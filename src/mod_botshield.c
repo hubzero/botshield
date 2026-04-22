@@ -151,6 +151,19 @@ typedef struct {
 #define BS_FLAGGED_PROBE_LIMIT    10   /* linear probe depth */
 #define BS_FLAGGED_MAX_READ_SPINS 3    /* seqlock retry budget */
 
+/* Rotating Bloom filter (M5b). N=2 buffers with half-window rotation.
+ * Fixed 1% false-positive rate → ~9.6 bits/element, k=7 hash functions.
+ * If we ever need to tune FP, this is where it gets a directive. */
+#define BS_BLOOM_BITS_PER_IP      10      /* 9.6 rounded up */
+#define BS_BLOOM_K                7
+#define BS_DEFAULT_BLOOM_IPS      1000000 /* one week of a medium site */
+#define BS_DEFAULT_BLOOM_WINDOW   604800  /* 7 days in seconds */
+#define BS_BLOOM_MIN_IPS          1000
+#define BS_BLOOM_MAX_IPS          10000000
+#define BS_BLOOM_MIN_WINDOW       3600    /* 1 hour */
+#define BS_BLOOM_MAX_WINDOW       (30 * 86400)  /* 30 days */
+#define BS_FIRST_SIGHT_PENALTY    5
+
 /* Per-slot seqlock + payload. version bit 0 is a "write in progress"
  * marker: even = quiescent, odd = mid-write. Readers snapshot fields
  * between matching even versions. Slot size is 32 bytes (cache-line
@@ -168,11 +181,11 @@ typedef struct {
     apr_uint32_t  flagged_capacity; /* number of slots in the table */
     apr_uint32_t  _pad0;
     unsigned char siphash_key[16];  /* DoS-resistant hash key */
-    /* Reserved for M5b (kept here so layout stabilizes now): */
-    apr_uint32_t  bloom_active;     /* 0 or 1 */
-    apr_uint32_t  bloom_buf_bytes;  /* per-buffer size in bytes */
-    apr_int64_t   bloom_next_rotate;
-    apr_int64_t   _pad1;
+    apr_uint32_t  bloom_active;         /* 0 or 1 */
+    apr_uint32_t  bloom_buf_bytes;      /* per-buffer size in bytes */
+    apr_uint32_t  bloom_window_secs;    /* full window; rotations at half */
+    apr_uint32_t  _pad1;
+    apr_int64_t   bloom_next_rotate;    /* unix sec */
 } bs_shm_header;
 
 /* Module-global runtime pointer struct. Populated once in post-config;
@@ -283,7 +296,9 @@ struct bs_dir_cfg {
 typedef struct {
     apr_size_t shm_size;
     int        flagged_capacity;
-    int        ipv6_prefix_bits;  /* 0..128; 64 = per-subscriber v6 key */
+    int        ipv6_prefix_bits;   /* 0..128; 64 = per-subscriber v6 key */
+    int        bloom_ips;          /* expected working-set size */
+    int        bloom_window_secs;  /* full window; rotation at window/2 */
 } bs_server_cfg;
 
 /* --- Config lifecycle --- */
@@ -322,6 +337,8 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->shm_size          = BS_DEFAULT_SHM_SIZE;
     scfg->flagged_capacity  = BS_DEFAULT_FLAGGED_SLOTS;
     scfg->ipv6_prefix_bits  = 64;   /* /64 aggregation by default */
+    scfg->bloom_ips         = BS_DEFAULT_BLOOM_IPS;
+    scfg->bloom_window_secs = BS_DEFAULT_BLOOM_WINDOW;
     return scfg;
 }
 
@@ -940,6 +957,38 @@ static void bs_mask_ipv6_prefix(unsigned char ip[16], int prefix_bits)
     for (int i = full_bytes; i < 16; i++) ip[i] = 0;
 }
 
+static const char *bs_set_bloom_ips(cmd_parms *cmd, void *dconf,
+                                    const char *arg)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    int n = atoi(arg);
+    if (n < BS_BLOOM_MIN_IPS || n > BS_BLOOM_MAX_IPS) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldBloomIPs: must be between %d and %d",
+            BS_BLOOM_MIN_IPS, BS_BLOOM_MAX_IPS);
+    }
+    scfg->bloom_ips = n;
+    return NULL;
+}
+
+static const char *bs_set_bloom_window(cmd_parms *cmd, void *dconf,
+                                       const char *arg)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    int n = atoi(arg);
+    if (n < BS_BLOOM_MIN_WINDOW || n > BS_BLOOM_MAX_WINDOW) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldBloomWindow: must be between %d and %d seconds",
+            BS_BLOOM_MIN_WINDOW, BS_BLOOM_MAX_WINDOW);
+    }
+    scfg->bloom_window_secs = n;
+    return NULL;
+}
+
 static const char *bs_set_ipv6_prefix(cmd_parms *cmd, void *dconf,
                                       const char *arg)
 {
@@ -1000,19 +1049,27 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     bs_server_cfg *scfg = ap_get_module_config(s->module_config,
                                                &botshield_module);
 
-    /* Compute layout: header + flagged table. Bloom buffers are reserved
-     * by leaving the remainder of the segment untouched; M5b will claim
-     * it without a re-allocation. */
+    /* Compute SHM layout: header + flagged-IP table + two Bloom buffers
+     * at the tail. Each Bloom buffer is sized to hit ~1% FP at the
+     * configured capacity (10 bits/IP, rounded up to a multiple of 8
+     * so we can atomic-OR on aligned u64 slots). */
     apr_size_t header_bytes = sizeof(bs_shm_header);
     apr_size_t table_bytes  = (apr_size_t)scfg->flagged_capacity
                               * sizeof(bs_flagged_ip_slot);
-    apr_size_t min_bytes    = header_bytes + table_bytes;
-    if (scfg->shm_size < min_bytes) {
+
+    apr_size_t bloom_bits   = (apr_size_t)scfg->bloom_ips
+                              * BS_BLOOM_BITS_PER_IP;
+    apr_size_t bloom_bytes  = (bloom_bits + 63) / 64 * 8;   /* u64-aligned */
+    apr_size_t total_bytes  = header_bytes + table_bytes + 2 * bloom_bytes;
+
+    if (scfg->shm_size < total_bytes) {
         ap_log_error(APLOG_MARK, APLOG_ERR, 0, s,
             "mod_botshield: BotShieldShmSize %" APR_SIZE_T_FMT
             " is too small; needs at least %" APR_SIZE_T_FMT " bytes "
-            "for header + %d flagged-IP slots",
-            scfg->shm_size, min_bytes, scfg->flagged_capacity);
+            "(header + %d flagged-IP slots + 2x %" APR_SIZE_T_FMT
+            "-byte Bloom buffers for %d IPs)",
+            scfg->shm_size, total_bytes, scfg->flagged_capacity,
+            bloom_bytes, scfg->bloom_ips);
         return HTTP_INTERNAL_SERVER_ERROR;
     }
 
@@ -1042,9 +1099,15 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
 
     bs_shm.flagged_table    = (bs_flagged_ip_slot *)(base + header_bytes);
     bs_shm.flagged_capacity = scfg->flagged_capacity;
-    bs_shm.bloom_bufs[0]    = NULL;
-    bs_shm.bloom_bufs[1]    = NULL;
-    bs_shm.bloom_buf_bytes  = 0;
+    bs_shm.bloom_bufs[0]    = base + header_bytes + table_bytes;
+    bs_shm.bloom_bufs[1]    = bs_shm.bloom_bufs[0] + bloom_bytes;
+    bs_shm.bloom_buf_bytes  = bloom_bytes;
+
+    bs_shm.header->bloom_active        = 0;
+    bs_shm.header->bloom_buf_bytes     = (apr_uint32_t)bloom_bytes;
+    bs_shm.header->bloom_window_secs   = (apr_uint32_t)scfg->bloom_window_secs;
+    apr_int64_t now = (apr_int64_t)apr_time_sec(apr_time_now());
+    bs_shm.header->bloom_next_rotate   = now + scfg->bloom_window_secs / 2;
 
     /* Global mutex protects the narrow insert/evict critical section.
      * Reads don't take the lock — they use the slot seqlock. */
@@ -1073,8 +1136,10 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
 
     ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
         "mod_botshield: SHM ready: %" APR_SIZE_T_FMT " bytes, "
-        "flagged-IP capacity %d",
-        scfg->shm_size, scfg->flagged_capacity);
+        "flagged-IP capacity %d, "
+        "Bloom %d IPs per %d s (2x %" APR_SIZE_T_FMT " bytes)",
+        scfg->shm_size, scfg->flagged_capacity,
+        scfg->bloom_ips, scfg->bloom_window_secs, bloom_bytes);
     return OK;
 }
 
@@ -1233,6 +1298,105 @@ static int bs_flagged_ip_lookup(const unsigned char ip[16],
         return 1;
     }
     return 0;
+}
+
+/* --- Rotating Bloom filter (M5b) ---
+ *
+ * Two buffers share the same hash geometry. Writes go to the buffer
+ * the active_index points at; queries check each buffer independently
+ * and OR the results so "seen" means "fully present in A or fully
+ * present in B" (not the weaker "each bit present in A or B"). Rotation
+ * is driven by inserts (rotate-on-insert) and optionally by mod_watchdog
+ * for low-traffic freshness — a CAS on bloom_next_rotate serializes the
+ * rotation across processes without a lock. */
+
+/* Compute k bit indices using SipHash + Kirsch-Mitzenmacher double
+ * hashing: hash once to get h1, salt and re-hash for h2, then generate
+ * each of the k indices as (h1 + i*h2) mod m_bits. */
+static void bs_bloom_indices(const unsigned char ip[16],
+                             apr_uint32_t *out, apr_size_t m_bits)
+{
+    apr_uint64_t h1 = bs_siphash24(bs_shm.header->siphash_key, ip, 16);
+    unsigned char salted[16];
+    memcpy(salted, ip, 16);
+    salted[0] ^= 0x9e;   /* domain separator for the second hash */
+    apr_uint64_t h2 = bs_siphash24(bs_shm.header->siphash_key,
+                                   salted, 16);
+    for (int i = 0; i < BS_BLOOM_K; i++) {
+        out[i] = (apr_uint32_t)((h1 + (apr_uint64_t)i * h2) % m_bits);
+    }
+}
+
+/* Single-winner rotation: CAS bloom_next_rotate from its current value
+ * to now+window/2. The winner memsets the buffer about to become active
+ * and flips bloom_active. Losers return without rotating. Idempotent
+ * across the process group. */
+static void bs_bloom_rotate_if_due(apr_int64_t now_sec)
+{
+    if (!bs_shm.bloom_bufs[0]) return;
+    apr_int64_t due =
+        (apr_int64_t)apr_atomic_read64(
+            (apr_uint64_t *)&bs_shm.header->bloom_next_rotate);
+    if (now_sec < due) return;
+
+    apr_int64_t next = now_sec +
+        (apr_int64_t)bs_shm.header->bloom_window_secs / 2;
+    apr_uint64_t prev = apr_atomic_cas64(
+        (apr_uint64_t *)&bs_shm.header->bloom_next_rotate,
+        (apr_uint64_t)next, (apr_uint64_t)due);
+    if ((apr_int64_t)prev != due) return;   /* another worker rotated */
+
+    apr_uint32_t old_active = apr_atomic_read32(&bs_shm.header->bloom_active);
+    apr_uint32_t new_active = old_active ^ 1U;
+    /* Clear the buffer that's about to start accepting writes. It
+     * currently holds the *oldest* data (~window/2 to window old); this
+     * zero is what ages that cohort out. */
+    memset(bs_shm.bloom_bufs[new_active], 0, bs_shm.bloom_buf_bytes);
+    apr_atomic_set32(&bs_shm.header->bloom_active, new_active);
+}
+
+static void bs_bloom_add(const unsigned char ip[16])
+{
+    if (!bs_shm.bloom_bufs[0]) return;
+    bs_bloom_rotate_if_due((apr_int64_t)apr_time_sec(apr_time_now()));
+
+    apr_size_t m_bits = (apr_size_t)bs_shm.bloom_buf_bytes * 8;
+    apr_uint32_t indices[BS_BLOOM_K];
+    bs_bloom_indices(ip, indices, m_bits);
+
+    apr_uint32_t active = apr_atomic_read32(&bs_shm.header->bloom_active);
+    unsigned char *buf = bs_shm.bloom_bufs[active & 1U];
+    for (int i = 0; i < BS_BLOOM_K; i++) {
+        apr_uint32_t bit_idx  = indices[i];
+        apr_size_t   byte_idx = bit_idx / 8;
+        unsigned char mask    = (unsigned char)(1U << (bit_idx % 8));
+        __atomic_or_fetch(&buf[byte_idx], mask, __ATOMIC_RELAXED);
+    }
+}
+
+/* Returns 1 if the IP's bits are fully present in buffer A or fully
+ * present in buffer B. Lockless; plain atomic loads on bit slots. */
+static int bs_bloom_seen(const unsigned char ip[16])
+{
+    if (!bs_shm.bloom_bufs[0]) return 0;
+    apr_size_t m_bits = (apr_size_t)bs_shm.bloom_buf_bytes * 8;
+    apr_uint32_t indices[BS_BLOOM_K];
+    bs_bloom_indices(ip, indices, m_bits);
+
+    int in_a = 1, in_b = 1;
+    for (int i = 0; i < BS_BLOOM_K; i++) {
+        apr_uint32_t bit_idx  = indices[i];
+        apr_size_t   byte_idx = bit_idx / 8;
+        unsigned char mask    = (unsigned char)(1U << (bit_idx % 8));
+        unsigned char a = __atomic_load_n(&bs_shm.bloom_bufs[0][byte_idx],
+                                          __ATOMIC_RELAXED);
+        unsigned char b = __atomic_load_n(&bs_shm.bloom_bufs[1][byte_idx],
+                                          __ATOMIC_RELAXED);
+        if (!(a & mask)) in_a = 0;
+        if (!(b & mask)) in_b = 0;
+        if (!in_a && !in_b) return 0;
+    }
+    return in_a || in_b;
 }
 
 /* Translate a flag bitmap (from the cookie's flags field OR the flagged-
@@ -1766,6 +1930,18 @@ static const command_rec bs_cmds[] = {
                  "allocation is one identity, so an attacker with a /64 "
                  "can't rotate addresses to shed a flag. 128 disables "
                  "aggregation. IPv4 (v6-mapped) keys are never masked."),
+    AP_INIT_TAKE1("BotShieldBloomIPs", bs_set_bloom_ips, NULL,
+                 RSRC_CONF,
+                 "Expected working-set size for the first-sight Bloom "
+                 "filter. Drives buffer size at ~10 bits/IP (1% FP). "
+                 "Default 1000000 (2.4 MB total for the two buffers). "
+                 "Range 1000..10000000."),
+    AP_INIT_TAKE1("BotShieldBloomWindow", bs_set_bloom_window, NULL,
+                 RSRC_CONF,
+                 "Full lifetime window for Bloom entries, in seconds. "
+                 "Rotation happens at half-window. Default 604800 (1 week) "
+                 "→ 3.5 day guaranteed minimum lifetime, 7 day max. "
+                 "Range 3600..2592000."),
     AP_INIT_TAKE12("BotShieldFlagIP", bs_set_flag_ip, NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "Flag the client IP with one or more bits when a request "
@@ -2165,6 +2341,16 @@ static int bs_handler(request_rec *r)
                      "flagged-ip");
     }
 
+    /* First-sight Bloom lookup (M5b). Policy: only on cookieless or
+     * signature-mismatched requests. Sig-verified cookies (even if
+     * expired) mean we've already transacted with this browser, so
+     * the first-sight signal would just be noise. A valid cookie
+     * likewise skips this. */
+    if (have_client_ip && !have_prior_rep &&
+        !bs_bloom_seen(client_ip)) {
+        bs_score_add(r, BS_FIRST_SIGHT_PENALTY, 0, "first-sight-ip");
+    }
+
     /* Fetch the score struct *after* all per-request adds. Using create=1
      * so a request with zero hits still gets a valid (empty) pointer and
      * the log line prints reasons=[] consistently. */
@@ -2209,12 +2395,16 @@ static int bs_handler(request_rec *r)
         return DECLINED;
     }
 
-    /* Not pass tier — we will issue a challenge. Build the rep state
-     * to carry into the new cookie. Today M4b serves form-PoW for every
-     * non-pass tier; silent (M7) and captcha (M8) will ship later with
-     * their own forgiveness rates. Until then, form forgiveness is
-     * applied whenever we re-issue, matching what the user actually
-     * solves. */
+    /* Not pass tier — we will issue a challenge. Feed the Bloom filter
+     * now that we've committed to challenging this client; that keeps
+     * writes off the ~99% happy path. */
+    if (have_client_ip) bs_bloom_add(client_ip);
+
+    /* Build the rep state to carry into the new cookie. Today M4b serves
+     * form-PoW for every non-pass tier; silent (M7) and captcha (M8)
+     * will ship later with their own forgiveness rates. Until then,
+     * form forgiveness is applied whenever we re-issue, matching what
+     * the user actually solves. */
     bs_rep_state next_rep;
     if (have_prior_rep) {
         int forgive = bs_effective_int(cfg->forgive_form,
