@@ -44,9 +44,12 @@ module AP_MODULE_DECLARE_DATA botshield_module;
 /* Tri-state for flag directives: -1 = unset (inherit), 0 = off, 1 = on.
  * Integer directives use -1 to mean "inherit" too. */
 #define BS_UNSET              (-1)
-#define BS_DEFAULT_COOKIE_TTL 300   /* seconds a verified cookie is good for */
+#define BS_DEFAULT_COOKIE_TTL 3600  /* seconds a verified cookie is good for */
 #define BS_DEFAULT_DIFFICULTY 4     /* leading hex zeros */
 #define BS_CLOCK_SKEW_AHEAD   60    /* grace if client clock runs ahead */
+#define BS_DEFAULT_FORGIVE_SILENT   10
+#define BS_DEFAULT_FORGIVE_FORM     25
+#define BS_DEFAULT_FORGIVE_CAPTCHA  50
 #define BS_COOKIE_NAME        "_bs_verified"
 #define BS_DEFAULT_PROMPT     "I\xe2\x80\x99m not a robot"   /* U+2019 */
 #define BS_DEFAULT_LOGO_LABEL "botshield"
@@ -57,23 +60,38 @@ module AP_MODULE_DECLARE_DATA botshield_module;
 #define BS_MIN_SECRET_BYTES   16
 #define BS_WIDGET_MARKER      "<!-- BOTSHIELD -->"
 
-/* Challenge protocol —
- *   Wire format (embedded inline in the interstitial):
- *     { v, alg, salt, nonce, difficulty, expires_at, signature }
+/* Challenge protocol (M4a) —
+ *   Wire format (embedded inline in the interstitial, JSON):
+ *     { v, alg, salt, nonce, difficulty, expires_at,
+ *       score, flags, passes_silent, passes_form, passes_captcha,
+ *       challenged_at, signature }
  *   Canonical HMAC input (deterministic, pipe-delimited ASCII):
- *     "v|alg|salthex|noncehex|difficulty|expires_at"
- *   Cookie payload = base64( "v|alg|salt|nonce|difficulty|expires|sig|counter" )
- *   — a single base64 blob the server can parse with strtok-style splitting,
- *   no JSON parser required.
+ *     "v|alg|salthex|noncehex|difficulty|expires_at
+ *      |score|flags|pass_s|pass_f|pass_c|challenged_at"
+ *   Cookie payload = base64( canonical || "|" || sighex || "|" || counter )
+ *   — a single base64 blob the server can parse by splitting on '|',
+ *     no JSON parser required.
  *
  * Keep in sync with the JS worker when the template ships the wire bits. */
 #define BS_PROTOCOL_VERSION   1
 #define BS_SALT_BYTES         16
 #define BS_NONCE_BYTES        8
 #define BS_SIG_BYTES          32  /* HMAC-SHA-256 output */
+#define BS_COOKIE_FIELDS      14  /* full cookie payload; canonical is 12 */
 
 /* Forward declarations for the PoW algorithm dispatch table. */
 typedef struct bs_dir_cfg bs_dir_cfg;
+
+/* Reputation state carried in the cookie. Populated fresh on a first-time
+ * challenge (all zeros), and merged forward with forgiveness on re-issues. */
+typedef struct {
+    int         score;
+    apr_uint32_t flags;
+    int         passes_silent;
+    int         passes_form;
+    int         passes_captcha;
+    apr_time_t  challenged_at;  /* unix sec */
+} bs_rep_state;
 
 typedef struct {
     int          version;
@@ -82,6 +100,7 @@ typedef struct {
     unsigned char nonce[BS_NONCE_BYTES];
     int          difficulty;
     apr_time_t   expires_at;            /* unix seconds */
+    bs_rep_state rep;                   /* carried forward across re-issues */
     unsigned char signature[BS_SIG_BYTES];
 } bs_challenge;
 
@@ -124,7 +143,7 @@ typedef enum {
 
 typedef struct {
     int         penalty;
-    int         ttl_seconds;   /* reserved for M4 SHM-backed scoreboard */
+    int         ttl_seconds;   /* reserved for M5 flagged-IP table entries */
     const char *reason;        /* static string or r->pool-allocated */
 } bs_score_entry;
 
@@ -175,6 +194,10 @@ struct bs_dir_cfg {
     int score_silent;           /* score >= this → silent tier (logged only) */
     int score_hard;             /* score >= this → hard form-PoW tier */
     int score_captcha;          /* score >= this → captcha tier */
+    int forgive_silent;         /* score credit on silent-tier pass */
+    int forgive_form;           /* score credit on form-tier pass */
+    int forgive_captcha;        /* score credit on captcha pass */
+    const char *cookie_domain;  /* if set, Set-Cookie Domain= attribute */
 };
 
 /* --- Config lifecycle --- */
@@ -197,6 +220,10 @@ static void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->score_silent  = BS_UNSET;
     cfg->score_hard    = BS_UNSET;
     cfg->score_captcha = BS_UNSET;
+    cfg->forgive_silent  = BS_UNSET;
+    cfg->forgive_form    = BS_UNSET;
+    cfg->forgive_captcha = BS_UNSET;
+    cfg->cookie_domain   = NULL;
     return cfg;
 }
 
@@ -229,6 +256,10 @@ static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     out->score_silent  = (add->score_silent  == BS_UNSET) ? base->score_silent  : add->score_silent;
     out->score_hard    = (add->score_hard    == BS_UNSET) ? base->score_hard    : add->score_hard;
     out->score_captcha = (add->score_captcha == BS_UNSET) ? base->score_captcha : add->score_captcha;
+    out->forgive_silent  = (add->forgive_silent  == BS_UNSET) ? base->forgive_silent  : add->forgive_silent;
+    out->forgive_form    = (add->forgive_form    == BS_UNSET) ? base->forgive_form    : add->forgive_form;
+    out->forgive_captcha = (add->forgive_captcha == BS_UNSET) ? base->forgive_captcha : add->forgive_captcha;
+    out->cookie_domain   = add->cookie_domain ? add->cookie_domain : base->cookie_domain;
     return out;
 }
 
@@ -325,6 +356,43 @@ static const char *bs_set_score_captcha(cmd_parms *cmd, void *cfg_v, const char 
 {
     return bs_set_score_int("BotShieldScoreCaptcha",
         &((bs_dir_cfg *)cfg_v)->score_captcha, arg, cmd->pool);
+}
+
+static const char *bs_set_forgive_silent(cmd_parms *cmd, void *cfg_v, const char *arg)
+{
+    return bs_set_score_int("BotShieldForgivenessSilent",
+        &((bs_dir_cfg *)cfg_v)->forgive_silent, arg, cmd->pool);
+}
+
+static const char *bs_set_forgive_form(cmd_parms *cmd, void *cfg_v, const char *arg)
+{
+    return bs_set_score_int("BotShieldForgivenessForm",
+        &((bs_dir_cfg *)cfg_v)->forgive_form, arg, cmd->pool);
+}
+
+static const char *bs_set_forgive_captcha(cmd_parms *cmd, void *cfg_v, const char *arg)
+{
+    return bs_set_score_int("BotShieldForgivenessCaptcha",
+        &((bs_dir_cfg *)cfg_v)->forgive_captcha, arg, cmd->pool);
+}
+
+/* Accept ".example.com" (leading dot for cross-subdomain) or "example.com"
+ * (host-only). Empty string clears the directive, reverting to host-only. */
+static const char *bs_set_cookie_domain(cmd_parms *cmd, void *cfg_v, const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    if (!arg) return "BotShieldCookieDomain requires an argument";
+    if (!*arg) { cfg->cookie_domain = NULL; return NULL; }
+    /* Very light validation: no whitespace, no semicolons (would break the
+     * Set-Cookie serialization). Trust the admin otherwise. */
+    for (const char *p = arg; *p; p++) {
+        if (*p == ';' || *p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
+            return apr_psprintf(cmd->pool,
+                "BotShieldCookieDomain: '%s' contains an unsafe character", arg);
+        }
+    }
+    cfg->cookie_domain = apr_pstrdup(cmd->pool, arg);
+    return NULL;
 }
 
 static const char *bs_set_prompt(cmd_parms *cmd, void *cfg_v, const char *arg)
@@ -492,11 +560,13 @@ static int bs_from_hex(const char *in, apr_size_t out_len, unsigned char *out)
 
 /* --- Canonical form for HMAC input ---
  *
- * "v|alg|salthex|noncehex|difficulty|expires_at"
+ * "v|alg|salthex|noncehex|difficulty|expires_at
+ *  |score|flags|pass_s|pass_f|pass_c|challenged_at"   (12 fields)
  *
  * Deterministic, ASCII, field-delimited. Both sign and verify produce this
  * exact string from the challenge struct — if a byte changes, the HMAC
- * changes, and tampering is detected. */
+ * changes, and tampering is detected. The rep fields follow the challenge
+ * fields so existing M2 code reading positions 0..5 still lines up. */
 static const char *bs_challenge_canonical(apr_pool_t *p,
                                           const bs_challenge *ch)
 {
@@ -504,9 +574,14 @@ static const char *bs_challenge_canonical(apr_pool_t *p,
     char nonce_hex[BS_NONCE_BYTES * 2 + 1];
     bs_to_hex(ch->salt,  BS_SALT_BYTES,  salt_hex);
     bs_to_hex(ch->nonce, BS_NONCE_BYTES, nonce_hex);
-    return apr_psprintf(p, "%d|%s|%s|%s|%d|%" APR_TIME_T_FMT,
-                        ch->version, ch->alg_name, salt_hex, nonce_hex,
-                        ch->difficulty, ch->expires_at);
+    return apr_psprintf(p,
+        "%d|%s|%s|%s|%d|%" APR_TIME_T_FMT
+        "|%d|%u|%d|%d|%d|%" APR_TIME_T_FMT,
+        ch->version, ch->alg_name, salt_hex, nonce_hex,
+        ch->difficulty, ch->expires_at,
+        ch->rep.score, (unsigned)ch->rep.flags,
+        ch->rep.passes_silent, ch->rep.passes_form, ch->rep.passes_captcha,
+        ch->rep.challenged_at);
 }
 
 /* --- Algorithm: sha256-zeros ---
@@ -581,11 +656,26 @@ static const bs_pow_algorithm *bs_find_algorithm(const char *name)
     return NULL;
 }
 
+/* Translate a cookie-rep flag bitmap into the minimum score the cookie
+ * should carry regardless of forgiveness. Flags don't exist yet (E1/E4
+ * will set them); until then this is always zero. Hooking the function
+ * now keeps the forgiveness math honest from day one. */
+static int bs_flag_penalty(apr_uint32_t flags)
+{
+    (void)flags;
+    return 0;  /* M4a placeholder; M5/E4 wire real bits here. */
+}
+
 /* Render the challenge as JSON for inline embedding in the interstitial.
- * The JS worker reads window.__bsChallenge and uses it to drive the PoW.
- * Contents are deterministic — hex digits, ASCII identifiers, integers —
- * so no HTML escaping is needed inside a <script> tag. */
-static const char *bs_challenge_json(apr_pool_t *p, const bs_challenge *ch)
+ * The JS worker reads window.__bsChallenge and uses it to drive the PoW
+ * and to assemble the resulting cookie. Contents are deterministic —
+ * hex digits, ASCII identifiers, integers — so no HTML escaping is
+ * needed inside a <script> tag.
+ *
+ * Also carries the cookie_domain (if configured) so the JS can include
+ * a Domain= attribute when calling document.cookie. */
+static const char *bs_challenge_json(apr_pool_t *p, const bs_dir_cfg *cfg,
+                                     const bs_challenge *ch)
 {
     char salt_hex [BS_SALT_BYTES * 2 + 1];
     char nonce_hex[BS_NONCE_BYTES * 2 + 1];
@@ -593,12 +683,22 @@ static const char *bs_challenge_json(apr_pool_t *p, const bs_challenge *ch)
     bs_to_hex(ch->salt,      BS_SALT_BYTES,  salt_hex);
     bs_to_hex(ch->nonce,     BS_NONCE_BYTES, nonce_hex);
     bs_to_hex(ch->signature, BS_SIG_BYTES,   sig_hex);
+    const char *domain_json = cfg->cookie_domain
+        ? apr_psprintf(p, ",\"cookie_domain\":\"%s\"", cfg->cookie_domain)
+        : "";
     return apr_psprintf(p,
         "{\"v\":%d,\"alg\":\"%s\",\"salt\":\"%s\",\"nonce\":\"%s\","
         "\"difficulty\":%d,\"expires_at\":%" APR_TIME_T_FMT ","
-        "\"signature\":\"%s\"}",
+        "\"score\":%d,\"flags\":%u,"
+        "\"passes_silent\":%d,\"passes_form\":%d,\"passes_captcha\":%d,"
+        "\"challenged_at\":%" APR_TIME_T_FMT ","
+        "\"signature\":\"%s\"%s}",
         ch->version, ch->alg_name, salt_hex, nonce_hex,
-        ch->difficulty, ch->expires_at, sig_hex);
+        ch->difficulty, ch->expires_at,
+        ch->rep.score, (unsigned)ch->rep.flags,
+        ch->rep.passes_silent, ch->rep.passes_form, ch->rep.passes_captcha,
+        ch->rep.challenged_at,
+        sig_hex, domain_json);
 }
 
 /* --- Top-level issue / verify ---
@@ -610,17 +710,37 @@ static const char *bs_challenge_json(apr_pool_t *p, const bs_challenge *ch)
  * + counter, checks HMAC + expiry, dispatches the PoW check to the alg.
  * Returns NULL on accept, else a diagnostic string. */
 
+/* Issue a fresh challenge. If `rep_in` is non-NULL its fields are copied
+ * into the issued challenge verbatim — the handler has already applied
+ * whatever forgiveness / increments are appropriate for the tier being
+ * issued. If `rep_in` is NULL, rep starts at zero (first-ever challenge). */
 static const char *bs_issue_challenge(apr_pool_t *p, const bs_dir_cfg *cfg,
                                       int difficulty, int cookie_ttl,
+                                      const bs_rep_state *rep_in,
                                       bs_challenge *out)
 {
     if (!cfg->secret || !cfg->algorithm) {
         return "BotShieldSecretFile and BotShieldAlgorithm must be set";
     }
+    apr_time_t now = apr_time_sec(apr_time_now());
     out->version     = BS_PROTOCOL_VERSION;
     out->alg_name    = cfg->algorithm->name;
     out->difficulty  = difficulty;
-    out->expires_at  = apr_time_sec(apr_time_now()) + cookie_ttl;
+    out->expires_at  = now + cookie_ttl;
+    if (rep_in) {
+        out->rep = *rep_in;
+    } else {
+        out->rep.score          = 0;
+        out->rep.flags          = 0;
+        out->rep.passes_silent  = 0;
+        out->rep.passes_form    = 0;
+        out->rep.passes_captcha = 0;
+        out->rep.challenged_at  = 0;
+    }
+    /* The challenged_at stamp records "when this cookie earned its
+     * current PoW proof" — set unconditionally since an issued challenge
+     * always implies a fresh PoW solve on acceptance. */
+    out->rep.challenged_at = now;
 
     const char *err = cfg->algorithm->issue(cfg, out);
     if (err) return err;
@@ -632,8 +752,14 @@ static const char *bs_issue_challenge(apr_pool_t *p, const bs_dir_cfg *cfg,
     return NULL;
 }
 
+/* If `out_ch` is non-NULL, it is populated with the parsed challenge once
+ * the HMAC signature has verified — even when the cookie is later rejected
+ * for expiry or a bad PoW counter. That lets the caller salvage the cookie's
+ * rep fields on re-challenge. On signature mismatch or any earlier error,
+ * `out_ch` is untouched. */
 static const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
-                                    const char *cookie_b64)
+                                    const char *cookie_b64,
+                                    bs_challenge *out_ch)
 {
     if (!cfg->secret) return "no secret configured";
 
@@ -646,18 +772,22 @@ static const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
     if (dec_len <= 0) return "base64 decode failed";
     decoded[dec_len] = '\0';
 
-    /* Expect 8 pipe-delimited fields:
-     *   v | alg | salthex | noncehex | difficulty | expires_at | sighex | counter
+    /* Expect 14 pipe-delimited fields (M4a):
+     *   0..5  : v, alg, salt, nonce, difficulty, expires_at
+     *   6..11 : score, flags, passes_silent, passes_form, passes_captcha,
+     *           challenged_at
+     *   12    : sighex
+     *   13    : counter
      * Split in place. */
-    char *fields[8];
+    char *fields[BS_COOKIE_FIELDS];
     int nf = 0;
     char *p = decoded;
     fields[nf++] = p;
-    while (*p && nf < 8) {
+    while (*p && nf < BS_COOKIE_FIELDS) {
         if (*p == '|') { *p = '\0'; fields[nf++] = p + 1; }
         p++;
     }
-    if (nf != 8) return "wrong field count";
+    if (nf != BS_COOKIE_FIELDS) return "wrong field count";
 
     /* Parse + validate each field with a strict shape check. */
     int version = atoi(fields[0]);
@@ -679,14 +809,24 @@ static const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
 
     ch.expires_at = (apr_time_t)apr_atoi64(fields[5]);
 
+    /* Rep fields — each already string-safe thanks to strtok-in-place. */
+    ch.rep.score          = atoi(fields[6]);
+    ch.rep.flags          = (apr_uint32_t)strtoul(fields[7], NULL, 10);
+    ch.rep.passes_silent  = atoi(fields[8]);
+    ch.rep.passes_form    = atoi(fields[9]);
+    ch.rep.passes_captcha = atoi(fields[10]);
+    ch.rep.challenged_at  = (apr_time_t)apr_atoi64(fields[11]);
+
     unsigned char sig_from_client[BS_SIG_BYTES];
-    if (strlen(fields[6]) != BS_SIG_BYTES * 2 ||
-        !bs_from_hex(fields[6], BS_SIG_BYTES, sig_from_client)) {
+    if (strlen(fields[12]) != BS_SIG_BYTES * 2 ||
+        !bs_from_hex(fields[12], BS_SIG_BYTES, sig_from_client)) {
         return "bad signature hex";
     }
 
     /* Re-derive the HMAC from canonical form + secret, and constant-time
-     * compare with the client-supplied signature. */
+     * compare with the client-supplied signature. The canonical form
+     * now covers the rep fields, so a client that edits (say) the score
+     * hoping to lower their own debt will fail here. */
     const char *canon = bs_challenge_canonical(r->pool, &ch);
     unsigned char sig_expected[BS_SIG_BYTES];
     bs_hmac_sha256(cfg->secret, cfg->secret_len,
@@ -696,12 +836,17 @@ static const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
         return "signature mismatch";
     }
 
+    /* Signature verified — expose the challenge to the caller even if
+     * later checks reject, so rep can be carried forward. */
+    memcpy(ch.signature, sig_from_client, BS_SIG_BYTES);
+    if (out_ch) *out_ch = ch;
+
     /* Freshness — a signed cookie is still only valid until expires_at. */
     apr_time_t now = apr_time_sec(apr_time_now());
     if (now > ch.expires_at) return "expired";
 
     /* Final step: algorithm-specific PoW check on the counter. */
-    return alg->verify(&ch, fields[7]);
+    return alg->verify(&ch, fields[13]);
 }
 
 /* --- New directive setters --- */
@@ -787,7 +932,11 @@ static bs_request_score *bs_get_score(request_rec *r, int create)
 
 /* `reason` must outlive the request — static string or r->pool-allocated.
  * `ttl_seconds` is accepted for API stability but ignored in M3 (the
- * request-scoped struct dies with the request). M4 wires it to SHM. */
+ * request-scoped struct dies with the request). The long-term stores
+ * are narrower than the API implies: M4 puts accumulated rep in the
+ * user's cookie (per-user, server-stateless); M5 puts serious-event
+ * flags in an SHM flagged-IP table (sparse, per-IP). `ttl_seconds`
+ * feeds the latter when the caller is a serious-event source. */
 static void bs_score_add(request_rec *r, int penalty,
                          int ttl_seconds, const char *reason)
 {
@@ -957,6 +1106,23 @@ static const command_rec bs_cmds[] = {
                  RSRC_CONF | ACCESS_CONF,
                  "Score at or above which the captcha tier is picked "
                  "(default: 80). Logged only until M8 ships."),
+    AP_INIT_TAKE1("BotShieldForgivenessSilent", bs_set_forgive_silent, NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "Score credit applied on a successful silent-PoW pass "
+                 "(default: 10). Clamped at max(0, flag_penalty)."),
+    AP_INIT_TAKE1("BotShieldForgivenessForm",   bs_set_forgive_form,   NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "Score credit applied on a successful form-PoW pass "
+                 "(default: 25). Clamped at max(0, flag_penalty)."),
+    AP_INIT_TAKE1("BotShieldForgivenessCaptcha",bs_set_forgive_captcha,NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "Score credit applied on a successful captcha pass "
+                 "(default: 50). Clamped at max(0, flag_penalty)."),
+    AP_INIT_TAKE1("BotShieldCookieDomain", bs_set_cookie_domain, NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "If set, Set-Cookie for _bs_verified includes a Domain= "
+                 "attribute so reputation follows users across subdomains. "
+                 "Use '.example.com' for subdomain sharing. Default: host-only."),
     { NULL }
 };
 
@@ -1182,12 +1348,17 @@ static const char BS_WIDGET_TEMPLATE[] =
 "   box.className = 'bs-widget bs-done';\n"
 "   msg.textContent = 'Verified \\u2014 reloading\\u2026';\n"
 "   var fields = [CH.v, CH.alg, CH.salt, CH.nonce, CH.difficulty,\n"
-"                 CH.expires_at, CH.signature, counterVal];\n"
+"                 CH.expires_at,\n"
+"                 CH.score, CH.flags,\n"
+"                 CH.passes_silent, CH.passes_form, CH.passes_captcha,\n"
+"                 CH.challenged_at,\n"
+"                 CH.signature, counterVal];\n"
 "   var payload = btoa(fields.join('|'));\n"
 "   var exp = new Date((CH.expires_at + 60) * 1000).toUTCString();\n"
 "   var secure = (location.protocol === 'https:') ? '; Secure' : '';\n"
+"   var domain = CH.cookie_domain ? '; Domain=' + CH.cookie_domain : '';\n"
 "   document.cookie = COOKIE_NAME + '=' + payload +\n"
-"                     '; Path=/; Expires=' + exp +\n"
+"                     '; Path=/; Expires=' + exp + domain +\n"
 "                     '; SameSite=Lax' + secure;\n"
 "   setTimeout(function(){ location.reload(); }, 250);\n"
 "  }\n"
@@ -1284,15 +1455,30 @@ static int bs_handler(request_rec *r)
         return OK;
     }
 
-    /* Verify an existing cookie, if any. verify returns NULL on success. */
+    /* Verify an existing cookie, if any. verify returns NULL on success.
+     * When it fails but the HMAC did verify (e.g. the cookie is expired
+     * or the PoW counter is wrong), `prior_ch` is populated — we salvage
+     * the rep fields and carry them forward into the new challenge.
+     *
+     * Today (M4a) a valid cookie is still an unconditional pass. M4b
+     * will make the decoded rep feed effective_score instead. */
     const char *cookie_val = bs_get_cookie_value(r, BS_COOKIE_NAME);
+    bs_challenge prior_ch;
+    int have_prior_rep = 0;
     if (cookie_val && *cookie_val) {
-        const char *reason = bs_verify_cookie(r, cfg, cookie_val);
+        const char *reason = bs_verify_cookie(r, cfg, cookie_val, &prior_ch);
         if (!reason) {
             ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
                           "mod_botshield: verified cookie, passing %s",
                           r->uri);
             return DECLINED;
+        }
+        /* Reason was set — full verify failed. If the HMAC specifically
+         * mismatched, we can't trust any fields. Otherwise (expired,
+         * insufficient leading zeros, etc.) sig-verified rep is safe to
+         * carry forward. */
+        if (strcmp(reason, "signature mismatch") != 0) {
+            have_prior_rep = 1;
         }
         ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
                       "mod_botshield: " BS_COOKIE_NAME " rejected: %s",
@@ -1307,17 +1493,48 @@ static int bs_handler(request_rec *r)
     int score_total = score ? score->total : 0;
     bs_tier tier = bs_decide_tier(cfg, score_total);
 
+    /* Build the rep state to carry into the new challenge. M4a only
+     * re-issues at the form tier, so apply form-tier forgiveness and
+     * increment passes_form. M4b will extend this to pick the forgiveness
+     * amount per tier. */
+    bs_rep_state next_rep;
+    if (have_prior_rep) {
+        int forgive = bs_effective_int(cfg->forgive_form,
+                                       BS_DEFAULT_FORGIVE_FORM);
+        int floor   = bs_flag_penalty(prior_ch.rep.flags);
+        int new_score = prior_ch.rep.score - forgive;
+        if (new_score < floor) new_score = floor;
+        if (new_score < 0)     new_score = 0;
+        next_rep = prior_ch.rep;
+        next_rep.score       = new_score;
+        next_rep.passes_form = prior_ch.rep.passes_form + 1;
+    } else {
+        next_rep.score          = 0;
+        next_rep.flags          = 0;
+        next_rep.passes_silent  = 0;
+        next_rep.passes_form    = 1;   /* this pass counts as the first */
+        next_rep.passes_captcha = 0;
+        next_rep.challenged_at  = 0;   /* overwritten by issue() */
+    }
+
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
                   "mod_botshield: challenging %s (alg=%s, difficulty=%d, "
-                  "ttl=%d) score=%d tier=%s reasons=%s",
+                  "ttl=%d) score=%d tier=%s reasons=%s "
+                  "cookie_score=%d cookie_flags=0x%x passes=[s:%d f:%d c:%d]",
                   r->unparsed_uri, cfg->algorithm->name, difficulty, ttl,
                   score_total, bs_tier_name(tier),
-                  bs_score_reasons_joined(r->pool, score));
+                  bs_score_reasons_joined(r->pool, score),
+                  have_prior_rep ? prior_ch.rep.score : -1,
+                  have_prior_rep ? (unsigned)prior_ch.rep.flags : 0,
+                  next_rep.passes_silent, next_rep.passes_form,
+                  next_rep.passes_captcha);
 
-    /* Issue a fresh signed challenge; the worker reads it from the page. */
+    /* Issue a fresh signed challenge; the worker reads it from the page.
+     * The next_rep struct carries forgiveness-adjusted rep from any
+     * sig-verified prior cookie. */
     bs_challenge challenge;
     const char *ierr = bs_issue_challenge(r->pool, cfg, difficulty, ttl,
-                                          &challenge);
+                                          &next_rep, &challenge);
     if (ierr) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
                       "mod_botshield: issue failed: %s", ierr);
@@ -1326,7 +1543,7 @@ static int bs_handler(request_rec *r)
         ap_rputs("Service error: could not issue challenge.\n", r);
         return OK;
     }
-    const char *challenge_js = bs_challenge_json(r->pool, &challenge);
+    const char *challenge_js = bs_challenge_json(r->pool, cfg, &challenge);
 
     const char *prompt     = cfg->prompt     ? cfg->prompt     : BS_DEFAULT_PROMPT;
     const char *logo_svg   = cfg->logo_svg   ? cfg->logo_svg   : BS_DEFAULT_LOGO_SVG;
