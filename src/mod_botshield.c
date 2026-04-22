@@ -513,6 +513,26 @@ static const bs_pow_algorithm *bs_find_algorithm(const char *name)
     return NULL;
 }
 
+/* Render the challenge as JSON for inline embedding in the interstitial.
+ * The JS worker reads window.__bsChallenge and uses it to drive the PoW.
+ * Contents are deterministic — hex digits, ASCII identifiers, integers —
+ * so no HTML escaping is needed inside a <script> tag. */
+static const char *bs_challenge_json(apr_pool_t *p, const bs_challenge *ch)
+{
+    char salt_hex [BS_SALT_BYTES * 2 + 1];
+    char nonce_hex[BS_NONCE_BYTES * 2 + 1];
+    char sig_hex  [BS_SIG_BYTES * 2 + 1];
+    bs_to_hex(ch->salt,      BS_SALT_BYTES,  salt_hex);
+    bs_to_hex(ch->nonce,     BS_NONCE_BYTES, nonce_hex);
+    bs_to_hex(ch->signature, BS_SIG_BYTES,   sig_hex);
+    return apr_psprintf(p,
+        "{\"v\":%d,\"alg\":\"%s\",\"salt\":\"%s\",\"nonce\":\"%s\","
+        "\"difficulty\":%d,\"expires_at\":%" APR_TIME_T_FMT ","
+        "\"signature\":\"%s\"}",
+        ch->version, ch->alg_name, salt_hex, nonce_hex,
+        ch->difficulty, ch->expires_at, sig_hex);
+}
+
 /* --- Top-level issue / verify ---
  *
  * bs_issue_challenge fills the `ch` struct (salt, nonce, signature) from
@@ -522,7 +542,6 @@ static const bs_pow_algorithm *bs_find_algorithm(const char *name)
  * + counter, checks HMAC + expiry, dispatches the PoW check to the alg.
  * Returns NULL on accept, else a diagnostic string. */
 
-__attribute__((unused))
 static const char *bs_issue_challenge(apr_pool_t *p, const bs_dir_cfg *cfg,
                                       int difficulty, int cookie_ttl,
                                       bs_challenge *out)
@@ -545,7 +564,6 @@ static const char *bs_issue_challenge(apr_pool_t *p, const bs_dir_cfg *cfg,
     return NULL;
 }
 
-__attribute__((unused))
 static const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
                                     const char *cookie_b64)
 {
@@ -778,76 +796,35 @@ static int bs_is_asset_uri(const char *uri)
     return 0;
 }
 
-/* --- Cookie parsing ---
+/* --- Cookie extraction ---
  *
- * Scan the Cookie header for `_bs_verified=<digits>:<16-hex>` at a
- * name-boundary (so `other_bs_verified=` won't false-match). Returns 1 if a
- * well-formed cookie with a timestamp within the TTL window is found.
- *
- * When a cookie is present but invalid, logs an APLOG_INFO with the reason
- * so we can distinguish "no cookie" from "expired cookie" from "malformed
- * cookie" in live traffic — a necessity while the baseline is shaking out. */
-static int bs_has_valid_cookie(request_rec *r, int ttl)
+ * Find the value of a named cookie in the request's Cookie header, at a
+ * name-boundary (so e.g. `other_bs_verified=` won't shadow `_bs_verified=`).
+ * Returns a pool-allocated copy of the value with trailing whitespace
+ * trimmed, or NULL if the cookie isn't present. The value itself is not
+ * validated here — callers decode and verify. */
+static const char *bs_get_cookie_value(request_rec *r, const char *name)
 {
     const char *cookies = apr_table_get(r->headers_in, "Cookie");
-    if (!cookies) return 0;
+    if (!cookies) return NULL;
 
-    static const char NAME[] = BS_COOKIE_NAME "=";
-    const apr_size_t NLEN = sizeof(NAME) - 1;
+    apr_size_t nlen = strlen(name);
     const char *p = cookies;
-    const char *reject_reason = NULL;
-
-    while ((p = strstr(p, NAME)) != NULL) {
+    while ((p = strstr(p, name)) != NULL) {
         int at_boundary = (p == cookies) ||
                           (p[-1] == ';')  ||
                           (p[-1] == ' ')  ||
                           (p[-1] == '\t');
-        if (!at_boundary) { p += NLEN; continue; }
-
-        const char *v = p + NLEN;
-
-        char *end = NULL;
-        long ts = strtol(v, &end, 10);
-        if (end == v || *end != ':' || ts <= 0) {
-            reject_reason = "malformed timestamp"; p += NLEN; continue;
+        if (at_boundary && p[nlen] == '=') {
+            const char *v = p + nlen + 1;
+            const char *end = strchr(v, ';');
+            if (!end) end = v + strlen(v);
+            while (end > v && (end[-1] == ' ' || end[-1] == '\t')) end--;
+            return apr_pstrmemdup(r->pool, v, (apr_size_t)(end - v));
         }
-
-        const char *hex = end + 1;
-        int i;
-        for (i = 0; i < 16; i++) {
-            if (!isxdigit((unsigned char)hex[i])) break;
-        }
-        if (i != 16) {
-            reject_reason = "hash not 16 hex chars"; p += NLEN; continue;
-        }
-
-        char term = hex[16];
-        if (term != '\0' && term != ';' && term != ' ' && term != '\t') {
-            reject_reason = "unexpected trailing char"; p += NLEN; continue;
-        }
-
-        apr_time_t now_sec = apr_time_sec(apr_time_now());
-        long delta = (long)now_sec - ts;
-        if (delta > ttl) {
-            reject_reason = apr_psprintf(r->pool,
-                "expired (cookie is %lds old, ttl=%ds)", delta, ttl);
-            p += NLEN; continue;
-        }
-        if (delta < -BS_CLOCK_SKEW_AHEAD) {
-            reject_reason = apr_psprintf(r->pool,
-                "timestamp from the future (%lds ahead)", -delta);
-            p += NLEN; continue;
-        }
-
-        return 1;
+        p += nlen;
     }
-
-    if (reject_reason) {
-        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
-                      "mod_botshield: " BS_COOKIE_NAME
-                      " rejected: %s", reject_reason);
-    }
-    return 0;
+    return NULL;
 }
 
 /* --- Challenge page templates ---
@@ -948,14 +925,26 @@ static const char BS_WIDGET_TEMPLATE[] =
 "%s"
 "<p class=\"bs-msg\" id=\"msg\" role=\"status\" aria-live=\"polite\"></p>\n"
 "</div>\n"
+"<script>window.__bsChallenge=%s;</script>\n"
 "<script>\n"
 "(function(){\n"
-" var DIFFICULTY = %d;\n"
-" var COOKIE_TTL = %d;\n"
+" var CH = window.__bsChallenge;\n"
+" if (!CH) return;\n"
 " var COOKIE_NAME = '" BS_COOKIE_NAME "';\n"
 " var box = document.getElementById('c');\n"
 " var msg = document.getElementById('msg');\n"
 " var btn = document.getElementById('btn');\n"
+" function hexToBytes(h){\n"
+"  var b = new Uint8Array(h.length/2);\n"
+"  for (var i=0; i<b.length; i++) b[i] = parseInt(h.substr(i*2,2),16);\n"
+"  return b;\n"
+" }\n"
+" function meetsTarget(digest, difficulty){\n"
+"  var fb = Math.floor(difficulty/2);\n"
+"  for (var i=0; i<fb; i++) if (digest[i] !== 0) return false;\n"
+"  if (difficulty & 1) return (digest[fb] >> 4) === 0;\n"
+"  return true;\n"
+" }\n"
 " btn.addEventListener('click', function h(e){\n"
 "  if(!e.isTrusted) return;\n"
 "  btn.removeEventListener('click', h);\n"
@@ -964,50 +953,47 @@ static const char BS_WIDGET_TEMPLATE[] =
 "  startChallenge();\n"
 " });\n"
 " function startChallenge(){\n"
-"  var prefix = new Array(DIFFICULTY+1).join('0');\n"
-"  var enc = new TextEncoder();\n"
-"  var fp = [screen.width,screen.height,screen.colorDepth,\n"
-"            navigator.language,new Date().getTimezoneOffset(),\n"
-"            navigator.hardwareConcurrency||0].join('|');\n"
-"  var salt = Math.floor(Date.now()/1000) + ':' + fp;\n"
-"  var nonce = 0;\n"
+"  var saltB  = hexToBytes(CH.salt);\n"
+"  var nonceB = hexToBytes(CH.nonce);\n"
+"  var counter = 0;\n"
 "  var BATCH = 2048;\n"
 "  var t0 = Date.now();\n"
 "  msg.textContent = 'Verifying\\u2026';\n"
 "  function doBatch(){\n"
 "   var promises = [];\n"
-"   var start = nonce;\n"
+"   var start = counter;\n"
 "   for (var i=0; i<BATCH; i++){\n"
-"    promises.push(crypto.subtle.digest('SHA-256',\n"
-"                   enc.encode(salt + ':' + (start+i))));\n"
+"    var cstr = String(start+i);\n"
+"    var buf = new Uint8Array(saltB.length + nonceB.length + cstr.length);\n"
+"    buf.set(saltB, 0);\n"
+"    buf.set(nonceB, saltB.length);\n"
+"    for (var j=0; j<cstr.length; j++) buf[saltB.length+nonceB.length+j] = cstr.charCodeAt(j);\n"
+"    promises.push(crypto.subtle.digest('SHA-256', buf));\n"
 "   }\n"
 "   Promise.all(promises).then(function(results){\n"
 "    for (var i=0; i<results.length; i++){\n"
-"     var a = new Uint8Array(results[i]);\n"
-"     var hex = '';\n"
-"     for (var j=0; j<8; j++){\n"
-"      hex += ('0'+a[j].toString(16)).slice(-2);\n"
-"     }\n"
-"     if (hex.substring(0, DIFFICULTY) === prefix){\n"
-"      finish(hex); return;\n"
+"     if (meetsTarget(new Uint8Array(results[i]), CH.difficulty)){\n"
+"      finish(start+i); return;\n"
 "     }\n"
 "    }\n"
-"    nonce = start + BATCH;\n"
+"    counter = start + BATCH;\n"
 "    var elapsed = ((Date.now()-t0)/1000).toFixed(1);\n"
-"    msg.textContent = 'Verifying\\u2026 (' + nonce.toLocaleString() +\n"
+"    msg.textContent = 'Verifying\\u2026 (' + counter.toLocaleString() +\n"
 "                      ' hashes, ' + elapsed + 's)';\n"
 "    setTimeout(doBatch, 0);\n"
 "   }).catch(function(err){\n"
 "    msg.textContent = 'Verification failed: ' + (err && err.message || err);\n"
 "   });\n"
 "  }\n"
-"  function finish(hex){\n"
+"  function finish(counterVal){\n"
 "   box.className = 'bs-widget bs-done';\n"
 "   msg.textContent = 'Verified \\u2014 reloading\\u2026';\n"
-"   var tsNow = Math.floor(Date.now()/1000);\n"
-"   var exp = new Date(Date.now() + COOKIE_TTL*1000).toUTCString();\n"
+"   var fields = [CH.v, CH.alg, CH.salt, CH.nonce, CH.difficulty,\n"
+"                 CH.expires_at, CH.signature, counterVal];\n"
+"   var payload = btoa(fields.join('|'));\n"
+"   var exp = new Date((CH.expires_at + 60) * 1000).toUTCString();\n"
 "   var secure = (location.protocol === 'https:') ? '; Secure' : '';\n"
-"   document.cookie = COOKIE_NAME + '=' + tsNow + ':' + hex +\n"
+"   document.cookie = COOKIE_NAME + '=' + payload +\n"
 "                     '; Path=/; Expires=' + exp +\n"
 "                     '; SameSite=Lax' + secure;\n"
 "   setTimeout(function(){ location.reload(); }, 250);\n"
@@ -1089,15 +1075,54 @@ static int bs_handler(request_rec *r)
     int ttl        = bs_effective_int(cfg->cookie_ttl, BS_DEFAULT_COOKIE_TTL);
     int difficulty = bs_effective_int(cfg->difficulty, BS_DEFAULT_DIFFICULTY);
 
-    if (bs_has_valid_cookie(r, ttl)) {
-        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
-                      "mod_botshield: verified cookie, passing %s", r->uri);
-        return DECLINED;
+    /* Without a secret+algorithm we can't sign challenges or verify cookies.
+     * Refuse the scope with a 503 so misconfiguration is immediately visible
+     * rather than silently weaker. */
+    if (!cfg->secret || !cfg->algorithm) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+                      "mod_botshield: BotShieldEnabled On requires both "
+                      "BotShieldSecretFile and BotShieldAlgorithm in scope "
+                      "(for %s)", r->uri);
+        r->status = HTTP_SERVICE_UNAVAILABLE;
+        ap_set_content_type(r, "text/plain; charset=utf-8");
+        apr_table_setn(r->headers_out, "Cache-Control", "no-store");
+        apr_table_setn(r->err_headers_out, "X-Botshield", "misconfigured");
+        ap_rputs("Service unavailable: mod_botshield misconfigured.\n", r);
+        return OK;
+    }
+
+    /* Verify an existing cookie, if any. verify returns NULL on success. */
+    const char *cookie_val = bs_get_cookie_value(r, BS_COOKIE_NAME);
+    if (cookie_val && *cookie_val) {
+        const char *reason = bs_verify_cookie(r, cfg, cookie_val);
+        if (!reason) {
+            ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
+                          "mod_botshield: verified cookie, passing %s",
+                          r->uri);
+            return DECLINED;
+        }
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                      "mod_botshield: " BS_COOKIE_NAME " rejected: %s",
+                      reason);
     }
 
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
-                  "mod_botshield: challenging %s (difficulty=%d, ttl=%d)",
-                  r->unparsed_uri, difficulty, ttl);
+                  "mod_botshield: challenging %s (alg=%s, difficulty=%d, ttl=%d)",
+                  r->unparsed_uri, cfg->algorithm->name, difficulty, ttl);
+
+    /* Issue a fresh signed challenge; the worker reads it from the page. */
+    bs_challenge challenge;
+    const char *ierr = bs_issue_challenge(r->pool, cfg, difficulty, ttl,
+                                          &challenge);
+    if (ierr) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+                      "mod_botshield: issue failed: %s", ierr);
+        r->status = HTTP_INTERNAL_SERVER_ERROR;
+        ap_set_content_type(r, "text/plain; charset=utf-8");
+        ap_rputs("Service error: could not issue challenge.\n", r);
+        return OK;
+    }
+    const char *challenge_js = bs_challenge_json(r->pool, &challenge);
 
     const char *prompt     = cfg->prompt     ? cfg->prompt     : BS_DEFAULT_PROMPT;
     const char *logo_svg   = cfg->logo_svg   ? cfg->logo_svg   : BS_DEFAULT_LOGO_SVG;
@@ -1150,7 +1175,7 @@ static int bs_handler(request_rec *r)
                                 prompt_span,
                                 brand_div,
                                 help_html,
-                                difficulty, ttl);
+                                challenge_js);
 
     const char *page = cfg->challenge_html ? cfg->challenge_html
                                            : BS_DEFAULT_PAGE_TEMPLATE;
