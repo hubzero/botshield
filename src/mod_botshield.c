@@ -1035,7 +1035,8 @@ static const command_rec bs_cmds[] = {
                  "enclosing scope (default: off)"),
     AP_INIT_TAKE1("BotShieldCookieTTL", bs_set_cookie_ttl, NULL,
                  RSRC_CONF | ACCESS_CONF,
-                 "Seconds a verified cookie stays valid (default: 60)"),
+                 "Seconds a verified cookie stays valid (default: 3600, "
+                 "range 1..86400)"),
     AP_INIT_TAKE1("BotShieldDifficulty",bs_set_difficulty, NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "Number of leading hex zeros the PoW must produce (default: 4)"),
