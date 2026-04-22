@@ -57,13 +57,52 @@ sudo apachectl configtest && sudo systemctl reload apache2
 </VirtualHost>
 ```
 
+## Deployment behind a reverse proxy or load balancer
+
+`mod_botshield` keys its IP-based signals — the flagged-IP table, the
+Bloom filter, the score per IP — on `r->useragent_ip`, which is the
+TCP peer Apache saw. If Apache sits behind a reverse proxy or load
+balancer, that peer is the proxy, not the real client.
+
+**The fix is the stock Apache module `mod_remoteip`.** Configure it
+to trust your edge hops, and it will rewrite `r->useragent_ip` to the
+real client before any botshield hook runs. This is the same module
+used for accurate `%a` in access logs — if your logs already show
+real client IPs, you're done. If not:
+
+```apache
+LoadModule remoteip_module modules/mod_remoteip.so
+
+RemoteIPHeader        X-Forwarded-For
+RemoteIPTrustedProxy  10.0.0.0/8
+RemoteIPTrustedProxy  2001:db8:cafe::/48
+# ... one RemoteIPTrustedProxy per edge CIDR ...
+
+<VirtualHost *:443>
+    ServerName example.com
+    BotShieldEnabled     On
+    BotShieldSecretFile  /etc/botshield/secret
+    BotShieldAlgorithm   sha256-zeros
+</VirtualHost>
+```
+
+We deliberately do not reimplement this. `mod_remoteip` handles
+`X-Forwarded-For`, `Forwarded:` (RFC 7239), trusted-proxy CIDR
+matching for both v4 and v6, and multi-hop chains — all in Apache
+core, battle-tested, maintained. A site that skips this and just
+enables `BotShieldEnabled` behind a proxy will flag its own load
+balancer and then challenge every legitimate visitor.
+
+For a single-host deployment with no proxy in front, no extra
+configuration is needed — `r->useragent_ip` already is the client.
+
 ## Directives
 
 | Directive | Default | Purpose |
 |---|---|---|
 | `BotShieldEnabled on\|off` | `off` | Master on/off for the enclosing scope |
 | `BotShieldDebug on\|off` | `off` | Return `403 "Hello World"` for every request (smoke test) |
-| `BotShieldCookieTTL N` | `300` | Seconds a verified cookie is honoured |
+| `BotShieldCookieTTL N` | `3600` | Seconds a verified cookie is honoured |
 | `BotShieldDifficulty N` | `4` | Leading hex zeros the PoW must produce (1..8) |
 | `BotShieldPromptText "..."` | `I'm not a robot` | Label next to the checkbox |
 | `BotShieldLogoFile /path.svg` | embedded Guardian | SVG served inline as the logo (≤ 64 KB) |
