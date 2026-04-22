@@ -1456,48 +1456,71 @@ static int bs_handler(request_rec *r)
         return OK;
     }
 
-    /* Verify an existing cookie, if any. verify returns NULL on success.
-     * When it fails but the HMAC did verify (e.g. the cookie is expired
-     * or the PoW counter is wrong), `prior_ch` is populated — we salvage
-     * the rep fields and carry them forward into the new challenge.
-     *
-     * Today (M4a) a valid cookie is still an unconditional pass. M4b
-     * will make the decoded rep feed effective_score instead. */
+    /* Parse the cookie if present. Three outcomes:
+     *   - NULL reason: cookie is fully valid. We still compute effective
+     *     score and tier — M4b lets cookied users land on a challenge
+     *     if new request-level signals have pushed their score up.
+     *   - non-NULL reason, sig matched: cookie was tampered or replayed
+     *     no, wait — sig matched but failed for another reason (expiry,
+     *     PoW counter). Salvage rep and carry it forward.
+     *   - non-NULL reason, "signature mismatch": can't trust any bytes
+     *     in the cookie. Treat as cookieless.
+     */
     const char *cookie_val = bs_get_cookie_value(r, BS_COOKIE_NAME);
     bs_challenge prior_ch;
-    int have_prior_rep = 0;
+    int have_prior_rep   = 0;
+    int cookie_fully_ok  = 0;
     if (cookie_val && *cookie_val) {
         const char *reason = bs_verify_cookie(r, cfg, cookie_val, &prior_ch);
         if (!reason) {
-            ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
-                          "mod_botshield: verified cookie, passing %s",
-                          r->uri);
-            return DECLINED;
+            cookie_fully_ok = 1;
+            have_prior_rep  = 1;
+        } else {
+            if (strcmp(reason, "signature mismatch") != 0) {
+                have_prior_rep = 1;
+            }
+            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                          "mod_botshield: " BS_COOKIE_NAME " rejected: %s",
+                          reason);
         }
-        /* Reason was set — full verify failed. If the HMAC specifically
-         * mismatched, we can't trust any fields. Otherwise (expired,
-         * insufficient leading zeros, etc.) sig-verified rep is safe to
-         * carry forward. */
-        if (strcmp(reason, "signature mismatch") != 0) {
-            have_prior_rep = 1;
-        }
-        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
-                      "mod_botshield: " BS_COOKIE_NAME " rejected: %s",
-                      reason);
     }
 
-    /* Score the request with built-in heuristics. Extensions (M3 onward)
-     * add more via bs_score_add(). The tier is computed but not yet acted
-     * on — every challenged request still goes to form-PoW. */
+    /* Score the request. Heuristics always run — a fully-valid cookie
+     * doesn't exempt you from fresh request-level signals that might
+     * have pushed you into a tier that requires a re-challenge. */
     bs_run_builtin_heuristics(r);
     bs_request_score *score = bs_get_score(r, 0);
-    int score_total = score ? score->total : 0;
-    bs_tier tier = bs_decide_tier(cfg, score_total);
+    int heuristic_total = score ? score->total : 0;
 
-    /* Build the rep state to carry into the new challenge. M4a only
-     * re-issues at the form tier, so apply form-tier forgiveness and
-     * increment passes_form. M4b will extend this to pick the forgiveness
-     * amount per tier. */
+    /* effective_score composes three things: the per-request heuristic
+     * total, the cookie's accumulated rep score, and any flag-penalty
+     * floor that the cookie's flag bitmap implies (zero today; M5/E4
+     * will wire real bits). IP-level penalties from M5's flagged-IP
+     * table will add here when that lands. */
+    int cookie_score  = have_prior_rep ? prior_ch.rep.score : 0;
+    int flag_floor    = have_prior_rep ? bs_flag_penalty(prior_ch.rep.flags) : 0;
+    int effective     = heuristic_total + cookie_score + flag_floor;
+    bs_tier tier      = bs_decide_tier(cfg, effective);
+
+    /* Happy path: score below the silent threshold → pass through.
+     * If there's no cookie this means no cookie is ever issued —
+     * legitimate users experience mod_botshield as invisible. */
+    if (tier == BS_TIER_PASS) {
+        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
+                      "mod_botshield: pass %s effective=%d "
+                      "(heuristic=%d cookie_score=%d flag_floor=%d) "
+                      "cookie_ok=%d",
+                      r->uri, effective, heuristic_total, cookie_score,
+                      flag_floor, cookie_fully_ok);
+        return DECLINED;
+    }
+
+    /* Not pass tier — we will issue a challenge. Build the rep state
+     * to carry into the new cookie. Today M4b serves form-PoW for every
+     * non-pass tier; silent (M7) and captcha (M8) will ship later with
+     * their own forgiveness rates. Until then, form forgiveness is
+     * applied whenever we re-issue, matching what the user actually
+     * solves. */
     bs_rep_state next_rep;
     if (have_prior_rep) {
         int forgive = bs_effective_int(cfg->forgive_form,
@@ -1520,13 +1543,15 @@ static int bs_handler(request_rec *r)
 
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
                   "mod_botshield: challenging %s (alg=%s, difficulty=%d, "
-                  "ttl=%d) score=%d tier=%s reasons=%s "
-                  "cookie_score=%d cookie_flags=0x%x passes=[s:%d f:%d c:%d]",
+                  "ttl=%d) effective=%d tier=%s heuristic=%d reasons=%s "
+                  "cookie_score=%d cookie_flags=0x%x cookie_ok=%d "
+                  "passes=[s:%d f:%d c:%d]",
                   r->unparsed_uri, cfg->algorithm->name, difficulty, ttl,
-                  score_total, bs_tier_name(tier),
+                  effective, bs_tier_name(tier), heuristic_total,
                   bs_score_reasons_joined(r->pool, score),
-                  have_prior_rep ? prior_ch.rep.score : -1,
+                  have_prior_rep ? cookie_score : -1,
                   have_prior_rep ? (unsigned)prior_ch.rep.flags : 0,
+                  cookie_fully_ok,
                   next_rep.passes_silent, next_rep.passes_form,
                   next_rep.passes_captcha);
 
