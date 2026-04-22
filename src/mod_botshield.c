@@ -47,6 +47,9 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
 
 module AP_MODULE_DECLARE_DATA botshield_module;
 
@@ -1655,9 +1658,44 @@ corrupt:
         path);
 }
 
+/* fsync the directory containing `path` so the post-rename directory
+ * entry is durable on crash/power-loss. APR doesn't expose a
+ * directory-fsync helper; fall back to plain POSIX open+fsync+close.
+ * Errors are logged at INFO and non-fatal — the rename already
+ * succeeded, and most filesystems flush the entry in time anyway. */
+static void bs_fsync_parent_dir(apr_pool_t *p, server_rec *s,
+                                const char *path)
+{
+    char *dir = apr_pstrdup(p, path);
+    char *slash = strrchr(dir, '/');
+    if (!slash) return;
+    if (slash == dir) dir[1] = '\0';   /* "/state.bin" → "/" */
+    else              *slash = '\0';
+    int fd = open(dir, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        ap_log_error(APLOG_MARK, APLOG_INFO, APR_FROM_OS_ERROR(errno), s,
+            "mod_botshield: state save: cannot open '%s' for fsync", dir);
+        return;
+    }
+    if (fsync(fd) < 0) {
+        ap_log_error(APLOG_MARK, APLOG_INFO, APR_FROM_OS_ERROR(errno), s,
+            "mod_botshield: state save: fsync('%s') failed", dir);
+    }
+    close(fd);
+}
+
 /* Write the current SHM contents to `path` atomically (write to .tmp,
- * fsync, rename). Called at graceful shutdown via pool cleanup. Any
- * error is logged at WARNING but never fatal. */
+ * fsync file, rename, fsync parent dir). Called at graceful shutdown
+ * via pool cleanup. Any error is logged at WARNING but never fatal.
+ *
+ * Concurrency: the flagged-IP table is serialized under the global
+ * mutex while we take the snapshot, so we can't capture a slot that's
+ * mid-write. (A racing writer otherwise leaves the slot with version
+ * odd + partially-written IP/flags; loading that would reset version
+ * to 0 and present the half-written state as legitimately authored.)
+ * The Bloom buffers are byte arrays mutated by single-byte atomic OR;
+ * individual byte reads are torn-free, so a plain memcpy captures a
+ * well-defined per-byte snapshot with no lock needed. */
 static apr_status_t bs_state_save(apr_pool_t *p, server_rec *s,
                                   const char *path)
 {
@@ -1684,7 +1722,22 @@ static apr_status_t bs_state_save(apr_pool_t *p, server_rec *s,
 
     apr_uint32_t cap = (apr_uint32_t)bs_shm.flagged_capacity;
     memcpy(pc, &cap, 4); pc += 4;
+
+    /* Serialize the flagged-IP copy against bs_flagged_ip_add's
+     * writer. Without the lock, a concurrent add's odd-version mid-
+     * state can be captured; load resets version to 0 and ends up
+     * publishing a logically-forged slot. */
+    if (bs_shm.mutex) {
+        apr_status_t lr = apr_global_mutex_lock(bs_shm.mutex);
+        if (lr != APR_SUCCESS) {
+            ap_log_error(APLOG_MARK, APLOG_WARNING, lr, s,
+                "mod_botshield: state save: could not lock mutex; "
+                "skipping save to avoid writing an inconsistent snapshot");
+            return lr;
+        }
+    }
     memcpy(pc, bs_shm.flagged_table, flagged_bytes);
+    if (bs_shm.mutex) apr_global_mutex_unlock(bs_shm.mutex);
     pc += flagged_bytes;
 
     apr_uint32_t bb = (apr_uint32_t)bs_shm.bloom_buf_bytes;
@@ -1733,6 +1786,12 @@ static apr_status_t bs_state_save(apr_pool_t *p, server_rec *s,
         apr_file_remove(tmp_path, p);
         return rv;
     }
+    /* fsync the parent directory so the new directory entry is durable
+     * across a crash/power-loss before the next periodic flush. Without
+     * this, some filesystems can lose the rename even though the file
+     * contents are already on disk. */
+    bs_fsync_parent_dir(p, s, path);
+
     ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
         "mod_botshield: state saved to %s (%" APR_SIZE_T_FMT " bytes)",
         path, total);
