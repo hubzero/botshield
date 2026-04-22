@@ -15,12 +15,16 @@ LA       := $(SRC:.c=.la)
 # Pass warnings through apxs to the underlying compiler.
 CFLAGS_WARN := -Wc,-Wall -Wc,-Wextra -Wc,-Wno-unused-parameter
 
+# Link against OpenSSL for HMAC + SHA + RAND. apxs forwards trailing -l args
+# to the linker.
+LIBS := -lcrypto
+
 .PHONY: all build install enable disable reload clean
 
 all: build
 
 build:
-	$(APXS) -c $(CFLAGS_WARN) $(SRC)
+	$(APXS) -c $(CFLAGS_WARN) $(SRC) $(LIBS)
 
 install: build
 	sudo $(APXS) -i -n $(MOD_NAME) $(LA)

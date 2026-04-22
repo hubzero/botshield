@@ -28,9 +28,16 @@
 #include "apr_tables.h"
 #include "apr_time.h"
 #include "apr_file_io.h"
+#include "apr_base64.h"
+
+#include <openssl/hmac.h>
+#include <openssl/evp.h>
+#include <openssl/rand.h>
 
 #include <ctype.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
 
 module AP_MODULE_DECLARE_DATA botshield_module;
 
@@ -46,7 +53,49 @@ module AP_MODULE_DECLARE_DATA botshield_module;
 #define BS_MAX_LOGO_BYTES     (64 * 1024)
 #define BS_MAX_HELP_BYTES     (64 * 1024)
 #define BS_MAX_PAGE_BYTES     (256 * 1024)
+#define BS_MAX_SECRET_BYTES   1024
+#define BS_MIN_SECRET_BYTES   16
 #define BS_WIDGET_MARKER      "<!-- BOTSHIELD -->"
+
+/* Challenge protocol —
+ *   Wire format (embedded inline in the interstitial):
+ *     { v, alg, salt, nonce, difficulty, expires_at, signature }
+ *   Canonical HMAC input (deterministic, pipe-delimited ASCII):
+ *     "v|alg|salthex|noncehex|difficulty|expires_at"
+ *   Cookie payload = base64( "v|alg|salt|nonce|difficulty|expires|sig|counter" )
+ *   — a single base64 blob the server can parse with strtok-style splitting,
+ *   no JSON parser required.
+ *
+ * Keep in sync with the JS worker when the template ships the wire bits. */
+#define BS_PROTOCOL_VERSION   1
+#define BS_SALT_BYTES         16
+#define BS_NONCE_BYTES        8
+#define BS_SIG_BYTES          32  /* HMAC-SHA-256 output */
+
+/* Forward declarations for the PoW algorithm dispatch table. */
+typedef struct bs_dir_cfg bs_dir_cfg;
+
+typedef struct {
+    int          version;
+    const char  *alg_name;              /* points into registry */
+    unsigned char salt [BS_SALT_BYTES];
+    unsigned char nonce[BS_NONCE_BYTES];
+    int          difficulty;
+    apr_time_t   expires_at;            /* unix seconds */
+    unsigned char signature[BS_SIG_BYTES];
+} bs_challenge;
+
+typedef const char *(*bs_alg_issue_fn)(const bs_dir_cfg *cfg,
+                                       bs_challenge *out);
+typedef const char *(*bs_alg_verify_fn)(const bs_challenge *ch,
+                                        const char *counter_str);
+
+typedef struct {
+    const char       *name;
+    int               implemented;   /* 1 = callable, 0 = reserved */
+    bs_alg_issue_fn   issue;
+    bs_alg_verify_fn  verify;
+} bs_pow_algorithm;
 
 /* Help visibility modes (values are stored in bs_dir_cfg.help_mode). */
 enum bs_help_mode {
@@ -78,7 +127,7 @@ static const char BS_DEFAULT_LOGO_SVG[] =
 "stroke-width=\"5.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>"
 "</svg>";
 
-typedef struct {
+struct bs_dir_cfg {
     int enabled;
     int debug;
     int cookie_ttl;
@@ -92,7 +141,10 @@ typedef struct {
     const char *logo_label;     /* small caption under the logo */
     const char *help_html;      /* panel content, loaded at config time */
     const char *challenge_html; /* full HTML page template with marker */
-} bs_dir_cfg;
+    const bs_pow_algorithm *algorithm;      /* chosen issue algorithm */
+    const unsigned char    *secret;         /* HMAC key bytes */
+    apr_size_t              secret_len;     /* key length */
+};
 
 /* --- Config lifecycle --- */
 
@@ -108,6 +160,9 @@ static void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->show_logo  = BS_UNSET;
     cfg->show_label = BS_UNSET;
     cfg->show_box   = BS_UNSET;
+    cfg->algorithm  = NULL;
+    cfg->secret     = NULL;
+    cfg->secret_len = 0;
     return cfg;
 }
 
@@ -129,6 +184,14 @@ static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     out->logo_label     = add->logo_label     ? add->logo_label     : base->logo_label;
     out->help_html      = add->help_html      ? add->help_html      : base->help_html;
     out->challenge_html = add->challenge_html ? add->challenge_html : base->challenge_html;
+    out->algorithm      = add->algorithm      ? add->algorithm      : base->algorithm;
+    if (add->secret) {
+        out->secret     = add->secret;
+        out->secret_len = add->secret_len;
+    } else {
+        out->secret     = base->secret;
+        out->secret_len = base->secret_len;
+    }
     return out;
 }
 
@@ -297,6 +360,323 @@ static const char *bs_set_challenge_file(cmd_parms *cmd, void *cfg_v, const char
     return NULL;
 }
 
+/* ======================================================================
+ * Crypto helpers, challenge struct, algorithm registry, issue/verify.
+ * ====================================================================== */
+
+/* --- Low-level crypto wrappers --- */
+
+#define BS_SHA256_LEN 32
+
+static void bs_sha256(const unsigned char *data, apr_size_t len,
+                      unsigned char out[BS_SHA256_LEN])
+{
+    unsigned int outlen = BS_SHA256_LEN;
+    EVP_Digest(data, (size_t)len, out, &outlen, EVP_sha256(), NULL);
+}
+
+static void bs_hmac_sha256(const unsigned char *key, apr_size_t keylen,
+                           const unsigned char *data, apr_size_t datalen,
+                           unsigned char out[BS_SIG_BYTES])
+{
+    unsigned int outlen = BS_SIG_BYTES;
+    HMAC(EVP_sha256(), key, (int)keylen, data, datalen, out, &outlen);
+}
+
+/* Constant-time equality. Returns 1 on equal, 0 on not. */
+static int bs_ct_equal(const unsigned char *a, const unsigned char *b,
+                       apr_size_t len)
+{
+    unsigned char diff = 0;
+    for (apr_size_t i = 0; i < len; i++) diff |= a[i] ^ b[i];
+    return diff == 0;
+}
+
+/* Hex helpers. Writes 2*len chars + NUL. */
+static void bs_to_hex(const unsigned char *in, apr_size_t len, char *out)
+{
+    static const char H[] = "0123456789abcdef";
+    for (apr_size_t i = 0; i < len; i++) {
+        out[i*2]   = H[(in[i] >> 4) & 0xF];
+        out[i*2+1] = H[in[i] & 0xF];
+    }
+    out[len*2] = '\0';
+}
+
+/* Returns 1 on success, 0 on malformed. out_len is bytes expected. */
+static int bs_from_hex(const char *in, apr_size_t out_len, unsigned char *out)
+{
+    for (apr_size_t i = 0; i < out_len; i++) {
+        int hi = -1, lo = -1;
+        char c = in[i*2];
+        if      (c >= '0' && c <= '9') hi = c - '0';
+        else if (c >= 'a' && c <= 'f') hi = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') hi = c - 'A' + 10;
+        c = in[i*2+1];
+        if      (c >= '0' && c <= '9') lo = c - '0';
+        else if (c >= 'a' && c <= 'f') lo = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') lo = c - 'A' + 10;
+        if (hi < 0 || lo < 0) return 0;
+        out[i] = (unsigned char)((hi << 4) | lo);
+    }
+    return 1;
+}
+
+/* --- Canonical form for HMAC input ---
+ *
+ * "v|alg|salthex|noncehex|difficulty|expires_at"
+ *
+ * Deterministic, ASCII, field-delimited. Both sign and verify produce this
+ * exact string from the challenge struct — if a byte changes, the HMAC
+ * changes, and tampering is detected. */
+static const char *bs_challenge_canonical(apr_pool_t *p,
+                                          const bs_challenge *ch)
+{
+    char salt_hex [BS_SALT_BYTES * 2 + 1];
+    char nonce_hex[BS_NONCE_BYTES * 2 + 1];
+    bs_to_hex(ch->salt,  BS_SALT_BYTES,  salt_hex);
+    bs_to_hex(ch->nonce, BS_NONCE_BYTES, nonce_hex);
+    return apr_psprintf(p, "%d|%s|%s|%s|%d|%" APR_TIME_T_FMT,
+                        ch->version, ch->alg_name, salt_hex, nonce_hex,
+                        ch->difficulty, ch->expires_at);
+}
+
+/* --- Algorithm: sha256-zeros ---
+ *
+ * The PoW our M1 widget already uses, now wrapped in the registry.
+ * issue: pick salt+nonce, record in the challenge. (HMAC signing is done
+ *   by the top-level issuer, not the per-alg callback.)
+ * verify: check that SHA-256(salt || nonce || counter) has `difficulty`
+ *   leading hex zero digits. */
+static const char *bs_sha256_zeros_issue(const bs_dir_cfg *cfg,
+                                         bs_challenge *out)
+{
+    (void)cfg;
+    if (RAND_bytes(out->salt,  BS_SALT_BYTES)  != 1) return "RAND_bytes(salt)";
+    if (RAND_bytes(out->nonce, BS_NONCE_BYTES) != 1) return "RAND_bytes(nonce)";
+    return NULL;
+}
+
+static const char *bs_sha256_zeros_verify(const bs_challenge *ch,
+                                          const char *counter_str)
+{
+    if (!counter_str || !*counter_str) return "empty counter";
+
+    /* Accumulate salt || nonce || counter into a stack buffer. Salt+nonce
+     * is 24 bytes; counter is a decimal ASCII integer, capped well below
+     * 32 bytes by the cookie-size limit. */
+    unsigned char buf[BS_SALT_BYTES + BS_NONCE_BYTES + 64];
+    apr_size_t n = 0;
+    memcpy(buf + n, ch->salt,  BS_SALT_BYTES);  n += BS_SALT_BYTES;
+    memcpy(buf + n, ch->nonce, BS_NONCE_BYTES); n += BS_NONCE_BYTES;
+    apr_size_t cslen = strlen(counter_str);
+    if (cslen > sizeof(buf) - n) return "counter too long";
+    memcpy(buf + n, counter_str, cslen); n += cslen;
+
+    unsigned char digest[BS_SHA256_LEN];
+    bs_sha256(buf, n, digest);
+
+    /* Leading `difficulty` hex zero digits = first `difficulty`/2 bytes are
+     * 0x00, and if difficulty is odd the high nibble of the next byte is 0. */
+    int full_bytes = ch->difficulty / 2;
+    int need_half  = ch->difficulty & 1;
+    for (int i = 0; i < full_bytes; i++) {
+        if (digest[i] != 0) return "insufficient leading zeros";
+    }
+    if (need_half && (digest[full_bytes] >> 4) != 0) {
+        return "insufficient leading zeros";
+    }
+    return NULL;
+}
+
+/* --- Algorithm registry ---
+ *
+ * Static dispatch table. Only sha256-zeros is implemented today. Flipping
+ * a 0 to 1 + providing the two functions is how new algorithms get added;
+ * no changes to the protocol or the verify code path. */
+static const bs_pow_algorithm bs_algorithms[] = {
+    { "sha256-zeros",  1, bs_sha256_zeros_issue, bs_sha256_zeros_verify },
+    { "sha384-zeros",  0, NULL, NULL },
+    { "sha512-zeros",  0, NULL, NULL },
+    { "pbkdf2-sha256", 0, NULL, NULL },
+    { "argon2id",      0, NULL, NULL },
+    { NULL,            0, NULL, NULL }
+};
+
+static const bs_pow_algorithm *bs_find_algorithm(const char *name)
+{
+    for (int i = 0; bs_algorithms[i].name; i++) {
+        if (strcmp(bs_algorithms[i].name, name) == 0) {
+            return &bs_algorithms[i];
+        }
+    }
+    return NULL;
+}
+
+/* --- Top-level issue / verify ---
+ *
+ * bs_issue_challenge fills the `ch` struct (salt, nonce, signature) from
+ * config; the handler serializes to JSON for inline embedding. Stateless.
+ *
+ * bs_verify_cookie parses a base64-encoded cookie payload into a challenge
+ * + counter, checks HMAC + expiry, dispatches the PoW check to the alg.
+ * Returns NULL on accept, else a diagnostic string. */
+
+__attribute__((unused))
+static const char *bs_issue_challenge(apr_pool_t *p, const bs_dir_cfg *cfg,
+                                      int difficulty, int cookie_ttl,
+                                      bs_challenge *out)
+{
+    if (!cfg->secret || !cfg->algorithm) {
+        return "BotShieldSecretFile and BotShieldAlgorithm must be set";
+    }
+    out->version     = BS_PROTOCOL_VERSION;
+    out->alg_name    = cfg->algorithm->name;
+    out->difficulty  = difficulty;
+    out->expires_at  = apr_time_sec(apr_time_now()) + cookie_ttl;
+
+    const char *err = cfg->algorithm->issue(cfg, out);
+    if (err) return err;
+
+    const char *canon = bs_challenge_canonical(p, out);
+    bs_hmac_sha256(cfg->secret, cfg->secret_len,
+                   (const unsigned char *)canon, strlen(canon),
+                   out->signature);
+    return NULL;
+}
+
+__attribute__((unused))
+static const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
+                                    const char *cookie_b64)
+{
+    if (!cfg->secret) return "no secret configured";
+
+    /* Decode the base64 into a pool buffer large enough. apr_base64_decode
+     * writes into the buffer and returns length; we add room for a NUL. */
+    apr_size_t in_len = strlen(cookie_b64);
+    if (in_len > BS_MAX_PAGE_BYTES) return "cookie absurdly long";
+    char *decoded = apr_palloc(r->pool, apr_base64_decode_len(cookie_b64) + 1);
+    int dec_len = apr_base64_decode(decoded, cookie_b64);
+    if (dec_len <= 0) return "base64 decode failed";
+    decoded[dec_len] = '\0';
+
+    /* Expect 8 pipe-delimited fields:
+     *   v | alg | salthex | noncehex | difficulty | expires_at | sighex | counter
+     * Split in place. */
+    char *fields[8];
+    int nf = 0;
+    char *p = decoded;
+    fields[nf++] = p;
+    while (*p && nf < 8) {
+        if (*p == '|') { *p = '\0'; fields[nf++] = p + 1; }
+        p++;
+    }
+    if (nf != 8) return "wrong field count";
+
+    /* Parse + validate each field with a strict shape check. */
+    int version = atoi(fields[0]);
+    if (version != BS_PROTOCOL_VERSION) return "bad protocol version";
+
+    const bs_pow_algorithm *alg = bs_find_algorithm(fields[1]);
+    if (!alg || !alg->implemented) return "unknown algorithm";
+
+    bs_challenge ch;
+    ch.version    = version;
+    ch.alg_name   = alg->name;
+    ch.difficulty = atoi(fields[4]);
+    if (ch.difficulty < 1 || ch.difficulty > 8) return "bad difficulty";
+
+    if (strlen(fields[2]) != BS_SALT_BYTES * 2 ||
+        !bs_from_hex(fields[2], BS_SALT_BYTES, ch.salt)) return "bad salt";
+    if (strlen(fields[3]) != BS_NONCE_BYTES * 2 ||
+        !bs_from_hex(fields[3], BS_NONCE_BYTES, ch.nonce)) return "bad nonce";
+
+    ch.expires_at = (apr_time_t)apr_atoi64(fields[5]);
+
+    unsigned char sig_from_client[BS_SIG_BYTES];
+    if (strlen(fields[6]) != BS_SIG_BYTES * 2 ||
+        !bs_from_hex(fields[6], BS_SIG_BYTES, sig_from_client)) {
+        return "bad signature hex";
+    }
+
+    /* Re-derive the HMAC from canonical form + secret, and constant-time
+     * compare with the client-supplied signature. */
+    const char *canon = bs_challenge_canonical(r->pool, &ch);
+    unsigned char sig_expected[BS_SIG_BYTES];
+    bs_hmac_sha256(cfg->secret, cfg->secret_len,
+                   (const unsigned char *)canon, strlen(canon),
+                   sig_expected);
+    if (!bs_ct_equal(sig_expected, sig_from_client, BS_SIG_BYTES)) {
+        return "signature mismatch";
+    }
+
+    /* Freshness — a signed cookie is still only valid until expires_at. */
+    apr_time_t now = apr_time_sec(apr_time_now());
+    if (now > ch.expires_at) return "expired";
+
+    /* Final step: algorithm-specific PoW check on the counter. */
+    return alg->verify(&ch, fields[7]);
+}
+
+/* --- New directive setters --- */
+
+/* `BotShieldSecretFile /path` — HMAC key. Refuse world-readable and
+ * group-readable files so an operator can't accidentally ship a key that
+ * any local user on the box can exfiltrate. */
+static const char *bs_set_secret_file(cmd_parms *cmd, void *cfg_v,
+                                      const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+
+    struct stat st;
+    if (stat(arg, &st) != 0) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSecretFile: cannot stat '%s'", arg);
+    }
+    if (st.st_mode & (S_IRGRP | S_IROTH | S_IWGRP | S_IWOTH)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSecretFile: '%s' is group- or world-accessible "
+            "(mode %04o); chmod 600 it", arg, st.st_mode & 07777);
+    }
+
+    const char *buf = NULL;
+    const char *err = bs_load_config_file(cmd, "BotShieldSecretFile", arg,
+                                          BS_MAX_SECRET_BYTES, &buf);
+    if (err) return err;
+
+    /* Trim one trailing newline if present — common with `echo` output. */
+    apr_size_t len = strlen(buf);
+    if (len > 0 && buf[len-1] == '\n') len--;
+    if (len < BS_MIN_SECRET_BYTES) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSecretFile: '%s' contains only %" APR_SIZE_T_FMT
+            " bytes (minimum %d)", arg, len, BS_MIN_SECRET_BYTES);
+    }
+
+    cfg->secret     = (const unsigned char *)buf;
+    cfg->secret_len = len;
+    return NULL;
+}
+
+static const char *bs_set_algorithm(cmd_parms *cmd, void *cfg_v,
+                                    const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    const bs_pow_algorithm *alg = bs_find_algorithm(arg);
+    if (!alg) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldAlgorithm: '%s' is not a recognized algorithm name",
+            arg);
+    }
+    if (!alg->implemented) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldAlgorithm: '%s' is reserved in the registry but not "
+            "built into this module", arg);
+    }
+    cfg->algorithm = alg;
+    return NULL;
+}
+
 static const command_rec bs_cmds[] = {
     AP_INIT_FLAG("BotShieldEnabled",    bs_set_enabled,    NULL,
                  RSRC_CONF | ACCESS_CONF,
@@ -355,6 +735,17 @@ static const command_rec bs_cmds[] = {
                  "where the widget should be inserted. Read once at startup; "
                  "must be <= 256 KB. Other BotShield* directives still apply "
                  "to the widget block."),
+    AP_INIT_TAKE1("BotShieldSecretFile", bs_set_secret_file, NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "Path to the HMAC key used to sign challenge cookies. "
+                 "Must be mode 0600 (not group- or world-accessible) and "
+                 ">= 16 bytes. Read once at startup."),
+    AP_INIT_TAKE1("BotShieldAlgorithm",  bs_set_algorithm,  NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "Proof-of-work algorithm name. Only 'sha256-zeros' is built "
+                 "into this module today; 'sha384-zeros' / 'sha512-zeros' / "
+                 "'pbkdf2-sha256' / 'argon2id' are registry slots reserved "
+                 "for future opt-in builds."),
     { NULL }
 };
 
