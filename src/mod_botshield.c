@@ -283,6 +283,7 @@ struct bs_dir_cfg {
 typedef struct {
     apr_size_t shm_size;
     int        flagged_capacity;
+    int        ipv6_prefix_bits;  /* 0..128; 64 = per-subscriber v6 key */
 } bs_server_cfg;
 
 /* --- Config lifecycle --- */
@@ -320,6 +321,7 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     bs_server_cfg *scfg = apr_pcalloc(p, sizeof(*scfg));
     scfg->shm_size          = BS_DEFAULT_SHM_SIZE;
     scfg->flagged_capacity  = BS_DEFAULT_FLAGGED_SLOTS;
+    scfg->ipv6_prefix_bits  = 64;   /* /64 aggregation by default */
     return scfg;
 }
 
@@ -911,6 +913,48 @@ static int bs_parse_client_ip(const char *ip_str, unsigned char out[16])
         return 1;
     }
     return 0;
+}
+
+/* Apply an IPv6 prefix mask in-place so same-subnet v6 clients collapse
+ * to one key in the flagged-IP table. This bounds the attacker's ability
+ * to rotate through a /64 allocation to shed flags.
+ *
+ * IPv4 (carried as v6-mapped, ::ffff:a.b.c.d) is never masked: the v4
+ * economy is per-/32, not per-/24.
+ *
+ * prefix_bits == 128 or prefix_bits <= 0 → no-op. */
+static void bs_mask_ipv6_prefix(unsigned char ip[16], int prefix_bits)
+{
+    static const unsigned char v4mapped[12] =
+        { 0,0,0,0, 0,0,0,0, 0,0, 0xff,0xff };
+    if (memcmp(ip, v4mapped, 12) == 0) return;       /* v4-in-v6: leave alone */
+    if (prefix_bits <= 0 || prefix_bits >= 128) return;
+
+    int full_bytes  = prefix_bits / 8;
+    int extra_bits  = prefix_bits % 8;
+    if (extra_bits) {
+        unsigned char keep = (unsigned char)(0xff << (8 - extra_bits));
+        ip[full_bytes] &= keep;
+        full_bytes++;
+    }
+    for (int i = full_bytes; i < 16; i++) ip[i] = 0;
+}
+
+static const char *bs_set_ipv6_prefix(cmd_parms *cmd, void *dconf,
+                                      const char *arg)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (end == arg || *end != '\0' || n < 0 || n > 128) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldIPv6PrefixLen: expected an integer 0..128, got '%s'",
+            arg);
+    }
+    scfg->ipv6_prefix_bits = (int)n;
+    return NULL;
 }
 
 /* --- SHM lifecycle ---
@@ -1715,6 +1759,13 @@ static const command_rec bs_cmds[] = {
                  "Slot count in the flagged-IP hash table. Each slot is "
                  "32 bytes. Default: 50000 (≈ 1.6 MB). "
                  "Range: 1024..1000000."),
+    AP_INIT_TAKE1("BotShieldIPv6PrefixLen", bs_set_ipv6_prefix, NULL,
+                 RSRC_CONF,
+                 "Native-IPv6 clients are keyed on this prefix length in "
+                 "the flagged-IP table. Default 64 — one subscriber "
+                 "allocation is one identity, so an attacker with a /64 "
+                 "can't rotate addresses to shed a flag. 128 disables "
+                 "aggregation. IPv4 (v6-mapped) keys are never masked."),
     AP_INIT_TAKE12("BotShieldFlagIP", bs_set_flag_ip, NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "Flag the client IP with one or more bits when a request "
@@ -2091,10 +2142,19 @@ static int bs_handler(request_rec *r)
 
     /* Flagged-IP table (M5a): look up the client IP. Hits add the
      * serious-event bitmap's penalty to effective_score, rollback-proof
-     * because the flag lives in SHM, not in the cookie. */
+     * because the flag lives in SHM, not in the cookie.
+     *
+     * IPv6 native addresses are masked to the operator-configured prefix
+     * (default /64) so an attacker can't trivially rotate within their
+     * ISP allocation to shed a flag. v4-mapped addresses are left at /32. */
     unsigned char client_ip[16];
     int have_client_ip =
         bs_parse_client_ip(r->useragent_ip, client_ip);
+    if (have_client_ip) {
+        bs_server_cfg *scfg = ap_get_module_config(
+            r->server->module_config, &botshield_module);
+        bs_mask_ipv6_prefix(client_ip, scfg->ipv6_prefix_bits);
+    }
     apr_uint32_t ip_flags = 0;
     int ip_flag_penalty = 0;
     if (have_client_ip &&
