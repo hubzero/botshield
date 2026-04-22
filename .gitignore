@@ -1,0 +1,16 @@
+# Dev-only content served by the local Apache vhost for testing.
+# Not part of the module; regenerate from scratch if needed.
+/testsite/
+
+# apxs / libtool build artifacts
+*.o
+*.lo
+*.la
+*.slo
+*.so
+.libs/
+
+# Editor/scratch
+*.swp
+*~
+.DS_Store
