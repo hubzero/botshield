@@ -34,6 +34,7 @@
 #include "apr_thread_mutex.h"
 #include "apr_atomic.h"
 #include "unixd.h"
+#include "mod_watchdog.h"
 
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
@@ -303,6 +304,7 @@ typedef struct {
     int         bloom_ips;          /* expected working-set size */
     int         bloom_window_secs;  /* full window; rotation at window/2 */
     const char *state_file;         /* NULL = persistence off */
+    int         state_save_interval;/* seconds; 0 = shutdown-only */
 } bs_server_cfg;
 
 /* --- Config lifecycle --- */
@@ -341,9 +343,10 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->shm_size          = BS_DEFAULT_SHM_SIZE;
     scfg->flagged_capacity  = BS_DEFAULT_FLAGGED_SLOTS;
     scfg->ipv6_prefix_bits  = 64;   /* /64 aggregation by default */
-    scfg->bloom_ips         = BS_DEFAULT_BLOOM_IPS;
-    scfg->bloom_window_secs = BS_DEFAULT_BLOOM_WINDOW;
-    scfg->state_file        = NULL;
+    scfg->bloom_ips             = BS_DEFAULT_BLOOM_IPS;
+    scfg->bloom_window_secs     = BS_DEFAULT_BLOOM_WINDOW;
+    scfg->state_file            = NULL;
+    scfg->state_save_interval   = 300;   /* 5 min default when state file set */
     return scfg;
 }
 
@@ -1047,6 +1050,8 @@ typedef struct bs_state_cleanup_ctx {
 static void          bs_state_load(apr_pool_t *p, server_rec *s,
                                    const char *path);
 static apr_status_t  bs_state_cleanup(void *data);
+static apr_status_t  bs_watchdog_save_cb(int state, void *data,
+                                         apr_pool_t *pool);
 
 static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                           apr_pool_t *ptemp, server_rec *s)
@@ -1171,6 +1176,53 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
         ctx->path   = scfg->state_file;
         apr_pool_cleanup_register(pconf, ctx, bs_state_cleanup,
                                   apr_pool_cleanup_null);
+
+        /* Optional periodic save via mod_watchdog. Soft dependency —
+         * if mod_watchdog isn't loaded we degrade to shutdown-only
+         * with a NOTICE. This is "normal degraded mode," not an
+         * error; the graceful-shutdown save still runs either way. */
+        if (scfg->state_save_interval > 0) {
+            APR_OPTIONAL_FN_TYPE(ap_watchdog_get_instance) *fn_get =
+                APR_RETRIEVE_OPTIONAL_FN(ap_watchdog_get_instance);
+            APR_OPTIONAL_FN_TYPE(ap_watchdog_register_callback) *fn_reg =
+                APR_RETRIEVE_OPTIONAL_FN(ap_watchdog_register_callback);
+            if (fn_get && fn_reg) {
+                ap_watchdog_t *wd = NULL;
+                apr_status_t wrv = fn_get(&wd, "mod_botshield_state",
+                                          0 /* not parent-only */,
+                                          1 /* singleton */, pconf);
+                if (wrv == APR_SUCCESS && wd) {
+                    apr_interval_time_t ival =
+                        apr_time_from_sec(scfg->state_save_interval);
+                    wrv = fn_reg(wd, ival, ctx, bs_watchdog_save_cb);
+                } else if (wrv == APR_SUCCESS) {
+                    /* Docs say fn_get returns success + valid ptr or
+                     * an error code, but be defensive. */
+                    wrv = APR_EGENERAL;
+                }
+                if (wrv == APR_SUCCESS) {
+                    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+                        "mod_botshield: periodic state save enabled via "
+                        "mod_watchdog every %d s",
+                        scfg->state_save_interval);
+                } else {
+                    ap_log_error(APLOG_MARK, APLOG_WARNING, wrv, s,
+                        "mod_botshield: watchdog registration failed; "
+                        "state saves on graceful shutdown only");
+                }
+            } else {
+                ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+                    "mod_botshield: mod_watchdog not loaded; periodic "
+                    "state saves disabled (graceful shutdown save still "
+                    "runs). Load mod_watchdog and keep "
+                    "BotShieldStateSaveInterval set to enable periodic "
+                    "saves.");
+            }
+        } else {
+            ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+                "mod_botshield: BotShieldStateSaveInterval=0; state saves "
+                "on graceful shutdown only");
+        }
     } else {
         ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
             "mod_botshield: BotShieldStateFile not set; state is in-memory "
@@ -1822,6 +1874,39 @@ static const char *bs_set_state_file(cmd_parms *cmd, void *dconf,
     return NULL;
 }
 
+static const char *bs_set_state_save_interval(cmd_parms *cmd, void *dconf,
+                                              const char *arg)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    int n = atoi(arg);
+    /* 0 = shutdown-only. Otherwise must be in a sane operational range. */
+    if (n != 0 && (n < 30 || n > 86400)) {
+        return "BotShieldStateSaveInterval: 0 (shutdown-only) or 30..86400 seconds";
+    }
+    scfg->state_save_interval = n;
+    return NULL;
+}
+
+/* mod_watchdog periodic-save callback. Runs in the parent/watchdog
+ * process context with a short-lived pool. AP_WATCHDOG_STATE_RUNNING
+ * fires at the configured interval. STARTING/STOPPING we ignore; the
+ * graceful-shutdown save still happens via pool cleanup. */
+static apr_status_t bs_watchdog_save_cb(int state, void *data,
+                                        apr_pool_t *pool)
+{
+    if (state != AP_WATCHDOG_STATE_RUNNING) return APR_SUCCESS;
+    bs_state_cleanup_ctx *ctx = data;
+    if (!ctx || !ctx->path) return APR_SUCCESS;
+    if (!bs_shm.shm || !bs_shm.flagged_table || !bs_shm.bloom_bufs[0]) {
+        return APR_SUCCESS;   /* SHM not up yet; nothing to save */
+    }
+    /* Use the callback's own pool so temporaries die with this tick. */
+    bs_state_save(pool, ctx->server, ctx->path);
+    return APR_SUCCESS;
+}
+
 /* Translate a flag bitmap (from the cookie's flags field OR the flagged-
  * IP table) into an additive score. M5a wires real numbers; bits are
  * independent so an IP with multiple flags pays the sum. */
@@ -2372,6 +2457,13 @@ static const command_rec bs_cmds[] = {
                  "at clean shutdown; loaded (with checksum and dimension "
                  "checks) at startup. Any problem at load time is treated "
                  "as 'start fresh'. Unset (default) disables persistence."),
+    AP_INIT_TAKE1("BotShieldStateSaveInterval", bs_set_state_save_interval, NULL,
+                 RSRC_CONF,
+                 "Seconds between periodic state snapshots via mod_watchdog. "
+                 "Default 300 (5 min). 0 disables periodic saves (only the "
+                 "graceful-shutdown save runs). Range when non-zero: "
+                 "30..86400. Requires mod_watchdog to be loaded; otherwise "
+                 "degrades to shutdown-only with a NOTICE."),
     AP_INIT_TAKE12("BotShieldFlagIP", bs_set_flag_ip, NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "Flag the client IP with one or more bits when a request "
