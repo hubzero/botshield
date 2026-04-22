@@ -29,6 +29,11 @@
 #include "apr_time.h"
 #include "apr_file_io.h"
 #include "apr_base64.h"
+#include "apr_shm.h"
+#include "apr_global_mutex.h"
+#include "apr_thread_mutex.h"
+#include "apr_atomic.h"
+#include "unixd.h"
 
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
@@ -37,7 +42,11 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 
 module AP_MODULE_DECLARE_DATA botshield_module;
 
@@ -115,6 +124,72 @@ typedef struct {
     bs_alg_issue_fn   issue;
     bs_alg_verify_fn  verify;
 } bs_pow_algorithm;
+
+/* --- Flagged-IP bitmap and scoring ---
+ *
+ * Each bit represents a *serious* event we want to remember about an IP
+ * even if its cookie is rolled back. Penalties per bit are listed inline
+ * in bs_flag_penalty(). Bits are additive: an IP that triggered both a
+ * honeypot and a scanner probe carries the sum. */
+#define BS_FLAG_HONEYPOT_HIT      (1U << 0)
+#define BS_FLAG_SCANNER_PROBE     (1U << 1)
+#define BS_FLAG_FAKE_CRAWLER      (1U << 2)
+#define BS_FLAG_POW_FAIL_STREAK   (1U << 3)
+
+/* --- Shared-memory layout ---
+ *
+ * One APR shared-memory segment holds everything. Fields are laid out
+ * contiguously: fixed header, flagged-IP table, then (reserved for M5b)
+ * two Bloom filter buffers. Workers access the segment through bs_shm,
+ * a module-global runtime struct populated in post-config. */
+#define BS_SHM_MAGIC              0x42534844  /* 'BSHD' */
+#define BS_SHM_FORMAT_VERSION     1
+#define BS_DEFAULT_SHM_SIZE       (8 * 1024 * 1024)
+#define BS_DEFAULT_FLAGGED_SLOTS  50000
+#define BS_FLAGGED_MIN_SLOTS      1024
+#define BS_FLAGGED_MAX_SLOTS      1000000
+#define BS_FLAGGED_PROBE_LIMIT    10   /* linear probe depth */
+#define BS_FLAGGED_MAX_READ_SPINS 3    /* seqlock retry budget */
+
+/* Per-slot seqlock + payload. version bit 0 is a "write in progress"
+ * marker: even = quiescent, odd = mid-write. Readers snapshot fields
+ * between matching even versions. Slot size is 32 bytes (cache-line
+ * friendly): keep it that way so the array stays compact. */
+typedef struct {
+    apr_uint32_t  version;       /* seqlock counter */
+    apr_uint32_t  flags;         /* 0 = empty slot */
+    unsigned char ip[16];        /* IPv6-mapped v4 or raw v6 */
+    apr_int64_t   expires_at;    /* unix seconds; past means stale */
+} bs_flagged_ip_slot;
+
+typedef struct {
+    apr_uint32_t  magic;            /* BS_SHM_MAGIC */
+    apr_uint32_t  format_version;   /* BS_SHM_FORMAT_VERSION */
+    apr_uint32_t  flagged_capacity; /* number of slots in the table */
+    apr_uint32_t  _pad0;
+    unsigned char siphash_key[16];  /* DoS-resistant hash key */
+    /* Reserved for M5b (kept here so layout stabilizes now): */
+    apr_uint32_t  bloom_active;     /* 0 or 1 */
+    apr_uint32_t  bloom_buf_bytes;  /* per-buffer size in bytes */
+    apr_int64_t   bloom_next_rotate;
+    apr_int64_t   _pad1;
+} bs_shm_header;
+
+/* Module-global runtime pointer struct. Populated once in post-config;
+ * children inherit via fork. M5b just fills in bloom_bufs[] and
+ * bloom_buf_bytes — no re-plumbing. */
+typedef struct {
+    apr_shm_t           *shm;
+    apr_global_mutex_t  *mutex;
+    const char          *mutex_filename;   /* for attaches in child_init */
+    bs_shm_header       *header;
+    bs_flagged_ip_slot  *flagged_table;
+    apr_size_t           flagged_capacity;
+    unsigned char       *bloom_bufs[2];    /* reserved for M5b */
+    apr_size_t           bloom_buf_bytes;  /* reserved for M5b */
+} bs_shm_runtime;
+
+static bs_shm_runtime bs_shm;
 
 /* Help visibility modes (values are stored in bs_dir_cfg.help_mode). */
 enum bs_help_mode {
@@ -198,7 +273,17 @@ struct bs_dir_cfg {
     int forgive_form;           /* score credit on form-tier pass */
     int forgive_captcha;        /* score credit on captcha pass */
     const char *cookie_domain;  /* if set, Set-Cookie Domain= attribute */
+    apr_uint32_t flag_on_match; /* BotShieldFlagIP: bits to add on any hit */
+    int          flag_on_match_ttl;  /* entry TTL when flag_on_match fires */
 };
+
+/* Per-server config — holds SHM sizing before post-config runs. Only the
+ * main server's values are consulted; vhost-level overrides are logged
+ * and ignored because the SHM segment is global. */
+typedef struct {
+    apr_size_t shm_size;
+    int        flagged_capacity;
+} bs_server_cfg;
 
 /* --- Config lifecycle --- */
 
@@ -224,7 +309,18 @@ static void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->forgive_form    = BS_UNSET;
     cfg->forgive_captcha = BS_UNSET;
     cfg->cookie_domain   = NULL;
+    cfg->flag_on_match       = 0;
+    cfg->flag_on_match_ttl   = 0;
     return cfg;
+}
+
+static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
+{
+    (void)s;
+    bs_server_cfg *scfg = apr_pcalloc(p, sizeof(*scfg));
+    scfg->shm_size          = BS_DEFAULT_SHM_SIZE;
+    scfg->flagged_capacity  = BS_DEFAULT_FLAGGED_SLOTS;
+    return scfg;
 }
 
 static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
@@ -260,6 +356,12 @@ static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     out->forgive_form    = (add->forgive_form    == BS_UNSET) ? base->forgive_form    : add->forgive_form;
     out->forgive_captcha = (add->forgive_captcha == BS_UNSET) ? base->forgive_captcha : add->forgive_captcha;
     out->cookie_domain   = add->cookie_domain ? add->cookie_domain : base->cookie_domain;
+    /* Flag-on-match is additive: a more-specific scope that adds a flag
+     * is merged with any broader-scope flag, so an inner <Location> adds
+     * its flag without losing the outer. */
+    out->flag_on_match = base->flag_on_match | add->flag_on_match;
+    out->flag_on_match_ttl = add->flag_on_match_ttl
+                             ? add->flag_on_match_ttl : base->flag_on_match_ttl;
     return out;
 }
 
@@ -374,6 +476,79 @@ static const char *bs_set_forgive_captcha(cmd_parms *cmd, void *cfg_v, const cha
 {
     return bs_set_score_int("BotShieldForgivenessCaptcha",
         &((bs_dir_cfg *)cfg_v)->forgive_captcha, arg, cmd->pool);
+}
+
+/* Forward decl: defined below in the SHM section, used by the directive
+ * setter just beneath this comment. */
+static apr_uint32_t bs_parse_flag_names(apr_pool_t *p, const char *s,
+                                        const char **err);
+
+static const char *bs_set_shm_size(cmd_parms *cmd, void *dconf, const char *arg)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    /* Accept "N", "NK", "NM", "NG" (case-insensitive). */
+    char *end = NULL;
+    apr_int64_t n = apr_strtoi64(arg, &end, 10);
+    if (end == arg || n <= 0) {
+        return "BotShieldShmSize: expected a positive integer byte count";
+    }
+    apr_int64_t mult = 1;
+    if      (*end == 'K' || *end == 'k') mult = 1024;
+    else if (*end == 'M' || *end == 'm') mult = 1024 * 1024;
+    else if (*end == 'G' || *end == 'g') mult = 1024 * 1024 * 1024;
+    else if (*end != '\0') {
+        return apr_psprintf(cmd->pool,
+            "BotShieldShmSize: unknown suffix '%c'", *end);
+    }
+    apr_int64_t bytes = n * mult;
+    if (bytes < 128 * 1024 || bytes > 256LL * 1024 * 1024) {
+        return "BotShieldShmSize: must be between 128K and 256M";
+    }
+    scfg->shm_size = (apr_size_t)bytes;
+    return NULL;
+}
+
+static const char *bs_set_flagged_capacity(cmd_parms *cmd, void *dconf,
+                                           const char *arg)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    int n = atoi(arg);
+    if (n < BS_FLAGGED_MIN_SLOTS || n > BS_FLAGGED_MAX_SLOTS) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldFlaggedIPCapacity: must be between %d and %d",
+            BS_FLAGGED_MIN_SLOTS, BS_FLAGGED_MAX_SLOTS);
+    }
+    scfg->flagged_capacity = n;
+    return NULL;
+}
+
+/* BotShieldFlagIP <flag_name>[,<flag_name>...] [ttl_seconds]
+ * Any request that reaches this scope causes the client IP to be
+ * inserted (or merged) into the flagged-IP table with the named bits.
+ * Designed for explicit honeypot / scanner / test endpoints. */
+static const char *bs_set_flag_ip(cmd_parms *cmd, void *cfg_v,
+                                  const char *names, const char *ttl_str)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    const char *err = NULL;
+    apr_uint32_t bits = bs_parse_flag_names(cmd->pool, names, &err);
+    if (err) return apr_psprintf(cmd->pool, "BotShieldFlagIP: %s", err);
+    if (!bits) return "BotShieldFlagIP: no flag bits resolved";
+
+    int ttl = 3600;
+    if (ttl_str && *ttl_str) {
+        ttl = atoi(ttl_str);
+        if (ttl < 60 || ttl > 30 * 86400) {
+            return "BotShieldFlagIP: ttl must be 60..2592000 seconds";
+        }
+    }
+    cfg->flag_on_match     = bits;
+    cfg->flag_on_match_ttl = ttl;
+    return NULL;
 }
 
 /* Accept ".example.com" (leading dot for cross-subdomain) or "example.com"
@@ -656,14 +831,420 @@ static const bs_pow_algorithm *bs_find_algorithm(const char *name)
     return NULL;
 }
 
-/* Translate a cookie-rep flag bitmap into the minimum score the cookie
- * should carry regardless of forgiveness. Flags don't exist yet (E1/E4
- * will set them); until then this is always zero. Hooking the function
- * now keeps the forgiveness math honest from day one. */
+/* ======================================================================
+ * Shared memory: flagged-IP table (M5a) + Bloom reservations (M5b).
+ * ====================================================================== */
+
+/* SipHash-2-4 — DoS-resistant hash for the flagged-IP bucket index.
+ * Key is generated in post-config and lives in the SHM header, so
+ * attackers can't precompute colliding IPs to evict stored entries. */
+
+static inline apr_uint64_t bs_rotl64(apr_uint64_t x, int b)
+{
+    return (x << b) | (x >> (64 - b));
+}
+
+#define BS_SIPROUND() do {                                         \
+    v0 += v1; v1 = bs_rotl64(v1,13); v1 ^= v0; v0 = bs_rotl64(v0,32); \
+    v2 += v3; v3 = bs_rotl64(v3,16); v3 ^= v2;                       \
+    v0 += v3; v3 = bs_rotl64(v3,21); v3 ^= v0;                       \
+    v2 += v1; v1 = bs_rotl64(v1,17); v1 ^= v2; v2 = bs_rotl64(v2,32); \
+} while (0)
+
+static apr_uint64_t bs_siphash24(const unsigned char key[16],
+                                 const unsigned char *data, apr_size_t len)
+{
+    apr_uint64_t k0, k1;
+    memcpy(&k0, key,     8);
+    memcpy(&k1, key + 8, 8);
+
+    apr_uint64_t v0 = 0x736f6d6570736575ULL ^ k0;
+    apr_uint64_t v1 = 0x646f72616e646f6dULL ^ k1;
+    apr_uint64_t v2 = 0x6c7967656e657261ULL ^ k0;
+    apr_uint64_t v3 = 0x7465646279746573ULL ^ k1;
+
+    const unsigned char *end = data + (len - (len & 7));
+    for (; data != end; data += 8) {
+        apr_uint64_t m;
+        memcpy(&m, data, 8);
+        v3 ^= m;
+        BS_SIPROUND(); BS_SIPROUND();
+        v0 ^= m;
+    }
+
+    apr_uint64_t b = ((apr_uint64_t)len) << 56;
+    switch (len & 7) {
+        case 7: b |= ((apr_uint64_t)data[6]) << 48; /* fallthrough */
+        case 6: b |= ((apr_uint64_t)data[5]) << 40; /* fallthrough */
+        case 5: b |= ((apr_uint64_t)data[4]) << 32; /* fallthrough */
+        case 4: b |= ((apr_uint64_t)data[3]) << 24; /* fallthrough */
+        case 3: b |= ((apr_uint64_t)data[2]) << 16; /* fallthrough */
+        case 2: b |= ((apr_uint64_t)data[1]) <<  8; /* fallthrough */
+        case 1: b |= ((apr_uint64_t)data[0]);       /* fallthrough */
+        case 0: break;
+    }
+    v3 ^= b;
+    BS_SIPROUND(); BS_SIPROUND();
+    v0 ^= b;
+    v2 ^= 0xff;
+    BS_SIPROUND(); BS_SIPROUND(); BS_SIPROUND(); BS_SIPROUND();
+    return v0 ^ v1 ^ v2 ^ v3;
+}
+#undef BS_SIPROUND
+
+/* Parse r->useragent_ip into a 16-byte network-order buffer. IPv4
+ * becomes v6-mapped (::ffff:a.b.c.d) so the table is keyed uniformly.
+ * Returns 1 on success, 0 if the string is unparseable. */
+static int bs_parse_client_ip(const char *ip_str, unsigned char out[16])
+{
+    if (!ip_str || !*ip_str) return 0;
+    struct in_addr v4;
+    if (inet_pton(AF_INET, ip_str, &v4) == 1) {
+        memset(out, 0, 10);
+        out[10] = 0xff; out[11] = 0xff;
+        memcpy(out + 12, &v4, 4);
+        return 1;
+    }
+    struct in6_addr v6;
+    if (inet_pton(AF_INET6, ip_str, &v6) == 1) {
+        memcpy(out, &v6, 16);
+        return 1;
+    }
+    return 0;
+}
+
+/* --- SHM lifecycle ---
+ *
+ * post-config (server-wide) runs twice; we do real init on the second
+ * pass. Anonymous APR SHM is sufficient since Apache's children fork
+ * from the parent and inherit the mapping — no explicit attach needed
+ * in worker processes. Graceful restart rotates pconf, which cleans up
+ * the old segment and its mutex automatically.
+ *
+ * For file-backed SHM (needed when Apache is configured to use a
+ * non-fork MPM variant), apr_global_mutex_child_init is called from
+ * our child-init hook to re-attach. */
+
+static apr_status_t bs_shm_cleanup(void *unused)
+{
+    (void)unused;
+    /* apr_shm_destroy/mutex_destroy are driven by pool cleanups
+     * registered when we created them; nothing to do here beyond
+     * resetting the runtime pointers so a subsequent post-config
+     * starts fresh. */
+    memset(&bs_shm, 0, sizeof(bs_shm));
+    return APR_SUCCESS;
+}
+
+static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
+                          apr_pool_t *ptemp, server_rec *s)
+{
+    (void)plog; (void)ptemp;
+
+    /* Apache calls post-config twice; skip the first pass so we don't
+     * create the SHM segment and then immediately discard it. */
+    void *already;
+    apr_pool_userdata_get(&already, "bs_post_config_done",
+                          s->process->pool);
+    if (!already) {
+        apr_pool_userdata_set((const void *)1, "bs_post_config_done",
+                              apr_pool_cleanup_null,
+                              s->process->pool);
+        return OK;
+    }
+
+    bs_server_cfg *scfg = ap_get_module_config(s->module_config,
+                                               &botshield_module);
+
+    /* Compute layout: header + flagged table. Bloom buffers are reserved
+     * by leaving the remainder of the segment untouched; M5b will claim
+     * it without a re-allocation. */
+    apr_size_t header_bytes = sizeof(bs_shm_header);
+    apr_size_t table_bytes  = (apr_size_t)scfg->flagged_capacity
+                              * sizeof(bs_flagged_ip_slot);
+    apr_size_t min_bytes    = header_bytes + table_bytes;
+    if (scfg->shm_size < min_bytes) {
+        ap_log_error(APLOG_MARK, APLOG_ERR, 0, s,
+            "mod_botshield: BotShieldShmSize %" APR_SIZE_T_FMT
+            " is too small; needs at least %" APR_SIZE_T_FMT " bytes "
+            "for header + %d flagged-IP slots",
+            scfg->shm_size, min_bytes, scfg->flagged_capacity);
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    apr_status_t rv = apr_shm_create(&bs_shm.shm, scfg->shm_size,
+                                     NULL, pconf);
+    if (rv != APR_SUCCESS) {
+        char errbuf[128];
+        apr_strerror(rv, errbuf, sizeof(errbuf));
+        ap_log_error(APLOG_MARK, APLOG_ERR, rv, s,
+            "mod_botshield: apr_shm_create failed: %s", errbuf);
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    unsigned char *base = apr_shm_baseaddr_get(bs_shm.shm);
+    memset(base, 0, scfg->shm_size);
+
+    bs_shm.header = (bs_shm_header *)base;
+    bs_shm.header->magic            = BS_SHM_MAGIC;
+    bs_shm.header->format_version   = BS_SHM_FORMAT_VERSION;
+    bs_shm.header->flagged_capacity = (apr_uint32_t)scfg->flagged_capacity;
+    if (RAND_bytes(bs_shm.header->siphash_key,
+                   sizeof(bs_shm.header->siphash_key)) != 1) {
+        ap_log_error(APLOG_MARK, APLOG_ERR, 0, s,
+            "mod_botshield: RAND_bytes(siphash_key) failed");
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    bs_shm.flagged_table    = (bs_flagged_ip_slot *)(base + header_bytes);
+    bs_shm.flagged_capacity = scfg->flagged_capacity;
+    bs_shm.bloom_bufs[0]    = NULL;
+    bs_shm.bloom_bufs[1]    = NULL;
+    bs_shm.bloom_buf_bytes  = 0;
+
+    /* Global mutex protects the narrow insert/evict critical section.
+     * Reads don't take the lock — they use the slot seqlock. */
+    bs_shm.mutex_filename = apr_psprintf(pconf, "%s/botshield-mutex",
+                                         ap_runtime_dir_relative(pconf, ""));
+    rv = apr_global_mutex_create(&bs_shm.mutex, bs_shm.mutex_filename,
+                                 APR_LOCK_DEFAULT, pconf);
+    if (rv != APR_SUCCESS) {
+        char errbuf[128];
+        apr_strerror(rv, errbuf, sizeof(errbuf));
+        ap_log_error(APLOG_MARK, APLOG_ERR, rv, s,
+            "mod_botshield: apr_global_mutex_create failed: %s", errbuf);
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+#ifdef AP_NEED_SET_MUTEX_PERMS
+    rv = ap_unixd_set_global_mutex_perms(bs_shm.mutex);
+    if (rv != APR_SUCCESS) {
+        ap_log_error(APLOG_MARK, APLOG_ERR, rv, s,
+            "mod_botshield: set_global_mutex_perms failed");
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+#endif
+
+    apr_pool_cleanup_register(pconf, NULL, bs_shm_cleanup,
+                              apr_pool_cleanup_null);
+
+    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+        "mod_botshield: SHM ready: %" APR_SIZE_T_FMT " bytes, "
+        "flagged-IP capacity %d",
+        scfg->shm_size, scfg->flagged_capacity);
+    return OK;
+}
+
+static void bs_child_init(apr_pool_t *p, server_rec *s)
+{
+    if (!bs_shm.mutex) return;
+    apr_status_t rv = apr_global_mutex_child_init(&bs_shm.mutex,
+                                                  bs_shm.mutex_filename, p);
+    if (rv != APR_SUCCESS) {
+        ap_log_error(APLOG_MARK, APLOG_ERR, rv, s,
+            "mod_botshield: global_mutex_child_init failed");
+    }
+}
+
+/* --- Flagged-IP table operations ---
+ *
+ * Writes take the global mutex briefly, wrap the slot payload in a
+ * seqlock bump (odd → write → even), and probe up to BS_FLAGGED_PROBE_LIMIT
+ * slots for either an existing match, an empty slot, or a stale slot to
+ * reuse. Reads are lockless and use the seqlock to avoid torn fields.
+ *
+ * Eviction policy (simplest sufficient):
+ *   1. Exact-IP match inside the probe window → merge flags, refresh TTL.
+ *   2. Else an empty slot (flags == 0) → claim.
+ *   3. Else the first stale slot (expires_at < now) → reclaim.
+ *   4. Else the first slot encountered → overwrite (with a log-warning).
+ */
+
+static apr_uint32_t bs_flagged_bucket(const unsigned char ip[16])
+{
+    apr_uint64_t h = bs_siphash24(bs_shm.header->siphash_key, ip, 16);
+    return (apr_uint32_t)(h % bs_shm.flagged_capacity);
+}
+
+/* Write into a slot under seqlock protection. Caller must hold the
+ * global mutex. */
+static void bs_flagged_write_slot(bs_flagged_ip_slot *slot,
+                                  const unsigned char ip[16],
+                                  apr_uint32_t flags, apr_int64_t expires_at)
+{
+    apr_uint32_t v = apr_atomic_read32(&slot->version);
+    apr_atomic_set32(&slot->version, v | 1U);   /* begin: odd */
+    /* Ensure the version-odd store is visible before the payload stores. */
+    memcpy(slot->ip, ip, 16);
+    slot->flags      = flags;
+    slot->expires_at = expires_at;
+    /* Version-bump to even publishes the payload to readers. */
+    apr_atomic_set32(&slot->version, (v | 1U) + 1U);
+}
+
+static void bs_flagged_ip_add(request_rec *r,
+                              const unsigned char ip[16],
+                              apr_uint32_t flag_bits, int ttl_seconds)
+{
+    if (!bs_shm.flagged_table || !bs_shm.mutex) return;
+    if (!flag_bits) return;
+    if (ttl_seconds <= 0) ttl_seconds = 3600;
+
+    apr_int64_t now = (apr_int64_t)apr_time_sec(apr_time_now());
+    apr_int64_t expires_at = now + ttl_seconds;
+    apr_uint32_t base = bs_flagged_bucket(ip);
+
+    apr_status_t rv = apr_global_mutex_lock(bs_shm.mutex);
+    if (rv != APR_SUCCESS) {
+        ap_log_rerror(APLOG_MARK, APLOG_WARNING, rv, r,
+            "mod_botshield: flagged-IP mutex_lock failed; dropping flag");
+        return;
+    }
+
+    int victim = -1;
+    for (unsigned i = 0; i < BS_FLAGGED_PROBE_LIMIT; i++) {
+        apr_uint32_t idx = (base + i) % bs_shm.flagged_capacity;
+        bs_flagged_ip_slot *slot = &bs_shm.flagged_table[idx];
+
+        if (slot->flags && memcmp(slot->ip, ip, 16) == 0) {
+            /* Merge flags, refresh TTL to whichever is later. */
+            apr_uint32_t merged = slot->flags | flag_bits;
+            apr_int64_t later   = slot->expires_at > expires_at
+                                  ? slot->expires_at : expires_at;
+            bs_flagged_write_slot(slot, ip, merged, later);
+            apr_global_mutex_unlock(bs_shm.mutex);
+            return;
+        }
+        if (slot->flags == 0 && victim < 0) {
+            victim = (int)idx;
+            /* Empty is good; keep looking only in case an exact-IP
+             * match is further along — we want to merge, not duplicate. */
+        }
+        if (slot->expires_at > 0 && slot->expires_at < now && victim < 0) {
+            victim = (int)idx;
+        }
+    }
+
+    if (victim < 0) {
+        /* Probe window was fully occupied with live non-matching entries.
+         * Overwrite the first slot we looked at. Rate-limit the warning
+         * so a sustained attack doesn't flood logs. */
+        static apr_time_t last_warn = 0;
+        apr_time_t now_t = apr_time_now();
+        if (now_t - last_warn > apr_time_from_sec(60)) {
+            last_warn = now_t;
+            ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+                "mod_botshield: flagged-IP table probe saturated at bucket %u "
+                "(capacity %" APR_SIZE_T_FMT "); overwriting — consider "
+                "raising BotShieldFlaggedIPCapacity",
+                base, bs_shm.flagged_capacity);
+        }
+        victim = (int)base;
+    }
+
+    bs_flagged_write_slot(&bs_shm.flagged_table[victim], ip,
+                          flag_bits, expires_at);
+    apr_global_mutex_unlock(bs_shm.mutex);
+}
+
+/* Read under seqlock. Returns 1 if the IP has a live entry, writing
+ * the merged flag bitmap into *out_flags. 0 on miss or all retries
+ * skipped. Readers never block writers; a caught-mid-write slot is
+ * skipped (probe continues to the next). */
+static int bs_flagged_ip_lookup(const unsigned char ip[16],
+                                apr_uint32_t *out_flags)
+{
+    if (!bs_shm.flagged_table) return 0;
+
+    apr_int64_t now = (apr_int64_t)apr_time_sec(apr_time_now());
+    apr_uint32_t base = bs_flagged_bucket(ip);
+
+    for (unsigned i = 0; i < BS_FLAGGED_PROBE_LIMIT; i++) {
+        apr_uint32_t idx = (base + i) % bs_shm.flagged_capacity;
+        bs_flagged_ip_slot *slot = &bs_shm.flagged_table[idx];
+
+        apr_uint32_t v1, v2;
+        unsigned char  local_ip[16];
+        apr_uint32_t   local_flags;
+        apr_int64_t    local_expires;
+        int spins = 0;
+        for (;;) {
+            v1 = apr_atomic_read32(&slot->version);
+            if (v1 & 1U) {
+                if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
+                continue;
+            }
+            memcpy(local_ip, slot->ip, 16);
+            local_flags   = slot->flags;
+            local_expires = slot->expires_at;
+            v2 = apr_atomic_read32(&slot->version);
+            if (v1 == v2) break;
+            if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
+        }
+        if (v1 == ~0U) continue;           /* slot too contended */
+        if (local_flags == 0) continue;     /* empty */
+        if (local_expires < now) continue;  /* stale */
+        if (memcmp(local_ip, ip, 16) != 0) continue;
+
+        *out_flags = local_flags;
+        return 1;
+    }
+    return 0;
+}
+
+/* Translate a flag bitmap (from the cookie's flags field OR the flagged-
+ * IP table) into an additive score. M5a wires real numbers; bits are
+ * independent so an IP with multiple flags pays the sum. */
 static int bs_flag_penalty(apr_uint32_t flags)
 {
-    (void)flags;
-    return 0;  /* M4a placeholder; M5/E4 wire real bits here. */
+    int p = 0;
+    if (flags & BS_FLAG_HONEYPOT_HIT)     p += 60;
+    if (flags & BS_FLAG_SCANNER_PROBE)    p += 50;
+    if (flags & BS_FLAG_FAKE_CRAWLER)     p += 80;
+    if (flags & BS_FLAG_POW_FAIL_STREAK)  p += 30;
+    return p;
+}
+
+/* Parse a comma-joined flag-name list into a bit mask. Unknown tokens
+ * return an error message in *err; *err is NULL on success. */
+static const struct { const char *name; apr_uint32_t bit; } bs_flag_names[] = {
+    { "honeypot_hit",    BS_FLAG_HONEYPOT_HIT    },
+    { "scanner_probe",   BS_FLAG_SCANNER_PROBE   },
+    { "fake_crawler",    BS_FLAG_FAKE_CRAWLER    },
+    { "pow_fail_streak", BS_FLAG_POW_FAIL_STREAK },
+    { NULL, 0 }
+};
+
+static apr_uint32_t bs_parse_flag_names(apr_pool_t *p, const char *s,
+                                        const char **err)
+{
+    apr_uint32_t bits = 0;
+    *err = NULL;
+    const char *cur = s;
+    while (cur && *cur) {
+        const char *comma = strchr(cur, ',');
+        apr_size_t len = comma ? (apr_size_t)(comma - cur) : strlen(cur);
+        while (len && (*cur == ' ' || *cur == '\t')) { cur++; len--; }
+        while (len && (cur[len-1] == ' ' || cur[len-1] == '\t')) { len--; }
+
+        int matched = 0;
+        for (int i = 0; bs_flag_names[i].name; i++) {
+            apr_size_t nlen = strlen(bs_flag_names[i].name);
+            if (nlen == len &&
+                strncasecmp(cur, bs_flag_names[i].name, nlen) == 0) {
+                bits |= bs_flag_names[i].bit;
+                matched = 1;
+                break;
+            }
+        }
+        if (!matched) {
+            *err = apr_psprintf(p, "unknown flag name '%.*s' "
+                "(known: honeypot_hit, scanner_probe, fake_crawler, "
+                "pow_fail_streak)", (int)len, cur);
+            return 0;
+        }
+        cur = comma ? comma + 1 : NULL;
+    }
+    return bits;
 }
 
 /* Render the challenge as JSON for inline embedding in the interstitial.
@@ -1124,6 +1705,23 @@ static const command_rec bs_cmds[] = {
                  "If set, Set-Cookie for _bs_verified includes a Domain= "
                  "attribute so reputation follows users across subdomains. "
                  "Use '.example.com' for subdomain sharing. Default: host-only."),
+    AP_INIT_TAKE1("BotShieldShmSize", bs_set_shm_size, NULL,
+                 RSRC_CONF,
+                 "Total shared-memory budget for flagged-IP table and "
+                 "(future) Bloom filter. Accepts K/M/G suffixes. "
+                 "Default: 8M. Range: 128K..256M."),
+    AP_INIT_TAKE1("BotShieldFlaggedIPCapacity", bs_set_flagged_capacity, NULL,
+                 RSRC_CONF,
+                 "Slot count in the flagged-IP hash table. Each slot is "
+                 "32 bytes. Default: 50000 (≈ 1.6 MB). "
+                 "Range: 1024..1000000."),
+    AP_INIT_TAKE12("BotShieldFlagIP", bs_set_flag_ip, NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "Flag the client IP with one or more bits when a request "
+                 "hits this scope. Flag names: honeypot_hit, scanner_probe, "
+                 "fake_crawler, pow_fail_streak. Optional second argument "
+                 "is the TTL in seconds (default 3600). Use inside a "
+                 "<Location> for honeypot paths."),
     { NULL }
 };
 
@@ -1490,18 +2088,52 @@ static int bs_handler(request_rec *r)
      * doesn't exempt you from fresh request-level signals that might
      * have pushed you into a tier that requires a re-challenge. */
     bs_run_builtin_heuristics(r);
-    bs_request_score *score = bs_get_score(r, 0);
-    int heuristic_total = score ? score->total : 0;
 
-    /* effective_score composes three things: the per-request heuristic
-     * total, the cookie's accumulated rep score, and any flag-penalty
-     * floor that the cookie's flag bitmap implies (zero today; M5/E4
-     * will wire real bits). IP-level penalties from M5's flagged-IP
-     * table will add here when that lands. */
-    int cookie_score  = have_prior_rep ? prior_ch.rep.score : 0;
-    int flag_floor    = have_prior_rep ? bs_flag_penalty(prior_ch.rep.flags) : 0;
-    int effective     = heuristic_total + cookie_score + flag_floor;
-    bs_tier tier      = bs_decide_tier(cfg, effective);
+    /* Flagged-IP table (M5a): look up the client IP. Hits add the
+     * serious-event bitmap's penalty to effective_score, rollback-proof
+     * because the flag lives in SHM, not in the cookie. */
+    unsigned char client_ip[16];
+    int have_client_ip =
+        bs_parse_client_ip(r->useragent_ip, client_ip);
+    apr_uint32_t ip_flags = 0;
+    int ip_flag_penalty = 0;
+    if (have_client_ip &&
+        bs_flagged_ip_lookup(client_ip, &ip_flags)) {
+        ip_flag_penalty = bs_flag_penalty(ip_flags);
+        bs_score_add(r, ip_flag_penalty,
+                     /* ttl unused here — flag TTL lives in SHM */ 0,
+                     "flagged-ip");
+    }
+
+    /* Fetch the score struct *after* all per-request adds. Using create=1
+     * so a request with zero hits still gets a valid (empty) pointer and
+     * the log line prints reasons=[] consistently. */
+    bs_request_score *score = bs_get_score(r, 1);
+    int heuristic_total = score->total;
+
+    /* effective_score composes four things: the per-request heuristic
+     * total (already inclusive of the ip-flag penalty above), the
+     * cookie's accumulated rep score, and the flag-penalty floor the
+     * cookie's own flag bitmap implies. */
+    int cookie_score    = have_prior_rep ? prior_ch.rep.score : 0;
+    int cookie_flag_floor = have_prior_rep ? bs_flag_penalty(prior_ch.rep.flags) : 0;
+    int effective       = heuristic_total + cookie_score + cookie_flag_floor;
+    bs_tier tier        = bs_decide_tier(cfg, effective);
+
+    /* BotShieldFlagIP: if any scope the request matched sets flag bits,
+     * land them in the flagged-IP table now. Fires on every hit to the
+     * scope, so honeypot paths and scanner-trap paths should be reached
+     * only by actors that deserve the flag. */
+    if (cfg->flag_on_match && have_client_ip) {
+        bs_flagged_ip_add(r, client_ip, cfg->flag_on_match,
+                          cfg->flag_on_match_ttl
+                            ? cfg->flag_on_match_ttl : 3600);
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: flagged IP %s bits=0x%x ttl=%d scope=%s",
+            r->useragent_ip, (unsigned)cfg->flag_on_match,
+            cfg->flag_on_match_ttl ? cfg->flag_on_match_ttl : 3600,
+            r->uri);
+    }
 
     /* Happy path: score below the silent threshold → pass through.
      * If there's no cookie this means no cookie is ever issued —
@@ -1509,10 +2141,11 @@ static int bs_handler(request_rec *r)
     if (tier == BS_TIER_PASS) {
         ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
                       "mod_botshield: pass %s effective=%d "
-                      "(heuristic=%d cookie_score=%d flag_floor=%d) "
-                      "cookie_ok=%d",
+                      "(heuristic=%d cookie_score=%d cookie_flag_floor=%d "
+                      "ip_flag_penalty=%d ip_flags=0x%x) cookie_ok=%d",
                       r->uri, effective, heuristic_total, cookie_score,
-                      flag_floor, cookie_fully_ok);
+                      cookie_flag_floor, ip_flag_penalty, (unsigned)ip_flags,
+                      cookie_fully_ok);
         return DECLINED;
     }
 
@@ -1660,14 +2293,16 @@ static int bs_handler(request_rec *r)
 static void bs_register_hooks(apr_pool_t *p)
 {
     (void)p;
-    ap_hook_handler(bs_handler, NULL, NULL, APR_HOOK_FIRST);
+    ap_hook_post_config(bs_post_config, NULL, NULL, APR_HOOK_MIDDLE);
+    ap_hook_child_init (bs_child_init,  NULL, NULL, APR_HOOK_MIDDLE);
+    ap_hook_handler    (bs_handler,     NULL, NULL, APR_HOOK_FIRST);
 }
 
 AP_DECLARE_MODULE(botshield) = {
     STANDARD20_MODULE_STUFF,
     bs_create_dir_cfg,    /* per-directory config creator */
     bs_merge_dir_cfg,     /* per-directory config merger  */
-    NULL,                 /* per-server config creator    */
+    bs_create_server_cfg, /* per-server config creator    */
     NULL,                 /* per-server config merger     */
     bs_cmds,              /* config directives            */
     bs_register_hooks,    /* hook registration            */
