@@ -34,6 +34,7 @@
 #include "apr_thread_mutex.h"
 #include "apr_atomic.h"
 #include "unixd.h"
+#include "mod_watchdog.h"
 
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
@@ -47,6 +48,9 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
 
 module AP_MODULE_DECLARE_DATA botshield_module;
 
@@ -151,6 +155,19 @@ typedef struct {
 #define BS_FLAGGED_PROBE_LIMIT    10   /* linear probe depth */
 #define BS_FLAGGED_MAX_READ_SPINS 3    /* seqlock retry budget */
 
+/* Rotating Bloom filter (M5b). N=2 buffers with half-window rotation.
+ * Fixed 1% false-positive rate → ~9.6 bits/element, k=7 hash functions.
+ * If we ever need to tune FP, this is where it gets a directive. */
+#define BS_BLOOM_BITS_PER_IP      10      /* 9.6 rounded up */
+#define BS_BLOOM_K                7
+#define BS_DEFAULT_BLOOM_IPS      1000000 /* one week of a medium site */
+#define BS_DEFAULT_BLOOM_WINDOW   604800  /* 7 days in seconds */
+#define BS_BLOOM_MIN_IPS          1000
+#define BS_BLOOM_MAX_IPS          10000000
+#define BS_BLOOM_MIN_WINDOW       3600    /* 1 hour */
+#define BS_BLOOM_MAX_WINDOW       (30 * 86400)  /* 30 days */
+#define BS_FIRST_SIGHT_PENALTY    5
+
 /* Per-slot seqlock + payload. version bit 0 is a "write in progress"
  * marker: even = quiescent, odd = mid-write. Readers snapshot fields
  * between matching even versions. Slot size is 32 bytes (cache-line
@@ -168,11 +185,11 @@ typedef struct {
     apr_uint32_t  flagged_capacity; /* number of slots in the table */
     apr_uint32_t  _pad0;
     unsigned char siphash_key[16];  /* DoS-resistant hash key */
-    /* Reserved for M5b (kept here so layout stabilizes now): */
-    apr_uint32_t  bloom_active;     /* 0 or 1 */
-    apr_uint32_t  bloom_buf_bytes;  /* per-buffer size in bytes */
-    apr_int64_t   bloom_next_rotate;
-    apr_int64_t   _pad1;
+    apr_uint32_t  bloom_active;         /* 0 or 1 */
+    apr_uint32_t  bloom_buf_bytes;      /* per-buffer size in bytes */
+    apr_uint32_t  bloom_window_secs;    /* full window; rotations at half */
+    apr_uint32_t  _pad1;
+    apr_int64_t   bloom_next_rotate;    /* unix sec */
 } bs_shm_header;
 
 /* Module-global runtime pointer struct. Populated once in post-config;
@@ -281,9 +298,13 @@ struct bs_dir_cfg {
  * main server's values are consulted; vhost-level overrides are logged
  * and ignored because the SHM segment is global. */
 typedef struct {
-    apr_size_t shm_size;
-    int        flagged_capacity;
-    int        ipv6_prefix_bits;  /* 0..128; 64 = per-subscriber v6 key */
+    apr_size_t  shm_size;
+    int         flagged_capacity;
+    int         ipv6_prefix_bits;   /* 0..128; 64 = per-subscriber v6 key */
+    int         bloom_ips;          /* expected working-set size */
+    int         bloom_window_secs;  /* full window; rotation at window/2 */
+    const char *state_file;         /* NULL = persistence off */
+    int         state_save_interval;/* seconds; 0 = shutdown-only */
 } bs_server_cfg;
 
 /* --- Config lifecycle --- */
@@ -322,6 +343,10 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->shm_size          = BS_DEFAULT_SHM_SIZE;
     scfg->flagged_capacity  = BS_DEFAULT_FLAGGED_SLOTS;
     scfg->ipv6_prefix_bits  = 64;   /* /64 aggregation by default */
+    scfg->bloom_ips             = BS_DEFAULT_BLOOM_IPS;
+    scfg->bloom_window_secs     = BS_DEFAULT_BLOOM_WINDOW;
+    scfg->state_file            = NULL;
+    scfg->state_save_interval   = 300;   /* 5 min default when state file set */
     return scfg;
 }
 
@@ -940,6 +965,38 @@ static void bs_mask_ipv6_prefix(unsigned char ip[16], int prefix_bits)
     for (int i = full_bytes; i < 16; i++) ip[i] = 0;
 }
 
+static const char *bs_set_bloom_ips(cmd_parms *cmd, void *dconf,
+                                    const char *arg)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    int n = atoi(arg);
+    if (n < BS_BLOOM_MIN_IPS || n > BS_BLOOM_MAX_IPS) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldBloomIPs: must be between %d and %d",
+            BS_BLOOM_MIN_IPS, BS_BLOOM_MAX_IPS);
+    }
+    scfg->bloom_ips = n;
+    return NULL;
+}
+
+static const char *bs_set_bloom_window(cmd_parms *cmd, void *dconf,
+                                       const char *arg)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    int n = atoi(arg);
+    if (n < BS_BLOOM_MIN_WINDOW || n > BS_BLOOM_MAX_WINDOW) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldBloomWindow: must be between %d and %d seconds",
+            BS_BLOOM_MIN_WINDOW, BS_BLOOM_MAX_WINDOW);
+    }
+    scfg->bloom_window_secs = n;
+    return NULL;
+}
+
 static const char *bs_set_ipv6_prefix(cmd_parms *cmd, void *dconf,
                                       const char *arg)
 {
@@ -980,6 +1037,22 @@ static apr_status_t bs_shm_cleanup(void *unused)
     return APR_SUCCESS;
 }
 
+/* Context struct used by the M6 save-on-shutdown pool cleanup. Full
+ * definition is here so post_config can sizeof() it; the implementation
+ * (bs_state_load/save/cleanup) lives further down where the flagged-IP
+ * slot type and Bloom buffers are already in scope. */
+typedef struct bs_state_cleanup_ctx {
+    apr_pool_t *pool;
+    server_rec *server;
+    const char *path;
+} bs_state_cleanup_ctx;
+
+static void          bs_state_load(apr_pool_t *p, server_rec *s,
+                                   const char *path);
+static apr_status_t  bs_state_cleanup(void *data);
+static apr_status_t  bs_watchdog_save_cb(int state, void *data,
+                                         apr_pool_t *pool);
+
 static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                           apr_pool_t *ptemp, server_rec *s)
 {
@@ -1000,19 +1073,27 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     bs_server_cfg *scfg = ap_get_module_config(s->module_config,
                                                &botshield_module);
 
-    /* Compute layout: header + flagged table. Bloom buffers are reserved
-     * by leaving the remainder of the segment untouched; M5b will claim
-     * it without a re-allocation. */
+    /* Compute SHM layout: header + flagged-IP table + two Bloom buffers
+     * at the tail. Each Bloom buffer is sized to hit ~1% FP at the
+     * configured capacity (10 bits/IP, rounded up to a multiple of 8
+     * so we can atomic-OR on aligned u64 slots). */
     apr_size_t header_bytes = sizeof(bs_shm_header);
     apr_size_t table_bytes  = (apr_size_t)scfg->flagged_capacity
                               * sizeof(bs_flagged_ip_slot);
-    apr_size_t min_bytes    = header_bytes + table_bytes;
-    if (scfg->shm_size < min_bytes) {
+
+    apr_size_t bloom_bits   = (apr_size_t)scfg->bloom_ips
+                              * BS_BLOOM_BITS_PER_IP;
+    apr_size_t bloom_bytes  = (bloom_bits + 63) / 64 * 8;   /* u64-aligned */
+    apr_size_t total_bytes  = header_bytes + table_bytes + 2 * bloom_bytes;
+
+    if (scfg->shm_size < total_bytes) {
         ap_log_error(APLOG_MARK, APLOG_ERR, 0, s,
             "mod_botshield: BotShieldShmSize %" APR_SIZE_T_FMT
             " is too small; needs at least %" APR_SIZE_T_FMT " bytes "
-            "for header + %d flagged-IP slots",
-            scfg->shm_size, min_bytes, scfg->flagged_capacity);
+            "(header + %d flagged-IP slots + 2x %" APR_SIZE_T_FMT
+            "-byte Bloom buffers for %d IPs)",
+            scfg->shm_size, total_bytes, scfg->flagged_capacity,
+            bloom_bytes, scfg->bloom_ips);
         return HTTP_INTERNAL_SERVER_ERROR;
     }
 
@@ -1042,9 +1123,15 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
 
     bs_shm.flagged_table    = (bs_flagged_ip_slot *)(base + header_bytes);
     bs_shm.flagged_capacity = scfg->flagged_capacity;
-    bs_shm.bloom_bufs[0]    = NULL;
-    bs_shm.bloom_bufs[1]    = NULL;
-    bs_shm.bloom_buf_bytes  = 0;
+    bs_shm.bloom_bufs[0]    = base + header_bytes + table_bytes;
+    bs_shm.bloom_bufs[1]    = bs_shm.bloom_bufs[0] + bloom_bytes;
+    bs_shm.bloom_buf_bytes  = bloom_bytes;
+
+    bs_shm.header->bloom_active        = 0;
+    bs_shm.header->bloom_buf_bytes     = (apr_uint32_t)bloom_bytes;
+    bs_shm.header->bloom_window_secs   = (apr_uint32_t)scfg->bloom_window_secs;
+    apr_int64_t now = (apr_int64_t)apr_time_sec(apr_time_now());
+    bs_shm.header->bloom_next_rotate   = now + scfg->bloom_window_secs / 2;
 
     /* Global mutex protects the narrow insert/evict critical section.
      * Reads don't take the lock — they use the slot seqlock. */
@@ -1073,8 +1160,74 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
 
     ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
         "mod_botshield: SHM ready: %" APR_SIZE_T_FMT " bytes, "
-        "flagged-IP capacity %d",
-        scfg->shm_size, scfg->flagged_capacity);
+        "flagged-IP capacity %d, "
+        "Bloom %d IPs per %d s (2x %" APR_SIZE_T_FMT " bytes)",
+        scfg->shm_size, scfg->flagged_capacity,
+        scfg->bloom_ips, scfg->bloom_window_secs, bloom_bytes);
+
+    /* Persistence (M6): load after SHM is ready, register save on
+     * graceful shutdown. A missing or malformed file is non-fatal;
+     * bs_state_load logs NOTICE and returns without touching SHM. */
+    if (scfg->state_file) {
+        bs_state_load(pconf, s, scfg->state_file);
+        bs_state_cleanup_ctx *ctx = apr_palloc(pconf, sizeof(*ctx));
+        ctx->pool   = pconf;
+        ctx->server = s;
+        ctx->path   = scfg->state_file;
+        apr_pool_cleanup_register(pconf, ctx, bs_state_cleanup,
+                                  apr_pool_cleanup_null);
+
+        /* Optional periodic save via mod_watchdog. Soft dependency —
+         * if mod_watchdog isn't loaded we degrade to shutdown-only
+         * with a NOTICE. This is "normal degraded mode," not an
+         * error; the graceful-shutdown save still runs either way. */
+        if (scfg->state_save_interval > 0) {
+            APR_OPTIONAL_FN_TYPE(ap_watchdog_get_instance) *fn_get =
+                APR_RETRIEVE_OPTIONAL_FN(ap_watchdog_get_instance);
+            APR_OPTIONAL_FN_TYPE(ap_watchdog_register_callback) *fn_reg =
+                APR_RETRIEVE_OPTIONAL_FN(ap_watchdog_register_callback);
+            if (fn_get && fn_reg) {
+                ap_watchdog_t *wd = NULL;
+                apr_status_t wrv = fn_get(&wd, "mod_botshield_state",
+                                          0 /* not parent-only */,
+                                          1 /* singleton */, pconf);
+                if (wrv == APR_SUCCESS && wd) {
+                    apr_interval_time_t ival =
+                        apr_time_from_sec(scfg->state_save_interval);
+                    wrv = fn_reg(wd, ival, ctx, bs_watchdog_save_cb);
+                } else if (wrv == APR_SUCCESS) {
+                    /* Docs say fn_get returns success + valid ptr or
+                     * an error code, but be defensive. */
+                    wrv = APR_EGENERAL;
+                }
+                if (wrv == APR_SUCCESS) {
+                    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+                        "mod_botshield: periodic state save enabled via "
+                        "mod_watchdog every %d s",
+                        scfg->state_save_interval);
+                } else {
+                    ap_log_error(APLOG_MARK, APLOG_WARNING, wrv, s,
+                        "mod_botshield: watchdog registration failed; "
+                        "state saves on graceful shutdown only");
+                }
+            } else {
+                ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+                    "mod_botshield: mod_watchdog not loaded; periodic "
+                    "state saves disabled (graceful shutdown save still "
+                    "runs). Load mod_watchdog and keep "
+                    "BotShieldStateSaveInterval set to enable periodic "
+                    "saves.");
+            }
+        } else {
+            ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+                "mod_botshield: BotShieldStateSaveInterval=0; state saves "
+                "on graceful shutdown only");
+        }
+    } else {
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+            "mod_botshield: BotShieldStateFile not set; state is in-memory "
+            "only and will reset on restart");
+    }
     return OK;
 }
 
@@ -1233,6 +1386,525 @@ static int bs_flagged_ip_lookup(const unsigned char ip[16],
         return 1;
     }
     return 0;
+}
+
+/* --- Rotating Bloom filter (M5b) ---
+ *
+ * Two buffers share the same hash geometry. Writes go to the buffer
+ * the active_index points at; queries check each buffer independently
+ * and OR the results so "seen" means "fully present in A or fully
+ * present in B" (not the weaker "each bit present in A or B"). Rotation
+ * is driven by inserts (rotate-on-insert) and optionally by mod_watchdog
+ * for low-traffic freshness — a CAS on bloom_next_rotate serializes the
+ * rotation across processes without a lock. */
+
+/* Compute k bit indices using SipHash + Kirsch-Mitzenmacher double
+ * hashing: hash once to get h1, salt and re-hash for h2, then generate
+ * each of the k indices as (h1 + i*h2) mod m_bits. */
+static void bs_bloom_indices(const unsigned char ip[16],
+                             apr_uint32_t *out, apr_size_t m_bits)
+{
+    apr_uint64_t h1 = bs_siphash24(bs_shm.header->siphash_key, ip, 16);
+    unsigned char salted[16];
+    memcpy(salted, ip, 16);
+    salted[0] ^= 0x9e;   /* domain separator for the second hash */
+    apr_uint64_t h2 = bs_siphash24(bs_shm.header->siphash_key,
+                                   salted, 16);
+    for (int i = 0; i < BS_BLOOM_K; i++) {
+        out[i] = (apr_uint32_t)((h1 + (apr_uint64_t)i * h2) % m_bits);
+    }
+}
+
+/* Single-winner rotation: CAS bloom_next_rotate from its current value
+ * to now+window/2. The winner memsets the buffer about to become active
+ * and flips bloom_active. Losers return without rotating. Idempotent
+ * across the process group. */
+static void bs_bloom_rotate_if_due(apr_int64_t now_sec)
+{
+    if (!bs_shm.bloom_bufs[0]) return;
+    apr_int64_t due =
+        (apr_int64_t)apr_atomic_read64(
+            (apr_uint64_t *)&bs_shm.header->bloom_next_rotate);
+    if (now_sec < due) return;
+
+    apr_int64_t next = now_sec +
+        (apr_int64_t)bs_shm.header->bloom_window_secs / 2;
+    apr_uint64_t prev = apr_atomic_cas64(
+        (apr_uint64_t *)&bs_shm.header->bloom_next_rotate,
+        (apr_uint64_t)next, (apr_uint64_t)due);
+    if ((apr_int64_t)prev != due) return;   /* another worker rotated */
+
+    apr_uint32_t old_active = apr_atomic_read32(&bs_shm.header->bloom_active);
+    apr_uint32_t new_active = old_active ^ 1U;
+    /* Clear the buffer that's about to start accepting writes. It
+     * currently holds the *oldest* data (~window/2 to window old); this
+     * zero is what ages that cohort out. */
+    memset(bs_shm.bloom_bufs[new_active], 0, bs_shm.bloom_buf_bytes);
+    apr_atomic_set32(&bs_shm.header->bloom_active, new_active);
+}
+
+static void bs_bloom_add(const unsigned char ip[16])
+{
+    if (!bs_shm.bloom_bufs[0]) return;
+    bs_bloom_rotate_if_due((apr_int64_t)apr_time_sec(apr_time_now()));
+
+    apr_size_t m_bits = (apr_size_t)bs_shm.bloom_buf_bytes * 8;
+    apr_uint32_t indices[BS_BLOOM_K];
+    bs_bloom_indices(ip, indices, m_bits);
+
+    apr_uint32_t active = apr_atomic_read32(&bs_shm.header->bloom_active);
+    unsigned char *buf = bs_shm.bloom_bufs[active & 1U];
+    for (int i = 0; i < BS_BLOOM_K; i++) {
+        apr_uint32_t bit_idx  = indices[i];
+        apr_size_t   byte_idx = bit_idx / 8;
+        unsigned char mask    = (unsigned char)(1U << (bit_idx % 8));
+        __atomic_or_fetch(&buf[byte_idx], mask, __ATOMIC_RELAXED);
+    }
+}
+
+/* Returns 1 if the IP's bits are fully present in buffer A or fully
+ * present in buffer B. Lockless; plain atomic loads on bit slots. */
+static int bs_bloom_seen(const unsigned char ip[16])
+{
+    if (!bs_shm.bloom_bufs[0]) return 0;
+    apr_size_t m_bits = (apr_size_t)bs_shm.bloom_buf_bytes * 8;
+    apr_uint32_t indices[BS_BLOOM_K];
+    bs_bloom_indices(ip, indices, m_bits);
+
+    int in_a = 1, in_b = 1;
+    for (int i = 0; i < BS_BLOOM_K; i++) {
+        apr_uint32_t bit_idx  = indices[i];
+        apr_size_t   byte_idx = bit_idx / 8;
+        unsigned char mask    = (unsigned char)(1U << (bit_idx % 8));
+        unsigned char a = __atomic_load_n(&bs_shm.bloom_bufs[0][byte_idx],
+                                          __ATOMIC_RELAXED);
+        unsigned char b = __atomic_load_n(&bs_shm.bloom_bufs[1][byte_idx],
+                                          __ATOMIC_RELAXED);
+        if (!(a & mask)) in_a = 0;
+        if (!(b & mask)) in_b = 0;
+        if (!in_a && !in_b) return 0;
+    }
+    return in_a || in_b;
+}
+
+/* --- State persistence (M6) ---
+ *
+ * Narrow, boring format. Goal: survive graceful restart. Crashes lose
+ * state since last save. Dimension mismatches, bad checksums, missing
+ * file: all "start fresh," never fatal.
+ *
+ * File layout (little-endian, x86-64-native):
+ *
+ *   header    4B magic = 'BSHD'
+ *             4B format_version (= 1)
+ *             8B saved_at (unix sec)
+ *            16B siphash_key (so restored flagged entries hash to the
+ *                same buckets on restart — otherwise every entry
+ *                becomes unfindable even though its bytes are preserved)
+ *   flagged   4B capacity
+ *             capacity * sizeof(bs_flagged_ip_slot)  bytes
+ *   bloom     4B buf_bytes
+ *             4B active_index
+ *             8B next_rotate_at
+ *             buf_bytes  (buffer 0 raw)
+ *             buf_bytes  (buffer 1 raw)
+ *   trailer   8B FNV-1a-64 over all preceding bytes
+ *
+ * This format is not cross-architecture portable. Fine — state files
+ * belong to a deployment and don't travel between machines.
+ *
+ * Format_version is the only forward-compat knob. Bumping it means
+ * older files are ignored at load (fresh start, logged). No migration
+ * code; files are ephemeral enough to re-acquire. */
+
+#define BS_STATE_MAGIC            0x44485342U      /* 'BSHD' little-endian */
+#define BS_STATE_FORMAT_VERSION   1
+#define BS_STATE_MAX_AGE_SECS     (14 * 86400)     /* discard anything older */
+
+static apr_uint64_t bs_fnv64(apr_uint64_t h, const unsigned char *data,
+                             apr_size_t len)
+{
+    for (apr_size_t i = 0; i < len; i++) {
+        h ^= data[i];
+        h *= 0x100000001b3ULL;
+    }
+    return h;
+}
+#define BS_FNV64_SEED 0xcbf29ce484222325ULL
+
+/* Slurp a whole file into a freshly-allocated buffer. Returns NULL on
+ * any error; *out_len is valid only on success. Used by load. */
+static unsigned char *bs_state_read_all(apr_pool_t *p, const char *path,
+                                        apr_size_t *out_len,
+                                        const char **err)
+{
+    apr_file_t *f = NULL;
+    apr_status_t rv = apr_file_open(&f, path,
+                                    APR_FOPEN_READ | APR_FOPEN_BINARY,
+                                    APR_OS_DEFAULT, p);
+    if (rv != APR_SUCCESS) {
+        *err = (APR_STATUS_IS_ENOENT(rv)) ? "no prior state file"
+                                          : "cannot open state file";
+        return NULL;
+    }
+    apr_finfo_t info;
+    rv = apr_file_info_get(&info, APR_FINFO_SIZE, f);
+    if (rv != APR_SUCCESS || info.size <= 0 ||
+        info.size > (apr_off_t)(256 * 1024 * 1024)) {
+        apr_file_close(f);
+        *err = "bad size";
+        return NULL;
+    }
+    unsigned char *buf = apr_palloc(p, (apr_size_t)info.size);
+    apr_size_t want = (apr_size_t)info.size;
+    rv = apr_file_read(f, buf, &want);
+    apr_file_close(f);
+    if (rv != APR_SUCCESS || want != (apr_size_t)info.size) {
+        *err = "short read";
+        return NULL;
+    }
+    *out_len = want;
+    return buf;
+}
+
+/* Load a state file into the running SHM. Policy: any error is a clean
+ * "start fresh" — we log NOTICE and return. No error is fatal. */
+static void bs_state_load(apr_pool_t *p, server_rec *s, const char *path)
+{
+    const char *err = NULL;
+    apr_size_t len = 0;
+    unsigned char *buf = bs_state_read_all(p, path, &len, &err);
+    if (!buf) {
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+            "mod_botshield: state file %s: %s (starting fresh)",
+            path, err ? err : "unavailable");
+        return;
+    }
+
+    /* Minimum size: header (16) + siphash key (16) + flagged cap (4) +
+     * bloom header (16) + trailer (8). */
+    if (len < 60) {
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+            "mod_botshield: state file %s too short (%" APR_SIZE_T_FMT
+            " bytes); starting fresh", path, len);
+        return;
+    }
+
+    /* Verify trailer fnv64 over all preceding bytes. */
+    apr_uint64_t want_fnv;
+    memcpy(&want_fnv, buf + len - 8, 8);
+    apr_uint64_t got_fnv = bs_fnv64(BS_FNV64_SEED, buf, len - 8);
+    if (want_fnv != got_fnv) {
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+            "mod_botshield: state file %s checksum mismatch; starting fresh",
+            path);
+        return;
+    }
+
+    unsigned char *p_cur = buf;
+    unsigned char *p_end = buf + len - 8;
+
+    /* Header */
+    apr_uint32_t magic, version;
+    apr_int64_t  saved_at;
+    memcpy(&magic,    p_cur, 4);  p_cur += 4;
+    memcpy(&version,  p_cur, 4);  p_cur += 4;
+    memcpy(&saved_at, p_cur, 8);  p_cur += 8;
+    if (magic != BS_STATE_MAGIC) {
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+            "mod_botshield: state file %s bad magic; starting fresh", path);
+        return;
+    }
+    if (version != BS_STATE_FORMAT_VERSION) {
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+            "mod_botshield: state file %s version %u (expected %u); "
+            "starting fresh", path, version, BS_STATE_FORMAT_VERSION);
+        return;
+    }
+    apr_int64_t now = (apr_int64_t)apr_time_sec(apr_time_now());
+    apr_int64_t age = now - saved_at;
+    if (age < 0 || age > BS_STATE_MAX_AGE_SECS) {
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+            "mod_botshield: state file %s is %" APR_INT64_T_FMT " s old; "
+            "starting fresh", path, age);
+        return;
+    }
+
+    /* SipHash key. Restoring this makes the already-randomized key from
+     * post-config a no-op — exactly what we want, because the flagged-IP
+     * entries we're about to copy were bucket-indexed under the saved
+     * key. Without this restore, the entries would live in "wrong"
+     * buckets on restart and lookups would miss. */
+    if (p_end - p_cur < (ptrdiff_t)sizeof(bs_shm.header->siphash_key)) {
+        goto corrupt;
+    }
+    memcpy(bs_shm.header->siphash_key, p_cur,
+           sizeof(bs_shm.header->siphash_key));
+    p_cur += sizeof(bs_shm.header->siphash_key);
+
+    /* Flagged section */
+    if (p_end - p_cur < 4) { goto corrupt; }
+    apr_uint32_t saved_cap;
+    memcpy(&saved_cap, p_cur, 4); p_cur += 4;
+    if (saved_cap != (apr_uint32_t)bs_shm.flagged_capacity) {
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+            "mod_botshield: state file %s flagged-IP capacity %u != "
+            "current %" APR_SIZE_T_FMT "; starting fresh",
+            path, saved_cap, bs_shm.flagged_capacity);
+        return;
+    }
+    apr_size_t flagged_bytes = (apr_size_t)saved_cap * sizeof(bs_flagged_ip_slot);
+    if ((apr_size_t)(p_end - p_cur) < flagged_bytes) { goto corrupt; }
+    /* Copy flagged slots verbatim, dropping any whose expires_at has already
+     * passed and resetting each slot's seqlock version to 0 so live readers
+     * see a clean "fresh slot" state. */
+    memcpy(bs_shm.flagged_table, p_cur, flagged_bytes);
+    p_cur += flagged_bytes;
+    int kept = 0, dropped = 0;
+    for (apr_size_t i = 0; i < bs_shm.flagged_capacity; i++) {
+        bs_flagged_ip_slot *slot = &bs_shm.flagged_table[i];
+        slot->version = 0;
+        if (slot->flags == 0) continue;
+        if (slot->expires_at < now) {
+            slot->flags = 0;
+            memset(slot->ip, 0, 16);
+            slot->expires_at = 0;
+            dropped++;
+        } else {
+            kept++;
+        }
+    }
+
+    /* Bloom section */
+    if (p_end - p_cur < 16) { goto corrupt; }
+    apr_uint32_t saved_buf_bytes, saved_active;
+    apr_int64_t  saved_next_rotate;
+    memcpy(&saved_buf_bytes,  p_cur, 4); p_cur += 4;
+    memcpy(&saved_active,     p_cur, 4); p_cur += 4;
+    memcpy(&saved_next_rotate, p_cur, 8); p_cur += 8;
+    if (saved_buf_bytes != (apr_uint32_t)bs_shm.bloom_buf_bytes) {
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+            "mod_botshield: state file %s bloom buf_bytes %u != "
+            "current %" APR_SIZE_T_FMT "; flagged loaded, bloom fresh",
+            path, saved_buf_bytes, bs_shm.bloom_buf_bytes);
+        goto done_log;
+    }
+    if ((apr_size_t)(p_end - p_cur) < 2 * saved_buf_bytes) { goto corrupt; }
+    memcpy(bs_shm.bloom_bufs[0], p_cur, saved_buf_bytes);
+    p_cur += saved_buf_bytes;
+    memcpy(bs_shm.bloom_bufs[1], p_cur, saved_buf_bytes);
+    p_cur += saved_buf_bytes;
+    apr_atomic_set32(&bs_shm.header->bloom_active, saved_active & 1U);
+    bs_shm.header->bloom_next_rotate = saved_next_rotate;
+
+done_log:
+    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+        "mod_botshield: state loaded from %s (age %" APR_INT64_T_FMT " s): "
+        "flagged kept %d, dropped-stale %d, bloom buffers restored",
+        path, age, kept, dropped);
+    return;
+
+corrupt:
+    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+        "mod_botshield: state file %s truncated past header; starting fresh",
+        path);
+}
+
+/* fsync the directory containing `path` so the post-rename directory
+ * entry is durable on crash/power-loss. APR doesn't expose a
+ * directory-fsync helper; fall back to plain POSIX open+fsync+close.
+ * Errors are logged at INFO and non-fatal — the rename already
+ * succeeded, and most filesystems flush the entry in time anyway. */
+static void bs_fsync_parent_dir(apr_pool_t *p, server_rec *s,
+                                const char *path)
+{
+    char *dir = apr_pstrdup(p, path);
+    char *slash = strrchr(dir, '/');
+    if (!slash) return;
+    if (slash == dir) dir[1] = '\0';   /* "/state.bin" → "/" */
+    else              *slash = '\0';
+    int fd = open(dir, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        ap_log_error(APLOG_MARK, APLOG_INFO, APR_FROM_OS_ERROR(errno), s,
+            "mod_botshield: state save: cannot open '%s' for fsync", dir);
+        return;
+    }
+    if (fsync(fd) < 0) {
+        ap_log_error(APLOG_MARK, APLOG_INFO, APR_FROM_OS_ERROR(errno), s,
+            "mod_botshield: state save: fsync('%s') failed", dir);
+    }
+    close(fd);
+}
+
+/* Write the current SHM contents to `path` atomically (write to .tmp,
+ * fsync file, rename, fsync parent dir). Called at graceful shutdown
+ * via pool cleanup. Any error is logged at WARNING but never fatal.
+ *
+ * Concurrency: the flagged-IP table is serialized under the global
+ * mutex while we take the snapshot, so we can't capture a slot that's
+ * mid-write. (A racing writer otherwise leaves the slot with version
+ * odd + partially-written IP/flags; loading that would reset version
+ * to 0 and present the half-written state as legitimately authored.)
+ * The Bloom buffers are byte arrays mutated by single-byte atomic OR;
+ * individual byte reads are torn-free, so a plain memcpy captures a
+ * well-defined per-byte snapshot with no lock needed. */
+static apr_status_t bs_state_save(apr_pool_t *p, server_rec *s,
+                                  const char *path)
+{
+    apr_size_t flagged_bytes = bs_shm.flagged_capacity
+                               * sizeof(bs_flagged_ip_slot);
+    apr_size_t bloom_bytes   = bs_shm.bloom_buf_bytes;
+    apr_size_t key_bytes     = sizeof(bs_shm.header->siphash_key);
+    apr_size_t total = 4 + 4 + 8                    /* header */
+                     + key_bytes                    /* siphash key */
+                     + 4 + flagged_bytes            /* flagged */
+                     + 4 + 4 + 8 + 2 * bloom_bytes  /* bloom */
+                     + 8;                           /* fnv */
+
+    unsigned char *buf = apr_palloc(p, total);
+    unsigned char *pc  = buf;
+
+    apr_uint32_t magic   = BS_STATE_MAGIC;
+    apr_uint32_t version = BS_STATE_FORMAT_VERSION;
+    apr_int64_t  now     = (apr_int64_t)apr_time_sec(apr_time_now());
+    memcpy(pc, &magic,   4); pc += 4;
+    memcpy(pc, &version, 4); pc += 4;
+    memcpy(pc, &now,     8); pc += 8;
+    memcpy(pc, bs_shm.header->siphash_key, key_bytes); pc += key_bytes;
+
+    apr_uint32_t cap = (apr_uint32_t)bs_shm.flagged_capacity;
+    memcpy(pc, &cap, 4); pc += 4;
+
+    /* Serialize the flagged-IP copy against bs_flagged_ip_add's
+     * writer. Without the lock, a concurrent add's odd-version mid-
+     * state can be captured; load resets version to 0 and ends up
+     * publishing a logically-forged slot. */
+    if (bs_shm.mutex) {
+        apr_status_t lr = apr_global_mutex_lock(bs_shm.mutex);
+        if (lr != APR_SUCCESS) {
+            ap_log_error(APLOG_MARK, APLOG_WARNING, lr, s,
+                "mod_botshield: state save: could not lock mutex; "
+                "skipping save to avoid writing an inconsistent snapshot");
+            return lr;
+        }
+    }
+    memcpy(pc, bs_shm.flagged_table, flagged_bytes);
+    if (bs_shm.mutex) apr_global_mutex_unlock(bs_shm.mutex);
+    pc += flagged_bytes;
+
+    apr_uint32_t bb = (apr_uint32_t)bs_shm.bloom_buf_bytes;
+    apr_uint32_t act = apr_atomic_read32(&bs_shm.header->bloom_active);
+    apr_int64_t  nxt = bs_shm.header->bloom_next_rotate;
+    memcpy(pc, &bb,  4); pc += 4;
+    memcpy(pc, &act, 4); pc += 4;
+    memcpy(pc, &nxt, 8); pc += 8;
+    memcpy(pc, bs_shm.bloom_bufs[0], bb); pc += bb;
+    memcpy(pc, bs_shm.bloom_bufs[1], bb); pc += bb;
+
+    apr_uint64_t fnv = bs_fnv64(BS_FNV64_SEED, buf, pc - buf);
+    memcpy(pc, &fnv, 8); pc += 8;
+    /* pc - buf == total, by construction. */
+
+    /* Atomic write: .tmp then rename. */
+    const char *tmp_path = apr_psprintf(p, "%s.tmp", path);
+    apr_file_t *f = NULL;
+    apr_status_t rv = apr_file_open(&f, tmp_path,
+        APR_FOPEN_WRITE | APR_FOPEN_CREATE | APR_FOPEN_TRUNCATE
+          | APR_FOPEN_BINARY,
+        APR_FPROT_UREAD | APR_FPROT_UWRITE, p);
+    if (rv != APR_SUCCESS) {
+        ap_log_error(APLOG_MARK, APLOG_WARNING, rv, s,
+            "mod_botshield: state save: cannot open %s for writing",
+            tmp_path);
+        return rv;
+    }
+    apr_size_t want = total;
+    rv = apr_file_write(f, buf, &want);
+    if (rv == APR_SUCCESS && want == total) {
+        rv = apr_file_sync(f);
+    }
+    apr_file_close(f);
+    if (rv != APR_SUCCESS || want != total) {
+        ap_log_error(APLOG_MARK, APLOG_WARNING, rv, s,
+            "mod_botshield: state save: write/fsync failed");
+        apr_file_remove(tmp_path, p);
+        return rv;
+    }
+    rv = apr_file_rename(tmp_path, path, p);
+    if (rv != APR_SUCCESS) {
+        ap_log_error(APLOG_MARK, APLOG_WARNING, rv, s,
+            "mod_botshield: state save: rename %s -> %s failed",
+            tmp_path, path);
+        apr_file_remove(tmp_path, p);
+        return rv;
+    }
+    /* fsync the parent directory so the new directory entry is durable
+     * across a crash/power-loss before the next periodic flush. Without
+     * this, some filesystems can lose the rename even though the file
+     * contents are already on disk. */
+    bs_fsync_parent_dir(p, s, path);
+
+    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+        "mod_botshield: state saved to %s (%" APR_SIZE_T_FMT " bytes)",
+        path, total);
+    return APR_SUCCESS;
+}
+
+/* Pool cleanup trampoline. We stash the path in the cleanup data so
+ * the callback can find it; the pool owns the string's memory. The
+ * struct is defined up near post_config where it's first used. */
+static apr_status_t bs_state_cleanup(void *data)
+{
+    bs_state_cleanup_ctx *ctx = data;
+    if (!bs_shm.shm || !bs_shm.flagged_table || !bs_shm.bloom_bufs[0]) {
+        return APR_SUCCESS;   /* post-config never completed; nothing to save */
+    }
+    bs_state_save(ctx->pool, ctx->server, ctx->path);
+    return APR_SUCCESS;
+}
+
+static const char *bs_set_state_file(cmd_parms *cmd, void *dconf,
+                                     const char *arg)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    if (!arg || !*arg) return "BotShieldStateFile requires a path";
+    scfg->state_file = apr_pstrdup(cmd->pool, arg);
+    return NULL;
+}
+
+static const char *bs_set_state_save_interval(cmd_parms *cmd, void *dconf,
+                                              const char *arg)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    int n = atoi(arg);
+    /* 0 = shutdown-only. Otherwise must be in a sane operational range. */
+    if (n != 0 && (n < 30 || n > 86400)) {
+        return "BotShieldStateSaveInterval: 0 (shutdown-only) or 30..86400 seconds";
+    }
+    scfg->state_save_interval = n;
+    return NULL;
+}
+
+/* mod_watchdog periodic-save callback. Runs in the parent/watchdog
+ * process context with a short-lived pool. AP_WATCHDOG_STATE_RUNNING
+ * fires at the configured interval. STARTING/STOPPING we ignore; the
+ * graceful-shutdown save still happens via pool cleanup. */
+static apr_status_t bs_watchdog_save_cb(int state, void *data,
+                                        apr_pool_t *pool)
+{
+    if (state != AP_WATCHDOG_STATE_RUNNING) return APR_SUCCESS;
+    bs_state_cleanup_ctx *ctx = data;
+    if (!ctx || !ctx->path) return APR_SUCCESS;
+    if (!bs_shm.shm || !bs_shm.flagged_table || !bs_shm.bloom_bufs[0]) {
+        return APR_SUCCESS;   /* SHM not up yet; nothing to save */
+    }
+    /* Use the callback's own pool so temporaries die with this tick. */
+    bs_state_save(pool, ctx->server, ctx->path);
+    return APR_SUCCESS;
 }
 
 /* Translate a flag bitmap (from the cookie's flags field OR the flagged-
@@ -1766,6 +2438,32 @@ static const command_rec bs_cmds[] = {
                  "allocation is one identity, so an attacker with a /64 "
                  "can't rotate addresses to shed a flag. 128 disables "
                  "aggregation. IPv4 (v6-mapped) keys are never masked."),
+    AP_INIT_TAKE1("BotShieldBloomIPs", bs_set_bloom_ips, NULL,
+                 RSRC_CONF,
+                 "Expected working-set size for the first-sight Bloom "
+                 "filter. Drives buffer size at ~10 bits/IP (1% FP). "
+                 "Default 1000000 (2.4 MB total for the two buffers). "
+                 "Range 1000..10000000."),
+    AP_INIT_TAKE1("BotShieldBloomWindow", bs_set_bloom_window, NULL,
+                 RSRC_CONF,
+                 "Full lifetime window for Bloom entries, in seconds. "
+                 "Rotation happens at half-window. Default 604800 (1 week) "
+                 "→ 3.5 day guaranteed minimum lifetime, 7 day max. "
+                 "Range 3600..2592000."),
+    AP_INIT_TAKE1("BotShieldStateFile", bs_set_state_file, NULL,
+                 RSRC_CONF,
+                 "Path to a binary file used to persist flagged-IP and "
+                 "Bloom state across graceful restarts. Written atomically "
+                 "at clean shutdown; loaded (with checksum and dimension "
+                 "checks) at startup. Any problem at load time is treated "
+                 "as 'start fresh'. Unset (default) disables persistence."),
+    AP_INIT_TAKE1("BotShieldStateSaveInterval", bs_set_state_save_interval, NULL,
+                 RSRC_CONF,
+                 "Seconds between periodic state snapshots via mod_watchdog. "
+                 "Default 300 (5 min). 0 disables periodic saves (only the "
+                 "graceful-shutdown save runs). Range when non-zero: "
+                 "30..86400. Requires mod_watchdog to be loaded; otherwise "
+                 "degrades to shutdown-only with a NOTICE."),
     AP_INIT_TAKE12("BotShieldFlagIP", bs_set_flag_ip, NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "Flag the client IP with one or more bits when a request "
@@ -2165,6 +2863,16 @@ static int bs_handler(request_rec *r)
                      "flagged-ip");
     }
 
+    /* First-sight Bloom lookup (M5b). Policy: only on cookieless or
+     * signature-mismatched requests. Sig-verified cookies (even if
+     * expired) mean we've already transacted with this browser, so
+     * the first-sight signal would just be noise. A valid cookie
+     * likewise skips this. */
+    if (have_client_ip && !have_prior_rep &&
+        !bs_bloom_seen(client_ip)) {
+        bs_score_add(r, BS_FIRST_SIGHT_PENALTY, 0, "first-sight-ip");
+    }
+
     /* Fetch the score struct *after* all per-request adds. Using create=1
      * so a request with zero hits still gets a valid (empty) pointer and
      * the log line prints reasons=[] consistently. */
@@ -2209,12 +2917,16 @@ static int bs_handler(request_rec *r)
         return DECLINED;
     }
 
-    /* Not pass tier — we will issue a challenge. Build the rep state
-     * to carry into the new cookie. Today M4b serves form-PoW for every
-     * non-pass tier; silent (M7) and captcha (M8) will ship later with
-     * their own forgiveness rates. Until then, form forgiveness is
-     * applied whenever we re-issue, matching what the user actually
-     * solves. */
+    /* Not pass tier — we will issue a challenge. Feed the Bloom filter
+     * now that we've committed to challenging this client; that keeps
+     * writes off the ~99% happy path. */
+    if (have_client_ip) bs_bloom_add(client_ip);
+
+    /* Build the rep state to carry into the new cookie. Today M4b serves
+     * form-PoW for every non-pass tier; silent (M7) and captcha (M8)
+     * will ship later with their own forgiveness rates. Until then,
+     * form forgiveness is applied whenever we re-issue, matching what
+     * the user actually solves. */
     bs_rep_state next_rep;
     if (have_prior_rep) {
         int forgive = bs_effective_int(cfg->forgive_form,
