@@ -105,6 +105,34 @@ enum bs_help_mode {
 };
 #define BS_DEFAULT_HELP_MODE BS_HELP_BUTTON
 
+/* Scoring thresholds (penalty → tier) and heuristic penalties. */
+#define BS_DEFAULT_SCORE_SILENT   20
+#define BS_DEFAULT_SCORE_HARD     50
+#define BS_DEFAULT_SCORE_CAPTCHA  80
+#define BS_SCORE_MAX_REASONS      16
+
+#define BS_PENALTY_MISSING_UA     40
+#define BS_PENALTY_MISSING_AL     15
+#define BS_PENALTY_SCRAPER_UA     50
+
+typedef enum {
+    BS_TIER_PASS    = 0,
+    BS_TIER_SILENT  = 1,
+    BS_TIER_HARD    = 2,
+    BS_TIER_CAPTCHA = 3
+} bs_tier;
+
+typedef struct {
+    int         penalty;
+    int         ttl_seconds;   /* reserved for M4 SHM-backed scoreboard */
+    const char *reason;        /* static string or r->pool-allocated */
+} bs_score_entry;
+
+typedef struct {
+    int                 total;
+    apr_array_header_t *entries;
+} bs_request_score;
+
 /* Default help panel content. HTML allowed because the string is emitted
  * directly into the panel; admins override via BotShieldHelpFile. */
 static const char BS_DEFAULT_HELP_HTML[] =
@@ -144,6 +172,9 @@ struct bs_dir_cfg {
     const bs_pow_algorithm *algorithm;      /* chosen issue algorithm */
     const unsigned char    *secret;         /* HMAC key bytes */
     apr_size_t              secret_len;     /* key length */
+    int score_silent;           /* score >= this → silent tier (logged only) */
+    int score_hard;             /* score >= this → hard form-PoW tier */
+    int score_captcha;          /* score >= this → captcha tier */
 };
 
 /* --- Config lifecycle --- */
@@ -163,6 +194,9 @@ static void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->algorithm  = NULL;
     cfg->secret     = NULL;
     cfg->secret_len = 0;
+    cfg->score_silent  = BS_UNSET;
+    cfg->score_hard    = BS_UNSET;
+    cfg->score_captcha = BS_UNSET;
     return cfg;
 }
 
@@ -192,6 +226,9 @@ static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
         out->secret     = base->secret;
         out->secret_len = base->secret_len;
     }
+    out->score_silent  = (add->score_silent  == BS_UNSET) ? base->score_silent  : add->score_silent;
+    out->score_hard    = (add->score_hard    == BS_UNSET) ? base->score_hard    : add->score_hard;
+    out->score_captcha = (add->score_captcha == BS_UNSET) ? base->score_captcha : add->score_captcha;
     return out;
 }
 
@@ -257,6 +294,37 @@ static const char *bs_set_difficulty(cmd_parms *cmd, void *cfg_v, const char *ar
     }
     ((bs_dir_cfg *)cfg_v)->difficulty = n;
     return NULL;
+}
+
+static const char *bs_set_score_int(const char *directive, int *slot,
+                                    const char *arg, apr_pool_t *p)
+{
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (end == arg || *end != '\0' || n < 0 || n > 10000) {
+        return apr_psprintf(p,
+            "%s: expected an integer in 0..10000, got '%s'", directive, arg);
+    }
+    *slot = (int)n;
+    return NULL;
+}
+
+static const char *bs_set_score_silent(cmd_parms *cmd, void *cfg_v, const char *arg)
+{
+    return bs_set_score_int("BotShieldScoreSilent",
+        &((bs_dir_cfg *)cfg_v)->score_silent, arg, cmd->pool);
+}
+
+static const char *bs_set_score_hard(cmd_parms *cmd, void *cfg_v, const char *arg)
+{
+    return bs_set_score_int("BotShieldScoreHard",
+        &((bs_dir_cfg *)cfg_v)->score_hard, arg, cmd->pool);
+}
+
+static const char *bs_set_score_captcha(cmd_parms *cmd, void *cfg_v, const char *arg)
+{
+    return bs_set_score_int("BotShieldScoreCaptcha",
+        &((bs_dir_cfg *)cfg_v)->score_captcha, arg, cmd->pool);
 }
 
 static const char *bs_set_prompt(cmd_parms *cmd, void *cfg_v, const char *arg)
@@ -695,6 +763,119 @@ static const char *bs_set_algorithm(cmd_parms *cmd, void *cfg_v,
     return NULL;
 }
 
+/* ======================================================================
+ * Per-request scoring.
+ *
+ * Every feature that wants to nudge a request's risk upward (rate-limit
+ * exceeded, honeypot hit, scanner probe, fake-Googlebot, failed captcha)
+ * calls bs_score_add(). Today the score lives in r->request_config and
+ * dies with the request; M4 will back the same API with SHM so penalties
+ * outlive the request.
+ * ====================================================================== */
+
+static bs_request_score *bs_get_score(request_rec *r, int create)
+{
+    bs_request_score *s = ap_get_module_config(r->request_config,
+                                               &botshield_module);
+    if (!s && create) {
+        s = apr_pcalloc(r->pool, sizeof(*s));
+        s->entries = apr_array_make(r->pool, 4, sizeof(bs_score_entry));
+        ap_set_module_config(r->request_config, &botshield_module, s);
+    }
+    return s;
+}
+
+/* `reason` must outlive the request — static string or r->pool-allocated.
+ * `ttl_seconds` is accepted for API stability but ignored in M3 (the
+ * request-scoped struct dies with the request). M4 wires it to SHM. */
+static void bs_score_add(request_rec *r, int penalty,
+                         int ttl_seconds, const char *reason)
+{
+    bs_request_score *s = bs_get_score(r, 1);
+    if (s->entries->nelts >= BS_SCORE_MAX_REASONS) return;
+    bs_score_entry *e = apr_array_push(s->entries);
+    e->penalty     = penalty;
+    e->ttl_seconds = ttl_seconds;
+    e->reason      = reason;
+    s->total      += penalty;
+}
+
+/* Build a compact "[reason:penalty,reason:penalty,...]" string for logs. */
+static const char *bs_score_reasons_joined(apr_pool_t *p,
+                                           const bs_request_score *s)
+{
+    if (!s || !s->entries || s->entries->nelts == 0) return "[]";
+    char *out = apr_pstrdup(p, "[");
+    for (int i = 0; i < s->entries->nelts; i++) {
+        bs_score_entry *e = &APR_ARRAY_IDX(s->entries, i, bs_score_entry);
+        out = apr_pstrcat(p, out, i ? "," : "",
+                          e->reason, ":", apr_itoa(p, e->penalty), NULL);
+    }
+    return apr_pstrcat(p, out, "]", NULL);
+}
+
+/* Cheap built-in signals, run on requests we're about to challenge. Called
+ * after the cookie check — a verified cookie skips scoring entirely. */
+static void bs_run_builtin_heuristics(request_rec *r)
+{
+    const char *ua = apr_table_get(r->headers_in, "User-Agent");
+    if (!ua || !*ua) {
+        bs_score_add(r, BS_PENALTY_MISSING_UA, 3600, "missing-user-agent");
+    }
+    const char *al = apr_table_get(r->headers_in, "Accept-Language");
+    if (!al || !*al) {
+        bs_score_add(r, BS_PENALTY_MISSING_AL, 3600, "missing-accept-language");
+    }
+
+    /* Obvious scraper / HTTP-library UA fragments. Case-sensitive on
+     * purpose — we pick both casings where both actually appear in the
+     * wild. Matches are flagged, not blocked, so false positives only
+     * cost a tier bump. */
+    if (ua && *ua) {
+        static const char *const scraper_tokens[] = {
+            "curl", "Wget", "wget",
+            "python", "Python", "python-requests",
+            "urllib", "httpx", "aiohttp",
+            "Go-http-client", "okhttp", "axios", "scrapy",
+            "java", "Java", "libwww", "lwp-request",
+            NULL
+        };
+        for (int i = 0; scraper_tokens[i]; i++) {
+            if (strstr(ua, scraper_tokens[i])) {
+                bs_score_add(r, BS_PENALTY_SCRAPER_UA, 3600,
+                    apr_psprintf(r->pool, "scraper-ua-%s", scraper_tokens[i]));
+                break;
+            }
+        }
+    }
+}
+
+/* Pick a tier from the running score. Today the tier is computed and
+ * logged but not acted on — every challenged request still gets the
+ * form-PoW interstitial. M7/M8 will route the silent and captcha tiers
+ * to their own flows. */
+static bs_tier bs_decide_tier(const bs_dir_cfg *cfg, int score)
+{
+    int silent  = bs_effective_int(cfg->score_silent,  BS_DEFAULT_SCORE_SILENT);
+    int hard    = bs_effective_int(cfg->score_hard,    BS_DEFAULT_SCORE_HARD);
+    int captcha = bs_effective_int(cfg->score_captcha, BS_DEFAULT_SCORE_CAPTCHA);
+    if (score >= captcha) return BS_TIER_CAPTCHA;
+    if (score >= hard)    return BS_TIER_HARD;
+    if (score >= silent)  return BS_TIER_SILENT;
+    return BS_TIER_PASS;
+}
+
+static const char *bs_tier_name(bs_tier t)
+{
+    switch (t) {
+        case BS_TIER_PASS:    return "pass";
+        case BS_TIER_SILENT:  return "silent";
+        case BS_TIER_HARD:    return "hard";
+        case BS_TIER_CAPTCHA: return "captcha";
+    }
+    return "?";
+}
+
 static const command_rec bs_cmds[] = {
     AP_INIT_FLAG("BotShieldEnabled",    bs_set_enabled,    NULL,
                  RSRC_CONF | ACCESS_CONF,
@@ -764,6 +945,18 @@ static const command_rec bs_cmds[] = {
                  "into this module today; 'sha384-zeros' / 'sha512-zeros' / "
                  "'pbkdf2-sha256' / 'argon2id' are registry slots reserved "
                  "for future opt-in builds."),
+    AP_INIT_TAKE1("BotShieldScoreSilent",  bs_set_score_silent,  NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "Score at or above which the silent-PoW tier is picked "
+                 "(default: 20). Logged only until M7 ships."),
+    AP_INIT_TAKE1("BotShieldScoreHard",    bs_set_score_hard,    NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "Score at or above which the form-PoW tier is picked "
+                 "(default: 50). This is the only tier currently served."),
+    AP_INIT_TAKE1("BotShieldScoreCaptcha", bs_set_score_captcha, NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "Score at or above which the captcha tier is picked "
+                 "(default: 80). Logged only until M8 ships."),
     { NULL }
 };
 
@@ -1106,9 +1299,20 @@ static int bs_handler(request_rec *r)
                       reason);
     }
 
+    /* Score the request with built-in heuristics. Extensions (M3 onward)
+     * add more via bs_score_add(). The tier is computed but not yet acted
+     * on — every challenged request still goes to form-PoW. */
+    bs_run_builtin_heuristics(r);
+    bs_request_score *score = bs_get_score(r, 0);
+    int score_total = score ? score->total : 0;
+    bs_tier tier = bs_decide_tier(cfg, score_total);
+
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
-                  "mod_botshield: challenging %s (alg=%s, difficulty=%d, ttl=%d)",
-                  r->unparsed_uri, cfg->algorithm->name, difficulty, ttl);
+                  "mod_botshield: challenging %s (alg=%s, difficulty=%d, "
+                  "ttl=%d) score=%d tier=%s reasons=%s",
+                  r->unparsed_uri, cfg->algorithm->name, difficulty, ttl,
+                  score_total, bs_tier_name(tier),
+                  bs_score_reasons_joined(r->pool, score));
 
     /* Issue a fresh signed challenge; the worker reads it from the page. */
     bs_challenge challenge;
