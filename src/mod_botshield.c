@@ -1456,15 +1456,16 @@ static int bs_handler(request_rec *r)
         return OK;
     }
 
-    /* Parse the cookie if present. Three outcomes:
-     *   - NULL reason: cookie is fully valid. We still compute effective
-     *     score and tier — M4b lets cookied users land on a challenge
-     *     if new request-level signals have pushed their score up.
-     *   - non-NULL reason, sig matched: cookie was tampered or replayed
-     *     no, wait — sig matched but failed for another reason (expiry,
-     *     PoW counter). Salvage rep and carry it forward.
-     *   - non-NULL reason, "signature mismatch": can't trust any bytes
-     *     in the cookie. Treat as cookieless.
+    /* Parse the cookie if present. Three outcomes from bs_verify_cookie:
+     *   - NULL reason                  — cookie fully valid; rep is
+     *     trustworthy and the holder has solved their PoW. We still
+     *     compute effective score so a fresh signal can force a
+     *     re-challenge.
+     *   - non-NULL, sig did verify     — cookie failed a later check
+     *     (expired, PoW counter doesn't satisfy difficulty, etc.).
+     *     Rep was server-signed so it's still safe to carry forward.
+     *   - non-NULL, "signature mismatch" — HMAC didn't verify; bytes
+     *     in the cookie can't be trusted. Discard entirely.
      */
     const char *cookie_val = bs_get_cookie_value(r, BS_COOKIE_NAME);
     bs_challenge prior_ch;
