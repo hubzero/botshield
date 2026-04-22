@@ -84,6 +84,9 @@ typedef struct {
     int cookie_ttl;
     int difficulty;
     int help_mode;              /* BS_HELP_* or BS_UNSET */
+    int show_logo;              /* 0 = hide brand column, 1 = show, -1 = inherit */
+    int show_label;             /* 0 = hide prompt text, 1 = show, -1 = inherit */
+    int show_box;               /* 0 = no bounding box, 1 = boxed, -1 = inherit */
     const char *prompt;         /* e.g. "I'm not a robot" */
     const char *logo_svg;       /* full SVG content, loaded at config time */
     const char *logo_label;     /* small caption under the logo */
@@ -102,6 +105,9 @@ static void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->cookie_ttl = BS_UNSET;
     cfg->difficulty = BS_UNSET;
     cfg->help_mode  = BS_UNSET;
+    cfg->show_logo  = BS_UNSET;
+    cfg->show_label = BS_UNSET;
+    cfg->show_box   = BS_UNSET;
     return cfg;
 }
 
@@ -115,6 +121,9 @@ static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     out->cookie_ttl = (add->cookie_ttl == BS_UNSET) ? base->cookie_ttl : add->cookie_ttl;
     out->difficulty = (add->difficulty == BS_UNSET) ? base->difficulty : add->difficulty;
     out->help_mode  = (add->help_mode  == BS_UNSET) ? base->help_mode  : add->help_mode;
+    out->show_logo  = (add->show_logo  == BS_UNSET) ? base->show_logo  : add->show_logo;
+    out->show_label = (add->show_label == BS_UNSET) ? base->show_label : add->show_label;
+    out->show_box   = (add->show_box   == BS_UNSET) ? base->show_box   : add->show_box;
     out->prompt         = add->prompt         ? add->prompt         : base->prompt;
     out->logo_svg       = add->logo_svg       ? add->logo_svg       : base->logo_svg;
     out->logo_label     = add->logo_label     ? add->logo_label     : base->logo_label;
@@ -141,6 +150,27 @@ static const char *bs_set_debug(cmd_parms *cmd, void *cfg_v, int flag)
 {
     (void)cmd;
     ((bs_dir_cfg *)cfg_v)->debug = flag ? 1 : 0;
+    return NULL;
+}
+
+static const char *bs_set_show_logo(cmd_parms *cmd, void *cfg_v, int flag)
+{
+    (void)cmd;
+    ((bs_dir_cfg *)cfg_v)->show_logo = flag ? 1 : 0;
+    return NULL;
+}
+
+static const char *bs_set_show_label(cmd_parms *cmd, void *cfg_v, int flag)
+{
+    (void)cmd;
+    ((bs_dir_cfg *)cfg_v)->show_label = flag ? 1 : 0;
+    return NULL;
+}
+
+static const char *bs_set_show_box(cmd_parms *cmd, void *cfg_v, int flag)
+{
+    (void)cmd;
+    ((bs_dir_cfg *)cfg_v)->show_box = flag ? 1 : 0;
     return NULL;
 }
 
@@ -294,6 +324,20 @@ static const command_rec bs_cmds[] = {
                  RSRC_CONF | ACCESS_CONF,
                  "Small caption under the logo (default: \"botshield\"). "
                  "Empty string hides it."),
+    AP_INIT_FLAG("BotShieldShowLogo",   bs_set_show_logo,  NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "Show the brand column — logo + caption (default: on). "
+                 "Off removes the whole column from the widget."),
+    AP_INIT_FLAG("BotShieldShowLabel",  bs_set_show_label, NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "Show the prompt text next to the checkbox (default: on). "
+                 "Off hides the text and moves it to the button's aria-label "
+                 "so screen readers still hear it."),
+    AP_INIT_FLAG("BotShieldShowBox",    bs_set_show_box,   NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "Show the widget's outer box — border, background, shadow "
+                 "(default: on). Off leaves just the controls for the admin's "
+                 "page to style around."),
     AP_INIT_TAKE1("BotShieldHelp",       bs_set_help,      NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "Help visibility: off | on | button (default: button). "
@@ -447,6 +491,9 @@ static const char BS_WIDGET_TEMPLATE[] =
 ".bs-widget{display:inline-flex;align-items:center;\n"
 " background:#fafafa;border:1px solid #d3d9dd;border-radius:4px;\n"
 " box-shadow:0 1px 1px rgba(0,0,0,.04);min-width:300px}\n"
+".bs-widget.bs-bare{background:transparent;border:0;box-shadow:none;\n"
+" min-width:0;padding:0}\n"
+".bs-widget.bs-bare .bs-btn{padding:0;border-radius:4px}\n"
 ".bs-btn{display:inline-flex;align-items:center;gap:.85rem;\n"
 " flex:1;padding:.9rem 1rem;background:transparent;border:0;\n"
 " font:inherit;color:#1f2530;cursor:pointer;text-align:left;\n"
@@ -499,16 +546,13 @@ static const char BS_WIDGET_TEMPLATE[] =
 "<h1 class=\"bs-sr\">Verify you are human</h1>\n"
 "<noscript><div class=\"bs-noscript\">JavaScript is required to continue."
 "</div></noscript>\n"
-"<div class=\"bs-widget\" id=\"c\">\n"
-" <button type=\"button\" class=\"bs-btn\" id=\"btn\"\n"
-"         aria-describedby=\"msg\">\n"
+"<div class=\"bs-widget%s\" id=\"c\">\n"
+" <button type=\"button\" class=\"bs-btn\" id=\"btn\""
+" aria-describedby=\"msg\"%s>\n"
 "  <span class=\"bs-check\" id=\"cb\" aria-hidden=\"true\"></span>\n"
-"  <span class=\"bs-label\">%s</span>\n"
+"  %s"
 " </button>\n"
-" <div class=\"bs-brand\" aria-hidden=\"true\">\n"
-"  %s\n"
-"  <span class=\"nm\">%s</span>\n"
-" </div>\n"
+" %s"
 "</div>\n"
 "%s"
 "<p class=\"bs-msg\" id=\"msg\" role=\"status\" aria-live=\"polite\"></p>\n"
@@ -667,7 +711,10 @@ static int bs_handler(request_rec *r)
     const char *prompt     = cfg->prompt     ? cfg->prompt     : BS_DEFAULT_PROMPT;
     const char *logo_svg   = cfg->logo_svg   ? cfg->logo_svg   : BS_DEFAULT_LOGO_SVG;
     const char *logo_label = cfg->logo_label ? cfg->logo_label : BS_DEFAULT_LOGO_LABEL;
-    int help_mode = bs_effective_int(cfg->help_mode, BS_DEFAULT_HELP_MODE);
+    int help_mode  = bs_effective_int(cfg->help_mode,  BS_DEFAULT_HELP_MODE);
+    int show_logo  = bs_effective_int(cfg->show_logo,  1);
+    int show_label = bs_effective_int(cfg->show_label, 1);
+    int show_box   = bs_effective_int(cfg->show_box,   1);
     const char *help_content = cfg->help_html ? cfg->help_html : BS_DEFAULT_HELP_HTML;
 
     const char *help_html = "";
@@ -684,13 +731,33 @@ static int bs_handler(request_rec *r)
             help_content);
     }
 
+    /* Chrome toggles: build conditional widget fragments. When the label is
+     * hidden, move the prompt text to an aria-label on the button so the
+     * button keeps an accessible name. */
+    const char *prompt_esc = ap_escape_html(r->pool, prompt);
+    const char *widget_mod = show_box ? "" : " bs-bare";
+    const char *aria_attr  = show_label
+        ? ""
+        : apr_psprintf(r->pool, " aria-label=\"%s\"", prompt_esc);
+    const char *prompt_span = show_label
+        ? apr_psprintf(r->pool,
+              "<span class=\"bs-label\">%s</span>\n", prompt_esc)
+        : "";
+    const char *brand_div = show_logo
+        ? apr_psprintf(r->pool,
+              "<div class=\"bs-brand\" aria-hidden=\"true\">%s"
+              "<span class=\"nm\">%s</span></div>\n",
+              logo_svg, ap_escape_html(r->pool, logo_label))
+        : "";
+
     /* Render the widget block once, then splice it into the page shell at
      * BS_WIDGET_MARKER. The shell is either the admin's BotShieldChallengeFile
      * or our built-in default — same splice code path either way. */
     char *widget = apr_psprintf(r->pool, BS_WIDGET_TEMPLATE,
-                                ap_escape_html(r->pool, prompt),
-                                logo_svg,
-                                ap_escape_html(r->pool, logo_label),
+                                widget_mod,
+                                aria_attr,
+                                prompt_span,
+                                brand_div,
                                 help_html,
                                 difficulty, ttl);
 
