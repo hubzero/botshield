@@ -46,7 +46,8 @@ CFLAGS_SAN := \
 LIBS := -lcrypto -lcurl -ljson-c
 
 .PHONY: all build install enable disable reload clean \
-        sanitize install-sanitize
+        sanitize install-sanitize \
+        fuzz fuzz-run fuzz-clean
 
 all: build
 
@@ -82,3 +83,50 @@ sanitize: clean
 
 install-sanitize: sanitize
 	sudo $(APXS) -i -n $(MOD_NAME) $(LA)
+
+# --- M11.8 fuzz ---
+#
+# LibFuzzer harness for bs_verify_cookie. Builds with clang +
+# -fsanitize=fuzzer,address,undefined. Requires:
+#   apt install clang libfuzzer-<version>-dev
+# The harness #includes src/mod_botshield.c directly; _fuzz_stubs.h
+# provides weak stubs for Apache runtime symbols the fuzzer never
+# reaches (see the header for the approach).
+
+FUZZ_CC    ?= clang
+FUZZ_BIN   := tests/fuzz/fuzz_cookie
+FUZZ_SRC   := tests/fuzz/fuzz_cookie.c
+FUZZ_STUBS := tests/fuzz/_fuzz_stubs.h
+
+# apxs flags for apr/apache headers — clang can't find them without these.
+FUZZ_CPPFLAGS := $(shell $(APXS) -q INCLUDEDIR 2>/dev/null) \
+                 $(shell pkg-config --cflags apr-1 apr-util-1 2>/dev/null)
+FUZZ_CPPFLAGS := -I$(shell $(APXS) -q INCLUDEDIR) \
+                 $(shell pkg-config --cflags apr-1 apr-util-1)
+
+FUZZ_LIBS := -lcrypto -lcurl -ljson-c \
+             $(shell pkg-config --libs apr-1 apr-util-1) \
+             -lpcre2-8
+
+FUZZ_CFLAGS := -g -O1 -fno-omit-frame-pointer \
+               -fsanitize=fuzzer,address,undefined \
+               -fno-sanitize=object-size \
+               -Wno-deprecated-declarations
+
+fuzz: $(FUZZ_BIN)
+
+$(FUZZ_BIN): $(FUZZ_SRC) $(FUZZ_STUBS) $(SRC)
+	$(FUZZ_CC) $(FUZZ_CFLAGS) $(FUZZ_CPPFLAGS) \
+	    -o $@ $(FUZZ_SRC) $(FUZZ_LIBS)
+
+# tests/fuzz/run.sh calls this. Default runtime is a short smoke —
+# for a real campaign, pass a longer value: `make fuzz-run DURATION=300`
+DURATION ?= 30
+
+fuzz-run: fuzz
+	$(FUZZ_BIN) -max_total_time=$(DURATION) \
+	    -print_final_stats=1 \
+	    tests/fuzz/corpus
+
+fuzz-clean:
+	rm -f $(FUZZ_BIN)
