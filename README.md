@@ -23,11 +23,14 @@ Production hardening is shipped through M10.3: clean under ASan +
 UBSan, load-tested with wrk, MPM-matrix-verified across event /
 worker / prefork with graceful-restart coverage. The overnight soak
 (M10.4) has runner + analyzer in `tests/stress/` and is ready to
-kick off. An in-repo test suite landed in M11.1–M11.3: 22 tests
-across `tests/unit`, `tests/integration`, and `tests/acceptance`,
-a GitHub Actions PR gate, and a 60-second soak smoke on every PR.
-Next up (M11.4+) is rebuilding the test framework on pytest +
-Playwright — see PLAN.md for the full arc.
+kick off. The test suite was rebuilt on pytest through M11.5: 32
+tests under `tests/pytests/` backed by a reusable `botshield_test`
+framework (`httpx` client, transactional `config_override`,
+structured decision-log parser, time-salted IP allocator,
+data-driven per-provider captcha specs), a GitHub Actions PR gate,
+and a 60-second soak smoke on every PR. The M11.1–M11.3 bash suite
+is archived in `tests/bash-legacy/` as a reference. Next up (M11.6)
+is the Playwright + Chromium acceptance layer — see PLAN.md.
 
 ## How it works
 
