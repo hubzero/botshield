@@ -4,26 +4,65 @@ Low-latency bot detection for Apache 2.4. Cookieless requests get a
 self-contained proof-of-work interstitial; verified visitors receive a
 short-lived cookie and pass through on their next request.
 
-**Status: early alpha.** The baseline PoW tier works end-to-end and passes
-WCAG 2.1 AA. Server-side HMAC signing, scoring heuristics, shared-memory
-rate tracking, Bloom-filter IP reputation, silent-PoW output filtering, and
-captcha providers are all planned but not yet implemented.
+**Status: early alpha.** End-to-end tiered routing works — pass, silent
+(no-click auto-submit splash), form (checkbox interstitial), and
+captcha (third-party provider). Server-side HMAC signing, scoring
+heuristics, shared-memory flagged-IP table with lockless reads,
+rotating Bloom filter for first-sight IP signals, crash-durable state
+persistence (mod_watchdog periodic snapshots plus shutdown save), and
+captcha-verify-endpoint hardening (per-IP rate limit, global in-flight
+semaphore, HMAC-signed challenge-pending cookie, log throttling) are
+all shipped. Captcha tier routes to Cloudflare Turnstile, hCaptcha,
+Google reCAPTCHA v2, Google reCAPTCHA v3 (with score threshold),
+Friendly Captcha, and GeeTest v4 — configurable per scope, with
+multi-provider cohabitation on one vhost. Observability is shipped:
+structured `key=value` decision-log line per request, 41 Prometheus
+metrics at `<prefix>/metrics`, and a `mod_status` contribution hook.
+Accessibility passes WCAG 2.1 AA on every interstitial variant.
+Production hardening (sanitizers, stress, MPM matrix, soak) is the
+next planned milestone.
 
 ## How it works
 
-1. A request without a valid `_bs_verified` cookie is intercepted by the
-   module's handler (registered at `APR_HOOK_FIRST`).
-2. If the request URI ends in a static-asset extension (`.css`, `.js`,
-   `.png`, `.svg`, …) the module declines and Apache serves the file
-   normally. This keeps the challenge page's own linked assets working.
-3. Otherwise the module renders a self-contained HTML page with inline
-   CSS, inline JavaScript, and the widget logo inlined as SVG. No network
-   round trips from the challenge page.
-4. The client solves a SHA-256 proof-of-work (`N` leading hex zeros on
-   `SHA-256(salt:fingerprint:nonce)`), writes
-   `_bs_verified=<timestamp>:<hash>`, and reloads.
-5. The next request carries the cookie; the module validates format and
-   freshness and declines — Apache serves the real content.
+1. An `APR_HOOK_FIRST` handler runs before Apache's content generator.
+   URLs under `BotShieldEndpointPrefix` (default `/botshield`) route to
+   the module's own handlers (`/botshield/captcha-verify/<provider>`,
+   `/botshield/metrics`) before tier dispatch. If the URI ends in a
+   static-asset extension (`.css`, `.js`, `.png`, `.svg`, …), the
+   module declines so the challenge page's own linked assets work.
+2. Each request gets a score. Heuristics (missing User-Agent, missing
+   Accept-Language, scraper UA tokens), the flagged-IP table lookup
+   (SHM, seqlock-guarded), a first-sight Bloom check, and any rep
+   carried in a signed `_bs_verified` cookie all compose into one
+   effective score.
+3. The score picks a tier — **pass** below `BotShieldScoreSilent`,
+   **silent** up to `BotShieldScoreHard`, **form** up to
+   `BotShieldScoreCaptcha`, **captcha** at or above. Below silent the
+   module returns `DECLINED` and Apache serves the real content —
+   legitimate visitors never see us and never receive a cookie.
+4. Tier behavior:
+   - **silent** — minimal "checking your browser" splash that
+     auto-submits a SHA-256 proof-of-work on load.
+   - **form** — reCAPTCHA-shaped checkbox widget; user clicks to start
+     the PoW.
+   - **captcha** — third-party provider widget (Turnstile / hCaptcha /
+     reCAPTCHA v2/v3 / Friendly Captcha / GeeTest v4); on success the
+     client POSTs the provider's token to `/botshield/captcha-verify/
+     <provider>`, the module siteverifies via libcurl (tight timeout,
+     fail-open on provider outage), and issues the cookie.
+
+   PoW tiers produce an HMAC-signed 15-field cookie; captcha tier
+   produces the same envelope with `alg="captcha-<provider>"`.
+5. Each decision emits two log lines: a human-readable prose line and
+   a stable `key=value` structured line (`mod_botshield: decision
+   tier=<t> outcome=<o> …`) parseable with a ~50-line awk script.
+   Every decision also increments matching SHM counters exported at
+   `/botshield/metrics` (Prometheus text) and via a `mod_status`
+   contribution hook.
+6. The next request carries the cookie; the server re-derives the
+   HMAC, checks freshness, and declines — Apache serves the real
+   content. Flags (honeypot hits, scanner probes) live in SHM, not the
+   cookie, so replaying an older cookie can't launder an IP flag.
 
 ## Build
 
@@ -98,12 +137,34 @@ configuration is needed — `r->useragent_ip` already is the client.
 
 ## Directives
 
+### Core
+
 | Directive | Default | Purpose |
 |---|---|---|
 | `BotShieldEnabled on\|off` | `off` | Master on/off for the enclosing scope |
 | `BotShieldDebug on\|off` | `off` | Return `403 "Hello World"` for every request (smoke test) |
+| `BotShieldSecretFile /path` | unset (required) | HMAC key for cookie/challenge signing; mode 0600, ≥ 16 bytes |
+| `BotShieldAlgorithm <name>` | unset (required) | PoW algorithm. Only `sha256-zeros` is built in today; `sha384-zeros`, `sha512-zeros`, `pbkdf2-sha256`, `argon2id` are reserved registry slots |
 | `BotShieldCookieTTL N` | `3600` | Seconds a verified cookie is honoured |
+| `BotShieldCookieDomain ".example.com"` | unset (host-only) | Set-Cookie Domain= attribute so rep follows across subdomains |
 | `BotShieldDifficulty N` | `4` | Leading hex zeros the PoW must produce (1..8) |
+| `BotShieldEndpointPrefix /path` | `/botshield` | URL prefix for module-owned handlers (captcha-verify, metrics) |
+
+### Tier thresholds and forgiveness
+
+| Directive | Default | Purpose |
+|---|---|---|
+| `BotShieldScoreSilent N` | `20` | Score at or above which the silent-PoW tier is picked |
+| `BotShieldScoreHard N` | `50` | Score at or above which the form-PoW tier is picked |
+| `BotShieldScoreCaptcha N` | `80` | Score at or above which the captcha tier is picked |
+| `BotShieldForgivenessSilent N` | `10` | Score credit on a successful silent-PoW pass |
+| `BotShieldForgivenessForm N` | `25` | Score credit on a successful form-PoW pass |
+| `BotShieldForgivenessCaptcha N` | `50` | Score credit on a successful captcha pass |
+
+### Widget customization
+
+| Directive | Default | Purpose |
+|---|---|---|
 | `BotShieldPromptText "..."` | `I'm not a robot` | Label next to the checkbox |
 | `BotShieldLogoFile /path.svg` | embedded Guardian | SVG served inline as the logo (≤ 64 KB) |
 | `BotShieldLogoLabel "..."` | `botshield` | Small caption under the logo |
@@ -114,10 +175,43 @@ configuration is needed — `r->useragent_ip` already is the client.
 | `BotShieldShowLabel on\|off` | `on` | Show the prompt text; when off, moves to the button's `aria-label` |
 | `BotShieldShowBox on\|off` | `on` | Show the widget's outer box (border/background/shadow) |
 
+### Captcha tier (M8)
+
+| Directive | Default | Purpose |
+|---|---|---|
+| `BotShieldCaptchaProvider <name>` | unset | `turnstile` / `hcaptcha` / `recaptcha-v2` / `recaptcha-v3` / `friendly` / `geetest` |
+| `BotShieldCaptchaSiteKey "..."` | unset | Provider-public site key (GeeTest: captcha_id) |
+| `BotShieldCaptchaSecretFile /path` | unset | Provider secret (mode 0600). For GeeTest this is the captcha_key used to HMAC the lot_number |
+| `BotShieldCaptchaTimeout N` | `1000` | Siteverify HTTP timeout in ms (100..5000). Fail-open on timeout |
+| `BotShieldRecaptchaV3MinScore 0..1` | `0.5` | Reject v3 verifications below this score even on `success:true` |
+
+### Captcha-verify endpoint hardening (M8.1)
+
+| Directive | Default | Purpose |
+|---|---|---|
+| `BotShieldCaptchaRateLimit N` | `30` | Per-IP verify POSTs per minute (0 disables, range 0..1000). Over cap → 429 with Retry-After, no libcurl |
+| `BotShieldCaptchaMaxInFlight N` | `64` | Global cap on concurrent outbound siteverify calls (1..1024). Over cap → 503, no libcurl |
+
+### Flagged-IP table / Bloom filter / state (M5+M6)
+
+| Directive | Default | Purpose |
+|---|---|---|
+| `BotShieldFlagIP <bits> [ttl]` | unset | Flag the client IP when this scope is hit. Bits: `honeypot_hit`, `scanner_probe`, `fake_crawler`, `pow_fail_streak` |
+| `BotShieldShmSize 8M` | `8M` | Total SHM budget (128K..256M) |
+| `BotShieldFlaggedIPCapacity N` | `50000` | Flagged-IP slot count (1024..1000000) |
+| `BotShieldIPv6PrefixLen N` | `64` | IPv6 mask length for flagged-IP keying; v4 always /32 |
+| `BotShieldBloomIPs N` | `1000000` | Expected working-set size; drives Bloom filter dimensions |
+| `BotShieldBloomWindow N` | `604800` | Bloom rotation window in seconds (rotation at window/2) |
+| `BotShieldBloomFPRate 0.01` | `0.01` | Target false-positive rate |
+| `BotShieldStateFile /path` | unset (persistence off) | SHM snapshot path. **Must be at main-server scope**, not inside `<VirtualHost>` |
+| `BotShieldStateSaveInterval N` | `300` | Periodic save interval in seconds (0 = shutdown-only); requires `mod_watchdog` |
+
 All directives are valid in server config, `<VirtualHost>`, `<Directory>`,
 `<Location>`, `<Files>`, and their `*Match` variants. **Not `.htaccess`** —
 keeping bot-protection config out of writable filesystem locations is a
-deliberate choice.
+deliberate choice. SHM-sizing and state-file directives must live at
+main-server scope (not inside `<VirtualHost>`), since the SHM segment is
+module-global.
 
 File-backed `*File` directives read their targets **once at config-parse
 time** and cache the bytes on the per-directory config — no per-request
@@ -163,22 +257,93 @@ preserves accessibility: the prompt moves to `aria-label` when visually
 hidden, the live-status region is always present, and the screen-reader-
 only `<h1>` is emitted regardless of how much chrome you've removed.
 
-## Security note on the baseline tier
+## Security note
 
-The verification cookie is set by client JavaScript and validated on the
-server only by format (regex) and timestamp window. A motivated attacker
-can forge a cookie that matches the pattern and bypass the challenge. The
-baseline is still useful in practice because it filters every bot that
-can't execute JavaScript — which is most of them.
+Cookies are HMAC-SHA-256-signed over a 13-field canonical envelope; any
+edit to the score, flag bitmap, tier marker, or PoW proof invalidates
+the signature and forces a fresh challenge. Cookies carrying a genuine
+PoW solve can still be replayed within their TTL (default 1 h), which
+is why flags and the first-sight Bloom filter live in shared memory
+rather than only in the cookie — an attacker can replay yesterday's
+lower-score cookie, but an IP that tripped a honeypot stays flagged
+across restarts via the periodic state-file snapshots.
 
-Server-side HMAC signing of challenges and cookies is the next planned
-milestone and closes this gap.
+The captcha-verify endpoint (`<prefix>/captcha-verify/<provider>`) is
+guarded by six layers of pre-libcurl checks: Content-Type prefilter,
+8 KB body cap, token-field presence and length bound, HMAC-signed
+`_bs_captcha_pending` cookie (set at interstitial render, required at
+verify, HttpOnly/Secure/SameSite=Lax/Max-Age=300), per-IP rate limit
+(`BotShieldCaptchaRateLimit`), and a global in-flight semaphore
+(`BotShieldCaptchaMaxInFlight`). Each check rejects cheaply **before**
+any outbound call — the verify endpoint cannot be trivially weaponized
+as a siteverify amplifier or worker-starvation vector.
+
+## Module-owned endpoints
+
+Under `BotShieldEndpointPrefix` (default `/botshield`):
+
+| Path | Method | Purpose |
+|---|---|---|
+| `<prefix>/captcha-verify` | POST | Bare verify URL for single-provider vhosts |
+| `<prefix>/captcha-verify/<provider>` | POST | Per-provider verify URL (multi-provider vhosts) |
+| `<prefix>/metrics` | GET | Prometheus 0.0.4 text exposition |
+
+Access control is delegated to standard Apache mechanisms — put a
+`<Location>` with `Require ip ...` or `AuthType Basic` around the
+metrics endpoint, for example:
+
+```apache
+<Location /botshield/metrics>
+    Require ip 10.0.0.0/8
+</Location>
+```
+
+## Observability
+
+Every decision emits a stable `key=value` line alongside the existing
+prose log:
+
+```
+mod_botshield: decision tier=captcha outcome=verified ip=203.0.113.42
+    score=0 cookie=- provider=turnstile alg=captcha-turnstile
+    reason="-" path="/captcha-demo"
+```
+
+Enum sets:
+
+- `tier`     = `none` | `pass` | `silent` | `form` | `captcha`
+- `outcome`  = `declined` | `challenged` | `verified` | `rejected` |
+               `failopen` | `rate_limited` | `inflight_capped` |
+               `pending_missing` | `misconfigured` | `debug`
+- `cookie`   = `ok` | `expired` | `bad_sig` | `bad_format` | `absent` | `-`
+- `provider` = `-` or registry name
+
+Every decision also increments SHM counters exported at `<prefix>/metrics`:
+
+- `botshield_tier_<t>_total` — 5 tier counters
+- `botshield_outcome_<o>_total` — 10 outcome counters
+- `botshield_cookie_<c>_total` — 5 cookie counters
+- `botshield_provider_<p>_total` — 6 provider counters
+- Plus persistence counters/gauges, Bloom popcount gauges, flagged-IP
+  table utilization, in-flight captcha count, SHM capacity static values
+
+Counter names mechanically track the log enum vocabulary — there is no
+parallel taxonomy. Adding an outcome value adds one row to the
+string→index lookup or the string simply doesn't increment a counter
+(with a visible WARNING), so drift is loud, not silent.
+
+When `mod_status` is loaded and `ExtendedStatus On` is set, the module
+also contributes to `/server-status` via an optional hook: a compact
+HTML table in browser mode, `BotShield<Name>: N` key-value lines in
+`?auto` mode.
 
 ## Development
 
 `apache/botshield-dev.conf` is a working HTTPS dev vhost that exercises
 each directive on its own URL of a fake "Crestline Research Library"
 test site:
+
+**Widget customization:**
 
 | Path | What it demonstrates |
 |---|---|
@@ -188,6 +353,28 @@ test site:
 | `/search.html` | All chrome toggles off — just a bare checkbox |
 | `/api/users.json` | `BotShieldShowBox off` — widget without outer box |
 | `/login.html` | `BotShieldChallengeFile` — widget spliced into a site-themed page |
+| `/admin/.env` | Honeypot scope — hits flag the IP via `BotShieldFlagIP honeypot_hit` |
+
+**Captcha providers** (each uses the provider's published test or
+placeholder keys; see the dev config comments for what each key
+actually does):
+
+| Path | Provider | Notes |
+|---|---|---|
+| `/captcha-demo` | Turnstile | Cloudflare always-pass dummies; full end-to-end works |
+| `/hcaptcha-demo` | hCaptcha | Always-pass dummies; POST body must use the documented test token |
+| `/recaptcha-v2-demo` | reCAPTCHA v2 | Google's published test pair; any token accepted by the test secret |
+| `/recaptcha-v3-demo` | reCAPTCHA v3 | Placeholder keys — real v3 keys from the reCAPTCHA admin console are needed for a true score-threshold test |
+| `/friendly-demo` | Friendly Captcha | Placeholder keys; real keys from friendlycaptcha.com |
+| `/geetest-demo` | GeeTest v4 | Placeholder keys; real keys from dashboard.geetest.com |
+
+**Module-owned endpoints:**
+
+| Path | What |
+|---|---|
+| `/botshield/captcha-verify/<provider>` | Per-provider verify POST target |
+| `/botshield/metrics` | Prometheus text exposition |
+| `/server-status` | Apache `mod_status` (enables the botshield contribution hook) |
 
 The test site lives under `testsite/` and is git-ignored. See the header
 of `apache/botshield-dev.conf` for how to set up the self-signed cert
