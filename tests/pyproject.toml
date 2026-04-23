@@ -33,6 +33,17 @@ testpaths = ["pytests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+# Default options for every pytest invocation:
+#   --screenshot=only-on-failure — pytest-playwright grabs a PNG on
+#     browser-test failure. Lands under test-results/<testname>/.
+#     M11.6 promised this; wiring here so tests/run + CI + direct
+#     pytest invocations all get it without per-callsite repetition.
+#   --video=retain-on-failure — short .webm capture of the failing
+#     browser session. Same location. Useful for diagnosing
+#     timing-sensitive form_tier / captcha_tier regressions.
+# Non-browser tests ignore these flags — pytest-playwright only
+# emits artifacts for tests using its fixtures.
+addopts = "--screenshot=only-on-failure --video=retain-on-failure"
 # Fail fast on first unexpected pass: no silent SKIP-as-XPASS.
 xfail_strict = true
 # Each test has to finish in under 2 minutes. The rate-limit test's

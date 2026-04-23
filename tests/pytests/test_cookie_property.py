@@ -18,6 +18,7 @@ total — this is a smoke for cookie-parser hardening, not a fuzzer.
 
 from __future__ import annotations
 
+import httpx
 import pytest
 from hypothesis import HealthCheck, given, settings, strategies as st
 
@@ -95,10 +96,20 @@ def test_single_byte_tamper_always_rejected(valid_cookie, index, bitmask):
     except UnicodeDecodeError:
         return
 
-    resp = client.get(
-        "/", xff=valid_cookie["ip"], ua=BROWSER_UA, accept_language="en-US",
-        cookies={"_bs_verified": tampered},
-    )
+    try:
+        resp = client.get(
+            "/", xff=valid_cookie["ip"],
+            ua=BROWSER_UA, accept_language="en-US",
+            cookies={"_bs_verified": tampered},
+        )
+    except httpx.LocalProtocolError:
+        # httpx refuses to send control bytes (0x00–0x1F) in header
+        # values — the request never reaches the module, so the
+        # tamper is vacuous for this test's purposes. Real browsers
+        # do the same thing (Chromium would strip such bytes before
+        # sending), which is another layer of defense the module
+        # benefits from without having to implement it.
+        return
     # Two acceptable outcomes:
     #   1. Response carries X-Botshield: challenge (module rejected
     #      the cookie, served an interstitial)
