@@ -34,7 +34,7 @@ apt-get install -y -qq \
   apache2 apache2-dev \
   libssl-dev libcurl4-openssl-dev libjson-c-dev \
   libpcre2-dev \
-  python3 \
+  python3 python3-venv \
   curl openssl \
   wrk >/dev/null
 
@@ -102,6 +102,20 @@ echo "== configtest + reload =="
 apachectl configtest
 systemctl reload apache2 || systemctl start apache2
 sleep 1
+
+echo "== tests/.venv (pytest framework, M11.4+) =="
+# Create an isolated venv owned by the unprivileged user so the test
+# suite can install + import the framework without leaking into
+# system site-packages. Idempotent: if the venv already exists, we
+# just reinstall requirements (cheap on the pinned versions).
+VENV="$REPO/tests/.venv"
+if [[ ! -d "$VENV" ]]; then
+  sudo -u "$SUDO_USER" python3 -m venv "$VENV"
+fi
+sudo -u "$SUDO_USER" "$VENV/bin/pip" install --upgrade pip --quiet
+sudo -u "$SUDO_USER" "$VENV/bin/pip" install \
+  -r "$REPO/tests/requirements-test.txt" --quiet
+sudo -u "$SUDO_USER" "$VENV/bin/pip" install -e "$REPO/tests" --quiet
 
 echo ""
 echo "provision.sh: OK — tests/run is ready."
