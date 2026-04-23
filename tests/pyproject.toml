@@ -23,9 +23,8 @@ dev = [
 include = ["botshield_test*"]
 
 [tool.pytest.ini_options]
-# pytest discovers tests under tests/pytests/ only. The bash suite
-# lives in tests/unit, tests/integration, tests/acceptance and is
-# driven by tests/run until M11.5 retires it.
+# Tests live under tests/pytests/. The archived bash suite in
+# tests/bash-legacy/ is intentionally excluded from discovery.
 testpaths = ["pytests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
