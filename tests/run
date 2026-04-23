@@ -7,9 +7,14 @@
 # Exit codes: 0 if every test passed, 1 if any failed, 2 on bad
 # invocation.
 #
+# Default run includes: unit, integration, acceptance.
+# stress/ is opt-in only (soak takes hours). Request it with
+# --only stress or --only all.
+#
 # Flags:
 #   --only CATEGORY    Run only one category (unit, integration,
-#                      acceptance, stress). Repeatable.
+#                      acceptance, stress). Repeatable. Use 'all'
+#                      to include stress alongside the others.
 #   --match PATTERN    Run only tests whose filename matches PATTERN
 #                      (substring, not regex).
 #   --verbose          Show each test's stdout inline instead of only
@@ -30,7 +35,12 @@
 set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-CATEGORIES=(unit integration acceptance stress)
+# stress/ is deliberately EXCLUDED from the default category list.
+# Soak and load tests take minutes to hours; they're opt-in via
+# --only stress (or --only all to include alongside the others).
+DEFAULT_CATEGORIES=(unit integration acceptance)
+ALL_CATEGORIES=(unit integration acceptance stress)
+CATEGORIES=("${DEFAULT_CATEGORIES[@]}")
 
 ONLY=()
 MATCH=""
@@ -39,7 +49,13 @@ LIST_ONLY=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --only)    ONLY+=("$2"); shift 2 ;;
+    --only)
+      if [[ "$2" == "all" ]]; then
+        ONLY=("${ALL_CATEGORIES[@]}")
+      else
+        ONLY+=("$2")
+      fi
+      shift 2 ;;
     --match)   MATCH="$2";   shift 2 ;;
     --verbose) VERBOSE=1;    shift   ;;
     --list)    LIST_ONLY=1;  shift   ;;

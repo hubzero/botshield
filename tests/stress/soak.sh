@@ -127,5 +127,5 @@ echo "load exit code: $load_rc"
 # -------- Analyze --------
 echo ""
 echo "Running analyzer..."
-"$HERE/soak-analyze.sh" "$REPORT"
+"$HERE/../tools/soak-analyze.sh" "$REPORT"
 exit $?
