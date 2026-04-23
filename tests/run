@@ -13,6 +13,11 @@
 #                      alongside pytests.
 #   --match PATTERN    Substring filter. Passed to pytest as -k, and
 #                      to the stress dispatcher as a filename filter.
+#   --mark EXPR        Extra pytest marker expression. Composed with
+#                      the phase + slow filters. Example:
+#                        tests/run --mark "not browser"
+#                      Expression syntax is pytest's -m (see
+#                        https://docs.pytest.org/en/stable/example/markers.html).
 #   --parallel         Run pytests with xdist in two phases:
 #                      non-serial tests in parallel (-n auto), then
 #                      serial tests sequentially. Default is fully
@@ -47,6 +52,7 @@ CATEGORIES=("${DEFAULT_CATEGORIES[@]}")
 
 ONLY=()
 MATCH=""
+MARK_EXTRA=""
 VERBOSE=0
 LIST_ONLY=0
 PARALLEL=0
@@ -61,13 +67,14 @@ while [[ $# -gt 0 ]]; do
         ONLY+=("$2")
       fi
       shift 2 ;;
-    --match)    MATCH="$2";   shift 2 ;;
-    --parallel) PARALLEL=1;   shift   ;;
-    --slow)     SLOW=1;       shift   ;;
-    --verbose)  VERBOSE=1;    shift   ;;
-    --list)     LIST_ONLY=1;  shift   ;;
+    --match)    MATCH="$2";      shift 2 ;;
+    --mark)     MARK_EXTRA="$2"; shift 2 ;;
+    --parallel) PARALLEL=1;      shift   ;;
+    --slow)     SLOW=1;          shift   ;;
+    --verbose)  VERBOSE=1;       shift   ;;
+    --list)     LIST_ONLY=1;     shift   ;;
     --help|-h)
-      sed -n '3,32p' "$0" | sed 's/^# \?//'; exit 0 ;;
+      sed -n '3,38p' "$0" | sed 's/^# \?//'; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
 done
@@ -108,19 +115,53 @@ run_pytests() {
   local slow_filter=""
   [[ $SLOW -eq 0 ]] && slow_filter="not slow"
 
+  # Reports land under tests/reports/ (gitignored). One JUnit XML
+  # per phase (so CI can surface them as separate steps), plus one
+  # HTML summary per phase. CI uploads the whole dir on failure.
+  local reports_dir="$HERE/reports"
+  mkdir -p "$reports_dir"
+
+  # Compose a marker expression by AND-joining the given parts.
+  # Empty parts are skipped; parentheses wrap non-trivial parts to
+  # keep `and`/`or` precedence sane.
+  _join_and() {
+    local out=""
+    local p
+    for p in "$@"; do
+      [[ -z "$p" ]] && continue
+      if [[ -z "$out" ]]; then
+        out="$p"
+      else
+        # Parenthesize each side only if it contains a space (cheap
+        # proxy for "has an operator in it").
+        local lhs="$out" rhs="$p"
+        [[ "$lhs" == *" "* ]] && lhs="($lhs)"
+        [[ "$rhs" == *" "* ]] && rhs="($rhs)"
+        out="$lhs and $rhs"
+      fi
+    done
+    printf "%s" "$out"
+  }
+
   # Invoke pytest once for a given marker filter + xdist jobcount.
   _one_pytest_invocation() {
     local marker="$1" njobs="$2"
-    local m_expr="$marker"
-    if [[ -n "$slow_filter" ]]; then
-      if [[ -n "$m_expr" ]]; then
-        m_expr="($m_expr) and $slow_filter"
-      else
-        m_expr="$slow_filter"
-      fi
-    fi
+    # Compose phase-marker + --slow filter + caller's --mark, in that
+    # order. Everything is optional.
+    local m_expr
+    m_expr=$(_join_and "$marker" "$slow_filter" "$MARK_EXTRA")
+    # Sanitize the marker for use in a filename.
+    local phase="${marker:-all}"
+    phase="${phase// /_}"; phase="${phase//\(/}"; phase="${phase//\)/}"
+    local junit_xml="$reports_dir/pytests-${phase}.xml"
+    local html_rpt="$reports_dir/pytests-${phase}.html"
+
     local pyout; pyout=$(mktemp /tmp/bs_pytest_out.XXXXXX)
-    local args=("$dir" --tb=short --no-header -p no:cacheprovider)
+    local args=(
+      "$dir" --tb=short --no-header -p no:cacheprovider
+      --junit-xml="$junit_xml"
+      --html="$html_rpt" --self-contained-html
+    )
     [[ -n "$MATCH"  ]] && args+=(-k "$MATCH")
     [[ -n "$m_expr" ]] && args+=(-m "$m_expr")
     [[ -n "$njobs"  ]] && args+=(-n "$njobs")

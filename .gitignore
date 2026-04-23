@@ -17,8 +17,9 @@
 .vscode/
 
 # Python test framework (M11.4+) — venv + pytest caches + egg-info
-# are per-box artifacts that don't belong in the repo.
+# + per-run reports are per-box artifacts that don't belong in the repo.
 tests/.venv/
 tests/.pytest_cache/
 tests/*.egg-info/
+tests/reports/
 __pycache__/

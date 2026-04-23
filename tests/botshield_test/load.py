@@ -1,0 +1,179 @@
+"""Rate-limited load generator for the soak driver and any pytest
+fixture that wants to run traffic in the background.
+
+Port of the legacy tests/stress/soak_load.py, reshaped around the
+framework's existing primitives:
+
+  - Uses `botshield_test.client.request` so the self-signed cert,
+    XFF injection, and timeout defaults match every other test's
+    HTTP path.
+  - IP picking is delegated to `botshield_test.ips.fresh_ip` when
+    the caller wants scoring variety; the classic soak uses fixed
+    per-request-class paths and doesn't need unique IPs.
+
+The traffic mix stays at 70/20/10 pass/form/captcha-render and is
+internal-only (never hits a third-party siteverify) because that
+keeps log growth predictable and doesn't burn rate-limit budgets
+upstream.
+
+The module exposes `LoadGenerator` as a context manager so pytest
+fixtures can start traffic on entry and stop it on teardown:
+
+    with LoadGenerator(rps=50, base_url=BASE_URL):
+        # do something while traffic is running
+        ...
+    # returns after the burst drains
+"""
+
+from __future__ import annotations
+
+import random
+import ssl
+import threading
+import time
+import urllib.request
+from dataclasses import dataclass, field
+from urllib.error import URLError
+
+from .config import BASE_URL
+
+
+# Traffic-class mix. Each entry: (weight, path, headers).
+# Browser-ish pass, scraper-ish form challenge, captcha render.
+_DEFAULT_MIX = (
+    (70, "/", {
+        "User-Agent": "Mozilla/5.0 (X11) Chrome/145",
+        "Accept-Language": "en-US",
+    }),
+    (20, "/", {
+        "User-Agent": "python-requests/2.31",
+    }),
+    (10, "/captcha-demo", {}),
+)
+
+
+@dataclass
+class LoadStats:
+    sent: int = 0
+    errors: int = 0
+    duration_sec: float = 0.0
+
+    @property
+    def rps(self) -> float:
+        if self.duration_sec <= 0:
+            return 0.0
+        return self.sent / self.duration_sec
+
+
+@dataclass
+class LoadGenerator:
+    """Rate-limited in-process load driver.
+
+    `rps` is exact: a request is launched every 1/rps seconds on a
+    short-lived thread so slow responses don't slow the sender.
+    `duration_sec` is a hard upper bound; `stop()` / `__exit__` will
+    signal an early shutdown and block until in-flight requests
+    drain (up to `drain_timeout`).
+    """
+    rps: float
+    duration_sec: float = 0.0  # 0 = run until stop() called
+    base_url: str = BASE_URL
+    mix: tuple = field(default_factory=lambda: _DEFAULT_MIX)
+    drain_timeout: float = 5.0
+
+    def __post_init__(self):
+        weighted = []
+        for weight, path, headers in self.mix:
+            weighted.extend([(path, headers)] * weight)
+        self._weighted = weighted
+        self._ssl = ssl._create_unverified_context()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.stats = LoadStats()
+
+    # --- Context manager API --------------------------------------------
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.stop()
+        return False  # don't swallow exceptions
+
+    # --- Lifecycle ------------------------------------------------------
+
+    def start(self) -> None:
+        if self._thread is not None:
+            raise RuntimeError("LoadGenerator already started")
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self.duration_sec + self.drain_timeout + 5)
+            self._thread = None
+
+    # --- Core loop ------------------------------------------------------
+
+    def _fire_one(self) -> None:
+        path, headers = random.choice(self._weighted)
+        try:
+            req = urllib.request.Request(self.base_url + path, headers=headers)
+            urllib.request.urlopen(req, context=self._ssl, timeout=5).read()
+        except (URLError, Exception):
+            self.stats.errors += 1
+
+    def _run(self) -> None:
+        interval = 1.0 / self.rps
+        start = time.time()
+        end = start + self.duration_sec if self.duration_sec > 0 else float("inf")
+        next_fire = start
+
+        while time.time() < end and not self._stop.is_set():
+            next_fire += interval
+            threading.Thread(target=self._fire_one, daemon=True).start()
+            self.stats.sent += 1
+
+            # If the server slows us down, skip the sleep so actual
+            # rps stays on target over the window.
+            sleep_for = next_fire - time.time()
+            if sleep_for > 0:
+                # Shorter waits keep stop() responsive.
+                self._stop.wait(timeout=sleep_for)
+
+        # Allow in-flight requests to drain.
+        drain_deadline = time.time() + self.drain_timeout
+        while threading.active_count() > 1 and time.time() < drain_deadline:
+            time.sleep(0.1)
+        self.stats.duration_sec = time.time() - start
+
+
+def main_cli() -> None:
+    """CLI entry for tests/stress/soak.sh back-compat:
+
+        python -m botshield_test.load <rps> <duration_sec> [base]
+    """
+    import sys
+
+    if len(sys.argv) < 3:
+        sys.exit("usage: python -m botshield_test.load "
+                 "<rps> <duration_sec> [base_url]")
+    rps = float(sys.argv[1])
+    duration_sec = float(sys.argv[2])
+    base = sys.argv[3] if len(sys.argv) > 3 else BASE_URL
+
+    gen = LoadGenerator(rps=rps, duration_sec=duration_sec, base_url=base)
+    gen.start()
+    gen._thread.join()
+    s = gen.stats
+    print(
+        f"sent={s.sent} errors={s.errors} "
+        f"duration={int(s.duration_sec)}s "
+        f"target_rps={rps:.0f} actual_rps={s.rps:.1f}"
+    )
+
+
+if __name__ == "__main__":
+    main_cli()

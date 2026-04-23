@@ -95,7 +95,17 @@ echo "# soak_run timestamp=$ts duration=$DURATION rps=$RPS" > "$REPORT"
 echo "# start_unix=$start_unix start_rss_kb=$start_rss start_log_bytes=$start_log_size" >> "$REPORT"
 
 # -------- Launch the load --------
-"$HERE/soak_load.py" "$RPS" "$duration_sec" "$BASE" \
+# Load driver lives in the framework as botshield_test.load (M11.7).
+# Require the venv — soak is a long-running job, and a silent
+# fallback to a system python that can't import the framework would
+# produce the kind of empty-report false-green the analyzer now
+# guards against, but noisier early is better.
+VENV="$HERE/../.venv"
+if [[ ! -x "$VENV/bin/python" ]]; then
+  echo "soak.sh: tests/.venv missing — run sudo tests/setup/provision.sh" >&2
+  exit 2
+fi
+"$VENV/bin/python" -m botshield_test.load "$RPS" "$duration_sec" "$BASE" \
   > "$LOAD_OUT" 2>&1 &
 LOAD_PID=$!
 
