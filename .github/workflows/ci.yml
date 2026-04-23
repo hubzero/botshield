@@ -1,19 +1,20 @@
 name: CI
 
 # Per-PR gate: fresh Ubuntu runner, provision the module + dev vhost,
-# run the unit + integration + acceptance tests. Stress (short soak,
-# no wrk matrix) runs too so we catch any regression that needs
-# sustained traffic to show up.
+# run the unit + integration + acceptance tests, then the short soak
+# smoke so we catch regressions that only show up under sustained
+# traffic.
 #
-# The full 8h soak + the MPM matrix + sanitizer runs are too expensive
-# for every PR — they're gated to the nightly job below.
+# The 8h soak is too long per-PR and runs on the nightly schedule.
+# MPM-matrix and sanitizer jobs are planned (see PLAN.md M11.7 /
+# M10.1) but not wired here yet.
 
 on:
   pull_request:
     branches: [ main ]
   push:
     branches: [ main ]
-  # Nightly: runs the long soak + the full stress matrix.
+  # Nightly: runs the 8h soak against mpm_event.
   schedule:
     - cron: "0 6 * * *"
   workflow_dispatch:
@@ -66,9 +67,12 @@ jobs:
             /var/log/apache2/error.log
           retention-days: 7
 
-  # -------- Nightly: full 8h soak + sanitizer build. --------
+  # -------- Nightly: 8h soak only (for now). --------
+  # MPM matrix + sanitizer builds are planned as separate jobs — see
+  # PLAN.md M11.7 (MPM matrix as pytest parametrize) and M10.1
+  # (sanitizer binary, currently a local build target, not CI).
   nightly:
-    name: 8h soak + sanitizer
+    name: 8h soak
     # Only run on scheduled / manual trigger, not per-PR.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04

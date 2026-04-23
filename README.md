@@ -19,8 +19,15 @@ multi-provider cohabitation on one vhost. Observability is shipped:
 structured `key=value` decision-log line per request, 41 Prometheus
 metrics at `<prefix>/metrics`, and a `mod_status` contribution hook.
 Accessibility passes WCAG 2.1 AA on every interstitial variant.
-Production hardening (sanitizers, stress, MPM matrix, soak) is the
-next planned milestone.
+Production hardening is shipped through M10.3: clean under ASan +
+UBSan, load-tested with wrk, MPM-matrix-verified across event /
+worker / prefork with graceful-restart coverage. The overnight soak
+(M10.4) has runner + analyzer in `tests/stress/` and is ready to
+kick off. An in-repo test suite landed in M11.1–M11.3: 22 tests
+across `tests/unit`, `tests/integration`, and `tests/acceptance`,
+a GitHub Actions PR gate, and a 60-second soak smoke on every PR.
+Next up (M11.4+) is rebuilding the test framework on pytest +
+Playwright — see PLAN.md for the full arc.
 
 ## How it works
 

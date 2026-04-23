@@ -92,14 +92,24 @@ for cat in "${CATEGORIES[@]}"; do
     printf "\n=== %s ===\n" "$name"
     out=$(mktemp /tmp/bs_test_out.XXXXXX)
     if "$t" > "$out" 2>&1; then
+      # A zero exit code is necessary but not sufficient. The test
+      # also has to emit at least one PASS: or SKIP: marker — a
+      # script that silently returns 0 without running any assertion
+      # (truncated, early-returned, stubbed out) would otherwise
+      # score as green. Require one of the markers explicitly.
       if grep -q "^  SKIP:" "$out"; then
         skip=$((skip + 1))
         grep "^  SKIP:" "$out"
-      else
+      elif grep -q "^  PASS:" "$out"; then
         pass=$((pass + 1))
-        grep "^  PASS:" "$out" || true
+        grep "^  PASS:" "$out"
+        [[ $VERBOSE -eq 1 ]] && grep -v "^  PASS:\|^  SKIP:" "$out" || true
+      else
+        fail=$((fail + 1))
+        fails+=("$name")
+        echo "  FAIL: test exited 0 without emitting any PASS: or SKIP: markers"
+        cat "$out"
       fi
-      [[ $VERBOSE -eq 1 ]] && grep -v "^  PASS:\|^  SKIP:" "$out" || true
     else
       fail=$((fail + 1))
       fails+=("$name")
