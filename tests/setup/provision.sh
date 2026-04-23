@@ -1,0 +1,107 @@
+#!/bin/bash
+# tests/setup/provision.sh — one-shot idempotent setup.
+#
+# Brings a freshly-installed Ubuntu/Debian box to a state where
+# `tests/run` works:
+#   - apt packages for build + runtime + test deps
+#   - /etc/botshield/ with the secret files tests need (0600)
+#   - /etc/ssl/botshield-dev/ with a self-signed cert
+#   - /var/lib/botshield/ for the state file
+#   - dev vhost installed + enabled, mod_botshield built + enabled
+#   - mod_status + mod_remoteip enabled
+#   - mpm_event selected (tests assume threaded MPM by default; the
+#     mpm matrix test switches as needed)
+#
+# Idempotent: safe to re-run. Won't overwrite existing secrets
+# (it only creates them if they're missing), so if you've set up
+# real provider keys for testing, this won't stomp them.
+#
+# Usage:  sudo tests/setup/provision.sh
+# Idempotent: can be run repeatedly without damage.
+
+set -eu
+
+if [[ $EUID -ne 0 ]]; then
+  echo "provision.sh must be run as root (use sudo)." >&2
+  exit 1
+fi
+
+REPO="$(cd "$(dirname "$0")/../.." && pwd)"
+
+echo "== apt packages =="
+apt-get update -qq
+apt-get install -y -qq \
+  apache2 apache2-dev \
+  libssl-dev libcurl4-openssl-dev libjson-c-dev \
+  libpcre2-dev \
+  python3 \
+  curl openssl \
+  wrk >/dev/null
+
+echo "== module build + install =="
+cd "$REPO"
+sudo -u "$SUDO_USER" make clean >/dev/null || true
+sudo -u "$SUDO_USER" make >/dev/null
+make install >/dev/null
+
+printf "LoadModule botshield_module /usr/lib/apache2/modules/mod_botshield.so\n" \
+  > /etc/apache2/mods-available/botshield.load
+a2enmod botshield status remoteip ssl >/dev/null
+# Ensure threaded MPM by default
+if [[ ! -e /etc/apache2/mods-enabled/mpm_event.load ]]; then
+  a2dismod mpm_prefork mpm_worker 2>/dev/null || true
+  a2enmod mpm_event >/dev/null
+fi
+
+echo "== /etc/ssl/botshield-dev self-signed cert =="
+install -d -m 755 /etc/ssl/botshield-dev
+if [[ ! -s /etc/ssl/botshield-dev/server.crt ]]; then
+  openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+    -subj "/CN=localhost" \
+    -keyout /etc/ssl/botshield-dev/server.key \
+    -out   /etc/ssl/botshield-dev/server.crt \
+    >/dev/null 2>&1
+  chmod 600 /etc/ssl/botshield-dev/server.key
+  chmod 644 /etc/ssl/botshield-dev/server.crt
+fi
+
+echo "== /etc/botshield secrets (0600) =="
+install -d -m 755 /etc/botshield
+# The HMAC secret for cookie signing — generate once if absent.
+if [[ ! -s /etc/botshield/secret ]]; then
+  openssl rand -hex 32 > /etc/botshield/secret
+  chmod 600 /etc/botshield/secret
+fi
+
+# Provider dummy secrets. Each is publicly-documented by the provider
+# (Turnstile/hCaptcha/reCAPTCHA v2) or a placeholder string (Friendly,
+# GeeTest, reCAPTCHA v3). Tests that need REAL secrets read them from
+# env vars rather than these files.
+install_secret() {
+  local path="$1" content="$2"
+  [[ -s "$path" ]] && return 0
+  printf "%s" "$content" > "$path"
+  chmod 600 "$path"
+}
+install_secret /etc/botshield/turnstile-secret       "1x0000000000000000000000000000000AA"
+install_secret /etc/botshield/hcaptcha-secret        "0x0000000000000000000000000000000000000000"
+install_secret /etc/botshield/recaptcha-v2-secret    "6LeIxAcTAAAAAGG-vFI1TnRWxMZNFuojJ4WifJWe"
+install_secret /etc/botshield/recaptcha-v3-secret    "6LeIxAcTAAAAAGG-vFI1TnRWxMZNFuojJ4WifJWe"
+install_secret /etc/botshield/friendly-secret        "FRIENDLYCAPTCHA_FREE_TIER_SECRET_REPLACE_ME_WITH_REAL"
+install_secret /etc/botshield/geetest-secret         "GEETEST_CAPTCHA_KEY_REPLACE_WITH_REAL_FROM_DASHBOARD"
+
+echo "== /var/lib/botshield (state file dir) =="
+install -d -m 750 -o www-data -g www-data /var/lib/botshield
+
+echo "== dev vhost =="
+cp "$REPO/apache/botshield-dev.conf" /etc/apache2/sites-available/
+a2dissite 000-default 2>/dev/null || true
+a2ensite botshield-dev >/dev/null
+
+echo "== configtest + reload =="
+apachectl configtest
+systemctl reload apache2 || systemctl start apache2
+sleep 1
+
+echo ""
+echo "provision.sh: OK — tests/run is ready."
