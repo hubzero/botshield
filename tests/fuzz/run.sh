@@ -38,4 +38,12 @@ if [[ -z "$(ls -A "$CORPUS" 2>/dev/null)" ]]; then
 fi
 
 echo "fuzzing for ${DURATION}s (corpus: $(ls -1 "$CORPUS" | wc -l) seeds)..."
+# LibFuzzer writes `crash-<hash>` / `leak-<hash>` / `timeout-<hash>`
+# / `slow-unit-<hash>` reproducer files to its current working
+# directory, not next to the binary. cd into tests/fuzz/ first so
+# the reproducers land alongside the harness + corpus — what the
+# README claims and what operators actually want on a finding.
+# .gitignore catches these patterns at the repo root AND inside
+# tests/fuzz/ (see the `crash-*` etc. entries in .gitignore).
+cd "$HERE"
 "$BIN" -max_total_time="$DURATION" -print_final_stats=1 "$@" "$CORPUS"
