@@ -118,6 +118,21 @@ module AP_MODULE_DECLARE_DATA botshield_module;
 /* Forward declarations for the PoW algorithm dispatch table. */
 typedef struct bs_dir_cfg bs_dir_cfg;
 
+/* Forward decls for the bounded numeric parsers. Defined later in the
+ * file alongside bs_from_hex; hoisted here so the directive setters
+ * in the config block below can use them (security review: directive
+ * setters now use strict bounded parsing like the cookie verify
+ * path, not libc atoi which silently accepts "60sec" as 60 and
+ * invokes UB on overflow). */
+static int bs_parse_int_bounded(const char *s,
+                                long min_val, long max_val,
+                                apr_size_t max_len,
+                                long *out);
+static int bs_parse_int64_bounded(const char *s,
+                                  apr_int64_t min_val,
+                                  apr_int64_t max_val,
+                                  apr_int64_t *out);
+
 /* Reputation state carried in the cookie. Populated fresh on a first-time
  * challenge (all zeros), and merged forward with forgiveness on re-issues. */
 typedef struct {
@@ -695,22 +710,24 @@ static const char *bs_set_show_box(cmd_parms *cmd, void *cfg_v, int flag)
 static const char *bs_set_cookie_ttl(cmd_parms *cmd, void *cfg_v, const char *arg)
 {
     (void)cmd;
-    int n = atoi(arg);
-    if (n < 1 || n > 86400) {
-        return "BotShieldCookieTTL must be between 1 and 86400 seconds";
+    /* Strict parse — reject "60sec" and overflow, not just silently
+     * truncate via atoi(). Review finding #2. */
+    long n;
+    if (!bs_parse_int_bounded(arg, 1, 86400, 6, &n)) {
+        return "BotShieldCookieTTL: must be an integer 1..86400 (seconds)";
     }
-    ((bs_dir_cfg *)cfg_v)->cookie_ttl = n;
+    ((bs_dir_cfg *)cfg_v)->cookie_ttl = (int)n;
     return NULL;
 }
 
 static const char *bs_set_difficulty(cmd_parms *cmd, void *cfg_v, const char *arg)
 {
     (void)cmd;
-    int n = atoi(arg);
-    if (n < 1 || n > 8) {
-        return "BotShieldDifficulty must be between 1 and 8";
+    long n;
+    if (!bs_parse_int_bounded(arg, 1, 8, 2, &n)) {
+        return "BotShieldDifficulty: must be an integer 1..8";
     }
-    ((bs_dir_cfg *)cfg_v)->difficulty = n;
+    ((bs_dir_cfg *)cfg_v)->difficulty = (int)n;
     return NULL;
 }
 
@@ -774,9 +791,10 @@ static const char *bs_set_shm_size(cmd_parms *cmd, void *dconf, const char *arg)
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
     /* Accept "N", "NK", "NM", "NG" (case-insensitive). */
+    errno = 0;
     char *end = NULL;
     apr_int64_t n = apr_strtoi64(arg, &end, 10);
-    if (end == arg || n <= 0) {
+    if (errno != 0 || end == arg || n <= 0) {
         return "BotShieldShmSize: expected a positive integer byte count";
     }
     apr_int64_t mult = 1;
@@ -787,8 +805,16 @@ static const char *bs_set_shm_size(cmd_parms *cmd, void *dconf, const char *arg)
         return apr_psprintf(cmd->pool,
             "BotShieldShmSize: unknown suffix '%c'", *end);
     }
+    /* Guard the suffix multiply (security review #2). The explicit
+     * max below (256 MiB) is the real gate, but catching an overflow
+     * BEFORE the compare keeps signed-arithmetic UB off the table —
+     * n * mult could wrap negative on pathological input and sneak
+     * past the `bytes < 128K` check. */
+    if (n > (256LL * 1024 * 1024) / mult) {
+        return "BotShieldShmSize: value too large (overflows size_t)";
+    }
     apr_int64_t bytes = n * mult;
-    if (bytes < 128 * 1024 || bytes > 256LL * 1024 * 1024) {
+    if (bytes < 128 * 1024 || bytes > (256LL * 1024 * 1024)) {
         return "BotShieldShmSize: must be between 128K and 256M";
     }
     scfg->shm_size = (apr_size_t)bytes;
@@ -801,13 +827,14 @@ static const char *bs_set_flagged_capacity(cmd_parms *cmd, void *dconf,
     (void)dconf;
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
-    int n = atoi(arg);
-    if (n < BS_FLAGGED_MIN_SLOTS || n > BS_FLAGGED_MAX_SLOTS) {
+    long n;
+    if (!bs_parse_int_bounded(arg, BS_FLAGGED_MIN_SLOTS,
+                              BS_FLAGGED_MAX_SLOTS, 10, &n)) {
         return apr_psprintf(cmd->pool,
-            "BotShieldFlaggedIPCapacity: must be between %d and %d",
+            "BotShieldFlaggedIPCapacity: must be an integer %d..%d",
             BS_FLAGGED_MIN_SLOTS, BS_FLAGGED_MAX_SLOTS);
     }
-    scfg->flagged_capacity = n;
+    scfg->flagged_capacity = (int)n;
     return NULL;
 }
 
@@ -826,10 +853,12 @@ static const char *bs_set_flag_ip(cmd_parms *cmd, void *cfg_v,
 
     int ttl = 3600;
     if (ttl_str && *ttl_str) {
-        ttl = atoi(ttl_str);
-        if (ttl < 60 || ttl > 30 * 86400) {
-            return "BotShieldFlagIP: ttl must be 60..2592000 seconds";
+        long n;
+        if (!bs_parse_int_bounded(ttl_str, 60, 30 * 86400, 8, &n)) {
+            return "BotShieldFlagIP: ttl must be an integer 60..2592000 "
+                   "(seconds)";
         }
+        ttl = (int)n;
     }
     cfg->flag_on_match     = bits;
     cfg->flag_on_match_ttl = ttl;
@@ -1449,13 +1478,14 @@ static const char *bs_set_bloom_ips(cmd_parms *cmd, void *dconf,
     (void)dconf;
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
-    int n = atoi(arg);
-    if (n < BS_BLOOM_MIN_IPS || n > BS_BLOOM_MAX_IPS) {
+    long n;
+    if (!bs_parse_int_bounded(arg, BS_BLOOM_MIN_IPS,
+                              BS_BLOOM_MAX_IPS, 12, &n)) {
         return apr_psprintf(cmd->pool,
-            "BotShieldBloomIPs: must be between %d and %d",
+            "BotShieldBloomIPs: must be an integer %d..%d",
             BS_BLOOM_MIN_IPS, BS_BLOOM_MAX_IPS);
     }
-    scfg->bloom_ips = n;
+    scfg->bloom_ips = (int)n;
     return NULL;
 }
 
@@ -1465,13 +1495,14 @@ static const char *bs_set_bloom_window(cmd_parms *cmd, void *dconf,
     (void)dconf;
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
-    int n = atoi(arg);
-    if (n < BS_BLOOM_MIN_WINDOW || n > BS_BLOOM_MAX_WINDOW) {
+    long n;
+    if (!bs_parse_int_bounded(arg, BS_BLOOM_MIN_WINDOW,
+                              BS_BLOOM_MAX_WINDOW, 10, &n)) {
         return apr_psprintf(cmd->pool,
-            "BotShieldBloomWindow: must be between %d and %d seconds",
+            "BotShieldBloomWindow: must be an integer %d..%d (seconds)",
             BS_BLOOM_MIN_WINDOW, BS_BLOOM_MAX_WINDOW);
     }
-    scfg->bloom_window_secs = n;
+    scfg->bloom_window_secs = (int)n;
     return NULL;
 }
 
@@ -2488,12 +2519,18 @@ static const char *bs_set_state_save_interval(cmd_parms *cmd, void *dconf,
     (void)dconf;
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
-    int n = atoi(arg);
-    /* 0 = shutdown-only. Otherwise must be in a sane operational range. */
-    if (n != 0 && (n < 30 || n > 86400)) {
+    /* 0 = shutdown-only. Otherwise must be in a sane operational
+     * range. Parse with the full 0..86400 envelope, then enforce
+     * the "no 1..29 values" policy explicitly. */
+    long n;
+    if (!bs_parse_int_bounded(arg, 0, 86400, 6, &n)) {
+        return "BotShieldStateSaveInterval: must be an integer 0..86400 "
+               "(seconds)";
+    }
+    if (n != 0 && n < 30) {
         return "BotShieldStateSaveInterval: 0 (shutdown-only) or 30..86400 seconds";
     }
-    scfg->state_save_interval = n;
+    scfg->state_save_interval = (int)n;
     return NULL;
 }
 

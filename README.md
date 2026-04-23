@@ -19,18 +19,23 @@ multi-provider cohabitation on one vhost. Observability is shipped:
 structured `key=value` decision-log line per request, 41 Prometheus
 metrics at `<prefix>/metrics`, and a `mod_status` contribution hook.
 Accessibility passes WCAG 2.1 AA on every interstitial variant.
-Production hardening is shipped through M10.3: clean under ASan +
-UBSan, load-tested with wrk, MPM-matrix-verified across event /
-worker / prefork with graceful-restart coverage. The overnight soak
-(M10.4) has runner + analyzer in `tests/stress/` and is ready to
-kick off. The test suite was rebuilt on pytest through M11.5: 32
-tests under `tests/pytests/` backed by a reusable `botshield_test`
+Production hardening is shipped through M10.4: clean under ASan +
+UBSan, load-tested, MPM-matrix-verified across event / worker /
+prefork with graceful-restart coverage, and 8h-soak-clean (1.4M
+requests, +4MB RSS, zero crashes). The overnight soak now runs as
+a pytest test (`tests/pytests/test_soak.py`), kicked off nightly
+via the GitHub Actions workflow. The test suite shipped through
+M11.8: 60+ pytest tests backed by a reusable `botshield_test`
 framework (`httpx` client, transactional `config_override`,
 structured decision-log parser, time-salted IP allocator,
-data-driven per-provider captcha specs), a GitHub Actions PR gate,
-and a 60-second soak smoke on every PR. The M11.1–M11.3 bash suite
-is archived in `tests/bash-legacy/` as a reference. Next up (M11.6)
-is the Playwright + Chromium acceptance layer — see PLAN.md.
+data-driven per-provider captcha specs, a real Chromium via
+Playwright for the acceptance layer, axe-core a11y smoke,
+hypothesis property tests for cookie tampering, Prometheus
+exposition-format validator, session-scoped MPM matrix, and a
+LibFuzzer harness for the cookie parser). CI splits a fast
+per-PR lane from a browser lane and a nightly soak. The M11.1–
+M11.3 bash suite is archived in `tests/bash-legacy/` as a
+reference — see PLAN.md for the milestone-by-milestone history.
 
 ## How it works
 

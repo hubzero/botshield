@@ -198,11 +198,32 @@ run_pytests() {
     rm -f "$pyout"
   }
 
+  # Snapshot the running totals so we can tell — after all phases
+  # finish — whether ANY phase collected a test. pytest exit 5 (no
+  # tests collected) is benign for ONE phase inside --parallel (e.g.
+  # --match state_round_trip only matches serial), but an invocation
+  # where no phase collected anything is a user-visible footgun
+  # (--match typo, contradictory --mark expression, etc.) that used
+  # to exit 0 with "0 passed, 0 skipped, 0 failed" and read green
+  # to automation.
+  local start_pass=$pass start_skip=$skip start_fail=$fail
+
   if [[ $PARALLEL -eq 1 ]]; then
     _one_pytest_invocation "not serial" "auto"
     _one_pytest_invocation "serial" ""
   else
     _one_pytest_invocation "" ""
+  fi
+
+  local ran=$(( (pass - start_pass) + (skip - start_skip) + (fail - start_fail) ))
+  if [[ $ran -eq 0 ]]; then
+    echo "  FAIL: no tests were collected by this invocation"
+    if [[ -n "$MATCH$MARK_EXTRA" ]]; then
+      echo "         filters in effect: match='${MATCH}' mark='${MARK_EXTRA}'"
+      echo "         — check for a typo or an impossible marker expression"
+    fi
+    fail=$(( fail + 1 ))
+    fails+=("pytests (no tests collected)")
   fi
 }
 
