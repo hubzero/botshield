@@ -3142,6 +3142,25 @@ static size_t bs_curl_write_cb(char *ptr, size_t size, size_t nmemb,
                                void *userdata)
 {
     bs_curl_buffer *b = userdata;
+    /* Overflow-guard the size*nmemb multiply (security review —
+     * hardening point). libcurl's documented contract keeps `size`
+     * at 1 in practice, and BS_MAX_CAPTCHA_BODY caps the target
+     * buffer anyway, so a realistic overrun is vanishingly unlikely.
+     * But the guard is two cheap comparisons and closes the class
+     * entirely: an overflow would wrap `incoming` to a small value,
+     * make our truncation accounting think we took the whole chunk
+     * when we really dropped a mountain of bytes, and return a
+     * mis-stated byte count to libcurl. Treat overflow as "drop
+     * this chunk" same as the already-truncated branch.*/
+    if (size > 0 && nmemb > SIZE_MAX / size) {
+        b->truncated = 1;
+        /* Return 0 to tell libcurl we consumed nothing — it will
+         * abort the transfer with CURLE_WRITE_ERROR, which the
+         * caller maps to BS_CAPTCHA_ERROR + fail-open. That's the
+         * right behavior for an obviously-malformed provider
+         * response: don't silently drop it. */
+        return 0;
+    }
     size_t incoming = size * nmemb;
     if (b->truncated) return incoming;   /* drain silently */
     size_t room = (b->len < b->cap) ? (b->cap - b->len) : 0;
