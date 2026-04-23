@@ -25,6 +25,11 @@ tests/
 │   └── providers.py      # per-captcha-provider specs (quirks as data)
 ├── pytests/              # the test files themselves
 │   └── test_soak.py      # soak runner — @slow + @serial pytest
+├── fuzz/                 # LibFuzzer harness (M11.8)
+│   ├── fuzz_cookie.c     # harness for bs_verify_cookie
+│   ├── _fuzz_stubs.h     # minimal Apache runtime stubs
+│   ├── seed_corpus.py    # populates corpus/ with real cookies
+│   └── run.sh            # `run.sh [seconds]` — smokes in 30s
 ├── setup/
 │   ├── provision.sh      # idempotent one-shot box setup (creates .venv)
 │   └── reset-state.sh    # between-run state-file wipe
@@ -68,6 +73,31 @@ otherwise. The directory is gitignored.
 `conftest.py` rather than per-test decorators — new live_network
 tests inherit the policy automatically. Non-live tests have zero
 retries; flake there is a bug to fix, not to mask.
+
+## Fuzzing (M11.8)
+
+Coverage-guided fuzz target for `bs_verify_cookie`. Not in the
+default pytest suite — fuzzing wants minutes-to-hours budgets, not
+per-PR budgets. Run manually:
+
+```bash
+sudo apt install -y clang libfuzzer-18-dev    # one-time
+make fuzz                                      # builds tests/fuzz/fuzz_cookie
+tests/fuzz/run.sh 30                           # 30-second smoke
+tests/fuzz/run.sh 3600 -jobs=4                 # 1-hour parallel campaign
+```
+
+The harness is ASan + UBSan + libFuzzer. A crash, UB report, or
+leak produces a `crash-<hash>` / `leak-<hash>` file next to the
+binary — these are the minimized reproducer inputs.
+
+The hypothesis-driven byte-tamper test in
+`pytests/test_cookie_property.py` covers the same parser at 50
+exec/sec via HTTP; LibFuzzer here covers it at 200k+ exec/sec
+in-process with coverage feedback. Complementary, not redundant:
+HTTP hypothesis catches end-to-end issues (cookies the module
+accepts it shouldn't); LibFuzzer catches memory safety / UB bugs
+in the parsing C.
 
 ## Markers
 

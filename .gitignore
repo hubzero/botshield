@@ -23,3 +23,14 @@ tests/.pytest_cache/
 tests/*.egg-info/
 tests/reports/
 __pycache__/
+
+# Fuzz harness build artifacts + per-run corpus. The corpus grows on
+# every fuzz run with newly-discovered inputs; we don't track it in
+# git. seed_corpus.py regenerates a starter set any time.
+tests/fuzz/fuzz_cookie
+tests/fuzz/corpus/
+# LibFuzzer also drops crash-* files next to the binary on a finding
+crash-*
+leak-*
+timeout-*
+slow-unit-*
