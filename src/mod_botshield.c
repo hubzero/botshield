@@ -571,11 +571,14 @@ typedef struct {
     void        *bot_classifier;       /* bs_ua_classifier *, opaque here */
     apr_hash_t  *bot_ranges;           /* name → apr_array_header_t of apr_ipsubnet_t* */
     apr_hash_t *allow_bots;         /* name → bs_allow_bot_entry * (directive-defined) */
-    /* E2.1 — policy enforcement (rate limit + path block). Both hashes
-     * keyed by cohort name; resolved ranges + SHM slot indices populated
-     * in post_config. */
-    apr_hash_t  *rate_limits;          /* name → bs_rate_limit_entry * */
-    apr_hash_t  *block_paths;          /* name → bs_block_path_entry * */
+    /* E2.1 — policy enforcement (rate limit + path block). Ordered
+     * arrays of entry pointers. Precedence at request time is
+     * declaration order (first match wins). Upsert-by-name at
+     * config time — re-declaring the same name replaces the entry
+     * in place, preserving its position so operators can override
+     * a rule without disturbing relative order of the others. */
+    apr_array_header_t *rate_limits;   /* bs_rate_limit_entry * */
+    apr_array_header_t *block_paths;   /* bs_block_path_entry * */
 } bs_server_cfg;
 
 /* --- Config lifecycle --- */
@@ -635,6 +638,39 @@ static void *bs_create_dir_cfg(apr_pool_t *p, char *path)
  *    overlay arg, so passing (overlay=add, base=base) gives vhost-
  *    overrides-main. Operators can add to, or shadow, a main-scope
  *    bot declaration from a specific vhost. */
+/* Merge two E2.1 rule arrays. Vhost (add) leads; main-scope (base)
+ * entries whose name doesn't already appear in vhost are appended
+ * as fallbacks. Both entry types start with `const char *name` as
+ * their first field so we can dedup by reading *(const char **)entry
+ * without a per-type callback. */
+static apr_array_header_t *bs_merge_rule_array(apr_pool_t *p,
+                                               apr_array_header_t *base,
+                                               apr_array_header_t *add)
+{
+    int nadd  = add  ? add->nelts  : 0;
+    int nbase = base ? base->nelts : 0;
+    if (nadd == 0)  return base;
+    if (nbase == 0) return add;
+
+    apr_array_header_t *out = apr_array_copy(p, add);
+    for (int i = 0; i < nbase; i++) {
+        void *be = APR_ARRAY_IDX(base, i, void *);
+        const char *bname = *(const char **)be;
+        int shadowed = 0;
+        for (int j = 0; j < out->nelts; j++) {
+            void *oe = APR_ARRAY_IDX(out, j, void *);
+            if (strcmp(*(const char **)oe, bname) == 0) {
+                shadowed = 1;
+                break;
+            }
+        }
+        if (!shadowed) {
+            *(void **)apr_array_push(out) = be;
+        }
+    }
+    return out;
+}
+
 static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
 {
     bs_server_cfg *base = base_v;
@@ -646,18 +682,19 @@ static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
         out->allow_bots = apr_hash_overlay(p, add->allow_bots,
                                            base->allow_bots);
     }
-    /* E2.1 — union rate_limits / block_paths the same way. Vhost
-     * wins on name collision; main-scope entries flow through. */
-    if (base->rate_limits && apr_hash_count(base->rate_limits) > 0
-        && add->rate_limits) {
-        out->rate_limits = apr_hash_overlay(p, add->rate_limits,
-                                            base->rate_limits);
-    }
-    if (base->block_paths && apr_hash_count(base->block_paths) > 0
-        && add->block_paths) {
-        out->block_paths = apr_hash_overlay(p, add->block_paths,
-                                             base->block_paths);
-    }
+    /* E2.1 — ordered-array merge. Vhost entries lead (more-specific
+     * wins on first-match), then main-scope entries as fallbacks.
+     * If a name exists in both, the vhost version wins and the
+     * main version is skipped entirely (no shadowed duplicates).
+     *
+     * Both struct types (bs_rate_limit_entry, bs_block_path_entry)
+     * share a const char *name as their first field, so we can
+     * key the dedup by the leading pointer word without branching
+     * per-type. */
+    out->rate_limits = bs_merge_rule_array(p, base->rate_limits,
+                                           add->rate_limits);
+    out->block_paths = bs_merge_rule_array(p, base->block_paths,
+                                           add->block_paths);
     return out;
 }
 
@@ -682,10 +719,11 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->bot_classifier   = NULL;
     scfg->bot_ranges       = NULL;
     scfg->allow_bots       = apr_hash_make(p);
-    /* E2.1 — rate-limit + block-path hashes; populated by directives,
-     * post_config resolves cohort ipspecs and assigns SHM slots. */
-    scfg->rate_limits      = apr_hash_make(p);
-    scfg->block_paths      = apr_hash_make(p);
+    /* E2.1 — rate-limit + block-path ordered arrays; populated by
+     * directives in declaration order, post_config resolves cohort
+     * ipspecs and assigns SHM slots. */
+    scfg->rate_limits      = apr_array_make(p, 4, sizeof(void *));
+    scfg->block_paths      = apr_array_make(p, 4, sizeof(void *));
     return scfg;
 }
 
@@ -2221,12 +2259,15 @@ static int bs_path_glob_match(const char *pattern, const char *path)
 }
 
 /* Cohort match at request time. Returns 1 when this request belongs
- * to the cohort. */
+ * to the cohort. UA match is case-insensitive via strcasestr to
+ * match the directive's documented contract. strcasestr is a GNU
+ * extension, already relied on elsewhere in the module on the
+ * platforms we target (Linux/FreeBSD/macOS). */
 static int bs_cohort_matches(const bs_cohort *c,
                              const char *ua, request_rec *r)
 {
     if (!c->ua_any) {
-        if (!ua || !c->ua_pattern || !strstr(ua, c->ua_pattern)) return 0;
+        if (!ua || !c->ua_pattern || !strcasestr(ua, c->ua_pattern)) return 0;
     }
     if (!c->ip_any) {
         if (!c->ranges || !bs_allow_ip_in_ranges(c->ranges, r)) return 0;
@@ -2280,14 +2321,13 @@ static int bs_check_policy(request_rec *r)
     const char *ua = apr_table_get(r->headers_in, "User-Agent");
 
     /* Block paths first: if the request would be 403ed anyway there's
-     * no point charging it a token from a rate bucket it's also in. */
-    if (scfg->block_paths && apr_hash_count(scfg->block_paths) > 0) {
-        apr_hash_index_t *hi;
-        for (hi = apr_hash_first(r->pool, scfg->block_paths);
-             hi; hi = apr_hash_next(hi)) {
-            const void *k; void *v;
-            apr_hash_this(hi, &k, NULL, &v);
-            bs_block_path_entry *e = v;
+     * no point charging it a token from a rate bucket it's also in.
+     * Ordered-array iteration — first match wins; declaration order
+     * is the precedence. */
+    if (scfg->block_paths && scfg->block_paths->nelts > 0) {
+        for (int i = 0; i < scfg->block_paths->nelts; i++) {
+            bs_block_path_entry *e = APR_ARRAY_IDX(
+                scfg->block_paths, i, bs_block_path_entry *);
             if (!bs_path_glob_match(e->path_pattern, r->uri)) continue;
             if (!bs_cohort_matches(&e->cohort, ua, r)) continue;
             bs_score_add(r, BS_PENALTY_BLOCK_PATH, 3600,
@@ -2300,14 +2340,11 @@ static int bs_check_policy(request_rec *r)
         }
     }
 
-    if (scfg->rate_limits && apr_hash_count(scfg->rate_limits) > 0) {
+    if (scfg->rate_limits && scfg->rate_limits->nelts > 0) {
         bs_rate_counter *counters = (bs_rate_counter *)bs_shm.rate_counters;
-        apr_hash_index_t *hi;
-        for (hi = apr_hash_first(r->pool, scfg->rate_limits);
-             hi; hi = apr_hash_next(hi)) {
-            const void *k; void *v;
-            apr_hash_this(hi, &k, NULL, &v);
-            bs_rate_limit_entry *e = v;
+        for (int i = 0; i < scfg->rate_limits->nelts; i++) {
+            bs_rate_limit_entry *e = APR_ARRAY_IDX(
+                scfg->rate_limits, i, bs_rate_limit_entry *);
             if (!bs_cohort_matches(&e->cohort, ua, r)) continue;
             if (e->shm_slot < 0 || !counters) continue;
             if (bs_rate_counter_admit(&counters[e->shm_slot],
@@ -2726,14 +2763,10 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
             }                                                                \
         } while (0)
 
-        if (vcfg->rate_limits && apr_hash_count(vcfg->rate_limits) > 0) {
-            apr_hash_index_t *hi;
-            int n = 0;
-            for (hi = apr_hash_first(pconf, vcfg->rate_limits);
-                 hi; hi = apr_hash_next(hi)) {
-                const void *k; void *v;
-                apr_hash_this(hi, &k, NULL, &v);
-                bs_rate_limit_entry *e = v;
+        if (vcfg->rate_limits && vcfg->rate_limits->nelts > 0) {
+            for (int i = 0; i < vcfg->rate_limits->nelts; i++) {
+                bs_rate_limit_entry *e = APR_ARRAY_IDX(
+                    vcfg->rate_limits, i, bs_rate_limit_entry *);
                 BS_E21_RESOLVE_COHORT(&e->cohort,
                     "BotShieldRateLimit", e->name);
                 if (e->shm_slot < 0) {
@@ -2746,26 +2779,22 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                             (int)bs_shm.rate_counter_count, e->name);
                     }
                 }
-                n++;
             }
             ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
-                "mod_botshield: %d rate-limit cohorts wired", n);
+                "mod_botshield: %d rate-limit cohorts wired",
+                vcfg->rate_limits->nelts);
         }
 
-        if (vcfg->block_paths && apr_hash_count(vcfg->block_paths) > 0) {
-            apr_hash_index_t *hi;
-            int n = 0;
-            for (hi = apr_hash_first(pconf, vcfg->block_paths);
-                 hi; hi = apr_hash_next(hi)) {
-                const void *k; void *v;
-                apr_hash_this(hi, &k, NULL, &v);
-                bs_block_path_entry *e = v;
+        if (vcfg->block_paths && vcfg->block_paths->nelts > 0) {
+            for (int i = 0; i < vcfg->block_paths->nelts; i++) {
+                bs_block_path_entry *e = APR_ARRAY_IDX(
+                    vcfg->block_paths, i, bs_block_path_entry *);
                 BS_E21_RESOLVE_COHORT(&e->cohort,
                     "BotShieldBlockPath", e->name);
-                n++;
             }
             ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
-                "mod_botshield: %d block-path cohorts wired", n);
+                "mod_botshield: %d block-path cohorts wired",
+                vcfg->block_paths->nelts);
         }
         #undef BS_E21_RESOLVE_COHORT
     }
@@ -3668,7 +3697,18 @@ static const char *bs_set_rate_limit(cmd_parms *cmd, void *dconf,
     if (err) return apr_pstrcat(cmd->pool,
         "BotShieldRateLimit: ", err, NULL);
 
-    apr_hash_set(scfg->rate_limits, e->name, APR_HASH_KEY_STRING, e);
+    /* Upsert by name — a re-declaration replaces the entry in its
+     * existing slot, preserving declaration order for the surrounding
+     * rules. New names append. */
+    for (int i = 0; i < scfg->rate_limits->nelts; i++) {
+        bs_rate_limit_entry *ex =
+            APR_ARRAY_IDX(scfg->rate_limits, i, bs_rate_limit_entry *);
+        if (strcmp(ex->name, e->name) == 0) {
+            APR_ARRAY_IDX(scfg->rate_limits, i, bs_rate_limit_entry *) = e;
+            return NULL;
+        }
+    }
+    *(bs_rate_limit_entry **)apr_array_push(scfg->rate_limits) = e;
     return NULL;
 }
 
@@ -3712,7 +3752,16 @@ static const char *bs_set_block_path(cmd_parms *cmd, void *dconf,
     if (err) return apr_pstrcat(cmd->pool,
         "BotShieldBlockPath: ", err, NULL);
 
-    apr_hash_set(scfg->block_paths, e->name, APR_HASH_KEY_STRING, e);
+    /* Upsert by name — same semantics as BotShieldRateLimit. */
+    for (int i = 0; i < scfg->block_paths->nelts; i++) {
+        bs_block_path_entry *ex =
+            APR_ARRAY_IDX(scfg->block_paths, i, bs_block_path_entry *);
+        if (strcmp(ex->name, e->name) == 0) {
+            APR_ARRAY_IDX(scfg->block_paths, i, bs_block_path_entry *) = e;
+            return NULL;
+        }
+    }
+    *(bs_block_path_entry **)apr_array_push(scfg->block_paths) = e;
     return NULL;
 }
 
