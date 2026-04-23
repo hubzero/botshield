@@ -129,7 +129,9 @@ def test_captcha_rejected_via_bad_secret(
     # full line including whitespace; replacement uses the bad file.
     good = spec.good_secret_file
     bad = spec.bad_secret_file
-    pattern = rf"BotShieldCaptchaSecretFile {good}"
+    # Match 1+ whitespace characters between directive + path so the
+    # test survives aligned-column formatting in the vhost file.
+    pattern = rf"BotShieldCaptchaSecretFile\s+{good}"
     replacement = f"BotShieldCaptchaSecretFile {bad}"
 
     pending = pending_cookie(spec.demo_path)

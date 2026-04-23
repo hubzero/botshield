@@ -55,6 +55,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include <limits.h>
 
 module AP_MODULE_DECLARE_DATA botshield_module;
 
@@ -176,7 +177,14 @@ typedef bs_captcha_result (*bs_captcha_siteverify_fn)(
     const char *token, int timeout_ms,
     const char **out_details,
     long *out_http_code,
-    double *out_score);
+    double *out_score,
+    /* Binding-metadata out-params. NULL is a legal value and means
+     * "provider didn't return this field" — a valid signal (e.g.
+     * GeeTest doesn't expose hostname/action over the wire because
+     * its binding is HMAC-signed at request time). Callers only
+     * compare when non-NULL. */
+    const char **out_hostname,
+    const char **out_action);
 
 /* Captcha provider (M8). One entry per third-party provider we can
  * route to at the captcha tier. `implemented` mirrors bs_pow_algorithm.
@@ -496,6 +504,16 @@ struct bs_dir_cfg {
     double      recaptcha_v3_min_score;
     /* M8.1 per-scope verify-endpoint rate limit. -1 unset, 0 disables. */
     int         captcha_rate_limit;
+    /* Security review findings: binding-metadata validation on the
+     * siteverify response. NULL = use a runtime default
+     * (server_hostname, "botshield"); empty string = skip the check
+     * (operator opted out). Turnstile + reCAPTCHA v2/v3 + hCaptcha
+     * return `hostname`; reCAPTCHA v3 + Turnstile also return
+     * `action`. Without these checks, a valid token for the same
+     * sitekey but a different action or a different origin would
+     * satisfy the verify handler. */
+    const char *captcha_expected_hostname;
+    const char *captcha_expected_action;
 };
 
 /* Per-server config — holds SHM sizing before post-config runs. Only the
@@ -546,6 +564,8 @@ static void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->captcha_timeout_ms  = BS_UNSET;
     cfg->recaptcha_v3_min_score = -1.0;
     cfg->captcha_rate_limit  = BS_UNSET;
+    cfg->captcha_expected_hostname = NULL;
+    cfg->captcha_expected_action   = NULL;
     return cfg;
 }
 
@@ -621,6 +641,12 @@ static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     out->captcha_rate_limit = (add->captcha_rate_limit == BS_UNSET)
                               ? base->captcha_rate_limit
                               : add->captcha_rate_limit;
+    out->captcha_expected_hostname = add->captcha_expected_hostname
+                                     ? add->captcha_expected_hostname
+                                     : base->captcha_expected_hostname;
+    out->captcha_expected_action   = add->captcha_expected_action
+                                     ? add->captcha_expected_action
+                                     : base->captcha_expected_action;
     return out;
 }
 
@@ -811,18 +837,36 @@ static const char *bs_set_flag_ip(cmd_parms *cmd, void *cfg_v,
 }
 
 /* Accept ".example.com" (leading dot for cross-subdomain) or "example.com"
- * (host-only). Empty string clears the directive, reverting to host-only. */
+ * (host-only). Empty string clears the directive, reverting to host-only.
+ *
+ * Security review #3: the value is embedded into both the Set-Cookie
+ * header and (via bs_challenge_json) inline JSON in the interstitial
+ * script. The previous check only rejected whitespace + semicolons,
+ * which would have let quotes/backslashes through and given a
+ * config-time script-injection footgun to any templating system
+ * that ever hands this directive a non-human-typed value. Tighten
+ * to DNS hostname charset only: [a-zA-Z0-9.-], max 253 chars per
+ * RFC 1035. Leading dot permitted (cookie-domain convention). */
 static const char *bs_set_cookie_domain(cmd_parms *cmd, void *cfg_v, const char *arg)
 {
     bs_dir_cfg *cfg = cfg_v;
     if (!arg) return "BotShieldCookieDomain requires an argument";
     if (!*arg) { cfg->cookie_domain = NULL; return NULL; }
-    /* Very light validation: no whitespace, no semicolons (would break the
-     * Set-Cookie serialization). Trust the admin otherwise. */
-    for (const char *p = arg; *p; p++) {
-        if (*p == ';' || *p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
+
+    apr_size_t len = strlen(arg);
+    if (len > 253) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCookieDomain: '%s' exceeds 253-char RFC 1035 limit",
+            arg);
+    }
+    /* First char may be '.' (leading-dot domain) or an alphanumeric. */
+    for (apr_size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)arg[i];
+        int ok = isalnum(c) || c == '.' || c == '-';
+        if (!ok) {
             return apr_psprintf(cmd->pool,
-                "BotShieldCookieDomain: '%s' contains an unsafe character", arg);
+                "BotShieldCookieDomain: '%s' contains a character "
+                "outside [a-zA-Z0-9.-] — hostnames only", arg);
         }
     }
     cfg->cookie_domain = apr_pstrdup(cmd->pool, arg);
@@ -971,6 +1015,81 @@ static void bs_to_hex(const unsigned char *in, apr_size_t len, char *out)
         out[i*2+1] = H[in[i] & 0xF];
     }
     out[len*2] = '\0';
+}
+
+/* Bounded integer parser for pre-HMAC cookie fields (security review
+ * #2). atoi() and strtoul(..., NULL, 10) both invoke undefined
+ * behavior on overflow per C11 §7.22.1 — atoi because the result
+ * doesn't fit in int, strtoul because we never check errno. Our
+ * ASan/UBSan fuzz can't reliably catch that because the dangerous
+ * work happens inside libc, not in instrumented project code.
+ *
+ * Returns 1 on a clean parse within [min_val, max_val]; 0 otherwise.
+ * The out pointer is left untouched on failure so callers can treat
+ * 0-returns as "reject this cookie" without dancing around partial
+ * state. Accepts optional leading + only; negative values must fall
+ * within min_val to be accepted (no underflow tricks).
+ *
+ * max_len is a hard cap on the digit-string length — rejects gigantic
+ * inputs before they reach strtol. A 64-bit long can hold up to 19
+ * decimal digits, so any cookie field longer than that is obviously
+ * junk and we bail without invoking libc at all. */
+static int bs_parse_int_bounded(const char *s,
+                                long min_val, long max_val,
+                                apr_size_t max_len,
+                                long *out)
+{
+    if (!s || !*s) return 0;
+    apr_size_t len = strlen(s);
+    if (len > max_len) return 0;
+
+    errno = 0;
+    char *end = NULL;
+    long v = strtol(s, &end, 10);
+    if (errno != 0)        return 0;  /* ERANGE or other libc complaint */
+    if (!end || *end != '\0') return 0;  /* trailing junk */
+    if (v < min_val || v > max_val) return 0;
+    *out = v;
+    return 1;
+}
+
+/* 32-bit unsigned variant for the flags field. strtoul also invokes
+ * UB on overflow if errno isn't checked — same hardening. */
+static int bs_parse_uint32_bounded(const char *s,
+                                   apr_size_t max_len,
+                                   apr_uint32_t *out)
+{
+    if (!s || !*s) return 0;
+    if (strlen(s) > max_len) return 0;
+
+    errno = 0;
+    char *end = NULL;
+    unsigned long v = strtoul(s, &end, 10);
+    if (errno != 0)        return 0;
+    if (!end || *end != '\0') return 0;
+    if (v > UINT32_MAX)    return 0;
+    *out = (apr_uint32_t)v;
+    return 1;
+}
+
+/* int64 variant for expires_at / challenged_at (apr_time_t seconds).
+ * Same shape; max_len caps at 19 (largest int64 decimal expansion). */
+static int bs_parse_int64_bounded(const char *s,
+                                  apr_int64_t min_val,
+                                  apr_int64_t max_val,
+                                  apr_int64_t *out)
+{
+    if (!s || !*s) return 0;
+    if (strlen(s) > 19) return 0;
+
+    errno = 0;
+    char *end = NULL;
+    long long v = strtoll(s, &end, 10);
+    if (errno != 0)        return 0;
+    if (!end || *end != '\0') return 0;
+    if ((apr_int64_t)v < min_val || (apr_int64_t)v > max_val) return 0;
+    *out = (apr_int64_t)v;
+    return 1;
 }
 
 /* Returns 1 on success, 0 on malformed. out_len is bytes expected. */
@@ -1162,7 +1281,8 @@ static const bs_pow_algorithm *bs_find_algorithm(const char *name)
 static bs_captcha_result bs_geetest_siteverify(request_rec *r,
     const bs_captcha_provider *prov, const unsigned char *secret,
     apr_size_t secret_len, const char *token, int timeout_ms,
-    const char **out_details, long *out_http_code, double *out_score);
+    const char **out_details, long *out_http_code, double *out_score,
+    const char **out_hostname, const char **out_action);
 
 static const bs_captcha_provider bs_providers[] = {
     { "turnstile",    1,
@@ -2607,8 +2727,15 @@ static const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
     }
     if (nf != BS_COOKIE_FIELDS) return "wrong field count";
 
-    /* Parse + validate each field with a strict shape check. */
-    int version = atoi(fields[0]);
+    /* Parse + validate each field with a strict, bounded numeric
+     * parser (security review #2). Using atoi()/strtoul() here
+     * invokes UB on overflow because these are attacker-controlled
+     * bytes and we're still BEFORE the HMAC check. bs_parse_*_bounded
+     * caps the input length and handles ERANGE so libc never sees
+     * something outside representable range. */
+    long v;
+    if (!bs_parse_int_bounded(fields[0], 0, INT_MAX, 10, &v)) return "bad version";
+    int version = (int)v;
     if (version != BS_PROTOCOL_VERSION) return "bad protocol version";
 
     const bs_pow_algorithm *alg = bs_find_algorithm(fields[1]);
@@ -2617,24 +2744,34 @@ static const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
     bs_challenge ch;
     ch.version    = version;
     ch.alg_name   = alg->name;
-    ch.difficulty = atoi(fields[4]);
-    if (ch.difficulty < 1 || ch.difficulty > 8) return "bad difficulty";
+    if (!bs_parse_int_bounded(fields[4], 1, 8, 2, &v)) return "bad difficulty";
+    ch.difficulty = (int)v;
 
     if (strlen(fields[2]) != BS_SALT_BYTES * 2 ||
         !bs_from_hex(fields[2], BS_SALT_BYTES, ch.salt)) return "bad salt";
     if (strlen(fields[3]) != BS_NONCE_BYTES * 2 ||
         !bs_from_hex(fields[3], BS_NONCE_BYTES, ch.nonce)) return "bad nonce";
 
-    ch.expires_at = (apr_time_t)apr_atoi64(fields[5]);
+    apr_int64_t v64;
+    if (!bs_parse_int64_bounded(fields[5], 0, APR_INT64_MAX, &v64)) return "bad expires_at";
+    ch.expires_at = (apr_time_t)v64;
 
-    /* Rep fields — each already string-safe thanks to strtok-in-place. */
-    ch.rep.score          = atoi(fields[6]);
-    ch.rep.flags          = (apr_uint32_t)strtoul(fields[7], NULL, 10);
-    ch.rep.passes_silent  = atoi(fields[8]);
-    ch.rep.passes_form    = atoi(fields[9]);
-    ch.rep.passes_captcha = atoi(fields[10]);
-    ch.rep.challenged_at  = (apr_time_t)apr_atoi64(fields[11]);
-    ch.auto_tier          = atoi(fields[12]) ? 1 : 0;
+    /* Rep fields. These are still pre-HMAC — same bounded-parse
+     * discipline. score is a signed int (allowed negative for credits);
+     * passes_* are small flags; flags is a 32-bit bitmap. */
+    if (!bs_parse_int_bounded(fields[6], INT_MIN, INT_MAX, 11, &v)) return "bad score";
+    ch.rep.score = (int)v;
+    if (!bs_parse_uint32_bounded(fields[7], 10, &ch.rep.flags)) return "bad flags";
+    if (!bs_parse_int_bounded(fields[8],  0, 1, 1, &v)) return "bad passes_silent";
+    ch.rep.passes_silent  = (int)v;
+    if (!bs_parse_int_bounded(fields[9],  0, 1, 1, &v)) return "bad passes_form";
+    ch.rep.passes_form    = (int)v;
+    if (!bs_parse_int_bounded(fields[10], 0, 1, 1, &v)) return "bad passes_captcha";
+    ch.rep.passes_captcha = (int)v;
+    if (!bs_parse_int64_bounded(fields[11], 0, APR_INT64_MAX, &v64)) return "bad challenged_at";
+    ch.rep.challenged_at  = (apr_time_t)v64;
+    if (!bs_parse_int_bounded(fields[12], 0, 1, 1, &v)) return "bad auto";
+    ch.auto_tier          = (int)v;
 
     unsigned char sig_from_client[BS_SIG_BYTES];
     if (strlen(fields[13]) != BS_SIG_BYTES * 2 ||
@@ -2865,6 +3002,74 @@ static const char *bs_set_recaptcha_v3_min_score(cmd_parms *cmd,
     return NULL;
 }
 
+/* `BotShieldCaptchaExpectedHostname <host|off>` — hostname the
+ * captcha provider echoed back in the siteverify response must
+ * equal this value. Default = r->server->server_hostname (the
+ * vhost name). The literal value `off` (case-insensitive) disables
+ * the check — stored internally as an empty string — for
+ * multi-origin deployments where the operator enforces binding
+ * elsewhere. Apache's directive parser rejects bare "" as zero
+ * args so the sentinel is the ergonomic escape.
+ *
+ * DNS hostname charset only — matches the cookie-domain setter's
+ * policy. Rejects quotes / backslashes / whitespace / anything that
+ * could confuse later string comparison or logging. */
+static const char *bs_set_captcha_expected_hostname(cmd_parms *cmd,
+                                                    void *cfg_v,
+                                                    const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    if (!arg) return "BotShieldCaptchaExpectedHostname requires an argument";
+    if (strcasecmp(arg, "off") == 0) {
+        cfg->captcha_expected_hostname = "";
+        return NULL;
+    }
+    if (strlen(arg) > 253) {
+        return "BotShieldCaptchaExpectedHostname: longer than RFC 1035 limit";
+    }
+    for (const char *p = arg; *p; p++) {
+        if (!(isalnum((unsigned char)*p) || *p == '.' || *p == '-')) {
+            return apr_psprintf(cmd->pool,
+                "BotShieldCaptchaExpectedHostname: '%s' contains "
+                "a character outside [a-zA-Z0-9.-]", arg);
+        }
+    }
+    cfg->captcha_expected_hostname = apr_pstrdup(cmd->pool, arg);
+    return NULL;
+}
+
+/* `BotShieldCaptchaExpectedAction <action|off>` — the action string
+ * the client-side widget tagged the token with. Default =
+ * "botshield" (matches the action embedded in the interstitial JS
+ * for reCAPTCHA v3 and the Turnstile data-action attribute). The
+ * literal value `off` disables the check. Restricted to printable
+ * ASCII without whitespace or shell/quote metacharacters. */
+static const char *bs_set_captcha_expected_action(cmd_parms *cmd,
+                                                  void *cfg_v,
+                                                  const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    if (!arg) return "BotShieldCaptchaExpectedAction requires an argument";
+    if (strcasecmp(arg, "off") == 0) {
+        cfg->captcha_expected_action = "";
+        return NULL;
+    }
+    if (strlen(arg) > 64) {
+        return "BotShieldCaptchaExpectedAction: max 64 characters";
+    }
+    for (const char *p = arg; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c <= 0x20 || c >= 0x7f || c == '"' || c == '\'' ||
+            c == '\\' || c == ';' || c == '&') {
+            return apr_psprintf(cmd->pool,
+                "BotShieldCaptchaExpectedAction: '%s' contains "
+                "an unsafe character", arg);
+        }
+    }
+    cfg->captcha_expected_action = apr_pstrdup(cmd->pool, arg);
+    return NULL;
+}
+
 /* `BotShieldCaptchaRateLimit N` — verify-endpoint attempts per IP per
  * minute. 0 disables the rate limiter entirely (not recommended);
  * default BS_DEFAULT_CAPTCHA_RATE_LIMIT = 30. */
@@ -2937,6 +3142,25 @@ static size_t bs_curl_write_cb(char *ptr, size_t size, size_t nmemb,
                                void *userdata)
 {
     bs_curl_buffer *b = userdata;
+    /* Overflow-guard the size*nmemb multiply (security review —
+     * hardening point). libcurl's documented contract keeps `size`
+     * at 1 in practice, and BS_MAX_CAPTCHA_BODY caps the target
+     * buffer anyway, so a realistic overrun is vanishingly unlikely.
+     * But the guard is two cheap comparisons and closes the class
+     * entirely: an overflow would wrap `incoming` to a small value,
+     * make our truncation accounting think we took the whole chunk
+     * when we really dropped a mountain of bytes, and return a
+     * mis-stated byte count to libcurl. Treat overflow as "drop
+     * this chunk" same as the already-truncated branch.*/
+    if (size > 0 && nmemb > SIZE_MAX / size) {
+        b->truncated = 1;
+        /* Return 0 to tell libcurl we consumed nothing — it will
+         * abort the transfer with CURLE_WRITE_ERROR, which the
+         * caller maps to BS_CAPTCHA_ERROR + fail-open. That's the
+         * right behavior for an obviously-malformed provider
+         * response: don't silently drop it. */
+        return 0;
+    }
     size_t incoming = size * nmemb;
     if (b->truncated) return incoming;   /* drain silently */
     size_t room = (b->len < b->cap) ? (b->cap - b->len) : 0;
@@ -2992,10 +3216,14 @@ static bs_captcha_result bs_captcha_parse_response(apr_pool_t *p,
                                                    const char *body,
                                                    apr_size_t body_len,
                                                    const char **out_details,
-                                                   double *out_score)
+                                                   double *out_score,
+                                                   const char **out_hostname,
+                                                   const char **out_action)
 {
     *out_details = "";
     if (out_score) *out_score = -1.0;
+    if (out_hostname) *out_hostname = NULL;
+    if (out_action)   *out_action   = NULL;
     if (!body || body_len == 0) return BS_CAPTCHA_ERROR;
 
     enum json_tokener_error jerr = json_tokener_success;
@@ -3027,6 +3255,25 @@ static bs_captcha_result bs_captcha_parse_response(apr_pool_t *p,
                     sc && (json_object_is_type(sc, json_type_double) ||
                            json_object_is_type(sc, json_type_int))) {
                     *out_score = json_object_get_double(sc);
+                }
+                /* Binding metadata (security review #1). Turnstile +
+                 * hCaptcha + reCAPTCHA v2 + v3 all return `hostname`.
+                 * reCAPTCHA v3 + Turnstile also return `action`. Copy
+                 * into the caller's pool so the original json_object
+                 * can be freed without dangling the strings. */
+                json_object *hn = NULL;
+                if (out_hostname &&
+                    json_object_object_get_ex(root, "hostname", &hn) &&
+                    hn && json_object_is_type(hn, json_type_string)) {
+                    const char *s = json_object_get_string(hn);
+                    if (s) *out_hostname = apr_pstrdup(p, s);
+                }
+                json_object *act = NULL;
+                if (out_action &&
+                    json_object_object_get_ex(root, "action", &act) &&
+                    act && json_object_is_type(act, json_type_string)) {
+                    const char *s = json_object_get_string(act);
+                    if (s) *out_action = apr_pstrdup(p, s);
                 }
             } else {
                 out = BS_CAPTCHA_REJECTED;
@@ -3075,11 +3322,15 @@ static bs_captcha_result bs_captcha_siteverify(request_rec *r,
                                                int timeout_ms,
                                                const char **out_details,
                                                long *out_http_code,
-                                               double *out_score)
+                                               double *out_score,
+                                               const char **out_hostname,
+                                               const char **out_action)
 {
     *out_details  = "";
     *out_http_code = 0;
     if (out_score) *out_score = -1.0;
+    if (out_hostname) *out_hostname = NULL;
+    if (out_action)   *out_action   = NULL;
 
     CURL *curl = curl_easy_init();
     if (!curl) return BS_CAPTCHA_ERROR;
@@ -3143,7 +3394,8 @@ static bs_captcha_result bs_captcha_siteverify(request_rec *r,
     apr_size_t body_len = resp.len < resp.cap ? resp.len : resp.cap - 1;
     resp.buf[body_len] = '\0';
     return bs_captcha_parse_response(r->pool, resp.buf, body_len,
-                                     out_details, out_score);
+                                     out_details, out_score,
+                                     out_hostname, out_action);
 }
 
 /* ----------------------------------------------------------------------
@@ -3229,11 +3481,20 @@ static bs_captcha_result bs_geetest_siteverify(request_rec *r,
                                                int timeout_ms,
                                                const char **out_details,
                                                long *out_http_code,
-                                               double *out_score)
+                                               double *out_score,
+                                               const char **out_hostname,
+                                               const char **out_action)
 {
     *out_details   = "";
     *out_http_code = 0;
     if (out_score) *out_score = -1.0;
+    /* GeeTest's binding is HMAC-signed over the request side (sign_token
+     * covers lot_number), not a string echoed back in the response.
+     * Leave the binding out-params NULL — the handler's shared check
+     * will see NULL and skip hostname/action comparison for this
+     * provider (intended behavior). */
+    if (out_hostname) *out_hostname = NULL;
+    if (out_action)   *out_action   = NULL;
 
     /* Need the sitekey (captcha_id) from per-dir cfg. Walk up from r. */
     bs_dir_cfg *cfg = ap_get_module_config(r->per_dir_config,
@@ -4021,8 +4282,15 @@ static const char *bs_verify_pending_cookie(request_rec *r,
     unsigned char scratch[16];
     if (!bs_from_hex(nonce_hex, sizeof(scratch), scratch)) return "bad nonce hex";
 
-    apr_time_t expiry = (apr_time_t)apr_atoi64(expiry_str);
-    if (expiry <= 0) return "bad expiry";
+    /* Bounded parse before HMAC (security review #2). apr_atoi64
+     * silently clamps/wraps on overflow without signalling; use the
+     * bounded helper so gigantic junk is rejected cleanly instead
+     * of feeding a nonsense timestamp into the freshness check. */
+    apr_int64_t expiry_raw;
+    if (!bs_parse_int64_bounded(expiry_str, 1, APR_INT64_MAX, &expiry_raw)) {
+        return "bad expiry";
+    }
+    apr_time_t expiry = (apr_time_t)expiry_raw;
     if (expiry + BS_CLOCK_SKEW_AHEAD < apr_time_sec(apr_time_now())) {
         return "expired";
     }
@@ -4543,6 +4811,8 @@ static int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
     const char *details = NULL;
     long http_code = 0;
     double score = -1.0;
+    const char *resp_hostname = NULL;
+    const char *resp_action   = NULL;
     /* Provider-specific verify path overrides the shared shim when set.
      * GeeTest is the current user (HMAC-signed body, non-bool result
      * semantics); the other five providers leave siteverify_fn NULL. */
@@ -4553,11 +4823,56 @@ static int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
     bs_captcha_result result = verify_fn(
         r, cfg->captcha_provider,
         cfg->captcha_secret, cfg->captcha_secret_len,
-        token, timeout, &details, &http_code, &score);
+        token, timeout, &details, &http_code, &score,
+        &resp_hostname, &resp_action);
     /* In-flight semaphore released as soon as the libcurl call returns.
      * The rest of the handler (cookie issuance, redirect) doesn't hold
      * a provider slot. */
     bs_captcha_inflight_release();
+
+    /* Security review #1: bind the token to this origin + flow.
+     *   - hostname: provider-echoed domain of the site where the
+     *     challenge was solved. Check against the configured expected
+     *     hostname (default = r->server->server_hostname) so a token
+     *     minted on another origin but sharing the same sitekey can't
+     *     satisfy verification here.
+     *   - action (reCAPTCHA v3, Turnstile): the string the client
+     *     widget tagged the token with. We embed `action: 'botshield'`
+     *     in the interstitial JS, so a token from a different form on
+     *     the same sitekey will carry a different action. Without this
+     *     check, reCAPTCHA v3 in particular is score-threshold-only,
+     *     which a stolen-from-elsewhere token with a high score would
+     *     sail through.
+     *
+     * Mismatch flips OK → REJECTED with a descriptive details string
+     * so the prose + decision log both carry the "why". An operator
+     * can opt out of either check by setting the directive value to
+     * the empty string. */
+    if (result == BS_CAPTCHA_OK) {
+        const char *expected_host =
+            cfg->captcha_expected_hostname
+                ? cfg->captcha_expected_hostname
+                : (r->server && r->server->server_hostname
+                       ? r->server->server_hostname : "");
+        const char *expected_action =
+            cfg->captcha_expected_action
+                ? cfg->captcha_expected_action
+                : "botshield";
+
+        if (resp_hostname && *expected_host &&
+            strcmp(resp_hostname, expected_host) != 0) {
+            details = apr_psprintf(r->pool,
+                "hostname-mismatch:got=%s,expected=%s",
+                resp_hostname, expected_host);
+            result = BS_CAPTCHA_REJECTED;
+        } else if (resp_action && *expected_action &&
+                   strcmp(resp_action, expected_action) != 0) {
+            details = apr_psprintf(r->pool,
+                "action-mismatch:got=%s,expected=%s",
+                resp_action, expected_action);
+            result = BS_CAPTCHA_REJECTED;
+        }
+    }
 
     /* reCAPTCHA v3 score threshold. Applied *after* success:true — the
      * provider said the token is valid; we still reject if the signal
@@ -5006,6 +5321,20 @@ static const command_rec bs_cmds[] = {
                  "Minimum score (0.0..1.0) to accept a reCAPTCHA v3 "
                  "verification (default: 0.5). Scores below this are "
                  "logged as REJECTED with the numeric score."),
+    AP_INIT_TAKE1("BotShieldCaptchaExpectedHostname",
+                 bs_set_captcha_expected_hostname, NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "Hostname the captcha provider must echo back in the "
+                 "siteverify response for the token to be accepted. "
+                 "Default: the vhost's server_hostname. Empty string "
+                 "disables the check (for multi-origin deployments)."),
+    AP_INIT_TAKE1("BotShieldCaptchaExpectedAction",
+                 bs_set_captcha_expected_action, NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "Action string the client widget must tag the captcha "
+                 "token with (reCAPTCHA v3 + Turnstile). Default: "
+                 "'botshield'. Empty string disables the check. "
+                 "Mismatch rejects the token."),
     AP_INIT_TAKE1("BotShieldCaptchaRateLimit", bs_set_captcha_rate_limit,
                  NULL, RSRC_CONF | ACCESS_CONF,
                  "Max captcha-verify POSTs per IP per minute (default: 30, "
@@ -5381,7 +5710,8 @@ static const char BS_CAPTCHA_WIDGET_TEMPLATE[] =
 "</div></noscript>\n"
 "<form id=\"bscf\" method=\"POST\" action=\"%s\">\n"
 " <input type=\"hidden\" name=\"return_to\" value=\"%s\">\n"
-" <div class=\"%s\" data-sitekey=\"%s\" data-callback=\"bsOnSolve\"></div>\n"
+" <div class=\"%s\" data-sitekey=\"%s\" data-action=\"botshield\""
+" data-callback=\"bsOnSolve\"></div>\n"
 "</form>\n"
 "<p class=\"bs-msg\" id=\"msg\" role=\"status\" aria-live=\"polite\"></p>\n"
 "</div>\n"
