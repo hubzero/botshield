@@ -403,6 +403,9 @@ typedef struct {
     apr_uint64_t bot_allow_total;
     apr_uint64_t bot_fake_total;
     apr_uint64_t bot_unverified_total;
+    /* E2.1 — policy enforcement counters. */
+    apr_uint64_t rate_limit_exceeded_total;
+    apr_uint64_t block_path_hit_total;
 } bs_metrics;
 
 /* Module-global runtime pointer struct. Populated once in post-config;
@@ -425,6 +428,11 @@ typedef struct {
     apr_uint32_t        *cv_inflight;      /* ptr into SHM header field */
     /* M9.2 */
     bs_metrics          *metrics;
+    /* E2.1 — rate-limit fixed-window counters. Flat slot array in
+     * SHM; each bs_rate_limit_entry gets a slot index assigned at
+     * post_config. Sized by bs_rate_counter_count. */
+    void                *rate_counters;     /* bs_rate_counter *, opaque here */
+    apr_size_t           rate_counter_count;
 } bs_shm_runtime;
 
 static bs_shm_runtime bs_shm;
@@ -563,6 +571,11 @@ typedef struct {
     void        *bot_classifier;       /* bs_ua_classifier *, opaque here */
     apr_hash_t  *bot_ranges;           /* name → apr_array_header_t of apr_ipsubnet_t* */
     apr_hash_t *allow_bots;         /* name → bs_allow_bot_entry * (directive-defined) */
+    /* E2.1 — policy enforcement (rate limit + path block). Both hashes
+     * keyed by cohort name; resolved ranges + SHM slot indices populated
+     * in post_config. */
+    apr_hash_t  *rate_limits;          /* name → bs_rate_limit_entry * */
+    apr_hash_t  *block_paths;          /* name → bs_block_path_entry * */
 } bs_server_cfg;
 
 /* --- Config lifecycle --- */
@@ -633,6 +646,18 @@ static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
         out->allow_bots = apr_hash_overlay(p, add->allow_bots,
                                            base->allow_bots);
     }
+    /* E2.1 — union rate_limits / block_paths the same way. Vhost
+     * wins on name collision; main-scope entries flow through. */
+    if (base->rate_limits && apr_hash_count(base->rate_limits) > 0
+        && add->rate_limits) {
+        out->rate_limits = apr_hash_overlay(p, add->rate_limits,
+                                            base->rate_limits);
+    }
+    if (base->block_paths && apr_hash_count(base->block_paths) > 0
+        && add->block_paths) {
+        out->block_paths = apr_hash_overlay(p, add->block_paths,
+                                             base->block_paths);
+    }
     return out;
 }
 
@@ -657,6 +682,10 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->bot_classifier   = NULL;
     scfg->bot_ranges       = NULL;
     scfg->allow_bots       = apr_hash_make(p);
+    /* E2.1 — rate-limit + block-path hashes; populated by directives,
+     * post_config resolves cohort ipspecs and assigns SHM slots. */
+    scfg->rate_limits      = apr_hash_make(p);
+    scfg->block_paths      = apr_hash_make(p);
     return scfg;
 }
 
@@ -2063,6 +2092,250 @@ static void bs_check_allow(request_rec *r,
     }
 }
 
+/* ======================================================================
+ * E2.1 — Policy enforcement: rate limiting + path-based blocks
+ *
+ * Two feature families sharing one cohort definition:
+ *
+ *   BotShieldRateLimit <name> <budget> <per> <ua> <ipspec>
+ *   BotShieldBlockPath <name> <path-glob> <ua> <ipspec>
+ *
+ * A "cohort" is a (ua-substring?, ipspec?) predicate pair. The ipspec
+ * reuses E1's polymorphic shape — omitted / explicit path / '*' / inline
+ * CIDRs — via bs_allow_push_cidr + bs_allow_load_ranges{,_from_string}.
+ * Cohort matching at request time is UA-match AND IP-match, with '*'
+ * as "any" on either axis (but not both — that would rate-limit or
+ * block every request, which is almost always a mistake and the setter
+ * rejects it at config time).
+ *
+ * Storage:
+ *  - Config: scfg->rate_limits / scfg->block_paths hashes, keyed by
+ *    name. Merged across main/vhost scope via bs_merge_server_cfg.
+ *  - Runtime: rate counters live in SHM as a flat slot array
+ *    (bs_shm.rate_counters[]). Each bs_rate_limit_entry's shm_slot
+ *    is an index assigned in post_config. Fixed-window counter model
+ *    with atomic CAS updates — approximate rather than exact sliding
+ *    window, but that's the right trade for a rate limiter (smaller
+ *    code, no per-bucket mutex, burst-at-boundary is harmless here
+ *    because the downstream score_add hook still records it).
+ *
+ * On trip:
+ *  - Block-path hit → 403 + bs_score_add(+100, "block-path:<name>").
+ *  - Rate-limit exceeded → 429 + Retry-After: <seconds remaining in
+ *    window> + bs_score_add(+50, "rate-limit-exceeded:<name>").
+ * ====================================================================== */
+
+#define BS_PENALTY_RATE_LIMIT  50   /* sustained violator → captcha tier */
+#define BS_PENALTY_BLOCK_PATH 100   /* hit a forbidden path → flagged */
+
+/* Shared (UA?, IP?) cohort predicate. Set either or both; the cohort
+ * resolver rejects cohorts where both are '*' (would match everyone). */
+typedef struct {
+    const char         *ua_pattern;    /* substring match; NULL if ua_any */
+    int                 ua_any;        /* 1 when operator wrote '*' */
+    int                 ip_any;        /* 1 when operator wrote '*' */
+    const char         *path;          /* ipspec file path, or NULL */
+    const char         *inline_cidrs;  /* ipspec inline CIDRs, or NULL */
+    apr_array_header_t *ranges;        /* resolved at post_config */
+} bs_cohort;
+
+typedef struct {
+    const char   *name;
+    bs_cohort     cohort;
+    apr_uint32_t  budget;
+    apr_uint32_t  window_sec;
+    int           shm_slot;          /* index into bs_shm.rate_counters; -1 unset */
+} bs_rate_limit_entry;
+
+typedef struct {
+    const char *name;
+    const char *path_pattern;        /* prefix / trailing '*' / trailing '$' */
+    bs_cohort   cohort;
+} bs_block_path_entry;
+
+/* SHM slot for the fixed-window counter. Packed to 8 bytes so
+ * platforms with 64-bit atomics could later swap to a CAS-on-u64;
+ * for v1 we use 32-bit atomics on each field separately, which is
+ * adequate for the semantics we want (approximate fixed window). */
+typedef struct {
+    apr_uint32_t count;
+    apr_uint32_t window_start_sec;
+} bs_rate_counter;
+
+/* Inspect a directive's (ua, ipspec) arg pair and populate a
+ * bs_cohort. Returns NULL on success, or an Apache directive-error
+ * string. Ranges resolution is deferred to post_config so we can
+ * use pconf rather than cmd->temp_pool. */
+static const char *bs_cohort_resolve(cmd_parms *cmd, bs_cohort *out,
+                                     const char *ua, const char *ipspec)
+{
+    memset(out, 0, sizeof(*out));
+    if (!ua || !*ua || strcmp(ua, "*") == 0) {
+        out->ua_any = 1;
+    } else {
+        out->ua_pattern = apr_pstrdup(cmd->pool, ua);
+    }
+    if (!ipspec || !*ipspec || strcmp(ipspec, "*") == 0) {
+        out->ip_any = 1;
+    } else if (ipspec[0] == '/') {
+        out->path = apr_pstrdup(cmd->pool, ipspec);
+    } else if (strchr(ipspec, '/') || strchr(ipspec, ':')) {
+        out->inline_cidrs = apr_pstrdup(cmd->pool, ipspec);
+    } else {
+        return apr_psprintf(cmd->pool,
+            "ipspec '%s' unrecognized — use '*' (any IP), an absolute "
+            "file path, or a CIDR (single or comma-separated)", ipspec);
+    }
+    /* Guard against cohorts that would match every request. Operators
+     * who really want that can write it as two entries or a per-
+     * location cap elsewhere. */
+    if (out->ua_any && out->ip_any) {
+        return "cohort must restrict on UA or IP (both were '*')";
+    }
+    return NULL;
+}
+
+/* Minimal v1 path-glob matcher:
+ *   pattern ending in '$' → exact match against path (pattern minus $).
+ *   pattern ending in '*' → prefix match (pattern minus *).
+ *   otherwise              → prefix match against the whole pattern.
+ * Full RFC 9309 semantics (middle wildcards, longest-match rules,
+ * Allow-overrides-Disallow) arrive with robots.c in E2.2 — v1 covers
+ * the shapes operators actually write by hand. */
+static int bs_path_glob_match(const char *pattern, const char *path)
+{
+    if (!pattern || !*pattern || !path) return 0;
+    apr_size_t plen = strlen(pattern);
+    apr_size_t ulen = strlen(path);
+
+    if (pattern[plen - 1] == '$') {
+        if (ulen != plen - 1) return 0;
+        return memcmp(pattern, path, plen - 1) == 0;
+    }
+    if (pattern[plen - 1] == '*') {
+        if (ulen < plen - 1) return 0;
+        return memcmp(pattern, path, plen - 1) == 0;
+    }
+    if (ulen < plen) return 0;
+    return memcmp(pattern, path, plen) == 0;
+}
+
+/* Cohort match at request time. Returns 1 when this request belongs
+ * to the cohort. */
+static int bs_cohort_matches(const bs_cohort *c,
+                             const char *ua, request_rec *r)
+{
+    if (!c->ua_any) {
+        if (!ua || !c->ua_pattern || !strstr(ua, c->ua_pattern)) return 0;
+    }
+    if (!c->ip_any) {
+        if (!c->ranges || !bs_allow_ip_in_ranges(c->ranges, r)) return 0;
+    }
+    return 1;
+}
+
+/* Fixed-window admission test. Returns 1 if the request fits under
+ * budget (count was incremented), 0 if the window is full.
+ *
+ * Under pathological contention the CAS loop bounces; cap the retry
+ * count and err on admitting rather than emitting spurious 429s. */
+static int bs_rate_counter_admit(bs_rate_counter *slot,
+                                 apr_uint32_t budget,
+                                 apr_uint32_t window_sec)
+{
+    apr_uint32_t now = (apr_uint32_t)apr_time_sec(apr_time_now());
+    for (int i = 0; i < 32; i++) {
+        apr_uint32_t cnt = __atomic_load_n(&slot->count, __ATOMIC_RELAXED);
+        apr_uint32_t win = __atomic_load_n(&slot->window_start_sec,
+                                           __ATOMIC_RELAXED);
+        if (now < win || now - win >= window_sec) {
+            apr_uint32_t expected = win;
+            if (__atomic_compare_exchange_n(&slot->window_start_sec,
+                    &expected, now, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+                __atomic_store_n(&slot->count, 1, __ATOMIC_RELAXED);
+                return 1;
+            }
+            continue;  /* someone else rolled the window; re-read */
+        }
+        if (cnt >= budget) return 0;
+        apr_uint32_t expected = cnt;
+        if (__atomic_compare_exchange_n(&slot->count, &expected, cnt + 1,
+                0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+            return 1;
+        }
+        /* CAS lost — retry with fresh count */
+    }
+    return 1;
+}
+
+/* Request-time E2.1 check. Returns OK, HTTP_FORBIDDEN, or
+ * HTTP_TOO_MANY_REQUESTS. In both short-circuit cases we also feed
+ * bs_score_add so the violation appears in the decision log. */
+static int bs_check_policy(request_rec *r)
+{
+    bs_server_cfg *scfg = ap_get_module_config(r->server->module_config,
+                                               &botshield_module);
+    if (!scfg) return OK;
+
+    const char *ua = apr_table_get(r->headers_in, "User-Agent");
+
+    /* Block paths first: if the request would be 403ed anyway there's
+     * no point charging it a token from a rate bucket it's also in. */
+    if (scfg->block_paths && apr_hash_count(scfg->block_paths) > 0) {
+        apr_hash_index_t *hi;
+        for (hi = apr_hash_first(r->pool, scfg->block_paths);
+             hi; hi = apr_hash_next(hi)) {
+            const void *k; void *v;
+            apr_hash_this(hi, &k, NULL, &v);
+            bs_block_path_entry *e = v;
+            if (!bs_path_glob_match(e->path_pattern, r->uri)) continue;
+            if (!bs_cohort_matches(&e->cohort, ua, r)) continue;
+            bs_score_add(r, BS_PENALTY_BLOCK_PATH, 3600,
+                apr_pstrcat(r->pool, "block-path:", e->name, NULL));
+            if (bs_shm.metrics) {
+                __atomic_fetch_add(&bs_shm.metrics->block_path_hit_total,
+                                   1, __ATOMIC_RELAXED);
+            }
+            return HTTP_FORBIDDEN;
+        }
+    }
+
+    if (scfg->rate_limits && apr_hash_count(scfg->rate_limits) > 0) {
+        bs_rate_counter *counters = (bs_rate_counter *)bs_shm.rate_counters;
+        apr_hash_index_t *hi;
+        for (hi = apr_hash_first(r->pool, scfg->rate_limits);
+             hi; hi = apr_hash_next(hi)) {
+            const void *k; void *v;
+            apr_hash_this(hi, &k, NULL, &v);
+            bs_rate_limit_entry *e = v;
+            if (!bs_cohort_matches(&e->cohort, ua, r)) continue;
+            if (e->shm_slot < 0 || !counters) continue;
+            if (bs_rate_counter_admit(&counters[e->shm_slot],
+                                      e->budget, e->window_sec)) {
+                continue;
+            }
+            /* Over budget. Retry-After = seconds remaining in window. */
+            apr_uint32_t win = __atomic_load_n(
+                &counters[e->shm_slot].window_start_sec, __ATOMIC_RELAXED);
+            apr_uint32_t now = (apr_uint32_t)apr_time_sec(apr_time_now());
+            apr_uint32_t retry = (now >= win && now - win < e->window_sec)
+                                  ? e->window_sec - (now - win) : 1;
+            apr_table_setn(r->err_headers_out, "Retry-After",
+                apr_psprintf(r->pool, "%u", retry));
+            bs_score_add(r, BS_PENALTY_RATE_LIMIT, 3600,
+                apr_pstrcat(r->pool, "rate-limit-exceeded:",
+                            e->name, NULL));
+            if (bs_shm.metrics) {
+                __atomic_fetch_add(&bs_shm.metrics->rate_limit_exceeded_total,
+                                   1, __ATOMIC_RELAXED);
+            }
+            return HTTP_TOO_MANY_REQUESTS;
+        }
+    }
+
+    return OK;
+}
+
 static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                           apr_pool_t *ptemp, server_rec *s)
 {
@@ -2127,9 +2400,14 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     apr_size_t cv_log_bytes  = (apr_size_t)BS_DEFAULT_CV_LOG_SLOTS
                                * sizeof(bs_cv_slot);
     apr_size_t metrics_bytes = sizeof(bs_metrics);
+    /* E2.1 — fixed-size table of rate-limit counter slots. 256 slots
+     * covers hand-written directives comfortably; E2.2's robots.txt
+     * rules will share the same pool. Trivial size (~2 KB). */
+    #define BS_E21_RATE_SLOTS 256
+    apr_size_t e21_rate_bytes = BS_E21_RATE_SLOTS * sizeof(bs_rate_counter);
     apr_size_t total_bytes  = header_bytes + table_bytes + 2 * bloom_bytes
                               + cv_rate_bytes + cv_log_bytes
-                              + metrics_bytes;
+                              + metrics_bytes + e21_rate_bytes;
 
     if (scfg->shm_size < total_bytes) {
         ap_log_error(APLOG_MARK, APLOG_ERR, 0, s,
@@ -2192,6 +2470,10 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     /* M9.2: metrics block sits after the log-suppress ring. All counters
      * start at zero thanks to the memset(base) above. */
     bs_shm.metrics            = (bs_metrics *)metrics_base;
+    /* E2.1: rate-limit counter slots follow the metrics block. */
+    bs_shm.rate_counters      = (bs_rate_counter *)(metrics_base
+                                                    + metrics_bytes);
+    bs_shm.rate_counter_count = BS_E21_RATE_SLOTS;
 
     bs_shm.header->bloom_active        = 0;
     bs_shm.header->bloom_buf_bytes     = (apr_uint32_t)bloom_bytes;
@@ -2407,6 +2689,85 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
             "mod_botshield: Allow enabled; %d bots "
             "(%d ranges loaded, %d ua-only, %d missing, %d malformed)",
             n_bots, loaded, ua_only, missing, bad);
+    }
+
+    /* E2.1 — resolve cohort ipspecs for every rate_limit / block_path
+     * entry across main + vhost scopes, and assign SHM slot indices to
+     * rate_limit entries. Shared counter pool across all vhosts; slot
+     * indices are global, handed out in declaration order. If operators
+     * ever exceed BS_E21_RATE_SLOTS, the overflow entries stay at
+     * shm_slot=-1 and are silently skipped at request time (log warning
+     * surfaces the condition). */
+    int next_slot = 0;
+    for (server_rec *sv = s; sv; sv = sv->next) {
+        bs_server_cfg *vcfg = ap_get_module_config(sv->module_config,
+                                                   &botshield_module);
+        if (!vcfg) continue;
+
+        /* Resolve a cohort's ipspec (path or inline CIDRs) into the
+         * ranges array. Shared between rate_limits and block_paths. */
+        #define BS_E21_RESOLVE_COHORT(c_, feature_, name_) do {              \
+            if ((c_)->ip_any || (c_)->ranges) break;                         \
+            const char *rerr = NULL;                                         \
+            apr_status_t rrv = APR_SUCCESS;                                  \
+            if ((c_)->inline_cidrs) {                                        \
+                rrv = bs_allow_load_ranges_from_string(pconf,                \
+                    (c_)->inline_cidrs, &(c_)->ranges, &rerr);               \
+            } else if ((c_)->path) {                                         \
+                rrv = bs_allow_load_ranges(pconf, (c_)->path,                \
+                    &(c_)->ranges, &rerr);                                   \
+            }                                                                \
+            if (rrv != APR_SUCCESS) {                                        \
+                ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,               \
+                    "mod_botshield: %s '%s' ipspec load failed (%s) — "      \
+                    "cohort will never match", feature_, name_,              \
+                    rerr ? rerr : "unknown");                                \
+                (c_)->ranges = NULL;                                         \
+            }                                                                \
+        } while (0)
+
+        if (vcfg->rate_limits && apr_hash_count(vcfg->rate_limits) > 0) {
+            apr_hash_index_t *hi;
+            int n = 0;
+            for (hi = apr_hash_first(pconf, vcfg->rate_limits);
+                 hi; hi = apr_hash_next(hi)) {
+                const void *k; void *v;
+                apr_hash_this(hi, &k, NULL, &v);
+                bs_rate_limit_entry *e = v;
+                BS_E21_RESOLVE_COHORT(&e->cohort,
+                    "BotShieldRateLimit", e->name);
+                if (e->shm_slot < 0) {
+                    if (next_slot < (int)bs_shm.rate_counter_count) {
+                        e->shm_slot = next_slot++;
+                    } else {
+                        ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
+                            "mod_botshield: rate-limit slot pool "
+                            "exhausted (%d); '%s' will not enforce",
+                            (int)bs_shm.rate_counter_count, e->name);
+                    }
+                }
+                n++;
+            }
+            ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+                "mod_botshield: %d rate-limit cohorts wired", n);
+        }
+
+        if (vcfg->block_paths && apr_hash_count(vcfg->block_paths) > 0) {
+            apr_hash_index_t *hi;
+            int n = 0;
+            for (hi = apr_hash_first(pconf, vcfg->block_paths);
+                 hi; hi = apr_hash_next(hi)) {
+                const void *k; void *v;
+                apr_hash_this(hi, &k, NULL, &v);
+                bs_block_path_entry *e = v;
+                BS_E21_RESOLVE_COHORT(&e->cohort,
+                    "BotShieldBlockPath", e->name);
+                n++;
+            }
+            ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+                "mod_botshield: %d block-path cohorts wired", n);
+        }
+        #undef BS_E21_RESOLVE_COHORT
     }
 
     return OK;
@@ -3236,6 +3597,122 @@ static const char *bs_set_allow_bot(cmd_parms *cmd, void *dconf,
     }
 
     apr_hash_set(scfg->allow_bots, e->name, APR_HASH_KEY_STRING, e);
+    return NULL;
+}
+
+/* Parse a "per" unit token into seconds. We accept sec/min/hour and
+ * their single-letter aliases so operators can write whichever reads
+ * best inline with their budget. Collapsed-unit forms like "60/min"
+ * are deliberately not supported — Apache tokenizes args for us and
+ * splitting them out keeps the directive parseable by eye. */
+static int bs_rate_unit_seconds(const char *u)
+{
+    if (!u || !*u) return 0;
+    if (!strcasecmp(u, "sec") || !strcasecmp(u, "s")
+     || !strcasecmp(u, "second") || !strcasecmp(u, "seconds")) return 1;
+    if (!strcasecmp(u, "min") || !strcasecmp(u, "m")
+     || !strcasecmp(u, "minute") || !strcasecmp(u, "minutes")) return 60;
+    if (!strcasecmp(u, "hour") || !strcasecmp(u, "h")
+     || !strcasecmp(u, "hours")) return 3600;
+    return 0;
+}
+
+/* BotShieldRateLimit <name> <budget> <per-unit> <ua> <ipspec> — cohort
+ * rate-limit. Cohort semantics mirror BotShieldAllowBot (UA substring,
+ * polymorphic ipspec, '*' for "any" on either axis). Both-'*' is
+ * rejected because that would rate-limit every request on the server.
+ * Budget + window are stored as-is; SHM slot assignment happens in
+ * post_config.
+ *
+ * Apache doesn't ship AP_INIT_TAKE4/5, so this uses TAKE_ARGV and
+ * enforces argc itself. */
+static const char *bs_set_rate_limit(cmd_parms *cmd, void *dconf,
+                                     int argc, char *const argv[])
+{
+    (void)dconf;
+    if (argc != 5) {
+        return "BotShieldRateLimit: expects exactly 5 args — "
+               "<name> <budget> <per> <ua> <ipspec>";
+    }
+    const char *name     = argv[0];
+    const char *budget_s = argv[1];
+    const char *per_s    = argv[2];
+    const char *ua       = argv[3];
+    const char *ipspec   = argv[4];
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    if (!bs_bot_name_valid(name)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldRateLimit: name '%s' must be [a-z0-9-]{1,32}", name);
+    }
+    char *end = NULL;
+    long budget = strtol(budget_s, &end, 10);
+    if (!end || *end || budget <= 0 || budget > 1000000) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldRateLimit: budget '%s' must be a positive integer "
+            "≤ 1000000", budget_s);
+    }
+    int unit = bs_rate_unit_seconds(per_s);
+    if (unit == 0) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldRateLimit: per '%s' must be one of "
+            "sec/min/hour (or s/m/h)", per_s);
+    }
+
+    bs_rate_limit_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
+    e->name       = apr_pstrdup(cmd->pool, name);
+    e->budget     = (apr_uint32_t)budget;
+    e->window_sec = (apr_uint32_t)unit;
+    e->shm_slot   = -1;
+    const char *err = bs_cohort_resolve(cmd, &e->cohort, ua, ipspec);
+    if (err) return apr_pstrcat(cmd->pool,
+        "BotShieldRateLimit: ", err, NULL);
+
+    apr_hash_set(scfg->rate_limits, e->name, APR_HASH_KEY_STRING, e);
+    return NULL;
+}
+
+/* BotShieldBlockPath <name> <path-glob> <ua> <ipspec> — cohort-
+ * conditional path block. Matching requests get 403 + a scoring
+ * hook. Glob semantics are minimal in v1 (prefix / trailing '*' /
+ * trailing '$'); full RFC 9309 wildcards arrive in E2.2 with
+ * robots.c so block-paths derived from robots.txt Disallow behave
+ * identically to the reference parser.
+ *
+ * Uses TAKE_ARGV (Apache has no TAKE4). */
+static const char *bs_set_block_path(cmd_parms *cmd, void *dconf,
+                                     int argc, char *const argv[])
+{
+    (void)dconf;
+    if (argc != 4) {
+        return "BotShieldBlockPath: expects exactly 4 args — "
+               "<name> <path-glob> <ua> <ipspec>";
+    }
+    const char *name    = argv[0];
+    const char *pattern = argv[1];
+    const char *ua      = argv[2];
+    const char *ipspec  = argv[3];
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    if (!bs_bot_name_valid(name)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldBlockPath: name '%s' must be [a-z0-9-]{1,32}", name);
+    }
+    if (!pattern || !*pattern || pattern[0] != '/') {
+        return "BotShieldBlockPath: path-glob must start with '/'";
+    }
+    if (strlen(pattern) > 256) {
+        return "BotShieldBlockPath: path-glob longer than 256 chars";
+    }
+
+    bs_block_path_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
+    e->name         = apr_pstrdup(cmd->pool, name);
+    e->path_pattern = apr_pstrdup(cmd->pool, pattern);
+    const char *err = bs_cohort_resolve(cmd, &e->cohort, ua, ipspec);
+    if (err) return apr_pstrcat(cmd->pool,
+        "BotShieldBlockPath: ", err, NULL);
+
+    apr_hash_set(scfg->block_paths, e->name, APR_HASH_KEY_STRING, e);
     return NULL;
 }
 
@@ -5255,6 +5732,17 @@ static int bs_metrics_handler(request_rec *r, bs_dir_cfg *cfg)
         "file is configured for that crawler (no score effect, logged).",
         bs_mload(&m->bot_unverified_total));
 
+    /* --- E2.1 policy-enforcement counters --- */
+
+    bs_m_emit_counter(r, "rate_limit_exceeded_total",
+        "Requests that tripped a BotShieldRateLimit cohort budget "
+        "(response was 429 + Retry-After).",
+        bs_mload(&m->rate_limit_exceeded_total));
+    bs_m_emit_counter(r, "block_path_hit_total",
+        "Requests that matched a BotShieldBlockPath cohort+path-glob "
+        "(response was 403).",
+        bs_mload(&m->block_path_hit_total));
+
     /* --- On-demand gauges (may refresh a 1-second cache) --- */
 
     bs_m_emit_gauge(r, "captcha_inflight_current",
@@ -6173,6 +6661,26 @@ static const command_rec bs_cmds[] = {
                  "path, a single CIDR, or a comma-separated CIDR "
                  "list. Omit the target to use the default file path "
                  "/var/lib/botshield/bots/<name>.txt."),
+    /* E2.1 — policy enforcement. TAKE_ARGV because Apache has no
+     * TAKE4/TAKE5 macros; the setters enforce argc themselves. */
+    AP_INIT_TAKE_ARGV("BotShieldRateLimit",
+                 bs_set_rate_limit, NULL, RSRC_CONF,
+                 "Rate-limit a named cohort. Args: <name> <budget> "
+                 "<per> <ua> <ipspec>. Per is sec/min/hour (or "
+                 "s/m/h). UA is a substring (case-insensitive) or "
+                 "'*' for any UA. Ipspec is '*', an absolute file "
+                 "path, or a single / comma-separated CIDR list. "
+                 "Both-'*' is rejected. Over-budget requests return "
+                 "429 + Retry-After and get a +50 score penalty "
+                 "under reason rate-limit-exceeded:<name>."),
+    AP_INIT_TAKE_ARGV("BotShieldBlockPath",
+                 bs_set_block_path, NULL, RSRC_CONF,
+                 "Block a named cohort from a path glob. Args: "
+                 "<name> <path-glob> <ua> <ipspec>. Path-glob must "
+                 "begin with '/'; trailing '*' = prefix match, "
+                 "trailing '$' = exact match. Hits return 403 with "
+                 "a +100 score penalty under reason "
+                 "block-path:<name>."),
     { NULL }
 };
 
@@ -6791,6 +7299,23 @@ static int bs_handler(request_rec *r)
     }
     const char *cookie_status =
         bs_decision_cookie_status(cookie_verify_reason, cookie_had_val);
+
+    /* E2.1 — policy enforcement. Rate-limit / block-path cohorts
+     * short-circuit with 429/403 before scoring heuristics run; the
+     * decision log still fires so operators see why the request was
+     * rejected. Runs even for cookie-valid requests — operator policy
+     * (including robots.txt enforcement in E2.2) applies regardless
+     * of bot-ness. */
+    int policy_rv = bs_check_policy(r);
+    if (policy_rv != OK) {
+        bs_request_score *s = bs_get_score(r, 0);
+        const char *reasons = bs_score_reasons_joined(r->pool, s);
+        const char *outcome = (policy_rv == HTTP_FORBIDDEN)
+                              ? "rejected" : "rate_limited";
+        bs_decision_log(r, "pass", outcome, cookie_status, "-", "-",
+                        reasons, s ? s->total : 0);
+        return policy_rv;
+    }
 
     /* Score the request. Heuristics always run — a fully-valid cookie
      * doesn't exempt you from fresh request-level signals that might
