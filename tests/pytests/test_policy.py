@@ -184,6 +184,75 @@ def test_block_path_cohort_narrowing(config_override, log_slice, fresh_ip):
     )
 
 
+# --- Regression tests for review findings ---------------------------
+
+
+def test_rate_limit_ua_match_is_case_insensitive(
+    config_override, log_slice, fresh_ip,
+):
+    """Directive contract documents UA matching as case-insensitive.
+    Configure a lowercase pattern, send a mixed-case UA, expect the
+    cohort to match and trip the rate limit."""
+    with config_override(
+        r"BotShieldAllow\s+on",
+        'BotShieldAllow on\n'
+        '    BotShieldRateLimit gptbot 1 sec "gptbot" *',
+        count=1,
+    ):
+        with log_slice as slc:
+            r1 = client.get("/", xff=fresh_ip, ua="GPTBot/1.0")
+            r2 = client.get("/", xff=fresh_ip, ua="GPTBot/1.0")
+            lines = slc.decision_lines(ip=fresh_ip)
+
+    assert r1.status_code == 200, "first request admitted"
+    assert r2.status_code == 429, (
+        "mixed-case UA should match lowercase pattern; "
+        "regression indicates strstr vs strcasestr bug"
+    )
+    assert [d for d in lines
+            if "rate-limit-exceeded:gptbot" in d["reason"]], (
+        f"no rate-limit-exceeded line; lines={lines}"
+    )
+
+
+def test_block_path_precedence_is_declaration_order(
+    config_override, log_slice, fresh_ip,
+):
+    """Overlapping BotShieldBlockPath rules must resolve by declaration
+    order, not by hash-iteration chance. A specific `/admin/secret`
+    rule declared FIRST should win when both it and a generic
+    `/admin*` rule match."""
+    with config_override(
+        r"BotShieldAllow\s+on",
+        'BotShieldAllow on\n'
+        '    BotShieldBlockPath specific "/admin/secret" "Scraper/" *\n'
+        '    BotShieldBlockPath generic  "/admin*"       "Scraper/" *',
+        count=1,
+    ):
+        with log_slice as slc:
+            r_secret = client.get("/admin/secret", xff=fresh_ip,
+                                  ua="Scraper/1.0")
+            r_other  = client.get("/admin/other",  xff=fresh_ip,
+                                  ua="Scraper/1.0")
+            lines = slc.decision_lines(ip=fresh_ip)
+
+    assert r_secret.status_code == 403
+    assert r_other.status_code  == 403
+
+    specific_hits = [d for d in lines
+                     if "block-path:specific" in d["reason"]]
+    generic_hits  = [d for d in lines
+                     if "block-path:generic"  in d["reason"]]
+    assert len(specific_hits) == 1, (
+        f"/admin/secret should hit the specific rule (declared first); "
+        f"specific_hits={specific_hits}"
+    )
+    assert len(generic_hits) == 1, (
+        f"/admin/other should fall through to generic; "
+        f"generic_hits={generic_hits}"
+    )
+
+
 # --- Metrics ---------------------------------------------------------
 
 
