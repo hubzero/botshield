@@ -18,6 +18,10 @@ dev = [
     "pytest-xdist>=3.6",
     "pytest-timeout>=2.3",
 ]
+browser = [
+    "pytest-playwright>=0.7",
+    "playwright>=1.58",
+]
 
 [tool.setuptools.packages.find]
 include = ["botshield_test*"]
