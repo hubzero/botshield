@@ -95,22 +95,30 @@ def test_pending_cookie_path_scoped(bs_browser_context):
         "JS has no reason to read it, so HttpOnly should be set"
     )
 
-    # Chromium-level assertion: a fetch OUTSIDE the pending cookie's
-    # Path must NOT include it. The module's own captcha-demo route
-    # is at `/captcha-demo` (root path), which is outside
-    # `/botshield/captcha-verify` — so a same-origin GET to / should
-    # not carry the pending cookie.
-    got_cookies = page.evaluate("""async () => {
-        const r = await fetch('/', { credentials: 'include' });
-        return r.headers.get('x-botshield-echo-cookies') || '';
-    }""")
-    # We don't have an echo endpoint, so we check via document.cookie
-    # semantics instead: for the root path, the pending cookie
-    # (Path=/botshield/captcha-verify) must NOT be visible to JS. A
-    # real browser enforces this even when document.cookie is read
-    # from a page loaded from the root path.
-    cookies_at_root = page.evaluate("() => document.cookie")
-    assert "_bs_captcha_pending" not in cookies_at_root, (
-        f"pending cookie leaked into document.cookie at root path: "
-        f"{cookies_at_root!r}"
+    # Chromium-level Path enforcement. Playwright's
+    # `context.cookies(url=...)` returns the cookies the browser
+    # WOULD send with a request to `url` — the same filter Chromium
+    # applies before it attaches the Cookie header. That's the real
+    # regression gate: if the Path attribute widened to /, the
+    # pending cookie would appear in cookies_at_root.
+    #
+    # (document.cookie wouldn't work here — the pending cookie is
+    # HttpOnly, so JS never sees it regardless of Path. An assertion
+    # built on document.cookie would pass even if the Path leaked.)
+    cookies_for_root = ctx.cookies(urls="https://localhost/")
+    cookies_for_verify = ctx.cookies(
+        urls="https://localhost/botshield/captcha-verify/turnstile"
+    )
+
+    names_root = {c["name"] for c in cookies_for_root}
+    names_verify = {c["name"] for c in cookies_for_verify}
+
+    assert "_bs_captcha_pending" not in names_root, (
+        f"pending cookie would be sent on a request to /: {names_root}. "
+        f"Chromium's Path enforcement says the cookie's Path scope "
+        f"widened beyond /botshield/captcha-verify."
+    )
+    assert "_bs_captcha_pending" in names_verify, (
+        f"pending cookie missing from request to the verify endpoint: "
+        f"{names_verify}. Path should match /botshield/captcha-verify."
     )
