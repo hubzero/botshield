@@ -15,7 +15,17 @@ from __future__ import annotations
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
+
 from botshield_test import client, cookies, metrics
+
+
+# Serial: this test fires 40 parallel POSTs at the verify endpoint to
+# saturate one IP's rate-limit slot. Running alongside other tests
+# that also hit verify trips the global inflight semaphore and
+# gives the 40-way burst half-closed connections
+# (httpx.RemoteProtocolError) instead of the 429s we're measuring.
+pytestmark = pytest.mark.serial
 
 
 def _fire(pending: str, ip: str):

@@ -41,9 +41,12 @@ Ubuntu 22.04 work identically. The setup script installs what's needed:
 - `python3`, `python3-venv` (pytest framework lives in `tests/.venv`)
 - `curl`, `openssl`, `wrk`
 
-Pinned Python deps: `httpx`, `pytest`, `pytest-xdist`, `pytest-timeout`
-(see `requirements-test.txt`). `provision.sh` creates `tests/.venv`
-and installs them. Playwright + Chromium arrive in M11.6.
+Pinned Python deps: `httpx`, `pytest`, `pytest-xdist`,
+`pytest-timeout`, `pytest-playwright`, `playwright` (see
+`requirements-test.txt`). `provision.sh` creates `tests/.venv`,
+installs them, pulls the Chromium binary into `~/.cache/ms-playwright`,
+and apt-installs Chromium's shared-lib dependencies (libnss3, libatk,
+libxkbcommon, etc.).
 
 ## Markers
 
@@ -57,8 +60,10 @@ and installs them. Playwright + Chromium arrive in M11.6.
 - `@pytest.mark.live_provider` — requires a real provider token
   passed via env var (e.g. `BS_RECAPTCHA_V3_TOKEN`). Skips without.
 - `@pytest.mark.acceptance` — end-to-end user-journey test.
-  Becomes browser-driven in M11.6.
-- `@pytest.mark.browser` — reserved for the M11.6 Playwright layer.
+- `@pytest.mark.browser` — runs in a real headless Chromium via
+  pytest-playwright. Catches regressions no request library can see
+  (interstitial JS execution, cookie attribute enforcement,
+  auto-submit form wiring).
 
 RHEL-family isn't scripted yet but the dependency list maps cleanly:
 `httpd-devel`, `openssl-devel`, `libcurl-devel`, `json-c-devel`,

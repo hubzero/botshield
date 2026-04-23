@@ -117,5 +117,27 @@ sudo -u "$SUDO_USER" "$VENV/bin/pip" install \
   -r "$REPO/tests/requirements-test.txt" --quiet
 sudo -u "$SUDO_USER" "$VENV/bin/pip" install -e "$REPO/tests" --quiet
 
+echo "== Chromium for Playwright (M11.6) =="
+# Playwright ships chromium binaries into ~/.cache/ms-playwright. The
+# browser needs a handful of shared libs that aren't always on a
+# minimal Ubuntu (Chromium's install-deps would normally pull them,
+# but doing it explicitly via apt keeps the install idempotent and
+# diff-able). Minimal set that matches a bare ubuntu-24.04 runner.
+apt-get install -y -qq \
+  libnss3 libnspr4 \
+  libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 \
+  libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
+  libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 \
+  fonts-liberation \
+  >/dev/null 2>&1 \
+  || apt-get install -y -qq \
+       libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
+       libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
+       libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 \
+       fonts-liberation >/dev/null
+# Install the chromium binary itself into the user's cache. Idempotent:
+# already-present versions are skipped.
+sudo -u "$SUDO_USER" "$VENV/bin/playwright" install chromium >/dev/null
+
 echo ""
 echo "provision.sh: OK — tests/run is ready."
