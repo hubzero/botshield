@@ -1,17 +1,22 @@
 # tests/requirements-test.txt — pinned dependencies for the pytest
-# suite introduced in M11.4. Install into tests/.venv with:
+# suite. Install into tests/.venv with:
 #
 #   python3 -m venv tests/.venv
 #   tests/.venv/bin/pip install -r tests/requirements-test.txt
-#
-# Playwright + Chromium arrive in M11.6 and land here then.
 
+# M11.4: framework foundation
 httpx==0.28.1
 pytest==9.0.3
 pytest-xdist==3.6.1
 pytest-timeout==2.3.1
+
 # M11.6: real-browser acceptance layer. The chromium binary itself
 # lives under ~/.cache/ms-playwright/ and is installed separately via
 # `playwright install chromium` in tests/setup/provision.sh.
 pytest-playwright==0.7.2
 playwright==1.58.0
+
+# M11.7: rerun-on-flake for @live_network (third-party siteverify
+# blips) + HTML reports for CI triage.
+pytest-rerunfailures==16.1
+pytest-html==4.2.0

@@ -14,6 +14,32 @@ from botshield_test import logs as _logs
 from botshield_test import cookies as _cookies
 
 
+# ---------------------------------------------------------------------------
+# Flake control (M11.7)
+#
+# pytest-rerunfailures' `flaky` marker retries a failed test N times
+# before reporting failure. We apply it narrowly — only to tests tagged
+# @pytest.mark.live_network — because:
+#   1. Retrying unit logic that fails is harmful (masks real bugs).
+#   2. Third-party captcha siteverify endpoints genuinely flake: rate
+#      limits, maintenance windows, network blips. A single retry
+#      absorbs those without cost to signal quality.
+#
+# Implementing this via a collection hook rather than decorating each
+# test keeps the test bodies clean and guarantees every live_network
+# test inherits the policy automatically.
+# ---------------------------------------------------------------------------
+
+
+def pytest_collection_modifyitems(config, items):
+    for item in items:
+        if item.get_closest_marker("live_network") is not None:
+            # 2 retries = up to 3 total attempts per failing test. Only
+            # kicks in when the initial run failed; passes are not
+            # re-run.
+            item.add_marker(pytest.mark.flaky(reruns=2, reruns_delay=1))
+
+
 @pytest.fixture(scope="session")
 def apache():
     """Session-level sanity: Apache is running and the dev vhost
