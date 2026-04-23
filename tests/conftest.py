@@ -91,3 +91,60 @@ def clean_state():
     yield
     # No teardown: state accumulates naturally, and the next clean_state
     # caller will wipe again if they need to.
+
+
+# ---------------------------------------------------------------------------
+# Playwright / browser fixtures (M11.6)
+#
+# pytest-playwright ships `page` / `context` / `browser` fixtures by
+# default. We layer our own on top so every browser test gets:
+#   - self-signed cert trusted
+#   - XFF header injected (so tests can pick fresh Bloom-clean IPs the
+#     same way httpx tests do)
+#   - Accept-Language *omitted* by default, because Chromium's locale
+#     default would keep scores below the silent-tier threshold and
+#     make the form-tier journey untestable. Tests that need to look
+#     like a well-behaved browser add it back explicitly.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def browser_context_args(browser_context_args):
+    """Override the stock pytest-playwright fixture so every context
+    trusts the dev cert."""
+    return {**browser_context_args, "ignore_https_errors": True}
+
+
+@pytest.fixture
+def bs_browser_context(browser, fresh_ip):
+    """A Chromium context pinned to one Bloom-fresh IP via
+    X-Forwarded-For and with Accept-Language blank — the shape that
+    lands a cookieless request in silent / form tier.
+
+    Test that wants to look like a well-behaved browser (to exercise
+    the pass path) should override the headers via
+    `ctx.set_extra_http_headers(...)` or use `bs_browser_context_pass`.
+    """
+    ctx = browser.new_context(
+        ignore_https_errors=True,
+        extra_http_headers={
+            "X-Forwarded-For": fresh_ip,
+            "Accept-Language": "",
+        },
+    )
+    yield ctx
+    ctx.close()
+
+
+@pytest.fixture
+def bs_browser_context_pass(browser, fresh_ip):
+    """A Chromium context shaped like a real human visitor: fresh IP,
+    Accept-Language set, no scraper heuristics tripped. Should land
+    at pass tier with no challenge."""
+    ctx = browser.new_context(
+        ignore_https_errors=True,
+        locale="en-US",
+        extra_http_headers={"X-Forwarded-For": fresh_ip},
+    )
+    yield ctx
+    ctx.close()
