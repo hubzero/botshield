@@ -1,0 +1,108 @@
+#!/bin/bash
+# tests/run — mod_botshield test dispatcher.
+#
+# Walks category directories, runs each executable *.sh in order,
+# prints PASS/FAIL per test, reports a summary at the end.
+#
+# Exit codes: 0 if every test passed, 1 if any failed, 2 on bad
+# invocation.
+#
+# Flags:
+#   --only CATEGORY    Run only one category (unit, integration,
+#                      acceptance, stress). Repeatable.
+#   --match PATTERN    Run only tests whose filename matches PATTERN
+#                      (substring, not regex).
+#   --verbose          Show each test's stdout inline instead of only
+#                      on failure.
+#   --list             List tests that would run, don't execute them.
+#
+# Conventions:
+#   - Each test is a standalone shell script that sources
+#     tests/lib/common.sh and prints "PASS: <name>" / "FAIL: ..." /
+#     "SKIP: <reason>" lines. Exit code 0 = test passed or was
+#     skipped; non-zero = failed.
+#   - Tests MUST NOT depend on ordering within their category. Tests
+#     within a single run share the live Apache; each test should
+#     leave the dev vhost in a usable state for the next.
+#   - If a test needs a completely clean SHM/state, it should call
+#     tests/setup/reset-state.sh itself. Most tests don't need that.
+
+set -u
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+CATEGORIES=(unit integration acceptance stress)
+
+ONLY=()
+MATCH=""
+VERBOSE=0
+LIST_ONLY=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --only)    ONLY+=("$2"); shift 2 ;;
+    --match)   MATCH="$2";   shift 2 ;;
+    --verbose) VERBOSE=1;    shift   ;;
+    --list)    LIST_ONLY=1;  shift   ;;
+    --help|-h)
+      sed -n '3,22p' "$0" | sed 's/^# \?//'; exit 0 ;;
+    *) echo "unknown flag: $1" >&2; exit 2 ;;
+  esac
+done
+
+if [[ ${#ONLY[@]} -gt 0 ]]; then
+  CATEGORIES=("${ONLY[@]}")
+fi
+
+pass=0
+fail=0
+skip=0
+fails=()
+
+for cat in "${CATEGORIES[@]}"; do
+  dir="$HERE/$cat"
+  [[ -d "$dir" ]] || continue
+  for t in "$dir"/*.sh; do
+    [[ -e "$t" ]] || continue
+    [[ -x "$t" ]] || continue
+    name="$cat/$(basename "$t" .sh)"
+    if [[ -n "$MATCH" ]] && [[ "$name" != *"$MATCH"* ]]; then
+      continue
+    fi
+    if [[ $LIST_ONLY -eq 1 ]]; then
+      echo "$name"
+      continue
+    fi
+
+    printf "\n=== %s ===\n" "$name"
+    out=$(mktemp /tmp/bs_test_out.XXXXXX)
+    if "$t" > "$out" 2>&1; then
+      if grep -q "^  SKIP:" "$out"; then
+        skip=$((skip + 1))
+        grep "^  SKIP:" "$out"
+      else
+        pass=$((pass + 1))
+        grep "^  PASS:" "$out" || true
+      fi
+      [[ $VERBOSE -eq 1 ]] && grep -v "^  PASS:\|^  SKIP:" "$out" || true
+    else
+      fail=$((fail + 1))
+      fails+=("$name")
+      cat "$out"
+    fi
+    rm -f "$out"
+  done
+done
+
+if [[ $LIST_ONLY -eq 1 ]]; then
+  exit 0
+fi
+
+echo ""
+echo "====================================================="
+printf "tests: %d passed, %d skipped, %d failed\n" "$pass" "$skip" "$fail"
+if [[ $fail -gt 0 ]]; then
+  echo "failed:"
+  for f in "${fails[@]}"; do echo "  - $f"; done
+  exit 1
+fi
+exit 0
