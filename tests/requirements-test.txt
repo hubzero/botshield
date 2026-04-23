@@ -1,0 +1,12 @@
+# tests/requirements-test.txt — pinned dependencies for the pytest
+# suite introduced in M11.4. Install into tests/.venv with:
+#
+#   python3 -m venv tests/.venv
+#   tests/.venv/bin/pip install -r tests/requirements-test.txt
+#
+# Playwright + Chromium arrive in M11.6 and land here then.
+
+httpx==0.28.1
+pytest==9.0.3
+pytest-xdist==3.6.1
+pytest-timeout==2.3.1
