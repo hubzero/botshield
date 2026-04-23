@@ -84,9 +84,16 @@ fails=()
 run_pytests() {
   local dir="$HERE/pytests"
   if [[ ! -x "$PYTEST_VENV/bin/pytest" ]]; then
+    # Missing venv is a hard fail, not a silent skip. If the canonical
+    # runner exits 0/0/0 just because provision.sh wasn't run, every
+    # "CI is green" signal is a lie. Force a non-zero exit with a
+    # clear diagnostic.
     echo ""
-    echo "=== pytests (SKIPPED: no venv at $PYTEST_VENV) ==="
-    echo "  run sudo tests/setup/provision.sh to create it"
+    echo "=== pytests ==="
+    echo "  FAIL: no pytest venv at $PYTEST_VENV"
+    echo "  Run: sudo tests/setup/provision.sh"
+    fail=$(( fail + 1 ))
+    fails+=("pytests (venv missing)")
     return
   fi
   if [[ $LIST_ONLY -eq 1 ]]; then
@@ -131,7 +138,15 @@ run_pytests() {
     skip=$(( skip + ${s:-0} ))
     fail=$(( fail + ${f:-0} ))
 
-    if [[ $rc -ne 0 ]]; then
+    # pytest exit codes (from pytest docs):
+    #   0 = all passed, 1 = some failed, 2 = interrupted,
+    #   3 = internal error, 4 = cli misuse, 5 = no tests collected.
+    # Exit 5 is expected during a --parallel run when one phase's
+    # filter (serial / not-serial) intersected with --match or --slow
+    # yields an empty selection. It's not a failure; treat as benign.
+    if [[ $rc -eq 5 ]]; then
+      [[ $VERBOSE -eq 1 ]] && cat "$pyout"
+    elif [[ $rc -ne 0 ]]; then
       fails+=("pytests${marker:+ [$marker]} (${f:-?} failed)")
       cat "$pyout"
     elif [[ $VERBOSE -eq 1 ]]; then
