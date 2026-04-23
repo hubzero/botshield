@@ -79,14 +79,16 @@ assert_status "$hdr" "403"
 assert_header "$hdr" "X-Botshield" "captcha-rejected"
 rm -f "$hdr" "$body"
 
-# Log should carry error-codes from the parser
+# Assert the decision line: every request emits one, and it's never
+# log-throttled. The "captcha REJECTED" prose line is 1/IP/60s, so
+# rapid back-to-back runs would drop it from subsequent slices.
 slice=$(log_slice "$mark")
-if ! grep -q "captcha REJECTED .*error-codes=\[" "$slice"; then
+if ! grep -q "decision .*outcome=rejected .*provider=turnstile" "$slice"; then
   cat "$slice"; rm -f "$slice"
-  t_fail "REJECTED log line missing error-codes"
+  t_fail "no 'outcome=rejected provider=turnstile' decision line"
 fi
 rm -f "$slice"
-t_pass "always-fail secret → 403 + captcha-rejected + error-codes logged"
+t_pass "always-fail secret → 403 + captcha-rejected + decision outcome=rejected"
 
 # -------- TIMEOUT path (aggressive 100ms timeout) ---------
 sudo sed -i \
