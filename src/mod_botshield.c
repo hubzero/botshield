@@ -133,6 +133,12 @@ static int bs_parse_int64_bounded(const char *s,
                                   apr_int64_t max_val,
                                   apr_int64_t *out);
 
+/* Forward decl for bs_score_add — called from the E1 block, which
+ * lives before the scoring section so its data structures are
+ * available at post_config time. */
+static void bs_score_add(request_rec *r, int penalty,
+                         int ttl_seconds, const char *reason);
+
 /* Reputation state carried in the cookie. Populated fresh on a first-time
  * challenge (all zeros), and merged forward with forgiveness on re-issues. */
 typedef struct {
@@ -391,6 +397,12 @@ typedef struct {
     apr_uint64_t state_loads_total;
     apr_uint64_t state_load_last_kept;
     apr_uint64_t state_load_last_dropped;
+    /* E1 — crawler verification. Aggregate across all crawlers;
+     * per-crawler breakdown lives in the decision log, not here, so
+     * we don't introduce labeled metrics yet. */
+    apr_uint64_t crawler_verified_total;
+    apr_uint64_t crawler_fake_total;
+    apr_uint64_t crawler_unverified_total;
 } bs_metrics;
 
 /* Module-global runtime pointer struct. Populated once in post-config;
@@ -543,6 +555,15 @@ typedef struct {
     const char *state_file;         /* NULL = persistence off */
     int         state_save_interval;/* seconds; 0 = shutdown-only */
     int         captcha_max_inflight;  /* M8.1: cap on outstanding siteverifies */
+    /* E1 — verified legit-crawler allow-list. State loaded in
+     * post_config and read-only thereafter; lives at server scope
+     * because the UA classifier + CIDR lists are global, not per-
+     * directory. */
+    int          crawlers_enabled;         /* master gate, default 0 */
+    void        *crawler_classifier;       /* bs_ua_classifier *, opaque here */
+    apr_hash_t  *crawler_ranges;           /* name → apr_array_header_t of apr_ipsubnet_t* */
+    apr_table_t *crawler_range_overrides;  /* name → explicit path (directive overrides) */
+    apr_table_t *crawler_extra_patterns;   /* name → UA pattern (operator-defined bots) */
 } bs_server_cfg;
 
 /* --- Config lifecycle --- */
@@ -596,6 +617,14 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->state_file            = NULL;
     scfg->state_save_interval   = 300;   /* 5 min default when state file set */
     scfg->captcha_max_inflight  = BS_DEFAULT_CAPTCHA_MAX_INFLIGHT;
+    /* E1 crawler allow-list defaults — master gate off (opt-in).
+     * crawler_classifier / crawler_ranges stay NULL and get built
+     * in post_config if the master gate flips on. */
+    scfg->crawlers_enabled         = 0;
+    scfg->crawler_classifier       = NULL;
+    scfg->crawler_ranges           = NULL;
+    scfg->crawler_range_overrides  = apr_table_make(p, 4);
+    scfg->crawler_extra_patterns   = apr_table_make(p, 4);
     return scfg;
 }
 
@@ -1563,6 +1592,358 @@ static apr_status_t  bs_watchdog_save_cb(int state, void *data,
                                          apr_pool_t *pool);
 static const char   *bs_get_cookie_value(request_rec *r, const char *name);
 
+/* ======================================================================
+ * E1 — Verified legit-crawler allow-list.
+ *
+ * "Real Googlebot" vs "someone claiming to be Googlebot" is the
+ * question. UA strings are forgeable; IP ranges aren't. The design:
+ *
+ *   1. Match the UA against a classifier (trie) built from both
+ *      module built-ins and operator-registered patterns. Returns a
+ *      crawler name or NULL.
+ *   2. If classified, look up the matching CIDR list for that name
+ *      and test the client IP against it.
+ *   3. Match → verified-<name>; apply a large negative penalty so
+ *      tier dispatch collapses to pass.
+ *   4. No match → fake-<name>; apply BS_PENALTY_FAKE_CRAWLER so the
+ *      request sails into captcha tier with a loud reason.
+ *   5. Classified but no ranges loaded → "unverified" — log, don't
+ *      score either way. Operator hasn't authorized verification
+ *      for this crawler yet.
+ *
+ * The UA classifier is a vanilla trie (no Aho-Corasick failure
+ * links — simpler to read, indistinguishable on realistic UAs).
+ * A prefilter short-circuits non-crawler traffic in ~1 µs so the
+ * trie only walks for bot-ish UAs. Designed to scale to ~400
+ * patterns (Cloudflare Radar's worked list) without the linear-scan
+ * wall we'd hit otherwise.
+ *
+ * Pure read-only at request time; all state is populated in
+ * post_config and immutable thereafter. The module never touches
+ * the network for this feature — ranges come from disk files that
+ * operators refresh out-of-band via tools/refresh-crawler-ranges.sh.
+ * ====================================================================== */
+
+#define BS_PENALTY_FAKE_CRAWLER  100   /* enough to force captcha tier */
+#define BS_CREDIT_VERIFIED       (-1000) /* dominates any other penalty */
+
+/* --- UA classifier: trie with case-insensitive char match --- */
+
+typedef struct bs_ua_trie_child {
+    unsigned char c;                /* lowercased char this edge matches */
+    struct bs_ua_trie_node *node;
+} bs_ua_trie_child;
+
+typedef struct bs_ua_trie_node {
+    bs_ua_trie_child *kids;         /* pool-allocated, grown on insert */
+    int n_kids;
+    int cap_kids;
+    const char *name;               /* non-NULL → terminal (match here) */
+} bs_ua_trie_node;
+
+typedef struct {
+    apr_pool_t *pool;               /* for node allocation */
+    bs_ua_trie_node *root;
+    int n_patterns;                 /* for logging */
+} bs_ua_classifier;
+
+static bs_ua_classifier *bs_ua_classifier_create(apr_pool_t *p)
+{
+    bs_ua_classifier *c = apr_pcalloc(p, sizeof(*c));
+    c->pool = p;
+    c->root = apr_pcalloc(p, sizeof(*c->root));
+    return c;
+}
+
+static bs_ua_trie_node *bs_ua_trie_walk(bs_ua_trie_node *n, unsigned char c)
+{
+    c = (unsigned char)tolower(c);
+    for (int i = 0; i < n->n_kids; i++) {
+        if (n->kids[i].c == c) return n->kids[i].node;
+    }
+    return NULL;
+}
+
+static bs_ua_trie_node *bs_ua_trie_edge_get_or_add(apr_pool_t *p,
+                                                   bs_ua_trie_node *n,
+                                                   unsigned char c)
+{
+    c = (unsigned char)tolower(c);
+    for (int i = 0; i < n->n_kids; i++) {
+        if (n->kids[i].c == c) return n->kids[i].node;
+    }
+    /* Grow children array. Most nodes have 1-3 kids; start at 2, double. */
+    if (n->n_kids == n->cap_kids) {
+        int new_cap = n->cap_kids ? n->cap_kids * 2 : 2;
+        bs_ua_trie_child *nk = apr_palloc(p,
+            (apr_size_t)new_cap * sizeof(*nk));
+        if (n->n_kids > 0) {
+            memcpy(nk, n->kids, (apr_size_t)n->n_kids * sizeof(*nk));
+        }
+        n->kids = nk;
+        n->cap_kids = new_cap;
+    }
+    bs_ua_trie_node *child = apr_pcalloc(p, sizeof(*child));
+    n->kids[n->n_kids].c = c;
+    n->kids[n->n_kids].node = child;
+    n->n_kids++;
+    return child;
+}
+
+/* Register a substring pattern. The pattern matches anywhere in a UA
+ * (case-insensitive). Caller owns the memory for `name` — it must
+ * outlive the classifier (typically a static string or pool-alloc
+ * on the same pool). */
+static apr_status_t bs_ua_classifier_add(bs_ua_classifier *c,
+                                         const char *name,
+                                         const char *pattern)
+{
+    if (!name || !pattern || !*pattern) return APR_EINVAL;
+    bs_ua_trie_node *n = c->root;
+    for (const char *p = pattern; *p; p++) {
+        n = bs_ua_trie_edge_get_or_add(c->pool, n, (unsigned char)*p);
+        if (!n) return APR_ENOMEM;
+    }
+    /* Last-writer-wins on duplicate registration — the operator
+     * probably meant to override. */
+    n->name = name;
+    c->n_patterns++;
+    return APR_SUCCESS;
+}
+
+/* Cheap prefilter: does the UA contain any bot-ish token? Non-bot
+ * UAs skip the trie walk entirely (~1 µs regardless of pattern
+ * count). Tokens chosen to cover the overwhelming majority of
+ * legitimate crawlers' UAs while being uncommon in human browsers. */
+static int bs_ua_is_botlike(const char *ua)
+{
+    if (!ua) return 0;
+    /* strcasestr is a GNU extension but present on every Linux we
+     * target and on FreeBSD/macOS. Portable enough for our build. */
+    return strcasestr(ua, "bot")    != NULL
+        || strcasestr(ua, "crawl")  != NULL
+        || strcasestr(ua, "spider") != NULL
+        || strcasestr(ua, "fetch")  != NULL
+        || strcasestr(ua, "slurp")  != NULL;
+}
+
+/* Classify: walk the trie from each position in the UA until we find
+ * a terminal node. Returns the matched name (borrowed) or NULL.
+ * O(|ua| × avg-depth) worst case; in practice most positions die
+ * within the first few chars because the trie is sparse. */
+static const char *bs_ua_classify(const bs_ua_classifier *c, const char *ua)
+{
+    if (!c || !ua || !*ua) return NULL;
+    if (!bs_ua_is_botlike(ua)) return NULL;   /* hot path */
+
+    for (const char *start = ua; *start; start++) {
+        bs_ua_trie_node *n = c->root;
+        for (const char *p = start; *p; p++) {
+            n = bs_ua_trie_walk(n, (unsigned char)*p);
+            if (!n) break;
+            if (n->name) return n->name;   /* earliest / shortest match wins */
+        }
+    }
+    return NULL;
+}
+
+/* --- Built-in crawler UA patterns ---
+ *
+ * Only crawlers with known-good bundled or operator-curated CIDR
+ * ranges should go here — registering a UA with no ranges means the
+ * module matches the UA but has nothing to verify against, which
+ * surfaces as a perpetual "unverified" log entry. E2 will add
+ * entries for the rate-limit-only crawlers (GPTBot, ClaudeBot, etc.)
+ * that are classified but not verified.
+ */
+typedef struct {
+    const char *name;       /* internal key; matches ranges-file basename */
+    const char *pattern;    /* substring expected in UA (case-insensitive) */
+} bs_builtin_crawler;
+
+static const bs_builtin_crawler bs_builtin_crawlers[] = {
+    { "googlebot", "Googlebot" },
+    { "bingbot",   "bingbot"   },
+    { "applebot",  "Applebot"  },
+    { NULL, NULL }
+};
+
+/* --- CIDR list loader ---
+ *
+ * Plain-text format, one CIDR per line, # for comments, empty
+ * lines OK. Accepts both IPv4 and IPv6. apr_ipsubnet_create parses
+ * the CIDR; we hold them in an apr_array_header_t of
+ * apr_ipsubnet_t* that the request-time matcher scans.
+ *
+ * Max file size: 1 MiB. A ranges file that big would mean thousands
+ * of CIDRs, which no published provider list approaches; acts as a
+ * sanity cap on accidental misconfiguration (pointing at a JSON
+ * file, a log, etc.). */
+#define BS_CRAWLER_MAX_RANGES_FILE  (1024 * 1024)
+
+static apr_status_t bs_crawler_load_ranges(apr_pool_t *p,
+                                           const char *path,
+                                           apr_array_header_t **out,
+                                           const char **out_err)
+{
+    *out = NULL;
+    *out_err = NULL;
+
+    apr_file_t *f = NULL;
+    apr_status_t rv = apr_file_open(&f, path, APR_FOPEN_READ,
+                                    APR_OS_DEFAULT, p);
+    if (rv != APR_SUCCESS) {
+        char errbuf[256];
+        apr_strerror(rv, errbuf, sizeof(errbuf));
+        *out_err = apr_psprintf(p, "cannot open '%s': %s", path, errbuf);
+        return rv;
+    }
+
+    apr_finfo_t fi;
+    rv = apr_file_info_get(&fi, APR_FINFO_SIZE, f);
+    if (rv == APR_SUCCESS && fi.size > BS_CRAWLER_MAX_RANGES_FILE) {
+        apr_file_close(f);
+        *out_err = apr_psprintf(p,
+            "'%s' is %" APR_OFF_T_FMT " bytes — above %d cap",
+            path, fi.size, BS_CRAWLER_MAX_RANGES_FILE);
+        return APR_EINVAL;
+    }
+
+    apr_array_header_t *arr =
+        apr_array_make(p, 32, sizeof(apr_ipsubnet_t *));
+    char line[512];
+    int lineno = 0;
+
+    while (apr_file_gets(line, sizeof(line), f) == APR_SUCCESS) {
+        lineno++;
+        char *s = line;
+        /* trim trailing CR/LF/whitespace */
+        apr_size_t l = strlen(s);
+        while (l > 0 && (s[l-1] == '\n' || s[l-1] == '\r' ||
+                         s[l-1] == ' '  || s[l-1] == '\t')) {
+            s[--l] = '\0';
+        }
+        /* skip leading whitespace */
+        while (*s == ' ' || *s == '\t') s++;
+        /* skip blanks + comments */
+        if (!*s || *s == '#') continue;
+
+        /* apr_ipsubnet_create takes "ip/mask" or "ip/prefix-bits".
+         * Split in place. */
+        char *slash = strchr(s, '/');
+        apr_ipsubnet_t *net = NULL;
+        if (slash) {
+            *slash = '\0';
+            const char *mask = slash + 1;
+            rv = apr_ipsubnet_create(&net, s, mask, p);
+        } else {
+            /* Bare IP — treat as /32 or /128 depending on family. */
+            rv = apr_ipsubnet_create(&net, s, NULL, p);
+        }
+        if (rv != APR_SUCCESS) {
+            char errbuf[256];
+            apr_strerror(rv, errbuf, sizeof(errbuf));
+            apr_file_close(f);
+            *out_err = apr_psprintf(p,
+                "'%s' line %d: invalid CIDR: %s", path, lineno, errbuf);
+            return rv;
+        }
+        APR_ARRAY_PUSH(arr, apr_ipsubnet_t *) = net;
+    }
+    apr_file_close(f);
+
+    if (arr->nelts == 0) {
+        *out_err = apr_psprintf(p, "'%s' contained no CIDR entries", path);
+        return APR_EINVAL;
+    }
+
+    *out = arr;
+    return APR_SUCCESS;
+}
+
+/* Test a client IP (from r->useragent_ip) against a loaded CIDR list. */
+static int bs_crawler_ip_in_ranges(const apr_array_header_t *ranges,
+                                   request_rec *r)
+{
+    if (!ranges || ranges->nelts == 0) return 0;
+    /* Convert the client IP string into an apr_sockaddr_t that
+     * apr_ipsubnet_test can inspect. The client IP has already been
+     * normalized by mod_remoteip (if wired) — we take it as-is. */
+    const char *ip_str = r->useragent_ip;
+    if (!ip_str || !*ip_str) return 0;
+
+    apr_sockaddr_t *sa = NULL;
+    apr_status_t rv = apr_sockaddr_info_get(&sa, ip_str,
+                                            APR_UNSPEC, 0, 0, r->pool);
+    if (rv != APR_SUCCESS || !sa) return 0;
+
+    for (int i = 0; i < ranges->nelts; i++) {
+        apr_ipsubnet_t *net = APR_ARRAY_IDX(ranges, i, apr_ipsubnet_t *);
+        if (apr_ipsubnet_test(net, sa)) return 1;
+    }
+    return 0;
+}
+
+/* --- Request-time entry point ---
+ *
+ * Called from bs_run_builtin_heuristics. Does nothing unless E1 is
+ * enabled via BotShieldLegitCrawlers on. Emits at most one
+ * bs_score_add call per request (dominant penalty/credit).
+ */
+static void bs_check_legit_crawler(request_rec *r,
+                                   const bs_dir_cfg *cfg)
+{
+    (void)cfg;
+    bs_server_cfg *scfg = ap_get_module_config(r->server->module_config,
+                                               &botshield_module);
+    if (!scfg || !scfg->crawlers_enabled) return;
+    if (!scfg->crawler_classifier) return;
+
+    const char *ua = apr_table_get(r->headers_in, "User-Agent");
+    const char *name = bs_ua_classify(scfg->crawler_classifier, ua);
+    if (!name) return;
+
+    /* Look up the ranges this crawler has loaded. */
+    apr_array_header_t *ranges = NULL;
+    if (scfg->crawler_ranges) {
+        ranges = apr_hash_get(scfg->crawler_ranges, name, APR_HASH_KEY_STRING);
+    }
+
+    if (!ranges) {
+        /* Crawler pattern matched but no ranges file configured or
+         * loadable. Don't score either way — operator hasn't
+         * authorized verification for this crawler. Metric records
+         * the event for ops visibility. */
+        if (bs_shm.metrics) {
+            __atomic_fetch_add(&bs_shm.metrics->crawler_unverified_total,
+                               1, __ATOMIC_RELAXED);
+        }
+        bs_score_add(r, 0, 0,
+            apr_pstrcat(r->pool, "crawler-unverified:", name, NULL));
+        return;
+    }
+
+    if (bs_crawler_ip_in_ranges(ranges, r)) {
+        /* Verified — large negative penalty dominates tier decision. */
+        if (bs_shm.metrics) {
+            __atomic_fetch_add(&bs_shm.metrics->crawler_verified_total,
+                               1, __ATOMIC_RELAXED);
+        }
+        bs_score_add(r, BS_CREDIT_VERIFIED, 0,
+            apr_pstrcat(r->pool, "verified-crawler:", name, NULL));
+    } else {
+        /* Fake: claims crawler UA but IP isn't in that crawler's
+         * published ranges. Large penalty drives the request straight
+         * to captcha tier; the reason string surfaces in the log. */
+        if (bs_shm.metrics) {
+            __atomic_fetch_add(&bs_shm.metrics->crawler_fake_total,
+                               1, __ATOMIC_RELAXED);
+        }
+        bs_score_add(r, BS_PENALTY_FAKE_CRAWLER, 3600,
+            apr_pstrcat(r->pool, "fake-", name, NULL));
+    }
+}
+
 static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                           apr_pool_t *ptemp, server_rec *s)
 {
@@ -1797,6 +2178,113 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
             "mod_botshield: BotShieldStateFile not set; state is in-memory "
             "only and will reset on restart");
     }
+
+    /* E1 — build the UA classifier and load ranges for each server
+     * that enabled the feature. Walk s, s->next, s->next->next, ...
+     * so a vhost-scope `BotShieldLegitCrawlers on` fires. Each
+     * vhost gets its own classifier + ranges hash (the per-request
+     * check reads from r->server's scfg, so the scoping matches). */
+    for (server_rec *sv = s; sv; sv = sv->next) {
+        bs_server_cfg *vcfg = ap_get_module_config(sv->module_config,
+                                                   &botshield_module);
+        if (!vcfg || !vcfg->crawlers_enabled) continue;
+
+        vcfg->crawler_classifier = bs_ua_classifier_create(pconf);
+        vcfg->crawler_ranges     = apr_hash_make(pconf);
+
+        /* Register built-ins, unless an operator pattern overrides. */
+        for (const bs_builtin_crawler *b = bs_builtin_crawlers;
+             b->name; b++) {
+            const char *override =
+                apr_table_get(vcfg->crawler_extra_patterns, b->name);
+            bs_ua_classifier_add(vcfg->crawler_classifier, b->name,
+                                 override ? override : b->pattern);
+        }
+        /* Register operator-declared patterns that aren't built-ins. */
+        const apr_array_header_t *extras =
+            apr_table_elts(vcfg->crawler_extra_patterns);
+        for (int i = 0; i < extras->nelts; i++) {
+            apr_table_entry_t *e =
+                &((apr_table_entry_t *)extras->elts)[i];
+            int is_builtin = 0;
+            for (const bs_builtin_crawler *b = bs_builtin_crawlers;
+                 b->name; b++) {
+                if (strcmp(b->name, e->key) == 0) { is_builtin = 1; break; }
+            }
+            if (!is_builtin) {
+                bs_ua_classifier_add(vcfg->crawler_classifier,
+                                     e->key, e->val);
+            }
+        }
+
+        /* Load ranges for every classifier-registered name. Prefer
+         * operator override path, fall back to the default location.
+         * Missing file is a NOTICE — the classifier still knows the
+         * UA, requests just get "crawler-unverified:<name>". Malformed
+         * file is a WARN — we don't fail startup for a CIDR typo. */
+        const bs_builtin_crawler *all[64];
+        int n_all = 0;
+        for (const bs_builtin_crawler *b = bs_builtin_crawlers;
+             b->name && n_all < 64; b++) {
+            all[n_all++] = b;
+        }
+        /* Walk operator-declared names too. Build a synthetic
+         * entry just to iterate; we don't mutate. */
+        for (int i = 0; i < extras->nelts && n_all < 64; i++) {
+            apr_table_entry_t *e =
+                &((apr_table_entry_t *)extras->elts)[i];
+            int dup = 0;
+            for (int j = 0; j < n_all; j++) {
+                if (strcmp(all[j]->name, e->key) == 0) { dup = 1; break; }
+            }
+            if (!dup) {
+                bs_builtin_crawler *synth = apr_pcalloc(pconf, sizeof(*synth));
+                synth->name    = apr_pstrdup(pconf, e->key);
+                synth->pattern = apr_pstrdup(pconf, e->val);
+                all[n_all++]   = synth;
+            }
+        }
+
+        int loaded = 0, missing = 0, bad = 0;
+        for (int i = 0; i < n_all; i++) {
+            const char *name = all[i]->name;
+            const char *override =
+                apr_table_get(vcfg->crawler_range_overrides, name);
+            const char *path = override
+                ? override
+                : apr_psprintf(pconf,
+                    "/var/lib/botshield/crawlers/%s.txt", name);
+
+            apr_array_header_t *arr = NULL;
+            const char *err = NULL;
+            apr_status_t rv = bs_crawler_load_ranges(pconf, path, &arr, &err);
+            if (rv == APR_SUCCESS) {
+                apr_hash_set(vcfg->crawler_ranges, name,
+                             APR_HASH_KEY_STRING, arr);
+                loaded++;
+            } else if (APR_STATUS_IS_ENOENT(rv) || !override) {
+                /* Missing file is quiet for built-ins (no override =
+                 * operator hasn't wired cron yet). For explicit
+                 * overrides missing, louder warning. */
+                missing++;
+                ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+                    "mod_botshield: crawler '%s' ranges file '%s' "
+                    "not loaded (%s) — UA will classify as unverified",
+                    name, path, err ? err : "");
+            } else {
+                bad++;
+                ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
+                    "mod_botshield: crawler '%s' ranges file '%s' "
+                    "malformed (%s) — skipping", name, path,
+                    err ? err : "parse error");
+            }
+        }
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+            "mod_botshield: crawler allow-list enabled; %d patterns, "
+            "%d ranges files loaded (%d missing, %d malformed)",
+            n_all, loaded, missing, bad);
+    }
+
     return OK;
 }
 
@@ -2531,6 +3019,96 @@ static const char *bs_set_state_save_interval(cmd_parms *cmd, void *dconf,
         return "BotShieldStateSaveInterval: 0 (shutdown-only) or 30..86400 seconds";
     }
     scfg->state_save_interval = (int)n;
+    return NULL;
+}
+
+/* --- E1 directive setters --- */
+
+/* BotShieldLegitCrawlers on|off — master gate for the crawler
+ * allow-list. Default off (opt-in). Applied at server scope. */
+static const char *bs_set_crawlers_enabled(cmd_parms *cmd, void *dconf,
+                                           int flag)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->crawlers_enabled = flag ? 1 : 0;
+    return NULL;
+}
+
+/* Character policy for crawler-name tokens: lowercase letters,
+ * digits, hyphen. Used as both the hash key and the expected
+ * basename of the ranges file. Rejects anything that could create
+ * path-traversal surprises or cross-host confusion. */
+static int bs_crawler_name_valid(const char *s)
+{
+    if (!s || !*s) return 0;
+    apr_size_t len = strlen(s);
+    if (len > 32) return 0;
+    for (const char *p = s; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* BotShieldLegitCrawlerPattern <name> <substring> — register an
+ * extra crawler UA pattern at runtime. Built-in crawlers
+ * (googlebot, bingbot, applebot) are auto-registered and don't
+ * need this. Setting a pattern for a built-in's name OVERRIDES
+ * the built-in pattern (last writer wins — operator intent). */
+static const char *bs_set_crawler_pattern(cmd_parms *cmd, void *dconf,
+                                          const char *name,
+                                          const char *pattern)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    if (!bs_crawler_name_valid(name)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldLegitCrawlerPattern: name '%s' must be "
+            "[a-z0-9-]{1,32}", name);
+    }
+    if (!pattern || !*pattern) {
+        return "BotShieldLegitCrawlerPattern: pattern cannot be empty";
+    }
+    if (strlen(pattern) > 128) {
+        return "BotShieldLegitCrawlerPattern: pattern over 128 chars "
+               "(pick a shorter distinctive substring)";
+    }
+    /* Store for post_config — classifier doesn't exist yet. */
+    apr_table_set(scfg->crawler_extra_patterns,
+                  apr_pstrdup(cmd->pool, name),
+                  apr_pstrdup(cmd->pool, pattern));
+    return NULL;
+}
+
+/* BotShieldLegitCrawlerRanges <name> <path> — set/override the
+ * ranges file path for a crawler. Built-in paths default to
+ * /var/lib/botshield/crawlers/<name>.txt. */
+static const char *bs_set_crawler_ranges(cmd_parms *cmd, void *dconf,
+                                         const char *name,
+                                         const char *path)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    if (!bs_crawler_name_valid(name)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldLegitCrawlerRanges: name '%s' must be "
+            "[a-z0-9-]{1,32}", name);
+    }
+    if (!path || !*path) {
+        return "BotShieldLegitCrawlerRanges: path cannot be empty";
+    }
+    if (path[0] != '/') {
+        return "BotShieldLegitCrawlerRanges: path must be absolute";
+    }
+    apr_table_set(scfg->crawler_range_overrides,
+                  apr_pstrdup(cmd->pool, name),
+                  apr_pstrdup(cmd->pool, path));
     return NULL;
 }
 
@@ -4535,6 +5113,21 @@ static int bs_metrics_handler(request_rec *r, bs_dir_cfg *cfg)
         "Flagged-IP entries dropped as stale during the last state load.",
         bs_mload(&m->state_load_last_dropped));
 
+    /* --- E1 crawler-verification counters --- */
+
+    bs_m_emit_counter(r, "crawler_verified_total",
+        "Requests whose crawler UA matched the published IP ranges for "
+        "that crawler (legit-bot bypass applied).",
+        bs_mload(&m->crawler_verified_total));
+    bs_m_emit_counter(r, "crawler_fake_total",
+        "Requests with a known-crawler UA whose IP was NOT in that "
+        "crawler's published ranges (penalty applied, routed to captcha tier).",
+        bs_mload(&m->crawler_fake_total));
+    bs_m_emit_counter(r, "crawler_unverified_total",
+        "Requests whose crawler UA matched a known pattern but no ranges "
+        "file is configured for that crawler (no score effect, logged).",
+        bs_mload(&m->crawler_unverified_total));
+
     /* --- On-demand gauges (may refresh a 1-second cache) --- */
 
     bs_m_emit_gauge(r, "captcha_inflight_current",
@@ -5107,15 +5700,8 @@ static int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
     return OK;
 }
 
-/* ======================================================================
- * Per-request scoring.
- *
- * Every feature that wants to nudge a request's risk upward (rate-limit
- * exceeded, honeypot hit, scanner probe, fake-Googlebot, failed captcha)
- * calls bs_score_add(). Today the score lives in r->request_config and
- * dies with the request; M4 will back the same API with SHM so penalties
- * outlive the request.
- * ====================================================================== */
+
+
 
 static bs_request_score *bs_get_score(request_rec *r, int create)
 {
@@ -5166,6 +5752,14 @@ static const char *bs_score_reasons_joined(apr_pool_t *p,
  * after the cookie check — a verified cookie skips scoring entirely. */
 static void bs_run_builtin_heuristics(request_rec *r)
 {
+    /* E1: crawler allow-list runs first. A verified crawler adds a
+     * large negative penalty that dominates anything else scoring
+     * might pile on (scraper UA tokens in "Googlebot" etc.) and
+     * collapses tier dispatch to pass. */
+    bs_dir_cfg *dcfg = ap_get_module_config(r->per_dir_config,
+                                            &botshield_module);
+    bs_check_legit_crawler(r, dcfg);
+
     const char *ua = apr_table_get(r->headers_in, "User-Agent");
     if (!ua || !*ua) {
         bs_score_add(r, BS_PENALTY_MISSING_UA, 3600, "missing-user-agent");
@@ -5432,6 +6026,28 @@ static const command_rec bs_cmds[] = {
                  "fake_crawler, pow_fail_streak. Optional second argument "
                  "is the TTL in seconds (default 3600). Use inside a "
                  "<Location> for honeypot paths."),
+    /* E1 */
+    AP_INIT_FLAG("BotShieldLegitCrawlers", bs_set_crawlers_enabled,
+                 NULL, RSRC_CONF,
+                 "Enable the verified legit-crawler allow-list. Default "
+                 "off. When on, classified crawler UAs are matched "
+                 "against loaded IP ranges: in-range gets a large "
+                 "negative penalty (tier=pass bypass); out-of-range "
+                 "gets a fake-<name> penalty routing to captcha tier."),
+    AP_INIT_TAKE2("BotShieldLegitCrawlerPattern",
+                 bs_set_crawler_pattern, NULL, RSRC_CONF,
+                 "Register an extra crawler UA pattern. Two args: "
+                 "<name> <substring>. Name is used as the ranges-file "
+                 "basename and decision-log identifier; substring is a "
+                 "case-insensitive needle looked for in the UA header. "
+                 "Built-in crawlers are auto-registered; this directive "
+                 "extends the list."),
+    AP_INIT_TAKE2("BotShieldLegitCrawlerRanges",
+                 bs_set_crawler_ranges, NULL, RSRC_CONF,
+                 "Set or override the CIDR ranges file path for a "
+                 "crawler. Two args: <name> <path>. Default path is "
+                 "/var/lib/botshield/crawlers/<name>.txt. File format "
+                 "is plain text, one CIDR per line, # for comments."),
     { NULL }
 };
 
