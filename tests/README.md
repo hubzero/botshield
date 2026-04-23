@@ -43,11 +43,11 @@ Ubuntu 22.04 work identically. The setup script installs what's needed:
 
 Pinned Python deps: `httpx`, `pytest`, `pytest-xdist`,
 `pytest-timeout`, `pytest-playwright`, `playwright`,
-`pytest-rerunfailures`, `pytest-html` (see `requirements-test.txt`).
-`provision.sh` creates `tests/.venv`, installs them, pulls the
-Chromium binary into `~/.cache/ms-playwright`, and apt-installs
-Chromium's shared-lib dependencies (libnss3, libatk, libxkbcommon,
-etc.).
+`pytest-rerunfailures`, `pytest-html`, `hypothesis`,
+`prometheus_client` (see `requirements-test.txt`). `provision.sh`
+creates `tests/.venv`, installs them, pulls the Chromium binary
+into `~/.cache/ms-playwright`, and apt-installs Chromium's
+shared-lib dependencies (libnss3, libatk, libxkbcommon, etc.).
 
 ## Reports (M11.7)
 
