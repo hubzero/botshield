@@ -174,3 +174,30 @@ def bs_browser_context_pass(browser, fresh_ip):
     )
     yield ctx
     ctx.close()
+
+
+@pytest.fixture
+def bs_browser_context_form(browser, fresh_ip):
+    """A Chromium context shaped to land at form tier (the click-to-
+    verify variant), as opposed to silent tier's auto-submit.
+
+    Form tier requires score in [50, 80): strong enough to trip a
+    challenge but under the captcha threshold. Scraper UA
+    ("python-requests") contributes +50 via scraper-ua-python;
+    missing Accept-Language contributes +15; first-sight-ip +5 —
+    around 70, comfortably in the form band. Matches what the
+    bash-era m8_1 tests used to provoke form tier.
+
+    Tests use this when they need a user-interactive interstitial
+    (keyboard reachability, click-through a11y, visible labels).
+    """
+    ctx = browser.new_context(
+        ignore_https_errors=True,
+        user_agent="python-requests/2.31",
+        extra_http_headers={
+            "X-Forwarded-For": fresh_ip,
+            "Accept-Language": "",
+        },
+    )
+    yield ctx
+    ctx.close()

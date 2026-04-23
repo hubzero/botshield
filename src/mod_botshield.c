@@ -5168,7 +5168,17 @@ static const char BS_WIDGET_TEMPLATE[] =
 " min-width:0;padding:0}\n"
 ".bs-widget.bs-auto .bs-btn{padding:.6rem 0;cursor:default;\n"
 " pointer-events:none;justify-content:center}\n"
-".bs-widget.bs-auto .bs-label,.bs-widget.bs-auto .bs-brand{display:none}\n"
+/* Silent-tier visual cleanup: the brand column is purely decorative
+ * so display:none-ing it is fine, but the label carries the button's
+ * accessible name — visually hide it via the screen-reader-only
+ * technique so the a11y tree still exposes "Verify you are human"
+ * to axe/screen readers. An earlier revision display:none'd the
+ * label too, which made axe-core's button-name check fail
+ * critical (caught by tests/pytests/test_browser_a11y.py). */
+".bs-widget.bs-auto .bs-brand{display:none}\n"
+".bs-widget.bs-auto .bs-label{position:absolute;width:1px;height:1px;\n"
+" padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);\n"
+" white-space:nowrap;border:0}\n"
 ".bs-widget.bs-auto ~ .bs-help-toggle,\n"
 ".bs-widget.bs-auto ~ .bs-help{display:none}\n"
 ".bs-btn{display:inline-flex;align-items:center;gap:.85rem;\n"
