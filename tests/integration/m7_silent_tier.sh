@@ -10,9 +10,13 @@
 set -u
 source "$(dirname "$0")/../lib/common.sh"
 
-# Use a fresh IP each run — otherwise Bloom remembers us and
-# first-sight-ip doesn't fire, pushing the score below silent.
-fresh_ip="203.0.113.$((180 + RANDOM % 40))"
+# The test needs a truly Bloom-fresh IP each run — otherwise
+# first-sight-ip doesn't fire, score drops below silent, and the
+# module serves the real page instead of a challenge. Time-salting
+# across two octets gives ~65k unique IPs per week (Bloom window),
+# far more than any reasonable test cadence will recycle through.
+t=$(date +%s)
+fresh_ip="203.0.$(( (t / 256) % 250 + 1 )).$(( t % 250 + 1 ))"
 
 # 1. Cookieless silent-band probe. Mozilla UA + missing Accept-
 # Language (15) + first-sight-ip (5) = score 20 → silent tier.
