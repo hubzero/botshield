@@ -1,28 +1,28 @@
 """Rate-limited load generator for the soak driver and any pytest
 fixture that wants to run traffic in the background.
 
-Port of the legacy tests/stress/soak_load.py, reshaped around the
-framework's existing primitives:
+Port of the legacy tests/stress/soak_load.py. Deliberately stdlib-
+only — urllib.request rather than the framework's httpx-based
+`client`, and no IP allocator dependency — so the load driver works
+as a one-file CLI entry (`python -m botshield_test.load`) without
+pulling in pytest-scoped primitives. The tradeoff is that tests
+that want structured assertions about requests the load driver
+made should use the test-side helpers (botshield_test.client, logs,
+metrics) separately.
 
-  - Uses `botshield_test.client.request` so the self-signed cert,
-    XFF injection, and timeout defaults match every other test's
-    HTTP path.
-  - IP picking is delegated to `botshield_test.ips.fresh_ip` when
-    the caller wants scoring variety; the classic soak uses fixed
-    per-request-class paths and doesn't need unique IPs.
-
-The traffic mix stays at 70/20/10 pass/form/captcha-render and is
+The traffic mix is 70/20/10 pass/form/captcha-render and
 internal-only (never hits a third-party siteverify) because that
 keeps log growth predictable and doesn't burn rate-limit budgets
 upstream.
 
-The module exposes `LoadGenerator` as a context manager so pytest
-fixtures can start traffic on entry and stop it on teardown:
+`LoadGenerator` can be used as a context manager so pytest fixtures
+can start traffic on entry and stop it on teardown:
 
     with LoadGenerator(rps=50, base_url=BASE_URL):
         # do something while traffic is running
         ...
-    # returns after the burst drains
+    # __exit__ calls stop(): firing stops immediately; drain waits
+    # up to drain_timeout for in-flight requests to finish.
 """
 
 from __future__ import annotations

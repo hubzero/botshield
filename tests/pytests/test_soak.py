@@ -114,19 +114,18 @@ def _sampling_interval(duration_sec: int) -> int:
     return 1800            # >1h: every 30m
 
 
-def _count_forbidden_since(start_unix: int) -> dict[str, int]:
-    """Count FORBIDDEN_PATTERNS in both apache logs written after
-    start_unix. Cheap: one sudo grep per pattern per log.
-    """
+def _count_forbidden() -> dict[str, int]:
+    """Total count of FORBIDDEN_PATTERNS across both apache logs
+    right now. The test takes a baseline at soak start and compares
+    the delta at the end — that sidesteps the harder problem of
+    parsing per-line apache timestamps to window-filter historic
+    occurrences. A preexisting 'metrics: unknown' from a prior run
+    is cancelled out by the baseline; only growth during the soak
+    turns into a failure."""
     out: dict[str, int] = {}
-    # Use awk to filter by [ApacheTimestamp] >= start. Apache's
-    # error-log prefix is [Thu Apr 23 12:34:56.xxx 2026].
     for pat in _FORBIDDEN_PATTERNS:
         total = 0
         for log in (ERROR_LOG, APACHE_ERROR_LOG):
-            # sudo grep | wc -l, bounded by start_unix heuristically
-            # via `awk`. Approximate match is fine; any non-zero is
-            # a red flag.
             result = subprocess.run(
                 ["sudo", "grep", "-c", pat, log],
                 capture_output=True, text=True, check=False,
@@ -166,6 +165,9 @@ def test_soak(request):
     start_iso = datetime.fromtimestamp(start_unix, tz=timezone.utc).isoformat()
     baseline_rss_kb = _apache_rss_kb()
     baseline_log_bytes = _file_size(ERROR_LOG)
+    # Baseline count of forbidden patterns so historic entries from
+    # prior runs don't poison this soak's assertion. Delta must be 0.
+    baseline_forbidden = _count_forbidden()
 
     print(
         f"\nsoak starting: duration={duration_sec}s rps={rps} "
@@ -269,17 +271,16 @@ def test_soak(request):
             f"(start={values[0]}, end={values[-1]}). Driver not landing traffic?"
         )
 
-    # 5. No 'metrics: unknown' lines anywhere (M9.2 vocabulary drift).
-    #    We can't cleanly filter by start_unix across both logs with
-    #    a single grep, so a non-zero count is an unconditional red
-    #    flag — the test suite should never leave these in the logs,
-    #    and if M9.2 drift appeared mid-soak, a rotated log is still
-    #    better than a silent pass.
-    forbidden = _count_forbidden_since(start_unix)
-    for pat, count in forbidden.items():
-        assert count == 0, (
-            f"soak tripped forbidden log pattern {pat!r}: {count} line(s) "
-            f"in apache error logs"
+    # 5. No 'metrics: unknown' lines emitted DURING the soak. Compare
+    #    against the baseline taken at start so historic entries from
+    #    prior runs don't break this run.
+    final_forbidden = _count_forbidden()
+    for pat, final_count in final_forbidden.items():
+        delta = final_count - baseline_forbidden.get(pat, 0)
+        assert delta == 0, (
+            f"soak emitted {delta} new line(s) matching forbidden "
+            f"pattern {pat!r} (baseline={baseline_forbidden.get(pat, 0)}, "
+            f"final={final_count})"
         )
 
     # 6. No crash signatures in journalctl since soak start.

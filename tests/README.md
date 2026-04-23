@@ -88,7 +88,7 @@ retries; flake there is a bug to fix, not to mask.
 
 RHEL-family isn't scripted yet but the dependency list maps cleanly:
 `httpd-devel`, `openssl-devel`, `libcurl-devel`, `json-c-devel`,
-`pcre2-devel`, `python3`, `wrk` (EPEL).
+`pcre2-devel`, `python3`.
 
 ## One-shot setup
 
