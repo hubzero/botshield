@@ -1,28 +1,28 @@
 """Rate-limited load generator for the soak driver and any pytest
 fixture that wants to run traffic in the background.
 
-Port of the legacy tests/stress/soak_load.py, reshaped around the
-framework's existing primitives:
+Port of the legacy tests/stress/soak_load.py. Deliberately stdlib-
+only — urllib.request rather than the framework's httpx-based
+`client`, and no IP allocator dependency — so the load driver works
+as a one-file CLI entry (`python -m botshield_test.load`) without
+pulling in pytest-scoped primitives. The tradeoff is that tests
+that want structured assertions about requests the load driver
+made should use the test-side helpers (botshield_test.client, logs,
+metrics) separately.
 
-  - Uses `botshield_test.client.request` so the self-signed cert,
-    XFF injection, and timeout defaults match every other test's
-    HTTP path.
-  - IP picking is delegated to `botshield_test.ips.fresh_ip` when
-    the caller wants scoring variety; the classic soak uses fixed
-    per-request-class paths and doesn't need unique IPs.
-
-The traffic mix stays at 70/20/10 pass/form/captcha-render and is
+The traffic mix is 70/20/10 pass/form/captcha-render and
 internal-only (never hits a third-party siteverify) because that
 keeps log growth predictable and doesn't burn rate-limit budgets
 upstream.
 
-The module exposes `LoadGenerator` as a context manager so pytest
-fixtures can start traffic on entry and stop it on teardown:
+`LoadGenerator` can be used as a context manager so pytest fixtures
+can start traffic on entry and stop it on teardown:
 
     with LoadGenerator(rps=50, base_url=BASE_URL):
         # do something while traffic is running
         ...
-    # returns after the burst drains
+    # __exit__ calls stop(): firing stops immediately; drain waits
+    # up to drain_timeout for in-flight requests to finish.
 """
 
 from __future__ import annotations
@@ -89,6 +89,12 @@ class LoadGenerator:
         self._ssl = ssl._create_unverified_context()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        # Track outstanding request threads explicitly: counting
+        # `threading.active_count()` from inside _run() is always ≥2
+        # (main + _run), so a naive drain loop would run until it
+        # hit drain_timeout every time and inflate duration_sec.
+        self._inflight = 0
+        self._inflight_lock = threading.Lock()
         self.stats = LoadStats()
 
     # --- Context manager API --------------------------------------------
@@ -123,7 +129,11 @@ class LoadGenerator:
             req = urllib.request.Request(self.base_url + path, headers=headers)
             urllib.request.urlopen(req, context=self._ssl, timeout=5).read()
         except (URLError, Exception):
-            self.stats.errors += 1
+            with self._inflight_lock:
+                self.stats.errors += 1
+        finally:
+            with self._inflight_lock:
+                self._inflight -= 1
 
     def _run(self) -> None:
         interval = 1.0 / self.rps
@@ -133,6 +143,8 @@ class LoadGenerator:
 
         while time.time() < end and not self._stop.is_set():
             next_fire += interval
+            with self._inflight_lock:
+                self._inflight += 1
             threading.Thread(target=self._fire_one, daemon=True).start()
             self.stats.sent += 1
 
@@ -143,11 +155,21 @@ class LoadGenerator:
                 # Shorter waits keep stop() responsive.
                 self._stop.wait(timeout=sleep_for)
 
-        # Allow in-flight requests to drain.
-        drain_deadline = time.time() + self.drain_timeout
-        while threading.active_count() > 1 and time.time() < drain_deadline:
-            time.sleep(0.1)
+        # duration_sec is the FIRING window only — not the drain
+        # tail. Actual rps should compare against the interval we
+        # actually sent on, so the caller's sanity-check works.
         self.stats.duration_sec = time.time() - start
+
+        # Drain: wait for fired-off request threads to finish. Uses
+        # our tracked counter, not threading.active_count(), because
+        # active_count includes main + _run itself and would never
+        # drop to 0 from inside this thread.
+        drain_deadline = time.time() + self.drain_timeout
+        while time.time() < drain_deadline:
+            with self._inflight_lock:
+                if self._inflight <= 0:
+                    break
+            time.sleep(0.05)
 
 
 def main_cli() -> None:

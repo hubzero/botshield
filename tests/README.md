@@ -8,7 +8,7 @@ canonical framework.
 
 ```
 tests/
-├── run                   # dispatcher — runs pytest, + stress/ opt-in
+├── run                   # dispatcher — runs pytest
 ├── pyproject.toml        # pytest config + editable-install metadata
 ├── requirements-test.txt # pinned deps (installed into tests/.venv)
 ├── conftest.py           # pytest fixtures (apache, fresh_ip, log_slice, …)
@@ -24,11 +24,10 @@ tests/
 │   ├── metrics.py        # /metrics snapshot + delta
 │   └── providers.py      # per-captcha-provider specs (quirks as data)
 ├── pytests/              # the test files themselves
+│   └── test_soak.py      # soak runner — @slow + @serial pytest
 ├── setup/
 │   ├── provision.sh      # idempotent one-shot box setup (creates .venv)
 │   └── reset-state.sh    # between-run state-file wipe
-├── stress/               # wrk + soak (bash, opt-in, slow)
-├── tools/                # soak analyzer
 └── bash-legacy/          # M11.1–M11.3 bash tests, kept for reference
 ```
 
@@ -40,7 +39,7 @@ Ubuntu 22.04 work identically. The setup script installs what's needed:
 - `apache2`, `apache2-dev`
 - `libssl-dev`, `libcurl4-openssl-dev`, `libjson-c-dev`, `libpcre2-dev`
 - `python3`, `python3-venv` (pytest framework lives in `tests/.venv`)
-- `curl`, `openssl`, `wrk`
+- `curl`, `openssl`
 
 Pinned Python deps: `httpx`, `pytest`, `pytest-xdist`,
 `pytest-timeout`, `pytest-playwright`, `playwright`,
@@ -89,7 +88,7 @@ retries; flake there is a bug to fix, not to mask.
 
 RHEL-family isn't scripted yet but the dependency list maps cleanly:
 `httpd-devel`, `openssl-devel`, `libcurl-devel`, `json-c-devel`,
-`pcre2-devel`, `python3`, `wrk` (EPEL).
+`pcre2-devel`, `python3`.
 
 ## One-shot setup
 
@@ -128,12 +127,18 @@ sudo systemctl reload apache2` is enough — you don't need to re-run
 ```bash
 tests/run                      # pytest suite, default markers
 tests/run --parallel           # xdist parallel (non-serial tests); ~20% faster
-tests/run --slow               # include @slow tests (periodic_save, 40s wait)
+tests/run --slow               # include @slow tests (soak, periodic_save)
 tests/run --match cookie       # substring filter; passed to pytest as -k
+tests/run --mark "not browser" # pytest -m marker expression
 tests/run --verbose            # pytest -v instead of -q
 tests/run --list               # show tests that would run, don't execute
-tests/run --only stress        # opt-in; soak + load (long-running)
-tests/run --only all           # pytest + stress
+
+# Soak specifically (60s / 25 rps by default):
+tests/run --slow --match soak
+
+# Overnight soak (8h / 50 rps):
+BS_SOAK_DURATION_SEC=28800 BS_SOAK_RPS=50 \
+  tests/run --slow --match soak
 ```
 
 Exit code is `0` if every test passed (or was skipped), `1` if any
