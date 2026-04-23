@@ -15,6 +15,14 @@ ERROR_LOG = os.environ.get(
     "BS_ERROR_LOG", "/var/log/apache2/botshield-dev-error.log"
 )
 
+# Main Apache error log. A handful of module log lines are emitted
+# against the main server_rec (state save from the mod_watchdog
+# callback, startup messages) and land here rather than in the
+# dev-vhost log. Tests that check for those read this path.
+APACHE_ERROR_LOG = os.environ.get(
+    "BS_APACHE_ERROR_LOG", "/var/log/apache2/error.log"
+)
+
 # Dev vhost config. config_override() edits this file, reloads Apache,
 # and reverts on teardown. Never point this at the production vhost.
 DEV_VHOST_CONF = os.environ.get(

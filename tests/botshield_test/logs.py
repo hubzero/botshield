@@ -18,6 +18,16 @@ import subprocess
 from contextlib import contextmanager
 
 from .config import ERROR_LOG
+from .enums import COOKIES, OUTCOMES, PROVIDERS, TIERS, provider_log
+
+REQUIRED_DECISION_KEYS = (
+    "tier", "outcome", "ip", "score",
+    "cookie", "provider", "alg", "reason", "path",
+)
+
+# Provider enum values as they appear in the decision-log's `provider=`
+# field (hyphenated, plus the sentinel "-" for non-captcha tiers).
+_PROVIDER_LOG_VALUES = {"-", *(provider_log(p) for p in PROVIDERS)}
 
 # mod_botshield decision-line shape (M9.1):
 #   mod_botshield: decision tier=<t> outcome=<o> ip=<ip> score=<n>
@@ -117,3 +127,37 @@ def _log_size() -> int:
         check=True, capture_output=True, text=True,
     )
     return int(result.stdout.strip())
+
+
+def validate_decision(d: dict) -> list[str]:
+    """Return a list of validation failures for one parsed decision
+    dict. Empty list = clean.
+
+    Replaces `tests/lib/decision_gate.awk`. Same rules:
+      - every required key present
+      - tier/outcome/cookie values in their enum
+      - provider is `-` or a known hyphenated name
+      - score is an integer (positive, negative, or zero)
+    """
+    problems: list[str] = []
+    for key in REQUIRED_DECISION_KEYS:
+        if key not in d:
+            problems.append(f"missing key {key!r}")
+
+    if d.get("tier") and d["tier"] not in TIERS:
+        problems.append(f"tier={d['tier']!r} not in enum")
+    if d.get("outcome") and d["outcome"] not in OUTCOMES:
+        problems.append(f"outcome={d['outcome']!r} not in enum")
+    if d.get("cookie") and d["cookie"] not in set(COOKIES) | {"-"}:
+        problems.append(f"cookie={d['cookie']!r} not in enum")
+    if d.get("provider") and d["provider"] not in _PROVIDER_LOG_VALUES:
+        problems.append(f"provider={d['provider']!r} not in enum")
+
+    score = d.get("score")
+    if score is not None:
+        try:
+            int(score)
+        except (TypeError, ValueError):
+            problems.append(f"score={score!r} not an integer")
+
+    return problems

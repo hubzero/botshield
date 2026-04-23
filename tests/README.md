@@ -1,49 +1,34 @@
 # mod_botshield test suite
 
-Regression and acceptance tests for the module. Two frameworks live
-side-by-side during the M11.4–M11.5 rebuild:
-
-- **Bash suite** (`unit/`, `integration/`, `acceptance/`, `stress/`) —
-  the original lightweight shell scripts. One file per test, source
-  `lib/common.sh`, emit `PASS:` / `FAIL:` / `SKIP:` lines.
-- **Pytest suite** (`pytests/` + `botshield_test/` + `conftest.py`) —
-  the pytest rebuild introduced in M11.4. Shared helpers in
-  `botshield_test/`, pytest fixtures in `conftest.py`, tests under
-  `pytests/`.
-
-Both run under `tests/run` and in CI. The pytest suite is the forward-
-looking one; M11.5 archives the bash tests to `bash-legacy/` and
-retires them from the default run.
+Pytest-based regression and acceptance tests for the module. As of
+M11.5 the bash suite is archived in `bash-legacy/` — pytest is the
+canonical framework.
 
 ## Layout
 
 ```
 tests/
-├── run              # dispatcher — walks categories, runs tests
+├── run                   # dispatcher — runs pytest, + stress/ opt-in
 ├── pyproject.toml        # pytest config + editable-install metadata
-├── requirements-test.txt # pinned pytest deps (installed into .venv)
+├── requirements-test.txt # pinned deps (installed into tests/.venv)
 ├── conftest.py           # pytest fixtures (apache, fresh_ip, log_slice, …)
-├── lib/
-│   ├── common.sh          # bash helpers (legacy; retires in M11.5)
-│   └── decision_gate.awk  # key=value decision-log validator
-├── botshield_test/        # pytest framework helpers (M11.4+)
-│   ├── apache.py          # reload/restart + transactional config_override
-│   ├── client.py          # httpx wrapper with bs-specific defaults
-│   ├── config.py          # paths + constants, env-var overrides
-│   ├── cookies.py         # pending cookie, PoW solver, tamper helpers
-│   ├── enums.py           # TIERS / OUTCOMES / COOKIES / PROVIDERS
-│   ├── ips.py             # time-salted fresh_ip() + rate-slot flavor
-│   ├── logs.py            # log_slice + structured decision parser
-│   └── metrics.py         # /metrics snapshot + delta
+├── botshield_test/       # framework helpers
+│   ├── apache.py         # reload/restart + transactional config_override
+│   ├── client.py         # httpx wrapper with bs-specific defaults
+│   ├── config.py         # paths + constants, env-var overrides
+│   ├── cookies.py        # pending cookie, PoW solver, tamper helpers
+│   ├── enums.py          # TIERS / OUTCOMES / COOKIES / PROVIDERS
+│   ├── ips.py            # time-salted fresh_ip() + rate-slot flavor
+│   ├── logs.py           # log_slice + structured decision parser + validator
+│   ├── metrics.py        # /metrics snapshot + delta
+│   └── providers.py      # per-captcha-provider specs (quirks as data)
+├── pytests/              # the test files themselves
 ├── setup/
-│   ├── provision.sh       # idempotent one-shot box setup
-│   └── reset-state.sh     # between-run state-file wipe
-├── unit/            # bash: no-Apache-needed checks (format validators)
-├── integration/    # bash: tests against a running Apache + module
-├── acceptance/     # bash: end-to-end user journeys
-├── pytests/        # pytest: migrated tests (M11.4+ growing)
-├── stress/         # wrk, MPM matrix, soak (opt-in, slow)
-└── tools/          # test utilities (soak analyzer, etc.)
+│   ├── provision.sh      # idempotent one-shot box setup (creates .venv)
+│   └── reset-state.sh    # between-run state-file wipe
+├── stress/               # wrk + soak (bash, opt-in, slow)
+├── tools/                # soak analyzer
+└── bash-legacy/          # M11.1–M11.3 bash tests, kept for reference
 ```
 
 ## Prerequisites
@@ -59,6 +44,21 @@ Ubuntu 22.04 work identically. The setup script installs what's needed:
 Pinned Python deps: `httpx`, `pytest`, `pytest-xdist`, `pytest-timeout`
 (see `requirements-test.txt`). `provision.sh` creates `tests/.venv`
 and installs them. Playwright + Chromium arrive in M11.6.
+
+## Markers
+
+- `@pytest.mark.serial` — mutates shared Apache state (config swap,
+  SHM restart). Runs outside the xdist pool.
+- `@pytest.mark.slow` — multi-second wait (e.g. the 40-second
+  watchdog tick). Excluded by default; opt in with `tests/run --slow`.
+- `@pytest.mark.live_network` — requires reachable third-party
+  captcha siteverify (Cloudflare, Google, hCaptcha, Friendly,
+  GeeTest). Skips if unreachable rather than failing.
+- `@pytest.mark.live_provider` — requires a real provider token
+  passed via env var (e.g. `BS_RECAPTCHA_V3_TOKEN`). Skips without.
+- `@pytest.mark.acceptance` — end-to-end user-journey test.
+  Becomes browser-driven in M11.6.
+- `@pytest.mark.browser` — reserved for the M11.6 Playwright layer.
 
 RHEL-family isn't scripted yet but the dependency list maps cleanly:
 `httpd-devel`, `openssl-devel`, `libcurl-devel`, `json-c-devel`,
@@ -99,41 +99,27 @@ sudo systemctl reload apache2` is enough — you don't need to re-run
 ## Running tests
 
 ```bash
-tests/run                      # run everything except stress
-tests/run --only unit          # just the unit category
-tests/run --only integration   # just integration
-tests/run --match m7           # any test whose path contains "m7"
-tests/run --list               # list tests that would run
-tests/run --verbose            # show each test's stdout inline
-tests/run --only stress        # opt-in; these are slow
+tests/run                      # pytest suite, default markers
+tests/run --parallel           # xdist parallel (non-serial tests); ~20% faster
+tests/run --slow               # include @slow tests (periodic_save, 40s wait)
+tests/run --match cookie       # substring filter; passed to pytest as -k
+tests/run --verbose            # pytest -v instead of -q
+tests/run --list               # show tests that would run, don't execute
+tests/run --only stress        # opt-in; soak + load (long-running)
+tests/run --only all           # pytest + stress
 ```
 
 Exit code is `0` if every test passed (or was skipped), `1` if any
-test failed. The summary at the end names the failing tests so you
-can re-run one with `--match`:
+test failed.
 
+You can also invoke pytest directly — useful for iterating on one
+test with pytest's full traceback + `--pdb`:
+
+```bash
+tests/.venv/bin/pytest tests/pytests/test_cookie_hmac.py -v
+tests/.venv/bin/pytest tests/pytests/ -k "captcha and not rejected"
+tests/.venv/bin/pytest tests/pytests/ -m "not serial" -n auto
 ```
-=====================================================
-tests: 12 passed, 1 skipped, 2 failed
-failed:
-  - integration/m8_captcha_friendly
-  - integration/m8_captcha_geetest
-```
-
-## Output format
-
-Each test prints a one-line marker per assertion:
-
-```
-=== integration/m7_silent_tier ===
-  PASS: silent tier challenged cookie-less fresh IP
-  PASS: PoW solve round-trip accepted
-  PASS: 15-field cookie parses on replay
-```
-
-`t_fail` exits the test script immediately — a single failure aborts
-that test, but the dispatcher continues to the next. On failure, the
-test's stdout is printed in full so you can see what came before.
 
 ## Provider secrets
 
@@ -165,81 +151,77 @@ Published provider dummies (committed in `provision.sh`):
 
 ## What tests must not assume
 
-- **Absolute counter values.** Always work in deltas: `metrics_snapshot`
-  before, drive traffic, `metrics_snapshot` after, diff. Counters may
-  be any non-negative value at test start.
+- **Absolute counter values.** Always work in deltas: `metrics.snapshot()`
+  before, drive traffic, `metrics.snapshot()` after, then
+  `metrics.delta(before, after)`. Counters may be any non-negative
+  value at test start.
 - **Empty flagged-IP table.** Prior runs may have flagged IPs that
-  persist in the state file. Tests that care should use IPs unlikely
-  to have been flagged (e.g. uncommon XFF ranges), or call
-  `tests/setup/reset-state.sh` explicitly.
-- **Fresh Bloom filter.** Same reason. First-sight penalties might
-  not fire if the IP was in Bloom from a prior run.
-- **Log position.** Use `log_mark` + `log_slice` to extract only this
+  persist in the state file. Use `rate_slot_ip` (a fresh, un-flagged
+  IP per call) or request the `clean_state` fixture to wipe the
+  state file + restart.
+- **Fresh Bloom filter.** Same reason. Use `fresh_ip` — the allocator
+  picks from `100.64.0.0/10` (CGN), which no earlier run has touched.
+- **Log position.** Use the `log_slice` fixture to extract only this
   test's lines from the botshield error log.
 
 ## Between-run state reset
 
 Most tests use deltas and don't need a reset. For tests that DO need
-a known-clean SHM + state file:
+a known-clean SHM + state file, request the `clean_state` fixture:
+
+```python
+def test_fresh_setup(clean_state, fresh_ip):
+    # SHM + state file are empty. Apache just finished restarting.
+    ...
+```
+
+Or from the shell:
 
 ```bash
 sudo tests/setup/reset-state.sh
 ```
 
-This deletes `/var/lib/botshield/state.bin` and restarts Apache.
-After restart, all SHM counters start at 0, flagged-IP table is empty,
-Bloom filters are empty.
-
 ## Debugging a failing test
 
-When a test fails, `tests/run` prints its full stdout. Additional
-forensics:
+When a test fails, pytest prints the traceback with surrounding
+source. Additional forensics:
 
 - Module errors: `sudo tail -50 /var/log/apache2/error.log`
 - Decision log: `sudo tail -50 /var/log/apache2/botshield-dev-error.log`
 - Access log: `sudo tail -50 /var/log/apache2/botshield-dev-access.log`
 - Current SHM counters: `curl -sk https://localhost/botshield/metrics`
 - Current mod_status: `curl -sk https://localhost/server-status`
+- Drop into pdb on failure:
+  `tests/.venv/bin/pytest pytests/test_X.py --pdb`
 
-Tests that manipulate Apache config (MPM matrix, for instance) clean
-up after themselves; if a test exits mid-way and leaves the box in an
-odd state, `sudo tests/setup/provision.sh` restores the baseline.
+`config_override` guarantees revert on exception, so a test that
+blows up mid-swap leaves the vhost in its pre-test state. If the box
+is somehow left in an odd state anyway,
+`sudo tests/setup/provision.sh` restores the baseline.
 
 ## Writing a new test
 
-Start from `integration/m9_3_metrics_parity.sh` as a template — it
-exercises the typical pattern: snapshot metrics and log position,
-drive traffic, snapshot again, assert deltas.
+Put the file under `tests/pytests/`, named `test_<something>.py`.
+Request the fixtures you need by parameter name — no imports.
 
-Convention:
+```python
+"""One-line description of what this test proves."""
 
-```bash
-#!/bin/bash
-# Short description of what this test proves.
-set -u
-source "$(dirname "$0")/../lib/common.sh"
+from botshield_test import client, metrics
 
-# Optional: early skip if required env isn't present
-if [[ -z "${BS_SOMETHING:-}" ]]; then
-  t_skip "BS_SOMETHING not set"
-fi
 
-# 1. Snapshot
-before=$(metrics_snapshot)
-mark=$(log_mark)
+def test_some_path_emits_challenged(fresh_ip, log_slice):
+    before = metrics.snapshot()
+    with log_slice as slc:
+        client.get("/some-path", xff=fresh_ip, ua="python-requests/2.31")
+        lines = slc.decision_lines(ip=fresh_ip, outcome="challenged")
+    after = metrics.snapshot()
 
-# 2. Drive traffic
-bs_curl -o /dev/null "$BASE/some-path"
-
-# 3. Assert
-after=$(metrics_snapshot)
-assert_metric_delta "$before" "$after" botshield_outcome_challenged_total 1
-
-slice=$(log_slice "$mark")
-assert_decision_count "$slice" "outcome=challenged" 1
-
-t_pass "some-path emits one challenged decision"
+    assert len(lines) == 1
+    deltas = metrics.delta(before, after)
+    assert deltas["botshield_outcome_challenged_total"] == 1
 ```
 
-Make the script executable (`chmod +x`) and put it under the right
-category directory. `tests/run` picks it up automatically.
+Markers (declared at module level via `pytestmark =
+pytest.mark.serial` or per-test via `@pytest.mark.live_network`) are
+documented in the "Markers" section above.

@@ -1,63 +1,56 @@
 #!/bin/bash
 # tests/run — mod_botshield test dispatcher.
 #
-# Walks category directories, runs each executable *.sh in order,
-# prints PASS/FAIL per test, reports a summary at the end.
+# Fires pytest against tests/pytests/ (the M11.4+ rebuild) and reports
+# a summary. Stress/soak (tests/stress/) is opt-in via --only stress.
 #
 # Exit codes: 0 if every test passed, 1 if any failed, 2 on bad
 # invocation.
 #
-# Default run includes: unit, integration, acceptance, pytests.
-# stress/ is opt-in only (soak takes hours). Request it with
-# --only stress or --only all.
-#
-# The pytests/ category runs via pytest (tests/.venv), not the bash
-# runner. Its per-test PASS/FAIL line gets folded into the overall
-# summary. During the M11.4+ rebuild bash and pytest suites run
-# side-by-side; M11.5 archives bash.
-#
 # Flags:
-#   --only CATEGORY    Run only one category (unit, integration,
-#                      acceptance, pytests, stress). Repeatable. Use
-#                      'all' to include stress alongside the others.
-#   --match PATTERN    Run only tests whose filename matches PATTERN
-#                      (substring, not regex).
-#   --verbose          Show each test's stdout inline instead of only
-#                      on failure.
-#   --list             List tests that would run, don't execute them.
+#   --only CATEGORY    Run only one category (pytests, stress).
+#                      Repeatable. Use 'all' to include stress
+#                      alongside pytests.
+#   --match PATTERN    Substring filter. Passed to pytest as -k, and
+#                      to the stress dispatcher as a filename filter.
+#   --parallel         Run pytests with xdist in two phases:
+#                      non-serial tests in parallel (-n auto), then
+#                      serial tests sequentially. Default is fully
+#                      sequential (-n 0).
+#   --slow             Include tests marked @slow (e.g. the 40s
+#                      periodic-save watchdog wait). Excluded by
+#                      default so the suite finishes fast.
+#   --verbose          Show each test's stdout inline instead of
+#                      only on failure.
+#   --list             List tests that would run, don't execute.
 #
 # Conventions:
-#   - Each bash test is a standalone shell script that sources
-#     tests/lib/common.sh and prints "PASS: <name>" / "FAIL: ..." /
-#     "SKIP: <reason>" lines. Exit code 0 + at least one marker =
-#     test passed or was skipped; anything else = failed.
-#   - Each pytest test lives under tests/pytests/ and uses the
-#     fixtures in tests/conftest.py + the helpers in
-#     tests/botshield_test/.
-#   - Tests MUST NOT depend on ordering within their category. Tests
-#     within a single run share the live Apache; each test should
-#     leave the dev vhost in a usable state for the next.
-#   - If a test needs a completely clean SHM/state, it should call
-#     tests/setup/reset-state.sh itself. Most tests don't need that.
+#   - Every test lives under tests/pytests/ and uses the fixtures
+#     in tests/conftest.py + helpers in tests/botshield_test/.
+#   - Tests MUST NOT depend on ordering within their category.
+#   - Tests that mutate shared Apache state (config swap, restart)
+#     are marked @pytest.mark.serial and run outside the xdist pool.
+#   - A test needing a completely clean SHM/state should call the
+#     `clean_state` fixture.
+#
+# Bash test archive: tests/bash-legacy/ holds the M11.1–M11.3
+# shell-based tests as a reference. Not executed.
 
 set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-# stress/ is deliberately EXCLUDED from the default category list.
-# Soak and load tests take minutes to hours; they're opt-in via
-# --only stress (or --only all to include alongside the others).
-DEFAULT_CATEGORIES=(unit integration acceptance pytests)
-ALL_CATEGORIES=(unit integration acceptance pytests stress)
-CATEGORIES=("${DEFAULT_CATEGORIES[@]}")
-
-# Python venv for the pytest category. Created by
-# tests/setup/provision.sh.
 PYTEST_VENV="$HERE/.venv"
+
+DEFAULT_CATEGORIES=(pytests)
+ALL_CATEGORIES=(pytests stress)
+CATEGORIES=("${DEFAULT_CATEGORIES[@]}")
 
 ONLY=()
 MATCH=""
 VERBOSE=0
 LIST_ONLY=0
+PARALLEL=0
+SLOW=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -68,11 +61,13 @@ while [[ $# -gt 0 ]]; do
         ONLY+=("$2")
       fi
       shift 2 ;;
-    --match)   MATCH="$2";   shift 2 ;;
-    --verbose) VERBOSE=1;    shift   ;;
-    --list)    LIST_ONLY=1;  shift   ;;
+    --match)    MATCH="$2";   shift 2 ;;
+    --parallel) PARALLEL=1;   shift   ;;
+    --slow)     SLOW=1;       shift   ;;
+    --verbose)  VERBOSE=1;    shift   ;;
+    --list)     LIST_ONLY=1;  shift   ;;
     --help|-h)
-      sed -n '3,22p' "$0" | sed 's/^# \?//'; exit 0 ;;
+      sed -n '3,32p' "$0" | sed 's/^# \?//'; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
 done
@@ -86,91 +81,95 @@ fail=0
 skip=0
 fails=()
 
-for cat in "${CATEGORIES[@]}"; do
-  dir="$HERE/$cat"
-  [[ -d "$dir" ]] || continue
+run_pytests() {
+  local dir="$HERE/pytests"
+  if [[ ! -x "$PYTEST_VENV/bin/pytest" ]]; then
+    echo ""
+    echo "=== pytests (SKIPPED: no venv at $PYTEST_VENV) ==="
+    echo "  run sudo tests/setup/provision.sh to create it"
+    return
+  fi
+  if [[ $LIST_ONLY -eq 1 ]]; then
+    "$PYTEST_VENV/bin/pytest" "$dir" --collect-only -q 2>/dev/null | \
+      grep "::" | sed 's|^|pytests/|'
+    return
+  fi
 
-  # pytests/ is the pytest category — shell out to pytest once for
-  # the whole directory, parse its per-test result, fold into the
-  # running totals.
-  if [[ "$cat" == "pytests" ]]; then
-    if [[ ! -x "$PYTEST_VENV/bin/pytest" ]]; then
-      echo ""
-      echo "=== pytests (SKIPPED: no venv at $PYTEST_VENV) ==="
-      echo "  run tests/setup/provision.sh to create it"
-      continue
+  printf "\n=== pytests ===\n"
+
+  # Slow tests opt-in; default filter excludes them.
+  local slow_filter=""
+  [[ $SLOW -eq 0 ]] && slow_filter="not slow"
+
+  # Invoke pytest once for a given marker filter + xdist jobcount.
+  _one_pytest_invocation() {
+    local marker="$1" njobs="$2"
+    local m_expr="$marker"
+    if [[ -n "$slow_filter" ]]; then
+      if [[ -n "$m_expr" ]]; then
+        m_expr="($m_expr) and $slow_filter"
+      else
+        m_expr="$slow_filter"
+      fi
     fi
-    if [[ $LIST_ONLY -eq 1 ]]; then
-      # --list honors both the dispatcher's own listing and pytest's
-      # --collect-only for the python side.
-      "$PYTEST_VENV/bin/pytest" "$dir" --collect-only -q 2>/dev/null | \
-        grep "::" | sed 's|^|pytests/|'
-      continue
-    fi
+    local pyout; pyout=$(mktemp /tmp/bs_pytest_out.XXXXXX)
+    local args=("$dir" --tb=short --no-header -p no:cacheprovider)
+    [[ -n "$MATCH"  ]] && args+=(-k "$MATCH")
+    [[ -n "$m_expr" ]] && args+=(-m "$m_expr")
+    [[ -n "$njobs"  ]] && args+=(-n "$njobs")
+    [[ $VERBOSE -eq 1 ]] && args+=(-v) || args+=(-q)
 
-    # Pytest expects its CWD to be tests/ (where pyproject.toml
-    # lives). The -rN suppresses the per-test short-summary block
-    # so the output stays tidy; on failure pytest still prints the
-    # traceback.
-    printf "\n=== pytests ===\n"
-    pytest_args=("$dir" --tb=short --no-header)
-    [[ -n "$MATCH" ]] && pytest_args+=(-k "$MATCH")
-    [[ $VERBOSE -eq 1 ]] && pytest_args+=(-v) || pytest_args+=(-q)
+    local rc=0
+    ( cd "$HERE" && "$PYTEST_VENV/bin/pytest" "${args[@]}" ) \
+        > "$pyout" 2>&1 || rc=$?
 
-    pyout=$(mktemp /tmp/bs_pytest_out.XXXXXX)
-    if ( cd "$HERE" && "$PYTEST_VENV/bin/pytest" "${pytest_args[@]}" ) \
-         > "$pyout" 2>&1; then
-      # Success — grep the trailing "N passed" summary.
-      py_pass=$(grep -oE "[0-9]+ passed"  "$pyout" | head -1 | awk '{print $1}')
-      py_skip=$(grep -oE "[0-9]+ skipped" "$pyout" | head -1 | awk '{print $1}')
-      pass=$(( pass + ${py_pass:-0} ))
-      skip=$(( skip + ${py_skip:-0} ))
-      [[ $VERBOSE -eq 1 ]] && cat "$pyout" || \
-        grep -E "^(PASSED|SKIPPED|pytests/|=+)" "$pyout" | tail -20
-    else
-      py_pass=$(grep -oE "[0-9]+ passed"  "$pyout" | head -1 | awk '{print $1}')
-      py_fail=$(grep -oE "[0-9]+ failed"  "$pyout" | head -1 | awk '{print $1}')
-      py_skip=$(grep -oE "[0-9]+ skipped" "$pyout" | head -1 | awk '{print $1}')
-      pass=$(( pass + ${py_pass:-0} ))
-      skip=$(( skip + ${py_skip:-0} ))
-      fail=$(( fail + ${py_fail:-0} ))
-      fails+=("pytests (${py_fail:-?} failed)")
+    local p s f
+    p=$(grep -oE "[0-9]+ passed"  "$pyout" | head -1 | awk '{print $1}')
+    s=$(grep -oE "[0-9]+ skipped" "$pyout" | head -1 | awk '{print $1}')
+    f=$(grep -oE "[0-9]+ failed"  "$pyout" | head -1 | awk '{print $1}')
+    pass=$(( pass + ${p:-0} ))
+    skip=$(( skip + ${s:-0} ))
+    fail=$(( fail + ${f:-0} ))
+
+    if [[ $rc -ne 0 ]]; then
+      fails+=("pytests${marker:+ [$marker]} (${f:-?} failed)")
       cat "$pyout"
+    elif [[ $VERBOSE -eq 1 ]]; then
+      cat "$pyout"
+    else
+      grep -E "^(PASSED|SKIPPED|FAILED|pytests/|=+)" "$pyout" | tail -20
     fi
     rm -f "$pyout"
-    continue
+  }
+
+  if [[ $PARALLEL -eq 1 ]]; then
+    _one_pytest_invocation "not serial" "auto"
+    _one_pytest_invocation "serial" ""
+  else
+    _one_pytest_invocation "" ""
   fi
+}
+
+run_stress() {
+  local dir="$HERE/stress"
+  [[ -d "$dir" ]] || return
   for t in "$dir"/*.sh; do
     [[ -e "$t" ]] || continue
     [[ -x "$t" ]] || continue
-    name="$cat/$(basename "$t" .sh)"
-    if [[ -n "$MATCH" ]] && [[ "$name" != *"$MATCH"* ]]; then
-      continue
-    fi
-    if [[ $LIST_ONLY -eq 1 ]]; then
-      echo "$name"
-      continue
-    fi
+    local name="stress/$(basename "$t" .sh)"
+    if [[ -n "$MATCH" ]] && [[ "$name" != *"$MATCH"* ]]; then continue; fi
+    if [[ $LIST_ONLY -eq 1 ]]; then echo "$name"; continue; fi
 
     printf "\n=== %s ===\n" "$name"
-    out=$(mktemp /tmp/bs_test_out.XXXXXX)
+    local out; out=$(mktemp /tmp/bs_test_out.XXXXXX)
     if "$t" > "$out" 2>&1; then
-      # A zero exit code is necessary but not sufficient. The test
-      # also has to emit at least one PASS: or SKIP: marker — a
-      # script that silently returns 0 without running any assertion
-      # (truncated, early-returned, stubbed out) would otherwise
-      # score as green. Require one of the markers explicitly.
-      if grep -q "^  SKIP:" "$out"; then
-        skip=$((skip + 1))
-        grep "^  SKIP:" "$out"
-      elif grep -q "^  PASS:" "$out"; then
+      if grep -q "soak: PASS\|PASS:" "$out"; then
         pass=$((pass + 1))
-        grep "^  PASS:" "$out"
-        [[ $VERBOSE -eq 1 ]] && grep -v "^  PASS:\|^  SKIP:" "$out" || true
+        grep -E "soak: PASS|^  PASS:" "$out" | tail -5
       else
         fail=$((fail + 1))
         fails+=("$name")
-        echo "  FAIL: test exited 0 without emitting any PASS: or SKIP: markers"
+        echo "  FAIL: stress test exited 0 but no PASS marker found"
         cat "$out"
       fi
     else
@@ -180,6 +179,15 @@ for cat in "${CATEGORIES[@]}"; do
     fi
     rm -f "$out"
   done
+}
+
+for cat in "${CATEGORIES[@]}"; do
+  case "$cat" in
+    pytests) run_pytests ;;
+    stress)  run_stress  ;;
+    *) echo "unknown category: $cat (valid: pytests, stress, all)" >&2
+       exit 2 ;;
+  esac
 done
 
 if [[ $LIST_ONLY -eq 1 ]]; then

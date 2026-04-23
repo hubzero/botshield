@@ -59,14 +59,24 @@ def reset_state() -> None:
 
 
 @contextmanager
-def config_override(pattern: str, replacement: str, *, conf: str = DEV_VHOST_CONF):
-    """Swap a line in the dev vhost, reload, run the block, revert.
+def config_override(
+    pattern: str, replacement: str, *,
+    conf: str = DEV_VHOST_CONF,
+    count: int | None = None,
+):
+    """Swap one or more lines in the dev vhost, reload, run the block,
+    revert.
 
-    `pattern` is a Python regex matched line-by-line. `replacement`
-    replaces the whole matched region (re.sub semantics). Exactly
-    one match is required — ambiguity means the caller's pattern is
-    too broad, and silent multi-match substitution is how bash tests
-    have quietly corrupted their own config.
+    `pattern` is a Python regex; `replacement` replaces every match
+    (re.sub with default `count=0`). The dev vhost typically has two
+    copies of each per-provider directive (one in the verify-endpoint
+    Location, one in the demo-path Location); replacing both is what
+    tests want in practice, and not replacing both leaves the config
+    inconsistent.
+
+    Pass `count=N` to require exactly N matches — useful when a
+    test is only expecting one and wants a loud fail if a future
+    config change makes the pattern ambiguous.
 
     Guaranteed cleanup: the revert + reload fires even if the body
     raises. If the revert itself fails, that exception masks the
@@ -84,18 +94,18 @@ def config_override(pattern: str, replacement: str, *, conf: str = DEV_VHOST_CON
     conf_path = Path(conf)
     original = conf_path.read_text()
 
-    matches = re.findall(pattern, original)
-    if len(matches) == 0:
+    found = len(re.findall(pattern, original))
+    if found == 0:
         raise ValueError(
             f"config_override: pattern {pattern!r} matched zero lines in {conf}"
         )
-    if len(matches) > 1:
+    if count is not None and found != count:
         raise ValueError(
-            f"config_override: pattern {pattern!r} matched {len(matches)} "
-            f"lines in {conf} — tighten it"
+            f"config_override: pattern {pattern!r} matched {found} lines "
+            f"in {conf}, expected {count}"
         )
 
-    mutated = re.sub(pattern, replacement, original, count=1)
+    mutated = re.sub(pattern, replacement, original)
 
     # Stage the mutated file via a root-owned temp path. sudo mv is
     # atomic; a partial write can't leave the vhost in a broken state.

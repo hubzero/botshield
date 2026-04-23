@@ -40,6 +40,8 @@ markers = [
     "live_network: requires reachable third-party captcha siteverify",
     "live_provider: requires a real provider secret/token via env var",
     "slow: multi-second test; opt-in in fast CI lanes",
+    "acceptance: end-to-end user-journey test; becomes browser-driven in M11.6",
+    "browser: requires Playwright + Chromium (reserved for M11.6)",
 ]
 # Keep warnings loud — typos in filter names and fixture renames
 # often surface as deprecation warnings here before they break tests.
