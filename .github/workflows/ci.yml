@@ -116,7 +116,7 @@ jobs:
           name: reports-browser
           path: |
             tests/reports/
-            test-results/
+            tests/test-results/
           retention-days: 14
 
       - name: Upload logs on failure

@@ -24,6 +24,10 @@ tests/*.egg-info/
 tests/reports/
 __pycache__/
 
+# pytest-playwright screenshot/video artifacts — gitignored; CI
+# uploads as artifacts on failure.
+tests/test-results/
+
 # Fuzz harness build artifacts + per-run corpus. The corpus grows on
 # every fuzz run with newly-discovered inputs; we don't track it in
 # git. seed_corpus.py regenerates a starter set any time.
