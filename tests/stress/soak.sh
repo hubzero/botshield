@@ -73,7 +73,7 @@ case "$DURATION" in
 esac
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-source "$HERE/../lib/common.sh"
+source "$HERE/lib.sh"
 
 ts=$(date +%Y%m%d_%H%M%S)
 [[ -z "$REPORT" ]] && REPORT="/tmp/bs_soak_${ts}.report"
