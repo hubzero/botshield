@@ -1,0 +1,108 @@
+name: CI
+
+# Per-PR gate: fresh Ubuntu runner, provision the module + dev vhost,
+# run the unit + integration + acceptance tests. Stress (short soak,
+# no wrk matrix) runs too so we catch any regression that needs
+# sustained traffic to show up.
+#
+# The full 8h soak + the MPM matrix + sanitizer runs are too expensive
+# for every PR — they're gated to the nightly job below.
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+  # Nightly: runs the long soak + the full stress matrix.
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  # -------- Per-PR gate: fast tests, short stress smoke. --------
+  test:
+    name: unit + integration + acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # Live-provider tests need the secrets below. Without them the
+    # tests SKIP (provision.sh installs the publicly-documented
+    # always-pass keys for Turnstile / hCaptcha / reCAPTCHA v2, which
+    # is enough for the most critical integration paths to run). Real
+    # v3 / Friendly / GeeTest exercise only the plumbing branches
+    # unless the OK-branch env vars below are set.
+    env:
+      BS_RECAPTCHA_V3_TOKEN: ${{ secrets.BS_RECAPTCHA_V3_TOKEN }}
+      BS_FRIENDLY_SOLUTION:  ${{ secrets.BS_FRIENDLY_SOLUTION }}
+      BS_GEETEST_TOKEN:      ${{ secrets.BS_GEETEST_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Provision
+        run: sudo tests/setup/provision.sh
+
+      - name: Start Apache
+        run: |
+          sudo systemctl restart apache2
+          sleep 2
+          curl -sk --max-time 5 -o /dev/null https://localhost/ \
+            || (sudo journalctl -u apache2 --no-pager -n 50 && exit 1)
+
+      - name: Run tests (unit + integration + acceptance)
+        run: tests/run --verbose
+
+      # Short soak (60s at 25rps) — enough to catch any regression
+      # where sustained traffic unmasks a leak / deadlock / log-growth
+      # runaway. Full 8h soak runs on the nightly schedule.
+      - name: Soak smoke (60s)
+        run: tests/stress/soak.sh
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apache-logs
+          path: |
+            /var/log/apache2/botshield-dev-error.log
+            /var/log/apache2/error.log
+          retention-days: 7
+
+  # -------- Nightly: full 8h soak + sanitizer build. --------
+  nightly:
+    name: 8h soak + sanitizer
+    # Only run on scheduled / manual trigger, not per-PR.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 540  # 9h: 8h soak + provision overhead
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Provision
+        run: sudo tests/setup/provision.sh
+
+      - name: Start Apache
+        run: |
+          sudo systemctl restart apache2
+          sleep 2
+
+      - name: Full soak (8h at 50rps)
+        run: tests/stress/soak.sh --long --report /tmp/bs_soak_nightly.report
+
+      - name: Upload soak report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-nightly-report
+          path: |
+            /tmp/bs_soak_nightly.report
+            /tmp/bs_soak_*.out
+          retention-days: 30
+
+      - name: Upload Apache logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apache-logs-nightly
+          path: |
+            /var/log/apache2/botshield-dev-error.log
+            /var/log/apache2/error.log
+          retention-days: 14
