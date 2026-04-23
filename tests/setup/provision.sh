@@ -138,15 +138,15 @@ apt-get install -y -qq \
 # already-present versions are skipped.
 sudo -u "$SUDO_USER" "$VENV/bin/playwright" install chromium >/dev/null
 
-echo "== /var/lib/botshield/crawlers seed =="
-# E1 — verified legit-crawler allow-list. Seed /var/lib/... from the
-# bundled apache/crawlers/*.txt if nothing's there yet. Never stomps
-# existing files: once the operator wires tools/refresh-crawler-ranges.sh
+echo "== /var/lib/botshield/bots seed =="
+# E1 — Allow family (verified-bot). Seed /var/lib/... from the
+# bundled apache/bots/*.txt if nothing's there yet. Never stomps
+# existing files: once the operator wires tools/refresh-bot-ranges.sh
 # into cron, the refreshed files take over and this step is a no-op.
-install -d -m 755 -o www-data -g www-data /var/lib/botshield/crawlers
-for f in "$REPO"/apache/crawlers/*.txt; do
+install -d -m 755 -o www-data -g www-data /var/lib/botshield/bots
+for f in "$REPO"/apache/bots/*.txt; do
   [[ -f "$f" ]] || continue
-  dest="/var/lib/botshield/crawlers/$(basename "$f")"
+  dest="/var/lib/botshield/bots/$(basename "$f")"
   if [[ ! -s "$dest" ]]; then
     install -m 644 -o www-data -g www-data "$f" "$dest"
   fi

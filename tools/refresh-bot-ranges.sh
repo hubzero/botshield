@@ -1,7 +1,7 @@
 #!/bin/bash
-# tools/refresh-crawler-ranges.sh — pull the latest verified-crawler
-# IP ranges from each provider and rewrite the on-disk ranges files
-# that mod_botshield's E1 verifier reads at startup.
+# tools/refresh-bot-ranges.sh — pull the latest verified-bot IP
+# ranges from each provider and rewrite the on-disk ranges files
+# that mod_botshield's Allow family (E1) reads at startup.
 #
 # Designed to be run from cron. No Apache involvement — the module
 # picks up new ranges at next graceful restart. If your operational
@@ -9,22 +9,23 @@
 # reload.
 #
 # Usage:
-#     sudo tools/refresh-crawler-ranges.sh              # default dest
-#     sudo tools/refresh-crawler-ranges.sh /some/path   # override dest
+#     sudo tools/refresh-bot-ranges.sh              # default dest
+#     sudo tools/refresh-bot-ranges.sh /some/path   # override dest
 #
 # Exit code: 0 if ALL providers refreshed; 1 if any failed (others
 # still refreshed). Failure is fine operationally — BotShield keeps
 # reading the last good file.
 #
-# Designed around the three providers that publish clean JSON:
-# Googlebot, Bingbot, Applebot. Others (Yandex, DuckDuck, Facebook,
-# LinkedIn, Twitter) are PTR-only and don't fit this tool; E1b will
-# handle them async in-module.
+# Covers the three providers that publish clean JSON ranges:
+# Googlebot, Bingbot, Applebot. Providers that only publish via
+# PTR + forward-confirm (Yandex, DuckDuck, Facebook, LinkedIn,
+# Twitter) are out of scope by design — see PLAN.md E1 for the
+# reasoning.
 
 set -u
 
-DEST="${1:-/var/lib/botshield/crawlers}"
-TMP="$(mktemp -d /tmp/bs_crawler_refresh.XXXXXX)"
+DEST="${1:-/var/lib/botshield/bots}"
+TMP="$(mktemp -d /tmp/bs_bot_refresh.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
 # provider_name url
@@ -71,7 +72,7 @@ prefixes = sorted({
 })
 if not prefixes:
     sys.exit('no prefixes in payload')
-print('# refreshed by tools/refresh-crawler-ranges.sh')
+print('# refreshed by tools/refresh-bot-ranges.sh')
 print('# source: $url')
 print('\n'.join(prefixes))
 " > "$out.new"; then
