@@ -48,11 +48,19 @@ start_unix=$(grep -oE "start_unix=[0-9]+"   "$REPORT" | head -1 | cut -d= -f2)
 start_rss=$(grep -oE "start_rss_kb=[0-9]+"  "$REPORT" | head -1 | cut -d= -f2)
 start_log=$(grep -oE "start_log_bytes=[0-9]+" "$REPORT" | head -1 | cut -d= -f2)
 
-# Count samples (t= lines)
+# Count samples (t= lines). Minimum is 4: even the 60s smoke samples
+# every 15s (4 points); an 8h overnight samples every 30min (~18
+# points). Fewer than 4 means the sampling loop aborted early
+# (broken driver, missing env, etc.) — treat as an unreliable
+# report, not a pass. This closes the false-green surfaced when
+# M11.5 archived common.sh and the old soak.sh died instantly but
+# its analyzer still printed "soak: PASS" on the stub output.
 nsamples=$(grep -c '^t=' "$REPORT")
 echo "  samples collected: $nsamples"
-if [[ "$nsamples" -lt 2 ]]; then
-  echo "  FAIL: need at least 2 samples (start + end) to analyze"
+if [[ "$nsamples" -lt 4 ]]; then
+  echo "  FAIL: need at least 4 samples to analyze (got $nsamples)"
+  echo "        — this usually means the soak driver died early;"
+  echo "          check /tmp/bs_soak_*_load.out for errors"
   exit 1
 fi
 
@@ -111,18 +119,34 @@ for metric in $CRITICAL_COUNTERS; do
                }
              }
            }')
-  # Walk, detect any decrease
+  # Walk, detect any decrease. Also guard against two degenerate
+  # cases that previously snuck past as "OK":
+  #   (a) the series is empty (metric never appeared) — prev would
+  #       stay -1 and we'd report "final=-1", which looked fine.
+  #   (b) some sample parsed as a negative number (scrape error).
+  nvals=0
   prev=-1
   decreases=0
+  negatives=0
   for v in $vals; do
     [[ -z "$v" ]] && continue
+    nvals=$((nvals + 1))
+    if [[ "$v" -lt 0 ]]; then
+      negatives=$((negatives + 1))
+    fi
     if [[ "$prev" -gt -1 && "$v" -lt "$prev" ]]; then
       decreases=$((decreases + 1))
     fi
     prev=$v
   done
   final=${prev:-0}
-  if [[ "$decreases" -gt 0 ]]; then
+  if [[ "$nvals" -eq 0 ]]; then
+    echo "    FAIL: $metric — no values in any sample (scrape failed?)"
+    fail=1
+  elif [[ "$negatives" -gt 0 ]]; then
+    echo "    FAIL: $metric — $negatives negative value(s) in series"
+    fail=1
+  elif [[ "$decreases" -gt 0 ]]; then
     echo "    FAIL: $metric decreased $decreases time(s) (SHM reset? crash?)"
     fail=1
   else

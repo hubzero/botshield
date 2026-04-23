@@ -21,14 +21,12 @@ from __future__ import annotations
 import pytest
 
 
-# Serial: Turnstile's always-pass sitekey is rate-limited upstream,
-# and running this test concurrently with other captcha tests that
-# also hit siteverify (the parametrized provider smoke, etc.) makes
-# Cloudflare flake. M11.7 will wire pytest-rerunfailures for
-# live_network-marked tests and this can relax back to parallel.
+# live_network picks up rerun-on-flake via the conftest hook (M11.7):
+# Turnstile's always-pass sitekey occasionally flakes under parallel
+# siteverify pressure, and a single retry absorbs that without
+# turning the test serial.
 pytestmark = [
-    pytest.mark.acceptance, pytest.mark.browser,
-    pytest.mark.live_network, pytest.mark.serial,
+    pytest.mark.acceptance, pytest.mark.browser, pytest.mark.live_network,
 ]
 
 

@@ -19,6 +19,7 @@ tests/
 │   ├── cookies.py        # pending cookie, PoW solver, tamper helpers
 │   ├── enums.py          # TIERS / OUTCOMES / COOKIES / PROVIDERS
 │   ├── ips.py            # time-salted fresh_ip() + rate-slot flavor
+│   ├── load.py           # rate-limited load generator (soak + fixtures)
 │   ├── logs.py           # log_slice + structured decision parser + validator
 │   ├── metrics.py        # /metrics snapshot + delta
 │   └── providers.py      # per-captcha-provider specs (quirks as data)
@@ -42,11 +43,32 @@ Ubuntu 22.04 work identically. The setup script installs what's needed:
 - `curl`, `openssl`, `wrk`
 
 Pinned Python deps: `httpx`, `pytest`, `pytest-xdist`,
-`pytest-timeout`, `pytest-playwright`, `playwright` (see
-`requirements-test.txt`). `provision.sh` creates `tests/.venv`,
-installs them, pulls the Chromium binary into `~/.cache/ms-playwright`,
-and apt-installs Chromium's shared-lib dependencies (libnss3, libatk,
-libxkbcommon, etc.).
+`pytest-timeout`, `pytest-playwright`, `playwright`,
+`pytest-rerunfailures`, `pytest-html` (see `requirements-test.txt`).
+`provision.sh` creates `tests/.venv`, installs them, pulls the
+Chromium binary into `~/.cache/ms-playwright`, and apt-installs
+Chromium's shared-lib dependencies (libnss3, libatk, libxkbcommon,
+etc.).
+
+## Reports (M11.7)
+
+Every pytest invocation writes two reports to `tests/reports/`:
+
+- `pytests-<phase>.xml` — JUnit XML, picked up by GitHub Actions'
+  native test-summary view.
+- `pytests-<phase>.html` — self-contained HTML, downloadable as a
+  CI artifact for triage when a test fails.
+
+`<phase>` is `not_serial` / `serial` under `--parallel`, or `all`
+otherwise. The directory is gitignored.
+
+## Rerun-on-flake
+
+`@pytest.mark.live_network` tests automatically get 2 retries via
+`pytest-rerunfailures`. Applied through a collection hook in
+`conftest.py` rather than per-test decorators — new live_network
+tests inherit the policy automatically. Non-live tests have zero
+retries; flake there is a bug to fix, not to mask.
 
 ## Markers
 

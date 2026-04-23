@@ -1,13 +1,13 @@
 name: CI
 
-# Per-PR gate: fresh Ubuntu runner, provision the module + dev vhost,
-# run the unit + integration + acceptance tests, then the short soak
-# smoke so we catch regressions that only show up under sustained
-# traffic.
+# Per-PR gate: two jobs. `test-fast` runs the pytest suite minus the
+# @browser layer; `test-browser` runs only the @browser tests on its
+# own runner so the Chromium binary can be cached independently of
+# everything else. The 60-second soak smoke rides along in test-fast.
 #
 # The 8h soak is too long per-PR and runs on the nightly schedule.
-# MPM-matrix and sanitizer jobs are planned (see PLAN.md M11.7 /
-# M10.1) but not wired here yet.
+# MPM-matrix and sanitizer jobs are planned but not wired here yet
+# (see PLAN.md M11.8 / M10.1).
 
 on:
   pull_request:
@@ -19,10 +19,14 @@ on:
     - cron: "0 6 * * *"
   workflow_dispatch:
 
+env:
+  # Shared env so provision + tests use the same paths.
+  BS_BASE: "https://localhost"
+
 jobs:
-  # -------- Per-PR gate: fast tests, short stress smoke. --------
-  test:
-    name: unit + integration + acceptance
+  # -------- Per-PR gate: fast tests + short soak smoke. --------
+  test-fast:
+    name: pytest (not browser) + short soak
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     # Live-provider tests need the secrets below. Without them the
@@ -48,20 +52,75 @@ jobs:
           curl -sk --max-time 5 -o /dev/null https://localhost/ \
             || (sudo journalctl -u apache2 --no-pager -n 50 && exit 1)
 
-      - name: Run tests (pytest)
-        run: tests/run --parallel --verbose
+      - name: Run fast tests (pytest, not browser)
+        run: tests/run --parallel --mark "not browser" --verbose
 
-      # Short soak (60s at 25rps) — enough to catch any regression
-      # where sustained traffic unmasks a leak / deadlock / log-growth
-      # runaway. Full 8h soak runs on the nightly schedule.
       - name: Soak smoke (60s)
         run: tests/stress/soak.sh
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-fast
+          path: tests/reports/
+          retention-days: 14
 
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: apache-logs
+          name: apache-logs-fast
+          path: |
+            /var/log/apache2/botshield-dev-error.log
+            /var/log/apache2/error.log
+          retention-days: 7
+
+  # -------- Per-PR gate: browser tests in an isolated job so the
+  # Chromium install + cache is independent of the fast lane. --------
+  test-browser:
+    name: pytest (browser) — headless Chromium
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cache the Chromium binary across runs. provision.sh will
+      # `playwright install chromium` but it becomes a no-op when
+      # the cache hit populates ~/.cache/ms-playwright.
+      - name: Restore Playwright cache
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-v1-${{ hashFiles('tests/requirements-test.txt') }}
+
+      - name: Provision
+        run: sudo tests/setup/provision.sh
+
+      - name: Start Apache
+        run: |
+          sudo systemctl restart apache2
+          sleep 2
+
+      - name: Run browser tests (chromium)
+        run: tests/run --parallel --mark "browser" --verbose
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-browser
+          path: |
+            tests/reports/
+            test-results/
+          retention-days: 14
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apache-logs-browser
           path: |
             /var/log/apache2/botshield-dev-error.log
             /var/log/apache2/error.log
@@ -69,11 +128,10 @@ jobs:
 
   # -------- Nightly: 8h soak only (for now). --------
   # MPM matrix + sanitizer builds are planned as separate jobs — see
-  # PLAN.md M11.7 (MPM matrix as pytest parametrize) and M10.1
+  # PLAN.md M11.8 (MPM matrix as pytest parametrize) and M10.1
   # (sanitizer binary, currently a local build target, not CI).
   nightly:
     name: 8h soak
-    # Only run on scheduled / manual trigger, not per-PR.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 540  # 9h: 8h soak + provision overhead
