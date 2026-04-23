@@ -35,10 +35,14 @@
 #include "apr_atomic.h"
 #include "unixd.h"
 #include "mod_watchdog.h"
+#include "mod_status.h"
 
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
+
+#include <curl/curl.h>
+#include <json-c/json.h>
 
 #include <ctype.h>
 #include <stdlib.h>
@@ -73,24 +77,42 @@ module AP_MODULE_DECLARE_DATA botshield_module;
 #define BS_MIN_SECRET_BYTES   16
 #define BS_WIDGET_MARKER      "<!-- BOTSHIELD -->"
 
-/* Challenge protocol (M4a) —
+/* Captcha tier (M8). Defaults kept small and boring: a 1 s HTTP verify
+ * budget is enough for Cloudflare / hCaptcha / Google normally, and
+ * short enough that a provider outage doesn't stall real users. */
+#define BS_DEFAULT_ENDPOINT_PREFIX  "/botshield"
+#define BS_DEFAULT_CAPTCHA_TIMEOUT  1000   /* milliseconds */
+#define BS_MIN_CAPTCHA_TIMEOUT      100
+#define BS_MAX_CAPTCHA_TIMEOUT      5000
+#define BS_CAPTCHA_CONNECT_TIMEOUT  250    /* milliseconds, not operator-tunable */
+#define BS_MAX_CAPTCHA_TOKEN        4096   /* Turnstile tokens are <= ~2 KB */
+#define BS_MAX_CAPTCHA_BODY         8192   /* siteverify response cap */
+#define BS_DEFAULT_RECAPTCHA_V3_MIN_SCORE 0.5  /* Google's suggested baseline */
+
+/* Challenge protocol (M4.1 + M7) —
  *   Wire format (embedded inline in the interstitial, JSON):
  *     { v, alg, salt, nonce, difficulty, expires_at,
  *       score, flags, passes_silent, passes_form, passes_captcha,
- *       challenged_at, signature }
+ *       challenged_at, auto, signature }
  *   Canonical HMAC input (deterministic, pipe-delimited ASCII):
  *     "v|alg|salthex|noncehex|difficulty|expires_at
- *      |score|flags|pass_s|pass_f|pass_c|challenged_at"
+ *      |score|flags|pass_s|pass_f|pass_c|challenged_at|auto"
  *   Cookie payload = base64( canonical || "|" || sighex || "|" || counter )
  *   — a single base64 blob the server can parse by splitting on '|',
  *     no JSON parser required.
+ *
+ *   `auto` is the silent-tier (M7) marker: 1 means the challenge was served
+ *   as a no-click auto-submit splash, 0 means the form-PoW interstitial.
+ *   HMAC-covered so an accepted cookie tells the server which tier actually
+ *   served it — used to pick passes_silent vs passes_form and the matching
+ *   forgiveness amount on verify.
  *
  * Keep in sync with the JS worker when the template ships the wire bits. */
 #define BS_PROTOCOL_VERSION   1
 #define BS_SALT_BYTES         16
 #define BS_NONCE_BYTES        8
 #define BS_SIG_BYTES          32  /* HMAC-SHA-256 output */
-#define BS_COOKIE_FIELDS      14  /* full cookie payload; canonical is 12 */
+#define BS_COOKIE_FIELDS      15  /* full cookie payload; canonical is 13 */
 
 /* Forward declarations for the PoW algorithm dispatch table. */
 typedef struct bs_dir_cfg bs_dir_cfg;
@@ -114,6 +136,7 @@ typedef struct {
     int          difficulty;
     apr_time_t   expires_at;            /* unix seconds */
     bs_rep_state rep;                   /* carried forward across re-issues */
+    int          auto_tier;             /* 1 = silent M7 auto-submit; 0 = form */
     unsigned char signature[BS_SIG_BYTES];
 } bs_challenge;
 
@@ -129,6 +152,63 @@ typedef struct {
     bs_alg_verify_fn  verify;
 } bs_pow_algorithm;
 
+typedef struct bs_captcha_provider bs_captcha_provider;
+
+/* Captcha result (moved up here so the siteverify fn pointer can use it). */
+typedef enum {
+    BS_CAPTCHA_OK       = 0,
+    BS_CAPTCHA_REJECTED = 1,
+    BS_CAPTCHA_TIMEOUT  = 2,
+    BS_CAPTCHA_ERROR    = 3
+} bs_captcha_result;
+
+/* Provider-specific siteverify function. NULL on the provider row means
+ * "use the shared secret/response/remoteip POST + json-c parse path."
+ * Providers whose verify protocol diverges materially from the
+ * Google-family contract (GeeTest: HMAC-signed fields, non-bool result
+ * semantics, JSON blob as the client-side token) set this to their own
+ * function instead. Same signature and same out-params as the default
+ * path so the caller is agnostic. */
+typedef bs_captcha_result (*bs_captcha_siteverify_fn)(
+    request_rec *r,
+    const bs_captcha_provider *prov,
+    const unsigned char *secret, apr_size_t secret_len,
+    const char *token, int timeout_ms,
+    const char **out_details,
+    long *out_http_code,
+    double *out_score);
+
+/* Captcha provider (M8). One entry per third-party provider we can
+ * route to at the captcha tier. `implemented` mirrors bs_pow_algorithm.
+ *
+ * For the Google-family providers (Turnstile, hCaptcha, reCAPTCHA v2/v3,
+ * Friendly Captcha), `siteverify_fn` is NULL and the shared default
+ * path POSTs a body of the form
+ *   secret=<secret>&<siteverify_field>=<token>&remoteip=<ip>
+ * where `siteverify_field` defaults to "response" (Turnstile / hCaptcha /
+ * reCAPTCHA family) or is set to e.g. "solution" (Friendly Captcha).
+ *
+ * For providers whose verify protocol doesn't fit that shape (GeeTest),
+ * `siteverify_fn` is set to a provider-specific function and the rest
+ * of the registry row is informational — the fn decides how to use it.
+ *
+ * `token_field` is the name of the hidden form input the interstitial
+ * emits to carry the client's token to our verify endpoint.
+ *
+ * `widget_script_url` is the async script tag the interstitial embeds;
+ * `widget_class` is the CSS class on the container div the provider's
+ * script looks for (empty for providers with programmatic init). */
+struct bs_captcha_provider {
+    const char *name;
+    int         implemented;
+    const char *siteverify_url;
+    const char *token_field;
+    const char *widget_script_url;
+    const char *widget_class;
+    const char *siteverify_field;          /* NULL → "response" */
+    bs_captcha_siteverify_fn siteverify_fn; /* NULL → shared path */
+};
+
 /* --- Flagged-IP bitmap and scoring ---
  *
  * Each bit represents a *serious* event we want to remember about an IP
@@ -143,9 +223,11 @@ typedef struct {
 /* --- Shared-memory layout ---
  *
  * One APR shared-memory segment holds everything. Fields are laid out
- * contiguously: fixed header, flagged-IP table, then (reserved for M5b)
- * two Bloom filter buffers. Workers access the segment through bs_shm,
- * a module-global runtime struct populated in post-config. */
+ * contiguously: fixed header, flagged-IP table (M5.1), two Bloom filter
+ * buffers (M5.2), captcha-verify rate-limit ring (M8.1), log-suppress
+ * ring (M8.1), metrics counters (M9.2). Workers access the segment
+ * through bs_shm, a module-global runtime struct populated in
+ * post-config. */
 #define BS_SHM_MAGIC              0x42534844  /* 'BSHD' */
 #define BS_SHM_FORMAT_VERSION     1
 #define BS_DEFAULT_SHM_SIZE       (8 * 1024 * 1024)
@@ -155,7 +237,7 @@ typedef struct {
 #define BS_FLAGGED_PROBE_LIMIT    10   /* linear probe depth */
 #define BS_FLAGGED_MAX_READ_SPINS 3    /* seqlock retry budget */
 
-/* Rotating Bloom filter (M5b). N=2 buffers with half-window rotation.
+/* Rotating Bloom filter (M5.2). N=2 buffers with half-window rotation.
  * Fixed 1% false-positive rate → ~9.6 bits/element, k=7 hash functions.
  * If we ever need to tune FP, this is where it gets a directive. */
 #define BS_BLOOM_BITS_PER_IP      10      /* 9.6 rounded up */
@@ -190,10 +272,106 @@ typedef struct {
     apr_uint32_t  bloom_window_secs;    /* full window; rotations at half */
     apr_uint32_t  _pad1;
     apr_int64_t   bloom_next_rotate;    /* unix sec */
+    /* M8.1 captcha endpoint guardrails. Slot arrays use a single fixed
+     * power-of-two slot count so index = siphash(ip) & (slots-1). */
+    apr_uint32_t  cv_rate_slots;        /* rate-limit slot count */
+    apr_uint32_t  cv_log_slots;         /* log-suppress slot count */
+    apr_uint32_t  cv_inflight;          /* in-flight siteverify counter */
+    apr_uint32_t  _pad2;
 } bs_shm_header;
 
+/* Rate-limit / log-suppress slot encoding. One uint64 per slot:
+ *   bits 63..20  unix-minute window start (enough for ~millions of years)
+ *   bits 19..0   count within that window (0..1M)
+ * Rolling over to a new minute is a CAS of the whole slot to
+ * (new_minute << 20) | 1. Non-atomic reads are benign — a torn read
+ * just gives a stale count that CAS will correct on the next attempt. */
+typedef apr_uint64_t bs_cv_slot;
+#define BS_CV_WINDOW_SHIFT  20
+#define BS_CV_COUNT_MASK    ((apr_uint64_t)0xFFFFF)
+#define BS_CV_SLOT(min, cnt) \
+    (((apr_uint64_t)(min) << BS_CV_WINDOW_SHIFT) | \
+     ((apr_uint64_t)(cnt) & BS_CV_COUNT_MASK))
+#define BS_CV_WINDOW(slot) ((apr_uint64_t)(slot) >> BS_CV_WINDOW_SHIFT)
+#define BS_CV_COUNT(slot)  ((apr_uint32_t)((slot) & BS_CV_COUNT_MASK))
+
+#define BS_DEFAULT_CV_RATE_SLOTS  4096   /* 32 KB */
+#define BS_DEFAULT_CV_LOG_SLOTS   2048   /* 16 KB */
+#define BS_DEFAULT_CAPTCHA_RATE_LIMIT     30    /* verifies/min/IP */
+#define BS_DEFAULT_CAPTCHA_MAX_INFLIGHT   64
+#define BS_CAPTCHA_LOG_WINDOW_SEC         60    /* log-throttle window */
+
+/* ---- M9.2 metrics (SHM-backed counters + gauges) ----
+ *
+ * Indices and label strings are 1:1 with the M9.1 decision-log enums.
+ * Reviewer guidance: keep the counter vocabulary identical to the log
+ * vocabulary so a new outcome is a visible build break, not a silent
+ * metric drift. If you add a value to any enum below, the corresponding
+ * string→index lookup in bs_metrics.c gets one new row; the rest of
+ * M9.2/M9.3 (export, gauge readers) is mechanical. */
+typedef enum {
+    BS_M_TIER_NONE = 0,
+    BS_M_TIER_PASS,
+    BS_M_TIER_SILENT,
+    BS_M_TIER_FORM,
+    BS_M_TIER_CAPTCHA,
+    BS_M_TIER_COUNT
+} bs_m_tier;
+
+typedef enum {
+    BS_M_OUTCOME_DECLINED = 0,
+    BS_M_OUTCOME_CHALLENGED,
+    BS_M_OUTCOME_VERIFIED,
+    BS_M_OUTCOME_REJECTED,
+    BS_M_OUTCOME_FAILOPEN,
+    BS_M_OUTCOME_RATE_LIMITED,
+    BS_M_OUTCOME_INFLIGHT_CAPPED,
+    BS_M_OUTCOME_PENDING_MISSING,
+    BS_M_OUTCOME_MISCONFIGURED,
+    BS_M_OUTCOME_DEBUG,
+    BS_M_OUTCOME_COUNT
+} bs_m_outcome;
+
+typedef enum {
+    BS_M_COOKIE_OK = 0,
+    BS_M_COOKIE_EXPIRED,
+    BS_M_COOKIE_BAD_SIG,
+    BS_M_COOKIE_BAD_FORMAT,
+    BS_M_COOKIE_ABSENT,
+    BS_M_COOKIE_COUNT
+} bs_m_cookie;
+
+typedef enum {
+    BS_M_PROV_TURNSTILE = 0,
+    BS_M_PROV_HCAPTCHA,
+    BS_M_PROV_RECAPTCHA_V2,
+    BS_M_PROV_RECAPTCHA_V3,
+    BS_M_PROV_FRIENDLY,
+    BS_M_PROV_GEETEST,
+    BS_M_PROV_COUNT
+} bs_m_provider;
+
+/* Fixed-layout counter block in SHM. Each decision-log call increments
+ * up to four counters (tier, outcome, cookie when != "-", provider
+ * when != "-"). Persistence gauges are updated only from the save/load
+ * code paths, so no contention with the hot decision path. */
+typedef struct {
+    apr_uint64_t tier   [BS_M_TIER_COUNT];
+    apr_uint64_t outcome[BS_M_OUTCOME_COUNT];
+    apr_uint64_t cookie [BS_M_COOKIE_COUNT];
+    apr_uint64_t provider[BS_M_PROV_COUNT];
+    /* Persistence gauges (bumped / set by bs_state_save and bs_state_load). */
+    apr_uint64_t state_saves_total;
+    apr_uint64_t state_save_last_unix;
+    apr_uint64_t state_save_last_bytes;
+    apr_uint64_t state_save_last_duration_us;
+    apr_uint64_t state_loads_total;
+    apr_uint64_t state_load_last_kept;
+    apr_uint64_t state_load_last_dropped;
+} bs_metrics;
+
 /* Module-global runtime pointer struct. Populated once in post-config;
- * children inherit via fork. M5b just fills in bloom_bufs[] and
+ * children inherit via fork. M5.2 just fills in bloom_bufs[] and
  * bloom_buf_bytes — no re-plumbing. */
 typedef struct {
     apr_shm_t           *shm;
@@ -202,8 +380,16 @@ typedef struct {
     bs_shm_header       *header;
     bs_flagged_ip_slot  *flagged_table;
     apr_size_t           flagged_capacity;
-    unsigned char       *bloom_bufs[2];    /* reserved for M5b */
-    apr_size_t           bloom_buf_bytes;  /* reserved for M5b */
+    unsigned char       *bloom_bufs[2];    /* M5.2 rotating Bloom filter */
+    apr_size_t           bloom_buf_bytes;  /* M5.2 per-buffer byte size */
+    /* M8.1 */
+    bs_cv_slot          *cv_rate_slots;    /* rate-limit ring */
+    apr_size_t           cv_rate_slot_count;
+    bs_cv_slot          *cv_log_slots;     /* log-suppress ring */
+    apr_size_t           cv_log_slot_count;
+    apr_uint32_t        *cv_inflight;      /* ptr into SHM header field */
+    /* M9.2 */
+    bs_metrics          *metrics;
 } bs_shm_runtime;
 
 static bs_shm_runtime bs_shm;
@@ -235,7 +421,14 @@ typedef enum {
 
 typedef struct {
     int         penalty;
-    int         ttl_seconds;   /* reserved for M5 flagged-IP table entries */
+    int         ttl_seconds;   /* accepted for API stability; unused today
+                                * (bs_score_add stores it but downstream
+                                * consumers haven't materialized — the
+                                * flagged-IP table carries its own TTL
+                                * set at insert). Kept so callers can
+                                * annotate "this penalty represents an
+                                * N-second-worth signal" without the
+                                * API churning if we ever wire it up. */
     const char *reason;        /* static string or r->pool-allocated */
 } bs_score_entry;
 
@@ -292,6 +485,17 @@ struct bs_dir_cfg {
     const char *cookie_domain;  /* if set, Set-Cookie Domain= attribute */
     apr_uint32_t flag_on_match; /* BotShieldFlagIP: bits to add on any hit */
     int          flag_on_match_ttl;  /* entry TTL when flag_on_match fires */
+    /* --- Captcha tier (M8) --- */
+    const char *endpoint_prefix;            /* default "/botshield" */
+    const bs_captcha_provider *captcha_provider;  /* NULL = tier unused */
+    const char *captcha_site_key;           /* provider-public */
+    const unsigned char *captcha_secret;    /* file bytes, mode-600 */
+    apr_size_t  captcha_secret_len;
+    int         captcha_timeout_ms;         /* siteverify HTTP timeout */
+    /* reCAPTCHA v3: minimum score to accept, in [0.0, 1.0]. -1.0 = unset. */
+    double      recaptcha_v3_min_score;
+    /* M8.1 per-scope verify-endpoint rate limit. -1 unset, 0 disables. */
+    int         captcha_rate_limit;
 };
 
 /* Per-server config — holds SHM sizing before post-config runs. Only the
@@ -305,6 +509,7 @@ typedef struct {
     int         bloom_window_secs;  /* full window; rotation at window/2 */
     const char *state_file;         /* NULL = persistence off */
     int         state_save_interval;/* seconds; 0 = shutdown-only */
+    int         captcha_max_inflight;  /* M8.1: cap on outstanding siteverifies */
 } bs_server_cfg;
 
 /* --- Config lifecycle --- */
@@ -333,6 +538,14 @@ static void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->cookie_domain   = NULL;
     cfg->flag_on_match       = 0;
     cfg->flag_on_match_ttl   = 0;
+    cfg->endpoint_prefix     = NULL;
+    cfg->captcha_provider    = NULL;
+    cfg->captcha_site_key    = NULL;
+    cfg->captcha_secret      = NULL;
+    cfg->captcha_secret_len  = 0;
+    cfg->captcha_timeout_ms  = BS_UNSET;
+    cfg->recaptcha_v3_min_score = -1.0;
+    cfg->captcha_rate_limit  = BS_UNSET;
     return cfg;
 }
 
@@ -347,6 +560,7 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->bloom_window_secs     = BS_DEFAULT_BLOOM_WINDOW;
     scfg->state_file            = NULL;
     scfg->state_save_interval   = 300;   /* 5 min default when state file set */
+    scfg->captcha_max_inflight  = BS_DEFAULT_CAPTCHA_MAX_INFLIGHT;
     return scfg;
 }
 
@@ -389,6 +603,24 @@ static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     out->flag_on_match = base->flag_on_match | add->flag_on_match;
     out->flag_on_match_ttl = add->flag_on_match_ttl
                              ? add->flag_on_match_ttl : base->flag_on_match_ttl;
+    out->endpoint_prefix  = add->endpoint_prefix  ? add->endpoint_prefix  : base->endpoint_prefix;
+    out->captcha_provider = add->captcha_provider ? add->captcha_provider : base->captcha_provider;
+    out->captcha_site_key = add->captcha_site_key ? add->captcha_site_key : base->captcha_site_key;
+    if (add->captcha_secret) {
+        out->captcha_secret     = add->captcha_secret;
+        out->captcha_secret_len = add->captcha_secret_len;
+    } else {
+        out->captcha_secret     = base->captcha_secret;
+        out->captcha_secret_len = base->captcha_secret_len;
+    }
+    out->captcha_timeout_ms = (add->captcha_timeout_ms == BS_UNSET)
+                              ? base->captcha_timeout_ms : add->captcha_timeout_ms;
+    out->recaptcha_v3_min_score = (add->recaptcha_v3_min_score < 0.0)
+                                  ? base->recaptcha_v3_min_score
+                                  : add->recaptcha_v3_min_score;
+    out->captcha_rate_limit = (add->captcha_rate_limit == BS_UNSET)
+                              ? base->captcha_rate_limit
+                              : add->captcha_rate_limit;
     return out;
 }
 
@@ -763,12 +995,13 @@ static int bs_from_hex(const char *in, apr_size_t out_len, unsigned char *out)
 /* --- Canonical form for HMAC input ---
  *
  * "v|alg|salthex|noncehex|difficulty|expires_at
- *  |score|flags|pass_s|pass_f|pass_c|challenged_at"   (12 fields)
+ *  |score|flags|pass_s|pass_f|pass_c|challenged_at|auto"   (13 fields)
  *
  * Deterministic, ASCII, field-delimited. Both sign and verify produce this
  * exact string from the challenge struct — if a byte changes, the HMAC
  * changes, and tampering is detected. The rep fields follow the challenge
- * fields so existing M2 code reading positions 0..5 still lines up. */
+ * fields so existing M2 code reading positions 0..5 still lines up; the
+ * M7 `auto` marker is appended at position 12 after challenged_at. */
 static const char *bs_challenge_canonical(apr_pool_t *p,
                                           const bs_challenge *ch)
 {
@@ -778,12 +1011,13 @@ static const char *bs_challenge_canonical(apr_pool_t *p,
     bs_to_hex(ch->nonce, BS_NONCE_BYTES, nonce_hex);
     return apr_psprintf(p,
         "%d|%s|%s|%s|%d|%" APR_TIME_T_FMT
-        "|%d|%u|%d|%d|%d|%" APR_TIME_T_FMT,
+        "|%d|%u|%d|%d|%d|%" APR_TIME_T_FMT "|%d",
         ch->version, ch->alg_name, salt_hex, nonce_hex,
         ch->difficulty, ch->expires_at,
         ch->rep.score, (unsigned)ch->rep.flags,
         ch->rep.passes_silent, ch->rep.passes_form, ch->rep.passes_captcha,
-        ch->rep.challenged_at);
+        ch->rep.challenged_at,
+        ch->auto_tier ? 1 : 0);
 }
 
 /* --- Algorithm: sha256-zeros ---
@@ -834,18 +1068,56 @@ static const char *bs_sha256_zeros_verify(const bs_challenge *ch,
     return NULL;
 }
 
+/* --- Algorithm: captcha passthrough (M8) ---
+ *
+ * Captcha-earned cookies use the same signed envelope as PoW-earned
+ * cookies, but there's no client-side PoW counter to check — provider
+ * siteverify already confirmed the solve before the cookie was issued,
+ * and the HMAC on the envelope protects every field. The verify fn is
+ * a noop: counter presence is required (to keep the 15-field cookie
+ * shape), but its contents are ignored. */
+static const char *bs_captcha_issue(const bs_dir_cfg *cfg,
+                                    bs_challenge *out)
+{
+    (void)cfg;
+    /* Random salt/nonce so two captcha cookies issued to the same user
+     * at the same second don't collide in logs or caches. Difficulty
+     * is unused but valid (kept at whatever the handler passed in). */
+    if (RAND_bytes(out->salt,  BS_SALT_BYTES)  != 1) return "RAND_bytes(salt)";
+    if (RAND_bytes(out->nonce, BS_NONCE_BYTES) != 1) return "RAND_bytes(nonce)";
+    return NULL;
+}
+
+static const char *bs_captcha_verify_noop(const bs_challenge *ch,
+                                          const char *counter_str)
+{
+    (void)ch;
+    if (!counter_str || !*counter_str) return "empty counter";
+    /* Anything non-empty passes — the captcha provider already did the
+     * real work. */
+    return NULL;
+}
+
 /* --- Algorithm registry ---
  *
- * Static dispatch table. Only sha256-zeros is implemented today. Flipping
- * a 0 to 1 + providing the two functions is how new algorithms get added;
- * no changes to the protocol or the verify code path. */
+ * Static dispatch table. sha256-zeros is the PoW tier; captcha-turnstile
+ * is the captcha tier's cookie alg — same signed envelope, provider
+ * already did the client-side work. Reserved slots flip from 0→1 by
+ * providing the two callbacks; no changes to the protocol or verify
+ * code path. */
 static const bs_pow_algorithm bs_algorithms[] = {
-    { "sha256-zeros",  1, bs_sha256_zeros_issue, bs_sha256_zeros_verify },
-    { "sha384-zeros",  0, NULL, NULL },
-    { "sha512-zeros",  0, NULL, NULL },
-    { "pbkdf2-sha256", 0, NULL, NULL },
-    { "argon2id",      0, NULL, NULL },
-    { NULL,            0, NULL, NULL }
+    { "sha256-zeros",          1, bs_sha256_zeros_issue, bs_sha256_zeros_verify },
+    { "captcha-turnstile",     1, bs_captcha_issue,      bs_captcha_verify_noop },
+    { "captcha-hcaptcha",      1, bs_captcha_issue,      bs_captcha_verify_noop },
+    { "captcha-recaptcha-v2",  1, bs_captcha_issue,      bs_captcha_verify_noop },
+    { "captcha-recaptcha-v3",  1, bs_captcha_issue,      bs_captcha_verify_noop },
+    { "captcha-friendly",      1, bs_captcha_issue,      bs_captcha_verify_noop },
+    { "captcha-geetest",       1, bs_captcha_issue,      bs_captcha_verify_noop },
+    { "sha384-zeros",          0, NULL, NULL },
+    { "sha512-zeros",      0, NULL, NULL },
+    { "pbkdf2-sha256",     0, NULL, NULL },
+    { "argon2id",          0, NULL, NULL },
+    { NULL,                0, NULL, NULL }
 };
 
 static const bs_pow_algorithm *bs_find_algorithm(const char *name)
@@ -858,8 +1130,94 @@ static const bs_pow_algorithm *bs_find_algorithm(const char *name)
     return NULL;
 }
 
+/* --- Captcha provider registry (M8) ---
+ *
+ * Six providers built in today:
+ *
+ *   Render pattern (inline div + provider script renders a visible
+ *   widget the user clicks):
+ *     - turnstile  (Cloudflare)
+ *     - hcaptcha
+ *     - recaptcha-v2
+ *     - friendly   (Friendly Captcha; no user click — invisible PoW)
+ *
+ *   Execute pattern (no visible widget; provider script runs in the
+ *   background and returns a token):
+ *     - recaptcha-v3  (adds numeric "score" field we threshold via
+ *       BotShieldRecaptchaV3MinScore)
+ *
+ *   initGeetest4 pattern (imperative init, slider-based widget):
+ *     - geetest      (v4; response is {"result":"success"/"fail",...}
+ *       not {"success":bool,...}, and server signs lot_number with
+ *       HMAC-SHA256(captcha_key) — provider-specific siteverify_fn)
+ *
+ * The interstitial render code picks one of three templates based on
+ * provider name. The siteverify shim + json-c parser are shared across
+ * the five Google-family providers; GeeTest has its own siteverify_fn
+ * via the fn-pointer slot on the provider row.
+ *
+ * widget_script_url for v3 is the base URL — the render code appends
+ * "?render=<sitekey>" at render time because v3's script needs the
+ * sitekey baked into the URL query, not just the widget div. */
+static bs_captcha_result bs_geetest_siteverify(request_rec *r,
+    const bs_captcha_provider *prov, const unsigned char *secret,
+    apr_size_t secret_len, const char *token, int timeout_ms,
+    const char **out_details, long *out_http_code, double *out_score);
+
+static const bs_captcha_provider bs_providers[] = {
+    { "turnstile",    1,
+      "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+      "cf-turnstile-response",
+      "https://challenges.cloudflare.com/turnstile/v0/api.js",
+      "cf-turnstile",
+      NULL, NULL },
+    { "hcaptcha",     1,
+      "https://api.hcaptcha.com/siteverify",
+      "h-captcha-response",
+      "https://js.hcaptcha.com/1/api.js",
+      "h-captcha",
+      NULL, NULL },
+    { "recaptcha-v2", 1,
+      "https://www.google.com/recaptcha/api/siteverify",
+      "g-recaptcha-response",
+      "https://www.google.com/recaptcha/api.js",
+      "g-recaptcha",
+      NULL, NULL },
+    { "recaptcha-v3", 1,
+      "https://www.google.com/recaptcha/api/siteverify",
+      "g-recaptcha-response",
+      "https://www.google.com/recaptcha/api.js",
+      "" /* no widget class — v3 uses grecaptcha.execute(), not a div */,
+      NULL, NULL },
+    { "friendly",     1,
+      "https://api.friendlycaptcha.com/api/v1/siteverify",
+      "frc-captcha-solution",
+      "https://cdn.jsdelivr.net/npm/friendly-challenge/widget.min.js",
+      "frc-captcha",
+      "solution" /* Friendly Captcha's POST field name is `solution` */,
+      NULL },
+    { "geetest",      1,
+      "https://gcaptcha4.geetest.com/validate",
+      "geetest-token" /* the hidden form input carrying a JSON blob */,
+      "https://static.geetest.com/v4/gt4.js",
+      "" /* programmatic init via initGeetest4() */,
+      NULL /* shared body shape not used — custom fn handles signing */,
+      bs_geetest_siteverify },
+    { NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL }
+};
+
+static const bs_captcha_provider *bs_find_provider(const char *name)
+{
+    for (int i = 0; bs_providers[i].name; i++) {
+        if (strcmp(bs_providers[i].name, name) == 0) {
+            return &bs_providers[i];
+        }
+    }
+    return NULL;
+}
+
 /* ======================================================================
- * Shared memory: flagged-IP table (M5a) + Bloom reservations (M5b).
+ * Shared memory: flagged-IP table (M5.1) + Bloom reservations (M5.2).
  * ====================================================================== */
 
 /* SipHash-2-4 — DoS-resistant hash for the flagged-IP bucket index.
@@ -1052,6 +1410,7 @@ static void          bs_state_load(apr_pool_t *p, server_rec *s,
 static apr_status_t  bs_state_cleanup(void *data);
 static apr_status_t  bs_watchdog_save_cb(int state, void *data,
                                          apr_pool_t *pool);
+static const char   *bs_get_cookie_value(request_rec *r, const char *name);
 
 static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                           apr_pool_t *ptemp, server_rec *s)
@@ -1070,13 +1429,41 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
         return OK;
     }
 
+    /* libcurl global init: must run once before any worker thread
+     * touches a curl easy handle. curl_global_init is explicitly
+     * documented as not thread-safe, so the per-request lazy-init
+     * guard we used to have (bs_curl_ensure_init) had a race under
+     * mpm_event where two workers could both see the flag unset and
+     * race the init. Doing it here, in the parent process pre-fork
+     * and single-threaded, is the only sound place for it. Children
+     * inherit libcurl's global state via fork per libcurl's docs; no
+     * additional init in bs_child_init is needed. curl_global_cleanup
+     * is intentionally not paired — the process exits when Apache
+     * exits, and the kernel reaps the handle.
+     *
+     * Fail loudly if curl global init fails: the captcha tier uses
+     * libcurl on every verify, and curl_easy_init after a failed
+     * global init is undefined behavior. Better to refuse to start
+     * than to silently serve broken captcha. */
+    CURLcode curl_rv = curl_global_init(CURL_GLOBAL_DEFAULT);
+    if (curl_rv != CURLE_OK) {
+        ap_log_error(APLOG_MARK, APLOG_ERR, 0, s,
+            "mod_botshield: curl_global_init failed: %s (CURLcode=%d). "
+            "Refusing to start — the captcha tier needs working libcurl.",
+            curl_easy_strerror(curl_rv), (int)curl_rv);
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+
     bs_server_cfg *scfg = ap_get_module_config(s->module_config,
                                                &botshield_module);
 
     /* Compute SHM layout: header + flagged-IP table + two Bloom buffers
-     * at the tail. Each Bloom buffer is sized to hit ~1% FP at the
-     * configured capacity (10 bits/IP, rounded up to a multiple of 8
-     * so we can atomic-OR on aligned u64 slots). */
+     * + M8.1 captcha rate-limit ring + M8.1 captcha log-suppress ring.
+     * Each Bloom buffer is sized to hit ~1% FP at the configured
+     * capacity (10 bits/IP, rounded up to a multiple of 8 so we can
+     * atomic-OR on aligned u64 slots). The M8.1 rings are fixed-size
+     * power-of-two arrays of bs_cv_slot (uint64 each); both rings are
+     * module-global (not per-scope) since they guard one endpoint. */
     apr_size_t header_bytes = sizeof(bs_shm_header);
     apr_size_t table_bytes  = (apr_size_t)scfg->flagged_capacity
                               * sizeof(bs_flagged_ip_slot);
@@ -1084,16 +1471,26 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     apr_size_t bloom_bits   = (apr_size_t)scfg->bloom_ips
                               * BS_BLOOM_BITS_PER_IP;
     apr_size_t bloom_bytes  = (bloom_bits + 63) / 64 * 8;   /* u64-aligned */
-    apr_size_t total_bytes  = header_bytes + table_bytes + 2 * bloom_bytes;
+    apr_size_t cv_rate_bytes = (apr_size_t)BS_DEFAULT_CV_RATE_SLOTS
+                               * sizeof(bs_cv_slot);
+    apr_size_t cv_log_bytes  = (apr_size_t)BS_DEFAULT_CV_LOG_SLOTS
+                               * sizeof(bs_cv_slot);
+    apr_size_t metrics_bytes = sizeof(bs_metrics);
+    apr_size_t total_bytes  = header_bytes + table_bytes + 2 * bloom_bytes
+                              + cv_rate_bytes + cv_log_bytes
+                              + metrics_bytes;
 
     if (scfg->shm_size < total_bytes) {
         ap_log_error(APLOG_MARK, APLOG_ERR, 0, s,
             "mod_botshield: BotShieldShmSize %" APR_SIZE_T_FMT
             " is too small; needs at least %" APR_SIZE_T_FMT " bytes "
             "(header + %d flagged-IP slots + 2x %" APR_SIZE_T_FMT
-            "-byte Bloom buffers for %d IPs)",
+            "-byte Bloom buffers for %d IPs + %" APR_SIZE_T_FMT
+            " bytes of M8.1 rings + %" APR_SIZE_T_FMT
+            " bytes of M9.2 metrics)",
             scfg->shm_size, total_bytes, scfg->flagged_capacity,
-            bloom_bytes, scfg->bloom_ips);
+            bloom_bytes, scfg->bloom_ips,
+            cv_rate_bytes + cv_log_bytes, metrics_bytes);
         return HTTP_INTERNAL_SERVER_ERROR;
     }
 
@@ -1127,11 +1524,32 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     bs_shm.bloom_bufs[1]    = bs_shm.bloom_bufs[0] + bloom_bytes;
     bs_shm.bloom_buf_bytes  = bloom_bytes;
 
+    /* M8.1 rings follow the Bloom buffers. Both start zeroed by the
+     * memset(base) above — a zero slot has window=0 < current_minute,
+     * so any insert trips the "roll to new window" branch safely. */
+    unsigned char *cv_rate_base =
+        bs_shm.bloom_bufs[1] + bloom_bytes;
+    unsigned char *cv_log_base =
+        cv_rate_base + cv_rate_bytes;
+    unsigned char *metrics_base =
+        cv_log_base + cv_log_bytes;
+    bs_shm.cv_rate_slots      = (bs_cv_slot *)cv_rate_base;
+    bs_shm.cv_rate_slot_count = BS_DEFAULT_CV_RATE_SLOTS;
+    bs_shm.cv_log_slots       = (bs_cv_slot *)cv_log_base;
+    bs_shm.cv_log_slot_count  = BS_DEFAULT_CV_LOG_SLOTS;
+    bs_shm.cv_inflight        = &bs_shm.header->cv_inflight;
+    /* M9.2: metrics block sits after the log-suppress ring. All counters
+     * start at zero thanks to the memset(base) above. */
+    bs_shm.metrics            = (bs_metrics *)metrics_base;
+
     bs_shm.header->bloom_active        = 0;
     bs_shm.header->bloom_buf_bytes     = (apr_uint32_t)bloom_bytes;
     bs_shm.header->bloom_window_secs   = (apr_uint32_t)scfg->bloom_window_secs;
     apr_int64_t now = (apr_int64_t)apr_time_sec(apr_time_now());
     bs_shm.header->bloom_next_rotate   = now + scfg->bloom_window_secs / 2;
+    bs_shm.header->cv_rate_slots       = BS_DEFAULT_CV_RATE_SLOTS;
+    bs_shm.header->cv_log_slots        = BS_DEFAULT_CV_LOG_SLOTS;
+    bs_shm.header->cv_inflight         = 0;
 
     /* Global mutex protects the narrow insert/evict critical section.
      * Reads don't take the lock — they use the slot seqlock. */
@@ -1388,7 +1806,7 @@ static int bs_flagged_ip_lookup(const unsigned char ip[16],
     return 0;
 }
 
-/* --- Rotating Bloom filter (M5b) ---
+/* --- Rotating Bloom filter (M5.2) ---
  *
  * Two buffers share the same hash geometry. Writes go to the buffer
  * the active_index points at; queries check each buffer independently
@@ -1438,9 +1856,42 @@ static void bs_bloom_rotate_if_due(apr_int64_t now_sec)
     apr_uint32_t new_active = old_active ^ 1U;
     /* Clear the buffer that's about to start accepting writes. It
      * currently holds the *oldest* data (~window/2 to window old); this
-     * zero is what ages that cohort out. */
-    memset(bs_shm.bloom_bufs[new_active], 0, bs_shm.bloom_buf_bytes);
+     * zero is what ages that cohort out.
+     *
+     * Sanitizer-readiness: the insert path writes the same bytes via
+     * byte-level `__atomic_or_fetch`, so a plain `memset` here would be
+     * a data race per the C memory model (TSAN flags it). Instead,
+     * clear the buffer via a loop of relaxed atomic stores — on x86_64
+     * this compiles to the same memory-bandwidth mov sequence as a
+     * memset, but both sides of the concurrency are now atomic.
+     *
+     * Borrow the global mutex across the clear too. It doesn't stop
+     * the lockless Bloom writers (they don't take it), so the atomic
+     * loop is what actually fixes the race — but holding the mutex
+     * does serialize against flagged-IP writers and makes rotation
+     * a clean global checkpoint. Rotation fires at most twice per
+     * week by default, so the brief mutex hold is free. */
+    int held_mutex = 0;
+    if (bs_shm.mutex &&
+        apr_global_mutex_lock(bs_shm.mutex) == APR_SUCCESS) {
+        held_mutex = 1;
+    }
+    apr_uint64_t *p64 = (apr_uint64_t *)bs_shm.bloom_bufs[new_active];
+    apr_size_t n64 = bs_shm.bloom_buf_bytes / 8;
+    for (apr_size_t i = 0; i < n64; i++) {
+        __atomic_store_n(&p64[i], (apr_uint64_t)0, __ATOMIC_RELAXED);
+    }
+    /* Tail bytes if bloom_buf_bytes isn't a multiple of 8 (post_config
+     * layout guarantees u64 alignment today, but keep the loop for
+     * safety). */
+    unsigned char *tail_start =
+        (unsigned char *)bs_shm.bloom_bufs[new_active] + (n64 * 8);
+    for (apr_size_t i = 0; i < bs_shm.bloom_buf_bytes - (n64 * 8); i++) {
+        __atomic_store_n(&tail_start[i], (unsigned char)0,
+                         __ATOMIC_RELAXED);
+    }
     apr_atomic_set32(&bs_shm.header->bloom_active, new_active);
+    if (held_mutex) apr_global_mutex_unlock(bs_shm.mutex);
 }
 
 static void bs_bloom_add(const unsigned char ip[16])
@@ -1698,6 +2149,17 @@ static void bs_state_load(apr_pool_t *p, server_rec *s, const char *path)
     bs_shm.header->bloom_next_rotate = saved_next_rotate;
 
 done_log:
+    /* M9.2 persistence gauges. Counters update before the log line so a
+     * scraper that happens to hit during the post-config window sees
+     * consistent values. */
+    if (bs_shm.metrics) {
+        __atomic_fetch_add(&bs_shm.metrics->state_loads_total, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_store_n(&bs_shm.metrics->state_load_last_kept,
+                         (apr_uint64_t)kept, __ATOMIC_RELAXED);
+        __atomic_store_n(&bs_shm.metrics->state_load_last_dropped,
+                         (apr_uint64_t)dropped, __ATOMIC_RELAXED);
+    }
     ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
         "mod_botshield: state loaded from %s (age %" APR_INT64_T_FMT " s): "
         "flagged kept %d, dropped-stale %d, bloom buffers restored",
@@ -1751,6 +2213,7 @@ static void bs_fsync_parent_dir(apr_pool_t *p, server_rec *s,
 static apr_status_t bs_state_save(apr_pool_t *p, server_rec *s,
                                   const char *path)
 {
+    apr_time_t t_start = apr_time_now();
     apr_size_t flagged_bytes = bs_shm.flagged_capacity
                                * sizeof(bs_flagged_ip_slot);
     apr_size_t bloom_bytes   = bs_shm.bloom_buf_bytes;
@@ -1844,9 +2307,34 @@ static apr_status_t bs_state_save(apr_pool_t *p, server_rec *s,
      * contents are already on disk. */
     bs_fsync_parent_dir(p, s, path);
 
+    /* apr_time_t is microseconds since the epoch. apr_time_now() wraps
+     * gettimeofday(), which is wall-clock time — subject to NTP jumps
+     * and can go backward. Clamp the duration to 0 on a backward jump
+     * so the metric and log line stay sensible; a single save with
+     * duration=0 is visibly harmless, a negative duration is not. */
+    apr_time_t t_end = apr_time_now();
+    apr_int64_t duration_us = (apr_int64_t)(t_end - t_start);
+    if (duration_us < 0) duration_us = 0;
+
+    /* M9.2 persistence gauges — update before the log line so the value
+     * shown and the value scraped are consistent. Counters are
+     * module-global, not per-vhost, so no atomic-RMW race between
+     * concurrent saves (watchdog + shutdown) matters in practice. */
+    if (bs_shm.metrics) {
+        __atomic_fetch_add(&bs_shm.metrics->state_saves_total, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_store_n(&bs_shm.metrics->state_save_last_unix,
+                         (apr_uint64_t)apr_time_sec(t_end),
+                         __ATOMIC_RELAXED);
+        __atomic_store_n(&bs_shm.metrics->state_save_last_bytes,
+                         (apr_uint64_t)total, __ATOMIC_RELAXED);
+        __atomic_store_n(&bs_shm.metrics->state_save_last_duration_us,
+                         (apr_uint64_t)duration_us, __ATOMIC_RELAXED);
+    }
+
     ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
-        "mod_botshield: state saved to %s (%" APR_SIZE_T_FMT " bytes)",
-        path, total);
+        "mod_botshield: state saved to %s (%" APR_SIZE_T_FMT " bytes, "
+        "%" APR_INT64_T_FMT " us)", path, total, duration_us);
     return APR_SUCCESS;
 }
 
@@ -1908,7 +2396,7 @@ static apr_status_t bs_watchdog_save_cb(int state, void *data,
 }
 
 /* Translate a flag bitmap (from the cookie's flags field OR the flagged-
- * IP table) into an additive score. M5a wires real numbers; bits are
+ * IP table) into an additive score. M5.1 wires real numbers; bits are
  * independent so an IP with multiple flags pays the sum. */
 static int bs_flag_penalty(apr_uint32_t flags)
 {
@@ -1988,13 +2476,13 @@ static const char *bs_challenge_json(apr_pool_t *p, const bs_dir_cfg *cfg,
         "\"difficulty\":%d,\"expires_at\":%" APR_TIME_T_FMT ","
         "\"score\":%d,\"flags\":%u,"
         "\"passes_silent\":%d,\"passes_form\":%d,\"passes_captcha\":%d,"
-        "\"challenged_at\":%" APR_TIME_T_FMT ","
+        "\"challenged_at\":%" APR_TIME_T_FMT ",\"auto\":%d,"
         "\"signature\":\"%s\"%s}",
         ch->version, ch->alg_name, salt_hex, nonce_hex,
         ch->difficulty, ch->expires_at,
         ch->rep.score, (unsigned)ch->rep.flags,
         ch->rep.passes_silent, ch->rep.passes_form, ch->rep.passes_captcha,
-        ch->rep.challenged_at,
+        ch->rep.challenged_at, ch->auto_tier ? 1 : 0,
         sig_hex, domain_json);
 }
 
@@ -2010,20 +2498,31 @@ static const char *bs_challenge_json(apr_pool_t *p, const bs_dir_cfg *cfg,
 /* Issue a fresh challenge. If `rep_in` is non-NULL its fields are copied
  * into the issued challenge verbatim — the handler has already applied
  * whatever forgiveness / increments are appropriate for the tier being
- * issued. If `rep_in` is NULL, rep starts at zero (first-ever challenge). */
+ * issued. If `rep_in` is NULL, rep starts at zero (first-ever challenge).
+ * `auto_tier` controls the M7 silent-tier variant: 1 renders the interstitial
+ * as an auto-submitting splash, 0 renders the form-PoW checkbox.
+ * `alg_override` lets callers issue cookies under a non-default algorithm
+ * (M8 uses this for captcha-turnstile). NULL = use cfg->algorithm. */
 static const char *bs_issue_challenge(apr_pool_t *p, const bs_dir_cfg *cfg,
                                       int difficulty, int cookie_ttl,
+                                      int auto_tier,
+                                      const bs_pow_algorithm *alg_override,
                                       const bs_rep_state *rep_in,
                                       bs_challenge *out)
 {
-    if (!cfg->secret || !cfg->algorithm) {
-        return "BotShieldSecretFile and BotShieldAlgorithm must be set";
+    if (!cfg->secret) {
+        return "BotShieldSecretFile must be set";
+    }
+    const bs_pow_algorithm *alg = alg_override ? alg_override : cfg->algorithm;
+    if (!alg) {
+        return "BotShieldAlgorithm must be set (or alg_override provided)";
     }
     apr_time_t now = apr_time_sec(apr_time_now());
     out->version     = BS_PROTOCOL_VERSION;
-    out->alg_name    = cfg->algorithm->name;
+    out->alg_name    = alg->name;
     out->difficulty  = difficulty;
     out->expires_at  = now + cookie_ttl;
+    out->auto_tier   = auto_tier ? 1 : 0;
     if (rep_in) {
         out->rep = *rep_in;
     } else {
@@ -2039,7 +2538,7 @@ static const char *bs_issue_challenge(apr_pool_t *p, const bs_dir_cfg *cfg,
      * always implies a fresh PoW solve on acceptance. */
     out->rep.challenged_at = now;
 
-    const char *err = cfg->algorithm->issue(cfg, out);
+    const char *err = alg->issue(cfg, out);
     if (err) return err;
 
     const char *canon = bs_challenge_canonical(p, out);
@@ -2047,6 +2546,27 @@ static const char *bs_issue_challenge(apr_pool_t *p, const bs_dir_cfg *cfg,
                    (const unsigned char *)canon, strlen(canon),
                    out->signature);
     return NULL;
+}
+
+/* Build the 15-field base64-encoded cookie payload for a challenge +
+ * counter. Matches the format the interstitial JS produces so server-
+ * set (M8 captcha) and client-set (M1/M7 PoW) cookies are indistinguish-
+ * able on the wire. `counter_str` is the PoW counter for PoW cookies,
+ * or the sentinel "captcha" for captcha-alg cookies (the alg's verify
+ * only checks non-empty). */
+static const char *bs_build_cookie_payload(apr_pool_t *p,
+                                           const bs_challenge *ch,
+                                           const char *counter_str)
+{
+    char sig_hex[BS_SIG_BYTES * 2 + 1];
+    bs_to_hex(ch->signature, BS_SIG_BYTES, sig_hex);
+    const char *canon = bs_challenge_canonical(p, ch);
+    const char *joined = apr_psprintf(p, "%s|%s|%s",
+                                      canon, sig_hex, counter_str);
+    apr_size_t joined_len = strlen(joined);
+    char *b64 = apr_palloc(p, apr_base64_encode_len((int)joined_len) + 1);
+    apr_base64_encode(b64, joined, (int)joined_len);
+    return b64;
 }
 
 /* If `out_ch` is non-NULL, it is populated with the parsed challenge once
@@ -2069,12 +2589,13 @@ static const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
     if (dec_len <= 0) return "base64 decode failed";
     decoded[dec_len] = '\0';
 
-    /* Expect 14 pipe-delimited fields (M4a):
+    /* Expect 15 pipe-delimited fields (M4.1 + M7):
      *   0..5  : v, alg, salt, nonce, difficulty, expires_at
      *   6..11 : score, flags, passes_silent, passes_form, passes_captcha,
      *           challenged_at
-     *   12    : sighex
-     *   13    : counter
+     *   12    : auto       (0/1, M7 silent-tier marker)
+     *   13    : sighex
+     *   14    : counter
      * Split in place. */
     char *fields[BS_COOKIE_FIELDS];
     int nf = 0;
@@ -2113,10 +2634,11 @@ static const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
     ch.rep.passes_form    = atoi(fields[9]);
     ch.rep.passes_captcha = atoi(fields[10]);
     ch.rep.challenged_at  = (apr_time_t)apr_atoi64(fields[11]);
+    ch.auto_tier          = atoi(fields[12]) ? 1 : 0;
 
     unsigned char sig_from_client[BS_SIG_BYTES];
-    if (strlen(fields[12]) != BS_SIG_BYTES * 2 ||
-        !bs_from_hex(fields[12], BS_SIG_BYTES, sig_from_client)) {
+    if (strlen(fields[13]) != BS_SIG_BYTES * 2 ||
+        !bs_from_hex(fields[13], BS_SIG_BYTES, sig_from_client)) {
         return "bad signature hex";
     }
 
@@ -2143,7 +2665,7 @@ static const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
     if (now > ch.expires_at) return "expired";
 
     /* Final step: algorithm-specific PoW check on the counter. */
-    return alg->verify(&ch, fields[13]);
+    return alg->verify(&ch, fields[14]);
 }
 
 /* --- New directive setters --- */
@@ -2203,6 +2725,2034 @@ static const char *bs_set_algorithm(cmd_parms *cmd, void *cfg_v,
     }
     cfg->algorithm = alg;
     return NULL;
+}
+
+/* --- M8 captcha directive setters --- */
+
+/* `BotShieldEndpointPrefix /path` — URL prefix the module's own
+ * handlers live under. Today: /captcha-verify[/<provider>] (M8),
+ * /metrics (M9.3). Future: E7's /solver.js. Must start with '/' and
+ * not end with '/'. */
+static const char *bs_set_endpoint_prefix(cmd_parms *cmd, void *cfg_v,
+                                          const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    if (!arg || !*arg || arg[0] != '/') {
+        return apr_psprintf(cmd->pool,
+            "BotShieldEndpointPrefix: '%s' must start with '/'", arg ? arg : "");
+    }
+    apr_size_t len = strlen(arg);
+    if (len > 1 && arg[len-1] == '/') {
+        return apr_psprintf(cmd->pool,
+            "BotShieldEndpointPrefix: '%s' must not end with '/'", arg);
+    }
+    /* Cheap sanity — no spaces, control chars, or query strings. Operators
+     * don't mount endpoints at weird places on purpose. */
+    for (apr_size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)arg[i];
+        if (c <= ' ' || c == '?' || c == '#') {
+            return apr_psprintf(cmd->pool,
+                "BotShieldEndpointPrefix: '%s' contains an invalid char", arg);
+        }
+    }
+    cfg->endpoint_prefix = arg;
+    return NULL;
+}
+
+static const char *bs_set_captcha_provider(cmd_parms *cmd, void *cfg_v,
+                                           const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    const bs_captcha_provider *p = bs_find_provider(arg);
+    if (!p) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCaptchaProvider: '%s' is not a recognized provider "
+            "(known: turnstile, hcaptcha, recaptcha-v2, recaptcha-v3, "
+            "friendly, geetest)", arg);
+    }
+    if (!p->implemented) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCaptchaProvider: '%s' is reserved in the registry "
+            "but not built into this module", arg);
+    }
+    cfg->captcha_provider = p;
+    return NULL;
+}
+
+static const char *bs_set_captcha_site_key(cmd_parms *cmd, void *cfg_v,
+                                           const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    if (!arg || !*arg) {
+        return "BotShieldCaptchaSiteKey: empty value";
+    }
+    /* Site keys are public; just cap length to something sane so a
+     * misconfigured directive can't wedge the interstitial. */
+    if (strlen(arg) > 256) {
+        return "BotShieldCaptchaSiteKey: value longer than 256 bytes";
+    }
+    cfg->captcha_site_key = arg;
+    return NULL;
+}
+
+/* Reuse the same mode-600 discipline as BotShieldSecretFile. */
+static const char *bs_set_captcha_secret_file(cmd_parms *cmd, void *cfg_v,
+                                              const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+
+    struct stat st;
+    if (stat(arg, &st) != 0) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCaptchaSecretFile: cannot stat '%s'", arg);
+    }
+    if (st.st_mode & (S_IRGRP | S_IROTH | S_IWGRP | S_IWOTH)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCaptchaSecretFile: '%s' is group- or world-accessible "
+            "(mode %04o); chmod 600 it", arg, st.st_mode & 07777);
+    }
+
+    const char *buf = NULL;
+    const char *err = bs_load_config_file(cmd, "BotShieldCaptchaSecretFile",
+                                          arg, BS_MAX_SECRET_BYTES, &buf);
+    if (err) return err;
+
+    apr_size_t len = strlen(buf);
+    if (len > 0 && buf[len-1] == '\n') len--;
+    if (len == 0) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCaptchaSecretFile: '%s' is empty", arg);
+    }
+    cfg->captcha_secret     = (const unsigned char *)buf;
+    cfg->captcha_secret_len = len;
+    return NULL;
+}
+
+static const char *bs_set_captcha_timeout(cmd_parms *cmd, void *cfg_v,
+                                          const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    char *end = NULL;
+    long v = strtol(arg, &end, 10);
+    if (!end || *end != '\0' || v < BS_MIN_CAPTCHA_TIMEOUT ||
+        v > BS_MAX_CAPTCHA_TIMEOUT) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCaptchaTimeout: '%s' must be an integer in %d..%d ms",
+            arg, BS_MIN_CAPTCHA_TIMEOUT, BS_MAX_CAPTCHA_TIMEOUT);
+    }
+    cfg->captcha_timeout_ms = (int)v;
+    return NULL;
+}
+
+/* `BotShieldRecaptchaV3MinScore 0.0..1.0` — threshold below which a
+ * successful-but-low-score reCAPTCHA v3 verification is treated as a
+ * rejection. Google's documented baseline is 0.5; operators tune down
+ * (more permissive, fewer false rejections) or up (more strict) based
+ * on observed traffic. */
+static const char *bs_set_recaptcha_v3_min_score(cmd_parms *cmd,
+                                                 void *cfg_v,
+                                                 const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    char *end = NULL;
+    double v = strtod(arg, &end);
+    if (!end || *end != '\0' || v < 0.0 || v > 1.0) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldRecaptchaV3MinScore: '%s' must be a number in 0.0..1.0",
+            arg);
+    }
+    cfg->recaptcha_v3_min_score = v;
+    return NULL;
+}
+
+/* `BotShieldCaptchaRateLimit N` — verify-endpoint attempts per IP per
+ * minute. 0 disables the rate limiter entirely (not recommended);
+ * default BS_DEFAULT_CAPTCHA_RATE_LIMIT = 30. */
+static const char *bs_set_captcha_rate_limit(cmd_parms *cmd, void *cfg_v,
+                                             const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    char *end = NULL;
+    long v = strtol(arg, &end, 10);
+    if (!end || *end != '\0' || v < 0 || v > 1000) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCaptchaRateLimit: '%s' must be an integer 0..1000 "
+            "(0 disables)", arg);
+    }
+    cfg->captcha_rate_limit = (int)v;
+    return NULL;
+}
+
+/* `BotShieldCaptchaMaxInFlight N` — global cap on outstanding siteverify
+ * calls. The underlying SHM counter is module-global, so if the
+ * directive appears in more than one server_rec the last-parsed value
+ * wins at runtime. Allowed anywhere (RSRC_CONF) so operators who only
+ * have a vhost config can still set it; we don't pretend otherwise. */
+static const char *bs_set_captcha_max_inflight(cmd_parms *cmd, void *cfg_v,
+                                               const char *arg)
+{
+    (void)cfg_v;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    char *end = NULL;
+    long v = strtol(arg, &end, 10);
+    if (!end || *end != '\0' || v < 1 || v > 1024) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCaptchaMaxInFlight: '%s' must be an integer 1..1024",
+            arg);
+    }
+    scfg->captcha_max_inflight = (int)v;
+    return NULL;
+}
+
+/* ======================================================================
+ * Captcha tier (M8) — libcurl siteverify shim.
+ *
+ * Deliberately boring: one POST per verify, short timeouts, small
+ * response buffer capped at BS_MAX_CAPTCHA_BODY, no JSON dependency
+ * (the one field we need is "success", and we look for the explicit
+ * `"success":false` / `"success":true` forms Cloudflare documents).
+ *
+ * Fail policy:
+ *   - OK        → cookie issued, user redirected to return_to.
+ *   - REJECTED  → 403 logged at INFO with a short body snippet.
+ *   - TIMEOUT   → cookie issued anyway (fail-open), WARNING logged.
+ *   - ERROR     → same as TIMEOUT for request flow; logged at WARNING.
+ *     The alternative (fail-closed) locks users out during a Cloudflare
+ *     blip, which the plan rejected as worse than occasional permissive
+ *     behavior.
+ * ====================================================================== */
+
+/* bs_captcha_result is defined near the provider struct so the provider-
+ * specific siteverify fn pointer can reference it. */
+
+typedef struct {
+    char      *buf;      /* r->pool-allocated */
+    apr_size_t cap;
+    apr_size_t len;
+    int        truncated;
+} bs_curl_buffer;
+
+static size_t bs_curl_write_cb(char *ptr, size_t size, size_t nmemb,
+                               void *userdata)
+{
+    bs_curl_buffer *b = userdata;
+    size_t incoming = size * nmemb;
+    if (b->truncated) return incoming;   /* drain silently */
+    size_t room = (b->len < b->cap) ? (b->cap - b->len) : 0;
+    size_t take = (incoming < room) ? incoming : room;
+    if (take > 0) {
+        memcpy(b->buf + b->len, ptr, take);
+        b->len += take;
+    }
+    if (take < incoming) b->truncated = 1;
+    return incoming;  /* always "consume" everything so libcurl doesn't abort */
+}
+
+/* libcurl global state is initialized once in bs_post_config (see the
+ * comment there). No per-request init guard here — curl_global_init is
+ * not thread-safe, and doing it lazily from the request path would
+ * race under mpm_event. */
+
+/* URL-encode via libcurl and copy into the request pool so the caller
+ * can free the libcurl buffer right away. */
+static const char *bs_curl_escape_pool(apr_pool_t *p, CURL *curl,
+                                       const char *in, apr_size_t in_len)
+{
+    char *esc = curl_easy_escape(curl, in, (int)in_len);
+    if (!esc) return NULL;
+    const char *dup = apr_pstrdup(p, esc);
+    curl_free(esc);
+    return dup;
+}
+
+/* Parse the siteverify response body with json-c. Returns:
+ *   BS_CAPTCHA_OK        — explicit "success":true
+ *   BS_CAPTCHA_REJECTED  — explicit "success":false; *out_details is set
+ *                          to a comma-joined "error-codes" list, or the
+ *                          empty string if the provider didn't send any.
+ *   BS_CAPTCHA_ERROR     — malformed JSON, wrong shape, or "success" of
+ *                          a non-boolean type. *out_details is a snippet
+ *                          of the raw body for the log.
+ * The Google-family providers (Turnstile, hCaptcha, reCAPTCHA v2/v3,
+ * Friendly Captcha) all use the same {"success":bool,...} contract,
+ * so one parser covers all of them. Friendly Captcha v1 writes its
+ * error list under the key "errors" instead of "error-codes"; both
+ * keys are accepted, preferring "error-codes" when present. GeeTest
+ * uses a different response shape entirely and bypasses this parser
+ * via its own siteverify_fn on the provider row.
+ *
+ * `out_score` is optional; when non-NULL it receives the numeric
+ * "score" field if present (reCAPTCHA v3), or -1.0 if the response
+ * didn't carry a score (other Google-family providers). The
+ * handler uses it to apply BotShieldRecaptchaV3MinScore *after* the
+ * success:true check — v3 threshold failures look the same as any
+ * other REJECTED outcome to downstream code. */
+static bs_captcha_result bs_captcha_parse_response(apr_pool_t *p,
+                                                   const char *body,
+                                                   apr_size_t body_len,
+                                                   const char **out_details,
+                                                   double *out_score)
+{
+    *out_details = "";
+    if (out_score) *out_score = -1.0;
+    if (!body || body_len == 0) return BS_CAPTCHA_ERROR;
+
+    enum json_tokener_error jerr = json_tokener_success;
+    json_object *root = json_tokener_parse_verbose(body, &jerr);
+    if (!root || jerr != json_tokener_success) {
+        if (root) json_object_put(root);
+        /* 120-char snippet of whatever came back for the log. */
+        apr_size_t n = body_len < 120 ? body_len : 120;
+        char *snip = apr_pstrndup(p, body, n);
+        for (char *q = snip; *q; q++) if (*q == '\n' || *q == '\r') *q = ' ';
+        *out_details = snip;
+        return BS_CAPTCHA_ERROR;
+    }
+
+    /* Shape must be an object with a boolean `success` field. Anything
+     * else (missing field, wrong type) is a protocol surprise. */
+    bs_captcha_result out = BS_CAPTCHA_ERROR;
+    if (json_object_is_type(root, json_type_object)) {
+        json_object *succ = NULL;
+        if (json_object_object_get_ex(root, "success", &succ) &&
+            succ && json_object_is_type(succ, json_type_boolean)) {
+            if (json_object_get_boolean(succ)) {
+                out = BS_CAPTCHA_OK;
+                /* v3 carries a numeric score field. Extract if present;
+                 * providers that don't carry it leave out_score at -1.0. */
+                json_object *sc = NULL;
+                if (out_score &&
+                    json_object_object_get_ex(root, "score", &sc) &&
+                    sc && (json_object_is_type(sc, json_type_double) ||
+                           json_object_is_type(sc, json_type_int))) {
+                    *out_score = json_object_get_double(sc);
+                }
+            } else {
+                out = BS_CAPTCHA_REJECTED;
+                /* Join the error-codes array into a compact string for
+                 * the log. Most providers use "error-codes"; Friendly
+                 * Captcha v1 uses "errors". Check both, preferring the
+                 * standard name when both are present. */
+                json_object *ec = NULL;
+                if (!json_object_object_get_ex(root, "error-codes", &ec)) {
+                    json_object_object_get_ex(root, "errors", &ec);
+                }
+                if (ec && json_object_is_type(ec, json_type_array)) {
+                    int n = (int)json_object_array_length(ec);
+                    char *joined = apr_pstrdup(p, "");
+                    for (int i = 0; i < n; i++) {
+                        json_object *e = json_object_array_get_idx(ec, i);
+                        if (!e) continue;
+                        const char *s = json_object_get_string(e);
+                        if (!s) continue;
+                        joined = apr_pstrcat(p, joined,
+                                             i == 0 ? "" : ",", s, NULL);
+                    }
+                    *out_details = joined;
+                }
+            }
+        }
+    }
+
+    if (out == BS_CAPTCHA_ERROR) {
+        /* Couldn't find or interpret "success". Log a snippet. */
+        apr_size_t n = body_len < 120 ? body_len : 120;
+        char *snip = apr_pstrndup(p, body, n);
+        for (char *q = snip; *q; q++) if (*q == '\n' || *q == '\r') *q = ' ';
+        *out_details = snip;
+    }
+
+    json_object_put(root);
+    return out;
+}
+
+static bs_captcha_result bs_captcha_siteverify(request_rec *r,
+                                               const bs_captcha_provider *prov,
+                                               const unsigned char *secret,
+                                               apr_size_t secret_len,
+                                               const char *token,
+                                               int timeout_ms,
+                                               const char **out_details,
+                                               long *out_http_code,
+                                               double *out_score)
+{
+    *out_details  = "";
+    *out_http_code = 0;
+    if (out_score) *out_score = -1.0;
+
+    CURL *curl = curl_easy_init();
+    if (!curl) return BS_CAPTCHA_ERROR;
+
+    /* Build URL-encoded body: secret=...&response=...&remoteip=... */
+    const char *esc_secret = bs_curl_escape_pool(r->pool, curl,
+        (const char *)secret, secret_len);
+    const char *esc_token  = bs_curl_escape_pool(r->pool, curl,
+        token, strlen(token));
+    const char *esc_ip     = bs_curl_escape_pool(r->pool, curl,
+        r->useragent_ip ? r->useragent_ip : "",
+        r->useragent_ip ? strlen(r->useragent_ip) : 0);
+    if (!esc_secret || !esc_token || !esc_ip) {
+        curl_easy_cleanup(curl);
+        return BS_CAPTCHA_ERROR;
+    }
+    const char *field = prov->siteverify_field ? prov->siteverify_field
+                                               : "response";
+    const char *body = apr_psprintf(r->pool,
+        "secret=%s&%s=%s&remoteip=%s",
+        esc_secret, field, esc_token, esc_ip);
+
+    bs_curl_buffer resp = {
+        .buf = apr_palloc(r->pool, BS_MAX_CAPTCHA_BODY),
+        .cap = BS_MAX_CAPTCHA_BODY,
+        .len = 0, .truncated = 0,
+    };
+
+    curl_easy_setopt(curl, CURLOPT_URL, prov->siteverify_url);
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS,
+                     (long)BS_CAPTCHA_CONNECT_TIMEOUT);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, (long)timeout_ms);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "mod_botshield/0.1");
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, bs_curl_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+
+    CURLcode rc = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_cleanup(curl);
+
+    *out_http_code = http_code;
+
+    if (rc == CURLE_OPERATION_TIMEDOUT) return BS_CAPTCHA_TIMEOUT;
+    if (rc != CURLE_OK) {
+        *out_details = curl_easy_strerror(rc);
+        return BS_CAPTCHA_ERROR;
+    }
+    if (http_code < 200 || http_code >= 300) {
+        *out_details = apr_psprintf(r->pool, "http-status-%ld", http_code);
+        return BS_CAPTCHA_ERROR;
+    }
+
+    apr_size_t body_len = resp.len < resp.cap ? resp.len : resp.cap - 1;
+    resp.buf[body_len] = '\0';
+    return bs_captcha_parse_response(r->pool, resp.buf, body_len,
+                                     out_details, out_score);
+}
+
+/* ----------------------------------------------------------------------
+ * GeeTest v4 siteverify. Not the "Google family" shape:
+ *
+ *   client → server:  JSON blob of {lot_number, pass_token, gen_time,
+ *                                   captcha_output} submitted as the
+ *                                   `geetest-token` form field.
+ *
+ *   server → GeeTest: POST {siteverify_url}?captcha_id=<sitekey>
+ *                     Content-Type: application/x-www-form-urlencoded
+ *                     body: lot_number=...&captcha_output=...
+ *                           &pass_token=...&gen_time=...&sign_token=...
+ *                     where sign_token = HMAC-SHA256(captcha_key=secret,
+ *                                                    lot_number) as hex.
+ *
+ *   GeeTest → server: {"result":"success"|"fail","reason":"...",...}
+ *                     — "result" is a string, not a bool; "reason" is
+ *                     the human-readable explanation.
+ *
+ * We map GeeTest's "success" / "fail" onto BS_CAPTCHA_OK /
+ * BS_CAPTCHA_REJECTED the same way the shared path maps the boolean
+ * from Google-family providers. Everything else (libcurl buffer,
+ * timeouts, write callback, fail-open policy) is shared via the same
+ * helpers the default shim uses. */
+static apr_status_t bs_geetest_parse_client_token(apr_pool_t *p,
+                                                  const char *token,
+                                                  const char **out_lot_number,
+                                                  const char **out_captcha_output,
+                                                  const char **out_pass_token,
+                                                  const char **out_gen_time,
+                                                  const char **out_err)
+{
+    *out_lot_number    = NULL;
+    *out_captcha_output = NULL;
+    *out_pass_token    = NULL;
+    *out_gen_time      = NULL;
+    *out_err           = NULL;
+
+    if (!token || !*token) {
+        *out_err = "empty token";
+        return APR_EINVAL;
+    }
+    json_object *root = json_tokener_parse(token);
+    if (!root || !json_object_is_type(root, json_type_object)) {
+        if (root) json_object_put(root);
+        *out_err = "token not a JSON object";
+        return APR_EINVAL;
+    }
+
+    struct { const char *key; const char **out; } fields[] = {
+        { "lot_number",     out_lot_number     },
+        { "captcha_output", out_captcha_output },
+        { "pass_token",     out_pass_token     },
+        { "gen_time",       out_gen_time       },
+        { NULL, NULL }
+    };
+
+    for (int i = 0; fields[i].key; i++) {
+        json_object *v = NULL;
+        if (!json_object_object_get_ex(root, fields[i].key, &v) || !v) {
+            *out_err = apr_psprintf(p, "missing field '%s'", fields[i].key);
+            json_object_put(root);
+            return APR_EINVAL;
+        }
+        const char *s = json_object_get_string(v);
+        if (!s) {
+            *out_err = apr_psprintf(p, "non-string field '%s'", fields[i].key);
+            json_object_put(root);
+            return APR_EINVAL;
+        }
+        *fields[i].out = apr_pstrdup(p, s);
+    }
+    json_object_put(root);
+    return APR_SUCCESS;
+}
+
+static bs_captcha_result bs_geetest_siteverify(request_rec *r,
+                                               const bs_captcha_provider *prov,
+                                               const unsigned char *secret,
+                                               apr_size_t secret_len,
+                                               const char *token,
+                                               int timeout_ms,
+                                               const char **out_details,
+                                               long *out_http_code,
+                                               double *out_score)
+{
+    *out_details   = "";
+    *out_http_code = 0;
+    if (out_score) *out_score = -1.0;
+
+    /* Need the sitekey (captcha_id) from per-dir cfg. Walk up from r. */
+    bs_dir_cfg *cfg = ap_get_module_config(r->per_dir_config,
+                                           &botshield_module);
+    if (!cfg || !cfg->captcha_site_key) {
+        *out_details = "captcha_id missing from scope";
+        return BS_CAPTCHA_ERROR;
+    }
+
+    const char *lot_number, *captcha_output, *pass_token, *gen_time;
+    const char *perr = NULL;
+    if (bs_geetest_parse_client_token(r->pool, token,
+            &lot_number, &captcha_output, &pass_token, &gen_time,
+            &perr) != APR_SUCCESS) {
+        *out_details = perr ? perr : "bad token";
+        return BS_CAPTCHA_REJECTED;
+    }
+
+    /* sign_token = HMAC-SHA256(captcha_key=secret, lot_number) hex. */
+    unsigned char sig[BS_SIG_BYTES];
+    bs_hmac_sha256(secret, secret_len,
+                   (const unsigned char *)lot_number, strlen(lot_number),
+                   sig);
+    char sign_token[BS_SIG_BYTES * 2 + 1];
+    bs_to_hex(sig, BS_SIG_BYTES, sign_token);
+
+    CURL *curl = curl_easy_init();
+    if (!curl) return BS_CAPTCHA_ERROR;
+
+    const char *e_lot    = bs_curl_escape_pool(r->pool, curl, lot_number,     strlen(lot_number));
+    const char *e_output = bs_curl_escape_pool(r->pool, curl, captcha_output, strlen(captcha_output));
+    const char *e_pass   = bs_curl_escape_pool(r->pool, curl, pass_token,     strlen(pass_token));
+    const char *e_time   = bs_curl_escape_pool(r->pool, curl, gen_time,       strlen(gen_time));
+    const char *e_id     = bs_curl_escape_pool(r->pool, curl, cfg->captcha_site_key,
+                                               strlen(cfg->captcha_site_key));
+    if (!e_lot || !e_output || !e_pass || !e_time || !e_id) {
+        curl_easy_cleanup(curl);
+        return BS_CAPTCHA_ERROR;
+    }
+    const char *url = apr_psprintf(r->pool,
+        "%s?captcha_id=%s", prov->siteverify_url, e_id);
+    const char *body = apr_psprintf(r->pool,
+        "lot_number=%s&captcha_output=%s&pass_token=%s"
+        "&gen_time=%s&sign_token=%s",
+        e_lot, e_output, e_pass, e_time, sign_token);
+
+    bs_curl_buffer resp = {
+        .buf = apr_palloc(r->pool, BS_MAX_CAPTCHA_BODY),
+        .cap = BS_MAX_CAPTCHA_BODY,
+        .len = 0, .truncated = 0,
+    };
+
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS,
+                     (long)BS_CAPTCHA_CONNECT_TIMEOUT);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, (long)timeout_ms);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "mod_botshield/0.1");
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, bs_curl_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+
+    CURLcode rc = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_cleanup(curl);
+    *out_http_code = http_code;
+
+    if (rc == CURLE_OPERATION_TIMEDOUT) return BS_CAPTCHA_TIMEOUT;
+    if (rc != CURLE_OK) {
+        *out_details = curl_easy_strerror(rc);
+        return BS_CAPTCHA_ERROR;
+    }
+    if (http_code < 200 || http_code >= 300) {
+        *out_details = apr_psprintf(r->pool, "http-status-%ld", http_code);
+        return BS_CAPTCHA_ERROR;
+    }
+
+    apr_size_t body_len = resp.len < resp.cap ? resp.len : resp.cap - 1;
+    resp.buf[body_len] = '\0';
+
+    /* Parse GeeTest response: {"result":"success"/"fail","reason":"..."}. */
+    json_object *root = json_tokener_parse(resp.buf);
+    if (!root || !json_object_is_type(root, json_type_object)) {
+        if (root) json_object_put(root);
+        apr_size_t n = body_len < 120 ? body_len : 120;
+        char *snip = apr_pstrndup(r->pool, resp.buf, n);
+        for (char *q = snip; *q; q++) if (*q == '\n' || *q == '\r') *q = ' ';
+        *out_details = snip;
+        return BS_CAPTCHA_ERROR;
+    }
+
+    bs_captcha_result out = BS_CAPTCHA_ERROR;
+    json_object *res_o = NULL, *reason_o = NULL;
+    if (json_object_object_get_ex(root, "result", &res_o) && res_o &&
+        json_object_is_type(res_o, json_type_string)) {
+        const char *res = json_object_get_string(res_o);
+        if (res && strcmp(res, "success") == 0) {
+            out = BS_CAPTCHA_OK;
+        } else if (res && strcmp(res, "fail") == 0) {
+            out = BS_CAPTCHA_REJECTED;
+        }
+    }
+    if (json_object_object_get_ex(root, "reason", &reason_o) && reason_o &&
+        json_object_is_type(reason_o, json_type_string)) {
+        const char *reason = json_object_get_string(reason_o);
+        if (reason) *out_details = apr_pstrdup(r->pool, reason);
+    }
+    if (out == BS_CAPTCHA_ERROR && (!*out_details || !**out_details)) {
+        apr_size_t n = body_len < 120 ? body_len : 120;
+        char *snip = apr_pstrndup(r->pool, resp.buf, n);
+        for (char *q = snip; *q; q++) if (*q == '\n' || *q == '\r') *q = ' ';
+        *out_details = snip;
+    }
+    json_object_put(root);
+    return out;
+}
+
+/* ----------------------------------------------------------------------
+ * M8.1 verify-endpoint guardrails: per-IP rate limit, global in-flight
+ * semaphore, per-IP log-throttle. All three live in SHM and use the
+ * same "epoch-minute << 20 | count" slot encoding (bs_cv_slot). Reads
+ * are torn-tolerant (a CAS loop corrects any bad read); writes are CAS.
+ * ---------------------------------------------------------------------- */
+
+/* Hash an IP to a slot index in a power-of-two table. Reuses the SHM
+ * SipHash key so precomputed collisions are blocked. */
+static apr_uint32_t bs_cv_slot_index(const unsigned char ip[16],
+                                     apr_size_t slot_count)
+{
+    apr_uint64_t h = bs_siphash24(bs_shm.header->siphash_key, ip, 16);
+    /* slot_count is a power of two at configuration time. */
+    return (apr_uint32_t)(h & (apr_uint64_t)(slot_count - 1));
+}
+
+/* Try to increment a window counter at [slots[idx]] under `limit`.
+ * Returns 1 on "accepted" (slot incremented, under cap) or 0 on
+ * "rejected" (slot at or above cap in the current window). `cur_min`
+ * is the current unix-minute. Uses CAS to roll a stale window and to
+ * increment. */
+static int bs_cv_counter_bump(bs_cv_slot *slots, apr_size_t idx,
+                              apr_uint64_t cur_min, int limit)
+{
+    for (int attempt = 0; attempt < 4; attempt++) {
+        /* Relaxed atomic load makes the torn-tolerant observation
+         * explicit to the compiler and TSAN; the CAS below will
+         * either succeed (so what we read was consistent) or retry. */
+        bs_cv_slot observed = __atomic_load_n(&slots[idx],
+                                              __ATOMIC_RELAXED);
+        bs_cv_slot next;
+        if (BS_CV_WINDOW(observed) != cur_min) {
+            next = BS_CV_SLOT(cur_min, 1);
+        } else {
+            apr_uint32_t count = BS_CV_COUNT(observed);
+            if ((int)count >= limit) return 0;
+            next = BS_CV_SLOT(cur_min, count + 1);
+        }
+        /* apr_atomic_cas64 isn't universally available; fall back to a
+         * 32-bit CAS on the lower half since that's where the count
+         * lives. The window rollover is idempotent — a concurrent
+         * rollover just re-initializes to (cur_min, 1), which is
+         * indistinguishable from our own rollover. */
+        if (__sync_bool_compare_and_swap(&slots[idx], observed, next)) {
+            return 1;
+        }
+    }
+    /* Contention gave up — fail-open on rate (accept) rather than
+     * flap-reject legitimate traffic. Alternate choice would be
+     * fail-closed; either is defensible. */
+    return 1;
+}
+
+/* Per-IP rate limit on the verify endpoint. Returns 1 if the request
+ * is within the cap (allow through), 0 if over cap (reject with 429).
+ * limit <= 0 disables the check. */
+static int bs_captcha_rate_allowed(const unsigned char ip[16], int limit)
+{
+    if (limit <= 0 || !bs_shm.cv_rate_slots) return 1;
+    apr_uint64_t cur_min =
+        (apr_uint64_t)(apr_time_sec(apr_time_now()) / 60);
+    apr_uint32_t idx =
+        bs_cv_slot_index(ip, bs_shm.cv_rate_slot_count);
+    return bs_cv_counter_bump(bs_shm.cv_rate_slots, idx, cur_min, limit);
+}
+
+/* Global in-flight siteverify semaphore. Returns 1 on acquire, 0 if
+ * the cap was already reached (caller must return 503 without calling
+ * libcurl). Every successful acquire MUST be paired with a release on
+ * every return path. */
+static int bs_captcha_inflight_acquire(int max_inflight)
+{
+    if (!bs_shm.cv_inflight || max_inflight <= 0) return 1;
+    for (int attempt = 0; attempt < 8; attempt++) {
+        apr_uint32_t cur = apr_atomic_read32(bs_shm.cv_inflight);
+        if ((int)cur >= max_inflight) return 0;
+        if (apr_atomic_cas32(bs_shm.cv_inflight, cur + 1, cur) == cur) {
+            return 1;
+        }
+    }
+    /* Heavy contention — fail-closed here so we don't overshoot the
+     * cap under load. Cheap: contention at this level already means
+     * we're near the cap. */
+    return 0;
+}
+
+static void bs_captcha_inflight_release(void)
+{
+    if (!bs_shm.cv_inflight) return;
+    apr_atomic_dec32(bs_shm.cv_inflight);
+}
+
+/* Per-IP log-throttle for verify-endpoint lines. Returns 1 if the
+ * caller should emit the log, 0 if it should suppress. When emitting
+ * after a rollover, *out_prev_count carries the number of events
+ * suppressed during the previous window (0 if none or if this is the
+ * first event for this slot). Callers typically format the log as
+ * `... (×N in last 60s)` when out_prev_count > 1.
+ *
+ * Each IP gets one log per BS_CAPTCHA_LOG_WINDOW_SEC regardless of
+ * how many events fired in between; the count tells the operator
+ * how many were collapsed. */
+static int bs_captcha_log_throttle(const unsigned char ip[16],
+                                   apr_uint32_t *out_prev_count)
+{
+    if (out_prev_count) *out_prev_count = 0;
+    if (!bs_shm.cv_log_slots) return 1;
+    apr_uint64_t cur_min =
+        (apr_uint64_t)(apr_time_sec(apr_time_now()) /
+                       BS_CAPTCHA_LOG_WINDOW_SEC);
+    apr_uint32_t idx =
+        bs_cv_slot_index(ip, bs_shm.cv_log_slot_count);
+
+    for (int attempt = 0; attempt < 4; attempt++) {
+        bs_cv_slot observed = __atomic_load_n(&bs_shm.cv_log_slots[idx],
+                                              __ATOMIC_RELAXED);
+        if (BS_CV_WINDOW(observed) != cur_min) {
+            /* Stale window → this is the first log in a new window.
+             * Roll to (cur_min, 1); report how many were suppressed in
+             * the old window (if any) so the caller can tell the
+             * operator "N events collapsed since the last line". */
+            apr_uint32_t prev = BS_CV_COUNT(observed);
+            bs_cv_slot next = BS_CV_SLOT(cur_min, 1);
+            if (__sync_bool_compare_and_swap(&bs_shm.cv_log_slots[idx],
+                                              observed, next)) {
+                if (out_prev_count) *out_prev_count = prev;
+                return 1;
+            }
+        } else {
+            /* Same window → bump the suppressed count, but don't log. */
+            apr_uint32_t count = BS_CV_COUNT(observed);
+            bs_cv_slot next = BS_CV_SLOT(cur_min, count + 1);
+            if (__sync_bool_compare_and_swap(&bs_shm.cv_log_slots[idx],
+                                              observed, next)) {
+                return 0;   /* suppressed */
+            }
+        }
+    }
+    /* Contention → log (better to have the line than silently drop). */
+    return 1;
+}
+
+/* Small helper: return " (×N in last 60s)" or "" for prepending to a
+ * throttled log line. Allocated on r->pool. */
+static const char *bs_log_suppress_suffix(apr_pool_t *p, apr_uint32_t n)
+{
+    if (n <= 1) return "";
+    return apr_psprintf(p, " (×%u in last %ds)",
+                        n, BS_CAPTCHA_LOG_WINDOW_SEC);
+}
+
+/* ---------- M9.1: structured per-decision log line ----------
+ *
+ * One machine-parseable line per terminal decision. Emitted alongside
+ * the existing human-readable prose lines, not in place of them, so
+ * operators tailing the log still see English and M9.2/M9.3 still have
+ * a stable contract to count against.
+ *
+ * Format (keys always in this order; values always present or "-"):
+ *
+ *   mod_botshield: decision tier=<t> outcome=<o> ip=<i>
+ *     score=<n> cookie=<c> provider=<p|-> alg=<a|->
+ *     reason="<r|->" path="<u>"
+ *
+ * Enum values (see PLAN.md M9.1):
+ *   tier     = none | pass | silent | form | captcha
+ *   outcome  = declined | challenged | verified | rejected | failopen
+ *              | rate_limited | inflight_capped | pending_missing
+ *              | misconfigured | debug
+ *   cookie   = ok | expired | bad_sig | bad_format | absent | -
+ *
+ * `reason` and `path` are double-quoted because they can carry
+ * short-dashed strings from config/heuristics; everything else is a
+ * known enum and left unquoted for logfmt readability. */
+/* ---- M9.2: string → counter index lookups ----
+ *
+ * These mirror the M9.1 enum strings verbatim. If a string doesn't map,
+ * return -1 — the caller logs a single WARNING and skips the increment
+ * rather than silently corrupting counters (the validator should catch
+ * this at M9.1 gate, so it's a defense-in-depth check). */
+static int bs_m_tier_idx(const char *s)
+{
+    if (!s) return -1;
+    if (strcmp(s, "none")    == 0) return BS_M_TIER_NONE;
+    if (strcmp(s, "pass")    == 0) return BS_M_TIER_PASS;
+    if (strcmp(s, "silent")  == 0) return BS_M_TIER_SILENT;
+    if (strcmp(s, "form")    == 0) return BS_M_TIER_FORM;
+    if (strcmp(s, "captcha") == 0) return BS_M_TIER_CAPTCHA;
+    return -1;
+}
+
+static int bs_m_outcome_idx(const char *s)
+{
+    if (!s) return -1;
+    if (strcmp(s, "declined")         == 0) return BS_M_OUTCOME_DECLINED;
+    if (strcmp(s, "challenged")       == 0) return BS_M_OUTCOME_CHALLENGED;
+    if (strcmp(s, "verified")         == 0) return BS_M_OUTCOME_VERIFIED;
+    if (strcmp(s, "rejected")         == 0) return BS_M_OUTCOME_REJECTED;
+    if (strcmp(s, "failopen")         == 0) return BS_M_OUTCOME_FAILOPEN;
+    if (strcmp(s, "rate_limited")     == 0) return BS_M_OUTCOME_RATE_LIMITED;
+    if (strcmp(s, "inflight_capped")  == 0) return BS_M_OUTCOME_INFLIGHT_CAPPED;
+    if (strcmp(s, "pending_missing")  == 0) return BS_M_OUTCOME_PENDING_MISSING;
+    if (strcmp(s, "misconfigured")    == 0) return BS_M_OUTCOME_MISCONFIGURED;
+    if (strcmp(s, "debug")            == 0) return BS_M_OUTCOME_DEBUG;
+    return -1;
+}
+
+static int bs_m_cookie_idx(const char *s)
+{
+    if (!s) return -1;
+    if (strcmp(s, "ok")         == 0) return BS_M_COOKIE_OK;
+    if (strcmp(s, "expired")    == 0) return BS_M_COOKIE_EXPIRED;
+    if (strcmp(s, "bad_sig")    == 0) return BS_M_COOKIE_BAD_SIG;
+    if (strcmp(s, "bad_format") == 0) return BS_M_COOKIE_BAD_FORMAT;
+    if (strcmp(s, "absent")     == 0) return BS_M_COOKIE_ABSENT;
+    return -1;
+}
+
+static int bs_m_provider_idx(const char *s)
+{
+    if (!s) return -1;
+    if (strcmp(s, "turnstile")    == 0) return BS_M_PROV_TURNSTILE;
+    if (strcmp(s, "hcaptcha")     == 0) return BS_M_PROV_HCAPTCHA;
+    if (strcmp(s, "recaptcha-v2") == 0) return BS_M_PROV_RECAPTCHA_V2;
+    if (strcmp(s, "recaptcha-v3") == 0) return BS_M_PROV_RECAPTCHA_V3;
+    if (strcmp(s, "friendly")     == 0) return BS_M_PROV_FRIENDLY;
+    if (strcmp(s, "geetest")      == 0) return BS_M_PROV_GEETEST;
+    return -1;
+}
+
+/* ---- M9.2 on-demand gauge readers ----
+ *
+ * Called by the metrics export handler (M9.3) when a scraper GETs
+ * /botshield/metrics. Not called on the hot decision path. Results
+ * cached for 1 second via a tiny static struct so concurrent scrapes
+ * don't each walk the flagged-IP table or popcount the Bloom bufs.
+ *
+ * The cache is deliberately process-local (not SHM) so a read by one
+ * worker doesn't stale the value for another — if two workers answer
+ * two concurrent scrapes they each do their own computation, but each
+ * is still bounded at 1 Hz per worker. */
+typedef struct {
+    apr_time_t   expires_at;
+    apr_uint64_t flagged_used;
+    apr_uint64_t bloom_bits_active;
+    apr_uint64_t bloom_bits_warming;
+} bs_gauge_cache;
+
+/* Thread-local storage. Each worker thread gets its own cache so
+ * concurrent /metrics scrapes in one Apache process can't race on the
+ * refresh, and we don't need a lock. The 1-second TTL means at worst
+ * a thread computes fresh values once per scrape; cost is bounded. */
+static __thread bs_gauge_cache bs_gauges = {0, 0, 0, 0};
+#define BS_GAUGE_CACHE_TTL_US (1000 * 1000)  /* 1 second */
+
+static apr_uint64_t bs_popcount_u64(apr_uint64_t x)
+{
+    return (apr_uint64_t)__builtin_popcountll(x);
+}
+
+static apr_uint64_t bs_popcount_buffer(const unsigned char *buf,
+                                       apr_size_t bytes)
+{
+    apr_uint64_t total = 0;
+    apr_size_t aligned_end = (bytes / 8) * 8;
+    const apr_uint64_t *p64 = (const apr_uint64_t *)buf;
+    apr_size_t n64 = aligned_end / 8;
+    /* Relaxed atomic loads: the Bloom buffer is concurrently mutated
+     * via byte-level __atomic_or_fetch in the insert path, so plain
+     * u64 loads here would be a data race per the C memory model
+     * (even though the hardware on x86_64 gives us the same answer).
+     * The popcount result is inherently an approximation of a live
+     * counter, so acquire ordering isn't needed — we just need TSAN
+     * to see this as a race-tolerant read. */
+    for (apr_size_t i = 0; i < n64; i++) {
+        total += bs_popcount_u64(
+            __atomic_load_n(&p64[i], __ATOMIC_RELAXED));
+    }
+    /* Tail bytes (Bloom buffers are u64-aligned per the post_config
+     * layout, so aligned_end == bytes in practice — keep the loop for
+     * safety if that ever changes). */
+    for (apr_size_t i = aligned_end; i < bytes; i++) {
+        total += (apr_uint64_t)__builtin_popcount(
+            __atomic_load_n(&buf[i], __ATOMIC_RELAXED));
+    }
+    return total;
+}
+
+static void bs_gauges_refresh(void)
+{
+    apr_time_t now = apr_time_now();
+    if (now < bs_gauges.expires_at) return;
+
+    apr_uint64_t flagged_used = 0;
+    if (bs_shm.flagged_table) {
+        apr_int64_t now_sec = (apr_int64_t)apr_time_sec(now);
+        for (apr_size_t i = 0; i < bs_shm.flagged_capacity; i++) {
+            const bs_flagged_ip_slot *slot = &bs_shm.flagged_table[i];
+            /* Skip odd versions (mid-write) — they don't count toward
+             * populated slots. A torn read is fine because this is an
+             * estimate anyway. */
+            if ((slot->version & 1U) == 0 &&
+                slot->flags != 0 &&
+                slot->expires_at > now_sec) {
+                flagged_used++;
+            }
+        }
+    }
+    apr_uint64_t bloom_active = 0, bloom_warming = 0;
+    if (bs_shm.bloom_bufs[0] && bs_shm.bloom_buf_bytes) {
+        apr_uint32_t act = apr_atomic_read32(&bs_shm.header->bloom_active);
+        apr_size_t bb = bs_shm.bloom_buf_bytes;
+        bloom_active  = bs_popcount_buffer(bs_shm.bloom_bufs[act & 1U], bb);
+        bloom_warming = bs_popcount_buffer(bs_shm.bloom_bufs[(act & 1U) ^ 1], bb);
+    }
+
+    bs_gauges.flagged_used       = flagged_used;
+    bs_gauges.bloom_bits_active  = bloom_active;
+    bs_gauges.bloom_bits_warming = bloom_warming;
+    bs_gauges.expires_at         = now + BS_GAUGE_CACHE_TTL_US;
+}
+
+/* Public gauge accessors. Each refreshes the cache if stale then
+ * returns the cached value. M9.3's export handler calls these. */
+static apr_uint64_t bs_metrics_flagged_used(void)
+{
+    bs_gauges_refresh();
+    return bs_gauges.flagged_used;
+}
+
+static apr_uint64_t bs_metrics_bloom_bits(int active_buf)
+{
+    bs_gauges_refresh();
+    return active_buf ? bs_gauges.bloom_bits_active
+                      : bs_gauges.bloom_bits_warming;
+}
+
+static apr_uint32_t bs_metrics_inflight_cur(void)
+{
+    if (!bs_shm.cv_inflight) return 0;
+    return apr_atomic_read32(bs_shm.cv_inflight);
+}
+
+/* Bump the M9.2 counters for one decision emission. `cookie` and
+ * `provider` may be "-" (not applicable); those dimensions skip.
+ * Unknown enum strings log one WARNING and skip that dimension — a
+ * loud signal that the producer/consumer drifted out of sync. */
+static void bs_metrics_bump(request_rec *r,
+                            const char *tier, const char *outcome,
+                            const char *cookie, const char *provider)
+{
+    if (!bs_shm.metrics) return;
+
+    int ti = bs_m_tier_idx(tier);
+    int oi = bs_m_outcome_idx(outcome);
+    int ci = (cookie && strcmp(cookie, "-") != 0)
+             ? bs_m_cookie_idx(cookie) : -1;
+    int pi = (provider && strcmp(provider, "-") != 0)
+             ? bs_m_provider_idx(provider) : -1;
+
+    if (ti >= 0) {
+        __atomic_fetch_add(&bs_shm.metrics->tier[ti], 1, __ATOMIC_RELAXED);
+    } else {
+        ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+            "mod_botshield: metrics: unknown tier=\"%s\" — skipped",
+            tier ? tier : "(null)");
+    }
+    if (oi >= 0) {
+        __atomic_fetch_add(&bs_shm.metrics->outcome[oi], 1, __ATOMIC_RELAXED);
+    } else {
+        ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+            "mod_botshield: metrics: unknown outcome=\"%s\" — skipped",
+            outcome ? outcome : "(null)");
+    }
+    if (ci >= 0) {
+        __atomic_fetch_add(&bs_shm.metrics->cookie[ci], 1, __ATOMIC_RELAXED);
+    } else if (cookie && strcmp(cookie, "-") != 0) {
+        ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+            "mod_botshield: metrics: unknown cookie=\"%s\" — skipped",
+            cookie);
+    }
+    if (pi >= 0) {
+        __atomic_fetch_add(&bs_shm.metrics->provider[pi], 1, __ATOMIC_RELAXED);
+    } else if (provider && strcmp(provider, "-") != 0) {
+        ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+            "mod_botshield: metrics: unknown provider=\"%s\" — skipped",
+            provider);
+    }
+}
+
+/* Map a bs_verify_cookie diagnostic to the cookie enum value. NULL
+ * reason (accept) → "ok"; other diagnostics classify into the M9.1
+ * documented enum. */
+static const char *bs_decision_cookie_status(const char *verify_reason,
+                                             int had_cookie)
+{
+    if (!had_cookie) return "absent";
+    if (!verify_reason) return "ok";
+    if (strcmp(verify_reason, "expired") == 0) return "expired";
+    if (strcmp(verify_reason, "signature mismatch") == 0) return "bad_sig";
+    return "bad_format";
+}
+
+/* Join the request's score-reason names (no penalties) into a single
+ * comma-separated string for the decision line. Returns "-" when no
+ * heuristic signal fired. */
+static const char *bs_decision_reason_names(apr_pool_t *p,
+                                            const bs_request_score *s)
+{
+    if (!s || !s->entries || s->entries->nelts == 0) return "-";
+    char *out = apr_pstrdup(p, "");
+    for (int i = 0; i < s->entries->nelts; i++) {
+        bs_score_entry *e = &APR_ARRAY_IDX(s->entries, i, bs_score_entry);
+        out = apr_pstrcat(p, out, i ? "," : "", e->reason, NULL);
+    }
+    return out;
+}
+
+static void bs_decision_log(request_rec *r,
+                            const char *tier,
+                            const char *outcome,
+                            const char *cookie,
+                            const char *provider,
+                            const char *alg,
+                            const char *reason,
+                            int score)
+{
+    const char *ip       = (r->useragent_ip && *r->useragent_ip)
+                           ? r->useragent_ip : "-";
+    const char *path     = (r->unparsed_uri && *r->unparsed_uri)
+                           ? r->unparsed_uri : "-";
+    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+        "mod_botshield: decision tier=%s outcome=%s ip=%s score=%d "
+        "cookie=%s provider=%s alg=%s reason=\"%s\" path=\"%s\"",
+        tier, outcome, ip, score,
+        cookie   ? cookie   : "-",
+        provider ? provider : "-",
+        alg      ? alg      : "-",
+        reason   ? reason   : "-",
+        path);
+    /* M9.2: counters derived from the same enum vocabulary. One log
+     * line, up to four counter increments (tier, outcome, cookie when
+     * applicable, provider when applicable). */
+    bs_metrics_bump(r, tier, outcome, cookie, provider);
+}
+
+/* URL-decode an x-www-form-urlencoded value in place: '+' → ' ',
+ * %XX → byte. Unrecognized sequences are left untouched; a value that
+ * survives partial decoding will simply fail siteverify downstream. */
+static void bs_urldecode_inplace(char *s)
+{
+    char *w = s;
+    char *rp = s;
+    while (*rp) {
+        if (*rp == '+') { *w++ = ' '; rp++; continue; }
+        if (*rp == '%' && rp[1] && rp[2]) {
+            int hi = -1, lo = -1;
+            char c = rp[1];
+            if      (c >= '0' && c <= '9') hi = c - '0';
+            else if (c >= 'a' && c <= 'f') hi = c - 'a' + 10;
+            else if (c >= 'A' && c <= 'F') hi = c - 'A' + 10;
+            c = rp[2];
+            if      (c >= '0' && c <= '9') lo = c - '0';
+            else if (c >= 'a' && c <= 'f') lo = c - 'a' + 10;
+            else if (c >= 'A' && c <= 'F') lo = c - 'A' + 10;
+            if (hi >= 0 && lo >= 0) {
+                *w++ = (char)((hi << 4) | lo);
+                rp += 3;
+                continue;
+            }
+        }
+        *w++ = *rp++;
+    }
+    *w = '\0';
+}
+
+/* Read the POST body into an r->pool buffer. Caps length at max_len to
+ * prevent a malicious client from forcing us to buffer unbounded bytes
+ * during captcha-verify. Returns NULL on error (already responded to
+ * the client via ap_setup_client_block) or a pool-allocated NUL-
+ * terminated buffer otherwise. */
+static const char *bs_read_form_body(request_rec *r, apr_size_t max_len,
+                                     apr_size_t *out_len)
+{
+    *out_len = 0;
+    int rc = ap_setup_client_block(r, REQUEST_CHUNKED_ERROR);
+    if (rc != OK) return NULL;
+    if (!ap_should_client_block(r)) {
+        char *empty = apr_pcalloc(r->pool, 1);
+        return empty;
+    }
+    char *buf = apr_palloc(r->pool, max_len + 1);
+    apr_size_t total = 0;
+    long n;
+    char chunk[4096];
+    while ((n = ap_get_client_block(r, chunk, sizeof(chunk))) > 0) {
+        apr_size_t room = max_len - total;
+        apr_size_t take = ((apr_size_t)n < room) ? (apr_size_t)n : room;
+        memcpy(buf + total, chunk, take);
+        total += take;
+        if (total >= max_len) break;
+    }
+    if (n < 0) return NULL;
+    buf[total] = '\0';
+    *out_len = total;
+    return buf;
+}
+
+/* Pick a single field value from a URL-encoded body. Returns a fresh
+ * pool-allocated, URL-decoded copy, or NULL if the field is absent —
+ * safe to call repeatedly on the same buffer. */
+static char *bs_form_get(apr_pool_t *p, const char *body, const char *key)
+{
+    apr_size_t klen = strlen(key);
+    const char *cur = body;
+    while (cur && *cur) {
+        const char *eq  = strchr(cur, '=');
+        const char *amp = strchr(cur, '&');
+        if (!eq || (amp && eq > amp)) {
+            if (!amp) break;
+            cur = amp + 1;
+            continue;
+        }
+        apr_size_t this_klen = (apr_size_t)(eq - cur);
+        const char *val     = eq + 1;
+        const char *val_end = amp ? amp : (body + strlen(body));
+        if (this_klen == klen && strncmp(cur, key, klen) == 0) {
+            char *dup = apr_pstrmemdup(p, val, (apr_size_t)(val_end - val));
+            bs_urldecode_inplace(dup);
+            return dup;
+        }
+        if (!amp) break;
+        cur = amp + 1;
+    }
+    return NULL;
+}
+
+/* Sanity-check a client-supplied return_to for use as a redirect target.
+ * Accept only same-origin relative paths: must start with '/', must not
+ * start with '//' (protocol-relative), no CR/LF (header injection), and
+ * reasonable length. Returns NULL on reject, else the same pointer for
+ * caller convenience. */
+static const char *bs_sanitize_return_to(const char *s)
+{
+    if (!s || !*s) return NULL;
+    apr_size_t len = strlen(s);
+    if (len > 2048) return NULL;
+    if (s[0] != '/') return NULL;
+    if (s[1] == '/' || s[1] == '\\') return NULL;   /* //host, /\host */
+    for (apr_size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '\r' || c == '\n' || c == 0) return NULL;
+    }
+    return s;
+}
+
+/* Set-Cookie string for a server-issued _bs_verified cookie. Mirrors the
+ * attributes the M1/M7 interstitial JS produces so a captcha-earned and
+ * a PoW-earned cookie are indistinguishable on subsequent requests. */
+static const char *bs_build_set_cookie(request_rec *r, const bs_dir_cfg *cfg,
+                                       const char *payload_b64,
+                                       apr_time_t expires_at)
+{
+    char expires_buf[APR_RFC822_DATE_LEN];
+    apr_rfc822_date(expires_buf, apr_time_from_sec(expires_at + 60));
+    const char *secure = "";
+    /* Apache exposes the scheme via ap_run_http_scheme or r->server's
+     * SSL config; simplest portable check is ap_is_https if mod_ssl is
+     * loaded, else fall through. mod_ssl registers ssl_is_https as an
+     * optional function; here we take the belt-and-suspenders route and
+     * check the r->parsed_uri / r->server / request scheme via
+     * ap_http_scheme(r). */
+    const char *scheme = ap_http_scheme(r);
+    if (scheme && strcmp(scheme, "https") == 0) {
+        secure = "; Secure";
+    }
+    const char *domain = "";
+    if (cfg->cookie_domain && *cfg->cookie_domain) {
+        domain = apr_psprintf(r->pool, "; Domain=%s", cfg->cookie_domain);
+    }
+    return apr_psprintf(r->pool,
+        "%s=%s; Path=/; Expires=%s%s%s; SameSite=Lax",
+        BS_COOKIE_NAME, payload_b64, expires_buf, domain, secure);
+}
+
+/* ---- M8.1 challenge-origin "pending" cookie ----
+ *
+ * Name:  _bs_captcha_pending
+ * Value: <nonce_hex>|<expiry_unix_sec>|<hmac_hex>
+ *        hmac = HMAC-SHA256(cfg->secret, "pending:" || nonce_hex || ":"
+ *                           || expiry_unix_sec_ascii)
+ * Attrs: HttpOnly, Secure (on HTTPS), SameSite=Lax, Max-Age=300,
+ *        Path=<endpoint_prefix>/captcha-verify (so it's only sent on
+ *        verify POSTs, not every request).
+ *
+ * Minted at captcha-interstitial render time. Verified at the verify
+ * endpoint before any libcurl call — missing / tampered / expired all
+ * short-circuit to 403 cheaply. Turns blind POST spray at the verify
+ * endpoint into a guaranteed early reject. */
+#define BS_PENDING_COOKIE_NAME  "_bs_captcha_pending"
+#define BS_PENDING_COOKIE_TTL   300   /* seconds */
+
+static const char *bs_mint_pending_cookie(request_rec *r,
+                                          const bs_dir_cfg *cfg)
+{
+    if (!cfg->secret) return NULL;
+    unsigned char nonce[16];
+    if (RAND_bytes(nonce, sizeof(nonce)) != 1) return NULL;
+    char nonce_hex[sizeof(nonce) * 2 + 1];
+    bs_to_hex(nonce, sizeof(nonce), nonce_hex);
+
+    apr_time_t expiry = apr_time_sec(apr_time_now()) + BS_PENDING_COOKIE_TTL;
+    const char *canon = apr_psprintf(r->pool,
+        "pending:%s:%" APR_TIME_T_FMT, nonce_hex, expiry);
+    unsigned char mac[BS_SIG_BYTES];
+    bs_hmac_sha256(cfg->secret, cfg->secret_len,
+                   (const unsigned char *)canon, strlen(canon), mac);
+    char mac_hex[BS_SIG_BYTES * 2 + 1];
+    bs_to_hex(mac, BS_SIG_BYTES, mac_hex);
+
+    const char *value = apr_psprintf(r->pool,
+        "%s|%" APR_TIME_T_FMT "|%s", nonce_hex, expiry, mac_hex);
+    const char *prefix = cfg->endpoint_prefix
+        ? cfg->endpoint_prefix : BS_DEFAULT_ENDPOINT_PREFIX;
+    const char *scheme = ap_http_scheme(r);
+    const char *secure = (scheme && strcmp(scheme, "https") == 0)
+        ? "; Secure" : "";
+    return apr_psprintf(r->pool,
+        BS_PENDING_COOKIE_NAME "=%s; Path=%s/captcha-verify; "
+        "HttpOnly%s; SameSite=Lax; Max-Age=%d",
+        value, prefix, secure, BS_PENDING_COOKIE_TTL);
+}
+
+/* Returns NULL on accept; else a short diagnostic string. On accept,
+ * the cookie stays on the request (the handler should emit a
+ * Max-Age=0 clear after a successful siteverify so a stale cookie
+ * isn't reused). Every failure reason returns to the caller the same
+ * way — don't differentiate in the 403 response body, both to avoid
+ * leaking validation details and to keep the response constant-time. */
+static const char *bs_verify_pending_cookie(request_rec *r,
+                                            const bs_dir_cfg *cfg)
+{
+    if (!cfg->secret) return "no server secret";
+    const char *raw = bs_get_cookie_value(r, BS_PENDING_COOKIE_NAME);
+    if (!raw || !*raw) return "missing";
+    if (strlen(raw) > 256) return "too long";
+
+    char *mut = apr_pstrdup(r->pool, raw);
+    char *nonce_hex = mut;
+    char *bar1 = strchr(mut, '|');
+    if (!bar1) return "bad format";
+    *bar1++ = '\0';
+    char *expiry_str = bar1;
+    char *bar2 = strchr(expiry_str, '|');
+    if (!bar2) return "bad format";
+    *bar2++ = '\0';
+    char *mac_hex = bar2;
+    if (strlen(nonce_hex) != 32) return "bad nonce";
+    if (strlen(mac_hex)   != BS_SIG_BYTES * 2) return "bad mac length";
+    /* nonce must be valid hex — quick check. */
+    unsigned char scratch[16];
+    if (!bs_from_hex(nonce_hex, sizeof(scratch), scratch)) return "bad nonce hex";
+
+    apr_time_t expiry = (apr_time_t)apr_atoi64(expiry_str);
+    if (expiry <= 0) return "bad expiry";
+    if (expiry + BS_CLOCK_SKEW_AHEAD < apr_time_sec(apr_time_now())) {
+        return "expired";
+    }
+
+    const char *canon = apr_psprintf(r->pool,
+        "pending:%s:%" APR_TIME_T_FMT, nonce_hex, expiry);
+    unsigned char expect[BS_SIG_BYTES];
+    bs_hmac_sha256(cfg->secret, cfg->secret_len,
+                   (const unsigned char *)canon, strlen(canon), expect);
+    unsigned char got[BS_SIG_BYTES];
+    if (!bs_from_hex(mac_hex, BS_SIG_BYTES, got)) return "bad mac hex";
+    if (!bs_ct_equal(expect, got, BS_SIG_BYTES)) return "sig mismatch";
+    return NULL;
+}
+
+/* Set-Cookie clearing the pending cookie (Max-Age=0). Called after a
+ * successful verify so a captured cookie can't be replayed. */
+static const char *bs_clear_pending_cookie(request_rec *r,
+                                           const bs_dir_cfg *cfg)
+{
+    const char *prefix = cfg->endpoint_prefix
+        ? cfg->endpoint_prefix : BS_DEFAULT_ENDPOINT_PREFIX;
+    const char *scheme = ap_http_scheme(r);
+    const char *secure = (scheme && strcmp(scheme, "https") == 0)
+        ? "; Secure" : "";
+    return apr_psprintf(r->pool,
+        BS_PENDING_COOKIE_NAME "=; Path=%s/captcha-verify; "
+        "HttpOnly%s; SameSite=Lax; Max-Age=0",
+        prefix, secure);
+}
+
+/* M8 verify handler. Mounted at <prefix>/captcha-verify; POSTed to by
+ * the interstitial's form submit when the provider's widget callback
+ * fires. On success, server-issues a signed captcha-turnstile cookie
+ * and 302s back to the page the user tried to reach. */
+/* ---- M9.3: Prometheus text metrics handler ----
+ *
+ * Mounted at <prefix>/metrics. Emits counters + gauges in a fixed
+ * deterministic order with hardcoded metric names (no runtime name
+ * construction → no apr_psprintf on the scrape path). Each counter
+ * read uses __atomic_load_n with RELAXED; on x86_64 64-bit aligned
+ * reads are already atomic, but the intrinsic keeps the compiler
+ * from reordering across concurrent writers.
+ *
+ * Access control is deliberately delegated to Apache: operators gate
+ * this endpoint with `<Location /botshield/metrics>` + Require ip /
+ * AuthType Basic / etc. The module emits everything to anyone who
+ * reaches the handler. Keeps metric exposition out of policy-code. */
+
+#define BS_M_PREFIX "botshield_"
+
+static apr_uint64_t bs_mload(const apr_uint64_t *p)
+{
+    return __atomic_load_n(p, __ATOMIC_RELAXED);
+}
+
+/* Emit one Prometheus metric: HELP, TYPE, value. Using a single
+ * ap_rprintf per line keeps the scrape path free of intermediate
+ * buffers. `name` and `help` are string literals from the caller. */
+static void bs_m_emit_counter(request_rec *r, const char *name,
+                              const char *help, apr_uint64_t val)
+{
+    ap_rprintf(r, "# HELP %s%s %s\n", BS_M_PREFIX, name, help);
+    ap_rprintf(r, "# TYPE %s%s counter\n", BS_M_PREFIX, name);
+    ap_rprintf(r, "%s%s %" APR_UINT64_T_FMT "\n", BS_M_PREFIX, name, val);
+}
+
+static void bs_m_emit_gauge(request_rec *r, const char *name,
+                            const char *help, apr_uint64_t val)
+{
+    ap_rprintf(r, "# HELP %s%s %s\n", BS_M_PREFIX, name, help);
+    ap_rprintf(r, "# TYPE %s%s gauge\n", BS_M_PREFIX, name);
+    ap_rprintf(r, "%s%s %" APR_UINT64_T_FMT "\n", BS_M_PREFIX, name, val);
+}
+
+static int bs_metrics_handler(request_rec *r, bs_dir_cfg *cfg)
+{
+    (void)cfg;
+    if (r->method_number != M_GET && r->method_number != M_OPTIONS) {
+        r->status = HTTP_METHOD_NOT_ALLOWED;
+        apr_table_setn(r->headers_out, "Allow", "GET, OPTIONS");
+        ap_set_content_type(r, "text/plain; charset=utf-8");
+        ap_rputs("GET required.\n", r);
+        return OK;
+    }
+    if (!bs_shm.metrics) {
+        r->status = HTTP_SERVICE_UNAVAILABLE;
+        ap_set_content_type(r, "text/plain; charset=utf-8");
+        ap_rputs("# metrics not initialized\n", r);
+        return OK;
+    }
+
+    /* Prometheus exposition format 0.0.4. Content-Type per the spec. */
+    ap_set_content_type(r,
+        "text/plain; version=0.0.4; charset=utf-8");
+    apr_table_setn(r->headers_out, "Cache-Control", "no-store");
+
+    bs_metrics *m = bs_shm.metrics;
+
+    /* --- Decision counters (ordered tier → outcome → cookie → provider) --- */
+
+    bs_m_emit_counter(r, "tier_none_total",
+        "Decisions reaching no tier (pre-tier terminations like debug/asset/misconfig).",
+        bs_mload(&m->tier[BS_M_TIER_NONE]));
+    bs_m_emit_counter(r, "tier_pass_total",
+        "Decisions at tier=pass (no challenge served, request DECLINED).",
+        bs_mload(&m->tier[BS_M_TIER_PASS]));
+    bs_m_emit_counter(r, "tier_silent_total",
+        "Decisions at tier=silent (auto-submit splash interstitial served).",
+        bs_mload(&m->tier[BS_M_TIER_SILENT]));
+    bs_m_emit_counter(r, "tier_form_total",
+        "Decisions at tier=form (checkbox PoW interstitial served).",
+        bs_mload(&m->tier[BS_M_TIER_FORM]));
+    bs_m_emit_counter(r, "tier_captcha_total",
+        "Decisions at tier=captcha (third-party provider widget served or verified).",
+        bs_mload(&m->tier[BS_M_TIER_CAPTCHA]));
+
+    bs_m_emit_counter(r, "outcome_declined_total",
+        "Decisions where the module returned DECLINED to Apache (pass tier + asset).",
+        bs_mload(&m->outcome[BS_M_OUTCOME_DECLINED]));
+    bs_m_emit_counter(r, "outcome_challenged_total",
+        "Decisions that served an interstitial.",
+        bs_mload(&m->outcome[BS_M_OUTCOME_CHALLENGED]));
+    bs_m_emit_counter(r, "outcome_verified_total",
+        "Captcha verifications that passed siteverify.",
+        bs_mload(&m->outcome[BS_M_OUTCOME_VERIFIED]));
+    bs_m_emit_counter(r, "outcome_rejected_total",
+        "Requests rejected before or by provider siteverify.",
+        bs_mload(&m->outcome[BS_M_OUTCOME_REJECTED]));
+    bs_m_emit_counter(r, "outcome_failopen_total",
+        "Siteverify calls that failed open (timeout, network error, provider 5xx).",
+        bs_mload(&m->outcome[BS_M_OUTCOME_FAILOPEN]));
+    bs_m_emit_counter(r, "outcome_rate_limited_total",
+        "Verify requests rejected by per-IP rate limit.",
+        bs_mload(&m->outcome[BS_M_OUTCOME_RATE_LIMITED]));
+    bs_m_emit_counter(r, "outcome_inflight_capped_total",
+        "Verify requests rejected by global in-flight semaphore.",
+        bs_mload(&m->outcome[BS_M_OUTCOME_INFLIGHT_CAPPED]));
+    bs_m_emit_counter(r, "outcome_pending_missing_total",
+        "Verify POSTs missing or with tampered pending cookie.",
+        bs_mload(&m->outcome[BS_M_OUTCOME_PENDING_MISSING]));
+    bs_m_emit_counter(r, "outcome_misconfigured_total",
+        "Terminations due to missing scope config or internal state.",
+        bs_mload(&m->outcome[BS_M_OUTCOME_MISCONFIGURED]));
+    bs_m_emit_counter(r, "outcome_debug_total",
+        "BotShieldDebug-forced 403 responses.",
+        bs_mload(&m->outcome[BS_M_OUTCOME_DEBUG]));
+
+    bs_m_emit_counter(r, "cookie_ok_total",
+        "Rep cookies that verified fully (signature + freshness + PoW).",
+        bs_mload(&m->cookie[BS_M_COOKIE_OK]));
+    bs_m_emit_counter(r, "cookie_expired_total",
+        "Rep cookies with valid signature but past expires_at.",
+        bs_mload(&m->cookie[BS_M_COOKIE_EXPIRED]));
+    bs_m_emit_counter(r, "cookie_bad_sig_total",
+        "Rep cookies with HMAC signature mismatch.",
+        bs_mload(&m->cookie[BS_M_COOKIE_BAD_SIG]));
+    bs_m_emit_counter(r, "cookie_bad_format_total",
+        "Rep cookies that failed structural parsing (field count, hex, etc).",
+        bs_mload(&m->cookie[BS_M_COOKIE_BAD_FORMAT]));
+    bs_m_emit_counter(r, "cookie_absent_total",
+        "Requests with no rep cookie.",
+        bs_mload(&m->cookie[BS_M_COOKIE_ABSENT]));
+
+    bs_m_emit_counter(r, "provider_turnstile_total",
+        "Decisions tagged with provider=turnstile.",
+        bs_mload(&m->provider[BS_M_PROV_TURNSTILE]));
+    bs_m_emit_counter(r, "provider_hcaptcha_total",
+        "Decisions tagged with provider=hcaptcha.",
+        bs_mload(&m->provider[BS_M_PROV_HCAPTCHA]));
+    bs_m_emit_counter(r, "provider_recaptcha_v2_total",
+        "Decisions tagged with provider=recaptcha-v2.",
+        bs_mload(&m->provider[BS_M_PROV_RECAPTCHA_V2]));
+    bs_m_emit_counter(r, "provider_recaptcha_v3_total",
+        "Decisions tagged with provider=recaptcha-v3.",
+        bs_mload(&m->provider[BS_M_PROV_RECAPTCHA_V3]));
+    bs_m_emit_counter(r, "provider_friendly_total",
+        "Decisions tagged with provider=friendly.",
+        bs_mload(&m->provider[BS_M_PROV_FRIENDLY]));
+    bs_m_emit_counter(r, "provider_geetest_total",
+        "Decisions tagged with provider=geetest.",
+        bs_mload(&m->provider[BS_M_PROV_GEETEST]));
+
+    /* --- Persistence counters + gauges --- */
+
+    bs_m_emit_counter(r, "state_saves_total",
+        "Successful state-file saves (shutdown + periodic).",
+        bs_mload(&m->state_saves_total));
+    bs_m_emit_counter(r, "state_loads_total",
+        "Successful state-file loads at post-config.",
+        bs_mload(&m->state_loads_total));
+    bs_m_emit_gauge(r, "state_save_last_unix",
+        "Unix seconds of the last successful state save.",
+        bs_mload(&m->state_save_last_unix));
+    bs_m_emit_gauge(r, "state_save_last_bytes",
+        "Byte length of the last successful state save.",
+        bs_mload(&m->state_save_last_bytes));
+    bs_m_emit_gauge(r, "state_save_last_duration_microseconds",
+        "Wall-clock microseconds the last save took (build + fsync + rename + dir fsync).",
+        bs_mload(&m->state_save_last_duration_us));
+    bs_m_emit_gauge(r, "state_load_last_kept",
+        "Flagged-IP entries kept across the last state load.",
+        bs_mload(&m->state_load_last_kept));
+    bs_m_emit_gauge(r, "state_load_last_dropped",
+        "Flagged-IP entries dropped as stale during the last state load.",
+        bs_mload(&m->state_load_last_dropped));
+
+    /* --- On-demand gauges (may refresh a 1-second cache) --- */
+
+    bs_m_emit_gauge(r, "captcha_inflight_current",
+        "Current in-flight captcha siteverify calls.",
+        (apr_uint64_t)bs_metrics_inflight_cur());
+    bs_m_emit_gauge(r, "shm_flagged_used",
+        "Flagged-IP slots currently populated with non-expired entries.",
+        bs_metrics_flagged_used());
+    bs_m_emit_gauge(r, "shm_flagged_capacity",
+        "Configured BotShieldFlaggedIPCapacity.",
+        (apr_uint64_t)bs_shm.flagged_capacity);
+    bs_m_emit_gauge(r, "bloom_bits_set_active",
+        "Set bits in the active Bloom buffer (popcount; ~population proxy).",
+        bs_metrics_bloom_bits(1));
+    bs_m_emit_gauge(r, "bloom_bits_set_warming",
+        "Set bits in the warming Bloom buffer.",
+        bs_metrics_bloom_bits(0));
+    bs_m_emit_gauge(r, "bloom_window_seconds",
+        "Configured BotShieldBloomWindow (full window; rotation at half).",
+        (apr_uint64_t)(bs_shm.header
+                       ? bs_shm.header->bloom_window_secs : 0));
+    bs_m_emit_gauge(r, "cv_rate_slot_capacity",
+        "Fixed size of the verify-endpoint rate-limit ring (slots).",
+        (apr_uint64_t)bs_shm.cv_rate_slot_count);
+    bs_m_emit_gauge(r, "cv_log_slot_capacity",
+        "Fixed size of the verify-endpoint log-suppress ring (slots).",
+        (apr_uint64_t)bs_shm.cv_log_slot_count);
+
+    return OK;
+}
+
+/* ---- M9.3: mod_status contribution ----
+ *
+ * Called from `mod_status` (when loaded) for /server-status. Two
+ * output modes:
+ *   AP_STATUS_SHORT  — machine-readable text; one "Key: value" line
+ *                      per top-line metric. Same vocabulary as the
+ *                      Prometheus names, without the "botshield_"
+ *                      prefix (mod_status uses its own keys already).
+ *   default          — compact HTML: <h2> + two <table>s. Only the
+ *                      top-line counters + gauges an operator glances
+ *                      at; full detail lives at /botshield/metrics.
+ *
+ * Allocation-free: direct ap_rprintf to the active response. No copy
+ * of the metrics struct — atomic loads on each access. */
+static int bs_status_hook(request_rec *r, int flags)
+{
+    if (!bs_shm.metrics) return DECLINED;
+    bs_metrics *m = bs_shm.metrics;
+
+    if (flags & AP_STATUS_SHORT) {
+        ap_rprintf(r,
+            "BotShieldTierPass: %" APR_UINT64_T_FMT "\n"
+            "BotShieldTierSilent: %" APR_UINT64_T_FMT "\n"
+            "BotShieldTierForm: %" APR_UINT64_T_FMT "\n"
+            "BotShieldTierCaptcha: %" APR_UINT64_T_FMT "\n"
+            "BotShieldOutcomeVerified: %" APR_UINT64_T_FMT "\n"
+            "BotShieldOutcomeRejected: %" APR_UINT64_T_FMT "\n"
+            "BotShieldOutcomeFailopen: %" APR_UINT64_T_FMT "\n"
+            "BotShieldOutcomeRateLimited: %" APR_UINT64_T_FMT "\n"
+            "BotShieldCaptchaInflightCurrent: %u\n"
+            "BotShieldFlaggedUsed: %" APR_UINT64_T_FMT "\n"
+            "BotShieldFlaggedCapacity: %" APR_SIZE_T_FMT "\n",
+            bs_mload(&m->tier[BS_M_TIER_PASS]),
+            bs_mload(&m->tier[BS_M_TIER_SILENT]),
+            bs_mload(&m->tier[BS_M_TIER_FORM]),
+            bs_mload(&m->tier[BS_M_TIER_CAPTCHA]),
+            bs_mload(&m->outcome[BS_M_OUTCOME_VERIFIED]),
+            bs_mload(&m->outcome[BS_M_OUTCOME_REJECTED]),
+            bs_mload(&m->outcome[BS_M_OUTCOME_FAILOPEN]),
+            bs_mload(&m->outcome[BS_M_OUTCOME_RATE_LIMITED]),
+            bs_metrics_inflight_cur(),
+            bs_metrics_flagged_used(),
+            bs_shm.flagged_capacity);
+        return OK;
+    }
+
+    ap_rputs("<hr />\n<h2>mod_botshield</h2>\n", r);
+    ap_rputs("<table border=\"0\" cellspacing=\"0\" cellpadding=\"3\">\n",
+             r);
+    ap_rputs("<tr><th>tier</th><th>total</th>"
+             "<th></th><th>outcome</th><th>total</th></tr>\n", r);
+    /* Two parallel columns: tier distribution on the left, outcome
+     * highlights on the right. Keeps the row count tight. */
+    const struct { const char *label; apr_uint64_t val; } rows[] = {
+        { "pass",    bs_mload(&m->tier[BS_M_TIER_PASS])    },
+        { "silent",  bs_mload(&m->tier[BS_M_TIER_SILENT])  },
+        { "form",    bs_mload(&m->tier[BS_M_TIER_FORM])    },
+        { "captcha", bs_mload(&m->tier[BS_M_TIER_CAPTCHA]) },
+        { "none",    bs_mload(&m->tier[BS_M_TIER_NONE])    },
+    };
+    const struct { const char *label; apr_uint64_t val; } out_rows[] = {
+        { "verified",        bs_mload(&m->outcome[BS_M_OUTCOME_VERIFIED])        },
+        { "rejected",        bs_mload(&m->outcome[BS_M_OUTCOME_REJECTED])        },
+        { "failopen",        bs_mload(&m->outcome[BS_M_OUTCOME_FAILOPEN])        },
+        { "rate_limited",    bs_mload(&m->outcome[BS_M_OUTCOME_RATE_LIMITED])    },
+        { "pending_missing", bs_mload(&m->outcome[BS_M_OUTCOME_PENDING_MISSING]) },
+    };
+    for (int i = 0; i < 5; i++) {
+        ap_rprintf(r,
+            "<tr><td>%s</td><td align=\"right\">%" APR_UINT64_T_FMT "</td>"
+            "<td>&nbsp;&nbsp;</td>"
+            "<td>%s</td><td align=\"right\">%" APR_UINT64_T_FMT "</td></tr>\n",
+            rows[i].label, rows[i].val,
+            out_rows[i].label, out_rows[i].val);
+    }
+    ap_rputs("</table>\n", r);
+    ap_rprintf(r,
+        "<p>captcha in-flight: %u &nbsp;&nbsp; "
+        "flagged IPs: %" APR_UINT64_T_FMT " / %" APR_SIZE_T_FMT " &nbsp;&nbsp; "
+        "last state save: %" APR_UINT64_T_FMT " bytes in %" APR_UINT64_T_FMT " \xc2\xb5s "
+        "&nbsp;&nbsp;"
+        "<a href=\"/botshield/metrics\">full metrics</a></p>\n",
+        bs_metrics_inflight_cur(),
+        bs_metrics_flagged_used(),
+        bs_shm.flagged_capacity,
+        bs_mload(&m->state_save_last_bytes),
+        bs_mload(&m->state_save_last_duration_us));
+
+    return OK;
+}
+
+static int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
+{
+    /* Response from this endpoint must never be cached by any
+     * intermediary — verify is stateful (issues a cookie) and the body
+     * only ever contains status text. Set the header early so every
+     * return path inherits it. */
+    apr_table_setn(r->headers_out, "Cache-Control", "no-store");
+
+    /* For consistency in the decision log, resolve a provider name up
+     * front even if config is partial — misconfigured paths still want
+     * a defensible value to emit. */
+    const char *prov_name = (cfg->captcha_provider
+                             && cfg->captcha_provider->name)
+                            ? cfg->captcha_provider->name : "-";
+
+    if (r->method_number != M_POST) {
+        r->status = HTTP_METHOD_NOT_ALLOWED;
+        apr_table_setn(r->headers_out, "Allow", "POST");
+        ap_set_content_type(r, "text/plain; charset=utf-8");
+        ap_rputs("POST required.\n", r);
+        bs_decision_log(r, "captcha", "rejected", "-",
+                        prov_name, "-", "method_not_allowed", 0);
+        return OK;
+    }
+
+    /* M8.1 cheap prefilter: Content-Type must be form-urlencoded. Reject
+     * anything else (JSON bodies, multipart, unset, etc.) immediately —
+     * we only parse form bodies downstream and a mismatched type is
+     * either a misconfigured client or junk traffic. */
+    const char *ctype = apr_table_get(r->headers_in, "Content-Type");
+    if (!ctype || strncmp(ctype, "application/x-www-form-urlencoded",
+                          sizeof("application/x-www-form-urlencoded") - 1) != 0) {
+        r->status = HTTP_UNSUPPORTED_MEDIA_TYPE;
+        ap_set_content_type(r, "text/plain; charset=utf-8");
+        apr_table_setn(r->err_headers_out, "X-Botshield",
+                       "captcha-bad-content-type");
+        ap_rputs("application/x-www-form-urlencoded required.\n", r);
+        bs_decision_log(r, "captcha", "rejected", "-",
+                        prov_name, "-", "bad_content_type", 0);
+        return OK;
+    }
+
+    if (!cfg->captcha_provider || !cfg->captcha_site_key ||
+        !cfg->captcha_secret || !cfg->secret) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+            "mod_botshield: captcha-verify called on a scope without full "
+            "captcha config (provider=%s, sitekey=%s, secret=%s)",
+            cfg->captcha_provider ? "set" : "unset",
+            cfg->captcha_site_key ? "set" : "unset",
+            cfg->captcha_secret   ? "set" : "unset");
+        r->status = HTTP_SERVICE_UNAVAILABLE;
+        ap_set_content_type(r, "text/plain; charset=utf-8");
+        ap_rputs("Captcha verification is not configured on this scope.\n", r);
+        bs_decision_log(r, "captcha", "misconfigured", "-",
+                        prov_name, "-", "-", 0);
+        return OK;
+    }
+
+    /* M8.1 pending-cookie check. A valid cookie proves the client hit
+     * our interstitial within the last 5 minutes; missing or tampered
+     * means this is either a blind POST spray or a badly-timed replay.
+     * Short-circuit to 403 before any rate slot or body parse. */
+    const char *pend_err = bs_verify_pending_cookie(r, cfg);
+    if (pend_err) {
+        /* Log throttled — a flood of blind POSTs must not drown the log. */
+        unsigned char ip_for_log[16];
+        int have_ip_for_log =
+            bs_parse_client_ip(r->useragent_ip, ip_for_log);
+        apr_uint32_t prev = 0;
+        int emit = have_ip_for_log
+            ? bs_captcha_log_throttle(ip_for_log, &prev) : 1;
+        if (emit) {
+            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                "mod_botshield: captcha-verify pending cookie %s%s — 403",
+                pend_err, bs_log_suppress_suffix(r->pool, prev));
+        }
+        r->status = HTTP_FORBIDDEN;
+        apr_table_setn(r->err_headers_out, "X-Botshield",
+                       "captcha-pending-missing");
+        ap_set_content_type(r, "text/plain; charset=utf-8");
+        ap_rputs("Challenge session missing or expired.\n", r);
+        bs_decision_log(r, "captcha", "pending_missing", "-",
+                        prov_name, "-", pend_err, 0);
+        return OK;
+    }
+
+    /* M8.1 per-IP rate limit — *before* reading the body so a flood of
+     * junk POSTs gets rejected for ~nothing. 0 disables; default 30. */
+    unsigned char client_ip[16];
+    int have_ip = bs_parse_client_ip(r->useragent_ip, client_ip);
+    if (have_ip) {
+        int rate_limit = bs_effective_int(cfg->captcha_rate_limit,
+                                          BS_DEFAULT_CAPTCHA_RATE_LIMIT);
+        if (!bs_captcha_rate_allowed(client_ip, rate_limit)) {
+            /* Logged at INFO via the throttle so a flood doesn't drown
+             * the log. First hit per IP per window emits; rest suppress. */
+            apr_uint32_t prev = 0;
+            int emit = bs_captcha_log_throttle(client_ip, &prev);
+            if (emit) {
+                ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                    "mod_botshield: captcha-verify rate limit%s "
+                    "(ip=%s, limit=%d/min) — 429",
+                    bs_log_suppress_suffix(r->pool, prev),
+                    r->useragent_ip ? r->useragent_ip : "?", rate_limit);
+            }
+            r->status = HTTP_TOO_MANY_REQUESTS;
+            apr_table_setn(r->err_headers_out, "Retry-After", "60");
+            apr_table_setn(r->err_headers_out, "X-Botshield",
+                           "captcha-rate-limited");
+            ap_set_content_type(r, "text/plain; charset=utf-8");
+            ap_rputs("Too many captcha verification attempts.\n", r);
+            bs_decision_log(r, "captcha", "rate_limited", "-",
+                            prov_name, "-", "-", 0);
+            return OK;
+        }
+    }
+
+    /* M8.1 body size tightened to 8 KB total (was BS_MAX_CAPTCHA_TOKEN
+     * + 4096 ~= 12 KB). The largest legitimate body is a GeeTest JSON
+     * blob of ~2 KB + return_to ~= 3 KB; 8 KB is comfortable headroom
+     * and caps the work a hostile client can force us to buffer. */
+    apr_size_t body_len = 0;
+    const char *body = bs_read_form_body(r, 8 * 1024, &body_len);
+    if (!body) {
+        bs_decision_log(r, "captcha", "rejected", "-",
+                        prov_name, "-", "body_read_failed", 0);
+        return HTTP_BAD_REQUEST;
+    }
+    char *token     = bs_form_get(r->pool, body,
+                                  cfg->captcha_provider->token_field);
+    char *return_to = bs_form_get(r->pool, body, "return_to");
+
+    const char *safe_return = bs_sanitize_return_to(return_to);
+    if (!safe_return) safe_return = "/";
+
+    if (!token || !*token) {
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: captcha-verify: missing token field '%s'",
+            cfg->captcha_provider->token_field);
+        r->status = HTTP_BAD_REQUEST;
+        ap_set_content_type(r, "text/plain; charset=utf-8");
+        ap_rputs("Missing captcha token.\n", r);
+        bs_decision_log(r, "captcha", "rejected", "-",
+                        prov_name, "-", "no_token", 0);
+        return OK;
+    }
+    if (strlen(token) > BS_MAX_CAPTCHA_TOKEN) {
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: captcha-verify: token longer than %d bytes",
+            BS_MAX_CAPTCHA_TOKEN);
+        r->status = HTTP_BAD_REQUEST;
+        ap_set_content_type(r, "text/plain; charset=utf-8");
+        ap_rputs("Captcha token too long.\n", r);
+        bs_decision_log(r, "captcha", "rejected", "-",
+                        prov_name, "-", "token_too_long", 0);
+        return OK;
+    }
+
+    /* M8.1 global in-flight semaphore. Holds for the duration of the
+     * libcurl call; all return paths below release before returning. */
+    bs_server_cfg *scfg = ap_get_module_config(r->server->module_config,
+                                               &botshield_module);
+    int max_inflight = scfg ? scfg->captcha_max_inflight
+                            : BS_DEFAULT_CAPTCHA_MAX_INFLIGHT;
+    if (!bs_captcha_inflight_acquire(max_inflight)) {
+        apr_uint32_t prev = 0;
+        int emit = have_ip
+            ? bs_captcha_log_throttle(client_ip, &prev) : 1;
+        if (emit) {
+            ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+                "mod_botshield: captcha-verify in-flight cap reached%s "
+                "(max=%d) — 503; provider likely slow",
+                bs_log_suppress_suffix(r->pool, prev), max_inflight);
+        }
+        r->status = HTTP_SERVICE_UNAVAILABLE;
+        apr_table_setn(r->err_headers_out, "Retry-After", "2");
+        apr_table_setn(r->err_headers_out, "X-Botshield",
+                       "captcha-saturated");
+        ap_set_content_type(r, "text/plain; charset=utf-8");
+        ap_rputs("Captcha verification busy, try again shortly.\n", r);
+        bs_decision_log(r, "captcha", "inflight_capped", "-",
+                        prov_name, "-", "-", 0);
+        return OK;
+    }
+
+    int timeout = bs_effective_int(cfg->captcha_timeout_ms,
+                                   BS_DEFAULT_CAPTCHA_TIMEOUT);
+
+    const char *details = NULL;
+    long http_code = 0;
+    double score = -1.0;
+    /* Provider-specific verify path overrides the shared shim when set.
+     * GeeTest is the current user (HMAC-signed body, non-bool result
+     * semantics); the other five providers leave siteverify_fn NULL. */
+    bs_captcha_siteverify_fn verify_fn =
+        cfg->captcha_provider->siteverify_fn
+        ? cfg->captcha_provider->siteverify_fn
+        : bs_captcha_siteverify;
+    bs_captcha_result result = verify_fn(
+        r, cfg->captcha_provider,
+        cfg->captcha_secret, cfg->captcha_secret_len,
+        token, timeout, &details, &http_code, &score);
+    /* In-flight semaphore released as soon as the libcurl call returns.
+     * The rest of the handler (cookie issuance, redirect) doesn't hold
+     * a provider slot. */
+    bs_captcha_inflight_release();
+
+    /* reCAPTCHA v3 score threshold. Applied *after* success:true — the
+     * provider said the token is valid; we still reject if the signal
+     * is too weak. A missing score on a v3 response is a protocol
+     * surprise (v3 always returns one); treat that as ERROR so the
+     * fail-open path runs rather than silently accepting or rejecting.
+     * The plain REJECTED path above stays exactly as it was. */
+    /* Log-throttle is only invoked from failure branches so a flood of
+     * happy-path OKs doesn't bump the slot counter and starve later
+     * REJECTED/WARNING emissions. OK paths log unconditionally — the
+     * throttle exists to protect against hostile/broken traffic. */
+    int is_v3 = (strcmp(cfg->captcha_provider->name, "recaptcha-v3") == 0);
+    if (result == BS_CAPTCHA_OK && is_v3) {
+        double min_score = (cfg->recaptcha_v3_min_score >= 0.0)
+            ? cfg->recaptcha_v3_min_score
+            : BS_DEFAULT_RECAPTCHA_V3_MIN_SCORE;
+        if (score < 0.0) {
+            apr_uint32_t prev = 0;
+            int emit = have_ip
+                ? bs_captcha_log_throttle(client_ip, &prev) : 1;
+            if (emit) ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+                "mod_botshield: reCAPTCHA v3 response missing score%s — "
+                "failing open (provider=%s http=%ld)",
+                bs_log_suppress_suffix(r->pool, prev),
+                cfg->captcha_provider->name, http_code);
+            /* fall through to success path (fail-open) */
+        } else if (score < min_score) {
+            apr_uint32_t prev = 0;
+            int emit = have_ip
+                ? bs_captcha_log_throttle(client_ip, &prev) : 1;
+            if (emit) ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                "mod_botshield: captcha REJECTED%s "
+                "(provider=%s http=%ld score=%.2f min=%.2f)",
+                bs_log_suppress_suffix(r->pool, prev),
+                cfg->captcha_provider->name, http_code,
+                score, min_score);
+            r->status = HTTP_FORBIDDEN;
+            ap_set_content_type(r, "text/plain; charset=utf-8");
+            apr_table_setn(r->err_headers_out, "X-Botshield", "captcha-rejected");
+            ap_rputs("Verification score too low. Go back and try again.\n", r);
+            bs_decision_log(r, "captcha", "rejected", "-",
+                            cfg->captcha_provider->name, "-",
+                            apr_psprintf(r->pool, "low_score:%.2f", score),
+                            0);
+            return OK;
+        } else {
+            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                "mod_botshield: captcha OK (provider=%s http=%ld "
+                "score=%.2f min=%.2f return_to=%s)",
+                cfg->captcha_provider->name, http_code,
+                score, min_score, safe_return);
+        }
+    } else if (result == BS_CAPTCHA_REJECTED) {
+        apr_uint32_t prev = 0;
+        int emit = have_ip
+            ? bs_captcha_log_throttle(client_ip, &prev) : 1;
+        if (emit) ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: captcha REJECTED%s "
+            "(provider=%s http=%ld error-codes=[%s])",
+            bs_log_suppress_suffix(r->pool, prev),
+            cfg->captcha_provider->name, http_code,
+            details ? details : "");
+        r->status = HTTP_FORBIDDEN;
+        ap_set_content_type(r, "text/plain; charset=utf-8");
+        apr_table_setn(r->err_headers_out, "X-Botshield", "captcha-rejected");
+        ap_rputs("Captcha verification failed. Go back and try again.\n", r);
+        bs_decision_log(r, "captcha", "rejected", "-",
+                        cfg->captcha_provider->name, "-",
+                        (details && *details) ? details : "-", 0);
+        return OK;
+    } else if (result == BS_CAPTCHA_TIMEOUT || result == BS_CAPTCHA_ERROR) {
+        /* Fail-open is an attack surface while a provider is unavailable.
+         * The WARNING-level log line carries the literal string
+         * "failing open" so operators can grep/alert on it; M9.2 counts
+         * these as outcome=failopen. */
+        apr_uint32_t prev = 0;
+        int emit = have_ip
+            ? bs_captcha_log_throttle(client_ip, &prev) : 1;
+        if (emit) ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+            "mod_botshield: captcha %s — failing open%s "
+            "(provider=%s http=%ld detail=\"%s\")",
+            result == BS_CAPTCHA_TIMEOUT ? "TIMEOUT" : "ERROR",
+            bs_log_suppress_suffix(r->pool, prev),
+            cfg->captcha_provider->name, http_code,
+            details ? details : "");
+        /* fall through to success path */
+    } else {
+        /* Plain OK, non-v3 provider. */
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: captcha OK (provider=%s http=%ld return_to=%s)",
+            cfg->captcha_provider->name, http_code, safe_return);
+    }
+
+    /* Issue a captcha-alg signed cookie. Rep starts from any prior
+     * cookie if one is still valid, with captcha forgiveness applied. */
+    const char *prior_val = bs_get_cookie_value(r, BS_COOKIE_NAME);
+    bs_challenge prior_ch = { 0 };
+    int have_prior = 0;
+    if (prior_val && *prior_val) {
+        if (bs_verify_cookie(r, cfg, prior_val, &prior_ch) != NULL) {
+            /* Either signature-ok-but-expired (ok to carry rep) or
+             * signature-mismatch. Only carry forward if the sig was ok —
+             * same invariant as bs_handler. We can't distinguish here
+             * without re-parsing; err on the side of carrying forward
+             * only when the struct was fully populated. */
+            if (prior_ch.alg_name) have_prior = 1;
+        } else {
+            have_prior = 1;
+        }
+    }
+
+    bs_rep_state next_rep;
+    if (have_prior) {
+        int forgive = bs_effective_int(cfg->forgive_captcha,
+                                       BS_DEFAULT_FORGIVE_CAPTCHA);
+        int floor   = bs_flag_penalty(prior_ch.rep.flags);
+        int new_score = prior_ch.rep.score - forgive;
+        if (new_score < floor) new_score = floor;
+        if (new_score < 0)     new_score = 0;
+        next_rep = prior_ch.rep;
+        next_rep.score          = new_score;
+        next_rep.passes_captcha = prior_ch.rep.passes_captcha + 1;
+    } else {
+        next_rep.score          = 0;
+        next_rep.flags          = 0;
+        next_rep.passes_silent  = 0;
+        next_rep.passes_form    = 0;
+        next_rep.passes_captcha = 1;
+        next_rep.challenged_at  = 0;   /* overwritten by issue() */
+    }
+
+    int ttl        = bs_effective_int(cfg->cookie_ttl, BS_DEFAULT_COOKIE_TTL);
+    int difficulty = bs_effective_int(cfg->difficulty, BS_DEFAULT_DIFFICULTY);
+
+    /* Cookie alg name is derived from provider name by convention so
+     * adding a provider doesn't require touching this handler — just the
+     * two registries. If bs_algorithms[] is missing the matching entry,
+     * that's a build-time oversight, not a config error, so fail hard. */
+    const char *cookie_alg_name = apr_psprintf(r->pool, "captcha-%s",
+                                               cfg->captcha_provider->name);
+    const bs_pow_algorithm *captcha_alg = bs_find_algorithm(cookie_alg_name);
+    if (!captcha_alg || !captcha_alg->implemented) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+            "mod_botshield: cookie alg '%s' missing from registry — "
+            "provider '%s' is wired up but its cookie-alg row isn't",
+            cookie_alg_name, cfg->captcha_provider->name);
+        r->status = HTTP_INTERNAL_SERVER_ERROR;
+        ap_set_content_type(r, "text/plain; charset=utf-8");
+        ap_rputs("Service error: captcha cookie alg not registered.\n", r);
+        bs_decision_log(r, "captcha", "misconfigured", "-",
+                        cfg->captcha_provider->name, cookie_alg_name,
+                        "cookie_alg_missing", 0);
+        return OK;
+    }
+
+    bs_challenge ch;
+    const char *ierr = bs_issue_challenge(r->pool, cfg, difficulty, ttl,
+                                          /* auto_tier */ 0,
+                                          captcha_alg, &next_rep, &ch);
+    if (ierr) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+            "mod_botshield: captcha cookie issue failed: %s", ierr);
+        r->status = HTTP_INTERNAL_SERVER_ERROR;
+        ap_set_content_type(r, "text/plain; charset=utf-8");
+        ap_rputs("Service error: could not issue cookie.\n", r);
+        bs_decision_log(r, "captcha", "misconfigured", "-",
+                        cfg->captcha_provider->name, cookie_alg_name,
+                        "issue_failed", 0);
+        return OK;
+    }
+
+    const char *payload = bs_build_cookie_payload(r->pool, &ch, "captcha");
+    const char *set_cookie = bs_build_set_cookie(r, cfg, payload,
+                                                 ch.expires_at);
+    /* Two Set-Cookie headers: the verified-rep cookie, and a Max-Age=0
+     * clear for the pending cookie so the solved challenge can't be
+     * replayed. apr_table_add (not setn) preserves both. */
+    apr_table_add(r->err_headers_out, "Set-Cookie", set_cookie);
+    apr_table_add(r->err_headers_out, "Set-Cookie",
+                  bs_clear_pending_cookie(r, cfg));
+    apr_table_setn(r->headers_out, "Location",      safe_return);
+    apr_table_setn(r->headers_out, "X-Botshield",   "captcha-ok");
+    r->status = HTTP_SEE_OTHER;   /* 303 — POST→GET redirect */
+    /* Decision log: verified = real OK, failopen = provider was
+     * unavailable but we issued anyway. The v3 missing-score branch
+     * also falls through here — detect via details carrying an ERROR/
+     * TIMEOUT marker stored earlier. Simplest: re-check `result`. */
+    const char *d_outcome = (result == BS_CAPTCHA_OK) ? "verified" : "failopen";
+    const char *d_reason  = "-";
+    if (result == BS_CAPTCHA_TIMEOUT) d_reason = "provider_timeout";
+    else if (result == BS_CAPTCHA_ERROR) d_reason = "provider_error";
+    bs_decision_log(r, "captcha", d_outcome, "-",
+                    cfg->captcha_provider->name, cookie_alg_name,
+                    d_reason, 0);
+    return OK;
 }
 
 /* ======================================================================
@@ -2296,10 +4846,12 @@ static void bs_run_builtin_heuristics(request_rec *r)
     }
 }
 
-/* Pick a tier from the running score. Today the tier is computed and
- * logged but not acted on — every challenged request still gets the
- * form-PoW interstitial. M7/M8 will route the silent and captcha tiers
- * to their own flows. */
+/* Pick a tier from the running score. Each tier has its own
+ * interstitial: silent → auto-submit splash; form → reCAPTCHA-shaped
+ * checkbox; captcha → configured third-party provider's widget. When
+ * captcha tier is selected but no provider is configured on the scope,
+ * the render code falls through to form-PoW (documented in the
+ * decision log as reason="captcha_fallback"). */
 static bs_tier bs_decide_tier(const bs_dir_cfg *cfg, int score)
 {
     int silent  = bs_effective_int(cfg->score_silent,  BS_DEFAULT_SCORE_SILENT);
@@ -2316,7 +4868,7 @@ static const char *bs_tier_name(bs_tier t)
     switch (t) {
         case BS_TIER_PASS:    return "pass";
         case BS_TIER_SILENT:  return "silent";
-        case BS_TIER_HARD:    return "hard";
+        case BS_TIER_HARD:    return "form";
         case BS_TIER_CAPTCHA: return "captcha";
     }
     return "?";
@@ -2395,15 +4947,17 @@ static const command_rec bs_cmds[] = {
     AP_INIT_TAKE1("BotShieldScoreSilent",  bs_set_score_silent,  NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "Score at or above which the silent-PoW tier is picked "
-                 "(default: 20). Logged only until M7 ships."),
+                 "(default: 20). Serves a no-click auto-submit splash."),
     AP_INIT_TAKE1("BotShieldScoreHard",    bs_set_score_hard,    NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "Score at or above which the form-PoW tier is picked "
-                 "(default: 50). This is the only tier currently served."),
+                 "(default: 50). Serves the checkbox interstitial."),
     AP_INIT_TAKE1("BotShieldScoreCaptcha", bs_set_score_captcha, NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "Score at or above which the captcha tier is picked "
-                 "(default: 80). Logged only until M8 ships."),
+                 "(default: 80). Serves the configured third-party "
+                 "provider's widget; falls through to form-PoW if no "
+                 "BotShieldCaptchaProvider is set on the scope."),
     AP_INIT_TAKE1("BotShieldForgivenessSilent", bs_set_forgive_silent, NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "Score credit applied on a successful silent-PoW pass "
@@ -2421,6 +4975,47 @@ static const command_rec bs_cmds[] = {
                  "If set, Set-Cookie for _bs_verified includes a Domain= "
                  "attribute so reputation follows users across subdomains. "
                  "Use '.example.com' for subdomain sharing. Default: host-only."),
+    AP_INIT_TAKE1("BotShieldEndpointPrefix", bs_set_endpoint_prefix, NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "URL prefix for module-owned handlers (default: /botshield). "
+                 "Must start with '/' and not end with '/'. Change it if this "
+                 "collides with real app routes."),
+    AP_INIT_TAKE1("BotShieldCaptchaProvider", bs_set_captcha_provider, NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "Third-party captcha provider for the captcha tier. Built "
+                 "in: 'turnstile' (Cloudflare), 'hcaptcha', 'recaptcha-v2', "
+                 "'recaptcha-v3' (with BotShieldRecaptchaV3MinScore), "
+                 "'friendly' (Friendly Captcha), 'geetest' (GeeTest v4). "
+                 "Unrecognized names fail at configtest time."),
+    AP_INIT_TAKE1("BotShieldCaptchaSiteKey", bs_set_captcha_site_key, NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "Provider-public site key embedded in the captcha widget."),
+    AP_INIT_TAKE1("BotShieldCaptchaSecretFile", bs_set_captcha_secret_file,
+                 NULL, RSRC_CONF | ACCESS_CONF,
+                 "Path to the captcha provider's secret key, used in "
+                 "server-side siteverify calls. Must be mode 0600 (not "
+                 "group- or world-accessible). Read once at startup."),
+    AP_INIT_TAKE1("BotShieldCaptchaTimeout", bs_set_captcha_timeout, NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "Siteverify HTTP call timeout in milliseconds "
+                 "(default: 1000, range 100..5000). On timeout the module "
+                 "fails open — issues the cookie and logs a WARNING."),
+    AP_INIT_TAKE1("BotShieldRecaptchaV3MinScore",
+                 bs_set_recaptcha_v3_min_score, NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "Minimum score (0.0..1.0) to accept a reCAPTCHA v3 "
+                 "verification (default: 0.5). Scores below this are "
+                 "logged as REJECTED with the numeric score."),
+    AP_INIT_TAKE1("BotShieldCaptchaRateLimit", bs_set_captcha_rate_limit,
+                 NULL, RSRC_CONF | ACCESS_CONF,
+                 "Max captcha-verify POSTs per IP per minute (default: 30, "
+                 "range 0..1000; 0 disables). Over cap returns 429 Retry-"
+                 "After without calling the provider. Scope: per-dir."),
+    AP_INIT_TAKE1("BotShieldCaptchaMaxInFlight", bs_set_captcha_max_inflight,
+                 NULL, RSRC_CONF,
+                 "Global cap on concurrent outbound siteverify calls "
+                 "(default: 64, range 1..1024). Over cap returns 503 "
+                 "with WARNING. Server-scope only."),
     AP_INIT_TAKE1("BotShieldShmSize", bs_set_shm_size, NULL,
                  RSRC_CONF,
                  "Total shared-memory budget for flagged-IP table and "
@@ -2569,6 +5164,13 @@ static const char BS_WIDGET_TEMPLATE[] =
 ".bs-widget.bs-bare{background:transparent;border:0;box-shadow:none;\n"
 " min-width:0;padding:0}\n"
 ".bs-widget.bs-bare .bs-btn{padding:0;border-radius:4px}\n"
+".bs-widget.bs-auto{background:transparent;border:0;box-shadow:none;\n"
+" min-width:0;padding:0}\n"
+".bs-widget.bs-auto .bs-btn{padding:.6rem 0;cursor:default;\n"
+" pointer-events:none;justify-content:center}\n"
+".bs-widget.bs-auto .bs-label,.bs-widget.bs-auto .bs-brand{display:none}\n"
+".bs-widget.bs-auto ~ .bs-help-toggle,\n"
+".bs-widget.bs-auto ~ .bs-help{display:none}\n"
 ".bs-btn{display:inline-flex;align-items:center;gap:.85rem;\n"
 " flex:1;padding:.9rem 1rem;background:transparent;border:0;\n"
 " font:inherit;color:#1f2530;cursor:pointer;text-align:left;\n"
@@ -2652,13 +5254,25 @@ static const char BS_WIDGET_TEMPLATE[] =
 "  if (difficulty & 1) return (digest[fb] >> 4) === 0;\n"
 "  return true;\n"
 " }\n"
-" btn.addEventListener('click', function h(e){\n"
-"  if(!e.isTrusted) return;\n"
-"  btn.removeEventListener('click', h);\n"
-"  box.className = 'bs-widget bs-working';\n"
+" function begin(){\n"
+"  box.classList.add('bs-working');\n"
 "  btn.setAttribute('aria-disabled', 'true');\n"
 "  startChallenge();\n"
-" });\n"
+" }\n"
+" if (CH.auto){\n"
+"  msg.textContent = 'Checking your browser\\u2026';\n"
+"  if (document.readyState === 'loading') {\n"
+"   document.addEventListener('DOMContentLoaded', begin, {once:true});\n"
+"  } else {\n"
+"   begin();\n"
+"  }\n"
+" } else {\n"
+"  btn.addEventListener('click', function h(e){\n"
+"   if(!e.isTrusted) return;\n"
+"   btn.removeEventListener('click', h);\n"
+"   begin();\n"
+"  });\n"
+" }\n"
 " function startChallenge(){\n"
 "  var saltB  = hexToBytes(CH.salt);\n"
 "  var nonceB = hexToBytes(CH.nonce);\n"
@@ -2693,13 +5307,14 @@ static const char BS_WIDGET_TEMPLATE[] =
 "   });\n"
 "  }\n"
 "  function finish(counterVal){\n"
-"   box.className = 'bs-widget bs-done';\n"
+"   box.classList.remove('bs-working');\n"
+"   box.classList.add('bs-done');\n"
 "   msg.textContent = 'Verified \\u2014 reloading\\u2026';\n"
 "   var fields = [CH.v, CH.alg, CH.salt, CH.nonce, CH.difficulty,\n"
 "                 CH.expires_at,\n"
 "                 CH.score, CH.flags,\n"
 "                 CH.passes_silent, CH.passes_form, CH.passes_captcha,\n"
-"                 CH.challenged_at,\n"
+"                 CH.challenged_at, CH.auto,\n"
 "                 CH.signature, counterVal];\n"
 "   var payload = btoa(fields.join('|'));\n"
 "   var exp = new Date((CH.expires_at + 60) * 1000).toUTCString();\n"
@@ -2720,6 +5335,191 @@ static const char BS_WIDGET_TEMPLATE[] =
 "   var panel = document.getElementById('bs-help');\n"
 "   if (panel) panel.hidden = expanded;\n"
 "  });\n"
+" }\n"
+"})();\n"
+"</script>\n";
+
+/* Captcha-tier widget template (M8). Embeds the provider's async script
+ * + a container div with the provider's CSS class and our site key, and
+ * a form that POSTs back to /<prefix>/captcha-verify when the provider's
+ * JS callback fires. Printf substitutions (in order):
+ *   %s script_url, %s form_action, %s return_to_esc, %s widget_class,
+ *   %s site_key, %s provider_name_esc.
+ * The scoped <style> block re-declares a small subset of the PoW widget
+ * CSS so we don't depend on BS_WIDGET_TEMPLATE's styles being present. */
+static const char BS_CAPTCHA_WIDGET_TEMPLATE[] =
+"<style>\n"
+".bs-stack{display:flex;flex-direction:column;align-items:center;\n"
+" gap:.85rem;width:100%%;max-width:540px;margin:0 auto;\n"
+" font:14px/1.5 system-ui,-apple-system,\"Segoe UI\",sans-serif;\n"
+" color:#1f2530;text-align:center}\n"
+".bs-stack *,.bs-stack *::before,.bs-stack *::after{box-sizing:border-box}\n"
+".bs-prompt{font-size:15px;font-weight:500;color:#1f2530;margin:0}\n"
+".bs-sub{font-size:13px;color:#55605e;margin:0}\n"
+".bs-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;\n"
+" overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}\n"
+".bs-msg{font-size:12px;color:#55605e;min-height:1.3em;\n"
+" text-align:center;word-break:break-word;max-width:320px;margin:0}\n"
+".bs-noscript{padding:.9rem 1rem;color:#b02a37;background:#fdf4f4;\n"
+" border:1px solid #f3c8c8;border-radius:4px}\n"
+"</style>\n"
+"<div class=\"bs-stack\">\n"
+"<h1 class=\"bs-sr\">Verify you are human</h1>\n"
+"<p class=\"bs-prompt\">Please complete the check to continue.</p>\n"
+"<p class=\"bs-sub\">Provided by %s.</p>\n"
+"<noscript><div class=\"bs-noscript\">JavaScript is required to continue."
+"</div></noscript>\n"
+"<form id=\"bscf\" method=\"POST\" action=\"%s\">\n"
+" <input type=\"hidden\" name=\"return_to\" value=\"%s\">\n"
+" <div class=\"%s\" data-sitekey=\"%s\" data-callback=\"bsOnSolve\"></div>\n"
+"</form>\n"
+"<p class=\"bs-msg\" id=\"msg\" role=\"status\" aria-live=\"polite\"></p>\n"
+"</div>\n"
+"<script src=\"%s\" async defer></script>\n"
+"<script>\n"
+"function bsOnSolve(token){\n"
+" var m = document.getElementById('msg');\n"
+" if (m) m.textContent = 'Verifying\\u2026';\n"
+" document.getElementById('bscf').submit();\n"
+"}\n"
+"</script>\n";
+
+/* reCAPTCHA v3 widget template (M8). Different from the render-pattern
+ * template above — v3 has no visible widget; the script runs
+ * grecaptcha.execute() on load and auto-submits the form once the
+ * token comes back. Printf substitutions (in order):
+ *   %s provider_name_esc, %s form_action, %s return_to_esc,
+ *   %s token_field, %s script_url_with_render_param, %s sitekey_js_esc.
+ * The CSS reuses the subset that BS_CAPTCHA_WIDGET_TEMPLATE defines so
+ * we don't grow a second copy of every style rule. */
+static const char BS_RECAPTCHA_V3_WIDGET_TEMPLATE[] =
+"<style>\n"
+".bs-stack{display:flex;flex-direction:column;align-items:center;\n"
+" gap:.85rem;width:100%%;max-width:540px;margin:0 auto;\n"
+" font:14px/1.5 system-ui,-apple-system,\"Segoe UI\",sans-serif;\n"
+" color:#1f2530;text-align:center}\n"
+".bs-stack *,.bs-stack *::before,.bs-stack *::after{box-sizing:border-box}\n"
+".bs-prompt{font-size:15px;font-weight:500;color:#1f2530;margin:0}\n"
+".bs-sub{font-size:13px;color:#55605e;margin:0}\n"
+".bs-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;\n"
+" overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}\n"
+".bs-msg{font-size:12px;color:#55605e;min-height:1.3em;\n"
+" text-align:center;word-break:break-word;max-width:320px;margin:0}\n"
+".bs-noscript{padding:.9rem 1rem;color:#b02a37;background:#fdf4f4;\n"
+" border:1px solid #f3c8c8;border-radius:4px}\n"
+".bs-spin{width:32px;height:32px;border:3px solid #e4e7ea;\n"
+" border-top-color:#2f5d50;border-radius:50%%;\n"
+" animation:bs-spin .8s linear infinite}\n"
+"@keyframes bs-spin{to{transform:rotate(360deg)}}\n"
+"@media (prefers-reduced-motion: reduce){\n"
+" .bs-spin{animation:none;border-top-color:#7a8487}\n"
+"}\n"
+"</style>\n"
+"<div class=\"bs-stack\">\n"
+"<h1 class=\"bs-sr\">Verify you are human</h1>\n"
+"<p class=\"bs-prompt\">Checking your browser\\u2026</p>\n"
+"<div class=\"bs-spin\" aria-hidden=\"true\"></div>\n"
+"<p class=\"bs-sub\">Provided by %s.</p>\n"
+"<noscript><div class=\"bs-noscript\">JavaScript is required to continue."
+"</div></noscript>\n"
+"<form id=\"bscf\" method=\"POST\" action=\"%s\">\n"
+" <input type=\"hidden\" name=\"return_to\" value=\"%s\">\n"
+" <input type=\"hidden\" name=\"%s\" id=\"bs-token\" value=\"\">\n"
+"</form>\n"
+"<p class=\"bs-msg\" id=\"msg\" role=\"status\" aria-live=\"polite\"></p>\n"
+"</div>\n"
+"<script src=\"%s\" async defer></script>\n"
+"<script>\n"
+"(function(){\n"
+" var sk = '%s';\n"
+" function exec(){\n"
+"  grecaptcha.ready(function(){\n"
+"   grecaptcha.execute(sk, {action: 'botshield'}).then(function(t){\n"
+"    document.getElementById('bs-token').value = t;\n"
+"    var m = document.getElementById('msg');\n"
+"    if (m) m.textContent = 'Verifying\\u2026';\n"
+"    document.getElementById('bscf').submit();\n"
+"   });\n"
+"  });\n"
+" }\n"
+" function start(){\n"
+"  if (typeof grecaptcha !== 'undefined' && grecaptcha.ready) {\n"
+"   exec();\n"
+"  } else {\n"
+"   setTimeout(start, 50);\n"
+"  }\n"
+" }\n"
+" if (document.readyState === 'loading') {\n"
+"  document.addEventListener('DOMContentLoaded', start, {once:true});\n"
+" } else {\n"
+"  start();\n"
+" }\n"
+"})();\n"
+"</script>\n";
+
+/* GeeTest v4 widget template (M8). GeeTest neither renders into a
+ * named div (like Turnstile/hCaptcha/v2/Friendly) nor calls execute
+ * directly (like reCAPTCHA v3) — instead its gt4.js exposes a global
+ * initGeetest4({captchaId, product}, callback) that produces a captcha
+ * object the caller drops into a container and wires for onSuccess.
+ * Printf substitutions (in order):
+ *   %s provider_name_esc, %s form_action, %s return_to_esc,
+ *   %s token_field, %s widget_script_url, %s sitekey_js_esc.
+ * When the user solves the slider, our onSuccess handler pulls
+ * captchaObj.getValidate() (a 4-field object) and stringifies it into
+ * the hidden input named `token_field` so the verify handler can parse
+ * it apart. */
+static const char BS_GEETEST_WIDGET_TEMPLATE[] =
+"<style>\n"
+".bs-stack{display:flex;flex-direction:column;align-items:center;\n"
+" gap:.85rem;width:100%%;max-width:540px;margin:0 auto;\n"
+" font:14px/1.5 system-ui,-apple-system,\"Segoe UI\",sans-serif;\n"
+" color:#1f2530;text-align:center}\n"
+".bs-stack *,.bs-stack *::before,.bs-stack *::after{box-sizing:border-box}\n"
+".bs-prompt{font-size:15px;font-weight:500;color:#1f2530;margin:0}\n"
+".bs-sub{font-size:13px;color:#55605e;margin:0}\n"
+".bs-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;\n"
+" overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}\n"
+".bs-msg{font-size:12px;color:#55605e;min-height:1.3em;\n"
+" text-align:center;word-break:break-word;max-width:320px;margin:0}\n"
+".bs-noscript{padding:.9rem 1rem;color:#b02a37;background:#fdf4f4;\n"
+" border:1px solid #f3c8c8;border-radius:4px}\n"
+"#bs-gt{min-height:60px;display:flex;justify-content:center}\n"
+"</style>\n"
+"<div class=\"bs-stack\">\n"
+"<h1 class=\"bs-sr\">Verify you are human</h1>\n"
+"<p class=\"bs-prompt\">Please complete the check to continue.</p>\n"
+"<p class=\"bs-sub\">Provided by %s.</p>\n"
+"<noscript><div class=\"bs-noscript\">JavaScript is required to continue."
+"</div></noscript>\n"
+"<form id=\"bscf\" method=\"POST\" action=\"%s\">\n"
+" <input type=\"hidden\" name=\"return_to\" value=\"%s\">\n"
+" <input type=\"hidden\" name=\"%s\" id=\"bs-token\" value=\"\">\n"
+"</form>\n"
+"<div id=\"bs-gt\" aria-live=\"polite\"></div>\n"
+"<p class=\"bs-msg\" id=\"msg\" role=\"status\" aria-live=\"polite\"></p>\n"
+"</div>\n"
+"<script src=\"%s\" async defer></script>\n"
+"<script>\n"
+"(function(){\n"
+" var captchaId = '%s';\n"
+" function boot(){\n"
+"  if (typeof initGeetest4 === 'undefined') { setTimeout(boot, 50); return; }\n"
+"  initGeetest4({captchaId: captchaId, product: 'bind'}, function(cap){\n"
+"   cap.appendTo('#bs-gt');\n"
+"   cap.onSuccess(function(){\n"
+"    var v = cap.getValidate();\n"
+"    document.getElementById('bs-token').value = JSON.stringify(v);\n"
+"    var m = document.getElementById('msg');\n"
+"    if (m) m.textContent = 'Verifying\\u2026';\n"
+"    document.getElementById('bscf').submit();\n"
+"   });\n"
+"  });\n"
+" }\n"
+" if (document.readyState === 'loading') {\n"
+"  document.addEventListener('DOMContentLoaded', boot, {once:true});\n"
+" } else {\n"
+"  boot();\n"
 " }\n"
 "})();\n"
 "</script>\n";
@@ -2765,6 +5565,40 @@ static int bs_handler(request_rec *r)
         return DECLINED;
     }
 
+    /* Module-owned endpoint routing (M8). URLs under BotShieldEndpointPrefix
+     * (default /botshield) are served by this module's own handlers, not
+     * the tier dispatch. Today:
+     *   <prefix>/captcha-verify             — single-provider vhost
+     *   <prefix>/captcha-verify/<name>      — per-provider cohabitation
+     * The bare form still works for the single-provider case so the old
+     * dev config and the first-provider-on-a-vhost case keep working.
+     * Done before the debug / asset / cookie paths so operators can hit
+     * the verify endpoint regardless of surrounding scope. */
+    const char *prefix = cfg->endpoint_prefix
+        ? cfg->endpoint_prefix : BS_DEFAULT_ENDPOINT_PREFIX;
+    apr_size_t prefix_len = strlen(prefix);
+    if (r->uri && strncmp(r->uri, prefix, prefix_len) == 0 &&
+        r->uri[prefix_len] == '/') {
+        const char *sub = r->uri + prefix_len;
+        if (strcmp(sub, "/captcha-verify") == 0 ||
+            strncmp(sub, "/captcha-verify/", 16) == 0) {
+            return bs_captcha_verify_handler(r, cfg);
+        }
+        if (strcmp(sub, "/metrics") == 0) {
+            return bs_metrics_handler(r, cfg);
+        }
+        /* Unknown module endpoint under the prefix → 404, so a typo in
+         * an operator's template fails loudly instead of falling through
+         * to Apache and serving some unrelated file. */
+        r->status = HTTP_NOT_FOUND;
+        ap_set_content_type(r, "text/plain; charset=utf-8");
+        apr_table_setn(r->err_headers_out, "X-Botshield", "unknown-endpoint");
+        ap_rputs("Not found.\n", r);
+        bs_decision_log(r, "none", "rejected", "-", "-", "-",
+                        "unknown_endpoint", 0);
+        return OK;
+    }
+
     /* Debug override keeps the first-commit behavior available for tests. */
     if (cfg->debug == 1) {
         ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
@@ -2775,12 +5609,14 @@ static int bs_handler(request_rec *r)
         apr_table_setn(r->headers_out,    "Cache-Control", "no-store");
         apr_table_setn(r->err_headers_out, "X-Botshield",  "debug-403");
         ap_rputs("Hello World\n", r);
+        bs_decision_log(r, "none", "debug", "-", "-", "-", "-", 0);
         return OK;
     }
 
     /* Static assets pass through — a cookieless first page load must still
      * render its CSS/images so the PoW page is usable. */
     if (bs_is_asset_uri(r->uri)) {
+        bs_decision_log(r, "pass", "declined", "-", "-", "-", "asset", 0);
         return DECLINED;
     }
 
@@ -2800,6 +5636,7 @@ static int bs_handler(request_rec *r)
         apr_table_setn(r->headers_out, "Cache-Control", "no-store");
         apr_table_setn(r->err_headers_out, "X-Botshield", "misconfigured");
         ap_rputs("Service unavailable: mod_botshield misconfigured.\n", r);
+        bs_decision_log(r, "none", "misconfigured", "-", "-", "-", "-", 0);
         return OK;
     }
 
@@ -2815,30 +5652,34 @@ static int bs_handler(request_rec *r)
      *     in the cookie can't be trusted. Discard entirely.
      */
     const char *cookie_val = bs_get_cookie_value(r, BS_COOKIE_NAME);
-    bs_challenge prior_ch;
+    bs_challenge prior_ch = { 0 };
     int have_prior_rep   = 0;
     int cookie_fully_ok  = 0;
-    if (cookie_val && *cookie_val) {
-        const char *reason = bs_verify_cookie(r, cfg, cookie_val, &prior_ch);
-        if (!reason) {
+    const char *cookie_verify_reason = NULL;
+    int cookie_had_val = (cookie_val && *cookie_val);
+    if (cookie_had_val) {
+        cookie_verify_reason = bs_verify_cookie(r, cfg, cookie_val, &prior_ch);
+        if (!cookie_verify_reason) {
             cookie_fully_ok = 1;
             have_prior_rep  = 1;
         } else {
-            if (strcmp(reason, "signature mismatch") != 0) {
+            if (strcmp(cookie_verify_reason, "signature mismatch") != 0) {
                 have_prior_rep = 1;
             }
             ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
                           "mod_botshield: " BS_COOKIE_NAME " rejected: %s",
-                          reason);
+                          cookie_verify_reason);
         }
     }
+    const char *cookie_status =
+        bs_decision_cookie_status(cookie_verify_reason, cookie_had_val);
 
     /* Score the request. Heuristics always run — a fully-valid cookie
      * doesn't exempt you from fresh request-level signals that might
      * have pushed you into a tier that requires a re-challenge. */
     bs_run_builtin_heuristics(r);
 
-    /* Flagged-IP table (M5a): look up the client IP. Hits add the
+    /* Flagged-IP table (M5.1): look up the client IP. Hits add the
      * serious-event bitmap's penalty to effective_score, rollback-proof
      * because the flag lives in SHM, not in the cookie.
      *
@@ -2863,7 +5704,7 @@ static int bs_handler(request_rec *r)
                      "flagged-ip");
     }
 
-    /* First-sight Bloom lookup (M5b). Policy: only on cookieless or
+    /* First-sight Bloom lookup (M5.2). Policy: only on cookieless or
      * signature-mismatched requests. Sig-verified cookies (even if
      * expired) mean we've already transacted with this browser, so
      * the first-sight signal would just be noise. A valid cookie
@@ -2914,6 +5755,10 @@ static int bs_handler(request_rec *r)
                       r->uri, effective, heuristic_total, cookie_score,
                       cookie_flag_floor, ip_flag_penalty, (unsigned)ip_flags,
                       cookie_fully_ok);
+        bs_decision_log(r, "pass", "declined", cookie_status,
+                        "-", "-",
+                        bs_decision_reason_names(r->pool, score),
+                        effective);
         return DECLINED;
     }
 
@@ -2922,27 +5767,38 @@ static int bs_handler(request_rec *r)
      * writes off the ~99% happy path. */
     if (have_client_ip) bs_bloom_add(client_ip);
 
-    /* Build the rep state to carry into the new cookie. Today M4b serves
-     * form-PoW for every non-pass tier; silent (M7) and captcha (M8)
-     * will ship later with their own forgiveness rates. Until then,
-     * form forgiveness is applied whenever we re-issue, matching what
-     * the user actually solves. */
+    /* Decide whether this challenge will be served as the M7 silent-tier
+     * auto-submit splash or as the form-PoW interstitial. Captcha tier
+     * (M8) still stubs to form until that ships. */
+    int issue_auto = (tier == BS_TIER_SILENT);
+
+    /* Build the rep state to carry into the new cookie. Forgiveness +
+     * pass-counter bump are picked from the tier the *prior* cookie was
+     * served under (prior_ch.auto_tier), because that records what the
+     * user actually just solved. First-time challenges have no prior
+     * tier, so they increment whichever counter matches the tier we're
+     * about to issue. */
     bs_rep_state next_rep;
     if (have_prior_rep) {
-        int forgive = bs_effective_int(cfg->forgive_form,
-                                       BS_DEFAULT_FORGIVE_FORM);
+        int forgive = prior_ch.auto_tier
+            ? bs_effective_int(cfg->forgive_silent, BS_DEFAULT_FORGIVE_SILENT)
+            : bs_effective_int(cfg->forgive_form,   BS_DEFAULT_FORGIVE_FORM);
         int floor   = bs_flag_penalty(prior_ch.rep.flags);
         int new_score = prior_ch.rep.score - forgive;
         if (new_score < floor) new_score = floor;
         if (new_score < 0)     new_score = 0;
         next_rep = prior_ch.rep;
-        next_rep.score       = new_score;
-        next_rep.passes_form = prior_ch.rep.passes_form + 1;
+        next_rep.score = new_score;
+        if (prior_ch.auto_tier) {
+            next_rep.passes_silent = prior_ch.rep.passes_silent + 1;
+        } else {
+            next_rep.passes_form   = prior_ch.rep.passes_form + 1;
+        }
     } else {
         next_rep.score          = 0;
         next_rep.flags          = 0;
-        next_rep.passes_silent  = 0;
-        next_rep.passes_form    = 1;   /* this pass counts as the first */
+        next_rep.passes_silent  = issue_auto ? 1 : 0;
+        next_rep.passes_form    = issue_auto ? 0 : 1;
         next_rep.passes_captcha = 0;
         next_rep.challenged_at  = 0;   /* overwritten by issue() */
     }
@@ -2966,6 +5822,7 @@ static int bs_handler(request_rec *r)
      * sig-verified prior cookie. */
     bs_challenge challenge;
     const char *ierr = bs_issue_challenge(r->pool, cfg, difficulty, ttl,
+                                          issue_auto, NULL,
                                           &next_rep, &challenge);
     if (ierr) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
@@ -2973,6 +5830,8 @@ static int bs_handler(request_rec *r)
         r->status = HTTP_INTERNAL_SERVER_ERROR;
         ap_set_content_type(r, "text/plain; charset=utf-8");
         ap_rputs("Service error: could not issue challenge.\n", r);
+        bs_decision_log(r, bs_tier_name(tier), "misconfigured",
+                        cookie_status, "-", "-", "issue_failed", effective);
         return OK;
     }
     const char *challenge_js = bs_challenge_json(r->pool, cfg, &challenge);
@@ -3004,7 +5863,10 @@ static int bs_handler(request_rec *r)
      * hidden, move the prompt text to an aria-label on the button so the
      * button keeps an accessible name. */
     const char *prompt_esc = ap_escape_html(r->pool, prompt);
-    const char *widget_mod = show_box ? "" : " bs-bare";
+    const char *widget_mod = apr_pstrcat(r->pool,
+                                         show_box   ? "" : " bs-bare",
+                                         issue_auto ? " bs-auto" : "",
+                                         NULL);
     const char *aria_attr  = show_label
         ? ""
         : apr_psprintf(r->pool, " aria-label=\"%s\"", prompt_esc);
@@ -3021,14 +5883,86 @@ static int bs_handler(request_rec *r)
 
     /* Render the widget block once, then splice it into the page shell at
      * BS_WIDGET_MARKER. The shell is either the admin's BotShieldChallengeFile
-     * or our built-in default — same splice code path either way. */
-    char *widget = apr_psprintf(r->pool, BS_WIDGET_TEMPLATE,
-                                widget_mod,
-                                aria_attr,
-                                prompt_span,
-                                brand_div,
-                                help_html,
-                                challenge_js);
+     * or our built-in default — same splice code path either way.
+     *
+     * Captcha tier (M8): if we're at captcha tier AND a provider is fully
+     * configured, render the provider's widget instead of the PoW checkbox.
+     * If captcha tier resolves but no provider/key/secret is configured,
+     * the handler already issued a PoW challenge above and we stub to
+     * form-PoW here — preserves the pre-M8 fall-through behavior and lets
+     * operators opt in to captcha only on scopes they've configured. */
+    char *widget;
+    int use_captcha_widget = (tier == BS_TIER_CAPTCHA)
+        && cfg->captcha_provider
+        && cfg->captcha_site_key
+        && cfg->captcha_secret;
+    if (use_captcha_widget) {
+        /* M8.1: mint a short-lived HMAC-signed "pending" cookie so the
+         * verify endpoint can short-circuit random POST spray before
+         * calling libcurl. Set early so it rides out on the challenge
+         * response. If mint fails (RAND_bytes) we still render — worst
+         * case is the verify endpoint falls back to rate-limit + in-
+         * flight cap as the only guardrails. */
+        const char *pending = bs_mint_pending_cookie(r, cfg);
+        if (pending) {
+            apr_table_add(r->err_headers_out, "Set-Cookie", pending);
+        }
+        const char *prefix = cfg->endpoint_prefix
+            ? cfg->endpoint_prefix : BS_DEFAULT_ENDPOINT_PREFIX;
+        /* Per-provider verify URL: {prefix}/captcha-verify/{provider}.
+         * Encoding the provider in the path lets operators run multiple
+         * providers on one vhost by giving each its own <Location> block
+         * with the matching secret/sitekey. Operators running a single
+         * provider don't need to notice — any scope-level override still
+         * works because the verify URL's per-dir config is independent. */
+        const char *verify_url = apr_pstrcat(r->pool, prefix,
+            "/captcha-verify/", cfg->captcha_provider->name, NULL);
+        const char *return_esc  = ap_escape_html(r->pool,
+            r->unparsed_uri ? r->unparsed_uri : "/");
+        const char *provider_esc = ap_escape_html(r->pool,
+            cfg->captcha_provider->name);
+        const char *pname = cfg->captcha_provider->name;
+        if (strcmp(pname, "recaptcha-v3") == 0) {
+            /* v3 script URL embeds the sitekey in its query string, so
+             * the render-pattern widget_script_url from the registry
+             * isn't used directly — build it here instead. */
+            const char *v3_script_url = apr_psprintf(r->pool,
+                "%s?render=%s",
+                cfg->captcha_provider->widget_script_url,
+                cfg->captcha_site_key);
+            widget = apr_psprintf(r->pool, BS_RECAPTCHA_V3_WIDGET_TEMPLATE,
+                provider_esc,
+                verify_url,
+                return_esc,
+                cfg->captcha_provider->token_field,
+                v3_script_url,
+                cfg->captcha_site_key);
+        } else if (strcmp(pname, "geetest") == 0) {
+            widget = apr_psprintf(r->pool, BS_GEETEST_WIDGET_TEMPLATE,
+                provider_esc,
+                verify_url,
+                return_esc,
+                cfg->captcha_provider->token_field,
+                cfg->captcha_provider->widget_script_url,
+                cfg->captcha_site_key);
+        } else {
+            widget = apr_psprintf(r->pool, BS_CAPTCHA_WIDGET_TEMPLATE,
+                provider_esc,
+                verify_url,
+                return_esc,
+                cfg->captcha_provider->widget_class,
+                cfg->captcha_site_key,
+                cfg->captcha_provider->widget_script_url);
+        }
+    } else {
+        widget = apr_psprintf(r->pool, BS_WIDGET_TEMPLATE,
+                              widget_mod,
+                              aria_attr,
+                              prompt_span,
+                              brand_div,
+                              help_html,
+                              challenge_js);
+    }
 
     const char *page = cfg->challenge_html ? cfg->challenge_html
                                            : BS_DEFAULT_PAGE_TEMPLATE;
@@ -3057,6 +5991,34 @@ static int bs_handler(request_rec *r)
     apr_table_setn(r->headers_out, "Cache-Control", "no-store");
     apr_table_setn(r->headers_out, "X-Botshield",   "challenge");
     ap_rputs(body, r);
+
+    /* Decision log for the challenge we just served. For non-captcha
+     * tiers the provider/alg are the PoW algorithm the cookie will be
+     * signed under; captcha tier names the configured provider and its
+     * cookie alg. When captcha tier falls through to form-PoW (no
+     * provider configured), report the actual served tier (form) with
+     * reason "captcha_fallback". */
+    const char *served_tier_name = bs_tier_name(tier);
+    const char *served_provider  = "-";
+    const char *served_alg       = cfg->algorithm
+                                   ? cfg->algorithm->name : "-";
+    const char *served_reason    = bs_decision_reason_names(r->pool, score);
+    if (use_captcha_widget) {
+        served_provider = cfg->captcha_provider->name;
+        served_alg      = apr_psprintf(r->pool, "captcha-%s",
+                                       cfg->captcha_provider->name);
+    } else if (tier == BS_TIER_CAPTCHA) {
+        /* Captcha tier asked for but no provider configured on this
+         * scope — interstitial we actually served is form-PoW. Label
+         * honestly. */
+        served_tier_name = "form";
+        served_reason    = (!score || !score->entries ||
+                            score->entries->nelts == 0)
+            ? "captcha_fallback"
+            : apr_pstrcat(r->pool, "captcha_fallback,", served_reason, NULL);
+    }
+    bs_decision_log(r, served_tier_name, "challenged", cookie_status,
+                    served_provider, served_alg, served_reason, effective);
     return OK;
 }
 
@@ -3065,9 +6027,14 @@ static int bs_handler(request_rec *r)
 static void bs_register_hooks(apr_pool_t *p)
 {
     (void)p;
-    ap_hook_post_config(bs_post_config, NULL, NULL, APR_HOOK_MIDDLE);
-    ap_hook_child_init (bs_child_init,  NULL, NULL, APR_HOOK_MIDDLE);
-    ap_hook_handler    (bs_handler,     NULL, NULL, APR_HOOK_FIRST);
+    ap_hook_post_config (bs_post_config, NULL, NULL, APR_HOOK_MIDDLE);
+    ap_hook_child_init  (bs_child_init,  NULL, NULL, APR_HOOK_MIDDLE);
+    ap_hook_handler     (bs_handler,     NULL, NULL, APR_HOOK_FIRST);
+    /* mod_status optional hook: fires only when mod_status is loaded.
+     * If it isn't, APR_OPTIONAL_HOOK silently registers nothing — no
+     * hot-path cost and no hard linkage to mod_status. */
+    APR_OPTIONAL_HOOK(ap, status_hook, bs_status_hook,
+                      NULL, NULL, APR_HOOK_MIDDLE);
 }
 
 AP_DECLARE_MODULE(botshield) = {
