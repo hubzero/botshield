@@ -42,6 +42,53 @@ def restart() -> None:
     time.sleep(2)
 
 
+_MPMS = ("event", "worker", "prefork")
+
+
+def current_mpm() -> str | None:
+    """Return the currently-enabled MPM's short name, or None if
+    none is enabled (which would be unusual)."""
+    for mpm in _MPMS:
+        if Path(f"/etc/apache2/mods-enabled/mpm_{mpm}.load").exists():
+            return mpm
+    return None
+
+
+def switch_mpm(target: str) -> None:
+    """Switch Apache to the named MPM (event / worker / prefork).
+
+    Idempotent — switching to the already-active MPM is a no-op.
+    Used by the M11.8 MPM-matrix fixture; tests that call this must
+    restore the default (event) on teardown.
+
+    Performs a full restart, not a reload, because a reload can't
+    swap MPMs — the serving model is baked in at process start.
+    """
+    if target not in _MPMS:
+        raise ValueError(f"unknown MPM {target!r}; want one of {_MPMS}")
+    active = current_mpm()
+    if active == target:
+        return
+
+    # a2dismod is noisy on stderr; discard unless there's a real
+    # problem (the restart will complain if MPM config is broken).
+    # All current MPMs get disabled — a2enmod prints a warning if
+    # the target conflicts otherwise.
+    for mpm in _MPMS:
+        if mpm != target:
+            subprocess.run(
+                ["sudo", "a2dismod", f"mpm_{mpm}"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                check=False,
+            )
+    subprocess.run(
+        ["sudo", "a2enmod", f"mpm_{target}"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        check=True,
+    )
+    restart()
+
+
 def reset_state() -> None:
     """Wipe the state file + restart so SHM + flagged-IP start empty.
 

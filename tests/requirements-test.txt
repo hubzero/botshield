@@ -20,3 +20,11 @@ playwright==1.58.0
 # blips) + HTML reports for CI triage.
 pytest-rerunfailures==16.1
 pytest-html==4.2.0
+
+# M11.8: property + format testing.
+# hypothesis — byte-level fuzz of the cookie parser via
+# pytest-hypothesis integration.
+# prometheus_client — the official Prometheus Python lib; its parser
+# is the ground-truth for Prometheus exposition-format validation.
+hypothesis==6.152.1
+prometheus_client==0.25.0
