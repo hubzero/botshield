@@ -1,18 +1,18 @@
 #!/bin/bash
 # tests/run — mod_botshield test dispatcher.
 #
-# Fires pytest against tests/pytests/ (the M11.4+ rebuild) and reports
-# a summary. Stress/soak (tests/stress/) is opt-in via --only stress.
+# Fires pytest against tests/pytests/ and reports a summary. The
+# soak test is just another pytest (marked @slow + @serial); opt in
+# with --slow --match soak, set BS_SOAK_DURATION_SEC / BS_SOAK_RPS
+# to scale.
 #
 # Exit codes: 0 if every test passed, 1 if any failed, 2 on bad
 # invocation.
 #
 # Flags:
-#   --only CATEGORY    Run only one category (pytests, stress).
-#                      Repeatable. Use 'all' to include stress
-#                      alongside pytests.
-#   --match PATTERN    Substring filter. Passed to pytest as -k, and
-#                      to the stress dispatcher as a filename filter.
+#   --only CATEGORY    Run only one category (currently pytests
+#                      is the only category).
+#   --match PATTERN    Substring filter, passed to pytest as -k.
 #   --mark EXPR        Extra pytest marker expression. Composed with
 #                      the phase + slow filters. Example:
 #                        tests/run --mark "not browser"
@@ -47,7 +47,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 PYTEST_VENV="$HERE/.venv"
 
 DEFAULT_CATEGORIES=(pytests)
-ALL_CATEGORIES=(pytests stress)
+ALL_CATEGORIES=(pytests)
 CATEGORIES=("${DEFAULT_CATEGORIES[@]}")
 
 ONLY=()
@@ -206,42 +206,10 @@ run_pytests() {
   fi
 }
 
-run_stress() {
-  local dir="$HERE/stress"
-  [[ -d "$dir" ]] || return
-  for t in "$dir"/*.sh; do
-    [[ -e "$t" ]] || continue
-    [[ -x "$t" ]] || continue
-    local name="stress/$(basename "$t" .sh)"
-    if [[ -n "$MATCH" ]] && [[ "$name" != *"$MATCH"* ]]; then continue; fi
-    if [[ $LIST_ONLY -eq 1 ]]; then echo "$name"; continue; fi
-
-    printf "\n=== %s ===\n" "$name"
-    local out; out=$(mktemp /tmp/bs_test_out.XXXXXX)
-    if "$t" > "$out" 2>&1; then
-      if grep -q "soak: PASS\|PASS:" "$out"; then
-        pass=$((pass + 1))
-        grep -E "soak: PASS|^  PASS:" "$out" | tail -5
-      else
-        fail=$((fail + 1))
-        fails+=("$name")
-        echo "  FAIL: stress test exited 0 but no PASS marker found"
-        cat "$out"
-      fi
-    else
-      fail=$((fail + 1))
-      fails+=("$name")
-      cat "$out"
-    fi
-    rm -f "$out"
-  done
-}
-
 for cat in "${CATEGORIES[@]}"; do
   case "$cat" in
     pytests) run_pytests ;;
-    stress)  run_stress  ;;
-    *) echo "unknown category: $cat (valid: pytests, stress, all)" >&2
+    *) echo "unknown category: $cat (valid: pytests)" >&2
        exit 2 ;;
   esac
 done

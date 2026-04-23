@@ -35,8 +35,7 @@ apt-get install -y -qq \
   libssl-dev libcurl4-openssl-dev libjson-c-dev \
   libpcre2-dev \
   python3 python3-venv \
-  curl openssl \
-  wrk >/dev/null
+  curl openssl >/dev/null
 
 echo "== module build + install =="
 cd "$REPO"

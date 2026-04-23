@@ -52,11 +52,14 @@ jobs:
           curl -sk --max-time 5 -o /dev/null https://localhost/ \
             || (sudo journalctl -u apache2 --no-pager -n 50 && exit 1)
 
-      - name: Run fast tests (pytest, not browser)
+      - name: Run fast tests (pytest, not browser, not slow)
         run: tests/run --parallel --mark "not browser" --verbose
 
-      - name: Soak smoke (60s)
-        run: tests/stress/soak.sh
+      - name: Soak smoke (60s at 25 rps)
+        # The soak is a pytest test marked @slow + @serial. Running
+        # it via tests/run with --slow --match soak keeps it in the
+        # same framework + reports pipeline as every other test.
+        run: tests/run --slow --match soak --verbose
 
       - name: Upload reports
         if: always()
@@ -146,8 +149,12 @@ jobs:
           sudo systemctl restart apache2
           sleep 2
 
-      - name: Full soak (8h at 50rps)
-        run: tests/stress/soak.sh --long --report /tmp/bs_soak_nightly.report
+      - name: Full soak (8h at 50 rps)
+        env:
+          BS_SOAK_DURATION_SEC: "28800"  # 8h
+          BS_SOAK_RPS: "50"
+          BS_SOAK_REPORT: /tmp/bs_soak_nightly.report
+        run: tests/run --slow --match soak --verbose
 
       - name: Upload soak report
         if: always()
@@ -156,7 +163,7 @@ jobs:
           name: soak-nightly-report
           path: |
             /tmp/bs_soak_nightly.report
-            /tmp/bs_soak_*.out
+            tests/reports/
           retention-days: 30
 
       - name: Upload Apache logs
