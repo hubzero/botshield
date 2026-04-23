@@ -1,11 +1,17 @@
 #!/bin/bash
-# tests/stress/soak.sh — long-duration soak test (M10.4).
+# tests/stress/soak.sh — soak test (M10.4).
 #
-# Launches a steady rate-limited load against the module for hours,
-# periodically samples /metrics + worker RSS + log file size, writes
-# each sample to a timestamped report file. Designed to be started
-# before going home ("nohup tests/stress/soak.sh --duration 8h &")
-# and analyzed in the morning.
+# Launches a steady rate-limited load against the module, periodically
+# samples /metrics + worker RSS + log file size, writes each sample to
+# a timestamped report file.
+#
+# Two modes:
+#   - Default ("short"): 60s at 25 rps. Used as the per-PR smoke run
+#     via `tests/run --only stress`. Finishes in a minute, still
+#     exercises every hot path a few times over.
+#   - --long: 8h at 50 rps (~1.4M requests). The overnight run.
+#     Kick off with `nohup tests/stress/soak.sh --long &` and analyze
+#     the report in the morning.
 #
 # Workload is internal-only (pass / form / captcha-render) — does NOT
 # hit any third-party provider. Mix is 70/20/10 pass/form/captcha.
@@ -14,12 +20,12 @@
 # so log growth is predictable and bounded across overnight runs.
 #
 # Usage:
-#   tests/stress/soak.sh [--duration DURATION] [--rps N] [--report PATH]
-#     --duration  2m | 30m | 8h | 12h etc. Converted to seconds.
-#     --rps       exact target rps. Default 50. Load is moderate —
-#                 the goal is to exercise all hot paths for hours,
-#                 not stress throughput.
-#     --report    report file path. Default /tmp/bs_soak_<ts>.report.
+#   tests/stress/soak.sh [--long] [--duration DURATION] [--rps N] [--report PATH]
+#     --long       shortcut for --duration 8h --rps 50.
+#     --duration   2m | 30m | 8h | 12h etc. Converted to seconds.
+#                  Ignored if --long set.
+#     --rps        exact target rps. Default 25 (short) / 50 (--long).
+#     --report     report file path. Default /tmp/bs_soak_<ts>.report.
 #
 # Exit code:
 #   0 — soak completed, analyzer says pass
@@ -31,20 +37,32 @@
 
 set -u
 
-DURATION="8h"
-RPS=50
+LONG=0
+DURATION=""
+RPS=""
 REPORT=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --duration) DURATION="$2"; shift 2 ;;
-    --rps)      RPS="$2";      shift 2 ;;
-    --report)   REPORT="$2";   shift 2 ;;
+    --long)     LONG=1;            shift ;;
+    --duration) DURATION="$2";     shift 2 ;;
+    --rps)      RPS="$2";          shift 2 ;;
+    --report)   REPORT="$2";       shift 2 ;;
     -h|--help)
-      sed -n '2,30p' "$0" | sed 's/^# \?//'; exit 0 ;;
+      sed -n '2,33p' "$0" | sed 's/^# \?//'; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
 done
+
+# Short (default) vs long defaults. Explicit --duration / --rps
+# override either.
+if [[ "$LONG" -eq 1 ]]; then
+  [[ -z "$DURATION" ]] && DURATION="8h"
+  [[ -z "$RPS" ]]      && RPS="50"
+else
+  [[ -z "$DURATION" ]] && DURATION="60s"
+  [[ -z "$RPS" ]]      && RPS="25"
+fi
 
 # Convert duration string (2m / 30m / 8h / N) to seconds
 case "$DURATION" in
