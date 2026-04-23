@@ -7,14 +7,19 @@
 # Exit codes: 0 if every test passed, 1 if any failed, 2 on bad
 # invocation.
 #
-# Default run includes: unit, integration, acceptance.
+# Default run includes: unit, integration, acceptance, pytests.
 # stress/ is opt-in only (soak takes hours). Request it with
 # --only stress or --only all.
 #
+# The pytests/ category runs via pytest (tests/.venv), not the bash
+# runner. Its per-test PASS/FAIL line gets folded into the overall
+# summary. During the M11.4+ rebuild bash and pytest suites run
+# side-by-side; M11.5 archives bash.
+#
 # Flags:
 #   --only CATEGORY    Run only one category (unit, integration,
-#                      acceptance, stress). Repeatable. Use 'all'
-#                      to include stress alongside the others.
+#                      acceptance, pytests, stress). Repeatable. Use
+#                      'all' to include stress alongside the others.
 #   --match PATTERN    Run only tests whose filename matches PATTERN
 #                      (substring, not regex).
 #   --verbose          Show each test's stdout inline instead of only
@@ -22,10 +27,13 @@
 #   --list             List tests that would run, don't execute them.
 #
 # Conventions:
-#   - Each test is a standalone shell script that sources
+#   - Each bash test is a standalone shell script that sources
 #     tests/lib/common.sh and prints "PASS: <name>" / "FAIL: ..." /
-#     "SKIP: <reason>" lines. Exit code 0 = test passed or was
-#     skipped; non-zero = failed.
+#     "SKIP: <reason>" lines. Exit code 0 + at least one marker =
+#     test passed or was skipped; anything else = failed.
+#   - Each pytest test lives under tests/pytests/ and uses the
+#     fixtures in tests/conftest.py + the helpers in
+#     tests/botshield_test/.
 #   - Tests MUST NOT depend on ordering within their category. Tests
 #     within a single run share the live Apache; each test should
 #     leave the dev vhost in a usable state for the next.
@@ -38,9 +46,13 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # stress/ is deliberately EXCLUDED from the default category list.
 # Soak and load tests take minutes to hours; they're opt-in via
 # --only stress (or --only all to include alongside the others).
-DEFAULT_CATEGORIES=(unit integration acceptance)
-ALL_CATEGORIES=(unit integration acceptance stress)
+DEFAULT_CATEGORIES=(unit integration acceptance pytests)
+ALL_CATEGORIES=(unit integration acceptance pytests stress)
 CATEGORIES=("${DEFAULT_CATEGORIES[@]}")
+
+# Python venv for the pytest category. Created by
+# tests/setup/provision.sh.
+PYTEST_VENV="$HERE/.venv"
 
 ONLY=()
 MATCH=""
@@ -77,6 +89,57 @@ fails=()
 for cat in "${CATEGORIES[@]}"; do
   dir="$HERE/$cat"
   [[ -d "$dir" ]] || continue
+
+  # pytests/ is the pytest category — shell out to pytest once for
+  # the whole directory, parse its per-test result, fold into the
+  # running totals.
+  if [[ "$cat" == "pytests" ]]; then
+    if [[ ! -x "$PYTEST_VENV/bin/pytest" ]]; then
+      echo ""
+      echo "=== pytests (SKIPPED: no venv at $PYTEST_VENV) ==="
+      echo "  run tests/setup/provision.sh to create it"
+      continue
+    fi
+    if [[ $LIST_ONLY -eq 1 ]]; then
+      # --list honors both the dispatcher's own listing and pytest's
+      # --collect-only for the python side.
+      "$PYTEST_VENV/bin/pytest" "$dir" --collect-only -q 2>/dev/null | \
+        grep "::" | sed 's|^|pytests/|'
+      continue
+    fi
+
+    # Pytest expects its CWD to be tests/ (where pyproject.toml
+    # lives). The -rN suppresses the per-test short-summary block
+    # so the output stays tidy; on failure pytest still prints the
+    # traceback.
+    printf "\n=== pytests ===\n"
+    pytest_args=("$dir" --tb=short --no-header)
+    [[ -n "$MATCH" ]] && pytest_args+=(-k "$MATCH")
+    [[ $VERBOSE -eq 1 ]] && pytest_args+=(-v) || pytest_args+=(-q)
+
+    pyout=$(mktemp /tmp/bs_pytest_out.XXXXXX)
+    if ( cd "$HERE" && "$PYTEST_VENV/bin/pytest" "${pytest_args[@]}" ) \
+         > "$pyout" 2>&1; then
+      # Success — grep the trailing "N passed" summary.
+      py_pass=$(grep -oE "[0-9]+ passed"  "$pyout" | head -1 | awk '{print $1}')
+      py_skip=$(grep -oE "[0-9]+ skipped" "$pyout" | head -1 | awk '{print $1}')
+      pass=$(( pass + ${py_pass:-0} ))
+      skip=$(( skip + ${py_skip:-0} ))
+      [[ $VERBOSE -eq 1 ]] && cat "$pyout" || \
+        grep -E "^(PASSED|SKIPPED|pytests/|=+)" "$pyout" | tail -20
+    else
+      py_pass=$(grep -oE "[0-9]+ passed"  "$pyout" | head -1 | awk '{print $1}')
+      py_fail=$(grep -oE "[0-9]+ failed"  "$pyout" | head -1 | awk '{print $1}')
+      py_skip=$(grep -oE "[0-9]+ skipped" "$pyout" | head -1 | awk '{print $1}')
+      pass=$(( pass + ${py_pass:-0} ))
+      skip=$(( skip + ${py_skip:-0} ))
+      fail=$(( fail + ${py_fail:-0} ))
+      fails+=("pytests (${py_fail:-?} failed)")
+      cat "$pyout"
+    fi
+    rm -f "$pyout"
+    continue
+  fi
   for t in "$dir"/*.sh; do
     [[ -e "$t" ]] || continue
     [[ -x "$t" ]] || continue

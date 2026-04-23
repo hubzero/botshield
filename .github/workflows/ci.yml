@@ -48,7 +48,7 @@ jobs:
           curl -sk --max-time 5 -o /dev/null https://localhost/ \
             || (sudo journalctl -u apache2 --no-pager -n 50 && exit 1)
 
-      - name: Run tests (unit + integration + acceptance)
+      - name: Run tests (bash + pytest)
         run: tests/run --verbose
 
       # Short soak (60s at 25rps) — enough to catch any regression

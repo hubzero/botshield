@@ -1,27 +1,49 @@
 # mod_botshield test suite
 
-Regression and acceptance tests for the module. The suite is
-deliberately lightweight — just `bash + curl + python3 + awk`,
-no test-runner framework. Each test is a self-contained shell
-script that sources `lib/common.sh` and emits `PASS: …` /
-`FAIL: …` / `SKIP: …` lines.
+Regression and acceptance tests for the module. Two frameworks live
+side-by-side during the M11.4–M11.5 rebuild:
+
+- **Bash suite** (`unit/`, `integration/`, `acceptance/`, `stress/`) —
+  the original lightweight shell scripts. One file per test, source
+  `lib/common.sh`, emit `PASS:` / `FAIL:` / `SKIP:` lines.
+- **Pytest suite** (`pytests/` + `botshield_test/` + `conftest.py`) —
+  the pytest rebuild introduced in M11.4. Shared helpers in
+  `botshield_test/`, pytest fixtures in `conftest.py`, tests under
+  `pytests/`.
+
+Both run under `tests/run` and in CI. The pytest suite is the forward-
+looking one; M11.5 archives the bash tests to `bash-legacy/` and
+retires them from the default run.
 
 ## Layout
 
 ```
 tests/
 ├── run              # dispatcher — walks categories, runs tests
+├── pyproject.toml        # pytest config + editable-install metadata
+├── requirements-test.txt # pinned pytest deps (installed into .venv)
+├── conftest.py           # pytest fixtures (apache, fresh_ip, log_slice, …)
 ├── lib/
-│   ├── common.sh          # shared helpers (curl, metrics, log slice, asserts)
+│   ├── common.sh          # bash helpers (legacy; retires in M11.5)
 │   └── decision_gate.awk  # key=value decision-log validator
+├── botshield_test/        # pytest framework helpers (M11.4+)
+│   ├── apache.py          # reload/restart + transactional config_override
+│   ├── client.py          # httpx wrapper with bs-specific defaults
+│   ├── config.py          # paths + constants, env-var overrides
+│   ├── cookies.py         # pending cookie, PoW solver, tamper helpers
+│   ├── enums.py           # TIERS / OUTCOMES / COOKIES / PROVIDERS
+│   ├── ips.py             # time-salted fresh_ip() + rate-slot flavor
+│   ├── logs.py            # log_slice + structured decision parser
+│   └── metrics.py         # /metrics snapshot + delta
 ├── setup/
 │   ├── provision.sh       # idempotent one-shot box setup
 │   └── reset-state.sh     # between-run state-file wipe
-├── unit/            # no-Apache-needed checks (format validators)
-├── integration/    # tests against a running Apache + module
-├── acceptance/     # end-to-end user journeys
+├── unit/            # bash: no-Apache-needed checks (format validators)
+├── integration/    # bash: tests against a running Apache + module
+├── acceptance/     # bash: end-to-end user journeys
+├── pytests/        # pytest: migrated tests (M11.4+ growing)
 ├── stress/         # wrk, MPM matrix, soak (opt-in, slow)
-└── tools/          # test utilities (PoW solver, etc.)
+└── tools/          # test utilities (soak analyzer, etc.)
 ```
 
 ## Prerequisites
@@ -31,8 +53,12 @@ Ubuntu 22.04 work identically. The setup script installs what's needed:
 
 - `apache2`, `apache2-dev`
 - `libssl-dev`, `libcurl4-openssl-dev`, `libjson-c-dev`, `libpcre2-dev`
-- `python3` (for the SHA-256 PoW solver)
+- `python3`, `python3-venv` (pytest framework lives in `tests/.venv`)
 - `curl`, `openssl`, `wrk`
+
+Pinned Python deps: `httpx`, `pytest`, `pytest-xdist`, `pytest-timeout`
+(see `requirements-test.txt`). `provision.sh` creates `tests/.venv`
+and installs them. Playwright + Chromium arrive in M11.6.
 
 RHEL-family isn't scripted yet but the dependency list maps cleanly:
 `httpd-devel`, `openssl-devel`, `libcurl-devel`, `json-c-devel`,
