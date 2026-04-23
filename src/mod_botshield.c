@@ -6024,6 +6024,12 @@ static int bs_handler(request_rec *r)
 
 /* --- Hook registration --- */
 
+/* Gated under the same BS_FUZZ_HARNESS flag as the module
+ * declaration below: the hook-registration calls (ap_hook_*,
+ * APR_OPTIONAL_HOOK) reference Apache symbols the fuzz harness
+ * doesn't link against, and the fuzz target never invokes this
+ * function. No effect on the normal apxs build. */
+#ifndef BS_FUZZ_HARNESS
 static void bs_register_hooks(apr_pool_t *p)
 {
     (void)p;
@@ -6036,7 +6042,14 @@ static void bs_register_hooks(apr_pool_t *p)
     APR_OPTIONAL_HOOK(ap, status_hook, bs_status_hook,
                       NULL, NULL, APR_HOOK_MIDDLE);
 }
+#endif
 
+/* The module declaration pulls in Apache's core runtime symbols
+ * (hooks, module registration) that the LibFuzzer harness in
+ * tests/fuzz/ doesn't link against. Wrap it so the fuzz target can
+ * #include this file verbatim without fighting the linker. No
+ * effect on the normal apxs build. */
+#ifndef BS_FUZZ_HARNESS
 AP_DECLARE_MODULE(botshield) = {
     STANDARD20_MODULE_STUFF,
     bs_create_dir_cfg,    /* per-directory config creator */
@@ -6047,3 +6060,4 @@ AP_DECLARE_MODULE(botshield) = {
     bs_register_hooks,    /* hook registration            */
     AP_MODULE_FLAG_NONE   /* flags                        */
 };
+#endif
