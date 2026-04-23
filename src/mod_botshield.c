@@ -604,6 +604,38 @@ static void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     return cfg;
 }
 
+/* Per-server merge for the Allow family.
+ *
+ * Apache calls this to combine main-scope + vhost-scope configs into
+ * the effective scfg that hooks and request handlers see. The module
+ * historically omitted a server merge, which meant main-scope
+ * `BotShieldAllowBot` entries were invisible inside a vhost — a real
+ * mismatch for the common "declare globally, enable per-vhost" shape.
+ *
+ * Policy:
+ *  - Most fields: override (vhost) wins via pmemdup. Matches the
+ *    historical no-merge behavior so existing per-vhost directives
+ *    keep their scoping. (The merge is a null-op for any vhost that
+ *    doesn't touch allow_bots at main scope.)
+ *  - allow_bots: union of base + override, with override winning on
+ *    key collision. apr_hash_overlay is last-writer-wins on the
+ *    overlay arg, so passing (overlay=add, base=base) gives vhost-
+ *    overrides-main. Operators can add to, or shadow, a main-scope
+ *    bot declaration from a specific vhost. */
+static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
+{
+    bs_server_cfg *base = base_v;
+    bs_server_cfg *add  = add_v;
+    bs_server_cfg *out  = apr_pmemdup(p, add, sizeof(*add));
+
+    if (base->allow_bots && apr_hash_count(base->allow_bots) > 0
+        && add->allow_bots) {
+        out->allow_bots = apr_hash_overlay(p, add->allow_bots,
+                                           base->allow_bots);
+    }
+    return out;
+}
+
 static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
 {
     (void)s;
@@ -1613,10 +1645,8 @@ static const char   *bs_get_cookie_value(request_rec *r, const char *name);
  *
  * The UA classifier is a vanilla trie (no Aho-Corasick failure
  * links — simpler to read, indistinguishable on realistic UAs).
- * A prefilter short-circuits non-crawler traffic in ~1 µs so the
- * trie only walks for bot-ish UAs. Designed to scale to ~400
- * patterns (Cloudflare Radar's worked list) without the linear-scan
- * wall we'd hit otherwise.
+ * Designed to scale to ~400 patterns (Cloudflare Radar's worked
+ * list) without the linear-scan wall we'd hit otherwise.
  *
  * Pure read-only at request time; all state is populated in
  * post_config and immutable thereafter. The module never touches
@@ -1711,40 +1741,39 @@ static apr_status_t bs_ua_classifier_add(bs_ua_classifier *c,
     return APR_SUCCESS;
 }
 
-/* Cheap prefilter: does the UA contain any bot-ish token? Non-bot
- * UAs skip the trie walk entirely (~1 µs regardless of pattern
- * count). Tokens chosen to cover the overwhelming majority of
- * legitimate crawlers' UAs while being uncommon in human browsers. */
-static int bs_ua_is_botlike(const char *ua)
-{
-    if (!ua) return 0;
-    /* strcasestr is a GNU extension but present on every Linux we
-     * target and on FreeBSD/macOS. Portable enough for our build. */
-    return strcasestr(ua, "bot")    != NULL
-        || strcasestr(ua, "crawl")  != NULL
-        || strcasestr(ua, "spider") != NULL
-        || strcasestr(ua, "fetch")  != NULL
-        || strcasestr(ua, "slurp")  != NULL;
-}
-
-/* Classify: walk the trie from each position in the UA until we find
- * a terminal node. Returns the matched name (borrowed) or NULL.
- * O(|ua| × avg-depth) worst case; in practice most positions die
- * within the first few chars because the trie is sparse. */
+/* Classify: walk the trie from each position in the UA and return
+ * the longest terminal match (across all start positions). Longest-
+ * match semantics matter when operators register overlapping patterns
+ * — a more specific "CorpBot/Admin" must shadow a generic "CorpBot"
+ * so specific overrides do what operators expect.
+ *
+ * No prefilter: an earlier revision short-circuited on a hardcoded
+ * bot/crawl/spider/fetch/slurp token list, but that silently made
+ * operator-defined patterns unreachable for UAs that didn't happen
+ * to contain one of those tokens. Correctness beats the ~1 µs we'd
+ * save on non-bot traffic, and the trie walk is already O(|ua|)
+ * with a small constant (most positions die within 1–2 edges
+ * because the trie is sparse). */
 static const char *bs_ua_classify(const bs_ua_classifier *c, const char *ua)
 {
     if (!c || !ua || !*ua) return NULL;
-    if (!bs_ua_is_botlike(ua)) return NULL;   /* hot path */
 
+    const char *best_name = NULL;
+    size_t best_len = 0;
     for (const char *start = ua; *start; start++) {
         bs_ua_trie_node *n = c->root;
+        size_t len = 0;
         for (const char *p = start; *p; p++) {
             n = bs_ua_trie_walk(n, (unsigned char)*p);
             if (!n) break;
-            if (n->name) return n->name;   /* earliest / shortest match wins */
+            len++;
+            if (n->name && len > best_len) {
+                best_name = n->name;
+                best_len  = len;
+            }
         }
     }
-    return NULL;
+    return best_name;
 }
 
 /* --- Bot entry used by the Allow family ---
@@ -7144,7 +7173,7 @@ AP_DECLARE_MODULE(botshield) = {
     bs_create_dir_cfg,    /* per-directory config creator */
     bs_merge_dir_cfg,     /* per-directory config merger  */
     bs_create_server_cfg, /* per-server config creator    */
-    NULL,                 /* per-server config merger     */
+    bs_merge_server_cfg,  /* per-server config merger     */
     bs_cmds,              /* config directives            */
     bs_register_hooks,    /* hook registration            */
     AP_MODULE_FLAG_NONE   /* flags                        */

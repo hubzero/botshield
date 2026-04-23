@@ -105,25 +105,27 @@ def test_allow_bot_ua_only_mode(config_override, log_slice, fresh_ip):
     (distinct from allow-bot:<name>) so operators can filter on the
     weaker-trust variant.
 
-    The override anchors off the existing `BotShieldAllow on` line so
-    we append a new directive without disturbing the rest of config."""
+    Pick a UA and pattern that contain NONE of bot/crawl/spider/
+    fetch/slurp — doubles as the regression test for the earlier
+    prefilter bug where operator-defined patterns were silently
+    unreachable unless the UA happened to match a hardcoded token."""
     with config_override(
         r"BotShieldAllow\s+on",
         'BotShieldAllow on\n'
-        '    BotShieldAllowBot myscraper "InternalScraper/" *',
+        '    BotShieldAllowBot xenophon "Xenophon/" *',
         count=1,
     ):
         with log_slice as slc:
             resp = client.get(
                 "/", xff=fresh_ip,
-                ua="InternalScraper/1.0 (+https://example.com/bot)",
+                ua="Xenophon/9.9 (internal scraper)",
             )
             lines = slc.decision_lines(ip=fresh_ip)
 
     assert resp.status_code == 200
-    ua_only = [d for d in lines if "allow-bot-ua:myscraper" in d["reason"]]
+    ua_only = [d for d in lines if "allow-bot-ua:xenophon" in d["reason"]]
     assert ua_only, (
-        f"no decision line carried allow-bot-ua:myscraper; "
+        f"no decision line carried allow-bot-ua:xenophon; "
         f"lines={lines}"
     )
     assert ua_only[0]["tier"] == "pass"
@@ -157,6 +159,78 @@ def test_allow_bot_inline_cidr(config_override, log_slice, fresh_ip):
     fake = [d for d in out_lines if "fake-corpbot" in d["reason"]]
     assert fake, f"out-of-range CorpBot not faked; lines={out_lines}"
     assert fake[0]["tier"] in ("form", "captcha")
+
+
+def test_allow_bot_main_scope_inherits_to_vhost(
+    config_override, log_slice, fresh_ip,
+):
+    """Regression test for the server-config merge hook.
+
+    Declaring `BotShieldAllowBot` at MAIN scope (outside `<VirtualHost>`)
+    must flow into the vhost where `BotShieldAllow on` lives. Without
+    the merge hook, main-scope entries were invisible to per-request
+    matching — a structural mismatch for the common "declare globally,
+    enable per-vhost" shape.
+
+    Anchor off the main-scope BotShieldStateFile line (outside any
+    vhost block) to inject the main-scope directive."""
+    with config_override(
+        r"BotShieldStateFile\s+\S+",
+        'BotShieldAllowBot globalbot "GlobalBot/" *\n'
+        r'BotShieldStateFile /var/lib/botshield/state.bin',
+        count=1,
+    ):
+        with log_slice as slc:
+            resp = client.get(
+                "/", xff=fresh_ip,
+                ua="GlobalBot/1.0 (internal)",
+            )
+            lines = slc.decision_lines(ip=fresh_ip)
+
+    assert resp.status_code == 200
+    inherited = [d for d in lines if "allow-bot-ua:globalbot" in d["reason"]]
+    assert inherited, (
+        f"main-scope BotShieldAllowBot did not inherit into vhost; "
+        f"lines={lines}"
+    )
+    assert inherited[0]["tier"] == "pass"
+
+
+def test_allow_bot_longest_match_wins(
+    config_override, log_slice, fresh_ip,
+):
+    """Overlapping UA patterns must resolve to the longer/more specific
+    match. A UA matching both `CorpBot` and `CorpBot/Admin` should
+    classify as corpbot-admin, not corpbot — otherwise specific
+    overrides are shadowed by the generic pattern registered first."""
+    with config_override(
+        r"BotShieldAllow\s+on",
+        'BotShieldAllow on\n'
+        '    BotShieldAllowBot corpbot       "CorpBot" *\n'
+        '    BotShieldAllowBot corpbot-admin "CorpBot/Admin" *',
+        count=1,
+    ):
+        with log_slice as slc:
+            resp = client.get(
+                "/", xff=fresh_ip,
+                ua="CorpBot/Admin 1.0 (internal)",
+            )
+            lines = slc.decision_lines(ip=fresh_ip)
+
+    assert resp.status_code == 200
+    admin_lines = [
+        d for d in lines if "allow-bot-ua:corpbot-admin" in d["reason"]
+    ]
+    assert admin_lines, (
+        f"CorpBot/Admin UA was not classified as the longer-match "
+        f"corpbot-admin; lines={lines}"
+    )
+    # Defensive: make sure the generic corpbot didn't also win a line
+    # (shouldn't — classify returns a single name per request).
+    assert not [
+        d for d in lines if "allow-bot-ua:corpbot," in d["reason"]
+        or d["reason"].endswith("allow-bot-ua:corpbot")
+    ], f"generic corpbot shadowed the specific override; lines={lines}"
 
 
 def test_metrics_counters_present():
