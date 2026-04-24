@@ -163,21 +163,34 @@ static int bs_rb_path_match(const char *pattern, const char *path)
 
 /* ---------- UA group matching ---------- */
 
-/* Case-insensitive substring match. RFC 9309 strictly says the
- * User-agent token must be a prefix of the UA header, but that
- * misses the overwhelming majority of real-world crawler UAs, which
- * embed the product token mid-string — e.g. `Mozilla/5.0
- * (compatible; GPTBot/1.0; +https://openai.com/gptbot)` is the UA
- * a real GPTBot sends, and `User-agent: GPTBot` should match it.
- * Google's reference parser does the same (token-substring at
- * space/paren/slash boundaries). We use plain strcasestr rather
- * than token-boundary-aware scanning because robots.txt tokens
- * already contain only [A-Za-z0-9_-] by spec, so a substring
- * anywhere in the UA is effectively a token match. */
-static int bs_rb_ua_substring_match(const char *ua, const char *token)
+/* Case-insensitive per-segment prefix match. Real UAs structure
+ * their product tokens with `;` as the separator between segments,
+ * especially in the Mozilla-compat form:
+ *
+ *   Mozilla/5.0 (compatible; GPTBot/1.0; +https://openai.com/gptbot)
+ *
+ * (RFC 9110 doesn't name these `;`-separated pieces; "segment" here
+ * is descriptive, not a spec term.) We split the UA on `;`, strip
+ * leading whitespace and `(` from each segment, then check if the
+ * segment *starts with* the robots.txt token (case-insensitive).
+ * This is more accurate than a blanket strcasestr — a `User-agent:
+ * Bot` token under the old rule would match anything with "bot"
+ * anywhere in the UA, including real browsers whose UA happens to
+ * mention 'bot' inside a URL. Under the segment rule it only
+ * matches when a segment's product token begins with `Bot`. */
+static int bs_rb_ua_segment_match(const char *ua, const char *token)
 {
-    if (!token || !*token) return 0;
-    return strcasestr(ua, token) != NULL;
+    if (!ua || !token || !*token) return 0;
+    apr_size_t tlen = strlen(token);
+    const char *seg = ua;
+    while (seg) {
+        while (*seg == ' ' || *seg == '\t' || *seg == '(') seg++;
+        if (strncasecmp(seg, token, tlen) == 0) return 1;
+        const char *sep = strchr(seg, ';');
+        if (!sep) break;
+        seg = sep + 1;
+    }
+    return 0;
 }
 
 /* Walk groups, return index of the group with the longest matching
@@ -199,7 +212,7 @@ static int bs_rb_find_group(const robots_doc *doc, const char *ua)
                 if (wildcard_idx < 0) wildcard_idx = i;
                 continue;
             }
-            if (bs_rb_ua_substring_match(ua, tok)) {
+            if (bs_rb_ua_segment_match(ua, tok)) {
                 int len = (int)strlen(tok);
                 if (len > best_len) {
                     best_len = len;

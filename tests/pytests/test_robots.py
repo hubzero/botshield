@@ -219,6 +219,55 @@ def test_robots_wildcard_off_skips_wildcard_entirely(
     )
 
 
+# --- Segment-based UA match semantics -------------------------------
+
+
+def test_robots_ua_match_is_segment_based(
+    robots_path, config_override, log_slice, fresh_ip,
+):
+    """The robots.txt UA matcher splits the UA on `;` and checks each
+    segment for a prefix match with the token — not a blanket
+    substring of the whole UA.
+
+    Under the earlier strcasestr semantics, a `User-agent: Bot` rule
+    would match any UA that contained 'bot' anywhere, including
+    something like `Mozilla/5.0 (+https://example.com/robot-info)`
+    (because it contains 'bot' in the URL). Under segment semantics
+    it only matches when a `;`-separated segment starts with 'Bot'.
+
+    The specific 'GPTBot' case still matches its Mozilla-style UA
+    because the GPTBot segment is a `;`-separated piece that starts
+    with 'GPTBot'."""
+    robots_path = _write_robots(robots_path, """
+        User-agent: Bot
+        Disallow: /admin
+    """)
+    with config_override(
+        r"BotShieldAllow\s+on",
+        f'BotShieldAllow on\n    BotShieldRobotsTxt {robots_path}',
+        count=1,
+    ):
+        # A UA that mentions 'bot' only inside a URL in a slug —
+        # the slug starts with '+https://', not 'Bot'. Must NOT match.
+        r_substring_only = client.get(
+            "/admin", xff=fresh_ip,
+            ua="Mozilla/5.0 (+https://example.com/robot-info)",
+        )
+        # A UA whose product-token slug starts with 'Bot'. MUST match.
+        r_real_bot = client.get(
+            "/admin", xff=fresh_ip,
+            ua="Mozilla/5.0 (compatible; BotMom/1.0; +https://example.com)",
+        )
+
+    assert r_substring_only.status_code == 200, (
+        "strcasestr-era semantics would have blocked this; slug-based "
+        "matching must not — 'bot' only appears inside a URL"
+    )
+    assert r_real_bot.status_code == 403, (
+        "the slug 'BotMom/1.0' starts with 'Bot' — this should match"
+    )
+
+
 # --- Layering directive rules over robots.txt ------------------------
 
 
