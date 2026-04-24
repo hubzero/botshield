@@ -65,11 +65,23 @@ void robots_query(const robots_doc *doc,
                   robots_match *out);
 
 /* Group iteration — used at post_config time to allocate one SHM
- * rate-counter slot per group that carries a Crawl-delay. */
+ * rate-counter slot per group that carries a Crawl-delay, and by
+ * the /botshield/policy-status handler to render the parsed doc. */
 int         robots_group_count(const robots_doc *doc);
 const char *robots_group_name_at(const robots_doc *doc, int idx);
 int         robots_group_is_wildcard_at(const robots_doc *doc, int idx);
 int         robots_group_crawl_delay_at(const robots_doc *doc, int idx);
+
+/* Per-group content accessors. `ua_at` returns the lowercased UA
+ * token the parser stored; `rule_at` fills out the pattern pointer
+ * and the allow flag (1 = Allow, 0 = Disallow). All string pointers
+ * are pool-allocated inside the doc and share its lifetime. Out-
+ * of-range indices return NULL (strings) or 0 (counts/flags). */
+int         robots_group_ua_count_at(const robots_doc *doc, int idx);
+const char *robots_group_ua_at(const robots_doc *doc, int idx, int ua_idx);
+int         robots_group_rule_count_at(const robots_doc *doc, int idx);
+int         robots_group_rule_at(const robots_doc *doc, int idx, int rule_idx,
+                                 const char **out_pattern, int *out_allow);
 
 #ifdef __cplusplus
 }

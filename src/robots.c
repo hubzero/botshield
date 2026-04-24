@@ -554,3 +554,36 @@ int robots_group_crawl_delay_at(const robots_doc *doc, int idx)
     robots_group *g = bs_rb_group_at(doc, idx);
     return g ? g->crawl_delay : 0;
 }
+
+int robots_group_ua_count_at(const robots_doc *doc, int idx)
+{
+    robots_group *g = bs_rb_group_at(doc, idx);
+    return (g && g->user_agents) ? g->user_agents->nelts : 0;
+}
+
+const char *robots_group_ua_at(const robots_doc *doc, int idx, int ua_idx)
+{
+    robots_group *g = bs_rb_group_at(doc, idx);
+    if (!g || !g->user_agents) return NULL;
+    if (ua_idx < 0 || ua_idx >= g->user_agents->nelts) return NULL;
+    return APR_ARRAY_IDX(g->user_agents, ua_idx, const char *);
+}
+
+int robots_group_rule_count_at(const robots_doc *doc, int idx)
+{
+    robots_group *g = bs_rb_group_at(doc, idx);
+    return (g && g->rules) ? g->rules->nelts : 0;
+}
+
+int robots_group_rule_at(const robots_doc *doc, int idx, int rule_idx,
+                         const char **out_pattern, int *out_allow)
+{
+    robots_group *g = bs_rb_group_at(doc, idx);
+    if (!g || !g->rules) return 0;
+    if (rule_idx < 0 || rule_idx >= g->rules->nelts) return 0;
+    robots_rule *r = APR_ARRAY_IDX(g->rules, rule_idx, robots_rule *);
+    if (!r) return 0;
+    if (out_pattern) *out_pattern = r->pattern;
+    if (out_allow)   *out_allow   = r->allow;
+    return 1;
+}
