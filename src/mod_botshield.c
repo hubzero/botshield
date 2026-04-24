@@ -2744,13 +2744,24 @@ static int bs_check_policy(request_rec *r)
                                                &botshield_module);
     if (!scfg) return OK;
 
-    /* E4 — cookie triggers. Declaration order, first match wins.
+    /* E4 — cookie triggers. Declaration order; **pass triggers
+     * accumulate, first non-pass trigger short-circuits the walk**.
+     * That split exists to make the canonical layered-reputation
+     * pattern work — `app-session credit=15` + `app-auth
+     * credit=40` should stack to a 55-point credit when both
+     * cookies are present, not lose the second credit to first-
+     * match-wins. Contrast E3 path triggers, which are strict
+     * first-match-wins with no accumulation: paths are one-off
+     * matches, cookies are ongoing-state signals that naturally
+     * compose.
+     *
      * Runs before E3 path triggers so reputation signals land on
      * the decision log even when a later rule short-circuits.
      *
-     * Divergence from E3: credit/penalty apply regardless of
-     * status=pass, because cookies are ongoing-state signals the
-     * client carries on THIS request. */
+     * Divergences from E3 to keep straight while reading this loop:
+     *  1. credit/penalty apply regardless of status (even under
+     *     status=pass, because the cookie IS this request's state).
+     *  2. pass matches don't end the walk — they accumulate. */
     if (scfg->cookie_triggers && scfg->cookie_triggers->nelts > 0) {
         apr_table_t *cmap = bs_parse_cookies_once(r);
         const char *bs_state = apr_table_get(r->notes, BS_CK_STATE_NOTE);
@@ -8360,7 +8371,10 @@ static const command_rec bs_cmds[] = {
                  "from E3 — credit/penalty here ALWAYS apply, even "
                  "under pass), redirect=<url>, log=<tag>, flag=<bit>, "
                  "ttl=<sec>, penalty=<n>, credit=<n>. Declaration "
-                 "order, first match wins; upsert-by-name."),
+                 "order; pass triggers accumulate credit/penalty "
+                 "(layered reputation signals), first non-pass "
+                 "trigger short-circuits the response. Upsert-by-"
+                 "name."),
     AP_INIT_TAKE1("BotShieldSessionCookieName",
                  bs_set_session_cookie_name, NULL, RSRC_CONF,
                  "Add a cookie name to the list matched by the "
