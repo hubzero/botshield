@@ -268,6 +268,98 @@ def test_robots_ua_match_is_segment_based(
     )
 
 
+# --- Duplicate-UA groups (RFC 9309 §2.2.1) ---------------------------
+
+
+def test_robots_duplicate_ua_groups_are_unioned(
+    robots_path, config_override, fresh_ip,
+):
+    """Per RFC 9309 §2.2.1, when the same User-agent token appears in
+    multiple group stanzas, the crawler MUST obey the rules from all
+    of them. Earlier implementations only consulted the first (or
+    longest) matching group, under-enforcing files like this one."""
+    _write_robots(robots_path, """
+        User-agent: GPTBot
+        Disallow: /a
+
+        User-agent: GPTBot
+        Disallow: /b
+    """)
+    with config_override(
+        r"BotShieldAllow\s+on",
+        f'BotShieldAllow on\n    BotShieldRobotsTxt {robots_path}',
+        count=1,
+    ):
+        r_a = client.get("/a", xff=fresh_ip, ua=GPTBOT_UA)
+        r_b = client.get("/b", xff=fresh_ip, ua=GPTBOT_UA)
+        r_c = client.get("/c", xff=fresh_ip, ua=GPTBOT_UA)
+
+    assert r_a.status_code == 403, "Disallow /a from first stanza must fire"
+    assert r_b.status_code == 403, (
+        "Disallow /b from second stanza must fire too — duplicate "
+        "User-agent groups are accumulative per RFC 9309"
+    )
+    assert r_c.status_code == 200, "/c not mentioned; should pass"
+
+
+def test_robots_duplicate_crawl_delay_takes_max(
+    robots_path, config_override, fresh_ip,
+):
+    """When duplicate UA stanzas carry different Crawl-delay values,
+    the max (most restrictive) wins. Two stanzas with Crawl-delay: 30
+    and Crawl-delay: 60 → effective budget is 1 per 60 sec."""
+    _write_robots(robots_path, """
+        User-agent: GPTBot
+        Crawl-delay: 30
+
+        User-agent: GPTBot
+        Crawl-delay: 60
+    """)
+    with config_override(
+        r"BotShieldAllow\s+on",
+        f'BotShieldAllow on\n    BotShieldRobotsTxt {robots_path}',
+        count=1,
+    ):
+        r1 = client.get("/", xff=fresh_ip, ua=GPTBOT_UA)
+        r2 = client.get("/", xff=fresh_ip, ua=GPTBOT_UA)
+        ra = r2.headers.get("Retry-After")
+
+    assert r1.status_code == 200
+    assert r2.status_code == 429
+    assert ra and ra.isdigit() and int(ra) > 30, (
+        f"Retry-After should reflect the 60s window (max across "
+        f"stanzas); got {ra!r}"
+    )
+
+
+# --- Main-scope server-config inheritance ----------------------------
+
+
+def test_robots_main_scope_path_inherits_into_vhost(
+    robots_path, config_override, fresh_ip,
+):
+    """BotShieldRobotsTxt declared at the main server (outside
+    <VirtualHost>) must flow into the vhost's effective scfg via the
+    server-config merge hook — same guarantee E1/E2.1 already
+    provide. Anchor off the main-scope BotShieldStateFile line."""
+    _write_robots(robots_path, """
+        User-agent: GPTBot
+        Disallow: /admin
+    """)
+    with config_override(
+        r"BotShieldStateFile\s+\S+",
+        f'BotShieldRobotsTxt {robots_path}\n'
+        r'BotShieldStateFile /var/lib/botshield/state.bin',
+        count=1,
+    ):
+        r = client.get("/admin", xff=fresh_ip, ua=GPTBOT_UA)
+
+    assert r.status_code == 403, (
+        "main-scope BotShieldRobotsTxt didn't inherit into the vhost; "
+        "bs_merge_server_cfg needs to carry robots_* fields"
+    )
+
+
 # --- Layering directive rules over robots.txt ------------------------
 
 

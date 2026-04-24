@@ -193,59 +193,57 @@ static int bs_rb_ua_segment_match(const char *ua, const char *token)
     return 0;
 }
 
-/* Walk groups, return index of the group with the longest matching
- * User-agent token (most-specific-wins). Returns the wildcard group
- * as a fallback only if no specific group matched. -1 if no group. */
-static int bs_rb_find_group(const robots_doc *doc, const char *ua)
+/* Determine the "specificity" of the match: the length of the
+ * longest User-agent token across the doc that matches this UA.
+ * Returns 0 when only the `*` fallback matches (or nothing
+ * matches), so callers can distinguish the wildcard fallback
+ * case. `*_has_wildcard` is set to 1 if any group's UA list
+ * contains `*`; `*_doc_has_any_match` is 1 if a specific (non-`*`)
+ * token matched. */
+static int bs_rb_best_token_len(const robots_doc *doc, const char *ua,
+                                int *out_has_wildcard)
 {
-    if (!doc || !doc->groups || doc->groups->nelts == 0 || !ua) return -1;
-
-    int best_idx = -1;
-    int best_len = -1;
-    int wildcard_idx = -1;
-
+    int best_len = 0;
+    int has_wildcard = 0;
     for (int i = 0; i < doc->groups->nelts; i++) {
         robots_group *g = APR_ARRAY_IDX(doc->groups, i, robots_group *);
         for (int j = 0; j < g->user_agents->nelts; j++) {
             const char *tok = APR_ARRAY_IDX(g->user_agents, j, const char *);
-            if (strcmp(tok, "*") == 0) {
-                if (wildcard_idx < 0) wildcard_idx = i;
-                continue;
-            }
+            if (strcmp(tok, "*") == 0) { has_wildcard = 1; continue; }
             if (bs_rb_ua_segment_match(ua, tok)) {
                 int len = (int)strlen(tok);
-                if (len > best_len) {
-                    best_len = len;
-                    best_idx = i;
-                }
+                if (len > best_len) best_len = len;
             }
         }
     }
-    return (best_idx >= 0) ? best_idx : wildcard_idx;
+    if (out_has_wildcard) *out_has_wildcard = has_wildcard;
+    return best_len;
 }
 
-/* Walk a group's rules; return the longest-matching rule's allow flag.
- * Tie-break: Allow wins over Disallow on equal length (RFC 9309). If
- * nothing matches, default allowed. */
-static int bs_rb_group_allowed(const robots_group *g, const char *path)
+/* Does this group qualify for the winning specificity? If
+ * `best_len > 0`, the group qualifies iff it contains a UA token of
+ * length == best_len that matches the crawler UA. If `best_len == 0`
+ * (no specific match), the group qualifies iff it contains `*`. */
+static int bs_rb_group_qualifies(const robots_group *g,
+                                 const char *ua, int best_len)
 {
-    int best_len = -1;
-    int best_allow = 1;
-
-    if (!g || !g->rules) return 1;
-    for (int i = 0; i < g->rules->nelts; i++) {
-        robots_rule *r = APR_ARRAY_IDX(g->rules, i, robots_rule *);
-        if (!bs_rb_path_match(r->pattern, path)) continue;
-        int len = (int)strlen(r->pattern);
-        if (len > best_len) {
-            best_len = len;
-            best_allow = r->allow;
-        } else if (len == best_len && r->allow) {
-            best_allow = 1;
+    for (int j = 0; j < g->user_agents->nelts; j++) {
+        const char *tok = APR_ARRAY_IDX(g->user_agents, j, const char *);
+        if (best_len == 0) {
+            if (strcmp(tok, "*") == 0) return 1;
+        } else {
+            if (strcmp(tok, "*") == 0) continue;
+            if ((int)strlen(tok) == best_len
+                && bs_rb_ua_segment_match(ua, tok)) return 1;
         }
     }
-    return best_allow;
+    return 0;
 }
+
+/* Previously a per-group longest-match-wins evaluator. robots_query
+ * now folds this loop into its union-of-groups walk inline, so the
+ * standalone helper has no remaining callers. Kept out of the file
+ * deliberately. */
 
 /* ---------- parsing ---------- */
 
@@ -503,6 +501,29 @@ apr_status_t robots_parse_file(apr_pool_t *p, const char *path,
 
 /* ---------- query API ---------- */
 
+/* RFC 9309 §2.2.1: "if the product token matches multiple
+ * user-agent lines, all of the matching [groups] are applied."
+ * Real robots.txt files sometimes fan a single crawler across
+ * several stanzas; applying only one under-enforces.
+ *
+ * Evaluation:
+ *   1. Scan all groups once to find the longest matching UA token
+ *      (best_len) and whether any group carries `*`.
+ *   2. If best_len > 0: every group with a UA token of that length
+ *      that matches the crawler UA is "relevant."
+ *      If best_len == 0 and `*` exists: every group with `*` is
+ *      relevant; is_wildcard = 1.
+ *   3. Walk the union of rules across all relevant groups; return
+ *      longest-match-wins Allow/Disallow (Allow wins length ties
+ *      per RFC 9309).
+ *   4. Crawl-delay: take the max across relevant groups' non-zero
+ *      values — most restrictive wins. The RFC is silent on
+ *      duplicates; max is the safe interpretation for rate-limit
+ *      enforcement (if any stanza says "wait 60s," honor it).
+ *   5. group_idx / group_name report the first relevant group —
+ *      stable identifier for the decision log and for the slot
+ *      lookup downstream (duplicate-name groups share an SHM slot
+ *      by construction of scfg->robots_slot_by_name). */
 void robots_query(const robots_doc *doc, const char *ua, const char *path,
                   robots_match *out)
 {
@@ -512,17 +533,49 @@ void robots_query(const robots_doc *doc, const char *ua, const char *path,
     out->allowed         = 1;
     out->crawl_delay_sec = 0;
     out->group_name      = NULL;
-    if (!doc || !ua) return;
+    if (!doc || !ua || !doc->groups || doc->groups->nelts == 0) return;
 
-    int idx = bs_rb_find_group(doc, ua);
-    if (idx < 0) return;
+    int has_wildcard = 0;
+    int best_len = bs_rb_best_token_len(doc, ua, &has_wildcard);
+    if (best_len == 0 && !has_wildcard) return;  /* nothing to enforce */
 
-    robots_group *g = APR_ARRAY_IDX(doc->groups, idx, robots_group *);
-    out->group_idx       = idx;
-    out->is_wildcard     = g->is_wildcard;
-    out->crawl_delay_sec = g->crawl_delay;
-    out->group_name      = g->name;
-    out->allowed         = path ? bs_rb_group_allowed(g, path) : 1;
+    int best_rule_len = -1;
+    int best_allow    = 1;
+    int first_relevant_idx = -1;
+    int max_crawl_delay    = 0;
+
+    for (int i = 0; i < doc->groups->nelts; i++) {
+        robots_group *g = APR_ARRAY_IDX(doc->groups, i, robots_group *);
+        if (!bs_rb_group_qualifies(g, ua, best_len)) continue;
+        if (first_relevant_idx < 0) first_relevant_idx = i;
+
+        if (g->crawl_delay > max_crawl_delay) {
+            max_crawl_delay = g->crawl_delay;
+        }
+        if (!path) continue;
+
+        for (int k = 0; k < g->rules->nelts; k++) {
+            robots_rule *r = APR_ARRAY_IDX(g->rules, k, robots_rule *);
+            if (!bs_rb_path_match(r->pattern, path)) continue;
+            int len = (int)strlen(r->pattern);
+            if (len > best_rule_len) {
+                best_rule_len = len;
+                best_allow = r->allow;
+            } else if (len == best_rule_len && r->allow) {
+                best_allow = 1;
+            }
+        }
+    }
+
+    if (first_relevant_idx < 0) return;
+
+    robots_group *fg = APR_ARRAY_IDX(doc->groups, first_relevant_idx,
+                                     robots_group *);
+    out->group_idx       = first_relevant_idx;
+    out->is_wildcard     = (best_len == 0);
+    out->crawl_delay_sec = max_crawl_delay;
+    out->group_name      = fg->name;
+    out->allowed         = (path && best_rule_len >= 0) ? best_allow : 1;
 }
 
 int robots_group_count(const robots_doc *doc)

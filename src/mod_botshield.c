@@ -631,10 +631,18 @@ typedef struct {
 } bs_server_cfg;
 
 enum bs_robots_wildcard_scope {
+    BS_ROBOTS_WILDCARD_UNSET     = -1,  /* directive not given at this scope */
     BS_ROBOTS_WILDCARD_HEURISTIC = 0,   /* default: crawler-candidate test */
     BS_ROBOTS_WILDCARD_STRICT    = 1,   /* apply * rules to all UAs */
     BS_ROBOTS_WILDCARD_OFF       = 2,   /* ignore * groups entirely */
 };
+
+/* Sentinel for robots_refresh_interval: the directive hasn't been
+ * given at this scope. At post_config time this resolves to
+ * BS_ROBOTS_REFRESH_DEFAULT (60s) unless a main/vhost override
+ * replaced it via the merge hook. */
+#define BS_ROBOTS_REFRESH_UNSET    (-1)
+#define BS_ROBOTS_REFRESH_DEFAULT  60
 
 /* --- Config lifecycle --- */
 
@@ -750,6 +758,20 @@ static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
                                            add->rate_limits);
     out->block_paths = bs_merge_rule_array(p, base->block_paths,
                                            add->block_paths);
+
+    /* E2.2 server-scope inheritance — main-scope settings should
+     * flow into vhosts that don't restate them. Each field uses a
+     * sentinel ("unset at this scope") so we can tell "take the
+     * base value" apart from "vhost explicitly chose the default." */
+    if (!add->robots_txt_path && base->robots_txt_path) {
+        out->robots_txt_path = base->robots_txt_path;
+    }
+    if (add->robots_wildcard_scope == BS_ROBOTS_WILDCARD_UNSET) {
+        out->robots_wildcard_scope = base->robots_wildcard_scope;
+    }
+    if (add->robots_refresh_interval == BS_ROBOTS_REFRESH_UNSET) {
+        out->robots_refresh_interval = base->robots_refresh_interval;
+    }
     return out;
 }
 
@@ -782,17 +804,17 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     /* E2.2 — robots.txt defaults: no file configured, heuristic
      * wildcard scope, no parsed doc (populated in post_config). */
     scfg->robots_txt_path         = NULL;
-    scfg->robots_wildcard_scope   = BS_ROBOTS_WILDCARD_HEURISTIC;
+    /* Sentinel defaults so bs_merge_server_cfg can tell "unset at
+     * this scope" from "explicitly set to the default." An unset
+     * field after merge resolves to its real default in post_config. */
+    scfg->robots_wildcard_scope   = BS_ROBOTS_WILDCARD_UNSET;
     scfg->robots                  = NULL;
     scfg->robots_pending          = NULL;
     scfg->robots_slot_by_name     = apr_hash_make(p);
     scfg->robots_slot_pool_base   = -1;
     scfg->robots_slot_pool_size   = 0;
     scfg->robots_slot_pool_used   = 0;
-    /* 60s live-refresh default; BotShieldRobotsRefreshInterval 0
-     * disables the watchdog callback and reverts to post_config-
-     * only load (equivalent to E2.2.1 behavior). */
-    scfg->robots_refresh_interval = 60;
+    scfg->robots_refresh_interval = BS_ROBOTS_REFRESH_UNSET;
     return scfg;
 }
 
@@ -3157,6 +3179,22 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                 vcfg->block_paths->nelts);
         }
         #undef BS_E21_RESOLVE_COHORT
+    }
+
+    /* E2.2 — resolve sentinel defaults for any vhost where the
+     * directive wasn't given (either at the vhost or at main scope
+     * that got merged down). After this loop every vhost's scfg has
+     * concrete values; downstream code can read them as-is. */
+    for (server_rec *sv = s; sv; sv = sv->next) {
+        bs_server_cfg *vcfg = ap_get_module_config(sv->module_config,
+                                                   &botshield_module);
+        if (!vcfg) continue;
+        if (vcfg->robots_wildcard_scope == BS_ROBOTS_WILDCARD_UNSET) {
+            vcfg->robots_wildcard_scope = BS_ROBOTS_WILDCARD_HEURISTIC;
+        }
+        if (vcfg->robots_refresh_interval == BS_ROBOTS_REFRESH_UNSET) {
+            vcfg->robots_refresh_interval = BS_ROBOTS_REFRESH_DEFAULT;
+        }
     }
 
     /* E2.2 — reserve an SHM rate-counter slot pool for each vhost's
