@@ -271,6 +271,74 @@ def test_robots_ua_match_is_segment_based(
 # --- Layering directive rules over robots.txt ------------------------
 
 
+def test_robots_live_refresh_picks_up_changes(
+    robots_path, config_override, fresh_ip,
+):
+    """E2.2.2 — with BotShieldRobotsRefreshInterval set, the module
+    should pick up on-disk changes to robots.txt via mod_watchdog
+    without an Apache reload.
+
+    Strategy: initial file Disallows /admin for GPTBot. Verify the
+    block is active. Rewrite the file with the Disallow removed and
+    bump mtime. Wait ~2 refresh intervals. Confirm /admin is no
+    longer blocked, purely from the watchdog tick (no apachectl
+    reload between requests).
+
+    Uses the shortest-safe refresh interval (1s) so the test cost
+    stays under 5s. The sleep after the file rewrite is
+    interval * 3 to account for scheduling jitter and the initial
+    stat check having happened immediately after reload."""
+    import time
+
+    # Initial file: block /admin for GPTBot.
+    _write_robots(robots_path, """
+        User-agent: GPTBot
+        Disallow: /admin
+    """)
+    with config_override(
+        r"BotShieldAllow\s+on",
+        f'BotShieldAllow on\n'
+        f'    BotShieldRobotsTxt {robots_path}\n'
+        f'    BotShieldRobotsRefreshInterval 1',
+        count=1,
+    ):
+        r_before = client.get("/admin", xff=fresh_ip, ua=GPTBOT_UA)
+        assert r_before.status_code == 403, (
+            "initial robots.txt must block before refresh test begins"
+        )
+
+        # Rewrite the file with an empty Disallow (explicitly allow)
+        # and bump mtime one second forward so the stat() definitely
+        # detects the change (some filesystems have 1s mtime
+        # granularity).
+        _write_robots(robots_path, """
+            User-agent: GPTBot
+            Allow: /
+        """)
+        future = time.time() + 2
+        os.utime(robots_path, (future, future))
+
+        # Wait for the watchdog to tick and the refresh to run. Poll
+        # for up to 10s instead of a fixed sleep — under load (full
+        # parallel suite) watchdog scheduling has more jitter than the
+        # 1s interval would suggest. We still fail the test if the
+        # refresh never lands; we just don't fail it on a slow runner.
+        deadline = time.time() + 10
+        r_after = None
+        while time.time() < deadline:
+            r_after = client.get("/admin", xff=fresh_ip, ua=GPTBOT_UA)
+            if r_after.status_code != 403:
+                break
+            time.sleep(0.5)
+
+    assert r_after is not None and r_after.status_code == 200, (
+        "robots.txt was rewritten to allow /admin, but the refresh "
+        "watchdog didn't swap in the new rules within 10s — request "
+        "is still blocked. Check BotShieldRobotsRefreshInterval wiring "
+        f"(last status={r_after.status_code if r_after else 'n/a'})."
+    )
+
+
 def test_directive_rate_limit_overrides_robots_crawl_delay(
     robots_path, config_override, fresh_ip,
 ):

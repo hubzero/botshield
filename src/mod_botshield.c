@@ -553,6 +553,21 @@ struct bs_dir_cfg {
     const char *captcha_expected_action;
 };
 
+/* E2.2 — robots.txt state bundle. One of these per active parse;
+ * swapped atomically by the refresh watchdog. The owning subpool
+ * (`pool`) is a child of pconf and is destroyed when this bundle is
+ * finally retired — one refresh cycle after being displaced — so
+ * request-path readers holding pointers into doc's pool never see
+ * freed memory. `slot_by_group_idx` maps each group index in doc to
+ * its SHM rate-counter slot, or -1 for groups without a Crawl-delay
+ * (or for which the slot pool was exhausted). */
+typedef struct bs_robots_state {
+    robots_doc    *doc;
+    apr_pool_t    *pool;              /* owns doc; sized for one doc */
+    apr_time_t     mtime;              /* source file mtime when parsed */
+    int           *slot_by_group_idx;  /* length = robots_group_count(doc) */
+} bs_robots_state;
+
 /* Per-server config — holds SHM sizing before post-config runs. Only the
  * main server's values are consulted; vhost-level overrides are logged
  * and ignored because the SHM segment is global. */
@@ -581,17 +596,38 @@ typedef struct {
      * a rule without disturbing relative order of the others. */
     apr_array_header_t *rate_limits;   /* bs_rate_limit_entry * */
     apr_array_header_t *block_paths;   /* bs_block_path_entry * */
-    /* E2.2 — robots.txt enforcement. Path set via BotShieldRobotsTxt;
-     * doc populated in post_config. Wildcard scope governs how the
-     * User-agent: * group is applied (see PLAN.md). Crawl-delay slots
-     * array: indexed by robots_group index, value is the SHM
-     * rate-counter slot assigned at post_config (-1 = no crawl-delay
-     * for that group). */
+    /* E2.2 — robots.txt enforcement.
+     *
+     * `robots` is the active state bundle (parsed doc + owning
+     * subpool + per-group SHM slot indices + source-file mtime) —
+     * atomically swappable by the refresh watchdog without quiescing
+     * the hot path. NULL until post_config successfully loads the
+     * file.
+     *
+     * `robots_pending` holds the previously-active bundle for one
+     * refresh cycle, then is destroyed at the next refresh. This
+     * gives request-path readers at least one refresh interval to
+     * finish using an old doc before its pool is reclaimed; with
+     * refresh_interval >> max request duration the window is ample.
+     *
+     * `robots_slot_by_name` is a name → (int*) SHM-slot map
+     * populated at post_config and updated (but not shrunk) by each
+     * refresh. Keying by group name (not index) means unchanged
+     * groups keep their rate-counter state across refreshes —
+     * operators expect that rewriting robots.txt doesn't reset
+     * Crawl-delay windows for crawlers whose entry didn't change.
+     * The slot pool itself is reserved from bs_shm.rate_counters at
+     * post_config; robots_slot_pool_base/size bound it and
+     * robots_slot_pool_used tracks allocation. */
     const char         *robots_txt_path;
-    int                 robots_wildcard_scope;  /* enum below */
-    robots_doc         *robots_doc;
-    int                *robots_delay_slots;     /* int[robots_group_count] */
-    int                 robots_delay_slots_n;
+    int                 robots_wildcard_scope;       /* enum below */
+    bs_robots_state    *robots;                      /* active bundle, atomic */
+    bs_robots_state    *robots_pending;              /* awaits destruction */
+    apr_hash_t         *robots_slot_by_name;         /* name → int * */
+    int                 robots_slot_pool_base;       /* first reserved slot */
+    int                 robots_slot_pool_size;       /* pool capacity */
+    int                 robots_slot_pool_used;       /* slots assigned so far */
+    int                 robots_refresh_interval;     /* seconds; 0 = off */
 } bs_server_cfg;
 
 enum bs_robots_wildcard_scope {
@@ -745,11 +781,18 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->block_paths      = apr_array_make(p, 4, sizeof(void *));
     /* E2.2 — robots.txt defaults: no file configured, heuristic
      * wildcard scope, no parsed doc (populated in post_config). */
-    scfg->robots_txt_path        = NULL;
-    scfg->robots_wildcard_scope  = BS_ROBOTS_WILDCARD_HEURISTIC;
-    scfg->robots_doc             = NULL;
-    scfg->robots_delay_slots     = NULL;
-    scfg->robots_delay_slots_n   = 0;
+    scfg->robots_txt_path         = NULL;
+    scfg->robots_wildcard_scope   = BS_ROBOTS_WILDCARD_HEURISTIC;
+    scfg->robots                  = NULL;
+    scfg->robots_pending          = NULL;
+    scfg->robots_slot_by_name     = apr_hash_make(p);
+    scfg->robots_slot_pool_base   = -1;
+    scfg->robots_slot_pool_size   = 0;
+    scfg->robots_slot_pool_used   = 0;
+    /* 60s live-refresh default; BotShieldRobotsRefreshInterval 0
+     * disables the watchdog callback and reverts to post_config-
+     * only load (equivalent to E2.2.1 behavior). */
+    scfg->robots_refresh_interval = 60;
     return scfg;
 }
 
@@ -2409,11 +2452,18 @@ static int bs_check_policy(request_rec *r)
 
     /* E2.2 — robots.txt Disallow enforcement. Queried once for
      * (ua, path); the result also carries the Crawl-delay we'll use
-     * below, so stash it. */
+     * below, so stash it.
+     *
+     * Atomic load of scfg->robots so we never see a half-swapped
+     * state bundle. The bundle's fields are immutable after publish,
+     * and the previous bundle is held one refresh cycle before its
+     * pool is reclaimed — see bs_robots_refresh. */
+    bs_robots_state *rstate =
+        __atomic_load_n(&scfg->robots, __ATOMIC_ACQUIRE);
     robots_match rmatch = { -1, 0, 1, 0, NULL };
     int robots_apply = 0;
-    if (scfg->robots_doc && ua) {
-        robots_query(scfg->robots_doc, ua, r->uri, &rmatch);
+    if (rstate && rstate->doc && ua) {
+        robots_query(rstate->doc, ua, r->uri, &rmatch);
         if (rmatch.group_idx >= 0) {
             robots_apply = 1;
             if (rmatch.is_wildcard) {
@@ -2481,14 +2531,16 @@ static int bs_check_policy(request_rec *r)
     }
 
     /* E2.2 — robots.txt Crawl-delay enforcement. Budget=1 per
-     * Crawl-delay seconds; slot was assigned at post_config.
-     * Skipped when a directive rate-limit already matched this
-     * request: operator policy is authoritative in the rate family. */
+     * Crawl-delay seconds; slot assignment is held inside rstate's
+     * bundle (allocated at post_config + preserved by name across
+     * refreshes). Skipped when a directive rate-limit already
+     * matched this request: operator policy is authoritative in the
+     * rate family. */
     if (robots_apply && rmatch.crawl_delay_sec > 0
         && !directive_rate_matched
-        && scfg->robots_delay_slots
-        && rmatch.group_idx < scfg->robots_delay_slots_n) {
-        int slot_idx = scfg->robots_delay_slots[rmatch.group_idx];
+        && rstate && rstate->slot_by_group_idx
+        && rmatch.group_idx < robots_group_count(rstate->doc)) {
+        int slot_idx = rstate->slot_by_group_idx[rmatch.group_idx];
         bs_rate_counter *counters = (bs_rate_counter *)bs_shm.rate_counters;
         if (slot_idx >= 0 && counters) {
             bs_rate_counter *slot = &counters[slot_idx];
@@ -2519,6 +2571,166 @@ static int bs_check_policy(request_rec *r)
     }
 
     return OK;
+}
+
+/* ======================================================================
+ * E2.2.2 — live-refresh of robots.txt via mod_watchdog
+ *
+ * bs_robots_load(): stat + (conditionally) parse + publish. Runs both
+ * at post_config (initial load) and at each watchdog tick (refresh).
+ * When the source file's mtime is unchanged, it's a cheap no-op.
+ *
+ * Atomic-swap model: active state lives in scfg->robots (read with
+ * __atomic_load_n on the request path). When a fresh doc is built,
+ * we atomically publish it, push the outgoing state into
+ * scfg->robots_pending, and destroy whatever pool was in the
+ * previous pending slot. That gives each displaced doc at least one
+ * refresh interval of grace — more than enough for any in-flight
+ * request to finish reading pointers into its pool.
+ *
+ * Slot stability: SHM rate-counter slots are keyed by group name via
+ * scfg->robots_slot_by_name, which lives in pconf and survives
+ * refresh. A group whose name reappears in the new doc keeps its
+ * existing slot (and its in-flight Crawl-delay window); a genuinely
+ * new group gets a fresh slot from the reserved pool. The map never
+ * shrinks — operators who delete a crawler from robots.txt leave a
+ * stale entry, which is harmless (no lookup targets it). If they
+ * re-add it, the old slot is reused.
+ * ====================================================================== */
+static apr_status_t bs_robots_load(server_rec *sv, bs_server_cfg *scfg,
+                                   apr_pool_t *pconf)
+{
+    if (!scfg || !scfg->robots_txt_path) return APR_EINVAL;
+
+    /* Stat first — if mtime is unchanged since the active doc was
+     * parsed, there's nothing to do. This is the common case on
+     * every refresh tick. */
+    apr_finfo_t fi;
+    apr_status_t rv = apr_stat(&fi, scfg->robots_txt_path,
+                               APR_FINFO_MTIME | APR_FINFO_SIZE, pconf);
+    if (rv != APR_SUCCESS) {
+        char errbuf[128];
+        apr_strerror(rv, errbuf, sizeof(errbuf));
+        ap_log_error(APLOG_MARK, APLOG_WARNING, rv, sv,
+            "mod_botshield: robots.txt %s stat failed (%s); "
+            "keeping previous state",
+            scfg->robots_txt_path, errbuf);
+        return rv;
+    }
+
+    bs_robots_state *cur =
+        __atomic_load_n(&scfg->robots, __ATOMIC_ACQUIRE);
+    if (cur && cur->mtime == fi.mtime) {
+        return APR_SUCCESS;
+    }
+
+    /* Build the new state in a fresh subpool we control. Destroying
+     * this subpool later frees the doc and its slot map in one go,
+     * without touching anything else in pconf. */
+    apr_pool_t *npool = NULL;
+    apr_pool_create(&npool, pconf);
+
+    robots_doc *doc = NULL;
+    const char *parse_err = NULL;
+    rv = robots_parse_file(npool, scfg->robots_txt_path,
+                           &doc, &parse_err);
+    if (rv != APR_SUCCESS || !doc) {
+        ap_log_error(APLOG_MARK, APLOG_WARNING, rv, sv,
+            "mod_botshield: robots.txt %s parse failed (%s); "
+            "keeping previous state",
+            scfg->robots_txt_path,
+            parse_err ? parse_err : "unknown error");
+        apr_pool_destroy(npool);
+        return rv;
+    }
+
+    int n_groups = robots_group_count(doc);
+    bs_robots_state *ns = apr_pcalloc(npool, sizeof(*ns));
+    ns->doc   = doc;
+    ns->pool  = npool;
+    ns->mtime = fi.mtime;
+    ns->slot_by_group_idx = apr_pcalloc(npool,
+        (n_groups > 0 ? n_groups : 1) * sizeof(int));
+
+    int delay_count = 0, slot_reused = 0, slot_new = 0, slot_exhausted = 0;
+    for (int i = 0; i < n_groups; i++) {
+        ns->slot_by_group_idx[i] = -1;
+        int cd = robots_group_crawl_delay_at(doc, i);
+        if (cd <= 0) continue;
+        delay_count++;
+        const char *name = robots_group_name_at(doc, i);
+        int *slot_ptr = apr_hash_get(scfg->robots_slot_by_name,
+                                     name, APR_HASH_KEY_STRING);
+        if (slot_ptr) {
+            ns->slot_by_group_idx[i] = *slot_ptr;
+            slot_reused++;
+            continue;
+        }
+        if (scfg->robots_slot_pool_used < scfg->robots_slot_pool_size) {
+            int slot = scfg->robots_slot_pool_base
+                     + scfg->robots_slot_pool_used++;
+            ns->slot_by_group_idx[i] = slot;
+            /* Persist the mapping in pconf so future refreshes see
+             * it. Copy name into pconf too — the doc's pool will be
+             * destroyed on replacement and its name string with it. */
+            int *persist = apr_palloc(pconf, sizeof(int));
+            *persist = slot;
+            apr_hash_set(scfg->robots_slot_by_name,
+                         apr_pstrdup(pconf, name),
+                         APR_HASH_KEY_STRING, persist);
+            slot_new++;
+        } else {
+            slot_exhausted++;
+        }
+    }
+
+    /* Publish the new state. scfg->robots_pending currently holds
+     * the bundle displaced one refresh ago (or NULL at first load);
+     * destroy its pool now — more than one refresh interval has
+     * passed since any request took a pointer to it. */
+    bs_robots_state *to_destroy = scfg->robots_pending;
+    bs_robots_state *displaced  = cur;
+    __atomic_store_n(&scfg->robots, ns, __ATOMIC_RELEASE);
+    scfg->robots_pending = displaced;
+    if (to_destroy && to_destroy->pool) {
+        apr_pool_destroy(to_destroy->pool);
+    }
+
+    if (slot_exhausted > 0) {
+        ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
+            "mod_botshield: robots.txt slot pool exhausted "
+            "(%d/%d used); %d Crawl-delay groups will not enforce "
+            "until an Apache reload resizes the pool",
+            scfg->robots_slot_pool_used, scfg->robots_slot_pool_size,
+            slot_exhausted);
+    }
+    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+        "mod_botshield: robots.txt %s %sloaded — %d groups, "
+        "%d with Crawl-delay (%d slots reused, %d new)",
+        scfg->robots_txt_path, cur ? "re" : "",
+        n_groups, delay_count, slot_reused, slot_new);
+    return APR_SUCCESS;
+}
+
+/* mod_watchdog tick callback — one registration per vhost with a
+ * BotShieldRobotsTxt directive. State-transition events (STARTING,
+ * STOPPING) do nothing; RUNNING calls bs_robots_load which returns
+ * fast when mtime hasn't changed. */
+static apr_status_t bs_robots_watchdog_cb(int state, void *data,
+                                          apr_pool_t *pool)
+{
+    (void)pool;
+    if (state != AP_WATCHDOG_STATE_RUNNING) return APR_SUCCESS;
+    /* data was passed as the server_rec at registration; retrieve
+     * scfg from it so we always see the live pointer. pconf is
+     * reachable through sv->process->pconf. */
+    server_rec *sv = data;
+    if (!sv) return APR_SUCCESS;
+    bs_server_cfg *scfg =
+        ap_get_module_config(sv->module_config, &botshield_module);
+    if (!scfg || !scfg->robots_txt_path) return APR_SUCCESS;
+    bs_robots_load(sv, scfg, sv->process->pconf);
+    return APR_SUCCESS;
 }
 
 static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
@@ -2947,59 +3159,80 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
         #undef BS_E21_RESOLVE_COHORT
     }
 
-    /* E2.2 — parse any configured robots.txt file and assign SHM
-     * rate-counter slots to groups that carry a Crawl-delay. Uses
-     * the same slot pool as E2.1; `next_slot` keeps advancing. */
+    /* E2.2 — reserve an SHM rate-counter slot pool for each vhost's
+     * robots.txt, then do the initial parse. The SHM slot pool is
+     * sized once at post_config (cannot grow after); refresh reuses
+     * slots by group name so rate-counter state survives across
+     * refreshes. BS_E22_ROBOTS_SLOT_POOL is a deliberate overshoot —
+     * most hand-maintained robots.txt files have <10 Crawl-delay
+     * groups. */
+    #define BS_E22_ROBOTS_SLOT_POOL 16
     for (server_rec *sv = s; sv; sv = sv->next) {
         bs_server_cfg *vcfg = ap_get_module_config(sv->module_config,
                                                    &botshield_module);
         if (!vcfg || !vcfg->robots_txt_path) continue;
 
-        const char *parse_err = NULL;
-        robots_doc *doc = NULL;
-        apr_status_t rv = robots_parse_file(pconf, vcfg->robots_txt_path,
-                                            &doc, &parse_err);
-        if (rv != APR_SUCCESS || !doc) {
-            ap_log_error(APLOG_MARK, APLOG_WARNING, rv, sv,
-                "mod_botshield: BotShieldRobotsTxt %s failed to "
-                "parse (%s) — robots.txt enforcement disabled for "
-                "this vhost", vcfg->robots_txt_path,
-                parse_err ? parse_err : "unknown error");
-            continue;
+        /* Reserve the pool from the global rate-counter table. */
+        int pool_base = next_slot;
+        int pool_size = BS_E22_ROBOTS_SLOT_POOL;
+        if (pool_base + pool_size > (int)bs_shm.rate_counter_count) {
+            pool_size = (int)bs_shm.rate_counter_count - pool_base;
+            if (pool_size < 0) pool_size = 0;
         }
-        vcfg->robots_doc = doc;
+        vcfg->robots_slot_pool_base = pool_base;
+        vcfg->robots_slot_pool_size = pool_size;
+        vcfg->robots_slot_pool_used = 0;
+        next_slot += pool_size;
 
-        int n_groups = robots_group_count(doc);
-        if (n_groups > 0) {
-            vcfg->robots_delay_slots = apr_pcalloc(pconf,
-                n_groups * sizeof(int));
-            vcfg->robots_delay_slots_n = n_groups;
-            int delay_assigned = 0;
-            for (int i = 0; i < n_groups; i++) {
-                vcfg->robots_delay_slots[i] = -1;
-                int cd = robots_group_crawl_delay_at(doc, i);
-                if (cd <= 0) continue;
-                if (next_slot < (int)bs_shm.rate_counter_count) {
-                    vcfg->robots_delay_slots[i] = next_slot++;
-                    delay_assigned++;
-                } else {
-                    ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
-                        "mod_botshield: rate-counter slots exhausted "
-                        "(%d); robots.txt group '%s' Crawl-delay will "
-                        "not enforce",
-                        (int)bs_shm.rate_counter_count,
-                        robots_group_name_at(doc, i));
+        apr_status_t rv = bs_robots_load(sv, vcfg, pconf);
+        if (rv != APR_SUCCESS) {
+            /* bs_robots_load already logged a diagnostic; keep
+             * scfg->robots at NULL so the request path short-
+             * circuits out of robots.txt enforcement for this vhost. */
+        }
+
+        /* Register a per-vhost watchdog callback for live refresh.
+         * Soft dependency on mod_watchdog — if not loaded, we keep
+         * what post_config built and that's that. Per-vhost
+         * singletons so the watchdog doesn't multiplex ticks across
+         * vhosts with different refresh intervals. */
+        if (vcfg->robots_refresh_interval > 0) {
+            APR_OPTIONAL_FN_TYPE(ap_watchdog_get_instance) *fn_get =
+                APR_RETRIEVE_OPTIONAL_FN(ap_watchdog_get_instance);
+            APR_OPTIONAL_FN_TYPE(ap_watchdog_register_callback) *fn_reg =
+                APR_RETRIEVE_OPTIONAL_FN(ap_watchdog_register_callback);
+            if (fn_get && fn_reg) {
+                /* Instance name is per-vhost so one operator bad
+                 * state can't wedge another vhost's refresh. */
+                const char *wd_name = apr_psprintf(pconf,
+                    "mod_botshield_robots_%pp", (void *)sv);
+                ap_watchdog_t *wd = NULL;
+                apr_status_t wrv = fn_get(&wd, wd_name, 0, 1, pconf);
+                if (wrv == APR_SUCCESS && wd) {
+                    apr_interval_time_t ival = apr_time_from_sec(
+                        vcfg->robots_refresh_interval);
+                    wrv = fn_reg(wd, ival, sv, bs_robots_watchdog_cb);
+                } else if (wrv == APR_SUCCESS) {
+                    wrv = APR_EGENERAL;
                 }
+                if (wrv == APR_SUCCESS) {
+                    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+                        "mod_botshield: robots.txt live-refresh "
+                        "enabled every %d s",
+                        vcfg->robots_refresh_interval);
+                } else {
+                    ap_log_error(APLOG_MARK, APLOG_WARNING, wrv, sv,
+                        "mod_botshield: robots.txt watchdog "
+                        "registration failed; live-refresh disabled "
+                        "(post_config load still in effect)");
+                }
+            } else {
+                ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+                    "mod_botshield: mod_watchdog not loaded; "
+                    "robots.txt live-refresh disabled (post_config "
+                    "load still in effect; reload Apache after "
+                    "editing robots.txt)");
             }
-            ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
-                "mod_botshield: robots.txt %s parsed — %d groups, "
-                "%d with Crawl-delay",
-                vcfg->robots_txt_path, n_groups, delay_assigned);
-        } else {
-            ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
-                "mod_botshield: robots.txt %s parsed but contains "
-                "no groups (no enforcement)",
-                vcfg->robots_txt_path);
         }
     }
 
@@ -3987,6 +4220,29 @@ static const char *bs_set_robots_txt(cmd_parms *cmd, void *dconf,
         return "BotShieldRobotsTxt: path must be absolute";
     }
     scfg->robots_txt_path = apr_pstrdup(cmd->pool, path);
+    return NULL;
+}
+
+/* E2.2 — BotShieldRobotsRefreshInterval <seconds>. Governs the
+ * mod_watchdog-driven live refresh (E2.2.2). 0 disables the
+ * watchdog callback, reverting to post_config-only load
+ * (edit robots.txt + reload Apache). Default 60s. Hard cap at
+ * 86400 to catch typos that'd push refreshes into next week. */
+static const char *bs_set_robots_refresh_interval(cmd_parms *cmd,
+                                                  void *dconf,
+                                                  const char *arg)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    char *end = NULL;
+    long v = strtol(arg, &end, 10);
+    if (!end || *end || v < 0 || v > 86400) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldRobotsRefreshInterval: '%s' must be an integer "
+            "0..86400 seconds (0 = disable live refresh)", arg);
+    }
+    scfg->robots_refresh_interval = (int)v;
     return NULL;
 }
 
@@ -6995,6 +7251,14 @@ static const command_rec bs_cmds[] = {
                  "paths return 403 (reason robots-block:<group>); "
                  "Crawl-delay trips return 429 + Retry-After "
                  "(reason robots-rate:<group>)."),
+    AP_INIT_TAKE1("BotShieldRobotsRefreshInterval",
+                 bs_set_robots_refresh_interval, NULL, RSRC_CONF,
+                 "Seconds between mod_watchdog-driven re-checks of "
+                 "the BotShieldRobotsTxt file. On mtime change the "
+                 "file is re-parsed and the active rule set is "
+                 "atomically swapped — no Apache reload needed. "
+                 "Default 60. Set 0 to disable live-refresh and "
+                 "require an explicit reload after editing."),
     AP_INIT_TAKE1("BotShieldRobotsWildcardScope",
                  bs_set_robots_wildcard_scope, NULL, RSRC_CONF,
                  "How to apply User-agent: * rules: 'heuristic' "
