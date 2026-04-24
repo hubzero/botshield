@@ -1,6 +1,6 @@
 """E3 — path-based triggers.
 
-Exercises BotShieldTrigger directives:
+Exercises BotShieldPathTrigger directives:
 
   status=<code>       → Apache returns that code; ErrorDocument
                         compatible (we don't write a body).
@@ -14,7 +14,7 @@ Exercises BotShieldTrigger directives:
                         so future requests inherit the bit's penalty.
 
 Precedence: declaration order, first match wins. Main-scope
-BotShieldTrigger inherits into vhosts.
+BotShieldPathTrigger inherits into vhosts.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ def test_trigger_status_code_blocks_and_tags_log(
     with config_override(
         r"BotShieldAllow\s+on",
         'BotShieldAllow on\n'
-        '    BotShieldTrigger env-probe "/.env" '
+        '    BotShieldPathTrigger env-probe "/.env" '
         'status=403 "log=BAN 2h" ttl=3600',
         count=1,
     ):
@@ -51,8 +51,8 @@ def test_trigger_status_code_blocks_and_tags_log(
             lines = slc.decision_lines(ip=fresh_ip)
 
     assert resp.status_code == 403
-    hits = [d for d in lines if "trigger:env-probe" in d["reason"]]
-    assert hits, f"no trigger:env-probe decision line; lines={lines}"
+    hits = [d for d in lines if "path-trigger:env-probe" in d["reason"]]
+    assert hits, f"no path-trigger:env-probe decision line; lines={lines}"
     # The tag rides the existing decision log line — decision_lines
     # should pick it up as the "tag" field.
     assert any(d.get("tag") == "BAN 2h" for d in hits), (
@@ -72,7 +72,7 @@ def test_trigger_status_pass_lets_request_through(
     with config_override(
         r"BotShieldAllow\s+on",
         'BotShieldAllow on\n'
-        '    BotShieldTrigger pass-probe "/definitely-nonexistent" '
+        '    BotShieldPathTrigger pass-probe "/definitely-nonexistent" '
         'status=pass',
         count=1,
     ):
@@ -81,6 +81,41 @@ def test_trigger_status_pass_lets_request_through(
     # default) or whatever the dev vhost serves.
     assert resp.status_code != 403, (
         f"status=pass must not 403; got {resp.status_code}"
+    )
+
+
+def test_trigger_status_pass_does_not_apply_current_request_penalty(
+    config_override, log_slice, fresh_ip,
+):
+    """Path-family divergence from cookie/env: status=pass means
+    'don't enforce anything on this request.' Even if the operator
+    wrote penalty=N, that penalty must NOT bump the current
+    request's score — it's purely future-request bookkeeping
+    via flag=/ttl=. Pinned here so E7.2's shared action engine
+    can't silently homogenize this with cookie/env semantics."""
+    with config_override(
+        r"BotShieldAllow\s+on",
+        'BotShieldAllow on\n'
+        '    BotShieldPathTrigger passpen "/honey-pass" '
+        'status=pass penalty=90 flag=honeypot_hit ttl=3600',
+        count=1,
+    ):
+        with log_slice as slc:
+            client.get("/honey-pass", xff=fresh_ip)
+            lines = slc.decision_lines(ip=fresh_ip)
+    assert lines, f"no decision line for the passpen match; lines={lines}"
+    d = lines[-1]
+    # Reason trace records the match with the :pass suffix so
+    # operators can correlate, but the score delta is 0 — not 90.
+    assert "path-trigger:passpen:pass" in d["reason"], (
+        f"path-trigger:passpen:pass missing from reason; d={d}"
+    )
+    # Score the decision logs should only carry first-sight-ip (+5)
+    # and whatever clean-UA signals pile up — NEVER the +90 penalty.
+    score = int(d["score"])
+    assert score < 60, (
+        f"path-trigger status=pass leaked the penalty=90 bump into "
+        f"the current request's score; reason={d['reason']} score={score}"
     )
 
 
@@ -96,7 +131,7 @@ def test_trigger_redirect_sets_location(
     with config_override(
         r"BotShieldAllow\s+on",
         'BotShieldAllow on\n'
-        '    BotShieldTrigger env-redirect "/.env.redir" '
+        '    BotShieldPathTrigger env-redirect "/.env.redir" '
         'redirect=https://example.org/gone',
         count=1,
     ):
@@ -114,7 +149,7 @@ def test_trigger_redirect_honors_explicit_status(
     with config_override(
         r"BotShieldAllow\s+on",
         'BotShieldAllow on\n'
-        '    BotShieldTrigger env-redirect "/.env.perm" '
+        '    BotShieldPathTrigger env-redirect "/.env.perm" '
         'redirect=https://example.org/gone status=301',
         count=1,
     ):
@@ -135,8 +170,8 @@ def test_trigger_declaration_order_wins_on_overlap(
     with config_override(
         r"BotShieldAllow\s+on",
         'BotShieldAllow on\n'
-        '    BotShieldTrigger wp-ajax "/wp-admin/admin-ajax.php" status=pass\n'
-        '    BotShieldTrigger wp-all  "/wp-admin*"               status=403',
+        '    BotShieldPathTrigger wp-ajax "/wp-admin/admin-ajax.php" status=pass\n'
+        '    BotShieldPathTrigger wp-all  "/wp-admin*"               status=403',
         count=1,
     ):
         r_ajax  = client.get("/wp-admin/admin-ajax.php", xff=fresh_ip)
@@ -156,19 +191,19 @@ def test_trigger_declaration_order_wins_on_overlap(
 def test_trigger_main_scope_inherits_into_vhost(
     config_override, log_slice, fresh_ip,
 ):
-    """BotShieldTrigger declared outside <VirtualHost> must flow
+    """BotShieldPathTrigger declared outside <VirtualHost> must flow
     into the vhost via bs_merge_server_cfg — same guarantee the
     other E2.x directives got."""
     with config_override(
         r"BotShieldStateFile\s+\S+",
-        'BotShieldTrigger main-scope-trap "/main-scope-env" '
+        'BotShieldPathTrigger main-scope-trap "/main-scope-env" '
         'status=403 log="MAIN"\n'
         'BotShieldStateFile /var/lib/botshield/state.bin',
         count=1,
     ):
         resp = client.get("/main-scope-env", xff=fresh_ip)
     assert resp.status_code == 403, (
-        "main-scope BotShieldTrigger did not inherit into the vhost"
+        "main-scope BotShieldPathTrigger did not inherit into the vhost"
     )
 
 
@@ -189,7 +224,7 @@ def test_trigger_flag_ip_carries_to_next_request(
     with config_override(
         r"BotShieldAllow\s+on",
         'BotShieldAllow on\n'
-        '    BotShieldTrigger bait "/honey-bait" '
+        '    BotShieldPathTrigger bait "/honey-bait" '
         'status=pass flag=honeypot_hit ttl=3600',
         count=1,
     ):
