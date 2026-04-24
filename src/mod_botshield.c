@@ -585,7 +585,7 @@ typedef struct bs_robots_state {
 /* Per-server config — holds SHM sizing before post-config runs. Only the
  * main server's values are consulted; vhost-level overrides are logged
  * and ignored because the SHM segment is global. */
-typedef struct {
+typedef struct bs_server_cfg {
     apr_size_t  shm_size;
     int         flagged_capacity;
     int         ipv6_prefix_bits;   /* 0..128; 64 = per-subscriber v6 key */
@@ -2405,6 +2405,58 @@ typedef struct {
  * score_add (see PLAN.md E3 semantics). */
 #define BS_TRIGGER_STATUS_PASS   (-1)
 
+/* E7.2 — shared action engine for path/cookie/env trigger families.
+ *
+ * Every trigger family parses a family-unique predicate (path-glob,
+ * cookie-match, env-match) and shares the same action vocabulary
+ * after the predicate: status / redirect / log / flag / ttl /
+ * penalty / credit. `bs_trigger_action` holds the parsed action
+ * surface; `bs_trigger_family` selects the semantic profile the
+ * executor applies.
+ *
+ * Deliberate family differences that the profile encodes (not
+ * erased by the shared engine):
+ *   - allowed key subset
+ *       path rejects credit=     (discrete events, not reputation)
+ *       env  rejects redirect=   (scoring/flagging only)
+ *   - status=pass scoring
+ *       path skips score_add     (pass means "don't enforce here")
+ *       cookie/env apply penalty-credit (signal is this request's
+ *                                  state, so it belongs on this
+ *                                  request's score)
+ *   - pass-match iteration
+ *       path decays to DECLINED  (hand off to real handler)
+ *       cookie continues loop    (pass-credits accumulate)
+ *       env breaks loop          (discrete env signals, no stacking)
+ *   - family defaults
+ *       path  status=403, flag=scanner_probe, ttl=3600
+ *       cookie status=PASS, no flag
+ *       env    status=PASS, no flag
+ */
+typedef enum {
+    BS_TFAMILY_PATH = 0,
+    BS_TFAMILY_COOKIE,
+    BS_TFAMILY_ENV,
+} bs_trigger_family;
+
+typedef struct {
+    int           status_code;    /* HTTP code or BS_TRIGGER_STATUS_PASS */
+    const char   *redirect_url;   /* NULL unless explicitly set */
+    const char   *log_tag;
+    apr_uint32_t  flag_bit;       /* single M5.1 bit; 0 if ttl_sec==0 */
+    int           ttl_sec;        /* 0 = don't flag the IP */
+    int           penalty;        /* 0..1000 */
+    int           credit;         /* 0..1000 (rejected on path family) */
+    int           status_explicit; /* 1 if operator wrote status= */
+} bs_trigger_action;
+
+typedef enum {
+    BS_TEXEC_PASS_CONTINUE = 0,  /* pass-match; stay in family loop */
+    BS_TEXEC_PASS_BREAK,         /* pass-match; exit this family's loop */
+    BS_TEXEC_PASS_DECLINE,       /* pass-match; return DECLINED from policy */
+    BS_TEXEC_STATUS,             /* emit status/redirect; short-circuit */
+} bs_trigger_exec_outcome;
+
 /* Forward declarations — bs_check_policy (E3 path) calls these; they
  * live alongside their primary users further down the file. */
 static void bs_set_trigger_tag(request_rec *r, const char *tag);
@@ -2413,16 +2465,31 @@ static void bs_flagged_ip_add(request_rec *r,
                               apr_uint32_t flag_bits, int ttl_seconds);
 static int  bs_parse_client_ip(const char *ip_str, unsigned char out[16]);
 static void bs_mask_ipv6_prefix(unsigned char ip[16], int prefix_bits);
+/* Shared action helpers — see definitions below. The server-cfg
+ * struct body appears later in the file, so we forward-declare by
+ * struct tag and use `struct bs_server_cfg *` in the signature. */
+struct bs_server_cfg;
+static void bs_trigger_action_init(bs_trigger_family fam,
+                                   bs_trigger_action *a);
+static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
+                                               bs_trigger_family fam,
+                                               const char *arg,
+                                               bs_trigger_action *a);
+static const char *bs_finalize_trigger_action(apr_pool_t *pool,
+                                              bs_trigger_family fam,
+                                              bs_trigger_action *a);
+static bs_trigger_exec_outcome bs_apply_trigger_action(
+    request_rec *r,
+    struct bs_server_cfg *scfg,
+    bs_trigger_family fam,
+    const bs_trigger_action *a,
+    const char *family_tag,
+    const char *trigger_name);
 
 typedef struct {
-    const char   *name;
-    const char   *path_pattern;
-    int           status_code;       /* HTTP code or BS_TRIGGER_STATUS_PASS */
-    const char   *redirect_url;      /* NULL if not a redirect trigger */
-    const char   *log_tag;           /* NULL if no tag set */
-    apr_uint32_t  flag_bit;          /* single M5.1 bit, 0 if ttl_sec==0 */
-    int           ttl_sec;           /* 0 = don't flag the IP */
-    int           penalty;           /* score_add amount; ignored under PASS */
+    const char        *name;
+    const char        *path_pattern;
+    bs_trigger_action  action;       /* shared; see bs_trigger_action */
 } bs_path_trigger_entry;
 
 /* E4 — cookie triggers. Parallel feature to E3 path triggers, but
@@ -2467,20 +2534,11 @@ enum bs_cookie_pred_kind {
 };
 
 typedef struct {
-    const char   *name;
-    int           pred_kind;         /* enum bs_cookie_pred_kind */
-    const char   *cname;             /* NULL unless kind is NAMED_* */
-    const char   *cvalue;            /* NULL unless kind is NAMED_{EQ,NE,CONTAINS} */
-    /* Same action surface as bs_path_trigger_entry, minus status_code==PASS
-     * as the only way to express "no response short-circuit" — here
-     * pass means "no short-circuit but credit/penalty still apply." */
-    int           status_code;       /* HTTP code or BS_TRIGGER_STATUS_PASS */
-    const char   *redirect_url;
-    const char   *log_tag;
-    apr_uint32_t  flag_bit;
-    int           ttl_sec;
-    int           penalty;           /* applied regardless of status */
-    int           credit;            /* applied regardless of status */
+    const char        *name;
+    int                pred_kind;     /* enum bs_cookie_pred_kind */
+    const char        *cname;         /* NULL unless kind is NAMED_* */
+    const char        *cvalue;        /* NULL unless kind is NAMED_{EQ,NE,CONTAINS} */
+    bs_trigger_action  action;        /* shared; see bs_trigger_action */
 } bs_cookie_trigger_entry;
 
 /* E6 — env-var triggers. Read a per-request env var from
@@ -2517,20 +2575,11 @@ enum bs_env_pred_kind {
 };
 
 typedef struct {
-    const char   *name;
-    int           pred_kind;         /* enum bs_env_pred_kind */
-    const char   *env_name;
-    const char   *env_value;         /* NULL unless NAMED_EQ */
-    /* Action keys mirror E4's minus `credit` being unconditional —
-     * same E4-style semantics: credit/penalty apply under
-     * status=pass because the env signal is part of this
-     * request's state. */
-    int           status_code;       /* HTTP code or BS_TRIGGER_STATUS_PASS */
-    const char   *log_tag;
-    apr_uint32_t  flag_bit;
-    int           ttl_sec;
-    int           penalty;
-    int           credit;
+    const char        *name;
+    int                pred_kind;     /* enum bs_env_pred_kind */
+    const char        *env_name;
+    const char        *env_value;     /* NULL unless NAMED_EQ */
+    bs_trigger_action  action;        /* shared; see bs_trigger_action */
 } bs_env_trigger_entry;
 
 /* SHM slot for the fixed-window counter. Packed to 8 bytes so
@@ -2883,41 +2932,13 @@ static int bs_check_policy(request_rec *r)
                 scfg->cookie_triggers, i, bs_cookie_trigger_entry *);
             if (!bs_cookie_pred_match(c, cmap, scfg->session_names,
                                       bs_state)) continue;
-
-            /* Flag-IP (future-request memory). */
-            if (c->flag_bit && c->ttl_sec > 0) {
-                unsigned char client_ip[16];
-                if (bs_parse_client_ip(r->useragent_ip, client_ip)) {
-                    bs_mask_ipv6_prefix(client_ip,
-                                        scfg->ipv6_prefix_bits);
-                    bs_flagged_ip_add(r, client_ip,
-                                      c->flag_bit, c->ttl_sec);
-                }
-            }
-
-            bs_set_trigger_tag(r, c->log_tag);
-
-            /* credit/penalty always apply — E4's central divergence
-             * from E3. Record a reason so the decision log reflects
-             * the match regardless of short-circuit path taken. */
-            int score_delta = c->penalty - c->credit;
-            const char *reason = apr_pstrcat(r->pool,
-                "cookie-trigger:", c->name, NULL);
-            bs_score_add(r, score_delta, 0, reason);
-
-            if (c->status_code == BS_TRIGGER_STATUS_PASS) {
-                /* Pass: no short-circuit, continue to E3 and the
-                 * rest of the pipeline. The score contribution
-                 * above stays in the scoring record and gets
-                 * composed with downstream heuristics. */
-                continue;
-            }
-
-            if (c->redirect_url) {
-                apr_table_setn(r->headers_out,
-                    "Location", c->redirect_url);
-            }
-            return c->status_code;
+            bs_trigger_exec_outcome o = bs_apply_trigger_action(
+                r, scfg, BS_TFAMILY_COOKIE, &c->action,
+                "cookie-trigger", c->name);
+            /* Cookie family: BS_TEXEC_PASS_CONTINUE keeps accumulating
+             * credits; BS_TEXEC_STATUS short-circuits. PASS_BREAK /
+             * PASS_DECLINE aren't produced for this family. */
+            if (o == BS_TEXEC_STATUS) return c->action.status_code;
         }
     }
 
@@ -2955,81 +2976,32 @@ static int bs_check_policy(request_rec *r)
                 break;
             }
             if (!matched) continue;
-
-            if (t->flag_bit && t->ttl_sec > 0) {
-                unsigned char client_ip[16];
-                if (bs_parse_client_ip(r->useragent_ip, client_ip)) {
-                    bs_mask_ipv6_prefix(client_ip,
-                                        scfg->ipv6_prefix_bits);
-                    bs_flagged_ip_add(r, client_ip,
-                                      t->flag_bit, t->ttl_sec);
-                }
-            }
-            bs_set_trigger_tag(r, t->log_tag);
-
-            int score_delta = t->penalty - t->credit;
-            bs_score_add(r, score_delta, 0,
-                apr_pstrcat(r->pool, "env-trigger:", t->name, NULL));
-
-            if (t->status_code == BS_TRIGGER_STATUS_PASS) {
-                /* First match wins — no accumulation across env
-                 * triggers (env signals are discrete per-request,
-                 * not layered reputation like cookies). Stop
-                 * evaluating the rest of this family. */
-                break;
-            }
-            return t->status_code;
+            bs_trigger_exec_outcome o = bs_apply_trigger_action(
+                r, scfg, BS_TFAMILY_ENV, &t->action,
+                "env-trigger", t->name);
+            /* Env family: BS_TEXEC_PASS_BREAK ends the loop (env
+             * signals are discrete; no accumulation). STATUS
+             * short-circuits. */
+            if (o == BS_TEXEC_STATUS) return t->action.status_code;
+            if (o == BS_TEXEC_PASS_BREAK) break;
         }
     }
 
-    /* E3 — triggers. Path-only, unscoped. */
+    /* E3 — path triggers. First match wins; no accumulation. */
     if (scfg->path_triggers && scfg->path_triggers->nelts > 0) {
         for (int i = 0; i < scfg->path_triggers->nelts; i++) {
             bs_path_trigger_entry *t = APR_ARRAY_IDX(
                 scfg->path_triggers, i, bs_path_trigger_entry *);
             if (!bs_path_glob_match(t->path_pattern, r->uri)) continue;
-
-            /* Flag the IP (future-request memory) before any early
-             * return, so both PASS and error-status paths carry the
-             * reputation side-effect. */
-            if (t->flag_bit && t->ttl_sec > 0) {
-                unsigned char client_ip[16];
-                if (bs_parse_client_ip(r->useragent_ip, client_ip)) {
-                    bs_mask_ipv6_prefix(client_ip,
-                                        scfg->ipv6_prefix_bits);
-                    bs_flagged_ip_add(r, client_ip,
-                                      t->flag_bit, t->ttl_sec);
-                }
-            }
-
-            /* Decision-log tag rides the existing decision line —
-             * set it in r->notes whether or not we short-circuit. */
-            bs_set_trigger_tag(r, t->log_tag);
-
-            if (t->status_code == BS_TRIGGER_STATUS_PASS) {
-                /* Pass-through: no score_add on this request
-                 * (PASS means "don't enforce anything on this
-                 * request"), no body, no headers. The real handler
-                 * responds normally. bs_handler translates our
-                 * DECLINED into DECLINED for Apache. */
-                bs_score_add(r, 0, 0,
-                    apr_pstrcat(r->pool, "path-trigger:", t->name,
-                                ":pass", NULL));
-                return DECLINED;
-            }
-
-            /* Concrete-status path: record the reason (with or
-             * without penalty) so the decision log captures it,
-             * then either emit Location (redirect) or return the
-             * code for ErrorDocument to handle the body. */
-            bs_score_add(r, t->penalty, 0,
-                apr_pstrcat(r->pool, "path-trigger:", t->name, NULL));
-
-            if (t->redirect_url) {
-                apr_table_setn(r->headers_out,
-                    "Location", t->redirect_url);
-            }
-            return t->status_code;
+            bs_trigger_exec_outcome o = bs_apply_trigger_action(
+                r, scfg, BS_TFAMILY_PATH, &t->action,
+                "path-trigger", t->name);
+            /* Path family: PASS decays to DECLINED (handler lets
+             * the real Apache response through); STATUS emits
+             * Location/code short-circuit. CONTINUE/BREAK aren't
+             * produced for this family. */
+            if (o == BS_TEXEC_PASS_DECLINE) return DECLINED;
+            if (o == BS_TEXEC_STATUS)       return t->action.status_code;
         }
     }
 
@@ -5041,19 +5013,262 @@ static const char *bs_set_block_path(cmd_parms *cmd, void *dconf,
     return NULL;
 }
 
+/* E7.2 — shared action-engine implementation. One parser + one
+ * executor across path/cookie/env trigger families; family-specific
+ * matchers (path-glob / cookie / env) stay in their own setters and
+ * request-time walks and feed the shared action struct into these
+ * helpers. See the bs_trigger_action block at the top of the file
+ * for the semantic profile each family gets. */
+
+static const char *bs_trigger_family_dname(bs_trigger_family fam)
+{
+    switch (fam) {
+    case BS_TFAMILY_PATH:   return "BotShieldPathTrigger";
+    case BS_TFAMILY_COOKIE: return "BotShieldCookieTrigger";
+    case BS_TFAMILY_ENV:    return "BotShieldEnvTrigger";
+    }
+    return "BotShieldTrigger";      /* unreachable */
+}
+
+static void bs_trigger_action_init(bs_trigger_family fam,
+                                   bs_trigger_action *a)
+{
+    memset(a, 0, sizeof(*a));
+    switch (fam) {
+    case BS_TFAMILY_PATH:
+        /* Path defaults per PLAN.md E3: immediate 403, flag the IP
+         * with scanner_probe for an hour. Operators override by
+         * writing status=/flag=/ttl= explicitly. */
+        a->status_code = 403;
+        a->flag_bit    = BS_FLAG_SCANNER_PROBE;
+        a->ttl_sec     = 3600;
+        break;
+    case BS_TFAMILY_COOKIE:
+    case BS_TFAMILY_ENV:
+        /* Cookie/env default is pass-with-score-shaping. No flag
+         * unless operator asks; no short-circuit unless they do. */
+        a->status_code = BS_TRIGGER_STATUS_PASS;
+        a->flag_bit    = 0;
+        a->ttl_sec     = 0;
+        break;
+    }
+    a->penalty         = 0;
+    a->credit          = 0;
+    a->redirect_url    = NULL;
+    a->log_tag         = NULL;
+    a->status_explicit = 0;
+}
+
+static const char *bs_trigger_known_keys(bs_trigger_family fam)
+{
+    switch (fam) {
+    case BS_TFAMILY_PATH:
+        return "status, redirect, log, flag, ttl, penalty";
+    case BS_TFAMILY_COOKIE:
+        return "status, redirect, log, flag, ttl, penalty, credit";
+    case BS_TFAMILY_ENV:
+        return "status, log, flag, ttl, penalty, credit";
+    }
+    return "";
+}
+
+static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
+                                               bs_trigger_family fam,
+                                               const char *arg,
+                                               bs_trigger_action *a)
+{
+    const char *dname = bs_trigger_family_dname(fam);
+    const char *eq = strchr(arg, '=');
+    if (!eq) {
+        return apr_psprintf(pool,
+            "%s: extra arg '%s' must be key=value", dname, arg);
+    }
+    apr_size_t klen = (apr_size_t)(eq - arg);
+    const char *val = eq + 1;
+
+    #define BS_AK(n) (klen == sizeof(n)-1 && \
+                      strncasecmp(arg, n, sizeof(n)-1) == 0)
+
+    if (BS_AK("status")) {
+        if (!strcasecmp(val, "pass")) {
+            a->status_code = BS_TRIGGER_STATUS_PASS;
+        } else {
+            char *end = NULL;
+            long code = strtol(val, &end, 10);
+            if (!end || *end || code < 100 || code > 599) {
+                return apr_psprintf(pool,
+                    "%s: status='%s' must be an HTTP code 100..599 "
+                    "or the literal 'pass'", dname, val);
+            }
+            a->status_code = (int)code;
+        }
+        a->status_explicit = 1;
+    } else if (BS_AK("redirect")) {
+        if (fam == BS_TFAMILY_ENV) {
+            return apr_psprintf(pool,
+                "%s: redirect= is not supported on env triggers "
+                "(env signals are scoring/flagging only; use the "
+                "path or cookie family for response-shaping "
+                "redirects)", dname);
+        }
+        if (!*val) {
+            return apr_psprintf(pool,
+                "%s: redirect= requires a URL", dname);
+        }
+        a->redirect_url = apr_pstrdup(pool, val);
+    } else if (BS_AK("log")) {
+        a->log_tag = apr_pstrdup(pool, val);
+    } else if (BS_AK("flag")) {
+        const char *perr = NULL;
+        apr_uint32_t bits = bs_parse_flag_names(pool, val, &perr);
+        if (perr) return apr_psprintf(pool,
+            "%s: flag=%s: %s", dname, val, perr);
+        if (bits == 0 || (bits & (bits - 1)) != 0) {
+            return apr_psprintf(pool,
+                "%s: flag=%s must name exactly one bit",
+                dname, val);
+        }
+        a->flag_bit = bits;
+    } else if (BS_AK("ttl")) {
+        char *end = NULL;
+        long t = strtol(val, &end, 10);
+        if (!end || *end || t < 0 || t > 86400 * 30) {
+            return apr_psprintf(pool,
+                "%s: ttl='%s' must be 0..2592000 (0 = don't flag)",
+                dname, val);
+        }
+        a->ttl_sec = (int)t;
+    } else if (BS_AK("penalty")) {
+        char *end = NULL;
+        long pn = strtol(val, &end, 10);
+        if (!end || *end || pn < 0 || pn > 1000) {
+            return apr_psprintf(pool,
+                "%s: penalty='%s' must be 0..1000", dname, val);
+        }
+        a->penalty = (int)pn;
+    } else if (BS_AK("credit")) {
+        if (fam == BS_TFAMILY_PATH) {
+            return apr_psprintf(pool,
+                "%s: credit= is not supported on path triggers "
+                "(path matches are discrete events; running "
+                "reputation belongs on cookie or env triggers)",
+                dname);
+        }
+        char *end = NULL;
+        long cn = strtol(val, &end, 10);
+        if (!end || *end || cn < 0 || cn > 1000) {
+            return apr_psprintf(pool,
+                "%s: credit='%s' must be 0..1000", dname, val);
+        }
+        a->credit = (int)cn;
+    } else {
+        return apr_psprintf(pool,
+            "%s: unknown key '%.*s' (known: %s)",
+            dname, (int)klen, arg, bs_trigger_known_keys(fam));
+    }
+    #undef BS_AK
+    return NULL;
+}
+
+static const char *bs_finalize_trigger_action(apr_pool_t *pool,
+                                              bs_trigger_family fam,
+                                              bs_trigger_action *a)
+{
+    const char *dname = bs_trigger_family_dname(fam);
+    /* No flag without a TTL — clear the bit so the request-time
+     * walk skips the flag_ip call and the decision log stays
+     * honest about what persisted. */
+    if (a->ttl_sec == 0) a->flag_bit = 0;
+
+    if (a->redirect_url) {
+        if (a->status_code == BS_TRIGGER_STATUS_PASS) {
+            return apr_psprintf(pool,
+                "%s: status=pass and redirect= are mutually exclusive "
+                "— a redirect IS the response", dname);
+        }
+        if (!a->status_explicit) {
+            /* Default 302 when redirect is set without an explicit
+             * status; lets operators write `redirect=<url>` without
+             * also spelling out status=302. */
+            a->status_code = 302;
+            a->status_explicit = 1;
+        }
+        if (a->status_code < 300 || a->status_code >= 400) {
+            return apr_psprintf(pool,
+                "%s: redirect= requires a 3xx status (got %d)",
+                dname, a->status_code);
+        }
+    }
+    return NULL;
+}
+
+static bs_trigger_exec_outcome bs_apply_trigger_action(
+    request_rec *r,
+    struct bs_server_cfg *scfg,
+    bs_trigger_family fam,
+    const bs_trigger_action *a,
+    const char *family_tag,
+    const char *trigger_name)
+{
+    /* Flag-IP (future-request memory). Applies to all families
+     * uniformly — flag_bit is already 0 when ttl_sec==0, so the
+     * guard below is belt-and-suspenders. */
+    if (a->flag_bit && a->ttl_sec > 0) {
+        unsigned char client_ip[16];
+        if (bs_parse_client_ip(r->useragent_ip, client_ip)) {
+            bs_mask_ipv6_prefix(client_ip, scfg->ipv6_prefix_bits);
+            bs_flagged_ip_add(r, client_ip, a->flag_bit, a->ttl_sec);
+        }
+    }
+    bs_set_trigger_tag(r, a->log_tag);
+
+    int is_pass = (a->status_code == BS_TRIGGER_STATUS_PASS);
+
+    if (is_pass) {
+        if (fam == BS_TFAMILY_PATH) {
+            /* Path pass: record the match for the decision-log
+             * reason trace but do NOT bump the score. "pass" here
+             * means "don't enforce anything on this request" — the
+             * flag-IP side-effect above is the trigger's only
+             * future-request surface. */
+            bs_score_add(r, 0, 0,
+                apr_pstrcat(r->pool, family_tag, ":", trigger_name,
+                            ":pass", NULL));
+            return BS_TEXEC_PASS_DECLINE;
+        }
+        /* Cookie/env pass: apply penalty - credit on THIS request's
+         * score. The signal (cookie, env var) is part of this
+         * request's state, so the score contribution belongs here. */
+        int delta = a->penalty - a->credit;
+        bs_score_add(r, delta, 0,
+            apr_pstrcat(r->pool, family_tag, ":", trigger_name, NULL));
+        return (fam == BS_TFAMILY_COOKIE)
+             ? BS_TEXEC_PASS_CONTINUE   /* cookies accumulate */
+             : BS_TEXEC_PASS_BREAK;     /* env first-match-wins */
+    }
+
+    /* Concrete status. Record reason; caller emits Location + the
+     * status_code. Path family historically ignored `credit` — the
+     * parser rejects credit= for path so a->credit is always 0 and
+     * `penalty - credit` collapses to `penalty` for path too. */
+    int delta = a->penalty - a->credit;
+    bs_score_add(r, delta, 0,
+        apr_pstrcat(r->pool, family_tag, ":", trigger_name, NULL));
+
+    if (a->redirect_url) {
+        apr_table_setn(r->headers_out, "Location", a->redirect_url);
+    }
+    return BS_TEXEC_STATUS;
+}
+
 /* E3 — BotShieldPathTrigger <name> <path-glob> [key=value ...].
  *
- * Supported keys: status (code|pass), redirect, log, flag, ttl,
- * penalty. See PLAN.md E3 for semantics. Rejects:
- *   - unknown key names
- *   - status=pass + redirect= (pass-through can't also redirect)
- *   - flag= with an unknown bit name
- *   - status values that aren't 3xx when redirect= is set
- *
- * Upsert-by-name, preserving declaration order (same model as
- * BotShieldRateLimit / BotShieldBlockPath). */
+ * Path-unique bits live here; action-key parsing and cross-validation
+ * are delegated to the shared bs_parse_trigger_action_key +
+ * bs_finalize_trigger_action (see E7.2 above). Upsert-by-name
+ * preserves declaration order. */
 static const char *bs_set_path_trigger(cmd_parms *cmd, void *dconf,
-                                  int argc, char *const argv[])
+                                       int argc, char *const argv[])
 {
     (void)dconf;
     if (argc < 2) {
@@ -5078,114 +5293,16 @@ static const char *bs_set_path_trigger(cmd_parms *cmd, void *dconf,
     bs_path_trigger_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
     e->name         = apr_pstrdup(cmd->pool, name);
     e->path_pattern = apr_pstrdup(cmd->pool, pattern);
-    /* Defaults per PLAN.md E3. */
-    e->status_code  = 403;
-    e->redirect_url = NULL;
-    e->log_tag      = NULL;
-    e->flag_bit     = BS_FLAG_SCANNER_PROBE;
-    e->ttl_sec      = 3600;
-    e->penalty      = 0;
-
-    int status_explicit = 0;
+    bs_trigger_action_init(BS_TFAMILY_PATH, &e->action);
 
     for (int i = 2; i < argc; i++) {
-        const char *arg = argv[i];
-        const char *eq  = strchr(arg, '=');
-        if (!eq) {
-            return apr_psprintf(cmd->pool,
-                "BotShieldPathTrigger: extra arg '%s' must be key=value",
-                arg);
-        }
-        apr_size_t klen = (apr_size_t)(eq - arg);
-        const char *val = eq + 1;
-
-        #define BS_TRIG_KEY(n) (klen == sizeof(n)-1 && \
-                                 strncasecmp(arg, n, sizeof(n)-1) == 0)
-
-        if (BS_TRIG_KEY("status")) {
-            if (!strcasecmp(val, "pass")) {
-                e->status_code = BS_TRIGGER_STATUS_PASS;
-            } else {
-                char *end = NULL;
-                long code = strtol(val, &end, 10);
-                if (!end || *end || code < 100 || code > 599) {
-                    return apr_psprintf(cmd->pool,
-                        "BotShieldPathTrigger: status='%s' must be an "
-                        "HTTP code 100..599 or the literal 'pass'",
-                        val);
-                }
-                e->status_code = (int)code;
-            }
-            status_explicit = 1;
-        } else if (BS_TRIG_KEY("redirect")) {
-            if (!*val) {
-                return "BotShieldPathTrigger: redirect= requires a URL";
-            }
-            e->redirect_url = apr_pstrdup(cmd->pool, val);
-            if (!status_explicit) {
-                /* Default to 302 when redirect is set and operator
-                 * didn't pick a 3xx explicitly. */
-                e->status_code = 302;
-            }
-        } else if (BS_TRIG_KEY("log")) {
-            e->log_tag = apr_pstrdup(cmd->pool, val);
-        } else if (BS_TRIG_KEY("flag")) {
-            const char *perr = NULL;
-            apr_uint32_t bits = bs_parse_flag_names(cmd->pool, val, &perr);
-            if (perr) return apr_psprintf(cmd->pool,
-                "BotShieldPathTrigger: flag=%s: %s", val, perr);
-            /* Require exactly one bit — trigger semantics are per-
-             * request-per-IP and multi-bit would confuse the
-             * future-score contribution operators are picking. */
-            if (bits == 0 || (bits & (bits - 1)) != 0) {
-                return apr_psprintf(cmd->pool,
-                    "BotShieldPathTrigger: flag=%s must name exactly one "
-                    "bit", val);
-            }
-            e->flag_bit = bits;
-        } else if (BS_TRIG_KEY("ttl")) {
-            char *end = NULL;
-            long t = strtol(val, &end, 10);
-            if (!end || *end || t < 0 || t > 86400 * 30) {
-                return apr_psprintf(cmd->pool,
-                    "BotShieldPathTrigger: ttl='%s' must be 0..2592000 "
-                    "seconds (0 = don't flag)", val);
-            }
-            e->ttl_sec = (int)t;
-        } else if (BS_TRIG_KEY("penalty")) {
-            char *end = NULL;
-            long pn = strtol(val, &end, 10);
-            if (!end || *end || pn < 0 || pn > 1000) {
-                return apr_psprintf(cmd->pool,
-                    "BotShieldPathTrigger: penalty='%s' must be 0..1000",
-                    val);
-            }
-            e->penalty = (int)pn;
-        } else {
-            return apr_psprintf(cmd->pool,
-                "BotShieldPathTrigger: unknown key '%.*s' (known: status, "
-                "redirect, log, flag, ttl, penalty)",
-                (int)klen, arg);
-        }
-        #undef BS_TRIG_KEY
+        const char *err = bs_parse_trigger_action_key(cmd->pool,
+            BS_TFAMILY_PATH, argv[i], &e->action);
+        if (err) return err;
     }
-
-    /* Cross-validate. */
-    if (e->redirect_url && e->status_code == BS_TRIGGER_STATUS_PASS) {
-        return "BotShieldPathTrigger: status=pass and redirect= are "
-               "mutually exclusive — a redirect IS the response";
-    }
-    if (e->redirect_url
-        && (e->status_code < 300 || e->status_code >= 400)) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldPathTrigger: redirect= requires a 3xx status "
-            "(got %d)", e->status_code);
-    }
-    if (e->ttl_sec == 0) {
-        /* No flagging → bit is moot. Clear it to skip the flag call
-         * and keep the status page honest. */
-        e->flag_bit = 0;
-    }
+    const char *err = bs_finalize_trigger_action(cmd->pool,
+        BS_TFAMILY_PATH, &e->action);
+    if (err) return err;
 
     /* Upsert-by-name; preserves declaration order. */
     for (int i = 0; i < scfg->path_triggers->nelts; i++) {
@@ -5285,12 +5402,8 @@ static const char *bs_set_cookie_trigger(cmd_parms *cmd, void *dconf,
     }
 
     bs_cookie_trigger_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
-    e->name         = apr_pstrdup(cmd->pool, name);
-    e->status_code  = BS_TRIGGER_STATUS_PASS;   /* default pass */
-    e->flag_bit     = 0;                        /* no flag unless ttl>0 */
-    e->ttl_sec      = 0;                        /* no flag by default */
-    e->penalty      = 0;
-    e->credit       = 0;
+    e->name = apr_pstrdup(cmd->pool, name);
+    bs_trigger_action_init(BS_TFAMILY_COOKIE, &e->action);
 
     /* --- Parse the cookie-match predicate. --- */
     const char *m = match;
@@ -5385,101 +5498,17 @@ static const char *bs_set_cookie_trigger(cmd_parms *cmd, void *dconf,
             "bs-cookie=...)", match);
     }
 
-    /* --- Parse action keys. Shared mostly with bs_set_path_trigger. --- */
-    int status_explicit = 0;
+    /* --- Parse action keys via shared engine (E7.2). --- */
     for (int i = 2; i < argc; i++) {
-        const char *arg = argv[i];
-        const char *eq  = strchr(arg, '=');
-        if (!eq) {
-            return apr_psprintf(cmd->pool,
-                "BotShieldCookieTrigger: extra arg '%s' must be key=value",
-                arg);
-        }
-        apr_size_t klen = (apr_size_t)(eq - arg);
-        const char *val = eq + 1;
-        #define BS_CTK(n) (klen == sizeof(n)-1 && \
-                            strncasecmp(arg, n, sizeof(n)-1) == 0)
-
-        if (BS_CTK("status")) {
-            if (!strcasecmp(val, "pass")) {
-                e->status_code = BS_TRIGGER_STATUS_PASS;
-            } else {
-                char *end = NULL;
-                long code = strtol(val, &end, 10);
-                if (!end || *end || code < 100 || code > 599) {
-                    return apr_psprintf(cmd->pool,
-                        "BotShieldCookieTrigger: status='%s' must be "
-                        "an HTTP code 100..599 or the literal 'pass'",
-                        val);
-                }
-                e->status_code = (int)code;
-            }
-            status_explicit = 1;
-        } else if (BS_CTK("redirect")) {
-            if (!*val) return "BotShieldCookieTrigger: redirect= "
-                              "requires a URL";
-            e->redirect_url = apr_pstrdup(cmd->pool, val);
-            if (!status_explicit) e->status_code = 302;
-        } else if (BS_CTK("log")) {
-            e->log_tag = apr_pstrdup(cmd->pool, val);
-        } else if (BS_CTK("flag")) {
-            const char *perr = NULL;
-            apr_uint32_t bits = bs_parse_flag_names(cmd->pool, val, &perr);
-            if (perr) return apr_psprintf(cmd->pool,
-                "BotShieldCookieTrigger: flag=%s: %s", val, perr);
-            if (bits == 0 || (bits & (bits - 1)) != 0) {
-                return apr_psprintf(cmd->pool,
-                    "BotShieldCookieTrigger: flag=%s must name exactly "
-                    "one bit", val);
-            }
-            e->flag_bit = bits;
-        } else if (BS_CTK("ttl")) {
-            char *end = NULL;
-            long t = strtol(val, &end, 10);
-            if (!end || *end || t < 0 || t > 86400 * 30) {
-                return apr_psprintf(cmd->pool,
-                    "BotShieldCookieTrigger: ttl='%s' must be 0..2592000",
-                    val);
-            }
-            e->ttl_sec = (int)t;
-        } else if (BS_CTK("penalty")) {
-            char *end = NULL;
-            long pn = strtol(val, &end, 10);
-            if (!end || *end || pn < 0 || pn > 1000) {
-                return apr_psprintf(cmd->pool,
-                    "BotShieldCookieTrigger: penalty='%s' must be "
-                    "0..1000", val);
-            }
-            e->penalty = (int)pn;
-        } else if (BS_CTK("credit")) {
-            char *end = NULL;
-            long cn = strtol(val, &end, 10);
-            if (!end || *end || cn < 0 || cn > 1000) {
-                return apr_psprintf(cmd->pool,
-                    "BotShieldCookieTrigger: credit='%s' must be "
-                    "0..1000", val);
-            }
-            e->credit = (int)cn;
-        } else {
-            return apr_psprintf(cmd->pool,
-                "BotShieldCookieTrigger: unknown key '%.*s' (known: "
-                "status, redirect, log, flag, ttl, penalty, credit)",
-                (int)klen, arg);
-        }
-        #undef BS_CTK
+        const char *err = bs_parse_trigger_action_key(cmd->pool,
+            BS_TFAMILY_COOKIE, argv[i], &e->action);
+        if (err) return err;
     }
-
-    if (e->redirect_url && e->status_code == BS_TRIGGER_STATUS_PASS) {
-        return "BotShieldCookieTrigger: status=pass and redirect= are "
-               "mutually exclusive — a redirect IS the response";
+    {
+        const char *err = bs_finalize_trigger_action(cmd->pool,
+            BS_TFAMILY_COOKIE, &e->action);
+        if (err) return err;
     }
-    if (e->redirect_url
-        && (e->status_code < 300 || e->status_code >= 400)) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldCookieTrigger: redirect= requires a 3xx "
-            "status (got %d)", e->status_code);
-    }
-    if (e->ttl_sec == 0) e->flag_bit = 0;  /* no flag without ttl */
 
     /* Upsert-by-name. */
     for (int i = 0; i < scfg->cookie_triggers->nelts; i++) {
@@ -5529,10 +5558,8 @@ static const char *bs_set_env_trigger(cmd_parms *cmd, void *dconf,
     }
 
     bs_env_trigger_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
-    e->name        = apr_pstrdup(cmd->pool, name);
-    e->status_code = BS_TRIGGER_STATUS_PASS;
-    e->flag_bit    = 0;
-    e->ttl_sec     = 0;
+    e->name = apr_pstrdup(cmd->pool, name);
+    bs_trigger_action_init(BS_TFAMILY_ENV, &e->action);
 
     /* --- Parse env-match predicate. --- */
     const char *m = match;
@@ -5590,92 +5617,17 @@ static const char *bs_set_env_trigger(cmd_parms *cmd, void *dconf,
          * Distinct from env=FOO (matches empty OR non-empty). */
     }
 
-    /* --- Parse action keys. Reject redirect= explicitly. --- */
-    int status_explicit = 0;
+    /* --- Parse action keys via shared engine (E7.2). --- */
     for (int i = 2; i < argc; i++) {
-        const char *arg = argv[i];
-        const char *eq  = strchr(arg, '=');
-        if (!eq) {
-            return apr_psprintf(cmd->pool,
-                "BotShieldEnvTrigger: extra arg '%s' must be key=value",
-                arg);
-        }
-        apr_size_t klen = (apr_size_t)(eq - arg);
-        const char *val = eq + 1;
-        #define BS_ETK(n) (klen == sizeof(n)-1 && \
-                           strncasecmp(arg, n, sizeof(n)-1) == 0)
-
-        if (BS_ETK("status")) {
-            if (!strcasecmp(val, "pass")) {
-                e->status_code = BS_TRIGGER_STATUS_PASS;
-            } else {
-                char *end = NULL;
-                long code = strtol(val, &end, 10);
-                if (!end || *end || code < 100 || code > 599) {
-                    return apr_psprintf(cmd->pool,
-                        "BotShieldEnvTrigger: status='%s' must be "
-                        "an HTTP code 100..599 or the literal "
-                        "'pass'", val);
-                }
-                e->status_code = (int)code;
-            }
-            status_explicit = 1;
-            (void)status_explicit;
-        } else if (BS_ETK("redirect")) {
-            return "BotShieldEnvTrigger: redirect= is not supported "
-                   "on env triggers (env signals are scoring / "
-                   "flagging only; use E3 or E4 for response-shaping "
-                   "redirects)";
-        } else if (BS_ETK("log")) {
-            e->log_tag = apr_pstrdup(cmd->pool, val);
-        } else if (BS_ETK("flag")) {
-            const char *perr = NULL;
-            apr_uint32_t bits = bs_parse_flag_names(cmd->pool, val, &perr);
-            if (perr) return apr_psprintf(cmd->pool,
-                "BotShieldEnvTrigger: flag=%s: %s", val, perr);
-            if (bits == 0 || (bits & (bits - 1)) != 0) {
-                return apr_psprintf(cmd->pool,
-                    "BotShieldEnvTrigger: flag=%s must name exactly "
-                    "one bit", val);
-            }
-            e->flag_bit = bits;
-        } else if (BS_ETK("ttl")) {
-            char *end = NULL;
-            long t = strtol(val, &end, 10);
-            if (!end || *end || t < 0 || t > 86400 * 30) {
-                return apr_psprintf(cmd->pool,
-                    "BotShieldEnvTrigger: ttl='%s' must be 0..2592000",
-                    val);
-            }
-            e->ttl_sec = (int)t;
-        } else if (BS_ETK("penalty")) {
-            char *end = NULL;
-            long pn = strtol(val, &end, 10);
-            if (!end || *end || pn < 0 || pn > 1000) {
-                return apr_psprintf(cmd->pool,
-                    "BotShieldEnvTrigger: penalty='%s' must be "
-                    "0..1000", val);
-            }
-            e->penalty = (int)pn;
-        } else if (BS_ETK("credit")) {
-            char *end = NULL;
-            long cn = strtol(val, &end, 10);
-            if (!end || *end || cn < 0 || cn > 1000) {
-                return apr_psprintf(cmd->pool,
-                    "BotShieldEnvTrigger: credit='%s' must be "
-                    "0..1000", val);
-            }
-            e->credit = (int)cn;
-        } else {
-            return apr_psprintf(cmd->pool,
-                "BotShieldEnvTrigger: unknown key '%.*s' (known: "
-                "status, log, flag, ttl, penalty, credit)",
-                (int)klen, arg);
-        }
-        #undef BS_ETK
+        const char *err = bs_parse_trigger_action_key(cmd->pool,
+            BS_TFAMILY_ENV, argv[i], &e->action);
+        if (err) return err;
     }
-
-    if (e->ttl_sec == 0) e->flag_bit = 0;
+    {
+        const char *err = bs_finalize_trigger_action(cmd->pool,
+            BS_TFAMILY_ENV, &e->action);
+        if (err) return err;
+    }
 
     /* Upsert-by-name (same as E3/E4). */
     for (int i = 0; i < scfg->env_triggers->nelts; i++) {
