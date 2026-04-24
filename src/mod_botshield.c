@@ -248,8 +248,22 @@ struct bs_captcha_provider {
  * honeypot and a scanner probe carries the sum. */
 #define BS_FLAG_HONEYPOT_HIT      (1U << 0)
 #define BS_FLAG_SCANNER_PROBE     (1U << 1)
-#define BS_FLAG_FAKE_BOT      (1U << 2)
+#define BS_FLAG_FAKE_BOT          (1U << 2)
 #define BS_FLAG_POW_FAIL_STREAK   (1U << 3)
+/* E5 — credit-carrying bits. Contribute negative penalty in
+ * bs_flag_penalty so the app can push score down as well as up
+ * via the app-feedback channel. Compose additively with penalty
+ * bits: an IP that tripped a honeypot and later had the app
+ * verify the human carries +60 + -80 = -20 until the shorter-
+ * TTL bit expires. */
+#define BS_FLAG_APP_VERIFIED_HUMAN   (1U << 4)
+#define BS_FLAG_APP_VERIFIED_SESSION (1U << 5)
+#define BS_FLAG_APP_TRUST_SIGNAL     (1U << 6)
+/* Score floor for bs_flag_penalty output. Penalties can stack
+ * unbounded (high-trust penalty-stacking is a valid state);
+ * credits are clamped so a single huge credit can't lock out
+ * all future enforcement if other signals later go bad. */
+#define BS_FLAG_PENALTY_FLOOR        (-200)
 
 /* --- Shared-memory layout ---
  *
@@ -639,7 +653,21 @@ typedef struct {
     int                 robots_slot_pool_size;       /* pool capacity */
     int                 robots_slot_pool_used;       /* slots assigned so far */
     int                 robots_refresh_interval;     /* seconds; 0 = off */
+    /* E5 — app-to-module reputation feedback. Enabled gates the
+     * parse/validate path; stripping the header always runs when
+     * enabled=-1 (unset) or enabled=0 so a misconfigured app can
+     * never leak the header to clients. Header name + secret are
+     * per-scope. Secret bytes are loaded from the secret file at
+     * post_config. */
+    int                 app_feedback_enabled;        /* -1 unset, 0 off, 1 on */
+    const char         *app_feedback_header;         /* default "X-BotShield-Feedback" */
+    const char         *app_feedback_secret_file;    /* NULL = no key */
+    const unsigned char *app_feedback_secret;        /* loaded bytes */
+    apr_size_t          app_feedback_secret_len;
 } bs_server_cfg;
+
+#define BS_APP_FEEDBACK_UNSET  (-1)
+#define BS_APP_FEEDBACK_DEFAULT_HEADER  "X-BotShield-Feedback"
 
 enum bs_robots_wildcard_scope {
     BS_ROBOTS_WILDCARD_UNSET     = -1,  /* directive not given at this scope */
@@ -804,6 +832,19 @@ static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
     if (add->robots_refresh_interval == BS_ROBOTS_REFRESH_UNSET) {
         out->robots_refresh_interval = base->robots_refresh_interval;
     }
+
+    /* E5 — app feedback server-scope inheritance. */
+    if (add->app_feedback_enabled == BS_APP_FEEDBACK_UNSET) {
+        out->app_feedback_enabled = base->app_feedback_enabled;
+    }
+    if (!add->app_feedback_header && base->app_feedback_header) {
+        out->app_feedback_header = base->app_feedback_header;
+    }
+    if (!add->app_feedback_secret_file && base->app_feedback_secret_file) {
+        out->app_feedback_secret_file = base->app_feedback_secret_file;
+        out->app_feedback_secret      = base->app_feedback_secret;
+        out->app_feedback_secret_len  = base->app_feedback_secret_len;
+    }
     return out;
 }
 
@@ -863,6 +904,13 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->robots_slot_pool_size   = 0;
     scfg->robots_slot_pool_used   = 0;
     scfg->robots_refresh_interval = BS_ROBOTS_REFRESH_UNSET;
+    /* E5 defaults — sentinel so bs_merge_server_cfg can tell
+     * "unset at this scope" from explicit off. */
+    scfg->app_feedback_enabled      = BS_APP_FEEDBACK_UNSET;
+    scfg->app_feedback_header       = NULL;
+    scfg->app_feedback_secret_file  = NULL;
+    scfg->app_feedback_secret       = NULL;
+    scfg->app_feedback_secret_len   = 0;
     return scfg;
 }
 
@@ -3164,6 +3212,224 @@ static apr_status_t bs_robots_watchdog_cb(int state, void *data,
     return APR_SUCCESS;
 }
 
+/* ======================================================================
+ * E5 — App-to-module reputation feedback.
+ *
+ * App emits `X-BotShield-Feedback: flag=<name>;ttl=<sec>[;kid=<id>];sig=<hex>`
+ * on its response. Module reads, HMAC-verifies, parses, strips the header,
+ * and calls bs_flagged_ip_add. Bidirectional: flag names can be penalty
+ * bits (honeypot_hit, scanner_probe, fake_bot, pow_fail_streak) or
+ * credit bits (app_verified_human, app_verified_session,
+ * app_trust_signal) — same wire format, different bit semantics.
+ *
+ * Implementation rules (see PLAN.md E5):
+ *   1. Run as an output filter so stripping happens before the
+ *      response reaches the client. log_transaction would be too late.
+ *   2. Always strip when the header is present, even if the feature
+ *      is off — a misconfigured app must not leak the header to clients.
+ *   3. Duplicate headers → reject + strip all instances.
+ *   4. Main request only (ap_is_initial_req).
+ *   5. One-shot per request: the filter removes itself after processing.
+ * ====================================================================== */
+
+static ap_filter_rec_t *bs_app_feedback_filter_handle;
+
+/* Count how many header entries match `name` (case-insensitive)
+ * across both headers_out tables. apr_table_get only returns the
+ * first; we need the count to catch duplicates up front, before
+ * calling apr_table_unset (which removes all of them). Check both
+ * r->headers_out AND r->err_headers_out — mod_headers' "Header
+ * set" writes to the former; "Header always set" writes to the
+ * latter (which Apache still merges into the on-wire response
+ * regardless of status). If we only looked at one, a conditional
+ * `Header set` from a 404 handler would miss the strip. */
+static int bs_count_header_in_table(apr_table_t *t, const char *name)
+{
+    if (!t) return 0;
+    const apr_array_header_t *arr = apr_table_elts(t);
+    int count = 0;
+    for (int i = 0; i < arr->nelts; i++) {
+        apr_table_entry_t *e = &((apr_table_entry_t *)arr->elts)[i];
+        if (e->key && strcasecmp(e->key, name) == 0) count++;
+    }
+    return count;
+}
+static int bs_count_header(request_rec *r, const char *name)
+{
+    return bs_count_header_in_table(r->headers_out, name)
+         + bs_count_header_in_table(r->err_headers_out, name);
+}
+
+/* Parse + HMAC-verify a single X-BotShield-Feedback value. On success
+ * sets *out_flag / *out_ttl and returns NULL. On failure returns an
+ * error string (for logging) and leaves *out_flag / *out_ttl unset. */
+static const char *bs_app_feedback_verify(apr_pool_t *p,
+                                          const unsigned char *key,
+                                          apr_size_t key_len,
+                                          const char *value,
+                                          apr_uint32_t *out_flag,
+                                          int *out_ttl)
+{
+    if (!key || key_len == 0) return "no secret configured";
+    if (!value || !*value) return "empty header value";
+
+    /* Find ";sig=" — everything before it is HMAC-covered. */
+    const char *sig_marker = strstr(value, ";sig=");
+    if (!sig_marker) return "missing sig= field";
+    apr_size_t signed_len = (apr_size_t)(sig_marker - value);
+    const char *sig_hex = sig_marker + 5;
+    if (strlen(sig_hex) != 64) return "sig must be 64 hex chars";
+
+    unsigned char expected[32];
+    bs_hmac_sha256(key, key_len,
+                   (const unsigned char *)value, signed_len,
+                   expected);
+    unsigned char given[32];
+    if (!bs_from_hex(sig_hex, 32, given)) return "sig not hex";
+    if (!bs_ct_equal(expected, given, 32)) return "signature mismatch";
+
+    /* Parse key=value pairs up to (but not including) ;sig=. */
+    char *body = apr_pstrmemdup(p, value, signed_len);
+    char *state = NULL;
+    const char *flag_name = NULL;
+    int ttl = -1;
+    for (char *tok = apr_strtok(body, ";", &state); tok;
+         tok = apr_strtok(NULL, ";", &state)) {
+        while (*tok == ' ' || *tok == '\t') tok++;
+        char *eq = strchr(tok, '=');
+        if (!eq) continue;
+        *eq = '\0';
+        const char *k = tok;
+        const char *v = eq + 1;
+        if (!strcasecmp(k, "flag")) {
+            flag_name = v;
+        } else if (!strcasecmp(k, "ttl")) {
+            char *end = NULL;
+            long n = strtol(v, &end, 10);
+            if (end && !*end) ttl = (int)n;
+        }
+        /* Unknown keys (e.g. kid=) tolerated but don't affect
+         * parsing — still HMAC-covered so replay is bounded. */
+    }
+
+    if (!flag_name)         return "missing flag= field";
+    if (ttl < 60 || ttl > 86400 * 30) {
+        return "ttl must be 60..2592000";
+    }
+
+    const char *ferr = NULL;
+    apr_uint32_t bits = bs_parse_flag_names(p, flag_name, &ferr);
+    if (ferr || bits == 0) {
+        return apr_psprintf(p, "invalid flag: %s",
+            ferr ? ferr : "unknown name");
+    }
+    /* Require exactly one bit per header — multi-bit flags would let
+     * one signed blob apply multiple bits, which is a clarity /
+     * replayability concern even if HMAC covers the whole value. */
+    if ((bits & (bits - 1)) != 0) {
+        return "flag must name exactly one bit";
+    }
+
+    *out_flag = bits;
+    *out_ttl  = ttl;
+    return NULL;
+}
+
+/* Output-filter callback. Runs once per initial request: reads
+ * r->headers_out for the configured feedback header, strips every
+ * occurrence, and (if the feature is enabled and exactly one copy
+ * was found) validates the HMAC and updates the flagged-IP table. */
+static apr_status_t bs_app_feedback_filter(ap_filter_t *f,
+                                           apr_bucket_brigade *bb)
+{
+    request_rec *r = f->r;
+
+    /* One-shot: remove before processing to avoid re-entry on
+     * subsequent brigade passes. */
+    ap_remove_output_filter(f);
+
+    if (!ap_is_initial_req(r)) {
+        return ap_pass_brigade(f->next, bb);
+    }
+
+    bs_server_cfg *scfg =
+        ap_get_module_config(r->server->module_config, &botshield_module);
+    if (!scfg) return ap_pass_brigade(f->next, bb);
+
+    const char *hname = scfg->app_feedback_header
+                      ? scfg->app_feedback_header
+                      : BS_APP_FEEDBACK_DEFAULT_HEADER;
+
+    int n = bs_count_header(r, hname);
+    if (n == 0) return ap_pass_brigade(f->next, bb);
+
+    /* Snapshot the first value BEFORE we strip — we still want to
+     * verify and apply it if there's exactly one. Check both tables
+     * since mod_headers' `Header set` and `Header always set` go
+     * to different ones. */
+    const char *first_val = apr_table_get(r->headers_out, hname);
+    if (!first_val) first_val = apr_table_get(r->err_headers_out, hname);
+    char *snapshot = first_val ? apr_pstrdup(r->pool, first_val) : NULL;
+
+    /* Always strip — see PLAN.md E5 rule 2. Removes every copy at
+     * once (from both tables) so duplicates don't leak even when
+     * we reject them. */
+    apr_table_unset(r->headers_out, hname);
+    apr_table_unset(r->err_headers_out, hname);
+
+    int enabled = (scfg->app_feedback_enabled == 1);
+    if (!enabled) {
+        return ap_pass_brigade(f->next, bb);
+    }
+
+    if (n > 1) {
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: app feedback rejected: %d copies of "
+            "'%s' on response (expected exactly 1)", n, hname);
+        return ap_pass_brigade(f->next, bb);
+    }
+
+    if (!scfg->app_feedback_secret || scfg->app_feedback_secret_len == 0) {
+        ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+            "mod_botshield: app feedback received but "
+            "BotShieldAppFeedbackSecretFile not configured");
+        return ap_pass_brigade(f->next, bb);
+    }
+
+    apr_uint32_t flag_bit = 0;
+    int ttl = 0;
+    const char *err = bs_app_feedback_verify(r->pool,
+        scfg->app_feedback_secret, scfg->app_feedback_secret_len,
+        snapshot, &flag_bit, &ttl);
+    if (err) {
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: app feedback rejected: %s", err);
+        return ap_pass_brigade(f->next, bb);
+    }
+
+    unsigned char client_ip[16];
+    if (bs_parse_client_ip(r->useragent_ip, client_ip)) {
+        bs_mask_ipv6_prefix(client_ip, scfg->ipv6_prefix_bits);
+        bs_flagged_ip_add(r, client_ip, flag_bit, ttl);
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: app feedback applied flag=0x%x ttl=%d",
+            flag_bit, ttl);
+    }
+
+    return ap_pass_brigade(f->next, bb);
+}
+
+/* Adds the one-shot filter to the chain for every request. Called
+ * from ap_hook_insert_filter. Cheap — just appends to the filter
+ * list; the real work is gated inside the filter on
+ * ap_is_initial_req + the header being present. */
+static void bs_app_feedback_insert_filter(request_rec *r)
+{
+    if (!ap_is_initial_req(r)) return;
+    ap_add_output_filter_handle(bs_app_feedback_filter_handle,
+                                NULL, r, r->connection);
+}
+
 static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                           apr_pool_t *ptemp, server_rec *s)
 {
@@ -5147,6 +5413,104 @@ static const char *bs_set_robots_refresh_interval(cmd_parms *cmd,
     return NULL;
 }
 
+/* E5 — BotShieldAppFeedback on|off. Master gate for the
+ * app-to-module reputation-feedback channel. Default off. Even
+ * under off we still strip the feedback header from outgoing
+ * responses (see bs_app_feedback_fixup), so a misconfigured app
+ * can't leak it to clients during a staged rollout. */
+static const char *bs_set_app_feedback(cmd_parms *cmd, void *dconf,
+                                        int flag)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->app_feedback_enabled = flag ? 1 : 0;
+    return NULL;
+}
+
+/* E5 — BotShieldAppFeedbackHeader <name>. Header name the module
+ * reads feedback from (and strips on its way out). Default
+ * X-BotShield-Feedback. */
+static const char *bs_set_app_feedback_header(cmd_parms *cmd, void *dconf,
+                                               const char *name)
+{
+    (void)dconf;
+    if (!name || !*name) {
+        return "BotShieldAppFeedbackHeader: header name required";
+    }
+    apr_size_t nlen = strlen(name);
+    if (nlen > 64) {
+        return "BotShieldAppFeedbackHeader: name over 64 chars";
+    }
+    for (apr_size_t i = 0; i < nlen; i++) {
+        unsigned char c = (unsigned char)name[i];
+        int ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+              || (c >= '0' && c <= '9') || c == '-' || c == '_';
+        if (!ok) {
+            return apr_psprintf(cmd->pool,
+                "BotShieldAppFeedbackHeader: '%s' contains invalid "
+                "char '%c'", name, (char)c);
+        }
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->app_feedback_header = apr_pstrdup(cmd->pool, name);
+    return NULL;
+}
+
+/* E5 — BotShieldAppFeedbackSecretFile <path>. HMAC key file for
+ * validating app-feedback signatures. Mode-600-or-tighter + absolute
+ * path, same hygiene as BotShieldSecretFile. Loaded at parse time so
+ * it's in memory before the first request hits the hook. Separate
+ * key from BotShieldSecretFile so compromise of one doesn't cross-
+ * contaminate the other. */
+static const char *bs_set_app_feedback_secret_file(cmd_parms *cmd,
+                                                    void *dconf,
+                                                    const char *arg)
+{
+    (void)dconf;
+    if (!arg || !*arg) {
+        return "BotShieldAppFeedbackSecretFile: path required";
+    }
+    if (arg[0] != '/') {
+        return "BotShieldAppFeedbackSecretFile: path must be absolute";
+    }
+
+    struct stat st;
+    if (stat(arg, &st) != 0) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldAppFeedbackSecretFile: cannot stat '%s'", arg);
+    }
+    if (st.st_mode & (S_IRGRP | S_IROTH | S_IWGRP | S_IWOTH)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldAppFeedbackSecretFile: '%s' is group- or world-"
+            "accessible (mode %04o); chmod 600 it",
+            arg, st.st_mode & 07777);
+    }
+
+    const char *buf = NULL;
+    const char *err = bs_load_config_file(cmd,
+        "BotShieldAppFeedbackSecretFile", arg,
+        BS_MAX_SECRET_BYTES, &buf);
+    if (err) return err;
+
+    apr_size_t len = strlen(buf);
+    if (len > 0 && buf[len-1] == '\n') len--;
+    if (len < BS_MIN_SECRET_BYTES) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldAppFeedbackSecretFile: '%s' contains only "
+            "%" APR_SIZE_T_FMT " bytes (minimum %d)",
+            arg, len, BS_MIN_SECRET_BYTES);
+    }
+
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->app_feedback_secret_file = apr_pstrdup(cmd->pool, arg);
+    scfg->app_feedback_secret      = (const unsigned char *)buf;
+    scfg->app_feedback_secret_len  = len;
+    return NULL;
+}
+
 /* E2.2 — BotShieldRobotsWildcardScope heuristic|strict|off.
  * Governs how the User-agent: * group in robots.txt is enforced:
  *   heuristic (default): apply only to UAs that look like crawlers
@@ -5195,25 +5559,38 @@ static apr_status_t bs_watchdog_save_cb(int state, void *data,
 }
 
 /* Translate a flag bitmap (from the cookie's flags field OR the flagged-
- * IP table) into an additive score. M5.1 wires real numbers; bits are
- * independent so an IP with multiple flags pays the sum. */
+ * IP table) into an additive score. M5.1 wires penalty numbers; E5
+ * extends the registry with credit bits (negative contributions) for
+ * the app-to-module reputation-feedback channel. Bits are independent
+ * and compose additively — an IP carrying BS_FLAG_HONEYPOT_HIT +
+ * BS_FLAG_APP_VERIFIED_HUMAN contributes 60 + (-80) = -20 (net
+ * credit) until the shorter-TTL bit expires. Output is clamped to
+ * BS_FLAG_PENALTY_FLOOR so a single gigantic credit can't lock out
+ * all future enforcement for that IP. */
 static int bs_flag_penalty(apr_uint32_t flags)
 {
     int p = 0;
-    if (flags & BS_FLAG_HONEYPOT_HIT)     p += 60;
-    if (flags & BS_FLAG_SCANNER_PROBE)    p += 50;
-    if (flags & BS_FLAG_FAKE_BOT)     p += 80;
-    if (flags & BS_FLAG_POW_FAIL_STREAK)  p += 30;
+    if (flags & BS_FLAG_HONEYPOT_HIT)         p +=  60;
+    if (flags & BS_FLAG_SCANNER_PROBE)        p +=  50;
+    if (flags & BS_FLAG_FAKE_BOT)             p +=  80;
+    if (flags & BS_FLAG_POW_FAIL_STREAK)      p +=  30;
+    if (flags & BS_FLAG_APP_VERIFIED_HUMAN)   p += -80;
+    if (flags & BS_FLAG_APP_VERIFIED_SESSION) p += -40;
+    if (flags & BS_FLAG_APP_TRUST_SIGNAL)     p += -20;
+    if (p < BS_FLAG_PENALTY_FLOOR) p = BS_FLAG_PENALTY_FLOOR;
     return p;
 }
 
 /* Parse a comma-joined flag-name list into a bit mask. Unknown tokens
  * return an error message in *err; *err is NULL on success. */
 static const struct { const char *name; apr_uint32_t bit; } bs_flag_names[] = {
-    { "honeypot_hit",    BS_FLAG_HONEYPOT_HIT    },
-    { "scanner_probe",   BS_FLAG_SCANNER_PROBE   },
-    { "fake_bot",    BS_FLAG_FAKE_BOT    },
-    { "pow_fail_streak", BS_FLAG_POW_FAIL_STREAK },
+    { "honeypot_hit",         BS_FLAG_HONEYPOT_HIT         },
+    { "scanner_probe",        BS_FLAG_SCANNER_PROBE        },
+    { "fake_bot",             BS_FLAG_FAKE_BOT             },
+    { "pow_fail_streak",      BS_FLAG_POW_FAIL_STREAK      },
+    { "app_verified_human",   BS_FLAG_APP_VERIFIED_HUMAN   },
+    { "app_verified_session", BS_FLAG_APP_VERIFIED_SESSION },
+    { "app_trust_signal",     BS_FLAG_APP_TRUST_SIGNAL     },
     { NULL, 0 }
 };
 
@@ -5241,8 +5618,10 @@ static apr_uint32_t bs_parse_flag_names(apr_pool_t *p, const char *s,
         }
         if (!matched) {
             *err = apr_psprintf(p, "unknown flag name '%.*s' "
-                "(known: honeypot_hit, scanner_probe, fake_bot, "
-                "pow_fail_streak)", (int)len, cur);
+                "(known penalty bits: honeypot_hit, scanner_probe, "
+                "fake_bot, pow_fail_streak; credit bits: "
+                "app_verified_human, app_verified_session, "
+                "app_trust_signal)", (int)len, cur);
             return 0;
         }
         cur = comma ? comma + 1 : NULL;
@@ -8425,6 +8804,28 @@ static const command_rec bs_cmds[] = {
                  "Opera/, Firefox/, Edge/, Safari/) combined with a "
                  "bot-token allowlist (bot/crawl/spider/fetch/"
                  "slurp)."),
+    /* E5 — app-to-module reputation feedback */
+    AP_INIT_FLAG("BotShieldAppFeedback",
+                 bs_set_app_feedback, NULL, RSRC_CONF,
+                 "Enable app-to-module reputation feedback via the "
+                 "response header set by BotShieldAppFeedbackHeader. "
+                 "Default off. When off, the header is still stripped "
+                 "from outgoing responses so a misconfigured app can't "
+                 "leak it to clients."),
+    AP_INIT_TAKE1("BotShieldAppFeedbackHeader",
+                 bs_set_app_feedback_header, NULL, RSRC_CONF,
+                 "Header name the module reads feedback from. "
+                 "Default X-BotShield-Feedback. App sets "
+                 "`<header>: flag=<name>;ttl=<sec>[;kid=<id>];sig=<hex>`; "
+                 "module validates the HMAC, applies the flag to the "
+                 "flagged-IP table, and strips the header before the "
+                 "response leaves Apache."),
+    AP_INIT_TAKE1("BotShieldAppFeedbackSecretFile",
+                 bs_set_app_feedback_secret_file, NULL, RSRC_CONF,
+                 "Absolute path to the HMAC key used for validating "
+                 "app-feedback signatures. Mode 600, root-owned. "
+                 "Separate from BotShieldSecretFile so a compromise of "
+                 "one key doesn't affect the other."),
     { NULL }
 };
 
@@ -9448,6 +9849,29 @@ static void bs_register_hooks(apr_pool_t *p)
     ap_hook_post_config (bs_post_config, NULL, NULL, APR_HOOK_MIDDLE);
     ap_hook_child_init  (bs_child_init,  NULL, NULL, APR_HOOK_MIDDLE);
     ap_hook_handler     (bs_handler,     NULL, NULL, APR_HOOK_FIRST);
+    /* E5 — response-phase filter for the app-feedback header. Filter
+     * runs once per request (self-removes), strips the configured
+     * header from r->headers_out, and — when the feature is enabled
+     * and the header is well-formed — HMAC-verifies and applies the
+     * flag to the flagged-IP table. Registered here (filter + the
+     * insert hook) so every request has it in the chain; cheap
+     * until a real header appears. AP_FTYPE_CONTENT_SET puts us
+     * before the network filters so headers modifications land
+     * before the protocol flush. */
+    /* Filter type picked to run AFTER mod_headers. mod_headers has
+     * several stages and its late filter re-applies the "always"
+     * directive even after we've stripped. Running at
+     * AP_FTYPE_PROTOCOL - 1 (just past mod_headers' FIXUP_HEADERS_OUT
+     * at CONTENT_SET but before the protocol serializer) gives the
+     * widest window; for a BELT-AND-SUSPENDERS strip we also hook
+     * log_transaction to unset the tables one more time after the
+     * response is on the wire — purely defensive, for any edge
+     * where a later filter might read the outgoing table. */
+    bs_app_feedback_filter_handle = ap_register_output_filter(
+        "BOTSHIELD_APP_FEEDBACK", bs_app_feedback_filter, NULL,
+        AP_FTYPE_PROTOCOL - 1);
+    ap_hook_insert_filter(bs_app_feedback_insert_filter, NULL, NULL,
+                          APR_HOOK_MIDDLE);
     /* mod_status optional hook: fires only when mod_status is loaded.
      * If it isn't, APR_OPTIONAL_HOOK silently registers nothing — no
      * hot-path cost and no hard linkage to mod_status. */
