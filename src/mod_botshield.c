@@ -57,6 +57,8 @@
 #include <errno.h>
 #include <limits.h>
 
+#include "robots.h"   /* E2.2 — robots.txt parser/matcher */
+
 module AP_MODULE_DECLARE_DATA botshield_module;
 
 /* Tri-state for flag directives: -1 = unset (inherit), 0 = off, 1 = on.
@@ -579,7 +581,24 @@ typedef struct {
      * a rule without disturbing relative order of the others. */
     apr_array_header_t *rate_limits;   /* bs_rate_limit_entry * */
     apr_array_header_t *block_paths;   /* bs_block_path_entry * */
+    /* E2.2 — robots.txt enforcement. Path set via BotShieldRobotsTxt;
+     * doc populated in post_config. Wildcard scope governs how the
+     * User-agent: * group is applied (see PLAN.md). Crawl-delay slots
+     * array: indexed by robots_group index, value is the SHM
+     * rate-counter slot assigned at post_config (-1 = no crawl-delay
+     * for that group). */
+    const char         *robots_txt_path;
+    int                 robots_wildcard_scope;  /* enum below */
+    robots_doc         *robots_doc;
+    int                *robots_delay_slots;     /* int[robots_group_count] */
+    int                 robots_delay_slots_n;
 } bs_server_cfg;
+
+enum bs_robots_wildcard_scope {
+    BS_ROBOTS_WILDCARD_HEURISTIC = 0,   /* default: crawler-candidate test */
+    BS_ROBOTS_WILDCARD_STRICT    = 1,   /* apply * rules to all UAs */
+    BS_ROBOTS_WILDCARD_OFF       = 2,   /* ignore * groups entirely */
+};
 
 /* --- Config lifecycle --- */
 
@@ -724,6 +743,13 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
      * ipspecs and assigns SHM slots. */
     scfg->rate_limits      = apr_array_make(p, 4, sizeof(void *));
     scfg->block_paths      = apr_array_make(p, 4, sizeof(void *));
+    /* E2.2 — robots.txt defaults: no file configured, heuristic
+     * wildcard scope, no parsed doc (populated in post_config). */
+    scfg->robots_txt_path        = NULL;
+    scfg->robots_wildcard_scope  = BS_ROBOTS_WILDCARD_HEURISTIC;
+    scfg->robots_doc             = NULL;
+    scfg->robots_delay_slots     = NULL;
+    scfg->robots_delay_slots_n   = 0;
     return scfg;
 }
 
@@ -2309,9 +2335,50 @@ static int bs_rate_counter_admit(bs_rate_counter *slot,
     return 1;
 }
 
-/* Request-time E2.1 check. Returns OK, HTTP_FORBIDDEN, or
+/* Is this UA a plausible crawler for the purpose of applying
+ * robots.txt User-agent: * rules in heuristic mode? See PLAN.md for
+ * the rationale — the point is to avoid rate-limiting or blocking
+ * real users' browsers, which never read robots.txt and so should
+ * never be subject to its rules. */
+static int bs_ua_is_crawler_candidate(const char *ua)
+{
+    if (!ua || !*ua) return 0;
+
+    int has_bot_token =
+           strcasestr(ua, "bot")    != NULL
+        || strcasestr(ua, "crawl")  != NULL
+        || strcasestr(ua, "spider") != NULL
+        || strcasestr(ua, "fetch")  != NULL
+        || strcasestr(ua, "slurp")  != NULL;
+    if (has_bot_token) return 1;
+
+    /* Bot-less UA that starts with a real-browser prefix: skip.
+     * Everything else (curl/python/etc.) defaults to candidate —
+     * those tools are used by scrapers and rarely by humans. */
+    static const char *const browser_prefixes[] = {
+        "Mozilla/", "Opera/", "Firefox/", "Edge/", "Safari/", NULL
+    };
+    for (int i = 0; browser_prefixes[i]; i++) {
+        apr_size_t plen = strlen(browser_prefixes[i]);
+        if (strncasecmp(ua, browser_prefixes[i], plen) == 0) return 0;
+    }
+    return 1;
+}
+
+/* Request-time E2.1+E2.2 check. Returns OK, HTTP_FORBIDDEN, or
  * HTTP_TOO_MANY_REQUESTS. In both short-circuit cases we also feed
- * bs_score_add so the violation appears in the decision log. */
+ * bs_score_add so the violation appears in the decision log.
+ *
+ * Order:
+ *   1. Directive block_paths (declaration order, first match wins).
+ *   2. robots.txt Disallow (if configured).
+ *   3. Directive rate_limits.
+ *   4. robots.txt Crawl-delay (if configured).
+ *
+ * Operator directives always get first say in each feature family;
+ * robots.txt fills in where the operator didn't declare explicit
+ * rules. This matches the "operator overrides robots.txt" principle
+ * and keeps the two rule sources layered rather than interleaved. */
 static int bs_check_policy(request_rec *r)
 {
     bs_server_cfg *scfg = ap_get_module_config(r->server->module_config,
@@ -2340,12 +2407,55 @@ static int bs_check_policy(request_rec *r)
         }
     }
 
+    /* E2.2 — robots.txt Disallow enforcement. Queried once for
+     * (ua, path); the result also carries the Crawl-delay we'll use
+     * below, so stash it. */
+    robots_match rmatch = { -1, 0, 1, 0, NULL };
+    int robots_apply = 0;
+    if (scfg->robots_doc && ua) {
+        robots_query(scfg->robots_doc, ua, r->uri, &rmatch);
+        if (rmatch.group_idx >= 0) {
+            robots_apply = 1;
+            if (rmatch.is_wildcard) {
+                switch (scfg->robots_wildcard_scope) {
+                case BS_ROBOTS_WILDCARD_OFF:
+                    robots_apply = 0;
+                    break;
+                case BS_ROBOTS_WILDCARD_HEURISTIC:
+                    if (!bs_ua_is_crawler_candidate(ua)) robots_apply = 0;
+                    break;
+                case BS_ROBOTS_WILDCARD_STRICT:
+                default:
+                    /* apply regardless */
+                    break;
+                }
+            }
+        }
+    }
+    if (robots_apply && !rmatch.allowed) {
+        bs_score_add(r, BS_PENALTY_BLOCK_PATH, 3600,
+            apr_pstrcat(r->pool, "robots-block:",
+                        rmatch.group_name ? rmatch.group_name : "?", NULL));
+        if (bs_shm.metrics) {
+            __atomic_fetch_add(&bs_shm.metrics->block_path_hit_total,
+                               1, __ATOMIC_RELAXED);
+        }
+        return HTTP_FORBIDDEN;
+    }
+
+    /* A directive rate-limit cohort that MATCHES this request is
+     * authoritative for it — operator policy overrides robots.txt in
+     * the rate-limit family. If a directive matched, we skip the
+     * robots.txt crawl-delay check below regardless of whether the
+     * directive admitted or tripped. */
+    int directive_rate_matched = 0;
     if (scfg->rate_limits && scfg->rate_limits->nelts > 0) {
         bs_rate_counter *counters = (bs_rate_counter *)bs_shm.rate_counters;
         for (int i = 0; i < scfg->rate_limits->nelts; i++) {
             bs_rate_limit_entry *e = APR_ARRAY_IDX(
                 scfg->rate_limits, i, bs_rate_limit_entry *);
             if (!bs_cohort_matches(&e->cohort, ua, r)) continue;
+            directive_rate_matched = 1;
             if (e->shm_slot < 0 || !counters) continue;
             if (bs_rate_counter_admit(&counters[e->shm_slot],
                                       e->budget, e->window_sec)) {
@@ -2367,6 +2477,44 @@ static int bs_check_policy(request_rec *r)
                                    1, __ATOMIC_RELAXED);
             }
             return HTTP_TOO_MANY_REQUESTS;
+        }
+    }
+
+    /* E2.2 — robots.txt Crawl-delay enforcement. Budget=1 per
+     * Crawl-delay seconds; slot was assigned at post_config.
+     * Skipped when a directive rate-limit already matched this
+     * request: operator policy is authoritative in the rate family. */
+    if (robots_apply && rmatch.crawl_delay_sec > 0
+        && !directive_rate_matched
+        && scfg->robots_delay_slots
+        && rmatch.group_idx < scfg->robots_delay_slots_n) {
+        int slot_idx = scfg->robots_delay_slots[rmatch.group_idx];
+        bs_rate_counter *counters = (bs_rate_counter *)bs_shm.rate_counters;
+        if (slot_idx >= 0 && counters) {
+            bs_rate_counter *slot = &counters[slot_idx];
+            if (!bs_rate_counter_admit(slot, 1,
+                    (apr_uint32_t)rmatch.crawl_delay_sec)) {
+                apr_uint32_t win = __atomic_load_n(
+                    &slot->window_start_sec, __ATOMIC_RELAXED);
+                apr_uint32_t now =
+                    (apr_uint32_t)apr_time_sec(apr_time_now());
+                apr_uint32_t wsec =
+                    (apr_uint32_t)rmatch.crawl_delay_sec;
+                apr_uint32_t retry = (now >= win && now - win < wsec)
+                                      ? wsec - (now - win) : 1;
+                apr_table_setn(r->err_headers_out, "Retry-After",
+                    apr_psprintf(r->pool, "%u", retry));
+                bs_score_add(r, BS_PENALTY_RATE_LIMIT, 3600,
+                    apr_pstrcat(r->pool, "robots-rate:",
+                        rmatch.group_name ? rmatch.group_name : "?",
+                        NULL));
+                if (bs_shm.metrics) {
+                    __atomic_fetch_add(
+                        &bs_shm.metrics->rate_limit_exceeded_total,
+                        1, __ATOMIC_RELAXED);
+                }
+                return HTTP_TOO_MANY_REQUESTS;
+            }
         }
     }
 
@@ -2797,6 +2945,62 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                 vcfg->block_paths->nelts);
         }
         #undef BS_E21_RESOLVE_COHORT
+    }
+
+    /* E2.2 — parse any configured robots.txt file and assign SHM
+     * rate-counter slots to groups that carry a Crawl-delay. Uses
+     * the same slot pool as E2.1; `next_slot` keeps advancing. */
+    for (server_rec *sv = s; sv; sv = sv->next) {
+        bs_server_cfg *vcfg = ap_get_module_config(sv->module_config,
+                                                   &botshield_module);
+        if (!vcfg || !vcfg->robots_txt_path) continue;
+
+        const char *parse_err = NULL;
+        robots_doc *doc = NULL;
+        apr_status_t rv = robots_parse_file(pconf, vcfg->robots_txt_path,
+                                            &doc, &parse_err);
+        if (rv != APR_SUCCESS || !doc) {
+            ap_log_error(APLOG_MARK, APLOG_WARNING, rv, sv,
+                "mod_botshield: BotShieldRobotsTxt %s failed to "
+                "parse (%s) — robots.txt enforcement disabled for "
+                "this vhost", vcfg->robots_txt_path,
+                parse_err ? parse_err : "unknown error");
+            continue;
+        }
+        vcfg->robots_doc = doc;
+
+        int n_groups = robots_group_count(doc);
+        if (n_groups > 0) {
+            vcfg->robots_delay_slots = apr_pcalloc(pconf,
+                n_groups * sizeof(int));
+            vcfg->robots_delay_slots_n = n_groups;
+            int delay_assigned = 0;
+            for (int i = 0; i < n_groups; i++) {
+                vcfg->robots_delay_slots[i] = -1;
+                int cd = robots_group_crawl_delay_at(doc, i);
+                if (cd <= 0) continue;
+                if (next_slot < (int)bs_shm.rate_counter_count) {
+                    vcfg->robots_delay_slots[i] = next_slot++;
+                    delay_assigned++;
+                } else {
+                    ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
+                        "mod_botshield: rate-counter slots exhausted "
+                        "(%d); robots.txt group '%s' Crawl-delay will "
+                        "not enforce",
+                        (int)bs_shm.rate_counter_count,
+                        robots_group_name_at(doc, i));
+                }
+            }
+            ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+                "mod_botshield: robots.txt %s parsed — %d groups, "
+                "%d with Crawl-delay",
+                vcfg->robots_txt_path, n_groups, delay_assigned);
+        } else {
+            ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+                "mod_botshield: robots.txt %s parsed but contains "
+                "no groups (no enforcement)",
+                vcfg->robots_txt_path);
+        }
     }
 
     return OK;
@@ -3762,6 +3966,56 @@ static const char *bs_set_block_path(cmd_parms *cmd, void *dconf,
         }
     }
     *(bs_block_path_entry **)apr_array_push(scfg->block_paths) = e;
+    return NULL;
+}
+
+/* E2.2 — BotShieldRobotsTxt <path>: point the module at a robots.txt
+ * file. Parsing deferred to post_config so pconf's allocator is alive
+ * for the doc's lifetime. Empty/absent path is the default "don't
+ * enforce robots.txt" state; operators turn it on by pointing at a
+ * file. */
+static const char *bs_set_robots_txt(cmd_parms *cmd, void *dconf,
+                                     const char *path)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    if (!path || !*path) {
+        return "BotShieldRobotsTxt: path required";
+    }
+    if (path[0] != '/') {
+        return "BotShieldRobotsTxt: path must be absolute";
+    }
+    scfg->robots_txt_path = apr_pstrdup(cmd->pool, path);
+    return NULL;
+}
+
+/* E2.2 — BotShieldRobotsWildcardScope heuristic|strict|off.
+ * Governs how the User-agent: * group in robots.txt is enforced:
+ *   heuristic (default): apply only to UAs that look like crawlers
+ *                        — real-browser prefix denylist + bot-token
+ *                        allowlist (see PLAN.md).
+ *   strict             : apply to every UA (operator's call; risks
+ *                        rate-limiting or blocking real users).
+ *   off                : ignore * groups entirely. */
+static const char *bs_set_robots_wildcard_scope(cmd_parms *cmd, void *dconf,
+                                                const char *arg)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    if (!arg || !*arg) return "BotShieldRobotsWildcardScope: mode required";
+    if (!strcasecmp(arg, "heuristic")) {
+        scfg->robots_wildcard_scope = BS_ROBOTS_WILDCARD_HEURISTIC;
+    } else if (!strcasecmp(arg, "strict")) {
+        scfg->robots_wildcard_scope = BS_ROBOTS_WILDCARD_STRICT;
+    } else if (!strcasecmp(arg, "off")) {
+        scfg->robots_wildcard_scope = BS_ROBOTS_WILDCARD_OFF;
+    } else {
+        return apr_psprintf(cmd->pool,
+            "BotShieldRobotsWildcardScope: '%s' not one of "
+            "heuristic|strict|off", arg);
+    }
     return NULL;
 }
 
@@ -6730,6 +6984,27 @@ static const command_rec bs_cmds[] = {
                  "trailing '$' = exact match. Hits return 403 with "
                  "a +100 score penalty under reason "
                  "block-path:<name>."),
+    /* E2.2 — robots.txt enforcement */
+    AP_INIT_TAKE1("BotShieldRobotsTxt", bs_set_robots_txt,
+                 NULL, RSRC_CONF,
+                 "Path to a robots.txt file whose Disallow and "
+                 "Crawl-delay rules mod_botshield will enforce "
+                 "server-side. Parsed at post_config; RFC 9309 "
+                 "semantics (prefix + '*' + '$' wildcards, longest-"
+                 "match-wins, case-insensitive UA prefix). Blocked "
+                 "paths return 403 (reason robots-block:<group>); "
+                 "Crawl-delay trips return 429 + Retry-After "
+                 "(reason robots-rate:<group>)."),
+    AP_INIT_TAKE1("BotShieldRobotsWildcardScope",
+                 bs_set_robots_wildcard_scope, NULL, RSRC_CONF,
+                 "How to apply User-agent: * rules: 'heuristic' "
+                 "(default — apply only to UAs that look like "
+                 "crawlers), 'strict' (apply to every UA), or "
+                 "'off' (ignore * groups entirely). Heuristic mode "
+                 "uses a real-browser-prefix denylist (Mozilla/, "
+                 "Opera/, Firefox/, Edge/, Safari/) combined with a "
+                 "bot-token allowlist (bot/crawl/spider/fetch/"
+                 "slurp)."),
     { NULL }
 };
 

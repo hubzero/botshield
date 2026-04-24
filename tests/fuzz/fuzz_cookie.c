@@ -46,7 +46,10 @@
 #include "_fuzz_stubs.h"
 
 /* Now the module itself. Defines bs_verify_cookie + all its helpers
- * as static functions in this translation unit. */
+ * as static functions in this translation unit. The module references
+ * E2.2's robots.c symbols, so fold that file in too to satisfy the
+ * single-TU link model this harness uses. */
+#include "../../src/robots.c"
 #include "../../src/mod_botshield.c"
 
 /* --- Fuzz state (initialized once per process) ---------------------- */
