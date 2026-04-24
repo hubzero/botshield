@@ -612,7 +612,7 @@ typedef struct {
     apr_array_header_t *block_paths;   /* bs_block_path_entry * */
     /* E3 — path-based triggers. Same ordered-array + upsert-by-name
      * shape as E2.1; first match wins at request time. */
-    apr_array_header_t *triggers;      /* bs_trigger_entry * */
+    apr_array_header_t *path_triggers; /* bs_path_trigger_entry * */
     /* E4 — cookie triggers. Same ordered-array + upsert-by-name
      * shape as E3. `session_names` is the list of cookie names
      * that `cookies=session` matches against — seeded with common
@@ -802,8 +802,8 @@ static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
                                            add->rate_limits);
     out->block_paths = bs_merge_rule_array(p, base->block_paths,
                                            add->block_paths);
-    out->triggers    = bs_merge_rule_array(p, base->triggers,
-                                           add->triggers);
+    out->path_triggers = bs_merge_rule_array(p, base->path_triggers,
+                                             add->path_triggers);
     out->cookie_triggers = bs_merge_rule_array(p, base->cookie_triggers,
                                                add->cookie_triggers);
     out->env_triggers    = bs_merge_rule_array(p, base->env_triggers,
@@ -881,7 +881,7 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
      * ipspecs and assigns SHM slots. */
     scfg->rate_limits      = apr_array_make(p, 4, sizeof(void *));
     scfg->block_paths      = apr_array_make(p, 4, sizeof(void *));
-    scfg->triggers         = apr_array_make(p, 4, sizeof(void *));
+    scfg->path_triggers         = apr_array_make(p, 4, sizeof(void *));
     scfg->cookie_triggers  = apr_array_make(p, 4, sizeof(void *));
     scfg->env_triggers     = apr_array_make(p, 4, sizeof(void *));
     /* Curated session-cookie-name defaults. Kept deliberately
@@ -2386,7 +2386,7 @@ typedef struct {
     bs_cohort   cohort;
 } bs_block_path_entry;
 
-/* E3 — path-based triggers. One of these per BotShieldTrigger
+/* E3 — path-based triggers. One of these per BotShieldPathTrigger
  * directive. `status_code` holds either a concrete HTTP status
  * (e.g. 403, 429) or the BS_TRIGGER_STATUS_PASS sentinel meaning
  * "don't enforce anything on this request; let the real handler
@@ -2423,7 +2423,7 @@ typedef struct {
     apr_uint32_t  flag_bit;          /* single M5.1 bit, 0 if ttl_sec==0 */
     int           ttl_sec;           /* 0 = don't flag the IP */
     int           penalty;           /* score_add amount; ignored under PASS */
-} bs_trigger_entry;
+} bs_path_trigger_entry;
 
 /* E4 — cookie triggers. Parallel feature to E3 path triggers, but
  * matched on the Cookie header rather than the request URI. Shares
@@ -2471,7 +2471,7 @@ typedef struct {
     int           pred_kind;         /* enum bs_cookie_pred_kind */
     const char   *cname;             /* NULL unless kind is NAMED_* */
     const char   *cvalue;            /* NULL unless kind is NAMED_{EQ,NE,CONTAINS} */
-    /* Same action surface as bs_trigger_entry, minus status_code==PASS
+    /* Same action surface as bs_path_trigger_entry, minus status_code==PASS
      * as the only way to express "no response short-circuit" — here
      * pass means "no short-circuit but credit/penalty still apply." */
     int           status_code;       /* HTTP code or BS_TRIGGER_STATUS_PASS */
@@ -2983,10 +2983,10 @@ static int bs_check_policy(request_rec *r)
     }
 
     /* E3 — triggers. Path-only, unscoped. */
-    if (scfg->triggers && scfg->triggers->nelts > 0) {
-        for (int i = 0; i < scfg->triggers->nelts; i++) {
-            bs_trigger_entry *t = APR_ARRAY_IDX(
-                scfg->triggers, i, bs_trigger_entry *);
+    if (scfg->path_triggers && scfg->path_triggers->nelts > 0) {
+        for (int i = 0; i < scfg->path_triggers->nelts; i++) {
+            bs_path_trigger_entry *t = APR_ARRAY_IDX(
+                scfg->path_triggers, i, bs_path_trigger_entry *);
             if (!bs_path_glob_match(t->path_pattern, r->uri)) continue;
 
             /* Flag the IP (future-request memory) before any early
@@ -3013,7 +3013,7 @@ static int bs_check_policy(request_rec *r)
                  * responds normally. bs_handler translates our
                  * DECLINED into DECLINED for Apache. */
                 bs_score_add(r, 0, 0,
-                    apr_pstrcat(r->pool, "trigger:", t->name,
+                    apr_pstrcat(r->pool, "path-trigger:", t->name,
                                 ":pass", NULL));
                 return DECLINED;
             }
@@ -3023,7 +3023,7 @@ static int bs_check_policy(request_rec *r)
              * then either emit Location (redirect) or return the
              * code for ErrorDocument to handle the body. */
             bs_score_add(r, t->penalty, 0,
-                apr_pstrcat(r->pool, "trigger:", t->name, NULL));
+                apr_pstrcat(r->pool, "path-trigger:", t->name, NULL));
 
             if (t->redirect_url) {
                 apr_table_setn(r->headers_out,
@@ -5041,7 +5041,7 @@ static const char *bs_set_block_path(cmd_parms *cmd, void *dconf,
     return NULL;
 }
 
-/* E3 — BotShieldTrigger <name> <path-glob> [key=value ...].
+/* E3 — BotShieldPathTrigger <name> <path-glob> [key=value ...].
  *
  * Supported keys: status (code|pass), redirect, log, flag, ttl,
  * penalty. See PLAN.md E3 for semantics. Rejects:
@@ -5052,12 +5052,12 @@ static const char *bs_set_block_path(cmd_parms *cmd, void *dconf,
  *
  * Upsert-by-name, preserving declaration order (same model as
  * BotShieldRateLimit / BotShieldBlockPath). */
-static const char *bs_set_trigger(cmd_parms *cmd, void *dconf,
+static const char *bs_set_path_trigger(cmd_parms *cmd, void *dconf,
                                   int argc, char *const argv[])
 {
     (void)dconf;
     if (argc < 2) {
-        return "BotShieldTrigger: expects <name> <path-glob> "
+        return "BotShieldPathTrigger: expects <name> <path-glob> "
                "[key=value ...]";
     }
     const char *name    = argv[0];
@@ -5066,16 +5066,16 @@ static const char *bs_set_trigger(cmd_parms *cmd, void *dconf,
                                                &botshield_module);
     if (!bs_bot_name_valid(name)) {
         return apr_psprintf(cmd->pool,
-            "BotShieldTrigger: name '%s' must be [a-z0-9-]{1,32}", name);
+            "BotShieldPathTrigger: name '%s' must be [a-z0-9-]{1,32}", name);
     }
     if (!pattern || !*pattern || pattern[0] != '/') {
-        return "BotShieldTrigger: path-glob must start with '/'";
+        return "BotShieldPathTrigger: path-glob must start with '/'";
     }
     if (strlen(pattern) > 256) {
-        return "BotShieldTrigger: path-glob longer than 256 chars";
+        return "BotShieldPathTrigger: path-glob longer than 256 chars";
     }
 
-    bs_trigger_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
+    bs_path_trigger_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
     e->name         = apr_pstrdup(cmd->pool, name);
     e->path_pattern = apr_pstrdup(cmd->pool, pattern);
     /* Defaults per PLAN.md E3. */
@@ -5093,7 +5093,7 @@ static const char *bs_set_trigger(cmd_parms *cmd, void *dconf,
         const char *eq  = strchr(arg, '=');
         if (!eq) {
             return apr_psprintf(cmd->pool,
-                "BotShieldTrigger: extra arg '%s' must be key=value",
+                "BotShieldPathTrigger: extra arg '%s' must be key=value",
                 arg);
         }
         apr_size_t klen = (apr_size_t)(eq - arg);
@@ -5110,7 +5110,7 @@ static const char *bs_set_trigger(cmd_parms *cmd, void *dconf,
                 long code = strtol(val, &end, 10);
                 if (!end || *end || code < 100 || code > 599) {
                     return apr_psprintf(cmd->pool,
-                        "BotShieldTrigger: status='%s' must be an "
+                        "BotShieldPathTrigger: status='%s' must be an "
                         "HTTP code 100..599 or the literal 'pass'",
                         val);
                 }
@@ -5119,7 +5119,7 @@ static const char *bs_set_trigger(cmd_parms *cmd, void *dconf,
             status_explicit = 1;
         } else if (BS_TRIG_KEY("redirect")) {
             if (!*val) {
-                return "BotShieldTrigger: redirect= requires a URL";
+                return "BotShieldPathTrigger: redirect= requires a URL";
             }
             e->redirect_url = apr_pstrdup(cmd->pool, val);
             if (!status_explicit) {
@@ -5133,13 +5133,13 @@ static const char *bs_set_trigger(cmd_parms *cmd, void *dconf,
             const char *perr = NULL;
             apr_uint32_t bits = bs_parse_flag_names(cmd->pool, val, &perr);
             if (perr) return apr_psprintf(cmd->pool,
-                "BotShieldTrigger: flag=%s: %s", val, perr);
+                "BotShieldPathTrigger: flag=%s: %s", val, perr);
             /* Require exactly one bit — trigger semantics are per-
              * request-per-IP and multi-bit would confuse the
              * future-score contribution operators are picking. */
             if (bits == 0 || (bits & (bits - 1)) != 0) {
                 return apr_psprintf(cmd->pool,
-                    "BotShieldTrigger: flag=%s must name exactly one "
+                    "BotShieldPathTrigger: flag=%s must name exactly one "
                     "bit", val);
             }
             e->flag_bit = bits;
@@ -5148,7 +5148,7 @@ static const char *bs_set_trigger(cmd_parms *cmd, void *dconf,
             long t = strtol(val, &end, 10);
             if (!end || *end || t < 0 || t > 86400 * 30) {
                 return apr_psprintf(cmd->pool,
-                    "BotShieldTrigger: ttl='%s' must be 0..2592000 "
+                    "BotShieldPathTrigger: ttl='%s' must be 0..2592000 "
                     "seconds (0 = don't flag)", val);
             }
             e->ttl_sec = (int)t;
@@ -5157,13 +5157,13 @@ static const char *bs_set_trigger(cmd_parms *cmd, void *dconf,
             long pn = strtol(val, &end, 10);
             if (!end || *end || pn < 0 || pn > 1000) {
                 return apr_psprintf(cmd->pool,
-                    "BotShieldTrigger: penalty='%s' must be 0..1000",
+                    "BotShieldPathTrigger: penalty='%s' must be 0..1000",
                     val);
             }
             e->penalty = (int)pn;
         } else {
             return apr_psprintf(cmd->pool,
-                "BotShieldTrigger: unknown key '%.*s' (known: status, "
+                "BotShieldPathTrigger: unknown key '%.*s' (known: status, "
                 "redirect, log, flag, ttl, penalty)",
                 (int)klen, arg);
         }
@@ -5172,13 +5172,13 @@ static const char *bs_set_trigger(cmd_parms *cmd, void *dconf,
 
     /* Cross-validate. */
     if (e->redirect_url && e->status_code == BS_TRIGGER_STATUS_PASS) {
-        return "BotShieldTrigger: status=pass and redirect= are "
+        return "BotShieldPathTrigger: status=pass and redirect= are "
                "mutually exclusive — a redirect IS the response";
     }
     if (e->redirect_url
         && (e->status_code < 300 || e->status_code >= 400)) {
         return apr_psprintf(cmd->pool,
-            "BotShieldTrigger: redirect= requires a 3xx status "
+            "BotShieldPathTrigger: redirect= requires a 3xx status "
             "(got %d)", e->status_code);
     }
     if (e->ttl_sec == 0) {
@@ -5188,15 +5188,15 @@ static const char *bs_set_trigger(cmd_parms *cmd, void *dconf,
     }
 
     /* Upsert-by-name; preserves declaration order. */
-    for (int i = 0; i < scfg->triggers->nelts; i++) {
-        bs_trigger_entry *ex =
-            APR_ARRAY_IDX(scfg->triggers, i, bs_trigger_entry *);
+    for (int i = 0; i < scfg->path_triggers->nelts; i++) {
+        bs_path_trigger_entry *ex =
+            APR_ARRAY_IDX(scfg->path_triggers, i, bs_path_trigger_entry *);
         if (strcmp(ex->name, e->name) == 0) {
-            APR_ARRAY_IDX(scfg->triggers, i, bs_trigger_entry *) = e;
+            APR_ARRAY_IDX(scfg->path_triggers, i, bs_path_trigger_entry *) = e;
             return NULL;
         }
     }
-    *(bs_trigger_entry **)apr_array_push(scfg->triggers) = e;
+    *(bs_path_trigger_entry **)apr_array_push(scfg->path_triggers) = e;
     return NULL;
 }
 
@@ -5249,7 +5249,7 @@ static const char *bs_set_session_cookie_name(cmd_parms *cmd, void *dconf,
  * predicate grammar) and the action keys, enforces cross-
  * validation (status=pass + redirect= is a config error;
  * _bs_verified as cookie=name is redirected to bs-cookie=<state>),
- * and upserts by name. See bs_trigger_entry for the action-key
+ * and upserts by name. See bs_path_trigger_entry for the action-key
  * semantics shared with E3; the semantic divergences are:
  *
  *   - credit= always applies (even under status=pass), because a
@@ -5385,7 +5385,7 @@ static const char *bs_set_cookie_trigger(cmd_parms *cmd, void *dconf,
             "bs-cookie=...)", match);
     }
 
-    /* --- Parse action keys. Shared mostly with bs_set_trigger. --- */
+    /* --- Parse action keys. Shared mostly with bs_set_path_trigger. --- */
     int status_explicit = 0;
     for (int i = 2; i < argc; i++) {
         const char *arg = argv[i];
@@ -9098,8 +9098,8 @@ static const command_rec bs_cmds[] = {
                  "order, first match wins; upsert-by-name. Main "
                  "requests only — subrequests are no-ops."),
     /* E3 — path-based triggers */
-    AP_INIT_TAKE_ARGV("BotShieldTrigger",
-                 bs_set_trigger, NULL, RSRC_CONF,
+    AP_INIT_TAKE_ARGV("BotShieldPathTrigger",
+                 bs_set_path_trigger, NULL, RSRC_CONF,
                  "Path-based trigger. Args: <name> <path-glob> "
                  "[key=value ...]. Keys: status=<code|pass> (default "
                  "403; 'pass' means the real handler runs), "
