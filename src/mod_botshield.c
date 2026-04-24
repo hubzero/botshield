@@ -599,6 +599,14 @@ typedef struct {
     /* E3 — path-based triggers. Same ordered-array + upsert-by-name
      * shape as E2.1; first match wins at request time. */
     apr_array_header_t *triggers;      /* bs_trigger_entry * */
+    /* E4 — cookie triggers. Same ordered-array + upsert-by-name
+     * shape as E3. `session_names` is the list of cookie names
+     * that `cookies=session` matches against — seeded with common
+     * framework defaults at config creation, extended via
+     * BotShieldSessionCookieName. Lowercased at add time for
+     * cheap case-insensitive compare at request time. */
+    apr_array_header_t *cookie_triggers;   /* bs_cookie_trigger_entry * */
+    apr_array_header_t *session_names;     /* const char * (lowercased) */
     /* E2.2 — robots.txt enforcement.
      *
      * `robots` is the active state bundle (parsed doc + owning
@@ -763,6 +771,25 @@ static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
                                            add->block_paths);
     out->triggers    = bs_merge_rule_array(p, base->triggers,
                                            add->triggers);
+    out->cookie_triggers = bs_merge_rule_array(p, base->cookie_triggers,
+                                               add->cookie_triggers);
+    /* session_names: concatenate base + add, drop dups. Small lists,
+     * O(n*m) is fine; happens once at config load. */
+    if (base->session_names && add->session_names) {
+        apr_array_header_t *merged = apr_array_copy(p, add->session_names);
+        for (int i = 0; i < base->session_names->nelts; i++) {
+            const char *bn = APR_ARRAY_IDX(base->session_names, i,
+                                           const char *);
+            int dup = 0;
+            for (int j = 0; j < merged->nelts; j++) {
+                if (strcmp(APR_ARRAY_IDX(merged, j, const char *), bn) == 0) {
+                    dup = 1; break;
+                }
+            }
+            if (!dup) *(const char **)apr_array_push(merged) = bn;
+        }
+        out->session_names = merged;
+    }
 
     /* E2.2 server-scope inheritance — main-scope settings should
      * flow into vhosts that don't restate them. Each field uses a
@@ -807,6 +834,21 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->rate_limits      = apr_array_make(p, 4, sizeof(void *));
     scfg->block_paths      = apr_array_make(p, 4, sizeof(void *));
     scfg->triggers         = apr_array_make(p, 4, sizeof(void *));
+    scfg->cookie_triggers  = apr_array_make(p, 4, sizeof(void *));
+    /* Curated session-cookie-name defaults. Kept deliberately
+     * short; long auto-lists turn `cookies=session` into a loose
+     * matcher and undermine the bonus. Operators add their own
+     * via BotShieldSessionCookieName. Stored lowercased. */
+    scfg->session_names    = apr_array_make(p, 8, sizeof(const char *));
+    static const char *const bs_session_name_defaults[] = {
+        "phpsessid", "jsessionid", "asp.net_sessionid",
+        "session_id", "connect.sid", "laravel_session",
+        NULL
+    };
+    for (int i = 0; bs_session_name_defaults[i]; i++) {
+        *(const char **)apr_array_push(scfg->session_names) =
+            apr_pstrdup(p, bs_session_name_defaults[i]);
+    }
     /* E2.2 — robots.txt defaults: no file configured, heuristic
      * wildcard scope, no parsed doc (populated in post_config). */
     scfg->robots_txt_path         = NULL;
@@ -2327,6 +2369,64 @@ typedef struct {
     int           penalty;           /* score_add amount; ignored under PASS */
 } bs_trigger_entry;
 
+/* E4 — cookie triggers. Parallel feature to E3 path triggers, but
+ * matched on the Cookie header rather than the request URI. Shares
+ * the action surface with E3 (status / redirect / log / flag / ttl /
+ * penalty) and adds `credit` for negative-score contributions —
+ * the mechanism for "legitimate session → glide through tier
+ * dispatch." Two deliberate semantic divergences from E3:
+ *
+ *  1. credit/penalty are applied to THIS request regardless of
+ *     status (contrast E3 where status=pass ignores penalty).
+ *     Cookies are persistent-state signals: the client carries
+ *     them on THIS request and we want to shape its score.
+ *  2. Cookie triggers evaluate BEFORE path triggers in
+ *     bs_check_policy so the decision log shows reputation signals
+ *     even when a later short-circuit fires.
+ *
+ * Predicate kinds — one per entry, populated by the setter:
+ *   NAMED_PRESENT     cookie is present (any value)
+ *   NAMED_ABSENT      cookie is absent
+ *   NAMED_EQ          cookie has exactly this value
+ *   NAMED_NE          cookie is present but value is NOT this
+ *   NAMED_CONTAINS    cookie value contains this substring
+ *   BULK_NONE         request has zero cookies
+ *   BULK_ANY          request has at least one cookie
+ *   BULK_SESSION      request has a cookie from the session-name list
+ *   BS_VERIFIED       _bs_verified present and valid
+ *   BS_MISSING        no _bs_verified at all
+ *   BS_INVALID        _bs_verified present but HMAC/format failed */
+enum bs_cookie_pred_kind {
+    BS_CP_NAMED_PRESENT = 0,
+    BS_CP_NAMED_ABSENT,
+    BS_CP_NAMED_EQ,
+    BS_CP_NAMED_NE,
+    BS_CP_NAMED_CONTAINS,
+    BS_CP_BULK_NONE,
+    BS_CP_BULK_ANY,
+    BS_CP_BULK_SESSION,
+    BS_CP_BS_VERIFIED,
+    BS_CP_BS_MISSING,
+    BS_CP_BS_INVALID,
+};
+
+typedef struct {
+    const char   *name;
+    int           pred_kind;         /* enum bs_cookie_pred_kind */
+    const char   *cname;             /* NULL unless kind is NAMED_* */
+    const char   *cvalue;            /* NULL unless kind is NAMED_{EQ,NE,CONTAINS} */
+    /* Same action surface as bs_trigger_entry, minus status_code==PASS
+     * as the only way to express "no response short-circuit" — here
+     * pass means "no short-circuit but credit/penalty still apply." */
+    int           status_code;       /* HTTP code or BS_TRIGGER_STATUS_PASS */
+    const char   *redirect_url;
+    const char   *log_tag;
+    apr_uint32_t  flag_bit;
+    int           ttl_sec;
+    int           penalty;           /* applied regardless of status */
+    int           credit;            /* applied regardless of status */
+} bs_cookie_trigger_entry;
+
 /* SHM slot for the fixed-window counter. Packed to 8 bytes so
  * platforms with 64-bit atomics could later swap to a CAS-on-u64;
  * for v1 we use 32-bit atomics on each field separately, which is
@@ -2475,7 +2575,136 @@ static int bs_ua_is_crawler_candidate(const char *ua)
     return 1;
 }
 
-/* Request-time E2.1 + E2.2 + E3 check. Return values:
+/* E4 — BotShield-cookie-state note: set by bs_handler after the
+ * `_bs_verified` verification pass so bs_check_policy's cookie-
+ * trigger evaluator can surface the verdict via bs-cookie=<state>
+ * predicates without re-running the HMAC check. Values: "verified"
+ * (cookie valid), "missing" (no cookie at all), "invalid" (present
+ * but HMAC/format/expiry check rejected). */
+#define BS_CK_STATE_NOTE   "botshield-cookie-state"
+#define BS_CK_STATE_VERIFIED  "verified"
+#define BS_CK_STATE_MISSING   "missing"
+#define BS_CK_STATE_INVALID   "invalid"
+
+/* Parse-once tokenizer for the Cookie request header. Returns a
+ * pool-allocated apr_table_t (name → value, case-insensitive on the
+ * name per RFC 6265 in practice). Empty values are stored as ""
+ * (matching `cookie=<name>` / `cookie=<name>=`). Duplicate names
+ * take the first occurrence; subsequent ones are ignored. Cached on
+ * r->notes as a hex-encoded pointer so the same map survives across
+ * multiple cookie-trigger evaluations within the same request. */
+#define BS_COOKIEMAP_NOTE  "botshield-parsed-cookies"
+static apr_table_t *bs_parse_cookies_once(request_rec *r)
+{
+    const char *cached_hex = apr_table_get(r->notes, BS_COOKIEMAP_NOTE);
+    if (cached_hex && *cached_hex) {
+        apr_table_t *prev;
+        if (sscanf(cached_hex, "%p", (void **)&prev) == 1 && prev) {
+            return prev;
+        }
+    }
+
+    apr_table_t *map = apr_table_make(r->pool, 8);
+    const char *raw = apr_table_get(r->headers_in, "Cookie");
+    if (raw && *raw) {
+        char *buf = apr_pstrdup(r->pool, raw);
+        char *state = NULL;
+        for (char *tok = apr_strtok(buf, ";", &state); tok;
+             tok = apr_strtok(NULL, ";", &state)) {
+            while (*tok == ' ' || *tok == '\t') tok++;
+            if (!*tok) continue;
+            char *eq = strchr(tok, '=');
+            const char *name;
+            const char *value;
+            if (eq) {
+                *eq = '\0';
+                name  = tok;
+                value = eq + 1;
+            } else {
+                name  = tok;
+                value = "";
+            }
+            /* Trim trailing whitespace from name (values are taken
+             * as-is; cookie values are allowed to include leading
+             * whitespace per RFC 6265 in practice, but we strip a
+             * common one anyway). */
+            apr_size_t nlen = strlen(name);
+            while (nlen && (name[nlen-1] == ' ' || name[nlen-1] == '\t')) {
+                ((char *)name)[--nlen] = '\0';
+            }
+            if (nlen == 0) continue;
+            if (apr_table_get(map, name) != NULL) continue;  /* first wins */
+            apr_table_setn(map, name, value);
+        }
+    }
+    apr_table_setn(r->notes, BS_COOKIEMAP_NOTE,
+                   apr_psprintf(r->pool, "%p", (void *)map));
+    return map;
+}
+
+/* Is this cookie-name on the session-name list? */
+static int bs_is_session_cookie_name(const apr_array_header_t *names,
+                                     const char *name)
+{
+    if (!names) return 0;
+    for (int i = 0; i < names->nelts; i++) {
+        if (strcasecmp(APR_ARRAY_IDX(names, i, const char *), name) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Evaluate a single cookie-trigger predicate against the parsed
+ * cookie map + BS-cookie state. Returns 1 on match, 0 on no match. */
+static int bs_cookie_pred_match(const bs_cookie_trigger_entry *e,
+                                apr_table_t *cmap,
+                                const apr_array_header_t *session_names,
+                                const char *bs_state)
+{
+    switch (e->pred_kind) {
+    case BS_CP_NAMED_PRESENT:
+        return apr_table_get(cmap, e->cname) != NULL;
+    case BS_CP_NAMED_ABSENT:
+        return apr_table_get(cmap, e->cname) == NULL;
+    case BS_CP_NAMED_EQ: {
+        const char *v = apr_table_get(cmap, e->cname);
+        return v && strcmp(v, e->cvalue) == 0;
+    }
+    case BS_CP_NAMED_NE: {
+        const char *v = apr_table_get(cmap, e->cname);
+        return v && strcmp(v, e->cvalue) != 0;
+    }
+    case BS_CP_NAMED_CONTAINS: {
+        const char *v = apr_table_get(cmap, e->cname);
+        return v && strstr(v, e->cvalue) != NULL;
+    }
+    case BS_CP_BULK_NONE:
+        return apr_is_empty_table(cmap);
+    case BS_CP_BULK_ANY:
+        return !apr_is_empty_table(cmap);
+    case BS_CP_BULK_SESSION: {
+        const apr_array_header_t *arr = apr_table_elts(cmap);
+        for (int i = 0; i < arr->nelts; i++) {
+            apr_table_entry_t *te = &((apr_table_entry_t *)arr->elts)[i];
+            if (bs_is_session_cookie_name(session_names, te->key)) {
+                return 1;
+            }
+        }
+        return 0;
+    }
+    case BS_CP_BS_VERIFIED:
+        return bs_state && strcmp(bs_state, BS_CK_STATE_VERIFIED) == 0;
+    case BS_CP_BS_MISSING:
+        return !bs_state
+            || strcmp(bs_state, BS_CK_STATE_MISSING) == 0;
+    case BS_CP_BS_INVALID:
+        return bs_state && strcmp(bs_state, BS_CK_STATE_INVALID) == 0;
+    }
+    return 0;
+}
+
+/* Request-time E2.1 + E2.2 + E3 + E4 check. Return values:
  *   OK                     — no rule fired; continue to heuristics.
  *   DECLINED               — a trigger with status=pass fired; the
  *                            bs_handler short-circuits to DECLINED
@@ -2488,23 +2717,85 @@ static int bs_ua_is_crawler_candidate(const char *ua)
  *                            response body.
  *
  * Order:
- *   1. E3 triggers (declaration order, first match wins).
- *   2. Directive block_paths (declaration order, first match wins).
- *   3. robots.txt Disallow (if configured).
- *   4. Directive rate_limits.
- *   5. robots.txt Crawl-delay (if configured).
+ *   1. E4 cookie triggers (declaration order, first match wins).
+ *   2. E3 path triggers (declaration order, first match wins).
+ *   3. Directive block_paths (declaration order, first match wins).
+ *   4. robots.txt Disallow (if configured).
+ *   5. Directive rate_limits.
+ *   6. robots.txt Crawl-delay (if configured).
  *
- * Triggers run first because they're the most specific per-path
- * intent the operator can write — a trigger on `/.env` should win
- * against any cohort-scoped block-path that also happens to match.
- * Operator directives always get first say in each family after
- * that; robots.txt fills in where the operator hasn't declared
- * explicit rules. */
+ * Cookie triggers run first so reputation signals from cookies
+ * always land on the decision log, even when a later rule short-
+ * circuits. Path triggers run next because they're the most
+ * specific per-path intent the operator can write — a trigger on
+ * `/.env` should win against any cohort-scoped block-path that
+ * also happens to match. Operator directives always get first
+ * say in each family after that; robots.txt fills in where the
+ * operator hasn't declared explicit rules.
+ *
+ * E4 semantic divergence from E3: cookie triggers apply
+ * credit/penalty to THIS request regardless of status=pass, because
+ * cookies are ongoing-state signals (the client carries the
+ * signal on this very request). Path triggers under status=pass
+ * leave the score alone. */
 static int bs_check_policy(request_rec *r)
 {
     bs_server_cfg *scfg = ap_get_module_config(r->server->module_config,
                                                &botshield_module);
     if (!scfg) return OK;
+
+    /* E4 — cookie triggers. Declaration order, first match wins.
+     * Runs before E3 path triggers so reputation signals land on
+     * the decision log even when a later rule short-circuits.
+     *
+     * Divergence from E3: credit/penalty apply regardless of
+     * status=pass, because cookies are ongoing-state signals the
+     * client carries on THIS request. */
+    if (scfg->cookie_triggers && scfg->cookie_triggers->nelts > 0) {
+        apr_table_t *cmap = bs_parse_cookies_once(r);
+        const char *bs_state = apr_table_get(r->notes, BS_CK_STATE_NOTE);
+        for (int i = 0; i < scfg->cookie_triggers->nelts; i++) {
+            bs_cookie_trigger_entry *c = APR_ARRAY_IDX(
+                scfg->cookie_triggers, i, bs_cookie_trigger_entry *);
+            if (!bs_cookie_pred_match(c, cmap, scfg->session_names,
+                                      bs_state)) continue;
+
+            /* Flag-IP (future-request memory). */
+            if (c->flag_bit && c->ttl_sec > 0) {
+                unsigned char client_ip[16];
+                if (bs_parse_client_ip(r->useragent_ip, client_ip)) {
+                    bs_mask_ipv6_prefix(client_ip,
+                                        scfg->ipv6_prefix_bits);
+                    bs_flagged_ip_add(r, client_ip,
+                                      c->flag_bit, c->ttl_sec);
+                }
+            }
+
+            bs_set_trigger_tag(r, c->log_tag);
+
+            /* credit/penalty always apply — E4's central divergence
+             * from E3. Record a reason so the decision log reflects
+             * the match regardless of short-circuit path taken. */
+            int score_delta = c->penalty - c->credit;
+            const char *reason = apr_pstrcat(r->pool,
+                "cookie-trigger:", c->name, NULL);
+            bs_score_add(r, score_delta, 0, reason);
+
+            if (c->status_code == BS_TRIGGER_STATUS_PASS) {
+                /* Pass: no short-circuit, continue to E3 and the
+                 * rest of the pipeline. The score contribution
+                 * above stays in the scoring record and gets
+                 * composed with downstream heuristics. */
+                continue;
+            }
+
+            if (c->redirect_url) {
+                apr_table_setn(r->headers_out,
+                    "Location", c->redirect_url);
+            }
+            return c->status_code;
+        }
+    }
 
     /* E3 — triggers. Path-only, unscoped. */
     if (scfg->triggers && scfg->triggers->nelts > 0) {
@@ -4503,6 +4794,301 @@ static const char *bs_set_trigger(cmd_parms *cmd, void *dconf,
         }
     }
     *(bs_trigger_entry **)apr_array_push(scfg->triggers) = e;
+    return NULL;
+}
+
+/* E4 — BotShieldSessionCookieName <name>. Each invocation appends
+ * one cookie name to scfg->session_names (lowercased, deduped).
+ * The list seeds the `cookies=session` predicate — matches any
+ * cookie on the request whose name is in this list. Curated
+ * defaults ship (PHPSESSID, JSESSIONID, etc.); this directive lets
+ * operators add framework-specific names without editing the
+ * module. Short by design — long auto-lists turn `cookies=session`
+ * into a loose any-cookie-with-a-suggestive-name matcher. */
+static const char *bs_set_session_cookie_name(cmd_parms *cmd, void *dconf,
+                                              const char *name)
+{
+    (void)dconf;
+    if (!name || !*name) {
+        return "BotShieldSessionCookieName: name required";
+    }
+    apr_size_t nlen = strlen(name);
+    if (nlen > 64) {
+        return "BotShieldSessionCookieName: name over 64 chars";
+    }
+    for (apr_size_t i = 0; i < nlen; i++) {
+        unsigned char c = (unsigned char)name[i];
+        int ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+              || (c >= '0' && c <= '9') || c == '-' || c == '_'
+              || c == '.';
+        if (!ok) return apr_psprintf(cmd->pool,
+            "BotShieldSessionCookieName: '%s' contains invalid "
+            "char '%c' (expect [A-Za-z0-9_-.])", name, (char)c);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    char *lower = apr_pstrdup(cmd->pool, name);
+    for (char *p = lower; *p; p++) *p = (char)tolower((unsigned char)*p);
+    /* Dedup — O(n) scan, list is tiny. */
+    for (int i = 0; i < scfg->session_names->nelts; i++) {
+        if (strcmp(APR_ARRAY_IDX(scfg->session_names, i,
+                                 const char *), lower) == 0) {
+            return NULL;
+        }
+    }
+    *(const char **)apr_array_push(scfg->session_names) = lower;
+    return NULL;
+}
+
+/* E4 — BotShieldCookieTrigger <name> <cookie-match> [key=value ...].
+ *
+ * Parses the cookie-match predicate (see PLAN.md E4 for the full
+ * predicate grammar) and the action keys, enforces cross-
+ * validation (status=pass + redirect= is a config error;
+ * _bs_verified as cookie=name is redirected to bs-cookie=<state>),
+ * and upserts by name. See bs_trigger_entry for the action-key
+ * semantics shared with E3; the semantic divergences are:
+ *
+ *   - credit= always applies (even under status=pass), because a
+ *     cookie is ongoing client state we want to shape this
+ *     request's score for.
+ *   - penalty= likewise always applies. Contrast E3 where it's
+ *     ignored under pass.
+ *   - status=pass is the DEFAULT; a credit trigger with no status
+ *     set is pass-with-score-shaping. */
+static int bs_ishex_or_alnum(char c)
+{
+    unsigned char u = (unsigned char)c;
+    return (u >= 'A' && u <= 'Z') || (u >= 'a' && u <= 'z')
+        || (u >= '0' && u <= '9') || u == '-' || u == '_' || u == '.';
+}
+
+static const char *bs_set_cookie_trigger(cmd_parms *cmd, void *dconf,
+                                         int argc, char *const argv[])
+{
+    (void)dconf;
+    if (argc < 2) {
+        return "BotShieldCookieTrigger: expects <name> <cookie-match> "
+               "[key=value ...]";
+    }
+    const char *name     = argv[0];
+    const char *match    = argv[1];
+    bs_server_cfg *scfg  = ap_get_module_config(cmd->server->module_config,
+                                                &botshield_module);
+    if (!bs_bot_name_valid(name)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCookieTrigger: name '%s' must be [a-z0-9-]{1,32}",
+            name);
+    }
+
+    bs_cookie_trigger_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
+    e->name         = apr_pstrdup(cmd->pool, name);
+    e->status_code  = BS_TRIGGER_STATUS_PASS;   /* default pass */
+    e->flag_bit     = 0;                        /* no flag unless ttl>0 */
+    e->ttl_sec      = 0;                        /* no flag by default */
+    e->penalty      = 0;
+    e->credit       = 0;
+
+    /* --- Parse the cookie-match predicate. --- */
+    const char *m = match;
+    int negated = 0;
+    if (m[0] == '!') { negated = 1; m++; }
+    if (!strncasecmp(m, "cookie=", 7)) {
+        const char *rest = m + 7;
+        if (!*rest) {
+            return "BotShieldCookieTrigger: cookie= needs a name";
+        }
+        /* Parse cookie name up to '=' / '~' / '!' / end. */
+        const char *op = rest;
+        while (*op && *op != '=' && *op != '~' && *op != '!') {
+            if (!bs_ishex_or_alnum(*op)) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldCookieTrigger: cookie name may only "
+                    "contain [A-Za-z0-9_-.] (got '%c')", *op);
+            }
+            op++;
+        }
+        apr_size_t nlen = (apr_size_t)(op - rest);
+        if (nlen == 0 || nlen > 64) {
+            return "BotShieldCookieTrigger: cookie name must be 1..64 chars";
+        }
+        char *cname = apr_pstrmemdup(cmd->pool, rest, nlen);
+        /* Reject the module's own cookie at this predicate level;
+         * redirect operators to bs-cookie=<state>. */
+        if (!strcasecmp(cname, BS_COOKIE_NAME)) {
+            return "BotShieldCookieTrigger: declaring a predicate "
+                   "against the module's own " BS_COOKIE_NAME
+                   " cookie is not supported — use bs-cookie=verified "
+                   "/ bs-cookie=missing / bs-cookie=invalid instead";
+        }
+        e->cname = cname;
+        /* Dispatch on the operator chosen. */
+        if (*op == '\0') {
+            e->pred_kind = negated ? BS_CP_NAMED_ABSENT
+                                   : BS_CP_NAMED_PRESENT;
+        } else if (negated) {
+            return "BotShieldCookieTrigger: '!' prefix may only be "
+                   "combined with a bare cookie=<name> (absence "
+                   "test); use cookie=<name>!<value> for value "
+                   "mismatch";
+        } else if (*op == '=') {
+            e->pred_kind = BS_CP_NAMED_EQ;
+            e->cvalue    = apr_pstrdup(cmd->pool, op + 1);
+        } else if (*op == '~') {
+            e->pred_kind = BS_CP_NAMED_CONTAINS;
+            e->cvalue    = apr_pstrdup(cmd->pool, op + 1);
+            if (!*e->cvalue) {
+                return "BotShieldCookieTrigger: cookie=<name>~<substr> "
+                       "needs a non-empty substring";
+            }
+        } else if (*op == '!') {
+            e->pred_kind = BS_CP_NAMED_NE;
+            e->cvalue    = apr_pstrdup(cmd->pool, op + 1);
+        }
+    } else if (!strncasecmp(m, "cookies=", 8)) {
+        if (negated) {
+            return "BotShieldCookieTrigger: '!' prefix cannot combine "
+                   "with cookies=<state> — use the complementary "
+                   "state (cookies=any is the complement of cookies=none)";
+        }
+        const char *state = m + 8;
+        if      (!strcasecmp(state, "none"))    e->pred_kind = BS_CP_BULK_NONE;
+        else if (!strcasecmp(state, "any"))     e->pred_kind = BS_CP_BULK_ANY;
+        else if (!strcasecmp(state, "session")) e->pred_kind = BS_CP_BULK_SESSION;
+        else {
+            return apr_psprintf(cmd->pool,
+                "BotShieldCookieTrigger: cookies='%s' not one of "
+                "none|any|session", state);
+        }
+    } else if (!strncasecmp(m, "bs-cookie=", 10)) {
+        if (negated) {
+            return "BotShieldCookieTrigger: '!' prefix cannot combine "
+                   "with bs-cookie=<state> — use the complementary "
+                   "state directly";
+        }
+        const char *state = m + 10;
+        if      (!strcasecmp(state, "verified")) e->pred_kind = BS_CP_BS_VERIFIED;
+        else if (!strcasecmp(state, "missing"))  e->pred_kind = BS_CP_BS_MISSING;
+        else if (!strcasecmp(state, "invalid"))  e->pred_kind = BS_CP_BS_INVALID;
+        else {
+            return apr_psprintf(cmd->pool,
+                "BotShieldCookieTrigger: bs-cookie='%s' not one of "
+                "verified|missing|invalid", state);
+        }
+    } else {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCookieTrigger: unrecognized cookie-match '%s' "
+            "(expected cookie=... / !cookie=... / cookies=... / "
+            "bs-cookie=...)", match);
+    }
+
+    /* --- Parse action keys. Shared mostly with bs_set_trigger. --- */
+    int status_explicit = 0;
+    for (int i = 2; i < argc; i++) {
+        const char *arg = argv[i];
+        const char *eq  = strchr(arg, '=');
+        if (!eq) {
+            return apr_psprintf(cmd->pool,
+                "BotShieldCookieTrigger: extra arg '%s' must be key=value",
+                arg);
+        }
+        apr_size_t klen = (apr_size_t)(eq - arg);
+        const char *val = eq + 1;
+        #define BS_CTK(n) (klen == sizeof(n)-1 && \
+                            strncasecmp(arg, n, sizeof(n)-1) == 0)
+
+        if (BS_CTK("status")) {
+            if (!strcasecmp(val, "pass")) {
+                e->status_code = BS_TRIGGER_STATUS_PASS;
+            } else {
+                char *end = NULL;
+                long code = strtol(val, &end, 10);
+                if (!end || *end || code < 100 || code > 599) {
+                    return apr_psprintf(cmd->pool,
+                        "BotShieldCookieTrigger: status='%s' must be "
+                        "an HTTP code 100..599 or the literal 'pass'",
+                        val);
+                }
+                e->status_code = (int)code;
+            }
+            status_explicit = 1;
+        } else if (BS_CTK("redirect")) {
+            if (!*val) return "BotShieldCookieTrigger: redirect= "
+                              "requires a URL";
+            e->redirect_url = apr_pstrdup(cmd->pool, val);
+            if (!status_explicit) e->status_code = 302;
+        } else if (BS_CTK("log")) {
+            e->log_tag = apr_pstrdup(cmd->pool, val);
+        } else if (BS_CTK("flag")) {
+            const char *perr = NULL;
+            apr_uint32_t bits = bs_parse_flag_names(cmd->pool, val, &perr);
+            if (perr) return apr_psprintf(cmd->pool,
+                "BotShieldCookieTrigger: flag=%s: %s", val, perr);
+            if (bits == 0 || (bits & (bits - 1)) != 0) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldCookieTrigger: flag=%s must name exactly "
+                    "one bit", val);
+            }
+            e->flag_bit = bits;
+        } else if (BS_CTK("ttl")) {
+            char *end = NULL;
+            long t = strtol(val, &end, 10);
+            if (!end || *end || t < 0 || t > 86400 * 30) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldCookieTrigger: ttl='%s' must be 0..2592000",
+                    val);
+            }
+            e->ttl_sec = (int)t;
+        } else if (BS_CTK("penalty")) {
+            char *end = NULL;
+            long pn = strtol(val, &end, 10);
+            if (!end || *end || pn < 0 || pn > 1000) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldCookieTrigger: penalty='%s' must be "
+                    "0..1000", val);
+            }
+            e->penalty = (int)pn;
+        } else if (BS_CTK("credit")) {
+            char *end = NULL;
+            long cn = strtol(val, &end, 10);
+            if (!end || *end || cn < 0 || cn > 1000) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldCookieTrigger: credit='%s' must be "
+                    "0..1000", val);
+            }
+            e->credit = (int)cn;
+        } else {
+            return apr_psprintf(cmd->pool,
+                "BotShieldCookieTrigger: unknown key '%.*s' (known: "
+                "status, redirect, log, flag, ttl, penalty, credit)",
+                (int)klen, arg);
+        }
+        #undef BS_CTK
+    }
+
+    if (e->redirect_url && e->status_code == BS_TRIGGER_STATUS_PASS) {
+        return "BotShieldCookieTrigger: status=pass and redirect= are "
+               "mutually exclusive — a redirect IS the response";
+    }
+    if (e->redirect_url
+        && (e->status_code < 300 || e->status_code >= 400)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCookieTrigger: redirect= requires a 3xx "
+            "status (got %d)", e->status_code);
+    }
+    if (e->ttl_sec == 0) e->flag_bit = 0;  /* no flag without ttl */
+
+    /* Upsert-by-name. */
+    for (int i = 0; i < scfg->cookie_triggers->nelts; i++) {
+        bs_cookie_trigger_entry *ex = APR_ARRAY_IDX(
+            scfg->cookie_triggers, i, bs_cookie_trigger_entry *);
+        if (strcmp(ex->name, e->name) == 0) {
+            APR_ARRAY_IDX(scfg->cookie_triggers, i,
+                          bs_cookie_trigger_entry *) = e;
+            return NULL;
+        }
+    }
+    *(bs_cookie_trigger_entry **)apr_array_push(scfg->cookie_triggers) = e;
     return NULL;
 }
 
@@ -7762,6 +8348,26 @@ static const command_rec bs_cmds[] = {
                  "trailing '$' = exact match. Hits return 403 with "
                  "a +100 score penalty under reason "
                  "block-path:<name>."),
+    /* E4 — cookie triggers */
+    AP_INIT_TAKE_ARGV("BotShieldCookieTrigger",
+                 bs_set_cookie_trigger, NULL, RSRC_CONF,
+                 "Cookie-based trigger. Args: <name> <cookie-match> "
+                 "[key=value ...]. cookie-match is one of: "
+                 "cookie=<n>, cookie=<n>=<v>, cookie=<n>~<substr>, "
+                 "cookie=<n>!<v>, !cookie=<n>, cookies=<none|any|"
+                 "session>, bs-cookie=<verified|missing|invalid>. "
+                 "Keys: status=<code|pass> (default pass; diverges "
+                 "from E3 — credit/penalty here ALWAYS apply, even "
+                 "under pass), redirect=<url>, log=<tag>, flag=<bit>, "
+                 "ttl=<sec>, penalty=<n>, credit=<n>. Declaration "
+                 "order, first match wins; upsert-by-name."),
+    AP_INIT_TAKE1("BotShieldSessionCookieName",
+                 bs_set_session_cookie_name, NULL, RSRC_CONF,
+                 "Add a cookie name to the list matched by the "
+                 "cookies=session predicate. Curated defaults: "
+                 "PHPSESSID, JSESSIONID, ASP.NET_SessionId, "
+                 "session_id, connect.sid, laravel_session. Each "
+                 "invocation appends one name; case-insensitive."),
     /* E3 — path-based triggers */
     AP_INIT_TAKE_ARGV("BotShieldTrigger",
                  bs_set_trigger, NULL, RSRC_CONF,
@@ -8426,6 +9032,18 @@ static int bs_handler(request_rec *r)
     }
     const char *cookie_status =
         bs_decision_cookie_status(cookie_verify_reason, cookie_had_val);
+
+    /* E4 — publish the `_bs_verified` verification verdict as a
+     * request note so bs_check_policy's cookie-trigger evaluator
+     * can surface it via bs-cookie=<state> predicates. Three-state
+     * mapping matches the directive surface. */
+    {
+        const char *bs_state;
+        if (!cookie_had_val)           bs_state = BS_CK_STATE_MISSING;
+        else if (!cookie_verify_reason) bs_state = BS_CK_STATE_VERIFIED;
+        else                           bs_state = BS_CK_STATE_INVALID;
+        apr_table_setn(r->notes, BS_CK_STATE_NOTE, bs_state);
+    }
 
     /* E2.1 + E2.2 + E3 policy enforcement. Runs before scoring
      * heuristics so a block / rate / trigger short-circuits cleanly.
