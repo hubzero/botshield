@@ -52,7 +52,8 @@ LIBS := -lcrypto -lcurl -ljson-c
 
 .PHONY: all build install enable disable reload clean \
         sanitize install-sanitize \
-        fuzz fuzz-run fuzz-clean
+        fuzz fuzz-run fuzz-clean \
+        fuzz-robots fuzz-robots-run
 
 all: build
 
@@ -133,5 +134,30 @@ fuzz-run: fuzz
 	    -print_final_stats=1 \
 	    tests/fuzz/corpus
 
+# --- E2.2.3 robots.txt fuzz ---
+#
+# Second LibFuzzer harness, targeting src/robots.c. Independent from
+# fuzz_cookie — robots.c is APR-only, no httpd dependency, so no
+# stubs are needed and the build command is shorter.
+
+FUZZ_ROBOTS_BIN := tests/fuzz/fuzz_robots
+FUZZ_ROBOTS_SRC := tests/fuzz/fuzz_robots.c
+
+fuzz-robots: $(FUZZ_ROBOTS_BIN)
+
+$(FUZZ_ROBOTS_BIN): $(FUZZ_ROBOTS_SRC) src/robots.c src/robots.h
+	$(FUZZ_CC) $(FUZZ_CFLAGS) $(FUZZ_CPPFLAGS) \
+	    -o $@ $(FUZZ_ROBOTS_SRC) \
+	    $(shell pkg-config --libs apr-1)
+
+fuzz-robots-run: fuzz-robots
+	@mkdir -p tests/fuzz/corpus-robots
+	@if [ -z "$$(ls -A tests/fuzz/corpus-robots 2>/dev/null)" ]; then \
+	    cp tests/fuzz/seeds-robots/* tests/fuzz/corpus-robots/ ; \
+	fi
+	$(FUZZ_ROBOTS_BIN) -max_total_time=$(DURATION) \
+	    -print_final_stats=1 \
+	    tests/fuzz/corpus-robots
+
 fuzz-clean:
-	rm -f $(FUZZ_BIN)
+	rm -f $(FUZZ_BIN) $(FUZZ_ROBOTS_BIN)

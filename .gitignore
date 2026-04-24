@@ -32,7 +32,9 @@ tests/test-results/
 # every fuzz run with newly-discovered inputs; we don't track it in
 # git. seed_corpus.py regenerates a starter set any time.
 tests/fuzz/fuzz_cookie
+tests/fuzz/fuzz_robots
 tests/fuzz/corpus/
+tests/fuzz/corpus-robots/
 # LibFuzzer also drops crash-* files next to the binary on a finding
 crash-*
 leak-*
