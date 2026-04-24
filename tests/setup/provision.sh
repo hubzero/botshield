@@ -45,7 +45,7 @@ make install >/dev/null
 
 printf "LoadModule botshield_module /usr/lib/apache2/modules/mod_botshield.so\n" \
   > /etc/apache2/mods-available/botshield.load
-a2enmod botshield status remoteip ssl >/dev/null
+a2enmod botshield status remoteip ssl headers >/dev/null
 # Ensure threaded MPM by default
 if [[ ! -e /etc/apache2/mods-enabled/mpm_event.load ]]; then
   a2dismod mpm_prefork mpm_worker 2>/dev/null || true
@@ -88,6 +88,11 @@ install_secret /etc/botshield/recaptcha-v2-secret    "6LeIxAcTAAAAAGG-vFI1TnRWxM
 install_secret /etc/botshield/recaptcha-v3-secret    "6LeIxAcTAAAAAGG-vFI1TnRWxMZNFuojJ4WifJWe"
 install_secret /etc/botshield/friendly-secret        "FRIENDLYCAPTCHA_FREE_TIER_SECRET_REPLACE_ME_WITH_REAL"
 install_secret /etc/botshield/geetest-secret         "GEETEST_CAPTCHA_KEY_REPLACE_WITH_REAL_FROM_DASHBOARD"
+# E5 — app-to-module feedback HMAC key. Fixed value so pytest can
+# recompute signatures with the same bytes. 64 hex chars = 32
+# bytes, well above BS_MIN_SECRET_BYTES.
+install_secret /etc/botshield/app-feedback-secret \
+  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 echo "== /var/lib/botshield (state file dir) =="
 install -d -m 750 -o www-data -g www-data /var/lib/botshield
