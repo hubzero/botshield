@@ -15,8 +15,13 @@
 
 APXS     ?= apxs
 MOD_NAME ?= botshield
-SRC      := src/mod_$(MOD_NAME).c
-LA       := $(SRC:.c=.la)
+# Keep mod_botshield.c first — apxs derives the .la/.so name from the
+# first source. Extra .c files are compiled into the same shared
+# object and share the module's pool/APR linkage.
+MAIN_SRC := src/mod_$(MOD_NAME).c
+EXTRA_SRC := src/robots.c
+SRC      := $(MAIN_SRC) $(EXTRA_SRC)
+LA       := $(MAIN_SRC:.c=.la)
 
 # Pass warnings through apxs to the underlying compiler.
 CFLAGS_WARN := -Wc,-Wall -Wc,-Wextra -Wc,-Wno-unused-parameter
