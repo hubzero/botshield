@@ -620,6 +620,11 @@ typedef struct {
      * BotShieldSessionCookieName. Lowercased at add time for
      * cheap case-insensitive compare at request time. */
     apr_array_header_t *cookie_triggers;   /* bs_cookie_trigger_entry * */
+    /* E6 — env-var triggers. Same ordered-array + upsert-by-name
+     * shape as E3/E4. Precedence: declaration order, first match
+     * wins (no accumulation); env signals are discrete per-request,
+     * not layered reputation. */
+    apr_array_header_t *env_triggers;      /* bs_env_trigger_entry * */
     apr_array_header_t *session_names;     /* const char * (lowercased) */
     /* E2.2 — robots.txt enforcement.
      *
@@ -801,6 +806,8 @@ static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
                                            add->triggers);
     out->cookie_triggers = bs_merge_rule_array(p, base->cookie_triggers,
                                                add->cookie_triggers);
+    out->env_triggers    = bs_merge_rule_array(p, base->env_triggers,
+                                                add->env_triggers);
     /* session_names: concatenate base + add, drop dups. Small lists,
      * O(n*m) is fine; happens once at config load. */
     if (base->session_names && add->session_names) {
@@ -876,6 +883,7 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->block_paths      = apr_array_make(p, 4, sizeof(void *));
     scfg->triggers         = apr_array_make(p, 4, sizeof(void *));
     scfg->cookie_triggers  = apr_array_make(p, 4, sizeof(void *));
+    scfg->env_triggers     = apr_array_make(p, 4, sizeof(void *));
     /* Curated session-cookie-name defaults. Kept deliberately
      * short; long auto-lists turn `cookies=session` into a loose
      * matcher and undermine the bonus. Operators add their own
@@ -2475,6 +2483,48 @@ typedef struct {
     int           credit;            /* applied regardless of status */
 } bs_cookie_trigger_entry;
 
+/* E6 — env-var triggers. Read a per-request env var from
+ * r->subprocess_env and apply action accordingly. Producers
+ * include Apache's `SetEnvIf` family, `BrowserMatch`,
+ * `RewriteRule [E=...]`, and ModSecurity v2 `setenv`. All write
+ * to the same apr_table_t at phases before the handler runs, so
+ * bs_check_policy observes whatever the upstream chain wrote.
+ *
+ * Deliberately narrower than E3/E4: no substring/contains match,
+ * no redirect action, strict first-match-wins precedence. Rich
+ * matching belongs in the upstream module, which then sets a
+ * coarse bucket variable E6 consumes.
+ *
+ * Predicate kinds:
+ *   NAMED_PRESENT  env var is defined on the request (any value,
+ *                  including empty string — Apache assigns an
+ *                  empty string to `SetEnvIf X Y` with no value).
+ *   NAMED_ABSENT   env var is not defined on the request.
+ *   NAMED_EQ       env var has exactly the operator-specified
+ *                  value (case-sensitive, like Apache's table). */
+enum bs_env_pred_kind {
+    BS_EP_NAMED_PRESENT = 0,
+    BS_EP_NAMED_ABSENT,
+    BS_EP_NAMED_EQ,
+};
+
+typedef struct {
+    const char   *name;
+    int           pred_kind;         /* enum bs_env_pred_kind */
+    const char   *env_name;
+    const char   *env_value;         /* NULL unless NAMED_EQ */
+    /* Action keys mirror E4's minus `credit` being unconditional —
+     * same E4-style semantics: credit/penalty apply under
+     * status=pass because the env signal is part of this
+     * request's state. */
+    int           status_code;       /* HTTP code or BS_TRIGGER_STATUS_PASS */
+    const char   *log_tag;
+    apr_uint32_t  flag_bit;
+    int           ttl_sec;
+    int           penalty;
+    int           credit;
+} bs_env_trigger_entry;
+
 /* SHM slot for the fixed-window counter. Packed to 8 bytes so
  * platforms with 64-bit atomics could later swap to a CAS-on-u64;
  * for v1 we use 32-bit atomics on each field separately, which is
@@ -2752,7 +2802,7 @@ static int bs_cookie_pred_match(const bs_cookie_trigger_entry *e,
     return 0;
 }
 
-/* Request-time E2.1 + E2.2 + E3 + E4 check. Return values:
+/* Request-time E2.1 + E2.2 + E3 + E4 + E6 check. Return values:
  *   OK                     — no rule fired; continue to heuristics.
  *   DECLINED               — a trigger with status=pass fired; the
  *                            bs_handler short-circuits to DECLINED
@@ -2765,27 +2815,34 @@ static int bs_cookie_pred_match(const bs_cookie_trigger_entry *e,
  *                            response body.
  *
  * Order:
- *   1. E4 cookie triggers (declaration order, first match wins).
- *   2. E3 path triggers (declaration order, first match wins).
- *   3. Directive block_paths (declaration order, first match wins).
- *   4. robots.txt Disallow (if configured).
- *   5. Directive rate_limits.
- *   6. robots.txt Crawl-delay (if configured).
+ *   1. E4 cookie triggers (declaration order; pass accumulates,
+ *      first non-pass short-circuits).
+ *   2. E6 env-var triggers (declaration order, first match wins).
+ *   3. E3 path triggers (declaration order, first match wins).
+ *   4. Directive block_paths (declaration order, first match wins).
+ *   5. robots.txt Disallow (if configured).
+ *   6. Directive rate_limits.
+ *   7. robots.txt Crawl-delay (if configured).
  *
- * Cookie triggers run first so reputation signals from cookies
- * always land on the decision log, even when a later rule short-
- * circuits. Path triggers run next because they're the most
- * specific per-path intent the operator can write — a trigger on
- * `/.env` should win against any cohort-scoped block-path that
- * also happens to match. Operator directives always get first
- * say in each family after that; robots.txt fills in where the
- * operator hasn't declared explicit rules.
+ * Cookie triggers run first so reputation signals always land on
+ * the decision log, even when a later rule short-circuits. Env
+ * triggers run next — another reputation/policy shape driven by
+ * upstream Apache modules (SetEnvIf / ModSecurity / etc.). Path
+ * triggers are the most specific per-path intent the operator
+ * can write — a trigger on `/.env` should win against any
+ * cohort-scoped block-path that also happens to match. Operator
+ * directives always get first say in each family after that;
+ * robots.txt fills in where the operator hasn't declared
+ * explicit rules.
  *
- * E4 semantic divergence from E3: cookie triggers apply
- * credit/penalty to THIS request regardless of status=pass, because
- * cookies are ongoing-state signals (the client carries the
- * signal on this very request). Path triggers under status=pass
- * leave the score alone. */
+ * Precedence divergences from E3 (strict first-match-wins, no
+ * accumulation) worth keeping straight:
+ *  - E4 cookies: credit/penalty always apply (even under
+ *    status=pass); pass matches accumulate across triggers;
+ *    first non-pass trigger short-circuits the walk.
+ *  - E6 env: credit/penalty always apply (E4-style), but the
+ *    family uses strict first-match-wins — a pass match ends
+ *    the env-trigger loop without considering later entries. */
 static int bs_check_policy(request_rec *r)
 {
     bs_server_cfg *scfg = ap_get_module_config(r->server->module_config,
@@ -2853,6 +2910,61 @@ static int bs_check_policy(request_rec *r)
                     "Location", c->redirect_url);
             }
             return c->status_code;
+        }
+    }
+
+    /* E6 — env-var triggers. Declaration order, first match wins.
+     * Main-request-only (subrequests have producer-specific env
+     * propagation — applying here would double-count). Reads
+     * r->subprocess_env, the table SetEnvIf / RewriteRule [E=...] /
+     * BrowserMatch / ModSecurity v2 setenv all populate at phases
+     * that run before the handler. */
+    if (ap_is_initial_req(r)
+        && scfg->env_triggers && scfg->env_triggers->nelts > 0) {
+        for (int i = 0; i < scfg->env_triggers->nelts; i++) {
+            bs_env_trigger_entry *t = APR_ARRAY_IDX(
+                scfg->env_triggers, i, bs_env_trigger_entry *);
+            const char *v = apr_table_get(r->subprocess_env,
+                                          t->env_name);
+            int matched = 0;
+            switch (t->pred_kind) {
+            case BS_EP_NAMED_PRESENT:
+                matched = (v != NULL);
+                break;
+            case BS_EP_NAMED_ABSENT:
+                matched = (v == NULL);
+                break;
+            case BS_EP_NAMED_EQ:
+                matched = (v != NULL
+                        && t->env_value != NULL
+                        && strcmp(v, t->env_value) == 0);
+                break;
+            }
+            if (!matched) continue;
+
+            if (t->flag_bit && t->ttl_sec > 0) {
+                unsigned char client_ip[16];
+                if (bs_parse_client_ip(r->useragent_ip, client_ip)) {
+                    bs_mask_ipv6_prefix(client_ip,
+                                        scfg->ipv6_prefix_bits);
+                    bs_flagged_ip_add(r, client_ip,
+                                      t->flag_bit, t->ttl_sec);
+                }
+            }
+            bs_set_trigger_tag(r, t->log_tag);
+
+            int score_delta = t->penalty - t->credit;
+            bs_score_add(r, score_delta, 0,
+                apr_pstrcat(r->pool, "env-trigger:", t->name, NULL));
+
+            if (t->status_code == BS_TRIGGER_STATUS_PASS) {
+                /* First match wins — no accumulation across env
+                 * triggers (env signals are discrete per-request,
+                 * not layered reputation like cookies). Stop
+                 * evaluating the rest of this family. */
+                break;
+            }
+            return t->status_code;
         }
     }
 
@@ -5366,6 +5478,197 @@ static const char *bs_set_cookie_trigger(cmd_parms *cmd, void *dconf,
         }
     }
     *(bs_cookie_trigger_entry **)apr_array_push(scfg->cookie_triggers) = e;
+    return NULL;
+}
+
+/* E6 — BotShieldEnvTrigger <name> <env-match> [key=value ...].
+ *
+ * env-match shapes:
+ *   env=<var>           present (any value, including empty)
+ *   env=<var>=<value>   exact value match
+ *   !env=<var>          absent
+ *
+ * Keys mirror E4's, minus `redirect` (E6 doesn't do response
+ * shaping; scoring/flagging only). Predicate matching reads
+ * `r->subprocess_env` at request time.
+ *
+ * Narrower by design than E3/E4: no substring/contains shape, no
+ * cookie-bulk-state analog. Operators who need rich matching set
+ * a coarse bucket upstream (SetEnvIfExpr, ModSecurity rule, etc.)
+ * and consume the bucket here. */
+static const char *bs_set_env_trigger(cmd_parms *cmd, void *dconf,
+                                      int argc, char *const argv[])
+{
+    (void)dconf;
+    if (argc < 2) {
+        return "BotShieldEnvTrigger: expects <name> <env-match> "
+               "[key=value ...]";
+    }
+    const char *name  = argv[0];
+    const char *match = argv[1];
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    if (!bs_bot_name_valid(name)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldEnvTrigger: name '%s' must be [a-z0-9-]{1,32}",
+            name);
+    }
+
+    bs_env_trigger_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
+    e->name        = apr_pstrdup(cmd->pool, name);
+    e->status_code = BS_TRIGGER_STATUS_PASS;
+    e->flag_bit    = 0;
+    e->ttl_sec     = 0;
+
+    /* --- Parse env-match predicate. --- */
+    const char *m = match;
+    int negated = 0;
+    if (m[0] == '!') { negated = 1; m++; }
+    if (strncmp(m, "env=", 4) != 0) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldEnvTrigger: unrecognized env-match '%s' "
+            "(expected env=<var>, env=<var>=<value>, or "
+            "!env=<var>)", match);
+    }
+    const char *rest = m + 4;
+    if (!*rest) {
+        return "BotShieldEnvTrigger: env= needs a variable name";
+    }
+    /* Env var name: POSIX-ish [A-Za-z_][A-Za-z0-9_]* but Apache is
+     * liberal; we accept the same charset we allow on session-
+     * cookie names and cookie-match names. */
+    const char *op = rest;
+    while (*op && *op != '=') {
+        unsigned char c = (unsigned char)*op;
+        int ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+              || (c >= '0' && c <= '9') || c == '_' || c == '-';
+        if (!ok) {
+            return apr_psprintf(cmd->pool,
+                "BotShieldEnvTrigger: env var name contains "
+                "invalid char '%c' (expect [A-Za-z0-9_-])", (char)c);
+        }
+        op++;
+    }
+    apr_size_t nlen = (apr_size_t)(op - rest);
+    if (nlen == 0 || nlen > 128) {
+        return "BotShieldEnvTrigger: env var name must be 1..128 chars";
+    }
+    e->env_name = apr_pstrmemdup(cmd->pool, rest, nlen);
+
+    if (*op == '\0') {
+        e->pred_kind = negated ? BS_EP_NAMED_ABSENT
+                               : BS_EP_NAMED_PRESENT;
+    } else if (negated) {
+        return "BotShieldEnvTrigger: '!' prefix only combines with "
+               "bare env=<var> (absence test); use env=<var>=<value> "
+               "for value-mismatch semantics via a separate trigger";
+    } else {
+        /* *op == '=' */
+        e->pred_kind  = BS_EP_NAMED_EQ;
+        e->env_value  = apr_pstrdup(cmd->pool, op + 1);
+        /* Empty expected-value is legitimate: SetEnvIf with no value
+         * assigns "", so env=FOO= matches that case explicitly.
+         * Distinct from env=FOO (matches empty OR non-empty). */
+    }
+
+    /* --- Parse action keys. Reject redirect= explicitly. --- */
+    int status_explicit = 0;
+    for (int i = 2; i < argc; i++) {
+        const char *arg = argv[i];
+        const char *eq  = strchr(arg, '=');
+        if (!eq) {
+            return apr_psprintf(cmd->pool,
+                "BotShieldEnvTrigger: extra arg '%s' must be key=value",
+                arg);
+        }
+        apr_size_t klen = (apr_size_t)(eq - arg);
+        const char *val = eq + 1;
+        #define BS_ETK(n) (klen == sizeof(n)-1 && \
+                           strncasecmp(arg, n, sizeof(n)-1) == 0)
+
+        if (BS_ETK("status")) {
+            if (!strcasecmp(val, "pass")) {
+                e->status_code = BS_TRIGGER_STATUS_PASS;
+            } else {
+                char *end = NULL;
+                long code = strtol(val, &end, 10);
+                if (!end || *end || code < 100 || code > 599) {
+                    return apr_psprintf(cmd->pool,
+                        "BotShieldEnvTrigger: status='%s' must be "
+                        "an HTTP code 100..599 or the literal "
+                        "'pass'", val);
+                }
+                e->status_code = (int)code;
+            }
+            status_explicit = 1;
+            (void)status_explicit;
+        } else if (BS_ETK("redirect")) {
+            return "BotShieldEnvTrigger: redirect= is not supported "
+                   "on env triggers (env signals are scoring / "
+                   "flagging only; use E3 or E4 for response-shaping "
+                   "redirects)";
+        } else if (BS_ETK("log")) {
+            e->log_tag = apr_pstrdup(cmd->pool, val);
+        } else if (BS_ETK("flag")) {
+            const char *perr = NULL;
+            apr_uint32_t bits = bs_parse_flag_names(cmd->pool, val, &perr);
+            if (perr) return apr_psprintf(cmd->pool,
+                "BotShieldEnvTrigger: flag=%s: %s", val, perr);
+            if (bits == 0 || (bits & (bits - 1)) != 0) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldEnvTrigger: flag=%s must name exactly "
+                    "one bit", val);
+            }
+            e->flag_bit = bits;
+        } else if (BS_ETK("ttl")) {
+            char *end = NULL;
+            long t = strtol(val, &end, 10);
+            if (!end || *end || t < 0 || t > 86400 * 30) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldEnvTrigger: ttl='%s' must be 0..2592000",
+                    val);
+            }
+            e->ttl_sec = (int)t;
+        } else if (BS_ETK("penalty")) {
+            char *end = NULL;
+            long pn = strtol(val, &end, 10);
+            if (!end || *end || pn < 0 || pn > 1000) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldEnvTrigger: penalty='%s' must be "
+                    "0..1000", val);
+            }
+            e->penalty = (int)pn;
+        } else if (BS_ETK("credit")) {
+            char *end = NULL;
+            long cn = strtol(val, &end, 10);
+            if (!end || *end || cn < 0 || cn > 1000) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldEnvTrigger: credit='%s' must be "
+                    "0..1000", val);
+            }
+            e->credit = (int)cn;
+        } else {
+            return apr_psprintf(cmd->pool,
+                "BotShieldEnvTrigger: unknown key '%.*s' (known: "
+                "status, log, flag, ttl, penalty, credit)",
+                (int)klen, arg);
+        }
+        #undef BS_ETK
+    }
+
+    if (e->ttl_sec == 0) e->flag_bit = 0;
+
+    /* Upsert-by-name (same as E3/E4). */
+    for (int i = 0; i < scfg->env_triggers->nelts; i++) {
+        bs_env_trigger_entry *ex = APR_ARRAY_IDX(
+            scfg->env_triggers, i, bs_env_trigger_entry *);
+        if (strcmp(ex->name, e->name) == 0) {
+            APR_ARRAY_IDX(scfg->env_triggers, i,
+                          bs_env_trigger_entry *) = e;
+            return NULL;
+        }
+    }
+    *(bs_env_trigger_entry **)apr_array_push(scfg->env_triggers) = e;
     return NULL;
 }
 
@@ -8761,6 +9064,20 @@ static const command_rec bs_cmds[] = {
                  "PHPSESSID, JSESSIONID, ASP.NET_SessionId, "
                  "session_id, connect.sid, laravel_session. Each "
                  "invocation appends one name; case-insensitive."),
+    /* E6 — env-var triggers */
+    AP_INIT_TAKE_ARGV("BotShieldEnvTrigger",
+                 bs_set_env_trigger, NULL, RSRC_CONF,
+                 "Env-var-based trigger, reads r->subprocess_env. "
+                 "Args: <name> <env-match> [key=value ...]. "
+                 "env-match is one of: env=<var> (present), "
+                 "env=<var>=<value> (exact match, case-sensitive), "
+                 "!env=<var> (absent). Keys: status=<code|pass> "
+                 "(default pass; credit/penalty apply under pass "
+                 "like E4), log=<tag>, flag=<bit>, ttl=<sec>, "
+                 "penalty=<n>, credit=<n>. No redirect= (env "
+                 "signals are scoring/flagging only). Declaration "
+                 "order, first match wins; upsert-by-name. Main "
+                 "requests only — subrequests are no-ops."),
     /* E3 — path-based triggers */
     AP_INIT_TAKE_ARGV("BotShieldTrigger",
                  bs_set_trigger, NULL, RSRC_CONF,
