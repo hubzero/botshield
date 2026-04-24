@@ -596,6 +596,9 @@ typedef struct {
      * a rule without disturbing relative order of the others. */
     apr_array_header_t *rate_limits;   /* bs_rate_limit_entry * */
     apr_array_header_t *block_paths;   /* bs_block_path_entry * */
+    /* E3 — path-based triggers. Same ordered-array + upsert-by-name
+     * shape as E2.1; first match wins at request time. */
+    apr_array_header_t *triggers;      /* bs_trigger_entry * */
     /* E2.2 — robots.txt enforcement.
      *
      * `robots` is the active state bundle (parsed doc + owning
@@ -758,6 +761,8 @@ static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
                                            add->rate_limits);
     out->block_paths = bs_merge_rule_array(p, base->block_paths,
                                            add->block_paths);
+    out->triggers    = bs_merge_rule_array(p, base->triggers,
+                                           add->triggers);
 
     /* E2.2 server-scope inheritance — main-scope settings should
      * flow into vhosts that don't restate them. Each field uses a
@@ -801,6 +806,7 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
      * ipspecs and assigns SHM slots. */
     scfg->rate_limits      = apr_array_make(p, 4, sizeof(void *));
     scfg->block_paths      = apr_array_make(p, 4, sizeof(void *));
+    scfg->triggers         = apr_array_make(p, 4, sizeof(void *));
     /* E2.2 — robots.txt defaults: no file configured, heuristic
      * wildcard scope, no parsed doc (populated in post_config). */
     scfg->robots_txt_path         = NULL;
@@ -2282,6 +2288,45 @@ typedef struct {
     bs_cohort   cohort;
 } bs_block_path_entry;
 
+/* E3 — path-based triggers. One of these per BotShieldTrigger
+ * directive. `status_code` holds either a concrete HTTP status
+ * (e.g. 403, 429) or the BS_TRIGGER_STATUS_PASS sentinel meaning
+ * "don't enforce anything on this request; let the real handler
+ * respond." The sentinel uses a negative int so it can never
+ * collide with a valid HTTP status code.
+ *
+ * `redirect_url` + `status_code` interact: when redirect is set,
+ * status_code is a 3xx code (default 302 chosen at parse time);
+ * bs_check_policy emits the Location header and returns
+ * status_code from the handler.
+ *
+ * `flag_bit` is the M5.1 flag-IP bit to set for future requests
+ * (default scanner_probe at parse time). `ttl_sec == 0` disables
+ * IP flagging. `penalty` is only applied when status is a concrete
+ * error code — under PASS it's bookkeeping-only and we skip the
+ * score_add (see PLAN.md E3 semantics). */
+#define BS_TRIGGER_STATUS_PASS   (-1)
+
+/* Forward declarations — bs_check_policy (E3 path) calls these; they
+ * live alongside their primary users further down the file. */
+static void bs_set_trigger_tag(request_rec *r, const char *tag);
+static void bs_flagged_ip_add(request_rec *r,
+                              const unsigned char ip[16],
+                              apr_uint32_t flag_bits, int ttl_seconds);
+static int  bs_parse_client_ip(const char *ip_str, unsigned char out[16]);
+static void bs_mask_ipv6_prefix(unsigned char ip[16], int prefix_bits);
+
+typedef struct {
+    const char   *name;
+    const char   *path_pattern;
+    int           status_code;       /* HTTP code or BS_TRIGGER_STATUS_PASS */
+    const char   *redirect_url;      /* NULL if not a redirect trigger */
+    const char   *log_tag;           /* NULL if no tag set */
+    apr_uint32_t  flag_bit;          /* single M5.1 bit, 0 if ttl_sec==0 */
+    int           ttl_sec;           /* 0 = don't flag the IP */
+    int           penalty;           /* score_add amount; ignored under PASS */
+} bs_trigger_entry;
+
 /* SHM slot for the fixed-window counter. Packed to 8 bytes so
  * platforms with 64-bit atomics could later swap to a CAS-on-u64;
  * for v1 we use 32-bit atomics on each field separately, which is
@@ -2430,25 +2475,87 @@ static int bs_ua_is_crawler_candidate(const char *ua)
     return 1;
 }
 
-/* Request-time E2.1+E2.2 check. Returns OK, HTTP_FORBIDDEN, or
- * HTTP_TOO_MANY_REQUESTS. In both short-circuit cases we also feed
- * bs_score_add so the violation appears in the decision log.
+/* Request-time E2.1 + E2.2 + E3 check. Return values:
+ *   OK                     — no rule fired; continue to heuristics.
+ *   DECLINED               — a trigger with status=pass fired; the
+ *                            bs_handler short-circuits to DECLINED
+ *                            so the real handler runs, with the
+ *                            flag-IP / log side effects already
+ *                            applied.
+ *   any other HTTP_* code  — short-circuit with that status. The
+ *                            handler returns it directly so Apache's
+ *                            ErrorDocument machinery can render the
+ *                            response body.
  *
  * Order:
- *   1. Directive block_paths (declaration order, first match wins).
- *   2. robots.txt Disallow (if configured).
- *   3. Directive rate_limits.
- *   4. robots.txt Crawl-delay (if configured).
+ *   1. E3 triggers (declaration order, first match wins).
+ *   2. Directive block_paths (declaration order, first match wins).
+ *   3. robots.txt Disallow (if configured).
+ *   4. Directive rate_limits.
+ *   5. robots.txt Crawl-delay (if configured).
  *
- * Operator directives always get first say in each feature family;
- * robots.txt fills in where the operator didn't declare explicit
- * rules. This matches the "operator overrides robots.txt" principle
- * and keeps the two rule sources layered rather than interleaved. */
+ * Triggers run first because they're the most specific per-path
+ * intent the operator can write — a trigger on `/.env` should win
+ * against any cohort-scoped block-path that also happens to match.
+ * Operator directives always get first say in each family after
+ * that; robots.txt fills in where the operator hasn't declared
+ * explicit rules. */
 static int bs_check_policy(request_rec *r)
 {
     bs_server_cfg *scfg = ap_get_module_config(r->server->module_config,
                                                &botshield_module);
     if (!scfg) return OK;
+
+    /* E3 — triggers. Path-only, unscoped. */
+    if (scfg->triggers && scfg->triggers->nelts > 0) {
+        for (int i = 0; i < scfg->triggers->nelts; i++) {
+            bs_trigger_entry *t = APR_ARRAY_IDX(
+                scfg->triggers, i, bs_trigger_entry *);
+            if (!bs_path_glob_match(t->path_pattern, r->uri)) continue;
+
+            /* Flag the IP (future-request memory) before any early
+             * return, so both PASS and error-status paths carry the
+             * reputation side-effect. */
+            if (t->flag_bit && t->ttl_sec > 0) {
+                unsigned char client_ip[16];
+                if (bs_parse_client_ip(r->useragent_ip, client_ip)) {
+                    bs_mask_ipv6_prefix(client_ip,
+                                        scfg->ipv6_prefix_bits);
+                    bs_flagged_ip_add(r, client_ip,
+                                      t->flag_bit, t->ttl_sec);
+                }
+            }
+
+            /* Decision-log tag rides the existing decision line —
+             * set it in r->notes whether or not we short-circuit. */
+            bs_set_trigger_tag(r, t->log_tag);
+
+            if (t->status_code == BS_TRIGGER_STATUS_PASS) {
+                /* Pass-through: no score_add on this request
+                 * (PASS means "don't enforce anything on this
+                 * request"), no body, no headers. The real handler
+                 * responds normally. bs_handler translates our
+                 * DECLINED into DECLINED for Apache. */
+                bs_score_add(r, 0, 0,
+                    apr_pstrcat(r->pool, "trigger:", t->name,
+                                ":pass", NULL));
+                return DECLINED;
+            }
+
+            /* Concrete-status path: record the reason (with or
+             * without penalty) so the decision log captures it,
+             * then either emit Location (redirect) or return the
+             * code for ErrorDocument to handle the body. */
+            bs_score_add(r, t->penalty, 0,
+                apr_pstrcat(r->pool, "trigger:", t->name, NULL));
+
+            if (t->redirect_url) {
+                apr_table_setn(r->headers_out,
+                    "Location", t->redirect_url);
+            }
+            return t->status_code;
+        }
+    }
 
     const char *ua = apr_table_get(r->headers_in, "User-Agent");
 
@@ -4240,6 +4347,165 @@ static const char *bs_set_block_path(cmd_parms *cmd, void *dconf,
     return NULL;
 }
 
+/* E3 — BotShieldTrigger <name> <path-glob> [key=value ...].
+ *
+ * Supported keys: status (code|pass), redirect, log, flag, ttl,
+ * penalty. See PLAN.md E3 for semantics. Rejects:
+ *   - unknown key names
+ *   - status=pass + redirect= (pass-through can't also redirect)
+ *   - flag= with an unknown bit name
+ *   - status values that aren't 3xx when redirect= is set
+ *
+ * Upsert-by-name, preserving declaration order (same model as
+ * BotShieldRateLimit / BotShieldBlockPath). */
+static const char *bs_set_trigger(cmd_parms *cmd, void *dconf,
+                                  int argc, char *const argv[])
+{
+    (void)dconf;
+    if (argc < 2) {
+        return "BotShieldTrigger: expects <name> <path-glob> "
+               "[key=value ...]";
+    }
+    const char *name    = argv[0];
+    const char *pattern = argv[1];
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    if (!bs_bot_name_valid(name)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldTrigger: name '%s' must be [a-z0-9-]{1,32}", name);
+    }
+    if (!pattern || !*pattern || pattern[0] != '/') {
+        return "BotShieldTrigger: path-glob must start with '/'";
+    }
+    if (strlen(pattern) > 256) {
+        return "BotShieldTrigger: path-glob longer than 256 chars";
+    }
+
+    bs_trigger_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
+    e->name         = apr_pstrdup(cmd->pool, name);
+    e->path_pattern = apr_pstrdup(cmd->pool, pattern);
+    /* Defaults per PLAN.md E3. */
+    e->status_code  = 403;
+    e->redirect_url = NULL;
+    e->log_tag      = NULL;
+    e->flag_bit     = BS_FLAG_SCANNER_PROBE;
+    e->ttl_sec      = 3600;
+    e->penalty      = 0;
+
+    int status_explicit = 0;
+
+    for (int i = 2; i < argc; i++) {
+        const char *arg = argv[i];
+        const char *eq  = strchr(arg, '=');
+        if (!eq) {
+            return apr_psprintf(cmd->pool,
+                "BotShieldTrigger: extra arg '%s' must be key=value",
+                arg);
+        }
+        apr_size_t klen = (apr_size_t)(eq - arg);
+        const char *val = eq + 1;
+
+        #define BS_TRIG_KEY(n) (klen == sizeof(n)-1 && \
+                                 strncasecmp(arg, n, sizeof(n)-1) == 0)
+
+        if (BS_TRIG_KEY("status")) {
+            if (!strcasecmp(val, "pass")) {
+                e->status_code = BS_TRIGGER_STATUS_PASS;
+            } else {
+                char *end = NULL;
+                long code = strtol(val, &end, 10);
+                if (!end || *end || code < 100 || code > 599) {
+                    return apr_psprintf(cmd->pool,
+                        "BotShieldTrigger: status='%s' must be an "
+                        "HTTP code 100..599 or the literal 'pass'",
+                        val);
+                }
+                e->status_code = (int)code;
+            }
+            status_explicit = 1;
+        } else if (BS_TRIG_KEY("redirect")) {
+            if (!*val) {
+                return "BotShieldTrigger: redirect= requires a URL";
+            }
+            e->redirect_url = apr_pstrdup(cmd->pool, val);
+            if (!status_explicit) {
+                /* Default to 302 when redirect is set and operator
+                 * didn't pick a 3xx explicitly. */
+                e->status_code = 302;
+            }
+        } else if (BS_TRIG_KEY("log")) {
+            e->log_tag = apr_pstrdup(cmd->pool, val);
+        } else if (BS_TRIG_KEY("flag")) {
+            const char *perr = NULL;
+            apr_uint32_t bits = bs_parse_flag_names(cmd->pool, val, &perr);
+            if (perr) return apr_psprintf(cmd->pool,
+                "BotShieldTrigger: flag=%s: %s", val, perr);
+            /* Require exactly one bit — trigger semantics are per-
+             * request-per-IP and multi-bit would confuse the
+             * future-score contribution operators are picking. */
+            if (bits == 0 || (bits & (bits - 1)) != 0) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldTrigger: flag=%s must name exactly one "
+                    "bit", val);
+            }
+            e->flag_bit = bits;
+        } else if (BS_TRIG_KEY("ttl")) {
+            char *end = NULL;
+            long t = strtol(val, &end, 10);
+            if (!end || *end || t < 0 || t > 86400 * 30) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldTrigger: ttl='%s' must be 0..2592000 "
+                    "seconds (0 = don't flag)", val);
+            }
+            e->ttl_sec = (int)t;
+        } else if (BS_TRIG_KEY("penalty")) {
+            char *end = NULL;
+            long pn = strtol(val, &end, 10);
+            if (!end || *end || pn < 0 || pn > 1000) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldTrigger: penalty='%s' must be 0..1000",
+                    val);
+            }
+            e->penalty = (int)pn;
+        } else {
+            return apr_psprintf(cmd->pool,
+                "BotShieldTrigger: unknown key '%.*s' (known: status, "
+                "redirect, log, flag, ttl, penalty)",
+                (int)klen, arg);
+        }
+        #undef BS_TRIG_KEY
+    }
+
+    /* Cross-validate. */
+    if (e->redirect_url && e->status_code == BS_TRIGGER_STATUS_PASS) {
+        return "BotShieldTrigger: status=pass and redirect= are "
+               "mutually exclusive — a redirect IS the response";
+    }
+    if (e->redirect_url
+        && (e->status_code < 300 || e->status_code >= 400)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldTrigger: redirect= requires a 3xx status "
+            "(got %d)", e->status_code);
+    }
+    if (e->ttl_sec == 0) {
+        /* No flagging → bit is moot. Clear it to skip the flag call
+         * and keep the status page honest. */
+        e->flag_bit = 0;
+    }
+
+    /* Upsert-by-name; preserves declaration order. */
+    for (int i = 0; i < scfg->triggers->nelts; i++) {
+        bs_trigger_entry *ex =
+            APR_ARRAY_IDX(scfg->triggers, i, bs_trigger_entry *);
+        if (strcmp(ex->name, e->name) == 0) {
+            APR_ARRAY_IDX(scfg->triggers, i, bs_trigger_entry *) = e;
+            return NULL;
+        }
+    }
+    *(bs_trigger_entry **)apr_array_push(scfg->triggers) = e;
+    return NULL;
+}
+
 /* E2.2 — BotShieldRobotsTxt <path>: point the module at a robots.txt
  * file. Parsing deferred to post_config so pconf's allocator is alive
  * for the doc's lifetime. Empty/absent path is the default "don't
@@ -5853,6 +6119,21 @@ static const char *bs_decision_reason_names(apr_pool_t *p,
     return out;
 }
 
+/* Optional E3 trigger log-tag: set via r->notes so bs_decision_log
+ * can emit it without changing the signature that 20+ call sites
+ * already use. Read back as a pool-owned string; NULL = no tag. */
+#define BS_TRIGGER_TAG_NOTE   "botshield-trigger-tag"
+static void bs_set_trigger_tag(request_rec *r, const char *tag)
+{
+    if (!tag || !*tag) return;
+    apr_table_setn(r->notes, BS_TRIGGER_TAG_NOTE,
+                   apr_pstrdup(r->pool, tag));
+}
+static const char *bs_get_trigger_tag(request_rec *r)
+{
+    return apr_table_get(r->notes, BS_TRIGGER_TAG_NOTE);
+}
+
 static void bs_decision_log(request_rec *r,
                             const char *tier,
                             const char *outcome,
@@ -5866,15 +6147,31 @@ static void bs_decision_log(request_rec *r,
                            ? r->useragent_ip : "-";
     const char *path     = (r->unparsed_uri && *r->unparsed_uri)
                            ? r->unparsed_uri : "-";
-    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
-        "mod_botshield: decision tier=%s outcome=%s ip=%s score=%d "
-        "cookie=%s provider=%s alg=%s reason=\"%s\" path=\"%s\"",
-        tier, outcome, ip, score,
-        cookie   ? cookie   : "-",
-        provider ? provider : "-",
-        alg      ? alg      : "-",
-        reason   ? reason   : "-",
-        path);
+    const char *tag      = bs_get_trigger_tag(r);
+    /* tag= suffix only when a trigger set it; normal decision lines
+     * stay byte-identical so existing log parsers don't break. */
+    if (tag && *tag) {
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: decision tier=%s outcome=%s ip=%s score=%d "
+            "cookie=%s provider=%s alg=%s reason=\"%s\" path=\"%s\" "
+            "tag=\"%s\"",
+            tier, outcome, ip, score,
+            cookie   ? cookie   : "-",
+            provider ? provider : "-",
+            alg      ? alg      : "-",
+            reason   ? reason   : "-",
+            path, tag);
+    } else {
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: decision tier=%s outcome=%s ip=%s score=%d "
+            "cookie=%s provider=%s alg=%s reason=\"%s\" path=\"%s\"",
+            tier, outcome, ip, score,
+            cookie   ? cookie   : "-",
+            provider ? provider : "-",
+            alg      ? alg      : "-",
+            reason   ? reason   : "-",
+            path);
+    }
     /* M9.2: counters derived from the same enum vocabulary. One log
      * line, up to four counter increments (tier, outcome, cookie when
      * applicable, provider when applicable). */
@@ -7465,6 +7762,20 @@ static const command_rec bs_cmds[] = {
                  "trailing '$' = exact match. Hits return 403 with "
                  "a +100 score penalty under reason "
                  "block-path:<name>."),
+    /* E3 — path-based triggers */
+    AP_INIT_TAKE_ARGV("BotShieldTrigger",
+                 bs_set_trigger, NULL, RSRC_CONF,
+                 "Path-based trigger. Args: <name> <path-glob> "
+                 "[key=value ...]. Keys: status=<code|pass> (default "
+                 "403; 'pass' means the real handler runs), "
+                 "redirect=<url> (implies 302 unless status=3xx "
+                 "explicit), log=<tag> (emitted as tag=\"<x>\" on "
+                 "the decision log), flag=<bit> (M5.1 flag name; "
+                 "default scanner_probe), ttl=<sec> (flagged-IP "
+                 "TTL; default 3600; 0 = don't flag), penalty=<n> "
+                 "(score_add amount on this request; default 0; "
+                 "ignored under status=pass). Declaration order, "
+                 "first match wins; upsert-by-name."),
     /* E2.2 — robots.txt enforcement */
     AP_INIT_TAKE1("BotShieldRobotsTxt", bs_set_robots_txt,
                  NULL, RSRC_CONF,
@@ -8116,18 +8427,28 @@ static int bs_handler(request_rec *r)
     const char *cookie_status =
         bs_decision_cookie_status(cookie_verify_reason, cookie_had_val);
 
-    /* E2.1 — policy enforcement. Rate-limit / block-path cohorts
-     * short-circuit with 429/403 before scoring heuristics run; the
-     * decision log still fires so operators see why the request was
-     * rejected. Runs even for cookie-valid requests — operator policy
-     * (including robots.txt enforcement in E2.2) applies regardless
+    /* E2.1 + E2.2 + E3 policy enforcement. Runs before scoring
+     * heuristics so a block / rate / trigger short-circuits cleanly.
+     * Applies to cookie-valid requests too — operator policy
+     * (including robots.txt and path-based triggers) is independent
      * of bot-ness. */
     int policy_rv = bs_check_policy(r);
+    if (policy_rv == DECLINED) {
+        /* E3 trigger with status=pass: log + let the real handler
+         * respond. No score, no BotShield interstitial. Flag-IP +
+         * tag side effects already applied in bs_check_policy. */
+        bs_request_score *s = bs_get_score(r, 0);
+        const char *reasons = bs_score_reasons_joined(r->pool, s);
+        bs_decision_log(r, "pass", "declined", cookie_status, "-", "-",
+                        reasons, s ? s->total : 0);
+        return DECLINED;
+    }
     if (policy_rv != OK) {
         bs_request_score *s = bs_get_score(r, 0);
         const char *reasons = bs_score_reasons_joined(r->pool, s);
-        const char *outcome = (policy_rv == HTTP_FORBIDDEN)
-                              ? "rejected" : "rate_limited";
+        const char *outcome;
+        if (policy_rv == HTTP_TOO_MANY_REQUESTS)      outcome = "rate_limited";
+        else                                          outcome = "rejected";
         bs_decision_log(r, "pass", outcome, cookie_status, "-", "-",
                         reasons, s ? s->total : 0);
         return policy_rv;
