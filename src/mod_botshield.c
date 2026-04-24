@@ -57,6 +57,8 @@
 #include <errno.h>
 #include <limits.h>
 
+#include "robots.h"   /* E2.2 — robots.txt parser/matcher */
+
 module AP_MODULE_DECLARE_DATA botshield_module;
 
 /* Tri-state for flag directives: -1 = unset (inherit), 0 = off, 1 = on.
@@ -551,6 +553,21 @@ struct bs_dir_cfg {
     const char *captcha_expected_action;
 };
 
+/* E2.2 — robots.txt state bundle. One of these per active parse;
+ * swapped atomically by the refresh watchdog. The owning subpool
+ * (`pool`) is a child of pconf and is destroyed when this bundle is
+ * finally retired — one refresh cycle after being displaced — so
+ * request-path readers holding pointers into doc's pool never see
+ * freed memory. `slot_by_group_idx` maps each group index in doc to
+ * its SHM rate-counter slot, or -1 for groups without a Crawl-delay
+ * (or for which the slot pool was exhausted). */
+typedef struct bs_robots_state {
+    robots_doc    *doc;
+    apr_pool_t    *pool;              /* owns doc; sized for one doc */
+    apr_time_t     mtime;              /* source file mtime when parsed */
+    int           *slot_by_group_idx;  /* length = robots_group_count(doc) */
+} bs_robots_state;
+
 /* Per-server config — holds SHM sizing before post-config runs. Only the
  * main server's values are consulted; vhost-level overrides are logged
  * and ignored because the SHM segment is global. */
@@ -579,7 +596,64 @@ typedef struct {
      * a rule without disturbing relative order of the others. */
     apr_array_header_t *rate_limits;   /* bs_rate_limit_entry * */
     apr_array_header_t *block_paths;   /* bs_block_path_entry * */
+    /* E3 — path-based triggers. Same ordered-array + upsert-by-name
+     * shape as E2.1; first match wins at request time. */
+    apr_array_header_t *triggers;      /* bs_trigger_entry * */
+    /* E4 — cookie triggers. Same ordered-array + upsert-by-name
+     * shape as E3. `session_names` is the list of cookie names
+     * that `cookies=session` matches against — seeded with common
+     * framework defaults at config creation, extended via
+     * BotShieldSessionCookieName. Lowercased at add time for
+     * cheap case-insensitive compare at request time. */
+    apr_array_header_t *cookie_triggers;   /* bs_cookie_trigger_entry * */
+    apr_array_header_t *session_names;     /* const char * (lowercased) */
+    /* E2.2 — robots.txt enforcement.
+     *
+     * `robots` is the active state bundle (parsed doc + owning
+     * subpool + per-group SHM slot indices + source-file mtime) —
+     * atomically swappable by the refresh watchdog without quiescing
+     * the hot path. NULL until post_config successfully loads the
+     * file.
+     *
+     * `robots_pending` holds the previously-active bundle for one
+     * refresh cycle, then is destroyed at the next refresh. This
+     * gives request-path readers at least one refresh interval to
+     * finish using an old doc before its pool is reclaimed; with
+     * refresh_interval >> max request duration the window is ample.
+     *
+     * `robots_slot_by_name` is a name → (int*) SHM-slot map
+     * populated at post_config and updated (but not shrunk) by each
+     * refresh. Keying by group name (not index) means unchanged
+     * groups keep their rate-counter state across refreshes —
+     * operators expect that rewriting robots.txt doesn't reset
+     * Crawl-delay windows for crawlers whose entry didn't change.
+     * The slot pool itself is reserved from bs_shm.rate_counters at
+     * post_config; robots_slot_pool_base/size bound it and
+     * robots_slot_pool_used tracks allocation. */
+    const char         *robots_txt_path;
+    int                 robots_wildcard_scope;       /* enum below */
+    bs_robots_state    *robots;                      /* active bundle, atomic */
+    bs_robots_state    *robots_pending;              /* awaits destruction */
+    apr_hash_t         *robots_slot_by_name;         /* name → int * */
+    int                 robots_slot_pool_base;       /* first reserved slot */
+    int                 robots_slot_pool_size;       /* pool capacity */
+    int                 robots_slot_pool_used;       /* slots assigned so far */
+    int                 robots_refresh_interval;     /* seconds; 0 = off */
 } bs_server_cfg;
+
+enum bs_robots_wildcard_scope {
+    BS_ROBOTS_WILDCARD_UNSET     = -1,  /* directive not given at this scope */
+    BS_ROBOTS_WILDCARD_HEURISTIC = 0,   /* default: crawler-candidate test */
+    BS_ROBOTS_WILDCARD_STRICT    = 1,   /* apply * rules to all UAs */
+    BS_ROBOTS_WILDCARD_OFF       = 2,   /* ignore * groups entirely */
+};
+
+/* Sentinel for robots_refresh_interval: the directive hasn't been
+ * given at this scope. At post_config time this resolves to
+ * BS_ROBOTS_REFRESH_DEFAULT (60s) unless a main/vhost override
+ * replaced it via the merge hook. */
+#define BS_ROBOTS_REFRESH_UNSET    (-1)
+#define BS_ROBOTS_REFRESH_DEFAULT  60
 
 /* --- Config lifecycle --- */
 
@@ -695,6 +769,41 @@ static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
                                            add->rate_limits);
     out->block_paths = bs_merge_rule_array(p, base->block_paths,
                                            add->block_paths);
+    out->triggers    = bs_merge_rule_array(p, base->triggers,
+                                           add->triggers);
+    out->cookie_triggers = bs_merge_rule_array(p, base->cookie_triggers,
+                                               add->cookie_triggers);
+    /* session_names: concatenate base + add, drop dups. Small lists,
+     * O(n*m) is fine; happens once at config load. */
+    if (base->session_names && add->session_names) {
+        apr_array_header_t *merged = apr_array_copy(p, add->session_names);
+        for (int i = 0; i < base->session_names->nelts; i++) {
+            const char *bn = APR_ARRAY_IDX(base->session_names, i,
+                                           const char *);
+            int dup = 0;
+            for (int j = 0; j < merged->nelts; j++) {
+                if (strcmp(APR_ARRAY_IDX(merged, j, const char *), bn) == 0) {
+                    dup = 1; break;
+                }
+            }
+            if (!dup) *(const char **)apr_array_push(merged) = bn;
+        }
+        out->session_names = merged;
+    }
+
+    /* E2.2 server-scope inheritance — main-scope settings should
+     * flow into vhosts that don't restate them. Each field uses a
+     * sentinel ("unset at this scope") so we can tell "take the
+     * base value" apart from "vhost explicitly chose the default." */
+    if (!add->robots_txt_path && base->robots_txt_path) {
+        out->robots_txt_path = base->robots_txt_path;
+    }
+    if (add->robots_wildcard_scope == BS_ROBOTS_WILDCARD_UNSET) {
+        out->robots_wildcard_scope = base->robots_wildcard_scope;
+    }
+    if (add->robots_refresh_interval == BS_ROBOTS_REFRESH_UNSET) {
+        out->robots_refresh_interval = base->robots_refresh_interval;
+    }
     return out;
 }
 
@@ -724,6 +833,36 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
      * ipspecs and assigns SHM slots. */
     scfg->rate_limits      = apr_array_make(p, 4, sizeof(void *));
     scfg->block_paths      = apr_array_make(p, 4, sizeof(void *));
+    scfg->triggers         = apr_array_make(p, 4, sizeof(void *));
+    scfg->cookie_triggers  = apr_array_make(p, 4, sizeof(void *));
+    /* Curated session-cookie-name defaults. Kept deliberately
+     * short; long auto-lists turn `cookies=session` into a loose
+     * matcher and undermine the bonus. Operators add their own
+     * via BotShieldSessionCookieName. Stored lowercased. */
+    scfg->session_names    = apr_array_make(p, 8, sizeof(const char *));
+    static const char *const bs_session_name_defaults[] = {
+        "phpsessid", "jsessionid", "asp.net_sessionid",
+        "session_id", "connect.sid", "laravel_session",
+        NULL
+    };
+    for (int i = 0; bs_session_name_defaults[i]; i++) {
+        *(const char **)apr_array_push(scfg->session_names) =
+            apr_pstrdup(p, bs_session_name_defaults[i]);
+    }
+    /* E2.2 — robots.txt defaults: no file configured, heuristic
+     * wildcard scope, no parsed doc (populated in post_config). */
+    scfg->robots_txt_path         = NULL;
+    /* Sentinel defaults so bs_merge_server_cfg can tell "unset at
+     * this scope" from "explicitly set to the default." An unset
+     * field after merge resolves to its real default in post_config. */
+    scfg->robots_wildcard_scope   = BS_ROBOTS_WILDCARD_UNSET;
+    scfg->robots                  = NULL;
+    scfg->robots_pending          = NULL;
+    scfg->robots_slot_by_name     = apr_hash_make(p);
+    scfg->robots_slot_pool_base   = -1;
+    scfg->robots_slot_pool_size   = 0;
+    scfg->robots_slot_pool_used   = 0;
+    scfg->robots_refresh_interval = BS_ROBOTS_REFRESH_UNSET;
     return scfg;
 }
 
@@ -2191,6 +2330,103 @@ typedef struct {
     bs_cohort   cohort;
 } bs_block_path_entry;
 
+/* E3 — path-based triggers. One of these per BotShieldTrigger
+ * directive. `status_code` holds either a concrete HTTP status
+ * (e.g. 403, 429) or the BS_TRIGGER_STATUS_PASS sentinel meaning
+ * "don't enforce anything on this request; let the real handler
+ * respond." The sentinel uses a negative int so it can never
+ * collide with a valid HTTP status code.
+ *
+ * `redirect_url` + `status_code` interact: when redirect is set,
+ * status_code is a 3xx code (default 302 chosen at parse time);
+ * bs_check_policy emits the Location header and returns
+ * status_code from the handler.
+ *
+ * `flag_bit` is the M5.1 flag-IP bit to set for future requests
+ * (default scanner_probe at parse time). `ttl_sec == 0` disables
+ * IP flagging. `penalty` is only applied when status is a concrete
+ * error code — under PASS it's bookkeeping-only and we skip the
+ * score_add (see PLAN.md E3 semantics). */
+#define BS_TRIGGER_STATUS_PASS   (-1)
+
+/* Forward declarations — bs_check_policy (E3 path) calls these; they
+ * live alongside their primary users further down the file. */
+static void bs_set_trigger_tag(request_rec *r, const char *tag);
+static void bs_flagged_ip_add(request_rec *r,
+                              const unsigned char ip[16],
+                              apr_uint32_t flag_bits, int ttl_seconds);
+static int  bs_parse_client_ip(const char *ip_str, unsigned char out[16]);
+static void bs_mask_ipv6_prefix(unsigned char ip[16], int prefix_bits);
+
+typedef struct {
+    const char   *name;
+    const char   *path_pattern;
+    int           status_code;       /* HTTP code or BS_TRIGGER_STATUS_PASS */
+    const char   *redirect_url;      /* NULL if not a redirect trigger */
+    const char   *log_tag;           /* NULL if no tag set */
+    apr_uint32_t  flag_bit;          /* single M5.1 bit, 0 if ttl_sec==0 */
+    int           ttl_sec;           /* 0 = don't flag the IP */
+    int           penalty;           /* score_add amount; ignored under PASS */
+} bs_trigger_entry;
+
+/* E4 — cookie triggers. Parallel feature to E3 path triggers, but
+ * matched on the Cookie header rather than the request URI. Shares
+ * the action surface with E3 (status / redirect / log / flag / ttl /
+ * penalty) and adds `credit` for negative-score contributions —
+ * the mechanism for "legitimate session → glide through tier
+ * dispatch." Two deliberate semantic divergences from E3:
+ *
+ *  1. credit/penalty are applied to THIS request regardless of
+ *     status (contrast E3 where status=pass ignores penalty).
+ *     Cookies are persistent-state signals: the client carries
+ *     them on THIS request and we want to shape its score.
+ *  2. Cookie triggers evaluate BEFORE path triggers in
+ *     bs_check_policy so the decision log shows reputation signals
+ *     even when a later short-circuit fires.
+ *
+ * Predicate kinds — one per entry, populated by the setter:
+ *   NAMED_PRESENT     cookie is present (any value)
+ *   NAMED_ABSENT      cookie is absent
+ *   NAMED_EQ          cookie has exactly this value
+ *   NAMED_NE          cookie is present but value is NOT this
+ *   NAMED_CONTAINS    cookie value contains this substring
+ *   BULK_NONE         request has zero cookies
+ *   BULK_ANY          request has at least one cookie
+ *   BULK_SESSION      request has a cookie from the session-name list
+ *   BS_VERIFIED       _bs_verified present and valid
+ *   BS_MISSING        no _bs_verified at all
+ *   BS_INVALID        _bs_verified present but HMAC/format failed */
+enum bs_cookie_pred_kind {
+    BS_CP_NAMED_PRESENT = 0,
+    BS_CP_NAMED_ABSENT,
+    BS_CP_NAMED_EQ,
+    BS_CP_NAMED_NE,
+    BS_CP_NAMED_CONTAINS,
+    BS_CP_BULK_NONE,
+    BS_CP_BULK_ANY,
+    BS_CP_BULK_SESSION,
+    BS_CP_BS_VERIFIED,
+    BS_CP_BS_MISSING,
+    BS_CP_BS_INVALID,
+};
+
+typedef struct {
+    const char   *name;
+    int           pred_kind;         /* enum bs_cookie_pred_kind */
+    const char   *cname;             /* NULL unless kind is NAMED_* */
+    const char   *cvalue;            /* NULL unless kind is NAMED_{EQ,NE,CONTAINS} */
+    /* Same action surface as bs_trigger_entry, minus status_code==PASS
+     * as the only way to express "no response short-circuit" — here
+     * pass means "no short-circuit but credit/penalty still apply." */
+    int           status_code;       /* HTTP code or BS_TRIGGER_STATUS_PASS */
+    const char   *redirect_url;
+    const char   *log_tag;
+    apr_uint32_t  flag_bit;
+    int           ttl_sec;
+    int           penalty;           /* applied regardless of status */
+    int           credit;            /* applied regardless of status */
+} bs_cookie_trigger_entry;
+
 /* SHM slot for the fixed-window counter. Packed to 8 bytes so
  * platforms with 64-bit atomics could later swap to a CAS-on-u64;
  * for v1 we use 32-bit atomics on each field separately, which is
@@ -2309,14 +2545,319 @@ static int bs_rate_counter_admit(bs_rate_counter *slot,
     return 1;
 }
 
-/* Request-time E2.1 check. Returns OK, HTTP_FORBIDDEN, or
- * HTTP_TOO_MANY_REQUESTS. In both short-circuit cases we also feed
- * bs_score_add so the violation appears in the decision log. */
+/* Is this UA a plausible crawler for the purpose of applying
+ * robots.txt User-agent: * rules in heuristic mode? See PLAN.md for
+ * the rationale — the point is to avoid rate-limiting or blocking
+ * real users' browsers, which never read robots.txt and so should
+ * never be subject to its rules. */
+static int bs_ua_is_crawler_candidate(const char *ua)
+{
+    if (!ua || !*ua) return 0;
+
+    int has_bot_token =
+           strcasestr(ua, "bot")    != NULL
+        || strcasestr(ua, "crawl")  != NULL
+        || strcasestr(ua, "spider") != NULL
+        || strcasestr(ua, "fetch")  != NULL
+        || strcasestr(ua, "slurp")  != NULL;
+    if (has_bot_token) return 1;
+
+    /* Bot-less UA that starts with a real-browser prefix: skip.
+     * Everything else (curl/python/etc.) defaults to candidate —
+     * those tools are used by scrapers and rarely by humans. */
+    static const char *const browser_prefixes[] = {
+        "Mozilla/", "Opera/", "Firefox/", "Edge/", "Safari/", NULL
+    };
+    for (int i = 0; browser_prefixes[i]; i++) {
+        apr_size_t plen = strlen(browser_prefixes[i]);
+        if (strncasecmp(ua, browser_prefixes[i], plen) == 0) return 0;
+    }
+    return 1;
+}
+
+/* E4 — BotShield-cookie-state note: set by bs_handler after the
+ * `_bs_verified` verification pass so bs_check_policy's cookie-
+ * trigger evaluator can surface the verdict via bs-cookie=<state>
+ * predicates without re-running the HMAC check. Values: "verified"
+ * (cookie valid), "missing" (no cookie at all), "invalid" (present
+ * but HMAC/format/expiry check rejected). */
+#define BS_CK_STATE_NOTE   "botshield-cookie-state"
+#define BS_CK_STATE_VERIFIED  "verified"
+#define BS_CK_STATE_MISSING   "missing"
+#define BS_CK_STATE_INVALID   "invalid"
+
+/* Parse-once tokenizer for the Cookie request header. Returns a
+ * pool-allocated apr_table_t (name → value, case-insensitive on the
+ * name per RFC 6265 in practice). Empty values are stored as ""
+ * (matching `cookie=<name>` / `cookie=<name>=`). Duplicate names
+ * take the first occurrence; subsequent ones are ignored. Cached on
+ * r->notes as a hex-encoded pointer so the same map survives across
+ * multiple cookie-trigger evaluations within the same request. */
+#define BS_COOKIEMAP_NOTE  "botshield-parsed-cookies"
+static apr_table_t *bs_parse_cookies_once(request_rec *r)
+{
+    const char *cached_hex = apr_table_get(r->notes, BS_COOKIEMAP_NOTE);
+    if (cached_hex && *cached_hex) {
+        apr_table_t *prev;
+        if (sscanf(cached_hex, "%p", (void **)&prev) == 1 && prev) {
+            return prev;
+        }
+    }
+
+    apr_table_t *map = apr_table_make(r->pool, 8);
+    const char *raw = apr_table_get(r->headers_in, "Cookie");
+    if (raw && *raw) {
+        char *buf = apr_pstrdup(r->pool, raw);
+        char *state = NULL;
+        for (char *tok = apr_strtok(buf, ";", &state); tok;
+             tok = apr_strtok(NULL, ";", &state)) {
+            while (*tok == ' ' || *tok == '\t') tok++;
+            if (!*tok) continue;
+            char *eq = strchr(tok, '=');
+            const char *name;
+            const char *value;
+            if (eq) {
+                *eq = '\0';
+                name  = tok;
+                value = eq + 1;
+            } else {
+                name  = tok;
+                value = "";
+            }
+            /* Trim trailing whitespace from name (values are taken
+             * as-is; cookie values are allowed to include leading
+             * whitespace per RFC 6265 in practice, but we strip a
+             * common one anyway). */
+            apr_size_t nlen = strlen(name);
+            while (nlen && (name[nlen-1] == ' ' || name[nlen-1] == '\t')) {
+                ((char *)name)[--nlen] = '\0';
+            }
+            if (nlen == 0) continue;
+            if (apr_table_get(map, name) != NULL) continue;  /* first wins */
+            apr_table_setn(map, name, value);
+        }
+    }
+    apr_table_setn(r->notes, BS_COOKIEMAP_NOTE,
+                   apr_psprintf(r->pool, "%p", (void *)map));
+    return map;
+}
+
+/* Is this cookie-name on the session-name list? */
+static int bs_is_session_cookie_name(const apr_array_header_t *names,
+                                     const char *name)
+{
+    if (!names) return 0;
+    for (int i = 0; i < names->nelts; i++) {
+        if (strcasecmp(APR_ARRAY_IDX(names, i, const char *), name) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Evaluate a single cookie-trigger predicate against the parsed
+ * cookie map + BS-cookie state. Returns 1 on match, 0 on no match. */
+static int bs_cookie_pred_match(const bs_cookie_trigger_entry *e,
+                                apr_table_t *cmap,
+                                const apr_array_header_t *session_names,
+                                const char *bs_state)
+{
+    switch (e->pred_kind) {
+    case BS_CP_NAMED_PRESENT:
+        return apr_table_get(cmap, e->cname) != NULL;
+    case BS_CP_NAMED_ABSENT:
+        return apr_table_get(cmap, e->cname) == NULL;
+    case BS_CP_NAMED_EQ: {
+        const char *v = apr_table_get(cmap, e->cname);
+        return v && strcmp(v, e->cvalue) == 0;
+    }
+    case BS_CP_NAMED_NE: {
+        const char *v = apr_table_get(cmap, e->cname);
+        return v && strcmp(v, e->cvalue) != 0;
+    }
+    case BS_CP_NAMED_CONTAINS: {
+        const char *v = apr_table_get(cmap, e->cname);
+        return v && strstr(v, e->cvalue) != NULL;
+    }
+    case BS_CP_BULK_NONE:
+        return apr_is_empty_table(cmap);
+    case BS_CP_BULK_ANY:
+        return !apr_is_empty_table(cmap);
+    case BS_CP_BULK_SESSION: {
+        const apr_array_header_t *arr = apr_table_elts(cmap);
+        for (int i = 0; i < arr->nelts; i++) {
+            apr_table_entry_t *te = &((apr_table_entry_t *)arr->elts)[i];
+            if (bs_is_session_cookie_name(session_names, te->key)) {
+                return 1;
+            }
+        }
+        return 0;
+    }
+    case BS_CP_BS_VERIFIED:
+        return bs_state && strcmp(bs_state, BS_CK_STATE_VERIFIED) == 0;
+    case BS_CP_BS_MISSING:
+        return !bs_state
+            || strcmp(bs_state, BS_CK_STATE_MISSING) == 0;
+    case BS_CP_BS_INVALID:
+        return bs_state && strcmp(bs_state, BS_CK_STATE_INVALID) == 0;
+    }
+    return 0;
+}
+
+/* Request-time E2.1 + E2.2 + E3 + E4 check. Return values:
+ *   OK                     — no rule fired; continue to heuristics.
+ *   DECLINED               — a trigger with status=pass fired; the
+ *                            bs_handler short-circuits to DECLINED
+ *                            so the real handler runs, with the
+ *                            flag-IP / log side effects already
+ *                            applied.
+ *   any other HTTP_* code  — short-circuit with that status. The
+ *                            handler returns it directly so Apache's
+ *                            ErrorDocument machinery can render the
+ *                            response body.
+ *
+ * Order:
+ *   1. E4 cookie triggers (declaration order, first match wins).
+ *   2. E3 path triggers (declaration order, first match wins).
+ *   3. Directive block_paths (declaration order, first match wins).
+ *   4. robots.txt Disallow (if configured).
+ *   5. Directive rate_limits.
+ *   6. robots.txt Crawl-delay (if configured).
+ *
+ * Cookie triggers run first so reputation signals from cookies
+ * always land on the decision log, even when a later rule short-
+ * circuits. Path triggers run next because they're the most
+ * specific per-path intent the operator can write — a trigger on
+ * `/.env` should win against any cohort-scoped block-path that
+ * also happens to match. Operator directives always get first
+ * say in each family after that; robots.txt fills in where the
+ * operator hasn't declared explicit rules.
+ *
+ * E4 semantic divergence from E3: cookie triggers apply
+ * credit/penalty to THIS request regardless of status=pass, because
+ * cookies are ongoing-state signals (the client carries the
+ * signal on this very request). Path triggers under status=pass
+ * leave the score alone. */
 static int bs_check_policy(request_rec *r)
 {
     bs_server_cfg *scfg = ap_get_module_config(r->server->module_config,
                                                &botshield_module);
     if (!scfg) return OK;
+
+    /* E4 — cookie triggers. Declaration order; **pass triggers
+     * accumulate, first non-pass trigger short-circuits the walk**.
+     * That split exists to make the canonical layered-reputation
+     * pattern work — `app-session credit=15` + `app-auth
+     * credit=40` should stack to a 55-point credit when both
+     * cookies are present, not lose the second credit to first-
+     * match-wins. Contrast E3 path triggers, which are strict
+     * first-match-wins with no accumulation: paths are one-off
+     * matches, cookies are ongoing-state signals that naturally
+     * compose.
+     *
+     * Runs before E3 path triggers so reputation signals land on
+     * the decision log even when a later rule short-circuits.
+     *
+     * Divergences from E3 to keep straight while reading this loop:
+     *  1. credit/penalty apply regardless of status (even under
+     *     status=pass, because the cookie IS this request's state).
+     *  2. pass matches don't end the walk — they accumulate. */
+    if (scfg->cookie_triggers && scfg->cookie_triggers->nelts > 0) {
+        apr_table_t *cmap = bs_parse_cookies_once(r);
+        const char *bs_state = apr_table_get(r->notes, BS_CK_STATE_NOTE);
+        for (int i = 0; i < scfg->cookie_triggers->nelts; i++) {
+            bs_cookie_trigger_entry *c = APR_ARRAY_IDX(
+                scfg->cookie_triggers, i, bs_cookie_trigger_entry *);
+            if (!bs_cookie_pred_match(c, cmap, scfg->session_names,
+                                      bs_state)) continue;
+
+            /* Flag-IP (future-request memory). */
+            if (c->flag_bit && c->ttl_sec > 0) {
+                unsigned char client_ip[16];
+                if (bs_parse_client_ip(r->useragent_ip, client_ip)) {
+                    bs_mask_ipv6_prefix(client_ip,
+                                        scfg->ipv6_prefix_bits);
+                    bs_flagged_ip_add(r, client_ip,
+                                      c->flag_bit, c->ttl_sec);
+                }
+            }
+
+            bs_set_trigger_tag(r, c->log_tag);
+
+            /* credit/penalty always apply — E4's central divergence
+             * from E3. Record a reason so the decision log reflects
+             * the match regardless of short-circuit path taken. */
+            int score_delta = c->penalty - c->credit;
+            const char *reason = apr_pstrcat(r->pool,
+                "cookie-trigger:", c->name, NULL);
+            bs_score_add(r, score_delta, 0, reason);
+
+            if (c->status_code == BS_TRIGGER_STATUS_PASS) {
+                /* Pass: no short-circuit, continue to E3 and the
+                 * rest of the pipeline. The score contribution
+                 * above stays in the scoring record and gets
+                 * composed with downstream heuristics. */
+                continue;
+            }
+
+            if (c->redirect_url) {
+                apr_table_setn(r->headers_out,
+                    "Location", c->redirect_url);
+            }
+            return c->status_code;
+        }
+    }
+
+    /* E3 — triggers. Path-only, unscoped. */
+    if (scfg->triggers && scfg->triggers->nelts > 0) {
+        for (int i = 0; i < scfg->triggers->nelts; i++) {
+            bs_trigger_entry *t = APR_ARRAY_IDX(
+                scfg->triggers, i, bs_trigger_entry *);
+            if (!bs_path_glob_match(t->path_pattern, r->uri)) continue;
+
+            /* Flag the IP (future-request memory) before any early
+             * return, so both PASS and error-status paths carry the
+             * reputation side-effect. */
+            if (t->flag_bit && t->ttl_sec > 0) {
+                unsigned char client_ip[16];
+                if (bs_parse_client_ip(r->useragent_ip, client_ip)) {
+                    bs_mask_ipv6_prefix(client_ip,
+                                        scfg->ipv6_prefix_bits);
+                    bs_flagged_ip_add(r, client_ip,
+                                      t->flag_bit, t->ttl_sec);
+                }
+            }
+
+            /* Decision-log tag rides the existing decision line —
+             * set it in r->notes whether or not we short-circuit. */
+            bs_set_trigger_tag(r, t->log_tag);
+
+            if (t->status_code == BS_TRIGGER_STATUS_PASS) {
+                /* Pass-through: no score_add on this request
+                 * (PASS means "don't enforce anything on this
+                 * request"), no body, no headers. The real handler
+                 * responds normally. bs_handler translates our
+                 * DECLINED into DECLINED for Apache. */
+                bs_score_add(r, 0, 0,
+                    apr_pstrcat(r->pool, "trigger:", t->name,
+                                ":pass", NULL));
+                return DECLINED;
+            }
+
+            /* Concrete-status path: record the reason (with or
+             * without penalty) so the decision log captures it,
+             * then either emit Location (redirect) or return the
+             * code for ErrorDocument to handle the body. */
+            bs_score_add(r, t->penalty, 0,
+                apr_pstrcat(r->pool, "trigger:", t->name, NULL));
+
+            if (t->redirect_url) {
+                apr_table_setn(r->headers_out,
+                    "Location", t->redirect_url);
+            }
+            return t->status_code;
+        }
+    }
 
     const char *ua = apr_table_get(r->headers_in, "User-Agent");
 
@@ -2340,12 +2881,62 @@ static int bs_check_policy(request_rec *r)
         }
     }
 
+    /* E2.2 — robots.txt Disallow enforcement. Queried once for
+     * (ua, path); the result also carries the Crawl-delay we'll use
+     * below, so stash it.
+     *
+     * Atomic load of scfg->robots so we never see a half-swapped
+     * state bundle. The bundle's fields are immutable after publish,
+     * and the previous bundle is held one refresh cycle before its
+     * pool is reclaimed — see bs_robots_refresh. */
+    bs_robots_state *rstate =
+        __atomic_load_n(&scfg->robots, __ATOMIC_ACQUIRE);
+    robots_match rmatch = { -1, 0, 1, 0, NULL };
+    int robots_apply = 0;
+    if (rstate && rstate->doc && ua) {
+        robots_query(rstate->doc, ua, r->uri, &rmatch);
+        if (rmatch.group_idx >= 0) {
+            robots_apply = 1;
+            if (rmatch.is_wildcard) {
+                switch (scfg->robots_wildcard_scope) {
+                case BS_ROBOTS_WILDCARD_OFF:
+                    robots_apply = 0;
+                    break;
+                case BS_ROBOTS_WILDCARD_HEURISTIC:
+                    if (!bs_ua_is_crawler_candidate(ua)) robots_apply = 0;
+                    break;
+                case BS_ROBOTS_WILDCARD_STRICT:
+                default:
+                    /* apply regardless */
+                    break;
+                }
+            }
+        }
+    }
+    if (robots_apply && !rmatch.allowed) {
+        bs_score_add(r, BS_PENALTY_BLOCK_PATH, 3600,
+            apr_pstrcat(r->pool, "robots-block:",
+                        rmatch.group_name ? rmatch.group_name : "?", NULL));
+        if (bs_shm.metrics) {
+            __atomic_fetch_add(&bs_shm.metrics->block_path_hit_total,
+                               1, __ATOMIC_RELAXED);
+        }
+        return HTTP_FORBIDDEN;
+    }
+
+    /* A directive rate-limit cohort that MATCHES this request is
+     * authoritative for it — operator policy overrides robots.txt in
+     * the rate-limit family. If a directive matched, we skip the
+     * robots.txt crawl-delay check below regardless of whether the
+     * directive admitted or tripped. */
+    int directive_rate_matched = 0;
     if (scfg->rate_limits && scfg->rate_limits->nelts > 0) {
         bs_rate_counter *counters = (bs_rate_counter *)bs_shm.rate_counters;
         for (int i = 0; i < scfg->rate_limits->nelts; i++) {
             bs_rate_limit_entry *e = APR_ARRAY_IDX(
                 scfg->rate_limits, i, bs_rate_limit_entry *);
             if (!bs_cohort_matches(&e->cohort, ua, r)) continue;
+            directive_rate_matched = 1;
             if (e->shm_slot < 0 || !counters) continue;
             if (bs_rate_counter_admit(&counters[e->shm_slot],
                                       e->budget, e->window_sec)) {
@@ -2370,7 +2961,207 @@ static int bs_check_policy(request_rec *r)
         }
     }
 
+    /* E2.2 — robots.txt Crawl-delay enforcement. Budget=1 per
+     * Crawl-delay seconds; slot assignment is held inside rstate's
+     * bundle (allocated at post_config + preserved by name across
+     * refreshes). Skipped when a directive rate-limit already
+     * matched this request: operator policy is authoritative in the
+     * rate family. */
+    if (robots_apply && rmatch.crawl_delay_sec > 0
+        && !directive_rate_matched
+        && rstate && rstate->slot_by_group_idx
+        && rmatch.group_idx < robots_group_count(rstate->doc)) {
+        int slot_idx = rstate->slot_by_group_idx[rmatch.group_idx];
+        bs_rate_counter *counters = (bs_rate_counter *)bs_shm.rate_counters;
+        if (slot_idx >= 0 && counters) {
+            bs_rate_counter *slot = &counters[slot_idx];
+            if (!bs_rate_counter_admit(slot, 1,
+                    (apr_uint32_t)rmatch.crawl_delay_sec)) {
+                apr_uint32_t win = __atomic_load_n(
+                    &slot->window_start_sec, __ATOMIC_RELAXED);
+                apr_uint32_t now =
+                    (apr_uint32_t)apr_time_sec(apr_time_now());
+                apr_uint32_t wsec =
+                    (apr_uint32_t)rmatch.crawl_delay_sec;
+                apr_uint32_t retry = (now >= win && now - win < wsec)
+                                      ? wsec - (now - win) : 1;
+                apr_table_setn(r->err_headers_out, "Retry-After",
+                    apr_psprintf(r->pool, "%u", retry));
+                bs_score_add(r, BS_PENALTY_RATE_LIMIT, 3600,
+                    apr_pstrcat(r->pool, "robots-rate:",
+                        rmatch.group_name ? rmatch.group_name : "?",
+                        NULL));
+                if (bs_shm.metrics) {
+                    __atomic_fetch_add(
+                        &bs_shm.metrics->rate_limit_exceeded_total,
+                        1, __ATOMIC_RELAXED);
+                }
+                return HTTP_TOO_MANY_REQUESTS;
+            }
+        }
+    }
+
     return OK;
+}
+
+/* ======================================================================
+ * E2.2.2 — live-refresh of robots.txt via mod_watchdog
+ *
+ * bs_robots_load(): stat + (conditionally) parse + publish. Runs both
+ * at post_config (initial load) and at each watchdog tick (refresh).
+ * When the source file's mtime is unchanged, it's a cheap no-op.
+ *
+ * Atomic-swap model: active state lives in scfg->robots (read with
+ * __atomic_load_n on the request path). When a fresh doc is built,
+ * we atomically publish it, push the outgoing state into
+ * scfg->robots_pending, and destroy whatever pool was in the
+ * previous pending slot. That gives each displaced doc at least one
+ * refresh interval of grace — more than enough for any in-flight
+ * request to finish reading pointers into its pool.
+ *
+ * Slot stability: SHM rate-counter slots are keyed by group name via
+ * scfg->robots_slot_by_name, which lives in pconf and survives
+ * refresh. A group whose name reappears in the new doc keeps its
+ * existing slot (and its in-flight Crawl-delay window); a genuinely
+ * new group gets a fresh slot from the reserved pool. The map never
+ * shrinks — operators who delete a crawler from robots.txt leave a
+ * stale entry, which is harmless (no lookup targets it). If they
+ * re-add it, the old slot is reused.
+ * ====================================================================== */
+static apr_status_t bs_robots_load(server_rec *sv, bs_server_cfg *scfg,
+                                   apr_pool_t *pconf)
+{
+    if (!scfg || !scfg->robots_txt_path) return APR_EINVAL;
+
+    /* Stat first — if mtime is unchanged since the active doc was
+     * parsed, there's nothing to do. This is the common case on
+     * every refresh tick. */
+    apr_finfo_t fi;
+    apr_status_t rv = apr_stat(&fi, scfg->robots_txt_path,
+                               APR_FINFO_MTIME | APR_FINFO_SIZE, pconf);
+    if (rv != APR_SUCCESS) {
+        char errbuf[128];
+        apr_strerror(rv, errbuf, sizeof(errbuf));
+        ap_log_error(APLOG_MARK, APLOG_WARNING, rv, sv,
+            "mod_botshield: robots.txt %s stat failed (%s); "
+            "keeping previous state",
+            scfg->robots_txt_path, errbuf);
+        return rv;
+    }
+
+    bs_robots_state *cur =
+        __atomic_load_n(&scfg->robots, __ATOMIC_ACQUIRE);
+    if (cur && cur->mtime == fi.mtime) {
+        return APR_SUCCESS;
+    }
+
+    /* Build the new state in a fresh subpool we control. Destroying
+     * this subpool later frees the doc and its slot map in one go,
+     * without touching anything else in pconf. */
+    apr_pool_t *npool = NULL;
+    apr_pool_create(&npool, pconf);
+
+    robots_doc *doc = NULL;
+    const char *parse_err = NULL;
+    rv = robots_parse_file(npool, scfg->robots_txt_path,
+                           &doc, &parse_err);
+    if (rv != APR_SUCCESS || !doc) {
+        ap_log_error(APLOG_MARK, APLOG_WARNING, rv, sv,
+            "mod_botshield: robots.txt %s parse failed (%s); "
+            "keeping previous state",
+            scfg->robots_txt_path,
+            parse_err ? parse_err : "unknown error");
+        apr_pool_destroy(npool);
+        return rv;
+    }
+
+    int n_groups = robots_group_count(doc);
+    bs_robots_state *ns = apr_pcalloc(npool, sizeof(*ns));
+    ns->doc   = doc;
+    ns->pool  = npool;
+    ns->mtime = fi.mtime;
+    ns->slot_by_group_idx = apr_pcalloc(npool,
+        (n_groups > 0 ? n_groups : 1) * sizeof(int));
+
+    int delay_count = 0, slot_reused = 0, slot_new = 0, slot_exhausted = 0;
+    for (int i = 0; i < n_groups; i++) {
+        ns->slot_by_group_idx[i] = -1;
+        int cd = robots_group_crawl_delay_at(doc, i);
+        if (cd <= 0) continue;
+        delay_count++;
+        const char *name = robots_group_name_at(doc, i);
+        int *slot_ptr = apr_hash_get(scfg->robots_slot_by_name,
+                                     name, APR_HASH_KEY_STRING);
+        if (slot_ptr) {
+            ns->slot_by_group_idx[i] = *slot_ptr;
+            slot_reused++;
+            continue;
+        }
+        if (scfg->robots_slot_pool_used < scfg->robots_slot_pool_size) {
+            int slot = scfg->robots_slot_pool_base
+                     + scfg->robots_slot_pool_used++;
+            ns->slot_by_group_idx[i] = slot;
+            /* Persist the mapping in pconf so future refreshes see
+             * it. Copy name into pconf too — the doc's pool will be
+             * destroyed on replacement and its name string with it. */
+            int *persist = apr_palloc(pconf, sizeof(int));
+            *persist = slot;
+            apr_hash_set(scfg->robots_slot_by_name,
+                         apr_pstrdup(pconf, name),
+                         APR_HASH_KEY_STRING, persist);
+            slot_new++;
+        } else {
+            slot_exhausted++;
+        }
+    }
+
+    /* Publish the new state. scfg->robots_pending currently holds
+     * the bundle displaced one refresh ago (or NULL at first load);
+     * destroy its pool now — more than one refresh interval has
+     * passed since any request took a pointer to it. */
+    bs_robots_state *to_destroy = scfg->robots_pending;
+    bs_robots_state *displaced  = cur;
+    __atomic_store_n(&scfg->robots, ns, __ATOMIC_RELEASE);
+    scfg->robots_pending = displaced;
+    if (to_destroy && to_destroy->pool) {
+        apr_pool_destroy(to_destroy->pool);
+    }
+
+    if (slot_exhausted > 0) {
+        ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
+            "mod_botshield: robots.txt slot pool exhausted "
+            "(%d/%d used); %d Crawl-delay groups will not enforce "
+            "until an Apache reload resizes the pool",
+            scfg->robots_slot_pool_used, scfg->robots_slot_pool_size,
+            slot_exhausted);
+    }
+    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+        "mod_botshield: robots.txt %s %sloaded — %d groups, "
+        "%d with Crawl-delay (%d slots reused, %d new)",
+        scfg->robots_txt_path, cur ? "re" : "",
+        n_groups, delay_count, slot_reused, slot_new);
+    return APR_SUCCESS;
+}
+
+/* mod_watchdog tick callback — one registration per vhost with a
+ * BotShieldRobotsTxt directive. State-transition events (STARTING,
+ * STOPPING) do nothing; RUNNING calls bs_robots_load which returns
+ * fast when mtime hasn't changed. */
+static apr_status_t bs_robots_watchdog_cb(int state, void *data,
+                                          apr_pool_t *pool)
+{
+    (void)pool;
+    if (state != AP_WATCHDOG_STATE_RUNNING) return APR_SUCCESS;
+    /* data was passed as the server_rec at registration; retrieve
+     * scfg from it so we always see the live pointer. pconf is
+     * reachable through sv->process->pconf. */
+    server_rec *sv = data;
+    if (!sv) return APR_SUCCESS;
+    bs_server_cfg *scfg =
+        ap_get_module_config(sv->module_config, &botshield_module);
+    if (!scfg || !scfg->robots_txt_path) return APR_SUCCESS;
+    bs_robots_load(sv, scfg, sv->process->pconf);
+    return APR_SUCCESS;
 }
 
 static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
@@ -2797,6 +3588,99 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                 vcfg->block_paths->nelts);
         }
         #undef BS_E21_RESOLVE_COHORT
+    }
+
+    /* E2.2 — resolve sentinel defaults for any vhost where the
+     * directive wasn't given (either at the vhost or at main scope
+     * that got merged down). After this loop every vhost's scfg has
+     * concrete values; downstream code can read them as-is. */
+    for (server_rec *sv = s; sv; sv = sv->next) {
+        bs_server_cfg *vcfg = ap_get_module_config(sv->module_config,
+                                                   &botshield_module);
+        if (!vcfg) continue;
+        if (vcfg->robots_wildcard_scope == BS_ROBOTS_WILDCARD_UNSET) {
+            vcfg->robots_wildcard_scope = BS_ROBOTS_WILDCARD_HEURISTIC;
+        }
+        if (vcfg->robots_refresh_interval == BS_ROBOTS_REFRESH_UNSET) {
+            vcfg->robots_refresh_interval = BS_ROBOTS_REFRESH_DEFAULT;
+        }
+    }
+
+    /* E2.2 — reserve an SHM rate-counter slot pool for each vhost's
+     * robots.txt, then do the initial parse. The SHM slot pool is
+     * sized once at post_config (cannot grow after); refresh reuses
+     * slots by group name so rate-counter state survives across
+     * refreshes. BS_E22_ROBOTS_SLOT_POOL is a deliberate overshoot —
+     * most hand-maintained robots.txt files have <10 Crawl-delay
+     * groups. */
+    #define BS_E22_ROBOTS_SLOT_POOL 16
+    for (server_rec *sv = s; sv; sv = sv->next) {
+        bs_server_cfg *vcfg = ap_get_module_config(sv->module_config,
+                                                   &botshield_module);
+        if (!vcfg || !vcfg->robots_txt_path) continue;
+
+        /* Reserve the pool from the global rate-counter table. */
+        int pool_base = next_slot;
+        int pool_size = BS_E22_ROBOTS_SLOT_POOL;
+        if (pool_base + pool_size > (int)bs_shm.rate_counter_count) {
+            pool_size = (int)bs_shm.rate_counter_count - pool_base;
+            if (pool_size < 0) pool_size = 0;
+        }
+        vcfg->robots_slot_pool_base = pool_base;
+        vcfg->robots_slot_pool_size = pool_size;
+        vcfg->robots_slot_pool_used = 0;
+        next_slot += pool_size;
+
+        apr_status_t rv = bs_robots_load(sv, vcfg, pconf);
+        if (rv != APR_SUCCESS) {
+            /* bs_robots_load already logged a diagnostic; keep
+             * scfg->robots at NULL so the request path short-
+             * circuits out of robots.txt enforcement for this vhost. */
+        }
+
+        /* Register a per-vhost watchdog callback for live refresh.
+         * Soft dependency on mod_watchdog — if not loaded, we keep
+         * what post_config built and that's that. Per-vhost
+         * singletons so the watchdog doesn't multiplex ticks across
+         * vhosts with different refresh intervals. */
+        if (vcfg->robots_refresh_interval > 0) {
+            APR_OPTIONAL_FN_TYPE(ap_watchdog_get_instance) *fn_get =
+                APR_RETRIEVE_OPTIONAL_FN(ap_watchdog_get_instance);
+            APR_OPTIONAL_FN_TYPE(ap_watchdog_register_callback) *fn_reg =
+                APR_RETRIEVE_OPTIONAL_FN(ap_watchdog_register_callback);
+            if (fn_get && fn_reg) {
+                /* Instance name is per-vhost so one operator bad
+                 * state can't wedge another vhost's refresh. */
+                const char *wd_name = apr_psprintf(pconf,
+                    "mod_botshield_robots_%pp", (void *)sv);
+                ap_watchdog_t *wd = NULL;
+                apr_status_t wrv = fn_get(&wd, wd_name, 0, 1, pconf);
+                if (wrv == APR_SUCCESS && wd) {
+                    apr_interval_time_t ival = apr_time_from_sec(
+                        vcfg->robots_refresh_interval);
+                    wrv = fn_reg(wd, ival, sv, bs_robots_watchdog_cb);
+                } else if (wrv == APR_SUCCESS) {
+                    wrv = APR_EGENERAL;
+                }
+                if (wrv == APR_SUCCESS) {
+                    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+                        "mod_botshield: robots.txt live-refresh "
+                        "enabled every %d s",
+                        vcfg->robots_refresh_interval);
+                } else {
+                    ap_log_error(APLOG_MARK, APLOG_WARNING, wrv, sv,
+                        "mod_botshield: robots.txt watchdog "
+                        "registration failed; live-refresh disabled "
+                        "(post_config load still in effect)");
+                }
+            } else {
+                ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+                    "mod_botshield: mod_watchdog not loaded; "
+                    "robots.txt live-refresh disabled (post_config "
+                    "load still in effect; reload Apache after "
+                    "editing robots.txt)");
+            }
+        }
     }
 
     return OK;
@@ -3762,6 +4646,533 @@ static const char *bs_set_block_path(cmd_parms *cmd, void *dconf,
         }
     }
     *(bs_block_path_entry **)apr_array_push(scfg->block_paths) = e;
+    return NULL;
+}
+
+/* E3 — BotShieldTrigger <name> <path-glob> [key=value ...].
+ *
+ * Supported keys: status (code|pass), redirect, log, flag, ttl,
+ * penalty. See PLAN.md E3 for semantics. Rejects:
+ *   - unknown key names
+ *   - status=pass + redirect= (pass-through can't also redirect)
+ *   - flag= with an unknown bit name
+ *   - status values that aren't 3xx when redirect= is set
+ *
+ * Upsert-by-name, preserving declaration order (same model as
+ * BotShieldRateLimit / BotShieldBlockPath). */
+static const char *bs_set_trigger(cmd_parms *cmd, void *dconf,
+                                  int argc, char *const argv[])
+{
+    (void)dconf;
+    if (argc < 2) {
+        return "BotShieldTrigger: expects <name> <path-glob> "
+               "[key=value ...]";
+    }
+    const char *name    = argv[0];
+    const char *pattern = argv[1];
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    if (!bs_bot_name_valid(name)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldTrigger: name '%s' must be [a-z0-9-]{1,32}", name);
+    }
+    if (!pattern || !*pattern || pattern[0] != '/') {
+        return "BotShieldTrigger: path-glob must start with '/'";
+    }
+    if (strlen(pattern) > 256) {
+        return "BotShieldTrigger: path-glob longer than 256 chars";
+    }
+
+    bs_trigger_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
+    e->name         = apr_pstrdup(cmd->pool, name);
+    e->path_pattern = apr_pstrdup(cmd->pool, pattern);
+    /* Defaults per PLAN.md E3. */
+    e->status_code  = 403;
+    e->redirect_url = NULL;
+    e->log_tag      = NULL;
+    e->flag_bit     = BS_FLAG_SCANNER_PROBE;
+    e->ttl_sec      = 3600;
+    e->penalty      = 0;
+
+    int status_explicit = 0;
+
+    for (int i = 2; i < argc; i++) {
+        const char *arg = argv[i];
+        const char *eq  = strchr(arg, '=');
+        if (!eq) {
+            return apr_psprintf(cmd->pool,
+                "BotShieldTrigger: extra arg '%s' must be key=value",
+                arg);
+        }
+        apr_size_t klen = (apr_size_t)(eq - arg);
+        const char *val = eq + 1;
+
+        #define BS_TRIG_KEY(n) (klen == sizeof(n)-1 && \
+                                 strncasecmp(arg, n, sizeof(n)-1) == 0)
+
+        if (BS_TRIG_KEY("status")) {
+            if (!strcasecmp(val, "pass")) {
+                e->status_code = BS_TRIGGER_STATUS_PASS;
+            } else {
+                char *end = NULL;
+                long code = strtol(val, &end, 10);
+                if (!end || *end || code < 100 || code > 599) {
+                    return apr_psprintf(cmd->pool,
+                        "BotShieldTrigger: status='%s' must be an "
+                        "HTTP code 100..599 or the literal 'pass'",
+                        val);
+                }
+                e->status_code = (int)code;
+            }
+            status_explicit = 1;
+        } else if (BS_TRIG_KEY("redirect")) {
+            if (!*val) {
+                return "BotShieldTrigger: redirect= requires a URL";
+            }
+            e->redirect_url = apr_pstrdup(cmd->pool, val);
+            if (!status_explicit) {
+                /* Default to 302 when redirect is set and operator
+                 * didn't pick a 3xx explicitly. */
+                e->status_code = 302;
+            }
+        } else if (BS_TRIG_KEY("log")) {
+            e->log_tag = apr_pstrdup(cmd->pool, val);
+        } else if (BS_TRIG_KEY("flag")) {
+            const char *perr = NULL;
+            apr_uint32_t bits = bs_parse_flag_names(cmd->pool, val, &perr);
+            if (perr) return apr_psprintf(cmd->pool,
+                "BotShieldTrigger: flag=%s: %s", val, perr);
+            /* Require exactly one bit — trigger semantics are per-
+             * request-per-IP and multi-bit would confuse the
+             * future-score contribution operators are picking. */
+            if (bits == 0 || (bits & (bits - 1)) != 0) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldTrigger: flag=%s must name exactly one "
+                    "bit", val);
+            }
+            e->flag_bit = bits;
+        } else if (BS_TRIG_KEY("ttl")) {
+            char *end = NULL;
+            long t = strtol(val, &end, 10);
+            if (!end || *end || t < 0 || t > 86400 * 30) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldTrigger: ttl='%s' must be 0..2592000 "
+                    "seconds (0 = don't flag)", val);
+            }
+            e->ttl_sec = (int)t;
+        } else if (BS_TRIG_KEY("penalty")) {
+            char *end = NULL;
+            long pn = strtol(val, &end, 10);
+            if (!end || *end || pn < 0 || pn > 1000) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldTrigger: penalty='%s' must be 0..1000",
+                    val);
+            }
+            e->penalty = (int)pn;
+        } else {
+            return apr_psprintf(cmd->pool,
+                "BotShieldTrigger: unknown key '%.*s' (known: status, "
+                "redirect, log, flag, ttl, penalty)",
+                (int)klen, arg);
+        }
+        #undef BS_TRIG_KEY
+    }
+
+    /* Cross-validate. */
+    if (e->redirect_url && e->status_code == BS_TRIGGER_STATUS_PASS) {
+        return "BotShieldTrigger: status=pass and redirect= are "
+               "mutually exclusive — a redirect IS the response";
+    }
+    if (e->redirect_url
+        && (e->status_code < 300 || e->status_code >= 400)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldTrigger: redirect= requires a 3xx status "
+            "(got %d)", e->status_code);
+    }
+    if (e->ttl_sec == 0) {
+        /* No flagging → bit is moot. Clear it to skip the flag call
+         * and keep the status page honest. */
+        e->flag_bit = 0;
+    }
+
+    /* Upsert-by-name; preserves declaration order. */
+    for (int i = 0; i < scfg->triggers->nelts; i++) {
+        bs_trigger_entry *ex =
+            APR_ARRAY_IDX(scfg->triggers, i, bs_trigger_entry *);
+        if (strcmp(ex->name, e->name) == 0) {
+            APR_ARRAY_IDX(scfg->triggers, i, bs_trigger_entry *) = e;
+            return NULL;
+        }
+    }
+    *(bs_trigger_entry **)apr_array_push(scfg->triggers) = e;
+    return NULL;
+}
+
+/* E4 — BotShieldSessionCookieName <name>. Each invocation appends
+ * one cookie name to scfg->session_names (lowercased, deduped).
+ * The list seeds the `cookies=session` predicate — matches any
+ * cookie on the request whose name is in this list. Curated
+ * defaults ship (PHPSESSID, JSESSIONID, etc.); this directive lets
+ * operators add framework-specific names without editing the
+ * module. Short by design — long auto-lists turn `cookies=session`
+ * into a loose any-cookie-with-a-suggestive-name matcher. */
+static const char *bs_set_session_cookie_name(cmd_parms *cmd, void *dconf,
+                                              const char *name)
+{
+    (void)dconf;
+    if (!name || !*name) {
+        return "BotShieldSessionCookieName: name required";
+    }
+    apr_size_t nlen = strlen(name);
+    if (nlen > 64) {
+        return "BotShieldSessionCookieName: name over 64 chars";
+    }
+    for (apr_size_t i = 0; i < nlen; i++) {
+        unsigned char c = (unsigned char)name[i];
+        int ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+              || (c >= '0' && c <= '9') || c == '-' || c == '_'
+              || c == '.';
+        if (!ok) return apr_psprintf(cmd->pool,
+            "BotShieldSessionCookieName: '%s' contains invalid "
+            "char '%c' (expect [A-Za-z0-9_-.])", name, (char)c);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    char *lower = apr_pstrdup(cmd->pool, name);
+    for (char *p = lower; *p; p++) *p = (char)tolower((unsigned char)*p);
+    /* Dedup — O(n) scan, list is tiny. */
+    for (int i = 0; i < scfg->session_names->nelts; i++) {
+        if (strcmp(APR_ARRAY_IDX(scfg->session_names, i,
+                                 const char *), lower) == 0) {
+            return NULL;
+        }
+    }
+    *(const char **)apr_array_push(scfg->session_names) = lower;
+    return NULL;
+}
+
+/* E4 — BotShieldCookieTrigger <name> <cookie-match> [key=value ...].
+ *
+ * Parses the cookie-match predicate (see PLAN.md E4 for the full
+ * predicate grammar) and the action keys, enforces cross-
+ * validation (status=pass + redirect= is a config error;
+ * _bs_verified as cookie=name is redirected to bs-cookie=<state>),
+ * and upserts by name. See bs_trigger_entry for the action-key
+ * semantics shared with E3; the semantic divergences are:
+ *
+ *   - credit= always applies (even under status=pass), because a
+ *     cookie is ongoing client state we want to shape this
+ *     request's score for.
+ *   - penalty= likewise always applies. Contrast E3 where it's
+ *     ignored under pass.
+ *   - status=pass is the DEFAULT; a credit trigger with no status
+ *     set is pass-with-score-shaping. */
+static int bs_ishex_or_alnum(char c)
+{
+    unsigned char u = (unsigned char)c;
+    return (u >= 'A' && u <= 'Z') || (u >= 'a' && u <= 'z')
+        || (u >= '0' && u <= '9') || u == '-' || u == '_' || u == '.';
+}
+
+static const char *bs_set_cookie_trigger(cmd_parms *cmd, void *dconf,
+                                         int argc, char *const argv[])
+{
+    (void)dconf;
+    if (argc < 2) {
+        return "BotShieldCookieTrigger: expects <name> <cookie-match> "
+               "[key=value ...]";
+    }
+    const char *name     = argv[0];
+    const char *match    = argv[1];
+    bs_server_cfg *scfg  = ap_get_module_config(cmd->server->module_config,
+                                                &botshield_module);
+    if (!bs_bot_name_valid(name)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCookieTrigger: name '%s' must be [a-z0-9-]{1,32}",
+            name);
+    }
+
+    bs_cookie_trigger_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
+    e->name         = apr_pstrdup(cmd->pool, name);
+    e->status_code  = BS_TRIGGER_STATUS_PASS;   /* default pass */
+    e->flag_bit     = 0;                        /* no flag unless ttl>0 */
+    e->ttl_sec      = 0;                        /* no flag by default */
+    e->penalty      = 0;
+    e->credit       = 0;
+
+    /* --- Parse the cookie-match predicate. --- */
+    const char *m = match;
+    int negated = 0;
+    if (m[0] == '!') { negated = 1; m++; }
+    if (!strncasecmp(m, "cookie=", 7)) {
+        const char *rest = m + 7;
+        if (!*rest) {
+            return "BotShieldCookieTrigger: cookie= needs a name";
+        }
+        /* Parse cookie name up to '=' / '~' / '!' / end. */
+        const char *op = rest;
+        while (*op && *op != '=' && *op != '~' && *op != '!') {
+            if (!bs_ishex_or_alnum(*op)) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldCookieTrigger: cookie name may only "
+                    "contain [A-Za-z0-9_-.] (got '%c')", *op);
+            }
+            op++;
+        }
+        apr_size_t nlen = (apr_size_t)(op - rest);
+        if (nlen == 0 || nlen > 64) {
+            return "BotShieldCookieTrigger: cookie name must be 1..64 chars";
+        }
+        char *cname = apr_pstrmemdup(cmd->pool, rest, nlen);
+        /* Reject the module's own cookie at this predicate level;
+         * redirect operators to bs-cookie=<state>. */
+        if (!strcasecmp(cname, BS_COOKIE_NAME)) {
+            return "BotShieldCookieTrigger: declaring a predicate "
+                   "against the module's own " BS_COOKIE_NAME
+                   " cookie is not supported — use bs-cookie=verified "
+                   "/ bs-cookie=missing / bs-cookie=invalid instead";
+        }
+        e->cname = cname;
+        /* Dispatch on the operator chosen. */
+        if (*op == '\0') {
+            e->pred_kind = negated ? BS_CP_NAMED_ABSENT
+                                   : BS_CP_NAMED_PRESENT;
+        } else if (negated) {
+            return "BotShieldCookieTrigger: '!' prefix may only be "
+                   "combined with a bare cookie=<name> (absence "
+                   "test); use cookie=<name>!<value> for value "
+                   "mismatch";
+        } else if (*op == '=') {
+            e->pred_kind = BS_CP_NAMED_EQ;
+            e->cvalue    = apr_pstrdup(cmd->pool, op + 1);
+        } else if (*op == '~') {
+            e->pred_kind = BS_CP_NAMED_CONTAINS;
+            e->cvalue    = apr_pstrdup(cmd->pool, op + 1);
+            if (!*e->cvalue) {
+                return "BotShieldCookieTrigger: cookie=<name>~<substr> "
+                       "needs a non-empty substring";
+            }
+        } else if (*op == '!') {
+            e->pred_kind = BS_CP_NAMED_NE;
+            e->cvalue    = apr_pstrdup(cmd->pool, op + 1);
+        }
+    } else if (!strncasecmp(m, "cookies=", 8)) {
+        if (negated) {
+            return "BotShieldCookieTrigger: '!' prefix cannot combine "
+                   "with cookies=<state> — use the complementary "
+                   "state (cookies=any is the complement of cookies=none)";
+        }
+        const char *state = m + 8;
+        if      (!strcasecmp(state, "none"))    e->pred_kind = BS_CP_BULK_NONE;
+        else if (!strcasecmp(state, "any"))     e->pred_kind = BS_CP_BULK_ANY;
+        else if (!strcasecmp(state, "session")) e->pred_kind = BS_CP_BULK_SESSION;
+        else {
+            return apr_psprintf(cmd->pool,
+                "BotShieldCookieTrigger: cookies='%s' not one of "
+                "none|any|session", state);
+        }
+    } else if (!strncasecmp(m, "bs-cookie=", 10)) {
+        if (negated) {
+            return "BotShieldCookieTrigger: '!' prefix cannot combine "
+                   "with bs-cookie=<state> — use the complementary "
+                   "state directly";
+        }
+        const char *state = m + 10;
+        if      (!strcasecmp(state, "verified")) e->pred_kind = BS_CP_BS_VERIFIED;
+        else if (!strcasecmp(state, "missing"))  e->pred_kind = BS_CP_BS_MISSING;
+        else if (!strcasecmp(state, "invalid"))  e->pred_kind = BS_CP_BS_INVALID;
+        else {
+            return apr_psprintf(cmd->pool,
+                "BotShieldCookieTrigger: bs-cookie='%s' not one of "
+                "verified|missing|invalid", state);
+        }
+    } else {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCookieTrigger: unrecognized cookie-match '%s' "
+            "(expected cookie=... / !cookie=... / cookies=... / "
+            "bs-cookie=...)", match);
+    }
+
+    /* --- Parse action keys. Shared mostly with bs_set_trigger. --- */
+    int status_explicit = 0;
+    for (int i = 2; i < argc; i++) {
+        const char *arg = argv[i];
+        const char *eq  = strchr(arg, '=');
+        if (!eq) {
+            return apr_psprintf(cmd->pool,
+                "BotShieldCookieTrigger: extra arg '%s' must be key=value",
+                arg);
+        }
+        apr_size_t klen = (apr_size_t)(eq - arg);
+        const char *val = eq + 1;
+        #define BS_CTK(n) (klen == sizeof(n)-1 && \
+                            strncasecmp(arg, n, sizeof(n)-1) == 0)
+
+        if (BS_CTK("status")) {
+            if (!strcasecmp(val, "pass")) {
+                e->status_code = BS_TRIGGER_STATUS_PASS;
+            } else {
+                char *end = NULL;
+                long code = strtol(val, &end, 10);
+                if (!end || *end || code < 100 || code > 599) {
+                    return apr_psprintf(cmd->pool,
+                        "BotShieldCookieTrigger: status='%s' must be "
+                        "an HTTP code 100..599 or the literal 'pass'",
+                        val);
+                }
+                e->status_code = (int)code;
+            }
+            status_explicit = 1;
+        } else if (BS_CTK("redirect")) {
+            if (!*val) return "BotShieldCookieTrigger: redirect= "
+                              "requires a URL";
+            e->redirect_url = apr_pstrdup(cmd->pool, val);
+            if (!status_explicit) e->status_code = 302;
+        } else if (BS_CTK("log")) {
+            e->log_tag = apr_pstrdup(cmd->pool, val);
+        } else if (BS_CTK("flag")) {
+            const char *perr = NULL;
+            apr_uint32_t bits = bs_parse_flag_names(cmd->pool, val, &perr);
+            if (perr) return apr_psprintf(cmd->pool,
+                "BotShieldCookieTrigger: flag=%s: %s", val, perr);
+            if (bits == 0 || (bits & (bits - 1)) != 0) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldCookieTrigger: flag=%s must name exactly "
+                    "one bit", val);
+            }
+            e->flag_bit = bits;
+        } else if (BS_CTK("ttl")) {
+            char *end = NULL;
+            long t = strtol(val, &end, 10);
+            if (!end || *end || t < 0 || t > 86400 * 30) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldCookieTrigger: ttl='%s' must be 0..2592000",
+                    val);
+            }
+            e->ttl_sec = (int)t;
+        } else if (BS_CTK("penalty")) {
+            char *end = NULL;
+            long pn = strtol(val, &end, 10);
+            if (!end || *end || pn < 0 || pn > 1000) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldCookieTrigger: penalty='%s' must be "
+                    "0..1000", val);
+            }
+            e->penalty = (int)pn;
+        } else if (BS_CTK("credit")) {
+            char *end = NULL;
+            long cn = strtol(val, &end, 10);
+            if (!end || *end || cn < 0 || cn > 1000) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldCookieTrigger: credit='%s' must be "
+                    "0..1000", val);
+            }
+            e->credit = (int)cn;
+        } else {
+            return apr_psprintf(cmd->pool,
+                "BotShieldCookieTrigger: unknown key '%.*s' (known: "
+                "status, redirect, log, flag, ttl, penalty, credit)",
+                (int)klen, arg);
+        }
+        #undef BS_CTK
+    }
+
+    if (e->redirect_url && e->status_code == BS_TRIGGER_STATUS_PASS) {
+        return "BotShieldCookieTrigger: status=pass and redirect= are "
+               "mutually exclusive — a redirect IS the response";
+    }
+    if (e->redirect_url
+        && (e->status_code < 300 || e->status_code >= 400)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCookieTrigger: redirect= requires a 3xx "
+            "status (got %d)", e->status_code);
+    }
+    if (e->ttl_sec == 0) e->flag_bit = 0;  /* no flag without ttl */
+
+    /* Upsert-by-name. */
+    for (int i = 0; i < scfg->cookie_triggers->nelts; i++) {
+        bs_cookie_trigger_entry *ex = APR_ARRAY_IDX(
+            scfg->cookie_triggers, i, bs_cookie_trigger_entry *);
+        if (strcmp(ex->name, e->name) == 0) {
+            APR_ARRAY_IDX(scfg->cookie_triggers, i,
+                          bs_cookie_trigger_entry *) = e;
+            return NULL;
+        }
+    }
+    *(bs_cookie_trigger_entry **)apr_array_push(scfg->cookie_triggers) = e;
+    return NULL;
+}
+
+/* E2.2 — BotShieldRobotsTxt <path>: point the module at a robots.txt
+ * file. Parsing deferred to post_config so pconf's allocator is alive
+ * for the doc's lifetime. Empty/absent path is the default "don't
+ * enforce robots.txt" state; operators turn it on by pointing at a
+ * file. */
+static const char *bs_set_robots_txt(cmd_parms *cmd, void *dconf,
+                                     const char *path)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    if (!path || !*path) {
+        return "BotShieldRobotsTxt: path required";
+    }
+    if (path[0] != '/') {
+        return "BotShieldRobotsTxt: path must be absolute";
+    }
+    scfg->robots_txt_path = apr_pstrdup(cmd->pool, path);
+    return NULL;
+}
+
+/* E2.2 — BotShieldRobotsRefreshInterval <seconds>. Governs the
+ * mod_watchdog-driven live refresh (E2.2.2). 0 disables the
+ * watchdog callback, reverting to post_config-only load
+ * (edit robots.txt + reload Apache). Default 60s. Hard cap at
+ * 86400 to catch typos that'd push refreshes into next week. */
+static const char *bs_set_robots_refresh_interval(cmd_parms *cmd,
+                                                  void *dconf,
+                                                  const char *arg)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    char *end = NULL;
+    long v = strtol(arg, &end, 10);
+    if (!end || *end || v < 0 || v > 86400) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldRobotsRefreshInterval: '%s' must be an integer "
+            "0..86400 seconds (0 = disable live refresh)", arg);
+    }
+    scfg->robots_refresh_interval = (int)v;
+    return NULL;
+}
+
+/* E2.2 — BotShieldRobotsWildcardScope heuristic|strict|off.
+ * Governs how the User-agent: * group in robots.txt is enforced:
+ *   heuristic (default): apply only to UAs that look like crawlers
+ *                        — real-browser prefix denylist + bot-token
+ *                        allowlist (see PLAN.md).
+ *   strict             : apply to every UA (operator's call; risks
+ *                        rate-limiting or blocking real users).
+ *   off                : ignore * groups entirely. */
+static const char *bs_set_robots_wildcard_scope(cmd_parms *cmd, void *dconf,
+                                                const char *arg)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    if (!arg || !*arg) return "BotShieldRobotsWildcardScope: mode required";
+    if (!strcasecmp(arg, "heuristic")) {
+        scfg->robots_wildcard_scope = BS_ROBOTS_WILDCARD_HEURISTIC;
+    } else if (!strcasecmp(arg, "strict")) {
+        scfg->robots_wildcard_scope = BS_ROBOTS_WILDCARD_STRICT;
+    } else if (!strcasecmp(arg, "off")) {
+        scfg->robots_wildcard_scope = BS_ROBOTS_WILDCARD_OFF;
+    } else {
+        return apr_psprintf(cmd->pool,
+            "BotShieldRobotsWildcardScope: '%s' not one of "
+            "heuristic|strict|off", arg);
+    }
     return NULL;
 }
 
@@ -5305,6 +6716,21 @@ static const char *bs_decision_reason_names(apr_pool_t *p,
     return out;
 }
 
+/* Optional E3 trigger log-tag: set via r->notes so bs_decision_log
+ * can emit it without changing the signature that 20+ call sites
+ * already use. Read back as a pool-owned string; NULL = no tag. */
+#define BS_TRIGGER_TAG_NOTE   "botshield-trigger-tag"
+static void bs_set_trigger_tag(request_rec *r, const char *tag)
+{
+    if (!tag || !*tag) return;
+    apr_table_setn(r->notes, BS_TRIGGER_TAG_NOTE,
+                   apr_pstrdup(r->pool, tag));
+}
+static const char *bs_get_trigger_tag(request_rec *r)
+{
+    return apr_table_get(r->notes, BS_TRIGGER_TAG_NOTE);
+}
+
 static void bs_decision_log(request_rec *r,
                             const char *tier,
                             const char *outcome,
@@ -5318,15 +6744,31 @@ static void bs_decision_log(request_rec *r,
                            ? r->useragent_ip : "-";
     const char *path     = (r->unparsed_uri && *r->unparsed_uri)
                            ? r->unparsed_uri : "-";
-    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
-        "mod_botshield: decision tier=%s outcome=%s ip=%s score=%d "
-        "cookie=%s provider=%s alg=%s reason=\"%s\" path=\"%s\"",
-        tier, outcome, ip, score,
-        cookie   ? cookie   : "-",
-        provider ? provider : "-",
-        alg      ? alg      : "-",
-        reason   ? reason   : "-",
-        path);
+    const char *tag      = bs_get_trigger_tag(r);
+    /* tag= suffix only when a trigger set it; normal decision lines
+     * stay byte-identical so existing log parsers don't break. */
+    if (tag && *tag) {
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: decision tier=%s outcome=%s ip=%s score=%d "
+            "cookie=%s provider=%s alg=%s reason=\"%s\" path=\"%s\" "
+            "tag=\"%s\"",
+            tier, outcome, ip, score,
+            cookie   ? cookie   : "-",
+            provider ? provider : "-",
+            alg      ? alg      : "-",
+            reason   ? reason   : "-",
+            path, tag);
+    } else {
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: decision tier=%s outcome=%s ip=%s score=%d "
+            "cookie=%s provider=%s alg=%s reason=\"%s\" path=\"%s\"",
+            tier, outcome, ip, score,
+            cookie   ? cookie   : "-",
+            provider ? provider : "-",
+            alg      ? alg      : "-",
+            reason   ? reason   : "-",
+            path);
+    }
     /* M9.2: counters derived from the same enum vocabulary. One log
      * line, up to four counter increments (tier, outcome, cookie when
      * applicable, provider when applicable). */
@@ -5820,6 +7262,193 @@ static int bs_metrics_handler(request_rec *r, bs_dir_cfg *cfg)
         "Fixed size of the verify-endpoint log-suppress ring (slots).",
         (apr_uint64_t)bs_shm.cv_log_slot_count);
 
+    return OK;
+}
+
+/* ======================================================================
+ * E2.2.3 — /botshield/policy-status
+ *
+ * Plain-text dump of the rules currently being enforced:
+ *   - BotShieldRateLimit directives (directive rate_limits array).
+ *   - BotShieldBlockPath directives (directive block_paths array).
+ *   - robots.txt-derived groups (if BotShieldRobotsTxt is set) —
+ *     source file path, mtime, every group's UA tokens + rules +
+ *     Crawl-delay.
+ *
+ * Goal is operator-visibility: when E2.2.2 hot-swaps a freshly-edited
+ * robots.txt, operators can curl this page to confirm what the module
+ * is actually enforcing, rather than guessing. Also useful for
+ * verifying that `BotShieldAllow` overrides have landed.
+ *
+ * No authentication / no rate limit built in. Treat like mod_status —
+ * operators wrap it in `<Location>` with their own ACL. The page
+ * doesn't reveal cookie secrets or client IPs; the most sensitive
+ * content is the operator's own directive config, which is already
+ * on disk in /etc/apache2/.
+ *
+ * Format is plain text (not Prometheus) — this is meant to be read
+ * by humans over curl; structured consumers use /botshield/metrics.
+ * ====================================================================== */
+
+static void bs_psh_cohort_ipspec(request_rec *r, const bs_cohort *c)
+{
+    if (c->ip_any) { ap_rputs("*", r); return; }
+    if (c->inline_cidrs) {
+        ap_rprintf(r, "inline(%s)", c->inline_cidrs);
+        return;
+    }
+    if (c->path) {
+        ap_rprintf(r, "file(%s)", c->path);
+        return;
+    }
+    ap_rprintf(r, "<%d ranges>", c->ranges ? c->ranges->nelts : 0);
+}
+
+static void bs_psh_render_counter(request_rec *r, int slot_idx,
+                                  apr_uint32_t budget)
+{
+    bs_rate_counter *counters = (bs_rate_counter *)bs_shm.rate_counters;
+    if (slot_idx < 0 || !counters) {
+        ap_rputs("-/-", r);
+        return;
+    }
+    apr_uint32_t cnt = __atomic_load_n(&counters[slot_idx].count,
+                                       __ATOMIC_RELAXED);
+    ap_rprintf(r, "%u/%u", cnt, budget);
+}
+
+static int bs_policy_status_handler(request_rec *r, bs_dir_cfg *cfg)
+{
+    (void)cfg;
+    if (r->method_number != M_GET && r->method_number != M_OPTIONS) {
+        r->status = HTTP_METHOD_NOT_ALLOWED;
+        apr_table_setn(r->headers_out, "Allow", "GET, OPTIONS");
+        ap_set_content_type(r, "text/plain; charset=utf-8");
+        ap_rputs("GET required.\n", r);
+        return OK;
+    }
+    ap_set_content_type(r, "text/plain; charset=utf-8");
+    apr_table_setn(r->headers_out, "Cache-Control", "no-store");
+
+    bs_server_cfg *scfg =
+        ap_get_module_config(r->server->module_config, &botshield_module);
+    if (!scfg) {
+        ap_rputs("# scfg unavailable\n", r);
+        return OK;
+    }
+
+    char tbuf[APR_RFC822_DATE_LEN + 1] = { 0 };
+    apr_rfc822_date(tbuf, apr_time_now());
+    ap_rprintf(r, "# mod_botshield policy status\n"
+                  "# vhost:       %s\n"
+                  "# server_time: %s\n\n",
+        r->server->server_hostname ? r->server->server_hostname : "-",
+        tbuf);
+
+    /* --- directive rate limits --- */
+    ap_rputs("## BotShieldRateLimit (directive)\n", r);
+    if (!scfg->rate_limits || scfg->rate_limits->nelts == 0) {
+        ap_rputs("# (none)\n\n", r);
+    } else {
+        ap_rputs("# name               budget  window  ua                          "
+                 "ipspec                slot  count/budget\n", r);
+        for (int i = 0; i < scfg->rate_limits->nelts; i++) {
+            bs_rate_limit_entry *e = APR_ARRAY_IDX(
+                scfg->rate_limits, i, bs_rate_limit_entry *);
+            ap_rprintf(r, "%-18s  %6u  %4us   %-26s  ",
+                e->name, e->budget, e->window_sec,
+                e->cohort.ua_any ? "*"
+                    : apr_psprintf(r->pool, "\"%s\"", e->cohort.ua_pattern));
+            bs_psh_cohort_ipspec(r, &e->cohort);
+            ap_rprintf(r, "%*s  %4d  ",
+                       (int)(22 - (e->cohort.ip_any ? 1
+                          : (int)(strlen("file()") + (e->cohort.path ? strlen(e->cohort.path) : 0)
+                                  + (e->cohort.inline_cidrs ? strlen(e->cohort.inline_cidrs) : 0)))),
+                       "", e->shm_slot);
+            bs_psh_render_counter(r, e->shm_slot, e->budget);
+            ap_rputs("\n", r);
+        }
+        ap_rputs("\n", r);
+    }
+
+    /* --- directive block paths --- */
+    ap_rputs("## BotShieldBlockPath (directive)\n", r);
+    if (!scfg->block_paths || scfg->block_paths->nelts == 0) {
+        ap_rputs("# (none)\n\n", r);
+    } else {
+        ap_rputs("# name               path-glob                     "
+                 "ua                          ipspec\n", r);
+        for (int i = 0; i < scfg->block_paths->nelts; i++) {
+            bs_block_path_entry *e = APR_ARRAY_IDX(
+                scfg->block_paths, i, bs_block_path_entry *);
+            ap_rprintf(r, "%-18s  %-28s  %-26s  ",
+                e->name, e->path_pattern,
+                e->cohort.ua_any ? "*"
+                    : apr_psprintf(r->pool, "\"%s\"", e->cohort.ua_pattern));
+            bs_psh_cohort_ipspec(r, &e->cohort);
+            ap_rputs("\n", r);
+        }
+        ap_rputs("\n", r);
+    }
+
+    /* --- robots.txt --- */
+    ap_rputs("## robots.txt (BotShieldRobotsTxt)\n", r);
+    if (!scfg->robots_txt_path) {
+        ap_rputs("# (not configured)\n", r);
+        return OK;
+    }
+    bs_robots_state *rs =
+        __atomic_load_n(&scfg->robots, __ATOMIC_ACQUIRE);
+    ap_rprintf(r, "# path:                %s\n", scfg->robots_txt_path);
+    if (!rs) {
+        ap_rputs("# status:              not loaded (parse failed or "
+                 "file missing at post_config)\n", r);
+        return OK;
+    }
+    char mbuf[APR_RFC822_DATE_LEN + 1] = { 0 };
+    apr_rfc822_date(mbuf, rs->mtime);
+    ap_rprintf(r, "# mtime:               %s\n"
+                  "# groups:              %d\n"
+                  "# slot pool:           %d/%d used\n"
+                  "# wildcard scope:      %s\n"
+                  "# refresh interval:    %d s%s\n",
+        mbuf,
+        robots_group_count(rs->doc),
+        scfg->robots_slot_pool_used, scfg->robots_slot_pool_size,
+        scfg->robots_wildcard_scope == BS_ROBOTS_WILDCARD_STRICT ? "strict"
+          : scfg->robots_wildcard_scope == BS_ROBOTS_WILDCARD_OFF ? "off"
+          : "heuristic",
+        scfg->robots_refresh_interval,
+        scfg->robots_refresh_interval == 0 ? " (live-refresh disabled)" : "");
+
+    int n = robots_group_count(rs->doc);
+    for (int i = 0; i < n; i++) {
+        ap_rprintf(r, "\n### group[%d] \"%s\"  wildcard=%s\n", i,
+            robots_group_name_at(rs->doc, i),
+            robots_group_is_wildcard_at(rs->doc, i) ? "yes" : "no");
+        int n_ua = robots_group_ua_count_at(rs->doc, i);
+        for (int u = 0; u < n_ua; u++) {
+            ap_rprintf(r, "  user-agent: %s\n",
+                robots_group_ua_at(rs->doc, i, u));
+        }
+        int n_rules = robots_group_rule_count_at(rs->doc, i);
+        for (int k = 0; k < n_rules; k++) {
+            const char *pat = NULL;
+            int allow = 0;
+            if (robots_group_rule_at(rs->doc, i, k, &pat, &allow)) {
+                ap_rprintf(r, "  %-9s %s\n",
+                    allow ? "Allow:" : "Disallow:", pat ? pat : "");
+            }
+        }
+        int cd = robots_group_crawl_delay_at(rs->doc, i);
+        if (cd > 0) {
+            int slot = (rs->slot_by_group_idx && i < n)
+                     ? rs->slot_by_group_idx[i] : -1;
+            ap_rprintf(r, "  Crawl-delay: %ds  slot=%d  ", cd, slot);
+            bs_psh_render_counter(r, slot, 1);
+            ap_rputs("\n", r);
+        }
+    }
     return OK;
 }
 
@@ -6730,6 +8359,72 @@ static const command_rec bs_cmds[] = {
                  "trailing '$' = exact match. Hits return 403 with "
                  "a +100 score penalty under reason "
                  "block-path:<name>."),
+    /* E4 — cookie triggers */
+    AP_INIT_TAKE_ARGV("BotShieldCookieTrigger",
+                 bs_set_cookie_trigger, NULL, RSRC_CONF,
+                 "Cookie-based trigger. Args: <name> <cookie-match> "
+                 "[key=value ...]. cookie-match is one of: "
+                 "cookie=<n>, cookie=<n>=<v>, cookie=<n>~<substr>, "
+                 "cookie=<n>!<v>, !cookie=<n>, cookies=<none|any|"
+                 "session>, bs-cookie=<verified|missing|invalid>. "
+                 "Keys: status=<code|pass> (default pass; diverges "
+                 "from E3 — credit/penalty here ALWAYS apply, even "
+                 "under pass), redirect=<url>, log=<tag>, flag=<bit>, "
+                 "ttl=<sec>, penalty=<n>, credit=<n>. Declaration "
+                 "order; pass triggers accumulate credit/penalty "
+                 "(layered reputation signals), first non-pass "
+                 "trigger short-circuits the response. Upsert-by-"
+                 "name."),
+    AP_INIT_TAKE1("BotShieldSessionCookieName",
+                 bs_set_session_cookie_name, NULL, RSRC_CONF,
+                 "Add a cookie name to the list matched by the "
+                 "cookies=session predicate. Curated defaults: "
+                 "PHPSESSID, JSESSIONID, ASP.NET_SessionId, "
+                 "session_id, connect.sid, laravel_session. Each "
+                 "invocation appends one name; case-insensitive."),
+    /* E3 — path-based triggers */
+    AP_INIT_TAKE_ARGV("BotShieldTrigger",
+                 bs_set_trigger, NULL, RSRC_CONF,
+                 "Path-based trigger. Args: <name> <path-glob> "
+                 "[key=value ...]. Keys: status=<code|pass> (default "
+                 "403; 'pass' means the real handler runs), "
+                 "redirect=<url> (implies 302 unless status=3xx "
+                 "explicit), log=<tag> (emitted as tag=\"<x>\" on "
+                 "the decision log), flag=<bit> (M5.1 flag name; "
+                 "default scanner_probe), ttl=<sec> (flagged-IP "
+                 "TTL; default 3600; 0 = don't flag), penalty=<n> "
+                 "(score_add amount on this request; default 0; "
+                 "ignored under status=pass). Declaration order, "
+                 "first match wins; upsert-by-name."),
+    /* E2.2 — robots.txt enforcement */
+    AP_INIT_TAKE1("BotShieldRobotsTxt", bs_set_robots_txt,
+                 NULL, RSRC_CONF,
+                 "Path to a robots.txt file whose Disallow and "
+                 "Crawl-delay rules mod_botshield will enforce "
+                 "server-side. Parsed at post_config; RFC 9309 "
+                 "semantics (prefix + '*' + '$' wildcards, longest-"
+                 "match-wins, case-insensitive UA prefix). Blocked "
+                 "paths return 403 (reason robots-block:<group>); "
+                 "Crawl-delay trips return 429 + Retry-After "
+                 "(reason robots-rate:<group>)."),
+    AP_INIT_TAKE1("BotShieldRobotsRefreshInterval",
+                 bs_set_robots_refresh_interval, NULL, RSRC_CONF,
+                 "Seconds between mod_watchdog-driven re-checks of "
+                 "the BotShieldRobotsTxt file. On mtime change the "
+                 "file is re-parsed and the active rule set is "
+                 "atomically swapped — no Apache reload needed. "
+                 "Default 60. Set 0 to disable live-refresh and "
+                 "require an explicit reload after editing."),
+    AP_INIT_TAKE1("BotShieldRobotsWildcardScope",
+                 bs_set_robots_wildcard_scope, NULL, RSRC_CONF,
+                 "How to apply User-agent: * rules: 'heuristic' "
+                 "(default — apply only to UAs that look like "
+                 "crawlers), 'strict' (apply to every UA), or "
+                 "'off' (ignore * groups entirely). Heuristic mode "
+                 "uses a real-browser-prefix denylist (Mozilla/, "
+                 "Opera/, Firefox/, Edge/, Safari/) combined with a "
+                 "bot-token allowlist (bot/crawl/spider/fetch/"
+                 "slurp)."),
     { NULL }
 };
 
@@ -7262,6 +8957,9 @@ static int bs_handler(request_rec *r)
         if (strcmp(sub, "/metrics") == 0) {
             return bs_metrics_handler(r, cfg);
         }
+        if (strcmp(sub, "/policy-status") == 0) {
+            return bs_policy_status_handler(r, cfg);
+        }
         /* Unknown module endpoint under the prefix → 404, so a typo in
          * an operator's template fails loudly instead of falling through
          * to Apache and serving some unrelated file. */
@@ -7349,18 +9047,40 @@ static int bs_handler(request_rec *r)
     const char *cookie_status =
         bs_decision_cookie_status(cookie_verify_reason, cookie_had_val);
 
-    /* E2.1 — policy enforcement. Rate-limit / block-path cohorts
-     * short-circuit with 429/403 before scoring heuristics run; the
-     * decision log still fires so operators see why the request was
-     * rejected. Runs even for cookie-valid requests — operator policy
-     * (including robots.txt enforcement in E2.2) applies regardless
+    /* E4 — publish the `_bs_verified` verification verdict as a
+     * request note so bs_check_policy's cookie-trigger evaluator
+     * can surface it via bs-cookie=<state> predicates. Three-state
+     * mapping matches the directive surface. */
+    {
+        const char *bs_state;
+        if (!cookie_had_val)           bs_state = BS_CK_STATE_MISSING;
+        else if (!cookie_verify_reason) bs_state = BS_CK_STATE_VERIFIED;
+        else                           bs_state = BS_CK_STATE_INVALID;
+        apr_table_setn(r->notes, BS_CK_STATE_NOTE, bs_state);
+    }
+
+    /* E2.1 + E2.2 + E3 policy enforcement. Runs before scoring
+     * heuristics so a block / rate / trigger short-circuits cleanly.
+     * Applies to cookie-valid requests too — operator policy
+     * (including robots.txt and path-based triggers) is independent
      * of bot-ness. */
     int policy_rv = bs_check_policy(r);
+    if (policy_rv == DECLINED) {
+        /* E3 trigger with status=pass: log + let the real handler
+         * respond. No score, no BotShield interstitial. Flag-IP +
+         * tag side effects already applied in bs_check_policy. */
+        bs_request_score *s = bs_get_score(r, 0);
+        const char *reasons = bs_score_reasons_joined(r->pool, s);
+        bs_decision_log(r, "pass", "declined", cookie_status, "-", "-",
+                        reasons, s ? s->total : 0);
+        return DECLINED;
+    }
     if (policy_rv != OK) {
         bs_request_score *s = bs_get_score(r, 0);
         const char *reasons = bs_score_reasons_joined(r->pool, s);
-        const char *outcome = (policy_rv == HTTP_FORBIDDEN)
-                              ? "rejected" : "rate_limited";
+        const char *outcome;
+        if (policy_rv == HTTP_TOO_MANY_REQUESTS)      outcome = "rate_limited";
+        else                                          outcome = "rejected";
         bs_decision_log(r, "pass", outcome, cookie_status, "-", "-",
                         reasons, s ? s->total : 0);
         return policy_rv;

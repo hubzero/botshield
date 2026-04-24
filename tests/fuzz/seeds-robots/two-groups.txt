@@ -1,0 +1,7 @@
+User-agent: GPTBot
+Disallow: /
+Allow: /public
+Crawl-delay: 10
+
+User-agent: *
+Disallow: /private

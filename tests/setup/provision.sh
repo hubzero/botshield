@@ -138,6 +138,17 @@ apt-get install -y -qq \
 # already-present versions are skipped.
 sudo -u "$SUDO_USER" "$VENV/bin/playwright" install chromium >/dev/null
 
+echo "== /etc/botshield/test-robots (E2.2 test staging) =="
+# Apache's systemd unit sets PrivateTmp=true, which gives the apache2
+# process its own isolated /tmp. Files we'd normally stash under /tmp
+# are invisible to Apache. Give the E2.2 test suite a non-sandboxed
+# directory where the unprivileged test user can drop robots.txt
+# fixtures that www-data can read. Uses /etc/botshield/ (world-
+# traversable via /etc) rather than /var/lib/botshield/ (0750, not
+# traversable by the test user). 0775 with the test user owning and
+# www-data in the group lets both sides work without further sudo.
+install -d -m 775 -o "$SUDO_USER" -g www-data /etc/botshield/test-robots
+
 echo "== /var/lib/botshield/bots seed =="
 # E1 — Allow family (verified-bot). Seed /var/lib/... from the
 # bundled apache/bots/*.txt if nothing's there yet. Never stomps
