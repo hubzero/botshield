@@ -9863,15 +9863,23 @@ static void bs_register_hooks(apr_pool_t *p)
      * directive even after we've stripped. Running at
      * AP_FTYPE_PROTOCOL - 1 (just past mod_headers' FIXUP_HEADERS_OUT
      * at CONTENT_SET but before the protocol serializer) gives the
-     * widest window; for a BELT-AND-SUSPENDERS strip we also hook
-     * log_transaction to unset the tables one more time after the
-     * response is on the wire — purely defensive, for any edge
-     * where a later filter might read the outgoing table. */
+     * widest window for the normal response chain. */
     bs_app_feedback_filter_handle = ap_register_output_filter(
         "BOTSHIELD_APP_FEEDBACK", bs_app_feedback_filter, NULL,
         AP_FTYPE_PROTOCOL - 1);
-    ap_hook_insert_filter(bs_app_feedback_insert_filter, NULL, NULL,
-                          APR_HOOK_MIDDLE);
+    /* Register on BOTH the normal-response chain and the error-
+     * response chain. Apache builds a separate filter chain when
+     * `ap_die` runs for a 4xx/5xx response (including 404 from a
+     * missing file, error-from-handler, and ErrorDocument
+     * redirects); the insert_filter hook doesn't fire there, so
+     * without the error-filter registration the header would leak
+     * to clients on any error response that mod_headers decorated.
+     * Same handle, same callback — the filter is idempotent and
+     * one-shot per request, so double-registration is safe. */
+    ap_hook_insert_filter      (bs_app_feedback_insert_filter,
+                                NULL, NULL, APR_HOOK_MIDDLE);
+    ap_hook_insert_error_filter(bs_app_feedback_insert_filter,
+                                NULL, NULL, APR_HOOK_MIDDLE);
     /* mod_status optional hook: fires only when mod_status is loaded.
      * If it isn't, APR_OPTIONAL_HOOK silently registers nothing — no
      * hot-path cost and no hard linkage to mod_status. */

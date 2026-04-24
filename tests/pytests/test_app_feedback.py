@@ -6,12 +6,12 @@ applies the flag to the flagged-IP table so future requests from
 that IP carry the bit's score contribution.
 
 Tests use the `Header always set` directive from mod_headers to
-plant the feedback header on responses to specific locations —
-existing file paths in the dev vhost's DocumentRoot, because
-mod_headers + the output filter chain Apache uses for file
-responses is the real-world path a backend app takes. 404 error
-responses travel a separate chain (Apache's error-document
-machinery) where our filter doesn't sit.
+plant the feedback header on responses to specific locations.
+We cover both the normal content chain (existing files in the
+dev vhost's DocumentRoot) and Apache's separate error-response
+chain (404 for a missing path) — the module registers the strip
+filter on both chains so the "header never reaches client"
+promise holds regardless of response status.
 
 Secret is fixed in `tests/setup/provision.sh`
 (/etc/botshield/app-feedback-secret) so the test can recompute
@@ -129,6 +129,35 @@ def test_app_feedback_credit_flag_lowers_score(
 
 
 # --- Strip rules ----------------------------------------------------
+
+
+def test_app_feedback_strips_from_404_error_response(
+    config_override,
+):
+    """Regression: Apache's 404 (missing-file) response travels a
+    separate filter chain than normal content. Without the
+    `ap_hook_insert_error_filter` registration, mod_headers' `Header
+    always set` leaks the feedback header to the client on 404s.
+    Confirm it's stripped."""
+    val = _sign("honeypot_hit", 3600)
+    missing_path = "/this-file-does-not-exist-404.html"
+    with config_override(
+        r"BotShieldAllow\s+on",
+        _cfg(
+            f'    <Location "{missing_path}">\n'
+            f'        Header always set X-BotShield-Feedback "{val}"\n'
+            f'    </Location>'
+        ),
+        count=1,
+    ):
+        r = _g(missing_path, xff=_ips.fresh_ip())
+    assert r.status_code == 404, (
+        f"expected 404 (missing file); got {r.status_code}"
+    )
+    assert "X-BotShield-Feedback" not in r.headers, (
+        "feedback header leaked to client on 404 error response; "
+        "the error-filter chain registration is missing"
+    )
 
 
 def test_app_feedback_strips_when_feature_off(config_override):
