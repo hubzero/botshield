@@ -2501,7 +2501,15 @@ typedef struct {
  *                  empty string to `SetEnvIf X Y` with no value).
  *   NAMED_ABSENT   env var is not defined on the request.
  *   NAMED_EQ       env var has exactly the operator-specified
- *                  value (case-sensitive, like Apache's table). */
+ *                  value (byte-for-byte, case-sensitive strcmp).
+ *
+ * Name-lookup semantics follow APR tables: `apr_table_get` matches
+ * names case-insensitively. `env=BS_LEVEL` and `env=bs_level` hit
+ * the same stored key. Operators running a mix of case forms should
+ * assume they collide; picking one canonical case per project
+ * (convention: uppercase) avoids accidental shadowing under
+ * first-match-wins. Values stay case-sensitive because table
+ * storage preserves the producer's bytes as-is. */
 enum bs_env_pred_kind {
     BS_EP_NAMED_PRESENT = 0,
     BS_EP_NAMED_ABSENT,
@@ -2914,11 +2922,17 @@ static int bs_check_policy(request_rec *r)
     }
 
     /* E6 — env-var triggers. Declaration order, first match wins.
-     * Main-request-only (subrequests have producer-specific env
-     * propagation — applying here would double-count). Reads
-     * r->subprocess_env, the table SetEnvIf / RewriteRule [E=...] /
-     * BrowserMatch / ModSecurity v2 setenv all populate at phases
-     * that run before the handler. */
+     * Gate: once per client-visible request. `ap_is_initial_req` is
+     * (r->main == NULL && r->prev == NULL) per httpd's protocol.c,
+     * which both excludes subrequests (where producer env
+     * propagation differs) and blocks re-application on internal-
+     * redirect legs (ErrorDocument, RewriteRule-without-R) where
+     * the env producer would fire a second time and double-count
+     * score/flag. The header docs only advertise the main-vs-
+     * subrequest distinction, so we restate the full intent here.
+     * Reads r->subprocess_env, the table SetEnvIf / RewriteRule
+     * [E=...] / BrowserMatch / ModSecurity v2 setenv all populate
+     * at phases that run before the handler. */
     if (ap_is_initial_req(r)
         && scfg->env_triggers && scfg->env_triggers->nelts > 0) {
         for (int i = 0; i < scfg->env_triggers->nelts; i++) {
@@ -5536,7 +5550,12 @@ static const char *bs_set_env_trigger(cmd_parms *cmd, void *dconf,
     }
     /* Env var name: POSIX-ish [A-Za-z_][A-Za-z0-9_]* but Apache is
      * liberal; we accept the same charset we allow on session-
-     * cookie names and cookie-match names. */
+     * cookie names and cookie-match names. Stored verbatim, but the
+     * request-time lookup (`apr_table_get` on `r->subprocess_env`)
+     * is case-insensitive per APR table semantics — two triggers
+     * whose env names differ only in case will resolve to the same
+     * stored value at runtime and shadow each other under
+     * first-match-wins. */
     const char *op = rest;
     while (*op && *op != '=') {
         unsigned char c = (unsigned char)*op;
