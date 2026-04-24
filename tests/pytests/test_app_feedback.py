@@ -1,17 +1,18 @@
-"""E5 — app-to-module reputation feedback.
+"""E5 — app-to-module reputation feedback (post-E7.3 wire format).
 
-App sets `X-BotShield-Feedback: flag=<name>;ttl=<sec>;sig=<hmac>`
-on its response. Module validates the HMAC, strips the header, and
-applies the flag to the flagged-IP table so future requests from
-that IP carry the bit's score contribution.
+App sets `X-BotShield-Feedback: event=<name>;sig=<hmac>` on its
+response. The signer only has to know the HMAC secret and an event
+name; the mapping from event → action (flag bit + TTL + optional
+log tag) is declared server-side via `BotShieldFeedbackTrigger`, so
+a compromised app can't reach into arbitrary module memory by
+emitting raw `flag=` / `ttl=` tokens on the wire.
 
-Tests use the `Header always set` directive from mod_headers to
-plant the feedback header on responses to specific locations.
-We cover both the normal content chain (existing files in the
-dev vhost's DocumentRoot) and Apache's separate error-response
-chain (404 for a missing path) — the module registers the strip
-filter on both chains so the "header never reaches client"
-promise holds regardless of response status.
+Tests use `Header always set` from mod_headers to plant the feedback
+header on responses to specific locations. We cover both the normal
+content chain (existing files in the dev vhost's DocumentRoot) and
+Apache's separate error-response chain (404 for a missing path) —
+the module registers the strip filter on both chains so the "header
+never reaches client" promise holds regardless of response status.
 
 Secret is fixed in `tests/setup/provision.sh`
 (/etc/botshield/app-feedback-secret) so the test can recompute
@@ -48,19 +49,32 @@ def _g(path, xff, **kw):
                       accept_language=PASS_AL, **kw)
 
 
-def _sign(flag: str, ttl: int, extra: str = "") -> str:
-    body = f"flag={flag};ttl={ttl}"
+def _sign(event: str, extra: str = "") -> str:
+    """Produce an E7.3 wire-format X-BotShield-Feedback value.
+
+    Body is `event=<name>[;extra];sig=<hex>`. HMAC covers everything
+    up to (not including) the `;sig=` marker.
+    """
+    body = f"event={event}"
     if extra:
         body += ";" + extra
     sig = hmac.new(SECRET, body.encode(), hashlib.sha256).hexdigest()
     return f"{body};sig={sig}"
 
 
-def _cfg(body_inserts: str) -> str:
+def _cfg(feedback_triggers: str, body_inserts: str) -> str:
+    """Assemble the override block.
+
+    `feedback_triggers` is zero or more `BotShieldFeedbackTrigger`
+    lines (pre-indented to match the vhost-body style), and
+    `body_inserts` is the <Location>…</Location> chunk that plants
+    the header on the test path.
+    """
     return (
         'BotShieldAllow on\n'
         '    BotShieldAppFeedback on\n'
         f'    BotShieldAppFeedbackSecretFile {SECRET_PATH}\n'
+        + feedback_triggers
         + body_inserts
     )
 
@@ -71,11 +85,16 @@ def _cfg(body_inserts: str) -> str:
 def test_app_feedback_penalty_flag_applies_to_next_request(
     config_override, log_slice,
 ):
-    val = _sign("honeypot_hit", 3600)
+    """Event `scanner-hit` maps to flag=honeypot_hit ttl=3600. App
+    signs the event name; module looks it up in the config and
+    applies the configured bit to the flagged-IP table."""
+    val = _sign("scanner-hit")
     ip = _ips.fresh_ip()
     with config_override(
         r"BotShieldAllow\s+on",
         _cfg(
+            '    BotShieldFeedbackTrigger scanner-hit '
+            'flag=honeypot_hit ttl=3600\n',
             f'    {FEEDBACK_LOC_1}\n'
             f'        Header always set X-BotShield-Feedback "{val}"\n'
             f'    </Location>'
@@ -100,12 +119,16 @@ def test_app_feedback_penalty_flag_applies_to_next_request(
 def test_app_feedback_credit_flag_lowers_score(
     config_override, log_slice,
 ):
-    val = _sign("app_verified_human", 3600)
+    """Credit bits land the same way penalty bits do; the event →
+    flag mapping is the only surface the app controls."""
+    val = _sign("human-verified")
     ip_base = _ips.fresh_ip()
     ip_cred = _ips.fresh_ip()
     with config_override(
         r"BotShieldAllow\s+on",
         _cfg(
+            '    BotShieldFeedbackTrigger human-verified '
+            'flag=app_verified_human ttl=3600\n',
             f'    {FEEDBACK_LOC_1}\n'
             f'        Header always set X-BotShield-Feedback "{val}"\n'
             f'    </Location>'
@@ -139,11 +162,13 @@ def test_app_feedback_strips_from_404_error_response(
     `ap_hook_insert_error_filter` registration, mod_headers' `Header
     always set` leaks the feedback header to the client on 404s.
     Confirm it's stripped."""
-    val = _sign("honeypot_hit", 3600)
+    val = _sign("scanner-hit")
     missing_path = "/this-file-does-not-exist-404.html"
     with config_override(
         r"BotShieldAllow\s+on",
         _cfg(
+            '    BotShieldFeedbackTrigger scanner-hit '
+            'flag=honeypot_hit ttl=3600\n',
             f'    <Location "{missing_path}">\n'
             f'        Header always set X-BotShield-Feedback "{val}"\n'
             f'    </Location>'
@@ -161,12 +186,14 @@ def test_app_feedback_strips_from_404_error_response(
 
 
 def test_app_feedback_strips_when_feature_off(config_override):
-    val = _sign("honeypot_hit", 3600)
+    val = _sign("scanner-hit")
     with config_override(
         r"BotShieldAllow\s+on",
         'BotShieldAllow on\n'
         '    BotShieldAppFeedback off\n'
         f'    BotShieldAppFeedbackSecretFile {SECRET_PATH}\n'
+        '    BotShieldFeedbackTrigger scanner-hit '
+        'flag=honeypot_hit ttl=3600\n'
         f'    {FEEDBACK_LOC_1}\n'
         f'        Header always set X-BotShield-Feedback "{val}"\n'
         f'    </Location>',
@@ -182,12 +209,14 @@ def test_app_feedback_strips_when_feature_off(config_override):
 def test_app_feedback_tampered_sig_rejected_and_stripped(
     config_override, log_slice,
 ):
-    val = _sign("honeypot_hit", 3600)
+    val = _sign("scanner-hit")
     tampered = val[:-1] + ("0" if val[-1] != "0" else "1")
     ip = _ips.fresh_ip()
     with config_override(
         r"BotShieldAllow\s+on",
         _cfg(
+            '    BotShieldFeedbackTrigger scanner-hit '
+            'flag=honeypot_hit ttl=3600\n',
             f'    {FEEDBACK_LOC_1}\n'
             f'        Header always set X-BotShield-Feedback "{tampered}"\n'
             f'    </Location>'
@@ -208,17 +237,23 @@ def test_app_feedback_tampered_sig_rejected_and_stripped(
     )
 
 
-# --- TTL clamp + unknown flag ---------------------------------------
+# --- Unmapped event + legacy wire format -------------------------
 
 
-def test_app_feedback_rejects_out_of_range_ttl(
+def test_app_feedback_unmapped_event_is_ignored(
     config_override, log_slice,
 ):
-    val = _sign("honeypot_hit", 10)
+    """App signs an event name nobody has BotShieldFeedbackTrigger'd.
+    The HMAC is valid but the event has no module-memory mapping, so
+    the flag doesn't land. Gives operators safe rollout: apps can
+    start emitting new event names before the config catches up."""
+    val = _sign("brand-new-event-name")
     ip = _ips.fresh_ip()
     with config_override(
         r"BotShieldAllow\s+on",
         _cfg(
+            # deliberately no BotShieldFeedbackTrigger for the event
+            '',
             f'    {FEEDBACK_LOC_1}\n'
             f'        Header always set X-BotShield-Feedback "{val}"\n'
             f'    </Location>'
@@ -231,15 +266,30 @@ def test_app_feedback_rejects_out_of_range_ttl(
             lines = slc.decision_lines(ip=ip)
 
     assert "X-BotShield-Feedback" not in r1.headers
-    assert lines and "flagged-ip" not in lines[-1]["reason"]
+    assert lines and "flagged-ip" not in lines[-1]["reason"], (
+        f"unmapped event should not have flagged the IP; "
+        f"reason={lines[-1]['reason']}"
+    )
 
 
-def test_app_feedback_rejects_unknown_flag(config_override, log_slice):
-    val = _sign("definitely_not_a_real_flag", 3600)
+def test_app_feedback_legacy_wire_format_rejected(
+    config_override, log_slice,
+):
+    """Pre-E7.3 apps signed `flag=<name>;ttl=<sec>` directly. After
+    E7.3 the module HMACs event=<name>, so an old-format body will
+    either fail HMAC verification (signer covered different bytes)
+    or fail the event= required-field check — either way the IP is
+    not flagged and the header is stripped."""
+    # Reproduce the pre-E7.3 wire format: sign `flag=<name>;ttl=<sec>`.
+    body = "flag=honeypot_hit;ttl=3600"
+    sig = hmac.new(SECRET, body.encode(), hashlib.sha256).hexdigest()
+    val = f"{body};sig={sig}"
     ip = _ips.fresh_ip()
     with config_override(
         r"BotShieldAllow\s+on",
         _cfg(
+            '    BotShieldFeedbackTrigger legacy-guard '
+            'flag=honeypot_hit ttl=3600\n',
             f'    {FEEDBACK_LOC_1}\n'
             f'        Header always set X-BotShield-Feedback "{val}"\n'
             f'    </Location>'
@@ -252,7 +302,10 @@ def test_app_feedback_rejects_unknown_flag(config_override, log_slice):
             lines = slc.decision_lines(ip=ip)
 
     assert "X-BotShield-Feedback" not in r1.headers
-    assert lines and "flagged-ip" not in lines[-1]["reason"]
+    assert lines and "flagged-ip" not in lines[-1]["reason"], (
+        f"legacy wire format must not flag; "
+        f"reason={lines[-1]['reason']}"
+    )
 
 
 # --- Credit + penalty compose --------------------------------------
@@ -267,12 +320,16 @@ def test_app_feedback_credit_and_penalty_compose(
     rather than on the composed score (first-sight and other
     heuristics can shift the absolute number but the `flagged-ip`
     reason token is where the flag-penalty math surfaces)."""
-    penalty_val = _sign("honeypot_hit", 3600)
-    credit_val  = _sign("app_verified_human", 3600)
+    penalty_val = _sign("scanner-hit")
+    credit_val  = _sign("human-verified")
     ip_both = _ips.fresh_ip()
     with config_override(
         r"BotShieldAllow\s+on",
         _cfg(
+            '    BotShieldFeedbackTrigger scanner-hit '
+            'flag=honeypot_hit ttl=3600\n'
+            '    BotShieldFeedbackTrigger human-verified '
+            'flag=app_verified_human ttl=3600\n',
             f'    {FEEDBACK_LOC_1}\n'
             f'        Header always set X-BotShield-Feedback "{penalty_val}"\n'
             f'    </Location>\n'

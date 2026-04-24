@@ -625,6 +625,10 @@ typedef struct bs_server_cfg {
      * wins (no accumulation); env signals are discrete per-request,
      * not layered reputation. */
     apr_array_header_t *env_triggers;      /* bs_env_trigger_entry * */
+    /* E7.3 — feedback triggers. Signed event names from E5's
+     * response-path header map to module memory (flag+ttl+log) via
+     * these entries. Same ordered-array + upsert-by-name shape. */
+    apr_array_header_t *feedback_triggers; /* bs_feedback_trigger_entry * */
     apr_array_header_t *session_names;     /* const char * (lowercased) */
     /* E2.2 — robots.txt enforcement.
      *
@@ -808,6 +812,8 @@ static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
                                                add->cookie_triggers);
     out->env_triggers    = bs_merge_rule_array(p, base->env_triggers,
                                                 add->env_triggers);
+    out->feedback_triggers = bs_merge_rule_array(p, base->feedback_triggers,
+                                                 add->feedback_triggers);
     /* session_names: concatenate base + add, drop dups. Small lists,
      * O(n*m) is fine; happens once at config load. */
     if (base->session_names && add->session_names) {
@@ -884,6 +890,7 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->path_triggers         = apr_array_make(p, 4, sizeof(void *));
     scfg->cookie_triggers  = apr_array_make(p, 4, sizeof(void *));
     scfg->env_triggers     = apr_array_make(p, 4, sizeof(void *));
+    scfg->feedback_triggers = apr_array_make(p, 4, sizeof(void *));
     /* Curated session-cookie-name defaults. Kept deliberately
      * short; long auto-lists turn `cookies=session` into a loose
      * matcher and undermine the bonus. Operators add their own
@@ -2437,6 +2444,14 @@ typedef enum {
     BS_TFAMILY_PATH = 0,
     BS_TFAMILY_COOKIE,
     BS_TFAMILY_ENV,
+    /* Response-path family: E5 feedback. Signed `event=<name>`
+     * header arrives on the response, module looks up the event in
+     * scfg->feedback_triggers, and applies the configured action.
+     * Only the future-request subset (flag/ttl/log) is supported —
+     * the request is already served, so status/redirect/penalty/
+     * credit would have nowhere to land. The shared parser rejects
+     * those keys for this family. */
+    BS_TFAMILY_FEEDBACK,
 } bs_trigger_family;
 
 typedef struct {
@@ -2581,6 +2596,17 @@ typedef struct {
     const char        *env_value;     /* NULL unless NAMED_EQ */
     bs_trigger_action  action;        /* shared; see bs_trigger_action */
 } bs_env_trigger_entry;
+
+/* E7.3 — BotShieldFeedbackTrigger <event> [key=value ...]. The
+ * `event` is the app-visible name carried in the signed X-BotShield-
+ * Feedback header body (`event=<name>`). The action bound to that
+ * name — flag bit + TTL + optional log tag — lives in scfg; the app
+ * can't set module internals through the wire anymore. One entry
+ * per declaration; upsert-by-event-name. */
+typedef struct {
+    const char        *event;
+    bs_trigger_action  action;
+} bs_feedback_trigger_entry;
 
 /* SHM slot for the fixed-window counter. Packed to 8 bytes so
  * platforms with 64-bit atomics could later swap to a CAS-on-u64;
@@ -3313,12 +3339,19 @@ static apr_status_t bs_robots_watchdog_cb(int state, void *data,
 /* ======================================================================
  * E5 — App-to-module reputation feedback.
  *
- * App emits `X-BotShield-Feedback: flag=<name>;ttl=<sec>[;kid=<id>];sig=<hex>`
- * on its response. Module reads, HMAC-verifies, parses, strips the header,
- * and calls bs_flagged_ip_add. Bidirectional: flag names can be penalty
- * bits (honeypot_hit, scanner_probe, fake_bot, pow_fail_streak) or
- * credit bits (app_verified_human, app_verified_session,
- * app_trust_signal) — same wire format, different bit semantics.
+ * App emits `X-BotShield-Feedback: event=<name>[;kid=<id>];sig=<hex>` on
+ * its response. Module reads, HMAC-verifies, parses, strips the header,
+ * looks up `<name>` in scfg->feedback_triggers (see E7.3's
+ * BotShieldFeedbackTrigger directive), and applies the configured
+ * flag+ttl+log. The wire carries *event names*, not raw flag/ttl
+ * policy — operators control the mapping from event → module memory
+ * in their Apache config, so an app compromise can't poke arbitrary
+ * flag bits.
+ *
+ * Flag bits can be penalty (honeypot_hit, scanner_probe, fake_bot,
+ * pow_fail_streak) or credit (app_verified_human, app_verified_session,
+ * app_trust_signal); same wire format, different bit semantics on the
+ * config side of the event-name indirection.
  *
  * Implementation rules (see PLAN.md E5):
  *   1. Run as an output filter so stripping happens before the
@@ -3328,6 +3361,13 @@ static apr_status_t bs_robots_watchdog_cb(int state, void *data,
  *   3. Duplicate headers → reject + strip all instances.
  *   4. Main request only (ap_is_initial_req).
  *   5. One-shot per request: the filter removes itself after processing.
+ *
+ * Wire-format change (E7.3): pre-E7.3 apps signed
+ * `flag=<name>;ttl=<sec>;sig=<hex>` directly. The body now carries
+ * `event=<name>;sig=<hex>` and the flag/ttl come from config. Apps
+ * must migrate their signer; the old body shape is rejected at
+ * HMAC-verify time (the `flag=` / `ttl=` tokens are no longer HMAC-
+ * covered under the new wire format, so signatures won't match).
  * ====================================================================== */
 
 static ap_filter_rec_t *bs_app_feedback_filter_handle;
@@ -3358,15 +3398,17 @@ static int bs_count_header(request_rec *r, const char *name)
          + bs_count_header_in_table(r->err_headers_out, name);
 }
 
-/* Parse + HMAC-verify a single X-BotShield-Feedback value. On success
- * sets *out_flag / *out_ttl and returns NULL. On failure returns an
- * error string (for logging) and leaves *out_flag / *out_ttl unset. */
+/* Parse + HMAC-verify a single X-BotShield-Feedback value under the
+ * E7.3 wire format (`event=<name>[;...];sig=<hex>`). On success the
+ * pool-allocated event name lands in *out_event and NULL is returned.
+ * On failure returns an error string for logging and leaves
+ * *out_event untouched. Caller looks up the event in
+ * scfg->feedback_triggers to decide what the event means. */
 static const char *bs_app_feedback_verify(apr_pool_t *p,
                                           const unsigned char *key,
                                           apr_size_t key_len,
                                           const char *value,
-                                          apr_uint32_t *out_flag,
-                                          int *out_ttl)
+                                          const char **out_event)
 {
     if (!key || key_len == 0) return "no secret configured";
     if (!value || !*value) return "empty header value";
@@ -3386,11 +3428,13 @@ static const char *bs_app_feedback_verify(apr_pool_t *p,
     if (!bs_from_hex(sig_hex, 32, given)) return "sig not hex";
     if (!bs_ct_equal(expected, given, 32)) return "signature mismatch";
 
-    /* Parse key=value pairs up to (but not including) ;sig=. */
+    /* Parse key=value pairs up to (but not including) ;sig=. The
+     * only semantic key is event=; everything else (kid, tid, etc.)
+     * is tolerated so apps can include their own correlation IDs
+     * under the HMAC without churning this parser. */
     char *body = apr_pstrmemdup(p, value, signed_len);
     char *state = NULL;
-    const char *flag_name = NULL;
-    int ttl = -1;
+    const char *event_name = NULL;
     for (char *tok = apr_strtok(body, ";", &state); tok;
          tok = apr_strtok(NULL, ";", &state)) {
         while (*tok == ' ' || *tok == '\t') tok++;
@@ -3399,37 +3443,50 @@ static const char *bs_app_feedback_verify(apr_pool_t *p,
         *eq = '\0';
         const char *k = tok;
         const char *v = eq + 1;
-        if (!strcasecmp(k, "flag")) {
-            flag_name = v;
-        } else if (!strcasecmp(k, "ttl")) {
-            char *end = NULL;
-            long n = strtol(v, &end, 10);
-            if (end && !*end) ttl = (int)n;
+        if (!strcasecmp(k, "event")) {
+            event_name = v;
         }
-        /* Unknown keys (e.g. kid=) tolerated but don't affect
-         * parsing — still HMAC-covered so replay is bounded. */
+        /* Pre-E7.3 bodies carried flag= / ttl= directly. Those
+         * tokens would now be ignored here, but they were part of
+         * the HMAC-covered bytes under the OLD key layout. Under
+         * the new format the signer covers only event=<name>, so
+         * an old body would fail HMAC verification above before
+         * reaching this parse. No explicit "reject pre-E7.3"
+         * branch is needed — the crypto catches it. */
     }
 
-    if (!flag_name)         return "missing flag= field";
-    if (ttl < 60 || ttl > 86400 * 30) {
-        return "ttl must be 60..2592000";
+    if (!event_name || !*event_name) return "missing event= field";
+    /* Event names follow the same constrained shape as trigger
+     * names so operators can always reason about what a signed
+     * body means. Enforced here so an injected ';' or '=' inside
+     * the value can't confuse the upcoming lookup. */
+    apr_size_t elen = strlen(event_name);
+    if (elen == 0 || elen > 32) {
+        return "event name must be 1..32 chars";
+    }
+    for (apr_size_t i = 0; i < elen; i++) {
+        unsigned char c = (unsigned char)event_name[i];
+        int ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+              || c == '-';
+        if (!ok) return "event name must be [a-z0-9-]";
     }
 
-    const char *ferr = NULL;
-    apr_uint32_t bits = bs_parse_flag_names(p, flag_name, &ferr);
-    if (ferr || bits == 0) {
-        return apr_psprintf(p, "invalid flag: %s",
-            ferr ? ferr : "unknown name");
-    }
-    /* Require exactly one bit per header — multi-bit flags would let
-     * one signed blob apply multiple bits, which is a clarity /
-     * replayability concern even if HMAC covers the whole value. */
-    if ((bits & (bits - 1)) != 0) {
-        return "flag must name exactly one bit";
-    }
+    *out_event = apr_pstrdup(p, event_name);
+    return NULL;
+}
 
-    *out_flag = bits;
-    *out_ttl  = ttl;
+/* Look up an event name in scfg->feedback_triggers. Returns the
+ * matching entry or NULL. Declaration order, first match wins (no
+ * accumulation — an event is a discrete app-originated signal). */
+static const bs_feedback_trigger_entry *bs_feedback_trigger_find(
+    struct bs_server_cfg *scfg, const char *event)
+{
+    if (!scfg || !scfg->feedback_triggers || !event) return NULL;
+    for (int i = 0; i < scfg->feedback_triggers->nelts; i++) {
+        bs_feedback_trigger_entry *e = APR_ARRAY_IDX(
+            scfg->feedback_triggers, i, bs_feedback_trigger_entry *);
+        if (strcmp(e->event, event) == 0) return e;
+    }
     return NULL;
 }
 
@@ -3494,24 +3551,45 @@ static apr_status_t bs_app_feedback_filter(ap_filter_t *f,
         return ap_pass_brigade(f->next, bb);
     }
 
-    apr_uint32_t flag_bit = 0;
-    int ttl = 0;
+    const char *event = NULL;
     const char *err = bs_app_feedback_verify(r->pool,
         scfg->app_feedback_secret, scfg->app_feedback_secret_len,
-        snapshot, &flag_bit, &ttl);
+        snapshot, &event);
     if (err) {
         ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
             "mod_botshield: app feedback rejected: %s", err);
         return ap_pass_brigade(f->next, bb);
     }
 
+    /* Map event → action via BotShieldFeedbackTrigger. Unknown
+     * events are a config-side miss, not an app-side attack — log
+     * at info and skip. This is the indirection that keeps flag
+     * names out of the wire format: a compromised app can emit any
+     * event name, but only configured mappings have effect. */
+    const bs_feedback_trigger_entry *ft =
+        bs_feedback_trigger_find(scfg, event);
+    if (!ft) {
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: app feedback event=%s unmapped "
+            "(no BotShieldFeedbackTrigger entry); ignored", event);
+        return ap_pass_brigade(f->next, bb);
+    }
+
     unsigned char client_ip[16];
     if (bs_parse_client_ip(r->useragent_ip, client_ip)) {
         bs_mask_ipv6_prefix(client_ip, scfg->ipv6_prefix_bits);
-        bs_flagged_ip_add(r, client_ip, flag_bit, ttl);
+        bs_flagged_ip_add(r, client_ip,
+                          ft->action.flag_bit, ft->action.ttl_sec);
+        if (ft->action.log_tag) {
+            /* Feedback has no decision-log emission of its own, but
+             * the tag belongs in r->notes so any subsequent access
+             * log or custom format can pick it up via %{BS-...}n. */
+            bs_set_trigger_tag(r, ft->action.log_tag);
+        }
         ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
-            "mod_botshield: app feedback applied flag=0x%x ttl=%d",
-            flag_bit, ttl);
+            "mod_botshield: app feedback event=%s applied "
+            "flag=0x%x ttl=%d", event,
+            ft->action.flag_bit, ft->action.ttl_sec);
     }
 
     return ap_pass_brigade(f->next, bb);
@@ -5023,9 +5101,10 @@ static const char *bs_set_block_path(cmd_parms *cmd, void *dconf,
 static const char *bs_trigger_family_dname(bs_trigger_family fam)
 {
     switch (fam) {
-    case BS_TFAMILY_PATH:   return "BotShieldPathTrigger";
-    case BS_TFAMILY_COOKIE: return "BotShieldCookieTrigger";
-    case BS_TFAMILY_ENV:    return "BotShieldEnvTrigger";
+    case BS_TFAMILY_PATH:     return "BotShieldPathTrigger";
+    case BS_TFAMILY_COOKIE:   return "BotShieldCookieTrigger";
+    case BS_TFAMILY_ENV:      return "BotShieldEnvTrigger";
+    case BS_TFAMILY_FEEDBACK: return "BotShieldFeedbackTrigger";
     }
     return "BotShieldTrigger";      /* unreachable */
 }
@@ -5051,6 +5130,15 @@ static void bs_trigger_action_init(bs_trigger_family fam,
         a->flag_bit    = 0;
         a->ttl_sec     = 0;
         break;
+    case BS_TFAMILY_FEEDBACK:
+        /* Feedback runs on the response path; status/redirect/
+         * penalty/credit don't apply. status_code left at PASS as
+         * a harmless sentinel — the executor path for this family
+         * doesn't consult it. */
+        a->status_code = BS_TRIGGER_STATUS_PASS;
+        a->flag_bit    = 0;
+        a->ttl_sec     = 0;
+        break;
     }
     a->penalty         = 0;
     a->credit          = 0;
@@ -5068,8 +5156,27 @@ static const char *bs_trigger_known_keys(bs_trigger_family fam)
         return "status, redirect, log, flag, ttl, penalty, credit";
     case BS_TFAMILY_ENV:
         return "status, log, flag, ttl, penalty, credit";
+    case BS_TFAMILY_FEEDBACK:
+        return "flag, ttl, log";
     }
     return "";
+}
+
+/* Feedback-specific: status/redirect/penalty/credit make no sense
+ * on the response path — all four are rejected at parse time with
+ * a pointed error. Centralized so the messages stay consistent and
+ * future keys are easier to vet per family. */
+static int bs_trigger_key_is_response_only(const char *arg,
+                                           apr_size_t klen)
+{
+    #define BS_KMATCH(n) (klen == sizeof(n)-1 && \
+                          strncasecmp(arg, n, sizeof(n)-1) == 0)
+    if (BS_KMATCH("status"))   return 1;
+    if (BS_KMATCH("redirect")) return 1;
+    if (BS_KMATCH("penalty"))  return 1;
+    if (BS_KMATCH("credit"))   return 1;
+    #undef BS_KMATCH
+    return 0;
 }
 
 static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
@@ -5085,6 +5192,19 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
     }
     apr_size_t klen = (apr_size_t)(eq - arg);
     const char *val = eq + 1;
+
+    /* Feedback family: reject the request-path-only keys up front
+     * with a pointed error message so operators don't confuse this
+     * family with the cookie/env surface. */
+    if (fam == BS_TFAMILY_FEEDBACK
+        && bs_trigger_key_is_response_only(arg, klen)) {
+        return apr_psprintf(pool,
+            "%s: %.*s= is not supported on feedback triggers "
+            "(the response has already been served; feedback maps "
+            "a signed event to flag/ttl only — use a cookie or path "
+            "trigger for status/redirect/penalty/credit)",
+            dname, (int)klen, arg);
+    }
 
     #define BS_AK(n) (klen == sizeof(n)-1 && \
                       strncasecmp(arg, n, sizeof(n)-1) == 0)
@@ -5179,6 +5299,20 @@ static const char *bs_finalize_trigger_action(apr_pool_t *pool,
      * walk skips the flag_ip call and the decision log stays
      * honest about what persisted. */
     if (a->ttl_sec == 0) a->flag_bit = 0;
+
+    /* Feedback triggers without an actionable flag are dead config —
+     * the mapping has nowhere to land. Reject at parse time so
+     * operators see it via configtest rather than as silent no-ops
+     * at runtime. */
+    if (fam == BS_TFAMILY_FEEDBACK) {
+        if (!a->flag_bit || a->ttl_sec <= 0) {
+            return apr_psprintf(pool,
+                "%s: feedback triggers must set flag=<bit> and "
+                "ttl=<sec>; the event mapping has no request-time "
+                "surface otherwise", dname);
+        }
+        return NULL;   /* status/redirect checks don't apply here */
+    }
 
     if (a->redirect_url) {
         if (a->status_code == BS_TRIGGER_STATUS_PASS) {
@@ -5640,6 +5774,62 @@ static const char *bs_set_env_trigger(cmd_parms *cmd, void *dconf,
         }
     }
     *(bs_env_trigger_entry **)apr_array_push(scfg->env_triggers) = e;
+    return NULL;
+}
+
+/* E7.3 — BotShieldFeedbackTrigger <event> [key=value ...].
+ *
+ * Binds an app-signed event name (carried in E5's
+ * X-BotShield-Feedback header body as `event=<name>;sig=<hex>`) to
+ * a module-memory update. Required keys: flag=<bit> and ttl=<sec>
+ * (the event has to land somewhere); optional log=<tag>. Response-
+ * path only, so status/redirect/penalty/credit are rejected by the
+ * shared parser. Upsert-by-event-name. */
+static const char *bs_set_feedback_trigger(cmd_parms *cmd, void *dconf,
+                                           int argc, char *const argv[])
+{
+    (void)dconf;
+    if (argc < 1) {
+        return "BotShieldFeedbackTrigger: expects <event> "
+               "[key=value ...]";
+    }
+    const char *event = argv[0];
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    if (!bs_bot_name_valid(event)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldFeedbackTrigger: event '%s' must be "
+            "[a-z0-9-]{1,32}", event);
+    }
+
+    bs_feedback_trigger_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
+    e->event = apr_pstrdup(cmd->pool, event);
+    bs_trigger_action_init(BS_TFAMILY_FEEDBACK, &e->action);
+
+    for (int i = 1; i < argc; i++) {
+        const char *err = bs_parse_trigger_action_key(cmd->pool,
+            BS_TFAMILY_FEEDBACK, argv[i], &e->action);
+        if (err) return err;
+    }
+    {
+        const char *err = bs_finalize_trigger_action(cmd->pool,
+            BS_TFAMILY_FEEDBACK, &e->action);
+        if (err) return err;
+    }
+
+    /* Upsert-by-event. Last declaration for a given event wins its
+     * slot, same model as the other trigger families. */
+    for (int i = 0; i < scfg->feedback_triggers->nelts; i++) {
+        bs_feedback_trigger_entry *ex = APR_ARRAY_IDX(
+            scfg->feedback_triggers, i, bs_feedback_trigger_entry *);
+        if (strcmp(ex->event, e->event) == 0) {
+            APR_ARRAY_IDX(scfg->feedback_triggers, i,
+                          bs_feedback_trigger_entry *) = e;
+            return NULL;
+        }
+    }
+    *(bs_feedback_trigger_entry **)
+        apr_array_push(scfg->feedback_triggers) = e;
     return NULL;
 }
 
@@ -9049,6 +9239,17 @@ static const command_rec bs_cmds[] = {
                  "signals are scoring/flagging only). Declaration "
                  "order, first match wins; upsert-by-name. Main "
                  "requests only — subrequests are no-ops."),
+    /* E7.3 — feedback triggers (response-path mapping for E5) */
+    AP_INIT_TAKE_ARGV("BotShieldFeedbackTrigger",
+                 bs_set_feedback_trigger, NULL, RSRC_CONF,
+                 "Map an app-signed event (via X-BotShield-Feedback "
+                 "header) to module memory. Args: <event> "
+                 "[key=value ...]. Required keys: flag=<bit>, "
+                 "ttl=<sec>. Optional: log=<tag>. The app signs "
+                 "event=<name>;sig=<hex>; the module looks up <name> "
+                 "here and applies flag+ttl to the flagged-IP table. "
+                 "No status/redirect/penalty/credit (response is "
+                 "already served)."),
     /* E3 — path-based triggers */
     AP_INIT_TAKE_ARGV("BotShieldPathTrigger",
                  bs_set_path_trigger, NULL, RSRC_CONF,
