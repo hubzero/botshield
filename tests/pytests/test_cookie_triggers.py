@@ -264,6 +264,99 @@ def test_cookie_trigger_status_pass_still_applies_credit(
     )
 
 
+# --- Precedence: pass accumulates, non-pass short-circuits -----------
+
+
+def test_cookie_trigger_pass_triggers_stack_credits(
+    config_override, log_slice,
+):
+    """When two status=pass triggers both match (e.g. a client
+    carries both a session cookie and an auth cookie), their
+    credits MUST stack — that's the whole point of the layered-
+    reputation pattern. A "first match wins" reading would lose
+    the second credit."""
+    from botshield_test import ips as _ips
+    ip_base = _ips.fresh_ip()
+    ip_both = _ips.fresh_ip()
+    with config_override(
+        r"BotShieldAllow\s+on",
+        'BotShieldAllow on\n'
+        '    BotShieldCookieTrigger app-session cookie=PHPSESSID credit=15\n'
+        '    BotShieldCookieTrigger app-auth    cookie=auth_token credit=40',
+        count=1,
+    ):
+        with log_slice as slc:
+            client.get("/", xff=ip_base)
+            client.get("/", xff=ip_both,
+                       cookies={"PHPSESSID": "x", "auth_token": "y"})
+            baseline  = slc.decision_lines(ip=ip_base)
+            both      = slc.decision_lines(ip=ip_both)
+
+    assert baseline and both
+    base_score = int(baseline[-1]["score"])
+    both_score = int(both[-1]["score"])
+    assert both_score == base_score - 55, (
+        f"two pass-triggers with credit=15 + credit=40 must stack "
+        f"to -55; baseline={base_score} both={both_score}"
+    )
+    # Both reasons should appear in the decision line.
+    reason = both[-1]["reason"]
+    assert "cookie-trigger:app-session" in reason, reason
+    assert "cookie-trigger:app-auth"    in reason, reason
+
+
+def test_cookie_trigger_non_pass_shortcircuits_after_pass(
+    config_override, log_slice, fresh_ip,
+):
+    """A pass trigger before a non-pass trigger must let the
+    non-pass trigger short-circuit (the response status comes
+    from the non-pass rule, not the pass one). The pass trigger's
+    credit still contributes to the decision-log score."""
+    with config_override(
+        r"BotShieldAllow\s+on",
+        'BotShieldAllow on\n'
+        '    BotShieldCookieTrigger app-session cookie=PHPSESSID credit=15\n'
+        '    BotShieldCookieTrigger kill       cookie=api_token=BAD status=403',
+        count=1,
+    ):
+        with log_slice as slc:
+            r = client.get("/", xff=fresh_ip,
+                           cookies={"PHPSESSID": "x", "api_token": "BAD"})
+            lines = slc.decision_lines(ip=fresh_ip)
+
+    assert r.status_code == 403, (
+        "non-pass trigger declared after a matching pass trigger "
+        "must still short-circuit the response"
+    )
+    # The pass trigger's reason should be on the log line too.
+    reason = lines[-1]["reason"] if lines else ""
+    assert "cookie-trigger:app-session" in reason, (
+        f"pass trigger's reason missing from decision log even "
+        f"though non-pass short-circuited; reason={reason}"
+    )
+    assert "cookie-trigger:kill" in reason, (
+        f"non-pass trigger's reason missing; reason={reason}"
+    )
+
+
+def test_cookie_trigger_first_non_pass_wins_over_second(
+    config_override, log_slice, fresh_ip,
+):
+    """Two non-pass triggers in declaration order: the first to
+    match wins. Second never runs."""
+    with config_override(
+        r"BotShieldAllow\s+on",
+        'BotShieldAllow on\n'
+        '    BotShieldCookieTrigger first  cookie=foo status=403\n'
+        '    BotShieldCookieTrigger second cookie=foo status=451',
+        count=1,
+    ):
+        r = client.get("/", xff=fresh_ip, cookies={"foo": "x"})
+    assert r.status_code == 403, (
+        f"first declared non-pass trigger must win; got {r.status_code}"
+    )
+
+
 # --- Main-scope inheritance + _bs_verified rejection ------------------
 
 
