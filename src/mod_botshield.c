@@ -342,6 +342,34 @@ typedef struct {
     apr_int64_t   expires_at;    /* unix seconds; past means stale */
 } bs_flagged_ip_slot;
 
+/* E9 — repeated-429 escalation. Per-(client_ip, rate_rule_slot)
+ * strike accounting in SHM. Same seqlock + open-addressing idiom as
+ * flagged_table. `rule_slot == BS_STRIKE_EMPTY` flags an unused slot
+ * (real rule slots are non-negative + small); strike counter is a
+ * fixed window keyed off `strike_window_start` so an idle entry
+ * eventually rolls over.
+ *
+ * `escalation_until == 0` means the strike-counter is accumulating
+ * but the IP has not yet crossed the threshold. Non-zero means the
+ * (ip, rule) pair is in the escalated state: subsequent requests
+ * against this rule return the operator-configured status until the
+ * timestamp passes. Each fresh strike during escalation extends
+ * the timestamp (TTL slides on the last strike). */
+typedef struct {
+    apr_uint32_t  version;             /* seqlock counter */
+    apr_uint32_t  rule_slot;           /* BS_STRIKE_EMPTY = unused */
+    unsigned char ip[16];              /* masked per ipv6_prefix_bits */
+    apr_uint32_t  strike_window_start; /* unix sec; 0 = no strikes yet */
+    apr_uint32_t  strike_count;
+    apr_int64_t   escalation_until;    /* unix sec; 0 = not escalated */
+} bs_strike_slot;
+
+#define BS_STRIKE_EMPTY            0xFFFFFFFFu
+#define BS_STRIKE_PROBE_LIMIT      8
+#define BS_DEFAULT_STRIKE_SLOTS    50000
+#define BS_STRIKE_MIN_SLOTS        1024
+#define BS_STRIKE_MAX_SLOTS        1000000
+
 typedef struct {
     apr_uint32_t  magic;            /* BS_SHM_MAGIC */
     apr_uint32_t  format_version;   /* BS_SHM_FORMAT_VERSION */
@@ -485,6 +513,11 @@ typedef struct {
      * post_config. Sized by bs_rate_counter_count. */
     void                *rate_counters;     /* bs_rate_counter *, opaque here */
     apr_size_t           rate_counter_count;
+    /* E9 — strike table for repeated-429 escalation. Open-addressed
+     * SHM hash, key = (client_ip, rule_slot). Sized by
+     * BotShieldRateLimitEscalateCapacity. */
+    bs_strike_slot      *strike_table;
+    apr_size_t           strike_capacity;
 } bs_shm_runtime;
 
 static bs_shm_runtime bs_shm;
@@ -646,6 +679,14 @@ typedef struct bs_server_cfg {
      * in place, preserving its position so operators can override
      * a rule without disturbing relative order of the others. */
     apr_array_header_t *rate_limits;   /* bs_rate_limit_entry * */
+    /* E9 — repeated-429 escalation. One entry per
+     * BotShieldRateLimitEscalate directive; each one references an
+     * existing rate_limits rule by name. Linked into the matching
+     * bs_rate_limit_entry::escalate at post_config. */
+    apr_array_header_t *rate_escalates; /* bs_rate_escalate_entry * */
+    /* Strike-table capacity (operator-tunable). Read at post_config
+     * from the main server's scfg, same convention as flagged_capacity. */
+    int                 strike_capacity;
     apr_array_header_t *block_paths;   /* bs_block_path_entry * */
     /* E3 — path-based triggers. Same ordered-array + upsert-by-name
      * shape as E2.1; first match wins at request time. */
@@ -852,6 +893,10 @@ static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
      * per-type. */
     out->rate_limits = bs_merge_rule_array(p, base->rate_limits,
                                            add->rate_limits);
+    out->rate_escalates = bs_merge_rule_array(p, base->rate_escalates,
+                                              add->rate_escalates);
+    out->strike_capacity = (add->strike_capacity > 0)
+                         ? add->strike_capacity : base->strike_capacity;
     out->block_paths = bs_merge_rule_array(p, base->block_paths,
                                            add->block_paths);
     out->path_triggers = bs_merge_rule_array(p, base->path_triggers,
@@ -943,6 +988,8 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
      * directives in declaration order, post_config resolves cohort
      * ipspecs and assigns SHM slots. */
     scfg->rate_limits      = apr_array_make(p, 4, sizeof(void *));
+    scfg->rate_escalates   = apr_array_make(p, 2, sizeof(void *));
+    scfg->strike_capacity  = 0;   /* 0 = inherit / use default */
     scfg->block_paths      = apr_array_make(p, 4, sizeof(void *));
     scfg->path_triggers         = apr_array_make(p, 4, sizeof(void *));
     scfg->cookie_triggers  = apr_array_make(p, 4, sizeof(void *));
@@ -2607,13 +2654,34 @@ typedef struct {
     apr_array_header_t *ranges;        /* resolved at post_config */
 } bs_cohort;
 
+/* Forward decl: rate_limit_entry references its escalation config
+ * by pointer. Linked at post_config. */
+typedef struct bs_rate_escalate_entry bs_rate_escalate_entry;
+
 typedef struct {
     const char   *name;
     bs_cohort     cohort;
     apr_uint32_t  budget;
     apr_uint32_t  window_sec;
     int           shm_slot;          /* index into bs_shm.rate_counters; -1 unset */
+    /* E9 — back-link to the escalation config for this rule, if
+     * any. Resolved at post_config from scfg->rate_escalates by
+     * matching name. NULL = no escalation; the rule behaves like
+     * pre-E9. */
+    const bs_rate_escalate_entry *escalate;
 } bs_rate_limit_entry;
+
+/* E9 — BotShieldRateLimitEscalate config. Stored in
+ * scfg->rate_escalates; linked into bs_rate_limit_entry::escalate
+ * at post_config so the request-time path can branch in O(1). */
+struct bs_rate_escalate_entry {
+    const char   *rule_name;     /* must name a BotShieldRateLimit */
+    apr_uint32_t  strikes;       /* threshold within the per window */
+    apr_uint32_t  per_sec;       /* strike-counter window */
+    int           status_code;   /* HTTP code on escalation; default 403 */
+    int           ttl_sec;       /* escalation lifetime; default 1800 */
+    const char   *log_tag;       /* fail2ban-friendly tag, NULL if unset */
+};
 
 typedef struct {
     const char *name;
@@ -2708,6 +2776,15 @@ static void bs_flagged_ip_add(request_rec *r,
                               apr_uint32_t flag_bits, int ttl_seconds);
 static int  bs_parse_client_ip(const char *ip_str, unsigned char out[16]);
 static void bs_mask_ipv6_prefix(unsigned char ip[16], int prefix_bits);
+/* E9 — strike-table helpers used inside the rate-limit walk. */
+static int  bs_strike_check_escalated(const unsigned char ip[16],
+                                      apr_uint32_t rule_slot,
+                                      apr_int64_t now);
+static int  bs_strike_record_429(request_rec *r,
+                                 const unsigned char ip[16],
+                                 apr_uint32_t rule_slot,
+                                 const bs_rate_escalate_entry *cfg,
+                                 apr_int64_t now);
 /* Shared action helpers — see definitions below. The server-cfg
  * struct body appears later in the file, so we forward-declare by
  * struct tag and use `struct bs_server_cfg *` in the signature. */
@@ -3332,12 +3409,37 @@ static int bs_check_policy(request_rec *r)
     int directive_rate_matched = 0;
     if (scfg->rate_limits && scfg->rate_limits->nelts > 0) {
         bs_rate_counter *counters = (bs_rate_counter *)bs_shm.rate_counters;
+        unsigned char client_ip[16];
+        int have_ip = bs_parse_client_ip(r->useragent_ip, client_ip);
+        if (have_ip) bs_mask_ipv6_prefix(client_ip, scfg->ipv6_prefix_bits);
+        apr_int64_t now_t = (apr_int64_t)apr_time_sec(apr_time_now());
         for (int i = 0; i < scfg->rate_limits->nelts; i++) {
             bs_rate_limit_entry *e = APR_ARRAY_IDX(
                 scfg->rate_limits, i, bs_rate_limit_entry *);
             if (!bs_cohort_matches(&e->cohort, ua, r)) continue;
             directive_rate_matched = 1;
             if (e->shm_slot < 0 || !counters) continue;
+
+            /* E9 — escalation gate. If this rule has an escalation
+             * config and the (ip, rule) pair is in the escalated
+             * window, return the configured stricter status without
+             * consulting the budget. The normal counter doesn't tick
+             * during escalation: the request is rejected outright. */
+            if (e->escalate && have_ip
+                && bs_strike_check_escalated(client_ip,
+                                             (apr_uint32_t)e->shm_slot,
+                                             now_t)) {
+                bs_score_add(r, BS_PENALTY_RATE_LIMIT, 3600,
+                    apr_pstrcat(r->pool, "rate-limit-abuse:",
+                                e->name, NULL));
+                if (bs_shm.metrics) {
+                    __atomic_fetch_add(
+                        &bs_shm.metrics->rate_limit_exceeded_total,
+                        1, __ATOMIC_RELAXED);
+                }
+                return e->escalate->status_code;
+            }
+
             if (bs_rate_counter_admit(&counters[e->shm_slot],
                                       e->budget, e->window_sec)) {
                 continue;
@@ -3356,6 +3458,28 @@ static int bs_check_policy(request_rec *r)
             if (bs_shm.metrics) {
                 __atomic_fetch_add(&bs_shm.metrics->rate_limit_exceeded_total,
                                    1, __ATOMIC_RELAXED);
+            }
+            /* E9 — strike accounting. Record this 429 under the
+             * (ip, rule) entry; if the strike count crosses the
+             * threshold inside the per-window, log the operator's
+             * tag once for fail2ban handoff. The threshold-crossing
+             * request itself returns 429; subsequent ones promote
+             * to status_code via bs_strike_check_escalated above. */
+            if (e->escalate && have_ip) {
+                int crossed = bs_strike_record_429(r, client_ip,
+                    (apr_uint32_t)e->shm_slot, e->escalate, now_t);
+                if (crossed) {
+                    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r,
+                        "mod_botshield: rate-limit-abuse threshold "
+                        "crossed for '%s' from ip=%s; escalating to "
+                        "status=%d for %ds%s%s%s",
+                        e->name, r->useragent_ip,
+                        e->escalate->status_code, e->escalate->ttl_sec,
+                        e->escalate->log_tag ? " tag=\"" : "",
+                        e->escalate->log_tag ? e->escalate->log_tag : "",
+                        e->escalate->log_tag ? "\"" : "");
+                    bs_set_trigger_tag(r, e->escalate->log_tag);
+                }
             }
             return HTTP_TOO_MANY_REQUESTS;
         }
@@ -4028,9 +4152,17 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
      * rules will share the same pool. Trivial size (~2 KB). */
     #define BS_E21_RATE_SLOTS 256
     apr_size_t e21_rate_bytes = BS_E21_RATE_SLOTS * sizeof(bs_rate_counter);
+    /* E9 — strike table for repeated-429 escalation. Sized by the
+     * main server's BotShieldRateLimitEscalateCapacity (default
+     * BS_DEFAULT_STRIKE_SLOTS). */
+    apr_size_t strike_slots = (scfg->strike_capacity > 0)
+                            ? (apr_size_t)scfg->strike_capacity
+                            : (apr_size_t)BS_DEFAULT_STRIKE_SLOTS;
+    apr_size_t strike_bytes = strike_slots * sizeof(bs_strike_slot);
     apr_size_t total_bytes  = header_bytes + table_bytes + 2 * bloom_bytes
                               + cv_rate_bytes + cv_log_bytes
-                              + metrics_bytes + e21_rate_bytes;
+                              + metrics_bytes + e21_rate_bytes
+                              + strike_bytes;
 
     if (scfg->shm_size < total_bytes) {
         ap_log_error(APLOG_MARK, APLOG_ERR, 0, s,
@@ -4097,6 +4229,17 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     bs_shm.rate_counters      = (bs_rate_counter *)(metrics_base
                                                     + metrics_bytes);
     bs_shm.rate_counter_count = BS_E21_RATE_SLOTS;
+    /* E9: strike table follows rate counters. memset(base, 0) above
+     * leaves all slots with rule_slot=0 by default — but 0 is a real
+     * rule slot value, so we have to explicitly mark every slot
+     * empty. One pass at startup is fine; slots are reused via
+     * the open-addressing eviction policy thereafter. */
+    bs_shm.strike_table = (bs_strike_slot *)((unsigned char *)bs_shm.rate_counters
+                                             + e21_rate_bytes);
+    bs_shm.strike_capacity = strike_slots;
+    for (apr_size_t i = 0; i < strike_slots; i++) {
+        bs_shm.strike_table[i].rule_slot = BS_STRIKE_EMPTY;
+    }
 
     bs_shm.header->bloom_active        = 0;
     bs_shm.header->bloom_buf_bytes     = (apr_uint32_t)bloom_bytes;
@@ -4371,6 +4514,37 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                 vcfg->rate_limits->nelts);
         }
 
+        /* E9 — link each BotShieldRateLimitEscalate to its target
+         * BotShieldRateLimit by name. Declarations may appear in
+         * any order at config time; we resolve here once both arrays
+         * are populated. Unlinked escalates (no matching rate rule)
+         * log a warning and stay inert. */
+        if (vcfg->rate_escalates && vcfg->rate_escalates->nelts > 0) {
+            for (int i = 0; i < vcfg->rate_escalates->nelts; i++) {
+                bs_rate_escalate_entry *esc = APR_ARRAY_IDX(
+                    vcfg->rate_escalates, i, bs_rate_escalate_entry *);
+                int linked = 0;
+                if (vcfg->rate_limits) {
+                    for (int j = 0; j < vcfg->rate_limits->nelts; j++) {
+                        bs_rate_limit_entry *rl = APR_ARRAY_IDX(
+                            vcfg->rate_limits, j, bs_rate_limit_entry *);
+                        if (strcmp(rl->name, esc->rule_name) == 0) {
+                            rl->escalate = esc;
+                            linked = 1;
+                            break;
+                        }
+                    }
+                }
+                if (!linked) {
+                    ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
+                        "mod_botshield: BotShieldRateLimitEscalate '%s' "
+                        "names no matching BotShieldRateLimit at this "
+                        "scope; directive is inert",
+                        esc->rule_name);
+                }
+            }
+        }
+
         if (vcfg->block_paths && vcfg->block_paths->nelts > 0) {
             for (int i = 0; i < vcfg->block_paths->nelts; i++) {
                 bs_block_path_entry *e = APR_ARRAY_IDX(
@@ -4636,6 +4810,170 @@ static int bs_flagged_ip_lookup(const unsigned char ip[16],
         return 1;
     }
     return 0;
+}
+
+/* --- E9: strike-table helpers (repeated-429 escalation) ---
+ *
+ * Same open-addressing + per-slot seqlock idiom as flagged_table.
+ * The hash key is (masked client_ip, rule_slot); collisions across
+ * different rules for the same IP are valid — they just probe to
+ * different buckets via the rule_slot mixin.
+ *
+ * Reads (escalation check) are lockless via the seqlock. Writes
+ * (recording a 429 strike) take the global mutex, same shared one
+ * the flagged-IP path uses. Strike accounting is approximate under
+ * concurrent worker races — same posture as the rate-counter
+ * windows themselves; a few off-by-ones in the strike count don't
+ * change the user-visible behavior. */
+
+static apr_uint32_t bs_strike_bucket(const unsigned char ip[16],
+                                     apr_uint32_t rule_slot)
+{
+    /* Mix rule_slot into the SipHash input so the same IP falls in
+     * different buckets per rule — keeps probe windows from
+     * clustering when one IP misbehaves on multiple rules. */
+    unsigned char buf[16 + 4];
+    memcpy(buf, ip, 16);
+    buf[16] = (unsigned char)( rule_slot        & 0xFF);
+    buf[17] = (unsigned char)((rule_slot >> 8 ) & 0xFF);
+    buf[18] = (unsigned char)((rule_slot >> 16) & 0xFF);
+    buf[19] = (unsigned char)((rule_slot >> 24) & 0xFF);
+    apr_uint64_t h = bs_siphash24(bs_shm.header->siphash_key,
+                                  buf, sizeof(buf));
+    return (apr_uint32_t)(h % bs_shm.strike_capacity);
+}
+
+/* Seqlock-protected lookup. Returns 1 if (ip, rule_slot) has an
+ * active escalation (escalation_until > now), 0 otherwise. */
+static int bs_strike_check_escalated(const unsigned char ip[16],
+                                     apr_uint32_t rule_slot,
+                                     apr_int64_t now)
+{
+    if (!bs_shm.strike_table || bs_shm.strike_capacity == 0) return 0;
+    apr_uint32_t base = bs_strike_bucket(ip, rule_slot);
+
+    for (unsigned i = 0; i < BS_STRIKE_PROBE_LIMIT; i++) {
+        apr_uint32_t idx = (base + i) % bs_shm.strike_capacity;
+        bs_strike_slot *slot = &bs_shm.strike_table[idx];
+
+        apr_uint32_t v1, v2;
+        unsigned char local_ip[16];
+        apr_uint32_t  local_rule;
+        apr_int64_t   local_until;
+        int spins = 0;
+        for (;;) {
+            v1 = apr_atomic_read32(&slot->version);
+            if (v1 & 1U) {
+                if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
+                continue;
+            }
+            local_rule  = slot->rule_slot;
+            memcpy(local_ip, slot->ip, 16);
+            local_until = slot->escalation_until;
+            v2 = apr_atomic_read32(&slot->version);
+            if (v1 == v2) break;
+            if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
+        }
+        if (v1 == ~0U) continue;
+        if (local_rule == BS_STRIKE_EMPTY) continue;
+        if (local_rule != rule_slot) continue;
+        if (memcmp(local_ip, ip, 16) != 0) continue;
+        return local_until > now;
+    }
+    return 0;
+}
+
+/* Strike accounting under the shared mutex. Bumps the (ip, rule)
+ * counter inside its `per_sec` window, sets escalation_until on
+ * threshold crossing. Returns 1 if THIS call crossed the threshold
+ * from "not escalated" to "escalated" (caller logs the operator's
+ * tag exactly once); 0 otherwise (still below threshold, or already
+ * in the escalated state and just refreshing the TTL). */
+static int bs_strike_record_429(request_rec *r,
+                                const unsigned char ip[16],
+                                apr_uint32_t rule_slot,
+                                const bs_rate_escalate_entry *cfg,
+                                apr_int64_t now)
+{
+    if (!bs_shm.strike_table || !bs_shm.mutex || !cfg) return 0;
+    apr_uint32_t base = bs_strike_bucket(ip, rule_slot);
+
+    apr_status_t rv = apr_global_mutex_lock(bs_shm.mutex);
+    if (rv != APR_SUCCESS) {
+        ap_log_rerror(APLOG_MARK, APLOG_WARNING, rv, r,
+            "mod_botshield: strike-table mutex_lock failed; "
+            "dropping strike");
+        return 0;
+    }
+
+    int matched_idx = -1;
+    int empty_idx   = -1;
+    for (unsigned i = 0; i < BS_STRIKE_PROBE_LIMIT; i++) {
+        apr_uint32_t idx = (base + i) % bs_shm.strike_capacity;
+        bs_strike_slot *slot = &bs_shm.strike_table[idx];
+        if (slot->rule_slot == BS_STRIKE_EMPTY) {
+            if (empty_idx < 0) empty_idx = (int)idx;
+            continue;
+        }
+        if (slot->rule_slot == rule_slot
+            && memcmp(slot->ip, ip, 16) == 0) {
+            matched_idx = (int)idx;
+            break;
+        }
+    }
+
+    int target_idx;
+    if (matched_idx >= 0) {
+        target_idx = matched_idx;
+    } else if (empty_idx >= 0) {
+        target_idx = empty_idx;
+    } else {
+        static apr_time_t last_warn = 0;
+        apr_time_t now_t = apr_time_now();
+        if (now_t - last_warn > apr_time_from_sec(60)) {
+            last_warn = now_t;
+            ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+                "mod_botshield: strike-table probe saturated at "
+                "bucket %u (capacity %" APR_SIZE_T_FMT "); "
+                "overwriting — consider raising "
+                "BotShieldRateLimitEscalateCapacity",
+                base, bs_shm.strike_capacity);
+        }
+        target_idx = (int)base;
+    }
+
+    bs_strike_slot *slot = &bs_shm.strike_table[target_idx];
+    apr_uint32_t v0 = apr_atomic_read32(&slot->version);
+    apr_atomic_set32(&slot->version, v0 | 1U);   /* begin write */
+
+    int crossed = 0;
+    apr_uint32_t now_sec = (apr_uint32_t)now;
+    int fresh_slot = (matched_idx < 0);
+    if (fresh_slot) {
+        memcpy(slot->ip, ip, 16);
+        slot->rule_slot           = rule_slot;
+        slot->strike_window_start = now_sec;
+        slot->strike_count        = 1;
+        slot->escalation_until    = 0;
+    } else {
+        /* Window roll: reset count when the per-window has passed. */
+        if (slot->strike_window_start == 0
+            || now_sec - slot->strike_window_start >= cfg->per_sec) {
+            slot->strike_window_start = now_sec;
+            slot->strike_count        = 1;
+        } else {
+            slot->strike_count++;
+        }
+    }
+    if (slot->strike_count >= cfg->strikes) {
+        apr_int64_t prev_until = slot->escalation_until;
+        slot->escalation_until = now + cfg->ttl_sec;
+        if (prev_until <= now) crossed = 1;
+    }
+
+    apr_atomic_set32(&slot->version, (v0 | 1U) + 1U);   /* publish */
+    apr_global_mutex_unlock(bs_shm.mutex);
+    return crossed;
 }
 
 /* --- Rotating Bloom filter (M5.2) ---
@@ -5388,6 +5726,140 @@ static const char *bs_set_rate_limit(cmd_parms *cmd, void *dconf,
         }
     }
     *(bs_rate_limit_entry **)apr_array_push(scfg->rate_limits) = e;
+    return NULL;
+}
+
+/* E9 — BotShieldRateLimitEscalate <rate-name> <strikes> <per>
+ *      [status=<code>] [ttl=<sec>] [log=<tag>]
+ *
+ * Promotes repeated 429s on a named BotShieldRateLimit rule into a
+ * stricter status (default 403) for a short TTL. The cross-rule
+ * link is by name; the post_config phase resolves it into a direct
+ * pointer on the matching bs_rate_limit_entry so the request-time
+ * path branches in O(1).
+ *
+ * `<per>` accepts the same sec/min/hour suffixes as BotShieldRateLimit. */
+static const char *bs_set_rate_limit_escalate(cmd_parms *cmd, void *dconf,
+                                              int argc, char *const argv[])
+{
+    (void)dconf;
+    if (argc < 3) {
+        return "BotShieldRateLimitEscalate: expects <rate-name> "
+               "<strikes> <per> [key=value ...]";
+    }
+    const char *rule_name = argv[0];
+    const char *strikes_s = argv[1];
+    const char *per_s     = argv[2];
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    if (!bs_bot_name_valid(rule_name)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldRateLimitEscalate: rate-name '%s' must be "
+            "[a-z0-9-]{1,32}", rule_name);
+    }
+    char *end = NULL;
+    long strikes = strtol(strikes_s, &end, 10);
+    if (!end || *end || strikes <= 0 || strikes > 1000000) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldRateLimitEscalate: strikes '%s' must be a "
+            "positive integer <= 1000000", strikes_s);
+    }
+    int per = bs_rate_unit_seconds(per_s);
+    if (per == 0) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldRateLimitEscalate: per '%s' must be one of "
+            "sec/min/hour (or s/m/h)", per_s);
+    }
+
+    bs_rate_escalate_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
+    e->rule_name   = apr_pstrdup(cmd->pool, rule_name);
+    e->strikes     = (apr_uint32_t)strikes;
+    e->per_sec     = (apr_uint32_t)per;
+    e->status_code = 403;       /* default per PLAN.md E9 */
+    e->ttl_sec     = 1800;      /* default per PLAN.md E9 */
+    e->log_tag     = NULL;
+
+    for (int i = 3; i < argc; i++) {
+        const char *arg = argv[i];
+        const char *eq  = strchr(arg, '=');
+        if (!eq) {
+            return apr_psprintf(cmd->pool,
+                "BotShieldRateLimitEscalate: extra arg '%s' must be "
+                "key=value", arg);
+        }
+        apr_size_t klen = (apr_size_t)(eq - arg);
+        const char *val = eq + 1;
+        #define BS_REK(n) (klen == sizeof(n)-1 && \
+                           strncasecmp(arg, n, sizeof(n)-1) == 0)
+        if (BS_REK("status")) {
+            char *e2 = NULL;
+            long code = strtol(val, &e2, 10);
+            if (!e2 || *e2 || code < 100 || code > 599) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldRateLimitEscalate: status='%s' must be "
+                    "an HTTP code 100..599", val);
+            }
+            if (code == 429) {
+                /* Same code as the normal rate-limit response — no
+                 * escalation effect. Reject so operators don't
+                 * accidentally write a no-op directive. */
+                return "BotShieldRateLimitEscalate: status=429 is a "
+                       "no-op (same as the normal rate-limit "
+                       "response); pick a stricter code (default 403)";
+            }
+            e->status_code = (int)code;
+        } else if (BS_REK("ttl")) {
+            char *e2 = NULL;
+            long t = strtol(val, &e2, 10);
+            if (!e2 || *e2 || t < 1 || t > 86400 * 30) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldRateLimitEscalate: ttl='%s' must be "
+                    "1..2592000 seconds", val);
+            }
+            e->ttl_sec = (int)t;
+        } else if (BS_REK("log")) {
+            e->log_tag = apr_pstrdup(cmd->pool, val);
+        } else {
+            return apr_psprintf(cmd->pool,
+                "BotShieldRateLimitEscalate: unknown key '%.*s' "
+                "(known: status, ttl, log)", (int)klen, arg);
+        }
+        #undef BS_REK
+    }
+
+    /* Upsert by rule_name. Re-declaration replaces in place. */
+    for (int i = 0; i < scfg->rate_escalates->nelts; i++) {
+        bs_rate_escalate_entry *ex = APR_ARRAY_IDX(
+            scfg->rate_escalates, i, bs_rate_escalate_entry *);
+        if (strcmp(ex->rule_name, e->rule_name) == 0) {
+            APR_ARRAY_IDX(scfg->rate_escalates, i,
+                          bs_rate_escalate_entry *) = e;
+            return NULL;
+        }
+    }
+    *(bs_rate_escalate_entry **)apr_array_push(scfg->rate_escalates) = e;
+    return NULL;
+}
+
+/* E9 — BotShieldRateLimitEscalateCapacity <n>. SHM slot count for
+ * the strike table. Per-server-scope; only the main server's value
+ * is used at post_config (the strike table is module-global). */
+static const char *bs_set_rate_escalate_capacity(cmd_parms *cmd,
+                                                 void *dconf,
+                                                 const char *arg)
+{
+    (void)dconf;
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (!end || *end
+        || n < BS_STRIKE_MIN_SLOTS || n > BS_STRIKE_MAX_SLOTS) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldRateLimitEscalateCapacity: '%s' must be %d..%d",
+            arg, BS_STRIKE_MIN_SLOTS, BS_STRIKE_MAX_SLOTS);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->strike_capacity = (int)n;
     return NULL;
 }
 
@@ -9800,6 +10272,28 @@ static const command_rec bs_cmds[] = {
                  "Both-'*' is rejected. Over-budget requests return "
                  "429 + Retry-After and get a +50 score penalty "
                  "under reason rate-limit-exceeded:<name>."),
+    /* E9 — repeated-429 escalation. Sits on top of BotShieldRateLimit;
+     * does not apply to robots.txt Crawl-delay 429s in v1 (no operator
+     * handle for them). */
+    AP_INIT_TAKE_ARGV("BotShieldRateLimitEscalate",
+                 bs_set_rate_limit_escalate, NULL, RSRC_CONF,
+                 "Promote repeated 429s on a named BotShieldRateLimit "
+                 "into a stricter status. Args: <rate-name> <strikes> "
+                 "<per> [status=<code>] [ttl=<sec>] [log=<tag>]. "
+                 "Per accepts sec/min/hour. Once <strikes> rejected "
+                 "requests accumulate within <per>, subsequent "
+                 "requests against the same rule return status= "
+                 "(default 403) for ttl= seconds (default 1800). The "
+                 "ttl slides on each additional strike; log=<tag> "
+                 "rides the decision line on threshold crossing for "
+                 "fail2ban handoff. Reason rate-limit-abuse:<name>."),
+    AP_INIT_TAKE1("BotShieldRateLimitEscalateCapacity",
+                 bs_set_rate_escalate_capacity, NULL, RSRC_CONF,
+                 "SHM strike-table slot count (default 50000). Sized "
+                 "for (concurrent-misbehaving-IPs * named-rate-rules) "
+                 "headroom; same eviction discipline as the flagged-"
+                 "IP table when the probe window saturates. Read at "
+                 "post_config from the main server's value."),
     AP_INIT_TAKE_ARGV("BotShieldBlockPath",
                  bs_set_block_path, NULL, RSRC_CONF,
                  "Block a named cohort from a path glob. Args: "
