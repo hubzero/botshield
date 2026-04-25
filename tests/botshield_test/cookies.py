@@ -84,7 +84,7 @@ def build_cookie(challenge: dict, counter: int) -> str:
         fields + signature. Cookie = base64 of the 17-field
         pipe-delimited payload (canonical 0..14, sig 15, counter 16).
 
-    Open-question #3 grew the canonical field count from 13 to 15 by
+    E16 grew the canonical field count from 13 to 15 by
     appending `forgive_window_start` and `forgive_consumed`; the
     module's BS_PROTOCOL_VERSION bumped 1->2 in the same commit.
     """
@@ -107,7 +107,7 @@ def build_cookie(challenge: dict, counter: int) -> str:
 
 def tamper_signature(cookie: str) -> str:
     """Flip one hex character of the HMAC signature (now at field 15
-    after the open-question #3 envelope grew) in an assembled legacy
+    after the E16 envelope grew) in an assembled legacy
     `_bs_verified` cookie. Used to prove the module rejects a forged
     signature."""
     raw = base64.b64decode(cookie).decode()

@@ -41,7 +41,7 @@ def _encode_cookie(fields: list[str]) -> str:
     what the module's assembler + parser expect.
 
     The canonical envelope grew from 13 to 15 fields with
-    BS_PROTOCOL_VERSION 1->2 (open-question #3 added forgive_window_start
+    BS_PROTOCOL_VERSION 1->2 (E16 added forgive_window_start
     and forgive_consumed); the cookie body still appends sig_hex and
     counter for a total of 17 fields."""
     return base64.b64encode("|".join(fields).encode()).decode()
@@ -53,7 +53,7 @@ def _encode_cookie(fields: list[str]) -> str:
 # test. We want parse-step rejections, not signature-step rejections.
 def _valid_shape_fields():
     return [
-        "2",                              # 0:  version (bumped 1->2 for #3)
+        "2",                              # 0:  version (bumped 1->2 for E16)
         "sha256-zeros",                   # 1:  alg
         "00" * 16,                        # 2:  salt (32 hex = 16 bytes)
         "00" * 8,                         # 3:  nonce (16 hex = 8 bytes)
@@ -64,8 +64,8 @@ def _valid_shape_fields():
         "0", "1", "0",                    # 8-10: passes_silent/form/captcha
         "1900000000",                     # 11: challenged_at
         "1",                              # 12: auto
-        "0",                              # 13: forgive_window_start (#3)
-        "0",                              # 14: forgive_consumed (#3)
+        "0",                              # 13: forgive_window_start (E16)
+        "0",                              # 14: forgive_consumed (E16)
         "00" * 32,                        # 15: signature (would fail HMAC)
         "0",                              # 16: counter
     ]

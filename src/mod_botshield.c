@@ -77,7 +77,7 @@ module AP_MODULE_DECLARE_DATA botshield_module;
 #define BS_DEFAULT_FORGIVE_SILENT   10
 #define BS_DEFAULT_FORGIVE_FORM     25
 #define BS_DEFAULT_FORGIVE_CAPTCHA  50
-/* Open-question #3 — per-cookie hourly cap on accumulated forgiveness.
+/* E16 — per-cookie hourly cap on accumulated forgiveness.
  * 200 points/hour ≈ 4-8 challenge-passes worth of credit; enough for
  * a real user pinned at borderline-suspicious to keep transacting,
  * tight enough that a patient bot solving every few minutes stops
@@ -125,7 +125,7 @@ module AP_MODULE_DECLARE_DATA botshield_module;
  *   forgiveness amount on verify.
  *
  * Keep in sync with the JS worker when the template ships the wire bits. */
-/* Bumped 1->2 for open-question #3: rep envelope grew two fields
+/* Bumped 1->2 for E16: rep envelope grew two fields
  * (forgive_window_start, forgive_consumed). Old (v1) cookies fail
  * the version check and trigger a fresh challenge — one-time
  * disruption per client on upgrade. The same shape lets future rep
@@ -199,7 +199,7 @@ static void bs_score_add(request_rec *r, int penalty,
 /* Reputation state carried in the cookie. Populated fresh on a first-time
  * challenge (all zeros), and merged forward with forgiveness on re-issues.
  *
- * Open-question #3 — forgiveness cap per window. `forgive_window_start`
+ * E16 — forgiveness cap per window. `forgive_window_start`
  * marks the start of the current rolling hour (unix sec); on every
  * verify-success we either roll the window if the prior one is over an
  * hour old, or clamp the new forgiveness so the running consumed total
@@ -744,7 +744,7 @@ struct bs_dir_cfg {
     const bs_pow_algorithm *algorithm;      /* chosen issue algorithm */
     const unsigned char    *secret;         /* HMAC key bytes */
     apr_size_t              secret_len;     /* key length */
-    /* Open-question #5 — verify-only secondary secret for graceful
+    /* E17 — verify-only secondary secret for graceful
      * rotation. Issue path always uses `secret`; verify tries
      * `secret` first and falls back to `secret_secondary` so cookies
      * minted under the old key keep validating during a rotation
@@ -882,7 +882,7 @@ typedef struct bs_server_cfg {
      * default (BS_DEFAULT_MAX_DIFFICULTY). Server-scope only — the
      * adaptive layer is module-global by design. */
     int                 max_difficulty;
-    /* Open-question #3 — per-cookie hourly forgiveness cap. 0 =
+    /* E16 — per-cookie hourly forgiveness cap. 0 =
      * inherit / use BS_DEFAULT_FORGIVE_CAP_PER_HOUR. Operators set
      * this at server scope to bound forgiveness-farming. */
     int                 forgive_cap_per_hour;
@@ -1150,7 +1150,7 @@ static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
     /* E14 — child-set value wins; 0 means "inherit". */
     out->max_difficulty = (add->max_difficulty > 0)
         ? add->max_difficulty : base->max_difficulty;
-    /* Open-question #3 — same merge shape. */
+    /* E16 — same merge shape. */
     out->forgive_cap_per_hour = (add->forgive_cap_per_hour > 0)
         ? add->forgive_cap_per_hour : base->forgive_cap_per_hour;
     out->block_paths = bs_merge_rule_array(p, base->block_paths,
@@ -1279,7 +1279,7 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->share_scope_token     = NULL;
     /* E14 — 0 means "inherit / use BS_DEFAULT_MAX_DIFFICULTY". */
     scfg->max_difficulty        = 0;
-    /* Open-question #3 — 0 means "inherit / use default". */
+    /* E16 — 0 means "inherit / use default". */
     scfg->forgive_cap_per_hour  = 0;
     scfg->block_paths      = apr_array_make(p, 4, sizeof(void *));
     scfg->path_triggers         = apr_array_make(p, 4, sizeof(void *));
@@ -1356,7 +1356,7 @@ static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
         out->secret     = base->secret;
         out->secret_len = base->secret_len;
     }
-    /* Open-question #5 — same merge shape for the verify-only
+    /* E17 — same merge shape for the verify-only
      * secondary key. Independent of primary so an operator can
      * stage a rotation by setting just the secondary on a child
      * scope. */
@@ -2081,7 +2081,7 @@ static int bs_from_hex(const char *in, apr_size_t out_len, unsigned char *out)
  * changes, and tampering is detected. The rep fields follow the challenge
  * fields so existing M2 code reading positions 0..5 still lines up; the
  * M7 `auto` marker is appended at position 12 after challenged_at; the
- * open-question-#3 forgiveness-window pair is appended at 13..14. */
+ * E16 forgiveness-window pair is appended at 13..14. */
 static const char *bs_challenge_canonical(apr_pool_t *p,
                                           const bs_challenge *ch)
 {
@@ -2090,7 +2090,7 @@ static const char *bs_challenge_canonical(apr_pool_t *p,
     bs_to_hex(ch->salt,  BS_SALT_BYTES,  salt_hex);
     bs_to_hex(ch->nonce, BS_NONCE_BYTES, nonce_hex);
     /* v2 canonical = v1 canonical + forgive_window_start +
-     * forgive_consumed (open-question #3). 15 pipe-delimited fields
+     * forgive_consumed (E16). 15 pipe-delimited fields
      * total; HMAC cookie body adds 2 more (sig_hex, counter) for 17. */
     return apr_psprintf(p,
         "%d|%s|%s|%s|%d|%" APR_TIME_T_FMT
@@ -7472,7 +7472,7 @@ static const char *bs_set_max_difficulty(cmd_parms *cmd, void *dconf,
     return NULL;
 }
 
-/* Open-question #3 — BotShieldForgivenessCapPerHour <N>. Server-
+/* E16 — BotShieldForgivenessCapPerHour <N>. Server-
  * scope cap on the points of forgiveness any one cookie can earn
  * inside a rolling 1-hour window. 0 disables the cap (legacy
  * behavior). Range 1..1000 — beyond that the cap is effectively
@@ -9225,7 +9225,7 @@ static const char *bs_verify_cookie_hmac(request_rec *r,
     }
 
     /* HMAC-SHA-256 of canonical bytes. Constant-time compare.
-     * Open-question #5 — try the primary key first, then fall back
+     * E17 — try the primary key first, then fall back
      * to the secondary if configured. Both keys live in process
      * memory; no SHM or file I/O on the hot verify path. The extra
      * HMAC during a rotation window is negligible (low-µs) and only
@@ -9275,7 +9275,7 @@ static const char *bs_verify_cookie_gcm(request_rec *r,
                       - BS_GCM_TAG_LEN;
     unsigned char *pt = apr_palloc(r->pool, pt_cap + 1);
     apr_size_t pt_len = 0;
-    /* Open-question #5 — try primary key first, then secondary if
+    /* E17 — try primary key first, then secondary if
      * configured. AES-GCM decrypt is authenticated; a wrong key
      * fails the tag check and bs_gcm_decrypt returns an error
      * without leaking plaintext. The retry is safe and the success
@@ -9299,7 +9299,7 @@ static const char *bs_verify_cookie_gcm(request_rec *r,
     pt[pt_len] = '\0';
 
     /* pt is canonical form (15 pipe-delimited fields after E14 +
-     * open-question #3 — the count grew with BS_PROTOCOL_VERSION 1->2). */
+     * E16 — the count grew with BS_PROTOCOL_VERSION 1->2). */
     char *fields[15];
     int nf = 0;
     char *p = (char *)pt;
@@ -9392,7 +9392,7 @@ static const char *bs_set_secret_file(cmd_parms *cmd, void *cfg_v,
     return NULL;
 }
 
-/* Open-question #5 — `BotShieldSecondarySecretFile /path`. Verify-
+/* E17 — `BotShieldSecondarySecretFile /path`. Verify-
  * only secondary key for graceful HMAC/GCM secret rotation.
  *
  * Operator workflow:
@@ -11955,7 +11955,7 @@ static int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
     if (have_prior) {
         int forgive = bs_effective_int(cfg->forgive_captcha,
                                        BS_DEFAULT_FORGIVE_CAPTCHA);
-        /* Open-question #3 — clamp forgiveness against the per-cookie
+        /* E16 — clamp forgiveness against the per-cookie
          * hourly cap. Window state lives in the cookie rep; a fresh
          * cookie starts with window_start=0 which the helper treats
          * as "open new window now." */
@@ -12245,7 +12245,7 @@ static const command_rec bs_cmds[] = {
                  "Path to the HMAC key used to sign challenge cookies. "
                  "Must be mode 0600 (not group- or world-accessible) and "
                  ">= 16 bytes. Read once at startup."),
-    /* Open-question #5 — graceful secret rotation. */
+    /* E17 — graceful secret rotation. */
     AP_INIT_TAKE1("BotShieldSecondarySecretFile",
                  bs_set_secondary_secret_file, NULL,
                  RSRC_CONF | ACCESS_CONF,
@@ -12561,7 +12561,7 @@ static const command_rec bs_cmds[] = {
                  "raise up to 16 if operator-side adaptive policy "
                  "needs more headroom. Adaptive bumps that would "
                  "exceed this ceiling are silently clamped."),
-    /* Open-question #3 — forgiveness farming defense. */
+    /* E16 — forgiveness farming defense. */
     AP_INIT_TAKE1("BotShieldForgivenessCapPerHour",
                  bs_set_forgive_cap, NULL, RSRC_CONF,
                  "Per-cookie cap on accumulated forgiveness points "
@@ -13604,7 +13604,7 @@ static int bs_handler(request_rec *r)
         int forgive = prior_ch.auto_tier
             ? bs_effective_int(cfg->forgive_silent, BS_DEFAULT_FORGIVE_SILENT)
             : bs_effective_int(cfg->forgive_form,   BS_DEFAULT_FORGIVE_FORM);
-        /* Open-question #3 — clamp against the per-cookie hourly cap
+        /* E16 — clamp against the per-cookie hourly cap
          * and surface the granted vs requested via reason chain when
          * the cap kicks in. */
         int cap = scfg_h && scfg_h->forgive_cap_per_hour > 0
