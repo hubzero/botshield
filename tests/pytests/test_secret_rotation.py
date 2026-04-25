@@ -1,4 +1,4 @@
-"""E17 — graceful HMAC/GCM secret rotation.
+"""E16 — graceful HMAC/GCM secret rotation.
 
 `BotShieldSecondarySecretFile` adds a verify-only fallback secret so
 cookies signed under the old key keep validating during a rotation

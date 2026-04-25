@@ -1,4 +1,4 @@
-"""E16 — per-cookie forgiveness cap per rolling hour.
+"""E15 — per-cookie forgiveness cap per rolling hour.
 
 A patient bot solving challenges repeatedly used to earn unbounded
 forgiveness against accumulated rep score. The cap bounds the
