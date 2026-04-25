@@ -370,6 +370,45 @@ typedef struct {
 #define BS_STRIKE_MIN_SLOTS        1024
 #define BS_STRIKE_MAX_SLOTS        1000000
 
+/* E10 — challenge safeguard / anti-loop hysteresis. Per-IP SHM
+ * tracking for "BotShield keeps presenting a challenge but this
+ * client never solves it." Tripping safeguard stops the module
+ * from re-issuing the same challenge for a short TTL so a broken
+ * client (JS blocked, CSP-stripped, cookie handling buggy) gets a
+ * stable non-looping outcome instead of an endless
+ * challenge-reload-challenge loop.
+ *
+ * Same seqlock + open-addressing idiom as the flagged-IP and
+ * strike tables. Slot layout:
+ *
+ *   `present_count` accumulates inside `present_window_start +
+ *   window_sec`. It resets on any `bs_safeguard_clear` (called when
+ *   a valid `_bs_verified` lands — they can solve, so history was
+ *   noise). It also resets on window roll.
+ *
+ *   `safeguard_until` is 0 when inactive; non-zero means the
+ *   request-time check returns "safeguard active" until the
+ *   timestamp passes. Each fresh presentation during an active
+ *   safeguard refreshes the TTL (TTL slides on the last attempt)
+ *   so a client who stays broken keeps benefiting rather than
+ *   dropping in and out of safeguard every window boundary. */
+typedef struct {
+    apr_uint32_t  version;              /* seqlock */
+    apr_uint32_t  used;                 /* 0 = empty slot */
+    unsigned char ip[16];               /* masked per ipv6_prefix_bits */
+    apr_uint32_t  present_window_start; /* unix sec */
+    apr_uint32_t  present_count;
+    apr_int64_t   safeguard_until;      /* unix sec; 0 = inactive */
+} bs_safeguard_slot;
+
+#define BS_SAFEGUARD_PROBE_LIMIT   8
+#define BS_DEFAULT_SAFEGUARD_SLOTS 50000
+#define BS_SAFEGUARD_MIN_SLOTS     1024
+#define BS_SAFEGUARD_MAX_SLOTS     1000000
+#define BS_DEFAULT_SAFEGUARD_THRESHOLD 5
+#define BS_DEFAULT_SAFEGUARD_WINDOW    600
+#define BS_DEFAULT_SAFEGUARD_TTL       900
+
 typedef struct {
     apr_uint32_t  magic;            /* BS_SHM_MAGIC */
     apr_uint32_t  format_version;   /* BS_SHM_FORMAT_VERSION */
@@ -518,6 +557,11 @@ typedef struct {
      * BotShieldRateLimitEscalateCapacity. */
     bs_strike_slot      *strike_table;
     apr_size_t           strike_capacity;
+    /* E10 — safeguard table for anti-loop hysteresis. Same shape
+     * as strike_table but keyed by masked IP only (no rule_slot).
+     * Sized by BotShieldSafeguardCapacity. */
+    bs_safeguard_slot   *safeguard_table;
+    apr_size_t           safeguard_capacity;
 } bs_shm_runtime;
 
 static bs_shm_runtime bs_shm;
@@ -687,6 +731,14 @@ typedef struct bs_server_cfg {
     /* Strike-table capacity (operator-tunable). Read at post_config
      * from the main server's scfg, same convention as flagged_capacity. */
     int                 strike_capacity;
+    /* E10 — safeguard config. All server-scope so the single SHM
+     * table is consistently sized. `safeguard_enabled=-1` is the
+     * unset sentinel; merge picks add's value if set, else base's. */
+    int                 safeguard_enabled;      /* -1 unset, 0 off, 1 on */
+    int                 safeguard_threshold;    /* 0 = inherit / default */
+    int                 safeguard_window;       /* seconds; 0 = default */
+    int                 safeguard_ttl;          /* seconds; 0 = default */
+    int                 safeguard_capacity;     /* 0 = default */
     apr_array_header_t *block_paths;   /* bs_block_path_entry * */
     /* E3 — path-based triggers. Same ordered-array + upsert-by-name
      * shape as E2.1; first match wins at request time. */
@@ -897,6 +949,24 @@ static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
                                               add->rate_escalates);
     out->strike_capacity = (add->strike_capacity > 0)
                          ? add->strike_capacity : base->strike_capacity;
+    /* E10 — safeguard merge. Only the main server's values steer
+     * SHM sizing; merged-in overrides are harmless at per-vhost
+     * scope because the table is module-global. */
+    out->safeguard_enabled  = (add->safeguard_enabled != -1)
+                            ? add->safeguard_enabled
+                            : base->safeguard_enabled;
+    out->safeguard_threshold = (add->safeguard_threshold > 0)
+                             ? add->safeguard_threshold
+                             : base->safeguard_threshold;
+    out->safeguard_window   = (add->safeguard_window > 0)
+                            ? add->safeguard_window
+                            : base->safeguard_window;
+    out->safeguard_ttl      = (add->safeguard_ttl > 0)
+                            ? add->safeguard_ttl
+                            : base->safeguard_ttl;
+    out->safeguard_capacity = (add->safeguard_capacity > 0)
+                            ? add->safeguard_capacity
+                            : base->safeguard_capacity;
     out->block_paths = bs_merge_rule_array(p, base->block_paths,
                                            add->block_paths);
     out->path_triggers = bs_merge_rule_array(p, base->path_triggers,
@@ -990,6 +1060,15 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->rate_limits      = apr_array_make(p, 4, sizeof(void *));
     scfg->rate_escalates   = apr_array_make(p, 2, sizeof(void *));
     scfg->strike_capacity  = 0;   /* 0 = inherit / use default */
+    /* E10 — safeguard defaults. enabled=-1 is the unset sentinel so
+     * the merge can pick the right scope's value; numeric fields
+     * default to 0 which the post_config sizing + request-time
+     * check treat as "use the compiled-in default." */
+    scfg->safeguard_enabled   = -1;
+    scfg->safeguard_threshold = 0;
+    scfg->safeguard_window    = 0;
+    scfg->safeguard_ttl       = 0;
+    scfg->safeguard_capacity  = 0;
     scfg->block_paths      = apr_array_make(p, 4, sizeof(void *));
     scfg->path_triggers         = apr_array_make(p, 4, sizeof(void *));
     scfg->cookie_triggers  = apr_array_make(p, 4, sizeof(void *));
@@ -2785,6 +2864,18 @@ static int  bs_strike_record_429(request_rec *r,
                                  apr_uint32_t rule_slot,
                                  const bs_rate_escalate_entry *cfg,
                                  apr_int64_t now);
+
+/* E10 — safeguard helpers. Called from bs_handler at two points:
+ * just before issuing a challenge (check + record presentation)
+ * and on successful cookie verify (clear the per-IP counter). */
+static int  bs_safeguard_check(const unsigned char ip[16],
+                               apr_int64_t now);
+static void bs_safeguard_record_presentation(request_rec *r,
+                                             bs_server_cfg *scfg,
+                                             const unsigned char ip[16],
+                                             apr_int64_t now);
+static void bs_safeguard_clear(const unsigned char ip[16]);
+static int  bs_safeguard_effective_int(int v, int dflt);
 /* Shared action helpers — see definitions below. The server-cfg
  * struct body appears later in the file, so we forward-declare by
  * struct tag and use `struct bs_server_cfg *` in the signature. */
@@ -4159,10 +4250,17 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                             ? (apr_size_t)scfg->strike_capacity
                             : (apr_size_t)BS_DEFAULT_STRIKE_SLOTS;
     apr_size_t strike_bytes = strike_slots * sizeof(bs_strike_slot);
+    /* E10 — safeguard table. Same ballpark size + tuning surface
+     * as the strike table. */
+    apr_size_t safeguard_slots = (scfg->safeguard_capacity > 0)
+                               ? (apr_size_t)scfg->safeguard_capacity
+                               : (apr_size_t)BS_DEFAULT_SAFEGUARD_SLOTS;
+    apr_size_t safeguard_bytes = safeguard_slots
+                               * sizeof(bs_safeguard_slot);
     apr_size_t total_bytes  = header_bytes + table_bytes + 2 * bloom_bytes
                               + cv_rate_bytes + cv_log_bytes
                               + metrics_bytes + e21_rate_bytes
-                              + strike_bytes;
+                              + strike_bytes + safeguard_bytes;
 
     if (scfg->shm_size < total_bytes) {
         ap_log_error(APLOG_MARK, APLOG_ERR, 0, s,
@@ -4240,6 +4338,12 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     for (apr_size_t i = 0; i < strike_slots; i++) {
         bs_shm.strike_table[i].rule_slot = BS_STRIKE_EMPTY;
     }
+    /* E10: safeguard table follows the strike table. memset(base,0)
+     * leaves every `used` field at 0, which IS the "empty" sentinel
+     * for this table — no explicit zero pass needed. */
+    bs_shm.safeguard_table = (bs_safeguard_slot *)
+        ((unsigned char *)bs_shm.strike_table + strike_bytes);
+    bs_shm.safeguard_capacity = safeguard_slots;
 
     bs_shm.header->bloom_active        = 0;
     bs_shm.header->bloom_buf_bytes     = (apr_uint32_t)bloom_bytes;
@@ -4974,6 +5078,194 @@ static int bs_strike_record_429(request_rec *r,
     apr_atomic_set32(&slot->version, (v0 | 1U) + 1U);   /* publish */
     apr_global_mutex_unlock(bs_shm.mutex);
     return crossed;
+}
+
+/* --- E10: challenge-safeguard helpers ---
+ *
+ * Anti-loop hysteresis. The rate-counter-strike pair (E9) said
+ * "this client is hitting our rate limit harder than 429 is
+ * deterring"; safeguard says "this client keeps getting presented
+ * a challenge but never solves it." Different signal, same
+ * mitigation pattern (per-IP SHM, short-lived trip state).
+ *
+ * Why safeguard isn't just another E9-style directive: the 429
+ * case is behavior BotShield explicitly provoked ("you asked us
+ * to rate-limit this cohort"). The safeguard case is a failure
+ * mode — clients who are bad at solving challenges, whether from
+ * malice (refusing to run JS) or infrastructure (CSP strips our
+ * interstitial, blockers, privacy tooling). It applies everywhere
+ * a challenge gets issued, independent of operator rule-sets. */
+
+static int bs_safeguard_effective_int(int v, int dflt)
+{
+    return (v > 0) ? v : dflt;
+}
+
+static apr_uint32_t bs_safeguard_bucket(const unsigned char ip[16])
+{
+    apr_uint64_t h = bs_siphash24(bs_shm.header->siphash_key, ip, 16);
+    /* Mix a distinct constant so this table's bucket distribution
+     * isn't perfectly correlated with flagged_table / strike_table
+     * for the same IP — reduces probe-window collisions across
+     * tables under high saturation. */
+    h ^= 0xC0FFEE00BA5EBA11ULL;
+    return (apr_uint32_t)(h % bs_shm.safeguard_capacity);
+}
+
+/* Lockless read. Returns 1 if the IP has an active safeguard
+ * (safeguard_until > now), 0 otherwise. Seqlock discipline matches
+ * bs_flagged_ip_lookup and bs_strike_check_escalated. */
+static int bs_safeguard_check(const unsigned char ip[16], apr_int64_t now)
+{
+    if (!bs_shm.safeguard_table || bs_shm.safeguard_capacity == 0) return 0;
+    apr_uint32_t base = bs_safeguard_bucket(ip);
+
+    for (unsigned i = 0; i < BS_SAFEGUARD_PROBE_LIMIT; i++) {
+        apr_uint32_t idx = (base + i) % bs_shm.safeguard_capacity;
+        bs_safeguard_slot *slot = &bs_shm.safeguard_table[idx];
+
+        apr_uint32_t v1, v2;
+        apr_uint32_t  local_used;
+        unsigned char local_ip[16];
+        apr_int64_t   local_until;
+        int spins = 0;
+        for (;;) {
+            v1 = apr_atomic_read32(&slot->version);
+            if (v1 & 1U) {
+                if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
+                continue;
+            }
+            local_used  = slot->used;
+            memcpy(local_ip, slot->ip, 16);
+            local_until = slot->safeguard_until;
+            v2 = apr_atomic_read32(&slot->version);
+            if (v1 == v2) break;
+            if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
+        }
+        if (v1 == ~0U) continue;
+        if (!local_used) continue;
+        if (memcmp(local_ip, ip, 16) != 0) continue;
+        return local_until > now;
+    }
+    return 0;
+}
+
+/* Bump the presentation counter for this IP under the shared
+ * mutex. Trips safeguard when `present_count` crosses
+ * `threshold` inside `window` seconds. Each call during an
+ * already-active safeguard refreshes safeguard_until (TTL slides
+ * on the last presentation) so clients that stay broken keep
+ * benefiting rather than oscillating at window boundaries. */
+static void bs_safeguard_record_presentation(request_rec *r,
+                                             bs_server_cfg *scfg,
+                                             const unsigned char ip[16],
+                                             apr_int64_t now)
+{
+    if (!bs_shm.safeguard_table || !bs_shm.mutex || !scfg) return;
+    int threshold = bs_safeguard_effective_int(scfg->safeguard_threshold,
+                        BS_DEFAULT_SAFEGUARD_THRESHOLD);
+    int window    = bs_safeguard_effective_int(scfg->safeguard_window,
+                        BS_DEFAULT_SAFEGUARD_WINDOW);
+    int ttl       = bs_safeguard_effective_int(scfg->safeguard_ttl,
+                        BS_DEFAULT_SAFEGUARD_TTL);
+
+    apr_uint32_t base = bs_safeguard_bucket(ip);
+    apr_status_t rv = apr_global_mutex_lock(bs_shm.mutex);
+    if (rv != APR_SUCCESS) {
+        ap_log_rerror(APLOG_MARK, APLOG_WARNING, rv, r,
+            "mod_botshield: safeguard-table mutex_lock failed; "
+            "dropping presentation record");
+        return;
+    }
+
+    int matched_idx = -1;
+    int empty_idx   = -1;
+    for (unsigned i = 0; i < BS_SAFEGUARD_PROBE_LIMIT; i++) {
+        apr_uint32_t idx = (base + i) % bs_shm.safeguard_capacity;
+        bs_safeguard_slot *slot = &bs_shm.safeguard_table[idx];
+        if (!slot->used) {
+            if (empty_idx < 0) empty_idx = (int)idx;
+            continue;
+        }
+        if (memcmp(slot->ip, ip, 16) == 0) {
+            matched_idx = (int)idx;
+            break;
+        }
+    }
+
+    int target_idx;
+    if (matched_idx >= 0) {
+        target_idx = matched_idx;
+    } else if (empty_idx >= 0) {
+        target_idx = empty_idx;
+    } else {
+        static apr_time_t last_warn = 0;
+        apr_time_t now_t = apr_time_now();
+        if (now_t - last_warn > apr_time_from_sec(60)) {
+            last_warn = now_t;
+            ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+                "mod_botshield: safeguard-table probe saturated at "
+                "bucket %u (capacity %" APR_SIZE_T_FMT "); overwriting "
+                "— consider raising BotShieldSafeguardCapacity",
+                base, bs_shm.safeguard_capacity);
+        }
+        target_idx = (int)base;
+    }
+
+    bs_safeguard_slot *slot = &bs_shm.safeguard_table[target_idx];
+    apr_uint32_t v0 = apr_atomic_read32(&slot->version);
+    apr_atomic_set32(&slot->version, v0 | 1U);   /* begin write */
+
+    apr_uint32_t now_sec = (apr_uint32_t)now;
+    int fresh_slot = (matched_idx < 0);
+    if (fresh_slot) {
+        memcpy(slot->ip, ip, 16);
+        slot->used                 = 1;
+        slot->present_window_start = now_sec;
+        slot->present_count        = 1;
+        slot->safeguard_until      = 0;
+    } else if (slot->present_window_start == 0
+               || now_sec - slot->present_window_start >= (apr_uint32_t)window) {
+        /* Window rolled — start fresh counting from this presentation. */
+        slot->present_window_start = now_sec;
+        slot->present_count        = 1;
+    } else {
+        slot->present_count++;
+    }
+    if (slot->present_count >= (apr_uint32_t)threshold) {
+        slot->safeguard_until = now + ttl;
+    }
+
+    apr_atomic_set32(&slot->version, (v0 | 1U) + 1U);
+    apr_global_mutex_unlock(bs_shm.mutex);
+}
+
+/* Clear the (ip) entry. Called when a valid _bs_verified lands for
+ * this IP — proves the client CAN solve, so accumulated presentation
+ * history was noise (probably transient) and we want a fresh slate.
+ * No-op if the entry isn't found; silent on error. */
+static void bs_safeguard_clear(const unsigned char ip[16])
+{
+    if (!bs_shm.safeguard_table || !bs_shm.mutex) return;
+    apr_uint32_t base = bs_safeguard_bucket(ip);
+
+    if (apr_global_mutex_lock(bs_shm.mutex) != APR_SUCCESS) return;
+    for (unsigned i = 0; i < BS_SAFEGUARD_PROBE_LIMIT; i++) {
+        apr_uint32_t idx = (base + i) % bs_shm.safeguard_capacity;
+        bs_safeguard_slot *slot = &bs_shm.safeguard_table[idx];
+        if (!slot->used) continue;
+        if (memcmp(slot->ip, ip, 16) != 0) continue;
+        apr_uint32_t v0 = apr_atomic_read32(&slot->version);
+        apr_atomic_set32(&slot->version, v0 | 1U);
+        slot->used                 = 0;
+        slot->present_window_start = 0;
+        slot->present_count        = 0;
+        slot->safeguard_until      = 0;
+        memset(slot->ip, 0, 16);
+        apr_atomic_set32(&slot->version, (v0 | 1U) + 1U);
+        break;
+    }
+    apr_global_mutex_unlock(bs_shm.mutex);
 }
 
 /* --- Rotating Bloom filter (M5.2) ---
@@ -5860,6 +6152,110 @@ static const char *bs_set_rate_escalate_capacity(cmd_parms *cmd,
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
     scfg->strike_capacity = (int)n;
+    return NULL;
+}
+
+/* E10 — BotShieldSafeguard on|off. Master switch for the
+ * anti-loop hysteresis. Off = pre-E10 behavior (challenge every
+ * request that tier dispatch sends to challenge). On = track
+ * presentations per IP and flip to a short-lived pass-through
+ * after BotShieldSafeguardThreshold presentations within
+ * BotShieldSafeguardWindow seconds without a solve.
+ *
+ * Default off: opt-in because safeguard does grant temporary
+ * pass-through, which some operators will consider too soft
+ * regardless of the narrow conditions. Operators who've seen
+ * the stuck-loop failure mode in practice enable it. */
+static const char *bs_set_safeguard(cmd_parms *cmd, void *dconf, int flag)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->safeguard_enabled = flag ? 1 : 0;
+    return NULL;
+}
+
+/* E10 — BotShieldSafeguardThreshold <N>. Number of presentations
+ * within the window before safeguard trips. */
+static const char *bs_set_safeguard_threshold(cmd_parms *cmd,
+                                              void *dconf,
+                                              const char *arg)
+{
+    (void)dconf;
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (!end || *end || n < 1 || n > 1000) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSafeguardThreshold: '%s' must be 1..1000", arg);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->safeguard_threshold = (int)n;
+    return NULL;
+}
+
+/* E10 — BotShieldSafeguardWindow <seconds>. Counting window for
+ * the threshold. Beyond this, old presentations roll off and the
+ * counter resets on the next presentation. */
+static const char *bs_set_safeguard_window(cmd_parms *cmd,
+                                           void *dconf,
+                                           const char *arg)
+{
+    (void)dconf;
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (!end || *end || n < 1 || n > 86400) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSafeguardWindow: '%s' must be 1..86400 seconds",
+            arg);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->safeguard_window = (int)n;
+    return NULL;
+}
+
+/* E10 — BotShieldSafeguardTTL <seconds>. How long the safeguard
+ * state lasts after the last presentation. Slides on each fresh
+ * presentation during active safeguard (TTL resets) so a client
+ * that stays broken doesn't oscillate at window boundaries. */
+static const char *bs_set_safeguard_ttl(cmd_parms *cmd,
+                                        void *dconf,
+                                        const char *arg)
+{
+    (void)dconf;
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (!end || *end || n < 1 || n > 86400 * 7) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSafeguardTTL: '%s' must be 1..%d seconds",
+            arg, 86400 * 7);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->safeguard_ttl = (int)n;
+    return NULL;
+}
+
+/* E10 — BotShieldSafeguardCapacity <n>. SHM slot count. Same
+ * per-server-scope convention as the other SHM-sizing directives:
+ * only the main server's value is consulted at post_config. */
+static const char *bs_set_safeguard_capacity(cmd_parms *cmd,
+                                             void *dconf,
+                                             const char *arg)
+{
+    (void)dconf;
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (!end || *end
+        || n < BS_SAFEGUARD_MIN_SLOTS || n > BS_SAFEGUARD_MAX_SLOTS) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSafeguardCapacity: '%s' must be %d..%d",
+            arg, BS_SAFEGUARD_MIN_SLOTS, BS_SAFEGUARD_MAX_SLOTS);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->safeguard_capacity = (int)n;
     return NULL;
 }
 
@@ -10294,6 +10690,36 @@ static const command_rec bs_cmds[] = {
                  "headroom; same eviction discipline as the flagged-"
                  "IP table when the probe window saturates. Read at "
                  "post_config from the main server's value."),
+    /* E10 — challenge safeguard / anti-loop hysteresis. */
+    AP_INIT_FLAG("BotShieldSafeguard",
+                 bs_set_safeguard, NULL, RSRC_CONF,
+                 "Enable anti-loop hysteresis (default off). When on, "
+                 "a client that gets challenged N times within W "
+                 "seconds without solving any challenge is passed "
+                 "through for a TTL window instead of being re-"
+                 "challenged. Decision log shows reason "
+                 "challenge-safeguard. Doesn't mint _bs_verified; "
+                 "doesn't override 403/429 blocks."),
+    AP_INIT_TAKE1("BotShieldSafeguardThreshold",
+                 bs_set_safeguard_threshold, NULL, RSRC_CONF,
+                 "Presentations-without-solve inside the window "
+                 "before safeguard trips (default 5; range 1..1000)."),
+    AP_INIT_TAKE1("BotShieldSafeguardWindow",
+                 bs_set_safeguard_window, NULL, RSRC_CONF,
+                 "Counting window in seconds for the threshold "
+                 "(default 600; range 1..86400)."),
+    AP_INIT_TAKE1("BotShieldSafeguardTTL",
+                 bs_set_safeguard_ttl, NULL, RSRC_CONF,
+                 "How long safeguard stays active after the last "
+                 "presentation (default 900 seconds; range "
+                 "1..604800). Slides on each fresh presentation "
+                 "during active safeguard."),
+    AP_INIT_TAKE1("BotShieldSafeguardCapacity",
+                 bs_set_safeguard_capacity, NULL, RSRC_CONF,
+                 "SHM safeguard-table slot count (default 50000). "
+                 "Per-server-scope but only the main server's value "
+                 "is consulted at post_config since the table is "
+                 "module-global."),
     AP_INIT_TAKE_ARGV("BotShieldBlockPath",
                  bs_set_block_path, NULL, RSRC_CONF,
                  "Block a named cohort from a path glob. Args: "
@@ -11051,6 +11477,23 @@ static int bs_handler(request_rec *r)
         if (!cookie_verify_reason) {
             cookie_fully_ok = 1;
             have_prior_rep  = 1;
+            /* E10 — safeguard clear on solve. A successful verify
+             * proves this client CAN complete a challenge, so any
+             * accumulated presentation history was transient noise
+             * (mid-session CSP moment, browser cookie glitch). Reset
+             * the slot so a later failed solve counts from zero. */
+            {
+                bs_server_cfg *scfg_sg = ap_get_module_config(
+                    r->server->module_config, &botshield_module);
+                if (scfg_sg && scfg_sg->safeguard_enabled == 1) {
+                    unsigned char sg_ip[16];
+                    if (bs_parse_client_ip(r->useragent_ip, sg_ip)) {
+                        bs_mask_ipv6_prefix(sg_ip,
+                                            scfg_sg->ipv6_prefix_bits);
+                        bs_safeguard_clear(sg_ip);
+                    }
+                }
+            }
         } else {
             if (strcmp(cookie_verify_reason, "signature mismatch") != 0) {
                 have_prior_rep = 1;
@@ -11213,6 +11656,39 @@ static int bs_handler(request_rec *r)
      * now that we've committed to challenging this client; that keeps
      * writes off the ~99% happy path. */
     if (have_client_ip) bs_bloom_add(client_ip);
+
+    /* E10 — challenge safeguard. Before actually issuing the
+     * challenge, check whether this IP has been presented N times
+     * within the window without solving. If so, flip to a pass-
+     * through with reason=challenge-safeguard so a broken client
+     * (JS blocked, CSP-stripped, cookie handling buggy) stops
+     * being looped on the same challenge. Otherwise record this
+     * presentation and proceed. Safeguard runs AFTER bs_check_policy
+     * by construction (we're already past the policy short-circuit
+     * returns), so 403/429 blocks still win. */
+    {
+        bs_server_cfg *scfg_sg = ap_get_module_config(
+            r->server->module_config, &botshield_module);
+        if (scfg_sg && scfg_sg->safeguard_enabled == 1
+            && have_client_ip) {
+            apr_int64_t now_t = (apr_int64_t)apr_time_sec(apr_time_now());
+            if (bs_safeguard_check(client_ip, now_t)) {
+                ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                    "mod_botshield: challenge-safeguard active for "
+                    "%s; skipping challenge-issue and passing "
+                    "through (until=%" APR_INT64_T_FMT ")",
+                    r->useragent_ip, (apr_int64_t)now_t);
+                bs_score_add(r, 0, 0, "challenge-safeguard");
+                bs_decision_log(r, "safeguard", "declined",
+                                cookie_status, "-", "-",
+                                bs_decision_reason_names(r->pool, score),
+                                effective);
+                return DECLINED;
+            }
+            bs_safeguard_record_presentation(r, scfg_sg,
+                                             client_ip, now_t);
+        }
+    }
 
     /* Decide whether this challenge will be served as the M7 silent-tier
      * auto-submit splash or as the form-PoW interstitial. Captcha tier
