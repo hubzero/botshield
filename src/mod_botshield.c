@@ -67,10 +67,23 @@ module AP_MODULE_DECLARE_DATA botshield_module;
 #define BS_UNSET              (-1)
 #define BS_DEFAULT_COOKIE_TTL 3600  /* seconds a verified cookie is good for */
 #define BS_DEFAULT_DIFFICULTY 4     /* leading hex zeros */
+#define BS_DEFAULT_MAX_DIFFICULTY 8 /* matches the BotShieldDifficulty
+                                     * upper-bound; adaptive bumps from
+                                     * BotShieldFlag clamp here. Operator
+                                     * raises with BotShieldMaxDifficulty
+                                     * (1..16) at server scope. */
+#define BS_MAX_DIFFICULTY_HARDCAP 16
 #define BS_CLOCK_SKEW_AHEAD   60    /* grace if client clock runs ahead */
 #define BS_DEFAULT_FORGIVE_SILENT   10
 #define BS_DEFAULT_FORGIVE_FORM     25
 #define BS_DEFAULT_FORGIVE_CAPTCHA  50
+/* E15 — per-cookie hourly cap on accumulated forgiveness.
+ * 200 points/hour ≈ 4-8 challenge-passes worth of credit; enough for
+ * a real user pinned at borderline-suspicious to keep transacting,
+ * tight enough that a patient bot solving every few minutes stops
+ * earning forgiveness past the cap. */
+#define BS_DEFAULT_FORGIVE_CAP_PER_HOUR  200
+#define BS_FORGIVE_WINDOW_SEC            3600
 #define BS_COOKIE_NAME        "_bs_verified"
 #define BS_DEFAULT_PROMPT     "I\xe2\x80\x99m not a robot"   /* U+2019 */
 #define BS_DEFAULT_LOGO_LABEL "botshield"
@@ -112,11 +125,16 @@ module AP_MODULE_DECLARE_DATA botshield_module;
  *   forgiveness amount on verify.
  *
  * Keep in sync with the JS worker when the template ships the wire bits. */
-#define BS_PROTOCOL_VERSION   1
+/* Bumped 1->2 for E15: rep envelope grew two fields
+ * (forgive_window_start, forgive_consumed). Old (v1) cookies fail
+ * the version check and trigger a fresh challenge — one-time
+ * disruption per client on upgrade. The same shape lets future rep
+ * extensions ride without code-flow changes. */
+#define BS_PROTOCOL_VERSION   2
 #define BS_SALT_BYTES         16
 #define BS_NONCE_BYTES        8
 #define BS_SIG_BYTES          32  /* HMAC-SHA-256 output */
-#define BS_COOKIE_FIELDS      15  /* full cookie payload; canonical is 13 */
+#define BS_COOKIE_FIELDS      17  /* full cookie payload; canonical is 15 */
 
 /* E8.1 — AES-256-GCM cookie wire format.
  *
@@ -179,14 +197,26 @@ static void bs_score_add(request_rec *r, int penalty,
                          int ttl_seconds, const char *reason);
 
 /* Reputation state carried in the cookie. Populated fresh on a first-time
- * challenge (all zeros), and merged forward with forgiveness on re-issues. */
+ * challenge (all zeros), and merged forward with forgiveness on re-issues.
+ *
+ * E15 — forgiveness cap per window. `forgive_window_start`
+ * marks the start of the current rolling hour (unix sec); on every
+ * verify-success we either roll the window if the prior one is over an
+ * hour old, or clamp the new forgiveness so the running consumed total
+ * stays at or below BotShieldForgivenessCapPerHour. The fields ride in
+ * the cookie envelope (one bump of BS_PROTOCOL_VERSION) so the cap
+ * survives across cookie re-issues but doesn't survive a deliberate
+ * cookie drop — by design, since dropping the cookie also drops the
+ * accumulated rep that forgiveness was meant to whittle down. */
 typedef struct {
     int         score;
     apr_uint32_t flags;
     int         passes_silent;
     int         passes_form;
     int         passes_captcha;
-    apr_time_t  challenged_at;  /* unix sec */
+    apr_time_t  challenged_at;        /* unix sec */
+    apr_uint32_t forgive_window_start; /* unix sec; 0 = no window yet */
+    apr_uint32_t forgive_consumed;     /* points used inside current window */
 } bs_rep_state;
 
 typedef struct {
@@ -312,7 +342,10 @@ struct bs_captcha_provider {
  * post-config. */
 #define BS_SHM_MAGIC              0x42534844  /* 'BSHD' */
 #define BS_SHM_FORMAT_VERSION     1
-#define BS_DEFAULT_SHM_SIZE       (8 * 1024 * 1024)
+/* E13 — bumped from 8M to 16M to accommodate the per-slot ns_id+pad
+ * fields (8 bytes/slot across flagged-IP / strike / safeguard tables
+ * at default capacities). 8M no longer fits the default config. */
+#define BS_DEFAULT_SHM_SIZE       (16 * 1024 * 1024)
 #define BS_DEFAULT_FLAGGED_SLOTS  50000
 #define BS_FLAGGED_MIN_SLOTS      1024
 #define BS_FLAGGED_MAX_SLOTS      1000000
@@ -334,13 +367,20 @@ struct bs_captcha_provider {
 
 /* Per-slot seqlock + payload. version bit 0 is a "write in progress"
  * marker: even = quiescent, odd = mid-write. Readers snapshot fields
- * between matching even versions. Slot size is 32 bytes (cache-line
- * friendly): keep it that way so the array stays compact. */
+ * between matching even versions.
+ *
+ * E13: an `ns_id` field was added so vhosts can isolate their flagged-
+ * IP reputation. Lookups match on (ip, ns_id); the same physical
+ * table holds rows from many namespaces without cross-pollution. The
+ * size grew from 32 to 40 bytes — a 25% memory hit on this table for
+ * the namespace guarantee. */
 typedef struct {
     apr_uint32_t  version;       /* seqlock counter */
     apr_uint32_t  flags;         /* 0 = empty slot */
     unsigned char ip[16];        /* IPv6-mapped v4 or raw v6 */
     apr_int64_t   expires_at;    /* unix seconds; past means stale */
+    apr_uint32_t  ns_id;         /* E13 — reputation namespace */
+    apr_uint32_t  _pad;          /* keep slot 8-byte aligned */
 } bs_flagged_ip_slot;
 
 /* E9 — repeated-429 escalation. Per-(client_ip, rate_rule_slot)
@@ -363,6 +403,8 @@ typedef struct {
     apr_uint32_t  strike_window_start; /* unix sec; 0 = no strikes yet */
     apr_uint32_t  strike_count;
     apr_int64_t   escalation_until;    /* unix sec; 0 = not escalated */
+    apr_uint32_t  ns_id;               /* E13 — reputation namespace */
+    apr_uint32_t  _pad;
 } bs_strike_slot;
 
 #define BS_STRIKE_EMPTY            0xFFFFFFFFu
@@ -400,6 +442,8 @@ typedef struct {
     apr_uint32_t  present_window_start; /* unix sec */
     apr_uint32_t  present_count;
     apr_int64_t   safeguard_until;      /* unix sec; 0 = inactive */
+    apr_uint32_t  ns_id;                /* E13 — reputation namespace */
+    apr_uint32_t  _pad;
 } bs_safeguard_slot;
 
 #define BS_SAFEGUARD_PROBE_LIMIT   8
@@ -700,6 +744,13 @@ struct bs_dir_cfg {
     const bs_pow_algorithm *algorithm;      /* chosen issue algorithm */
     const unsigned char    *secret;         /* HMAC key bytes */
     apr_size_t              secret_len;     /* key length */
+    /* E16 — verify-only secondary secret for graceful
+     * rotation. Issue path always uses `secret`; verify tries
+     * `secret` first and falls back to `secret_secondary` so cookies
+     * minted under the old key keep validating during a rotation
+     * window. NULL = no rotation in progress. */
+    const unsigned char    *secret_secondary;
+    apr_size_t              secret_secondary_len;
     int                     cookie_format;  /* BS_FMT_* bitmap or BS_FMT_UNSET */
     int score_silent;           /* score >= this → silent tier (logged only) */
     int score_hard;             /* score >= this → hard form-PoW tier */
@@ -810,6 +861,31 @@ typedef struct bs_server_cfg {
      * block-path rules behave as if mode=observe regardless of
      * their per-rule setting. Operator's panic-revert switch. */
     int                 shadow_mode;
+    /* E13 — reputation namespace for SHM-backed state (flagged-IP,
+     * strike, safeguard, Bloom). Derived at post_config: explicit
+     * BotShieldShareScope token wins; otherwise siphash(ServerName)
+     * truncated to u32. ns_id == 0 means "global default
+     * namespace" — used as a graceful fallback when ServerName is
+     * unset (rare but legal). Lookups in the SHM tables match on
+     * (ip, ns_id) so different namespaces stop sharing reputation
+     * even though they live in the same physical SHM segment.
+     *
+     * Default semantic: each vhost auto-isolates by ServerName.
+     * Operators wanting two vhosts to share state set the same
+     * BotShieldShareScope token on both; same string → same
+     * ns_id → shared rows. */
+    apr_uint32_t        ns_id;            /* effective; resolved post_config */
+    const char         *share_scope_token; /* explicit override; NULL = default */
+    /* E14 — adaptive challenge intensity ceiling. PoW difficulty
+     * after BotShieldFlag's next_difficulty bumps is clamped against
+     * this value (1..BS_MAX_DIFFICULTY_HARDCAP). 0 = inherit /
+     * default (BS_DEFAULT_MAX_DIFFICULTY). Server-scope only — the
+     * adaptive layer is module-global by design. */
+    int                 max_difficulty;
+    /* E15 — per-cookie hourly forgiveness cap. 0 =
+     * inherit / use BS_DEFAULT_FORGIVE_CAP_PER_HOUR. Operators set
+     * this at server scope to bound forgiveness-farming. */
+    int                 forgive_cap_per_hour;
     apr_array_header_t *block_paths;   /* bs_block_path_entry * */
     /* E3 — path-based triggers. Same ordered-array + upsert-by-name
      * shape as E2.1; first match wins at request time. */
@@ -923,6 +999,8 @@ static void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->algorithm  = NULL;
     cfg->secret     = NULL;
     cfg->secret_len = 0;
+    cfg->secret_secondary     = NULL;
+    cfg->secret_secondary_len = 0;
     cfg->cookie_format = BS_FMT_UNSET;
     cfg->score_silent  = BS_UNSET;
     cfg->score_hard    = BS_UNSET;
@@ -1062,6 +1140,19 @@ static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
     /* E12 — shadow mode inherits unless explicitly set. */
     out->shadow_mode = (add->shadow_mode != -1)
                      ? add->shadow_mode : base->shadow_mode;
+    /* E13 — namespace plumbing: explicit share_scope_token survives
+     * the merge if either scope set it. ns_id is computed at
+     * post_config from the merged config + ServerName, so the
+     * field's value here is irrelevant; just take add's. */
+    out->share_scope_token = add->share_scope_token
+        ? add->share_scope_token : base->share_scope_token;
+    out->ns_id = add->ns_id;
+    /* E14 — child-set value wins; 0 means "inherit". */
+    out->max_difficulty = (add->max_difficulty > 0)
+        ? add->max_difficulty : base->max_difficulty;
+    /* E15 — same merge shape. */
+    out->forgive_cap_per_hour = (add->forgive_cap_per_hour > 0)
+        ? add->forgive_cap_per_hour : base->forgive_cap_per_hour;
     out->block_paths = bs_merge_rule_array(p, base->block_paths,
                                            add->block_paths);
     out->path_triggers = bs_merge_rule_array(p, base->path_triggers,
@@ -1181,6 +1272,15 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     /* E12 — global shadow mode unset. -1 sentinel means "inherit
      * from parent scope"; merge below picks the right value. */
     scfg->shadow_mode           = -1;
+    /* E13 — namespace defaults. ns_id is filled in at post_config
+     * once ServerName is final; here we just zero the field and
+     * leave the explicit-token slot NULL. */
+    scfg->ns_id                 = 0;
+    scfg->share_scope_token     = NULL;
+    /* E14 — 0 means "inherit / use BS_DEFAULT_MAX_DIFFICULTY". */
+    scfg->max_difficulty        = 0;
+    /* E15 — 0 means "inherit / use default". */
+    scfg->forgive_cap_per_hour  = 0;
     scfg->block_paths      = apr_array_make(p, 4, sizeof(void *));
     scfg->path_triggers         = apr_array_make(p, 4, sizeof(void *));
     scfg->cookie_triggers  = apr_array_make(p, 4, sizeof(void *));
@@ -1255,6 +1355,17 @@ static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     } else {
         out->secret     = base->secret;
         out->secret_len = base->secret_len;
+    }
+    /* E16 — same merge shape for the verify-only
+     * secondary key. Independent of primary so an operator can
+     * stage a rotation by setting just the secondary on a child
+     * scope. */
+    if (add->secret_secondary) {
+        out->secret_secondary     = add->secret_secondary;
+        out->secret_secondary_len = add->secret_secondary_len;
+    } else {
+        out->secret_secondary     = base->secret_secondary;
+        out->secret_secondary_len = base->secret_secondary_len;
     }
     out->cookie_format = (add->cookie_format == BS_FMT_UNSET)
                        ? base->cookie_format
@@ -1419,8 +1530,29 @@ static const char *bs_set_forgive_captcha(cmd_parms *cmd, void *cfg_v, const cha
 static apr_uint32_t bs_parse_flag_names(apr_pool_t *p, const char *s,
                                         const char **err);
 
+/* E13 — log a NOTICE if an SHM-sizing directive is placed inside
+ * <VirtualHost>. The single SHM segment is sized once at post_config
+ * from the main server's scfg; per-vhost values for capacity directives
+ * are silently ignored. The footgun was hard to spot in operator
+ * configs — surface it explicitly so they don't think their override
+ * took effect. */
+static void bs_warn_if_virtual_scope(cmd_parms *cmd, const char *name)
+{
+    if (cmd->server && cmd->server->is_virtual) {
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, cmd->server,
+            "mod_botshield: %s placed inside <VirtualHost> at %s:%d "
+            "is ignored — SHM is sized once from the main server "
+            "scope. Move this directive outside <VirtualHost>.",
+            name,
+            cmd->directive && cmd->directive->filename
+                ? cmd->directive->filename : "(unknown)",
+            cmd->directive ? cmd->directive->line_num : 0);
+    }
+}
+
 static const char *bs_set_shm_size(cmd_parms *cmd, void *dconf, const char *arg)
 {
+    bs_warn_if_virtual_scope(cmd, "BotShieldShmSize");
     (void)dconf;
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
@@ -1459,6 +1591,7 @@ static const char *bs_set_flagged_capacity(cmd_parms *cmd, void *dconf,
                                            const char *arg)
 {
     (void)dconf;
+    bs_warn_if_virtual_scope(cmd, "BotShieldFlaggedIPCapacity");
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
     long n;
@@ -1940,13 +2073,15 @@ static int bs_from_hex(const char *in, apr_size_t out_len, unsigned char *out)
 /* --- Canonical form for HMAC input ---
  *
  * "v|alg|salthex|noncehex|difficulty|expires_at
- *  |score|flags|pass_s|pass_f|pass_c|challenged_at|auto"   (13 fields)
+ *  |score|flags|pass_s|pass_f|pass_c|challenged_at|auto
+ *  |forgive_window_start|forgive_consumed"                  (15 fields)
  *
  * Deterministic, ASCII, field-delimited. Both sign and verify produce this
  * exact string from the challenge struct — if a byte changes, the HMAC
  * changes, and tampering is detected. The rep fields follow the challenge
  * fields so existing M2 code reading positions 0..5 still lines up; the
- * M7 `auto` marker is appended at position 12 after challenged_at. */
+ * M7 `auto` marker is appended at position 12 after challenged_at; the
+ * E15 forgiveness-window pair is appended at 13..14. */
 static const char *bs_challenge_canonical(apr_pool_t *p,
                                           const bs_challenge *ch)
 {
@@ -1954,15 +2089,20 @@ static const char *bs_challenge_canonical(apr_pool_t *p,
     char nonce_hex[BS_NONCE_BYTES * 2 + 1];
     bs_to_hex(ch->salt,  BS_SALT_BYTES,  salt_hex);
     bs_to_hex(ch->nonce, BS_NONCE_BYTES, nonce_hex);
+    /* v2 canonical = v1 canonical + forgive_window_start +
+     * forgive_consumed (E15). 15 pipe-delimited fields
+     * total; HMAC cookie body adds 2 more (sig_hex, counter) for 17. */
     return apr_psprintf(p,
         "%d|%s|%s|%s|%d|%" APR_TIME_T_FMT
-        "|%d|%u|%d|%d|%d|%" APR_TIME_T_FMT "|%d",
+        "|%d|%u|%d|%d|%d|%" APR_TIME_T_FMT "|%d|%u|%u",
         ch->version, ch->alg_name, salt_hex, nonce_hex,
         ch->difficulty, ch->expires_at,
         ch->rep.score, (unsigned)ch->rep.flags,
         ch->rep.passes_silent, ch->rep.passes_form, ch->rep.passes_captcha,
         ch->rep.challenged_at,
-        ch->auto_tier ? 1 : 0);
+        ch->auto_tier ? 1 : 0,
+        (unsigned)ch->rep.forgive_window_start,
+        (unsigned)ch->rep.forgive_consumed);
 }
 
 /* --- Algorithm: sha256-zeros ---
@@ -2273,6 +2413,7 @@ static const char *bs_set_bloom_ips(cmd_parms *cmd, void *dconf,
                                     const char *arg)
 {
     (void)dconf;
+    bs_warn_if_virtual_scope(cmd, "BotShieldBloomIPs");
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
     long n;
@@ -2290,6 +2431,7 @@ static const char *bs_set_bloom_window(cmd_parms *cmd, void *dconf,
                                        const char *arg)
 {
     (void)dconf;
+    bs_warn_if_virtual_scope(cmd, "BotShieldBloomWindow");
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
     long n;
@@ -2998,18 +3140,22 @@ typedef enum {
 static void bs_set_trigger_tag(request_rec *r, const char *tag);
 static void bs_flagged_ip_add(request_rec *r,
                               const unsigned char ip[16],
-                              apr_uint32_t flag_bits, int ttl_seconds);
+                              apr_uint32_t flag_bits, int ttl_seconds,
+                              apr_uint32_t ns_id);
 static int  bs_parse_client_ip(const char *ip_str, unsigned char out[16]);
 static void bs_mask_ipv6_prefix(unsigned char ip[16], int prefix_bits);
-/* E9 — strike-table helpers used inside the rate-limit walk. */
+/* E9 — strike-table helpers used inside the rate-limit walk.
+ * E13 — extra ns_id parameter for per-vhost reputation. */
 static int  bs_strike_check_escalated(const unsigned char ip[16],
                                       apr_uint32_t rule_slot,
-                                      apr_int64_t now);
+                                      apr_int64_t now,
+                                      apr_uint32_t ns_id);
 static int  bs_strike_record_429(request_rec *r,
                                  const unsigned char ip[16],
                                  apr_uint32_t rule_slot,
                                  const bs_rate_escalate_entry *cfg,
-                                 apr_int64_t now);
+                                 apr_int64_t now,
+                                 apr_uint32_t ns_id);
 
 /* E11 — load-state read used by bs_check_policy's load-trigger
  * walk. Declaration here so the walk at line ~3540 compiles
@@ -3020,12 +3166,15 @@ static bs_load_state bs_load_current(void);
  * just before issuing a challenge (check + record presentation)
  * and on successful cookie verify (clear the per-IP counter). */
 static int  bs_safeguard_check(const unsigned char ip[16],
-                               apr_int64_t now);
+                               apr_int64_t now,
+                               apr_uint32_t ns_id);
 static void bs_safeguard_record_presentation(request_rec *r,
                                              bs_server_cfg *scfg,
                                              const unsigned char ip[16],
-                                             apr_int64_t now);
-static void bs_safeguard_clear(const unsigned char ip[16]);
+                                             apr_int64_t now,
+                                             apr_uint32_t ns_id);
+static void bs_safeguard_clear(const unsigned char ip[16],
+                               apr_uint32_t ns_id);
 static int  bs_safeguard_effective_int(int v, int dflt);
 /* Shared action helpers — see definitions below. The server-cfg
  * struct body appears later in the file, so we forward-declare by
@@ -3739,7 +3888,7 @@ static int bs_check_policy(request_rec *r)
             if (!observe && e->escalate && have_ip
                 && bs_strike_check_escalated(client_ip,
                                              (apr_uint32_t)e->shm_slot,
-                                             now_t)) {
+                                             now_t, scfg->ns_id)) {
                 /* E9 — escalation gate. Active only outside observe
                  * mode; observe must not enforce. */
                 bs_score_add(r, BS_PENALTY_RATE_LIMIT, 3600,
@@ -3792,7 +3941,8 @@ static int bs_check_policy(request_rec *r)
              * to status_code via bs_strike_check_escalated above. */
             if (e->escalate && have_ip) {
                 int crossed = bs_strike_record_429(r, client_ip,
-                    (apr_uint32_t)e->shm_slot, e->escalate, now_t);
+                    (apr_uint32_t)e->shm_slot, e->escalate, now_t,
+                    scfg->ns_id);
                 if (crossed) {
                     ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r,
                         "mod_botshield: rate-limit-abuse threshold "
@@ -4243,6 +4393,165 @@ static bs_load_state bs_load_current(void)
     return (bs_load_state)apr_atomic_read32(&bs_shm.header->load_state);
 }
 
+/* Forward decl for the Bloom popcount helper used by the headroom
+ * tick below; the body lives further down with the metrics gauge
+ * helpers. */
+static apr_uint64_t bs_popcount_buffer(const unsigned char *buf,
+                                       apr_size_t bytes);
+
+/* E13.1 — capacity headroom monitoring. Periodic watchdog that walks
+ * the four reputation tables and emits NOTICE / WARNING when load
+ * factors approach the probe-saturation cliff. The reactive "probe
+ * saturated" warnings still fire at the cliff (see bs_flagged_ip_add
+ * / bs_strike_record_429 / bs_safeguard_record_presentation), but
+ * those only fire when an insert actually overflows the probe window
+ * — by then entries are already being overwritten. The forward-
+ * looking warnings here give operators time to bump capacity
+ * directives gracefully before that happens.
+ *
+ * Thresholds match the open-addressing displacement model:
+ *   load 0.50 → ~0.1% insert displacement (NOTICE)
+ *   load 0.70 → ~2.8%                     (WARNING)
+ * Beyond 0.7 the cliff comes fast.
+ *
+ * For the Bloom filter the rated-FP design point sits at bit-fill
+ * ≈ ln(2) ≈ 0.693 of total bits. We NOTICE at 0.50 fill (~0.1% FP),
+ * WARNING at 0.70 (~1.5% FP), past which FP climbs sharply. */
+
+#define BS_HEADROOM_NOTICE_PCT     50
+#define BS_HEADROOM_WARN_PCT       70
+#define BS_HEADROOM_REWARN_SEC     300
+
+typedef struct {
+    apr_int64_t flagged_last_warn;
+    apr_int64_t strike_last_warn;
+    apr_int64_t safeguard_last_warn;
+    apr_int64_t bloom_last_warn;
+} bs_headroom_state;
+
+/* Single-process state — mod_watchdog runs callbacks in the parent
+ * only, so static module-scope storage is sufficient. */
+static bs_headroom_state bs_headroom = {0, 0, 0, 0};
+
+static void bs_headroom_check_table(server_rec *sv,
+                                    const char *table_name,
+                                    const char *directive_name,
+                                    apr_uint64_t used,
+                                    apr_size_t capacity,
+                                    apr_int64_t *last_warn,
+                                    apr_int64_t now_sec)
+{
+    if (capacity == 0) return;
+    int pct = (int)((used * 100) / capacity);
+    int level;
+    if      (pct >= BS_HEADROOM_WARN_PCT)   level = APLOG_WARNING;
+    else if (pct >= BS_HEADROOM_NOTICE_PCT) level = APLOG_NOTICE;
+    else { *last_warn = 0; return; }   /* below threshold; reset cooldown */
+
+    if (now_sec - *last_warn < BS_HEADROOM_REWARN_SEC) return;
+    *last_warn = now_sec;
+    ap_log_error(APLOG_MARK, level, 0, sv,
+        "mod_botshield: %s table at %d%% (%" APR_UINT64_T_FMT
+        "/%" APR_SIZE_T_FMT "); approaching probe-saturation. "
+        "Consider raising %s.",
+        table_name, pct, used, capacity, directive_name);
+}
+
+static apr_status_t bs_headroom_watchdog_cb(int state, void *data,
+                                            apr_pool_t *pool)
+{
+    (void)pool;
+    if (state != AP_WATCHDOG_STATE_RUNNING) return APR_SUCCESS;
+    server_rec *sv = data;
+    if (!sv) return APR_SUCCESS;
+
+    apr_int64_t now_sec = (apr_int64_t)apr_time_sec(apr_time_now());
+
+    /* flagged-IP — count active (TTL-live) entries. Stale-but-still-
+     * present slots understate load slightly, biasing toward late
+     * warnings. Acceptable: the reactive cliff warning is the safety
+     * net for the bias case. */
+    if (bs_shm.flagged_table && bs_shm.flagged_capacity) {
+        apr_uint64_t used = 0;
+        for (apr_size_t i = 0; i < bs_shm.flagged_capacity; i++) {
+            const bs_flagged_ip_slot *slot = &bs_shm.flagged_table[i];
+            if ((slot->version & 1U) == 0 &&
+                slot->flags != 0 &&
+                slot->expires_at > now_sec) {
+                used++;
+            }
+        }
+        bs_headroom_check_table(sv, "flagged-IP",
+            "BotShieldFlaggedIPCapacity",
+            used, bs_shm.flagged_capacity,
+            &bs_headroom.flagged_last_warn, now_sec);
+    }
+
+    /* strike — physical occupancy (any non-EMPTY rule_slot). */
+    if (bs_shm.strike_table && bs_shm.strike_capacity) {
+        apr_uint64_t used = 0;
+        for (apr_size_t i = 0; i < bs_shm.strike_capacity; i++) {
+            const bs_strike_slot *slot = &bs_shm.strike_table[i];
+            if ((slot->version & 1U) == 0 &&
+                slot->rule_slot != BS_STRIKE_EMPTY) {
+                used++;
+            }
+        }
+        bs_headroom_check_table(sv, "strike",
+            "BotShieldRateLimitEscalateCapacity",
+            used, bs_shm.strike_capacity,
+            &bs_headroom.strike_last_warn, now_sec);
+    }
+
+    /* safeguard — physical occupancy. */
+    if (bs_shm.safeguard_table && bs_shm.safeguard_capacity) {
+        apr_uint64_t used = 0;
+        for (apr_size_t i = 0; i < bs_shm.safeguard_capacity; i++) {
+            const bs_safeguard_slot *slot = &bs_shm.safeguard_table[i];
+            if ((slot->version & 1U) == 0 && slot->used != 0) {
+                used++;
+            }
+        }
+        bs_headroom_check_table(sv, "safeguard",
+            "BotShieldSafeguardCapacity",
+            used, bs_shm.safeguard_capacity,
+            &bs_headroom.safeguard_last_warn, now_sec);
+    }
+
+    /* Bloom — bit-fill against the ln(2) rated-FP design point.
+     * Both buffers OR'd at lookup, so the higher-fill buffer governs
+     * the effective FP. Compare the peak fill across the two. */
+    if (bs_shm.bloom_bufs[0] && bs_shm.bloom_buf_bytes) {
+        apr_uint64_t total_bits = (apr_uint64_t)bs_shm.bloom_buf_bytes * 8;
+        if (total_bits > 0) {
+            apr_uint64_t bits_a = bs_popcount_buffer(
+                bs_shm.bloom_bufs[0], bs_shm.bloom_buf_bytes);
+            apr_uint64_t bits_b = bs_popcount_buffer(
+                bs_shm.bloom_bufs[1], bs_shm.bloom_buf_bytes);
+            apr_uint64_t peak = (bits_a > bits_b) ? bits_a : bits_b;
+            int pct = (int)((peak * 100) / total_bits);
+            int level;
+            if      (pct >= BS_HEADROOM_WARN_PCT)   level = APLOG_WARNING;
+            else if (pct >= BS_HEADROOM_NOTICE_PCT) level = APLOG_NOTICE;
+            else { bs_headroom.bloom_last_warn = 0; goto bloom_done; }
+            if (now_sec - bs_headroom.bloom_last_warn
+                >= BS_HEADROOM_REWARN_SEC) {
+                bs_headroom.bloom_last_warn = now_sec;
+                ap_log_error(APLOG_MARK, level, 0, sv,
+                    "mod_botshield: Bloom filter peak buffer at %d%% "
+                    "fill (%" APR_UINT64_T_FMT "/%" APR_UINT64_T_FMT
+                    " bits); false-positive rate climbing past design "
+                    "point. Consider raising BotShieldBloomIPs or "
+                    "shortening BotShieldBloomWindow.",
+                    pct, peak, total_bits);
+            }
+bloom_done: ;
+        }
+    }
+
+    return APR_SUCCESS;
+}
+
 /* ======================================================================
  * E5 — App-to-module reputation feedback.
  *
@@ -4486,7 +4795,8 @@ static apr_status_t bs_app_feedback_filter(ap_filter_t *f,
     if (bs_parse_client_ip(r->useragent_ip, client_ip)) {
         bs_mask_ipv6_prefix(client_ip, scfg->ipv6_prefix_bits);
         bs_flagged_ip_add(r, client_ip,
-                          ft->action.flag_bit, ft->action.ttl_sec);
+                          ft->action.flag_bit, ft->action.ttl_sec,
+                          scfg->ns_id);
         if (ft->action.log_tag) {
             /* Feedback has no decision-log emission of its own, but
              * the tag belongs in r->notes so any subsequent access
@@ -4518,7 +4828,38 @@ static void bs_app_feedback_insert_filter(request_rec *r)
  * formats (X-Botshield-Claims `flags=`), and the decision log.
  * Hoisted up the file so E8.2's claim-emit path can render the
  * bitmap without a forward-decl dance over an anonymous-struct
- * array (forward-declaring such arrays in C is awkward). */
+ * array (forward-declaring such arrays in C is awkward).
+ *
+ * E14 — registry now also carries adaptive metadata (penalty,
+ * next_difficulty_delta, next_tier_floor). The values seeded here
+ * are the built-in defaults; `BotShieldFlag` directive entries
+ * override them by name. Compatibility shim `bs_flag_names` (no
+ * metadata, just name+bit) is kept as a const projection for
+ * call-sites that only iterate names. */
+typedef struct {
+    const char     *name;
+    apr_uint32_t    bit;
+    int             penalty;
+    int             next_difficulty_delta;   /* signed; clamped at apply time */
+    bs_tier         next_tier_floor;          /* PASS = no floor (default) */
+} bs_flag_meta;
+
+static bs_flag_meta bs_flag_metadata[] = {
+    { "honeypot_hit",         BS_FLAG_HONEYPOT_HIT,          60, 0, BS_TIER_PASS },
+    { "scanner_probe",        BS_FLAG_SCANNER_PROBE,         50, 0, BS_TIER_PASS },
+    { "fake_bot",             BS_FLAG_FAKE_BOT,              80, 0, BS_TIER_PASS },
+    { "pow_fail_streak",      BS_FLAG_POW_FAIL_STREAK,       30, 0, BS_TIER_PASS },
+    { "app_verified_human",   BS_FLAG_APP_VERIFIED_HUMAN,   -80, 0, BS_TIER_PASS },
+    { "app_verified_session", BS_FLAG_APP_VERIFIED_SESSION, -40, 0, BS_TIER_PASS },
+    { "app_trust_signal",     BS_FLAG_APP_TRUST_SIGNAL,     -20, 0, BS_TIER_PASS },
+};
+#define BS_FLAG_META_COUNT \
+    (sizeof(bs_flag_metadata) / sizeof(bs_flag_metadata[0]))
+
+/* Read-only name+bit projection for legacy iteration sites. NULL-
+ * terminated to match the prior bs_flag_names[] sentinel contract.
+ * Built lazily because the metadata table isn't const after E14
+ * (BotShieldFlag mutates it). */
 static const struct { const char *name; apr_uint32_t bit; } bs_flag_names[] = {
     { "honeypot_hit",         BS_FLAG_HONEYPOT_HIT         },
     { "scanner_probe",        BS_FLAG_SCANNER_PROBE        },
@@ -4529,6 +4870,16 @@ static const struct { const char *name; apr_uint32_t bit; } bs_flag_names[] = {
     { "app_trust_signal",     BS_FLAG_APP_TRUST_SIGNAL     },
     { NULL, 0 }
 };
+
+static bs_flag_meta *bs_flag_meta_for_name(const char *name)
+{
+    for (size_t i = 0; i < BS_FLAG_META_COUNT; i++) {
+        if (strcmp(bs_flag_metadata[i].name, name) == 0) {
+            return &bs_flag_metadata[i];
+        }
+    }
+    return NULL;
+}
 
 /* Forward decl: bs_tier_name lives further down with the rest of
  * the tier-dispatch helpers; bs_app_claims_set needs it. */
@@ -5141,6 +5492,43 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
         if (vcfg->robots_refresh_interval == BS_ROBOTS_REFRESH_UNSET) {
             vcfg->robots_refresh_interval = BS_ROBOTS_REFRESH_DEFAULT;
         }
+
+        /* E13 — derive the per-vhost reputation namespace ID.
+         * Precedence: explicit BotShieldShareScope token first,
+         * then siphash(ServerName), finally fallback to ns_id=0
+         * (global default) with a NOTICE so operators see the
+         * fallback. The siphash_key was randomized at SHM init
+         * above, so the ns_id is stable for this Apache process
+         * but unpredictable across restarts — which is fine since
+         * persistence already keys on ns_id and old state files
+         * get rejected on format mismatch. */
+        const char *src = NULL;
+        if (vcfg->share_scope_token) {
+            apr_uint64_t h = bs_siphash24(bs_shm.header->siphash_key,
+                (const unsigned char *)vcfg->share_scope_token,
+                strlen(vcfg->share_scope_token));
+            vcfg->ns_id = (apr_uint32_t)h;
+            src = "BotShieldShareScope token";
+        } else if (sv->server_hostname && *sv->server_hostname) {
+            apr_uint64_t h = bs_siphash24(bs_shm.header->siphash_key,
+                (const unsigned char *)sv->server_hostname,
+                strlen(sv->server_hostname));
+            vcfg->ns_id = (apr_uint32_t)h;
+            src = "ServerName";
+        } else {
+            vcfg->ns_id = 0;
+            ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+                "mod_botshield: vhost has no ServerName and no "
+                "BotShieldShareScope; using global ns_id=0. "
+                "Reputation will be shared with any other vhost "
+                "in this state. Set ServerName or "
+                "BotShieldShareScope to opt into isolation.");
+        }
+        if (src) {
+            ap_log_error(APLOG_MARK, APLOG_INFO, 0, sv,
+                "mod_botshield: vhost ns_id=0x%08x from %s",
+                vcfg->ns_id, src);
+        }
     }
 
     /* E2.2 — reserve an SHM rate-counter slot pool for each vhost's
@@ -5297,6 +5685,35 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
         }
     }
 
+    /* E13.1 — capacity headroom watchdog. Independent of load-state
+     * config; runs whenever mod_watchdog is available. 60s tick is
+     * generous — table populations move on minute-to-hour timescales
+     * and the rewarn cooldown is 5 min anyway. */
+    {
+        APR_OPTIONAL_FN_TYPE(ap_watchdog_get_instance) *fn_get =
+            APR_RETRIEVE_OPTIONAL_FN(ap_watchdog_get_instance);
+        APR_OPTIONAL_FN_TYPE(ap_watchdog_register_callback) *fn_reg =
+            APR_RETRIEVE_OPTIONAL_FN(ap_watchdog_register_callback);
+        if (fn_get && fn_reg) {
+            ap_watchdog_t *wd = NULL;
+            apr_status_t wrv = fn_get(&wd,
+                "mod_botshield_headroom", 0, 1, pconf);
+            if (wrv == APR_SUCCESS && wd) {
+                apr_interval_time_t ival = apr_time_from_sec(60);
+                wrv = fn_reg(wd, ival, s, bs_headroom_watchdog_cb);
+            } else if (wrv == APR_SUCCESS) {
+                wrv = APR_EGENERAL;
+            }
+            if (wrv != APR_SUCCESS) {
+                ap_log_error(APLOG_MARK, APLOG_INFO, wrv, s,
+                    "mod_botshield: headroom watchdog "
+                    "registration failed; capacity warnings "
+                    "will not fire (reactive cliff warnings "
+                    "still in place)");
+            }
+        }
+    }
+
     return OK;
 }
 
@@ -5325,9 +5742,21 @@ static void bs_child_init(apr_pool_t *p, server_rec *s)
  *   4. Else the first slot encountered → overwrite (with a log-warning).
  */
 
-static apr_uint32_t bs_flagged_bucket(const unsigned char ip[16])
+/* E13 — bucket key folds in ns_id so different namespaces probe
+ * different starting positions for the same IP. The slot's ns_id
+ * field is the authoritative match check; mixing ns_id into the
+ * hash is a load-balancing optimization, not a correctness one. */
+static apr_uint32_t bs_flagged_bucket(const unsigned char ip[16],
+                                      apr_uint32_t ns_id)
 {
-    apr_uint64_t h = bs_siphash24(bs_shm.header->siphash_key, ip, 16);
+    unsigned char buf[16 + 4];
+    memcpy(buf, ip, 16);
+    buf[16] = (unsigned char)( ns_id        & 0xFF);
+    buf[17] = (unsigned char)((ns_id >>  8) & 0xFF);
+    buf[18] = (unsigned char)((ns_id >> 16) & 0xFF);
+    buf[19] = (unsigned char)((ns_id >> 24) & 0xFF);
+    apr_uint64_t h = bs_siphash24(bs_shm.header->siphash_key,
+                                  buf, sizeof(buf));
     return (apr_uint32_t)(h % bs_shm.flagged_capacity);
 }
 
@@ -5335,7 +5764,8 @@ static apr_uint32_t bs_flagged_bucket(const unsigned char ip[16])
  * global mutex. */
 static void bs_flagged_write_slot(bs_flagged_ip_slot *slot,
                                   const unsigned char ip[16],
-                                  apr_uint32_t flags, apr_int64_t expires_at)
+                                  apr_uint32_t flags, apr_int64_t expires_at,
+                                  apr_uint32_t ns_id)
 {
     apr_uint32_t v = apr_atomic_read32(&slot->version);
     apr_atomic_set32(&slot->version, v | 1U);   /* begin: odd */
@@ -5343,13 +5773,15 @@ static void bs_flagged_write_slot(bs_flagged_ip_slot *slot,
     memcpy(slot->ip, ip, 16);
     slot->flags      = flags;
     slot->expires_at = expires_at;
+    slot->ns_id      = ns_id;
     /* Version-bump to even publishes the payload to readers. */
     apr_atomic_set32(&slot->version, (v | 1U) + 1U);
 }
 
 static void bs_flagged_ip_add(request_rec *r,
                               const unsigned char ip[16],
-                              apr_uint32_t flag_bits, int ttl_seconds)
+                              apr_uint32_t flag_bits, int ttl_seconds,
+                              apr_uint32_t ns_id)
 {
     if (!bs_shm.flagged_table || !bs_shm.mutex) return;
     if (!flag_bits) return;
@@ -5357,7 +5789,7 @@ static void bs_flagged_ip_add(request_rec *r,
 
     apr_int64_t now = (apr_int64_t)apr_time_sec(apr_time_now());
     apr_int64_t expires_at = now + ttl_seconds;
-    apr_uint32_t base = bs_flagged_bucket(ip);
+    apr_uint32_t base = bs_flagged_bucket(ip, ns_id);
 
     apr_status_t rv = apr_global_mutex_lock(bs_shm.mutex);
     if (rv != APR_SUCCESS) {
@@ -5371,12 +5803,13 @@ static void bs_flagged_ip_add(request_rec *r,
         apr_uint32_t idx = (base + i) % bs_shm.flagged_capacity;
         bs_flagged_ip_slot *slot = &bs_shm.flagged_table[idx];
 
-        if (slot->flags && memcmp(slot->ip, ip, 16) == 0) {
+        if (slot->flags && slot->ns_id == ns_id
+            && memcmp(slot->ip, ip, 16) == 0) {
             /* Merge flags, refresh TTL to whichever is later. */
             apr_uint32_t merged = slot->flags | flag_bits;
             apr_int64_t later   = slot->expires_at > expires_at
                                   ? slot->expires_at : expires_at;
-            bs_flagged_write_slot(slot, ip, merged, later);
+            bs_flagged_write_slot(slot, ip, merged, later, ns_id);
             apr_global_mutex_unlock(bs_shm.mutex);
             return;
         }
@@ -5408,7 +5841,7 @@ static void bs_flagged_ip_add(request_rec *r,
     }
 
     bs_flagged_write_slot(&bs_shm.flagged_table[victim], ip,
-                          flag_bits, expires_at);
+                          flag_bits, expires_at, ns_id);
     apr_global_mutex_unlock(bs_shm.mutex);
 }
 
@@ -5417,12 +5850,13 @@ static void bs_flagged_ip_add(request_rec *r,
  * skipped. Readers never block writers; a caught-mid-write slot is
  * skipped (probe continues to the next). */
 static int bs_flagged_ip_lookup(const unsigned char ip[16],
-                                apr_uint32_t *out_flags)
+                                apr_uint32_t *out_flags,
+                                apr_uint32_t ns_id)
 {
     if (!bs_shm.flagged_table) return 0;
 
     apr_int64_t now = (apr_int64_t)apr_time_sec(apr_time_now());
-    apr_uint32_t base = bs_flagged_bucket(ip);
+    apr_uint32_t base = bs_flagged_bucket(ip, ns_id);
 
     for (unsigned i = 0; i < BS_FLAGGED_PROBE_LIMIT; i++) {
         apr_uint32_t idx = (base + i) % bs_shm.flagged_capacity;
@@ -5432,6 +5866,7 @@ static int bs_flagged_ip_lookup(const unsigned char ip[16],
         unsigned char  local_ip[16];
         apr_uint32_t   local_flags;
         apr_int64_t    local_expires;
+        apr_uint32_t   local_ns;
         int spins = 0;
         for (;;) {
             v1 = apr_atomic_read32(&slot->version);
@@ -5442,6 +5877,7 @@ static int bs_flagged_ip_lookup(const unsigned char ip[16],
             memcpy(local_ip, slot->ip, 16);
             local_flags   = slot->flags;
             local_expires = slot->expires_at;
+            local_ns      = slot->ns_id;
             v2 = apr_atomic_read32(&slot->version);
             if (v1 == v2) break;
             if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
@@ -5449,6 +5885,7 @@ static int bs_flagged_ip_lookup(const unsigned char ip[16],
         if (v1 == ~0U) continue;           /* slot too contended */
         if (local_flags == 0) continue;     /* empty */
         if (local_expires < now) continue;  /* stale */
+        if (local_ns != ns_id) continue;    /* E13: different namespace */
         if (memcmp(local_ip, ip, 16) != 0) continue;
 
         *out_flags = local_flags;
@@ -5472,30 +5909,38 @@ static int bs_flagged_ip_lookup(const unsigned char ip[16],
  * change the user-visible behavior. */
 
 static apr_uint32_t bs_strike_bucket(const unsigned char ip[16],
-                                     apr_uint32_t rule_slot)
+                                     apr_uint32_t rule_slot,
+                                     apr_uint32_t ns_id)
 {
-    /* Mix rule_slot into the SipHash input so the same IP falls in
-     * different buckets per rule — keeps probe windows from
-     * clustering when one IP misbehaves on multiple rules. */
-    unsigned char buf[16 + 4];
+    /* Mix rule_slot AND ns_id into the SipHash input. rule_slot
+     * keeps probe windows from clustering when one IP misbehaves
+     * on multiple rules; ns_id (E13) puts different namespaces in
+     * different buckets for load-balancing — the slot's ns_id
+     * field is the authoritative match check. */
+    unsigned char buf[16 + 4 + 4];
     memcpy(buf, ip, 16);
     buf[16] = (unsigned char)( rule_slot        & 0xFF);
     buf[17] = (unsigned char)((rule_slot >> 8 ) & 0xFF);
     buf[18] = (unsigned char)((rule_slot >> 16) & 0xFF);
     buf[19] = (unsigned char)((rule_slot >> 24) & 0xFF);
+    buf[20] = (unsigned char)( ns_id            & 0xFF);
+    buf[21] = (unsigned char)((ns_id >> 8 )     & 0xFF);
+    buf[22] = (unsigned char)((ns_id >> 16)     & 0xFF);
+    buf[23] = (unsigned char)((ns_id >> 24)     & 0xFF);
     apr_uint64_t h = bs_siphash24(bs_shm.header->siphash_key,
                                   buf, sizeof(buf));
     return (apr_uint32_t)(h % bs_shm.strike_capacity);
 }
 
-/* Seqlock-protected lookup. Returns 1 if (ip, rule_slot) has an
- * active escalation (escalation_until > now), 0 otherwise. */
+/* Seqlock-protected lookup. Returns 1 if (ip, rule_slot, ns_id)
+ * has an active escalation (escalation_until > now), 0 otherwise. */
 static int bs_strike_check_escalated(const unsigned char ip[16],
                                      apr_uint32_t rule_slot,
-                                     apr_int64_t now)
+                                     apr_int64_t now,
+                                     apr_uint32_t ns_id)
 {
     if (!bs_shm.strike_table || bs_shm.strike_capacity == 0) return 0;
-    apr_uint32_t base = bs_strike_bucket(ip, rule_slot);
+    apr_uint32_t base = bs_strike_bucket(ip, rule_slot, ns_id);
 
     for (unsigned i = 0; i < BS_STRIKE_PROBE_LIMIT; i++) {
         apr_uint32_t idx = (base + i) % bs_shm.strike_capacity;
@@ -5505,6 +5950,7 @@ static int bs_strike_check_escalated(const unsigned char ip[16],
         unsigned char local_ip[16];
         apr_uint32_t  local_rule;
         apr_int64_t   local_until;
+        apr_uint32_t  local_ns;
         int spins = 0;
         for (;;) {
             v1 = apr_atomic_read32(&slot->version);
@@ -5515,6 +5961,7 @@ static int bs_strike_check_escalated(const unsigned char ip[16],
             local_rule  = slot->rule_slot;
             memcpy(local_ip, slot->ip, 16);
             local_until = slot->escalation_until;
+            local_ns    = slot->ns_id;
             v2 = apr_atomic_read32(&slot->version);
             if (v1 == v2) break;
             if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
@@ -5522,6 +5969,7 @@ static int bs_strike_check_escalated(const unsigned char ip[16],
         if (v1 == ~0U) continue;
         if (local_rule == BS_STRIKE_EMPTY) continue;
         if (local_rule != rule_slot) continue;
+        if (local_ns != ns_id) continue;
         if (memcmp(local_ip, ip, 16) != 0) continue;
         return local_until > now;
     }
@@ -5538,10 +5986,11 @@ static int bs_strike_record_429(request_rec *r,
                                 const unsigned char ip[16],
                                 apr_uint32_t rule_slot,
                                 const bs_rate_escalate_entry *cfg,
-                                apr_int64_t now)
+                                apr_int64_t now,
+                                apr_uint32_t ns_id)
 {
     if (!bs_shm.strike_table || !bs_shm.mutex || !cfg) return 0;
-    apr_uint32_t base = bs_strike_bucket(ip, rule_slot);
+    apr_uint32_t base = bs_strike_bucket(ip, rule_slot, ns_id);
 
     apr_status_t rv = apr_global_mutex_lock(bs_shm.mutex);
     if (rv != APR_SUCCESS) {
@@ -5561,6 +6010,7 @@ static int bs_strike_record_429(request_rec *r,
             continue;
         }
         if (slot->rule_slot == rule_slot
+            && slot->ns_id == ns_id
             && memcmp(slot->ip, ip, 16) == 0) {
             matched_idx = (int)idx;
             break;
@@ -5597,6 +6047,7 @@ static int bs_strike_record_429(request_rec *r,
     if (fresh_slot) {
         memcpy(slot->ip, ip, 16);
         slot->rule_slot           = rule_slot;
+        slot->ns_id               = ns_id;
         slot->strike_window_start = now_sec;
         slot->strike_count        = 1;
         slot->escalation_until    = 0;
@@ -5642,9 +6093,18 @@ static int bs_safeguard_effective_int(int v, int dflt)
     return (v > 0) ? v : dflt;
 }
 
-static apr_uint32_t bs_safeguard_bucket(const unsigned char ip[16])
+static apr_uint32_t bs_safeguard_bucket(const unsigned char ip[16],
+                                        apr_uint32_t ns_id)
 {
-    apr_uint64_t h = bs_siphash24(bs_shm.header->siphash_key, ip, 16);
+    /* E13 — fold ns_id into the hash so vhosts with different
+     * reputation namespaces get disjoint bucket distributions. */
+    unsigned char buf[16 + 4];
+    memcpy(buf, ip, 16);
+    buf[16] = (unsigned char)(ns_id      );
+    buf[17] = (unsigned char)(ns_id >>  8);
+    buf[18] = (unsigned char)(ns_id >> 16);
+    buf[19] = (unsigned char)(ns_id >> 24);
+    apr_uint64_t h = bs_siphash24(bs_shm.header->siphash_key, buf, sizeof(buf));
     /* Mix a distinct constant so this table's bucket distribution
      * isn't perfectly correlated with flagged_table / strike_table
      * for the same IP — reduces probe-window collisions across
@@ -5656,10 +6116,11 @@ static apr_uint32_t bs_safeguard_bucket(const unsigned char ip[16])
 /* Lockless read. Returns 1 if the IP has an active safeguard
  * (safeguard_until > now), 0 otherwise. Seqlock discipline matches
  * bs_flagged_ip_lookup and bs_strike_check_escalated. */
-static int bs_safeguard_check(const unsigned char ip[16], apr_int64_t now)
+static int bs_safeguard_check(const unsigned char ip[16], apr_int64_t now,
+                              apr_uint32_t ns_id)
 {
     if (!bs_shm.safeguard_table || bs_shm.safeguard_capacity == 0) return 0;
-    apr_uint32_t base = bs_safeguard_bucket(ip);
+    apr_uint32_t base = bs_safeguard_bucket(ip, ns_id);
 
     for (unsigned i = 0; i < BS_SAFEGUARD_PROBE_LIMIT; i++) {
         apr_uint32_t idx = (base + i) % bs_shm.safeguard_capacity;
@@ -5667,6 +6128,7 @@ static int bs_safeguard_check(const unsigned char ip[16], apr_int64_t now)
 
         apr_uint32_t v1, v2;
         apr_uint32_t  local_used;
+        apr_uint32_t  local_ns_id;
         unsigned char local_ip[16];
         apr_int64_t   local_until;
         int spins = 0;
@@ -5677,6 +6139,7 @@ static int bs_safeguard_check(const unsigned char ip[16], apr_int64_t now)
                 continue;
             }
             local_used  = slot->used;
+            local_ns_id = slot->ns_id;
             memcpy(local_ip, slot->ip, 16);
             local_until = slot->safeguard_until;
             v2 = apr_atomic_read32(&slot->version);
@@ -5685,6 +6148,7 @@ static int bs_safeguard_check(const unsigned char ip[16], apr_int64_t now)
         }
         if (v1 == ~0U) continue;
         if (!local_used) continue;
+        if (local_ns_id != ns_id) continue;
         if (memcmp(local_ip, ip, 16) != 0) continue;
         return local_until > now;
     }
@@ -5700,7 +6164,8 @@ static int bs_safeguard_check(const unsigned char ip[16], apr_int64_t now)
 static void bs_safeguard_record_presentation(request_rec *r,
                                              bs_server_cfg *scfg,
                                              const unsigned char ip[16],
-                                             apr_int64_t now)
+                                             apr_int64_t now,
+                                             apr_uint32_t ns_id)
 {
     if (!bs_shm.safeguard_table || !bs_shm.mutex || !scfg) return;
     int threshold = bs_safeguard_effective_int(scfg->safeguard_threshold,
@@ -5710,7 +6175,7 @@ static void bs_safeguard_record_presentation(request_rec *r,
     int ttl       = bs_safeguard_effective_int(scfg->safeguard_ttl,
                         BS_DEFAULT_SAFEGUARD_TTL);
 
-    apr_uint32_t base = bs_safeguard_bucket(ip);
+    apr_uint32_t base = bs_safeguard_bucket(ip, ns_id);
     apr_status_t rv = apr_global_mutex_lock(bs_shm.mutex);
     if (rv != APR_SUCCESS) {
         ap_log_rerror(APLOG_MARK, APLOG_WARNING, rv, r,
@@ -5728,6 +6193,7 @@ static void bs_safeguard_record_presentation(request_rec *r,
             if (empty_idx < 0) empty_idx = (int)idx;
             continue;
         }
+        if (slot->ns_id != ns_id) continue;
         if (memcmp(slot->ip, ip, 16) == 0) {
             matched_idx = (int)idx;
             break;
@@ -5762,6 +6228,7 @@ static void bs_safeguard_record_presentation(request_rec *r,
     if (fresh_slot) {
         memcpy(slot->ip, ip, 16);
         slot->used                 = 1;
+        slot->ns_id                = ns_id;
         slot->present_window_start = now_sec;
         slot->present_count        = 1;
         slot->safeguard_until      = 0;
@@ -5785,20 +6252,23 @@ static void bs_safeguard_record_presentation(request_rec *r,
  * this IP — proves the client CAN solve, so accumulated presentation
  * history was noise (probably transient) and we want a fresh slate.
  * No-op if the entry isn't found; silent on error. */
-static void bs_safeguard_clear(const unsigned char ip[16])
+static void bs_safeguard_clear(const unsigned char ip[16],
+                               apr_uint32_t ns_id)
 {
     if (!bs_shm.safeguard_table || !bs_shm.mutex) return;
-    apr_uint32_t base = bs_safeguard_bucket(ip);
+    apr_uint32_t base = bs_safeguard_bucket(ip, ns_id);
 
     if (apr_global_mutex_lock(bs_shm.mutex) != APR_SUCCESS) return;
     for (unsigned i = 0; i < BS_SAFEGUARD_PROBE_LIMIT; i++) {
         apr_uint32_t idx = (base + i) % bs_shm.safeguard_capacity;
         bs_safeguard_slot *slot = &bs_shm.safeguard_table[idx];
         if (!slot->used) continue;
+        if (slot->ns_id != ns_id) continue;
         if (memcmp(slot->ip, ip, 16) != 0) continue;
         apr_uint32_t v0 = apr_atomic_read32(&slot->version);
         apr_atomic_set32(&slot->version, v0 | 1U);
         slot->used                 = 0;
+        slot->ns_id                = 0;
         slot->present_window_start = 0;
         slot->present_count        = 0;
         slot->safeguard_until      = 0;
@@ -5821,16 +6291,28 @@ static void bs_safeguard_clear(const unsigned char ip[16])
 
 /* Compute k bit indices using SipHash + Kirsch-Mitzenmacher double
  * hashing: hash once to get h1, salt and re-hash for h2, then generate
- * each of the k indices as (h1 + i*h2) mod m_bits. */
+ * each of the k indices as (h1 + i*h2) mod m_bits.
+ *
+ * E13 — ns_id is folded into both h1 and h2 inputs so different
+ * namespaces compute disjoint bit-position sets. Same physical
+ * Bloom buffer, logically isolated states. The K=7 bit-position
+ * draws make false-positive across namespaces negligible at our
+ * load factors. */
 static void bs_bloom_indices(const unsigned char ip[16],
-                             apr_uint32_t *out, apr_size_t m_bits)
+                             apr_uint32_t *out, apr_size_t m_bits,
+                             apr_uint32_t ns_id)
 {
-    apr_uint64_t h1 = bs_siphash24(bs_shm.header->siphash_key, ip, 16);
-    unsigned char salted[16];
-    memcpy(salted, ip, 16);
-    salted[0] ^= 0x9e;   /* domain separator for the second hash */
+    unsigned char buf[16 + 4];
+    memcpy(buf, ip, 16);
+    buf[16] = (unsigned char)( ns_id        & 0xFF);
+    buf[17] = (unsigned char)((ns_id >>  8) & 0xFF);
+    buf[18] = (unsigned char)((ns_id >> 16) & 0xFF);
+    buf[19] = (unsigned char)((ns_id >> 24) & 0xFF);
+    apr_uint64_t h1 = bs_siphash24(bs_shm.header->siphash_key,
+                                   buf, sizeof(buf));
+    buf[0] ^= 0x9e;   /* domain separator for the second hash */
     apr_uint64_t h2 = bs_siphash24(bs_shm.header->siphash_key,
-                                   salted, 16);
+                                   buf, sizeof(buf));
     for (int i = 0; i < BS_BLOOM_K; i++) {
         out[i] = (apr_uint32_t)((h1 + (apr_uint64_t)i * h2) % m_bits);
     }
@@ -5897,14 +6379,14 @@ static void bs_bloom_rotate_if_due(apr_int64_t now_sec)
     if (held_mutex) apr_global_mutex_unlock(bs_shm.mutex);
 }
 
-static void bs_bloom_add(const unsigned char ip[16])
+static void bs_bloom_add(const unsigned char ip[16], apr_uint32_t ns_id)
 {
     if (!bs_shm.bloom_bufs[0]) return;
     bs_bloom_rotate_if_due((apr_int64_t)apr_time_sec(apr_time_now()));
 
     apr_size_t m_bits = (apr_size_t)bs_shm.bloom_buf_bytes * 8;
     apr_uint32_t indices[BS_BLOOM_K];
-    bs_bloom_indices(ip, indices, m_bits);
+    bs_bloom_indices(ip, indices, m_bits, ns_id);
 
     apr_uint32_t active = apr_atomic_read32(&bs_shm.header->bloom_active);
     unsigned char *buf = bs_shm.bloom_bufs[active & 1U];
@@ -5918,12 +6400,12 @@ static void bs_bloom_add(const unsigned char ip[16])
 
 /* Returns 1 if the IP's bits are fully present in buffer A or fully
  * present in buffer B. Lockless; plain atomic loads on bit slots. */
-static int bs_bloom_seen(const unsigned char ip[16])
+static int bs_bloom_seen(const unsigned char ip[16], apr_uint32_t ns_id)
 {
     if (!bs_shm.bloom_bufs[0]) return 0;
     apr_size_t m_bits = (apr_size_t)bs_shm.bloom_buf_bytes * 8;
     apr_uint32_t indices[BS_BLOOM_K];
-    bs_bloom_indices(ip, indices, m_bits);
+    bs_bloom_indices(ip, indices, m_bits, ns_id);
 
     int in_a = 1, in_b = 1;
     for (int i = 0; i < BS_BLOOM_K; i++) {
@@ -5972,7 +6454,13 @@ static int bs_bloom_seen(const unsigned char ip[16])
  * code; files are ephemeral enough to re-acquire. */
 
 #define BS_STATE_MAGIC            0x44485342U      /* 'BSHD' little-endian */
-#define BS_STATE_FORMAT_VERSION   1
+/* E13 — bumped from 1 to 2: bs_flagged_ip_slot grew an `ns_id`
+ * field for per-vhost reputation namespacing. Old (v1) state
+ * files are rejected with a NOTICE and the table starts fresh —
+ * one-time cost on upgrade, no slot-level migration code needed
+ * because flagged-IP TTLs are short anyway and most entries
+ * would have aged out. */
+#define BS_STATE_FORMAT_VERSION   2
 #define BS_STATE_MAX_AGE_SECS     (14 * 86400)     /* discard anything older */
 
 static apr_uint64_t bs_fnv64(apr_uint64_t h, const unsigned char *data,
@@ -6721,6 +7209,7 @@ static const char *bs_set_rate_escalate_capacity(cmd_parms *cmd,
                                                  const char *arg)
 {
     (void)dconf;
+    bs_warn_if_virtual_scope(cmd, "BotShieldRateLimitEscalateCapacity");
     char *end = NULL;
     long n = strtol(arg, &end, 10);
     if (!end || *end
@@ -6825,6 +7314,7 @@ static const char *bs_set_safeguard_capacity(cmd_parms *cmd,
                                              const char *arg)
 {
     (void)dconf;
+    bs_warn_if_virtual_scope(cmd, "BotShieldSafeguardCapacity");
     char *end = NULL;
     long n = strtol(arg, &end, 10);
     if (!end || *end
@@ -6837,6 +7327,212 @@ static const char *bs_set_safeguard_capacity(cmd_parms *cmd,
                                                &botshield_module);
     scfg->safeguard_capacity = (int)n;
     return NULL;
+}
+
+/* E13 — BotShieldShareScope <token>. Per-vhost reputation
+ * namespacing override. Default: each vhost auto-isolates by
+ * siphash(ServerName) — different ServerNames don't share
+ * flagged-IP / strike / safeguard / Bloom state. Two vhosts that
+ * should share state set the same token here; same string → same
+ * ns_id → shared rows in SHM.
+ *
+ * Empty token treated as "fall back to ServerName default" so
+ * `BotShieldShareScope ""` is a config error rather than a
+ * confusing reset. */
+static const char *bs_set_share_scope(cmd_parms *cmd, void *dconf,
+                                      const char *arg)
+{
+    (void)dconf;
+    if (!arg || !*arg) {
+        return "BotShieldShareScope: token required (use a "
+               "non-empty string; default isolation derives ns_id "
+               "from ServerName when this directive is absent)";
+    }
+    /* Bound the token length defensively; long strings are pointless
+     * since we hash to u32. */
+    if (strlen(arg) > 128) {
+        return "BotShieldShareScope: token over 128 chars";
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->share_scope_token = apr_pstrdup(cmd->pool, arg);
+    return NULL;
+}
+
+/* E14 — BotShieldFlag <name> [penalty=N] [next_difficulty=±N]
+ * [next_tier=silent|form|captcha]. Operator-side override of a
+ * registered flag bit's metadata.
+ *
+ * The flag NAME determines the bit; the directive lets operators
+ * tune what consequences riding that bit triggers without rewriting
+ * every BotShieldFeedbackTrigger / BotShieldPathTrigger that writes
+ * the flag. One declaration captures the policy for the whole
+ * deployment.
+ *
+ * All three keys are optional; absent keys leave the prior (built-in
+ * or last-set) value alone. Multiple BotShieldFlag directives for
+ * the same name compose — last write wins per key. */
+static const char *bs_set_flag(cmd_parms *cmd, void *dconf,
+                               int argc, char *const argv[])
+{
+    (void)dconf;
+    if (argc < 1) {
+        return "BotShieldFlag: expects <name> [penalty=N] "
+               "[next_difficulty=±N] [next_tier=silent|form|captcha]";
+    }
+    const char *name = argv[0];
+    bs_flag_meta *m = bs_flag_meta_for_name(name);
+    if (!m) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldFlag: unknown flag '%s'. Known flags: "
+            "honeypot_hit, scanner_probe, fake_bot, pow_fail_streak, "
+            "app_verified_human, app_verified_session, "
+            "app_trust_signal", name);
+    }
+    if (argc < 2) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldFlag: '%s' needs at least one key=value "
+            "(penalty / next_difficulty / next_tier)", name);
+    }
+    for (int i = 1; i < argc; i++) {
+        const char *arg = argv[i];
+        const char *eq  = strchr(arg, '=');
+        if (!eq) {
+            return apr_psprintf(cmd->pool,
+                "BotShieldFlag '%s': extra arg '%s' must be key=value",
+                name, arg);
+        }
+        apr_size_t klen = (apr_size_t)(eq - arg);
+        const char *val = eq + 1;
+        #define BS_FK(n) (klen == sizeof(n)-1 && \
+                          strncasecmp(arg, n, sizeof(n)-1) == 0)
+        if (BS_FK("penalty")) {
+            char *e2 = NULL;
+            long p = strtol(val, &e2, 10);
+            if (!e2 || *e2 || p < -1000 || p > 1000) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldFlag '%s': penalty='%s' must be an "
+                    "integer in -1000..1000", name, val);
+            }
+            m->penalty = (int)p;
+        } else if (BS_FK("next_difficulty")) {
+            char *e2 = NULL;
+            long d = strtol(val, &e2, 10);
+            if (!e2 || *e2 || d < -BS_MAX_DIFFICULTY_HARDCAP
+                           || d >  BS_MAX_DIFFICULTY_HARDCAP) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldFlag '%s': next_difficulty='%s' must be "
+                    "an integer in -%d..+%d", name, val,
+                    BS_MAX_DIFFICULTY_HARDCAP,
+                    BS_MAX_DIFFICULTY_HARDCAP);
+            }
+            m->next_difficulty_delta = (int)d;
+        } else if (BS_FK("next_tier")) {
+            if      (strcasecmp(val, "pass")    == 0) m->next_tier_floor = BS_TIER_PASS;
+            else if (strcasecmp(val, "silent")  == 0) m->next_tier_floor = BS_TIER_SILENT;
+            else if (strcasecmp(val, "form")    == 0) m->next_tier_floor = BS_TIER_HARD;
+            else if (strcasecmp(val, "captcha") == 0) m->next_tier_floor = BS_TIER_CAPTCHA;
+            else {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldFlag '%s': next_tier='%s' must be one "
+                    "of pass / silent / form / captcha", name, val);
+            }
+        } else {
+            return apr_psprintf(cmd->pool,
+                "BotShieldFlag '%s': unknown key '%.*s' "
+                "(want penalty / next_difficulty / next_tier)",
+                name, (int)klen, arg);
+        }
+        #undef BS_FK
+    }
+    return NULL;
+}
+
+/* E14 — BotShieldMaxDifficulty <N>. Server-scope ceiling for the
+ * effective PoW difficulty after BotShieldFlag's adaptive bumps. The
+ * existing BotShieldDifficulty range is 1..8 leading hex zeros
+ * (already astronomical at 8 = 2^32 hashes). Adaptive bumps from
+ * BotShieldFlag are clamped against this max. Default 8 — operators
+ * who actually want adaptive headroom raise this explicitly so the
+ * higher-cost ceiling is intentional. */
+static const char *bs_set_max_difficulty(cmd_parms *cmd, void *dconf,
+                                         const char *arg)
+{
+    (void)dconf;
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (!end || *end || n < 1 || n > BS_MAX_DIFFICULTY_HARDCAP) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldMaxDifficulty: '%s' must be an integer 1..%d",
+            arg, BS_MAX_DIFFICULTY_HARDCAP);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->max_difficulty = (int)n;
+    return NULL;
+}
+
+/* E15 — BotShieldForgivenessCapPerHour <N>. Server-
+ * scope cap on the points of forgiveness any one cookie can earn
+ * inside a rolling 1-hour window. 0 disables the cap (legacy
+ * behavior). Range 1..1000 — beyond that the cap is effectively
+ * absent anyway. */
+static const char *bs_set_forgive_cap(cmd_parms *cmd, void *dconf,
+                                      const char *arg)
+{
+    (void)dconf;
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (!end || *end || n < 0 || n > 1000) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldForgivenessCapPerHour: '%s' must be an integer "
+            "0..1000 (0 disables)", arg);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    /* Use 1 as a sentinel for "explicit 0 = disabled" so the merge's
+     * "> 0 wins" doesn't lose an explicit-zero override; map 0 input
+     * to a special sentinel that the apply helper treats as disabled.
+     * Simplest: use INT_MAX as "uncapped" and let merge work normally. */
+    scfg->forgive_cap_per_hour = (n == 0) ? INT_MAX : (int)n;
+    return NULL;
+}
+
+/* Apply the per-cookie forgiveness cap. Modifies *consumed and
+ * *window_start in place (reflecting the cookie state we'll write
+ * out) and returns the number of points actually granted, which may
+ * be less than `requested` if the cap kicks in. Window rolls if more
+ * than BS_FORGIVE_WINDOW_SEC has passed since window_start. */
+static int bs_forgiveness_apply_cap(int requested,
+                                    int cap,
+                                    apr_uint32_t now_sec,
+                                    apr_uint32_t *window_start,
+                                    apr_uint32_t *consumed)
+{
+    if (requested <= 0) return requested;
+    if (cap <= 0 || cap == INT_MAX) {
+        /* Uncapped: still update the window state for observability. */
+        if (*window_start == 0 ||
+            now_sec - *window_start >= BS_FORGIVE_WINDOW_SEC) {
+            *window_start = now_sec;
+            *consumed = 0;
+        }
+        *consumed = (apr_uint32_t)((apr_uint64_t)*consumed + requested
+                                    > APR_UINT32_MAX
+                                    ? APR_UINT32_MAX
+                                    : *consumed + requested);
+        return requested;
+    }
+    if (*window_start == 0 ||
+        now_sec - *window_start >= BS_FORGIVE_WINDOW_SEC) {
+        *window_start = now_sec;
+        *consumed = 0;
+    }
+    int remaining = cap - (int)*consumed;
+    if (remaining < 0) remaining = 0;
+    int granted = (requested < remaining) ? requested : remaining;
+    *consumed = (apr_uint32_t)(*consumed + granted);
+    return granted;
 }
 
 /* E12 — BotShieldShadowMode on|off. Server-scope master switch
@@ -7331,7 +8027,8 @@ static bs_trigger_exec_outcome bs_apply_trigger_action(
         unsigned char client_ip[16];
         if (bs_parse_client_ip(r->useragent_ip, client_ip)) {
             bs_mask_ipv6_prefix(client_ip, scfg->ipv6_prefix_bits);
-            bs_flagged_ip_add(r, client_ip, a->flag_bit, a->ttl_sec);
+            bs_flagged_ip_add(r, client_ip, a->flag_bit, a->ttl_sec,
+                              scfg->ns_id);
         }
     }
     bs_set_trigger_tag(r, a->log_tag);
@@ -8174,15 +8871,45 @@ static apr_status_t bs_watchdog_save_cb(int state, void *data,
 static int bs_flag_penalty(apr_uint32_t flags)
 {
     int p = 0;
-    if (flags & BS_FLAG_HONEYPOT_HIT)         p +=  60;
-    if (flags & BS_FLAG_SCANNER_PROBE)        p +=  50;
-    if (flags & BS_FLAG_FAKE_BOT)             p +=  80;
-    if (flags & BS_FLAG_POW_FAIL_STREAK)      p +=  30;
-    if (flags & BS_FLAG_APP_VERIFIED_HUMAN)   p += -80;
-    if (flags & BS_FLAG_APP_VERIFIED_SESSION) p += -40;
-    if (flags & BS_FLAG_APP_TRUST_SIGNAL)     p += -20;
+    for (size_t i = 0; i < BS_FLAG_META_COUNT; i++) {
+        if (flags & bs_flag_metadata[i].bit) p += bs_flag_metadata[i].penalty;
+    }
     if (p < BS_FLAG_PENALTY_FLOOR) p = BS_FLAG_PENALTY_FLOOR;
     return p;
+}
+
+/* E14 — adaptive intensity accumulator. For a flag bitfield, walks
+ * the registry and returns the cumulative difficulty-delta (sum) and
+ * tier-floor (max). PASS tier-floor means "no floor" — the score-
+ * derived tier wins. Negative difficulty-deltas (from credit flags)
+ * compose; final clamping happens at the use site against the
+ * configured BotShieldDifficulty range. */
+typedef struct {
+    int          difficulty_delta;
+    bs_tier      tier_floor;
+    apr_uint32_t bits_with_difficulty;   /* contributing flag bits */
+    apr_uint32_t bits_with_tier;
+} bs_flag_adaptive;
+
+static bs_flag_adaptive bs_flag_adaptive_for(apr_uint32_t flags)
+{
+    bs_flag_adaptive r = { 0, BS_TIER_PASS, 0, 0 };
+    for (size_t i = 0; i < BS_FLAG_META_COUNT; i++) {
+        const bs_flag_meta *m = &bs_flag_metadata[i];
+        if (!(flags & m->bit)) continue;
+        if (m->next_difficulty_delta != 0) {
+            r.difficulty_delta += m->next_difficulty_delta;
+            r.bits_with_difficulty |= m->bit;
+        }
+        if (m->next_tier_floor > r.tier_floor) {
+            r.tier_floor = m->next_tier_floor;
+            r.bits_with_tier = m->bit;
+        } else if (m->next_tier_floor != BS_TIER_PASS &&
+                   m->next_tier_floor == r.tier_floor) {
+            r.bits_with_tier |= m->bit;
+        }
+    }
+    return r;
 }
 
 /* Flag-name registry moved up the file (near the early request-path
@@ -8302,12 +9029,15 @@ static const char *bs_challenge_json(apr_pool_t *p, const bs_dir_cfg *cfg,
         "\"score\":%d,\"flags\":%u,"
         "\"passes_silent\":%d,\"passes_form\":%d,\"passes_captcha\":%d,"
         "\"challenged_at\":%" APR_TIME_T_FMT ",\"auto\":%d,"
+        "\"forgive_window_start\":%u,\"forgive_consumed\":%u,"
         "\"signature\":\"%s\"%s}",
         ch->version, ch->alg_name, salt_hex, nonce_hex,
         ch->difficulty, ch->expires_at,
         ch->rep.score, (unsigned)ch->rep.flags,
         ch->rep.passes_silent, ch->rep.passes_form, ch->rep.passes_captcha,
         ch->rep.challenged_at, ch->auto_tier ? 1 : 0,
+        (unsigned)ch->rep.forgive_window_start,
+        (unsigned)ch->rep.forgive_consumed,
         sig_hex, domain_json);
 }
 
@@ -8373,11 +9103,16 @@ static const char *bs_issue_challenge(apr_pool_t *p, const bs_dir_cfg *cfg,
     return NULL;
 }
 
-/* Parse the 13 pipe-delimited canonical-form fields (same shape
+/* Parse the 15 pipe-delimited canonical-form fields (same shape
  * emitted by bs_challenge_canonical, whether it arrived cleartext
  * from an HMAC cookie or as GCM plaintext) into *ch. Returns NULL
  * on success or a diagnostic on parse failure. Caller has already
- * split the canonical string at '|' into fields[0..12]. */
+ * split the canonical string at '|' into fields[0..14].
+ *
+ * Field count grew from 13 to 15 with BS_PROTOCOL_VERSION 1->2 to
+ * carry forgiveness-window state. The version check rejects v1
+ * cookies before we read the new fields, so a malformed v1 won't
+ * misalign reads. */
 static const char *bs_parse_canonical_fields(char *const fields[],
                                               bs_challenge *ch)
 {
@@ -8395,7 +9130,7 @@ static const char *bs_parse_canonical_fields(char *const fields[],
         !bs_from_hex(fields[2], BS_SALT_BYTES, ch->salt)) return "bad salt";
     if (strlen(fields[3]) != BS_NONCE_BYTES * 2 ||
         !bs_from_hex(fields[3], BS_NONCE_BYTES, ch->nonce)) return "bad nonce";
-    if (!bs_parse_int_bounded(fields[4], 1, 8, 2, &v)) return "bad difficulty";
+    if (!bs_parse_int_bounded(fields[4], 1, 16, 2, &v)) return "bad difficulty";
     ch->difficulty = (int)v;
     if (!bs_parse_int64_bounded(fields[5], 0, APR_INT64_MAX, &v64)) return "bad expires_at";
     ch->expires_at = (apr_time_t)v64;
@@ -8413,6 +9148,10 @@ static const char *bs_parse_canonical_fields(char *const fields[],
     ch->rep.challenged_at  = (apr_time_t)v64;
     if (!bs_parse_int_bounded(fields[12], 0, 1, 1, &v)) return "bad auto";
     ch->auto_tier = (int)v;
+    if (!bs_parse_uint32_bounded(fields[13], 10, &ch->rep.forgive_window_start))
+        return "bad forgive_window_start";
+    if (!bs_parse_uint32_bounded(fields[14], 10, &ch->rep.forgive_consumed))
+        return "bad forgive_consumed";
     return NULL;
 }
 
@@ -8463,7 +9202,7 @@ static const char *bs_verify_cookie_hmac(request_rec *r,
     if (dec_len <= 0) return "base64 decode failed";
     decoded[dec_len] = '\0';
 
-    /* 15 pipe-delimited fields (canonical 0-12, sig_hex 13, counter 14). */
+    /* 17 pipe-delimited fields (canonical 0-14, sig_hex 15, counter 16). */
     char *fields[BS_COOKIE_FIELDS];
     int nf = 0;
     char *p = decoded;
@@ -8480,19 +9219,30 @@ static const char *bs_verify_cookie_hmac(request_rec *r,
     if (perr) return perr;
 
     unsigned char sig_from_client[BS_SIG_BYTES];
-    if (strlen(fields[13]) != BS_SIG_BYTES * 2 ||
-        !bs_from_hex(fields[13], BS_SIG_BYTES, sig_from_client)) {
+    if (strlen(fields[15]) != BS_SIG_BYTES * 2 ||
+        !bs_from_hex(fields[15], BS_SIG_BYTES, sig_from_client)) {
         return "bad signature hex";
     }
 
-    /* HMAC-SHA-256 of canonical bytes. Constant-time compare. */
+    /* HMAC-SHA-256 of canonical bytes. Constant-time compare.
+     * E16 — try the primary key first, then fall back
+     * to the secondary if configured. Both keys live in process
+     * memory; no SHM or file I/O on the hot verify path. The extra
+     * HMAC during a rotation window is negligible (low-µs) and only
+     * pays off on cookies the primary key already rejected. */
     const char *canon = bs_challenge_canonical(r->pool, &ch);
     unsigned char sig_expected[BS_SIG_BYTES];
     bs_hmac_sha256(cfg->secret, cfg->secret_len,
                    (const unsigned char *)canon, strlen(canon),
                    sig_expected);
     if (!bs_ct_equal(sig_expected, sig_from_client, BS_SIG_BYTES)) {
-        return "signature mismatch";
+        if (!cfg->secret_secondary) return "signature mismatch";
+        bs_hmac_sha256(cfg->secret_secondary, cfg->secret_secondary_len,
+                       (const unsigned char *)canon, strlen(canon),
+                       sig_expected);
+        if (!bs_ct_equal(sig_expected, sig_from_client, BS_SIG_BYTES)) {
+            return "signature mismatch";
+        }
     }
     memcpy(ch.signature, sig_from_client, BS_SIG_BYTES);
     if (out_ch) *out_ch = ch;
@@ -8500,7 +9250,7 @@ static const char *bs_verify_cookie_hmac(request_rec *r,
     apr_time_t now = apr_time_sec(apr_time_now());
     if (now > ch.expires_at) return "expired";
     const bs_pow_algorithm *alg = bs_find_algorithm(fields[1]);
-    return alg->verify(&ch, fields[14]);
+    return alg->verify(&ch, fields[16]);
 }
 
 /* Verify an E8.1 GCM-format cookie. `dot` points at the '.' that
@@ -8525,9 +9275,20 @@ static const char *bs_verify_cookie_gcm(request_rec *r,
                       - BS_GCM_TAG_LEN;
     unsigned char *pt = apr_palloc(r->pool, pt_cap + 1);
     apr_size_t pt_len = 0;
+    /* E16 — try primary key first, then secondary if
+     * configured. AES-GCM decrypt is authenticated; a wrong key
+     * fails the tag check and bs_gcm_decrypt returns an error
+     * without leaking plaintext. The retry is safe and the success
+     * path is unchanged. */
     const char *derr = bs_gcm_decrypt(cfg->secret, cfg->secret_len,
                                       env, (apr_size_t)env_len,
                                       pt, &pt_len);
+    if (derr && cfg->secret_secondary) {
+        derr = bs_gcm_decrypt(cfg->secret_secondary,
+                              cfg->secret_secondary_len,
+                              env, (apr_size_t)env_len,
+                              pt, &pt_len);
+    }
     if (derr) {
         /* Map all GCM-decrypt failures to the same reason string the
          * HMAC path uses when the tag doesn't match — the caller
@@ -8537,16 +9298,17 @@ static const char *bs_verify_cookie_gcm(request_rec *r,
     }
     pt[pt_len] = '\0';
 
-    /* pt is canonical form (13 pipe-delimited fields). */
-    char *fields[13];
+    /* pt is canonical form (15 pipe-delimited fields after E14 +
+     * E15 — the count grew with BS_PROTOCOL_VERSION 1->2). */
+    char *fields[15];
     int nf = 0;
     char *p = (char *)pt;
     fields[nf++] = p;
-    while (*p && nf < 13) {
+    while (*p && nf < 15) {
         if (*p == '|') { *p = '\0'; fields[nf++] = p + 1; }
         p++;
     }
-    if (nf != 13) return "wrong field count";
+    if (nf != 15) return "wrong field count";
 
     bs_challenge ch;
     memset(&ch, 0, sizeof(ch));
@@ -8627,6 +9389,60 @@ static const char *bs_set_secret_file(cmd_parms *cmd, void *cfg_v,
 
     cfg->secret     = (const unsigned char *)buf;
     cfg->secret_len = len;
+    return NULL;
+}
+
+/* E16 — `BotShieldSecondarySecretFile /path`. Verify-
+ * only secondary key for graceful HMAC/GCM secret rotation.
+ *
+ * Operator workflow:
+ *   1. Generate the new key file. Add `BotShieldSecondarySecretFile`
+ *      pointing at the OLD key. Reload Apache. Verify path now
+ *      accepts BOTH old and new cookies; issue path uses the NEW key.
+ *   2. Wait one BotShieldCookieTTL window so every active cookie has
+ *      been re-issued under the new key.
+ *   3. Remove the BotShieldSecondarySecretFile directive. Reload.
+ *      Old cookies were either re-issued or expired naturally.
+ *
+ * Same mode-600 hygiene as BotShieldSecretFile. The file's bytes are
+ * tried after the primary on every verify; cost is one extra
+ * HMAC-SHA-256 (or AES-GCM open) per rejected primary, only during
+ * the rotation window. */
+static const char *bs_set_secondary_secret_file(cmd_parms *cmd,
+                                                void *cfg_v,
+                                                const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+
+    struct stat st;
+    if (stat(arg, &st) != 0) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSecondarySecretFile: cannot stat '%s'", arg);
+    }
+    if (st.st_mode & (S_IRGRP | S_IROTH | S_IWGRP | S_IWOTH)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSecondarySecretFile: '%s' is group- or "
+            "world-accessible (mode %04o); chmod 600 it",
+            arg, st.st_mode & 07777);
+    }
+
+    const char *buf = NULL;
+    const char *err = bs_load_config_file(cmd,
+                                          "BotShieldSecondarySecretFile",
+                                          arg, BS_MAX_SECRET_BYTES, &buf);
+    if (err) return err;
+
+    apr_size_t len = strlen(buf);
+    if (len > 0 && buf[len-1] == '\n') len--;
+    if (len < BS_MIN_SECRET_BYTES) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSecondarySecretFile: '%s' contains only "
+            "%" APR_SIZE_T_FMT " bytes (minimum %d)",
+            arg, len, BS_MIN_SECRET_BYTES);
+    }
+
+    cfg->secret_secondary     = (const unsigned char *)buf;
+    cfg->secret_secondary_len = len;
     return NULL;
 }
 
@@ -9692,6 +10508,8 @@ static int bs_m_provider_idx(const char *s)
 typedef struct {
     apr_time_t   expires_at;
     apr_uint64_t flagged_used;
+    apr_uint64_t strike_used;
+    apr_uint64_t safeguard_used;
     apr_uint64_t bloom_bits_active;
     apr_uint64_t bloom_bits_warming;
 } bs_gauge_cache;
@@ -9700,7 +10518,7 @@ typedef struct {
  * concurrent /metrics scrapes in one Apache process can't race on the
  * refresh, and we don't need a lock. The 1-second TTL means at worst
  * a thread computes fresh values once per scrape; cost is bounded. */
-static __thread bs_gauge_cache bs_gauges = {0, 0, 0, 0};
+static __thread bs_gauge_cache bs_gauges = {0, 0, 0, 0, 0, 0};
 #define BS_GAUGE_CACHE_TTL_US (1000 * 1000)  /* 1 second */
 
 static apr_uint64_t bs_popcount_u64(apr_uint64_t x)
@@ -9741,9 +10559,9 @@ static void bs_gauges_refresh(void)
     apr_time_t now = apr_time_now();
     if (now < bs_gauges.expires_at) return;
 
+    apr_int64_t now_sec = (apr_int64_t)apr_time_sec(now);
     apr_uint64_t flagged_used = 0;
     if (bs_shm.flagged_table) {
-        apr_int64_t now_sec = (apr_int64_t)apr_time_sec(now);
         for (apr_size_t i = 0; i < bs_shm.flagged_capacity; i++) {
             const bs_flagged_ip_slot *slot = &bs_shm.flagged_table[i];
             /* Skip odd versions (mid-write) — they don't count toward
@@ -9756,6 +10574,30 @@ static void bs_gauges_refresh(void)
             }
         }
     }
+    /* E13.1 — strike + safeguard occupancy. "Used" here means the
+     * slot would force a probe walk (rule_slot != EMPTY for strike,
+     * used != 0 for safeguard), regardless of whether the entry is
+     * still TTL-active. That's the right view for load-factor-based
+     * probe-saturation warnings. */
+    apr_uint64_t strike_used = 0;
+    if (bs_shm.strike_table) {
+        for (apr_size_t i = 0; i < bs_shm.strike_capacity; i++) {
+            const bs_strike_slot *slot = &bs_shm.strike_table[i];
+            if ((slot->version & 1U) == 0 &&
+                slot->rule_slot != BS_STRIKE_EMPTY) {
+                strike_used++;
+            }
+        }
+    }
+    apr_uint64_t safeguard_used = 0;
+    if (bs_shm.safeguard_table) {
+        for (apr_size_t i = 0; i < bs_shm.safeguard_capacity; i++) {
+            const bs_safeguard_slot *slot = &bs_shm.safeguard_table[i];
+            if ((slot->version & 1U) == 0 && slot->used != 0) {
+                safeguard_used++;
+            }
+        }
+    }
     apr_uint64_t bloom_active = 0, bloom_warming = 0;
     if (bs_shm.bloom_bufs[0] && bs_shm.bloom_buf_bytes) {
         apr_uint32_t act = apr_atomic_read32(&bs_shm.header->bloom_active);
@@ -9765,6 +10607,8 @@ static void bs_gauges_refresh(void)
     }
 
     bs_gauges.flagged_used       = flagged_used;
+    bs_gauges.strike_used        = strike_used;
+    bs_gauges.safeguard_used     = safeguard_used;
     bs_gauges.bloom_bits_active  = bloom_active;
     bs_gauges.bloom_bits_warming = bloom_warming;
     bs_gauges.expires_at         = now + BS_GAUGE_CACHE_TTL_US;
@@ -9776,6 +10620,18 @@ static apr_uint64_t bs_metrics_flagged_used(void)
 {
     bs_gauges_refresh();
     return bs_gauges.flagged_used;
+}
+
+static apr_uint64_t bs_metrics_strike_used(void)
+{
+    bs_gauges_refresh();
+    return bs_gauges.strike_used;
+}
+
+static apr_uint64_t bs_metrics_safeguard_used(void)
+{
+    bs_gauges_refresh();
+    return bs_gauges.safeguard_used;
 }
 
 static apr_uint64_t bs_metrics_bloom_bits(int active_buf)
@@ -10408,6 +11264,19 @@ static int bs_metrics_handler(request_rec *r, bs_dir_cfg *cfg)
     bs_m_emit_gauge(r, "shm_flagged_capacity",
         "Configured BotShieldFlaggedIPCapacity.",
         (apr_uint64_t)bs_shm.flagged_capacity);
+    bs_m_emit_gauge(r, "shm_strike_used",
+        "Strike-table slots physically occupied "
+        "(rule_slot != BS_STRIKE_EMPTY).",
+        bs_metrics_strike_used());
+    bs_m_emit_gauge(r, "shm_strike_capacity",
+        "Configured BotShieldRateLimitEscalateCapacity.",
+        (apr_uint64_t)bs_shm.strike_capacity);
+    bs_m_emit_gauge(r, "shm_safeguard_used",
+        "Safeguard-table slots physically occupied (used != 0).",
+        bs_metrics_safeguard_used());
+    bs_m_emit_gauge(r, "shm_safeguard_capacity",
+        "Configured BotShieldSafeguardCapacity.",
+        (apr_uint64_t)bs_shm.safeguard_capacity);
     bs_m_emit_gauge(r, "bloom_bits_set_active",
         "Set bits in the active Bloom buffer (popcount; ~population proxy).",
         bs_metrics_bloom_bits(1));
@@ -11086,11 +11955,24 @@ static int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
     if (have_prior) {
         int forgive = bs_effective_int(cfg->forgive_captcha,
                                        BS_DEFAULT_FORGIVE_CAPTCHA);
+        /* E15 — clamp forgiveness against the per-cookie
+         * hourly cap. Window state lives in the cookie rep; a fresh
+         * cookie starts with window_start=0 which the helper treats
+         * as "open new window now." */
+        bs_server_cfg *scfg_fc = ap_get_module_config(
+            r->server->module_config, &botshield_module);
+        int cap = scfg_fc && scfg_fc->forgive_cap_per_hour > 0
+                ? scfg_fc->forgive_cap_per_hour
+                : BS_DEFAULT_FORGIVE_CAP_PER_HOUR;
+        apr_uint32_t now_sec = (apr_uint32_t)apr_time_sec(apr_time_now());
+        next_rep = prior_ch.rep;
+        forgive = bs_forgiveness_apply_cap(forgive, cap, now_sec,
+                    &next_rep.forgive_window_start,
+                    &next_rep.forgive_consumed);
         int floor   = bs_flag_penalty(prior_ch.rep.flags);
         int new_score = prior_ch.rep.score - forgive;
         if (new_score < floor) new_score = floor;
         if (new_score < 0)     new_score = 0;
-        next_rep = prior_ch.rep;
         next_rep.score          = new_score;
         next_rep.passes_captcha = prior_ch.rep.passes_captcha + 1;
     } else {
@@ -11100,6 +11982,8 @@ static int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         next_rep.passes_form    = 0;
         next_rep.passes_captcha = 1;
         next_rep.challenged_at  = 0;   /* overwritten by issue() */
+        next_rep.forgive_window_start = 0;
+        next_rep.forgive_consumed     = 0;
     }
 
     int ttl        = bs_effective_int(cfg->cookie_ttl, BS_DEFAULT_COOKIE_TTL);
@@ -11361,6 +12245,19 @@ static const command_rec bs_cmds[] = {
                  "Path to the HMAC key used to sign challenge cookies. "
                  "Must be mode 0600 (not group- or world-accessible) and "
                  ">= 16 bytes. Read once at startup."),
+    /* E16 — graceful secret rotation. */
+    AP_INIT_TAKE1("BotShieldSecondarySecretFile",
+                 bs_set_secondary_secret_file, NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "Path to a verify-only secondary HMAC/GCM key for "
+                 "graceful secret rotation. Issue path always uses "
+                 "BotShieldSecretFile; verify tries primary then "
+                 "secondary, so cookies signed under the OLD key keep "
+                 "validating during the rotation window. Same mode-0600 "
+                 "+ >= 16-byte hygiene as the primary. Remove the "
+                 "directive after one BotShieldCookieTTL window has "
+                 "elapsed and every active cookie is back on the new "
+                 "key."),
     AP_INIT_TAKE1("BotShieldAlgorithm",  bs_set_algorithm,  NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "Proof-of-work algorithm name. Only 'sha256-zeros' is built "
@@ -11619,6 +12516,18 @@ static const command_rec bs_cmds[] = {
                  "Busy-worker percentage at which a tick samples "
                  "as 'hot' (default 85; range 1..99). Must be "
                  "greater than the warm threshold."),
+    /* E13 — per-vhost reputation namespacing. */
+    AP_INIT_TAKE1("BotShieldShareScope",
+                 bs_set_share_scope, NULL, RSRC_CONF,
+                 "Reputation-namespace override token. By default, "
+                 "each vhost gets an isolated SHM namespace derived "
+                 "from siphash(ServerName), so flagged-IP / Bloom / "
+                 "strike / safeguard tables don't share rows across "
+                 "unrelated sites. Set this directive to the same "
+                 "token on two or more vhosts to force them to share "
+                 "(e.g., dev+prod for one logical app, or api+www "
+                 "subdomains). Strings up to 128 chars; hashed to a "
+                 "32-bit ns_id and stored in each SHM slot."),
     /* E12 — shadow / dry-run enforcement. */
     AP_INIT_FLAG("BotShieldShadowMode",
                  bs_set_shadow_mode, NULL, RSRC_CONF,
@@ -11629,6 +12538,39 @@ static const command_rec bs_cmds[] = {
                  "revision before flipping enforcement on. Default "
                  "off; per-rule mode=observe is the finer-grained "
                  "alternative."),
+    /* E14 — adaptive challenge intensity. */
+    AP_INIT_TAKE_ARGV("BotShieldFlag",
+                 bs_set_flag, NULL, RSRC_CONF,
+                 "Override metadata for a registered flag bit. "
+                 "Args: <name> [penalty=N] [next_difficulty=±N] "
+                 "[next_tier=pass|silent|form|captcha]. The flag "
+                 "name picks the existing bit (honeypot_hit, "
+                 "scanner_probe, fake_bot, pow_fail_streak, "
+                 "app_verified_human, app_verified_session, "
+                 "app_trust_signal); penalty replaces the built-in "
+                 "score contribution; next_difficulty sums into the "
+                 "PoW difficulty when the bit is set on the request "
+                 "(IP- or cookie-derived); next_tier acts as a tier "
+                 "FLOOR — score-derived tier is taken if higher, "
+                 "but never lower."),
+    AP_INIT_TAKE1("BotShieldMaxDifficulty",
+                 bs_set_max_difficulty, NULL, RSRC_CONF,
+                 "Server-scope ceiling on the effective PoW "
+                 "difficulty after BotShieldFlag adaptive bumps. "
+                 "Default 8 (matches BotShieldDifficulty's max); "
+                 "raise up to 16 if operator-side adaptive policy "
+                 "needs more headroom. Adaptive bumps that would "
+                 "exceed this ceiling are silently clamped."),
+    /* E15 — forgiveness farming defense. */
+    AP_INIT_TAKE1("BotShieldForgivenessCapPerHour",
+                 bs_set_forgive_cap, NULL, RSRC_CONF,
+                 "Per-cookie cap on accumulated forgiveness points "
+                 "inside a rolling 1-hour window. Default 200 — "
+                 "enough for a real user pinned at borderline-"
+                 "suspicious to keep transacting; tight enough that "
+                 "a patient bot solving every few minutes stops "
+                 "earning forgiveness past the cap. 0 disables the "
+                 "cap (legacy behavior). Range 0..1000."),
     AP_INIT_TAKE_ARGV("BotShieldBlockPath",
                  bs_set_block_path, NULL, RSRC_CONF,
                  "Block a named cohort from a path glob. Args: "
@@ -12045,6 +12987,7 @@ static const char BS_WIDGET_TEMPLATE[] =
 "                  CH.score, CH.flags,\n"
 "                  CH.passes_silent, CH.passes_form, CH.passes_captcha,\n"
 "                  CH.challenged_at, CH.auto,\n"
+"                  CH.forgive_window_start, CH.forgive_consumed,\n"
 "                  CH.signature, counterVal];\n"
 "    payload = btoa(fields.join('|'));\n"
 "   }\n"
@@ -12410,7 +13353,7 @@ static int bs_handler(request_rec *r)
                     if (bs_parse_client_ip(r->useragent_ip, sg_ip)) {
                         bs_mask_ipv6_prefix(sg_ip,
                                             scfg_sg->ipv6_prefix_bits);
-                        bs_safeguard_clear(sg_ip);
+                        bs_safeguard_clear(sg_ip, scfg_sg->ns_id);
                     }
                 }
             }
@@ -12480,15 +13423,15 @@ static int bs_handler(request_rec *r)
     unsigned char client_ip[16];
     int have_client_ip =
         bs_parse_client_ip(r->useragent_ip, client_ip);
+    bs_server_cfg *scfg_h = ap_get_module_config(
+        r->server->module_config, &botshield_module);
     if (have_client_ip) {
-        bs_server_cfg *scfg = ap_get_module_config(
-            r->server->module_config, &botshield_module);
-        bs_mask_ipv6_prefix(client_ip, scfg->ipv6_prefix_bits);
+        bs_mask_ipv6_prefix(client_ip, scfg_h->ipv6_prefix_bits);
     }
     apr_uint32_t ip_flags = 0;
     int ip_flag_penalty = 0;
     if (have_client_ip &&
-        bs_flagged_ip_lookup(client_ip, &ip_flags)) {
+        bs_flagged_ip_lookup(client_ip, &ip_flags, scfg_h->ns_id)) {
         ip_flag_penalty = bs_flag_penalty(ip_flags);
         bs_score_add(r, ip_flag_penalty,
                      /* ttl unused here — flag TTL lives in SHM */ 0,
@@ -12501,7 +13444,7 @@ static int bs_handler(request_rec *r)
      * the first-sight signal would just be noise. A valid cookie
      * likewise skips this. */
     if (have_client_ip && !have_prior_rep &&
-        !bs_bloom_seen(client_ip)) {
+        !bs_bloom_seen(client_ip, scfg_h->ns_id)) {
         bs_score_add(r, BS_FIRST_SIGHT_PENALTY, 0, "first-sight-ip");
     }
 
@@ -12518,7 +13461,40 @@ static int bs_handler(request_rec *r)
     int cookie_score    = have_prior_rep ? prior_ch.rep.score : 0;
     int cookie_flag_floor = have_prior_rep ? bs_flag_penalty(prior_ch.rep.flags) : 0;
     int effective       = heuristic_total + cookie_score + cookie_flag_floor;
-    bs_tier tier        = bs_decide_tier(cfg, effective);
+    bs_tier score_tier  = bs_decide_tier(cfg, effective);
+
+    /* E14 — adaptive intensity. Walk both flag sources (IP-side and
+     * cookie-side) through the registry; difficulty deltas SUM, tier
+     * floor takes MAX. The score-derived tier wins when it's already
+     * higher than the floor (never silently downgrade). Difficulty
+     * delta is applied later, just before bs_issue_challenge, so it
+     * gets clamped against BotShieldMaxDifficulty alongside the rest
+     * of the issue-time bounds checks. */
+    bs_flag_adaptive adaptive_ip     = bs_flag_adaptive_for(ip_flags);
+    bs_flag_adaptive adaptive_cookie = have_prior_rep
+        ? bs_flag_adaptive_for(prior_ch.rep.flags)
+        : (bs_flag_adaptive){0, BS_TIER_PASS, 0, 0};
+    bs_flag_adaptive adaptive = {
+        .difficulty_delta = adaptive_ip.difficulty_delta
+                          + adaptive_cookie.difficulty_delta,
+        .tier_floor = (adaptive_ip.tier_floor > adaptive_cookie.tier_floor)
+                    ? adaptive_ip.tier_floor : adaptive_cookie.tier_floor,
+        .bits_with_difficulty = adaptive_ip.bits_with_difficulty
+                              | adaptive_cookie.bits_with_difficulty,
+        .bits_with_tier = (adaptive_ip.tier_floor == adaptive_cookie.tier_floor)
+                        ? (adaptive_ip.bits_with_tier
+                           | adaptive_cookie.bits_with_tier)
+                        : (adaptive_ip.tier_floor > adaptive_cookie.tier_floor
+                           ? adaptive_ip.bits_with_tier
+                           : adaptive_cookie.bits_with_tier),
+    };
+    bs_tier tier = score_tier;
+    if (adaptive.tier_floor > tier) {
+        tier = adaptive.tier_floor;
+        bs_score_add(r, 0, 0,
+            apr_psprintf(r->pool, "adaptive-tier:%s",
+                         bs_tier_name(adaptive.tier_floor)));
+    }
 
     /* BotShieldFlagIP: if any scope the request matched sets flag bits,
      * land them in the flagged-IP table now. Fires on every hit to the
@@ -12527,7 +13503,8 @@ static int bs_handler(request_rec *r)
     if (cfg->flag_on_match && have_client_ip) {
         bs_flagged_ip_add(r, client_ip, cfg->flag_on_match,
                           cfg->flag_on_match_ttl
-                            ? cfg->flag_on_match_ttl : 3600);
+                            ? cfg->flag_on_match_ttl : 3600,
+                          scfg_h->ns_id);
         ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
             "mod_botshield: flagged IP %s bits=0x%x ttl=%d scope=%s",
             r->useragent_ip, (unsigned)cfg->flag_on_match,
@@ -12575,7 +13552,7 @@ static int bs_handler(request_rec *r)
     /* Not pass tier — we will issue a challenge. Feed the Bloom filter
      * now that we've committed to challenging this client; that keeps
      * writes off the ~99% happy path. */
-    if (have_client_ip) bs_bloom_add(client_ip);
+    if (have_client_ip) bs_bloom_add(client_ip, scfg_h->ns_id);
 
     /* E10 — challenge safeguard. Before actually issuing the
      * challenge, check whether this IP has been presented N times
@@ -12592,7 +13569,7 @@ static int bs_handler(request_rec *r)
         if (scfg_sg && scfg_sg->safeguard_enabled == 1
             && have_client_ip) {
             apr_int64_t now_t = (apr_int64_t)apr_time_sec(apr_time_now());
-            if (bs_safeguard_check(client_ip, now_t)) {
+            if (bs_safeguard_check(client_ip, now_t, scfg_sg->ns_id)) {
                 ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
                     "mod_botshield: challenge-safeguard active for "
                     "%s; skipping challenge-issue and passing "
@@ -12606,7 +13583,8 @@ static int bs_handler(request_rec *r)
                 return DECLINED;
             }
             bs_safeguard_record_presentation(r, scfg_sg,
-                                             client_ip, now_t);
+                                             client_ip, now_t,
+                                             scfg_sg->ns_id);
         }
     }
 
@@ -12626,11 +13604,28 @@ static int bs_handler(request_rec *r)
         int forgive = prior_ch.auto_tier
             ? bs_effective_int(cfg->forgive_silent, BS_DEFAULT_FORGIVE_SILENT)
             : bs_effective_int(cfg->forgive_form,   BS_DEFAULT_FORGIVE_FORM);
+        /* E15 — clamp against the per-cookie hourly cap
+         * and surface the granted vs requested via reason chain when
+         * the cap kicks in. */
+        int cap = scfg_h && scfg_h->forgive_cap_per_hour > 0
+                ? scfg_h->forgive_cap_per_hour
+                : BS_DEFAULT_FORGIVE_CAP_PER_HOUR;
+        apr_uint32_t now_sec = (apr_uint32_t)apr_time_sec(apr_time_now());
+        next_rep = prior_ch.rep;
+        int requested = forgive;
+        forgive = bs_forgiveness_apply_cap(forgive, cap, now_sec,
+                    &next_rep.forgive_window_start,
+                    &next_rep.forgive_consumed);
+        if (forgive < requested) {
+            bs_score_add(r, 0, 0,
+                apr_psprintf(r->pool,
+                    "forgive-capped:%d/%d",
+                    forgive, requested));
+        }
         int floor   = bs_flag_penalty(prior_ch.rep.flags);
         int new_score = prior_ch.rep.score - forgive;
         if (new_score < floor) new_score = floor;
         if (new_score < 0)     new_score = 0;
-        next_rep = prior_ch.rep;
         next_rep.score = new_score;
         if (prior_ch.auto_tier) {
             next_rep.passes_silent = prior_ch.rep.passes_silent + 1;
@@ -12644,6 +13639,8 @@ static int bs_handler(request_rec *r)
         next_rep.passes_form    = issue_auto ? 0 : 1;
         next_rep.passes_captcha = 0;
         next_rep.challenged_at  = 0;   /* overwritten by issue() */
+        next_rep.forgive_window_start = 0;
+        next_rep.forgive_consumed     = 0;
     }
 
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
@@ -12659,12 +13656,39 @@ static int bs_handler(request_rec *r)
                   cookie_fully_ok,
                   next_rep.passes_silent, next_rep.passes_form,
                   next_rep.passes_captcha);
+    /* Log line above prints the BASE difficulty; E14's adaptive
+     * difficulty bump is logged via the reason chain
+     * (adaptive-difficulty:+N) and the effective issue_difficulty
+     * is what bs_issue_challenge actually uses. */
+
+    /* E14 — apply adaptive difficulty bump and clamp against the
+     * server-scope ceiling. Negative deltas (from credit flags like
+     * app_verified_human) compose, then clamp at 1 (BotShieldDifficulty
+     * minimum). Positive deltas clamp at the operator-set max
+     * (BotShieldMaxDifficulty, default 8). The reason chain logs the
+     * effective bump for traceability. */
+    int issue_difficulty = difficulty;
+    if (adaptive.difficulty_delta != 0) {
+        int max_diff = (scfg_h && scfg_h->max_difficulty > 0)
+                     ? scfg_h->max_difficulty
+                     : BS_DEFAULT_MAX_DIFFICULTY;
+        int requested = difficulty + adaptive.difficulty_delta;
+        if (requested < 1)         issue_difficulty = 1;
+        else if (requested > max_diff) issue_difficulty = max_diff;
+        else                       issue_difficulty = requested;
+        int applied_delta = issue_difficulty - difficulty;
+        if (applied_delta != 0) {
+            bs_score_add(r, 0, 0,
+                apr_psprintf(r->pool, "adaptive-difficulty:%+d",
+                             applied_delta));
+        }
+    }
 
     /* Issue a fresh signed challenge; the worker reads it from the page.
      * The next_rep struct carries forgiveness-adjusted rep from any
      * sig-verified prior cookie. */
     bs_challenge challenge;
-    const char *ierr = bs_issue_challenge(r->pool, cfg, difficulty, ttl,
+    const char *ierr = bs_issue_challenge(r->pool, cfg, issue_difficulty, ttl,
                                           issue_auto, NULL,
                                           &next_rep, &challenge);
     if (ierr) {
