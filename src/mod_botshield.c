@@ -312,7 +312,10 @@ struct bs_captcha_provider {
  * post-config. */
 #define BS_SHM_MAGIC              0x42534844  /* 'BSHD' */
 #define BS_SHM_FORMAT_VERSION     1
-#define BS_DEFAULT_SHM_SIZE       (8 * 1024 * 1024)
+/* E13 — bumped from 8M to 16M to accommodate the per-slot ns_id+pad
+ * fields (8 bytes/slot across flagged-IP / strike / safeguard tables
+ * at default capacities). 8M no longer fits the default config. */
+#define BS_DEFAULT_SHM_SIZE       (16 * 1024 * 1024)
 #define BS_DEFAULT_FLAGGED_SLOTS  50000
 #define BS_FLAGGED_MIN_SLOTS      1024
 #define BS_FLAGGED_MAX_SLOTS      1000000
@@ -334,13 +337,20 @@ struct bs_captcha_provider {
 
 /* Per-slot seqlock + payload. version bit 0 is a "write in progress"
  * marker: even = quiescent, odd = mid-write. Readers snapshot fields
- * between matching even versions. Slot size is 32 bytes (cache-line
- * friendly): keep it that way so the array stays compact. */
+ * between matching even versions.
+ *
+ * E13: an `ns_id` field was added so vhosts can isolate their flagged-
+ * IP reputation. Lookups match on (ip, ns_id); the same physical
+ * table holds rows from many namespaces without cross-pollution. The
+ * size grew from 32 to 40 bytes — a 25% memory hit on this table for
+ * the namespace guarantee. */
 typedef struct {
     apr_uint32_t  version;       /* seqlock counter */
     apr_uint32_t  flags;         /* 0 = empty slot */
     unsigned char ip[16];        /* IPv6-mapped v4 or raw v6 */
     apr_int64_t   expires_at;    /* unix seconds; past means stale */
+    apr_uint32_t  ns_id;         /* E13 — reputation namespace */
+    apr_uint32_t  _pad;          /* keep slot 8-byte aligned */
 } bs_flagged_ip_slot;
 
 /* E9 — repeated-429 escalation. Per-(client_ip, rate_rule_slot)
@@ -363,6 +373,8 @@ typedef struct {
     apr_uint32_t  strike_window_start; /* unix sec; 0 = no strikes yet */
     apr_uint32_t  strike_count;
     apr_int64_t   escalation_until;    /* unix sec; 0 = not escalated */
+    apr_uint32_t  ns_id;               /* E13 — reputation namespace */
+    apr_uint32_t  _pad;
 } bs_strike_slot;
 
 #define BS_STRIKE_EMPTY            0xFFFFFFFFu
@@ -400,6 +412,8 @@ typedef struct {
     apr_uint32_t  present_window_start; /* unix sec */
     apr_uint32_t  present_count;
     apr_int64_t   safeguard_until;      /* unix sec; 0 = inactive */
+    apr_uint32_t  ns_id;                /* E13 — reputation namespace */
+    apr_uint32_t  _pad;
 } bs_safeguard_slot;
 
 #define BS_SAFEGUARD_PROBE_LIMIT   8
@@ -810,6 +824,21 @@ typedef struct bs_server_cfg {
      * block-path rules behave as if mode=observe regardless of
      * their per-rule setting. Operator's panic-revert switch. */
     int                 shadow_mode;
+    /* E13 — reputation namespace for SHM-backed state (flagged-IP,
+     * strike, safeguard, Bloom). Derived at post_config: explicit
+     * BotShieldShareScope token wins; otherwise siphash(ServerName)
+     * truncated to u32. ns_id == 0 means "global default
+     * namespace" — used as a graceful fallback when ServerName is
+     * unset (rare but legal). Lookups in the SHM tables match on
+     * (ip, ns_id) so different namespaces stop sharing reputation
+     * even though they live in the same physical SHM segment.
+     *
+     * Default semantic: each vhost auto-isolates by ServerName.
+     * Operators wanting two vhosts to share state set the same
+     * BotShieldShareScope token on both; same string → same
+     * ns_id → shared rows. */
+    apr_uint32_t        ns_id;            /* effective; resolved post_config */
+    const char         *share_scope_token; /* explicit override; NULL = default */
     apr_array_header_t *block_paths;   /* bs_block_path_entry * */
     /* E3 — path-based triggers. Same ordered-array + upsert-by-name
      * shape as E2.1; first match wins at request time. */
@@ -1062,6 +1091,13 @@ static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
     /* E12 — shadow mode inherits unless explicitly set. */
     out->shadow_mode = (add->shadow_mode != -1)
                      ? add->shadow_mode : base->shadow_mode;
+    /* E13 — namespace plumbing: explicit share_scope_token survives
+     * the merge if either scope set it. ns_id is computed at
+     * post_config from the merged config + ServerName, so the
+     * field's value here is irrelevant; just take add's. */
+    out->share_scope_token = add->share_scope_token
+        ? add->share_scope_token : base->share_scope_token;
+    out->ns_id = add->ns_id;
     out->block_paths = bs_merge_rule_array(p, base->block_paths,
                                            add->block_paths);
     out->path_triggers = bs_merge_rule_array(p, base->path_triggers,
@@ -1181,6 +1217,11 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     /* E12 — global shadow mode unset. -1 sentinel means "inherit
      * from parent scope"; merge below picks the right value. */
     scfg->shadow_mode           = -1;
+    /* E13 — namespace defaults. ns_id is filled in at post_config
+     * once ServerName is final; here we just zero the field and
+     * leave the explicit-token slot NULL. */
+    scfg->ns_id                 = 0;
+    scfg->share_scope_token     = NULL;
     scfg->block_paths      = apr_array_make(p, 4, sizeof(void *));
     scfg->path_triggers         = apr_array_make(p, 4, sizeof(void *));
     scfg->cookie_triggers  = apr_array_make(p, 4, sizeof(void *));
@@ -1419,8 +1460,29 @@ static const char *bs_set_forgive_captcha(cmd_parms *cmd, void *cfg_v, const cha
 static apr_uint32_t bs_parse_flag_names(apr_pool_t *p, const char *s,
                                         const char **err);
 
+/* E13 — log a NOTICE if an SHM-sizing directive is placed inside
+ * <VirtualHost>. The single SHM segment is sized once at post_config
+ * from the main server's scfg; per-vhost values for capacity directives
+ * are silently ignored. The footgun was hard to spot in operator
+ * configs — surface it explicitly so they don't think their override
+ * took effect. */
+static void bs_warn_if_virtual_scope(cmd_parms *cmd, const char *name)
+{
+    if (cmd->server && cmd->server->is_virtual) {
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, cmd->server,
+            "mod_botshield: %s placed inside <VirtualHost> at %s:%d "
+            "is ignored — SHM is sized once from the main server "
+            "scope. Move this directive outside <VirtualHost>.",
+            name,
+            cmd->directive && cmd->directive->filename
+                ? cmd->directive->filename : "(unknown)",
+            cmd->directive ? cmd->directive->line_num : 0);
+    }
+}
+
 static const char *bs_set_shm_size(cmd_parms *cmd, void *dconf, const char *arg)
 {
+    bs_warn_if_virtual_scope(cmd, "BotShieldShmSize");
     (void)dconf;
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
@@ -1459,6 +1521,7 @@ static const char *bs_set_flagged_capacity(cmd_parms *cmd, void *dconf,
                                            const char *arg)
 {
     (void)dconf;
+    bs_warn_if_virtual_scope(cmd, "BotShieldFlaggedIPCapacity");
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
     long n;
@@ -2273,6 +2336,7 @@ static const char *bs_set_bloom_ips(cmd_parms *cmd, void *dconf,
                                     const char *arg)
 {
     (void)dconf;
+    bs_warn_if_virtual_scope(cmd, "BotShieldBloomIPs");
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
     long n;
@@ -2290,6 +2354,7 @@ static const char *bs_set_bloom_window(cmd_parms *cmd, void *dconf,
                                        const char *arg)
 {
     (void)dconf;
+    bs_warn_if_virtual_scope(cmd, "BotShieldBloomWindow");
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
     long n;
@@ -2998,18 +3063,22 @@ typedef enum {
 static void bs_set_trigger_tag(request_rec *r, const char *tag);
 static void bs_flagged_ip_add(request_rec *r,
                               const unsigned char ip[16],
-                              apr_uint32_t flag_bits, int ttl_seconds);
+                              apr_uint32_t flag_bits, int ttl_seconds,
+                              apr_uint32_t ns_id);
 static int  bs_parse_client_ip(const char *ip_str, unsigned char out[16]);
 static void bs_mask_ipv6_prefix(unsigned char ip[16], int prefix_bits);
-/* E9 — strike-table helpers used inside the rate-limit walk. */
+/* E9 — strike-table helpers used inside the rate-limit walk.
+ * E13 — extra ns_id parameter for per-vhost reputation. */
 static int  bs_strike_check_escalated(const unsigned char ip[16],
                                       apr_uint32_t rule_slot,
-                                      apr_int64_t now);
+                                      apr_int64_t now,
+                                      apr_uint32_t ns_id);
 static int  bs_strike_record_429(request_rec *r,
                                  const unsigned char ip[16],
                                  apr_uint32_t rule_slot,
                                  const bs_rate_escalate_entry *cfg,
-                                 apr_int64_t now);
+                                 apr_int64_t now,
+                                 apr_uint32_t ns_id);
 
 /* E11 — load-state read used by bs_check_policy's load-trigger
  * walk. Declaration here so the walk at line ~3540 compiles
@@ -3020,12 +3089,15 @@ static bs_load_state bs_load_current(void);
  * just before issuing a challenge (check + record presentation)
  * and on successful cookie verify (clear the per-IP counter). */
 static int  bs_safeguard_check(const unsigned char ip[16],
-                               apr_int64_t now);
+                               apr_int64_t now,
+                               apr_uint32_t ns_id);
 static void bs_safeguard_record_presentation(request_rec *r,
                                              bs_server_cfg *scfg,
                                              const unsigned char ip[16],
-                                             apr_int64_t now);
-static void bs_safeguard_clear(const unsigned char ip[16]);
+                                             apr_int64_t now,
+                                             apr_uint32_t ns_id);
+static void bs_safeguard_clear(const unsigned char ip[16],
+                               apr_uint32_t ns_id);
 static int  bs_safeguard_effective_int(int v, int dflt);
 /* Shared action helpers — see definitions below. The server-cfg
  * struct body appears later in the file, so we forward-declare by
@@ -3739,7 +3811,7 @@ static int bs_check_policy(request_rec *r)
             if (!observe && e->escalate && have_ip
                 && bs_strike_check_escalated(client_ip,
                                              (apr_uint32_t)e->shm_slot,
-                                             now_t)) {
+                                             now_t, scfg->ns_id)) {
                 /* E9 — escalation gate. Active only outside observe
                  * mode; observe must not enforce. */
                 bs_score_add(r, BS_PENALTY_RATE_LIMIT, 3600,
@@ -3792,7 +3864,8 @@ static int bs_check_policy(request_rec *r)
              * to status_code via bs_strike_check_escalated above. */
             if (e->escalate && have_ip) {
                 int crossed = bs_strike_record_429(r, client_ip,
-                    (apr_uint32_t)e->shm_slot, e->escalate, now_t);
+                    (apr_uint32_t)e->shm_slot, e->escalate, now_t,
+                    scfg->ns_id);
                 if (crossed) {
                     ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r,
                         "mod_botshield: rate-limit-abuse threshold "
@@ -4486,7 +4559,8 @@ static apr_status_t bs_app_feedback_filter(ap_filter_t *f,
     if (bs_parse_client_ip(r->useragent_ip, client_ip)) {
         bs_mask_ipv6_prefix(client_ip, scfg->ipv6_prefix_bits);
         bs_flagged_ip_add(r, client_ip,
-                          ft->action.flag_bit, ft->action.ttl_sec);
+                          ft->action.flag_bit, ft->action.ttl_sec,
+                          scfg->ns_id);
         if (ft->action.log_tag) {
             /* Feedback has no decision-log emission of its own, but
              * the tag belongs in r->notes so any subsequent access
@@ -5141,6 +5215,43 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
         if (vcfg->robots_refresh_interval == BS_ROBOTS_REFRESH_UNSET) {
             vcfg->robots_refresh_interval = BS_ROBOTS_REFRESH_DEFAULT;
         }
+
+        /* E13 — derive the per-vhost reputation namespace ID.
+         * Precedence: explicit BotShieldShareScope token first,
+         * then siphash(ServerName), finally fallback to ns_id=0
+         * (global default) with a NOTICE so operators see the
+         * fallback. The siphash_key was randomized at SHM init
+         * above, so the ns_id is stable for this Apache process
+         * but unpredictable across restarts — which is fine since
+         * persistence already keys on ns_id and old state files
+         * get rejected on format mismatch. */
+        const char *src = NULL;
+        if (vcfg->share_scope_token) {
+            apr_uint64_t h = bs_siphash24(bs_shm.header->siphash_key,
+                (const unsigned char *)vcfg->share_scope_token,
+                strlen(vcfg->share_scope_token));
+            vcfg->ns_id = (apr_uint32_t)h;
+            src = "BotShieldShareScope token";
+        } else if (sv->server_hostname && *sv->server_hostname) {
+            apr_uint64_t h = bs_siphash24(bs_shm.header->siphash_key,
+                (const unsigned char *)sv->server_hostname,
+                strlen(sv->server_hostname));
+            vcfg->ns_id = (apr_uint32_t)h;
+            src = "ServerName";
+        } else {
+            vcfg->ns_id = 0;
+            ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+                "mod_botshield: vhost has no ServerName and no "
+                "BotShieldShareScope; using global ns_id=0. "
+                "Reputation will be shared with any other vhost "
+                "in this state. Set ServerName or "
+                "BotShieldShareScope to opt into isolation.");
+        }
+        if (src) {
+            ap_log_error(APLOG_MARK, APLOG_INFO, 0, sv,
+                "mod_botshield: vhost ns_id=0x%08x from %s",
+                vcfg->ns_id, src);
+        }
     }
 
     /* E2.2 — reserve an SHM rate-counter slot pool for each vhost's
@@ -5325,9 +5436,21 @@ static void bs_child_init(apr_pool_t *p, server_rec *s)
  *   4. Else the first slot encountered → overwrite (with a log-warning).
  */
 
-static apr_uint32_t bs_flagged_bucket(const unsigned char ip[16])
+/* E13 — bucket key folds in ns_id so different namespaces probe
+ * different starting positions for the same IP. The slot's ns_id
+ * field is the authoritative match check; mixing ns_id into the
+ * hash is a load-balancing optimization, not a correctness one. */
+static apr_uint32_t bs_flagged_bucket(const unsigned char ip[16],
+                                      apr_uint32_t ns_id)
 {
-    apr_uint64_t h = bs_siphash24(bs_shm.header->siphash_key, ip, 16);
+    unsigned char buf[16 + 4];
+    memcpy(buf, ip, 16);
+    buf[16] = (unsigned char)( ns_id        & 0xFF);
+    buf[17] = (unsigned char)((ns_id >>  8) & 0xFF);
+    buf[18] = (unsigned char)((ns_id >> 16) & 0xFF);
+    buf[19] = (unsigned char)((ns_id >> 24) & 0xFF);
+    apr_uint64_t h = bs_siphash24(bs_shm.header->siphash_key,
+                                  buf, sizeof(buf));
     return (apr_uint32_t)(h % bs_shm.flagged_capacity);
 }
 
@@ -5335,7 +5458,8 @@ static apr_uint32_t bs_flagged_bucket(const unsigned char ip[16])
  * global mutex. */
 static void bs_flagged_write_slot(bs_flagged_ip_slot *slot,
                                   const unsigned char ip[16],
-                                  apr_uint32_t flags, apr_int64_t expires_at)
+                                  apr_uint32_t flags, apr_int64_t expires_at,
+                                  apr_uint32_t ns_id)
 {
     apr_uint32_t v = apr_atomic_read32(&slot->version);
     apr_atomic_set32(&slot->version, v | 1U);   /* begin: odd */
@@ -5343,13 +5467,15 @@ static void bs_flagged_write_slot(bs_flagged_ip_slot *slot,
     memcpy(slot->ip, ip, 16);
     slot->flags      = flags;
     slot->expires_at = expires_at;
+    slot->ns_id      = ns_id;
     /* Version-bump to even publishes the payload to readers. */
     apr_atomic_set32(&slot->version, (v | 1U) + 1U);
 }
 
 static void bs_flagged_ip_add(request_rec *r,
                               const unsigned char ip[16],
-                              apr_uint32_t flag_bits, int ttl_seconds)
+                              apr_uint32_t flag_bits, int ttl_seconds,
+                              apr_uint32_t ns_id)
 {
     if (!bs_shm.flagged_table || !bs_shm.mutex) return;
     if (!flag_bits) return;
@@ -5357,7 +5483,7 @@ static void bs_flagged_ip_add(request_rec *r,
 
     apr_int64_t now = (apr_int64_t)apr_time_sec(apr_time_now());
     apr_int64_t expires_at = now + ttl_seconds;
-    apr_uint32_t base = bs_flagged_bucket(ip);
+    apr_uint32_t base = bs_flagged_bucket(ip, ns_id);
 
     apr_status_t rv = apr_global_mutex_lock(bs_shm.mutex);
     if (rv != APR_SUCCESS) {
@@ -5371,12 +5497,13 @@ static void bs_flagged_ip_add(request_rec *r,
         apr_uint32_t idx = (base + i) % bs_shm.flagged_capacity;
         bs_flagged_ip_slot *slot = &bs_shm.flagged_table[idx];
 
-        if (slot->flags && memcmp(slot->ip, ip, 16) == 0) {
+        if (slot->flags && slot->ns_id == ns_id
+            && memcmp(slot->ip, ip, 16) == 0) {
             /* Merge flags, refresh TTL to whichever is later. */
             apr_uint32_t merged = slot->flags | flag_bits;
             apr_int64_t later   = slot->expires_at > expires_at
                                   ? slot->expires_at : expires_at;
-            bs_flagged_write_slot(slot, ip, merged, later);
+            bs_flagged_write_slot(slot, ip, merged, later, ns_id);
             apr_global_mutex_unlock(bs_shm.mutex);
             return;
         }
@@ -5408,7 +5535,7 @@ static void bs_flagged_ip_add(request_rec *r,
     }
 
     bs_flagged_write_slot(&bs_shm.flagged_table[victim], ip,
-                          flag_bits, expires_at);
+                          flag_bits, expires_at, ns_id);
     apr_global_mutex_unlock(bs_shm.mutex);
 }
 
@@ -5417,12 +5544,13 @@ static void bs_flagged_ip_add(request_rec *r,
  * skipped. Readers never block writers; a caught-mid-write slot is
  * skipped (probe continues to the next). */
 static int bs_flagged_ip_lookup(const unsigned char ip[16],
-                                apr_uint32_t *out_flags)
+                                apr_uint32_t *out_flags,
+                                apr_uint32_t ns_id)
 {
     if (!bs_shm.flagged_table) return 0;
 
     apr_int64_t now = (apr_int64_t)apr_time_sec(apr_time_now());
-    apr_uint32_t base = bs_flagged_bucket(ip);
+    apr_uint32_t base = bs_flagged_bucket(ip, ns_id);
 
     for (unsigned i = 0; i < BS_FLAGGED_PROBE_LIMIT; i++) {
         apr_uint32_t idx = (base + i) % bs_shm.flagged_capacity;
@@ -5432,6 +5560,7 @@ static int bs_flagged_ip_lookup(const unsigned char ip[16],
         unsigned char  local_ip[16];
         apr_uint32_t   local_flags;
         apr_int64_t    local_expires;
+        apr_uint32_t   local_ns;
         int spins = 0;
         for (;;) {
             v1 = apr_atomic_read32(&slot->version);
@@ -5442,6 +5571,7 @@ static int bs_flagged_ip_lookup(const unsigned char ip[16],
             memcpy(local_ip, slot->ip, 16);
             local_flags   = slot->flags;
             local_expires = slot->expires_at;
+            local_ns      = slot->ns_id;
             v2 = apr_atomic_read32(&slot->version);
             if (v1 == v2) break;
             if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
@@ -5449,6 +5579,7 @@ static int bs_flagged_ip_lookup(const unsigned char ip[16],
         if (v1 == ~0U) continue;           /* slot too contended */
         if (local_flags == 0) continue;     /* empty */
         if (local_expires < now) continue;  /* stale */
+        if (local_ns != ns_id) continue;    /* E13: different namespace */
         if (memcmp(local_ip, ip, 16) != 0) continue;
 
         *out_flags = local_flags;
@@ -5472,30 +5603,38 @@ static int bs_flagged_ip_lookup(const unsigned char ip[16],
  * change the user-visible behavior. */
 
 static apr_uint32_t bs_strike_bucket(const unsigned char ip[16],
-                                     apr_uint32_t rule_slot)
+                                     apr_uint32_t rule_slot,
+                                     apr_uint32_t ns_id)
 {
-    /* Mix rule_slot into the SipHash input so the same IP falls in
-     * different buckets per rule — keeps probe windows from
-     * clustering when one IP misbehaves on multiple rules. */
-    unsigned char buf[16 + 4];
+    /* Mix rule_slot AND ns_id into the SipHash input. rule_slot
+     * keeps probe windows from clustering when one IP misbehaves
+     * on multiple rules; ns_id (E13) puts different namespaces in
+     * different buckets for load-balancing — the slot's ns_id
+     * field is the authoritative match check. */
+    unsigned char buf[16 + 4 + 4];
     memcpy(buf, ip, 16);
     buf[16] = (unsigned char)( rule_slot        & 0xFF);
     buf[17] = (unsigned char)((rule_slot >> 8 ) & 0xFF);
     buf[18] = (unsigned char)((rule_slot >> 16) & 0xFF);
     buf[19] = (unsigned char)((rule_slot >> 24) & 0xFF);
+    buf[20] = (unsigned char)( ns_id            & 0xFF);
+    buf[21] = (unsigned char)((ns_id >> 8 )     & 0xFF);
+    buf[22] = (unsigned char)((ns_id >> 16)     & 0xFF);
+    buf[23] = (unsigned char)((ns_id >> 24)     & 0xFF);
     apr_uint64_t h = bs_siphash24(bs_shm.header->siphash_key,
                                   buf, sizeof(buf));
     return (apr_uint32_t)(h % bs_shm.strike_capacity);
 }
 
-/* Seqlock-protected lookup. Returns 1 if (ip, rule_slot) has an
- * active escalation (escalation_until > now), 0 otherwise. */
+/* Seqlock-protected lookup. Returns 1 if (ip, rule_slot, ns_id)
+ * has an active escalation (escalation_until > now), 0 otherwise. */
 static int bs_strike_check_escalated(const unsigned char ip[16],
                                      apr_uint32_t rule_slot,
-                                     apr_int64_t now)
+                                     apr_int64_t now,
+                                     apr_uint32_t ns_id)
 {
     if (!bs_shm.strike_table || bs_shm.strike_capacity == 0) return 0;
-    apr_uint32_t base = bs_strike_bucket(ip, rule_slot);
+    apr_uint32_t base = bs_strike_bucket(ip, rule_slot, ns_id);
 
     for (unsigned i = 0; i < BS_STRIKE_PROBE_LIMIT; i++) {
         apr_uint32_t idx = (base + i) % bs_shm.strike_capacity;
@@ -5505,6 +5644,7 @@ static int bs_strike_check_escalated(const unsigned char ip[16],
         unsigned char local_ip[16];
         apr_uint32_t  local_rule;
         apr_int64_t   local_until;
+        apr_uint32_t  local_ns;
         int spins = 0;
         for (;;) {
             v1 = apr_atomic_read32(&slot->version);
@@ -5515,6 +5655,7 @@ static int bs_strike_check_escalated(const unsigned char ip[16],
             local_rule  = slot->rule_slot;
             memcpy(local_ip, slot->ip, 16);
             local_until = slot->escalation_until;
+            local_ns    = slot->ns_id;
             v2 = apr_atomic_read32(&slot->version);
             if (v1 == v2) break;
             if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
@@ -5522,6 +5663,7 @@ static int bs_strike_check_escalated(const unsigned char ip[16],
         if (v1 == ~0U) continue;
         if (local_rule == BS_STRIKE_EMPTY) continue;
         if (local_rule != rule_slot) continue;
+        if (local_ns != ns_id) continue;
         if (memcmp(local_ip, ip, 16) != 0) continue;
         return local_until > now;
     }
@@ -5538,10 +5680,11 @@ static int bs_strike_record_429(request_rec *r,
                                 const unsigned char ip[16],
                                 apr_uint32_t rule_slot,
                                 const bs_rate_escalate_entry *cfg,
-                                apr_int64_t now)
+                                apr_int64_t now,
+                                apr_uint32_t ns_id)
 {
     if (!bs_shm.strike_table || !bs_shm.mutex || !cfg) return 0;
-    apr_uint32_t base = bs_strike_bucket(ip, rule_slot);
+    apr_uint32_t base = bs_strike_bucket(ip, rule_slot, ns_id);
 
     apr_status_t rv = apr_global_mutex_lock(bs_shm.mutex);
     if (rv != APR_SUCCESS) {
@@ -5561,6 +5704,7 @@ static int bs_strike_record_429(request_rec *r,
             continue;
         }
         if (slot->rule_slot == rule_slot
+            && slot->ns_id == ns_id
             && memcmp(slot->ip, ip, 16) == 0) {
             matched_idx = (int)idx;
             break;
@@ -5597,6 +5741,7 @@ static int bs_strike_record_429(request_rec *r,
     if (fresh_slot) {
         memcpy(slot->ip, ip, 16);
         slot->rule_slot           = rule_slot;
+        slot->ns_id               = ns_id;
         slot->strike_window_start = now_sec;
         slot->strike_count        = 1;
         slot->escalation_until    = 0;
@@ -5642,9 +5787,18 @@ static int bs_safeguard_effective_int(int v, int dflt)
     return (v > 0) ? v : dflt;
 }
 
-static apr_uint32_t bs_safeguard_bucket(const unsigned char ip[16])
+static apr_uint32_t bs_safeguard_bucket(const unsigned char ip[16],
+                                        apr_uint32_t ns_id)
 {
-    apr_uint64_t h = bs_siphash24(bs_shm.header->siphash_key, ip, 16);
+    /* E13 — fold ns_id into the hash so vhosts with different
+     * reputation namespaces get disjoint bucket distributions. */
+    unsigned char buf[16 + 4];
+    memcpy(buf, ip, 16);
+    buf[16] = (unsigned char)(ns_id      );
+    buf[17] = (unsigned char)(ns_id >>  8);
+    buf[18] = (unsigned char)(ns_id >> 16);
+    buf[19] = (unsigned char)(ns_id >> 24);
+    apr_uint64_t h = bs_siphash24(bs_shm.header->siphash_key, buf, sizeof(buf));
     /* Mix a distinct constant so this table's bucket distribution
      * isn't perfectly correlated with flagged_table / strike_table
      * for the same IP — reduces probe-window collisions across
@@ -5656,10 +5810,11 @@ static apr_uint32_t bs_safeguard_bucket(const unsigned char ip[16])
 /* Lockless read. Returns 1 if the IP has an active safeguard
  * (safeguard_until > now), 0 otherwise. Seqlock discipline matches
  * bs_flagged_ip_lookup and bs_strike_check_escalated. */
-static int bs_safeguard_check(const unsigned char ip[16], apr_int64_t now)
+static int bs_safeguard_check(const unsigned char ip[16], apr_int64_t now,
+                              apr_uint32_t ns_id)
 {
     if (!bs_shm.safeguard_table || bs_shm.safeguard_capacity == 0) return 0;
-    apr_uint32_t base = bs_safeguard_bucket(ip);
+    apr_uint32_t base = bs_safeguard_bucket(ip, ns_id);
 
     for (unsigned i = 0; i < BS_SAFEGUARD_PROBE_LIMIT; i++) {
         apr_uint32_t idx = (base + i) % bs_shm.safeguard_capacity;
@@ -5667,6 +5822,7 @@ static int bs_safeguard_check(const unsigned char ip[16], apr_int64_t now)
 
         apr_uint32_t v1, v2;
         apr_uint32_t  local_used;
+        apr_uint32_t  local_ns_id;
         unsigned char local_ip[16];
         apr_int64_t   local_until;
         int spins = 0;
@@ -5677,6 +5833,7 @@ static int bs_safeguard_check(const unsigned char ip[16], apr_int64_t now)
                 continue;
             }
             local_used  = slot->used;
+            local_ns_id = slot->ns_id;
             memcpy(local_ip, slot->ip, 16);
             local_until = slot->safeguard_until;
             v2 = apr_atomic_read32(&slot->version);
@@ -5685,6 +5842,7 @@ static int bs_safeguard_check(const unsigned char ip[16], apr_int64_t now)
         }
         if (v1 == ~0U) continue;
         if (!local_used) continue;
+        if (local_ns_id != ns_id) continue;
         if (memcmp(local_ip, ip, 16) != 0) continue;
         return local_until > now;
     }
@@ -5700,7 +5858,8 @@ static int bs_safeguard_check(const unsigned char ip[16], apr_int64_t now)
 static void bs_safeguard_record_presentation(request_rec *r,
                                              bs_server_cfg *scfg,
                                              const unsigned char ip[16],
-                                             apr_int64_t now)
+                                             apr_int64_t now,
+                                             apr_uint32_t ns_id)
 {
     if (!bs_shm.safeguard_table || !bs_shm.mutex || !scfg) return;
     int threshold = bs_safeguard_effective_int(scfg->safeguard_threshold,
@@ -5710,7 +5869,7 @@ static void bs_safeguard_record_presentation(request_rec *r,
     int ttl       = bs_safeguard_effective_int(scfg->safeguard_ttl,
                         BS_DEFAULT_SAFEGUARD_TTL);
 
-    apr_uint32_t base = bs_safeguard_bucket(ip);
+    apr_uint32_t base = bs_safeguard_bucket(ip, ns_id);
     apr_status_t rv = apr_global_mutex_lock(bs_shm.mutex);
     if (rv != APR_SUCCESS) {
         ap_log_rerror(APLOG_MARK, APLOG_WARNING, rv, r,
@@ -5728,6 +5887,7 @@ static void bs_safeguard_record_presentation(request_rec *r,
             if (empty_idx < 0) empty_idx = (int)idx;
             continue;
         }
+        if (slot->ns_id != ns_id) continue;
         if (memcmp(slot->ip, ip, 16) == 0) {
             matched_idx = (int)idx;
             break;
@@ -5762,6 +5922,7 @@ static void bs_safeguard_record_presentation(request_rec *r,
     if (fresh_slot) {
         memcpy(slot->ip, ip, 16);
         slot->used                 = 1;
+        slot->ns_id                = ns_id;
         slot->present_window_start = now_sec;
         slot->present_count        = 1;
         slot->safeguard_until      = 0;
@@ -5785,20 +5946,23 @@ static void bs_safeguard_record_presentation(request_rec *r,
  * this IP — proves the client CAN solve, so accumulated presentation
  * history was noise (probably transient) and we want a fresh slate.
  * No-op if the entry isn't found; silent on error. */
-static void bs_safeguard_clear(const unsigned char ip[16])
+static void bs_safeguard_clear(const unsigned char ip[16],
+                               apr_uint32_t ns_id)
 {
     if (!bs_shm.safeguard_table || !bs_shm.mutex) return;
-    apr_uint32_t base = bs_safeguard_bucket(ip);
+    apr_uint32_t base = bs_safeguard_bucket(ip, ns_id);
 
     if (apr_global_mutex_lock(bs_shm.mutex) != APR_SUCCESS) return;
     for (unsigned i = 0; i < BS_SAFEGUARD_PROBE_LIMIT; i++) {
         apr_uint32_t idx = (base + i) % bs_shm.safeguard_capacity;
         bs_safeguard_slot *slot = &bs_shm.safeguard_table[idx];
         if (!slot->used) continue;
+        if (slot->ns_id != ns_id) continue;
         if (memcmp(slot->ip, ip, 16) != 0) continue;
         apr_uint32_t v0 = apr_atomic_read32(&slot->version);
         apr_atomic_set32(&slot->version, v0 | 1U);
         slot->used                 = 0;
+        slot->ns_id                = 0;
         slot->present_window_start = 0;
         slot->present_count        = 0;
         slot->safeguard_until      = 0;
@@ -5821,16 +5985,28 @@ static void bs_safeguard_clear(const unsigned char ip[16])
 
 /* Compute k bit indices using SipHash + Kirsch-Mitzenmacher double
  * hashing: hash once to get h1, salt and re-hash for h2, then generate
- * each of the k indices as (h1 + i*h2) mod m_bits. */
+ * each of the k indices as (h1 + i*h2) mod m_bits.
+ *
+ * E13 — ns_id is folded into both h1 and h2 inputs so different
+ * namespaces compute disjoint bit-position sets. Same physical
+ * Bloom buffer, logically isolated states. The K=7 bit-position
+ * draws make false-positive across namespaces negligible at our
+ * load factors. */
 static void bs_bloom_indices(const unsigned char ip[16],
-                             apr_uint32_t *out, apr_size_t m_bits)
+                             apr_uint32_t *out, apr_size_t m_bits,
+                             apr_uint32_t ns_id)
 {
-    apr_uint64_t h1 = bs_siphash24(bs_shm.header->siphash_key, ip, 16);
-    unsigned char salted[16];
-    memcpy(salted, ip, 16);
-    salted[0] ^= 0x9e;   /* domain separator for the second hash */
+    unsigned char buf[16 + 4];
+    memcpy(buf, ip, 16);
+    buf[16] = (unsigned char)( ns_id        & 0xFF);
+    buf[17] = (unsigned char)((ns_id >>  8) & 0xFF);
+    buf[18] = (unsigned char)((ns_id >> 16) & 0xFF);
+    buf[19] = (unsigned char)((ns_id >> 24) & 0xFF);
+    apr_uint64_t h1 = bs_siphash24(bs_shm.header->siphash_key,
+                                   buf, sizeof(buf));
+    buf[0] ^= 0x9e;   /* domain separator for the second hash */
     apr_uint64_t h2 = bs_siphash24(bs_shm.header->siphash_key,
-                                   salted, 16);
+                                   buf, sizeof(buf));
     for (int i = 0; i < BS_BLOOM_K; i++) {
         out[i] = (apr_uint32_t)((h1 + (apr_uint64_t)i * h2) % m_bits);
     }
@@ -5897,14 +6073,14 @@ static void bs_bloom_rotate_if_due(apr_int64_t now_sec)
     if (held_mutex) apr_global_mutex_unlock(bs_shm.mutex);
 }
 
-static void bs_bloom_add(const unsigned char ip[16])
+static void bs_bloom_add(const unsigned char ip[16], apr_uint32_t ns_id)
 {
     if (!bs_shm.bloom_bufs[0]) return;
     bs_bloom_rotate_if_due((apr_int64_t)apr_time_sec(apr_time_now()));
 
     apr_size_t m_bits = (apr_size_t)bs_shm.bloom_buf_bytes * 8;
     apr_uint32_t indices[BS_BLOOM_K];
-    bs_bloom_indices(ip, indices, m_bits);
+    bs_bloom_indices(ip, indices, m_bits, ns_id);
 
     apr_uint32_t active = apr_atomic_read32(&bs_shm.header->bloom_active);
     unsigned char *buf = bs_shm.bloom_bufs[active & 1U];
@@ -5918,12 +6094,12 @@ static void bs_bloom_add(const unsigned char ip[16])
 
 /* Returns 1 if the IP's bits are fully present in buffer A or fully
  * present in buffer B. Lockless; plain atomic loads on bit slots. */
-static int bs_bloom_seen(const unsigned char ip[16])
+static int bs_bloom_seen(const unsigned char ip[16], apr_uint32_t ns_id)
 {
     if (!bs_shm.bloom_bufs[0]) return 0;
     apr_size_t m_bits = (apr_size_t)bs_shm.bloom_buf_bytes * 8;
     apr_uint32_t indices[BS_BLOOM_K];
-    bs_bloom_indices(ip, indices, m_bits);
+    bs_bloom_indices(ip, indices, m_bits, ns_id);
 
     int in_a = 1, in_b = 1;
     for (int i = 0; i < BS_BLOOM_K; i++) {
@@ -5972,7 +6148,13 @@ static int bs_bloom_seen(const unsigned char ip[16])
  * code; files are ephemeral enough to re-acquire. */
 
 #define BS_STATE_MAGIC            0x44485342U      /* 'BSHD' little-endian */
-#define BS_STATE_FORMAT_VERSION   1
+/* E13 — bumped from 1 to 2: bs_flagged_ip_slot grew an `ns_id`
+ * field for per-vhost reputation namespacing. Old (v1) state
+ * files are rejected with a NOTICE and the table starts fresh —
+ * one-time cost on upgrade, no slot-level migration code needed
+ * because flagged-IP TTLs are short anyway and most entries
+ * would have aged out. */
+#define BS_STATE_FORMAT_VERSION   2
 #define BS_STATE_MAX_AGE_SECS     (14 * 86400)     /* discard anything older */
 
 static apr_uint64_t bs_fnv64(apr_uint64_t h, const unsigned char *data,
@@ -6721,6 +6903,7 @@ static const char *bs_set_rate_escalate_capacity(cmd_parms *cmd,
                                                  const char *arg)
 {
     (void)dconf;
+    bs_warn_if_virtual_scope(cmd, "BotShieldRateLimitEscalateCapacity");
     char *end = NULL;
     long n = strtol(arg, &end, 10);
     if (!end || *end
@@ -6825,6 +7008,7 @@ static const char *bs_set_safeguard_capacity(cmd_parms *cmd,
                                              const char *arg)
 {
     (void)dconf;
+    bs_warn_if_virtual_scope(cmd, "BotShieldSafeguardCapacity");
     char *end = NULL;
     long n = strtol(arg, &end, 10);
     if (!end || *end
@@ -6836,6 +7020,36 @@ static const char *bs_set_safeguard_capacity(cmd_parms *cmd,
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
     scfg->safeguard_capacity = (int)n;
+    return NULL;
+}
+
+/* E13 — BotShieldShareScope <token>. Per-vhost reputation
+ * namespacing override. Default: each vhost auto-isolates by
+ * siphash(ServerName) — different ServerNames don't share
+ * flagged-IP / strike / safeguard / Bloom state. Two vhosts that
+ * should share state set the same token here; same string → same
+ * ns_id → shared rows in SHM.
+ *
+ * Empty token treated as "fall back to ServerName default" so
+ * `BotShieldShareScope ""` is a config error rather than a
+ * confusing reset. */
+static const char *bs_set_share_scope(cmd_parms *cmd, void *dconf,
+                                      const char *arg)
+{
+    (void)dconf;
+    if (!arg || !*arg) {
+        return "BotShieldShareScope: token required (use a "
+               "non-empty string; default isolation derives ns_id "
+               "from ServerName when this directive is absent)";
+    }
+    /* Bound the token length defensively; long strings are pointless
+     * since we hash to u32. */
+    if (strlen(arg) > 128) {
+        return "BotShieldShareScope: token over 128 chars";
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->share_scope_token = apr_pstrdup(cmd->pool, arg);
     return NULL;
 }
 
@@ -7331,7 +7545,8 @@ static bs_trigger_exec_outcome bs_apply_trigger_action(
         unsigned char client_ip[16];
         if (bs_parse_client_ip(r->useragent_ip, client_ip)) {
             bs_mask_ipv6_prefix(client_ip, scfg->ipv6_prefix_bits);
-            bs_flagged_ip_add(r, client_ip, a->flag_bit, a->ttl_sec);
+            bs_flagged_ip_add(r, client_ip, a->flag_bit, a->ttl_sec,
+                              scfg->ns_id);
         }
     }
     bs_set_trigger_tag(r, a->log_tag);
@@ -11619,6 +11834,18 @@ static const command_rec bs_cmds[] = {
                  "Busy-worker percentage at which a tick samples "
                  "as 'hot' (default 85; range 1..99). Must be "
                  "greater than the warm threshold."),
+    /* E13 — per-vhost reputation namespacing. */
+    AP_INIT_TAKE1("BotShieldShareScope",
+                 bs_set_share_scope, NULL, RSRC_CONF,
+                 "Reputation-namespace override token. By default, "
+                 "each vhost gets an isolated SHM namespace derived "
+                 "from siphash(ServerName), so flagged-IP / Bloom / "
+                 "strike / safeguard tables don't share rows across "
+                 "unrelated sites. Set this directive to the same "
+                 "token on two or more vhosts to force them to share "
+                 "(e.g., dev+prod for one logical app, or api+www "
+                 "subdomains). Strings up to 128 chars; hashed to a "
+                 "32-bit ns_id and stored in each SHM slot."),
     /* E12 — shadow / dry-run enforcement. */
     AP_INIT_FLAG("BotShieldShadowMode",
                  bs_set_shadow_mode, NULL, RSRC_CONF,
@@ -12410,7 +12637,7 @@ static int bs_handler(request_rec *r)
                     if (bs_parse_client_ip(r->useragent_ip, sg_ip)) {
                         bs_mask_ipv6_prefix(sg_ip,
                                             scfg_sg->ipv6_prefix_bits);
-                        bs_safeguard_clear(sg_ip);
+                        bs_safeguard_clear(sg_ip, scfg_sg->ns_id);
                     }
                 }
             }
@@ -12480,15 +12707,15 @@ static int bs_handler(request_rec *r)
     unsigned char client_ip[16];
     int have_client_ip =
         bs_parse_client_ip(r->useragent_ip, client_ip);
+    bs_server_cfg *scfg_h = ap_get_module_config(
+        r->server->module_config, &botshield_module);
     if (have_client_ip) {
-        bs_server_cfg *scfg = ap_get_module_config(
-            r->server->module_config, &botshield_module);
-        bs_mask_ipv6_prefix(client_ip, scfg->ipv6_prefix_bits);
+        bs_mask_ipv6_prefix(client_ip, scfg_h->ipv6_prefix_bits);
     }
     apr_uint32_t ip_flags = 0;
     int ip_flag_penalty = 0;
     if (have_client_ip &&
-        bs_flagged_ip_lookup(client_ip, &ip_flags)) {
+        bs_flagged_ip_lookup(client_ip, &ip_flags, scfg_h->ns_id)) {
         ip_flag_penalty = bs_flag_penalty(ip_flags);
         bs_score_add(r, ip_flag_penalty,
                      /* ttl unused here — flag TTL lives in SHM */ 0,
@@ -12501,7 +12728,7 @@ static int bs_handler(request_rec *r)
      * the first-sight signal would just be noise. A valid cookie
      * likewise skips this. */
     if (have_client_ip && !have_prior_rep &&
-        !bs_bloom_seen(client_ip)) {
+        !bs_bloom_seen(client_ip, scfg_h->ns_id)) {
         bs_score_add(r, BS_FIRST_SIGHT_PENALTY, 0, "first-sight-ip");
     }
 
@@ -12527,7 +12754,8 @@ static int bs_handler(request_rec *r)
     if (cfg->flag_on_match && have_client_ip) {
         bs_flagged_ip_add(r, client_ip, cfg->flag_on_match,
                           cfg->flag_on_match_ttl
-                            ? cfg->flag_on_match_ttl : 3600);
+                            ? cfg->flag_on_match_ttl : 3600,
+                          scfg_h->ns_id);
         ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
             "mod_botshield: flagged IP %s bits=0x%x ttl=%d scope=%s",
             r->useragent_ip, (unsigned)cfg->flag_on_match,
@@ -12575,7 +12803,7 @@ static int bs_handler(request_rec *r)
     /* Not pass tier — we will issue a challenge. Feed the Bloom filter
      * now that we've committed to challenging this client; that keeps
      * writes off the ~99% happy path. */
-    if (have_client_ip) bs_bloom_add(client_ip);
+    if (have_client_ip) bs_bloom_add(client_ip, scfg_h->ns_id);
 
     /* E10 — challenge safeguard. Before actually issuing the
      * challenge, check whether this IP has been presented N times
@@ -12592,7 +12820,7 @@ static int bs_handler(request_rec *r)
         if (scfg_sg && scfg_sg->safeguard_enabled == 1
             && have_client_ip) {
             apr_int64_t now_t = (apr_int64_t)apr_time_sec(apr_time_now());
-            if (bs_safeguard_check(client_ip, now_t)) {
+            if (bs_safeguard_check(client_ip, now_t, scfg_sg->ns_id)) {
                 ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
                     "mod_botshield: challenge-safeguard active for "
                     "%s; skipping challenge-issue and passing "
@@ -12606,7 +12834,8 @@ static int bs_handler(request_rec *r)
                 return DECLINED;
             }
             bs_safeguard_record_presentation(r, scfg_sg,
-                                             client_ip, now_t);
+                                             client_ip, now_t,
+                                             scfg_sg->ns_id);
         }
     }
 
