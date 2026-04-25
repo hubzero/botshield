@@ -687,6 +687,21 @@ typedef enum {
     BS_TIER_CAPTCHA = 3
 } bs_tier;
 
+/* E17 PoC — what flavor of silent-tier dispatch to use. INTERSTITIAL
+ * is the legacy M7 splash that auto-submits the PoW. EMBEDDED hands
+ * off to a wrapper script the operator has already included on the
+ * page; the page serves DECLINED (real content) and the wrapper does
+ * the PoW in a Web Worker, then POSTs back to /botshield/embedded-
+ * verify to mint _bs_verified. The "kicks in eventually" model: the
+ * cookie may not be set in time for the very first request, but it
+ * lands within a few page-views and from then on the client is
+ * verified. */
+typedef enum {
+    BS_SILENT_MODE_UNSET        = -1,
+    BS_SILENT_MODE_INTERSTITIAL =  0,   /* default; M7 splash */
+    BS_SILENT_MODE_EMBEDDED     =  1    /* E17 background verify */
+} bs_silent_mode;
+
 typedef struct {
     int         penalty;
     int         ttl_seconds;   /* accepted for API stability; unused today
@@ -755,6 +770,10 @@ struct bs_dir_cfg {
     int score_silent;           /* score >= this → silent tier (logged only) */
     int score_hard;             /* score >= this → hard form-PoW tier */
     int score_captcha;          /* score >= this → captcha tier */
+    /* E17 PoC — what flavor of silent-tier challenge to issue. Stored
+     * as a tri-state with UNSET sentinel so the merge picks the
+     * right scope's value. */
+    int silent_mode;            /* bs_silent_mode; UNSET inherits */
     int forgive_silent;         /* score credit on silent-tier pass */
     int forgive_form;           /* score credit on form-tier pass */
     int forgive_captcha;        /* score credit on captcha pass */
@@ -1005,6 +1024,7 @@ static void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->score_silent  = BS_UNSET;
     cfg->score_hard    = BS_UNSET;
     cfg->score_captcha = BS_UNSET;
+    cfg->silent_mode   = BS_SILENT_MODE_UNSET;
     cfg->forgive_silent  = BS_UNSET;
     cfg->forgive_form    = BS_UNSET;
     cfg->forgive_captcha = BS_UNSET;
@@ -1373,6 +1393,8 @@ static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     out->score_silent  = (add->score_silent  == BS_UNSET) ? base->score_silent  : add->score_silent;
     out->score_hard    = (add->score_hard    == BS_UNSET) ? base->score_hard    : add->score_hard;
     out->score_captcha = (add->score_captcha == BS_UNSET) ? base->score_captcha : add->score_captcha;
+    out->silent_mode   = (add->silent_mode   == BS_SILENT_MODE_UNSET)
+                       ? base->silent_mode : add->silent_mode;
     out->forgive_silent  = (add->forgive_silent  == BS_UNSET) ? base->forgive_silent  : add->forgive_silent;
     out->forgive_form    = (add->forgive_form    == BS_UNSET) ? base->forgive_form    : add->forgive_form;
     out->forgive_captcha = (add->forgive_captcha == BS_UNSET) ? base->forgive_captcha : add->forgive_captcha;
@@ -1523,6 +1545,29 @@ static const char *bs_set_forgive_captcha(cmd_parms *cmd, void *cfg_v, const cha
 {
     return bs_set_score_int("BotShieldForgivenessCaptcha",
         &((bs_dir_cfg *)cfg_v)->forgive_captcha, arg, cmd->pool);
+}
+
+/* E17 PoC — `BotShieldSilentMode <interstitial|embedded>`. Per-scope
+ * picker for what flavor of silent-tier challenge to issue. Default
+ * `interstitial` matches the legacy M7 splash. `embedded` opts the
+ * scope into background verification: BotShield serves the real
+ * page (DECLINED) and relies on the operator-included
+ * `<script src="/botshield/embedded.js" defer>` wrapper to run the
+ * PoW in a Web Worker and POST the result back. The cookie may
+ * arrive after the first request — see PLAN E17 for the
+ * "kicks in eventually" guarantee. */
+static const char *bs_set_silent_mode(cmd_parms *cmd, void *cfg_v,
+                                      const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    if      (!strcasecmp(arg, "interstitial")) cfg->silent_mode = BS_SILENT_MODE_INTERSTITIAL;
+    else if (!strcasecmp(arg, "embedded"))     cfg->silent_mode = BS_SILENT_MODE_EMBEDDED;
+    else {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSilentMode: '%s' must be 'interstitial' or "
+            "'embedded'", arg);
+    }
+    return NULL;
 }
 
 /* Forward decl: defined below in the SHM section, used by the directive
@@ -11042,6 +11087,434 @@ static const char *bs_clear_pending_cookie(request_rec *r,
  * the interstitial's form submit when the provider's widget callback
  * fires. On success, server-issues a signed captcha-turnstile cookie
  * and 302s back to the page the user tried to reach. */
+
+/* ===========================================================
+ * E17 PoC — embedded silent verification handlers.
+ *
+ * Three endpoints under <prefix>/embedded*:
+ *   GET  /botshield/embedded.js         — static wrapper script
+ *   GET  /botshield/embedded-bootstrap  — JSON: per-call PoW challenge
+ *   POST /botshield/embedded-verify     — JSON: validates + sets cookie
+ *
+ * Activation: scope opts in via `BotShieldSilentMode embedded`.
+ * Operator adds <script src="/botshield/embedded.js" defer> to their
+ * page. When the request lands at silent tier, BotShield serves
+ * DECLINED (real content) instead of the M7 splash; the wrapper runs
+ * on page-load, fetches the bootstrap, solves PoW in a Web Worker,
+ * and POSTs back. The verify endpoint mints _bs_verified the same
+ * way the M7 form-PoW path does, so subsequent requests round-trip
+ * cleanly.
+ * =========================================================== */
+
+/* The wrapper JS body. Self-contained IIFE; no external deps.
+ *
+ * Implementation notes:
+ *   - blob:-URL Web Worker so we don't need a separate cacheable URL
+ *     for the worker code. CSP-strict scopes need worker-src 'self'
+ *     blob:; documented as a known gotcha for E17 hardening.
+ *   - SubtleCrypto.digest is async, so PoW runs as Promise.all
+ *     batches with setTimeout yields between them — same shape the
+ *     M2 form interstitial uses, copied here for parity.
+ *   - Short-circuit on existing _bs_verified cookie (cheap read of
+ *     document.cookie). If the cookie is already there, no Worker
+ *     is spawned and no fetch fires.
+ *   - One Worker per page-load. _bsEmbeddedRan guard prevents
+ *     double-spawn if embedded.js gets included twice. */
+static const char BS_EMBEDDED_JS[] =
+"(function(){\n"
+" if (window._bsEmbeddedRan) return;\n"
+" window._bsEmbeddedRan = true;\n"
+" if (document.cookie && document.cookie.indexOf('_bs_verified=') !== -1) return;\n"
+" fetch('/botshield/embedded-bootstrap', {credentials:'same-origin'})\n"
+"  .then(function(r){ return r.ok ? r.json() : null; })\n"
+"  .then(function(j){\n"
+"   if (!j || j.mode !== 'silent' || !j.challenge) return;\n"
+"   var ch = j.challenge;\n"
+"   var workerSrc = '(' + (function(){\n"
+"    self.onmessage = function(ev){\n"
+"     var c = ev.data;\n"
+"     var saltB = hexToBytes(c.salt);\n"
+"     var nonceB = hexToBytes(c.nonce);\n"
+"     var counter = 0;\n"
+"     var BATCH = 1024;\n"
+"     var LIMIT = 5000000;\n"
+"     function doBatch(){\n"
+"      var promises = [];\n"
+"      var start = counter;\n"
+"      for (var i=0;i<BATCH;i++){\n"
+"       var cs = String(start+i);\n"
+"       var buf = new Uint8Array(saltB.length + nonceB.length + cs.length);\n"
+"       buf.set(saltB,0); buf.set(nonceB,saltB.length);\n"
+"       for (var j=0;j<cs.length;j++) buf[saltB.length+nonceB.length+j] = cs.charCodeAt(j);\n"
+"       promises.push(crypto.subtle.digest('SHA-256', buf));\n"
+"      }\n"
+"      Promise.all(promises).then(function(rs){\n"
+"       for (var i=0;i<rs.length;i++){\n"
+"        if (meets(new Uint8Array(rs[i]), c.difficulty)){\n"
+"         self.postMessage({counter: start+i});\n"
+"         return;\n"
+"        }\n"
+"       }\n"
+"       counter = start + BATCH;\n"
+"       if (counter > LIMIT){ self.postMessage({error:'limit'}); return; }\n"
+"       setTimeout(doBatch, 0);\n"
+"      }).catch(function(e){ self.postMessage({error:String(e)}); });\n"
+"     }\n"
+"     function hexToBytes(s){\n"
+"      var o = new Uint8Array(s.length/2);\n"
+"      for (var i=0;i<s.length;i+=2) o[i/2] = parseInt(s.substr(i,2),16);\n"
+"      return o;\n"
+"     }\n"
+"     function meets(d,n){\n"
+"      var fb = (n/2)|0; var hh = n&1;\n"
+"      for (var i=0;i<fb;i++) if (d[i] !== 0) return false;\n"
+"      if (hh && (d[fb] & 0xF0) !== 0) return false;\n"
+"      return true;\n"
+"     }\n"
+"     doBatch();\n"
+"    };\n"
+"   }).toString() + ')()';\n"
+"   var blob = new Blob([workerSrc], {type:'application/javascript'});\n"
+"   var url = URL.createObjectURL(blob);\n"
+"   var w = new Worker(url);\n"
+"   w.onmessage = function(ev){\n"
+"    if (ev.data && typeof ev.data.counter === 'number'){\n"
+"     fetch('/botshield/embedded-verify', {\n"
+"      method:'POST', credentials:'same-origin',\n"
+"      headers:{'Content-Type':'application/json'},\n"
+"      body: JSON.stringify({\n"
+"       v: ch.v, alg: ch.alg, salt: ch.salt, nonce: ch.nonce,\n"
+"       difficulty: ch.difficulty, expires_at: ch.expires_at,\n"
+"       challenged_at: ch.challenged_at, auto: ch.auto,\n"
+"       signature: ch.signature, counter: ev.data.counter\n"
+"      })\n"
+"     });\n"
+"    }\n"
+"    w.terminate();\n"
+"    URL.revokeObjectURL(url);\n"
+"   };\n"
+"   w.postMessage(ch);\n"
+"  })\n"
+"  .catch(function(){});\n"
+"})();\n";
+
+static int bs_embedded_js_handler(request_rec *r)
+{
+    if (r->method_number != M_GET && r->method_number != M_OPTIONS) {
+        r->status = HTTP_METHOD_NOT_ALLOWED;
+        apr_table_setn(r->headers_out, "Allow", "GET, OPTIONS");
+        ap_set_content_type(r, "text/plain; charset=utf-8");
+        ap_rputs("GET required.\n", r);
+        return OK;
+    }
+    ap_set_content_type(r, "application/javascript; charset=utf-8");
+    /* Short max-age so operators can iterate during the PoC without
+     * fighting browser caches; production-hardening is E17.1's job. */
+    apr_table_setn(r->headers_out, "Cache-Control", "public, max-age=60");
+    ap_rputs(BS_EMBEDDED_JS, r);
+    return OK;
+}
+
+/* GET /botshield/embedded-bootstrap — issue a fresh PoW challenge.
+ *
+ * Returns one of:
+ *   {"mode":"off"}                          — cookie already valid; wrapper exits
+ *   {"mode":"silent","challenge":{...}}     — solve this and POST to verify
+ *
+ * The challenge struct is HMAC-signed with cfg->secret, exactly the
+ * same way bs_issue_challenge signs M2/M7 challenges. The verify
+ * endpoint reconstructs the same canonical form from the JSON fields
+ * and re-validates the HMAC, so the wrapper can't forge a challenge
+ * the server didn't issue. */
+static int bs_embedded_bootstrap_handler(request_rec *r,
+                                         bs_dir_cfg *cfg)
+{
+    if (r->method_number != M_GET) {
+        r->status = HTTP_METHOD_NOT_ALLOWED;
+        apr_table_setn(r->headers_out, "Allow", "GET");
+        return OK;
+    }
+    ap_set_content_type(r, "application/json; charset=utf-8");
+    apr_table_setn(r->headers_out, "Cache-Control", "no-store");
+
+    /* If the client already has a valid _bs_verified, no point in
+     * burning Worker cycles. The wrapper short-circuits on its end
+     * too, but a redundant check here costs almost nothing and keeps
+     * the bootstrap honest. */
+    const char *cookie_val = bs_get_cookie_value(r, BS_COOKIE_NAME);
+    if (cookie_val && *cookie_val) {
+        bs_challenge tmp;
+        const char *err = bs_verify_cookie(r, cfg, cookie_val, &tmp);
+        if (!err) {
+            ap_rputs("{\"mode\":\"off\"}\n", r);
+            return OK;
+        }
+    }
+
+    if (!cfg->secret || !cfg->algorithm) {
+        ap_rputs("{\"mode\":\"off\"}\n", r);
+        return OK;
+    }
+
+    int difficulty = bs_effective_int(cfg->difficulty, BS_DEFAULT_DIFFICULTY);
+    int ttl = bs_effective_int(cfg->cookie_ttl, BS_DEFAULT_COOKIE_TTL);
+
+    bs_challenge ch;
+    memset(&ch, 0, sizeof(ch));
+    /* Issue a fresh challenge with default-zero rep state. The
+     * verify path will mint a cookie carrying this same rep, which
+     * matches what a first-time silent-tier solver would receive. */
+    const char *ierr = bs_issue_challenge(r->pool, cfg, difficulty, ttl,
+                                          /* auto_tier */ 1, NULL, NULL, &ch);
+    if (ierr) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+            "mod_botshield: embedded-bootstrap issue failed: %s", ierr);
+        r->status = HTTP_INTERNAL_SERVER_ERROR;
+        ap_rputs("{\"error\":\"issue\"}\n", r);
+        return OK;
+    }
+
+    char salt_hex [BS_SALT_BYTES * 2 + 1];
+    char nonce_hex[BS_NONCE_BYTES * 2 + 1];
+    char sig_hex  [BS_SIG_BYTES * 2 + 1];
+    bs_to_hex(ch.salt,       BS_SALT_BYTES,  salt_hex);
+    bs_to_hex(ch.nonce,      BS_NONCE_BYTES, nonce_hex);
+    bs_to_hex(ch.signature,  BS_SIG_BYTES,   sig_hex);
+
+    /* Include challenged_at and auto so the wrapper can round-trip
+     * them through the verify POST. The signature in
+     * bs_challenge_canonical covers every rep field; if the wrapper
+     * doesn't send back exactly the bytes we signed, the signature
+     * recomputation in verify will mismatch. Score / flags /
+     * passes_* / forgive_* are zero on a fresh challenge so we don't
+     * need to surface them — they parse-default to 0 on verify. */
+    ap_rprintf(r,
+        "{\"mode\":\"silent\",\"challenge\":{"
+        "\"v\":%d,\"alg\":\"%s\",\"salt\":\"%s\",\"nonce\":\"%s\","
+        "\"difficulty\":%d,\"expires_at\":%" APR_TIME_T_FMT ","
+        "\"challenged_at\":%" APR_TIME_T_FMT ",\"auto\":%d,"
+        "\"signature\":\"%s\""
+        "}}\n",
+        ch.version, ch.alg_name, salt_hex, nonce_hex,
+        ch.difficulty, ch.expires_at,
+        ch.rep.challenged_at, ch.auto_tier,
+        sig_hex);
+    return OK;
+}
+
+/* Pull a string field out of a parsed JSON object, returning a pool-
+ * allocated copy or NULL if missing/wrong-type. Bounded copy keeps
+ * us from accepting unbounded input from a malicious client. */
+static const char *bs_json_get_str(apr_pool_t *p, json_object *root,
+                                   const char *key, apr_size_t max_len)
+{
+    json_object *v = NULL;
+    if (!json_object_object_get_ex(root, key, &v)) return NULL;
+    if (!json_object_is_type(v, json_type_string)) return NULL;
+    const char *s = json_object_get_string(v);
+    if (!s) return NULL;
+    apr_size_t slen = strlen(s);
+    if (slen > max_len) return NULL;
+    return apr_pstrdup(p, s);
+}
+
+static int bs_json_get_int(json_object *root, const char *key,
+                           int *out, int min_val, int max_val)
+{
+    json_object *v = NULL;
+    if (!json_object_object_get_ex(root, key, &v)) return 0;
+    if (!json_object_is_type(v, json_type_int)) return 0;
+    int64_t n = json_object_get_int64(v);
+    if (n < min_val || n > max_val) return 0;
+    *out = (int)n;
+    return 1;
+}
+
+/* POST /botshield/embedded-verify — validate the wrapper's PoW
+ * solution and mint _bs_verified.
+ *
+ * Body shape (JSON):
+ *   {"v":N, "alg":"sha256-zeros", "salt":"<hex>", "nonce":"<hex>",
+ *    "difficulty":N, "expires_at":N, "signature":"<hex>",
+ *    "counter":N}
+ *
+ * On success: 204 + Set-Cookie: _bs_verified=...; ...
+ * On failure: 4xx; no cookie. */
+#define BS_EMBEDDED_BODY_MAX 4096
+static int bs_embedded_verify_handler(request_rec *r, bs_dir_cfg *cfg)
+{
+    if (r->method_number != M_POST) {
+        r->status = HTTP_METHOD_NOT_ALLOWED;
+        apr_table_setn(r->headers_out, "Allow", "POST");
+        return OK;
+    }
+    if (!cfg->secret || !cfg->algorithm) {
+        r->status = HTTP_SERVICE_UNAVAILABLE;
+        return OK;
+    }
+
+    apr_size_t body_len = 0;
+    const char *body = bs_read_form_body(r, BS_EMBEDDED_BODY_MAX, &body_len);
+    if (!body || body_len == 0) {
+        r->status = HTTP_BAD_REQUEST;
+        return OK;
+    }
+
+    enum json_tokener_error jerr = json_tokener_success;
+    json_object *root = json_tokener_parse_verbose(body, &jerr);
+    if (!root || jerr != json_tokener_success) {
+        if (root) json_object_put(root);
+        r->status = HTTP_BAD_REQUEST;
+        return OK;
+    }
+
+    /* Reconstruct the bs_challenge struct from the JSON. The HMAC
+     * signature binds every byte of the canonical form, so any
+     * tampered field invalidates the signature check below. */
+    bs_challenge ch;
+    memset(&ch, 0, sizeof(ch));
+    int ok = 1;
+    int int_v = 0;
+    if (!bs_json_get_int(root, "v",          &int_v, 0, INT_MAX))      ok = 0;
+    ch.version = int_v;
+    if (!bs_json_get_int(root, "difficulty", &int_v, 1, BS_MAX_DIFFICULTY_HARDCAP)) ok = 0;
+    ch.difficulty = int_v;
+    int counter = 0;
+    if (!bs_json_get_int(root, "counter",    &counter, 0, INT_MAX))     ok = 0;
+    json_object *exp_v = NULL;
+    apr_int64_t exp64 = 0;
+    if (json_object_object_get_ex(root, "expires_at", &exp_v) &&
+        json_object_is_type(exp_v, json_type_int)) {
+        exp64 = json_object_get_int64(exp_v);
+    } else {
+        ok = 0;
+    }
+    ch.expires_at = (apr_time_t)exp64;
+
+    /* challenged_at + auto are part of the canonical form the
+     * signature covers, so the wrapper must round-trip them
+     * verbatim. Mismatch here is a sig-mismatch downstream, but we
+     * fail-fast on parse errors. */
+    json_object *ca_v = NULL;
+    if (json_object_object_get_ex(root, "challenged_at", &ca_v) &&
+        json_object_is_type(ca_v, json_type_int)) {
+        ch.rep.challenged_at = (apr_time_t)json_object_get_int64(ca_v);
+    } else {
+        ok = 0;
+    }
+    if (!bs_json_get_int(root, "auto", &int_v, 0, 1)) ok = 0;
+    ch.auto_tier = int_v;
+
+    const char *alg_name = bs_json_get_str(r->pool, root, "alg", 64);
+    const char *salt_hex = bs_json_get_str(r->pool, root, "salt",
+                                           BS_SALT_BYTES * 2);
+    const char *nonce_hex = bs_json_get_str(r->pool, root, "nonce",
+                                            BS_NONCE_BYTES * 2);
+    const char *sig_hex  = bs_json_get_str(r->pool, root, "signature",
+                                           BS_SIG_BYTES * 2);
+    if (!alg_name || !salt_hex || !nonce_hex || !sig_hex) ok = 0;
+
+    if (!ok) {
+        json_object_put(root);
+        r->status = HTTP_BAD_REQUEST;
+        return OK;
+    }
+
+    const bs_pow_algorithm *alg = bs_find_algorithm(alg_name);
+    if (!alg || !alg->implemented) {
+        json_object_put(root);
+        r->status = HTTP_BAD_REQUEST;
+        return OK;
+    }
+    ch.alg_name = alg->name;
+
+    if (strlen(salt_hex)  != BS_SALT_BYTES * 2  ||
+        !bs_from_hex(salt_hex,  BS_SALT_BYTES,  ch.salt) ||
+        strlen(nonce_hex) != BS_NONCE_BYTES * 2 ||
+        !bs_from_hex(nonce_hex, BS_NONCE_BYTES, ch.nonce) ||
+        strlen(sig_hex)   != BS_SIG_BYTES * 2   ||
+        !bs_from_hex(sig_hex,   BS_SIG_BYTES,   ch.signature)) {
+        json_object_put(root);
+        r->status = HTTP_BAD_REQUEST;
+        return OK;
+    }
+
+    /* Validate the HMAC against the canonical form. This proves the
+     * server issued the challenge and nothing in transit changed. */
+    const char *canon = bs_challenge_canonical(r->pool, &ch);
+    unsigned char sig_expected[BS_SIG_BYTES];
+    bs_hmac_sha256(cfg->secret, cfg->secret_len,
+                   (const unsigned char *)canon, strlen(canon),
+                   sig_expected);
+    if (!bs_ct_equal(sig_expected, ch.signature, BS_SIG_BYTES)) {
+        /* Try secondary key if rotation is in progress (E16). */
+        if (cfg->secret_secondary) {
+            bs_hmac_sha256(cfg->secret_secondary, cfg->secret_secondary_len,
+                           (const unsigned char *)canon, strlen(canon),
+                           sig_expected);
+        }
+        if (!cfg->secret_secondary ||
+            !bs_ct_equal(sig_expected, ch.signature, BS_SIG_BYTES)) {
+            json_object_put(root);
+            r->status = HTTP_FORBIDDEN;
+            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                "mod_botshield: embedded-verify: bad signature");
+            return OK;
+        }
+    }
+
+    apr_time_t now = apr_time_sec(apr_time_now());
+    if (now > ch.expires_at) {
+        json_object_put(root);
+        r->status = HTTP_FORBIDDEN;
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: embedded-verify: challenge expired");
+        return OK;
+    }
+
+    /* Validate the PoW counter via the registered algorithm. */
+    char counter_str[24];
+    apr_snprintf(counter_str, sizeof(counter_str), "%d", counter);
+    const char *verr = alg->verify(&ch, counter_str);
+    if (verr) {
+        json_object_put(root);
+        r->status = HTTP_FORBIDDEN;
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: embedded-verify: PoW reject: %s", verr);
+        return OK;
+    }
+
+    json_object_put(root);
+
+    /* Mint _bs_verified the same way the M7 form-PoW does — same
+     * cookie shape, same expiry, same signature path. The counter
+     * the wrapper found rides into the cookie body so future
+     * requests can replay-detect (the cookie format already includes
+     * the counter as the last field). */
+    ch.rep.passes_silent = 1;   /* this counts as one solved silent challenge */
+    /* Re-sign because we just modified rep. */
+    canon = bs_challenge_canonical(r->pool, &ch);
+    bs_hmac_sha256(cfg->secret, cfg->secret_len,
+                   (const unsigned char *)canon, strlen(canon),
+                   ch.signature);
+    const char *payload = bs_build_cookie_payload(r->pool, cfg, &ch,
+                                                  counter_str);
+    if (!payload) {
+        r->status = HTTP_INTERNAL_SERVER_ERROR;
+        return OK;
+    }
+    apr_table_set(r->err_headers_out, "Set-Cookie",
+                  bs_build_set_cookie(r, cfg, payload, ch.expires_at));
+
+    r->status = HTTP_NO_CONTENT;
+    apr_table_setn(r->headers_out, "Cache-Control", "no-store");
+    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+        "mod_botshield: embedded-verify: cookie minted (counter=%d)",
+        counter);
+    return OK;
+}
+/* end E17 PoC handlers */
+
 /* ---- M9.3: Prometheus text metrics handler ----
  *
  * Mounted at <prefix>/metrics. Emits counters + gauges in a fixed
@@ -12286,6 +12759,19 @@ static const command_rec bs_cmds[] = {
                  "(default: 80). Serves the configured third-party "
                  "provider's widget; falls through to form-PoW if no "
                  "BotShieldCaptchaProvider is set on the scope."),
+    /* E17 PoC — silent-tier dispatch flavor. */
+    AP_INIT_TAKE1("BotShieldSilentMode", bs_set_silent_mode, NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "How to dispatch silent-tier (low-friction) "
+                 "challenges. 'interstitial' (default) = legacy M7 "
+                 "auto-submit splash. 'embedded' = serve real page "
+                 "(DECLINED) and rely on the operator-included "
+                 "/botshield/embedded.js wrapper to do PoW in a Web "
+                 "Worker and POST the result back to "
+                 "/botshield/embedded-verify. The verified cookie "
+                 "may not arrive in time for the very first request, "
+                 "but it lands within a few page-views — see PLAN "
+                 "E17 for the timing model."),
     AP_INIT_TAKE1("BotShieldForgivenessSilent", bs_set_forgive_silent, NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "Score credit applied on a successful silent-PoW pass "
@@ -13265,6 +13751,16 @@ static int bs_handler(request_rec *r)
         if (strcmp(sub, "/policy-status") == 0) {
             return bs_policy_status_handler(r, cfg);
         }
+        /* E17 PoC — embedded silent-verify endpoints. */
+        if (strcmp(sub, "/embedded.js") == 0) {
+            return bs_embedded_js_handler(r);
+        }
+        if (strcmp(sub, "/embedded-bootstrap") == 0) {
+            return bs_embedded_bootstrap_handler(r, cfg);
+        }
+        if (strcmp(sub, "/embedded-verify") == 0) {
+            return bs_embedded_verify_handler(r, cfg);
+        }
         /* Unknown module endpoint under the prefix → 404, so a typo in
          * an operator's template fails loudly instead of falling through
          * to Apache and serving some unrelated file. */
@@ -13586,6 +14082,25 @@ static int bs_handler(request_rec *r)
                                              client_ip, now_t,
                                              scfg_sg->ns_id);
         }
+    }
+
+    /* E17 PoC — if silent-tier dispatch lands here AND the scope is
+     * in `embedded` mode, skip the M7 interstitial entirely. Serve
+     * the real page (DECLINED). The operator-included
+     * /botshield/embedded.js wrapper runs on page-load, fetches a
+     * challenge from /botshield/embedded-bootstrap, solves PoW in a
+     * Web Worker, and POSTs back to /botshield/embedded-verify which
+     * mints _bs_verified. The cookie may not arrive in time for the
+     * very first request, but subsequent page-loads in the session
+     * carry it — see PLAN E17 for the "kicks in eventually"
+     * timing model. */
+    if (tier == BS_TIER_SILENT &&
+        cfg->silent_mode == BS_SILENT_MODE_EMBEDDED) {
+        bs_decision_log(r, "silent", "declined", cookie_status,
+                        "-", "-",
+                        bs_decision_reason_names(r->pool, score),
+                        effective);
+        return DECLINED;
     }
 
     /* Decide whether this challenge will be served as the M7 silent-tier

@@ -1,0 +1,133 @@
+"""E17 PoC — embedded silent verification round-trip in a real browser.
+
+The PoC's job is to prove the timing model works: page renders
+immediately (no interstitial), wrapper runs in background, Worker
+solves PoW, POSTs result, _bs_verified cookie is set, next page-load
+in the session rides through without re-challenge.
+
+These tests use a Bloom-fresh IP shaped to land at silent tier (no
+Accept-Language, no Mozilla UA boost) and visit /embedded-test.html
+(a tiny static page that includes the wrapper). With
+BotShieldSilentMode embedded scoped to that path, the response is
+DECLINED (real page) instead of the M7 splash; the wrapper does the
+verification work in the background.
+
+The "kicks in eventually" guarantee:
+  - first request may not have the cookie yet (wrapper hasn't
+    finished posting)
+  - within ~2-3 seconds the cookie should be set
+  - subsequent requests in the same browser context ride through
+"""
+
+from __future__ import annotations
+
+import time
+
+import pytest
+
+
+pytestmark = [pytest.mark.acceptance, pytest.mark.browser]
+
+
+EMBEDDED_PATH = "/embedded-test.html"
+
+
+def test_embedded_serves_real_page_immediately(
+    config_override, bs_browser_context,
+):
+    """First page-load under embedded mode: real page renders, no
+    interstitial. The page title is 'BotShield embedded-mode test
+    page', not 'Verify you are human'."""
+    with config_override(
+        r"BotShieldAllow\s+on",
+        'BotShieldAllow on\n'
+        '    <Location /embedded-test.html>\n'
+        '        BotShieldSilentMode embedded\n'
+        '    </Location>',
+        count=1,
+    ):
+        page = bs_browser_context.new_page()
+        resp = page.goto(f"https://localhost{EMBEDDED_PATH}")
+        assert resp.status == 200, (
+            f"embedded mode should serve the real page; "
+            f"status={resp.status}"
+        )
+        title = page.title()
+        assert "Verify you are human" not in title, (
+            f"embedded mode leaked the M7 interstitial; title={title!r}"
+        )
+        assert "embedded-mode test page" in title, (
+            f"unexpected page title: {title!r}"
+        )
+
+
+def test_embedded_wrapper_mints_verified_cookie(
+    config_override, bs_browser_context,
+):
+    """The headline timing test: load the page (wrapper fires in
+    background), wait a few seconds for the Worker + POST to
+    complete, observe _bs_verified in the cookie jar."""
+    with config_override(
+        r"BotShieldAllow\s+on",
+        'BotShieldAllow on\n'
+        '    <Location /embedded-test.html>\n'
+        '        BotShieldSilentMode embedded\n'
+        '    </Location>',
+        count=1,
+    ):
+        page = bs_browser_context.new_page()
+        page.goto(f"https://localhost{EMBEDDED_PATH}")
+
+        # Poll for the cookie up to 8s. PoW at default difficulty=4
+        # is a few thousand hashes — Worker should finish in well
+        # under 2s on any modern machine, but CI variance + Worker
+        # spin-up justifies a generous deadline.
+        deadline = time.monotonic() + 8.0
+        cookie_present = False
+        while time.monotonic() < deadline:
+            cookies = {c["name"] for c in bs_browser_context.cookies()}
+            if "_bs_verified" in cookies:
+                cookie_present = True
+                break
+            time.sleep(0.25)
+
+        assert cookie_present, (
+            f"wrapper failed to mint _bs_verified within deadline; "
+            f"cookies={[c['name'] for c in bs_browser_context.cookies()]}"
+        )
+
+
+def test_embedded_subsequent_request_declined_through(
+    config_override, bs_browser_context,
+):
+    """Once the cookie has landed, the next page-load within the same
+    browser context should ride through with the cookie attached. No
+    challenge, no re-issue. Verifies the round-trip closes the loop:
+    cookie minted → cookie sent → cookie verified server-side → real
+    content."""
+    with config_override(
+        r"BotShieldAllow\s+on",
+        'BotShieldAllow on\n'
+        '    <Location /embedded-test.html>\n'
+        '        BotShieldSilentMode embedded\n'
+        '    </Location>',
+        count=1,
+    ):
+        page = bs_browser_context.new_page()
+        # First visit — wait for the wrapper to mint the cookie.
+        page.goto(f"https://localhost{EMBEDDED_PATH}")
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            if "_bs_verified" in {c["name"] for c in bs_browser_context.cookies()}:
+                break
+            time.sleep(0.25)
+
+        # Second visit on the same context — cookie should ride along
+        # and the response should be the real page with no challenge
+        # marker.
+        resp = page.goto(f"https://localhost{EMBEDDED_PATH}")
+        assert resp.status == 200
+        assert resp.headers.get("x-botshield") != "challenge", (
+            f"second request to embedded scope got a challenge "
+            f"despite cookie present; headers={dict(resp.headers)}"
+        )
