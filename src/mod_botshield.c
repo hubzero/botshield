@@ -117,6 +117,42 @@ module AP_MODULE_DECLARE_DATA botshield_module;
 #define BS_SIG_BYTES          32  /* HMAC-SHA-256 output */
 #define BS_COOKIE_FIELDS      15  /* full cookie payload; canonical is 13 */
 
+/* E8.1 — AES-256-GCM cookie wire format.
+ *
+ * Wire format:   base64( alg_id(1) || nonce(12) || ct || tag(16) )
+ *                + "." + counter
+ *
+ *   alg_id is authenticated via AAD so an attacker can't swap
+ *   primitives. ct is the AES-GCM encryption of the same canonical
+ *   pipe-delimited form the HMAC path builds. Counter rides outside
+ *   the ciphertext because the PoW JS builds the cookie client-side
+ *   without the AES key — it appends its computed counter to the
+ *   server-issued encrypted prefix and sets the cookie. Server-built
+ *   cookies (captcha tier) use "captcha" as the counter sentinel on
+ *   the same dot-suffix.
+ *
+ * AES-256 key is derived from cfg->secret via SHA-256, so:
+ *   - operators keep a single BotShieldSecretFile
+ *   - HMAC and GCM use distinct domain-separated keys from the same
+ *     material (HMAC uses the raw bytes; GCM uses the digest) */
+#define BS_COOKIE_ALG_GCM     0x01
+#define BS_GCM_NONCE_LEN      12
+#define BS_GCM_TAG_LEN        16
+#define BS_GCM_COUNTER_SEP    '.'
+/* Separator byte in AES-GCM wire format between the base64 envelope
+ * and the plaintext counter. `.` because it's not in standard base64
+ * alphabet — unambiguous split point. */
+
+/* E8.1 — BotShieldCookieFormat bitmap. Bits are accepted *verify*
+ * formats; issuer prefers GCM when that bit is set. Both bits set
+ * is the migration mode ("issue GCM, accept either"). Field value
+ * BS_FMT_UNSET (-1) means operator didn't write the directive; the
+ * effective format falls back to BS_FMT_HMAC (legacy default until
+ * operators opt in). */
+#define BS_FMT_HMAC           0x01
+#define BS_FMT_GCM            0x02
+#define BS_FMT_UNSET          (-1)
+
 /* Forward declarations for the PoW algorithm dispatch table. */
 typedef struct bs_dir_cfg bs_dir_cfg;
 
@@ -535,6 +571,7 @@ struct bs_dir_cfg {
     const bs_pow_algorithm *algorithm;      /* chosen issue algorithm */
     const unsigned char    *secret;         /* HMAC key bytes */
     apr_size_t              secret_len;     /* key length */
+    int                     cookie_format;  /* BS_FMT_* bitmap or BS_FMT_UNSET */
     int score_silent;           /* score >= this → silent tier (logged only) */
     int score_hard;             /* score >= this → hard form-PoW tier */
     int score_captcha;          /* score >= this → captcha tier */
@@ -709,6 +746,7 @@ static void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->algorithm  = NULL;
     cfg->secret     = NULL;
     cfg->secret_len = 0;
+    cfg->cookie_format = BS_FMT_UNSET;
     cfg->score_silent  = BS_UNSET;
     cfg->score_hard    = BS_UNSET;
     cfg->score_captcha = BS_UNSET;
@@ -955,6 +993,9 @@ static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
         out->secret     = base->secret;
         out->secret_len = base->secret_len;
     }
+    out->cookie_format = (add->cookie_format == BS_FMT_UNSET)
+                       ? base->cookie_format
+                       : add->cookie_format;
     out->score_silent  = (add->score_silent  == BS_UNSET) ? base->score_silent  : add->score_silent;
     out->score_hard    = (add->score_hard    == BS_UNSET) ? base->score_hard    : add->score_hard;
     out->score_captcha = (add->score_captcha == BS_UNSET) ? base->score_captcha : add->score_captcha;
@@ -1363,6 +1404,169 @@ static int bs_ct_equal(const unsigned char *a, const unsigned char *b,
     unsigned char diff = 0;
     for (apr_size_t i = 0; i < len; i++) diff |= a[i] ^ b[i];
     return diff == 0;
+}
+
+/* Derive a 32-byte AES-256 key from operator secret bytes via
+ * SHA-256. Two purposes:
+ *   1. Accept any secret length — SHA-256 is defined for any input.
+ *      The existing HMAC path uses the secret bytes directly (HMAC
+ *      accepts variable-length keys), so having GCM run through a
+ *      hash gives us one derived-key convention without forcing
+ *      operators to manage two key files.
+ *   2. Domain separation. HMAC reads the raw bytes; GCM reads the
+ *      digest. A leaked-in-one-direction-but-not-the-other secret
+ *      can't be trivially cross-applied even if someone mistakenly
+ *      exports the derived bytes. Not cryptographically rigorous
+ *      domain separation (a SHA-256 preimage is trivial with the
+ *      original bytes), but it means AES ciphertexts produced under
+ *      the HMAC-derived key won't decrypt under the raw bytes and
+ *      vice versa. */
+static void bs_derive_aes_key(const unsigned char *secret,
+                              apr_size_t secret_len,
+                              unsigned char out_key[32])
+{
+    bs_sha256(secret, secret_len, out_key);
+}
+
+/* AES-256-GCM encrypt. Wire layout:
+ *     alg_id(1) || nonce(12) || ciphertext || tag(16)
+ * The alg_id byte is the only AAD — authenticates the primitive
+ * choice so an attacker can't swap 0x01 for (say) 0x02 and drive
+ * the verifier into a different algorithm's parse.
+ *
+ * On success: writes the full envelope into *out_buf (caller-
+ * provided, must be at least 1 + 12 + pt_len + 16 bytes), writes
+ * the envelope length into *out_len, returns NULL.
+ * On failure: returns an error string for logging; *out_len
+ * untouched. */
+static const char *bs_gcm_encrypt(const unsigned char *secret,
+                                  apr_size_t secret_len,
+                                  const unsigned char *pt,
+                                  apr_size_t pt_len,
+                                  unsigned char *out_buf,
+                                  apr_size_t *out_len)
+{
+    unsigned char key[32];
+    bs_derive_aes_key(secret, secret_len, key);
+
+    out_buf[0] = BS_COOKIE_ALG_GCM;
+    if (RAND_bytes(out_buf + 1, BS_GCM_NONCE_LEN) != 1) {
+        return "RAND_bytes(gcm_nonce)";
+    }
+    unsigned char *nonce = out_buf + 1;
+    unsigned char *ct    = out_buf + 1 + BS_GCM_NONCE_LEN;
+    unsigned char *tag   = ct + pt_len;
+
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) return "EVP_CIPHER_CTX_new";
+    const char *err = NULL;
+    int outlen = 0, finallen = 0, aadlen = 0;
+
+    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1) {
+        err = "EVP_EncryptInit_ex(aes_256_gcm)"; goto done;
+    }
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN,
+                            BS_GCM_NONCE_LEN, NULL) != 1) {
+        err = "EVP_CIPHER_CTX_ctrl(SET_IVLEN)"; goto done;
+    }
+    if (EVP_EncryptInit_ex(ctx, NULL, NULL, key, nonce) != 1) {
+        err = "EVP_EncryptInit_ex(key+nonce)"; goto done;
+    }
+    if (EVP_EncryptUpdate(ctx, NULL, &aadlen, out_buf, 1) != 1) {
+        err = "EVP_EncryptUpdate(AAD)"; goto done;
+    }
+    if (pt_len > 0) {
+        if (EVP_EncryptUpdate(ctx, ct, &outlen, pt, (int)pt_len) != 1) {
+            err = "EVP_EncryptUpdate(pt)"; goto done;
+        }
+    }
+    if (EVP_EncryptFinal_ex(ctx, ct + outlen, &finallen) != 1) {
+        err = "EVP_EncryptFinal_ex"; goto done;
+    }
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG,
+                            BS_GCM_TAG_LEN, tag) != 1) {
+        err = "EVP_CIPHER_CTX_ctrl(GET_TAG)"; goto done;
+    }
+    *out_len = 1 + BS_GCM_NONCE_LEN + pt_len + BS_GCM_TAG_LEN;
+
+done:
+    EVP_CIPHER_CTX_free(ctx);
+    OPENSSL_cleanse(key, sizeof(key));
+    return err;
+}
+
+/* AES-256-GCM decrypt. Expects the full envelope
+ *     alg_id(1) || nonce(12) || ciphertext || tag(16)
+ * Returns NULL on success (tag verified) with plaintext written
+ * into *out_pt (caller-provided, must be at least env_len - 1 - 12
+ * - 16 bytes) and the plaintext length in *out_pt_len. Returns an
+ * error string on any failure including tag-mismatch. */
+static const char *bs_gcm_decrypt(const unsigned char *secret,
+                                  apr_size_t secret_len,
+                                  const unsigned char *env,
+                                  apr_size_t env_len,
+                                  unsigned char *out_pt,
+                                  apr_size_t *out_pt_len)
+{
+    if (env_len < (apr_size_t)(1 + BS_GCM_NONCE_LEN + BS_GCM_TAG_LEN)) {
+        return "envelope too short";
+    }
+    if (env[0] != BS_COOKIE_ALG_GCM) return "unknown alg_id";
+
+    apr_size_t ct_len = env_len - 1 - BS_GCM_NONCE_LEN - BS_GCM_TAG_LEN;
+    const unsigned char *nonce = env + 1;
+    const unsigned char *ct    = env + 1 + BS_GCM_NONCE_LEN;
+    const unsigned char *tag   = ct + ct_len;
+
+    unsigned char key[32];
+    bs_derive_aes_key(secret, secret_len, key);
+
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) { OPENSSL_cleanse(key, sizeof(key)); return "EVP_CIPHER_CTX_new"; }
+    const char *err = NULL;
+    int outlen = 0, finallen = 0, aadlen = 0;
+
+    if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1) {
+        err = "EVP_DecryptInit_ex(aes_256_gcm)"; goto done;
+    }
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN,
+                            BS_GCM_NONCE_LEN, NULL) != 1) {
+        err = "EVP_CIPHER_CTX_ctrl(SET_IVLEN)"; goto done;
+    }
+    if (EVP_DecryptInit_ex(ctx, NULL, NULL, key, nonce) != 1) {
+        err = "EVP_DecryptInit_ex(key+nonce)"; goto done;
+    }
+    if (EVP_DecryptUpdate(ctx, NULL, &aadlen, env, 1) != 1) {
+        err = "EVP_DecryptUpdate(AAD)"; goto done;
+    }
+    if (ct_len > 0) {
+        if (EVP_DecryptUpdate(ctx, out_pt, &outlen, ct, (int)ct_len) != 1) {
+            err = "EVP_DecryptUpdate(ct)"; goto done;
+        }
+    }
+    /* Set expected tag BEFORE Final — required by EVP's GCM contract. */
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG,
+                            BS_GCM_TAG_LEN, (void *)tag) != 1) {
+        err = "EVP_CIPHER_CTX_ctrl(SET_TAG)"; goto done;
+    }
+    if (EVP_DecryptFinal_ex(ctx, out_pt + outlen, &finallen) != 1) {
+        err = "gcm tag verification failed"; goto done;
+    }
+    *out_pt_len = (apr_size_t)(outlen + finallen);
+
+done:
+    EVP_CIPHER_CTX_free(ctx);
+    OPENSSL_cleanse(key, sizeof(key));
+    return err;
+}
+
+/* Effective cookie-format bitmap for a given dir_cfg, substituting
+ * the legacy default when the operator hasn't written the directive
+ * at any inherited scope. */
+static int bs_effective_cookie_format(const bs_dir_cfg *cfg)
+{
+    return (cfg && cfg->cookie_format != BS_FMT_UNSET)
+         ? cfg->cookie_format : BS_FMT_HMAC;
 }
 
 /* Hex helpers. Writes 2*len chars + NUL. */
@@ -6093,6 +6297,33 @@ static apr_uint32_t bs_parse_flag_names(apr_pool_t *p, const char *s,
     return bits;
 }
 
+/* E8.1 — GCM cookie prefix builder. Encrypts the same canonical
+ * pipe-delimited form the HMAC path signs, base64-encodes
+ *     alg_id(1) || nonce(12) || ciphertext || tag(16)
+ * for the JS interstitial to append '.<counter>' to when the PoW
+ * worker completes. Also used by the server-built captcha cookie
+ * path, which appends '.captcha' on the module side. */
+static const char *bs_build_cookie_prefix_gcm(apr_pool_t *p,
+                                              const bs_dir_cfg *cfg,
+                                              const bs_challenge *ch,
+                                              const char **out_b64)
+{
+    if (!cfg->secret || cfg->secret_len == 0) return "no secret";
+    const char *canon = bs_challenge_canonical(p, ch);
+    apr_size_t pt_len = strlen(canon);
+    apr_size_t env_cap = 1 + BS_GCM_NONCE_LEN + pt_len + BS_GCM_TAG_LEN;
+    unsigned char *env = apr_palloc(p, env_cap);
+    apr_size_t env_len = 0;
+    const char *err = bs_gcm_encrypt(cfg->secret, cfg->secret_len,
+                                     (const unsigned char *)canon, pt_len,
+                                     env, &env_len);
+    if (err) return err;
+    char *b64 = apr_palloc(p, apr_base64_encode_len((int)env_len) + 1);
+    apr_base64_encode(b64, (const char *)env, (int)env_len);
+    *out_b64 = b64;
+    return NULL;
+}
+
 /* Render the challenge as JSON for inline embedding in the interstitial.
  * The JS worker reads window.__bsChallenge and uses it to drive the PoW
  * and to assemble the resulting cookie. Contents are deterministic —
@@ -6100,19 +6331,42 @@ static apr_uint32_t bs_parse_flag_names(apr_pool_t *p, const char *s,
  * needed inside a <script> tag.
  *
  * Also carries the cookie_domain (if configured) so the JS can include
- * a Domain= attribute when calling document.cookie. */
+ * a Domain= attribute when calling document.cookie.
+ *
+ * E8.1 — under GCM issue format the rep block is omitted from the
+ * JSON (that's the whole point of encryption: the client shouldn't
+ * see score/flags/passes_*). Instead the JSON carries an opaque
+ * cookie_prefix base64 blob that the JS appends `.<counter>` to.
+ * Under HMAC issue format the legacy shape stays byte-identical. */
 static const char *bs_challenge_json(apr_pool_t *p, const bs_dir_cfg *cfg,
                                      const bs_challenge *ch)
 {
     char salt_hex [BS_SALT_BYTES * 2 + 1];
     char nonce_hex[BS_NONCE_BYTES * 2 + 1];
-    char sig_hex  [BS_SIG_BYTES * 2 + 1];
-    bs_to_hex(ch->salt,      BS_SALT_BYTES,  salt_hex);
-    bs_to_hex(ch->nonce,     BS_NONCE_BYTES, nonce_hex);
-    bs_to_hex(ch->signature, BS_SIG_BYTES,   sig_hex);
+    bs_to_hex(ch->salt,  BS_SALT_BYTES,  salt_hex);
+    bs_to_hex(ch->nonce, BS_NONCE_BYTES, nonce_hex);
     const char *domain_json = cfg->cookie_domain
         ? apr_psprintf(p, ",\"cookie_domain\":\"%s\"", cfg->cookie_domain)
         : "";
+    int fmt = bs_effective_cookie_format(cfg);
+    if (fmt & BS_FMT_GCM) {
+        const char *prefix_b64 = NULL;
+        const char *err = bs_build_cookie_prefix_gcm(p, cfg, ch, &prefix_b64);
+        if (!err) {
+            return apr_psprintf(p,
+                "{\"salt\":\"%s\",\"nonce\":\"%s\",\"difficulty\":%d,"
+                "\"expires_at\":%" APR_TIME_T_FMT ",\"auto\":%d,"
+                "\"cookie_prefix\":\"%s\"%s}",
+                salt_hex, nonce_hex, ch->difficulty, ch->expires_at,
+                ch->auto_tier ? 1 : 0, prefix_b64, domain_json);
+        }
+        /* Encryption failed at render time. Rather than serve a broken
+         * page, fall through to the HMAC shape — the verifier will
+         * still accept it if HMAC is in the allow-list. Operators see
+         * the diagnostic in the error log. */
+    }
+    char sig_hex[BS_SIG_BYTES * 2 + 1];
+    bs_to_hex(ch->signature, BS_SIG_BYTES, sig_hex);
     return apr_psprintf(p,
         "{\"v\":%d,\"alg\":\"%s\",\"salt\":\"%s\",\"nonce\":\"%s\","
         "\"difficulty\":%d,\"expires_at\":%" APR_TIME_T_FMT ","
@@ -6190,16 +6444,72 @@ static const char *bs_issue_challenge(apr_pool_t *p, const bs_dir_cfg *cfg,
     return NULL;
 }
 
-/* Build the 15-field base64-encoded cookie payload for a challenge +
- * counter. Matches the format the interstitial JS produces so server-
- * set (M8 captcha) and client-set (M1/M7 PoW) cookies are indistinguish-
- * able on the wire. `counter_str` is the PoW counter for PoW cookies,
- * or the sentinel "captcha" for captcha-alg cookies (the alg's verify
- * only checks non-empty). */
+/* Parse the 13 pipe-delimited canonical-form fields (same shape
+ * emitted by bs_challenge_canonical, whether it arrived cleartext
+ * from an HMAC cookie or as GCM plaintext) into *ch. Returns NULL
+ * on success or a diagnostic on parse failure. Caller has already
+ * split the canonical string at '|' into fields[0..12]. */
+static const char *bs_parse_canonical_fields(char *const fields[],
+                                              bs_challenge *ch)
+{
+    long v;
+    apr_int64_t v64;
+    if (!bs_parse_int_bounded(fields[0], 0, INT_MAX, 10, &v)) return "bad version";
+    ch->version = (int)v;
+    if (ch->version != BS_PROTOCOL_VERSION) return "bad protocol version";
+
+    const bs_pow_algorithm *alg = bs_find_algorithm(fields[1]);
+    if (!alg || !alg->implemented) return "unknown algorithm";
+    ch->alg_name = alg->name;
+
+    if (strlen(fields[2]) != BS_SALT_BYTES * 2 ||
+        !bs_from_hex(fields[2], BS_SALT_BYTES, ch->salt)) return "bad salt";
+    if (strlen(fields[3]) != BS_NONCE_BYTES * 2 ||
+        !bs_from_hex(fields[3], BS_NONCE_BYTES, ch->nonce)) return "bad nonce";
+    if (!bs_parse_int_bounded(fields[4], 1, 8, 2, &v)) return "bad difficulty";
+    ch->difficulty = (int)v;
+    if (!bs_parse_int64_bounded(fields[5], 0, APR_INT64_MAX, &v64)) return "bad expires_at";
+    ch->expires_at = (apr_time_t)v64;
+
+    if (!bs_parse_int_bounded(fields[6], INT_MIN, INT_MAX, 11, &v)) return "bad score";
+    ch->rep.score = (int)v;
+    if (!bs_parse_uint32_bounded(fields[7], 10, &ch->rep.flags)) return "bad flags";
+    if (!bs_parse_int_bounded(fields[8],  0, 1, 1, &v)) return "bad passes_silent";
+    ch->rep.passes_silent  = (int)v;
+    if (!bs_parse_int_bounded(fields[9],  0, 1, 1, &v)) return "bad passes_form";
+    ch->rep.passes_form    = (int)v;
+    if (!bs_parse_int_bounded(fields[10], 0, 1, 1, &v)) return "bad passes_captcha";
+    ch->rep.passes_captcha = (int)v;
+    if (!bs_parse_int64_bounded(fields[11], 0, APR_INT64_MAX, &v64)) return "bad challenged_at";
+    ch->rep.challenged_at  = (apr_time_t)v64;
+    if (!bs_parse_int_bounded(fields[12], 0, 1, 1, &v)) return "bad auto";
+    ch->auto_tier = (int)v;
+    return NULL;
+}
+
+/* Build the base64-encoded cookie payload for a challenge + counter.
+ * Dispatches on the effective cookie format:
+ *   HMAC (legacy): base64(canonical | sig_hex | counter) in a single
+ *                  15-field pipe-delimited blob — byte-identical to
+ *                  what the JS interstitial assembles in HMAC mode.
+ *   GCM  (E8.1):   base64(alg_id || nonce || ct || tag) + "." + counter
+ *                  The server builds this form when issuing captcha
+ *                  cookies (counter = "captcha"); the JS builds the
+ *                  same shape in PoW mode from the cookie_prefix we
+ *                  expose in bs_challenge_json. */
 static const char *bs_build_cookie_payload(apr_pool_t *p,
+                                           const bs_dir_cfg *cfg,
                                            const bs_challenge *ch,
                                            const char *counter_str)
 {
+    int fmt = bs_effective_cookie_format(cfg);
+    if (fmt & BS_FMT_GCM) {
+        const char *prefix_b64 = NULL;
+        const char *err = bs_build_cookie_prefix_gcm(p, cfg, ch, &prefix_b64);
+        if (err) return NULL;
+        return apr_psprintf(p, "%s%c%s", prefix_b64,
+                            BS_GCM_COUNTER_SEP, counter_str);
+    }
     char sig_hex[BS_SIG_BYTES * 2 + 1];
     bs_to_hex(ch->signature, BS_SIG_BYTES, sig_hex);
     const char *canon = bs_challenge_canonical(p, ch);
@@ -6211,34 +6521,20 @@ static const char *bs_build_cookie_payload(apr_pool_t *p,
     return b64;
 }
 
-/* If `out_ch` is non-NULL, it is populated with the parsed challenge once
- * the HMAC signature has verified — even when the cookie is later rejected
- * for expiry or a bad PoW counter. That lets the caller salvage the cookie's
- * rep fields on re-challenge. On signature mismatch or any earlier error,
- * `out_ch` is untouched. */
-static const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
-                                    const char *cookie_b64,
-                                    bs_challenge *out_ch)
+/* Verify a legacy HMAC-format cookie. 15 pipe-delimited fields,
+ * base64-encoded as a single blob. Caller guarantees the cookie
+ * doesn't contain BS_GCM_COUNTER_SEP (the '.' split point for GCM). */
+static const char *bs_verify_cookie_hmac(request_rec *r,
+                                         const bs_dir_cfg *cfg,
+                                         const char *cookie_b64,
+                                         bs_challenge *out_ch)
 {
-    if (!cfg->secret) return "no secret configured";
-
-    /* Decode the base64 into a pool buffer large enough. apr_base64_decode
-     * writes into the buffer and returns length; we add room for a NUL. */
-    apr_size_t in_len = strlen(cookie_b64);
-    if (in_len > BS_MAX_PAGE_BYTES) return "cookie absurdly long";
     char *decoded = apr_palloc(r->pool, apr_base64_decode_len(cookie_b64) + 1);
     int dec_len = apr_base64_decode(decoded, cookie_b64);
     if (dec_len <= 0) return "base64 decode failed";
     decoded[dec_len] = '\0';
 
-    /* Expect 15 pipe-delimited fields (M4.1 + M7):
-     *   0..5  : v, alg, salt, nonce, difficulty, expires_at
-     *   6..11 : score, flags, passes_silent, passes_form, passes_captcha,
-     *           challenged_at
-     *   12    : auto       (0/1, M7 silent-tier marker)
-     *   13    : sighex
-     *   14    : counter
-     * Split in place. */
+    /* 15 pipe-delimited fields (canonical 0-12, sig_hex 13, counter 14). */
     char *fields[BS_COOKIE_FIELDS];
     int nf = 0;
     char *p = decoded;
@@ -6249,51 +6545,10 @@ static const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
     }
     if (nf != BS_COOKIE_FIELDS) return "wrong field count";
 
-    /* Parse + validate each field with a strict, bounded numeric
-     * parser (security review #2). Using atoi()/strtoul() here
-     * invokes UB on overflow because these are attacker-controlled
-     * bytes and we're still BEFORE the HMAC check. bs_parse_*_bounded
-     * caps the input length and handles ERANGE so libc never sees
-     * something outside representable range. */
-    long v;
-    if (!bs_parse_int_bounded(fields[0], 0, INT_MAX, 10, &v)) return "bad version";
-    int version = (int)v;
-    if (version != BS_PROTOCOL_VERSION) return "bad protocol version";
-
-    const bs_pow_algorithm *alg = bs_find_algorithm(fields[1]);
-    if (!alg || !alg->implemented) return "unknown algorithm";
-
     bs_challenge ch;
-    ch.version    = version;
-    ch.alg_name   = alg->name;
-    if (!bs_parse_int_bounded(fields[4], 1, 8, 2, &v)) return "bad difficulty";
-    ch.difficulty = (int)v;
-
-    if (strlen(fields[2]) != BS_SALT_BYTES * 2 ||
-        !bs_from_hex(fields[2], BS_SALT_BYTES, ch.salt)) return "bad salt";
-    if (strlen(fields[3]) != BS_NONCE_BYTES * 2 ||
-        !bs_from_hex(fields[3], BS_NONCE_BYTES, ch.nonce)) return "bad nonce";
-
-    apr_int64_t v64;
-    if (!bs_parse_int64_bounded(fields[5], 0, APR_INT64_MAX, &v64)) return "bad expires_at";
-    ch.expires_at = (apr_time_t)v64;
-
-    /* Rep fields. These are still pre-HMAC — same bounded-parse
-     * discipline. score is a signed int (allowed negative for credits);
-     * passes_* are small flags; flags is a 32-bit bitmap. */
-    if (!bs_parse_int_bounded(fields[6], INT_MIN, INT_MAX, 11, &v)) return "bad score";
-    ch.rep.score = (int)v;
-    if (!bs_parse_uint32_bounded(fields[7], 10, &ch.rep.flags)) return "bad flags";
-    if (!bs_parse_int_bounded(fields[8],  0, 1, 1, &v)) return "bad passes_silent";
-    ch.rep.passes_silent  = (int)v;
-    if (!bs_parse_int_bounded(fields[9],  0, 1, 1, &v)) return "bad passes_form";
-    ch.rep.passes_form    = (int)v;
-    if (!bs_parse_int_bounded(fields[10], 0, 1, 1, &v)) return "bad passes_captcha";
-    ch.rep.passes_captcha = (int)v;
-    if (!bs_parse_int64_bounded(fields[11], 0, APR_INT64_MAX, &v64)) return "bad challenged_at";
-    ch.rep.challenged_at  = (apr_time_t)v64;
-    if (!bs_parse_int_bounded(fields[12], 0, 1, 1, &v)) return "bad auto";
-    ch.auto_tier          = (int)v;
+    memset(&ch, 0, sizeof(ch));
+    const char *perr = bs_parse_canonical_fields(fields, &ch);
+    if (perr) return perr;
 
     unsigned char sig_from_client[BS_SIG_BYTES];
     if (strlen(fields[13]) != BS_SIG_BYTES * 2 ||
@@ -6301,10 +6556,7 @@ static const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
         return "bad signature hex";
     }
 
-    /* Re-derive the HMAC from canonical form + secret, and constant-time
-     * compare with the client-supplied signature. The canonical form
-     * now covers the rep fields, so a client that edits (say) the score
-     * hoping to lower their own debt will fail here. */
+    /* HMAC-SHA-256 of canonical bytes. Constant-time compare. */
     const char *canon = bs_challenge_canonical(r->pool, &ch);
     unsigned char sig_expected[BS_SIG_BYTES];
     bs_hmac_sha256(cfg->secret, cfg->secret_len,
@@ -6313,18 +6565,100 @@ static const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
     if (!bs_ct_equal(sig_expected, sig_from_client, BS_SIG_BYTES)) {
         return "signature mismatch";
     }
-
-    /* Signature verified — expose the challenge to the caller even if
-     * later checks reject, so rep can be carried forward. */
     memcpy(ch.signature, sig_from_client, BS_SIG_BYTES);
     if (out_ch) *out_ch = ch;
 
-    /* Freshness — a signed cookie is still only valid until expires_at. */
     apr_time_t now = apr_time_sec(apr_time_now());
     if (now > ch.expires_at) return "expired";
-
-    /* Final step: algorithm-specific PoW check on the counter. */
+    const bs_pow_algorithm *alg = bs_find_algorithm(fields[1]);
     return alg->verify(&ch, fields[14]);
+}
+
+/* Verify an E8.1 GCM-format cookie. `dot` points at the '.' that
+ * separates the base64 envelope from the counter portion. */
+static const char *bs_verify_cookie_gcm(request_rec *r,
+                                        const bs_dir_cfg *cfg,
+                                        const char *cookie_value,
+                                        const char *dot,
+                                        bs_challenge *out_ch)
+{
+    apr_size_t prefix_len = (apr_size_t)(dot - cookie_value);
+    const char *counter = dot + 1;
+    char *prefix_b64 = apr_pstrmemdup(r->pool, cookie_value, prefix_len);
+    unsigned char *env = apr_palloc(r->pool,
+                                    apr_base64_decode_len(prefix_b64));
+    int env_len = apr_base64_decode((char *)env, prefix_b64);
+    if (env_len < 1 + BS_GCM_NONCE_LEN + BS_GCM_TAG_LEN) {
+        return "base64 decode failed";
+    }
+
+    apr_size_t pt_cap = (apr_size_t)env_len - 1 - BS_GCM_NONCE_LEN
+                      - BS_GCM_TAG_LEN;
+    unsigned char *pt = apr_palloc(r->pool, pt_cap + 1);
+    apr_size_t pt_len = 0;
+    const char *derr = bs_gcm_decrypt(cfg->secret, cfg->secret_len,
+                                      env, (apr_size_t)env_len,
+                                      pt, &pt_len);
+    if (derr) {
+        /* Map all GCM-decrypt failures to the same reason string the
+         * HMAC path uses when the tag doesn't match — the caller
+         * treats this as "don't carry rep forward", same behavior
+         * desired here. */
+        return "signature mismatch";
+    }
+    pt[pt_len] = '\0';
+
+    /* pt is canonical form (13 pipe-delimited fields). */
+    char *fields[13];
+    int nf = 0;
+    char *p = (char *)pt;
+    fields[nf++] = p;
+    while (*p && nf < 13) {
+        if (*p == '|') { *p = '\0'; fields[nf++] = p + 1; }
+        p++;
+    }
+    if (nf != 13) return "wrong field count";
+
+    bs_challenge ch;
+    memset(&ch, 0, sizeof(ch));
+    const char *perr = bs_parse_canonical_fields(fields, &ch);
+    if (perr) return perr;
+    /* No sig field in GCM — the tag verification above already
+     * authenticated every canonical byte. Expose ch for rep carry-
+     * forward semantics parity with the HMAC path. */
+    if (out_ch) *out_ch = ch;
+
+    apr_time_t now = apr_time_sec(apr_time_now());
+    if (now > ch.expires_at) return "expired";
+    const bs_pow_algorithm *alg = bs_find_algorithm(fields[1]);
+    return alg->verify(&ch, counter);
+}
+
+/* Dispatch on the cookie wire format. Writes to *out_ch once the
+ * format-specific verifier has authenticated the bytes (either HMAC
+ * of the canonical or GCM tag over the envelope); later semantic
+ * rejections (expiry, bad counter) leave the struct populated for
+ * rep carry-forward. On format rejection or pre-auth error, *out_ch
+ * stays untouched. */
+static const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
+                                    const char *cookie_value,
+                                    bs_challenge *out_ch)
+{
+    if (!cfg->secret) return "no secret configured";
+    apr_size_t val_len = strlen(cookie_value);
+    if (val_len > BS_MAX_PAGE_BYTES) return "cookie absurdly long";
+
+    int fmt = bs_effective_cookie_format(cfg);
+    /* Standard base64 alphabet is [A-Za-z0-9+/=]; the '.' byte is
+     * not part of it. Its presence unambiguously marks a GCM-format
+     * cookie (envelope '.' counter). Absent → legacy HMAC. */
+    const char *dot = strrchr(cookie_value, BS_GCM_COUNTER_SEP);
+    if (dot) {
+        if (!(fmt & BS_FMT_GCM)) return "GCM cookies not accepted";
+        return bs_verify_cookie_gcm(r, cfg, cookie_value, dot, out_ch);
+    }
+    if (!(fmt & BS_FMT_HMAC)) return "HMAC cookies not accepted";
+    return bs_verify_cookie_hmac(r, cfg, cookie_value, out_ch);
 }
 
 /* --- New directive setters --- */
@@ -6364,6 +6698,50 @@ static const char *bs_set_secret_file(cmd_parms *cmd, void *cfg_v,
 
     cfg->secret     = (const unsigned char *)buf;
     cfg->secret_len = len;
+    return NULL;
+}
+
+/* `BotShieldCookieFormat <hmac|gcm|gcm,hmac>` — E8.1. Controls which
+ * wire formats the issuer emits and the verifier accepts. Value is
+ * a comma-separated list of format tokens:
+ *   hmac       legacy HMAC-SHA-256 envelope (cleartext fields, 32-
+ *              byte signature). Default if the directive is absent.
+ *   gcm        AES-256-GCM envelope. Cleartext fields don't appear
+ *              in the cookie; rep block is confidential.
+ *   gcm,hmac   issue GCM, accept either on verify. Migration mode
+ *              for rolling the wire format over a longest-TTL cycle.
+ * Issue preference: if the bitmap includes GCM, issue GCM; otherwise
+ * issue HMAC. Verify accepts any format whose bit is set. */
+static const char *bs_set_cookie_format(cmd_parms *cmd, void *cfg_v,
+                                        const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    if (!arg || !*arg) {
+        return "BotShieldCookieFormat: requires at least one format "
+               "(hmac, gcm, or a comma-separated list)";
+    }
+    int fmt = 0;
+    char *buf = apr_pstrdup(cmd->pool, arg);
+    char *state = NULL;
+    for (char *tok = apr_strtok(buf, ",", &state); tok;
+         tok = apr_strtok(NULL, ",", &state)) {
+        while (*tok == ' ' || *tok == '\t') tok++;
+        char *end = tok + strlen(tok);
+        while (end > tok && (end[-1] == ' ' || end[-1] == '\t')) end--;
+        *end = '\0';
+        if (!*tok) continue;
+        if      (!strcasecmp(tok, "hmac")) fmt |= BS_FMT_HMAC;
+        else if (!strcasecmp(tok, "gcm"))  fmt |= BS_FMT_GCM;
+        else {
+            return apr_psprintf(cmd->pool,
+                "BotShieldCookieFormat: unknown format '%s' "
+                "(known: hmac, gcm)", tok);
+        }
+    }
+    if (!fmt) {
+        return "BotShieldCookieFormat: at least one format required";
+    }
+    cfg->cookie_format = fmt;
     return NULL;
 }
 
@@ -8810,7 +9188,16 @@ static int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         return OK;
     }
 
-    const char *payload = bs_build_cookie_payload(r->pool, &ch, "captcha");
+    const char *payload = bs_build_cookie_payload(r->pool, cfg, &ch, "captcha");
+    if (!payload) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+            "mod_botshield: failed to build cookie payload "
+            "(cookie_format=0x%x)", bs_effective_cookie_format(cfg));
+        r->status = HTTP_INTERNAL_SERVER_ERROR;
+        ap_set_content_type(r, "text/plain; charset=utf-8");
+        ap_rputs("Service error: could not issue cookie.\n", r);
+        return OK;
+    }
     const char *set_cookie = bs_build_set_cookie(r, cfg, payload,
                                                  ch.expires_at);
     /* Two Set-Cookie headers: the verified-rep cookie, and a Max-Age=0
@@ -9026,6 +9413,14 @@ static const command_rec bs_cmds[] = {
                  "into this module today; 'sha384-zeros' / 'sha512-zeros' / "
                  "'pbkdf2-sha256' / 'argon2id' are registry slots reserved "
                  "for future opt-in builds."),
+    AP_INIT_TAKE1("BotShieldCookieFormat", bs_set_cookie_format, NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "Cookie wire format: hmac (legacy cleartext+HMAC; "
+                 "default), gcm (AES-256-GCM; rep block confidential), "
+                 "or a comma-separated list (e.g., 'gcm,hmac' for "
+                 "migration: issue GCM, accept either). AES key is "
+                 "SHA-256(BotShieldSecretFile bytes); same secret file "
+                 "for both primitives."),
     AP_INIT_TAKE1("BotShieldScoreSilent",  bs_set_score_silent,  NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "Score at or above which the silent-PoW tier is picked "
@@ -9569,13 +9964,23 @@ static const char BS_WIDGET_TEMPLATE[] =
 "   box.classList.remove('bs-working');\n"
 "   box.classList.add('bs-done');\n"
 "   msg.textContent = 'Verified \\u2014 reloading\\u2026';\n"
-"   var fields = [CH.v, CH.alg, CH.salt, CH.nonce, CH.difficulty,\n"
-"                 CH.expires_at,\n"
-"                 CH.score, CH.flags,\n"
-"                 CH.passes_silent, CH.passes_form, CH.passes_captcha,\n"
-"                 CH.challenged_at, CH.auto,\n"
-"                 CH.signature, counterVal];\n"
-"   var payload = btoa(fields.join('|'));\n"
+"   var payload;\n"
+"   if (CH.cookie_prefix) {\n"
+"    /* E8.1 GCM cookie shape. Server gave us an opaque encrypted\n"
+"       envelope; we append '.' + counter and the server splits on\n"
+"       the last dot to decrypt + PoW-verify. */\n"
+"    payload = CH.cookie_prefix + '.' + counterVal;\n"
+"   } else {\n"
+"    /* Legacy HMAC shape. Cleartext canonical fields + sig + counter\n"
+"       pipe-joined and base64-encoded as a single blob. */\n"
+"    var fields = [CH.v, CH.alg, CH.salt, CH.nonce, CH.difficulty,\n"
+"                  CH.expires_at,\n"
+"                  CH.score, CH.flags,\n"
+"                  CH.passes_silent, CH.passes_form, CH.passes_captcha,\n"
+"                  CH.challenged_at, CH.auto,\n"
+"                  CH.signature, counterVal];\n"
+"    payload = btoa(fields.join('|'));\n"
+"   }\n"
 "   var exp = new Date((CH.expires_at + 60) * 1000).toUTCString();\n"
 "   var secure = (location.protocol === 'https:') ? '; Secure' : '';\n"
 "   var domain = CH.cookie_domain ? '; Domain=' + CH.cookie_domain : '';\n"
