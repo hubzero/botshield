@@ -67,6 +67,12 @@ module AP_MODULE_DECLARE_DATA botshield_module;
 #define BS_UNSET              (-1)
 #define BS_DEFAULT_COOKIE_TTL 3600  /* seconds a verified cookie is good for */
 #define BS_DEFAULT_DIFFICULTY 4     /* leading hex zeros */
+#define BS_DEFAULT_MAX_DIFFICULTY 8 /* matches the BotShieldDifficulty
+                                     * upper-bound; adaptive bumps from
+                                     * BotShieldFlag clamp here. Operator
+                                     * raises with BotShieldMaxDifficulty
+                                     * (1..16) at server scope. */
+#define BS_MAX_DIFFICULTY_HARDCAP 16
 #define BS_CLOCK_SKEW_AHEAD   60    /* grace if client clock runs ahead */
 #define BS_DEFAULT_FORGIVE_SILENT   10
 #define BS_DEFAULT_FORGIVE_FORM     25
@@ -839,6 +845,12 @@ typedef struct bs_server_cfg {
      * ns_id → shared rows. */
     apr_uint32_t        ns_id;            /* effective; resolved post_config */
     const char         *share_scope_token; /* explicit override; NULL = default */
+    /* E14 — adaptive challenge intensity ceiling. PoW difficulty
+     * after BotShieldFlag's next_difficulty bumps is clamped against
+     * this value (1..BS_MAX_DIFFICULTY_HARDCAP). 0 = inherit /
+     * default (BS_DEFAULT_MAX_DIFFICULTY). Server-scope only — the
+     * adaptive layer is module-global by design. */
+    int                 max_difficulty;
     apr_array_header_t *block_paths;   /* bs_block_path_entry * */
     /* E3 — path-based triggers. Same ordered-array + upsert-by-name
      * shape as E2.1; first match wins at request time. */
@@ -1098,6 +1110,9 @@ static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
     out->share_scope_token = add->share_scope_token
         ? add->share_scope_token : base->share_scope_token;
     out->ns_id = add->ns_id;
+    /* E14 — child-set value wins; 0 means "inherit". */
+    out->max_difficulty = (add->max_difficulty > 0)
+        ? add->max_difficulty : base->max_difficulty;
     out->block_paths = bs_merge_rule_array(p, base->block_paths,
                                            add->block_paths);
     out->path_triggers = bs_merge_rule_array(p, base->path_triggers,
@@ -1222,6 +1237,8 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
      * leave the explicit-token slot NULL. */
     scfg->ns_id                 = 0;
     scfg->share_scope_token     = NULL;
+    /* E14 — 0 means "inherit / use BS_DEFAULT_MAX_DIFFICULTY". */
+    scfg->max_difficulty        = 0;
     scfg->block_paths      = apr_array_make(p, 4, sizeof(void *));
     scfg->path_triggers         = apr_array_make(p, 4, sizeof(void *));
     scfg->cookie_triggers  = apr_array_make(p, 4, sizeof(void *));
@@ -4751,7 +4768,38 @@ static void bs_app_feedback_insert_filter(request_rec *r)
  * formats (X-Botshield-Claims `flags=`), and the decision log.
  * Hoisted up the file so E8.2's claim-emit path can render the
  * bitmap without a forward-decl dance over an anonymous-struct
- * array (forward-declaring such arrays in C is awkward). */
+ * array (forward-declaring such arrays in C is awkward).
+ *
+ * E14 — registry now also carries adaptive metadata (penalty,
+ * next_difficulty_delta, next_tier_floor). The values seeded here
+ * are the built-in defaults; `BotShieldFlag` directive entries
+ * override them by name. Compatibility shim `bs_flag_names` (no
+ * metadata, just name+bit) is kept as a const projection for
+ * call-sites that only iterate names. */
+typedef struct {
+    const char     *name;
+    apr_uint32_t    bit;
+    int             penalty;
+    int             next_difficulty_delta;   /* signed; clamped at apply time */
+    bs_tier         next_tier_floor;          /* PASS = no floor (default) */
+} bs_flag_meta;
+
+static bs_flag_meta bs_flag_metadata[] = {
+    { "honeypot_hit",         BS_FLAG_HONEYPOT_HIT,          60, 0, BS_TIER_PASS },
+    { "scanner_probe",        BS_FLAG_SCANNER_PROBE,         50, 0, BS_TIER_PASS },
+    { "fake_bot",             BS_FLAG_FAKE_BOT,              80, 0, BS_TIER_PASS },
+    { "pow_fail_streak",      BS_FLAG_POW_FAIL_STREAK,       30, 0, BS_TIER_PASS },
+    { "app_verified_human",   BS_FLAG_APP_VERIFIED_HUMAN,   -80, 0, BS_TIER_PASS },
+    { "app_verified_session", BS_FLAG_APP_VERIFIED_SESSION, -40, 0, BS_TIER_PASS },
+    { "app_trust_signal",     BS_FLAG_APP_TRUST_SIGNAL,     -20, 0, BS_TIER_PASS },
+};
+#define BS_FLAG_META_COUNT \
+    (sizeof(bs_flag_metadata) / sizeof(bs_flag_metadata[0]))
+
+/* Read-only name+bit projection for legacy iteration sites. NULL-
+ * terminated to match the prior bs_flag_names[] sentinel contract.
+ * Built lazily because the metadata table isn't const after E14
+ * (BotShieldFlag mutates it). */
 static const struct { const char *name; apr_uint32_t bit; } bs_flag_names[] = {
     { "honeypot_hit",         BS_FLAG_HONEYPOT_HIT         },
     { "scanner_probe",        BS_FLAG_SCANNER_PROBE        },
@@ -4762,6 +4810,16 @@ static const struct { const char *name; apr_uint32_t bit; } bs_flag_names[] = {
     { "app_trust_signal",     BS_FLAG_APP_TRUST_SIGNAL     },
     { NULL, 0 }
 };
+
+static bs_flag_meta *bs_flag_meta_for_name(const char *name)
+{
+    for (size_t i = 0; i < BS_FLAG_META_COUNT; i++) {
+        if (strcmp(bs_flag_metadata[i].name, name) == 0) {
+            return &bs_flag_metadata[i];
+        }
+    }
+    return NULL;
+}
 
 /* Forward decl: bs_tier_name lives further down with the rest of
  * the tier-dispatch helpers; bs_app_claims_set needs it. */
@@ -7241,6 +7299,119 @@ static const char *bs_set_share_scope(cmd_parms *cmd, void *dconf,
     return NULL;
 }
 
+/* E14 — BotShieldFlag <name> [penalty=N] [next_difficulty=±N]
+ * [next_tier=silent|form|captcha]. Operator-side override of a
+ * registered flag bit's metadata.
+ *
+ * The flag NAME determines the bit; the directive lets operators
+ * tune what consequences riding that bit triggers without rewriting
+ * every BotShieldFeedbackTrigger / BotShieldPathTrigger that writes
+ * the flag. One declaration captures the policy for the whole
+ * deployment.
+ *
+ * All three keys are optional; absent keys leave the prior (built-in
+ * or last-set) value alone. Multiple BotShieldFlag directives for
+ * the same name compose — last write wins per key. */
+static const char *bs_set_flag(cmd_parms *cmd, void *dconf,
+                               int argc, char *const argv[])
+{
+    (void)dconf;
+    if (argc < 1) {
+        return "BotShieldFlag: expects <name> [penalty=N] "
+               "[next_difficulty=±N] [next_tier=silent|form|captcha]";
+    }
+    const char *name = argv[0];
+    bs_flag_meta *m = bs_flag_meta_for_name(name);
+    if (!m) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldFlag: unknown flag '%s'. Known flags: "
+            "honeypot_hit, scanner_probe, fake_bot, pow_fail_streak, "
+            "app_verified_human, app_verified_session, "
+            "app_trust_signal", name);
+    }
+    if (argc < 2) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldFlag: '%s' needs at least one key=value "
+            "(penalty / next_difficulty / next_tier)", name);
+    }
+    for (int i = 1; i < argc; i++) {
+        const char *arg = argv[i];
+        const char *eq  = strchr(arg, '=');
+        if (!eq) {
+            return apr_psprintf(cmd->pool,
+                "BotShieldFlag '%s': extra arg '%s' must be key=value",
+                name, arg);
+        }
+        apr_size_t klen = (apr_size_t)(eq - arg);
+        const char *val = eq + 1;
+        #define BS_FK(n) (klen == sizeof(n)-1 && \
+                          strncasecmp(arg, n, sizeof(n)-1) == 0)
+        if (BS_FK("penalty")) {
+            char *e2 = NULL;
+            long p = strtol(val, &e2, 10);
+            if (!e2 || *e2 || p < -1000 || p > 1000) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldFlag '%s': penalty='%s' must be an "
+                    "integer in -1000..1000", name, val);
+            }
+            m->penalty = (int)p;
+        } else if (BS_FK("next_difficulty")) {
+            char *e2 = NULL;
+            long d = strtol(val, &e2, 10);
+            if (!e2 || *e2 || d < -BS_MAX_DIFFICULTY_HARDCAP
+                           || d >  BS_MAX_DIFFICULTY_HARDCAP) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldFlag '%s': next_difficulty='%s' must be "
+                    "an integer in -%d..+%d", name, val,
+                    BS_MAX_DIFFICULTY_HARDCAP,
+                    BS_MAX_DIFFICULTY_HARDCAP);
+            }
+            m->next_difficulty_delta = (int)d;
+        } else if (BS_FK("next_tier")) {
+            if      (strcasecmp(val, "pass")    == 0) m->next_tier_floor = BS_TIER_PASS;
+            else if (strcasecmp(val, "silent")  == 0) m->next_tier_floor = BS_TIER_SILENT;
+            else if (strcasecmp(val, "form")    == 0) m->next_tier_floor = BS_TIER_HARD;
+            else if (strcasecmp(val, "captcha") == 0) m->next_tier_floor = BS_TIER_CAPTCHA;
+            else {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldFlag '%s': next_tier='%s' must be one "
+                    "of pass / silent / form / captcha", name, val);
+            }
+        } else {
+            return apr_psprintf(cmd->pool,
+                "BotShieldFlag '%s': unknown key '%.*s' "
+                "(want penalty / next_difficulty / next_tier)",
+                name, (int)klen, arg);
+        }
+        #undef BS_FK
+    }
+    return NULL;
+}
+
+/* E14 — BotShieldMaxDifficulty <N>. Server-scope ceiling for the
+ * effective PoW difficulty after BotShieldFlag's adaptive bumps. The
+ * existing BotShieldDifficulty range is 1..8 leading hex zeros
+ * (already astronomical at 8 = 2^32 hashes). Adaptive bumps from
+ * BotShieldFlag are clamped against this max. Default 8 — operators
+ * who actually want adaptive headroom raise this explicitly so the
+ * higher-cost ceiling is intentional. */
+static const char *bs_set_max_difficulty(cmd_parms *cmd, void *dconf,
+                                         const char *arg)
+{
+    (void)dconf;
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (!end || *end || n < 1 || n > BS_MAX_DIFFICULTY_HARDCAP) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldMaxDifficulty: '%s' must be an integer 1..%d",
+            arg, BS_MAX_DIFFICULTY_HARDCAP);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->max_difficulty = (int)n;
+    return NULL;
+}
+
 /* E12 — BotShieldShadowMode on|off. Server-scope master switch
  * for dry-run enforcement. When on, every trigger / rate-limit /
  * block-path rule behaves as if mode=observe regardless of its
@@ -8577,15 +8748,45 @@ static apr_status_t bs_watchdog_save_cb(int state, void *data,
 static int bs_flag_penalty(apr_uint32_t flags)
 {
     int p = 0;
-    if (flags & BS_FLAG_HONEYPOT_HIT)         p +=  60;
-    if (flags & BS_FLAG_SCANNER_PROBE)        p +=  50;
-    if (flags & BS_FLAG_FAKE_BOT)             p +=  80;
-    if (flags & BS_FLAG_POW_FAIL_STREAK)      p +=  30;
-    if (flags & BS_FLAG_APP_VERIFIED_HUMAN)   p += -80;
-    if (flags & BS_FLAG_APP_VERIFIED_SESSION) p += -40;
-    if (flags & BS_FLAG_APP_TRUST_SIGNAL)     p += -20;
+    for (size_t i = 0; i < BS_FLAG_META_COUNT; i++) {
+        if (flags & bs_flag_metadata[i].bit) p += bs_flag_metadata[i].penalty;
+    }
     if (p < BS_FLAG_PENALTY_FLOOR) p = BS_FLAG_PENALTY_FLOOR;
     return p;
+}
+
+/* E14 — adaptive intensity accumulator. For a flag bitfield, walks
+ * the registry and returns the cumulative difficulty-delta (sum) and
+ * tier-floor (max). PASS tier-floor means "no floor" — the score-
+ * derived tier wins. Negative difficulty-deltas (from credit flags)
+ * compose; final clamping happens at the use site against the
+ * configured BotShieldDifficulty range. */
+typedef struct {
+    int          difficulty_delta;
+    bs_tier      tier_floor;
+    apr_uint32_t bits_with_difficulty;   /* contributing flag bits */
+    apr_uint32_t bits_with_tier;
+} bs_flag_adaptive;
+
+static bs_flag_adaptive bs_flag_adaptive_for(apr_uint32_t flags)
+{
+    bs_flag_adaptive r = { 0, BS_TIER_PASS, 0, 0 };
+    for (size_t i = 0; i < BS_FLAG_META_COUNT; i++) {
+        const bs_flag_meta *m = &bs_flag_metadata[i];
+        if (!(flags & m->bit)) continue;
+        if (m->next_difficulty_delta != 0) {
+            r.difficulty_delta += m->next_difficulty_delta;
+            r.bits_with_difficulty |= m->bit;
+        }
+        if (m->next_tier_floor > r.tier_floor) {
+            r.tier_floor = m->next_tier_floor;
+            r.bits_with_tier = m->bit;
+        } else if (m->next_tier_floor != BS_TIER_PASS &&
+                   m->next_tier_floor == r.tier_floor) {
+            r.bits_with_tier |= m->bit;
+        }
+    }
+    return r;
 }
 
 /* Flag-name registry moved up the file (near the early request-path
@@ -12097,6 +12298,29 @@ static const command_rec bs_cmds[] = {
                  "revision before flipping enforcement on. Default "
                  "off; per-rule mode=observe is the finer-grained "
                  "alternative."),
+    /* E14 — adaptive challenge intensity. */
+    AP_INIT_TAKE_ARGV("BotShieldFlag",
+                 bs_set_flag, NULL, RSRC_CONF,
+                 "Override metadata for a registered flag bit. "
+                 "Args: <name> [penalty=N] [next_difficulty=±N] "
+                 "[next_tier=pass|silent|form|captcha]. The flag "
+                 "name picks the existing bit (honeypot_hit, "
+                 "scanner_probe, fake_bot, pow_fail_streak, "
+                 "app_verified_human, app_verified_session, "
+                 "app_trust_signal); penalty replaces the built-in "
+                 "score contribution; next_difficulty sums into the "
+                 "PoW difficulty when the bit is set on the request "
+                 "(IP- or cookie-derived); next_tier acts as a tier "
+                 "FLOOR — score-derived tier is taken if higher, "
+                 "but never lower."),
+    AP_INIT_TAKE1("BotShieldMaxDifficulty",
+                 bs_set_max_difficulty, NULL, RSRC_CONF,
+                 "Server-scope ceiling on the effective PoW "
+                 "difficulty after BotShieldFlag adaptive bumps. "
+                 "Default 8 (matches BotShieldDifficulty's max); "
+                 "raise up to 16 if operator-side adaptive policy "
+                 "needs more headroom. Adaptive bumps that would "
+                 "exceed this ceiling are silently clamped."),
     AP_INIT_TAKE_ARGV("BotShieldBlockPath",
                  bs_set_block_path, NULL, RSRC_CONF,
                  "Block a named cohort from a path glob. Args: "
@@ -12986,7 +13210,40 @@ static int bs_handler(request_rec *r)
     int cookie_score    = have_prior_rep ? prior_ch.rep.score : 0;
     int cookie_flag_floor = have_prior_rep ? bs_flag_penalty(prior_ch.rep.flags) : 0;
     int effective       = heuristic_total + cookie_score + cookie_flag_floor;
-    bs_tier tier        = bs_decide_tier(cfg, effective);
+    bs_tier score_tier  = bs_decide_tier(cfg, effective);
+
+    /* E14 — adaptive intensity. Walk both flag sources (IP-side and
+     * cookie-side) through the registry; difficulty deltas SUM, tier
+     * floor takes MAX. The score-derived tier wins when it's already
+     * higher than the floor (never silently downgrade). Difficulty
+     * delta is applied later, just before bs_issue_challenge, so it
+     * gets clamped against BotShieldMaxDifficulty alongside the rest
+     * of the issue-time bounds checks. */
+    bs_flag_adaptive adaptive_ip     = bs_flag_adaptive_for(ip_flags);
+    bs_flag_adaptive adaptive_cookie = have_prior_rep
+        ? bs_flag_adaptive_for(prior_ch.rep.flags)
+        : (bs_flag_adaptive){0, BS_TIER_PASS, 0, 0};
+    bs_flag_adaptive adaptive = {
+        .difficulty_delta = adaptive_ip.difficulty_delta
+                          + adaptive_cookie.difficulty_delta,
+        .tier_floor = (adaptive_ip.tier_floor > adaptive_cookie.tier_floor)
+                    ? adaptive_ip.tier_floor : adaptive_cookie.tier_floor,
+        .bits_with_difficulty = adaptive_ip.bits_with_difficulty
+                              | adaptive_cookie.bits_with_difficulty,
+        .bits_with_tier = (adaptive_ip.tier_floor == adaptive_cookie.tier_floor)
+                        ? (adaptive_ip.bits_with_tier
+                           | adaptive_cookie.bits_with_tier)
+                        : (adaptive_ip.tier_floor > adaptive_cookie.tier_floor
+                           ? adaptive_ip.bits_with_tier
+                           : adaptive_cookie.bits_with_tier),
+    };
+    bs_tier tier = score_tier;
+    if (adaptive.tier_floor > tier) {
+        tier = adaptive.tier_floor;
+        bs_score_add(r, 0, 0,
+            apr_psprintf(r->pool, "adaptive-tier:%s",
+                         bs_tier_name(adaptive.tier_floor)));
+    }
 
     /* BotShieldFlagIP: if any scope the request matched sets flag bits,
      * land them in the flagged-IP table now. Fires on every hit to the
@@ -13129,12 +13386,39 @@ static int bs_handler(request_rec *r)
                   cookie_fully_ok,
                   next_rep.passes_silent, next_rep.passes_form,
                   next_rep.passes_captcha);
+    /* Log line above prints the BASE difficulty; E14's adaptive
+     * difficulty bump is logged via the reason chain
+     * (adaptive-difficulty:+N) and the effective issue_difficulty
+     * is what bs_issue_challenge actually uses. */
+
+    /* E14 — apply adaptive difficulty bump and clamp against the
+     * server-scope ceiling. Negative deltas (from credit flags like
+     * app_verified_human) compose, then clamp at 1 (BotShieldDifficulty
+     * minimum). Positive deltas clamp at the operator-set max
+     * (BotShieldMaxDifficulty, default 8). The reason chain logs the
+     * effective bump for traceability. */
+    int issue_difficulty = difficulty;
+    if (adaptive.difficulty_delta != 0) {
+        int max_diff = (scfg_h && scfg_h->max_difficulty > 0)
+                     ? scfg_h->max_difficulty
+                     : BS_DEFAULT_MAX_DIFFICULTY;
+        int requested = difficulty + adaptive.difficulty_delta;
+        if (requested < 1)         issue_difficulty = 1;
+        else if (requested > max_diff) issue_difficulty = max_diff;
+        else                       issue_difficulty = requested;
+        int applied_delta = issue_difficulty - difficulty;
+        if (applied_delta != 0) {
+            bs_score_add(r, 0, 0,
+                apr_psprintf(r->pool, "adaptive-difficulty:%+d",
+                             applied_delta));
+        }
+    }
 
     /* Issue a fresh signed challenge; the worker reads it from the page.
      * The next_rep struct carries forgiveness-adjusted rep from any
      * sig-verified prior cookie. */
     bs_challenge challenge;
-    const char *ierr = bs_issue_challenge(r->pool, cfg, difficulty, ttl,
+    const char *ierr = bs_issue_challenge(r->pool, cfg, issue_difficulty, ttl,
                                           issue_auto, NULL,
                                           &next_rep, &challenge);
     if (ierr) {
