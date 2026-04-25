@@ -81,8 +81,12 @@ def build_cookie(challenge: dict, counter: int) -> str:
       - GCM mode (E8.1): challenge carries an opaque `cookie_prefix`
         base64 envelope from the module. Cookie = `<prefix>.<counter>`.
       - Legacy HMAC mode: challenge carries cleartext canonical
-        fields + signature. Cookie = base64 of the 15-field
-        pipe-delimited payload.
+        fields + signature. Cookie = base64 of the 17-field
+        pipe-delimited payload (canonical 0..14, sig 15, counter 16).
+
+    Open-question #3 grew the canonical field count from 13 to 15 by
+    appending `forgive_window_start` and `forgive_consumed`; the
+    module's BS_PROTOCOL_VERSION bumped 1->2 in the same commit.
     """
     if "cookie_prefix" in challenge:
         return f"{challenge['cookie_prefix']}.{counter}"
@@ -94,6 +98,7 @@ def build_cookie(challenge: dict, counter: int) -> str:
         challenge["passes_silent"], challenge["passes_form"],
         challenge["passes_captcha"],
         challenge["challenged_at"], challenge["auto"],
+        challenge["forgive_window_start"], challenge["forgive_consumed"],
         challenge["signature"], counter,
     ]
     joined = "|".join(str(f) for f in fields).encode()
@@ -101,15 +106,16 @@ def build_cookie(challenge: dict, counter: int) -> str:
 
 
 def tamper_signature(cookie: str) -> str:
-    """Flip one hex character of the HMAC signature (field 13) in an
-    assembled legacy `_bs_verified` cookie. Used to prove the module
-    rejects a forged signature."""
+    """Flip one hex character of the HMAC signature (now at field 15
+    after the open-question #3 envelope grew) in an assembled legacy
+    `_bs_verified` cookie. Used to prove the module rejects a forged
+    signature."""
     raw = base64.b64decode(cookie).decode()
     fields = raw.split("|")
-    sig = list(fields[13])
+    sig = list(fields[15])
     # Deterministic flip: a↔b. Any in-place change invalidates the HMAC.
     sig[0] = "b" if sig[0] == "a" else "a"
-    fields[13] = "".join(sig)
+    fields[15] = "".join(sig)
     return base64.b64encode("|".join(fields).encode()).decode()
 
 

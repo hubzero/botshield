@@ -1,0 +1,80 @@
+"""Open-question #3 — per-cookie forgiveness cap per rolling hour.
+
+A patient bot solving challenges repeatedly used to earn unbounded
+forgiveness against accumulated rep score. The cap bounds the
+points-per-hour any one cookie can earn so a bot pinned at borderline
+score can't farm forgiveness indefinitely. State rides in the cookie
+envelope (`forgive_window_start`, `forgive_consumed`) so the cap
+survives cookie re-issues but not deliberate cookie drops — by
+design, since dropping the cookie also drops the score-debt the
+forgiveness was meant to offset.
+
+The cap defaults to BS_DEFAULT_FORGIVE_CAP_PER_HOUR (200) and is
+configurable via BotShieldForgivenessCapPerHour at server scope.
+0 disables the cap (legacy behavior).
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from botshield_test import client
+
+
+pytestmark = pytest.mark.serial
+
+
+# --- Directive validation ------------------------------------------
+
+
+def test_directive_rejects_negative(config_override):
+    with pytest.raises(Exception):
+        with config_override(
+            r"BotShieldAllow\s+on",
+            'BotShieldAllow on\n'
+            '    BotShieldForgivenessCapPerHour -1',
+            count=1,
+        ):
+            pass
+
+
+def test_directive_rejects_out_of_range(config_override):
+    with pytest.raises(Exception):
+        with config_override(
+            r"BotShieldAllow\s+on",
+            'BotShieldAllow on\n'
+            '    BotShieldForgivenessCapPerHour 9999',
+            count=1,
+        ):
+            pass
+
+
+def test_directive_accepts_zero_to_disable(config_override):
+    """0 disables the cap (legacy uncapped behavior). Reload should
+    succeed and the server should still respond."""
+    with config_override(
+        r"BotShieldAllow\s+on",
+        'BotShieldAllow on\n'
+        '    BotShieldForgivenessCapPerHour 0',
+        count=1,
+    ):
+        r = client.get("/", xff="203.0.113.123",
+                       ua="Mozilla/5.0 Firefox/125.0",
+                       accept_language="en-US,en;q=0.9")
+        assert r.status_code in (200, 304), (
+            f"server unhealthy after cap-disable reload; "
+            f"status={r.status_code}"
+        )
+
+
+def test_directive_accepts_normal_value(config_override):
+    with config_override(
+        r"BotShieldAllow\s+on",
+        'BotShieldAllow on\n'
+        '    BotShieldForgivenessCapPerHour 50',
+        count=1,
+    ):
+        r = client.get("/", xff="203.0.113.124",
+                       ua="Mozilla/5.0 Firefox/125.0",
+                       accept_language="en-US,en;q=0.9")
+        assert r.status_code in (200, 304)
