@@ -710,6 +710,16 @@ typedef struct bs_server_cfg {
     const char         *app_feedback_secret_file;    /* NULL = no key */
     const unsigned char *app_feedback_secret;        /* loaded bytes */
     apr_size_t          app_feedback_secret_len;
+    /* E8.2 — module-to-app reputation export. Symmetric to E5 in
+     * shape: signed envelope, separate secret file. The module sets
+     * a single X-Botshield-Claims request header on the way to the
+     * backend handler, having first stripped any client-supplied
+     * X-Botshield-* (the strip is the trust anchor for apps that
+     * skip HMAC verification). */
+    int                 app_claims_enabled;          /* -1 unset, 0 off, 1 on */
+    const char         *app_claims_secret_file;      /* NULL = no key */
+    const unsigned char *app_claims_secret;          /* loaded bytes */
+    apr_size_t          app_claims_secret_len;
 } bs_server_cfg;
 
 #define BS_APP_FEEDBACK_UNSET  (-1)
@@ -896,6 +906,15 @@ static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
         out->app_feedback_secret      = base->app_feedback_secret;
         out->app_feedback_secret_len  = base->app_feedback_secret_len;
     }
+    /* E8.2 — app claims server-scope inheritance. Same shape. */
+    if (add->app_claims_enabled == BS_APP_FEEDBACK_UNSET) {
+        out->app_claims_enabled = base->app_claims_enabled;
+    }
+    if (!add->app_claims_secret_file && base->app_claims_secret_file) {
+        out->app_claims_secret_file = base->app_claims_secret_file;
+        out->app_claims_secret      = base->app_claims_secret;
+        out->app_claims_secret_len  = base->app_claims_secret_len;
+    }
     return out;
 }
 
@@ -964,6 +983,11 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->app_feedback_secret_file  = NULL;
     scfg->app_feedback_secret       = NULL;
     scfg->app_feedback_secret_len   = 0;
+    /* E8.2 defaults — same UNSET sentinel shape as E5. */
+    scfg->app_claims_enabled        = BS_APP_FEEDBACK_UNSET;
+    scfg->app_claims_secret_file    = NULL;
+    scfg->app_claims_secret         = NULL;
+    scfg->app_claims_secret_len     = 0;
     return scfg;
 }
 
@@ -3810,6 +3834,131 @@ static void bs_app_feedback_insert_filter(request_rec *r)
                                 NULL, r, r->connection);
 }
 
+/* Flag-bit registry. Maps the BS_FLAG_* defines to the canonical
+ * names that appear in directives (`flag=honeypot_hit`), wire
+ * formats (X-Botshield-Claims `flags=`), and the decision log.
+ * Hoisted up the file so E8.2's claim-emit path can render the
+ * bitmap without a forward-decl dance over an anonymous-struct
+ * array (forward-declaring such arrays in C is awkward). */
+static const struct { const char *name; apr_uint32_t bit; } bs_flag_names[] = {
+    { "honeypot_hit",         BS_FLAG_HONEYPOT_HIT         },
+    { "scanner_probe",        BS_FLAG_SCANNER_PROBE        },
+    { "fake_bot",             BS_FLAG_FAKE_BOT             },
+    { "pow_fail_streak",      BS_FLAG_POW_FAIL_STREAK      },
+    { "app_verified_human",   BS_FLAG_APP_VERIFIED_HUMAN   },
+    { "app_verified_session", BS_FLAG_APP_VERIFIED_SESSION },
+    { "app_trust_signal",     BS_FLAG_APP_TRUST_SIGNAL     },
+    { NULL, 0 }
+};
+
+/* Forward decl: bs_tier_name lives further down with the rest of
+ * the tier-dispatch helpers; bs_app_claims_set needs it. */
+static const char *bs_tier_name(bs_tier t);
+
+/* ======================================================================
+ * E8.2 — Module-to-app reputation export.
+ *
+ * On the request path: strip any client-supplied X-Botshield-*, then
+ * set a single signed X-Botshield-Claims header that the backend
+ * handler reads to drive whatever app-side policy cares about
+ * BotShield's verdict (request-by-request risk score, cookie state,
+ * accumulated flag bitmap, etc.).
+ *
+ * Symmetric to E5 in shape:
+ *   - signed envelope, key=value;...;sig=<hex>, HMAC-SHA-256
+ *   - separate secret file (defense-in-depth vs. E5's inbound key)
+ *   - unknown body keys tolerated (forward compat)
+ *
+ * Symmetric to E5 in trust posture: the strip-before-set is the
+ * trust anchor for apps that don't bother to verify the HMAC. The
+ * signed envelope is for apps that want value-integrity even across
+ * an untrusted Apache→backend hop.
+ * ====================================================================== */
+
+/* Walk r->headers_in and unset every header whose name begins with
+ * "X-Botshield-" (case-insensitive). apr_table_unset takes a key, so
+ * we collect names first (snapshotting because table mutation during
+ * iteration is undefined) then drop them all in a second pass. */
+static void bs_app_claims_strip_incoming(request_rec *r)
+{
+    const apr_array_header_t *arr = apr_table_elts(r->headers_in);
+    apr_array_header_t *to_unset =
+        apr_array_make(r->pool, 4, sizeof(const char *));
+    for (int i = 0; i < arr->nelts; i++) {
+        apr_table_entry_t *e = &((apr_table_entry_t *)arr->elts)[i];
+        if (e->key && strncasecmp(e->key, "X-Botshield-", 12) == 0) {
+            *(const char **)apr_array_push(to_unset) = e->key;
+        }
+    }
+    for (int i = 0; i < to_unset->nelts; i++) {
+        apr_table_unset(r->headers_in,
+                        APR_ARRAY_IDX(to_unset, i, const char *));
+    }
+}
+
+/* Render the flag bitmap as a space-separated list of registry names
+ * for the X-Botshield-Claims body. Empty string when no bits set —
+ * apps see `flags=` (empty value) which the parser treats the same
+ * as absent. */
+static const char *bs_app_claims_flag_names(apr_pool_t *p,
+                                            apr_uint32_t flags)
+{
+    if (!flags) return "";
+    char *buf = apr_palloc(p, 256);
+    apr_size_t off = 0;
+    for (int i = 0; bs_flag_names[i].name; i++) {
+        if (!(flags & bs_flag_names[i].bit)) continue;
+        const char *n = bs_flag_names[i].name;
+        apr_size_t nlen = strlen(n);
+        if (off + nlen + 2 > 256) break;   /* defensive cap */
+        if (off > 0) buf[off++] = ' ';
+        memcpy(buf + off, n, nlen);
+        off += nlen;
+    }
+    buf[off] = '\0';
+    return buf;
+}
+
+/* Emit X-Botshield-Claims on the request to the backend. Called from
+ * bs_handler's PASS leg — every value is finalized at that point.
+ * Returns NULL on success or an error string the caller can log. */
+static const char *bs_app_claims_set(request_rec *r,
+                                     bs_server_cfg *scfg,
+                                     int score,
+                                     bs_tier tier,
+                                     const char *cookie_status,
+                                     apr_uint32_t flags,
+                                     int passes_silent,
+                                     int passes_form,
+                                     int passes_captcha)
+{
+    if (!scfg || scfg->app_claims_enabled != 1) return NULL;
+    if (!scfg->app_claims_secret || scfg->app_claims_secret_len == 0) {
+        return "BotShieldAppClaimsSecretFile not configured";
+    }
+
+    bs_app_claims_strip_incoming(r);
+
+    apr_time_t now = apr_time_sec(apr_time_now());
+    const char *flag_names = bs_app_claims_flag_names(r->pool, flags);
+    const char *body = apr_psprintf(r->pool,
+        "v=1;score=%d;tier=%s;cookie=%s;flags=%s;"
+        "passes=s=%d,f=%d,c=%d;ts=%" APR_TIME_T_FMT,
+        score, bs_tier_name(tier), cookie_status, flag_names,
+        passes_silent, passes_form, passes_captcha, now);
+
+    unsigned char mac[BS_SIG_BYTES];
+    bs_hmac_sha256(scfg->app_claims_secret, scfg->app_claims_secret_len,
+                   (const unsigned char *)body, strlen(body), mac);
+    char sig_hex[BS_SIG_BYTES * 2 + 1];
+    bs_to_hex(mac, BS_SIG_BYTES, sig_hex);
+
+    const char *header_val = apr_psprintf(r->pool, "%s;sig=%s",
+                                          body, sig_hex);
+    apr_table_setn(r->headers_in, "X-Botshield-Claims", header_val);
+    return NULL;
+}
+
 static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                           apr_pool_t *ptemp, server_rec *s)
 {
@@ -6179,6 +6328,75 @@ static const char *bs_set_app_feedback_secret_file(cmd_parms *cmd,
     return NULL;
 }
 
+/* E8.2 — BotShieldAppClaims on|off. Master gate for the module-to-
+ * app reputation-export channel. Default off. When on, the module
+ * sets a single signed X-Botshield-Claims header on the request to
+ * the backend handler, having first stripped any client-supplied
+ * X-Botshield-* (the strip is what makes the signed envelope safe
+ * to trust on app reads — even if an app skips HMAC verification,
+ * forged claim values can't survive the strip + set sequence). */
+static const char *bs_set_app_claims(cmd_parms *cmd, void *dconf, int flag)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->app_claims_enabled = flag ? 1 : 0;
+    return NULL;
+}
+
+/* E8.2 — BotShieldAppClaimsSecretFile <path>. HMAC key for the
+ * module-to-app channel. Same mode-600 hygiene + load-at-parse-time
+ * discipline as BotShieldAppFeedbackSecretFile. Deliberately a
+ * separate file: a leak of the inbound (app-signs) key shouldn't
+ * also let an attacker forge module-originated claims, and vice
+ * versa. */
+static const char *bs_set_app_claims_secret_file(cmd_parms *cmd,
+                                                 void *dconf,
+                                                 const char *arg)
+{
+    (void)dconf;
+    if (!arg || !*arg) {
+        return "BotShieldAppClaimsSecretFile: path required";
+    }
+    if (arg[0] != '/') {
+        return "BotShieldAppClaimsSecretFile: path must be absolute";
+    }
+
+    struct stat st;
+    if (stat(arg, &st) != 0) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldAppClaimsSecretFile: cannot stat '%s'", arg);
+    }
+    if (st.st_mode & (S_IRGRP | S_IROTH | S_IWGRP | S_IWOTH)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldAppClaimsSecretFile: '%s' is group- or world-"
+            "accessible (mode %04o); chmod 600 it",
+            arg, st.st_mode & 07777);
+    }
+
+    const char *buf = NULL;
+    const char *err = bs_load_config_file(cmd,
+        "BotShieldAppClaimsSecretFile", arg,
+        BS_MAX_SECRET_BYTES, &buf);
+    if (err) return err;
+
+    apr_size_t len = strlen(buf);
+    if (len > 0 && buf[len-1] == '\n') len--;
+    if (len < BS_MIN_SECRET_BYTES) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldAppClaimsSecretFile: '%s' contains only "
+            "%" APR_SIZE_T_FMT " bytes (minimum %d)",
+            arg, len, BS_MIN_SECRET_BYTES);
+    }
+
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->app_claims_secret_file = apr_pstrdup(cmd->pool, arg);
+    scfg->app_claims_secret      = (const unsigned char *)buf;
+    scfg->app_claims_secret_len  = len;
+    return NULL;
+}
+
 /* E2.2 — BotShieldRobotsWildcardScope heuristic|strict|off.
  * Governs how the User-agent: * group in robots.txt is enforced:
  *   heuristic (default): apply only to UAs that look like crawlers
@@ -6249,18 +6467,11 @@ static int bs_flag_penalty(apr_uint32_t flags)
     return p;
 }
 
-/* Parse a comma-joined flag-name list into a bit mask. Unknown tokens
- * return an error message in *err; *err is NULL on success. */
-static const struct { const char *name; apr_uint32_t bit; } bs_flag_names[] = {
-    { "honeypot_hit",         BS_FLAG_HONEYPOT_HIT         },
-    { "scanner_probe",        BS_FLAG_SCANNER_PROBE        },
-    { "fake_bot",             BS_FLAG_FAKE_BOT             },
-    { "pow_fail_streak",      BS_FLAG_POW_FAIL_STREAK      },
-    { "app_verified_human",   BS_FLAG_APP_VERIFIED_HUMAN   },
-    { "app_verified_session", BS_FLAG_APP_VERIFIED_SESSION },
-    { "app_trust_signal",     BS_FLAG_APP_TRUST_SIGNAL     },
-    { NULL, 0 }
-};
+/* Flag-name registry moved up the file (near the early request-path
+ * helpers) so E8.2's bs_app_claims_flag_names can render the bitmap
+ * without a forward-declaration dance. Definition lives further up;
+ * leave a placeholder comment here so a reader scanning E5/E6 still
+ * sees where the table conceptually belongs. */
 
 static apr_uint32_t bs_parse_flag_names(apr_pool_t *p, const char *s,
                                         const char **err)
@@ -9710,6 +9921,22 @@ static const command_rec bs_cmds[] = {
                  "app-feedback signatures. Mode 600, root-owned. "
                  "Separate from BotShieldSecretFile so a compromise of "
                  "one key doesn't affect the other."),
+    /* E8.2 — module-to-app reputation export. */
+    AP_INIT_FLAG("BotShieldAppClaims",
+                 bs_set_app_claims, NULL, RSRC_CONF,
+                 "Enable module-to-app reputation export. When on, "
+                 "the module strips any client-supplied X-Botshield-* "
+                 "from the request and sets a single signed "
+                 "X-Botshield-Claims header before the backend handler "
+                 "runs. Default off."),
+    AP_INIT_TAKE1("BotShieldAppClaimsSecretFile",
+                 bs_set_app_claims_secret_file, NULL, RSRC_CONF,
+                 "Absolute path to the HMAC key used to sign the "
+                 "outbound X-Botshield-Claims header. Mode 600, "
+                 "root-owned. Deliberately separate from "
+                 "BotShieldAppFeedbackSecretFile: leaking the inbound "
+                 "key shouldn't let an attacker forge module-originated "
+                 "claims, and vice versa."),
     { NULL }
 };
 
@@ -10462,6 +10689,25 @@ static int bs_handler(request_rec *r)
                       r->uri, effective, heuristic_total, cookie_score,
                       cookie_flag_floor, ip_flag_penalty, (unsigned)ip_flags,
                       cookie_fully_ok);
+        /* E8.2 — module-to-app reputation export. Strip incoming
+         * X-Botshield-* and set a single signed claim envelope so
+         * the backend handler reads sanctioned BotShield state
+         * without poking at the (encrypted post-E8.1) cookie. */
+        {
+            bs_server_cfg *scfg2 = ap_get_module_config(
+                r->server->module_config, &botshield_module);
+            apr_uint32_t composite_flags = ip_flags
+                | (have_prior_rep ? prior_ch.rep.flags : 0);
+            const char *cerr = bs_app_claims_set(r, scfg2,
+                effective, tier, cookie_status, composite_flags,
+                have_prior_rep ? prior_ch.rep.passes_silent  : 0,
+                have_prior_rep ? prior_ch.rep.passes_form    : 0,
+                have_prior_rep ? prior_ch.rep.passes_captcha : 0);
+            if (cerr) {
+                ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+                    "mod_botshield: app claims not emitted: %s", cerr);
+            }
+        }
         bs_decision_log(r, "pass", "declined", cookie_status,
                         "-", "-",
                         bs_decision_reason_names(r->pool, score),

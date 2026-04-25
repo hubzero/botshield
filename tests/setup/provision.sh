@@ -93,6 +93,11 @@ install_secret /etc/botshield/geetest-secret         "GEETEST_CAPTCHA_KEY_REPLAC
 # bytes, well above BS_MIN_SECRET_BYTES.
 install_secret /etc/botshield/app-feedback-secret \
   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+# E8.2 — module-to-app claims HMAC key. Fixed value so pytest can
+# verify signatures the module emits. Distinct bytes from the
+# feedback secret to enforce key separation across the two channels.
+install_secret /etc/botshield/app-claims-secret \
+  "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 
 echo "== /var/lib/botshield (state file dir) =="
 install -d -m 750 -o www-data -g www-data /var/lib/botshield
