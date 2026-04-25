@@ -26,7 +26,8 @@ import time
 import pytest
 
 
-pytestmark = [pytest.mark.acceptance, pytest.mark.browser]
+pytestmark = [pytest.mark.acceptance, pytest.mark.browser,
+              pytest.mark.serial]
 
 
 EMBEDDED_PATH = "/embedded-test.html"
@@ -94,6 +95,53 @@ def test_embedded_wrapper_mints_verified_cookie(
         assert cookie_present, (
             f"wrapper failed to mint _bs_verified within deadline; "
             f"cookies={[c['name'] for c in bs_browser_context.cookies()]}"
+        )
+
+
+def test_embedded_turnstile_mints_verified_cookie(
+    config_override, bs_browser_context,
+):
+    """E17.2 — invisible Turnstile adapter. Scope is configured for
+    Turnstile (not native PoW); the wrapper loads Cloudflare's
+    api.js, renders an invisible widget with the always-pass test
+    sitekey 2x00000000000000000000AB, gets a token from
+    Cloudflare, POSTs to /embedded-verify, server siteverifies
+    against Cloudflare's real endpoint with the always-pass secret,
+    and mints _bs_verified.
+
+    Hits the real challenges.cloudflare.com infrastructure — slower
+    + flakier than the PoW path, but proves the provider-dispatch
+    mechanism works end-to-end."""
+    with config_override(
+        r"BotShieldAllow\s+on",
+        'BotShieldAllow on\n'
+        '    <Location /embedded-test.html>\n'
+        '        BotShieldSilentMode embedded\n'
+        '        BotShieldCaptchaProvider turnstile\n'
+        '        BotShieldCaptchaSiteKey 2x00000000000000000000AB\n'
+        '        BotShieldCaptchaSecretFile /etc/botshield/turnstile-secret\n'
+        '    </Location>',
+        count=1,
+    ):
+        page = bs_browser_context.new_page()
+        page.goto(f"https://localhost{EMBEDDED_PATH}")
+
+        # Real Cloudflare round trip — give it more time than PoW.
+        # Local network + CF latency + invisible-widget readiness
+        # typically lands within 5s but we allow 15.
+        deadline = time.monotonic() + 15.0
+        cookie_present = False
+        while time.monotonic() < deadline:
+            cookies = {c["name"] for c in bs_browser_context.cookies()}
+            if "_bs_verified" in cookies:
+                cookie_present = True
+                break
+            time.sleep(0.5)
+
+        assert cookie_present, (
+            f"turnstile wrapper failed to mint _bs_verified within "
+            f"deadline; cookies="
+            f"{[c['name'] for c in bs_browser_context.cookies()]}"
         )
 
 
