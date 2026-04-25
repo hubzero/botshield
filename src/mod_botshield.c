@@ -4316,6 +4316,165 @@ static bs_load_state bs_load_current(void)
     return (bs_load_state)apr_atomic_read32(&bs_shm.header->load_state);
 }
 
+/* Forward decl for the Bloom popcount helper used by the headroom
+ * tick below; the body lives further down with the metrics gauge
+ * helpers. */
+static apr_uint64_t bs_popcount_buffer(const unsigned char *buf,
+                                       apr_size_t bytes);
+
+/* E13.1 — capacity headroom monitoring. Periodic watchdog that walks
+ * the four reputation tables and emits NOTICE / WARNING when load
+ * factors approach the probe-saturation cliff. The reactive "probe
+ * saturated" warnings still fire at the cliff (see bs_flagged_ip_add
+ * / bs_strike_record_429 / bs_safeguard_record_presentation), but
+ * those only fire when an insert actually overflows the probe window
+ * — by then entries are already being overwritten. The forward-
+ * looking warnings here give operators time to bump capacity
+ * directives gracefully before that happens.
+ *
+ * Thresholds match the open-addressing displacement model:
+ *   load 0.50 → ~0.1% insert displacement (NOTICE)
+ *   load 0.70 → ~2.8%                     (WARNING)
+ * Beyond 0.7 the cliff comes fast.
+ *
+ * For the Bloom filter the rated-FP design point sits at bit-fill
+ * ≈ ln(2) ≈ 0.693 of total bits. We NOTICE at 0.50 fill (~0.1% FP),
+ * WARNING at 0.70 (~1.5% FP), past which FP climbs sharply. */
+
+#define BS_HEADROOM_NOTICE_PCT     50
+#define BS_HEADROOM_WARN_PCT       70
+#define BS_HEADROOM_REWARN_SEC     300
+
+typedef struct {
+    apr_int64_t flagged_last_warn;
+    apr_int64_t strike_last_warn;
+    apr_int64_t safeguard_last_warn;
+    apr_int64_t bloom_last_warn;
+} bs_headroom_state;
+
+/* Single-process state — mod_watchdog runs callbacks in the parent
+ * only, so static module-scope storage is sufficient. */
+static bs_headroom_state bs_headroom = {0, 0, 0, 0};
+
+static void bs_headroom_check_table(server_rec *sv,
+                                    const char *table_name,
+                                    const char *directive_name,
+                                    apr_uint64_t used,
+                                    apr_size_t capacity,
+                                    apr_int64_t *last_warn,
+                                    apr_int64_t now_sec)
+{
+    if (capacity == 0) return;
+    int pct = (int)((used * 100) / capacity);
+    int level;
+    if      (pct >= BS_HEADROOM_WARN_PCT)   level = APLOG_WARNING;
+    else if (pct >= BS_HEADROOM_NOTICE_PCT) level = APLOG_NOTICE;
+    else { *last_warn = 0; return; }   /* below threshold; reset cooldown */
+
+    if (now_sec - *last_warn < BS_HEADROOM_REWARN_SEC) return;
+    *last_warn = now_sec;
+    ap_log_error(APLOG_MARK, level, 0, sv,
+        "mod_botshield: %s table at %d%% (%" APR_UINT64_T_FMT
+        "/%" APR_SIZE_T_FMT "); approaching probe-saturation. "
+        "Consider raising %s.",
+        table_name, pct, used, capacity, directive_name);
+}
+
+static apr_status_t bs_headroom_watchdog_cb(int state, void *data,
+                                            apr_pool_t *pool)
+{
+    (void)pool;
+    if (state != AP_WATCHDOG_STATE_RUNNING) return APR_SUCCESS;
+    server_rec *sv = data;
+    if (!sv) return APR_SUCCESS;
+
+    apr_int64_t now_sec = (apr_int64_t)apr_time_sec(apr_time_now());
+
+    /* flagged-IP — count active (TTL-live) entries. Stale-but-still-
+     * present slots understate load slightly, biasing toward late
+     * warnings. Acceptable: the reactive cliff warning is the safety
+     * net for the bias case. */
+    if (bs_shm.flagged_table && bs_shm.flagged_capacity) {
+        apr_uint64_t used = 0;
+        for (apr_size_t i = 0; i < bs_shm.flagged_capacity; i++) {
+            const bs_flagged_ip_slot *slot = &bs_shm.flagged_table[i];
+            if ((slot->version & 1U) == 0 &&
+                slot->flags != 0 &&
+                slot->expires_at > now_sec) {
+                used++;
+            }
+        }
+        bs_headroom_check_table(sv, "flagged-IP",
+            "BotShieldFlaggedIPCapacity",
+            used, bs_shm.flagged_capacity,
+            &bs_headroom.flagged_last_warn, now_sec);
+    }
+
+    /* strike — physical occupancy (any non-EMPTY rule_slot). */
+    if (bs_shm.strike_table && bs_shm.strike_capacity) {
+        apr_uint64_t used = 0;
+        for (apr_size_t i = 0; i < bs_shm.strike_capacity; i++) {
+            const bs_strike_slot *slot = &bs_shm.strike_table[i];
+            if ((slot->version & 1U) == 0 &&
+                slot->rule_slot != BS_STRIKE_EMPTY) {
+                used++;
+            }
+        }
+        bs_headroom_check_table(sv, "strike",
+            "BotShieldRateLimitEscalateCapacity",
+            used, bs_shm.strike_capacity,
+            &bs_headroom.strike_last_warn, now_sec);
+    }
+
+    /* safeguard — physical occupancy. */
+    if (bs_shm.safeguard_table && bs_shm.safeguard_capacity) {
+        apr_uint64_t used = 0;
+        for (apr_size_t i = 0; i < bs_shm.safeguard_capacity; i++) {
+            const bs_safeguard_slot *slot = &bs_shm.safeguard_table[i];
+            if ((slot->version & 1U) == 0 && slot->used != 0) {
+                used++;
+            }
+        }
+        bs_headroom_check_table(sv, "safeguard",
+            "BotShieldSafeguardCapacity",
+            used, bs_shm.safeguard_capacity,
+            &bs_headroom.safeguard_last_warn, now_sec);
+    }
+
+    /* Bloom — bit-fill against the ln(2) rated-FP design point.
+     * Both buffers OR'd at lookup, so the higher-fill buffer governs
+     * the effective FP. Compare the peak fill across the two. */
+    if (bs_shm.bloom_bufs[0] && bs_shm.bloom_buf_bytes) {
+        apr_uint64_t total_bits = (apr_uint64_t)bs_shm.bloom_buf_bytes * 8;
+        if (total_bits > 0) {
+            apr_uint64_t bits_a = bs_popcount_buffer(
+                bs_shm.bloom_bufs[0], bs_shm.bloom_buf_bytes);
+            apr_uint64_t bits_b = bs_popcount_buffer(
+                bs_shm.bloom_bufs[1], bs_shm.bloom_buf_bytes);
+            apr_uint64_t peak = (bits_a > bits_b) ? bits_a : bits_b;
+            int pct = (int)((peak * 100) / total_bits);
+            int level;
+            if      (pct >= BS_HEADROOM_WARN_PCT)   level = APLOG_WARNING;
+            else if (pct >= BS_HEADROOM_NOTICE_PCT) level = APLOG_NOTICE;
+            else { bs_headroom.bloom_last_warn = 0; goto bloom_done; }
+            if (now_sec - bs_headroom.bloom_last_warn
+                >= BS_HEADROOM_REWARN_SEC) {
+                bs_headroom.bloom_last_warn = now_sec;
+                ap_log_error(APLOG_MARK, level, 0, sv,
+                    "mod_botshield: Bloom filter peak buffer at %d%% "
+                    "fill (%" APR_UINT64_T_FMT "/%" APR_UINT64_T_FMT
+                    " bits); false-positive rate climbing past design "
+                    "point. Consider raising BotShieldBloomIPs or "
+                    "shortening BotShieldBloomWindow.",
+                    pct, peak, total_bits);
+            }
+bloom_done: ;
+        }
+    }
+
+    return APR_SUCCESS;
+}
+
 /* ======================================================================
  * E5 — App-to-module reputation feedback.
  *
@@ -5404,6 +5563,35 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                         "BotShieldLoadStateFile inert (state stays "
                         "normal). Load mod_watchdog to enable.");
                 }
+            }
+        }
+    }
+
+    /* E13.1 — capacity headroom watchdog. Independent of load-state
+     * config; runs whenever mod_watchdog is available. 60s tick is
+     * generous — table populations move on minute-to-hour timescales
+     * and the rewarn cooldown is 5 min anyway. */
+    {
+        APR_OPTIONAL_FN_TYPE(ap_watchdog_get_instance) *fn_get =
+            APR_RETRIEVE_OPTIONAL_FN(ap_watchdog_get_instance);
+        APR_OPTIONAL_FN_TYPE(ap_watchdog_register_callback) *fn_reg =
+            APR_RETRIEVE_OPTIONAL_FN(ap_watchdog_register_callback);
+        if (fn_get && fn_reg) {
+            ap_watchdog_t *wd = NULL;
+            apr_status_t wrv = fn_get(&wd,
+                "mod_botshield_headroom", 0, 1, pconf);
+            if (wrv == APR_SUCCESS && wd) {
+                apr_interval_time_t ival = apr_time_from_sec(60);
+                wrv = fn_reg(wd, ival, s, bs_headroom_watchdog_cb);
+            } else if (wrv == APR_SUCCESS) {
+                wrv = APR_EGENERAL;
+            }
+            if (wrv != APR_SUCCESS) {
+                ap_log_error(APLOG_MARK, APLOG_INFO, wrv, s,
+                    "mod_botshield: headroom watchdog "
+                    "registration failed; capacity warnings "
+                    "will not fire (reactive cliff warnings "
+                    "still in place)");
             }
         }
     }
@@ -9907,6 +10095,8 @@ static int bs_m_provider_idx(const char *s)
 typedef struct {
     apr_time_t   expires_at;
     apr_uint64_t flagged_used;
+    apr_uint64_t strike_used;
+    apr_uint64_t safeguard_used;
     apr_uint64_t bloom_bits_active;
     apr_uint64_t bloom_bits_warming;
 } bs_gauge_cache;
@@ -9915,7 +10105,7 @@ typedef struct {
  * concurrent /metrics scrapes in one Apache process can't race on the
  * refresh, and we don't need a lock. The 1-second TTL means at worst
  * a thread computes fresh values once per scrape; cost is bounded. */
-static __thread bs_gauge_cache bs_gauges = {0, 0, 0, 0};
+static __thread bs_gauge_cache bs_gauges = {0, 0, 0, 0, 0, 0};
 #define BS_GAUGE_CACHE_TTL_US (1000 * 1000)  /* 1 second */
 
 static apr_uint64_t bs_popcount_u64(apr_uint64_t x)
@@ -9956,9 +10146,9 @@ static void bs_gauges_refresh(void)
     apr_time_t now = apr_time_now();
     if (now < bs_gauges.expires_at) return;
 
+    apr_int64_t now_sec = (apr_int64_t)apr_time_sec(now);
     apr_uint64_t flagged_used = 0;
     if (bs_shm.flagged_table) {
-        apr_int64_t now_sec = (apr_int64_t)apr_time_sec(now);
         for (apr_size_t i = 0; i < bs_shm.flagged_capacity; i++) {
             const bs_flagged_ip_slot *slot = &bs_shm.flagged_table[i];
             /* Skip odd versions (mid-write) — they don't count toward
@@ -9971,6 +10161,30 @@ static void bs_gauges_refresh(void)
             }
         }
     }
+    /* E13.1 — strike + safeguard occupancy. "Used" here means the
+     * slot would force a probe walk (rule_slot != EMPTY for strike,
+     * used != 0 for safeguard), regardless of whether the entry is
+     * still TTL-active. That's the right view for load-factor-based
+     * probe-saturation warnings. */
+    apr_uint64_t strike_used = 0;
+    if (bs_shm.strike_table) {
+        for (apr_size_t i = 0; i < bs_shm.strike_capacity; i++) {
+            const bs_strike_slot *slot = &bs_shm.strike_table[i];
+            if ((slot->version & 1U) == 0 &&
+                slot->rule_slot != BS_STRIKE_EMPTY) {
+                strike_used++;
+            }
+        }
+    }
+    apr_uint64_t safeguard_used = 0;
+    if (bs_shm.safeguard_table) {
+        for (apr_size_t i = 0; i < bs_shm.safeguard_capacity; i++) {
+            const bs_safeguard_slot *slot = &bs_shm.safeguard_table[i];
+            if ((slot->version & 1U) == 0 && slot->used != 0) {
+                safeguard_used++;
+            }
+        }
+    }
     apr_uint64_t bloom_active = 0, bloom_warming = 0;
     if (bs_shm.bloom_bufs[0] && bs_shm.bloom_buf_bytes) {
         apr_uint32_t act = apr_atomic_read32(&bs_shm.header->bloom_active);
@@ -9980,6 +10194,8 @@ static void bs_gauges_refresh(void)
     }
 
     bs_gauges.flagged_used       = flagged_used;
+    bs_gauges.strike_used        = strike_used;
+    bs_gauges.safeguard_used     = safeguard_used;
     bs_gauges.bloom_bits_active  = bloom_active;
     bs_gauges.bloom_bits_warming = bloom_warming;
     bs_gauges.expires_at         = now + BS_GAUGE_CACHE_TTL_US;
@@ -9991,6 +10207,18 @@ static apr_uint64_t bs_metrics_flagged_used(void)
 {
     bs_gauges_refresh();
     return bs_gauges.flagged_used;
+}
+
+static apr_uint64_t bs_metrics_strike_used(void)
+{
+    bs_gauges_refresh();
+    return bs_gauges.strike_used;
+}
+
+static apr_uint64_t bs_metrics_safeguard_used(void)
+{
+    bs_gauges_refresh();
+    return bs_gauges.safeguard_used;
 }
 
 static apr_uint64_t bs_metrics_bloom_bits(int active_buf)
@@ -10623,6 +10851,19 @@ static int bs_metrics_handler(request_rec *r, bs_dir_cfg *cfg)
     bs_m_emit_gauge(r, "shm_flagged_capacity",
         "Configured BotShieldFlaggedIPCapacity.",
         (apr_uint64_t)bs_shm.flagged_capacity);
+    bs_m_emit_gauge(r, "shm_strike_used",
+        "Strike-table slots physically occupied "
+        "(rule_slot != BS_STRIKE_EMPTY).",
+        bs_metrics_strike_used());
+    bs_m_emit_gauge(r, "shm_strike_capacity",
+        "Configured BotShieldRateLimitEscalateCapacity.",
+        (apr_uint64_t)bs_shm.strike_capacity);
+    bs_m_emit_gauge(r, "shm_safeguard_used",
+        "Safeguard-table slots physically occupied (used != 0).",
+        bs_metrics_safeguard_used());
+    bs_m_emit_gauge(r, "shm_safeguard_capacity",
+        "Configured BotShieldSafeguardCapacity.",
+        (apr_uint64_t)bs_shm.safeguard_capacity);
     bs_m_emit_gauge(r, "bloom_bits_set_active",
         "Set bits in the active Bloom buffer (popcount; ~population proxy).",
         bs_metrics_bloom_bits(1));
