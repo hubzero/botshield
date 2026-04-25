@@ -117,6 +117,42 @@ module AP_MODULE_DECLARE_DATA botshield_module;
 #define BS_SIG_BYTES          32  /* HMAC-SHA-256 output */
 #define BS_COOKIE_FIELDS      15  /* full cookie payload; canonical is 13 */
 
+/* E8.1 — AES-256-GCM cookie wire format.
+ *
+ * Wire format:   base64( alg_id(1) || nonce(12) || ct || tag(16) )
+ *                + "." + counter
+ *
+ *   alg_id is authenticated via AAD so an attacker can't swap
+ *   primitives. ct is the AES-GCM encryption of the same canonical
+ *   pipe-delimited form the HMAC path builds. Counter rides outside
+ *   the ciphertext because the PoW JS builds the cookie client-side
+ *   without the AES key — it appends its computed counter to the
+ *   server-issued encrypted prefix and sets the cookie. Server-built
+ *   cookies (captcha tier) use "captcha" as the counter sentinel on
+ *   the same dot-suffix.
+ *
+ * AES-256 key is derived from cfg->secret via SHA-256, so:
+ *   - operators keep a single BotShieldSecretFile
+ *   - HMAC and GCM use distinct domain-separated keys from the same
+ *     material (HMAC uses the raw bytes; GCM uses the digest) */
+#define BS_COOKIE_ALG_GCM     0x01
+#define BS_GCM_NONCE_LEN      12
+#define BS_GCM_TAG_LEN        16
+#define BS_GCM_COUNTER_SEP    '.'
+/* Separator byte in AES-GCM wire format between the base64 envelope
+ * and the plaintext counter. `.` because it's not in standard base64
+ * alphabet — unambiguous split point. */
+
+/* E8.1 — BotShieldCookieFormat bitmap. Bits are accepted *verify*
+ * formats; issuer prefers GCM when that bit is set. Both bits set
+ * is the migration mode ("issue GCM, accept either"). Field value
+ * BS_FMT_UNSET (-1) means operator didn't write the directive; the
+ * effective format falls back to BS_FMT_HMAC (legacy default until
+ * operators opt in). */
+#define BS_FMT_HMAC           0x01
+#define BS_FMT_GCM            0x02
+#define BS_FMT_UNSET          (-1)
+
 /* Forward declarations for the PoW algorithm dispatch table. */
 typedef struct bs_dir_cfg bs_dir_cfg;
 
@@ -306,6 +342,34 @@ typedef struct {
     apr_int64_t   expires_at;    /* unix seconds; past means stale */
 } bs_flagged_ip_slot;
 
+/* E9 — repeated-429 escalation. Per-(client_ip, rate_rule_slot)
+ * strike accounting in SHM. Same seqlock + open-addressing idiom as
+ * flagged_table. `rule_slot == BS_STRIKE_EMPTY` flags an unused slot
+ * (real rule slots are non-negative + small); strike counter is a
+ * fixed window keyed off `strike_window_start` so an idle entry
+ * eventually rolls over.
+ *
+ * `escalation_until == 0` means the strike-counter is accumulating
+ * but the IP has not yet crossed the threshold. Non-zero means the
+ * (ip, rule) pair is in the escalated state: subsequent requests
+ * against this rule return the operator-configured status until the
+ * timestamp passes. Each fresh strike during escalation extends
+ * the timestamp (TTL slides on the last strike). */
+typedef struct {
+    apr_uint32_t  version;             /* seqlock counter */
+    apr_uint32_t  rule_slot;           /* BS_STRIKE_EMPTY = unused */
+    unsigned char ip[16];              /* masked per ipv6_prefix_bits */
+    apr_uint32_t  strike_window_start; /* unix sec; 0 = no strikes yet */
+    apr_uint32_t  strike_count;
+    apr_int64_t   escalation_until;    /* unix sec; 0 = not escalated */
+} bs_strike_slot;
+
+#define BS_STRIKE_EMPTY            0xFFFFFFFFu
+#define BS_STRIKE_PROBE_LIMIT      8
+#define BS_DEFAULT_STRIKE_SLOTS    50000
+#define BS_STRIKE_MIN_SLOTS        1024
+#define BS_STRIKE_MAX_SLOTS        1000000
+
 typedef struct {
     apr_uint32_t  magic;            /* BS_SHM_MAGIC */
     apr_uint32_t  format_version;   /* BS_SHM_FORMAT_VERSION */
@@ -449,6 +513,11 @@ typedef struct {
      * post_config. Sized by bs_rate_counter_count. */
     void                *rate_counters;     /* bs_rate_counter *, opaque here */
     apr_size_t           rate_counter_count;
+    /* E9 — strike table for repeated-429 escalation. Open-addressed
+     * SHM hash, key = (client_ip, rule_slot). Sized by
+     * BotShieldRateLimitEscalateCapacity. */
+    bs_strike_slot      *strike_table;
+    apr_size_t           strike_capacity;
 } bs_shm_runtime;
 
 static bs_shm_runtime bs_shm;
@@ -535,6 +604,7 @@ struct bs_dir_cfg {
     const bs_pow_algorithm *algorithm;      /* chosen issue algorithm */
     const unsigned char    *secret;         /* HMAC key bytes */
     apr_size_t              secret_len;     /* key length */
+    int                     cookie_format;  /* BS_FMT_* bitmap or BS_FMT_UNSET */
     int score_silent;           /* score >= this → silent tier (logged only) */
     int score_hard;             /* score >= this → hard form-PoW tier */
     int score_captcha;          /* score >= this → captcha tier */
@@ -609,6 +679,14 @@ typedef struct bs_server_cfg {
      * in place, preserving its position so operators can override
      * a rule without disturbing relative order of the others. */
     apr_array_header_t *rate_limits;   /* bs_rate_limit_entry * */
+    /* E9 — repeated-429 escalation. One entry per
+     * BotShieldRateLimitEscalate directive; each one references an
+     * existing rate_limits rule by name. Linked into the matching
+     * bs_rate_limit_entry::escalate at post_config. */
+    apr_array_header_t *rate_escalates; /* bs_rate_escalate_entry * */
+    /* Strike-table capacity (operator-tunable). Read at post_config
+     * from the main server's scfg, same convention as flagged_capacity. */
+    int                 strike_capacity;
     apr_array_header_t *block_paths;   /* bs_block_path_entry * */
     /* E3 — path-based triggers. Same ordered-array + upsert-by-name
      * shape as E2.1; first match wins at request time. */
@@ -673,6 +751,16 @@ typedef struct bs_server_cfg {
     const char         *app_feedback_secret_file;    /* NULL = no key */
     const unsigned char *app_feedback_secret;        /* loaded bytes */
     apr_size_t          app_feedback_secret_len;
+    /* E8.2 — module-to-app reputation export. Symmetric to E5 in
+     * shape: signed envelope, separate secret file. The module sets
+     * a single X-Botshield-Claims request header on the way to the
+     * backend handler, having first stripped any client-supplied
+     * X-Botshield-* (the strip is the trust anchor for apps that
+     * skip HMAC verification). */
+    int                 app_claims_enabled;          /* -1 unset, 0 off, 1 on */
+    const char         *app_claims_secret_file;      /* NULL = no key */
+    const unsigned char *app_claims_secret;          /* loaded bytes */
+    apr_size_t          app_claims_secret_len;
 } bs_server_cfg;
 
 #define BS_APP_FEEDBACK_UNSET  (-1)
@@ -709,6 +797,7 @@ static void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->algorithm  = NULL;
     cfg->secret     = NULL;
     cfg->secret_len = 0;
+    cfg->cookie_format = BS_FMT_UNSET;
     cfg->score_silent  = BS_UNSET;
     cfg->score_hard    = BS_UNSET;
     cfg->score_captcha = BS_UNSET;
@@ -804,6 +893,10 @@ static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
      * per-type. */
     out->rate_limits = bs_merge_rule_array(p, base->rate_limits,
                                            add->rate_limits);
+    out->rate_escalates = bs_merge_rule_array(p, base->rate_escalates,
+                                              add->rate_escalates);
+    out->strike_capacity = (add->strike_capacity > 0)
+                         ? add->strike_capacity : base->strike_capacity;
     out->block_paths = bs_merge_rule_array(p, base->block_paths,
                                            add->block_paths);
     out->path_triggers = bs_merge_rule_array(p, base->path_triggers,
@@ -858,6 +951,15 @@ static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
         out->app_feedback_secret      = base->app_feedback_secret;
         out->app_feedback_secret_len  = base->app_feedback_secret_len;
     }
+    /* E8.2 — app claims server-scope inheritance. Same shape. */
+    if (add->app_claims_enabled == BS_APP_FEEDBACK_UNSET) {
+        out->app_claims_enabled = base->app_claims_enabled;
+    }
+    if (!add->app_claims_secret_file && base->app_claims_secret_file) {
+        out->app_claims_secret_file = base->app_claims_secret_file;
+        out->app_claims_secret      = base->app_claims_secret;
+        out->app_claims_secret_len  = base->app_claims_secret_len;
+    }
     return out;
 }
 
@@ -886,6 +988,8 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
      * directives in declaration order, post_config resolves cohort
      * ipspecs and assigns SHM slots. */
     scfg->rate_limits      = apr_array_make(p, 4, sizeof(void *));
+    scfg->rate_escalates   = apr_array_make(p, 2, sizeof(void *));
+    scfg->strike_capacity  = 0;   /* 0 = inherit / use default */
     scfg->block_paths      = apr_array_make(p, 4, sizeof(void *));
     scfg->path_triggers         = apr_array_make(p, 4, sizeof(void *));
     scfg->cookie_triggers  = apr_array_make(p, 4, sizeof(void *));
@@ -926,6 +1030,11 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->app_feedback_secret_file  = NULL;
     scfg->app_feedback_secret       = NULL;
     scfg->app_feedback_secret_len   = 0;
+    /* E8.2 defaults — same UNSET sentinel shape as E5. */
+    scfg->app_claims_enabled        = BS_APP_FEEDBACK_UNSET;
+    scfg->app_claims_secret_file    = NULL;
+    scfg->app_claims_secret         = NULL;
+    scfg->app_claims_secret_len     = 0;
     return scfg;
 }
 
@@ -955,6 +1064,9 @@ static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
         out->secret     = base->secret;
         out->secret_len = base->secret_len;
     }
+    out->cookie_format = (add->cookie_format == BS_FMT_UNSET)
+                       ? base->cookie_format
+                       : add->cookie_format;
     out->score_silent  = (add->score_silent  == BS_UNSET) ? base->score_silent  : add->score_silent;
     out->score_hard    = (add->score_hard    == BS_UNSET) ? base->score_hard    : add->score_hard;
     out->score_captcha = (add->score_captcha == BS_UNSET) ? base->score_captcha : add->score_captcha;
@@ -1363,6 +1475,169 @@ static int bs_ct_equal(const unsigned char *a, const unsigned char *b,
     unsigned char diff = 0;
     for (apr_size_t i = 0; i < len; i++) diff |= a[i] ^ b[i];
     return diff == 0;
+}
+
+/* Derive a 32-byte AES-256 key from operator secret bytes via
+ * SHA-256. Two purposes:
+ *   1. Accept any secret length — SHA-256 is defined for any input.
+ *      The existing HMAC path uses the secret bytes directly (HMAC
+ *      accepts variable-length keys), so having GCM run through a
+ *      hash gives us one derived-key convention without forcing
+ *      operators to manage two key files.
+ *   2. Domain separation. HMAC reads the raw bytes; GCM reads the
+ *      digest. A leaked-in-one-direction-but-not-the-other secret
+ *      can't be trivially cross-applied even if someone mistakenly
+ *      exports the derived bytes. Not cryptographically rigorous
+ *      domain separation (a SHA-256 preimage is trivial with the
+ *      original bytes), but it means AES ciphertexts produced under
+ *      the HMAC-derived key won't decrypt under the raw bytes and
+ *      vice versa. */
+static void bs_derive_aes_key(const unsigned char *secret,
+                              apr_size_t secret_len,
+                              unsigned char out_key[32])
+{
+    bs_sha256(secret, secret_len, out_key);
+}
+
+/* AES-256-GCM encrypt. Wire layout:
+ *     alg_id(1) || nonce(12) || ciphertext || tag(16)
+ * The alg_id byte is the only AAD — authenticates the primitive
+ * choice so an attacker can't swap 0x01 for (say) 0x02 and drive
+ * the verifier into a different algorithm's parse.
+ *
+ * On success: writes the full envelope into *out_buf (caller-
+ * provided, must be at least 1 + 12 + pt_len + 16 bytes), writes
+ * the envelope length into *out_len, returns NULL.
+ * On failure: returns an error string for logging; *out_len
+ * untouched. */
+static const char *bs_gcm_encrypt(const unsigned char *secret,
+                                  apr_size_t secret_len,
+                                  const unsigned char *pt,
+                                  apr_size_t pt_len,
+                                  unsigned char *out_buf,
+                                  apr_size_t *out_len)
+{
+    unsigned char key[32];
+    bs_derive_aes_key(secret, secret_len, key);
+
+    out_buf[0] = BS_COOKIE_ALG_GCM;
+    if (RAND_bytes(out_buf + 1, BS_GCM_NONCE_LEN) != 1) {
+        return "RAND_bytes(gcm_nonce)";
+    }
+    unsigned char *nonce = out_buf + 1;
+    unsigned char *ct    = out_buf + 1 + BS_GCM_NONCE_LEN;
+    unsigned char *tag   = ct + pt_len;
+
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) return "EVP_CIPHER_CTX_new";
+    const char *err = NULL;
+    int outlen = 0, finallen = 0, aadlen = 0;
+
+    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1) {
+        err = "EVP_EncryptInit_ex(aes_256_gcm)"; goto done;
+    }
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN,
+                            BS_GCM_NONCE_LEN, NULL) != 1) {
+        err = "EVP_CIPHER_CTX_ctrl(SET_IVLEN)"; goto done;
+    }
+    if (EVP_EncryptInit_ex(ctx, NULL, NULL, key, nonce) != 1) {
+        err = "EVP_EncryptInit_ex(key+nonce)"; goto done;
+    }
+    if (EVP_EncryptUpdate(ctx, NULL, &aadlen, out_buf, 1) != 1) {
+        err = "EVP_EncryptUpdate(AAD)"; goto done;
+    }
+    if (pt_len > 0) {
+        if (EVP_EncryptUpdate(ctx, ct, &outlen, pt, (int)pt_len) != 1) {
+            err = "EVP_EncryptUpdate(pt)"; goto done;
+        }
+    }
+    if (EVP_EncryptFinal_ex(ctx, ct + outlen, &finallen) != 1) {
+        err = "EVP_EncryptFinal_ex"; goto done;
+    }
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG,
+                            BS_GCM_TAG_LEN, tag) != 1) {
+        err = "EVP_CIPHER_CTX_ctrl(GET_TAG)"; goto done;
+    }
+    *out_len = 1 + BS_GCM_NONCE_LEN + pt_len + BS_GCM_TAG_LEN;
+
+done:
+    EVP_CIPHER_CTX_free(ctx);
+    OPENSSL_cleanse(key, sizeof(key));
+    return err;
+}
+
+/* AES-256-GCM decrypt. Expects the full envelope
+ *     alg_id(1) || nonce(12) || ciphertext || tag(16)
+ * Returns NULL on success (tag verified) with plaintext written
+ * into *out_pt (caller-provided, must be at least env_len - 1 - 12
+ * - 16 bytes) and the plaintext length in *out_pt_len. Returns an
+ * error string on any failure including tag-mismatch. */
+static const char *bs_gcm_decrypt(const unsigned char *secret,
+                                  apr_size_t secret_len,
+                                  const unsigned char *env,
+                                  apr_size_t env_len,
+                                  unsigned char *out_pt,
+                                  apr_size_t *out_pt_len)
+{
+    if (env_len < (apr_size_t)(1 + BS_GCM_NONCE_LEN + BS_GCM_TAG_LEN)) {
+        return "envelope too short";
+    }
+    if (env[0] != BS_COOKIE_ALG_GCM) return "unknown alg_id";
+
+    apr_size_t ct_len = env_len - 1 - BS_GCM_NONCE_LEN - BS_GCM_TAG_LEN;
+    const unsigned char *nonce = env + 1;
+    const unsigned char *ct    = env + 1 + BS_GCM_NONCE_LEN;
+    const unsigned char *tag   = ct + ct_len;
+
+    unsigned char key[32];
+    bs_derive_aes_key(secret, secret_len, key);
+
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) { OPENSSL_cleanse(key, sizeof(key)); return "EVP_CIPHER_CTX_new"; }
+    const char *err = NULL;
+    int outlen = 0, finallen = 0, aadlen = 0;
+
+    if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1) {
+        err = "EVP_DecryptInit_ex(aes_256_gcm)"; goto done;
+    }
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN,
+                            BS_GCM_NONCE_LEN, NULL) != 1) {
+        err = "EVP_CIPHER_CTX_ctrl(SET_IVLEN)"; goto done;
+    }
+    if (EVP_DecryptInit_ex(ctx, NULL, NULL, key, nonce) != 1) {
+        err = "EVP_DecryptInit_ex(key+nonce)"; goto done;
+    }
+    if (EVP_DecryptUpdate(ctx, NULL, &aadlen, env, 1) != 1) {
+        err = "EVP_DecryptUpdate(AAD)"; goto done;
+    }
+    if (ct_len > 0) {
+        if (EVP_DecryptUpdate(ctx, out_pt, &outlen, ct, (int)ct_len) != 1) {
+            err = "EVP_DecryptUpdate(ct)"; goto done;
+        }
+    }
+    /* Set expected tag BEFORE Final — required by EVP's GCM contract. */
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG,
+                            BS_GCM_TAG_LEN, (void *)tag) != 1) {
+        err = "EVP_CIPHER_CTX_ctrl(SET_TAG)"; goto done;
+    }
+    if (EVP_DecryptFinal_ex(ctx, out_pt + outlen, &finallen) != 1) {
+        err = "gcm tag verification failed"; goto done;
+    }
+    *out_pt_len = (apr_size_t)(outlen + finallen);
+
+done:
+    EVP_CIPHER_CTX_free(ctx);
+    OPENSSL_cleanse(key, sizeof(key));
+    return err;
+}
+
+/* Effective cookie-format bitmap for a given dir_cfg, substituting
+ * the legacy default when the operator hasn't written the directive
+ * at any inherited scope. */
+static int bs_effective_cookie_format(const bs_dir_cfg *cfg)
+{
+    return (cfg && cfg->cookie_format != BS_FMT_UNSET)
+         ? cfg->cookie_format : BS_FMT_HMAC;
 }
 
 /* Hex helpers. Writes 2*len chars + NUL. */
@@ -2379,13 +2654,34 @@ typedef struct {
     apr_array_header_t *ranges;        /* resolved at post_config */
 } bs_cohort;
 
+/* Forward decl: rate_limit_entry references its escalation config
+ * by pointer. Linked at post_config. */
+typedef struct bs_rate_escalate_entry bs_rate_escalate_entry;
+
 typedef struct {
     const char   *name;
     bs_cohort     cohort;
     apr_uint32_t  budget;
     apr_uint32_t  window_sec;
     int           shm_slot;          /* index into bs_shm.rate_counters; -1 unset */
+    /* E9 — back-link to the escalation config for this rule, if
+     * any. Resolved at post_config from scfg->rate_escalates by
+     * matching name. NULL = no escalation; the rule behaves like
+     * pre-E9. */
+    const bs_rate_escalate_entry *escalate;
 } bs_rate_limit_entry;
+
+/* E9 — BotShieldRateLimitEscalate config. Stored in
+ * scfg->rate_escalates; linked into bs_rate_limit_entry::escalate
+ * at post_config so the request-time path can branch in O(1). */
+struct bs_rate_escalate_entry {
+    const char   *rule_name;     /* must name a BotShieldRateLimit */
+    apr_uint32_t  strikes;       /* threshold within the per window */
+    apr_uint32_t  per_sec;       /* strike-counter window */
+    int           status_code;   /* HTTP code on escalation; default 403 */
+    int           ttl_sec;       /* escalation lifetime; default 1800 */
+    const char   *log_tag;       /* fail2ban-friendly tag, NULL if unset */
+};
 
 typedef struct {
     const char *name;
@@ -2480,6 +2776,15 @@ static void bs_flagged_ip_add(request_rec *r,
                               apr_uint32_t flag_bits, int ttl_seconds);
 static int  bs_parse_client_ip(const char *ip_str, unsigned char out[16]);
 static void bs_mask_ipv6_prefix(unsigned char ip[16], int prefix_bits);
+/* E9 — strike-table helpers used inside the rate-limit walk. */
+static int  bs_strike_check_escalated(const unsigned char ip[16],
+                                      apr_uint32_t rule_slot,
+                                      apr_int64_t now);
+static int  bs_strike_record_429(request_rec *r,
+                                 const unsigned char ip[16],
+                                 apr_uint32_t rule_slot,
+                                 const bs_rate_escalate_entry *cfg,
+                                 apr_int64_t now);
 /* Shared action helpers — see definitions below. The server-cfg
  * struct body appears later in the file, so we forward-declare by
  * struct tag and use `struct bs_server_cfg *` in the signature. */
@@ -3104,12 +3409,37 @@ static int bs_check_policy(request_rec *r)
     int directive_rate_matched = 0;
     if (scfg->rate_limits && scfg->rate_limits->nelts > 0) {
         bs_rate_counter *counters = (bs_rate_counter *)bs_shm.rate_counters;
+        unsigned char client_ip[16];
+        int have_ip = bs_parse_client_ip(r->useragent_ip, client_ip);
+        if (have_ip) bs_mask_ipv6_prefix(client_ip, scfg->ipv6_prefix_bits);
+        apr_int64_t now_t = (apr_int64_t)apr_time_sec(apr_time_now());
         for (int i = 0; i < scfg->rate_limits->nelts; i++) {
             bs_rate_limit_entry *e = APR_ARRAY_IDX(
                 scfg->rate_limits, i, bs_rate_limit_entry *);
             if (!bs_cohort_matches(&e->cohort, ua, r)) continue;
             directive_rate_matched = 1;
             if (e->shm_slot < 0 || !counters) continue;
+
+            /* E9 — escalation gate. If this rule has an escalation
+             * config and the (ip, rule) pair is in the escalated
+             * window, return the configured stricter status without
+             * consulting the budget. The normal counter doesn't tick
+             * during escalation: the request is rejected outright. */
+            if (e->escalate && have_ip
+                && bs_strike_check_escalated(client_ip,
+                                             (apr_uint32_t)e->shm_slot,
+                                             now_t)) {
+                bs_score_add(r, BS_PENALTY_RATE_LIMIT, 3600,
+                    apr_pstrcat(r->pool, "rate-limit-abuse:",
+                                e->name, NULL));
+                if (bs_shm.metrics) {
+                    __atomic_fetch_add(
+                        &bs_shm.metrics->rate_limit_exceeded_total,
+                        1, __ATOMIC_RELAXED);
+                }
+                return e->escalate->status_code;
+            }
+
             if (bs_rate_counter_admit(&counters[e->shm_slot],
                                       e->budget, e->window_sec)) {
                 continue;
@@ -3128,6 +3458,28 @@ static int bs_check_policy(request_rec *r)
             if (bs_shm.metrics) {
                 __atomic_fetch_add(&bs_shm.metrics->rate_limit_exceeded_total,
                                    1, __ATOMIC_RELAXED);
+            }
+            /* E9 — strike accounting. Record this 429 under the
+             * (ip, rule) entry; if the strike count crosses the
+             * threshold inside the per-window, log the operator's
+             * tag once for fail2ban handoff. The threshold-crossing
+             * request itself returns 429; subsequent ones promote
+             * to status_code via bs_strike_check_escalated above. */
+            if (e->escalate && have_ip) {
+                int crossed = bs_strike_record_429(r, client_ip,
+                    (apr_uint32_t)e->shm_slot, e->escalate, now_t);
+                if (crossed) {
+                    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r,
+                        "mod_botshield: rate-limit-abuse threshold "
+                        "crossed for '%s' from ip=%s; escalating to "
+                        "status=%d for %ds%s%s%s",
+                        e->name, r->useragent_ip,
+                        e->escalate->status_code, e->escalate->ttl_sec,
+                        e->escalate->log_tag ? " tag=\"" : "",
+                        e->escalate->log_tag ? e->escalate->log_tag : "",
+                        e->escalate->log_tag ? "\"" : "");
+                    bs_set_trigger_tag(r, e->escalate->log_tag);
+                }
             }
             return HTTP_TOO_MANY_REQUESTS;
         }
@@ -3606,6 +3958,131 @@ static void bs_app_feedback_insert_filter(request_rec *r)
                                 NULL, r, r->connection);
 }
 
+/* Flag-bit registry. Maps the BS_FLAG_* defines to the canonical
+ * names that appear in directives (`flag=honeypot_hit`), wire
+ * formats (X-Botshield-Claims `flags=`), and the decision log.
+ * Hoisted up the file so E8.2's claim-emit path can render the
+ * bitmap without a forward-decl dance over an anonymous-struct
+ * array (forward-declaring such arrays in C is awkward). */
+static const struct { const char *name; apr_uint32_t bit; } bs_flag_names[] = {
+    { "honeypot_hit",         BS_FLAG_HONEYPOT_HIT         },
+    { "scanner_probe",        BS_FLAG_SCANNER_PROBE        },
+    { "fake_bot",             BS_FLAG_FAKE_BOT             },
+    { "pow_fail_streak",      BS_FLAG_POW_FAIL_STREAK      },
+    { "app_verified_human",   BS_FLAG_APP_VERIFIED_HUMAN   },
+    { "app_verified_session", BS_FLAG_APP_VERIFIED_SESSION },
+    { "app_trust_signal",     BS_FLAG_APP_TRUST_SIGNAL     },
+    { NULL, 0 }
+};
+
+/* Forward decl: bs_tier_name lives further down with the rest of
+ * the tier-dispatch helpers; bs_app_claims_set needs it. */
+static const char *bs_tier_name(bs_tier t);
+
+/* ======================================================================
+ * E8.2 — Module-to-app reputation export.
+ *
+ * On the request path: strip any client-supplied X-Botshield-*, then
+ * set a single signed X-Botshield-Claims header that the backend
+ * handler reads to drive whatever app-side policy cares about
+ * BotShield's verdict (request-by-request risk score, cookie state,
+ * accumulated flag bitmap, etc.).
+ *
+ * Symmetric to E5 in shape:
+ *   - signed envelope, key=value;...;sig=<hex>, HMAC-SHA-256
+ *   - separate secret file (defense-in-depth vs. E5's inbound key)
+ *   - unknown body keys tolerated (forward compat)
+ *
+ * Symmetric to E5 in trust posture: the strip-before-set is the
+ * trust anchor for apps that don't bother to verify the HMAC. The
+ * signed envelope is for apps that want value-integrity even across
+ * an untrusted Apache→backend hop.
+ * ====================================================================== */
+
+/* Walk r->headers_in and unset every header whose name begins with
+ * "X-Botshield-" (case-insensitive). apr_table_unset takes a key, so
+ * we collect names first (snapshotting because table mutation during
+ * iteration is undefined) then drop them all in a second pass. */
+static void bs_app_claims_strip_incoming(request_rec *r)
+{
+    const apr_array_header_t *arr = apr_table_elts(r->headers_in);
+    apr_array_header_t *to_unset =
+        apr_array_make(r->pool, 4, sizeof(const char *));
+    for (int i = 0; i < arr->nelts; i++) {
+        apr_table_entry_t *e = &((apr_table_entry_t *)arr->elts)[i];
+        if (e->key && strncasecmp(e->key, "X-Botshield-", 12) == 0) {
+            *(const char **)apr_array_push(to_unset) = e->key;
+        }
+    }
+    for (int i = 0; i < to_unset->nelts; i++) {
+        apr_table_unset(r->headers_in,
+                        APR_ARRAY_IDX(to_unset, i, const char *));
+    }
+}
+
+/* Render the flag bitmap as a space-separated list of registry names
+ * for the X-Botshield-Claims body. Empty string when no bits set —
+ * apps see `flags=` (empty value) which the parser treats the same
+ * as absent. */
+static const char *bs_app_claims_flag_names(apr_pool_t *p,
+                                            apr_uint32_t flags)
+{
+    if (!flags) return "";
+    char *buf = apr_palloc(p, 256);
+    apr_size_t off = 0;
+    for (int i = 0; bs_flag_names[i].name; i++) {
+        if (!(flags & bs_flag_names[i].bit)) continue;
+        const char *n = bs_flag_names[i].name;
+        apr_size_t nlen = strlen(n);
+        if (off + nlen + 2 > 256) break;   /* defensive cap */
+        if (off > 0) buf[off++] = ' ';
+        memcpy(buf + off, n, nlen);
+        off += nlen;
+    }
+    buf[off] = '\0';
+    return buf;
+}
+
+/* Emit X-Botshield-Claims on the request to the backend. Called from
+ * bs_handler's PASS leg — every value is finalized at that point.
+ * Returns NULL on success or an error string the caller can log. */
+static const char *bs_app_claims_set(request_rec *r,
+                                     bs_server_cfg *scfg,
+                                     int score,
+                                     bs_tier tier,
+                                     const char *cookie_status,
+                                     apr_uint32_t flags,
+                                     int passes_silent,
+                                     int passes_form,
+                                     int passes_captcha)
+{
+    if (!scfg || scfg->app_claims_enabled != 1) return NULL;
+    if (!scfg->app_claims_secret || scfg->app_claims_secret_len == 0) {
+        return "BotShieldAppClaimsSecretFile not configured";
+    }
+
+    bs_app_claims_strip_incoming(r);
+
+    apr_time_t now = apr_time_sec(apr_time_now());
+    const char *flag_names = bs_app_claims_flag_names(r->pool, flags);
+    const char *body = apr_psprintf(r->pool,
+        "v=1;score=%d;tier=%s;cookie=%s;flags=%s;"
+        "passes=s=%d,f=%d,c=%d;ts=%" APR_TIME_T_FMT,
+        score, bs_tier_name(tier), cookie_status, flag_names,
+        passes_silent, passes_form, passes_captcha, now);
+
+    unsigned char mac[BS_SIG_BYTES];
+    bs_hmac_sha256(scfg->app_claims_secret, scfg->app_claims_secret_len,
+                   (const unsigned char *)body, strlen(body), mac);
+    char sig_hex[BS_SIG_BYTES * 2 + 1];
+    bs_to_hex(mac, BS_SIG_BYTES, sig_hex);
+
+    const char *header_val = apr_psprintf(r->pool, "%s;sig=%s",
+                                          body, sig_hex);
+    apr_table_setn(r->headers_in, "X-Botshield-Claims", header_val);
+    return NULL;
+}
+
 static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                           apr_pool_t *ptemp, server_rec *s)
 {
@@ -3675,9 +4152,17 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
      * rules will share the same pool. Trivial size (~2 KB). */
     #define BS_E21_RATE_SLOTS 256
     apr_size_t e21_rate_bytes = BS_E21_RATE_SLOTS * sizeof(bs_rate_counter);
+    /* E9 — strike table for repeated-429 escalation. Sized by the
+     * main server's BotShieldRateLimitEscalateCapacity (default
+     * BS_DEFAULT_STRIKE_SLOTS). */
+    apr_size_t strike_slots = (scfg->strike_capacity > 0)
+                            ? (apr_size_t)scfg->strike_capacity
+                            : (apr_size_t)BS_DEFAULT_STRIKE_SLOTS;
+    apr_size_t strike_bytes = strike_slots * sizeof(bs_strike_slot);
     apr_size_t total_bytes  = header_bytes + table_bytes + 2 * bloom_bytes
                               + cv_rate_bytes + cv_log_bytes
-                              + metrics_bytes + e21_rate_bytes;
+                              + metrics_bytes + e21_rate_bytes
+                              + strike_bytes;
 
     if (scfg->shm_size < total_bytes) {
         ap_log_error(APLOG_MARK, APLOG_ERR, 0, s,
@@ -3744,6 +4229,17 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     bs_shm.rate_counters      = (bs_rate_counter *)(metrics_base
                                                     + metrics_bytes);
     bs_shm.rate_counter_count = BS_E21_RATE_SLOTS;
+    /* E9: strike table follows rate counters. memset(base, 0) above
+     * leaves all slots with rule_slot=0 by default — but 0 is a real
+     * rule slot value, so we have to explicitly mark every slot
+     * empty. One pass at startup is fine; slots are reused via
+     * the open-addressing eviction policy thereafter. */
+    bs_shm.strike_table = (bs_strike_slot *)((unsigned char *)bs_shm.rate_counters
+                                             + e21_rate_bytes);
+    bs_shm.strike_capacity = strike_slots;
+    for (apr_size_t i = 0; i < strike_slots; i++) {
+        bs_shm.strike_table[i].rule_slot = BS_STRIKE_EMPTY;
+    }
 
     bs_shm.header->bloom_active        = 0;
     bs_shm.header->bloom_buf_bytes     = (apr_uint32_t)bloom_bytes;
@@ -4018,6 +4514,37 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                 vcfg->rate_limits->nelts);
         }
 
+        /* E9 — link each BotShieldRateLimitEscalate to its target
+         * BotShieldRateLimit by name. Declarations may appear in
+         * any order at config time; we resolve here once both arrays
+         * are populated. Unlinked escalates (no matching rate rule)
+         * log a warning and stay inert. */
+        if (vcfg->rate_escalates && vcfg->rate_escalates->nelts > 0) {
+            for (int i = 0; i < vcfg->rate_escalates->nelts; i++) {
+                bs_rate_escalate_entry *esc = APR_ARRAY_IDX(
+                    vcfg->rate_escalates, i, bs_rate_escalate_entry *);
+                int linked = 0;
+                if (vcfg->rate_limits) {
+                    for (int j = 0; j < vcfg->rate_limits->nelts; j++) {
+                        bs_rate_limit_entry *rl = APR_ARRAY_IDX(
+                            vcfg->rate_limits, j, bs_rate_limit_entry *);
+                        if (strcmp(rl->name, esc->rule_name) == 0) {
+                            rl->escalate = esc;
+                            linked = 1;
+                            break;
+                        }
+                    }
+                }
+                if (!linked) {
+                    ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
+                        "mod_botshield: BotShieldRateLimitEscalate '%s' "
+                        "names no matching BotShieldRateLimit at this "
+                        "scope; directive is inert",
+                        esc->rule_name);
+                }
+            }
+        }
+
         if (vcfg->block_paths && vcfg->block_paths->nelts > 0) {
             for (int i = 0; i < vcfg->block_paths->nelts; i++) {
                 bs_block_path_entry *e = APR_ARRAY_IDX(
@@ -4283,6 +4810,170 @@ static int bs_flagged_ip_lookup(const unsigned char ip[16],
         return 1;
     }
     return 0;
+}
+
+/* --- E9: strike-table helpers (repeated-429 escalation) ---
+ *
+ * Same open-addressing + per-slot seqlock idiom as flagged_table.
+ * The hash key is (masked client_ip, rule_slot); collisions across
+ * different rules for the same IP are valid — they just probe to
+ * different buckets via the rule_slot mixin.
+ *
+ * Reads (escalation check) are lockless via the seqlock. Writes
+ * (recording a 429 strike) take the global mutex, same shared one
+ * the flagged-IP path uses. Strike accounting is approximate under
+ * concurrent worker races — same posture as the rate-counter
+ * windows themselves; a few off-by-ones in the strike count don't
+ * change the user-visible behavior. */
+
+static apr_uint32_t bs_strike_bucket(const unsigned char ip[16],
+                                     apr_uint32_t rule_slot)
+{
+    /* Mix rule_slot into the SipHash input so the same IP falls in
+     * different buckets per rule — keeps probe windows from
+     * clustering when one IP misbehaves on multiple rules. */
+    unsigned char buf[16 + 4];
+    memcpy(buf, ip, 16);
+    buf[16] = (unsigned char)( rule_slot        & 0xFF);
+    buf[17] = (unsigned char)((rule_slot >> 8 ) & 0xFF);
+    buf[18] = (unsigned char)((rule_slot >> 16) & 0xFF);
+    buf[19] = (unsigned char)((rule_slot >> 24) & 0xFF);
+    apr_uint64_t h = bs_siphash24(bs_shm.header->siphash_key,
+                                  buf, sizeof(buf));
+    return (apr_uint32_t)(h % bs_shm.strike_capacity);
+}
+
+/* Seqlock-protected lookup. Returns 1 if (ip, rule_slot) has an
+ * active escalation (escalation_until > now), 0 otherwise. */
+static int bs_strike_check_escalated(const unsigned char ip[16],
+                                     apr_uint32_t rule_slot,
+                                     apr_int64_t now)
+{
+    if (!bs_shm.strike_table || bs_shm.strike_capacity == 0) return 0;
+    apr_uint32_t base = bs_strike_bucket(ip, rule_slot);
+
+    for (unsigned i = 0; i < BS_STRIKE_PROBE_LIMIT; i++) {
+        apr_uint32_t idx = (base + i) % bs_shm.strike_capacity;
+        bs_strike_slot *slot = &bs_shm.strike_table[idx];
+
+        apr_uint32_t v1, v2;
+        unsigned char local_ip[16];
+        apr_uint32_t  local_rule;
+        apr_int64_t   local_until;
+        int spins = 0;
+        for (;;) {
+            v1 = apr_atomic_read32(&slot->version);
+            if (v1 & 1U) {
+                if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
+                continue;
+            }
+            local_rule  = slot->rule_slot;
+            memcpy(local_ip, slot->ip, 16);
+            local_until = slot->escalation_until;
+            v2 = apr_atomic_read32(&slot->version);
+            if (v1 == v2) break;
+            if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
+        }
+        if (v1 == ~0U) continue;
+        if (local_rule == BS_STRIKE_EMPTY) continue;
+        if (local_rule != rule_slot) continue;
+        if (memcmp(local_ip, ip, 16) != 0) continue;
+        return local_until > now;
+    }
+    return 0;
+}
+
+/* Strike accounting under the shared mutex. Bumps the (ip, rule)
+ * counter inside its `per_sec` window, sets escalation_until on
+ * threshold crossing. Returns 1 if THIS call crossed the threshold
+ * from "not escalated" to "escalated" (caller logs the operator's
+ * tag exactly once); 0 otherwise (still below threshold, or already
+ * in the escalated state and just refreshing the TTL). */
+static int bs_strike_record_429(request_rec *r,
+                                const unsigned char ip[16],
+                                apr_uint32_t rule_slot,
+                                const bs_rate_escalate_entry *cfg,
+                                apr_int64_t now)
+{
+    if (!bs_shm.strike_table || !bs_shm.mutex || !cfg) return 0;
+    apr_uint32_t base = bs_strike_bucket(ip, rule_slot);
+
+    apr_status_t rv = apr_global_mutex_lock(bs_shm.mutex);
+    if (rv != APR_SUCCESS) {
+        ap_log_rerror(APLOG_MARK, APLOG_WARNING, rv, r,
+            "mod_botshield: strike-table mutex_lock failed; "
+            "dropping strike");
+        return 0;
+    }
+
+    int matched_idx = -1;
+    int empty_idx   = -1;
+    for (unsigned i = 0; i < BS_STRIKE_PROBE_LIMIT; i++) {
+        apr_uint32_t idx = (base + i) % bs_shm.strike_capacity;
+        bs_strike_slot *slot = &bs_shm.strike_table[idx];
+        if (slot->rule_slot == BS_STRIKE_EMPTY) {
+            if (empty_idx < 0) empty_idx = (int)idx;
+            continue;
+        }
+        if (slot->rule_slot == rule_slot
+            && memcmp(slot->ip, ip, 16) == 0) {
+            matched_idx = (int)idx;
+            break;
+        }
+    }
+
+    int target_idx;
+    if (matched_idx >= 0) {
+        target_idx = matched_idx;
+    } else if (empty_idx >= 0) {
+        target_idx = empty_idx;
+    } else {
+        static apr_time_t last_warn = 0;
+        apr_time_t now_t = apr_time_now();
+        if (now_t - last_warn > apr_time_from_sec(60)) {
+            last_warn = now_t;
+            ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+                "mod_botshield: strike-table probe saturated at "
+                "bucket %u (capacity %" APR_SIZE_T_FMT "); "
+                "overwriting — consider raising "
+                "BotShieldRateLimitEscalateCapacity",
+                base, bs_shm.strike_capacity);
+        }
+        target_idx = (int)base;
+    }
+
+    bs_strike_slot *slot = &bs_shm.strike_table[target_idx];
+    apr_uint32_t v0 = apr_atomic_read32(&slot->version);
+    apr_atomic_set32(&slot->version, v0 | 1U);   /* begin write */
+
+    int crossed = 0;
+    apr_uint32_t now_sec = (apr_uint32_t)now;
+    int fresh_slot = (matched_idx < 0);
+    if (fresh_slot) {
+        memcpy(slot->ip, ip, 16);
+        slot->rule_slot           = rule_slot;
+        slot->strike_window_start = now_sec;
+        slot->strike_count        = 1;
+        slot->escalation_until    = 0;
+    } else {
+        /* Window roll: reset count when the per-window has passed. */
+        if (slot->strike_window_start == 0
+            || now_sec - slot->strike_window_start >= cfg->per_sec) {
+            slot->strike_window_start = now_sec;
+            slot->strike_count        = 1;
+        } else {
+            slot->strike_count++;
+        }
+    }
+    if (slot->strike_count >= cfg->strikes) {
+        apr_int64_t prev_until = slot->escalation_until;
+        slot->escalation_until = now + cfg->ttl_sec;
+        if (prev_until <= now) crossed = 1;
+    }
+
+    apr_atomic_set32(&slot->version, (v0 | 1U) + 1U);   /* publish */
+    apr_global_mutex_unlock(bs_shm.mutex);
+    return crossed;
 }
 
 /* --- Rotating Bloom filter (M5.2) ---
@@ -5035,6 +5726,140 @@ static const char *bs_set_rate_limit(cmd_parms *cmd, void *dconf,
         }
     }
     *(bs_rate_limit_entry **)apr_array_push(scfg->rate_limits) = e;
+    return NULL;
+}
+
+/* E9 — BotShieldRateLimitEscalate <rate-name> <strikes> <per>
+ *      [status=<code>] [ttl=<sec>] [log=<tag>]
+ *
+ * Promotes repeated 429s on a named BotShieldRateLimit rule into a
+ * stricter status (default 403) for a short TTL. The cross-rule
+ * link is by name; the post_config phase resolves it into a direct
+ * pointer on the matching bs_rate_limit_entry so the request-time
+ * path branches in O(1).
+ *
+ * `<per>` accepts the same sec/min/hour suffixes as BotShieldRateLimit. */
+static const char *bs_set_rate_limit_escalate(cmd_parms *cmd, void *dconf,
+                                              int argc, char *const argv[])
+{
+    (void)dconf;
+    if (argc < 3) {
+        return "BotShieldRateLimitEscalate: expects <rate-name> "
+               "<strikes> <per> [key=value ...]";
+    }
+    const char *rule_name = argv[0];
+    const char *strikes_s = argv[1];
+    const char *per_s     = argv[2];
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    if (!bs_bot_name_valid(rule_name)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldRateLimitEscalate: rate-name '%s' must be "
+            "[a-z0-9-]{1,32}", rule_name);
+    }
+    char *end = NULL;
+    long strikes = strtol(strikes_s, &end, 10);
+    if (!end || *end || strikes <= 0 || strikes > 1000000) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldRateLimitEscalate: strikes '%s' must be a "
+            "positive integer <= 1000000", strikes_s);
+    }
+    int per = bs_rate_unit_seconds(per_s);
+    if (per == 0) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldRateLimitEscalate: per '%s' must be one of "
+            "sec/min/hour (or s/m/h)", per_s);
+    }
+
+    bs_rate_escalate_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
+    e->rule_name   = apr_pstrdup(cmd->pool, rule_name);
+    e->strikes     = (apr_uint32_t)strikes;
+    e->per_sec     = (apr_uint32_t)per;
+    e->status_code = 403;       /* default per PLAN.md E9 */
+    e->ttl_sec     = 1800;      /* default per PLAN.md E9 */
+    e->log_tag     = NULL;
+
+    for (int i = 3; i < argc; i++) {
+        const char *arg = argv[i];
+        const char *eq  = strchr(arg, '=');
+        if (!eq) {
+            return apr_psprintf(cmd->pool,
+                "BotShieldRateLimitEscalate: extra arg '%s' must be "
+                "key=value", arg);
+        }
+        apr_size_t klen = (apr_size_t)(eq - arg);
+        const char *val = eq + 1;
+        #define BS_REK(n) (klen == sizeof(n)-1 && \
+                           strncasecmp(arg, n, sizeof(n)-1) == 0)
+        if (BS_REK("status")) {
+            char *e2 = NULL;
+            long code = strtol(val, &e2, 10);
+            if (!e2 || *e2 || code < 100 || code > 599) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldRateLimitEscalate: status='%s' must be "
+                    "an HTTP code 100..599", val);
+            }
+            if (code == 429) {
+                /* Same code as the normal rate-limit response — no
+                 * escalation effect. Reject so operators don't
+                 * accidentally write a no-op directive. */
+                return "BotShieldRateLimitEscalate: status=429 is a "
+                       "no-op (same as the normal rate-limit "
+                       "response); pick a stricter code (default 403)";
+            }
+            e->status_code = (int)code;
+        } else if (BS_REK("ttl")) {
+            char *e2 = NULL;
+            long t = strtol(val, &e2, 10);
+            if (!e2 || *e2 || t < 1 || t > 86400 * 30) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldRateLimitEscalate: ttl='%s' must be "
+                    "1..2592000 seconds", val);
+            }
+            e->ttl_sec = (int)t;
+        } else if (BS_REK("log")) {
+            e->log_tag = apr_pstrdup(cmd->pool, val);
+        } else {
+            return apr_psprintf(cmd->pool,
+                "BotShieldRateLimitEscalate: unknown key '%.*s' "
+                "(known: status, ttl, log)", (int)klen, arg);
+        }
+        #undef BS_REK
+    }
+
+    /* Upsert by rule_name. Re-declaration replaces in place. */
+    for (int i = 0; i < scfg->rate_escalates->nelts; i++) {
+        bs_rate_escalate_entry *ex = APR_ARRAY_IDX(
+            scfg->rate_escalates, i, bs_rate_escalate_entry *);
+        if (strcmp(ex->rule_name, e->rule_name) == 0) {
+            APR_ARRAY_IDX(scfg->rate_escalates, i,
+                          bs_rate_escalate_entry *) = e;
+            return NULL;
+        }
+    }
+    *(bs_rate_escalate_entry **)apr_array_push(scfg->rate_escalates) = e;
+    return NULL;
+}
+
+/* E9 — BotShieldRateLimitEscalateCapacity <n>. SHM slot count for
+ * the strike table. Per-server-scope; only the main server's value
+ * is used at post_config (the strike table is module-global). */
+static const char *bs_set_rate_escalate_capacity(cmd_parms *cmd,
+                                                 void *dconf,
+                                                 const char *arg)
+{
+    (void)dconf;
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (!end || *end
+        || n < BS_STRIKE_MIN_SLOTS || n > BS_STRIKE_MAX_SLOTS) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldRateLimitEscalateCapacity: '%s' must be %d..%d",
+            arg, BS_STRIKE_MIN_SLOTS, BS_STRIKE_MAX_SLOTS);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->strike_capacity = (int)n;
     return NULL;
 }
 
@@ -5975,6 +6800,75 @@ static const char *bs_set_app_feedback_secret_file(cmd_parms *cmd,
     return NULL;
 }
 
+/* E8.2 — BotShieldAppClaims on|off. Master gate for the module-to-
+ * app reputation-export channel. Default off. When on, the module
+ * sets a single signed X-Botshield-Claims header on the request to
+ * the backend handler, having first stripped any client-supplied
+ * X-Botshield-* (the strip is what makes the signed envelope safe
+ * to trust on app reads — even if an app skips HMAC verification,
+ * forged claim values can't survive the strip + set sequence). */
+static const char *bs_set_app_claims(cmd_parms *cmd, void *dconf, int flag)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->app_claims_enabled = flag ? 1 : 0;
+    return NULL;
+}
+
+/* E8.2 — BotShieldAppClaimsSecretFile <path>. HMAC key for the
+ * module-to-app channel. Same mode-600 hygiene + load-at-parse-time
+ * discipline as BotShieldAppFeedbackSecretFile. Deliberately a
+ * separate file: a leak of the inbound (app-signs) key shouldn't
+ * also let an attacker forge module-originated claims, and vice
+ * versa. */
+static const char *bs_set_app_claims_secret_file(cmd_parms *cmd,
+                                                 void *dconf,
+                                                 const char *arg)
+{
+    (void)dconf;
+    if (!arg || !*arg) {
+        return "BotShieldAppClaimsSecretFile: path required";
+    }
+    if (arg[0] != '/') {
+        return "BotShieldAppClaimsSecretFile: path must be absolute";
+    }
+
+    struct stat st;
+    if (stat(arg, &st) != 0) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldAppClaimsSecretFile: cannot stat '%s'", arg);
+    }
+    if (st.st_mode & (S_IRGRP | S_IROTH | S_IWGRP | S_IWOTH)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldAppClaimsSecretFile: '%s' is group- or world-"
+            "accessible (mode %04o); chmod 600 it",
+            arg, st.st_mode & 07777);
+    }
+
+    const char *buf = NULL;
+    const char *err = bs_load_config_file(cmd,
+        "BotShieldAppClaimsSecretFile", arg,
+        BS_MAX_SECRET_BYTES, &buf);
+    if (err) return err;
+
+    apr_size_t len = strlen(buf);
+    if (len > 0 && buf[len-1] == '\n') len--;
+    if (len < BS_MIN_SECRET_BYTES) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldAppClaimsSecretFile: '%s' contains only "
+            "%" APR_SIZE_T_FMT " bytes (minimum %d)",
+            arg, len, BS_MIN_SECRET_BYTES);
+    }
+
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->app_claims_secret_file = apr_pstrdup(cmd->pool, arg);
+    scfg->app_claims_secret      = (const unsigned char *)buf;
+    scfg->app_claims_secret_len  = len;
+    return NULL;
+}
+
 /* E2.2 — BotShieldRobotsWildcardScope heuristic|strict|off.
  * Governs how the User-agent: * group in robots.txt is enforced:
  *   heuristic (default): apply only to UAs that look like crawlers
@@ -6045,18 +6939,11 @@ static int bs_flag_penalty(apr_uint32_t flags)
     return p;
 }
 
-/* Parse a comma-joined flag-name list into a bit mask. Unknown tokens
- * return an error message in *err; *err is NULL on success. */
-static const struct { const char *name; apr_uint32_t bit; } bs_flag_names[] = {
-    { "honeypot_hit",         BS_FLAG_HONEYPOT_HIT         },
-    { "scanner_probe",        BS_FLAG_SCANNER_PROBE        },
-    { "fake_bot",             BS_FLAG_FAKE_BOT             },
-    { "pow_fail_streak",      BS_FLAG_POW_FAIL_STREAK      },
-    { "app_verified_human",   BS_FLAG_APP_VERIFIED_HUMAN   },
-    { "app_verified_session", BS_FLAG_APP_VERIFIED_SESSION },
-    { "app_trust_signal",     BS_FLAG_APP_TRUST_SIGNAL     },
-    { NULL, 0 }
-};
+/* Flag-name registry moved up the file (near the early request-path
+ * helpers) so E8.2's bs_app_claims_flag_names can render the bitmap
+ * without a forward-declaration dance. Definition lives further up;
+ * leave a placeholder comment here so a reader scanning E5/E6 still
+ * sees where the table conceptually belongs. */
 
 static apr_uint32_t bs_parse_flag_names(apr_pool_t *p, const char *s,
                                         const char **err)
@@ -6093,6 +6980,33 @@ static apr_uint32_t bs_parse_flag_names(apr_pool_t *p, const char *s,
     return bits;
 }
 
+/* E8.1 — GCM cookie prefix builder. Encrypts the same canonical
+ * pipe-delimited form the HMAC path signs, base64-encodes
+ *     alg_id(1) || nonce(12) || ciphertext || tag(16)
+ * for the JS interstitial to append '.<counter>' to when the PoW
+ * worker completes. Also used by the server-built captcha cookie
+ * path, which appends '.captcha' on the module side. */
+static const char *bs_build_cookie_prefix_gcm(apr_pool_t *p,
+                                              const bs_dir_cfg *cfg,
+                                              const bs_challenge *ch,
+                                              const char **out_b64)
+{
+    if (!cfg->secret || cfg->secret_len == 0) return "no secret";
+    const char *canon = bs_challenge_canonical(p, ch);
+    apr_size_t pt_len = strlen(canon);
+    apr_size_t env_cap = 1 + BS_GCM_NONCE_LEN + pt_len + BS_GCM_TAG_LEN;
+    unsigned char *env = apr_palloc(p, env_cap);
+    apr_size_t env_len = 0;
+    const char *err = bs_gcm_encrypt(cfg->secret, cfg->secret_len,
+                                     (const unsigned char *)canon, pt_len,
+                                     env, &env_len);
+    if (err) return err;
+    char *b64 = apr_palloc(p, apr_base64_encode_len((int)env_len) + 1);
+    apr_base64_encode(b64, (const char *)env, (int)env_len);
+    *out_b64 = b64;
+    return NULL;
+}
+
 /* Render the challenge as JSON for inline embedding in the interstitial.
  * The JS worker reads window.__bsChallenge and uses it to drive the PoW
  * and to assemble the resulting cookie. Contents are deterministic —
@@ -6100,19 +7014,42 @@ static apr_uint32_t bs_parse_flag_names(apr_pool_t *p, const char *s,
  * needed inside a <script> tag.
  *
  * Also carries the cookie_domain (if configured) so the JS can include
- * a Domain= attribute when calling document.cookie. */
+ * a Domain= attribute when calling document.cookie.
+ *
+ * E8.1 — under GCM issue format the rep block is omitted from the
+ * JSON (that's the whole point of encryption: the client shouldn't
+ * see score/flags/passes_*). Instead the JSON carries an opaque
+ * cookie_prefix base64 blob that the JS appends `.<counter>` to.
+ * Under HMAC issue format the legacy shape stays byte-identical. */
 static const char *bs_challenge_json(apr_pool_t *p, const bs_dir_cfg *cfg,
                                      const bs_challenge *ch)
 {
     char salt_hex [BS_SALT_BYTES * 2 + 1];
     char nonce_hex[BS_NONCE_BYTES * 2 + 1];
-    char sig_hex  [BS_SIG_BYTES * 2 + 1];
-    bs_to_hex(ch->salt,      BS_SALT_BYTES,  salt_hex);
-    bs_to_hex(ch->nonce,     BS_NONCE_BYTES, nonce_hex);
-    bs_to_hex(ch->signature, BS_SIG_BYTES,   sig_hex);
+    bs_to_hex(ch->salt,  BS_SALT_BYTES,  salt_hex);
+    bs_to_hex(ch->nonce, BS_NONCE_BYTES, nonce_hex);
     const char *domain_json = cfg->cookie_domain
         ? apr_psprintf(p, ",\"cookie_domain\":\"%s\"", cfg->cookie_domain)
         : "";
+    int fmt = bs_effective_cookie_format(cfg);
+    if (fmt & BS_FMT_GCM) {
+        const char *prefix_b64 = NULL;
+        const char *err = bs_build_cookie_prefix_gcm(p, cfg, ch, &prefix_b64);
+        if (!err) {
+            return apr_psprintf(p,
+                "{\"salt\":\"%s\",\"nonce\":\"%s\",\"difficulty\":%d,"
+                "\"expires_at\":%" APR_TIME_T_FMT ",\"auto\":%d,"
+                "\"cookie_prefix\":\"%s\"%s}",
+                salt_hex, nonce_hex, ch->difficulty, ch->expires_at,
+                ch->auto_tier ? 1 : 0, prefix_b64, domain_json);
+        }
+        /* Encryption failed at render time. Rather than serve a broken
+         * page, fall through to the HMAC shape — the verifier will
+         * still accept it if HMAC is in the allow-list. Operators see
+         * the diagnostic in the error log. */
+    }
+    char sig_hex[BS_SIG_BYTES * 2 + 1];
+    bs_to_hex(ch->signature, BS_SIG_BYTES, sig_hex);
     return apr_psprintf(p,
         "{\"v\":%d,\"alg\":\"%s\",\"salt\":\"%s\",\"nonce\":\"%s\","
         "\"difficulty\":%d,\"expires_at\":%" APR_TIME_T_FMT ","
@@ -6190,16 +7127,72 @@ static const char *bs_issue_challenge(apr_pool_t *p, const bs_dir_cfg *cfg,
     return NULL;
 }
 
-/* Build the 15-field base64-encoded cookie payload for a challenge +
- * counter. Matches the format the interstitial JS produces so server-
- * set (M8 captcha) and client-set (M1/M7 PoW) cookies are indistinguish-
- * able on the wire. `counter_str` is the PoW counter for PoW cookies,
- * or the sentinel "captcha" for captcha-alg cookies (the alg's verify
- * only checks non-empty). */
+/* Parse the 13 pipe-delimited canonical-form fields (same shape
+ * emitted by bs_challenge_canonical, whether it arrived cleartext
+ * from an HMAC cookie or as GCM plaintext) into *ch. Returns NULL
+ * on success or a diagnostic on parse failure. Caller has already
+ * split the canonical string at '|' into fields[0..12]. */
+static const char *bs_parse_canonical_fields(char *const fields[],
+                                              bs_challenge *ch)
+{
+    long v;
+    apr_int64_t v64;
+    if (!bs_parse_int_bounded(fields[0], 0, INT_MAX, 10, &v)) return "bad version";
+    ch->version = (int)v;
+    if (ch->version != BS_PROTOCOL_VERSION) return "bad protocol version";
+
+    const bs_pow_algorithm *alg = bs_find_algorithm(fields[1]);
+    if (!alg || !alg->implemented) return "unknown algorithm";
+    ch->alg_name = alg->name;
+
+    if (strlen(fields[2]) != BS_SALT_BYTES * 2 ||
+        !bs_from_hex(fields[2], BS_SALT_BYTES, ch->salt)) return "bad salt";
+    if (strlen(fields[3]) != BS_NONCE_BYTES * 2 ||
+        !bs_from_hex(fields[3], BS_NONCE_BYTES, ch->nonce)) return "bad nonce";
+    if (!bs_parse_int_bounded(fields[4], 1, 8, 2, &v)) return "bad difficulty";
+    ch->difficulty = (int)v;
+    if (!bs_parse_int64_bounded(fields[5], 0, APR_INT64_MAX, &v64)) return "bad expires_at";
+    ch->expires_at = (apr_time_t)v64;
+
+    if (!bs_parse_int_bounded(fields[6], INT_MIN, INT_MAX, 11, &v)) return "bad score";
+    ch->rep.score = (int)v;
+    if (!bs_parse_uint32_bounded(fields[7], 10, &ch->rep.flags)) return "bad flags";
+    if (!bs_parse_int_bounded(fields[8],  0, 1, 1, &v)) return "bad passes_silent";
+    ch->rep.passes_silent  = (int)v;
+    if (!bs_parse_int_bounded(fields[9],  0, 1, 1, &v)) return "bad passes_form";
+    ch->rep.passes_form    = (int)v;
+    if (!bs_parse_int_bounded(fields[10], 0, 1, 1, &v)) return "bad passes_captcha";
+    ch->rep.passes_captcha = (int)v;
+    if (!bs_parse_int64_bounded(fields[11], 0, APR_INT64_MAX, &v64)) return "bad challenged_at";
+    ch->rep.challenged_at  = (apr_time_t)v64;
+    if (!bs_parse_int_bounded(fields[12], 0, 1, 1, &v)) return "bad auto";
+    ch->auto_tier = (int)v;
+    return NULL;
+}
+
+/* Build the base64-encoded cookie payload for a challenge + counter.
+ * Dispatches on the effective cookie format:
+ *   HMAC (legacy): base64(canonical | sig_hex | counter) in a single
+ *                  15-field pipe-delimited blob — byte-identical to
+ *                  what the JS interstitial assembles in HMAC mode.
+ *   GCM  (E8.1):   base64(alg_id || nonce || ct || tag) + "." + counter
+ *                  The server builds this form when issuing captcha
+ *                  cookies (counter = "captcha"); the JS builds the
+ *                  same shape in PoW mode from the cookie_prefix we
+ *                  expose in bs_challenge_json. */
 static const char *bs_build_cookie_payload(apr_pool_t *p,
+                                           const bs_dir_cfg *cfg,
                                            const bs_challenge *ch,
                                            const char *counter_str)
 {
+    int fmt = bs_effective_cookie_format(cfg);
+    if (fmt & BS_FMT_GCM) {
+        const char *prefix_b64 = NULL;
+        const char *err = bs_build_cookie_prefix_gcm(p, cfg, ch, &prefix_b64);
+        if (err) return NULL;
+        return apr_psprintf(p, "%s%c%s", prefix_b64,
+                            BS_GCM_COUNTER_SEP, counter_str);
+    }
     char sig_hex[BS_SIG_BYTES * 2 + 1];
     bs_to_hex(ch->signature, BS_SIG_BYTES, sig_hex);
     const char *canon = bs_challenge_canonical(p, ch);
@@ -6211,34 +7204,20 @@ static const char *bs_build_cookie_payload(apr_pool_t *p,
     return b64;
 }
 
-/* If `out_ch` is non-NULL, it is populated with the parsed challenge once
- * the HMAC signature has verified — even when the cookie is later rejected
- * for expiry or a bad PoW counter. That lets the caller salvage the cookie's
- * rep fields on re-challenge. On signature mismatch or any earlier error,
- * `out_ch` is untouched. */
-static const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
-                                    const char *cookie_b64,
-                                    bs_challenge *out_ch)
+/* Verify a legacy HMAC-format cookie. 15 pipe-delimited fields,
+ * base64-encoded as a single blob. Caller guarantees the cookie
+ * doesn't contain BS_GCM_COUNTER_SEP (the '.' split point for GCM). */
+static const char *bs_verify_cookie_hmac(request_rec *r,
+                                         const bs_dir_cfg *cfg,
+                                         const char *cookie_b64,
+                                         bs_challenge *out_ch)
 {
-    if (!cfg->secret) return "no secret configured";
-
-    /* Decode the base64 into a pool buffer large enough. apr_base64_decode
-     * writes into the buffer and returns length; we add room for a NUL. */
-    apr_size_t in_len = strlen(cookie_b64);
-    if (in_len > BS_MAX_PAGE_BYTES) return "cookie absurdly long";
     char *decoded = apr_palloc(r->pool, apr_base64_decode_len(cookie_b64) + 1);
     int dec_len = apr_base64_decode(decoded, cookie_b64);
     if (dec_len <= 0) return "base64 decode failed";
     decoded[dec_len] = '\0';
 
-    /* Expect 15 pipe-delimited fields (M4.1 + M7):
-     *   0..5  : v, alg, salt, nonce, difficulty, expires_at
-     *   6..11 : score, flags, passes_silent, passes_form, passes_captcha,
-     *           challenged_at
-     *   12    : auto       (0/1, M7 silent-tier marker)
-     *   13    : sighex
-     *   14    : counter
-     * Split in place. */
+    /* 15 pipe-delimited fields (canonical 0-12, sig_hex 13, counter 14). */
     char *fields[BS_COOKIE_FIELDS];
     int nf = 0;
     char *p = decoded;
@@ -6249,51 +7228,10 @@ static const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
     }
     if (nf != BS_COOKIE_FIELDS) return "wrong field count";
 
-    /* Parse + validate each field with a strict, bounded numeric
-     * parser (security review #2). Using atoi()/strtoul() here
-     * invokes UB on overflow because these are attacker-controlled
-     * bytes and we're still BEFORE the HMAC check. bs_parse_*_bounded
-     * caps the input length and handles ERANGE so libc never sees
-     * something outside representable range. */
-    long v;
-    if (!bs_parse_int_bounded(fields[0], 0, INT_MAX, 10, &v)) return "bad version";
-    int version = (int)v;
-    if (version != BS_PROTOCOL_VERSION) return "bad protocol version";
-
-    const bs_pow_algorithm *alg = bs_find_algorithm(fields[1]);
-    if (!alg || !alg->implemented) return "unknown algorithm";
-
     bs_challenge ch;
-    ch.version    = version;
-    ch.alg_name   = alg->name;
-    if (!bs_parse_int_bounded(fields[4], 1, 8, 2, &v)) return "bad difficulty";
-    ch.difficulty = (int)v;
-
-    if (strlen(fields[2]) != BS_SALT_BYTES * 2 ||
-        !bs_from_hex(fields[2], BS_SALT_BYTES, ch.salt)) return "bad salt";
-    if (strlen(fields[3]) != BS_NONCE_BYTES * 2 ||
-        !bs_from_hex(fields[3], BS_NONCE_BYTES, ch.nonce)) return "bad nonce";
-
-    apr_int64_t v64;
-    if (!bs_parse_int64_bounded(fields[5], 0, APR_INT64_MAX, &v64)) return "bad expires_at";
-    ch.expires_at = (apr_time_t)v64;
-
-    /* Rep fields. These are still pre-HMAC — same bounded-parse
-     * discipline. score is a signed int (allowed negative for credits);
-     * passes_* are small flags; flags is a 32-bit bitmap. */
-    if (!bs_parse_int_bounded(fields[6], INT_MIN, INT_MAX, 11, &v)) return "bad score";
-    ch.rep.score = (int)v;
-    if (!bs_parse_uint32_bounded(fields[7], 10, &ch.rep.flags)) return "bad flags";
-    if (!bs_parse_int_bounded(fields[8],  0, 1, 1, &v)) return "bad passes_silent";
-    ch.rep.passes_silent  = (int)v;
-    if (!bs_parse_int_bounded(fields[9],  0, 1, 1, &v)) return "bad passes_form";
-    ch.rep.passes_form    = (int)v;
-    if (!bs_parse_int_bounded(fields[10], 0, 1, 1, &v)) return "bad passes_captcha";
-    ch.rep.passes_captcha = (int)v;
-    if (!bs_parse_int64_bounded(fields[11], 0, APR_INT64_MAX, &v64)) return "bad challenged_at";
-    ch.rep.challenged_at  = (apr_time_t)v64;
-    if (!bs_parse_int_bounded(fields[12], 0, 1, 1, &v)) return "bad auto";
-    ch.auto_tier          = (int)v;
+    memset(&ch, 0, sizeof(ch));
+    const char *perr = bs_parse_canonical_fields(fields, &ch);
+    if (perr) return perr;
 
     unsigned char sig_from_client[BS_SIG_BYTES];
     if (strlen(fields[13]) != BS_SIG_BYTES * 2 ||
@@ -6301,10 +7239,7 @@ static const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
         return "bad signature hex";
     }
 
-    /* Re-derive the HMAC from canonical form + secret, and constant-time
-     * compare with the client-supplied signature. The canonical form
-     * now covers the rep fields, so a client that edits (say) the score
-     * hoping to lower their own debt will fail here. */
+    /* HMAC-SHA-256 of canonical bytes. Constant-time compare. */
     const char *canon = bs_challenge_canonical(r->pool, &ch);
     unsigned char sig_expected[BS_SIG_BYTES];
     bs_hmac_sha256(cfg->secret, cfg->secret_len,
@@ -6313,18 +7248,100 @@ static const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
     if (!bs_ct_equal(sig_expected, sig_from_client, BS_SIG_BYTES)) {
         return "signature mismatch";
     }
-
-    /* Signature verified — expose the challenge to the caller even if
-     * later checks reject, so rep can be carried forward. */
     memcpy(ch.signature, sig_from_client, BS_SIG_BYTES);
     if (out_ch) *out_ch = ch;
 
-    /* Freshness — a signed cookie is still only valid until expires_at. */
     apr_time_t now = apr_time_sec(apr_time_now());
     if (now > ch.expires_at) return "expired";
-
-    /* Final step: algorithm-specific PoW check on the counter. */
+    const bs_pow_algorithm *alg = bs_find_algorithm(fields[1]);
     return alg->verify(&ch, fields[14]);
+}
+
+/* Verify an E8.1 GCM-format cookie. `dot` points at the '.' that
+ * separates the base64 envelope from the counter portion. */
+static const char *bs_verify_cookie_gcm(request_rec *r,
+                                        const bs_dir_cfg *cfg,
+                                        const char *cookie_value,
+                                        const char *dot,
+                                        bs_challenge *out_ch)
+{
+    apr_size_t prefix_len = (apr_size_t)(dot - cookie_value);
+    const char *counter = dot + 1;
+    char *prefix_b64 = apr_pstrmemdup(r->pool, cookie_value, prefix_len);
+    unsigned char *env = apr_palloc(r->pool,
+                                    apr_base64_decode_len(prefix_b64));
+    int env_len = apr_base64_decode((char *)env, prefix_b64);
+    if (env_len < 1 + BS_GCM_NONCE_LEN + BS_GCM_TAG_LEN) {
+        return "base64 decode failed";
+    }
+
+    apr_size_t pt_cap = (apr_size_t)env_len - 1 - BS_GCM_NONCE_LEN
+                      - BS_GCM_TAG_LEN;
+    unsigned char *pt = apr_palloc(r->pool, pt_cap + 1);
+    apr_size_t pt_len = 0;
+    const char *derr = bs_gcm_decrypt(cfg->secret, cfg->secret_len,
+                                      env, (apr_size_t)env_len,
+                                      pt, &pt_len);
+    if (derr) {
+        /* Map all GCM-decrypt failures to the same reason string the
+         * HMAC path uses when the tag doesn't match — the caller
+         * treats this as "don't carry rep forward", same behavior
+         * desired here. */
+        return "signature mismatch";
+    }
+    pt[pt_len] = '\0';
+
+    /* pt is canonical form (13 pipe-delimited fields). */
+    char *fields[13];
+    int nf = 0;
+    char *p = (char *)pt;
+    fields[nf++] = p;
+    while (*p && nf < 13) {
+        if (*p == '|') { *p = '\0'; fields[nf++] = p + 1; }
+        p++;
+    }
+    if (nf != 13) return "wrong field count";
+
+    bs_challenge ch;
+    memset(&ch, 0, sizeof(ch));
+    const char *perr = bs_parse_canonical_fields(fields, &ch);
+    if (perr) return perr;
+    /* No sig field in GCM — the tag verification above already
+     * authenticated every canonical byte. Expose ch for rep carry-
+     * forward semantics parity with the HMAC path. */
+    if (out_ch) *out_ch = ch;
+
+    apr_time_t now = apr_time_sec(apr_time_now());
+    if (now > ch.expires_at) return "expired";
+    const bs_pow_algorithm *alg = bs_find_algorithm(fields[1]);
+    return alg->verify(&ch, counter);
+}
+
+/* Dispatch on the cookie wire format. Writes to *out_ch once the
+ * format-specific verifier has authenticated the bytes (either HMAC
+ * of the canonical or GCM tag over the envelope); later semantic
+ * rejections (expiry, bad counter) leave the struct populated for
+ * rep carry-forward. On format rejection or pre-auth error, *out_ch
+ * stays untouched. */
+static const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
+                                    const char *cookie_value,
+                                    bs_challenge *out_ch)
+{
+    if (!cfg->secret) return "no secret configured";
+    apr_size_t val_len = strlen(cookie_value);
+    if (val_len > BS_MAX_PAGE_BYTES) return "cookie absurdly long";
+
+    int fmt = bs_effective_cookie_format(cfg);
+    /* Standard base64 alphabet is [A-Za-z0-9+/=]; the '.' byte is
+     * not part of it. Its presence unambiguously marks a GCM-format
+     * cookie (envelope '.' counter). Absent → legacy HMAC. */
+    const char *dot = strrchr(cookie_value, BS_GCM_COUNTER_SEP);
+    if (dot) {
+        if (!(fmt & BS_FMT_GCM)) return "GCM cookies not accepted";
+        return bs_verify_cookie_gcm(r, cfg, cookie_value, dot, out_ch);
+    }
+    if (!(fmt & BS_FMT_HMAC)) return "HMAC cookies not accepted";
+    return bs_verify_cookie_hmac(r, cfg, cookie_value, out_ch);
 }
 
 /* --- New directive setters --- */
@@ -6364,6 +7381,50 @@ static const char *bs_set_secret_file(cmd_parms *cmd, void *cfg_v,
 
     cfg->secret     = (const unsigned char *)buf;
     cfg->secret_len = len;
+    return NULL;
+}
+
+/* `BotShieldCookieFormat <hmac|gcm|gcm,hmac>` — E8.1. Controls which
+ * wire formats the issuer emits and the verifier accepts. Value is
+ * a comma-separated list of format tokens:
+ *   hmac       legacy HMAC-SHA-256 envelope (cleartext fields, 32-
+ *              byte signature). Default if the directive is absent.
+ *   gcm        AES-256-GCM envelope. Cleartext fields don't appear
+ *              in the cookie; rep block is confidential.
+ *   gcm,hmac   issue GCM, accept either on verify. Migration mode
+ *              for rolling the wire format over a longest-TTL cycle.
+ * Issue preference: if the bitmap includes GCM, issue GCM; otherwise
+ * issue HMAC. Verify accepts any format whose bit is set. */
+static const char *bs_set_cookie_format(cmd_parms *cmd, void *cfg_v,
+                                        const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    if (!arg || !*arg) {
+        return "BotShieldCookieFormat: requires at least one format "
+               "(hmac, gcm, or a comma-separated list)";
+    }
+    int fmt = 0;
+    char *buf = apr_pstrdup(cmd->pool, arg);
+    char *state = NULL;
+    for (char *tok = apr_strtok(buf, ",", &state); tok;
+         tok = apr_strtok(NULL, ",", &state)) {
+        while (*tok == ' ' || *tok == '\t') tok++;
+        char *end = tok + strlen(tok);
+        while (end > tok && (end[-1] == ' ' || end[-1] == '\t')) end--;
+        *end = '\0';
+        if (!*tok) continue;
+        if      (!strcasecmp(tok, "hmac")) fmt |= BS_FMT_HMAC;
+        else if (!strcasecmp(tok, "gcm"))  fmt |= BS_FMT_GCM;
+        else {
+            return apr_psprintf(cmd->pool,
+                "BotShieldCookieFormat: unknown format '%s' "
+                "(known: hmac, gcm)", tok);
+        }
+    }
+    if (!fmt) {
+        return "BotShieldCookieFormat: at least one format required";
+    }
+    cfg->cookie_format = fmt;
     return NULL;
 }
 
@@ -8810,7 +9871,16 @@ static int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         return OK;
     }
 
-    const char *payload = bs_build_cookie_payload(r->pool, &ch, "captcha");
+    const char *payload = bs_build_cookie_payload(r->pool, cfg, &ch, "captcha");
+    if (!payload) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+            "mod_botshield: failed to build cookie payload "
+            "(cookie_format=0x%x)", bs_effective_cookie_format(cfg));
+        r->status = HTTP_INTERNAL_SERVER_ERROR;
+        ap_set_content_type(r, "text/plain; charset=utf-8");
+        ap_rputs("Service error: could not issue cookie.\n", r);
+        return OK;
+    }
     const char *set_cookie = bs_build_set_cookie(r, cfg, payload,
                                                  ch.expires_at);
     /* Two Set-Cookie headers: the verified-rep cookie, and a Max-Age=0
@@ -9026,6 +10096,14 @@ static const command_rec bs_cmds[] = {
                  "into this module today; 'sha384-zeros' / 'sha512-zeros' / "
                  "'pbkdf2-sha256' / 'argon2id' are registry slots reserved "
                  "for future opt-in builds."),
+    AP_INIT_TAKE1("BotShieldCookieFormat", bs_set_cookie_format, NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "Cookie wire format: hmac (legacy cleartext+HMAC; "
+                 "default), gcm (AES-256-GCM; rep block confidential), "
+                 "or a comma-separated list (e.g., 'gcm,hmac' for "
+                 "migration: issue GCM, accept either). AES key is "
+                 "SHA-256(BotShieldSecretFile bytes); same secret file "
+                 "for both primitives."),
     AP_INIT_TAKE1("BotShieldScoreSilent",  bs_set_score_silent,  NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "Score at or above which the silent-PoW tier is picked "
@@ -9194,6 +10272,28 @@ static const command_rec bs_cmds[] = {
                  "Both-'*' is rejected. Over-budget requests return "
                  "429 + Retry-After and get a +50 score penalty "
                  "under reason rate-limit-exceeded:<name>."),
+    /* E9 — repeated-429 escalation. Sits on top of BotShieldRateLimit;
+     * does not apply to robots.txt Crawl-delay 429s in v1 (no operator
+     * handle for them). */
+    AP_INIT_TAKE_ARGV("BotShieldRateLimitEscalate",
+                 bs_set_rate_limit_escalate, NULL, RSRC_CONF,
+                 "Promote repeated 429s on a named BotShieldRateLimit "
+                 "into a stricter status. Args: <rate-name> <strikes> "
+                 "<per> [status=<code>] [ttl=<sec>] [log=<tag>]. "
+                 "Per accepts sec/min/hour. Once <strikes> rejected "
+                 "requests accumulate within <per>, subsequent "
+                 "requests against the same rule return status= "
+                 "(default 403) for ttl= seconds (default 1800). The "
+                 "ttl slides on each additional strike; log=<tag> "
+                 "rides the decision line on threshold crossing for "
+                 "fail2ban handoff. Reason rate-limit-abuse:<name>."),
+    AP_INIT_TAKE1("BotShieldRateLimitEscalateCapacity",
+                 bs_set_rate_escalate_capacity, NULL, RSRC_CONF,
+                 "SHM strike-table slot count (default 50000). Sized "
+                 "for (concurrent-misbehaving-IPs * named-rate-rules) "
+                 "headroom; same eviction discipline as the flagged-"
+                 "IP table when the probe window saturates. Read at "
+                 "post_config from the main server's value."),
     AP_INIT_TAKE_ARGV("BotShieldBlockPath",
                  bs_set_block_path, NULL, RSRC_CONF,
                  "Block a named cohort from a path glob. Args: "
@@ -9315,6 +10415,22 @@ static const command_rec bs_cmds[] = {
                  "app-feedback signatures. Mode 600, root-owned. "
                  "Separate from BotShieldSecretFile so a compromise of "
                  "one key doesn't affect the other."),
+    /* E8.2 — module-to-app reputation export. */
+    AP_INIT_FLAG("BotShieldAppClaims",
+                 bs_set_app_claims, NULL, RSRC_CONF,
+                 "Enable module-to-app reputation export. When on, "
+                 "the module strips any client-supplied X-Botshield-* "
+                 "from the request and sets a single signed "
+                 "X-Botshield-Claims header before the backend handler "
+                 "runs. Default off."),
+    AP_INIT_TAKE1("BotShieldAppClaimsSecretFile",
+                 bs_set_app_claims_secret_file, NULL, RSRC_CONF,
+                 "Absolute path to the HMAC key used to sign the "
+                 "outbound X-Botshield-Claims header. Mode 600, "
+                 "root-owned. Deliberately separate from "
+                 "BotShieldAppFeedbackSecretFile: leaking the inbound "
+                 "key shouldn't let an attacker forge module-originated "
+                 "claims, and vice versa."),
     { NULL }
 };
 
@@ -9569,13 +10685,23 @@ static const char BS_WIDGET_TEMPLATE[] =
 "   box.classList.remove('bs-working');\n"
 "   box.classList.add('bs-done');\n"
 "   msg.textContent = 'Verified \\u2014 reloading\\u2026';\n"
-"   var fields = [CH.v, CH.alg, CH.salt, CH.nonce, CH.difficulty,\n"
-"                 CH.expires_at,\n"
-"                 CH.score, CH.flags,\n"
-"                 CH.passes_silent, CH.passes_form, CH.passes_captcha,\n"
-"                 CH.challenged_at, CH.auto,\n"
-"                 CH.signature, counterVal];\n"
-"   var payload = btoa(fields.join('|'));\n"
+"   var payload;\n"
+"   if (CH.cookie_prefix) {\n"
+"    /* E8.1 GCM cookie shape. Server gave us an opaque encrypted\n"
+"       envelope; we append '.' + counter and the server splits on\n"
+"       the last dot to decrypt + PoW-verify. */\n"
+"    payload = CH.cookie_prefix + '.' + counterVal;\n"
+"   } else {\n"
+"    /* Legacy HMAC shape. Cleartext canonical fields + sig + counter\n"
+"       pipe-joined and base64-encoded as a single blob. */\n"
+"    var fields = [CH.v, CH.alg, CH.salt, CH.nonce, CH.difficulty,\n"
+"                  CH.expires_at,\n"
+"                  CH.score, CH.flags,\n"
+"                  CH.passes_silent, CH.passes_form, CH.passes_captcha,\n"
+"                  CH.challenged_at, CH.auto,\n"
+"                  CH.signature, counterVal];\n"
+"    payload = btoa(fields.join('|'));\n"
+"   }\n"
 "   var exp = new Date((CH.expires_at + 60) * 1000).toUTCString();\n"
 "   var secure = (location.protocol === 'https:') ? '; Secure' : '';\n"
 "   var domain = CH.cookie_domain ? '; Domain=' + CH.cookie_domain : '';\n"
@@ -10057,6 +11183,25 @@ static int bs_handler(request_rec *r)
                       r->uri, effective, heuristic_total, cookie_score,
                       cookie_flag_floor, ip_flag_penalty, (unsigned)ip_flags,
                       cookie_fully_ok);
+        /* E8.2 — module-to-app reputation export. Strip incoming
+         * X-Botshield-* and set a single signed claim envelope so
+         * the backend handler reads sanctioned BotShield state
+         * without poking at the (encrypted post-E8.1) cookie. */
+        {
+            bs_server_cfg *scfg2 = ap_get_module_config(
+                r->server->module_config, &botshield_module);
+            apr_uint32_t composite_flags = ip_flags
+                | (have_prior_rep ? prior_ch.rep.flags : 0);
+            const char *cerr = bs_app_claims_set(r, scfg2,
+                effective, tier, cookie_status, composite_flags,
+                have_prior_rep ? prior_ch.rep.passes_silent  : 0,
+                have_prior_rep ? prior_ch.rep.passes_form    : 0,
+                have_prior_rep ? prior_ch.rep.passes_captcha : 0);
+            if (cerr) {
+                ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+                    "mod_botshield: app claims not emitted: %s", cerr);
+            }
+        }
         bs_decision_log(r, "pass", "declined", cookie_status,
                         "-", "-",
                         bs_decision_reason_names(r->pool, score),

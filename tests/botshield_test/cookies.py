@@ -75,8 +75,17 @@ def solve_pow(challenge: dict, *, limit: int = 10_000_000) -> int:
 
 
 def build_cookie(challenge: dict, counter: int) -> str:
-    """Assemble the 15-field base64 cookie payload that mirrors the
-    server-side canonical layout."""
+    """Assemble the cookie payload from a parsed challenge JSON.
+
+    Dispatches on the JSON shape:
+      - GCM mode (E8.1): challenge carries an opaque `cookie_prefix`
+        base64 envelope from the module. Cookie = `<prefix>.<counter>`.
+      - Legacy HMAC mode: challenge carries cleartext canonical
+        fields + signature. Cookie = base64 of the 15-field
+        pipe-delimited payload.
+    """
+    if "cookie_prefix" in challenge:
+        return f"{challenge['cookie_prefix']}.{counter}"
     fields = [
         challenge["v"], challenge["alg"],
         challenge["salt"], challenge["nonce"], challenge["difficulty"],
@@ -93,8 +102,8 @@ def build_cookie(challenge: dict, counter: int) -> str:
 
 def tamper_signature(cookie: str) -> str:
     """Flip one hex character of the HMAC signature (field 13) in an
-    assembled `_bs_verified` cookie. Used to prove the module rejects
-    a forged signature."""
+    assembled legacy `_bs_verified` cookie. Used to prove the module
+    rejects a forged signature."""
     raw = base64.b64decode(cookie).decode()
     fields = raw.split("|")
     sig = list(fields[13])
@@ -102,3 +111,18 @@ def tamper_signature(cookie: str) -> str:
     sig[0] = "b" if sig[0] == "a" else "a"
     fields[13] = "".join(sig)
     return base64.b64encode("|".join(fields).encode()).decode()
+
+
+def tamper_envelope(cookie: str) -> str:
+    """Flip one base64 character of the GCM envelope (everything
+    before the last '.'). Mutating any byte in alg_id/nonce/ct/tag
+    causes GCM tag verification to fail. Counterpart of
+    tamper_signature for E8.1 GCM-format cookies."""
+    head, sep, counter = cookie.rpartition(".")
+    if not sep:
+        raise AssertionError("not a GCM-format cookie (no '.' separator)")
+    # Flip the leading char of the base64 envelope. Any single-char
+    # change inside the envelope changes one ciphertext (or tag, or
+    # nonce) byte after base64-decode, which breaks GCM auth.
+    flipped = ("b" if head[0] == "a" else "a") + head[1:]
+    return f"{flipped}.{counter}"
