@@ -36,6 +36,7 @@
 #include "unixd.h"
 #include "mod_watchdog.h"
 #include "mod_status.h"
+#include "scoreboard.h"
 
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
@@ -409,6 +410,40 @@ typedef struct {
 #define BS_DEFAULT_SAFEGUARD_WINDOW    600
 #define BS_DEFAULT_SAFEGUARD_TTL       900
 
+/* E11 — load-aware throttling. A periodic watchdog tick samples
+ * the Apache scoreboard's busy-worker ratio, optionally merges in
+ * an external operator-set state from a watched file, and computes
+ * a coarse cached state that the request path reads as a single
+ * atomic u32. This is application-tier brownout, not DDoS defense:
+ * help shed low-trust traffic when the origin is hot, leave verified
+ * clients alone.
+ *
+ * State is a 3-value totally-ordered enum:
+ *   normal < warm < hot
+ *
+ * "Most severe wins" merging: if internal sensing says warm and
+ * external file says hot, result is hot. The external override is
+ * the cleanest handoff for operators with their own monitoring —
+ * they don't have to teach the monitor to talk Apache config. */
+typedef enum {
+    BS_LOAD_NORMAL = 0,
+    BS_LOAD_WARM   = 1,
+    BS_LOAD_HOT    = 2,
+} bs_load_state;
+
+#define BS_DEFAULT_LOAD_REFRESH_SEC      1
+#define BS_DEFAULT_LOAD_WARM_RATIO_PCT   65    /* busy_workers / total */
+#define BS_DEFAULT_LOAD_HOT_RATIO_PCT    85
+/* Hysteresis: asymmetric. Easy to enter (3 escalating samples to
+ * warm, 2 more to hot), slow to exit (5 normal samples to demote
+ * one level). Tunes the responsiveness vs. flap-resistance
+ * tradeoff. Operators rarely need to override; the constants are
+ * exposed via directives below for when they do. */
+#define BS_DEFAULT_LOAD_WARM_RISE        3
+#define BS_DEFAULT_LOAD_HOT_RISE         2
+#define BS_DEFAULT_LOAD_WARM_FALL        5
+#define BS_DEFAULT_LOAD_NORMAL_FALL      5
+
 typedef struct {
     apr_uint32_t  magic;            /* BS_SHM_MAGIC */
     apr_uint32_t  format_version;   /* BS_SHM_FORMAT_VERSION */
@@ -426,6 +461,16 @@ typedef struct {
     apr_uint32_t  cv_log_slots;         /* log-suppress slot count */
     apr_uint32_t  cv_inflight;          /* in-flight siteverify counter */
     apr_uint32_t  _pad2;
+    /* E11 — cached load state. Updated by the watchdog tick;
+     * read lockless from the request path. The hysteresis fields
+     * are tick-private; only the watchdog thread reads/writes
+     * them, so they don't need atomic ordering. */
+    apr_uint32_t  load_state;             /* bs_load_state enum value */
+    apr_uint32_t  load_state_since_sec;   /* unix sec at last transition */
+    apr_uint32_t  load_escalation_streak; /* samples wanting higher state */
+    apr_uint32_t  load_recovery_streak;   /* samples wanting lower state */
+    apr_uint32_t  load_state_changes;     /* monotonic counter for metrics */
+    apr_uint32_t  _pad3;
 } bs_shm_header;
 
 /* Rate-limit / log-suppress slot encoding. One uint64 per slot:
@@ -739,6 +784,20 @@ typedef struct bs_server_cfg {
     int                 safeguard_window;       /* seconds; 0 = default */
     int                 safeguard_ttl;          /* seconds; 0 = default */
     int                 safeguard_capacity;     /* 0 = default */
+    /* E11 — load-aware throttling. All server-scope; the cached
+     * state and watchdog are module-global. */
+    const char         *load_state_file;        /* NULL = no external file */
+    int                 load_refresh_sec;       /* watchdog tick; 0 = default */
+    int                 load_warm_pct;          /* busy-ratio % for warm; 0 = default */
+    int                 load_hot_pct;           /* busy-ratio % for hot; 0 = default */
+    int                 load_warm_rise;         /* hysteresis; 0 = default */
+    int                 load_hot_rise;          /* hysteresis; 0 = default */
+    int                 load_normal_fall;       /* hysteresis; 0 = default */
+    /* Tick-private: last successfully read external state and the
+     * mtime that produced it. Stored on scfg (not SHM) because the
+     * watchdog runs single-threaded per server; no contention. */
+    bs_load_state       load_external_cached;
+    apr_time_t          load_external_mtime;
     apr_array_header_t *block_paths;   /* bs_block_path_entry * */
     /* E3 — path-based triggers. Same ordered-array + upsert-by-name
      * shape as E2.1; first match wins at request time. */
@@ -967,6 +1026,24 @@ static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
     out->safeguard_capacity = (add->safeguard_capacity > 0)
                             ? add->safeguard_capacity
                             : base->safeguard_capacity;
+    /* E11 — load-state merge. Only the main server's values steer
+     * the watchdog; vhost-level overrides are harmless because the
+     * cached state is module-global. */
+    out->load_state_file   = add->load_state_file ? add->load_state_file
+                                                  : base->load_state_file;
+    out->load_refresh_sec  = (add->load_refresh_sec > 0)
+                           ? add->load_refresh_sec
+                           : base->load_refresh_sec;
+    out->load_warm_pct     = (add->load_warm_pct > 0)
+                           ? add->load_warm_pct : base->load_warm_pct;
+    out->load_hot_pct      = (add->load_hot_pct > 0)
+                           ? add->load_hot_pct : base->load_hot_pct;
+    out->load_warm_rise    = (add->load_warm_rise > 0)
+                           ? add->load_warm_rise : base->load_warm_rise;
+    out->load_hot_rise     = (add->load_hot_rise > 0)
+                           ? add->load_hot_rise : base->load_hot_rise;
+    out->load_normal_fall  = (add->load_normal_fall > 0)
+                           ? add->load_normal_fall : base->load_normal_fall;
     out->block_paths = bs_merge_rule_array(p, base->block_paths,
                                            add->block_paths);
     out->path_triggers = bs_merge_rule_array(p, base->path_triggers,
@@ -1069,6 +1146,18 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->safeguard_window    = 0;
     scfg->safeguard_ttl       = 0;
     scfg->safeguard_capacity  = 0;
+    /* E11 — load-state defaults. NULL state file = no external
+     * override path; all numeric thresholds default to 0 (request-
+     * time + post_config substitute the compile-time defaults). */
+    scfg->load_state_file       = NULL;
+    scfg->load_refresh_sec      = 0;
+    scfg->load_warm_pct         = 0;
+    scfg->load_hot_pct          = 0;
+    scfg->load_warm_rise        = 0;
+    scfg->load_hot_rise         = 0;
+    scfg->load_normal_fall      = 0;
+    scfg->load_external_cached  = BS_LOAD_NORMAL;
+    scfg->load_external_mtime   = 0;
     scfg->block_paths      = apr_array_make(p, 4, sizeof(void *));
     scfg->path_triggers         = apr_array_make(p, 4, sizeof(void *));
     scfg->cookie_triggers  = apr_array_make(p, 4, sizeof(void *));
@@ -3780,6 +3869,237 @@ static apr_status_t bs_robots_watchdog_cb(int state, void *data,
 }
 
 /* ======================================================================
+ * E11 — Load-aware throttling.
+ *
+ * Watchdog tick samples the Apache scoreboard's busy-worker ratio,
+ * optionally merges in an external operator-set state from a watched
+ * file, and folds the result into a cached state with hysteresis.
+ * Request path reads bs_shm.header->load_state as a single atomic
+ * u32. No scoreboard scans on the hot path.
+ *
+ * State transitions write `load_state` last, after the streak
+ * counters and `load_state_changes` metric, so an unlucky reader
+ * sees a self-consistent snapshot — at worst a slightly stale
+ * state for a few microseconds. That's fine for a coarse 3-value
+ * brownout signal. */
+
+static int bs_load_effective_int(int v, int dflt)
+{
+    return (v > 0) ? v : dflt;
+}
+
+/* Map a sampled busy-worker ratio (percent of total slots) to a
+ * candidate state via the operator's thresholds. */
+static bs_load_state bs_load_state_from_pct(int busy_pct,
+                                            int warm_pct, int hot_pct)
+{
+    if (busy_pct >= hot_pct)  return BS_LOAD_HOT;
+    if (busy_pct >= warm_pct) return BS_LOAD_WARM;
+    return BS_LOAD_NORMAL;
+}
+
+/* Read + parse the external load-state file. Caches by mtime so a
+ * sampler that ticks every second only does an open()/read() when
+ * the file actually changed (operator's monitor wrote a new value).
+ * On any error: leave the cache untouched and return whatever the
+ * last successful read produced (or NORMAL if never read). */
+static bs_load_state bs_load_read_external(server_rec *sv,
+                                           bs_server_cfg *scfg)
+{
+    if (!scfg->load_state_file) return BS_LOAD_NORMAL;
+    apr_finfo_t finfo;
+    apr_status_t rv = apr_stat(&finfo, scfg->load_state_file,
+                               APR_FINFO_MTIME, sv->process->pconf);
+    if (rv != APR_SUCCESS) {
+        /* File missing is normal if the operator hasn't written one
+         * yet. Don't log per-tick or we'd spam. */
+        return scfg->load_external_cached;
+    }
+    if (finfo.mtime == scfg->load_external_mtime) {
+        return scfg->load_external_cached;   /* unchanged */
+    }
+
+    apr_file_t *f = NULL;
+    rv = apr_file_open(&f, scfg->load_state_file,
+                       APR_READ | APR_BINARY, 0, sv->process->pconf);
+    if (rv != APR_SUCCESS) return scfg->load_external_cached;
+
+    char buf[32];
+    apr_size_t got = sizeof(buf) - 1;
+    rv = apr_file_read(f, buf, &got);
+    apr_file_close(f);
+    if (rv != APR_SUCCESS && rv != APR_EOF) {
+        return scfg->load_external_cached;
+    }
+    buf[got] = '\0';
+    /* Trim trailing whitespace/newline so `echo hot > file` works. */
+    while (got > 0 && (buf[got-1] == '\n' || buf[got-1] == '\r'
+                       || buf[got-1] == ' '  || buf[got-1] == '\t')) {
+        buf[--got] = '\0';
+    }
+    /* Trim leading whitespace too. */
+    char *p = buf;
+    while (*p == ' ' || *p == '\t') p++;
+
+    bs_load_state parsed;
+    if      (!strcasecmp(p, "normal")) parsed = BS_LOAD_NORMAL;
+    else if (!strcasecmp(p, "warm"))   parsed = BS_LOAD_WARM;
+    else if (!strcasecmp(p, "hot"))    parsed = BS_LOAD_HOT;
+    else {
+        ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
+            "mod_botshield: BotShieldLoadStateFile '%s' contains "
+            "unrecognized value '%s' (expected normal|warm|hot); "
+            "treating as normal",
+            scfg->load_state_file, p);
+        parsed = BS_LOAD_NORMAL;
+    }
+    scfg->load_external_cached = parsed;
+    scfg->load_external_mtime  = finfo.mtime;
+    if (parsed != BS_LOAD_NORMAL) {
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+            "mod_botshield: external load state from '%s': %s",
+            scfg->load_state_file, p);
+    }
+    return parsed;
+}
+
+/* Sample the Apache scoreboard. Returns busy_pct = 100 *
+ * busy_workers / total_worker_slots. "Busy" = anything that's
+ * actively servicing a request: BUSY_READ/WRITE/KEEPALIVE/LOG/DNS
+ * + GRACEFUL (still serving its current request). READY and DEAD
+ * slots don't count as busy. */
+static int bs_load_sample_scoreboard(void)
+{
+    if (!ap_exists_scoreboard_image()) return 0;
+    global_score *gs = ap_get_scoreboard_global();
+    if (!gs) return 0;
+    int total = gs->server_limit * gs->thread_limit;
+    if (total <= 0) return 0;
+
+    int busy = 0;
+    for (int i = 0; i < gs->server_limit; i++) {
+        for (int j = 0; j < gs->thread_limit; j++) {
+            worker_score *ws =
+                ap_get_scoreboard_worker_from_indexes(i, j);
+            if (!ws) continue;
+            switch (ws->status) {
+            case SERVER_BUSY_READ:
+            case SERVER_BUSY_WRITE:
+            case SERVER_BUSY_KEEPALIVE:
+            case SERVER_BUSY_LOG:
+            case SERVER_BUSY_DNS:
+            case SERVER_GRACEFUL:
+                busy++;
+                break;
+            default:
+                break;
+            }
+        }
+    }
+    return (busy * 100) / total;
+}
+
+/* Apply hysteresis. Given a candidate state from this tick's
+ * sampling, decide whether to promote/demote the cached state.
+ * Asymmetric: easy to enter (3 escalating samples to warm; 2 more
+ * to hot), slow to exit (5 normal samples to demote one level).
+ * Reset the opposite streak whenever the candidate changes
+ * direction.
+ *
+ * Writes through the SHM header. Single-thread (watchdog), so no
+ * locking; readers see a consistent state because the final write
+ * is to load_state itself. */
+static void bs_load_apply_tick(server_rec *sv, bs_server_cfg *scfg,
+                               bs_load_state candidate)
+{
+    if (!bs_shm.header) return;
+    int warm_rise = bs_load_effective_int(scfg->load_warm_rise,
+                        BS_DEFAULT_LOAD_WARM_RISE);
+    int hot_rise  = bs_load_effective_int(scfg->load_hot_rise,
+                        BS_DEFAULT_LOAD_HOT_RISE);
+    int fall      = bs_load_effective_int(scfg->load_normal_fall,
+                        BS_DEFAULT_LOAD_NORMAL_FALL);
+
+    bs_load_state current = (bs_load_state)bs_shm.header->load_state;
+    bs_load_state next    = current;
+
+    if (candidate > current) {
+        bs_shm.header->load_recovery_streak = 0;
+        bs_shm.header->load_escalation_streak++;
+        int need = (current == BS_LOAD_NORMAL) ? warm_rise : hot_rise;
+        if ((int)bs_shm.header->load_escalation_streak >= need) {
+            next = (bs_load_state)(current + 1);
+            bs_shm.header->load_escalation_streak = 0;
+        }
+    } else if (candidate < current) {
+        bs_shm.header->load_escalation_streak = 0;
+        bs_shm.header->load_recovery_streak++;
+        if ((int)bs_shm.header->load_recovery_streak >= fall) {
+            next = (bs_load_state)(current - 1);
+            bs_shm.header->load_recovery_streak = 0;
+        }
+    } else {
+        /* Steady-state: any drift toward edge resets. */
+        bs_shm.header->load_escalation_streak = 0;
+        bs_shm.header->load_recovery_streak   = 0;
+    }
+
+    if (next != current) {
+        const char *names[] = { "normal", "warm", "hot" };
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+            "mod_botshield: load state %s -> %s",
+            names[current], names[next]);
+        bs_shm.header->load_state_since_sec =
+            (apr_uint32_t)apr_time_sec(apr_time_now());
+        bs_shm.header->load_state_changes++;
+        /* Publish the new state last so a request reading the field
+         * sees either the old or the new value, not torn metadata. */
+        apr_atomic_set32(&bs_shm.header->load_state,
+                         (apr_uint32_t)next);
+    }
+}
+
+/* mod_watchdog tick. Sample, merge with external file, fold into
+ * the cached state. Cheap enough to run every second per main
+ * server. */
+static apr_status_t bs_load_watchdog_cb(int state, void *data,
+                                        apr_pool_t *pool)
+{
+    (void)pool;
+    if (state != AP_WATCHDOG_STATE_RUNNING) return APR_SUCCESS;
+    server_rec *sv = data;
+    if (!sv) return APR_SUCCESS;
+    bs_server_cfg *scfg =
+        ap_get_module_config(sv->module_config, &botshield_module);
+    if (!scfg) return APR_SUCCESS;
+
+    int warm_pct = bs_load_effective_int(scfg->load_warm_pct,
+                       BS_DEFAULT_LOAD_WARM_RATIO_PCT);
+    int hot_pct  = bs_load_effective_int(scfg->load_hot_pct,
+                       BS_DEFAULT_LOAD_HOT_RATIO_PCT);
+    int busy_pct = bs_load_sample_scoreboard();
+    bs_load_state internal = bs_load_state_from_pct(busy_pct,
+                                                    warm_pct, hot_pct);
+    bs_load_state external = bs_load_read_external(sv, scfg);
+
+    /* Most-severe-wins merge. */
+    bs_load_state candidate = (internal > external) ? internal : external;
+    bs_load_apply_tick(sv, scfg, candidate);
+    return APR_SUCCESS;
+}
+
+/* Cheap request-path read of the cached state. Lockless atomic.
+ * Used by E11.2's BotShieldLoadTrigger predicate matcher; defined
+ * here in E11.1 alongside the rest of the load-state surface. */
+static bs_load_state bs_load_current(void)
+    __attribute__((unused));   /* E11.2 wires the request-path use. */
+static bs_load_state bs_load_current(void)
+{
+    if (!bs_shm.header) return BS_LOAD_NORMAL;
+    return (bs_load_state)apr_atomic_read32(&bs_shm.header->load_state);
+}
+
+/* ======================================================================
  * E5 — App-to-module reputation feedback.
  *
  * App emits `X-BotShield-Feedback: event=<name>[;kid=<id>];sig=<hex>` on
@@ -4752,6 +5072,83 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                     "robots.txt live-refresh disabled (post_config "
                     "load still in effect; reload Apache after "
                     "editing robots.txt)");
+            }
+        }
+    }
+
+    /* E11 — load-state watchdog. One registration on the main
+     * server only — the cached state is module-global, so per-vhost
+     * registrations would just multiply the work for no gain. The
+     * sampler reads scoreboard + (optional) external state file
+     * once per tick and updates SHM. Soft dep on mod_watchdog. */
+    {
+        bs_server_cfg *main_scfg = ap_get_module_config(
+            s->module_config, &botshield_module);
+        /* Propagate load directives from any vhost to the main
+         * scfg if main doesn't have them. Operators write
+         * BotShieldLoadStateFile in vhost scope (config_override
+         * lands inside <VirtualHost>); the watchdog runs against
+         * main's scfg. Without this, the watchdog wouldn't see the
+         * directive at all. First-vhost-wins for each field. */
+        if (main_scfg) {
+            for (server_rec *sv2 = s; sv2; sv2 = sv2->next) {
+                bs_server_cfg *vc = ap_get_module_config(
+                    sv2->module_config, &botshield_module);
+                if (!vc || vc == main_scfg) continue;
+                if (!main_scfg->load_state_file && vc->load_state_file)
+                    main_scfg->load_state_file = vc->load_state_file;
+                if (main_scfg->load_refresh_sec <= 0
+                    && vc->load_refresh_sec > 0)
+                    main_scfg->load_refresh_sec = vc->load_refresh_sec;
+                if (main_scfg->load_warm_pct <= 0 && vc->load_warm_pct > 0)
+                    main_scfg->load_warm_pct = vc->load_warm_pct;
+                if (main_scfg->load_hot_pct <= 0 && vc->load_hot_pct > 0)
+                    main_scfg->load_hot_pct = vc->load_hot_pct;
+            }
+        }
+        if (main_scfg) {
+            int refresh = bs_load_effective_int(
+                main_scfg->load_refresh_sec,
+                BS_DEFAULT_LOAD_REFRESH_SEC);
+            APR_OPTIONAL_FN_TYPE(ap_watchdog_get_instance) *fn_get =
+                APR_RETRIEVE_OPTIONAL_FN(ap_watchdog_get_instance);
+            APR_OPTIONAL_FN_TYPE(ap_watchdog_register_callback) *fn_reg =
+                APR_RETRIEVE_OPTIONAL_FN(ap_watchdog_register_callback);
+            if (fn_get && fn_reg) {
+                ap_watchdog_t *wd = NULL;
+                apr_status_t wrv = fn_get(&wd,
+                    "mod_botshield_load", 0, 1, pconf);
+                if (wrv == APR_SUCCESS && wd) {
+                    apr_interval_time_t ival = apr_time_from_sec(refresh);
+                    wrv = fn_reg(wd, ival, s, bs_load_watchdog_cb);
+                } else if (wrv == APR_SUCCESS) {
+                    wrv = APR_EGENERAL;
+                }
+                if (wrv == APR_SUCCESS) {
+                    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+                        "mod_botshield: load-state sampler enabled "
+                        "every %d s%s%s%s",
+                        refresh,
+                        main_scfg->load_state_file ? " (external file " : "",
+                        main_scfg->load_state_file
+                          ? main_scfg->load_state_file : "",
+                        main_scfg->load_state_file ? ")" : "");
+                } else {
+                    ap_log_error(APLOG_MARK, APLOG_WARNING, wrv, s,
+                        "mod_botshield: load-state watchdog "
+                        "registration failed; load state will stay "
+                        "at 'normal'");
+                }
+            } else {
+                /* No mod_watchdog → load state is permanently
+                 * NORMAL. Quiet; only worth logging if the operator
+                 * configured a state file (active intent). */
+                if (main_scfg->load_state_file) {
+                    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+                        "mod_botshield: mod_watchdog not loaded; "
+                        "BotShieldLoadStateFile inert (state stays "
+                        "normal). Load mod_watchdog to enable.");
+                }
             }
         }
     }
@@ -6256,6 +6653,87 @@ static const char *bs_set_safeguard_capacity(cmd_parms *cmd,
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
     scfg->safeguard_capacity = (int)n;
+    return NULL;
+}
+
+/* E11 — BotShieldLoadStateFile <path>. Operator-writable file
+ * whose body is `normal`, `warm`, or `hot` (whitespace tolerated).
+ * Watchdog stat-polls mtime once per refresh tick; only re-reads
+ * when mtime changed. Most-severe-wins merging means an external
+ * `hot` overrides any internal sensing decision. */
+static const char *bs_set_load_state_file(cmd_parms *cmd, void *dconf,
+                                          const char *arg)
+{
+    (void)dconf;
+    if (!arg || !*arg) {
+        return "BotShieldLoadStateFile: path required";
+    }
+    if (arg[0] != '/') {
+        return "BotShieldLoadStateFile: path must be absolute";
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->load_state_file = apr_pstrdup(cmd->pool, arg);
+    return NULL;
+}
+
+/* E11 — BotShieldLoadRefreshInterval <seconds>. How often the
+ * watchdog samples + reads the external file. Default 1s; the
+ * lockless cached read on the request path keeps this from
+ * affecting hot-path cost. */
+static const char *bs_set_load_refresh(cmd_parms *cmd, void *dconf,
+                                       const char *arg)
+{
+    (void)dconf;
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (!end || *end || n < 1 || n > 60) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldLoadRefreshInterval: '%s' must be 1..60 seconds",
+            arg);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->load_refresh_sec = (int)n;
+    return NULL;
+}
+
+/* E11 — BotShieldLoadWarmThreshold <percent>. Busy-worker ratio
+ * (percent of total worker slots) at which a sample is classified
+ * warm. Default 65. */
+static const char *bs_set_load_warm_pct(cmd_parms *cmd, void *dconf,
+                                        const char *arg)
+{
+    (void)dconf;
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (!end || *end || n < 1 || n > 99) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldLoadWarmThreshold: '%s' must be 1..99 (percent)",
+            arg);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->load_warm_pct = (int)n;
+    return NULL;
+}
+
+/* E11 — BotShieldLoadHotThreshold <percent>. Default 85; must be
+ * strictly greater than the warm threshold. */
+static const char *bs_set_load_hot_pct(cmd_parms *cmd, void *dconf,
+                                       const char *arg)
+{
+    (void)dconf;
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (!end || *end || n < 1 || n > 99) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldLoadHotThreshold: '%s' must be 1..99 (percent)",
+            arg);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->load_hot_pct = (int)n;
     return NULL;
 }
 
@@ -9562,6 +10040,18 @@ static int bs_metrics_handler(request_rec *r, bs_dir_cfg *cfg)
         "Fixed size of the verify-endpoint log-suppress ring (slots).",
         (apr_uint64_t)bs_shm.cv_log_slot_count);
 
+    /* E11 — load-state observability. The gauge is the most useful
+     * value to alert on; the counter lets operators graph state
+     * transitions per minute. */
+    bs_m_emit_gauge(r, "load_state",
+        "Current cached load state (0=normal, 1=warm, 2=hot).",
+        (apr_uint64_t)(bs_shm.header
+                       ? bs_shm.header->load_state : 0));
+    bs_m_emit_counter(r, "load_state_changes_total",
+        "Number of load-state transitions since the SHM was created.",
+        (apr_uint64_t)(bs_shm.header
+                       ? bs_shm.header->load_state_changes : 0));
+
     return OK;
 }
 
@@ -10720,6 +11210,30 @@ static const command_rec bs_cmds[] = {
                  "Per-server-scope but only the main server's value "
                  "is consulted at post_config since the table is "
                  "module-global."),
+    /* E11 — load-aware throttling. Sampling + cached state. */
+    AP_INIT_TAKE1("BotShieldLoadStateFile",
+                 bs_set_load_state_file, NULL, RSRC_CONF,
+                 "Optional file the operator's monitoring system "
+                 "writes to push a load-state override into the "
+                 "module. Body is one of normal/warm/hot. Watchdog "
+                 "stat-polls mtime; only re-reads on change. "
+                 "Most-severe-wins merging with internal sensing."),
+    AP_INIT_TAKE1("BotShieldLoadRefreshInterval",
+                 bs_set_load_refresh, NULL, RSRC_CONF,
+                 "Watchdog tick period in seconds (default 1; "
+                 "1..60). Lower = faster brownout response; higher "
+                 "= less work in mod_watchdog."),
+    AP_INIT_TAKE1("BotShieldLoadWarmThreshold",
+                 bs_set_load_warm_pct, NULL, RSRC_CONF,
+                 "Busy-worker percentage at which a tick samples "
+                 "as 'warm' (default 65; range 1..99). Hysteresis "
+                 "still applies — promotion takes 3 consecutive "
+                 "warm-or-hot samples."),
+    AP_INIT_TAKE1("BotShieldLoadHotThreshold",
+                 bs_set_load_hot_pct, NULL, RSRC_CONF,
+                 "Busy-worker percentage at which a tick samples "
+                 "as 'hot' (default 85; range 1..99). Must be "
+                 "greater than the warm threshold."),
     AP_INIT_TAKE_ARGV("BotShieldBlockPath",
                  bs_set_block_path, NULL, RSRC_CONF,
                  "Block a named cohort from a path glob. Args: "
