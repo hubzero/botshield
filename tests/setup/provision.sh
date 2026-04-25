@@ -148,6 +148,15 @@ apt-get install -y -qq \
 # already-present versions are skipped.
 sudo -u "$SUDO_USER" "$VENV/bin/playwright" install chromium >/dev/null
 
+echo "== /etc/botshield/load.state.test (E11.1 test staging) =="
+# Same Apache-PrivateTmp workaround as test-robots: PrivateTmp=true
+# isolates /tmp away from the test user, so we stage the file under
+# /etc/botshield where the test user can write and Apache can read.
+# Initial value `normal` so the watchdog finds the file present and
+# valid even when no test is actively manipulating it.
+install -m 664 -o "$SUDO_USER" -g www-data /dev/stdin \
+    /etc/botshield/load.state.test <<< "normal"
+
 echo "== /etc/botshield/test-robots (E2.2 test staging) =="
 # Apache's systemd unit sets PrivateTmp=true, which gives the apache2
 # process its own isolated /tmp. Files we'd normally stash under /tmp

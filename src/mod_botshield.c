@@ -36,6 +36,7 @@
 #include "unixd.h"
 #include "mod_watchdog.h"
 #include "mod_status.h"
+#include "scoreboard.h"
 
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
@@ -370,6 +371,79 @@ typedef struct {
 #define BS_STRIKE_MIN_SLOTS        1024
 #define BS_STRIKE_MAX_SLOTS        1000000
 
+/* E10 — challenge safeguard / anti-loop hysteresis. Per-IP SHM
+ * tracking for "BotShield keeps presenting a challenge but this
+ * client never solves it." Tripping safeguard stops the module
+ * from re-issuing the same challenge for a short TTL so a broken
+ * client (JS blocked, CSP-stripped, cookie handling buggy) gets a
+ * stable non-looping outcome instead of an endless
+ * challenge-reload-challenge loop.
+ *
+ * Same seqlock + open-addressing idiom as the flagged-IP and
+ * strike tables. Slot layout:
+ *
+ *   `present_count` accumulates inside `present_window_start +
+ *   window_sec`. It resets on any `bs_safeguard_clear` (called when
+ *   a valid `_bs_verified` lands — they can solve, so history was
+ *   noise). It also resets on window roll.
+ *
+ *   `safeguard_until` is 0 when inactive; non-zero means the
+ *   request-time check returns "safeguard active" until the
+ *   timestamp passes. Each fresh presentation during an active
+ *   safeguard refreshes the TTL (TTL slides on the last attempt)
+ *   so a client who stays broken keeps benefiting rather than
+ *   dropping in and out of safeguard every window boundary. */
+typedef struct {
+    apr_uint32_t  version;              /* seqlock */
+    apr_uint32_t  used;                 /* 0 = empty slot */
+    unsigned char ip[16];               /* masked per ipv6_prefix_bits */
+    apr_uint32_t  present_window_start; /* unix sec */
+    apr_uint32_t  present_count;
+    apr_int64_t   safeguard_until;      /* unix sec; 0 = inactive */
+} bs_safeguard_slot;
+
+#define BS_SAFEGUARD_PROBE_LIMIT   8
+#define BS_DEFAULT_SAFEGUARD_SLOTS 50000
+#define BS_SAFEGUARD_MIN_SLOTS     1024
+#define BS_SAFEGUARD_MAX_SLOTS     1000000
+#define BS_DEFAULT_SAFEGUARD_THRESHOLD 5
+#define BS_DEFAULT_SAFEGUARD_WINDOW    600
+#define BS_DEFAULT_SAFEGUARD_TTL       900
+
+/* E11 — load-aware throttling. A periodic watchdog tick samples
+ * the Apache scoreboard's busy-worker ratio, optionally merges in
+ * an external operator-set state from a watched file, and computes
+ * a coarse cached state that the request path reads as a single
+ * atomic u32. This is application-tier brownout, not DDoS defense:
+ * help shed low-trust traffic when the origin is hot, leave verified
+ * clients alone.
+ *
+ * State is a 3-value totally-ordered enum:
+ *   normal < warm < hot
+ *
+ * "Most severe wins" merging: if internal sensing says warm and
+ * external file says hot, result is hot. The external override is
+ * the cleanest handoff for operators with their own monitoring —
+ * they don't have to teach the monitor to talk Apache config. */
+typedef enum {
+    BS_LOAD_NORMAL = 0,
+    BS_LOAD_WARM   = 1,
+    BS_LOAD_HOT    = 2,
+} bs_load_state;
+
+#define BS_DEFAULT_LOAD_REFRESH_SEC      1
+#define BS_DEFAULT_LOAD_WARM_RATIO_PCT   65    /* busy_workers / total */
+#define BS_DEFAULT_LOAD_HOT_RATIO_PCT    85
+/* Hysteresis: asymmetric. Easy to enter (3 escalating samples to
+ * warm, 2 more to hot), slow to exit (5 normal samples to demote
+ * one level). Tunes the responsiveness vs. flap-resistance
+ * tradeoff. Operators rarely need to override; the constants are
+ * exposed via directives below for when they do. */
+#define BS_DEFAULT_LOAD_WARM_RISE        3
+#define BS_DEFAULT_LOAD_HOT_RISE         2
+#define BS_DEFAULT_LOAD_WARM_FALL        5
+#define BS_DEFAULT_LOAD_NORMAL_FALL      5
+
 typedef struct {
     apr_uint32_t  magic;            /* BS_SHM_MAGIC */
     apr_uint32_t  format_version;   /* BS_SHM_FORMAT_VERSION */
@@ -387,6 +461,16 @@ typedef struct {
     apr_uint32_t  cv_log_slots;         /* log-suppress slot count */
     apr_uint32_t  cv_inflight;          /* in-flight siteverify counter */
     apr_uint32_t  _pad2;
+    /* E11 — cached load state. Updated by the watchdog tick;
+     * read lockless from the request path. The hysteresis fields
+     * are tick-private; only the watchdog thread reads/writes
+     * them, so they don't need atomic ordering. */
+    apr_uint32_t  load_state;             /* bs_load_state enum value */
+    apr_uint32_t  load_state_since_sec;   /* unix sec at last transition */
+    apr_uint32_t  load_escalation_streak; /* samples wanting higher state */
+    apr_uint32_t  load_recovery_streak;   /* samples wanting lower state */
+    apr_uint32_t  load_state_changes;     /* monotonic counter for metrics */
+    apr_uint32_t  _pad3;
 } bs_shm_header;
 
 /* Rate-limit / log-suppress slot encoding. One uint64 per slot:
@@ -486,6 +570,13 @@ typedef struct {
     /* E2.1 — policy enforcement counters. */
     apr_uint64_t rate_limit_exceeded_total;
     apr_uint64_t block_path_hit_total;
+    /* E12 — shadow / observe-mode counters. Separate from the
+     * enforcement counters above so operators can graph "what the
+     * staged rule would have blocked" without polluting the real-
+     * blocks dashboards. */
+    apr_uint64_t rate_limit_observed_total;
+    apr_uint64_t block_path_observed_total;
+    apr_uint64_t trigger_observed_total;
 } bs_metrics;
 
 /* Module-global runtime pointer struct. Populated once in post-config;
@@ -518,6 +609,11 @@ typedef struct {
      * BotShieldRateLimitEscalateCapacity. */
     bs_strike_slot      *strike_table;
     apr_size_t           strike_capacity;
+    /* E10 — safeguard table for anti-loop hysteresis. Same shape
+     * as strike_table but keyed by masked IP only (no rule_slot).
+     * Sized by BotShieldSafeguardCapacity. */
+    bs_safeguard_slot   *safeguard_table;
+    apr_size_t           safeguard_capacity;
 } bs_shm_runtime;
 
 static bs_shm_runtime bs_shm;
@@ -687,6 +783,33 @@ typedef struct bs_server_cfg {
     /* Strike-table capacity (operator-tunable). Read at post_config
      * from the main server's scfg, same convention as flagged_capacity. */
     int                 strike_capacity;
+    /* E10 — safeguard config. All server-scope so the single SHM
+     * table is consistently sized. `safeguard_enabled=-1` is the
+     * unset sentinel; merge picks add's value if set, else base's. */
+    int                 safeguard_enabled;      /* -1 unset, 0 off, 1 on */
+    int                 safeguard_threshold;    /* 0 = inherit / default */
+    int                 safeguard_window;       /* seconds; 0 = default */
+    int                 safeguard_ttl;          /* seconds; 0 = default */
+    int                 safeguard_capacity;     /* 0 = default */
+    /* E11 — load-aware throttling. All server-scope; the cached
+     * state and watchdog are module-global. */
+    const char         *load_state_file;        /* NULL = no external file */
+    int                 load_refresh_sec;       /* watchdog tick; 0 = default */
+    int                 load_warm_pct;          /* busy-ratio % for warm; 0 = default */
+    int                 load_hot_pct;           /* busy-ratio % for hot; 0 = default */
+    int                 load_warm_rise;         /* hysteresis; 0 = default */
+    int                 load_hot_rise;          /* hysteresis; 0 = default */
+    int                 load_normal_fall;       /* hysteresis; 0 = default */
+    /* Tick-private: last successfully read external state and the
+     * mtime that produced it. Stored on scfg (not SHM) because the
+     * watchdog runs single-threaded per server; no contention. */
+    bs_load_state       load_external_cached;
+    apr_time_t          load_external_mtime;
+    /* E12 — global shadow mode. -1 unset (merge picks parent's
+     * value), 0 off, 1 on. When on, ALL trigger / rate-limit /
+     * block-path rules behave as if mode=observe regardless of
+     * their per-rule setting. Operator's panic-revert switch. */
+    int                 shadow_mode;
     apr_array_header_t *block_paths;   /* bs_block_path_entry * */
     /* E3 — path-based triggers. Same ordered-array + upsert-by-name
      * shape as E2.1; first match wins at request time. */
@@ -707,6 +830,9 @@ typedef struct bs_server_cfg {
      * response-path header map to module memory (flag+ttl+log) via
      * these entries. Same ordered-array + upsert-by-name shape. */
     apr_array_header_t *feedback_triggers; /* bs_feedback_trigger_entry * */
+    /* E11.2 — load triggers. Same ordered-array shape; predicate
+     * matches against the global cached load_state (E11.1). */
+    apr_array_header_t *load_triggers;     /* bs_load_trigger_entry * */
     apr_array_header_t *session_names;     /* const char * (lowercased) */
     /* E2.2 — robots.txt enforcement.
      *
@@ -897,6 +1023,45 @@ static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
                                               add->rate_escalates);
     out->strike_capacity = (add->strike_capacity > 0)
                          ? add->strike_capacity : base->strike_capacity;
+    /* E10 — safeguard merge. Only the main server's values steer
+     * SHM sizing; merged-in overrides are harmless at per-vhost
+     * scope because the table is module-global. */
+    out->safeguard_enabled  = (add->safeguard_enabled != -1)
+                            ? add->safeguard_enabled
+                            : base->safeguard_enabled;
+    out->safeguard_threshold = (add->safeguard_threshold > 0)
+                             ? add->safeguard_threshold
+                             : base->safeguard_threshold;
+    out->safeguard_window   = (add->safeguard_window > 0)
+                            ? add->safeguard_window
+                            : base->safeguard_window;
+    out->safeguard_ttl      = (add->safeguard_ttl > 0)
+                            ? add->safeguard_ttl
+                            : base->safeguard_ttl;
+    out->safeguard_capacity = (add->safeguard_capacity > 0)
+                            ? add->safeguard_capacity
+                            : base->safeguard_capacity;
+    /* E11 — load-state merge. Only the main server's values steer
+     * the watchdog; vhost-level overrides are harmless because the
+     * cached state is module-global. */
+    out->load_state_file   = add->load_state_file ? add->load_state_file
+                                                  : base->load_state_file;
+    out->load_refresh_sec  = (add->load_refresh_sec > 0)
+                           ? add->load_refresh_sec
+                           : base->load_refresh_sec;
+    out->load_warm_pct     = (add->load_warm_pct > 0)
+                           ? add->load_warm_pct : base->load_warm_pct;
+    out->load_hot_pct      = (add->load_hot_pct > 0)
+                           ? add->load_hot_pct : base->load_hot_pct;
+    out->load_warm_rise    = (add->load_warm_rise > 0)
+                           ? add->load_warm_rise : base->load_warm_rise;
+    out->load_hot_rise     = (add->load_hot_rise > 0)
+                           ? add->load_hot_rise : base->load_hot_rise;
+    out->load_normal_fall  = (add->load_normal_fall > 0)
+                           ? add->load_normal_fall : base->load_normal_fall;
+    /* E12 — shadow mode inherits unless explicitly set. */
+    out->shadow_mode = (add->shadow_mode != -1)
+                     ? add->shadow_mode : base->shadow_mode;
     out->block_paths = bs_merge_rule_array(p, base->block_paths,
                                            add->block_paths);
     out->path_triggers = bs_merge_rule_array(p, base->path_triggers,
@@ -907,6 +1072,8 @@ static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
                                                 add->env_triggers);
     out->feedback_triggers = bs_merge_rule_array(p, base->feedback_triggers,
                                                  add->feedback_triggers);
+    out->load_triggers     = bs_merge_rule_array(p, base->load_triggers,
+                                                 add->load_triggers);
     /* session_names: concatenate base + add, drop dups. Small lists,
      * O(n*m) is fine; happens once at config load. */
     if (base->session_names && add->session_names) {
@@ -990,11 +1157,36 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->rate_limits      = apr_array_make(p, 4, sizeof(void *));
     scfg->rate_escalates   = apr_array_make(p, 2, sizeof(void *));
     scfg->strike_capacity  = 0;   /* 0 = inherit / use default */
+    /* E10 — safeguard defaults. enabled=-1 is the unset sentinel so
+     * the merge can pick the right scope's value; numeric fields
+     * default to 0 which the post_config sizing + request-time
+     * check treat as "use the compiled-in default." */
+    scfg->safeguard_enabled   = -1;
+    scfg->safeguard_threshold = 0;
+    scfg->safeguard_window    = 0;
+    scfg->safeguard_ttl       = 0;
+    scfg->safeguard_capacity  = 0;
+    /* E11 — load-state defaults. NULL state file = no external
+     * override path; all numeric thresholds default to 0 (request-
+     * time + post_config substitute the compile-time defaults). */
+    scfg->load_state_file       = NULL;
+    scfg->load_refresh_sec      = 0;
+    scfg->load_warm_pct         = 0;
+    scfg->load_hot_pct          = 0;
+    scfg->load_warm_rise        = 0;
+    scfg->load_hot_rise         = 0;
+    scfg->load_normal_fall      = 0;
+    scfg->load_external_cached  = BS_LOAD_NORMAL;
+    scfg->load_external_mtime   = 0;
+    /* E12 — global shadow mode unset. -1 sentinel means "inherit
+     * from parent scope"; merge below picks the right value. */
+    scfg->shadow_mode           = -1;
     scfg->block_paths      = apr_array_make(p, 4, sizeof(void *));
     scfg->path_triggers         = apr_array_make(p, 4, sizeof(void *));
     scfg->cookie_triggers  = apr_array_make(p, 4, sizeof(void *));
     scfg->env_triggers     = apr_array_make(p, 4, sizeof(void *));
     scfg->feedback_triggers = apr_array_make(p, 4, sizeof(void *));
+    scfg->load_triggers     = apr_array_make(p, 4, sizeof(void *));
     /* Curated session-cookie-name defaults. Kept deliberately
      * short; long auto-lists turn `cookies=session` into a loose
      * matcher and undermine the bonus. Operators add their own
@@ -2669,6 +2861,11 @@ typedef struct {
      * matching name. NULL = no escalation; the rule behaves like
      * pre-E9. */
     const bs_rate_escalate_entry *escalate;
+    /* E12 — observe-mode opt-in. Same enum as bs_trigger_action.mode.
+     * When set to BS_TMODE_OBSERVE (or when the global shadow_mode
+     * flag is on), over-budget hits log `would-rate-limit:<name>`
+     * but don't return 429 / consume a token / bump strikes. */
+    int           mode;              /* bs_trigger_mode */
 } bs_rate_limit_entry;
 
 /* E9 — BotShieldRateLimitEscalate config. Stored in
@@ -2687,6 +2884,11 @@ typedef struct {
     const char *name;
     const char *path_pattern;        /* prefix / trailing '*' / trailing '$' */
     bs_cohort   cohort;
+    /* E12 — observe-mode opt-in. When set (or when the global
+     * shadow_mode flag is on), matched paths log
+     * `would-block-path:<name>` but don't return 403 / write the
+     * BS_PENALTY_BLOCK_PATH score. */
+    int         mode;                /* bs_trigger_mode */
 } bs_block_path_entry;
 
 /* E3 — path-based triggers. One of these per BotShieldPathTrigger
@@ -2748,6 +2950,12 @@ typedef enum {
      * credit would have nowhere to land. The shared parser rejects
      * those keys for this family. */
     BS_TFAMILY_FEEDBACK,
+    /* E11.2 — host-state family. Predicate is a comparison against
+     * the global cached load_state (BS_LOAD_NORMAL/WARM/HOT) — no
+     * per-request match. Action surface is penalty/credit/status/
+     * log; flag= is rejected because load is global state, not a
+     * property worth memorizing per-IP. */
+    BS_TFAMILY_LOAD,
 } bs_trigger_family;
 
 typedef struct {
@@ -2759,13 +2967,30 @@ typedef struct {
     int           penalty;        /* 0..1000 */
     int           credit;         /* 0..1000 (rejected on path family) */
     int           status_explicit; /* 1 if operator wrote status= */
+    /* E12 — shadow mode. BS_TMODE_ENFORCE (default) is normal
+     * behavior. BS_TMODE_OBSERVE makes a matched rule LOG what it
+     * would have done — :observe suffix on the reason string,
+     * mode-specific metric counter — but applies no side effects:
+     * no flag-IP, no score, no status/redirect, no log tag side-
+     * effect. Operators stage new rules safely and watch the
+     * decision log before turning enforce on. */
+    int           mode;           /* bs_trigger_mode */
 } bs_trigger_action;
+
+typedef enum {
+    BS_TMODE_ENFORCE = 0,
+    BS_TMODE_OBSERVE,
+} bs_trigger_mode;
 
 typedef enum {
     BS_TEXEC_PASS_CONTINUE = 0,  /* pass-match; stay in family loop */
     BS_TEXEC_PASS_BREAK,         /* pass-match; exit this family's loop */
     BS_TEXEC_PASS_DECLINE,       /* pass-match; return DECLINED from policy */
     BS_TEXEC_STATUS,             /* emit status/redirect; short-circuit */
+    /* E12 — observe-only match: rule fired but took no enforcing
+     * action. Caller treats this as `continue` so subsequent rules
+     * in the same family still get a chance. */
+    BS_TEXEC_OBSERVE,
 } bs_trigger_exec_outcome;
 
 /* Forward declarations — bs_check_policy (E3 path) calls these; they
@@ -2785,6 +3010,23 @@ static int  bs_strike_record_429(request_rec *r,
                                  apr_uint32_t rule_slot,
                                  const bs_rate_escalate_entry *cfg,
                                  apr_int64_t now);
+
+/* E11 — load-state read used by bs_check_policy's load-trigger
+ * walk. Declaration here so the walk at line ~3540 compiles
+ * before the body at line ~4150. */
+static bs_load_state bs_load_current(void);
+
+/* E10 — safeguard helpers. Called from bs_handler at two points:
+ * just before issuing a challenge (check + record presentation)
+ * and on successful cookie verify (clear the per-IP counter). */
+static int  bs_safeguard_check(const unsigned char ip[16],
+                               apr_int64_t now);
+static void bs_safeguard_record_presentation(request_rec *r,
+                                             bs_server_cfg *scfg,
+                                             const unsigned char ip[16],
+                                             apr_int64_t now);
+static void bs_safeguard_clear(const unsigned char ip[16]);
+static int  bs_safeguard_effective_int(int v, int dflt);
 /* Shared action helpers — see definitions below. The server-cfg
  * struct body appears later in the file, so we forward-declare by
  * struct tag and use `struct bs_server_cfg *` in the signature. */
@@ -2912,6 +3154,30 @@ typedef struct {
     const char        *event;
     bs_trigger_action  action;
 } bs_feedback_trigger_entry;
+
+/* E11.2 — BotShieldLoadTrigger <name> <load-match> [key=value ...].
+ * Predicate is a comparison against the global cached load_state.
+ * Two predicate kinds:
+ *   EQ:  state=normal | state=warm | state=hot     (exact match)
+ *   GE:  state>=warm  | state>=hot                 (>= comparison)
+ *
+ * EQ + state=normal is mostly useful for documentation/tests;
+ * operators in production usually want state>=warm to cover both
+ * warm AND hot.
+ *
+ * Action surface inherits from bs_trigger_action; load-specific
+ * limits are enforced by the shared parser (no flag/ttl/redirect). */
+enum bs_load_pred_kind {
+    BS_LP_EQ = 0,
+    BS_LP_GE,
+};
+
+typedef struct {
+    const char        *name;
+    int                pred_kind;     /* enum bs_load_pred_kind */
+    bs_load_state      target_state;
+    bs_trigger_action  action;
+} bs_load_trigger_entry;
 
 /* SHM slot for the fixed-window counter. Packed to 8 bytes so
  * platforms with 64-bit atomics could later swap to a CAS-on-u64;
@@ -3318,6 +3584,29 @@ static int bs_check_policy(request_rec *r)
         }
     }
 
+    /* E11.2 — load triggers. Match on the global cached load state
+     * (BS_LOAD_NORMAL/WARM/HOT). First-match-wins; alternative-
+     * specificity rules (state>=warm vs state=hot) are stacked by
+     * declaration order with the more specific one declared first. */
+    if (scfg->load_triggers && scfg->load_triggers->nelts > 0) {
+        bs_load_state cur = bs_load_current();
+        for (int i = 0; i < scfg->load_triggers->nelts; i++) {
+            bs_load_trigger_entry *t = APR_ARRAY_IDX(
+                scfg->load_triggers, i, bs_load_trigger_entry *);
+            int matched = 0;
+            switch (t->pred_kind) {
+            case BS_LP_EQ: matched = (cur == t->target_state); break;
+            case BS_LP_GE: matched = (cur >= t->target_state); break;
+            }
+            if (!matched) continue;
+            bs_trigger_exec_outcome o = bs_apply_trigger_action(
+                r, scfg, BS_TFAMILY_LOAD, &t->action,
+                "load-trigger", t->name);
+            if (o == BS_TEXEC_STATUS) return t->action.status_code;
+            if (o == BS_TEXEC_PASS_BREAK) break;
+        }
+    }
+
     /* E3 — path triggers. First match wins; no accumulation. */
     if (scfg->path_triggers && scfg->path_triggers->nelts > 0) {
         for (int i = 0; i < scfg->path_triggers->nelts; i++) {
@@ -3341,13 +3630,29 @@ static int bs_check_policy(request_rec *r)
     /* Block paths first: if the request would be 403ed anyway there's
      * no point charging it a token from a rate bucket it's also in.
      * Ordered-array iteration — first match wins; declaration order
-     * is the precedence. */
+     * is the precedence. E12: a matched rule in observe mode (or
+     * any matched rule when global shadow_mode is on) logs
+     * `would-block-path:<name>` instead of returning 403, and the
+     * walk continues so subsequent rules still get their say. */
+    int global_shadow = (scfg->shadow_mode == 1);
     if (scfg->block_paths && scfg->block_paths->nelts > 0) {
         for (int i = 0; i < scfg->block_paths->nelts; i++) {
             bs_block_path_entry *e = APR_ARRAY_IDX(
                 scfg->block_paths, i, bs_block_path_entry *);
             if (!bs_path_glob_match(e->path_pattern, r->uri)) continue;
             if (!bs_cohort_matches(&e->cohort, ua, r)) continue;
+            int observe = global_shadow || (e->mode == BS_TMODE_OBSERVE);
+            if (observe) {
+                bs_score_add(r, 0, 0,
+                    apr_pstrcat(r->pool, "block-path:", e->name,
+                                ":observe", NULL));
+                if (bs_shm.metrics) {
+                    __atomic_fetch_add(
+                        &bs_shm.metrics->block_path_observed_total,
+                        1, __ATOMIC_RELAXED);
+                }
+                continue;
+            }
             bs_score_add(r, BS_PENALTY_BLOCK_PATH, 3600,
                 apr_pstrcat(r->pool, "block-path:", e->name, NULL));
             if (bs_shm.metrics) {
@@ -3420,15 +3725,23 @@ static int bs_check_policy(request_rec *r)
             directive_rate_matched = 1;
             if (e->shm_slot < 0 || !counters) continue;
 
-            /* E9 — escalation gate. If this rule has an escalation
-             * config and the (ip, rule) pair is in the escalated
-             * window, return the configured stricter status without
-             * consulting the budget. The normal counter doesn't tick
-             * during escalation: the request is rejected outright. */
-            if (e->escalate && have_ip
+            /* E12 — observe mode (per-rule or global shadow_mode).
+             * The counter still ticks (so `would-rate-limit` volume
+             * answers the operator's "what would this fire?"
+             * question accurately), but over-budget hits log
+             * `rate-limit-exceeded:<name>:observe` instead of
+             * returning 429. E9 escalation is also fully suppressed
+             * — we don't bump strikes, and any pre-existing
+             * escalation state is ignored for this rule under
+             * observe. */
+            int observe = global_shadow || (e->mode == BS_TMODE_OBSERVE);
+
+            if (!observe && e->escalate && have_ip
                 && bs_strike_check_escalated(client_ip,
                                              (apr_uint32_t)e->shm_slot,
                                              now_t)) {
+                /* E9 — escalation gate. Active only outside observe
+                 * mode; observe must not enforce. */
                 bs_score_add(r, BS_PENALTY_RATE_LIMIT, 3600,
                     apr_pstrcat(r->pool, "rate-limit-abuse:",
                                 e->name, NULL));
@@ -3444,7 +3757,19 @@ static int bs_check_policy(request_rec *r)
                                       e->budget, e->window_sec)) {
                 continue;
             }
-            /* Over budget. Retry-After = seconds remaining in window. */
+            /* Over budget. */
+            if (observe) {
+                bs_score_add(r, 0, 0,
+                    apr_pstrcat(r->pool, "rate-limit-exceeded:",
+                                e->name, ":observe", NULL));
+                if (bs_shm.metrics) {
+                    __atomic_fetch_add(
+                        &bs_shm.metrics->rate_limit_observed_total,
+                        1, __ATOMIC_RELAXED);
+                }
+                continue;
+            }
+            /* Enforce: Retry-After = seconds remaining in window. */
             apr_uint32_t win = __atomic_load_n(
                 &counters[e->shm_slot].window_start_sec, __ATOMIC_RELAXED);
             apr_uint32_t now = (apr_uint32_t)apr_time_sec(apr_time_now());
@@ -3686,6 +4011,236 @@ static apr_status_t bs_robots_watchdog_cb(int state, void *data,
     if (!scfg || !scfg->robots_txt_path) return APR_SUCCESS;
     bs_robots_load(sv, scfg, sv->process->pconf);
     return APR_SUCCESS;
+}
+
+/* ======================================================================
+ * E11 — Load-aware throttling.
+ *
+ * Watchdog tick samples the Apache scoreboard's busy-worker ratio,
+ * optionally merges in an external operator-set state from a watched
+ * file, and folds the result into a cached state with hysteresis.
+ * Request path reads bs_shm.header->load_state as a single atomic
+ * u32. No scoreboard scans on the hot path.
+ *
+ * State transitions write `load_state` last, after the streak
+ * counters and `load_state_changes` metric, so an unlucky reader
+ * sees a self-consistent snapshot — at worst a slightly stale
+ * state for a few microseconds. That's fine for a coarse 3-value
+ * brownout signal. */
+
+static int bs_load_effective_int(int v, int dflt)
+{
+    return (v > 0) ? v : dflt;
+}
+
+/* Map a sampled busy-worker ratio (percent of total slots) to a
+ * candidate state via the operator's thresholds. */
+static bs_load_state bs_load_state_from_pct(int busy_pct,
+                                            int warm_pct, int hot_pct)
+{
+    if (busy_pct >= hot_pct)  return BS_LOAD_HOT;
+    if (busy_pct >= warm_pct) return BS_LOAD_WARM;
+    return BS_LOAD_NORMAL;
+}
+
+/* Read + parse the external load-state file. Caches by mtime so a
+ * sampler that ticks every second only does an open()/read() when
+ * the file actually changed (operator's monitor wrote a new value).
+ * On any error: leave the cache untouched and return whatever the
+ * last successful read produced (or NORMAL if never read). */
+static bs_load_state bs_load_read_external(server_rec *sv,
+                                           bs_server_cfg *scfg)
+{
+    if (!scfg->load_state_file) return BS_LOAD_NORMAL;
+    apr_finfo_t finfo;
+    apr_status_t rv = apr_stat(&finfo, scfg->load_state_file,
+                               APR_FINFO_MTIME, sv->process->pconf);
+    if (rv != APR_SUCCESS) {
+        /* File missing is normal if the operator hasn't written one
+         * yet. Don't log per-tick or we'd spam. */
+        return scfg->load_external_cached;
+    }
+    if (finfo.mtime == scfg->load_external_mtime) {
+        return scfg->load_external_cached;   /* unchanged */
+    }
+
+    apr_file_t *f = NULL;
+    rv = apr_file_open(&f, scfg->load_state_file,
+                       APR_READ | APR_BINARY, 0, sv->process->pconf);
+    if (rv != APR_SUCCESS) return scfg->load_external_cached;
+
+    char buf[32];
+    apr_size_t got = sizeof(buf) - 1;
+    rv = apr_file_read(f, buf, &got);
+    apr_file_close(f);
+    if (rv != APR_SUCCESS && rv != APR_EOF) {
+        return scfg->load_external_cached;
+    }
+    buf[got] = '\0';
+    /* Trim trailing whitespace/newline so `echo hot > file` works. */
+    while (got > 0 && (buf[got-1] == '\n' || buf[got-1] == '\r'
+                       || buf[got-1] == ' '  || buf[got-1] == '\t')) {
+        buf[--got] = '\0';
+    }
+    /* Trim leading whitespace too. */
+    char *p = buf;
+    while (*p == ' ' || *p == '\t') p++;
+
+    bs_load_state parsed;
+    if      (!strcasecmp(p, "normal")) parsed = BS_LOAD_NORMAL;
+    else if (!strcasecmp(p, "warm"))   parsed = BS_LOAD_WARM;
+    else if (!strcasecmp(p, "hot"))    parsed = BS_LOAD_HOT;
+    else {
+        ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
+            "mod_botshield: BotShieldLoadStateFile '%s' contains "
+            "unrecognized value '%s' (expected normal|warm|hot); "
+            "treating as normal",
+            scfg->load_state_file, p);
+        parsed = BS_LOAD_NORMAL;
+    }
+    scfg->load_external_cached = parsed;
+    scfg->load_external_mtime  = finfo.mtime;
+    if (parsed != BS_LOAD_NORMAL) {
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+            "mod_botshield: external load state from '%s': %s",
+            scfg->load_state_file, p);
+    }
+    return parsed;
+}
+
+/* Sample the Apache scoreboard. Returns busy_pct = 100 *
+ * busy_workers / total_worker_slots. "Busy" = anything that's
+ * actively servicing a request: BUSY_READ/WRITE/KEEPALIVE/LOG/DNS
+ * + GRACEFUL (still serving its current request). READY and DEAD
+ * slots don't count as busy. */
+static int bs_load_sample_scoreboard(void)
+{
+    if (!ap_exists_scoreboard_image()) return 0;
+    global_score *gs = ap_get_scoreboard_global();
+    if (!gs) return 0;
+    int total = gs->server_limit * gs->thread_limit;
+    if (total <= 0) return 0;
+
+    int busy = 0;
+    for (int i = 0; i < gs->server_limit; i++) {
+        for (int j = 0; j < gs->thread_limit; j++) {
+            worker_score *ws =
+                ap_get_scoreboard_worker_from_indexes(i, j);
+            if (!ws) continue;
+            switch (ws->status) {
+            case SERVER_BUSY_READ:
+            case SERVER_BUSY_WRITE:
+            case SERVER_BUSY_KEEPALIVE:
+            case SERVER_BUSY_LOG:
+            case SERVER_BUSY_DNS:
+            case SERVER_GRACEFUL:
+                busy++;
+                break;
+            default:
+                break;
+            }
+        }
+    }
+    return (busy * 100) / total;
+}
+
+/* Apply hysteresis. Given a candidate state from this tick's
+ * sampling, decide whether to promote/demote the cached state.
+ * Asymmetric: easy to enter (3 escalating samples to warm; 2 more
+ * to hot), slow to exit (5 normal samples to demote one level).
+ * Reset the opposite streak whenever the candidate changes
+ * direction.
+ *
+ * Writes through the SHM header. Single-thread (watchdog), so no
+ * locking; readers see a consistent state because the final write
+ * is to load_state itself. */
+static void bs_load_apply_tick(server_rec *sv, bs_server_cfg *scfg,
+                               bs_load_state candidate)
+{
+    if (!bs_shm.header) return;
+    int warm_rise = bs_load_effective_int(scfg->load_warm_rise,
+                        BS_DEFAULT_LOAD_WARM_RISE);
+    int hot_rise  = bs_load_effective_int(scfg->load_hot_rise,
+                        BS_DEFAULT_LOAD_HOT_RISE);
+    int fall      = bs_load_effective_int(scfg->load_normal_fall,
+                        BS_DEFAULT_LOAD_NORMAL_FALL);
+
+    bs_load_state current = (bs_load_state)bs_shm.header->load_state;
+    bs_load_state next    = current;
+
+    if (candidate > current) {
+        bs_shm.header->load_recovery_streak = 0;
+        bs_shm.header->load_escalation_streak++;
+        int need = (current == BS_LOAD_NORMAL) ? warm_rise : hot_rise;
+        if ((int)bs_shm.header->load_escalation_streak >= need) {
+            next = (bs_load_state)(current + 1);
+            bs_shm.header->load_escalation_streak = 0;
+        }
+    } else if (candidate < current) {
+        bs_shm.header->load_escalation_streak = 0;
+        bs_shm.header->load_recovery_streak++;
+        if ((int)bs_shm.header->load_recovery_streak >= fall) {
+            next = (bs_load_state)(current - 1);
+            bs_shm.header->load_recovery_streak = 0;
+        }
+    } else {
+        /* Steady-state: any drift toward edge resets. */
+        bs_shm.header->load_escalation_streak = 0;
+        bs_shm.header->load_recovery_streak   = 0;
+    }
+
+    if (next != current) {
+        const char *names[] = { "normal", "warm", "hot" };
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+            "mod_botshield: load state %s -> %s",
+            names[current], names[next]);
+        bs_shm.header->load_state_since_sec =
+            (apr_uint32_t)apr_time_sec(apr_time_now());
+        bs_shm.header->load_state_changes++;
+        /* Publish the new state last so a request reading the field
+         * sees either the old or the new value, not torn metadata. */
+        apr_atomic_set32(&bs_shm.header->load_state,
+                         (apr_uint32_t)next);
+    }
+}
+
+/* mod_watchdog tick. Sample, merge with external file, fold into
+ * the cached state. Cheap enough to run every second per main
+ * server. */
+static apr_status_t bs_load_watchdog_cb(int state, void *data,
+                                        apr_pool_t *pool)
+{
+    (void)pool;
+    if (state != AP_WATCHDOG_STATE_RUNNING) return APR_SUCCESS;
+    server_rec *sv = data;
+    if (!sv) return APR_SUCCESS;
+    bs_server_cfg *scfg =
+        ap_get_module_config(sv->module_config, &botshield_module);
+    if (!scfg) return APR_SUCCESS;
+
+    int warm_pct = bs_load_effective_int(scfg->load_warm_pct,
+                       BS_DEFAULT_LOAD_WARM_RATIO_PCT);
+    int hot_pct  = bs_load_effective_int(scfg->load_hot_pct,
+                       BS_DEFAULT_LOAD_HOT_RATIO_PCT);
+    int busy_pct = bs_load_sample_scoreboard();
+    bs_load_state internal = bs_load_state_from_pct(busy_pct,
+                                                    warm_pct, hot_pct);
+    bs_load_state external = bs_load_read_external(sv, scfg);
+
+    /* Most-severe-wins merge. */
+    bs_load_state candidate = (internal > external) ? internal : external;
+    bs_load_apply_tick(sv, scfg, candidate);
+    return APR_SUCCESS;
+}
+
+/* Cheap request-path read of the cached state. Lockless atomic.
+ * Used by E11.2's BotShieldLoadTrigger predicate matcher; the
+ * forward declaration lives near the other request-time helpers
+ * earlier in the file. */
+static bs_load_state bs_load_current(void)
+{
+    if (!bs_shm.header) return BS_LOAD_NORMAL;
+    return (bs_load_state)apr_atomic_read32(&bs_shm.header->load_state);
 }
 
 /* ======================================================================
@@ -4159,10 +4714,17 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                             ? (apr_size_t)scfg->strike_capacity
                             : (apr_size_t)BS_DEFAULT_STRIKE_SLOTS;
     apr_size_t strike_bytes = strike_slots * sizeof(bs_strike_slot);
+    /* E10 — safeguard table. Same ballpark size + tuning surface
+     * as the strike table. */
+    apr_size_t safeguard_slots = (scfg->safeguard_capacity > 0)
+                               ? (apr_size_t)scfg->safeguard_capacity
+                               : (apr_size_t)BS_DEFAULT_SAFEGUARD_SLOTS;
+    apr_size_t safeguard_bytes = safeguard_slots
+                               * sizeof(bs_safeguard_slot);
     apr_size_t total_bytes  = header_bytes + table_bytes + 2 * bloom_bytes
                               + cv_rate_bytes + cv_log_bytes
                               + metrics_bytes + e21_rate_bytes
-                              + strike_bytes;
+                              + strike_bytes + safeguard_bytes;
 
     if (scfg->shm_size < total_bytes) {
         ap_log_error(APLOG_MARK, APLOG_ERR, 0, s,
@@ -4240,6 +4802,12 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     for (apr_size_t i = 0; i < strike_slots; i++) {
         bs_shm.strike_table[i].rule_slot = BS_STRIKE_EMPTY;
     }
+    /* E10: safeguard table follows the strike table. memset(base,0)
+     * leaves every `used` field at 0, which IS the "empty" sentinel
+     * for this table — no explicit zero pass needed. */
+    bs_shm.safeguard_table = (bs_safeguard_slot *)
+        ((unsigned char *)bs_shm.strike_table + strike_bytes);
+    bs_shm.safeguard_capacity = safeguard_slots;
 
     bs_shm.header->bloom_active        = 0;
     bs_shm.header->bloom_buf_bytes     = (apr_uint32_t)bloom_bytes;
@@ -4652,6 +5220,83 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
         }
     }
 
+    /* E11 — load-state watchdog. One registration on the main
+     * server only — the cached state is module-global, so per-vhost
+     * registrations would just multiply the work for no gain. The
+     * sampler reads scoreboard + (optional) external state file
+     * once per tick and updates SHM. Soft dep on mod_watchdog. */
+    {
+        bs_server_cfg *main_scfg = ap_get_module_config(
+            s->module_config, &botshield_module);
+        /* Propagate load directives from any vhost to the main
+         * scfg if main doesn't have them. Operators write
+         * BotShieldLoadStateFile in vhost scope (config_override
+         * lands inside <VirtualHost>); the watchdog runs against
+         * main's scfg. Without this, the watchdog wouldn't see the
+         * directive at all. First-vhost-wins for each field. */
+        if (main_scfg) {
+            for (server_rec *sv2 = s; sv2; sv2 = sv2->next) {
+                bs_server_cfg *vc = ap_get_module_config(
+                    sv2->module_config, &botshield_module);
+                if (!vc || vc == main_scfg) continue;
+                if (!main_scfg->load_state_file && vc->load_state_file)
+                    main_scfg->load_state_file = vc->load_state_file;
+                if (main_scfg->load_refresh_sec <= 0
+                    && vc->load_refresh_sec > 0)
+                    main_scfg->load_refresh_sec = vc->load_refresh_sec;
+                if (main_scfg->load_warm_pct <= 0 && vc->load_warm_pct > 0)
+                    main_scfg->load_warm_pct = vc->load_warm_pct;
+                if (main_scfg->load_hot_pct <= 0 && vc->load_hot_pct > 0)
+                    main_scfg->load_hot_pct = vc->load_hot_pct;
+            }
+        }
+        if (main_scfg) {
+            int refresh = bs_load_effective_int(
+                main_scfg->load_refresh_sec,
+                BS_DEFAULT_LOAD_REFRESH_SEC);
+            APR_OPTIONAL_FN_TYPE(ap_watchdog_get_instance) *fn_get =
+                APR_RETRIEVE_OPTIONAL_FN(ap_watchdog_get_instance);
+            APR_OPTIONAL_FN_TYPE(ap_watchdog_register_callback) *fn_reg =
+                APR_RETRIEVE_OPTIONAL_FN(ap_watchdog_register_callback);
+            if (fn_get && fn_reg) {
+                ap_watchdog_t *wd = NULL;
+                apr_status_t wrv = fn_get(&wd,
+                    "mod_botshield_load", 0, 1, pconf);
+                if (wrv == APR_SUCCESS && wd) {
+                    apr_interval_time_t ival = apr_time_from_sec(refresh);
+                    wrv = fn_reg(wd, ival, s, bs_load_watchdog_cb);
+                } else if (wrv == APR_SUCCESS) {
+                    wrv = APR_EGENERAL;
+                }
+                if (wrv == APR_SUCCESS) {
+                    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+                        "mod_botshield: load-state sampler enabled "
+                        "every %d s%s%s%s",
+                        refresh,
+                        main_scfg->load_state_file ? " (external file " : "",
+                        main_scfg->load_state_file
+                          ? main_scfg->load_state_file : "",
+                        main_scfg->load_state_file ? ")" : "");
+                } else {
+                    ap_log_error(APLOG_MARK, APLOG_WARNING, wrv, s,
+                        "mod_botshield: load-state watchdog "
+                        "registration failed; load state will stay "
+                        "at 'normal'");
+                }
+            } else {
+                /* No mod_watchdog → load state is permanently
+                 * NORMAL. Quiet; only worth logging if the operator
+                 * configured a state file (active intent). */
+                if (main_scfg->load_state_file) {
+                    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+                        "mod_botshield: mod_watchdog not loaded; "
+                        "BotShieldLoadStateFile inert (state stays "
+                        "normal). Load mod_watchdog to enable.");
+                }
+            }
+        }
+    }
+
     return OK;
 }
 
@@ -4974,6 +5619,194 @@ static int bs_strike_record_429(request_rec *r,
     apr_atomic_set32(&slot->version, (v0 | 1U) + 1U);   /* publish */
     apr_global_mutex_unlock(bs_shm.mutex);
     return crossed;
+}
+
+/* --- E10: challenge-safeguard helpers ---
+ *
+ * Anti-loop hysteresis. The rate-counter-strike pair (E9) said
+ * "this client is hitting our rate limit harder than 429 is
+ * deterring"; safeguard says "this client keeps getting presented
+ * a challenge but never solves it." Different signal, same
+ * mitigation pattern (per-IP SHM, short-lived trip state).
+ *
+ * Why safeguard isn't just another E9-style directive: the 429
+ * case is behavior BotShield explicitly provoked ("you asked us
+ * to rate-limit this cohort"). The safeguard case is a failure
+ * mode — clients who are bad at solving challenges, whether from
+ * malice (refusing to run JS) or infrastructure (CSP strips our
+ * interstitial, blockers, privacy tooling). It applies everywhere
+ * a challenge gets issued, independent of operator rule-sets. */
+
+static int bs_safeguard_effective_int(int v, int dflt)
+{
+    return (v > 0) ? v : dflt;
+}
+
+static apr_uint32_t bs_safeguard_bucket(const unsigned char ip[16])
+{
+    apr_uint64_t h = bs_siphash24(bs_shm.header->siphash_key, ip, 16);
+    /* Mix a distinct constant so this table's bucket distribution
+     * isn't perfectly correlated with flagged_table / strike_table
+     * for the same IP — reduces probe-window collisions across
+     * tables under high saturation. */
+    h ^= 0xC0FFEE00BA5EBA11ULL;
+    return (apr_uint32_t)(h % bs_shm.safeguard_capacity);
+}
+
+/* Lockless read. Returns 1 if the IP has an active safeguard
+ * (safeguard_until > now), 0 otherwise. Seqlock discipline matches
+ * bs_flagged_ip_lookup and bs_strike_check_escalated. */
+static int bs_safeguard_check(const unsigned char ip[16], apr_int64_t now)
+{
+    if (!bs_shm.safeguard_table || bs_shm.safeguard_capacity == 0) return 0;
+    apr_uint32_t base = bs_safeguard_bucket(ip);
+
+    for (unsigned i = 0; i < BS_SAFEGUARD_PROBE_LIMIT; i++) {
+        apr_uint32_t idx = (base + i) % bs_shm.safeguard_capacity;
+        bs_safeguard_slot *slot = &bs_shm.safeguard_table[idx];
+
+        apr_uint32_t v1, v2;
+        apr_uint32_t  local_used;
+        unsigned char local_ip[16];
+        apr_int64_t   local_until;
+        int spins = 0;
+        for (;;) {
+            v1 = apr_atomic_read32(&slot->version);
+            if (v1 & 1U) {
+                if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
+                continue;
+            }
+            local_used  = slot->used;
+            memcpy(local_ip, slot->ip, 16);
+            local_until = slot->safeguard_until;
+            v2 = apr_atomic_read32(&slot->version);
+            if (v1 == v2) break;
+            if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
+        }
+        if (v1 == ~0U) continue;
+        if (!local_used) continue;
+        if (memcmp(local_ip, ip, 16) != 0) continue;
+        return local_until > now;
+    }
+    return 0;
+}
+
+/* Bump the presentation counter for this IP under the shared
+ * mutex. Trips safeguard when `present_count` crosses
+ * `threshold` inside `window` seconds. Each call during an
+ * already-active safeguard refreshes safeguard_until (TTL slides
+ * on the last presentation) so clients that stay broken keep
+ * benefiting rather than oscillating at window boundaries. */
+static void bs_safeguard_record_presentation(request_rec *r,
+                                             bs_server_cfg *scfg,
+                                             const unsigned char ip[16],
+                                             apr_int64_t now)
+{
+    if (!bs_shm.safeguard_table || !bs_shm.mutex || !scfg) return;
+    int threshold = bs_safeguard_effective_int(scfg->safeguard_threshold,
+                        BS_DEFAULT_SAFEGUARD_THRESHOLD);
+    int window    = bs_safeguard_effective_int(scfg->safeguard_window,
+                        BS_DEFAULT_SAFEGUARD_WINDOW);
+    int ttl       = bs_safeguard_effective_int(scfg->safeguard_ttl,
+                        BS_DEFAULT_SAFEGUARD_TTL);
+
+    apr_uint32_t base = bs_safeguard_bucket(ip);
+    apr_status_t rv = apr_global_mutex_lock(bs_shm.mutex);
+    if (rv != APR_SUCCESS) {
+        ap_log_rerror(APLOG_MARK, APLOG_WARNING, rv, r,
+            "mod_botshield: safeguard-table mutex_lock failed; "
+            "dropping presentation record");
+        return;
+    }
+
+    int matched_idx = -1;
+    int empty_idx   = -1;
+    for (unsigned i = 0; i < BS_SAFEGUARD_PROBE_LIMIT; i++) {
+        apr_uint32_t idx = (base + i) % bs_shm.safeguard_capacity;
+        bs_safeguard_slot *slot = &bs_shm.safeguard_table[idx];
+        if (!slot->used) {
+            if (empty_idx < 0) empty_idx = (int)idx;
+            continue;
+        }
+        if (memcmp(slot->ip, ip, 16) == 0) {
+            matched_idx = (int)idx;
+            break;
+        }
+    }
+
+    int target_idx;
+    if (matched_idx >= 0) {
+        target_idx = matched_idx;
+    } else if (empty_idx >= 0) {
+        target_idx = empty_idx;
+    } else {
+        static apr_time_t last_warn = 0;
+        apr_time_t now_t = apr_time_now();
+        if (now_t - last_warn > apr_time_from_sec(60)) {
+            last_warn = now_t;
+            ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+                "mod_botshield: safeguard-table probe saturated at "
+                "bucket %u (capacity %" APR_SIZE_T_FMT "); overwriting "
+                "— consider raising BotShieldSafeguardCapacity",
+                base, bs_shm.safeguard_capacity);
+        }
+        target_idx = (int)base;
+    }
+
+    bs_safeguard_slot *slot = &bs_shm.safeguard_table[target_idx];
+    apr_uint32_t v0 = apr_atomic_read32(&slot->version);
+    apr_atomic_set32(&slot->version, v0 | 1U);   /* begin write */
+
+    apr_uint32_t now_sec = (apr_uint32_t)now;
+    int fresh_slot = (matched_idx < 0);
+    if (fresh_slot) {
+        memcpy(slot->ip, ip, 16);
+        slot->used                 = 1;
+        slot->present_window_start = now_sec;
+        slot->present_count        = 1;
+        slot->safeguard_until      = 0;
+    } else if (slot->present_window_start == 0
+               || now_sec - slot->present_window_start >= (apr_uint32_t)window) {
+        /* Window rolled — start fresh counting from this presentation. */
+        slot->present_window_start = now_sec;
+        slot->present_count        = 1;
+    } else {
+        slot->present_count++;
+    }
+    if (slot->present_count >= (apr_uint32_t)threshold) {
+        slot->safeguard_until = now + ttl;
+    }
+
+    apr_atomic_set32(&slot->version, (v0 | 1U) + 1U);
+    apr_global_mutex_unlock(bs_shm.mutex);
+}
+
+/* Clear the (ip) entry. Called when a valid _bs_verified lands for
+ * this IP — proves the client CAN solve, so accumulated presentation
+ * history was noise (probably transient) and we want a fresh slate.
+ * No-op if the entry isn't found; silent on error. */
+static void bs_safeguard_clear(const unsigned char ip[16])
+{
+    if (!bs_shm.safeguard_table || !bs_shm.mutex) return;
+    apr_uint32_t base = bs_safeguard_bucket(ip);
+
+    if (apr_global_mutex_lock(bs_shm.mutex) != APR_SUCCESS) return;
+    for (unsigned i = 0; i < BS_SAFEGUARD_PROBE_LIMIT; i++) {
+        apr_uint32_t idx = (base + i) % bs_shm.safeguard_capacity;
+        bs_safeguard_slot *slot = &bs_shm.safeguard_table[idx];
+        if (!slot->used) continue;
+        if (memcmp(slot->ip, ip, 16) != 0) continue;
+        apr_uint32_t v0 = apr_atomic_read32(&slot->version);
+        apr_atomic_set32(&slot->version, v0 | 1U);
+        slot->used                 = 0;
+        slot->present_window_start = 0;
+        slot->present_count        = 0;
+        slot->safeguard_until      = 0;
+        memset(slot->ip, 0, 16);
+        apr_atomic_set32(&slot->version, (v0 | 1U) + 1U);
+        break;
+    }
+    apr_global_mutex_unlock(bs_shm.mutex);
 }
 
 /* --- Rotating Bloom filter (M5.2) ---
@@ -5672,13 +6505,51 @@ static int bs_rate_unit_seconds(const char *u)
  *
  * Apache doesn't ship AP_INIT_TAKE4/5, so this uses TAKE_ARGV and
  * enforces argc itself. */
+/* E12 — parse the optional trailing `mode=enforce|observe` argv
+ * token shared by BotShieldRateLimit and BotShieldBlockPath. The
+ * directive grammar is positional (5 args for rate-limit, 4 for
+ * block-path), so this is strict: the token must be the LAST
+ * argument and it must be `mode=...`. Returns the parsed mode in
+ * *out_mode and shrinks *argc by 1 if the token was consumed. */
+static const char *bs_parse_optional_mode(apr_pool_t *p,
+                                          const char *dname,
+                                          int *argc,
+                                          char *const argv[],
+                                          int *out_mode)
+{
+    *out_mode = BS_TMODE_ENFORCE;
+    if (*argc <= 0) return NULL;
+    const char *last = argv[*argc - 1];
+    if (strncmp(last, "mode=", 5) != 0) return NULL;
+    const char *val = last + 5;
+    if (!strcasecmp(val, "enforce")) {
+        *out_mode = BS_TMODE_ENFORCE;
+    } else if (!strcasecmp(val, "observe")) {
+        *out_mode = BS_TMODE_OBSERVE;
+    } else {
+        return apr_psprintf(p,
+            "%s: mode='%s' must be 'enforce' or 'observe'", dname, val);
+    }
+    (*argc)--;
+    return NULL;
+}
+
 static const char *bs_set_rate_limit(cmd_parms *cmd, void *dconf,
                                      int argc, char *const argv[])
 {
     (void)dconf;
+    /* E12 — strip optional trailing mode= token before counting
+     * positional args. */
+    int mode = BS_TMODE_ENFORCE;
+    {
+        const char *merr = bs_parse_optional_mode(cmd->pool,
+            "BotShieldRateLimit", &argc, argv, &mode);
+        if (merr) return merr;
+    }
     if (argc != 5) {
         return "BotShieldRateLimit: expects exactly 5 args — "
-               "<name> <budget> <per> <ua> <ipspec>";
+               "<name> <budget> <per> <ua> <ipspec> "
+               "[mode=enforce|observe]";
     }
     const char *name     = argv[0];
     const char *budget_s = argv[1];
@@ -5710,6 +6581,7 @@ static const char *bs_set_rate_limit(cmd_parms *cmd, void *dconf,
     e->budget     = (apr_uint32_t)budget;
     e->window_sec = (apr_uint32_t)unit;
     e->shm_slot   = -1;
+    e->mode       = mode;   /* E12 */
     const char *err = bs_cohort_resolve(cmd, &e->cohort, ua, ipspec);
     if (err) return apr_pstrcat(cmd->pool,
         "BotShieldRateLimit: ", err, NULL);
@@ -5863,6 +6735,207 @@ static const char *bs_set_rate_escalate_capacity(cmd_parms *cmd,
     return NULL;
 }
 
+/* E10 — BotShieldSafeguard on|off. Master switch for the
+ * anti-loop hysteresis. Off = pre-E10 behavior (challenge every
+ * request that tier dispatch sends to challenge). On = track
+ * presentations per IP and flip to a short-lived pass-through
+ * after BotShieldSafeguardThreshold presentations within
+ * BotShieldSafeguardWindow seconds without a solve.
+ *
+ * Default off: opt-in because safeguard does grant temporary
+ * pass-through, which some operators will consider too soft
+ * regardless of the narrow conditions. Operators who've seen
+ * the stuck-loop failure mode in practice enable it. */
+static const char *bs_set_safeguard(cmd_parms *cmd, void *dconf, int flag)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->safeguard_enabled = flag ? 1 : 0;
+    return NULL;
+}
+
+/* E10 — BotShieldSafeguardThreshold <N>. Number of presentations
+ * within the window before safeguard trips. */
+static const char *bs_set_safeguard_threshold(cmd_parms *cmd,
+                                              void *dconf,
+                                              const char *arg)
+{
+    (void)dconf;
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (!end || *end || n < 1 || n > 1000) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSafeguardThreshold: '%s' must be 1..1000", arg);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->safeguard_threshold = (int)n;
+    return NULL;
+}
+
+/* E10 — BotShieldSafeguardWindow <seconds>. Counting window for
+ * the threshold. Beyond this, old presentations roll off and the
+ * counter resets on the next presentation. */
+static const char *bs_set_safeguard_window(cmd_parms *cmd,
+                                           void *dconf,
+                                           const char *arg)
+{
+    (void)dconf;
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (!end || *end || n < 1 || n > 86400) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSafeguardWindow: '%s' must be 1..86400 seconds",
+            arg);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->safeguard_window = (int)n;
+    return NULL;
+}
+
+/* E10 — BotShieldSafeguardTTL <seconds>. How long the safeguard
+ * state lasts after the last presentation. Slides on each fresh
+ * presentation during active safeguard (TTL resets) so a client
+ * that stays broken doesn't oscillate at window boundaries. */
+static const char *bs_set_safeguard_ttl(cmd_parms *cmd,
+                                        void *dconf,
+                                        const char *arg)
+{
+    (void)dconf;
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (!end || *end || n < 1 || n > 86400 * 7) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSafeguardTTL: '%s' must be 1..%d seconds",
+            arg, 86400 * 7);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->safeguard_ttl = (int)n;
+    return NULL;
+}
+
+/* E10 — BotShieldSafeguardCapacity <n>. SHM slot count. Same
+ * per-server-scope convention as the other SHM-sizing directives:
+ * only the main server's value is consulted at post_config. */
+static const char *bs_set_safeguard_capacity(cmd_parms *cmd,
+                                             void *dconf,
+                                             const char *arg)
+{
+    (void)dconf;
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (!end || *end
+        || n < BS_SAFEGUARD_MIN_SLOTS || n > BS_SAFEGUARD_MAX_SLOTS) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSafeguardCapacity: '%s' must be %d..%d",
+            arg, BS_SAFEGUARD_MIN_SLOTS, BS_SAFEGUARD_MAX_SLOTS);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->safeguard_capacity = (int)n;
+    return NULL;
+}
+
+/* E12 — BotShieldShadowMode on|off. Server-scope master switch
+ * for dry-run enforcement. When on, every trigger / rate-limit /
+ * block-path rule behaves as if mode=observe regardless of its
+ * per-rule setting. Operators stage a whole config revision in one
+ * shot, watch the decision log, then flip off to enforce. Off is
+ * the default — operators opt in. */
+static const char *bs_set_shadow_mode(cmd_parms *cmd, void *dconf,
+                                      int flag)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->shadow_mode = flag ? 1 : 0;
+    return NULL;
+}
+
+/* E11 — BotShieldLoadStateFile <path>. Operator-writable file
+ * whose body is `normal`, `warm`, or `hot` (whitespace tolerated).
+ * Watchdog stat-polls mtime once per refresh tick; only re-reads
+ * when mtime changed. Most-severe-wins merging means an external
+ * `hot` overrides any internal sensing decision. */
+static const char *bs_set_load_state_file(cmd_parms *cmd, void *dconf,
+                                          const char *arg)
+{
+    (void)dconf;
+    if (!arg || !*arg) {
+        return "BotShieldLoadStateFile: path required";
+    }
+    if (arg[0] != '/') {
+        return "BotShieldLoadStateFile: path must be absolute";
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->load_state_file = apr_pstrdup(cmd->pool, arg);
+    return NULL;
+}
+
+/* E11 — BotShieldLoadRefreshInterval <seconds>. How often the
+ * watchdog samples + reads the external file. Default 1s; the
+ * lockless cached read on the request path keeps this from
+ * affecting hot-path cost. */
+static const char *bs_set_load_refresh(cmd_parms *cmd, void *dconf,
+                                       const char *arg)
+{
+    (void)dconf;
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (!end || *end || n < 1 || n > 60) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldLoadRefreshInterval: '%s' must be 1..60 seconds",
+            arg);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->load_refresh_sec = (int)n;
+    return NULL;
+}
+
+/* E11 — BotShieldLoadWarmThreshold <percent>. Busy-worker ratio
+ * (percent of total worker slots) at which a sample is classified
+ * warm. Default 65. */
+static const char *bs_set_load_warm_pct(cmd_parms *cmd, void *dconf,
+                                        const char *arg)
+{
+    (void)dconf;
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (!end || *end || n < 1 || n > 99) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldLoadWarmThreshold: '%s' must be 1..99 (percent)",
+            arg);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->load_warm_pct = (int)n;
+    return NULL;
+}
+
+/* E11 — BotShieldLoadHotThreshold <percent>. Default 85; must be
+ * strictly greater than the warm threshold. */
+static const char *bs_set_load_hot_pct(cmd_parms *cmd, void *dconf,
+                                       const char *arg)
+{
+    (void)dconf;
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (!end || *end || n < 1 || n > 99) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldLoadHotThreshold: '%s' must be 1..99 (percent)",
+            arg);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->load_hot_pct = (int)n;
+    return NULL;
+}
+
 /* BotShieldBlockPath <name> <path-glob> <ua> <ipspec> — cohort-
  * conditional path block. Matching requests get 403 + a scoring
  * hook. Glob semantics are minimal in v1 (prefix / trailing '*' /
@@ -5875,9 +6948,18 @@ static const char *bs_set_block_path(cmd_parms *cmd, void *dconf,
                                      int argc, char *const argv[])
 {
     (void)dconf;
+    /* E12 — strip optional trailing mode= token before counting
+     * positional args. */
+    int mode = BS_TMODE_ENFORCE;
+    {
+        const char *merr = bs_parse_optional_mode(cmd->pool,
+            "BotShieldBlockPath", &argc, argv, &mode);
+        if (merr) return merr;
+    }
     if (argc != 4) {
         return "BotShieldBlockPath: expects exactly 4 args — "
-               "<name> <path-glob> <ua> <ipspec>";
+               "<name> <path-glob> <ua> <ipspec> "
+               "[mode=enforce|observe]";
     }
     const char *name    = argv[0];
     const char *pattern = argv[1];
@@ -5899,6 +6981,7 @@ static const char *bs_set_block_path(cmd_parms *cmd, void *dconf,
     bs_block_path_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
     e->name         = apr_pstrdup(cmd->pool, name);
     e->path_pattern = apr_pstrdup(cmd->pool, pattern);
+    e->mode         = mode;   /* E12 */
     const char *err = bs_cohort_resolve(cmd, &e->cohort, ua, ipspec);
     if (err) return apr_pstrcat(cmd->pool,
         "BotShieldBlockPath: ", err, NULL);
@@ -5930,6 +7013,7 @@ static const char *bs_trigger_family_dname(bs_trigger_family fam)
     case BS_TFAMILY_COOKIE:   return "BotShieldCookieTrigger";
     case BS_TFAMILY_ENV:      return "BotShieldEnvTrigger";
     case BS_TFAMILY_FEEDBACK: return "BotShieldFeedbackTrigger";
+    case BS_TFAMILY_LOAD:     return "BotShieldLoadTrigger";
     }
     return "BotShieldTrigger";      /* unreachable */
 }
@@ -5964,6 +7048,16 @@ static void bs_trigger_action_init(bs_trigger_family fam,
         a->flag_bit    = 0;
         a->ttl_sec     = 0;
         break;
+    case BS_TFAMILY_LOAD:
+        /* Load triggers default to pass-with-score-shaping. The
+         * common case is "add some penalty/credit when warm/hot";
+         * less common is "outright 403 expensive paths under hot."
+         * Both are explicit operator decisions via status=. No
+         * flag — load is a global state, not per-IP behavior. */
+        a->status_code = BS_TRIGGER_STATUS_PASS;
+        a->flag_bit    = 0;
+        a->ttl_sec     = 0;
+        break;
     }
     a->penalty         = 0;
     a->credit          = 0;
@@ -5976,13 +7070,18 @@ static const char *bs_trigger_known_keys(bs_trigger_family fam)
 {
     switch (fam) {
     case BS_TFAMILY_PATH:
-        return "status, redirect, log, flag, ttl, penalty";
+        return "status, redirect, log, flag, ttl, penalty, mode";
     case BS_TFAMILY_COOKIE:
-        return "status, redirect, log, flag, ttl, penalty, credit";
+        return "status, redirect, log, flag, ttl, penalty, credit, mode";
     case BS_TFAMILY_ENV:
-        return "status, log, flag, ttl, penalty, credit";
+        return "status, log, flag, ttl, penalty, credit, mode";
     case BS_TFAMILY_FEEDBACK:
+        /* No mode= for feedback: the response has already been
+         * served, so "observe" doesn't have a meaningful no-op
+         * compared to enforce. */
         return "flag, ttl, log";
+    case BS_TFAMILY_LOAD:
+        return "status, log, penalty, credit, mode";
     }
     return "";
 }
@@ -6049,12 +7148,11 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
         }
         a->status_explicit = 1;
     } else if (BS_AK("redirect")) {
-        if (fam == BS_TFAMILY_ENV) {
+        if (fam == BS_TFAMILY_ENV || fam == BS_TFAMILY_LOAD) {
             return apr_psprintf(pool,
-                "%s: redirect= is not supported on env triggers "
-                "(env signals are scoring/flagging only; use the "
-                "path or cookie family for response-shaping "
-                "redirects)", dname);
+                "%s: redirect= is not supported on this family "
+                "(scoring/flagging only; use the path or cookie "
+                "family for response-shaping redirects)", dname);
         }
         if (!*val) {
             return apr_psprintf(pool,
@@ -6064,6 +7162,14 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
     } else if (BS_AK("log")) {
         a->log_tag = apr_pstrdup(pool, val);
     } else if (BS_AK("flag")) {
+        if (fam == BS_TFAMILY_LOAD) {
+            return apr_psprintf(pool,
+                "%s: flag= is not supported on load triggers "
+                "(load is global state; flagging individual IPs "
+                "because the host is hot doesn't fit the model — "
+                "use a cookie or env trigger if you want per-IP "
+                "memory tied to a load condition)", dname);
+        }
         const char *perr = NULL;
         apr_uint32_t bits = bs_parse_flag_names(pool, val, &perr);
         if (perr) return apr_psprintf(pool,
@@ -6075,6 +7181,12 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
         }
         a->flag_bit = bits;
     } else if (BS_AK("ttl")) {
+        if (fam == BS_TFAMILY_LOAD) {
+            return apr_psprintf(pool,
+                "%s: ttl= has no effect on load triggers (no flag "
+                "is written, so there's nothing for ttl to govern)",
+                dname);
+        }
         char *end = NULL;
         long t = strtol(val, &end, 10);
         if (!end || *end || t < 0 || t > 86400 * 30) {
@@ -6091,6 +7203,28 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
                 "%s: penalty='%s' must be 0..1000", dname, val);
         }
         a->penalty = (int)pn;
+    } else if (BS_AK("mode")) {
+        /* E12 — observe vs enforce. Default enforce; observe makes
+         * the rule log a :observe match without taking the action.
+         * Same enum across path/cookie/env/load families. Feedback
+         * is response-path; observe doesn't have a meaningful no-op
+         * there (the response already shipped), so reject. */
+        if (fam == BS_TFAMILY_FEEDBACK) {
+            return apr_psprintf(pool,
+                "%s: mode= is not supported on feedback triggers "
+                "(observe is meaningless on a response-path rule; "
+                "if you don't want the event applied, just don't "
+                "declare a BotShieldFeedbackTrigger for it)", dname);
+        }
+        if (!strcasecmp(val, "enforce")) {
+            a->mode = BS_TMODE_ENFORCE;
+        } else if (!strcasecmp(val, "observe")) {
+            a->mode = BS_TMODE_OBSERVE;
+        } else {
+            return apr_psprintf(pool,
+                "%s: mode='%s' must be 'enforce' or 'observe'",
+                dname, val);
+        }
     } else if (BS_AK("credit")) {
         if (fam == BS_TFAMILY_PATH) {
             return apr_psprintf(pool,
@@ -6169,6 +7303,27 @@ static bs_trigger_exec_outcome bs_apply_trigger_action(
     const char *family_tag,
     const char *trigger_name)
 {
+    /* E12 — shadow / observe-mode short-circuit. If the rule is
+     * observe-only, OR the global shadow_mode is on, log the match
+     * with a :observe suffix and return without applying any side
+     * effect (no flag-IP, no score, no status, no redirect, no log
+     * tag — observe is a "what would have happened" probe).
+     * Caller's loop treats BS_TEXEC_OBSERVE as `continue` so the
+     * next rule still gets a chance — observed rules never shadow
+     * enforced ones. */
+    int global_shadow = (scfg && scfg->shadow_mode == 1);
+    int observe = global_shadow || (a->mode == BS_TMODE_OBSERVE);
+    if (observe) {
+        bs_score_add(r, 0, 0,
+            apr_pstrcat(r->pool, family_tag, ":", trigger_name,
+                        ":observe", NULL));
+        if (bs_shm.metrics) {
+            __atomic_fetch_add(&bs_shm.metrics->trigger_observed_total,
+                               1, __ATOMIC_RELAXED);
+        }
+        return BS_TEXEC_OBSERVE;
+    }
+
     /* Flag-IP (future-request memory). Applies to all families
      * uniformly — flag_bit is already 0 when ttl_sec==0, so the
      * guard below is belt-and-suspenders. */
@@ -6195,15 +7350,18 @@ static bs_trigger_exec_outcome bs_apply_trigger_action(
                             ":pass", NULL));
             return BS_TEXEC_PASS_DECLINE;
         }
-        /* Cookie/env pass: apply penalty - credit on THIS request's
-         * score. The signal (cookie, env var) is part of this
-         * request's state, so the score contribution belongs here. */
+        /* Cookie/env/load pass: apply penalty - credit on THIS
+         * request's score. The signal is part of this request's
+         * decision state (cookie carried, env set, host hot), so
+         * the score contribution belongs here. */
         int delta = a->penalty - a->credit;
         bs_score_add(r, delta, 0,
             apr_pstrcat(r->pool, family_tag, ":", trigger_name, NULL));
-        return (fam == BS_TFAMILY_COOKIE)
-             ? BS_TEXEC_PASS_CONTINUE   /* cookies accumulate */
-             : BS_TEXEC_PASS_BREAK;     /* env first-match-wins */
+        if (fam == BS_TFAMILY_COOKIE) return BS_TEXEC_PASS_CONTINUE;
+        /* env + load: first-match-wins. Distinct load triggers
+         * (state>=warm vs state=hot) are alternative-specificity
+         * cases, not layered reputation — one match is enough. */
+        return BS_TEXEC_PASS_BREAK;
     }
 
     /* Concrete status. Record reason; caller emits Location + the
@@ -6655,6 +7813,94 @@ static const char *bs_set_feedback_trigger(cmd_parms *cmd, void *dconf,
     }
     *(bs_feedback_trigger_entry **)
         apr_array_push(scfg->feedback_triggers) = e;
+    return NULL;
+}
+
+/* E11.2 — BotShieldLoadTrigger <name> <load-match> [key=value ...].
+ *
+ * load-match shapes:
+ *   state=normal   (exact match — typically only for tests/docs)
+ *   state=warm
+ *   state=hot
+ *   state>=warm    (matches warm OR hot)
+ *   state>=hot     (matches hot only — equivalent to state=hot but
+ *                   reads more naturally in operator config when
+ *                   paired with state>=warm rules)
+ *
+ * First-match-wins within the family (load triggers are alternative-
+ * specificity cases, not layered reputation). Action keys: status,
+ * log, penalty, credit. flag/ttl/redirect rejected at parse time —
+ * load is a global signal, not per-IP behavior to memorize. */
+static const char *bs_set_load_trigger(cmd_parms *cmd, void *dconf,
+                                       int argc, char *const argv[])
+{
+    (void)dconf;
+    if (argc < 2) {
+        return "BotShieldLoadTrigger: expects <name> <load-match> "
+               "[key=value ...]";
+    }
+    const char *name  = argv[0];
+    const char *match = argv[1];
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    if (!bs_bot_name_valid(name)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldLoadTrigger: name '%s' must be [a-z0-9-]{1,32}",
+            name);
+    }
+
+    int pred_kind;
+    const char *state_str;
+    if (!strncmp(match, "state>=", 7)) {
+        pred_kind = BS_LP_GE;
+        state_str = match + 7;
+    } else if (!strncmp(match, "state=", 6)) {
+        pred_kind = BS_LP_EQ;
+        state_str = match + 6;
+    } else {
+        return apr_psprintf(cmd->pool,
+            "BotShieldLoadTrigger: unrecognized load-match '%s' "
+            "(expected state=<level> or state>=<level> where "
+            "<level> is normal|warm|hot)", match);
+    }
+    bs_load_state target;
+    if      (!strcasecmp(state_str, "normal")) target = BS_LOAD_NORMAL;
+    else if (!strcasecmp(state_str, "warm"))   target = BS_LOAD_WARM;
+    else if (!strcasecmp(state_str, "hot"))    target = BS_LOAD_HOT;
+    else {
+        return apr_psprintf(cmd->pool,
+            "BotShieldLoadTrigger: state '%s' must be one of "
+            "normal|warm|hot", state_str);
+    }
+
+    bs_load_trigger_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
+    e->name         = apr_pstrdup(cmd->pool, name);
+    e->pred_kind    = pred_kind;
+    e->target_state = target;
+    bs_trigger_action_init(BS_TFAMILY_LOAD, &e->action);
+
+    for (int i = 2; i < argc; i++) {
+        const char *err = bs_parse_trigger_action_key(cmd->pool,
+            BS_TFAMILY_LOAD, argv[i], &e->action);
+        if (err) return err;
+    }
+    {
+        const char *err = bs_finalize_trigger_action(cmd->pool,
+            BS_TFAMILY_LOAD, &e->action);
+        if (err) return err;
+    }
+
+    /* Upsert-by-name. */
+    for (int i = 0; i < scfg->load_triggers->nelts; i++) {
+        bs_load_trigger_entry *ex = APR_ARRAY_IDX(
+            scfg->load_triggers, i, bs_load_trigger_entry *);
+        if (strcmp(ex->name, e->name) == 0) {
+            APR_ARRAY_IDX(scfg->load_triggers, i,
+                          bs_load_trigger_entry *) = e;
+            return NULL;
+        }
+    }
+    *(bs_load_trigger_entry **)apr_array_push(scfg->load_triggers) = e;
     return NULL;
 }
 
@@ -9129,6 +10375,19 @@ static int bs_metrics_handler(request_rec *r, bs_dir_cfg *cfg)
 
     /* --- E2.1 policy-enforcement counters --- */
 
+    bs_m_emit_counter(r, "rate_limit_observed_total",
+        "Rate-limit over-budget events that ran in observe mode "
+        "(per-rule mode=observe or BotShieldShadowMode on); rule "
+        "would have returned 429 but didn't.",
+        bs_mload(&m->rate_limit_observed_total));
+    bs_m_emit_counter(r, "block_path_observed_total",
+        "Block-path matches that ran in observe mode; rule would "
+        "have returned 403 but didn't.",
+        bs_mload(&m->block_path_observed_total));
+    bs_m_emit_counter(r, "trigger_observed_total",
+        "Trigger matches (path/cookie/env/load) that ran in observe "
+        "mode across all families.",
+        bs_mload(&m->trigger_observed_total));
     bs_m_emit_counter(r, "rate_limit_exceeded_total",
         "Requests that tripped a BotShieldRateLimit cohort budget "
         "(response was 429 + Retry-After).",
@@ -9165,6 +10424,18 @@ static int bs_metrics_handler(request_rec *r, bs_dir_cfg *cfg)
     bs_m_emit_gauge(r, "cv_log_slot_capacity",
         "Fixed size of the verify-endpoint log-suppress ring (slots).",
         (apr_uint64_t)bs_shm.cv_log_slot_count);
+
+    /* E11 — load-state observability. The gauge is the most useful
+     * value to alert on; the counter lets operators graph state
+     * transitions per minute. */
+    bs_m_emit_gauge(r, "load_state",
+        "Current cached load state (0=normal, 1=warm, 2=hot).",
+        (apr_uint64_t)(bs_shm.header
+                       ? bs_shm.header->load_state : 0));
+    bs_m_emit_counter(r, "load_state_changes_total",
+        "Number of load-state transitions since the SHM was created.",
+        (apr_uint64_t)(bs_shm.header
+                       ? bs_shm.header->load_state_changes : 0));
 
     return OK;
 }
@@ -10294,6 +11565,70 @@ static const command_rec bs_cmds[] = {
                  "headroom; same eviction discipline as the flagged-"
                  "IP table when the probe window saturates. Read at "
                  "post_config from the main server's value."),
+    /* E10 — challenge safeguard / anti-loop hysteresis. */
+    AP_INIT_FLAG("BotShieldSafeguard",
+                 bs_set_safeguard, NULL, RSRC_CONF,
+                 "Enable anti-loop hysteresis (default off). When on, "
+                 "a client that gets challenged N times within W "
+                 "seconds without solving any challenge is passed "
+                 "through for a TTL window instead of being re-"
+                 "challenged. Decision log shows reason "
+                 "challenge-safeguard. Doesn't mint _bs_verified; "
+                 "doesn't override 403/429 blocks."),
+    AP_INIT_TAKE1("BotShieldSafeguardThreshold",
+                 bs_set_safeguard_threshold, NULL, RSRC_CONF,
+                 "Presentations-without-solve inside the window "
+                 "before safeguard trips (default 5; range 1..1000)."),
+    AP_INIT_TAKE1("BotShieldSafeguardWindow",
+                 bs_set_safeguard_window, NULL, RSRC_CONF,
+                 "Counting window in seconds for the threshold "
+                 "(default 600; range 1..86400)."),
+    AP_INIT_TAKE1("BotShieldSafeguardTTL",
+                 bs_set_safeguard_ttl, NULL, RSRC_CONF,
+                 "How long safeguard stays active after the last "
+                 "presentation (default 900 seconds; range "
+                 "1..604800). Slides on each fresh presentation "
+                 "during active safeguard."),
+    AP_INIT_TAKE1("BotShieldSafeguardCapacity",
+                 bs_set_safeguard_capacity, NULL, RSRC_CONF,
+                 "SHM safeguard-table slot count (default 50000). "
+                 "Per-server-scope but only the main server's value "
+                 "is consulted at post_config since the table is "
+                 "module-global."),
+    /* E11 — load-aware throttling. Sampling + cached state. */
+    AP_INIT_TAKE1("BotShieldLoadStateFile",
+                 bs_set_load_state_file, NULL, RSRC_CONF,
+                 "Optional file the operator's monitoring system "
+                 "writes to push a load-state override into the "
+                 "module. Body is one of normal/warm/hot. Watchdog "
+                 "stat-polls mtime; only re-reads on change. "
+                 "Most-severe-wins merging with internal sensing."),
+    AP_INIT_TAKE1("BotShieldLoadRefreshInterval",
+                 bs_set_load_refresh, NULL, RSRC_CONF,
+                 "Watchdog tick period in seconds (default 1; "
+                 "1..60). Lower = faster brownout response; higher "
+                 "= less work in mod_watchdog."),
+    AP_INIT_TAKE1("BotShieldLoadWarmThreshold",
+                 bs_set_load_warm_pct, NULL, RSRC_CONF,
+                 "Busy-worker percentage at which a tick samples "
+                 "as 'warm' (default 65; range 1..99). Hysteresis "
+                 "still applies — promotion takes 3 consecutive "
+                 "warm-or-hot samples."),
+    AP_INIT_TAKE1("BotShieldLoadHotThreshold",
+                 bs_set_load_hot_pct, NULL, RSRC_CONF,
+                 "Busy-worker percentage at which a tick samples "
+                 "as 'hot' (default 85; range 1..99). Must be "
+                 "greater than the warm threshold."),
+    /* E12 — shadow / dry-run enforcement. */
+    AP_INIT_FLAG("BotShieldShadowMode",
+                 bs_set_shadow_mode, NULL, RSRC_CONF,
+                 "Master switch for dry-run enforcement. When on, "
+                 "all trigger / rate-limit / block-path rules log "
+                 "matches with a :observe suffix instead of taking "
+                 "their action — useful for staging a whole policy "
+                 "revision before flipping enforcement on. Default "
+                 "off; per-rule mode=observe is the finer-grained "
+                 "alternative."),
     AP_INIT_TAKE_ARGV("BotShieldBlockPath",
                  bs_set_block_path, NULL, RSRC_CONF,
                  "Block a named cohort from a path glob. Args: "
@@ -10350,6 +11685,17 @@ static const command_rec bs_cmds[] = {
                  "here and applies flag+ttl to the flagged-IP table. "
                  "No status/redirect/penalty/credit (response is "
                  "already served)."),
+    /* E11.2 — load-aware throttling triggers */
+    AP_INIT_TAKE_ARGV("BotShieldLoadTrigger",
+                 bs_set_load_trigger, NULL, RSRC_CONF,
+                 "Trigger that fires based on the cached load state "
+                 "(see BotShieldLoadStateFile / E11). Args: <name> "
+                 "<load-match> [key=value ...]. load-match is one of "
+                 "state=<level> or state>=<level> where <level> is "
+                 "normal|warm|hot. Keys: status=<code|pass>, "
+                 "log=<tag>, penalty=<n>, credit=<n>. flag/ttl/"
+                 "redirect rejected — load is global state, not "
+                 "per-IP behavior. First-match-wins."),
     /* E3 — path-based triggers */
     AP_INIT_TAKE_ARGV("BotShieldPathTrigger",
                  bs_set_path_trigger, NULL, RSRC_CONF,
@@ -11051,6 +12397,23 @@ static int bs_handler(request_rec *r)
         if (!cookie_verify_reason) {
             cookie_fully_ok = 1;
             have_prior_rep  = 1;
+            /* E10 — safeguard clear on solve. A successful verify
+             * proves this client CAN complete a challenge, so any
+             * accumulated presentation history was transient noise
+             * (mid-session CSP moment, browser cookie glitch). Reset
+             * the slot so a later failed solve counts from zero. */
+            {
+                bs_server_cfg *scfg_sg = ap_get_module_config(
+                    r->server->module_config, &botshield_module);
+                if (scfg_sg && scfg_sg->safeguard_enabled == 1) {
+                    unsigned char sg_ip[16];
+                    if (bs_parse_client_ip(r->useragent_ip, sg_ip)) {
+                        bs_mask_ipv6_prefix(sg_ip,
+                                            scfg_sg->ipv6_prefix_bits);
+                        bs_safeguard_clear(sg_ip);
+                    }
+                }
+            }
         } else {
             if (strcmp(cookie_verify_reason, "signature mismatch") != 0) {
                 have_prior_rep = 1;
@@ -11213,6 +12576,39 @@ static int bs_handler(request_rec *r)
      * now that we've committed to challenging this client; that keeps
      * writes off the ~99% happy path. */
     if (have_client_ip) bs_bloom_add(client_ip);
+
+    /* E10 — challenge safeguard. Before actually issuing the
+     * challenge, check whether this IP has been presented N times
+     * within the window without solving. If so, flip to a pass-
+     * through with reason=challenge-safeguard so a broken client
+     * (JS blocked, CSP-stripped, cookie handling buggy) stops
+     * being looped on the same challenge. Otherwise record this
+     * presentation and proceed. Safeguard runs AFTER bs_check_policy
+     * by construction (we're already past the policy short-circuit
+     * returns), so 403/429 blocks still win. */
+    {
+        bs_server_cfg *scfg_sg = ap_get_module_config(
+            r->server->module_config, &botshield_module);
+        if (scfg_sg && scfg_sg->safeguard_enabled == 1
+            && have_client_ip) {
+            apr_int64_t now_t = (apr_int64_t)apr_time_sec(apr_time_now());
+            if (bs_safeguard_check(client_ip, now_t)) {
+                ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                    "mod_botshield: challenge-safeguard active for "
+                    "%s; skipping challenge-issue and passing "
+                    "through (until=%" APR_INT64_T_FMT ")",
+                    r->useragent_ip, (apr_int64_t)now_t);
+                bs_score_add(r, 0, 0, "challenge-safeguard");
+                bs_decision_log(r, "safeguard", "declined",
+                                cookie_status, "-", "-",
+                                bs_decision_reason_names(r->pool, score),
+                                effective);
+                return DECLINED;
+            }
+            bs_safeguard_record_presentation(r, scfg_sg,
+                                             client_ip, now_t);
+        }
+    }
 
     /* Decide whether this challenge will be served as the M7 silent-tier
      * auto-submit splash or as the form-PoW interstitial. Captcha tier
