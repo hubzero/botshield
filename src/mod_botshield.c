@@ -818,6 +818,9 @@ typedef struct bs_server_cfg {
      * response-path header map to module memory (flag+ttl+log) via
      * these entries. Same ordered-array + upsert-by-name shape. */
     apr_array_header_t *feedback_triggers; /* bs_feedback_trigger_entry * */
+    /* E11.2 — load triggers. Same ordered-array shape; predicate
+     * matches against the global cached load_state (E11.1). */
+    apr_array_header_t *load_triggers;     /* bs_load_trigger_entry * */
     apr_array_header_t *session_names;     /* const char * (lowercased) */
     /* E2.2 — robots.txt enforcement.
      *
@@ -1054,6 +1057,8 @@ static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
                                                 add->env_triggers);
     out->feedback_triggers = bs_merge_rule_array(p, base->feedback_triggers,
                                                  add->feedback_triggers);
+    out->load_triggers     = bs_merge_rule_array(p, base->load_triggers,
+                                                 add->load_triggers);
     /* session_names: concatenate base + add, drop dups. Small lists,
      * O(n*m) is fine; happens once at config load. */
     if (base->session_names && add->session_names) {
@@ -1163,6 +1168,7 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->cookie_triggers  = apr_array_make(p, 4, sizeof(void *));
     scfg->env_triggers     = apr_array_make(p, 4, sizeof(void *));
     scfg->feedback_triggers = apr_array_make(p, 4, sizeof(void *));
+    scfg->load_triggers     = apr_array_make(p, 4, sizeof(void *));
     /* Curated session-cookie-name defaults. Kept deliberately
      * short; long auto-lists turn `cookies=session` into a loose
      * matcher and undermine the bonus. Operators add their own
@@ -2916,6 +2922,12 @@ typedef enum {
      * credit would have nowhere to land. The shared parser rejects
      * those keys for this family. */
     BS_TFAMILY_FEEDBACK,
+    /* E11.2 — host-state family. Predicate is a comparison against
+     * the global cached load_state (BS_LOAD_NORMAL/WARM/HOT) — no
+     * per-request match. Action surface is penalty/credit/status/
+     * log; flag= is rejected because load is global state, not a
+     * property worth memorizing per-IP. */
+    BS_TFAMILY_LOAD,
 } bs_trigger_family;
 
 typedef struct {
@@ -2953,6 +2965,11 @@ static int  bs_strike_record_429(request_rec *r,
                                  apr_uint32_t rule_slot,
                                  const bs_rate_escalate_entry *cfg,
                                  apr_int64_t now);
+
+/* E11 — load-state read used by bs_check_policy's load-trigger
+ * walk. Declaration here so the walk at line ~3540 compiles
+ * before the body at line ~4150. */
+static bs_load_state bs_load_current(void);
 
 /* E10 — safeguard helpers. Called from bs_handler at two points:
  * just before issuing a challenge (check + record presentation)
@@ -3092,6 +3109,30 @@ typedef struct {
     const char        *event;
     bs_trigger_action  action;
 } bs_feedback_trigger_entry;
+
+/* E11.2 — BotShieldLoadTrigger <name> <load-match> [key=value ...].
+ * Predicate is a comparison against the global cached load_state.
+ * Two predicate kinds:
+ *   EQ:  state=normal | state=warm | state=hot     (exact match)
+ *   GE:  state>=warm  | state>=hot                 (>= comparison)
+ *
+ * EQ + state=normal is mostly useful for documentation/tests;
+ * operators in production usually want state>=warm to cover both
+ * warm AND hot.
+ *
+ * Action surface inherits from bs_trigger_action; load-specific
+ * limits are enforced by the shared parser (no flag/ttl/redirect). */
+enum bs_load_pred_kind {
+    BS_LP_EQ = 0,
+    BS_LP_GE,
+};
+
+typedef struct {
+    const char        *name;
+    int                pred_kind;     /* enum bs_load_pred_kind */
+    bs_load_state      target_state;
+    bs_trigger_action  action;
+} bs_load_trigger_entry;
 
 /* SHM slot for the fixed-window counter. Packed to 8 bytes so
  * platforms with 64-bit atomics could later swap to a CAS-on-u64;
@@ -3493,6 +3534,29 @@ static int bs_check_policy(request_rec *r)
             /* Env family: BS_TEXEC_PASS_BREAK ends the loop (env
              * signals are discrete; no accumulation). STATUS
              * short-circuits. */
+            if (o == BS_TEXEC_STATUS) return t->action.status_code;
+            if (o == BS_TEXEC_PASS_BREAK) break;
+        }
+    }
+
+    /* E11.2 — load triggers. Match on the global cached load state
+     * (BS_LOAD_NORMAL/WARM/HOT). First-match-wins; alternative-
+     * specificity rules (state>=warm vs state=hot) are stacked by
+     * declaration order with the more specific one declared first. */
+    if (scfg->load_triggers && scfg->load_triggers->nelts > 0) {
+        bs_load_state cur = bs_load_current();
+        for (int i = 0; i < scfg->load_triggers->nelts; i++) {
+            bs_load_trigger_entry *t = APR_ARRAY_IDX(
+                scfg->load_triggers, i, bs_load_trigger_entry *);
+            int matched = 0;
+            switch (t->pred_kind) {
+            case BS_LP_EQ: matched = (cur == t->target_state); break;
+            case BS_LP_GE: matched = (cur >= t->target_state); break;
+            }
+            if (!matched) continue;
+            bs_trigger_exec_outcome o = bs_apply_trigger_action(
+                r, scfg, BS_TFAMILY_LOAD, &t->action,
+                "load-trigger", t->name);
             if (o == BS_TEXEC_STATUS) return t->action.status_code;
             if (o == BS_TEXEC_PASS_BREAK) break;
         }
@@ -4089,10 +4153,9 @@ static apr_status_t bs_load_watchdog_cb(int state, void *data,
 }
 
 /* Cheap request-path read of the cached state. Lockless atomic.
- * Used by E11.2's BotShieldLoadTrigger predicate matcher; defined
- * here in E11.1 alongside the rest of the load-state surface. */
-static bs_load_state bs_load_current(void)
-    __attribute__((unused));   /* E11.2 wires the request-path use. */
+ * Used by E11.2's BotShieldLoadTrigger predicate matcher; the
+ * forward declaration lives near the other request-time helpers
+ * earlier in the file. */
 static bs_load_state bs_load_current(void)
 {
     if (!bs_shm.header) return BS_LOAD_NORMAL;
@@ -6804,6 +6867,7 @@ static const char *bs_trigger_family_dname(bs_trigger_family fam)
     case BS_TFAMILY_COOKIE:   return "BotShieldCookieTrigger";
     case BS_TFAMILY_ENV:      return "BotShieldEnvTrigger";
     case BS_TFAMILY_FEEDBACK: return "BotShieldFeedbackTrigger";
+    case BS_TFAMILY_LOAD:     return "BotShieldLoadTrigger";
     }
     return "BotShieldTrigger";      /* unreachable */
 }
@@ -6838,6 +6902,16 @@ static void bs_trigger_action_init(bs_trigger_family fam,
         a->flag_bit    = 0;
         a->ttl_sec     = 0;
         break;
+    case BS_TFAMILY_LOAD:
+        /* Load triggers default to pass-with-score-shaping. The
+         * common case is "add some penalty/credit when warm/hot";
+         * less common is "outright 403 expensive paths under hot."
+         * Both are explicit operator decisions via status=. No
+         * flag — load is a global state, not per-IP behavior. */
+        a->status_code = BS_TRIGGER_STATUS_PASS;
+        a->flag_bit    = 0;
+        a->ttl_sec     = 0;
+        break;
     }
     a->penalty         = 0;
     a->credit          = 0;
@@ -6857,6 +6931,8 @@ static const char *bs_trigger_known_keys(bs_trigger_family fam)
         return "status, log, flag, ttl, penalty, credit";
     case BS_TFAMILY_FEEDBACK:
         return "flag, ttl, log";
+    case BS_TFAMILY_LOAD:
+        return "status, log, penalty, credit";
     }
     return "";
 }
@@ -6923,12 +6999,11 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
         }
         a->status_explicit = 1;
     } else if (BS_AK("redirect")) {
-        if (fam == BS_TFAMILY_ENV) {
+        if (fam == BS_TFAMILY_ENV || fam == BS_TFAMILY_LOAD) {
             return apr_psprintf(pool,
-                "%s: redirect= is not supported on env triggers "
-                "(env signals are scoring/flagging only; use the "
-                "path or cookie family for response-shaping "
-                "redirects)", dname);
+                "%s: redirect= is not supported on this family "
+                "(scoring/flagging only; use the path or cookie "
+                "family for response-shaping redirects)", dname);
         }
         if (!*val) {
             return apr_psprintf(pool,
@@ -6938,6 +7013,14 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
     } else if (BS_AK("log")) {
         a->log_tag = apr_pstrdup(pool, val);
     } else if (BS_AK("flag")) {
+        if (fam == BS_TFAMILY_LOAD) {
+            return apr_psprintf(pool,
+                "%s: flag= is not supported on load triggers "
+                "(load is global state; flagging individual IPs "
+                "because the host is hot doesn't fit the model — "
+                "use a cookie or env trigger if you want per-IP "
+                "memory tied to a load condition)", dname);
+        }
         const char *perr = NULL;
         apr_uint32_t bits = bs_parse_flag_names(pool, val, &perr);
         if (perr) return apr_psprintf(pool,
@@ -6949,6 +7032,12 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
         }
         a->flag_bit = bits;
     } else if (BS_AK("ttl")) {
+        if (fam == BS_TFAMILY_LOAD) {
+            return apr_psprintf(pool,
+                "%s: ttl= has no effect on load triggers (no flag "
+                "is written, so there's nothing for ttl to govern)",
+                dname);
+        }
         char *end = NULL;
         long t = strtol(val, &end, 10);
         if (!end || *end || t < 0 || t > 86400 * 30) {
@@ -7069,15 +7158,18 @@ static bs_trigger_exec_outcome bs_apply_trigger_action(
                             ":pass", NULL));
             return BS_TEXEC_PASS_DECLINE;
         }
-        /* Cookie/env pass: apply penalty - credit on THIS request's
-         * score. The signal (cookie, env var) is part of this
-         * request's state, so the score contribution belongs here. */
+        /* Cookie/env/load pass: apply penalty - credit on THIS
+         * request's score. The signal is part of this request's
+         * decision state (cookie carried, env set, host hot), so
+         * the score contribution belongs here. */
         int delta = a->penalty - a->credit;
         bs_score_add(r, delta, 0,
             apr_pstrcat(r->pool, family_tag, ":", trigger_name, NULL));
-        return (fam == BS_TFAMILY_COOKIE)
-             ? BS_TEXEC_PASS_CONTINUE   /* cookies accumulate */
-             : BS_TEXEC_PASS_BREAK;     /* env first-match-wins */
+        if (fam == BS_TFAMILY_COOKIE) return BS_TEXEC_PASS_CONTINUE;
+        /* env + load: first-match-wins. Distinct load triggers
+         * (state>=warm vs state=hot) are alternative-specificity
+         * cases, not layered reputation — one match is enough. */
+        return BS_TEXEC_PASS_BREAK;
     }
 
     /* Concrete status. Record reason; caller emits Location + the
@@ -7529,6 +7621,94 @@ static const char *bs_set_feedback_trigger(cmd_parms *cmd, void *dconf,
     }
     *(bs_feedback_trigger_entry **)
         apr_array_push(scfg->feedback_triggers) = e;
+    return NULL;
+}
+
+/* E11.2 — BotShieldLoadTrigger <name> <load-match> [key=value ...].
+ *
+ * load-match shapes:
+ *   state=normal   (exact match — typically only for tests/docs)
+ *   state=warm
+ *   state=hot
+ *   state>=warm    (matches warm OR hot)
+ *   state>=hot     (matches hot only — equivalent to state=hot but
+ *                   reads more naturally in operator config when
+ *                   paired with state>=warm rules)
+ *
+ * First-match-wins within the family (load triggers are alternative-
+ * specificity cases, not layered reputation). Action keys: status,
+ * log, penalty, credit. flag/ttl/redirect rejected at parse time —
+ * load is a global signal, not per-IP behavior to memorize. */
+static const char *bs_set_load_trigger(cmd_parms *cmd, void *dconf,
+                                       int argc, char *const argv[])
+{
+    (void)dconf;
+    if (argc < 2) {
+        return "BotShieldLoadTrigger: expects <name> <load-match> "
+               "[key=value ...]";
+    }
+    const char *name  = argv[0];
+    const char *match = argv[1];
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    if (!bs_bot_name_valid(name)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldLoadTrigger: name '%s' must be [a-z0-9-]{1,32}",
+            name);
+    }
+
+    int pred_kind;
+    const char *state_str;
+    if (!strncmp(match, "state>=", 7)) {
+        pred_kind = BS_LP_GE;
+        state_str = match + 7;
+    } else if (!strncmp(match, "state=", 6)) {
+        pred_kind = BS_LP_EQ;
+        state_str = match + 6;
+    } else {
+        return apr_psprintf(cmd->pool,
+            "BotShieldLoadTrigger: unrecognized load-match '%s' "
+            "(expected state=<level> or state>=<level> where "
+            "<level> is normal|warm|hot)", match);
+    }
+    bs_load_state target;
+    if      (!strcasecmp(state_str, "normal")) target = BS_LOAD_NORMAL;
+    else if (!strcasecmp(state_str, "warm"))   target = BS_LOAD_WARM;
+    else if (!strcasecmp(state_str, "hot"))    target = BS_LOAD_HOT;
+    else {
+        return apr_psprintf(cmd->pool,
+            "BotShieldLoadTrigger: state '%s' must be one of "
+            "normal|warm|hot", state_str);
+    }
+
+    bs_load_trigger_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
+    e->name         = apr_pstrdup(cmd->pool, name);
+    e->pred_kind    = pred_kind;
+    e->target_state = target;
+    bs_trigger_action_init(BS_TFAMILY_LOAD, &e->action);
+
+    for (int i = 2; i < argc; i++) {
+        const char *err = bs_parse_trigger_action_key(cmd->pool,
+            BS_TFAMILY_LOAD, argv[i], &e->action);
+        if (err) return err;
+    }
+    {
+        const char *err = bs_finalize_trigger_action(cmd->pool,
+            BS_TFAMILY_LOAD, &e->action);
+        if (err) return err;
+    }
+
+    /* Upsert-by-name. */
+    for (int i = 0; i < scfg->load_triggers->nelts; i++) {
+        bs_load_trigger_entry *ex = APR_ARRAY_IDX(
+            scfg->load_triggers, i, bs_load_trigger_entry *);
+        if (strcmp(ex->name, e->name) == 0) {
+            APR_ARRAY_IDX(scfg->load_triggers, i,
+                          bs_load_trigger_entry *) = e;
+            return NULL;
+        }
+    }
+    *(bs_load_trigger_entry **)apr_array_push(scfg->load_triggers) = e;
     return NULL;
 }
 
@@ -11290,6 +11470,17 @@ static const command_rec bs_cmds[] = {
                  "here and applies flag+ttl to the flagged-IP table. "
                  "No status/redirect/penalty/credit (response is "
                  "already served)."),
+    /* E11.2 — load-aware throttling triggers */
+    AP_INIT_TAKE_ARGV("BotShieldLoadTrigger",
+                 bs_set_load_trigger, NULL, RSRC_CONF,
+                 "Trigger that fires based on the cached load state "
+                 "(see BotShieldLoadStateFile / E11). Args: <name> "
+                 "<load-match> [key=value ...]. load-match is one of "
+                 "state=<level> or state>=<level> where <level> is "
+                 "normal|warm|hot. Keys: status=<code|pass>, "
+                 "log=<tag>, penalty=<n>, credit=<n>. flag/ttl/"
+                 "redirect rejected — load is global state, not "
+                 "per-IP behavior. First-match-wins."),
     /* E3 — path-based triggers */
     AP_INIT_TAKE_ARGV("BotShieldPathTrigger",
                  bs_set_path_trigger, NULL, RSRC_CONF,
