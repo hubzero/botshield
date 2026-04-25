@@ -570,6 +570,13 @@ typedef struct {
     /* E2.1 — policy enforcement counters. */
     apr_uint64_t rate_limit_exceeded_total;
     apr_uint64_t block_path_hit_total;
+    /* E12 — shadow / observe-mode counters. Separate from the
+     * enforcement counters above so operators can graph "what the
+     * staged rule would have blocked" without polluting the real-
+     * blocks dashboards. */
+    apr_uint64_t rate_limit_observed_total;
+    apr_uint64_t block_path_observed_total;
+    apr_uint64_t trigger_observed_total;
 } bs_metrics;
 
 /* Module-global runtime pointer struct. Populated once in post-config;
@@ -798,6 +805,11 @@ typedef struct bs_server_cfg {
      * watchdog runs single-threaded per server; no contention. */
     bs_load_state       load_external_cached;
     apr_time_t          load_external_mtime;
+    /* E12 — global shadow mode. -1 unset (merge picks parent's
+     * value), 0 off, 1 on. When on, ALL trigger / rate-limit /
+     * block-path rules behave as if mode=observe regardless of
+     * their per-rule setting. Operator's panic-revert switch. */
+    int                 shadow_mode;
     apr_array_header_t *block_paths;   /* bs_block_path_entry * */
     /* E3 — path-based triggers. Same ordered-array + upsert-by-name
      * shape as E2.1; first match wins at request time. */
@@ -1047,6 +1059,9 @@ static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
                            ? add->load_hot_rise : base->load_hot_rise;
     out->load_normal_fall  = (add->load_normal_fall > 0)
                            ? add->load_normal_fall : base->load_normal_fall;
+    /* E12 — shadow mode inherits unless explicitly set. */
+    out->shadow_mode = (add->shadow_mode != -1)
+                     ? add->shadow_mode : base->shadow_mode;
     out->block_paths = bs_merge_rule_array(p, base->block_paths,
                                            add->block_paths);
     out->path_triggers = bs_merge_rule_array(p, base->path_triggers,
@@ -1163,6 +1178,9 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->load_normal_fall      = 0;
     scfg->load_external_cached  = BS_LOAD_NORMAL;
     scfg->load_external_mtime   = 0;
+    /* E12 — global shadow mode unset. -1 sentinel means "inherit
+     * from parent scope"; merge below picks the right value. */
+    scfg->shadow_mode           = -1;
     scfg->block_paths      = apr_array_make(p, 4, sizeof(void *));
     scfg->path_triggers         = apr_array_make(p, 4, sizeof(void *));
     scfg->cookie_triggers  = apr_array_make(p, 4, sizeof(void *));
@@ -2843,6 +2861,11 @@ typedef struct {
      * matching name. NULL = no escalation; the rule behaves like
      * pre-E9. */
     const bs_rate_escalate_entry *escalate;
+    /* E12 — observe-mode opt-in. Same enum as bs_trigger_action.mode.
+     * When set to BS_TMODE_OBSERVE (or when the global shadow_mode
+     * flag is on), over-budget hits log `would-rate-limit:<name>`
+     * but don't return 429 / consume a token / bump strikes. */
+    int           mode;              /* bs_trigger_mode */
 } bs_rate_limit_entry;
 
 /* E9 — BotShieldRateLimitEscalate config. Stored in
@@ -2861,6 +2884,11 @@ typedef struct {
     const char *name;
     const char *path_pattern;        /* prefix / trailing '*' / trailing '$' */
     bs_cohort   cohort;
+    /* E12 — observe-mode opt-in. When set (or when the global
+     * shadow_mode flag is on), matched paths log
+     * `would-block-path:<name>` but don't return 403 / write the
+     * BS_PENALTY_BLOCK_PATH score. */
+    int         mode;                /* bs_trigger_mode */
 } bs_block_path_entry;
 
 /* E3 — path-based triggers. One of these per BotShieldPathTrigger
@@ -2939,13 +2967,30 @@ typedef struct {
     int           penalty;        /* 0..1000 */
     int           credit;         /* 0..1000 (rejected on path family) */
     int           status_explicit; /* 1 if operator wrote status= */
+    /* E12 — shadow mode. BS_TMODE_ENFORCE (default) is normal
+     * behavior. BS_TMODE_OBSERVE makes a matched rule LOG what it
+     * would have done — :observe suffix on the reason string,
+     * mode-specific metric counter — but applies no side effects:
+     * no flag-IP, no score, no status/redirect, no log tag side-
+     * effect. Operators stage new rules safely and watch the
+     * decision log before turning enforce on. */
+    int           mode;           /* bs_trigger_mode */
 } bs_trigger_action;
+
+typedef enum {
+    BS_TMODE_ENFORCE = 0,
+    BS_TMODE_OBSERVE,
+} bs_trigger_mode;
 
 typedef enum {
     BS_TEXEC_PASS_CONTINUE = 0,  /* pass-match; stay in family loop */
     BS_TEXEC_PASS_BREAK,         /* pass-match; exit this family's loop */
     BS_TEXEC_PASS_DECLINE,       /* pass-match; return DECLINED from policy */
     BS_TEXEC_STATUS,             /* emit status/redirect; short-circuit */
+    /* E12 — observe-only match: rule fired but took no enforcing
+     * action. Caller treats this as `continue` so subsequent rules
+     * in the same family still get a chance. */
+    BS_TEXEC_OBSERVE,
 } bs_trigger_exec_outcome;
 
 /* Forward declarations — bs_check_policy (E3 path) calls these; they
@@ -3585,13 +3630,29 @@ static int bs_check_policy(request_rec *r)
     /* Block paths first: if the request would be 403ed anyway there's
      * no point charging it a token from a rate bucket it's also in.
      * Ordered-array iteration — first match wins; declaration order
-     * is the precedence. */
+     * is the precedence. E12: a matched rule in observe mode (or
+     * any matched rule when global shadow_mode is on) logs
+     * `would-block-path:<name>` instead of returning 403, and the
+     * walk continues so subsequent rules still get their say. */
+    int global_shadow = (scfg->shadow_mode == 1);
     if (scfg->block_paths && scfg->block_paths->nelts > 0) {
         for (int i = 0; i < scfg->block_paths->nelts; i++) {
             bs_block_path_entry *e = APR_ARRAY_IDX(
                 scfg->block_paths, i, bs_block_path_entry *);
             if (!bs_path_glob_match(e->path_pattern, r->uri)) continue;
             if (!bs_cohort_matches(&e->cohort, ua, r)) continue;
+            int observe = global_shadow || (e->mode == BS_TMODE_OBSERVE);
+            if (observe) {
+                bs_score_add(r, 0, 0,
+                    apr_pstrcat(r->pool, "block-path:", e->name,
+                                ":observe", NULL));
+                if (bs_shm.metrics) {
+                    __atomic_fetch_add(
+                        &bs_shm.metrics->block_path_observed_total,
+                        1, __ATOMIC_RELAXED);
+                }
+                continue;
+            }
             bs_score_add(r, BS_PENALTY_BLOCK_PATH, 3600,
                 apr_pstrcat(r->pool, "block-path:", e->name, NULL));
             if (bs_shm.metrics) {
@@ -3664,15 +3725,23 @@ static int bs_check_policy(request_rec *r)
             directive_rate_matched = 1;
             if (e->shm_slot < 0 || !counters) continue;
 
-            /* E9 — escalation gate. If this rule has an escalation
-             * config and the (ip, rule) pair is in the escalated
-             * window, return the configured stricter status without
-             * consulting the budget. The normal counter doesn't tick
-             * during escalation: the request is rejected outright. */
-            if (e->escalate && have_ip
+            /* E12 — observe mode (per-rule or global shadow_mode).
+             * The counter still ticks (so `would-rate-limit` volume
+             * answers the operator's "what would this fire?"
+             * question accurately), but over-budget hits log
+             * `rate-limit-exceeded:<name>:observe` instead of
+             * returning 429. E9 escalation is also fully suppressed
+             * — we don't bump strikes, and any pre-existing
+             * escalation state is ignored for this rule under
+             * observe. */
+            int observe = global_shadow || (e->mode == BS_TMODE_OBSERVE);
+
+            if (!observe && e->escalate && have_ip
                 && bs_strike_check_escalated(client_ip,
                                              (apr_uint32_t)e->shm_slot,
                                              now_t)) {
+                /* E9 — escalation gate. Active only outside observe
+                 * mode; observe must not enforce. */
                 bs_score_add(r, BS_PENALTY_RATE_LIMIT, 3600,
                     apr_pstrcat(r->pool, "rate-limit-abuse:",
                                 e->name, NULL));
@@ -3688,7 +3757,19 @@ static int bs_check_policy(request_rec *r)
                                       e->budget, e->window_sec)) {
                 continue;
             }
-            /* Over budget. Retry-After = seconds remaining in window. */
+            /* Over budget. */
+            if (observe) {
+                bs_score_add(r, 0, 0,
+                    apr_pstrcat(r->pool, "rate-limit-exceeded:",
+                                e->name, ":observe", NULL));
+                if (bs_shm.metrics) {
+                    __atomic_fetch_add(
+                        &bs_shm.metrics->rate_limit_observed_total,
+                        1, __ATOMIC_RELAXED);
+                }
+                continue;
+            }
+            /* Enforce: Retry-After = seconds remaining in window. */
             apr_uint32_t win = __atomic_load_n(
                 &counters[e->shm_slot].window_start_sec, __ATOMIC_RELAXED);
             apr_uint32_t now = (apr_uint32_t)apr_time_sec(apr_time_now());
@@ -6424,13 +6505,51 @@ static int bs_rate_unit_seconds(const char *u)
  *
  * Apache doesn't ship AP_INIT_TAKE4/5, so this uses TAKE_ARGV and
  * enforces argc itself. */
+/* E12 — parse the optional trailing `mode=enforce|observe` argv
+ * token shared by BotShieldRateLimit and BotShieldBlockPath. The
+ * directive grammar is positional (5 args for rate-limit, 4 for
+ * block-path), so this is strict: the token must be the LAST
+ * argument and it must be `mode=...`. Returns the parsed mode in
+ * *out_mode and shrinks *argc by 1 if the token was consumed. */
+static const char *bs_parse_optional_mode(apr_pool_t *p,
+                                          const char *dname,
+                                          int *argc,
+                                          char *const argv[],
+                                          int *out_mode)
+{
+    *out_mode = BS_TMODE_ENFORCE;
+    if (*argc <= 0) return NULL;
+    const char *last = argv[*argc - 1];
+    if (strncmp(last, "mode=", 5) != 0) return NULL;
+    const char *val = last + 5;
+    if (!strcasecmp(val, "enforce")) {
+        *out_mode = BS_TMODE_ENFORCE;
+    } else if (!strcasecmp(val, "observe")) {
+        *out_mode = BS_TMODE_OBSERVE;
+    } else {
+        return apr_psprintf(p,
+            "%s: mode='%s' must be 'enforce' or 'observe'", dname, val);
+    }
+    (*argc)--;
+    return NULL;
+}
+
 static const char *bs_set_rate_limit(cmd_parms *cmd, void *dconf,
                                      int argc, char *const argv[])
 {
     (void)dconf;
+    /* E12 — strip optional trailing mode= token before counting
+     * positional args. */
+    int mode = BS_TMODE_ENFORCE;
+    {
+        const char *merr = bs_parse_optional_mode(cmd->pool,
+            "BotShieldRateLimit", &argc, argv, &mode);
+        if (merr) return merr;
+    }
     if (argc != 5) {
         return "BotShieldRateLimit: expects exactly 5 args — "
-               "<name> <budget> <per> <ua> <ipspec>";
+               "<name> <budget> <per> <ua> <ipspec> "
+               "[mode=enforce|observe]";
     }
     const char *name     = argv[0];
     const char *budget_s = argv[1];
@@ -6462,6 +6581,7 @@ static const char *bs_set_rate_limit(cmd_parms *cmd, void *dconf,
     e->budget     = (apr_uint32_t)budget;
     e->window_sec = (apr_uint32_t)unit;
     e->shm_slot   = -1;
+    e->mode       = mode;   /* E12 */
     const char *err = bs_cohort_resolve(cmd, &e->cohort, ua, ipspec);
     if (err) return apr_pstrcat(cmd->pool,
         "BotShieldRateLimit: ", err, NULL);
@@ -6719,6 +6839,22 @@ static const char *bs_set_safeguard_capacity(cmd_parms *cmd,
     return NULL;
 }
 
+/* E12 — BotShieldShadowMode on|off. Server-scope master switch
+ * for dry-run enforcement. When on, every trigger / rate-limit /
+ * block-path rule behaves as if mode=observe regardless of its
+ * per-rule setting. Operators stage a whole config revision in one
+ * shot, watch the decision log, then flip off to enforce. Off is
+ * the default — operators opt in. */
+static const char *bs_set_shadow_mode(cmd_parms *cmd, void *dconf,
+                                      int flag)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->shadow_mode = flag ? 1 : 0;
+    return NULL;
+}
+
 /* E11 — BotShieldLoadStateFile <path>. Operator-writable file
  * whose body is `normal`, `warm`, or `hot` (whitespace tolerated).
  * Watchdog stat-polls mtime once per refresh tick; only re-reads
@@ -6812,9 +6948,18 @@ static const char *bs_set_block_path(cmd_parms *cmd, void *dconf,
                                      int argc, char *const argv[])
 {
     (void)dconf;
+    /* E12 — strip optional trailing mode= token before counting
+     * positional args. */
+    int mode = BS_TMODE_ENFORCE;
+    {
+        const char *merr = bs_parse_optional_mode(cmd->pool,
+            "BotShieldBlockPath", &argc, argv, &mode);
+        if (merr) return merr;
+    }
     if (argc != 4) {
         return "BotShieldBlockPath: expects exactly 4 args — "
-               "<name> <path-glob> <ua> <ipspec>";
+               "<name> <path-glob> <ua> <ipspec> "
+               "[mode=enforce|observe]";
     }
     const char *name    = argv[0];
     const char *pattern = argv[1];
@@ -6836,6 +6981,7 @@ static const char *bs_set_block_path(cmd_parms *cmd, void *dconf,
     bs_block_path_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
     e->name         = apr_pstrdup(cmd->pool, name);
     e->path_pattern = apr_pstrdup(cmd->pool, pattern);
+    e->mode         = mode;   /* E12 */
     const char *err = bs_cohort_resolve(cmd, &e->cohort, ua, ipspec);
     if (err) return apr_pstrcat(cmd->pool,
         "BotShieldBlockPath: ", err, NULL);
@@ -6924,15 +7070,18 @@ static const char *bs_trigger_known_keys(bs_trigger_family fam)
 {
     switch (fam) {
     case BS_TFAMILY_PATH:
-        return "status, redirect, log, flag, ttl, penalty";
+        return "status, redirect, log, flag, ttl, penalty, mode";
     case BS_TFAMILY_COOKIE:
-        return "status, redirect, log, flag, ttl, penalty, credit";
+        return "status, redirect, log, flag, ttl, penalty, credit, mode";
     case BS_TFAMILY_ENV:
-        return "status, log, flag, ttl, penalty, credit";
+        return "status, log, flag, ttl, penalty, credit, mode";
     case BS_TFAMILY_FEEDBACK:
+        /* No mode= for feedback: the response has already been
+         * served, so "observe" doesn't have a meaningful no-op
+         * compared to enforce. */
         return "flag, ttl, log";
     case BS_TFAMILY_LOAD:
-        return "status, log, penalty, credit";
+        return "status, log, penalty, credit, mode";
     }
     return "";
 }
@@ -7054,6 +7203,28 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
                 "%s: penalty='%s' must be 0..1000", dname, val);
         }
         a->penalty = (int)pn;
+    } else if (BS_AK("mode")) {
+        /* E12 — observe vs enforce. Default enforce; observe makes
+         * the rule log a :observe match without taking the action.
+         * Same enum across path/cookie/env/load families. Feedback
+         * is response-path; observe doesn't have a meaningful no-op
+         * there (the response already shipped), so reject. */
+        if (fam == BS_TFAMILY_FEEDBACK) {
+            return apr_psprintf(pool,
+                "%s: mode= is not supported on feedback triggers "
+                "(observe is meaningless on a response-path rule; "
+                "if you don't want the event applied, just don't "
+                "declare a BotShieldFeedbackTrigger for it)", dname);
+        }
+        if (!strcasecmp(val, "enforce")) {
+            a->mode = BS_TMODE_ENFORCE;
+        } else if (!strcasecmp(val, "observe")) {
+            a->mode = BS_TMODE_OBSERVE;
+        } else {
+            return apr_psprintf(pool,
+                "%s: mode='%s' must be 'enforce' or 'observe'",
+                dname, val);
+        }
     } else if (BS_AK("credit")) {
         if (fam == BS_TFAMILY_PATH) {
             return apr_psprintf(pool,
@@ -7132,6 +7303,27 @@ static bs_trigger_exec_outcome bs_apply_trigger_action(
     const char *family_tag,
     const char *trigger_name)
 {
+    /* E12 — shadow / observe-mode short-circuit. If the rule is
+     * observe-only, OR the global shadow_mode is on, log the match
+     * with a :observe suffix and return without applying any side
+     * effect (no flag-IP, no score, no status, no redirect, no log
+     * tag — observe is a "what would have happened" probe).
+     * Caller's loop treats BS_TEXEC_OBSERVE as `continue` so the
+     * next rule still gets a chance — observed rules never shadow
+     * enforced ones. */
+    int global_shadow = (scfg && scfg->shadow_mode == 1);
+    int observe = global_shadow || (a->mode == BS_TMODE_OBSERVE);
+    if (observe) {
+        bs_score_add(r, 0, 0,
+            apr_pstrcat(r->pool, family_tag, ":", trigger_name,
+                        ":observe", NULL));
+        if (bs_shm.metrics) {
+            __atomic_fetch_add(&bs_shm.metrics->trigger_observed_total,
+                               1, __ATOMIC_RELAXED);
+        }
+        return BS_TEXEC_OBSERVE;
+    }
+
     /* Flag-IP (future-request memory). Applies to all families
      * uniformly — flag_bit is already 0 when ttl_sec==0, so the
      * guard below is belt-and-suspenders. */
@@ -10183,6 +10375,19 @@ static int bs_metrics_handler(request_rec *r, bs_dir_cfg *cfg)
 
     /* --- E2.1 policy-enforcement counters --- */
 
+    bs_m_emit_counter(r, "rate_limit_observed_total",
+        "Rate-limit over-budget events that ran in observe mode "
+        "(per-rule mode=observe or BotShieldShadowMode on); rule "
+        "would have returned 429 but didn't.",
+        bs_mload(&m->rate_limit_observed_total));
+    bs_m_emit_counter(r, "block_path_observed_total",
+        "Block-path matches that ran in observe mode; rule would "
+        "have returned 403 but didn't.",
+        bs_mload(&m->block_path_observed_total));
+    bs_m_emit_counter(r, "trigger_observed_total",
+        "Trigger matches (path/cookie/env/load) that ran in observe "
+        "mode across all families.",
+        bs_mload(&m->trigger_observed_total));
     bs_m_emit_counter(r, "rate_limit_exceeded_total",
         "Requests that tripped a BotShieldRateLimit cohort budget "
         "(response was 429 + Retry-After).",
@@ -11414,6 +11619,16 @@ static const command_rec bs_cmds[] = {
                  "Busy-worker percentage at which a tick samples "
                  "as 'hot' (default 85; range 1..99). Must be "
                  "greater than the warm threshold."),
+    /* E12 — shadow / dry-run enforcement. */
+    AP_INIT_FLAG("BotShieldShadowMode",
+                 bs_set_shadow_mode, NULL, RSRC_CONF,
+                 "Master switch for dry-run enforcement. When on, "
+                 "all trigger / rate-limit / block-path rules log "
+                 "matches with a :observe suffix instead of taking "
+                 "their action — useful for staging a whole policy "
+                 "revision before flipping enforcement on. Default "
+                 "off; per-rule mode=observe is the finer-grained "
+                 "alternative."),
     AP_INIT_TAKE_ARGV("BotShieldBlockPath",
                  bs_set_block_path, NULL, RSRC_CONF,
                  "Block a named cohort from a path glob. Args: "
