@@ -145,6 +145,54 @@ def test_embedded_turnstile_mints_verified_cookie(
         )
 
 
+def test_embedded_hcaptcha_mints_verified_cookie(
+    config_override, bs_browser_context,
+):
+    """E17.4a — hCaptcha invisible adapter. Same architectural shape
+    as Turnstile (token-based, real round-trip against the provider's
+    siteverify), but materially different client API: hcaptcha.render
+    returns a widget ID, then hcaptcha.execute(widgetId) triggers
+    the invisible challenge. Validates that the wrapper's per-
+    provider dispatch actually handles the API differences cleanly,
+    not just the abstraction over them.
+
+    Uses hCaptcha's published always-pass test keys:
+      sitekey: 10000000-ffff-ffff-ffff-000000000001
+      secret:  0x0000000000000000000000000000000000000000
+    """
+    with config_override(
+        r"BotShieldAllow\s+on",
+        'BotShieldAllow on\n'
+        '    <Location /embedded-test.html>\n'
+        '        BotShieldSilentMode embedded\n'
+        '        BotShieldCaptchaProvider hcaptcha\n'
+        '        BotShieldCaptchaSiteKey '
+            '10000000-ffff-ffff-ffff-000000000001\n'
+        '        BotShieldCaptchaSecretFile /etc/botshield/hcaptcha-secret\n'
+        '        BotShieldCaptchaExpectedHostname dummy-key-pass\n'
+        '    </Location>',
+        count=1,
+    ):
+        page = bs_browser_context.new_page()
+        page.goto(f"https://localhost{EMBEDDED_PATH}")
+
+        # Real hCaptcha round trip — comparable latency to Turnstile.
+        deadline = time.monotonic() + 15.0
+        cookie_present = False
+        while time.monotonic() < deadline:
+            cookies = {c["name"] for c in bs_browser_context.cookies()}
+            if "_bs_verified" in cookies:
+                cookie_present = True
+                break
+            time.sleep(0.5)
+
+        assert cookie_present, (
+            f"hcaptcha wrapper failed to mint _bs_verified within "
+            f"deadline; cookies="
+            f"{[c['name'] for c in bs_browser_context.cookies()]}"
+        )
+
+
 def test_embedded_subsequent_request_declined_through(
     config_override, bs_browser_context,
 ):
