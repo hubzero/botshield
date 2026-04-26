@@ -30,6 +30,7 @@ application.
 | E8.2      | Gemini 3.1 Pro Preview, 2026-04-26 | **low-confidence "clean"** | pure praise, no findings — see caveat |
 | E9        | Gemini 3.1 Pro Preview, 2026-04-26 | **low-confidence "clean"** | pure praise + one optional observation — see caveat |
 | E10       | Gemini 3.1 Pro Preview, 2026-04-26 | one real finding | metrics-vocabulary bug fixed: `tier="safeguard"` was unrecognized by `bs_m_tier_idx`, causing every safeguard activation to drop a metric increment with a WARNING. Fix: alias `"safeguard"` → `BS_M_TIER_PASS` in the metrics index (decision-log line stays distinct, metric counter binned to pass). Recovers credibility for the Gemini reviewer relative to E7-E9. |
+| E11 (E11.1+E11.2) | Gemini 3.1 Pro Preview + self-audit, 2026-04-26 | one real finding (self-audit) | Gemini returned pure praise; self-audit caught a vhost-propagation gap: `BotShieldLoadWarmRise` / `LoadHotRise` / `LoadNormalFall` directives, when set inside `<VirtualHost>`, parsed and merged into the vhost's cfg but were silently ignored at watchdog time because the post-config propagation loop only copied the first four load fields (state-file, refresh-sec, warm-pct, hot-pct) up to main_scfg. Hysteresis fields stayed zero, compiled defaults applied. Fix: extend the propagation loop to include all three hysteresis fields. |
 
 ### Gemini-3.1-Pro caveat
 
@@ -80,8 +81,8 @@ Lower priority — smaller surface, less new attack-surface:
 
 5. ~~**E10** — challenge safeguard~~ — reviewed 2026-04-26 (Gemini),
    one finding, fixed.
-6. **E11 / E11.1 / E11.2** — load-aware throttling (sampler + watchdog +
-   trigger family).
+6. ~~**E11 / E11.1 / E11.2** — load-aware throttling~~ — reviewed
+   2026-04-26 (Gemini + self-audit), one finding, fixed.
 7. **E12** — shadow mode / dry-run.
 8. **E14** — adaptive challenge intensity (flag-registry).
 9. **E15** — forgiveness cap.

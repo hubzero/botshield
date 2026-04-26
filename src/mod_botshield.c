@@ -5719,6 +5719,20 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                     main_scfg->load_warm_pct = vc->load_warm_pct;
                 if (main_scfg->load_hot_pct <= 0 && vc->load_hot_pct > 0)
                     main_scfg->load_hot_pct = vc->load_hot_pct;
+                /* Hysteresis fields too — bs_load_apply_tick reads
+                 * these off main_scfg via the watchdog callback. If
+                 * an operator sets BotShieldLoadWarmRise inside a
+                 * <VirtualHost>, the directive parses fine but
+                 * silently has no effect unless we propagate. */
+                if (main_scfg->load_warm_rise <= 0
+                    && vc->load_warm_rise > 0)
+                    main_scfg->load_warm_rise = vc->load_warm_rise;
+                if (main_scfg->load_hot_rise <= 0
+                    && vc->load_hot_rise > 0)
+                    main_scfg->load_hot_rise = vc->load_hot_rise;
+                if (main_scfg->load_normal_fall <= 0
+                    && vc->load_normal_fall > 0)
+                    main_scfg->load_normal_fall = vc->load_normal_fall;
             }
         }
         if (main_scfg) {
