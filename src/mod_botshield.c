@@ -15353,6 +15353,20 @@ static apr_status_t bs_form_replay_filter(ap_filter_t *f,
         if (mode == AP_MODE_READBYTES && readbytes > 0 &&
             (apr_off_t)remain > readbytes) {
             emit = (apr_size_t)readbytes;
+        } else if (mode == AP_MODE_GETLINE) {
+            /* Honor line-mode reads. Some legacy CGI / custom
+             * downstream handlers pull request bodies one line at
+             * a time; emitting the whole remainder in one bucket
+             * lets the caller discard everything past the first
+             * newline (since they only consume one line). Emit up
+             * to and including the first '\n' if present; if not,
+             * fall through and emit the whole remainder (caller
+             * keeps reading until EOS). */
+            const char *start = ctx->body + ctx->offset;
+            const void *nl = memchr(start, '\n', remain);
+            if (nl) {
+                emit = (apr_size_t)((const char *)nl - start) + 1;
+            }
         }
         apr_bucket *b = apr_bucket_immortal_create(
             ctx->body + ctx->offset, emit, f->c->bucket_alloc);
@@ -15506,6 +15520,17 @@ static int bs_form_captcha_fixup(request_rec *r)
             ctx->offset = 0;
             ap_add_input_filter_handle(bs_form_replay_filter_handle,
                                        ctx, r, r->connection);
+            /* The body has been consumed through ap_http_filter, which
+             * silently de-chunks Transfer-Encoding: chunked into raw
+             * bytes. r->headers_in still says "Transfer-Encoding:
+             * chunked" though, so a downstream mod_proxy / mod_cgi
+             * would try to re-chunk a body that no longer has
+             * chunks — protocol error or dropped body. Strip the TE
+             * header and set an explicit Content-Length so the
+             * downstream sees a clean Content-Length-framed request. */
+            apr_table_unset(r->headers_in, "Transfer-Encoding");
+            apr_table_setn(r->headers_in, "Content-Length",
+                apr_psprintf(r->pool, "%" APR_SIZE_T_FMT, body_len));
             ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
                 "mod_botshield: form-captcha:observe (shadow mode; "
                 "body replayed, no siteverify, no cookie mint)");
@@ -15700,6 +15725,14 @@ static int bs_form_captcha_fixup(request_rec *r)
     ctx->offset = 0;
     ap_add_input_filter_handle(bs_form_replay_filter_handle,
                                ctx, r, r->connection);
+    /* See shadow-mode branch above for the rationale: ap_http_filter
+     * de-chunked the body for us, so r->headers_in's
+     * Transfer-Encoding: chunked is now a lie. Strip it and set
+     * Content-Length to body_len so downstream mod_proxy / mod_cgi
+     * / PHP-FPM see a coherent framed request. */
+    apr_table_unset(r->headers_in, "Transfer-Encoding");
+    apr_table_setn(r->headers_in, "Content-Length",
+        apr_psprintf(r->pool, "%" APR_SIZE_T_FMT, body_len));
 
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
         "mod_botshield: form-captcha verified (provider=%s, "
