@@ -77,4 +77,15 @@ echo "fuzzing $TARGET for ${DURATION}s (corpus: $(ls -1 "$CORPUS" | wc -l) seeds
 # .gitignore catches these patterns at the repo root AND inside
 # tests/fuzz/ (see the `crash-*` etc. entries in .gitignore).
 cd "$HERE"
-"$BIN" -max_total_time="$DURATION" -print_final_stats=1 "$@" "$CORPUS"
+# Security review MEDIUM #15 — explicit per-input timeout and RSS
+# cap. Without -timeout, LibFuzzer defaults to 1200s per input;
+# without -rss_limit_mb, 2048 MB. Slow-unit findings would
+# otherwise look like CI step timeouts rather than discrete
+# reproducer files. 10s + 512 MB are well above what these
+# targets ever legitimately need.
+FUZZ_TIMEOUT_S="${FUZZ_TIMEOUT_S:-10}"
+FUZZ_RSS_LIMIT_MB="${FUZZ_RSS_LIMIT_MB:-512}"
+"$BIN" -max_total_time="$DURATION" \
+       -timeout="$FUZZ_TIMEOUT_S" \
+       -rss_limit_mb="$FUZZ_RSS_LIMIT_MB" \
+       -print_final_stats=1 "$@" "$CORPUS"

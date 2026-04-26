@@ -175,3 +175,52 @@ jobs:
             /var/log/apache2/botshield-dev-error.log
             /var/log/apache2/error.log
           retention-days: 14
+
+  # -------- Nightly: LibFuzzer campaigns. --------
+  # Security review MEDIUM #16. Two harnesses run sequentially within
+  # one job: fuzz_cookie (HMAC + GCM cookie parser via _fuzz_stubs.h)
+  # and fuzz_robots (robots.c parser, APR-only, no httpd dependency).
+  # 30 minutes each is enough to surface meaningful coverage on a
+  # mature corpus; longer campaigns belong on a dedicated runner.
+  # On a finding, the harness writes crash-/leak-/slow-unit-/
+  # timeout-<hash> reproducers next to itself in tests/fuzz/, which
+  # the artifact upload picks up.
+  fuzz-nightly:
+    name: fuzz (cookie + robots, 30m each)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang + libfuzzer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-rt-dev pkg-config \
+              libapr1-dev libcrypto++-dev libssl-dev
+
+      - name: Build harnesses
+        run: |
+          make fuzz
+          make fuzz-robots
+
+      - name: Fuzz cookie parser (30 min)
+        run: tests/fuzz/run.sh --target cookie 1800
+
+      - name: Fuzz robots parser (30 min)
+        run: tests/fuzz/run.sh --target robots 1800
+
+      - name: Upload corpus + reproducers
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-nightly-artifacts
+          path: |
+            tests/fuzz/corpus/
+            tests/fuzz/corpus-robots/
+            tests/fuzz/crash-*
+            tests/fuzz/leak-*
+            tests/fuzz/timeout-*
+            tests/fuzz/slow-unit-*
+          retention-days: 30
+          if-no-files-found: ignore

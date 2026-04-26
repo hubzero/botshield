@@ -6,6 +6,7 @@
 #   make disable    a2dismod + reload (leaves .so in place)
 #   make reload     configtest + reload (no rebuild)
 #   make clean      remove build artifacts
+#   make docs       build the static project site into ./docs
 #
 # M10.1 sanitizer targets:
 #   make sanitize        build with ASan + UBSan + frame pointers + -g
@@ -15,6 +16,8 @@
 
 APXS     ?= apxs
 MOD_NAME ?= botshield
+DOCS_PYTHON ?= python3
+DOCS_BUILD  := tools/build_site.py
 # Keep mod_botshield.c first — apxs derives the .la/.so name from the
 # first source. Extra .c files are compiled into the same shared
 # object and share the module's pool/APR linkage.
@@ -50,7 +53,7 @@ CFLAGS_SAN := \
 # response. apxs forwards trailing -l args to the linker.
 LIBS := -lcrypto -lcurl -ljson-c
 
-.PHONY: all build install enable disable reload clean \
+.PHONY: all build install enable disable reload clean docs \
         sanitize install-sanitize \
         fuzz fuzz-run fuzz-clean \
         fuzz-robots fuzz-robots-run
@@ -81,6 +84,9 @@ reload:
 
 clean:
 	rm -rf src/.libs src/*.lo src/*.la src/*.slo src/*.o
+
+docs:
+	$(DOCS_PYTHON) $(DOCS_BUILD)
 
 # --- M10.1 ---
 
@@ -128,9 +134,21 @@ $(FUZZ_BIN): $(FUZZ_SRC) $(FUZZ_STUBS) $(SRC)
 # tests/fuzz/run.sh calls this. Default runtime is a short smoke —
 # for a real campaign, pass a longer value: `make fuzz-run DURATION=300`
 DURATION ?= 30
+# Security review MEDIUM #15 — explicit per-input timeout and memory
+# cap. Without these, LibFuzzer defaults are 1200s per-input and
+# 2048 MB RSS — slow-unit findings would surface as "CI step
+# timeout" rather than as a slow-unit-<hash> reproducer file.
+# 10s per-input and 512 MB RSS are well above any legitimate run
+# of these targets (which complete each input in microseconds and
+# never grow past ~30 MB) but tight enough that real findings
+# trip the limit and produce reproducers.
+FUZZ_TIMEOUT_S    ?= 10
+FUZZ_RSS_LIMIT_MB ?= 512
 
 fuzz-run: fuzz
 	$(FUZZ_BIN) -max_total_time=$(DURATION) \
+	    -timeout=$(FUZZ_TIMEOUT_S) \
+	    -rss_limit_mb=$(FUZZ_RSS_LIMIT_MB) \
 	    -print_final_stats=1 \
 	    tests/fuzz/corpus
 
@@ -156,6 +174,8 @@ fuzz-robots-run: fuzz-robots
 	    cp tests/fuzz/seeds-robots/* tests/fuzz/corpus-robots/ ; \
 	fi
 	$(FUZZ_ROBOTS_BIN) -max_total_time=$(DURATION) \
+	    -timeout=$(FUZZ_TIMEOUT_S) \
+	    -rss_limit_mb=$(FUZZ_RSS_LIMIT_MB) \
 	    -print_final_stats=1 \
 	    tests/fuzz/corpus-robots
 
