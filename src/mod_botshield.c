@@ -11448,7 +11448,15 @@ static const char *bs_verify_pending_cookie(request_rec *r,
         return "bad expiry";
     }
     apr_time_t expiry = (apr_time_t)expiry_raw;
-    if (expiry + BS_CLOCK_SKEW_AHEAD < apr_time_sec(apr_time_now())) {
+    /* Security review MEDIUM #3 — was `expiry + BS_CLOCK_SKEW_AHEAD <
+     * now` with the comment "grace if client clock runs ahead", but
+     * the expiry stamped into the pending cookie comes from
+     * apr_time_now() at mint time — server-side, never a client
+     * stamp. The clock-skew grace was therefore mis-justified and
+     * just extended the effective TTL by 60s, giving a stolen-
+     * and-expired pending cookie an extra minute of replay
+     * window for no defensive value. Drop the grace. */
+    if (expiry < apr_time_sec(apr_time_now())) {
         return "expired";
     }
 
