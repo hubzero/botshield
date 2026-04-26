@@ -800,6 +800,10 @@ struct bs_dir_cfg {
     const unsigned char *captcha_secret;    /* file bytes, mode-600 */
     apr_size_t  captcha_secret_len;
     int         captcha_timeout_ms;         /* siteverify HTTP timeout */
+    /* Security review LOW #13 — connect-phase timeout. Default
+     * BS_CAPTCHA_CONNECT_TIMEOUT (250 ms) is fine for healthy
+     * networks but operators on transient-loss links want headroom. */
+    int         captcha_connect_timeout_ms;
     /* reCAPTCHA v3: minimum score to accept, in [0.0, 1.0]. -1.0 = unset. */
     double      recaptcha_v3_min_score;
     /* M8.1 per-scope verify-endpoint rate limit. -1 unset, 0 disables. */
@@ -1051,6 +1055,7 @@ static void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->captcha_secret      = NULL;
     cfg->captcha_secret_len  = 0;
     cfg->captcha_timeout_ms  = BS_UNSET;
+    cfg->captcha_connect_timeout_ms = BS_UNSET;
     cfg->recaptcha_v3_min_score = -1.0;
     cfg->captcha_rate_limit  = BS_UNSET;
     cfg->captcha_expected_hostname = NULL;
@@ -1433,6 +1438,10 @@ static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     }
     out->captcha_timeout_ms = (add->captcha_timeout_ms == BS_UNSET)
                               ? base->captcha_timeout_ms : add->captcha_timeout_ms;
+    out->captcha_connect_timeout_ms =
+        (add->captcha_connect_timeout_ms == BS_UNSET)
+            ? base->captcha_connect_timeout_ms
+            : add->captcha_connect_timeout_ms;
     out->recaptcha_v3_min_score = (add->recaptcha_v3_min_score < 0.0)
                                   ? base->recaptcha_v3_min_score
                                   : add->recaptcha_v3_min_score;
@@ -10017,6 +10026,27 @@ static const char *bs_set_captcha_timeout(cmd_parms *cmd, void *cfg_v,
     return NULL;
 }
 
+/* Security review LOW #13 — operator-tunable connect-phase timeout.
+ * Default BS_CAPTCHA_CONNECT_TIMEOUT (250 ms) is tight for healthy
+ * networks; operators on transient-loss links can bump it to avoid
+ * fail-open on momentary connect blips. Same overall bound as the
+ * full siteverify timeout. */
+static const char *bs_set_captcha_connect_timeout(cmd_parms *cmd,
+                                                  void *cfg_v,
+                                                  const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    char *end = NULL;
+    long v = strtol(arg, &end, 10);
+    if (!end || *end != '\0' || v < 50 || v > BS_MAX_CAPTCHA_TIMEOUT) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCaptchaConnectTimeout: '%s' must be an integer in "
+            "50..%d ms", arg, BS_MAX_CAPTCHA_TIMEOUT);
+    }
+    cfg->captcha_connect_timeout_ms = (int)v;
+    return NULL;
+}
+
 /* `BotShieldRecaptchaV3MinScore 0.0..1.0` — threshold below which a
  * successful-but-low-score reCAPTCHA v3 verification is treated as a
  * rejection. Google's documented baseline is 0.5; operators tune down
@@ -10513,8 +10543,14 @@ static bs_captcha_result bs_captcha_siteverify(request_rec *r,
     BS_SETOPT(curl, CURLOPT_POST, 1L);
     BS_SETOPT(curl, CURLOPT_POSTFIELDS, body);
     BS_SETOPT(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
-    BS_SETOPT(curl, CURLOPT_CONNECTTIMEOUT_MS,
-                     (long)BS_CAPTCHA_CONNECT_TIMEOUT);
+    {
+        bs_dir_cfg *_dcfg = ap_get_module_config(r->per_dir_config,
+                                                 &botshield_module);
+        long _ct = (_dcfg && _dcfg->captcha_connect_timeout_ms > 0)
+                   ? _dcfg->captcha_connect_timeout_ms
+                   : BS_CAPTCHA_CONNECT_TIMEOUT;
+        BS_SETOPT(curl, CURLOPT_CONNECTTIMEOUT_MS, _ct);
+    }
     BS_SETOPT(curl, CURLOPT_TIMEOUT_MS, (long)timeout_ms);
     BS_SETOPT(curl, CURLOPT_NOSIGNAL, 1L);
     BS_SETOPT(curl, CURLOPT_USERAGENT, "mod_botshield/0.1");
@@ -10544,12 +10580,26 @@ static bs_captcha_result bs_captcha_siteverify(request_rec *r,
      * captcha slot for the full timeout. */
     BS_SETOPT(curl, CURLOPT_MAXFILESIZE,
                      (long)BS_MAX_CAPTCHA_BODY);
+    /* Security review LOW #14 — pin Content-Type and Accept so a
+     * future provider content-negotiation change can't quietly
+     * shift the wire format. We send url-encoded fields and parse
+     * JSON responses; both are stable across all six providers. */
+    struct curl_slist *bs_hdrs = NULL;
+    bs_hdrs = curl_slist_append(bs_hdrs,
+        "Content-Type: application/x-www-form-urlencoded");
+    bs_hdrs = curl_slist_append(bs_hdrs, "Accept: application/json");
+    if (!bs_hdrs) {
+        curl_easy_cleanup(curl);
+        return BS_CAPTCHA_ERROR;
+    }
+    BS_SETOPT(curl, CURLOPT_HTTPHEADER, bs_hdrs);
     if (setopt_rc != CURLE_OK) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
             "mod_botshield: captcha siteverify: curl_easy_setopt "
             "failed: %s (CURLcode=%d)",
             curl_easy_strerror(setopt_rc), (int)setopt_rc);
         curl_easy_cleanup(curl);
+        curl_slist_free_all(bs_hdrs);
         return BS_CAPTCHA_ERROR;
     }
 
@@ -10557,6 +10607,7 @@ static bs_captcha_result bs_captcha_siteverify(request_rec *r,
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     curl_easy_cleanup(curl);
+    curl_slist_free_all(bs_hdrs);
 
     *out_http_code = http_code;
 
@@ -10739,8 +10790,14 @@ static bs_captcha_result bs_geetest_siteverify(request_rec *r,
     BS_SETOPT(curl, CURLOPT_POST, 1L);
     BS_SETOPT(curl, CURLOPT_POSTFIELDS, body);
     BS_SETOPT(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
-    BS_SETOPT(curl, CURLOPT_CONNECTTIMEOUT_MS,
-                     (long)BS_CAPTCHA_CONNECT_TIMEOUT);
+    {
+        bs_dir_cfg *_dcfg = ap_get_module_config(r->per_dir_config,
+                                                 &botshield_module);
+        long _ct = (_dcfg && _dcfg->captcha_connect_timeout_ms > 0)
+                   ? _dcfg->captcha_connect_timeout_ms
+                   : BS_CAPTCHA_CONNECT_TIMEOUT;
+        BS_SETOPT(curl, CURLOPT_CONNECTTIMEOUT_MS, _ct);
+    }
     BS_SETOPT(curl, CURLOPT_TIMEOUT_MS, (long)timeout_ms);
     BS_SETOPT(curl, CURLOPT_NOSIGNAL, 1L);
     BS_SETOPT(curl, CURLOPT_USERAGENT, "mod_botshield/0.1");
@@ -10770,6 +10827,19 @@ static bs_captcha_result bs_geetest_siteverify(request_rec *r,
      * captcha slot for the full timeout. */
     BS_SETOPT(curl, CURLOPT_MAXFILESIZE,
                      (long)BS_MAX_CAPTCHA_BODY);
+    /* Security review LOW #14 — pin Content-Type and Accept so a
+     * future provider content-negotiation change can't quietly
+     * shift the wire format. We send url-encoded fields and parse
+     * JSON responses; both are stable across all six providers. */
+    struct curl_slist *bs_hdrs = NULL;
+    bs_hdrs = curl_slist_append(bs_hdrs,
+        "Content-Type: application/x-www-form-urlencoded");
+    bs_hdrs = curl_slist_append(bs_hdrs, "Accept: application/json");
+    if (!bs_hdrs) {
+        curl_easy_cleanup(curl);
+        return BS_CAPTCHA_ERROR;
+    }
+    BS_SETOPT(curl, CURLOPT_HTTPHEADER, bs_hdrs);
     if (setopt_rc != CURLE_OK) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
             "mod_botshield: GeeTest siteverify: curl_easy_setopt "
@@ -12484,7 +12554,11 @@ static int bs_embedded_verify_pow(request_rec *r, bs_dir_cfg *cfg,
             if (new_score < floor) new_score = floor;
             if (new_score < 0)     new_score = 0;
             ch.rep.score          = new_score;
-            ch.rep.passes_silent  = prior_ch.rep.passes_silent + 1;
+            /* Security review LOW #7 — clamp to 1. Parser bounds the
+             * field to [0,1] (it's effectively a "ever passed silent"
+             * flag, not a counter); plain +1 would overflow that on
+             * the second carry-forward. */
+            ch.rep.passes_silent  = 1;
         } else {
             ch.rep.passes_silent = 1;
         }
@@ -12699,7 +12773,7 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
             if (new_score < floor) new_score = floor;
             if (new_score < 0)     new_score = 0;
             next_rep.score          = new_score;
-            next_rep.passes_silent  = prior_ch.rep.passes_silent + 1;
+            next_rep.passes_silent = 1;  /* LOW #7 clamp */
         } else {
             next_rep.passes_silent = 1;
         }
@@ -13734,7 +13808,7 @@ static int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         if (new_score < floor) new_score = floor;
         if (new_score < 0)     new_score = 0;
         next_rep.score          = new_score;
-        next_rep.passes_captcha = prior_ch.rep.passes_captcha + 1;
+        next_rep.passes_captcha = 1;  /* LOW #7 clamp */
     } else {
         next_rep.score          = 0;
         next_rep.flags          = 0;
@@ -14114,6 +14188,13 @@ static const command_rec bs_cmds[] = {
                  "Siteverify HTTP call timeout in milliseconds "
                  "(default: 1000, range 100..5000). On timeout the module "
                  "fails open — issues the cookie and logs a WARNING."),
+    AP_INIT_TAKE1("BotShieldCaptchaConnectTimeout",
+                 bs_set_captcha_connect_timeout, NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "Connect-phase timeout for siteverify in milliseconds "
+                 "(default: 250, range 50..5000). Tighter than the full "
+                 "siteverify timeout; bump on links with transient packet "
+                 "loss to avoid fail-open on momentary connect blips."),
     AP_INIT_TAKE1("BotShieldRecaptchaV3MinScore",
                  bs_set_recaptcha_v3_min_score, NULL,
                  RSRC_CONF | ACCESS_CONF,
@@ -15471,9 +15552,9 @@ static int bs_handler(request_rec *r)
         if (new_score < 0)     new_score = 0;
         next_rep.score = new_score;
         if (prior_ch.auto_tier) {
-            next_rep.passes_silent = prior_ch.rep.passes_silent + 1;
+            next_rep.passes_silent = 1;  /* LOW #7 clamp */
         } else {
-            next_rep.passes_form   = prior_ch.rep.passes_form + 1;
+            next_rep.passes_form = 1;  /* LOW #7 clamp */
         }
     } else {
         next_rep.score          = 0;
@@ -16169,7 +16250,7 @@ static int bs_form_captcha_fixup(request_rec *r)
             if (new_score < floor) new_score = floor;
             if (new_score < 0)     new_score = 0;
             next_rep.score          = new_score;
-            next_rep.passes_captcha = prior_ch.rep.passes_captcha + 1;
+            next_rep.passes_captcha = 1;  /* LOW #7 clamp */
         } else {
             next_rep.passes_captcha = 1;
         }
