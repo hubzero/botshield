@@ -11130,6 +11130,7 @@ static const char BS_EMBEDDED_JS[] =
 "  .then(function(j){\n"
 "   if (!j || j.mode !== 'silent') return;\n"
 "   if (j.provider === 'turnstile') { runTurnstile(j); return; }\n"
+"   if (j.provider === 'recaptcha-v3') { runRecaptchaV3(j); return; }\n"
 "   if (j.provider !== 'pow' || !j.challenge) return;\n"
 "   var ch = j.challenge;\n"
 "   var workerSrc = '(' + (function(){\n"
@@ -11221,6 +11222,7 @@ static const char BS_EMBEDDED_JS[] =
 "    turnstile.render(c, {\n"
 "     sitekey: j.sitekey,\n"
 "     size: 'invisible',\n"
+"     action: j.action || 'botshield',\n"
 "     callback: function(token){\n"
 "      fetch('/botshield/embedded-verify', {\n"
 "       method:'POST', credentials:'same-origin',\n"
@@ -11231,6 +11233,39 @@ static const char BS_EMBEDDED_JS[] =
 "     'error-callback': function(){}\n"
 "    });\n"
 "   } catch (e) { /* silent — see fail-mode comment */ }\n"
+"  };\n"
+"  s.onerror = function(){};\n"
+"  document.head.appendChild(s);\n"
+" }\n"
+"\n"
+" /* E17.3 — reCAPTCHA v3 invisible adapter. Materially different\n"
+"    client API from Turnstile — Google's grecaptcha is always\n"
+"    invisible (no widget element to mount), uses\n"
+"    grecaptcha.execute() with action binding instead of\n"
+"    render+callback. Server-side, the v3 path also goes through\n"
+"    the same M8 siteverify and validates the response score\n"
+"    against BotShieldRecaptchaV3MinScore. The wrapper just hands\n"
+"    over the token; the policy is server-side. */\n"
+" function runRecaptchaV3(j){\n"
+"  var s = document.createElement('script');\n"
+"  s.src = 'https://www.google.com/recaptcha/api.js?render=' +\n"
+"          encodeURIComponent(j.sitekey);\n"
+"  s.async = true; s.defer = true;\n"
+"  s.onload = function(){\n"
+"   if (typeof grecaptcha === 'undefined') return;\n"
+"   try {\n"
+"    grecaptcha.ready(function(){\n"
+"     grecaptcha.execute(j.sitekey,\n"
+"                        {action: j.action || 'botshield'})\n"
+"      .then(function(token){\n"
+"       fetch('/botshield/embedded-verify', {\n"
+"        method:'POST', credentials:'same-origin',\n"
+"        headers:{'Content-Type':'application/json'},\n"
+"        body: JSON.stringify({provider:'recaptcha-v3', token: token})\n"
+"       });\n"
+"      }).catch(function(){});\n"
+"    });\n"
+"   } catch (e) {}\n"
 "  };\n"
 "  s.onerror = function(){};\n"
 "  document.head.appendChild(s);\n"
@@ -11298,10 +11333,19 @@ static int bs_embedded_bootstrap_handler(request_rec *r,
      * client-side path. */
     if (cfg->captcha_provider && cfg->captcha_provider->implemented &&
         cfg->captcha_site_key && cfg->captcha_secret) {
+        /* `action` is the string the client widget tags its token
+         * with. Both Turnstile and reCAPTCHA v3 understand actions;
+         * server-side we validate the response carries it back so
+         * tokens minted for a different form/scope can't be replayed
+         * here. Operator can override via BotShieldCaptchaExpectedAction;
+         * default "botshield" matches the M8 interstitial path. */
+        const char *action = cfg->captcha_expected_action
+            ? cfg->captcha_expected_action : "botshield";
         ap_rprintf(r,
             "{\"mode\":\"silent\",\"provider\":\"%s\","
-            "\"sitekey\":\"%s\"}\n",
-            cfg->captcha_provider->name, cfg->captcha_site_key);
+            "\"sitekey\":\"%s\",\"action\":\"%s\"}\n",
+            cfg->captcha_provider->name,
+            cfg->captcha_site_key, action);
         return OK;
     }
 
@@ -11577,11 +11621,11 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
     const char *details = NULL;
     long http_code = 0;
     double score = -1.0;
-    const char *hostname = NULL, *action = NULL;
+    const char *resp_hostname = NULL, *resp_action = NULL;
     bs_captcha_result res = bs_captcha_siteverify(r,
         cfg->captcha_provider, cfg->captcha_secret,
         cfg->captcha_secret_len, token, timeout_ms,
-        &details, &http_code, &score, &hostname, &action);
+        &details, &http_code, &score, &resp_hostname, &resp_action);
 
     if (res != BS_CAPTCHA_OK) {
         r->status = HTTP_FORBIDDEN;
@@ -11590,6 +11634,61 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
             "(http=%ld details=\"%s\")", provider_name, http_code,
             details ? details : "");
         return OK;
+    }
+
+    /* Post-siteverify validation parity with the M8 captcha-verify
+     * handler (security review #1). Hostname + action binding stops
+     * a token minted for a different scope/form on the same sitekey
+     * from satisfying verification here. v3 score threshold caps
+     * "valid token but signal is weak". Operator can opt out of
+     * either binding by setting the directive to empty. */
+    const char *expected_host =
+        cfg->captcha_expected_hostname
+            ? cfg->captcha_expected_hostname
+            : (r->server && r->server->server_hostname
+                   ? r->server->server_hostname : "");
+    const char *expected_action =
+        cfg->captcha_expected_action
+            ? cfg->captcha_expected_action : "botshield";
+
+    if (resp_hostname && *expected_host &&
+        strcmp(resp_hostname, expected_host) != 0) {
+        r->status = HTTP_FORBIDDEN;
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: embedded-verify(%s): hostname-mismatch "
+            "(got=%s expected=%s)", provider_name,
+            resp_hostname, expected_host);
+        return OK;
+    }
+    if (resp_action && *expected_action &&
+        strcmp(resp_action, expected_action) != 0) {
+        r->status = HTTP_FORBIDDEN;
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: embedded-verify(%s): action-mismatch "
+            "(got=%s expected=%s)", provider_name,
+            resp_action, expected_action);
+        return OK;
+    }
+    if (strcmp(provider_name, "recaptcha-v3") == 0) {
+        double min_score = (cfg->recaptcha_v3_min_score >= 0.0)
+            ? cfg->recaptcha_v3_min_score
+            : BS_DEFAULT_RECAPTCHA_V3_MIN_SCORE;
+        if (score < 0.0) {
+            /* Missing score on a v3 response is a protocol surprise
+             * (v3 always returns one). Fail open with a warning —
+             * matches the M8 path's behavior. */
+            ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+                "mod_botshield: embedded-verify(recaptcha-v3): "
+                "response missing score — failing open "
+                "(http=%ld)", http_code);
+        } else if (score < min_score) {
+            r->status = HTTP_FORBIDDEN;
+            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                "mod_botshield: embedded-verify(recaptcha-v3): "
+                "score below threshold (%.2f < %.2f)",
+                score, min_score);
+            return OK;
+        }
     }
 
     /* Mint a captcha-<provider> cookie just like the M8 interstitial
