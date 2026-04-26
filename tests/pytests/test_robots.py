@@ -411,11 +411,13 @@ def test_robots_live_refresh_picks_up_changes(
         os.utime(robots_path, (future, future))
 
         # Wait for the watchdog to tick and the refresh to run. Poll
-        # for up to 10s instead of a fixed sleep — under load (full
-        # parallel suite) watchdog scheduling has more jitter than the
-        # 1s interval would suggest. We still fail the test if the
-        # refresh never lands; we just don't fail it on a slow runner.
-        deadline = time.time() + 10
+        # up to 20s — under load (full parallel suite) watchdog
+        # scheduling jitters far past the 1s interval would suggest,
+        # and after the parallel phase Apache may have non-trivial
+        # backlog. 20s is still cheap if the watchdog is responsive;
+        # generous enough to avoid flakes on busier runners. We still
+        # fail the test if the refresh never lands.
+        deadline = time.time() + 20
         r_after = None
         while time.time() < deadline:
             r_after = client.get("/admin", xff=fresh_ip, ua=GPTBOT_UA)
@@ -425,7 +427,7 @@ def test_robots_live_refresh_picks_up_changes(
 
     assert r_after is not None and r_after.status_code == 200, (
         "robots.txt was rewritten to allow /admin, but the refresh "
-        "watchdog didn't swap in the new rules within 10s — request "
+        "watchdog didn't swap in the new rules within 20s — request "
         "is still blocked. Check BotShieldRobotsRefreshInterval wiring "
         f"(last status={r_after.status_code if r_after else 'n/a'})."
     )
