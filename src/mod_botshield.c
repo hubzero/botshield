@@ -1765,11 +1765,20 @@ static const char *bs_set_logo_label(cmd_parms *cmd, void *cfg_v, const char *ar
 /* Slurp a file at config-parse time and hand back its bytes allocated out
  * of the config pool. Size-capped so a misbehaving config can't blow up
  * Apache startup. Returns an error string on failure, NULL on success. */
+/* Loads up to max_bytes from path into a pool-allocated buffer.
+ * The buffer is always NUL-terminated at byte n (one extra byte
+ * past the file content). When out_len is non-NULL, it receives
+ * the actual byte count read — callers handling binary content
+ * (HMAC keys) MUST use this rather than strlen(out_content) since
+ * binary keys can legitimately contain embedded NULs that
+ * strlen would silently truncate at. Callers handling text
+ * content (logo/help/challenge files) can pass NULL. */
 static const char *bs_load_config_file(cmd_parms *cmd,
                                        const char *directive,
                                        const char *path,
                                        apr_size_t max_bytes,
-                                       const char **out_content)
+                                       const char **out_content,
+                                       apr_size_t *out_len)
 {
     apr_file_t *f = NULL;
     apr_status_t rv;
@@ -1806,6 +1815,45 @@ static const char *bs_load_config_file(cmd_parms *cmd,
     }
     buf[n] = '\0';
     *out_content = buf;
+    if (out_len) *out_len = n;
+    return NULL;
+}
+
+/* Security review HIGH #2 — validate a binary-capable secret loaded via
+ * bs_load_config_file. Trims one trailing newline (common with
+ * `echo`-style key generation), rejects embedded NUL bytes (would
+ * silently truncate keys generated with `dd if=/dev/urandom` or
+ * similar — ~22% of random 32-byte buffers contain a NUL), and
+ * enforces the minimum-bytes floor. Returns NULL on success with
+ * *out_len set to the effective key length, or an error string. */
+static const char *bs_validate_secret_key(cmd_parms *cmd,
+                                          const char *directive,
+                                          const char *path,
+                                          const char *buf,
+                                          apr_size_t buf_len,
+                                          apr_size_t *out_len)
+{
+    apr_size_t len = buf_len;
+    if (len > 0 && buf[len-1] == '\n') len--;
+    if (memchr(buf, '\0', len) != NULL) {
+        return apr_psprintf(cmd->pool,
+            "%s: '%s' contains an embedded NUL byte. Random binary "
+            "key files (e.g. `dd if=/dev/urandom` or `openssl rand`) "
+            "produce NUL bytes ~22%% of the time, and earlier "
+            "versions of this loader silently truncated the key at "
+            "the first NUL via strlen — yielding a shorter, weaker "
+            "effective key with no log warning. Generate the key "
+            "with hex (`openssl rand -hex 32`) or base64 (`openssl "
+            "rand -base64 48`) encoding instead, or pre-strip NULs.",
+            directive, path);
+    }
+    if (len < BS_MIN_SECRET_BYTES) {
+        return apr_psprintf(cmd->pool,
+            "%s: '%s' contains only %" APR_SIZE_T_FMT
+            " bytes (minimum %d)",
+            directive, path, len, BS_MIN_SECRET_BYTES);
+    }
+    *out_len = len;
     return NULL;
 }
 
@@ -1813,7 +1861,7 @@ static const char *bs_set_logo_file(cmd_parms *cmd, void *cfg_v, const char *arg
 {
     bs_dir_cfg *cfg = cfg_v;
     return bs_load_config_file(cmd, "BotShieldLogoFile", arg,
-                               BS_MAX_LOGO_BYTES, &cfg->logo_svg);
+                               BS_MAX_LOGO_BYTES, &cfg->logo_svg, NULL);
 }
 
 static const char *bs_set_help(cmd_parms *cmd, void *cfg_v, const char *arg)
@@ -1831,14 +1879,14 @@ static const char *bs_set_help_file(cmd_parms *cmd, void *cfg_v, const char *arg
 {
     bs_dir_cfg *cfg = cfg_v;
     return bs_load_config_file(cmd, "BotShieldHelpFile", arg,
-                               BS_MAX_HELP_BYTES, &cfg->help_html);
+                               BS_MAX_HELP_BYTES, &cfg->help_html, NULL);
 }
 
 static const char *bs_set_challenge_file(cmd_parms *cmd, void *cfg_v, const char *arg)
 {
     bs_dir_cfg *cfg = cfg_v;
     const char *err = bs_load_config_file(cmd, "BotShieldChallengeFile", arg,
-                                          BS_MAX_PAGE_BYTES, &cfg->challenge_html);
+                                          BS_MAX_PAGE_BYTES, &cfg->challenge_html, NULL);
     if (err) return err;
     if (!strstr(cfg->challenge_html, BS_WIDGET_MARKER)) {
         return apr_psprintf(cmd->pool,
@@ -2552,29 +2600,48 @@ static const char *bs_set_ipv6_prefix(cmd_parms *cmd, void *dconf,
  * non-fork MPM variant), apr_global_mutex_child_init is called from
  * our child-init hook to re-attach. */
 
-static apr_status_t bs_shm_cleanup(void *unused)
+static apr_status_t bs_shm_cleanup(void *data)
 {
-    (void)unused;
-    /* apr_shm_destroy/mutex_destroy are driven by pool cleanups
-     * registered when we created them; nothing to do here beyond
-     * resetting the runtime pointers so a subsequent post-config
-     * starts fresh. */
-    memset(&bs_shm, 0, sizeof(bs_shm));
+    /* Graceful-restart guard. The cleanup callback was registered
+     * against the OLD pconf with that generation's apr_shm_t* as
+     * data. By the time this fires, a new bs_post_config may have
+     * already overwritten the global bs_shm with the new generation's
+     * pointers. Unconditionally memset would zero out the new
+     * generation's bs_shm — any worker forked from the parent
+     * AFTER this point would inherit a NULLed struct and segfault
+     * on first request. Only zero if our generation is still the
+     * active one. */
+    apr_shm_t *old_shm = data;
+    if (bs_shm.shm == old_shm) {
+        memset(&bs_shm, 0, sizeof(bs_shm));
+    }
     return APR_SUCCESS;
 }
 
 /* Context struct used by the M6 save-on-shutdown pool cleanup. Full
  * definition is here so post_config can sizeof() it; the implementation
  * (bs_state_load/save/cleanup) lives further down where the flagged-IP
- * slot type and Bloom buffers are already in scope. */
+ * slot type and Bloom buffers are already in scope.
+ *
+ * shm_rt captures a snapshot of bs_shm at registration time. On a
+ * graceful restart, the global bs_shm is overwritten by the new
+ * generation's post_config before this generation's cleanup save
+ * fires; without the snapshot, the save would read the new SHM
+ * (effectively a no-op vs what was just loaded from disk) and the
+ * old generation's accumulated state would be lost. With the
+ * snapshot, each generation's cleanup saves ITS OWN SHM. */
 typedef struct bs_state_cleanup_ctx {
     apr_pool_t *pool;
     server_rec *server;
     const char *path;
+    bs_shm_runtime shm_rt;
 } bs_state_cleanup_ctx;
 
 static void          bs_state_load(apr_pool_t *p, server_rec *s,
                                    const char *path);
+static apr_status_t  bs_state_save(apr_pool_t *p, server_rec *s,
+                                   const char *path,
+                                   const bs_shm_runtime *rt);
 static apr_status_t  bs_state_cleanup(void *data);
 static apr_status_t  bs_watchdog_save_cb(int state, void *data,
                                          apr_pool_t *pool);
@@ -3256,7 +3323,8 @@ static void bs_safeguard_record_presentation(request_rec *r,
                                              const unsigned char ip[16],
                                              apr_int64_t now,
                                              apr_uint32_t ns_id);
-static void bs_safeguard_clear(const unsigned char ip[16],
+static void bs_safeguard_clear(request_rec *r,
+                               const unsigned char ip[16],
                                apr_uint32_t ns_id);
 static int  bs_safeguard_effective_int(int v, int dflt);
 /* Shared action helpers — see definitions below. The server-cfg
@@ -3499,32 +3567,49 @@ static int bs_cohort_matches(const bs_cohort *c,
  * budget (count was incremented), 0 if the window is full.
  *
  * Under pathological contention the CAS loop bounces; cap the retry
- * count and err on admitting rather than emitting spurious 429s. */
+ * count and err on admitting rather than emitting spurious 429s.
+ *
+ * Security review MEDIUM #4 — the prior shape did the window-roll
+ * via two separate stores (CAS window_start_sec, then plain
+ * __atomic_store_n on count = 1). Between those two operations,
+ * another thread could land an increment via the bottom-of-loop
+ * count-CAS path; the count=1 store then wiped that increment,
+ * yielding a slightly-larger-than-budget window straddling the
+ * rollover. Pack window_start_sec and count into a single u64 and
+ * CAS them together — same shape as bs_cv_counter_bump. The
+ * struct is already laid out 8-byte-packed for this. Each CAS
+ * either rolls the window AND sets count atomically, or
+ * increments count alone — no torn intermediate visible to
+ * other threads. */
 static int bs_rate_counter_admit(bs_rate_counter *slot,
                                  apr_uint32_t budget,
                                  apr_uint32_t window_sec)
 {
+    _Static_assert(sizeof(bs_rate_counter) == sizeof(apr_uint64_t),
+                   "bs_rate_counter must be 8 bytes for u64 CAS");
+    apr_uint64_t *p64 = (apr_uint64_t *)slot;
     apr_uint32_t now = (apr_uint32_t)apr_time_sec(apr_time_now());
     for (int i = 0; i < 32; i++) {
-        apr_uint32_t cnt = __atomic_load_n(&slot->count, __ATOMIC_RELAXED);
-        apr_uint32_t win = __atomic_load_n(&slot->window_start_sec,
-                                           __ATOMIC_RELAXED);
-        if (now < win || now - win >= window_sec) {
-            apr_uint32_t expected = win;
-            if (__atomic_compare_exchange_n(&slot->window_start_sec,
-                    &expected, now, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
-                __atomic_store_n(&slot->count, 1, __ATOMIC_RELAXED);
-                return 1;
-            }
-            continue;  /* someone else rolled the window; re-read */
+        apr_uint64_t observed = __atomic_load_n(p64, __ATOMIC_RELAXED);
+        bs_rate_counter snap;
+        memcpy(&snap, &observed, sizeof(snap));
+        apr_uint64_t next;
+        bs_rate_counter cand;
+        if (now < snap.window_start_sec ||
+            now - snap.window_start_sec >= window_sec) {
+            cand.count            = 1;
+            cand.window_start_sec = now;
+        } else {
+            if (snap.count >= budget) return 0;
+            cand.count            = snap.count + 1;
+            cand.window_start_sec = snap.window_start_sec;
         }
-        if (cnt >= budget) return 0;
-        apr_uint32_t expected = cnt;
-        if (__atomic_compare_exchange_n(&slot->count, &expected, cnt + 1,
+        memcpy(&next, &cand, sizeof(next));
+        if (__atomic_compare_exchange_n(p64, &observed, next,
                 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
             return 1;
         }
-        /* CAS lost — retry with fresh count */
+        /* CAS lost — re-read */
     }
     return 1;
 }
@@ -5174,6 +5259,36 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
         return HTTP_INTERNAL_SERVER_ERROR;
     }
 
+    /* Graceful-restart hand-off. If a previous generation's SHM is
+     * still live (bs_shm.shm != NULL means we're inside `apachectl
+     * graceful` rather than a cold boot), force a synchronous save
+     * of THAT generation's state to disk before we allocate the new
+     * SHM and overwrite bs_shm. Without this, the new generation's
+     * bs_state_load (called shortly below) would read a state.bin
+     * up to BotShieldStateSaveInterval seconds stale — the old
+     * generation's accumulated reputation since the last periodic
+     * save would be lost. The old pconf's bs_state_cleanup will
+     * also fire, but asynchronously AFTER this post_config
+     * completes — too late to influence the new generation's load.
+     * ptemp is the right pool here: scratch memory that dies with
+     * this post_config invocation. */
+    if (bs_shm.shm && scfg->state_file) {
+        bs_shm_runtime old_rt = bs_shm;
+        bs_state_save(ptemp, s, scfg->state_file, &old_rt);
+    }
+
+    /* Security review HIGH #4 — snapshot bs_shm before any failable
+     * step that mutates the global. If RAND_bytes /
+     * apr_global_mutex_create / ap_unixd_set_global_mutex_perms
+     * fail, the new pconf gets destroyed by APR (which frees the
+     * apr_shm_t), but the global bs_shm.shm / header /
+     * flagged_table / bloom_bufs[*] would still hold dangling
+     * pointers. On graceful restart with a botched new config the
+     * old workers continue using the dangling state until the old
+     * pconf finally tears down. Restore the snapshot on every
+     * error path below so bs_shm either stays at the OLD
+     * generation's pointers (graceful) or stays NULL (cold boot). */
+    bs_shm_runtime saved_bs_shm = bs_shm;
     apr_status_t rv = apr_shm_create(&bs_shm.shm, scfg->shm_size,
                                      NULL, pconf);
     if (rv != APR_SUCCESS) {
@@ -5181,6 +5296,7 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
         apr_strerror(rv, errbuf, sizeof(errbuf));
         ap_log_error(APLOG_MARK, APLOG_ERR, rv, s,
             "mod_botshield: apr_shm_create failed: %s", errbuf);
+        bs_shm = saved_bs_shm;
         return HTTP_INTERNAL_SERVER_ERROR;
     }
 
@@ -5195,6 +5311,7 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                    sizeof(bs_shm.header->siphash_key)) != 1) {
         ap_log_error(APLOG_MARK, APLOG_ERR, 0, s,
             "mod_botshield: RAND_bytes(siphash_key) failed");
+        bs_shm = saved_bs_shm;
         return HTTP_INTERNAL_SERVER_ERROR;
     }
 
@@ -5263,6 +5380,7 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
         apr_strerror(rv, errbuf, sizeof(errbuf));
         ap_log_error(APLOG_MARK, APLOG_ERR, rv, s,
             "mod_botshield: apr_global_mutex_create failed: %s", errbuf);
+        bs_shm = saved_bs_shm;
         return HTTP_INTERNAL_SERVER_ERROR;
     }
 #ifdef AP_NEED_SET_MUTEX_PERMS
@@ -5270,11 +5388,17 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     if (rv != APR_SUCCESS) {
         ap_log_error(APLOG_MARK, APLOG_ERR, rv, s,
             "mod_botshield: set_global_mutex_perms failed");
+        bs_shm = saved_bs_shm;
         return HTTP_INTERNAL_SERVER_ERROR;
     }
 #endif
 
-    apr_pool_cleanup_register(pconf, NULL, bs_shm_cleanup,
+    /* Pass bs_shm.shm as cleanup data so bs_shm_cleanup can verify
+     * the global bs_shm still belongs to OUR generation before
+     * zeroing it. Prevents the segfault where an old pconf's
+     * cleanup zeros the global struct after the new generation has
+     * already taken it over. */
+    apr_pool_cleanup_register(pconf, bs_shm.shm, bs_shm_cleanup,
                               apr_pool_cleanup_null);
 
     ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
@@ -5293,6 +5417,11 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
         ctx->pool   = pconf;
         ctx->server = s;
         ctx->path   = scfg->state_file;
+        /* Snapshot bs_shm at registration time so the cleanup save
+         * (and the watchdog periodic save) operates on OUR
+         * generation's SHM, not whatever a future graceful restart
+         * has overwritten the global with. */
+        ctx->shm_rt = bs_shm;
         apr_pool_cleanup_register(pconf, ctx, bs_state_cleanup,
                                   apr_pool_cleanup_null);
 
@@ -5858,21 +5987,30 @@ static apr_uint32_t bs_flagged_bucket(const unsigned char ip[16],
 }
 
 /* Write into a slot under seqlock protection. Caller must hold the
- * global mutex. */
+ * global mutex.
+ *
+ * Security review HIGH #5 — version stores use C11 RELEASE
+ * semantics, version loads use ACQUIRE. apr_atomic_set32 / read32
+ * only happen to emit full barriers on x86; on AArch64 / POWER
+ * the plain payload stores between the two version bumps could
+ * be reordered relative to the version stores, allowing a
+ * lockless reader to observe an even (committed) version with
+ * stale or torn payload bytes. The release/acquire pair locks
+ * the ordering down portably; same pattern as the scfg->robots
+ * publish/load (search for __ATOMIC_RELEASE in this file). */
 static void bs_flagged_write_slot(bs_flagged_ip_slot *slot,
                                   const unsigned char ip[16],
                                   apr_uint32_t flags, apr_int64_t expires_at,
                                   apr_uint32_t ns_id)
 {
-    apr_uint32_t v = apr_atomic_read32(&slot->version);
-    apr_atomic_set32(&slot->version, v | 1U);   /* begin: odd */
-    /* Ensure the version-odd store is visible before the payload stores. */
+    apr_uint32_t v = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&slot->version, v | 1U, __ATOMIC_RELEASE);   /* begin: odd */
     memcpy(slot->ip, ip, 16);
     slot->flags      = flags;
     slot->expires_at = expires_at;
     slot->ns_id      = ns_id;
-    /* Version-bump to even publishes the payload to readers. */
-    apr_atomic_set32(&slot->version, (v | 1U) + 1U);
+    /* Release-publish: payload stores above are now visible. */
+    __atomic_store_n(&slot->version, (v | 1U) + 1U, __ATOMIC_RELEASE);
 }
 
 static void bs_flagged_ip_add(request_rec *r,
@@ -5888,7 +6026,17 @@ static void bs_flagged_ip_add(request_rec *r,
     apr_int64_t expires_at = now + ttl_seconds;
     apr_uint32_t base = bs_flagged_bucket(ip, ns_id);
 
-    apr_status_t rv = apr_global_mutex_lock(bs_shm.mutex);
+    /* Load-shed under heavy contention. Under a volumetric DDoS,
+     * every malicious request reaches this write path; a blocking
+     * lock would queue every Apache worker behind whichever one
+     * holds the mutex and starve legitimate traffic. trylock + drop
+     * trades one missed flag-write for keeping workers flowing —
+     * acceptable because (a) the next request from the same IP
+     * will retry, (b) the table is already lossy under probe-limit
+     * overflow, and (c) silent drop is preferable to disk-I/O log
+     * spam during the same DDoS. */
+    apr_status_t rv = apr_global_mutex_trylock(bs_shm.mutex);
+    if (APR_STATUS_IS_EBUSY(rv)) return;
     if (rv != APR_SUCCESS) {
         ap_log_rerror(APLOG_MARK, APLOG_WARNING, rv, r,
             "mod_botshield: flagged-IP mutex_lock failed; dropping flag");
@@ -5966,7 +6114,7 @@ static int bs_flagged_ip_lookup(const unsigned char ip[16],
         apr_uint32_t   local_ns;
         int spins = 0;
         for (;;) {
-            v1 = apr_atomic_read32(&slot->version);
+            v1 = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
             if (v1 & 1U) {
                 if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
                 continue;
@@ -5975,7 +6123,7 @@ static int bs_flagged_ip_lookup(const unsigned char ip[16],
             local_flags   = slot->flags;
             local_expires = slot->expires_at;
             local_ns      = slot->ns_id;
-            v2 = apr_atomic_read32(&slot->version);
+            v2 = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
             if (v1 == v2) break;
             if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
         }
@@ -6050,7 +6198,7 @@ static int bs_strike_check_escalated(const unsigned char ip[16],
         apr_uint32_t  local_ns;
         int spins = 0;
         for (;;) {
-            v1 = apr_atomic_read32(&slot->version);
+            v1 = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
             if (v1 & 1U) {
                 if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
                 continue;
@@ -6059,7 +6207,7 @@ static int bs_strike_check_escalated(const unsigned char ip[16],
             memcpy(local_ip, slot->ip, 16);
             local_until = slot->escalation_until;
             local_ns    = slot->ns_id;
-            v2 = apr_atomic_read32(&slot->version);
+            v2 = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
             if (v1 == v2) break;
             if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
         }
@@ -6089,7 +6237,13 @@ static int bs_strike_record_429(request_rec *r,
     if (!bs_shm.strike_table || !bs_shm.mutex || !cfg) return 0;
     apr_uint32_t base = bs_strike_bucket(ip, rule_slot, ns_id);
 
-    apr_status_t rv = apr_global_mutex_lock(bs_shm.mutex);
+    /* Load-shed under heavy contention — same rationale as
+     * bs_flagged_ip_add. A dropped strike just means the attacker
+     * gets one extra 429 before the rate-limit-abuse escalation
+     * kicks in; retrying from the same IP will hit the lock when
+     * it's free. */
+    apr_status_t rv = apr_global_mutex_trylock(bs_shm.mutex);
+    if (APR_STATUS_IS_EBUSY(rv)) return 0;
     if (rv != APR_SUCCESS) {
         ap_log_rerror(APLOG_MARK, APLOG_WARNING, rv, r,
             "mod_botshield: strike-table mutex_lock failed; "
@@ -6135,8 +6289,8 @@ static int bs_strike_record_429(request_rec *r,
     }
 
     bs_strike_slot *slot = &bs_shm.strike_table[target_idx];
-    apr_uint32_t v0 = apr_atomic_read32(&slot->version);
-    apr_atomic_set32(&slot->version, v0 | 1U);   /* begin write */
+    apr_uint32_t v0 = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&slot->version, v0 | 1U, __ATOMIC_RELEASE);   /* begin write */
 
     int crossed = 0;
     apr_uint32_t now_sec = (apr_uint32_t)now;
@@ -6164,7 +6318,7 @@ static int bs_strike_record_429(request_rec *r,
         if (prev_until <= now) crossed = 1;
     }
 
-    apr_atomic_set32(&slot->version, (v0 | 1U) + 1U);   /* publish */
+    __atomic_store_n(&slot->version, (v0 | 1U) + 1U, __ATOMIC_RELEASE);   /* publish */
     apr_global_mutex_unlock(bs_shm.mutex);
     return crossed;
 }
@@ -6230,7 +6384,7 @@ static int bs_safeguard_check(const unsigned char ip[16], apr_int64_t now,
         apr_int64_t   local_until;
         int spins = 0;
         for (;;) {
-            v1 = apr_atomic_read32(&slot->version);
+            v1 = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
             if (v1 & 1U) {
                 if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
                 continue;
@@ -6239,7 +6393,7 @@ static int bs_safeguard_check(const unsigned char ip[16], apr_int64_t now,
             local_ns_id = slot->ns_id;
             memcpy(local_ip, slot->ip, 16);
             local_until = slot->safeguard_until;
-            v2 = apr_atomic_read32(&slot->version);
+            v2 = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
             if (v1 == v2) break;
             if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
         }
@@ -6279,7 +6433,7 @@ static apr_uint32_t bs_safeguard_present_count(const unsigned char ip[16],
         apr_uint32_t  local_count;
         int spins = 0;
         for (;;) {
-            v1 = apr_atomic_read32(&slot->version);
+            v1 = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
             if (v1 & 1U) {
                 if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
                 continue;
@@ -6289,7 +6443,7 @@ static apr_uint32_t bs_safeguard_present_count(const unsigned char ip[16],
             memcpy(local_ip, slot->ip, 16);
             local_window_start = slot->present_window_start;
             local_count        = slot->present_count;
-            v2 = apr_atomic_read32(&slot->version);
+            v2 = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
             if (v1 == v2) break;
             if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
         }
@@ -6329,7 +6483,10 @@ static void bs_safeguard_record_presentation(request_rec *r,
                         BS_DEFAULT_SAFEGUARD_TTL);
 
     apr_uint32_t base = bs_safeguard_bucket(ip, ns_id);
-    apr_status_t rv = apr_global_mutex_lock(bs_shm.mutex);
+    /* Load-shed under heavy contention — same rationale as
+     * bs_flagged_ip_add. */
+    apr_status_t rv = apr_global_mutex_trylock(bs_shm.mutex);
+    if (APR_STATUS_IS_EBUSY(rv)) return;
     if (rv != APR_SUCCESS) {
         ap_log_rerror(APLOG_MARK, APLOG_WARNING, rv, r,
             "mod_botshield: safeguard-table mutex_lock failed; "
@@ -6373,8 +6530,8 @@ static void bs_safeguard_record_presentation(request_rec *r,
     }
 
     bs_safeguard_slot *slot = &bs_shm.safeguard_table[target_idx];
-    apr_uint32_t v0 = apr_atomic_read32(&slot->version);
-    apr_atomic_set32(&slot->version, v0 | 1U);   /* begin write */
+    apr_uint32_t v0 = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&slot->version, v0 | 1U, __ATOMIC_RELEASE);   /* begin write */
 
     apr_uint32_t now_sec = (apr_uint32_t)now;
     int fresh_slot = (matched_idx < 0);
@@ -6397,7 +6554,7 @@ static void bs_safeguard_record_presentation(request_rec *r,
         slot->safeguard_until = now + ttl;
     }
 
-    apr_atomic_set32(&slot->version, (v0 | 1U) + 1U);
+    __atomic_store_n(&slot->version, (v0 | 1U) + 1U, __ATOMIC_RELEASE);
     apr_global_mutex_unlock(bs_shm.mutex);
 }
 
@@ -6405,28 +6562,43 @@ static void bs_safeguard_record_presentation(request_rec *r,
  * this IP — proves the client CAN solve, so accumulated presentation
  * history was noise (probably transient) and we want a fresh slate.
  * No-op if the entry isn't found; silent on error. */
-static void bs_safeguard_clear(const unsigned char ip[16],
+static void bs_safeguard_clear(request_rec *r,
+                               const unsigned char ip[16],
                                apr_uint32_t ns_id)
 {
     if (!bs_shm.safeguard_table || !bs_shm.mutex) return;
     apr_uint32_t base = bs_safeguard_bucket(ip, ns_id);
 
-    if (apr_global_mutex_lock(bs_shm.mutex) != APR_SUCCESS) return;
+    /* Load-shed under heavy contention. A dropped clear leaves the
+     * stale safeguard record in place; it expires on its own TTL.
+     *
+     * Security review HIGH #6 — distinguish EBUSY (expected
+     * shedding under load) from other failures (mutex genuinely
+     * broken — operator should know). Mirrors the
+     * bs_safeguard_record_presentation pattern. */
+    apr_status_t rv = apr_global_mutex_trylock(bs_shm.mutex);
+    if (APR_STATUS_IS_EBUSY(rv)) return;
+    if (rv != APR_SUCCESS) {
+        ap_log_rerror(APLOG_MARK, APLOG_WARNING, rv, r,
+            "mod_botshield: safeguard-table mutex_lock failed; "
+            "dropping clear (entry will expire on its own TTL)");
+        return;
+    }
     for (unsigned i = 0; i < BS_SAFEGUARD_PROBE_LIMIT; i++) {
         apr_uint32_t idx = (base + i) % bs_shm.safeguard_capacity;
         bs_safeguard_slot *slot = &bs_shm.safeguard_table[idx];
         if (!slot->used) continue;
         if (slot->ns_id != ns_id) continue;
         if (memcmp(slot->ip, ip, 16) != 0) continue;
-        apr_uint32_t v0 = apr_atomic_read32(&slot->version);
-        apr_atomic_set32(&slot->version, v0 | 1U);
+        apr_uint32_t v0 = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
+        __atomic_store_n(&slot->version, v0 | 1U, __ATOMIC_RELEASE);
         slot->used                 = 0;
         slot->ns_id                = 0;
         slot->present_window_start = 0;
         slot->present_count        = 0;
         slot->safeguard_until      = 0;
         memset(slot->ip, 0, 16);
-        apr_atomic_set32(&slot->version, (v0 | 1U) + 1U);
+        __atomic_store_n(&slot->version, (v0 | 1U) + 1U, __ATOMIC_RELEASE);
         break;
     }
     apr_global_mutex_unlock(bs_shm.mutex);
@@ -6509,9 +6681,20 @@ static void bs_bloom_rotate_if_due(apr_int64_t now_sec)
      * does serialize against flagged-IP writers and makes rotation
      * a clean global checkpoint. Rotation fires at most twice per
      * week by default, so the brief mutex hold is free. */
+    /* Security review MEDIUM #6 — was apr_global_mutex_lock (blocking),
+     * but this code path runs from any worker that wins the
+     * rotation CAS — i.e., from the request hot path. A flagged-IP
+     * writer or strike-record-429 holding the mutex would stall
+     * the rotating worker on its current request. Trylock matches
+     * the rest of the request-path lock acquisitions. The atomic
+     * loop below is what actually fixes the writer/clearer race;
+     * the mutex is just opportunistic serialization for cleanliness.
+     * If we miss it on contention, the rotation still succeeds
+     * (atomic stores publish) — slightly less of a clean global
+     * checkpoint, but safe. */
     int held_mutex = 0;
     if (bs_shm.mutex &&
-        apr_global_mutex_lock(bs_shm.mutex) == APR_SUCCESS) {
+        apr_global_mutex_trylock(bs_shm.mutex) == APR_SUCCESS) {
         held_mutex = 1;
     }
     apr_uint64_t *p64 = (apr_uint64_t *)bs_shm.bloom_bufs[new_active];
@@ -6855,13 +7038,14 @@ static void bs_fsync_parent_dir(apr_pool_t *p, server_rec *s,
  * individual byte reads are torn-free, so a plain memcpy captures a
  * well-defined per-byte snapshot with no lock needed. */
 static apr_status_t bs_state_save(apr_pool_t *p, server_rec *s,
-                                  const char *path)
+                                  const char *path,
+                                  const bs_shm_runtime *rt)
 {
     apr_time_t t_start = apr_time_now();
-    apr_size_t flagged_bytes = bs_shm.flagged_capacity
+    apr_size_t flagged_bytes = rt->flagged_capacity
                                * sizeof(bs_flagged_ip_slot);
-    apr_size_t bloom_bytes   = bs_shm.bloom_buf_bytes;
-    apr_size_t key_bytes     = sizeof(bs_shm.header->siphash_key);
+    apr_size_t bloom_bytes   = rt->bloom_buf_bytes;
+    apr_size_t key_bytes     = sizeof(rt->header->siphash_key);
     apr_size_t total = 4 + 4 + 8                    /* header */
                      + key_bytes                    /* siphash key */
                      + 4 + flagged_bytes            /* flagged */
@@ -6877,36 +7061,68 @@ static apr_status_t bs_state_save(apr_pool_t *p, server_rec *s,
     memcpy(pc, &magic,   4); pc += 4;
     memcpy(pc, &version, 4); pc += 4;
     memcpy(pc, &now,     8); pc += 8;
-    memcpy(pc, bs_shm.header->siphash_key, key_bytes); pc += key_bytes;
+    memcpy(pc, rt->header->siphash_key, key_bytes); pc += key_bytes;
 
-    apr_uint32_t cap = (apr_uint32_t)bs_shm.flagged_capacity;
+    apr_uint32_t cap = (apr_uint32_t)rt->flagged_capacity;
     memcpy(pc, &cap, 4); pc += 4;
 
     /* Serialize the flagged-IP copy against bs_flagged_ip_add's
      * writer. Without the lock, a concurrent add's odd-version mid-
      * state can be captured; load resets version to 0 and ends up
-     * publishing a logically-forged slot. */
-    if (bs_shm.mutex) {
-        apr_status_t lr = apr_global_mutex_lock(bs_shm.mutex);
+     * publishing a logically-forged slot.
+     *
+     * Security review MEDIUM #7 — was apr_global_mutex_lock
+     * (blocking). bs_state_save runs from three contexts:
+     *   - mod_watchdog periodic save (parent or watchdog process)
+     *   - graceful-shutdown pool cleanup
+     *   - graceful-restart sync save in post_config (parent)
+     *
+     * In all three cases, blocking on a worker-held mutex stalls
+     * the parent or watchdog indefinitely if a worker dies
+     * holding the mutex or just happens to be in the middle of a
+     * write under heavy load. Use timedlock with a 2-second
+     * ceiling: the critical section we'd be waiting on is a
+     * bounded probe-loop (~10 slot scans) followed by short
+     * stores; 2s is generous for that and short enough to fail
+     * cleanly if something's wedged. On timeout, log + skip the
+     * save (same behavior as the previous error path). */
+    if (rt->mutex) {
+        apr_status_t lr = apr_global_mutex_timedlock(
+            rt->mutex, apr_time_from_sec(2));
         if (lr != APR_SUCCESS) {
             ap_log_error(APLOG_MARK, APLOG_WARNING, lr, s,
-                "mod_botshield: state save: could not lock mutex; "
-                "skipping save to avoid writing an inconsistent snapshot");
+                "mod_botshield: state save: could not lock mutex "
+                "within 2s; skipping save to avoid blocking "
+                "the parent or writing an inconsistent snapshot");
             return lr;
         }
     }
-    memcpy(pc, bs_shm.flagged_table, flagged_bytes);
-    if (bs_shm.mutex) apr_global_mutex_unlock(bs_shm.mutex);
+    memcpy(pc, rt->flagged_table, flagged_bytes);
+    if (rt->mutex) apr_global_mutex_unlock(rt->mutex);
     pc += flagged_bytes;
 
-    apr_uint32_t bb = (apr_uint32_t)bs_shm.bloom_buf_bytes;
-    apr_uint32_t act = apr_atomic_read32(&bs_shm.header->bloom_active);
-    apr_int64_t  nxt = bs_shm.header->bloom_next_rotate;
+    apr_uint32_t bb = (apr_uint32_t)rt->bloom_buf_bytes;
+    apr_uint32_t act = apr_atomic_read32(&rt->header->bloom_active);
+    apr_int64_t  nxt = rt->header->bloom_next_rotate;
     memcpy(pc, &bb,  4); pc += 4;
     memcpy(pc, &act, 4); pc += 4;
     memcpy(pc, &nxt, 8); pc += 8;
-    memcpy(pc, bs_shm.bloom_bufs[0], bb); pc += bb;
-    memcpy(pc, bs_shm.bloom_bufs[1], bb); pc += bb;
+    /* Security review MEDIUM #5 — bloom buffers are mutated on the
+     * request hot path via byte-level __atomic_or_fetch (see
+     * bs_bloom_add). A plain memcpy reading those same bytes
+     * concurrently is a data race per the C memory model — TSAN
+     * flags it, and on weak-memory arches the saved bytes could
+     * tear (lost OR'd bits) even though x86 hides it. Byte-wise
+     * relaxed atomic load matches the writer's atomic granularity;
+     * compiles to the same memory-bandwidth-bound mov on x86 / ldr
+     * on AArch64 as memcpy would. */
+    for (int j = 0; j < 2; j++) {
+        const unsigned char *src = rt->bloom_bufs[j];
+        for (apr_size_t i = 0; i < bb; i++) {
+            pc[i] = __atomic_load_n(&src[i], __ATOMIC_RELAXED);
+        }
+        pc += bb;
+    }
 
     apr_uint64_t fnv = bs_fnv64(BS_FNV64_SEED, buf, pc - buf);
     memcpy(pc, &fnv, 8); pc += 8;
@@ -6964,15 +7180,15 @@ static apr_status_t bs_state_save(apr_pool_t *p, server_rec *s,
      * shown and the value scraped are consistent. Counters are
      * module-global, not per-vhost, so no atomic-RMW race between
      * concurrent saves (watchdog + shutdown) matters in practice. */
-    if (bs_shm.metrics) {
-        __atomic_fetch_add(&bs_shm.metrics->state_saves_total, 1,
+    if (rt->metrics) {
+        __atomic_fetch_add(&rt->metrics->state_saves_total, 1,
                            __ATOMIC_RELAXED);
-        __atomic_store_n(&bs_shm.metrics->state_save_last_unix,
+        __atomic_store_n(&rt->metrics->state_save_last_unix,
                          (apr_uint64_t)apr_time_sec(t_end),
                          __ATOMIC_RELAXED);
-        __atomic_store_n(&bs_shm.metrics->state_save_last_bytes,
+        __atomic_store_n(&rt->metrics->state_save_last_bytes,
                          (apr_uint64_t)total, __ATOMIC_RELAXED);
-        __atomic_store_n(&bs_shm.metrics->state_save_last_duration_us,
+        __atomic_store_n(&rt->metrics->state_save_last_duration_us,
                          (apr_uint64_t)duration_us, __ATOMIC_RELAXED);
     }
 
@@ -6988,10 +7204,14 @@ static apr_status_t bs_state_save(apr_pool_t *p, server_rec *s,
 static apr_status_t bs_state_cleanup(void *data)
 {
     bs_state_cleanup_ctx *ctx = data;
-    if (!bs_shm.shm || !bs_shm.flagged_table || !bs_shm.bloom_bufs[0]) {
+    /* Use the snapshotted SHM rt — on a graceful restart, the
+     * global bs_shm has already been overwritten by the new
+     * generation. ctx->shm_rt remembers OUR generation's pointers. */
+    if (!ctx->shm_rt.shm || !ctx->shm_rt.flagged_table ||
+        !ctx->shm_rt.bloom_bufs[0]) {
         return APR_SUCCESS;   /* post-config never completed; nothing to save */
     }
-    bs_state_save(ctx->pool, ctx->server, ctx->path);
+    bs_state_save(ctx->pool, ctx->server, ctx->path, &ctx->shm_rt);
     return APR_SUCCESS;
 }
 
@@ -6999,6 +7219,7 @@ static const char *bs_set_state_file(cmd_parms *cmd, void *dconf,
                                      const char *arg)
 {
     (void)dconf;
+    bs_warn_if_virtual_scope(cmd, "BotShieldStateFile");
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
     if (!arg || !*arg) return "BotShieldStateFile requires a path";
@@ -7010,6 +7231,7 @@ static const char *bs_set_state_save_interval(cmd_parms *cmd, void *dconf,
                                               const char *arg)
 {
     (void)dconf;
+    bs_warn_if_virtual_scope(cmd, "BotShieldStateSaveInterval");
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
     /* 0 = shutdown-only. Otherwise must be in a sane operational
@@ -8874,19 +9096,16 @@ static const char *bs_set_app_feedback_secret_file(cmd_parms *cmd,
     }
 
     const char *buf = NULL;
+    apr_size_t buf_len = 0;
     const char *err = bs_load_config_file(cmd,
         "BotShieldAppFeedbackSecretFile", arg,
-        BS_MAX_SECRET_BYTES, &buf);
+        BS_MAX_SECRET_BYTES, &buf, &buf_len);
     if (err) return err;
 
-    apr_size_t len = strlen(buf);
-    if (len > 0 && buf[len-1] == '\n') len--;
-    if (len < BS_MIN_SECRET_BYTES) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldAppFeedbackSecretFile: '%s' contains only "
-            "%" APR_SIZE_T_FMT " bytes (minimum %d)",
-            arg, len, BS_MIN_SECRET_BYTES);
-    }
+    apr_size_t len = 0;
+    err = bs_validate_secret_key(cmd, "BotShieldAppFeedbackSecretFile",
+                                 arg, buf, buf_len, &len);
+    if (err) return err;
 
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
@@ -8943,19 +9162,16 @@ static const char *bs_set_app_claims_secret_file(cmd_parms *cmd,
     }
 
     const char *buf = NULL;
+    apr_size_t buf_len = 0;
     const char *err = bs_load_config_file(cmd,
         "BotShieldAppClaimsSecretFile", arg,
-        BS_MAX_SECRET_BYTES, &buf);
+        BS_MAX_SECRET_BYTES, &buf, &buf_len);
     if (err) return err;
 
-    apr_size_t len = strlen(buf);
-    if (len > 0 && buf[len-1] == '\n') len--;
-    if (len < BS_MIN_SECRET_BYTES) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldAppClaimsSecretFile: '%s' contains only "
-            "%" APR_SIZE_T_FMT " bytes (minimum %d)",
-            arg, len, BS_MIN_SECRET_BYTES);
-    }
+    apr_size_t len = 0;
+    err = bs_validate_secret_key(cmd, "BotShieldAppClaimsSecretFile",
+                                 arg, buf, buf_len, &len);
+    if (err) return err;
 
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
@@ -9004,11 +9220,12 @@ static apr_status_t bs_watchdog_save_cb(int state, void *data,
     if (state != AP_WATCHDOG_STATE_RUNNING) return APR_SUCCESS;
     bs_state_cleanup_ctx *ctx = data;
     if (!ctx || !ctx->path) return APR_SUCCESS;
-    if (!bs_shm.shm || !bs_shm.flagged_table || !bs_shm.bloom_bufs[0]) {
+    if (!ctx->shm_rt.shm || !ctx->shm_rt.flagged_table ||
+        !ctx->shm_rt.bloom_bufs[0]) {
         return APR_SUCCESS;   /* SHM not up yet; nothing to save */
     }
     /* Use the callback's own pool so temporaries die with this tick. */
-    bs_state_save(pool, ctx->server, ctx->path);
+    bs_state_save(pool, ctx->server, ctx->path, &ctx->shm_rt);
     return APR_SUCCESS;
 }
 
@@ -9527,18 +9744,15 @@ static const char *bs_set_secret_file(cmd_parms *cmd, void *cfg_v,
     }
 
     const char *buf = NULL;
+    apr_size_t buf_len = 0;
     const char *err = bs_load_config_file(cmd, "BotShieldSecretFile", arg,
-                                          BS_MAX_SECRET_BYTES, &buf);
+                                          BS_MAX_SECRET_BYTES, &buf, &buf_len);
     if (err) return err;
 
-    /* Trim one trailing newline if present — common with `echo` output. */
-    apr_size_t len = strlen(buf);
-    if (len > 0 && buf[len-1] == '\n') len--;
-    if (len < BS_MIN_SECRET_BYTES) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldSecretFile: '%s' contains only %" APR_SIZE_T_FMT
-            " bytes (minimum %d)", arg, len, BS_MIN_SECRET_BYTES);
-    }
+    apr_size_t len = 0;
+    err = bs_validate_secret_key(cmd, "BotShieldSecretFile",
+                                 arg, buf, buf_len, &len);
+    if (err) return err;
 
     cfg->secret     = (const unsigned char *)buf;
     cfg->secret_len = len;
@@ -9580,19 +9794,17 @@ static const char *bs_set_secondary_secret_file(cmd_parms *cmd,
     }
 
     const char *buf = NULL;
+    apr_size_t buf_len = 0;
     const char *err = bs_load_config_file(cmd,
                                           "BotShieldSecondarySecretFile",
-                                          arg, BS_MAX_SECRET_BYTES, &buf);
+                                          arg, BS_MAX_SECRET_BYTES,
+                                          &buf, &buf_len);
     if (err) return err;
 
-    apr_size_t len = strlen(buf);
-    if (len > 0 && buf[len-1] == '\n') len--;
-    if (len < BS_MIN_SECRET_BYTES) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldSecondarySecretFile: '%s' contains only "
-            "%" APR_SIZE_T_FMT " bytes (minimum %d)",
-            arg, len, BS_MIN_SECRET_BYTES);
-    }
+    apr_size_t len = 0;
+    err = bs_validate_secret_key(cmd, "BotShieldSecondarySecretFile",
+                                 arg, buf, buf_len, &len);
+    if (err) return err;
 
     cfg->secret_secondary     = (const unsigned char *)buf;
     cfg->secret_secondary_len = len;
@@ -9748,16 +9960,16 @@ static const char *bs_set_captcha_secret_file(cmd_parms *cmd, void *cfg_v,
     }
 
     const char *buf = NULL;
+    apr_size_t buf_len = 0;
     const char *err = bs_load_config_file(cmd, "BotShieldCaptchaSecretFile",
-                                          arg, BS_MAX_SECRET_BYTES, &buf);
+                                          arg, BS_MAX_SECRET_BYTES,
+                                          &buf, &buf_len);
     if (err) return err;
 
-    apr_size_t len = strlen(buf);
-    if (len > 0 && buf[len-1] == '\n') len--;
-    if (len == 0) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldCaptchaSecretFile: '%s' is empty", arg);
-    }
+    apr_size_t len = 0;
+    err = bs_validate_secret_key(cmd, "BotShieldCaptchaSecretFile",
+                                 arg, buf, buf_len, &len);
+    if (err) return err;
     cfg->captcha_secret     = (const unsigned char *)buf;
     cfg->captcha_secret_len = len;
     return NULL;
@@ -9936,6 +10148,18 @@ typedef struct {
     int        truncated;
 } bs_curl_buffer;
 
+/* Security review MEDIUM — curl_easy_setopt return codes used to be
+ * silently ignored. Wrapping every call with this macro accumulates
+ * the first failure into setopt_rc, which the caller checks once
+ * before curl_easy_perform. CURLE_OK is the common path; checking
+ * the accumulator at the end avoids cluttering 16 lines per
+ * siteverify with explicit if-blocks. Caller must declare
+ * `CURLcode setopt_rc = CURLE_OK;` in scope. */
+#define BS_SETOPT(h, opt, val) do { \
+    CURLcode _bs_rc = curl_easy_setopt((h), (opt), (val)); \
+    if (_bs_rc != CURLE_OK && setopt_rc == CURLE_OK) setopt_rc = _bs_rc; \
+} while (0)
+
 static size_t bs_curl_write_cb(char *ptr, size_t size, size_t nmemb,
                                void *userdata)
 {
@@ -9960,21 +10184,94 @@ static size_t bs_curl_write_cb(char *ptr, size_t size, size_t nmemb,
         return 0;
     }
     size_t incoming = size * nmemb;
-    if (b->truncated) return incoming;   /* drain silently */
+    /* Security review HIGH #8 — abort the transfer once truncation
+     * is detected, instead of draining the rest of the body
+     * silently. A slow-trickle malicious provider was previously
+     * able to hold an in-flight captcha slot for the full timeout
+     * (BS_DEFAULT_CAPTCHA_MAX_INFLIGHT defaults to 64 — exhausting
+     * the pool with 64 slow trickles starves real verifies).
+     * Returning 0 yields CURLE_WRITE_ERROR; the caller maps that
+     * to BS_CAPTCHA_ERROR (fail-open by policy on transport
+     * failures, same path as a timeout). */
+    if (b->truncated) return 0;
     size_t room = (b->len < b->cap) ? (b->cap - b->len) : 0;
     size_t take = (incoming < room) ? incoming : room;
     if (take > 0) {
         memcpy(b->buf + b->len, ptr, take);
         b->len += take;
     }
-    if (take < incoming) b->truncated = 1;
-    return incoming;  /* always "consume" everything so libcurl doesn't abort */
+    if (take < incoming) {
+        b->truncated = 1;
+        return 0;   /* abort transfer */
+    }
+    return incoming;
 }
 
 /* libcurl global state is initialized once in bs_post_config (see the
  * comment there). No per-request init guard here — curl_global_init is
  * not thread-safe, and doing it lazily from the request path would
  * race under mpm_event. */
+
+/* Security review MEDIUM #13 — CURLOPT_OPENSOCKETFUNCTION callback
+ * that rejects connections to RFC1918 / loopback / link-local
+ * addresses. Defense-in-depth: HIGH #7 already pinned protocol to
+ * https, but if a provider's NS were ever compromised to return an
+ * internal IP for the provider hostname (challenges.cloudflare.com,
+ * etc.), libcurl would still happily connect to that address and
+ * we'd POST our captcha-secret bytes to whoever's listening. This
+ * callback inspects the resolved address right before socket()
+ * and refuses the connection by returning CURL_SOCKET_BAD if the
+ * target is in any of:
+ *   IPv4: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16,
+ *         127.0.0.0/8, 169.254.0.0/16, 0.0.0.0/8
+ *   IPv6: ::1/128, fc00::/7 (ULA), fe80::/10 (link-local),
+ *         IPv4-mapped equivalents of the above. */
+static curl_socket_t bs_curl_open_socket_cb(void *clientp,
+                                            curlsocktype purpose,
+                                            struct curl_sockaddr *addr)
+{
+    (void)clientp; (void)purpose;
+    int reject = 0;
+    if (addr->family == AF_INET) {
+        const struct sockaddr_in *sin = (const struct sockaddr_in *)&addr->addr;
+        apr_uint32_t ip = ntohl(sin->sin_addr.s_addr);
+        unsigned char o1 = (ip >> 24) & 0xFF;
+        unsigned char o2 = (ip >> 16) & 0xFF;
+        if (o1 == 10) reject = 1;                              /* 10/8 */
+        else if (o1 == 172 && (o2 & 0xF0) == 16) reject = 1;   /* 172.16/12 */
+        else if (o1 == 192 && o2 == 168) reject = 1;           /* 192.168/16 */
+        else if (o1 == 127) reject = 1;                        /* loopback */
+        else if (o1 == 169 && o2 == 254) reject = 1;           /* link-local */
+        else if (o1 == 0) reject = 1;                          /* 0/8 */
+    } else if (addr->family == AF_INET6) {
+        const struct sockaddr_in6 *sin6 =
+            (const struct sockaddr_in6 *)&addr->addr;
+        const unsigned char *b = sin6->sin6_addr.s6_addr;
+        /* ::1 loopback */
+        if (b[0]==0 && b[1]==0 && b[2]==0 && b[3]==0 &&
+            b[4]==0 && b[5]==0 && b[6]==0 && b[7]==0 &&
+            b[8]==0 && b[9]==0 && b[10]==0 && b[11]==0 &&
+            b[12]==0 && b[13]==0 && b[14]==0 && b[15]==1) reject = 1;
+        /* fc00::/7 — ULA */
+        else if ((b[0] & 0xFE) == 0xFC) reject = 1;
+        /* fe80::/10 — link-local */
+        else if (b[0] == 0xFE && (b[1] & 0xC0) == 0x80) reject = 1;
+        /* ::ffff:0:0/96 — IPv4-mapped; recheck the embedded v4 */
+        else if (b[0]==0 && b[1]==0 && b[2]==0 && b[3]==0 &&
+                 b[4]==0 && b[5]==0 && b[6]==0 && b[7]==0 &&
+                 b[8]==0 && b[9]==0 && b[10]==0xFF && b[11]==0xFF) {
+            unsigned char o1 = b[12], o2 = b[13];
+            if (o1 == 10) reject = 1;
+            else if (o1 == 172 && (o2 & 0xF0) == 16) reject = 1;
+            else if (o1 == 192 && o2 == 168) reject = 1;
+            else if (o1 == 127) reject = 1;
+            else if (o1 == 169 && o2 == 254) reject = 1;
+            else if (o1 == 0) reject = 1;
+        }
+    }
+    if (reject) return CURL_SOCKET_BAD;
+    return socket(addr->family, addr->socktype, addr->protocol);
+}
 
 /* URL-encode via libcurl and copy into the request pool so the caller
  * can free the libcurl buffer right away. */
@@ -10084,17 +10381,31 @@ static bs_captcha_result bs_captcha_parse_response(apr_pool_t *p,
                     json_object_object_get_ex(root, "errors", &ec);
                 }
                 if (ec && json_object_is_type(ec, json_type_array)) {
+                    /* apr_pstrcat in a loop is O(N²) — each call
+                     * allocates a fresh buffer sized to the
+                     * cumulative length and copies the prior result
+                     * forward. Push into an array and join in one
+                     * allocation via apr_array_pstrcat (O(N)). The
+                     * 8 KB body cap (BS_MAX_CAPTCHA_BODY) bounds N,
+                     * but a misconfigured-secret response returning
+                     * many "invalid-input-*" error codes hits this
+                     * path on every request — worth the tidier
+                     * shape. */
                     int n = (int)json_object_array_length(ec);
-                    char *joined = apr_pstrdup(p, "");
+                    apr_array_header_t *arr = apr_array_make(p,
+                        n > 0 ? n : 1, sizeof(const char *));
                     for (int i = 0; i < n; i++) {
                         json_object *e = json_object_array_get_idx(ec, i);
                         if (!e) continue;
                         const char *s = json_object_get_string(e);
                         if (!s) continue;
-                        joined = apr_pstrcat(p, joined,
-                                             i == 0 ? "" : ",", s, NULL);
+                        /* Borrowed pointer into root — root is
+                         * json_object_put'd at the end of this
+                         * function, AFTER apr_array_pstrcat copies
+                         * the strings into its joined output. Safe. */
+                        *(const char **)apr_array_push(arr) = s;
                     }
-                    *out_details = joined;
+                    *out_details = apr_array_pstrcat(p, arr, ',');
                 }
             }
         }
@@ -10151,26 +10462,64 @@ static bs_captcha_result bs_captcha_siteverify(request_rec *r,
         "secret=%s&%s=%s&remoteip=%s",
         esc_secret, field, esc_token, esc_ip);
 
+    /* Security review MEDIUM — allocate one extra byte so a
+     * full-cap response (resp.len == BS_MAX_CAPTCHA_BODY, which
+     * the write callback caps at via the room calculation) can
+     * receive its NUL terminator at resp.buf[resp.len] without
+     * overwriting the last valid byte. Symmetric with the
+     * BS_FORM_CAPTCHA_BODY_MAX+1 fix applied to the form-captcha
+     * body buffer. */
     bs_curl_buffer resp = {
-        .buf = apr_palloc(r->pool, BS_MAX_CAPTCHA_BODY),
+        .buf = apr_palloc(r->pool, BS_MAX_CAPTCHA_BODY + 1),
         .cap = BS_MAX_CAPTCHA_BODY,
         .len = 0, .truncated = 0,
     };
 
-    curl_easy_setopt(curl, CURLOPT_URL, prov->siteverify_url);
-    curl_easy_setopt(curl, CURLOPT_POST, 1L);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS,
+    /* Accumulator for BS_SETOPT — see macro definition. */
+    CURLcode setopt_rc = CURLE_OK;
+    BS_SETOPT(curl, CURLOPT_URL, prov->siteverify_url);
+    BS_SETOPT(curl, CURLOPT_POST, 1L);
+    BS_SETOPT(curl, CURLOPT_POSTFIELDS, body);
+    BS_SETOPT(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
+    BS_SETOPT(curl, CURLOPT_CONNECTTIMEOUT_MS,
                      (long)BS_CAPTCHA_CONNECT_TIMEOUT);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, (long)timeout_ms);
-    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "mod_botshield/0.1");
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, bs_curl_write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+    BS_SETOPT(curl, CURLOPT_TIMEOUT_MS, (long)timeout_ms);
+    BS_SETOPT(curl, CURLOPT_NOSIGNAL, 1L);
+    BS_SETOPT(curl, CURLOPT_USERAGENT, "mod_botshield/0.1");
+    BS_SETOPT(curl, CURLOPT_WRITEFUNCTION, bs_curl_write_cb);
+    BS_SETOPT(curl, CURLOPT_WRITEDATA, &resp);
+    BS_SETOPT(curl, CURLOPT_FOLLOWLOCATION, 0L);
+    BS_SETOPT(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    BS_SETOPT(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+    /* Security review HIGH #7 — allowlist HTTPS only. Provider URLs
+     * are hard-coded today, but a future operator-tunable URL
+     * would become an immediate SSRF vector via file://, gopher://,
+     * etc. Cheap to close now. REDIR_PROTOCOLS mirrors the policy
+     * in case FOLLOWLOCATION is ever flipped on later. */
+    BS_SETOPT(curl, CURLOPT_PROTOCOLS_STR, "https");
+    BS_SETOPT(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
+    /* Security review MEDIUM #13 — defense-in-depth against a
+     * compromised-DNS scenario where the provider hostname resolves
+     * to an internal IP. The callback rejects RFC1918 / loopback /
+     * link-local before connect(). */
+    BS_SETOPT(curl, CURLOPT_OPENSOCKETFUNCTION, bs_curl_open_socket_cb);
+    /* Security review HIGH #8 — server-declared response size cap.
+     * If a malicious or misbehaving provider sets Content-Length
+     * larger than our buffer, abort before any bytes flow.
+     * Streaming-trickle providers without a declared length still
+     * terminate via bs_curl_write_cb returning 0 on overflow
+     * (CURLE_WRITE_ERROR), instead of holding an in-flight
+     * captcha slot for the full timeout. */
+    BS_SETOPT(curl, CURLOPT_MAXFILESIZE,
+                     (long)BS_MAX_CAPTCHA_BODY);
+    if (setopt_rc != CURLE_OK) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+            "mod_botshield: captcha siteverify: curl_easy_setopt "
+            "failed: %s (CURLcode=%d)",
+            curl_easy_strerror(setopt_rc), (int)setopt_rc);
+        curl_easy_cleanup(curl);
+        return BS_CAPTCHA_ERROR;
+    }
 
     CURLcode rc = curl_easy_perform(curl);
     long http_code = 0;
@@ -10189,7 +10538,7 @@ static bs_captcha_result bs_captcha_siteverify(request_rec *r,
         return BS_CAPTCHA_ERROR;
     }
 
-    apr_size_t body_len = resp.len < resp.cap ? resp.len : resp.cap - 1;
+    apr_size_t body_len = resp.len;
     resp.buf[body_len] = '\0';
     return bs_captcha_parse_response(r->pool, resp.buf, body_len,
                                      out_details, out_score,
@@ -10339,26 +10688,64 @@ static bs_captcha_result bs_geetest_siteverify(request_rec *r,
         "&gen_time=%s&sign_token=%s",
         e_lot, e_output, e_pass, e_time, sign_token);
 
+    /* Security review MEDIUM — allocate one extra byte so a
+     * full-cap response (resp.len == BS_MAX_CAPTCHA_BODY, which
+     * the write callback caps at via the room calculation) can
+     * receive its NUL terminator at resp.buf[resp.len] without
+     * overwriting the last valid byte. Symmetric with the
+     * BS_FORM_CAPTCHA_BODY_MAX+1 fix applied to the form-captcha
+     * body buffer. */
     bs_curl_buffer resp = {
-        .buf = apr_palloc(r->pool, BS_MAX_CAPTCHA_BODY),
+        .buf = apr_palloc(r->pool, BS_MAX_CAPTCHA_BODY + 1),
         .cap = BS_MAX_CAPTCHA_BODY,
         .len = 0, .truncated = 0,
     };
 
-    curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_POST, 1L);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS,
+    /* Accumulator for BS_SETOPT — see macro definition. */
+    CURLcode setopt_rc = CURLE_OK;
+    BS_SETOPT(curl, CURLOPT_URL, url);
+    BS_SETOPT(curl, CURLOPT_POST, 1L);
+    BS_SETOPT(curl, CURLOPT_POSTFIELDS, body);
+    BS_SETOPT(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
+    BS_SETOPT(curl, CURLOPT_CONNECTTIMEOUT_MS,
                      (long)BS_CAPTCHA_CONNECT_TIMEOUT);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, (long)timeout_ms);
-    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "mod_botshield/0.1");
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, bs_curl_write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+    BS_SETOPT(curl, CURLOPT_TIMEOUT_MS, (long)timeout_ms);
+    BS_SETOPT(curl, CURLOPT_NOSIGNAL, 1L);
+    BS_SETOPT(curl, CURLOPT_USERAGENT, "mod_botshield/0.1");
+    BS_SETOPT(curl, CURLOPT_WRITEFUNCTION, bs_curl_write_cb);
+    BS_SETOPT(curl, CURLOPT_WRITEDATA, &resp);
+    BS_SETOPT(curl, CURLOPT_FOLLOWLOCATION, 0L);
+    BS_SETOPT(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    BS_SETOPT(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+    /* Security review HIGH #7 — allowlist HTTPS only. Provider URLs
+     * are hard-coded today, but a future operator-tunable URL
+     * would become an immediate SSRF vector via file://, gopher://,
+     * etc. Cheap to close now. REDIR_PROTOCOLS mirrors the policy
+     * in case FOLLOWLOCATION is ever flipped on later. */
+    BS_SETOPT(curl, CURLOPT_PROTOCOLS_STR, "https");
+    BS_SETOPT(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
+    /* Security review MEDIUM #13 — defense-in-depth against a
+     * compromised-DNS scenario where the provider hostname resolves
+     * to an internal IP. The callback rejects RFC1918 / loopback /
+     * link-local before connect(). */
+    BS_SETOPT(curl, CURLOPT_OPENSOCKETFUNCTION, bs_curl_open_socket_cb);
+    /* Security review HIGH #8 — server-declared response size cap.
+     * If a malicious or misbehaving provider sets Content-Length
+     * larger than our buffer, abort before any bytes flow.
+     * Streaming-trickle providers without a declared length still
+     * terminate via bs_curl_write_cb returning 0 on overflow
+     * (CURLE_WRITE_ERROR), instead of holding an in-flight
+     * captcha slot for the full timeout. */
+    BS_SETOPT(curl, CURLOPT_MAXFILESIZE,
+                     (long)BS_MAX_CAPTCHA_BODY);
+    if (setopt_rc != CURLE_OK) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+            "mod_botshield: GeeTest siteverify: curl_easy_setopt "
+            "failed: %s (CURLcode=%d)",
+            curl_easy_strerror(setopt_rc), (int)setopt_rc);
+        curl_easy_cleanup(curl);
+        return BS_CAPTCHA_ERROR;
+    }
 
     CURLcode rc = curl_easy_perform(curl);
     long http_code = 0;
@@ -10376,7 +10763,7 @@ static bs_captcha_result bs_geetest_siteverify(request_rec *r,
         return BS_CAPTCHA_ERROR;
     }
 
-    apr_size_t body_len = resp.len < resp.cap ? resp.len : resp.cap - 1;
+    apr_size_t body_len = resp.len;
     resp.buf[body_len] = '\0';
 
     /* Parse GeeTest response: {"result":"success"/"fail","reason":"..."}. */
@@ -10978,31 +11365,54 @@ static void bs_urldecode_inplace(char *s)
  * during captcha-verify. Returns NULL on error (already responded to
  * the client via ap_setup_client_block) or a pool-allocated NUL-
  * terminated buffer otherwise. */
-static const char *bs_read_form_body(request_rec *r, apr_size_t max_len,
-                                     apr_size_t *out_len)
+/* Read the whole request body via ap_get_client_block into a
+ * pool-allocated buffer.
+ *
+ * Returns:
+ *   APR_SUCCESS  — *out_body / *out_len populated; body may be empty.
+ *   APR_ENOSPC   — body exceeded max_len; caller should emit 413.
+ *   APR_EGENERAL — ap_get_client_block returned a transport error;
+ *                  caller should emit 400.
+ *   APR_EINIT    — ap_setup_client_block rejected; caller emits 400.
+ *
+ * Security review MEDIUM #9 — was returning a pointer-or-NULL with
+ * silent truncation when the body exceeded max_len: the loop
+ * `break`'d at `total >= max_len` without consuming the rest, so
+ * callers couldn't tell the difference between "body fit cleanly"
+ * and "body was twice the cap and we threw the tail away." Now
+ * the function reads one extra byte past max_len; if any data
+ * remains, we return APR_ENOSPC so the caller can 413 instead
+ * of accepting a quietly-truncated body. */
+static apr_status_t bs_read_form_body(request_rec *r, apr_size_t max_len,
+                                      const char **out_body,
+                                      apr_size_t *out_len)
 {
+    *out_body = NULL;
     *out_len = 0;
     int rc = ap_setup_client_block(r, REQUEST_CHUNKED_ERROR);
-    if (rc != OK) return NULL;
+    if (rc != OK) return APR_EINIT;
     if (!ap_should_client_block(r)) {
         char *empty = apr_pcalloc(r->pool, 1);
-        return empty;
+        *out_body = empty;
+        return APR_SUCCESS;
     }
     char *buf = apr_palloc(r->pool, max_len + 1);
     apr_size_t total = 0;
     long n;
     char chunk[4096];
     while ((n = ap_get_client_block(r, chunk, sizeof(chunk))) > 0) {
-        apr_size_t room = max_len - total;
-        apr_size_t take = ((apr_size_t)n < room) ? (apr_size_t)n : room;
-        memcpy(buf + total, chunk, take);
-        total += take;
-        if (total >= max_len) break;
+        if ((apr_size_t)n > max_len - total) {
+            /* This chunk would overflow. Body is too big. */
+            return APR_ENOSPC;
+        }
+        memcpy(buf + total, chunk, (apr_size_t)n);
+        total += (apr_size_t)n;
     }
-    if (n < 0) return NULL;
+    if (n < 0) return APR_EGENERAL;
     buf[total] = '\0';
+    *out_body = buf;
     *out_len = total;
-    return buf;
+    return APR_SUCCESS;
 }
 
 /* Pick a single field value from a URL-encoded body. Returns a fresh
@@ -11169,7 +11579,15 @@ static const char *bs_verify_pending_cookie(request_rec *r,
         return "bad expiry";
     }
     apr_time_t expiry = (apr_time_t)expiry_raw;
-    if (expiry + BS_CLOCK_SKEW_AHEAD < apr_time_sec(apr_time_now())) {
+    /* Security review MEDIUM #3 — was `expiry + BS_CLOCK_SKEW_AHEAD <
+     * now` with the comment "grace if client clock runs ahead", but
+     * the expiry stamped into the pending cookie comes from
+     * apr_time_now() at mint time — server-side, never a client
+     * stamp. The clock-skew grace was therefore mis-justified and
+     * just extended the effective TTL by 60s, giving a stolen-
+     * and-expired pending cookie an extra minute of replay
+     * window for no defensive value. Drop the grace. */
+    if (expiry < apr_time_sec(apr_time_now())) {
         return "expired";
     }
 
@@ -11180,7 +11598,23 @@ static const char *bs_verify_pending_cookie(request_rec *r,
                    (const unsigned char *)canon, strlen(canon), expect);
     unsigned char got[BS_SIG_BYTES];
     if (!bs_from_hex(mac_hex, BS_SIG_BYTES, got)) return "bad mac hex";
-    if (!bs_ct_equal(expect, got, BS_SIG_BYTES)) return "sig mismatch";
+    if (!bs_ct_equal(expect, got, BS_SIG_BYTES)) {
+        /* E16 review fix — pending-cookie path missed the secret-
+         * rotation fallback. _bs_verified and the embedded-verify
+         * path both fall back to cfg->secret_secondary on HMAC
+         * mismatch; the M8.1 pending cookie did not. During a
+         * key-rotation reload, any user with an in-flight
+         * pending cookie (TTL 300s) would 403 on captcha submit
+         * even though the secondary key would have validated.
+         * Same secondary-key retry pattern as bs_verify_cookie_hmac. */
+        if (!cfg->secret_secondary) return "sig mismatch";
+        bs_hmac_sha256(cfg->secret_secondary, cfg->secret_secondary_len,
+                       (const unsigned char *)canon, strlen(canon),
+                       expect);
+        if (!bs_ct_equal(expect, got, BS_SIG_BYTES)) {
+            return "sig mismatch";
+        }
+    }
     return NULL;
 }
 
@@ -11727,7 +12161,25 @@ static int bs_embedded_bootstrap_handler(request_rec *r,
     }
 
     int difficulty = bs_effective_int(cfg->difficulty, BS_DEFAULT_DIFFICULTY);
-    int ttl = bs_effective_int(cfg->cookie_ttl, BS_DEFAULT_COOKIE_TTL);
+    /* Security review MEDIUM #2 — bootstrap challenges should expire
+     * fast. The previous code reused cookie_ttl (1h default), which
+     * gave attackers a 60-minute window to grind an issued challenge
+     * in parallel — bs_issue_challenge gives them salt+nonce+sig
+     * with no one-time-use binding, so they can solve once and
+     * replay-verify, OR farm a pool of pre-issued challenges to
+     * solve in bulk. 120 s is generous for a real browser to round-
+     * trip the bootstrap → solve → verify sequence (typical PoW
+     * runtime is sub-second; 120 s covers a slow client + 100 ms
+     * RTT × handful of round-trips with comfortable headroom) and
+     * cuts the grind window by 30x.
+     *
+     * TODO (hardening phase): add a nonce SHM table for one-time-use
+     * binding. The verify path would atomic-insert the challenge
+     * nonce into a small open-addressed table; presenting the same
+     * nonce twice → verify rejects. That fully closes the
+     * pre-issued-pool grind class. The 120 s expiry here is the
+     * cheap partial defense pending that. */
+    int ttl = 120;
 
     bs_challenge ch;
     memset(&ch, 0, sizeof(ch));
@@ -11924,8 +12376,67 @@ static int bs_embedded_verify_pow(request_rec *r, bs_dir_cfg *cfg,
     /* Mint _bs_verified the same way the M7 form-PoW does — same
      * cookie shape, same expiry, same signature path. The counter
      * the wrapper found rides into the cookie body so future
-     * requests can replay-detect. */
-    ch.rep.passes_silent = 1;
+     * requests can replay-detect.
+     *
+     * E17 review fix — carry forward prior cookie state if a sig-
+     * verifying _bs_verified is present. Without this, a client
+     * whose forgive_consumed is near the E15 cap could wash their
+     * budget by letting the cookie expire before an embedded
+     * verify, then solving the bootstrap PoW to mint a fresh
+     * passes_silent=1 cookie with rep zeroed. Symmetric with M8
+     * and E18 (form-captcha): same prior-cookie acceptance check,
+     * same forgive_silent + cap helper, same flag-penalty floor.
+     * challenged_at on the JSON-reconstructed challenge is
+     * preserved — that's the bootstrap-issue time the wrapper
+     * just round-tripped, not a field we want to overwrite with
+     * the prior cookie's older value. */
+    {
+        const char *prior_val = bs_get_cookie_value(r, BS_COOKIE_NAME);
+        bs_challenge prior_ch = { 0 };
+        int have_prior = 0;
+        if (prior_val && *prior_val) {
+            const char *cverr = bs_verify_cookie(r, cfg, prior_val,
+                                                  &prior_ch);
+            /* Security review MEDIUM #1 — refuse carry-forward when
+             * the cookie has expired. Otherwise a leaked or stolen
+             * cookie could be replayed past TTL to transplant a
+             * good-standing rep into a freshly-minted _bs_verified
+             * via the captcha solve path. The TTL is the only
+             * mechanism preventing indefinite reputation transfer
+             * across cookie generations. */
+            if (cverr == NULL ||
+                (cverr && strcmp(cverr, "signature mismatch") != 0
+                       && strcmp(cverr, "expired") != 0
+                       && prior_ch.alg_name)) {
+                have_prior = 1;
+            }
+        }
+        if (have_prior) {
+            int forgive = bs_effective_int(cfg->forgive_silent,
+                                            BS_DEFAULT_FORGIVE_SILENT);
+            bs_server_cfg *scfg_fc = ap_get_module_config(
+                r->server->module_config, &botshield_module);
+            int cap = (scfg_fc && scfg_fc->forgive_cap_per_hour > 0)
+                    ? scfg_fc->forgive_cap_per_hour
+                    : BS_DEFAULT_FORGIVE_CAP_PER_HOUR;
+            apr_uint32_t now_sec =
+                (apr_uint32_t)apr_time_sec(apr_time_now());
+            apr_time_t challenged_at = ch.rep.challenged_at;
+            ch.rep = prior_ch.rep;
+            ch.rep.challenged_at = challenged_at;
+            forgive = bs_forgiveness_apply_cap(forgive, cap, now_sec,
+                        &ch.rep.forgive_window_start,
+                        &ch.rep.forgive_consumed);
+            int floor   = bs_flag_penalty(prior_ch.rep.flags);
+            int new_score = prior_ch.rep.score - forgive;
+            if (new_score < floor) new_score = floor;
+            if (new_score < 0)     new_score = 0;
+            ch.rep.score          = new_score;
+            ch.rep.passes_silent  = prior_ch.rep.passes_silent + 1;
+        } else {
+            ch.rep.passes_silent = 1;
+        }
+    }
     canon = bs_challenge_canonical(r->pool, &ch);
     bs_hmac_sha256(cfg->secret, cfg->secret_len,
                    (const unsigned char *)canon, strlen(canon),
@@ -11936,7 +12447,12 @@ static int bs_embedded_verify_pow(request_rec *r, bs_dir_cfg *cfg,
         r->status = HTTP_INTERNAL_SERVER_ERROR;
         return OK;
     }
-    apr_table_set(r->err_headers_out, "Set-Cookie",
+    /* E18 review fix (cross-ext) — apr_table_set deletes any prior
+     * entries for the key, which clobbers Set-Cookie headers added
+     * by other modules (e.g. mod_session) earlier in the chain.
+     * apr_table_add appends a new row instead. Symmetric with the
+     * E18 fixup site and the M8 captcha-verify path. */
+    apr_table_add(r->err_headers_out, "Set-Cookie",
                   bs_build_set_cookie(r, cfg, payload, ch.expires_at));
 
     r->status = HTTP_NO_CONTENT;
@@ -12081,9 +12597,61 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
         return OK;
     }
 
+    /* E17 review fix — carry forward prior cookie state if a sig-
+     * verifying _bs_verified is present. Symmetric with the PoW
+     * path above and with M8/E18; without it, a client near the
+     * E15 forgive_consumed cap could wash their budget by letting
+     * the cookie expire and re-running an embedded provider
+     * verify. bs_issue_challenge() will overwrite challenged_at
+     * with the current time, so unlike the PoW path we don't need
+     * to save/restore it here. */
     bs_rep_state next_rep;
     memset(&next_rep, 0, sizeof(next_rep));
-    next_rep.passes_silent = 1;
+    {
+        const char *prior_val = bs_get_cookie_value(r, BS_COOKIE_NAME);
+        bs_challenge prior_ch = { 0 };
+        int have_prior = 0;
+        if (prior_val && *prior_val) {
+            const char *cverr = bs_verify_cookie(r, cfg, prior_val,
+                                                  &prior_ch);
+            /* Security review MEDIUM #1 — refuse carry-forward when
+             * the cookie has expired. Otherwise a leaked or stolen
+             * cookie could be replayed past TTL to transplant a
+             * good-standing rep into a freshly-minted _bs_verified
+             * via the captcha solve path. The TTL is the only
+             * mechanism preventing indefinite reputation transfer
+             * across cookie generations. */
+            if (cverr == NULL ||
+                (cverr && strcmp(cverr, "signature mismatch") != 0
+                       && strcmp(cverr, "expired") != 0
+                       && prior_ch.alg_name)) {
+                have_prior = 1;
+            }
+        }
+        if (have_prior) {
+            int forgive = bs_effective_int(cfg->forgive_silent,
+                                            BS_DEFAULT_FORGIVE_SILENT);
+            bs_server_cfg *scfg_fc = ap_get_module_config(
+                r->server->module_config, &botshield_module);
+            int cap = (scfg_fc && scfg_fc->forgive_cap_per_hour > 0)
+                    ? scfg_fc->forgive_cap_per_hour
+                    : BS_DEFAULT_FORGIVE_CAP_PER_HOUR;
+            apr_uint32_t now_sec =
+                (apr_uint32_t)apr_time_sec(apr_time_now());
+            next_rep = prior_ch.rep;
+            forgive = bs_forgiveness_apply_cap(forgive, cap, now_sec,
+                        &next_rep.forgive_window_start,
+                        &next_rep.forgive_consumed);
+            int floor   = bs_flag_penalty(prior_ch.rep.flags);
+            int new_score = prior_ch.rep.score - forgive;
+            if (new_score < floor) new_score = floor;
+            if (new_score < 0)     new_score = 0;
+            next_rep.score          = new_score;
+            next_rep.passes_silent  = prior_ch.rep.passes_silent + 1;
+        } else {
+            next_rep.passes_silent = 1;
+        }
+    }
 
     bs_challenge ch;
     const char *ierr = bs_issue_challenge(r->pool, cfg, difficulty, ttl,
@@ -12103,7 +12671,8 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
         r->status = HTTP_INTERNAL_SERVER_ERROR;
         return OK;
     }
-    apr_table_set(r->err_headers_out, "Set-Cookie",
+    /* E18 review fix (cross-ext) — see PoW path above. */
+    apr_table_add(r->err_headers_out, "Set-Cookie",
                   bs_build_set_cookie(r, cfg, payload, ch.expires_at));
 
     r->status = HTTP_NO_CONTENT;
@@ -12137,8 +12706,14 @@ static int bs_embedded_verify_handler(request_rec *r, bs_dir_cfg *cfg)
     }
 
     apr_size_t body_len = 0;
-    const char *body = bs_read_form_body(r, BS_EMBEDDED_BODY_MAX, &body_len);
-    if (!body || body_len == 0) {
+    const char *body = NULL;
+    apr_status_t bsr = bs_read_form_body(r, BS_EMBEDDED_BODY_MAX,
+                                         &body, &body_len);
+    if (bsr == APR_ENOSPC) {
+        r->status = HTTP_REQUEST_ENTITY_TOO_LARGE;
+        return OK;
+    }
+    if (bsr != APR_SUCCESS || !body || body_len == 0) {
         r->status = HTTP_BAD_REQUEST;
         return OK;
     }
@@ -12832,8 +13407,14 @@ static int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
      * blob of ~2 KB + return_to ~= 3 KB; 8 KB is comfortable headroom
      * and caps the work a hostile client can force us to buffer. */
     apr_size_t body_len = 0;
-    const char *body = bs_read_form_body(r, 8 * 1024, &body_len);
-    if (!body) {
+    const char *body = NULL;
+    apr_status_t bsr = bs_read_form_body(r, 8 * 1024, &body, &body_len);
+    if (bsr == APR_ENOSPC) {
+        bs_decision_log(r, "captcha", "rejected", "-",
+                        prov_name, "-", "body_too_large", 0);
+        return HTTP_REQUEST_ENTITY_TOO_LARGE;
+    }
+    if (bsr != APR_SUCCESS || !body) {
         bs_decision_log(r, "captcha", "rejected", "-",
                         prov_name, "-", "body_read_failed", 0);
         return HTTP_BAD_REQUEST;
@@ -13057,19 +13638,23 @@ static int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
     }
 
     /* Issue a captcha-alg signed cookie. Rep starts from any prior
-     * cookie if one is still valid, with captcha forgiveness applied. */
+     * cookie if one is still valid, with captcha forgiveness applied.
+     *
+     * Security review MEDIUM #1 — refuse carry-forward on "expired".
+     * Letting a sig-valid-but-past-TTL cookie carry rep forward
+     * means a stolen+expired cookie can be replayed (with a fresh
+     * captcha solve) to transplant good-standing rep into a fresh
+     * _bs_verified. TTL is the only mechanism preventing indefinite
+     * reputation transfer across generations. */
     const char *prior_val = bs_get_cookie_value(r, BS_COOKIE_NAME);
     bs_challenge prior_ch = { 0 };
     int have_prior = 0;
     if (prior_val && *prior_val) {
-        if (bs_verify_cookie(r, cfg, prior_val, &prior_ch) != NULL) {
-            /* Either signature-ok-but-expired (ok to carry rep) or
-             * signature-mismatch. Only carry forward if the sig was ok —
-             * same invariant as bs_handler. We can't distinguish here
-             * without re-parsing; err on the side of carrying forward
-             * only when the struct was fully populated. */
-            if (prior_ch.alg_name) have_prior = 1;
-        } else {
+        const char *cverr = bs_verify_cookie(r, cfg, prior_val, &prior_ch);
+        if (cverr == NULL) {
+            have_prior = 1;
+        } else if (prior_ch.alg_name &&
+                   strcmp(cverr, "expired") != 0) {
             have_prior = 1;
         }
     }
@@ -13907,28 +14492,23 @@ static int bs_is_asset_uri(const char *uri)
  * Returns a pool-allocated copy of the value with trailing whitespace
  * trimmed, or NULL if the cookie isn't present. The value itself is not
  * validated here — callers decode and verify. */
+/* Security review HIGH #3 — was strstr + leading-byte-boundary
+ * check, which had two issues vs RFC 6265:
+ *   1. Tolerated a bare-space separator ("a=1 b=2") as if it
+ *      were "; "; RFC requires the semicolon.
+ *   2. The substring search could fall into surprising matches
+ *      with a name that's a substring of another (defended via
+ *      the boundary check, but the logic was duplicated only
+ *      here while bs_parse_cookies_once already had the right
+ *      tokenizer).
+ * Now both cookie consumers route through the same tokenizer.
+ * bs_parse_cookies_once memoizes its result in r->notes, so
+ * the per-request cost stays a single parse. */
 static const char *bs_get_cookie_value(request_rec *r, const char *name)
 {
-    const char *cookies = apr_table_get(r->headers_in, "Cookie");
-    if (!cookies) return NULL;
-
-    apr_size_t nlen = strlen(name);
-    const char *p = cookies;
-    while ((p = strstr(p, name)) != NULL) {
-        int at_boundary = (p == cookies) ||
-                          (p[-1] == ';')  ||
-                          (p[-1] == ' ')  ||
-                          (p[-1] == '\t');
-        if (at_boundary && p[nlen] == '=') {
-            const char *v = p + nlen + 1;
-            const char *end = strchr(v, ';');
-            if (!end) end = v + strlen(v);
-            while (end > v && (end[-1] == ' ' || end[-1] == '\t')) end--;
-            return apr_pstrmemdup(r->pool, v, (apr_size_t)(end - v));
-        }
-        p += nlen;
-    }
-    return NULL;
+    apr_table_t *map = bs_parse_cookies_once(r);
+    if (!map) return NULL;
+    return apr_table_get(map, name);
 }
 
 /* --- Challenge page templates ---
@@ -14519,7 +15099,7 @@ static int bs_handler(request_rec *r)
                     if (bs_parse_client_ip(r->useragent_ip, sg_ip)) {
                         bs_mask_ipv6_prefix(sg_ip,
                                             scfg_sg->ipv6_prefix_bits);
-                        bs_safeguard_clear(sg_ip, scfg_sg->ns_id);
+                        bs_safeguard_clear(r, sg_ip, scfg_sg->ns_id);
                     }
                 }
             }
@@ -15126,7 +15706,7 @@ static int bs_handler(request_rec *r)
 typedef struct {
     const char *body;
     apr_size_t  len;
-    int         emitted;
+    apr_size_t  offset;   /* bytes already emitted to downstream */
 } bs_form_replay_ctx;
 
 static ap_filter_rec_t *bs_form_replay_filter_handle = NULL;
@@ -15144,24 +15724,50 @@ static apr_status_t bs_form_replay_filter(ap_filter_t *f,
     }
     if (mode == AP_MODE_INIT) return APR_SUCCESS;
 
-    if (!ctx->emitted) {
-        /* Emit the buffered body + EOS in one shot. Most handlers
-         * read until EOS via ap_setup_client_block /
-         * ap_get_client_block; the framework slices buckets to honor
-         * `readbytes`. The body is allocated in r->pool, so the
-         * pool bucket is safe for the full request lifetime. */
-        if (ctx->len > 0) {
-            apr_bucket *body_b = apr_bucket_pool_create(
-                ctx->body, ctx->len, f->r->pool, f->c->bucket_alloc);
-            APR_BRIGADE_INSERT_TAIL(bb, body_b);
+    /* E18 review fix — honor readbytes. Emitting the whole body in a
+     * single bucket regardless of what the downstream handler asked
+     * for is an API-conformance violation (a strictly-conformant
+     * caller is allowed to discard excess past readbytes). Stream it
+     * one chunk at a time, capped at readbytes when the caller is in
+     * READBYTES mode. The body buffer is allocated in r->pool and
+     * outlives any bucket the framework derives from it, so
+     * apr_bucket_immortal_create is safe and avoids the deferred
+     * pool-bucket copy on pool cleanup. */
+    if (ctx->offset < ctx->len) {
+        apr_size_t remain = ctx->len - ctx->offset;
+        apr_size_t emit = remain;
+        if (mode == AP_MODE_READBYTES && readbytes > 0 &&
+            (apr_off_t)remain > readbytes) {
+            emit = (apr_size_t)readbytes;
+        } else if (mode == AP_MODE_GETLINE) {
+            /* Honor line-mode reads. Some legacy CGI / custom
+             * downstream handlers pull request bodies one line at
+             * a time; emitting the whole remainder in one bucket
+             * lets the caller discard everything past the first
+             * newline (since they only consume one line). Emit up
+             * to and including the first '\n' if present; if not,
+             * fall through and emit the whole remainder (caller
+             * keeps reading until EOS). */
+            const char *start = ctx->body + ctx->offset;
+            const void *nl = memchr(start, '\n', remain);
+            if (nl) {
+                emit = (apr_size_t)((const char *)nl - start) + 1;
+            }
         }
-        APR_BRIGADE_INSERT_TAIL(bb,
-            apr_bucket_eos_create(f->c->bucket_alloc));
-        ctx->emitted = 1;
+        apr_bucket *b = apr_bucket_immortal_create(
+            ctx->body + ctx->offset, emit, f->c->bucket_alloc);
+        APR_BRIGADE_INSERT_TAIL(bb, b);
+        ctx->offset += emit;
+        if (ctx->offset == ctx->len) {
+            APR_BRIGADE_INSERT_TAIL(bb,
+                apr_bucket_eos_create(f->c->bucket_alloc));
+            ap_remove_input_filter(f);
+        }
         return APR_SUCCESS;
     }
-    /* Already emitted; subsequent reads see only EOS. Self-remove
-     * so we don't get re-invoked. */
+
+    /* Body fully drained but caller is reading again. Emit EOS and
+     * self-remove. */
     APR_BRIGADE_INSERT_TAIL(bb,
         apr_bucket_eos_create(f->c->bucket_alloc));
     ap_remove_input_filter(f);
@@ -15180,7 +15786,11 @@ static apr_status_t bs_form_captcha_read_body(request_rec *r,
 {
     apr_bucket_brigade *bb = apr_brigade_create(r->pool,
         r->connection->bucket_alloc);
-    char *buf = apr_palloc(r->pool, BS_FORM_CAPTCHA_BODY_MAX);
+    /* E18 review fix — allocate one extra byte so a body of exactly
+     * BS_FORM_CAPTCHA_BODY_MAX bytes (the read-loop guard is `>`,
+     * not `>=`, so this size is accepted) can be NUL-terminated
+     * without overwriting the last valid body byte. */
+    char *buf = apr_palloc(r->pool, BS_FORM_CAPTCHA_BODY_MAX + 1);
     apr_size_t total = 0;
     int saw_eos = 0;
     apr_status_t rv = APR_SUCCESS;
@@ -15204,7 +15814,13 @@ static apr_status_t bs_form_captcha_read_body(request_rec *r,
                 apr_brigade_destroy(bb);
                 return br;
             }
-            if (total + len > BS_FORM_CAPTCHA_BODY_MAX) {
+            /* Security review MEDIUM — overflow-safe shape. The
+             * naive `total + len > MAX` form can wrap on a maliciously
+             * large `len` even though both operands are size_t, since
+             * BS_FORM_CAPTCHA_BODY_MAX is well below SIZE_MAX. Rewrite
+             * as `len > MAX - total` so the subtraction stays in range
+             * and we never compute the overflowing sum at all. */
+            if (len > BS_FORM_CAPTCHA_BODY_MAX - total) {
                 apr_brigade_destroy(bb);
                 return APR_ENOSPC;
             }
@@ -15215,7 +15831,7 @@ static apr_status_t bs_form_captcha_read_body(request_rec *r,
         apr_brigade_cleanup(bb);
     }
     apr_brigade_destroy(bb);
-    buf[total < BS_FORM_CAPTCHA_BODY_MAX ? total : BS_FORM_CAPTCHA_BODY_MAX - 1] = '\0';
+    buf[total] = '\0';
     *out_body = buf;
     *out_len  = total;
     return APR_SUCCESS;
@@ -15248,11 +15864,22 @@ static int bs_form_captcha_fixup(request_rec *r)
      * the right home for. Anything else gets 415 with diagnostic
      * so operators notice the gap rather than silently allow
      * unverified submits. */
+    /* Security review MEDIUM — Content-Type prefix match must check
+     * the next byte is a recognized separator (`;` for parameters,
+     * whitespace, or end-of-string). Without it,
+     * `application/x-www-form-urlencoded-evil` and
+     * `application/json-something` would match the prefix and slip
+     * through with the wrong handler choice. */
     const char *ct = apr_table_get(r->headers_in, "Content-Type");
+    #define BS_CT_TERMINATOR(c) ((c) == '\0' || (c) == ';' || \
+                                  (c) == ' '  || (c) == '\t')
     int ct_form = (ct &&
-        strncasecmp(ct, "application/x-www-form-urlencoded", 33) == 0);
+        strncasecmp(ct, "application/x-www-form-urlencoded", 33) == 0 &&
+        BS_CT_TERMINATOR(ct[33]));
     int ct_json = (ct &&
-        strncasecmp(ct, "application/json", 16) == 0);
+        strncasecmp(ct, "application/json", 16) == 0 &&
+        BS_CT_TERMINATOR(ct[16]));
+    #undef BS_CT_TERMINATOR
     if (!ct_form && !ct_json) {
         ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
             "mod_botshield: BotShieldFormCaptcha supports "
@@ -15278,6 +15905,22 @@ static int bs_form_captcha_fixup(request_rec *r)
         return HTTP_BAD_REQUEST;
     }
 
+    /* Security review HIGH #1 — NUL-byte parser-confusion smuggling.
+     * Body is read as raw bytes (memcpy + length), but downstream
+     * validators treat it as a C string: bs_form_get uses strchr,
+     * json_tokener_parse_verbose stops at the first '\0'. The full
+     * byte buffer (including post-NUL bytes) is then replayed to
+     * the app handler via the replay filter. An attacker can hide
+     * a separate request shape past a NUL — BotShield validates
+     * the prefix, the app handler sees the full body. Reject any
+     * body containing an embedded NUL with 400 before validation. */
+    if (memchr(body, '\0', body_len) != NULL) {
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: form-captcha body contains embedded NUL "
+            "byte (rejected to prevent parser-confusion smuggling)");
+        return HTTP_BAD_REQUEST;
+    }
+
     /* E12 — shadow / observe mode for E18. If global BotShieldShadowMode
      * is on, skip siteverify + cookie-mint, log a :observe reason, and
      * pass the request through. The body is still read (we already did
@@ -15291,11 +15934,22 @@ static int bs_form_captcha_fixup(request_rec *r)
             r->server->module_config, &botshield_module);
         if (scfg_sh && scfg_sh->shadow_mode == 1) {
             bs_form_replay_ctx *ctx = apr_pcalloc(r->pool, sizeof(*ctx));
-            ctx->body    = body;
-            ctx->len     = body_len;
-            ctx->emitted = 0;
+            ctx->body   = body;
+            ctx->len    = body_len;
+            ctx->offset = 0;
             ap_add_input_filter_handle(bs_form_replay_filter_handle,
                                        ctx, r, r->connection);
+            /* The body has been consumed through ap_http_filter, which
+             * silently de-chunks Transfer-Encoding: chunked into raw
+             * bytes. r->headers_in still says "Transfer-Encoding:
+             * chunked" though, so a downstream mod_proxy / mod_cgi
+             * would try to re-chunk a body that no longer has
+             * chunks — protocol error or dropped body. Strip the TE
+             * header and set an explicit Content-Length so the
+             * downstream sees a clean Content-Length-framed request. */
+            apr_table_unset(r->headers_in, "Transfer-Encoding");
+            apr_table_setn(r->headers_in, "Content-Length",
+                apr_psprintf(r->pool, "%" APR_SIZE_T_FMT, body_len));
             ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
                 "mod_botshield: form-captcha:observe (shadow mode; "
                 "body replayed, no siteverify, no cookie mint)");
@@ -15408,9 +16062,66 @@ static int bs_form_captcha_fixup(request_rec *r)
             "from registry", cookie_alg_name);
         return HTTP_INTERNAL_SERVER_ERROR;
     }
+    /* E15 review fix — carry forward prior cookie state if present,
+     * mirroring M8's captcha-verify path. Without this, an existing
+     * client whose cookie has forgive_consumed close to the cap
+     * could "wash" their budget by submitting a form-captcha — the
+     * fresh memset zeroed the rolling-window state and gave them a
+     * full new budget. Symmetric with M8 now: read prior cookie if
+     * sig-verifies, apply forgive_captcha through the cap helper,
+     * carry forward score (clamped to flag-penalty floor), bump the
+     * passes_captcha counter. */
     bs_rep_state next_rep;
     memset(&next_rep, 0, sizeof(next_rep));
-    next_rep.passes_captcha = 1;
+    {
+        const char *prior_val = bs_get_cookie_value(r, BS_COOKIE_NAME);
+        bs_challenge prior_ch = { 0 };
+        int have_prior = 0;
+        if (prior_val && *prior_val) {
+            const char *cverr = bs_verify_cookie(r, cfg, prior_val,
+                                                  &prior_ch);
+            /* Carry forward when the signature was valid OR when the
+             * sig was valid-but-cookie-expired (rep is server-signed,
+             * still trustworthy). Skip on signature mismatch — those
+             * bytes can't be trusted. Same invariant as the M7 issue
+             * path. */
+            /* Security review MEDIUM #1 — refuse carry-forward when
+             * the cookie has expired. Otherwise a leaked or stolen
+             * cookie could be replayed past TTL to transplant a
+             * good-standing rep into a freshly-minted _bs_verified
+             * via the captcha solve path. The TTL is the only
+             * mechanism preventing indefinite reputation transfer
+             * across cookie generations. */
+            if (cverr == NULL ||
+                (cverr && strcmp(cverr, "signature mismatch") != 0
+                       && strcmp(cverr, "expired") != 0
+                       && prior_ch.alg_name)) {
+                have_prior = 1;
+            }
+        }
+        if (have_prior) {
+            int forgive = bs_effective_int(cfg->forgive_captcha,
+                                            BS_DEFAULT_FORGIVE_CAPTCHA);
+            bs_server_cfg *scfg_fc = ap_get_module_config(
+                r->server->module_config, &botshield_module);
+            int cap = (scfg_fc && scfg_fc->forgive_cap_per_hour > 0)
+                    ? scfg_fc->forgive_cap_per_hour
+                    : BS_DEFAULT_FORGIVE_CAP_PER_HOUR;
+            apr_uint32_t now_sec = (apr_uint32_t)apr_time_sec(apr_time_now());
+            next_rep = prior_ch.rep;
+            forgive = bs_forgiveness_apply_cap(forgive, cap, now_sec,
+                        &next_rep.forgive_window_start,
+                        &next_rep.forgive_consumed);
+            int floor   = bs_flag_penalty(prior_ch.rep.flags);
+            int new_score = prior_ch.rep.score - forgive;
+            if (new_score < floor) new_score = floor;
+            if (new_score < 0)     new_score = 0;
+            next_rep.score          = new_score;
+            next_rep.passes_captcha = prior_ch.rep.passes_captcha + 1;
+        } else {
+            next_rep.passes_captcha = 1;
+        }
+    }
 
     bs_challenge ch;
     const char *ierr = bs_issue_challenge(r->pool, cfg, difficulty, ttl,
@@ -15424,7 +16135,11 @@ static int bs_form_captcha_fixup(request_rec *r)
     const char *payload = bs_build_cookie_payload(r->pool, cfg, &ch,
                                                   "captcha");
     if (payload) {
-        apr_table_set(r->err_headers_out, "Set-Cookie",
+        /* E18 review fix — apr_table_set deletes any prior Set-Cookie
+         * entries (mod_session and friends may have added some by
+         * now). apr_table_add appends a new row, which is what HTTP
+         * actually allows for Set-Cookie. */
+        apr_table_add(r->err_headers_out, "Set-Cookie",
                       bs_build_set_cookie(r, cfg, payload, ch.expires_at));
     }
 
@@ -15432,11 +16147,19 @@ static int bs_form_captcha_fixup(request_rec *r)
      * original POST body. Filter buffers in r->pool memory; lifetime
      * is the request, plenty for any handler that wants it. */
     bs_form_replay_ctx *ctx = apr_pcalloc(r->pool, sizeof(*ctx));
-    ctx->body    = body;
-    ctx->len     = body_len;
-    ctx->emitted = 0;
+    ctx->body   = body;
+    ctx->len    = body_len;
+    ctx->offset = 0;
     ap_add_input_filter_handle(bs_form_replay_filter_handle,
                                ctx, r, r->connection);
+    /* See shadow-mode branch above for the rationale: ap_http_filter
+     * de-chunked the body for us, so r->headers_in's
+     * Transfer-Encoding: chunked is now a lie. Strip it and set
+     * Content-Length to body_len so downstream mod_proxy / mod_cgi
+     * / PHP-FPM see a coherent framed request. */
+    apr_table_unset(r->headers_in, "Transfer-Encoding");
+    apr_table_setn(r->headers_in, "Content-Length",
+        apr_psprintf(r->pool, "%" APR_SIZE_T_FMT, body_len));
 
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
         "mod_botshield: form-captcha verified (provider=%s, "
