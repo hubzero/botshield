@@ -2552,29 +2552,48 @@ static const char *bs_set_ipv6_prefix(cmd_parms *cmd, void *dconf,
  * non-fork MPM variant), apr_global_mutex_child_init is called from
  * our child-init hook to re-attach. */
 
-static apr_status_t bs_shm_cleanup(void *unused)
+static apr_status_t bs_shm_cleanup(void *data)
 {
-    (void)unused;
-    /* apr_shm_destroy/mutex_destroy are driven by pool cleanups
-     * registered when we created them; nothing to do here beyond
-     * resetting the runtime pointers so a subsequent post-config
-     * starts fresh. */
-    memset(&bs_shm, 0, sizeof(bs_shm));
+    /* Graceful-restart guard. The cleanup callback was registered
+     * against the OLD pconf with that generation's apr_shm_t* as
+     * data. By the time this fires, a new bs_post_config may have
+     * already overwritten the global bs_shm with the new generation's
+     * pointers. Unconditionally memset would zero out the new
+     * generation's bs_shm — any worker forked from the parent
+     * AFTER this point would inherit a NULLed struct and segfault
+     * on first request. Only zero if our generation is still the
+     * active one. */
+    apr_shm_t *old_shm = data;
+    if (bs_shm.shm == old_shm) {
+        memset(&bs_shm, 0, sizeof(bs_shm));
+    }
     return APR_SUCCESS;
 }
 
 /* Context struct used by the M6 save-on-shutdown pool cleanup. Full
  * definition is here so post_config can sizeof() it; the implementation
  * (bs_state_load/save/cleanup) lives further down where the flagged-IP
- * slot type and Bloom buffers are already in scope. */
+ * slot type and Bloom buffers are already in scope.
+ *
+ * shm_rt captures a snapshot of bs_shm at registration time. On a
+ * graceful restart, the global bs_shm is overwritten by the new
+ * generation's post_config before this generation's cleanup save
+ * fires; without the snapshot, the save would read the new SHM
+ * (effectively a no-op vs what was just loaded from disk) and the
+ * old generation's accumulated state would be lost. With the
+ * snapshot, each generation's cleanup saves ITS OWN SHM. */
 typedef struct bs_state_cleanup_ctx {
     apr_pool_t *pool;
     server_rec *server;
     const char *path;
+    bs_shm_runtime shm_rt;
 } bs_state_cleanup_ctx;
 
 static void          bs_state_load(apr_pool_t *p, server_rec *s,
                                    const char *path);
+static apr_status_t  bs_state_save(apr_pool_t *p, server_rec *s,
+                                   const char *path,
+                                   const bs_shm_runtime *rt);
 static apr_status_t  bs_state_cleanup(void *data);
 static apr_status_t  bs_watchdog_save_cb(int state, void *data,
                                          apr_pool_t *pool);
@@ -5174,6 +5193,24 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
         return HTTP_INTERNAL_SERVER_ERROR;
     }
 
+    /* Graceful-restart hand-off. If a previous generation's SHM is
+     * still live (bs_shm.shm != NULL means we're inside `apachectl
+     * graceful` rather than a cold boot), force a synchronous save
+     * of THAT generation's state to disk before we allocate the new
+     * SHM and overwrite bs_shm. Without this, the new generation's
+     * bs_state_load (called shortly below) would read a state.bin
+     * up to BotShieldStateSaveInterval seconds stale — the old
+     * generation's accumulated reputation since the last periodic
+     * save would be lost. The old pconf's bs_state_cleanup will
+     * also fire, but asynchronously AFTER this post_config
+     * completes — too late to influence the new generation's load.
+     * ptemp is the right pool here: scratch memory that dies with
+     * this post_config invocation. */
+    if (bs_shm.shm && scfg->state_file) {
+        bs_shm_runtime old_rt = bs_shm;
+        bs_state_save(ptemp, s, scfg->state_file, &old_rt);
+    }
+
     apr_status_t rv = apr_shm_create(&bs_shm.shm, scfg->shm_size,
                                      NULL, pconf);
     if (rv != APR_SUCCESS) {
@@ -5274,7 +5311,12 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     }
 #endif
 
-    apr_pool_cleanup_register(pconf, NULL, bs_shm_cleanup,
+    /* Pass bs_shm.shm as cleanup data so bs_shm_cleanup can verify
+     * the global bs_shm still belongs to OUR generation before
+     * zeroing it. Prevents the segfault where an old pconf's
+     * cleanup zeros the global struct after the new generation has
+     * already taken it over. */
+    apr_pool_cleanup_register(pconf, bs_shm.shm, bs_shm_cleanup,
                               apr_pool_cleanup_null);
 
     ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
@@ -5293,6 +5335,11 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
         ctx->pool   = pconf;
         ctx->server = s;
         ctx->path   = scfg->state_file;
+        /* Snapshot bs_shm at registration time so the cleanup save
+         * (and the watchdog periodic save) operates on OUR
+         * generation's SHM, not whatever a future graceful restart
+         * has overwritten the global with. */
+        ctx->shm_rt = bs_shm;
         apr_pool_cleanup_register(pconf, ctx, bs_state_cleanup,
                                   apr_pool_cleanup_null);
 
@@ -6877,13 +6924,14 @@ static void bs_fsync_parent_dir(apr_pool_t *p, server_rec *s,
  * individual byte reads are torn-free, so a plain memcpy captures a
  * well-defined per-byte snapshot with no lock needed. */
 static apr_status_t bs_state_save(apr_pool_t *p, server_rec *s,
-                                  const char *path)
+                                  const char *path,
+                                  const bs_shm_runtime *rt)
 {
     apr_time_t t_start = apr_time_now();
-    apr_size_t flagged_bytes = bs_shm.flagged_capacity
+    apr_size_t flagged_bytes = rt->flagged_capacity
                                * sizeof(bs_flagged_ip_slot);
-    apr_size_t bloom_bytes   = bs_shm.bloom_buf_bytes;
-    apr_size_t key_bytes     = sizeof(bs_shm.header->siphash_key);
+    apr_size_t bloom_bytes   = rt->bloom_buf_bytes;
+    apr_size_t key_bytes     = sizeof(rt->header->siphash_key);
     apr_size_t total = 4 + 4 + 8                    /* header */
                      + key_bytes                    /* siphash key */
                      + 4 + flagged_bytes            /* flagged */
@@ -6899,17 +6947,17 @@ static apr_status_t bs_state_save(apr_pool_t *p, server_rec *s,
     memcpy(pc, &magic,   4); pc += 4;
     memcpy(pc, &version, 4); pc += 4;
     memcpy(pc, &now,     8); pc += 8;
-    memcpy(pc, bs_shm.header->siphash_key, key_bytes); pc += key_bytes;
+    memcpy(pc, rt->header->siphash_key, key_bytes); pc += key_bytes;
 
-    apr_uint32_t cap = (apr_uint32_t)bs_shm.flagged_capacity;
+    apr_uint32_t cap = (apr_uint32_t)rt->flagged_capacity;
     memcpy(pc, &cap, 4); pc += 4;
 
     /* Serialize the flagged-IP copy against bs_flagged_ip_add's
      * writer. Without the lock, a concurrent add's odd-version mid-
      * state can be captured; load resets version to 0 and ends up
      * publishing a logically-forged slot. */
-    if (bs_shm.mutex) {
-        apr_status_t lr = apr_global_mutex_lock(bs_shm.mutex);
+    if (rt->mutex) {
+        apr_status_t lr = apr_global_mutex_lock(rt->mutex);
         if (lr != APR_SUCCESS) {
             ap_log_error(APLOG_MARK, APLOG_WARNING, lr, s,
                 "mod_botshield: state save: could not lock mutex; "
@@ -6917,18 +6965,18 @@ static apr_status_t bs_state_save(apr_pool_t *p, server_rec *s,
             return lr;
         }
     }
-    memcpy(pc, bs_shm.flagged_table, flagged_bytes);
-    if (bs_shm.mutex) apr_global_mutex_unlock(bs_shm.mutex);
+    memcpy(pc, rt->flagged_table, flagged_bytes);
+    if (rt->mutex) apr_global_mutex_unlock(rt->mutex);
     pc += flagged_bytes;
 
-    apr_uint32_t bb = (apr_uint32_t)bs_shm.bloom_buf_bytes;
-    apr_uint32_t act = apr_atomic_read32(&bs_shm.header->bloom_active);
-    apr_int64_t  nxt = bs_shm.header->bloom_next_rotate;
+    apr_uint32_t bb = (apr_uint32_t)rt->bloom_buf_bytes;
+    apr_uint32_t act = apr_atomic_read32(&rt->header->bloom_active);
+    apr_int64_t  nxt = rt->header->bloom_next_rotate;
     memcpy(pc, &bb,  4); pc += 4;
     memcpy(pc, &act, 4); pc += 4;
     memcpy(pc, &nxt, 8); pc += 8;
-    memcpy(pc, bs_shm.bloom_bufs[0], bb); pc += bb;
-    memcpy(pc, bs_shm.bloom_bufs[1], bb); pc += bb;
+    memcpy(pc, rt->bloom_bufs[0], bb); pc += bb;
+    memcpy(pc, rt->bloom_bufs[1], bb); pc += bb;
 
     apr_uint64_t fnv = bs_fnv64(BS_FNV64_SEED, buf, pc - buf);
     memcpy(pc, &fnv, 8); pc += 8;
@@ -6986,15 +7034,15 @@ static apr_status_t bs_state_save(apr_pool_t *p, server_rec *s,
      * shown and the value scraped are consistent. Counters are
      * module-global, not per-vhost, so no atomic-RMW race between
      * concurrent saves (watchdog + shutdown) matters in practice. */
-    if (bs_shm.metrics) {
-        __atomic_fetch_add(&bs_shm.metrics->state_saves_total, 1,
+    if (rt->metrics) {
+        __atomic_fetch_add(&rt->metrics->state_saves_total, 1,
                            __ATOMIC_RELAXED);
-        __atomic_store_n(&bs_shm.metrics->state_save_last_unix,
+        __atomic_store_n(&rt->metrics->state_save_last_unix,
                          (apr_uint64_t)apr_time_sec(t_end),
                          __ATOMIC_RELAXED);
-        __atomic_store_n(&bs_shm.metrics->state_save_last_bytes,
+        __atomic_store_n(&rt->metrics->state_save_last_bytes,
                          (apr_uint64_t)total, __ATOMIC_RELAXED);
-        __atomic_store_n(&bs_shm.metrics->state_save_last_duration_us,
+        __atomic_store_n(&rt->metrics->state_save_last_duration_us,
                          (apr_uint64_t)duration_us, __ATOMIC_RELAXED);
     }
 
@@ -7010,10 +7058,14 @@ static apr_status_t bs_state_save(apr_pool_t *p, server_rec *s,
 static apr_status_t bs_state_cleanup(void *data)
 {
     bs_state_cleanup_ctx *ctx = data;
-    if (!bs_shm.shm || !bs_shm.flagged_table || !bs_shm.bloom_bufs[0]) {
+    /* Use the snapshotted SHM rt — on a graceful restart, the
+     * global bs_shm has already been overwritten by the new
+     * generation. ctx->shm_rt remembers OUR generation's pointers. */
+    if (!ctx->shm_rt.shm || !ctx->shm_rt.flagged_table ||
+        !ctx->shm_rt.bloom_bufs[0]) {
         return APR_SUCCESS;   /* post-config never completed; nothing to save */
     }
-    bs_state_save(ctx->pool, ctx->server, ctx->path);
+    bs_state_save(ctx->pool, ctx->server, ctx->path, &ctx->shm_rt);
     return APR_SUCCESS;
 }
 
@@ -9028,11 +9080,12 @@ static apr_status_t bs_watchdog_save_cb(int state, void *data,
     if (state != AP_WATCHDOG_STATE_RUNNING) return APR_SUCCESS;
     bs_state_cleanup_ctx *ctx = data;
     if (!ctx || !ctx->path) return APR_SUCCESS;
-    if (!bs_shm.shm || !bs_shm.flagged_table || !bs_shm.bloom_bufs[0]) {
+    if (!ctx->shm_rt.shm || !ctx->shm_rt.flagged_table ||
+        !ctx->shm_rt.bloom_bufs[0]) {
         return APR_SUCCESS;   /* SHM not up yet; nothing to save */
     }
     /* Use the callback's own pool so temporaries die with this tick. */
-    bs_state_save(pool, ctx->server, ctx->path);
+    bs_state_save(pool, ctx->server, ctx->path, &ctx->shm_rt);
     return APR_SUCCESS;
 }
 
