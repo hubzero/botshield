@@ -10074,15 +10074,27 @@ static size_t bs_curl_write_cb(char *ptr, size_t size, size_t nmemb,
         return 0;
     }
     size_t incoming = size * nmemb;
-    if (b->truncated) return incoming;   /* drain silently */
+    /* Security review HIGH #8 — abort the transfer once truncation
+     * is detected, instead of draining the rest of the body
+     * silently. A slow-trickle malicious provider was previously
+     * able to hold an in-flight captcha slot for the full timeout
+     * (BS_DEFAULT_CAPTCHA_MAX_INFLIGHT defaults to 64 — exhausting
+     * the pool with 64 slow trickles starves real verifies).
+     * Returning 0 yields CURLE_WRITE_ERROR; the caller maps that
+     * to BS_CAPTCHA_ERROR (fail-open by policy on transport
+     * failures, same path as a timeout). */
+    if (b->truncated) return 0;
     size_t room = (b->len < b->cap) ? (b->cap - b->len) : 0;
     size_t take = (incoming < room) ? incoming : room;
     if (take > 0) {
         memcpy(b->buf + b->len, ptr, take);
         b->len += take;
     }
-    if (take < incoming) b->truncated = 1;
-    return incoming;  /* always "consume" everything so libcurl doesn't abort */
+    if (take < incoming) {
+        b->truncated = 1;
+        return 0;   /* abort transfer */
+    }
+    return incoming;
 }
 
 /* libcurl global state is initialized once in bs_post_config (see the
@@ -10299,6 +10311,22 @@ static bs_captcha_result bs_captcha_siteverify(request_rec *r,
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+    /* Security review HIGH #7 — allowlist HTTPS only. Provider URLs
+     * are hard-coded today, but a future operator-tunable URL
+     * would become an immediate SSRF vector via file://, gopher://,
+     * etc. Cheap to close now. REDIR_PROTOCOLS mirrors the policy
+     * in case FOLLOWLOCATION is ever flipped on later. */
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https");
+    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
+    /* Security review HIGH #8 — server-declared response size cap.
+     * If a malicious or misbehaving provider sets Content-Length
+     * larger than our buffer, abort before any bytes flow.
+     * Streaming-trickle providers without a declared length still
+     * terminate via bs_curl_write_cb returning 0 on overflow
+     * (CURLE_WRITE_ERROR), instead of holding an in-flight
+     * captcha slot for the full timeout. */
+    curl_easy_setopt(curl, CURLOPT_MAXFILESIZE,
+                     (long)BS_MAX_CAPTCHA_BODY);
 
     CURLcode rc = curl_easy_perform(curl);
     long http_code = 0;
@@ -10487,6 +10515,22 @@ static bs_captcha_result bs_geetest_siteverify(request_rec *r,
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+    /* Security review HIGH #7 — allowlist HTTPS only. Provider URLs
+     * are hard-coded today, but a future operator-tunable URL
+     * would become an immediate SSRF vector via file://, gopher://,
+     * etc. Cheap to close now. REDIR_PROTOCOLS mirrors the policy
+     * in case FOLLOWLOCATION is ever flipped on later. */
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https");
+    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
+    /* Security review HIGH #8 — server-declared response size cap.
+     * If a malicious or misbehaving provider sets Content-Length
+     * larger than our buffer, abort before any bytes flow.
+     * Streaming-trickle providers without a declared length still
+     * terminate via bs_curl_write_cb returning 0 on overflow
+     * (CURLE_WRITE_ERROR), instead of holding an in-flight
+     * captcha slot for the full timeout. */
+    curl_easy_setopt(curl, CURLOPT_MAXFILESIZE,
+                     (long)BS_MAX_CAPTCHA_BODY);
 
     CURLcode rc = curl_easy_perform(curl);
     long http_code = 0;
