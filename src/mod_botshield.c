@@ -10329,8 +10329,15 @@ static bs_captcha_result bs_captcha_siteverify(request_rec *r,
         "secret=%s&%s=%s&remoteip=%s",
         esc_secret, field, esc_token, esc_ip);
 
+    /* Security review MEDIUM — allocate one extra byte so a
+     * full-cap response (resp.len == BS_MAX_CAPTCHA_BODY, which
+     * the write callback caps at via the room calculation) can
+     * receive its NUL terminator at resp.buf[resp.len] without
+     * overwriting the last valid byte. Symmetric with the
+     * BS_FORM_CAPTCHA_BODY_MAX+1 fix applied to the form-captcha
+     * body buffer. */
     bs_curl_buffer resp = {
-        .buf = apr_palloc(r->pool, BS_MAX_CAPTCHA_BODY),
+        .buf = apr_palloc(r->pool, BS_MAX_CAPTCHA_BODY + 1),
         .cap = BS_MAX_CAPTCHA_BODY,
         .len = 0, .truncated = 0,
     };
@@ -10383,7 +10390,7 @@ static bs_captcha_result bs_captcha_siteverify(request_rec *r,
         return BS_CAPTCHA_ERROR;
     }
 
-    apr_size_t body_len = resp.len < resp.cap ? resp.len : resp.cap - 1;
+    apr_size_t body_len = resp.len;
     resp.buf[body_len] = '\0';
     return bs_captcha_parse_response(r->pool, resp.buf, body_len,
                                      out_details, out_score,
@@ -10533,8 +10540,15 @@ static bs_captcha_result bs_geetest_siteverify(request_rec *r,
         "&gen_time=%s&sign_token=%s",
         e_lot, e_output, e_pass, e_time, sign_token);
 
+    /* Security review MEDIUM — allocate one extra byte so a
+     * full-cap response (resp.len == BS_MAX_CAPTCHA_BODY, which
+     * the write callback caps at via the room calculation) can
+     * receive its NUL terminator at resp.buf[resp.len] without
+     * overwriting the last valid byte. Symmetric with the
+     * BS_FORM_CAPTCHA_BODY_MAX+1 fix applied to the form-captcha
+     * body buffer. */
     bs_curl_buffer resp = {
-        .buf = apr_palloc(r->pool, BS_MAX_CAPTCHA_BODY),
+        .buf = apr_palloc(r->pool, BS_MAX_CAPTCHA_BODY + 1),
         .cap = BS_MAX_CAPTCHA_BODY,
         .len = 0, .truncated = 0,
     };
@@ -10586,7 +10600,7 @@ static bs_captcha_result bs_geetest_siteverify(request_rec *r,
         return BS_CAPTCHA_ERROR;
     }
 
-    apr_size_t body_len = resp.len < resp.cap ? resp.len : resp.cap - 1;
+    apr_size_t body_len = resp.len;
     resp.buf[body_len] = '\0';
 
     /* Parse GeeTest response: {"result":"success"/"fail","reason":"..."}. */
@@ -15556,7 +15570,13 @@ static apr_status_t bs_form_captcha_read_body(request_rec *r,
                 apr_brigade_destroy(bb);
                 return br;
             }
-            if (total + len > BS_FORM_CAPTCHA_BODY_MAX) {
+            /* Security review MEDIUM — overflow-safe shape. The
+             * naive `total + len > MAX` form can wrap on a maliciously
+             * large `len` even though both operands are size_t, since
+             * BS_FORM_CAPTCHA_BODY_MAX is well below SIZE_MAX. Rewrite
+             * as `len > MAX - total` so the subtraction stays in range
+             * and we never compute the overflowing sum at all. */
+            if (len > BS_FORM_CAPTCHA_BODY_MAX - total) {
                 apr_brigade_destroy(bb);
                 return APR_ENOSPC;
             }
@@ -15600,11 +15620,22 @@ static int bs_form_captcha_fixup(request_rec *r)
      * the right home for. Anything else gets 415 with diagnostic
      * so operators notice the gap rather than silently allow
      * unverified submits. */
+    /* Security review MEDIUM — Content-Type prefix match must check
+     * the next byte is a recognized separator (`;` for parameters,
+     * whitespace, or end-of-string). Without it,
+     * `application/x-www-form-urlencoded-evil` and
+     * `application/json-something` would match the prefix and slip
+     * through with the wrong handler choice. */
     const char *ct = apr_table_get(r->headers_in, "Content-Type");
+    #define BS_CT_TERMINATOR(c) ((c) == '\0' || (c) == ';' || \
+                                  (c) == ' '  || (c) == '\t')
     int ct_form = (ct &&
-        strncasecmp(ct, "application/x-www-form-urlencoded", 33) == 0);
+        strncasecmp(ct, "application/x-www-form-urlencoded", 33) == 0 &&
+        BS_CT_TERMINATOR(ct[33]));
     int ct_json = (ct &&
-        strncasecmp(ct, "application/json", 16) == 0);
+        strncasecmp(ct, "application/json", 16) == 0 &&
+        BS_CT_TERMINATOR(ct[16]));
+    #undef BS_CT_TERMINATOR
     if (!ct_form && !ct_json) {
         ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
             "mod_botshield: BotShieldFormCaptcha supports "
