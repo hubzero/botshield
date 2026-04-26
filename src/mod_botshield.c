@@ -3323,7 +3323,8 @@ static void bs_safeguard_record_presentation(request_rec *r,
                                              const unsigned char ip[16],
                                              apr_int64_t now,
                                              apr_uint32_t ns_id);
-static void bs_safeguard_clear(const unsigned char ip[16],
+static void bs_safeguard_clear(request_rec *r,
+                               const unsigned char ip[16],
                                apr_uint32_t ns_id);
 static int  bs_safeguard_effective_int(int v, int dflt);
 /* Shared action helpers — see definitions below. The server-cfg
@@ -5259,6 +5260,18 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
         bs_state_save(ptemp, s, scfg->state_file, &old_rt);
     }
 
+    /* Security review HIGH #4 — snapshot bs_shm before any failable
+     * step that mutates the global. If RAND_bytes /
+     * apr_global_mutex_create / ap_unixd_set_global_mutex_perms
+     * fail, the new pconf gets destroyed by APR (which frees the
+     * apr_shm_t), but the global bs_shm.shm / header /
+     * flagged_table / bloom_bufs[*] would still hold dangling
+     * pointers. On graceful restart with a botched new config the
+     * old workers continue using the dangling state until the old
+     * pconf finally tears down. Restore the snapshot on every
+     * error path below so bs_shm either stays at the OLD
+     * generation's pointers (graceful) or stays NULL (cold boot). */
+    bs_shm_runtime saved_bs_shm = bs_shm;
     apr_status_t rv = apr_shm_create(&bs_shm.shm, scfg->shm_size,
                                      NULL, pconf);
     if (rv != APR_SUCCESS) {
@@ -5266,6 +5279,7 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
         apr_strerror(rv, errbuf, sizeof(errbuf));
         ap_log_error(APLOG_MARK, APLOG_ERR, rv, s,
             "mod_botshield: apr_shm_create failed: %s", errbuf);
+        bs_shm = saved_bs_shm;
         return HTTP_INTERNAL_SERVER_ERROR;
     }
 
@@ -5280,6 +5294,7 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                    sizeof(bs_shm.header->siphash_key)) != 1) {
         ap_log_error(APLOG_MARK, APLOG_ERR, 0, s,
             "mod_botshield: RAND_bytes(siphash_key) failed");
+        bs_shm = saved_bs_shm;
         return HTTP_INTERNAL_SERVER_ERROR;
     }
 
@@ -5348,6 +5363,7 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
         apr_strerror(rv, errbuf, sizeof(errbuf));
         ap_log_error(APLOG_MARK, APLOG_ERR, rv, s,
             "mod_botshield: apr_global_mutex_create failed: %s", errbuf);
+        bs_shm = saved_bs_shm;
         return HTTP_INTERNAL_SERVER_ERROR;
     }
 #ifdef AP_NEED_SET_MUTEX_PERMS
@@ -5355,6 +5371,7 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     if (rv != APR_SUCCESS) {
         ap_log_error(APLOG_MARK, APLOG_ERR, rv, s,
             "mod_botshield: set_global_mutex_perms failed");
+        bs_shm = saved_bs_shm;
         return HTTP_INTERNAL_SERVER_ERROR;
     }
 #endif
@@ -6528,16 +6545,28 @@ static void bs_safeguard_record_presentation(request_rec *r,
  * this IP — proves the client CAN solve, so accumulated presentation
  * history was noise (probably transient) and we want a fresh slate.
  * No-op if the entry isn't found; silent on error. */
-static void bs_safeguard_clear(const unsigned char ip[16],
+static void bs_safeguard_clear(request_rec *r,
+                               const unsigned char ip[16],
                                apr_uint32_t ns_id)
 {
     if (!bs_shm.safeguard_table || !bs_shm.mutex) return;
     apr_uint32_t base = bs_safeguard_bucket(ip, ns_id);
 
     /* Load-shed under heavy contention. A dropped clear leaves the
-     * stale safeguard record in place; it expires on its own TTL. */
+     * stale safeguard record in place; it expires on its own TTL.
+     *
+     * Security review HIGH #6 — distinguish EBUSY (expected
+     * shedding under load) from other failures (mutex genuinely
+     * broken — operator should know). Mirrors the
+     * bs_safeguard_record_presentation pattern. */
     apr_status_t rv = apr_global_mutex_trylock(bs_shm.mutex);
-    if (rv != APR_SUCCESS) return;
+    if (APR_STATUS_IS_EBUSY(rv)) return;
+    if (rv != APR_SUCCESS) {
+        ap_log_rerror(APLOG_MARK, APLOG_WARNING, rv, r,
+            "mod_botshield: safeguard-table mutex_lock failed; "
+            "dropping clear (entry will expire on its own TTL)");
+        return;
+    }
     for (unsigned i = 0; i < BS_SAFEGUARD_PROBE_LIMIT; i++) {
         apr_uint32_t idx = (base + i) % bs_shm.safeguard_capacity;
         bs_safeguard_slot *slot = &bs_shm.safeguard_table[idx];
@@ -14205,28 +14234,23 @@ static int bs_is_asset_uri(const char *uri)
  * Returns a pool-allocated copy of the value with trailing whitespace
  * trimmed, or NULL if the cookie isn't present. The value itself is not
  * validated here — callers decode and verify. */
+/* Security review HIGH #3 — was strstr + leading-byte-boundary
+ * check, which had two issues vs RFC 6265:
+ *   1. Tolerated a bare-space separator ("a=1 b=2") as if it
+ *      were "; "; RFC requires the semicolon.
+ *   2. The substring search could fall into surprising matches
+ *      with a name that's a substring of another (defended via
+ *      the boundary check, but the logic was duplicated only
+ *      here while bs_parse_cookies_once already had the right
+ *      tokenizer).
+ * Now both cookie consumers route through the same tokenizer.
+ * bs_parse_cookies_once memoizes its result in r->notes, so
+ * the per-request cost stays a single parse. */
 static const char *bs_get_cookie_value(request_rec *r, const char *name)
 {
-    const char *cookies = apr_table_get(r->headers_in, "Cookie");
-    if (!cookies) return NULL;
-
-    apr_size_t nlen = strlen(name);
-    const char *p = cookies;
-    while ((p = strstr(p, name)) != NULL) {
-        int at_boundary = (p == cookies) ||
-                          (p[-1] == ';')  ||
-                          (p[-1] == ' ')  ||
-                          (p[-1] == '\t');
-        if (at_boundary && p[nlen] == '=') {
-            const char *v = p + nlen + 1;
-            const char *end = strchr(v, ';');
-            if (!end) end = v + strlen(v);
-            while (end > v && (end[-1] == ' ' || end[-1] == '\t')) end--;
-            return apr_pstrmemdup(r->pool, v, (apr_size_t)(end - v));
-        }
-        p += nlen;
-    }
-    return NULL;
+    apr_table_t *map = bs_parse_cookies_once(r);
+    if (!map) return NULL;
+    return apr_table_get(map, name);
 }
 
 /* --- Challenge page templates ---
@@ -14817,7 +14841,7 @@ static int bs_handler(request_rec *r)
                     if (bs_parse_client_ip(r->useragent_ip, sg_ip)) {
                         bs_mask_ipv6_prefix(sg_ip,
                                             scfg_sg->ipv6_prefix_bits);
-                        bs_safeguard_clear(sg_ip, scfg_sg->ns_id);
+                        bs_safeguard_clear(r, sg_ip, scfg_sg->ns_id);
                     }
                 }
             }
