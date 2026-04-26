@@ -1255,26 +1255,9 @@ static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
     return out;
 }
 
-/* Forward decl: defined down with the bs_flag_metadata array. The
- * reset has to fire from bs_create_server_cfg (this function),
- * which lives much earlier than the array data — hence the
- * declaration here. */
-static void bs_flag_meta_reset_to_defaults(void);
-
 static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
 {
-    /* E14 — reset the global flag-metadata array on each main-server
-     * config-pass entry. The array is mutated in place by
-     * BotShieldFlag directives; without this reset, removing a
-     * directive line + apachectl graceful would leak the prior
-     * mutation across reloads (graceful re-runs config parse but
-     * doesn't dlclose the module .so). Restricting to the main
-     * server (!s->is_virtual) gives us exactly one reset per
-     * config pass, before any directive setter for THIS pass fires
-     * — vhost create-cfg calls happen later and inherit. */
-    if (s && !s->is_virtual) {
-        bs_flag_meta_reset_to_defaults();
-    }
+    (void)s;
     bs_server_cfg *scfg = apr_pcalloc(p, sizeof(*scfg));
     scfg->shm_size          = BS_DEFAULT_SHM_SIZE;
     scfg->flagged_capacity  = BS_DEFAULT_FLAGGED_SLOTS;
@@ -4953,30 +4936,6 @@ static bs_flag_meta bs_flag_metadata[] = {
     { "app_verified_session", BS_FLAG_APP_VERIFIED_SESSION, -40, 0, BS_TIER_PASS },
     { "app_trust_signal",     BS_FLAG_APP_TRUST_SIGNAL,     -20, 0, BS_TIER_PASS },
 };
-
-/* Pristine copy of the defaults. The mutable array above gets
- * mutated in place by `BotShieldFlag` directives — without this,
- * an operator who removes a directive and runs `apachectl graceful`
- * would still see the prior mutation in memory because graceful
- * doesn't dlclose the .so. bs_create_server_cfg calls
- * bs_flag_meta_reset_to_defaults() on each main-server config
- * pass to give the directive parser a clean slate. */
-static const bs_flag_meta bs_flag_metadata_defaults[] = {
-    { "honeypot_hit",         BS_FLAG_HONEYPOT_HIT,          60, 0, BS_TIER_PASS },
-    { "scanner_probe",        BS_FLAG_SCANNER_PROBE,         50, 0, BS_TIER_PASS },
-    { "fake_bot",             BS_FLAG_FAKE_BOT,              80, 0, BS_TIER_PASS },
-    { "pow_fail_streak",      BS_FLAG_POW_FAIL_STREAK,       30, 0, BS_TIER_PASS },
-    { "app_verified_human",   BS_FLAG_APP_VERIFIED_HUMAN,   -80, 0, BS_TIER_PASS },
-    { "app_verified_session", BS_FLAG_APP_VERIFIED_SESSION, -40, 0, BS_TIER_PASS },
-    { "app_trust_signal",     BS_FLAG_APP_TRUST_SIGNAL,     -20, 0, BS_TIER_PASS },
-};
-
-static void bs_flag_meta_reset_to_defaults(void)
-{
-    memcpy(bs_flag_metadata, bs_flag_metadata_defaults,
-           sizeof(bs_flag_metadata_defaults));
-}
-
 #define BS_FLAG_META_COUNT \
     (sizeof(bs_flag_metadata) / sizeof(bs_flag_metadata[0]))
 
@@ -11772,59 +11731,6 @@ static int bs_embedded_bootstrap_handler(request_rec *r,
     int difficulty = bs_effective_int(cfg->difficulty, BS_DEFAULT_DIFFICULTY);
     int ttl = bs_effective_int(cfg->cookie_ttl, BS_DEFAULT_COOKIE_TTL);
 
-    /* E14 — adaptive difficulty in the embedded path. The M7 issue
-     * path applies BotShieldFlag's next_difficulty bumps before
-     * issuing; the embedded bootstrap was missing this, so a
-     * flagged-IP client visiting an embedded-mode page got the
-     * same baseline PoW as a clean client. Look up flag state
-     * (IP-side via flagged-IP table; cookie-side via the prior_ch
-     * we may have parsed above), accumulate the delta, clamp
-     * against BotShieldMaxDifficulty. */
-    {
-        bs_server_cfg *scfg_h = ap_get_module_config(
-            r->server->module_config, &botshield_module);
-        unsigned char client_ip_local[16];
-        int have_local_ip = bs_parse_client_ip(r->useragent_ip,
-                                               client_ip_local);
-        if (have_local_ip && scfg_h) {
-            bs_mask_ipv6_prefix(client_ip_local,
-                                scfg_h->ipv6_prefix_bits);
-        }
-        apr_uint32_t local_ip_flags = 0;
-        if (have_local_ip && scfg_h &&
-            bs_flagged_ip_lookup(client_ip_local,
-                                 &local_ip_flags, scfg_h->ns_id)) {
-            /* hit */
-        }
-        /* Cookie-side flags. Re-parse here even though we already
-         * called bs_verify_cookie above for the off-mode short-
-         * circuit — that was for the success branch only. If the
-         * cookie was sig-mismatch (bytes can't be trusted) we
-         * skip; otherwise carry rep.flags forward. */
-        apr_uint32_t cookie_flags = 0;
-        if (cookie_val && *cookie_val) {
-            bs_challenge prior;
-            const char *cverr = bs_verify_cookie(r, cfg, cookie_val,
-                                                 &prior);
-            if (cverr == NULL ||
-                (cverr && strcmp(cverr, "signature mismatch") != 0)) {
-                cookie_flags = prior.rep.flags;
-            }
-        }
-        bs_flag_adaptive a_ip   = bs_flag_adaptive_for(local_ip_flags);
-        bs_flag_adaptive a_cook = bs_flag_adaptive_for(cookie_flags);
-        int delta = a_ip.difficulty_delta + a_cook.difficulty_delta;
-        if (delta != 0 && scfg_h) {
-            int max_diff = (scfg_h->max_difficulty > 0)
-                         ? scfg_h->max_difficulty
-                         : BS_DEFAULT_MAX_DIFFICULTY;
-            int requested = difficulty + delta;
-            if      (requested < 1)         difficulty = 1;
-            else if (requested > max_diff)  difficulty = max_diff;
-            else                            difficulty = requested;
-        }
-    }
-
     bs_challenge ch;
     memset(&ch, 0, sizeof(ch));
     /* Issue a fresh challenge with default-zero rep state. The
@@ -15504,9 +15410,58 @@ static int bs_form_captcha_fixup(request_rec *r)
             "from registry", cookie_alg_name);
         return HTTP_INTERNAL_SERVER_ERROR;
     }
+    /* E15 review fix — carry forward prior cookie state if present,
+     * mirroring M8's captcha-verify path. Without this, an existing
+     * client whose cookie has forgive_consumed close to the cap
+     * could "wash" their budget by submitting a form-captcha — the
+     * fresh memset zeroed the rolling-window state and gave them a
+     * full new budget. Symmetric with M8 now: read prior cookie if
+     * sig-verifies, apply forgive_captcha through the cap helper,
+     * carry forward score (clamped to flag-penalty floor), bump the
+     * passes_captcha counter. */
     bs_rep_state next_rep;
     memset(&next_rep, 0, sizeof(next_rep));
-    next_rep.passes_captcha = 1;
+    {
+        const char *prior_val = bs_get_cookie_value(r, BS_COOKIE_NAME);
+        bs_challenge prior_ch = { 0 };
+        int have_prior = 0;
+        if (prior_val && *prior_val) {
+            const char *cverr = bs_verify_cookie(r, cfg, prior_val,
+                                                  &prior_ch);
+            /* Carry forward when the signature was valid OR when the
+             * sig was valid-but-cookie-expired (rep is server-signed,
+             * still trustworthy). Skip on signature mismatch — those
+             * bytes can't be trusted. Same invariant as the M7 issue
+             * path. */
+            if (cverr == NULL ||
+                (cverr && strcmp(cverr, "signature mismatch") != 0
+                       && prior_ch.alg_name)) {
+                have_prior = 1;
+            }
+        }
+        if (have_prior) {
+            int forgive = bs_effective_int(cfg->forgive_captcha,
+                                            BS_DEFAULT_FORGIVE_CAPTCHA);
+            bs_server_cfg *scfg_fc = ap_get_module_config(
+                r->server->module_config, &botshield_module);
+            int cap = (scfg_fc && scfg_fc->forgive_cap_per_hour > 0)
+                    ? scfg_fc->forgive_cap_per_hour
+                    : BS_DEFAULT_FORGIVE_CAP_PER_HOUR;
+            apr_uint32_t now_sec = (apr_uint32_t)apr_time_sec(apr_time_now());
+            next_rep = prior_ch.rep;
+            forgive = bs_forgiveness_apply_cap(forgive, cap, now_sec,
+                        &next_rep.forgive_window_start,
+                        &next_rep.forgive_consumed);
+            int floor   = bs_flag_penalty(prior_ch.rep.flags);
+            int new_score = prior_ch.rep.score - forgive;
+            if (new_score < floor) new_score = floor;
+            if (new_score < 0)     new_score = 0;
+            next_rep.score          = new_score;
+            next_rep.passes_captcha = prior_ch.rep.passes_captcha + 1;
+        } else {
+            next_rep.passes_captcha = 1;
+        }
+    }
 
     bs_challenge ch;
     const char *ierr = bs_issue_challenge(r->pool, cfg, difficulty, ttl,
