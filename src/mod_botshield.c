@@ -10591,6 +10591,15 @@ static int bs_m_tier_idx(const char *s)
     if (strcmp(s, "silent")  == 0) return BS_M_TIER_SILENT;
     if (strcmp(s, "form")    == 0) return BS_M_TIER_FORM;
     if (strcmp(s, "captcha") == 0) return BS_M_TIER_CAPTCHA;
+    /* E10 — safeguard activations land in the decision log as
+     * tier="safeguard" so operators can grep/filter for them
+     * (semantically distinct from a regular pass). For metrics
+     * we bin them into the pass counter — they are functionally
+     * pass-through (no challenge issued, request reaches origin).
+     * Operators wanting to dashboard safeguard rate scrape the
+     * decision log for reason="challenge-safeguard". A dedicated
+     * counter could be added later without changing this mapping. */
+    if (strcmp(s, "safeguard") == 0) return BS_M_TIER_PASS;
     return -1;
 }
 
