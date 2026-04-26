@@ -453,6 +453,13 @@ typedef struct {
 #define BS_DEFAULT_SAFEGUARD_THRESHOLD 5
 #define BS_DEFAULT_SAFEGUARD_WINDOW    600
 #define BS_DEFAULT_SAFEGUARD_TTL       900
+/* E17 — embedded → M7 fallback threshold. After N consecutive silent-
+ * tier-embedded dispatches in the safeguard window without
+ * _bs_verified arriving, the embedded short-circuit is bypassed and
+ * M7 issues. Set lower than safeguard threshold so M7 gets a chance
+ * before pass-through fully kicks in. Reuses the safeguard table's
+ * present_count to avoid a fourth SHM table just for this counter. */
+#define BS_DEFAULT_EMBEDDED_FALLBACK_THRESHOLD 3
 
 /* E11 — load-aware throttling. A periodic watchdog tick samples
  * the Apache scoreboard's busy-worker ratio, optionally merges in
@@ -3209,10 +3216,15 @@ static bs_load_state bs_load_current(void);
 
 /* E10 — safeguard helpers. Called from bs_handler at two points:
  * just before issuing a challenge (check + record presentation)
- * and on successful cookie verify (clear the per-IP counter). */
+ * and on successful cookie verify (clear the per-IP counter).
+ * E17 reuses the count via bs_safeguard_present_count for the
+ * embedded → M7 fallback decision. */
 static int  bs_safeguard_check(const unsigned char ip[16],
                                apr_int64_t now,
                                apr_uint32_t ns_id);
+static apr_uint32_t bs_safeguard_present_count(const unsigned char ip[16],
+                                               apr_int64_t now,
+                                               apr_uint32_t ns_id);
 static void bs_safeguard_record_presentation(request_rec *r,
                                              bs_server_cfg *scfg,
                                              const unsigned char ip[16],
@@ -6196,6 +6208,62 @@ static int bs_safeguard_check(const unsigned char ip[16], apr_int64_t now,
         if (local_ns_id != ns_id) continue;
         if (memcmp(local_ip, ip, 16) != 0) continue;
         return local_until > now;
+    }
+    return 0;
+}
+
+/* E17 — read present_count for this IP (lockless seqlock, same
+ * discipline as bs_safeguard_check). Returns 0 if the IP has no
+ * slot or the safeguard window has expired. Used by the embedded
+ * → M7 fallback decision: after N consecutive silent-tier-embedded
+ * dispatches without _bs_verified, the embedded short-circuit is
+ * bypassed and M7 issues. The count is the same one
+ * bs_safeguard_record_presentation maintains; reading it here
+ * doesn't affect safeguard semantics. */
+static apr_uint32_t bs_safeguard_present_count(const unsigned char ip[16],
+                                               apr_int64_t now,
+                                               apr_uint32_t ns_id)
+{
+    if (!bs_shm.safeguard_table || bs_shm.safeguard_capacity == 0) return 0;
+    apr_uint32_t base = bs_safeguard_bucket(ip, ns_id);
+
+    for (unsigned i = 0; i < BS_SAFEGUARD_PROBE_LIMIT; i++) {
+        apr_uint32_t idx = (base + i) % bs_shm.safeguard_capacity;
+        bs_safeguard_slot *slot = &bs_shm.safeguard_table[idx];
+
+        apr_uint32_t v1, v2;
+        apr_uint32_t  local_used;
+        apr_uint32_t  local_ns_id;
+        unsigned char local_ip[16];
+        apr_uint32_t  local_window_start;
+        apr_uint32_t  local_count;
+        int spins = 0;
+        for (;;) {
+            v1 = apr_atomic_read32(&slot->version);
+            if (v1 & 1U) {
+                if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
+                continue;
+            }
+            local_used         = slot->used;
+            local_ns_id        = slot->ns_id;
+            memcpy(local_ip, slot->ip, 16);
+            local_window_start = slot->present_window_start;
+            local_count        = slot->present_count;
+            v2 = apr_atomic_read32(&slot->version);
+            if (v1 == v2) break;
+            if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
+        }
+        if (v1 == ~0U) continue;
+        if (!local_used) continue;
+        if (local_ns_id != ns_id) continue;
+        if (memcmp(local_ip, ip, 16) != 0) continue;
+        /* Window-rolled: count is stale, treat as zero. */
+        apr_uint32_t window_sec = BS_DEFAULT_SAFEGUARD_WINDOW;
+        if (local_window_start == 0 ||
+            (apr_uint32_t)now - local_window_start >= window_sec) {
+            return 0;
+        }
+        return local_count;
     }
     return 0;
 }
@@ -11106,12 +11174,61 @@ static const char *bs_clear_pending_cookie(request_rec *r,
  * cleanly.
  * =========================================================== */
 
+/* The PoW solver Web Worker body — served as its own URL so strict
+ * CSP scopes (`worker-src 'self'`) can opt into embedded mode.
+ * Earlier shape used a blob:-URL Worker built from inline source;
+ * blob: is blocked under strict CSP. Real URL works in both strict
+ * and permissive setups, costs one cacheable round-trip. */
+static const char BS_EMBEDDED_WORKER_JS[] =
+"self.onmessage = function(ev){\n"
+" var c = ev.data;\n"
+" var saltB = hexToBytes(c.salt);\n"
+" var nonceB = hexToBytes(c.nonce);\n"
+" var counter = 0;\n"
+" var BATCH = 1024;\n"
+" var LIMIT = 5000000;\n"
+" function doBatch(){\n"
+"  var promises = [];\n"
+"  var start = counter;\n"
+"  for (var i=0;i<BATCH;i++){\n"
+"   var cs = String(start+i);\n"
+"   var buf = new Uint8Array(saltB.length + nonceB.length + cs.length);\n"
+"   buf.set(saltB,0); buf.set(nonceB,saltB.length);\n"
+"   for (var j=0;j<cs.length;j++) buf[saltB.length+nonceB.length+j] = cs.charCodeAt(j);\n"
+"   promises.push(crypto.subtle.digest('SHA-256', buf));\n"
+"  }\n"
+"  Promise.all(promises).then(function(rs){\n"
+"   for (var i=0;i<rs.length;i++){\n"
+"    if (meets(new Uint8Array(rs[i]), c.difficulty)){\n"
+"     self.postMessage({counter: start+i});\n"
+"     return;\n"
+"    }\n"
+"   }\n"
+"   counter = start + BATCH;\n"
+"   if (counter > LIMIT){ self.postMessage({error:'limit'}); return; }\n"
+"   setTimeout(doBatch, 0);\n"
+"  }).catch(function(e){ self.postMessage({error:String(e)}); });\n"
+" }\n"
+" function hexToBytes(s){\n"
+"  var o = new Uint8Array(s.length/2);\n"
+"  for (var i=0;i<s.length;i+=2) o[i/2] = parseInt(s.substr(i,2),16);\n"
+"  return o;\n"
+" }\n"
+" function meets(d,n){\n"
+"  var fb = (n/2)|0; var hh = n&1;\n"
+"  for (var i=0;i<fb;i++) if (d[i] !== 0) return false;\n"
+"  if (hh && (d[fb] & 0xF0) !== 0) return false;\n"
+"  return true;\n"
+" }\n"
+" doBatch();\n"
+"};\n";
+
 /* The wrapper JS body. Self-contained IIFE; no external deps.
  *
  * Implementation notes:
- *   - blob:-URL Web Worker so we don't need a separate cacheable URL
- *     for the worker code. CSP-strict scopes need worker-src 'self'
- *     blob:; documented as a known gotcha for E17 hardening.
+ *   - Web Worker is loaded from /botshield/embedded-worker.js (a
+ *     real URL, not blob:) so strict-CSP scopes — worker-src 'self'
+ *     — can opt into embedded mode without exemptions.
  *   - SubtleCrypto.digest is async, so PoW runs as Promise.all
  *     batches with setTimeout yields between them — same shape the
  *     M2 form interstitial uses, copied here for parity.
@@ -11136,53 +11253,9 @@ static const char BS_EMBEDDED_JS[] =
 "   if (j.provider === 'friendly') { runFriendly(j); return; }\n"
 "   if (j.provider !== 'pow' || !j.challenge) return;\n"
 "   var ch = j.challenge;\n"
-"   var workerSrc = '(' + (function(){\n"
-"    self.onmessage = function(ev){\n"
-"     var c = ev.data;\n"
-"     var saltB = hexToBytes(c.salt);\n"
-"     var nonceB = hexToBytes(c.nonce);\n"
-"     var counter = 0;\n"
-"     var BATCH = 1024;\n"
-"     var LIMIT = 5000000;\n"
-"     function doBatch(){\n"
-"      var promises = [];\n"
-"      var start = counter;\n"
-"      for (var i=0;i<BATCH;i++){\n"
-"       var cs = String(start+i);\n"
-"       var buf = new Uint8Array(saltB.length + nonceB.length + cs.length);\n"
-"       buf.set(saltB,0); buf.set(nonceB,saltB.length);\n"
-"       for (var j=0;j<cs.length;j++) buf[saltB.length+nonceB.length+j] = cs.charCodeAt(j);\n"
-"       promises.push(crypto.subtle.digest('SHA-256', buf));\n"
-"      }\n"
-"      Promise.all(promises).then(function(rs){\n"
-"       for (var i=0;i<rs.length;i++){\n"
-"        if (meets(new Uint8Array(rs[i]), c.difficulty)){\n"
-"         self.postMessage({counter: start+i});\n"
-"         return;\n"
-"        }\n"
-"       }\n"
-"       counter = start + BATCH;\n"
-"       if (counter > LIMIT){ self.postMessage({error:'limit'}); return; }\n"
-"       setTimeout(doBatch, 0);\n"
-"      }).catch(function(e){ self.postMessage({error:String(e)}); });\n"
-"     }\n"
-"     function hexToBytes(s){\n"
-"      var o = new Uint8Array(s.length/2);\n"
-"      for (var i=0;i<s.length;i+=2) o[i/2] = parseInt(s.substr(i,2),16);\n"
-"      return o;\n"
-"     }\n"
-"     function meets(d,n){\n"
-"      var fb = (n/2)|0; var hh = n&1;\n"
-"      for (var i=0;i<fb;i++) if (d[i] !== 0) return false;\n"
-"      if (hh && (d[fb] & 0xF0) !== 0) return false;\n"
-"      return true;\n"
-"     }\n"
-"     doBatch();\n"
-"    };\n"
-"   }).toString() + ')()';\n"
-"   var blob = new Blob([workerSrc], {type:'application/javascript'});\n"
-"   var url = URL.createObjectURL(blob);\n"
-"   var w = new Worker(url);\n"
+"   var w;\n"
+"   try { w = new Worker('/botshield/embedded-worker.js'); }\n"
+"   catch (e) { return; }\n"
 "   w.onmessage = function(ev){\n"
 "    if (ev.data && typeof ev.data.counter === 'number'){\n"
 "     fetch('/botshield/embedded-verify', {\n"
@@ -11198,8 +11271,8 @@ static const char BS_EMBEDDED_JS[] =
 "     });\n"
 "    }\n"
 "    w.terminate();\n"
-"    URL.revokeObjectURL(url);\n"
 "   };\n"
+"   w.onerror = function(){ try { w.terminate(); } catch(e){} };\n"
 "   w.postMessage(ch);\n"
 "  })\n"
 "  .catch(function(){});\n"
@@ -11410,6 +11483,22 @@ static int bs_embedded_js_handler(request_rec *r)
      * fighting browser caches; production-hardening is E17.1's job. */
     apr_table_setn(r->headers_out, "Cache-Control", "public, max-age=60");
     ap_rputs(BS_EMBEDDED_JS, r);
+    return OK;
+}
+
+/* Web Worker source. Served at /botshield/embedded-worker.js as a
+ * real same-origin URL so strict CSP (`worker-src 'self'`) accepts
+ * it — blob:-URL Workers are blocked under strict CSP. */
+static int bs_embedded_worker_handler(request_rec *r)
+{
+    if (r->method_number != M_GET && r->method_number != M_OPTIONS) {
+        r->status = HTTP_METHOD_NOT_ALLOWED;
+        apr_table_setn(r->headers_out, "Allow", "GET, OPTIONS");
+        return OK;
+    }
+    ap_set_content_type(r, "application/javascript; charset=utf-8");
+    apr_table_setn(r->headers_out, "Cache-Control", "public, max-age=60");
+    ap_rputs(BS_EMBEDDED_WORKER_JS, r);
     return OK;
 }
 
@@ -14157,6 +14246,9 @@ static int bs_handler(request_rec *r)
         if (strcmp(sub, "/embedded.js") == 0) {
             return bs_embedded_js_handler(r);
         }
+        if (strcmp(sub, "/embedded-worker.js") == 0) {
+            return bs_embedded_worker_handler(r);
+        }
         if (strcmp(sub, "/embedded-bootstrap") == 0) {
             return bs_embedded_bootstrap_handler(r, cfg);
         }
@@ -14464,10 +14556,13 @@ static int bs_handler(request_rec *r)
     {
         bs_server_cfg *scfg_sg = ap_get_module_config(
             r->server->module_config, &botshield_module);
-        if (scfg_sg && scfg_sg->safeguard_enabled == 1
-            && have_client_ip) {
+        if (scfg_sg && have_client_ip) {
             apr_int64_t now_t = (apr_int64_t)apr_time_sec(apr_time_now());
-            if (bs_safeguard_check(client_ip, now_t, scfg_sg->ns_id)) {
+            /* Active-state behavior is gated on safeguard_enabled —
+             * an operator who hasn't opted into safeguard doesn't
+             * want pass-through-after-N. */
+            if (scfg_sg->safeguard_enabled == 1 &&
+                bs_safeguard_check(client_ip, now_t, scfg_sg->ns_id)) {
                 ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
                     "mod_botshield: challenge-safeguard active for "
                     "%s; skipping challenge-issue and passing "
@@ -14480,29 +14575,52 @@ static int bs_handler(request_rec *r)
                                 effective);
                 return DECLINED;
             }
+            /* Record the presentation regardless of safeguard_enabled.
+             * E17's embedded → M7 fallback reads the same count to
+             * decide when to bypass the embedded short-circuit. The
+             * write itself is cheap (one mutex + a few SHM stores);
+             * the only side-effect when safeguard is "off" is that
+             * embedded mode gets the count it needs. */
             bs_safeguard_record_presentation(r, scfg_sg,
                                              client_ip, now_t,
                                              scfg_sg->ns_id);
         }
     }
 
-    /* E17 PoC — if silent-tier dispatch lands here AND the scope is
-     * in `embedded` mode, skip the M7 interstitial entirely. Serve
-     * the real page (DECLINED). The operator-included
-     * /botshield/embedded.js wrapper runs on page-load, fetches a
-     * challenge from /botshield/embedded-bootstrap, solves PoW in a
-     * Web Worker, and POSTs back to /botshield/embedded-verify which
-     * mints _bs_verified. The cookie may not arrive in time for the
-     * very first request, but subsequent page-loads in the session
-     * carry it — see PLAN E17 for the "kicks in eventually"
-     * timing model. */
+    /* E17 — silent-tier dispatch with embedded mode. Default behavior:
+     * skip the M7 interstitial, serve the real page (DECLINED), let
+     * the wrapper handle verification in the background. Timing model:
+     * "kicks in eventually" — see PLAN E17.
+     *
+     * E17 fallback: if this client has had N consecutive silent-tier
+     * dispatches without _bs_verified arriving (count tracked via
+     * bs_safeguard_present_count), the wrapper isn't doing its job
+     * (CSP-blocked, no JS, no Worker support, etc.). Bypass the
+     * embedded short-circuit so the M7 form-PoW path runs. M7's own
+     * safeguard threshold catches the case where M7 also fails. */
     if (tier == BS_TIER_SILENT &&
         cfg->silent_mode == BS_SILENT_MODE_EMBEDDED) {
-        bs_decision_log(r, "silent", "declined", cookie_status,
-                        "-", "-",
-                        bs_decision_reason_names(r->pool, score),
-                        effective);
-        return DECLINED;
+        int fall_back = 0;
+        if (have_client_ip) {
+            apr_int64_t now_t = (apr_int64_t)apr_time_sec(apr_time_now());
+            apr_uint32_t cnt = bs_safeguard_present_count(client_ip,
+                                                          now_t,
+                                                          scfg_h->ns_id);
+            if (cnt >= BS_DEFAULT_EMBEDDED_FALLBACK_THRESHOLD) {
+                fall_back = 1;
+            }
+        }
+        if (!fall_back) {
+            bs_decision_log(r, "silent", "declined", cookie_status,
+                            "-", "-",
+                            bs_decision_reason_names(r->pool, score),
+                            effective);
+            return DECLINED;
+        }
+        /* Fall through to M7 — the embedded path has had its
+         * chances. Surface the decision in the reason chain so
+         * operators can spot clients stuck in this state. */
+        bs_score_add(r, 0, 0, "embedded-fallback-m7");
     }
 
     /* Decide whether this challenge will be served as the M7 silent-tier
