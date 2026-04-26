@@ -68,6 +68,10 @@ void robots_query(const robots_doc *doc,
  * rate-counter slot per group that carries a Crawl-delay, and by
  * the /botshield/policy-status handler to render the parsed doc. */
 int         robots_group_count(const robots_doc *doc);
+/* Number of lines that exceeded BOTSHIELD_ROBOTS_MAX_LINE and got
+ * truncated during the parse. Caller emits a NOTICE if non-zero so
+ * operators see the silent truncation. */
+int         robots_doc_truncated_lines(const robots_doc *doc);
 const char *robots_group_name_at(const robots_doc *doc, int idx);
 int         robots_group_is_wildcard_at(const robots_doc *doc, int idx);
 int         robots_group_crawl_delay_at(const robots_doc *doc, int idx);

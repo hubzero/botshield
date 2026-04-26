@@ -800,6 +800,10 @@ struct bs_dir_cfg {
     const unsigned char *captcha_secret;    /* file bytes, mode-600 */
     apr_size_t  captcha_secret_len;
     int         captcha_timeout_ms;         /* siteverify HTTP timeout */
+    /* Security review LOW #13 — connect-phase timeout. Default
+     * BS_CAPTCHA_CONNECT_TIMEOUT (250 ms) is fine for healthy
+     * networks but operators on transient-loss links want headroom. */
+    int         captcha_connect_timeout_ms;
     /* reCAPTCHA v3: minimum score to accept, in [0.0, 1.0]. -1.0 = unset. */
     double      recaptcha_v3_min_score;
     /* M8.1 per-scope verify-endpoint rate limit. -1 unset, 0 disables. */
@@ -1051,6 +1055,7 @@ static void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->captcha_secret      = NULL;
     cfg->captcha_secret_len  = 0;
     cfg->captcha_timeout_ms  = BS_UNSET;
+    cfg->captcha_connect_timeout_ms = BS_UNSET;
     cfg->recaptcha_v3_min_score = -1.0;
     cfg->captcha_rate_limit  = BS_UNSET;
     cfg->captcha_expected_hostname = NULL;
@@ -1433,6 +1438,10 @@ static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     }
     out->captcha_timeout_ms = (add->captcha_timeout_ms == BS_UNSET)
                               ? base->captcha_timeout_ms : add->captcha_timeout_ms;
+    out->captcha_connect_timeout_ms =
+        (add->captcha_connect_timeout_ms == BS_UNSET)
+            ? base->captcha_connect_timeout_ms
+            : add->captcha_connect_timeout_ms;
     out->recaptcha_v3_min_score = (add->recaptcha_v3_min_score < 0.0)
                                   ? base->recaptcha_v3_min_score
                                   : add->recaptcha_v3_min_score;
@@ -4242,6 +4251,17 @@ static apr_status_t bs_robots_load(server_rec *sv, bs_server_cfg *scfg,
         return rv;
     }
 
+    /* Security review LOW #6 — surface truncated lines (the parser
+     * silently caps any line > BOTSHIELD_ROBOTS_MAX_LINE). The
+     * documented contract said operators "see a warning through
+     * the summary log"; this emits that warning. */
+    int n_truncated = robots_doc_truncated_lines(doc);
+    if (n_truncated > 0) {
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+            "mod_botshield: robots.txt %s: %d line(s) exceeded the "
+            "parser line limit and were truncated during parse",
+            scfg->robots_txt_path, n_truncated);
+    }
     int n_groups = robots_group_count(doc);
     bs_robots_state *ns = apr_pcalloc(npool, sizeof(*ns));
     ns->doc   = doc;
@@ -4639,11 +4659,19 @@ static apr_status_t bs_headroom_watchdog_cb(int state, void *data,
      * present slots understate load slightly, biasing toward late
      * warnings. Acceptable: the reactive cliff warning is the safety
      * net for the bias case. */
+    /* Security review LOW #8 — relaxed atomic loads on slot->version
+     * so TSAN doesn't flag the concurrent read against seqlock
+     * writers. The pass is documented as an estimate; torn reads on
+     * payload fields are acceptable (writer hold the mutex; under-
+     * or over-counting biases toward late-warning, never miscounting
+     * into a hot panic). */
     if (bs_shm.flagged_table && bs_shm.flagged_capacity) {
         apr_uint64_t used = 0;
         for (apr_size_t i = 0; i < bs_shm.flagged_capacity; i++) {
             const bs_flagged_ip_slot *slot = &bs_shm.flagged_table[i];
-            if ((slot->version & 1U) == 0 &&
+            apr_uint32_t v = __atomic_load_n(&slot->version,
+                                              __ATOMIC_RELAXED);
+            if ((v & 1U) == 0 &&
                 slot->flags != 0 &&
                 slot->expires_at > now_sec) {
                 used++;
@@ -4660,7 +4688,9 @@ static apr_status_t bs_headroom_watchdog_cb(int state, void *data,
         apr_uint64_t used = 0;
         for (apr_size_t i = 0; i < bs_shm.strike_capacity; i++) {
             const bs_strike_slot *slot = &bs_shm.strike_table[i];
-            if ((slot->version & 1U) == 0 &&
+            apr_uint32_t v = __atomic_load_n(&slot->version,
+                                              __ATOMIC_RELAXED);
+            if ((v & 1U) == 0 &&
                 slot->rule_slot != BS_STRIKE_EMPTY) {
                 used++;
             }
@@ -4676,7 +4706,9 @@ static apr_status_t bs_headroom_watchdog_cb(int state, void *data,
         apr_uint64_t used = 0;
         for (apr_size_t i = 0; i < bs_shm.safeguard_capacity; i++) {
             const bs_safeguard_slot *slot = &bs_shm.safeguard_table[i];
-            if ((slot->version & 1U) == 0 && slot->used != 0) {
+            apr_uint32_t v = __atomic_load_n(&slot->version,
+                                              __ATOMIC_RELAXED);
+            if ((v & 1U) == 0 && slot->used != 0) {
                 used++;
             }
         }
@@ -5162,8 +5194,23 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
 {
     (void)plog; (void)ptemp;
 
-    /* Apache calls post-config twice; skip the first pass so we don't
-     * create the SHM segment and then immediately discard it. */
+    /* Apache calls post-config twice on cold boot (syntax-check pass,
+     * then the real one). Skip the first pass so we don't create the
+     * SHM segment and then immediately discard it.
+     *
+     * Security review LOW #11 — the userdata key lives on
+     * s->process->pool, which survives `apachectl graceful`. On
+     * graceful, the previous boot's userdata is still set, so the
+     * FIRST post_config call after graceful runs init directly
+     * (correct — graceful only invokes post_config once). This
+     * relies on Apache's documented post_config-runs-twice-on-cold-
+     * boot, post_config-runs-once-on-graceful behavior. If that
+     * ever changes (cold-boot single pass, or graceful double pass),
+     * this skip would either suppress the only init opportunity
+     * or skip the real one. Behavior is stable on Apache 2.4 today;
+     * a more defensive pattern would key the userdata on a pconf-
+     * scoped marker but Apache doesn't expose a stable one across
+     * post_config invocations. */
     void *already;
     apr_pool_userdata_get(&already, "bs_post_config_done",
                           s->process->pool);
@@ -6251,16 +6298,35 @@ static int bs_strike_record_429(request_rec *r,
         return 0;
     }
 
+    /* Security review LOW #9 — atomic-relaxed loads on slot fields
+     * during the probe scan. We hold the global mutex so no other
+     * writer can be in flight, but a previous writer may have died
+     * mid-write (process kill / crash) leaving the seqlock at odd
+     * with torn bytes. Skip slots whose version is odd (treat as
+     * uninitialized — matches the safest reader-side bail-out
+     * behavior). Plain loads on the comparison fields are TSAN-noise
+     * even though they're mutex-protected against concurrent
+     * writers; relaxed atomics quiet that. */
     int matched_idx = -1;
     int empty_idx   = -1;
     for (unsigned i = 0; i < BS_STRIKE_PROBE_LIMIT; i++) {
         apr_uint32_t idx = (base + i) % bs_shm.strike_capacity;
         bs_strike_slot *slot = &bs_shm.strike_table[idx];
-        if (slot->rule_slot == BS_STRIKE_EMPTY) {
+        apr_uint32_t v = __atomic_load_n(&slot->version,
+                                          __ATOMIC_RELAXED);
+        if (v & 1U) {
+            /* Stuck mid-write — treat as unknown; if we can't find
+             * a clean slot we'll fall through to the eviction
+             * branch and overwrite. */
+            continue;
+        }
+        apr_uint32_t local_rule = __atomic_load_n(&slot->rule_slot,
+                                                   __ATOMIC_RELAXED);
+        if (local_rule == BS_STRIKE_EMPTY) {
             if (empty_idx < 0) empty_idx = (int)idx;
             continue;
         }
-        if (slot->rule_slot == rule_slot
+        if (local_rule == rule_slot
             && slot->ns_id == ns_id
             && memcmp(slot->ip, ip, 16) == 0) {
             matched_idx = (int)idx;
@@ -9991,6 +10057,27 @@ static const char *bs_set_captcha_timeout(cmd_parms *cmd, void *cfg_v,
     return NULL;
 }
 
+/* Security review LOW #13 — operator-tunable connect-phase timeout.
+ * Default BS_CAPTCHA_CONNECT_TIMEOUT (250 ms) is tight for healthy
+ * networks; operators on transient-loss links can bump it to avoid
+ * fail-open on momentary connect blips. Same overall bound as the
+ * full siteverify timeout. */
+static const char *bs_set_captcha_connect_timeout(cmd_parms *cmd,
+                                                  void *cfg_v,
+                                                  const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    char *end = NULL;
+    long v = strtol(arg, &end, 10);
+    if (!end || *end != '\0' || v < 50 || v > BS_MAX_CAPTCHA_TIMEOUT) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCaptchaConnectTimeout: '%s' must be an integer in "
+            "50..%d ms", arg, BS_MAX_CAPTCHA_TIMEOUT);
+    }
+    cfg->captcha_connect_timeout_ms = (int)v;
+    return NULL;
+}
+
 /* `BotShieldRecaptchaV3MinScore 0.0..1.0` — threshold below which a
  * successful-but-low-score reCAPTCHA v3 verification is treated as a
  * rejection. Google's documented baseline is 0.5; operators tune down
@@ -10278,6 +10365,12 @@ static curl_socket_t bs_curl_open_socket_cb(void *clientp,
 static const char *bs_curl_escape_pool(apr_pool_t *p, CURL *curl,
                                        const char *in, apr_size_t in_len)
 {
+    /* Security review LOW #12 — curl_easy_escape takes int. Casting
+     * size_t > INT_MAX wraps to a negative length and curl_easy_escape
+     * misinterprets it. None of our callers exceed INT_MAX in
+     * practice (secret bytes capped at 1024, tokens at ~600), but
+     * rejecting explicitly is cheap and closes the class. */
+    if (in_len > (apr_size_t)INT_MAX) return NULL;
     char *esc = curl_easy_escape(curl, in, (int)in_len);
     if (!esc) return NULL;
     const char *dup = apr_pstrdup(p, esc);
@@ -10481,8 +10574,14 @@ static bs_captcha_result bs_captcha_siteverify(request_rec *r,
     BS_SETOPT(curl, CURLOPT_POST, 1L);
     BS_SETOPT(curl, CURLOPT_POSTFIELDS, body);
     BS_SETOPT(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
-    BS_SETOPT(curl, CURLOPT_CONNECTTIMEOUT_MS,
-                     (long)BS_CAPTCHA_CONNECT_TIMEOUT);
+    {
+        bs_dir_cfg *_dcfg = ap_get_module_config(r->per_dir_config,
+                                                 &botshield_module);
+        long _ct = (_dcfg && _dcfg->captcha_connect_timeout_ms > 0)
+                   ? _dcfg->captcha_connect_timeout_ms
+                   : BS_CAPTCHA_CONNECT_TIMEOUT;
+        BS_SETOPT(curl, CURLOPT_CONNECTTIMEOUT_MS, _ct);
+    }
     BS_SETOPT(curl, CURLOPT_TIMEOUT_MS, (long)timeout_ms);
     BS_SETOPT(curl, CURLOPT_NOSIGNAL, 1L);
     BS_SETOPT(curl, CURLOPT_USERAGENT, "mod_botshield/0.1");
@@ -10512,12 +10611,26 @@ static bs_captcha_result bs_captcha_siteverify(request_rec *r,
      * captcha slot for the full timeout. */
     BS_SETOPT(curl, CURLOPT_MAXFILESIZE,
                      (long)BS_MAX_CAPTCHA_BODY);
+    /* Security review LOW #14 — pin Content-Type and Accept so a
+     * future provider content-negotiation change can't quietly
+     * shift the wire format. We send url-encoded fields and parse
+     * JSON responses; both are stable across all six providers. */
+    struct curl_slist *bs_hdrs = NULL;
+    bs_hdrs = curl_slist_append(bs_hdrs,
+        "Content-Type: application/x-www-form-urlencoded");
+    bs_hdrs = curl_slist_append(bs_hdrs, "Accept: application/json");
+    if (!bs_hdrs) {
+        curl_easy_cleanup(curl);
+        return BS_CAPTCHA_ERROR;
+    }
+    BS_SETOPT(curl, CURLOPT_HTTPHEADER, bs_hdrs);
     if (setopt_rc != CURLE_OK) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
             "mod_botshield: captcha siteverify: curl_easy_setopt "
             "failed: %s (CURLcode=%d)",
             curl_easy_strerror(setopt_rc), (int)setopt_rc);
         curl_easy_cleanup(curl);
+        curl_slist_free_all(bs_hdrs);
         return BS_CAPTCHA_ERROR;
     }
 
@@ -10525,6 +10638,7 @@ static bs_captcha_result bs_captcha_siteverify(request_rec *r,
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     curl_easy_cleanup(curl);
+    curl_slist_free_all(bs_hdrs);
 
     *out_http_code = http_code;
 
@@ -10707,8 +10821,14 @@ static bs_captcha_result bs_geetest_siteverify(request_rec *r,
     BS_SETOPT(curl, CURLOPT_POST, 1L);
     BS_SETOPT(curl, CURLOPT_POSTFIELDS, body);
     BS_SETOPT(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
-    BS_SETOPT(curl, CURLOPT_CONNECTTIMEOUT_MS,
-                     (long)BS_CAPTCHA_CONNECT_TIMEOUT);
+    {
+        bs_dir_cfg *_dcfg = ap_get_module_config(r->per_dir_config,
+                                                 &botshield_module);
+        long _ct = (_dcfg && _dcfg->captcha_connect_timeout_ms > 0)
+                   ? _dcfg->captcha_connect_timeout_ms
+                   : BS_CAPTCHA_CONNECT_TIMEOUT;
+        BS_SETOPT(curl, CURLOPT_CONNECTTIMEOUT_MS, _ct);
+    }
     BS_SETOPT(curl, CURLOPT_TIMEOUT_MS, (long)timeout_ms);
     BS_SETOPT(curl, CURLOPT_NOSIGNAL, 1L);
     BS_SETOPT(curl, CURLOPT_USERAGENT, "mod_botshield/0.1");
@@ -10738,6 +10858,19 @@ static bs_captcha_result bs_geetest_siteverify(request_rec *r,
      * captcha slot for the full timeout. */
     BS_SETOPT(curl, CURLOPT_MAXFILESIZE,
                      (long)BS_MAX_CAPTCHA_BODY);
+    /* Security review LOW #14 — pin Content-Type and Accept so a
+     * future provider content-negotiation change can't quietly
+     * shift the wire format. We send url-encoded fields and parse
+     * JSON responses; both are stable across all six providers. */
+    struct curl_slist *bs_hdrs = NULL;
+    bs_hdrs = curl_slist_append(bs_hdrs,
+        "Content-Type: application/x-www-form-urlencoded");
+    bs_hdrs = curl_slist_append(bs_hdrs, "Accept: application/json");
+    if (!bs_hdrs) {
+        curl_easy_cleanup(curl);
+        return BS_CAPTCHA_ERROR;
+    }
+    BS_SETOPT(curl, CURLOPT_HTTPHEADER, bs_hdrs);
     if (setopt_rc != CURLE_OK) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
             "mod_botshield: GeeTest siteverify: curl_easy_setopt "
@@ -11110,13 +11243,15 @@ static void bs_gauges_refresh(void)
 
     apr_int64_t now_sec = (apr_int64_t)apr_time_sec(now);
     apr_uint64_t flagged_used = 0;
+    /* Security review LOW #8 — relaxed atomic loads on slot->version
+     * make TSAN happy with the concurrent read. Estimate is fine
+     * (already documented). */
     if (bs_shm.flagged_table) {
         for (apr_size_t i = 0; i < bs_shm.flagged_capacity; i++) {
             const bs_flagged_ip_slot *slot = &bs_shm.flagged_table[i];
-            /* Skip odd versions (mid-write) — they don't count toward
-             * populated slots. A torn read is fine because this is an
-             * estimate anyway. */
-            if ((slot->version & 1U) == 0 &&
+            apr_uint32_t v = __atomic_load_n(&slot->version,
+                                              __ATOMIC_RELAXED);
+            if ((v & 1U) == 0 &&
                 slot->flags != 0 &&
                 slot->expires_at > now_sec) {
                 flagged_used++;
@@ -11132,7 +11267,9 @@ static void bs_gauges_refresh(void)
     if (bs_shm.strike_table) {
         for (apr_size_t i = 0; i < bs_shm.strike_capacity; i++) {
             const bs_strike_slot *slot = &bs_shm.strike_table[i];
-            if ((slot->version & 1U) == 0 &&
+            apr_uint32_t v = __atomic_load_n(&slot->version,
+                                              __ATOMIC_RELAXED);
+            if ((v & 1U) == 0 &&
                 slot->rule_slot != BS_STRIKE_EMPTY) {
                 strike_used++;
             }
@@ -11142,7 +11279,9 @@ static void bs_gauges_refresh(void)
     if (bs_shm.safeguard_table) {
         for (apr_size_t i = 0; i < bs_shm.safeguard_capacity; i++) {
             const bs_safeguard_slot *slot = &bs_shm.safeguard_table[i];
-            if ((slot->version & 1U) == 0 && slot->used != 0) {
+            apr_uint32_t v = __atomic_load_n(&slot->version,
+                                              __ATOMIC_RELAXED);
+            if ((v & 1U) == 0 && slot->used != 0) {
                 safeguard_used++;
             }
         }
@@ -11350,6 +11489,16 @@ static void bs_urldecode_inplace(char *s)
             else if (c >= 'a' && c <= 'f') lo = c - 'a' + 10;
             else if (c >= 'A' && c <= 'F') lo = c - 'A' + 10;
             if (hi >= 0 && lo >= 0) {
+                /* Security review LOW #5 — refuse to decode %00.
+                 * Otherwise the embedded NUL truncates every C-string
+                 * consumer downstream (strlen, strchr, snprintf %s).
+                 * Pass the literal '%','0','0' through; downstream
+                 * validators that care can flag the percent sequence
+                 * explicitly. */
+                if (hi == 0 && lo == 0) {
+                    *w++ = *rp++;   /* '%' */
+                    continue;
+                }
                 *w++ = (char)((hi << 4) | lo);
                 rp += 3;
                 continue;
@@ -11519,8 +11668,15 @@ static const char *bs_mint_pending_cookie(request_rec *r,
     bs_to_hex(nonce, sizeof(nonce), nonce_hex);
 
     apr_time_t expiry = apr_time_sec(apr_time_now()) + BS_PENDING_COOKIE_TTL;
+    /* Security review LOW #4 — explicit module + purpose + version
+     * context tag for domain separation. SHA-256 HMAC is collision-
+     * resistant on its own, but a longer, more specific tag makes
+     * it impossible for any FUTURE HMAC use to accidentally share
+     * a canonical-bytes prefix with this one. Versioning the tag
+     * lets us bump the protocol later without revalidating that
+     * the new bytes are disjoint from the old. */
     const char *canon = apr_psprintf(r->pool,
-        "pending:%s:%" APR_TIME_T_FMT, nonce_hex, expiry);
+        "bs:pending:v1:%s:%" APR_TIME_T_FMT, nonce_hex, expiry);
     unsigned char mac[BS_SIG_BYTES];
     bs_hmac_sha256(cfg->secret, cfg->secret_len,
                    (const unsigned char *)canon, strlen(canon), mac);
@@ -11591,8 +11747,11 @@ static const char *bs_verify_pending_cookie(request_rec *r,
         return "expired";
     }
 
+    /* Security review LOW #4 — must match the mint side's canon
+     * shape exactly. See comment above the mint site for the
+     * domain-separation rationale. */
     const char *canon = apr_psprintf(r->pool,
-        "pending:%s:%" APR_TIME_T_FMT, nonce_hex, expiry);
+        "bs:pending:v1:%s:%" APR_TIME_T_FMT, nonce_hex, expiry);
     unsigned char expect[BS_SIG_BYTES];
     bs_hmac_sha256(cfg->secret, cfg->secret_len,
                    (const unsigned char *)canon, strlen(canon), expect);
@@ -12432,7 +12591,11 @@ static int bs_embedded_verify_pow(request_rec *r, bs_dir_cfg *cfg,
             if (new_score < floor) new_score = floor;
             if (new_score < 0)     new_score = 0;
             ch.rep.score          = new_score;
-            ch.rep.passes_silent  = prior_ch.rep.passes_silent + 1;
+            /* Security review LOW #7 — clamp to 1. Parser bounds the
+             * field to [0,1] (it's effectively a "ever passed silent"
+             * flag, not a counter); plain +1 would overflow that on
+             * the second carry-forward. */
+            ch.rep.passes_silent  = 1;
         } else {
             ch.rep.passes_silent = 1;
         }
@@ -12647,7 +12810,7 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
             if (new_score < floor) new_score = floor;
             if (new_score < 0)     new_score = 0;
             next_rep.score          = new_score;
-            next_rep.passes_silent  = prior_ch.rep.passes_silent + 1;
+            next_rep.passes_silent = 1;  /* LOW #7 clamp */
         } else {
             next_rep.passes_silent = 1;
         }
@@ -13682,7 +13845,7 @@ static int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         if (new_score < floor) new_score = floor;
         if (new_score < 0)     new_score = 0;
         next_rep.score          = new_score;
-        next_rep.passes_captcha = prior_ch.rep.passes_captcha + 1;
+        next_rep.passes_captcha = 1;  /* LOW #7 clamp */
     } else {
         next_rep.score          = 0;
         next_rep.flags          = 0;
@@ -14062,6 +14225,13 @@ static const command_rec bs_cmds[] = {
                  "Siteverify HTTP call timeout in milliseconds "
                  "(default: 1000, range 100..5000). On timeout the module "
                  "fails open — issues the cookie and logs a WARNING."),
+    AP_INIT_TAKE1("BotShieldCaptchaConnectTimeout",
+                 bs_set_captcha_connect_timeout, NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "Connect-phase timeout for siteverify in milliseconds "
+                 "(default: 250, range 50..5000). Tighter than the full "
+                 "siteverify timeout; bump on links with transient packet "
+                 "loss to avoid fail-open on momentary connect blips."),
     AP_INIT_TAKE1("BotShieldRecaptchaV3MinScore",
                  bs_set_recaptcha_v3_min_score, NULL,
                  RSRC_CONF | ACCESS_CONF,
@@ -15419,9 +15589,9 @@ static int bs_handler(request_rec *r)
         if (new_score < 0)     new_score = 0;
         next_rep.score = new_score;
         if (prior_ch.auto_tier) {
-            next_rep.passes_silent = prior_ch.rep.passes_silent + 1;
+            next_rep.passes_silent = 1;  /* LOW #7 clamp */
         } else {
-            next_rep.passes_form   = prior_ch.rep.passes_form + 1;
+            next_rep.passes_form = 1;  /* LOW #7 clamp */
         }
     } else {
         next_rep.score          = 0;
@@ -16117,7 +16287,7 @@ static int bs_form_captcha_fixup(request_rec *r)
             if (new_score < floor) new_score = floor;
             if (new_score < 0)     new_score = 0;
             next_rep.score          = new_score;
-            next_rep.passes_captcha = prior_ch.rep.passes_captcha + 1;
+            next_rep.passes_captcha = 1;  /* LOW #7 clamp */
         } else {
             next_rep.passes_captcha = 1;
         }
