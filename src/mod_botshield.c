@@ -10088,6 +10088,18 @@ typedef struct {
     int        truncated;
 } bs_curl_buffer;
 
+/* Security review MEDIUM — curl_easy_setopt return codes used to be
+ * silently ignored. Wrapping every call with this macro accumulates
+ * the first failure into setopt_rc, which the caller checks once
+ * before curl_easy_perform. CURLE_OK is the common path; checking
+ * the accumulator at the end avoids cluttering 16 lines per
+ * siteverify with explicit if-blocks. Caller must declare
+ * `CURLcode setopt_rc = CURLE_OK;` in scope. */
+#define BS_SETOPT(h, opt, val) do { \
+    CURLcode _bs_rc = curl_easy_setopt((h), (opt), (val)); \
+    if (_bs_rc != CURLE_OK && setopt_rc == CURLE_OK) setopt_rc = _bs_rc; \
+} while (0)
+
 static size_t bs_curl_write_cb(char *ptr, size_t size, size_t nmemb,
                                void *userdata)
 {
@@ -10342,27 +10354,29 @@ static bs_captcha_result bs_captcha_siteverify(request_rec *r,
         .len = 0, .truncated = 0,
     };
 
-    curl_easy_setopt(curl, CURLOPT_URL, prov->siteverify_url);
-    curl_easy_setopt(curl, CURLOPT_POST, 1L);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS,
+    /* Accumulator for BS_SETOPT — see macro definition. */
+    CURLcode setopt_rc = CURLE_OK;
+    BS_SETOPT(curl, CURLOPT_URL, prov->siteverify_url);
+    BS_SETOPT(curl, CURLOPT_POST, 1L);
+    BS_SETOPT(curl, CURLOPT_POSTFIELDS, body);
+    BS_SETOPT(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
+    BS_SETOPT(curl, CURLOPT_CONNECTTIMEOUT_MS,
                      (long)BS_CAPTCHA_CONNECT_TIMEOUT);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, (long)timeout_ms);
-    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "mod_botshield/0.1");
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, bs_curl_write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+    BS_SETOPT(curl, CURLOPT_TIMEOUT_MS, (long)timeout_ms);
+    BS_SETOPT(curl, CURLOPT_NOSIGNAL, 1L);
+    BS_SETOPT(curl, CURLOPT_USERAGENT, "mod_botshield/0.1");
+    BS_SETOPT(curl, CURLOPT_WRITEFUNCTION, bs_curl_write_cb);
+    BS_SETOPT(curl, CURLOPT_WRITEDATA, &resp);
+    BS_SETOPT(curl, CURLOPT_FOLLOWLOCATION, 0L);
+    BS_SETOPT(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    BS_SETOPT(curl, CURLOPT_SSL_VERIFYHOST, 2L);
     /* Security review HIGH #7 — allowlist HTTPS only. Provider URLs
      * are hard-coded today, but a future operator-tunable URL
      * would become an immediate SSRF vector via file://, gopher://,
      * etc. Cheap to close now. REDIR_PROTOCOLS mirrors the policy
      * in case FOLLOWLOCATION is ever flipped on later. */
-    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https");
-    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
+    BS_SETOPT(curl, CURLOPT_PROTOCOLS_STR, "https");
+    BS_SETOPT(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
     /* Security review HIGH #8 — server-declared response size cap.
      * If a malicious or misbehaving provider sets Content-Length
      * larger than our buffer, abort before any bytes flow.
@@ -10370,8 +10384,16 @@ static bs_captcha_result bs_captcha_siteverify(request_rec *r,
      * terminate via bs_curl_write_cb returning 0 on overflow
      * (CURLE_WRITE_ERROR), instead of holding an in-flight
      * captcha slot for the full timeout. */
-    curl_easy_setopt(curl, CURLOPT_MAXFILESIZE,
+    BS_SETOPT(curl, CURLOPT_MAXFILESIZE,
                      (long)BS_MAX_CAPTCHA_BODY);
+    if (setopt_rc != CURLE_OK) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+            "mod_botshield: captcha siteverify: curl_easy_setopt "
+            "failed: %s (CURLcode=%d)",
+            curl_easy_strerror(setopt_rc), (int)setopt_rc);
+        curl_easy_cleanup(curl);
+        return BS_CAPTCHA_ERROR;
+    }
 
     CURLcode rc = curl_easy_perform(curl);
     long http_code = 0;
@@ -10553,27 +10575,29 @@ static bs_captcha_result bs_geetest_siteverify(request_rec *r,
         .len = 0, .truncated = 0,
     };
 
-    curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_POST, 1L);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS,
+    /* Accumulator for BS_SETOPT — see macro definition. */
+    CURLcode setopt_rc = CURLE_OK;
+    BS_SETOPT(curl, CURLOPT_URL, url);
+    BS_SETOPT(curl, CURLOPT_POST, 1L);
+    BS_SETOPT(curl, CURLOPT_POSTFIELDS, body);
+    BS_SETOPT(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
+    BS_SETOPT(curl, CURLOPT_CONNECTTIMEOUT_MS,
                      (long)BS_CAPTCHA_CONNECT_TIMEOUT);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, (long)timeout_ms);
-    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "mod_botshield/0.1");
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, bs_curl_write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+    BS_SETOPT(curl, CURLOPT_TIMEOUT_MS, (long)timeout_ms);
+    BS_SETOPT(curl, CURLOPT_NOSIGNAL, 1L);
+    BS_SETOPT(curl, CURLOPT_USERAGENT, "mod_botshield/0.1");
+    BS_SETOPT(curl, CURLOPT_WRITEFUNCTION, bs_curl_write_cb);
+    BS_SETOPT(curl, CURLOPT_WRITEDATA, &resp);
+    BS_SETOPT(curl, CURLOPT_FOLLOWLOCATION, 0L);
+    BS_SETOPT(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    BS_SETOPT(curl, CURLOPT_SSL_VERIFYHOST, 2L);
     /* Security review HIGH #7 — allowlist HTTPS only. Provider URLs
      * are hard-coded today, but a future operator-tunable URL
      * would become an immediate SSRF vector via file://, gopher://,
      * etc. Cheap to close now. REDIR_PROTOCOLS mirrors the policy
      * in case FOLLOWLOCATION is ever flipped on later. */
-    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https");
-    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
+    BS_SETOPT(curl, CURLOPT_PROTOCOLS_STR, "https");
+    BS_SETOPT(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
     /* Security review HIGH #8 — server-declared response size cap.
      * If a malicious or misbehaving provider sets Content-Length
      * larger than our buffer, abort before any bytes flow.
@@ -10581,8 +10605,16 @@ static bs_captcha_result bs_geetest_siteverify(request_rec *r,
      * terminate via bs_curl_write_cb returning 0 on overflow
      * (CURLE_WRITE_ERROR), instead of holding an in-flight
      * captcha slot for the full timeout. */
-    curl_easy_setopt(curl, CURLOPT_MAXFILESIZE,
+    BS_SETOPT(curl, CURLOPT_MAXFILESIZE,
                      (long)BS_MAX_CAPTCHA_BODY);
+    if (setopt_rc != CURLE_OK) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+            "mod_botshield: GeeTest siteverify: curl_easy_setopt "
+            "failed: %s (CURLcode=%d)",
+            curl_easy_strerror(setopt_rc), (int)setopt_rc);
+        curl_easy_cleanup(curl);
+        return BS_CAPTCHA_ERROR;
+    }
 
     CURLcode rc = curl_easy_perform(curl);
     long http_code = 0;
