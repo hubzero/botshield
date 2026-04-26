@@ -193,6 +193,110 @@ def test_embedded_hcaptcha_mints_verified_cookie(
         )
 
 
+def test_embedded_falls_back_to_m7_when_wrapper_blocked(
+    config_override, bs_browser_context,
+):
+    """E17 spec gate: 'With E17 enabled but the wrapper missing,
+    blocked by CSP, or not yet supported, the site still works and
+    M7 remains the fallback path for future silent-tier requests.'
+
+    Simulate a CSP-blocked wrapper by intercepting the
+    /botshield/embedded.js URL with Playwright's route() and
+    aborting the request. The page loads, wrapper never runs,
+    no _bs_verified arrives. After 3 silent-tier dispatches without
+    verify (default fallback threshold), the server switches to
+    issuing the M7 form-PoW interstitial.
+
+    Test pins silent tier explicitly via tight ScoreSilent + relaxed
+    ScoreHard so successive requests don't drop to pass tier after
+    the Bloom first-sight bonus stops applying. Without that, only
+    the first request would be silent-tier and the count couldn't
+    accumulate."""
+    with config_override(
+        r"BotShieldAllow\s+on",
+        'BotShieldAllow on\n'
+        '    <Location /embedded-test.html>\n'
+        '        BotShieldSilentMode embedded\n'
+        '        BotShieldScoreSilent 1\n'
+        '        BotShieldScoreHard 1000\n'
+        '        BotShieldScoreCaptcha 2000\n'
+        '    </Location>',
+        count=1,
+    ):
+        page = bs_browser_context.new_page()
+        # Block the wrapper script — simulates strict CSP / ad-blocker
+        # killing /botshield/embedded.js.
+        page.route("**/botshield/embedded.js", lambda r: r.abort())
+
+        # Three attempts that should land at silent-tier-embedded
+        # (the embedded short-circuit fires; real page served; no
+        # cookie because wrapper is blocked).
+        for _ in range(3):
+            resp = page.goto(f"https://localhost{EMBEDDED_PATH}")
+            assert resp.status == 200, (
+                f"unexpected status during embedded attempt; "
+                f"status={resp.status}"
+            )
+
+        # 4th request — embedded fallback threshold (3) crossed; M7
+        # interstitial should now be served instead. The interstitial
+        # template title is "Verify you are human".
+        resp = page.goto(f"https://localhost{EMBEDDED_PATH}")
+        title = page.title()
+        assert "Verify you are human" in title, (
+            f"after 3 embedded attempts without verify, M7 fallback "
+            f"should fire; got title={title!r} (status={resp.status})"
+        )
+
+
+def test_embedded_worker_endpoint_serves_pow_solver():
+    """E17 worker-src 'self' alternative: the wrapper loads its
+    Web Worker from /botshield/embedded-worker.js (a real same-
+    origin URL) instead of a blob: URL, so strict CSP scopes
+    (worker-src 'self') accept it.
+
+    Sanity check that the endpoint actually serves the worker
+    source — content-type is JS, body has the SubtleCrypto digest
+    call that the PoW solver uses."""
+    from botshield_test import client as _client
+
+    r = _client.get("/botshield/embedded-worker.js")
+    assert r.status_code == 200
+    ct = r.headers.get("content-type", "")
+    assert "javascript" in ct, (
+        f"worker endpoint should serve JS; content-type={ct!r}"
+    )
+    body = r.text
+    assert "self.onmessage" in body, "worker missing message handler"
+    assert "crypto.subtle.digest" in body, (
+        "worker missing SHA-256 digest call"
+    )
+
+
+def test_embedded_wrapper_uses_real_url_worker():
+    """E17 worker-src 'self' alternative: the wrapper JS
+    /botshield/embedded.js must construct its Worker from
+    '/botshield/embedded-worker.js' (a real URL), NOT from a blob:
+    URL. Catches a regression where someone reverts the worker-src
+    hardening."""
+    from botshield_test import client as _client
+
+    r = _client.get("/botshield/embedded.js")
+    assert r.status_code == 200
+    body = r.text
+    assert "/botshield/embedded-worker.js" in body, (
+        "wrapper missing real-URL Worker reference"
+    )
+    # blob: URL should NOT be how the worker is created anymore.
+    # (The file may still mention 'blob' in comments or ancillary
+    # code, but the Worker constructor should NOT be passed a blob
+    # object URL.)
+    assert "URL.createObjectURL" not in body, (
+        "wrapper still uses blob: URL Worker — strict CSP scopes "
+        "will reject this"
+    )
+
+
 def test_embedded_subsequent_request_declined_through(
     config_override, bs_browser_context,
 ):
