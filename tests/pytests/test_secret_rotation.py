@@ -38,10 +38,25 @@ SECONDARY_PATH = "/etc/botshield/secret-secondary"
 
 def _write_root_owned_mode_600(path: str, content: bytes) -> None:
     """Provision a mode-600 root-owned file. Mirrors what the test
-    environment does for /etc/botshield/secret."""
-    tmp = f"/tmp/.bs-secret-rotation-{os.getpid()}"
-    with open(tmp, "wb") as f:
-        f.write(content)
+    environment does for /etc/botshield/secret.
+
+    Security review MEDIUM #14 — was using a predictable filename
+    `/tmp/.bs-secret-rotation-<pid>`. On a shared dev host, an
+    attacker who can predict the pid (e.g. via a parallel shell)
+    could pre-create a symlink at that path pointing at an
+    attacker-owned file; our subsequent `open(tmp, "wb")` would
+    follow the symlink and let them learn the random key bytes.
+    Use tempfile.mkstemp() which atomically creates a fresh
+    O_CREAT|O_EXCL fd at a non-guessable path with mode 0600.
+    """
+    import tempfile
+    fd, tmp = tempfile.mkstemp(prefix=".bs-secret-rotation-",
+                               dir="/tmp")
+    try:
+        os.write(fd, content)
+    finally:
+        os.close(fd)
+    os.chmod(tmp, 0o600)
     subprocess.run(["sudo", "install", "-m", "0600", "-o", "root",
                     tmp, path], check=True)
     os.unlink(tmp)
