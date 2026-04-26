@@ -76,11 +76,26 @@ def request(
     httpx's jar is explicitly bypassed.
     """
     url = base_url.rstrip("/") + path
+    # Security review LOW #16 — verify=False is correct for the dev
+    # vhost (self-signed cert) but actively dangerous if applied to
+    # a non-loopback host. Use verify=True (system trust store) for
+    # any non-loopback target so a misconfigured BS_BASE pointing
+    # at a public host doesn't silently accept any cert. Loopback
+    # targets keep verify=False since the dev cert is self-signed.
+    # Tests that probe a public provider URL (reachability checks)
+    # naturally land on the verify=True path.
+    from urllib.parse import urlparse as _urlparse
+    _host = (_urlparse(base_url).hostname or "").lower()
+    _is_loopback = (
+        _host in ("localhost", "127.0.0.1", "::1")
+        or _host.endswith(".localhost")
+    )
     h = _headers(
         ua=ua, accept_language=accept_language, xff=xff,
         cookies=cookies, extra=headers,
     )
-    with httpx.Client(verify=False, timeout=timeout) as client:
+    _verify = not _is_loopback   # False on loopback, True elsewhere
+    with httpx.Client(verify=_verify, timeout=timeout) as client:
         return client.request(
             method, url,
             data=data,
