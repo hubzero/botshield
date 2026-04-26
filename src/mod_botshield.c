@@ -687,6 +687,21 @@ typedef enum {
     BS_TIER_CAPTCHA = 3
 } bs_tier;
 
+/* E17 PoC — what flavor of silent-tier dispatch to use. INTERSTITIAL
+ * is the legacy M7 splash that auto-submits the PoW. EMBEDDED hands
+ * off to a wrapper script the operator has already included on the
+ * page; the page serves DECLINED (real content) and the wrapper does
+ * the PoW in a Web Worker, then POSTs back to /botshield/embedded-
+ * verify to mint _bs_verified. The "kicks in eventually" model: the
+ * cookie may not be set in time for the very first request, but it
+ * lands within a few page-views and from then on the client is
+ * verified. */
+typedef enum {
+    BS_SILENT_MODE_UNSET        = -1,
+    BS_SILENT_MODE_INTERSTITIAL =  0,   /* default; M7 splash */
+    BS_SILENT_MODE_EMBEDDED     =  1    /* E17 background verify */
+} bs_silent_mode;
+
 typedef struct {
     int         penalty;
     int         ttl_seconds;   /* accepted for API stability; unused today
@@ -755,6 +770,10 @@ struct bs_dir_cfg {
     int score_silent;           /* score >= this → silent tier (logged only) */
     int score_hard;             /* score >= this → hard form-PoW tier */
     int score_captcha;          /* score >= this → captcha tier */
+    /* E17 PoC — what flavor of silent-tier challenge to issue. Stored
+     * as a tri-state with UNSET sentinel so the merge picks the
+     * right scope's value. */
+    int silent_mode;            /* bs_silent_mode; UNSET inherits */
     int forgive_silent;         /* score credit on silent-tier pass */
     int forgive_form;           /* score credit on form-tier pass */
     int forgive_captcha;        /* score credit on captcha pass */
@@ -1005,6 +1024,7 @@ static void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->score_silent  = BS_UNSET;
     cfg->score_hard    = BS_UNSET;
     cfg->score_captcha = BS_UNSET;
+    cfg->silent_mode   = BS_SILENT_MODE_UNSET;
     cfg->forgive_silent  = BS_UNSET;
     cfg->forgive_form    = BS_UNSET;
     cfg->forgive_captcha = BS_UNSET;
@@ -1373,6 +1393,8 @@ static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     out->score_silent  = (add->score_silent  == BS_UNSET) ? base->score_silent  : add->score_silent;
     out->score_hard    = (add->score_hard    == BS_UNSET) ? base->score_hard    : add->score_hard;
     out->score_captcha = (add->score_captcha == BS_UNSET) ? base->score_captcha : add->score_captcha;
+    out->silent_mode   = (add->silent_mode   == BS_SILENT_MODE_UNSET)
+                       ? base->silent_mode : add->silent_mode;
     out->forgive_silent  = (add->forgive_silent  == BS_UNSET) ? base->forgive_silent  : add->forgive_silent;
     out->forgive_form    = (add->forgive_form    == BS_UNSET) ? base->forgive_form    : add->forgive_form;
     out->forgive_captcha = (add->forgive_captcha == BS_UNSET) ? base->forgive_captcha : add->forgive_captcha;
@@ -1523,6 +1545,29 @@ static const char *bs_set_forgive_captcha(cmd_parms *cmd, void *cfg_v, const cha
 {
     return bs_set_score_int("BotShieldForgivenessCaptcha",
         &((bs_dir_cfg *)cfg_v)->forgive_captcha, arg, cmd->pool);
+}
+
+/* E17 PoC — `BotShieldSilentMode <interstitial|embedded>`. Per-scope
+ * picker for what flavor of silent-tier challenge to issue. Default
+ * `interstitial` matches the legacy M7 splash. `embedded` opts the
+ * scope into background verification: BotShield serves the real
+ * page (DECLINED) and relies on the operator-included
+ * `<script src="/botshield/embedded.js" defer>` wrapper to run the
+ * PoW in a Web Worker and POST the result back. The cookie may
+ * arrive after the first request — see PLAN E17 for the
+ * "kicks in eventually" guarantee. */
+static const char *bs_set_silent_mode(cmd_parms *cmd, void *cfg_v,
+                                      const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    if      (!strcasecmp(arg, "interstitial")) cfg->silent_mode = BS_SILENT_MODE_INTERSTITIAL;
+    else if (!strcasecmp(arg, "embedded"))     cfg->silent_mode = BS_SILENT_MODE_EMBEDDED;
+    else {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSilentMode: '%s' must be 'interstitial' or "
+            "'embedded'", arg);
+    }
+    return NULL;
 }
 
 /* Forward decl: defined below in the SHM section, used by the directive
@@ -11042,6 +11087,836 @@ static const char *bs_clear_pending_cookie(request_rec *r,
  * the interstitial's form submit when the provider's widget callback
  * fires. On success, server-issues a signed captcha-turnstile cookie
  * and 302s back to the page the user tried to reach. */
+
+/* ===========================================================
+ * E17 PoC — embedded silent verification handlers.
+ *
+ * Three endpoints under <prefix>/embedded*:
+ *   GET  /botshield/embedded.js         — static wrapper script
+ *   GET  /botshield/embedded-bootstrap  — JSON: per-call PoW challenge
+ *   POST /botshield/embedded-verify     — JSON: validates + sets cookie
+ *
+ * Activation: scope opts in via `BotShieldSilentMode embedded`.
+ * Operator adds <script src="/botshield/embedded.js" defer> to their
+ * page. When the request lands at silent tier, BotShield serves
+ * DECLINED (real content) instead of the M7 splash; the wrapper runs
+ * on page-load, fetches the bootstrap, solves PoW in a Web Worker,
+ * and POSTs back. The verify endpoint mints _bs_verified the same
+ * way the M7 form-PoW path does, so subsequent requests round-trip
+ * cleanly.
+ * =========================================================== */
+
+/* The wrapper JS body. Self-contained IIFE; no external deps.
+ *
+ * Implementation notes:
+ *   - blob:-URL Web Worker so we don't need a separate cacheable URL
+ *     for the worker code. CSP-strict scopes need worker-src 'self'
+ *     blob:; documented as a known gotcha for E17 hardening.
+ *   - SubtleCrypto.digest is async, so PoW runs as Promise.all
+ *     batches with setTimeout yields between them — same shape the
+ *     M2 form interstitial uses, copied here for parity.
+ *   - Short-circuit on existing _bs_verified cookie (cheap read of
+ *     document.cookie). If the cookie is already there, no Worker
+ *     is spawned and no fetch fires.
+ *   - One Worker per page-load. _bsEmbeddedRan guard prevents
+ *     double-spawn if embedded.js gets included twice. */
+static const char BS_EMBEDDED_JS[] =
+"(function(){\n"
+" if (window._bsEmbeddedRan) return;\n"
+" window._bsEmbeddedRan = true;\n"
+" if (document.cookie && document.cookie.indexOf('_bs_verified=') !== -1) return;\n"
+" fetch('/botshield/embedded-bootstrap', {credentials:'same-origin'})\n"
+"  .then(function(r){ return r.ok ? r.json() : null; })\n"
+"  .then(function(j){\n"
+"   if (!j || j.mode !== 'silent') return;\n"
+"   if (j.provider === 'turnstile') { runTurnstile(j); return; }\n"
+"   if (j.provider === 'recaptcha-v3') { runRecaptchaV3(j); return; }\n"
+"   if (j.provider === 'recaptcha-v2') { runRecaptchaV2(j); return; }\n"
+"   if (j.provider === 'hcaptcha') { runHCaptcha(j); return; }\n"
+"   if (j.provider === 'friendly') { runFriendly(j); return; }\n"
+"   if (j.provider !== 'pow' || !j.challenge) return;\n"
+"   var ch = j.challenge;\n"
+"   var workerSrc = '(' + (function(){\n"
+"    self.onmessage = function(ev){\n"
+"     var c = ev.data;\n"
+"     var saltB = hexToBytes(c.salt);\n"
+"     var nonceB = hexToBytes(c.nonce);\n"
+"     var counter = 0;\n"
+"     var BATCH = 1024;\n"
+"     var LIMIT = 5000000;\n"
+"     function doBatch(){\n"
+"      var promises = [];\n"
+"      var start = counter;\n"
+"      for (var i=0;i<BATCH;i++){\n"
+"       var cs = String(start+i);\n"
+"       var buf = new Uint8Array(saltB.length + nonceB.length + cs.length);\n"
+"       buf.set(saltB,0); buf.set(nonceB,saltB.length);\n"
+"       for (var j=0;j<cs.length;j++) buf[saltB.length+nonceB.length+j] = cs.charCodeAt(j);\n"
+"       promises.push(crypto.subtle.digest('SHA-256', buf));\n"
+"      }\n"
+"      Promise.all(promises).then(function(rs){\n"
+"       for (var i=0;i<rs.length;i++){\n"
+"        if (meets(new Uint8Array(rs[i]), c.difficulty)){\n"
+"         self.postMessage({counter: start+i});\n"
+"         return;\n"
+"        }\n"
+"       }\n"
+"       counter = start + BATCH;\n"
+"       if (counter > LIMIT){ self.postMessage({error:'limit'}); return; }\n"
+"       setTimeout(doBatch, 0);\n"
+"      }).catch(function(e){ self.postMessage({error:String(e)}); });\n"
+"     }\n"
+"     function hexToBytes(s){\n"
+"      var o = new Uint8Array(s.length/2);\n"
+"      for (var i=0;i<s.length;i+=2) o[i/2] = parseInt(s.substr(i,2),16);\n"
+"      return o;\n"
+"     }\n"
+"     function meets(d,n){\n"
+"      var fb = (n/2)|0; var hh = n&1;\n"
+"      for (var i=0;i<fb;i++) if (d[i] !== 0) return false;\n"
+"      if (hh && (d[fb] & 0xF0) !== 0) return false;\n"
+"      return true;\n"
+"     }\n"
+"     doBatch();\n"
+"    };\n"
+"   }).toString() + ')()';\n"
+"   var blob = new Blob([workerSrc], {type:'application/javascript'});\n"
+"   var url = URL.createObjectURL(blob);\n"
+"   var w = new Worker(url);\n"
+"   w.onmessage = function(ev){\n"
+"    if (ev.data && typeof ev.data.counter === 'number'){\n"
+"     fetch('/botshield/embedded-verify', {\n"
+"      method:'POST', credentials:'same-origin',\n"
+"      headers:{'Content-Type':'application/json'},\n"
+"      body: JSON.stringify({\n"
+"       provider: 'pow',\n"
+"       v: ch.v, alg: ch.alg, salt: ch.salt, nonce: ch.nonce,\n"
+"       difficulty: ch.difficulty, expires_at: ch.expires_at,\n"
+"       challenged_at: ch.challenged_at, auto: ch.auto,\n"
+"       signature: ch.signature, counter: ev.data.counter\n"
+"      })\n"
+"     });\n"
+"    }\n"
+"    w.terminate();\n"
+"    URL.revokeObjectURL(url);\n"
+"   };\n"
+"   w.postMessage(ch);\n"
+"  })\n"
+"  .catch(function(){});\n"
+"\n"
+" /* E17.2 — invisible Turnstile path. Cloudflare's api.js is loaded\n"
+"    only when this scope's bootstrap says so; explicit-render mode\n"
+"    so we control the lifecycle. We mount a hidden div and ask\n"
+"    Turnstile for invisible execution; the success callback hands\n"
+"    us a token that we POST back to the verify endpoint. The\n"
+"    error-callback path is silent — failure here just means the\n"
+"    next page-load will get a fresh bootstrap (re-challenge), which\n"
+"    is benign under the 'kicks in eventually' model. */\n"
+" function runTurnstile(j){\n"
+"  var s = document.createElement('script');\n"
+"  s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';\n"
+"  s.async = true; s.defer = true;\n"
+"  s.onload = function(){\n"
+"   if (typeof turnstile === 'undefined') return;\n"
+"   var c = document.createElement('div');\n"
+"   c.style.display = 'none';\n"
+"   document.body.appendChild(c);\n"
+"   try {\n"
+"    turnstile.render(c, {\n"
+"     sitekey: j.sitekey,\n"
+"     size: 'invisible',\n"
+"     action: j.action || 'botshield',\n"
+"     callback: function(token){\n"
+"      fetch('/botshield/embedded-verify', {\n"
+"       method:'POST', credentials:'same-origin',\n"
+"       headers:{'Content-Type':'application/json'},\n"
+"       body: JSON.stringify({provider:'turnstile', token: token})\n"
+"      });\n"
+"     },\n"
+"     'error-callback': function(){}\n"
+"    });\n"
+"   } catch (e) { /* silent — see fail-mode comment */ }\n"
+"  };\n"
+"  s.onerror = function(){};\n"
+"  document.head.appendChild(s);\n"
+" }\n"
+"\n"
+" /* E17.3 — reCAPTCHA v3 invisible adapter. Materially different\n"
+"    client API from Turnstile — Google's grecaptcha is always\n"
+"    invisible (no widget element to mount), uses\n"
+"    grecaptcha.execute() with action binding instead of\n"
+"    render+callback. Server-side, the v3 path also goes through\n"
+"    the same M8 siteverify and validates the response score\n"
+"    against BotShieldRecaptchaV3MinScore. The wrapper just hands\n"
+"    over the token; the policy is server-side. */\n"
+" function runRecaptchaV3(j){\n"
+"  var s = document.createElement('script');\n"
+"  s.src = 'https://www.google.com/recaptcha/api.js?render=' +\n"
+"          encodeURIComponent(j.sitekey);\n"
+"  s.async = true; s.defer = true;\n"
+"  s.onload = function(){\n"
+"   if (typeof grecaptcha === 'undefined') return;\n"
+"   try {\n"
+"    grecaptcha.ready(function(){\n"
+"     grecaptcha.execute(j.sitekey,\n"
+"                        {action: j.action || 'botshield'})\n"
+"      .then(function(token){\n"
+"       fetch('/botshield/embedded-verify', {\n"
+"        method:'POST', credentials:'same-origin',\n"
+"        headers:{'Content-Type':'application/json'},\n"
+"        body: JSON.stringify({provider:'recaptcha-v3', token: token})\n"
+"       });\n"
+"      }).catch(function(){});\n"
+"    });\n"
+"   } catch (e) {}\n"
+"  };\n"
+"  s.onerror = function(){};\n"
+"  document.head.appendChild(s);\n"
+" }\n"
+"\n"
+" /* E17.4a — hCaptcha invisible adapter. Token-based like\n"
+"    Turnstile, but the client API splits render and execute:\n"
+"    hcaptcha.render() returns a widget ID; the challenge fires\n"
+"    only when the operator calls hcaptcha.execute(widgetId). For\n"
+"    invisible mode we render with size:'invisible' (no UI ever\n"
+"    shown — hCaptcha's risk engine decides whether to escalate to\n"
+"    interactive UI; if it does, the error-callback fires and we\n"
+"    silently fall through to the next page-load's bootstrap, same\n"
+"    as Turnstile). The siteverify response shape matches Turnstile's\n"
+"    {success, hostname, error-codes} contract — no action field,\n"
+"    so the action-binding check on the server is a no-op for\n"
+"    hCaptcha (the validator already skips when resp_action is\n"
+"    NULL). */\n"
+" function runHCaptcha(j){\n"
+"  var s = document.createElement('script');\n"
+"  s.src = 'https://js.hcaptcha.com/1/api.js?render=explicit';\n"
+"  s.async = true; s.defer = true;\n"
+"  s.onload = function(){\n"
+"   if (typeof hcaptcha === 'undefined') return;\n"
+"   var c = document.createElement('div');\n"
+"   c.style.display = 'none';\n"
+"   document.body.appendChild(c);\n"
+"   try {\n"
+"    var widgetId = hcaptcha.render(c, {\n"
+"     sitekey: j.sitekey,\n"
+"     size: 'invisible',\n"
+"     callback: function(token){\n"
+"      fetch('/botshield/embedded-verify', {\n"
+"       method:'POST', credentials:'same-origin',\n"
+"       headers:{'Content-Type':'application/json'},\n"
+"       body: JSON.stringify({provider:'hcaptcha', token: token})\n"
+"      });\n"
+"     },\n"
+"     'error-callback': function(){}\n"
+"    });\n"
+"    hcaptcha.execute(widgetId);\n"
+"   } catch (e) {}\n"
+"  };\n"
+"  s.onerror = function(){};\n"
+"  document.head.appendChild(s);\n"
+" }\n"
+"\n"
+" /* E17.4b — reCAPTCHA v2 invisible adapter. v2 invisible is a\n"
+"    distinct sitekey type from the v2 checkbox; sitekey is\n"
+"    configured as 'Invisible reCAPTCHA badge' in Google's admin\n"
+"    console. The client API is grecaptcha.render() returning a\n"
+"    widget ID (like hCaptcha), then grecaptcha.execute(widgetId)\n"
+"    to trigger. Same google.com/recaptcha/api.js loader as v3 but\n"
+"    without the ?render=<sitekey> query (v2 uses ?render=explicit\n"
+"    to disable auto-render of any g-recaptcha class divs). */\n"
+" function runRecaptchaV2(j){\n"
+"  var s = document.createElement('script');\n"
+"  s.src = 'https://www.google.com/recaptcha/api.js?render=explicit';\n"
+"  s.async = true; s.defer = true;\n"
+"  s.onload = function(){\n"
+"   if (typeof grecaptcha === 'undefined') return;\n"
+"   try {\n"
+"    grecaptcha.ready(function(){\n"
+"     var c = document.createElement('div');\n"
+"     c.style.display = 'none';\n"
+"     document.body.appendChild(c);\n"
+"     var widgetId = grecaptcha.render(c, {\n"
+"      sitekey: j.sitekey,\n"
+"      size: 'invisible',\n"
+"      callback: function(token){\n"
+"       fetch('/botshield/embedded-verify', {\n"
+"        method:'POST', credentials:'same-origin',\n"
+"        headers:{'Content-Type':'application/json'},\n"
+"        body: JSON.stringify({provider:'recaptcha-v2', token: token})\n"
+"       });\n"
+"      },\n"
+"      'error-callback': function(){}\n"
+"     });\n"
+"     grecaptcha.execute(widgetId);\n"
+"    });\n"
+"   } catch (e) {}\n"
+"  };\n"
+"  s.onerror = function(){};\n"
+"  document.head.appendChild(s);\n"
+" }\n"
+"\n"
+" /* E17.4c — Friendly Captcha auto-start adapter. Loads the\n"
+"    friendly-challenge bundle from jsdelivr (matches the M8 widget\n"
+"    URL), instantiates a WidgetInstance with startMode:'auto' so\n"
+"    the PoW solver fires immediately, and ships the solution\n"
+"    string the doneCallback hands us as the token. Friendly's\n"
+"    siteverify response uses 'solution' as the field name (handled\n"
+"    server-side via the provider's siteverify_field='solution'\n"
+"    override in the M8 registry). The client posts a normal\n"
+"    {provider, token} envelope; bs_embedded_verify_provider\n"
+"    forwards via bs_captcha_siteverify which substitutes the\n"
+"    correct field name from the registry. */\n"
+" function runFriendly(j){\n"
+"  var s = document.createElement('script');\n"
+"  s.src = 'https://cdn.jsdelivr.net/npm/friendly-challenge/widget.min.js';\n"
+"  s.async = true; s.defer = true;\n"
+"  s.onload = function(){\n"
+"   if (typeof friendlyChallenge === 'undefined' ||\n"
+"       !friendlyChallenge.WidgetInstance) return;\n"
+"   var c = document.createElement('div');\n"
+"   c.style.display = 'none';\n"
+"   document.body.appendChild(c);\n"
+"   try {\n"
+"    new friendlyChallenge.WidgetInstance(c, {\n"
+"     sitekey: j.sitekey,\n"
+"     startMode: 'auto',\n"
+"     doneCallback: function(solution){\n"
+"      fetch('/botshield/embedded-verify', {\n"
+"       method:'POST', credentials:'same-origin',\n"
+"       headers:{'Content-Type':'application/json'},\n"
+"       body: JSON.stringify({provider:'friendly', token: solution})\n"
+"      });\n"
+"     },\n"
+"     errorCallback: function(){}\n"
+"    });\n"
+"   } catch (e) {}\n"
+"  };\n"
+"  s.onerror = function(){};\n"
+"  document.head.appendChild(s);\n"
+" }\n"
+"})();\n";
+
+static int bs_embedded_js_handler(request_rec *r)
+{
+    if (r->method_number != M_GET && r->method_number != M_OPTIONS) {
+        r->status = HTTP_METHOD_NOT_ALLOWED;
+        apr_table_setn(r->headers_out, "Allow", "GET, OPTIONS");
+        ap_set_content_type(r, "text/plain; charset=utf-8");
+        ap_rputs("GET required.\n", r);
+        return OK;
+    }
+    ap_set_content_type(r, "application/javascript; charset=utf-8");
+    /* Short max-age so operators can iterate during the PoC without
+     * fighting browser caches; production-hardening is E17.1's job. */
+    apr_table_setn(r->headers_out, "Cache-Control", "public, max-age=60");
+    ap_rputs(BS_EMBEDDED_JS, r);
+    return OK;
+}
+
+/* GET /botshield/embedded-bootstrap — issue a fresh PoW challenge.
+ *
+ * Returns one of:
+ *   {"mode":"off"}                          — cookie already valid; wrapper exits
+ *   {"mode":"silent","challenge":{...}}     — solve this and POST to verify
+ *
+ * The challenge struct is HMAC-signed with cfg->secret, exactly the
+ * same way bs_issue_challenge signs M2/M7 challenges. The verify
+ * endpoint reconstructs the same canonical form from the JSON fields
+ * and re-validates the HMAC, so the wrapper can't forge a challenge
+ * the server didn't issue. */
+static int bs_embedded_bootstrap_handler(request_rec *r,
+                                         bs_dir_cfg *cfg)
+{
+    if (r->method_number != M_GET) {
+        r->status = HTTP_METHOD_NOT_ALLOWED;
+        apr_table_setn(r->headers_out, "Allow", "GET");
+        return OK;
+    }
+    ap_set_content_type(r, "application/json; charset=utf-8");
+    apr_table_setn(r->headers_out, "Cache-Control", "no-store");
+
+    /* If the client already has a valid _bs_verified, no point in
+     * burning Worker cycles or loading provider scripts. The wrapper
+     * short-circuits on its end too, but a redundant check here
+     * costs almost nothing and keeps the bootstrap honest. */
+    const char *cookie_val = bs_get_cookie_value(r, BS_COOKIE_NAME);
+    if (cookie_val && *cookie_val) {
+        bs_challenge tmp;
+        const char *err = bs_verify_cookie(r, cfg, cookie_val, &tmp);
+        if (!err) {
+            ap_rputs("{\"mode\":\"off\"}\n", r);
+            return OK;
+        }
+    }
+
+    /* E17.2 — provider dispatch. If the scope has a captcha provider
+     * configured (BotShieldCaptchaProvider + SiteKey + SecretFile),
+     * surface that provider's invisible-mode adapter to the wrapper.
+     * Otherwise fall back to native PoW. The wrapper's runtime check
+     * on the `provider` field is what dispatches to the right
+     * client-side path. */
+    if (cfg->captcha_provider && cfg->captcha_provider->implemented &&
+        cfg->captcha_site_key && cfg->captcha_secret) {
+        /* `action` is the string the client widget tags its token
+         * with. Both Turnstile and reCAPTCHA v3 understand actions;
+         * server-side we validate the response carries it back so
+         * tokens minted for a different form/scope can't be replayed
+         * here. Operator can override via BotShieldCaptchaExpectedAction;
+         * default "botshield" matches the M8 interstitial path. */
+        const char *action = cfg->captcha_expected_action
+            ? cfg->captcha_expected_action : "botshield";
+        ap_rprintf(r,
+            "{\"mode\":\"silent\",\"provider\":\"%s\","
+            "\"sitekey\":\"%s\",\"action\":\"%s\"}\n",
+            cfg->captcha_provider->name,
+            cfg->captcha_site_key, action);
+        return OK;
+    }
+
+    if (!cfg->secret || !cfg->algorithm) {
+        ap_rputs("{\"mode\":\"off\"}\n", r);
+        return OK;
+    }
+
+    int difficulty = bs_effective_int(cfg->difficulty, BS_DEFAULT_DIFFICULTY);
+    int ttl = bs_effective_int(cfg->cookie_ttl, BS_DEFAULT_COOKIE_TTL);
+
+    bs_challenge ch;
+    memset(&ch, 0, sizeof(ch));
+    /* Issue a fresh challenge with default-zero rep state. The
+     * verify path will mint a cookie carrying this same rep, which
+     * matches what a first-time silent-tier solver would receive. */
+    const char *ierr = bs_issue_challenge(r->pool, cfg, difficulty, ttl,
+                                          /* auto_tier */ 1, NULL, NULL, &ch);
+    if (ierr) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+            "mod_botshield: embedded-bootstrap issue failed: %s", ierr);
+        r->status = HTTP_INTERNAL_SERVER_ERROR;
+        ap_rputs("{\"error\":\"issue\"}\n", r);
+        return OK;
+    }
+
+    char salt_hex [BS_SALT_BYTES * 2 + 1];
+    char nonce_hex[BS_NONCE_BYTES * 2 + 1];
+    char sig_hex  [BS_SIG_BYTES * 2 + 1];
+    bs_to_hex(ch.salt,       BS_SALT_BYTES,  salt_hex);
+    bs_to_hex(ch.nonce,      BS_NONCE_BYTES, nonce_hex);
+    bs_to_hex(ch.signature,  BS_SIG_BYTES,   sig_hex);
+
+    /* Native PoW path. Include challenged_at and auto so the wrapper
+     * can round-trip them through the verify POST — the signature
+     * in bs_challenge_canonical covers every rep field; if the
+     * wrapper doesn't send back exactly the bytes we signed, the
+     * signature recomputation in verify will mismatch. Score /
+     * flags / passes_* / forgive_* are zero on a fresh challenge so
+     * we don't need to surface them — they parse-default to 0 on
+     * verify. */
+    ap_rprintf(r,
+        "{\"mode\":\"silent\",\"provider\":\"pow\","
+        "\"challenge\":{"
+        "\"v\":%d,\"alg\":\"%s\",\"salt\":\"%s\",\"nonce\":\"%s\","
+        "\"difficulty\":%d,\"expires_at\":%" APR_TIME_T_FMT ","
+        "\"challenged_at\":%" APR_TIME_T_FMT ",\"auto\":%d,"
+        "\"signature\":\"%s\""
+        "}}\n",
+        ch.version, ch.alg_name, salt_hex, nonce_hex,
+        ch.difficulty, ch.expires_at,
+        ch.rep.challenged_at, ch.auto_tier,
+        sig_hex);
+    return OK;
+}
+
+/* Pull a string field out of a parsed JSON object, returning a pool-
+ * allocated copy or NULL if missing/wrong-type. Bounded copy keeps
+ * us from accepting unbounded input from a malicious client. */
+static const char *bs_json_get_str(apr_pool_t *p, json_object *root,
+                                   const char *key, apr_size_t max_len)
+{
+    json_object *v = NULL;
+    if (!json_object_object_get_ex(root, key, &v)) return NULL;
+    if (!json_object_is_type(v, json_type_string)) return NULL;
+    const char *s = json_object_get_string(v);
+    if (!s) return NULL;
+    apr_size_t slen = strlen(s);
+    if (slen > max_len) return NULL;
+    return apr_pstrdup(p, s);
+}
+
+static int bs_json_get_int(json_object *root, const char *key,
+                           int *out, int min_val, int max_val)
+{
+    json_object *v = NULL;
+    if (!json_object_object_get_ex(root, key, &v)) return 0;
+    if (!json_object_is_type(v, json_type_int)) return 0;
+    int64_t n = json_object_get_int64(v);
+    if (n < min_val || n > max_val) return 0;
+    *out = (int)n;
+    return 1;
+}
+
+/* PoW-path verify: reconstruct bs_challenge from the round-tripped
+ * fields, validate HMAC + PoW counter, mint _bs_verified. Helper
+ * pulled out of the dispatcher so the turnstile (and future
+ * provider) paths can sit alongside cleanly. */
+static int bs_embedded_verify_pow(request_rec *r, bs_dir_cfg *cfg,
+                                  json_object *root)
+{
+    if (!cfg->secret || !cfg->algorithm) {
+        r->status = HTTP_SERVICE_UNAVAILABLE;
+        return OK;
+    }
+
+    /* Reconstruct the bs_challenge struct from the JSON. The HMAC
+     * signature binds every byte of the canonical form, so any
+     * tampered field invalidates the signature check below. */
+    bs_challenge ch;
+    memset(&ch, 0, sizeof(ch));
+    int ok = 1;
+    int int_v = 0;
+    if (!bs_json_get_int(root, "v",          &int_v, 0, INT_MAX))      ok = 0;
+    ch.version = int_v;
+    if (!bs_json_get_int(root, "difficulty", &int_v, 1, BS_MAX_DIFFICULTY_HARDCAP)) ok = 0;
+    ch.difficulty = int_v;
+    int counter = 0;
+    if (!bs_json_get_int(root, "counter",    &counter, 0, INT_MAX))     ok = 0;
+    json_object *exp_v = NULL;
+    apr_int64_t exp64 = 0;
+    if (json_object_object_get_ex(root, "expires_at", &exp_v) &&
+        json_object_is_type(exp_v, json_type_int)) {
+        exp64 = json_object_get_int64(exp_v);
+    } else {
+        ok = 0;
+    }
+    ch.expires_at = (apr_time_t)exp64;
+
+    /* challenged_at + auto are part of the canonical form the
+     * signature covers, so the wrapper must round-trip them
+     * verbatim. */
+    json_object *ca_v = NULL;
+    if (json_object_object_get_ex(root, "challenged_at", &ca_v) &&
+        json_object_is_type(ca_v, json_type_int)) {
+        ch.rep.challenged_at = (apr_time_t)json_object_get_int64(ca_v);
+    } else {
+        ok = 0;
+    }
+    if (!bs_json_get_int(root, "auto", &int_v, 0, 1)) ok = 0;
+    ch.auto_tier = int_v;
+
+    const char *alg_name = bs_json_get_str(r->pool, root, "alg", 64);
+    const char *salt_hex = bs_json_get_str(r->pool, root, "salt",
+                                           BS_SALT_BYTES * 2);
+    const char *nonce_hex = bs_json_get_str(r->pool, root, "nonce",
+                                            BS_NONCE_BYTES * 2);
+    const char *sig_hex  = bs_json_get_str(r->pool, root, "signature",
+                                           BS_SIG_BYTES * 2);
+    if (!alg_name || !salt_hex || !nonce_hex || !sig_hex) ok = 0;
+    if (!ok) {
+        r->status = HTTP_BAD_REQUEST;
+        return OK;
+    }
+
+    const bs_pow_algorithm *alg = bs_find_algorithm(alg_name);
+    if (!alg || !alg->implemented) {
+        r->status = HTTP_BAD_REQUEST;
+        return OK;
+    }
+    ch.alg_name = alg->name;
+
+    if (strlen(salt_hex)  != BS_SALT_BYTES * 2  ||
+        !bs_from_hex(salt_hex,  BS_SALT_BYTES,  ch.salt) ||
+        strlen(nonce_hex) != BS_NONCE_BYTES * 2 ||
+        !bs_from_hex(nonce_hex, BS_NONCE_BYTES, ch.nonce) ||
+        strlen(sig_hex)   != BS_SIG_BYTES * 2   ||
+        !bs_from_hex(sig_hex,   BS_SIG_BYTES,   ch.signature)) {
+        r->status = HTTP_BAD_REQUEST;
+        return OK;
+    }
+
+    /* Validate the HMAC against the canonical form. This proves the
+     * server issued the challenge and nothing in transit changed. */
+    const char *canon = bs_challenge_canonical(r->pool, &ch);
+    unsigned char sig_expected[BS_SIG_BYTES];
+    bs_hmac_sha256(cfg->secret, cfg->secret_len,
+                   (const unsigned char *)canon, strlen(canon),
+                   sig_expected);
+    if (!bs_ct_equal(sig_expected, ch.signature, BS_SIG_BYTES)) {
+        /* Try secondary key if rotation is in progress (E16). */
+        if (cfg->secret_secondary) {
+            bs_hmac_sha256(cfg->secret_secondary, cfg->secret_secondary_len,
+                           (const unsigned char *)canon, strlen(canon),
+                           sig_expected);
+        }
+        if (!cfg->secret_secondary ||
+            !bs_ct_equal(sig_expected, ch.signature, BS_SIG_BYTES)) {
+            r->status = HTTP_FORBIDDEN;
+            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                "mod_botshield: embedded-verify(pow): bad signature");
+            return OK;
+        }
+    }
+
+    apr_time_t now = apr_time_sec(apr_time_now());
+    if (now > ch.expires_at) {
+        r->status = HTTP_FORBIDDEN;
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: embedded-verify(pow): challenge expired");
+        return OK;
+    }
+
+    char counter_str[24];
+    apr_snprintf(counter_str, sizeof(counter_str), "%d", counter);
+    const char *verr = alg->verify(&ch, counter_str);
+    if (verr) {
+        r->status = HTTP_FORBIDDEN;
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: embedded-verify(pow): PoW reject: %s", verr);
+        return OK;
+    }
+
+    /* Mint _bs_verified the same way the M7 form-PoW does — same
+     * cookie shape, same expiry, same signature path. The counter
+     * the wrapper found rides into the cookie body so future
+     * requests can replay-detect. */
+    ch.rep.passes_silent = 1;
+    canon = bs_challenge_canonical(r->pool, &ch);
+    bs_hmac_sha256(cfg->secret, cfg->secret_len,
+                   (const unsigned char *)canon, strlen(canon),
+                   ch.signature);
+    const char *payload = bs_build_cookie_payload(r->pool, cfg, &ch,
+                                                  counter_str);
+    if (!payload) {
+        r->status = HTTP_INTERNAL_SERVER_ERROR;
+        return OK;
+    }
+    apr_table_set(r->err_headers_out, "Set-Cookie",
+                  bs_build_set_cookie(r, cfg, payload, ch.expires_at));
+
+    r->status = HTTP_NO_CONTENT;
+    apr_table_setn(r->headers_out, "Cache-Control", "no-store");
+    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+        "mod_botshield: embedded-verify(pow): cookie minted (counter=%d)",
+        counter);
+    return OK;
+}
+
+/* Provider-path verify (E17.2 — first lands Turnstile invisible).
+ * The wrapper has called the provider's invisible widget and got a
+ * token; we siteverify it against the configured provider via the
+ * existing M8 client, then mint _bs_verified using the same
+ * captcha-<provider> cookie alg the M8 interstitial path uses.
+ *
+ * Body shape: {"provider":"<name>","token":"<token>"}. */
+static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
+                                       json_object *root,
+                                       const char *provider_name)
+{
+    if (!cfg->captcha_provider || !cfg->captcha_provider->implemented ||
+        !cfg->captcha_secret) {
+        r->status = HTTP_SERVICE_UNAVAILABLE;
+        ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+            "mod_botshield: embedded-verify(%s): scope has no "
+            "captcha provider configured for this provider name",
+            provider_name);
+        return OK;
+    }
+    if (strcmp(cfg->captcha_provider->name, provider_name) != 0) {
+        r->status = HTTP_BAD_REQUEST;
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: embedded-verify(%s): wrapper claimed "
+            "provider but scope is configured for '%s'",
+            provider_name, cfg->captcha_provider->name);
+        return OK;
+    }
+
+    const char *token = bs_json_get_str(r->pool, root, "token",
+                                        BS_MAX_CAPTCHA_TOKEN);
+    if (!token || !*token) {
+        r->status = HTTP_BAD_REQUEST;
+        return OK;
+    }
+
+    /* Reuse M8's siteverify path. Same provider entry, same
+     * secret/sitekey, same body shape — the only difference vs.
+     * /captcha-verify is that we don't redirect afterward and that
+     * we mint a cookie marked passes_silent=1 instead of
+     * passes_captcha=1. */
+    int timeout_ms = cfg->captcha_timeout_ms > 0
+        ? cfg->captcha_timeout_ms : BS_DEFAULT_CAPTCHA_TIMEOUT;
+    const char *details = NULL;
+    long http_code = 0;
+    double score = -1.0;
+    const char *resp_hostname = NULL, *resp_action = NULL;
+    bs_captcha_result res = bs_captcha_siteverify(r,
+        cfg->captcha_provider, cfg->captcha_secret,
+        cfg->captcha_secret_len, token, timeout_ms,
+        &details, &http_code, &score, &resp_hostname, &resp_action);
+
+    if (res != BS_CAPTCHA_OK) {
+        r->status = HTTP_FORBIDDEN;
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: embedded-verify(%s): siteverify rejected "
+            "(http=%ld details=\"%s\")", provider_name, http_code,
+            details ? details : "");
+        return OK;
+    }
+
+    /* Post-siteverify validation parity with the M8 captcha-verify
+     * handler (security review #1). Hostname + action binding stops
+     * a token minted for a different scope/form on the same sitekey
+     * from satisfying verification here. v3 score threshold caps
+     * "valid token but signal is weak". Operator can opt out of
+     * either binding by setting the directive to empty. */
+    const char *expected_host =
+        cfg->captcha_expected_hostname
+            ? cfg->captcha_expected_hostname
+            : (r->server && r->server->server_hostname
+                   ? r->server->server_hostname : "");
+    const char *expected_action =
+        cfg->captcha_expected_action
+            ? cfg->captcha_expected_action : "botshield";
+
+    if (resp_hostname && *expected_host &&
+        strcmp(resp_hostname, expected_host) != 0) {
+        r->status = HTTP_FORBIDDEN;
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: embedded-verify(%s): hostname-mismatch "
+            "(got=%s expected=%s)", provider_name,
+            resp_hostname, expected_host);
+        return OK;
+    }
+    if (resp_action && *expected_action &&
+        strcmp(resp_action, expected_action) != 0) {
+        r->status = HTTP_FORBIDDEN;
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: embedded-verify(%s): action-mismatch "
+            "(got=%s expected=%s)", provider_name,
+            resp_action, expected_action);
+        return OK;
+    }
+    if (strcmp(provider_name, "recaptcha-v3") == 0) {
+        double min_score = (cfg->recaptcha_v3_min_score >= 0.0)
+            ? cfg->recaptcha_v3_min_score
+            : BS_DEFAULT_RECAPTCHA_V3_MIN_SCORE;
+        if (score < 0.0) {
+            /* Missing score on a v3 response is a protocol surprise
+             * (v3 always returns one). Fail open with a warning —
+             * matches the M8 path's behavior. */
+            ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+                "mod_botshield: embedded-verify(recaptcha-v3): "
+                "response missing score — failing open "
+                "(http=%ld)", http_code);
+        } else if (score < min_score) {
+            r->status = HTTP_FORBIDDEN;
+            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                "mod_botshield: embedded-verify(recaptcha-v3): "
+                "score below threshold (%.2f < %.2f)",
+                score, min_score);
+            return OK;
+        }
+    }
+
+    /* Mint a captcha-<provider> cookie just like the M8 interstitial
+     * path does. The only rep delta is passes_silent=1 vs
+     * passes_captcha=1 — this was a silent-tier dispatch that
+     * happened to use a captcha provider for the verification, not
+     * a captcha-tier user-interactive solve. */
+    int ttl        = bs_effective_int(cfg->cookie_ttl, BS_DEFAULT_COOKIE_TTL);
+    int difficulty = bs_effective_int(cfg->difficulty, BS_DEFAULT_DIFFICULTY);
+    const char *cookie_alg_name = apr_psprintf(r->pool, "captcha-%s",
+                                               cfg->captcha_provider->name);
+    const bs_pow_algorithm *captcha_alg = bs_find_algorithm(cookie_alg_name);
+    if (!captcha_alg || !captcha_alg->implemented) {
+        r->status = HTTP_INTERNAL_SERVER_ERROR;
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+            "mod_botshield: embedded-verify(%s): cookie alg '%s' "
+            "missing from registry", provider_name, cookie_alg_name);
+        return OK;
+    }
+
+    bs_rep_state next_rep;
+    memset(&next_rep, 0, sizeof(next_rep));
+    next_rep.passes_silent = 1;
+
+    bs_challenge ch;
+    const char *ierr = bs_issue_challenge(r->pool, cfg, difficulty, ttl,
+                                          /* auto_tier */ 1,
+                                          captcha_alg, &next_rep, &ch);
+    if (ierr) {
+        r->status = HTTP_INTERNAL_SERVER_ERROR;
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+            "mod_botshield: embedded-verify(%s): cookie issue failed: %s",
+            provider_name, ierr);
+        return OK;
+    }
+
+    const char *payload = bs_build_cookie_payload(r->pool, cfg, &ch,
+                                                  "captcha");
+    if (!payload) {
+        r->status = HTTP_INTERNAL_SERVER_ERROR;
+        return OK;
+    }
+    apr_table_set(r->err_headers_out, "Set-Cookie",
+                  bs_build_set_cookie(r, cfg, payload, ch.expires_at));
+
+    r->status = HTTP_NO_CONTENT;
+    apr_table_setn(r->headers_out, "Cache-Control", "no-store");
+    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+        "mod_botshield: embedded-verify(%s): cookie minted "
+        "(siteverify ok)", provider_name);
+    return OK;
+}
+
+/* POST /botshield/embedded-verify — dispatcher.
+ *
+ * Body shape (JSON):
+ *   PoW path:
+ *     {"provider":"pow","v":N, "alg":"sha256-zeros",
+ *      "salt":"<hex>", "nonce":"<hex>", "difficulty":N,
+ *      "expires_at":N, "challenged_at":N, "auto":N,
+ *      "signature":"<hex>", "counter":N}
+ *   Provider path (turnstile et al.):
+ *     {"provider":"turnstile","token":"<token>"}
+ *
+ * On success: 204 + Set-Cookie: _bs_verified=...; ...
+ * On failure: 4xx; no cookie. */
+#define BS_EMBEDDED_BODY_MAX 8192   /* turnstile tokens are ~600 bytes */
+static int bs_embedded_verify_handler(request_rec *r, bs_dir_cfg *cfg)
+{
+    if (r->method_number != M_POST) {
+        r->status = HTTP_METHOD_NOT_ALLOWED;
+        apr_table_setn(r->headers_out, "Allow", "POST");
+        return OK;
+    }
+
+    apr_size_t body_len = 0;
+    const char *body = bs_read_form_body(r, BS_EMBEDDED_BODY_MAX, &body_len);
+    if (!body || body_len == 0) {
+        r->status = HTTP_BAD_REQUEST;
+        return OK;
+    }
+
+    enum json_tokener_error jerr = json_tokener_success;
+    json_object *root = json_tokener_parse_verbose(body, &jerr);
+    if (!root || jerr != json_tokener_success) {
+        if (root) json_object_put(root);
+        r->status = HTTP_BAD_REQUEST;
+        return OK;
+    }
+
+    const char *provider = bs_json_get_str(r->pool, root, "provider", 32);
+    if (!provider) provider = "pow";   /* legacy compat */
+
+    int rv;
+    if (strcmp(provider, "pow") == 0) {
+        rv = bs_embedded_verify_pow(r, cfg, root);
+    } else {
+        rv = bs_embedded_verify_provider(r, cfg, root, provider);
+    }
+    json_object_put(root);
+    return rv;
+}
+/* end E17 PoC handlers */
+
 /* ---- M9.3: Prometheus text metrics handler ----
  *
  * Mounted at <prefix>/metrics. Emits counters + gauges in a fixed
@@ -12286,6 +13161,19 @@ static const command_rec bs_cmds[] = {
                  "(default: 80). Serves the configured third-party "
                  "provider's widget; falls through to form-PoW if no "
                  "BotShieldCaptchaProvider is set on the scope."),
+    /* E17 PoC — silent-tier dispatch flavor. */
+    AP_INIT_TAKE1("BotShieldSilentMode", bs_set_silent_mode, NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "How to dispatch silent-tier (low-friction) "
+                 "challenges. 'interstitial' (default) = legacy M7 "
+                 "auto-submit splash. 'embedded' = serve real page "
+                 "(DECLINED) and rely on the operator-included "
+                 "/botshield/embedded.js wrapper to do PoW in a Web "
+                 "Worker and POST the result back to "
+                 "/botshield/embedded-verify. The verified cookie "
+                 "may not arrive in time for the very first request, "
+                 "but it lands within a few page-views — see PLAN "
+                 "E17 for the timing model."),
     AP_INIT_TAKE1("BotShieldForgivenessSilent", bs_set_forgive_silent, NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "Score credit applied on a successful silent-PoW pass "
@@ -13265,6 +14153,16 @@ static int bs_handler(request_rec *r)
         if (strcmp(sub, "/policy-status") == 0) {
             return bs_policy_status_handler(r, cfg);
         }
+        /* E17 PoC — embedded silent-verify endpoints. */
+        if (strcmp(sub, "/embedded.js") == 0) {
+            return bs_embedded_js_handler(r);
+        }
+        if (strcmp(sub, "/embedded-bootstrap") == 0) {
+            return bs_embedded_bootstrap_handler(r, cfg);
+        }
+        if (strcmp(sub, "/embedded-verify") == 0) {
+            return bs_embedded_verify_handler(r, cfg);
+        }
         /* Unknown module endpoint under the prefix → 404, so a typo in
          * an operator's template fails loudly instead of falling through
          * to Apache and serving some unrelated file. */
@@ -13586,6 +14484,25 @@ static int bs_handler(request_rec *r)
                                              client_ip, now_t,
                                              scfg_sg->ns_id);
         }
+    }
+
+    /* E17 PoC — if silent-tier dispatch lands here AND the scope is
+     * in `embedded` mode, skip the M7 interstitial entirely. Serve
+     * the real page (DECLINED). The operator-included
+     * /botshield/embedded.js wrapper runs on page-load, fetches a
+     * challenge from /botshield/embedded-bootstrap, solves PoW in a
+     * Web Worker, and POSTs back to /botshield/embedded-verify which
+     * mints _bs_verified. The cookie may not arrive in time for the
+     * very first request, but subsequent page-loads in the session
+     * carry it — see PLAN E17 for the "kicks in eventually"
+     * timing model. */
+    if (tier == BS_TIER_SILENT &&
+        cfg->silent_mode == BS_SILENT_MODE_EMBEDDED) {
+        bs_decision_log(r, "silent", "declined", cookie_status,
+                        "-", "-",
+                        bs_decision_reason_names(r->pool, score),
+                        effective);
+        return DECLINED;
     }
 
     /* Decide whether this challenge will be served as the M7 silent-tier

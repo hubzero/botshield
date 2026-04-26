@@ -1,0 +1,229 @@
+"""E17 PoC — embedded silent verification round-trip in a real browser.
+
+The PoC's job is to prove the timing model works: page renders
+immediately (no interstitial), wrapper runs in background, Worker
+solves PoW, POSTs result, _bs_verified cookie is set, next page-load
+in the session rides through without re-challenge.
+
+These tests use a Bloom-fresh IP shaped to land at silent tier (no
+Accept-Language, no Mozilla UA boost) and visit /embedded-test.html
+(a tiny static page that includes the wrapper). With
+BotShieldSilentMode embedded scoped to that path, the response is
+DECLINED (real page) instead of the M7 splash; the wrapper does the
+verification work in the background.
+
+The "kicks in eventually" guarantee:
+  - first request may not have the cookie yet (wrapper hasn't
+    finished posting)
+  - within ~2-3 seconds the cookie should be set
+  - subsequent requests in the same browser context ride through
+"""
+
+from __future__ import annotations
+
+import time
+
+import pytest
+
+
+pytestmark = [pytest.mark.acceptance, pytest.mark.browser,
+              pytest.mark.serial]
+
+
+EMBEDDED_PATH = "/embedded-test.html"
+
+
+def test_embedded_serves_real_page_immediately(
+    config_override, bs_browser_context,
+):
+    """First page-load under embedded mode: real page renders, no
+    interstitial. The page title is 'BotShield embedded-mode test
+    page', not 'Verify you are human'."""
+    with config_override(
+        r"BotShieldAllow\s+on",
+        'BotShieldAllow on\n'
+        '    <Location /embedded-test.html>\n'
+        '        BotShieldSilentMode embedded\n'
+        '    </Location>',
+        count=1,
+    ):
+        page = bs_browser_context.new_page()
+        resp = page.goto(f"https://localhost{EMBEDDED_PATH}")
+        assert resp.status == 200, (
+            f"embedded mode should serve the real page; "
+            f"status={resp.status}"
+        )
+        title = page.title()
+        assert "Verify you are human" not in title, (
+            f"embedded mode leaked the M7 interstitial; title={title!r}"
+        )
+        assert "embedded-mode test page" in title, (
+            f"unexpected page title: {title!r}"
+        )
+
+
+def test_embedded_wrapper_mints_verified_cookie(
+    config_override, bs_browser_context,
+):
+    """The headline timing test: load the page (wrapper fires in
+    background), wait a few seconds for the Worker + POST to
+    complete, observe _bs_verified in the cookie jar."""
+    with config_override(
+        r"BotShieldAllow\s+on",
+        'BotShieldAllow on\n'
+        '    <Location /embedded-test.html>\n'
+        '        BotShieldSilentMode embedded\n'
+        '    </Location>',
+        count=1,
+    ):
+        page = bs_browser_context.new_page()
+        page.goto(f"https://localhost{EMBEDDED_PATH}")
+
+        # Poll for the cookie up to 8s. PoW at default difficulty=4
+        # is a few thousand hashes — Worker should finish in well
+        # under 2s on any modern machine, but CI variance + Worker
+        # spin-up justifies a generous deadline.
+        deadline = time.monotonic() + 8.0
+        cookie_present = False
+        while time.monotonic() < deadline:
+            cookies = {c["name"] for c in bs_browser_context.cookies()}
+            if "_bs_verified" in cookies:
+                cookie_present = True
+                break
+            time.sleep(0.25)
+
+        assert cookie_present, (
+            f"wrapper failed to mint _bs_verified within deadline; "
+            f"cookies={[c['name'] for c in bs_browser_context.cookies()]}"
+        )
+
+
+def test_embedded_turnstile_mints_verified_cookie(
+    config_override, bs_browser_context,
+):
+    """E17.2 — invisible Turnstile adapter. Scope is configured for
+    Turnstile (not native PoW); the wrapper loads Cloudflare's
+    api.js, renders an invisible widget with the always-pass test
+    sitekey 2x00000000000000000000AB, gets a token from
+    Cloudflare, POSTs to /embedded-verify, server siteverifies
+    against Cloudflare's real endpoint with the always-pass secret,
+    and mints _bs_verified.
+
+    Hits the real challenges.cloudflare.com infrastructure — slower
+    + flakier than the PoW path, but proves the provider-dispatch
+    mechanism works end-to-end."""
+    with config_override(
+        r"BotShieldAllow\s+on",
+        'BotShieldAllow on\n'
+        '    <Location /embedded-test.html>\n'
+        '        BotShieldSilentMode embedded\n'
+        '        BotShieldCaptchaProvider turnstile\n'
+        '        BotShieldCaptchaSiteKey 2x00000000000000000000AB\n'
+        '        BotShieldCaptchaSecretFile /etc/botshield/turnstile-secret\n'
+        '    </Location>',
+        count=1,
+    ):
+        page = bs_browser_context.new_page()
+        page.goto(f"https://localhost{EMBEDDED_PATH}")
+
+        # Real Cloudflare round trip — give it more time than PoW.
+        # Local network + CF latency + invisible-widget readiness
+        # typically lands within 5s but we allow 15.
+        deadline = time.monotonic() + 15.0
+        cookie_present = False
+        while time.monotonic() < deadline:
+            cookies = {c["name"] for c in bs_browser_context.cookies()}
+            if "_bs_verified" in cookies:
+                cookie_present = True
+                break
+            time.sleep(0.5)
+
+        assert cookie_present, (
+            f"turnstile wrapper failed to mint _bs_verified within "
+            f"deadline; cookies="
+            f"{[c['name'] for c in bs_browser_context.cookies()]}"
+        )
+
+
+def test_embedded_hcaptcha_mints_verified_cookie(
+    config_override, bs_browser_context,
+):
+    """E17.4a — hCaptcha invisible adapter. Same architectural shape
+    as Turnstile (token-based, real round-trip against the provider's
+    siteverify), but materially different client API: hcaptcha.render
+    returns a widget ID, then hcaptcha.execute(widgetId) triggers
+    the invisible challenge. Validates that the wrapper's per-
+    provider dispatch actually handles the API differences cleanly,
+    not just the abstraction over them.
+
+    Uses hCaptcha's published always-pass test keys:
+      sitekey: 10000000-ffff-ffff-ffff-000000000001
+      secret:  0x0000000000000000000000000000000000000000
+    """
+    with config_override(
+        r"BotShieldAllow\s+on",
+        'BotShieldAllow on\n'
+        '    <Location /embedded-test.html>\n'
+        '        BotShieldSilentMode embedded\n'
+        '        BotShieldCaptchaProvider hcaptcha\n'
+        '        BotShieldCaptchaSiteKey '
+            '10000000-ffff-ffff-ffff-000000000001\n'
+        '        BotShieldCaptchaSecretFile /etc/botshield/hcaptcha-secret\n'
+        '        BotShieldCaptchaExpectedHostname dummy-key-pass\n'
+        '    </Location>',
+        count=1,
+    ):
+        page = bs_browser_context.new_page()
+        page.goto(f"https://localhost{EMBEDDED_PATH}")
+
+        # Real hCaptcha round trip — comparable latency to Turnstile.
+        deadline = time.monotonic() + 15.0
+        cookie_present = False
+        while time.monotonic() < deadline:
+            cookies = {c["name"] for c in bs_browser_context.cookies()}
+            if "_bs_verified" in cookies:
+                cookie_present = True
+                break
+            time.sleep(0.5)
+
+        assert cookie_present, (
+            f"hcaptcha wrapper failed to mint _bs_verified within "
+            f"deadline; cookies="
+            f"{[c['name'] for c in bs_browser_context.cookies()]}"
+        )
+
+
+def test_embedded_subsequent_request_declined_through(
+    config_override, bs_browser_context,
+):
+    """Once the cookie has landed, the next page-load within the same
+    browser context should ride through with the cookie attached. No
+    challenge, no re-issue. Verifies the round-trip closes the loop:
+    cookie minted → cookie sent → cookie verified server-side → real
+    content."""
+    with config_override(
+        r"BotShieldAllow\s+on",
+        'BotShieldAllow on\n'
+        '    <Location /embedded-test.html>\n'
+        '        BotShieldSilentMode embedded\n'
+        '    </Location>',
+        count=1,
+    ):
+        page = bs_browser_context.new_page()
+        # First visit — wait for the wrapper to mint the cookie.
+        page.goto(f"https://localhost{EMBEDDED_PATH}")
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            if "_bs_verified" in {c["name"] for c in bs_browser_context.cookies()}:
+                break
+            time.sleep(0.25)
+
+        # Second visit on the same context — cookie should ride along
+        # and the response should be the real page with no challenge
+        # marker.
+        resp = page.goto(f"https://localhost{EMBEDDED_PATH}")
+        assert resp.status == 200
+        assert resp.headers.get("x-botshield") != "challenge", (
+            f"second request to embedded scope got a challenge "
+            f"despite cookie present; headers={dict(resp.headers)}"
+        )
