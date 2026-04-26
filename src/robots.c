@@ -45,6 +45,12 @@ typedef struct robots_group {
 struct robots_doc {
     apr_pool_t         *pool;
     apr_array_header_t *groups;       /* robots_group * */
+    /* Security review LOW #6 — count of lines that exceeded
+     * BOTSHIELD_ROBOTS_MAX_LINE and got truncated during parse.
+     * Caller in mod_botshield.c reads via robots_doc_truncated_lines()
+     * and emits a NOTICE so operators see the silent truncation
+     * the parser-header docs claim is reported. */
+    int                 truncated_lines;
 };
 
 /* ---------- helpers ---------- */
@@ -425,7 +431,10 @@ static apr_status_t bs_rb_parse(apr_pool_t *p, const char *buf, apr_size_t len,
         if (clen == 0) continue;
 
         apr_size_t copy_len = clen;
-        if (copy_len >= sizeof(line)) copy_len = sizeof(line) - 1;
+        if (copy_len >= sizeof(line)) {
+            copy_len = sizeof(line) - 1;
+            doc->truncated_lines++;
+        }
         memcpy(line, buf + start, copy_len);
         line[copy_len] = '\0';
 
@@ -581,6 +590,11 @@ void robots_query(const robots_doc *doc, const char *ua, const char *path,
 int robots_group_count(const robots_doc *doc)
 {
     return (doc && doc->groups) ? doc->groups->nelts : 0;
+}
+
+int robots_doc_truncated_lines(const robots_doc *doc)
+{
+    return doc ? doc->truncated_lines : 0;
 }
 
 static robots_group *bs_rb_group_at(const robots_doc *doc, int idx)

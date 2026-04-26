@@ -4242,6 +4242,17 @@ static apr_status_t bs_robots_load(server_rec *sv, bs_server_cfg *scfg,
         return rv;
     }
 
+    /* Security review LOW #6 — surface truncated lines (the parser
+     * silently caps any line > BOTSHIELD_ROBOTS_MAX_LINE). The
+     * documented contract said operators "see a warning through
+     * the summary log"; this emits that warning. */
+    int n_truncated = robots_doc_truncated_lines(doc);
+    if (n_truncated > 0) {
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+            "mod_botshield: robots.txt %s: %d line(s) exceeded the "
+            "parser line limit and were truncated during parse",
+            scfg->robots_txt_path, n_truncated);
+    }
     int n_groups = robots_group_count(doc);
     bs_robots_state *ns = apr_pcalloc(npool, sizeof(*ns));
     ns->doc   = doc;
@@ -5162,8 +5173,23 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
 {
     (void)plog; (void)ptemp;
 
-    /* Apache calls post-config twice; skip the first pass so we don't
-     * create the SHM segment and then immediately discard it. */
+    /* Apache calls post-config twice on cold boot (syntax-check pass,
+     * then the real one). Skip the first pass so we don't create the
+     * SHM segment and then immediately discard it.
+     *
+     * Security review LOW #11 — the userdata key lives on
+     * s->process->pool, which survives `apachectl graceful`. On
+     * graceful, the previous boot's userdata is still set, so the
+     * FIRST post_config call after graceful runs init directly
+     * (correct — graceful only invokes post_config once). This
+     * relies on Apache's documented post_config-runs-twice-on-cold-
+     * boot, post_config-runs-once-on-graceful behavior. If that
+     * ever changes (cold-boot single pass, or graceful double pass),
+     * this skip would either suppress the only init opportunity
+     * or skip the real one. Behavior is stable on Apache 2.4 today;
+     * a more defensive pattern would key the userdata on a pconf-
+     * scoped marker but Apache doesn't expose a stable one across
+     * post_config invocations. */
     void *already;
     apr_pool_userdata_get(&already, "bs_post_config_done",
                           s->process->pool);
@@ -10278,6 +10304,12 @@ static curl_socket_t bs_curl_open_socket_cb(void *clientp,
 static const char *bs_curl_escape_pool(apr_pool_t *p, CURL *curl,
                                        const char *in, apr_size_t in_len)
 {
+    /* Security review LOW #12 — curl_easy_escape takes int. Casting
+     * size_t > INT_MAX wraps to a negative length and curl_easy_escape
+     * misinterprets it. None of our callers exceed INT_MAX in
+     * practice (secret bytes capped at 1024, tokens at ~600), but
+     * rejecting explicitly is cheap and closes the class. */
+    if (in_len > (apr_size_t)INT_MAX) return NULL;
     char *esc = curl_easy_escape(curl, in, (int)in_len);
     if (!esc) return NULL;
     const char *dup = apr_pstrdup(p, esc);
@@ -11350,6 +11382,16 @@ static void bs_urldecode_inplace(char *s)
             else if (c >= 'a' && c <= 'f') lo = c - 'a' + 10;
             else if (c >= 'A' && c <= 'F') lo = c - 'A' + 10;
             if (hi >= 0 && lo >= 0) {
+                /* Security review LOW #5 — refuse to decode %00.
+                 * Otherwise the embedded NUL truncates every C-string
+                 * consumer downstream (strlen, strchr, snprintf %s).
+                 * Pass the literal '%','0','0' through; downstream
+                 * validators that care can flag the percent sequence
+                 * explicitly. */
+                if (hi == 0 && lo == 0) {
+                    *w++ = *rp++;   /* '%' */
+                    continue;
+                }
                 *w++ = (char)((hi << 4) | lo);
                 rp += 3;
                 continue;
@@ -11519,8 +11561,15 @@ static const char *bs_mint_pending_cookie(request_rec *r,
     bs_to_hex(nonce, sizeof(nonce), nonce_hex);
 
     apr_time_t expiry = apr_time_sec(apr_time_now()) + BS_PENDING_COOKIE_TTL;
+    /* Security review LOW #4 — explicit module + purpose + version
+     * context tag for domain separation. SHA-256 HMAC is collision-
+     * resistant on its own, but a longer, more specific tag makes
+     * it impossible for any FUTURE HMAC use to accidentally share
+     * a canonical-bytes prefix with this one. Versioning the tag
+     * lets us bump the protocol later without revalidating that
+     * the new bytes are disjoint from the old. */
     const char *canon = apr_psprintf(r->pool,
-        "pending:%s:%" APR_TIME_T_FMT, nonce_hex, expiry);
+        "bs:pending:v1:%s:%" APR_TIME_T_FMT, nonce_hex, expiry);
     unsigned char mac[BS_SIG_BYTES];
     bs_hmac_sha256(cfg->secret, cfg->secret_len,
                    (const unsigned char *)canon, strlen(canon), mac);
@@ -11591,8 +11640,11 @@ static const char *bs_verify_pending_cookie(request_rec *r,
         return "expired";
     }
 
+    /* Security review LOW #4 — must match the mint side's canon
+     * shape exactly. See comment above the mint site for the
+     * domain-separation rationale. */
     const char *canon = apr_psprintf(r->pool,
-        "pending:%s:%" APR_TIME_T_FMT, nonce_hex, expiry);
+        "bs:pending:v1:%s:%" APR_TIME_T_FMT, nonce_hex, expiry);
     unsigned char expect[BS_SIG_BYTES];
     bs_hmac_sha256(cfg->secret, cfg->secret_len,
                    (const unsigned char *)canon, strlen(canon), expect);
