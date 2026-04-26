@@ -11182,7 +11182,23 @@ static const char *bs_verify_pending_cookie(request_rec *r,
                    (const unsigned char *)canon, strlen(canon), expect);
     unsigned char got[BS_SIG_BYTES];
     if (!bs_from_hex(mac_hex, BS_SIG_BYTES, got)) return "bad mac hex";
-    if (!bs_ct_equal(expect, got, BS_SIG_BYTES)) return "sig mismatch";
+    if (!bs_ct_equal(expect, got, BS_SIG_BYTES)) {
+        /* E16 review fix — pending-cookie path missed the secret-
+         * rotation fallback. _bs_verified and the embedded-verify
+         * path both fall back to cfg->secret_secondary on HMAC
+         * mismatch; the M8.1 pending cookie did not. During a
+         * key-rotation reload, any user with an in-flight
+         * pending cookie (TTL 300s) would 403 on captcha submit
+         * even though the secondary key would have validated.
+         * Same secondary-key retry pattern as bs_verify_cookie_hmac. */
+        if (!cfg->secret_secondary) return "sig mismatch";
+        bs_hmac_sha256(cfg->secret_secondary, cfg->secret_secondary_len,
+                       (const unsigned char *)canon, strlen(canon),
+                       expect);
+        if (!bs_ct_equal(expect, got, BS_SIG_BYTES)) {
+            return "sig mismatch";
+        }
+    }
     return NULL;
 }
 
