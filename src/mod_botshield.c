@@ -7052,13 +7052,31 @@ static apr_status_t bs_state_save(apr_pool_t *p, server_rec *s,
     /* Serialize the flagged-IP copy against bs_flagged_ip_add's
      * writer. Without the lock, a concurrent add's odd-version mid-
      * state can be captured; load resets version to 0 and ends up
-     * publishing a logically-forged slot. */
+     * publishing a logically-forged slot.
+     *
+     * Security review MEDIUM #7 — was apr_global_mutex_lock
+     * (blocking). bs_state_save runs from three contexts:
+     *   - mod_watchdog periodic save (parent or watchdog process)
+     *   - graceful-shutdown pool cleanup
+     *   - graceful-restart sync save in post_config (parent)
+     *
+     * In all three cases, blocking on a worker-held mutex stalls
+     * the parent or watchdog indefinitely if a worker dies
+     * holding the mutex or just happens to be in the middle of a
+     * write under heavy load. Use timedlock with a 2-second
+     * ceiling: the critical section we'd be waiting on is a
+     * bounded probe-loop (~10 slot scans) followed by short
+     * stores; 2s is generous for that and short enough to fail
+     * cleanly if something's wedged. On timeout, log + skip the
+     * save (same behavior as the previous error path). */
     if (rt->mutex) {
-        apr_status_t lr = apr_global_mutex_lock(rt->mutex);
+        apr_status_t lr = apr_global_mutex_timedlock(
+            rt->mutex, apr_time_from_sec(2));
         if (lr != APR_SUCCESS) {
             ap_log_error(APLOG_MARK, APLOG_WARNING, lr, s,
-                "mod_botshield: state save: could not lock mutex; "
-                "skipping save to avoid writing an inconsistent snapshot");
+                "mod_botshield: state save: could not lock mutex "
+                "within 2s; skipping save to avoid blocking "
+                "the parent or writing an inconsistent snapshot");
             return lr;
         }
     }
