@@ -12240,8 +12240,16 @@ static int bs_embedded_verify_pow(request_rec *r, bs_dir_cfg *cfg,
         if (prior_val && *prior_val) {
             const char *cverr = bs_verify_cookie(r, cfg, prior_val,
                                                   &prior_ch);
+            /* Security review MEDIUM #1 — refuse carry-forward when
+             * the cookie has expired. Otherwise a leaked or stolen
+             * cookie could be replayed past TTL to transplant a
+             * good-standing rep into a freshly-minted _bs_verified
+             * via the captcha solve path. The TTL is the only
+             * mechanism preventing indefinite reputation transfer
+             * across cookie generations. */
             if (cverr == NULL ||
                 (cverr && strcmp(cverr, "signature mismatch") != 0
+                       && strcmp(cverr, "expired") != 0
                        && prior_ch.alg_name)) {
                 have_prior = 1;
             }
@@ -12449,8 +12457,16 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
         if (prior_val && *prior_val) {
             const char *cverr = bs_verify_cookie(r, cfg, prior_val,
                                                   &prior_ch);
+            /* Security review MEDIUM #1 — refuse carry-forward when
+             * the cookie has expired. Otherwise a leaked or stolen
+             * cookie could be replayed past TTL to transplant a
+             * good-standing rep into a freshly-minted _bs_verified
+             * via the captcha solve path. The TTL is the only
+             * mechanism preventing indefinite reputation transfer
+             * across cookie generations. */
             if (cverr == NULL ||
                 (cverr && strcmp(cverr, "signature mismatch") != 0
+                       && strcmp(cverr, "expired") != 0
                        && prior_ch.alg_name)) {
                 have_prior = 1;
             }
@@ -13465,19 +13481,23 @@ static int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
     }
 
     /* Issue a captcha-alg signed cookie. Rep starts from any prior
-     * cookie if one is still valid, with captcha forgiveness applied. */
+     * cookie if one is still valid, with captcha forgiveness applied.
+     *
+     * Security review MEDIUM #1 — refuse carry-forward on "expired".
+     * Letting a sig-valid-but-past-TTL cookie carry rep forward
+     * means a stolen+expired cookie can be replayed (with a fresh
+     * captcha solve) to transplant good-standing rep into a fresh
+     * _bs_verified. TTL is the only mechanism preventing indefinite
+     * reputation transfer across generations. */
     const char *prior_val = bs_get_cookie_value(r, BS_COOKIE_NAME);
     bs_challenge prior_ch = { 0 };
     int have_prior = 0;
     if (prior_val && *prior_val) {
-        if (bs_verify_cookie(r, cfg, prior_val, &prior_ch) != NULL) {
-            /* Either signature-ok-but-expired (ok to carry rep) or
-             * signature-mismatch. Only carry forward if the sig was ok —
-             * same invariant as bs_handler. We can't distinguish here
-             * without re-parsing; err on the side of carrying forward
-             * only when the struct was fully populated. */
-            if (prior_ch.alg_name) have_prior = 1;
-        } else {
+        const char *cverr = bs_verify_cookie(r, cfg, prior_val, &prior_ch);
+        if (cverr == NULL) {
+            have_prior = 1;
+        } else if (prior_ch.alg_name &&
+                   strcmp(cverr, "expired") != 0) {
             have_prior = 1;
         }
     }
@@ -15908,8 +15928,16 @@ static int bs_form_captcha_fixup(request_rec *r)
              * still trustworthy). Skip on signature mismatch — those
              * bytes can't be trusted. Same invariant as the M7 issue
              * path. */
+            /* Security review MEDIUM #1 — refuse carry-forward when
+             * the cookie has expired. Otherwise a leaked or stolen
+             * cookie could be replayed past TTL to transplant a
+             * good-standing rep into a freshly-minted _bs_verified
+             * via the captcha solve path. The TTL is the only
+             * mechanism preventing indefinite reputation transfer
+             * across cookie generations. */
             if (cverr == NULL ||
                 (cverr && strcmp(cverr, "signature mismatch") != 0
+                       && strcmp(cverr, "expired") != 0
                        && prior_ch.alg_name)) {
                 have_prior = 1;
             }
