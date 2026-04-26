@@ -1,4 +1,4 @@
-"""E17.3 — recaptcha-v3 score-based provider dispatch.
+"""E17.3-4 — recaptcha-v3 / recaptcha-v2 / friendly dispatch coverage.
 
 reCAPTCHA v3 is materially different from Turnstile in client API:
 no widget element, always invisible, uses grecaptcha.execute() with
@@ -133,6 +133,80 @@ def test_verify_rejects_recaptcha_v3_missing_token(config_override):
         assert r.status_code in (400, 403), (
             f"missing-token POST should be rejected; got {r.status_code}"
         )
+
+
+def test_wrapper_js_carries_recaptcha_v2_dispatch():
+    """E17.4b — recaptcha-v2 invisible mode."""
+    r = client.get("/botshield/embedded.js")
+    assert r.status_code == 200
+    body = r.text
+    assert "recaptcha-v2" in body, "wrapper missing recaptcha-v2 dispatch"
+    assert "runRecaptchaV2" in body, "wrapper missing runRecaptchaV2"
+    # v2 invisible uses grecaptcha.render + execute (NOT execute(sitekey))
+    # — the API differs from v3.
+    assert "grecaptcha.render" in body, (
+        "wrapper missing grecaptcha.render call (v2 invisible needs it)"
+    )
+
+
+def test_wrapper_js_carries_friendly_dispatch():
+    """E17.4c — Friendly Captcha auto-start mode."""
+    r = client.get("/botshield/embedded.js")
+    assert r.status_code == 200
+    body = r.text
+    assert "friendly" in body, "wrapper missing friendly dispatch case"
+    assert "runFriendly" in body, "wrapper missing runFriendly function"
+    assert "friendlyChallenge.WidgetInstance" in body, (
+        "wrapper missing friendlyChallenge.WidgetInstance constructor"
+    )
+    assert "doneCallback" in body, (
+        "wrapper missing doneCallback (Friendly's solution callback)"
+    )
+    assert "startMode" in body and "auto" in body, (
+        "wrapper missing startMode:'auto' for invisible behavior"
+    )
+    assert "cdn.jsdelivr.net/npm/friendly-challenge" in body, (
+        "wrapper missing Friendly Captcha CDN loader"
+    )
+
+
+def test_bootstrap_returns_recaptcha_v2_provider(config_override):
+    """Sanity check: bootstrap surfaces provider=recaptcha-v2 when
+    configured. Sitekey is the v2 always-pass test pair (Google's
+    only published v2 test keys; not invisible-specific but the
+    bootstrap doesn't care about the sitekey type, just transports
+    it to the wrapper)."""
+    with config_override(
+        r"BotShieldAllow\s+on",
+        'BotShieldAllow on\n'
+        '    <Location /botshield/embedded-bootstrap>\n'
+        '        BotShieldCaptchaProvider recaptcha-v2\n'
+        '        BotShieldCaptchaSiteKey 6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI\n'
+        '        BotShieldCaptchaSecretFile /etc/botshield/recaptcha-v2-secret\n'
+        '    </Location>',
+        count=1,
+    ):
+        r = client.get("/botshield/embedded-bootstrap")
+        j = json.loads(r.text)
+        assert j.get("provider") == "recaptcha-v2"
+
+
+def test_bootstrap_returns_friendly_provider(config_override):
+    """Same check for Friendly. The placeholder sitekey from the dev
+    config is fine — bootstrap just round-trips it."""
+    with config_override(
+        r"BotShieldAllow\s+on",
+        'BotShieldAllow on\n'
+        '    <Location /botshield/embedded-bootstrap>\n'
+        '        BotShieldCaptchaProvider friendly\n'
+        '        BotShieldCaptchaSiteKey FRIENDLY_CAPTCHA_SITEKEY_PLACEHOLDER\n'
+        '        BotShieldCaptchaSecretFile /etc/botshield/friendly-secret\n'
+        '    </Location>',
+        count=1,
+    ):
+        r = client.get("/botshield/embedded-bootstrap")
+        j = json.loads(r.text)
+        assert j.get("provider") == "friendly"
 
 
 def test_verify_rejects_provider_mismatch(config_override):
