@@ -15516,6 +15516,22 @@ static int bs_form_captcha_fixup(request_rec *r)
         return HTTP_BAD_REQUEST;
     }
 
+    /* Security review HIGH #1 — NUL-byte parser-confusion smuggling.
+     * Body is read as raw bytes (memcpy + length), but downstream
+     * validators treat it as a C string: bs_form_get uses strchr,
+     * json_tokener_parse_verbose stops at the first '\0'. The full
+     * byte buffer (including post-NUL bytes) is then replayed to
+     * the app handler via the replay filter. An attacker can hide
+     * a separate request shape past a NUL — BotShield validates
+     * the prefix, the app handler sees the full body. Reject any
+     * body containing an embedded NUL with 400 before validation. */
+    if (memchr(body, '\0', body_len) != NULL) {
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: form-captcha body contains embedded NUL "
+            "byte (rejected to prevent parser-confusion smuggling)");
+        return HTTP_BAD_REQUEST;
+    }
+
     /* E12 — shadow / observe mode for E18. If global BotShieldShadowMode
      * is on, skip siteverify + cookie-mint, log a :observe reason, and
      * pass the request through. The body is still read (we already did
