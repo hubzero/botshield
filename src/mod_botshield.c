@@ -1255,9 +1255,26 @@ static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
     return out;
 }
 
+/* Forward decl: defined down with the bs_flag_metadata array. The
+ * reset has to fire from bs_create_server_cfg (this function),
+ * which lives much earlier than the array data — hence the
+ * declaration here. */
+static void bs_flag_meta_reset_to_defaults(void);
+
 static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
 {
-    (void)s;
+    /* E14 — reset the global flag-metadata array on each main-server
+     * config-pass entry. The array is mutated in place by
+     * BotShieldFlag directives; without this reset, removing a
+     * directive line + apachectl graceful would leak the prior
+     * mutation across reloads (graceful re-runs config parse but
+     * doesn't dlclose the module .so). Restricting to the main
+     * server (!s->is_virtual) gives us exactly one reset per
+     * config pass, before any directive setter for THIS pass fires
+     * — vhost create-cfg calls happen later and inherit. */
+    if (s && !s->is_virtual) {
+        bs_flag_meta_reset_to_defaults();
+    }
     bs_server_cfg *scfg = apr_pcalloc(p, sizeof(*scfg));
     scfg->shm_size          = BS_DEFAULT_SHM_SIZE;
     scfg->flagged_capacity  = BS_DEFAULT_FLAGGED_SLOTS;
@@ -4936,6 +4953,30 @@ static bs_flag_meta bs_flag_metadata[] = {
     { "app_verified_session", BS_FLAG_APP_VERIFIED_SESSION, -40, 0, BS_TIER_PASS },
     { "app_trust_signal",     BS_FLAG_APP_TRUST_SIGNAL,     -20, 0, BS_TIER_PASS },
 };
+
+/* Pristine copy of the defaults. The mutable array above gets
+ * mutated in place by `BotShieldFlag` directives — without this,
+ * an operator who removes a directive and runs `apachectl graceful`
+ * would still see the prior mutation in memory because graceful
+ * doesn't dlclose the .so. bs_create_server_cfg calls
+ * bs_flag_meta_reset_to_defaults() on each main-server config
+ * pass to give the directive parser a clean slate. */
+static const bs_flag_meta bs_flag_metadata_defaults[] = {
+    { "honeypot_hit",         BS_FLAG_HONEYPOT_HIT,          60, 0, BS_TIER_PASS },
+    { "scanner_probe",        BS_FLAG_SCANNER_PROBE,         50, 0, BS_TIER_PASS },
+    { "fake_bot",             BS_FLAG_FAKE_BOT,              80, 0, BS_TIER_PASS },
+    { "pow_fail_streak",      BS_FLAG_POW_FAIL_STREAK,       30, 0, BS_TIER_PASS },
+    { "app_verified_human",   BS_FLAG_APP_VERIFIED_HUMAN,   -80, 0, BS_TIER_PASS },
+    { "app_verified_session", BS_FLAG_APP_VERIFIED_SESSION, -40, 0, BS_TIER_PASS },
+    { "app_trust_signal",     BS_FLAG_APP_TRUST_SIGNAL,     -20, 0, BS_TIER_PASS },
+};
+
+static void bs_flag_meta_reset_to_defaults(void)
+{
+    memcpy(bs_flag_metadata, bs_flag_metadata_defaults,
+           sizeof(bs_flag_metadata_defaults));
+}
+
 #define BS_FLAG_META_COUNT \
     (sizeof(bs_flag_metadata) / sizeof(bs_flag_metadata[0]))
 
@@ -6999,6 +7040,7 @@ static const char *bs_set_state_file(cmd_parms *cmd, void *dconf,
                                      const char *arg)
 {
     (void)dconf;
+    bs_warn_if_virtual_scope(cmd, "BotShieldStateFile");
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
     if (!arg || !*arg) return "BotShieldStateFile requires a path";
@@ -7010,6 +7052,7 @@ static const char *bs_set_state_save_interval(cmd_parms *cmd, void *dconf,
                                               const char *arg)
 {
     (void)dconf;
+    bs_warn_if_virtual_scope(cmd, "BotShieldStateSaveInterval");
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
     /* 0 = shutdown-only. Otherwise must be in a sane operational
@@ -11728,6 +11771,59 @@ static int bs_embedded_bootstrap_handler(request_rec *r,
 
     int difficulty = bs_effective_int(cfg->difficulty, BS_DEFAULT_DIFFICULTY);
     int ttl = bs_effective_int(cfg->cookie_ttl, BS_DEFAULT_COOKIE_TTL);
+
+    /* E14 — adaptive difficulty in the embedded path. The M7 issue
+     * path applies BotShieldFlag's next_difficulty bumps before
+     * issuing; the embedded bootstrap was missing this, so a
+     * flagged-IP client visiting an embedded-mode page got the
+     * same baseline PoW as a clean client. Look up flag state
+     * (IP-side via flagged-IP table; cookie-side via the prior_ch
+     * we may have parsed above), accumulate the delta, clamp
+     * against BotShieldMaxDifficulty. */
+    {
+        bs_server_cfg *scfg_h = ap_get_module_config(
+            r->server->module_config, &botshield_module);
+        unsigned char client_ip_local[16];
+        int have_local_ip = bs_parse_client_ip(r->useragent_ip,
+                                               client_ip_local);
+        if (have_local_ip && scfg_h) {
+            bs_mask_ipv6_prefix(client_ip_local,
+                                scfg_h->ipv6_prefix_bits);
+        }
+        apr_uint32_t local_ip_flags = 0;
+        if (have_local_ip && scfg_h &&
+            bs_flagged_ip_lookup(client_ip_local,
+                                 &local_ip_flags, scfg_h->ns_id)) {
+            /* hit */
+        }
+        /* Cookie-side flags. Re-parse here even though we already
+         * called bs_verify_cookie above for the off-mode short-
+         * circuit — that was for the success branch only. If the
+         * cookie was sig-mismatch (bytes can't be trusted) we
+         * skip; otherwise carry rep.flags forward. */
+        apr_uint32_t cookie_flags = 0;
+        if (cookie_val && *cookie_val) {
+            bs_challenge prior;
+            const char *cverr = bs_verify_cookie(r, cfg, cookie_val,
+                                                 &prior);
+            if (cverr == NULL ||
+                (cverr && strcmp(cverr, "signature mismatch") != 0)) {
+                cookie_flags = prior.rep.flags;
+            }
+        }
+        bs_flag_adaptive a_ip   = bs_flag_adaptive_for(local_ip_flags);
+        bs_flag_adaptive a_cook = bs_flag_adaptive_for(cookie_flags);
+        int delta = a_ip.difficulty_delta + a_cook.difficulty_delta;
+        if (delta != 0 && scfg_h) {
+            int max_diff = (scfg_h->max_difficulty > 0)
+                         ? scfg_h->max_difficulty
+                         : BS_DEFAULT_MAX_DIFFICULTY;
+            int requested = difficulty + delta;
+            if      (requested < 1)         difficulty = 1;
+            else if (requested > max_diff)  difficulty = max_diff;
+            else                            difficulty = requested;
+        }
+    }
 
     bs_challenge ch;
     memset(&ch, 0, sizeof(ch));
