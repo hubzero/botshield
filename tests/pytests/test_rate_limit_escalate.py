@@ -187,24 +187,35 @@ def test_escalation_isolates_per_ip(config_override):
     window between phases. Otherwise IP-B's burst would all fall
     over the (already-exhausted) budget and IP-B would rack up its
     own strikes — a real-but-different effect that would mask the
-    cross-IP-isolation property under test."""
+    cross-IP-isolation property under test.
+
+    Budget is intentionally tight (1/sec) and threshold low (3
+    strikes/min) so the test isn't sensitive to how slowly Python
+    sends sequential HTTPS requests — at any plausible request rate
+    of ~10 reqs/sec, IP-A's 12-request burst lands ~11 strikes,
+    well past threshold. Earlier shape (4/sec budget, 8/min
+    threshold) flaked when post-parallel-phase Apache slowed
+    sequential HTTPS handshakes enough that the 4/sec rate-counter
+    rolled mid-burst and strikes didn't accumulate fast enough.
+    Loosening the timing tolerance is cheaper than fighting Apache
+    load."""
     ip_a = "198.51.100.10"
     ip_b = "198.51.100.20"
     with config_override(
         r"BotShieldAllow\s+on",
         'BotShieldAllow on\n'
-        '    BotShieldRateLimit corpbot 4 sec "CorpBot" *\n'
-        '    BotShieldRateLimitEscalate corpbot 8 min '
+        '    BotShieldRateLimit corpbot 1 sec "CorpBot" *\n'
+        '    BotShieldRateLimitEscalate corpbot 3 min '
         'status=403 ttl=60',
         count=1,
     ):
-        # Drive IP-A: 4 admit + 12 strikes >= threshold(8) → escalates.
-        codes_a = _hammer(ip_a, CORP_UA, 16)
-        # Wait past the 1-second rate-limit window so IP-B's tight
-        # burst gets a fresh budget (and thus zero strikes of its own).
+        # Drive IP-A: 1 admit + ~11 strikes well past threshold(3).
+        codes_a = _hammer(ip_a, CORP_UA, 12)
+        # Wait past the 1-second rate-limit window so IP-B's request
+        # gets a fresh budget (and thus zero strikes of its own).
         time.sleep(1.2)
-        # IP-B's 4 requests fit the fresh 4/sec budget — all admit.
-        codes_b = _hammer(ip_b, CORP_UA, 4)
+        # IP-B's single request fits the fresh budget — admit.
+        codes_b = _hammer(ip_b, CORP_UA, 1)
         # IP-A is still escalated even after the rate-counter window
         # rolled (escalation TTL is independent of the rate-counter
         # window). One more request from IP-A should still hit 403.
