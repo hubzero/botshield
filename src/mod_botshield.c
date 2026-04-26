@@ -522,6 +522,16 @@ typedef struct {
     apr_uint32_t  load_recovery_streak;   /* samples wanting lower state */
     apr_uint32_t  load_state_changes;     /* monotonic counter for metrics */
     apr_uint32_t  _pad3;
+    /* Security review LOW #10 — probe-saturation log-throttle
+     * timestamps shared across all worker processes. Per-worker
+     * statics scaled the warning by worker count (25 workers, 25
+     * warnings per minute under sustained saturation). Atomic CAS
+     * on these fields lets one worker per minute claim the right
+     * to log; the rest skip. apr_int64_t to match
+     * apr_time_t. */
+    apr_int64_t   probe_warn_flagged_us;
+    apr_int64_t   probe_warn_strike_us;
+    apr_int64_t   probe_warn_safeguard_us;
 } bs_shm_header;
 
 /* Rate-limit / log-suppress slot encoding. One uint64 per slot:
@@ -6118,11 +6128,19 @@ static void bs_flagged_ip_add(request_rec *r,
     if (victim < 0) {
         /* Probe window was fully occupied with live non-matching entries.
          * Overwrite the first slot we looked at. Rate-limit the warning
-         * so a sustained attack doesn't flood logs. */
-        static apr_time_t last_warn = 0;
+         * so a sustained attack doesn't flood logs.
+         *
+         * Security review LOW #10 — log-throttle timestamp lives in
+         * SHM so all worker processes coordinate. CAS-claim wins
+         * the right to log; losers skip (the winner already emitted). */
         apr_time_t now_t = apr_time_now();
-        if (now_t - last_warn > apr_time_from_sec(60)) {
-            last_warn = now_t;
+        apr_int64_t prev = __atomic_load_n(
+            &bs_shm.header->probe_warn_flagged_us, __ATOMIC_RELAXED);
+        if (now_t - (apr_time_t)prev > apr_time_from_sec(60) &&
+            __atomic_compare_exchange_n(
+                &bs_shm.header->probe_warn_flagged_us, &prev,
+                (apr_int64_t)now_t, 0, __ATOMIC_RELAXED,
+                __ATOMIC_RELAXED)) {
             ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
                 "mod_botshield: flagged-IP table probe saturated at bucket %u "
                 "(capacity %" APR_SIZE_T_FMT "); overwriting — consider "
@@ -6340,10 +6358,15 @@ static int bs_strike_record_429(request_rec *r,
     } else if (empty_idx >= 0) {
         target_idx = empty_idx;
     } else {
-        static apr_time_t last_warn = 0;
+        /* Security review LOW #10 — SHM-shared log-throttle. */
         apr_time_t now_t = apr_time_now();
-        if (now_t - last_warn > apr_time_from_sec(60)) {
-            last_warn = now_t;
+        apr_int64_t prev = __atomic_load_n(
+            &bs_shm.header->probe_warn_strike_us, __ATOMIC_RELAXED);
+        if (now_t - (apr_time_t)prev > apr_time_from_sec(60) &&
+            __atomic_compare_exchange_n(
+                &bs_shm.header->probe_warn_strike_us, &prev,
+                (apr_int64_t)now_t, 0, __ATOMIC_RELAXED,
+                __ATOMIC_RELAXED)) {
             ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
                 "mod_botshield: strike-table probe saturated at "
                 "bucket %u (capacity %" APR_SIZE_T_FMT "); "
@@ -6582,10 +6605,15 @@ static void bs_safeguard_record_presentation(request_rec *r,
     } else if (empty_idx >= 0) {
         target_idx = empty_idx;
     } else {
-        static apr_time_t last_warn = 0;
+        /* Security review LOW #10 — SHM-shared log-throttle. */
         apr_time_t now_t = apr_time_now();
-        if (now_t - last_warn > apr_time_from_sec(60)) {
-            last_warn = now_t;
+        apr_int64_t prev = __atomic_load_n(
+            &bs_shm.header->probe_warn_safeguard_us, __ATOMIC_RELAXED);
+        if (now_t - (apr_time_t)prev > apr_time_from_sec(60) &&
+            __atomic_compare_exchange_n(
+                &bs_shm.header->probe_warn_safeguard_us, &prev,
+                (apr_int64_t)now_t, 0, __ATOMIC_RELAXED,
+                __ATOMIC_RELAXED)) {
             ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
                 "mod_botshield: safeguard-table probe saturated at "
                 "bucket %u (capacity %" APR_SIZE_T_FMT "); overwriting "
