@@ -1588,12 +1588,14 @@ static const char *bs_set_silent_mode(cmd_parms *cmd, void *cfg_v,
 
 /* E18 — `BotShieldFormCaptcha on|off`. Per-scope opt-in for inline
  * form captcha verification on POST submit. When on, BotShield
- * inspects the form-encoded request body for the configured captcha
- * provider's response field, siteverifies via the existing M8
- * client, mints _bs_verified on success, and replays the body back
- * via input filter so the downstream app handler still sees its
- * original POST. v1 supports application/x-www-form-urlencoded only;
- * multipart and JSON are E18.2 work. */
+ * inspects the request body for the configured captcha provider's
+ * response field, siteverifies via the existing M8 client, mints
+ * _bs_verified on success, and replays the body back via input
+ * filter so the downstream app handler still sees its original
+ * POST. Supports application/x-www-form-urlencoded and
+ * application/json. multipart/form-data (file uploads) is out of
+ * scope — operators with file-upload forms put the captcha on a
+ * separate non-upload form. */
 static const char *bs_set_form_captcha(cmd_parms *cmd, void *cfg_v, int flag)
 {
     bs_dir_cfg *cfg = cfg_v;
@@ -13394,8 +13396,9 @@ static const command_rec bs_cmds[] = {
                  "inherited). On valid token: mints _bs_verified, "
                  "DECLINED so the app handler runs with the original "
                  "body intact. On bad/missing token: 403, app handler "
-                 "never runs. v1 supports application/x-www-form-"
-                 "urlencoded only; multipart and JSON are coming."),
+                 "never runs. Supports application/x-www-form-"
+                 "urlencoded and application/json bodies; "
+                 "multipart/form-data (file uploads) is out of scope."),
     /* E17 PoC — silent-tier dispatch flavor. */
     AP_INIT_TAKE1("BotShieldSilentMode", bs_set_silent_mode, NULL,
                  RSRC_CONF | ACCESS_CONF,
@@ -15216,10 +15219,12 @@ static int bs_form_captcha_fixup(request_rec *r)
         return HTTP_SERVICE_UNAVAILABLE;
     }
 
-    /* Body content-type dispatch. v1 supports url-encoded;
-     * E18.3 added JSON. Multipart is deferred to a future cut.
-     * Anything else gets 415 with diagnostic so operators notice
-     * the gap rather than silently allow unverified submits. */
+    /* Body content-type dispatch. Supports url-encoded and JSON.
+     * multipart/form-data is deliberately out of scope — file
+     * uploads need streaming-parser machinery this module isn't
+     * the right home for. Anything else gets 415 with diagnostic
+     * so operators notice the gap rather than silently allow
+     * unverified submits. */
     const char *ct = apr_table_get(r->headers_in, "Content-Type");
     int ct_form = (ct &&
         strncasecmp(ct, "application/x-www-form-urlencoded", 33) == 0);
