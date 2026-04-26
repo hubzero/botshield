@@ -81,12 +81,44 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _apache_rss_kb() -> int:
-    """Total RSS across all apache2 workers, in kB."""
-    out = subprocess.run(
-        ["ps", "-C", "apache2", "-o", "rss="],
+    """Total RSS across the apache2 instance under test, in kB.
+
+    Security review LOW #19 — `ps -C apache2 -o rss=` returns every
+    apache2 process system-wide, double-counting if the host also
+    runs an unrelated system apache2 instance. Read the parent pid
+    from /var/run/apache2/apache2.pid and sum the parent + its
+    direct children only.
+    """
+    try:
+        with open("/var/run/apache2/apache2.pid") as f:
+            parent_pid = int(f.read().strip())
+    except (OSError, ValueError):
+        # No pidfile (test rig not provisioned yet) — fall back to
+        # the all-apache2 sum so the soak doesn't crash. The
+        # baseline-vs-final delta still tells the right story so
+        # long as both samples use the same scope.
+        out = subprocess.run(
+            ["ps", "-C", "apache2", "-o", "rss="],
+            capture_output=True, text=True, check=False,
+        ).stdout
+        return sum(int(x) for x in out.split() if x.strip())
+
+    # parent + children scoped via --ppid + the parent itself.
+    parent_rss = subprocess.run(
+        ["ps", "-o", "rss=", "-p", str(parent_pid)],
+        capture_output=True, text=True, check=False,
+    ).stdout.strip()
+    children_rss = subprocess.run(
+        ["ps", "-o", "rss=", "--ppid", str(parent_pid)],
         capture_output=True, text=True, check=False,
     ).stdout
-    return sum(int(x) for x in out.split() if x.strip())
+    total = 0
+    if parent_rss.isdigit():
+        total += int(parent_rss)
+    for x in children_rss.split():
+        if x.strip().isdigit():
+            total += int(x)
+    return total
 
 
 def _file_size(path: str) -> int:
