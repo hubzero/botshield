@@ -297,6 +297,39 @@ def test_embedded_wrapper_uses_real_url_worker():
     )
 
 
+def test_form_widget_injects_per_provider_markup(bs_browser_context):
+    """E18.4 — the form-widget loads on a page with a
+    [data-bs-form-captcha] slot and injects the per-provider widget
+    markup. With provider='turnstile', a <div class='cf-turnstile'>
+    child should appear inside the slot. The CDN script load is
+    blocked (route abort) so the test doesn't actually try to
+    contact Cloudflare; we only verify the wrapper's local DOM
+    work."""
+    page = bs_browser_context.new_page()
+    # Block external CDN loaders so the test is hermetic. The
+    # wrapper still injects the markup; only the provider's render
+    # script never fires (which is fine — we only test injection).
+    page.route("**/turnstile/v0/api.js", lambda r: r.abort())
+    page.route("**/hcaptcha.com/**", lambda r: r.abort())
+    page.route("**/recaptcha/api.js**", lambda r: r.abort())
+
+    page.goto("https://localhost/form-widget-test.html")
+    # Give the deferred script time to execute.
+    page.wait_for_function(
+        "document.querySelector('#captcha-slot .cf-turnstile') !== null",
+        timeout=5000,
+    )
+    injected = page.evaluate(
+        "document.querySelector('#captcha-slot .cf-turnstile')"
+        "  && document.querySelector('#captcha-slot .cf-turnstile')"
+        "       .getAttribute('data-sitekey')"
+    )
+    assert injected == "1x00000000000000000000AA", (
+        f"widget didn't inject Turnstile markup with sitekey; got "
+        f"{injected!r}"
+    )
+
+
 def test_embedded_subsequent_request_declined_through(
     config_override, bs_browser_context,
 ):
