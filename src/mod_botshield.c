@@ -9577,11 +9577,76 @@ static const char *bs_issue_challenge(apr_pool_t *p, const bs_dir_cfg *cfg,
  * carry forgiveness-window state. The version check rejects v1
  * cookies before we read the new fields, so a malformed v1 won't
  * misalign reads. */
+/* Security review INFO #1 — strict surface-form check for the
+ * cookie's canonical integer fields. The lenient bs_parse_int_bounded
+ * (used elsewhere for directive parsing where operators write loose
+ * input) accepts strtol's full grammar: leading whitespace, optional
+ * `+` sign, leading zeros. That makes the canonical form malleable —
+ * `5`, `+5`, ` 5`, `005` all parse to the same value, and the
+ * verify path would HMAC the RECONSTRUCTED canonical and accept any
+ * of those surface forms even though the server only ever emits `5`.
+ *
+ * Per the reviewer it's not exploitable today (HMAC is over the
+ * reconstructed bytes, all variants reconstruct identically). But
+ * canonical-form unambiguity is cheap to enforce and removes a
+ * future-footgun risk: any code that ever uses raw cookie bytes
+ * for replay-tracking / fingerprinting would otherwise have a free
+ * surface-form bypass.
+ *
+ * Strict canonical: ASCII digit string, optional leading `-` only
+ * when allow_negative, no whitespace, no `+`, no leading zeros
+ * (single `0` fine; `00` / `01` / `010` rejected). */
+static int bs_strict_int_form(const char *s, int allow_negative)
+{
+    if (!s || !*s) return 0;
+    if (*s == '-') {
+        if (!allow_negative) return 0;
+        s++;
+        if (!*s) return 0;
+    }
+    /* Leading digit: must be a digit. */
+    if (*s < '0' || *s > '9') return 0;
+    /* Reject leading-zero ambiguity: "0" is fine, "00"/"01" not. */
+    if (*s == '0' && s[1] != '\0') return 0;
+    for (const char *p = s + 1; *p; p++) {
+        if (*p < '0' || *p > '9') return 0;
+    }
+    return 1;
+}
+
 static const char *bs_parse_canonical_fields(char *const fields[],
                                               bs_challenge *ch)
 {
     long v;
     apr_int64_t v64;
+    /* Strict surface-form gate (INFO #1). Score is the only signed
+     * field; everything else is non-negative. */
+    static const struct {
+        int idx;
+        int allow_neg;
+    } strict_int_fields[] = {
+        { 0,  0 },   /* version */
+        { 4,  0 },   /* difficulty */
+        { 5,  0 },   /* expires_at */
+        { 6,  1 },   /* score (signed) */
+        { 7,  0 },   /* flags */
+        { 8,  0 },   /* passes_silent */
+        { 9,  0 },   /* passes_form */
+        { 10, 0 },   /* passes_captcha */
+        { 11, 0 },   /* challenged_at */
+        { 12, 0 },   /* auto */
+        { 13, 0 },   /* forgive_window_start */
+        { 14, 0 },   /* forgive_consumed */
+    };
+    for (size_t i = 0;
+         i < sizeof(strict_int_fields)/sizeof(strict_int_fields[0]);
+         i++) {
+        int fi = strict_int_fields[i].idx;
+        if (!bs_strict_int_form(fields[fi],
+                                 strict_int_fields[i].allow_neg)) {
+            return "non-canonical integer surface form";
+        }
+    }
     if (!bs_parse_int_bounded(fields[0], 0, INT_MAX, 10, &v)) return "bad version";
     ch->version = (int)v;
     if (ch->version != BS_PROTOCOL_VERSION) return "bad protocol version";
