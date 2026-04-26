@@ -1765,11 +1765,20 @@ static const char *bs_set_logo_label(cmd_parms *cmd, void *cfg_v, const char *ar
 /* Slurp a file at config-parse time and hand back its bytes allocated out
  * of the config pool. Size-capped so a misbehaving config can't blow up
  * Apache startup. Returns an error string on failure, NULL on success. */
+/* Loads up to max_bytes from path into a pool-allocated buffer.
+ * The buffer is always NUL-terminated at byte n (one extra byte
+ * past the file content). When out_len is non-NULL, it receives
+ * the actual byte count read — callers handling binary content
+ * (HMAC keys) MUST use this rather than strlen(out_content) since
+ * binary keys can legitimately contain embedded NULs that
+ * strlen would silently truncate at. Callers handling text
+ * content (logo/help/challenge files) can pass NULL. */
 static const char *bs_load_config_file(cmd_parms *cmd,
                                        const char *directive,
                                        const char *path,
                                        apr_size_t max_bytes,
-                                       const char **out_content)
+                                       const char **out_content,
+                                       apr_size_t *out_len)
 {
     apr_file_t *f = NULL;
     apr_status_t rv;
@@ -1806,6 +1815,45 @@ static const char *bs_load_config_file(cmd_parms *cmd,
     }
     buf[n] = '\0';
     *out_content = buf;
+    if (out_len) *out_len = n;
+    return NULL;
+}
+
+/* Security review HIGH #2 — validate a binary-capable secret loaded via
+ * bs_load_config_file. Trims one trailing newline (common with
+ * `echo`-style key generation), rejects embedded NUL bytes (would
+ * silently truncate keys generated with `dd if=/dev/urandom` or
+ * similar — ~22% of random 32-byte buffers contain a NUL), and
+ * enforces the minimum-bytes floor. Returns NULL on success with
+ * *out_len set to the effective key length, or an error string. */
+static const char *bs_validate_secret_key(cmd_parms *cmd,
+                                          const char *directive,
+                                          const char *path,
+                                          const char *buf,
+                                          apr_size_t buf_len,
+                                          apr_size_t *out_len)
+{
+    apr_size_t len = buf_len;
+    if (len > 0 && buf[len-1] == '\n') len--;
+    if (memchr(buf, '\0', len) != NULL) {
+        return apr_psprintf(cmd->pool,
+            "%s: '%s' contains an embedded NUL byte. Random binary "
+            "key files (e.g. `dd if=/dev/urandom` or `openssl rand`) "
+            "produce NUL bytes ~22%% of the time, and earlier "
+            "versions of this loader silently truncated the key at "
+            "the first NUL via strlen — yielding a shorter, weaker "
+            "effective key with no log warning. Generate the key "
+            "with hex (`openssl rand -hex 32`) or base64 (`openssl "
+            "rand -base64 48`) encoding instead, or pre-strip NULs.",
+            directive, path);
+    }
+    if (len < BS_MIN_SECRET_BYTES) {
+        return apr_psprintf(cmd->pool,
+            "%s: '%s' contains only %" APR_SIZE_T_FMT
+            " bytes (minimum %d)",
+            directive, path, len, BS_MIN_SECRET_BYTES);
+    }
+    *out_len = len;
     return NULL;
 }
 
@@ -1813,7 +1861,7 @@ static const char *bs_set_logo_file(cmd_parms *cmd, void *cfg_v, const char *arg
 {
     bs_dir_cfg *cfg = cfg_v;
     return bs_load_config_file(cmd, "BotShieldLogoFile", arg,
-                               BS_MAX_LOGO_BYTES, &cfg->logo_svg);
+                               BS_MAX_LOGO_BYTES, &cfg->logo_svg, NULL);
 }
 
 static const char *bs_set_help(cmd_parms *cmd, void *cfg_v, const char *arg)
@@ -1831,14 +1879,14 @@ static const char *bs_set_help_file(cmd_parms *cmd, void *cfg_v, const char *arg
 {
     bs_dir_cfg *cfg = cfg_v;
     return bs_load_config_file(cmd, "BotShieldHelpFile", arg,
-                               BS_MAX_HELP_BYTES, &cfg->help_html);
+                               BS_MAX_HELP_BYTES, &cfg->help_html, NULL);
 }
 
 static const char *bs_set_challenge_file(cmd_parms *cmd, void *cfg_v, const char *arg)
 {
     bs_dir_cfg *cfg = cfg_v;
     const char *err = bs_load_config_file(cmd, "BotShieldChallengeFile", arg,
-                                          BS_MAX_PAGE_BYTES, &cfg->challenge_html);
+                                          BS_MAX_PAGE_BYTES, &cfg->challenge_html, NULL);
     if (err) return err;
     if (!strstr(cfg->challenge_html, BS_WIDGET_MARKER)) {
         return apr_psprintf(cmd->pool,
@@ -8950,19 +8998,16 @@ static const char *bs_set_app_feedback_secret_file(cmd_parms *cmd,
     }
 
     const char *buf = NULL;
+    apr_size_t buf_len = 0;
     const char *err = bs_load_config_file(cmd,
         "BotShieldAppFeedbackSecretFile", arg,
-        BS_MAX_SECRET_BYTES, &buf);
+        BS_MAX_SECRET_BYTES, &buf, &buf_len);
     if (err) return err;
 
-    apr_size_t len = strlen(buf);
-    if (len > 0 && buf[len-1] == '\n') len--;
-    if (len < BS_MIN_SECRET_BYTES) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldAppFeedbackSecretFile: '%s' contains only "
-            "%" APR_SIZE_T_FMT " bytes (minimum %d)",
-            arg, len, BS_MIN_SECRET_BYTES);
-    }
+    apr_size_t len = 0;
+    err = bs_validate_secret_key(cmd, "BotShieldAppFeedbackSecretFile",
+                                 arg, buf, buf_len, &len);
+    if (err) return err;
 
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
@@ -9019,19 +9064,16 @@ static const char *bs_set_app_claims_secret_file(cmd_parms *cmd,
     }
 
     const char *buf = NULL;
+    apr_size_t buf_len = 0;
     const char *err = bs_load_config_file(cmd,
         "BotShieldAppClaimsSecretFile", arg,
-        BS_MAX_SECRET_BYTES, &buf);
+        BS_MAX_SECRET_BYTES, &buf, &buf_len);
     if (err) return err;
 
-    apr_size_t len = strlen(buf);
-    if (len > 0 && buf[len-1] == '\n') len--;
-    if (len < BS_MIN_SECRET_BYTES) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldAppClaimsSecretFile: '%s' contains only "
-            "%" APR_SIZE_T_FMT " bytes (minimum %d)",
-            arg, len, BS_MIN_SECRET_BYTES);
-    }
+    apr_size_t len = 0;
+    err = bs_validate_secret_key(cmd, "BotShieldAppClaimsSecretFile",
+                                 arg, buf, buf_len, &len);
+    if (err) return err;
 
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
@@ -9604,18 +9646,15 @@ static const char *bs_set_secret_file(cmd_parms *cmd, void *cfg_v,
     }
 
     const char *buf = NULL;
+    apr_size_t buf_len = 0;
     const char *err = bs_load_config_file(cmd, "BotShieldSecretFile", arg,
-                                          BS_MAX_SECRET_BYTES, &buf);
+                                          BS_MAX_SECRET_BYTES, &buf, &buf_len);
     if (err) return err;
 
-    /* Trim one trailing newline if present — common with `echo` output. */
-    apr_size_t len = strlen(buf);
-    if (len > 0 && buf[len-1] == '\n') len--;
-    if (len < BS_MIN_SECRET_BYTES) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldSecretFile: '%s' contains only %" APR_SIZE_T_FMT
-            " bytes (minimum %d)", arg, len, BS_MIN_SECRET_BYTES);
-    }
+    apr_size_t len = 0;
+    err = bs_validate_secret_key(cmd, "BotShieldSecretFile",
+                                 arg, buf, buf_len, &len);
+    if (err) return err;
 
     cfg->secret     = (const unsigned char *)buf;
     cfg->secret_len = len;
@@ -9657,19 +9696,17 @@ static const char *bs_set_secondary_secret_file(cmd_parms *cmd,
     }
 
     const char *buf = NULL;
+    apr_size_t buf_len = 0;
     const char *err = bs_load_config_file(cmd,
                                           "BotShieldSecondarySecretFile",
-                                          arg, BS_MAX_SECRET_BYTES, &buf);
+                                          arg, BS_MAX_SECRET_BYTES,
+                                          &buf, &buf_len);
     if (err) return err;
 
-    apr_size_t len = strlen(buf);
-    if (len > 0 && buf[len-1] == '\n') len--;
-    if (len < BS_MIN_SECRET_BYTES) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldSecondarySecretFile: '%s' contains only "
-            "%" APR_SIZE_T_FMT " bytes (minimum %d)",
-            arg, len, BS_MIN_SECRET_BYTES);
-    }
+    apr_size_t len = 0;
+    err = bs_validate_secret_key(cmd, "BotShieldSecondarySecretFile",
+                                 arg, buf, buf_len, &len);
+    if (err) return err;
 
     cfg->secret_secondary     = (const unsigned char *)buf;
     cfg->secret_secondary_len = len;
@@ -9825,16 +9862,16 @@ static const char *bs_set_captcha_secret_file(cmd_parms *cmd, void *cfg_v,
     }
 
     const char *buf = NULL;
+    apr_size_t buf_len = 0;
     const char *err = bs_load_config_file(cmd, "BotShieldCaptchaSecretFile",
-                                          arg, BS_MAX_SECRET_BYTES, &buf);
+                                          arg, BS_MAX_SECRET_BYTES,
+                                          &buf, &buf_len);
     if (err) return err;
 
-    apr_size_t len = strlen(buf);
-    if (len > 0 && buf[len-1] == '\n') len--;
-    if (len == 0) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldCaptchaSecretFile: '%s' is empty", arg);
-    }
+    apr_size_t len = 0;
+    err = bs_validate_secret_key(cmd, "BotShieldCaptchaSecretFile",
+                                 arg, buf, buf_len, &len);
+    if (err) return err;
     cfg->captcha_secret     = (const unsigned char *)buf;
     cfg->captcha_secret_len = len;
     return NULL;
@@ -15513,6 +15550,22 @@ static int bs_form_captcha_fixup(request_rec *r)
     if (rv != APR_SUCCESS) {
         ap_log_rerror(APLOG_MARK, APLOG_WARNING, rv, r,
             "mod_botshield: form-captcha body read failed");
+        return HTTP_BAD_REQUEST;
+    }
+
+    /* Security review HIGH #1 — NUL-byte parser-confusion smuggling.
+     * Body is read as raw bytes (memcpy + length), but downstream
+     * validators treat it as a C string: bs_form_get uses strchr,
+     * json_tokener_parse_verbose stops at the first '\0'. The full
+     * byte buffer (including post-NUL bytes) is then replayed to
+     * the app handler via the replay filter. An attacker can hide
+     * a separate request shape past a NUL — BotShield validates
+     * the prefix, the app handler sees the full body. Reject any
+     * body containing an embedded NUL with 400 before validation. */
+    if (memchr(body, '\0', body_len) != NULL) {
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: form-captcha body contains embedded NUL "
+            "byte (rejected to prevent parser-confusion smuggling)");
         return HTTP_BAD_REQUEST;
     }
 
