@@ -12005,7 +12005,12 @@ static int bs_embedded_verify_pow(request_rec *r, bs_dir_cfg *cfg,
         r->status = HTTP_INTERNAL_SERVER_ERROR;
         return OK;
     }
-    apr_table_set(r->err_headers_out, "Set-Cookie",
+    /* E18 review fix (cross-ext) — apr_table_set deletes any prior
+     * entries for the key, which clobbers Set-Cookie headers added
+     * by other modules (e.g. mod_session) earlier in the chain.
+     * apr_table_add appends a new row instead. Symmetric with the
+     * E18 fixup site and the M8 captcha-verify path. */
+    apr_table_add(r->err_headers_out, "Set-Cookie",
                   bs_build_set_cookie(r, cfg, payload, ch.expires_at));
 
     r->status = HTTP_NO_CONTENT;
@@ -12216,7 +12221,8 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
         r->status = HTTP_INTERNAL_SERVER_ERROR;
         return OK;
     }
-    apr_table_set(r->err_headers_out, "Set-Cookie",
+    /* E18 review fix (cross-ext) — see PoW path above. */
+    apr_table_add(r->err_headers_out, "Set-Cookie",
                   bs_build_set_cookie(r, cfg, payload, ch.expires_at));
 
     r->status = HTTP_NO_CONTENT;
@@ -15239,7 +15245,7 @@ static int bs_handler(request_rec *r)
 typedef struct {
     const char *body;
     apr_size_t  len;
-    int         emitted;
+    apr_size_t  offset;   /* bytes already emitted to downstream */
 } bs_form_replay_ctx;
 
 static ap_filter_rec_t *bs_form_replay_filter_handle = NULL;
@@ -15257,24 +15263,36 @@ static apr_status_t bs_form_replay_filter(ap_filter_t *f,
     }
     if (mode == AP_MODE_INIT) return APR_SUCCESS;
 
-    if (!ctx->emitted) {
-        /* Emit the buffered body + EOS in one shot. Most handlers
-         * read until EOS via ap_setup_client_block /
-         * ap_get_client_block; the framework slices buckets to honor
-         * `readbytes`. The body is allocated in r->pool, so the
-         * pool bucket is safe for the full request lifetime. */
-        if (ctx->len > 0) {
-            apr_bucket *body_b = apr_bucket_pool_create(
-                ctx->body, ctx->len, f->r->pool, f->c->bucket_alloc);
-            APR_BRIGADE_INSERT_TAIL(bb, body_b);
+    /* E18 review fix — honor readbytes. Emitting the whole body in a
+     * single bucket regardless of what the downstream handler asked
+     * for is an API-conformance violation (a strictly-conformant
+     * caller is allowed to discard excess past readbytes). Stream it
+     * one chunk at a time, capped at readbytes when the caller is in
+     * READBYTES mode. The body buffer is allocated in r->pool and
+     * outlives any bucket the framework derives from it, so
+     * apr_bucket_immortal_create is safe and avoids the deferred
+     * pool-bucket copy on pool cleanup. */
+    if (ctx->offset < ctx->len) {
+        apr_size_t remain = ctx->len - ctx->offset;
+        apr_size_t emit = remain;
+        if (mode == AP_MODE_READBYTES && readbytes > 0 &&
+            (apr_off_t)remain > readbytes) {
+            emit = (apr_size_t)readbytes;
         }
-        APR_BRIGADE_INSERT_TAIL(bb,
-            apr_bucket_eos_create(f->c->bucket_alloc));
-        ctx->emitted = 1;
+        apr_bucket *b = apr_bucket_immortal_create(
+            ctx->body + ctx->offset, emit, f->c->bucket_alloc);
+        APR_BRIGADE_INSERT_TAIL(bb, b);
+        ctx->offset += emit;
+        if (ctx->offset == ctx->len) {
+            APR_BRIGADE_INSERT_TAIL(bb,
+                apr_bucket_eos_create(f->c->bucket_alloc));
+            ap_remove_input_filter(f);
+        }
         return APR_SUCCESS;
     }
-    /* Already emitted; subsequent reads see only EOS. Self-remove
-     * so we don't get re-invoked. */
+
+    /* Body fully drained but caller is reading again. Emit EOS and
+     * self-remove. */
     APR_BRIGADE_INSERT_TAIL(bb,
         apr_bucket_eos_create(f->c->bucket_alloc));
     ap_remove_input_filter(f);
@@ -15293,7 +15311,11 @@ static apr_status_t bs_form_captcha_read_body(request_rec *r,
 {
     apr_bucket_brigade *bb = apr_brigade_create(r->pool,
         r->connection->bucket_alloc);
-    char *buf = apr_palloc(r->pool, BS_FORM_CAPTCHA_BODY_MAX);
+    /* E18 review fix — allocate one extra byte so a body of exactly
+     * BS_FORM_CAPTCHA_BODY_MAX bytes (the read-loop guard is `>`,
+     * not `>=`, so this size is accepted) can be NUL-terminated
+     * without overwriting the last valid body byte. */
+    char *buf = apr_palloc(r->pool, BS_FORM_CAPTCHA_BODY_MAX + 1);
     apr_size_t total = 0;
     int saw_eos = 0;
     apr_status_t rv = APR_SUCCESS;
@@ -15328,7 +15350,7 @@ static apr_status_t bs_form_captcha_read_body(request_rec *r,
         apr_brigade_cleanup(bb);
     }
     apr_brigade_destroy(bb);
-    buf[total < BS_FORM_CAPTCHA_BODY_MAX ? total : BS_FORM_CAPTCHA_BODY_MAX - 1] = '\0';
+    buf[total] = '\0';
     *out_body = buf;
     *out_len  = total;
     return APR_SUCCESS;
@@ -15404,9 +15426,9 @@ static int bs_form_captcha_fixup(request_rec *r)
             r->server->module_config, &botshield_module);
         if (scfg_sh && scfg_sh->shadow_mode == 1) {
             bs_form_replay_ctx *ctx = apr_pcalloc(r->pool, sizeof(*ctx));
-            ctx->body    = body;
-            ctx->len     = body_len;
-            ctx->emitted = 0;
+            ctx->body   = body;
+            ctx->len    = body_len;
+            ctx->offset = 0;
             ap_add_input_filter_handle(bs_form_replay_filter_handle,
                                        ctx, r, r->connection);
             ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
@@ -15586,7 +15608,11 @@ static int bs_form_captcha_fixup(request_rec *r)
     const char *payload = bs_build_cookie_payload(r->pool, cfg, &ch,
                                                   "captcha");
     if (payload) {
-        apr_table_set(r->err_headers_out, "Set-Cookie",
+        /* E18 review fix — apr_table_set deletes any prior Set-Cookie
+         * entries (mod_session and friends may have added some by
+         * now). apr_table_add appends a new row, which is what HTTP
+         * actually allows for Set-Cookie. */
+        apr_table_add(r->err_headers_out, "Set-Cookie",
                       bs_build_set_cookie(r, cfg, payload, ch.expires_at));
     }
 
@@ -15594,9 +15620,9 @@ static int bs_form_captcha_fixup(request_rec *r)
      * original POST body. Filter buffers in r->pool memory; lifetime
      * is the request, plenty for any handler that wants it. */
     bs_form_replay_ctx *ctx = apr_pcalloc(r->pool, sizeof(*ctx));
-    ctx->body    = body;
-    ctx->len     = body_len;
-    ctx->emitted = 0;
+    ctx->body   = body;
+    ctx->len    = body_len;
+    ctx->offset = 0;
     ap_add_input_filter_handle(bs_form_replay_filter_handle,
                                ctx, r, r->connection);
 
