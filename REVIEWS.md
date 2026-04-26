@@ -32,6 +32,8 @@ application.
 | E10       | Gemini 3.1 Pro Preview, 2026-04-26 | one real finding | metrics-vocabulary bug fixed: `tier="safeguard"` was unrecognized by `bs_m_tier_idx`, causing every safeguard activation to drop a metric increment with a WARNING. Fix: alias `"safeguard"` → `BS_M_TIER_PASS` in the metrics index (decision-log line stays distinct, metric counter binned to pass). Recovers credibility for the Gemini reviewer relative to E7-E9. |
 | E11 (E11.1+E11.2) | Gemini 3.1 Pro Preview + self-audit, 2026-04-26 | one real finding (self-audit) | Gemini returned pure praise; self-audit caught a vhost-propagation gap: `BotShieldLoadWarmRise` / `LoadHotRise` / `LoadNormalFall` directives, when set inside `<VirtualHost>`, parsed and merged into the vhost's cfg but were silently ignored at watchdog time because the post-config propagation loop only copied the first four load fields (state-file, refresh-sec, warm-pct, hot-pct) up to main_scfg. Hysteresis fields stayed zero, compiled defaults applied. Fix: extend the propagation loop to include all three hysteresis fields. |
 | E12       | Gemini 3.1 Pro Preview + self-audit, 2026-04-26 | one real finding (self-audit) | Gemini returned pure praise; self-audit caught a cross-extension regression: E18 (`BotShieldFormCaptcha on`) didn't honor `BotShieldShadowMode on`. E18 was added after E12 and never plumbed through the global shadow flag, so operators staging a full BotShield policy under shadow mode would still see E18's hard-403s on bad/missing tokens — breaking the dry-run mental model. Fix: bs_form_captcha_fixup checks `scfg->shadow_mode == 1` after body-read but before any policy-level decision; if on, installs the body-replay filter and returns DECLINED with a `form-captcha:observe` log line. Transport-level errors (415/413/400/503-misconfigured) intentionally still fire under shadow mode — those are misconfiguration, not policy. |
+| E13 (E13.1) | Gemini 3.1 Pro Preview + self-audit, 2026-04-26 | one real finding (self-audit) | Gemini returned pure praise on the architectural claims (which checked out: state-file siphash_key restore order, mutex-protected state_save, per-slot ns_id matching, slot pad alignment). Self-audit caught the same vhost-scope-silently-ignored pattern as E11: `BotShieldStateFile` and `BotShieldStateSaveInterval` accept `RSRC_CONF` (main + vhost), but only `main_scfg`'s value is read at post_config — operators dropping these inside `<VirtualHost>` (where the rest of BotShield's directives naturally live) get silent no-ops. Fix: apply `bs_warn_if_virtual_scope` to both setters, same pattern as the SHM-sizing directives. Operators now get a clear NOTICE telling them to move the directive to the main server scope. |
+| E14       | Gemini 3.1 Pro Preview + self-audit, 2026-04-26 | two findings (one Gemini, one self-audit) | (1) Gemini caught config-stickiness across `apachectl graceful`: the global `bs_flag_metadata` array is mutated in place by `BotShieldFlag` directives but never reset between config passes. Removing a directive line + graceful-reload would silently keep the prior mutation in memory. Fix: pristine `bs_flag_metadata_defaults` constant + `bs_flag_meta_reset_to_defaults()` helper called from `bs_create_server_cfg` for the main server. (2) Self-audit caught a cross-extension gap: E14's adaptive difficulty was wired into the M7 issue path but NOT into the E17 embedded-bootstrap PoW path. A flagged-IP client visiting an embedded-mode page would get the baseline-difficulty challenge, not the adaptive-bumped one. Fix: the bootstrap now does flag lookup (IP-side via flagged-IP table, cookie-side via prior_ch parse) and applies the same clamp-against-MaxDifficulty logic as M7. |
 
 ### Gemini-3.1-Pro caveat
 
@@ -57,11 +59,9 @@ because at least one set of eyes saw them) but don't skip them.
 
 High priority — load-bearing or new-attack-surface code:
 
-1. **E13 / E13.1** — per-vhost SHM namespacing. Bumped state-file format
-   version 1→2; added `ns_id` field to flagged-IP / strike / safeguard
-   slots; added headroom warnings + missing-table gauges. Cross-vhost
-   isolation is a security claim worth verifying. Particularly check
-   slot-write/slot-read symmetry for `ns_id` matching.
+1. ~~**E13 / E13.1** — per-vhost SHM namespacing~~ — reviewed
+   2026-04-26 (Gemini + self-audit), one finding (vhost-scope state
+   file directives), fixed.
 2. **E16** — cookie secret rotation. Multi-key verify on HMAC + GCM
    paths is exactly where timing side-channel or fall-through bugs
    historically appear. Verify constant-time comparison still
@@ -87,7 +87,8 @@ Lower priority — smaller surface, less new attack-surface:
 7. ~~**E12** — shadow mode / dry-run~~ — reviewed 2026-04-26
    (Gemini + self-audit), one finding (cross-extension regression
    in E18), fixed.
-8. **E14** — adaptive challenge intensity (flag-registry).
+8. ~~**E14** — adaptive challenge intensity~~ — reviewed 2026-04-26
+   (Gemini + self-audit), two findings, both fixed.
 9. **E15** — forgiveness cap.
 
 Tail — already had a low-confidence review pass; re-review when
