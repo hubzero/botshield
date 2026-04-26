@@ -453,6 +453,13 @@ typedef struct {
 #define BS_DEFAULT_SAFEGUARD_THRESHOLD 5
 #define BS_DEFAULT_SAFEGUARD_WINDOW    600
 #define BS_DEFAULT_SAFEGUARD_TTL       900
+/* E17 — embedded → M7 fallback threshold. After N consecutive silent-
+ * tier-embedded dispatches in the safeguard window without
+ * _bs_verified arriving, the embedded short-circuit is bypassed and
+ * M7 issues. Set lower than safeguard threshold so M7 gets a chance
+ * before pass-through fully kicks in. Reuses the safeguard table's
+ * present_count to avoid a fourth SHM table just for this counter. */
+#define BS_DEFAULT_EMBEDDED_FALLBACK_THRESHOLD 3
 
 /* E11 — load-aware throttling. A periodic watchdog tick samples
  * the Apache scoreboard's busy-worker ratio, optionally merges in
@@ -774,6 +781,12 @@ struct bs_dir_cfg {
      * as a tri-state with UNSET sentinel so the merge picks the
      * right scope's value. */
     int silent_mode;            /* bs_silent_mode; UNSET inherits */
+    /* E18 — inline form captcha. When 1, this scope's POST handler
+     * inspects the request body (url-encoded only in v1) for the
+     * configured captcha provider's response field, siteverifies
+     * via the existing M8 path, mints _bs_verified on success, 403s
+     * on failure. -1 = inherit, 0 = off, 1 = on. */
+    int form_captcha;           /* tri-state */
     int forgive_silent;         /* score credit on silent-tier pass */
     int forgive_form;           /* score credit on form-tier pass */
     int forgive_captcha;        /* score credit on captcha pass */
@@ -1025,6 +1038,7 @@ static void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->score_hard    = BS_UNSET;
     cfg->score_captcha = BS_UNSET;
     cfg->silent_mode   = BS_SILENT_MODE_UNSET;
+    cfg->form_captcha  = BS_UNSET;
     cfg->forgive_silent  = BS_UNSET;
     cfg->forgive_form    = BS_UNSET;
     cfg->forgive_captcha = BS_UNSET;
@@ -1395,6 +1409,8 @@ static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     out->score_captcha = (add->score_captcha == BS_UNSET) ? base->score_captcha : add->score_captcha;
     out->silent_mode   = (add->silent_mode   == BS_SILENT_MODE_UNSET)
                        ? base->silent_mode : add->silent_mode;
+    out->form_captcha  = (add->form_captcha  == BS_UNSET)
+                       ? base->form_captcha : add->form_captcha;
     out->forgive_silent  = (add->forgive_silent  == BS_UNSET) ? base->forgive_silent  : add->forgive_silent;
     out->forgive_form    = (add->forgive_form    == BS_UNSET) ? base->forgive_form    : add->forgive_form;
     out->forgive_captcha = (add->forgive_captcha == BS_UNSET) ? base->forgive_captcha : add->forgive_captcha;
@@ -1567,6 +1583,23 @@ static const char *bs_set_silent_mode(cmd_parms *cmd, void *cfg_v,
             "BotShieldSilentMode: '%s' must be 'interstitial' or "
             "'embedded'", arg);
     }
+    return NULL;
+}
+
+/* E18 — `BotShieldFormCaptcha on|off`. Per-scope opt-in for inline
+ * form captcha verification on POST submit. When on, BotShield
+ * inspects the request body for the configured captcha provider's
+ * response field, siteverifies via the existing M8 client, mints
+ * _bs_verified on success, and replays the body back via input
+ * filter so the downstream app handler still sees its original
+ * POST. Supports application/x-www-form-urlencoded and
+ * application/json. multipart/form-data (file uploads) is out of
+ * scope — operators with file-upload forms put the captcha on a
+ * separate non-upload form. */
+static const char *bs_set_form_captcha(cmd_parms *cmd, void *cfg_v, int flag)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    cfg->form_captcha = flag ? 1 : 0;
     return NULL;
 }
 
@@ -3209,10 +3242,15 @@ static bs_load_state bs_load_current(void);
 
 /* E10 — safeguard helpers. Called from bs_handler at two points:
  * just before issuing a challenge (check + record presentation)
- * and on successful cookie verify (clear the per-IP counter). */
+ * and on successful cookie verify (clear the per-IP counter).
+ * E17 reuses the count via bs_safeguard_present_count for the
+ * embedded → M7 fallback decision. */
 static int  bs_safeguard_check(const unsigned char ip[16],
                                apr_int64_t now,
                                apr_uint32_t ns_id);
+static apr_uint32_t bs_safeguard_present_count(const unsigned char ip[16],
+                                               apr_int64_t now,
+                                               apr_uint32_t ns_id);
 static void bs_safeguard_record_presentation(request_rec *r,
                                              bs_server_cfg *scfg,
                                              const unsigned char ip[16],
@@ -5681,6 +5719,20 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                     main_scfg->load_warm_pct = vc->load_warm_pct;
                 if (main_scfg->load_hot_pct <= 0 && vc->load_hot_pct > 0)
                     main_scfg->load_hot_pct = vc->load_hot_pct;
+                /* Hysteresis fields too — bs_load_apply_tick reads
+                 * these off main_scfg via the watchdog callback. If
+                 * an operator sets BotShieldLoadWarmRise inside a
+                 * <VirtualHost>, the directive parses fine but
+                 * silently has no effect unless we propagate. */
+                if (main_scfg->load_warm_rise <= 0
+                    && vc->load_warm_rise > 0)
+                    main_scfg->load_warm_rise = vc->load_warm_rise;
+                if (main_scfg->load_hot_rise <= 0
+                    && vc->load_hot_rise > 0)
+                    main_scfg->load_hot_rise = vc->load_hot_rise;
+                if (main_scfg->load_normal_fall <= 0
+                    && vc->load_normal_fall > 0)
+                    main_scfg->load_normal_fall = vc->load_normal_fall;
             }
         }
         if (main_scfg) {
@@ -6196,6 +6248,62 @@ static int bs_safeguard_check(const unsigned char ip[16], apr_int64_t now,
         if (local_ns_id != ns_id) continue;
         if (memcmp(local_ip, ip, 16) != 0) continue;
         return local_until > now;
+    }
+    return 0;
+}
+
+/* E17 — read present_count for this IP (lockless seqlock, same
+ * discipline as bs_safeguard_check). Returns 0 if the IP has no
+ * slot or the safeguard window has expired. Used by the embedded
+ * → M7 fallback decision: after N consecutive silent-tier-embedded
+ * dispatches without _bs_verified, the embedded short-circuit is
+ * bypassed and M7 issues. The count is the same one
+ * bs_safeguard_record_presentation maintains; reading it here
+ * doesn't affect safeguard semantics. */
+static apr_uint32_t bs_safeguard_present_count(const unsigned char ip[16],
+                                               apr_int64_t now,
+                                               apr_uint32_t ns_id)
+{
+    if (!bs_shm.safeguard_table || bs_shm.safeguard_capacity == 0) return 0;
+    apr_uint32_t base = bs_safeguard_bucket(ip, ns_id);
+
+    for (unsigned i = 0; i < BS_SAFEGUARD_PROBE_LIMIT; i++) {
+        apr_uint32_t idx = (base + i) % bs_shm.safeguard_capacity;
+        bs_safeguard_slot *slot = &bs_shm.safeguard_table[idx];
+
+        apr_uint32_t v1, v2;
+        apr_uint32_t  local_used;
+        apr_uint32_t  local_ns_id;
+        unsigned char local_ip[16];
+        apr_uint32_t  local_window_start;
+        apr_uint32_t  local_count;
+        int spins = 0;
+        for (;;) {
+            v1 = apr_atomic_read32(&slot->version);
+            if (v1 & 1U) {
+                if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
+                continue;
+            }
+            local_used         = slot->used;
+            local_ns_id        = slot->ns_id;
+            memcpy(local_ip, slot->ip, 16);
+            local_window_start = slot->present_window_start;
+            local_count        = slot->present_count;
+            v2 = apr_atomic_read32(&slot->version);
+            if (v1 == v2) break;
+            if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
+        }
+        if (v1 == ~0U) continue;
+        if (!local_used) continue;
+        if (local_ns_id != ns_id) continue;
+        if (memcmp(local_ip, ip, 16) != 0) continue;
+        /* Window-rolled: count is stale, treat as zero. */
+        apr_uint32_t window_sec = BS_DEFAULT_SAFEGUARD_WINDOW;
+        if (local_window_start == 0 ||
+            (apr_uint32_t)now - local_window_start >= window_sec) {
+            return 0;
+        }
+        return local_count;
     }
     return 0;
 }
@@ -10497,6 +10605,15 @@ static int bs_m_tier_idx(const char *s)
     if (strcmp(s, "silent")  == 0) return BS_M_TIER_SILENT;
     if (strcmp(s, "form")    == 0) return BS_M_TIER_FORM;
     if (strcmp(s, "captcha") == 0) return BS_M_TIER_CAPTCHA;
+    /* E10 — safeguard activations land in the decision log as
+     * tier="safeguard" so operators can grep/filter for them
+     * (semantically distinct from a regular pass). For metrics
+     * we bin them into the pass counter — they are functionally
+     * pass-through (no challenge issued, request reaches origin).
+     * Operators wanting to dashboard safeguard rate scrape the
+     * decision log for reason="challenge-safeguard". A dedicated
+     * counter could be added later without changing this mapping. */
+    if (strcmp(s, "safeguard") == 0) return BS_M_TIER_PASS;
     return -1;
 }
 
@@ -11106,12 +11223,61 @@ static const char *bs_clear_pending_cookie(request_rec *r,
  * cleanly.
  * =========================================================== */
 
+/* The PoW solver Web Worker body — served as its own URL so strict
+ * CSP scopes (`worker-src 'self'`) can opt into embedded mode.
+ * Earlier shape used a blob:-URL Worker built from inline source;
+ * blob: is blocked under strict CSP. Real URL works in both strict
+ * and permissive setups, costs one cacheable round-trip. */
+static const char BS_EMBEDDED_WORKER_JS[] =
+"self.onmessage = function(ev){\n"
+" var c = ev.data;\n"
+" var saltB = hexToBytes(c.salt);\n"
+" var nonceB = hexToBytes(c.nonce);\n"
+" var counter = 0;\n"
+" var BATCH = 1024;\n"
+" var LIMIT = 5000000;\n"
+" function doBatch(){\n"
+"  var promises = [];\n"
+"  var start = counter;\n"
+"  for (var i=0;i<BATCH;i++){\n"
+"   var cs = String(start+i);\n"
+"   var buf = new Uint8Array(saltB.length + nonceB.length + cs.length);\n"
+"   buf.set(saltB,0); buf.set(nonceB,saltB.length);\n"
+"   for (var j=0;j<cs.length;j++) buf[saltB.length+nonceB.length+j] = cs.charCodeAt(j);\n"
+"   promises.push(crypto.subtle.digest('SHA-256', buf));\n"
+"  }\n"
+"  Promise.all(promises).then(function(rs){\n"
+"   for (var i=0;i<rs.length;i++){\n"
+"    if (meets(new Uint8Array(rs[i]), c.difficulty)){\n"
+"     self.postMessage({counter: start+i});\n"
+"     return;\n"
+"    }\n"
+"   }\n"
+"   counter = start + BATCH;\n"
+"   if (counter > LIMIT){ self.postMessage({error:'limit'}); return; }\n"
+"   setTimeout(doBatch, 0);\n"
+"  }).catch(function(e){ self.postMessage({error:String(e)}); });\n"
+" }\n"
+" function hexToBytes(s){\n"
+"  var o = new Uint8Array(s.length/2);\n"
+"  for (var i=0;i<s.length;i+=2) o[i/2] = parseInt(s.substr(i,2),16);\n"
+"  return o;\n"
+" }\n"
+" function meets(d,n){\n"
+"  var fb = (n/2)|0; var hh = n&1;\n"
+"  for (var i=0;i<fb;i++) if (d[i] !== 0) return false;\n"
+"  if (hh && (d[fb] & 0xF0) !== 0) return false;\n"
+"  return true;\n"
+" }\n"
+" doBatch();\n"
+"};\n";
+
 /* The wrapper JS body. Self-contained IIFE; no external deps.
  *
  * Implementation notes:
- *   - blob:-URL Web Worker so we don't need a separate cacheable URL
- *     for the worker code. CSP-strict scopes need worker-src 'self'
- *     blob:; documented as a known gotcha for E17 hardening.
+ *   - Web Worker is loaded from /botshield/embedded-worker.js (a
+ *     real URL, not blob:) so strict-CSP scopes — worker-src 'self'
+ *     — can opt into embedded mode without exemptions.
  *   - SubtleCrypto.digest is async, so PoW runs as Promise.all
  *     batches with setTimeout yields between them — same shape the
  *     M2 form interstitial uses, copied here for parity.
@@ -11136,53 +11302,9 @@ static const char BS_EMBEDDED_JS[] =
 "   if (j.provider === 'friendly') { runFriendly(j); return; }\n"
 "   if (j.provider !== 'pow' || !j.challenge) return;\n"
 "   var ch = j.challenge;\n"
-"   var workerSrc = '(' + (function(){\n"
-"    self.onmessage = function(ev){\n"
-"     var c = ev.data;\n"
-"     var saltB = hexToBytes(c.salt);\n"
-"     var nonceB = hexToBytes(c.nonce);\n"
-"     var counter = 0;\n"
-"     var BATCH = 1024;\n"
-"     var LIMIT = 5000000;\n"
-"     function doBatch(){\n"
-"      var promises = [];\n"
-"      var start = counter;\n"
-"      for (var i=0;i<BATCH;i++){\n"
-"       var cs = String(start+i);\n"
-"       var buf = new Uint8Array(saltB.length + nonceB.length + cs.length);\n"
-"       buf.set(saltB,0); buf.set(nonceB,saltB.length);\n"
-"       for (var j=0;j<cs.length;j++) buf[saltB.length+nonceB.length+j] = cs.charCodeAt(j);\n"
-"       promises.push(crypto.subtle.digest('SHA-256', buf));\n"
-"      }\n"
-"      Promise.all(promises).then(function(rs){\n"
-"       for (var i=0;i<rs.length;i++){\n"
-"        if (meets(new Uint8Array(rs[i]), c.difficulty)){\n"
-"         self.postMessage({counter: start+i});\n"
-"         return;\n"
-"        }\n"
-"       }\n"
-"       counter = start + BATCH;\n"
-"       if (counter > LIMIT){ self.postMessage({error:'limit'}); return; }\n"
-"       setTimeout(doBatch, 0);\n"
-"      }).catch(function(e){ self.postMessage({error:String(e)}); });\n"
-"     }\n"
-"     function hexToBytes(s){\n"
-"      var o = new Uint8Array(s.length/2);\n"
-"      for (var i=0;i<s.length;i+=2) o[i/2] = parseInt(s.substr(i,2),16);\n"
-"      return o;\n"
-"     }\n"
-"     function meets(d,n){\n"
-"      var fb = (n/2)|0; var hh = n&1;\n"
-"      for (var i=0;i<fb;i++) if (d[i] !== 0) return false;\n"
-"      if (hh && (d[fb] & 0xF0) !== 0) return false;\n"
-"      return true;\n"
-"     }\n"
-"     doBatch();\n"
-"    };\n"
-"   }).toString() + ')()';\n"
-"   var blob = new Blob([workerSrc], {type:'application/javascript'});\n"
-"   var url = URL.createObjectURL(blob);\n"
-"   var w = new Worker(url);\n"
+"   var w;\n"
+"   try { w = new Worker('/botshield/embedded-worker.js'); }\n"
+"   catch (e) { return; }\n"
 "   w.onmessage = function(ev){\n"
 "    if (ev.data && typeof ev.data.counter === 'number'){\n"
 "     fetch('/botshield/embedded-verify', {\n"
@@ -11198,8 +11320,8 @@ static const char BS_EMBEDDED_JS[] =
 "     });\n"
 "    }\n"
 "    w.terminate();\n"
-"    URL.revokeObjectURL(url);\n"
 "   };\n"
+"   w.onerror = function(){ try { w.terminate(); } catch(e){} };\n"
 "   w.postMessage(ch);\n"
 "  })\n"
 "  .catch(function(){});\n"
@@ -11410,6 +11532,132 @@ static int bs_embedded_js_handler(request_rec *r)
      * fighting browser caches; production-hardening is E17.1's job. */
     apr_table_setn(r->headers_out, "Cache-Control", "public, max-age=60");
     ap_rputs(BS_EMBEDDED_JS, r);
+    return OK;
+}
+
+/* Web Worker source. Served at /botshield/embedded-worker.js as a
+ * real same-origin URL so strict CSP (`worker-src 'self'`) accepts
+ * it — blob:-URL Workers are blocked under strict CSP. */
+static int bs_embedded_worker_handler(request_rec *r)
+{
+    if (r->method_number != M_GET && r->method_number != M_OPTIONS) {
+        r->status = HTTP_METHOD_NOT_ALLOWED;
+        apr_table_setn(r->headers_out, "Allow", "GET, OPTIONS");
+        return OK;
+    }
+    ap_set_content_type(r, "application/javascript; charset=utf-8");
+    apr_table_setn(r->headers_out, "Cache-Control", "public, max-age=60");
+    ap_rputs(BS_EMBEDDED_WORKER_JS, r);
+    return OK;
+}
+
+/* E18.4 — form-widget shell. Served at /botshield/form-widget.js.
+ * Operator HTML pattern:
+ *
+ *   <form action="/contact/submit" method="POST">
+ *     <input name="email">
+ *     <div data-bs-form-captcha
+ *          data-bs-provider="turnstile"
+ *          data-bs-sitekey="1x..."></div>
+ *     <button>Send</button>
+ *   </form>
+ *   <script src="/botshield/form-widget.js" defer></script>
+ *
+ * Wrapper finds every [data-bs-form-captcha] slot, reads provider
+ * + sitekey from data-* attributes, emits the per-provider widget
+ * markup (cf-turnstile / h-captcha / g-recaptcha / frc-captcha)
+ * and lazy-loads the provider's CDN script. Operators don't have
+ * to remember per-provider class names or script URLs — the
+ * BotShield wrapper abstracts them.
+ *
+ * Attribute-driven (no server-side scope lookup): keeps the wrapper
+ * simple and avoids an extra round-trip. Operators already write
+ * the sitekey somewhere; data-bs-sitekey isn't more verbose than
+ * the stock provider integration would be. */
+static const char BS_FORM_WIDGET_JS[] =
+"(function(){\n"
+" if (window._bsFormWidgetRan) return;\n"
+" window._bsFormWidgetRan = true;\n"
+"\n"
+" var providers = {\n"
+"  'turnstile': {\n"
+"   cls: 'cf-turnstile',\n"
+"   src: 'https://challenges.cloudflare.com/turnstile/v0/api.js'\n"
+"  },\n"
+"  'hcaptcha': {\n"
+"   cls: 'h-captcha',\n"
+"   src: 'https://js.hcaptcha.com/1/api.js'\n"
+"  },\n"
+"  'recaptcha-v2': {\n"
+"   cls: 'g-recaptcha',\n"
+"   src: 'https://www.google.com/recaptcha/api.js'\n"
+"  },\n"
+"  'recaptcha-v3': {\n"
+"   cls: '',\n"
+"   src: 'https://www.google.com/recaptcha/api.js?render='\n"
+"  },\n"
+"  'friendly': {\n"
+"   cls: 'frc-captcha',\n"
+"   src: 'https://cdn.jsdelivr.net/npm/friendly-challenge/widget.min.js'\n"
+"  }\n"
+" };\n"
+"\n"
+" var loaded = {};\n"
+" function loadScript(url){\n"
+"  if (loaded[url]) return;\n"
+"  loaded[url] = true;\n"
+"  var s = document.createElement('script');\n"
+"  s.src = url; s.async = true; s.defer = true;\n"
+"  document.head.appendChild(s);\n"
+" }\n"
+"\n"
+" var slots = document.querySelectorAll('[data-bs-form-captcha]');\n"
+" for (var i = 0; i < slots.length; i++) {\n"
+"  var slot = slots[i];\n"
+"  var providerName = slot.getAttribute('data-bs-provider') ||\n"
+"                     'turnstile';\n"
+"  var sitekey = slot.getAttribute('data-bs-sitekey');\n"
+"  var prov = providers[providerName];\n"
+"  if (!prov || !sitekey) {\n"
+"   if (window.console && console.warn) {\n"
+"    console.warn('botshield form-widget: missing provider or '\n"
+"                 + 'sitekey on slot', slot);\n"
+"   }\n"
+"   continue;\n"
+"  }\n"
+"  /* recaptcha-v3: no widget div; the provider script auto-runs.\n"
+"     Append sitekey to the loader URL. */\n"
+"  if (providerName === 'recaptcha-v3') {\n"
+"   loadScript(prov.src + encodeURIComponent(sitekey));\n"
+"   continue;\n"
+"  }\n"
+"  /* All other providers: inject a child div with the right class\n"
+"     + sitekey attribute, then load the provider's CDN script.\n"
+"     The provider's script picks up the divs and renders the\n"
+"     widget. */\n"
+"  var div = document.createElement('div');\n"
+"  div.className = prov.cls;\n"
+"  div.setAttribute('data-sitekey', sitekey);\n"
+"  /* Optional callback: operator can specify a JS function name\n"
+"     via data-bs-callback that the provider invokes with the\n"
+"     resolved token. */\n"
+"  var cb = slot.getAttribute('data-bs-callback');\n"
+"  if (cb) div.setAttribute('data-callback', cb);\n"
+"  slot.appendChild(div);\n"
+"  loadScript(prov.src);\n"
+" }\n"
+"})();\n";
+
+static int bs_form_widget_handler(request_rec *r)
+{
+    if (r->method_number != M_GET && r->method_number != M_OPTIONS) {
+        r->status = HTTP_METHOD_NOT_ALLOWED;
+        apr_table_setn(r->headers_out, "Allow", "GET, OPTIONS");
+        return OK;
+    }
+    ap_set_content_type(r, "application/javascript; charset=utf-8");
+    apr_table_setn(r->headers_out, "Cache-Control", "public, max-age=60");
+    ap_rputs(BS_FORM_WIDGET_JS, r);
     return OK;
 }
 
@@ -13161,6 +13409,19 @@ static const command_rec bs_cmds[] = {
                  "(default: 80). Serves the configured third-party "
                  "provider's widget; falls through to form-PoW if no "
                  "BotShieldCaptchaProvider is set on the scope."),
+    /* E18 — inline form captcha. */
+    AP_INIT_FLAG("BotShieldFormCaptcha", bs_set_form_captcha, NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "When on, this scope validates a configured captcha "
+                 "provider's response token in the POST body of form "
+                 "submissions. Requires BotShieldCaptchaProvider + "
+                 "SiteKey + SecretFile in the same scope (or "
+                 "inherited). On valid token: mints _bs_verified, "
+                 "DECLINED so the app handler runs with the original "
+                 "body intact. On bad/missing token: 403, app handler "
+                 "never runs. Supports application/x-www-form-"
+                 "urlencoded and application/json bodies; "
+                 "multipart/form-data (file uploads) is out of scope."),
     /* E17 PoC — silent-tier dispatch flavor. */
     AP_INIT_TAKE1("BotShieldSilentMode", bs_set_silent_mode, NULL,
                  RSRC_CONF | ACCESS_CONF,
@@ -14157,11 +14418,18 @@ static int bs_handler(request_rec *r)
         if (strcmp(sub, "/embedded.js") == 0) {
             return bs_embedded_js_handler(r);
         }
+        if (strcmp(sub, "/embedded-worker.js") == 0) {
+            return bs_embedded_worker_handler(r);
+        }
         if (strcmp(sub, "/embedded-bootstrap") == 0) {
             return bs_embedded_bootstrap_handler(r, cfg);
         }
         if (strcmp(sub, "/embedded-verify") == 0) {
             return bs_embedded_verify_handler(r, cfg);
+        }
+        /* E18.4 — form-widget shell. */
+        if (strcmp(sub, "/form-widget.js") == 0) {
+            return bs_form_widget_handler(r);
         }
         /* Unknown module endpoint under the prefix → 404, so a typo in
          * an operator's template fails loudly instead of falling through
@@ -14464,10 +14732,13 @@ static int bs_handler(request_rec *r)
     {
         bs_server_cfg *scfg_sg = ap_get_module_config(
             r->server->module_config, &botshield_module);
-        if (scfg_sg && scfg_sg->safeguard_enabled == 1
-            && have_client_ip) {
+        if (scfg_sg && have_client_ip) {
             apr_int64_t now_t = (apr_int64_t)apr_time_sec(apr_time_now());
-            if (bs_safeguard_check(client_ip, now_t, scfg_sg->ns_id)) {
+            /* Active-state behavior is gated on safeguard_enabled —
+             * an operator who hasn't opted into safeguard doesn't
+             * want pass-through-after-N. */
+            if (scfg_sg->safeguard_enabled == 1 &&
+                bs_safeguard_check(client_ip, now_t, scfg_sg->ns_id)) {
                 ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
                     "mod_botshield: challenge-safeguard active for "
                     "%s; skipping challenge-issue and passing "
@@ -14480,29 +14751,52 @@ static int bs_handler(request_rec *r)
                                 effective);
                 return DECLINED;
             }
+            /* Record the presentation regardless of safeguard_enabled.
+             * E17's embedded → M7 fallback reads the same count to
+             * decide when to bypass the embedded short-circuit. The
+             * write itself is cheap (one mutex + a few SHM stores);
+             * the only side-effect when safeguard is "off" is that
+             * embedded mode gets the count it needs. */
             bs_safeguard_record_presentation(r, scfg_sg,
                                              client_ip, now_t,
                                              scfg_sg->ns_id);
         }
     }
 
-    /* E17 PoC — if silent-tier dispatch lands here AND the scope is
-     * in `embedded` mode, skip the M7 interstitial entirely. Serve
-     * the real page (DECLINED). The operator-included
-     * /botshield/embedded.js wrapper runs on page-load, fetches a
-     * challenge from /botshield/embedded-bootstrap, solves PoW in a
-     * Web Worker, and POSTs back to /botshield/embedded-verify which
-     * mints _bs_verified. The cookie may not arrive in time for the
-     * very first request, but subsequent page-loads in the session
-     * carry it — see PLAN E17 for the "kicks in eventually"
-     * timing model. */
+    /* E17 — silent-tier dispatch with embedded mode. Default behavior:
+     * skip the M7 interstitial, serve the real page (DECLINED), let
+     * the wrapper handle verification in the background. Timing model:
+     * "kicks in eventually" — see PLAN E17.
+     *
+     * E17 fallback: if this client has had N consecutive silent-tier
+     * dispatches without _bs_verified arriving (count tracked via
+     * bs_safeguard_present_count), the wrapper isn't doing its job
+     * (CSP-blocked, no JS, no Worker support, etc.). Bypass the
+     * embedded short-circuit so the M7 form-PoW path runs. M7's own
+     * safeguard threshold catches the case where M7 also fails. */
     if (tier == BS_TIER_SILENT &&
         cfg->silent_mode == BS_SILENT_MODE_EMBEDDED) {
-        bs_decision_log(r, "silent", "declined", cookie_status,
-                        "-", "-",
-                        bs_decision_reason_names(r->pool, score),
-                        effective);
-        return DECLINED;
+        int fall_back = 0;
+        if (have_client_ip) {
+            apr_int64_t now_t = (apr_int64_t)apr_time_sec(apr_time_now());
+            apr_uint32_t cnt = bs_safeguard_present_count(client_ip,
+                                                          now_t,
+                                                          scfg_h->ns_id);
+            if (cnt >= BS_DEFAULT_EMBEDDED_FALLBACK_THRESHOLD) {
+                fall_back = 1;
+            }
+        }
+        if (!fall_back) {
+            bs_decision_log(r, "silent", "declined", cookie_status,
+                            "-", "-",
+                            bs_decision_reason_names(r->pool, score),
+                            effective);
+            return DECLINED;
+        }
+        /* Fall through to M7 — the embedded path has had its
+         * chances. Surface the decision in the reason chain so
+         * operators can spot clients stuck in this state. */
+        bs_score_add(r, 0, 0, "embedded-fallback-m7");
     }
 
     /* Decide whether this challenge will be served as the M7 silent-tier
@@ -14806,6 +15100,352 @@ static int bs_handler(request_rec *r)
     return OK;
 }
 
+/* --- E18 — inline form captcha ----------------------------------
+ *
+ * Operator opts a scope into form-captcha validation via
+ * `BotShieldFormCaptcha on`. On POST to that scope, BotShield's
+ * fixup hook reads the request body (url-encoded only in v1),
+ * extracts the configured provider's response field, calls
+ * siteverify, and either:
+ *   - mints _bs_verified, installs an input replay filter so the
+ *     downstream app handler still sees the original body, returns
+ *     DECLINED → app's handler runs normally
+ *   - returns 403 → app's handler never sees the bad request
+ *
+ * The replay-filter pattern handles "BotShield consumed the body
+ * for inspection but the app handler still needs to read it." We
+ * buffer the body in r->pool and emit it as a synthetic input
+ * brigade when downstream asks. Apache's ap_add_input_filter puts
+ * the filter at the top of r->input_filters, so the very first
+ * read by the app handler hits our buffered copy and never touches
+ * the drained protocol filters below.
+ */
+
+#define BS_FORM_CAPTCHA_BODY_MAX  (256 * 1024)   /* 256 KB body cap */
+
+typedef struct {
+    const char *body;
+    apr_size_t  len;
+    int         emitted;
+} bs_form_replay_ctx;
+
+static ap_filter_rec_t *bs_form_replay_filter_handle = NULL;
+
+static apr_status_t bs_form_replay_filter(ap_filter_t *f,
+                                          apr_bucket_brigade *bb,
+                                          ap_input_mode_t mode,
+                                          apr_read_type_e block,
+                                          apr_off_t readbytes)
+{
+    bs_form_replay_ctx *ctx = f->ctx;
+    if (!ctx) {
+        ap_remove_input_filter(f);
+        return ap_get_brigade(f->next, bb, mode, block, readbytes);
+    }
+    if (mode == AP_MODE_INIT) return APR_SUCCESS;
+
+    if (!ctx->emitted) {
+        /* Emit the buffered body + EOS in one shot. Most handlers
+         * read until EOS via ap_setup_client_block /
+         * ap_get_client_block; the framework slices buckets to honor
+         * `readbytes`. The body is allocated in r->pool, so the
+         * pool bucket is safe for the full request lifetime. */
+        if (ctx->len > 0) {
+            apr_bucket *body_b = apr_bucket_pool_create(
+                ctx->body, ctx->len, f->r->pool, f->c->bucket_alloc);
+            APR_BRIGADE_INSERT_TAIL(bb, body_b);
+        }
+        APR_BRIGADE_INSERT_TAIL(bb,
+            apr_bucket_eos_create(f->c->bucket_alloc));
+        ctx->emitted = 1;
+        return APR_SUCCESS;
+    }
+    /* Already emitted; subsequent reads see only EOS. Self-remove
+     * so we don't get re-invoked. */
+    APR_BRIGADE_INSERT_TAIL(bb,
+        apr_bucket_eos_create(f->c->bucket_alloc));
+    ap_remove_input_filter(f);
+    return APR_SUCCESS;
+}
+
+/* Read the whole request body via the input filter chain into a
+ * pool-allocated buffer. After this, the upstream filters are
+ * drained — caller is expected to install bs_form_replay_filter to
+ * satisfy downstream readers. Returns APR_SUCCESS + sets *out_body
+ * + *out_len; APR_ENOSPC if body exceeds BS_FORM_CAPTCHA_BODY_MAX;
+ * other apr_status_t on transport errors. */
+static apr_status_t bs_form_captcha_read_body(request_rec *r,
+                                              const char **out_body,
+                                              apr_size_t *out_len)
+{
+    apr_bucket_brigade *bb = apr_brigade_create(r->pool,
+        r->connection->bucket_alloc);
+    char *buf = apr_palloc(r->pool, BS_FORM_CAPTCHA_BODY_MAX);
+    apr_size_t total = 0;
+    int saw_eos = 0;
+    apr_status_t rv = APR_SUCCESS;
+
+    while (!saw_eos) {
+        rv = ap_get_brigade(r->input_filters, bb,
+                            AP_MODE_READBYTES, APR_BLOCK_READ,
+                            HUGE_STRING_LEN);
+        if (rv != APR_SUCCESS) {
+            apr_brigade_destroy(bb);
+            return rv;
+        }
+        apr_bucket *e;
+        while ((e = APR_BRIGADE_FIRST(bb)) != APR_BRIGADE_SENTINEL(bb)) {
+            if (APR_BUCKET_IS_EOS(e)) { saw_eos = 1; break; }
+            const char *data;
+            apr_size_t len;
+            apr_status_t br = apr_bucket_read(e, &data, &len,
+                                              APR_BLOCK_READ);
+            if (br != APR_SUCCESS) {
+                apr_brigade_destroy(bb);
+                return br;
+            }
+            if (total + len > BS_FORM_CAPTCHA_BODY_MAX) {
+                apr_brigade_destroy(bb);
+                return APR_ENOSPC;
+            }
+            memcpy(buf + total, data, len);
+            total += len;
+            apr_bucket_delete(e);
+        }
+        apr_brigade_cleanup(bb);
+    }
+    apr_brigade_destroy(bb);
+    buf[total < BS_FORM_CAPTCHA_BODY_MAX ? total : BS_FORM_CAPTCHA_BODY_MAX - 1] = '\0';
+    *out_body = buf;
+    *out_len  = total;
+    return APR_SUCCESS;
+}
+
+/* E18 fixup hook. Runs before content handlers. For POST to scopes
+ * with BotShieldFormCaptcha on, validates the captcha and decides
+ * whether to let the downstream handler see the request. */
+static int bs_form_captcha_fixup(request_rec *r)
+{
+    if (r->method_number != M_POST) return DECLINED;
+    if (!ap_is_initial_req(r)) return DECLINED;
+
+    bs_dir_cfg *cfg = ap_get_module_config(r->per_dir_config,
+                                           &botshield_module);
+    if (!cfg || cfg->form_captcha != 1) return DECLINED;
+
+    if (!cfg->captcha_provider || !cfg->captcha_provider->implemented ||
+        !cfg->captcha_secret || !cfg->captcha_site_key) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+            "mod_botshield: BotShieldFormCaptcha on but scope is "
+            "missing BotShieldCaptchaProvider/SiteKey/SecretFile; "
+            "rejecting POST as misconfigured");
+        return HTTP_SERVICE_UNAVAILABLE;
+    }
+
+    /* Body content-type dispatch. Supports url-encoded and JSON.
+     * multipart/form-data is deliberately out of scope — file
+     * uploads need streaming-parser machinery this module isn't
+     * the right home for. Anything else gets 415 with diagnostic
+     * so operators notice the gap rather than silently allow
+     * unverified submits. */
+    const char *ct = apr_table_get(r->headers_in, "Content-Type");
+    int ct_form = (ct &&
+        strncasecmp(ct, "application/x-www-form-urlencoded", 33) == 0);
+    int ct_json = (ct &&
+        strncasecmp(ct, "application/json", 16) == 0);
+    if (!ct_form && !ct_json) {
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: BotShieldFormCaptcha supports "
+            "application/x-www-form-urlencoded or application/json; "
+            "got Content-Type=%s",
+            ct ? ct : "(missing)");
+        return HTTP_UNSUPPORTED_MEDIA_TYPE;
+    }
+
+    /* Read the body. */
+    const char *body = NULL;
+    apr_size_t  body_len = 0;
+    apr_status_t rv = bs_form_captcha_read_body(r, &body, &body_len);
+    if (rv == APR_ENOSPC) {
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: form-captcha body exceeds %d bytes",
+            BS_FORM_CAPTCHA_BODY_MAX);
+        return HTTP_REQUEST_ENTITY_TOO_LARGE;
+    }
+    if (rv != APR_SUCCESS) {
+        ap_log_rerror(APLOG_MARK, APLOG_WARNING, rv, r,
+            "mod_botshield: form-captcha body read failed");
+        return HTTP_BAD_REQUEST;
+    }
+
+    /* E12 — shadow / observe mode for E18. If global BotShieldShadowMode
+     * is on, skip siteverify + cookie-mint, log a :observe reason, and
+     * pass the request through. The body is still read (we already did
+     * it — needed for the replay filter so the app handler sees its
+     * original POST). Transport-level errors (415/413/400/503) above
+     * this point intentionally still fire even under shadow mode —
+     * those represent misconfiguration or genuinely-malformed requests,
+     * not policy decisions an operator is staging. */
+    {
+        bs_server_cfg *scfg_sh = ap_get_module_config(
+            r->server->module_config, &botshield_module);
+        if (scfg_sh && scfg_sh->shadow_mode == 1) {
+            bs_form_replay_ctx *ctx = apr_pcalloc(r->pool, sizeof(*ctx));
+            ctx->body    = body;
+            ctx->len     = body_len;
+            ctx->emitted = 0;
+            ap_add_input_filter_handle(bs_form_replay_filter_handle,
+                                       ctx, r, r->connection);
+            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                "mod_botshield: form-captcha:observe (shadow mode; "
+                "body replayed, no siteverify, no cookie mint)");
+            return DECLINED;
+        }
+    }
+
+    /* Extract the captcha-response field by provider-known name.
+     * URL-encoded → bs_form_get (existing M8 helper).
+     * JSON → json-c parse, look up the same key at top level. */
+    const char *token = NULL;
+    if (ct_form) {
+        token = bs_form_get(r->pool, body,
+                            cfg->captcha_provider->token_field);
+    } else { /* ct_json */
+        enum json_tokener_error jerr = json_tokener_success;
+        json_object *root = json_tokener_parse_verbose(body, &jerr);
+        if (!root || jerr != json_tokener_success) {
+            if (root) json_object_put(root);
+            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                "mod_botshield: form-captcha: JSON parse failed");
+            return HTTP_BAD_REQUEST;
+        }
+        json_object *tok_v = NULL;
+        if (json_object_object_get_ex(root,
+                cfg->captcha_provider->token_field, &tok_v) &&
+            tok_v && json_object_is_type(tok_v, json_type_string)) {
+            const char *s = json_object_get_string(tok_v);
+            if (s) token = apr_pstrdup(r->pool, s);
+        }
+        json_object_put(root);
+    }
+    if (!token || !*token) {
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: form-captcha: missing token field '%s'",
+            cfg->captcha_provider->token_field);
+        return HTTP_FORBIDDEN;
+    }
+
+    /* siteverify via the existing M8 client. */
+    int timeout_ms = cfg->captcha_timeout_ms > 0
+        ? cfg->captcha_timeout_ms : BS_DEFAULT_CAPTCHA_TIMEOUT;
+    const char *details = NULL;
+    long http_code = 0;
+    double score = -1.0;
+    const char *resp_hostname = NULL, *resp_action = NULL;
+    bs_captcha_result res = bs_captcha_siteverify(r,
+        cfg->captcha_provider, cfg->captcha_secret,
+        cfg->captcha_secret_len, token, timeout_ms,
+        &details, &http_code, &score, &resp_hostname, &resp_action);
+
+    if (res != BS_CAPTCHA_OK) {
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: form-captcha siteverify rejected "
+            "(http=%ld details=\"%s\")", http_code,
+            details ? details : "");
+        return HTTP_FORBIDDEN;
+    }
+
+    /* Hostname binding (security-review #1 parity with M8 path).
+     * Action binding deliberately skipped here — the form's action
+     * value is operator-defined and varies per form; enforcing a
+     * single expected_action cross-form would be wrong. Operators
+     * who want strict action checks can configure
+     * BotShieldCaptchaExpectedAction explicitly. */
+    const char *expected_host =
+        cfg->captcha_expected_hostname
+            ? cfg->captcha_expected_hostname
+            : (r->server && r->server->server_hostname
+                   ? r->server->server_hostname : "");
+    if (resp_hostname && *expected_host &&
+        strcmp(resp_hostname, expected_host) != 0) {
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: form-captcha hostname-mismatch "
+            "(got=%s expected=%s)", resp_hostname, expected_host);
+        return HTTP_FORBIDDEN;
+    }
+    if (cfg->captcha_expected_action && *cfg->captcha_expected_action &&
+        resp_action &&
+        strcmp(resp_action, cfg->captcha_expected_action) != 0) {
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: form-captcha action-mismatch "
+            "(got=%s expected=%s)",
+            resp_action, cfg->captcha_expected_action);
+        return HTTP_FORBIDDEN;
+    }
+    if (strcmp(cfg->captcha_provider->name, "recaptcha-v3") == 0) {
+        double min_score = (cfg->recaptcha_v3_min_score >= 0.0)
+            ? cfg->recaptcha_v3_min_score
+            : BS_DEFAULT_RECAPTCHA_V3_MIN_SCORE;
+        if (score >= 0.0 && score < min_score) {
+            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                "mod_botshield: form-captcha v3 score below "
+                "threshold (%.2f < %.2f)", score, min_score);
+            return HTTP_FORBIDDEN;
+        }
+    }
+
+    /* Mint _bs_verified — same captcha-<provider> alg the M8
+     * interstitial path uses. passes_captcha=1 (this WAS a captcha-
+     * tier solve, just inline rather than interstitial). */
+    int ttl        = bs_effective_int(cfg->cookie_ttl, BS_DEFAULT_COOKIE_TTL);
+    int difficulty = bs_effective_int(cfg->difficulty, BS_DEFAULT_DIFFICULTY);
+    const char *cookie_alg_name = apr_psprintf(r->pool, "captcha-%s",
+                                               cfg->captcha_provider->name);
+    const bs_pow_algorithm *captcha_alg = bs_find_algorithm(cookie_alg_name);
+    if (!captcha_alg || !captcha_alg->implemented) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+            "mod_botshield: form-captcha cookie alg '%s' missing "
+            "from registry", cookie_alg_name);
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+    bs_rep_state next_rep;
+    memset(&next_rep, 0, sizeof(next_rep));
+    next_rep.passes_captcha = 1;
+
+    bs_challenge ch;
+    const char *ierr = bs_issue_challenge(r->pool, cfg, difficulty, ttl,
+                                          /* auto_tier */ 0,
+                                          captcha_alg, &next_rep, &ch);
+    if (ierr) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+            "mod_botshield: form-captcha cookie issue failed: %s", ierr);
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+    const char *payload = bs_build_cookie_payload(r->pool, cfg, &ch,
+                                                  "captcha");
+    if (payload) {
+        apr_table_set(r->err_headers_out, "Set-Cookie",
+                      bs_build_set_cookie(r, cfg, payload, ch.expires_at));
+    }
+
+    /* Install the replay filter so the downstream handler sees the
+     * original POST body. Filter buffers in r->pool memory; lifetime
+     * is the request, plenty for any handler that wants it. */
+    bs_form_replay_ctx *ctx = apr_pcalloc(r->pool, sizeof(*ctx));
+    ctx->body    = body;
+    ctx->len     = body_len;
+    ctx->emitted = 0;
+    ap_add_input_filter_handle(bs_form_replay_filter_handle,
+                               ctx, r, r->connection);
+
+    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+        "mod_botshield: form-captcha verified (provider=%s, "
+        "body_len=%" APR_SIZE_T_FMT ")",
+        cfg->captcha_provider->name, body_len);
+    /* DECLINED so the app's regular handler runs. */
+    return DECLINED;
+}
+
 /* --- Hook registration --- */
 
 /* Gated under the same BS_FUZZ_HARNESS flag as the module
@@ -14820,6 +15460,15 @@ static void bs_register_hooks(apr_pool_t *p)
     ap_hook_post_config (bs_post_config, NULL, NULL, APR_HOOK_MIDDLE);
     ap_hook_child_init  (bs_child_init,  NULL, NULL, APR_HOOK_MIDDLE);
     ap_hook_handler     (bs_handler,     NULL, NULL, APR_HOOK_FIRST);
+    /* E18 — inline form captcha. Fixup runs before content handlers
+     * but after auth/header processing, so the request body is still
+     * readable from the input filter chain. The hook reads + validates
+     * + decides whether to let the downstream handler proceed. */
+    ap_hook_fixups      (bs_form_captcha_fixup,
+                         NULL, NULL, APR_HOOK_MIDDLE);
+    bs_form_replay_filter_handle = ap_register_input_filter(
+        "BS_FORM_REPLAY", bs_form_replay_filter, NULL,
+        AP_FTYPE_RESOURCE);
     /* E5 — response-phase filter for the app-feedback header. Filter
      * runs once per request (self-removes), strips the configured
      * header from r->headers_out, and — when the feature is enabled
