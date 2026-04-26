@@ -12090,7 +12090,25 @@ static int bs_embedded_bootstrap_handler(request_rec *r,
     }
 
     int difficulty = bs_effective_int(cfg->difficulty, BS_DEFAULT_DIFFICULTY);
-    int ttl = bs_effective_int(cfg->cookie_ttl, BS_DEFAULT_COOKIE_TTL);
+    /* Security review MEDIUM #2 — bootstrap challenges should expire
+     * fast. The previous code reused cookie_ttl (1h default), which
+     * gave attackers a 60-minute window to grind an issued challenge
+     * in parallel — bs_issue_challenge gives them salt+nonce+sig
+     * with no one-time-use binding, so they can solve once and
+     * replay-verify, OR farm a pool of pre-issued challenges to
+     * solve in bulk. 120 s is generous for a real browser to round-
+     * trip the bootstrap → solve → verify sequence (typical PoW
+     * runtime is sub-second; 120 s covers a slow client + 100 ms
+     * RTT × handful of round-trips with comfortable headroom) and
+     * cuts the grind window by 30x.
+     *
+     * TODO (hardening phase): add a nonce SHM table for one-time-use
+     * binding. The verify path would atomic-insert the challenge
+     * nonce into a small open-addressed table; presenting the same
+     * nonce twice → verify rejects. That fully closes the
+     * pre-issued-pool grind class. The 120 s expiry here is the
+     * cheap partial defense pending that. */
+    int ttl = 120;
 
     bs_challenge ch;
     memset(&ch, 0, sizeof(ch));
