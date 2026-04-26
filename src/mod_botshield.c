@@ -5953,21 +5953,30 @@ static apr_uint32_t bs_flagged_bucket(const unsigned char ip[16],
 }
 
 /* Write into a slot under seqlock protection. Caller must hold the
- * global mutex. */
+ * global mutex.
+ *
+ * Security review HIGH #5 — version stores use C11 RELEASE
+ * semantics, version loads use ACQUIRE. apr_atomic_set32 / read32
+ * only happen to emit full barriers on x86; on AArch64 / POWER
+ * the plain payload stores between the two version bumps could
+ * be reordered relative to the version stores, allowing a
+ * lockless reader to observe an even (committed) version with
+ * stale or torn payload bytes. The release/acquire pair locks
+ * the ordering down portably; same pattern as the scfg->robots
+ * publish/load (search for __ATOMIC_RELEASE in this file). */
 static void bs_flagged_write_slot(bs_flagged_ip_slot *slot,
                                   const unsigned char ip[16],
                                   apr_uint32_t flags, apr_int64_t expires_at,
                                   apr_uint32_t ns_id)
 {
-    apr_uint32_t v = apr_atomic_read32(&slot->version);
-    apr_atomic_set32(&slot->version, v | 1U);   /* begin: odd */
-    /* Ensure the version-odd store is visible before the payload stores. */
+    apr_uint32_t v = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&slot->version, v | 1U, __ATOMIC_RELEASE);   /* begin: odd */
     memcpy(slot->ip, ip, 16);
     slot->flags      = flags;
     slot->expires_at = expires_at;
     slot->ns_id      = ns_id;
-    /* Version-bump to even publishes the payload to readers. */
-    apr_atomic_set32(&slot->version, (v | 1U) + 1U);
+    /* Release-publish: payload stores above are now visible. */
+    __atomic_store_n(&slot->version, (v | 1U) + 1U, __ATOMIC_RELEASE);
 }
 
 static void bs_flagged_ip_add(request_rec *r,
@@ -6071,7 +6080,7 @@ static int bs_flagged_ip_lookup(const unsigned char ip[16],
         apr_uint32_t   local_ns;
         int spins = 0;
         for (;;) {
-            v1 = apr_atomic_read32(&slot->version);
+            v1 = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
             if (v1 & 1U) {
                 if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
                 continue;
@@ -6080,7 +6089,7 @@ static int bs_flagged_ip_lookup(const unsigned char ip[16],
             local_flags   = slot->flags;
             local_expires = slot->expires_at;
             local_ns      = slot->ns_id;
-            v2 = apr_atomic_read32(&slot->version);
+            v2 = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
             if (v1 == v2) break;
             if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
         }
@@ -6155,7 +6164,7 @@ static int bs_strike_check_escalated(const unsigned char ip[16],
         apr_uint32_t  local_ns;
         int spins = 0;
         for (;;) {
-            v1 = apr_atomic_read32(&slot->version);
+            v1 = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
             if (v1 & 1U) {
                 if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
                 continue;
@@ -6164,7 +6173,7 @@ static int bs_strike_check_escalated(const unsigned char ip[16],
             memcpy(local_ip, slot->ip, 16);
             local_until = slot->escalation_until;
             local_ns    = slot->ns_id;
-            v2 = apr_atomic_read32(&slot->version);
+            v2 = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
             if (v1 == v2) break;
             if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
         }
@@ -6246,8 +6255,8 @@ static int bs_strike_record_429(request_rec *r,
     }
 
     bs_strike_slot *slot = &bs_shm.strike_table[target_idx];
-    apr_uint32_t v0 = apr_atomic_read32(&slot->version);
-    apr_atomic_set32(&slot->version, v0 | 1U);   /* begin write */
+    apr_uint32_t v0 = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&slot->version, v0 | 1U, __ATOMIC_RELEASE);   /* begin write */
 
     int crossed = 0;
     apr_uint32_t now_sec = (apr_uint32_t)now;
@@ -6275,7 +6284,7 @@ static int bs_strike_record_429(request_rec *r,
         if (prev_until <= now) crossed = 1;
     }
 
-    apr_atomic_set32(&slot->version, (v0 | 1U) + 1U);   /* publish */
+    __atomic_store_n(&slot->version, (v0 | 1U) + 1U, __ATOMIC_RELEASE);   /* publish */
     apr_global_mutex_unlock(bs_shm.mutex);
     return crossed;
 }
@@ -6341,7 +6350,7 @@ static int bs_safeguard_check(const unsigned char ip[16], apr_int64_t now,
         apr_int64_t   local_until;
         int spins = 0;
         for (;;) {
-            v1 = apr_atomic_read32(&slot->version);
+            v1 = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
             if (v1 & 1U) {
                 if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
                 continue;
@@ -6350,7 +6359,7 @@ static int bs_safeguard_check(const unsigned char ip[16], apr_int64_t now,
             local_ns_id = slot->ns_id;
             memcpy(local_ip, slot->ip, 16);
             local_until = slot->safeguard_until;
-            v2 = apr_atomic_read32(&slot->version);
+            v2 = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
             if (v1 == v2) break;
             if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
         }
@@ -6390,7 +6399,7 @@ static apr_uint32_t bs_safeguard_present_count(const unsigned char ip[16],
         apr_uint32_t  local_count;
         int spins = 0;
         for (;;) {
-            v1 = apr_atomic_read32(&slot->version);
+            v1 = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
             if (v1 & 1U) {
                 if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
                 continue;
@@ -6400,7 +6409,7 @@ static apr_uint32_t bs_safeguard_present_count(const unsigned char ip[16],
             memcpy(local_ip, slot->ip, 16);
             local_window_start = slot->present_window_start;
             local_count        = slot->present_count;
-            v2 = apr_atomic_read32(&slot->version);
+            v2 = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
             if (v1 == v2) break;
             if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
         }
@@ -6487,8 +6496,8 @@ static void bs_safeguard_record_presentation(request_rec *r,
     }
 
     bs_safeguard_slot *slot = &bs_shm.safeguard_table[target_idx];
-    apr_uint32_t v0 = apr_atomic_read32(&slot->version);
-    apr_atomic_set32(&slot->version, v0 | 1U);   /* begin write */
+    apr_uint32_t v0 = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&slot->version, v0 | 1U, __ATOMIC_RELEASE);   /* begin write */
 
     apr_uint32_t now_sec = (apr_uint32_t)now;
     int fresh_slot = (matched_idx < 0);
@@ -6511,7 +6520,7 @@ static void bs_safeguard_record_presentation(request_rec *r,
         slot->safeguard_until = now + ttl;
     }
 
-    apr_atomic_set32(&slot->version, (v0 | 1U) + 1U);
+    __atomic_store_n(&slot->version, (v0 | 1U) + 1U, __ATOMIC_RELEASE);
     apr_global_mutex_unlock(bs_shm.mutex);
 }
 
@@ -6535,15 +6544,15 @@ static void bs_safeguard_clear(const unsigned char ip[16],
         if (!slot->used) continue;
         if (slot->ns_id != ns_id) continue;
         if (memcmp(slot->ip, ip, 16) != 0) continue;
-        apr_uint32_t v0 = apr_atomic_read32(&slot->version);
-        apr_atomic_set32(&slot->version, v0 | 1U);
+        apr_uint32_t v0 = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
+        __atomic_store_n(&slot->version, v0 | 1U, __ATOMIC_RELEASE);
         slot->used                 = 0;
         slot->ns_id                = 0;
         slot->present_window_start = 0;
         slot->present_count        = 0;
         slot->safeguard_until      = 0;
         memset(slot->ip, 0, 16);
-        apr_atomic_set32(&slot->version, (v0 | 1U) + 1U);
+        __atomic_store_n(&slot->version, (v0 | 1U) + 1U, __ATOMIC_RELEASE);
         break;
     }
     apr_global_mutex_unlock(bs_shm.mutex);
