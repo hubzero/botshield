@@ -171,10 +171,32 @@ run_pytests() {
     ( cd "$HERE" && "$PYTEST_VENV/bin/pytest" "${args[@]}" ) \
         > "$pyout" 2>&1 || rc=$?
 
+    # Security review LOW #18 — read counts from JUnit XML instead
+    # of grep'ing pytest's stdout. pytest's summary line format has
+    # drifted in past releases ("X passed in Ys" vs "X passed,
+    # Y skipped, Z failed in Ns") and a green-success grep can be
+    # silently fooled by a future format change. The XML schema is
+    # contractually stable: <testsuite tests="N" failures="N"
+    # errors="N" skipped="N">.
     local p s f
-    p=$(grep -oE "[0-9]+ passed"  "$pyout" | head -1 | awk '{print $1}')
-    s=$(grep -oE "[0-9]+ skipped" "$pyout" | head -1 | awk '{print $1}')
-    f=$(grep -oE "[0-9]+ failed"  "$pyout" | head -1 | awk '{print $1}')
+    if [[ -s "$junit_xml" ]]; then
+        local total xml_f xml_e xml_s
+        total=$(grep -oE 'tests="[0-9]+"'    "$junit_xml" | head -1 \
+                | grep -oE '[0-9]+')
+        xml_f=$(grep -oE 'failures="[0-9]+"' "$junit_xml" | head -1 \
+                | grep -oE '[0-9]+')
+        xml_e=$(grep -oE 'errors="[0-9]+"'   "$junit_xml" | head -1 \
+                | grep -oE '[0-9]+')
+        xml_s=$(grep -oE 'skipped="[0-9]+"'  "$junit_xml" | head -1 \
+                | grep -oE '[0-9]+')
+        f=$(( ${xml_f:-0} + ${xml_e:-0} ))
+        s=${xml_s:-0}
+        p=$(( ${total:-0} - f - s ))
+    else
+        # Fallback for the rc=5 (no tests collected) case where
+        # pytest doesn't emit a JUnit XML at all.
+        p=0; s=0; f=0
+    fi
     pass=$(( pass + ${p:-0} ))
     skip=$(( skip + ${s:-0} ))
     fail=$(( fail + ${f:-0} ))
