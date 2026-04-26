@@ -10212,6 +10212,67 @@ static size_t bs_curl_write_cb(char *ptr, size_t size, size_t nmemb,
  * not thread-safe, and doing it lazily from the request path would
  * race under mpm_event. */
 
+/* Security review MEDIUM #13 — CURLOPT_OPENSOCKETFUNCTION callback
+ * that rejects connections to RFC1918 / loopback / link-local
+ * addresses. Defense-in-depth: HIGH #7 already pinned protocol to
+ * https, but if a provider's NS were ever compromised to return an
+ * internal IP for the provider hostname (challenges.cloudflare.com,
+ * etc.), libcurl would still happily connect to that address and
+ * we'd POST our captcha-secret bytes to whoever's listening. This
+ * callback inspects the resolved address right before socket()
+ * and refuses the connection by returning CURL_SOCKET_BAD if the
+ * target is in any of:
+ *   IPv4: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16,
+ *         127.0.0.0/8, 169.254.0.0/16, 0.0.0.0/8
+ *   IPv6: ::1/128, fc00::/7 (ULA), fe80::/10 (link-local),
+ *         IPv4-mapped equivalents of the above. */
+static curl_socket_t bs_curl_open_socket_cb(void *clientp,
+                                            curlsocktype purpose,
+                                            struct curl_sockaddr *addr)
+{
+    (void)clientp; (void)purpose;
+    int reject = 0;
+    if (addr->family == AF_INET) {
+        const struct sockaddr_in *sin = (const struct sockaddr_in *)&addr->addr;
+        apr_uint32_t ip = ntohl(sin->sin_addr.s_addr);
+        unsigned char o1 = (ip >> 24) & 0xFF;
+        unsigned char o2 = (ip >> 16) & 0xFF;
+        if (o1 == 10) reject = 1;                              /* 10/8 */
+        else if (o1 == 172 && (o2 & 0xF0) == 16) reject = 1;   /* 172.16/12 */
+        else if (o1 == 192 && o2 == 168) reject = 1;           /* 192.168/16 */
+        else if (o1 == 127) reject = 1;                        /* loopback */
+        else if (o1 == 169 && o2 == 254) reject = 1;           /* link-local */
+        else if (o1 == 0) reject = 1;                          /* 0/8 */
+    } else if (addr->family == AF_INET6) {
+        const struct sockaddr_in6 *sin6 =
+            (const struct sockaddr_in6 *)&addr->addr;
+        const unsigned char *b = sin6->sin6_addr.s6_addr;
+        /* ::1 loopback */
+        if (b[0]==0 && b[1]==0 && b[2]==0 && b[3]==0 &&
+            b[4]==0 && b[5]==0 && b[6]==0 && b[7]==0 &&
+            b[8]==0 && b[9]==0 && b[10]==0 && b[11]==0 &&
+            b[12]==0 && b[13]==0 && b[14]==0 && b[15]==1) reject = 1;
+        /* fc00::/7 — ULA */
+        else if ((b[0] & 0xFE) == 0xFC) reject = 1;
+        /* fe80::/10 — link-local */
+        else if (b[0] == 0xFE && (b[1] & 0xC0) == 0x80) reject = 1;
+        /* ::ffff:0:0/96 — IPv4-mapped; recheck the embedded v4 */
+        else if (b[0]==0 && b[1]==0 && b[2]==0 && b[3]==0 &&
+                 b[4]==0 && b[5]==0 && b[6]==0 && b[7]==0 &&
+                 b[8]==0 && b[9]==0 && b[10]==0xFF && b[11]==0xFF) {
+            unsigned char o1 = b[12], o2 = b[13];
+            if (o1 == 10) reject = 1;
+            else if (o1 == 172 && (o2 & 0xF0) == 16) reject = 1;
+            else if (o1 == 192 && o2 == 168) reject = 1;
+            else if (o1 == 127) reject = 1;
+            else if (o1 == 169 && o2 == 254) reject = 1;
+            else if (o1 == 0) reject = 1;
+        }
+    }
+    if (reject) return CURL_SOCKET_BAD;
+    return socket(addr->family, addr->socktype, addr->protocol);
+}
+
 /* URL-encode via libcurl and copy into the request pool so the caller
  * can free the libcurl buffer right away. */
 static const char *bs_curl_escape_pool(apr_pool_t *p, CURL *curl,
@@ -10437,6 +10498,11 @@ static bs_captcha_result bs_captcha_siteverify(request_rec *r,
      * in case FOLLOWLOCATION is ever flipped on later. */
     BS_SETOPT(curl, CURLOPT_PROTOCOLS_STR, "https");
     BS_SETOPT(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
+    /* Security review MEDIUM #13 — defense-in-depth against a
+     * compromised-DNS scenario where the provider hostname resolves
+     * to an internal IP. The callback rejects RFC1918 / loopback /
+     * link-local before connect(). */
+    BS_SETOPT(curl, CURLOPT_OPENSOCKETFUNCTION, bs_curl_open_socket_cb);
     /* Security review HIGH #8 — server-declared response size cap.
      * If a malicious or misbehaving provider sets Content-Length
      * larger than our buffer, abort before any bytes flow.
@@ -10658,6 +10724,11 @@ static bs_captcha_result bs_geetest_siteverify(request_rec *r,
      * in case FOLLOWLOCATION is ever flipped on later. */
     BS_SETOPT(curl, CURLOPT_PROTOCOLS_STR, "https");
     BS_SETOPT(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
+    /* Security review MEDIUM #13 — defense-in-depth against a
+     * compromised-DNS scenario where the provider hostname resolves
+     * to an internal IP. The callback rejects RFC1918 / loopback /
+     * link-local before connect(). */
+    BS_SETOPT(curl, CURLOPT_OPENSOCKETFUNCTION, bs_curl_open_socket_cb);
     /* Security review HIGH #8 — server-declared response size cap.
      * If a malicious or misbehaving provider sets Content-Length
      * larger than our buffer, abort before any bytes flow.
