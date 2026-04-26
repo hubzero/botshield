@@ -4659,11 +4659,19 @@ static apr_status_t bs_headroom_watchdog_cb(int state, void *data,
      * present slots understate load slightly, biasing toward late
      * warnings. Acceptable: the reactive cliff warning is the safety
      * net for the bias case. */
+    /* Security review LOW #8 — relaxed atomic loads on slot->version
+     * so TSAN doesn't flag the concurrent read against seqlock
+     * writers. The pass is documented as an estimate; torn reads on
+     * payload fields are acceptable (writer hold the mutex; under-
+     * or over-counting biases toward late-warning, never miscounting
+     * into a hot panic). */
     if (bs_shm.flagged_table && bs_shm.flagged_capacity) {
         apr_uint64_t used = 0;
         for (apr_size_t i = 0; i < bs_shm.flagged_capacity; i++) {
             const bs_flagged_ip_slot *slot = &bs_shm.flagged_table[i];
-            if ((slot->version & 1U) == 0 &&
+            apr_uint32_t v = __atomic_load_n(&slot->version,
+                                              __ATOMIC_RELAXED);
+            if ((v & 1U) == 0 &&
                 slot->flags != 0 &&
                 slot->expires_at > now_sec) {
                 used++;
@@ -4680,7 +4688,9 @@ static apr_status_t bs_headroom_watchdog_cb(int state, void *data,
         apr_uint64_t used = 0;
         for (apr_size_t i = 0; i < bs_shm.strike_capacity; i++) {
             const bs_strike_slot *slot = &bs_shm.strike_table[i];
-            if ((slot->version & 1U) == 0 &&
+            apr_uint32_t v = __atomic_load_n(&slot->version,
+                                              __ATOMIC_RELAXED);
+            if ((v & 1U) == 0 &&
                 slot->rule_slot != BS_STRIKE_EMPTY) {
                 used++;
             }
@@ -4696,7 +4706,9 @@ static apr_status_t bs_headroom_watchdog_cb(int state, void *data,
         apr_uint64_t used = 0;
         for (apr_size_t i = 0; i < bs_shm.safeguard_capacity; i++) {
             const bs_safeguard_slot *slot = &bs_shm.safeguard_table[i];
-            if ((slot->version & 1U) == 0 && slot->used != 0) {
+            apr_uint32_t v = __atomic_load_n(&slot->version,
+                                              __ATOMIC_RELAXED);
+            if ((v & 1U) == 0 && slot->used != 0) {
                 used++;
             }
         }
@@ -6286,16 +6298,35 @@ static int bs_strike_record_429(request_rec *r,
         return 0;
     }
 
+    /* Security review LOW #9 — atomic-relaxed loads on slot fields
+     * during the probe scan. We hold the global mutex so no other
+     * writer can be in flight, but a previous writer may have died
+     * mid-write (process kill / crash) leaving the seqlock at odd
+     * with torn bytes. Skip slots whose version is odd (treat as
+     * uninitialized — matches the safest reader-side bail-out
+     * behavior). Plain loads on the comparison fields are TSAN-noise
+     * even though they're mutex-protected against concurrent
+     * writers; relaxed atomics quiet that. */
     int matched_idx = -1;
     int empty_idx   = -1;
     for (unsigned i = 0; i < BS_STRIKE_PROBE_LIMIT; i++) {
         apr_uint32_t idx = (base + i) % bs_shm.strike_capacity;
         bs_strike_slot *slot = &bs_shm.strike_table[idx];
-        if (slot->rule_slot == BS_STRIKE_EMPTY) {
+        apr_uint32_t v = __atomic_load_n(&slot->version,
+                                          __ATOMIC_RELAXED);
+        if (v & 1U) {
+            /* Stuck mid-write — treat as unknown; if we can't find
+             * a clean slot we'll fall through to the eviction
+             * branch and overwrite. */
+            continue;
+        }
+        apr_uint32_t local_rule = __atomic_load_n(&slot->rule_slot,
+                                                   __ATOMIC_RELAXED);
+        if (local_rule == BS_STRIKE_EMPTY) {
             if (empty_idx < 0) empty_idx = (int)idx;
             continue;
         }
-        if (slot->rule_slot == rule_slot
+        if (local_rule == rule_slot
             && slot->ns_id == ns_id
             && memcmp(slot->ip, ip, 16) == 0) {
             matched_idx = (int)idx;
@@ -11212,13 +11243,15 @@ static void bs_gauges_refresh(void)
 
     apr_int64_t now_sec = (apr_int64_t)apr_time_sec(now);
     apr_uint64_t flagged_used = 0;
+    /* Security review LOW #8 — relaxed atomic loads on slot->version
+     * make TSAN happy with the concurrent read. Estimate is fine
+     * (already documented). */
     if (bs_shm.flagged_table) {
         for (apr_size_t i = 0; i < bs_shm.flagged_capacity; i++) {
             const bs_flagged_ip_slot *slot = &bs_shm.flagged_table[i];
-            /* Skip odd versions (mid-write) — they don't count toward
-             * populated slots. A torn read is fine because this is an
-             * estimate anyway. */
-            if ((slot->version & 1U) == 0 &&
+            apr_uint32_t v = __atomic_load_n(&slot->version,
+                                              __ATOMIC_RELAXED);
+            if ((v & 1U) == 0 &&
                 slot->flags != 0 &&
                 slot->expires_at > now_sec) {
                 flagged_used++;
@@ -11234,7 +11267,9 @@ static void bs_gauges_refresh(void)
     if (bs_shm.strike_table) {
         for (apr_size_t i = 0; i < bs_shm.strike_capacity; i++) {
             const bs_strike_slot *slot = &bs_shm.strike_table[i];
-            if ((slot->version & 1U) == 0 &&
+            apr_uint32_t v = __atomic_load_n(&slot->version,
+                                              __ATOMIC_RELAXED);
+            if ((v & 1U) == 0 &&
                 slot->rule_slot != BS_STRIKE_EMPTY) {
                 strike_used++;
             }
@@ -11244,7 +11279,9 @@ static void bs_gauges_refresh(void)
     if (bs_shm.safeguard_table) {
         for (apr_size_t i = 0; i < bs_shm.safeguard_capacity; i++) {
             const bs_safeguard_slot *slot = &bs_shm.safeguard_table[i];
-            if ((slot->version & 1U) == 0 && slot->used != 0) {
+            apr_uint32_t v = __atomic_load_n(&slot->version,
+                                              __ATOMIC_RELAXED);
+            if ((v & 1U) == 0 && slot->used != 0) {
                 safeguard_used++;
             }
         }
