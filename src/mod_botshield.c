@@ -3567,32 +3567,49 @@ static int bs_cohort_matches(const bs_cohort *c,
  * budget (count was incremented), 0 if the window is full.
  *
  * Under pathological contention the CAS loop bounces; cap the retry
- * count and err on admitting rather than emitting spurious 429s. */
+ * count and err on admitting rather than emitting spurious 429s.
+ *
+ * Security review MEDIUM #4 — the prior shape did the window-roll
+ * via two separate stores (CAS window_start_sec, then plain
+ * __atomic_store_n on count = 1). Between those two operations,
+ * another thread could land an increment via the bottom-of-loop
+ * count-CAS path; the count=1 store then wiped that increment,
+ * yielding a slightly-larger-than-budget window straddling the
+ * rollover. Pack window_start_sec and count into a single u64 and
+ * CAS them together — same shape as bs_cv_counter_bump. The
+ * struct is already laid out 8-byte-packed for this. Each CAS
+ * either rolls the window AND sets count atomically, or
+ * increments count alone — no torn intermediate visible to
+ * other threads. */
 static int bs_rate_counter_admit(bs_rate_counter *slot,
                                  apr_uint32_t budget,
                                  apr_uint32_t window_sec)
 {
+    _Static_assert(sizeof(bs_rate_counter) == sizeof(apr_uint64_t),
+                   "bs_rate_counter must be 8 bytes for u64 CAS");
+    apr_uint64_t *p64 = (apr_uint64_t *)slot;
     apr_uint32_t now = (apr_uint32_t)apr_time_sec(apr_time_now());
     for (int i = 0; i < 32; i++) {
-        apr_uint32_t cnt = __atomic_load_n(&slot->count, __ATOMIC_RELAXED);
-        apr_uint32_t win = __atomic_load_n(&slot->window_start_sec,
-                                           __ATOMIC_RELAXED);
-        if (now < win || now - win >= window_sec) {
-            apr_uint32_t expected = win;
-            if (__atomic_compare_exchange_n(&slot->window_start_sec,
-                    &expected, now, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
-                __atomic_store_n(&slot->count, 1, __ATOMIC_RELAXED);
-                return 1;
-            }
-            continue;  /* someone else rolled the window; re-read */
+        apr_uint64_t observed = __atomic_load_n(p64, __ATOMIC_RELAXED);
+        bs_rate_counter snap;
+        memcpy(&snap, &observed, sizeof(snap));
+        apr_uint64_t next;
+        bs_rate_counter cand;
+        if (now < snap.window_start_sec ||
+            now - snap.window_start_sec >= window_sec) {
+            cand.count            = 1;
+            cand.window_start_sec = now;
+        } else {
+            if (snap.count >= budget) return 0;
+            cand.count            = snap.count + 1;
+            cand.window_start_sec = snap.window_start_sec;
         }
-        if (cnt >= budget) return 0;
-        apr_uint32_t expected = cnt;
-        if (__atomic_compare_exchange_n(&slot->count, &expected, cnt + 1,
+        memcpy(&next, &cand, sizeof(next));
+        if (__atomic_compare_exchange_n(p64, &observed, next,
                 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
             return 1;
         }
-        /* CAS lost — retry with fresh count */
+        /* CAS lost — re-read */
     }
     return 1;
 }
