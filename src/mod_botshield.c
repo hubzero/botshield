@@ -5888,7 +5888,17 @@ static void bs_flagged_ip_add(request_rec *r,
     apr_int64_t expires_at = now + ttl_seconds;
     apr_uint32_t base = bs_flagged_bucket(ip, ns_id);
 
-    apr_status_t rv = apr_global_mutex_lock(bs_shm.mutex);
+    /* Load-shed under heavy contention. Under a volumetric DDoS,
+     * every malicious request reaches this write path; a blocking
+     * lock would queue every Apache worker behind whichever one
+     * holds the mutex and starve legitimate traffic. trylock + drop
+     * trades one missed flag-write for keeping workers flowing —
+     * acceptable because (a) the next request from the same IP
+     * will retry, (b) the table is already lossy under probe-limit
+     * overflow, and (c) silent drop is preferable to disk-I/O log
+     * spam during the same DDoS. */
+    apr_status_t rv = apr_global_mutex_trylock(bs_shm.mutex);
+    if (APR_STATUS_IS_EBUSY(rv)) return;
     if (rv != APR_SUCCESS) {
         ap_log_rerror(APLOG_MARK, APLOG_WARNING, rv, r,
             "mod_botshield: flagged-IP mutex_lock failed; dropping flag");
@@ -6089,7 +6099,13 @@ static int bs_strike_record_429(request_rec *r,
     if (!bs_shm.strike_table || !bs_shm.mutex || !cfg) return 0;
     apr_uint32_t base = bs_strike_bucket(ip, rule_slot, ns_id);
 
-    apr_status_t rv = apr_global_mutex_lock(bs_shm.mutex);
+    /* Load-shed under heavy contention — same rationale as
+     * bs_flagged_ip_add. A dropped strike just means the attacker
+     * gets one extra 429 before the rate-limit-abuse escalation
+     * kicks in; retrying from the same IP will hit the lock when
+     * it's free. */
+    apr_status_t rv = apr_global_mutex_trylock(bs_shm.mutex);
+    if (APR_STATUS_IS_EBUSY(rv)) return 0;
     if (rv != APR_SUCCESS) {
         ap_log_rerror(APLOG_MARK, APLOG_WARNING, rv, r,
             "mod_botshield: strike-table mutex_lock failed; "
@@ -6329,7 +6345,10 @@ static void bs_safeguard_record_presentation(request_rec *r,
                         BS_DEFAULT_SAFEGUARD_TTL);
 
     apr_uint32_t base = bs_safeguard_bucket(ip, ns_id);
-    apr_status_t rv = apr_global_mutex_lock(bs_shm.mutex);
+    /* Load-shed under heavy contention — same rationale as
+     * bs_flagged_ip_add. */
+    apr_status_t rv = apr_global_mutex_trylock(bs_shm.mutex);
+    if (APR_STATUS_IS_EBUSY(rv)) return;
     if (rv != APR_SUCCESS) {
         ap_log_rerror(APLOG_MARK, APLOG_WARNING, rv, r,
             "mod_botshield: safeguard-table mutex_lock failed; "
@@ -6411,7 +6430,10 @@ static void bs_safeguard_clear(const unsigned char ip[16],
     if (!bs_shm.safeguard_table || !bs_shm.mutex) return;
     apr_uint32_t base = bs_safeguard_bucket(ip, ns_id);
 
-    if (apr_global_mutex_lock(bs_shm.mutex) != APR_SUCCESS) return;
+    /* Load-shed under heavy contention. A dropped clear leaves the
+     * stale safeguard record in place; it expires on its own TTL. */
+    apr_status_t rv = apr_global_mutex_trylock(bs_shm.mutex);
+    if (rv != APR_SUCCESS) return;
     for (unsigned i = 0; i < BS_SAFEGUARD_PROBE_LIMIT; i++) {
         apr_uint32_t idx = (base + i) % bs_shm.safeguard_capacity;
         bs_safeguard_slot *slot = &bs_shm.safeguard_table[idx];
