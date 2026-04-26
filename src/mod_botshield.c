@@ -781,6 +781,12 @@ struct bs_dir_cfg {
      * as a tri-state with UNSET sentinel so the merge picks the
      * right scope's value. */
     int silent_mode;            /* bs_silent_mode; UNSET inherits */
+    /* E18 — inline form captcha. When 1, this scope's POST handler
+     * inspects the request body (url-encoded only in v1) for the
+     * configured captcha provider's response field, siteverifies
+     * via the existing M8 path, mints _bs_verified on success, 403s
+     * on failure. -1 = inherit, 0 = off, 1 = on. */
+    int form_captcha;           /* tri-state */
     int forgive_silent;         /* score credit on silent-tier pass */
     int forgive_form;           /* score credit on form-tier pass */
     int forgive_captcha;        /* score credit on captcha pass */
@@ -1032,6 +1038,7 @@ static void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->score_hard    = BS_UNSET;
     cfg->score_captcha = BS_UNSET;
     cfg->silent_mode   = BS_SILENT_MODE_UNSET;
+    cfg->form_captcha  = BS_UNSET;
     cfg->forgive_silent  = BS_UNSET;
     cfg->forgive_form    = BS_UNSET;
     cfg->forgive_captcha = BS_UNSET;
@@ -1402,6 +1409,8 @@ static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     out->score_captcha = (add->score_captcha == BS_UNSET) ? base->score_captcha : add->score_captcha;
     out->silent_mode   = (add->silent_mode   == BS_SILENT_MODE_UNSET)
                        ? base->silent_mode : add->silent_mode;
+    out->form_captcha  = (add->form_captcha  == BS_UNSET)
+                       ? base->form_captcha : add->form_captcha;
     out->forgive_silent  = (add->forgive_silent  == BS_UNSET) ? base->forgive_silent  : add->forgive_silent;
     out->forgive_form    = (add->forgive_form    == BS_UNSET) ? base->forgive_form    : add->forgive_form;
     out->forgive_captcha = (add->forgive_captcha == BS_UNSET) ? base->forgive_captcha : add->forgive_captcha;
@@ -1574,6 +1583,21 @@ static const char *bs_set_silent_mode(cmd_parms *cmd, void *cfg_v,
             "BotShieldSilentMode: '%s' must be 'interstitial' or "
             "'embedded'", arg);
     }
+    return NULL;
+}
+
+/* E18 — `BotShieldFormCaptcha on|off`. Per-scope opt-in for inline
+ * form captcha verification on POST submit. When on, BotShield
+ * inspects the form-encoded request body for the configured captcha
+ * provider's response field, siteverifies via the existing M8
+ * client, mints _bs_verified on success, and replays the body back
+ * via input filter so the downstream app handler still sees its
+ * original POST. v1 supports application/x-www-form-urlencoded only;
+ * multipart and JSON are E18.2 work. */
+static const char *bs_set_form_captcha(cmd_parms *cmd, void *cfg_v, int flag)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    cfg->form_captcha = flag ? 1 : 0;
     return NULL;
 }
 
@@ -13250,6 +13274,18 @@ static const command_rec bs_cmds[] = {
                  "(default: 80). Serves the configured third-party "
                  "provider's widget; falls through to form-PoW if no "
                  "BotShieldCaptchaProvider is set on the scope."),
+    /* E18 — inline form captcha. */
+    AP_INIT_FLAG("BotShieldFormCaptcha", bs_set_form_captcha, NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "When on, this scope validates a configured captcha "
+                 "provider's response token in the POST body of form "
+                 "submissions. Requires BotShieldCaptchaProvider + "
+                 "SiteKey + SecretFile in the same scope (or "
+                 "inherited). On valid token: mints _bs_verified, "
+                 "DECLINED so the app handler runs with the original "
+                 "body intact. On bad/missing token: 403, app handler "
+                 "never runs. v1 supports application/x-www-form-"
+                 "urlencoded only; multipart and JSON are coming."),
     /* E17 PoC — silent-tier dispatch flavor. */
     AP_INIT_TAKE1("BotShieldSilentMode", bs_set_silent_mode, NULL,
                  RSRC_CONF | ACCESS_CONF,
@@ -14924,6 +14960,299 @@ static int bs_handler(request_rec *r)
     return OK;
 }
 
+/* --- E18 — inline form captcha ----------------------------------
+ *
+ * Operator opts a scope into form-captcha validation via
+ * `BotShieldFormCaptcha on`. On POST to that scope, BotShield's
+ * fixup hook reads the request body (url-encoded only in v1),
+ * extracts the configured provider's response field, calls
+ * siteverify, and either:
+ *   - mints _bs_verified, installs an input replay filter so the
+ *     downstream app handler still sees the original body, returns
+ *     DECLINED → app's handler runs normally
+ *   - returns 403 → app's handler never sees the bad request
+ *
+ * The replay-filter pattern handles "BotShield consumed the body
+ * for inspection but the app handler still needs to read it." We
+ * buffer the body in r->pool and emit it as a synthetic input
+ * brigade when downstream asks. Apache's ap_add_input_filter puts
+ * the filter at the top of r->input_filters, so the very first
+ * read by the app handler hits our buffered copy and never touches
+ * the drained protocol filters below.
+ */
+
+#define BS_FORM_CAPTCHA_BODY_MAX  (256 * 1024)   /* 256 KB body cap */
+
+typedef struct {
+    const char *body;
+    apr_size_t  len;
+    int         emitted;
+} bs_form_replay_ctx;
+
+static ap_filter_rec_t *bs_form_replay_filter_handle = NULL;
+
+static apr_status_t bs_form_replay_filter(ap_filter_t *f,
+                                          apr_bucket_brigade *bb,
+                                          ap_input_mode_t mode,
+                                          apr_read_type_e block,
+                                          apr_off_t readbytes)
+{
+    bs_form_replay_ctx *ctx = f->ctx;
+    if (!ctx) {
+        ap_remove_input_filter(f);
+        return ap_get_brigade(f->next, bb, mode, block, readbytes);
+    }
+    if (mode == AP_MODE_INIT) return APR_SUCCESS;
+
+    if (!ctx->emitted) {
+        /* Emit the buffered body + EOS in one shot. Most handlers
+         * read until EOS via ap_setup_client_block /
+         * ap_get_client_block; the framework slices buckets to honor
+         * `readbytes`. The body is allocated in r->pool, so the
+         * pool bucket is safe for the full request lifetime. */
+        if (ctx->len > 0) {
+            apr_bucket *body_b = apr_bucket_pool_create(
+                ctx->body, ctx->len, f->r->pool, f->c->bucket_alloc);
+            APR_BRIGADE_INSERT_TAIL(bb, body_b);
+        }
+        APR_BRIGADE_INSERT_TAIL(bb,
+            apr_bucket_eos_create(f->c->bucket_alloc));
+        ctx->emitted = 1;
+        return APR_SUCCESS;
+    }
+    /* Already emitted; subsequent reads see only EOS. Self-remove
+     * so we don't get re-invoked. */
+    APR_BRIGADE_INSERT_TAIL(bb,
+        apr_bucket_eos_create(f->c->bucket_alloc));
+    ap_remove_input_filter(f);
+    return APR_SUCCESS;
+}
+
+/* Read the whole request body via the input filter chain into a
+ * pool-allocated buffer. After this, the upstream filters are
+ * drained — caller is expected to install bs_form_replay_filter to
+ * satisfy downstream readers. Returns APR_SUCCESS + sets *out_body
+ * + *out_len; APR_ENOSPC if body exceeds BS_FORM_CAPTCHA_BODY_MAX;
+ * other apr_status_t on transport errors. */
+static apr_status_t bs_form_captcha_read_body(request_rec *r,
+                                              const char **out_body,
+                                              apr_size_t *out_len)
+{
+    apr_bucket_brigade *bb = apr_brigade_create(r->pool,
+        r->connection->bucket_alloc);
+    char *buf = apr_palloc(r->pool, BS_FORM_CAPTCHA_BODY_MAX);
+    apr_size_t total = 0;
+    int saw_eos = 0;
+    apr_status_t rv = APR_SUCCESS;
+
+    while (!saw_eos) {
+        rv = ap_get_brigade(r->input_filters, bb,
+                            AP_MODE_READBYTES, APR_BLOCK_READ,
+                            HUGE_STRING_LEN);
+        if (rv != APR_SUCCESS) {
+            apr_brigade_destroy(bb);
+            return rv;
+        }
+        apr_bucket *e;
+        while ((e = APR_BRIGADE_FIRST(bb)) != APR_BRIGADE_SENTINEL(bb)) {
+            if (APR_BUCKET_IS_EOS(e)) { saw_eos = 1; break; }
+            const char *data;
+            apr_size_t len;
+            apr_status_t br = apr_bucket_read(e, &data, &len,
+                                              APR_BLOCK_READ);
+            if (br != APR_SUCCESS) {
+                apr_brigade_destroy(bb);
+                return br;
+            }
+            if (total + len > BS_FORM_CAPTCHA_BODY_MAX) {
+                apr_brigade_destroy(bb);
+                return APR_ENOSPC;
+            }
+            memcpy(buf + total, data, len);
+            total += len;
+            apr_bucket_delete(e);
+        }
+        apr_brigade_cleanup(bb);
+    }
+    apr_brigade_destroy(bb);
+    buf[total < BS_FORM_CAPTCHA_BODY_MAX ? total : BS_FORM_CAPTCHA_BODY_MAX - 1] = '\0';
+    *out_body = buf;
+    *out_len  = total;
+    return APR_SUCCESS;
+}
+
+/* E18 fixup hook. Runs before content handlers. For POST to scopes
+ * with BotShieldFormCaptcha on, validates the captcha and decides
+ * whether to let the downstream handler see the request. */
+static int bs_form_captcha_fixup(request_rec *r)
+{
+    if (r->method_number != M_POST) return DECLINED;
+    if (!ap_is_initial_req(r)) return DECLINED;
+
+    bs_dir_cfg *cfg = ap_get_module_config(r->per_dir_config,
+                                           &botshield_module);
+    if (!cfg || cfg->form_captcha != 1) return DECLINED;
+
+    if (!cfg->captcha_provider || !cfg->captcha_provider->implemented ||
+        !cfg->captcha_secret || !cfg->captcha_site_key) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+            "mod_botshield: BotShieldFormCaptcha on but scope is "
+            "missing BotShieldCaptchaProvider/SiteKey/SecretFile; "
+            "rejecting POST as misconfigured");
+        return HTTP_SERVICE_UNAVAILABLE;
+    }
+
+    /* Body content-type check. v1 = url-encoded only. Other shapes
+     * (multipart, JSON) get a 415 with diagnostic so operators
+     * notice the gap immediately rather than silently allowing
+     * unverified submits. */
+    const char *ct = apr_table_get(r->headers_in, "Content-Type");
+    if (!ct ||
+        strncasecmp(ct, "application/x-www-form-urlencoded", 33) != 0) {
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: BotShieldFormCaptcha v1 only supports "
+            "application/x-www-form-urlencoded; got Content-Type=%s",
+            ct ? ct : "(missing)");
+        return HTTP_UNSUPPORTED_MEDIA_TYPE;
+    }
+
+    /* Read the body. */
+    const char *body = NULL;
+    apr_size_t  body_len = 0;
+    apr_status_t rv = bs_form_captcha_read_body(r, &body, &body_len);
+    if (rv == APR_ENOSPC) {
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: form-captcha body exceeds %d bytes",
+            BS_FORM_CAPTCHA_BODY_MAX);
+        return HTTP_REQUEST_ENTITY_TOO_LARGE;
+    }
+    if (rv != APR_SUCCESS) {
+        ap_log_rerror(APLOG_MARK, APLOG_WARNING, rv, r,
+            "mod_botshield: form-captcha body read failed");
+        return HTTP_BAD_REQUEST;
+    }
+
+    /* Extract the captcha-response field by provider-known name. */
+    char *token = bs_form_get(r->pool, body,
+                              cfg->captcha_provider->token_field);
+    if (!token || !*token) {
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: form-captcha: missing token field '%s'",
+            cfg->captcha_provider->token_field);
+        return HTTP_FORBIDDEN;
+    }
+
+    /* siteverify via the existing M8 client. */
+    int timeout_ms = cfg->captcha_timeout_ms > 0
+        ? cfg->captcha_timeout_ms : BS_DEFAULT_CAPTCHA_TIMEOUT;
+    const char *details = NULL;
+    long http_code = 0;
+    double score = -1.0;
+    const char *resp_hostname = NULL, *resp_action = NULL;
+    bs_captcha_result res = bs_captcha_siteverify(r,
+        cfg->captcha_provider, cfg->captcha_secret,
+        cfg->captcha_secret_len, token, timeout_ms,
+        &details, &http_code, &score, &resp_hostname, &resp_action);
+
+    if (res != BS_CAPTCHA_OK) {
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: form-captcha siteverify rejected "
+            "(http=%ld details=\"%s\")", http_code,
+            details ? details : "");
+        return HTTP_FORBIDDEN;
+    }
+
+    /* Hostname binding (security-review #1 parity with M8 path).
+     * Action binding deliberately skipped here — the form's action
+     * value is operator-defined and varies per form; enforcing a
+     * single expected_action cross-form would be wrong. Operators
+     * who want strict action checks can configure
+     * BotShieldCaptchaExpectedAction explicitly. */
+    const char *expected_host =
+        cfg->captcha_expected_hostname
+            ? cfg->captcha_expected_hostname
+            : (r->server && r->server->server_hostname
+                   ? r->server->server_hostname : "");
+    if (resp_hostname && *expected_host &&
+        strcmp(resp_hostname, expected_host) != 0) {
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: form-captcha hostname-mismatch "
+            "(got=%s expected=%s)", resp_hostname, expected_host);
+        return HTTP_FORBIDDEN;
+    }
+    if (cfg->captcha_expected_action && *cfg->captcha_expected_action &&
+        resp_action &&
+        strcmp(resp_action, cfg->captcha_expected_action) != 0) {
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: form-captcha action-mismatch "
+            "(got=%s expected=%s)",
+            resp_action, cfg->captcha_expected_action);
+        return HTTP_FORBIDDEN;
+    }
+    if (strcmp(cfg->captcha_provider->name, "recaptcha-v3") == 0) {
+        double min_score = (cfg->recaptcha_v3_min_score >= 0.0)
+            ? cfg->recaptcha_v3_min_score
+            : BS_DEFAULT_RECAPTCHA_V3_MIN_SCORE;
+        if (score >= 0.0 && score < min_score) {
+            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                "mod_botshield: form-captcha v3 score below "
+                "threshold (%.2f < %.2f)", score, min_score);
+            return HTTP_FORBIDDEN;
+        }
+    }
+
+    /* Mint _bs_verified — same captcha-<provider> alg the M8
+     * interstitial path uses. passes_captcha=1 (this WAS a captcha-
+     * tier solve, just inline rather than interstitial). */
+    int ttl        = bs_effective_int(cfg->cookie_ttl, BS_DEFAULT_COOKIE_TTL);
+    int difficulty = bs_effective_int(cfg->difficulty, BS_DEFAULT_DIFFICULTY);
+    const char *cookie_alg_name = apr_psprintf(r->pool, "captcha-%s",
+                                               cfg->captcha_provider->name);
+    const bs_pow_algorithm *captcha_alg = bs_find_algorithm(cookie_alg_name);
+    if (!captcha_alg || !captcha_alg->implemented) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+            "mod_botshield: form-captcha cookie alg '%s' missing "
+            "from registry", cookie_alg_name);
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+    bs_rep_state next_rep;
+    memset(&next_rep, 0, sizeof(next_rep));
+    next_rep.passes_captcha = 1;
+
+    bs_challenge ch;
+    const char *ierr = bs_issue_challenge(r->pool, cfg, difficulty, ttl,
+                                          /* auto_tier */ 0,
+                                          captcha_alg, &next_rep, &ch);
+    if (ierr) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+            "mod_botshield: form-captcha cookie issue failed: %s", ierr);
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+    const char *payload = bs_build_cookie_payload(r->pool, cfg, &ch,
+                                                  "captcha");
+    if (payload) {
+        apr_table_set(r->err_headers_out, "Set-Cookie",
+                      bs_build_set_cookie(r, cfg, payload, ch.expires_at));
+    }
+
+    /* Install the replay filter so the downstream handler sees the
+     * original POST body. Filter buffers in r->pool memory; lifetime
+     * is the request, plenty for any handler that wants it. */
+    bs_form_replay_ctx *ctx = apr_pcalloc(r->pool, sizeof(*ctx));
+    ctx->body    = body;
+    ctx->len     = body_len;
+    ctx->emitted = 0;
+    ap_add_input_filter_handle(bs_form_replay_filter_handle,
+                               ctx, r, r->connection);
+
+    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+        "mod_botshield: form-captcha verified (provider=%s, "
+        "body_len=%" APR_SIZE_T_FMT ")",
+        cfg->captcha_provider->name, body_len);
+    /* DECLINED so the app's regular handler runs. */
+    return DECLINED;
+}
+
 /* --- Hook registration --- */
 
 /* Gated under the same BS_FUZZ_HARNESS flag as the module
@@ -14938,6 +15267,15 @@ static void bs_register_hooks(apr_pool_t *p)
     ap_hook_post_config (bs_post_config, NULL, NULL, APR_HOOK_MIDDLE);
     ap_hook_child_init  (bs_child_init,  NULL, NULL, APR_HOOK_MIDDLE);
     ap_hook_handler     (bs_handler,     NULL, NULL, APR_HOOK_FIRST);
+    /* E18 — inline form captcha. Fixup runs before content handlers
+     * but after auth/header processing, so the request body is still
+     * readable from the input filter chain. The hook reads + validates
+     * + decides whether to let the downstream handler proceed. */
+    ap_hook_fixups      (bs_form_captcha_fixup,
+                         NULL, NULL, APR_HOOK_MIDDLE);
+    bs_form_replay_filter_handle = ap_register_input_filter(
+        "BS_FORM_REPLAY", bs_form_replay_filter, NULL,
+        AP_FTYPE_RESOURCE);
     /* E5 — response-phase filter for the app-feedback header. Filter
      * runs once per request (self-removes), strips the configured
      * header from r->headers_out, and — when the feature is enabled
