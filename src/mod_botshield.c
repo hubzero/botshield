@@ -10161,17 +10161,31 @@ static bs_captcha_result bs_captcha_parse_response(apr_pool_t *p,
                     json_object_object_get_ex(root, "errors", &ec);
                 }
                 if (ec && json_object_is_type(ec, json_type_array)) {
+                    /* apr_pstrcat in a loop is O(N²) — each call
+                     * allocates a fresh buffer sized to the
+                     * cumulative length and copies the prior result
+                     * forward. Push into an array and join in one
+                     * allocation via apr_array_pstrcat (O(N)). The
+                     * 8 KB body cap (BS_MAX_CAPTCHA_BODY) bounds N,
+                     * but a misconfigured-secret response returning
+                     * many "invalid-input-*" error codes hits this
+                     * path on every request — worth the tidier
+                     * shape. */
                     int n = (int)json_object_array_length(ec);
-                    char *joined = apr_pstrdup(p, "");
+                    apr_array_header_t *arr = apr_array_make(p,
+                        n > 0 ? n : 1, sizeof(const char *));
                     for (int i = 0; i < n; i++) {
                         json_object *e = json_object_array_get_idx(ec, i);
                         if (!e) continue;
                         const char *s = json_object_get_string(e);
                         if (!s) continue;
-                        joined = apr_pstrcat(p, joined,
-                                             i == 0 ? "" : ",", s, NULL);
+                        /* Borrowed pointer into root — root is
+                         * json_object_put'd at the end of this
+                         * function, AFTER apr_array_pstrcat copies
+                         * the strings into its joined output. Safe. */
+                        *(const char **)apr_array_push(arr) = s;
                     }
-                    *out_details = joined;
+                    *out_details = apr_array_pstrcat(p, arr, ',');
                 }
             }
         }
