@@ -15278,6 +15278,31 @@ static int bs_form_captcha_fixup(request_rec *r)
         return HTTP_BAD_REQUEST;
     }
 
+    /* E12 — shadow / observe mode for E18. If global BotShieldShadowMode
+     * is on, skip siteverify + cookie-mint, log a :observe reason, and
+     * pass the request through. The body is still read (we already did
+     * it — needed for the replay filter so the app handler sees its
+     * original POST). Transport-level errors (415/413/400/503) above
+     * this point intentionally still fire even under shadow mode —
+     * those represent misconfiguration or genuinely-malformed requests,
+     * not policy decisions an operator is staging. */
+    {
+        bs_server_cfg *scfg_sh = ap_get_module_config(
+            r->server->module_config, &botshield_module);
+        if (scfg_sh && scfg_sh->shadow_mode == 1) {
+            bs_form_replay_ctx *ctx = apr_pcalloc(r->pool, sizeof(*ctx));
+            ctx->body    = body;
+            ctx->len     = body_len;
+            ctx->emitted = 0;
+            ap_add_input_filter_handle(bs_form_replay_filter_handle,
+                                       ctx, r, r->connection);
+            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                "mod_botshield: form-captcha:observe (shadow mode; "
+                "body replayed, no siteverify, no cookie mint)");
+            return DECLINED;
+        }
+    }
+
     /* Extract the captcha-response field by provider-known name.
      * URL-encoded → bs_form_get (existing M8 helper).
      * JSON → json-c parse, look up the same key at top level. */

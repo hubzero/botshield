@@ -240,6 +240,38 @@ def test_form_widget_endpoint_serves_provider_dispatch():
     assert "data-bs-form-captcha" in body
 
 
+def test_form_captcha_honors_global_shadow_mode(config_override):
+    """E12 review fix — `BotShieldShadowMode on` (server-scope) must
+    suppress E18's policy-level 403s. A POST with a missing or bad
+    captcha token under shadow mode should pass through (DECLINED;
+    Apache static handler returns 405 because the test path doesn't
+    accept POST). Without the fix, E18 hard-403's regardless of
+    shadow_mode and breaks the dry-run mental model."""
+    with config_override(
+        r"BotShieldAllow\s+on",
+        'BotShieldAllow on\n'
+        '    BotShieldShadowMode on\n'
+        '    <Location /embedded-test.html>\n'
+        '        BotShieldCaptchaProvider turnstile\n'
+        '        BotShieldCaptchaSiteKey 1x00000000000000000000AA\n'
+        '        BotShieldCaptchaSecretFile /etc/botshield/turnstile-secret\n'
+        '        BotShieldFormCaptcha on\n'
+        '    </Location>',
+        count=1,
+    ):
+        r = client.post(
+            "/embedded-test.html",
+            data="email=foo@example.com&message=hi",  # missing token
+            headers={"Content-Type":
+                     "application/x-www-form-urlencoded"},
+        )
+    # Without shadow mode this would have been 403. Under shadow it
+    # passes through to Apache, which 405s the static-file POST.
+    assert r.status_code != 403, (
+        f"shadow_mode should suppress E18's 403; got {r.status_code}"
+    )
+
+
 def test_form_captcha_misconfigured_scope_503(config_override):
     """BotShieldFormCaptcha on without a configured provider on the
     scope is misconfiguration — 503 rather than silent allow."""
