@@ -86,19 +86,76 @@ def test_form_captcha_rejects_empty_token(config_override):
 
 
 def test_form_captcha_rejects_wrong_content_type(config_override):
-    """v1 supports only application/x-www-form-urlencoded; multipart
-    or JSON POSTs get a 415 with diagnostic so operators notice the
-    gap immediately."""
+    """E18 supports url-encoded + JSON. Multipart and other shapes
+    get 415 with diagnostic so operators notice the gap."""
     with config_override(
         r"BotShieldAllow\s+on", _override_form_captcha(), count=1,
     ):
         r = client.post(
             "/embedded-test.html",
-            data='{"cf-turnstile-response":"x"}',
-            headers={"Content-Type": "application/json"},
+            data="--b\r\nContent-Disposition: form-data\r\n\r\nfoo",
+            headers={"Content-Type": "multipart/form-data; boundary=b"},
         )
     assert r.status_code == 415, (
         f"unsupported content-type should be 415; got {r.status_code}"
+    )
+
+
+def test_form_captcha_json_rejects_missing_token(config_override):
+    """E18.3 — JSON body without the captcha-response field is
+    rejected the same way url-encoded missing-token is."""
+    import json as _json
+    with config_override(
+        r"BotShieldAllow\s+on", _override_form_captcha(), count=1,
+    ):
+        r = client.post(
+            "/embedded-test.html",
+            data=_json.dumps({"email": "foo@example.com"}),
+            headers={"Content-Type": "application/json"},
+        )
+    assert r.status_code == 403
+
+
+def test_form_captcha_json_rejects_malformed(config_override):
+    """E18.3 — non-JSON body claiming JSON content-type is a 400."""
+    with config_override(
+        r"BotShieldAllow\s+on", _override_form_captcha(), count=1,
+    ):
+        r = client.post(
+            "/embedded-test.html",
+            data="this is not json",
+            headers={"Content-Type": "application/json"},
+        )
+    assert r.status_code == 400
+
+
+def test_form_captcha_json_passes_valid_token(config_override, log_slice):
+    """E18.3 — JSON body with a valid Turnstile token round-trips
+    through siteverify the same way url-encoded does. Cookie minted,
+    body replay installed, downstream handler runs (Apache returns
+    405 because /embedded-test.html is static)."""
+    import json as _json
+    valid_token = "any-token-the-always-pass-secret-accepts"
+    with config_override(
+        r"BotShieldAllow\s+on", _override_form_captcha(), count=1,
+    ):
+        with log_slice as slc:
+            r = client.post(
+                "/embedded-test.html",
+                data=_json.dumps({
+                    "email": "foo@example.com",
+                    "cf-turnstile-response": valid_token,
+                }),
+                headers={"Content-Type": "application/json"},
+            )
+            log_text = slc.text()
+
+    assert r.status_code != 403, (
+        f"valid JSON form-captcha should not be rejected; "
+        f"got 403"
+    )
+    assert "form-captcha verified" in log_text, (
+        f"missing form-captcha-verified log line for JSON path"
     )
 
 
@@ -153,6 +210,34 @@ def test_form_captcha_passes_valid_token(config_override, log_slice):
         f"valid form-captcha should mint _bs_verified; "
         f"set-cookies={set_cookies}"
     )
+
+
+def test_form_widget_endpoint_serves_provider_dispatch():
+    """E18.4 — /botshield/form-widget.js serves a JS shell that
+    detects [data-bs-form-captcha] slots and injects per-provider
+    markup. Sanity-check that the served body has the dispatch
+    table and the right CDN URLs."""
+    r = client.get("/botshield/form-widget.js")
+    assert r.status_code == 200
+    ct = r.headers.get("content-type", "")
+    assert "javascript" in ct, f"expected JS content-type; got {ct!r}"
+    body = r.text
+    # Provider dispatch table
+    for name in ("turnstile", "hcaptcha", "recaptcha-v2",
+                 "recaptcha-v3", "friendly"):
+        assert name in body, f"widget missing dispatch case: {name!r}"
+    # Per-provider widget classes
+    for cls in ("cf-turnstile", "h-captcha", "g-recaptcha",
+                "frc-captcha"):
+        assert cls in body, f"widget missing markup class: {cls!r}"
+    # CDN loaders
+    assert "challenges.cloudflare.com/turnstile" in body
+    assert "js.hcaptcha.com" in body
+    assert "google.com/recaptcha/api.js" in body
+    assert "cdn.jsdelivr.net/npm/friendly-challenge" in body
+    # Slot detection + run-once guard
+    assert "_bsFormWidgetRan" in body
+    assert "data-bs-form-captcha" in body
 
 
 def test_form_captcha_misconfigured_scope_503(config_override):

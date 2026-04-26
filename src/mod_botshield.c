@@ -11526,6 +11526,116 @@ static int bs_embedded_worker_handler(request_rec *r)
     return OK;
 }
 
+/* E18.4 — form-widget shell. Served at /botshield/form-widget.js.
+ * Operator HTML pattern:
+ *
+ *   <form action="/contact/submit" method="POST">
+ *     <input name="email">
+ *     <div data-bs-form-captcha
+ *          data-bs-provider="turnstile"
+ *          data-bs-sitekey="1x..."></div>
+ *     <button>Send</button>
+ *   </form>
+ *   <script src="/botshield/form-widget.js" defer></script>
+ *
+ * Wrapper finds every [data-bs-form-captcha] slot, reads provider
+ * + sitekey from data-* attributes, emits the per-provider widget
+ * markup (cf-turnstile / h-captcha / g-recaptcha / frc-captcha)
+ * and lazy-loads the provider's CDN script. Operators don't have
+ * to remember per-provider class names or script URLs — the
+ * BotShield wrapper abstracts them.
+ *
+ * Attribute-driven (no server-side scope lookup): keeps the wrapper
+ * simple and avoids an extra round-trip. Operators already write
+ * the sitekey somewhere; data-bs-sitekey isn't more verbose than
+ * the stock provider integration would be. */
+static const char BS_FORM_WIDGET_JS[] =
+"(function(){\n"
+" if (window._bsFormWidgetRan) return;\n"
+" window._bsFormWidgetRan = true;\n"
+"\n"
+" var providers = {\n"
+"  'turnstile': {\n"
+"   cls: 'cf-turnstile',\n"
+"   src: 'https://challenges.cloudflare.com/turnstile/v0/api.js'\n"
+"  },\n"
+"  'hcaptcha': {\n"
+"   cls: 'h-captcha',\n"
+"   src: 'https://js.hcaptcha.com/1/api.js'\n"
+"  },\n"
+"  'recaptcha-v2': {\n"
+"   cls: 'g-recaptcha',\n"
+"   src: 'https://www.google.com/recaptcha/api.js'\n"
+"  },\n"
+"  'recaptcha-v3': {\n"
+"   cls: '',\n"
+"   src: 'https://www.google.com/recaptcha/api.js?render='\n"
+"  },\n"
+"  'friendly': {\n"
+"   cls: 'frc-captcha',\n"
+"   src: 'https://cdn.jsdelivr.net/npm/friendly-challenge/widget.min.js'\n"
+"  }\n"
+" };\n"
+"\n"
+" var loaded = {};\n"
+" function loadScript(url){\n"
+"  if (loaded[url]) return;\n"
+"  loaded[url] = true;\n"
+"  var s = document.createElement('script');\n"
+"  s.src = url; s.async = true; s.defer = true;\n"
+"  document.head.appendChild(s);\n"
+" }\n"
+"\n"
+" var slots = document.querySelectorAll('[data-bs-form-captcha]');\n"
+" for (var i = 0; i < slots.length; i++) {\n"
+"  var slot = slots[i];\n"
+"  var providerName = slot.getAttribute('data-bs-provider') ||\n"
+"                     'turnstile';\n"
+"  var sitekey = slot.getAttribute('data-bs-sitekey');\n"
+"  var prov = providers[providerName];\n"
+"  if (!prov || !sitekey) {\n"
+"   if (window.console && console.warn) {\n"
+"    console.warn('botshield form-widget: missing provider or '\n"
+"                 + 'sitekey on slot', slot);\n"
+"   }\n"
+"   continue;\n"
+"  }\n"
+"  /* recaptcha-v3: no widget div; the provider script auto-runs.\n"
+"     Append sitekey to the loader URL. */\n"
+"  if (providerName === 'recaptcha-v3') {\n"
+"   loadScript(prov.src + encodeURIComponent(sitekey));\n"
+"   continue;\n"
+"  }\n"
+"  /* All other providers: inject a child div with the right class\n"
+"     + sitekey attribute, then load the provider's CDN script.\n"
+"     The provider's script picks up the divs and renders the\n"
+"     widget. */\n"
+"  var div = document.createElement('div');\n"
+"  div.className = prov.cls;\n"
+"  div.setAttribute('data-sitekey', sitekey);\n"
+"  /* Optional callback: operator can specify a JS function name\n"
+"     via data-bs-callback that the provider invokes with the\n"
+"     resolved token. */\n"
+"  var cb = slot.getAttribute('data-bs-callback');\n"
+"  if (cb) div.setAttribute('data-callback', cb);\n"
+"  slot.appendChild(div);\n"
+"  loadScript(prov.src);\n"
+" }\n"
+"})();\n";
+
+static int bs_form_widget_handler(request_rec *r)
+{
+    if (r->method_number != M_GET && r->method_number != M_OPTIONS) {
+        r->status = HTTP_METHOD_NOT_ALLOWED;
+        apr_table_setn(r->headers_out, "Allow", "GET, OPTIONS");
+        return OK;
+    }
+    ap_set_content_type(r, "application/javascript; charset=utf-8");
+    apr_table_setn(r->headers_out, "Cache-Control", "public, max-age=60");
+    ap_rputs(BS_FORM_WIDGET_JS, r);
+    return OK;
+}
+
 /* GET /botshield/embedded-bootstrap — issue a fresh PoW challenge.
  *
  * Returns one of:
@@ -14291,6 +14401,10 @@ static int bs_handler(request_rec *r)
         if (strcmp(sub, "/embedded-verify") == 0) {
             return bs_embedded_verify_handler(r, cfg);
         }
+        /* E18.4 — form-widget shell. */
+        if (strcmp(sub, "/form-widget.js") == 0) {
+            return bs_form_widget_handler(r);
+        }
         /* Unknown module endpoint under the prefix → 404, so a typo in
          * an operator's template fails loudly instead of falling through
          * to Apache and serving some unrelated file. */
@@ -15102,16 +15216,20 @@ static int bs_form_captcha_fixup(request_rec *r)
         return HTTP_SERVICE_UNAVAILABLE;
     }
 
-    /* Body content-type check. v1 = url-encoded only. Other shapes
-     * (multipart, JSON) get a 415 with diagnostic so operators
-     * notice the gap immediately rather than silently allowing
-     * unverified submits. */
+    /* Body content-type dispatch. v1 supports url-encoded;
+     * E18.3 added JSON. Multipart is deferred to a future cut.
+     * Anything else gets 415 with diagnostic so operators notice
+     * the gap rather than silently allow unverified submits. */
     const char *ct = apr_table_get(r->headers_in, "Content-Type");
-    if (!ct ||
-        strncasecmp(ct, "application/x-www-form-urlencoded", 33) != 0) {
+    int ct_form = (ct &&
+        strncasecmp(ct, "application/x-www-form-urlencoded", 33) == 0);
+    int ct_json = (ct &&
+        strncasecmp(ct, "application/json", 16) == 0);
+    if (!ct_form && !ct_json) {
         ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
-            "mod_botshield: BotShieldFormCaptcha v1 only supports "
-            "application/x-www-form-urlencoded; got Content-Type=%s",
+            "mod_botshield: BotShieldFormCaptcha supports "
+            "application/x-www-form-urlencoded or application/json; "
+            "got Content-Type=%s",
             ct ? ct : "(missing)");
         return HTTP_UNSUPPORTED_MEDIA_TYPE;
     }
@@ -15132,9 +15250,31 @@ static int bs_form_captcha_fixup(request_rec *r)
         return HTTP_BAD_REQUEST;
     }
 
-    /* Extract the captcha-response field by provider-known name. */
-    char *token = bs_form_get(r->pool, body,
-                              cfg->captcha_provider->token_field);
+    /* Extract the captcha-response field by provider-known name.
+     * URL-encoded → bs_form_get (existing M8 helper).
+     * JSON → json-c parse, look up the same key at top level. */
+    const char *token = NULL;
+    if (ct_form) {
+        token = bs_form_get(r->pool, body,
+                            cfg->captcha_provider->token_field);
+    } else { /* ct_json */
+        enum json_tokener_error jerr = json_tokener_success;
+        json_object *root = json_tokener_parse_verbose(body, &jerr);
+        if (!root || jerr != json_tokener_success) {
+            if (root) json_object_put(root);
+            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                "mod_botshield: form-captcha: JSON parse failed");
+            return HTTP_BAD_REQUEST;
+        }
+        json_object *tok_v = NULL;
+        if (json_object_object_get_ex(root,
+                cfg->captcha_provider->token_field, &tok_v) &&
+            tok_v && json_object_is_type(tok_v, json_type_string)) {
+            const char *s = json_object_get_string(tok_v);
+            if (s) token = apr_pstrdup(r->pool, s);
+        }
+        json_object_put(root);
+    }
     if (!token || !*token) {
         ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
             "mod_botshield: form-captcha: missing token field '%s'",
