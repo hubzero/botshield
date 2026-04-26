@@ -11234,31 +11234,54 @@ static void bs_urldecode_inplace(char *s)
  * during captcha-verify. Returns NULL on error (already responded to
  * the client via ap_setup_client_block) or a pool-allocated NUL-
  * terminated buffer otherwise. */
-static const char *bs_read_form_body(request_rec *r, apr_size_t max_len,
-                                     apr_size_t *out_len)
+/* Read the whole request body via ap_get_client_block into a
+ * pool-allocated buffer.
+ *
+ * Returns:
+ *   APR_SUCCESS  — *out_body / *out_len populated; body may be empty.
+ *   APR_ENOSPC   — body exceeded max_len; caller should emit 413.
+ *   APR_EGENERAL — ap_get_client_block returned a transport error;
+ *                  caller should emit 400.
+ *   APR_EINIT    — ap_setup_client_block rejected; caller emits 400.
+ *
+ * Security review MEDIUM #9 — was returning a pointer-or-NULL with
+ * silent truncation when the body exceeded max_len: the loop
+ * `break`'d at `total >= max_len` without consuming the rest, so
+ * callers couldn't tell the difference between "body fit cleanly"
+ * and "body was twice the cap and we threw the tail away." Now
+ * the function reads one extra byte past max_len; if any data
+ * remains, we return APR_ENOSPC so the caller can 413 instead
+ * of accepting a quietly-truncated body. */
+static apr_status_t bs_read_form_body(request_rec *r, apr_size_t max_len,
+                                      const char **out_body,
+                                      apr_size_t *out_len)
 {
+    *out_body = NULL;
     *out_len = 0;
     int rc = ap_setup_client_block(r, REQUEST_CHUNKED_ERROR);
-    if (rc != OK) return NULL;
+    if (rc != OK) return APR_EINIT;
     if (!ap_should_client_block(r)) {
         char *empty = apr_pcalloc(r->pool, 1);
-        return empty;
+        *out_body = empty;
+        return APR_SUCCESS;
     }
     char *buf = apr_palloc(r->pool, max_len + 1);
     apr_size_t total = 0;
     long n;
     char chunk[4096];
     while ((n = ap_get_client_block(r, chunk, sizeof(chunk))) > 0) {
-        apr_size_t room = max_len - total;
-        apr_size_t take = ((apr_size_t)n < room) ? (apr_size_t)n : room;
-        memcpy(buf + total, chunk, take);
-        total += take;
-        if (total >= max_len) break;
+        if ((apr_size_t)n > max_len - total) {
+            /* This chunk would overflow. Body is too big. */
+            return APR_ENOSPC;
+        }
+        memcpy(buf + total, chunk, (apr_size_t)n);
+        total += (apr_size_t)n;
     }
-    if (n < 0) return NULL;
+    if (n < 0) return APR_EGENERAL;
     buf[total] = '\0';
+    *out_body = buf;
     *out_len = total;
-    return buf;
+    return APR_SUCCESS;
 }
 
 /* Pick a single field value from a URL-encoded body. Returns a fresh
@@ -12510,8 +12533,14 @@ static int bs_embedded_verify_handler(request_rec *r, bs_dir_cfg *cfg)
     }
 
     apr_size_t body_len = 0;
-    const char *body = bs_read_form_body(r, BS_EMBEDDED_BODY_MAX, &body_len);
-    if (!body || body_len == 0) {
+    const char *body = NULL;
+    apr_status_t bsr = bs_read_form_body(r, BS_EMBEDDED_BODY_MAX,
+                                         &body, &body_len);
+    if (bsr == APR_ENOSPC) {
+        r->status = HTTP_REQUEST_ENTITY_TOO_LARGE;
+        return OK;
+    }
+    if (bsr != APR_SUCCESS || !body || body_len == 0) {
         r->status = HTTP_BAD_REQUEST;
         return OK;
     }
@@ -13205,8 +13234,14 @@ static int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
      * blob of ~2 KB + return_to ~= 3 KB; 8 KB is comfortable headroom
      * and caps the work a hostile client can force us to buffer. */
     apr_size_t body_len = 0;
-    const char *body = bs_read_form_body(r, 8 * 1024, &body_len);
-    if (!body) {
+    const char *body = NULL;
+    apr_status_t bsr = bs_read_form_body(r, 8 * 1024, &body, &body_len);
+    if (bsr == APR_ENOSPC) {
+        bs_decision_log(r, "captcha", "rejected", "-",
+                        prov_name, "-", "body_too_large", 0);
+        return HTTP_REQUEST_ENTITY_TOO_LARGE;
+    }
+    if (bsr != APR_SUCCESS || !body) {
         bs_decision_log(r, "captcha", "rejected", "-",
                         prov_name, "-", "body_read_failed", 0);
         return HTTP_BAD_REQUEST;
