@@ -6664,9 +6664,20 @@ static void bs_bloom_rotate_if_due(apr_int64_t now_sec)
      * does serialize against flagged-IP writers and makes rotation
      * a clean global checkpoint. Rotation fires at most twice per
      * week by default, so the brief mutex hold is free. */
+    /* Security review MEDIUM #6 — was apr_global_mutex_lock (blocking),
+     * but this code path runs from any worker that wins the
+     * rotation CAS — i.e., from the request hot path. A flagged-IP
+     * writer or strike-record-429 holding the mutex would stall
+     * the rotating worker on its current request. Trylock matches
+     * the rest of the request-path lock acquisitions. The atomic
+     * loop below is what actually fixes the writer/clearer race;
+     * the mutex is just opportunistic serialization for cleanliness.
+     * If we miss it on contention, the rotation still succeeds
+     * (atomic stores publish) — slightly less of a clean global
+     * checkpoint, but safe. */
     int held_mutex = 0;
     if (bs_shm.mutex &&
-        apr_global_mutex_lock(bs_shm.mutex) == APR_SUCCESS) {
+        apr_global_mutex_trylock(bs_shm.mutex) == APR_SUCCESS) {
         held_mutex = 1;
     }
     apr_uint64_t *p64 = (apr_uint64_t *)bs_shm.bloom_bufs[new_active];
@@ -7061,8 +7072,22 @@ static apr_status_t bs_state_save(apr_pool_t *p, server_rec *s,
     memcpy(pc, &bb,  4); pc += 4;
     memcpy(pc, &act, 4); pc += 4;
     memcpy(pc, &nxt, 8); pc += 8;
-    memcpy(pc, rt->bloom_bufs[0], bb); pc += bb;
-    memcpy(pc, rt->bloom_bufs[1], bb); pc += bb;
+    /* Security review MEDIUM #5 — bloom buffers are mutated on the
+     * request hot path via byte-level __atomic_or_fetch (see
+     * bs_bloom_add). A plain memcpy reading those same bytes
+     * concurrently is a data race per the C memory model — TSAN
+     * flags it, and on weak-memory arches the saved bytes could
+     * tear (lost OR'd bits) even though x86 hides it. Byte-wise
+     * relaxed atomic load matches the writer's atomic granularity;
+     * compiles to the same memory-bandwidth-bound mov on x86 / ldr
+     * on AArch64 as memcpy would. */
+    for (int j = 0; j < 2; j++) {
+        const unsigned char *src = rt->bloom_bufs[j];
+        for (apr_size_t i = 0; i < bb; i++) {
+            pc[i] = __atomic_load_n(&src[i], __ATOMIC_RELAXED);
+        }
+        pc += bb;
+    }
 
     apr_uint64_t fnv = bs_fnv64(BS_FNV64_SEED, buf, pc - buf);
     memcpy(pc, &fnv, 8); pc += 8;
