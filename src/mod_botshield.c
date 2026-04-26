@@ -11942,8 +11942,59 @@ static int bs_embedded_verify_pow(request_rec *r, bs_dir_cfg *cfg,
     /* Mint _bs_verified the same way the M7 form-PoW does — same
      * cookie shape, same expiry, same signature path. The counter
      * the wrapper found rides into the cookie body so future
-     * requests can replay-detect. */
-    ch.rep.passes_silent = 1;
+     * requests can replay-detect.
+     *
+     * E17 review fix — carry forward prior cookie state if a sig-
+     * verifying _bs_verified is present. Without this, a client
+     * whose forgive_consumed is near the E15 cap could wash their
+     * budget by letting the cookie expire before an embedded
+     * verify, then solving the bootstrap PoW to mint a fresh
+     * passes_silent=1 cookie with rep zeroed. Symmetric with M8
+     * and E18 (form-captcha): same prior-cookie acceptance check,
+     * same forgive_silent + cap helper, same flag-penalty floor.
+     * challenged_at on the JSON-reconstructed challenge is
+     * preserved — that's the bootstrap-issue time the wrapper
+     * just round-tripped, not a field we want to overwrite with
+     * the prior cookie's older value. */
+    {
+        const char *prior_val = bs_get_cookie_value(r, BS_COOKIE_NAME);
+        bs_challenge prior_ch = { 0 };
+        int have_prior = 0;
+        if (prior_val && *prior_val) {
+            const char *cverr = bs_verify_cookie(r, cfg, prior_val,
+                                                  &prior_ch);
+            if (cverr == NULL ||
+                (cverr && strcmp(cverr, "signature mismatch") != 0
+                       && prior_ch.alg_name)) {
+                have_prior = 1;
+            }
+        }
+        if (have_prior) {
+            int forgive = bs_effective_int(cfg->forgive_silent,
+                                            BS_DEFAULT_FORGIVE_SILENT);
+            bs_server_cfg *scfg_fc = ap_get_module_config(
+                r->server->module_config, &botshield_module);
+            int cap = (scfg_fc && scfg_fc->forgive_cap_per_hour > 0)
+                    ? scfg_fc->forgive_cap_per_hour
+                    : BS_DEFAULT_FORGIVE_CAP_PER_HOUR;
+            apr_uint32_t now_sec =
+                (apr_uint32_t)apr_time_sec(apr_time_now());
+            apr_time_t challenged_at = ch.rep.challenged_at;
+            ch.rep = prior_ch.rep;
+            ch.rep.challenged_at = challenged_at;
+            forgive = bs_forgiveness_apply_cap(forgive, cap, now_sec,
+                        &ch.rep.forgive_window_start,
+                        &ch.rep.forgive_consumed);
+            int floor   = bs_flag_penalty(prior_ch.rep.flags);
+            int new_score = prior_ch.rep.score - forgive;
+            if (new_score < floor) new_score = floor;
+            if (new_score < 0)     new_score = 0;
+            ch.rep.score          = new_score;
+            ch.rep.passes_silent  = prior_ch.rep.passes_silent + 1;
+        } else {
+            ch.rep.passes_silent = 1;
+        }
+    }
     canon = bs_challenge_canonical(r->pool, &ch);
     bs_hmac_sha256(cfg->secret, cfg->secret_len,
                    (const unsigned char *)canon, strlen(canon),
@@ -12099,9 +12150,53 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
         return OK;
     }
 
+    /* E17 review fix — carry forward prior cookie state if a sig-
+     * verifying _bs_verified is present. Symmetric with the PoW
+     * path above and with M8/E18; without it, a client near the
+     * E15 forgive_consumed cap could wash their budget by letting
+     * the cookie expire and re-running an embedded provider
+     * verify. bs_issue_challenge() will overwrite challenged_at
+     * with the current time, so unlike the PoW path we don't need
+     * to save/restore it here. */
     bs_rep_state next_rep;
     memset(&next_rep, 0, sizeof(next_rep));
-    next_rep.passes_silent = 1;
+    {
+        const char *prior_val = bs_get_cookie_value(r, BS_COOKIE_NAME);
+        bs_challenge prior_ch = { 0 };
+        int have_prior = 0;
+        if (prior_val && *prior_val) {
+            const char *cverr = bs_verify_cookie(r, cfg, prior_val,
+                                                  &prior_ch);
+            if (cverr == NULL ||
+                (cverr && strcmp(cverr, "signature mismatch") != 0
+                       && prior_ch.alg_name)) {
+                have_prior = 1;
+            }
+        }
+        if (have_prior) {
+            int forgive = bs_effective_int(cfg->forgive_silent,
+                                            BS_DEFAULT_FORGIVE_SILENT);
+            bs_server_cfg *scfg_fc = ap_get_module_config(
+                r->server->module_config, &botshield_module);
+            int cap = (scfg_fc && scfg_fc->forgive_cap_per_hour > 0)
+                    ? scfg_fc->forgive_cap_per_hour
+                    : BS_DEFAULT_FORGIVE_CAP_PER_HOUR;
+            apr_uint32_t now_sec =
+                (apr_uint32_t)apr_time_sec(apr_time_now());
+            next_rep = prior_ch.rep;
+            forgive = bs_forgiveness_apply_cap(forgive, cap, now_sec,
+                        &next_rep.forgive_window_start,
+                        &next_rep.forgive_consumed);
+            int floor   = bs_flag_penalty(prior_ch.rep.flags);
+            int new_score = prior_ch.rep.score - forgive;
+            if (new_score < floor) new_score = floor;
+            if (new_score < 0)     new_score = 0;
+            next_rep.score          = new_score;
+            next_rep.passes_silent  = prior_ch.rep.passes_silent + 1;
+        } else {
+            next_rep.passes_silent = 1;
+        }
+    }
 
     bs_challenge ch;
     const char *ierr = bs_issue_challenge(r->pool, cfg, difficulty, ttl,
