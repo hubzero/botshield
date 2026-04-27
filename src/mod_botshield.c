@@ -12038,6 +12038,35 @@ static const char *bs_build_set_cookie(request_rec *r, const bs_dir_cfg *cfg,
         name, payload_b64, expires_buf, domain, secure);
 }
 
+/* Build a _bs_verified cookie payload from ch and install the
+ * resulting Set-Cookie header on the request's err_headers_out
+ * (so it reaches the client even on non-2xx responses). Returns
+ * NULL on success, an error-string diagnostic on failure (the only
+ * realistic failure is GCM encrypt; callers map this to 500).
+ *
+ * counter_str is the payload's tail token: "captcha" for server-
+ * issued captcha cookies, the decimal PoW counter for embedded
+ * PoW-verify, etc. ch must already carry the rep state the caller
+ * wants — call bs_apply_rep_carry first if doing carry-forward.
+ *
+ * The four issuance call sites (embedded-verify-pow-gcm, embedded-
+ * verify-provider, M8 captcha-verify, form-captcha-replay) all
+ * funnel through here. apr_table_add (not setn) is required so we
+ * append rather than clobber any prior Set-Cookie rows that other
+ * modules (mod_session etc.) may have added earlier in the chain. */
+static const char *bs_install_verified_cookie(request_rec *r,
+                                              const bs_dir_cfg *cfg,
+                                              const bs_challenge *ch,
+                                              const char *counter_str)
+{
+    const char *payload = bs_build_cookie_payload(r->pool, cfg, ch,
+                                                   counter_str);
+    if (!payload) return "GCM cookie payload build failed";
+    apr_table_add(r->err_headers_out, "Set-Cookie",
+                  bs_build_set_cookie(r, cfg, payload, ch->expires_at));
+    return NULL;
+}
+
 /* ---- M8.1 challenge-origin "pending" cookie ----
  *
  * Name:  _bs_captcha_pending
@@ -13059,15 +13088,10 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
         }
         ch.rep.passes_silent = 1;
     }
-    const char *payload = bs_build_cookie_payload(r->pool, cfg, &ch,
-                                                  counter_str);
-    if (!payload) {
+    if (bs_install_verified_cookie(r, cfg, &ch, counter_str) != NULL) {
         r->status = HTTP_INTERNAL_SERVER_ERROR;
         return OK;
     }
-    apr_table_add(r->err_headers_out, "Set-Cookie",
-                  bs_build_set_cookie(r, cfg, payload, ch.expires_at));
-
     r->status = HTTP_NO_CONTENT;
     apr_table_setn(r->headers_out, "Cache-Control", "no-store");
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
@@ -13242,16 +13266,10 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
         return OK;
     }
 
-    const char *payload = bs_build_cookie_payload(r->pool, cfg, &ch,
-                                                  "captcha");
-    if (!payload) {
+    if (bs_install_verified_cookie(r, cfg, &ch, "captcha") != NULL) {
         r->status = HTTP_INTERNAL_SERVER_ERROR;
         return OK;
     }
-    /* E18 review fix (cross-ext) — see PoW path above. */
-    apr_table_add(r->err_headers_out, "Set-Cookie",
-                  bs_build_set_cookie(r, cfg, payload, ch.expires_at));
-
     r->status = HTTP_NO_CONTENT;
     apr_table_setn(r->headers_out, "Cache-Control", "no-store");
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
@@ -14269,8 +14287,7 @@ static int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         return OK;
     }
 
-    const char *payload = bs_build_cookie_payload(r->pool, cfg, &ch, "captcha");
-    if (!payload) {
+    if (bs_install_verified_cookie(r, cfg, &ch, "captcha") != NULL) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
             "mod_botshield: failed to build cookie payload "
             "(GCM encrypt failed)");
@@ -14279,12 +14296,10 @@ static int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         ap_rputs("Service error: could not issue cookie.\n", r);
         return OK;
     }
-    const char *set_cookie = bs_build_set_cookie(r, cfg, payload,
-                                                 ch.expires_at);
-    /* Two Set-Cookie headers: the verified-rep cookie, and a Max-Age=0
-     * clear for the pending cookie so the solved challenge can't be
-     * replayed. apr_table_add (not setn) preserves both. */
-    apr_table_add(r->err_headers_out, "Set-Cookie", set_cookie);
+    /* Second Set-Cookie: Max-Age=0 clear for the pending cookie so
+     * the solved challenge can't be replayed. apr_table_add (not
+     * setn) preserves the verified-cookie row from the install
+     * helper above. */
     apr_table_add(r->err_headers_out, "Set-Cookie",
                   bs_clear_pending_cookie(r, cfg));
     apr_table_setn(r->headers_out, "Location",      safe_return);
@@ -16659,16 +16674,13 @@ static int bs_form_captcha_fixup(request_rec *r)
             "mod_botshield: form-captcha cookie issue failed: %s", ierr);
         return HTTP_INTERNAL_SERVER_ERROR;
     }
-    const char *payload = bs_build_cookie_payload(r->pool, cfg, &ch,
-                                                  "captcha");
-    if (payload) {
-        /* E18 review fix — apr_table_set deletes any prior Set-Cookie
-         * entries (mod_session and friends may have added some by
-         * now). apr_table_add appends a new row, which is what HTTP
-         * actually allows for Set-Cookie. */
-        apr_table_add(r->err_headers_out, "Set-Cookie",
-                      bs_build_set_cookie(r, cfg, payload, ch.expires_at));
-    }
+    /* Best-effort install: if the cookie mint fails (GCM encrypt
+     * error — vanishingly unlikely with a valid key) we still let
+     * the replay filter run. The user just won't get a cookie this
+     * time and will re-challenge on the next request. The other
+     * three issuance paths 500 on the same condition — preserved
+     * here as-is to keep this refactor behavior-neutral. */
+    (void)bs_install_verified_cookie(r, cfg, &ch, "captcha");
 
     /* Install the replay filter so the downstream handler sees the
      * original POST body. Filter buffers in r->pool memory; lifetime
