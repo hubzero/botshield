@@ -98,7 +98,7 @@ def test_overflow_field_rejected(fresh_ip, log_slice, idx, bad_value, why):
         resp = client.get(
             "/", xff=fresh_ip,
             ua=BROWSER_UA, accept_language="en-US",
-            cookies={"_bs_verified": cookie},
+            cookies={"__Host-bs_verified": cookie},
         )
         # The module logs per-request details when a cookie fails
         # verification — look for either the cookie-rejection marker
@@ -124,7 +124,7 @@ def test_overflow_field_rejected(fresh_ip, log_slice, idx, bad_value, why):
     # specific "bad <field>" marker from our new bounded parser, or
     # as the generic signature-mismatch if we somehow got past parse.
     # Both count as safely rejected.
-    assert ("_bs_verified rejected:" in slice_text), (
+    assert ("__Host-bs_verified rejected:" in slice_text), (
         f"no cookie-rejection log line found for overflow in field {idx} "
         f"({why}); module may be silently accepting overflowing input"
     )
@@ -144,11 +144,11 @@ def test_valid_cookie_still_parses_cleanly(fresh_ip, log_slice):
         client.get(
             "/", xff=fresh_ip,
             ua=BROWSER_UA, accept_language="en-US",
-            cookies={"_bs_verified": cookie},
+            cookies={"__Host-bs_verified": cookie},
         )
         lines = [
             ln for ln in slc.text().splitlines()
-            if "_bs_verified rejected:" in ln
+            if "__Host-bs_verified rejected:" in ln
         ]
 
     assert lines, "expected a cookie-rejected log line; got none"

@@ -11,7 +11,7 @@ tests enable it explicitly and check:
   - threshold crossing promotes the request to safeguard pass-through
   - below threshold still issues a challenge
   - per-IP isolation (IP-A safeguarded doesn't carry to IP-B)
-  - safeguard doesn't mint `_bs_verified` (no cookie issued)
+  - safeguard doesn't mint `__Host-bs_verified` (no cookie issued)
   - safeguard doesn't override a 403 block decision
   - successful cookie verify resets the per-IP counter
 
@@ -65,7 +65,7 @@ def test_safeguard_trips_after_threshold(config_override, fresh_ip,
     """Threshold=3: first 3 cookieless requests get challenged
     (interstitial HTML + _bs_pending cookie). The 4th is passed
     through with reason=challenge-safeguard — no interstitial, no
-    _bs_verified, backend handler serves real content."""
+    __Host-bs_verified, backend handler serves real content."""
     with config_override(
         r"BotShieldAllow\s+on",
         _safeguard_cfg(threshold=3),
@@ -102,12 +102,12 @@ def test_safeguard_trips_after_threshold(config_override, fresh_ip,
         f"expected tier=safeguard; got {safeguard_lines[0]}"
     )
 
-    # Sanity: no _bs_verified cookie ever set by safeguard (the
+    # Sanity: no __Host-bs_verified cookie ever set by safeguard (the
     # point is to NOT grant trust). The pending cookie from the
     # pre-threshold challenges may exist; the verified one must not.
     for r in responses:
-        assert "_bs_verified" not in r.cookies, (
-            f"safeguard must not mint _bs_verified; got "
+        assert "__Host-bs_verified" not in r.cookies, (
+            f"safeguard must not mint __Host-bs_verified; got "
             f"cookies={dict(r.cookies)}"
         )
 
@@ -225,7 +225,7 @@ def test_solved_cookie_clears_safeguard_counter(
         with log_slice as slc:
             r_solved = client.get(
                 "/", xff=fresh_ip, ua=SCRAPER_UA,
-                cookies={"_bs_verified": solved},
+                cookies={"__Host-bs_verified": solved},
             )
             lines = slc.decision_lines(ip=fresh_ip)
     # The post-solve request's decision line must NOT carry the

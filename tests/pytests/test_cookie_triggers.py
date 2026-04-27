@@ -194,7 +194,7 @@ def test_cookie_trigger_session_name_directive_extends_list(
 def test_cookie_trigger_bs_cookie_missing(
     config_override, log_slice, fresh_ip,
 ):
-    """bs-cookie=missing fires when no _bs_verified cookie present —
+    """bs-cookie=missing fires when no __Host-bs_verified cookie present —
     the most common case (first-sight visitor)."""
     with config_override(
         r"BotShieldAllow\s+on",
@@ -209,7 +209,7 @@ def test_cookie_trigger_bs_cookie_missing(
 def test_cookie_trigger_bs_cookie_invalid(
     config_override, log_slice, fresh_ip,
 ):
-    """bs-cookie=invalid fires when _bs_verified is present but
+    """bs-cookie=invalid fires when __Host-bs_verified is present but
     fails verification (tampered HMAC, wrong format, etc.)."""
     with config_override(
         r"BotShieldAllow\s+on",
@@ -217,9 +217,9 @@ def test_cookie_trigger_bs_cookie_invalid(
         '    BotShieldCookieTrigger bad-bs bs-cookie=invalid status=403',
         count=1,
     ):
-        # Send a garbage _bs_verified cookie — fails signature check.
+        # Send a garbage __Host-bs_verified cookie — fails signature check.
         r = client.get("/", xff=fresh_ip,
-                       cookies={"_bs_verified": "obviously-bogus"})
+                       cookies={"__Host-bs_verified": "obviously-bogus"})
     assert r.status_code == 403
 
 
@@ -357,7 +357,7 @@ def test_cookie_trigger_first_non_pass_wins_over_second(
     )
 
 
-# --- Main-scope inheritance + _bs_verified rejection ------------------
+# --- Main-scope inheritance + __Host-bs_verified rejection ------------------
 
 
 def test_cookie_trigger_main_scope_inherits_into_vhost(
@@ -381,14 +381,14 @@ def test_cookie_trigger_main_scope_inherits_into_vhost(
 def test_cookie_trigger_bs_verified_raw_name_rejected(
     config_override,
 ):
-    """Declaring a cookie=_bs_verified predicate must fail at config
+    """Declaring a cookie=__Host-bs_verified predicate must fail at config
     parse time — operators are redirected to bs-cookie=<state>."""
     import pytest as _pytest
     with _pytest.raises(Exception) as ei:
         with config_override(
             r"BotShieldAllow\s+on",
             'BotShieldAllow on\n'
-            '    BotShieldCookieTrigger bad cookie=_bs_verified=foo',
+            '    BotShieldCookieTrigger bad cookie=__Host-bs_verified=foo',
             count=1,
         ):
             pass

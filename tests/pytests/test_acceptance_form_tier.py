@@ -39,7 +39,7 @@ def test_cookieless_recoverable_journey(fresh_ip, log_slice):
         resp = client.get(
             "/", xff=fresh_ip,
             ua=BROWSER_UA, accept_language="en-US",
-            cookies={"_bs_verified": cookie},
+            cookies={"__Host-bs_verified": cookie},
         )
         lines = slc.decision_lines(ip=fresh_ip)
 

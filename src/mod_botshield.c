@@ -85,6 +85,22 @@ module AP_MODULE_DECLARE_DATA botshield_module;
 #define BS_DEFAULT_FORGIVE_CAP_PER_HOUR  200
 #define BS_FORGIVE_WINDOW_SEC            3600
 #define BS_COOKIE_NAME        "_bs_verified"
+/* Security review LOW #1 + #2 — `__Host-` prefix variant.
+ * RFC 6265bis binds `__Host-`-prefixed cookies to the exact origin:
+ * requires Secure, Path=/, forbids Domain. Browsers reject any
+ * Set-Cookie with `__Host-` that doesn't satisfy those constraints.
+ * Combined with HttpOnly (no JS access to the cookie value), this
+ * defends two distinct attacks:
+ *   - sibling-subdomain cookie tossing (a hostile sibling can't
+ *     plant a same-named cookie that crosses to us)
+ *   - XSS-driven token exfiltration (script can't read it).
+ *
+ * We emit this variant when the request is HTTPS AND no operator-
+ * configured Domain is in play. Operators on plain HTTP or with a
+ * cookie_domain (cross-subdomain SSO) get the legacy unprefixed
+ * name — the prefix preconditions can't be satisfied. Verify path
+ * checks both (host-prefix first, legacy second). */
+#define BS_COOKIE_NAME_HOST   "__Host-bs_verified"
 #define BS_DEFAULT_PROMPT     "I\xe2\x80\x99m not a robot"   /* U+2019 */
 #define BS_DEFAULT_LOGO_LABEL "botshield"
 #define BS_MAX_LOGO_BYTES     (64 * 1024)
@@ -2665,6 +2681,11 @@ static apr_status_t  bs_state_cleanup(void *data);
 static apr_status_t  bs_watchdog_save_cb(int state, void *data,
                                          apr_pool_t *pool);
 static const char   *bs_get_cookie_value(request_rec *r, const char *name);
+/* Verified-cookie lookup that prefers __Host-bs_verified over the
+ * legacy _bs_verified name (LOW #2). Both names can be in flight
+ * during a HTTP→HTTPS migration or when an operator sets a Domain
+ * (which forces fallback to legacy). */
+static const char   *bs_get_verified_cookie_value(request_rec *r);
 
 /* ======================================================================
  * E1 — Verified legit-crawler allow-list.
@@ -8714,11 +8735,13 @@ static const char *bs_set_cookie_trigger(cmd_parms *cmd, void *dconf,
         char *cname = apr_pstrmemdup(cmd->pool, rest, nlen);
         /* Reject the module's own cookie at this predicate level;
          * redirect operators to bs-cookie=<state>. */
-        if (!strcasecmp(cname, BS_COOKIE_NAME)) {
+        if (!strcasecmp(cname, BS_COOKIE_NAME) ||
+            !strcasecmp(cname, BS_COOKIE_NAME_HOST)) {
             return "BotShieldCookieTrigger: declaring a predicate "
                    "against the module's own " BS_COOKIE_NAME
-                   " cookie is not supported — use bs-cookie=verified "
-                   "/ bs-cookie=missing / bs-cookie=invalid instead";
+                   " (or " BS_COOKIE_NAME_HOST ") cookie is not "
+                   "supported — use bs-cookie=verified / "
+                   "bs-cookie=missing / bs-cookie=invalid instead";
         }
         e->cname = cname;
         /* Dispatch on the operator chosen. */
@@ -11722,16 +11745,31 @@ static const char *bs_build_set_cookie(request_rec *r, const bs_dir_cfg *cfg,
      * check the r->parsed_uri / r->server / request scheme via
      * ap_http_scheme(r). */
     const char *scheme = ap_http_scheme(r);
-    if (scheme && strcmp(scheme, "https") == 0) {
+    int is_https = (scheme && strcmp(scheme, "https") == 0);
+    if (is_https) {
         secure = "; Secure";
     }
     const char *domain = "";
-    if (cfg->cookie_domain && *cfg->cookie_domain) {
+    int has_domain = (cfg->cookie_domain && *cfg->cookie_domain);
+    if (has_domain) {
         domain = apr_psprintf(r->pool, "; Domain=%s", cfg->cookie_domain);
     }
+    /* Security review LOW #2 — emit __Host-bs_verified when the
+     * RFC 6265bis preconditions hold (HTTPS + no Domain). Browsers
+     * reject the prefix when those invariants fail, so we only use
+     * it where we can. Operators on plain HTTP or with a configured
+     * cookie_domain (cross-subdomain SSO) get the legacy unprefixed
+     * name; the verify path checks both. */
+    const char *name = (is_https && !has_domain)
+        ? BS_COOKIE_NAME_HOST : BS_COOKIE_NAME;
+    /* Security review LOW #1 — HttpOnly closes XSS-stealing-the-
+     * cookie. The M1 widget JS used to set this cookie via
+     * document.cookie (which required JS-readability), but that
+     * was refactored to a server-mint via /botshield/embedded-verify
+     * so HttpOnly is now compatible with the issue path. */
     return apr_psprintf(r->pool,
-        "%s=%s; Path=/; Expires=%s%s%s; SameSite=Lax",
-        BS_COOKIE_NAME, payload_b64, expires_buf, domain, secure);
+        "%s=%s; Path=/; Expires=%s%s%s; SameSite=Lax; HttpOnly",
+        name, payload_b64, expires_buf, domain, secure);
 }
 
 /* ---- M8.1 challenge-origin "pending" cookie ----
@@ -11976,7 +12014,11 @@ static const char BS_EMBEDDED_JS[] =
 "(function(){\n"
 " if (window._bsEmbeddedRan) return;\n"
 " window._bsEmbeddedRan = true;\n"
-" if (document.cookie && document.cookie.indexOf('_bs_verified=') !== -1) return;\n"
+" /* Security review LOW #1 — used to short-circuit on\n"
+"    document.cookie containing _bs_verified, but HttpOnly now\n"
+"    hides the cookie from JS. /embedded-bootstrap returns\n"
+"    {mode:'off'} when a valid cookie is present, so the\n"
+"    server-side check below covers it for free. */\n"
 " fetch('/botshield/embedded-bootstrap', {credentials:'same-origin'})\n"
 "  .then(function(r){ return r.ok ? r.json() : null; })\n"
 "  .then(function(j){\n"
@@ -12373,7 +12415,7 @@ static int bs_embedded_bootstrap_handler(request_rec *r,
      * burning Worker cycles or loading provider scripts. The wrapper
      * short-circuits on its end too, but a redundant check here
      * costs almost nothing and keeps the bootstrap honest. */
-    const char *cookie_val = bs_get_cookie_value(r, BS_COOKIE_NAME);
+    const char *cookie_val = bs_get_verified_cookie_value(r);
     if (cookie_val && *cookie_val) {
         bs_challenge tmp;
         const char *err = bs_verify_cookie(r, cfg, cookie_val, &tmp);
@@ -12554,6 +12596,58 @@ static int bs_embedded_verify_pow(request_rec *r, bs_dir_cfg *cfg,
     if (!bs_json_get_int(root, "auto", &int_v, 0, 1)) ok = 0;
     ch.auto_tier = int_v;
 
+    /* Security review LOW #1 — the rep fields are part of the
+     * canonical the original HMAC covered. /embedded-bootstrap-issued
+     * challenges always have zero rep, but the M1 widget splash
+     * (rendered by bs_handler at request time) carries forward rep
+     * state from any prior cookie. The JSON must round-trip those
+     * fields verbatim or the HMAC reconstruction below fails on
+     * any non-fresh-rep challenge. Default to 0 if the field is
+     * missing (bootstrap case). */
+    int rep_int = 0;
+    apr_uint32_t rep_u32 = 0;
+    if (bs_json_get_int(root, "score", &rep_int, INT_MIN, INT_MAX)) {
+        ch.rep.score = rep_int;
+    }
+    {
+        json_object *fl = NULL;
+        if (json_object_object_get_ex(root, "flags", &fl) && fl &&
+            json_object_is_type(fl, json_type_int)) {
+            int64_t n = json_object_get_int64(fl);
+            if (n >= 0 && n <= UINT32_MAX) {
+                ch.rep.flags = (apr_uint32_t)n;
+            }
+        }
+    }
+    if (bs_json_get_int(root, "passes_silent", &rep_int, 0, 1)) {
+        ch.rep.passes_silent = rep_int;
+    }
+    if (bs_json_get_int(root, "passes_form", &rep_int, 0, 1)) {
+        ch.rep.passes_form = rep_int;
+    }
+    if (bs_json_get_int(root, "passes_captcha", &rep_int, 0, 1)) {
+        ch.rep.passes_captcha = rep_int;
+    }
+    {
+        json_object *fws = NULL;
+        if (json_object_object_get_ex(root, "forgive_window_start", &fws) &&
+            fws && json_object_is_type(fws, json_type_int)) {
+            int64_t n = json_object_get_int64(fws);
+            if (n >= 0 && n <= UINT32_MAX) {
+                ch.rep.forgive_window_start = (apr_uint32_t)n;
+            }
+        }
+        json_object *fc = NULL;
+        if (json_object_object_get_ex(root, "forgive_consumed", &fc) &&
+            fc && json_object_is_type(fc, json_type_int)) {
+            int64_t n = json_object_get_int64(fc);
+            if (n >= 0 && n <= UINT32_MAX) {
+                ch.rep.forgive_consumed = (apr_uint32_t)n;
+            }
+        }
+    }
+    (void)rep_u32;
+
     const char *alg_name = bs_json_get_str(r->pool, root, "alg", 64);
     const char *salt_hex = bs_json_get_str(r->pool, root, "salt",
                                            BS_SALT_BYTES * 2);
@@ -12643,7 +12737,7 @@ static int bs_embedded_verify_pow(request_rec *r, bs_dir_cfg *cfg,
      * just round-tripped, not a field we want to overwrite with
      * the prior cookie's older value. */
     {
-        const char *prior_val = bs_get_cookie_value(r, BS_COOKIE_NAME);
+        const char *prior_val = bs_get_verified_cookie_value(r);
         bs_challenge prior_ch = { 0 };
         int have_prior = 0;
         if (prior_val && *prior_val) {
@@ -12716,6 +12810,127 @@ static int bs_embedded_verify_pow(request_rec *r, bs_dir_cfg *cfg,
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
         "mod_botshield: embedded-verify(pow): cookie minted (counter=%d)",
         counter);
+    return OK;
+}
+
+/* GCM-cookie-prefix variant of the PoW verify path. The M1 widget JS
+ * is given an opaque encrypted envelope (the "cookie_prefix") instead
+ * of cleartext canonical fields. Client solves PoW against the
+ * salt+nonce+difficulty also present in the challenge JSON, then sends
+ * {provider:"pow-gcm", cookie_prefix, counter} here. We synthesize
+ * the wire-format cookie value (envelope.counter), route it through
+ * bs_verify_cookie_gcm — which handles GCM-decrypt with secondary-key
+ * fallback (E16), canonical parse, and PoW verify all in one
+ * authenticated path — then mint a fresh cookie with the same
+ * carry-forward + Set-Cookie shape as the HMAC verify path above.
+ *
+ * Added for security review LOW #1 (HttpOnly): the M1 widget used
+ * to set the cookie via document.cookie because the PoW solution
+ * was assembled client-side. Routing through this endpoint lets the
+ * server emit Set-Cookie with HttpOnly, closing XSS-token-theft on
+ * the GCM mode too. */
+static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
+                                       json_object *root)
+{
+    if (!cfg->secret) {
+        r->status = HTTP_SERVICE_UNAVAILABLE;
+        return OK;
+    }
+
+    const char *prefix_b64 = bs_json_get_str(r->pool, root,
+                                              "cookie_prefix",
+                                              BS_MAX_PAGE_BYTES);
+    int counter = 0;
+    if (!prefix_b64 ||
+        !bs_json_get_int(root, "counter", &counter, 0, INT_MAX)) {
+        r->status = HTTP_BAD_REQUEST;
+        return OK;
+    }
+
+    char counter_str[24];
+    apr_snprintf(counter_str, sizeof(counter_str), "%d", counter);
+    const char *cookie_value = apr_psprintf(r->pool, "%s.%s",
+                                             prefix_b64, counter_str);
+    const char *dot = strrchr(cookie_value, BS_GCM_COUNTER_SEP);
+    if (!dot) {
+        r->status = HTTP_BAD_REQUEST;
+        return OK;
+    }
+    bs_challenge ch;
+    memset(&ch, 0, sizeof(ch));
+    const char *err = bs_verify_cookie_gcm(r, cfg, cookie_value, dot, &ch);
+    if (err) {
+        r->status = HTTP_FORBIDDEN;
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: embedded-verify(pow-gcm): %s", err);
+        return OK;
+    }
+
+    /* Carry forward + set passes_silent — same shape as the HMAC
+     * pow path above. See its comments for rationale (forgiveness
+     * cap, flag-penalty floor, expired-cookie carry-forward
+     * rejection per LOW #1, passes_silent clamp per LOW #7). */
+    {
+        const char *prior_val = bs_get_verified_cookie_value(r);
+        bs_challenge prior_ch = { 0 };
+        int have_prior = 0;
+        if (prior_val && *prior_val) {
+            const char *cverr = bs_verify_cookie(r, cfg, prior_val,
+                                                  &prior_ch);
+            if (cverr == NULL ||
+                (cverr && strcmp(cverr, "signature mismatch") != 0
+                       && strcmp(cverr, "expired") != 0
+                       && prior_ch.alg_name)) {
+                have_prior = 1;
+            }
+        }
+        if (have_prior) {
+            int forgive = bs_effective_int(cfg->forgive_silent,
+                                            BS_DEFAULT_FORGIVE_SILENT);
+            bs_server_cfg *scfg_fc = ap_get_module_config(
+                r->server->module_config, &botshield_module);
+            int cap = (scfg_fc && scfg_fc->forgive_cap_per_hour > 0)
+                    ? scfg_fc->forgive_cap_per_hour
+                    : BS_DEFAULT_FORGIVE_CAP_PER_HOUR;
+            apr_uint32_t now_sec =
+                (apr_uint32_t)apr_time_sec(apr_time_now());
+            apr_time_t challenged_at = ch.rep.challenged_at;
+            ch.rep = prior_ch.rep;
+            ch.rep.challenged_at = challenged_at;
+            forgive = bs_forgiveness_apply_cap(forgive, cap, now_sec,
+                        &ch.rep.forgive_window_start,
+                        &ch.rep.forgive_consumed);
+            int floor   = bs_flag_penalty(prior_ch.rep.flags);
+            int new_score = prior_ch.rep.score - forgive;
+            if (new_score < floor) new_score = floor;
+            if (new_score < 0)     new_score = 0;
+            ch.rep.score          = new_score;
+            ch.rep.passes_silent  = 1;
+        } else {
+            ch.rep.passes_silent = 1;
+        }
+    }
+    /* Re-sign canonical (HMAC) — bs_build_cookie_payload uses this
+     * signature for HMAC mode; for GCM mode the signature is part
+     * of the encrypted canonical so it gets re-encrypted. */
+    const char *canon = bs_challenge_canonical(r->pool, &ch);
+    bs_hmac_sha256(cfg->secret, cfg->secret_len,
+                   (const unsigned char *)canon, strlen(canon),
+                   ch.signature);
+    const char *payload = bs_build_cookie_payload(r->pool, cfg, &ch,
+                                                  counter_str);
+    if (!payload) {
+        r->status = HTTP_INTERNAL_SERVER_ERROR;
+        return OK;
+    }
+    apr_table_add(r->err_headers_out, "Set-Cookie",
+                  bs_build_set_cookie(r, cfg, payload, ch.expires_at));
+
+    r->status = HTTP_NO_CONTENT;
+    apr_table_setn(r->headers_out, "Cache-Control", "no-store");
+    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+        "mod_botshield: embedded-verify(pow-gcm): cookie minted "
+        "(counter=%d)", counter);
     return OK;
 }
 
@@ -12864,7 +13079,7 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
     bs_rep_state next_rep;
     memset(&next_rep, 0, sizeof(next_rep));
     {
-        const char *prior_val = bs_get_cookie_value(r, BS_COOKIE_NAME);
+        const char *prior_val = bs_get_verified_cookie_value(r);
         bs_challenge prior_ch = { 0 };
         int have_prior = 0;
         if (prior_val && *prior_val) {
@@ -12988,6 +13203,8 @@ static int bs_embedded_verify_handler(request_rec *r, bs_dir_cfg *cfg)
     int rv;
     if (strcmp(provider, "pow") == 0) {
         rv = bs_embedded_verify_pow(r, cfg, root);
+    } else if (strcmp(provider, "pow-gcm") == 0) {
+        rv = bs_embedded_verify_pow_gcm(r, cfg, root);
     } else {
         rv = bs_embedded_verify_provider(r, cfg, root, provider);
     }
@@ -13902,7 +14119,7 @@ static int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
      * captcha solve) to transplant good-standing rep into a fresh
      * _bs_verified. TTL is the only mechanism preventing indefinite
      * reputation transfer across generations. */
-    const char *prior_val = bs_get_cookie_value(r, BS_COOKIE_NAME);
+    const char *prior_val = bs_get_verified_cookie_value(r);
     bs_challenge prior_ch = { 0 };
     int have_prior = 0;
     if (prior_val && *prior_val) {
@@ -14774,6 +14991,18 @@ static const char *bs_get_cookie_value(request_rec *r, const char *name)
     return apr_table_get(map, name);
 }
 
+/* Security review LOW #2 — verified-cookie lookup that prefers
+ * `__Host-bs_verified` and falls back to legacy `_bs_verified`.
+ * Both can be valid in some operator setups: HTTPS-only deployment
+ * always sees the prefixed variant; a Domain-configured (cross-
+ * subdomain SSO) deployment falls back to the legacy name. */
+static const char *bs_get_verified_cookie_value(request_rec *r)
+{
+    const char *v = bs_get_cookie_value(r, BS_COOKIE_NAME_HOST);
+    if (v && *v) return v;
+    return bs_get_cookie_value(r, BS_COOKIE_NAME);
+}
+
 /* --- Challenge page templates ---
  *
  * Rendering is a two-step substitution:
@@ -14894,7 +15123,8 @@ static const char BS_WIDGET_TEMPLATE[] =
 "(function(){\n"
 " var CH = window.__bsChallenge;\n"
 " if (!CH) return;\n"
-" var COOKIE_NAME = '" BS_COOKIE_NAME "';\n"
+" /* The cookie is now server-minted via /botshield/embedded-verify,\n"
+"    so the JS never references the name (LOW #1, #2). */\n"
 " var box = document.getElementById('c');\n"
 " var msg = document.getElementById('msg');\n"
 " var btn = document.getElementById('btn');\n"
@@ -14965,31 +15195,59 @@ static const char BS_WIDGET_TEMPLATE[] =
 "   box.classList.remove('bs-working');\n"
 "   box.classList.add('bs-done');\n"
 "   msg.textContent = 'Verified \\u2014 reloading\\u2026';\n"
-"   var payload;\n"
+"   /* Security review LOW #1 — POST the solution to the server\n"
+"      and let it mint the cookie via Set-Cookie + HttpOnly,\n"
+"      instead of setting document.cookie locally. JS can't read\n"
+"      the cookie back, but it doesn't need to: server validates\n"
+"      and the next request's bs_handler accepts the new cookie. */\n"
+"   var body;\n"
 "   if (CH.cookie_prefix) {\n"
-"    /* E8.1 GCM cookie shape. Server gave us an opaque encrypted\n"
-"       envelope; we append '.' + counter and the server splits on\n"
-"       the last dot to decrypt + PoW-verify. */\n"
-"    payload = CH.cookie_prefix + '.' + counterVal;\n"
+"    /* GCM mode — server-encrypted envelope; client only sends\n"
+"       prefix + counter, server decrypts + verifies + re-mints. */\n"
+"    body = JSON.stringify({\n"
+"     provider: 'pow-gcm',\n"
+"     cookie_prefix: CH.cookie_prefix,\n"
+"     counter: counterVal\n"
+"    });\n"
 "   } else {\n"
-"    /* Legacy HMAC shape. Cleartext canonical fields + sig + counter\n"
-"       pipe-joined and base64-encoded as a single blob. */\n"
-"    var fields = [CH.v, CH.alg, CH.salt, CH.nonce, CH.difficulty,\n"
-"                  CH.expires_at,\n"
-"                  CH.score, CH.flags,\n"
-"                  CH.passes_silent, CH.passes_form, CH.passes_captcha,\n"
-"                  CH.challenged_at, CH.auto,\n"
-"                  CH.forgive_window_start, CH.forgive_consumed,\n"
-"                  CH.signature, counterVal];\n"
-"    payload = btoa(fields.join('|'));\n"
+"    /* HMAC mode — round-trip every canonical field the server\n"
+"       signed (including rep state — score, flags, passes_*,\n"
+"       forgive_*) plus our counter. The HMAC verify on the\n"
+"       server reconstructs canonical from these fields and any\n"
+"       missing/tampered field will mismatch the signature. */\n"
+"    body = JSON.stringify({\n"
+"     provider: 'pow',\n"
+"     v: CH.v, alg: CH.alg,\n"
+"     salt: CH.salt, nonce: CH.nonce,\n"
+"     difficulty: CH.difficulty,\n"
+"     expires_at: CH.expires_at,\n"
+"     score: CH.score, flags: CH.flags,\n"
+"     passes_silent: CH.passes_silent,\n"
+"     passes_form: CH.passes_form,\n"
+"     passes_captcha: CH.passes_captcha,\n"
+"     challenged_at: CH.challenged_at,\n"
+"     auto: CH.auto,\n"
+"     forgive_window_start: CH.forgive_window_start,\n"
+"     forgive_consumed: CH.forgive_consumed,\n"
+"     signature: CH.signature,\n"
+"     counter: counterVal\n"
+"    });\n"
 "   }\n"
-"   var exp = new Date((CH.expires_at + 60) * 1000).toUTCString();\n"
-"   var secure = (location.protocol === 'https:') ? '; Secure' : '';\n"
-"   var domain = CH.cookie_domain ? '; Domain=' + CH.cookie_domain : '';\n"
-"   document.cookie = COOKIE_NAME + '=' + payload +\n"
-"                     '; Path=/; Expires=' + exp + domain +\n"
-"                     '; SameSite=Lax' + secure;\n"
-"   setTimeout(function(){ location.reload(); }, 250);\n"
+"   fetch('/botshield/embedded-verify', {\n"
+"    method: 'POST',\n"
+"    credentials: 'same-origin',\n"
+"    headers: {'Content-Type':'application/json'},\n"
+"    body: body\n"
+"   }).then(function(resp){\n"
+"    if (resp.ok || resp.status === 204) {\n"
+"     setTimeout(function(){ location.reload(); }, 250);\n"
+"    } else {\n"
+"     msg.textContent = 'Verification failed (' + resp.status + ')';\n"
+"    }\n"
+"   }).catch(function(err){\n"
+"    msg.textContent = 'Verification failed: ' +\n"
+"                       (err && err.message || err);\n"
+"   });\n"
 "  }\n"
 "  doBatch();\n"
 " }\n"
@@ -15338,7 +15596,7 @@ static int bs_handler(request_rec *r)
      *   - non-NULL, "signature mismatch" — HMAC didn't verify; bytes
      *     in the cookie can't be trusted. Discard entirely.
      */
-    const char *cookie_val = bs_get_cookie_value(r, BS_COOKIE_NAME);
+    const char *cookie_val = bs_get_verified_cookie_value(r);
     bs_challenge prior_ch = { 0 };
     int have_prior_rep   = 0;
     int cookie_fully_ok  = 0;
@@ -15370,9 +15628,15 @@ static int bs_handler(request_rec *r)
             if (strcmp(cookie_verify_reason, "signature mismatch") != 0) {
                 have_prior_rep = 1;
             }
+            /* Security review LOW #2 — log the cookie name actually
+             * present so a sed-renamed test can grep for the right
+             * literal. The dual-name helper hides which variant was
+             * found; rediscover here for the log line only. */
+            const char *which = bs_get_cookie_value(r, BS_COOKIE_NAME_HOST)
+                                ? BS_COOKIE_NAME_HOST : BS_COOKIE_NAME;
             ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
-                          "mod_botshield: " BS_COOKIE_NAME " rejected: %s",
-                          cookie_verify_reason);
+                          "mod_botshield: %s rejected: %s",
+                          which, cookie_verify_reason);
         }
     }
     const char *cookie_status =
@@ -16337,7 +16601,7 @@ static int bs_form_captcha_fixup(request_rec *r)
     bs_rep_state next_rep;
     memset(&next_rep, 0, sizeof(next_rep));
     {
-        const char *prior_val = bs_get_cookie_value(r, BS_COOKIE_NAME);
+        const char *prior_val = bs_get_verified_cookie_value(r);
         bs_challenge prior_ch = { 0 };
         int have_prior = 0;
         if (prior_val && *prior_val) {
