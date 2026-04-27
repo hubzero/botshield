@@ -39,6 +39,44 @@ apt-get install -y -qq \
 
 echo "== module build + install =="
 cd "$REPO"
+
+# Security review LOW #17 — between `sudo -u $SUDO_USER make` and the
+# subsequent `make install` (as root) there's a window where the
+# build outputs (src/.libs/mod_botshield.so, src/mod_botshield.la,
+# Makefile, .ltargets) sit in $REPO. If $REPO is group- or
+# world-writable, an unrelated user on the box can swap the .so for
+# a payload between the build and install steps, and `make install`
+# carries that payload to /usr/lib/apache2/modules/ as root.
+#
+# Refuse to proceed if the source tree or its parent is writable by
+# anyone other than $SUDO_USER. Single-tenant dev boxes pass; shared
+# boxes have to lock down the repo perms first. This is a tripwire,
+# not a complete fix — a fully hardened build/install would copy
+# source into a root-only staging dir before building. That's a
+# bigger restructure; this check catches the most common footgun.
+_chk_path_safe() {
+    local p="$1"
+    while [[ "$p" != "/" ]]; do
+        # Bail if any ancestor is writable by group or others.
+        if [[ -d "$p" ]]; then
+            local mode
+            mode=$(stat -c '%a' "$p")
+            local g=$(( (mode / 10) % 10 ))
+            local o=$(( mode % 10 ))
+            if (( (g & 2) != 0 || (o & 2) != 0 )); then
+                echo "provision.sh: refusing to build — '$p' is " \
+                     "group- or world-writable (mode $mode). On a " \
+                     "shared dev box this lets another user inject " \
+                     "binaries into 'make install' as root. " \
+                     "chmod o-w,g-w '$p' (and any parents) and re-run." >&2
+                exit 1
+            fi
+        fi
+        p=$(dirname "$p")
+    done
+}
+_chk_path_safe "$REPO"
+
 sudo -u "$SUDO_USER" make clean >/dev/null || true
 sudo -u "$SUDO_USER" make >/dev/null
 make install >/dev/null
