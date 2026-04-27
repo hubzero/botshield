@@ -1,10 +1,10 @@
-"""M2: tampered `_bs_verified` cookie must be rejected with
+"""M2: tampered `__Host-bs_verified` cookie must be rejected with
 reason="signature mismatch".
 
 Port of tests/integration/m2_cookie_hmac.sh. Builds a valid cookie
 by solving the silent-tier PoW locally, flips one hex character of
 the HMAC signature, and replays. The log slice should carry a
-`_bs_verified rejected: signature mismatch` line.
+`__Host-bs_verified rejected: signature mismatch` line.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ def test_tampered_cookie_rejected(fresh_ip, log_slice):
     resp = client.get(
         "/", xff=fresh_ip,
         ua=BROWSER_UA, accept_language="en-US",
-        cookies={"_bs_verified": valid},
+        cookies={"__Host-bs_verified": valid},
     )
     assert resp.headers.get("X-Botshield") != "challenge", (
         f"sanity check failed: valid cookie was challenged. "
@@ -44,11 +44,11 @@ def test_tampered_cookie_rejected(fresh_ip, log_slice):
         client.get(
             "/", xff=fresh_ip,
             ua=BROWSER_UA, accept_language="en-US",
-            cookies={"_bs_verified": tampered},
+            cookies={"__Host-bs_verified": tampered},
         )
-        matches = slc.grep(r"_bs_verified rejected: signature mismatch")
+        matches = slc.grep(r"__Host-bs_verified rejected: signature mismatch")
 
     assert matches, (
-        "expected '_bs_verified rejected: signature mismatch' in log slice; "
+        "expected '__Host-bs_verified rejected: signature mismatch' in log slice; "
         f"tail: {slc.text().splitlines()[-5:]}"
     )

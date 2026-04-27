@@ -4,7 +4,7 @@
 so a fresh-IP + missing-AL request is guaranteed to land there. A real
 Chromium loads the interstitial, the module's form markup is well-
 formed enough that a submit with an injected Turnstile-always-pass
-token does a round-trip → 303 → _bs_verified cookie → redirect to
+token does a round-trip → 303 → __Host-bs_verified cookie → redirect to
 return_to → challenge cleared on subsequent navigation.
 
 We inject the token rather than wait for Turnstile to auto-solve:
@@ -75,10 +75,10 @@ def test_captcha_tier_end_to_end(bs_browser_context):
     }""")
     page.wait_for_load_state("load", timeout=15_000)
 
-    # 3. After the solve: _bs_verified in the jar, we're on the real site.
+    # 3. After the solve: __Host-bs_verified in the jar, we're on the real site.
     cookies = {c["name"] for c in ctx.cookies()}
-    assert "_bs_verified" in cookies, (
-        f"captcha solve didn't set _bs_verified; cookies={cookies}"
+    assert "__Host-bs_verified" in cookies, (
+        f"captcha solve didn't set __Host-bs_verified; cookies={cookies}"
     )
     assert "Verify you are human" not in page.title(), (
         f"still on interstitial post-submit; title={page.title()!r}"
@@ -107,7 +107,7 @@ def test_captcha_cookie_clears_subsequent_challenge(bs_browser_context):
         f.appendChild(i); f.submit();
     }""")
     page.wait_for_load_state("load", timeout=15_000)
-    assert "_bs_verified" in {c["name"] for c in ctx.cookies()}, \
+    assert "__Host-bs_verified" in {c["name"] for c in ctx.cookies()}, \
         "setup: verified cookie didn't land"
 
     # Replay /: layer a browser-shaped Accept-Language on top of the

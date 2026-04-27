@@ -52,7 +52,7 @@ def extract_challenge(html: str) -> dict:
 
 # ---------------------------------------------------------------------------
 # SHA-256 leading-zero-hex PoW solver (from tests/tools/solve_pow.py).
-# The module expects a 15-field `_bs_verified` cookie; solve_pow() returns
+# The module expects a 15-field `__Host-bs_verified` cookie; solve_pow() returns
 # the counter, cookie_payload() assembles the full envelope.
 # ---------------------------------------------------------------------------
 
@@ -108,7 +108,7 @@ def build_cookie(challenge: dict, counter: int) -> str:
 def tamper_signature(cookie: str) -> str:
     """Flip one hex character of the HMAC signature (now at field 15
     after the E15 envelope grew) in an assembled legacy
-    `_bs_verified` cookie. Used to prove the module rejects a forged
+    `__Host-bs_verified` cookie. Used to prove the module rejects a forged
     signature."""
     raw = base64.b64decode(cookie).decode()
     fields = raw.split("|")

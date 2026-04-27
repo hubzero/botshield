@@ -1,7 +1,7 @@
 """E8.1 — AES-256-GCM cookie confidentiality + BotShieldCookieFormat
 compat switch.
 
-Pre-E8.1 the `_bs_verified` cookie was an HMAC-SHA-256 envelope:
+Pre-E8.1 the `__Host-bs_verified` cookie was an HMAC-SHA-256 envelope:
 fields cleartext, integrity tag at the end. Anyone base64-decoding
 read the rep block (score, flag bitmap, pass counters) in the clear.
 E8.1 adds an AES-256-GCM wire format that wraps the same canonical
@@ -100,7 +100,7 @@ def test_gcm_mode_roundtrip(config_override, fresh_ip):
         resp = client.get(
             "/", xff=fresh_ip,
             ua=BROWSER_UA, accept_language="en-US",
-            cookies={"_bs_verified": cookie},
+            cookies={"__Host-bs_verified": cookie},
         )
         assert resp.headers.get("X-Botshield") != "challenge", (
             f"valid GCM cookie was challenged; "
@@ -167,10 +167,10 @@ def test_gcm_tampered_envelope_rejected(config_override, fresh_ip,
             client.get(
                 "/", xff=fresh_ip,
                 ua=BROWSER_UA, accept_language="en-US",
-                cookies={"_bs_verified": tampered},
+                cookies={"__Host-bs_verified": tampered},
             )
             matches = slc.grep(
-                r"_bs_verified rejected: signature mismatch"
+                r"__Host-bs_verified rejected: signature mismatch"
             )
 
     assert matches, (
@@ -215,7 +215,7 @@ def test_compat_mode_accepts_legacy_hmac_cookie(
         resp = client.get(
             "/", xff=fresh_ip,
             ua=BROWSER_UA, accept_language="en-US",
-            cookies={"_bs_verified": hmac_cookie},
+            cookies={"__Host-bs_verified": hmac_cookie},
         )
 
     assert resp.headers.get("X-Botshield") != "challenge", (
@@ -257,10 +257,10 @@ def test_gcm_only_mode_rejects_hmac_cookie(
             client.get(
                 "/", xff=fresh_ip,
                 ua=BROWSER_UA, accept_language="en-US",
-                cookies={"_bs_verified": hmac_cookie},
+                cookies={"__Host-bs_verified": hmac_cookie},
             )
             matches = slc.grep(
-                r"_bs_verified rejected: HMAC cookies not accepted"
+                r"__Host-bs_verified rejected: HMAC cookies not accepted"
             )
 
     assert matches, (

@@ -3,7 +3,7 @@
 /captcha-demo is pinned to captcha tier via BotShieldScoreCaptcha 3.
 The user:
   1. hits /captcha-demo → interstitial with a Turnstile widget,
-  2. solves → 303 + _bs_verified cookie,
+  2. solves → 303 + __Host-bs_verified cookie,
   3. continues browsing /  → no challenge on normal paths.
 
 Requires Cloudflare reachability. M11.6 replaces step 2 with an
@@ -61,8 +61,8 @@ def test_captcha_journey_end_to_end(pending_cookie, log_slice):
 
     assert resp.status_code == 303
     assert resp.headers.get("X-Botshield") == "captcha-ok"
-    verified = resp.cookies.get("_bs_verified")
-    assert verified, "verify response didn't set _bs_verified"
+    verified = resp.cookies.get("__Host-bs_verified")
+    assert verified, "verify response didn't set __Host-bs_verified"
     assert lines, (
         "no 'outcome=verified provider=turnstile' decision line emitted"
     )
@@ -71,7 +71,7 @@ def test_captcha_journey_end_to_end(pending_cookie, log_slice):
     resp2 = client.get(
         "/",
         ua=BROWSER_UA, accept_language="en-US",
-        cookies={"_bs_verified": verified},
+        cookies={"__Host-bs_verified": verified},
     )
     assert resp2.status_code == 200
     assert resp2.headers.get("X-Botshield") != "challenge", (

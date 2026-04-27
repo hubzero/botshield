@@ -41,7 +41,7 @@ def test_silent_tier_round_trip(fresh_ip):
     resp = client.get(
         "/", xff=fresh_ip,
         ua=BROWSER_UA, accept_language="en-US",
-        cookies={"_bs_verified": cookie},
+        cookies={"__Host-bs_verified": cookie},
     )
     assert resp.headers.get("X-Botshield") != "challenge", (
         f"cookied replay still challenged; headers={dict(resp.headers)}"
