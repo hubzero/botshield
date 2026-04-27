@@ -330,6 +330,80 @@ rules; use `BotShieldShadowMode` for staging an entire policy.
 The audit trail captures everything the rule WOULD have done; the
 response is unaffected.
 
+## Multi-vhost deployments
+
+mod_botshield gives each vhost its own isolated bot reputation by
+default. A bot flagged on `site-a.example.com` doesn't carry that flag
+to `site-b.example.com`. Operators running many vhosts on one Apache
+instance get per-site detection without configuring anything.
+
+### Default behavior: auto-isolation per ServerName
+
+Each vhost's reputation namespace is derived from its `ServerName`
+directive. Two vhosts with different `ServerName` values automatically
+maintain separate reputation. No configuration required.
+
+```apache
+<VirtualHost *:443>
+    ServerName site-a.example.com
+    # bot reputation isolated to site-a.example.com
+</VirtualHost>
+
+<VirtualHost *:443>
+    ServerName site-b.example.com
+    # bot reputation isolated to site-b.example.com
+</VirtualHost>
+```
+
+A bot that hits a honeypot on `site-a.example.com` and gets flagged
+appears clean to `site-b.example.com` on its next visit. This is usually
+what you want — different sites have different threat models.
+
+### Opt-in shared reputation
+
+Sometimes you want sibling vhosts to share state — dev/prod
+environments, www/api subdomains under the same brand, redundant
+frontends. Set `BotShieldShareScope` to the same string on each vhost:
+
+```apache
+<VirtualHost *:443>
+    ServerName www.example.com
+    BotShieldShareScope example-cluster
+</VirtualHost>
+
+<VirtualHost *:443>
+    ServerName api.example.com
+    BotShieldShareScope example-cluster
+</VirtualHost>
+```
+
+Both vhosts now share one reputation namespace. A bot flagged on either
+site is flagged on the other.
+
+The scope token is hashed; any string works, just keep it consistent
+across the vhosts you want grouped. Different tokens produce
+independent groups.
+
+### Scaling
+
+A single Apache instance can handle hundreds of vhosts sharing one
+shared-memory segment. The per-slot namespace tag lets all vhosts
+coexist without spawning per-vhost SHM segments — operationally simpler
+than running per-vhost bot-detection instances.
+
+For very large deployments, monitor SHM utilization via the existing
+headroom watchdog and tune `BotShieldFlaggedIPCapacity`,
+`BotShieldRateLimitEscalateCapacity`, and `BotShieldSafeguardCapacity`
+to fit the aggregate traffic.
+
+### When ServerName is missing
+
+A vhost without a `ServerName` directive falls back to the global
+default namespace (`ns_id=0`). All such vhosts share reputation.
+mod_botshield logs a NOTICE at startup so operators see the fallback.
+For explicit isolation on a vhost without ServerName, set
+`BotShieldShareScope` to a unique-per-vhost token.
+
 ## Customizing the challenge page
 
 Three layers, each independent:

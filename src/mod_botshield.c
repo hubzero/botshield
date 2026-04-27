@@ -5507,7 +5507,15 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
          * above, so the ns_id is stable for this Apache process
          * but unpredictable across restarts — which is fine since
          * persistence already keys on ns_id and old state files
-         * get rejected on format mismatch. */
+         * get rejected on format mismatch.
+         *
+         * Operator-facing documentation lives in the README's
+         * "Multi-vhost deployments" section: every vhost gets
+         * isolated reputation by default, and operators opt into
+         * sharing reputation across sibling vhosts by setting the
+         * same BotShieldShareScope token on each. Hundreds of
+         * vhosts on one Apache instance share one SHM segment;
+         * the per-slot ns_id is what makes that work. */
         const char *src = NULL;
         if (vcfg->share_scope_token) {
             apr_uint64_t h = bs_siphash24(bs_shm.header->siphash_key,
