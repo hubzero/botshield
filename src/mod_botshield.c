@@ -15077,6 +15077,12 @@ static void bs_register_hooks(apr_pool_t *p)
  * #include this file verbatim without fighting the linker. No
  * effect on the normal apxs build. */
 #ifndef BS_FUZZ_HARNESS
+/* The .so is compiled with -fvisibility=hidden so internal cross-file
+ * symbols (bs_flagged_ip_lookup, bs_state_save, etc.) don't leak into
+ * the dynamic-linker symbol table. Apache's LoadModule resolves the
+ * module entry via dlsym, though, so this one symbol must stay
+ * exported with default visibility. */
+#pragma GCC visibility push(default)
 AP_DECLARE_MODULE(botshield) = {
     STANDARD20_MODULE_STUFF,
     bs_create_dir_cfg,    /* per-directory config creator */
@@ -15087,4 +15093,5 @@ AP_DECLARE_MODULE(botshield) = {
     bs_register_hooks,    /* hook registration            */
     AP_MODULE_FLAG_NONE   /* flags                        */
 };
+#pragma GCC visibility pop
 #endif
