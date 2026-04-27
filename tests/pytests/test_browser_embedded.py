@@ -2,7 +2,7 @@
 
 The PoC's job is to prove the timing model works: page renders
 immediately (no interstitial), wrapper runs in background, Worker
-solves PoW, POSTs result, _bs_verified cookie is set, next page-load
+solves PoW, POSTs result, __Host-bs_verified cookie is set, next page-load
 in the session rides through without re-challenge.
 
 These tests use a Bloom-fresh IP shaped to land at silent tier (no
@@ -67,7 +67,7 @@ def test_embedded_wrapper_mints_verified_cookie(
 ):
     """The headline timing test: load the page (wrapper fires in
     background), wait a few seconds for the Worker + POST to
-    complete, observe _bs_verified in the cookie jar."""
+    complete, observe __Host-bs_verified in the cookie jar."""
     with config_override(
         r"BotShieldAllow\s+on",
         'BotShieldAllow on\n'
@@ -87,13 +87,13 @@ def test_embedded_wrapper_mints_verified_cookie(
         cookie_present = False
         while time.monotonic() < deadline:
             cookies = {c["name"] for c in bs_browser_context.cookies()}
-            if "_bs_verified" in cookies:
+            if "__Host-bs_verified" in cookies:
                 cookie_present = True
                 break
             time.sleep(0.25)
 
         assert cookie_present, (
-            f"wrapper failed to mint _bs_verified within deadline; "
+            f"wrapper failed to mint __Host-bs_verified within deadline; "
             f"cookies={[c['name'] for c in bs_browser_context.cookies()]}"
         )
 
@@ -107,7 +107,7 @@ def test_embedded_turnstile_mints_verified_cookie(
     sitekey 2x00000000000000000000AB, gets a token from
     Cloudflare, POSTs to /embedded-verify, server siteverifies
     against Cloudflare's real endpoint with the always-pass secret,
-    and mints _bs_verified.
+    and mints __Host-bs_verified.
 
     Hits the real challenges.cloudflare.com infrastructure — slower
     + flakier than the PoW path, but proves the provider-dispatch
@@ -133,13 +133,13 @@ def test_embedded_turnstile_mints_verified_cookie(
         cookie_present = False
         while time.monotonic() < deadline:
             cookies = {c["name"] for c in bs_browser_context.cookies()}
-            if "_bs_verified" in cookies:
+            if "__Host-bs_verified" in cookies:
                 cookie_present = True
                 break
             time.sleep(0.5)
 
         assert cookie_present, (
-            f"turnstile wrapper failed to mint _bs_verified within "
+            f"turnstile wrapper failed to mint __Host-bs_verified within "
             f"deadline; cookies="
             f"{[c['name'] for c in bs_browser_context.cookies()]}"
         )
@@ -181,13 +181,13 @@ def test_embedded_hcaptcha_mints_verified_cookie(
         cookie_present = False
         while time.monotonic() < deadline:
             cookies = {c["name"] for c in bs_browser_context.cookies()}
-            if "_bs_verified" in cookies:
+            if "__Host-bs_verified" in cookies:
                 cookie_present = True
                 break
             time.sleep(0.5)
 
         assert cookie_present, (
-            f"hcaptcha wrapper failed to mint _bs_verified within "
+            f"hcaptcha wrapper failed to mint __Host-bs_verified within "
             f"deadline; cookies="
             f"{[c['name'] for c in bs_browser_context.cookies()]}"
         )
@@ -203,7 +203,7 @@ def test_embedded_falls_back_to_m7_when_wrapper_blocked(
     Simulate a CSP-blocked wrapper by intercepting the
     /botshield/embedded.js URL with Playwright's route() and
     aborting the request. The page loads, wrapper never runs,
-    no _bs_verified arrives. After 3 silent-tier dispatches without
+    no __Host-bs_verified arrives. After 3 silent-tier dispatches without
     verify (default fallback threshold), the server switches to
     issuing the M7 form-PoW interstitial.
 
@@ -351,7 +351,7 @@ def test_embedded_subsequent_request_declined_through(
         page.goto(f"https://localhost{EMBEDDED_PATH}")
         deadline = time.monotonic() + 8.0
         while time.monotonic() < deadline:
-            if "_bs_verified" in {c["name"] for c in bs_browser_context.cookies()}:
+            if "__Host-bs_verified" in {c["name"] for c in bs_browser_context.cookies()}:
                 break
             time.sleep(0.25)
 
