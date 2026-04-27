@@ -27,8 +27,7 @@ browser = [
 include = ["botshield_test*"]
 
 [tool.pytest.ini_options]
-# Tests live under tests/pytests/. The archived bash suite in
-# tests/bash-legacy/ is intentionally excluded from discovery.
+# Tests live under tests/pytests/.
 testpaths = ["pytests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]

@@ -1,8 +1,6 @@
 # mod_botshield test suite
 
-Pytest-based regression and acceptance tests for the module. As of
-M11.5 the bash suite is archived in `bash-legacy/` — pytest is the
-canonical framework.
+Pytest-based regression and acceptance tests for the module.
 
 ## Layout
 
@@ -33,7 +31,6 @@ tests/
 ├── setup/
 │   ├── provision.sh      # idempotent one-shot box setup (creates .venv)
 │   └── reset-state.sh    # between-run state-file wipe
-└── bash-legacy/          # M11.1–M11.3 bash tests, kept for reference
 ```
 
 ## Prerequisites
