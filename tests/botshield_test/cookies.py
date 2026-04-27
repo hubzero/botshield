@@ -1,4 +1,4 @@
-"""Cookie helpers: pending cookie fetch + HMAC cookie assembly.
+"""Cookie helpers: pending cookie fetch + GCM cookie assembly.
 
 The PoW solver moves here from `tests/tools/solve_pow.py` so every
 cookie operation lives in one module.
@@ -52,8 +52,8 @@ def extract_challenge(html: str) -> dict:
 
 # ---------------------------------------------------------------------------
 # SHA-256 leading-zero-hex PoW solver (from tests/tools/solve_pow.py).
-# The module expects a 15-field `__Host-bs_verified` cookie; solve_pow() returns
-# the counter, cookie_payload() assembles the full envelope.
+# Cookie wire form is base64(GCM envelope) "." counter; build_cookie()
+# composes the value the JS would assemble in production.
 # ---------------------------------------------------------------------------
 
 def solve_pow(challenge: dict, *, limit: int = 10_000_000) -> int:
@@ -77,53 +77,17 @@ def solve_pow(challenge: dict, *, limit: int = 10_000_000) -> int:
 def build_cookie(challenge: dict, counter: int) -> str:
     """Assemble the cookie payload from a parsed challenge JSON.
 
-    Dispatches on the JSON shape:
-      - GCM mode (E8.1): challenge carries an opaque `cookie_prefix`
-        base64 envelope from the module. Cookie = `<prefix>.<counter>`.
-      - Legacy HMAC mode: challenge carries cleartext canonical
-        fields + signature. Cookie = base64 of the 17-field
-        pipe-delimited payload (canonical 0..14, sig 15, counter 16).
-
-    E15 grew the canonical field count from 13 to 15 by
-    appending `forgive_window_start` and `forgive_consumed`; the
-    module's BS_PROTOCOL_VERSION bumped 1->2 in the same commit.
+    The challenge carries an opaque `cookie_prefix` (base64-encoded
+    AES-256-GCM envelope of the canonical form). Cookie value =
+    `<prefix>.<counter>`.
     """
-    if "cookie_prefix" in challenge:
-        return f"{challenge['cookie_prefix']}.{counter}"
-    fields = [
-        challenge["v"], challenge["alg"],
-        challenge["salt"], challenge["nonce"], challenge["difficulty"],
-        challenge["expires_at"],
-        challenge["score"], challenge["flags"],
-        challenge["passes_silent"], challenge["passes_form"],
-        challenge["passes_captcha"],
-        challenge["challenged_at"], challenge["auto"],
-        challenge["forgive_window_start"], challenge["forgive_consumed"],
-        challenge["signature"], counter,
-    ]
-    joined = "|".join(str(f) for f in fields).encode()
-    return base64.b64encode(joined).decode()
-
-
-def tamper_signature(cookie: str) -> str:
-    """Flip one hex character of the HMAC signature (now at field 15
-    after the E15 envelope grew) in an assembled legacy
-    `__Host-bs_verified` cookie. Used to prove the module rejects a forged
-    signature."""
-    raw = base64.b64decode(cookie).decode()
-    fields = raw.split("|")
-    sig = list(fields[15])
-    # Deterministic flip: a↔b. Any in-place change invalidates the HMAC.
-    sig[0] = "b" if sig[0] == "a" else "a"
-    fields[15] = "".join(sig)
-    return base64.b64encode("|".join(fields).encode()).decode()
+    return f"{challenge['cookie_prefix']}.{counter}"
 
 
 def tamper_envelope(cookie: str) -> str:
     """Flip one base64 character of the GCM envelope (everything
     before the last '.'). Mutating any byte in alg_id/nonce/ct/tag
-    causes GCM tag verification to fail. Counterpart of
-    tamper_signature for E8.1 GCM-format cookies."""
+    causes GCM tag verification to fail."""
     head, sep, counter = cookie.rpartition(".")
     if not sep:
         raise AssertionError("not a GCM-format cookie (no '.' separator)")
