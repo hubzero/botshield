@@ -87,6 +87,19 @@ int         robots_group_rule_count_at(const robots_doc *doc, int idx);
 int         robots_group_rule_at(const robots_doc *doc, int idx, int rule_idx,
                                  const char **out_pattern, int *out_allow);
 
+/* RFC 9309 path-pattern match.
+ *
+ * Pattern may contain '*' (matches any byte sequence; multiple '*'s
+ * permitted, segments between them are literal and must appear in
+ * order) and may end with '$' (anchor to end of path).
+ *
+ * Returns 1 on match, 0 otherwise. An empty pattern never matches.
+ *
+ * Originally robots.txt-internal but promoted to public so
+ * BotShieldPathTrigger and BotShieldBlockPath share the same
+ * matcher rather than maintaining a parallel placeholder. */
+int bs_path_match(const char *pattern, const char *path);
+
 #ifdef __cplusplus
 }
 #endif

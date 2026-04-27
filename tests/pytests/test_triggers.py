@@ -244,3 +244,113 @@ def test_trigger_flag_ip_carries_to_next_request(
         f"follow-up request didn't show flagged-ip in reason; "
         f"follow_up={follow_up}"
     )
+
+
+# --- RFC 9309 path matching: middle-`*` patterns -------------------
+#
+# After consolidating onto the RFC 9309 matcher (was: a v1 placeholder
+# in mod_botshield.c that treated middle '*' as a literal byte), '*'
+# in non-trailing position is a proper wildcard.
+
+def test_path_trigger_middle_star_matches_segment(
+    config_override, log_slice, fresh_ip,
+):
+    """`/api/*/admin` matches `/api/v1/admin` and `/api/internal/admin`
+    via the RFC 9309 matcher's middle-wildcard semantics."""
+    with config_override(
+        r"BotShieldAllow\s+on",
+        'BotShieldAllow on\n'
+        '    BotShieldPathTrigger api-admin "/api/*/admin" status=403',
+        count=1,
+    ):
+        with log_slice as slc:
+            r1 = client.get("/api/v1/admin", xff=fresh_ip)
+            r2 = client.get("/api/internal/admin", xff=fresh_ip)
+            lines = slc.decision_lines(ip=fresh_ip)
+
+    assert r1.status_code == 403, (
+        f"middle-* didn't match /api/v1/admin; got {r1.status_code}"
+    )
+    assert r2.status_code == 403, (
+        f"middle-* didn't match /api/internal/admin; got {r2.status_code}"
+    )
+    assert sum(1 for d in lines
+               if "path-trigger:api-admin" in d["reason"]) >= 2, (
+        f"expected two path-trigger:api-admin decisions; lines={lines}"
+    )
+
+
+def test_path_trigger_middle_star_anchored_excludes_suffix(
+    config_override, log_slice, fresh_ip,
+):
+    """`/api/*/admin$` matches `/api/v1/admin` but NOT
+    `/api/v1/admin/foo` — the trailing $ anchors to end-of-path
+    even when '*' appears mid-pattern."""
+    with config_override(
+        r"BotShieldAllow\s+on",
+        'BotShieldAllow on\n'
+        '    BotShieldPathTrigger api-admin-end "/api/*/admin$" status=403',
+        count=1,
+    ):
+        with log_slice as slc:
+            r_match  = client.get("/api/v1/admin",     xff=fresh_ip)
+            r_after  = client.get("/api/v1/admin/foo", xff=fresh_ip)
+            lines = slc.decision_lines(ip=fresh_ip)
+
+    assert r_match.status_code == 403, (
+        f"middle-*-with-$ anchor didn't match /api/v1/admin; "
+        f"got {r_match.status_code}"
+    )
+    assert r_after.status_code != 403, (
+        f"middle-*-with-$ anchor must NOT match /api/v1/admin/foo "
+        f"(suffix beyond anchor); got {r_after.status_code}"
+    )
+    triggered = [d for d in lines
+                 if "path-trigger:api-admin-end" in d["reason"]]
+    assert len(triggered) == 1, (
+        f"expected exactly one trigger fire (the /admin path); "
+        f"lines={lines}"
+    )
+
+
+def test_path_trigger_middle_star_emits_notice_on_config_load(
+    config_override,
+):
+    """Operators who write a non-trailing '*' get a NOTICE on config
+    load explaining that the matcher interprets it per RFC 9309. The
+    placeholder matcher used to treat middle '*' as a literal byte;
+    this warning surfaces the behavior change so a typo doesn't
+    silently start matching paths the operator didn't intend.
+
+    During directive parsing the vhost's ErrorLog isn't applied
+    yet, so the NOTICE lands in the main Apache error log rather
+    than the vhost-specific log_slice surface. Read the main log
+    directly via sudo tail."""
+    import subprocess
+    from botshield_test.config import APACHE_ERROR_LOG
+
+    # Snapshot the main log size before, then look at everything
+    # after this offset for our NOTICE.
+    before = int(subprocess.run(
+        ["sudo", "stat", "-c", "%s", APACHE_ERROR_LOG],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip())
+
+    with config_override(
+        r"BotShieldAllow\s+on",
+        'BotShieldAllow on\n'
+        '    BotShieldPathTrigger middle-warn "/foo*bar" status=403',
+        count=1,
+    ):
+        pass
+
+    tail = subprocess.run(
+        ["sudo", "tail", "-c", f"+{before + 1}", APACHE_ERROR_LOG],
+        capture_output=True, text=True, check=True,
+    ).stdout
+
+    assert "BotShieldPathTrigger 'middle-warn'" in tail and \
+           "non-trailing '*'" in tail, (
+        "expected a NOTICE about non-trailing '*' on config load; "
+        f"main-log tail: {tail!r}"
+    )

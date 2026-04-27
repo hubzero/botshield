@@ -116,8 +116,13 @@ static void bs_rb_rstrip(char *s)
  *
  * Returns 1 on match, 0 otherwise. An empty pattern never matches —
  * empty Disallow/Allow is robots.txt's "no rule" sentinel and is
- * filtered out at parse time. */
-static int bs_rb_path_match(const char *pattern, const char *path)
+ * filtered out at parse time.
+ *
+ * Public surface — also used by BotShieldPathTrigger and
+ * BotShieldBlockPath in mod_botshield.c. The earlier
+ * bs_path_glob_match placeholder in mod_botshield.c was retired
+ * once this matcher landed; one path matcher across the codebase. */
+int bs_path_match(const char *pattern, const char *path)
 {
     if (!pattern || !*pattern || !path) return 0;
 
@@ -565,7 +570,7 @@ void robots_query(const robots_doc *doc, const char *ua, const char *path,
 
         for (int k = 0; k < g->rules->nelts; k++) {
             robots_rule *r = APR_ARRAY_IDX(g->rules, k, robots_rule *);
-            if (!bs_rb_path_match(r->pattern, path)) continue;
+            if (!bs_path_match(r->pattern, path)) continue;
             int len = (int)strlen(r->pattern);
             if (len > best_rule_len) {
                 best_rule_len = len;

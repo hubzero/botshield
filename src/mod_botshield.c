@@ -3792,29 +3792,46 @@ static const char *bs_cohort_resolve(cmd_parms *cmd, bs_cohort *out,
     return NULL;
 }
 
-/* Minimal v1 path-glob matcher:
- *   pattern ending in '$' → exact match against path (pattern minus $).
- *   pattern ending in '*' → prefix match (pattern minus *).
- *   otherwise              → prefix match against the whole pattern.
- * Full RFC 9309 semantics (middle wildcards, longest-match rules,
- * Allow-overrides-Disallow) arrive with robots.c in E2.2 — v1 covers
- * the shapes operators actually write by hand. */
-static int bs_path_glob_match(const char *pattern, const char *path)
-{
-    if (!pattern || !*pattern || !path) return 0;
-    apr_size_t plen = strlen(pattern);
-    apr_size_t ulen = strlen(path);
+/* Path-pattern matching for BotShieldPathTrigger and BotShieldBlockPath
+ * is the RFC 9309 matcher promoted from src/robots.c (bs_path_match).
+ * The earlier v1 placeholder here that only handled <literal>,
+ * <literal>*, and <literal>$ shapes was retired once the RFC 9309
+ * matcher landed — its own comment flagged itself as temporary. One
+ * path matcher across the codebase now. */
 
-    if (pattern[plen - 1] == '$') {
-        if (ulen != plen - 1) return 0;
-        return memcmp(pattern, path, plen - 1) == 0;
+/* Surface a NOTICE at config-load when a pattern contains a non-
+ * trailing '*'. Under the retired v1 matcher those characters were
+ * treated as literal bytes (which essentially never matched any
+ * URI). Under the RFC 9309 matcher they're proper wildcards. The
+ * behavior change is desired for operators who intended wildcards;
+ * for operators who fat-fingered a '*' the warning gives them a
+ * heads-up so the new match doesn't surprise them. The trailing '*'
+ * (or '*' followed only by '$') is the documented v1 shape and
+ * stays silent — its behavior didn't change. */
+static void bs_path_pattern_warn_middle_star(cmd_parms *cmd,
+                                              const char *directive,
+                                              const char *name,
+                                              const char *pattern)
+{
+    const char *star = strchr(pattern, '*');
+    if (!star) return;
+    /* Find the last '*'. Anything past the last '*' that isn't
+     * empty or "$" means there's content after a wildcard, i.e.
+     * the wildcard is non-trailing. */
+    const char *last_star = star;
+    for (const char *q = star + 1; *q; q++) {
+        if (*q == '*') last_star = q;
     }
-    if (pattern[plen - 1] == '*') {
-        if (ulen < plen - 1) return 0;
-        return memcmp(pattern, path, plen - 1) == 0;
-    }
-    if (ulen < plen) return 0;
-    return memcmp(pattern, path, plen) == 0;
+    const char *tail = last_star + 1;
+    if (*tail == '\0') return;        /* trailing '*' — v1 shape */
+    if (tail[0] == '$' && tail[1] == '\0') return; /* '*$' — v1 shape */
+    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, cmd->server,
+        "mod_botshield: %s '%s' pattern '%s' contains a non-trailing "
+        "'*'; interpreted per RFC 9309 (matches any byte sequence at "
+        "this position). The retired v1 matcher treated middle '*' "
+        "as a literal byte. If the literal was intended, this rule "
+        "will no longer match.",
+        directive, name, pattern);
 }
 
 /* Cohort match at request time. Returns 1 when this request belongs
@@ -4200,7 +4217,7 @@ static int bs_check_policy(request_rec *r)
         for (int i = 0; i < scfg->path_triggers->nelts; i++) {
             bs_path_trigger_entry *t = APR_ARRAY_IDX(
                 scfg->path_triggers, i, bs_path_trigger_entry *);
-            if (!bs_path_glob_match(t->path_pattern, r->uri)) continue;
+            if (!bs_path_match(t->path_pattern, r->uri)) continue;
             bs_trigger_exec_outcome o = bs_apply_trigger_action(
                 r, scfg, BS_TFAMILY_PATH, &t->action,
                 "path-trigger", t->name);
@@ -4227,7 +4244,7 @@ static int bs_check_policy(request_rec *r)
         for (int i = 0; i < scfg->block_paths->nelts; i++) {
             bs_block_path_entry *e = APR_ARRAY_IDX(
                 scfg->block_paths, i, bs_block_path_entry *);
-            if (!bs_path_glob_match(e->path_pattern, r->uri)) continue;
+            if (!bs_path_match(e->path_pattern, r->uri)) continue;
             if (!bs_cohort_matches(&e->cohort, ua, r)) continue;
             int observe = global_shadow || (e->mode == BS_TMODE_OBSERVE);
             if (observe) {
@@ -8627,6 +8644,8 @@ static const char *bs_set_block_path(cmd_parms *cmd, void *dconf,
     if (strlen(pattern) > 256) {
         return "BotShieldBlockPath: path-glob longer than 256 chars";
     }
+    bs_path_pattern_warn_middle_star(cmd, "BotShieldBlockPath",
+                                      name, pattern);
 
     bs_block_path_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
     e->name         = apr_pstrdup(cmd->pool, name);
@@ -9057,6 +9076,8 @@ static const char *bs_set_path_trigger(cmd_parms *cmd, void *dconf,
     if (strlen(pattern) > 256) {
         return "BotShieldPathTrigger: path-glob longer than 256 chars";
     }
+    bs_path_pattern_warn_middle_star(cmd, "BotShieldPathTrigger",
+                                      name, pattern);
 
     bs_path_trigger_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
     e->name         = apr_pstrdup(cmd->pool, name);
