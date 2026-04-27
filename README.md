@@ -33,9 +33,7 @@ Playwright for the acceptance layer, axe-core a11y smoke,
 hypothesis property tests for cookie tampering, Prometheus
 exposition-format validator, session-scoped MPM matrix, and a
 LibFuzzer harness for the cookie parser). CI splits a fast
-per-PR lane from a browser lane and a nightly soak. The M11.1–
-M11.3 bash suite is archived in `tests/bash-legacy/` as a
-reference — see PLAN.md for the milestone-by-milestone history.
+per-PR lane from a browser lane and a nightly soak.
 
 ## How it works
 
