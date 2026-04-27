@@ -37,9 +37,6 @@
 #     are marked @pytest.mark.serial and run outside the xdist pool.
 #   - A test needing a completely clean SHM/state should call the
 #     `clean_state` fixture.
-#
-# Bash test archive: tests/bash-legacy/ holds the M11.1–M11.3
-# shell-based tests as a reference. Not executed.
 
 set -u
 
