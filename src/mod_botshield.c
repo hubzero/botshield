@@ -388,6 +388,11 @@ typedef struct {
 typedef struct {
     int                 total;
     apr_array_header_t *entries;
+    int                 cap_warned;   /* DEBUG-logged when entries
+                                       * first hit BS_SCORE_MAX_REASONS
+                                       * so further drops don't spam
+                                       * the log. apr_pcalloc gives
+                                       * us 0 for free. */
 } bs_request_score;
 
 /* Default help panel content. HTML allowed because the string is emitted
@@ -12686,11 +12691,29 @@ static bs_request_score *bs_get_score(request_rec *r, int create)
  * user's cookie (per-user, server-stateless); M5 puts serious-event
  * flags in an SHM flagged-IP table (sparse, per-IP). `ttl_seconds`
  * feeds the latter when the caller is a serious-event source. */
+/* Operator-facing documentation: README "Understanding scoring"
+ * (rendered into docs/guide/index.html) explains the score
+ * composition, threshold ladder, and tuning workflow. */
 static void bs_score_add(request_rec *r, int penalty,
                          int ttl_seconds, const char *reason)
 {
     bs_request_score *s = bs_get_score(r, 1);
-    if (s->entries->nelts >= BS_SCORE_MAX_REASONS) return;
+    if (s->entries->nelts >= BS_SCORE_MAX_REASONS) {
+        /* Silent drop on cap could mask a runaway loop or a
+         * misconfigured rule fanout. Log once at DEBUG so the
+         * diagnostic surfaces under verbose-logging without
+         * spamming production. The total still accumulates from
+         * the entries we kept; it's only the per-reason audit trail
+         * that's truncated past this point. */
+        if (!s->cap_warned) {
+            ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
+                "mod_botshield: score-reason cap (%d) reached for %s; "
+                "further bs_score_add calls drop their reason silently",
+                BS_SCORE_MAX_REASONS, r->uri);
+            s->cap_warned = 1;
+        }
+        return;
+    }
     bs_score_entry *e = apr_array_push(s->entries);
     e->penalty     = penalty;
     e->ttl_seconds = ttl_seconds;
@@ -12767,6 +12790,10 @@ static void bs_run_builtin_heuristics(request_rec *r)
  * captcha tier is selected but no provider is configured on the scope,
  * the render code falls through to form-PoW (documented in the
  * decision log as reason="captcha_fallback"). */
+/* Score-to-tier threshold ladder. Three configurable cut-points
+ * (BotShieldScoreSilent / Hard / Captcha) gate four tiers. See the
+ * README "Understanding scoring" section for the operator-facing
+ * tuning workflow. */
 static bs_tier bs_decide_tier(const bs_dir_cfg *cfg, int score)
 {
     int silent  = bs_effective_int(cfg->score_silent,  BS_DEFAULT_SCORE_SILENT);
@@ -14155,7 +14182,8 @@ static int bs_handler(request_rec *r)
 
     /* effective_score = per-request heuristic total (already inclusive
      * of any flag-trigger SCORE actions applied above) + the cookie's
-     * accumulated rep score. */
+     * accumulated rep score. Operator-facing tuning workflow lives
+     * in the README "Understanding scoring" section. */
     int cookie_score = have_prior_rep ? prior_ch.rep.score : 0;
     int effective    = heuristic_total + cookie_score;
     bs_tier score_tier = bs_decide_tier(cfg, effective);
