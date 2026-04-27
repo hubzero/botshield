@@ -29,6 +29,14 @@ LA       := $(MAIN_SRC:.c=.la)
 # Pass warnings through apxs to the underlying compiler.
 CFLAGS_WARN := -Wc,-Wall -Wc,-Wextra -Wc,-Wno-unused-parameter
 
+# Hide cross-file bs_* symbols from the dynamic-linker symbol table.
+# Apache modules share the parent httpd's dynamic symbol space; without
+# this, two modules with same-named non-static functions could resolve
+# to whichever loaded first. The module entry point (botshield_module)
+# stays default-visible via a #pragma GCC visibility push/pop in
+# mod_botshield.c — Apache's LoadModule resolves it via dlsym.
+CFLAGS_VIS := -Wc,-fvisibility=hidden
+
 # Sanitizer flags for the M10.1 pass. -Wc,... forwards compiler flags
 # through apxs; -Wl,... forwards linker flags. Frame pointers on so
 # ASan's stack traces are actually readable. -O1 instead of -O2 to
@@ -61,7 +69,7 @@ LIBS := -lcrypto -lcurl -ljson-c
 all: build
 
 build:
-	$(APXS) -c $(CFLAGS_WARN) $(SRC) $(LIBS)
+	$(APXS) -c $(CFLAGS_WARN) $(CFLAGS_VIS) $(SRC) $(LIBS)
 
 install: build
 	sudo $(APXS) -i -n $(MOD_NAME) $(LA)
@@ -91,7 +99,7 @@ docs:
 # --- M10.1 ---
 
 sanitize: clean
-	$(APXS) -c $(CFLAGS_WARN) $(CFLAGS_SAN) $(SRC) $(LIBS)
+	$(APXS) -c $(CFLAGS_WARN) $(CFLAGS_VIS) $(CFLAGS_SAN) $(SRC) $(LIBS)
 
 install-sanitize: sanitize
 	sudo $(APXS) -i -n $(MOD_NAME) $(LA)
