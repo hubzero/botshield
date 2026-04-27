@@ -12023,6 +12023,51 @@ static const char *bs_get_trigger_tag(request_rec *r)
     return apr_table_get(r->notes, BS_TRIGGER_TAG_NOTE);
 }
 
+/* Sanitize a string for inclusion inside the `key="value"` quoted
+ * fields of the decision log.
+ *
+ * Browsers always %22-encode '"' in URIs but a hand-rolled HTTP
+ * client can send a literal '"' raw; without sanitization it would
+ * close the quoting and mis-tokenize the rest of the line for
+ * downstream log parsers.
+ *
+ * Why URL-encoding instead of backslash-escaping: Apache's error-
+ * log writer escapes embedded '\' bytes (each '\' becomes "\\" in
+ * the log file) but does NOT escape '"'. A naive '"'→'\"' approach
+ * therefore lands in the log as '\\"' — three characters that a
+ * standard string-literal parser reads as escaped-backslash +
+ * close-quote, which still mis-tokenizes. Percent-encoding the
+ * troublesome bytes ('"' → "%22", '\' → "%5C") survives Apache's
+ * pass-through unchanged and remains operator-readable since the
+ * surrounding URI context is already URL-shaped.
+ *
+ * Fast path: if the input contains no '"' or '\', returns the
+ * input pointer unchanged — zero copy, zero pool allocation.
+ * Common case for typical request URIs and reason names. */
+static const char *bs_log_quote(apr_pool_t *p, const char *s)
+{
+    if (!s) return "-";
+    apr_size_t extra = 0;
+    for (const char *q = s; *q; q++) {
+        if (*q == '"' || *q == '\\') extra += 2;  /* '"' → "%22"; '\' → "%5C" */
+    }
+    if (extra == 0) return s;
+    apr_size_t in_len = strlen(s);
+    char *out = apr_palloc(p, in_len + extra + 1);
+    char *w = out;
+    for (const char *q = s; *q; q++) {
+        if (*q == '"') {
+            *w++ = '%'; *w++ = '2'; *w++ = '2';
+        } else if (*q == '\\') {
+            *w++ = '%'; *w++ = '5'; *w++ = 'C';
+        } else {
+            *w++ = *q;
+        }
+    }
+    *w = '\0';
+    return out;
+}
+
 static void bs_decision_log(request_rec *r,
                             const char *tier,
                             const char *outcome,
@@ -12037,9 +12082,21 @@ static void bs_decision_log(request_rec *r,
     const char *path     = (r->unparsed_uri && *r->unparsed_uri)
                            ? r->unparsed_uri : "-";
     const char *tag      = bs_get_trigger_tag(r);
+    /* Escape backslashes and double-quotes inside the three quoted
+     * fields (reason, path, tag) so a request URI containing a
+     * literal " (which a malicious client can send raw, even though
+     * browsers always %22-encode) doesn't break tokenization for
+     * downstream log parsers. Browsers and well-formed clients pass
+     * through untouched: alpha+digit+typical-URI bytes don't match
+     * \\ or " so the helper returns its input pointer unchanged.
+     * Common case: zero copy. */
+    const char *reason_q = bs_log_quote(r->pool,
+                                         reason ? reason : "-");
+    const char *path_q   = bs_log_quote(r->pool, path);
     /* tag= suffix only when a trigger set it; normal decision lines
      * stay byte-identical so existing log parsers don't break. */
     if (tag && *tag) {
+        const char *tag_q = bs_log_quote(r->pool, tag);
         ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
             "mod_botshield: decision tier=%s outcome=%s ip=%s score=%d "
             "cookie=%s provider=%s alg=%s reason=\"%s\" path=\"%s\" "
@@ -12048,8 +12105,7 @@ static void bs_decision_log(request_rec *r,
             cookie   ? cookie   : "-",
             provider ? provider : "-",
             alg      ? alg      : "-",
-            reason   ? reason   : "-",
-            path, tag);
+            reason_q, path_q, tag_q);
     } else {
         ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
             "mod_botshield: decision tier=%s outcome=%s ip=%s score=%d "
@@ -12058,8 +12114,7 @@ static void bs_decision_log(request_rec *r,
             cookie   ? cookie   : "-",
             provider ? provider : "-",
             alg      ? alg      : "-",
-            reason   ? reason   : "-",
-            path);
+            reason_q, path_q);
     }
     /* M9.2: counters derived from the same enum vocabulary. One log
      * line, up to four counter increments (tier, outcome, cookie when
