@@ -270,6 +270,9 @@ typedef bs_captcha_result (*bs_captcha_siteverify_fn)(
     const bs_captcha_provider *prov,
     const unsigned char *secret, apr_size_t secret_len,
     const char *token, int timeout_ms,
+    /* Optional operator-supplied CA bundle path. NULL = libcurl
+     * default. */
+    const char *ca_bundle,
     const char **out_details,
     long *out_http_code,
     double *out_score,
@@ -883,6 +886,13 @@ struct bs_dir_cfg {
      * satisfy the verify handler. */
     const char *captcha_expected_hostname;
     const char *captcha_expected_action;
+    /* Optional CA bundle for siteverify TLS. NULL = libcurl's
+     * compiled-in default (typically the system bundle). Operators
+     * on stripped-down container images without `ca-certificates`
+     * installed need to point this at the bundle they ship; without
+     * it every siteverify hits CURLE_PEER_FAILED_VERIFICATION and
+     * the captcha tier silently fails-open. */
+    const char *captcha_ca_bundle;
 };
 
 /* E2.2 — robots.txt state bundle. One of these per active parse;
@@ -1129,6 +1139,7 @@ static void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->captcha_rate_limit  = BS_UNSET;
     cfg->captcha_expected_hostname = NULL;
     cfg->captcha_expected_action   = NULL;
+    cfg->captcha_ca_bundle         = NULL;
     return cfg;
 }
 
@@ -1544,6 +1555,9 @@ static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     out->captcha_expected_action   = add->captcha_expected_action
                                      ? add->captcha_expected_action
                                      : base->captcha_expected_action;
+    out->captcha_ca_bundle         = add->captcha_ca_bundle
+                                     ? add->captcha_ca_bundle
+                                     : base->captcha_ca_bundle;
     return out;
 }
 
@@ -2543,6 +2557,7 @@ static const bs_pow_algorithm *bs_find_algorithm(const char *name)
 static bs_captcha_result bs_geetest_siteverify(request_rec *r,
     const bs_captcha_provider *prov, const unsigned char *secret,
     apr_size_t secret_len, const char *token, int timeout_ms,
+    const char *ca_bundle,
     const char **out_details, long *out_http_code, double *out_score,
     const char **out_hostname, const char **out_action);
 
@@ -10629,6 +10644,43 @@ static const char *bs_set_captcha_expected_action(cmd_parms *cmd,
     return NULL;
 }
 
+/* `BotShieldCaptchaCABundle <path>` — absolute path to a PEM
+ * certificate bundle that libcurl will use when validating the
+ * captcha-provider TLS certificate. Optional. When unset, libcurl
+ * falls back to its compiled-in default (typically the system
+ * `ca-certificates` bundle on Debian/Ubuntu/RHEL).
+ *
+ * Why this exists: stripped-down container images that omit the
+ * `ca-certificates` package have no system CA store, so every
+ * captcha siteverify hits CURLE_PEER_FAILED_VERIFICATION and the
+ * captcha tier silently fails-open (occasional permissive better
+ * than locking everyone out — but a permanent state of fail-open
+ * is bad). Pointing this at the bundle the operator's image ships
+ * fixes that without a config-time policy change. */
+static const char *bs_set_captcha_ca_bundle(cmd_parms *cmd,
+                                            void *cfg_v,
+                                            const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    if (!arg || !*arg) {
+        return "BotShieldCaptchaCABundle: path required";
+    }
+    if (arg[0] != '/') {
+        return "BotShieldCaptchaCABundle: path must be absolute";
+    }
+    struct stat st;
+    if (stat(arg, &st) != 0) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCaptchaCABundle: cannot stat '%s'", arg);
+    }
+    if (!S_ISREG(st.st_mode)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCaptchaCABundle: '%s' is not a regular file", arg);
+    }
+    cfg->captcha_ca_bundle = apr_pstrdup(cmd->pool, arg);
+    return NULL;
+}
+
 /* `BotShieldCaptchaRateLimit N` — verify-endpoint attempts per IP per
  * minute. 0 disables the rate limiter entirely (not recommended);
  * default BS_DEFAULT_CAPTCHA_RATE_LIMIT = 30. */
@@ -10998,6 +11050,7 @@ static bs_captcha_result bs_captcha_siteverify(request_rec *r,
                                                apr_size_t secret_len,
                                                const char *token,
                                                int timeout_ms,
+                                               const char *ca_bundle,
                                                const char **out_details,
                                                long *out_http_code,
                                                double *out_score,
@@ -11060,12 +11113,22 @@ static bs_captcha_result bs_captcha_siteverify(request_rec *r,
     }
     BS_SETOPT(curl, CURLOPT_TIMEOUT_MS, (long)timeout_ms);
     BS_SETOPT(curl, CURLOPT_NOSIGNAL, 1L);
+    BS_SETOPT(curl, CURLOPT_NOPROGRESS, 1L);
     BS_SETOPT(curl, CURLOPT_USERAGENT, "mod_botshield/0.1");
     BS_SETOPT(curl, CURLOPT_WRITEFUNCTION, bs_curl_write_cb);
     BS_SETOPT(curl, CURLOPT_WRITEDATA, &resp);
     BS_SETOPT(curl, CURLOPT_FOLLOWLOCATION, 0L);
     BS_SETOPT(curl, CURLOPT_SSL_VERIFYPEER, 1L);
     BS_SETOPT(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+    /* Pin TLS floor at 1.2. Modern libcurl already excludes earlier
+     * versions by default, but explicit-is-better-than-implicit
+     * locks the policy across libcurl version drift. */
+    BS_SETOPT(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
+    /* Operator-supplied CA bundle, if configured. Falls through to
+     * libcurl's compiled-in default when unset. */
+    if (ca_bundle) {
+        BS_SETOPT(curl, CURLOPT_CAINFO, ca_bundle);
+    }
     /* Security review HIGH #7 — allowlist HTTPS only. Provider URLs
      * are hard-coded today, but a future operator-tunable URL
      * would become an immediate SSRF vector via file://, gopher://,
@@ -11217,6 +11280,7 @@ static bs_captcha_result bs_geetest_siteverify(request_rec *r,
                                                apr_size_t secret_len,
                                                const char *token,
                                                int timeout_ms,
+                                               const char *ca_bundle,
                                                const char **out_details,
                                                long *out_http_code,
                                                double *out_score,
@@ -11308,12 +11372,22 @@ static bs_captcha_result bs_geetest_siteverify(request_rec *r,
     }
     BS_SETOPT(curl, CURLOPT_TIMEOUT_MS, (long)timeout_ms);
     BS_SETOPT(curl, CURLOPT_NOSIGNAL, 1L);
+    BS_SETOPT(curl, CURLOPT_NOPROGRESS, 1L);
     BS_SETOPT(curl, CURLOPT_USERAGENT, "mod_botshield/0.1");
     BS_SETOPT(curl, CURLOPT_WRITEFUNCTION, bs_curl_write_cb);
     BS_SETOPT(curl, CURLOPT_WRITEDATA, &resp);
     BS_SETOPT(curl, CURLOPT_FOLLOWLOCATION, 0L);
     BS_SETOPT(curl, CURLOPT_SSL_VERIFYPEER, 1L);
     BS_SETOPT(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+    /* Pin TLS floor at 1.2. Modern libcurl already excludes earlier
+     * versions by default, but explicit-is-better-than-implicit
+     * locks the policy across libcurl version drift. */
+    BS_SETOPT(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
+    /* Operator-supplied CA bundle, if configured. Falls through to
+     * libcurl's compiled-in default when unset. */
+    if (ca_bundle) {
+        BS_SETOPT(curl, CURLOPT_CAINFO, ca_bundle);
+    }
     /* Security review HIGH #7 — allowlist HTTPS only. Provider URLs
      * are hard-coded today, but a future operator-tunable URL
      * would become an immediate SSRF vector via file://, gopher://,
@@ -13262,6 +13336,7 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
     bs_captcha_result res = bs_captcha_siteverify(r,
         cfg->captcha_provider, cfg->captcha_secret,
         cfg->captcha_secret_len, token, timeout_ms,
+        cfg->captcha_ca_bundle,
         &details, &http_code, &score, &resp_hostname, &resp_action);
 
     if (res != BS_CAPTCHA_OK) {
@@ -14199,7 +14274,8 @@ static int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
     bs_captcha_result result = verify_fn(
         r, cfg->captcha_provider,
         cfg->captcha_secret, cfg->captcha_secret_len,
-        token, timeout, &details, &http_code, &score,
+        token, timeout, cfg->captcha_ca_bundle,
+        &details, &http_code, &score,
         &resp_hostname, &resp_action);
     /* In-flight semaphore released as soon as the libcurl call returns.
      * The rest of the handler (cookie issuance, redirect) doesn't hold
@@ -14748,6 +14824,15 @@ static const command_rec bs_cmds[] = {
                  "token with (reCAPTCHA v3 + Turnstile). Default: "
                  "'botshield'. Empty string disables the check. "
                  "Mismatch rejects the token."),
+    AP_INIT_TAKE1("BotShieldCaptchaCABundle", bs_set_captcha_ca_bundle,
+                 NULL, RSRC_CONF | ACCESS_CONF,
+                 "Absolute path to a PEM CA bundle libcurl will use to "
+                 "validate the captcha-provider TLS certificate. "
+                 "Optional; defaults to libcurl's compiled-in system "
+                 "bundle. Set this on stripped container images that "
+                 "lack /etc/ssl/certs to avoid silent fail-open from "
+                 "every siteverify hitting "
+                 "CURLE_PEER_FAILED_VERIFICATION."),
     AP_INIT_TAKE1("BotShieldCaptchaRateLimit", bs_set_captcha_rate_limit,
                  NULL, RSRC_CONF | ACCESS_CONF,
                  "Max captcha-verify POSTs per IP per minute (default: 30, "
@@ -16705,6 +16790,7 @@ static int bs_form_captcha_fixup(request_rec *r)
     bs_captcha_result res = bs_captcha_siteverify(r,
         cfg->captcha_provider, cfg->captcha_secret,
         cfg->captcha_secret_len, token, timeout_ms,
+        cfg->captcha_ca_bundle,
         &details, &http_code, &score, &resp_hostname, &resp_action);
 
     if (res != BS_CAPTCHA_OK) {
