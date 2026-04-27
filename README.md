@@ -271,6 +271,65 @@ BotShieldEnabled Off
 </LocationMatch>
 ```
 
+## Staging policy changes
+
+mod_botshield supports two complementary dry-run modes so operators can
+deploy new rules without affecting production traffic until they're
+confident the matches are correct.
+
+### Per-rule observe mode
+
+Add `mode=observe` to any directive that supports it (`BotShieldPathTrigger`,
+`BotShieldBlockPath`, `BotShieldRateLimit`, `BotShieldFlagTrigger`, …):
+
+```apache
+BotShieldPathTrigger /admin/$ flag=scanner_probe mode=observe
+```
+
+The rule still evaluates against every matching request, but takes no
+action. Matches appear in the decision log with an `:observe` suffix:
+
+```
+botshield: path-trigger:scanner-trap:observe ip=1.2.3.4 path=/admin/
+```
+
+Watch the log for a few hours or days. When matches look correct, remove
+`mode=observe` and reload Apache to flip the rule to enforce.
+
+### Global `BotShieldShadowMode`
+
+For staging a whole policy revision at once, set the server-wide flag:
+
+```apache
+BotShieldShadowMode on
+```
+
+This forces every rule to observe regardless of its per-rule setting —
+useful before a release or when comparing a new ruleset against
+production traffic without any enforcement risk. Flip back to `off` when
+you're ready to enforce.
+
+### How they combine
+
+Either signal is sufficient: a rule runs in observe mode if EITHER its
+per-rule mode is observe OR `BotShieldShadowMode on` is set. There is no
+priority order to memorize. Use per-rule observe for staging single
+rules; use `BotShieldShadowMode` for staging an entire policy.
+
+### What "observe" means precisely
+
+- The rule's predicate evaluates normally (path match, cohort match, etc.)
+- The decision log records the would-have-done outcome with `:observe`
+  suffix
+- The matching observe-mode metric counter increments
+  (e.g. `block_path_observed_total`, `trigger_observed_total`)
+- No flag bits are set on the IP
+- No score is added to the request
+- No status code, redirect, or log tag side-effect is emitted
+
+The audit trail captures everything the rule WOULD have done; the
+response is unaffected.
+
 ## Customizing the challenge page
 
 Three layers, each independent:
