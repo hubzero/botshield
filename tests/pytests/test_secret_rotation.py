@@ -104,6 +104,35 @@ def test_directive_rejects_world_readable(config_override, tmp_path):
             pass
 
 
+def test_directive_rejects_embedded_nul(config_override, tmp_path):
+    """Security review HIGH #2. A secret file containing an embedded
+    NUL must be rejected at parse time. Earlier versions silently
+    truncated the key at the first NUL via strlen, yielding a
+    shorter, weaker effective key with no log warning. P(NUL in N
+    random bytes) = 1 − (255/256)^N — about 12% for 32-byte keys —
+    so this is the realistic failure mode of `dd if=/dev/urandom` /
+    `openssl rand` without hex/base64 encoding.
+
+    Exercising the secondary loader is sufficient: all five secret
+    loaders (primary, secondary, captcha, app-feedback/claims merged
+    into app-integration) share `bs_validate_secret_key`, so the
+    fix is on a single code path."""
+    bad = tmp_path / "secret-with-nul"
+    # 32 mode-600 bytes with a NUL in the middle. Bypasses the
+    # length-floor + permissions checks so the validator's NUL guard
+    # is what fires.
+    bad.write_bytes(b"a" * 16 + b"\x00" + b"b" * 15)
+    bad.chmod(0o600)
+    with pytest.raises(Exception):
+        with config_override(
+            r"BotShieldAllow\s+on",
+            f'BotShieldAllow on\n'
+            f'    BotShieldSecondarySecretFile {bad}',
+            count=1,
+        ):
+            pass
+
+
 def test_directive_accepts_well_formed(config_override,
                                        secondary_secret_file):
     """Valid secondary file path: reload succeeds, server stays

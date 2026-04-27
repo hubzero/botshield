@@ -4,7 +4,7 @@ Low-latency bot detection for Apache 2.4. Cookieless requests get a
 self-contained proof-of-work interstitial; verified visitors receive a
 short-lived cookie and pass through on their next request.
 
-**Status: early alpha.** End-to-end tiered routing works — pass, silent
+**Status: beta.** End-to-end tiered routing works — pass, silent
 (no-click auto-submit splash), form (checkbox interstitial), and
 captcha (third-party provider). Server-side HMAC signing, scoring
 heuristics, shared-memory flagged-IP table with lockless reads,
@@ -149,6 +149,32 @@ balancer and then challenge every legitimate visitor.
 
 For a single-host deployment with no proxy in front, no extra
 configuration is needed — `r->useragent_ip` already is the client.
+
+## Slow-client / slowloris defense
+
+`mod_botshield`'s body-read paths (the form-captcha verify, the M8
+captcha-verify endpoint, the embedded-verify endpoint) inherit
+Apache's slow-client defense. Apache's `Timeout` directive bounds
+how long a worker can be held by a stalled client; the default is
+60 seconds.
+
+**For production deployments, pair `mod_botshield` with
+`mod_reqtimeout`.** It gives finer-grained controls than `Timeout`
+and is the standard Apache answer to slowloris-class attacks. A
+typical configuration:
+
+```apache
+LoadModule reqtimeout_module modules/mod_reqtimeout.so
+
+RequestReadTimeout header=20-40,minrate=500
+RequestReadTimeout body=20,minrate=500
+```
+
+We deliberately do not implement our own slow-client defense.
+`mod_reqtimeout` is in Apache core, battle-tested, and applies to
+the whole vhost — `mod_botshield`-owned endpoints get the same
+protection as the application's own handlers without any extra
+config on our side.
 
 ## Directives
 
@@ -323,6 +349,21 @@ mod_botshield: decision tier=captcha outcome=verified ip=203.0.113.42
     score=0 cookie=- provider=turnstile alg=captcha-turnstile
     reason="-" path="/captcha-demo"
 ```
+
+The decision log emits at Apache's `info` level. Apache's default
+`LogLevel` is `warn`, so the line is invisible until you opt in.
+Bump just this module to make it visible without raising the
+verbosity of the rest of the server:
+
+```apache
+LogLevel mod_botshield:info
+```
+
+The `reason`, `path`, and `tag` fields are quoted; embedded `"`
+and `\` characters are URL-percent-encoded (`%22` and `%5C`) so a
+hand-rolled HTTP client sending an adversarial URI can't break
+log-parser tokenization. Browser traffic is unaffected — browsers
+already %-encode those bytes before sending.
 
 Enum sets:
 
