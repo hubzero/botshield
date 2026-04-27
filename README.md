@@ -4,7 +4,7 @@ Low-latency bot detection for Apache 2.4. Cookieless requests get a
 self-contained proof-of-work interstitial; verified visitors receive a
 short-lived cookie and pass through on their next request.
 
-**Status: early alpha.** End-to-end tiered routing works — pass, silent
+**Status: beta.** End-to-end tiered routing works — pass, silent
 (no-click auto-submit splash), form (checkbox interstitial), and
 captcha (third-party provider). Server-side HMAC signing, scoring
 heuristics, shared-memory flagged-IP table with lockless reads,
