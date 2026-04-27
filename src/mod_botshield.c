@@ -531,44 +531,79 @@ typedef enum {
 #define BS_DEFAULT_LOAD_WARM_FALL        5
 #define BS_DEFAULT_LOAD_NORMAL_FALL      5
 
+/* Header layout is segmented onto three cachelines (64 bytes each)
+ * to prevent false sharing between fields with very different
+ * read/write rates. Without this segmentation cv_inflight (CAS on
+ * every captcha verify) would invalidate the cacheline that holds
+ * load_state (read on every request) — every CAS would force every
+ * worker to reload load_state. At 10K+ RPS with non-trivial captcha
+ * volume that's a measurable few-percent CPU cost; at lower scales
+ * it's invisible but the layout is right anyway.
+ *
+ * Cacheline 0: write-once configuration (set at post_config, then
+ *   read-only). Co-resides safely.
+ * Cacheline 1: hot-read, rare-write (bloom_active read every Bloom
+ *   add; load_state read every request; the load_* siblings live
+ *   here too so the watchdog's read+write set sits on one line).
+ * Cacheline 2: write-frequently fields (cv_inflight, the CAS-on-
+ *   rotation Bloom timer, the CAS-on-saturation probe-warn
+ *   timestamps). Co-located deliberately — a CAS here invalidates
+ *   this line for other workers, but they'd be invalidating it
+ *   anyway when they CAS one of the other fields, so the cost stays
+ *   O(1) instead of O(N_workers).
+ *
+ * The static assertion below locks the layout. */
 typedef struct {
-    apr_uint32_t  magic;            /* BS_SHM_MAGIC */
-    apr_uint32_t  format_version;   /* BS_SHM_FORMAT_VERSION */
-    apr_uint32_t  flagged_capacity; /* number of slots in the table */
-    apr_uint32_t  _pad0;
-    unsigned char siphash_key[16];  /* DoS-resistant hash key */
-    apr_uint32_t  bloom_active;         /* 0 or 1 */
+    /* === Cacheline 0: configuration (write-once) === */
+    apr_uint32_t  magic;                /* BS_SHM_MAGIC */
+    apr_uint32_t  format_version;       /* BS_SHM_FORMAT_VERSION */
+    apr_uint32_t  flagged_capacity;     /* slot count */
     apr_uint32_t  bloom_buf_bytes;      /* per-buffer size in bytes */
     apr_uint32_t  bloom_window_secs;    /* full window; rotations at half */
-    apr_uint32_t  _pad1;
-    apr_int64_t   bloom_next_rotate;    /* unix sec */
-    /* M8.1 captcha endpoint guardrails. Slot arrays use a single fixed
-     * power-of-two slot count so index = siphash(ip) & (slots-1). */
-    apr_uint32_t  cv_rate_slots;        /* rate-limit slot count */
-    apr_uint32_t  cv_log_slots;         /* log-suppress slot count */
-    apr_uint32_t  cv_inflight;          /* in-flight siteverify counter */
-    apr_uint32_t  _pad2;
-    /* E11 — cached load state. Updated by the watchdog tick;
-     * read lockless from the request path. The hysteresis fields
-     * are tick-private; only the watchdog thread reads/writes
-     * them, so they don't need atomic ordering. */
-    apr_uint32_t  load_state;             /* bs_load_state enum value */
-    apr_uint32_t  load_state_since_sec;   /* unix sec at last transition */
-    apr_uint32_t  load_escalation_streak; /* samples wanting higher state */
-    apr_uint32_t  load_recovery_streak;   /* samples wanting lower state */
-    apr_uint32_t  load_state_changes;     /* monotonic counter for metrics */
-    apr_uint32_t  _pad3;
+    apr_uint32_t  cv_rate_slots;        /* M8.1 rate-limit slot count */
+    apr_uint32_t  cv_log_slots;         /* M8.1 log-suppress slot count */
+    apr_uint32_t  _pad_cl0_a;           /* keep siphash_key 8-byte aligned */
+    unsigned char siphash_key[16];      /* DoS-resistant hash key */
+    apr_uint32_t  _pad_cl0[4];          /* pad to 64 */
+
+    /* === Cacheline 1: hot-read, rare-write ===
+     * bloom_active is read on every Bloom add; CAS only on
+     * rotation. load_state is read on every request via
+     * bs_load_current; written by the watchdog tick (~1 Hz).
+     * The other load_* fields are watchdog-tick-private but
+     * co-located so the watchdog's read+write set is one
+     * cacheline of churn instead of two. */
+    apr_uint32_t  bloom_active;             /* 0 or 1 */
+    apr_uint32_t  load_state;               /* bs_load_state enum value */
+    apr_uint32_t  load_state_since_sec;     /* unix sec at last transition */
+    apr_uint32_t  load_escalation_streak;   /* samples wanting higher state */
+    apr_uint32_t  load_recovery_streak;     /* samples wanting lower state */
+    apr_uint32_t  load_state_changes;       /* monotonic counter for metrics */
+    apr_uint32_t  _pad_cl1[10];             /* pad to 64 */
+
+    /* === Cacheline 2: write-frequently === */
+    apr_uint32_t  cv_inflight;          /* CAS on every captcha verify */
+    apr_uint32_t  _pad_cl2_a;           /* align bloom_next_rotate to 8 */
+    apr_int64_t   bloom_next_rotate;    /* unix sec; CAS on rotation claim */
     /* Security review LOW #10 — probe-saturation log-throttle
-     * timestamps shared across all worker processes. Per-worker
-     * statics scaled the warning by worker count (25 workers, 25
-     * warnings per minute under sustained saturation). Atomic CAS
-     * on these fields lets one worker per minute claim the right
-     * to log; the rest skip. apr_int64_t to match
-     * apr_time_t. */
+     * timestamps shared across worker processes. Atomic CAS on
+     * these fields lets one worker per minute claim the right to
+     * log; the rest skip. apr_int64_t to match apr_time_t. */
     apr_int64_t   probe_warn_flagged_us;
     apr_int64_t   probe_warn_strike_us;
     apr_int64_t   probe_warn_safeguard_us;
+    apr_uint32_t  _pad_cl2[6];          /* pad to 64 */
 } bs_shm_header;
+
+/* Lock the cacheline layout. If a future field addition slips one
+ * of the three sections off its 64-byte boundary, this fires at
+ * compile time so the false-sharing fix doesn't silently regress. */
+_Static_assert(sizeof(bs_shm_header) == 192,
+               "bs_shm_header must be exactly three 64-byte cachelines");
+_Static_assert(offsetof(bs_shm_header, bloom_active) == 64,
+               "cacheline 1 starts at offset 64");
+_Static_assert(offsetof(bs_shm_header, cv_inflight) == 128,
+               "cacheline 2 starts at offset 128");
 
 /* Rate-limit / log-suppress slot encoding. One uint64 per slot:
  *   bits 63..20  unix-minute window start (enough for ~millions of years)
