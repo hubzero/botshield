@@ -471,6 +471,34 @@ typedef struct {
 #define BS_DEFAULT_SAFEGUARD_THRESHOLD 5
 #define BS_DEFAULT_SAFEGUARD_WINDOW    600
 #define BS_DEFAULT_SAFEGUARD_TTL       900
+
+/* MEDIUM #2 (Phase 2) — embedded-bootstrap nonce table. Records
+ * every successfully-redeemed challenge nonce with its expiry so
+ * the verify endpoint can reject replays. Open-addressed, seqlock-
+ * protected, mutex-serialized writes (trylock + load-shed under
+ * sustained pressure, matching the rest of the SHM tables).
+ *
+ * Keyed on a 64-bit SipHash of the 8-byte challenge nonce + 4-byte
+ * ns_id (E13 namespace separation) to prevent hash-DoS and cross-
+ * scope nonce leakage. The full nonce isn't stored — the hash is
+ * cryptographically wide enough that collisions on legitimate
+ * traffic are negligible (random nonces, ~16K slots, 64-bit hash:
+ * birthday-bound is ~2^32 entries before any collision).
+ *
+ * Slot is empty when expires_at == 0. Eviction: any entry whose
+ * expires_at is in the past (the bootstrap challenge expired) is
+ * fair game for reuse. */
+typedef struct {
+    apr_uint32_t  version;        /* seqlock */
+    apr_uint32_t  ns_id;          /* E13 — reputation namespace */
+    apr_uint64_t  nonce_hash;     /* siphash24(siphash_key, nonce||ns_id) */
+    apr_int64_t   expires_at;     /* unix sec; 0 = empty */
+} bs_nonce_slot;
+
+#define BS_NONCE_PROBE_LIMIT       8
+#define BS_DEFAULT_NONCE_SLOTS     32768
+#define BS_NONCE_MIN_SLOTS         1024
+#define BS_NONCE_MAX_SLOTS         1048576
 /* E17 — embedded → M7 fallback threshold. After N consecutive silent-
  * tier-embedded dispatches in the safeguard window without
  * _bs_verified arriving, the embedded short-circuit is bypassed and
@@ -693,6 +721,9 @@ typedef struct {
      * Sized by BotShieldSafeguardCapacity. */
     bs_safeguard_slot   *safeguard_table;
     apr_size_t           safeguard_capacity;
+    /* MEDIUM #2 (Phase 2) — bootstrap nonce table. */
+    bs_nonce_slot       *nonce_table;
+    apr_size_t           nonce_capacity;
 } bs_shm_runtime;
 
 static bs_shm_runtime bs_shm;
@@ -928,6 +959,8 @@ typedef struct bs_server_cfg {
     int                 safeguard_window;       /* seconds; 0 = default */
     int                 safeguard_ttl;          /* seconds; 0 = default */
     int                 safeguard_capacity;     /* 0 = default */
+    /* MEDIUM #2 (Phase 2) — embedded nonce table sizing. 0 = default. */
+    int                 nonce_capacity;
     /* E11 — load-aware throttling. All server-scope; the cached
      * state and watchdog are module-global. */
     const char         *load_state_file;        /* NULL = no external file */
@@ -1205,6 +1238,8 @@ static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
     out->safeguard_ttl      = (add->safeguard_ttl > 0)
                             ? add->safeguard_ttl
                             : base->safeguard_ttl;
+    out->nonce_capacity = (add->nonce_capacity > 0)
+                        ? add->nonce_capacity : base->nonce_capacity;
     out->safeguard_capacity = (add->safeguard_capacity > 0)
                             ? add->safeguard_capacity
                             : base->safeguard_capacity;
@@ -1346,6 +1381,7 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->safeguard_window    = 0;
     scfg->safeguard_ttl       = 0;
     scfg->safeguard_capacity  = 0;
+    scfg->nonce_capacity      = 0;   /* 0 = inherit/default */
     /* E11 — load-state defaults. NULL state file = no external
      * override path; all numeric thresholds default to 0 (request-
      * time + post_config substitute the compile-time defaults). */
@@ -2837,6 +2873,10 @@ static int  bs_verify_bootstrap_sig(apr_pool_t *p,
                                      const char *bound_ip_hex,
                                      apr_time_t expires_at,
                                      const char *sig_hex_in);
+static int  bs_embedded_nonce_consume(request_rec *r,
+                                       const unsigned char nonce[BS_NONCE_BYTES],
+                                       apr_int64_t expires_at,
+                                       apr_uint32_t ns_id);
 
 /* ======================================================================
  * E1 — Verified legit-crawler allow-list.
@@ -4895,7 +4935,7 @@ static apr_status_t bs_headroom_watchdog_cb(int state, void *data,
             }
         }
         bs_headroom_check_table(sv, "safeguard",
-            "BotShieldSafeguardCapacity",
+            "BotShieldSafeguardCapacity / BotShieldEmbeddedNonceCapacity",
             used, bs_shm.safeguard_capacity,
             &bs_headroom.safeguard_last_warn, now_sec);
     }
@@ -5469,10 +5509,16 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                                : (apr_size_t)BS_DEFAULT_SAFEGUARD_SLOTS;
     apr_size_t safeguard_bytes = safeguard_slots
                                * sizeof(bs_safeguard_slot);
+    /* MEDIUM #2 (Phase 2) — nonce table. */
+    apr_size_t nonce_slots = (scfg->nonce_capacity > 0)
+                           ? (apr_size_t)scfg->nonce_capacity
+                           : (apr_size_t)BS_DEFAULT_NONCE_SLOTS;
+    apr_size_t nonce_bytes = nonce_slots * sizeof(bs_nonce_slot);
     apr_size_t total_bytes  = header_bytes + table_bytes + 2 * bloom_bytes
                               + cv_rate_bytes + cv_log_bytes
                               + metrics_bytes + e21_rate_bytes
-                              + strike_bytes + safeguard_bytes;
+                              + strike_bytes + safeguard_bytes
+                              + nonce_bytes;
 
     if (scfg->shm_size < total_bytes) {
         ap_log_error(APLOG_MARK, APLOG_ERR, 0, s,
@@ -5588,6 +5634,12 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     bs_shm.safeguard_table = (bs_safeguard_slot *)
         ((unsigned char *)bs_shm.strike_table + strike_bytes);
     bs_shm.safeguard_capacity = safeguard_slots;
+    /* MEDIUM #2 (Phase 2): nonce table follows safeguard. memset(base,0)
+     * leaves every expires_at == 0 (empty sentinel) — no explicit
+     * zero pass needed. */
+    bs_shm.nonce_table = (bs_nonce_slot *)
+        ((unsigned char *)bs_shm.safeguard_table + safeguard_bytes);
+    bs_shm.nonce_capacity = nonce_slots;
 
     bs_shm.header->bloom_active        = 0;
     bs_shm.header->bloom_buf_bytes     = (apr_uint32_t)bloom_bytes;
@@ -6870,6 +6922,138 @@ static void bs_safeguard_clear(request_rec *r,
     apr_global_mutex_unlock(bs_shm.mutex);
 }
 
+/* MEDIUM #2 (Phase 2) — atomically consume an embedded-bootstrap
+ * nonce. Returns 1 if the nonce was successfully recorded as
+ * "redeemed for the first time" (verify may proceed); 0 if the
+ * nonce is already present (replay — caller rejects).
+ *
+ * The 8-byte challenge nonce + 4-byte ns_id are SipHash'd under
+ * the SHM siphash_key for both the bucket index and the stored
+ * "fingerprint" we compare against. Hash-DoS is impossible (key
+ * is RAND_bytes per startup); 64-bit fingerprints make legitimate
+ * collisions vanishingly unlikely (random nonces, ~32K slots,
+ * birthday-bound on 2^64 fingerprints).
+ *
+ * Mutex is acquired with trylock (load-shed under contention,
+ * matching the rest of the SHM tables). Probe up to
+ * BS_NONCE_PROBE_LIMIT slots looking for: (a) same-fingerprint
+ * fresh entry → replay reject, (b) same-fingerprint expired entry
+ * → reuse and accept (the original challenge has already aged
+ * out, so this is a fresh challenge that happened to siphash to
+ * the same bucket-fingerprint over time), (c) empty slot → insert
+ * and accept, (d) different fingerprint expired → evict and
+ * accept, (e) different fingerprint fresh → continue probing.
+ *
+ * Probe-limit exhausted → log throttled-warn + reject. Better to
+ * fail-closed under saturation than allow undetected replay.
+ *
+ * Trylock EBUSY → log throttled-warn + reject. */
+static int bs_embedded_nonce_consume(request_rec *r,
+                                     const unsigned char nonce[BS_NONCE_BYTES],
+                                     apr_int64_t expires_at,
+                                     apr_uint32_t ns_id)
+{
+    if (!bs_shm.nonce_table || !bs_shm.mutex ||
+        bs_shm.nonce_capacity == 0) {
+        /* SHM unavailable: fail-closed. The verify endpoint can't
+         * mint a cookie if we can't track redemption. Operators
+         * see the SHM-init log line at startup; this is a noisy
+         * error case, not silent. */
+        return 0;
+    }
+
+    /* Compose siphash input: 8-byte nonce + 4-byte ns_id (LE). */
+    unsigned char buf[BS_NONCE_BYTES + 4];
+    memcpy(buf, nonce, BS_NONCE_BYTES);
+    buf[BS_NONCE_BYTES + 0] = (unsigned char)(ns_id & 0xFF);
+    buf[BS_NONCE_BYTES + 1] = (unsigned char)((ns_id >> 8) & 0xFF);
+    buf[BS_NONCE_BYTES + 2] = (unsigned char)((ns_id >> 16) & 0xFF);
+    buf[BS_NONCE_BYTES + 3] = (unsigned char)((ns_id >> 24) & 0xFF);
+    apr_uint64_t fp = bs_siphash24(bs_shm.header->siphash_key,
+                                    buf, sizeof(buf));
+    apr_uint32_t base = (apr_uint32_t)(fp % bs_shm.nonce_capacity);
+    apr_int64_t now_sec = (apr_int64_t)apr_time_sec(apr_time_now());
+
+    apr_status_t rv = apr_global_mutex_trylock(bs_shm.mutex);
+    if (APR_STATUS_IS_EBUSY(rv)) {
+        /* Load-shed: under sustained contention, fail closed. The
+         * client retries via a fresh bootstrap. */
+        return 0;
+    }
+    if (rv != APR_SUCCESS) {
+        ap_log_rerror(APLOG_MARK, APLOG_WARNING, rv, r,
+            "mod_botshield: nonce-table mutex_lock failed; "
+            "rejecting verify");
+        return 0;
+    }
+
+    int empty_idx = -1;
+    int evict_idx = -1;
+    for (unsigned i = 0; i < BS_NONCE_PROBE_LIMIT; i++) {
+        apr_uint32_t idx = (base + i) % bs_shm.nonce_capacity;
+        bs_nonce_slot *slot = &bs_shm.nonce_table[idx];
+        if (slot->expires_at == 0) {
+            if (empty_idx < 0) empty_idx = (int)idx;
+            continue;
+        }
+        if (slot->nonce_hash == fp && slot->ns_id == ns_id) {
+            if (slot->expires_at > now_sec) {
+                /* Fresh duplicate — replay attempt. */
+                apr_global_mutex_unlock(bs_shm.mutex);
+                return 0;
+            }
+            /* Expired same-fingerprint slot — fine to reuse.
+             * (Original challenge has aged out; this is a NEW
+             * challenge with a colliding fingerprint, but the
+             * original challenge can never be redeemed again
+             * since its expires_at is past.) */
+            evict_idx = (int)idx;
+            break;
+        }
+        if (slot->expires_at < now_sec && evict_idx < 0) {
+            /* First-seen expired slot of a different fingerprint —
+             * remember as fallback eviction target. */
+            evict_idx = (int)idx;
+        }
+    }
+    int target_idx = empty_idx >= 0 ? empty_idx
+                  : evict_idx >= 0 ? evict_idx : -1;
+    if (target_idx < 0) {
+        /* Probe window is fully occupied with fresh entries. Log
+         * throttled and fail-closed. Same throttle pattern as the
+         * other SHM tables (LOW #10 — SHM-shared probe-warn
+         * timestamps). Reuse the safeguard slot for the throttle
+         * since adding a fourth header field for one extra warning
+         * isn't worth a SHM layout bump. */
+        apr_time_t now_t = apr_time_now();
+        apr_int64_t prev = __atomic_load_n(
+            &bs_shm.header->probe_warn_safeguard_us, __ATOMIC_RELAXED);
+        if (now_t - (apr_time_t)prev > apr_time_from_sec(60) &&
+            __atomic_compare_exchange_n(
+                &bs_shm.header->probe_warn_safeguard_us, &prev,
+                (apr_int64_t)now_t, 0, __ATOMIC_RELAXED,
+                __ATOMIC_RELAXED)) {
+            ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+                "mod_botshield: nonce-table probe saturated at "
+                "bucket %u (capacity %" APR_SIZE_T_FMT "); failing "
+                "verify closed — consider raising "
+                "BotShieldEmbeddedNonceCapacity", base,
+                bs_shm.nonce_capacity);
+        }
+        apr_global_mutex_unlock(bs_shm.mutex);
+        return 0;
+    }
+    bs_nonce_slot *slot = &bs_shm.nonce_table[target_idx];
+    apr_uint32_t v = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&slot->version, v | 1U, __ATOMIC_RELEASE);
+    slot->nonce_hash = fp;
+    slot->ns_id      = ns_id;
+    slot->expires_at = expires_at;
+    __atomic_store_n(&slot->version, (v | 1U) + 1U, __ATOMIC_RELEASE);
+    apr_global_mutex_unlock(bs_shm.mutex);
+    return 1;
+}
+
 /* --- Rotating Bloom filter (M5.2) ---
  *
  * Two buffers share the same hash geometry. Writes go to the buffer
@@ -7967,6 +8151,31 @@ static const char *bs_set_safeguard_capacity(cmd_parms *cmd,
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
     scfg->safeguard_capacity = (int)n;
+    return NULL;
+}
+
+/* MEDIUM #2 (Phase 2) — BotShieldEmbeddedNonceCapacity <n>. SHM
+ * slot count for the embedded-bootstrap nonce table. Sized to
+ * comfortably hold all in-flight bootstrap challenges within their
+ * 120-second expiry window: at 100 bootstraps/sec sustained that's
+ * 12K nonces; the 32K default has ~60% headroom. */
+static const char *bs_set_nonce_capacity(cmd_parms *cmd,
+                                         void *dconf,
+                                         const char *arg)
+{
+    (void)dconf;
+    bs_warn_if_virtual_scope(cmd, "BotShieldEmbeddedNonceCapacity");
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (!end || *end ||
+        n < BS_NONCE_MIN_SLOTS || n > BS_NONCE_MAX_SLOTS) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldEmbeddedNonceCapacity: '%s' must be %d..%d",
+            arg, BS_NONCE_MIN_SLOTS, BS_NONCE_MAX_SLOTS);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->nonce_capacity = (int)n;
     return NULL;
 }
 
@@ -13074,6 +13283,25 @@ static int bs_embedded_verify_pow(request_rec *r, bs_dir_cfg *cfg,
         return OK;
     }
 
+    /* MEDIUM #2 (Phase 2) — atomically consume the nonce. Replay of
+     * the same {nonce, counter, signature} bundle is rejected here:
+     * the first verify wins the slot, all subsequent attempts get
+     * "already redeemed" and 403. Closes Attacks 1 and 2 (replay
+     * multiplier and pool farming). */
+    {
+        bs_server_cfg *scfg_n = ap_get_module_config(
+            r->server->module_config, &botshield_module);
+        apr_uint32_t ns = scfg_n ? scfg_n->ns_id : 0;
+        if (!bs_embedded_nonce_consume(r, ch.nonce,
+                                        (apr_int64_t)ch.expires_at, ns)) {
+            r->status = HTTP_FORBIDDEN;
+            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                "mod_botshield: embedded-verify(pow): nonce already "
+                "redeemed (replay or pool-farm) — rejected");
+            return OK;
+        }
+    }
+
     /* Mint _bs_verified the same way the M7 form-PoW does — same
      * cookie shape, same expiry, same signature path. The counter
      * the wrapper found rides into the cookie body so future
@@ -13262,6 +13490,22 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
                 "mod_botshield: embedded-verify(pow-gcm): IP-bind "
                 "mismatch (issued for %s, redeemed from %s)",
                 bound_ip_hex, observed_ip_hex);
+            return OK;
+        }
+    }
+
+    /* MEDIUM #2 (Phase 2) — consume the nonce. Same shape as the
+     * HMAC pow path's nonce-consume call above. */
+    {
+        bs_server_cfg *scfg_n = ap_get_module_config(
+            r->server->module_config, &botshield_module);
+        apr_uint32_t ns = scfg_n ? scfg_n->ns_id : 0;
+        if (!bs_embedded_nonce_consume(r, ch.nonce,
+                                        (apr_int64_t)ch.expires_at, ns)) {
+            r->status = HTTP_FORBIDDEN;
+            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                "mod_botshield: embedded-verify(pow-gcm): nonce "
+                "already redeemed (replay or pool-farm) — rejected");
             return OK;
         }
     }
@@ -15107,6 +15351,13 @@ static const command_rec bs_cmds[] = {
                  "Per-server-scope but only the main server's value "
                  "is consulted at post_config since the table is "
                  "module-global."),
+    AP_INIT_TAKE1("BotShieldEmbeddedNonceCapacity",
+                 bs_set_nonce_capacity, NULL, RSRC_CONF,
+                 "SHM slot count for the embedded-bootstrap nonce "
+                 "table (default 32768, range 1024..1048576). "
+                 "Bound the in-flight + recently-redeemed challenge "
+                 "set within the 120s bootstrap expiry. Each slot "
+                 "is 24 bytes."),
     /* E11 — load-aware throttling. Sampling + cached state. */
     AP_INIT_TAKE1("BotShieldLoadStateFile",
                  bs_set_load_state_file, NULL, RSRC_CONF,
