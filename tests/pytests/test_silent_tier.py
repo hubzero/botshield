@@ -12,9 +12,14 @@ Port of tests/integration/m7_silent_tier.sh.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
-from botshield_test import client, cookies
+from botshield_test import client, cookies, ips as _ips
+
+
+pytestmark = pytest.mark.serial
 
 
 BROWSER_UA = "Mozilla/5.0 (X11) Chrome/145"
@@ -45,4 +50,67 @@ def test_silent_tier_round_trip(fresh_ip):
     )
     assert resp.headers.get("X-Botshield") != "challenge", (
         f"cookied replay still challenged; headers={dict(resp.headers)}"
+    )
+
+
+# --- MEDIUM #1: render-side carry-forward refuses expired cookies --
+
+def test_expired_cookie_does_not_carry_rep_to_render_path(
+    config_override, log_slice,
+):
+    """Security review MEDIUM #1, render-side. The four issuance
+    sites correctly reject an expired prior cookie via
+    bs_carry_forward_eligible. But bs_handler's render-side
+    predicate used to accept "expired" — only "signature mismatch"
+    was rejected — so an expired cookie's rep was carried into
+    next_rep, baked into the next challenge's GCM envelope, and
+    round-tripped through the JS to /embedded-verify. The TTL
+    guarantee leaked through that path.
+
+    Fix routes both sides through bs_should_carry_prior_rep so an
+    expired cookie is rejected at the render step too.
+    Verifiable signal: bs_handler's "challenging" log line emits
+        cookie_score=%d  with  have_prior_rep ? cookie_score : -1
+    so cookie_score=-1 means have_prior_rep is 0 — i.e. the expired
+    cookie did not contribute. Pre-fix, the same line would have
+    shown cookie_score=0 (the prior cookie's score for a fresh
+    bootstrap-issued envelope).
+
+    Setup uses a 2-second BotShieldCookieTTL so a sleep(3) reliably
+    expires the cookie without slowing the suite materially. The
+    second request comes from a different IP so first-sight-ip +
+    missing Accept-Language reliably push the score back into
+    silent tier and cause bs_handler to emit the challenge log
+    line we're asserting on."""
+    ip_issue = _ips.fresh_ip()
+
+    with config_override(
+        r"BotShieldAlgorithm\s+sha256-zeros",
+        "BotShieldAlgorithm sha256-zeros\n"
+        "    BotShieldCookieTTL 2",
+    ):
+        resp = client.get("/", xff=ip_issue, ua=BROWSER_UA)
+        challenge = cookies.extract_challenge(resp.text)
+        counter   = cookies.solve_pow(challenge)
+        cookie    = cookies.build_cookie(challenge, counter)
+
+        # Cookie's expires_at is "now + 2s" at issue time. Wait past
+        # that point so bs_verify_cookie returns "expired" on the
+        # next use.
+        time.sleep(3)
+
+        ip_replay = _ips.fresh_ip()
+        with log_slice as slc:
+            client.get(
+                "/", xff=ip_replay, ua=BROWSER_UA,
+                cookies={"__Host-bs_verified": cookie},
+            )
+            matches = slc.grep(r"challenging.*cookie_score=-1")
+
+    assert matches, (
+        "bs_handler emitted a 'challenging' log line for an expired "
+        "cookie but cookie_score is not -1 — the render-side "
+        "carry-forward predicate is letting the expired cookie's "
+        "rep through. tail:\n"
+        + "\n".join(slc.text().splitlines()[-8:])
     )
