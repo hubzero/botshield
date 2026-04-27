@@ -1,8 +1,11 @@
 """E8.2 — module-to-app reputation export via signed X-Botshield-Claims.
 
-Mirror of E5 in shape: signed envelope, separate secret file, the
-strip discipline is the trust anchor for apps that don't bother with
-HMAC. Wire format:
+Mirror of E5 in shape: signed envelope, shared
+BotShieldAppIntegrationSecretFile key (one secret covers both
+inbound feedback and outbound claims; cross-replay is blocked by
+parser-level domain separation, not key separation). The strip
+discipline is the trust anchor for apps that don't bother with HMAC.
+Wire format:
 
     X-Botshield-Claims: v=1;score=<n>;tier=<t>;cookie=<s>;flags=<names>;
                         passes=s=<n>,f=<n>,c=<n>;ts=<unix>;sig=<64 hex>
@@ -15,8 +18,8 @@ before the handler chain reaches mod_headers, so the response carries
 exactly what the backend would have seen.
 
 Secret is fixed in `tests/setup/provision.sh`
-(/etc/botshield/app-claims-secret). Distinct bytes from the
-feedback secret so the two channels stay key-separated.
+(/etc/botshield/app-integration-secret), same bytes shared with
+test_app_feedback.py.
 """
 
 from __future__ import annotations
@@ -33,8 +36,8 @@ from botshield_test import client
 pytestmark = pytest.mark.serial
 
 
-SECRET_PATH = "/etc/botshield/app-claims-secret"
-SECRET = b"fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+SECRET_PATH = "/etc/botshield/app-integration-secret"
+SECRET = b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 PASS_UA = "Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/125.0"
 PASS_AL = "en-US,en;q=0.9"
@@ -50,7 +53,7 @@ def _cfg_on(extra: str = "") -> str:
     return (
         'BotShieldAllow on\n'
         '    BotShieldAppClaims on\n'
-        f'    BotShieldAppClaimsSecretFile {SECRET_PATH}\n'
+        f'    BotShieldAppIntegrationSecretFile {SECRET_PATH}\n'
         # mod_headers echo: copy any X-Botshield-* request header
         # into the response so pytest can observe what the backend
         # would have seen.
@@ -198,10 +201,13 @@ def test_tampered_claim_body_fails_app_side_verify(
 
 
 def test_claims_not_emitted_without_secret(config_override, fresh_ip):
-    """BotShieldAppClaims on without BotShieldAppClaimsSecretFile is
-    a misconfiguration. Module logs a warning at request time and
-    skips the claim emit rather than emitting an unsigned envelope
-    or crashing the request."""
+    """BotShieldAppClaims on without BotShieldAppIntegrationSecretFile
+    is a misconfiguration. Module logs a warning at startup and skips
+    the claim emit at request time rather than emitting an unsigned
+    envelope or crashing the request. (Per-request fall-through is
+    deliberate: the rest of the module — cookie tier, captcha,
+    rate-limiting — should still work even when the operator has
+    half-configured the optional app integration.)"""
     with config_override(
         r"BotShieldAllow\s+on",
         'BotShieldAllow on\n'

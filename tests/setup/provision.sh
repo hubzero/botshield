@@ -126,16 +126,19 @@ install_secret /etc/botshield/recaptcha-v2-secret    "6LeIxAcTAAAAAGG-vFI1TnRWxM
 install_secret /etc/botshield/recaptcha-v3-secret    "6LeIxAcTAAAAAGG-vFI1TnRWxMZNFuojJ4WifJWe"
 install_secret /etc/botshield/friendly-secret        "FRIENDLYCAPTCHA_FREE_TIER_SECRET_REPLACE_ME_WITH_REAL"
 install_secret /etc/botshield/geetest-secret         "GEETEST_CAPTCHA_KEY_REPLACE_WITH_REAL_FROM_DASHBOARD"
-# E5 — app-to-module feedback HMAC key. Fixed value so pytest can
-# recompute signatures with the same bytes. 64 hex chars = 32
-# bytes, well above BS_MIN_SECRET_BYTES.
-install_secret /etc/botshield/app-feedback-secret \
+# Shared HMAC key for both directions of app integration: app→module
+# feedback envelopes and module→app X-Botshield-Claims headers. The
+# two protocols' canonical forms are structurally distinct (single-
+# field vs seven-field) so cross-replay isn't possible, and one key
+# fits both directions. Fixed value here so pytest can recompute and
+# verify signatures with the same bytes. 64 hex chars = 32 bytes,
+# well above BS_MIN_SECRET_BYTES.
+install_secret /etc/botshield/app-integration-secret \
   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-# E8.2 — module-to-app claims HMAC key. Fixed value so pytest can
-# verify signatures the module emits. Distinct bytes from the
-# feedback secret to enforce key separation across the two channels.
-install_secret /etc/botshield/app-claims-secret \
-  "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+# Clean up legacy app-feedback/-claims secret files from pre-
+# consolidation provisions. The directives that referenced them are
+# gone; leftover files are harmless but confusing on inspection.
+rm -f /etc/botshield/app-feedback-secret /etc/botshield/app-claims-secret
 
 echo "== /var/lib/botshield (state file dir) =="
 install -d -m 750 -o www-data -g www-data /var/lib/botshield
