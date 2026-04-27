@@ -1961,9 +1961,10 @@ static const char *bs_derive_purpose_keys(apr_pool_t *p,
  * bs_load_config_file. Trims one trailing newline (common with
  * `echo`-style key generation), rejects embedded NUL bytes (would
  * silently truncate keys generated with `dd if=/dev/urandom` or
- * similar — ~22% of random 32-byte buffers contain a NUL), and
- * enforces the minimum-bytes floor. Returns NULL on success with
- * *out_len set to the effective key length, or an error string. */
+ * similar — P(NUL in N random bytes) = 1 − (255/256)^N, ≈12% for
+ * 32-byte keys and ≈22% for 64-byte keys), and enforces the
+ * minimum-bytes floor. Returns NULL on success with *out_len set
+ * to the effective key length, or an error string. */
 static const char *bs_validate_secret_key(cmd_parms *cmd,
                                           const char *directive,
                                           const char *path,
@@ -1977,12 +1978,14 @@ static const char *bs_validate_secret_key(cmd_parms *cmd,
         return apr_psprintf(cmd->pool,
             "%s: '%s' contains an embedded NUL byte. Random binary "
             "key files (e.g. `dd if=/dev/urandom` or `openssl rand`) "
-            "produce NUL bytes ~22%% of the time, and earlier "
-            "versions of this loader silently truncated the key at "
-            "the first NUL via strlen — yielding a shorter, weaker "
-            "effective key with no log warning. Generate the key "
-            "with hex (`openssl rand -hex 32`) or base64 (`openssl "
-            "rand -base64 48`) encoding instead, or pre-strip NULs.",
+            "hit a NUL with probability 1 − (255/256)^N — about 12%% "
+            "for 32-byte keys, 22%% for 64-byte keys. Earlier versions "
+            "of this loader silently truncated at the first NUL via "
+            "strlen, yielding a shorter, weaker effective key with no "
+            "log warning. Generate the key with hex "
+            "(`openssl rand -hex 32`) or base64 "
+            "(`openssl rand -base64 48`) encoding instead, or "
+            "pre-strip NULs.",
             directive, path);
     }
     if (len < BS_MIN_SECRET_BYTES) {
