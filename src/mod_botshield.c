@@ -40,6 +40,8 @@
 
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
+#include <openssl/kdf.h>
+#include <openssl/params.h>
 #include <openssl/rand.h>
 
 #include <curl/curl.h>
@@ -469,6 +471,34 @@ typedef struct {
 #define BS_DEFAULT_SAFEGUARD_THRESHOLD 5
 #define BS_DEFAULT_SAFEGUARD_WINDOW    600
 #define BS_DEFAULT_SAFEGUARD_TTL       900
+
+/* MEDIUM #2 (Phase 2) — embedded-bootstrap nonce table. Records
+ * every successfully-redeemed challenge nonce with its expiry so
+ * the verify endpoint can reject replays. Open-addressed, seqlock-
+ * protected, mutex-serialized writes (trylock + load-shed under
+ * sustained pressure, matching the rest of the SHM tables).
+ *
+ * Keyed on a 64-bit SipHash of the 8-byte challenge nonce + 4-byte
+ * ns_id (E13 namespace separation) to prevent hash-DoS and cross-
+ * scope nonce leakage. The full nonce isn't stored — the hash is
+ * cryptographically wide enough that collisions on legitimate
+ * traffic are negligible (random nonces, ~16K slots, 64-bit hash:
+ * birthday-bound is ~2^32 entries before any collision).
+ *
+ * Slot is empty when expires_at == 0. Eviction: any entry whose
+ * expires_at is in the past (the bootstrap challenge expired) is
+ * fair game for reuse. */
+typedef struct {
+    apr_uint32_t  version;        /* seqlock */
+    apr_uint32_t  ns_id;          /* E13 — reputation namespace */
+    apr_uint64_t  nonce_hash;     /* siphash24(siphash_key, nonce||ns_id) */
+    apr_int64_t   expires_at;     /* unix sec; 0 = empty */
+} bs_nonce_slot;
+
+#define BS_NONCE_PROBE_LIMIT       8
+#define BS_DEFAULT_NONCE_SLOTS     32768
+#define BS_NONCE_MIN_SLOTS         1024
+#define BS_NONCE_MAX_SLOTS         1048576
 /* E17 — embedded → M7 fallback threshold. After N consecutive silent-
  * tier-embedded dispatches in the safeguard window without
  * _bs_verified arriving, the embedded short-circuit is bypassed and
@@ -691,6 +721,9 @@ typedef struct {
      * Sized by BotShieldSafeguardCapacity. */
     bs_safeguard_slot   *safeguard_table;
     apr_size_t           safeguard_capacity;
+    /* MEDIUM #2 (Phase 2) — bootstrap nonce table. */
+    bs_nonce_slot       *nonce_table;
+    apr_size_t           nonce_capacity;
 } bs_shm_runtime;
 
 static bs_shm_runtime bs_shm;
@@ -790,8 +823,8 @@ struct bs_dir_cfg {
     const char *help_html;      /* panel content, loaded at config time */
     const char *challenge_html; /* full HTML page template with marker */
     const bs_pow_algorithm *algorithm;      /* chosen issue algorithm */
-    const unsigned char    *secret;         /* HMAC key bytes */
-    apr_size_t              secret_len;     /* key length */
+    const unsigned char    *secret;         /* master key bytes */
+    apr_size_t              secret_len;     /* master key length */
     /* E16 — verify-only secondary secret for graceful
      * rotation. Issue path always uses `secret`; verify tries
      * `secret` first and falls back to `secret_secondary` so cookies
@@ -799,6 +832,28 @@ struct bs_dir_cfg {
      * window. NULL = no rotation in progress. */
     const unsigned char    *secret_secondary;
     apr_size_t              secret_secondary_len;
+    /* Security review LOW #3 — HKDF-Expand'd per-purpose keys
+     * derived once at config-load time (bs_set_secret_file etc.).
+     * Each purpose tag yields a cryptographically-independent key:
+     * leaking one tells an attacker nothing about the others.
+     * `derived_*_keys_set` is 1 once the master is loaded and
+     * derivation succeeded; the request path checks it before use. */
+    unsigned char    derived_hmac_cookie    [32];
+    unsigned char    derived_gcm_cookie     [32];
+    unsigned char    derived_hmac_pending   [32];
+    /* MEDIUM #2 — separate purpose key for the bootstrap → verify
+     * IP-binding HMAC. Kept distinct from derived_hmac_cookie so
+     * the bound-ip signature can't be repurposed as a cookie
+     * signature or vice versa. */
+    unsigned char    derived_hmac_bootstrap [32];
+    int              derived_keys_set;
+    /* Same for the secondary key, populated when
+     * BotShieldSecondarySecretFile is configured. */
+    unsigned char    derived_hmac_cookie_2  [32];
+    unsigned char    derived_gcm_cookie_2   [32];
+    unsigned char    derived_hmac_pending_2 [32];
+    unsigned char    derived_hmac_bootstrap_2[32];
+    int              derived_keys_set_2;
     int                     cookie_format;  /* BS_FMT_* bitmap or BS_FMT_UNSET */
     int score_silent;           /* score >= this → silent tier (logged only) */
     int score_hard;             /* score >= this → hard form-PoW tier */
@@ -904,6 +959,8 @@ typedef struct bs_server_cfg {
     int                 safeguard_window;       /* seconds; 0 = default */
     int                 safeguard_ttl;          /* seconds; 0 = default */
     int                 safeguard_capacity;     /* 0 = default */
+    /* MEDIUM #2 (Phase 2) — embedded nonce table sizing. 0 = default. */
+    int                 nonce_capacity;
     /* E11 — load-aware throttling. All server-scope; the cached
      * state and watchdog are module-global. */
     const char         *load_state_file;        /* NULL = no external file */
@@ -1181,6 +1238,8 @@ static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
     out->safeguard_ttl      = (add->safeguard_ttl > 0)
                             ? add->safeguard_ttl
                             : base->safeguard_ttl;
+    out->nonce_capacity = (add->nonce_capacity > 0)
+                        ? add->nonce_capacity : base->nonce_capacity;
     out->safeguard_capacity = (add->safeguard_capacity > 0)
                             ? add->safeguard_capacity
                             : base->safeguard_capacity;
@@ -1322,6 +1381,7 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->safeguard_window    = 0;
     scfg->safeguard_ttl       = 0;
     scfg->safeguard_capacity  = 0;
+    scfg->nonce_capacity      = 0;   /* 0 = inherit/default */
     /* E11 — load-state defaults. NULL state file = no external
      * override path; all numeric thresholds default to 0 (request-
      * time + post_config substitute the compile-time defaults). */
@@ -1414,12 +1474,33 @@ static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     out->help_html      = add->help_html      ? add->help_html      : base->help_html;
     out->challenge_html = add->challenge_html ? add->challenge_html : base->challenge_html;
     out->algorithm      = add->algorithm      ? add->algorithm      : base->algorithm;
+    /* LOW #3 — derived per-purpose keys ride alongside the master.
+     * If add has its own master secret, take its derived keys too;
+     * otherwise inherit base's. */
     if (add->secret) {
         out->secret     = add->secret;
         out->secret_len = add->secret_len;
+        memcpy(out->derived_hmac_cookie,
+               add->derived_hmac_cookie,    32);
+        memcpy(out->derived_gcm_cookie,
+               add->derived_gcm_cookie,     32);
+        memcpy(out->derived_hmac_pending,
+               add->derived_hmac_pending,   32);
+        memcpy(out->derived_hmac_bootstrap,
+               add->derived_hmac_bootstrap, 32);
+        out->derived_keys_set = add->derived_keys_set;
     } else {
         out->secret     = base->secret;
         out->secret_len = base->secret_len;
+        memcpy(out->derived_hmac_cookie,
+               base->derived_hmac_cookie,    32);
+        memcpy(out->derived_gcm_cookie,
+               base->derived_gcm_cookie,     32);
+        memcpy(out->derived_hmac_pending,
+               base->derived_hmac_pending,   32);
+        memcpy(out->derived_hmac_bootstrap,
+               base->derived_hmac_bootstrap, 32);
+        out->derived_keys_set = base->derived_keys_set;
     }
     /* E16 — same merge shape for the verify-only
      * secondary key. Independent of primary so an operator can
@@ -1428,9 +1509,27 @@ static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     if (add->secret_secondary) {
         out->secret_secondary     = add->secret_secondary;
         out->secret_secondary_len = add->secret_secondary_len;
+        memcpy(out->derived_hmac_cookie_2,
+               add->derived_hmac_cookie_2,    32);
+        memcpy(out->derived_gcm_cookie_2,
+               add->derived_gcm_cookie_2,     32);
+        memcpy(out->derived_hmac_pending_2,
+               add->derived_hmac_pending_2,   32);
+        memcpy(out->derived_hmac_bootstrap_2,
+               add->derived_hmac_bootstrap_2, 32);
+        out->derived_keys_set_2 = add->derived_keys_set_2;
     } else {
         out->secret_secondary     = base->secret_secondary;
         out->secret_secondary_len = base->secret_secondary_len;
+        memcpy(out->derived_hmac_cookie_2,
+               base->derived_hmac_cookie_2,    32);
+        memcpy(out->derived_gcm_cookie_2,
+               base->derived_gcm_cookie_2,     32);
+        memcpy(out->derived_hmac_pending_2,
+               base->derived_hmac_pending_2,   32);
+        memcpy(out->derived_hmac_bootstrap_2,
+               base->derived_hmac_bootstrap_2, 32);
+        out->derived_keys_set_2 = base->derived_keys_set_2;
     }
     out->cookie_format = (add->cookie_format == BS_FMT_UNSET)
                        ? base->cookie_format
@@ -1854,6 +1953,50 @@ static const char *bs_load_config_file(cmd_parms *cmd,
     return NULL;
 }
 
+/* Forward decl — bs_hkdf_derive_key is defined alongside the other
+ * crypto helpers further below. */
+static int bs_hkdf_derive_key(const unsigned char *master,
+                              apr_size_t master_len,
+                              const char *info,
+                              unsigned char out_key[32]);
+
+/* Security review LOW #3 — derive the per-purpose keys for a master
+ * secret. Called from the secret-file directive setters AFTER the
+ * key bytes have been validated. Returns NULL on success; on
+ * (vanishingly unlikely) HKDF failure returns a diagnostic string
+ * the directive setter surfaces as a fatal config error so the
+ * module refuses to start with a broken key derivation. The 3
+ * purpose tags map 1:1 to derived_hmac_cookie / derived_gcm_cookie
+ * / derived_hmac_pending in the dir_cfg. Bumping any tag (e.g.
+ * "bs:cookie:hmac:v2") is the rotation knob if the underlying
+ * crypto contract ever changes. */
+static const char *bs_derive_purpose_keys(apr_pool_t *p,
+                                          const unsigned char *master,
+                                          apr_size_t master_len,
+                                          unsigned char *out_hmac,
+                                          unsigned char *out_gcm,
+                                          unsigned char *out_pending,
+                                          unsigned char *out_bootstrap)
+{
+    if (!bs_hkdf_derive_key(master, master_len,
+                            "bs:cookie:hmac:v1", out_hmac)) {
+        return apr_psprintf(p, "HKDF(bs:cookie:hmac:v1) failed");
+    }
+    if (!bs_hkdf_derive_key(master, master_len,
+                            "bs:cookie:gcm:v1", out_gcm)) {
+        return apr_psprintf(p, "HKDF(bs:cookie:gcm:v1) failed");
+    }
+    if (!bs_hkdf_derive_key(master, master_len,
+                            "bs:cookie:pending:v1", out_pending)) {
+        return apr_psprintf(p, "HKDF(bs:cookie:pending:v1) failed");
+    }
+    if (!bs_hkdf_derive_key(master, master_len,
+                            "bs:cookie:bootstrap:v1", out_bootstrap)) {
+        return apr_psprintf(p, "HKDF(bs:cookie:bootstrap:v1) failed");
+    }
+    return NULL;
+}
+
 /* Security review HIGH #2 — validate a binary-capable secret loaded via
  * bs_load_config_file. Trims one trailing newline (common with
  * `echo`-style key generation), rejects embedded NUL bytes (would
@@ -1963,26 +2106,51 @@ static int bs_ct_equal(const unsigned char *a, const unsigned char *b,
     return diff == 0;
 }
 
-/* Derive a 32-byte AES-256 key from operator secret bytes via
- * SHA-256. Two purposes:
- *   1. Accept any secret length — SHA-256 is defined for any input.
- *      The existing HMAC path uses the secret bytes directly (HMAC
- *      accepts variable-length keys), so having GCM run through a
- *      hash gives us one derived-key convention without forcing
- *      operators to manage two key files.
- *   2. Domain separation. HMAC reads the raw bytes; GCM reads the
- *      digest. A leaked-in-one-direction-but-not-the-other secret
- *      can't be trivially cross-applied even if someone mistakenly
- *      exports the derived bytes. Not cryptographically rigorous
- *      domain separation (a SHA-256 preimage is trivial with the
- *      original bytes), but it means AES ciphertexts produced under
- *      the HMAC-derived key won't decrypt under the raw bytes and
- *      vice versa. */
-static void bs_derive_aes_key(const unsigned char *secret,
-                              apr_size_t secret_len,
+/* Security review LOW #3 — HKDF-Expand for per-purpose key
+ * derivation. RFC 5869. Replaces the prior `SHA256(secret)` ad-hoc
+ * derivation with a cryptographically clean per-purpose key model:
+ *
+ *   key_for_X = HKDF(secret, info="bs:X:v1")
+ *
+ * Each purpose gets its own derived key. Leaking one (cryptanalysis,
+ * side-channel, key extraction from memory) tells an attacker
+ * nothing about the others — the HMAC-based extract+expand
+ * construction is one-way per purpose-tag.
+ *
+ * Called once at config-load time per secret/purpose; the derived
+ * keys live in dir_cfg and the request path uses them directly with
+ * zero per-request HKDF cost.
+ *
+ * Returns 0 on OpenSSL failure (vanishingly unlikely; treats as
+ * fatal in caller — module won't start). */
+static int bs_hkdf_derive_key(const unsigned char *master,
+                              apr_size_t master_len,
+                              const char *info,
                               unsigned char out_key[32])
 {
-    bs_sha256(secret, secret_len, out_key);
+    EVP_KDF *kdf = EVP_KDF_fetch(NULL, "HKDF", NULL);
+    if (!kdf) return 0;
+    EVP_KDF_CTX *ctx = EVP_KDF_CTX_new(kdf);
+    EVP_KDF_free(kdf);
+    if (!ctx) return 0;
+    OSSL_PARAM params[5];
+    int i = 0;
+    params[i++] = OSSL_PARAM_construct_utf8_string("digest",
+                                                   "SHA256", 0);
+    params[i++] = OSSL_PARAM_construct_octet_string("key",
+                                                    (void *)master,
+                                                    master_len);
+    /* Empty salt: HKDF-Extract degenerates to HMAC(zeros, secret).
+     * The per-purpose info tag below provides domain separation. */
+    params[i++] = OSSL_PARAM_construct_octet_string("salt",
+                                                    (void *)"", 0);
+    params[i++] = OSSL_PARAM_construct_octet_string("info",
+                                                    (void *)info,
+                                                    strlen(info));
+    params[i] = OSSL_PARAM_construct_end();
+    int rc = EVP_KDF_derive(ctx, out_key, 32, params);
+    EVP_KDF_CTX_free(ctx);
+    return rc == 1;
 }
 
 /* AES-256-GCM encrypt. Wire layout:
@@ -1996,15 +2164,15 @@ static void bs_derive_aes_key(const unsigned char *secret,
  * the envelope length into *out_len, returns NULL.
  * On failure: returns an error string for logging; *out_len
  * untouched. */
-static const char *bs_gcm_encrypt(const unsigned char *secret,
-                                  apr_size_t secret_len,
+static const char *bs_gcm_encrypt(const unsigned char aes_key[32],
                                   const unsigned char *pt,
                                   apr_size_t pt_len,
                                   unsigned char *out_buf,
                                   apr_size_t *out_len)
 {
-    unsigned char key[32];
-    bs_derive_aes_key(secret, secret_len, key);
+    /* LOW #3 — caller passes the HKDF-derived AES key directly;
+     * we no longer derive per-call. */
+    const unsigned char *key = aes_key;
 
     out_buf[0] = BS_COOKIE_ALG_GCM;
     if (RAND_bytes(out_buf + 1, BS_GCM_NONCE_LEN) != 1) {
@@ -2048,7 +2216,9 @@ static const char *bs_gcm_encrypt(const unsigned char *secret,
 
 done:
     EVP_CIPHER_CTX_free(ctx);
-    OPENSSL_cleanse(key, sizeof(key));
+    /* LOW #3 — `key` now points at caller-owned memory (cfg-cached
+     * derived key); the caller's pool cleanup will OPENSSL_cleanse
+     * when the cfg is destroyed. Don't cleanse a borrowed buffer. */
     return err;
 }
 
@@ -2058,8 +2228,7 @@ done:
  * into *out_pt (caller-provided, must be at least env_len - 1 - 12
  * - 16 bytes) and the plaintext length in *out_pt_len. Returns an
  * error string on any failure including tag-mismatch. */
-static const char *bs_gcm_decrypt(const unsigned char *secret,
-                                  apr_size_t secret_len,
+static const char *bs_gcm_decrypt(const unsigned char aes_key[32],
                                   const unsigned char *env,
                                   apr_size_t env_len,
                                   unsigned char *out_pt,
@@ -2075,11 +2244,11 @@ static const char *bs_gcm_decrypt(const unsigned char *secret,
     const unsigned char *ct    = env + 1 + BS_GCM_NONCE_LEN;
     const unsigned char *tag   = ct + ct_len;
 
-    unsigned char key[32];
-    bs_derive_aes_key(secret, secret_len, key);
+    /* LOW #3 — caller passes the HKDF-derived AES key directly. */
+    const unsigned char *key = aes_key;
 
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) { OPENSSL_cleanse(key, sizeof(key)); return "EVP_CIPHER_CTX_new"; }
+    if (!ctx) return "EVP_CIPHER_CTX_new";
     const char *err = NULL;
     int outlen = 0, finallen = 0, aadlen = 0;
 
@@ -2113,7 +2282,7 @@ static const char *bs_gcm_decrypt(const unsigned char *secret,
 
 done:
     EVP_CIPHER_CTX_free(ctx);
-    OPENSSL_cleanse(key, sizeof(key));
+    /* LOW #3 — borrowed key, see encrypt path comment. */
     return err;
 }
 
@@ -2686,6 +2855,28 @@ static const char   *bs_get_cookie_value(request_rec *r, const char *name);
  * during a HTTP→HTTPS migration or when an operator sets a Domain
  * (which forces fallback to legacy). */
 static const char   *bs_get_verified_cookie_value(request_rec *r);
+/* Bootstrap-binding helpers — definitions live near the embedded
+ * verify endpoints. Forward-declared here so bs_challenge_json
+ * (used by the M1 widget interstitial earlier in the file) can
+ * call them. */
+static int  bs_format_bound_ip_hex(const char *useragent_ip,
+                                    char out_hex[33]);
+static void bs_compute_bootstrap_sig(apr_pool_t *p,
+                                      const unsigned char key[32],
+                                      const char *nonce_hex,
+                                      const char *bound_ip_hex,
+                                      apr_time_t expires_at,
+                                      char out_sig_hex[BS_SIG_BYTES * 2 + 1]);
+static int  bs_verify_bootstrap_sig(apr_pool_t *p,
+                                     const bs_dir_cfg *cfg,
+                                     const char *nonce_hex,
+                                     const char *bound_ip_hex,
+                                     apr_time_t expires_at,
+                                     const char *sig_hex_in);
+static int  bs_embedded_nonce_consume(request_rec *r,
+                                       const unsigned char nonce[BS_NONCE_BYTES],
+                                       apr_int64_t expires_at,
+                                       apr_uint32_t ns_id);
 
 /* ======================================================================
  * E1 — Verified legit-crawler allow-list.
@@ -4744,7 +4935,7 @@ static apr_status_t bs_headroom_watchdog_cb(int state, void *data,
             }
         }
         bs_headroom_check_table(sv, "safeguard",
-            "BotShieldSafeguardCapacity",
+            "BotShieldSafeguardCapacity / BotShieldEmbeddedNonceCapacity",
             used, bs_shm.safeguard_capacity,
             &bs_headroom.safeguard_last_warn, now_sec);
     }
@@ -5318,10 +5509,16 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                                : (apr_size_t)BS_DEFAULT_SAFEGUARD_SLOTS;
     apr_size_t safeguard_bytes = safeguard_slots
                                * sizeof(bs_safeguard_slot);
+    /* MEDIUM #2 (Phase 2) — nonce table. */
+    apr_size_t nonce_slots = (scfg->nonce_capacity > 0)
+                           ? (apr_size_t)scfg->nonce_capacity
+                           : (apr_size_t)BS_DEFAULT_NONCE_SLOTS;
+    apr_size_t nonce_bytes = nonce_slots * sizeof(bs_nonce_slot);
     apr_size_t total_bytes  = header_bytes + table_bytes + 2 * bloom_bytes
                               + cv_rate_bytes + cv_log_bytes
                               + metrics_bytes + e21_rate_bytes
-                              + strike_bytes + safeguard_bytes;
+                              + strike_bytes + safeguard_bytes
+                              + nonce_bytes;
 
     if (scfg->shm_size < total_bytes) {
         ap_log_error(APLOG_MARK, APLOG_ERR, 0, s,
@@ -5437,6 +5634,12 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     bs_shm.safeguard_table = (bs_safeguard_slot *)
         ((unsigned char *)bs_shm.strike_table + strike_bytes);
     bs_shm.safeguard_capacity = safeguard_slots;
+    /* MEDIUM #2 (Phase 2): nonce table follows safeguard. memset(base,0)
+     * leaves every expires_at == 0 (empty sentinel) — no explicit
+     * zero pass needed. */
+    bs_shm.nonce_table = (bs_nonce_slot *)
+        ((unsigned char *)bs_shm.safeguard_table + safeguard_bytes);
+    bs_shm.nonce_capacity = nonce_slots;
 
     bs_shm.header->bloom_active        = 0;
     bs_shm.header->bloom_buf_bytes     = (apr_uint32_t)bloom_bytes;
@@ -6719,6 +6922,138 @@ static void bs_safeguard_clear(request_rec *r,
     apr_global_mutex_unlock(bs_shm.mutex);
 }
 
+/* MEDIUM #2 (Phase 2) — atomically consume an embedded-bootstrap
+ * nonce. Returns 1 if the nonce was successfully recorded as
+ * "redeemed for the first time" (verify may proceed); 0 if the
+ * nonce is already present (replay — caller rejects).
+ *
+ * The 8-byte challenge nonce + 4-byte ns_id are SipHash'd under
+ * the SHM siphash_key for both the bucket index and the stored
+ * "fingerprint" we compare against. Hash-DoS is impossible (key
+ * is RAND_bytes per startup); 64-bit fingerprints make legitimate
+ * collisions vanishingly unlikely (random nonces, ~32K slots,
+ * birthday-bound on 2^64 fingerprints).
+ *
+ * Mutex is acquired with trylock (load-shed under contention,
+ * matching the rest of the SHM tables). Probe up to
+ * BS_NONCE_PROBE_LIMIT slots looking for: (a) same-fingerprint
+ * fresh entry → replay reject, (b) same-fingerprint expired entry
+ * → reuse and accept (the original challenge has already aged
+ * out, so this is a fresh challenge that happened to siphash to
+ * the same bucket-fingerprint over time), (c) empty slot → insert
+ * and accept, (d) different fingerprint expired → evict and
+ * accept, (e) different fingerprint fresh → continue probing.
+ *
+ * Probe-limit exhausted → log throttled-warn + reject. Better to
+ * fail-closed under saturation than allow undetected replay.
+ *
+ * Trylock EBUSY → log throttled-warn + reject. */
+static int bs_embedded_nonce_consume(request_rec *r,
+                                     const unsigned char nonce[BS_NONCE_BYTES],
+                                     apr_int64_t expires_at,
+                                     apr_uint32_t ns_id)
+{
+    if (!bs_shm.nonce_table || !bs_shm.mutex ||
+        bs_shm.nonce_capacity == 0) {
+        /* SHM unavailable: fail-closed. The verify endpoint can't
+         * mint a cookie if we can't track redemption. Operators
+         * see the SHM-init log line at startup; this is a noisy
+         * error case, not silent. */
+        return 0;
+    }
+
+    /* Compose siphash input: 8-byte nonce + 4-byte ns_id (LE). */
+    unsigned char buf[BS_NONCE_BYTES + 4];
+    memcpy(buf, nonce, BS_NONCE_BYTES);
+    buf[BS_NONCE_BYTES + 0] = (unsigned char)(ns_id & 0xFF);
+    buf[BS_NONCE_BYTES + 1] = (unsigned char)((ns_id >> 8) & 0xFF);
+    buf[BS_NONCE_BYTES + 2] = (unsigned char)((ns_id >> 16) & 0xFF);
+    buf[BS_NONCE_BYTES + 3] = (unsigned char)((ns_id >> 24) & 0xFF);
+    apr_uint64_t fp = bs_siphash24(bs_shm.header->siphash_key,
+                                    buf, sizeof(buf));
+    apr_uint32_t base = (apr_uint32_t)(fp % bs_shm.nonce_capacity);
+    apr_int64_t now_sec = (apr_int64_t)apr_time_sec(apr_time_now());
+
+    apr_status_t rv = apr_global_mutex_trylock(bs_shm.mutex);
+    if (APR_STATUS_IS_EBUSY(rv)) {
+        /* Load-shed: under sustained contention, fail closed. The
+         * client retries via a fresh bootstrap. */
+        return 0;
+    }
+    if (rv != APR_SUCCESS) {
+        ap_log_rerror(APLOG_MARK, APLOG_WARNING, rv, r,
+            "mod_botshield: nonce-table mutex_lock failed; "
+            "rejecting verify");
+        return 0;
+    }
+
+    int empty_idx = -1;
+    int evict_idx = -1;
+    for (unsigned i = 0; i < BS_NONCE_PROBE_LIMIT; i++) {
+        apr_uint32_t idx = (base + i) % bs_shm.nonce_capacity;
+        bs_nonce_slot *slot = &bs_shm.nonce_table[idx];
+        if (slot->expires_at == 0) {
+            if (empty_idx < 0) empty_idx = (int)idx;
+            continue;
+        }
+        if (slot->nonce_hash == fp && slot->ns_id == ns_id) {
+            if (slot->expires_at > now_sec) {
+                /* Fresh duplicate — replay attempt. */
+                apr_global_mutex_unlock(bs_shm.mutex);
+                return 0;
+            }
+            /* Expired same-fingerprint slot — fine to reuse.
+             * (Original challenge has aged out; this is a NEW
+             * challenge with a colliding fingerprint, but the
+             * original challenge can never be redeemed again
+             * since its expires_at is past.) */
+            evict_idx = (int)idx;
+            break;
+        }
+        if (slot->expires_at < now_sec && evict_idx < 0) {
+            /* First-seen expired slot of a different fingerprint —
+             * remember as fallback eviction target. */
+            evict_idx = (int)idx;
+        }
+    }
+    int target_idx = empty_idx >= 0 ? empty_idx
+                  : evict_idx >= 0 ? evict_idx : -1;
+    if (target_idx < 0) {
+        /* Probe window is fully occupied with fresh entries. Log
+         * throttled and fail-closed. Same throttle pattern as the
+         * other SHM tables (LOW #10 — SHM-shared probe-warn
+         * timestamps). Reuse the safeguard slot for the throttle
+         * since adding a fourth header field for one extra warning
+         * isn't worth a SHM layout bump. */
+        apr_time_t now_t = apr_time_now();
+        apr_int64_t prev = __atomic_load_n(
+            &bs_shm.header->probe_warn_safeguard_us, __ATOMIC_RELAXED);
+        if (now_t - (apr_time_t)prev > apr_time_from_sec(60) &&
+            __atomic_compare_exchange_n(
+                &bs_shm.header->probe_warn_safeguard_us, &prev,
+                (apr_int64_t)now_t, 0, __ATOMIC_RELAXED,
+                __ATOMIC_RELAXED)) {
+            ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+                "mod_botshield: nonce-table probe saturated at "
+                "bucket %u (capacity %" APR_SIZE_T_FMT "); failing "
+                "verify closed — consider raising "
+                "BotShieldEmbeddedNonceCapacity", base,
+                bs_shm.nonce_capacity);
+        }
+        apr_global_mutex_unlock(bs_shm.mutex);
+        return 0;
+    }
+    bs_nonce_slot *slot = &bs_shm.nonce_table[target_idx];
+    apr_uint32_t v = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&slot->version, v | 1U, __ATOMIC_RELEASE);
+    slot->nonce_hash = fp;
+    slot->ns_id      = ns_id;
+    slot->expires_at = expires_at;
+    __atomic_store_n(&slot->version, (v | 1U) + 1U, __ATOMIC_RELEASE);
+    apr_global_mutex_unlock(bs_shm.mutex);
+    return 1;
+}
+
 /* --- Rotating Bloom filter (M5.2) ---
  *
  * Two buffers share the same hash geometry. Writes go to the buffer
@@ -7816,6 +8151,31 @@ static const char *bs_set_safeguard_capacity(cmd_parms *cmd,
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
     scfg->safeguard_capacity = (int)n;
+    return NULL;
+}
+
+/* MEDIUM #2 (Phase 2) — BotShieldEmbeddedNonceCapacity <n>. SHM
+ * slot count for the embedded-bootstrap nonce table. Sized to
+ * comfortably hold all in-flight bootstrap challenges within their
+ * 120-second expiry window: at 100 bootstraps/sec sustained that's
+ * 12K nonces; the 32K default has ~60% headroom. */
+static const char *bs_set_nonce_capacity(cmd_parms *cmd,
+                                         void *dconf,
+                                         const char *arg)
+{
+    (void)dconf;
+    bs_warn_if_virtual_scope(cmd, "BotShieldEmbeddedNonceCapacity");
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (!end || *end ||
+        n < BS_NONCE_MIN_SLOTS || n > BS_NONCE_MAX_SLOTS) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldEmbeddedNonceCapacity: '%s' must be %d..%d",
+            arg, BS_NONCE_MIN_SLOTS, BS_NONCE_MAX_SLOTS);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->nonce_capacity = (int)n;
     return NULL;
 }
 
@@ -9451,13 +9811,14 @@ static const char *bs_build_cookie_prefix_gcm(apr_pool_t *p,
                                               const bs_challenge *ch,
                                               const char **out_b64)
 {
-    if (!cfg->secret || cfg->secret_len == 0) return "no secret";
+    if (!cfg->derived_keys_set) return "no secret";
     const char *canon = bs_challenge_canonical(p, ch);
     apr_size_t pt_len = strlen(canon);
     apr_size_t env_cap = 1 + BS_GCM_NONCE_LEN + pt_len + BS_GCM_TAG_LEN;
     unsigned char *env = apr_palloc(p, env_cap);
     apr_size_t env_len = 0;
-    const char *err = bs_gcm_encrypt(cfg->secret, cfg->secret_len,
+    /* LOW #3 — derived GCM key, not raw secret. */
+    const char *err = bs_gcm_encrypt(cfg->derived_gcm_cookie,
                                      (const unsigned char *)canon, pt_len,
                                      env, &env_len);
     if (err) return err;
@@ -9481,7 +9842,8 @@ static const char *bs_build_cookie_prefix_gcm(apr_pool_t *p,
  * see score/flags/passes_*). Instead the JSON carries an opaque
  * cookie_prefix base64 blob that the JS appends `.<counter>` to.
  * Under HMAC issue format the legacy shape stays byte-identical. */
-static const char *bs_challenge_json(apr_pool_t *p, const bs_dir_cfg *cfg,
+static const char *bs_challenge_json(request_rec *r, apr_pool_t *p,
+                                     const bs_dir_cfg *cfg,
                                      const bs_challenge *ch)
 {
     char salt_hex [BS_SALT_BYTES * 2 + 1];
@@ -9491,6 +9853,25 @@ static const char *bs_challenge_json(apr_pool_t *p, const bs_dir_cfg *cfg,
     const char *domain_json = cfg->cookie_domain
         ? apr_psprintf(p, ",\"cookie_domain\":\"%s\"", cfg->cookie_domain)
         : "";
+    /* MEDIUM #2 — IP-binding round-trip. Compute bound_ip from
+     * the request's client IP and bootstrap_sig over the
+     * (nonce, bound_ip, expires_at) tuple under the per-purpose
+     * derived bootstrap key. Both fields ride along in the JSON
+     * for the JS to round-trip back to /embedded-verify. */
+    char bound_ip_hex[33];
+    char bootstrap_sig_hex[BS_SIG_BYTES * 2 + 1];
+    int have_bound_ip = bs_format_bound_ip_hex(
+        r ? r->useragent_ip : NULL, bound_ip_hex);
+    if (have_bound_ip) {
+        bs_compute_bootstrap_sig(p, cfg->derived_hmac_bootstrap,
+                                  nonce_hex, bound_ip_hex,
+                                  ch->expires_at, bootstrap_sig_hex);
+    }
+    const char *bind_json = have_bound_ip
+        ? apr_psprintf(p,
+            ",\"bound_ip\":\"%s\",\"bootstrap_sig\":\"%s\"",
+            bound_ip_hex, bootstrap_sig_hex)
+        : "";
     int fmt = bs_effective_cookie_format(cfg);
     if (fmt & BS_FMT_GCM) {
         const char *prefix_b64 = NULL;
@@ -9499,9 +9880,10 @@ static const char *bs_challenge_json(apr_pool_t *p, const bs_dir_cfg *cfg,
             return apr_psprintf(p,
                 "{\"salt\":\"%s\",\"nonce\":\"%s\",\"difficulty\":%d,"
                 "\"expires_at\":%" APR_TIME_T_FMT ",\"auto\":%d,"
-                "\"cookie_prefix\":\"%s\"%s}",
+                "\"cookie_prefix\":\"%s\"%s%s}",
                 salt_hex, nonce_hex, ch->difficulty, ch->expires_at,
-                ch->auto_tier ? 1 : 0, prefix_b64, domain_json);
+                ch->auto_tier ? 1 : 0, prefix_b64, domain_json,
+                bind_json);
         }
         /* Encryption failed at render time. Rather than serve a broken
          * page, fall through to the HMAC shape — the verifier will
@@ -9517,7 +9899,7 @@ static const char *bs_challenge_json(apr_pool_t *p, const bs_dir_cfg *cfg,
         "\"passes_silent\":%d,\"passes_form\":%d,\"passes_captcha\":%d,"
         "\"challenged_at\":%" APR_TIME_T_FMT ",\"auto\":%d,"
         "\"forgive_window_start\":%u,\"forgive_consumed\":%u,"
-        "\"signature\":\"%s\"%s}",
+        "\"signature\":\"%s\"%s%s}",
         ch->version, ch->alg_name, salt_hex, nonce_hex,
         ch->difficulty, ch->expires_at,
         ch->rep.score, (unsigned)ch->rep.flags,
@@ -9525,7 +9907,7 @@ static const char *bs_challenge_json(apr_pool_t *p, const bs_dir_cfg *cfg,
         ch->rep.challenged_at, ch->auto_tier ? 1 : 0,
         (unsigned)ch->rep.forgive_window_start,
         (unsigned)ch->rep.forgive_consumed,
-        sig_hex, domain_json);
+        sig_hex, domain_json, bind_json);
 }
 
 /* --- Top-level issue / verify ---
@@ -9584,7 +9966,8 @@ static const char *bs_issue_challenge(apr_pool_t *p, const bs_dir_cfg *cfg,
     if (err) return err;
 
     const char *canon = bs_challenge_canonical(p, out);
-    bs_hmac_sha256(cfg->secret, cfg->secret_len,
+    /* LOW #3 — issue uses the HKDF-derived cookie HMAC key. */
+    bs_hmac_sha256(cfg->derived_hmac_cookie, 32,
                    (const unsigned char *)canon, strlen(canon),
                    out->signature);
     return NULL;
@@ -9784,12 +10167,13 @@ static const char *bs_verify_cookie_hmac(request_rec *r,
      * pays off on cookies the primary key already rejected. */
     const char *canon = bs_challenge_canonical(r->pool, &ch);
     unsigned char sig_expected[BS_SIG_BYTES];
-    bs_hmac_sha256(cfg->secret, cfg->secret_len,
+    /* LOW #3 — derived cookie-HMAC key, not raw secret. */
+    bs_hmac_sha256(cfg->derived_hmac_cookie, 32,
                    (const unsigned char *)canon, strlen(canon),
                    sig_expected);
     if (!bs_ct_equal(sig_expected, sig_from_client, BS_SIG_BYTES)) {
-        if (!cfg->secret_secondary) return "signature mismatch";
-        bs_hmac_sha256(cfg->secret_secondary, cfg->secret_secondary_len,
+        if (!cfg->derived_keys_set_2) return "signature mismatch";
+        bs_hmac_sha256(cfg->derived_hmac_cookie_2, 32,
                        (const unsigned char *)canon, strlen(canon),
                        sig_expected);
         if (!bs_ct_equal(sig_expected, sig_from_client, BS_SIG_BYTES)) {
@@ -9832,12 +10216,12 @@ static const char *bs_verify_cookie_gcm(request_rec *r,
      * fails the tag check and bs_gcm_decrypt returns an error
      * without leaking plaintext. The retry is safe and the success
      * path is unchanged. */
-    const char *derr = bs_gcm_decrypt(cfg->secret, cfg->secret_len,
+    /* LOW #3 — derived GCM keys, primary then secondary. */
+    const char *derr = bs_gcm_decrypt(cfg->derived_gcm_cookie,
                                       env, (apr_size_t)env_len,
                                       pt, &pt_len);
-    if (derr && cfg->secret_secondary) {
-        derr = bs_gcm_decrypt(cfg->secret_secondary,
-                              cfg->secret_secondary_len,
+    if (derr && cfg->derived_keys_set_2) {
+        derr = bs_gcm_decrypt(cfg->derived_gcm_cookie_2,
                               env, (apr_size_t)env_len,
                               pt, &pt_len);
     }
@@ -9938,6 +10322,19 @@ static const char *bs_set_secret_file(cmd_parms *cmd, void *cfg_v,
 
     cfg->secret     = (const unsigned char *)buf;
     cfg->secret_len = len;
+
+    /* Security review LOW #3 — derive per-purpose keys once. */
+    err = bs_derive_purpose_keys(cmd->pool,
+                                  cfg->secret, cfg->secret_len,
+                                  cfg->derived_hmac_cookie,
+                                  cfg->derived_gcm_cookie,
+                                  cfg->derived_hmac_pending,
+                                  cfg->derived_hmac_bootstrap);
+    if (err) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSecretFile: key derivation failed: %s", err);
+    }
+    cfg->derived_keys_set = 1;
     return NULL;
 }
 
@@ -9990,6 +10387,22 @@ static const char *bs_set_secondary_secret_file(cmd_parms *cmd,
 
     cfg->secret_secondary     = (const unsigned char *)buf;
     cfg->secret_secondary_len = len;
+
+    /* Security review LOW #3 — derive per-purpose keys for the
+     * secondary master too. */
+    err = bs_derive_purpose_keys(cmd->pool,
+                                  cfg->secret_secondary,
+                                  cfg->secret_secondary_len,
+                                  cfg->derived_hmac_cookie_2,
+                                  cfg->derived_gcm_cookie_2,
+                                  cfg->derived_hmac_pending_2,
+                                  cfg->derived_hmac_bootstrap_2);
+    if (err) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSecondarySecretFile: key derivation failed: %s",
+            err);
+    }
+    cfg->derived_keys_set_2 = 1;
     return NULL;
 }
 
@@ -11809,7 +12222,8 @@ static const char *bs_mint_pending_cookie(request_rec *r,
     const char *canon = apr_psprintf(r->pool,
         "bs:pending:v1:%s:%" APR_TIME_T_FMT, nonce_hex, expiry);
     unsigned char mac[BS_SIG_BYTES];
-    bs_hmac_sha256(cfg->secret, cfg->secret_len,
+    /* LOW #3 — derived pending-HMAC key. */
+    bs_hmac_sha256(cfg->derived_hmac_pending, 32,
                    (const unsigned char *)canon, strlen(canon), mac);
     char mac_hex[BS_SIG_BYTES * 2 + 1];
     bs_to_hex(mac, BS_SIG_BYTES, mac_hex);
@@ -11884,7 +12298,8 @@ static const char *bs_verify_pending_cookie(request_rec *r,
     const char *canon = apr_psprintf(r->pool,
         "bs:pending:v1:%s:%" APR_TIME_T_FMT, nonce_hex, expiry);
     unsigned char expect[BS_SIG_BYTES];
-    bs_hmac_sha256(cfg->secret, cfg->secret_len,
+    /* LOW #3 — derived pending-HMAC key (primary). */
+    bs_hmac_sha256(cfg->derived_hmac_pending, 32,
                    (const unsigned char *)canon, strlen(canon), expect);
     unsigned char got[BS_SIG_BYTES];
     if (!bs_from_hex(mac_hex, BS_SIG_BYTES, got)) return "bad mac hex";
@@ -11897,8 +12312,8 @@ static const char *bs_verify_pending_cookie(request_rec *r,
          * pending cookie (TTL 300s) would 403 on captcha submit
          * even though the secondary key would have validated.
          * Same secondary-key retry pattern as bs_verify_cookie_hmac. */
-        if (!cfg->secret_secondary) return "sig mismatch";
-        bs_hmac_sha256(cfg->secret_secondary, cfg->secret_secondary_len,
+        if (!cfg->derived_keys_set_2) return "sig mismatch";
+        bs_hmac_sha256(cfg->derived_hmac_pending_2, 32,
                        (const unsigned char *)canon, strlen(canon),
                        expect);
         if (!bs_ct_equal(expect, got, BS_SIG_BYTES)) {
@@ -12043,7 +12458,10 @@ static const char BS_EMBEDDED_JS[] =
 "       v: ch.v, alg: ch.alg, salt: ch.salt, nonce: ch.nonce,\n"
 "       difficulty: ch.difficulty, expires_at: ch.expires_at,\n"
 "       challenged_at: ch.challenged_at, auto: ch.auto,\n"
-"       signature: ch.signature, counter: ev.data.counter\n"
+"       signature: ch.signature,\n"
+"       /* MEDIUM #2 — IP-bind round-trip. */\n"
+"       bound_ip: ch.bound_ip, bootstrap_sig: ch.bootstrap_sig,\n"
+"       counter: ev.data.counter\n"
 "      })\n"
 "     });\n"
 "    }\n"
@@ -12497,6 +12915,25 @@ static int bs_embedded_bootstrap_handler(request_rec *r,
     bs_to_hex(ch.nonce,      BS_NONCE_BYTES, nonce_hex);
     bs_to_hex(ch.signature,  BS_SIG_BYTES,   sig_hex);
 
+    /* MEDIUM #2 — IP-bind the bootstrap. The bound_ip + bootstrap_sig
+     * round-trip via the verify POST and the verify endpoint
+     * compares bound_ip against the verifying request's IP.
+     * Closes the distributed-redemption attack (issue from one IP,
+     * redeem from another). */
+    char bound_ip_hex[33];
+    if (!bs_format_bound_ip_hex(r->useragent_ip, bound_ip_hex)) {
+        ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+            "mod_botshield: embedded-bootstrap: cannot format "
+            "client IP %s", r->useragent_ip ? r->useragent_ip : "(null)");
+        r->status = HTTP_INTERNAL_SERVER_ERROR;
+        ap_rputs("{\"error\":\"ip\"}\n", r);
+        return OK;
+    }
+    char bootstrap_sig_hex[BS_SIG_BYTES * 2 + 1];
+    bs_compute_bootstrap_sig(r->pool, cfg->derived_hmac_bootstrap,
+                              nonce_hex, bound_ip_hex,
+                              ch.expires_at, bootstrap_sig_hex);
+
     /* Native PoW path. Include challenged_at and auto so the wrapper
      * can round-trip them through the verify POST — the signature
      * in bs_challenge_canonical covers every rep field; if the
@@ -12511,13 +12948,95 @@ static int bs_embedded_bootstrap_handler(request_rec *r,
         "\"v\":%d,\"alg\":\"%s\",\"salt\":\"%s\",\"nonce\":\"%s\","
         "\"difficulty\":%d,\"expires_at\":%" APR_TIME_T_FMT ","
         "\"challenged_at\":%" APR_TIME_T_FMT ",\"auto\":%d,"
-        "\"signature\":\"%s\""
+        "\"signature\":\"%s\","
+        "\"bound_ip\":\"%s\",\"bootstrap_sig\":\"%s\""
         "}}\n",
         ch.version, ch.alg_name, salt_hex, nonce_hex,
         ch.difficulty, ch.expires_at,
         ch.rep.challenged_at, ch.auto_tier,
-        sig_hex);
+        sig_hex, bound_ip_hex, bootstrap_sig_hex);
     return OK;
+}
+
+/* Security review MEDIUM #2 — IP-binding for the bootstrap → verify
+ * pathway. At bootstrap time we sign (nonce, bound_ip, expires_at)
+ * with a per-purpose HKDF-derived key (`derived_hmac_bootstrap`).
+ * At verify time we recompute the HMAC and also compare bound_ip
+ * against the verifying request's IP. A challenge issued from one
+ * IP cannot be redeemed from another — closes Attack 3
+ * (distributed redemption) from the security-review writeup.
+ *
+ * bound_ip is rendered as a 32-char lowercase hex string of the
+ * 16 raw bytes (IPv4 maps to ::ffff:V.V.V.V already in the parser).
+ * Format-stable across IPv4 / IPv6.
+ *
+ * Output: 32-byte hex string + NUL into out_hex (33 bytes). */
+static int bs_format_bound_ip_hex(const char *useragent_ip, char out_hex[33])
+{
+    unsigned char ip_bytes[16];
+    if (!useragent_ip || !*useragent_ip) return 0;
+    if (!bs_parse_client_ip(useragent_ip, ip_bytes)) return 0;
+    bs_to_hex(ip_bytes, 16, out_hex);
+    return 1;
+}
+
+/* Compute the bootstrap-binding HMAC over
+ *   "bs:bootstrap:v1:" || nonce_hex || ":" || bound_ip_hex || ":"
+ *   || expires_at (decimal ASCII)
+ * using the dir_cfg's derived bootstrap key. Output is hex-encoded
+ * into out_sig_hex (65 bytes). */
+static void bs_compute_bootstrap_sig(apr_pool_t *p,
+                                     const unsigned char key[32],
+                                     const char *nonce_hex,
+                                     const char *bound_ip_hex,
+                                     apr_time_t expires_at,
+                                     char out_sig_hex[BS_SIG_BYTES * 2 + 1])
+{
+    const char *canon = apr_psprintf(p,
+        "bs:bootstrap:v1:%s:%s:%" APR_TIME_T_FMT,
+        nonce_hex, bound_ip_hex, expires_at);
+    unsigned char mac[BS_SIG_BYTES];
+    bs_hmac_sha256(key, 32, (const unsigned char *)canon,
+                   strlen(canon), mac);
+    bs_to_hex(mac, BS_SIG_BYTES, out_sig_hex);
+}
+
+/* Verify a bootstrap-binding signature presented at /embedded-verify.
+ * Reconstructs the canon from the inputs (which must round-trip
+ * verbatim from the bootstrap response), computes the HMAC under the
+ * primary derived key, falls back to the secondary if E16 rotation
+ * is in progress. Returns 1 on accept, 0 on reject. The bound_ip
+ * comparison against r->useragent_ip happens separately at the
+ * verify call site. */
+static int bs_verify_bootstrap_sig(apr_pool_t *p,
+                                   const bs_dir_cfg *cfg,
+                                   const char *nonce_hex,
+                                   const char *bound_ip_hex,
+                                   apr_time_t expires_at,
+                                   const char *sig_hex_in)
+{
+    if (!cfg->derived_keys_set) return 0;
+    if (!sig_hex_in || strlen(sig_hex_in) != BS_SIG_BYTES * 2) return 0;
+    unsigned char sig_in[BS_SIG_BYTES];
+    if (!bs_from_hex(sig_hex_in, BS_SIG_BYTES, sig_in)) return 0;
+
+    char expected_hex[BS_SIG_BYTES * 2 + 1];
+    bs_compute_bootstrap_sig(p, cfg->derived_hmac_bootstrap,
+                              nonce_hex, bound_ip_hex,
+                              expires_at, expected_hex);
+    unsigned char expected[BS_SIG_BYTES];
+    bs_from_hex(expected_hex, BS_SIG_BYTES, expected);
+    if (bs_ct_equal(sig_in, expected, BS_SIG_BYTES)) return 1;
+
+    /* E16 rotation — try secondary derived bootstrap key. */
+    if (cfg->derived_keys_set_2) {
+        bs_compute_bootstrap_sig(p, cfg->derived_hmac_bootstrap_2,
+                                  nonce_hex, bound_ip_hex,
+                                  expires_at, expected_hex);
+        bs_from_hex(expected_hex, BS_SIG_BYTES, expected);
+        if (bs_ct_equal(sig_in, expected, BS_SIG_BYTES)) return 1;
+    }
+    return 0;
 }
 
 /* Pull a string field out of a parsed JSON object, returning a pool-
@@ -12678,21 +13197,66 @@ static int bs_embedded_verify_pow(request_rec *r, bs_dir_cfg *cfg,
         return OK;
     }
 
+    /* MEDIUM #2 — IP-binding check. The bootstrap response carried
+     * a (bound_ip, bootstrap_sig) pair signed under the per-purpose
+     * derived bootstrap key. Verify the HMAC, then compare bound_ip
+     * against the current request's client IP. Mismatch ⇒ reject:
+     * a challenge issued from one IP cannot be redeemed from
+     * another (closes Attack 3). */
+    const char *bound_ip_hex = bs_json_get_str(r->pool, root,
+                                                "bound_ip", 32);
+    const char *bootstrap_sig_hex = bs_json_get_str(r->pool, root,
+                                                "bootstrap_sig",
+                                                BS_SIG_BYTES * 2);
+    if (!bound_ip_hex || !bootstrap_sig_hex ||
+        strlen(bound_ip_hex) != 32) {
+        r->status = HTTP_BAD_REQUEST;
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: embedded-verify(pow): missing or "
+            "malformed bound_ip / bootstrap_sig");
+        return OK;
+    }
+    if (!bs_verify_bootstrap_sig(r->pool, cfg, nonce_hex,
+                                  bound_ip_hex, ch.expires_at,
+                                  bootstrap_sig_hex)) {
+        r->status = HTTP_FORBIDDEN;
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: embedded-verify(pow): bad bootstrap_sig "
+            "(IP-binding tampered or wrong key)");
+        return OK;
+    }
+    {
+        char observed_ip_hex[33];
+        if (!bs_format_bound_ip_hex(r->useragent_ip, observed_ip_hex)) {
+            r->status = HTTP_BAD_REQUEST;
+            return OK;
+        }
+        if (strcasecmp(observed_ip_hex, bound_ip_hex) != 0) {
+            r->status = HTTP_FORBIDDEN;
+            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                "mod_botshield: embedded-verify(pow): IP-bind "
+                "mismatch (issued for %s, redeemed from %s)",
+                bound_ip_hex, observed_ip_hex);
+            return OK;
+        }
+    }
+
     /* Validate the HMAC against the canonical form. This proves the
-     * server issued the challenge and nothing in transit changed. */
+     * server issued the challenge and nothing in transit changed.
+     * LOW #3 — derived cookie-HMAC key. */
     const char *canon = bs_challenge_canonical(r->pool, &ch);
     unsigned char sig_expected[BS_SIG_BYTES];
-    bs_hmac_sha256(cfg->secret, cfg->secret_len,
+    bs_hmac_sha256(cfg->derived_hmac_cookie, 32,
                    (const unsigned char *)canon, strlen(canon),
                    sig_expected);
     if (!bs_ct_equal(sig_expected, ch.signature, BS_SIG_BYTES)) {
         /* Try secondary key if rotation is in progress (E16). */
-        if (cfg->secret_secondary) {
-            bs_hmac_sha256(cfg->secret_secondary, cfg->secret_secondary_len,
+        if (cfg->derived_keys_set_2) {
+            bs_hmac_sha256(cfg->derived_hmac_cookie_2, 32,
                            (const unsigned char *)canon, strlen(canon),
                            sig_expected);
         }
-        if (!cfg->secret_secondary ||
+        if (!cfg->derived_keys_set_2 ||
             !bs_ct_equal(sig_expected, ch.signature, BS_SIG_BYTES)) {
             r->status = HTTP_FORBIDDEN;
             ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
@@ -12717,6 +13281,25 @@ static int bs_embedded_verify_pow(request_rec *r, bs_dir_cfg *cfg,
         ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
             "mod_botshield: embedded-verify(pow): PoW reject: %s", verr);
         return OK;
+    }
+
+    /* MEDIUM #2 (Phase 2) — atomically consume the nonce. Replay of
+     * the same {nonce, counter, signature} bundle is rejected here:
+     * the first verify wins the slot, all subsequent attempts get
+     * "already redeemed" and 403. Closes Attacks 1 and 2 (replay
+     * multiplier and pool farming). */
+    {
+        bs_server_cfg *scfg_n = ap_get_module_config(
+            r->server->module_config, &botshield_module);
+        apr_uint32_t ns = scfg_n ? scfg_n->ns_id : 0;
+        if (!bs_embedded_nonce_consume(r, ch.nonce,
+                                        (apr_int64_t)ch.expires_at, ns)) {
+            r->status = HTTP_FORBIDDEN;
+            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                "mod_botshield: embedded-verify(pow): nonce already "
+                "redeemed (replay or pool-farm) — rejected");
+            return OK;
+        }
     }
 
     /* Mint _bs_verified the same way the M7 form-PoW does — same
@@ -12788,7 +13371,8 @@ static int bs_embedded_verify_pow(request_rec *r, bs_dir_cfg *cfg,
         }
     }
     canon = bs_challenge_canonical(r->pool, &ch);
-    bs_hmac_sha256(cfg->secret, cfg->secret_len,
+    /* LOW #3 — re-sign with derived cookie-HMAC key. */
+    bs_hmac_sha256(cfg->derived_hmac_cookie, 32,
                    (const unsigned char *)canon, strlen(canon),
                    ch.signature);
     const char *payload = bs_build_cookie_payload(r->pool, cfg, &ch,
@@ -12866,6 +13450,66 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
         return OK;
     }
 
+    /* MEDIUM #2 — IP-binding check. See bs_embedded_verify_pow for
+     * the rationale; same shape applies here. nonce_hex is rebuilt
+     * from ch.nonce since this code path doesn't extract it from
+     * top-level JSON. */
+    {
+        char nonce_hex_buf[BS_NONCE_BYTES * 2 + 1];
+        bs_to_hex(ch.nonce, BS_NONCE_BYTES, nonce_hex_buf);
+        const char *bound_ip_hex = bs_json_get_str(r->pool, root,
+                                                    "bound_ip", 32);
+        const char *bootstrap_sig_hex = bs_json_get_str(r->pool, root,
+                                                    "bootstrap_sig",
+                                                    BS_SIG_BYTES * 2);
+        if (!bound_ip_hex || !bootstrap_sig_hex ||
+            strlen(bound_ip_hex) != 32) {
+            r->status = HTTP_BAD_REQUEST;
+            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                "mod_botshield: embedded-verify(pow-gcm): missing or "
+                "malformed bound_ip / bootstrap_sig");
+            return OK;
+        }
+        if (!bs_verify_bootstrap_sig(r->pool, cfg, nonce_hex_buf,
+                                      bound_ip_hex, ch.expires_at,
+                                      bootstrap_sig_hex)) {
+            r->status = HTTP_FORBIDDEN;
+            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                "mod_botshield: embedded-verify(pow-gcm): bad "
+                "bootstrap_sig");
+            return OK;
+        }
+        char observed_ip_hex[33];
+        if (!bs_format_bound_ip_hex(r->useragent_ip, observed_ip_hex)) {
+            r->status = HTTP_BAD_REQUEST;
+            return OK;
+        }
+        if (strcasecmp(observed_ip_hex, bound_ip_hex) != 0) {
+            r->status = HTTP_FORBIDDEN;
+            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                "mod_botshield: embedded-verify(pow-gcm): IP-bind "
+                "mismatch (issued for %s, redeemed from %s)",
+                bound_ip_hex, observed_ip_hex);
+            return OK;
+        }
+    }
+
+    /* MEDIUM #2 (Phase 2) — consume the nonce. Same shape as the
+     * HMAC pow path's nonce-consume call above. */
+    {
+        bs_server_cfg *scfg_n = ap_get_module_config(
+            r->server->module_config, &botshield_module);
+        apr_uint32_t ns = scfg_n ? scfg_n->ns_id : 0;
+        if (!bs_embedded_nonce_consume(r, ch.nonce,
+                                        (apr_int64_t)ch.expires_at, ns)) {
+            r->status = HTTP_FORBIDDEN;
+            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                "mod_botshield: embedded-verify(pow-gcm): nonce "
+                "already redeemed (replay or pool-farm) — rejected");
+            return OK;
+        }
+    }
+
     /* Carry forward + set passes_silent — same shape as the HMAC
      * pow path above. See its comments for rationale (forgiveness
      * cap, flag-penalty floor, expired-cookie carry-forward
@@ -12912,9 +13556,10 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
     }
     /* Re-sign canonical (HMAC) — bs_build_cookie_payload uses this
      * signature for HMAC mode; for GCM mode the signature is part
-     * of the encrypted canonical so it gets re-encrypted. */
+     * of the encrypted canonical so it gets re-encrypted.
+     * LOW #3 — derived cookie-HMAC key. */
     const char *canon = bs_challenge_canonical(r->pool, &ch);
-    bs_hmac_sha256(cfg->secret, cfg->secret_len,
+    bs_hmac_sha256(cfg->derived_hmac_cookie, 32,
                    (const unsigned char *)canon, strlen(canon),
                    ch.signature);
     const char *payload = bs_build_cookie_payload(r->pool, cfg, &ch,
@@ -14706,6 +15351,13 @@ static const command_rec bs_cmds[] = {
                  "Per-server-scope but only the main server's value "
                  "is consulted at post_config since the table is "
                  "module-global."),
+    AP_INIT_TAKE1("BotShieldEmbeddedNonceCapacity",
+                 bs_set_nonce_capacity, NULL, RSRC_CONF,
+                 "SHM slot count for the embedded-bootstrap nonce "
+                 "table (default 32768, range 1024..1048576). "
+                 "Bound the in-flight + recently-redeemed challenge "
+                 "set within the 120s bootstrap expiry. Each slot "
+                 "is 24 bytes."),
     /* E11 — load-aware throttling. Sampling + cached state. */
     AP_INIT_TAKE1("BotShieldLoadStateFile",
                  bs_set_load_state_file, NULL, RSRC_CONF,
@@ -15203,10 +15855,14 @@ static const char BS_WIDGET_TEMPLATE[] =
 "   var body;\n"
 "   if (CH.cookie_prefix) {\n"
 "    /* GCM mode — server-encrypted envelope; client only sends\n"
-"       prefix + counter, server decrypts + verifies + re-mints. */\n"
+"       prefix + counter, server decrypts + verifies + re-mints.\n"
+"       MEDIUM #2 — round-trip bound_ip + bootstrap_sig for\n"
+"       IP-binding. */\n"
 "    body = JSON.stringify({\n"
 "     provider: 'pow-gcm',\n"
 "     cookie_prefix: CH.cookie_prefix,\n"
+"     bound_ip: CH.bound_ip,\n"
+"     bootstrap_sig: CH.bootstrap_sig,\n"
 "     counter: counterVal\n"
 "    });\n"
 "   } else {\n"
@@ -15214,7 +15870,10 @@ static const char BS_WIDGET_TEMPLATE[] =
 "       signed (including rep state — score, flags, passes_*,\n"
 "       forgive_*) plus our counter. The HMAC verify on the\n"
 "       server reconstructs canonical from these fields and any\n"
-"       missing/tampered field will mismatch the signature. */\n"
+"       missing/tampered field will mismatch the signature.\n"
+"       MEDIUM #2 — round-trip bound_ip + bootstrap_sig too\n"
+"       so the server can confirm the verifying IP matches the\n"
+"       IP at issue time. */\n"
 "    body = JSON.stringify({\n"
 "     provider: 'pow',\n"
 "     v: CH.v, alg: CH.alg,\n"
@@ -15230,6 +15889,8 @@ static const char BS_WIDGET_TEMPLATE[] =
 "     forgive_window_start: CH.forgive_window_start,\n"
 "     forgive_consumed: CH.forgive_consumed,\n"
 "     signature: CH.signature,\n"
+"     bound_ip: CH.bound_ip,\n"
+"     bootstrap_sig: CH.bootstrap_sig,\n"
 "     counter: counterVal\n"
 "    });\n"
 "   }\n"
@@ -16019,7 +16680,7 @@ static int bs_handler(request_rec *r)
                         cookie_status, "-", "-", "issue_failed", effective);
         return OK;
     }
-    const char *challenge_js = bs_challenge_json(r->pool, cfg, &challenge);
+    const char *challenge_js = bs_challenge_json(r, r->pool, cfg, &challenge);
 
     const char *prompt     = cfg->prompt     ? cfg->prompt     : BS_DEFAULT_PROMPT;
     const char *logo_svg   = cfg->logo_svg   ? cfg->logo_svg   : BS_DEFAULT_LOGO_SVG;
