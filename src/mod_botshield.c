@@ -810,12 +810,18 @@ struct bs_dir_cfg {
     unsigned char    derived_hmac_cookie    [32];
     unsigned char    derived_gcm_cookie     [32];
     unsigned char    derived_hmac_pending   [32];
+    /* MEDIUM #2 — separate purpose key for the bootstrap → verify
+     * IP-binding HMAC. Kept distinct from derived_hmac_cookie so
+     * the bound-ip signature can't be repurposed as a cookie
+     * signature or vice versa. */
+    unsigned char    derived_hmac_bootstrap [32];
     int              derived_keys_set;
     /* Same for the secondary key, populated when
      * BotShieldSecondarySecretFile is configured. */
     unsigned char    derived_hmac_cookie_2  [32];
     unsigned char    derived_gcm_cookie_2   [32];
     unsigned char    derived_hmac_pending_2 [32];
+    unsigned char    derived_hmac_bootstrap_2[32];
     int              derived_keys_set_2;
     int                     cookie_format;  /* BS_FMT_* bitmap or BS_FMT_UNSET */
     int score_silent;           /* score >= this → silent tier (logged only) */
@@ -1439,21 +1445,25 @@ static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
         out->secret     = add->secret;
         out->secret_len = add->secret_len;
         memcpy(out->derived_hmac_cookie,
-               add->derived_hmac_cookie,  32);
+               add->derived_hmac_cookie,    32);
         memcpy(out->derived_gcm_cookie,
-               add->derived_gcm_cookie,   32);
+               add->derived_gcm_cookie,     32);
         memcpy(out->derived_hmac_pending,
-               add->derived_hmac_pending, 32);
+               add->derived_hmac_pending,   32);
+        memcpy(out->derived_hmac_bootstrap,
+               add->derived_hmac_bootstrap, 32);
         out->derived_keys_set = add->derived_keys_set;
     } else {
         out->secret     = base->secret;
         out->secret_len = base->secret_len;
         memcpy(out->derived_hmac_cookie,
-               base->derived_hmac_cookie,  32);
+               base->derived_hmac_cookie,    32);
         memcpy(out->derived_gcm_cookie,
-               base->derived_gcm_cookie,   32);
+               base->derived_gcm_cookie,     32);
         memcpy(out->derived_hmac_pending,
-               base->derived_hmac_pending, 32);
+               base->derived_hmac_pending,   32);
+        memcpy(out->derived_hmac_bootstrap,
+               base->derived_hmac_bootstrap, 32);
         out->derived_keys_set = base->derived_keys_set;
     }
     /* E16 — same merge shape for the verify-only
@@ -1464,21 +1474,25 @@ static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
         out->secret_secondary     = add->secret_secondary;
         out->secret_secondary_len = add->secret_secondary_len;
         memcpy(out->derived_hmac_cookie_2,
-               add->derived_hmac_cookie_2,  32);
+               add->derived_hmac_cookie_2,    32);
         memcpy(out->derived_gcm_cookie_2,
-               add->derived_gcm_cookie_2,   32);
+               add->derived_gcm_cookie_2,     32);
         memcpy(out->derived_hmac_pending_2,
-               add->derived_hmac_pending_2, 32);
+               add->derived_hmac_pending_2,   32);
+        memcpy(out->derived_hmac_bootstrap_2,
+               add->derived_hmac_bootstrap_2, 32);
         out->derived_keys_set_2 = add->derived_keys_set_2;
     } else {
         out->secret_secondary     = base->secret_secondary;
         out->secret_secondary_len = base->secret_secondary_len;
         memcpy(out->derived_hmac_cookie_2,
-               base->derived_hmac_cookie_2,  32);
+               base->derived_hmac_cookie_2,    32);
         memcpy(out->derived_gcm_cookie_2,
-               base->derived_gcm_cookie_2,   32);
+               base->derived_gcm_cookie_2,     32);
         memcpy(out->derived_hmac_pending_2,
-               base->derived_hmac_pending_2, 32);
+               base->derived_hmac_pending_2,   32);
+        memcpy(out->derived_hmac_bootstrap_2,
+               base->derived_hmac_bootstrap_2, 32);
         out->derived_keys_set_2 = base->derived_keys_set_2;
     }
     out->cookie_format = (add->cookie_format == BS_FMT_UNSET)
@@ -1925,7 +1939,8 @@ static const char *bs_derive_purpose_keys(apr_pool_t *p,
                                           apr_size_t master_len,
                                           unsigned char *out_hmac,
                                           unsigned char *out_gcm,
-                                          unsigned char *out_pending)
+                                          unsigned char *out_pending,
+                                          unsigned char *out_bootstrap)
 {
     if (!bs_hkdf_derive_key(master, master_len,
                             "bs:cookie:hmac:v1", out_hmac)) {
@@ -1938,6 +1953,10 @@ static const char *bs_derive_purpose_keys(apr_pool_t *p,
     if (!bs_hkdf_derive_key(master, master_len,
                             "bs:cookie:pending:v1", out_pending)) {
         return apr_psprintf(p, "HKDF(bs:cookie:pending:v1) failed");
+    }
+    if (!bs_hkdf_derive_key(master, master_len,
+                            "bs:cookie:bootstrap:v1", out_bootstrap)) {
+        return apr_psprintf(p, "HKDF(bs:cookie:bootstrap:v1) failed");
     }
     return NULL;
 }
@@ -2800,6 +2819,24 @@ static const char   *bs_get_cookie_value(request_rec *r, const char *name);
  * during a HTTP→HTTPS migration or when an operator sets a Domain
  * (which forces fallback to legacy). */
 static const char   *bs_get_verified_cookie_value(request_rec *r);
+/* Bootstrap-binding helpers — definitions live near the embedded
+ * verify endpoints. Forward-declared here so bs_challenge_json
+ * (used by the M1 widget interstitial earlier in the file) can
+ * call them. */
+static int  bs_format_bound_ip_hex(const char *useragent_ip,
+                                    char out_hex[33]);
+static void bs_compute_bootstrap_sig(apr_pool_t *p,
+                                      const unsigned char key[32],
+                                      const char *nonce_hex,
+                                      const char *bound_ip_hex,
+                                      apr_time_t expires_at,
+                                      char out_sig_hex[BS_SIG_BYTES * 2 + 1]);
+static int  bs_verify_bootstrap_sig(apr_pool_t *p,
+                                     const bs_dir_cfg *cfg,
+                                     const char *nonce_hex,
+                                     const char *bound_ip_hex,
+                                     apr_time_t expires_at,
+                                     const char *sig_hex_in);
 
 /* ======================================================================
  * E1 — Verified legit-crawler allow-list.
@@ -9596,7 +9633,8 @@ static const char *bs_build_cookie_prefix_gcm(apr_pool_t *p,
  * see score/flags/passes_*). Instead the JSON carries an opaque
  * cookie_prefix base64 blob that the JS appends `.<counter>` to.
  * Under HMAC issue format the legacy shape stays byte-identical. */
-static const char *bs_challenge_json(apr_pool_t *p, const bs_dir_cfg *cfg,
+static const char *bs_challenge_json(request_rec *r, apr_pool_t *p,
+                                     const bs_dir_cfg *cfg,
                                      const bs_challenge *ch)
 {
     char salt_hex [BS_SALT_BYTES * 2 + 1];
@@ -9606,6 +9644,25 @@ static const char *bs_challenge_json(apr_pool_t *p, const bs_dir_cfg *cfg,
     const char *domain_json = cfg->cookie_domain
         ? apr_psprintf(p, ",\"cookie_domain\":\"%s\"", cfg->cookie_domain)
         : "";
+    /* MEDIUM #2 — IP-binding round-trip. Compute bound_ip from
+     * the request's client IP and bootstrap_sig over the
+     * (nonce, bound_ip, expires_at) tuple under the per-purpose
+     * derived bootstrap key. Both fields ride along in the JSON
+     * for the JS to round-trip back to /embedded-verify. */
+    char bound_ip_hex[33];
+    char bootstrap_sig_hex[BS_SIG_BYTES * 2 + 1];
+    int have_bound_ip = bs_format_bound_ip_hex(
+        r ? r->useragent_ip : NULL, bound_ip_hex);
+    if (have_bound_ip) {
+        bs_compute_bootstrap_sig(p, cfg->derived_hmac_bootstrap,
+                                  nonce_hex, bound_ip_hex,
+                                  ch->expires_at, bootstrap_sig_hex);
+    }
+    const char *bind_json = have_bound_ip
+        ? apr_psprintf(p,
+            ",\"bound_ip\":\"%s\",\"bootstrap_sig\":\"%s\"",
+            bound_ip_hex, bootstrap_sig_hex)
+        : "";
     int fmt = bs_effective_cookie_format(cfg);
     if (fmt & BS_FMT_GCM) {
         const char *prefix_b64 = NULL;
@@ -9614,9 +9671,10 @@ static const char *bs_challenge_json(apr_pool_t *p, const bs_dir_cfg *cfg,
             return apr_psprintf(p,
                 "{\"salt\":\"%s\",\"nonce\":\"%s\",\"difficulty\":%d,"
                 "\"expires_at\":%" APR_TIME_T_FMT ",\"auto\":%d,"
-                "\"cookie_prefix\":\"%s\"%s}",
+                "\"cookie_prefix\":\"%s\"%s%s}",
                 salt_hex, nonce_hex, ch->difficulty, ch->expires_at,
-                ch->auto_tier ? 1 : 0, prefix_b64, domain_json);
+                ch->auto_tier ? 1 : 0, prefix_b64, domain_json,
+                bind_json);
         }
         /* Encryption failed at render time. Rather than serve a broken
          * page, fall through to the HMAC shape — the verifier will
@@ -9632,7 +9690,7 @@ static const char *bs_challenge_json(apr_pool_t *p, const bs_dir_cfg *cfg,
         "\"passes_silent\":%d,\"passes_form\":%d,\"passes_captcha\":%d,"
         "\"challenged_at\":%" APR_TIME_T_FMT ",\"auto\":%d,"
         "\"forgive_window_start\":%u,\"forgive_consumed\":%u,"
-        "\"signature\":\"%s\"%s}",
+        "\"signature\":\"%s\"%s%s}",
         ch->version, ch->alg_name, salt_hex, nonce_hex,
         ch->difficulty, ch->expires_at,
         ch->rep.score, (unsigned)ch->rep.flags,
@@ -9640,7 +9698,7 @@ static const char *bs_challenge_json(apr_pool_t *p, const bs_dir_cfg *cfg,
         ch->rep.challenged_at, ch->auto_tier ? 1 : 0,
         (unsigned)ch->rep.forgive_window_start,
         (unsigned)ch->rep.forgive_consumed,
-        sig_hex, domain_json);
+        sig_hex, domain_json, bind_json);
 }
 
 /* --- Top-level issue / verify ---
@@ -10061,7 +10119,8 @@ static const char *bs_set_secret_file(cmd_parms *cmd, void *cfg_v,
                                   cfg->secret, cfg->secret_len,
                                   cfg->derived_hmac_cookie,
                                   cfg->derived_gcm_cookie,
-                                  cfg->derived_hmac_pending);
+                                  cfg->derived_hmac_pending,
+                                  cfg->derived_hmac_bootstrap);
     if (err) {
         return apr_psprintf(cmd->pool,
             "BotShieldSecretFile: key derivation failed: %s", err);
@@ -10127,7 +10186,8 @@ static const char *bs_set_secondary_secret_file(cmd_parms *cmd,
                                   cfg->secret_secondary_len,
                                   cfg->derived_hmac_cookie_2,
                                   cfg->derived_gcm_cookie_2,
-                                  cfg->derived_hmac_pending_2);
+                                  cfg->derived_hmac_pending_2,
+                                  cfg->derived_hmac_bootstrap_2);
     if (err) {
         return apr_psprintf(cmd->pool,
             "BotShieldSecondarySecretFile: key derivation failed: %s",
@@ -12189,7 +12249,10 @@ static const char BS_EMBEDDED_JS[] =
 "       v: ch.v, alg: ch.alg, salt: ch.salt, nonce: ch.nonce,\n"
 "       difficulty: ch.difficulty, expires_at: ch.expires_at,\n"
 "       challenged_at: ch.challenged_at, auto: ch.auto,\n"
-"       signature: ch.signature, counter: ev.data.counter\n"
+"       signature: ch.signature,\n"
+"       /* MEDIUM #2 — IP-bind round-trip. */\n"
+"       bound_ip: ch.bound_ip, bootstrap_sig: ch.bootstrap_sig,\n"
+"       counter: ev.data.counter\n"
 "      })\n"
 "     });\n"
 "    }\n"
@@ -12643,6 +12706,25 @@ static int bs_embedded_bootstrap_handler(request_rec *r,
     bs_to_hex(ch.nonce,      BS_NONCE_BYTES, nonce_hex);
     bs_to_hex(ch.signature,  BS_SIG_BYTES,   sig_hex);
 
+    /* MEDIUM #2 — IP-bind the bootstrap. The bound_ip + bootstrap_sig
+     * round-trip via the verify POST and the verify endpoint
+     * compares bound_ip against the verifying request's IP.
+     * Closes the distributed-redemption attack (issue from one IP,
+     * redeem from another). */
+    char bound_ip_hex[33];
+    if (!bs_format_bound_ip_hex(r->useragent_ip, bound_ip_hex)) {
+        ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+            "mod_botshield: embedded-bootstrap: cannot format "
+            "client IP %s", r->useragent_ip ? r->useragent_ip : "(null)");
+        r->status = HTTP_INTERNAL_SERVER_ERROR;
+        ap_rputs("{\"error\":\"ip\"}\n", r);
+        return OK;
+    }
+    char bootstrap_sig_hex[BS_SIG_BYTES * 2 + 1];
+    bs_compute_bootstrap_sig(r->pool, cfg->derived_hmac_bootstrap,
+                              nonce_hex, bound_ip_hex,
+                              ch.expires_at, bootstrap_sig_hex);
+
     /* Native PoW path. Include challenged_at and auto so the wrapper
      * can round-trip them through the verify POST — the signature
      * in bs_challenge_canonical covers every rep field; if the
@@ -12657,13 +12739,95 @@ static int bs_embedded_bootstrap_handler(request_rec *r,
         "\"v\":%d,\"alg\":\"%s\",\"salt\":\"%s\",\"nonce\":\"%s\","
         "\"difficulty\":%d,\"expires_at\":%" APR_TIME_T_FMT ","
         "\"challenged_at\":%" APR_TIME_T_FMT ",\"auto\":%d,"
-        "\"signature\":\"%s\""
+        "\"signature\":\"%s\","
+        "\"bound_ip\":\"%s\",\"bootstrap_sig\":\"%s\""
         "}}\n",
         ch.version, ch.alg_name, salt_hex, nonce_hex,
         ch.difficulty, ch.expires_at,
         ch.rep.challenged_at, ch.auto_tier,
-        sig_hex);
+        sig_hex, bound_ip_hex, bootstrap_sig_hex);
     return OK;
+}
+
+/* Security review MEDIUM #2 — IP-binding for the bootstrap → verify
+ * pathway. At bootstrap time we sign (nonce, bound_ip, expires_at)
+ * with a per-purpose HKDF-derived key (`derived_hmac_bootstrap`).
+ * At verify time we recompute the HMAC and also compare bound_ip
+ * against the verifying request's IP. A challenge issued from one
+ * IP cannot be redeemed from another — closes Attack 3
+ * (distributed redemption) from the security-review writeup.
+ *
+ * bound_ip is rendered as a 32-char lowercase hex string of the
+ * 16 raw bytes (IPv4 maps to ::ffff:V.V.V.V already in the parser).
+ * Format-stable across IPv4 / IPv6.
+ *
+ * Output: 32-byte hex string + NUL into out_hex (33 bytes). */
+static int bs_format_bound_ip_hex(const char *useragent_ip, char out_hex[33])
+{
+    unsigned char ip_bytes[16];
+    if (!useragent_ip || !*useragent_ip) return 0;
+    if (!bs_parse_client_ip(useragent_ip, ip_bytes)) return 0;
+    bs_to_hex(ip_bytes, 16, out_hex);
+    return 1;
+}
+
+/* Compute the bootstrap-binding HMAC over
+ *   "bs:bootstrap:v1:" || nonce_hex || ":" || bound_ip_hex || ":"
+ *   || expires_at (decimal ASCII)
+ * using the dir_cfg's derived bootstrap key. Output is hex-encoded
+ * into out_sig_hex (65 bytes). */
+static void bs_compute_bootstrap_sig(apr_pool_t *p,
+                                     const unsigned char key[32],
+                                     const char *nonce_hex,
+                                     const char *bound_ip_hex,
+                                     apr_time_t expires_at,
+                                     char out_sig_hex[BS_SIG_BYTES * 2 + 1])
+{
+    const char *canon = apr_psprintf(p,
+        "bs:bootstrap:v1:%s:%s:%" APR_TIME_T_FMT,
+        nonce_hex, bound_ip_hex, expires_at);
+    unsigned char mac[BS_SIG_BYTES];
+    bs_hmac_sha256(key, 32, (const unsigned char *)canon,
+                   strlen(canon), mac);
+    bs_to_hex(mac, BS_SIG_BYTES, out_sig_hex);
+}
+
+/* Verify a bootstrap-binding signature presented at /embedded-verify.
+ * Reconstructs the canon from the inputs (which must round-trip
+ * verbatim from the bootstrap response), computes the HMAC under the
+ * primary derived key, falls back to the secondary if E16 rotation
+ * is in progress. Returns 1 on accept, 0 on reject. The bound_ip
+ * comparison against r->useragent_ip happens separately at the
+ * verify call site. */
+static int bs_verify_bootstrap_sig(apr_pool_t *p,
+                                   const bs_dir_cfg *cfg,
+                                   const char *nonce_hex,
+                                   const char *bound_ip_hex,
+                                   apr_time_t expires_at,
+                                   const char *sig_hex_in)
+{
+    if (!cfg->derived_keys_set) return 0;
+    if (!sig_hex_in || strlen(sig_hex_in) != BS_SIG_BYTES * 2) return 0;
+    unsigned char sig_in[BS_SIG_BYTES];
+    if (!bs_from_hex(sig_hex_in, BS_SIG_BYTES, sig_in)) return 0;
+
+    char expected_hex[BS_SIG_BYTES * 2 + 1];
+    bs_compute_bootstrap_sig(p, cfg->derived_hmac_bootstrap,
+                              nonce_hex, bound_ip_hex,
+                              expires_at, expected_hex);
+    unsigned char expected[BS_SIG_BYTES];
+    bs_from_hex(expected_hex, BS_SIG_BYTES, expected);
+    if (bs_ct_equal(sig_in, expected, BS_SIG_BYTES)) return 1;
+
+    /* E16 rotation — try secondary derived bootstrap key. */
+    if (cfg->derived_keys_set_2) {
+        bs_compute_bootstrap_sig(p, cfg->derived_hmac_bootstrap_2,
+                                  nonce_hex, bound_ip_hex,
+                                  expires_at, expected_hex);
+        bs_from_hex(expected_hex, BS_SIG_BYTES, expected);
+        if (bs_ct_equal(sig_in, expected, BS_SIG_BYTES)) return 1;
+    }
+    return 0;
 }
 
 /* Pull a string field out of a parsed JSON object, returning a pool-
@@ -12822,6 +12986,50 @@ static int bs_embedded_verify_pow(request_rec *r, bs_dir_cfg *cfg,
         !bs_from_hex(sig_hex,   BS_SIG_BYTES,   ch.signature)) {
         r->status = HTTP_BAD_REQUEST;
         return OK;
+    }
+
+    /* MEDIUM #2 — IP-binding check. The bootstrap response carried
+     * a (bound_ip, bootstrap_sig) pair signed under the per-purpose
+     * derived bootstrap key. Verify the HMAC, then compare bound_ip
+     * against the current request's client IP. Mismatch ⇒ reject:
+     * a challenge issued from one IP cannot be redeemed from
+     * another (closes Attack 3). */
+    const char *bound_ip_hex = bs_json_get_str(r->pool, root,
+                                                "bound_ip", 32);
+    const char *bootstrap_sig_hex = bs_json_get_str(r->pool, root,
+                                                "bootstrap_sig",
+                                                BS_SIG_BYTES * 2);
+    if (!bound_ip_hex || !bootstrap_sig_hex ||
+        strlen(bound_ip_hex) != 32) {
+        r->status = HTTP_BAD_REQUEST;
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: embedded-verify(pow): missing or "
+            "malformed bound_ip / bootstrap_sig");
+        return OK;
+    }
+    if (!bs_verify_bootstrap_sig(r->pool, cfg, nonce_hex,
+                                  bound_ip_hex, ch.expires_at,
+                                  bootstrap_sig_hex)) {
+        r->status = HTTP_FORBIDDEN;
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: embedded-verify(pow): bad bootstrap_sig "
+            "(IP-binding tampered or wrong key)");
+        return OK;
+    }
+    {
+        char observed_ip_hex[33];
+        if (!bs_format_bound_ip_hex(r->useragent_ip, observed_ip_hex)) {
+            r->status = HTTP_BAD_REQUEST;
+            return OK;
+        }
+        if (strcasecmp(observed_ip_hex, bound_ip_hex) != 0) {
+            r->status = HTTP_FORBIDDEN;
+            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                "mod_botshield: embedded-verify(pow): IP-bind "
+                "mismatch (issued for %s, redeemed from %s)",
+                bound_ip_hex, observed_ip_hex);
+            return OK;
+        }
     }
 
     /* Validate the HMAC against the canonical form. This proves the
@@ -13012,6 +13220,50 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
         ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
             "mod_botshield: embedded-verify(pow-gcm): %s", err);
         return OK;
+    }
+
+    /* MEDIUM #2 — IP-binding check. See bs_embedded_verify_pow for
+     * the rationale; same shape applies here. nonce_hex is rebuilt
+     * from ch.nonce since this code path doesn't extract it from
+     * top-level JSON. */
+    {
+        char nonce_hex_buf[BS_NONCE_BYTES * 2 + 1];
+        bs_to_hex(ch.nonce, BS_NONCE_BYTES, nonce_hex_buf);
+        const char *bound_ip_hex = bs_json_get_str(r->pool, root,
+                                                    "bound_ip", 32);
+        const char *bootstrap_sig_hex = bs_json_get_str(r->pool, root,
+                                                    "bootstrap_sig",
+                                                    BS_SIG_BYTES * 2);
+        if (!bound_ip_hex || !bootstrap_sig_hex ||
+            strlen(bound_ip_hex) != 32) {
+            r->status = HTTP_BAD_REQUEST;
+            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                "mod_botshield: embedded-verify(pow-gcm): missing or "
+                "malformed bound_ip / bootstrap_sig");
+            return OK;
+        }
+        if (!bs_verify_bootstrap_sig(r->pool, cfg, nonce_hex_buf,
+                                      bound_ip_hex, ch.expires_at,
+                                      bootstrap_sig_hex)) {
+            r->status = HTTP_FORBIDDEN;
+            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                "mod_botshield: embedded-verify(pow-gcm): bad "
+                "bootstrap_sig");
+            return OK;
+        }
+        char observed_ip_hex[33];
+        if (!bs_format_bound_ip_hex(r->useragent_ip, observed_ip_hex)) {
+            r->status = HTTP_BAD_REQUEST;
+            return OK;
+        }
+        if (strcasecmp(observed_ip_hex, bound_ip_hex) != 0) {
+            r->status = HTTP_FORBIDDEN;
+            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                "mod_botshield: embedded-verify(pow-gcm): IP-bind "
+                "mismatch (issued for %s, redeemed from %s)",
+                bound_ip_hex, observed_ip_hex);
+            return OK;
+        }
     }
 
     /* Carry forward + set passes_silent — same shape as the HMAC
@@ -15352,10 +15604,14 @@ static const char BS_WIDGET_TEMPLATE[] =
 "   var body;\n"
 "   if (CH.cookie_prefix) {\n"
 "    /* GCM mode — server-encrypted envelope; client only sends\n"
-"       prefix + counter, server decrypts + verifies + re-mints. */\n"
+"       prefix + counter, server decrypts + verifies + re-mints.\n"
+"       MEDIUM #2 — round-trip bound_ip + bootstrap_sig for\n"
+"       IP-binding. */\n"
 "    body = JSON.stringify({\n"
 "     provider: 'pow-gcm',\n"
 "     cookie_prefix: CH.cookie_prefix,\n"
+"     bound_ip: CH.bound_ip,\n"
+"     bootstrap_sig: CH.bootstrap_sig,\n"
 "     counter: counterVal\n"
 "    });\n"
 "   } else {\n"
@@ -15363,7 +15619,10 @@ static const char BS_WIDGET_TEMPLATE[] =
 "       signed (including rep state — score, flags, passes_*,\n"
 "       forgive_*) plus our counter. The HMAC verify on the\n"
 "       server reconstructs canonical from these fields and any\n"
-"       missing/tampered field will mismatch the signature. */\n"
+"       missing/tampered field will mismatch the signature.\n"
+"       MEDIUM #2 — round-trip bound_ip + bootstrap_sig too\n"
+"       so the server can confirm the verifying IP matches the\n"
+"       IP at issue time. */\n"
 "    body = JSON.stringify({\n"
 "     provider: 'pow',\n"
 "     v: CH.v, alg: CH.alg,\n"
@@ -15379,6 +15638,8 @@ static const char BS_WIDGET_TEMPLATE[] =
 "     forgive_window_start: CH.forgive_window_start,\n"
 "     forgive_consumed: CH.forgive_consumed,\n"
 "     signature: CH.signature,\n"
+"     bound_ip: CH.bound_ip,\n"
+"     bootstrap_sig: CH.bootstrap_sig,\n"
 "     counter: counterVal\n"
 "    });\n"
 "   }\n"
@@ -16168,7 +16429,7 @@ static int bs_handler(request_rec *r)
                         cookie_status, "-", "-", "issue_failed", effective);
         return OK;
     }
-    const char *challenge_js = bs_challenge_json(r->pool, cfg, &challenge);
+    const char *challenge_js = bs_challenge_json(r, r->pool, cfg, &challenge);
 
     const char *prompt     = cfg->prompt     ? cfg->prompt     : BS_DEFAULT_PROMPT;
     const char *logo_svg   = cfg->logo_svg   ? cfg->logo_svg   : BS_DEFAULT_LOGO_SVG;
