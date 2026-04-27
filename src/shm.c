@@ -1,6 +1,6 @@
-/* botshield_shm.c — SHM table machinery for mod_botshield.
+/* shm.c — SHM table machinery for mod_botshield.
  *
- * See botshield_shm.h for the design narrative on why five similarly-
+ * See shm.h for the design narrative on why five similarly-
  * shaped tables live here. This file owns:
  *
  *   - The bs_shm runtime global (struct definition: bs_shm_runtime in
@@ -24,7 +24,7 @@
  *     unified walker dispatches per-table predicates so the four-table
  *     scan shares a single rate-limited warning state. */
 
-#include "botshield_shm.h"
+#include "shm.h"
 
 #include <string.h>
 #include <stddef.h>

@@ -61,7 +61,7 @@
 #include <limits.h>
 
 #include "robots.h"        /* E2.2 — robots.txt parser/matcher */
-#include "botshield_shm.h" /* SHM tables, state save/load, headroom watchdog */
+#include "shm.h" /* SHM tables, state save/load, headroom watchdog */
 
 module AP_MODULE_DECLARE_DATA botshield_module;
 
@@ -3039,7 +3039,7 @@ static void bs_mask_ipv6_prefix(unsigned char ip[16], int prefix_bits);
  * walk. Declaration here so the walk compiles before the body. */
 static bs_load_state bs_load_current(void);
 /* SHM-table flagged-IP / strike / safeguard helpers all live in
- * botshield_shm.h. */
+ * shm.h. */
 /* Shared action helpers — see definitions below. The server-cfg
  * struct body appears later in the file, so we forward-declare by
  * struct tag and use `struct bs_server_cfg *` in the signature. */
