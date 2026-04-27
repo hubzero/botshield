@@ -350,6 +350,21 @@ mod_botshield: decision tier=captcha outcome=verified ip=203.0.113.42
     reason="-" path="/captcha-demo"
 ```
 
+The decision log emits at Apache's `info` level. Apache's default
+`LogLevel` is `warn`, so the line is invisible until you opt in.
+Bump just this module to make it visible without raising the
+verbosity of the rest of the server:
+
+```apache
+LogLevel mod_botshield:info
+```
+
+The `reason`, `path`, and `tag` fields are quoted; embedded `"`
+and `\` characters are URL-percent-encoded (`%22` and `%5C`) so a
+hand-rolled HTTP client sending an adversarial URI can't break
+log-parser tokenization. Browser traffic is unaffected — browsers
+already %-encode those bytes before sending.
+
 Enum sets:
 
 - `tier`     = `none` | `pass` | `silent` | `form` | `captcha`
