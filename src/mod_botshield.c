@@ -9663,50 +9663,60 @@ static int bs_flag_penalty(apr_uint32_t flags)
     return p;
 }
 
-/* Carry-forward eligibility predicate. Reads the request's
- * __Host-bs_verified cookie, verifies it, and decides whether its
- * rep block can carry into a freshly-minted cookie at this issuance
- * site.
+/* Decide whether the rep block in *prior_ch can be carried into a
+ * freshly-minted cookie, given the cverr that bs_verify_cookie just
+ * returned.
  *
- * Returns 1 with *out_prior_ch populated when the prior cookie's rep
- * is trustworthy and current. Returns 0 (and leaves *out_prior_ch
- * untouched beyond what bs_verify_cookie wrote) on any of:
+ * Reject when:
+ *   - cverr == "signature mismatch"  (rep bytes can't be trusted)
+ *   - cverr == "expired"  ── Security review MEDIUM #1: TTL is the
+ *     only mechanism preventing indefinite reputation transfer
+ *     across cookie generations. A leaked or stolen cookie that has
+ *     aged past TTL must NOT be allowed to transplant good-standing
+ *     rep into a fresh _bs_verified via any solve path.
+ *   - cverr is some other pre-auth failure (decode errors, wrong
+ *     field count, "no secret configured", etc.) — bs_verify_cookie
+ *     leaves *prior_ch unwritten in those branches, so
+ *     prior_ch->alg_name is NULL and we reject.
  *
- *   - cookie absent
- *   - signature/tag mismatch (rep bytes can't be trusted)
- *   - "expired"  ── Security review MEDIUM #1: TTL is the only
- *     mechanism preventing indefinite reputation transfer across
- *     cookie generations. A leaked or stolen cookie that has aged
- *     past TTL must NOT be allowed to transplant good-standing rep
- *     into a fresh _bs_verified via the captcha solve path.
- *   - any other pre-auth failure (decode errors, wrong field count,
- *     "no secret configured", etc. — *out_ch is unset in those
- *     branches, so prior_ch.alg_name remains NULL and we reject)
+ * Accept when:
+ *   - cverr == NULL  (cookie fully validated)
+ *   - cverr names a post-tag-verification failure (PoW counter
+ *     check, etc.) — bs_verify_cookie wrote authenticated rep into
+ *     *prior_ch and prior_ch->alg_name is non-NULL.
  *
- * Recoverable cverr values that arrive AFTER GCM tag verification
- * (PoW counter check failure, etc.) populate prior_ch.alg_name and
- * carry the authenticated rep block — we accept those.
+ * This is the load-bearing carry-forward gate. Both the issuance-
+ * side helper (bs_carry_forward_eligible) and the render-side
+ * predicate in bs_handler share this single source of truth so a
+ * change to the rule only has to land here. The original review
+ * (MEDIUM #1) was a four-site fix that the issuance-side
+ * consolidation collapsed to one site; reusing this predicate from
+ * bs_handler closes the same drift gap on the render side. */
+static int bs_should_carry_prior_rep(const char *cverr,
+                                      const bs_challenge *prior_ch)
+{
+    if (cverr == NULL) return 1;
+    if (strcmp(cverr, "signature mismatch") == 0) return 0;
+    if (strcmp(cverr, "expired") == 0) return 0;          /* MEDIUM #1 */
+    return prior_ch->alg_name ? 1 : 0;
+}
+
+/* Carry-forward eligibility predicate for issuance call sites. Reads
+ * the request's __Host-bs_verified cookie, verifies it, and applies
+ * bs_should_carry_prior_rep to the result. Returns 1 with *out_prior_ch
+ * populated when carry-forward is allowed; 0 (and leaves *out_prior_ch
+ * untouched beyond what bs_verify_cookie wrote) when not.
  *
- * This predicate replaces four near-identical inline blocks across
- * bs_embedded_verify_pow_gcm, bs_embedded_verify_provider,
- * bs_captcha_verify_handler, and bs_form_captcha_replay. The MEDIUM
- * #1 fix landed in all four in parallel; future fixes to this
- * predicate land here once. */
+ * Used by bs_embedded_verify_pow_gcm, bs_embedded_verify_provider,
+ * bs_captcha_verify_handler, and bs_form_captcha_replay. */
 static int bs_carry_forward_eligible(request_rec *r,
                                       const bs_dir_cfg *cfg,
                                       bs_challenge *out_prior_ch)
 {
     const char *prior_val = bs_get_verified_cookie_value(r);
     if (!prior_val || !*prior_val) return 0;
-
     const char *cverr = bs_verify_cookie(r, cfg, prior_val, out_prior_ch);
-    if (cverr == NULL) return 1;
-    if (strcmp(cverr, "signature mismatch") == 0) return 0;
-    if (strcmp(cverr, "expired") == 0) return 0;          /* MEDIUM #1 */
-    /* Any other cverr is acceptable only if bs_verify_cookie wrote
-     * an authenticated rep block — alg_name being non-NULL is the
-     * "tag passed, then a later semantic check rejected" signal. */
-    return out_prior_ch->alg_name ? 1 : 0;
+    return bs_should_carry_prior_rep(cverr, out_prior_ch);
 }
 
 /* Apply the rep-carry-forward computation to *target.
@@ -15651,9 +15661,18 @@ static int bs_handler(request_rec *r)
     int cookie_had_val = (cookie_val && *cookie_val);
     if (cookie_had_val) {
         cookie_verify_reason = bs_verify_cookie(r, cfg, cookie_val, &prior_ch);
+        /* MEDIUM #1: render-side carry-forward must reject the same
+         * cverrs the issuance-side carry-forward rejects, otherwise
+         * an expired cookie's rep can be transplanted via the
+         * interstitial-render path (next_rep is baked into the
+         * challenge envelope and round-tripped through the JS,
+         * arriving at /embedded-verify before the issuance-side
+         * predicate sees it). Sharing bs_should_carry_prior_rep
+         * keeps the two predicates from drifting. */
+        have_prior_rep = bs_should_carry_prior_rep(cookie_verify_reason,
+                                                    &prior_ch);
         if (!cookie_verify_reason) {
             cookie_fully_ok = 1;
-            have_prior_rep  = 1;
             /* E10 — safeguard clear on solve. A successful verify
              * proves this client CAN complete a challenge, so any
              * accumulated presentation history was transient noise
@@ -15672,9 +15691,6 @@ static int bs_handler(request_rec *r)
                 }
             }
         } else {
-            if (strcmp(cookie_verify_reason, "signature mismatch") != 0) {
-                have_prior_rep = 1;
-            }
             /* Security review LOW #2 — log the cookie name actually
              * present so a sed-renamed test can grep for the right
              * literal. The dual-name helper hides which variant was
