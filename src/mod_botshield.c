@@ -151,27 +151,24 @@ module AP_MODULE_DECLARE_DATA botshield_module;
 #define BS_PROTOCOL_VERSION   2
 #define BS_SALT_BYTES         16
 #define BS_NONCE_BYTES        8
-#define BS_SIG_BYTES          32  /* HMAC-SHA-256 output */
-#define BS_COOKIE_FIELDS      17  /* full cookie payload; canonical is 15 */
+#define BS_SIG_BYTES          32  /* HMAC-SHA-256 output (used for bootstrap_sig) */
 
-/* E8.1 — AES-256-GCM cookie wire format.
+/* AES-256-GCM cookie wire format.
  *
  * Wire format:   base64( alg_id(1) || nonce(12) || ct || tag(16) )
  *                + "." + counter
  *
  *   alg_id is authenticated via AAD so an attacker can't swap
- *   primitives. ct is the AES-GCM encryption of the same canonical
- *   pipe-delimited form the HMAC path builds. Counter rides outside
- *   the ciphertext because the PoW JS builds the cookie client-side
+ *   primitives. ct is the AES-GCM encryption of the canonical
+ *   pipe-delimited challenge form. Counter rides outside the
+ *   ciphertext because the PoW JS builds the cookie client-side
  *   without the AES key — it appends its computed counter to the
- *   server-issued encrypted prefix and sets the cookie. Server-built
- *   cookies (captcha tier) use "captcha" as the counter sentinel on
- *   the same dot-suffix.
+ *   server-issued encrypted prefix. Server-built cookies (captcha
+ *   tier) use "captcha" as the counter sentinel on the same dot
+ *   suffix.
  *
- * AES-256 key is derived from cfg->secret via SHA-256, so:
- *   - operators keep a single BotShieldSecretFile
- *   - HMAC and GCM use distinct domain-separated keys from the same
- *     material (HMAC uses the raw bytes; GCM uses the digest) */
+ * AES-256 key is HKDF-Expand'd from cfg->secret with the
+ * "bs:cookie:gcm:v1" purpose tag (see bs_derive_purpose_keys). */
 #define BS_COOKIE_ALG_GCM     0x01
 #define BS_GCM_NONCE_LEN      12
 #define BS_GCM_TAG_LEN        16
@@ -179,16 +176,6 @@ module AP_MODULE_DECLARE_DATA botshield_module;
 /* Separator byte in AES-GCM wire format between the base64 envelope
  * and the plaintext counter. `.` because it's not in standard base64
  * alphabet — unambiguous split point. */
-
-/* E8.1 — BotShieldCookieFormat bitmap. Bits are accepted *verify*
- * formats; issuer prefers GCM when that bit is set. Both bits set
- * is the migration mode ("issue GCM, accept either"). Field value
- * BS_FMT_UNSET (-1) means operator didn't write the directive; the
- * effective format falls back to BS_FMT_HMAC (legacy default until
- * operators opt in). */
-#define BS_FMT_HMAC           0x01
-#define BS_FMT_GCM            0x02
-#define BS_FMT_UNSET          (-1)
 
 /* Forward declarations for the PoW algorithm dispatch table. */
 typedef struct bs_dir_cfg bs_dir_cfg;
@@ -838,23 +825,20 @@ struct bs_dir_cfg {
      * leaking one tells an attacker nothing about the others.
      * `derived_*_keys_set` is 1 once the master is loaded and
      * derivation succeeded; the request path checks it before use. */
-    unsigned char    derived_hmac_cookie    [32];
     unsigned char    derived_gcm_cookie     [32];
     unsigned char    derived_hmac_pending   [32];
     /* MEDIUM #2 — separate purpose key for the bootstrap → verify
-     * IP-binding HMAC. Kept distinct from derived_hmac_cookie so
-     * the bound-ip signature can't be repurposed as a cookie
-     * signature or vice versa. */
+     * IP-binding HMAC. Kept distinct from the cookie key so the
+     * bound-ip signature can't be repurposed against the cookie or
+     * vice versa. */
     unsigned char    derived_hmac_bootstrap [32];
     int              derived_keys_set;
     /* Same for the secondary key, populated when
      * BotShieldSecondarySecretFile is configured. */
-    unsigned char    derived_hmac_cookie_2  [32];
     unsigned char    derived_gcm_cookie_2   [32];
     unsigned char    derived_hmac_pending_2 [32];
     unsigned char    derived_hmac_bootstrap_2[32];
     int              derived_keys_set_2;
-    int                     cookie_format;  /* BS_FMT_* bitmap or BS_FMT_UNSET */
     int score_silent;           /* score >= this → silent tier (logged only) */
     int score_hard;             /* score >= this → hard form-PoW tier */
     int score_captcha;          /* score >= this → captcha tier */
@@ -1120,7 +1104,6 @@ static void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->secret_len = 0;
     cfg->secret_secondary     = NULL;
     cfg->secret_secondary_len = 0;
-    cfg->cookie_format = BS_FMT_UNSET;
     cfg->score_silent  = BS_UNSET;
     cfg->score_hard    = BS_UNSET;
     cfg->score_captcha = BS_UNSET;
@@ -1480,8 +1463,6 @@ static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     if (add->secret) {
         out->secret     = add->secret;
         out->secret_len = add->secret_len;
-        memcpy(out->derived_hmac_cookie,
-               add->derived_hmac_cookie,    32);
         memcpy(out->derived_gcm_cookie,
                add->derived_gcm_cookie,     32);
         memcpy(out->derived_hmac_pending,
@@ -1492,8 +1473,6 @@ static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     } else {
         out->secret     = base->secret;
         out->secret_len = base->secret_len;
-        memcpy(out->derived_hmac_cookie,
-               base->derived_hmac_cookie,    32);
         memcpy(out->derived_gcm_cookie,
                base->derived_gcm_cookie,     32);
         memcpy(out->derived_hmac_pending,
@@ -1509,8 +1488,6 @@ static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     if (add->secret_secondary) {
         out->secret_secondary     = add->secret_secondary;
         out->secret_secondary_len = add->secret_secondary_len;
-        memcpy(out->derived_hmac_cookie_2,
-               add->derived_hmac_cookie_2,    32);
         memcpy(out->derived_gcm_cookie_2,
                add->derived_gcm_cookie_2,     32);
         memcpy(out->derived_hmac_pending_2,
@@ -1521,8 +1498,6 @@ static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     } else {
         out->secret_secondary     = base->secret_secondary;
         out->secret_secondary_len = base->secret_secondary_len;
-        memcpy(out->derived_hmac_cookie_2,
-               base->derived_hmac_cookie_2,    32);
         memcpy(out->derived_gcm_cookie_2,
                base->derived_gcm_cookie_2,     32);
         memcpy(out->derived_hmac_pending_2,
@@ -1531,9 +1506,6 @@ static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
                base->derived_hmac_bootstrap_2, 32);
         out->derived_keys_set_2 = base->derived_keys_set_2;
     }
-    out->cookie_format = (add->cookie_format == BS_FMT_UNSET)
-                       ? base->cookie_format
-                       : add->cookie_format;
     out->score_silent  = (add->score_silent  == BS_UNSET) ? base->score_silent  : add->score_silent;
     out->score_hard    = (add->score_hard    == BS_UNSET) ? base->score_hard    : add->score_hard;
     out->score_captcha = (add->score_captcha == BS_UNSET) ? base->score_captcha : add->score_captcha;
@@ -1965,23 +1937,18 @@ static int bs_hkdf_derive_key(const unsigned char *master,
  * key bytes have been validated. Returns NULL on success; on
  * (vanishingly unlikely) HKDF failure returns a diagnostic string
  * the directive setter surfaces as a fatal config error so the
- * module refuses to start with a broken key derivation. The 3
- * purpose tags map 1:1 to derived_hmac_cookie / derived_gcm_cookie
- * / derived_hmac_pending in the dir_cfg. Bumping any tag (e.g.
- * "bs:cookie:hmac:v2") is the rotation knob if the underlying
+ * module refuses to start with a broken key derivation. The purpose
+ * tags map 1:1 to derived_gcm_cookie / derived_hmac_pending /
+ * derived_hmac_bootstrap in the dir_cfg. Bumping any tag (e.g.
+ * "bs:cookie:gcm:v2") is the rotation knob if the underlying
  * crypto contract ever changes. */
 static const char *bs_derive_purpose_keys(apr_pool_t *p,
                                           const unsigned char *master,
                                           apr_size_t master_len,
-                                          unsigned char *out_hmac,
                                           unsigned char *out_gcm,
                                           unsigned char *out_pending,
                                           unsigned char *out_bootstrap)
 {
-    if (!bs_hkdf_derive_key(master, master_len,
-                            "bs:cookie:hmac:v1", out_hmac)) {
-        return apr_psprintf(p, "HKDF(bs:cookie:hmac:v1) failed");
-    }
     if (!bs_hkdf_derive_key(master, master_len,
                             "bs:cookie:gcm:v1", out_gcm)) {
         return apr_psprintf(p, "HKDF(bs:cookie:gcm:v1) failed");
@@ -2284,15 +2251,6 @@ done:
     EVP_CIPHER_CTX_free(ctx);
     /* LOW #3 — borrowed key, see encrypt path comment. */
     return err;
-}
-
-/* Effective cookie-format bitmap for a given dir_cfg, substituting
- * the legacy default when the operator hasn't written the directive
- * at any inherited scope. */
-static int bs_effective_cookie_format(const bs_dir_cfg *cfg)
-{
-    return (cfg && cfg->cookie_format != BS_FMT_UNSET)
-         ? cfg->cookie_format : BS_FMT_HMAC;
 }
 
 /* Hex helpers. Writes 2*len chars + NUL. */
@@ -9800,8 +9758,8 @@ static apr_uint32_t bs_parse_flag_names(apr_pool_t *p, const char *s,
     return bits;
 }
 
-/* E8.1 — GCM cookie prefix builder. Encrypts the same canonical
- * pipe-delimited form the HMAC path signs, base64-encodes
+/* GCM cookie prefix builder. Encrypts the canonical pipe-delimited
+ * challenge form, base64-encodes
  *     alg_id(1) || nonce(12) || ciphertext || tag(16)
  * for the JS interstitial to append '.<counter>' to when the PoW
  * worker completes. Also used by the server-built captcha cookie
@@ -9835,13 +9793,11 @@ static const char *bs_build_cookie_prefix_gcm(apr_pool_t *p,
  * needed inside a <script> tag.
  *
  * Also carries the cookie_domain (if configured) so the JS can include
- * a Domain= attribute when calling document.cookie.
+ * a Domain= attribute when needed.
  *
- * E8.1 — under GCM issue format the rep block is omitted from the
- * JSON (that's the whole point of encryption: the client shouldn't
- * see score/flags/passes_*). Instead the JSON carries an opaque
- * cookie_prefix base64 blob that the JS appends `.<counter>` to.
- * Under HMAC issue format the legacy shape stays byte-identical. */
+ * The rep block is omitted (that's the whole point of GCM: the client
+ * shouldn't see score/flags/passes_*). The JSON carries an opaque
+ * cookie_prefix base64 blob that the JS appends `.<counter>` to. */
 static const char *bs_challenge_json(request_rec *r, apr_pool_t *p,
                                      const bs_dir_cfg *cfg,
                                      const bs_challenge *ch)
@@ -9872,42 +9828,16 @@ static const char *bs_challenge_json(request_rec *r, apr_pool_t *p,
             ",\"bound_ip\":\"%s\",\"bootstrap_sig\":\"%s\"",
             bound_ip_hex, bootstrap_sig_hex)
         : "";
-    int fmt = bs_effective_cookie_format(cfg);
-    if (fmt & BS_FMT_GCM) {
-        const char *prefix_b64 = NULL;
-        const char *err = bs_build_cookie_prefix_gcm(p, cfg, ch, &prefix_b64);
-        if (!err) {
-            return apr_psprintf(p,
-                "{\"salt\":\"%s\",\"nonce\":\"%s\",\"difficulty\":%d,"
-                "\"expires_at\":%" APR_TIME_T_FMT ",\"auto\":%d,"
-                "\"cookie_prefix\":\"%s\"%s%s}",
-                salt_hex, nonce_hex, ch->difficulty, ch->expires_at,
-                ch->auto_tier ? 1 : 0, prefix_b64, domain_json,
-                bind_json);
-        }
-        /* Encryption failed at render time. Rather than serve a broken
-         * page, fall through to the HMAC shape — the verifier will
-         * still accept it if HMAC is in the allow-list. Operators see
-         * the diagnostic in the error log. */
-    }
-    char sig_hex[BS_SIG_BYTES * 2 + 1];
-    bs_to_hex(ch->signature, BS_SIG_BYTES, sig_hex);
+    const char *prefix_b64 = NULL;
+    const char *err = bs_build_cookie_prefix_gcm(p, cfg, ch, &prefix_b64);
+    if (err) return NULL;
     return apr_psprintf(p,
-        "{\"v\":%d,\"alg\":\"%s\",\"salt\":\"%s\",\"nonce\":\"%s\","
-        "\"difficulty\":%d,\"expires_at\":%" APR_TIME_T_FMT ","
-        "\"score\":%d,\"flags\":%u,"
-        "\"passes_silent\":%d,\"passes_form\":%d,\"passes_captcha\":%d,"
-        "\"challenged_at\":%" APR_TIME_T_FMT ",\"auto\":%d,"
-        "\"forgive_window_start\":%u,\"forgive_consumed\":%u,"
-        "\"signature\":\"%s\"%s%s}",
-        ch->version, ch->alg_name, salt_hex, nonce_hex,
-        ch->difficulty, ch->expires_at,
-        ch->rep.score, (unsigned)ch->rep.flags,
-        ch->rep.passes_silent, ch->rep.passes_form, ch->rep.passes_captcha,
-        ch->rep.challenged_at, ch->auto_tier ? 1 : 0,
-        (unsigned)ch->rep.forgive_window_start,
-        (unsigned)ch->rep.forgive_consumed,
-        sig_hex, domain_json, bind_json);
+        "{\"salt\":\"%s\",\"nonce\":\"%s\",\"difficulty\":%d,"
+        "\"expires_at\":%" APR_TIME_T_FMT ",\"auto\":%d,"
+        "\"cookie_prefix\":\"%s\"%s%s}",
+        salt_hex, nonce_hex, ch->difficulty, ch->expires_at,
+        ch->auto_tier ? 1 : 0, prefix_b64, domain_json,
+        bind_json);
 }
 
 /* --- Top-level issue / verify ---
@@ -9965,19 +9895,15 @@ static const char *bs_issue_challenge(apr_pool_t *p, const bs_dir_cfg *cfg,
     const char *err = alg->issue(cfg, out);
     if (err) return err;
 
-    const char *canon = bs_challenge_canonical(p, out);
-    /* LOW #3 — issue uses the HKDF-derived cookie HMAC key. */
-    bs_hmac_sha256(cfg->derived_hmac_cookie, 32,
-                   (const unsigned char *)canon, strlen(canon),
-                   out->signature);
+    /* GCM-only — the canonical bytes are authenticated by the GCM tag
+     * inside the cookie envelope; ch.signature is unused on the wire. */
     return NULL;
 }
 
 /* Parse the 15 pipe-delimited canonical-form fields (same shape
- * emitted by bs_challenge_canonical, whether it arrived cleartext
- * from an HMAC cookie or as GCM plaintext) into *ch. Returns NULL
- * on success or a diagnostic on parse failure. Caller has already
- * split the canonical string at '|' into fields[0..14].
+ * emitted by bs_challenge_canonical, after GCM-decrypt) into *ch.
+ * Returns NULL on success or a diagnostic on parse failure. Caller
+ * has already split the canonical string at '|' into fields[0..14].
  *
  * Field count grew from 13 to 15 with BS_PROTOCOL_VERSION 1->2 to
  * carry forgiveness-window state. The version check rejects v1
@@ -10091,105 +10017,23 @@ static const char *bs_parse_canonical_fields(char *const fields[],
 }
 
 /* Build the base64-encoded cookie payload for a challenge + counter.
- * Dispatches on the effective cookie format:
- *   HMAC (legacy): base64(canonical | sig_hex | counter) in a single
- *                  15-field pipe-delimited blob — byte-identical to
- *                  what the JS interstitial assembles in HMAC mode.
- *   GCM  (E8.1):   base64(alg_id || nonce || ct || tag) + "." + counter
- *                  The server builds this form when issuing captcha
- *                  cookies (counter = "captcha"); the JS builds the
- *                  same shape in PoW mode from the cookie_prefix we
- *                  expose in bs_challenge_json. */
+ * Wire form: base64(alg_id || nonce || ct || tag) + "." + counter.
+ * The server builds this when issuing captcha cookies (counter =
+ * "captcha"); the JS builds the same shape from the cookie_prefix
+ * exposed in bs_challenge_json. */
 static const char *bs_build_cookie_payload(apr_pool_t *p,
                                            const bs_dir_cfg *cfg,
                                            const bs_challenge *ch,
                                            const char *counter_str)
 {
-    int fmt = bs_effective_cookie_format(cfg);
-    if (fmt & BS_FMT_GCM) {
-        const char *prefix_b64 = NULL;
-        const char *err = bs_build_cookie_prefix_gcm(p, cfg, ch, &prefix_b64);
-        if (err) return NULL;
-        return apr_psprintf(p, "%s%c%s", prefix_b64,
-                            BS_GCM_COUNTER_SEP, counter_str);
-    }
-    char sig_hex[BS_SIG_BYTES * 2 + 1];
-    bs_to_hex(ch->signature, BS_SIG_BYTES, sig_hex);
-    const char *canon = bs_challenge_canonical(p, ch);
-    const char *joined = apr_psprintf(p, "%s|%s|%s",
-                                      canon, sig_hex, counter_str);
-    apr_size_t joined_len = strlen(joined);
-    char *b64 = apr_palloc(p, apr_base64_encode_len((int)joined_len) + 1);
-    apr_base64_encode(b64, joined, (int)joined_len);
-    return b64;
+    const char *prefix_b64 = NULL;
+    const char *err = bs_build_cookie_prefix_gcm(p, cfg, ch, &prefix_b64);
+    if (err) return NULL;
+    return apr_psprintf(p, "%s%c%s", prefix_b64,
+                        BS_GCM_COUNTER_SEP, counter_str);
 }
 
-/* Verify a legacy HMAC-format cookie. 15 pipe-delimited fields,
- * base64-encoded as a single blob. Caller guarantees the cookie
- * doesn't contain BS_GCM_COUNTER_SEP (the '.' split point for GCM). */
-static const char *bs_verify_cookie_hmac(request_rec *r,
-                                         const bs_dir_cfg *cfg,
-                                         const char *cookie_b64,
-                                         bs_challenge *out_ch)
-{
-    char *decoded = apr_palloc(r->pool, apr_base64_decode_len(cookie_b64) + 1);
-    int dec_len = apr_base64_decode(decoded, cookie_b64);
-    if (dec_len <= 0) return "base64 decode failed";
-    decoded[dec_len] = '\0';
-
-    /* 17 pipe-delimited fields (canonical 0-14, sig_hex 15, counter 16). */
-    char *fields[BS_COOKIE_FIELDS];
-    int nf = 0;
-    char *p = decoded;
-    fields[nf++] = p;
-    while (*p && nf < BS_COOKIE_FIELDS) {
-        if (*p == '|') { *p = '\0'; fields[nf++] = p + 1; }
-        p++;
-    }
-    if (nf != BS_COOKIE_FIELDS) return "wrong field count";
-
-    bs_challenge ch;
-    memset(&ch, 0, sizeof(ch));
-    const char *perr = bs_parse_canonical_fields(fields, &ch);
-    if (perr) return perr;
-
-    unsigned char sig_from_client[BS_SIG_BYTES];
-    if (strlen(fields[15]) != BS_SIG_BYTES * 2 ||
-        !bs_from_hex(fields[15], BS_SIG_BYTES, sig_from_client)) {
-        return "bad signature hex";
-    }
-
-    /* HMAC-SHA-256 of canonical bytes. Constant-time compare.
-     * E16 — try the primary key first, then fall back
-     * to the secondary if configured. Both keys live in process
-     * memory; no SHM or file I/O on the hot verify path. The extra
-     * HMAC during a rotation window is negligible (low-µs) and only
-     * pays off on cookies the primary key already rejected. */
-    const char *canon = bs_challenge_canonical(r->pool, &ch);
-    unsigned char sig_expected[BS_SIG_BYTES];
-    /* LOW #3 — derived cookie-HMAC key, not raw secret. */
-    bs_hmac_sha256(cfg->derived_hmac_cookie, 32,
-                   (const unsigned char *)canon, strlen(canon),
-                   sig_expected);
-    if (!bs_ct_equal(sig_expected, sig_from_client, BS_SIG_BYTES)) {
-        if (!cfg->derived_keys_set_2) return "signature mismatch";
-        bs_hmac_sha256(cfg->derived_hmac_cookie_2, 32,
-                       (const unsigned char *)canon, strlen(canon),
-                       sig_expected);
-        if (!bs_ct_equal(sig_expected, sig_from_client, BS_SIG_BYTES)) {
-            return "signature mismatch";
-        }
-    }
-    memcpy(ch.signature, sig_from_client, BS_SIG_BYTES);
-    if (out_ch) *out_ch = ch;
-
-    apr_time_t now = apr_time_sec(apr_time_now());
-    if (now > ch.expires_at) return "expired";
-    const bs_pow_algorithm *alg = bs_find_algorithm(fields[1]);
-    return alg->verify(&ch, fields[16]);
-}
-
-/* Verify an E8.1 GCM-format cookie. `dot` points at the '.' that
+/* Verify a GCM-format cookie. `dot` points at the '.' that
  * separates the base64 envelope from the counter portion. */
 static const char *bs_verify_cookie_gcm(request_rec *r,
                                         const bs_dir_cfg *cfg,
@@ -10226,10 +10070,9 @@ static const char *bs_verify_cookie_gcm(request_rec *r,
                               pt, &pt_len);
     }
     if (derr) {
-        /* Map all GCM-decrypt failures to the same reason string the
-         * HMAC path uses when the tag doesn't match — the caller
-         * treats this as "don't carry rep forward", same behavior
-         * desired here. */
+        /* "signature mismatch" is the canonical reason string for any
+         * authenticator failure (here: GCM tag); callers treat it as
+         * "don't carry rep forward". */
         return "signature mismatch";
     }
     pt[pt_len] = '\0';
@@ -10250,9 +10093,8 @@ static const char *bs_verify_cookie_gcm(request_rec *r,
     memset(&ch, 0, sizeof(ch));
     const char *perr = bs_parse_canonical_fields(fields, &ch);
     if (perr) return perr;
-    /* No sig field in GCM — the tag verification above already
-     * authenticated every canonical byte. Expose ch for rep carry-
-     * forward semantics parity with the HMAC path. */
+    /* The GCM tag above already authenticated every canonical byte.
+     * Expose ch so callers can carry rep state forward. */
     if (out_ch) *out_ch = ch;
 
     apr_time_t now = apr_time_sec(apr_time_now());
@@ -10261,12 +10103,10 @@ static const char *bs_verify_cookie_gcm(request_rec *r,
     return alg->verify(&ch, counter);
 }
 
-/* Dispatch on the cookie wire format. Writes to *out_ch once the
- * format-specific verifier has authenticated the bytes (either HMAC
- * of the canonical or GCM tag over the envelope); later semantic
- * rejections (expiry, bad counter) leave the struct populated for
- * rep carry-forward. On format rejection or pre-auth error, *out_ch
- * stays untouched. */
+/* Verify a cookie. Writes to *out_ch once the GCM tag has
+ * authenticated the envelope bytes; later semantic rejections
+ * (expiry, bad counter) leave the struct populated for rep
+ * carry-forward. On pre-auth error *out_ch stays untouched. */
 static const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
                                     const char *cookie_value,
                                     bs_challenge *out_ch)
@@ -10275,17 +10115,13 @@ static const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
     apr_size_t val_len = strlen(cookie_value);
     if (val_len > BS_MAX_PAGE_BYTES) return "cookie absurdly long";
 
-    int fmt = bs_effective_cookie_format(cfg);
-    /* Standard base64 alphabet is [A-Za-z0-9+/=]; the '.' byte is
-     * not part of it. Its presence unambiguously marks a GCM-format
-     * cookie (envelope '.' counter). Absent → legacy HMAC. */
+    /* Wire form is always base64(envelope) '.' counter. The '.' is
+     * outside the standard base64 alphabet, so it's an unambiguous
+     * split point. A cookie that's missing it is from the retired
+     * HMAC format (or arbitrary garbage) — reject. */
     const char *dot = strrchr(cookie_value, BS_GCM_COUNTER_SEP);
-    if (dot) {
-        if (!(fmt & BS_FMT_GCM)) return "GCM cookies not accepted";
-        return bs_verify_cookie_gcm(r, cfg, cookie_value, dot, out_ch);
-    }
-    if (!(fmt & BS_FMT_HMAC)) return "HMAC cookies not accepted";
-    return bs_verify_cookie_hmac(r, cfg, cookie_value, out_ch);
+    if (!dot) return "unsupported cookie format";
+    return bs_verify_cookie_gcm(r, cfg, cookie_value, dot, out_ch);
 }
 
 /* --- New directive setters --- */
@@ -10326,7 +10162,6 @@ static const char *bs_set_secret_file(cmd_parms *cmd, void *cfg_v,
     /* Security review LOW #3 — derive per-purpose keys once. */
     err = bs_derive_purpose_keys(cmd->pool,
                                   cfg->secret, cfg->secret_len,
-                                  cfg->derived_hmac_cookie,
                                   cfg->derived_gcm_cookie,
                                   cfg->derived_hmac_pending,
                                   cfg->derived_hmac_bootstrap);
@@ -10393,7 +10228,6 @@ static const char *bs_set_secondary_secret_file(cmd_parms *cmd,
     err = bs_derive_purpose_keys(cmd->pool,
                                   cfg->secret_secondary,
                                   cfg->secret_secondary_len,
-                                  cfg->derived_hmac_cookie_2,
                                   cfg->derived_gcm_cookie_2,
                                   cfg->derived_hmac_pending_2,
                                   cfg->derived_hmac_bootstrap_2);
@@ -10403,50 +10237,6 @@ static const char *bs_set_secondary_secret_file(cmd_parms *cmd,
             err);
     }
     cfg->derived_keys_set_2 = 1;
-    return NULL;
-}
-
-/* `BotShieldCookieFormat <hmac|gcm|gcm,hmac>` — E8.1. Controls which
- * wire formats the issuer emits and the verifier accepts. Value is
- * a comma-separated list of format tokens:
- *   hmac       legacy HMAC-SHA-256 envelope (cleartext fields, 32-
- *              byte signature). Default if the directive is absent.
- *   gcm        AES-256-GCM envelope. Cleartext fields don't appear
- *              in the cookie; rep block is confidential.
- *   gcm,hmac   issue GCM, accept either on verify. Migration mode
- *              for rolling the wire format over a longest-TTL cycle.
- * Issue preference: if the bitmap includes GCM, issue GCM; otherwise
- * issue HMAC. Verify accepts any format whose bit is set. */
-static const char *bs_set_cookie_format(cmd_parms *cmd, void *cfg_v,
-                                        const char *arg)
-{
-    bs_dir_cfg *cfg = cfg_v;
-    if (!arg || !*arg) {
-        return "BotShieldCookieFormat: requires at least one format "
-               "(hmac, gcm, or a comma-separated list)";
-    }
-    int fmt = 0;
-    char *buf = apr_pstrdup(cmd->pool, arg);
-    char *state = NULL;
-    for (char *tok = apr_strtok(buf, ",", &state); tok;
-         tok = apr_strtok(NULL, ",", &state)) {
-        while (*tok == ' ' || *tok == '\t') tok++;
-        char *end = tok + strlen(tok);
-        while (end > tok && (end[-1] == ' ' || end[-1] == '\t')) end--;
-        *end = '\0';
-        if (!*tok) continue;
-        if      (!strcasecmp(tok, "hmac")) fmt |= BS_FMT_HMAC;
-        else if (!strcasecmp(tok, "gcm"))  fmt |= BS_FMT_GCM;
-        else {
-            return apr_psprintf(cmd->pool,
-                "BotShieldCookieFormat: unknown format '%s' "
-                "(known: hmac, gcm)", tok);
-        }
-    }
-    if (!fmt) {
-        return "BotShieldCookieFormat: at least one format required";
-    }
-    cfg->cookie_format = fmt;
     return NULL;
 }
 
@@ -12311,7 +12101,7 @@ static const char *bs_verify_pending_cookie(request_rec *r,
          * key-rotation reload, any user with an in-flight
          * pending cookie (TTL 300s) would 403 on captcha submit
          * even though the secondary key would have validated.
-         * Same secondary-key retry pattern as bs_verify_cookie_hmac. */
+         * Same secondary-key retry pattern as the cookie verify path. */
         if (!cfg->derived_keys_set_2) return "sig mismatch";
         bs_hmac_sha256(cfg->derived_hmac_pending_2, 32,
                        (const unsigned char *)canon, strlen(canon),
@@ -12443,7 +12233,7 @@ static const char BS_EMBEDDED_JS[] =
 "   if (j.provider === 'recaptcha-v2') { runRecaptchaV2(j); return; }\n"
 "   if (j.provider === 'hcaptcha') { runHCaptcha(j); return; }\n"
 "   if (j.provider === 'friendly') { runFriendly(j); return; }\n"
-"   if (j.provider !== 'pow' || !j.challenge) return;\n"
+"   if (j.provider !== 'pow-gcm' || !j.challenge) return;\n"
 "   var ch = j.challenge;\n"
 "   var w;\n"
 "   try { w = new Worker('/botshield/embedded-worker.js'); }\n"
@@ -12454,11 +12244,8 @@ static const char BS_EMBEDDED_JS[] =
 "      method:'POST', credentials:'same-origin',\n"
 "      headers:{'Content-Type':'application/json'},\n"
 "      body: JSON.stringify({\n"
-"       provider: 'pow',\n"
-"       v: ch.v, alg: ch.alg, salt: ch.salt, nonce: ch.nonce,\n"
-"       difficulty: ch.difficulty, expires_at: ch.expires_at,\n"
-"       challenged_at: ch.challenged_at, auto: ch.auto,\n"
-"       signature: ch.signature,\n"
+"       provider: 'pow-gcm',\n"
+"       cookie_prefix: ch.cookie_prefix,\n"
 "       /* MEDIUM #2 — IP-bind round-trip. */\n"
 "       bound_ip: ch.bound_ip, bootstrap_sig: ch.bootstrap_sig,\n"
 "       counter: ev.data.counter\n"
@@ -12811,12 +12598,12 @@ static int bs_form_widget_handler(request_rec *r)
  *
  * Returns one of:
  *   {"mode":"off"}                          — cookie already valid; wrapper exits
- *   {"mode":"silent","challenge":{...}}     — solve this and POST to verify
+ *   {"mode":"silent","provider":"pow-gcm","challenge":{...}}
  *
- * The challenge struct is HMAC-signed with cfg->secret, exactly the
- * same way bs_issue_challenge signs M2/M7 challenges. The verify
- * endpoint reconstructs the same canonical form from the JSON fields
- * and re-validates the HMAC, so the wrapper can't forge a challenge
+ * The challenge object carries an opaque `cookie_prefix` — the same
+ * AES-256-GCM-encrypted canonical form that bs_challenge_json emits
+ * for the inline interstitial. The verify endpoint authenticates the
+ * envelope via the GCM tag, so the wrapper can't forge a challenge
  * the server didn't issue. */
 static int bs_embedded_bootstrap_handler(request_rec *r,
                                          bs_dir_cfg *cfg)
@@ -12910,10 +12697,8 @@ static int bs_embedded_bootstrap_handler(request_rec *r,
 
     char salt_hex [BS_SALT_BYTES * 2 + 1];
     char nonce_hex[BS_NONCE_BYTES * 2 + 1];
-    char sig_hex  [BS_SIG_BYTES * 2 + 1];
-    bs_to_hex(ch.salt,       BS_SALT_BYTES,  salt_hex);
-    bs_to_hex(ch.nonce,      BS_NONCE_BYTES, nonce_hex);
-    bs_to_hex(ch.signature,  BS_SIG_BYTES,   sig_hex);
+    bs_to_hex(ch.salt,  BS_SALT_BYTES,  salt_hex);
+    bs_to_hex(ch.nonce, BS_NONCE_BYTES, nonce_hex);
 
     /* MEDIUM #2 — IP-bind the bootstrap. The bound_ip + bootstrap_sig
      * round-trip via the verify POST and the verify endpoint
@@ -12934,27 +12719,34 @@ static int bs_embedded_bootstrap_handler(request_rec *r,
                               nonce_hex, bound_ip_hex,
                               ch.expires_at, bootstrap_sig_hex);
 
-    /* Native PoW path. Include challenged_at and auto so the wrapper
-     * can round-trip them through the verify POST — the signature
-     * in bs_challenge_canonical covers every rep field; if the
-     * wrapper doesn't send back exactly the bytes we signed, the
-     * signature recomputation in verify will mismatch. Score /
-     * flags / passes_* / forgive_* are zero on a fresh challenge so
-     * we don't need to surface them — they parse-default to 0 on
-     * verify. */
+    /* Encrypt the canonical form into the cookie_prefix. The wrapper
+     * round-trips this opaque blob to /embedded-verify; the GCM tag
+     * authenticates every rep field inside, so the wrapper can't tamper
+     * without the verify decrypt failing. */
+    const char *prefix_b64 = NULL;
+    const char *perr = bs_build_cookie_prefix_gcm(r->pool, cfg, &ch,
+                                                   &prefix_b64);
+    if (perr) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+            "mod_botshield: embedded-bootstrap: cookie_prefix build "
+            "failed: %s", perr);
+        r->status = HTTP_INTERNAL_SERVER_ERROR;
+        ap_rputs("{\"error\":\"prefix\"}\n", r);
+        return OK;
+    }
+
     ap_rprintf(r,
-        "{\"mode\":\"silent\",\"provider\":\"pow\","
+        "{\"mode\":\"silent\",\"provider\":\"pow-gcm\","
         "\"challenge\":{"
-        "\"v\":%d,\"alg\":\"%s\",\"salt\":\"%s\",\"nonce\":\"%s\","
+        "\"salt\":\"%s\",\"nonce\":\"%s\","
         "\"difficulty\":%d,\"expires_at\":%" APR_TIME_T_FMT ","
-        "\"challenged_at\":%" APR_TIME_T_FMT ",\"auto\":%d,"
-        "\"signature\":\"%s\","
+        "\"auto\":%d,\"cookie_prefix\":\"%s\","
         "\"bound_ip\":\"%s\",\"bootstrap_sig\":\"%s\""
         "}}\n",
-        ch.version, ch.alg_name, salt_hex, nonce_hex,
+        salt_hex, nonce_hex,
         ch.difficulty, ch.expires_at,
-        ch.rep.challenged_at, ch.auto_tier,
-        sig_hex, bound_ip_hex, bootstrap_sig_hex);
+        ch.auto_tier, prefix_b64,
+        bound_ip_hex, bootstrap_sig_hex);
     return OK;
 }
 
@@ -13067,352 +12859,20 @@ static int bs_json_get_int(json_object *root, const char *key,
     return 1;
 }
 
-/* PoW-path verify: reconstruct bs_challenge from the round-tripped
- * fields, validate HMAC + PoW counter, mint _bs_verified. Helper
- * pulled out of the dispatcher so the turnstile (and future
- * provider) paths can sit alongside cleanly. */
-static int bs_embedded_verify_pow(request_rec *r, bs_dir_cfg *cfg,
-                                  json_object *root)
-{
-    if (!cfg->secret || !cfg->algorithm) {
-        r->status = HTTP_SERVICE_UNAVAILABLE;
-        return OK;
-    }
 
-    /* Reconstruct the bs_challenge struct from the JSON. The HMAC
-     * signature binds every byte of the canonical form, so any
-     * tampered field invalidates the signature check below. */
-    bs_challenge ch;
-    memset(&ch, 0, sizeof(ch));
-    int ok = 1;
-    int int_v = 0;
-    if (!bs_json_get_int(root, "v",          &int_v, 0, INT_MAX))      ok = 0;
-    ch.version = int_v;
-    if (!bs_json_get_int(root, "difficulty", &int_v, 1, BS_MAX_DIFFICULTY_HARDCAP)) ok = 0;
-    ch.difficulty = int_v;
-    int counter = 0;
-    if (!bs_json_get_int(root, "counter",    &counter, 0, INT_MAX))     ok = 0;
-    json_object *exp_v = NULL;
-    apr_int64_t exp64 = 0;
-    if (json_object_object_get_ex(root, "expires_at", &exp_v) &&
-        json_object_is_type(exp_v, json_type_int)) {
-        exp64 = json_object_get_int64(exp_v);
-    } else {
-        ok = 0;
-    }
-    ch.expires_at = (apr_time_t)exp64;
-
-    /* challenged_at + auto are part of the canonical form the
-     * signature covers, so the wrapper must round-trip them
-     * verbatim. */
-    json_object *ca_v = NULL;
-    if (json_object_object_get_ex(root, "challenged_at", &ca_v) &&
-        json_object_is_type(ca_v, json_type_int)) {
-        ch.rep.challenged_at = (apr_time_t)json_object_get_int64(ca_v);
-    } else {
-        ok = 0;
-    }
-    if (!bs_json_get_int(root, "auto", &int_v, 0, 1)) ok = 0;
-    ch.auto_tier = int_v;
-
-    /* Security review LOW #1 — the rep fields are part of the
-     * canonical the original HMAC covered. /embedded-bootstrap-issued
-     * challenges always have zero rep, but the M1 widget splash
-     * (rendered by bs_handler at request time) carries forward rep
-     * state from any prior cookie. The JSON must round-trip those
-     * fields verbatim or the HMAC reconstruction below fails on
-     * any non-fresh-rep challenge. Default to 0 if the field is
-     * missing (bootstrap case). */
-    int rep_int = 0;
-    apr_uint32_t rep_u32 = 0;
-    if (bs_json_get_int(root, "score", &rep_int, INT_MIN, INT_MAX)) {
-        ch.rep.score = rep_int;
-    }
-    {
-        json_object *fl = NULL;
-        if (json_object_object_get_ex(root, "flags", &fl) && fl &&
-            json_object_is_type(fl, json_type_int)) {
-            int64_t n = json_object_get_int64(fl);
-            if (n >= 0 && n <= UINT32_MAX) {
-                ch.rep.flags = (apr_uint32_t)n;
-            }
-        }
-    }
-    if (bs_json_get_int(root, "passes_silent", &rep_int, 0, 1)) {
-        ch.rep.passes_silent = rep_int;
-    }
-    if (bs_json_get_int(root, "passes_form", &rep_int, 0, 1)) {
-        ch.rep.passes_form = rep_int;
-    }
-    if (bs_json_get_int(root, "passes_captcha", &rep_int, 0, 1)) {
-        ch.rep.passes_captcha = rep_int;
-    }
-    {
-        json_object *fws = NULL;
-        if (json_object_object_get_ex(root, "forgive_window_start", &fws) &&
-            fws && json_object_is_type(fws, json_type_int)) {
-            int64_t n = json_object_get_int64(fws);
-            if (n >= 0 && n <= UINT32_MAX) {
-                ch.rep.forgive_window_start = (apr_uint32_t)n;
-            }
-        }
-        json_object *fc = NULL;
-        if (json_object_object_get_ex(root, "forgive_consumed", &fc) &&
-            fc && json_object_is_type(fc, json_type_int)) {
-            int64_t n = json_object_get_int64(fc);
-            if (n >= 0 && n <= UINT32_MAX) {
-                ch.rep.forgive_consumed = (apr_uint32_t)n;
-            }
-        }
-    }
-    (void)rep_u32;
-
-    const char *alg_name = bs_json_get_str(r->pool, root, "alg", 64);
-    const char *salt_hex = bs_json_get_str(r->pool, root, "salt",
-                                           BS_SALT_BYTES * 2);
-    const char *nonce_hex = bs_json_get_str(r->pool, root, "nonce",
-                                            BS_NONCE_BYTES * 2);
-    const char *sig_hex  = bs_json_get_str(r->pool, root, "signature",
-                                           BS_SIG_BYTES * 2);
-    if (!alg_name || !salt_hex || !nonce_hex || !sig_hex) ok = 0;
-    if (!ok) {
-        r->status = HTTP_BAD_REQUEST;
-        return OK;
-    }
-
-    const bs_pow_algorithm *alg = bs_find_algorithm(alg_name);
-    if (!alg || !alg->implemented) {
-        r->status = HTTP_BAD_REQUEST;
-        return OK;
-    }
-    ch.alg_name = alg->name;
-
-    if (strlen(salt_hex)  != BS_SALT_BYTES * 2  ||
-        !bs_from_hex(salt_hex,  BS_SALT_BYTES,  ch.salt) ||
-        strlen(nonce_hex) != BS_NONCE_BYTES * 2 ||
-        !bs_from_hex(nonce_hex, BS_NONCE_BYTES, ch.nonce) ||
-        strlen(sig_hex)   != BS_SIG_BYTES * 2   ||
-        !bs_from_hex(sig_hex,   BS_SIG_BYTES,   ch.signature)) {
-        r->status = HTTP_BAD_REQUEST;
-        return OK;
-    }
-
-    /* MEDIUM #2 — IP-binding check. The bootstrap response carried
-     * a (bound_ip, bootstrap_sig) pair signed under the per-purpose
-     * derived bootstrap key. Verify the HMAC, then compare bound_ip
-     * against the current request's client IP. Mismatch ⇒ reject:
-     * a challenge issued from one IP cannot be redeemed from
-     * another (closes Attack 3). */
-    const char *bound_ip_hex = bs_json_get_str(r->pool, root,
-                                                "bound_ip", 32);
-    const char *bootstrap_sig_hex = bs_json_get_str(r->pool, root,
-                                                "bootstrap_sig",
-                                                BS_SIG_BYTES * 2);
-    if (!bound_ip_hex || !bootstrap_sig_hex ||
-        strlen(bound_ip_hex) != 32) {
-        r->status = HTTP_BAD_REQUEST;
-        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
-            "mod_botshield: embedded-verify(pow): missing or "
-            "malformed bound_ip / bootstrap_sig");
-        return OK;
-    }
-    if (!bs_verify_bootstrap_sig(r->pool, cfg, nonce_hex,
-                                  bound_ip_hex, ch.expires_at,
-                                  bootstrap_sig_hex)) {
-        r->status = HTTP_FORBIDDEN;
-        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
-            "mod_botshield: embedded-verify(pow): bad bootstrap_sig "
-            "(IP-binding tampered or wrong key)");
-        return OK;
-    }
-    {
-        char observed_ip_hex[33];
-        if (!bs_format_bound_ip_hex(r->useragent_ip, observed_ip_hex)) {
-            r->status = HTTP_BAD_REQUEST;
-            return OK;
-        }
-        if (strcasecmp(observed_ip_hex, bound_ip_hex) != 0) {
-            r->status = HTTP_FORBIDDEN;
-            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
-                "mod_botshield: embedded-verify(pow): IP-bind "
-                "mismatch (issued for %s, redeemed from %s)",
-                bound_ip_hex, observed_ip_hex);
-            return OK;
-        }
-    }
-
-    /* Validate the HMAC against the canonical form. This proves the
-     * server issued the challenge and nothing in transit changed.
-     * LOW #3 — derived cookie-HMAC key. */
-    const char *canon = bs_challenge_canonical(r->pool, &ch);
-    unsigned char sig_expected[BS_SIG_BYTES];
-    bs_hmac_sha256(cfg->derived_hmac_cookie, 32,
-                   (const unsigned char *)canon, strlen(canon),
-                   sig_expected);
-    if (!bs_ct_equal(sig_expected, ch.signature, BS_SIG_BYTES)) {
-        /* Try secondary key if rotation is in progress (E16). */
-        if (cfg->derived_keys_set_2) {
-            bs_hmac_sha256(cfg->derived_hmac_cookie_2, 32,
-                           (const unsigned char *)canon, strlen(canon),
-                           sig_expected);
-        }
-        if (!cfg->derived_keys_set_2 ||
-            !bs_ct_equal(sig_expected, ch.signature, BS_SIG_BYTES)) {
-            r->status = HTTP_FORBIDDEN;
-            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
-                "mod_botshield: embedded-verify(pow): bad signature");
-            return OK;
-        }
-    }
-
-    apr_time_t now = apr_time_sec(apr_time_now());
-    if (now > ch.expires_at) {
-        r->status = HTTP_FORBIDDEN;
-        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
-            "mod_botshield: embedded-verify(pow): challenge expired");
-        return OK;
-    }
-
-    char counter_str[24];
-    apr_snprintf(counter_str, sizeof(counter_str), "%d", counter);
-    const char *verr = alg->verify(&ch, counter_str);
-    if (verr) {
-        r->status = HTTP_FORBIDDEN;
-        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
-            "mod_botshield: embedded-verify(pow): PoW reject: %s", verr);
-        return OK;
-    }
-
-    /* MEDIUM #2 (Phase 2) — atomically consume the nonce. Replay of
-     * the same {nonce, counter, signature} bundle is rejected here:
-     * the first verify wins the slot, all subsequent attempts get
-     * "already redeemed" and 403. Closes Attacks 1 and 2 (replay
-     * multiplier and pool farming). */
-    {
-        bs_server_cfg *scfg_n = ap_get_module_config(
-            r->server->module_config, &botshield_module);
-        apr_uint32_t ns = scfg_n ? scfg_n->ns_id : 0;
-        if (!bs_embedded_nonce_consume(r, ch.nonce,
-                                        (apr_int64_t)ch.expires_at, ns)) {
-            r->status = HTTP_FORBIDDEN;
-            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
-                "mod_botshield: embedded-verify(pow): nonce already "
-                "redeemed (replay or pool-farm) — rejected");
-            return OK;
-        }
-    }
-
-    /* Mint _bs_verified the same way the M7 form-PoW does — same
-     * cookie shape, same expiry, same signature path. The counter
-     * the wrapper found rides into the cookie body so future
-     * requests can replay-detect.
-     *
-     * E17 review fix — carry forward prior cookie state if a sig-
-     * verifying _bs_verified is present. Without this, a client
-     * whose forgive_consumed is near the E15 cap could wash their
-     * budget by letting the cookie expire before an embedded
-     * verify, then solving the bootstrap PoW to mint a fresh
-     * passes_silent=1 cookie with rep zeroed. Symmetric with M8
-     * and E18 (form-captcha): same prior-cookie acceptance check,
-     * same forgive_silent + cap helper, same flag-penalty floor.
-     * challenged_at on the JSON-reconstructed challenge is
-     * preserved — that's the bootstrap-issue time the wrapper
-     * just round-tripped, not a field we want to overwrite with
-     * the prior cookie's older value. */
-    {
-        const char *prior_val = bs_get_verified_cookie_value(r);
-        bs_challenge prior_ch = { 0 };
-        int have_prior = 0;
-        if (prior_val && *prior_val) {
-            const char *cverr = bs_verify_cookie(r, cfg, prior_val,
-                                                  &prior_ch);
-            /* Security review MEDIUM #1 — refuse carry-forward when
-             * the cookie has expired. Otherwise a leaked or stolen
-             * cookie could be replayed past TTL to transplant a
-             * good-standing rep into a freshly-minted _bs_verified
-             * via the captcha solve path. The TTL is the only
-             * mechanism preventing indefinite reputation transfer
-             * across cookie generations. */
-            if (cverr == NULL ||
-                (cverr && strcmp(cverr, "signature mismatch") != 0
-                       && strcmp(cverr, "expired") != 0
-                       && prior_ch.alg_name)) {
-                have_prior = 1;
-            }
-        }
-        if (have_prior) {
-            int forgive = bs_effective_int(cfg->forgive_silent,
-                                            BS_DEFAULT_FORGIVE_SILENT);
-            bs_server_cfg *scfg_fc = ap_get_module_config(
-                r->server->module_config, &botshield_module);
-            int cap = (scfg_fc && scfg_fc->forgive_cap_per_hour > 0)
-                    ? scfg_fc->forgive_cap_per_hour
-                    : BS_DEFAULT_FORGIVE_CAP_PER_HOUR;
-            apr_uint32_t now_sec =
-                (apr_uint32_t)apr_time_sec(apr_time_now());
-            apr_time_t challenged_at = ch.rep.challenged_at;
-            ch.rep = prior_ch.rep;
-            ch.rep.challenged_at = challenged_at;
-            forgive = bs_forgiveness_apply_cap(forgive, cap, now_sec,
-                        &ch.rep.forgive_window_start,
-                        &ch.rep.forgive_consumed);
-            int floor   = bs_flag_penalty(prior_ch.rep.flags);
-            int new_score = prior_ch.rep.score - forgive;
-            if (new_score < floor) new_score = floor;
-            if (new_score < 0)     new_score = 0;
-            ch.rep.score          = new_score;
-            /* Security review LOW #7 — clamp to 1. Parser bounds the
-             * field to [0,1] (it's effectively a "ever passed silent"
-             * flag, not a counter); plain +1 would overflow that on
-             * the second carry-forward. */
-            ch.rep.passes_silent  = 1;
-        } else {
-            ch.rep.passes_silent = 1;
-        }
-    }
-    canon = bs_challenge_canonical(r->pool, &ch);
-    /* LOW #3 — re-sign with derived cookie-HMAC key. */
-    bs_hmac_sha256(cfg->derived_hmac_cookie, 32,
-                   (const unsigned char *)canon, strlen(canon),
-                   ch.signature);
-    const char *payload = bs_build_cookie_payload(r->pool, cfg, &ch,
-                                                  counter_str);
-    if (!payload) {
-        r->status = HTTP_INTERNAL_SERVER_ERROR;
-        return OK;
-    }
-    /* E18 review fix (cross-ext) — apr_table_set deletes any prior
-     * entries for the key, which clobbers Set-Cookie headers added
-     * by other modules (e.g. mod_session) earlier in the chain.
-     * apr_table_add appends a new row instead. Symmetric with the
-     * E18 fixup site and the M8 captcha-verify path. */
-    apr_table_add(r->err_headers_out, "Set-Cookie",
-                  bs_build_set_cookie(r, cfg, payload, ch.expires_at));
-
-    r->status = HTTP_NO_CONTENT;
-    apr_table_setn(r->headers_out, "Cache-Control", "no-store");
-    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
-        "mod_botshield: embedded-verify(pow): cookie minted (counter=%d)",
-        counter);
-    return OK;
-}
-
-/* GCM-cookie-prefix variant of the PoW verify path. The M1 widget JS
- * is given an opaque encrypted envelope (the "cookie_prefix") instead
- * of cleartext canonical fields. Client solves PoW against the
- * salt+nonce+difficulty also present in the challenge JSON, then sends
+/* PoW verify path. The M1 widget JS is given an opaque encrypted
+ * envelope (the "cookie_prefix"). Client solves PoW against the
+ * salt+nonce+difficulty in the challenge JSON, then sends
  * {provider:"pow-gcm", cookie_prefix, counter} here. We synthesize
  * the wire-format cookie value (envelope.counter), route it through
  * bs_verify_cookie_gcm — which handles GCM-decrypt with secondary-key
  * fallback (E16), canonical parse, and PoW verify all in one
- * authenticated path — then mint a fresh cookie with the same
- * carry-forward + Set-Cookie shape as the HMAC verify path above.
+ * authenticated path — then mint a fresh cookie.
  *
  * Added for security review LOW #1 (HttpOnly): the M1 widget used
  * to set the cookie via document.cookie because the PoW solution
  * was assembled client-side. Routing through this endpoint lets the
- * server emit Set-Cookie with HttpOnly, closing XSS-token-theft on
- * the GCM mode too. */
+ * server emit Set-Cookie with HttpOnly, closing XSS-token-theft. */
 static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
                                        json_object *root)
 {
@@ -13450,10 +12910,13 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
         return OK;
     }
 
-    /* MEDIUM #2 — IP-binding check. See bs_embedded_verify_pow for
-     * the rationale; same shape applies here. nonce_hex is rebuilt
-     * from ch.nonce since this code path doesn't extract it from
-     * top-level JSON. */
+    /* MEDIUM #2 — IP-binding check. The bootstrap response carried
+     * a (bound_ip, bootstrap_sig) pair signed under the per-purpose
+     * derived bootstrap key. Verify the HMAC, then compare bound_ip
+     * against the current request's client IP. Mismatch ⇒ reject:
+     * a challenge issued from one IP cannot be redeemed from
+     * another (closes Attack 3). nonce_hex is rebuilt from ch.nonce
+     * since this code path doesn't extract it from top-level JSON. */
     {
         char nonce_hex_buf[BS_NONCE_BYTES * 2 + 1];
         bs_to_hex(ch.nonce, BS_NONCE_BYTES, nonce_hex_buf);
@@ -13494,8 +12957,10 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
         }
     }
 
-    /* MEDIUM #2 (Phase 2) — consume the nonce. Same shape as the
-     * HMAC pow path's nonce-consume call above. */
+    /* MEDIUM #2 (Phase 2) — atomically consume the nonce. Replay of
+     * the same challenge bundle is rejected here: the first verify
+     * wins the slot, all subsequent attempts get 403. Closes Attacks
+     * 1 and 2 (replay multiplier and pool farming). */
     {
         bs_server_cfg *scfg_n = ap_get_module_config(
             r->server->module_config, &botshield_module);
@@ -13510,10 +12975,12 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
         }
     }
 
-    /* Carry forward + set passes_silent — same shape as the HMAC
-     * pow path above. See its comments for rationale (forgiveness
-     * cap, flag-penalty floor, expired-cookie carry-forward
-     * rejection per LOW #1, passes_silent clamp per LOW #7). */
+    /* Carry forward rep state from any prior valid _bs_verified, then
+     * set passes_silent. Forgiveness cap + flag-penalty floor mirror
+     * the M7/M8 mint paths. MEDIUM #1 — refuse carry-forward when the
+     * prior cookie has expired (closes the indefinite-rep-transfer
+     * attack via captured cookies). LOW #7 — clamp passes_silent to
+     * 1 (it's an "ever passed silent" flag, not a counter). */
     {
         const char *prior_val = bs_get_verified_cookie_value(r);
         bs_challenge prior_ch = { 0 };
@@ -13554,14 +13021,6 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
             ch.rep.passes_silent = 1;
         }
     }
-    /* Re-sign canonical (HMAC) — bs_build_cookie_payload uses this
-     * signature for HMAC mode; for GCM mode the signature is part
-     * of the encrypted canonical so it gets re-encrypted.
-     * LOW #3 — derived cookie-HMAC key. */
-    const char *canon = bs_challenge_canonical(r->pool, &ch);
-    bs_hmac_sha256(cfg->derived_hmac_cookie, 32,
-                   (const unsigned char *)canon, strlen(canon),
-                   ch.signature);
     const char *payload = bs_build_cookie_payload(r->pool, cfg, &ch,
                                                   counter_str);
     if (!payload) {
@@ -13803,10 +13262,8 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
  *
  * Body shape (JSON):
  *   PoW path:
- *     {"provider":"pow","v":N, "alg":"sha256-zeros",
- *      "salt":"<hex>", "nonce":"<hex>", "difficulty":N,
- *      "expires_at":N, "challenged_at":N, "auto":N,
- *      "signature":"<hex>", "counter":N}
+ *     {"provider":"pow-gcm","cookie_prefix":"<b64>",
+ *      "bound_ip":"<hex>","bootstrap_sig":"<hex>","counter":N}
  *   Provider path (turnstile et al.):
  *     {"provider":"turnstile","token":"<token>"}
  *
@@ -13843,12 +13300,10 @@ static int bs_embedded_verify_handler(request_rec *r, bs_dir_cfg *cfg)
     }
 
     const char *provider = bs_json_get_str(r->pool, root, "provider", 32);
-    if (!provider) provider = "pow";   /* legacy compat */
+    if (!provider) provider = "pow-gcm";
 
     int rv;
-    if (strcmp(provider, "pow") == 0) {
-        rv = bs_embedded_verify_pow(r, cfg, root);
-    } else if (strcmp(provider, "pow-gcm") == 0) {
+    if (strcmp(provider, "pow-gcm") == 0) {
         rv = bs_embedded_verify_pow_gcm(r, cfg, root);
     } else {
         rv = bs_embedded_verify_provider(r, cfg, root, provider);
@@ -14856,7 +14311,7 @@ static int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
     if (!payload) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
             "mod_botshield: failed to build cookie payload "
-            "(cookie_format=0x%x)", bs_effective_cookie_format(cfg));
+            "(GCM encrypt failed)");
         r->status = HTTP_INTERNAL_SERVER_ERROR;
         ap_set_content_type(r, "text/plain; charset=utf-8");
         ap_rputs("Service error: could not issue cookie.\n", r);
@@ -15090,14 +14545,6 @@ static const command_rec bs_cmds[] = {
                  "into this module today; 'sha384-zeros' / 'sha512-zeros' / "
                  "'pbkdf2-sha256' / 'argon2id' are registry slots reserved "
                  "for future opt-in builds."),
-    AP_INIT_TAKE1("BotShieldCookieFormat", bs_set_cookie_format, NULL,
-                 RSRC_CONF | ACCESS_CONF,
-                 "Cookie wire format: hmac (legacy cleartext+HMAC; "
-                 "default), gcm (AES-256-GCM; rep block confidential), "
-                 "or a comma-separated list (e.g., 'gcm,hmac' for "
-                 "migration: issue GCM, accept either). AES key is "
-                 "SHA-256(BotShieldSecretFile bytes); same secret file "
-                 "for both primitives."),
     AP_INIT_TAKE1("BotShieldScoreSilent",  bs_set_score_silent,  NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "Score at or above which the silent-PoW tier is picked "
@@ -15851,49 +15298,16 @@ static const char BS_WIDGET_TEMPLATE[] =
 "      and let it mint the cookie via Set-Cookie + HttpOnly,\n"
 "      instead of setting document.cookie locally. JS can't read\n"
 "      the cookie back, but it doesn't need to: server validates\n"
-"      and the next request's bs_handler accepts the new cookie. */\n"
-"   var body;\n"
-"   if (CH.cookie_prefix) {\n"
-"    /* GCM mode — server-encrypted envelope; client only sends\n"
-"       prefix + counter, server decrypts + verifies + re-mints.\n"
-"       MEDIUM #2 — round-trip bound_ip + bootstrap_sig for\n"
-"       IP-binding. */\n"
-"    body = JSON.stringify({\n"
-"     provider: 'pow-gcm',\n"
-"     cookie_prefix: CH.cookie_prefix,\n"
-"     bound_ip: CH.bound_ip,\n"
-"     bootstrap_sig: CH.bootstrap_sig,\n"
-"     counter: counterVal\n"
-"    });\n"
-"   } else {\n"
-"    /* HMAC mode — round-trip every canonical field the server\n"
-"       signed (including rep state — score, flags, passes_*,\n"
-"       forgive_*) plus our counter. The HMAC verify on the\n"
-"       server reconstructs canonical from these fields and any\n"
-"       missing/tampered field will mismatch the signature.\n"
-"       MEDIUM #2 — round-trip bound_ip + bootstrap_sig too\n"
-"       so the server can confirm the verifying IP matches the\n"
-"       IP at issue time. */\n"
-"    body = JSON.stringify({\n"
-"     provider: 'pow',\n"
-"     v: CH.v, alg: CH.alg,\n"
-"     salt: CH.salt, nonce: CH.nonce,\n"
-"     difficulty: CH.difficulty,\n"
-"     expires_at: CH.expires_at,\n"
-"     score: CH.score, flags: CH.flags,\n"
-"     passes_silent: CH.passes_silent,\n"
-"     passes_form: CH.passes_form,\n"
-"     passes_captcha: CH.passes_captcha,\n"
-"     challenged_at: CH.challenged_at,\n"
-"     auto: CH.auto,\n"
-"     forgive_window_start: CH.forgive_window_start,\n"
-"     forgive_consumed: CH.forgive_consumed,\n"
-"     signature: CH.signature,\n"
-"     bound_ip: CH.bound_ip,\n"
-"     bootstrap_sig: CH.bootstrap_sig,\n"
-"     counter: counterVal\n"
-"    });\n"
-"   }\n"
+"      and the next request's bs_handler accepts the new cookie.\n"
+"      MEDIUM #2 — round-trip bound_ip + bootstrap_sig for\n"
+"      IP-binding. */\n"
+"   var body = JSON.stringify({\n"
+"    provider: 'pow-gcm',\n"
+"    cookie_prefix: CH.cookie_prefix,\n"
+"    bound_ip: CH.bound_ip,\n"
+"    bootstrap_sig: CH.bootstrap_sig,\n"
+"    counter: counterVal\n"
+"   });\n"
 "   fetch('/botshield/embedded-verify', {\n"
 "    method: 'POST',\n"
 "    credentials: 'same-origin',\n"
@@ -16681,6 +16095,15 @@ static int bs_handler(request_rec *r)
         return OK;
     }
     const char *challenge_js = bs_challenge_json(r, r->pool, cfg, &challenge);
+    if (!challenge_js) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+            "mod_botshield: GCM cookie-prefix encryption failed; "
+            "cannot render interstitial");
+        r->status = HTTP_INTERNAL_SERVER_ERROR;
+        bs_decision_log(r, bs_tier_name(tier), "misconfigured",
+                        cookie_status, "-", "-", "issue_failed", effective);
+        return OK;
+    }
 
     const char *prompt     = cfg->prompt     ? cfg->prompt     : BS_DEFAULT_PROMPT;
     const char *logo_svg   = cfg->logo_svg   ? cfg->logo_svg   : BS_DEFAULT_LOGO_SVG;
