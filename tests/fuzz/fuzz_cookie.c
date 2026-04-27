@@ -50,7 +50,7 @@
  * E2.2's robots.c symbols, so fold that file in too to satisfy the
  * single-TU link model this harness uses. */
 #include "../../src/robots.c"
-#include "../../src/botshield_shm.c"
+#include "../../src/shm.c"
 #include "../../src/mod_botshield.c"
 
 /* --- Fuzz state (initialized once per process) ---------------------- */
