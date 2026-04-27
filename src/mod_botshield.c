@@ -40,6 +40,8 @@
 
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
+#include <openssl/kdf.h>
+#include <openssl/params.h>
 #include <openssl/rand.h>
 
 #include <curl/curl.h>
@@ -790,8 +792,8 @@ struct bs_dir_cfg {
     const char *help_html;      /* panel content, loaded at config time */
     const char *challenge_html; /* full HTML page template with marker */
     const bs_pow_algorithm *algorithm;      /* chosen issue algorithm */
-    const unsigned char    *secret;         /* HMAC key bytes */
-    apr_size_t              secret_len;     /* key length */
+    const unsigned char    *secret;         /* master key bytes */
+    apr_size_t              secret_len;     /* master key length */
     /* E16 — verify-only secondary secret for graceful
      * rotation. Issue path always uses `secret`; verify tries
      * `secret` first and falls back to `secret_secondary` so cookies
@@ -799,6 +801,22 @@ struct bs_dir_cfg {
      * window. NULL = no rotation in progress. */
     const unsigned char    *secret_secondary;
     apr_size_t              secret_secondary_len;
+    /* Security review LOW #3 — HKDF-Expand'd per-purpose keys
+     * derived once at config-load time (bs_set_secret_file etc.).
+     * Each purpose tag yields a cryptographically-independent key:
+     * leaking one tells an attacker nothing about the others.
+     * `derived_*_keys_set` is 1 once the master is loaded and
+     * derivation succeeded; the request path checks it before use. */
+    unsigned char    derived_hmac_cookie    [32];
+    unsigned char    derived_gcm_cookie     [32];
+    unsigned char    derived_hmac_pending   [32];
+    int              derived_keys_set;
+    /* Same for the secondary key, populated when
+     * BotShieldSecondarySecretFile is configured. */
+    unsigned char    derived_hmac_cookie_2  [32];
+    unsigned char    derived_gcm_cookie_2   [32];
+    unsigned char    derived_hmac_pending_2 [32];
+    int              derived_keys_set_2;
     int                     cookie_format;  /* BS_FMT_* bitmap or BS_FMT_UNSET */
     int score_silent;           /* score >= this → silent tier (logged only) */
     int score_hard;             /* score >= this → hard form-PoW tier */
@@ -1414,12 +1432,29 @@ static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     out->help_html      = add->help_html      ? add->help_html      : base->help_html;
     out->challenge_html = add->challenge_html ? add->challenge_html : base->challenge_html;
     out->algorithm      = add->algorithm      ? add->algorithm      : base->algorithm;
+    /* LOW #3 — derived per-purpose keys ride alongside the master.
+     * If add has its own master secret, take its derived keys too;
+     * otherwise inherit base's. */
     if (add->secret) {
         out->secret     = add->secret;
         out->secret_len = add->secret_len;
+        memcpy(out->derived_hmac_cookie,
+               add->derived_hmac_cookie,  32);
+        memcpy(out->derived_gcm_cookie,
+               add->derived_gcm_cookie,   32);
+        memcpy(out->derived_hmac_pending,
+               add->derived_hmac_pending, 32);
+        out->derived_keys_set = add->derived_keys_set;
     } else {
         out->secret     = base->secret;
         out->secret_len = base->secret_len;
+        memcpy(out->derived_hmac_cookie,
+               base->derived_hmac_cookie,  32);
+        memcpy(out->derived_gcm_cookie,
+               base->derived_gcm_cookie,   32);
+        memcpy(out->derived_hmac_pending,
+               base->derived_hmac_pending, 32);
+        out->derived_keys_set = base->derived_keys_set;
     }
     /* E16 — same merge shape for the verify-only
      * secondary key. Independent of primary so an operator can
@@ -1428,9 +1463,23 @@ static void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     if (add->secret_secondary) {
         out->secret_secondary     = add->secret_secondary;
         out->secret_secondary_len = add->secret_secondary_len;
+        memcpy(out->derived_hmac_cookie_2,
+               add->derived_hmac_cookie_2,  32);
+        memcpy(out->derived_gcm_cookie_2,
+               add->derived_gcm_cookie_2,   32);
+        memcpy(out->derived_hmac_pending_2,
+               add->derived_hmac_pending_2, 32);
+        out->derived_keys_set_2 = add->derived_keys_set_2;
     } else {
         out->secret_secondary     = base->secret_secondary;
         out->secret_secondary_len = base->secret_secondary_len;
+        memcpy(out->derived_hmac_cookie_2,
+               base->derived_hmac_cookie_2,  32);
+        memcpy(out->derived_gcm_cookie_2,
+               base->derived_gcm_cookie_2,   32);
+        memcpy(out->derived_hmac_pending_2,
+               base->derived_hmac_pending_2, 32);
+        out->derived_keys_set_2 = base->derived_keys_set_2;
     }
     out->cookie_format = (add->cookie_format == BS_FMT_UNSET)
                        ? base->cookie_format
@@ -1854,6 +1903,45 @@ static const char *bs_load_config_file(cmd_parms *cmd,
     return NULL;
 }
 
+/* Forward decl — bs_hkdf_derive_key is defined alongside the other
+ * crypto helpers further below. */
+static int bs_hkdf_derive_key(const unsigned char *master,
+                              apr_size_t master_len,
+                              const char *info,
+                              unsigned char out_key[32]);
+
+/* Security review LOW #3 — derive the per-purpose keys for a master
+ * secret. Called from the secret-file directive setters AFTER the
+ * key bytes have been validated. Returns NULL on success; on
+ * (vanishingly unlikely) HKDF failure returns a diagnostic string
+ * the directive setter surfaces as a fatal config error so the
+ * module refuses to start with a broken key derivation. The 3
+ * purpose tags map 1:1 to derived_hmac_cookie / derived_gcm_cookie
+ * / derived_hmac_pending in the dir_cfg. Bumping any tag (e.g.
+ * "bs:cookie:hmac:v2") is the rotation knob if the underlying
+ * crypto contract ever changes. */
+static const char *bs_derive_purpose_keys(apr_pool_t *p,
+                                          const unsigned char *master,
+                                          apr_size_t master_len,
+                                          unsigned char *out_hmac,
+                                          unsigned char *out_gcm,
+                                          unsigned char *out_pending)
+{
+    if (!bs_hkdf_derive_key(master, master_len,
+                            "bs:cookie:hmac:v1", out_hmac)) {
+        return apr_psprintf(p, "HKDF(bs:cookie:hmac:v1) failed");
+    }
+    if (!bs_hkdf_derive_key(master, master_len,
+                            "bs:cookie:gcm:v1", out_gcm)) {
+        return apr_psprintf(p, "HKDF(bs:cookie:gcm:v1) failed");
+    }
+    if (!bs_hkdf_derive_key(master, master_len,
+                            "bs:cookie:pending:v1", out_pending)) {
+        return apr_psprintf(p, "HKDF(bs:cookie:pending:v1) failed");
+    }
+    return NULL;
+}
+
 /* Security review HIGH #2 — validate a binary-capable secret loaded via
  * bs_load_config_file. Trims one trailing newline (common with
  * `echo`-style key generation), rejects embedded NUL bytes (would
@@ -1963,26 +2051,51 @@ static int bs_ct_equal(const unsigned char *a, const unsigned char *b,
     return diff == 0;
 }
 
-/* Derive a 32-byte AES-256 key from operator secret bytes via
- * SHA-256. Two purposes:
- *   1. Accept any secret length — SHA-256 is defined for any input.
- *      The existing HMAC path uses the secret bytes directly (HMAC
- *      accepts variable-length keys), so having GCM run through a
- *      hash gives us one derived-key convention without forcing
- *      operators to manage two key files.
- *   2. Domain separation. HMAC reads the raw bytes; GCM reads the
- *      digest. A leaked-in-one-direction-but-not-the-other secret
- *      can't be trivially cross-applied even if someone mistakenly
- *      exports the derived bytes. Not cryptographically rigorous
- *      domain separation (a SHA-256 preimage is trivial with the
- *      original bytes), but it means AES ciphertexts produced under
- *      the HMAC-derived key won't decrypt under the raw bytes and
- *      vice versa. */
-static void bs_derive_aes_key(const unsigned char *secret,
-                              apr_size_t secret_len,
+/* Security review LOW #3 — HKDF-Expand for per-purpose key
+ * derivation. RFC 5869. Replaces the prior `SHA256(secret)` ad-hoc
+ * derivation with a cryptographically clean per-purpose key model:
+ *
+ *   key_for_X = HKDF(secret, info="bs:X:v1")
+ *
+ * Each purpose gets its own derived key. Leaking one (cryptanalysis,
+ * side-channel, key extraction from memory) tells an attacker
+ * nothing about the others — the HMAC-based extract+expand
+ * construction is one-way per purpose-tag.
+ *
+ * Called once at config-load time per secret/purpose; the derived
+ * keys live in dir_cfg and the request path uses them directly with
+ * zero per-request HKDF cost.
+ *
+ * Returns 0 on OpenSSL failure (vanishingly unlikely; treats as
+ * fatal in caller — module won't start). */
+static int bs_hkdf_derive_key(const unsigned char *master,
+                              apr_size_t master_len,
+                              const char *info,
                               unsigned char out_key[32])
 {
-    bs_sha256(secret, secret_len, out_key);
+    EVP_KDF *kdf = EVP_KDF_fetch(NULL, "HKDF", NULL);
+    if (!kdf) return 0;
+    EVP_KDF_CTX *ctx = EVP_KDF_CTX_new(kdf);
+    EVP_KDF_free(kdf);
+    if (!ctx) return 0;
+    OSSL_PARAM params[5];
+    int i = 0;
+    params[i++] = OSSL_PARAM_construct_utf8_string("digest",
+                                                   "SHA256", 0);
+    params[i++] = OSSL_PARAM_construct_octet_string("key",
+                                                    (void *)master,
+                                                    master_len);
+    /* Empty salt: HKDF-Extract degenerates to HMAC(zeros, secret).
+     * The per-purpose info tag below provides domain separation. */
+    params[i++] = OSSL_PARAM_construct_octet_string("salt",
+                                                    (void *)"", 0);
+    params[i++] = OSSL_PARAM_construct_octet_string("info",
+                                                    (void *)info,
+                                                    strlen(info));
+    params[i] = OSSL_PARAM_construct_end();
+    int rc = EVP_KDF_derive(ctx, out_key, 32, params);
+    EVP_KDF_CTX_free(ctx);
+    return rc == 1;
 }
 
 /* AES-256-GCM encrypt. Wire layout:
@@ -1996,15 +2109,15 @@ static void bs_derive_aes_key(const unsigned char *secret,
  * the envelope length into *out_len, returns NULL.
  * On failure: returns an error string for logging; *out_len
  * untouched. */
-static const char *bs_gcm_encrypt(const unsigned char *secret,
-                                  apr_size_t secret_len,
+static const char *bs_gcm_encrypt(const unsigned char aes_key[32],
                                   const unsigned char *pt,
                                   apr_size_t pt_len,
                                   unsigned char *out_buf,
                                   apr_size_t *out_len)
 {
-    unsigned char key[32];
-    bs_derive_aes_key(secret, secret_len, key);
+    /* LOW #3 — caller passes the HKDF-derived AES key directly;
+     * we no longer derive per-call. */
+    const unsigned char *key = aes_key;
 
     out_buf[0] = BS_COOKIE_ALG_GCM;
     if (RAND_bytes(out_buf + 1, BS_GCM_NONCE_LEN) != 1) {
@@ -2048,7 +2161,9 @@ static const char *bs_gcm_encrypt(const unsigned char *secret,
 
 done:
     EVP_CIPHER_CTX_free(ctx);
-    OPENSSL_cleanse(key, sizeof(key));
+    /* LOW #3 — `key` now points at caller-owned memory (cfg-cached
+     * derived key); the caller's pool cleanup will OPENSSL_cleanse
+     * when the cfg is destroyed. Don't cleanse a borrowed buffer. */
     return err;
 }
 
@@ -2058,8 +2173,7 @@ done:
  * into *out_pt (caller-provided, must be at least env_len - 1 - 12
  * - 16 bytes) and the plaintext length in *out_pt_len. Returns an
  * error string on any failure including tag-mismatch. */
-static const char *bs_gcm_decrypt(const unsigned char *secret,
-                                  apr_size_t secret_len,
+static const char *bs_gcm_decrypt(const unsigned char aes_key[32],
                                   const unsigned char *env,
                                   apr_size_t env_len,
                                   unsigned char *out_pt,
@@ -2075,11 +2189,11 @@ static const char *bs_gcm_decrypt(const unsigned char *secret,
     const unsigned char *ct    = env + 1 + BS_GCM_NONCE_LEN;
     const unsigned char *tag   = ct + ct_len;
 
-    unsigned char key[32];
-    bs_derive_aes_key(secret, secret_len, key);
+    /* LOW #3 — caller passes the HKDF-derived AES key directly. */
+    const unsigned char *key = aes_key;
 
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) { OPENSSL_cleanse(key, sizeof(key)); return "EVP_CIPHER_CTX_new"; }
+    if (!ctx) return "EVP_CIPHER_CTX_new";
     const char *err = NULL;
     int outlen = 0, finallen = 0, aadlen = 0;
 
@@ -2113,7 +2227,7 @@ static const char *bs_gcm_decrypt(const unsigned char *secret,
 
 done:
     EVP_CIPHER_CTX_free(ctx);
-    OPENSSL_cleanse(key, sizeof(key));
+    /* LOW #3 — borrowed key, see encrypt path comment. */
     return err;
 }
 
@@ -9451,13 +9565,14 @@ static const char *bs_build_cookie_prefix_gcm(apr_pool_t *p,
                                               const bs_challenge *ch,
                                               const char **out_b64)
 {
-    if (!cfg->secret || cfg->secret_len == 0) return "no secret";
+    if (!cfg->derived_keys_set) return "no secret";
     const char *canon = bs_challenge_canonical(p, ch);
     apr_size_t pt_len = strlen(canon);
     apr_size_t env_cap = 1 + BS_GCM_NONCE_LEN + pt_len + BS_GCM_TAG_LEN;
     unsigned char *env = apr_palloc(p, env_cap);
     apr_size_t env_len = 0;
-    const char *err = bs_gcm_encrypt(cfg->secret, cfg->secret_len,
+    /* LOW #3 — derived GCM key, not raw secret. */
+    const char *err = bs_gcm_encrypt(cfg->derived_gcm_cookie,
                                      (const unsigned char *)canon, pt_len,
                                      env, &env_len);
     if (err) return err;
@@ -9584,7 +9699,8 @@ static const char *bs_issue_challenge(apr_pool_t *p, const bs_dir_cfg *cfg,
     if (err) return err;
 
     const char *canon = bs_challenge_canonical(p, out);
-    bs_hmac_sha256(cfg->secret, cfg->secret_len,
+    /* LOW #3 — issue uses the HKDF-derived cookie HMAC key. */
+    bs_hmac_sha256(cfg->derived_hmac_cookie, 32,
                    (const unsigned char *)canon, strlen(canon),
                    out->signature);
     return NULL;
@@ -9784,12 +9900,13 @@ static const char *bs_verify_cookie_hmac(request_rec *r,
      * pays off on cookies the primary key already rejected. */
     const char *canon = bs_challenge_canonical(r->pool, &ch);
     unsigned char sig_expected[BS_SIG_BYTES];
-    bs_hmac_sha256(cfg->secret, cfg->secret_len,
+    /* LOW #3 — derived cookie-HMAC key, not raw secret. */
+    bs_hmac_sha256(cfg->derived_hmac_cookie, 32,
                    (const unsigned char *)canon, strlen(canon),
                    sig_expected);
     if (!bs_ct_equal(sig_expected, sig_from_client, BS_SIG_BYTES)) {
-        if (!cfg->secret_secondary) return "signature mismatch";
-        bs_hmac_sha256(cfg->secret_secondary, cfg->secret_secondary_len,
+        if (!cfg->derived_keys_set_2) return "signature mismatch";
+        bs_hmac_sha256(cfg->derived_hmac_cookie_2, 32,
                        (const unsigned char *)canon, strlen(canon),
                        sig_expected);
         if (!bs_ct_equal(sig_expected, sig_from_client, BS_SIG_BYTES)) {
@@ -9832,12 +9949,12 @@ static const char *bs_verify_cookie_gcm(request_rec *r,
      * fails the tag check and bs_gcm_decrypt returns an error
      * without leaking plaintext. The retry is safe and the success
      * path is unchanged. */
-    const char *derr = bs_gcm_decrypt(cfg->secret, cfg->secret_len,
+    /* LOW #3 — derived GCM keys, primary then secondary. */
+    const char *derr = bs_gcm_decrypt(cfg->derived_gcm_cookie,
                                       env, (apr_size_t)env_len,
                                       pt, &pt_len);
-    if (derr && cfg->secret_secondary) {
-        derr = bs_gcm_decrypt(cfg->secret_secondary,
-                              cfg->secret_secondary_len,
+    if (derr && cfg->derived_keys_set_2) {
+        derr = bs_gcm_decrypt(cfg->derived_gcm_cookie_2,
                               env, (apr_size_t)env_len,
                               pt, &pt_len);
     }
@@ -9938,6 +10055,18 @@ static const char *bs_set_secret_file(cmd_parms *cmd, void *cfg_v,
 
     cfg->secret     = (const unsigned char *)buf;
     cfg->secret_len = len;
+
+    /* Security review LOW #3 — derive per-purpose keys once. */
+    err = bs_derive_purpose_keys(cmd->pool,
+                                  cfg->secret, cfg->secret_len,
+                                  cfg->derived_hmac_cookie,
+                                  cfg->derived_gcm_cookie,
+                                  cfg->derived_hmac_pending);
+    if (err) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSecretFile: key derivation failed: %s", err);
+    }
+    cfg->derived_keys_set = 1;
     return NULL;
 }
 
@@ -9990,6 +10119,21 @@ static const char *bs_set_secondary_secret_file(cmd_parms *cmd,
 
     cfg->secret_secondary     = (const unsigned char *)buf;
     cfg->secret_secondary_len = len;
+
+    /* Security review LOW #3 — derive per-purpose keys for the
+     * secondary master too. */
+    err = bs_derive_purpose_keys(cmd->pool,
+                                  cfg->secret_secondary,
+                                  cfg->secret_secondary_len,
+                                  cfg->derived_hmac_cookie_2,
+                                  cfg->derived_gcm_cookie_2,
+                                  cfg->derived_hmac_pending_2);
+    if (err) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSecondarySecretFile: key derivation failed: %s",
+            err);
+    }
+    cfg->derived_keys_set_2 = 1;
     return NULL;
 }
 
@@ -11809,7 +11953,8 @@ static const char *bs_mint_pending_cookie(request_rec *r,
     const char *canon = apr_psprintf(r->pool,
         "bs:pending:v1:%s:%" APR_TIME_T_FMT, nonce_hex, expiry);
     unsigned char mac[BS_SIG_BYTES];
-    bs_hmac_sha256(cfg->secret, cfg->secret_len,
+    /* LOW #3 — derived pending-HMAC key. */
+    bs_hmac_sha256(cfg->derived_hmac_pending, 32,
                    (const unsigned char *)canon, strlen(canon), mac);
     char mac_hex[BS_SIG_BYTES * 2 + 1];
     bs_to_hex(mac, BS_SIG_BYTES, mac_hex);
@@ -11884,7 +12029,8 @@ static const char *bs_verify_pending_cookie(request_rec *r,
     const char *canon = apr_psprintf(r->pool,
         "bs:pending:v1:%s:%" APR_TIME_T_FMT, nonce_hex, expiry);
     unsigned char expect[BS_SIG_BYTES];
-    bs_hmac_sha256(cfg->secret, cfg->secret_len,
+    /* LOW #3 — derived pending-HMAC key (primary). */
+    bs_hmac_sha256(cfg->derived_hmac_pending, 32,
                    (const unsigned char *)canon, strlen(canon), expect);
     unsigned char got[BS_SIG_BYTES];
     if (!bs_from_hex(mac_hex, BS_SIG_BYTES, got)) return "bad mac hex";
@@ -11897,8 +12043,8 @@ static const char *bs_verify_pending_cookie(request_rec *r,
          * pending cookie (TTL 300s) would 403 on captcha submit
          * even though the secondary key would have validated.
          * Same secondary-key retry pattern as bs_verify_cookie_hmac. */
-        if (!cfg->secret_secondary) return "sig mismatch";
-        bs_hmac_sha256(cfg->secret_secondary, cfg->secret_secondary_len,
+        if (!cfg->derived_keys_set_2) return "sig mismatch";
+        bs_hmac_sha256(cfg->derived_hmac_pending_2, 32,
                        (const unsigned char *)canon, strlen(canon),
                        expect);
         if (!bs_ct_equal(expect, got, BS_SIG_BYTES)) {
@@ -12679,20 +12825,21 @@ static int bs_embedded_verify_pow(request_rec *r, bs_dir_cfg *cfg,
     }
 
     /* Validate the HMAC against the canonical form. This proves the
-     * server issued the challenge and nothing in transit changed. */
+     * server issued the challenge and nothing in transit changed.
+     * LOW #3 — derived cookie-HMAC key. */
     const char *canon = bs_challenge_canonical(r->pool, &ch);
     unsigned char sig_expected[BS_SIG_BYTES];
-    bs_hmac_sha256(cfg->secret, cfg->secret_len,
+    bs_hmac_sha256(cfg->derived_hmac_cookie, 32,
                    (const unsigned char *)canon, strlen(canon),
                    sig_expected);
     if (!bs_ct_equal(sig_expected, ch.signature, BS_SIG_BYTES)) {
         /* Try secondary key if rotation is in progress (E16). */
-        if (cfg->secret_secondary) {
-            bs_hmac_sha256(cfg->secret_secondary, cfg->secret_secondary_len,
+        if (cfg->derived_keys_set_2) {
+            bs_hmac_sha256(cfg->derived_hmac_cookie_2, 32,
                            (const unsigned char *)canon, strlen(canon),
                            sig_expected);
         }
-        if (!cfg->secret_secondary ||
+        if (!cfg->derived_keys_set_2 ||
             !bs_ct_equal(sig_expected, ch.signature, BS_SIG_BYTES)) {
             r->status = HTTP_FORBIDDEN;
             ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
@@ -12788,7 +12935,8 @@ static int bs_embedded_verify_pow(request_rec *r, bs_dir_cfg *cfg,
         }
     }
     canon = bs_challenge_canonical(r->pool, &ch);
-    bs_hmac_sha256(cfg->secret, cfg->secret_len,
+    /* LOW #3 — re-sign with derived cookie-HMAC key. */
+    bs_hmac_sha256(cfg->derived_hmac_cookie, 32,
                    (const unsigned char *)canon, strlen(canon),
                    ch.signature);
     const char *payload = bs_build_cookie_payload(r->pool, cfg, &ch,
@@ -12912,9 +13060,10 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
     }
     /* Re-sign canonical (HMAC) — bs_build_cookie_payload uses this
      * signature for HMAC mode; for GCM mode the signature is part
-     * of the encrypted canonical so it gets re-encrypted. */
+     * of the encrypted canonical so it gets re-encrypted.
+     * LOW #3 — derived cookie-HMAC key. */
     const char *canon = bs_challenge_canonical(r->pool, &ch);
-    bs_hmac_sha256(cfg->secret, cfg->secret_len,
+    bs_hmac_sha256(cfg->derived_hmac_cookie, 32,
                    (const unsigned char *)canon, strlen(canon),
                    ch.signature);
     const char *payload = bs_build_cookie_payload(r->pool, cfg, &ch,
