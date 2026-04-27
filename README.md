@@ -150,6 +150,32 @@ balancer and then challenge every legitimate visitor.
 For a single-host deployment with no proxy in front, no extra
 configuration is needed — `r->useragent_ip` already is the client.
 
+## Slow-client / slowloris defense
+
+`mod_botshield`'s body-read paths (the form-captcha verify, the M8
+captcha-verify endpoint, the embedded-verify endpoint) inherit
+Apache's slow-client defense. Apache's `Timeout` directive bounds
+how long a worker can be held by a stalled client; the default is
+60 seconds.
+
+**For production deployments, pair `mod_botshield` with
+`mod_reqtimeout`.** It gives finer-grained controls than `Timeout`
+and is the standard Apache answer to slowloris-class attacks. A
+typical configuration:
+
+```apache
+LoadModule reqtimeout_module modules/mod_reqtimeout.so
+
+RequestReadTimeout header=20-40,minrate=500
+RequestReadTimeout body=20,minrate=500
+```
+
+We deliberately do not implement our own slow-client defense.
+`mod_reqtimeout` is in Apache core, battle-tested, and applies to
+the whole vhost — `mod_botshield`-owned endpoints get the same
+protection as the application's own handlers without any extra
+config on our side.
+
 ## Directives
 
 ### Core
