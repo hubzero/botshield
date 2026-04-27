@@ -3180,9 +3180,18 @@ static int bs_allow_ip_in_ranges(const apr_array_header_t *ranges,
     const char *ip_str = r->useragent_ip;
     if (!ip_str || !*ip_str) return 0;
 
+    /* APR_IPV4_ADDR_OK | APR_IPV6_ADDR_OK forces numeric-only
+     * parsing — no DNS resolution. r->useragent_ip should already
+     * be a numeric address (mod_remoteip rewrites it before our
+     * hooks run), but if mod_remoteip is misconfigured or absent
+     * a non-numeric value would otherwise trigger a blocking DNS
+     * lookup on the worker thread (5–30 s OS resolver timeout).
+     * Defense-in-depth flag costs nothing on the happy path. */
     apr_sockaddr_t *sa = NULL;
     apr_status_t rv = apr_sockaddr_info_get(&sa, ip_str,
-                                            APR_UNSPEC, 0, 0, r->pool);
+                                            APR_UNSPEC, 0,
+                                            APR_IPV4_ADDR_OK | APR_IPV6_ADDR_OK,
+                                            r->pool);
     if (rv != APR_SUCCESS || !sa) return 0;
 
     for (int i = 0; i < ranges->nelts; i++) {
