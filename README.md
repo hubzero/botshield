@@ -330,6 +330,126 @@ rules; use `BotShieldShadowMode` for staging an entire policy.
 The audit trail captures everything the rule WOULD have done; the
 response is unaffected.
 
+## Understanding scoring
+
+mod_botshield uses a single signed-integer score per request to decide
+how much friction to apply. Higher score = more suspicious = stronger
+challenge. Operators tune four thresholds and rely on the module to
+collect signals consistently.
+
+### How score is collected
+
+Throughout the request lifecycle, signals call `bs_score_add` with a
+penalty (positive = suspicious, negative = credit) and a reason string.
+Built-in signals (current defaults — verify against
+`src/mod_botshield.c` if tuning matters):
+
+| Signal | Penalty | Reason |
+|---|---|---|
+| Missing `User-Agent` | +40 | `missing-user-agent` |
+| Missing `Accept-Language` | +15 | `missing-accept-language` |
+| Scraper-pattern UA | +50 | `scraper-ua:<pattern>` |
+| First-sight IP (not in Bloom filter) | +5 | `first-sight-ip` |
+| Block-path match | +100 | `block-path:<name>` |
+| Rate-limit exceeded | +50 | `rate-limit-exceeded:<name>` |
+| Robots.txt Disallow violation | +100 | `robots-block:<group>` |
+| Honeypot hit (default flag-trigger) | +60 | `flag-trigger:honeypot_hit` |
+| Fake-bot detection (default) | +80 | `flag-trigger:fake_bot` |
+| Verified legit-crawler match | -∞ (forces pass) | `verified-<name>` |
+| `app_verified_human` cookie credit (default) | -80 | `flag-trigger:app_verified_human` |
+| Operator path / load / cookie / env / flag triggers with `action=score add=N` | configured | `<family>-trigger:<name>` |
+
+Every entry carries its reason; the per-request decision log lists
+them all so you can see exactly which signals contributed.
+
+The number of distinct reasons recorded per request is capped at 16
+(`BS_SCORE_MAX_REASONS`). Past the cap, further calls still
+contribute their penalty to the running total but are dropped from
+the audit trail. A one-shot DEBUG log line fires on the first drop
+so the diagnostic surfaces under verbose logging.
+
+### Composition
+
+When the policy decision is made, two values are summed into one
+effective score:
+
+```
+effective = heuristic_total + cookie_score
+```
+
+- **heuristic_total** — sum of `bs_score_add` calls for THIS request,
+  inclusive of any `BotShieldFlagTrigger action=score add=N` effects
+  fired by flags set on the IP or carried in the prior cookie.
+- **cookie_score** — accumulated reputation in the prior `_bs_verified`
+  cookie. Carries forward across requests; expires with the cookie.
+
+A separate **tier floor** can also apply: any
+`BotShieldFlagTrigger action=tier_floor min=<tier>` rule firing on a
+set flag bit lifts the final tier to AT LEAST that level after
+threshold mapping. Score-derived tier wins when it's already above
+the floor — never silently downgrades. The floor lifts produce a
+`flag-tier-floor:<tier>` reason.
+
+### Threshold ladder
+
+The composed `effective` score maps to a tier via three configurable
+thresholds:
+
+| Score range | Tier | Behavior |
+|---|---|---|
+| `effective < score_silent` | PASS | request continues normally |
+| `score_silent ≤ effective < score_hard` | SILENT | invisible JS proof-of-work |
+| `score_hard ≤ effective < score_captcha` | FORM | visible form-submitted PoW |
+| `score_captcha ≤ effective` | CAPTCHA | third-party captcha (falls back to FORM if no provider configured) |
+
+Defaults:
+
+- `BotShieldScoreSilent`  20
+- `BotShieldScoreHard`    50
+- `BotShieldScoreCaptcha` 80
+
+Tune the thresholds to your tolerance for friction. Lower = more
+requests hit challenges; higher = more requests pass freely.
+
+### Inspecting decisions
+
+The decision log line for every served challenge includes the full
+breakdown:
+
+```
+mod_botshield: <action> effective=N tier=<tier> heuristic=N
+               cookie_score=N reasons=[reason:penalty,reason:penalty,...]
+```
+
+When tuning thresholds or debugging unexpected challenges, grep the
+log for the request and read the `reasons` array — exactly which
+signals contributed and how much.
+
+### Tuning workflow
+
+1. Start with `BotShieldShadowMode on` to dry-run all rules without
+   enforcement (see "Staging policy changes" above).
+2. Watch the decision log for several days under real traffic.
+3. Adjust thresholds and per-rule penalties based on observed
+   distributions of `effective` and the per-reason contributions.
+4. Flip `BotShieldShadowMode off` when satisfied.
+5. Subsequent rule additions can be staged with per-rule
+   `mode=observe` without affecting the rest.
+
+### Cookie reputation
+
+Once a request passes through (challenged or not), mod_botshield
+issues a `_bs_verified` cookie carrying the user's accumulated
+reputation. On subsequent requests that cookie's score field becomes
+the `cookie_score` term in the composition. Repeated good behavior
+accumulates negative `cookie_score` (forgiveness credit applied at
+challenge-issue time); repeated suspicious behavior accumulates
+positive.
+
+The reputation persists across requests but expires with the cookie
+TTL (`BotShieldCookieTTL`, default 1 hour). After expiry users start
+fresh.
+
 ## Multi-vhost deployments
 
 mod_botshield gives each vhost its own isolated bot reputation by
