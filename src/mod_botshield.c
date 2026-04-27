@@ -5135,12 +5135,9 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     bs_shm.strike_table = (bs_strike_slot *)((unsigned char *)bs_shm.rate_counters
                                              + e21_rate_bytes);
     bs_shm.strike_capacity = strike_slots;
-    for (apr_size_t i = 0; i < strike_slots; i++) {
-        bs_shm.strike_table[i].rule_slot = BS_STRIKE_EMPTY;
-    }
-    /* E10: safeguard table follows the strike table. memset(base,0)
-     * leaves every `used` field at 0, which IS the "empty" sentinel
-     * for this table — no explicit zero pass needed. */
+    /* All slot types now share the same empty-marker convention
+     * (apr_uint32_t used == 0); apr_shm_create zeroes the segment so
+     * no explicit per-table init pass is needed. */
     bs_shm.safeguard_table = (bs_safeguard_slot *)
         ((unsigned char *)bs_shm.strike_table + strike_bytes);
     bs_shm.safeguard_capacity = safeguard_slots;
@@ -9867,25 +9864,23 @@ static void bs_gauges_refresh(void)
             apr_uint32_t v = __atomic_load_n(&slot->version,
                                               __ATOMIC_RELAXED);
             if ((v & 1U) == 0 &&
-                slot->flags != 0 &&
+                slot->used != 0 &&
                 slot->expires_at > now_sec) {
                 flagged_used++;
             }
         }
     }
     /* E13.1 — strike + safeguard occupancy. "Used" here means the
-     * slot would force a probe walk (rule_slot != EMPTY for strike,
-     * used != 0 for safeguard), regardless of whether the entry is
-     * still TTL-active. That's the right view for load-factor-based
-     * probe-saturation warnings. */
+     * slot would force a probe walk (used != 0), regardless of
+     * whether the entry is still TTL-active. That's the right view
+     * for load-factor-based probe-saturation warnings. */
     apr_uint64_t strike_used = 0;
     if (bs_shm.strike_table) {
         for (apr_size_t i = 0; i < bs_shm.strike_capacity; i++) {
             const bs_strike_slot *slot = &bs_shm.strike_table[i];
             apr_uint32_t v = __atomic_load_n(&slot->version,
                                               __ATOMIC_RELAXED);
-            if ((v & 1U) == 0 &&
-                slot->rule_slot != BS_STRIKE_EMPTY) {
+            if ((v & 1U) == 0 && slot->used != 0) {
                 strike_used++;
             }
         }
@@ -11859,8 +11854,7 @@ static int bs_metrics_handler(request_rec *r, bs_dir_cfg *cfg)
         "Configured BotShieldFlaggedIPCapacity.",
         (apr_uint64_t)bs_shm.flagged_capacity);
     bs_m_emit_gauge(r, "shm_strike_used",
-        "Strike-table slots physically occupied "
-        "(rule_slot != BS_STRIKE_EMPTY).",
+        "Strike-table slots physically occupied (used != 0).",
         bs_metrics_strike_used());
     bs_m_emit_gauge(r, "shm_strike_capacity",
         "Configured BotShieldRateLimitEscalateCapacity.",

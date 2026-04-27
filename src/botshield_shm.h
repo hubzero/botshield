@@ -62,7 +62,13 @@ extern "C" {
 
 /* SHM segment header */
 #define BS_SHM_MAGIC              0x42534844  /* 'BSHD' */
-#define BS_SHM_FORMAT_VERSION     1
+/* Format-version history:
+ *   1 — initial; per-table empty markers (flags==0, rule_slot==EMPTY,
+ *       expires_at==0, used==0).
+ *   2 — every slot type now carries an explicit apr_uint32_t used
+ *       field with 0 = empty as the unified convention. Slot
+ *       layouts changed; no backward-compatible read of v1 segments. */
+#define BS_SHM_FORMAT_VERSION     2
 /* E13 — bumped from 8M to 16M to accommodate the per-slot ns_id+pad
  * fields (8 bytes/slot across flagged-IP / strike / safeguard tables
  * at default capacities). 8M no longer fits the default config. */
@@ -87,7 +93,6 @@ extern "C" {
 #define BS_FIRST_SIGHT_PENALTY    5
 
 /* Strike table (E9) */
-#define BS_STRIKE_EMPTY            0xFFFFFFFFu
 #define BS_STRIKE_PROBE_LIMIT      8
 #define BS_DEFAULT_STRIKE_SLOTS    50000
 #define BS_STRIKE_MIN_SLOTS        1024
@@ -131,13 +136,16 @@ extern "C" {
 
 /* M6 state-file persistence */
 #define BS_STATE_MAGIC            0x44485342U
-/* E13 — bumped from 1 to 2: bs_flagged_ip_slot grew an `ns_id`
- * field for per-vhost reputation namespacing. Old (v1) state
- * files are rejected with a NOTICE and the table starts fresh —
- * one-time cost on upgrade, no slot-level migration code needed
- * because flagged-IP TTLs are short anyway and most entries
- * would have aged out. */
-#define BS_STATE_FORMAT_VERSION   2
+/* Format-version history:
+ *   1 — initial.
+ *   2 — bs_flagged_ip_slot grew an `ns_id` field for per-vhost
+ *       reputation namespacing.
+ *   3 — bs_flagged_ip_slot grew an explicit `used` field and got
+ *       its layout reordered as part of the empty-marker
+ *       consistency cleanup. Slot bytes from v2 state files don't
+ *       map cleanly into v3 layout, so older files are rejected
+ *       with a NOTICE and the table starts fresh. */
+#define BS_STATE_FORMAT_VERSION   3
 #define BS_STATE_MAX_AGE_SECS     (14 * 86400)
 #define BS_FNV64_SEED             0xcbf29ce484222325ULL
 
@@ -221,36 +229,39 @@ typedef enum {
  * even = quiescent, odd = mid-write. Readers snapshot fields between
  * matching even versions.
  *
+ * Empty-marker convention (unified across all SHM slot types as of
+ * BS_SHM_FORMAT_VERSION 2): apr_uint32_t used == 0 means the slot is
+ * unwritten; apr_shm_create zeroes the segment, so a fresh table
+ * starts with every slot empty without any explicit init pass.
+ *
  * E13 — `ns_id` field added so vhosts isolate flagged-IP reputation.
  * Lookups match (ip, ns_id); same physical table holds rows from many
- * namespaces without cross-pollution. Slot grew 32 → 40 bytes, a 25%
- * memory hit for the namespace guarantee. */
+ * namespaces without cross-pollution. */
 typedef struct {
     apr_uint32_t  version;       /* seqlock counter */
-    apr_uint32_t  flags;         /* 0 = empty slot */
+    apr_uint32_t  used;          /* 0 = empty slot */
     unsigned char ip[16];        /* IPv6-mapped v4 or raw v6 */
-    apr_int64_t   expires_at;    /* unix seconds; past means stale */
+    apr_uint32_t  flags;         /* OR'd flag bitmap */
     apr_uint32_t  ns_id;         /* E13 reputation namespace */
-    apr_uint32_t  _pad;          /* keep slot 8-byte aligned */
+    apr_int64_t   expires_at;    /* unix seconds; past means stale */
 } bs_flagged_ip_slot;
 
 /* E9 — repeated-429 escalation. Per-(client_ip, rate_rule_slot) strike
- * accounting in SHM. `rule_slot == BS_STRIKE_EMPTY` flags an unused
- * slot; strike counter is windowed on `strike_window_start` so an idle
- * entry rolls over.
+ * accounting in SHM. Strike counter is windowed on `strike_window_start`
+ * so an idle entry rolls over.
  *
  * `escalation_until == 0` → not yet crossed threshold. Non-zero → in
  * the escalated state until the timestamp passes. Each fresh strike
  * during escalation extends the timestamp (TTL slides on last strike). */
 typedef struct {
     apr_uint32_t  version;             /* seqlock counter */
-    apr_uint32_t  rule_slot;           /* BS_STRIKE_EMPTY = unused */
+    apr_uint32_t  used;                /* 0 = empty slot */
     unsigned char ip[16];              /* masked per ipv6_prefix_bits */
+    apr_uint32_t  rule_slot;           /* rate-rule index */
+    apr_uint32_t  ns_id;               /* E13 reputation namespace */
     apr_uint32_t  strike_window_start; /* unix sec; 0 = no strikes yet */
     apr_uint32_t  strike_count;
     apr_int64_t   escalation_until;    /* unix sec; 0 = not escalated */
-    apr_uint32_t  ns_id;               /* E13 reputation namespace */
-    apr_uint32_t  _pad;
 } bs_strike_slot;
 
 /* E10 — challenge safeguard / anti-loop hysteresis.
@@ -278,13 +289,14 @@ typedef struct {
 /* MEDIUM #2 phase 2 — embedded-bootstrap nonce table. Records every
  * successfully-redeemed challenge nonce with its expiry so the verify
  * endpoint can reject replays. Keyed on a 64-bit SipHash of
- * (8-byte challenge nonce || 4-byte ns_id). Slot empty when
- * expires_at == 0; eviction on expiry. */
+ * (8-byte challenge nonce || 4-byte ns_id). Eviction on expiry. */
 typedef struct {
     apr_uint32_t  version;        /* seqlock */
-    apr_uint32_t  ns_id;          /* E13 reputation namespace */
+    apr_uint32_t  used;           /* 0 = empty slot */
     apr_uint64_t  nonce_hash;     /* siphash24(siphash_key, nonce||ns_id) */
-    apr_int64_t   expires_at;     /* unix sec; 0 = empty */
+    apr_int64_t   expires_at;     /* unix sec; past means stale */
+    apr_uint32_t  ns_id;          /* E13 reputation namespace */
+    apr_uint32_t  _pad;
 } bs_nonce_slot;
 
 /* M8.1 — captcha-verify rate-limit slot encoding. One uint64 per slot:

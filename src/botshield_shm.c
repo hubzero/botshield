@@ -200,10 +200,11 @@ static void bs_flagged_write_slot(bs_flagged_ip_slot *slot,
 {
     apr_uint32_t v = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
     __atomic_store_n(&slot->version, v | 1U, __ATOMIC_RELEASE);   /* begin: odd */
+    slot->used       = 1;
     memcpy(slot->ip, ip, 16);
     slot->flags      = flags;
-    slot->expires_at = expires_at;
     slot->ns_id      = ns_id;
+    slot->expires_at = expires_at;
     /* Release-publish: payload stores above are now visible. */
     __atomic_store_n(&slot->version, (v | 1U) + 1U, __ATOMIC_RELEASE);
 }
@@ -255,7 +256,7 @@ void bs_flagged_ip_add(request_rec *r, const unsigned char ip[16],
             continue;
         }
 
-        if (slot->flags && slot->ns_id == ns_id
+        if (slot->used && slot->ns_id == ns_id
             && memcmp(slot->ip, ip, 16) == 0) {
             /* Merge flags, refresh TTL to whichever is later. */
             apr_uint32_t merged = slot->flags | flag_bits;
@@ -265,12 +266,12 @@ void bs_flagged_ip_add(request_rec *r, const unsigned char ip[16],
             apr_global_mutex_unlock(bs_shm.mutex);
             return;
         }
-        if (slot->flags == 0 && victim < 0) {
+        if (!slot->used && victim < 0) {
             victim = (int)idx;
             /* Empty is good; keep looking only in case an exact-IP
              * match is further along — we want to merge, not duplicate. */
         }
-        if (slot->expires_at > 0 && slot->expires_at < now && victim < 0) {
+        if (slot->used && slot->expires_at < now && victim < 0) {
             victim = (int)idx;
         }
     }
@@ -322,6 +323,7 @@ int bs_flagged_ip_lookup(const unsigned char ip[16],
         bs_flagged_ip_slot *slot = &bs_shm.flagged_table[idx];
 
         apr_uint32_t v1, v2;
+        apr_uint32_t   local_used;
         unsigned char  local_ip[16];
         apr_uint32_t   local_flags;
         apr_int64_t    local_expires;
@@ -333,6 +335,7 @@ int bs_flagged_ip_lookup(const unsigned char ip[16],
                 if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
                 continue;
             }
+            local_used    = slot->used;
             memcpy(local_ip, slot->ip, 16);
             local_flags   = slot->flags;
             local_expires = slot->expires_at;
@@ -342,7 +345,7 @@ int bs_flagged_ip_lookup(const unsigned char ip[16],
             if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
         }
         if (v1 == ~0U) continue;            /* slot too contended */
-        if (local_flags == 0) continue;     /* empty */
+        if (!local_used) continue;          /* empty */
         if (local_expires < now) continue;  /* stale */
         if (local_ns != ns_id) continue;    /* E13: different namespace */
         if (memcmp(local_ip, ip, 16) != 0) continue;
@@ -393,6 +396,7 @@ int bs_strike_check_escalated(const unsigned char ip[16],
         bs_strike_slot *slot = &bs_shm.strike_table[idx];
 
         apr_uint32_t v1, v2;
+        apr_uint32_t  local_used;
         unsigned char local_ip[16];
         apr_uint32_t  local_rule;
         apr_int64_t   local_until;
@@ -404,6 +408,7 @@ int bs_strike_check_escalated(const unsigned char ip[16],
                 if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
                 continue;
             }
+            local_used  = slot->used;
             local_rule  = slot->rule_slot;
             memcpy(local_ip, slot->ip, 16);
             local_until = slot->escalation_until;
@@ -413,7 +418,7 @@ int bs_strike_check_escalated(const unsigned char ip[16],
             if (++spins >= BS_FLAGGED_MAX_READ_SPINS) { v1 = ~0U; break; }
         }
         if (v1 == ~0U) continue;
-        if (local_rule == BS_STRIKE_EMPTY) continue;
+        if (!local_used) continue;
         if (local_rule != rule_slot) continue;
         if (local_ns != ns_id) continue;
         if (memcmp(local_ip, ip, 16) != 0) continue;
@@ -462,13 +467,11 @@ int bs_strike_record_429(request_rec *r, const unsigned char ip[16],
             if (empty_idx < 0) empty_idx = (int)idx;
             continue;
         }
-        apr_uint32_t local_rule = __atomic_load_n(&slot->rule_slot,
-                                                   __ATOMIC_RELAXED);
-        if (local_rule == BS_STRIKE_EMPTY) {
+        if (!slot->used) {
             if (empty_idx < 0) empty_idx = (int)idx;
             continue;
         }
-        if (local_rule == rule_slot
+        if (slot->rule_slot == rule_slot
             && slot->ns_id == ns_id
             && memcmp(slot->ip, ip, 16) == 0) {
             matched_idx = (int)idx;
@@ -509,6 +512,7 @@ int bs_strike_record_429(request_rec *r, const unsigned char ip[16],
     apr_uint32_t now_sec = (apr_uint32_t)now;
     int fresh_slot = (matched_idx < 0);
     if (fresh_slot) {
+        slot->used                = 1;
         memcpy(slot->ip, ip, 16);
         slot->rule_slot           = rule_slot;
         slot->ns_id               = ns_id;
@@ -837,7 +841,7 @@ int bs_embedded_nonce_consume(request_rec *r,
             if (empty_idx < 0) empty_idx = (int)idx;
             continue;
         }
-        if (slot->expires_at == 0) {
+        if (!slot->used) {
             if (empty_idx < 0) empty_idx = (int)idx;
             continue;
         }
@@ -882,6 +886,7 @@ int bs_embedded_nonce_consume(request_rec *r,
     bs_nonce_slot *slot = &bs_shm.nonce_table[target_idx];
     apr_uint32_t v = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
     __atomic_store_n(&slot->version, v | 1U, __ATOMIC_RELEASE);
+    slot->used       = 1;
     slot->nonce_hash = fp;
     slot->ns_id      = ns_id;
     slot->expires_at = expires_at;
@@ -1152,8 +1157,9 @@ void bs_state_load(apr_pool_t *p, server_rec *s, const char *path)
     for (apr_size_t i = 0; i < bs_shm.flagged_capacity; i++) {
         bs_flagged_ip_slot *slot = &bs_shm.flagged_table[i];
         slot->version = 0;
-        if (slot->flags == 0) continue;
+        if (!slot->used) continue;
         if (slot->expires_at < now) {
+            slot->used  = 0;
             slot->flags = 0;
             memset(slot->ip, 0, 16);
             slot->expires_at = 0;
@@ -1415,6 +1421,11 @@ apr_status_t bs_shm_cleanup(void *data)
 
 typedef apr_uint64_t (*bs_headroom_count_fn)(apr_int64_t now_sec);
 
+/* All four slot types now share the same empty-marker convention
+ * (apr_uint32_t used == 0). The flagged-IP count additionally
+ * filters by TTL so the gauge tracks "active" rather than
+ * "physically occupied" entries — that bias toward late warnings
+ * is documented and matches the prior behavior. */
 static apr_uint64_t bs_headroom_count_flagged(apr_int64_t now_sec)
 {
     if (!bs_shm.flagged_table || !bs_shm.flagged_capacity) return 0;
@@ -1423,7 +1434,7 @@ static apr_uint64_t bs_headroom_count_flagged(apr_int64_t now_sec)
         const bs_flagged_ip_slot *slot = &bs_shm.flagged_table[i];
         apr_uint32_t v = __atomic_load_n(&slot->version, __ATOMIC_RELAXED);
         if ((v & 1U) == 0 &&
-            slot->flags != 0 &&
+            slot->used != 0 &&
             slot->expires_at > now_sec) {
             used++;
         }
@@ -1439,7 +1450,7 @@ static apr_uint64_t bs_headroom_count_strike(apr_int64_t now_sec)
     for (apr_size_t i = 0; i < bs_shm.strike_capacity; i++) {
         const bs_strike_slot *slot = &bs_shm.strike_table[i];
         apr_uint32_t v = __atomic_load_n(&slot->version, __ATOMIC_RELAXED);
-        if ((v & 1U) == 0 && slot->rule_slot != BS_STRIKE_EMPTY) {
+        if ((v & 1U) == 0 && slot->used != 0) {
             used++;
         }
     }
