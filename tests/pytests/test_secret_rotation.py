@@ -64,9 +64,18 @@ def _write_root_owned_mode_600(path: str, content: bytes) -> None:
 
 @pytest.fixture
 def secondary_secret_file():
-    """Write a 32-byte random secondary secret at SECONDARY_PATH for
-    the duration of the test, remove it on teardown."""
-    secret = os.urandom(32)
+    """Write a random secondary secret at SECONDARY_PATH for the
+    duration of the test, remove it on teardown.
+
+    Uses hex-encoded urandom (64 ASCII bytes from 32 random bytes) so
+    the file is guaranteed NUL-free. Raw 32-byte urandom hits a NUL
+    ~12% of the time per the validator's own error message, which
+    historically made the two tests using this fixture intermittently
+    fail under reload with an embedded-NUL parse error. mod_botshield's
+    secret-key validator treats the file contents as opaque key
+    material — it doesn't hex-decode — so a 64-byte ASCII-hex file
+    just becomes a 64-byte key, which exceeds the 16-byte minimum."""
+    secret = os.urandom(32).hex().encode("ascii")
     _write_root_owned_mode_600(SECONDARY_PATH, secret)
     try:
         yield SECONDARY_PATH
