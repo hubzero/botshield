@@ -5216,7 +5216,7 @@ static apr_status_t bs_app_feedback_filter(ap_filter_t *f,
     }
 
     if (n > 1) {
-        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
             "mod_botshield: app feedback rejected: %d copies of "
             "'%s' on response (expected exactly 1)", n, hname);
         return ap_pass_brigade(f->next, bb);
@@ -5235,7 +5235,7 @@ static apr_status_t bs_app_feedback_filter(ap_filter_t *f,
         scfg->app_integration_secret, scfg->app_integration_secret_len,
         snapshot, &event);
     if (err) {
-        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
             "mod_botshield: app feedback rejected: %s", err);
         return ap_pass_brigade(f->next, bb);
     }
@@ -5248,7 +5248,7 @@ static apr_status_t bs_app_feedback_filter(ap_filter_t *f,
     const bs_feedback_trigger_entry *ft =
         bs_feedback_trigger_find(scfg, event);
     if (!ft) {
-        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
             "mod_botshield: app feedback event=%s unmapped "
             "(no BotShieldFeedbackTrigger entry); ignored", event);
         return ap_pass_brigade(f->next, bb);
@@ -13218,7 +13218,7 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
     const char *err = bs_verify_cookie_gcm(r, cfg, cookie_value, dot, &ch);
     if (err) {
         r->status = HTTP_FORBIDDEN;
-        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
             "mod_botshield: embedded-verify(pow-gcm): %s", err);
         return OK;
     }
@@ -13241,7 +13241,7 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
         if (!bound_ip_hex || !bootstrap_sig_hex ||
             strlen(bound_ip_hex) != 32) {
             r->status = HTTP_BAD_REQUEST;
-            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
                 "mod_botshield: embedded-verify(pow-gcm): missing or "
                 "malformed bound_ip / bootstrap_sig");
             return OK;
@@ -13250,7 +13250,7 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
                                       bound_ip_hex, ch.expires_at,
                                       bootstrap_sig_hex)) {
             r->status = HTTP_FORBIDDEN;
-            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
                 "mod_botshield: embedded-verify(pow-gcm): bad "
                 "bootstrap_sig");
             return OK;
@@ -13262,7 +13262,7 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
         }
         if (strcasecmp(observed_ip_hex, bound_ip_hex) != 0) {
             r->status = HTTP_FORBIDDEN;
-            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
                 "mod_botshield: embedded-verify(pow-gcm): IP-bind "
                 "mismatch (issued for %s, redeemed from %s)",
                 bound_ip_hex, observed_ip_hex);
@@ -13281,7 +13281,7 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
         if (!bs_embedded_nonce_consume(r, ch.nonce,
                                         (apr_int64_t)ch.expires_at, ns)) {
             r->status = HTTP_FORBIDDEN;
-            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
                 "mod_botshield: embedded-verify(pow-gcm): nonce "
                 "already redeemed (replay or pool-farm) — rejected");
             return OK;
@@ -13343,7 +13343,7 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
     }
     if (strcmp(cfg->captcha_provider->name, provider_name) != 0) {
         r->status = HTTP_BAD_REQUEST;
-        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
             "mod_botshield: embedded-verify(%s): wrapper claimed "
             "provider but scope is configured for '%s'",
             provider_name, cfg->captcha_provider->name);
@@ -13376,7 +13376,7 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
 
     if (res != BS_CAPTCHA_OK) {
         r->status = HTTP_FORBIDDEN;
-        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
             "mod_botshield: embedded-verify(%s): siteverify rejected "
             "(http=%ld details=\"%s\")", provider_name, http_code,
             details ? details : "");
@@ -13401,7 +13401,7 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
     if (resp_hostname && *expected_host &&
         strcmp(resp_hostname, expected_host) != 0) {
         r->status = HTTP_FORBIDDEN;
-        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
             "mod_botshield: embedded-verify(%s): hostname-mismatch "
             "(got=%s expected=%s)", provider_name,
             resp_hostname, expected_host);
@@ -13410,7 +13410,7 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
     if (resp_action && *expected_action &&
         strcmp(resp_action, expected_action) != 0) {
         r->status = HTTP_FORBIDDEN;
-        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
             "mod_botshield: embedded-verify(%s): action-mismatch "
             "(got=%s expected=%s)", provider_name,
             resp_action, expected_action);
@@ -13430,7 +13430,7 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
                 "(http=%ld)", http_code);
         } else if (score < min_score) {
             r->status = HTTP_FORBIDDEN;
-            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
                 "mod_botshield: embedded-verify(recaptcha-v3): "
                 "score below threshold (%.2f < %.2f)",
                 score, min_score);
@@ -14172,7 +14172,7 @@ static int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         int emit = have_ip_for_log
             ? bs_captcha_log_throttle(ip_for_log, &prev) : 1;
         if (emit) {
-            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
                 "mod_botshield: captcha-verify pending cookie %s%s — 403",
                 pend_err, bs_log_suppress_suffix(r->pool, prev));
         }
@@ -14253,7 +14253,7 @@ static int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         return OK;
     }
     if (strlen(token) > BS_MAX_CAPTCHA_TOKEN) {
-        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
             "mod_botshield: captcha-verify: token longer than %d bytes",
             BS_MAX_CAPTCHA_TOKEN);
         r->status = HTTP_BAD_REQUEST;
@@ -16707,7 +16707,7 @@ static int bs_form_captcha_fixup(request_rec *r)
         BS_CT_TERMINATOR(ct[16]));
     #undef BS_CT_TERMINATOR
     if (!ct_form && !ct_json) {
-        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
             "mod_botshield: BotShieldFormCaptcha supports "
             "application/x-www-form-urlencoded or application/json; "
             "got Content-Type=%s",
@@ -16720,7 +16720,7 @@ static int bs_form_captcha_fixup(request_rec *r)
     apr_size_t  body_len = 0;
     apr_status_t rv = bs_form_captcha_read_body(r, &body, &body_len);
     if (rv == APR_ENOSPC) {
-        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
             "mod_botshield: form-captcha body exceeds %d bytes",
             BS_FORM_CAPTCHA_BODY_MAX);
         return HTTP_REQUEST_ENTITY_TOO_LARGE;
@@ -16795,7 +16795,7 @@ static int bs_form_captcha_fixup(request_rec *r)
         json_object *root = json_tokener_parse_verbose(body, &jerr);
         if (!root || jerr != json_tokener_success) {
             if (root) json_object_put(root);
-            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
                 "mod_botshield: form-captcha: JSON parse failed");
             return HTTP_BAD_REQUEST;
         }
@@ -16809,7 +16809,7 @@ static int bs_form_captcha_fixup(request_rec *r)
         json_object_put(root);
     }
     if (!token || !*token) {
-        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
             "mod_botshield: form-captcha: missing token field '%s'",
             cfg->captcha_provider->token_field);
         return HTTP_FORBIDDEN;
@@ -16829,7 +16829,7 @@ static int bs_form_captcha_fixup(request_rec *r)
         &details, &http_code, &score, &resp_hostname, &resp_action);
 
     if (res != BS_CAPTCHA_OK) {
-        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
             "mod_botshield: form-captcha siteverify rejected "
             "(http=%ld details=\"%s\")", http_code,
             details ? details : "");
@@ -16849,7 +16849,7 @@ static int bs_form_captcha_fixup(request_rec *r)
                    ? r->server->server_hostname : "");
     if (resp_hostname && *expected_host &&
         strcmp(resp_hostname, expected_host) != 0) {
-        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
             "mod_botshield: form-captcha hostname-mismatch "
             "(got=%s expected=%s)", resp_hostname, expected_host);
         return HTTP_FORBIDDEN;
@@ -16857,7 +16857,7 @@ static int bs_form_captcha_fixup(request_rec *r)
     if (cfg->captcha_expected_action && *cfg->captcha_expected_action &&
         resp_action &&
         strcmp(resp_action, cfg->captcha_expected_action) != 0) {
-        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
             "mod_botshield: form-captcha action-mismatch "
             "(got=%s expected=%s)",
             resp_action, cfg->captcha_expected_action);
@@ -16868,7 +16868,7 @@ static int bs_form_captcha_fixup(request_rec *r)
             ? cfg->recaptcha_v3_min_score
             : BS_DEFAULT_RECAPTCHA_V3_MIN_SCORE;
         if (score >= 0.0 && score < min_score) {
-            ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
                 "mod_botshield: form-captcha v3 score below "
                 "threshold (%.2f < %.2f)", score, min_score);
             return HTTP_FORBIDDEN;
