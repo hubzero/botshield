@@ -1,0 +1,79 @@
+# mod_botshield test-rig sudoers snippet — OPTIONAL HARDENING.
+#
+# Background
+# ----------
+# The pytest test rig uses sudo for a handful of root-owned
+# operations: editing the dev vhost config, reloading Apache,
+# reading the dev error log, swapping MPMs, and removing
+# state files. By default the test user has unrestricted sudo
+# (typical of dev boxes), which means a compromised test
+# dependency could escalate to root via the same sudo
+# entitlement.
+#
+# This file scopes those entitlements to the EXACT commands and
+# paths the test rig actually invokes. Drop it in as
+# /etc/sudoers.d/botshield-tests (mode 0440, owner root) and the
+# test rig will continue to function with no other privileges
+# than what's listed below.
+#
+# Security review LOW #15 was the prompt to package this; the
+# framework can't enforce sudoers scoping itself, but providing
+# the exact ruleset makes it cheap for operators to opt in.
+#
+# Caveats
+# -------
+# - Replace `bsdev` below with the actual test user's username.
+# - Re-audit on each release: if a new test grows new sudo calls,
+#   they'll need to be added here. The full set of sudo
+#   invocations in the test framework is grep'able from
+#   tests/botshield_test/ + tests/pytests/.
+# - These rules grant unauthenticated sudo (NOPASSWD) to the
+#   listed commands — that's deliberate so pytest doesn't hang
+#   on a TTY prompt. The protection comes from the path/argument
+#   constraints, not from the password gate.
+
+# --- Apache lifecycle ---
+bsdev ALL=(root) NOPASSWD: /bin/systemctl reload apache2
+bsdev ALL=(root) NOPASSWD: /bin/systemctl restart apache2
+
+# --- MPM swap (test_mpm_matrix only) ---
+bsdev ALL=(root) NOPASSWD: /usr/sbin/a2enmod  mpm_event
+bsdev ALL=(root) NOPASSWD: /usr/sbin/a2enmod  mpm_worker
+bsdev ALL=(root) NOPASSWD: /usr/sbin/a2enmod  mpm_prefork
+bsdev ALL=(root) NOPASSWD: /usr/sbin/a2dismod mpm_event
+bsdev ALL=(root) NOPASSWD: /usr/sbin/a2dismod mpm_worker
+bsdev ALL=(root) NOPASSWD: /usr/sbin/a2dismod mpm_prefork
+
+# --- vhost config edit (config_override) ---
+# Stage temp file under same dir, atomic mv replaces the live
+# config. The exact temp-name pattern matches Path(conf).parent /
+# f".{Path(conf).name}.tmp" in tests/botshield_test/apache.py.
+bsdev ALL=(root) NOPASSWD: /usr/bin/tee /etc/apache2/sites-available/.botshield-dev.conf.tmp
+bsdev ALL=(root) NOPASSWD: /bin/mv /etc/apache2/sites-available/.botshield-dev.conf.tmp /etc/apache2/sites-available/botshield-dev.conf
+
+# --- Apache config-syntax check (test_directive_validation) ---
+bsdev ALL=(root) NOPASSWD: /usr/sbin/apachectl -C * -t
+
+# --- State-file ops (test_state_save / test_persist) ---
+bsdev ALL=(root) NOPASSWD: /bin/rm -f /var/lib/botshield/state.bin
+
+# --- Secret-rotation tests (test_secret_rotation) ---
+bsdev ALL=(root) NOPASSWD: /usr/bin/install -m 0600 -o root /tmp/.bs-secret-rotation-* /etc/botshield/secret-secondary
+bsdev ALL=(root) NOPASSWD: /usr/bin/install -m 0600 -o root /tmp/.bs-secret-rotation-* /etc/botshield/secret
+bsdev ALL=(root) NOPASSWD: /bin/rm -f /etc/botshield/secret-secondary
+
+# --- Log inspection (log_slice fixture) ---
+# Grant read-only access to the two error logs the tests slice.
+# An alternative would be `chgrp adm` + `chmod 640` on those
+# files — that eliminates these sudo entries entirely. Pick
+# whichever fits your operational policy.
+bsdev ALL=(root) NOPASSWD: /usr/bin/cat /var/log/apache2/botshield-dev-error.log
+bsdev ALL=(root) NOPASSWD: /usr/bin/cat /var/log/apache2/error.log
+bsdev ALL=(root) NOPASSWD: /bin/grep -c * /var/log/apache2/botshield-dev-error.log
+bsdev ALL=(root) NOPASSWD: /bin/grep -c * /var/log/apache2/error.log
+bsdev ALL=(root) NOPASSWD: /usr/bin/stat -c %s /var/log/apache2/botshield-dev-error.log
+bsdev ALL=(root) NOPASSWD: /usr/bin/stat -c %s /var/log/apache2/error.log
+bsdev ALL=(root) NOPASSWD: /bin/journalctl -u apache2*
+
+# --- File-size probe (used in a couple of tests) ---
+bsdev ALL=(root) NOPASSWD: /usr/bin/stat -c %s /etc/botshield/*
