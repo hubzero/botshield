@@ -2809,6 +2809,12 @@ static const char   *bs_get_cookie_value(request_rec *r, const char *name);
  * during a HTTP→HTTPS migration or when an operator sets a Domain
  * (which forces fallback to legacy). */
 static const char   *bs_get_verified_cookie_value(request_rec *r);
+/* Forward decl — bs_verify_cookie's body lives near the cookie
+ * format helpers but bs_carry_forward_eligible (defined alongside
+ * the score-math helpers earlier in the file) needs to call it. */
+static const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
+                                    const char *cookie_value,
+                                    bs_challenge *out_ch);
 /* Bootstrap-binding helpers — definitions live near the embedded
  * verify endpoints. Forward-declared here so bs_challenge_json
  * (used by the M1 widget interstitial earlier in the file) can
@@ -9657,6 +9663,89 @@ static int bs_flag_penalty(apr_uint32_t flags)
     return p;
 }
 
+/* Carry-forward eligibility predicate. Reads the request's
+ * __Host-bs_verified cookie, verifies it, and decides whether its
+ * rep block can carry into a freshly-minted cookie at this issuance
+ * site.
+ *
+ * Returns 1 with *out_prior_ch populated when the prior cookie's rep
+ * is trustworthy and current. Returns 0 (and leaves *out_prior_ch
+ * untouched beyond what bs_verify_cookie wrote) on any of:
+ *
+ *   - cookie absent
+ *   - signature/tag mismatch (rep bytes can't be trusted)
+ *   - "expired"  ── Security review MEDIUM #1: TTL is the only
+ *     mechanism preventing indefinite reputation transfer across
+ *     cookie generations. A leaked or stolen cookie that has aged
+ *     past TTL must NOT be allowed to transplant good-standing rep
+ *     into a fresh _bs_verified via the captcha solve path.
+ *   - any other pre-auth failure (decode errors, wrong field count,
+ *     "no secret configured", etc. — *out_ch is unset in those
+ *     branches, so prior_ch.alg_name remains NULL and we reject)
+ *
+ * Recoverable cverr values that arrive AFTER GCM tag verification
+ * (PoW counter check failure, etc.) populate prior_ch.alg_name and
+ * carry the authenticated rep block — we accept those.
+ *
+ * This predicate replaces four near-identical inline blocks across
+ * bs_embedded_verify_pow_gcm, bs_embedded_verify_provider,
+ * bs_captcha_verify_handler, and bs_form_captcha_replay. The MEDIUM
+ * #1 fix landed in all four in parallel; future fixes to this
+ * predicate land here once. */
+static int bs_carry_forward_eligible(request_rec *r,
+                                      const bs_dir_cfg *cfg,
+                                      bs_challenge *out_prior_ch)
+{
+    const char *prior_val = bs_get_verified_cookie_value(r);
+    if (!prior_val || !*prior_val) return 0;
+
+    const char *cverr = bs_verify_cookie(r, cfg, prior_val, out_prior_ch);
+    if (cverr == NULL) return 1;
+    if (strcmp(cverr, "signature mismatch") == 0) return 0;
+    if (strcmp(cverr, "expired") == 0) return 0;          /* MEDIUM #1 */
+    /* Any other cverr is acceptable only if bs_verify_cookie wrote
+     * an authenticated rep block — alg_name being non-NULL is the
+     * "tag passed, then a later semantic check rejected" signal. */
+    return out_prior_ch->alg_name ? 1 : 0;
+}
+
+/* Apply the rep-carry-forward computation to *target.
+ *
+ * The caller has chosen forgive_amount based on the issuance tier
+ * (cfg->forgive_silent / forgive_captcha / etc.) — that knowledge
+ * stays at the call site because forgive bands are per-tier policy.
+ *
+ * This helper does the deterministic math:
+ *   - clamp the requested forgive against the per-cookie hourly cap
+ *     (writes target->forgive_window_start + forgive_consumed)
+ *   - compute new score = prior.score - forgive, clamped against
+ *     the flag-penalty floor and zero
+ *
+ * The caller bumps the appropriate passes_X afterward (the LOW #7
+ * "ever passed" clamp). Tier knowledge for that decision also stays
+ * at the call site. */
+static void bs_apply_rep_carry(request_rec *r,
+                                const bs_dir_cfg *cfg,
+                                const bs_challenge *prior_ch,
+                                bs_rep_state *target,
+                                int forgive_amount)
+{
+    bs_server_cfg *scfg = ap_get_module_config(r->server->module_config,
+                                               &botshield_module);
+    int cap = (scfg && scfg->forgive_cap_per_hour > 0)
+            ? scfg->forgive_cap_per_hour
+            : BS_DEFAULT_FORGIVE_CAP_PER_HOUR;
+    apr_uint32_t now_sec = (apr_uint32_t)apr_time_sec(apr_time_now());
+    int forgive = bs_forgiveness_apply_cap(forgive_amount, cap, now_sec,
+                                           &target->forgive_window_start,
+                                           &target->forgive_consumed);
+    int floor     = bs_flag_penalty(prior_ch->rep.flags);
+    int new_score = prior_ch->rep.score - forgive;
+    if (new_score < floor) new_score = floor;
+    if (new_score < 0)     new_score = 0;
+    target->score = new_score;
+}
+
 /* E14 — adaptive intensity accumulator. For a flag bitfield, walks
  * the registry and returns the cumulative difficulty-delta (sum) and
  * tier-floor (max). PASS tier-floor means "no floor" — the score-
@@ -12949,51 +13038,26 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
         }
     }
 
-    /* Carry forward rep state from any prior valid _bs_verified, then
-     * set passes_silent. Forgiveness cap + flag-penalty floor mirror
-     * the M7/M8 mint paths. MEDIUM #1 — refuse carry-forward when the
-     * prior cookie has expired (closes the indefinite-rep-transfer
-     * attack via captured cookies). LOW #7 — clamp passes_silent to
-     * 1 (it's an "ever passed silent" flag, not a counter). */
+    /* Carry forward rep from any prior valid _bs_verified. The
+     * eligibility predicate and rep-math live in
+     * bs_carry_forward_eligible / bs_apply_rep_carry. Pattern A: ch
+     * is already populated from the decrypted bootstrap challenge,
+     * so we mutate ch.rep directly and preserve its server-set
+     * challenged_at (the issue path stamped "now" into ch when the
+     * bootstrap was minted; we don't want prior_ch's older value to
+     * overwrite it). LOW #7 — clamp passes_silent to 1 (it's an
+     * "ever passed" flag, not a counter). */
     {
-        const char *prior_val = bs_get_verified_cookie_value(r);
         bs_challenge prior_ch = { 0 };
-        int have_prior = 0;
-        if (prior_val && *prior_val) {
-            const char *cverr = bs_verify_cookie(r, cfg, prior_val,
-                                                  &prior_ch);
-            if (cverr == NULL ||
-                (cverr && strcmp(cverr, "signature mismatch") != 0
-                       && strcmp(cverr, "expired") != 0
-                       && prior_ch.alg_name)) {
-                have_prior = 1;
-            }
-        }
-        if (have_prior) {
-            int forgive = bs_effective_int(cfg->forgive_silent,
-                                            BS_DEFAULT_FORGIVE_SILENT);
-            bs_server_cfg *scfg_fc = ap_get_module_config(
-                r->server->module_config, &botshield_module);
-            int cap = (scfg_fc && scfg_fc->forgive_cap_per_hour > 0)
-                    ? scfg_fc->forgive_cap_per_hour
-                    : BS_DEFAULT_FORGIVE_CAP_PER_HOUR;
-            apr_uint32_t now_sec =
-                (apr_uint32_t)apr_time_sec(apr_time_now());
+        if (bs_carry_forward_eligible(r, cfg, &prior_ch)) {
             apr_time_t challenged_at = ch.rep.challenged_at;
             ch.rep = prior_ch.rep;
             ch.rep.challenged_at = challenged_at;
-            forgive = bs_forgiveness_apply_cap(forgive, cap, now_sec,
-                        &ch.rep.forgive_window_start,
-                        &ch.rep.forgive_consumed);
-            int floor   = bs_flag_penalty(prior_ch.rep.flags);
-            int new_score = prior_ch.rep.score - forgive;
-            if (new_score < floor) new_score = floor;
-            if (new_score < 0)     new_score = 0;
-            ch.rep.score          = new_score;
-            ch.rep.passes_silent  = 1;
-        } else {
-            ch.rep.passes_silent = 1;
+            bs_apply_rep_carry(r, cfg, &prior_ch, &ch.rep,
+                               bs_effective_int(cfg->forgive_silent,
+                                                BS_DEFAULT_FORGIVE_SILENT));
         }
+        ch.rep.passes_silent = 1;
     }
     const char *payload = bs_build_cookie_payload(r->pool, cfg, &ch,
                                                   counter_str);
@@ -13147,59 +13211,23 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
     }
 
     /* E17 review fix — carry forward prior cookie state if a sig-
-     * verifying _bs_verified is present. Symmetric with the PoW
-     * path above and with M8/E18; without it, a client near the
-     * E15 forgive_consumed cap could wash their budget by letting
-     * the cookie expire and re-running an embedded provider
+     * verifying _bs_verified is present. Without it, a client near
+     * the E15 forgive_consumed cap could wash their budget by
+     * letting the cookie expire and re-running an embedded provider
      * verify. bs_issue_challenge() will overwrite challenged_at
      * with the current time, so unlike the PoW path we don't need
      * to save/restore it here. */
     bs_rep_state next_rep;
     memset(&next_rep, 0, sizeof(next_rep));
     {
-        const char *prior_val = bs_get_verified_cookie_value(r);
         bs_challenge prior_ch = { 0 };
-        int have_prior = 0;
-        if (prior_val && *prior_val) {
-            const char *cverr = bs_verify_cookie(r, cfg, prior_val,
-                                                  &prior_ch);
-            /* Security review MEDIUM #1 — refuse carry-forward when
-             * the cookie has expired. Otherwise a leaked or stolen
-             * cookie could be replayed past TTL to transplant a
-             * good-standing rep into a freshly-minted _bs_verified
-             * via the captcha solve path. The TTL is the only
-             * mechanism preventing indefinite reputation transfer
-             * across cookie generations. */
-            if (cverr == NULL ||
-                (cverr && strcmp(cverr, "signature mismatch") != 0
-                       && strcmp(cverr, "expired") != 0
-                       && prior_ch.alg_name)) {
-                have_prior = 1;
-            }
-        }
-        if (have_prior) {
-            int forgive = bs_effective_int(cfg->forgive_silent,
-                                            BS_DEFAULT_FORGIVE_SILENT);
-            bs_server_cfg *scfg_fc = ap_get_module_config(
-                r->server->module_config, &botshield_module);
-            int cap = (scfg_fc && scfg_fc->forgive_cap_per_hour > 0)
-                    ? scfg_fc->forgive_cap_per_hour
-                    : BS_DEFAULT_FORGIVE_CAP_PER_HOUR;
-            apr_uint32_t now_sec =
-                (apr_uint32_t)apr_time_sec(apr_time_now());
+        if (bs_carry_forward_eligible(r, cfg, &prior_ch)) {
             next_rep = prior_ch.rep;
-            forgive = bs_forgiveness_apply_cap(forgive, cap, now_sec,
-                        &next_rep.forgive_window_start,
-                        &next_rep.forgive_consumed);
-            int floor   = bs_flag_penalty(prior_ch.rep.flags);
-            int new_score = prior_ch.rep.score - forgive;
-            if (new_score < floor) new_score = floor;
-            if (new_score < 0)     new_score = 0;
-            next_rep.score          = new_score;
-            next_rep.passes_silent = 1;  /* LOW #7 clamp */
-        } else {
-            next_rep.passes_silent = 1;
+            bs_apply_rep_carry(r, cfg, &prior_ch, &next_rep,
+                               bs_effective_int(cfg->forgive_silent,
+                                                BS_DEFAULT_FORGIVE_SILENT));
         }
+        next_rep.passes_silent = 1;  /* LOW #7 clamp */
     }
 
     bs_challenge ch;
@@ -14185,60 +14213,20 @@ static int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
     }
 
     /* Issue a captcha-alg signed cookie. Rep starts from any prior
-     * cookie if one is still valid, with captcha forgiveness applied.
-     *
-     * Security review MEDIUM #1 — refuse carry-forward on "expired".
-     * Letting a sig-valid-but-past-TTL cookie carry rep forward
-     * means a stolen+expired cookie can be replayed (with a fresh
-     * captcha solve) to transplant good-standing rep into a fresh
-     * _bs_verified. TTL is the only mechanism preventing indefinite
-     * reputation transfer across generations. */
-    const char *prior_val = bs_get_verified_cookie_value(r);
-    bs_challenge prior_ch = { 0 };
-    int have_prior = 0;
-    if (prior_val && *prior_val) {
-        const char *cverr = bs_verify_cookie(r, cfg, prior_val, &prior_ch);
-        if (cverr == NULL) {
-            have_prior = 1;
-        } else if (prior_ch.alg_name &&
-                   strcmp(cverr, "expired") != 0) {
-            have_prior = 1;
-        }
-    }
-
+     * cookie if one is still valid (forgive_captcha applied), else
+     * zero. Eligibility and rep-math live in
+     * bs_carry_forward_eligible / bs_apply_rep_carry. */
     bs_rep_state next_rep;
-    if (have_prior) {
-        int forgive = bs_effective_int(cfg->forgive_captcha,
-                                       BS_DEFAULT_FORGIVE_CAPTCHA);
-        /* E15 — clamp forgiveness against the per-cookie
-         * hourly cap. Window state lives in the cookie rep; a fresh
-         * cookie starts with window_start=0 which the helper treats
-         * as "open new window now." */
-        bs_server_cfg *scfg_fc = ap_get_module_config(
-            r->server->module_config, &botshield_module);
-        int cap = scfg_fc && scfg_fc->forgive_cap_per_hour > 0
-                ? scfg_fc->forgive_cap_per_hour
-                : BS_DEFAULT_FORGIVE_CAP_PER_HOUR;
-        apr_uint32_t now_sec = (apr_uint32_t)apr_time_sec(apr_time_now());
-        next_rep = prior_ch.rep;
-        forgive = bs_forgiveness_apply_cap(forgive, cap, now_sec,
-                    &next_rep.forgive_window_start,
-                    &next_rep.forgive_consumed);
-        int floor   = bs_flag_penalty(prior_ch.rep.flags);
-        int new_score = prior_ch.rep.score - forgive;
-        if (new_score < floor) new_score = floor;
-        if (new_score < 0)     new_score = 0;
-        next_rep.score          = new_score;
+    memset(&next_rep, 0, sizeof(next_rep));
+    {
+        bs_challenge prior_ch = { 0 };
+        if (bs_carry_forward_eligible(r, cfg, &prior_ch)) {
+            next_rep = prior_ch.rep;
+            bs_apply_rep_carry(r, cfg, &prior_ch, &next_rep,
+                               bs_effective_int(cfg->forgive_captcha,
+                                                BS_DEFAULT_FORGIVE_CAPTCHA));
+        }
         next_rep.passes_captcha = 1;  /* LOW #7 clamp */
-    } else {
-        next_rep.score          = 0;
-        next_rep.flags          = 0;
-        next_rep.passes_silent  = 0;
-        next_rep.passes_form    = 0;
-        next_rep.passes_captcha = 1;
-        next_rep.challenged_at  = 0;   /* overwritten by issue() */
-        next_rep.forgive_window_start = 0;
-        next_rep.forgive_consumed     = 0;
     }
 
     int ttl        = bs_effective_int(cfg->cookie_ttl, BS_DEFAULT_COOKIE_TTL);
@@ -16647,60 +16635,19 @@ static int bs_form_captcha_fixup(request_rec *r)
      * client whose cookie has forgive_consumed close to the cap
      * could "wash" their budget by submitting a form-captcha — the
      * fresh memset zeroed the rolling-window state and gave them a
-     * full new budget. Symmetric with M8 now: read prior cookie if
-     * sig-verifies, apply forgive_captcha through the cap helper,
-     * carry forward score (clamped to flag-penalty floor), bump the
-     * passes_captcha counter. */
+     * full new budget. Eligibility and rep-math live in
+     * bs_carry_forward_eligible / bs_apply_rep_carry. */
     bs_rep_state next_rep;
     memset(&next_rep, 0, sizeof(next_rep));
     {
-        const char *prior_val = bs_get_verified_cookie_value(r);
         bs_challenge prior_ch = { 0 };
-        int have_prior = 0;
-        if (prior_val && *prior_val) {
-            const char *cverr = bs_verify_cookie(r, cfg, prior_val,
-                                                  &prior_ch);
-            /* Carry forward when the signature was valid OR when the
-             * sig was valid-but-cookie-expired (rep is server-signed,
-             * still trustworthy). Skip on signature mismatch — those
-             * bytes can't be trusted. Same invariant as the M7 issue
-             * path. */
-            /* Security review MEDIUM #1 — refuse carry-forward when
-             * the cookie has expired. Otherwise a leaked or stolen
-             * cookie could be replayed past TTL to transplant a
-             * good-standing rep into a freshly-minted _bs_verified
-             * via the captcha solve path. The TTL is the only
-             * mechanism preventing indefinite reputation transfer
-             * across cookie generations. */
-            if (cverr == NULL ||
-                (cverr && strcmp(cverr, "signature mismatch") != 0
-                       && strcmp(cverr, "expired") != 0
-                       && prior_ch.alg_name)) {
-                have_prior = 1;
-            }
-        }
-        if (have_prior) {
-            int forgive = bs_effective_int(cfg->forgive_captcha,
-                                            BS_DEFAULT_FORGIVE_CAPTCHA);
-            bs_server_cfg *scfg_fc = ap_get_module_config(
-                r->server->module_config, &botshield_module);
-            int cap = (scfg_fc && scfg_fc->forgive_cap_per_hour > 0)
-                    ? scfg_fc->forgive_cap_per_hour
-                    : BS_DEFAULT_FORGIVE_CAP_PER_HOUR;
-            apr_uint32_t now_sec = (apr_uint32_t)apr_time_sec(apr_time_now());
+        if (bs_carry_forward_eligible(r, cfg, &prior_ch)) {
             next_rep = prior_ch.rep;
-            forgive = bs_forgiveness_apply_cap(forgive, cap, now_sec,
-                        &next_rep.forgive_window_start,
-                        &next_rep.forgive_consumed);
-            int floor   = bs_flag_penalty(prior_ch.rep.flags);
-            int new_score = prior_ch.rep.score - forgive;
-            if (new_score < floor) new_score = floor;
-            if (new_score < 0)     new_score = 0;
-            next_rep.score          = new_score;
-            next_rep.passes_captcha = 1;  /* LOW #7 clamp */
-        } else {
-            next_rep.passes_captcha = 1;
+            bs_apply_rep_carry(r, cfg, &prior_ch, &next_rep,
+                               bs_effective_int(cfg->forgive_captcha,
+                                                BS_DEFAULT_FORGIVE_CAPTCHA));
         }
+        next_rep.passes_captcha = 1;  /* LOW #7 clamp */
     }
 
     bs_challenge ch;
