@@ -2999,7 +2999,13 @@ typedef struct {
      * mode-specific metric counter — but applies no side effects:
      * no flag-IP, no score, no status/redirect, no log tag side-
      * effect. Operators stage new rules safely and watch the
-     * decision log before turning enforce on. */
+     * decision log before turning enforce on.
+     *
+     * Server-wide counterpart: BotShieldShadowMode forces every
+     * rule to observe regardless of its individual setting.
+     * Combined via OR at the use sites
+     * (`global_shadow || e->mode == BS_TMODE_OBSERVE`) — either
+     * path says observe and the rule runs dry-run. */
     int           mode;           /* bs_trigger_mode */
 } bs_trigger_action;
 
@@ -13172,7 +13178,10 @@ static const command_rec bs_cmds[] = {
                  "their action — useful for staging a whole policy "
                  "revision before flipping enforcement on. Default "
                  "off; per-rule mode=observe is the finer-grained "
-                 "alternative."),
+                 "alternative for staging a single rule. Typical "
+                 "workflow: add new rules with mode=observe, watch "
+                 "the decision log, flip to enforce when matches "
+                 "look right."),
     /* E14 (rework) — flag-driven trigger family. */
     AP_INIT_TAKE_ARGV("BotShieldFlagTrigger",
                  bs_set_flag_trigger, NULL, RSRC_CONF,
