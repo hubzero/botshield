@@ -10363,16 +10363,45 @@ static const char *bs_install_verified_cookie(request_rec *r,
  *
  * Name:  _bs_captcha_pending
  * Value: <nonce_hex>|<expiry_unix_sec>|<hmac_hex>
- *        hmac = HMAC-SHA256(cfg->secret, "pending:" || nonce_hex || ":"
+ *        hmac = HMAC-SHA256(derived_hmac_pending,
+ *                           "bs:pending:v1:" || nonce_hex || ":"
  *                           || expiry_unix_sec_ascii)
  * Attrs: HttpOnly, Secure (on HTTPS), SameSite=Lax, Max-Age=300,
  *        Path=<endpoint_prefix>/captcha-verify (so it's only sent on
  *        verify POSTs, not every request).
  *
- * Minted at captcha-interstitial render time. Verified at the verify
- * endpoint before any libcurl call — missing / tampered / expired all
- * short-circuit to 403 cheaply. Turns blind POST spray at the verify
- * endpoint into a guaranteed early reject. */
+ * Why this exists — DoS protection for /captcha-verify:
+ *
+ * Without this cookie, an attacker could POST garbage tokens directly
+ * to /captcha-verify. Each request triggers an outbound libcurl call
+ * to the captcha provider's siteverify endpoint, holding one of
+ * BS_DEFAULT_CAPTCHA_MAX_INFLIGHT (=64) in-flight slots for the call
+ * duration. Saturating that semaphore yields:
+ *   - 503 to legitimate users hitting /captcha-verify
+ *   - Burned API quota with the captcha provider
+ *   - Possible provider-side rate-limiting against the operator
+ *
+ * The pending cookie short-circuits the attack:
+ *   - Minted only at captcha-interstitial render time (one mint per
+ *     legitimate challenge presentation)
+ *   - Required at /captcha-verify; absent / forged / expired → 403 in
+ *     microseconds via HMAC verify, no libcurl call made
+ *   - Path-scoped to /captcha-verify so it's not sent on regular
+ *     requests (zero per-request cookie-size cost in normal traffic)
+ *   - HttpOnly + HMAC-signed so it can't be forged client-side
+ *
+ * Net effect: only clients that actually saw the challenge page can
+ * reach the libcurl call. The verify endpoint's effective attack
+ * surface shrinks from "anyone with a TCP connection" to "rate of
+ * legitimate captcha presentations" — a much smaller number.
+ *
+ * Why this is a separate cookie from _bs_verified, not state inside it:
+ *   - _bs_verified           Path=/, hour-scale TTL, sent every request
+ *   - _bs_captcha_pending    Path=<prefix>/captcha-verify, 5-min TTL,
+ *                            sent only at the verify endpoint
+ * Folding pending-state into _bs_verified would either mix state-
+ * machine concerns into the long-lived trust cookie or carry pending
+ * state on every request — both worse than the current split. */
 #define BS_PENDING_COOKIE_NAME  "_bs_captcha_pending"
 #define BS_PENDING_COOKIE_TTL   300   /* seconds */
 
@@ -12233,10 +12262,14 @@ static int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         return OK;
     }
 
-    /* M8.1 pending-cookie check. A valid cookie proves the client hit
-     * our interstitial within the last 5 minutes; missing or tampered
-     * means this is either a blind POST spray or a badly-timed replay.
-     * Short-circuit to 403 before any rate slot or body parse. */
+    /* M8.1 pending-cookie check MUST run BEFORE the libcurl siteverify
+     * call below. See the M8.1 block comment at bs_mint_pending_cookie
+     * for the full threat model — without this gate, blind POST spray
+     * at /captcha-verify can saturate BS_DEFAULT_CAPTCHA_MAX_INFLIGHT
+     * (=64) and DoS legitimate users (plus burn provider quota). A
+     * valid cookie proves the client hit our interstitial within the
+     * last 5 minutes; missing or tampered short-circuits to 403 in
+     * microseconds before any rate slot or body parse. */
     const char *pend_err = bs_verify_pending_cookie(r, cfg);
     if (pend_err) {
         /* Log throttled — a flood of blind POSTs must not drown the log. */
