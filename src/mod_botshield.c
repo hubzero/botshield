@@ -2335,9 +2335,21 @@ static int bs_parse_int64_bounded(const char *s,
     return 1;
 }
 
-/* Returns 1 on success, 0 on malformed. out_len is bytes expected. */
-static int bs_from_hex(const char *in, apr_size_t out_len, unsigned char *out)
+/* Decode `in_len` hex characters from `in` into `out_len` bytes at
+ * `out`. Returns 1 on success, 0 on any of:
+ *   - in_len < 2 * out_len  (input too short to fully decode)
+ *   - any non-[0-9a-fA-F] byte in the consumed prefix
+ *
+ * The in_len parameter is defense-in-depth: every existing caller
+ * verifies the input length before calling (e.g.
+ * `if (strlen(hex) != 32) return "bad nonce hex"`), but checking
+ * inside the function makes the contract explicit and prevents a
+ * future caller from forgetting the length check and reading past
+ * the buffer. */
+static int bs_from_hex(const char *in, apr_size_t in_len,
+                       apr_size_t out_len, unsigned char *out)
 {
+    if (in_len < out_len * 2) return 0;
     for (apr_size_t i = 0; i < out_len; i++) {
         int hi = -1, lo = -1;
         char c = in[i*2];
@@ -5044,7 +5056,7 @@ static const char *bs_app_feedback_verify(apr_pool_t *p,
                    (const unsigned char *)value, signed_len,
                    expected);
     unsigned char given[32];
-    if (!bs_from_hex(sig_hex, 32, given)) return "sig not hex";
+    if (!bs_from_hex(sig_hex, 64, 32, given)) return "sig not hex";
     if (!bs_ct_equal(expected, given, 32)) return "signature mismatch";
 
     /* Parse key=value pairs up to (but not including) ;sig=. The
@@ -6336,6 +6348,19 @@ static void bs_flagged_ip_add(request_rec *r,
         apr_uint32_t idx = (base + i) % bs_shm.flagged_capacity;
         bs_flagged_ip_slot *slot = &bs_shm.flagged_table[idx];
 
+        /* LOW #9 — defensive version-odd skip. We hold the mutex,
+         * so any odd version was left by a writer that crashed
+         * mid-write (SIGKILL / OOM / segfault) before
+         * bs_flagged_write_slot could rebump the version even.
+         * The slot bytes are partial garbage; don't try to identify
+         * an entry from them. Treat as recoverable victim space and
+         * let the eviction path overwrite cleanly. */
+        apr_uint32_t v = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
+        if (v & 1U) {
+            if (victim < 0) victim = (int)idx;
+            continue;
+        }
+
         if (slot->flags && slot->ns_id == ns_id
             && memcmp(slot->ip, ip, 16) == 0) {
             /* Merge flags, refresh TTL to whichever is later. */
@@ -6561,12 +6586,14 @@ static int bs_strike_record_429(request_rec *r,
     for (unsigned i = 0; i < BS_STRIKE_PROBE_LIMIT; i++) {
         apr_uint32_t idx = (base + i) % bs_shm.strike_capacity;
         bs_strike_slot *slot = &bs_shm.strike_table[idx];
+        /* LOW #9 — defensive version-odd skip. Same shape as the
+         * flagged-IP probe above; we hold the mutex but a prior
+         * writer may have died mid-write (SIGKILL / OOM). ACQUIRE
+         * pairs with bs_strike_write_slot's RELEASE bumps. */
         apr_uint32_t v = __atomic_load_n(&slot->version,
-                                          __ATOMIC_RELAXED);
+                                          __ATOMIC_ACQUIRE);
         if (v & 1U) {
-            /* Stuck mid-write — treat as unknown; if we can't find
-             * a clean slot we'll fall through to the eviction
-             * branch and overwrite. */
+            if (empty_idx < 0) empty_idx = (int)idx;
             continue;
         }
         apr_uint32_t local_rule = __atomic_load_n(&slot->rule_slot,
@@ -6819,6 +6846,12 @@ static void bs_safeguard_record_presentation(request_rec *r,
     for (unsigned i = 0; i < BS_SAFEGUARD_PROBE_LIMIT; i++) {
         apr_uint32_t idx = (base + i) % bs_shm.safeguard_capacity;
         bs_safeguard_slot *slot = &bs_shm.safeguard_table[idx];
+        /* LOW #9 — see flagged-IP probe for the rationale. */
+        apr_uint32_t v = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
+        if (v & 1U) {
+            if (empty_idx < 0) empty_idx = (int)idx;
+            continue;
+        }
         if (!slot->used) {
             if (empty_idx < 0) empty_idx = (int)idx;
             continue;
@@ -6912,6 +6945,13 @@ static void bs_safeguard_clear(request_rec *r,
     for (unsigned i = 0; i < BS_SAFEGUARD_PROBE_LIMIT; i++) {
         apr_uint32_t idx = (base + i) % bs_shm.safeguard_capacity;
         bs_safeguard_slot *slot = &bs_shm.safeguard_table[idx];
+        /* LOW #9 — defensive version-odd skip. The slot's bytes are
+         * partial garbage from a crashed prior writer; we can't
+         * trust an IP-comparison result. Skip and let the natural
+         * "no match" fall-through leave the slot for some later
+         * non-clear writer to clean up via its victim path. */
+        apr_uint32_t vc = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
+        if (vc & 1U) continue;
         if (!slot->used) continue;
         if (slot->ns_id != ns_id) continue;
         if (memcmp(slot->ip, ip, 16) != 0) continue;
@@ -6999,6 +7039,16 @@ static int bs_embedded_nonce_consume(request_rec *r,
     for (unsigned i = 0; i < BS_NONCE_PROBE_LIMIT; i++) {
         apr_uint32_t idx = (base + i) % bs_shm.nonce_capacity;
         bs_nonce_slot *slot = &bs_shm.nonce_table[idx];
+        /* LOW #9 — see flagged-IP probe for the rationale. The
+         * slot's nonce_hash is partial garbage from a crashed
+         * prior writer; treating it as a match would falsely
+         * trigger a replay rejection. Treat as recoverable victim
+         * space instead. */
+        apr_uint32_t vn = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
+        if (vn & 1U) {
+            if (empty_idx < 0) empty_idx = (int)idx;
+            continue;
+        }
         if (slot->expires_at == 0) {
             if (empty_idx < 0) empty_idx = (int)idx;
             continue;
@@ -10082,9 +10132,11 @@ static const char *bs_parse_canonical_fields(char *const fields[],
     ch->alg_name = alg->name;
 
     if (strlen(fields[2]) != BS_SALT_BYTES * 2 ||
-        !bs_from_hex(fields[2], BS_SALT_BYTES, ch->salt)) return "bad salt";
+        !bs_from_hex(fields[2], BS_SALT_BYTES * 2,
+                     BS_SALT_BYTES, ch->salt)) return "bad salt";
     if (strlen(fields[3]) != BS_NONCE_BYTES * 2 ||
-        !bs_from_hex(fields[3], BS_NONCE_BYTES, ch->nonce)) return "bad nonce";
+        !bs_from_hex(fields[3], BS_NONCE_BYTES * 2,
+                     BS_NONCE_BYTES, ch->nonce)) return "bad nonce";
     if (!bs_parse_int_bounded(fields[4], 1, 16, 2, &v)) return "bad difficulty";
     ch->difficulty = (int)v;
     if (!bs_parse_int64_bounded(fields[5], 0, APR_INT64_MAX, &v64)) return "bad expires_at";
@@ -10791,6 +10843,20 @@ static const char *bs_curl_escape_pool(apr_pool_t *p, CURL *curl,
     return dup;
 }
 
+/* Append a header line to a curl_slist, handling the alloc-failure
+ * edge correctly. libcurl's curl_slist_append returns NULL on
+ * allocation failure and leaves the input list unchanged — naive
+ * `list = curl_slist_append(list, s)` overwrites the variable with
+ * NULL on failure and leaks the prior list. Returns 1 on success
+ * with *list updated; 0 on failure with *list unchanged. */
+static int bs_curl_slist_append(struct curl_slist **list, const char *s)
+{
+    struct curl_slist *next = curl_slist_append(*list, s);
+    if (!next) return 0;
+    *list = next;
+    return 1;
+}
+
 /* Parse the siteverify response body with json-c. Returns:
  *   BS_CAPTCHA_OK        — explicit "success":true
  *   BS_CAPTCHA_REJECTED  — explicit "success":false; *out_details is set
@@ -11029,10 +11095,11 @@ static bs_captcha_result bs_captcha_siteverify(request_rec *r,
      * shift the wire format. We send url-encoded fields and parse
      * JSON responses; both are stable across all six providers. */
     struct curl_slist *bs_hdrs = NULL;
-    bs_hdrs = curl_slist_append(bs_hdrs,
-        "Content-Type: application/x-www-form-urlencoded");
-    bs_hdrs = curl_slist_append(bs_hdrs, "Accept: application/json");
-    if (!bs_hdrs) {
+    if (!bs_curl_slist_append(&bs_hdrs,
+            "Content-Type: application/x-www-form-urlencoded") ||
+        !bs_curl_slist_append(&bs_hdrs,
+            "Accept: application/json")) {
+        curl_slist_free_all(bs_hdrs);   /* may be NULL — slist_free_all is NULL-safe */
         curl_easy_cleanup(curl);
         return BS_CAPTCHA_ERROR;
     }
@@ -11276,10 +11343,11 @@ static bs_captcha_result bs_geetest_siteverify(request_rec *r,
      * shift the wire format. We send url-encoded fields and parse
      * JSON responses; both are stable across all six providers. */
     struct curl_slist *bs_hdrs = NULL;
-    bs_hdrs = curl_slist_append(bs_hdrs,
-        "Content-Type: application/x-www-form-urlencoded");
-    bs_hdrs = curl_slist_append(bs_hdrs, "Accept: application/json");
-    if (!bs_hdrs) {
+    if (!bs_curl_slist_append(&bs_hdrs,
+            "Content-Type: application/x-www-form-urlencoded") ||
+        !bs_curl_slist_append(&bs_hdrs,
+            "Accept: application/json")) {
+        curl_slist_free_all(bs_hdrs);   /* may be NULL — slist_free_all is NULL-safe */
         curl_easy_cleanup(curl);
         return BS_CAPTCHA_ERROR;
     }
@@ -11289,6 +11357,7 @@ static bs_captcha_result bs_geetest_siteverify(request_rec *r,
             "mod_botshield: GeeTest siteverify: curl_easy_setopt "
             "failed: %s (CURLcode=%d)",
             curl_easy_strerror(setopt_rc), (int)setopt_rc);
+        curl_slist_free_all(bs_hdrs);
         curl_easy_cleanup(curl);
         return BS_CAPTCHA_ERROR;
     }
@@ -11297,6 +11366,7 @@ static bs_captcha_result bs_geetest_siteverify(request_rec *r,
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     curl_easy_cleanup(curl);
+    curl_slist_free_all(bs_hdrs);   /* parity with the captcha helper above */
     *out_http_code = http_code;
 
     if (rc == CURLE_OPERATION_TIMEDOUT) return BS_CAPTCHA_TIMEOUT;
@@ -11815,12 +11885,21 @@ static const char *bs_decision_reason_names(apr_pool_t *p,
                                             const bs_request_score *s)
 {
     if (!s || !s->entries || s->entries->nelts == 0) return "-";
-    char *out = apr_pstrdup(p, "");
-    for (int i = 0; i < s->entries->nelts; i++) {
+    /* Same O(N) join shape as the captcha error-codes path
+     * (commit d939a72): push borrowed reason pointers into an
+     * array, single allocation via apr_array_pstrcat. The
+     * BS_SCORE_MAX_REASONS=16 cap bounds N tightly, but the join
+     * fires on every request that emits a decision line, so the
+     * tidier shape pays back on the hot path. The reason strings
+     * outlive p (string literals or strings already in p), so
+     * apr_array_pstrcat's copy is safe. */
+    int n = s->entries->nelts;
+    apr_array_header_t *arr = apr_array_make(p, n, sizeof(const char *));
+    for (int i = 0; i < n; i++) {
         bs_score_entry *e = &APR_ARRAY_IDX(s->entries, i, bs_score_entry);
-        out = apr_pstrcat(p, out, i ? "," : "", e->reason, NULL);
+        *(const char **)apr_array_push(arr) = e->reason;
     }
-    return out;
+    return apr_array_pstrcat(p, arr, ',');
 }
 
 /* Optional E3 trigger log-tag: set via r->notes so bs_decision_log
@@ -12182,7 +12261,7 @@ static const char *bs_verify_pending_cookie(request_rec *r,
     if (strlen(mac_hex)   != BS_SIG_BYTES * 2) return "bad mac length";
     /* nonce must be valid hex — quick check. */
     unsigned char scratch[16];
-    if (!bs_from_hex(nonce_hex, sizeof(scratch), scratch)) return "bad nonce hex";
+    if (!bs_from_hex(nonce_hex, 32, sizeof(scratch), scratch)) return "bad nonce hex";
 
     /* Bounded parse before HMAC (security review #2). apr_atoi64
      * silently clamps/wraps on overflow without signalling; use the
@@ -12215,7 +12294,8 @@ static const char *bs_verify_pending_cookie(request_rec *r,
     bs_hmac_sha256(cfg->derived_hmac_pending, 32,
                    (const unsigned char *)canon, strlen(canon), expect);
     unsigned char got[BS_SIG_BYTES];
-    if (!bs_from_hex(mac_hex, BS_SIG_BYTES, got)) return "bad mac hex";
+    if (!bs_from_hex(mac_hex, BS_SIG_BYTES * 2,
+                     BS_SIG_BYTES, got)) return "bad mac hex";
     if (!bs_ct_equal(expect, got, BS_SIG_BYTES)) {
         /* E16 review fix — pending-cookie path missed the secret-
          * rotation fallback. _bs_verified and the embedded-verify
@@ -12933,14 +13013,17 @@ static int bs_verify_bootstrap_sig(apr_pool_t *p,
     if (!cfg->derived_keys_set) return 0;
     if (!sig_hex_in || strlen(sig_hex_in) != BS_SIG_BYTES * 2) return 0;
     unsigned char sig_in[BS_SIG_BYTES];
-    if (!bs_from_hex(sig_hex_in, BS_SIG_BYTES, sig_in)) return 0;
+    if (!bs_from_hex(sig_hex_in, BS_SIG_BYTES * 2,
+                     BS_SIG_BYTES, sig_in)) return 0;
 
     char expected_hex[BS_SIG_BYTES * 2 + 1];
     bs_compute_bootstrap_sig(p, cfg->derived_hmac_bootstrap,
                               nonce_hex, bound_ip_hex,
                               expires_at, expected_hex);
     unsigned char expected[BS_SIG_BYTES];
-    bs_from_hex(expected_hex, BS_SIG_BYTES, expected);
+    /* expected_hex is bs_to_hex output: 2*BS_SIG_BYTES chars + NUL,
+     * so the length is fixed and known by construction. */
+    bs_from_hex(expected_hex, BS_SIG_BYTES * 2, BS_SIG_BYTES, expected);
     if (bs_ct_equal(sig_in, expected, BS_SIG_BYTES)) return 1;
 
     /* E16 rotation — try secondary derived bootstrap key. */
@@ -12948,7 +13031,8 @@ static int bs_verify_bootstrap_sig(apr_pool_t *p,
         bs_compute_bootstrap_sig(p, cfg->derived_hmac_bootstrap_2,
                                   nonce_hex, bound_ip_hex,
                                   expires_at, expected_hex);
-        bs_from_hex(expected_hex, BS_SIG_BYTES, expected);
+        bs_from_hex(expected_hex, BS_SIG_BYTES * 2,
+                    BS_SIG_BYTES, expected);
         if (bs_ct_equal(sig_in, expected, BS_SIG_BYTES)) return 1;
     }
     return 0;
@@ -14389,13 +14473,18 @@ static const char *bs_score_reasons_joined(apr_pool_t *p,
                                            const bs_request_score *s)
 {
     if (!s || !s->entries || s->entries->nelts == 0) return "[]";
-    char *out = apr_pstrdup(p, "[");
-    for (int i = 0; i < s->entries->nelts; i++) {
+    /* Same O(N) join shape as bs_decision_reason_names + commit
+     * d939a72: pre-format each "reason:penalty" pair into a
+     * pointer-array, single apr_array_pstrcat for the comma join,
+     * then one apr_pstrcat to wrap with brackets. */
+    int n = s->entries->nelts;
+    apr_array_header_t *arr = apr_array_make(p, n, sizeof(const char *));
+    for (int i = 0; i < n; i++) {
         bs_score_entry *e = &APR_ARRAY_IDX(s->entries, i, bs_score_entry);
-        out = apr_pstrcat(p, out, i ? "," : "",
-                          e->reason, ":", apr_itoa(p, e->penalty), NULL);
+        *(const char **)apr_array_push(arr) =
+            apr_psprintf(p, "%s:%d", e->reason, e->penalty);
     }
-    return apr_pstrcat(p, out, "]", NULL);
+    return apr_pstrcat(p, "[", apr_array_pstrcat(p, arr, ','), "]", NULL);
 }
 
 /* Cheap built-in signals, run on requests we're about to challenge. Called
