@@ -291,3 +291,72 @@ def test_form_captcha_misconfigured_scope_503(config_override):
             },
         )
     assert r.status_code == 503
+
+
+# --- HIGH #1: embedded-NUL parser-confusion smuggling ----------
+
+def test_form_captcha_rejects_embedded_nul_byte(config_override, log_slice):
+    """Security review HIGH #1. The form-captcha body is read as raw
+    bytes but downstream validators treat it as a C string (bs_form_get
+    uses strchr; json_tokener stops at '\\0'). The full byte buffer
+    (including post-NUL bytes) is then replayed to the app handler. An
+    attacker can hide a separate request shape past a NUL — BotShield
+    validates the prefix, the app handler sees the full body. Fix:
+    bodies containing any embedded NUL are rejected with 400 before
+    any validator runs."""
+    body = b"cf-turnstile-response=x\x00&hidden=evil"
+    with config_override(
+        r"BotShieldAllow\s+on", _override_form_captcha(), count=1,
+    ):
+        with log_slice as slc:
+            r = client.post(
+                "/embedded-test.html",
+                data=body,
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+            )
+            matches = slc.grep(
+                r"form-captcha body contains embedded NUL byte"
+            )
+
+    assert r.status_code == 400, (
+        f"embedded-NUL body should be 400; got {r.status_code}"
+    )
+    assert matches, (
+        "expected 'embedded NUL byte' rejection in log slice; "
+        f"tail: {slc.text().splitlines()[-5:]}"
+    )
+
+
+def test_form_captcha_accepts_clean_body_with_high_bytes(
+    config_override,
+):
+    """Counterpart to the NUL-rejection test: a body with high-bit
+    bytes (>= 0x80) that is otherwise clean must NOT trigger the
+    NUL guard. Confirms the rejection is scoped to 0x00, not to
+    'any non-ASCII byte', so the guard doesn't break legitimate
+    clients sending UTF-8 in form fields."""
+    # The captcha is "x" (a non-empty token) so siteverify will run;
+    # we don't care about the verify outcome here — just that the
+    # body wasn't pre-rejected by the NUL guard.
+    body = (
+        b"cf-turnstile-response=x&"
+        b"name=" + "café".encode("utf-8")
+    )
+    with config_override(
+        r"BotShieldAllow\s+on", _override_form_captcha(), count=1,
+    ):
+        r = client.post(
+            "/embedded-test.html",
+            data=body,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+        )
+    # Either the captcha verifies (200/302/etc.) or fails (403). Both
+    # are fine; what matters is we got past the NUL pre-check.
+    assert r.status_code != 400, (
+        f"clean high-bit body was rejected with 400 — NUL guard is "
+        f"too aggressive. status={r.status_code}"
+    )
