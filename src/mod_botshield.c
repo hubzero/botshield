@@ -1053,19 +1053,22 @@ typedef struct bs_server_cfg {
      * post_config. */
     int                 app_feedback_enabled;        /* -1 unset, 0 off, 1 on */
     const char         *app_feedback_header;         /* default "X-BotShield-Feedback" */
-    const char         *app_feedback_secret_file;    /* NULL = no key */
-    const unsigned char *app_feedback_secret;        /* loaded bytes */
-    apr_size_t          app_feedback_secret_len;
-    /* E8.2 — module-to-app reputation export. Symmetric to E5 in
-     * shape: signed envelope, separate secret file. The module sets
-     * a single X-Botshield-Claims request header on the way to the
+    /* E8.2 — module-to-app reputation export. The module sets a
+     * single X-Botshield-Claims request header on the way to the
      * backend handler, having first stripped any client-supplied
      * X-Botshield-* (the strip is the trust anchor for apps that
      * skip HMAC verification). */
     int                 app_claims_enabled;          /* -1 unset, 0 off, 1 on */
-    const char         *app_claims_secret_file;      /* NULL = no key */
-    const unsigned char *app_claims_secret;          /* loaded bytes */
-    apr_size_t          app_claims_secret_len;
+    /* Single shared HMAC key for both directions of app integration
+     * (feedback envelopes inbound + claims headers outbound). The
+     * two protocols' canonical forms are structurally distinct
+     * (feedback HMACs `event=<name>` only; claims HMAC seven
+     * semicolon-fields with a fixed `v=1` lead) so cross-replay is
+     * not possible — one key with parser-provided domain separation
+     * is sufficient. NULL = no key configured. */
+    const char         *app_integration_secret_file;
+    const unsigned char *app_integration_secret;
+    apr_size_t          app_integration_secret_len;
 } bs_server_cfg;
 
 #define BS_APP_FEEDBACK_UNSET  (-1)
@@ -1304,26 +1307,20 @@ static void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
         out->robots_refresh_interval = base->robots_refresh_interval;
     }
 
-    /* E5 — app feedback server-scope inheritance. */
+    /* App integration server-scope inheritance. */
     if (add->app_feedback_enabled == BS_APP_FEEDBACK_UNSET) {
         out->app_feedback_enabled = base->app_feedback_enabled;
     }
     if (!add->app_feedback_header && base->app_feedback_header) {
         out->app_feedback_header = base->app_feedback_header;
     }
-    if (!add->app_feedback_secret_file && base->app_feedback_secret_file) {
-        out->app_feedback_secret_file = base->app_feedback_secret_file;
-        out->app_feedback_secret      = base->app_feedback_secret;
-        out->app_feedback_secret_len  = base->app_feedback_secret_len;
-    }
-    /* E8.2 — app claims server-scope inheritance. Same shape. */
     if (add->app_claims_enabled == BS_APP_FEEDBACK_UNSET) {
         out->app_claims_enabled = base->app_claims_enabled;
     }
-    if (!add->app_claims_secret_file && base->app_claims_secret_file) {
-        out->app_claims_secret_file = base->app_claims_secret_file;
-        out->app_claims_secret      = base->app_claims_secret;
-        out->app_claims_secret_len  = base->app_claims_secret_len;
+    if (!add->app_integration_secret_file && base->app_integration_secret_file) {
+        out->app_integration_secret_file = base->app_integration_secret_file;
+        out->app_integration_secret      = base->app_integration_secret;
+        out->app_integration_secret_len  = base->app_integration_secret_len;
     }
     return out;
 }
@@ -1423,18 +1420,14 @@ static void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->robots_slot_pool_size   = 0;
     scfg->robots_slot_pool_used   = 0;
     scfg->robots_refresh_interval = BS_ROBOTS_REFRESH_UNSET;
-    /* E5 defaults — sentinel so bs_merge_server_cfg can tell
-     * "unset at this scope" from explicit off. */
-    scfg->app_feedback_enabled      = BS_APP_FEEDBACK_UNSET;
-    scfg->app_feedback_header       = NULL;
-    scfg->app_feedback_secret_file  = NULL;
-    scfg->app_feedback_secret       = NULL;
-    scfg->app_feedback_secret_len   = 0;
-    /* E8.2 defaults — same UNSET sentinel shape as E5. */
-    scfg->app_claims_enabled        = BS_APP_FEEDBACK_UNSET;
-    scfg->app_claims_secret_file    = NULL;
-    scfg->app_claims_secret         = NULL;
-    scfg->app_claims_secret_len     = 0;
+    /* App integration defaults — UNSET sentinel so the server-scope
+     * merge can tell "unset at this scope" from explicit off. */
+    scfg->app_feedback_enabled        = BS_APP_FEEDBACK_UNSET;
+    scfg->app_feedback_header         = NULL;
+    scfg->app_claims_enabled          = BS_APP_FEEDBACK_UNSET;
+    scfg->app_integration_secret_file = NULL;
+    scfg->app_integration_secret      = NULL;
+    scfg->app_integration_secret_len  = 0;
     return scfg;
 }
 
@@ -5140,16 +5133,17 @@ static apr_status_t bs_app_feedback_filter(ap_filter_t *f,
         return ap_pass_brigade(f->next, bb);
     }
 
-    if (!scfg->app_feedback_secret || scfg->app_feedback_secret_len == 0) {
+    if (!scfg->app_integration_secret ||
+        scfg->app_integration_secret_len == 0) {
         ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
             "mod_botshield: app feedback received but "
-            "BotShieldAppFeedbackSecretFile not configured");
+            "BotShieldAppIntegrationSecretFile not configured");
         return ap_pass_brigade(f->next, bb);
     }
 
     const char *event = NULL;
     const char *err = bs_app_feedback_verify(r->pool,
-        scfg->app_feedback_secret, scfg->app_feedback_secret_len,
+        scfg->app_integration_secret, scfg->app_integration_secret_len,
         snapshot, &event);
     if (err) {
         ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
@@ -5343,8 +5337,9 @@ static const char *bs_app_claims_set(request_rec *r,
                                      int passes_captcha)
 {
     if (!scfg || scfg->app_claims_enabled != 1) return NULL;
-    if (!scfg->app_claims_secret || scfg->app_claims_secret_len == 0) {
-        return "BotShieldAppClaimsSecretFile not configured";
+    if (!scfg->app_integration_secret ||
+        scfg->app_integration_secret_len == 0) {
+        return "BotShieldAppIntegrationSecretFile not configured";
     }
 
     bs_app_claims_strip_incoming(r);
@@ -5358,7 +5353,8 @@ static const char *bs_app_claims_set(request_rec *r,
         passes_silent, passes_form, passes_captcha, now);
 
     unsigned char mac[BS_SIG_BYTES];
-    bs_hmac_sha256(scfg->app_claims_secret, scfg->app_claims_secret_len,
+    bs_hmac_sha256(scfg->app_integration_secret,
+                   scfg->app_integration_secret_len,
                    (const unsigned char *)body, strlen(body), mac);
     char sig_hex[BS_SIG_BYTES * 2 + 1];
     bs_to_hex(mac, BS_SIG_BYTES, sig_hex);
@@ -5428,6 +5424,29 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
 
     bs_server_cfg *scfg = ap_get_module_config(s->module_config,
                                                &botshield_module);
+
+    /* App integration: warn loudly at startup if a feature is on but
+     * the shared secret is missing. Per-request paths fall through
+     * with their own warning + skip (see bs_app_feedback_verify_filter
+     * / bs_app_claims_set_header), but a single startup notice is
+     * easier for operators to spot than a stream of per-request
+     * warnings. We don't refuse to start: the rest of the module
+     * still works (cookie tier, captcha tier, etc.). */
+    for (server_rec *sv = s; sv; sv = sv->next) {
+        bs_server_cfg *vcfg = ap_get_module_config(sv->module_config,
+                                                   &botshield_module);
+        if (!vcfg) continue;
+        int needs_secret = (vcfg->app_feedback_enabled == 1) ||
+                           (vcfg->app_claims_enabled   == 1);
+        if (needs_secret && !vcfg->app_integration_secret) {
+            ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
+                "mod_botshield: BotShieldAppFeedback or "
+                "BotShieldAppClaims is enabled but "
+                "BotShieldAppIntegrationSecretFile is not configured "
+                "on this scope; the feature will be silently skipped "
+                "at request time.");
+        }
+    }
 
     /* Compute SHM layout: header + flagged-IP table + two Bloom buffers
      * + M8.1 captcha rate-limit ring + M8.1 captcha log-suppress ring.
@@ -9500,56 +9519,6 @@ static const char *bs_set_app_feedback_header(cmd_parms *cmd, void *dconf,
     return NULL;
 }
 
-/* E5 — BotShieldAppFeedbackSecretFile <path>. HMAC key file for
- * validating app-feedback signatures. Mode-600-or-tighter + absolute
- * path, same hygiene as BotShieldSecretFile. Loaded at parse time so
- * it's in memory before the first request hits the hook. Separate
- * key from BotShieldSecretFile so compromise of one doesn't cross-
- * contaminate the other. */
-static const char *bs_set_app_feedback_secret_file(cmd_parms *cmd,
-                                                    void *dconf,
-                                                    const char *arg)
-{
-    (void)dconf;
-    if (!arg || !*arg) {
-        return "BotShieldAppFeedbackSecretFile: path required";
-    }
-    if (arg[0] != '/') {
-        return "BotShieldAppFeedbackSecretFile: path must be absolute";
-    }
-
-    struct stat st;
-    if (stat(arg, &st) != 0) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldAppFeedbackSecretFile: cannot stat '%s'", arg);
-    }
-    if (st.st_mode & (S_IRGRP | S_IROTH | S_IWGRP | S_IWOTH)) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldAppFeedbackSecretFile: '%s' is group- or world-"
-            "accessible (mode %04o); chmod 600 it",
-            arg, st.st_mode & 07777);
-    }
-
-    const char *buf = NULL;
-    apr_size_t buf_len = 0;
-    const char *err = bs_load_config_file(cmd,
-        "BotShieldAppFeedbackSecretFile", arg,
-        BS_MAX_SECRET_BYTES, &buf, &buf_len);
-    if (err) return err;
-
-    apr_size_t len = 0;
-    err = bs_validate_secret_key(cmd, "BotShieldAppFeedbackSecretFile",
-                                 arg, buf, buf_len, &len);
-    if (err) return err;
-
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    scfg->app_feedback_secret_file = apr_pstrdup(cmd->pool, arg);
-    scfg->app_feedback_secret      = (const unsigned char *)buf;
-    scfg->app_feedback_secret_len  = len;
-    return NULL;
-}
-
 /* E8.2 — BotShieldAppClaims on|off. Master gate for the module-to-
  * app reputation-export channel. Default off. When on, the module
  * sets a single signed X-Botshield-Claims header on the request to
@@ -9566,53 +9535,55 @@ static const char *bs_set_app_claims(cmd_parms *cmd, void *dconf, int flag)
     return NULL;
 }
 
-/* E8.2 — BotShieldAppClaimsSecretFile <path>. HMAC key for the
- * module-to-app channel. Same mode-600 hygiene + load-at-parse-time
- * discipline as BotShieldAppFeedbackSecretFile. Deliberately a
- * separate file: a leak of the inbound (app-signs) key shouldn't
- * also let an attacker forge module-originated claims, and vice
- * versa. */
-static const char *bs_set_app_claims_secret_file(cmd_parms *cmd,
-                                                 void *dconf,
-                                                 const char *arg)
+/* BotShieldAppIntegrationSecretFile <path>. HMAC key for both
+ * directions of app integration: validates inbound feedback envelopes
+ * and signs outbound X-Botshield-Claims headers. The two protocols'
+ * canonical forms are structurally distinct (feedback HMACs
+ * `event=<name>` only; claims HMAC seven semicolon-fields with a
+ * fixed `v=1` lead) so cross-replay is not possible. Mode-600-or-
+ * tighter + absolute path; loaded at parse time so the bytes are in
+ * memory before the first request hits the hook. */
+static const char *bs_set_app_integration_secret_file(cmd_parms *cmd,
+                                                       void *dconf,
+                                                       const char *arg)
 {
     (void)dconf;
     if (!arg || !*arg) {
-        return "BotShieldAppClaimsSecretFile: path required";
+        return "BotShieldAppIntegrationSecretFile: path required";
     }
     if (arg[0] != '/') {
-        return "BotShieldAppClaimsSecretFile: path must be absolute";
+        return "BotShieldAppIntegrationSecretFile: path must be absolute";
     }
 
     struct stat st;
     if (stat(arg, &st) != 0) {
         return apr_psprintf(cmd->pool,
-            "BotShieldAppClaimsSecretFile: cannot stat '%s'", arg);
+            "BotShieldAppIntegrationSecretFile: cannot stat '%s'", arg);
     }
     if (st.st_mode & (S_IRGRP | S_IROTH | S_IWGRP | S_IWOTH)) {
         return apr_psprintf(cmd->pool,
-            "BotShieldAppClaimsSecretFile: '%s' is group- or world-"
-            "accessible (mode %04o); chmod 600 it",
+            "BotShieldAppIntegrationSecretFile: '%s' is group- or "
+            "world-accessible (mode %04o); chmod 600 it",
             arg, st.st_mode & 07777);
     }
 
     const char *buf = NULL;
     apr_size_t buf_len = 0;
     const char *err = bs_load_config_file(cmd,
-        "BotShieldAppClaimsSecretFile", arg,
+        "BotShieldAppIntegrationSecretFile", arg,
         BS_MAX_SECRET_BYTES, &buf, &buf_len);
     if (err) return err;
 
     apr_size_t len = 0;
-    err = bs_validate_secret_key(cmd, "BotShieldAppClaimsSecretFile",
+    err = bs_validate_secret_key(cmd, "BotShieldAppIntegrationSecretFile",
                                  arg, buf, buf_len, &len);
     if (err) return err;
 
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
-    scfg->app_claims_secret_file = apr_pstrdup(cmd->pool, arg);
-    scfg->app_claims_secret      = (const unsigned char *)buf;
-    scfg->app_claims_secret_len  = len;
+    scfg->app_integration_secret_file = apr_pstrdup(cmd->pool, arg);
+    scfg->app_integration_secret      = (const unsigned char *)buf;
+    scfg->app_integration_secret_len  = len;
     return NULL;
 }
 
@@ -15010,12 +14981,6 @@ static const command_rec bs_cmds[] = {
                  "module validates the HMAC, applies the flag to the "
                  "flagged-IP table, and strips the header before the "
                  "response leaves Apache."),
-    AP_INIT_TAKE1("BotShieldAppFeedbackSecretFile",
-                 bs_set_app_feedback_secret_file, NULL, RSRC_CONF,
-                 "Absolute path to the HMAC key used for validating "
-                 "app-feedback signatures. Mode 600, root-owned. "
-                 "Separate from BotShieldSecretFile so a compromise of "
-                 "one key doesn't affect the other."),
     /* E8.2 — module-to-app reputation export. */
     AP_INIT_FLAG("BotShieldAppClaims",
                  bs_set_app_claims, NULL, RSRC_CONF,
@@ -15024,14 +14989,15 @@ static const command_rec bs_cmds[] = {
                  "from the request and sets a single signed "
                  "X-Botshield-Claims header before the backend handler "
                  "runs. Default off."),
-    AP_INIT_TAKE1("BotShieldAppClaimsSecretFile",
-                 bs_set_app_claims_secret_file, NULL, RSRC_CONF,
-                 "Absolute path to the HMAC key used to sign the "
-                 "outbound X-Botshield-Claims header. Mode 600, "
-                 "root-owned. Deliberately separate from "
-                 "BotShieldAppFeedbackSecretFile: leaking the inbound "
-                 "key shouldn't let an attacker forge module-originated "
-                 "claims, and vice versa."),
+    AP_INIT_TAKE1("BotShieldAppIntegrationSecretFile",
+                 bs_set_app_integration_secret_file, NULL, RSRC_CONF,
+                 "Absolute path to the HMAC key used for both inbound "
+                 "feedback envelopes and outbound X-Botshield-Claims "
+                 "headers. Mode 600, root-owned. The two protocols' "
+                 "canonical forms are structurally distinct, so one key "
+                 "is safe — cross-replay is blocked by parser shape, "
+                 "not key separation. Required only when at least one "
+                 "of BotShieldAppFeedback or BotShieldAppClaims is on."),
     { NULL }
 };
 

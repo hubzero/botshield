@@ -15,8 +15,11 @@ the module registers the strip filter on both chains so the "header
 never reaches client" promise holds regardless of response status.
 
 Secret is fixed in `tests/setup/provision.sh`
-(/etc/botshield/app-feedback-secret) so the test can recompute
-HMACs with the same bytes.
+(/etc/botshield/app-integration-secret) so the test can recompute
+HMACs with the same bytes. The same key covers the outbound
+X-Botshield-Claims path (test_app_claims.py); the two protocols'
+canonical forms are structurally distinct so cross-replay is
+blocked by parser shape, not by key separation.
 """
 
 from __future__ import annotations
@@ -32,7 +35,7 @@ from botshield_test import client, ips as _ips
 pytestmark = pytest.mark.serial
 
 
-SECRET_PATH = "/etc/botshield/app-feedback-secret"
+SECRET_PATH = "/etc/botshield/app-integration-secret"
 SECRET = b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 PASS_UA = "Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/125.0"
@@ -73,7 +76,7 @@ def _cfg(feedback_triggers: str, body_inserts: str) -> str:
     return (
         'BotShieldAllow on\n'
         '    BotShieldAppFeedback on\n'
-        f'    BotShieldAppFeedbackSecretFile {SECRET_PATH}\n'
+        f'    BotShieldAppIntegrationSecretFile {SECRET_PATH}\n'
         + feedback_triggers
         + body_inserts
     )
@@ -191,7 +194,7 @@ def test_app_feedback_strips_when_feature_off(config_override):
         r"BotShieldAllow\s+on",
         'BotShieldAllow on\n'
         '    BotShieldAppFeedback off\n'
-        f'    BotShieldAppFeedbackSecretFile {SECRET_PATH}\n'
+        f'    BotShieldAppIntegrationSecretFile {SECRET_PATH}\n'
         '    BotShieldFeedbackTrigger scanner-hit '
         'flag=honeypot_hit ttl=3600\n'
         f'    {FEEDBACK_LOC_1}\n'
