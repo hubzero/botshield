@@ -3197,20 +3197,17 @@ static int bs_allow_ip_in_ranges(const apr_array_header_t *ranges,
      * if mod_remoteip is misconfigured or absent a non-numeric
      * value would otherwise trigger a blocking DNS lookup on the
      * worker thread inside apr_sockaddr_info_get (5–30 s OS
-     * resolver timeout). Pre-validate: refuse anything outside
-     * the IPv4/IPv6 numeric character set so the DNS path is
-     * unreachable from request input. (The APR_IPV[46]_ADDR_OK
-     * flags would also work in theory but their cross-version
-     * semantics for APR_UNSPEC + both-flags-set vary; the manual
-     * pre-check is bulletproof and free.) */
-    for (const char *cp = ip_str; *cp; cp++) {
-        unsigned char c = (unsigned char)*cp;
-        if (!((c >= '0' && c <= '9') ||
-              (c >= 'a' && c <= 'f') ||
-              (c >= 'A' && c <= 'F') ||
-              c == '.' || c == ':')) {
-            return 0;
-        }
+     * resolver timeout). Use inet_pton directly to prove the
+     * input is numeric IPv4 or IPv6 before letting APR's parser
+     * see it; if both fail, refuse. apr_sockaddr_info_get
+     * downstream is then guaranteed to short-circuit on the
+     * inet_pton path it does internally — the DNS fallback is
+     * unreachable from this code path by construction. */
+    unsigned char ipv4_probe[4];
+    unsigned char ipv6_probe[16];
+    if (inet_pton(AF_INET, ip_str, ipv4_probe) != 1 &&
+        inet_pton(AF_INET6, ip_str, ipv6_probe) != 1) {
+        return 0;
     }
     apr_sockaddr_t *sa = NULL;
     apr_status_t rv = apr_sockaddr_info_get(&sa, ip_str,
