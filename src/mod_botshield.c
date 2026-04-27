@@ -60,8 +60,9 @@
 #include <errno.h>
 #include <limits.h>
 
-#include "robots.h"        /* E2.2 — robots.txt parser/matcher */
-#include "shm.h" /* SHM tables, state save/load, headroom watchdog */
+#include "robots.h" /* E2.2 — robots.txt parser/matcher */
+#include "shm.h"    /* SHM tables, state save/load, headroom watchdog */
+#include "crypto.h" /* SHA-256, HMAC, AES-256-GCM, HKDF, hex codec */
 
 module AP_MODULE_DECLARE_DATA botshield_module;
 
@@ -146,7 +147,8 @@ module AP_MODULE_DECLARE_DATA botshield_module;
 #define BS_PROTOCOL_VERSION   2
 #define BS_SALT_BYTES         16
 #define BS_NONCE_BYTES        8
-#define BS_SIG_BYTES          32  /* HMAC-SHA-256 output (used for bootstrap_sig) */
+/* BS_SIG_BYTES, BS_COOKIE_ALG_GCM, BS_GCM_NONCE_LEN, BS_GCM_TAG_LEN
+ * live in crypto.h alongside the primitives that produce them. */
 
 /* AES-256-GCM cookie wire format.
  *
@@ -164,9 +166,6 @@ module AP_MODULE_DECLARE_DATA botshield_module;
  *
  * AES-256 key is HKDF-Expand'd from cfg->secret with the
  * "bs:cookie:gcm:v1" purpose tag (see bs_derive_purpose_keys). */
-#define BS_COOKIE_ALG_GCM     0x01
-#define BS_GCM_NONCE_LEN      12
-#define BS_GCM_TAG_LEN        16
 #define BS_GCM_COUNTER_SEP    '.'
 /* Separator byte in AES-GCM wire format between the base64 envelope
  * and the plaintext counter. `.` because it's not in standard base64
@@ -1550,13 +1549,6 @@ static const char *bs_load_config_file(cmd_parms *cmd,
     return NULL;
 }
 
-/* Forward decl — bs_hkdf_derive_key is defined alongside the other
- * crypto helpers further below. */
-static int bs_hkdf_derive_key(const unsigned char *master,
-                              apr_size_t master_len,
-                              const char *info,
-                              unsigned char out_key[32]);
-
 /* Security review LOW #3 — derive the per-purpose keys for a master
  * secret. Called from the secret-file directive setters AFTER the
  * key bytes have been validated. Returns NULL on success; on
@@ -1670,227 +1662,8 @@ static const char *bs_set_challenge_file(cmd_parms *cmd, void *cfg_v, const char
 }
 
 /* ======================================================================
- * Crypto helpers, challenge struct, algorithm registry, issue/verify.
+ * Challenge struct, algorithm registry, issue/verify.
  * ====================================================================== */
-
-/* --- Low-level crypto wrappers --- */
-
-#define BS_SHA256_LEN 32
-
-static void bs_sha256(const unsigned char *data, apr_size_t len,
-                      unsigned char out[BS_SHA256_LEN])
-{
-    unsigned int outlen = BS_SHA256_LEN;
-    EVP_Digest(data, (size_t)len, out, &outlen, EVP_sha256(), NULL);
-}
-
-static void bs_hmac_sha256(const unsigned char *key, apr_size_t keylen,
-                           const unsigned char *data, apr_size_t datalen,
-                           unsigned char out[BS_SIG_BYTES])
-{
-    unsigned int outlen = BS_SIG_BYTES;
-    HMAC(EVP_sha256(), key, (int)keylen, data, datalen, out, &outlen);
-}
-
-/* Constant-time equality. Returns 1 on equal, 0 on not. */
-static int bs_ct_equal(const unsigned char *a, const unsigned char *b,
-                       apr_size_t len)
-{
-    unsigned char diff = 0;
-    for (apr_size_t i = 0; i < len; i++) diff |= a[i] ^ b[i];
-    return diff == 0;
-}
-
-/* Security review LOW #3 — HKDF-Expand for per-purpose key
- * derivation. RFC 5869. Replaces the prior `SHA256(secret)` ad-hoc
- * derivation with a cryptographically clean per-purpose key model:
- *
- *   key_for_X = HKDF(secret, info="bs:X:v1")
- *
- * Each purpose gets its own derived key. Leaking one (cryptanalysis,
- * side-channel, key extraction from memory) tells an attacker
- * nothing about the others — the HMAC-based extract+expand
- * construction is one-way per purpose-tag.
- *
- * Called once at config-load time per secret/purpose; the derived
- * keys live in dir_cfg and the request path uses them directly with
- * zero per-request HKDF cost.
- *
- * Returns 0 on OpenSSL failure (vanishingly unlikely; treats as
- * fatal in caller — module won't start). */
-static int bs_hkdf_derive_key(const unsigned char *master,
-                              apr_size_t master_len,
-                              const char *info,
-                              unsigned char out_key[32])
-{
-    EVP_KDF *kdf = EVP_KDF_fetch(NULL, "HKDF", NULL);
-    if (!kdf) return 0;
-    EVP_KDF_CTX *ctx = EVP_KDF_CTX_new(kdf);
-    EVP_KDF_free(kdf);
-    if (!ctx) return 0;
-    OSSL_PARAM params[5];
-    int i = 0;
-    params[i++] = OSSL_PARAM_construct_utf8_string("digest",
-                                                   "SHA256", 0);
-    params[i++] = OSSL_PARAM_construct_octet_string("key",
-                                                    (void *)master,
-                                                    master_len);
-    /* Empty salt: HKDF-Extract degenerates to HMAC(zeros, secret).
-     * The per-purpose info tag below provides domain separation. */
-    params[i++] = OSSL_PARAM_construct_octet_string("salt",
-                                                    (void *)"", 0);
-    params[i++] = OSSL_PARAM_construct_octet_string("info",
-                                                    (void *)info,
-                                                    strlen(info));
-    params[i] = OSSL_PARAM_construct_end();
-    int rc = EVP_KDF_derive(ctx, out_key, 32, params);
-    EVP_KDF_CTX_free(ctx);
-    return rc == 1;
-}
-
-/* AES-256-GCM encrypt. Wire layout:
- *     alg_id(1) || nonce(12) || ciphertext || tag(16)
- * The alg_id byte is the only AAD — authenticates the primitive
- * choice so an attacker can't swap 0x01 for (say) 0x02 and drive
- * the verifier into a different algorithm's parse.
- *
- * On success: writes the full envelope into *out_buf (caller-
- * provided, must be at least 1 + 12 + pt_len + 16 bytes), writes
- * the envelope length into *out_len, returns NULL.
- * On failure: returns an error string for logging; *out_len
- * untouched. */
-static const char *bs_gcm_encrypt(const unsigned char aes_key[32],
-                                  const unsigned char *pt,
-                                  apr_size_t pt_len,
-                                  unsigned char *out_buf,
-                                  apr_size_t *out_len)
-{
-    /* LOW #3 — caller passes the HKDF-derived AES key directly;
-     * we no longer derive per-call. */
-    const unsigned char *key = aes_key;
-
-    out_buf[0] = BS_COOKIE_ALG_GCM;
-    if (RAND_bytes(out_buf + 1, BS_GCM_NONCE_LEN) != 1) {
-        return "RAND_bytes(gcm_nonce)";
-    }
-    unsigned char *nonce = out_buf + 1;
-    unsigned char *ct    = out_buf + 1 + BS_GCM_NONCE_LEN;
-    unsigned char *tag   = ct + pt_len;
-
-    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) return "EVP_CIPHER_CTX_new";
-    const char *err = NULL;
-    int outlen = 0, finallen = 0, aadlen = 0;
-
-    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1) {
-        err = "EVP_EncryptInit_ex(aes_256_gcm)"; goto done;
-    }
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN,
-                            BS_GCM_NONCE_LEN, NULL) != 1) {
-        err = "EVP_CIPHER_CTX_ctrl(SET_IVLEN)"; goto done;
-    }
-    if (EVP_EncryptInit_ex(ctx, NULL, NULL, key, nonce) != 1) {
-        err = "EVP_EncryptInit_ex(key+nonce)"; goto done;
-    }
-    if (EVP_EncryptUpdate(ctx, NULL, &aadlen, out_buf, 1) != 1) {
-        err = "EVP_EncryptUpdate(AAD)"; goto done;
-    }
-    if (pt_len > 0) {
-        if (EVP_EncryptUpdate(ctx, ct, &outlen, pt, (int)pt_len) != 1) {
-            err = "EVP_EncryptUpdate(pt)"; goto done;
-        }
-    }
-    if (EVP_EncryptFinal_ex(ctx, ct + outlen, &finallen) != 1) {
-        err = "EVP_EncryptFinal_ex"; goto done;
-    }
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG,
-                            BS_GCM_TAG_LEN, tag) != 1) {
-        err = "EVP_CIPHER_CTX_ctrl(GET_TAG)"; goto done;
-    }
-    *out_len = 1 + BS_GCM_NONCE_LEN + pt_len + BS_GCM_TAG_LEN;
-
-done:
-    EVP_CIPHER_CTX_free(ctx);
-    /* LOW #3 — `key` now points at caller-owned memory (cfg-cached
-     * derived key); the caller's pool cleanup will OPENSSL_cleanse
-     * when the cfg is destroyed. Don't cleanse a borrowed buffer. */
-    return err;
-}
-
-/* AES-256-GCM decrypt. Expects the full envelope
- *     alg_id(1) || nonce(12) || ciphertext || tag(16)
- * Returns NULL on success (tag verified) with plaintext written
- * into *out_pt (caller-provided, must be at least env_len - 1 - 12
- * - 16 bytes) and the plaintext length in *out_pt_len. Returns an
- * error string on any failure including tag-mismatch. */
-static const char *bs_gcm_decrypt(const unsigned char aes_key[32],
-                                  const unsigned char *env,
-                                  apr_size_t env_len,
-                                  unsigned char *out_pt,
-                                  apr_size_t *out_pt_len)
-{
-    if (env_len < (apr_size_t)(1 + BS_GCM_NONCE_LEN + BS_GCM_TAG_LEN)) {
-        return "envelope too short";
-    }
-    if (env[0] != BS_COOKIE_ALG_GCM) return "unknown alg_id";
-
-    apr_size_t ct_len = env_len - 1 - BS_GCM_NONCE_LEN - BS_GCM_TAG_LEN;
-    const unsigned char *nonce = env + 1;
-    const unsigned char *ct    = env + 1 + BS_GCM_NONCE_LEN;
-    const unsigned char *tag   = ct + ct_len;
-
-    /* LOW #3 — caller passes the HKDF-derived AES key directly. */
-    const unsigned char *key = aes_key;
-
-    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) return "EVP_CIPHER_CTX_new";
-    const char *err = NULL;
-    int outlen = 0, finallen = 0, aadlen = 0;
-
-    if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1) {
-        err = "EVP_DecryptInit_ex(aes_256_gcm)"; goto done;
-    }
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN,
-                            BS_GCM_NONCE_LEN, NULL) != 1) {
-        err = "EVP_CIPHER_CTX_ctrl(SET_IVLEN)"; goto done;
-    }
-    if (EVP_DecryptInit_ex(ctx, NULL, NULL, key, nonce) != 1) {
-        err = "EVP_DecryptInit_ex(key+nonce)"; goto done;
-    }
-    if (EVP_DecryptUpdate(ctx, NULL, &aadlen, env, 1) != 1) {
-        err = "EVP_DecryptUpdate(AAD)"; goto done;
-    }
-    if (ct_len > 0) {
-        if (EVP_DecryptUpdate(ctx, out_pt, &outlen, ct, (int)ct_len) != 1) {
-            err = "EVP_DecryptUpdate(ct)"; goto done;
-        }
-    }
-    /* Set expected tag BEFORE Final — required by EVP's GCM contract. */
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG,
-                            BS_GCM_TAG_LEN, (void *)tag) != 1) {
-        err = "EVP_CIPHER_CTX_ctrl(SET_TAG)"; goto done;
-    }
-    if (EVP_DecryptFinal_ex(ctx, out_pt + outlen, &finallen) != 1) {
-        err = "gcm tag verification failed"; goto done;
-    }
-    *out_pt_len = (apr_size_t)(outlen + finallen);
-
-done:
-    EVP_CIPHER_CTX_free(ctx);
-    /* LOW #3 — borrowed key, see encrypt path comment. */
-    return err;
-}
-
-/* Hex helpers. Writes 2*len chars + NUL. */
-static void bs_to_hex(const unsigned char *in, apr_size_t len, char *out)
-{
-    static const char H[] = "0123456789abcdef";
-    for (apr_size_t i = 0; i < len; i++) {
-        out[i*2]   = H[(in[i] >> 4) & 0xF];
-        out[i*2+1] = H[in[i] & 0xF];
-    }
-    out[len*2] = '\0';
-}
 
 /* Bounded integer parser for pre-HMAC cookie fields (security review
  * #2). atoi() and strtoul(..., NULL, 10) both invoke undefined
@@ -1967,36 +1740,6 @@ static int bs_parse_int64_bounded(const char *s,
     return 1;
 }
 
-/* Decode `in_len` hex characters from `in` into `out_len` bytes at
- * `out`. Returns 1 on success, 0 on any of:
- *   - in_len < 2 * out_len  (input too short to fully decode)
- *   - any non-[0-9a-fA-F] byte in the consumed prefix
- *
- * The in_len parameter is defense-in-depth: every existing caller
- * verifies the input length before calling (e.g.
- * `if (strlen(hex) != 32) return "bad nonce hex"`), but checking
- * inside the function makes the contract explicit and prevents a
- * future caller from forgetting the length check and reading past
- * the buffer. */
-static int bs_from_hex(const char *in, apr_size_t in_len,
-                       apr_size_t out_len, unsigned char *out)
-{
-    if (in_len < out_len * 2) return 0;
-    for (apr_size_t i = 0; i < out_len; i++) {
-        int hi = -1, lo = -1;
-        char c = in[i*2];
-        if      (c >= '0' && c <= '9') hi = c - '0';
-        else if (c >= 'a' && c <= 'f') hi = c - 'a' + 10;
-        else if (c >= 'A' && c <= 'F') hi = c - 'A' + 10;
-        c = in[i*2+1];
-        if      (c >= '0' && c <= '9') lo = c - '0';
-        else if (c >= 'a' && c <= 'f') lo = c - 'a' + 10;
-        else if (c >= 'A' && c <= 'F') lo = c - 'A' + 10;
-        if (hi < 0 || lo < 0) return 0;
-        out[i] = (unsigned char)((hi << 4) | lo);
-    }
-    return 1;
-}
 
 /* --- Canonical form for HMAC input ---
  *
