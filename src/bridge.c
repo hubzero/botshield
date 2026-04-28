@@ -182,7 +182,7 @@ const bs_feedback_trigger_entry *bs_feedback_trigger_find(
 /* Output-filter callback. Runs once per initial request: reads
  * r->headers_out for the configured feedback header, strips every
  * occurrence, and (if the feature is enabled and exactly one copy
- * was found) validates the HMAC and updates the flagged-IP table. */
+ * WAS found) validates the HMAC and updates the flagged-IP table. */
 apr_status_t bs_app_feedback_filter(ap_filter_t *f,
                                            apr_bucket_brigade *bb)
 {

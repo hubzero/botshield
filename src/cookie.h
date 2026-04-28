@@ -46,7 +46,7 @@ apr_table_t *bs_parse_cookies_once(request_rec *r);
 /* Look up `name` in the parsed cookie map. Returns NULL on miss. */
 const char *bs_get_cookie_value(request_rec *r, const char *name);
 
-/* LOW #2 — verified-cookie lookup. Prefers __Host-bs_verified
+/* verified-cookie lookup. Prefers __Host-bs_verified
  * (modern HTTPS deployments) and falls back to legacy _bs_verified
  * (cross-subdomain SSO via Domain=). */
 const char *bs_get_verified_cookie_value(request_rec *r);
@@ -71,7 +71,7 @@ const char *bs_build_cookie_payload(apr_pool_t *p,
 
 /* Render the Set-Cookie header line (name=value; Path=/; Expires=…;
  * SameSite=Lax; HttpOnly; Secure on HTTPS; Domain when configured).
- * LOW #2 — emits __Host-bs_verified when prefix preconditions hold. */
+ * emits __Host-bs_verified when prefix preconditions hold. */
 const char *bs_build_set_cookie(request_rec *r, const bs_dir_cfg *cfg,
                                 const char *payload_b64,
                                 apr_time_t expires_at);
@@ -116,16 +116,16 @@ const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
  * (issuance-side) and bs_handler (render-side) call this so the two
  * paths reject the same cverrs and don't drift. Reject when:
  *   - cverr == "signature mismatch" (rep bytes can't be trusted)
- *   - cverr == "expired"           (MEDIUM #1: indefinite rep transfer)
+ *   - cverr == "expired"           (indefinite rep transfer)
  *   - cverr is some other pre-auth error and *prior_ch is unwritten. */
 int bs_should_carry_prior_rep(const char *cverr,
                               const bs_challenge *prior_ch);
 
 /* Returns 1 with *out_prior_ch populated if the caller may carry
  * the prior cookie's rep block into a freshly-minted cookie; 0 if
- * the prior cookie is missing/invalid/expired (security-review
- * MEDIUM #1: TTL is the only mechanism preventing indefinite
- * reputation transfer across cookie generations). */
+ * the prior cookie is missing/invalid/expired. TTL is the only
+ * mechanism preventing indefinite reputation transfer across
+ * cookie generations. */
 int bs_carry_forward_eligible(request_rec *r, const bs_dir_cfg *cfg,
                               bs_challenge *out_prior_ch);
 
@@ -133,7 +133,7 @@ int bs_carry_forward_eligible(request_rec *r, const bs_dir_cfg *cfg,
  * hourly cap, compute new score = prior.score - forgive, clamp at
  * zero. forgive_amount is per-tier policy, picked by the caller
  * (cfg->forgive_silent / forgive_form / forgive_captcha). The
- * caller bumps target->passes_X afterward (the LOW #7 "ever
+ * caller bumps target->passes_X afterward (the "ever
  * passed" clamp). */
 void bs_apply_rep_carry(request_rec *r, const bs_dir_cfg *cfg,
                         const bs_challenge *prior_ch,

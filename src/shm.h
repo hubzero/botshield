@@ -9,7 +9,7 @@
  *   2. strike       — per-(IP, rate-rule) repeated-429 escalation (E9)
  *   3. safeguard    — per-IP challenge-presented-N-times anti-loop (E10)
  *   4. nonce        — embedded-bootstrap challenge replay-defense
- *                     (MEDIUM #2 phase 2)
+ *                    
  *   5. bloom (x2)   — rotating "have we ever seen this IP" filter (M5.2)
  *
  * Plus a captcha-verify rate-limit ring, a captcha-log-suppress ring,
@@ -107,7 +107,7 @@ extern "C" {
 #define BS_DEFAULT_SAFEGUARD_WINDOW    600
 #define BS_DEFAULT_SAFEGUARD_TTL       900
 
-/* Embedded-bootstrap nonce table (MEDIUM #2 phase 2) */
+/* Embedded-bootstrap nonce table */
 #define BS_NONCE_PROBE_LIMIT       8
 #define BS_DEFAULT_NONCE_SLOTS     32768
 #define BS_NONCE_MIN_SLOTS         1024
@@ -286,7 +286,7 @@ typedef struct {
     apr_uint32_t  _pad;
 } bs_safeguard_slot;
 
-/* MEDIUM #2 phase 2 — embedded-bootstrap nonce table. Records every
+/* embedded-bootstrap nonce table. Records every
  * successfully-redeemed challenge nonce with its expiry so the verify
  * endpoint can reject replays. Keyed on a 64-bit SipHash of
  * (8-byte challenge nonce || 4-byte ns_id). Eviction on expiry. */
@@ -335,7 +335,7 @@ typedef struct {
     apr_uint32_t  cv_inflight;
     apr_uint32_t  _pad_cl2_a;
     apr_int64_t   bloom_next_rotate;
-    /* Security review LOW #10 — probe-saturation log-throttle
+    /* Probe-saturation log-throttle
      * timestamps shared across worker processes. */
     apr_int64_t   probe_warn_flagged_us;
     apr_int64_t   probe_warn_strike_us;
@@ -402,7 +402,7 @@ typedef struct {
     /* E10 safeguard table */
     bs_safeguard_slot   *safeguard_table;
     apr_size_t           safeguard_capacity;
-    /* MEDIUM #2 phase 2 nonce table */
+    /* phase 2 nonce table */
     bs_nonce_slot       *nonce_table;
     apr_size_t           nonce_capacity;
 } bs_shm_runtime;
@@ -496,7 +496,7 @@ void bs_bloom_rotate_if_due(apr_int64_t now_sec);
 void bs_bloom_add(const unsigned char ip[16], apr_uint32_t ns_id);
 int  bs_bloom_seen(const unsigned char ip[16], apr_uint32_t ns_id);
 
-/* --- Embedded-bootstrap nonce table (MEDIUM #2 phase 2) ----------- */
+/* --- Embedded-bootstrap nonce table ----------- */
 
 /* Atomically claim a nonce. Returns 1 if the nonce was unused (and
  * has now been recorded with the given expiry); 0 if it was already

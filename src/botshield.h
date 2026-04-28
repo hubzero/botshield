@@ -74,7 +74,7 @@ extern "C" {
 #define BS_DEFAULT_FORGIVE_CAP_PER_HOUR  200
 #define BS_FORGIVE_WINDOW_SEC            3600
 #define BS_COOKIE_NAME        "_bs_verified"
-/* Security review LOW #1 + #2 — `__Host-` prefix variant. We emit
+/*  `__Host-` prefix variant. We emit
  * this when the request is HTTPS AND no operator cookie_domain is
  * in play. Verify path checks both (host-prefix first). */
 #define BS_COOKIE_NAME_HOST   "__Host-bs_verified"
@@ -378,13 +378,13 @@ struct bs_dir_cfg {
     /* E16 — verify-only secondary secret for graceful rotation. */
     const unsigned char    *secret_secondary;
     apr_size_t              secret_secondary_len;
-    /* Security review LOW #3 — HKDF-Expand'd per-purpose keys
+    /*  HKDF-Expand'd per-purpose keys
      * derived once at config-load time. Each purpose tag yields a
      * cryptographically-independent key: leaking one tells an
      * attacker nothing about the others. */
     unsigned char    derived_gcm_cookie     [32];
     unsigned char    derived_hmac_pending   [32];
-    /* MEDIUM #2 — separate purpose key for the bootstrap → verify
+    /* separate purpose key for the bootstrap → verify
      * IP-binding HMAC. Distinct from the cookie key so the
      * bound-ip signature can't be repurposed against the cookie. */
     unsigned char    derived_hmac_bootstrap [32];
@@ -416,7 +416,7 @@ struct bs_dir_cfg {
     const unsigned char *captcha_secret;    /* file bytes, mode-600 */
     apr_size_t  captcha_secret_len;
     int         captcha_timeout_ms;         /* siteverify HTTP timeout */
-    /* Security review LOW #13 — connect-phase timeout. */
+    /* Connect-phase timeout. */
     int         captcha_connect_timeout_ms;
     /* reCAPTCHA v3: minimum score in [0.0, 1.0]. -1.0 = unset. */
     double      recaptcha_v3_min_score;
@@ -468,7 +468,7 @@ typedef struct bs_server_cfg {
     int                 safeguard_window;
     int                 safeguard_ttl;
     int                 safeguard_capacity;
-    /* MEDIUM #2 (Phase 2) — embedded nonce table sizing. 0 = default. */
+    /* (Phase 2) — embedded nonce table sizing. 0 = default. */
     int                 nonce_capacity;
     /* E11 — load-aware throttling. */
     const char         *load_state_file;
@@ -724,7 +724,7 @@ apr_status_t bs_read_form_body(request_rec *r, apr_size_t max_len,
                                apr_size_t *out_len);
 
 /* Challenge issuance, PoW algorithm registry, the canonical-form
- * HMAC input, and the MEDIUM #2 bootstrap-binding helpers all live
+ * HMAC input, and the bootstrap-binding helpers all live
  * in challenge.h (see src/challenge.{c,h}). */
 
 /* Cookie format / mint / verify (E11.4 GCM cookie path), the

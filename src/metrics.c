@@ -118,7 +118,7 @@ static void bs_gauges_refresh(void)
 
     apr_int64_t now_sec = (apr_int64_t)apr_time_sec(now);
     apr_uint64_t flagged_used = 0;
-    /* Security review LOW #8 — relaxed atomic loads on slot->version
+    /* Relaxed atomic loads on slot->version
      * make TSAN happy with the concurrent read. Estimate is fine
      * (already documented). */
     if (bs_shm.flagged_table) {

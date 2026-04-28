@@ -141,7 +141,7 @@ static apr_status_t bs_form_captcha_read_body(request_rec *r,
                 apr_brigade_destroy(bb);
                 return br;
             }
-            /* Security review MEDIUM — overflow-safe shape. The
+            /* overflow-safe shape. The
              * naive `total + len > MAX` form can wrap on a maliciously
              * large `len` even though both operands are size_t, since
              * BS_FORM_CAPTCHA_BODY_MAX is well below SIZE_MAX. Rewrite
@@ -191,7 +191,7 @@ int bs_form_captcha_fixup(request_rec *r)
      * the right home for. Anything else gets 415 with diagnostic
      * so operators notice the gap rather than silently allow
      * unverified submits. */
-    /* Security review MEDIUM — Content-Type prefix match must check
+    /* Content-Type prefix match must check
      * the next byte is a recognized separator (`;` for parameters,
      * whitespace, or end-of-string). Without it,
      * `application/x-www-form-urlencoded-evil` and
@@ -232,7 +232,7 @@ int bs_form_captcha_fixup(request_rec *r)
         return HTTP_BAD_REQUEST;
     }
 
-    /* Security review HIGH #1 — NUL-byte parser-confusion smuggling.
+    /*  NUL-byte parser-confusion smuggling.
      * Body is read as raw bytes (memcpy + length), but downstream
      * validators treat it as a C string: bs_form_get uses strchr,
      * json_tokener_parse_verbose stops at the first '\0'. The full
@@ -337,7 +337,7 @@ int bs_form_captcha_fixup(request_rec *r)
         return HTTP_FORBIDDEN;
     }
 
-    /* Hostname binding (security-review #1 parity with M8 path).
+    /* Hostname binding (parity with M8 path).
      * Action binding deliberately skipped here — the form's action
      * value is operator-defined and varies per form; enforcing a
      * single expected_action cross-form would be wrong. Operators
@@ -407,7 +407,7 @@ int bs_form_captcha_fixup(request_rec *r)
                                bs_effective_int(cfg->forgive_captcha,
                                                 BS_DEFAULT_FORGIVE_CAPTCHA));
         }
-        next_rep.passes_captcha = 1;  /* LOW #7 clamp */
+        next_rep.passes_captcha = 1;  /* clamp */
     }
 
     bs_challenge ch;

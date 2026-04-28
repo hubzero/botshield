@@ -79,7 +79,7 @@ const char *bs_gcm_encrypt(const unsigned char aes_key[32],
                            unsigned char *out_buf,
                            apr_size_t *out_len)
 {
-    /* LOW #3 — caller passes the HKDF-derived AES key directly;
+    /* caller passes the HKDF-derived AES key directly;
      * we no longer derive per-call. */
     const unsigned char *key = aes_key;
 
@@ -125,7 +125,7 @@ const char *bs_gcm_encrypt(const unsigned char aes_key[32],
 
 done:
     EVP_CIPHER_CTX_free(ctx);
-    /* LOW #3 — `key` now points at caller-owned memory (cfg-cached
+    /* `key` now points at caller-owned memory (cfg-cached
      * derived key); the caller's pool cleanup will OPENSSL_cleanse
      * when the cfg is destroyed. Don't cleanse a borrowed buffer. */
     return err;
@@ -147,7 +147,7 @@ const char *bs_gcm_decrypt(const unsigned char aes_key[32],
     const unsigned char *ct    = env + 1 + BS_GCM_NONCE_LEN;
     const unsigned char *tag   = ct + ct_len;
 
-    /* LOW #3 — caller passes the HKDF-derived AES key directly. */
+    /* caller passes the HKDF-derived AES key directly. */
     const unsigned char *key = aes_key;
 
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
@@ -185,7 +185,7 @@ const char *bs_gcm_decrypt(const unsigned char aes_key[32],
 
 done:
     EVP_CIPHER_CTX_free(ctx);
-    /* LOW #3 — borrowed key, see encrypt path comment. */
+    /* borrowed key, see encrypt path comment. */
     return err;
 }
 
@@ -221,7 +221,7 @@ int bs_from_hex(const char *in, apr_size_t in_len,
 
 /* --- Cookie/secret directive setters --- */
 
-/* Security review LOW #3 — derive the per-purpose keys for a master
+/* Derive the per-purpose keys for a master
  * secret. Called from the secret-file directive setters AFTER the
  * key bytes have been validated. Returns NULL on success; on
  * (vanishingly unlikely) HKDF failure returns a diagnostic string
@@ -286,7 +286,7 @@ const char *bs_set_secret_file(cmd_parms *cmd, void *cfg_v,
     cfg->secret     = (const unsigned char *)buf;
     cfg->secret_len = len;
 
-    /* Security review LOW #3 — derive per-purpose keys once. */
+    /* Derive per-purpose keys once. */
     err = bs_derive_purpose_keys(cmd->pool,
                                   cfg->secret, cfg->secret_len,
                                   cfg->derived_gcm_cookie,
@@ -350,7 +350,7 @@ const char *bs_set_secondary_secret_file(cmd_parms *cmd,
     cfg->secret_secondary     = (const unsigned char *)buf;
     cfg->secret_secondary_len = len;
 
-    /* Security review LOW #3 — derive per-purpose keys for the
+    /* Derive per-purpose keys for the
      * secondary master too. */
     err = bs_derive_purpose_keys(cmd->pool,
                                   cfg->secret_secondary,
@@ -372,8 +372,8 @@ const char *bs_set_secondary_secret_file(cmd_parms *cmd,
  * in cookie.c and by directive setters in config.c.
  * ====================================================================== */
 
-/* Bounded integer parser for pre-HMAC cookie fields (security review
- * #2). atoi() and strtoul(..., NULL, 10) both invoke undefined
+/* Bounded integer parser for pre-HMAC cookie fields. atoi() and
+ * strtoul(..., NULL, 10) both invoke undefined
  * behavior on overflow per C11 §7.22.1 — atoi because the result
  * doesn't fit in int, strtoul because we never check errno. Our
  * ASan/UBSan fuzz can't reliably catch that because the dangerous

@@ -113,7 +113,7 @@ static const char BS_EMBEDDED_JS[] =
 "(function(){\n"
 " if (window._bsEmbeddedRan) return;\n"
 " window._bsEmbeddedRan = true;\n"
-" /* Security review LOW #1 — used to short-circuit on\n"
+" /*  used to short-circuit on\n"
 "    document.cookie containing _bs_verified, but HttpOnly now\n"
 "    hides the cookie from JS. /embedded-bootstrap returns\n"
 "    {mode:'off'} when a valid cookie is present, so the\n"
@@ -140,7 +140,7 @@ static const char BS_EMBEDDED_JS[] =
 "      body: JSON.stringify({\n"
 "       provider: 'pow-gcm',\n"
 "       cookie_prefix: ch.cookie_prefix,\n"
-"       /* MEDIUM #2 — IP-bind round-trip. */\n"
+"       /* IP-bind round-trip. */\n"
 "       bound_ip: ch.bound_ip, bootstrap_sig: ch.bootstrap_sig,\n"
 "       counter: ev.data.counter\n"
 "      })\n"
@@ -554,7 +554,7 @@ int bs_embedded_bootstrap_handler(request_rec *r,
     }
 
     int difficulty = bs_effective_int(cfg->difficulty, BS_DEFAULT_DIFFICULTY);
-    /* Security review MEDIUM #2 — bootstrap challenges should expire
+    /* Bootstrap challenges should expire
      * fast. The previous code reused cookie_ttl (1h default), which
      * gave attackers a 60-minute window to grind an issued challenge
      * in parallel — bs_issue_challenge gives them salt+nonce+sig
@@ -594,7 +594,7 @@ int bs_embedded_bootstrap_handler(request_rec *r,
     bs_to_hex(ch.salt,  BS_SALT_BYTES,  salt_hex);
     bs_to_hex(ch.nonce, BS_NONCE_BYTES, nonce_hex);
 
-    /* MEDIUM #2 — IP-bind the bootstrap. The bound_ip + bootstrap_sig
+    /* IP-bind the bootstrap. The bound_ip + bootstrap_sig
      * round-trip via the verify POST and the verify endpoint
      * compares bound_ip against the verifying request's IP.
      * Closes the distributed-redemption attack (issue from one IP,
@@ -725,9 +725,9 @@ static int bs_json_get_int(json_object *root, const char *key,
  * fallback (E16), canonical parse, and PoW verify all in one
  * authenticated path — then mint a fresh cookie.
  *
- * Added for security review LOW #1 (HttpOnly): the M1 widget used
+ * Added for HttpOnly: the M1 widget used
  * to set the cookie via document.cookie because the PoW solution
- * was assembled client-side. Routing through this endpoint lets the
+ * WAS assembled client-side. Routing through this endpoint lets the
  * server emit Set-Cookie with HttpOnly, closing XSS-token-theft. */
 static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
                                        json_object *root)
@@ -766,7 +766,7 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
         return OK;
     }
 
-    /* MEDIUM #2 — IP-binding check. The bootstrap response carried
+    /* IP-binding check. The bootstrap response carried
      * a (bound_ip, bootstrap_sig) pair signed under the per-purpose
      * derived bootstrap key. Verify the HMAC, then compare bound_ip
      * against the current request's client IP. Mismatch ⇒ reject:
@@ -813,7 +813,7 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
         }
     }
 
-    /* MEDIUM #2 (Phase 2) — atomically consume the nonce. Replay of
+    /* (Phase 2) — atomically consume the nonce. Replay of
      * the same challenge bundle is rejected here: the first verify
      * wins the slot, all subsequent attempts get 403. Closes Attacks
      * 1 and 2 (replay multiplier and pool farming). */
@@ -838,7 +838,7 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
      * so we mutate ch.rep directly and preserve its server-set
      * challenged_at (the issue path stamped "now" into ch when the
      * bootstrap was minted; we don't want prior_ch's older value to
-     * overwrite it). LOW #7 — clamp passes_silent to 1 (it's an
+     * overwrite it). clamp passes_silent to 1 (it's an
      * "ever passed" flag, not a counter). */
     {
         bs_challenge prior_ch = { 0 };
@@ -927,7 +927,7 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
     }
 
     /* Post-siteverify validation parity with the M8 captcha-verify
-     * handler (security review #1). Hostname + action binding stops
+     * handler. Hostname + action binding stops
      * a token minted for a different scope/form on the same sitekey
      * from satisfying verification here. v3 score threshold caps
      * "valid token but signal is weak". Operator can opt out of
@@ -1016,7 +1016,7 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
                                bs_effective_int(cfg->forgive_silent,
                                                 BS_DEFAULT_FORGIVE_SILENT));
         }
-        next_rep.passes_silent = 1;  /* LOW #7 clamp */
+        next_rep.passes_silent = 1;  /* clamp */
     }
 
     bs_challenge ch;

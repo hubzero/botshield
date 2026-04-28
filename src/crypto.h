@@ -57,7 +57,7 @@ void bs_hmac_sha256(const unsigned char *key, apr_size_t keylen,
 int bs_ct_equal(const unsigned char *a, const unsigned char *b,
                 apr_size_t len);
 
-/* Security review LOW #3 — HKDF-Expand for per-purpose key
+/*  HKDF-Expand for per-purpose key
  * derivation. RFC 5869. Replaces the prior `SHA256(secret)` ad-hoc
  * derivation with a cryptographically clean per-purpose model:
  *

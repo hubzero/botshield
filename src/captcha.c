@@ -120,7 +120,7 @@ typedef struct {
     int        truncated;
 } bs_curl_buffer;
 
-/* Security review MEDIUM — curl_easy_setopt return codes used to be
+/* curl_easy_setopt return codes used to be
  * silently ignored. Wrapping every call with this macro accumulates
  * the first failure into setopt_rc, which the caller checks once
  * before curl_easy_perform. CURLE_OK is the common path; checking
@@ -136,7 +136,7 @@ static size_t bs_curl_write_cb(char *ptr, size_t size, size_t nmemb,
                                void *userdata)
 {
     bs_curl_buffer *b = userdata;
-    /* Overflow-guard the size*nmemb multiply (security review —
+    /* Overflow-guard the size*nmemb multiply (
      * hardening point). libcurl's documented contract keeps `size`
      * at 1 in practice, and BS_MAX_CAPTCHA_BODY caps the target
      * buffer anyway, so a realistic overrun is vanishingly unlikely.
@@ -156,7 +156,7 @@ static size_t bs_curl_write_cb(char *ptr, size_t size, size_t nmemb,
         return 0;
     }
     size_t incoming = size * nmemb;
-    /* Security review HIGH #8 — abort the transfer once truncation
+    /* Abort the transfer once truncation
      * is detected, instead of draining the rest of the body
      * silently. A slow-trickle malicious provider was previously
      * able to hold an in-flight captcha slot for the full timeout
@@ -184,9 +184,9 @@ static size_t bs_curl_write_cb(char *ptr, size_t size, size_t nmemb,
  * not thread-safe, and doing it lazily from the request path would
  * race under mpm_event. */
 
-/* Security review MEDIUM #13 — CURLOPT_OPENSOCKETFUNCTION callback
+/*  CURLOPT_OPENSOCKETFUNCTION callback
  * that rejects connections to RFC1918 / loopback / link-local
- * addresses. Defense-in-depth: HIGH #7 already pinned protocol to
+ * addresses. Defense-in-depth:  already pinned protocol to
  * https, but if a provider's NS were ever compromised to return an
  * internal IP for the provider hostname (challenges.cloudflare.com,
  * etc.), libcurl would still happily connect to that address and
@@ -250,7 +250,7 @@ static curl_socket_t bs_curl_open_socket_cb(void *clientp,
 static const char *bs_curl_escape_pool(apr_pool_t *p, CURL *curl,
                                        const char *in, apr_size_t in_len)
 {
-    /* Security review LOW #12 — curl_easy_escape takes int. Casting
+    /* Curl_easy_escape takes int. Casting
      * size_t > INT_MAX wraps to a negative length and curl_easy_escape
      * misinterprets it. None of our callers exceed INT_MAX in
      * practice (secret bytes capped at 1024, tokens at ~600), but
@@ -343,7 +343,7 @@ static bs_captcha_result bs_captcha_parse_response(apr_pool_t *p,
                            json_object_is_type(sc, json_type_int))) {
                     *out_score = json_object_get_double(sc);
                 }
-                /* Binding metadata (security review #1). Turnstile +
+                /* Binding metadata. Turnstile +
                  * hCaptcha + reCAPTCHA v2 + v3 all return `hostname`.
                  * reCAPTCHA v3 + Turnstile also return `action`. Copy
                  * into the caller's pool so the original json_object
@@ -455,7 +455,7 @@ bs_captcha_result bs_captcha_siteverify(request_rec *r,
         "secret=%s&%s=%s&remoteip=%s",
         esc_secret, field, esc_token, esc_ip);
 
-    /* Security review MEDIUM — allocate one extra byte so a
+    /* allocate one extra byte so a
      * full-cap response (resp.len == BS_MAX_CAPTCHA_BODY, which
      * the write callback caps at via the room calculation) can
      * receive its NUL terminator at resp.buf[resp.len] without
@@ -500,19 +500,19 @@ bs_captcha_result bs_captcha_siteverify(request_rec *r,
     if (ca_bundle) {
         BS_SETOPT(curl, CURLOPT_CAINFO, ca_bundle);
     }
-    /* Security review HIGH #7 — allowlist HTTPS only. Provider URLs
+    /* Allowlist HTTPS only. Provider URLs
      * are hard-coded today, but a future operator-tunable URL
      * would become an immediate SSRF vector via file://, gopher://,
      * etc. Cheap to close now. REDIR_PROTOCOLS mirrors the policy
      * in case FOLLOWLOCATION is ever flipped on later. */
     BS_SETOPT(curl, CURLOPT_PROTOCOLS_STR, "https");
     BS_SETOPT(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
-    /* Security review MEDIUM #13 — defense-in-depth against a
+    /* Defense-in-depth against a
      * compromised-DNS scenario where the provider hostname resolves
      * to an internal IP. The callback rejects RFC1918 / loopback /
      * link-local before connect(). */
     BS_SETOPT(curl, CURLOPT_OPENSOCKETFUNCTION, bs_curl_open_socket_cb);
-    /* Security review HIGH #8 — server-declared response size cap.
+    /* Server-declared response size cap.
      * If a malicious or misbehaving provider sets Content-Length
      * larger than our buffer, abort before any bytes flow.
      * Streaming-trickle providers without a declared length still
@@ -521,7 +521,7 @@ bs_captcha_result bs_captcha_siteverify(request_rec *r,
      * captcha slot for the full timeout. */
     BS_SETOPT(curl, CURLOPT_MAXFILESIZE,
                      (long)BS_MAX_CAPTCHA_BODY);
-    /* Security review LOW #14 — pin Content-Type and Accept so a
+    /* Pin Content-Type and Accept so a
      * future provider content-negotiation change can't quietly
      * shift the wire format. We send url-encoded fields and parse
      * JSON responses; both are stable across all six providers. */
@@ -714,7 +714,7 @@ static bs_captcha_result bs_geetest_siteverify(request_rec *r,
         "&gen_time=%s&sign_token=%s",
         e_lot, e_output, e_pass, e_time, sign_token);
 
-    /* Security review MEDIUM — allocate one extra byte so a
+    /* allocate one extra byte so a
      * full-cap response (resp.len == BS_MAX_CAPTCHA_BODY, which
      * the write callback caps at via the room calculation) can
      * receive its NUL terminator at resp.buf[resp.len] without
@@ -759,19 +759,19 @@ static bs_captcha_result bs_geetest_siteverify(request_rec *r,
     if (ca_bundle) {
         BS_SETOPT(curl, CURLOPT_CAINFO, ca_bundle);
     }
-    /* Security review HIGH #7 — allowlist HTTPS only. Provider URLs
+    /* Allowlist HTTPS only. Provider URLs
      * are hard-coded today, but a future operator-tunable URL
      * would become an immediate SSRF vector via file://, gopher://,
      * etc. Cheap to close now. REDIR_PROTOCOLS mirrors the policy
      * in case FOLLOWLOCATION is ever flipped on later. */
     BS_SETOPT(curl, CURLOPT_PROTOCOLS_STR, "https");
     BS_SETOPT(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
-    /* Security review MEDIUM #13 — defense-in-depth against a
+    /* Defense-in-depth against a
      * compromised-DNS scenario where the provider hostname resolves
      * to an internal IP. The callback rejects RFC1918 / loopback /
      * link-local before connect(). */
     BS_SETOPT(curl, CURLOPT_OPENSOCKETFUNCTION, bs_curl_open_socket_cb);
-    /* Security review HIGH #8 — server-declared response size cap.
+    /* Server-declared response size cap.
      * If a malicious or misbehaving provider sets Content-Length
      * larger than our buffer, abort before any bytes flow.
      * Streaming-trickle providers without a declared length still
@@ -780,7 +780,7 @@ static bs_captcha_result bs_geetest_siteverify(request_rec *r,
      * captcha slot for the full timeout. */
     BS_SETOPT(curl, CURLOPT_MAXFILESIZE,
                      (long)BS_MAX_CAPTCHA_BODY);
-    /* Security review LOW #14 — pin Content-Type and Accept so a
+    /* Pin Content-Type and Accept so a
      * future provider content-negotiation change can't quietly
      * shift the wire format. We send url-encoded fields and parse
      * JSON responses; both are stable across all six providers. */
@@ -1037,7 +1037,7 @@ static void bs_urldecode_inplace(char *s)
             else if (c >= 'a' && c <= 'f') lo = c - 'a' + 10;
             else if (c >= 'A' && c <= 'F') lo = c - 'A' + 10;
             if (hi >= 0 && lo >= 0) {
-                /* Security review LOW #5 — refuse to decode %00.
+                /* Refuse to decode %00.
                  * Otherwise the embedded NUL truncates every C-string
                  * consumer downstream (strlen, strchr, snprintf %s).
                  * Pass the literal '%','0','0' through; downstream
@@ -1072,7 +1072,7 @@ static void bs_urldecode_inplace(char *s)
  *                  caller should emit 400.
  *   APR_EINIT    — ap_setup_client_block rejected; caller emits 400.
  *
- * Security review MEDIUM #9 — was returning a pointer-or-NULL with
+ *  was returning a pointer-or-NULL with
  * silent truncation when the body exceeded max_len: the loop
  * `break`'d at `total >= max_len` without consuming the rest, so
  * callers couldn't tell the difference between "body fit cleanly"
@@ -1217,7 +1217,7 @@ const char *bs_mint_pending_cookie(request_rec *r,
     bs_to_hex(nonce, sizeof(nonce), nonce_hex);
 
     apr_time_t expiry = apr_time_sec(apr_time_now()) + BS_PENDING_COOKIE_TTL;
-    /* Security review LOW #4 — explicit module + purpose + version
+    /* Explicit module + purpose + version
      * context tag for domain separation. SHA-256 HMAC is collision-
      * resistant on its own, but a longer, more specific tag makes
      * it impossible for any FUTURE HMAC use to accidentally share
@@ -1227,7 +1227,7 @@ const char *bs_mint_pending_cookie(request_rec *r,
     const char *canon = apr_psprintf(r->pool,
         "bs:pending:v1:%s:%" APR_TIME_T_FMT, nonce_hex, expiry);
     unsigned char mac[BS_SIG_BYTES];
-    /* LOW #3 — derived pending-HMAC key. */
+    /* derived pending-HMAC key. */
     bs_hmac_sha256(cfg->derived_hmac_pending, 32,
                    (const unsigned char *)canon, strlen(canon), mac);
     char mac_hex[BS_SIG_BYTES * 2 + 1];
@@ -1276,7 +1276,7 @@ static const char *bs_verify_pending_cookie(request_rec *r,
     unsigned char scratch[16];
     if (!bs_from_hex(nonce_hex, 32, sizeof(scratch), scratch)) return "bad nonce hex";
 
-    /* Bounded parse before HMAC (security review #2). apr_atoi64
+    /* Bounded parse before HMAC. apr_atoi64
      * silently clamps/wraps on overflow without signalling; use the
      * bounded helper so gigantic junk is rejected cleanly instead
      * of feeding a nonsense timestamp into the freshness check. */
@@ -1285,7 +1285,7 @@ static const char *bs_verify_pending_cookie(request_rec *r,
         return "bad expiry";
     }
     apr_time_t expiry = (apr_time_t)expiry_raw;
-    /* Security review MEDIUM #3 — was `expiry + BS_CLOCK_SKEW_AHEAD <
+    /* Was `expiry + BS_CLOCK_SKEW_AHEAD <
      * now` with the comment "grace if client clock runs ahead", but
      * the expiry stamped into the pending cookie comes from
      * apr_time_now() at mint time — server-side, never a client
@@ -1297,13 +1297,13 @@ static const char *bs_verify_pending_cookie(request_rec *r,
         return "expired";
     }
 
-    /* Security review LOW #4 — must match the mint side's canon
+    /* Must match the mint side's canon
      * shape exactly. See comment above the mint site for the
      * domain-separation rationale. */
     const char *canon = apr_psprintf(r->pool,
         "bs:pending:v1:%s:%" APR_TIME_T_FMT, nonce_hex, expiry);
     unsigned char expect[BS_SIG_BYTES];
-    /* LOW #3 — derived pending-HMAC key (primary). */
+    /* derived pending-HMAC key (primary). */
     bs_hmac_sha256(cfg->derived_hmac_pending, 32,
                    (const unsigned char *)canon, strlen(canon), expect);
     unsigned char got[BS_SIG_BYTES];
@@ -1573,7 +1573,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
      * a provider slot. */
     bs_captcha_inflight_release();
 
-    /* Security review #1: bind the token to this origin + flow.
+    /* bind the token to this origin + flow.
      *   - hostname: provider-echoed domain of the site where the
      *     challenge was solved. Check against the configured expected
      *     hostname (default = r->server->server_hostname) so a token
@@ -1723,7 +1723,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
                                bs_effective_int(cfg->forgive_captcha,
                                                 BS_DEFAULT_FORGIVE_CAPTCHA));
         }
-        next_rep.passes_captcha = 1;  /* LOW #7 clamp */
+        next_rep.passes_captcha = 1;  /* clamp */
     }
 
     int ttl        = bs_effective_int(cfg->cookie_ttl, BS_DEFAULT_COOKIE_TTL);
@@ -1886,7 +1886,7 @@ const char *bs_set_captcha_timeout(cmd_parms *cmd, void *cfg_v,
     return NULL;
 }
 
-/* Security review LOW #13 — operator-tunable connect-phase timeout.
+/* Operator-tunable connect-phase timeout.
  * Default BS_CAPTCHA_CONNECT_TIMEOUT (250 ms) is tight for healthy
  * networks; operators on transient-loss links can bump it to avoid
  * fail-open on momentary connect blips. Same overall bound as the

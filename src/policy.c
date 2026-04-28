@@ -56,7 +56,7 @@ static int bs_cohort_matches(const bs_cohort *c,
  * Under pathological contention the CAS loop bounces; cap the retry
  * count and err on admitting rather than emitting spurious 429s.
  *
- * Security review MEDIUM #4 — the prior shape did the window-roll
+ *  the prior shape did the window-roll
  * via two separate stores (CAS window_start_sec, then plain
  * __atomic_store_n on count = 1). Between those two operations,
  * another thread could land an increment via the bottom-of-loop

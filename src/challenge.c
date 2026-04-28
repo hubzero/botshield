@@ -1,5 +1,5 @@
 /* challenge.c — challenge issuance, PoW algorithm registry, and the
- * MEDIUM #2 bootstrap-binding helpers shared by the M7 (interstitial)
+ *  bootstrap-binding helpers shared by the M7 (interstitial)
  * and E17 (silent-tier) paths.
  *
  * Two abstractions live here:
@@ -186,7 +186,7 @@ const bs_pow_algorithm *bs_find_algorithm(const char *name)
  * Emits the small JSON object the M7 splash page consumes inline:
  * salt/nonce/difficulty/expires/auto + the encrypted cookie_prefix the
  * JS appends a counter to. For silent-tier embedded mode the
- * MEDIUM #2 IP-binding pair (bound_ip + bootstrap_sig) is included so
+ *  IP-binding pair (bound_ip + bootstrap_sig) is included so
  * the round-trip /embedded-verify can match the issuing IP.
  *
  * Also carries the cookie_domain (if configured) so the JS can include
@@ -206,7 +206,7 @@ const char *bs_challenge_json(request_rec *r, apr_pool_t *p,
     const char *domain_json = cfg->cookie_domain
         ? apr_psprintf(p, ",\"cookie_domain\":\"%s\"", cfg->cookie_domain)
         : "";
-    /* MEDIUM #2 — IP-binding round-trip. Compute bound_ip from
+    /* IP-binding round-trip. Compute bound_ip from
      * the request's client IP and bootstrap_sig over the
      * (nonce, bound_ip, expires_at) tuple under the per-purpose
      * derived bootstrap key. Both fields ride along in the JSON
@@ -297,15 +297,16 @@ const char *bs_issue_challenge(apr_pool_t *p, const bs_dir_cfg *cfg,
     return NULL;
 }
 
-/* --- MEDIUM #2 bootstrap-binding helpers ---
+/* ---  bootstrap-binding helpers ---
  *
- * Security review MEDIUM #2 — IP-binding for the bootstrap → verify
+ *  IP-binding for the bootstrap → verify
  * pathway. At bootstrap time we sign (nonce, bound_ip, expires_at)
  * with a per-purpose HKDF-derived key (`derived_hmac_bootstrap`).
  * At verify time we recompute the HMAC and also compare bound_ip
  * against the verifying request's IP. A challenge issued from one
- * IP cannot be redeemed from another — closes Attack 3
- * (distributed redemption) from the security-review writeup.
+ * IP cannot be redeemed from another — closes the distributed-
+ * redemption attack where one IP solves the PoW and many others
+ * redeem the result.
  *
  * bound_ip is rendered as a 32-char lowercase hex string of the
  * 16 raw bytes (IPv4 maps to ::ffff:V.V.V.V already in the parser).
