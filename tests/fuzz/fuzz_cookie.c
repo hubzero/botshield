@@ -62,6 +62,7 @@
 #include "../../src/templates.c"
 #include "../../src/formcaptcha.c"
 #include "../../src/score.c"
+#include "../../src/policy.c"
 #include "../../src/silent.c"
 #include "../../src/captcha.c"
 #include "../../src/bridge.c"
