@@ -78,6 +78,7 @@
 #include "formcaptcha.h" /* E18 — inline form-captcha tier */
 #include "score.h"     /* per-request score + flag-trigger walker */
 #include "policy.h"    /* request-time policy walker */
+#include "heuristics.h" /* cheap built-in score signals */
 
 /* Cross-cutting config defaults (BS_DEFAULT_*, BS_MAX_*, BS_UNSET,
  * cookie name strings, etc.) live in botshield.h so every TU that
@@ -881,49 +882,6 @@ static int bs_policy_status_handler(request_rec *r, bs_dir_cfg *cfg)
 
 
 
-/* Cheap built-in signals, run on requests we're about to challenge. Called
- * after the cookie check — a verified cookie skips scoring entirely. */
-static void bs_run_builtin_heuristics(request_rec *r)
-{
-    /* E1: crawler allow-list runs first. A verified crawler adds a
-     * large negative penalty that dominates anything else scoring
-     * might pile on (scraper UA tokens in "Googlebot" etc.) and
-     * collapses tier dispatch to pass. */
-    bs_dir_cfg *dcfg = ap_get_module_config(r->per_dir_config,
-                                            &botshield_module);
-    bs_check_allow(r, dcfg);
-
-    const char *ua = apr_table_get(r->headers_in, "User-Agent");
-    if (!ua || !*ua) {
-        bs_score_add(r, BS_PENALTY_MISSING_UA, 3600, "missing-user-agent");
-    }
-    const char *al = apr_table_get(r->headers_in, "Accept-Language");
-    if (!al || !*al) {
-        bs_score_add(r, BS_PENALTY_MISSING_AL, 3600, "missing-accept-language");
-    }
-
-    /* Obvious scraper / HTTP-library UA fragments. Case-sensitive on
-     * purpose — we pick both casings where both actually appear in the
-     * wild. Matches are flagged, not blocked, so false positives only
-     * cost a tier bump. */
-    if (ua && *ua) {
-        static const char *const scraper_tokens[] = {
-            "curl", "Wget", "wget",
-            "python", "Python", "python-requests",
-            "urllib", "httpx", "aiohttp",
-            "Go-http-client", "okhttp", "axios", "scrapy",
-            "java", "Java", "libwww", "lwp-request",
-            NULL
-        };
-        for (int i = 0; scraper_tokens[i]; i++) {
-            if (strstr(ua, scraper_tokens[i])) {
-                bs_score_add(r, BS_PENALTY_SCRAPER_UA, 3600,
-                    apr_psprintf(r->pool, "scraper-ua-%s", scraper_tokens[i]));
-                break;
-            }
-        }
-    }
-}
 
 /* Pick a tier from the running score. Each tier has its own
  * interstitial: silent → auto-submit splash; form → reCAPTCHA-shaped
