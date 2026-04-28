@@ -105,6 +105,41 @@ const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
                              const char *cookie_value,
                              bs_challenge *out_ch);
 
+/* --- Carry-forward: rep state across cookie generations ------- *
+ *
+ * Issuance call sites (silent embedded-verify, M8 captcha-verify,
+ * E18 form-captcha) read the prior cookie via bs_carry_forward_eligible,
+ * then bs_apply_rep_carry computes the carried score with the
+ * forgive-band the call site picks per tier policy. */
+
+/* The shared carry-forward predicate. Both bs_carry_forward_eligible
+ * (issuance-side) and bs_handler (render-side) call this so the two
+ * paths reject the same cverrs and don't drift. Reject when:
+ *   - cverr == "signature mismatch" (rep bytes can't be trusted)
+ *   - cverr == "expired"           (MEDIUM #1: indefinite rep transfer)
+ *   - cverr is some other pre-auth error and *prior_ch is unwritten. */
+int bs_should_carry_prior_rep(const char *cverr,
+                              const bs_challenge *prior_ch);
+
+/* Returns 1 with *out_prior_ch populated if the caller may carry
+ * the prior cookie's rep block into a freshly-minted cookie; 0 if
+ * the prior cookie is missing/invalid/expired (security-review
+ * MEDIUM #1: TTL is the only mechanism preventing indefinite
+ * reputation transfer across cookie generations). */
+int bs_carry_forward_eligible(request_rec *r, const bs_dir_cfg *cfg,
+                              bs_challenge *out_prior_ch);
+
+/* Apply rep-carry math: clamp forgive_amount against the per-cookie
+ * hourly cap, compute new score = prior.score - forgive, clamp at
+ * zero. forgive_amount is per-tier policy, picked by the caller
+ * (cfg->forgive_silent / forgive_form / forgive_captcha). The
+ * caller bumps target->passes_X afterward (the LOW #7 "ever
+ * passed" clamp). */
+void bs_apply_rep_carry(request_rec *r, const bs_dir_cfg *cfg,
+                        const bs_challenge *prior_ch,
+                        bs_rep_state *target,
+                        int forgive_amount);
+
 #ifdef __cplusplus
 }
 #endif
