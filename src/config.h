@@ -56,7 +56,7 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
 void bs_child_init(apr_pool_t *p, server_rec *s);
 
 /* mod_watchdog tick callbacks registered by post_config:
- *   - bs_watchdog_save_cb     → shm.h (pairs with bs_state_save)
+ *   - bs_state_save_watchdog_cb     → shm.h (pairs with bs_state_save)
  *   - bs_robots_watchdog_cb   → robots.h (pairs with bs_robots_load) */
 
 /* --- Directive setters (feature-homeless) ---

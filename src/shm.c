@@ -1576,7 +1576,7 @@ apr_status_t bs_headroom_watchdog_cb(int state, void *data, apr_pool_t *pool)
  * process context with a short-lived pool. AP_WATCHDOG_STATE_RUNNING
  * fires at the configured interval. STARTING/STOPPING we ignore; the
  * graceful-shutdown save still happens via pool cleanup. */
-apr_status_t bs_watchdog_save_cb(int state, void *data,
+apr_status_t bs_state_save_watchdog_cb(int state, void *data,
                                  apr_pool_t *pool)
 {
     if (state != AP_WATCHDOG_STATE_RUNNING) return APR_SUCCESS;
