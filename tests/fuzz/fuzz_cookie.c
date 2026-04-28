@@ -53,6 +53,7 @@
 #include "../../src/shm.c"
 #include "../../src/crypto.c"
 #include "../../src/allowlist.c"
+#include "../../src/metrics.c"
 #include "../../src/mod_botshield.c"
 
 /* --- Fuzz state (initialized once per process) ---------------------- */
