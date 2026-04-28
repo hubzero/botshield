@@ -25,6 +25,8 @@
 #include <httpd.h>
 #include <http_config.h>
 
+#include "botshield.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -111,6 +113,13 @@ apr_status_t bs_allow_load_ranges_from_string(apr_pool_t *p,
  * timeout). */
 int bs_allow_ip_in_ranges(const apr_array_header_t *ranges,
                           request_rec *r);
+
+/* E1 request-time entry. Called from bs_run_builtin_heuristics when
+ * BotShieldLegitCrawlers is on. Emits at most one bs_score_add call
+ * per request (a dominant credit for verified crawlers, a strong
+ * penalty for fakes claiming a crawler UA from the wrong IP, or a
+ * neutral "bot-unverified" reason when ranges aren't loaded). */
+void bs_check_allow(request_rec *r, const bs_dir_cfg *cfg);
 
 /* --- E1 directive setters --- *
  *
