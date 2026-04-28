@@ -87,6 +87,35 @@ extern "C" {
 #define BS_MIN_SECRET_BYTES   16
 #define BS_WIDGET_MARKER      "<!-- BOTSHIELD -->"
 
+/* E4 — BotShield-cookie-state note. Set by bs_handler after the
+ * `_bs_verified` verification pass so the cookie-trigger predicate
+ * matcher (and other consumers) can surface the verdict without
+ * re-running the HMAC check. Values: "verified" / "missing" /
+ * "invalid". */
+#define BS_CK_STATE_NOTE      "botshield-cookie-state"
+#define BS_CK_STATE_VERIFIED  "verified"
+#define BS_CK_STATE_MISSING   "missing"
+#define BS_CK_STATE_INVALID   "invalid"
+
+/* --- Flag-bit registry ----------------------------------------
+ *
+ * Each bit represents a *serious* event we want to remember about
+ * an IP even if its cookie is rolled back. Bits are additive — an
+ * IP that tripped both a honeypot and a scanner probe carries both.
+ * Score effects per bit live in scfg->flag_triggers (see
+ * bs_default_flag_triggers + bs_apply_flag_triggers in botshield.c).
+ *
+ * BS_FLAG_APP_* are credit-carrying bits set by the app via the E5
+ * X-BotShield-Feedback bridge — the app can push score down as well
+ * as up. Compose additively with the penalty bits. */
+#define BS_FLAG_HONEYPOT_HIT          (1U << 0)
+#define BS_FLAG_SCANNER_PROBE         (1U << 1)
+#define BS_FLAG_FAKE_BOT              (1U << 2)
+#define BS_FLAG_POW_FAIL_STREAK       (1U << 3)
+#define BS_FLAG_APP_VERIFIED_HUMAN    (1U << 4)
+#define BS_FLAG_APP_VERIFIED_SESSION  (1U << 5)
+#define BS_FLAG_APP_TRUST_SIGNAL      (1U << 6)
+
 /* Captcha tier (M8) defaults — small and boring: a 1 s HTTP verify
  * budget is enough for Cloudflare / hCaptcha / Google normally, and
  * short enough that a provider outage doesn't stall real users. */
@@ -601,16 +630,46 @@ void bs_apply_rep_carry(request_rec *r,
 /* M8 captcha siteverify, provider registry, M8.1 pending cookie,
  * and the captcha-verify request handler all live in captcha.h. */
 
+/* Validate an operator-supplied bot/rule name token (lowercase
+ * letters, digits, hyphen; max 32 chars). Returns 1 on accept, 0
+ * on reject. Used by E1 BotShieldAllowBot setters and by triggers
+ * directive setters. */
+int bs_bot_name_valid(const char *s);
+
+/* RFC 9309 path-pattern warning — log a NOTICE when a directive's
+ * path pattern contains a non-trailing '*' that the retired v1
+ * matcher would have treated as a literal byte. Used by E2.1
+ * BotShieldBlockPath and by E3 BotShieldPathTrigger. */
+void bs_path_pattern_warn_middle_star(cmd_parms *cmd,
+                                      const char *directive,
+                                      const char *name,
+                                      const char *pattern);
+
 /* Score system (will move to score.h or stay here long-term). */
 bs_request_score *bs_get_score(request_rec *r, int create);
+
+/* Append a (penalty, ttl, reason) entry to the per-request score.
+ * penalty=0 records a reason without changing the total (useful for
+ * observe-mode + status=pass entries). Used cross-file by triggers.c
+ * and bridge.c. */
+void bs_score_add(request_rec *r, int penalty, int ttl_seconds,
+                  const char *reason);
+
 const char *bs_decision_reason_names(apr_pool_t *p,
                                      const bs_request_score *s);
+
+/* Parse a comma-separated list of flag-bit names ("honeypot_hit,
+ * scanner_probe") into a bit mask. Sets *err to a pool-allocated
+ * diagnostic on unknown names. Used by triggers.c to validate the
+ * flag= action key and by bridge.c to parse claims-flag lists. */
+apr_uint32_t bs_parse_flag_names(apr_pool_t *p, const char *s,
+                                 const char **err);
 
 /* Tier-name string (e.g. "pass", "silent", "form", "captcha"). Will
  * move to challenge.h or stay here long-term. */
 const char *bs_tier_name(bs_tier t);
 
-/* E7.3 feedback-trigger lookup (will move to triggers.h in Phase 6). */
+/* E7.3 feedback-trigger lookup. */
 const bs_feedback_trigger_entry *bs_feedback_trigger_find(
     const struct bs_server_cfg *scfg, const char *event);
 
