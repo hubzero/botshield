@@ -5,10 +5,10 @@
  * runtime. Each entry records (penalty, ttl_seconds, reason) so the
  * decision log can replay why a tier was chosen.
  *
- * Score → tier mapping happens later in bs_handler (compares total
- * to bs_dir_cfg->score_silent / _hard / _captcha thresholds), but
- * the score struct itself is request-scoped and lives on
- * r->request_config under the module's slot.
+ * Score → tier mapping happens via bs_decide_tier (compares total to
+ * bs_dir_cfg->score_silent / _hard / _captcha thresholds), but the
+ * score struct itself is request-scoped and lives on r->request_config
+ * under the module's slot.
  *
  * The flag-trigger walker is on the request side too — it consumes
  * scfg->flag_triggers entries (configured at config time via
@@ -21,12 +21,94 @@
 
 #include <httpd.h>
 #include <apr_pools.h>
-
-#include "botshield.h"
+#include <apr_tables.h>
+#include <apr_time.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Forward declarations — bs_dir_cfg / bs_server_cfg are defined in
+ * botshield.h. Declared here as forwards so this header is self-
+ * contained: TUs that need score-system types do not have to also
+ * pull botshield.h through this file. */
+struct bs_dir_cfg;
+struct bs_server_cfg;
+typedef struct bs_dir_cfg bs_dir_cfg;
+
+/* ======================================================================
+ * Score thresholds + heuristic penalties
+ * ====================================================================== */
+
+/* Score → tier cut-points (defaults; operator-tunable via the
+ * BotShieldScoreSilent / Hard / Captcha directives). */
+#define BS_DEFAULT_SCORE_SILENT   20
+#define BS_DEFAULT_SCORE_HARD     50
+#define BS_DEFAULT_SCORE_CAPTCHA  80
+
+/* Cap on stored reason entries per request. Overflow is silently
+ * dropped; the score total still accumulates. */
+#define BS_SCORE_MAX_REASONS      16
+
+/* Built-in heuristic penalties (consumed by heuristics.c). */
+#define BS_PENALTY_MISSING_UA     40
+#define BS_PENALTY_MISSING_AL     15
+#define BS_PENALTY_SCRAPER_UA     50
+
+/* ======================================================================
+ * Tier + silent-mode enums (decision dispatch)
+ * ====================================================================== */
+
+typedef enum {
+    BS_TIER_PASS    = 0,
+    BS_TIER_SILENT  = 1,
+    BS_TIER_HARD    = 2,
+    BS_TIER_CAPTCHA = 3
+} bs_tier;
+
+/* E17 — what flavor of silent-tier dispatch to use. INTERSTITIAL is
+ * the legacy M7 splash that auto-submits the PoW. EMBEDDED hands off
+ * to a wrapper script the operator has already included on the page;
+ * the page serves DECLINED (real content) and the wrapper does the
+ * PoW in a Web Worker, then POSTs back to /botshield/embedded-verify
+ * to mint _bs_verified. */
+typedef enum {
+    BS_SILENT_MODE_UNSET        = -1,
+    BS_SILENT_MODE_INTERSTITIAL =  0,
+    BS_SILENT_MODE_EMBEDDED     =  1
+} bs_silent_mode;
+
+/* ======================================================================
+ * Score system
+ * ====================================================================== */
+
+typedef struct {
+    int         penalty;
+    int         ttl_seconds;   /* accepted for API stability; unused
+                                * today (bs_score_add stores it but
+                                * downstream consumers haven't
+                                * materialized — the flagged-IP table
+                                * carries its own TTL set at insert).
+                                * Kept so callers can annotate "this
+                                * penalty represents an N-second-worth
+                                * signal" without the API churning if
+                                * we ever wire it up. */
+    const char *reason;        /* static string or r->pool-allocated */
+} bs_score_entry;
+
+typedef struct {
+    int                 total;
+    apr_array_header_t *entries;
+    int                 cap_warned;   /* DEBUG-logged when entries
+                                       * first hit BS_SCORE_MAX_REASONS
+                                       * so further drops don't spam
+                                       * the log. apr_pcalloc gives us
+                                       * 0 for free. */
+} bs_request_score;
+
+/* ======================================================================
+ * Score API
+ * ====================================================================== */
 
 /* Allocate (or fetch the existing) per-request score struct on
  * r->request_config. create=0 returns NULL if none exists yet. */
