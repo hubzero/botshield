@@ -200,8 +200,13 @@ struct bs_dir_cfg {
     int forgive_form;           /* score credit on form-tier pass */
     int forgive_captcha;        /* score credit on captcha pass */
     const char *cookie_domain;  /* if set, Set-Cookie Domain= attribute */
-    apr_uint32_t flag_on_match; /* BotShieldFlagIP: bits to add on any hit */
-    int          flag_on_match_ttl;  /* entry TTL when flag_on_match fires */
+    /* BotShieldTrigger — per-Apache-scope trigger list. Each entry
+     * is a bs_trigger_action *; the request-time walker iterates
+     * the merged list and applies each via bs_apply_trigger_action.
+     * `scope_triggers_reset` means "this scope drops inherited
+     * triggers" — the merge skips base->scope_triggers when set. */
+    apr_array_header_t *scope_triggers;
+    int                 scope_triggers_reset;
     /* --- Captcha tier (M8) --- */
     const char *endpoint_prefix;            /* default "/botshield" */
     const bs_captcha_provider *captcha_provider;  /* NULL = tier unused */

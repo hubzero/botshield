@@ -390,13 +390,22 @@ static const command_rec bs_cmds[] = {
                  "graceful-shutdown save runs). Range when non-zero: "
                  "30..86400. Requires mod_watchdog to be loaded; otherwise "
                  "degrades to shutdown-only with a NOTICE."),
-    AP_INIT_TAKE12("BotShieldFlagIP", bs_set_flag_ip, NULL,
+    AP_INIT_TAKE_ARGV("BotShieldTrigger", bs_set_trigger, NULL,
                  RSRC_CONF | ACCESS_CONF,
-                 "Flag the client IP with one or more bits when a request "
-                 "hits this scope. Flag names: honeypot_hit, scanner_probe, "
-                 "fake_bot, pow_fail_streak. Optional second argument "
-                 "is the TTL in seconds (default 3600). Use inside a "
-                 "<Location> for honeypot paths."),
+                 "Per-scope trigger: the Apache scope (server / "
+                 "<VirtualHost> / <Directory> / <Location> / "
+                 "<LocationMatch> / <Files> / <If>) the directive "
+                 "lives in IS the predicate. Action keys: "
+                 "status=<code|pass>, redirect=<url>, log=<tag>, "
+                 "flag=<name>, ttl=<sec>, penalty=<N>, credit=<N>, "
+                 "mode=enforce|observe. The literal 'reset' as the "
+                 "first arg drops triggers inherited from outer "
+                 "scopes (and earlier same-scope BotShieldTrigger "
+                 "directives). Multiple BotShieldTrigger directives "
+                 "in one scope each append a separate action. "
+                 "Replaces the legacy BotShieldFlagIP — the "
+                 "equivalent today is `BotShieldTrigger flag=<name> "
+                 "ttl=<sec>`."),
     /* E1 — Allow family */
     AP_INIT_FLAG("BotShieldAllow", bs_set_allow_enabled,
                  NULL, RSRC_CONF,
@@ -1036,21 +1045,10 @@ static int bs_handler(request_rec *r)
                          bs_tier_name(tier_floor_from_flags)));
     }
 
-    /* BotShieldFlagIP: if any scope the request matched sets flag bits,
-     * land them in the flagged-IP table now. Fires on every hit to the
-     * scope, so honeypot paths and scanner-trap paths should be reached
-     * only by actors that deserve the flag. */
-    if (cfg->flag_on_match && have_client_ip) {
-        bs_flagged_ip_add(r, client_ip, cfg->flag_on_match,
-                          cfg->flag_on_match_ttl
-                            ? cfg->flag_on_match_ttl : 3600,
-                          scfg_h->ns_id);
-        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
-            "mod_botshield: flagged IP %s bits=0x%x ttl=%d scope=%s",
-            r->useragent_ip, (unsigned)cfg->flag_on_match,
-            cfg->flag_on_match_ttl ? cfg->flag_on_match_ttl : 3600,
-            r->uri);
-    }
+    /* Per-scope flag/TTL writes happen inside bs_check_policy via
+     * the BotShieldTrigger walker (BS_TFAMILY_SCOPE). The legacy
+     * BotShieldFlagIP directive that used to live here was
+     * superseded by `BotShieldTrigger flag=<name> ttl=<sec>`. */
 
     /* Happy path: score below the silent threshold → pass through.
      * If there's no cookie this means no cookie is ever issued —

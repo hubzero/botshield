@@ -29,10 +29,15 @@ RemoteIPTrustedProxy  2001:db8:cafe::/48
 This is the same module used for accurate `%a` in access logs — if
 your access logs already show real client IPs, you're done.
 
-We deliberately do not reimplement this. `mod_remoteip` handles
-`X-Forwarded-For`, `Forwarded:` (RFC 7239), trusted-proxy CIDR
-matching for both v4 and v6, and multi-hop chains — all in Apache
-core, battle-tested, maintained.
+We deliberately do not reimplement this. `mod_remoteip` parses
+the configured header (typically `X-Forwarded-For`) as a comma-
+separated chain of IPs, matches each hop against the trusted-
+proxy CIDR list, and rewrites `r->useragent_ip` to the leftmost
+untrusted address — IPv4 and IPv6, multi-hop chains, all in
+Apache core, battle-tested, maintained. If your edge sends
+RFC 7239 `Forwarded:` headers instead, terminate them at the
+edge and have it forward `X-Forwarded-For` for Apache; mod_remoteip
+itself does not parse the RFC 7239 grammar.
 
 For a single-host deployment with no proxy in front, no extra
 configuration is needed: `r->useragent_ip` already equals the client
@@ -40,7 +45,7 @@ IP.
 
 ## Slow-client / slowloris defense
 
-mod_botshield's body-read paths (form-captcha verify, M8
+mod_botshield's body-read paths (form-captcha verify, the
 captcha-verify endpoint, embedded-verify endpoint) inherit Apache's
 slow-client defense. Apache's `Timeout` directive bounds how long a
 worker can be held by a stalled client; the default is 60 seconds.
@@ -153,9 +158,9 @@ should size capacity directives to match.
 | `BotShieldFlaggedIPCapacity` | `50000` | Open-addressed slot count for flagged IPs. Range 1024..1000000 |
 | `BotShieldBloomIPs` | `1000000` | Expected unique-IPs working set. Drives Bloom filter dimensions |
 | `BotShieldBloomWindow` | `604800` | Bloom rotation window (seconds). Rotation at window/2 |
-| `BotShieldRateLimitEscalateCapacity` | `50000` | E9 strike-table slots |
-| `BotShieldSafeguardCapacity` | `50000` | E10 challenge-loop suppression slots |
-| `BotShieldEmbeddedNonceCapacity` | `32768` | E17 embedded-bootstrap nonce table |
+| `BotShieldRateLimitEscalateCapacity` | `50000` | strike-table slots |
+| `BotShieldSafeguardCapacity` | `50000` | challenge-loop suppression slots |
+| `BotShieldEmbeddedNonceCapacity` | `32768` | embedded-bootstrap nonce table |
 
 These are server-scope only — placed inside `<VirtualHost>` they
 emit a NOTICE and are ignored. The SHM segment is module-global, so
@@ -218,7 +223,7 @@ rotation. The flow:
    Reload. The old secret can now be deleted.
 
 The secondary covers four verify call sites: HMAC `_bs_verified`,
-GCM `_bs_verified`, the M8.1 captcha-pending cookie, and the
+GCM `_bs_verified`, the captcha-pending cookie, and the
 embedded-verify PoW path. App-bridge keys
 (`BotShieldAppIntegrationSecretFile`) and captcha provider secrets
 are out of rotation scope; rotate those by reloading with the new

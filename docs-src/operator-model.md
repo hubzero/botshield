@@ -19,7 +19,7 @@ mod_botshield supports four user-facing tiers plus a passive
 | `captcha` | Third-party provider widget (Turnstile / hCaptcha / reCAPTCHA / Friendly / GeeTest) | `effective ≥ BotShieldScoreCaptcha` (default `≥ 80`). Falls back to `form` if no provider configured on the scope |
 
 A fifth value, `safeguard`, can appear in decision logs. It marks
-the E10 challenge-loop suppression: a client that has been issued
+the challenge-loop suppression: a client that has been issued
 challenges repeatedly within the safeguard window without ever
 returning a verified cookie gets `tier=safeguard outcome=declined`
 — pass-through to the real content with no challenge — to break the
@@ -67,13 +67,13 @@ or cohort. Signs are absolute; the score either rises or stays put.
 | Missing `Accept-Language` | +15 | `missing-accept-language` |
 | Scraper-pattern UA | +50 | `scraper-ua:<pattern>` |
 | First-sight IP (not in Bloom filter) | +5 | `first-sight-ip` |
-| Block-path match (E2.1) | +100 | `block-path:<name>` |
-| Rate-limit exceeded (E2.1) | +50 | `rate-limit-exceeded:<name>` |
-| Robots.txt Disallow (E2.2) | +100 | `robots-block:<group>` |
-| Honeypot hit (default E14 trigger) | +60 | `flag-trigger:honeypot_hit` |
-| Fake-bot detection (default E14 trigger) | +80 | `flag-trigger:fake_bot` |
-| Verified legit-crawler match (E1) | forces pass | `verified-<name>` |
-| `app_verified_human` cookie credit (default E14) | -80 | `flag-trigger:app_verified_human` |
+| Block-path match | +100 | `block-path:<name>` |
+| Rate-limit exceeded | +50 | `rate-limit-exceeded:<name>` |
+| Robots.txt Disallow | +100 | `robots-block:<group>` |
+| Honeypot hit (default flag trigger) | +60 | `flag-trigger:honeypot_hit` |
+| Fake-bot detection (default flag trigger) | +80 | `flag-trigger:fake_bot` |
+| Verified legit-crawler match | forces pass | `verified-<name>` |
+| `app_verified_human` cookie credit (default flag-trigger) | -80 | `flag-trigger:app_verified_human` |
 | Operator path / load / cookie / env / flag triggers with `action=score add=N` | configured | `<family>-trigger:<name>` |
 
 Default thresholds and penalty values appear here for orientation.
@@ -99,7 +99,7 @@ authenticated AES-256-GCM envelope; the plaintext fields include:
 - `flags` — credit/penalty bits accumulated across challenges
 - `passes_silent` / `passes_form` / `passes_captcha` — counters of
   successful challenges at each tier
-- `forgive_window_start` / `forgive_consumed` — E15 forgiveness-cap
+- `forgive_window_start` / `forgive_consumed` — forgiveness-cap
   state (see below)
 - `expires_at` — unix timestamp; cookies past expiry fail verify
 
@@ -125,7 +125,7 @@ get re-challenged on the next request:
 | `form` | -25 | `BotShieldForgivenessForm` |
 | `captcha` | -50 | `BotShieldForgivenessCaptcha` |
 
-### Forgiveness cap (E15)
+### Forgiveness cap
 
 To prevent farming — bot operators stockpiling forgiveness credit by
 solving many cheap challenges then trading the score down — the
@@ -146,7 +146,7 @@ value for stricter farming resistance.
 ### Carry-forward gate
 
 When the module mints a fresh cookie (silent verify, form-captcha
-verify, M8 captcha-verify, embedded-verify), it tries to carry the
+verify, captcha-verify, embedded-verify), it tries to carry the
 prior cookie's reputation block forward. Carry-forward is gated:
 
 - `signature mismatch` → reject; rep bytes can't be trusted.
@@ -154,7 +154,7 @@ prior cookie's reputation block forward. Carry-forward is gated:
   evasion this gate prevents.
 - pre-auth errors with no rep struct populated → reject.
 - everything else → carry forward, apply the per-tier forgiveness
-  credit through the E15 cap, increment the matching `passes_*`
+  credit through the cap, increment the matching `passes_*`
   counter.
 
 ## Inspecting decisions
@@ -233,7 +233,7 @@ reachable; the common ones:
 | `captcha` | `failopen` | Provider siteverify timed out; treated as pass to avoid blocking on a third-party outage |
 | `captcha` | `rate_limited` | Per-IP captcha-verify rate cap exceeded |
 | `captcha` | `inflight_capped` | Global captcha-verify in-flight cap exceeded |
-| `safeguard` | `declined` | E10 challenge-loop suppression; pass-through |
+| `safeguard` | `declined` | challenge-loop suppression; pass-through |
 
 See [observability](../observability/index.html) for the complete enum
 vocabulary and how it maps to counters.

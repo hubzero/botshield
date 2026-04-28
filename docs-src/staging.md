@@ -39,10 +39,8 @@ Add `mode=observe` to any directive that supports it:
 ```apache
 BotShieldPathTrigger    /admin/.env  flag=scanner_probe ttl=3600 log=admin-trap mode=observe
 BotShieldBlockPath      legacy-admin "/wp-admin/*" "" * mode=observe
-BotShieldRateLimit      api-burst    60 60 "" * mode=observe
-BotShieldFlagTrigger    honeypot_hit_strict flag=honeypot_hit \
-    action=tier_floor min=captcha mode=observe
-BotShieldFeedbackTrigger scanner-hit flag=honeypot_hit ttl=3600 mode=observe
+BotShieldRateLimit      api-burst    60 min "" * mode=observe
+BotShieldFlagTrigger    honeypot_hit action=tier_floor min=captcha mode=observe
 ```
 
 The rule still evaluates against every matching request, but takes
@@ -81,16 +79,23 @@ Both observe signals reach every gating surface:
 
 | Family | Honors per-rule | Honors shadow_mode | Reason format |
 |---|---|---|---|
-| Path triggers (E3) | yes | yes | `path-trigger:<name>:observe` |
-| Cookie triggers (E4) | yes | yes | `cookie-trigger:<name>:observe` |
-| Env triggers (E6) | yes | yes | `env-trigger:<name>:observe` |
-| Load triggers (E11.2) | yes | yes | `load-trigger:<name>:observe` |
-| Feedback triggers (E7.3) | yes | yes | `feedback-trigger:<event>:observe` |
-| Flag triggers (E14) | yes | yes | `flag-trigger:<flag>:observe` |
-| Block-path (E2.1) | yes | yes | `block-path:<name>:observe` |
-| Rate-limit (E2.1) | yes | yes | `rate-limit:<name>:observe` |
-| Robots Disallow (E2.2) | n/a | yes | `robots-block:<group>:observe` |
-| Form-captcha (E18) | n/a | yes | `form-captcha:<scope>:observe` |
+| Path triggers | yes | yes | `path-trigger:<name>:observe` |
+| Cookie triggers | yes | yes | `cookie-trigger:<name>:observe` |
+| Env triggers | yes | yes | `env-trigger:<name>:observe` |
+| Load triggers | yes | yes | `load-trigger:<name>:observe` |
+| Feedback triggers | n/a (parser rejects `mode=`) | yes | `feedback-trigger:<event>:observe` |
+| Flag triggers | yes | yes | `flag-trigger:<flag>:observe` |
+| Block-path | yes | yes | `block-path:<name>:observe` |
+| Rate-limit | yes | yes | `rate-limit:<name>:observe` |
+| Robots Disallow | n/a | yes | `robots-block:<group>:observe` |
+| Form-captcha | n/a | yes | `form-captcha:<scope>:observe` |
+
+Per-trigger `mode=observe` is rejected by the parser on
+`BotShieldFeedbackTrigger` because feedback runs on the response
+path — observe is meaningless once the response has shipped.
+Global `BotShieldShadowMode` still flips feedback into observe
+semantics (matches log `feedback-trigger:<event>:observe`, no
+flagged-IP mutation).
 
 Transport-level errors (415 / 413 / 400 on form-captcha; 503 on
 captcha-verify in-flight cap; 503 misconfigured) intentionally
