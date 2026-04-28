@@ -159,3 +159,57 @@ int bs_apply_flag_triggers(request_rec *r,
     }
     return fired;
 }
+
+/* NULL-terminated name+bit projection for the legacy parse sites
+ * (bs_parse_flag_names, bs_app_claims_flag_names) that iterate via
+ * a sentinel rather than a count. Struct is named (`bs_flag_name`)
+ * so botshield.h can `extern`-declare the array. */
+const struct bs_flag_name bs_flag_names[] = {
+    { "honeypot_hit",         BS_FLAG_HONEYPOT_HIT         },
+    { "scanner_probe",        BS_FLAG_SCANNER_PROBE        },
+    { "fake_bot",             BS_FLAG_FAKE_BOT             },
+    { "pow_fail_streak",      BS_FLAG_POW_FAIL_STREAK      },
+    { "app_verified_human",   BS_FLAG_APP_VERIFIED_HUMAN   },
+    { "app_verified_session", BS_FLAG_APP_VERIFIED_SESSION },
+    { "app_trust_signal",     BS_FLAG_APP_TRUST_SIGNAL     },
+    { NULL, 0 }
+};
+
+/* The E14 flag-trigger walker (bs_apply_flag_triggers) lives in
+ * score.c. bs_flag_names[] is defined further up this file (the
+ * NULL-terminated name+bit array bs_parse_flag_names iterates). */
+
+apr_uint32_t bs_parse_flag_names(apr_pool_t *p, const char *s,
+                                 const char **err)
+{
+    apr_uint32_t bits = 0;
+    *err = NULL;
+    const char *cur = s;
+    while (cur && *cur) {
+        const char *comma = strchr(cur, ',');
+        apr_size_t len = comma ? (apr_size_t)(comma - cur) : strlen(cur);
+        while (len && (*cur == ' ' || *cur == '\t')) { cur++; len--; }
+        while (len && (cur[len-1] == ' ' || cur[len-1] == '\t')) { len--; }
+
+        int matched = 0;
+        for (int i = 0; bs_flag_names[i].name; i++) {
+            apr_size_t nlen = strlen(bs_flag_names[i].name);
+            if (nlen == len &&
+                strncasecmp(cur, bs_flag_names[i].name, nlen) == 0) {
+                bits |= bs_flag_names[i].bit;
+                matched = 1;
+                break;
+            }
+        }
+        if (!matched) {
+            *err = apr_psprintf(p, "unknown flag name '%.*s' "
+                "(known penalty bits: honeypot_hit, scanner_probe, "
+                "fake_bot, pow_fail_streak; credit bits: "
+                "app_verified_human, app_verified_session, "
+                "app_trust_signal)", (int)len, cur);
+            return 0;
+        }
+        cur = comma ? comma + 1 : NULL;
+    }
+    return bits;
+}

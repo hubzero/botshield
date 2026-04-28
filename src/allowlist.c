@@ -514,3 +514,49 @@ void bs_check_allow(request_rec *r,
             apr_pstrcat(r->pool, "fake-", name, NULL));
     }
 }
+
+/* Parse r->useragent_ip into a 16-byte network-order buffer. IPv4
+ * becomes v6-mapped (::ffff:a.b.c.d) so the table is keyed uniformly.
+ * Returns 1 on success, 0 if the string is unparseable. */
+int bs_parse_client_ip(const char *ip_str, unsigned char out[16])
+{
+    if (!ip_str || !*ip_str) return 0;
+    struct in_addr v4;
+    if (inet_pton(AF_INET, ip_str, &v4) == 1) {
+        memset(out, 0, 10);
+        out[10] = 0xff; out[11] = 0xff;
+        memcpy(out + 12, &v4, 4);
+        return 1;
+    }
+    struct in6_addr v6;
+    if (inet_pton(AF_INET6, ip_str, &v6) == 1) {
+        memcpy(out, &v6, 16);
+        return 1;
+    }
+    return 0;
+}
+
+/* Apply an IPv6 prefix mask in-place so same-subnet v6 clients collapse
+ * to one key in the flagged-IP table. This bounds the attacker's ability
+ * to rotate through a /64 allocation to shed flags.
+ *
+ * IPv4 (carried as v6-mapped, ::ffff:a.b.c.d) is never masked: the v4
+ * economy is per-/32, not per-/24.
+ *
+ * prefix_bits == 128 or prefix_bits <= 0 → no-op. */
+void bs_mask_ipv6_prefix(unsigned char ip[16], int prefix_bits)
+{
+    static const unsigned char v4mapped[12] =
+        { 0,0,0,0, 0,0,0,0, 0,0, 0xff,0xff };
+    if (memcmp(ip, v4mapped, 12) == 0) return;       /* v4-in-v6: leave alone */
+    if (prefix_bits <= 0 || prefix_bits >= 128) return;
+
+    int full_bytes  = prefix_bits / 8;
+    int extra_bits  = prefix_bits % 8;
+    if (extra_bits) {
+        unsigned char keep = (unsigned char)(0xff << (8 - extra_bits));
+        ip[full_bytes] &= keep;
+        full_bytes++;
+    }
+    for (int i = full_bytes; i < 16; i++) ip[i] = 0;
+}

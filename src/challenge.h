@@ -6,7 +6,29 @@
  * server signs once and the client returns having proved possession
  * of a small bit of work (PoW counter) or a third-party attestation
  * (captcha siteverify response). Both interstitial and silent paths
- * use the same bs_challenge struct + algorithm registry. */
+ * use the same bs_challenge struct + algorithm registry.
+ *
+ * Wire format (embedded inline in the interstitial, JSON):
+ *     { v, alg, salt, nonce, difficulty, expires_at,
+ *       score, flags, passes_silent, passes_form, passes_captcha,
+ *       challenged_at, auto, signature }
+ *
+ * Canonical HMAC input (deterministic, pipe-delimited ASCII):
+ *     "v|alg|salthex|noncehex|difficulty|expires_at
+ *      |score|flags|pass_s|pass_f|pass_c|challenged_at|auto"
+ *
+ * Cookie payload = base64( canonical || "|" || sighex || "|" || counter )
+ * — a single base64 blob the server can parse by splitting on '|',
+ * no JSON parser required.
+ *
+ * `auto` is the silent-tier (M7) marker: 1 means the challenge was
+ * served as a no-click auto-submit splash, 0 means the form-PoW
+ * interstitial. HMAC-covered so an accepted cookie tells the server
+ * which tier actually served it — used to pick passes_silent vs
+ * passes_form and the matching forgiveness amount on verify.
+ *
+ * Keep in sync with the JS worker (silent.c) when the template
+ * ships the wire bits. */
 #ifndef BOTSHIELD_CHALLENGE_H
 #define BOTSHIELD_CHALLENGE_H
 
