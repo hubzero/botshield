@@ -25,13 +25,16 @@
 #define BOTSHIELD_H
 
 #include <apr.h>
+#include <apr_hash.h>
 #include <apr_pools.h>
 #include <apr_tables.h>
 #include <apr_time.h>
 #include <httpd.h>
+#include <http_config.h>
 
 #include "crypto.h"
 #include "robots.h"
+#include "shm.h"      /* bs_load_state, bs_metrics typedefs */
 
 #ifdef __cplusplus
 extern "C" {
@@ -53,6 +56,48 @@ extern "C" {
  * plaintext counter. '.' is outside the standard base64 alphabet so
  * the split point is unambiguous. */
 #define BS_GCM_COUNTER_SEP    '.'
+
+/* ======================================================================
+ * Config defaults (operator-tunable; tri-state directives use -1
+ * for "unset / inherit")
+ * ====================================================================== */
+
+#define BS_UNSET              (-1)
+#define BS_DEFAULT_COOKIE_TTL 3600  /* seconds a verified cookie is good for */
+#define BS_DEFAULT_DIFFICULTY 4     /* leading hex zeros */
+#define BS_CLOCK_SKEW_AHEAD   60    /* grace if client clock runs ahead */
+#define BS_DEFAULT_FORGIVE_SILENT   10
+#define BS_DEFAULT_FORGIVE_FORM     25
+#define BS_DEFAULT_FORGIVE_CAPTCHA  50
+/* E15 — per-cookie hourly cap on accumulated forgiveness. 200
+ * points/hour ≈ 4-8 challenge-passes worth of credit. */
+#define BS_DEFAULT_FORGIVE_CAP_PER_HOUR  200
+#define BS_FORGIVE_WINDOW_SEC            3600
+#define BS_COOKIE_NAME        "_bs_verified"
+/* Security review LOW #1 + #2 — `__Host-` prefix variant. We emit
+ * this when the request is HTTPS AND no operator cookie_domain is
+ * in play. Verify path checks both (host-prefix first). */
+#define BS_COOKIE_NAME_HOST   "__Host-bs_verified"
+#define BS_DEFAULT_PROMPT     "I\xe2\x80\x99m not a robot"  /* U+2019 */
+#define BS_DEFAULT_LOGO_LABEL "botshield"
+#define BS_MAX_LOGO_BYTES     (64 * 1024)
+#define BS_MAX_HELP_BYTES     (64 * 1024)
+#define BS_MAX_PAGE_BYTES     (256 * 1024)
+#define BS_MAX_SECRET_BYTES   1024
+#define BS_MIN_SECRET_BYTES   16
+#define BS_WIDGET_MARKER      "<!-- BOTSHIELD -->"
+
+/* Captcha tier (M8) defaults — small and boring: a 1 s HTTP verify
+ * budget is enough for Cloudflare / hCaptcha / Google normally, and
+ * short enough that a provider outage doesn't stall real users. */
+#define BS_DEFAULT_ENDPOINT_PREFIX  "/botshield"
+#define BS_DEFAULT_CAPTCHA_TIMEOUT  1000   /* milliseconds */
+#define BS_MIN_CAPTCHA_TIMEOUT      100
+#define BS_MAX_CAPTCHA_TIMEOUT      5000
+#define BS_CAPTCHA_CONNECT_TIMEOUT  250    /* milliseconds */
+#define BS_MAX_CAPTCHA_TOKEN        4096   /* Turnstile tokens ≤ ~2 KB */
+#define BS_MAX_CAPTCHA_BODY         8192   /* siteverify response cap */
+#define BS_DEFAULT_RECAPTCHA_V3_MIN_SCORE 0.5  /* Google's suggested baseline */
 
 /* ======================================================================
  * Tier + silent-mode enums (decision dispatch)
@@ -427,6 +472,87 @@ typedef struct bs_server_cfg {
  * ====================================================================== */
 
 extern module AP_MODULE_DECLARE_DATA botshield_module;
+
+/* ======================================================================
+ * Transitional cross-file function declarations.
+ *
+ * Functions defined in botshield.c that newly-extracted TUs need to
+ * call. As future phases extract their own .c/.h pairs, declarations
+ * migrate from this section to the per-feature header (cookie.h,
+ * challenge.h, captcha.h, ...). Anything left in this section is a
+ * pending future-extraction. */
+
+/* Score helper — clamp negative-or-zero `value` to `fallback`. Used
+ * everywhere config tri-state ints (-1 unset, 0 disabled, N> 0 set)
+ * resolve to a runtime value. */
+int bs_effective_int(int value, int fallback);
+
+/* IP parsing — mirror of inet_pton with the IPv4-mapped-to-IPv6
+ * normalization the SHM tables expect. Returns 1 on success. */
+int bs_parse_client_ip(const char *ip_str, unsigned char out[16]);
+
+/* Form-body reader — slurps a POST body up to `max_len` and writes
+ * it as a NUL-terminated string. Returns APR_SUCCESS or an APR
+ * error. Used by the verify handlers (silent + M8). */
+apr_status_t bs_read_form_body(request_rec *r, apr_size_t max_len,
+                               const char **out_body,
+                               apr_size_t *out_len);
+
+/* PoW algorithm registry lookup. Returns NULL on no match. */
+const bs_pow_algorithm *bs_find_algorithm(const char *name);
+
+/* Challenge-issuance entry point. Builds a fresh bs_challenge from
+ * cfg (signed via the alg's issue fn). Returns NULL on success or
+ * an error string. */
+const char *bs_issue_challenge(apr_pool_t *p, const bs_dir_cfg *cfg,
+                               int difficulty, int cookie_ttl,
+                               int auto_tier,
+                               const bs_pow_algorithm *alg_override,
+                               const bs_rep_state *rep_in,
+                               bs_challenge *out);
+
+/* Cookie format / mint / verify (E11.4 GCM cookie path). */
+const char *bs_build_cookie_prefix_gcm(apr_pool_t *p,
+                                       const bs_dir_cfg *cfg,
+                                       const bs_challenge *ch,
+                                       const char **out_b64);
+const char *bs_install_verified_cookie(request_rec *r,
+                                       const bs_dir_cfg *cfg,
+                                       const bs_challenge *ch,
+                                       const char *counter_str);
+const char *bs_get_verified_cookie_value(request_rec *r);
+const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
+                             const char *cookie_value,
+                             bs_challenge *out_ch);
+const char *bs_verify_cookie_gcm(request_rec *r,
+                                 const bs_dir_cfg *cfg,
+                                 const char *cookie_value,
+                                 const char *dot,
+                                 bs_challenge *out_ch);
+
+/* Rep carry-forward (E15 forgiveness window math). */
+int  bs_carry_forward_eligible(request_rec *r,
+                               const bs_dir_cfg *cfg,
+                               bs_challenge *out_prior_ch);
+void bs_apply_rep_carry(request_rec *r,
+                        const bs_dir_cfg *cfg,
+                        const bs_challenge *prior_ch,
+                        bs_rep_state *target,
+                        int forgive_amount);
+
+/* M8 captcha siteverify (libcurl-backed). */
+bs_captcha_result bs_captcha_siteverify(request_rec *r,
+                                        const bs_captcha_provider *prov,
+                                        const unsigned char *secret,
+                                        apr_size_t secret_len,
+                                        const char *token,
+                                        int timeout_ms,
+                                        const char *ca_bundle,
+                                        const char **out_details,
+                                        long *out_http_code,
+                                        double *out_score,
+                                        const char **out_hostname,
+                                        const char **out_action);
 
 #ifdef __cplusplus
 }

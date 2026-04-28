@@ -25,7 +25,7 @@ DOCS_BUILD  := tools/build_site.py
 # is what Apache's LoadModule directive references; the source file
 # stays bare-named to match the rest of src/.
 MAIN_SRC := src/$(MOD_NAME).c
-EXTRA_SRC := src/robots.c src/shm.c src/crypto.c src/allowlist.c src/metrics.c
+EXTRA_SRC := src/robots.c src/shm.c src/crypto.c src/allowlist.c src/metrics.c src/silent.c
 SRC      := $(MAIN_SRC) $(EXTRA_SRC)
 LA       := $(MAIN_SRC:.c=.la)
 
