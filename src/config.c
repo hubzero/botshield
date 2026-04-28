@@ -974,7 +974,7 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                 if (wrv == APR_SUCCESS && wd) {
                     apr_interval_time_t ival =
                         apr_time_from_sec(scfg->state_save_interval);
-                    wrv = fn_reg(wd, ival, ctx, bs_watchdog_save_cb);
+                    wrv = fn_reg(wd, ival, ctx, bs_state_save_watchdog_cb);
                 } else if (wrv == APR_SUCCESS) {
                     /* Docs say fn_get returns success + valid ptr or
                      * an error code, but be defensive. */
