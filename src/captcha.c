@@ -3,6 +3,7 @@
  * pending-cookie machinery, and the verify endpoint handler. */
 
 #include "captcha.h"
+#include "allowlist.h" /* bs_parse_client_ip */
 
 #include <ctype.h>
 #include <errno.h>
@@ -1013,7 +1014,83 @@ static const char *bs_log_suppress_suffix(apr_pool_t *p, apr_uint32_t n)
                         n, BS_CAPTCHA_LOG_WINDOW_SEC);
 }
 
+/* See captcha.h for the contract. The wrapper exists so embedded-
+ * verify (silent.c) and form-captcha (formcaptcha.c) get the same
+ * provider-quota / worker-occupancy DoS protection that the
+ * /captcha-verify handler had inline — without this, those two
+ * paths reach bs_captcha_siteverify with no rate cap and no
+ * in-flight semaphore. */
+bs_captcha_result bs_captcha_siteverify_guarded(
+    request_rec *r,
+    const bs_dir_cfg *cfg,
+    const char *token,
+    int timeout_ms,
+    const char *log_tag,
+    const char **out_details,
+    long *out_http_code,
+    double *out_score,
+    const char **out_hostname,
+    const char **out_action)
+{
+    if (!log_tag) log_tag = "captcha";
 
+    /* Per-IP rate limit. 0 disables; default 30/min. */
+    unsigned char client_ip[16];
+    int have_ip = bs_parse_client_ip(r->useragent_ip, client_ip);
+    if (have_ip) {
+        int rate_limit = bs_effective_int(cfg->captcha_rate_limit,
+                                          BS_DEFAULT_CAPTCHA_RATE_LIMIT);
+        if (!bs_captcha_rate_allowed(client_ip, rate_limit)) {
+            apr_uint32_t prev = 0;
+            int emit = bs_captcha_log_throttle(client_ip, &prev);
+            if (emit) {
+                ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                    "mod_botshield: %s rate limit%s "
+                    "(ip=%s, limit=%d/min)",
+                    log_tag, bs_log_suppress_suffix(r->pool, prev),
+                    r->useragent_ip ? r->useragent_ip : "?", rate_limit);
+            }
+            return BS_CAPTCHA_RATE_LIMITED;
+        }
+    }
+
+    /* Global in-flight semaphore. Acquire-then-release; every return
+     * path past the acquire MUST release. */
+    bs_server_cfg *scfg = ap_get_module_config(r->server->module_config,
+                                                &botshield_module);
+    int max_inflight = scfg ? scfg->captcha_max_inflight
+                            : BS_DEFAULT_CAPTCHA_MAX_INFLIGHT;
+    if (!bs_captcha_inflight_acquire(max_inflight)) {
+        apr_uint32_t prev = 0;
+        int emit = have_ip
+            ? bs_captcha_log_throttle(client_ip, &prev) : 1;
+        if (emit) {
+            ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+                "mod_botshield: %s in-flight cap reached%s "
+                "(max=%d) — provider likely slow",
+                log_tag, bs_log_suppress_suffix(r->pool, prev),
+                max_inflight);
+        }
+        return BS_CAPTCHA_INFLIGHT_CAPPED;
+    }
+
+    /* Provider-specific verify path overrides the shared shim when
+     * set. GeeTest is the current user; the other five providers
+     * leave siteverify_fn NULL. */
+    bs_captcha_siteverify_fn verify_fn =
+        cfg->captcha_provider->siteverify_fn
+        ? cfg->captcha_provider->siteverify_fn
+        : bs_captcha_siteverify;
+    bs_captcha_result result = verify_fn(
+        r, cfg->captcha_provider,
+        cfg->captcha_secret, cfg->captcha_secret_len,
+        token, timeout_ms, cfg->captcha_ca_bundle,
+        out_details, out_http_code, out_score,
+        out_hostname, out_action);
+
+    bs_captcha_inflight_release();
+    return result;
+}
 
 
 
@@ -1099,7 +1176,13 @@ apr_status_t bs_read_form_body(request_rec *r, apr_size_t max_len,
     char chunk[4096];
     while ((n = ap_get_client_block(r, chunk, sizeof(chunk))) > 0) {
         if ((apr_size_t)n > max_len - total) {
-            /* This chunk would overflow. Body is too big. */
+            /* This chunk would overflow. Body is too big. Mark the
+             * connection close-on-response so the unread tail of the
+             * body doesn't desync framing on the next keepalive
+             * request — Apache otherwise leaves the unconsumed
+             * remainder on the socket and the next request gets
+             * garbled. */
+            r->connection->keepalive = AP_CONN_CLOSE;
             return APR_ENOSPC;
         }
         memcpy(buf + total, chunk, (apr_size_t)n);
@@ -1442,37 +1525,6 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         return OK;
     }
 
-    /* M8.1 per-IP rate limit — *before* reading the body so a flood of
-     * junk POSTs gets rejected for ~nothing. 0 disables; default 30. */
-    unsigned char client_ip[16];
-    int have_ip = bs_parse_client_ip(r->useragent_ip, client_ip);
-    if (have_ip) {
-        int rate_limit = bs_effective_int(cfg->captcha_rate_limit,
-                                          BS_DEFAULT_CAPTCHA_RATE_LIMIT);
-        if (!bs_captcha_rate_allowed(client_ip, rate_limit)) {
-            /* Logged at INFO via the throttle so a flood doesn't drown
-             * the log. First hit per IP per window emits; rest suppress. */
-            apr_uint32_t prev = 0;
-            int emit = bs_captcha_log_throttle(client_ip, &prev);
-            if (emit) {
-                ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
-                    "mod_botshield: captcha-verify rate limit%s "
-                    "(ip=%s, limit=%d/min) — 429",
-                    bs_log_suppress_suffix(r->pool, prev),
-                    r->useragent_ip ? r->useragent_ip : "?", rate_limit);
-            }
-            r->status = HTTP_TOO_MANY_REQUESTS;
-            apr_table_setn(r->err_headers_out, "Retry-After", "60");
-            apr_table_setn(r->err_headers_out, "X-Botshield",
-                           "captcha-rate-limited");
-            ap_set_content_type(r, "text/plain; charset=utf-8");
-            ap_rputs("Too many captcha verification attempts.\n", r);
-            bs_decision_log(r, "captcha", "rate_limited", "-",
-                            prov_name, "-", "-", 0);
-            return OK;
-        }
-    }
-
     /* M8.1 body size tightened to 8 KB total (was BS_MAX_CAPTCHA_TOKEN
      * + 4096 ~= 12 KB). The largest legitimate body is a GeeTest JSON
      * blob of ~2 KB + return_to ~= 3 KB; 8 KB is comfortable headroom
@@ -1520,22 +1572,41 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         return OK;
     }
 
-    /* M8.1 global in-flight semaphore. Holds for the duration of the
-     * libcurl call; all return paths below release before returning. */
-    bs_server_cfg *scfg = ap_get_module_config(r->server->module_config,
-                                               &botshield_module);
-    int max_inflight = scfg ? scfg->captcha_max_inflight
-                            : BS_DEFAULT_CAPTCHA_MAX_INFLIGHT;
-    if (!bs_captcha_inflight_acquire(max_inflight)) {
-        apr_uint32_t prev = 0;
-        int emit = have_ip
-            ? bs_captcha_log_throttle(client_ip, &prev) : 1;
-        if (emit) {
-            ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
-                "mod_botshield: captcha-verify in-flight cap reached%s "
-                "(max=%d) — 503; provider likely slow",
-                bs_log_suppress_suffix(r->pool, prev), max_inflight);
-        }
+    int timeout = bs_effective_int(cfg->captcha_timeout_ms,
+                                   BS_DEFAULT_CAPTCHA_TIMEOUT);
+
+    /* Re-extract client IP for log-throttle calls in the result-
+     * handling code below. The guard rail does its own IP parse
+     * internally; this copy is for the post-verify log lines. */
+    unsigned char client_ip[16];
+    int have_ip = bs_parse_client_ip(r->useragent_ip, client_ip);
+
+    const char *details = NULL;
+    long http_code = 0;
+    double score = -1.0;
+    const char *resp_hostname = NULL;
+    const char *resp_action   = NULL;
+    /* Centralized guarded siteverify — applies the per-IP rate limit
+     * + global in-flight semaphore + provider dispatch. Two new
+     * result variants (RATE_LIMITED, INFLIGHT_CAPPED) signal a guard
+     * short-circuit; map to 429 / 503. */
+    bs_captcha_result result = bs_captcha_siteverify_guarded(
+        r, cfg, token, timeout, "captcha-verify",
+        &details, &http_code, &score,
+        &resp_hostname, &resp_action);
+
+    if (result == BS_CAPTCHA_RATE_LIMITED) {
+        r->status = HTTP_TOO_MANY_REQUESTS;
+        apr_table_setn(r->err_headers_out, "Retry-After", "60");
+        apr_table_setn(r->err_headers_out, "X-Botshield",
+                       "captcha-rate-limited");
+        ap_set_content_type(r, "text/plain; charset=utf-8");
+        ap_rputs("Too many captcha verification attempts.\n", r);
+        bs_decision_log(r, "captcha", "rate_limited", "-",
+                        prov_name, "-", "-", 0);
+        return OK;
+    }
+    if (result == BS_CAPTCHA_INFLIGHT_CAPPED) {
         r->status = HTTP_SERVICE_UNAVAILABLE;
         apr_table_setn(r->err_headers_out, "Retry-After", "2");
         apr_table_setn(r->err_headers_out, "X-Botshield",
@@ -1546,32 +1617,6 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
                         prov_name, "-", "-", 0);
         return OK;
     }
-
-    int timeout = bs_effective_int(cfg->captcha_timeout_ms,
-                                   BS_DEFAULT_CAPTCHA_TIMEOUT);
-
-    const char *details = NULL;
-    long http_code = 0;
-    double score = -1.0;
-    const char *resp_hostname = NULL;
-    const char *resp_action   = NULL;
-    /* Provider-specific verify path overrides the shared shim when set.
-     * GeeTest is the current user (HMAC-signed body, non-bool result
-     * semantics); the other five providers leave siteverify_fn NULL. */
-    bs_captcha_siteverify_fn verify_fn =
-        cfg->captcha_provider->siteverify_fn
-        ? cfg->captcha_provider->siteverify_fn
-        : bs_captcha_siteverify;
-    bs_captcha_result result = verify_fn(
-        r, cfg->captcha_provider,
-        cfg->captcha_secret, cfg->captcha_secret_len,
-        token, timeout, cfg->captcha_ca_bundle,
-        &details, &http_code, &score,
-        &resp_hostname, &resp_action);
-    /* In-flight semaphore released as soon as the libcurl call returns.
-     * The rest of the handler (cookie issuance, redirect) doesn't hold
-     * a provider slot. */
-    bs_captcha_inflight_release();
 
     /* bind the token to this origin + flow.
      *   - hostname: provider-echoed domain of the site where the
@@ -1828,10 +1873,30 @@ const char *bs_set_captcha_site_key(cmd_parms *cmd, void *cfg_v,
     if (!arg || !*arg) {
         return "BotShieldCaptchaSiteKey: empty value";
     }
-    /* Site keys are public; just cap length to something sane so a
-     * misconfigured directive can't wedge the interstitial. */
+    /* Site keys are public; cap length so a misconfigured directive
+     * can't wedge the interstitial. */
     if (strlen(arg) > 256) {
         return "BotShieldCaptchaSiteKey: value longer than 256 bytes";
+    }
+    /* Defense-in-depth: real provider site keys are alphanumerics
+     * plus `_`, `-`, `.` (Turnstile, hCaptcha, reCAPTCHA, Friendly,
+     * GeeTest all conform). The value gets embedded into JS string
+     * literals, HTML attributes, and JSON in the interstitial render
+     * paths (templates.c, silent.c). Charset-restricting it at
+     * config time makes the embed sites trivially safe even though
+     * the value is operator-controlled. */
+    for (const char *p = arg; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        int ok = (c >= 'a' && c <= 'z')
+              || (c >= 'A' && c <= 'Z')
+              || (c >= '0' && c <= '9')
+              || c == '_' || c == '-' || c == '.';
+        if (!ok) {
+            return apr_psprintf(cmd->pool,
+                "BotShieldCaptchaSiteKey: illegal character 0x%02x at "
+                "offset %td. Allowed: alphanumerics, '_', '-', '.'.",
+                c, p - arg);
+        }
     }
     cfg->captcha_site_key = arg;
     return NULL;

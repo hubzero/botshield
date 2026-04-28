@@ -34,6 +34,7 @@
 #include <apr_tables.h>
 
 #include "botshield.h"
+#include "allowlist.h" /* bs_parse_client_ip, bs_mask_ipv6_prefix */
 #include "metrics.h"   /* bs_set_trigger_tag, bs_shm.metrics */
 #include "score.h"     /* bs_score_add */
 #include "shm.h"       /* bs_flagged_ip_add */
