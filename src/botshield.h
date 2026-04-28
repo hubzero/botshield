@@ -716,18 +716,10 @@ apr_status_t bs_read_form_body(request_rec *r, apr_size_t max_len,
  * HMAC input, and the MEDIUM #2 bootstrap-binding helpers all live
  * in challenge.h (see src/challenge.{c,h}). */
 
-/* Cookie format / mint / verify (E11.4 GCM cookie path) and the
- * Cookie-header parse-once tokenizer live in cookie.h. */
-
-/* Rep carry-forward (E15 forgiveness window math). */
-int  bs_carry_forward_eligible(request_rec *r,
-                               const bs_dir_cfg *cfg,
-                               bs_challenge *out_prior_ch);
-void bs_apply_rep_carry(request_rec *r,
-                        const bs_dir_cfg *cfg,
-                        const bs_challenge *prior_ch,
-                        bs_rep_state *target,
-                        int forgive_amount);
+/* Cookie format / mint / verify (E11.4 GCM cookie path), the
+ * Cookie-header parse-once tokenizer, AND the rep carry-forward
+ * helpers (bs_carry_forward_eligible, bs_apply_rep_carry) all
+ * live in cookie.h. */
 
 /* M8 captcha siteverify, provider registry, M8.1 pending cookie,
  * and the captcha-verify request handler all live in captcha.h. */
