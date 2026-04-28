@@ -1,16 +1,28 @@
-/* robots.c — mod_botshield's robots.txt parser + matcher.
+/* robots.c — mod_botshield's robots.txt parser + loader + matcher.
  *
  * See robots.h for the public surface. Semantics follow RFC 9309 plus
- * the Crawl-delay de facto extension. Pure APR; no Apache httpd.h.
+ * the Crawl-delay de facto extension.
  *
- * Defensive parsing — this is operator-controlled input today, but
- * E2.2b will watch the file for changes and hot-reload it, so we treat
- * it as untrusted. Length caps, line caps, and unknown-key tolerance
+ * Three concerns under one roof:
+ *   - Pure-APR parser/matcher (robots_parse_file, robots_query,
+ *     bs_path_match). The internals here read like a small stand-
+ *     alone library — minimal dependencies, untrusted-input hardening,
+ *     length caps + unknown-key tolerance.
+ *   - Module-level loader (bs_robots_load + bs_robots_watchdog_cb).
+ *     Stat + (conditionally) parse + atomically publish into the
+ *     server cfg, with mod_watchdog driving periodic refresh.
+ *   - Directive setters (bs_set_robots_*) and one config-time
+ *     validator (bs_path_pattern_warn_middle_star).
+ *
+ * Defensive parsing — operator-controlled input that the watchdog
+ * hot-reloads while requests are in flight, so we treat the file
+ * as untrusted. Length caps, line caps, and unknown-key tolerance
  * keep a malformed file from crashing the module or blowing memory.
  */
 #include "robots.h"
 
 #include <http_log.h>
+#include <mod_watchdog.h>
 
 #include <apr_file_io.h>
 #include <apr_file_info.h>
@@ -49,11 +61,11 @@ typedef struct robots_group {
 struct robots_doc {
     apr_pool_t         *pool;
     apr_array_header_t *groups;       /* robots_group * */
-    /* Security review LOW #6 — count of lines that exceeded
+    /* Count of lines that exceeded
      * BOTSHIELD_ROBOTS_MAX_LINE and got truncated during parse.
-     * Caller in botshield.c reads via robots_doc_truncated_lines()
-     * and emits a NOTICE so operators see the silent truncation
-     * the parser-header docs claim is reported. */
+     * bs_robots_load reads via robots_doc_truncated_lines() and
+     * emits a NOTICE so operators see the silent truncation the
+     * parser-header docs claim is reported. */
     int                 truncated_lines;
 };
 
@@ -715,7 +727,7 @@ const char *bs_set_robots_refresh_interval(cmd_parms *cmd,
  * Governs how the User-agent: * group in robots.txt is enforced:
  *   heuristic (default): apply only to UAs that look like crawlers
  *                        — real-browser prefix denylist + bot-token
- *                        allowlist (see PLAN.md).
+ *                        allowlist (see CHANGELOG.md).
  *   strict             : apply to every UA (operator's call; risks
  *                        rate-limiting or blocking real users).
  *   off                : ignore * groups entirely. */
@@ -779,4 +791,175 @@ void bs_path_pattern_warn_middle_star(cmd_parms *cmd,
         "as a literal byte. If the literal was intended, this rule "
         "will no longer match.",
         directive, name, pattern);
+}
+
+/* ======================================================================
+ * E2.2.2 — live-refresh of robots.txt via mod_watchdog
+ *
+ * bs_robots_load(): stat + (conditionally) parse + publish. Runs both
+ * at post_config (initial load) and at each watchdog tick (refresh).
+ * When the source file's mtime is unchanged, it's a cheap no-op.
+ *
+ * Atomic-swap model: active state lives in scfg->robots (read with
+ * __atomic_load_n on the request path). When a fresh doc is built,
+ * we atomically publish it, push the outgoing state into
+ * scfg->robots_pending, and destroy whatever pool was in the
+ * previous pending slot. That gives each displaced doc at least one
+ * refresh interval of grace — more than enough for any in-flight
+ * request to finish reading pointers into its pool.
+ *
+ * Slot stability: SHM rate-counter slots are keyed by group name via
+ * scfg->robots_slot_by_name, which lives in pconf and survives
+ * refresh. A group whose name reappears in the new doc keeps its
+ * existing slot (and its in-flight Crawl-delay window); a genuinely
+ * new group gets a fresh slot from the reserved pool. The map never
+ * shrinks — operators who delete a crawler from robots.txt leave a
+ * stale entry, which is harmless (no lookup targets it). If they
+ * re-add it, the old slot is reused.
+ * ====================================================================== */
+apr_status_t bs_robots_load(server_rec *sv, bs_server_cfg *scfg,
+                            apr_pool_t *pconf)
+{
+    if (!scfg || !scfg->robots_txt_path) return APR_EINVAL;
+
+    /* Stat first — if mtime is unchanged since the active doc was
+     * parsed, there's nothing to do. This is the common case on
+     * every refresh tick. */
+    apr_finfo_t fi;
+    apr_status_t rv = apr_stat(&fi, scfg->robots_txt_path,
+                               APR_FINFO_MTIME | APR_FINFO_SIZE, pconf);
+    if (rv != APR_SUCCESS) {
+        char errbuf[128];
+        apr_strerror(rv, errbuf, sizeof(errbuf));
+        ap_log_error(APLOG_MARK, APLOG_WARNING, rv, sv,
+            "mod_botshield: robots.txt %s stat failed (%s); "
+            "keeping previous state",
+            scfg->robots_txt_path, errbuf);
+        return rv;
+    }
+
+    bs_robots_state *cur =
+        __atomic_load_n(&scfg->robots, __ATOMIC_ACQUIRE);
+    if (cur && cur->mtime == fi.mtime) {
+        return APR_SUCCESS;
+    }
+
+    /* Build the new state in a fresh subpool we control. Destroying
+     * this subpool later frees the doc and its slot map in one go,
+     * without touching anything else in pconf. */
+    apr_pool_t *npool = NULL;
+    apr_pool_create(&npool, pconf);
+
+    robots_doc *doc = NULL;
+    const char *parse_err = NULL;
+    rv = robots_parse_file(npool, scfg->robots_txt_path,
+                           &doc, &parse_err);
+    if (rv != APR_SUCCESS || !doc) {
+        ap_log_error(APLOG_MARK, APLOG_WARNING, rv, sv,
+            "mod_botshield: robots.txt %s parse failed (%s); "
+            "keeping previous state",
+            scfg->robots_txt_path,
+            parse_err ? parse_err : "unknown error");
+        apr_pool_destroy(npool);
+        return rv;
+    }
+
+    /* Surface truncated lines (the parser
+     * silently caps any line > BOTSHIELD_ROBOTS_MAX_LINE). The
+     * documented contract said operators "see a warning through
+     * the summary log"; this emits that warning. */
+    int n_truncated = robots_doc_truncated_lines(doc);
+    if (n_truncated > 0) {
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+            "mod_botshield: robots.txt %s: %d line(s) exceeded the "
+            "parser line limit and were truncated during parse",
+            scfg->robots_txt_path, n_truncated);
+    }
+    int n_groups = robots_group_count(doc);
+    bs_robots_state *ns = apr_pcalloc(npool, sizeof(*ns));
+    ns->doc   = doc;
+    ns->pool  = npool;
+    ns->mtime = fi.mtime;
+    ns->slot_by_group_idx = apr_pcalloc(npool,
+        (n_groups > 0 ? n_groups : 1) * sizeof(int));
+
+    int delay_count = 0, slot_reused = 0, slot_new = 0, slot_exhausted = 0;
+    for (int i = 0; i < n_groups; i++) {
+        ns->slot_by_group_idx[i] = -1;
+        int cd = robots_group_crawl_delay_at(doc, i);
+        if (cd <= 0) continue;
+        delay_count++;
+        const char *name = robots_group_name_at(doc, i);
+        int *slot_ptr = apr_hash_get(scfg->robots_slot_by_name,
+                                     name, APR_HASH_KEY_STRING);
+        if (slot_ptr) {
+            ns->slot_by_group_idx[i] = *slot_ptr;
+            slot_reused++;
+            continue;
+        }
+        if (scfg->robots_slot_pool_used < scfg->robots_slot_pool_size) {
+            int slot = scfg->robots_slot_pool_base
+                     + scfg->robots_slot_pool_used++;
+            ns->slot_by_group_idx[i] = slot;
+            /* Persist the mapping in pconf so future refreshes see
+             * it. Copy name into pconf too — the doc's pool will be
+             * destroyed on replacement and its name string with it. */
+            int *persist = apr_palloc(pconf, sizeof(int));
+            *persist = slot;
+            apr_hash_set(scfg->robots_slot_by_name,
+                         apr_pstrdup(pconf, name),
+                         APR_HASH_KEY_STRING, persist);
+            slot_new++;
+        } else {
+            slot_exhausted++;
+        }
+    }
+
+    /* Publish the new state. scfg->robots_pending currently holds
+     * the bundle displaced one refresh ago (or NULL at first load);
+     * destroy its pool now — more than one refresh interval has
+     * passed since any request took a pointer to it. */
+    bs_robots_state *to_destroy = scfg->robots_pending;
+    bs_robots_state *displaced  = cur;
+    __atomic_store_n(&scfg->robots, ns, __ATOMIC_RELEASE);
+    scfg->robots_pending = displaced;
+    if (to_destroy && to_destroy->pool) {
+        apr_pool_destroy(to_destroy->pool);
+    }
+
+    if (slot_exhausted > 0) {
+        ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
+            "mod_botshield: robots.txt slot pool exhausted "
+            "(%d/%d used); %d Crawl-delay groups will not enforce "
+            "until an Apache reload resizes the pool",
+            scfg->robots_slot_pool_used, scfg->robots_slot_pool_size,
+            slot_exhausted);
+    }
+    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+        "mod_botshield: robots.txt %s %sloaded — %d groups, "
+        "%d with Crawl-delay (%d slots reused, %d new)",
+        scfg->robots_txt_path, cur ? "re" : "",
+        n_groups, delay_count, slot_reused, slot_new);
+    return APR_SUCCESS;
+}
+
+/* mod_watchdog tick callback — one registration per vhost with a
+ * BotShieldRobotsTxt directive. State-transition events (STARTING,
+ * STOPPING) do nothing; RUNNING calls bs_robots_load which returns
+ * fast when mtime hasn't changed. */
+apr_status_t bs_robots_watchdog_cb(int state, void *data,
+                                          apr_pool_t *pool)
+{
+    (void)pool;
+    if (state != AP_WATCHDOG_STATE_RUNNING) return APR_SUCCESS;
+    /* data was passed as the server_rec at registration; retrieve
+     * scfg from it so we always see the live pointer. pconf is
+     * reachable through sv->process->pconf. */
+    server_rec *sv = data;
+    if (!sv) return APR_SUCCESS;
+    bs_server_cfg *scfg =
+        ap_get_module_config(sv->module_config, &botshield_module);
+    if (!scfg || !scfg->robots_txt_path) return APR_SUCCESS;
+    bs_robots_load(sv, scfg, sv->process->pconf);
+    return APR_SUCCESS;
 }

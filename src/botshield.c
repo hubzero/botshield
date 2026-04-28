@@ -101,192 +101,6 @@
  * bounded numeric parsers). Every other concern fans out through the
  * per-feature includes above. */
 
-
-
-
-
-
-
-
-/* ======================================================================
- * E2.2.2 — live-refresh of robots.txt via mod_watchdog
- *
- * bs_robots_load(): stat + (conditionally) parse + publish. Runs both
- * at post_config (initial load) and at each watchdog tick (refresh).
- * When the source file's mtime is unchanged, it's a cheap no-op.
- *
- * Atomic-swap model: active state lives in scfg->robots (read with
- * __atomic_load_n on the request path). When a fresh doc is built,
- * we atomically publish it, push the outgoing state into
- * scfg->robots_pending, and destroy whatever pool was in the
- * previous pending slot. That gives each displaced doc at least one
- * refresh interval of grace — more than enough for any in-flight
- * request to finish reading pointers into its pool.
- *
- * Slot stability: SHM rate-counter slots are keyed by group name via
- * scfg->robots_slot_by_name, which lives in pconf and survives
- * refresh. A group whose name reappears in the new doc keeps its
- * existing slot (and its in-flight Crawl-delay window); a genuinely
- * new group gets a fresh slot from the reserved pool. The map never
- * shrinks — operators who delete a crawler from robots.txt leave a
- * stale entry, which is harmless (no lookup targets it). If they
- * re-add it, the old slot is reused.
- * ====================================================================== */
-apr_status_t bs_robots_load(server_rec *sv, bs_server_cfg *scfg,
-                            apr_pool_t *pconf)
-{
-    if (!scfg || !scfg->robots_txt_path) return APR_EINVAL;
-
-    /* Stat first — if mtime is unchanged since the active doc was
-     * parsed, there's nothing to do. This is the common case on
-     * every refresh tick. */
-    apr_finfo_t fi;
-    apr_status_t rv = apr_stat(&fi, scfg->robots_txt_path,
-                               APR_FINFO_MTIME | APR_FINFO_SIZE, pconf);
-    if (rv != APR_SUCCESS) {
-        char errbuf[128];
-        apr_strerror(rv, errbuf, sizeof(errbuf));
-        ap_log_error(APLOG_MARK, APLOG_WARNING, rv, sv,
-            "mod_botshield: robots.txt %s stat failed (%s); "
-            "keeping previous state",
-            scfg->robots_txt_path, errbuf);
-        return rv;
-    }
-
-    bs_robots_state *cur =
-        __atomic_load_n(&scfg->robots, __ATOMIC_ACQUIRE);
-    if (cur && cur->mtime == fi.mtime) {
-        return APR_SUCCESS;
-    }
-
-    /* Build the new state in a fresh subpool we control. Destroying
-     * this subpool later frees the doc and its slot map in one go,
-     * without touching anything else in pconf. */
-    apr_pool_t *npool = NULL;
-    apr_pool_create(&npool, pconf);
-
-    robots_doc *doc = NULL;
-    const char *parse_err = NULL;
-    rv = robots_parse_file(npool, scfg->robots_txt_path,
-                           &doc, &parse_err);
-    if (rv != APR_SUCCESS || !doc) {
-        ap_log_error(APLOG_MARK, APLOG_WARNING, rv, sv,
-            "mod_botshield: robots.txt %s parse failed (%s); "
-            "keeping previous state",
-            scfg->robots_txt_path,
-            parse_err ? parse_err : "unknown error");
-        apr_pool_destroy(npool);
-        return rv;
-    }
-
-    /* Security review LOW #6 — surface truncated lines (the parser
-     * silently caps any line > BOTSHIELD_ROBOTS_MAX_LINE). The
-     * documented contract said operators "see a warning through
-     * the summary log"; this emits that warning. */
-    int n_truncated = robots_doc_truncated_lines(doc);
-    if (n_truncated > 0) {
-        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
-            "mod_botshield: robots.txt %s: %d line(s) exceeded the "
-            "parser line limit and were truncated during parse",
-            scfg->robots_txt_path, n_truncated);
-    }
-    int n_groups = robots_group_count(doc);
-    bs_robots_state *ns = apr_pcalloc(npool, sizeof(*ns));
-    ns->doc   = doc;
-    ns->pool  = npool;
-    ns->mtime = fi.mtime;
-    ns->slot_by_group_idx = apr_pcalloc(npool,
-        (n_groups > 0 ? n_groups : 1) * sizeof(int));
-
-    int delay_count = 0, slot_reused = 0, slot_new = 0, slot_exhausted = 0;
-    for (int i = 0; i < n_groups; i++) {
-        ns->slot_by_group_idx[i] = -1;
-        int cd = robots_group_crawl_delay_at(doc, i);
-        if (cd <= 0) continue;
-        delay_count++;
-        const char *name = robots_group_name_at(doc, i);
-        int *slot_ptr = apr_hash_get(scfg->robots_slot_by_name,
-                                     name, APR_HASH_KEY_STRING);
-        if (slot_ptr) {
-            ns->slot_by_group_idx[i] = *slot_ptr;
-            slot_reused++;
-            continue;
-        }
-        if (scfg->robots_slot_pool_used < scfg->robots_slot_pool_size) {
-            int slot = scfg->robots_slot_pool_base
-                     + scfg->robots_slot_pool_used++;
-            ns->slot_by_group_idx[i] = slot;
-            /* Persist the mapping in pconf so future refreshes see
-             * it. Copy name into pconf too — the doc's pool will be
-             * destroyed on replacement and its name string with it. */
-            int *persist = apr_palloc(pconf, sizeof(int));
-            *persist = slot;
-            apr_hash_set(scfg->robots_slot_by_name,
-                         apr_pstrdup(pconf, name),
-                         APR_HASH_KEY_STRING, persist);
-            slot_new++;
-        } else {
-            slot_exhausted++;
-        }
-    }
-
-    /* Publish the new state. scfg->robots_pending currently holds
-     * the bundle displaced one refresh ago (or NULL at first load);
-     * destroy its pool now — more than one refresh interval has
-     * passed since any request took a pointer to it. */
-    bs_robots_state *to_destroy = scfg->robots_pending;
-    bs_robots_state *displaced  = cur;
-    __atomic_store_n(&scfg->robots, ns, __ATOMIC_RELEASE);
-    scfg->robots_pending = displaced;
-    if (to_destroy && to_destroy->pool) {
-        apr_pool_destroy(to_destroy->pool);
-    }
-
-    if (slot_exhausted > 0) {
-        ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
-            "mod_botshield: robots.txt slot pool exhausted "
-            "(%d/%d used); %d Crawl-delay groups will not enforce "
-            "until an Apache reload resizes the pool",
-            scfg->robots_slot_pool_used, scfg->robots_slot_pool_size,
-            slot_exhausted);
-    }
-    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
-        "mod_botshield: robots.txt %s %sloaded — %d groups, "
-        "%d with Crawl-delay (%d slots reused, %d new)",
-        scfg->robots_txt_path, cur ? "re" : "",
-        n_groups, delay_count, slot_reused, slot_new);
-    return APR_SUCCESS;
-}
-
-/* mod_watchdog tick callback — one registration per vhost with a
- * BotShieldRobotsTxt directive. State-transition events (STARTING,
- * STOPPING) do nothing; RUNNING calls bs_robots_load which returns
- * fast when mtime hasn't changed. */
-apr_status_t bs_robots_watchdog_cb(int state, void *data,
-                                          apr_pool_t *pool)
-{
-    (void)pool;
-    if (state != AP_WATCHDOG_STATE_RUNNING) return APR_SUCCESS;
-    /* data was passed as the server_rec at registration; retrieve
-     * scfg from it so we always see the live pointer. pconf is
-     * reachable through sv->process->pconf. */
-    server_rec *sv = data;
-    if (!sv) return APR_SUCCESS;
-    bs_server_cfg *scfg =
-        ap_get_module_config(sv->module_config, &botshield_module);
-    if (!scfg || !scfg->robots_txt_path) return APR_SUCCESS;
-    bs_robots_load(sv, scfg, sv->process->pconf);
-    return APR_SUCCESS;
-}
-
-
-
-
-
-
-
-
-
 /* Character policy for bot-name tokens: lowercase letters, digits,
  * hyphen. Used as the hash key and the default ranges-file basename.
  * Rejects anything that could create path-traversal surprises or
@@ -311,213 +125,6 @@ int bs_bot_name_valid(const char *s)
 
 
 
-/* mod_watchdog periodic-save callback. Runs in the parent/watchdog
- * process context with a short-lived pool. AP_WATCHDOG_STATE_RUNNING
- * fires at the configured interval. STARTING/STOPPING we ignore; the
- * graceful-shutdown save still happens via pool cleanup. */
-apr_status_t bs_watchdog_save_cb(int state, void *data,
-                                        apr_pool_t *pool)
-{
-    if (state != AP_WATCHDOG_STATE_RUNNING) return APR_SUCCESS;
-    bs_state_cleanup_ctx *ctx = data;
-    if (!ctx || !ctx->path) return APR_SUCCESS;
-    if (!ctx->shm_rt.shm || !ctx->shm_rt.flagged_table ||
-        !ctx->shm_rt.bloom_bufs[0]) {
-        return APR_SUCCESS;   /* SHM not up yet; nothing to save */
-    }
-    /* Use the callback's own pool so temporaries die with this tick. */
-    bs_state_save(pool, ctx->server, ctx->path, &ctx->shm_rt);
-    return APR_SUCCESS;
-}
-
-
-
-/* ======================================================================
- * E2.2.3 — /botshield/policy-status
- *
- * Plain-text dump of the rules currently being enforced:
- *   - BotShieldRateLimit directives (directive rate_limits array).
- *   - BotShieldBlockPath directives (directive block_paths array).
- *   - robots.txt-derived groups (if BotShieldRobotsTxt is set) —
- *     source file path, mtime, every group's UA tokens + rules +
- *     Crawl-delay.
- *
- * Goal is operator-visibility: when E2.2.2 hot-swaps a freshly-edited
- * robots.txt, operators can curl this page to confirm what the module
- * is actually enforcing, rather than guessing. Also useful for
- * verifying that `BotShieldAllow` overrides have landed.
- *
- * No authentication / no rate limit built in. Treat like mod_status —
- * operators wrap it in `<Location>` with their own ACL. The page
- * doesn't reveal cookie secrets or client IPs; the most sensitive
- * content is the operator's own directive config, which is already
- * on disk in /etc/apache2/.
- *
- * Format is plain text (not Prometheus) — this is meant to be read
- * by humans over curl; structured consumers use /botshield/metrics.
- * ====================================================================== */
-
-static void bs_psh_cohort_ipspec(request_rec *r, const bs_cohort *c)
-{
-    if (c->ip_any) { ap_rputs("*", r); return; }
-    if (c->inline_cidrs) {
-        ap_rprintf(r, "inline(%s)", c->inline_cidrs);
-        return;
-    }
-    if (c->path) {
-        ap_rprintf(r, "file(%s)", c->path);
-        return;
-    }
-    ap_rprintf(r, "<%d ranges>", c->ranges ? c->ranges->nelts : 0);
-}
-
-static void bs_psh_render_counter(request_rec *r, int slot_idx,
-                                  apr_uint32_t budget)
-{
-    bs_rate_counter *counters = (bs_rate_counter *)bs_shm.rate_counters;
-    if (slot_idx < 0 || !counters) {
-        ap_rputs("-/-", r);
-        return;
-    }
-    apr_uint32_t cnt = __atomic_load_n(&counters[slot_idx].count,
-                                       __ATOMIC_RELAXED);
-    ap_rprintf(r, "%u/%u", cnt, budget);
-}
-
-static int bs_policy_status_handler(request_rec *r, bs_dir_cfg *cfg)
-{
-    (void)cfg;
-    if (r->method_number != M_GET && r->method_number != M_OPTIONS) {
-        r->status = HTTP_METHOD_NOT_ALLOWED;
-        apr_table_setn(r->headers_out, "Allow", "GET, OPTIONS");
-        ap_set_content_type(r, "text/plain; charset=utf-8");
-        ap_rputs("GET required.\n", r);
-        return OK;
-    }
-    ap_set_content_type(r, "text/plain; charset=utf-8");
-    apr_table_setn(r->headers_out, "Cache-Control", "no-store");
-
-    bs_server_cfg *scfg =
-        ap_get_module_config(r->server->module_config, &botshield_module);
-    if (!scfg) {
-        ap_rputs("# scfg unavailable\n", r);
-        return OK;
-    }
-
-    char tbuf[APR_RFC822_DATE_LEN + 1] = { 0 };
-    apr_rfc822_date(tbuf, apr_time_now());
-    ap_rprintf(r, "# mod_botshield policy status\n"
-                  "# vhost:       %s\n"
-                  "# server_time: %s\n\n",
-        r->server->server_hostname ? r->server->server_hostname : "-",
-        tbuf);
-
-    /* --- directive rate limits --- */
-    ap_rputs("## BotShieldRateLimit (directive)\n", r);
-    if (!scfg->rate_limits || scfg->rate_limits->nelts == 0) {
-        ap_rputs("# (none)\n\n", r);
-    } else {
-        ap_rputs("# name               budget  window  ua                          "
-                 "ipspec                slot  count/budget\n", r);
-        for (int i = 0; i < scfg->rate_limits->nelts; i++) {
-            bs_rate_limit_entry *e = APR_ARRAY_IDX(
-                scfg->rate_limits, i, bs_rate_limit_entry *);
-            ap_rprintf(r, "%-18s  %6u  %4us   %-26s  ",
-                e->name, e->budget, e->window_sec,
-                e->cohort.ua_any ? "*"
-                    : apr_psprintf(r->pool, "\"%s\"", e->cohort.ua_pattern));
-            bs_psh_cohort_ipspec(r, &e->cohort);
-            ap_rprintf(r, "%*s  %4d  ",
-                       (int)(22 - (e->cohort.ip_any ? 1
-                          : (int)(strlen("file()") + (e->cohort.path ? strlen(e->cohort.path) : 0)
-                                  + (e->cohort.inline_cidrs ? strlen(e->cohort.inline_cidrs) : 0)))),
-                       "", e->shm_slot);
-            bs_psh_render_counter(r, e->shm_slot, e->budget);
-            ap_rputs("\n", r);
-        }
-        ap_rputs("\n", r);
-    }
-
-    /* --- directive block paths --- */
-    ap_rputs("## BotShieldBlockPath (directive)\n", r);
-    if (!scfg->block_paths || scfg->block_paths->nelts == 0) {
-        ap_rputs("# (none)\n\n", r);
-    } else {
-        ap_rputs("# name               path-glob                     "
-                 "ua                          ipspec\n", r);
-        for (int i = 0; i < scfg->block_paths->nelts; i++) {
-            bs_block_path_entry *e = APR_ARRAY_IDX(
-                scfg->block_paths, i, bs_block_path_entry *);
-            ap_rprintf(r, "%-18s  %-28s  %-26s  ",
-                e->name, e->path_pattern,
-                e->cohort.ua_any ? "*"
-                    : apr_psprintf(r->pool, "\"%s\"", e->cohort.ua_pattern));
-            bs_psh_cohort_ipspec(r, &e->cohort);
-            ap_rputs("\n", r);
-        }
-        ap_rputs("\n", r);
-    }
-
-    /* --- robots.txt --- */
-    ap_rputs("## robots.txt (BotShieldRobotsTxt)\n", r);
-    if (!scfg->robots_txt_path) {
-        ap_rputs("# (not configured)\n", r);
-        return OK;
-    }
-    bs_robots_state *rs =
-        __atomic_load_n(&scfg->robots, __ATOMIC_ACQUIRE);
-    ap_rprintf(r, "# path:                %s\n", scfg->robots_txt_path);
-    if (!rs) {
-        ap_rputs("# status:              not loaded (parse failed or "
-                 "file missing at post_config)\n", r);
-        return OK;
-    }
-    char mbuf[APR_RFC822_DATE_LEN + 1] = { 0 };
-    apr_rfc822_date(mbuf, rs->mtime);
-    ap_rprintf(r, "# mtime:               %s\n"
-                  "# groups:              %d\n"
-                  "# slot pool:           %d/%d used\n"
-                  "# wildcard scope:      %s\n"
-                  "# refresh interval:    %d s%s\n",
-        mbuf,
-        robots_group_count(rs->doc),
-        scfg->robots_slot_pool_used, scfg->robots_slot_pool_size,
-        scfg->robots_wildcard_scope == BS_ROBOTS_WILDCARD_STRICT ? "strict"
-          : scfg->robots_wildcard_scope == BS_ROBOTS_WILDCARD_OFF ? "off"
-          : "heuristic",
-        scfg->robots_refresh_interval,
-        scfg->robots_refresh_interval == 0 ? " (live-refresh disabled)" : "");
-
-    int n = robots_group_count(rs->doc);
-    for (int i = 0; i < n; i++) {
-        ap_rprintf(r, "\n### group[%d] \"%s\"  wildcard=%s\n", i,
-            robots_group_name_at(rs->doc, i),
-            robots_group_is_wildcard_at(rs->doc, i) ? "yes" : "no");
-        int n_ua = robots_group_ua_count_at(rs->doc, i);
-        for (int u = 0; u < n_ua; u++) {
-            ap_rprintf(r, "  user-agent: %s\n",
-                robots_group_ua_at(rs->doc, i, u));
-        }
-        int n_rules = robots_group_rule_count_at(rs->doc, i);
-        for (int k = 0; k < n_rules; k++) {
-            const char *pat = NULL;
-            int allow = 0;
-            if (robots_group_rule_at(rs->doc, i, k, &pat, &allow)) {
-                ap_rprintf(r, "  %-9s %s\n",
-                    allow ? "Allow:" : "Disallow:", pat ? pat : "");
-            }
-        }
-        int cd = robots_group_crawl_delay_at(rs->doc, i);
-        if (cd > 0) {
-            int slot = (rs->slot_by_group_idx && i < n)
-                     ? rs->slot_by_group_idx[i] : -1;
-            ap_rprintf(r, "  Crawl-delay: %ds  slot=%d  ", cd, slot);
-            bs_psh_render_counter(r, slot, 1);
-            ap_rputs("\n", r);
-        }
-    }
-    return OK;
-}
 
 
 
@@ -525,32 +132,9 @@ static int bs_policy_status_handler(request_rec *r, bs_dir_cfg *cfg)
 
 
 
-/* Score → tier picker. Three configurable cut-points
- * (BotShieldScoreSilent / Hard / Captcha) gate four tiers. The
- * README "Understanding scoring" section covers the operator-facing
- * tuning workflow; templates.h documents the per-tier interstitial
- * rendering. */
-static bs_tier bs_decide_tier(const bs_dir_cfg *cfg, int score)
-{
-    int silent  = bs_effective_int(cfg->score_silent,  BS_DEFAULT_SCORE_SILENT);
-    int hard    = bs_effective_int(cfg->score_hard,    BS_DEFAULT_SCORE_HARD);
-    int captcha = bs_effective_int(cfg->score_captcha, BS_DEFAULT_SCORE_CAPTCHA);
-    if (score >= captcha) return BS_TIER_CAPTCHA;
-    if (score >= hard)    return BS_TIER_HARD;
-    if (score >= silent)  return BS_TIER_SILENT;
-    return BS_TIER_PASS;
-}
 
-const char *bs_tier_name(bs_tier t)
-{
-    switch (t) {
-        case BS_TIER_PASS:    return "pass";
-        case BS_TIER_SILENT:  return "silent";
-        case BS_TIER_HARD:    return "form";
-        case BS_TIER_CAPTCHA: return "captcha";
-    }
-    return "?";
-}
+
+
 
 static const command_rec bs_cmds[] = {
     AP_INIT_FLAG("BotShieldEnabled",    bs_set_enabled,    NULL,
@@ -673,7 +257,7 @@ static const command_rec bs_cmds[] = {
                  "Worker and POST the result back to "
                  "/botshield/embedded-verify. The verified cookie "
                  "may not arrive in time for the very first request, "
-                 "but it lands within a few page-views — see PLAN "
+                 "but it lands within a few page-views — see CHANGELOG "
                  "E17 for the timing model."),
     AP_INIT_TAKE1("BotShieldForgivenessSilent", bs_set_forgive_silent, NULL,
                  RSRC_CONF | ACCESS_CONF,
@@ -1287,7 +871,7 @@ static int bs_handler(request_rec *r)
     int cookie_had_val = (cookie_val && *cookie_val);
     if (cookie_had_val) {
         cookie_verify_reason = bs_verify_cookie(r, cfg, cookie_val, &prior_ch);
-        /* MEDIUM #1: render-side carry-forward must reject the same
+        /* : render-side carry-forward must reject the same
          * cverrs the issuance-side carry-forward rejects, otherwise
          * an expired cookie's rep can be transplanted via the
          * interstitial-render path (next_rep is baked into the
@@ -1317,7 +901,7 @@ static int bs_handler(request_rec *r)
                 }
             }
         } else {
-            /* Security review LOW #2 — log the cookie name actually
+            /* Log the cookie name actually
              * present so a sed-renamed test can grep for the right
              * literal. The dual-name helper hides which variant was
              * found; rediscover here for the log line only. */
@@ -1568,7 +1152,7 @@ static int bs_handler(request_rec *r)
     /* E17 — silent-tier dispatch with embedded mode. Default behavior:
      * skip the M7 interstitial, serve the real page (DECLINED), let
      * the wrapper handle verification in the background. Timing model:
-     * "kicks in eventually" — see PLAN E17.
+     * "kicks in eventually" — see CHANGELOG E17.
      *
      * E17 fallback: if this client has had N consecutive silent-tier
      * dispatches without _bs_verified arriving (count tracked via
@@ -1643,9 +1227,9 @@ static int bs_handler(request_rec *r)
         if (new_score < 0) new_score = 0;
         next_rep.score = new_score;
         if (prior_ch.auto_tier) {
-            next_rep.passes_silent = 1;  /* LOW #7 clamp */
+            next_rep.passes_silent = 1;  /* clamp */
         } else {
-            next_rep.passes_form = 1;  /* LOW #7 clamp */
+            next_rep.passes_form = 1;  /* clamp */
         }
     } else {
         next_rep.score          = 0;

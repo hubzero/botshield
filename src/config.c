@@ -407,7 +407,7 @@ void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     out->help_html      = add->help_html      ? add->help_html      : base->help_html;
     out->challenge_html = add->challenge_html ? add->challenge_html : base->challenge_html;
     out->algorithm      = add->algorithm      ? add->algorithm      : base->algorithm;
-    /* LOW #3 — derived per-purpose keys ride alongside the master.
+    /* derived per-purpose keys ride alongside the master.
      * If add has its own master secret, take its derived keys too;
      * otherwise inherit base's. */
     if (add->secret) {
@@ -579,7 +579,7 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
      * then the real one). Skip the first pass so we don't create the
      * SHM segment and then immediately discard it.
      *
-     * Security review LOW #11 — the userdata key lives on
+     *  the userdata key lives on
      * s->process->pool, which survives `apachectl graceful`. On
      * graceful, the previous boot's userdata is still set, so the
      * FIRST post_config call after graceful runs init directly
@@ -763,7 +763,7 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                                : (apr_size_t)BS_DEFAULT_SAFEGUARD_SLOTS;
     apr_size_t safeguard_bytes = safeguard_slots
                                * sizeof(bs_safeguard_slot);
-    /* MEDIUM #2 (Phase 2) — nonce table. */
+    /* (Phase 2) — nonce table. */
     apr_size_t nonce_slots = (scfg->nonce_capacity > 0)
                            ? (apr_size_t)scfg->nonce_capacity
                            : (apr_size_t)BS_DEFAULT_NONCE_SLOTS;
@@ -806,7 +806,7 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
         bs_state_save(ptemp, s, scfg->state_file, &old_rt);
     }
 
-    /* Security review HIGH #4 — snapshot bs_shm before any failable
+    /* Snapshot bs_shm before any failable
      * step that mutates the global. If RAND_bytes /
      * apr_global_mutex_create / ap_unixd_set_global_mutex_perms
      * fail, the new pconf gets destroyed by APR (which frees the
@@ -885,7 +885,7 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     bs_shm.safeguard_table = (bs_safeguard_slot *)
         ((unsigned char *)bs_shm.strike_table + strike_bytes);
     bs_shm.safeguard_capacity = safeguard_slots;
-    /* MEDIUM #2 (Phase 2): nonce table follows safeguard. memset(base,0)
+    /* (Phase 2): nonce table follows safeguard. memset(base,0)
      * leaves every expires_at == 0 (empty sentinel) — no explicit
      * zero pass needed. */
     bs_shm.nonce_table = (bs_nonce_slot *)
@@ -974,7 +974,7 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                 if (wrv == APR_SUCCESS && wd) {
                     apr_interval_time_t ival =
                         apr_time_from_sec(scfg->state_save_interval);
-                    wrv = fn_reg(wd, ival, ctx, bs_watchdog_save_cb);
+                    wrv = fn_reg(wd, ival, ctx, bs_state_save_watchdog_cb);
                 } else if (wrv == APR_SUCCESS) {
                     /* Docs say fn_get returns success + valid ptr or
                      * an error code, but be defensive. */
@@ -1672,7 +1672,7 @@ const char *bs_set_shm_size(cmd_parms *cmd, void *dconf, const char *arg)
         return apr_psprintf(cmd->pool,
             "BotShieldShmSize: unknown suffix '%c'", *end);
     }
-    /* Guard the suffix multiply (security review #2). The explicit
+    /* Guard the suffix multiply. The explicit
      * max below (256 MiB) is the real gate, but catching an overflow
      * BEFORE the compare keeps signed-arithmetic UB off the table —
      * n * mult could wrap negative on pathological input and sneak
@@ -1710,7 +1710,7 @@ const char *bs_set_flagged_capacity(cmd_parms *cmd, void *dconf,
 /* Accept ".example.com" (leading dot for cross-subdomain) or "example.com"
  * (host-only). Empty string clears the directive, reverting to host-only.
  *
- * Security review #3: the value is embedded into both the Set-Cookie
+ * the value is embedded into both the Set-Cookie
  * header and (via bs_challenge_json) inline JSON in the interstitial
  * script. The previous check only rejected whitespace + semicolons,
  * which would have let quotes/backslashes through and given a
@@ -1817,7 +1817,7 @@ const char *bs_load_config_file(cmd_parms *cmd,
 }
 
 
-/* Security review HIGH #2 — validate a binary-capable secret loaded via
+/* Validate a binary-capable secret loaded via
  * bs_load_config_file. Trims one trailing newline (common with
  * `echo`-style key generation), rejects embedded NUL bytes (would
  * silently truncate keys generated with `dd if=/dev/urandom` or
@@ -2134,8 +2134,8 @@ const char *bs_set_rate_limit_escalate(cmd_parms *cmd, void *dconf,
     e->rule_name   = apr_pstrdup(cmd->pool, rule_name);
     e->strikes     = (apr_uint32_t)strikes;
     e->per_sec     = (apr_uint32_t)per;
-    e->status_code = 403;       /* default per PLAN.md E9 */
-    e->ttl_sec     = 1800;      /* default per PLAN.md E9 */
+    e->status_code = 403;       /* default per CHANGELOG.md E9 */
+    e->ttl_sec     = 1800;      /* default per CHANGELOG.md E9 */
     e->log_tag     = NULL;
 
     for (int i = 3; i < argc; i++) {
@@ -2328,7 +2328,7 @@ const char *bs_set_safeguard_capacity(cmd_parms *cmd,
     return NULL;
 }
 
-/* MEDIUM #2 (Phase 2) — BotShieldEmbeddedNonceCapacity <n>. SHM
+/* (Phase 2) — BotShieldEmbeddedNonceCapacity <n>. SHM
  * slot count for the embedded-bootstrap nonce table. Sized to
  * comfortably hold all in-flight bootstrap challenges within their
  * 120-second expiry window: at 100 bootstraps/sec sustained that's

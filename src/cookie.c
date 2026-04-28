@@ -92,25 +92,12 @@ apr_table_t *bs_parse_cookies_once(request_rec *r)
     return map;
 }
 
-/* --- Cookie extraction ---
- *
- * Find the value of a named cookie in the request's Cookie header, at a
- * name-boundary (so e.g. `other_bs_verified=` won't shadow `_bs_verified=`).
- * Returns a pool-allocated copy of the value with trailing whitespace
- * trimmed, or NULL if the cookie isn't present. The value itself is not
- * validated here — callers decode and verify. */
-/* Security review HIGH #3 — was strstr + leading-byte-boundary
- * check, which had two issues vs RFC 6265:
- *   1. Tolerated a bare-space separator ("a=1 b=2") as if it
- *      were "; "; RFC requires the semicolon.
- *   2. The substring search could fall into surprising matches
- *      with a name that's a substring of another (defended via
- *      the boundary check, but the logic was duplicated only
- *      here while bs_parse_cookies_once already had the right
- *      tokenizer).
- * Now both cookie consumers route through the same tokenizer.
- * bs_parse_cookies_once memoizes its result in r->notes, so
- * the per-request cost stays a single parse. */
+/* Find the value of a named cookie in the request's Cookie header.
+ * Returns NULL if the cookie isn't present. The value isn't validated
+ * here — callers decode and verify. Routes through the
+ * bs_parse_cookies_once tokenizer (RFC 6265 separator handling, name-
+ * boundary correctness) and benefits from its r->notes memoization
+ * so per-request cost stays a single parse. */
 const char *bs_get_cookie_value(request_rec *r, const char *name)
 {
     apr_table_t *map = bs_parse_cookies_once(r);
@@ -118,7 +105,7 @@ const char *bs_get_cookie_value(request_rec *r, const char *name)
     return apr_table_get(map, name);
 }
 
-/* Security review LOW #2 — verified-cookie lookup that prefers
+/* Verified-cookie lookup that prefers
  * `__Host-bs_verified` and falls back to legacy `_bs_verified`.
  * Both can be valid in some operator setups: HTTPS-only deployment
  * always sees the prefixed variant; a Domain-configured (cross-
@@ -149,7 +136,7 @@ const char *bs_build_cookie_prefix_gcm(apr_pool_t *p,
     apr_size_t env_cap = 1 + BS_GCM_NONCE_LEN + pt_len + BS_GCM_TAG_LEN;
     unsigned char *env = apr_palloc(p, env_cap);
     apr_size_t env_len = 0;
-    /* LOW #3 — derived GCM key, not raw secret. */
+    /* derived GCM key, not raw secret. */
     const char *err = bs_gcm_encrypt(cfg->derived_gcm_cookie,
                                      (const unsigned char *)canon, pt_len,
                                      env, &env_len);
@@ -203,7 +190,7 @@ const char *bs_build_set_cookie(request_rec *r, const bs_dir_cfg *cfg,
     if (has_domain) {
         domain = apr_psprintf(r->pool, "; Domain=%s", cfg->cookie_domain);
     }
-    /* Security review LOW #2 — emit __Host-bs_verified when the
+    /* Emit __Host-bs_verified when the
      * RFC 6265bis preconditions hold (HTTPS + no Domain). Browsers
      * reject the prefix when those invariants fail, so we only use
      * it where we can. Operators on plain HTTP or with a configured
@@ -211,10 +198,10 @@ const char *bs_build_set_cookie(request_rec *r, const bs_dir_cfg *cfg,
      * name; the verify path checks both. */
     const char *name = (is_https && !has_domain)
         ? BS_COOKIE_NAME_HOST : BS_COOKIE_NAME;
-    /* Security review LOW #1 — HttpOnly closes XSS-stealing-the-
+    /*  HttpOnly closes XSS-stealing-the-
      * cookie. The M1 widget JS used to set this cookie via
      * document.cookie (which required JS-readability), but that
-     * was refactored to a server-mint via /botshield/embedded-verify
+     * WAS refactored to a server-mint via /botshield/embedded-verify
      * so HttpOnly is now compatible with the issue path. */
     return apr_psprintf(r->pool,
         "%s=%s; Path=/; Expires=%s%s%s; SameSite=Lax; HttpOnly",
@@ -261,7 +248,7 @@ const char *bs_install_verified_cookie(request_rec *r,
  * carry forgiveness-window state. The version check rejects v1
  * cookies before we read the new fields, so a malformed v1 won't
  * misalign reads. */
-/* Security review INFO #1 — strict surface-form check for the
+/* Strict surface-form check for the
  * cookie's canonical integer fields. The lenient bs_parse_int_bounded
  * (used elsewhere for directive parsing where operators write loose
  * input) accepts strtol's full grammar: leading whitespace, optional
@@ -303,7 +290,7 @@ static const char *bs_parse_canonical_fields(char *const fields[],
 {
     long v;
     apr_int64_t v64;
-    /* Strict surface-form gate (INFO #1). Score is the only signed
+    /* Strict surface-form gate. Score is the only signed
      * field; everything else is non-negative. */
     static const struct {
         int idx;
@@ -397,7 +384,7 @@ const char *bs_verify_cookie_gcm(request_rec *r,
      * fails the tag check and bs_gcm_decrypt returns an error
      * without leaking plaintext. The retry is safe and the success
      * path is unchanged. */
-    /* LOW #3 — derived GCM keys, primary then secondary. */
+    /* derived GCM keys, primary then secondary. */
     const char *derr = bs_gcm_decrypt(cfg->derived_gcm_cookie,
                                       env, (apr_size_t)env_len,
                                       pt, &pt_len);
@@ -469,7 +456,7 @@ const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
  *
  * Reject when:
  *   - cverr == "signature mismatch"  (rep bytes can't be trusted)
- *   - cverr == "expired"  ── Security review MEDIUM #1: TTL is the
+ *   - cverr == "expired"  ── : TTL is the
  *     only mechanism preventing indefinite reputation transfer
  *     across cookie generations. A leaked or stolen cookie that has
  *     aged past TTL must NOT be allowed to transplant good-standing
@@ -489,7 +476,7 @@ const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
  * side helper (bs_carry_forward_eligible) and the render-side
  * predicate in bs_handler share this single source of truth so a
  * change to the rule only has to land here. The original review
- * (MEDIUM #1) was a four-site fix that the issuance-side
+ * WAS a four-site fix that the issuance-side
  * consolidation collapsed to one site; reusing this predicate from
  * bs_handler closes the same drift gap on the render side. */
 int bs_should_carry_prior_rep(const char *cverr,
@@ -497,7 +484,7 @@ int bs_should_carry_prior_rep(const char *cverr,
 {
     if (cverr == NULL) return 1;
     if (strcmp(cverr, "signature mismatch") == 0) return 0;
-    if (strcmp(cverr, "expired") == 0) return 0;          /* MEDIUM #1 */
+    if (strcmp(cverr, "expired") == 0) return 0;          /* */
     return prior_ch->alg_name ? 1 : 0;
 }
 
@@ -531,7 +518,7 @@ int bs_carry_forward_eligible(request_rec *r,
  *   - compute new score = prior.score - forgive, clamped against
  *     the flag-penalty floor and zero
  *
- * The caller bumps the appropriate passes_X afterward (the LOW #7
+ * The caller bumps the appropriate passes_X afterward (the 
  * "ever passed" clamp). Tier knowledge for that decision also stays
  * at the call site. */
 void bs_apply_rep_carry(request_rec *r,

@@ -72,7 +72,7 @@ const char *bs_challenge_json(request_rec *r, apr_pool_t *p,
                               const bs_dir_cfg *cfg,
                               const bs_challenge *ch);
 
-/* MEDIUM #2 bootstrap-binding helpers — bind the silent-tier
+/* bootstrap-binding helpers — bind the silent-tier
  * embedded-bootstrap to the originating client IP via an HMAC over
  * (nonce, bound_ip_hex, expires_at). Issued at bootstrap time,
  * verified at /embedded-verify time. */

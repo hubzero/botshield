@@ -19,7 +19,7 @@
 # Covers the three providers that publish clean JSON ranges:
 # Googlebot, Bingbot, Applebot. Providers that only publish via
 # PTR + forward-confirm (Yandex, DuckDuck, Facebook, LinkedIn,
-# Twitter) are out of scope by design — see PLAN.md E1 for the
+# Twitter) are out of scope by design — see CHANGELOG.md E1 for the
 # reasoning.
 
 set -u

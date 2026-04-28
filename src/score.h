@@ -63,6 +63,18 @@ int bs_apply_flag_triggers(request_rec *r,
                            apr_uint32_t all_flags,
                            bs_tier *out_tier_floor);
 
+/* Score-to-tier picker. Three configurable cut-points
+ * (BotShieldScoreSilent / Hard / Captcha) gate four tiers
+ * (pass / silent / form / captcha). The README "Understanding
+ * scoring" section covers operator tuning; templates.h documents
+ * the per-tier interstitial rendering. */
+bs_tier bs_decide_tier(const bs_dir_cfg *cfg, int score);
+
+/* Tier-name string for the decision log + claims-bridge wire
+ * format. Returns "pass" / "silent" / "form" / "captcha", or "?"
+ * for an unknown enum value. */
+const char *bs_tier_name(bs_tier t);
+
 #ifdef __cplusplus
 }
 #endif
