@@ -97,6 +97,16 @@ extern "C" {
 #define BS_CK_STATE_MISSING   "missing"
 #define BS_CK_STATE_INVALID   "invalid"
 
+/* Help visibility modes (values are stored in bs_dir_cfg.help_mode).
+ * Used by the help/help-file directive setters in config.c and by
+ * the splash-page renderer in botshield.c. */
+enum bs_help_mode {
+    BS_HELP_OFF    = 0,
+    BS_HELP_ON     = 1,
+    BS_HELP_BUTTON = 2,
+};
+#define BS_DEFAULT_HELP_MODE BS_HELP_BUTTON
+
 /* --- Flag-bit registry ----------------------------------------
  *
  * Each bit represents a *serious* event we want to remember about
@@ -771,6 +781,15 @@ bs_request_score *bs_get_score(request_rec *r, int create);
  * and bridge.c. */
 void bs_score_add(request_rec *r, int penalty, int ttl_seconds,
                   const char *reason);
+
+/* Apply the per-cookie forgiveness cap. Modifies *consumed and
+ * *window_start in place; returns the points actually granted.
+ * Window rolls if more than BS_FORGIVE_WINDOW_SEC has passed since
+ * window_start. Defined in config.c next to bs_set_forgive_cap. */
+int bs_forgiveness_apply_cap(int requested, int cap,
+                             apr_uint32_t now_sec,
+                             apr_uint32_t *window_start,
+                             apr_uint32_t *consumed);
 
 const char *bs_decision_reason_names(apr_pool_t *p,
                                      const bs_request_score *s);

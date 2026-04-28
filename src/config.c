@@ -16,6 +16,8 @@
  * here. */
 #include <string.h>
 #include <stdlib.h>
+#include <ctype.h>
+#include <sys/stat.h>
 
 #include <httpd.h>
 #include <http_config.h>
@@ -1490,4 +1492,1093 @@ void bs_child_init(apr_pool_t *p, server_rec *s)
         ap_log_error(APLOG_MARK, APLOG_ERR, rv, s,
             "mod_botshield: global_mutex_child_init failed");
     }
+}
+
+/* --- Directive setters --- *
+ *
+ * The remaining ~40 setters that don't have a feature home: top-
+ * level / UI, score thresholds, SHM sizing, rate-limit family,
+ * state-save, endpoint-prefix, plus the four config-time helpers
+ * (bs_load_config_file / bs_validate_secret_key / bs_cohort_resolve
+ * / bs_warn_if_virtual_scope) reused by feature-file setters via
+ * cross-file decls in botshield.h. */
+
+/* --- Directive setters --- */
+
+const char *bs_set_enabled(cmd_parms *cmd, void *cfg_v, int flag)
+{
+    (void)cmd;
+    ((bs_dir_cfg *)cfg_v)->enabled = flag ? 1 : 0;
+    return NULL;
+}
+
+const char *bs_set_debug(cmd_parms *cmd, void *cfg_v, int flag)
+{
+    (void)cmd;
+    ((bs_dir_cfg *)cfg_v)->debug = flag ? 1 : 0;
+    return NULL;
+}
+
+const char *bs_set_show_logo(cmd_parms *cmd, void *cfg_v, int flag)
+{
+    (void)cmd;
+    ((bs_dir_cfg *)cfg_v)->show_logo = flag ? 1 : 0;
+    return NULL;
+}
+
+const char *bs_set_show_label(cmd_parms *cmd, void *cfg_v, int flag)
+{
+    (void)cmd;
+    ((bs_dir_cfg *)cfg_v)->show_label = flag ? 1 : 0;
+    return NULL;
+}
+
+const char *bs_set_show_box(cmd_parms *cmd, void *cfg_v, int flag)
+{
+    (void)cmd;
+    ((bs_dir_cfg *)cfg_v)->show_box = flag ? 1 : 0;
+    return NULL;
+}
+
+const char *bs_set_cookie_ttl(cmd_parms *cmd, void *cfg_v, const char *arg)
+{
+    (void)cmd;
+    /* Strict parse — reject "60sec" and overflow, not just silently
+     * truncate via atoi(). Review finding #2. */
+    long n;
+    if (!bs_parse_int_bounded(arg, 1, 86400, 6, &n)) {
+        return "BotShieldCookieTTL: must be an integer 1..86400 (seconds)";
+    }
+    ((bs_dir_cfg *)cfg_v)->cookie_ttl = (int)n;
+    return NULL;
+}
+
+const char *bs_set_difficulty(cmd_parms *cmd, void *cfg_v, const char *arg)
+{
+    (void)cmd;
+    long n;
+    if (!bs_parse_int_bounded(arg, 1, 8, 2, &n)) {
+        return "BotShieldDifficulty: must be an integer 1..8";
+    }
+    ((bs_dir_cfg *)cfg_v)->difficulty = (int)n;
+    return NULL;
+}
+
+static const char *bs_set_score_int(const char *directive, int *slot,
+                                    const char *arg, apr_pool_t *p)
+{
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (end == arg || *end != '\0' || n < 0 || n > 10000) {
+        return apr_psprintf(p,
+            "%s: expected an integer in 0..10000, got '%s'", directive, arg);
+    }
+    *slot = (int)n;
+    return NULL;
+}
+
+const char *bs_set_score_silent(cmd_parms *cmd, void *cfg_v, const char *arg)
+{
+    return bs_set_score_int("BotShieldScoreSilent",
+        &((bs_dir_cfg *)cfg_v)->score_silent, arg, cmd->pool);
+}
+
+const char *bs_set_score_hard(cmd_parms *cmd, void *cfg_v, const char *arg)
+{
+    return bs_set_score_int("BotShieldScoreHard",
+        &((bs_dir_cfg *)cfg_v)->score_hard, arg, cmd->pool);
+}
+
+const char *bs_set_score_captcha(cmd_parms *cmd, void *cfg_v, const char *arg)
+{
+    return bs_set_score_int("BotShieldScoreCaptcha",
+        &((bs_dir_cfg *)cfg_v)->score_captcha, arg, cmd->pool);
+}
+
+const char *bs_set_forgive_silent(cmd_parms *cmd, void *cfg_v, const char *arg)
+{
+    return bs_set_score_int("BotShieldForgivenessSilent",
+        &((bs_dir_cfg *)cfg_v)->forgive_silent, arg, cmd->pool);
+}
+
+const char *bs_set_forgive_form(cmd_parms *cmd, void *cfg_v, const char *arg)
+{
+    return bs_set_score_int("BotShieldForgivenessForm",
+        &((bs_dir_cfg *)cfg_v)->forgive_form, arg, cmd->pool);
+}
+
+const char *bs_set_forgive_captcha(cmd_parms *cmd, void *cfg_v, const char *arg)
+{
+    return bs_set_score_int("BotShieldForgivenessCaptcha",
+        &((bs_dir_cfg *)cfg_v)->forgive_captcha, arg, cmd->pool);
+}
+
+
+/* E18 — `BotShieldFormCaptcha on|off`. Per-scope opt-in for inline
+ * form captcha verification on POST submit. When on, BotShield
+ * inspects the request body for the configured captcha provider's
+ * response field, siteverifies via the existing M8 client, mints
+ * _bs_verified on success, and replays the body back via input
+ * filter so the downstream app handler still sees its original
+ * POST. Supports application/x-www-form-urlencoded and
+ * application/json. multipart/form-data (file uploads) is out of
+ * scope — operators with file-upload forms put the captcha on a
+ * separate non-upload form. */
+const char *bs_set_form_captcha(cmd_parms *cmd, void *cfg_v, int flag)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    cfg->form_captcha = flag ? 1 : 0;
+    return NULL;
+}
+
+/* E13 — log a NOTICE if an SHM-sizing directive is placed inside
+ * <VirtualHost>. The single SHM segment is sized once at post_config
+ * from the main server's scfg; per-vhost values for capacity directives
+ * are silently ignored. The footgun was hard to spot in operator
+ * configs — surface it explicitly so they don't think their override
+ * took effect. */
+void bs_warn_if_virtual_scope(cmd_parms *cmd, const char *name)
+{
+    if (cmd->server && cmd->server->is_virtual) {
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, cmd->server,
+            "mod_botshield: %s placed inside <VirtualHost> at %s:%d "
+            "is ignored — SHM is sized once from the main server "
+            "scope. Move this directive outside <VirtualHost>.",
+            name,
+            cmd->directive && cmd->directive->filename
+                ? cmd->directive->filename : "(unknown)",
+            cmd->directive ? cmd->directive->line_num : 0);
+    }
+}
+
+const char *bs_set_shm_size(cmd_parms *cmd, void *dconf, const char *arg)
+{
+    bs_warn_if_virtual_scope(cmd, "BotShieldShmSize");
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    /* Accept "N", "NK", "NM", "NG" (case-insensitive). */
+    errno = 0;
+    char *end = NULL;
+    apr_int64_t n = apr_strtoi64(arg, &end, 10);
+    if (errno != 0 || end == arg || n <= 0) {
+        return "BotShieldShmSize: expected a positive integer byte count";
+    }
+    apr_int64_t mult = 1;
+    if      (*end == 'K' || *end == 'k') mult = 1024;
+    else if (*end == 'M' || *end == 'm') mult = 1024 * 1024;
+    else if (*end == 'G' || *end == 'g') mult = 1024 * 1024 * 1024;
+    else if (*end != '\0') {
+        return apr_psprintf(cmd->pool,
+            "BotShieldShmSize: unknown suffix '%c'", *end);
+    }
+    /* Guard the suffix multiply (security review #2). The explicit
+     * max below (256 MiB) is the real gate, but catching an overflow
+     * BEFORE the compare keeps signed-arithmetic UB off the table —
+     * n * mult could wrap negative on pathological input and sneak
+     * past the `bytes < 128K` check. */
+    if (n > (256LL * 1024 * 1024) / mult) {
+        return "BotShieldShmSize: value too large (overflows size_t)";
+    }
+    apr_int64_t bytes = n * mult;
+    if (bytes < 128 * 1024 || bytes > (256LL * 1024 * 1024)) {
+        return "BotShieldShmSize: must be between 128K and 256M";
+    }
+    scfg->shm_size = (apr_size_t)bytes;
+    return NULL;
+}
+
+const char *bs_set_flagged_capacity(cmd_parms *cmd, void *dconf,
+                                           const char *arg)
+{
+    (void)dconf;
+    bs_warn_if_virtual_scope(cmd, "BotShieldFlaggedIPCapacity");
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    long n;
+    if (!bs_parse_int_bounded(arg, BS_FLAGGED_MIN_SLOTS,
+                              BS_FLAGGED_MAX_SLOTS, 10, &n)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldFlaggedIPCapacity: must be an integer %d..%d",
+            BS_FLAGGED_MIN_SLOTS, BS_FLAGGED_MAX_SLOTS);
+    }
+    scfg->flagged_capacity = (int)n;
+    return NULL;
+}
+
+
+/* Accept ".example.com" (leading dot for cross-subdomain) or "example.com"
+ * (host-only). Empty string clears the directive, reverting to host-only.
+ *
+ * Security review #3: the value is embedded into both the Set-Cookie
+ * header and (via bs_challenge_json) inline JSON in the interstitial
+ * script. The previous check only rejected whitespace + semicolons,
+ * which would have let quotes/backslashes through and given a
+ * config-time script-injection footgun to any templating system
+ * that ever hands this directive a non-human-typed value. Tighten
+ * to DNS hostname charset only: [a-zA-Z0-9.-], max 253 chars per
+ * RFC 1035. Leading dot permitted (cookie-domain convention). */
+const char *bs_set_cookie_domain(cmd_parms *cmd, void *cfg_v, const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    if (!arg) return "BotShieldCookieDomain requires an argument";
+    if (!*arg) { cfg->cookie_domain = NULL; return NULL; }
+
+    apr_size_t len = strlen(arg);
+    if (len > 253) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCookieDomain: '%s' exceeds 253-char RFC 1035 limit",
+            arg);
+    }
+    /* First char may be '.' (leading-dot domain) or an alphanumeric. */
+    for (apr_size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)arg[i];
+        int ok = isalnum(c) || c == '.' || c == '-';
+        if (!ok) {
+            return apr_psprintf(cmd->pool,
+                "BotShieldCookieDomain: '%s' contains a character "
+                "outside [a-zA-Z0-9.-] — hostnames only", arg);
+        }
+    }
+    cfg->cookie_domain = apr_pstrdup(cmd->pool, arg);
+    return NULL;
+}
+
+const char *bs_set_prompt(cmd_parms *cmd, void *cfg_v, const char *arg)
+{
+    (void)cmd;
+    if (!arg || !*arg) return "BotShieldPromptText cannot be empty";
+    ((bs_dir_cfg *)cfg_v)->prompt = arg;
+    return NULL;
+}
+
+const char *bs_set_logo_label(cmd_parms *cmd, void *cfg_v, const char *arg)
+{
+    (void)cmd;
+    ((bs_dir_cfg *)cfg_v)->logo_label = arg ? arg : "";
+    return NULL;
+}
+
+/* Slurp a file at config-parse time and hand back its bytes allocated out
+ * of the config pool. Size-capped so a misbehaving config can't blow up
+ * Apache startup. Returns an error string on failure, NULL on success. */
+/* Loads up to max_bytes from path into a pool-allocated buffer.
+ * The buffer is always NUL-terminated at byte n (one extra byte
+ * past the file content). When out_len is non-NULL, it receives
+ * the actual byte count read — callers handling binary content
+ * (HMAC keys) MUST use this rather than strlen(out_content) since
+ * binary keys can legitimately contain embedded NULs that
+ * strlen would silently truncate at. Callers handling text
+ * content (logo/help/challenge files) can pass NULL. */
+const char *bs_load_config_file(cmd_parms *cmd,
+                                       const char *directive,
+                                       const char *path,
+                                       apr_size_t max_bytes,
+                                       const char **out_content,
+                                       apr_size_t *out_len)
+{
+    apr_file_t *f = NULL;
+    apr_status_t rv;
+    apr_finfo_t info;
+
+    rv = apr_file_open(&f, path, APR_FOPEN_READ | APR_FOPEN_BINARY,
+                       APR_OS_DEFAULT, cmd->pool);
+    if (rv != APR_SUCCESS) {
+        char errbuf[256];
+        apr_strerror(rv, errbuf, sizeof(errbuf));
+        return apr_psprintf(cmd->pool,
+            "%s: cannot open '%s': %s", directive, path, errbuf);
+    }
+    rv = apr_file_info_get(&info, APR_FINFO_SIZE, f);
+    if (rv != APR_SUCCESS) {
+        apr_file_close(f);
+        return apr_psprintf(cmd->pool,
+            "%s: cannot stat '%s'", directive, path);
+    }
+    if (info.size <= 0 || (apr_size_t)info.size > max_bytes) {
+        apr_file_close(f);
+        return apr_psprintf(cmd->pool,
+            "%s: '%s' size %" APR_OFF_T_FMT
+            " is outside 1..%" APR_SIZE_T_FMT " bytes",
+            directive, path, info.size, max_bytes);
+    }
+    char *buf = apr_palloc(cmd->pool, (apr_size_t)info.size + 1);
+    apr_size_t n = (apr_size_t)info.size;
+    rv = apr_file_read(f, buf, &n);
+    apr_file_close(f);
+    if (rv != APR_SUCCESS) {
+        return apr_psprintf(cmd->pool,
+            "%s: read error on '%s'", directive, path);
+    }
+    buf[n] = '\0';
+    *out_content = buf;
+    if (out_len) *out_len = n;
+    return NULL;
+}
+
+
+/* Security review HIGH #2 — validate a binary-capable secret loaded via
+ * bs_load_config_file. Trims one trailing newline (common with
+ * `echo`-style key generation), rejects embedded NUL bytes (would
+ * silently truncate keys generated with `dd if=/dev/urandom` or
+ * similar — P(NUL in N random bytes) = 1 − (255/256)^N, ≈12% for
+ * 32-byte keys and ≈22% for 64-byte keys), and enforces the
+ * minimum-bytes floor. Returns NULL on success with *out_len set
+ * to the effective key length, or an error string. */
+const char *bs_validate_secret_key(cmd_parms *cmd,
+                                          const char *directive,
+                                          const char *path,
+                                          const char *buf,
+                                          apr_size_t buf_len,
+                                          apr_size_t *out_len)
+{
+    apr_size_t len = buf_len;
+    if (len > 0 && buf[len-1] == '\n') len--;
+    if (memchr(buf, '\0', len) != NULL) {
+        return apr_psprintf(cmd->pool,
+            "%s: '%s' contains an embedded NUL byte. Random binary "
+            "key files (e.g. `dd if=/dev/urandom` or `openssl rand`) "
+            "hit a NUL with probability 1 − (255/256)^N — about 12%% "
+            "for 32-byte keys, 22%% for 64-byte keys. Earlier versions "
+            "of this loader silently truncated at the first NUL via "
+            "strlen, yielding a shorter, weaker effective key with no "
+            "log warning. Generate the key with hex "
+            "(`openssl rand -hex 32`) or base64 "
+            "(`openssl rand -base64 48`) encoding instead, or "
+            "pre-strip NULs.",
+            directive, path);
+    }
+    if (len < BS_MIN_SECRET_BYTES) {
+        return apr_psprintf(cmd->pool,
+            "%s: '%s' contains only %" APR_SIZE_T_FMT
+            " bytes (minimum %d)",
+            directive, path, len, BS_MIN_SECRET_BYTES);
+    }
+    *out_len = len;
+    return NULL;
+}
+
+const char *bs_set_logo_file(cmd_parms *cmd, void *cfg_v, const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    return bs_load_config_file(cmd, "BotShieldLogoFile", arg,
+                               BS_MAX_LOGO_BYTES, &cfg->logo_svg, NULL);
+}
+
+const char *bs_set_help(cmd_parms *cmd, void *cfg_v, const char *arg)
+{
+    (void)cmd;
+    bs_dir_cfg *cfg = cfg_v;
+    if (strcasecmp(arg, "off") == 0)         cfg->help_mode = BS_HELP_OFF;
+    else if (strcasecmp(arg, "on") == 0)     cfg->help_mode = BS_HELP_ON;
+    else if (strcasecmp(arg, "button") == 0) cfg->help_mode = BS_HELP_BUTTON;
+    else return "BotShieldHelp must be one of: off, on, button";
+    return NULL;
+}
+
+const char *bs_set_help_file(cmd_parms *cmd, void *cfg_v, const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    return bs_load_config_file(cmd, "BotShieldHelpFile", arg,
+                               BS_MAX_HELP_BYTES, &cfg->help_html, NULL);
+}
+
+const char *bs_set_challenge_file(cmd_parms *cmd, void *cfg_v, const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    const char *err = bs_load_config_file(cmd, "BotShieldChallengeFile", arg,
+                                          BS_MAX_PAGE_BYTES, &cfg->challenge_html, NULL);
+    if (err) return err;
+    if (!strstr(cfg->challenge_html, BS_WIDGET_MARKER)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldChallengeFile: '%s' contains no '%s' marker where the "
+            "verification widget should be inserted", arg, BS_WIDGET_MARKER);
+    }
+    return NULL;
+}
+
+const char *bs_set_bloom_ips(cmd_parms *cmd, void *dconf,
+                                    const char *arg)
+{
+    (void)dconf;
+    bs_warn_if_virtual_scope(cmd, "BotShieldBloomIPs");
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    long n;
+    if (!bs_parse_int_bounded(arg, BS_BLOOM_MIN_IPS,
+                              BS_BLOOM_MAX_IPS, 12, &n)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldBloomIPs: must be an integer %d..%d",
+            BS_BLOOM_MIN_IPS, BS_BLOOM_MAX_IPS);
+    }
+    scfg->bloom_ips = (int)n;
+    return NULL;
+}
+
+const char *bs_set_bloom_window(cmd_parms *cmd, void *dconf,
+                                       const char *arg)
+{
+    (void)dconf;
+    bs_warn_if_virtual_scope(cmd, "BotShieldBloomWindow");
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    long n;
+    if (!bs_parse_int_bounded(arg, BS_BLOOM_MIN_WINDOW,
+                              BS_BLOOM_MAX_WINDOW, 10, &n)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldBloomWindow: must be an integer %d..%d (seconds)",
+            BS_BLOOM_MIN_WINDOW, BS_BLOOM_MAX_WINDOW);
+    }
+    scfg->bloom_window_secs = (int)n;
+    return NULL;
+}
+
+const char *bs_set_ipv6_prefix(cmd_parms *cmd, void *dconf,
+                                      const char *arg)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (end == arg || *end != '\0' || n < 0 || n > 128) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldIPv6PrefixLen: expected an integer 0..128, got '%s'",
+            arg);
+    }
+    scfg->ipv6_prefix_bits = (int)n;
+    return NULL;
+}
+const char *bs_set_state_file(cmd_parms *cmd, void *dconf,
+                                     const char *arg)
+{
+    (void)dconf;
+    bs_warn_if_virtual_scope(cmd, "BotShieldStateFile");
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    if (!arg || !*arg) return "BotShieldStateFile requires a path";
+    scfg->state_file = apr_pstrdup(cmd->pool, arg);
+    return NULL;
+}
+
+const char *bs_set_state_save_interval(cmd_parms *cmd, void *dconf,
+                                              const char *arg)
+{
+    (void)dconf;
+    bs_warn_if_virtual_scope(cmd, "BotShieldStateSaveInterval");
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    /* 0 = shutdown-only. Otherwise must be in a sane operational
+     * range. Parse with the full 0..86400 envelope, then enforce
+     * the "no 1..29 values" policy explicitly. */
+    long n;
+    if (!bs_parse_int_bounded(arg, 0, 86400, 6, &n)) {
+        return "BotShieldStateSaveInterval: must be an integer 0..86400 "
+               "(seconds)";
+    }
+    if (n != 0 && n < 30) {
+        return "BotShieldStateSaveInterval: 0 (shutdown-only) or 30..86400 seconds";
+    }
+    scfg->state_save_interval = (int)n;
+    return NULL;
+}
+static int bs_rate_unit_seconds(const char *u)
+{
+    if (!u || !*u) return 0;
+    if (!strcasecmp(u, "sec") || !strcasecmp(u, "s")
+     || !strcasecmp(u, "second") || !strcasecmp(u, "seconds")) return 1;
+    if (!strcasecmp(u, "min") || !strcasecmp(u, "m")
+     || !strcasecmp(u, "minute") || !strcasecmp(u, "minutes")) return 60;
+    if (!strcasecmp(u, "hour") || !strcasecmp(u, "h")
+     || !strcasecmp(u, "hours")) return 3600;
+    return 0;
+}
+
+/* BotShieldRateLimit <name> <budget> <per-unit> <ua> <ipspec> — cohort
+ * rate-limit. Cohort semantics mirror BotShieldAllowBot (UA substring,
+ * polymorphic ipspec, '*' for "any" on either axis). Both-'*' is
+ * rejected because that would rate-limit every request on the server.
+ * Budget + window are stored as-is; SHM slot assignment happens in
+ * post_config.
+ *
+ * Apache doesn't ship AP_INIT_TAKE4/5, so this uses TAKE_ARGV and
+ * enforces argc itself. */
+/* E12 — parse the optional trailing `mode=enforce|observe` argv
+ * token shared by BotShieldRateLimit and BotShieldBlockPath. The
+ * directive grammar is positional (5 args for rate-limit, 4 for
+ * block-path), so this is strict: the token must be the LAST
+ * argument and it must be `mode=...`. Returns the parsed mode in
+ * *out_mode and shrinks *argc by 1 if the token was consumed. */
+static const char *bs_parse_optional_mode(apr_pool_t *p,
+                                          const char *dname,
+                                          int *argc,
+                                          char *const argv[],
+                                          int *out_mode)
+{
+    *out_mode = BS_TMODE_ENFORCE;
+    if (*argc <= 0) return NULL;
+    const char *last = argv[*argc - 1];
+    if (strncmp(last, "mode=", 5) != 0) return NULL;
+    const char *val = last + 5;
+    if (!strcasecmp(val, "enforce")) {
+        *out_mode = BS_TMODE_ENFORCE;
+    } else if (!strcasecmp(val, "observe")) {
+        *out_mode = BS_TMODE_OBSERVE;
+    } else {
+        return apr_psprintf(p,
+            "%s: mode='%s' must be 'enforce' or 'observe'", dname, val);
+    }
+    (*argc)--;
+    return NULL;
+}
+
+const char *bs_set_rate_limit(cmd_parms *cmd, void *dconf,
+                                     int argc, char *const argv[])
+{
+    (void)dconf;
+    /* E12 — strip optional trailing mode= token before counting
+     * positional args. */
+    int mode = BS_TMODE_ENFORCE;
+    {
+        const char *merr = bs_parse_optional_mode(cmd->pool,
+            "BotShieldRateLimit", &argc, argv, &mode);
+        if (merr) return merr;
+    }
+    if (argc != 5) {
+        return "BotShieldRateLimit: expects exactly 5 args — "
+               "<name> <budget> <per> <ua> <ipspec> "
+               "[mode=enforce|observe]";
+    }
+    const char *name     = argv[0];
+    const char *budget_s = argv[1];
+    const char *per_s    = argv[2];
+    const char *ua       = argv[3];
+    const char *ipspec   = argv[4];
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    if (!bs_bot_name_valid(name)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldRateLimit: name '%s' must be [a-z0-9-]{1,32}", name);
+    }
+    char *end = NULL;
+    long budget = strtol(budget_s, &end, 10);
+    if (!end || *end || budget <= 0 || budget > 1000000) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldRateLimit: budget '%s' must be a positive integer "
+            "≤ 1000000", budget_s);
+    }
+    int unit = bs_rate_unit_seconds(per_s);
+    if (unit == 0) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldRateLimit: per '%s' must be one of "
+            "sec/min/hour (or s/m/h)", per_s);
+    }
+
+    bs_rate_limit_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
+    e->name       = apr_pstrdup(cmd->pool, name);
+    e->budget     = (apr_uint32_t)budget;
+    e->window_sec = (apr_uint32_t)unit;
+    e->shm_slot   = -1;
+    e->mode       = mode;   /* E12 */
+    const char *err = bs_cohort_resolve(cmd, &e->cohort, ua, ipspec);
+    if (err) return apr_pstrcat(cmd->pool,
+        "BotShieldRateLimit: ", err, NULL);
+
+    /* Upsert by name — a re-declaration replaces the entry in its
+     * existing slot, preserving declaration order for the surrounding
+     * rules. New names append. */
+    for (int i = 0; i < scfg->rate_limits->nelts; i++) {
+        bs_rate_limit_entry *ex =
+            APR_ARRAY_IDX(scfg->rate_limits, i, bs_rate_limit_entry *);
+        if (strcmp(ex->name, e->name) == 0) {
+            APR_ARRAY_IDX(scfg->rate_limits, i, bs_rate_limit_entry *) = e;
+            return NULL;
+        }
+    }
+    *(bs_rate_limit_entry **)apr_array_push(scfg->rate_limits) = e;
+    return NULL;
+}
+const char *bs_set_rate_limit_escalate(cmd_parms *cmd, void *dconf,
+                                              int argc, char *const argv[])
+{
+    (void)dconf;
+    if (argc < 3) {
+        return "BotShieldRateLimitEscalate: expects <rate-name> "
+               "<strikes> <per> [key=value ...]";
+    }
+    const char *rule_name = argv[0];
+    const char *strikes_s = argv[1];
+    const char *per_s     = argv[2];
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    if (!bs_bot_name_valid(rule_name)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldRateLimitEscalate: rate-name '%s' must be "
+            "[a-z0-9-]{1,32}", rule_name);
+    }
+    char *end = NULL;
+    long strikes = strtol(strikes_s, &end, 10);
+    if (!end || *end || strikes <= 0 || strikes > 1000000) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldRateLimitEscalate: strikes '%s' must be a "
+            "positive integer <= 1000000", strikes_s);
+    }
+    int per = bs_rate_unit_seconds(per_s);
+    if (per == 0) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldRateLimitEscalate: per '%s' must be one of "
+            "sec/min/hour (or s/m/h)", per_s);
+    }
+
+    bs_rate_escalate_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
+    e->rule_name   = apr_pstrdup(cmd->pool, rule_name);
+    e->strikes     = (apr_uint32_t)strikes;
+    e->per_sec     = (apr_uint32_t)per;
+    e->status_code = 403;       /* default per PLAN.md E9 */
+    e->ttl_sec     = 1800;      /* default per PLAN.md E9 */
+    e->log_tag     = NULL;
+
+    for (int i = 3; i < argc; i++) {
+        const char *arg = argv[i];
+        const char *eq  = strchr(arg, '=');
+        if (!eq) {
+            return apr_psprintf(cmd->pool,
+                "BotShieldRateLimitEscalate: extra arg '%s' must be "
+                "key=value", arg);
+        }
+        apr_size_t klen = (apr_size_t)(eq - arg);
+        const char *val = eq + 1;
+        #define BS_REK(n) (klen == sizeof(n)-1 && \
+                           strncasecmp(arg, n, sizeof(n)-1) == 0)
+        if (BS_REK("status")) {
+            char *e2 = NULL;
+            long code = strtol(val, &e2, 10);
+            if (!e2 || *e2 || code < 100 || code > 599) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldRateLimitEscalate: status='%s' must be "
+                    "an HTTP code 100..599", val);
+            }
+            if (code == 429) {
+                /* Same code as the normal rate-limit response — no
+                 * escalation effect. Reject so operators don't
+                 * accidentally write a no-op directive. */
+                return "BotShieldRateLimitEscalate: status=429 is a "
+                       "no-op (same as the normal rate-limit "
+                       "response); pick a stricter code (default 403)";
+            }
+            e->status_code = (int)code;
+        } else if (BS_REK("ttl")) {
+            char *e2 = NULL;
+            long t = strtol(val, &e2, 10);
+            if (!e2 || *e2 || t < 1 || t > 86400 * 30) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldRateLimitEscalate: ttl='%s' must be "
+                    "1..2592000 seconds", val);
+            }
+            e->ttl_sec = (int)t;
+        } else if (BS_REK("log")) {
+            e->log_tag = apr_pstrdup(cmd->pool, val);
+        } else {
+            return apr_psprintf(cmd->pool,
+                "BotShieldRateLimitEscalate: unknown key '%.*s' "
+                "(known: status, ttl, log)", (int)klen, arg);
+        }
+        #undef BS_REK
+    }
+
+    /* Upsert by rule_name. Re-declaration replaces in place. */
+    for (int i = 0; i < scfg->rate_escalates->nelts; i++) {
+        bs_rate_escalate_entry *ex = APR_ARRAY_IDX(
+            scfg->rate_escalates, i, bs_rate_escalate_entry *);
+        if (strcmp(ex->rule_name, e->rule_name) == 0) {
+            APR_ARRAY_IDX(scfg->rate_escalates, i,
+                          bs_rate_escalate_entry *) = e;
+            return NULL;
+        }
+    }
+    *(bs_rate_escalate_entry **)apr_array_push(scfg->rate_escalates) = e;
+    return NULL;
+}
+
+/* E9 — BotShieldRateLimitEscalateCapacity <n>. SHM slot count for
+ * the strike table. Per-server-scope; only the main server's value
+ * is used at post_config (the strike table is module-global). */
+const char *bs_set_rate_escalate_capacity(cmd_parms *cmd,
+                                                 void *dconf,
+                                                 const char *arg)
+{
+    (void)dconf;
+    bs_warn_if_virtual_scope(cmd, "BotShieldRateLimitEscalateCapacity");
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (!end || *end
+        || n < BS_STRIKE_MIN_SLOTS || n > BS_STRIKE_MAX_SLOTS) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldRateLimitEscalateCapacity: '%s' must be %d..%d",
+            arg, BS_STRIKE_MIN_SLOTS, BS_STRIKE_MAX_SLOTS);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->strike_capacity = (int)n;
+    return NULL;
+}
+
+/* E10 — BotShieldSafeguard on|off. Master switch for the
+ * anti-loop hysteresis. Off = pre-E10 behavior (challenge every
+ * request that tier dispatch sends to challenge). On = track
+ * presentations per IP and flip to a short-lived pass-through
+ * after BotShieldSafeguardThreshold presentations within
+ * BotShieldSafeguardWindow seconds without a solve.
+ *
+ * Default off: opt-in because safeguard does grant temporary
+ * pass-through, which some operators will consider too soft
+ * regardless of the narrow conditions. Operators who've seen
+ * the stuck-loop failure mode in practice enable it. */
+const char *bs_set_safeguard(cmd_parms *cmd, void *dconf, int flag)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->safeguard_enabled = flag ? 1 : 0;
+    return NULL;
+}
+
+/* E10 — BotShieldSafeguardThreshold <N>. Number of presentations
+ * within the window before safeguard trips. */
+const char *bs_set_safeguard_threshold(cmd_parms *cmd,
+                                              void *dconf,
+                                              const char *arg)
+{
+    (void)dconf;
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (!end || *end || n < 1 || n > 1000) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSafeguardThreshold: '%s' must be 1..1000", arg);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->safeguard_threshold = (int)n;
+    return NULL;
+}
+
+/* E10 — BotShieldSafeguardWindow <seconds>. Counting window for
+ * the threshold. Beyond this, old presentations roll off and the
+ * counter resets on the next presentation. */
+const char *bs_set_safeguard_window(cmd_parms *cmd,
+                                           void *dconf,
+                                           const char *arg)
+{
+    (void)dconf;
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (!end || *end || n < 1 || n > 86400) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSafeguardWindow: '%s' must be 1..86400 seconds",
+            arg);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->safeguard_window = (int)n;
+    return NULL;
+}
+
+/* E10 — BotShieldSafeguardTTL <seconds>. How long the safeguard
+ * state lasts after the last presentation. Slides on each fresh
+ * presentation during active safeguard (TTL resets) so a client
+ * that stays broken doesn't oscillate at window boundaries. */
+const char *bs_set_safeguard_ttl(cmd_parms *cmd,
+                                        void *dconf,
+                                        const char *arg)
+{
+    (void)dconf;
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (!end || *end || n < 1 || n > 86400 * 7) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSafeguardTTL: '%s' must be 1..%d seconds",
+            arg, 86400 * 7);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->safeguard_ttl = (int)n;
+    return NULL;
+}
+
+/* E10 — BotShieldSafeguardCapacity <n>. SHM slot count. Same
+ * per-server-scope convention as the other SHM-sizing directives:
+ * only the main server's value is consulted at post_config. */
+const char *bs_set_safeguard_capacity(cmd_parms *cmd,
+                                             void *dconf,
+                                             const char *arg)
+{
+    (void)dconf;
+    bs_warn_if_virtual_scope(cmd, "BotShieldSafeguardCapacity");
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (!end || *end
+        || n < BS_SAFEGUARD_MIN_SLOTS || n > BS_SAFEGUARD_MAX_SLOTS) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSafeguardCapacity: '%s' must be %d..%d",
+            arg, BS_SAFEGUARD_MIN_SLOTS, BS_SAFEGUARD_MAX_SLOTS);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->safeguard_capacity = (int)n;
+    return NULL;
+}
+
+/* MEDIUM #2 (Phase 2) — BotShieldEmbeddedNonceCapacity <n>. SHM
+ * slot count for the embedded-bootstrap nonce table. Sized to
+ * comfortably hold all in-flight bootstrap challenges within their
+ * 120-second expiry window: at 100 bootstraps/sec sustained that's
+ * 12K nonces; the 32K default has ~60% headroom. */
+const char *bs_set_nonce_capacity(cmd_parms *cmd,
+                                         void *dconf,
+                                         const char *arg)
+{
+    (void)dconf;
+    bs_warn_if_virtual_scope(cmd, "BotShieldEmbeddedNonceCapacity");
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (!end || *end ||
+        n < BS_NONCE_MIN_SLOTS || n > BS_NONCE_MAX_SLOTS) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldEmbeddedNonceCapacity: '%s' must be %d..%d",
+            arg, BS_NONCE_MIN_SLOTS, BS_NONCE_MAX_SLOTS);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->nonce_capacity = (int)n;
+    return NULL;
+}
+
+/* E13 — BotShieldShareScope <token>. Per-vhost reputation
+ * namespacing override. Default: each vhost auto-isolates by
+ * siphash(ServerName) — different ServerNames don't share
+ * flagged-IP / strike / safeguard / Bloom state. Two vhosts that
+ * should share state set the same token here; same string → same
+ * ns_id → shared rows in SHM.
+ *
+ * Empty token treated as "fall back to ServerName default" so
+ * `BotShieldShareScope ""` is a config error rather than a
+ * confusing reset. */
+const char *bs_set_share_scope(cmd_parms *cmd, void *dconf,
+                                      const char *arg)
+{
+    (void)dconf;
+    if (!arg || !*arg) {
+        return "BotShieldShareScope: token required (use a "
+               "non-empty string; default isolation derives ns_id "
+               "from ServerName when this directive is absent)";
+    }
+    /* Bound the token length defensively; long strings are pointless
+     * since we hash to u32. */
+    if (strlen(arg) > 128) {
+        return "BotShieldShareScope: token over 128 chars";
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->share_scope_token = apr_pstrdup(cmd->pool, arg);
+    return NULL;
+}
+
+/* The BotShieldFlagTrigger directive setter lives in triggers.c. */
+
+/* E15 — BotShieldForgivenessCapPerHour <N>. Server-
+ * scope cap on the points of forgiveness any one cookie can earn
+ * inside a rolling 1-hour window. 0 disables the cap (legacy
+ * behavior). Range 1..1000 — beyond that the cap is effectively
+ * absent anyway. */
+const char *bs_set_forgive_cap(cmd_parms *cmd, void *dconf,
+                                      const char *arg)
+{
+    (void)dconf;
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    if (!end || *end || n < 0 || n > 1000) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldForgivenessCapPerHour: '%s' must be an integer "
+            "0..1000 (0 disables)", arg);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    /* Use 1 as a sentinel for "explicit 0 = disabled" so the merge's
+     * "> 0 wins" doesn't lose an explicit-zero override; map 0 input
+     * to a special sentinel that the apply helper treats as disabled.
+     * Simplest: use INT_MAX as "uncapped" and let merge work normally. */
+    scfg->forgive_cap_per_hour = (n == 0) ? INT_MAX : (int)n;
+    return NULL;
+}
+
+/* Apply the per-cookie forgiveness cap. Modifies *consumed and
+ * *window_start in place (reflecting the cookie state we'll write
+ * out) and returns the number of points actually granted, which may
+ * be less than `requested` if the cap kicks in. Window rolls if more
+ * than BS_FORGIVE_WINDOW_SEC has passed since window_start. */
+int bs_forgiveness_apply_cap(int requested,
+                             int cap,
+                             apr_uint32_t now_sec,
+                                    apr_uint32_t *window_start,
+                                    apr_uint32_t *consumed)
+{
+    if (requested <= 0) return requested;
+    if (cap <= 0 || cap == INT_MAX) {
+        /* Uncapped: still update the window state for observability. */
+        if (*window_start == 0 ||
+            now_sec - *window_start >= BS_FORGIVE_WINDOW_SEC) {
+            *window_start = now_sec;
+            *consumed = 0;
+        }
+        *consumed = (apr_uint32_t)((apr_uint64_t)*consumed + requested
+                                    > APR_UINT32_MAX
+                                    ? APR_UINT32_MAX
+                                    : *consumed + requested);
+        return requested;
+    }
+    if (*window_start == 0 ||
+        now_sec - *window_start >= BS_FORGIVE_WINDOW_SEC) {
+        *window_start = now_sec;
+        *consumed = 0;
+    }
+    int remaining = cap - (int)*consumed;
+    if (remaining < 0) remaining = 0;
+    int granted = (requested < remaining) ? requested : remaining;
+    *consumed = (apr_uint32_t)(*consumed + granted);
+    return granted;
+}
+
+/* E12 — BotShieldShadowMode on|off. Server-scope master switch
+ * for dry-run enforcement. When on, every trigger / rate-limit /
+ * block-path rule behaves as if mode=observe regardless of its
+ * per-rule setting. Operators stage a whole config revision in one
+ * shot, watch the decision log, then flip off to enforce. Off is
+ * the default — operators opt in. */
+const char *bs_set_shadow_mode(cmd_parms *cmd, void *dconf,
+                                      int flag)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->shadow_mode = flag ? 1 : 0;
+    return NULL;
+}
+
+
+/* BotShieldBlockPath <name> <path-glob> <ua> <ipspec> — cohort-
+ * conditional path block. Matching requests get 403 + a scoring
+ * hook. Glob semantics are minimal in v1 (prefix / trailing '*' /
+ * trailing '$'); full RFC 9309 wildcards arrive in E2.2 with
+ * robots.c so block-paths derived from robots.txt Disallow behave
+ * identically to the reference parser.
+ *
+ * Uses TAKE_ARGV (Apache has no TAKE4). */
+const char *bs_set_block_path(cmd_parms *cmd, void *dconf,
+                                     int argc, char *const argv[])
+{
+    (void)dconf;
+    /* E12 — strip optional trailing mode= token before counting
+     * positional args. */
+    int mode = BS_TMODE_ENFORCE;
+    {
+        const char *merr = bs_parse_optional_mode(cmd->pool,
+            "BotShieldBlockPath", &argc, argv, &mode);
+        if (merr) return merr;
+    }
+    if (argc != 4) {
+        return "BotShieldBlockPath: expects exactly 4 args — "
+               "<name> <path-glob> <ua> <ipspec> "
+               "[mode=enforce|observe]";
+    }
+    const char *name    = argv[0];
+    const char *pattern = argv[1];
+    const char *ua      = argv[2];
+    const char *ipspec  = argv[3];
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    if (!bs_bot_name_valid(name)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldBlockPath: name '%s' must be [a-z0-9-]{1,32}", name);
+    }
+    if (!pattern || !*pattern || pattern[0] != '/') {
+        return "BotShieldBlockPath: path-glob must start with '/'";
+    }
+    if (strlen(pattern) > 256) {
+        return "BotShieldBlockPath: path-glob longer than 256 chars";
+    }
+    bs_path_pattern_warn_middle_star(cmd, "BotShieldBlockPath",
+                                      name, pattern);
+
+    bs_block_path_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
+    e->name         = apr_pstrdup(cmd->pool, name);
+    e->path_pattern = apr_pstrdup(cmd->pool, pattern);
+    e->mode         = mode;   /* E12 */
+    const char *err = bs_cohort_resolve(cmd, &e->cohort, ua, ipspec);
+    if (err) return apr_pstrcat(cmd->pool,
+        "BotShieldBlockPath: ", err, NULL);
+
+    /* Upsert by name — same semantics as BotShieldRateLimit. */
+    for (int i = 0; i < scfg->block_paths->nelts; i++) {
+        bs_block_path_entry *ex =
+            APR_ARRAY_IDX(scfg->block_paths, i, bs_block_path_entry *);
+        if (strcmp(ex->name, e->name) == 0) {
+            APR_ARRAY_IDX(scfg->block_paths, i, bs_block_path_entry *) = e;
+            return NULL;
+        }
+    }
+    *(bs_block_path_entry **)apr_array_push(scfg->block_paths) = e;
+    return NULL;
+}
+const char *bs_set_endpoint_prefix(cmd_parms *cmd, void *cfg_v,
+                                          const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    if (!arg || !*arg || arg[0] != '/') {
+        return apr_psprintf(cmd->pool,
+            "BotShieldEndpointPrefix: '%s' must start with '/'", arg ? arg : "");
+    }
+    apr_size_t len = strlen(arg);
+    if (len > 1 && arg[len-1] == '/') {
+        return apr_psprintf(cmd->pool,
+            "BotShieldEndpointPrefix: '%s' must not end with '/'", arg);
+    }
+    /* Cheap sanity — no spaces, control chars, or query strings. Operators
+     * don't mount endpoints at weird places on purpose. */
+    for (apr_size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)arg[i];
+        if (c <= ' ' || c == '?' || c == '#') {
+            return apr_psprintf(cmd->pool,
+                "BotShieldEndpointPrefix: '%s' contains an invalid char", arg);
+        }
+    }
+    cfg->endpoint_prefix = arg;
+    return NULL;
+}
+const char *bs_cohort_resolve(cmd_parms *cmd, bs_cohort *out,
+                                     const char *ua, const char *ipspec)
+{
+    memset(out, 0, sizeof(*out));
+    if (!ua || !*ua || strcmp(ua, "*") == 0) {
+        out->ua_any = 1;
+    } else {
+        out->ua_pattern = apr_pstrdup(cmd->pool, ua);
+    }
+    if (!ipspec || !*ipspec || strcmp(ipspec, "*") == 0) {
+        out->ip_any = 1;
+    } else if (ipspec[0] == '/') {
+        out->path = apr_pstrdup(cmd->pool, ipspec);
+    } else if (strchr(ipspec, '/') || strchr(ipspec, ':')) {
+        out->inline_cidrs = apr_pstrdup(cmd->pool, ipspec);
+    } else {
+        return apr_psprintf(cmd->pool,
+            "ipspec '%s' unrecognized — use '*' (any IP), an absolute "
+            "file path, or a CIDR (single or comma-separated)", ipspec);
+    }
+    /* Guard against cohorts that would match every request. Operators
+     * who really want that can write it as two entries or a per-
+     * location cap elsewhere. */
+    if (out->ua_any && out->ip_any) {
+        return "cohort must restrict on UA or IP (both were '*')";
+    }
+    return NULL;
 }

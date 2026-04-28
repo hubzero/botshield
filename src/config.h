@@ -71,6 +71,69 @@ apr_status_t bs_watchdog_save_cb(int state, void *data,
 apr_status_t bs_robots_load(server_rec *sv, struct bs_server_cfg *scfg,
                             apr_pool_t *pconf);
 
+/* --- Directive setters (feature-homeless) ---
+ *
+ * Setters whose configured fields aren't owned by a single feature
+ * file. Top-level / UI / score / forgiveness / SHM-sizing / state-
+ * save / rate-limit family / endpoint-prefix. Wired into the cmds[]
+ * table in botshield.c. */
+
+/* Top-level + UI */
+const char *bs_set_enabled       (cmd_parms *cmd, void *cfg_v, int flag);
+const char *bs_set_debug         (cmd_parms *cmd, void *cfg_v, int flag);
+const char *bs_set_show_logo     (cmd_parms *cmd, void *cfg_v, int flag);
+const char *bs_set_show_label    (cmd_parms *cmd, void *cfg_v, int flag);
+const char *bs_set_show_box      (cmd_parms *cmd, void *cfg_v, int flag);
+const char *bs_set_cookie_ttl    (cmd_parms *cmd, void *cfg_v, const char *arg);
+const char *bs_set_difficulty    (cmd_parms *cmd, void *cfg_v, const char *arg);
+const char *bs_set_form_captcha  (cmd_parms *cmd, void *cfg_v, int flag);
+const char *bs_set_cookie_domain (cmd_parms *cmd, void *cfg_v, const char *arg);
+const char *bs_set_prompt        (cmd_parms *cmd, void *cfg_v, const char *arg);
+const char *bs_set_logo_label    (cmd_parms *cmd, void *cfg_v, const char *arg);
+const char *bs_set_logo_file     (cmd_parms *cmd, void *cfg_v, const char *arg);
+const char *bs_set_help          (cmd_parms *cmd, void *cfg_v, const char *arg);
+const char *bs_set_help_file     (cmd_parms *cmd, void *cfg_v, const char *arg);
+const char *bs_set_challenge_file(cmd_parms *cmd, void *cfg_v, const char *arg);
+const char *bs_set_endpoint_prefix(cmd_parms *cmd, void *cfg_v, const char *arg);
+
+/* Score thresholds + forgiveness */
+const char *bs_set_score_silent  (cmd_parms *cmd, void *cfg_v, const char *arg);
+const char *bs_set_score_hard    (cmd_parms *cmd, void *cfg_v, const char *arg);
+const char *bs_set_score_captcha (cmd_parms *cmd, void *cfg_v, const char *arg);
+const char *bs_set_forgive_silent(cmd_parms *cmd, void *cfg_v, const char *arg);
+const char *bs_set_forgive_form  (cmd_parms *cmd, void *cfg_v, const char *arg);
+const char *bs_set_forgive_captcha(cmd_parms *cmd, void *cfg_v, const char *arg);
+const char *bs_set_forgive_cap   (cmd_parms *cmd, void *dconf,  const char *arg);
+
+/* SHM sizing + capacity + scoping */
+const char *bs_set_shm_size           (cmd_parms *cmd, void *dconf, const char *arg);
+const char *bs_set_flagged_capacity   (cmd_parms *cmd, void *dconf, const char *arg);
+const char *bs_set_bloom_ips          (cmd_parms *cmd, void *dconf, const char *arg);
+const char *bs_set_bloom_window       (cmd_parms *cmd, void *dconf, const char *arg);
+const char *bs_set_ipv6_prefix        (cmd_parms *cmd, void *dconf, const char *arg);
+const char *bs_set_share_scope        (cmd_parms *cmd, void *dconf, const char *arg);
+const char *bs_set_shadow_mode        (cmd_parms *cmd, void *dconf, int flag);
+
+/* State-save */
+const char *bs_set_state_file         (cmd_parms *cmd, void *dconf, const char *arg);
+const char *bs_set_state_save_interval(cmd_parms *cmd, void *dconf, const char *arg);
+
+/* Rate-limit / safeguard / block-path family */
+const char *bs_set_rate_limit            (cmd_parms *cmd, void *dconf,
+                                          int argc, char *const argv[]);
+const char *bs_set_rate_limit_escalate   (cmd_parms *cmd, void *dconf,
+                                          int argc, char *const argv[]);
+const char *bs_set_rate_escalate_capacity(cmd_parms *cmd, void *dconf,
+                                          const char *arg);
+const char *bs_set_safeguard          (cmd_parms *cmd, void *dconf, int flag);
+const char *bs_set_safeguard_threshold(cmd_parms *cmd, void *dconf, const char *arg);
+const char *bs_set_safeguard_window   (cmd_parms *cmd, void *dconf, const char *arg);
+const char *bs_set_safeguard_ttl      (cmd_parms *cmd, void *dconf, const char *arg);
+const char *bs_set_safeguard_capacity (cmd_parms *cmd, void *dconf, const char *arg);
+const char *bs_set_nonce_capacity     (cmd_parms *cmd, void *dconf, const char *arg);
+const char *bs_set_block_path         (cmd_parms *cmd, void *dconf,
+                                       int argc, char *const argv[]);
+
 #ifdef __cplusplus
 }
 #endif
