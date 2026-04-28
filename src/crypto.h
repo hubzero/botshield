@@ -17,6 +17,9 @@
 #include <apr.h>
 #include <apr_errno.h>
 
+#include <httpd.h>
+#include <http_config.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -106,6 +109,16 @@ const char *bs_gcm_decrypt(const unsigned char aes_key[32],
 void bs_to_hex(const unsigned char *in, apr_size_t len, char *out);
 int  bs_from_hex(const char *in, apr_size_t in_len,
                  apr_size_t out_len, unsigned char *out);
+
+/* --- Cookie/secret directive setters --- *
+ *
+ * BotShieldSecretFile / BotShieldSecondarySecretFile load the master
+ * HMAC keys for the GCM cookie envelope and derive per-purpose keys
+ * (HKDF) at config time. Both verify the file is mode-600. */
+const char *bs_set_secret_file(cmd_parms *cmd, void *cfg_v,
+                               const char *arg);
+const char *bs_set_secondary_secret_file(cmd_parms *cmd, void *cfg_v,
+                                         const char *arg);
 
 #ifdef __cplusplus
 }

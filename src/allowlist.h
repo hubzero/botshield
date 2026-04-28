@@ -23,6 +23,7 @@
 #include <apr_tables.h>
 #include <apr_errno.h>
 #include <httpd.h>
+#include <http_config.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -110,6 +111,17 @@ apr_status_t bs_allow_load_ranges_from_string(apr_pool_t *p,
  * timeout). */
 int bs_allow_ip_in_ranges(const apr_array_header_t *ranges,
                           request_rec *r);
+
+/* --- E1 directive setters --- *
+ *
+ * BotShieldAllow on|off — master gate for the allow-list family.
+ * BotShieldAllowBot <name> <ua-pattern> [<target>] — register a bot
+ * with optional UA-only/file/inline-CIDR target. */
+const char *bs_set_allow_enabled(cmd_parms *cmd, void *dconf, int flag);
+const char *bs_set_allow_bot(cmd_parms *cmd, void *dconf,
+                             const char *name,
+                             const char *pattern,
+                             const char *target);
 
 #ifdef __cplusplus
 }

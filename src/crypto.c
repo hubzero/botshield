@@ -4,12 +4,21 @@
 #include "crypto.h"
 
 #include <string.h>
+#include <sys/stat.h>
 
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/kdf.h>
 #include <openssl/params.h>
 #include <openssl/rand.h>
+
+#include <apr_strings.h>
+#include <apr_file_io.h>
+
+#include <httpd.h>
+#include <http_config.h>
+
+#include "botshield.h"
 
 void bs_sha256(const unsigned char *data, apr_size_t len,
                unsigned char out[BS_SHA256_LEN])
@@ -208,4 +217,152 @@ int bs_from_hex(const char *in, apr_size_t in_len,
         out[i] = (unsigned char)((hi << 4) | lo);
     }
     return 1;
+}
+
+/* --- Cookie/secret directive setters --- */
+
+/* Security review LOW #3 — derive the per-purpose keys for a master
+ * secret. Called from the secret-file directive setters AFTER the
+ * key bytes have been validated. Returns NULL on success; on
+ * (vanishingly unlikely) HKDF failure returns a diagnostic string
+ * the directive setter surfaces as a fatal config error so the
+ * module refuses to start with a broken key derivation. The purpose
+ * tags map 1:1 to derived_gcm_cookie / derived_hmac_pending /
+ * derived_hmac_bootstrap in the dir_cfg. Bumping any tag (e.g.
+ * "bs:cookie:gcm:v2") is the rotation knob if the underlying
+ * crypto contract ever changes. */
+static const char *bs_derive_purpose_keys(apr_pool_t *p,
+                                          const unsigned char *master,
+                                          apr_size_t master_len,
+                                          unsigned char *out_gcm,
+                                          unsigned char *out_pending,
+                                          unsigned char *out_bootstrap)
+{
+    if (!bs_hkdf_derive_key(master, master_len,
+                            "bs:cookie:gcm:v1", out_gcm)) {
+        return apr_psprintf(p, "HKDF(bs:cookie:gcm:v1) failed");
+    }
+    if (!bs_hkdf_derive_key(master, master_len,
+                            "bs:cookie:pending:v1", out_pending)) {
+        return apr_psprintf(p, "HKDF(bs:cookie:pending:v1) failed");
+    }
+    if (!bs_hkdf_derive_key(master, master_len,
+                            "bs:cookie:bootstrap:v1", out_bootstrap)) {
+        return apr_psprintf(p, "HKDF(bs:cookie:bootstrap:v1) failed");
+    }
+    return NULL;
+}
+
+/* `BotShieldSecretFile /path` — HMAC key. Refuse world-readable and
+ * group-readable files so an operator can't accidentally ship a key that
+ * any local user on the box can exfiltrate. */
+const char *bs_set_secret_file(cmd_parms *cmd, void *cfg_v,
+                                      const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+
+    struct stat st;
+    if (stat(arg, &st) != 0) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSecretFile: cannot stat '%s'", arg);
+    }
+    if (st.st_mode & (S_IRGRP | S_IROTH | S_IWGRP | S_IWOTH)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSecretFile: '%s' is group- or world-accessible "
+            "(mode %04o); chmod 600 it", arg, st.st_mode & 07777);
+    }
+
+    const char *buf = NULL;
+    apr_size_t buf_len = 0;
+    const char *err = bs_load_config_file(cmd, "BotShieldSecretFile", arg,
+                                          BS_MAX_SECRET_BYTES, &buf, &buf_len);
+    if (err) return err;
+
+    apr_size_t len = 0;
+    err = bs_validate_secret_key(cmd, "BotShieldSecretFile",
+                                 arg, buf, buf_len, &len);
+    if (err) return err;
+
+    cfg->secret     = (const unsigned char *)buf;
+    cfg->secret_len = len;
+
+    /* Security review LOW #3 — derive per-purpose keys once. */
+    err = bs_derive_purpose_keys(cmd->pool,
+                                  cfg->secret, cfg->secret_len,
+                                  cfg->derived_gcm_cookie,
+                                  cfg->derived_hmac_pending,
+                                  cfg->derived_hmac_bootstrap);
+    if (err) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSecretFile: key derivation failed: %s", err);
+    }
+    cfg->derived_keys_set = 1;
+    return NULL;
+}
+
+/* E16 — `BotShieldSecondarySecretFile /path`. Verify-
+ * only secondary key for graceful HMAC/GCM secret rotation.
+ *
+ * Operator workflow:
+ *   1. Generate the new key file. Add `BotShieldSecondarySecretFile`
+ *      pointing at the OLD key. Reload Apache. Verify path now
+ *      accepts BOTH old and new cookies; issue path uses the NEW key.
+ *   2. Wait one BotShieldCookieTTL window so every active cookie has
+ *      been re-issued under the new key.
+ *   3. Remove the BotShieldSecondarySecretFile directive. Reload.
+ *      Old cookies were either re-issued or expired naturally.
+ *
+ * Same mode-600 hygiene as BotShieldSecretFile. The file's bytes are
+ * tried after the primary on every verify; cost is one extra
+ * HMAC-SHA-256 (or AES-GCM open) per rejected primary, only during
+ * the rotation window. */
+const char *bs_set_secondary_secret_file(cmd_parms *cmd,
+                                                void *cfg_v,
+                                                const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+
+    struct stat st;
+    if (stat(arg, &st) != 0) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSecondarySecretFile: cannot stat '%s'", arg);
+    }
+    if (st.st_mode & (S_IRGRP | S_IROTH | S_IWGRP | S_IWOTH)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSecondarySecretFile: '%s' is group- or "
+            "world-accessible (mode %04o); chmod 600 it",
+            arg, st.st_mode & 07777);
+    }
+
+    const char *buf = NULL;
+    apr_size_t buf_len = 0;
+    const char *err = bs_load_config_file(cmd,
+                                          "BotShieldSecondarySecretFile",
+                                          arg, BS_MAX_SECRET_BYTES,
+                                          &buf, &buf_len);
+    if (err) return err;
+
+    apr_size_t len = 0;
+    err = bs_validate_secret_key(cmd, "BotShieldSecondarySecretFile",
+                                 arg, buf, buf_len, &len);
+    if (err) return err;
+
+    cfg->secret_secondary     = (const unsigned char *)buf;
+    cfg->secret_secondary_len = len;
+
+    /* Security review LOW #3 — derive per-purpose keys for the
+     * secondary master too. */
+    err = bs_derive_purpose_keys(cmd->pool,
+                                  cfg->secret_secondary,
+                                  cfg->secret_secondary_len,
+                                  cfg->derived_gcm_cookie_2,
+                                  cfg->derived_hmac_pending_2,
+                                  cfg->derived_hmac_bootstrap_2);
+    if (err) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSecondarySecretFile: key derivation failed: %s",
+            err);
+    }
+    cfg->derived_keys_set_2 = 1;
+    return NULL;
 }

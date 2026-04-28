@@ -25,13 +25,16 @@
 #define BOTSHIELD_H
 
 #include <apr.h>
+#include <apr_hash.h>
 #include <apr_pools.h>
 #include <apr_tables.h>
 #include <apr_time.h>
 #include <httpd.h>
+#include <http_config.h>
 
 #include "crypto.h"
 #include "robots.h"
+#include "shm.h"      /* bs_load_state, bs_metrics typedefs */
 
 #ifdef __cplusplus
 extern "C" {
@@ -53,6 +56,87 @@ extern "C" {
  * plaintext counter. '.' is outside the standard base64 alphabet so
  * the split point is unambiguous. */
 #define BS_GCM_COUNTER_SEP    '.'
+
+/* ======================================================================
+ * Config defaults (operator-tunable; tri-state directives use -1
+ * for "unset / inherit")
+ * ====================================================================== */
+
+#define BS_UNSET              (-1)
+#define BS_DEFAULT_COOKIE_TTL 3600  /* seconds a verified cookie is good for */
+#define BS_DEFAULT_DIFFICULTY 4     /* leading hex zeros */
+#define BS_CLOCK_SKEW_AHEAD   60    /* grace if client clock runs ahead */
+#define BS_DEFAULT_FORGIVE_SILENT   10
+#define BS_DEFAULT_FORGIVE_FORM     25
+#define BS_DEFAULT_FORGIVE_CAPTCHA  50
+/* E15 — per-cookie hourly cap on accumulated forgiveness. 200
+ * points/hour ≈ 4-8 challenge-passes worth of credit. */
+#define BS_DEFAULT_FORGIVE_CAP_PER_HOUR  200
+#define BS_FORGIVE_WINDOW_SEC            3600
+#define BS_COOKIE_NAME        "_bs_verified"
+/* Security review LOW #1 + #2 — `__Host-` prefix variant. We emit
+ * this when the request is HTTPS AND no operator cookie_domain is
+ * in play. Verify path checks both (host-prefix first). */
+#define BS_COOKIE_NAME_HOST   "__Host-bs_verified"
+#define BS_DEFAULT_PROMPT     "I\xe2\x80\x99m not a robot"  /* U+2019 */
+#define BS_DEFAULT_LOGO_LABEL "botshield"
+#define BS_MAX_LOGO_BYTES     (64 * 1024)
+#define BS_MAX_HELP_BYTES     (64 * 1024)
+#define BS_MAX_PAGE_BYTES     (256 * 1024)
+#define BS_MAX_SECRET_BYTES   1024
+#define BS_MIN_SECRET_BYTES   16
+#define BS_WIDGET_MARKER      "<!-- BOTSHIELD -->"
+
+/* E4 — BotShield-cookie-state note. Set by bs_handler after the
+ * `_bs_verified` verification pass so the cookie-trigger predicate
+ * matcher (and other consumers) can surface the verdict without
+ * re-running the HMAC check. Values: "verified" / "missing" /
+ * "invalid". */
+#define BS_CK_STATE_NOTE      "botshield-cookie-state"
+#define BS_CK_STATE_VERIFIED  "verified"
+#define BS_CK_STATE_MISSING   "missing"
+#define BS_CK_STATE_INVALID   "invalid"
+
+/* Help visibility modes (values are stored in bs_dir_cfg.help_mode).
+ * Used by the help/help-file directive setters in config.c and by
+ * the splash-page renderer in botshield.c. */
+enum bs_help_mode {
+    BS_HELP_OFF    = 0,
+    BS_HELP_ON     = 1,
+    BS_HELP_BUTTON = 2,
+};
+#define BS_DEFAULT_HELP_MODE BS_HELP_BUTTON
+
+/* --- Flag-bit registry ----------------------------------------
+ *
+ * Each bit represents a *serious* event we want to remember about
+ * an IP even if its cookie is rolled back. Bits are additive — an
+ * IP that tripped both a honeypot and a scanner probe carries both.
+ * Score effects per bit live in scfg->flag_triggers (see
+ * bs_default_flag_triggers + bs_apply_flag_triggers in botshield.c).
+ *
+ * BS_FLAG_APP_* are credit-carrying bits set by the app via the E5
+ * X-BotShield-Feedback bridge — the app can push score down as well
+ * as up. Compose additively with the penalty bits. */
+#define BS_FLAG_HONEYPOT_HIT          (1U << 0)
+#define BS_FLAG_SCANNER_PROBE         (1U << 1)
+#define BS_FLAG_FAKE_BOT              (1U << 2)
+#define BS_FLAG_POW_FAIL_STREAK       (1U << 3)
+#define BS_FLAG_APP_VERIFIED_HUMAN    (1U << 4)
+#define BS_FLAG_APP_VERIFIED_SESSION  (1U << 5)
+#define BS_FLAG_APP_TRUST_SIGNAL      (1U << 6)
+
+/* Captcha tier (M8) defaults — small and boring: a 1 s HTTP verify
+ * budget is enough for Cloudflare / hCaptcha / Google normally, and
+ * short enough that a provider outage doesn't stall real users. */
+#define BS_DEFAULT_ENDPOINT_PREFIX  "/botshield"
+#define BS_DEFAULT_CAPTCHA_TIMEOUT  1000   /* milliseconds */
+#define BS_MIN_CAPTCHA_TIMEOUT      100
+#define BS_MAX_CAPTCHA_TIMEOUT      5000
+#define BS_CAPTCHA_CONNECT_TIMEOUT  250    /* milliseconds */
+#define BS_MAX_CAPTCHA_TOKEN        4096   /* Turnstile tokens ≤ ~2 KB */
+#define BS_MAX_CAPTCHA_BODY         8192   /* siteverify response cap */
+#define BS_DEFAULT_RECAPTCHA_V3_MIN_SCORE 0.5  /* Google's suggested baseline */
 
 /* ======================================================================
  * Tier + silent-mode enums (decision dispatch)
@@ -421,12 +505,309 @@ typedef struct bs_server_cfg {
 } bs_server_cfg;
 
 /* ======================================================================
+ * Trigger families — shared action engine for path/cookie/env/feedback
+ * /load, plus the flag-trigger family which uses a separate action
+ * surface (score-add / tier_floor). These types will migrate to
+ * triggers.h when that phase extracts.
+ * ====================================================================== */
+
+#define BS_TRIGGER_STATUS_PASS   (-1)
+
+typedef enum {
+    BS_TFAMILY_PATH = 0,
+    BS_TFAMILY_COOKIE,
+    BS_TFAMILY_ENV,
+    BS_TFAMILY_FEEDBACK,
+    BS_TFAMILY_LOAD,
+    BS_TFAMILY_FLAG,
+} bs_trigger_family;
+
+typedef enum {
+    BS_TMODE_ENFORCE = 0,
+    BS_TMODE_OBSERVE,
+} bs_trigger_mode;
+
+typedef enum {
+    BS_TEXEC_PASS_CONTINUE = 0,
+    BS_TEXEC_PASS_BREAK,
+    BS_TEXEC_PASS_DECLINE,
+    BS_TEXEC_STATUS,
+    BS_TEXEC_OBSERVE,
+} bs_trigger_exec_outcome;
+
+typedef struct {
+    int           status_code;    /* HTTP code or BS_TRIGGER_STATUS_PASS */
+    const char   *redirect_url;   /* NULL unless explicitly set */
+    const char   *log_tag;
+    apr_uint32_t  flag_bit;       /* single BS_FLAG_* bit; 0 if ttl_sec==0 */
+    int           ttl_sec;        /* 0 = don't flag the IP */
+    int           penalty;        /* 0..1000 */
+    int           credit;         /* 0..1000 (rejected on path family) */
+    int           status_explicit; /* 1 if operator wrote status= */
+    int           mode;           /* bs_trigger_mode */
+} bs_trigger_action;
+
+/* E7.3 — feedback trigger entry. One per BotShieldFeedbackTrigger
+ * directive; lookup-by-event-name. */
+typedef struct {
+    const char        *event;
+    bs_trigger_action  action;
+} bs_feedback_trigger_entry;
+
+/* --- E2.1 rate-limit + block-path family ----------------------- *
+ *
+ * bs_cohort is the shared (UA?, IP?) predicate; bs_rate_limit_entry,
+ * bs_block_path_entry, bs_rate_escalate_entry are the per-directive
+ * configs they parameterize. Defined here because config.c's
+ * post_config hook walks them at SHM-slot assignment time. */
+
+#define BS_PENALTY_RATE_LIMIT  50
+#define BS_PENALTY_BLOCK_PATH 100
+
+typedef struct {
+    const char         *ua_pattern;
+    int                 ua_any;
+    int                 ip_any;
+    const char         *path;
+    const char         *inline_cidrs;
+    apr_array_header_t *ranges;
+} bs_cohort;
+
+typedef struct bs_rate_escalate_entry bs_rate_escalate_entry;
+
+typedef struct {
+    const char   *name;
+    bs_cohort     cohort;
+    apr_uint32_t  budget;
+    apr_uint32_t  window_sec;
+    int           shm_slot;
+    const bs_rate_escalate_entry *escalate;
+    int           mode;
+} bs_rate_limit_entry;
+
+struct bs_rate_escalate_entry {
+    const char   *rule_name;
+    apr_uint32_t  strikes;
+    apr_uint32_t  per_sec;
+    int           status_code;
+    int           ttl_sec;
+    const char   *log_tag;
+};
+
+typedef struct {
+    const char *name;
+    const char *path_pattern;
+    bs_cohort   cohort;
+    int         mode;
+} bs_block_path_entry;
+
+/* SHM slot for the fixed-window counter. 8 bytes; CAS would target
+ * the pair as a u64 on a 64-bit-atomic platform. v1 uses 32-bit
+ * atomics on each field separately. */
+typedef struct {
+    apr_uint32_t count;
+    apr_uint32_t window_start_sec;
+} bs_rate_counter;
+
+/* --- E14 flag-trigger family ----------------------------------- *
+ *
+ * Predicate is "flag_bit is set on this request's IP-side or cookie-
+ * side flag bitmap". Two runtime action verbs (SCORE / TIER_FLOOR);
+ * RESET is a config-time sentinel consumed before the request path
+ * runs. */
+typedef enum {
+    BS_FLAG_ACT_SCORE = 0,
+    BS_FLAG_ACT_TIER_FLOOR,
+    BS_FLAG_ACT_RESET,
+} bs_flag_action_kind;
+
+typedef struct {
+    const char         *flag_name;
+    apr_uint32_t        flag_bit;
+    bs_flag_action_kind action;
+    int                 score_add;
+    bs_tier             tier_min;
+    int                 mode;
+    int                 from_default;
+} bs_flag_trigger_entry;
+
+/* E2.2 — robots refresh interval sentinel. */
+#define BS_ROBOTS_REFRESH_UNSET    (-1)
+#define BS_ROBOTS_REFRESH_DEFAULT  60
+
+/* ======================================================================
  * Module symbol — extern so other TUs can pass &botshield_module to
  * ap_get_module_config. The definition (and its visibility-default
  * pragma) lives in botshield.c.
  * ====================================================================== */
 
 extern module AP_MODULE_DECLARE_DATA botshield_module;
+
+/* ======================================================================
+ * Transitional cross-file function declarations.
+ *
+ * Functions defined in botshield.c that newly-extracted TUs need to
+ * call. As future phases extract their own .c/.h pairs, declarations
+ * migrate from this section to the per-feature header (cookie.h,
+ * challenge.h, captcha.h, ...). Anything left in this section is a
+ * pending future-extraction. */
+
+/* Score helper — clamp negative-or-zero `value` to `fallback`. Used
+ * everywhere config tri-state ints (-1 unset, 0 disabled, N> 0 set)
+ * resolve to a runtime value. */
+int bs_effective_int(int value, int fallback);
+
+/* IP parsing — mirror of inet_pton with the IPv4-mapped-to-IPv6
+ * normalization the SHM tables expect. Returns 1 on success. */
+int bs_parse_client_ip(const char *ip_str, unsigned char out[16]);
+
+/* Bounded integer parsers for pre-HMAC cookie / form-body fields.
+ * Each returns 1 on a clean parse within [min, max]; 0 otherwise.
+ * Caller's *out is left untouched on failure. max_len is a hard cap
+ * on the digit-string length — rejects gigantic inputs before they
+ * reach strtol. Used by directive setters and by the canonical-form
+ * cookie parser in cookie.c. */
+int bs_parse_int_bounded(const char *s,
+                         long min_val, long max_val,
+                         apr_size_t max_len,
+                         long *out);
+int bs_parse_uint32_bounded(const char *s,
+                            apr_size_t max_len,
+                            apr_uint32_t *out);
+int bs_parse_int64_bounded(const char *s,
+                           apr_int64_t min_val,
+                           apr_int64_t max_val,
+                           apr_int64_t *out);
+
+/* IPv6-prefix mask in place — zero out the trailing (128 - prefix)
+ * bits of an IPv6 address so the SHM tables key on a configured
+ * subscriber prefix instead of the full address. v4-mapped addresses
+ * are left untouched. */
+void bs_mask_ipv6_prefix(unsigned char ip[16], int prefix_bits);
+
+/* Flag-bit name registry — NULL-terminated table of (name, bit)
+ * pairs used by the parse path (operator declares
+ * `flag=honeypot_hit`) and the wire-format renderers
+ * (X-Botshield-Claims `flags=`). Will move to triggers.h or stay
+ * a long-term botshield.h citizen since the bit-meaning vocabulary
+ * is genuinely cross-cutting. */
+extern const struct bs_flag_name { const char *name; apr_uint32_t bit; }
+       bs_flag_names[];
+
+/* Form-body reader — slurps a POST body up to `max_len` and writes
+ * it as a NUL-terminated string. Returns APR_SUCCESS or an APR
+ * error. Used by the verify handlers (silent + M8). */
+apr_status_t bs_read_form_body(request_rec *r, apr_size_t max_len,
+                               const char **out_body,
+                               apr_size_t *out_len);
+
+/* Challenge issuance, PoW algorithm registry, the canonical-form
+ * HMAC input, and the MEDIUM #2 bootstrap-binding helpers all live
+ * in challenge.h (see src/challenge.{c,h}). */
+
+/* Cookie format / mint / verify (E11.4 GCM cookie path) and the
+ * Cookie-header parse-once tokenizer live in cookie.h. */
+
+/* Rep carry-forward (E15 forgiveness window math). */
+int  bs_carry_forward_eligible(request_rec *r,
+                               const bs_dir_cfg *cfg,
+                               bs_challenge *out_prior_ch);
+void bs_apply_rep_carry(request_rec *r,
+                        const bs_dir_cfg *cfg,
+                        const bs_challenge *prior_ch,
+                        bs_rep_state *target,
+                        int forgive_amount);
+
+/* M8 captcha siteverify, provider registry, M8.1 pending cookie,
+ * and the captcha-verify request handler all live in captcha.h. */
+
+/* Validate an operator-supplied bot/rule name token (lowercase
+ * letters, digits, hyphen; max 32 chars). Returns 1 on accept, 0
+ * on reject. Used by E1 BotShieldAllowBot setters and by triggers
+ * directive setters. */
+int bs_bot_name_valid(const char *s);
+
+/* --- Config-time helpers (callable from any feature's directive
+ * setters). All four currently live in botshield.c; they may
+ * migrate to config.c in a later phase as more setters relocate. */
+
+/* Log a NOTICE if the directive is being set inside a <VirtualHost>
+ * scope — used for SHM-sizing directives that the post_config hook
+ * only reads off the main server's scfg. */
+void bs_warn_if_virtual_scope(cmd_parms *cmd, const char *name);
+
+/* Slurp a file into pool memory with a max-size cap. Used for the
+ * secret/secondary-secret/captcha-secret keys and for the operator-
+ * customizable HTML / SVG templates (challenge page, logo, help). */
+const char *bs_load_config_file(cmd_parms *cmd,
+                                const char *directive,
+                                const char *path,
+                                apr_size_t max_bytes,
+                                const char **out_content,
+                                apr_size_t *out_len);
+
+/* Validate the contents of a secret-key file (BotShieldSecretFile
+ * et al.). Trims one trailing newline, rejects embedded NULs,
+ * enforces BS_MIN_SECRET_BYTES <= len. */
+const char *bs_validate_secret_key(cmd_parms *cmd,
+                                   const char *directive,
+                                   const char *path,
+                                   const char *buf,
+                                   apr_size_t buf_len,
+                                   apr_size_t *out_len);
+
+/* Resolve a directive's (ua, ipspec) arg pair into a bs_cohort.
+ * Range parsing for ipspec is deferred to post_config — the cohort
+ * stores the raw spec strings here. Returns NULL on success or an
+ * Apache directive-error string. */
+const char *bs_cohort_resolve(cmd_parms *cmd, bs_cohort *out,
+                              const char *ua, const char *ipspec);
+
+/* RFC 9309 path-pattern warning — log a NOTICE when a directive's
+ * path pattern contains a non-trailing '*' that the retired v1
+ * matcher would have treated as a literal byte. Used by E2.1
+ * BotShieldBlockPath and by E3 BotShieldPathTrigger. */
+void bs_path_pattern_warn_middle_star(cmd_parms *cmd,
+                                      const char *directive,
+                                      const char *name,
+                                      const char *pattern);
+
+/* Score system (will move to score.h or stay here long-term). */
+bs_request_score *bs_get_score(request_rec *r, int create);
+
+/* Append a (penalty, ttl, reason) entry to the per-request score.
+ * penalty=0 records a reason without changing the total (useful for
+ * observe-mode + status=pass entries). Used cross-file by triggers.c
+ * and bridge.c. */
+void bs_score_add(request_rec *r, int penalty, int ttl_seconds,
+                  const char *reason);
+
+/* Apply the per-cookie forgiveness cap. Modifies *consumed and
+ * *window_start in place; returns the points actually granted.
+ * Window rolls if more than BS_FORGIVE_WINDOW_SEC has passed since
+ * window_start. Defined in config.c next to bs_set_forgive_cap. */
+int bs_forgiveness_apply_cap(int requested, int cap,
+                             apr_uint32_t now_sec,
+                             apr_uint32_t *window_start,
+                             apr_uint32_t *consumed);
+
+const char *bs_decision_reason_names(apr_pool_t *p,
+                                     const bs_request_score *s);
+
+/* Parse a comma-separated list of flag-bit names ("honeypot_hit,
+ * scanner_probe") into a bit mask. Sets *err to a pool-allocated
+ * diagnostic on unknown names. Used by triggers.c to validate the
+ * flag= action key and by bridge.c to parse claims-flag lists. */
+apr_uint32_t bs_parse_flag_names(apr_pool_t *p, const char *s,
+                                 const char **err);
+
+/* Tier-name string (e.g. "pass", "silent", "form", "captcha"). Will
+ * move to challenge.h or stay here long-term. */
+const char *bs_tier_name(bs_tier t);
+
+/* E7.3 feedback-trigger lookup. */
+const bs_feedback_trigger_entry *bs_feedback_trigger_find(
+    const struct bs_server_cfg *scfg, const char *event);
 
 #ifdef __cplusplus
 }
