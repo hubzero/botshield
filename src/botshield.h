@@ -8,7 +8,7 @@
  * none of this leaks outside the module. The single externally-
  * visible symbol is `botshield_module` (the AP_DECLARE_MODULE
  * struct), which is annotated with default visibility at its
- * definition site in mod_botshield.c.
+ * definition site in botshield.c.
  *
  * Layered headers:
  *   crypto.h     — small primitives (HMAC, GCM, hex, HKDF)
@@ -18,7 +18,7 @@
  *   metrics.h    — decision log, M9 counters, Prometheus, mod_status
  *   botshield.h  — THIS file: bs_dir_cfg, bs_server_cfg, request-
  *                  flow types, cross-file function declarations
- *   mod_botshield.c — the request handler + glue. Includes all of
+ *   botshield.c — the request handler + glue. Includes all of
  *                     the above plus the per-feature headers as
  *                     more extractions land. */
 #ifndef BOTSHIELD_H
@@ -423,7 +423,7 @@ typedef struct bs_server_cfg {
 /* ======================================================================
  * Module symbol — extern so other TUs can pass &botshield_module to
  * ap_get_module_config. The definition (and its visibility-default
- * pragma) lives in mod_botshield.c.
+ * pragma) lives in botshield.c.
  * ====================================================================== */
 
 extern module AP_MODULE_DECLARE_DATA botshield_module;

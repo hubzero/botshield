@@ -1,5 +1,5 @@
 /*
- * tests/fuzz/_fuzz_stubs.h — #included before mod_botshield.c inside
+ * tests/fuzz/_fuzz_stubs.h — #included before botshield.c inside
  * the fuzz harness.
  *
  * Responsibilities:
