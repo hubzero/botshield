@@ -33,6 +33,11 @@
 extern "C" {
 #endif
 
+/* AES-256-GCM cookie wire format separator: base64-envelope + '.' +
+ * plaintext counter. '.' is outside the standard base64 alphabet so
+ * the split point is unambiguous. */
+#define BS_GCM_COUNTER_SEP    '.'
+
 /* --- Read side ------------------------------------------------- */
 
 /* Parse-once tokenizer for the request's Cookie header. Returns a
