@@ -466,6 +466,56 @@ typedef struct bs_server_cfg {
 } bs_server_cfg;
 
 /* ======================================================================
+ * Trigger families — shared action engine for path/cookie/env/feedback
+ * /load, plus the flag-trigger family which uses a separate action
+ * surface (score-add / tier_floor). These types will migrate to
+ * triggers.h when that phase extracts.
+ * ====================================================================== */
+
+#define BS_TRIGGER_STATUS_PASS   (-1)
+
+typedef enum {
+    BS_TFAMILY_PATH = 0,
+    BS_TFAMILY_COOKIE,
+    BS_TFAMILY_ENV,
+    BS_TFAMILY_FEEDBACK,
+    BS_TFAMILY_LOAD,
+    BS_TFAMILY_FLAG,
+} bs_trigger_family;
+
+typedef enum {
+    BS_TMODE_ENFORCE = 0,
+    BS_TMODE_OBSERVE,
+} bs_trigger_mode;
+
+typedef enum {
+    BS_TEXEC_PASS_CONTINUE = 0,
+    BS_TEXEC_PASS_BREAK,
+    BS_TEXEC_PASS_DECLINE,
+    BS_TEXEC_STATUS,
+    BS_TEXEC_OBSERVE,
+} bs_trigger_exec_outcome;
+
+typedef struct {
+    int           status_code;    /* HTTP code or BS_TRIGGER_STATUS_PASS */
+    const char   *redirect_url;   /* NULL unless explicitly set */
+    const char   *log_tag;
+    apr_uint32_t  flag_bit;       /* single BS_FLAG_* bit; 0 if ttl_sec==0 */
+    int           ttl_sec;        /* 0 = don't flag the IP */
+    int           penalty;        /* 0..1000 */
+    int           credit;         /* 0..1000 (rejected on path family) */
+    int           status_explicit; /* 1 if operator wrote status= */
+    int           mode;           /* bs_trigger_mode */
+} bs_trigger_action;
+
+/* E7.3 — feedback trigger entry. One per BotShieldFeedbackTrigger
+ * directive; lookup-by-event-name. */
+typedef struct {
+    const char        *event;
+    bs_trigger_action  action;
+} bs_feedback_trigger_entry;
+
+/* ======================================================================
  * Module symbol — extern so other TUs can pass &botshield_module to
  * ap_get_module_config. The definition (and its visibility-default
  * pragma) lives in botshield.c.
@@ -498,6 +548,21 @@ int bs_parse_int64_bounded(const char *s,
                            apr_int64_t min_val,
                            apr_int64_t max_val,
                            apr_int64_t *out);
+
+/* IPv6-prefix mask in place — zero out the trailing (128 - prefix)
+ * bits of an IPv6 address so the SHM tables key on a configured
+ * subscriber prefix instead of the full address. v4-mapped addresses
+ * are left untouched. */
+void bs_mask_ipv6_prefix(unsigned char ip[16], int prefix_bits);
+
+/* Flag-bit name registry — NULL-terminated table of (name, bit)
+ * pairs used by the parse path (operator declares
+ * `flag=honeypot_hit`) and the wire-format renderers
+ * (X-Botshield-Claims `flags=`). Will move to triggers.h or stay
+ * a long-term botshield.h citizen since the bit-meaning vocabulary
+ * is genuinely cross-cutting. */
+extern const struct bs_flag_name { const char *name; apr_uint32_t bit; }
+       bs_flag_names[];
 
 /* Form-body reader — slurps a POST body up to `max_len` and writes
  * it as a NUL-terminated string. Returns APR_SUCCESS or an APR
@@ -564,6 +629,14 @@ const char *bs_get_cookie_value(request_rec *r, const char *name);
 bs_request_score *bs_get_score(request_rec *r, int create);
 const char *bs_decision_reason_names(apr_pool_t *p,
                                      const bs_request_score *s);
+
+/* Tier-name string (e.g. "pass", "silent", "form", "captcha"). Will
+ * move to challenge.h or stay here long-term. */
+const char *bs_tier_name(bs_tier t);
+
+/* E7.3 feedback-trigger lookup (will move to triggers.h in Phase 6). */
+const bs_feedback_trigger_entry *bs_feedback_trigger_find(
+    const struct bs_server_cfg *scfg, const char *event);
 
 #ifdef __cplusplus
 }
