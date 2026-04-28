@@ -14,7 +14,7 @@
  * This file owns ONLY the building blocks: UA classifier, CIDR
  * loader, and the built-in bot table. The request-time orchestrator
  * (bs_check_allow) and the BotShieldAllowBot directive setters live
- * in mod_botshield.c — they read bs_dir_cfg / bs_server_cfg and emit
+ * in botshield.c — they read bs_dir_cfg / bs_server_cfg and emit
  * bs_score_add, both of which are module-internal concerns. */
 #ifndef BOTSHIELD_ALLOWLIST_H
 #define BOTSHIELD_ALLOWLIST_H

@@ -21,7 +21,7 @@ extern "C" {
 
 /* Emit one M9.1 decision log line and bump the matching M9.2 counter
  * dimensions. Caller composes the reason string (typically via
- * bs_decision_reason_names — still in mod_botshield.c since it
+ * bs_decision_reason_names — still in botshield.c since it
  * walks the request-scoped score struct). All string args may be NULL
  * or "-"; renderer substitutes "-" for NULL and skips counter dimensions
  * that don't map. */
@@ -50,7 +50,7 @@ const char *bs_decision_cookie_status(const char *verify_reason,
 void bs_set_trigger_tag(request_rec *r, const char *tag);
 
 /* /botshield/metrics handler — Prometheus exposition format 0.0.4.
- * Mounted via the request dispatcher in mod_botshield.c. Apache's
+ * Mounted via the request dispatcher in botshield.c. Apache's
  * <Location> + Require* gates access; this module emits to anyone
  * who reaches the handler. */
 int bs_metrics_handler(request_rec *r);

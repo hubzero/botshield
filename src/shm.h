@@ -202,7 +202,7 @@ typedef enum {
 
 /* E11 load-aware throttling state — value lives in
  * bs_shm_header.load_state (as apr_uint32_t for atomic access). The
- * sampler watchdog + hysteresis logic lives in mod_botshield.c; the
+ * sampler watchdog + hysteresis logic lives in botshield.c; the
  * tunables below are exposed here because the enum is. */
 typedef enum {
     BS_LOAD_NORMAL = 0,
@@ -407,7 +407,7 @@ typedef struct {
     apr_size_t           nonce_capacity;
 } bs_shm_runtime;
 
-/* Module-global. Defined in shm.c; mod_botshield.c
+/* Module-global. Defined in shm.c; botshield.c
  * (and its post_config in particular) writes the slot pointers
  * into this directly during SHM segment layout. */
 extern bs_shm_runtime bs_shm;
@@ -434,7 +434,7 @@ apr_uint64_t bs_siphash24(const unsigned char key[16],
                           const unsigned char *data, apr_size_t len);
 
 /* Bit-population count over a buffer. Used by Bloom-fill metrics
- * gauges (in mod_botshield.c) and the headroom watchdog (here).
+ * gauges (in botshield.c) and the headroom watchdog (here).
  * Uses relaxed atomic loads — Bloom buffers are concurrently
  * mutated; popcount is inherently an approximation. */
 apr_uint64_t bs_popcount_buffer(const unsigned char *buf,

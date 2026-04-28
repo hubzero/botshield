@@ -4,7 +4,7 @@
  * shaped tables live here. This file owns:
  *
  *   - The bs_shm runtime global (struct definition: bs_shm_runtime in
- *     the header). mod_botshield.c writes the slot pointers into it
+ *     the header). botshield.c writes the slot pointers into it
  *     during the SHM segment layout pass in post_config; lookups and
  *     mutators read it through the public functions below.
  *
@@ -122,7 +122,7 @@ apr_uint64_t bs_siphash24(const unsigned char key[16],
 /* ======================================================================
  * Popcount helpers
  *
- * Used by bloom-fill metric gauges (in mod_botshield.c via the public
+ * Used by bloom-fill metric gauges (in botshield.c via the public
  * bs_popcount_buffer) and the headroom watchdog (here).
  * ====================================================================== */
 

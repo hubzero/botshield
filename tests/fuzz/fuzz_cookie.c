@@ -25,12 +25,12 @@
  * Run  : `tests/fuzz/run.sh [seconds]`
  *
  * Strategy notes on the include:
- *   We #include src/mod_botshield.c directly so every static function
+ *   We #include src/botshield.c directly so every static function
  *   (bs_from_hex, bs_challenge_canonical, bs_hmac_sha256,
  *   bs_ct_equal, bs_find_algorithm, the pow algorithm table) is
  *   reachable without exporting them in a header. The Apache runtime
  *   symbols (ap_log_rerror, ap_hook_*, module declaration, etc.) are
- *   supplied via _fuzz_stubs.h, #included ahead of mod_botshield.c to
+ *   supplied via _fuzz_stubs.h, #included ahead of botshield.c to
  *   hijack specific call sites.
  *
  *   Cost of the approach: the module's post_config hooks and SHM
@@ -42,7 +42,7 @@
 
 /* Stubs for Apache/APR macros that otherwise pull in the whole
  * server runtime. Must be #included first so they define their
- * macros before mod_botshield.c expands them. */
+ * macros before botshield.c expands them. */
 #include "_fuzz_stubs.h"
 
 /* Now the module itself. Defines bs_verify_cookie + all its helpers
@@ -54,7 +54,7 @@
 #include "../../src/crypto.c"
 #include "../../src/allowlist.c"
 #include "../../src/metrics.c"
-#include "../../src/mod_botshield.c"
+#include "../../src/botshield.c"
 
 /* --- Fuzz state (initialized once per process) ---------------------- */
 
