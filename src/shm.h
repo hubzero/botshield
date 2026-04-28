@@ -516,6 +516,12 @@ apr_status_t bs_state_save(apr_pool_t *p, server_rec *s,
                            const bs_shm_runtime *rt);
 apr_status_t bs_state_cleanup(void *data);
 
+/* mod_watchdog tick that calls bs_state_save at the configured
+ * BotShieldStateSaveInterval. Registered against mod_watchdog by
+ * post_config; ignores STARTING / STOPPING events. */
+apr_status_t bs_watchdog_save_cb(int state, void *data,
+                                 apr_pool_t *pool);
+
 /* --- SHM lifecycle ------------------------------------------------ */
 
 apr_status_t bs_shm_cleanup(void *data);

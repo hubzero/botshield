@@ -1571,3 +1571,22 @@ apr_status_t bs_headroom_watchdog_cb(int state, void *data, apr_pool_t *pool)
 
     return APR_SUCCESS;
 }
+
+/* mod_watchdog periodic-save callback. Runs in the parent/watchdog
+ * process context with a short-lived pool. AP_WATCHDOG_STATE_RUNNING
+ * fires at the configured interval. STARTING/STOPPING we ignore; the
+ * graceful-shutdown save still happens via pool cleanup. */
+apr_status_t bs_watchdog_save_cb(int state, void *data,
+                                 apr_pool_t *pool)
+{
+    if (state != AP_WATCHDOG_STATE_RUNNING) return APR_SUCCESS;
+    bs_state_cleanup_ctx *ctx = data;
+    if (!ctx || !ctx->path) return APR_SUCCESS;
+    if (!ctx->shm_rt.shm || !ctx->shm_rt.flagged_table ||
+        !ctx->shm_rt.bloom_bufs[0]) {
+        return APR_SUCCESS;   /* SHM not up yet; nothing to save */
+    }
+    /* Use the callback's own pool so temporaries die with this tick. */
+    bs_state_save(pool, ctx->server, ctx->path, &ctx->shm_rt);
+    return APR_SUCCESS;
+}
