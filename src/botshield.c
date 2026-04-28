@@ -349,9 +349,9 @@ static const command_rec bs_cmds[] = {
                  "with WARNING. Server-scope only."),
     AP_INIT_TAKE1("BotShieldShmSize", bs_set_shm_size, NULL,
                  RSRC_CONF,
-                 "Total shared-memory budget for flagged-IP table and "
-                 "(future) Bloom filter. Accepts K/M/G suffixes. "
-                 "Default: 8M. Range: 128K..256M."),
+                 "Total shared-memory budget for the flagged-IP / strike "
+                 "/ safeguard tables and the Bloom filter. Accepts "
+                 "K/M/G suffixes. Default: 16M. Range: 128K..256M."),
     AP_INIT_TAKE1("BotShieldFlaggedIPCapacity", bs_set_flagged_capacity, NULL,
                  RSRC_CONF,
                  "Slot count in the flagged-IP hash table. Each slot is "
