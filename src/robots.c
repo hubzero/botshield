@@ -10,6 +10,8 @@
  */
 #include "robots.h"
 
+#include <http_log.h>
+
 #include <apr_file_io.h>
 #include <apr_file_info.h>
 #include <apr_strings.h>
@@ -736,4 +738,45 @@ const char *bs_set_robots_wildcard_scope(cmd_parms *cmd, void *dconf,
             "heuristic|strict|off", arg);
     }
     return NULL;
+}
+
+/* The bs_path_pattern_warn_middle_star helper below is a config-time
+ * validator shared by E2.1 BotShieldBlockPath (config.c),
+ * E3 BotShieldPathTrigger (triggers.c), and the request-path glob
+ * matcher (robots.c's bs_path_match). Lives here so all three
+ * callers find it without circular includes. */
+
+/* Surface a NOTICE at config-load when a pattern contains a non-
+ * trailing '*'. Under the retired v1 matcher those characters were
+ * treated as literal bytes (which essentially never matched any
+ * URI). Under the RFC 9309 matcher they're proper wildcards. The
+ * behavior change is desired for operators who intended wildcards;
+ * for operators who fat-fingered a '*' the warning gives them a
+ * heads-up so the new match doesn't surprise them. The trailing '*'
+ * (or '*' followed only by '$') is the documented v1 shape and
+ * stays silent — its behavior didn't change. */
+void bs_path_pattern_warn_middle_star(cmd_parms *cmd,
+                                      const char *directive,
+                                      const char *name,
+                                      const char *pattern)
+{
+    const char *star = strchr(pattern, '*');
+    if (!star) return;
+    /* Find the last '*'. Anything past the last '*' that isn't
+     * empty or "$" means there's content after a wildcard, i.e.
+     * the wildcard is non-trailing. */
+    const char *last_star = star;
+    for (const char *q = star + 1; *q; q++) {
+        if (*q == '*') last_star = q;
+    }
+    const char *tail = last_star + 1;
+    if (*tail == '\0') return;        /* trailing '*' — v1 shape */
+    if (tail[0] == '$' && tail[1] == '\0') return; /* '*$' — v1 shape */
+    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, cmd->server,
+        "mod_botshield: %s '%s' pattern '%s' contains a non-trailing "
+        "'*'; interpreted per RFC 9309 (matches any byte sequence at "
+        "this position). The retired v1 matcher treated middle '*' "
+        "as a literal byte. If the literal was intended, this rule "
+        "will no longer match.",
+        directive, name, pattern);
 }

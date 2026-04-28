@@ -87,90 +87,7 @@
  * bounded numeric parsers). Every other concern fans out through the
  * per-feature includes above. */
 
-int bs_effective_int(int value, int fallback)
-{
-    return (value == BS_UNSET) ? fallback : value;
-}
 
-/* ======================================================================
- * Bounded numeric parsers — used by the canonical-form cookie parser
- * in cookie.c and by directive setters in config.c.
- * ====================================================================== */
-
-/* Bounded integer parser for pre-HMAC cookie fields (security review
- * #2). atoi() and strtoul(..., NULL, 10) both invoke undefined
- * behavior on overflow per C11 §7.22.1 — atoi because the result
- * doesn't fit in int, strtoul because we never check errno. Our
- * ASan/UBSan fuzz can't reliably catch that because the dangerous
- * work happens inside libc, not in instrumented project code.
- *
- * Returns 1 on a clean parse within [min_val, max_val]; 0 otherwise.
- * The out pointer is left untouched on failure so callers can treat
- * 0-returns as "reject this cookie" without dancing around partial
- * state. Accepts optional leading + only; negative values must fall
- * within min_val to be accepted (no underflow tricks).
- *
- * max_len is a hard cap on the digit-string length — rejects gigantic
- * inputs before they reach strtol. A 64-bit long can hold up to 19
- * decimal digits, so any cookie field longer than that is obviously
- * junk and we bail without invoking libc at all. */
-int bs_parse_int_bounded(const char *s,
-                         long min_val, long max_val,
-                         apr_size_t max_len,
-                         long *out)
-{
-    if (!s || !*s) return 0;
-    apr_size_t len = strlen(s);
-    if (len > max_len) return 0;
-
-    errno = 0;
-    char *end = NULL;
-    long v = strtol(s, &end, 10);
-    if (errno != 0)        return 0;  /* ERANGE or other libc complaint */
-    if (!end || *end != '\0') return 0;  /* trailing junk */
-    if (v < min_val || v > max_val) return 0;
-    *out = v;
-    return 1;
-}
-
-/* 32-bit unsigned variant for the flags field. strtoul also invokes
- * UB on overflow if errno isn't checked — same hardening. */
-int bs_parse_uint32_bounded(const char *s,
-                            apr_size_t max_len,
-                            apr_uint32_t *out)
-{
-    if (!s || !*s) return 0;
-    if (strlen(s) > max_len) return 0;
-
-    errno = 0;
-    char *end = NULL;
-    unsigned long v = strtoul(s, &end, 10);
-    if (errno != 0)        return 0;
-    if (!end || *end != '\0') return 0;
-    if (v > UINT32_MAX)    return 0;
-    *out = (apr_uint32_t)v;
-    return 1;
-}
-
-/* int64 variant for expires_at / challenged_at (apr_time_t seconds).
- * Same shape; max_len caps at 19 (largest int64 decimal expansion). */
-int bs_parse_int64_bounded(const char *s,
-                           apr_int64_t min_val,
-                           apr_int64_t max_val,
-                           apr_int64_t *out)
-{
-    if (!s || !*s) return 0;
-    if (strlen(s) > 19) return 0;
-
-    errno = 0;
-    char *end = NULL;
-    long long v = strtoll(s, &end, 10);
-    if (errno != 0)        return 0;
-    if (!end || *end != '\0') return 0;
-    if ((apr_int64_t)v < min_val || (apr_int64_t)v > max_val) return 0;
-    *out = (apr_int64_t)v;
-    return 1;
-}
 
 /* Challenge issuance (bs_issue_challenge), the canonical-form HMAC
  * input (bs_challenge_canonical), the PoW algorithm registry, the
@@ -183,92 +100,8 @@ int bs_parse_int64_bounded(const char *s,
  * the M8.1 pending-cookie pair, and the captcha-verify request
  * handler are all reachable through that header. */
 
-/* Parse r->useragent_ip into a 16-byte network-order buffer. IPv4
- * becomes v6-mapped (::ffff:a.b.c.d) so the table is keyed uniformly.
- * Returns 1 on success, 0 if the string is unparseable. */
-int bs_parse_client_ip(const char *ip_str, unsigned char out[16])
-{
-    if (!ip_str || !*ip_str) return 0;
-    struct in_addr v4;
-    if (inet_pton(AF_INET, ip_str, &v4) == 1) {
-        memset(out, 0, 10);
-        out[10] = 0xff; out[11] = 0xff;
-        memcpy(out + 12, &v4, 4);
-        return 1;
-    }
-    struct in6_addr v6;
-    if (inet_pton(AF_INET6, ip_str, &v6) == 1) {
-        memcpy(out, &v6, 16);
-        return 1;
-    }
-    return 0;
-}
 
-/* Apply an IPv6 prefix mask in-place so same-subnet v6 clients collapse
- * to one key in the flagged-IP table. This bounds the attacker's ability
- * to rotate through a /64 allocation to shed flags.
- *
- * IPv4 (carried as v6-mapped, ::ffff:a.b.c.d) is never masked: the v4
- * economy is per-/32, not per-/24.
- *
- * prefix_bits == 128 or prefix_bits <= 0 → no-op. */
-void bs_mask_ipv6_prefix(unsigned char ip[16], int prefix_bits)
-{
-    static const unsigned char v4mapped[12] =
-        { 0,0,0,0, 0,0,0,0, 0,0, 0xff,0xff };
-    if (memcmp(ip, v4mapped, 12) == 0) return;       /* v4-in-v6: leave alone */
-    if (prefix_bits <= 0 || prefix_bits >= 128) return;
 
-    int full_bytes  = prefix_bits / 8;
-    int extra_bits  = prefix_bits % 8;
-    if (extra_bits) {
-        unsigned char keep = (unsigned char)(0xff << (8 - extra_bits));
-        ip[full_bytes] &= keep;
-        full_bytes++;
-    }
-    for (int i = full_bytes; i < 16; i++) ip[i] = 0;
-}
-
-/* The bs_path_pattern_warn_middle_star helper below is a config-time
- * validator shared by E2.1 BotShieldBlockPath (config.c),
- * E3 BotShieldPathTrigger (triggers.c), and the request-path glob
- * matcher (robots.c's bs_path_match). Lives here so all three
- * callers find it without circular includes. */
-
-/* Surface a NOTICE at config-load when a pattern contains a non-
- * trailing '*'. Under the retired v1 matcher those characters were
- * treated as literal bytes (which essentially never matched any
- * URI). Under the RFC 9309 matcher they're proper wildcards. The
- * behavior change is desired for operators who intended wildcards;
- * for operators who fat-fingered a '*' the warning gives them a
- * heads-up so the new match doesn't surprise them. The trailing '*'
- * (or '*' followed only by '$') is the documented v1 shape and
- * stays silent — its behavior didn't change. */
-void bs_path_pattern_warn_middle_star(cmd_parms *cmd,
-                                      const char *directive,
-                                      const char *name,
-                                      const char *pattern)
-{
-    const char *star = strchr(pattern, '*');
-    if (!star) return;
-    /* Find the last '*'. Anything past the last '*' that isn't
-     * empty or "$" means there's content after a wildcard, i.e.
-     * the wildcard is non-trailing. */
-    const char *last_star = star;
-    for (const char *q = star + 1; *q; q++) {
-        if (*q == '*') last_star = q;
-    }
-    const char *tail = last_star + 1;
-    if (*tail == '\0') return;        /* trailing '*' — v1 shape */
-    if (tail[0] == '$' && tail[1] == '\0') return; /* '*$' — v1 shape */
-    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, cmd->server,
-        "mod_botshield: %s '%s' pattern '%s' contains a non-trailing "
-        "'*'; interpreted per RFC 9309 (matches any byte sequence at "
-        "this position). The retired v1 matcher treated middle '*' "
-        "as a literal byte. If the literal was intended, this rule "
-        "will no longer match.",
-        directive, name, pattern);
-}
 
 
 /* ======================================================================
@@ -445,20 +278,6 @@ apr_status_t bs_robots_watchdog_cb(int state, void *data,
 
 
 
-/* NULL-terminated name+bit projection for the legacy parse sites
- * (bs_parse_flag_names, bs_app_claims_flag_names) that iterate via
- * a sentinel rather than a count. Struct is named (`bs_flag_name`)
- * so botshield.h can `extern`-declare the array. */
-const struct bs_flag_name bs_flag_names[] = {
-    { "honeypot_hit",         BS_FLAG_HONEYPOT_HIT         },
-    { "scanner_probe",        BS_FLAG_SCANNER_PROBE        },
-    { "fake_bot",             BS_FLAG_FAKE_BOT             },
-    { "pow_fail_streak",      BS_FLAG_POW_FAIL_STREAK      },
-    { "app_verified_human",   BS_FLAG_APP_VERIFIED_HUMAN   },
-    { "app_verified_session", BS_FLAG_APP_VERIFIED_SESSION },
-    { "app_trust_signal",     BS_FLAG_APP_TRUST_SIGNAL     },
-    { NULL, 0 }
-};
 
 
 
@@ -507,44 +326,6 @@ apr_status_t bs_watchdog_save_cb(int state, void *data,
     return APR_SUCCESS;
 }
 
-/* The E14 flag-trigger walker (bs_apply_flag_triggers) lives in
- * score.c. bs_flag_names[] is defined further up this file (the
- * NULL-terminated name+bit array bs_parse_flag_names iterates). */
-
-apr_uint32_t bs_parse_flag_names(apr_pool_t *p, const char *s,
-                                 const char **err)
-{
-    apr_uint32_t bits = 0;
-    *err = NULL;
-    const char *cur = s;
-    while (cur && *cur) {
-        const char *comma = strchr(cur, ',');
-        apr_size_t len = comma ? (apr_size_t)(comma - cur) : strlen(cur);
-        while (len && (*cur == ' ' || *cur == '\t')) { cur++; len--; }
-        while (len && (cur[len-1] == ' ' || cur[len-1] == '\t')) { len--; }
-
-        int matched = 0;
-        for (int i = 0; bs_flag_names[i].name; i++) {
-            apr_size_t nlen = strlen(bs_flag_names[i].name);
-            if (nlen == len &&
-                strncasecmp(cur, bs_flag_names[i].name, nlen) == 0) {
-                bits |= bs_flag_names[i].bit;
-                matched = 1;
-                break;
-            }
-        }
-        if (!matched) {
-            *err = apr_psprintf(p, "unknown flag name '%.*s' "
-                "(known penalty bits: honeypot_hit, scanner_probe, "
-                "fake_bot, pow_fail_streak; credit bits: "
-                "app_verified_human, app_verified_session, "
-                "app_trust_signal)", (int)len, cur);
-            return 0;
-        }
-        cur = comma ? comma + 1 : NULL;
-    }
-    return bits;
-}
 
 
 /* All directive setters now live in their feature files (config.c
