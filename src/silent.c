@@ -911,12 +911,28 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
     long http_code = 0;
     double score = -1.0;
     const char *resp_hostname = NULL, *resp_action = NULL;
-    bs_captcha_result res = bs_captcha_siteverify(r,
-        cfg->captcha_provider, cfg->captcha_secret,
-        cfg->captcha_secret_len, token, timeout_ms,
-        cfg->captcha_ca_bundle,
+    /* Centralized guarded siteverify so embedded-verify gets the
+     * same per-IP rate cap and global in-flight semaphore as the
+     * /captcha-verify handler. Without the wrapper, this path was
+     * a provider-quota / worker-occupancy DoS surface. */
+    bs_captcha_result res = bs_captcha_siteverify_guarded(r, cfg, token,
+        timeout_ms, "embedded-verify",
         &details, &http_code, &score, &resp_hostname, &resp_action);
 
+    if (res == BS_CAPTCHA_RATE_LIMITED) {
+        r->status = HTTP_TOO_MANY_REQUESTS;
+        apr_table_setn(r->err_headers_out, "Retry-After", "60");
+        apr_table_setn(r->err_headers_out, "X-Botshield",
+                       "captcha-rate-limited");
+        return OK;
+    }
+    if (res == BS_CAPTCHA_INFLIGHT_CAPPED) {
+        r->status = HTTP_SERVICE_UNAVAILABLE;
+        apr_table_setn(r->err_headers_out, "Retry-After", "2");
+        apr_table_setn(r->err_headers_out, "X-Botshield",
+                       "captcha-saturated");
+        return OK;
+    }
     if (res != BS_CAPTCHA_OK) {
         r->status = HTTP_FORBIDDEN;
         ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,

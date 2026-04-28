@@ -47,10 +47,16 @@ typedef struct bs_dir_cfg bs_dir_cfg;
 typedef struct bs_captcha_provider bs_captcha_provider;
 
 typedef enum {
-    BS_CAPTCHA_OK       = 0,
-    BS_CAPTCHA_REJECTED = 1,
-    BS_CAPTCHA_TIMEOUT  = 2,
-    BS_CAPTCHA_ERROR    = 3
+    BS_CAPTCHA_OK              = 0,
+    BS_CAPTCHA_REJECTED        = 1,
+    BS_CAPTCHA_TIMEOUT         = 2,
+    BS_CAPTCHA_ERROR           = 3,
+    /* Guard short-circuits emitted by bs_captcha_siteverify_guarded.
+     * Caller maps to HTTP status (typically 429 / 503) and emits its
+     * own decision_log line so the tier label matches the call site
+     * (captcha / silent / form). */
+    BS_CAPTCHA_RATE_LIMITED    = 4,
+    BS_CAPTCHA_INFLIGHT_CAPPED = 5
 } bs_captcha_result;
 
 /* Provider-specific siteverify function. NULL on the provider row
@@ -121,6 +127,38 @@ bs_captcha_result bs_captcha_siteverify(request_rec *r,
                                         double *out_score,
                                         const char **out_hostname,
                                         const char **out_action);
+
+/* Centralized siteverify wrapper. Applies the M8.1 guard rail
+ * (per-IP rate limit + global in-flight semaphore) before
+ * dispatching to the provider-specific or shared siteverify path.
+ * Used by /captcha-verify, /embedded-verify-provider (E17), and
+ * bs_form_captcha_fixup (E18) so all three paths get the same
+ * provider-quota and worker-occupancy DoS protection that the
+ * /captcha-verify handler had inline.
+ *
+ * Returns the same bs_captcha_result enum plus two new variants
+ * (BS_CAPTCHA_RATE_LIMITED, BS_CAPTCHA_INFLIGHT_CAPPED). Caller
+ * maps to HTTP status (typically 429 / 503) and emits its own
+ * decision_log line.
+ *
+ * `log_tag` is a short identifier for the call site
+ * ("captcha-verify", "embedded-verify", "form-captcha") woven into
+ * the rate-limit / in-flight log lines. The token must already be
+ * non-NULL, non-empty, and length-bounded by the caller (each call
+ * site has its own body shape). Resolves the provider verify_fn
+ * (provider-specific override or shared bs_captcha_siteverify) and
+ * dispatches once the guards pass. */
+bs_captcha_result bs_captcha_siteverify_guarded(
+    request_rec *r,
+    const bs_dir_cfg *cfg,
+    const char *token,
+    int timeout_ms,
+    const char *log_tag,
+    const char **out_details,
+    long *out_http_code,
+    double *out_score,
+    const char **out_hostname,
+    const char **out_action);
 
 const char *bs_mint_pending_cookie(request_rec *r,
                                    const bs_dir_cfg *cfg);

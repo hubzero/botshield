@@ -32,6 +32,7 @@
 #include <apr_strings.h>
 
 #include "botshield.h"
+#include "allowlist.h" /* bs_parse_client_ip, bs_mask_ipv6_prefix */
 #include "challenge.h"
 #include "cookie.h"
 #include "crypto.h"

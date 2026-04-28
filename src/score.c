@@ -43,17 +43,23 @@ void bs_score_add(request_rec *r, int penalty,
                   int ttl_seconds, const char *reason)
 {
     bs_request_score *s = bs_get_score(r, 1);
+
+    /* Score total accumulates regardless of the per-reason cap. The
+     * cap only truncates the audit trail; dropping the penalty too
+     * would let a noisy stream of low-value reasons silently mask a
+     * later high-value signal that lands past the 16th call. */
+    s->total += penalty;
+
     if (s->entries->nelts >= BS_SCORE_MAX_REASONS) {
         /* Silent drop on cap could mask a runaway loop or a
          * misconfigured rule fanout. Log once at DEBUG so the
          * diagnostic surfaces under verbose-logging without
-         * spamming production. The total still accumulates from
-         * the entries we kept; it's only the per-reason audit trail
-         * that's truncated past this point. */
+         * spamming production. */
         if (!s->cap_warned) {
             ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
                 "mod_botshield: score-reason cap (%d) reached for %s; "
-                "further bs_score_add calls drop their reason silently",
+                "further bs_score_add calls drop their reason silently "
+                "(score total still accumulates)",
                 BS_SCORE_MAX_REASONS, r->uri);
             s->cap_warned = 1;
         }
@@ -63,7 +69,6 @@ void bs_score_add(request_rec *r, int penalty,
     e->penalty     = penalty;
     e->ttl_seconds = ttl_seconds;
     e->reason      = reason;
-    s->total      += penalty;
 }
 
 /* Join the request's score-reason names (no penalties) into a single
