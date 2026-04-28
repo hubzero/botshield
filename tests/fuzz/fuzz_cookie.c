@@ -56,6 +56,7 @@
 #include "../../src/metrics.c"
 #include "../../src/silent.c"
 #include "../../src/captcha.c"
+#include "../../src/bridge.c"
 #include "../../src/botshield.c"
 
 /* --- Fuzz state (initialized once per process) ---------------------- */

@@ -68,6 +68,7 @@
 #include "botshield.h" /* module-wide types: bs_dir_cfg, bs_server_cfg, ... */
 #include "silent.h"    /* E17 — silent-tier embedded handlers + bootstrap-sig */
 #include "captcha.h"   /* M8 — provider registry, siteverify, pending cookie */
+#include "bridge.h"    /* E5 + E8.2 — module ↔ app feedback / claims bridge */
 
 /* Cross-cutting config defaults (BS_DEFAULT_*, BS_MAX_*, BS_UNSET,
  * cookie name strings, etc.) live in botshield.h so every TU that
@@ -1393,7 +1394,7 @@ int bs_parse_client_ip(const char *ip_str, unsigned char out[16])
  * economy is per-/32, not per-/24.
  *
  * prefix_bits == 128 or prefix_bits <= 0 → no-op. */
-static void bs_mask_ipv6_prefix(unsigned char ip[16], int prefix_bits)
+void bs_mask_ipv6_prefix(unsigned char ip[16], int prefix_bits)
 {
     static const unsigned char v4mapped[12] =
         { 0,0,0,0, 0,0,0,0, 0,0, 0xff,0xff };
@@ -1699,111 +1700,11 @@ typedef struct {
  * IP flagging. `penalty` is only applied when status is a concrete
  * error code — under PASS it's bookkeeping-only and we skip the
  * score_add (see PLAN.md E3 semantics). */
-#define BS_TRIGGER_STATUS_PASS   (-1)
-
-/* E7.2 — shared action engine for path/cookie/env trigger families.
- *
- * Every trigger family parses a family-unique predicate (path-glob,
- * cookie-match, env-match) and shares the same action vocabulary
- * after the predicate: status / redirect / log / flag / ttl /
- * penalty / credit. `bs_trigger_action` holds the parsed action
- * surface; `bs_trigger_family` selects the semantic profile the
- * executor applies.
- *
- * Deliberate family differences that the profile encodes (not
- * erased by the shared engine):
- *   - allowed key subset
- *       path rejects credit=     (discrete events, not reputation)
- *       env  rejects redirect=   (scoring/flagging only)
- *   - status=pass scoring
- *       path skips score_add     (pass means "don't enforce here")
- *       cookie/env apply penalty-credit (signal is this request's
- *                                  state, so it belongs on this
- *                                  request's score)
- *   - pass-match iteration
- *       path decays to DECLINED  (hand off to real handler)
- *       cookie continues loop    (pass-credits accumulate)
- *       env breaks loop          (discrete env signals, no stacking)
- *   - family defaults
- *       path  status=403, flag=scanner_probe, ttl=3600
- *       cookie status=PASS, no flag
- *       env    status=PASS, no flag
- */
-typedef enum {
-    BS_TFAMILY_PATH = 0,
-    BS_TFAMILY_COOKIE,
-    BS_TFAMILY_ENV,
-    /* Response-path family: E5 feedback. Signed `event=<name>`
-     * header arrives on the response, module looks up the event in
-     * scfg->feedback_triggers, and applies the configured action.
-     * Only the future-request subset (flag/ttl/log) is supported —
-     * the request is already served, so status/redirect/penalty/
-     * credit would have nowhere to land. The shared parser rejects
-     * those keys for this family. */
-    BS_TFAMILY_FEEDBACK,
-    /* E11.2 — host-state family. Predicate is a comparison against
-     * the global cached load_state (BS_LOAD_NORMAL/WARM/HOT) — no
-     * per-request match. Action surface is penalty/credit/status/
-     * log; flag= is rejected because load is global state, not a
-     * property worth memorizing per-IP. */
-    BS_TFAMILY_LOAD,
-    /* Flag-trigger family. Predicate is "this flag bit is set on
-     * this request's IP and/or cookie." Action surface is two
-     * distinct verbs that bypass the shared bs_trigger_action
-     * engine entirely (the existing penalty/credit/status surface
-     * doesn't fit): `score add=N` (signed, accumulates via SUM)
-     * and `tier_floor min=T` (accumulates via MAX). Storage uses
-     * a separate bs_flag_trigger_entry struct. The family enum
-     * label exists so observe-mode and family-name reporting
-     * follow the same conventions as the other families. */
-    BS_TFAMILY_FLAG,
-} bs_trigger_family;
-
-typedef struct {
-    int           status_code;    /* HTTP code or BS_TRIGGER_STATUS_PASS */
-    const char   *redirect_url;   /* NULL unless explicitly set */
-    const char   *log_tag;
-    apr_uint32_t  flag_bit;       /* single M5.1 bit; 0 if ttl_sec==0 */
-    int           ttl_sec;        /* 0 = don't flag the IP */
-    int           penalty;        /* 0..1000 */
-    int           credit;         /* 0..1000 (rejected on path family) */
-    int           status_explicit; /* 1 if operator wrote status= */
-    /* E12 — shadow mode. BS_TMODE_ENFORCE (default) is normal
-     * behavior. BS_TMODE_OBSERVE makes a matched rule LOG what it
-     * would have done — :observe suffix on the reason string,
-     * mode-specific metric counter — but applies no side effects:
-     * no flag-IP, no score, no status/redirect, no log tag side-
-     * effect. Operators stage new rules safely and watch the
-     * decision log before turning enforce on.
-     *
-     * Server-wide counterpart: BotShieldShadowMode forces every
-     * rule to observe regardless of its individual setting.
-     * Combined via OR at the use sites
-     * (`global_shadow || e->mode == BS_TMODE_OBSERVE`) — either
-     * path says observe and the rule runs dry-run. */
-    int           mode;           /* bs_trigger_mode */
-} bs_trigger_action;
-
-typedef enum {
-    BS_TMODE_ENFORCE = 0,
-    BS_TMODE_OBSERVE,
-} bs_trigger_mode;
-
-typedef enum {
-    BS_TEXEC_PASS_CONTINUE = 0,  /* pass-match; stay in family loop */
-    BS_TEXEC_PASS_BREAK,         /* pass-match; exit this family's loop */
-    BS_TEXEC_PASS_DECLINE,       /* pass-match; return DECLINED from policy */
-    BS_TEXEC_STATUS,             /* emit status/redirect; short-circuit */
-    /* E12 — observe-only match: rule fired but took no enforcing
-     * action. Caller treats this as `continue` so subsequent rules
-     * in the same family still get a chance. */
-    BS_TEXEC_OBSERVE,
-} bs_trigger_exec_outcome;
 
 /* Forward declarations — bs_check_policy (E3 path) calls these; they
  * live alongside their primary users further down the file.
  * (bs_parse_client_ip is now declared in botshield.h.) */
-static void bs_mask_ipv6_prefix(unsigned char ip[16], int prefix_bits);
+/* bs_mask_ipv6_prefix is now declared cross-file in botshield.h. */
 /* E11 — load-state read used by bs_check_policy's load-trigger
  * walk. Declaration here so the walk compiles before the body. */
 static bs_load_state bs_load_current(void);
@@ -1926,16 +1827,9 @@ typedef struct {
     bs_trigger_action  action;        /* shared; see bs_trigger_action */
 } bs_env_trigger_entry;
 
-/* E7.3 — BotShieldFeedbackTrigger <event> [key=value ...]. The
- * `event` is the app-visible name carried in the signed X-BotShield-
- * Feedback header body (`event=<name>`). The action bound to that
- * name — flag bit + TTL + optional log tag — lives in scfg; the app
- * can't set module internals through the wire anymore. One entry
- * per declaration; upsert-by-event-name. */
-typedef struct {
-    const char        *event;
-    bs_trigger_action  action;
-} bs_feedback_trigger_entry;
+/* bs_feedback_trigger_entry now declared in botshield.h alongside
+ * bs_trigger_action so bridge.c (E5) can use it without dragging the
+ * full trigger system. */
 
 /* E11.2 — BotShieldLoadTrigger <name> <load-match> [key=value ...].
  * Predicate is a comparison against the global cached load_state.
@@ -3110,277 +3004,6 @@ static bs_load_state bs_load_current(void)
 }
 
 
-/* ======================================================================
- * E5 — App-to-module reputation feedback.
- *
- * App emits `X-BotShield-Feedback: event=<name>[;kid=<id>];sig=<hex>` on
- * its response. Module reads, HMAC-verifies, parses, strips the header,
- * looks up `<name>` in scfg->feedback_triggers (see E7.3's
- * BotShieldFeedbackTrigger directive), and applies the configured
- * flag+ttl+log. The wire carries *event names*, not raw flag/ttl
- * policy — operators control the mapping from event → module memory
- * in their Apache config, so an app compromise can't poke arbitrary
- * flag bits.
- *
- * Flag bits can be penalty (honeypot_hit, scanner_probe, fake_bot,
- * pow_fail_streak) or credit (app_verified_human, app_verified_session,
- * app_trust_signal); same wire format, different bit semantics on the
- * config side of the event-name indirection.
- *
- * Implementation rules (see PLAN.md E5):
- *   1. Run as an output filter so stripping happens before the
- *      response reaches the client. log_transaction would be too late.
- *   2. Always strip when the header is present, even if the feature
- *      is off — a misconfigured app must not leak the header to clients.
- *   3. Duplicate headers → reject + strip all instances.
- *   4. Main request only (ap_is_initial_req).
- *   5. One-shot per request: the filter removes itself after processing.
- *
- * Wire-format change (E7.3): pre-E7.3 apps signed
- * `flag=<name>;ttl=<sec>;sig=<hex>` directly. The body now carries
- * `event=<name>;sig=<hex>` and the flag/ttl come from config. Apps
- * must migrate their signer; the old body shape is rejected at
- * HMAC-verify time (the `flag=` / `ttl=` tokens are no longer HMAC-
- * covered under the new wire format, so signatures won't match).
- * ====================================================================== */
-
-static ap_filter_rec_t *bs_app_feedback_filter_handle;
-
-/* Count how many header entries match `name` (case-insensitive)
- * across both headers_out tables. apr_table_get only returns the
- * first; we need the count to catch duplicates up front, before
- * calling apr_table_unset (which removes all of them). Check both
- * r->headers_out AND r->err_headers_out — mod_headers' "Header
- * set" writes to the former; "Header always set" writes to the
- * latter (which Apache still merges into the on-wire response
- * regardless of status). If we only looked at one, a conditional
- * `Header set` from a 404 handler would miss the strip. */
-static int bs_count_header_in_table(apr_table_t *t, const char *name)
-{
-    if (!t) return 0;
-    const apr_array_header_t *arr = apr_table_elts(t);
-    int count = 0;
-    for (int i = 0; i < arr->nelts; i++) {
-        apr_table_entry_t *e = &((apr_table_entry_t *)arr->elts)[i];
-        if (e->key && strcasecmp(e->key, name) == 0) count++;
-    }
-    return count;
-}
-static int bs_count_header(request_rec *r, const char *name)
-{
-    return bs_count_header_in_table(r->headers_out, name)
-         + bs_count_header_in_table(r->err_headers_out, name);
-}
-
-/* Parse + HMAC-verify a single X-BotShield-Feedback value under the
- * E7.3 wire format (`event=<name>[;...];sig=<hex>`). On success the
- * pool-allocated event name lands in *out_event and NULL is returned.
- * On failure returns an error string for logging and leaves
- * *out_event untouched. Caller looks up the event in
- * scfg->feedback_triggers to decide what the event means. */
-static const char *bs_app_feedback_verify(apr_pool_t *p,
-                                          const unsigned char *key,
-                                          apr_size_t key_len,
-                                          const char *value,
-                                          const char **out_event)
-{
-    if (!key || key_len == 0) return "no secret configured";
-    if (!value || !*value) return "empty header value";
-
-    /* Find ";sig=" — everything before it is HMAC-covered. */
-    const char *sig_marker = strstr(value, ";sig=");
-    if (!sig_marker) return "missing sig= field";
-    apr_size_t signed_len = (apr_size_t)(sig_marker - value);
-    const char *sig_hex = sig_marker + 5;
-    if (strlen(sig_hex) != 64) return "sig must be 64 hex chars";
-
-    unsigned char expected[32];
-    bs_hmac_sha256(key, key_len,
-                   (const unsigned char *)value, signed_len,
-                   expected);
-    unsigned char given[32];
-    if (!bs_from_hex(sig_hex, 64, 32, given)) return "sig not hex";
-    if (!bs_ct_equal(expected, given, 32)) return "signature mismatch";
-
-    /* Parse key=value pairs up to (but not including) ;sig=. The
-     * only semantic key is event=; everything else (kid, tid, etc.)
-     * is tolerated so apps can include their own correlation IDs
-     * under the HMAC without churning this parser. */
-    char *body = apr_pstrmemdup(p, value, signed_len);
-    char *state = NULL;
-    const char *event_name = NULL;
-    for (char *tok = apr_strtok(body, ";", &state); tok;
-         tok = apr_strtok(NULL, ";", &state)) {
-        while (*tok == ' ' || *tok == '\t') tok++;
-        char *eq = strchr(tok, '=');
-        if (!eq) continue;
-        *eq = '\0';
-        const char *k = tok;
-        const char *v = eq + 1;
-        if (!strcasecmp(k, "event")) {
-            event_name = v;
-        }
-        /* Pre-E7.3 bodies carried flag= / ttl= directly. Those
-         * tokens would now be ignored here, but they were part of
-         * the HMAC-covered bytes under the OLD key layout. Under
-         * the new format the signer covers only event=<name>, so
-         * an old body would fail HMAC verification above before
-         * reaching this parse. No explicit "reject pre-E7.3"
-         * branch is needed — the crypto catches it. */
-    }
-
-    if (!event_name || !*event_name) return "missing event= field";
-    /* Event names follow the same constrained shape as trigger
-     * names so operators can always reason about what a signed
-     * body means. Enforced here so an injected ';' or '=' inside
-     * the value can't confuse the upcoming lookup. */
-    apr_size_t elen = strlen(event_name);
-    if (elen == 0 || elen > 32) {
-        return "event name must be 1..32 chars";
-    }
-    for (apr_size_t i = 0; i < elen; i++) {
-        unsigned char c = (unsigned char)event_name[i];
-        int ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
-              || c == '-';
-        if (!ok) return "event name must be [a-z0-9-]";
-    }
-
-    *out_event = apr_pstrdup(p, event_name);
-    return NULL;
-}
-
-/* Look up an event name in scfg->feedback_triggers. Returns the
- * matching entry or NULL. Declaration order, first match wins (no
- * accumulation — an event is a discrete app-originated signal). */
-static const bs_feedback_trigger_entry *bs_feedback_trigger_find(
-    struct bs_server_cfg *scfg, const char *event)
-{
-    if (!scfg || !scfg->feedback_triggers || !event) return NULL;
-    for (int i = 0; i < scfg->feedback_triggers->nelts; i++) {
-        bs_feedback_trigger_entry *e = APR_ARRAY_IDX(
-            scfg->feedback_triggers, i, bs_feedback_trigger_entry *);
-        if (strcmp(e->event, event) == 0) return e;
-    }
-    return NULL;
-}
-
-/* Output-filter callback. Runs once per initial request: reads
- * r->headers_out for the configured feedback header, strips every
- * occurrence, and (if the feature is enabled and exactly one copy
- * was found) validates the HMAC and updates the flagged-IP table. */
-static apr_status_t bs_app_feedback_filter(ap_filter_t *f,
-                                           apr_bucket_brigade *bb)
-{
-    request_rec *r = f->r;
-
-    /* One-shot: remove before processing to avoid re-entry on
-     * subsequent brigade passes. */
-    ap_remove_output_filter(f);
-
-    if (!ap_is_initial_req(r)) {
-        return ap_pass_brigade(f->next, bb);
-    }
-
-    bs_server_cfg *scfg =
-        ap_get_module_config(r->server->module_config, &botshield_module);
-    if (!scfg) return ap_pass_brigade(f->next, bb);
-
-    const char *hname = scfg->app_feedback_header
-                      ? scfg->app_feedback_header
-                      : BS_APP_FEEDBACK_DEFAULT_HEADER;
-
-    int n = bs_count_header(r, hname);
-    if (n == 0) return ap_pass_brigade(f->next, bb);
-
-    /* Snapshot the first value BEFORE we strip — we still want to
-     * verify and apply it if there's exactly one. Check both tables
-     * since mod_headers' `Header set` and `Header always set` go
-     * to different ones. */
-    const char *first_val = apr_table_get(r->headers_out, hname);
-    if (!first_val) first_val = apr_table_get(r->err_headers_out, hname);
-    char *snapshot = first_val ? apr_pstrdup(r->pool, first_val) : NULL;
-
-    /* Always strip — see PLAN.md E5 rule 2. Removes every copy at
-     * once (from both tables) so duplicates don't leak even when
-     * we reject them. */
-    apr_table_unset(r->headers_out, hname);
-    apr_table_unset(r->err_headers_out, hname);
-
-    int enabled = (scfg->app_feedback_enabled == 1);
-    if (!enabled) {
-        return ap_pass_brigade(f->next, bb);
-    }
-
-    if (n > 1) {
-        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
-            "mod_botshield: app feedback rejected: %d copies of "
-            "'%s' on response (expected exactly 1)", n, hname);
-        return ap_pass_brigade(f->next, bb);
-    }
-
-    if (!scfg->app_integration_secret ||
-        scfg->app_integration_secret_len == 0) {
-        ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
-            "mod_botshield: app feedback received but "
-            "BotShieldAppIntegrationSecretFile not configured");
-        return ap_pass_brigade(f->next, bb);
-    }
-
-    const char *event = NULL;
-    const char *err = bs_app_feedback_verify(r->pool,
-        scfg->app_integration_secret, scfg->app_integration_secret_len,
-        snapshot, &event);
-    if (err) {
-        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
-            "mod_botshield: app feedback rejected: %s", err);
-        return ap_pass_brigade(f->next, bb);
-    }
-
-    /* Map event → action via BotShieldFeedbackTrigger. Unknown
-     * events are a config-side miss, not an app-side attack — log
-     * at info and skip. This is the indirection that keeps flag
-     * names out of the wire format: a compromised app can emit any
-     * event name, but only configured mappings have effect. */
-    const bs_feedback_trigger_entry *ft =
-        bs_feedback_trigger_find(scfg, event);
-    if (!ft) {
-        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
-            "mod_botshield: app feedback event=%s unmapped "
-            "(no BotShieldFeedbackTrigger entry); ignored", event);
-        return ap_pass_brigade(f->next, bb);
-    }
-
-    unsigned char client_ip[16];
-    if (bs_parse_client_ip(r->useragent_ip, client_ip)) {
-        bs_mask_ipv6_prefix(client_ip, scfg->ipv6_prefix_bits);
-        bs_flagged_ip_add(r, client_ip,
-                          ft->action.flag_bit, ft->action.ttl_sec,
-                          scfg->ns_id);
-        if (ft->action.log_tag) {
-            /* Feedback has no decision-log emission of its own, but
-             * the tag belongs in r->notes so any subsequent access
-             * log or custom format can pick it up via %{BS-...}n. */
-            bs_set_trigger_tag(r, ft->action.log_tag);
-        }
-        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
-            "mod_botshield: app feedback event=%s applied "
-            "flag=0x%x ttl=%d", event,
-            ft->action.flag_bit, ft->action.ttl_sec);
-    }
-
-    return ap_pass_brigade(f->next, bb);
-}
-
-/* Adds the one-shot filter to the chain for every request. Called
- * from ap_hook_insert_filter. Cheap — just appends to the filter
- * list; the real work is gated inside the filter on
- * ap_is_initial_req + the header being present. */
-static void bs_app_feedback_insert_filter(request_rec *r)
-{
-    if (!ap_is_initial_req(r)) return;
-    ap_add_output_filter_handle(bs_app_feedback_filter_handle,
-                                NULL, r, r->connection);
-}
 
 /* Flag-bit registry. Maps the BS_FLAG_* defines to the canonical
  * names that appear in directives (BotShieldFlagTrigger, BotShieldFlagIP),
@@ -3412,8 +3035,9 @@ static const bs_flag_meta bs_flag_metadata[] = {
 
 /* NULL-terminated name+bit projection for the legacy parse sites
  * (bs_parse_flag_names, bs_app_claims_flag_names) that iterate via
- * a sentinel rather than a count. */
-static const struct { const char *name; apr_uint32_t bit; } bs_flag_names[] = {
+ * a sentinel rather than a count. Struct is named (`bs_flag_name`)
+ * so botshield.h can `extern`-declare the array. */
+const struct bs_flag_name bs_flag_names[] = {
     { "honeypot_hit",         BS_FLAG_HONEYPOT_HIT         },
     { "scanner_probe",        BS_FLAG_SCANNER_PROBE        },
     { "fake_bot",             BS_FLAG_FAKE_BOT             },
@@ -3433,10 +3057,6 @@ static const bs_flag_meta *bs_flag_meta_for_name(const char *name)
     }
     return NULL;
 }
-
-/* Forward decl: bs_tier_name lives further down with the rest of
- * the tier-dispatch helpers; bs_app_claims_set needs it. */
-static const char *bs_tier_name(bs_tier t);
 
 /* Compiled-in default flag-trigger rule set.
  *
@@ -3500,111 +3120,6 @@ static const struct {
 #define BS_DEFAULT_FLAG_TRIGGER_COUNT \
     (sizeof(bs_default_flag_triggers) / sizeof(bs_default_flag_triggers[0]))
 
-/* ======================================================================
- * E8.2 — Module-to-app reputation export.
- *
- * On the request path: strip any client-supplied X-Botshield-*, then
- * set a single signed X-Botshield-Claims header that the backend
- * handler reads to drive whatever app-side policy cares about
- * BotShield's verdict (request-by-request risk score, cookie state,
- * accumulated flag bitmap, etc.).
- *
- * Symmetric to E5 in shape:
- *   - signed envelope, key=value;...;sig=<hex>, HMAC-SHA-256
- *   - separate secret file (defense-in-depth vs. E5's inbound key)
- *   - unknown body keys tolerated (forward compat)
- *
- * Symmetric to E5 in trust posture: the strip-before-set is the
- * trust anchor for apps that don't bother to verify the HMAC. The
- * signed envelope is for apps that want value-integrity even across
- * an untrusted Apache→backend hop.
- * ====================================================================== */
-
-/* Walk r->headers_in and unset every header whose name begins with
- * "X-Botshield-" (case-insensitive). apr_table_unset takes a key, so
- * we collect names first (snapshotting because table mutation during
- * iteration is undefined) then drop them all in a second pass. */
-static void bs_app_claims_strip_incoming(request_rec *r)
-{
-    const apr_array_header_t *arr = apr_table_elts(r->headers_in);
-    apr_array_header_t *to_unset =
-        apr_array_make(r->pool, 4, sizeof(const char *));
-    for (int i = 0; i < arr->nelts; i++) {
-        apr_table_entry_t *e = &((apr_table_entry_t *)arr->elts)[i];
-        if (e->key && strncasecmp(e->key, "X-Botshield-", 12) == 0) {
-            *(const char **)apr_array_push(to_unset) = e->key;
-        }
-    }
-    for (int i = 0; i < to_unset->nelts; i++) {
-        apr_table_unset(r->headers_in,
-                        APR_ARRAY_IDX(to_unset, i, const char *));
-    }
-}
-
-/* Render the flag bitmap as a space-separated list of registry names
- * for the X-Botshield-Claims body. Empty string when no bits set —
- * apps see `flags=` (empty value) which the parser treats the same
- * as absent. */
-static const char *bs_app_claims_flag_names(apr_pool_t *p,
-                                            apr_uint32_t flags)
-{
-    if (!flags) return "";
-    char *buf = apr_palloc(p, 256);
-    apr_size_t off = 0;
-    for (int i = 0; bs_flag_names[i].name; i++) {
-        if (!(flags & bs_flag_names[i].bit)) continue;
-        const char *n = bs_flag_names[i].name;
-        apr_size_t nlen = strlen(n);
-        if (off + nlen + 2 > 256) break;   /* defensive cap */
-        if (off > 0) buf[off++] = ' ';
-        memcpy(buf + off, n, nlen);
-        off += nlen;
-    }
-    buf[off] = '\0';
-    return buf;
-}
-
-/* Emit X-Botshield-Claims on the request to the backend. Called from
- * bs_handler's PASS leg — every value is finalized at that point.
- * Returns NULL on success or an error string the caller can log. */
-static const char *bs_app_claims_set(request_rec *r,
-                                     bs_server_cfg *scfg,
-                                     int score,
-                                     bs_tier tier,
-                                     const char *cookie_status,
-                                     apr_uint32_t flags,
-                                     int passes_silent,
-                                     int passes_form,
-                                     int passes_captcha)
-{
-    if (!scfg || scfg->app_claims_enabled != 1) return NULL;
-    if (!scfg->app_integration_secret ||
-        scfg->app_integration_secret_len == 0) {
-        return "BotShieldAppIntegrationSecretFile not configured";
-    }
-
-    bs_app_claims_strip_incoming(r);
-
-    apr_time_t now = apr_time_sec(apr_time_now());
-    const char *flag_names = bs_app_claims_flag_names(r->pool, flags);
-    const char *body = apr_psprintf(r->pool,
-        "v=1;score=%d;tier=%s;cookie=%s;flags=%s;"
-        "passes=s=%d,f=%d,c=%d;ts=%" APR_TIME_T_FMT,
-        score, bs_tier_name(tier), cookie_status, flag_names,
-        passes_silent, passes_form, passes_captcha, now);
-
-    unsigned char mac[BS_SIG_BYTES];
-    bs_hmac_sha256(scfg->app_integration_secret,
-                   scfg->app_integration_secret_len,
-                   (const unsigned char *)body, strlen(body), mac);
-    char sig_hex[BS_SIG_BYTES * 2 + 1];
-    bs_to_hex(mac, BS_SIG_BYTES, sig_hex);
-
-    const char *header_val = apr_psprintf(r->pool, "%s;sig=%s",
-                                          body, sig_hex);
-    apr_table_setn(r->headers_in, "X-Botshield-Claims", header_val);
-    return NULL;
-}
 
 static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                           apr_pool_t *ptemp, server_rec *s)
@@ -7923,7 +7438,7 @@ static bs_tier bs_decide_tier(const bs_dir_cfg *cfg, int score)
     return BS_TIER_PASS;
 }
 
-static const char *bs_tier_name(bs_tier t)
+const char *bs_tier_name(bs_tier t)
 {
     switch (t) {
         case BS_TIER_PASS:    return "pass";
