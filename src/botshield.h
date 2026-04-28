@@ -36,6 +36,7 @@
 #include "robots.h"
 #include "score.h"    /* bs_tier, bs_silent_mode, score system */
 #include "shm.h"      /* bs_load_state, bs_metrics typedefs */
+#include "triggers.h" /* trigger + policy family types */
 
 #ifdef __cplusplus
 extern "C" {
@@ -468,132 +469,10 @@ typedef struct bs_server_cfg {
     apr_size_t          app_integration_secret_len;
 } bs_server_cfg;
 
-/* ======================================================================
- * Trigger families — shared action engine for path/cookie/env/feedback
- * /load, plus the flag-trigger family which uses a separate action
- * surface (score-add / tier_floor). These types will migrate to
- * triggers.h when that phase extracts.
- * ====================================================================== */
-
-#define BS_TRIGGER_STATUS_PASS   (-1)
-
-typedef enum {
-    BS_TFAMILY_PATH = 0,
-    BS_TFAMILY_COOKIE,
-    BS_TFAMILY_ENV,
-    BS_TFAMILY_FEEDBACK,
-    BS_TFAMILY_LOAD,
-    BS_TFAMILY_FLAG,
-} bs_trigger_family;
-
-typedef enum {
-    BS_TMODE_ENFORCE = 0,
-    BS_TMODE_OBSERVE,
-} bs_trigger_mode;
-
-typedef enum {
-    BS_TEXEC_PASS_CONTINUE = 0,
-    BS_TEXEC_PASS_BREAK,
-    BS_TEXEC_PASS_DECLINE,
-    BS_TEXEC_STATUS,
-    BS_TEXEC_OBSERVE,
-} bs_trigger_exec_outcome;
-
-typedef struct {
-    int           status_code;    /* HTTP code or BS_TRIGGER_STATUS_PASS */
-    const char   *redirect_url;   /* NULL unless explicitly set */
-    const char   *log_tag;
-    apr_uint32_t  flag_bit;       /* single BS_FLAG_* bit; 0 if ttl_sec==0 */
-    int           ttl_sec;        /* 0 = don't flag the IP */
-    int           penalty;        /* 0..1000 */
-    int           credit;         /* 0..1000 (rejected on path family) */
-    int           status_explicit; /* 1 if operator wrote status= */
-    int           mode;           /* bs_trigger_mode */
-} bs_trigger_action;
-
-/* E7.3 — feedback trigger entry. One per BotShieldFeedbackTrigger
- * directive; lookup-by-event-name. */
-typedef struct {
-    const char        *event;
-    bs_trigger_action  action;
-} bs_feedback_trigger_entry;
-
-/* --- E2.1 rate-limit + block-path family ----------------------- *
- *
- * bs_cohort is the shared (UA?, IP?) predicate; bs_rate_limit_entry,
- * bs_block_path_entry, bs_rate_escalate_entry are the per-directive
- * configs they parameterize. Defined here because config.c's
- * post_config hook walks them at SHM-slot assignment time. */
-
-#define BS_PENALTY_RATE_LIMIT  50
-#define BS_PENALTY_BLOCK_PATH 100
-
-typedef struct {
-    const char         *ua_pattern;
-    int                 ua_any;
-    int                 ip_any;
-    const char         *path;
-    const char         *inline_cidrs;
-    apr_array_header_t *ranges;
-} bs_cohort;
-
-typedef struct bs_rate_escalate_entry bs_rate_escalate_entry;
-
-typedef struct {
-    const char   *name;
-    bs_cohort     cohort;
-    apr_uint32_t  budget;
-    apr_uint32_t  window_sec;
-    int           shm_slot;
-    const bs_rate_escalate_entry *escalate;
-    int           mode;
-} bs_rate_limit_entry;
-
-struct bs_rate_escalate_entry {
-    const char   *rule_name;
-    apr_uint32_t  strikes;
-    apr_uint32_t  per_sec;
-    int           status_code;
-    int           ttl_sec;
-    const char   *log_tag;
-};
-
-typedef struct {
-    const char *name;
-    const char *path_pattern;
-    bs_cohort   cohort;
-    int         mode;
-} bs_block_path_entry;
-
-/* SHM slot for the fixed-window counter. 8 bytes; CAS would target
- * the pair as a u64 on a 64-bit-atomic platform. v1 uses 32-bit
- * atomics on each field separately. */
-typedef struct {
-    apr_uint32_t count;
-    apr_uint32_t window_start_sec;
-} bs_rate_counter;
-
-/* --- E14 flag-trigger family ----------------------------------- *
- *
- * Predicate is "flag_bit is set on this request's IP-side or cookie-
- * side flag bitmap". Two runtime action verbs (SCORE / TIER_FLOOR);
- * RESET is a config-time sentinel consumed before the request path
- * runs. */
-typedef enum {
-    BS_FLAG_ACT_SCORE = 0,
-    BS_FLAG_ACT_TIER_FLOOR,
-    BS_FLAG_ACT_RESET,
-} bs_flag_action_kind;
-
-typedef struct {
-    const char         *flag_name;
-    apr_uint32_t        flag_bit;
-    bs_flag_action_kind action;
-    int                 score_add;
-    bs_tier             tier_min;
-    int                 mode;
-    int                 from_default;
-} bs_flag_trigger_entry;
+/* Trigger and policy family types (bs_trigger_*, bs_*_trigger_entry,
+ * bs_cohort, bs_rate_limit_entry, bs_block_path_entry, bs_rate_counter,
+ * bs_flag_trigger_entry, BS_TFAMILY_*, BS_TMODE_*, BS_TEXEC_*,
+ * BS_FLAG_ACT_*, BS_PENALTY_RATE_LIMIT/BLOCK_PATH) live in triggers.h. */
 
 /* E2.2 — robots refresh interval sentinel. */
 #define BS_ROBOTS_REFRESH_UNSET    (-1)
