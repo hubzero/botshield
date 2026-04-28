@@ -1014,29 +1014,6 @@ static const char *bs_log_suppress_suffix(apr_pool_t *p, apr_uint32_t n)
 }
 
 
-/* Join the request's score-reason names (no penalties) into a single
- * comma-separated string for the decision line. Returns "-" when no
- * heuristic signal fired. */
-const char *bs_decision_reason_names(apr_pool_t *p,
-                                            const bs_request_score *s)
-{
-    if (!s || !s->entries || s->entries->nelts == 0) return "-";
-    /* Same O(N) join shape as the captcha error-codes path
-     * (commit d939a72): push borrowed reason pointers into an
-     * array, single allocation via apr_array_pstrcat. The
-     * BS_SCORE_MAX_REASONS=16 cap bounds N tightly, but the join
-     * fires on every request that emits a decision line, so the
-     * tidier shape pays back on the hot path. The reason strings
-     * outlive p (string literals or strings already in p), so
-     * apr_array_pstrcat's copy is safe. */
-    int n = s->entries->nelts;
-    apr_array_header_t *arr = apr_array_make(p, n, sizeof(const char *));
-    for (int i = 0; i < n; i++) {
-        bs_score_entry *e = &APR_ARRAY_IDX(s->entries, i, bs_score_entry);
-        *(const char **)apr_array_push(arr) = e->reason;
-    }
-    return apr_array_pstrcat(p, arr, ',');
-}
 
 
 

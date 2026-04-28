@@ -35,6 +35,7 @@
 
 #include "botshield.h"
 #include "metrics.h"   /* bs_set_trigger_tag, bs_shm.metrics */
+#include "score.h"     /* bs_score_add */
 #include "shm.h"       /* bs_flagged_ip_add */
 #include "triggers.h"
 

@@ -76,6 +76,7 @@
 #include "bridge.h"    /* E5 + E8.2 — module ↔ app feedback / claims bridge */
 #include "templates.h" /* challenge page widget + shell rendering */
 #include "formcaptcha.h" /* E18 — inline form-captcha tier */
+#include "score.h"     /* per-request score + flag-trigger walker */
 
 /* Cross-cutting config defaults (BS_DEFAULT_*, BS_MAX_*, BS_UNSET,
  * cookie name strings, etc.) live in botshield.h so every TU that
@@ -122,15 +123,9 @@
 
 /* enum bs_help_mode + BS_DEFAULT_HELP_MODE now in botshield.h. */
 
-/* Scoring thresholds (penalty → tier) and heuristic penalties. */
-#define BS_DEFAULT_SCORE_SILENT   20
-#define BS_DEFAULT_SCORE_HARD     50
-#define BS_DEFAULT_SCORE_CAPTCHA  80
-#define BS_SCORE_MAX_REASONS      16
-
-#define BS_PENALTY_MISSING_UA     40
-#define BS_PENALTY_MISSING_AL     15
-#define BS_PENALTY_SCRAPER_UA     50
+/* BS_DEFAULT_SCORE_*, BS_SCORE_MAX_REASONS, BS_PENALTY_* are now in
+ * botshield.h since multiple files (config.c, score.c, bs_handler)
+ * reference them. */
 
 
 
@@ -1251,39 +1246,6 @@ apr_status_t bs_watchdog_save_cb(int state, void *data,
  * Returns the count of triggers that fired (informational; the
  * walker's effects are applied via bs_score_add and
  * *out_tier_floor). */
-static int bs_apply_flag_triggers(request_rec *r,
-                                   const bs_server_cfg *scfg,
-                                   apr_uint32_t all_flags,
-                                   bs_tier *out_tier_floor)
-{
-    if (out_tier_floor) *out_tier_floor = BS_TIER_PASS;
-    if (!scfg || !scfg->flag_triggers || all_flags == 0) return 0;
-    int fired = 0;
-    for (int i = 0; i < scfg->flag_triggers->nelts; i++) {
-        bs_flag_trigger_entry *e =
-            APR_ARRAY_IDX(scfg->flag_triggers, i, bs_flag_trigger_entry *);
-        if (!(all_flags & e->flag_bit)) continue;
-        fired++;
-        if (e->mode == BS_TMODE_OBSERVE) {
-            bs_score_add(r, 0, 0,
-                apr_psprintf(r->pool,
-                    "would-flag-trigger:%s:observe", e->flag_name));
-            continue;
-        }
-        if (e->action == BS_FLAG_ACT_SCORE) {
-            bs_score_add(r, e->score_add, 0,
-                apr_psprintf(r->pool,
-                    "flag-trigger:%s", e->flag_name));
-        } else if (e->action == BS_FLAG_ACT_TIER_FLOOR) {
-            if (out_tier_floor && e->tier_min > *out_tier_floor) {
-                *out_tier_floor = e->tier_min;
-            }
-        }
-        /* BS_FLAG_ACT_RESET entries are consumed at post_config —
-         * the request path never sees them. */
-    }
-    return fired;
-}
 
 /* Decide whether the rep block in *prior_ch can be carried into a
  * freshly-minted cookie, given the cverr that bs_verify_cookie just
@@ -1634,73 +1596,7 @@ static int bs_policy_status_handler(request_rec *r, bs_dir_cfg *cfg)
 
 
 
-bs_request_score *bs_get_score(request_rec *r, int create)
-{
-    bs_request_score *s = ap_get_module_config(r->request_config,
-                                               &botshield_module);
-    if (!s && create) {
-        s = apr_pcalloc(r->pool, sizeof(*s));
-        s->entries = apr_array_make(r->pool, 4, sizeof(bs_score_entry));
-        ap_set_module_config(r->request_config, &botshield_module, s);
-    }
-    return s;
-}
 
-/* `reason` must outlive the request — static string or r->pool-allocated.
- * `ttl_seconds` is accepted for API stability but ignored in M3 (the
- * request-scoped struct dies with the request). The long-term stores
- * are narrower than the API implies: M4 puts accumulated rep in the
- * user's cookie (per-user, server-stateless); M5 puts serious-event
- * flags in an SHM flagged-IP table (sparse, per-IP). `ttl_seconds`
- * feeds the latter when the caller is a serious-event source. */
-/* Operator-facing documentation: README "Understanding scoring"
- * (rendered into docs/guide/index.html) explains the score
- * composition, threshold ladder, and tuning workflow. */
-void bs_score_add(request_rec *r, int penalty,
-                  int ttl_seconds, const char *reason)
-{
-    bs_request_score *s = bs_get_score(r, 1);
-    if (s->entries->nelts >= BS_SCORE_MAX_REASONS) {
-        /* Silent drop on cap could mask a runaway loop or a
-         * misconfigured rule fanout. Log once at DEBUG so the
-         * diagnostic surfaces under verbose-logging without
-         * spamming production. The total still accumulates from
-         * the entries we kept; it's only the per-reason audit trail
-         * that's truncated past this point. */
-        if (!s->cap_warned) {
-            ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
-                "mod_botshield: score-reason cap (%d) reached for %s; "
-                "further bs_score_add calls drop their reason silently",
-                BS_SCORE_MAX_REASONS, r->uri);
-            s->cap_warned = 1;
-        }
-        return;
-    }
-    bs_score_entry *e = apr_array_push(s->entries);
-    e->penalty     = penalty;
-    e->ttl_seconds = ttl_seconds;
-    e->reason      = reason;
-    s->total      += penalty;
-}
-
-/* Build a compact "[reason:penalty,reason:penalty,...]" string for logs. */
-static const char *bs_score_reasons_joined(apr_pool_t *p,
-                                           const bs_request_score *s)
-{
-    if (!s || !s->entries || s->entries->nelts == 0) return "[]";
-    /* Same O(N) join shape as bs_decision_reason_names + commit
-     * d939a72: pre-format each "reason:penalty" pair into a
-     * pointer-array, single apr_array_pstrcat for the comma join,
-     * then one apr_pstrcat to wrap with brackets. */
-    int n = s->entries->nelts;
-    apr_array_header_t *arr = apr_array_make(p, n, sizeof(const char *));
-    for (int i = 0; i < n; i++) {
-        bs_score_entry *e = &APR_ARRAY_IDX(s->entries, i, bs_score_entry);
-        *(const char **)apr_array_push(arr) =
-            apr_psprintf(p, "%s:%d", e->reason, e->penalty);
-    }
-    return apr_pstrcat(p, "[", apr_array_pstrcat(p, arr, ','), "]", NULL);
-}
 
 /* Cheap built-in signals, run on requests we're about to challenge. Called
  * after the cookie check — a verified cookie skips scoring entirely. */
