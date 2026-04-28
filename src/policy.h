@@ -16,7 +16,31 @@
  * Each family's matcher / action is owned by its own feature file
  * (triggers.c, robots.c, etc.) — bs_check_policy is just the
  * orchestrator that walks them in the right order and converts the
- * outcomes into Apache-friendly status codes. */
+ * outcomes into Apache-friendly status codes.
+ *
+ * E2.1 specifics — BotShieldRateLimit + BotShieldBlockPath share one
+ * cohort definition: a (ua-substring?, ipspec?) predicate pair. The
+ * ipspec reuses E1's polymorphic shape — omitted / explicit path /
+ * '*' / inline CIDRs — via bs_allow_load_ranges{,_from_string}.
+ * Cohort matching at request time is UA-match AND IP-match, with '*'
+ * as "any" on either axis (but not both — that would rate-limit or
+ * block every request, which the setter rejects at config time).
+ *
+ * Storage:
+ *  - Config: scfg->rate_limits / scfg->block_paths arrays, keyed by
+ *    name; merged across main/vhost scope via bs_merge_server_cfg.
+ *  - Runtime: rate counters live in SHM as a flat slot array
+ *    (bs_shm.rate_counters[]). Each bs_rate_limit_entry's shm_slot
+ *    is an index assigned in post_config. Fixed-window counter model
+ *    with atomic CAS updates — approximate rather than exact sliding
+ *    window, but the right trade for a rate limiter (smaller code,
+ *    no per-bucket mutex, burst-at-boundary harmless because the
+ *    downstream score_add hook still records it).
+ *
+ * On trip:
+ *  - Block-path hit → 403 + bs_score_add(+100, "block-path:<name>").
+ *  - Rate-limit exceeded → 429 + Retry-After: <seconds remaining in
+ *    window> + bs_score_add(+50, "rate-limit-exceeded:<name>"). */
 #ifndef BOTSHIELD_POLICY_H
 #define BOTSHIELD_POLICY_H
 

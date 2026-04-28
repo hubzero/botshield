@@ -80,61 +80,12 @@
 #include "policy.h"    /* request-time policy walker */
 #include "heuristics.h" /* cheap built-in score signals */
 
-/* Cross-cutting config defaults (BS_DEFAULT_*, BS_MAX_*, BS_UNSET,
- * cookie name strings, etc.) live in botshield.h so every TU that
- * needs them gets them via the umbrella include. */
-
-/* Challenge protocol (M4.1 + M7) —
- *   Wire format (embedded inline in the interstitial, JSON):
- *     { v, alg, salt, nonce, difficulty, expires_at,
- *       score, flags, passes_silent, passes_form, passes_captcha,
- *       challenged_at, auto, signature }
- *   Canonical HMAC input (deterministic, pipe-delimited ASCII):
- *     "v|alg|salthex|noncehex|difficulty|expires_at
- *      |score|flags|pass_s|pass_f|pass_c|challenged_at|auto"
- *   Cookie payload = base64( canonical || "|" || sighex || "|" || counter )
- *   — a single base64 blob the server can parse by splitting on '|',
- *     no JSON parser required.
- *
- *   `auto` is the silent-tier (M7) marker: 1 means the challenge was served
- *   as a no-click auto-submit splash, 0 means the form-PoW interstitial.
- *   HMAC-covered so an accepted cookie tells the server which tier actually
- *   served it — used to pick passes_silent vs passes_form and the matching
- *   forgiveness amount on verify.
- *
- * Keep in sync with the JS worker when the template ships the wire bits. */
-/* BS_PROTOCOL_VERSION, BS_SALT_BYTES, BS_NONCE_BYTES, BS_GCM_COUNTER_SEP
- * live in botshield.h with the bs_challenge / bs_rep_state types they
- * frame.  BS_SIG_BYTES, BS_COOKIE_ALG_GCM, BS_GCM_NONCE_LEN, BS_GCM_TAG_LEN
- * live in crypto.h alongside the primitives that produce them. */
-
-/* bs_parse_int_bounded / bs_parse_uint32_bounded / bs_parse_int64_bounded
- * forward decls live in botshield.h (cross-TU — cookie.c uses them in
- * the canonical-form parser). Defined later in this file alongside the
- * other bounded numeric helpers. */
-
-/* bs_score_add is now declared cross-file in botshield.h. The
- * definition lives later in this file alongside bs_get_score. */
-
-
-
-/* BS_FLAG_* bit definitions live in botshield.h alongside the other
- * cross-cutting types. Used here, in triggers.c (default path-trigger
- * action), and in bridge.c (app-feedback flag mapping). */
-
-
-/* enum bs_help_mode + BS_DEFAULT_HELP_MODE now in botshield.h. */
-
-/* BS_DEFAULT_SCORE_*, BS_SCORE_MAX_REASONS, BS_PENALTY_* are now in
- * botshield.h since multiple files (config.c, score.c, bs_handler)
- * reference them. */
-
-
-
-
-
-/* BS_ROBOTS_REFRESH_UNSET / _DEFAULT now declared in botshield.h. */
-
+/* This file is the module's hooks-table spine: bs_handler (the
+ * request entry hook), the cmds[] directive table, bs_register_hooks,
+ * and the botshield_module struct. Plus a few thin helpers that
+ * bs_handler calls directly (bs_decide_tier, bs_tier_name, the
+ * bounded numeric parsers). Every other concern fans out through the
+ * per-feature includes above. */
 
 int bs_effective_int(int value, int fallback)
 {
@@ -142,7 +93,8 @@ int bs_effective_int(int value, int fallback)
 }
 
 /* ======================================================================
- * Challenge struct, algorithm registry, issue/verify.
+ * Bounded numeric parsers — used by the canonical-form cookie parser
+ * in cookie.c and by directive setters in config.c.
  * ====================================================================== */
 
 /* Bounded integer parser for pre-HMAC cookie fields (security review
@@ -277,58 +229,11 @@ void bs_mask_ipv6_prefix(unsigned char ip[16], int prefix_bits)
     for (int i = full_bytes; i < 16; i++) ip[i] = 0;
 }
 
-/* bs_watchdog_save_cb forward decl now lives in config.h. */
-/* The cookie envelope (mint/verify), the Cookie-header parser, and
- * the cross-file getters now live in cookie.h. The bootstrap-sig
- * pair lives in challenge.h. bs_verify_bootstrap_sig is private to
- * silent.c. */
-
-
-/* ======================================================================
- * E2.1 — Policy enforcement: rate limiting + path-based blocks
- *
- * Two feature families sharing one cohort definition:
- *
- *   BotShieldRateLimit <name> <budget> <per> <ua> <ipspec>
- *   BotShieldBlockPath <name> <path-glob> <ua> <ipspec>
- *
- * A "cohort" is a (ua-substring?, ipspec?) predicate pair. The ipspec
- * reuses E1's polymorphic shape — omitted / explicit path / '*' / inline
- * CIDRs — via bs_allow_push_cidr + bs_allow_load_ranges{,_from_string}.
- * Cohort matching at request time is UA-match AND IP-match, with '*'
- * as "any" on either axis (but not both — that would rate-limit or
- * block every request, which is almost always a mistake and the setter
- * rejects it at config time).
- *
- * Storage:
- *  - Config: scfg->rate_limits / scfg->block_paths hashes, keyed by
- *    name. Merged across main/vhost scope via bs_merge_server_cfg.
- *  - Runtime: rate counters live in SHM as a flat slot array
- *    (bs_shm.rate_counters[]). Each bs_rate_limit_entry's shm_slot
- *    is an index assigned in post_config. Fixed-window counter model
- *    with atomic CAS updates — approximate rather than exact sliding
- *    window, but that's the right trade for a rate limiter (smaller
- *    code, no per-bucket mutex, burst-at-boundary is harmless here
- *    because the downstream score_add hook still records it).
- *
- * On trip:
- *  - Block-path hit → 403 + bs_score_add(+100, "block-path:<name>").
- *  - Rate-limit exceeded → 429 + Retry-After: <seconds remaining in
- *    window> + bs_score_add(+50, "rate-limit-exceeded:<name>").
- * ====================================================================== */
-
-
-/* Inspect a directive's (ua, ipspec) arg pair and populate a
- * bs_cohort. Returns NULL on success, or an Apache directive-error
- * string. Ranges resolution is deferred to post_config so we can
- * use pconf rather than cmd->temp_pool. */
-
-/* Path-pattern matching for BotShieldPathTrigger and BotShieldBlockPath
- * is the RFC 9309 matcher promoted from src/robots.c (bs_path_match).
- * The earlier v1 placeholder here that only handled <literal>,
- * <literal>*, and <literal>$ shapes was retired once the RFC 9309
- * matcher landed — its own comment flagged itself as temporary. One
- * path matcher across the codebase now. */
+/* The bs_path_pattern_warn_middle_star helper below is a config-time
+ * validator shared by E2.1 BotShieldBlockPath (config.c),
+ * E3 BotShieldPathTrigger (triggers.c), and the request-path glob
+ * matcher (robots.c's bs_path_match). Lives here so all three
+ * callers find it without circular includes. */
 
 /* Surface a NOTICE at config-load when a pattern contains a non-
  * trailing '*'. Under the retired v1 matcher those characters were
@@ -559,15 +464,12 @@ const struct bs_flag_name bs_flag_names[] = {
 
 
 
-/* The E1 BotShieldAllow / BotShieldAllowBot directive setters live
- * in allowlist.c. */
-
 /* Character policy for bot-name tokens: lowercase letters, digits,
  * hyphen. Used as the hash key and the default ranges-file basename.
  * Rejects anything that could create path-traversal surprises or
- * cross-host confusion. Stays here because the rate-limit, block-
- * path, and triggers setters scattered across other files all reuse
- * it via the cross-file decl in botshield.h. */
+ * cross-host confusion. Lives here because the rate-limit, block-
+ * path, allowlist, and triggers setters scattered across other
+ * files all reuse it via the cross-file decl in botshield.h. */
 int bs_bot_name_valid(const char *s)
 {
     if (!s || !*s) return 0;
@@ -583,10 +485,6 @@ int bs_bot_name_valid(const char *s)
 }
 
 
-/* The directive setters for BotShieldRateLimit, the rate-limit
- * helpers (parse_optional_mode, rate_unit_seconds), and the rest
- * of the rate-limit / safeguard / block-path family live in
- * config.c. */
 
 
 
@@ -609,36 +507,9 @@ apr_status_t bs_watchdog_save_cb(int state, void *data,
     return APR_SUCCESS;
 }
 
-/* E14 (rework) — flag-trigger walker.
- *
- * Runs in bs_handler after flag bits are known (after
- * bs_flagged_ip_lookup and after the cookie verify decides
- * have_prior_rep) but BEFORE the tier decision. For each entry in
- * scfg->flag_triggers whose flag_bit is set in `all_flags`:
- *   - SCORE actions accumulate via bs_score_add (which already
- *     SUMs into the per-request score struct)
- *   - TIER_FLOOR actions MAX into *out_tier_floor; the caller
- *     applies the MAX(score_tier, *out_tier_floor) after
- *     bs_decide_tier returns.
- *
- * Observe-mode (mode=observe) entries log
- * `would-flag-trigger:<flag>:observe` and skip the side effect.
- *
- * Returns the count of triggers that fired (informational; the
- * walker's effects are applied via bs_score_add and
- * *out_tier_floor). */
-
-
-/* E14 (rework) — the prior bs_flag_adaptive accumulator that walked
- * bs_flag_meta.next_difficulty_delta and next_tier_floor was retired.
- * Adaptive effects are now expressed as BotShieldFlagTrigger entries
- * and applied via bs_apply_flag_triggers above. */
-
-/* Flag-name registry moved up the file (near the early request-path
- * helpers) so E8.2's bs_app_claims_flag_names can render the bitmap
- * without a forward-declaration dance. Definition lives further up;
- * leave a placeholder comment here so a reader scanning E5/E6 still
- * sees where the table conceptually belongs. */
+/* The E14 flag-trigger walker (bs_apply_flag_triggers) lives in
+ * score.c. bs_flag_names[] is defined further up this file (the
+ * NULL-terminated name+bit array bs_parse_flag_names iterates). */
 
 apr_uint32_t bs_parse_flag_names(apr_pool_t *p, const char *s,
                                  const char **err)
@@ -676,19 +547,9 @@ apr_uint32_t bs_parse_flag_names(apr_pool_t *p, const char *s,
 }
 
 
-/* --- New directive setters --- */
-
-
-
-/* The M8 captcha-tier directive setters (provider, site_key,
- * secret_file, timeouts, expected hostname/action, ca_bundle,
- * rate_limit, max_inflight) live in captcha.c. */
-
-/* `BotShieldEndpointPrefix /path` — URL prefix the module's own
- * handlers live under. Today: /captcha-verify[/<provider>] (M8),
- * /metrics (M9.3). Future: E7's /solver.js. Must start with '/' and
- * not end with '/'. */
-
+/* All directive setters now live in their feature files (config.c
+ * for top-level/UI/score/SHM/rate-limit/state-save, captcha.c for
+ * M8 captcha-tier, etc.). */
 
 /* ======================================================================
  * E2.2.3 — /botshield/policy-status
