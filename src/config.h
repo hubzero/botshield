@@ -55,21 +55,14 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
  * from the parent. Idempotent (safe under graceful restart). */
 void bs_child_init(apr_pool_t *p, server_rec *s);
 
-/* mod_watchdog callbacks registered by post_config. Defined in
- * botshield.c (where the rest of the request-path SHM machinery
- * they touch lives) and exposed here so post_config can pass them
- * to ap_watchdog_register_callback. */
-apr_status_t bs_robots_watchdog_cb(int state, void *data,
-                                   apr_pool_t *pool);
+/* mod_watchdog state-save callback registered by post_config.
+ * Defined in botshield.c (next to the rest of the SHM-resident
+ * machinery it touches). */
 apr_status_t bs_watchdog_save_cb(int state, void *data,
                                  apr_pool_t *pool);
 
-/* Stat + (conditionally) parse + atomic-publish the robots.txt
- * pointed to by scfg->robots_txt_path. Called both at post_config
- * (initial load) and from the watchdog callback (refresh). When
- * the source file's mtime is unchanged, it's a cheap no-op. */
-apr_status_t bs_robots_load(server_rec *sv, struct bs_server_cfg *scfg,
-                            apr_pool_t *pconf);
+/* The robots.txt loader (bs_robots_load) and its watchdog-tick
+ * callback (bs_robots_watchdog_cb) live in robots.h. */
 
 /* --- Directive setters (feature-homeless) ---
  *
