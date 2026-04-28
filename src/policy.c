@@ -536,3 +536,190 @@ int bs_check_policy(request_rec *r)
 
     return OK;
 }
+
+/* ======================================================================
+ * E2.2.3 — /botshield/policy-status
+ *
+ * Plain-text dump of the rules currently being enforced:
+ *   - BotShieldRateLimit directives (directive rate_limits array).
+ *   - BotShieldBlockPath directives (directive block_paths array).
+ *   - robots.txt-derived groups (if BotShieldRobotsTxt is set) —
+ *     source file path, mtime, every group's UA tokens + rules +
+ *     Crawl-delay.
+ *
+ * Goal is operator-visibility: when E2.2.2 hot-swaps a freshly-edited
+ * robots.txt, operators can curl this page to confirm what the module
+ * is actually enforcing, rather than guessing. Also useful for
+ * verifying that `BotShieldAllow` overrides have landed.
+ *
+ * No authentication / no rate limit built in. Treat like mod_status —
+ * operators wrap it in `<Location>` with their own ACL. The page
+ * doesn't reveal cookie secrets or client IPs; the most sensitive
+ * content is the operator's own directive config, which is already
+ * on disk in /etc/apache2/.
+ *
+ * Format is plain text (not Prometheus) — this is meant to be read
+ * by humans over curl; structured consumers use /botshield/metrics.
+ * ====================================================================== */
+
+static void bs_psh_cohort_ipspec(request_rec *r, const bs_cohort *c)
+{
+    if (c->ip_any) { ap_rputs("*", r); return; }
+    if (c->inline_cidrs) {
+        ap_rprintf(r, "inline(%s)", c->inline_cidrs);
+        return;
+    }
+    if (c->path) {
+        ap_rprintf(r, "file(%s)", c->path);
+        return;
+    }
+    ap_rprintf(r, "<%d ranges>", c->ranges ? c->ranges->nelts : 0);
+}
+
+static void bs_psh_render_counter(request_rec *r, int slot_idx,
+                                  apr_uint32_t budget)
+{
+    bs_rate_counter *counters = (bs_rate_counter *)bs_shm.rate_counters;
+    if (slot_idx < 0 || !counters) {
+        ap_rputs("-/-", r);
+        return;
+    }
+    apr_uint32_t cnt = __atomic_load_n(&counters[slot_idx].count,
+                                       __ATOMIC_RELAXED);
+    ap_rprintf(r, "%u/%u", cnt, budget);
+}
+
+int bs_policy_status_handler(request_rec *r, bs_dir_cfg *cfg)
+{
+    (void)cfg;
+    if (r->method_number != M_GET && r->method_number != M_OPTIONS) {
+        r->status = HTTP_METHOD_NOT_ALLOWED;
+        apr_table_setn(r->headers_out, "Allow", "GET, OPTIONS");
+        ap_set_content_type(r, "text/plain; charset=utf-8");
+        ap_rputs("GET required.\n", r);
+        return OK;
+    }
+    ap_set_content_type(r, "text/plain; charset=utf-8");
+    apr_table_setn(r->headers_out, "Cache-Control", "no-store");
+
+    bs_server_cfg *scfg =
+        ap_get_module_config(r->server->module_config, &botshield_module);
+    if (!scfg) {
+        ap_rputs("# scfg unavailable\n", r);
+        return OK;
+    }
+
+    char tbuf[APR_RFC822_DATE_LEN + 1] = { 0 };
+    apr_rfc822_date(tbuf, apr_time_now());
+    ap_rprintf(r, "# mod_botshield policy status\n"
+                  "# vhost:       %s\n"
+                  "# server_time: %s\n\n",
+        r->server->server_hostname ? r->server->server_hostname : "-",
+        tbuf);
+
+    /* --- directive rate limits --- */
+    ap_rputs("## BotShieldRateLimit (directive)\n", r);
+    if (!scfg->rate_limits || scfg->rate_limits->nelts == 0) {
+        ap_rputs("# (none)\n\n", r);
+    } else {
+        ap_rputs("# name               budget  window  ua                          "
+                 "ipspec                slot  count/budget\n", r);
+        for (int i = 0; i < scfg->rate_limits->nelts; i++) {
+            bs_rate_limit_entry *e = APR_ARRAY_IDX(
+                scfg->rate_limits, i, bs_rate_limit_entry *);
+            ap_rprintf(r, "%-18s  %6u  %4us   %-26s  ",
+                e->name, e->budget, e->window_sec,
+                e->cohort.ua_any ? "*"
+                    : apr_psprintf(r->pool, "\"%s\"", e->cohort.ua_pattern));
+            bs_psh_cohort_ipspec(r, &e->cohort);
+            ap_rprintf(r, "%*s  %4d  ",
+                       (int)(22 - (e->cohort.ip_any ? 1
+                          : (int)(strlen("file()") + (e->cohort.path ? strlen(e->cohort.path) : 0)
+                                  + (e->cohort.inline_cidrs ? strlen(e->cohort.inline_cidrs) : 0)))),
+                       "", e->shm_slot);
+            bs_psh_render_counter(r, e->shm_slot, e->budget);
+            ap_rputs("\n", r);
+        }
+        ap_rputs("\n", r);
+    }
+
+    /* --- directive block paths --- */
+    ap_rputs("## BotShieldBlockPath (directive)\n", r);
+    if (!scfg->block_paths || scfg->block_paths->nelts == 0) {
+        ap_rputs("# (none)\n\n", r);
+    } else {
+        ap_rputs("# name               path-glob                     "
+                 "ua                          ipspec\n", r);
+        for (int i = 0; i < scfg->block_paths->nelts; i++) {
+            bs_block_path_entry *e = APR_ARRAY_IDX(
+                scfg->block_paths, i, bs_block_path_entry *);
+            ap_rprintf(r, "%-18s  %-28s  %-26s  ",
+                e->name, e->path_pattern,
+                e->cohort.ua_any ? "*"
+                    : apr_psprintf(r->pool, "\"%s\"", e->cohort.ua_pattern));
+            bs_psh_cohort_ipspec(r, &e->cohort);
+            ap_rputs("\n", r);
+        }
+        ap_rputs("\n", r);
+    }
+
+    /* --- robots.txt --- */
+    ap_rputs("## robots.txt (BotShieldRobotsTxt)\n", r);
+    if (!scfg->robots_txt_path) {
+        ap_rputs("# (not configured)\n", r);
+        return OK;
+    }
+    bs_robots_state *rs =
+        __atomic_load_n(&scfg->robots, __ATOMIC_ACQUIRE);
+    ap_rprintf(r, "# path:                %s\n", scfg->robots_txt_path);
+    if (!rs) {
+        ap_rputs("# status:              not loaded (parse failed or "
+                 "file missing at post_config)\n", r);
+        return OK;
+    }
+    char mbuf[APR_RFC822_DATE_LEN + 1] = { 0 };
+    apr_rfc822_date(mbuf, rs->mtime);
+    ap_rprintf(r, "# mtime:               %s\n"
+                  "# groups:              %d\n"
+                  "# slot pool:           %d/%d used\n"
+                  "# wildcard scope:      %s\n"
+                  "# refresh interval:    %d s%s\n",
+        mbuf,
+        robots_group_count(rs->doc),
+        scfg->robots_slot_pool_used, scfg->robots_slot_pool_size,
+        scfg->robots_wildcard_scope == BS_ROBOTS_WILDCARD_STRICT ? "strict"
+          : scfg->robots_wildcard_scope == BS_ROBOTS_WILDCARD_OFF ? "off"
+          : "heuristic",
+        scfg->robots_refresh_interval,
+        scfg->robots_refresh_interval == 0 ? " (live-refresh disabled)" : "");
+
+    int n = robots_group_count(rs->doc);
+    for (int i = 0; i < n; i++) {
+        ap_rprintf(r, "\n### group[%d] \"%s\"  wildcard=%s\n", i,
+            robots_group_name_at(rs->doc, i),
+            robots_group_is_wildcard_at(rs->doc, i) ? "yes" : "no");
+        int n_ua = robots_group_ua_count_at(rs->doc, i);
+        for (int u = 0; u < n_ua; u++) {
+            ap_rprintf(r, "  user-agent: %s\n",
+                robots_group_ua_at(rs->doc, i, u));
+        }
+        int n_rules = robots_group_rule_count_at(rs->doc, i);
+        for (int k = 0; k < n_rules; k++) {
+            const char *pat = NULL;
+            int allow = 0;
+            if (robots_group_rule_at(rs->doc, i, k, &pat, &allow)) {
+                ap_rprintf(r, "  %-9s %s\n",
+                    allow ? "Allow:" : "Disallow:", pat ? pat : "");
+            }
+        }
+        int cd = robots_group_crawl_delay_at(rs->doc, i);
+        if (cd > 0) {
+            int slot = (rs->slot_by_group_idx && i < n)
+                     ? rs->slot_by_group_idx[i] : -1;
+            ap_rprintf(r, "  Crawl-delay: %ds  slot=%d  ", cd, slot);
+            bs_psh_render_counter(r, slot, 1);
+            ap_rputs("\n", r);
+        }
+    }
+    return OK;
+}
