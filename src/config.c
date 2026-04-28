@@ -74,8 +74,8 @@ void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->forgive_form    = BS_UNSET;
     cfg->forgive_captcha = BS_UNSET;
     cfg->cookie_domain   = NULL;
-    cfg->flag_on_match       = 0;
-    cfg->flag_on_match_ttl   = 0;
+    cfg->scope_triggers       = NULL;
+    cfg->scope_triggers_reset = 0;
     cfg->endpoint_prefix     = NULL;
     cfg->captcha_provider    = NULL;
     cfg->captcha_site_key    = NULL;
@@ -470,9 +470,24 @@ void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     /* Flag-on-match is additive: a more-specific scope that adds a flag
      * is merged with any broader-scope flag, so an inner <Location> adds
      * its flag without losing the outer. */
-    out->flag_on_match = base->flag_on_match | add->flag_on_match;
-    out->flag_on_match_ttl = add->flag_on_match_ttl
-                             ? add->flag_on_match_ttl : base->flag_on_match_ttl;
+    /* Per-scope BotShieldTrigger merge. Default: concatenate
+     * parent + child. Reset flag on the child drops the inherited
+     * list and uses only the child's entries. The reset flag also
+     * propagates to the merged output so deeper scopes see the
+     * effect (a reset at vhost level holds through every nested
+     * <Location>). */
+    out->scope_triggers_reset = base->scope_triggers_reset
+                              | add->scope_triggers_reset;
+    if (add->scope_triggers_reset) {
+        out->scope_triggers = add->scope_triggers;
+    } else if (!base->scope_triggers || base->scope_triggers->nelts == 0) {
+        out->scope_triggers = add->scope_triggers;
+    } else if (!add->scope_triggers || add->scope_triggers->nelts == 0) {
+        out->scope_triggers = base->scope_triggers;
+    } else {
+        out->scope_triggers = apr_array_append(p, base->scope_triggers,
+                                               add->scope_triggers);
+    }
     out->endpoint_prefix  = add->endpoint_prefix  ? add->endpoint_prefix  : base->endpoint_prefix;
     out->captcha_provider = add->captcha_provider ? add->captcha_provider : base->captcha_provider;
     out->captcha_site_key = add->captcha_site_key ? add->captcha_site_key : base->captcha_site_key;

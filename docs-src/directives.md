@@ -95,10 +95,30 @@ Tier dispatch ladder:
 See [operator model](../operator-model/index.html) for the full scoring
 discussion.
 
-`BotShieldForgivenessCapPerHour` (E15) caps total cookie-side
+`BotShieldForgivenessCapPerHour` caps total cookie-side
 forgiveness in any rolling 60-minute window. Default 200 ≈ 4–8
 challenge-passes worth of credit. Lower for stricter farming
 resistance; 0 disables (legacy behavior).
+
+## Silent-tier dispatch
+
+| Directive | Syntax | Default |
+|---|---|---|
+| `BotShieldSilentMode` | `interstitial\|embedded` | `interstitial` |
+
+`interstitial` (the default) serves a no-click splash page that
+auto-submits a SHA-256 PoW on load — the legacy silent-tier
+behavior. `embedded` instead hands off to the operator-included
+`/botshield/embedded.js` wrapper: the page serves DECLINED (real
+content) and the wrapper does the PoW in a Web Worker, then POSTs
+the result back to `/botshield/embedded-verify` to mint
+`_bs_verified` on the next request. Embedded mode trades a brief
+window where the cookie isn't yet on the client (the very first
+request goes through unverified) for a zero-interstitial UX.
+
+Embedded mode requires the operator to include the wrapper
+script in their page templates; without it, the request still
+serves the real content but no cookie ever lands.
 
 ## Widget customization
 
@@ -128,7 +148,7 @@ checkbox if the surrounding page styles its own chrome. When label
 is hidden it moves to the button's `aria-label` — accessibility is
 preserved.
 
-## Captcha tier (M8)
+## Captcha tier
 
 | Directive | Syntax | Default |
 |---|---|---|
@@ -161,11 +181,11 @@ disables the check; unset uses defaults (`server_hostname` /
 return them in the response, so these are no-ops for that
 provider.
 
-`BotShieldFormCaptcha` (E18) intercepts POSTs and validates the
+`BotShieldFormCaptcha` intercepts POSTs and validates the
 captcha token inline rather than via interstitial. Requires a
 captcha provider configured on the same scope.
 
-## Captcha-verify endpoint hardening (M8.1)
+## Captcha-verify endpoint hardening
 
 | Directive | Syntax | Default | Scope |
 |---|---|---|---|
@@ -209,7 +229,7 @@ periodic save requires `mod_watchdog`, the graceful-shutdown save
 runs regardless. State format mismatches on load reject the file
 with a NOTICE and start fresh — never a startup failure.
 
-## Allow list (E1)
+## Allow list
 
 | Directive | Syntax | Default | Scope |
 |---|---|---|---|
@@ -224,24 +244,25 @@ third arg is a path to a CIDR file, comma-separated inline CIDRs
 [policy](../policy/index.html#allow-list-e1-verified-crawlers) for the
 verified / fake / unverified outcomes.
 
-## Rate limit + block-path (E2.1, E9)
+## Rate limit + block-path
 
 | Directive | Syntax | Default |
 |---|---|---|
-| `BotShieldRateLimit` | `<name> <budget> <window-sec> <ua-pattern> <ipspec> [mode=observe]` | none |
-| `BotShieldRateLimitEscalate` | `<rate-rule> <strikes> <per-sec> [status=N] [ttl=N]` | none |
+| `BotShieldRateLimit` | `<name> <budget> <per> <ua-pattern> <ipspec> [mode=observe]` | none |
+| `BotShieldRateLimitEscalate` | `<rate-rule> <strikes> <per> [status=N] [ttl=N]` | none |
 | `BotShieldBlockPath` | `<name> <path-glob> <ua-pattern> <ipspec> [mode=observe]` | none |
 
 Cohort: `<ua-pattern>` is a substring or `""`/`*` for any UA;
 `<ipspec>` is a path to a CIDR file, comma-separated inline CIDRs,
 or `*` for any IP. Both axes can't be wildcard — that's rejected
-at config time.
+at config time. `<per>` accepts `sec`/`min`/`hour` (or `s`/`m`/
+`h`); plain integers are rejected.
 
 `BotShieldRateLimitEscalate` upgrades repeated 429s on the same
 client to a stickier status code — see
 [policy](../policy/index.html#repeated-429-escalation-e9).
 
-## Robots.txt enforcement (E2.2)
+## Robots.txt enforcement
 
 | Directive | Syntax | Default |
 |---|---|---|
@@ -252,15 +273,15 @@ client to a stickier status code — see
 See [policy](../policy/index.html#robotstxt-enforcement-e22) for the matcher
 semantics and refresh model.
 
-## Triggers (E3, E4, E6, E7.3, E11.2)
+## Triggers
 
 | Directive | Predicate args | Action keys |
 |---|---|---|
 | `BotShieldPathTrigger` | `<name> <path-glob>` | `status=`, `redirect=`, `log=`, `flag=`, `ttl=`, `penalty=`, `mode=` (no `credit=`) |
-| `BotShieldCookieTrigger` | `<name> <pred>` | `status=`, `redirect=`, `log=`, `flag=`, `ttl=`, `penalty=`, `credit=`, `mode=` |
-| `BotShieldEnvTrigger` | `<name> env=<var>[=...]` | `status=`, `redirect=`, `log=`, `flag=`, `ttl=`, `penalty=`, `credit=`, `mode=` |
-| `BotShieldFeedbackTrigger` | `<event>` | `flag=`, `ttl=`, `log=`, `mode=` |
-| `BotShieldLoadTrigger` | `<name> state=<n>\|state>=<n>` | `status=`, `log=`, `penalty=`, `mode=` |
+| `BotShieldCookieTrigger` | `<name> <pred>` (see policy page) | `status=`, `redirect=`, `log=`, `flag=`, `ttl=`, `penalty=`, `credit=`, `mode=` |
+| `BotShieldEnvTrigger` | `<name> <env-pred>` (see policy page) | `status=`, `log=`, `flag=`, `ttl=`, `penalty=`, `credit=`, `mode=` (no `redirect=`) |
+| `BotShieldFeedbackTrigger` | `<event>` | `flag=`, `ttl=`, `log=` (no `mode=`) |
+| `BotShieldLoadTrigger` | `<name> state=<n>\|state>=<n>` | `status=`, `log=`, `penalty=`, `mode=` (no `redirect=`, `flag=`, `ttl=`) |
 | `BotShieldSessionCookieName` | `<name>` (single arg, repeatable) | n/a (feeds cookies=session predicate) |
 
 See [policy](../policy/index.html#triggers--predicate-action-engine-e3-e4-e6-e73-e112)
@@ -270,15 +291,33 @@ for full predicate vocabulary and family-by-family semantics.
 `cookies=session` cookie-trigger predicate considers a session
 cookie. Repeatable; each call appends.
 
-## Flag triggers (E14)
+## Per-scope triggers
+
+| Directive | Syntax | Scope |
+|---|---|---|
+| `BotShieldTrigger` | `[reset] [status=N\|pass] [redirect=URL] [log=tag] [flag=NAME] [ttl=N] [penalty=N] [credit=N] [mode=enforce\|observe]` | server / vhost / Directory / Location / LocationMatch / Files / If |
+
+The Apache scope the directive lives in IS the predicate; no path
+glob argument. Multiple `BotShieldTrigger` lines in one scope
+each append a separate action; they all fire on a pass, the first
+non-pass status short-circuits. `reset` (no other args) drops
+inherited triggers from outer scopes and clears earlier same-scope
+entries.
+
+This is the directive that replaces the legacy `BotShieldFlagIP`
+— the equivalent today is `BotShieldTrigger flag=<name> ttl=<sec>`.
+
+## Flag triggers
 
 | Directive | Syntax |
 |---|---|
-| `BotShieldFlagIP` | `<bits> [ttl-sec]` |
-| `BotShieldFlagTrigger` | `<rule-name> flag=<bit-name> action=<verb>=<value> [mode=observe]` |
+| `BotShieldFlagTrigger` | `<flag> [reset] [action=<verb> args...] [mode=observe]` |
 
-Action verbs: `score add=N` (positive penalty / negative credit),
-`tier_floor min=<tier>` (raise effective tier).
+Action verbs: `action=score add=N` (signed N -1000..1000),
+`action=tier_floor min=<tier>` (raise effective tier; tier is one
+of `pass`/`silent`/`form`/`captcha`). The `reset` keyword clears
+all earlier triggers (compiled-in defaults + prior operator
+declarations) for the named flag at post-config time.
 
 Flag bits: `honeypot_hit`, `scanner_probe`, `fake_bot`,
 `pow_fail_streak`, `app_verified_human`, `app_verified_session`,
@@ -286,7 +325,7 @@ Flag bits: `honeypot_hit`, `scanner_probe`, `fake_bot`,
 [policy](../policy/index.html#flag-trigger-family-e14) for compiled-in
 defaults and override semantics.
 
-## Safeguard (E10)
+## Safeguard
 
 | Directive | Syntax | Default | Scope |
 |---|---|---|---|
@@ -295,19 +334,19 @@ defaults and override semantics.
 | `BotShieldSafeguardWindow` | `N` (sec) | `600` | server / vhost |
 | `BotShieldSafeguardTTL` | `N` (sec) | `900` | server / vhost |
 
-E10 challenge-loop suppression. See
+challenge-loop suppression. See
 [policy](../policy/index.html#safeguard-e10).
 
-## Load-aware throttling (E11)
+## Load-aware throttling
 
-Sampling and hysteresis (E11.1):
+Sampling and hysteresis:
 
 | Directive | Syntax | Default | Scope |
 |---|---|---|---|
 | `BotShieldLoadStateFile` | `/path` | unset | server only |
 | `BotShieldLoadRefreshInterval` | `N` (sec) | `1` | server only |
-| `BotShieldLoadWarmThreshold` | `N` (% workers busy) | `70` | server only |
-| `BotShieldLoadHotThreshold` | `N` (% workers busy) | `90` | server only |
+| `BotShieldLoadWarmThreshold` | `N` (% workers busy) | `65` | server only |
+| `BotShieldLoadHotThreshold` | `N` (% workers busy) | `85` | server only |
 
 `BotShieldLoadStateFile` points at an external single-word state
 file (managed by an out-of-band collector) that overrides the
@@ -319,7 +358,7 @@ The trigger family that consumes the state lives under
 `BotShieldLoadTrigger` (above). See
 [policy](../policy/index.html#load-triggers-e112).
 
-## Multi-vhost reputation (E13)
+## Multi-vhost reputation
 
 | Directive | Syntax | Default |
 |---|---|---|
@@ -328,7 +367,7 @@ The trigger family that consumes the state lives under
 Vhosts with the same token share one reputation namespace. See
 [deployment](../deployment/index.html#multi-vhost-reputation).
 
-## Shadow mode (E12)
+## Shadow mode
 
 | Directive | Syntax | Default |
 |---|---|---|
@@ -338,7 +377,7 @@ Tri-state: unset means "inherit from outer scope or off if no
 outer scope". When on, every gating decision flips to observe-mode
 regardless of per-rule setting. See [staging](../staging/index.html).
 
-## App bridge (E5, E8.2)
+## App bridge
 
 | Directive | Syntax | Default |
 |---|---|---|
@@ -347,7 +386,7 @@ regardless of per-rule setting. See [staging](../staging/index.html).
 | `BotShieldAppClaims` | `on\|off` | `off` |
 | `BotShieldAppIntegrationSecretFile` | `/path` | unset (required for either above) |
 
-See [captcha](../captcha/index.html#app-bridge-e5--e82) for the wire format
+See [captcha](../captcha/index.html#app-bridge) for the wire format
 and security model.
 
 ## Where to next

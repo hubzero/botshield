@@ -288,6 +288,26 @@ int bs_check_policy(request_rec *r)
         }
     }
 
+    /* BotShieldTrigger — per-Apache-scope triggers. Apache's
+     * scope-match has already evaluated; walk the merged dcfg
+     * list in declaration order. Each entry's pass continues
+     * (multiple BotShieldTriggers in one scope all fire); a
+     * status short-circuits the walk. */
+    bs_dir_cfg *dcfg = ap_get_module_config(r->per_dir_config,
+                                            &botshield_module);
+    if (dcfg && dcfg->scope_triggers && dcfg->scope_triggers->nelts > 0) {
+        for (int i = 0; i < dcfg->scope_triggers->nelts; i++) {
+            bs_trigger_action *a = APR_ARRAY_IDX(
+                dcfg->scope_triggers, i, bs_trigger_action *);
+            const char *tag = a->log_tag ? a->log_tag : "scope";
+            bs_trigger_exec_outcome o = bs_apply_trigger_action(
+                r, scfg, BS_TFAMILY_SCOPE, a,
+                "scope-trigger", tag);
+            if (o == BS_TEXEC_STATUS) return a->status_code;
+            /* PASS_CONTINUE / OBSERVE → keep walking */
+        }
+    }
+
     /* E3 — path triggers. First match wins; no accumulation. */
     if (scfg->path_triggers && scfg->path_triggers->nelts > 0) {
         for (int i = 0; i < scfg->path_triggers->nelts; i++) {

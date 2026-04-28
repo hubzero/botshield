@@ -7,8 +7,12 @@ canonical decision-log vocabulary — there is no parallel taxonomy.
 
 ## Decision log
 
-Every gated request emits two log lines: a human-readable prose
-line and a stable `key=value` structured line.
+Every gated request emits a stable `key=value` structured line at
+`info` level (`bs_decision_log`); challenge-issuing requests also
+emit an `info` prose line carrying per-reason penalty values, and
+pass-through decisions emit a `debug` prose line. The structured
+line is the canonical surface — operators tail at `info` and parse
+the `key=value` form; the prose lines are forensic detail.
 
 The structured line:
 
@@ -45,7 +49,7 @@ awk-validator.sh`).
 | `alg` | `-`, `sha256-zeros`, `captcha-<provider>` |
 | `reason` | quoted short string (comma-joined reason names) or `-` |
 
-`tier=safeguard` is emitted for E10 challenge-loop suppression
+`tier=safeguard` is emitted for challenge-loop suppression
 (pass-through with the flagged-IP entry preserved). For metrics it
 bins into `tier_pass_total` since it's functionally pass-through;
 operators wanting to dashboard the safeguard rate scrape the
@@ -60,17 +64,17 @@ takes the shape `<family>:<name>` so the source family is visible:
 | Token shape | Source |
 |---|---|
 | `missing-user-agent`, `missing-accept-language`, `scraper-ua:<pattern>` | Built-in heuristics |
-| `first-sight-ip` | E5.2 Bloom filter |
-| `verified-<name>`, `fake-<name>`, `bot-unverified` | E1 allow list |
-| `block-path:<name>` | E2.1 block-path |
-| `rate-limit-exceeded:<name>` | E2.1 rate limit |
-| `robots-block:<group>` | E2.2 robots.txt |
-| `flag-trigger:<flag>` | E14 score action |
-| `flag-tier-floor:<tier>` | E14 tier_floor action |
-| `path-trigger:<name>`, `cookie-trigger:<name>`, `env-trigger:<name>`, `load-trigger:<name>`, `feedback-trigger:<event>` | E3/E4/E6/E11.2/E7.3 triggers |
+| `first-sight-ip` | Bloom filter |
+| `verified-<name>`, `fake-<name>`, `bot-unverified` | allow list |
+| `block-path:<name>` | block-path |
+| `rate-limit-exceeded:<name>` | rate limit |
+| `robots-block:<group>` | robots.txt |
+| `flag-trigger:<flag>` | flag-trigger score action |
+| `flag-tier-floor:<tier>` | flag-trigger tier-floor action |
+| `path-trigger:<name>`, `cookie-trigger:<name>`, `env-trigger:<name>`, `load-trigger:<name>`, `feedback-trigger:<event>` | trigger families |
 | `<reason>:observe` | Any of the above with `mode=observe` or under `BotShieldShadowMode on` (see [staging](../staging/index.html)) |
 | `would-flag-trigger:<flag>:observe`, `would-block:<name>`, `would-rate-limit:<name>` | Observe-mode "would have done" reasons |
-| `challenge-safeguard` | E10 safeguard pass-through |
+| `challenge-safeguard` | safeguard pass-through |
 
 ### Verbose prose line
 
@@ -128,24 +132,37 @@ Plus persistence metrics:
 | `botshield_state_loads_total` | counter | Successful state-file loads at startup |
 | `botshield_state_save_last_unix` | gauge | Unix time of last save |
 | `botshield_state_save_last_bytes` | gauge | Bytes written in last save |
-| `botshield_state_save_last_duration_us` | gauge | Microseconds taken by last save |
+| `botshield_state_save_last_duration_microseconds` | gauge | Microseconds taken by last save |
 | `botshield_state_load_last_kept` | gauge | Slots restored from last load |
 | `botshield_state_load_last_dropped` | gauge | Slots discarded (TTL expired, format mismatch) |
 
-Plus on-demand gauges (computed at scrape time, cached 1 s per
-worker):
+Allow-list and policy counters:
 
 | Metric | Type | Meaning |
 |---|---|---|
-| `botshield_flagged_ip_used` | gauge | Filled flagged-IP slots |
-| `botshield_flagged_ip_capacity` | gauge | Max flagged-IP slots |
-| `botshield_strike_used`, `botshield_strike_capacity` | gauge | E9 strike-table utilization |
-| `botshield_safeguard_used`, `botshield_safeguard_capacity` | gauge | E10 safeguard utilization |
-| `botshield_nonce_used`, `botshield_nonce_capacity` | gauge | E17 embedded-bootstrap nonce table |
-| `botshield_bloom_a_popcount`, `botshield_bloom_b_popcount` | gauge | Bloom buffer fill |
-| `botshield_cv_inflight` | gauge | Outbound captcha-verify calls in flight |
+| `botshield_bot_allow_total` | counter | Verified-crawler matches |
+| `botshield_bot_fake_total` | counter | UA-claims-bot but IP doesn't match |
+| `botshield_bot_unverified_total` | counter | UA matches a registered bot but no ranges loaded |
+| `botshield_rate_limit_exceeded_total` | counter | Total rate-limit 429s |
+| `botshield_block_path_hit_total` | counter | Total block-path 403s |
+| `botshield_rate_limit_observed_total` | counter | Observe-mode rate-limit matches |
+| `botshield_block_path_observed_total` | counter | Observe-mode block-path matches |
+| `botshield_trigger_observed_total` | counter | Observe-mode trigger matches across families |
+
+Plus SHM utilization gauges (computed at scrape time, cached 1 s
+per worker):
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `botshield_shm_flagged_used`, `botshield_shm_flagged_capacity` | gauge | Flagged-IP slot utilization |
+| `botshield_shm_strike_used`, `botshield_shm_strike_capacity` | gauge | Rate-limit-escalate strike-table utilization |
+| `botshield_shm_safeguard_used`, `botshield_shm_safeguard_capacity` | gauge | Safeguard-table utilization |
+| `botshield_bloom_bits_set_active`, `botshield_bloom_bits_set_warming` | gauge | Bloom buffer fill (current + warming buffer) |
+| `botshield_bloom_window_seconds` | gauge | Configured Bloom rotation window |
+| `botshield_captcha_inflight_current` | gauge | Outbound captcha-verify calls in flight |
+| `botshield_cv_rate_slot_capacity`, `botshield_cv_log_slot_capacity` | gauge | Captcha-verify rate / log-throttle slot capacity |
 | `botshield_load_state` | gauge | Current load tier (0=normal, 1=warm, 2=hot) |
-| `botshield_trigger_observed_total` | counter | Total observe-mode trigger matches across all families |
+| `botshield_load_state_changes_total` | counter | Load-state transitions since startup |
 
 ### Sample scrape
 

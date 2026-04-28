@@ -7,47 +7,51 @@ and where it sits in the runtime walk.
 
 The runtime order (one pass per request, first short-circuit wins):
 
-1. **Cookie triggers (E4)** — pre-handler state. Cookie family
+1. **Cookie triggers** — pre-handler state. Cookie family
    accumulates pass-with-credit across multiple matches.
-2. **Env triggers (E6)** — predicate on Apache environment
+2. **Env triggers** — predicate on Apache environment
    variables (`SetEnvIfExpr`, mod_rewrite `[E=…]`). First-match
    wins; gated on `ap_is_initial_req` so internal-redirect legs
    don't double-apply.
-3. **Load triggers (E11.2)** — predicate on the global load_state
-   sampled by E11.1.
-4. **Path triggers (E3)** — predicate on the request URI.
-5. **Block-path (E2.1)** — cohort + path-glob → 403.
-6. **Robots.txt Disallow (E2.2)** — RFC 9309 matcher → 403.
-7. **Rate-limit (E2.1)** — cohort + budget → 429 with Retry-After.
-8. **Robots.txt Crawl-delay (E2.2)** — per-group rate cap.
+3. **Load triggers** — predicate on the global load_state
+   sampled by the load watchdog.
+4. **Path triggers** — predicate on the request URI.
+5. **Block-path** — cohort + path-glob → 403.
+6. **Robots.txt Disallow** — RFC 9309 matcher → 403.
+7. **Rate-limit** — cohort + budget → 429 with Retry-After.
+8. **Robots.txt Crawl-delay** — per-group rate cap.
 
-Allow-list (E1) and the built-in heuristics run inside the score
-fold-up that precedes this walk; flag-trigger effects (E14) are
-applied after policy completes against the IP's accumulated flag
-bitmap.
+The policy walk runs *before* the built-in heuristics, so a
+matching policy rule can short-circuit the request even when the
+client also has a valid `_bs_verified` cookie. Allow-list checks
+and built-in heuristics (missing-UA, missing-Accept-Language,
+scraper-pattern UA) run after the policy walk if the walk
+returns OK; flag-trigger effects are applied last, against the
+IP's accumulated flag bitmap.
 
-## Allow list (E1) — verified crawlers
+## Allow list — verified crawlers
 
-`BotShieldAllowBot` registers a UA pattern + IP-range pair that the
-allow-list classifier checks before any other gate runs. Verified
-crawlers (UA matches AND IP is in the published range) get a hard
-pass — they bypass the score ladder entirely.
+`BotShieldAllowBot` registers a UA pattern + IP-range pair that
+the allow-list classifier checks during the heuristics phase.
+Verified crawlers (UA matches AND IP is in the published range)
+get a hard pass — they bypass the score ladder entirely.
 
 ```apache
 BotShieldAllow on
 BotShieldAllowBot googlebot "Googlebot/" /var/lib/botshield/bots/googlebot.txt
 BotShieldAllowBot bingbot   "bingbot/"   /var/lib/botshield/bots/bingbot.txt
-BotShieldAllowBot internal-monitor "MonitorBot/" *,10.0.0.0/8,2001:db8::/32
+BotShieldAllowBot internal-monitor "MonitorBot/" 10.0.0.0/8,2001:db8::/32
 ```
 
-Three forms for the third arg:
+The third arg is shape-inspected — no separate flag or sentinel:
 
-- **path to a CIDR file** — one CIDR per line, `#` comments, blank
-  lines OK, IPv4 + IPv6.
-- **inline CIDRs** — leading `*,` then comma-separated CIDRs (the
-  `*` is a sentinel signaling "inline" rather than a path).
-- **`*` alone** — UA-match only; no IP check. Logged with reason
+- **starts with `/`** → absolute path to a CIDR file (one CIDR per
+  line, `#` comments, blank lines OK, IPv4 + IPv6).
+- **contains `/` or `:`** → comma-separated inline CIDRs.
+- **`*` alone** → UA-match only; no IP check. Logged with reason
   `allow-bot-ua:<name>` instead of `allow-bot:<name>`.
+- **omitted** → default file path
+  `/var/lib/botshield/bots/<name>.txt`.
 
 The CIDR file is read once at config-parse time (size cap 1 MiB) and
 cached on the per-server config. Refresh with a reload.
@@ -72,21 +76,23 @@ states:
   loaded for this name. Logged with reason `bot-unverified` for
   operator visibility, no score effect.
 
-## Rate limits and block paths (E2.1)
+## Rate limits and block paths
 
 `BotShieldRateLimit` caps requests-per-window for a cohort. Hits
 return 429 with `Retry-After` and add 50 to the score. Cohorts pair
 a UA-substring matcher with an IP spec:
 
 ```apache
-BotShieldRateLimit api-burst 60 60 "" 10.0.0.0/8,2001:db8::/48
-BotShieldRateLimit scrapers  10 60 "wget|curl|python" *
+BotShieldRateLimit api-burst 60 min "" 10.0.0.0/8,2001:db8::/48
+BotShieldRateLimit scrapers  10 min "wget|curl|python" *
 ```
 
-Args: `<name> <budget> <window-sec> <ua-pattern> <ipspec>`.
+Args: `<name> <budget> <per> <ua-pattern> <ipspec>`.
 
-- `<budget>` requests are allowed per `<window-sec>` (fixed-window
-  counter, atomic CAS-updated SHM slot).
+- `<budget>` requests are allowed per `<per>` (fixed-window counter,
+  atomic CAS-updated SHM slot).
+- `<per>` accepts `sec`/`min`/`hour` (or `s`/`m`/`h`) — never a
+  bare integer; the parser rejects plain numbers.
 - `<ua-pattern>` is a substring or `""` for "any UA".
 - `<ipspec>` is the same shape as `BotShieldAllowBot` — a path to a
   CIDR file, comma-separated inline CIDRs, or `*` for "any IP".
@@ -103,21 +109,22 @@ BotShieldBlockPath aggressive-scraper "/" "AhrefsBot|SEMrushBot" *
 
 Args: `<name> <path-glob> <ua-pattern> <ipspec>`.
 
-### Repeated-429 escalation (E9)
+### Repeated-429 escalation
 
 `BotShieldRateLimitEscalate` upgrades a rule that's already been
 firing — repeated 429s on the same IP escalate to 403 (or any
 configurable status):
 
 ```apache
-BotShieldRateLimitEscalate api-burst 5 60 status=403 ttl=3600
+BotShieldRateLimitEscalate api-burst 5 min status=403 ttl=3600
 ```
 
-If a rate-limited cohort triggers `<strikes>` 429s within
-`<per-sec>`, the IP is upgraded to the configured status for `ttl`
-seconds (lives in the strike SHM table). The original rate-limit
-rule still runs; the escalation is a separate decision applied on
-top.
+Args: `<rate-rule> <strikes> <per> [status=N] [ttl=N]`. `<per>`
+accepts `sec`/`min`/`hour` (same as `BotShieldRateLimit`). If a
+rate-limited cohort triggers `<strikes>` 429s within the window,
+the IP is upgraded to the configured status for `ttl` seconds
+(lives in the strike SHM table). The original rate-limit rule
+still runs; the escalation is a separate decision applied on top.
 
 ### Path-pattern semantics
 
@@ -128,7 +135,7 @@ literal byte; the current matcher follows RFC 9309's leftmost
 greedy semantics. The NOTICE warns operators that intent may have
 shifted; existing configs aren't broken, just verified.
 
-## Robots.txt enforcement (E2.2)
+## Robots.txt enforcement
 
 `BotShieldRobotsTxt` plugs in a parsed RFC 9309 robots.txt file as
 a policy source. Disallow rules become `block-path:robots:<group>`
@@ -161,7 +168,7 @@ Args:
 Group iteration is exposed at `<prefix>/policy-status` for
 operator inspection (see [observability](../observability/index.html)).
 
-## Triggers — predicate-action engine (E3, E4, E6, E7.3, E11.2)
+## Triggers — predicate-action engine
 
 Five trigger families share one config-time action engine and one
 request-time executor. Each family differs only in its predicate;
@@ -170,11 +177,11 @@ the same shared action keys.
 
 | Family | Directive | Predicate |
 |---|---|---|
-| Path (E3) | `BotShieldPathTrigger` | URI glob |
-| Cookie (E4) | `BotShieldCookieTrigger` | Cookie name + value (or bulk shape) |
-| Env (E6) | `BotShieldEnvTrigger` | Apache env var |
-| Feedback (E7.3) | `BotShieldFeedbackTrigger` | App-emitted event name (response path) |
-| Load (E11.2) | `BotShieldLoadTrigger` | Global load_state |
+| Path | `BotShieldPathTrigger` | URI glob |
+| Cookie | `BotShieldCookieTrigger` | Cookie name + value (or bulk shape) |
+| Env | `BotShieldEnvTrigger` | Apache env var |
+| Feedback | `BotShieldFeedbackTrigger` | App-emitted event name (response path) |
+| Load | `BotShieldLoadTrigger` | Global load_state |
 
 ### Shared action keys
 
@@ -192,7 +199,7 @@ action keys are:
 | `credit=N` | Subtract N from the request score (rejected on the path family — paths can't credit) |
 | `mode=observe` | Per-rule observe mode: predicate evaluates, side-effects suppressed. See [staging](../staging/index.html) |
 
-### Path triggers (E3)
+### Path triggers
 
 ```apache
 BotShieldPathTrigger admin-honeypot "/admin/.env" \
@@ -205,34 +212,38 @@ First-match wins (declaration order). On match, the path family's
 `status=pass` short-circuits to `DECLINED` (real handler runs); any
 other status is the response code.
 
-### Cookie triggers (E4)
+### Cookie triggers
 
 ```apache
-BotShieldCookieTrigger session-active sessionid=present \
+BotShieldCookieTrigger session-active cookie=sessionid \
     status=pass credit=10
-BotShieldCookieTrigger weak-session sessionid=eq:guest \
+BotShieldCookieTrigger weak-session cookie=sessionid=guest \
     penalty=15 log=guest-session
 BotShieldCookieTrigger no-cookies cookies=none \
     penalty=5 log=cookieless
 ```
 
-Predicates:
+Predicate shapes:
 
-- `<name>=present` / `<name>=absent` — named cookie presence.
-- `<name>=eq:<val>` / `<name>=ne:<val>` / `<name>=contains:<val>` —
-  named cookie value matchers.
+- `cookie=<name>` — named cookie present (any value).
+- `!cookie=<name>` — named cookie absent.
+- `cookie=<name>=<value>` — exact value match.
+- `cookie=<name>!<value>` — value mismatch.
+- `cookie=<name>~<substring>` — value contains substring.
 - `cookies=none` / `cookies=any` — bulk: empty cookie map / any
   cookie set.
 - `cookies=session` — bulk: any of the names declared via
   `BotShieldSessionCookieName` is set.
-- `bs=verified` / `bs=missing` / `bs=invalid` — the BotShield-
-  cookie-state note set by `bs_handler` (no double HMAC check).
+- `bs-cookie=verified` / `bs-cookie=missing` / `bs-cookie=invalid` —
+  the BotShield-cookie-state note set by `bs_handler` (no double
+  HMAC check). Predicates against the module's own `_bs_verified`
+  cookie name are rejected — use these instead.
 
 Cookie family accumulates: `status=pass` keeps walking and
 collecting credits/penalties from later cookie triggers. First
 non-pass status short-circuits.
 
-### Env triggers (E6)
+### Env triggers
 
 ```apache
 SetEnvIfExpr "%{HTTP:CF-Connecting-IP} =~ /:/" BS_IPV6=1
@@ -242,16 +253,24 @@ SetEnvIf User-Agent "(?i)\bcurl\b" BS_CLI=1
 BotShieldEnvTrigger curl-hint env=BS_CLI penalty=10 log=cli
 ```
 
-Predicates: `env=<name>=present` / `=absent` / `=eq:<val>`. Env is
-narrower than cookie by design — rich matching belongs in the
-upstream module that sets the var.
+Predicate shapes:
+
+- `env=<name>` — env var present (any value, including empty).
+- `!env=<name>` — env var absent.
+- `env=<name>=<value>` — exact value match.
+
+Narrower than cookie by design — no substring/contains shape and
+no bulk-state analog. Operators who need rich matching set a
+coarse bucket upstream (`SetEnvIfExpr`, ModSecurity rule, etc.)
+and consume the bucket here. `redirect=` is not a valid action
+key on env or load triggers.
 
 Env triggers gate on `ap_is_initial_req(r)` to prevent double-
 application on internal redirect legs (ErrorDocument, RewriteRule
 without R). The env producer would otherwise fire a second time
 and double-count score/flag.
 
-### Feedback triggers (E7.3)
+### Feedback triggers
 
 App emits a response header `X-BotShield-Feedback: event=<name>;sig=<hmac>`;
 the module verifies the HMAC and looks up the event name in the
@@ -269,18 +288,20 @@ compromised app can emit any event name, but only configured
 mappings reach module memory. Wire format details and signing are
 covered in [captcha](../captcha/index.html).
 
-Feedback runs on the response path. It honors `BotShieldShadowMode`
-and per-trigger `mode=observe` — observe matches log
-`feedback-trigger:<event>:observe` without mutating the flagged-IP
-table. See [staging](../staging/index.html).
+Feedback runs on the response path. Per-trigger `mode=observe` is
+rejected by the parser (observe is meaningless once the response
+has shipped); global `BotShieldShadowMode` still flips feedback
+into observe semantics — matches log `feedback-trigger:<event>:
+observe` without mutating the flagged-IP table. See
+[staging](../staging/index.html).
 
-### Load triggers (E11.2)
+### Load triggers
 
 ```apache
 BotShieldLoadStateFile          /run/botshield/load-state
 BotShieldLoadRefreshInterval    1
-BotShieldLoadWarmThreshold      70
-BotShieldLoadHotThreshold       90
+BotShieldLoadWarmThreshold      65
+BotShieldLoadHotThreshold       85
 
 BotShieldLoadTrigger be-strict state>=warm penalty=20 log=brownout
 BotShieldLoadTrigger drop-noise state=hot   status=503 log=hot-shed
@@ -297,7 +318,7 @@ collectd writing a single-word state every second). The external
 file lets you key load decisions on whatever metric makes sense
 for your deployment, not just Apache's busy-worker count.
 
-## Flag-trigger family (E14)
+## Flag-trigger family
 
 Flag triggers map flag bits → actions, applied after the policy
 walk against the IP's accumulated flag bitmap (IP-side via
@@ -306,25 +327,39 @@ have a different action surface than the five trigger families
 above:
 
 ```apache
-BotShieldFlagTrigger honeypot_hit_strict   flag=honeypot_hit \
-    action=tier_floor min=captcha
-BotShieldFlagTrigger honeypot_score        flag=honeypot_hit \
-    action=score add=60
-BotShieldFlagTrigger app_human_credit      flag=app_verified_human \
-    action=score add=-80
+BotShieldFlagTrigger honeypot_hit       action=tier_floor min=captcha
+BotShieldFlagTrigger honeypot_hit       action=score add=60
+BotShieldFlagTrigger app_verified_human action=score add=-80
 ```
+
+Args: `<flag> [reset] [action=<verb> args...]`. The first arg names
+a flag bit (`honeypot_hit`, `scanner_probe`, `fake_bot`,
+`pow_fail_streak`, `app_verified_human`, `app_verified_session`,
+`app_trust_signal`); each invocation appends one trigger entry for
+that bit.
 
 Two action verbs:
 
-- **`action=score add=N`** — accumulate into the request's score
-  (positive penalty / negative credit).
-- **`action=tier_floor min=<tier>`** — lift the tier to AT LEAST
-  `<tier>` regardless of score. Score-derived tier wins when
-  already above the floor.
+- **`action=score add=N`** — accumulate signed N into the
+  request's score (positive penalty / negative credit). SUM
+  accumulates across triggers.
+- **`action=tier_floor min=<tier>`** — set a minimum tier; `<tier>`
+  is `pass` / `silent` / `form` / `captcha`. MAX accumulates
+  (strictest wins).
 
-A third verb (`action=reset`) is a config-time sentinel for
-operators who want to override a compiled-in default, consumed
-before the request path runs.
+The `reset` keyword is directive-level (not an action verb): a
+line of the form `BotShieldFlagTrigger <flag> reset` clears every
+prior trigger (compiled-in default + earlier operator declarations)
+for that flag at post-config time. `reset` may appear with or
+without a trailing `action=...`:
+
+```apache
+# Wipe defaults, install only one tier-floor rule:
+BotShieldFlagTrigger honeypot_hit reset action=tier_floor min=form
+
+# Disarm a flag entirely:
+BotShieldFlagTrigger pow_fail_streak reset
+```
 
 ### Compiled-in defaults
 
@@ -351,29 +386,67 @@ Operator-supplied `BotShieldFlagTrigger` directives override the
 defaults for the matching flag bit + action verb pair (later
 declarations win, same as every other trigger family).
 
-### Setting flags by location
+### Per-Apache-scope triggers — `BotShieldTrigger`
 
-`BotShieldFlagIP` flags any IP that reaches the configured scope:
+For everything else operators want to do at a specific Apache
+scope — flag the IP, add a penalty, return a status, observe in
+shadow — there's a single per-scope directive:
 
 ```apache
 <Location "/admin/.env">
-    BotShieldFlagIP honeypot_hit 3600
+    BotShieldTrigger flag=honeypot_hit ttl=3600 log=admin-trap
 </Location>
 
-<Location "/wp-login.php">
-    BotShieldFlagIP scanner_probe 3600
+<LocationMatch "(?i)/wp-(login|admin)">
+    BotShieldTrigger flag=scanner_probe ttl=3600 penalty=20 log=wp-trap
+</LocationMatch>
+
+<Files "*.php">
+    <If "%{REQUEST_URI} =~ m#/uploads/#">
+        BotShieldTrigger status=403 log=php-in-uploads
+    </If>
+</Files>
+```
+
+The Apache scope match IS the predicate — no separate path glob,
+because Apache already evaluated the scope. Action keys mirror the
+cookie family: `status` / `redirect` / `log` / `flag` / `ttl` /
+`penalty` / `credit` / `mode`. Multiple `BotShieldTrigger` lines
+in one scope each append a separate action; they all fire on a
+pass, the first non-pass status short-circuits.
+
+`BotShieldTrigger` works in any Apache container the parser
+accepts (server config, `<VirtualHost>`, `<Directory>`,
+`<Location>`, `<LocationMatch>`, `<Files>`, `<If>`, etc.) — the
+same set that `Require` and `Header` work in. This is the
+recommended way to express anything `<Location>`-shaped.
+
+#### Reset semantics — opting out of inherited triggers
+
+By default a child scope inherits its parent's `BotShieldTrigger`
+list and concatenates its own. To drop the inherited list,
+declare `BotShieldTrigger reset` in the child:
+
+```apache
+<Location "/api">
+    BotShieldTrigger penalty=10 log=api-tax
+</Location>
+
+<Location "/api/health">
+    BotShieldTrigger reset
+</Location>
+
+<Location "/api/internal">
+    BotShieldTrigger reset
+    BotShieldTrigger status=pass log=internal-allow
 </Location>
 ```
 
-Args: `<bits> [ttl-sec]`. Multiple bits can be comma-separated.
-TTL defaults to 3600 if omitted. Range: 60..2592000.
+`reset` as the first arg drops triggers inherited from outer
+scopes (and clears any earlier `BotShieldTrigger` entries
+appended in the same scope before the reset).
 
-This is the operator handle for honeypot / scanner-bait `<Location>`
-blocks. Any request hitting the scope adds the named bits to the
-IP's flagged-IP entry; subsequent requests fold those bits through
-the flag-trigger table.
-
-## Safeguard (E10)
+## Safeguard
 
 The safeguard suppresses a challenge loop: a client that has been
 issued challenges repeatedly within the safeguard window without

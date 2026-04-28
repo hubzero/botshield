@@ -62,6 +62,7 @@ typedef enum {
     BS_TFAMILY_FEEDBACK,
     BS_TFAMILY_LOAD,
     BS_TFAMILY_FLAG,
+    BS_TFAMILY_SCOPE,
 } bs_trigger_family;
 
 typedef enum {
@@ -314,15 +315,34 @@ const char *bs_set_load_trigger    (cmd_parms *cmd, void *dconf,
 const char *bs_set_session_cookie_name(cmd_parms *cmd, void *dconf,
                                        const char *name);
 
-/* --- E14 flag-trigger family setters --- *
+/* --- Flag-trigger family setter --- *
  *
- * BotShieldFlagIP    — per-scope: any request reaching this scope
- *                      flags the client IP with named bits + ttl.
- * BotShieldFlagTrigger — flag→action mapping registry. */
-const char *bs_set_flag_ip(cmd_parms *cmd, void *cfg_v,
-                           const char *names, const char *ttl_str);
+ * BotShieldFlagTrigger — flag→action mapping registry. Per-scope
+ * IP flagging that used to live in BotShieldFlagIP is now
+ * expressed as `BotShieldTrigger flag=<name> ttl=<sec>` (see
+ * below). */
 const char *bs_set_flag_trigger(cmd_parms *cmd, void *dconf,
                                 int argc, char *const argv[]);
+
+/* --- BotShieldTrigger — per-Apache-scope trigger declaration --- *
+ *
+ * Lives in any Apache container the parser accepts (server,
+ * <VirtualHost>, <Directory>, <Location>, <LocationMatch>,
+ * <Files>, <If>, etc.). The Apache scope match IS the predicate;
+ * the directive carries only the action keys. Multiple
+ * BotShieldTrigger directives in one scope each append a separate
+ * action entry. Action keys: status, redirect, log, flag, ttl,
+ * penalty, credit, mode (same surface as the cookie family).
+ *
+ * Reset semantics: `BotShieldTrigger reset` (no other args) sets
+ * a flag on the current dcfg that the merge consults — when a
+ * deeper scope contains a reset, inherited triggers from outer
+ * scopes are dropped before any further triggers in the current
+ * scope are appended. The reset also clears any earlier
+ * BotShieldTrigger directives that were appended in the same
+ * scope before the reset directive. */
+const char *bs_set_trigger(cmd_parms *cmd, void *dconf,
+                           int argc, char *const argv[]);
 
 #ifdef __cplusplus
 }
