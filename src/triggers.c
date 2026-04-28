@@ -114,6 +114,7 @@ static const char *bs_trigger_family_dname(bs_trigger_family fam)
     case BS_TFAMILY_FEEDBACK: return "BotShieldFeedbackTrigger";
     case BS_TFAMILY_LOAD:     return "BotShieldLoadTrigger";
     case BS_TFAMILY_FLAG:     return "BotShieldFlagTrigger";
+    case BS_TFAMILY_SCOPE:    return "BotShieldTrigger";
     }
     return "BotShieldTrigger";      /* unreachable */
 }
@@ -169,6 +170,17 @@ static void bs_trigger_action_init(bs_trigger_family fam,
         a->flag_bit    = 0;
         a->ttl_sec     = 0;
         break;
+    case BS_TFAMILY_SCOPE:
+        /* Per-scope triggers default to pass-with-score-shaping —
+         * the scope match itself is the predicate, so the typical
+         * use is "everything reaching this <Location> gets +N
+         * penalty / -N credit / a flag bit set." Operators flip
+         * status= explicitly when they want the scope to short-
+         * circuit with a status code or redirect. */
+        a->status_code = BS_TRIGGER_STATUS_PASS;
+        a->flag_bit    = 0;
+        a->ttl_sec     = 0;
+        break;
     }
     a->penalty         = 0;
     a->credit          = 0;
@@ -193,6 +205,8 @@ static const char *bs_trigger_known_keys(bs_trigger_family fam)
         return "flag, ttl, log";
     case BS_TFAMILY_LOAD:
         return "status, log, penalty, credit, mode";
+    case BS_TFAMILY_SCOPE:
+        return "status, redirect, log, flag, ttl, penalty, credit, mode";
     case BS_TFAMILY_FLAG:
         /* Flag triggers use a separate parser. This entry exists
          * for switch-exhaustiveness; the flag setter prints its
@@ -467,14 +481,19 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
                             ":pass", NULL));
             return BS_TEXEC_PASS_DECLINE;
         }
-        /* Cookie/env/load pass: apply penalty - credit on THIS
-         * request's score. The signal is part of this request's
-         * decision state (cookie carried, env set, host hot), so
-         * the score contribution belongs here. */
+        /* Cookie/env/load/scope pass: apply penalty - credit on
+         * THIS request's score. The signal is part of this
+         * request's decision state (cookie carried, env set, host
+         * hot, scope matched), so the score contribution belongs
+         * here. */
         int delta = a->penalty - a->credit;
         bs_score_add(r, delta, 0,
             apr_pstrcat(r->pool, family_tag, ":", trigger_name, NULL));
         if (fam == BS_TFAMILY_COOKIE) return BS_TEXEC_PASS_CONTINUE;
+        /* Scope: multiple BotShieldTrigger directives in the same
+         * scope are independent declarations, all should fire on
+         * a pass — caller's loop continues to the next entry. */
+        if (fam == BS_TFAMILY_SCOPE)  return BS_TEXEC_PASS_CONTINUE;
         /* env + load: first-match-wins. Distinct load triggers
          * (state>=warm vs state=hot) are alternative-specificity
          * cases, not layered reputation — one match is enough. */
@@ -1025,37 +1044,61 @@ const char *bs_set_load_trigger(cmd_parms *cmd, void *dconf,
     return NULL;
 }
 
-/* --- E14 flag-trigger directive setters --- */
-
-/* BotShieldFlagIP <flag_name>[,<flag_name>...] [ttl_seconds]
- * Any request that reaches this scope causes the client IP to be
- * inserted (or merged) into the flagged-IP table with the named bits.
- * Designed for explicit honeypot / scanner / test endpoints. */
-const char *bs_set_flag_ip(cmd_parms *cmd, void *cfg_v,
-                                  const char *names, const char *ttl_str)
+/* --- BotShieldTrigger setter --- *
+ *
+ * BotShieldTrigger [reset] [key=value ...]
+ *
+ * Per-scope trigger declaration; the Apache scope match is the
+ * predicate. `reset` as the first arg drops inherited triggers
+ * (and earlier same-scope entries) before any further triggers
+ * in this scope are appended. Action keys mirror the cookie
+ * family. Multiple BotShieldTrigger directives in one scope each
+ * append a separate entry. */
+const char *bs_set_trigger(cmd_parms *cmd, void *cfg_v,
+                                  int argc, char *const argv[])
 {
     bs_dir_cfg *cfg = cfg_v;
-    const char *err = NULL;
-    apr_uint32_t bits = bs_parse_flag_names(cmd->pool, names, &err);
-    if (err) return apr_psprintf(cmd->pool, "BotShieldFlagIP: %s", err);
-    if (!bits) return "BotShieldFlagIP: no flag bits resolved";
-
-    int ttl = 3600;
-    if (ttl_str && *ttl_str) {
-        long n;
-        if (!bs_parse_int_bounded(ttl_str, 60, 30 * 86400, 8, &n)) {
-            return "BotShieldFlagIP: ttl must be an integer 60..2592000 "
-                   "(seconds)";
+    int start_idx = 0;
+    if (argc >= 1 && strcasecmp(argv[0], "reset") == 0) {
+        /* Reset clears any same-scope entries pushed before this
+         * directive and signals the merge to drop the inherited
+         * base list. Subsequent args (if any) are action keys
+         * for the remaining directive. */
+        cfg->scope_triggers_reset = 1;
+        if (cfg->scope_triggers) {
+            cfg->scope_triggers->nelts = 0;
         }
-        ttl = (int)n;
+        start_idx = 1;
+        if (argc == 1) return NULL;
     }
-    cfg->flag_on_match     = bits;
-    cfg->flag_on_match_ttl = ttl;
+    if (start_idx == argc) {
+        return "BotShieldTrigger: expects [reset] [key=value ...]; "
+               "got nothing actionable";
+    }
+
+    if (!cfg->scope_triggers) {
+        cfg->scope_triggers = apr_array_make(cmd->pool, 2,
+                                             sizeof(bs_trigger_action *));
+    }
+
+    bs_trigger_action *a = apr_pcalloc(cmd->pool, sizeof(*a));
+    bs_trigger_action_init(BS_TFAMILY_SCOPE, a);
+
+    for (int i = start_idx; i < argc; i++) {
+        const char *err = bs_parse_trigger_action_key(cmd->pool,
+            BS_TFAMILY_SCOPE, argv[i], a);
+        if (err) return err;
+    }
+    const char *err = bs_finalize_trigger_action(cmd->pool,
+        BS_TFAMILY_SCOPE, a);
+    if (err) return err;
+
+    *(bs_trigger_action **)apr_array_push(cfg->scope_triggers) = a;
     return NULL;
 }
 
 /* Flag-bit registry. Maps the BS_FLAG_* defines to the canonical
- * names that appear in directives (BotShieldFlagTrigger, BotShieldFlagIP),
+ * names that appear in directives (BotShieldFlagTrigger, BotShieldTrigger),
  * wire formats (X-Botshield-Claims `flags=`), and the decision log.
  * Hoisted up the file so E8.2's claim-emit path can render the bitmap
  * without a forward-decl dance over an anonymous-struct array

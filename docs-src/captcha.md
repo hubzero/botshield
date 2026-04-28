@@ -2,11 +2,11 @@
 
 mod_botshield ships two integration surfaces with third parties:
 
-1. **Captcha tier (M8)** — when the score crosses
+1. **Captcha tier** — when the score crosses
    `BotShieldScoreCaptcha`, the module renders a third-party
    captcha widget (Turnstile / hCaptcha / reCAPTCHA / Friendly /
    GeeTest) and verifies the token via libcurl on POST.
-2. **App bridge (E5 + E8.2)** — a signed two-way protocol between
+2. **App bridge** — a signed two-way protocol between
    mod_botshield and the upstream application: the app emits
    reputation feedback as a response header; the module emits
    verified-claims as a request header.
@@ -15,7 +15,7 @@ Both surfaces share one HMAC key
 (`BotShieldAppIntegrationSecretFile`) — wire-format separation
 keeps the directions distinct without separate keys.
 
-## Captcha tier (M8)
+## Captcha tier
 
 ### Provider registry
 
@@ -28,7 +28,7 @@ Six providers ship in the registry:
 | `recaptcha-v2` | `g-recaptcha-response` | Google reCAPTCHA v2. Test pair at https://developers.google.com/recaptcha/docs/faq |
 | `recaptcha-v3` | `g-recaptcha-response` | Google reCAPTCHA v3. Score-thresholded; configure via `BotShieldRecaptchaV3MinScore` |
 | `friendly` | `frc-captcha-solution` | Friendly Captcha. The `solution` form field is mandated by the provider |
-| `geetest` | `geetest_payload` | GeeTest v4. HMAC-signed; uses `captcha_id` + `captcha_key` rather than a generic site key + secret |
+| `geetest` | `geetest-token` | GeeTest v4. HMAC-signed; uses `captcha_id` + `captcha_key` rather than a generic site key + secret |
 
 Cohabitation: a single vhost can register multiple providers and
 route requests to different ones via `<LocationMatch>` scopes — the
@@ -60,7 +60,7 @@ compiled-in default (usually `/etc/ssl/certs/ca-certificates.crt`
 on Debian-family). Operators with custom trust stores or air-gapped
 deployments can pin a specific bundle.
 
-### Verify-endpoint hardening (M8.1)
+### Verify-endpoint hardening
 
 The captcha-verify endpoint
 (`<prefix>/captcha-verify/<provider>`) is guarded by six layers of
@@ -133,7 +133,7 @@ The verify endpoint URL is per-provider:
 the matching path. A vhost-wide single-provider deployment can use
 the bare `<prefix>/captcha-verify` form.
 
-## E18 — inline form captcha
+## Inline form captcha
 
 Some applications already render their own form captcha and want
 mod_botshield to validate the token inline rather than hand
@@ -161,13 +161,13 @@ upstream of the application's own validation.
 on the same scope. Without one, the directive logs a misconfig and
 no-ops.
 
-## App bridge (E5 + E8.2)
+## App bridge
 
 The app bridge gives the upstream application two protocols for
 exchanging signed reputation data with the module without ever
 appearing on the wire to the client.
 
-### E5 — App-to-module feedback
+### App-to-module feedback
 
 The app emits a response header on responses where it has classified
 the request after-the-fact:
@@ -207,18 +207,23 @@ compromised app can emit any event name, but only configured
 mappings reach module memory. Renaming, retiring, or muting an
 event is a config change with no app-side coordination.
 
-Feedback runs through the same shadow-mode + observe-mode gate as
-the other trigger families. Under `BotShieldShadowMode on` the
-filter logs `feedback-trigger:<event>:observe` without mutating the
-flagged-IP table. Per-trigger `mode=observe` works the same way.
+Feedback honors global `BotShieldShadowMode`. Under
+`BotShieldShadowMode on` the filter logs
+`feedback-trigger:<event>:observe` without mutating the flagged-IP
+table. Per-trigger `mode=observe` is rejected by the parser on
+`BotShieldFeedbackTrigger` — observe is meaningless once the
+response has already shipped, so feedback's only observe gate is
+the global shadow flag.
 
-### E8.2 — Module-to-app claims
+### Module-to-app claims
 
 mod_botshield can emit a signed claims header on the request seen
 by the upstream application:
 
 ```
-X-Botshield-Claims: tier=pass;ip=192.0.2.42;flags=app_verified_human;sig=<hmac>
+X-Botshield-Claims: v=1;score=12;tier=pass;cookie=ok;
+                    flags=app_verified_human;passes=s=0,f=0,c=1;
+                    ts=1745870400;sig=<hmac-sha256-hex>
 ```
 
 The application reads this to know what mod_botshield decided about
@@ -234,15 +239,25 @@ header on the way in, then emits a fresh signed value before
 handing the request to the next phase. Any application-side
 spoofing attempt is dropped before the app sees it.
 
-Claims fields:
+Claims fields (semicolon-separated, in this order):
 
-- `tier` — one of `pass`, `silent`, `form`, `captcha` (the
-  decision-log `tier` enum minus `none`).
-- `ip` — the client IP after `mod_remoteip` rewrite (so apps see
-  the real client, not the edge).
-- `flags` — comma-joined flag-bit names (`honeypot_hit,
-  scanner_probe`, etc.). Empty if no flags set.
-- `sig` — HMAC-SHA-256 hex over the canonical form.
+- `v=1` — wire-format version. Locked to `1` today.
+- `score=N` — running score the request decision used.
+- `tier=<t>` — `pass` / `silent` / `form` / `captcha` / `safeguard`
+  (matches the decision-log `tier` enum).
+- `cookie=<c>` — `ok` / `expired` / `bad_sig` / `bad_format` /
+  `absent` (matches the `cookie` enum).
+- `flags=<list>` — comma-joined flag-bit names
+  (`honeypot_hit,app_verified_human`, etc.). Empty value when
+  no flags set.
+- `passes=s=N,f=N,c=N` — counters of successful challenges at
+  each tier carried in the prior cookie.
+- `ts=<unix>` — emit time in unix seconds.
+- `sig=<hex>` — HMAC-SHA-256 over everything before `;sig=`.
+
+The client IP is *not* included in the claims; the application
+already has it via Apache's `r->useragent_ip` / access log /
+`%a` LogFormat after `mod_remoteip` rewrite.
 
 The same integration secret file backs both directions; the
 canonical forms differ structurally so cross-replay is blocked by
