@@ -97,6 +97,17 @@ extern "C" {
 #define BS_CK_STATE_MISSING   "missing"
 #define BS_CK_STATE_INVALID   "invalid"
 
+/* Scoring thresholds (penalty → tier) and heuristic penalties.
+ * Used by config.c (defaults), score.c (cap), and bs_handler. */
+#define BS_DEFAULT_SCORE_SILENT   20
+#define BS_DEFAULT_SCORE_HARD     50
+#define BS_DEFAULT_SCORE_CAPTCHA  80
+#define BS_SCORE_MAX_REASONS      16
+
+#define BS_PENALTY_MISSING_UA     40
+#define BS_PENALTY_MISSING_AL     15
+#define BS_PENALTY_SCRAPER_UA     50
+
 /* Help visibility modes (values are stored in bs_dir_cfg.help_mode).
  * Used by the help/help-file directive setters in config.c and by
  * the splash-page renderer in botshield.c. */
@@ -772,15 +783,8 @@ void bs_path_pattern_warn_middle_star(cmd_parms *cmd,
                                       const char *name,
                                       const char *pattern);
 
-/* Score system (will move to score.h or stay here long-term). */
-bs_request_score *bs_get_score(request_rec *r, int create);
-
-/* Append a (penalty, ttl, reason) entry to the per-request score.
- * penalty=0 records a reason without changing the total (useful for
- * observe-mode + status=pass entries). Used cross-file by triggers.c
- * and bridge.c. */
-void bs_score_add(request_rec *r, int penalty, int ttl_seconds,
-                  const char *reason);
+/* Score system (bs_get_score, bs_score_add, bs_decision_reason_names,
+ * bs_score_reasons_joined, bs_apply_flag_triggers) lives in score.h. */
 
 /* Apply the per-cookie forgiveness cap. Modifies *consumed and
  * *window_start in place; returns the points actually granted.
@@ -790,9 +794,6 @@ int bs_forgiveness_apply_cap(int requested, int cap,
                              apr_uint32_t now_sec,
                              apr_uint32_t *window_start,
                              apr_uint32_t *consumed);
-
-const char *bs_decision_reason_names(apr_pool_t *p,
-                                     const bs_request_score *s);
 
 /* Parse a comma-separated list of flag-bit names ("honeypot_hit,
  * scanner_probe") into a bit mask. Sets *err to a pool-allocated
