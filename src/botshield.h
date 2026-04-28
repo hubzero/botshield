@@ -663,10 +663,14 @@ extern module AP_MODULE_DECLARE_DATA botshield_module;
  * challenge.h, captcha.h, ...). Anything left in this section is a
  * pending future-extraction. */
 
-/* Score helper — clamp negative-or-zero `value` to `fallback`. Used
- * everywhere config tri-state ints (-1 unset, 0 disabled, N> 0 set)
- * resolve to a runtime value. */
-int bs_effective_int(int value, int fallback);
+/* Resolve a tri-state int (BS_UNSET = -1 sentinel, otherwise the
+ * operator-set value) to its runtime fallback. Used by every code
+ * path that reads a per-scope cfg int. Inline because it's tiny
+ * and the pattern shows up dozens of times per request. */
+static inline int bs_effective_int(int value, int fallback)
+{
+    return (value == BS_UNSET) ? fallback : value;
+}
 
 /* IP parsing — mirror of inet_pton with the IPv4-mapped-to-IPv6
  * normalization the SHM tables expect. Returns 1 on success. */

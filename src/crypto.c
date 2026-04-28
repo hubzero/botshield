@@ -366,3 +366,83 @@ const char *bs_set_secondary_secret_file(cmd_parms *cmd,
     cfg->derived_keys_set_2 = 1;
     return NULL;
 }
+
+/* ======================================================================
+ * Bounded numeric parsers — used by the canonical-form cookie parser
+ * in cookie.c and by directive setters in config.c.
+ * ====================================================================== */
+
+/* Bounded integer parser for pre-HMAC cookie fields (security review
+ * #2). atoi() and strtoul(..., NULL, 10) both invoke undefined
+ * behavior on overflow per C11 §7.22.1 — atoi because the result
+ * doesn't fit in int, strtoul because we never check errno. Our
+ * ASan/UBSan fuzz can't reliably catch that because the dangerous
+ * work happens inside libc, not in instrumented project code.
+ *
+ * Returns 1 on a clean parse within [min_val, max_val]; 0 otherwise.
+ * The out pointer is left untouched on failure so callers can treat
+ * 0-returns as "reject this cookie" without dancing around partial
+ * state. Accepts optional leading + only; negative values must fall
+ * within min_val to be accepted (no underflow tricks).
+ *
+ * max_len is a hard cap on the digit-string length — rejects gigantic
+ * inputs before they reach strtol. A 64-bit long can hold up to 19
+ * decimal digits, so any cookie field longer than that is obviously
+ * junk and we bail without invoking libc at all. */
+int bs_parse_int_bounded(const char *s,
+                         long min_val, long max_val,
+                         apr_size_t max_len,
+                         long *out)
+{
+    if (!s || !*s) return 0;
+    apr_size_t len = strlen(s);
+    if (len > max_len) return 0;
+
+    errno = 0;
+    char *end = NULL;
+    long v = strtol(s, &end, 10);
+    if (errno != 0)        return 0;  /* ERANGE or other libc complaint */
+    if (!end || *end != '\0') return 0;  /* trailing junk */
+    if (v < min_val || v > max_val) return 0;
+    *out = v;
+    return 1;
+}
+
+/* 32-bit unsigned variant for the flags field. strtoul also invokes
+ * UB on overflow if errno isn't checked — same hardening. */
+int bs_parse_uint32_bounded(const char *s,
+                            apr_size_t max_len,
+                            apr_uint32_t *out)
+{
+    if (!s || !*s) return 0;
+    if (strlen(s) > max_len) return 0;
+
+    errno = 0;
+    char *end = NULL;
+    unsigned long v = strtoul(s, &end, 10);
+    if (errno != 0)        return 0;
+    if (!end || *end != '\0') return 0;
+    if (v > UINT32_MAX)    return 0;
+    *out = (apr_uint32_t)v;
+    return 1;
+}
+
+/* int64 variant for expires_at / challenged_at (apr_time_t seconds).
+ * Same shape; max_len caps at 19 (largest int64 decimal expansion). */
+int bs_parse_int64_bounded(const char *s,
+                           apr_int64_t min_val,
+                           apr_int64_t max_val,
+                           apr_int64_t *out)
+{
+    if (!s || !*s) return 0;
+    if (strlen(s) > 19) return 0;
+
+    errno = 0;
+    char *end = NULL;
+    long long v = strtoll(s, &end, 10);
+    if (errno != 0)        return 0;
+    if (!end || *end != '\0') return 0;
+    if ((apr_int64_t)v < min_val || (apr_int64_t)v > max_val) return 0;
+    *out = (apr_int64_t)v;
+    return 1;
+}
