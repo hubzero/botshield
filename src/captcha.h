@@ -28,12 +28,84 @@
 #define BOTSHIELD_CAPTCHA_H
 
 #include <httpd.h>
-
-#include "botshield.h"
+#include <http_config.h>
+#include <apr.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Forward declarations — bs_dir_cfg is defined in botshield.h.
+ * Declared here so this header is self-contained. */
+struct bs_dir_cfg;
+typedef struct bs_dir_cfg bs_dir_cfg;
+
+/* ======================================================================
+ * M8 captcha provider registry
+ * ====================================================================== */
+
+typedef struct bs_captcha_provider bs_captcha_provider;
+
+typedef enum {
+    BS_CAPTCHA_OK       = 0,
+    BS_CAPTCHA_REJECTED = 1,
+    BS_CAPTCHA_TIMEOUT  = 2,
+    BS_CAPTCHA_ERROR    = 3
+} bs_captcha_result;
+
+/* Provider-specific siteverify function. NULL on the provider row
+ * means "use the shared secret/response/remoteip POST + json-c parse
+ * path." Providers whose verify protocol diverges materially from
+ * the Google-family contract (GeeTest: HMAC-signed fields, non-bool
+ * result semantics, JSON blob as the client-side token) set this to
+ * their own function instead. */
+typedef bs_captcha_result (*bs_captcha_siteverify_fn)(
+    request_rec *r,
+    const bs_captcha_provider *prov,
+    const unsigned char *secret, apr_size_t secret_len,
+    const char *token, int timeout_ms,
+    /* Optional operator-supplied CA bundle path. NULL = libcurl
+     * default. */
+    const char *ca_bundle,
+    const char **out_details,
+    long *out_http_code,
+    double *out_score,
+    /* Binding-metadata out-params. NULL is a legal value and means
+     * "provider didn't return this field" — a valid signal (e.g.
+     * GeeTest doesn't expose hostname/action over the wire because
+     * its binding is HMAC-signed at request time). Callers only
+     * compare when non-NULL. */
+    const char **out_hostname,
+    const char **out_action);
+
+/* For the Google-family providers (Turnstile, hCaptcha, reCAPTCHA
+ * v2/v3, Friendly Captcha), `siteverify_fn` is NULL and the shared
+ * default path POSTs a body of the form
+ *   secret=<secret>&<siteverify_field>=<token>&remoteip=<ip>
+ * where `siteverify_field` defaults to "response" or is set to e.g.
+ * "solution" (Friendly Captcha).
+ *
+ * For providers whose verify protocol doesn't fit that shape
+ * (GeeTest), `siteverify_fn` is set to a provider-specific function
+ * and the rest of the registry row is informational — the fn decides
+ * how to use it.
+ *
+ * `token_field` is the name of the hidden form input the
+ * interstitial emits to carry the client's token to our verify
+ * endpoint. `widget_script_url` is the async script tag the
+ * interstitial embeds; `widget_class` is the CSS class on the
+ * container div the provider's script looks for (empty for providers
+ * with programmatic init). */
+struct bs_captcha_provider {
+    const char *name;
+    int         implemented;
+    const char *siteverify_url;
+    const char *token_field;
+    const char *widget_script_url;
+    const char *widget_class;
+    const char *siteverify_field;          /* NULL → "response" */
+    bs_captcha_siteverify_fn siteverify_fn; /* NULL → shared path */
+};
 
 const bs_captcha_provider *bs_find_provider(const char *name);
 
