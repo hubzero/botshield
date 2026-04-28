@@ -491,6 +491,14 @@ int bs_effective_int(int value, int fallback);
  * normalization the SHM tables expect. Returns 1 on success. */
 int bs_parse_client_ip(const char *ip_str, unsigned char out[16]);
 
+/* Bounded integer parser for pre-HMAC cookie / form-body fields.
+ * Returns 1 on a clean parse within [min, max]; 0 otherwise.
+ * Caller's *out is left untouched on failure. */
+int bs_parse_int64_bounded(const char *s,
+                           apr_int64_t min_val,
+                           apr_int64_t max_val,
+                           apr_int64_t *out);
+
 /* Form-body reader — slurps a POST body up to `max_len` and writes
  * it as a NUL-terminated string. Returns APR_SUCCESS or an APR
  * error. Used by the verify handlers (silent + M8). */
@@ -540,19 +548,22 @@ void bs_apply_rep_carry(request_rec *r,
                         bs_rep_state *target,
                         int forgive_amount);
 
-/* M8 captcha siteverify (libcurl-backed). */
-bs_captcha_result bs_captcha_siteverify(request_rec *r,
-                                        const bs_captcha_provider *prov,
-                                        const unsigned char *secret,
-                                        apr_size_t secret_len,
-                                        const char *token,
-                                        int timeout_ms,
-                                        const char *ca_bundle,
-                                        const char **out_details,
-                                        long *out_http_code,
-                                        double *out_score,
-                                        const char **out_hostname,
-                                        const char **out_action);
+/* M8 captcha siteverify, provider registry, M8.1 pending cookie,
+ * and the captcha-verify request handler all live in captcha.h. */
+
+/* Cookie format / mint / verify (will move to cookie.h in Phase 7). */
+const char *bs_build_cookie_payload(apr_pool_t *p,
+                                    const bs_dir_cfg *cfg,
+                                    const bs_challenge *ch,
+                                    const char *counter_str);
+const char *bs_build_set_cookie(request_rec *r, const bs_dir_cfg *cfg,
+                                const char *value, apr_time_t expires_at);
+const char *bs_get_cookie_value(request_rec *r, const char *name);
+
+/* Score system (will move to score.h or stay here long-term). */
+bs_request_score *bs_get_score(request_rec *r, int create);
+const char *bs_decision_reason_names(apr_pool_t *p,
+                                     const bs_request_score *s);
 
 #ifdef __cplusplus
 }

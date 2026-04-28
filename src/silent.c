@@ -24,6 +24,7 @@
 #include "crypto.h"
 #include "shm.h"
 #include "metrics.h"
+#include "captcha.h"   /* bs_captcha_siteverify for embedded-verify-provider */
 
 /* ===========================================================
  * E17 PoC — embedded silent verification handlers.
