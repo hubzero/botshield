@@ -1,10 +1,10 @@
-/* triggers.h — E3/E4/E6/E7.3/E11.2 trigger families.
+/* triggers.h — E2.1/E3/E4/E6/E7.3/E11.2/E14 trigger + policy families.
  *
- * Five trigger families share one config-time action engine and one
- * request-time executor. The families differ in their predicate
+ * Six trigger families share one config-time action engine and one
+ * request-time executor. Five families differ in their predicate
  * shape (path glob, cookie name+value, env var, app-feedback event,
  * load tier) but funnel through the same bs_trigger_action struct
- * and the same bs_apply_trigger_action executor.
+ * and the same bs_apply_trigger_action executor:
  *
  *   E3  BotShieldPathTrigger      path glob       request-path
  *   E4  BotShieldCookieTrigger    cookie name/val request-path
@@ -12,12 +12,19 @@
  *   E7.3 BotShieldFeedbackTrigger event name      response-path
  *   E11.2 BotShieldLoadTrigger    load state      request-path
  *
+ * The sixth (E14 flag-trigger) uses a separate action surface
+ * (score-add / tier_floor) whose entry type also lives here.
+ *
+ * The E2.1 rate-limit + block-path family shares its (UA?, IP?)
+ * cohort predicate (bs_cohort) with the same setters and likewise
+ * lives here for cohesion.
+ *
  * Each family has its own directive setter (bs_set_*_trigger) that
  * parses family-specific predicate args, then delegates the shared
  * key=value action keys (status, redirect, log, flag, ttl, penalty,
  * credit, mode) to bs_parse_trigger_action_key + finalize.
  *
- * The request-path walker bs_check_policy in botshield.c calls
+ * The request-path walker bs_check_policy in policy.c calls
  * bs_apply_trigger_action with the matched entry's action; the
  * response-path E5 filter in bridge.c calls it for feedback. Outcome
  * codes (BS_TEXEC_*) tell the caller whether to short-circuit, end
@@ -27,21 +34,70 @@
 
 #include <httpd.h>
 #include <http_config.h>
+#include <apr.h>
 #include <apr_tables.h>
 
-#include "botshield.h"
+#include "score.h"     /* bs_tier (used by bs_flag_trigger_entry) */
+#include "shm.h"       /* bs_load_state (used by bs_load_trigger_entry) */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* --- Per-family entry types --------------------------------- *
+/* Forward declarations — bs_dir_cfg / bs_server_cfg are defined in
+ * botshield.h. Declared here so this header is self-contained. */
+struct bs_dir_cfg;
+struct bs_server_cfg;
+
+/* ======================================================================
+ * Shared action engine — types
+ * ====================================================================== */
+
+#define BS_TRIGGER_STATUS_PASS   (-1)
+
+typedef enum {
+    BS_TFAMILY_PATH = 0,
+    BS_TFAMILY_COOKIE,
+    BS_TFAMILY_ENV,
+    BS_TFAMILY_FEEDBACK,
+    BS_TFAMILY_LOAD,
+    BS_TFAMILY_FLAG,
+} bs_trigger_family;
+
+typedef enum {
+    BS_TMODE_ENFORCE = 0,
+    BS_TMODE_OBSERVE,
+} bs_trigger_mode;
+
+typedef enum {
+    BS_TEXEC_PASS_CONTINUE = 0,
+    BS_TEXEC_PASS_BREAK,
+    BS_TEXEC_PASS_DECLINE,
+    BS_TEXEC_STATUS,
+    BS_TEXEC_OBSERVE,
+} bs_trigger_exec_outcome;
+
+typedef struct {
+    int           status_code;    /* HTTP code or BS_TRIGGER_STATUS_PASS */
+    const char   *redirect_url;   /* NULL unless explicitly set */
+    const char   *log_tag;
+    apr_uint32_t  flag_bit;       /* single BS_FLAG_* bit; 0 if ttl_sec==0 */
+    int           ttl_sec;        /* 0 = don't flag the IP */
+    int           penalty;        /* 0..1000 */
+    int           credit;         /* 0..1000 (rejected on path family) */
+    int           status_explicit; /* 1 if operator wrote status= */
+    int           mode;           /* bs_trigger_mode */
+} bs_trigger_action;
+
+/* ======================================================================
+ * Per-family entry types
  *
  * One entry per BotShield<family>Trigger directive. Each carries
  * its family-specific predicate plus a shared bs_trigger_action
  * (action keys parsed by bs_parse_trigger_action_key in triggers.c).
  * scfg holds parallel apr_arrays of these — bs_check_policy walks
- * each in declaration order. */
+ * each in declaration order.
+ * ====================================================================== */
 
 typedef struct {
     const char        *name;
@@ -105,17 +161,109 @@ typedef struct {
     bs_trigger_action  action;
 } bs_load_trigger_entry;
 
-/* --- Cookie-trigger predicate matcher ----------------------- *
+/* E7.3 — feedback trigger entry. One per BotShieldFeedbackTrigger
+ * directive; lookup-by-event-name. */
+typedef struct {
+    const char        *event;
+    bs_trigger_action  action;
+} bs_feedback_trigger_entry;
+
+/* ======================================================================
+ * E2.1 rate-limit + block-path family
+ *
+ * bs_cohort is the shared (UA?, IP?) predicate; bs_rate_limit_entry,
+ * bs_block_path_entry, bs_rate_escalate_entry are the per-directive
+ * configs they parameterize. Defined here because config.c's
+ * post_config hook walks them at SHM-slot assignment time.
+ * ====================================================================== */
+
+#define BS_PENALTY_RATE_LIMIT  50
+#define BS_PENALTY_BLOCK_PATH 100
+
+typedef struct {
+    const char         *ua_pattern;
+    int                 ua_any;
+    int                 ip_any;
+    const char         *path;
+    const char         *inline_cidrs;
+    apr_array_header_t *ranges;
+} bs_cohort;
+
+typedef struct bs_rate_escalate_entry bs_rate_escalate_entry;
+
+typedef struct {
+    const char   *name;
+    bs_cohort     cohort;
+    apr_uint32_t  budget;
+    apr_uint32_t  window_sec;
+    int           shm_slot;
+    const bs_rate_escalate_entry *escalate;
+    int           mode;
+} bs_rate_limit_entry;
+
+struct bs_rate_escalate_entry {
+    const char   *rule_name;
+    apr_uint32_t  strikes;
+    apr_uint32_t  per_sec;
+    int           status_code;
+    int           ttl_sec;
+    const char   *log_tag;
+};
+
+typedef struct {
+    const char *name;
+    const char *path_pattern;
+    bs_cohort   cohort;
+    int         mode;
+} bs_block_path_entry;
+
+/* SHM slot for the fixed-window counter. 8 bytes; CAS would target
+ * the pair as a u64 on a 64-bit-atomic platform. v1 uses 32-bit
+ * atomics on each field separately. */
+typedef struct {
+    apr_uint32_t count;
+    apr_uint32_t window_start_sec;
+} bs_rate_counter;
+
+/* ======================================================================
+ * E14 flag-trigger family
+ *
+ * Predicate is "flag_bit is set on this request's IP-side or cookie-
+ * side flag bitmap". Two runtime action verbs (SCORE / TIER_FLOOR);
+ * RESET is a config-time sentinel consumed before the request path
+ * runs.
+ * ====================================================================== */
+
+typedef enum {
+    BS_FLAG_ACT_SCORE = 0,
+    BS_FLAG_ACT_TIER_FLOOR,
+    BS_FLAG_ACT_RESET,
+} bs_flag_action_kind;
+
+typedef struct {
+    const char         *flag_name;
+    apr_uint32_t        flag_bit;
+    bs_flag_action_kind action;
+    int                 score_add;
+    bs_tier             tier_min;
+    int                 mode;
+    int                 from_default;
+} bs_flag_trigger_entry;
+
+/* ======================================================================
+ * Cookie-trigger predicate matcher
  *
  * Evaluate one BotShieldCookieTrigger entry's predicate against the
  * already-parsed cookie map and the BS-cookie-state note set by
- * bs_handler. Returns 1 on match, 0 on no match. */
+ * bs_handler. Returns 1 on match, 0 on no match.
+ * ====================================================================== */
 int bs_cookie_pred_match(const bs_cookie_trigger_entry *e,
                          apr_table_t *cmap,
                          const apr_array_header_t *session_names,
                          const char *bs_state);
 
-/* --- Shared action engine: executor ------------------------- *
+/* ======================================================================
+ * Shared action engine: executor
  *
  * Apply a parsed bs_trigger_action against `r`. Records score, flags
  * the IP if the rule asks for it, sets the trigger-tag note for the
@@ -129,7 +277,8 @@ int bs_cookie_pred_match(const bs_cookie_trigger_entry *e,
  *
  * `family_tag` is the decision-log prefix ("cookie-trigger" /
  * "env-trigger" / "load-trigger" / "path-trigger"); `trigger_name`
- * is the operator's per-rule label. */
+ * is the operator's per-rule label.
+ * ====================================================================== */
 bs_trigger_exec_outcome bs_apply_trigger_action(
     request_rec *r,
     struct bs_server_cfg *scfg,
@@ -138,13 +287,15 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
     const char *family_tag,
     const char *trigger_name);
 
-/* --- Directive setters -------------------------------------- *
+/* ======================================================================
+ * Directive setters
  *
  * Each family's setter parses its own predicate args (path glob /
  * cookie spec / env var / event name / load match) then runs the
  * remaining argv through the shared action-key parser. Setters
  * upsert by name so re-declaring a name updates rather than
- * appends. */
+ * appends.
+ * ====================================================================== */
 
 const char *bs_set_path_trigger    (cmd_parms *cmd, void *dconf,
                                     int argc, char *const argv[]);
