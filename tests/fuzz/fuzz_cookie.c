@@ -54,6 +54,7 @@
 #include "../../src/crypto.c"
 #include "../../src/allowlist.c"
 #include "../../src/metrics.c"
+#include "../../src/silent.c"
 #include "../../src/botshield.c"
 
 /* --- Fuzz state (initialized once per process) ---------------------- */
