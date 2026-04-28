@@ -29,6 +29,13 @@
 #include <httpd.h>
 #include <http_config.h>
 
+/* Forward decl — bs_robots_load takes a bs_server_cfg pointer.
+ * We avoid including botshield.h here because botshield.h
+ * declares bs_robots_state with a robots_doc * field (forward-
+ * declared in botshield.h itself); pulling the umbrella in here
+ * would create a circular include. */
+struct bs_server_cfg;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -115,6 +122,22 @@ const char *bs_set_robots_refresh_interval(cmd_parms *cmd, void *dconf,
                                            const char *arg);
 const char *bs_set_robots_wildcard_scope(cmd_parms *cmd, void *dconf,
                                          const char *arg);
+
+/* --- E2.2.2 module-side loader --- *
+ *
+ * Stat + (conditionally) parse + atomically publish the robots.txt
+ * pointed to by scfg->robots_txt_path. Called both at post_config
+ * (initial load) and from the watchdog callback (refresh). When
+ * the source file's mtime is unchanged, it's a cheap no-op. */
+apr_status_t bs_robots_load(server_rec *sv, struct bs_server_cfg *scfg,
+                            apr_pool_t *pconf);
+
+/* mod_watchdog tick callback — one registration per vhost with a
+ * BotShieldRobotsTxt directive. Calls bs_robots_load when the
+ * watchdog reports RUNNING; bs_robots_load returns fast when mtime
+ * hasn't changed. */
+apr_status_t bs_robots_watchdog_cb(int state, void *data,
+                                   apr_pool_t *pool);
 
 #ifdef __cplusplus
 }

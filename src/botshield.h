@@ -333,6 +333,13 @@ struct bs_captcha_provider {
  * doc's pool never see freed memory.
  * ====================================================================== */
 
+/* robots_doc is the parsed-RFC-9309 document opaque type; full
+ * definition + accessors are in robots.h. Forward-declared here so
+ * scfg can hold a pointer to a bs_robots_state without dragging
+ * the robots-parser headers into every TU that includes botshield.h. */
+struct robots_doc;
+typedef struct robots_doc robots_doc;
+
 typedef struct bs_robots_state {
     robots_doc *doc;
     apr_pool_t *pool;              /* owns doc; sized for one doc */
