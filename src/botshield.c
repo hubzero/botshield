@@ -871,7 +871,7 @@ static int bs_handler(request_rec *r)
     int cookie_had_val = (cookie_val && *cookie_val);
     if (cookie_had_val) {
         cookie_verify_reason = bs_verify_cookie(r, cfg, cookie_val, &prior_ch);
-        /* MEDIUM #1: render-side carry-forward must reject the same
+        /* : render-side carry-forward must reject the same
          * cverrs the issuance-side carry-forward rejects, otherwise
          * an expired cookie's rep can be transplanted via the
          * interstitial-render path (next_rep is baked into the
@@ -901,7 +901,7 @@ static int bs_handler(request_rec *r)
                 }
             }
         } else {
-            /* Security review LOW #2 — log the cookie name actually
+            /* Log the cookie name actually
              * present so a sed-renamed test can grep for the right
              * literal. The dual-name helper hides which variant was
              * found; rediscover here for the log line only. */
@@ -1227,9 +1227,9 @@ static int bs_handler(request_rec *r)
         if (new_score < 0) new_score = 0;
         next_rep.score = new_score;
         if (prior_ch.auto_tier) {
-            next_rep.passes_silent = 1;  /* LOW #7 clamp */
+            next_rep.passes_silent = 1;  /* clamp */
         } else {
-            next_rep.passes_form = 1;  /* LOW #7 clamp */
+            next_rep.passes_form = 1;  /* clamp */
         }
     } else {
         next_rep.score          = 0;

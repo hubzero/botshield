@@ -185,7 +185,7 @@ static apr_uint32_t bs_flagged_bucket(const unsigned char ip[16],
 /* Write into a slot under seqlock protection. Caller must hold the
  * global mutex.
  *
- * Security review HIGH #5 — version stores use C11 RELEASE semantics,
+ *  version stores use C11 RELEASE semantics,
  * version loads use ACQUIRE. apr_atomic_set32 / read32 only happen to
  * emit full barriers on x86; on AArch64 / POWER the plain payload
  * stores between the two version bumps could be reordered relative
@@ -243,7 +243,7 @@ void bs_flagged_ip_add(request_rec *r, const unsigned char ip[16],
         apr_uint32_t idx = (base + i) % bs_shm.flagged_capacity;
         bs_flagged_ip_slot *slot = &bs_shm.flagged_table[idx];
 
-        /* LOW #9 — defensive version-odd skip. We hold the mutex,
+        /* defensive version-odd skip. We hold the mutex,
          * so any odd version was left by a writer that crashed
          * mid-write (SIGKILL / OOM / segfault) before
          * bs_flagged_write_slot could rebump the version even.
@@ -281,7 +281,7 @@ void bs_flagged_ip_add(request_rec *r, const unsigned char ip[16],
          * Overwrite the first slot we looked at. Rate-limit the warning
          * so a sustained attack doesn't flood logs.
          *
-         * Security review LOW #10 — log-throttle timestamp lives in
+         *  log-throttle timestamp lives in
          * SHM so all worker processes coordinate. CAS-claim wins the
          * right to log; losers skip (the winner already emitted). */
         apr_time_t now_t = apr_time_now();
@@ -460,7 +460,7 @@ int bs_strike_record_429(request_rec *r, const unsigned char ip[16],
     for (unsigned i = 0; i < BS_STRIKE_PROBE_LIMIT; i++) {
         apr_uint32_t idx = (base + i) % bs_shm.strike_capacity;
         bs_strike_slot *slot = &bs_shm.strike_table[idx];
-        /* LOW #9 — defensive version-odd skip. ACQUIRE pairs with
+        /* defensive version-odd skip. ACQUIRE pairs with
          * the RELEASE bumps in the write path. */
         apr_uint32_t v = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
         if (v & 1U) {
@@ -485,7 +485,7 @@ int bs_strike_record_429(request_rec *r, const unsigned char ip[16],
     } else if (empty_idx >= 0) {
         target_idx = empty_idx;
     } else {
-        /* Security review LOW #10 — SHM-shared log-throttle. */
+        /*  SHM-shared log-throttle. */
         apr_time_t now_t = apr_time_now();
         apr_int64_t prev = __atomic_load_n(
             &bs_shm.header->probe_warn_strike_us, __ATOMIC_RELAXED);
@@ -760,7 +760,7 @@ void bs_safeguard_clear(request_rec *r, const unsigned char ip[16],
     if (!bs_shm.safeguard_table || !bs_shm.mutex) return;
     apr_uint32_t base = bs_safeguard_bucket(ip, ns_id);
 
-    /* Security review HIGH #6 — distinguish EBUSY (expected shedding
+    /* Distinguish EBUSY (expected shedding
      * under load) from other failures (mutex genuinely broken —
      * operator should know). Mirrors the
      * bs_safeguard_record_presentation pattern. */
@@ -795,7 +795,7 @@ void bs_safeguard_clear(request_rec *r, const unsigned char ip[16],
 }
 
 /* ======================================================================
- * Embedded-bootstrap nonce table (MEDIUM #2 phase 2)
+ * Embedded-bootstrap nonce table
  * ====================================================================== */
 
 int bs_embedded_nonce_consume(request_rec *r,
@@ -1268,7 +1268,7 @@ apr_status_t bs_state_save(apr_pool_t *p, server_rec *s,
      * writer. Without the lock, a concurrent add's odd-version mid-
      * state can be captured.
      *
-     * Security review MEDIUM #7 — was apr_global_mutex_lock
+     *  was apr_global_mutex_lock
      * (blocking). bs_state_save runs from contexts where blocking on
      * a worker-held mutex stalls the parent or watchdog indefinitely.
      * Use timedlock with a 2-second ceiling: the critical section
@@ -1296,7 +1296,7 @@ apr_status_t bs_state_save(apr_pool_t *p, server_rec *s,
     memcpy(pc, &bb,  4); pc += 4;
     memcpy(pc, &act, 4); pc += 4;
     memcpy(pc, &nxt, 8); pc += 8;
-    /* Security review MEDIUM #5 — bloom buffers are mutated on the
+    /* Bloom buffers are mutated on the
      * request hot path via byte-level __atomic_or_fetch. Read with
      * matching atomic granularity. */
     for (int j = 0; j < 2; j++) {

@@ -61,7 +61,7 @@ typedef struct robots_group {
 struct robots_doc {
     apr_pool_t         *pool;
     apr_array_header_t *groups;       /* robots_group * */
-    /* Security review LOW #6 — count of lines that exceeded
+    /* Count of lines that exceeded
      * BOTSHIELD_ROBOTS_MAX_LINE and got truncated during parse.
      * bs_robots_load reads via robots_doc_truncated_lines() and
      * emits a NOTICE so operators see the silent truncation the
@@ -864,7 +864,7 @@ apr_status_t bs_robots_load(server_rec *sv, bs_server_cfg *scfg,
         return rv;
     }
 
-    /* Security review LOW #6 — surface truncated lines (the parser
+    /* Surface truncated lines (the parser
      * silently caps any line > BOTSHIELD_ROBOTS_MAX_LINE). The
      * documented contract said operators "see a warning through
      * the summary log"; this emits that warning. */
