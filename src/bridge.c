@@ -6,6 +6,7 @@
 
 #include <ctype.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include <apr_pools.h>
 #include <apr_strings.h>
@@ -398,5 +399,120 @@ const char *bs_app_claims_set(request_rec *r,
     const char *header_val = apr_psprintf(r->pool, "%s;sig=%s",
                                           body, sig_hex);
     apr_table_setn(r->headers_in, "X-Botshield-Claims", header_val);
+    return NULL;
+}
+
+/* --- E5 + E8.2 directive setters --- */
+
+/* E5 — BotShieldAppFeedback on|off. Master gate for the
+ * app-to-module reputation-feedback channel. Default off. Even
+ * under off we still strip the feedback header from outgoing
+ * responses (see bs_app_feedback_fixup), so a misconfigured app
+ * can't leak it to clients during a staged rollout. */
+const char *bs_set_app_feedback(cmd_parms *cmd, void *dconf,
+                                        int flag)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->app_feedback_enabled = flag ? 1 : 0;
+    return NULL;
+}
+
+/* E5 — BotShieldAppFeedbackHeader <name>. Header name the module
+ * reads feedback from (and strips on its way out). Default
+ * X-BotShield-Feedback. */
+const char *bs_set_app_feedback_header(cmd_parms *cmd, void *dconf,
+                                               const char *name)
+{
+    (void)dconf;
+    if (!name || !*name) {
+        return "BotShieldAppFeedbackHeader: header name required";
+    }
+    apr_size_t nlen = strlen(name);
+    if (nlen > 64) {
+        return "BotShieldAppFeedbackHeader: name over 64 chars";
+    }
+    for (apr_size_t i = 0; i < nlen; i++) {
+        unsigned char c = (unsigned char)name[i];
+        int ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+              || (c >= '0' && c <= '9') || c == '-' || c == '_';
+        if (!ok) {
+            return apr_psprintf(cmd->pool,
+                "BotShieldAppFeedbackHeader: '%s' contains invalid "
+                "char '%c'", name, (char)c);
+        }
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->app_feedback_header = apr_pstrdup(cmd->pool, name);
+    return NULL;
+}
+
+/* E8.2 — BotShieldAppClaims on|off. Master gate for the module-to-
+ * app reputation-export channel. Default off. When on, the module
+ * sets a single signed X-Botshield-Claims header on the request to
+ * the backend handler, having first stripped any client-supplied
+ * X-Botshield-* (the strip is what makes the signed envelope safe
+ * to trust on app reads — even if an app skips HMAC verification,
+ * forged claim values can't survive the strip + set sequence). */
+const char *bs_set_app_claims(cmd_parms *cmd, void *dconf, int flag)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->app_claims_enabled = flag ? 1 : 0;
+    return NULL;
+}
+
+/* BotShieldAppIntegrationSecretFile <path>. HMAC key for both
+ * directions of app integration: validates inbound feedback envelopes
+ * and signs outbound X-Botshield-Claims headers. The two protocols'
+ * canonical forms are structurally distinct (feedback HMACs
+ * `event=<name>` only; claims HMAC seven semicolon-fields with a
+ * fixed `v=1` lead) so cross-replay is not possible. Mode-600-or-
+ * tighter + absolute path; loaded at parse time so the bytes are in
+ * memory before the first request hits the hook. */
+const char *bs_set_app_integration_secret_file(cmd_parms *cmd,
+                                                       void *dconf,
+                                                       const char *arg)
+{
+    (void)dconf;
+    if (!arg || !*arg) {
+        return "BotShieldAppIntegrationSecretFile: path required";
+    }
+    if (arg[0] != '/') {
+        return "BotShieldAppIntegrationSecretFile: path must be absolute";
+    }
+
+    struct stat st;
+    if (stat(arg, &st) != 0) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldAppIntegrationSecretFile: cannot stat '%s'", arg);
+    }
+    if (st.st_mode & (S_IRGRP | S_IROTH | S_IWGRP | S_IWOTH)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldAppIntegrationSecretFile: '%s' is group- or "
+            "world-accessible (mode %04o); chmod 600 it",
+            arg, st.st_mode & 07777);
+    }
+
+    const char *buf = NULL;
+    apr_size_t buf_len = 0;
+    const char *err = bs_load_config_file(cmd,
+        "BotShieldAppIntegrationSecretFile", arg,
+        BS_MAX_SECRET_BYTES, &buf, &buf_len);
+    if (err) return err;
+
+    apr_size_t len = 0;
+    err = bs_validate_secret_key(cmd, "BotShieldAppIntegrationSecretFile",
+                                 arg, buf, buf_len, &len);
+    if (err) return err;
+
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->app_integration_secret_file = apr_pstrdup(cmd->pool, arg);
+    scfg->app_integration_secret      = (const unsigned char *)buf;
+    scfg->app_integration_secret_len  = len;
     return NULL;
 }

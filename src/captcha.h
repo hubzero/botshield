@@ -63,6 +63,24 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg);
  * pre-existing bs_read_form_body to slurp it. */
 char *bs_form_get(apr_pool_t *p, const char *body, const char *key);
 
+/* --- M8 captcha directive setters --- *
+ *
+ * Eleven directive setters that configure the captcha tier — provider
+ * choice, site/secret keys, network timeouts, expected hostname /
+ * action, CA bundle, and the rate-limit / max-inflight DoS guards.
+ * Wired into the cmds[] table in botshield.c. */
+const char *bs_set_captcha_provider     (cmd_parms *cmd, void *cfg_v, const char *arg);
+const char *bs_set_captcha_site_key     (cmd_parms *cmd, void *cfg_v, const char *arg);
+const char *bs_set_captcha_secret_file  (cmd_parms *cmd, void *cfg_v, const char *arg);
+const char *bs_set_captcha_timeout      (cmd_parms *cmd, void *cfg_v, const char *arg);
+const char *bs_set_captcha_connect_timeout(cmd_parms *cmd, void *cfg_v, const char *arg);
+const char *bs_set_recaptcha_v3_min_score(cmd_parms *cmd, void *cfg_v, const char *arg);
+const char *bs_set_captcha_expected_hostname(cmd_parms *cmd, void *cfg_v, const char *arg);
+const char *bs_set_captcha_expected_action  (cmd_parms *cmd, void *cfg_v, const char *arg);
+const char *bs_set_captcha_ca_bundle    (cmd_parms *cmd, void *cfg_v, const char *arg);
+const char *bs_set_captcha_rate_limit   (cmd_parms *cmd, void *cfg_v, const char *arg);
+const char *bs_set_captcha_max_inflight (cmd_parms *cmd, void *cfg_v, const char *arg);
+
 #ifdef __cplusplus
 }
 #endif

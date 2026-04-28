@@ -341,3 +341,24 @@ void bs_compute_bootstrap_sig(apr_pool_t *p,
                    strlen(canon), mac);
     bs_to_hex(mac, BS_SIG_BYTES, out_sig_hex);
 }
+
+/* --- M7 algorithm directive setter --- */
+
+const char *bs_set_algorithm(cmd_parms *cmd, void *cfg_v,
+                                    const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    const bs_pow_algorithm *alg = bs_find_algorithm(arg);
+    if (!alg) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldAlgorithm: '%s' is not a recognized algorithm name",
+            arg);
+    }
+    if (!alg->implemented) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldAlgorithm: '%s' is reserved in the registry but not "
+            "built into this module", arg);
+    }
+    cfg->algorithm = alg;
+    return NULL;
+}

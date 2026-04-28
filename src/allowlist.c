@@ -14,6 +14,11 @@
 #include <apr_file_io.h>
 #include <apr_file_info.h>
 #include <apr_network_io.h>
+#include <apr_hash.h>
+
+#include <http_config.h>
+
+#include "botshield.h"
 
 const bs_allow_bot_entry bs_builtin_bots[] = {
     { "googlebot", "Googlebot", NULL, NULL, 0 },
@@ -313,4 +318,78 @@ int bs_allow_ip_in_ranges(const apr_array_header_t *ranges, request_rec *r)
         if (apr_ipsubnet_test(net, sa)) return 1;
     }
     return 0;
+}
+
+/* --- E1 directive setters --- */
+
+/* BotShieldAllow on|off — master gate for the Allow-list family.
+ * Default off (opt-in). Applied at server scope. */
+const char *bs_set_allow_enabled(cmd_parms *cmd, void *dconf,
+                                        int flag)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->allow_enabled = flag ? 1 : 0;
+    return NULL;
+}
+/* BotShieldAllowBot <name> <ua-pattern> [<target>] — register a
+ * bot (or override a built-in). The optional third argument is
+ * polymorphic — shape-inspected here, not a separate directive:
+ *
+ *   _(omitted)_           → default file path
+ *                           /var/lib/botshield/bots/<name>.txt
+ *   starts with '/'       → explicit file path
+ *   equals "*"            → UA-only mode; trust on UA match with no
+ *                           IP verification. Logs allow-bot-ua:<name>.
+ *   anything else         → inline CIDR (single, or comma-separated
+ *                           for multiple: "10.0.0.0/8,192.168.0.0/16").
+ *
+ * Supersedes the two-directive shape (Pattern + Ranges) we
+ * initially landed — one directive per bot, config-local. */
+const char *bs_set_allow_bot(cmd_parms *cmd, void *dconf,
+                                    const char *name,
+                                    const char *pattern,
+                                    const char *target)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    if (!bs_bot_name_valid(name)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldAllowBot: name '%s' must be [a-z0-9-]{1,32}",
+            name);
+    }
+    if (!pattern || !*pattern) {
+        return "BotShieldAllowBot: pattern (arg 2) cannot be empty";
+    }
+    if (strlen(pattern) > 128) {
+        return "BotShieldAllowBot: pattern over 128 chars "
+               "(pick a shorter distinctive substring)";
+    }
+
+    bs_allow_bot_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
+    e->name    = apr_pstrdup(cmd->pool, name);
+    e->pattern = apr_pstrdup(cmd->pool, pattern);
+
+    if (target && *target) {
+        if (strcmp(target, "*") == 0) {
+            e->ua_only = 1;
+        } else if (target[0] == '/') {
+            e->path = apr_pstrdup(cmd->pool, target);
+        } else if (strchr(target, '/') || strchr(target, ':')) {
+            /* Contains a '/' (CIDR mask) or ':' (IPv6) — treat as
+             * inline CIDR list. Validation deferred to post_config
+             * where pconf's allocator is alive. */
+            e->inline_cidrs = apr_pstrdup(cmd->pool, target);
+        } else {
+            return apr_psprintf(cmd->pool,
+                "BotShieldAllowBot: arg 3 '%s' unrecognized — use "
+                "'*' (UA-only), an absolute file path, or a CIDR "
+                "(single or comma-separated)", target);
+        }
+    }
+
+    apr_hash_set(scfg->allow_bots, e->name, APR_HASH_KEY_STRING, e);
+    return NULL;
 }

@@ -11,6 +11,7 @@
 #define BOTSHIELD_CHALLENGE_H
 
 #include <httpd.h>
+#include <http_config.h>
 
 #include "botshield.h"
 
@@ -61,6 +62,12 @@ void bs_compute_bootstrap_sig(apr_pool_t *p,
                               const char *bound_ip_hex,
                               apr_time_t expires_at,
                               char out_sig_hex[BS_SIG_BYTES * 2 + 1]);
+
+/* `BotShieldAlgorithm <name>` — pin the PoW algorithm for cookie
+ * minting from this scope. Validates against the registry and the
+ * implemented flag. */
+const char *bs_set_algorithm(cmd_parms *cmd, void *cfg_v,
+                             const char *arg);
 
 #ifdef __cplusplus
 }
