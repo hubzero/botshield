@@ -1,18 +1,32 @@
 /*
  * mod_botshield — tiered bot detection and challenge module for Apache 2.4.
  *
- * Baseline tier: if the request has no valid _bs_verified cookie, return a
- * self-contained HTML interstitial with a proof-of-work challenge in inline
- * JavaScript. The client solves the PoW (SHA-256 with N leading hex zeros),
- * sets the cookie, and reloads — the same URL now passes through to the
- * real content.
+ * Module entry surface. This file hosts:
+ *   - bs_handler              : the ap_hook_handler request entry
+ *   - cmds[]                  : the directive table Apache reads at config
+ *   - bs_register_hooks       : ap_hook_post_config / child_init / handler /
+ *                               fixups + input-filter registrations
+ *   - botshield_module        : the apr module struct (extern symbol Apache
+ *                               resolves via dlsym at LoadModule time)
+ *   - bs_robots_load          : the robots.txt loader called both from
+ *                               post_config and the mod_watchdog tick
+ *   - policy-status handler   : the admin-visible /botshield/policy-status
+ *                               text dump
+ *   - bs_decide_tier          : score → (pass | silent | form | captcha)
  *
- * Security note on this baseline: the cookie is set client-side and the
- * server only matches it by format + timestamp window. A motivated attacker
- * can forge a cookie matching the regex; this is the "static verify page"
- * tier from hubzero/c-site-verify. Server-side HMAC signing (milestone M1)
- * closes that gap. The tier is still useful because it filters every bot
- * that can't run JS (most of them, in practice).
+ * Everything else fans out through the per-feature .h includes below.
+ * Each subsystem owns its runtime, its directive setters, and its tests.
+ *
+ * Operator model. Four tiers, decided per request from a running score:
+ *   pass     no challenge, real handler runs
+ *   silent   embedded silent-tier verification (E17) or auto-submit splash
+ *   form     visible form-PoW interstitial — a checkbox the JS solves
+ *   captcha  third-party provider widget (Turnstile, hCaptcha, reCAPTCHA,
+ *            Friendly, GeeTest) on the M8 verify endpoint
+ *
+ * The tier-earned cookie (_bs_verified or __Host-bs_verified, AES-GCM
+ * envelope) carries forward across requests, with a forgiveness-window
+ * cap so a one-time solve doesn't whitewash a flagged client forever.
  *
  * Scope: directives are valid in server config, <VirtualHost>, <Directory>,
  * <Location>, <Files>, and their regex/match variants. Not .htaccess.
@@ -89,16 +103,6 @@
 
 
 
-/* Challenge issuance (bs_issue_challenge), the canonical-form HMAC
- * input (bs_challenge_canonical), the PoW algorithm registry, the
- * challenge-as-JSON serializer for the M7 interstitial, and the
- * MEDIUM #2 bootstrap-binding helpers all live in challenge.c
- * (see challenge.h). */
-
-/* Captcha provider registry + libcurl-backed siteverify shim live
- * in captcha.c (see captcha.h). bs_find_provider, bs_captcha_siteverify,
- * the M8.1 pending-cookie pair, and the captcha-verify request
- * handler are all reachable through that header. */
 
 
 
@@ -328,10 +332,6 @@ apr_status_t bs_watchdog_save_cb(int state, void *data,
 
 
 
-/* All directive setters now live in their feature files (config.c
- * for top-level/UI/score/SHM/rate-limit/state-save, captcha.c for
- * M8 captcha-tier, etc.). */
-
 /* ======================================================================
  * E2.2.3 — /botshield/policy-status
  *
@@ -525,16 +525,11 @@ static int bs_policy_status_handler(request_rec *r, bs_dir_cfg *cfg)
 
 
 
-/* Pick a tier from the running score. Each tier has its own
- * interstitial: silent → auto-submit splash; form → reCAPTCHA-shaped
- * checkbox; captcha → configured third-party provider's widget. When
- * captcha tier is selected but no provider is configured on the scope,
- * the render code falls through to form-PoW (documented in the
- * decision log as reason="captcha_fallback"). */
-/* Score-to-tier threshold ladder. Three configurable cut-points
- * (BotShieldScoreSilent / Hard / Captcha) gate four tiers. See the
- * README "Understanding scoring" section for the operator-facing
- * tuning workflow. */
+/* Score → tier picker. Three configurable cut-points
+ * (BotShieldScoreSilent / Hard / Captcha) gate four tiers. The
+ * README "Understanding scoring" section covers the operator-facing
+ * tuning workflow; templates.h documents the per-tier interstitial
+ * rendering. */
 static bs_tier bs_decide_tier(const bs_dir_cfg *cfg, int score)
 {
     int silent  = bs_effective_int(cfg->score_silent,  BS_DEFAULT_SCORE_SILENT);
