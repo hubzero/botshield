@@ -33,6 +33,7 @@
 
 #include "botshield.h"
 #include "challenge.h"
+#include "cookie.h"
 #include "crypto.h"
 
 /* --- Canonical form for HMAC input ---

@@ -541,9 +541,19 @@ int bs_effective_int(int value, int fallback);
  * normalization the SHM tables expect. Returns 1 on success. */
 int bs_parse_client_ip(const char *ip_str, unsigned char out[16]);
 
-/* Bounded integer parser for pre-HMAC cookie / form-body fields.
- * Returns 1 on a clean parse within [min, max]; 0 otherwise.
- * Caller's *out is left untouched on failure. */
+/* Bounded integer parsers for pre-HMAC cookie / form-body fields.
+ * Each returns 1 on a clean parse within [min, max]; 0 otherwise.
+ * Caller's *out is left untouched on failure. max_len is a hard cap
+ * on the digit-string length — rejects gigantic inputs before they
+ * reach strtol. Used by directive setters and by the canonical-form
+ * cookie parser in cookie.c. */
+int bs_parse_int_bounded(const char *s,
+                         long min_val, long max_val,
+                         apr_size_t max_len,
+                         long *out);
+int bs_parse_uint32_bounded(const char *s,
+                            apr_size_t max_len,
+                            apr_uint32_t *out);
 int bs_parse_int64_bounded(const char *s,
                            apr_int64_t min_val,
                            apr_int64_t max_val,
@@ -575,24 +585,8 @@ apr_status_t bs_read_form_body(request_rec *r, apr_size_t max_len,
  * HMAC input, and the MEDIUM #2 bootstrap-binding helpers all live
  * in challenge.h (see src/challenge.{c,h}). */
 
-/* Cookie format / mint / verify (E11.4 GCM cookie path). */
-const char *bs_build_cookie_prefix_gcm(apr_pool_t *p,
-                                       const bs_dir_cfg *cfg,
-                                       const bs_challenge *ch,
-                                       const char **out_b64);
-const char *bs_install_verified_cookie(request_rec *r,
-                                       const bs_dir_cfg *cfg,
-                                       const bs_challenge *ch,
-                                       const char *counter_str);
-const char *bs_get_verified_cookie_value(request_rec *r);
-const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
-                             const char *cookie_value,
-                             bs_challenge *out_ch);
-const char *bs_verify_cookie_gcm(request_rec *r,
-                                 const bs_dir_cfg *cfg,
-                                 const char *cookie_value,
-                                 const char *dot,
-                                 bs_challenge *out_ch);
+/* Cookie format / mint / verify (E11.4 GCM cookie path) and the
+ * Cookie-header parse-once tokenizer live in cookie.h. */
 
 /* Rep carry-forward (E15 forgiveness window math). */
 int  bs_carry_forward_eligible(request_rec *r,
@@ -606,15 +600,6 @@ void bs_apply_rep_carry(request_rec *r,
 
 /* M8 captcha siteverify, provider registry, M8.1 pending cookie,
  * and the captcha-verify request handler all live in captcha.h. */
-
-/* Cookie format / mint / verify (will move to cookie.h in Phase 7). */
-const char *bs_build_cookie_payload(apr_pool_t *p,
-                                    const bs_dir_cfg *cfg,
-                                    const bs_challenge *ch,
-                                    const char *counter_str);
-const char *bs_build_set_cookie(request_rec *r, const bs_dir_cfg *cfg,
-                                const char *value, apr_time_t expires_at);
-const char *bs_get_cookie_value(request_rec *r, const char *name);
 
 /* Score system (will move to score.h or stay here long-term). */
 bs_request_score *bs_get_score(request_rec *r, int create);

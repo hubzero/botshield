@@ -55,6 +55,7 @@
 #include "../../src/allowlist.c"
 #include "../../src/metrics.c"
 #include "../../src/challenge.c"
+#include "../../src/cookie.c"
 #include "../../src/silent.c"
 #include "../../src/captcha.c"
 #include "../../src/bridge.c"

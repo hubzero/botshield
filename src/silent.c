@@ -22,6 +22,7 @@
 
 #include "botshield.h"
 #include "challenge.h"
+#include "cookie.h"
 #include "crypto.h"
 #include "shm.h"
 #include "metrics.h"
