@@ -114,6 +114,16 @@ apr_status_t bs_allow_load_ranges_from_string(apr_pool_t *p,
 int bs_allow_ip_in_ranges(const apr_array_header_t *ranges,
                           request_rec *r);
 
+/* IP parsing — mirror of inet_pton with the IPv4-mapped-to-IPv6
+ * normalization the SHM tables expect. Returns 1 on success. */
+int bs_parse_client_ip(const char *ip_str, unsigned char out[16]);
+
+/* IPv6-prefix mask in place — zero out the trailing (128 - prefix)
+ * bits of an IPv6 address so the SHM tables key on a configured
+ * subscriber prefix instead of the full address. v4-mapped addresses
+ * are left untouched. */
+void bs_mask_ipv6_prefix(unsigned char ip[16], int prefix_bits);
+
 /* E1 request-time entry. Called from bs_run_builtin_heuristics when
  * BotShieldLegitCrawlers is on. Emits at most one bs_score_add call
  * per request (a dominant credit for verified crawlers, a strong

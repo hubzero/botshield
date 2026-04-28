@@ -320,10 +320,6 @@ typedef struct bs_server_cfg {
  * bs_flag_trigger_entry, BS_TFAMILY_*, BS_TMODE_*, BS_TEXEC_*,
  * BS_FLAG_ACT_*, BS_PENALTY_RATE_LIMIT/BLOCK_PATH) live in triggers.h. */
 
-/* E2.2 — robots refresh interval sentinel. */
-#define BS_ROBOTS_REFRESH_UNSET    (-1)
-#define BS_ROBOTS_REFRESH_DEFAULT  60
-
 /* ======================================================================
  * Module symbol — extern so other TUs can pass &botshield_module to
  * ap_get_module_config. The definition (and its visibility-default
@@ -350,33 +346,10 @@ static inline int bs_effective_int(int value, int fallback)
     return (value == BS_UNSET) ? fallback : value;
 }
 
-/* IP parsing — mirror of inet_pton with the IPv4-mapped-to-IPv6
- * normalization the SHM tables expect. Returns 1 on success. */
-int bs_parse_client_ip(const char *ip_str, unsigned char out[16]);
-
-/* Bounded integer parsers for pre-HMAC cookie / form-body fields.
- * Each returns 1 on a clean parse within [min, max]; 0 otherwise.
- * Caller's *out is left untouched on failure. max_len is a hard cap
- * on the digit-string length — rejects gigantic inputs before they
- * reach strtol. Used by directive setters and by the canonical-form
- * cookie parser in cookie.c. */
-int bs_parse_int_bounded(const char *s,
-                         long min_val, long max_val,
-                         apr_size_t max_len,
-                         long *out);
-int bs_parse_uint32_bounded(const char *s,
-                            apr_size_t max_len,
-                            apr_uint32_t *out);
-int bs_parse_int64_bounded(const char *s,
-                           apr_int64_t min_val,
-                           apr_int64_t max_val,
-                           apr_int64_t *out);
-
-/* IPv6-prefix mask in place — zero out the trailing (128 - prefix)
- * bits of an IPv6 address so the SHM tables key on a configured
- * subscriber prefix instead of the full address. v4-mapped addresses
- * are left untouched. */
-void bs_mask_ipv6_prefix(unsigned char ip[16], int prefix_bits);
+/* IP parsing (bs_parse_client_ip) and IPv6-prefix masking
+ * (bs_mask_ipv6_prefix) live in allowlist.h. Bounded integer parsers
+ * (bs_parse_int_bounded, bs_parse_uint32_bounded, bs_parse_int64_bounded)
+ * live in crypto.h. */
 
 /* Flag-bit name registry — NULL-terminated table of (name, bit)
  * pairs used by the parse path (operator declares
