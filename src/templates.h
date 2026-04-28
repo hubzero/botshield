@@ -6,6 +6,16 @@
  * shell that hosts them. Plus the render function that fills in
  * the per-request substitutions and emits the response body.
  *
+ * Per-tier interstitial mapping (driven by bs_decide_tier in
+ * botshield.c):
+ *   silent  → auto-submit splash (no user click)
+ *   form    → reCAPTCHA-shaped checkbox the JS solves
+ *   captcha → configured third-party provider's widget
+ *
+ * When captcha tier is selected but no provider is configured on
+ * the scope, the render code falls through to form-PoW (documented
+ * in the decision log as reason="captcha_fallback").
+ *
  * Two-step substitution model:
  *
  *   1. Widget template is filled with the per-request bits (prompt,
