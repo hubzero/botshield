@@ -1,6 +1,6 @@
-/* challenge.h — challenge issuance, PoW algorithm registry, and
- * the bootstrap-sig helpers shared between M7 (interstitial) and
- * E17 (silent-tier embedded mode).
+/* challenge.h — challenge issuance, PoW algorithm registry,
+ * reputation state envelope, and the bootstrap-sig helpers shared
+ * between M7 (interstitial) and E17 (silent-tier embedded mode).
  *
  * The "challenge" abstraction is a pre-shared opaque envelope the
  * server signs once and the client returns having proved possession
@@ -34,12 +34,88 @@
 
 #include <httpd.h>
 #include <http_config.h>
+#include <apr.h>
+#include <apr_pools.h>
+#include <apr_time.h>
 
-#include "botshield.h"
+#include "crypto.h"   /* BS_SIG_BYTES, primitives */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Forward declarations — bs_dir_cfg is defined in botshield.h.
+ * Declared here so this header is self-contained. */
+struct bs_dir_cfg;
+typedef struct bs_dir_cfg bs_dir_cfg;
+
+/* ======================================================================
+ * Challenge wire-format constants
+ * ====================================================================== */
+
+/* Bumped 1->2 for E15: rep envelope grew two fields
+ * (forgive_window_start, forgive_consumed). Old (v1) cookies fail the
+ * version check and trigger a fresh challenge — one-time disruption
+ * per client on upgrade. */
+#define BS_PROTOCOL_VERSION   2
+#define BS_SALT_BYTES         16
+#define BS_NONCE_BYTES        8
+
+/* ======================================================================
+ * Reputation state and challenge envelope
+ * ====================================================================== */
+
+/* Reputation state carried in the cookie. Populated fresh on a first-
+ * time challenge (all zeros), and merged forward with forgiveness on
+ * re-issues.
+ *
+ * E15 — forgiveness cap per window. `forgive_window_start` marks the
+ * start of the current rolling hour (unix sec); on every verify-
+ * success we either roll the window if the prior one is over an hour
+ * old, or clamp the new forgiveness so the running consumed total
+ * stays at or below BotShieldForgivenessCapPerHour. */
+typedef struct {
+    int          score;
+    apr_uint32_t flags;
+    int          passes_silent;
+    int          passes_form;
+    int          passes_captcha;
+    apr_time_t   challenged_at;        /* unix sec */
+    apr_uint32_t forgive_window_start; /* unix sec; 0 = no window yet */
+    apr_uint32_t forgive_consumed;     /* points used inside current window */
+} bs_rep_state;
+
+typedef struct {
+    int           version;
+    const char   *alg_name;              /* points into registry */
+    unsigned char salt [BS_SALT_BYTES];
+    unsigned char nonce[BS_NONCE_BYTES];
+    int           difficulty;
+    apr_time_t    expires_at;            /* unix seconds */
+    bs_rep_state  rep;                   /* carried forward across re-issues */
+    int           auto_tier;             /* 1 = silent M7 auto-submit; 0 = form */
+    unsigned char signature[BS_SIG_BYTES];
+} bs_challenge;
+
+/* ======================================================================
+ * PoW algorithm registry
+ * ====================================================================== */
+
+typedef const char *(*bs_alg_issue_fn)(const bs_dir_cfg *cfg,
+                                       bs_challenge *out);
+typedef const char *(*bs_alg_verify_fn)(const bs_challenge *ch,
+                                        const char *counter_str);
+
+typedef struct {
+    const char       *name;
+    int               implemented;   /* 1 = callable, 0 = reserved */
+    bs_alg_issue_fn   issue;
+    bs_alg_verify_fn  verify;
+} bs_pow_algorithm;
+
+/* ======================================================================
+ * Challenge API
+ * ====================================================================== */
 
 /* PoW algorithm registry lookup. Returns NULL on no match. */
 const bs_pow_algorithm *bs_find_algorithm(const char *name);
