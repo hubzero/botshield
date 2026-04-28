@@ -21,6 +21,7 @@
 #include <http_request.h>
 
 #include "botshield.h"
+#include "allowlist.h" /* bs_parse_client_ip, bs_mask_ipv6_prefix */
 #include "crypto.h"
 #include "shm.h"
 #include "metrics.h"

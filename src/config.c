@@ -1957,6 +1957,21 @@ const char *bs_set_state_file(cmd_parms *cmd, void *dconf,
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
     if (!arg || !*arg) return "BotShieldStateFile requires a path";
+    /* The state file carries mutable reputation state and the keyed-
+     * hash collision keys; treat it as sensitive. Apache's CWD is
+     * undefined for relative paths (depends on how Apache was
+     * launched), so a relative `state.bin` could land in a world-
+     * writable directory by accident. Require an absolute path so
+     * operators are forced to think about the parent directory. The
+     * recommended convention is /var/lib/mod_botshield/state.bin
+     * with mode 0700 on the parent. */
+    if (arg[0] != '/') {
+        return apr_psprintf(cmd->pool,
+            "BotShieldStateFile: '%s' must be an absolute path. "
+            "The file holds reputation state and keyed-hash collision "
+            "keys — pin it to a non-world-writable parent (the "
+            "convention is /var/lib/mod_botshield/state.bin).", arg);
+    }
     scfg->state_file = apr_pstrdup(cmd->pool, arg);
     return NULL;
 }

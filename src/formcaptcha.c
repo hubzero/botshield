@@ -148,6 +148,12 @@ static apr_status_t bs_form_captcha_read_body(request_rec *r,
              * as `len > MAX - total` so the subtraction stays in range
              * and we never compute the overflowing sum at all. */
             if (len > BS_FORM_CAPTCHA_BODY_MAX - total) {
+                /* Body too big — mark the connection close-on-response
+                 * so the unread tail doesn't desync framing on the
+                 * next keepalive request. Without this, Apache's
+                 * keepalive logic leaves the unconsumed remainder
+                 * on the socket and the next request gets garbled. */
+                r->connection->keepalive = AP_CONN_CLOSE;
                 apr_brigade_destroy(bb);
                 return APR_ENOSPC;
             }
@@ -323,12 +329,27 @@ int bs_form_captcha_fixup(request_rec *r)
     long http_code = 0;
     double score = -1.0;
     const char *resp_hostname = NULL, *resp_action = NULL;
-    bs_captcha_result res = bs_captcha_siteverify(r,
-        cfg->captcha_provider, cfg->captcha_secret,
-        cfg->captcha_secret_len, token, timeout_ms,
-        cfg->captcha_ca_bundle,
+    /* Centralized guarded siteverify so form-captcha gets the same
+     * per-IP rate cap and global in-flight semaphore as the
+     * /captcha-verify handler. Without the wrapper, every E18 POST
+     * burned a provider quota slot and an Apache worker with no
+     * back-pressure. */
+    bs_captcha_result res = bs_captcha_siteverify_guarded(r, cfg, token,
+        timeout_ms, "form-captcha",
         &details, &http_code, &score, &resp_hostname, &resp_action);
 
+    if (res == BS_CAPTCHA_RATE_LIMITED) {
+        apr_table_setn(r->err_headers_out, "Retry-After", "60");
+        apr_table_setn(r->err_headers_out, "X-Botshield",
+                       "captcha-rate-limited");
+        return HTTP_TOO_MANY_REQUESTS;
+    }
+    if (res == BS_CAPTCHA_INFLIGHT_CAPPED) {
+        apr_table_setn(r->err_headers_out, "Retry-After", "2");
+        apr_table_setn(r->err_headers_out, "X-Botshield",
+                       "captcha-saturated");
+        return HTTP_SERVICE_UNAVAILABLE;
+    }
     if (res != BS_CAPTCHA_OK) {
         ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
             "mod_botshield: form-captcha siteverify rejected "
