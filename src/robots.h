@@ -67,6 +67,12 @@ enum bs_robots_wildcard_scope {
     BS_ROBOTS_WILDCARD_OFF       = 2,
 };
 
+/* E2.2 — robots refresh interval (seconds between mtime checks).
+ * UNSET sentinel inherits at request-time from the operator's directive
+ * value or the compiled-in default. */
+#define BS_ROBOTS_REFRESH_UNSET    (-1)
+#define BS_ROBOTS_REFRESH_DEFAULT  60
+
 typedef struct robots_match {
     int          group_idx;       /* -1 if no group matched */
     int          is_wildcard;     /* 1 if matching group was User-agent: * */

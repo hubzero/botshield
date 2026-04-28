@@ -110,6 +110,24 @@ void bs_to_hex(const unsigned char *in, apr_size_t len, char *out);
 int  bs_from_hex(const char *in, apr_size_t in_len,
                  apr_size_t out_len, unsigned char *out);
 
+/* Bounded integer parsers for pre-HMAC cookie / form-body fields.
+ * Each returns 1 on a clean parse within [min, max]; 0 otherwise.
+ * Caller's *out is left untouched on failure. max_len is a hard cap
+ * on the digit-string length — rejects gigantic inputs before they
+ * reach strtol. Used by directive setters and by the canonical-form
+ * cookie parser in cookie.c. */
+int bs_parse_int_bounded(const char *s,
+                         long min_val, long max_val,
+                         apr_size_t max_len,
+                         long *out);
+int bs_parse_uint32_bounded(const char *s,
+                            apr_size_t max_len,
+                            apr_uint32_t *out);
+int bs_parse_int64_bounded(const char *s,
+                           apr_int64_t min_val,
+                           apr_int64_t max_val,
+                           apr_int64_t *out);
+
 /* --- Cookie/secret directive setters --- *
  *
  * BotShieldSecretFile / BotShieldSecondarySecretFile load the master
