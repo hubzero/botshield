@@ -28,6 +28,7 @@
 
 #include "botshield.h"
 #include "challenge.h"
+#include "cookie.h"
 #include "crypto.h"
 #include "shm.h"
 #include "metrics.h"
@@ -1181,78 +1182,6 @@ static const char *bs_sanitize_return_to(const char *s)
     return s;
 }
 
-/* Set-Cookie string for a server-issued _bs_verified cookie. Mirrors the
- * attributes the M1/M7 interstitial JS produces so a captcha-earned and
- * a PoW-earned cookie are indistinguishable on subsequent requests. */
-const char *bs_build_set_cookie(request_rec *r, const bs_dir_cfg *cfg,
-                                       const char *payload_b64,
-                                       apr_time_t expires_at)
-{
-    char expires_buf[APR_RFC822_DATE_LEN];
-    apr_rfc822_date(expires_buf, apr_time_from_sec(expires_at + 60));
-    const char *secure = "";
-    /* Apache exposes the scheme via ap_run_http_scheme or r->server's
-     * SSL config; simplest portable check is ap_is_https if mod_ssl is
-     * loaded, else fall through. mod_ssl registers ssl_is_https as an
-     * optional function; here we take the belt-and-suspenders route and
-     * check the r->parsed_uri / r->server / request scheme via
-     * ap_http_scheme(r). */
-    const char *scheme = ap_http_scheme(r);
-    int is_https = (scheme && strcmp(scheme, "https") == 0);
-    if (is_https) {
-        secure = "; Secure";
-    }
-    const char *domain = "";
-    int has_domain = (cfg->cookie_domain && *cfg->cookie_domain);
-    if (has_domain) {
-        domain = apr_psprintf(r->pool, "; Domain=%s", cfg->cookie_domain);
-    }
-    /* Security review LOW #2 — emit __Host-bs_verified when the
-     * RFC 6265bis preconditions hold (HTTPS + no Domain). Browsers
-     * reject the prefix when those invariants fail, so we only use
-     * it where we can. Operators on plain HTTP or with a configured
-     * cookie_domain (cross-subdomain SSO) get the legacy unprefixed
-     * name; the verify path checks both. */
-    const char *name = (is_https && !has_domain)
-        ? BS_COOKIE_NAME_HOST : BS_COOKIE_NAME;
-    /* Security review LOW #1 — HttpOnly closes XSS-stealing-the-
-     * cookie. The M1 widget JS used to set this cookie via
-     * document.cookie (which required JS-readability), but that
-     * was refactored to a server-mint via /botshield/embedded-verify
-     * so HttpOnly is now compatible with the issue path. */
-    return apr_psprintf(r->pool,
-        "%s=%s; Path=/; Expires=%s%s%s; SameSite=Lax; HttpOnly",
-        name, payload_b64, expires_buf, domain, secure);
-}
-
-/* Build a _bs_verified cookie payload from ch and install the
- * resulting Set-Cookie header on the request's err_headers_out
- * (so it reaches the client even on non-2xx responses). Returns
- * NULL on success, an error-string diagnostic on failure (the only
- * realistic failure is GCM encrypt; callers map this to 500).
- *
- * counter_str is the payload's tail token: "captcha" for server-
- * issued captcha cookies, the decimal PoW counter for embedded
- * PoW-verify, etc. ch must already carry the rep state the caller
- * wants — call bs_apply_rep_carry first if doing carry-forward.
- *
- * The four issuance call sites (embedded-verify-pow-gcm, embedded-
- * verify-provider, M8 captcha-verify, form-captcha-replay) all
- * funnel through here. apr_table_add (not setn) is required so we
- * append rather than clobber any prior Set-Cookie rows that other
- * modules (mod_session etc.) may have added earlier in the chain. */
-const char *bs_install_verified_cookie(request_rec *r,
-                                              const bs_dir_cfg *cfg,
-                                              const bs_challenge *ch,
-                                              const char *counter_str)
-{
-    const char *payload = bs_build_cookie_payload(r->pool, cfg, ch,
-                                                   counter_str);
-    if (!payload) return "GCM cookie payload build failed";
-    apr_table_add(r->err_headers_out, "Set-Cookie",
-                  bs_build_set_cookie(r, cfg, payload, ch->expires_at));
-    return NULL;
-}
 
 /* ---- M8.1 challenge-origin "pending" cookie ----
  *
