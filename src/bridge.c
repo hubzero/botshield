@@ -3,6 +3,7 @@
  * (outbound request header). */
 
 #include "bridge.h"
+#include "score.h"   /* bs_tier_name */
 
 #include <ctype.h>
 #include <string.h>

@@ -339,32 +339,6 @@ static int bs_policy_status_handler(request_rec *r, bs_dir_cfg *cfg)
 
 
 
-/* Score → tier picker. Three configurable cut-points
- * (BotShieldScoreSilent / Hard / Captcha) gate four tiers. The
- * README "Understanding scoring" section covers the operator-facing
- * tuning workflow; templates.h documents the per-tier interstitial
- * rendering. */
-static bs_tier bs_decide_tier(const bs_dir_cfg *cfg, int score)
-{
-    int silent  = bs_effective_int(cfg->score_silent,  BS_DEFAULT_SCORE_SILENT);
-    int hard    = bs_effective_int(cfg->score_hard,    BS_DEFAULT_SCORE_HARD);
-    int captcha = bs_effective_int(cfg->score_captcha, BS_DEFAULT_SCORE_CAPTCHA);
-    if (score >= captcha) return BS_TIER_CAPTCHA;
-    if (score >= hard)    return BS_TIER_HARD;
-    if (score >= silent)  return BS_TIER_SILENT;
-    return BS_TIER_PASS;
-}
-
-const char *bs_tier_name(bs_tier t)
-{
-    switch (t) {
-        case BS_TIER_PASS:    return "pass";
-        case BS_TIER_SILENT:  return "silent";
-        case BS_TIER_HARD:    return "form";
-        case BS_TIER_CAPTCHA: return "captcha";
-    }
-    return "?";
-}
 
 static const command_rec bs_cmds[] = {
     AP_INIT_FLAG("BotShieldEnabled",    bs_set_enabled,    NULL,

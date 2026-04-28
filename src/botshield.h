@@ -805,9 +805,8 @@ int bs_forgiveness_apply_cap(int requested, int cap,
 apr_uint32_t bs_parse_flag_names(apr_pool_t *p, const char *s,
                                  const char **err);
 
-/* Tier-name string (e.g. "pass", "silent", "form", "captcha"). Will
- * move to challenge.h or stay here long-term. */
-const char *bs_tier_name(bs_tier t);
+/* bs_tier_name and bs_decide_tier (the score-to-tier picker) live
+ * in score.h alongside the score system they consume. */
 
 /* E7.3 feedback-trigger lookup. */
 const bs_feedback_trigger_entry *bs_feedback_trigger_find(
