@@ -544,6 +544,87 @@ typedef struct {
     bs_trigger_action  action;
 } bs_feedback_trigger_entry;
 
+/* --- E2.1 rate-limit + block-path family ----------------------- *
+ *
+ * bs_cohort is the shared (UA?, IP?) predicate; bs_rate_limit_entry,
+ * bs_block_path_entry, bs_rate_escalate_entry are the per-directive
+ * configs they parameterize. Defined here because config.c's
+ * post_config hook walks them at SHM-slot assignment time. */
+
+#define BS_PENALTY_RATE_LIMIT  50
+#define BS_PENALTY_BLOCK_PATH 100
+
+typedef struct {
+    const char         *ua_pattern;
+    int                 ua_any;
+    int                 ip_any;
+    const char         *path;
+    const char         *inline_cidrs;
+    apr_array_header_t *ranges;
+} bs_cohort;
+
+typedef struct bs_rate_escalate_entry bs_rate_escalate_entry;
+
+typedef struct {
+    const char   *name;
+    bs_cohort     cohort;
+    apr_uint32_t  budget;
+    apr_uint32_t  window_sec;
+    int           shm_slot;
+    const bs_rate_escalate_entry *escalate;
+    int           mode;
+} bs_rate_limit_entry;
+
+struct bs_rate_escalate_entry {
+    const char   *rule_name;
+    apr_uint32_t  strikes;
+    apr_uint32_t  per_sec;
+    int           status_code;
+    int           ttl_sec;
+    const char   *log_tag;
+};
+
+typedef struct {
+    const char *name;
+    const char *path_pattern;
+    bs_cohort   cohort;
+    int         mode;
+} bs_block_path_entry;
+
+/* SHM slot for the fixed-window counter. 8 bytes; CAS would target
+ * the pair as a u64 on a 64-bit-atomic platform. v1 uses 32-bit
+ * atomics on each field separately. */
+typedef struct {
+    apr_uint32_t count;
+    apr_uint32_t window_start_sec;
+} bs_rate_counter;
+
+/* --- E14 flag-trigger family ----------------------------------- *
+ *
+ * Predicate is "flag_bit is set on this request's IP-side or cookie-
+ * side flag bitmap". Two runtime action verbs (SCORE / TIER_FLOOR);
+ * RESET is a config-time sentinel consumed before the request path
+ * runs. */
+typedef enum {
+    BS_FLAG_ACT_SCORE = 0,
+    BS_FLAG_ACT_TIER_FLOOR,
+    BS_FLAG_ACT_RESET,
+} bs_flag_action_kind;
+
+typedef struct {
+    const char         *flag_name;
+    apr_uint32_t        flag_bit;
+    bs_flag_action_kind action;
+    int                 score_add;
+    bs_tier             tier_min;
+    int                 mode;
+    int                 from_default;
+} bs_flag_trigger_entry;
+
+/* E2.2 — robots refresh interval sentinel. */
+#define BS_ROBOTS_REFRESH_UNSET    (-1)
+#define BS_ROBOTS_REFRESH_DEFAULT  60
+
 /* ======================================================================
  * Module symbol — extern so other TUs can pass &botshield_module to
  * ap_get_module_config. The definition (and its visibility-default

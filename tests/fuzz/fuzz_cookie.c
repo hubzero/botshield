@@ -58,6 +58,7 @@
 #include "../../src/cookie.c"
 #include "../../src/load.c"
 #include "../../src/triggers.c"
+#include "../../src/config.c"
 #include "../../src/silent.c"
 #include "../../src/captcha.c"
 #include "../../src/bridge.c"
