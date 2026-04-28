@@ -22,7 +22,7 @@ DOCS_BUILD  := tools/build_site.py
 # first source. Extra .c files are compiled into the same shared
 # object and share the module's pool/APR linkage.
 MAIN_SRC := src/mod_$(MOD_NAME).c
-EXTRA_SRC := src/robots.c src/shm.c src/crypto.c
+EXTRA_SRC := src/robots.c src/shm.c src/crypto.c src/allowlist.c
 SRC      := $(MAIN_SRC) $(EXTRA_SRC)
 LA       := $(MAIN_SRC:.c=.la)
 
