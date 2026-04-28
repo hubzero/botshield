@@ -144,36 +144,8 @@ enum bs_help_mode {
 /* M8 captcha provider registry (bs_captcha_provider, bs_captcha_result,
  * bs_captcha_siteverify_fn) lives in captcha.h. */
 
-/* ======================================================================
- * Robots.txt active-state bundle
- *
- * One per active parse, swapped atomically by the refresh watchdog.
- * The owning subpool (`pool`) is a child of pconf and is destroyed
- * when this bundle is finally retired — one refresh cycle after
- * being displaced — so request-path readers holding pointers into
- * doc's pool never see freed memory.
- * ====================================================================== */
-
-/* robots_doc is the parsed-RFC-9309 document opaque type; full
- * definition + accessors are in robots.h. Forward-declared here so
- * scfg can hold a pointer to a bs_robots_state without dragging
- * the robots-parser headers into every TU that includes botshield.h. */
-struct robots_doc;
-typedef struct robots_doc robots_doc;
-
-typedef struct bs_robots_state {
-    robots_doc *doc;
-    apr_pool_t *pool;              /* owns doc; sized for one doc */
-    apr_time_t  mtime;              /* source file mtime when parsed */
-    int        *slot_by_group_idx;  /* length = robots_group_count(doc) */
-} bs_robots_state;
-
-enum bs_robots_wildcard_scope {
-    BS_ROBOTS_WILDCARD_UNSET     = -1,
-    BS_ROBOTS_WILDCARD_HEURISTIC = 0,
-    BS_ROBOTS_WILDCARD_STRICT    = 1,
-    BS_ROBOTS_WILDCARD_OFF       = 2,
-};
+/* Robots.txt active-state bundle (bs_robots_state, robots_doc forward
+ * decl, bs_robots_wildcard_scope enum) lives in robots.h. */
 
 /* ======================================================================
  * Per-directory configuration

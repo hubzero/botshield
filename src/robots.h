@@ -25,6 +25,7 @@
 
 #include <apr_pools.h>
 #include <apr_errno.h>
+#include <apr_time.h>
 
 #include <httpd.h>
 #include <http_config.h>
@@ -41,6 +42,30 @@ extern "C" {
 #endif
 
 typedef struct robots_doc robots_doc;
+
+/* ======================================================================
+ * Active-state bundle
+ *
+ * One per active parse, swapped atomically by the refresh watchdog.
+ * The owning subpool (`pool`) is a child of pconf and is destroyed
+ * when this bundle is finally retired — one refresh cycle after
+ * being displaced — so request-path readers holding pointers into
+ * doc's pool never see freed memory.
+ * ====================================================================== */
+
+typedef struct bs_robots_state {
+    robots_doc *doc;
+    apr_pool_t *pool;              /* owns doc; sized for one doc */
+    apr_time_t  mtime;              /* source file mtime when parsed */
+    int        *slot_by_group_idx;  /* length = robots_group_count(doc) */
+} bs_robots_state;
+
+enum bs_robots_wildcard_scope {
+    BS_ROBOTS_WILDCARD_UNSET     = -1,
+    BS_ROBOTS_WILDCARD_HEURISTIC = 0,
+    BS_ROBOTS_WILDCARD_STRICT    = 1,
+    BS_ROBOTS_WILDCARD_OFF       = 2,
+};
 
 typedef struct robots_match {
     int          group_idx;       /* -1 if no group matched */
