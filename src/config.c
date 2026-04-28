@@ -2134,8 +2134,8 @@ const char *bs_set_rate_limit_escalate(cmd_parms *cmd, void *dconf,
     e->rule_name   = apr_pstrdup(cmd->pool, rule_name);
     e->strikes     = (apr_uint32_t)strikes;
     e->per_sec     = (apr_uint32_t)per;
-    e->status_code = 403;       /* default per PLAN.md E9 */
-    e->ttl_sec     = 1800;      /* default per PLAN.md E9 */
+    e->status_code = 403;       /* default per CHANGELOG.md E9 */
+    e->ttl_sec     = 1800;      /* default per CHANGELOG.md E9 */
     e->log_tag     = NULL;
 
     for (int i = 3; i < argc; i++) {

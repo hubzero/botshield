@@ -124,7 +124,7 @@ These are accepted-as-shipped items where a reviewer noted a small
 deviation or a "could be improved" point. Tracked here so the
 hardening phase has a concrete punch list.
 
-- **E9 — dedicated metric counter.** PLAN E9 suggested an explicit
+- **E9 — dedicated metric counter.** CHANGELOG E9 suggested an explicit
   `botshield_rate_limit_escalated_total` counter; the implementation
   uses the decision-log reason `rate-limit-abuse:<name>` plus the
   `shm_strike_used` / `shm_strike_capacity` gauges instead. Gemini
@@ -137,7 +137,7 @@ hardening phase has a concrete punch list.
 When self-reviewing an extension, work the following checklist before
 declaring "looks good":
 
-1. **Read PLAN.md for this extension first.** Catch deliverable gaps
+1. **Read CHANGELOG.md for this extension first.** Catch deliverable gaps
    before reading code (which biases toward "code looks fine").
 2. **Re-read the implementing commit message verbatim.** Note any
    "deferred" or "out of scope" items not in the headline plan.

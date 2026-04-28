@@ -257,7 +257,7 @@ static const command_rec bs_cmds[] = {
                  "Worker and POST the result back to "
                  "/botshield/embedded-verify. The verified cookie "
                  "may not arrive in time for the very first request, "
-                 "but it lands within a few page-views — see PLAN "
+                 "but it lands within a few page-views — see CHANGELOG "
                  "E17 for the timing model."),
     AP_INIT_TAKE1("BotShieldForgivenessSilent", bs_set_forgive_silent, NULL,
                  RSRC_CONF | ACCESS_CONF,
@@ -1152,7 +1152,7 @@ static int bs_handler(request_rec *r)
     /* E17 — silent-tier dispatch with embedded mode. Default behavior:
      * skip the M7 interstitial, serve the real page (DECLINED), let
      * the wrapper handle verification in the background. Timing model:
-     * "kicks in eventually" — see PLAN E17.
+     * "kicks in eventually" — see CHANGELOG E17.
      *
      * E17 fallback: if this client has had N consecutive silent-tier
      * dispatches without _bs_verified arriving (count tracked via

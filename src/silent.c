@@ -1107,7 +1107,7 @@ int bs_embedded_verify_handler(request_rec *r, bs_dir_cfg *cfg)
  * page (DECLINED) and relies on the operator-included
  * `<script src="/botshield/embedded.js" defer>` wrapper to run the
  * PoW in a Web Worker and POST the result back. The cookie may
- * arrive after the first request — see PLAN E17 for the
+ * arrive after the first request — see CHANGELOG E17 for the
  * "kicks in eventually" guarantee. */
 const char *bs_set_silent_mode(cmd_parms *cmd, void *cfg_v,
                                       const char *arg)

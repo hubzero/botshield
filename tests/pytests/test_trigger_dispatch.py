@@ -8,7 +8,7 @@ specific test files. This file pins the ORDER between families:
     3. path triggers         (one-off per-path intent)
     4. feedback triggers     (response-path; separate hook)
 
-Gate from PLAN.md E7.3:
+Gate from CHANGELOG.md E7.3:
   - ordering is deterministic
   - later trigger families do not run after an earlier short-circuit
   - decision logs show which family fired (already covered by reason-

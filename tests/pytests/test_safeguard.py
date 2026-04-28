@@ -161,7 +161,7 @@ def test_safeguard_isolates_per_ip(config_override):
 def test_safeguard_does_not_override_block_path(
     config_override, fresh_ip,
 ):
-    """PLAN: 'safeguard should never override a clear hard block /
+    """CHANGELOG: 'safeguard should never override a clear hard block /
     deny decision.' Configure a BotShieldBlockPath on /blocked and
     trip safeguard on /. Then hit /blocked — must still return 403,
     not safeguard pass-through."""
