@@ -279,28 +279,6 @@ static const char *bs_set_forgive_captcha(cmd_parms *cmd, void *cfg_v, const cha
         &((bs_dir_cfg *)cfg_v)->forgive_captcha, arg, cmd->pool);
 }
 
-/* E17 PoC — `BotShieldSilentMode <interstitial|embedded>`. Per-scope
- * picker for what flavor of silent-tier challenge to issue. Default
- * `interstitial` matches the legacy M7 splash. `embedded` opts the
- * scope into background verification: BotShield serves the real
- * page (DECLINED) and relies on the operator-included
- * `<script src="/botshield/embedded.js" defer>` wrapper to run the
- * PoW in a Web Worker and POST the result back. The cookie may
- * arrive after the first request — see PLAN E17 for the
- * "kicks in eventually" guarantee. */
-static const char *bs_set_silent_mode(cmd_parms *cmd, void *cfg_v,
-                                      const char *arg)
-{
-    bs_dir_cfg *cfg = cfg_v;
-    if      (!strcasecmp(arg, "interstitial")) cfg->silent_mode = BS_SILENT_MODE_INTERSTITIAL;
-    else if (!strcasecmp(arg, "embedded"))     cfg->silent_mode = BS_SILENT_MODE_EMBEDDED;
-    else {
-        return apr_psprintf(cmd->pool,
-            "BotShieldSilentMode: '%s' must be 'interstitial' or "
-            "'embedded'", arg);
-    }
-    return NULL;
-}
 
 /* E18 — `BotShieldFormCaptcha on|off`. Per-scope opt-in for inline
  * form captcha verification on POST submit. When on, BotShield
@@ -325,7 +303,7 @@ static const char *bs_set_form_captcha(cmd_parms *cmd, void *cfg_v, int flag)
  * are silently ignored. The footgun was hard to spot in operator
  * configs — surface it explicitly so they don't think their override
  * took effect. */
-static void bs_warn_if_virtual_scope(cmd_parms *cmd, const char *name)
+void bs_warn_if_virtual_scope(cmd_parms *cmd, const char *name)
 {
     if (cmd->server && cmd->server->is_virtual) {
         ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, cmd->server,
@@ -394,32 +372,6 @@ static const char *bs_set_flagged_capacity(cmd_parms *cmd, void *dconf,
     return NULL;
 }
 
-/* BotShieldFlagIP <flag_name>[,<flag_name>...] [ttl_seconds]
- * Any request that reaches this scope causes the client IP to be
- * inserted (or merged) into the flagged-IP table with the named bits.
- * Designed for explicit honeypot / scanner / test endpoints. */
-static const char *bs_set_flag_ip(cmd_parms *cmd, void *cfg_v,
-                                  const char *names, const char *ttl_str)
-{
-    bs_dir_cfg *cfg = cfg_v;
-    const char *err = NULL;
-    apr_uint32_t bits = bs_parse_flag_names(cmd->pool, names, &err);
-    if (err) return apr_psprintf(cmd->pool, "BotShieldFlagIP: %s", err);
-    if (!bits) return "BotShieldFlagIP: no flag bits resolved";
-
-    int ttl = 3600;
-    if (ttl_str && *ttl_str) {
-        long n;
-        if (!bs_parse_int_bounded(ttl_str, 60, 30 * 86400, 8, &n)) {
-            return "BotShieldFlagIP: ttl must be an integer 60..2592000 "
-                   "(seconds)";
-        }
-        ttl = (int)n;
-    }
-    cfg->flag_on_match     = bits;
-    cfg->flag_on_match_ttl = ttl;
-    return NULL;
-}
 
 /* Accept ".example.com" (leading dot for cross-subdomain) or "example.com"
  * (host-only). Empty string clears the directive, reverting to host-only.
@@ -484,7 +436,7 @@ static const char *bs_set_logo_label(cmd_parms *cmd, void *cfg_v, const char *ar
  * binary keys can legitimately contain embedded NULs that
  * strlen would silently truncate at. Callers handling text
  * content (logo/help/challenge files) can pass NULL. */
-static const char *bs_load_config_file(cmd_parms *cmd,
+const char *bs_load_config_file(cmd_parms *cmd,
                                        const char *directive,
                                        const char *path,
                                        apr_size_t max_bytes,
@@ -530,37 +482,6 @@ static const char *bs_load_config_file(cmd_parms *cmd,
     return NULL;
 }
 
-/* Security review LOW #3 — derive the per-purpose keys for a master
- * secret. Called from the secret-file directive setters AFTER the
- * key bytes have been validated. Returns NULL on success; on
- * (vanishingly unlikely) HKDF failure returns a diagnostic string
- * the directive setter surfaces as a fatal config error so the
- * module refuses to start with a broken key derivation. The purpose
- * tags map 1:1 to derived_gcm_cookie / derived_hmac_pending /
- * derived_hmac_bootstrap in the dir_cfg. Bumping any tag (e.g.
- * "bs:cookie:gcm:v2") is the rotation knob if the underlying
- * crypto contract ever changes. */
-static const char *bs_derive_purpose_keys(apr_pool_t *p,
-                                          const unsigned char *master,
-                                          apr_size_t master_len,
-                                          unsigned char *out_gcm,
-                                          unsigned char *out_pending,
-                                          unsigned char *out_bootstrap)
-{
-    if (!bs_hkdf_derive_key(master, master_len,
-                            "bs:cookie:gcm:v1", out_gcm)) {
-        return apr_psprintf(p, "HKDF(bs:cookie:gcm:v1) failed");
-    }
-    if (!bs_hkdf_derive_key(master, master_len,
-                            "bs:cookie:pending:v1", out_pending)) {
-        return apr_psprintf(p, "HKDF(bs:cookie:pending:v1) failed");
-    }
-    if (!bs_hkdf_derive_key(master, master_len,
-                            "bs:cookie:bootstrap:v1", out_bootstrap)) {
-        return apr_psprintf(p, "HKDF(bs:cookie:bootstrap:v1) failed");
-    }
-    return NULL;
-}
 
 /* Security review HIGH #2 — validate a binary-capable secret loaded via
  * bs_load_config_file. Trims one trailing newline (common with
@@ -570,7 +491,7 @@ static const char *bs_derive_purpose_keys(apr_pool_t *p,
  * 32-byte keys and ≈22% for 64-byte keys), and enforces the
  * minimum-bytes floor. Returns NULL on success with *out_len set
  * to the effective key length, or an error string. */
-static const char *bs_validate_secret_key(cmd_parms *cmd,
+const char *bs_validate_secret_key(cmd_parms *cmd,
                                           const char *directive,
                                           const char *path,
                                           const char *buf,
@@ -993,7 +914,7 @@ static void bs_check_allow(request_rec *r,
  * bs_cohort. Returns NULL on success, or an Apache directive-error
  * string. Ranges resolution is deferred to post_config so we can
  * use pconf rather than cmd->temp_pool. */
-static const char *bs_cohort_resolve(cmd_parms *cmd, bs_cohort *out,
+const char *bs_cohort_resolve(cmd_parms *cmd, bs_cohort *out,
                                      const char *ua, const char *ipspec)
 {
     memset(out, 0, sizeof(*out));
@@ -1741,33 +1662,6 @@ apr_status_t bs_robots_watchdog_cb(int state, void *data,
 
 
 
-/* Flag-bit registry. Maps the BS_FLAG_* defines to the canonical
- * names that appear in directives (BotShieldFlagTrigger, BotShieldFlagIP),
- * wire formats (X-Botshield-Claims `flags=`), and the decision log.
- * Hoisted up the file so E8.2's claim-emit path can render the bitmap
- * without a forward-decl dance over an anonymous-struct array
- * (forward-declaring such arrays in C is awkward).
- *
- * E14 (rework) — registry trimmed to (name, bit). The prior penalty /
- * next_difficulty_delta / next_tier_floor fields were retired when
- * adaptive intensity moved into the unified BotShieldFlagTrigger
- * mechanism (see bs_default_flag_triggers below). */
-typedef struct {
-    const char     *name;
-    apr_uint32_t    bit;
-} bs_flag_meta;
-
-static const bs_flag_meta bs_flag_metadata[] = {
-    { "honeypot_hit",         BS_FLAG_HONEYPOT_HIT         },
-    { "scanner_probe",        BS_FLAG_SCANNER_PROBE        },
-    { "fake_bot",             BS_FLAG_FAKE_BOT             },
-    { "pow_fail_streak",      BS_FLAG_POW_FAIL_STREAK      },
-    { "app_verified_human",   BS_FLAG_APP_VERIFIED_HUMAN   },
-    { "app_verified_session", BS_FLAG_APP_VERIFIED_SESSION },
-    { "app_trust_signal",     BS_FLAG_APP_TRUST_SIGNAL     },
-};
-#define BS_FLAG_META_COUNT \
-    (sizeof(bs_flag_metadata) / sizeof(bs_flag_metadata[0]))
 
 /* NULL-terminated name+bit projection for the legacy parse sites
  * (bs_parse_flag_names, bs_app_claims_flag_names) that iterate via
@@ -1784,15 +1678,6 @@ const struct bs_flag_name bs_flag_names[] = {
     { NULL, 0 }
 };
 
-static const bs_flag_meta *bs_flag_meta_for_name(const char *name)
-{
-    for (size_t i = 0; i < BS_FLAG_META_COUNT; i++) {
-        if (strcmp(bs_flag_metadata[i].name, name) == 0) {
-            return &bs_flag_metadata[i];
-        }
-    }
-    return NULL;
-}
 
 
 
@@ -1830,24 +1715,15 @@ static const char *bs_set_state_save_interval(cmd_parms *cmd, void *dconf,
     return NULL;
 }
 
-/* --- E1 directive setters (Allow family) --- */
-
-/* BotShieldAllow on|off — master gate for the Allow-list family.
- * Default off (opt-in). Applied at server scope. */
-static const char *bs_set_allow_enabled(cmd_parms *cmd, void *dconf,
-                                        int flag)
-{
-    (void)dconf;
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    scfg->allow_enabled = flag ? 1 : 0;
-    return NULL;
-}
+/* The E1 BotShieldAllow / BotShieldAllowBot directive setters live
+ * in allowlist.c. */
 
 /* Character policy for bot-name tokens: lowercase letters, digits,
  * hyphen. Used as the hash key and the default ranges-file basename.
  * Rejects anything that could create path-traversal surprises or
- * cross-host confusion. */
+ * cross-host confusion. Stays here because the rate-limit, block-
+ * path, and triggers setters scattered across other files all reuse
+ * it via the cross-file decl in botshield.h. */
 int bs_bot_name_valid(const char *s)
 {
     if (!s || !*s) return 0;
@@ -1862,66 +1738,6 @@ int bs_bot_name_valid(const char *s)
     return 1;
 }
 
-/* BotShieldAllowBot <name> <ua-pattern> [<target>] — register a
- * bot (or override a built-in). The optional third argument is
- * polymorphic — shape-inspected here, not a separate directive:
- *
- *   _(omitted)_           → default file path
- *                           /var/lib/botshield/bots/<name>.txt
- *   starts with '/'       → explicit file path
- *   equals "*"            → UA-only mode; trust on UA match with no
- *                           IP verification. Logs allow-bot-ua:<name>.
- *   anything else         → inline CIDR (single, or comma-separated
- *                           for multiple: "10.0.0.0/8,192.168.0.0/16").
- *
- * Supersedes the two-directive shape (Pattern + Ranges) we
- * initially landed — one directive per bot, config-local. */
-static const char *bs_set_allow_bot(cmd_parms *cmd, void *dconf,
-                                    const char *name,
-                                    const char *pattern,
-                                    const char *target)
-{
-    (void)dconf;
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    if (!bs_bot_name_valid(name)) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldAllowBot: name '%s' must be [a-z0-9-]{1,32}",
-            name);
-    }
-    if (!pattern || !*pattern) {
-        return "BotShieldAllowBot: pattern (arg 2) cannot be empty";
-    }
-    if (strlen(pattern) > 128) {
-        return "BotShieldAllowBot: pattern over 128 chars "
-               "(pick a shorter distinctive substring)";
-    }
-
-    bs_allow_bot_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
-    e->name    = apr_pstrdup(cmd->pool, name);
-    e->pattern = apr_pstrdup(cmd->pool, pattern);
-
-    if (target && *target) {
-        if (strcmp(target, "*") == 0) {
-            e->ua_only = 1;
-        } else if (target[0] == '/') {
-            e->path = apr_pstrdup(cmd->pool, target);
-        } else if (strchr(target, '/') || strchr(target, ':')) {
-            /* Contains a '/' (CIDR mask) or ':' (IPv6) — treat as
-             * inline CIDR list. Validation deferred to post_config
-             * where pconf's allocator is alive. */
-            e->inline_cidrs = apr_pstrdup(cmd->pool, target);
-        } else {
-            return apr_psprintf(cmd->pool,
-                "BotShieldAllowBot: arg 3 '%s' unrecognized — use "
-                "'*' (UA-only), an absolute file path, or a CIDR "
-                "(single or comma-separated)", target);
-        }
-    }
-
-    apr_hash_set(scfg->allow_bots, e->name, APR_HASH_KEY_STRING, e);
-    return NULL;
-}
 
 /* Parse a "per" unit token into seconds. We accept sec/min/hour and
  * their single-letter aliases so operators can write whichever reads
@@ -2340,170 +2156,7 @@ static const char *bs_set_share_scope(cmd_parms *cmd, void *dconf,
     return NULL;
 }
 
-/* E14 (rework) — BotShieldFlagTrigger <flag> [reset] [action=<verb> args...]
- *
- * One unified config language for "when this flag fires, do X." Replaces
- * the prior BotShieldFlag directive (which mutated bs_flag_meta entries
- * to attach penalty/next_difficulty/next_tier metadata) with the same
- * shape as the existing BotShieldPathTrigger / BotShieldFeedbackTrigger /
- * BotShieldLoadTrigger family.
- *
- * Two action verbs:
- *   action=score add=N           — add signed N (-1000..1000) to the
- *                                  request score. SUM accumulates across
- *                                  triggers.
- *   action=tier_floor min=<tier> — set a minimum tier; <tier> is
- *                                  pass|silent|form|captcha. MAX
- *                                  accumulates (strictest wins).
- *
- * Reset keyword: `BotShieldFlagTrigger <flag> reset` clears all earlier
- * triggers (compiled-in defaults + prior operator declarations) for that
- * flag at post_config time. Three accepted forms:
- *
- *   BotShieldFlagTrigger pow_fail_streak reset
- *   BotShieldFlagTrigger honeypot_hit reset action=tier_floor min=form
- *   BotShieldFlagTrigger honeypot_hit reset
- *   BotShieldFlagTrigger honeypot_hit action=score add=60
- *
- * Form 2 is sugar for the first two of form 3. Reset is a directive-
- * level keyword, not an action verb — keeping the two concerns
- * syntactically distinct prevents conflict with future runtime verbs.
- *
- * Storage: each parsed line appends a bs_flag_trigger_entry to
- * scfg->flag_triggers. Reset entries appear inline as sentinels
- * (action=BS_FLAG_ACT_RESET); post_config consumes them. */
-static const char *bs_set_flag_trigger(cmd_parms *cmd, void *dconf,
-                                       int argc, char *const argv[])
-{
-    (void)dconf;
-    if (argc < 1) {
-        return "BotShieldFlagTrigger: expects <flag> "
-               "[reset] [action=<verb> args...]";
-    }
-    const char *flag_name = argv[0];
-    const bs_flag_meta *fm = bs_flag_meta_for_name(flag_name);
-    if (!fm) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldFlagTrigger: unknown flag '%s'. Known flags: "
-            "honeypot_hit, scanner_probe, fake_bot, pow_fail_streak, "
-            "app_verified_human, app_verified_session, "
-            "app_trust_signal", flag_name);
-    }
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-
-    int idx = 1;
-    int saw_reset = 0;
-    if (idx < argc && strcasecmp(argv[idx], "reset") == 0) {
-        saw_reset = 1;
-        idx++;
-        bs_flag_trigger_entry *r = apr_pcalloc(cmd->pool, sizeof(*r));
-        r->flag_name    = apr_pstrdup(cmd->pool, flag_name);
-        r->flag_bit     = fm->bit;
-        r->action       = BS_FLAG_ACT_RESET;
-        r->mode         = BS_TMODE_ENFORCE;
-        r->from_default = 0;
-        *(bs_flag_trigger_entry **)apr_array_push(scfg->flag_triggers) = r;
-    }
-    /* Bare `reset` with nothing after — done. */
-    if (idx >= argc) return NULL;
-
-    /* Otherwise the next token must be `action=<verb>`. */
-    if (strncasecmp(argv[idx], "action=", 7) != 0) {
-        if (saw_reset) {
-            return apr_psprintf(cmd->pool,
-                "BotShieldFlagTrigger '%s' reset: extra arg '%s' must "
-                "begin with 'action=' (or omit it for a bare reset)",
-                flag_name, argv[idx]);
-        }
-        return apr_psprintf(cmd->pool,
-            "BotShieldFlagTrigger '%s': expected 'reset' or 'action=' "
-            "as the second token; got '%s'", flag_name, argv[idx]);
-    }
-    const char *verb = argv[idx] + 7;
-    idx++;
-
-    bs_flag_trigger_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
-    e->flag_name    = apr_pstrdup(cmd->pool, flag_name);
-    e->flag_bit     = fm->bit;
-    e->mode         = BS_TMODE_ENFORCE;
-    e->from_default = 0;
-
-    if (strcasecmp(verb, "score") == 0) {
-        e->action = BS_FLAG_ACT_SCORE;
-        int saw_add = 0;
-        for (; idx < argc; idx++) {
-            const char *arg = argv[idx];
-            if (strncasecmp(arg, "add=", 4) == 0) {
-                char *e2 = NULL;
-                long n = strtol(arg + 4, &e2, 10);
-                if (!e2 || *e2 || n < -1000 || n > 1000) {
-                    return apr_psprintf(cmd->pool,
-                        "BotShieldFlagTrigger '%s' action=score: "
-                        "add='%s' must be an integer in -1000..1000",
-                        flag_name, arg + 4);
-                }
-                e->score_add = (int)n;
-                saw_add = 1;
-            } else if (strcasecmp(arg, "mode=observe") == 0) {
-                e->mode = BS_TMODE_OBSERVE;
-            } else if (strcasecmp(arg, "mode=enforce") == 0) {
-                e->mode = BS_TMODE_ENFORCE;
-            } else {
-                return apr_psprintf(cmd->pool,
-                    "BotShieldFlagTrigger '%s' action=score: "
-                    "unknown arg '%s' (want add=N or mode=observe)",
-                    flag_name, arg);
-            }
-        }
-        if (!saw_add) {
-            return apr_psprintf(cmd->pool,
-                "BotShieldFlagTrigger '%s' action=score: missing "
-                "required 'add=N'", flag_name);
-        }
-    } else if (strcasecmp(verb, "tier_floor") == 0) {
-        e->action = BS_FLAG_ACT_TIER_FLOOR;
-        int saw_min = 0;
-        for (; idx < argc; idx++) {
-            const char *arg = argv[idx];
-            if (strncasecmp(arg, "min=", 4) == 0) {
-                const char *t = arg + 4;
-                if      (strcasecmp(t, "pass")    == 0) e->tier_min = BS_TIER_PASS;
-                else if (strcasecmp(t, "silent")  == 0) e->tier_min = BS_TIER_SILENT;
-                else if (strcasecmp(t, "form")    == 0) e->tier_min = BS_TIER_HARD;
-                else if (strcasecmp(t, "captcha") == 0) e->tier_min = BS_TIER_CAPTCHA;
-                else {
-                    return apr_psprintf(cmd->pool,
-                        "BotShieldFlagTrigger '%s' action=tier_floor: "
-                        "min='%s' must be one of pass/silent/form/captcha",
-                        flag_name, t);
-                }
-                saw_min = 1;
-            } else if (strcasecmp(arg, "mode=observe") == 0) {
-                e->mode = BS_TMODE_OBSERVE;
-            } else if (strcasecmp(arg, "mode=enforce") == 0) {
-                e->mode = BS_TMODE_ENFORCE;
-            } else {
-                return apr_psprintf(cmd->pool,
-                    "BotShieldFlagTrigger '%s' action=tier_floor: "
-                    "unknown arg '%s' (want min=<tier> or mode=observe)",
-                    flag_name, arg);
-            }
-        }
-        if (!saw_min) {
-            return apr_psprintf(cmd->pool,
-                "BotShieldFlagTrigger '%s' action=tier_floor: missing "
-                "required 'min=<tier>'", flag_name);
-        }
-    } else {
-        return apr_psprintf(cmd->pool,
-            "BotShieldFlagTrigger '%s': unknown action verb '%s' "
-            "(want score or tier_floor)", flag_name, verb);
-    }
-
-    *(bs_flag_trigger_entry **)apr_array_push(scfg->flag_triggers) = e;
-    return NULL;
-}
+/* The BotShieldFlagTrigger directive setter lives in triggers.c. */
 
 /* E15 — BotShieldForgivenessCapPerHour <N>. Server-
  * scope cap on the points of forgiveness any one cookie can earn
@@ -2651,191 +2304,6 @@ static const char *bs_set_block_path(cmd_parms *cmd, void *dconf,
 }
 
 
-/* E2.2 — BotShieldRobotsTxt <path>: point the module at a robots.txt
- * file. Parsing deferred to post_config so pconf's allocator is alive
- * for the doc's lifetime. Empty/absent path is the default "don't
- * enforce robots.txt" state; operators turn it on by pointing at a
- * file. */
-static const char *bs_set_robots_txt(cmd_parms *cmd, void *dconf,
-                                     const char *path)
-{
-    (void)dconf;
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    if (!path || !*path) {
-        return "BotShieldRobotsTxt: path required";
-    }
-    if (path[0] != '/') {
-        return "BotShieldRobotsTxt: path must be absolute";
-    }
-    scfg->robots_txt_path = apr_pstrdup(cmd->pool, path);
-    return NULL;
-}
-
-/* E2.2 — BotShieldRobotsRefreshInterval <seconds>. Governs the
- * mod_watchdog-driven live refresh (E2.2.2). 0 disables the
- * watchdog callback, reverting to post_config-only load
- * (edit robots.txt + reload Apache). Default 60s. Hard cap at
- * 86400 to catch typos that'd push refreshes into next week. */
-static const char *bs_set_robots_refresh_interval(cmd_parms *cmd,
-                                                  void *dconf,
-                                                  const char *arg)
-{
-    (void)dconf;
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    char *end = NULL;
-    long v = strtol(arg, &end, 10);
-    if (!end || *end || v < 0 || v > 86400) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldRobotsRefreshInterval: '%s' must be an integer "
-            "0..86400 seconds (0 = disable live refresh)", arg);
-    }
-    scfg->robots_refresh_interval = (int)v;
-    return NULL;
-}
-
-/* E5 — BotShieldAppFeedback on|off. Master gate for the
- * app-to-module reputation-feedback channel. Default off. Even
- * under off we still strip the feedback header from outgoing
- * responses (see bs_app_feedback_fixup), so a misconfigured app
- * can't leak it to clients during a staged rollout. */
-static const char *bs_set_app_feedback(cmd_parms *cmd, void *dconf,
-                                        int flag)
-{
-    (void)dconf;
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    scfg->app_feedback_enabled = flag ? 1 : 0;
-    return NULL;
-}
-
-/* E5 — BotShieldAppFeedbackHeader <name>. Header name the module
- * reads feedback from (and strips on its way out). Default
- * X-BotShield-Feedback. */
-static const char *bs_set_app_feedback_header(cmd_parms *cmd, void *dconf,
-                                               const char *name)
-{
-    (void)dconf;
-    if (!name || !*name) {
-        return "BotShieldAppFeedbackHeader: header name required";
-    }
-    apr_size_t nlen = strlen(name);
-    if (nlen > 64) {
-        return "BotShieldAppFeedbackHeader: name over 64 chars";
-    }
-    for (apr_size_t i = 0; i < nlen; i++) {
-        unsigned char c = (unsigned char)name[i];
-        int ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
-              || (c >= '0' && c <= '9') || c == '-' || c == '_';
-        if (!ok) {
-            return apr_psprintf(cmd->pool,
-                "BotShieldAppFeedbackHeader: '%s' contains invalid "
-                "char '%c'", name, (char)c);
-        }
-    }
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    scfg->app_feedback_header = apr_pstrdup(cmd->pool, name);
-    return NULL;
-}
-
-/* E8.2 — BotShieldAppClaims on|off. Master gate for the module-to-
- * app reputation-export channel. Default off. When on, the module
- * sets a single signed X-Botshield-Claims header on the request to
- * the backend handler, having first stripped any client-supplied
- * X-Botshield-* (the strip is what makes the signed envelope safe
- * to trust on app reads — even if an app skips HMAC verification,
- * forged claim values can't survive the strip + set sequence). */
-static const char *bs_set_app_claims(cmd_parms *cmd, void *dconf, int flag)
-{
-    (void)dconf;
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    scfg->app_claims_enabled = flag ? 1 : 0;
-    return NULL;
-}
-
-/* BotShieldAppIntegrationSecretFile <path>. HMAC key for both
- * directions of app integration: validates inbound feedback envelopes
- * and signs outbound X-Botshield-Claims headers. The two protocols'
- * canonical forms are structurally distinct (feedback HMACs
- * `event=<name>` only; claims HMAC seven semicolon-fields with a
- * fixed `v=1` lead) so cross-replay is not possible. Mode-600-or-
- * tighter + absolute path; loaded at parse time so the bytes are in
- * memory before the first request hits the hook. */
-static const char *bs_set_app_integration_secret_file(cmd_parms *cmd,
-                                                       void *dconf,
-                                                       const char *arg)
-{
-    (void)dconf;
-    if (!arg || !*arg) {
-        return "BotShieldAppIntegrationSecretFile: path required";
-    }
-    if (arg[0] != '/') {
-        return "BotShieldAppIntegrationSecretFile: path must be absolute";
-    }
-
-    struct stat st;
-    if (stat(arg, &st) != 0) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldAppIntegrationSecretFile: cannot stat '%s'", arg);
-    }
-    if (st.st_mode & (S_IRGRP | S_IROTH | S_IWGRP | S_IWOTH)) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldAppIntegrationSecretFile: '%s' is group- or "
-            "world-accessible (mode %04o); chmod 600 it",
-            arg, st.st_mode & 07777);
-    }
-
-    const char *buf = NULL;
-    apr_size_t buf_len = 0;
-    const char *err = bs_load_config_file(cmd,
-        "BotShieldAppIntegrationSecretFile", arg,
-        BS_MAX_SECRET_BYTES, &buf, &buf_len);
-    if (err) return err;
-
-    apr_size_t len = 0;
-    err = bs_validate_secret_key(cmd, "BotShieldAppIntegrationSecretFile",
-                                 arg, buf, buf_len, &len);
-    if (err) return err;
-
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    scfg->app_integration_secret_file = apr_pstrdup(cmd->pool, arg);
-    scfg->app_integration_secret      = (const unsigned char *)buf;
-    scfg->app_integration_secret_len  = len;
-    return NULL;
-}
-
-/* E2.2 — BotShieldRobotsWildcardScope heuristic|strict|off.
- * Governs how the User-agent: * group in robots.txt is enforced:
- *   heuristic (default): apply only to UAs that look like crawlers
- *                        — real-browser prefix denylist + bot-token
- *                        allowlist (see PLAN.md).
- *   strict             : apply to every UA (operator's call; risks
- *                        rate-limiting or blocking real users).
- *   off                : ignore * groups entirely. */
-static const char *bs_set_robots_wildcard_scope(cmd_parms *cmd, void *dconf,
-                                                const char *arg)
-{
-    (void)dconf;
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    if (!arg || !*arg) return "BotShieldRobotsWildcardScope: mode required";
-    if (!strcasecmp(arg, "heuristic")) {
-        scfg->robots_wildcard_scope = BS_ROBOTS_WILDCARD_HEURISTIC;
-    } else if (!strcasecmp(arg, "strict")) {
-        scfg->robots_wildcard_scope = BS_ROBOTS_WILDCARD_STRICT;
-    } else if (!strcasecmp(arg, "off")) {
-        scfg->robots_wildcard_scope = BS_ROBOTS_WILDCARD_OFF;
-    } else {
-        return apr_psprintf(cmd->pool,
-            "BotShieldRobotsWildcardScope: '%s' not one of "
-            "heuristic|strict|off", arg);
-    }
-    return NULL;
-}
 
 /* mod_watchdog periodic-save callback. Runs in the parent/watchdog
  * process context with a short-lived pool. AP_WATCHDOG_STATE_RUNNING
@@ -3055,140 +2523,11 @@ apr_uint32_t bs_parse_flag_names(apr_pool_t *p, const char *s,
 
 /* --- New directive setters --- */
 
-/* `BotShieldSecretFile /path` — HMAC key. Refuse world-readable and
- * group-readable files so an operator can't accidentally ship a key that
- * any local user on the box can exfiltrate. */
-static const char *bs_set_secret_file(cmd_parms *cmd, void *cfg_v,
-                                      const char *arg)
-{
-    bs_dir_cfg *cfg = cfg_v;
 
-    struct stat st;
-    if (stat(arg, &st) != 0) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldSecretFile: cannot stat '%s'", arg);
-    }
-    if (st.st_mode & (S_IRGRP | S_IROTH | S_IWGRP | S_IWOTH)) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldSecretFile: '%s' is group- or world-accessible "
-            "(mode %04o); chmod 600 it", arg, st.st_mode & 07777);
-    }
 
-    const char *buf = NULL;
-    apr_size_t buf_len = 0;
-    const char *err = bs_load_config_file(cmd, "BotShieldSecretFile", arg,
-                                          BS_MAX_SECRET_BYTES, &buf, &buf_len);
-    if (err) return err;
-
-    apr_size_t len = 0;
-    err = bs_validate_secret_key(cmd, "BotShieldSecretFile",
-                                 arg, buf, buf_len, &len);
-    if (err) return err;
-
-    cfg->secret     = (const unsigned char *)buf;
-    cfg->secret_len = len;
-
-    /* Security review LOW #3 — derive per-purpose keys once. */
-    err = bs_derive_purpose_keys(cmd->pool,
-                                  cfg->secret, cfg->secret_len,
-                                  cfg->derived_gcm_cookie,
-                                  cfg->derived_hmac_pending,
-                                  cfg->derived_hmac_bootstrap);
-    if (err) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldSecretFile: key derivation failed: %s", err);
-    }
-    cfg->derived_keys_set = 1;
-    return NULL;
-}
-
-/* E16 — `BotShieldSecondarySecretFile /path`. Verify-
- * only secondary key for graceful HMAC/GCM secret rotation.
- *
- * Operator workflow:
- *   1. Generate the new key file. Add `BotShieldSecondarySecretFile`
- *      pointing at the OLD key. Reload Apache. Verify path now
- *      accepts BOTH old and new cookies; issue path uses the NEW key.
- *   2. Wait one BotShieldCookieTTL window so every active cookie has
- *      been re-issued under the new key.
- *   3. Remove the BotShieldSecondarySecretFile directive. Reload.
- *      Old cookies were either re-issued or expired naturally.
- *
- * Same mode-600 hygiene as BotShieldSecretFile. The file's bytes are
- * tried after the primary on every verify; cost is one extra
- * HMAC-SHA-256 (or AES-GCM open) per rejected primary, only during
- * the rotation window. */
-static const char *bs_set_secondary_secret_file(cmd_parms *cmd,
-                                                void *cfg_v,
-                                                const char *arg)
-{
-    bs_dir_cfg *cfg = cfg_v;
-
-    struct stat st;
-    if (stat(arg, &st) != 0) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldSecondarySecretFile: cannot stat '%s'", arg);
-    }
-    if (st.st_mode & (S_IRGRP | S_IROTH | S_IWGRP | S_IWOTH)) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldSecondarySecretFile: '%s' is group- or "
-            "world-accessible (mode %04o); chmod 600 it",
-            arg, st.st_mode & 07777);
-    }
-
-    const char *buf = NULL;
-    apr_size_t buf_len = 0;
-    const char *err = bs_load_config_file(cmd,
-                                          "BotShieldSecondarySecretFile",
-                                          arg, BS_MAX_SECRET_BYTES,
-                                          &buf, &buf_len);
-    if (err) return err;
-
-    apr_size_t len = 0;
-    err = bs_validate_secret_key(cmd, "BotShieldSecondarySecretFile",
-                                 arg, buf, buf_len, &len);
-    if (err) return err;
-
-    cfg->secret_secondary     = (const unsigned char *)buf;
-    cfg->secret_secondary_len = len;
-
-    /* Security review LOW #3 — derive per-purpose keys for the
-     * secondary master too. */
-    err = bs_derive_purpose_keys(cmd->pool,
-                                  cfg->secret_secondary,
-                                  cfg->secret_secondary_len,
-                                  cfg->derived_gcm_cookie_2,
-                                  cfg->derived_hmac_pending_2,
-                                  cfg->derived_hmac_bootstrap_2);
-    if (err) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldSecondarySecretFile: key derivation failed: %s",
-            err);
-    }
-    cfg->derived_keys_set_2 = 1;
-    return NULL;
-}
-
-static const char *bs_set_algorithm(cmd_parms *cmd, void *cfg_v,
-                                    const char *arg)
-{
-    bs_dir_cfg *cfg = cfg_v;
-    const bs_pow_algorithm *alg = bs_find_algorithm(arg);
-    if (!alg) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldAlgorithm: '%s' is not a recognized algorithm name",
-            arg);
-    }
-    if (!alg->implemented) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldAlgorithm: '%s' is reserved in the registry but not "
-            "built into this module", arg);
-    }
-    cfg->algorithm = alg;
-    return NULL;
-}
-
-/* --- M8 captcha directive setters --- */
+/* The M8 captcha-tier directive setters (provider, site_key,
+ * secret_file, timeouts, expected hostname/action, ca_bundle,
+ * rate_limit, max_inflight) live in captcha.c. */
 
 /* `BotShieldEndpointPrefix /path` — URL prefix the module's own
  * handlers live under. Today: /captcha-verify[/<provider>] (M8),
@@ -3220,277 +2559,6 @@ static const char *bs_set_endpoint_prefix(cmd_parms *cmd, void *cfg_v,
     return NULL;
 }
 
-static const char *bs_set_captcha_provider(cmd_parms *cmd, void *cfg_v,
-                                           const char *arg)
-{
-    bs_dir_cfg *cfg = cfg_v;
-    const bs_captcha_provider *p = bs_find_provider(arg);
-    if (!p) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldCaptchaProvider: '%s' is not a recognized provider "
-            "(known: turnstile, hcaptcha, recaptcha-v2, recaptcha-v3, "
-            "friendly, geetest)", arg);
-    }
-    if (!p->implemented) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldCaptchaProvider: '%s' is reserved in the registry "
-            "but not built into this module", arg);
-    }
-    cfg->captcha_provider = p;
-    return NULL;
-}
-
-static const char *bs_set_captcha_site_key(cmd_parms *cmd, void *cfg_v,
-                                           const char *arg)
-{
-    bs_dir_cfg *cfg = cfg_v;
-    if (!arg || !*arg) {
-        return "BotShieldCaptchaSiteKey: empty value";
-    }
-    /* Site keys are public; just cap length to something sane so a
-     * misconfigured directive can't wedge the interstitial. */
-    if (strlen(arg) > 256) {
-        return "BotShieldCaptchaSiteKey: value longer than 256 bytes";
-    }
-    cfg->captcha_site_key = arg;
-    return NULL;
-}
-
-/* Reuse the same mode-600 discipline as BotShieldSecretFile. */
-static const char *bs_set_captcha_secret_file(cmd_parms *cmd, void *cfg_v,
-                                              const char *arg)
-{
-    bs_dir_cfg *cfg = cfg_v;
-
-    struct stat st;
-    if (stat(arg, &st) != 0) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldCaptchaSecretFile: cannot stat '%s'", arg);
-    }
-    if (st.st_mode & (S_IRGRP | S_IROTH | S_IWGRP | S_IWOTH)) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldCaptchaSecretFile: '%s' is group- or world-accessible "
-            "(mode %04o); chmod 600 it", arg, st.st_mode & 07777);
-    }
-
-    const char *buf = NULL;
-    apr_size_t buf_len = 0;
-    const char *err = bs_load_config_file(cmd, "BotShieldCaptchaSecretFile",
-                                          arg, BS_MAX_SECRET_BYTES,
-                                          &buf, &buf_len);
-    if (err) return err;
-
-    apr_size_t len = 0;
-    err = bs_validate_secret_key(cmd, "BotShieldCaptchaSecretFile",
-                                 arg, buf, buf_len, &len);
-    if (err) return err;
-    cfg->captcha_secret     = (const unsigned char *)buf;
-    cfg->captcha_secret_len = len;
-    return NULL;
-}
-
-static const char *bs_set_captcha_timeout(cmd_parms *cmd, void *cfg_v,
-                                          const char *arg)
-{
-    bs_dir_cfg *cfg = cfg_v;
-    char *end = NULL;
-    long v = strtol(arg, &end, 10);
-    if (!end || *end != '\0' || v < BS_MIN_CAPTCHA_TIMEOUT ||
-        v > BS_MAX_CAPTCHA_TIMEOUT) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldCaptchaTimeout: '%s' must be an integer in %d..%d ms",
-            arg, BS_MIN_CAPTCHA_TIMEOUT, BS_MAX_CAPTCHA_TIMEOUT);
-    }
-    cfg->captcha_timeout_ms = (int)v;
-    return NULL;
-}
-
-/* Security review LOW #13 — operator-tunable connect-phase timeout.
- * Default BS_CAPTCHA_CONNECT_TIMEOUT (250 ms) is tight for healthy
- * networks; operators on transient-loss links can bump it to avoid
- * fail-open on momentary connect blips. Same overall bound as the
- * full siteverify timeout. */
-static const char *bs_set_captcha_connect_timeout(cmd_parms *cmd,
-                                                  void *cfg_v,
-                                                  const char *arg)
-{
-    bs_dir_cfg *cfg = cfg_v;
-    char *end = NULL;
-    long v = strtol(arg, &end, 10);
-    if (!end || *end != '\0' || v < 50 || v > BS_MAX_CAPTCHA_TIMEOUT) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldCaptchaConnectTimeout: '%s' must be an integer in "
-            "50..%d ms", arg, BS_MAX_CAPTCHA_TIMEOUT);
-    }
-    cfg->captcha_connect_timeout_ms = (int)v;
-    return NULL;
-}
-
-/* `BotShieldRecaptchaV3MinScore 0.0..1.0` — threshold below which a
- * successful-but-low-score reCAPTCHA v3 verification is treated as a
- * rejection. Google's documented baseline is 0.5; operators tune down
- * (more permissive, fewer false rejections) or up (more strict) based
- * on observed traffic. */
-static const char *bs_set_recaptcha_v3_min_score(cmd_parms *cmd,
-                                                 void *cfg_v,
-                                                 const char *arg)
-{
-    bs_dir_cfg *cfg = cfg_v;
-    char *end = NULL;
-    double v = strtod(arg, &end);
-    if (!end || *end != '\0' || v < 0.0 || v > 1.0) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldRecaptchaV3MinScore: '%s' must be a number in 0.0..1.0",
-            arg);
-    }
-    cfg->recaptcha_v3_min_score = v;
-    return NULL;
-}
-
-/* `BotShieldCaptchaExpectedHostname <host|off>` — hostname the
- * captcha provider echoed back in the siteverify response must
- * equal this value. Default = r->server->server_hostname (the
- * vhost name). The literal value `off` (case-insensitive) disables
- * the check — stored internally as an empty string — for
- * multi-origin deployments where the operator enforces binding
- * elsewhere. Apache's directive parser rejects bare "" as zero
- * args so the sentinel is the ergonomic escape.
- *
- * DNS hostname charset only — matches the cookie-domain setter's
- * policy. Rejects quotes / backslashes / whitespace / anything that
- * could confuse later string comparison or logging. */
-static const char *bs_set_captcha_expected_hostname(cmd_parms *cmd,
-                                                    void *cfg_v,
-                                                    const char *arg)
-{
-    bs_dir_cfg *cfg = cfg_v;
-    if (!arg) return "BotShieldCaptchaExpectedHostname requires an argument";
-    if (strcasecmp(arg, "off") == 0) {
-        cfg->captcha_expected_hostname = "";
-        return NULL;
-    }
-    if (strlen(arg) > 253) {
-        return "BotShieldCaptchaExpectedHostname: longer than RFC 1035 limit";
-    }
-    for (const char *p = arg; *p; p++) {
-        if (!(isalnum((unsigned char)*p) || *p == '.' || *p == '-')) {
-            return apr_psprintf(cmd->pool,
-                "BotShieldCaptchaExpectedHostname: '%s' contains "
-                "a character outside [a-zA-Z0-9.-]", arg);
-        }
-    }
-    cfg->captcha_expected_hostname = apr_pstrdup(cmd->pool, arg);
-    return NULL;
-}
-
-/* `BotShieldCaptchaExpectedAction <action|off>` — the action string
- * the client-side widget tagged the token with. Default =
- * "botshield" (matches the action embedded in the interstitial JS
- * for reCAPTCHA v3 and the Turnstile data-action attribute). The
- * literal value `off` disables the check. Restricted to printable
- * ASCII without whitespace or shell/quote metacharacters. */
-static const char *bs_set_captcha_expected_action(cmd_parms *cmd,
-                                                  void *cfg_v,
-                                                  const char *arg)
-{
-    bs_dir_cfg *cfg = cfg_v;
-    if (!arg) return "BotShieldCaptchaExpectedAction requires an argument";
-    if (strcasecmp(arg, "off") == 0) {
-        cfg->captcha_expected_action = "";
-        return NULL;
-    }
-    if (strlen(arg) > 64) {
-        return "BotShieldCaptchaExpectedAction: max 64 characters";
-    }
-    for (const char *p = arg; *p; p++) {
-        unsigned char c = (unsigned char)*p;
-        if (c <= 0x20 || c >= 0x7f || c == '"' || c == '\'' ||
-            c == '\\' || c == ';' || c == '&') {
-            return apr_psprintf(cmd->pool,
-                "BotShieldCaptchaExpectedAction: '%s' contains "
-                "an unsafe character", arg);
-        }
-    }
-    cfg->captcha_expected_action = apr_pstrdup(cmd->pool, arg);
-    return NULL;
-}
-
-/* `BotShieldCaptchaCABundle <path>` — absolute path to a PEM
- * certificate bundle that libcurl will use when validating the
- * captcha-provider TLS certificate. Optional. When unset, libcurl
- * falls back to its compiled-in default (typically the system
- * `ca-certificates` bundle on Debian/Ubuntu/RHEL).
- *
- * Why this exists: stripped-down container images that omit the
- * `ca-certificates` package have no system CA store, so every
- * captcha siteverify hits CURLE_PEER_FAILED_VERIFICATION and the
- * captcha tier silently fails-open (occasional permissive better
- * than locking everyone out — but a permanent state of fail-open
- * is bad). Pointing this at the bundle the operator's image ships
- * fixes that without a config-time policy change. */
-static const char *bs_set_captcha_ca_bundle(cmd_parms *cmd,
-                                            void *cfg_v,
-                                            const char *arg)
-{
-    bs_dir_cfg *cfg = cfg_v;
-    if (!arg || !*arg) {
-        return "BotShieldCaptchaCABundle: path required";
-    }
-    if (arg[0] != '/') {
-        return "BotShieldCaptchaCABundle: path must be absolute";
-    }
-    struct stat st;
-    if (stat(arg, &st) != 0) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldCaptchaCABundle: cannot stat '%s'", arg);
-    }
-    if (!S_ISREG(st.st_mode)) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldCaptchaCABundle: '%s' is not a regular file", arg);
-    }
-    cfg->captcha_ca_bundle = apr_pstrdup(cmd->pool, arg);
-    return NULL;
-}
-
-/* `BotShieldCaptchaRateLimit N` — verify-endpoint attempts per IP per
- * minute. 0 disables the rate limiter entirely (not recommended);
- * default BS_DEFAULT_CAPTCHA_RATE_LIMIT = 30. */
-static const char *bs_set_captcha_rate_limit(cmd_parms *cmd, void *cfg_v,
-                                             const char *arg)
-{
-    bs_dir_cfg *cfg = cfg_v;
-    char *end = NULL;
-    long v = strtol(arg, &end, 10);
-    if (!end || *end != '\0' || v < 0 || v > 1000) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldCaptchaRateLimit: '%s' must be an integer 0..1000 "
-            "(0 disables)", arg);
-    }
-    cfg->captcha_rate_limit = (int)v;
-    return NULL;
-}
-
-/* `BotShieldCaptchaMaxInFlight N` — global cap on outstanding siteverify
- * calls. The underlying SHM counter is module-global, so if the
- * directive appears in more than one server_rec the last-parsed value
- * wins at runtime. Allowed anywhere (RSRC_CONF) so operators who only
- * have a vhost config can still set it; we don't pretend otherwise. */
-static const char *bs_set_captcha_max_inflight(cmd_parms *cmd, void *cfg_v,
-                                               const char *arg)
-{
-    (void)cfg_v;
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    char *end = NULL;
-    long v = strtol(arg, &end, 10);
-    if (!end || *end != '\0' || v < 1 || v > 1024) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldCaptchaMaxInFlight: '%s' must be an integer 1..1024",
-            arg);
-    }
-    scfg->captcha_max_inflight = (int)v;
-    return NULL;
-}
 
 /* ======================================================================
  * E2.2.3 — /botshield/policy-status

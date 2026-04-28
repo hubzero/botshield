@@ -717,6 +717,42 @@ void bs_apply_rep_carry(request_rec *r,
  * directive setters. */
 int bs_bot_name_valid(const char *s);
 
+/* --- Config-time helpers (callable from any feature's directive
+ * setters). All four currently live in botshield.c; they may
+ * migrate to config.c in a later phase as more setters relocate. */
+
+/* Log a NOTICE if the directive is being set inside a <VirtualHost>
+ * scope — used for SHM-sizing directives that the post_config hook
+ * only reads off the main server's scfg. */
+void bs_warn_if_virtual_scope(cmd_parms *cmd, const char *name);
+
+/* Slurp a file into pool memory with a max-size cap. Used for the
+ * secret/secondary-secret/captcha-secret keys and for the operator-
+ * customizable HTML / SVG templates (challenge page, logo, help). */
+const char *bs_load_config_file(cmd_parms *cmd,
+                                const char *directive,
+                                const char *path,
+                                apr_size_t max_bytes,
+                                const char **out_content,
+                                apr_size_t *out_len);
+
+/* Validate the contents of a secret-key file (BotShieldSecretFile
+ * et al.). Trims one trailing newline, rejects embedded NULs,
+ * enforces BS_MIN_SECRET_BYTES <= len. */
+const char *bs_validate_secret_key(cmd_parms *cmd,
+                                   const char *directive,
+                                   const char *path,
+                                   const char *buf,
+                                   apr_size_t buf_len,
+                                   apr_size_t *out_len);
+
+/* Resolve a directive's (ua, ipspec) arg pair into a bs_cohort.
+ * Range parsing for ipspec is deferred to post_config — the cohort
+ * stores the raw spec strings here. Returns NULL on success or an
+ * Apache directive-error string. */
+const char *bs_cohort_resolve(cmd_parms *cmd, bs_cohort *out,
+                              const char *ua, const char *ipspec);
+
 /* RFC 9309 path-pattern warning — log a NOTICE when a directive's
  * path pattern contains a non-trailing '*' that the retired v1
  * matcher would have treated as a literal byte. Used by E2.1

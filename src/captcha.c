@@ -9,6 +9,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <limits.h>
+#include <sys/stat.h>
 
 #include <apr_pools.h>
 #include <apr_strings.h>
@@ -1820,3 +1821,277 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
     return OK;
 }
 
+
+/* --- M8 captcha directive setters --- */
+
+const char *bs_set_captcha_provider(cmd_parms *cmd, void *cfg_v,
+                                           const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    const bs_captcha_provider *p = bs_find_provider(arg);
+    if (!p) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCaptchaProvider: '%s' is not a recognized provider "
+            "(known: turnstile, hcaptcha, recaptcha-v2, recaptcha-v3, "
+            "friendly, geetest)", arg);
+    }
+    if (!p->implemented) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCaptchaProvider: '%s' is reserved in the registry "
+            "but not built into this module", arg);
+    }
+    cfg->captcha_provider = p;
+    return NULL;
+}
+
+const char *bs_set_captcha_site_key(cmd_parms *cmd, void *cfg_v,
+                                           const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    if (!arg || !*arg) {
+        return "BotShieldCaptchaSiteKey: empty value";
+    }
+    /* Site keys are public; just cap length to something sane so a
+     * misconfigured directive can't wedge the interstitial. */
+    if (strlen(arg) > 256) {
+        return "BotShieldCaptchaSiteKey: value longer than 256 bytes";
+    }
+    cfg->captcha_site_key = arg;
+    return NULL;
+}
+
+/* Reuse the same mode-600 discipline as BotShieldSecretFile. */
+const char *bs_set_captcha_secret_file(cmd_parms *cmd, void *cfg_v,
+                                              const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+
+    struct stat st;
+    if (stat(arg, &st) != 0) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCaptchaSecretFile: cannot stat '%s'", arg);
+    }
+    if (st.st_mode & (S_IRGRP | S_IROTH | S_IWGRP | S_IWOTH)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCaptchaSecretFile: '%s' is group- or world-accessible "
+            "(mode %04o); chmod 600 it", arg, st.st_mode & 07777);
+    }
+
+    const char *buf = NULL;
+    apr_size_t buf_len = 0;
+    const char *err = bs_load_config_file(cmd, "BotShieldCaptchaSecretFile",
+                                          arg, BS_MAX_SECRET_BYTES,
+                                          &buf, &buf_len);
+    if (err) return err;
+
+    apr_size_t len = 0;
+    err = bs_validate_secret_key(cmd, "BotShieldCaptchaSecretFile",
+                                 arg, buf, buf_len, &len);
+    if (err) return err;
+    cfg->captcha_secret     = (const unsigned char *)buf;
+    cfg->captcha_secret_len = len;
+    return NULL;
+}
+
+const char *bs_set_captcha_timeout(cmd_parms *cmd, void *cfg_v,
+                                          const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    char *end = NULL;
+    long v = strtol(arg, &end, 10);
+    if (!end || *end != '\0' || v < BS_MIN_CAPTCHA_TIMEOUT ||
+        v > BS_MAX_CAPTCHA_TIMEOUT) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCaptchaTimeout: '%s' must be an integer in %d..%d ms",
+            arg, BS_MIN_CAPTCHA_TIMEOUT, BS_MAX_CAPTCHA_TIMEOUT);
+    }
+    cfg->captcha_timeout_ms = (int)v;
+    return NULL;
+}
+
+/* Security review LOW #13 — operator-tunable connect-phase timeout.
+ * Default BS_CAPTCHA_CONNECT_TIMEOUT (250 ms) is tight for healthy
+ * networks; operators on transient-loss links can bump it to avoid
+ * fail-open on momentary connect blips. Same overall bound as the
+ * full siteverify timeout. */
+const char *bs_set_captcha_connect_timeout(cmd_parms *cmd,
+                                                  void *cfg_v,
+                                                  const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    char *end = NULL;
+    long v = strtol(arg, &end, 10);
+    if (!end || *end != '\0' || v < 50 || v > BS_MAX_CAPTCHA_TIMEOUT) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCaptchaConnectTimeout: '%s' must be an integer in "
+            "50..%d ms", arg, BS_MAX_CAPTCHA_TIMEOUT);
+    }
+    cfg->captcha_connect_timeout_ms = (int)v;
+    return NULL;
+}
+
+/* `BotShieldRecaptchaV3MinScore 0.0..1.0` — threshold below which a
+ * successful-but-low-score reCAPTCHA v3 verification is treated as a
+ * rejection. Google's documented baseline is 0.5; operators tune down
+ * (more permissive, fewer false rejections) or up (more strict) based
+ * on observed traffic. */
+const char *bs_set_recaptcha_v3_min_score(cmd_parms *cmd,
+                                                 void *cfg_v,
+                                                 const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    char *end = NULL;
+    double v = strtod(arg, &end);
+    if (!end || *end != '\0' || v < 0.0 || v > 1.0) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldRecaptchaV3MinScore: '%s' must be a number in 0.0..1.0",
+            arg);
+    }
+    cfg->recaptcha_v3_min_score = v;
+    return NULL;
+}
+
+/* `BotShieldCaptchaExpectedHostname <host|off>` — hostname the
+ * captcha provider echoed back in the siteverify response must
+ * equal this value. Default = r->server->server_hostname (the
+ * vhost name). The literal value `off` (case-insensitive) disables
+ * the check — stored internally as an empty string — for
+ * multi-origin deployments where the operator enforces binding
+ * elsewhere. Apache's directive parser rejects bare "" as zero
+ * args so the sentinel is the ergonomic escape.
+ *
+ * DNS hostname charset only — matches the cookie-domain setter's
+ * policy. Rejects quotes / backslashes / whitespace / anything that
+ * could confuse later string comparison or logging. */
+const char *bs_set_captcha_expected_hostname(cmd_parms *cmd,
+                                                    void *cfg_v,
+                                                    const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    if (!arg) return "BotShieldCaptchaExpectedHostname requires an argument";
+    if (strcasecmp(arg, "off") == 0) {
+        cfg->captcha_expected_hostname = "";
+        return NULL;
+    }
+    if (strlen(arg) > 253) {
+        return "BotShieldCaptchaExpectedHostname: longer than RFC 1035 limit";
+    }
+    for (const char *p = arg; *p; p++) {
+        if (!(isalnum((unsigned char)*p) || *p == '.' || *p == '-')) {
+            return apr_psprintf(cmd->pool,
+                "BotShieldCaptchaExpectedHostname: '%s' contains "
+                "a character outside [a-zA-Z0-9.-]", arg);
+        }
+    }
+    cfg->captcha_expected_hostname = apr_pstrdup(cmd->pool, arg);
+    return NULL;
+}
+
+/* `BotShieldCaptchaExpectedAction <action|off>` — the action string
+ * the client-side widget tagged the token with. Default =
+ * "botshield" (matches the action embedded in the interstitial JS
+ * for reCAPTCHA v3 and the Turnstile data-action attribute). The
+ * literal value `off` disables the check. Restricted to printable
+ * ASCII without whitespace or shell/quote metacharacters. */
+const char *bs_set_captcha_expected_action(cmd_parms *cmd,
+                                                  void *cfg_v,
+                                                  const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    if (!arg) return "BotShieldCaptchaExpectedAction requires an argument";
+    if (strcasecmp(arg, "off") == 0) {
+        cfg->captcha_expected_action = "";
+        return NULL;
+    }
+    if (strlen(arg) > 64) {
+        return "BotShieldCaptchaExpectedAction: max 64 characters";
+    }
+    for (const char *p = arg; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c <= 0x20 || c >= 0x7f || c == '"' || c == '\'' ||
+            c == '\\' || c == ';' || c == '&') {
+            return apr_psprintf(cmd->pool,
+                "BotShieldCaptchaExpectedAction: '%s' contains "
+                "an unsafe character", arg);
+        }
+    }
+    cfg->captcha_expected_action = apr_pstrdup(cmd->pool, arg);
+    return NULL;
+}
+
+/* `BotShieldCaptchaCABundle <path>` — absolute path to a PEM
+ * certificate bundle that libcurl will use when validating the
+ * captcha-provider TLS certificate. Optional. When unset, libcurl
+ * falls back to its compiled-in default (typically the system
+ * `ca-certificates` bundle on Debian/Ubuntu/RHEL).
+ *
+ * Why this exists: stripped-down container images that omit the
+ * `ca-certificates` package have no system CA store, so every
+ * captcha siteverify hits CURLE_PEER_FAILED_VERIFICATION and the
+ * captcha tier silently fails-open (occasional permissive better
+ * than locking everyone out — but a permanent state of fail-open
+ * is bad). Pointing this at the bundle the operator's image ships
+ * fixes that without a config-time policy change. */
+const char *bs_set_captcha_ca_bundle(cmd_parms *cmd,
+                                            void *cfg_v,
+                                            const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    if (!arg || !*arg) {
+        return "BotShieldCaptchaCABundle: path required";
+    }
+    if (arg[0] != '/') {
+        return "BotShieldCaptchaCABundle: path must be absolute";
+    }
+    struct stat st;
+    if (stat(arg, &st) != 0) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCaptchaCABundle: cannot stat '%s'", arg);
+    }
+    if (!S_ISREG(st.st_mode)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCaptchaCABundle: '%s' is not a regular file", arg);
+    }
+    cfg->captcha_ca_bundle = apr_pstrdup(cmd->pool, arg);
+    return NULL;
+}
+
+/* `BotShieldCaptchaRateLimit N` — verify-endpoint attempts per IP per
+ * minute. 0 disables the rate limiter entirely (not recommended);
+ * default BS_DEFAULT_CAPTCHA_RATE_LIMIT = 30. */
+const char *bs_set_captcha_rate_limit(cmd_parms *cmd, void *cfg_v,
+                                             const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    char *end = NULL;
+    long v = strtol(arg, &end, 10);
+    if (!end || *end != '\0' || v < 0 || v > 1000) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCaptchaRateLimit: '%s' must be an integer 0..1000 "
+            "(0 disables)", arg);
+    }
+    cfg->captcha_rate_limit = (int)v;
+    return NULL;
+}
+
+/* `BotShieldCaptchaMaxInFlight N` — global cap on outstanding siteverify
+ * calls. The underlying SHM counter is module-global, so if the
+ * directive appears in more than one server_rec the last-parsed value
+ * wins at runtime. Allowed anywhere (RSRC_CONF) so operators who only
+ * have a vhost config can still set it; we don't pretend otherwise. */
+const char *bs_set_captcha_max_inflight(cmd_parms *cmd, void *cfg_v,
+                                               const char *arg)
+{
+    (void)cfg_v;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    char *end = NULL;
+    long v = strtol(arg, &end, 10);
+    if (!end || *end != '\0' || v < 1 || v > 1024) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldCaptchaMaxInFlight: '%s' must be an integer 1..1024",
+            arg);
+    }
+    scfg->captcha_max_inflight = (int)v;
+    return NULL;
+}

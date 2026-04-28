@@ -21,6 +21,8 @@
 #include <stdlib.h>
 #include <strings.h>
 
+#include "botshield.h"
+
 /* Sanity caps — no legitimate robots.txt approaches any of these. */
 #define BOTSHIELD_ROBOTS_MAX_BYTES           (1024 * 1024)
 #define BOTSHIELD_ROBOTS_MAX_LINE            2048
@@ -658,4 +660,80 @@ int robots_group_rule_at(const robots_doc *doc, int idx, int rule_idx,
     if (out_pattern) *out_pattern = r->pattern;
     if (out_allow)   *out_allow   = r->allow;
     return 1;
+}
+
+/* --- E2.2 directive setters --- */
+
+/* E2.2 — BotShieldRobotsTxt <path>: point the module at a robots.txt
+ * file. Parsing deferred to post_config so pconf's allocator is alive
+ * for the doc's lifetime. Empty/absent path is the default "don't
+ * enforce robots.txt" state; operators turn it on by pointing at a
+ * file. */
+const char *bs_set_robots_txt(cmd_parms *cmd, void *dconf,
+                                     const char *path)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    if (!path || !*path) {
+        return "BotShieldRobotsTxt: path required";
+    }
+    if (path[0] != '/') {
+        return "BotShieldRobotsTxt: path must be absolute";
+    }
+    scfg->robots_txt_path = apr_pstrdup(cmd->pool, path);
+    return NULL;
+}
+
+/* E2.2 — BotShieldRobotsRefreshInterval <seconds>. Governs the
+ * mod_watchdog-driven live refresh (E2.2.2). 0 disables the
+ * watchdog callback, reverting to post_config-only load
+ * (edit robots.txt + reload Apache). Default 60s. Hard cap at
+ * 86400 to catch typos that'd push refreshes into next week. */
+const char *bs_set_robots_refresh_interval(cmd_parms *cmd,
+                                                  void *dconf,
+                                                  const char *arg)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    char *end = NULL;
+    long v = strtol(arg, &end, 10);
+    if (!end || *end || v < 0 || v > 86400) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldRobotsRefreshInterval: '%s' must be an integer "
+            "0..86400 seconds (0 = disable live refresh)", arg);
+    }
+    scfg->robots_refresh_interval = (int)v;
+    return NULL;
+}
+
+
+/* E2.2 — BotShieldRobotsWildcardScope heuristic|strict|off.
+ * Governs how the User-agent: * group in robots.txt is enforced:
+ *   heuristic (default): apply only to UAs that look like crawlers
+ *                        — real-browser prefix denylist + bot-token
+ *                        allowlist (see PLAN.md).
+ *   strict             : apply to every UA (operator's call; risks
+ *                        rate-limiting or blocking real users).
+ *   off                : ignore * groups entirely. */
+const char *bs_set_robots_wildcard_scope(cmd_parms *cmd, void *dconf,
+                                                const char *arg)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    if (!arg || !*arg) return "BotShieldRobotsWildcardScope: mode required";
+    if (!strcasecmp(arg, "heuristic")) {
+        scfg->robots_wildcard_scope = BS_ROBOTS_WILDCARD_HEURISTIC;
+    } else if (!strcasecmp(arg, "strict")) {
+        scfg->robots_wildcard_scope = BS_ROBOTS_WILDCARD_STRICT;
+    } else if (!strcasecmp(arg, "off")) {
+        scfg->robots_wildcard_scope = BS_ROBOTS_WILDCARD_OFF;
+    } else {
+        return apr_psprintf(cmd->pool,
+            "BotShieldRobotsWildcardScope: '%s' not one of "
+            "heuristic|strict|off", arg);
+    }
+    return NULL;
 }

@@ -1097,3 +1097,28 @@ int bs_embedded_verify_handler(request_rec *r, bs_dir_cfg *cfg)
     return rv;
 }
 /* end E17 PoC handlers */
+
+/* --- E17 directive setters --- */
+
+/* E17 PoC — `BotShieldSilentMode <interstitial|embedded>`. Per-scope
+ * picker for what flavor of silent-tier challenge to issue. Default
+ * `interstitial` matches the legacy M7 splash. `embedded` opts the
+ * scope into background verification: BotShield serves the real
+ * page (DECLINED) and relies on the operator-included
+ * `<script src="/botshield/embedded.js" defer>` wrapper to run the
+ * PoW in a Web Worker and POST the result back. The cookie may
+ * arrive after the first request — see PLAN E17 for the
+ * "kicks in eventually" guarantee. */
+const char *bs_set_silent_mode(cmd_parms *cmd, void *cfg_v,
+                                      const char *arg)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    if      (!strcasecmp(arg, "interstitial")) cfg->silent_mode = BS_SILENT_MODE_INTERSTITIAL;
+    else if (!strcasecmp(arg, "embedded"))     cfg->silent_mode = BS_SILENT_MODE_EMBEDDED;
+    else {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSilentMode: '%s' must be 'interstitial' or "
+            "'embedded'", arg);
+    }
+    return NULL;
+}

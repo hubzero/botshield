@@ -26,6 +26,9 @@
 #include <apr_pools.h>
 #include <apr_errno.h>
 
+#include <httpd.h>
+#include <http_config.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -99,6 +102,19 @@ int         robots_group_rule_at(const robots_doc *doc, int idx, int rule_idx,
  * BotShieldPathTrigger and BotShieldBlockPath share the same
  * matcher rather than maintaining a parallel placeholder. */
 int bs_path_match(const char *pattern, const char *path);
+
+/* --- E2.2 directive setters --- *
+ *
+ * BotShieldRobotsTxt <path>           — point at a robots.txt file.
+ * BotShieldRobotsRefreshInterval <s>  — live-refresh cadence (0 disables).
+ * BotShieldRobotsWildcardScope mode   — User-agent: * group enforcement
+ *                                       (heuristic / strict / off). */
+const char *bs_set_robots_txt(cmd_parms *cmd, void *dconf,
+                              const char *path);
+const char *bs_set_robots_refresh_interval(cmd_parms *cmd, void *dconf,
+                                           const char *arg);
+const char *bs_set_robots_wildcard_scope(cmd_parms *cmd, void *dconf,
+                                         const char *arg);
 
 #ifdef __cplusplus
 }

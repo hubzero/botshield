@@ -163,6 +163,16 @@ const char *bs_set_load_trigger    (cmd_parms *cmd, void *dconf,
 const char *bs_set_session_cookie_name(cmd_parms *cmd, void *dconf,
                                        const char *name);
 
+/* --- E14 flag-trigger family setters --- *
+ *
+ * BotShieldFlagIP    — per-scope: any request reaching this scope
+ *                      flags the client IP with named bits + ttl.
+ * BotShieldFlagTrigger — flag→action mapping registry. */
+const char *bs_set_flag_ip(cmd_parms *cmd, void *cfg_v,
+                           const char *names, const char *ttl_str);
+const char *bs_set_flag_trigger(cmd_parms *cmd, void *dconf,
+                                int argc, char *const argv[]);
+
 #ifdef __cplusplus
 }
 #endif

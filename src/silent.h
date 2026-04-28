@@ -29,6 +29,7 @@
 #define BOTSHIELD_SILENT_H
 
 #include <httpd.h>
+#include <http_config.h>
 
 #include "botshield.h"
 
@@ -46,6 +47,11 @@ int bs_form_widget_handler(request_rec *r);
 
 int bs_embedded_bootstrap_handler(request_rec *r, bs_dir_cfg *cfg);
 int bs_embedded_verify_handler(request_rec *r, bs_dir_cfg *cfg);
+
+/* E17 — BotShieldSilentMode <interstitial|embedded>. Per-scope picker
+ * for the silent-tier challenge flavor. */
+const char *bs_set_silent_mode(cmd_parms *cmd, void *cfg_v,
+                               const char *arg);
 
 #ifdef __cplusplus
 }

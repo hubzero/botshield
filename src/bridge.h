@@ -25,6 +25,7 @@
 #define BOTSHIELD_BRIDGE_H
 
 #include <httpd.h>
+#include <http_config.h>
 #include <util_filter.h>
 
 #include "botshield.h"
@@ -55,6 +56,20 @@ const char *bs_app_claims_set(request_rec *r,
                               int passes_silent,
                               int passes_form,
                               int passes_captcha);
+
+/* --- E5 + E8.2 directive setters --- *
+ *
+ * BotShieldAppFeedback / BotShieldAppFeedbackHeader configure the
+ * inbound (E5) channel; BotShieldAppClaims gates the outbound (E8.2)
+ * channel; BotShieldAppIntegrationSecretFile loads the HMAC key
+ * shared by both. */
+const char *bs_set_app_feedback(cmd_parms *cmd, void *dconf, int flag);
+const char *bs_set_app_feedback_header(cmd_parms *cmd, void *dconf,
+                                       const char *name);
+const char *bs_set_app_claims(cmd_parms *cmd, void *dconf, int flag);
+const char *bs_set_app_integration_secret_file(cmd_parms *cmd,
+                                               void *dconf,
+                                               const char *arg);
 
 #ifdef __cplusplus
 }

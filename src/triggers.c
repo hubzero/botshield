@@ -1022,3 +1022,235 @@ const char *bs_set_load_trigger(cmd_parms *cmd, void *dconf,
     *(bs_load_trigger_entry **)apr_array_push(scfg->load_triggers) = e;
     return NULL;
 }
+
+/* --- E14 flag-trigger directive setters --- */
+
+/* BotShieldFlagIP <flag_name>[,<flag_name>...] [ttl_seconds]
+ * Any request that reaches this scope causes the client IP to be
+ * inserted (or merged) into the flagged-IP table with the named bits.
+ * Designed for explicit honeypot / scanner / test endpoints. */
+const char *bs_set_flag_ip(cmd_parms *cmd, void *cfg_v,
+                                  const char *names, const char *ttl_str)
+{
+    bs_dir_cfg *cfg = cfg_v;
+    const char *err = NULL;
+    apr_uint32_t bits = bs_parse_flag_names(cmd->pool, names, &err);
+    if (err) return apr_psprintf(cmd->pool, "BotShieldFlagIP: %s", err);
+    if (!bits) return "BotShieldFlagIP: no flag bits resolved";
+
+    int ttl = 3600;
+    if (ttl_str && *ttl_str) {
+        long n;
+        if (!bs_parse_int_bounded(ttl_str, 60, 30 * 86400, 8, &n)) {
+            return "BotShieldFlagIP: ttl must be an integer 60..2592000 "
+                   "(seconds)";
+        }
+        ttl = (int)n;
+    }
+    cfg->flag_on_match     = bits;
+    cfg->flag_on_match_ttl = ttl;
+    return NULL;
+}
+
+/* Flag-bit registry. Maps the BS_FLAG_* defines to the canonical
+ * names that appear in directives (BotShieldFlagTrigger, BotShieldFlagIP),
+ * wire formats (X-Botshield-Claims `flags=`), and the decision log.
+ * Hoisted up the file so E8.2's claim-emit path can render the bitmap
+ * without a forward-decl dance over an anonymous-struct array
+ * (forward-declaring such arrays in C is awkward).
+ *
+ * E14 (rework) — registry trimmed to (name, bit). The prior penalty /
+ * next_difficulty_delta / next_tier_floor fields were retired when
+ * adaptive intensity moved into the unified BotShieldFlagTrigger
+ * mechanism (see bs_default_flag_triggers below). */
+typedef struct {
+    const char     *name;
+    apr_uint32_t    bit;
+} bs_flag_meta;
+
+static const bs_flag_meta bs_flag_metadata[] = {
+    { "honeypot_hit",         BS_FLAG_HONEYPOT_HIT         },
+    { "scanner_probe",        BS_FLAG_SCANNER_PROBE        },
+    { "fake_bot",             BS_FLAG_FAKE_BOT             },
+    { "pow_fail_streak",      BS_FLAG_POW_FAIL_STREAK      },
+    { "app_verified_human",   BS_FLAG_APP_VERIFIED_HUMAN   },
+    { "app_verified_session", BS_FLAG_APP_VERIFIED_SESSION },
+    { "app_trust_signal",     BS_FLAG_APP_TRUST_SIGNAL     },
+};
+#define BS_FLAG_META_COUNT \
+    (sizeof(bs_flag_metadata) / sizeof(bs_flag_metadata[0]))
+
+static const bs_flag_meta *bs_flag_meta_for_name(const char *name)
+{
+    for (size_t i = 0; i < BS_FLAG_META_COUNT; i++) {
+        if (strcmp(bs_flag_metadata[i].name, name) == 0) {
+            return &bs_flag_metadata[i];
+        }
+    }
+    return NULL;
+}
+/* BotShieldFlagTrigger <flag> [reset] [action=<verb> args...]
+ *
+ * One unified config language for "when this flag fires, do X." Replaces
+ * the prior BotShieldFlag directive (which mutated bs_flag_meta entries
+ * to attach penalty/next_difficulty/next_tier metadata) with the same
+ * shape as the existing BotShieldPathTrigger / BotShieldFeedbackTrigger /
+ * BotShieldLoadTrigger family.
+ *
+ * Two action verbs:
+ *   action=score add=N           — add signed N (-1000..1000) to the
+ *                                  request score. SUM accumulates across
+ *                                  triggers.
+ *   action=tier_floor min=<tier> — set a minimum tier; <tier> is
+ *                                  pass|silent|form|captcha. MAX
+ *                                  accumulates (strictest wins).
+ *
+ * Reset keyword: `BotShieldFlagTrigger <flag> reset` clears all earlier
+ * triggers (compiled-in defaults + prior operator declarations) for that
+ * flag at post_config time. Three accepted forms:
+ *
+ *   BotShieldFlagTrigger pow_fail_streak reset
+ *   BotShieldFlagTrigger honeypot_hit reset action=tier_floor min=form
+ *   BotShieldFlagTrigger honeypot_hit reset
+ *   BotShieldFlagTrigger honeypot_hit action=score add=60
+ *
+ * Form 2 is sugar for the first two of form 3. Reset is a directive-
+ * level keyword, not an action verb — keeping the two concerns
+ * syntactically distinct prevents conflict with future runtime verbs.
+ *
+ * Storage: each parsed line appends a bs_flag_trigger_entry to
+ * scfg->flag_triggers. Reset entries appear inline as sentinels
+ * (action=BS_FLAG_ACT_RESET); post_config consumes them. */
+const char *bs_set_flag_trigger(cmd_parms *cmd, void *dconf,
+                                       int argc, char *const argv[])
+{
+    (void)dconf;
+    if (argc < 1) {
+        return "BotShieldFlagTrigger: expects <flag> "
+               "[reset] [action=<verb> args...]";
+    }
+    const char *flag_name = argv[0];
+    const bs_flag_meta *fm = bs_flag_meta_for_name(flag_name);
+    if (!fm) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldFlagTrigger: unknown flag '%s'. Known flags: "
+            "honeypot_hit, scanner_probe, fake_bot, pow_fail_streak, "
+            "app_verified_human, app_verified_session, "
+            "app_trust_signal", flag_name);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+
+    int idx = 1;
+    int saw_reset = 0;
+    if (idx < argc && strcasecmp(argv[idx], "reset") == 0) {
+        saw_reset = 1;
+        idx++;
+        bs_flag_trigger_entry *r = apr_pcalloc(cmd->pool, sizeof(*r));
+        r->flag_name    = apr_pstrdup(cmd->pool, flag_name);
+        r->flag_bit     = fm->bit;
+        r->action       = BS_FLAG_ACT_RESET;
+        r->mode         = BS_TMODE_ENFORCE;
+        r->from_default = 0;
+        *(bs_flag_trigger_entry **)apr_array_push(scfg->flag_triggers) = r;
+    }
+    /* Bare `reset` with nothing after — done. */
+    if (idx >= argc) return NULL;
+
+    /* Otherwise the next token must be `action=<verb>`. */
+    if (strncasecmp(argv[idx], "action=", 7) != 0) {
+        if (saw_reset) {
+            return apr_psprintf(cmd->pool,
+                "BotShieldFlagTrigger '%s' reset: extra arg '%s' must "
+                "begin with 'action=' (or omit it for a bare reset)",
+                flag_name, argv[idx]);
+        }
+        return apr_psprintf(cmd->pool,
+            "BotShieldFlagTrigger '%s': expected 'reset' or 'action=' "
+            "as the second token; got '%s'", flag_name, argv[idx]);
+    }
+    const char *verb = argv[idx] + 7;
+    idx++;
+
+    bs_flag_trigger_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
+    e->flag_name    = apr_pstrdup(cmd->pool, flag_name);
+    e->flag_bit     = fm->bit;
+    e->mode         = BS_TMODE_ENFORCE;
+    e->from_default = 0;
+
+    if (strcasecmp(verb, "score") == 0) {
+        e->action = BS_FLAG_ACT_SCORE;
+        int saw_add = 0;
+        for (; idx < argc; idx++) {
+            const char *arg = argv[idx];
+            if (strncasecmp(arg, "add=", 4) == 0) {
+                char *e2 = NULL;
+                long n = strtol(arg + 4, &e2, 10);
+                if (!e2 || *e2 || n < -1000 || n > 1000) {
+                    return apr_psprintf(cmd->pool,
+                        "BotShieldFlagTrigger '%s' action=score: "
+                        "add='%s' must be an integer in -1000..1000",
+                        flag_name, arg + 4);
+                }
+                e->score_add = (int)n;
+                saw_add = 1;
+            } else if (strcasecmp(arg, "mode=observe") == 0) {
+                e->mode = BS_TMODE_OBSERVE;
+            } else if (strcasecmp(arg, "mode=enforce") == 0) {
+                e->mode = BS_TMODE_ENFORCE;
+            } else {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldFlagTrigger '%s' action=score: "
+                    "unknown arg '%s' (want add=N or mode=observe)",
+                    flag_name, arg);
+            }
+        }
+        if (!saw_add) {
+            return apr_psprintf(cmd->pool,
+                "BotShieldFlagTrigger '%s' action=score: missing "
+                "required 'add=N'", flag_name);
+        }
+    } else if (strcasecmp(verb, "tier_floor") == 0) {
+        e->action = BS_FLAG_ACT_TIER_FLOOR;
+        int saw_min = 0;
+        for (; idx < argc; idx++) {
+            const char *arg = argv[idx];
+            if (strncasecmp(arg, "min=", 4) == 0) {
+                const char *t = arg + 4;
+                if      (strcasecmp(t, "pass")    == 0) e->tier_min = BS_TIER_PASS;
+                else if (strcasecmp(t, "silent")  == 0) e->tier_min = BS_TIER_SILENT;
+                else if (strcasecmp(t, "form")    == 0) e->tier_min = BS_TIER_HARD;
+                else if (strcasecmp(t, "captcha") == 0) e->tier_min = BS_TIER_CAPTCHA;
+                else {
+                    return apr_psprintf(cmd->pool,
+                        "BotShieldFlagTrigger '%s' action=tier_floor: "
+                        "min='%s' must be one of pass/silent/form/captcha",
+                        flag_name, t);
+                }
+                saw_min = 1;
+            } else if (strcasecmp(arg, "mode=observe") == 0) {
+                e->mode = BS_TMODE_OBSERVE;
+            } else if (strcasecmp(arg, "mode=enforce") == 0) {
+                e->mode = BS_TMODE_ENFORCE;
+            } else {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldFlagTrigger '%s' action=tier_floor: "
+                    "unknown arg '%s' (want min=<tier> or mode=observe)",
+                    flag_name, arg);
+            }
+        }
+        if (!saw_min) {
+            return apr_psprintf(cmd->pool,
+                "BotShieldFlagTrigger '%s' action=tier_floor: missing "
+                "required 'min=<tier>'", flag_name);
+        }
+    } else {
+        return apr_psprintf(cmd->pool,
+            "BotShieldFlagTrigger '%s': unknown action verb '%s' "
+            "(want score or tier_floor)", flag_name, verb);
+    }
+
+    *(bs_flag_trigger_entry **)apr_array_push(scfg->flag_triggers) = e;
+    return NULL;
+}
+
