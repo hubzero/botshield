@@ -571,18 +571,9 @@ apr_status_t bs_read_form_body(request_rec *r, apr_size_t max_len,
                                const char **out_body,
                                apr_size_t *out_len);
 
-/* PoW algorithm registry lookup. Returns NULL on no match. */
-const bs_pow_algorithm *bs_find_algorithm(const char *name);
-
-/* Challenge-issuance entry point. Builds a fresh bs_challenge from
- * cfg (signed via the alg's issue fn). Returns NULL on success or
- * an error string. */
-const char *bs_issue_challenge(apr_pool_t *p, const bs_dir_cfg *cfg,
-                               int difficulty, int cookie_ttl,
-                               int auto_tier,
-                               const bs_pow_algorithm *alg_override,
-                               const bs_rep_state *rep_in,
-                               bs_challenge *out);
+/* Challenge issuance, PoW algorithm registry, the canonical-form
+ * HMAC input, and the MEDIUM #2 bootstrap-binding helpers all live
+ * in challenge.h (see src/challenge.{c,h}). */
 
 /* Cookie format / mint / verify (E11.4 GCM cookie path). */
 const char *bs_build_cookie_prefix_gcm(apr_pool_t *p,
