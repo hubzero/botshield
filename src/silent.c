@@ -21,6 +21,7 @@
 #include <json-c/json.h>
 
 #include "botshield.h"
+#include "challenge.h"
 #include "crypto.h"
 #include "shm.h"
 #include "metrics.h"
@@ -642,48 +643,6 @@ int bs_embedded_bootstrap_handler(request_rec *r,
     return OK;
 }
 
-/* Security review MEDIUM #2 — IP-binding for the bootstrap → verify
- * pathway. At bootstrap time we sign (nonce, bound_ip, expires_at)
- * with a per-purpose HKDF-derived key (`derived_hmac_bootstrap`).
- * At verify time we recompute the HMAC and also compare bound_ip
- * against the verifying request's IP. A challenge issued from one
- * IP cannot be redeemed from another — closes Attack 3
- * (distributed redemption) from the security-review writeup.
- *
- * bound_ip is rendered as a 32-char lowercase hex string of the
- * 16 raw bytes (IPv4 maps to ::ffff:V.V.V.V already in the parser).
- * Format-stable across IPv4 / IPv6.
- *
- * Output: 32-byte hex string + NUL into out_hex (33 bytes). */
-int bs_format_bound_ip_hex(const char *useragent_ip, char out_hex[33])
-{
-    unsigned char ip_bytes[16];
-    if (!useragent_ip || !*useragent_ip) return 0;
-    if (!bs_parse_client_ip(useragent_ip, ip_bytes)) return 0;
-    bs_to_hex(ip_bytes, 16, out_hex);
-    return 1;
-}
-
-/* Compute the bootstrap-binding HMAC over
- *   "bs:bootstrap:v1:" || nonce_hex || ":" || bound_ip_hex || ":"
- *   || expires_at (decimal ASCII)
- * using the dir_cfg's derived bootstrap key. Output is hex-encoded
- * into out_sig_hex (65 bytes). */
-void bs_compute_bootstrap_sig(apr_pool_t *p,
-                                     const unsigned char key[32],
-                                     const char *nonce_hex,
-                                     const char *bound_ip_hex,
-                                     apr_time_t expires_at,
-                                     char out_sig_hex[BS_SIG_BYTES * 2 + 1])
-{
-    const char *canon = apr_psprintf(p,
-        "bs:bootstrap:v1:%s:%s:%" APR_TIME_T_FMT,
-        nonce_hex, bound_ip_hex, expires_at);
-    unsigned char mac[BS_SIG_BYTES];
-    bs_hmac_sha256(key, 32, (const unsigned char *)canon,
-                   strlen(canon), mac);
-    bs_to_hex(mac, BS_SIG_BYTES, out_sig_hex);
-}
 
 /* Verify a bootstrap-binding signature presented at /embedded-verify.
  * Reconstructs the canon from the inputs (which must round-trip

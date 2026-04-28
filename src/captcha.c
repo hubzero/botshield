@@ -27,6 +27,7 @@
 #include <json-c/json.h>
 
 #include "botshield.h"
+#include "challenge.h"
 #include "crypto.h"
 #include "shm.h"
 #include "metrics.h"
