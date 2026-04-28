@@ -102,7 +102,7 @@ static int bs_rate_counter_admit(bs_rate_counter *slot,
 }
 
 /* Is this UA a plausible crawler for the purpose of applying
- * robots.txt User-agent: * rules in heuristic mode? See PLAN.md for
+ * robots.txt User-agent: * rules in heuristic mode? See CHANGELOG.md for
  * the rationale — the point is to avoid rate-limiting or blocking
  * real users' browsers, which never read robots.txt and so should
  * never be subject to its rules. */

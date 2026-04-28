@@ -727,7 +727,7 @@ const char *bs_set_robots_refresh_interval(cmd_parms *cmd,
  * Governs how the User-agent: * group in robots.txt is enforced:
  *   heuristic (default): apply only to UAs that look like crawlers
  *                        — real-browser prefix denylist + bot-token
- *                        allowlist (see PLAN.md).
+ *                        allowlist (see CHANGELOG.md).
  *   strict             : apply to every UA (operator's call; risks
  *                        rate-limiting or blocking real users).
  *   off                : ignore * groups entirely. */

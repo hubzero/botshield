@@ -170,7 +170,7 @@ def test_load_trigger_fires_under_hot(config_override, fresh_ip,
 def test_load_trigger_status_blocks_under_hot(
     config_override, fresh_ip,
 ):
-    """state=hot with status=503 short-circuits the request. PLAN's
+    """state=hot with status=503 short-circuits the request. CHANGELOG's
     'optional short-circuiting of expensive anonymous paths' shape:
     operators can hard-stop traffic when the host is hot."""
     _set_load_file("hot")

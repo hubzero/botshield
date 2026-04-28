@@ -42,7 +42,7 @@
  * app_trust_signal); same wire format, different bit semantics on the
  * config side of the event-name indirection.
  *
- * Implementation rules (see PLAN.md E5):
+ * Implementation rules (see CHANGELOG.md E5):
  *   1. Run as an output filter so stripping happens before the
  *      response reaches the client. log_transaction would be too late.
  *   2. Always strip when the header is present, even if the feature
@@ -215,7 +215,7 @@ apr_status_t bs_app_feedback_filter(ap_filter_t *f,
     if (!first_val) first_val = apr_table_get(r->err_headers_out, hname);
     char *snapshot = first_val ? apr_pstrdup(r->pool, first_val) : NULL;
 
-    /* Always strip — see PLAN.md E5 rule 2. Removes every copy at
+    /* Always strip — see CHANGELOG.md E5 rule 2. Removes every copy at
      * once (from both tables) so duplicates don't leak even when
      * we reject them. */
     apr_table_unset(r->headers_out, hname);

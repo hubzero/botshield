@@ -123,7 +123,7 @@ static void bs_trigger_action_init(bs_trigger_family fam,
     memset(a, 0, sizeof(*a));
     switch (fam) {
     case BS_TFAMILY_PATH:
-        /* Path defaults per PLAN.md E3: immediate 403, flag the IP
+        /* Path defaults per CHANGELOG.md E3: immediate 403, flag the IP
          * with scanner_probe for an hour. Operators override by
          * writing status=/flag=/ttl= explicitly. */
         a->status_code = 403;
@@ -597,7 +597,7 @@ const char *bs_set_session_cookie_name(cmd_parms *cmd, void *dconf,
 
 /* E4 — BotShieldCookieTrigger <name> <cookie-match> [key=value ...].
  *
- * Parses the cookie-match predicate (see PLAN.md E4 for the full
+ * Parses the cookie-match predicate (see CHANGELOG.md E4 for the full
  * predicate grammar) and the action keys, enforces cross-
  * validation (status=pass + redirect= is a config error;
  * _bs_verified as cookie=name is redirected to bs-cookie=<state>),
