@@ -60,10 +60,12 @@
 #include <errno.h>
 #include <limits.h>
 
-#include "robots.h"        /* E2.2 — robots.txt parser/matcher */
-#include "botshield_shm.h" /* SHM tables, state save/load, headroom watchdog */
-
-module AP_MODULE_DECLARE_DATA botshield_module;
+#include "robots.h"    /* E2.2 — robots.txt parser/matcher */
+#include "shm.h"       /* SHM tables, state save/load, headroom watchdog */
+#include "crypto.h"    /* SHA-256, HMAC, AES-256-GCM, HKDF, hex codec */
+#include "allowlist.h" /* E1 — UA classifier, CIDR list loader, builtin bots */
+#include "metrics.h"   /* M9 — decision log, counters, Prometheus, mod_status */
+#include "botshield.h" /* module-wide types: bs_dir_cfg, bs_server_cfg, ... */
 
 /* Tri-state for flag directives: -1 = unset (inherit), 0 = off, 1 = on.
  * Integer directives use -1 to mean "inherit" too. */
@@ -138,42 +140,10 @@ module AP_MODULE_DECLARE_DATA botshield_module;
  *   forgiveness amount on verify.
  *
  * Keep in sync with the JS worker when the template ships the wire bits. */
-/* Bumped 1->2 for E15: rep envelope grew two fields
- * (forgive_window_start, forgive_consumed). Old (v1) cookies fail
- * the version check and trigger a fresh challenge — one-time
- * disruption per client on upgrade. The same shape lets future rep
- * extensions ride without code-flow changes. */
-#define BS_PROTOCOL_VERSION   2
-#define BS_SALT_BYTES         16
-#define BS_NONCE_BYTES        8
-#define BS_SIG_BYTES          32  /* HMAC-SHA-256 output (used for bootstrap_sig) */
-
-/* AES-256-GCM cookie wire format.
- *
- * Wire format:   base64( alg_id(1) || nonce(12) || ct || tag(16) )
- *                + "." + counter
- *
- *   alg_id is authenticated via AAD so an attacker can't swap
- *   primitives. ct is the AES-GCM encryption of the canonical
- *   pipe-delimited challenge form. Counter rides outside the
- *   ciphertext because the PoW JS builds the cookie client-side
- *   without the AES key — it appends its computed counter to the
- *   server-issued encrypted prefix. Server-built cookies (captcha
- *   tier) use "captcha" as the counter sentinel on the same dot
- *   suffix.
- *
- * AES-256 key is HKDF-Expand'd from cfg->secret with the
- * "bs:cookie:gcm:v1" purpose tag (see bs_derive_purpose_keys). */
-#define BS_COOKIE_ALG_GCM     0x01
-#define BS_GCM_NONCE_LEN      12
-#define BS_GCM_TAG_LEN        16
-#define BS_GCM_COUNTER_SEP    '.'
-/* Separator byte in AES-GCM wire format between the base64 envelope
- * and the plaintext counter. `.` because it's not in standard base64
- * alphabet — unambiguous split point. */
-
-/* Forward declarations for the PoW algorithm dispatch table. */
-typedef struct bs_dir_cfg bs_dir_cfg;
+/* BS_PROTOCOL_VERSION, BS_SALT_BYTES, BS_NONCE_BYTES, BS_GCM_COUNTER_SEP
+ * live in botshield.h with the bs_challenge / bs_rep_state types they
+ * frame.  BS_SIG_BYTES, BS_COOKIE_ALG_GCM, BS_GCM_NONCE_LEN, BS_GCM_TAG_LEN
+ * live in crypto.h alongside the primitives that produce them. */
 
 /* Forward decls for the bounded numeric parsers. Defined later in the
  * file alongside bs_from_hex; hoisted here so the directive setters
@@ -196,119 +166,7 @@ static int bs_parse_int64_bounded(const char *s,
 static void bs_score_add(request_rec *r, int penalty,
                          int ttl_seconds, const char *reason);
 
-/* Reputation state carried in the cookie. Populated fresh on a first-time
- * challenge (all zeros), and merged forward with forgiveness on re-issues.
- *
- * E15 — forgiveness cap per window. `forgive_window_start`
- * marks the start of the current rolling hour (unix sec); on every
- * verify-success we either roll the window if the prior one is over an
- * hour old, or clamp the new forgiveness so the running consumed total
- * stays at or below BotShieldForgivenessCapPerHour. The fields ride in
- * the cookie envelope (one bump of BS_PROTOCOL_VERSION) so the cap
- * survives across cookie re-issues but doesn't survive a deliberate
- * cookie drop — by design, since dropping the cookie also drops the
- * accumulated rep that forgiveness was meant to whittle down. */
-typedef struct {
-    int         score;
-    apr_uint32_t flags;
-    int         passes_silent;
-    int         passes_form;
-    int         passes_captcha;
-    apr_time_t  challenged_at;        /* unix sec */
-    apr_uint32_t forgive_window_start; /* unix sec; 0 = no window yet */
-    apr_uint32_t forgive_consumed;     /* points used inside current window */
-} bs_rep_state;
 
-typedef struct {
-    int          version;
-    const char  *alg_name;              /* points into registry */
-    unsigned char salt [BS_SALT_BYTES];
-    unsigned char nonce[BS_NONCE_BYTES];
-    int          difficulty;
-    apr_time_t   expires_at;            /* unix seconds */
-    bs_rep_state rep;                   /* carried forward across re-issues */
-    int          auto_tier;             /* 1 = silent M7 auto-submit; 0 = form */
-    unsigned char signature[BS_SIG_BYTES];
-} bs_challenge;
-
-typedef const char *(*bs_alg_issue_fn)(const bs_dir_cfg *cfg,
-                                       bs_challenge *out);
-typedef const char *(*bs_alg_verify_fn)(const bs_challenge *ch,
-                                        const char *counter_str);
-
-typedef struct {
-    const char       *name;
-    int               implemented;   /* 1 = callable, 0 = reserved */
-    bs_alg_issue_fn   issue;
-    bs_alg_verify_fn  verify;
-} bs_pow_algorithm;
-
-typedef struct bs_captcha_provider bs_captcha_provider;
-
-/* Captcha result (moved up here so the siteverify fn pointer can use it). */
-typedef enum {
-    BS_CAPTCHA_OK       = 0,
-    BS_CAPTCHA_REJECTED = 1,
-    BS_CAPTCHA_TIMEOUT  = 2,
-    BS_CAPTCHA_ERROR    = 3
-} bs_captcha_result;
-
-/* Provider-specific siteverify function. NULL on the provider row means
- * "use the shared secret/response/remoteip POST + json-c parse path."
- * Providers whose verify protocol diverges materially from the
- * Google-family contract (GeeTest: HMAC-signed fields, non-bool result
- * semantics, JSON blob as the client-side token) set this to their own
- * function instead. Same signature and same out-params as the default
- * path so the caller is agnostic. */
-typedef bs_captcha_result (*bs_captcha_siteverify_fn)(
-    request_rec *r,
-    const bs_captcha_provider *prov,
-    const unsigned char *secret, apr_size_t secret_len,
-    const char *token, int timeout_ms,
-    /* Optional operator-supplied CA bundle path. NULL = libcurl
-     * default. */
-    const char *ca_bundle,
-    const char **out_details,
-    long *out_http_code,
-    double *out_score,
-    /* Binding-metadata out-params. NULL is a legal value and means
-     * "provider didn't return this field" — a valid signal (e.g.
-     * GeeTest doesn't expose hostname/action over the wire because
-     * its binding is HMAC-signed at request time). Callers only
-     * compare when non-NULL. */
-    const char **out_hostname,
-    const char **out_action);
-
-/* Captcha provider (M8). One entry per third-party provider we can
- * route to at the captcha tier. `implemented` mirrors bs_pow_algorithm.
- *
- * For the Google-family providers (Turnstile, hCaptcha, reCAPTCHA v2/v3,
- * Friendly Captcha), `siteverify_fn` is NULL and the shared default
- * path POSTs a body of the form
- *   secret=<secret>&<siteverify_field>=<token>&remoteip=<ip>
- * where `siteverify_field` defaults to "response" (Turnstile / hCaptcha /
- * reCAPTCHA family) or is set to e.g. "solution" (Friendly Captcha).
- *
- * For providers whose verify protocol doesn't fit that shape (GeeTest),
- * `siteverify_fn` is set to a provider-specific function and the rest
- * of the registry row is informational — the fn decides how to use it.
- *
- * `token_field` is the name of the hidden form input the interstitial
- * emits to carry the client's token to our verify endpoint.
- *
- * `widget_script_url` is the async script tag the interstitial embeds;
- * `widget_class` is the CSS class on the container div the provider's
- * script looks for (empty for providers with programmatic init). */
-struct bs_captcha_provider {
-    const char *name;
-    int         implemented;
-    const char *siteverify_url;
-    const char *token_field;
-    const char *widget_script_url;
-    const char *widget_class;
-    const char *siteverify_field;          /* NULL → "response" */
-    bs_captcha_siteverify_fn siteverify_fn; /* NULL → shared path */
-};
 
 /* --- Flagged-IP bitmap and scoring ---
  *
@@ -350,45 +208,6 @@ enum bs_help_mode {
 #define BS_PENALTY_MISSING_AL     15
 #define BS_PENALTY_SCRAPER_UA     50
 
-typedef enum {
-    BS_TIER_PASS    = 0,
-    BS_TIER_SILENT  = 1,
-    BS_TIER_HARD    = 2,
-    BS_TIER_CAPTCHA = 3
-} bs_tier;
-
-/* E17 PoC — what flavor of silent-tier dispatch to use. INTERSTITIAL
- * is the legacy M7 splash that auto-submits the PoW. EMBEDDED hands
- * off to a wrapper script the operator has already included on the
- * page; the page serves DECLINED (real content) and the wrapper does
- * the PoW in a Web Worker, then POSTs back to /botshield/embedded-
- * verify to mint _bs_verified. The "kicks in eventually" model: the
- * cookie may not be set in time for the very first request, but it
- * lands within a few page-views and from then on the client is
- * verified. */
-typedef enum {
-    BS_SILENT_MODE_UNSET        = -1,
-    BS_SILENT_MODE_INTERSTITIAL =  0,   /* default; M7 splash */
-    BS_SILENT_MODE_EMBEDDED     =  1    /* E17 background verify */
-} bs_silent_mode;
-
-typedef struct {
-    int         penalty;
-    int         ttl_seconds;   /* accepted for API stability; unused today
-                                * (bs_score_add stores it but downstream
-                                * consumers haven't materialized — the
-                                * flagged-IP table carries its own TTL
-                                * set at insert). Kept so callers can
-                                * annotate "this penalty represents an
-                                * N-second-worth signal" without the
-                                * API churning if we ever wire it up. */
-    const char *reason;        /* static string or r->pool-allocated */
-} bs_score_entry;
-
-typedef struct {
-    int                 total;
-    apr_array_header_t *entries;
-} bs_request_score;
 
 /* Default help panel content. HTML allowed because the string is emitted
  * directly into the panel; admins override via BotShieldHelpFile. */
@@ -412,299 +231,7 @@ static const char BS_DEFAULT_LOGO_SVG[] =
 "stroke-width=\"5.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>"
 "</svg>";
 
-struct bs_dir_cfg {
-    int enabled;
-    int debug;
-    int cookie_ttl;
-    int difficulty;
-    int help_mode;              /* BS_HELP_* or BS_UNSET */
-    int show_logo;              /* 0 = hide brand column, 1 = show, -1 = inherit */
-    int show_label;             /* 0 = hide prompt text, 1 = show, -1 = inherit */
-    int show_box;               /* 0 = no bounding box, 1 = boxed, -1 = inherit */
-    const char *prompt;         /* e.g. "I'm not a robot" */
-    const char *logo_svg;       /* full SVG content, loaded at config time */
-    const char *logo_label;     /* small caption under the logo */
-    const char *help_html;      /* panel content, loaded at config time */
-    const char *challenge_html; /* full HTML page template with marker */
-    const bs_pow_algorithm *algorithm;      /* chosen issue algorithm */
-    const unsigned char    *secret;         /* master key bytes */
-    apr_size_t              secret_len;     /* master key length */
-    /* E16 — verify-only secondary secret for graceful
-     * rotation. Issue path always uses `secret`; verify tries
-     * `secret` first and falls back to `secret_secondary` so cookies
-     * minted under the old key keep validating during a rotation
-     * window. NULL = no rotation in progress. */
-    const unsigned char    *secret_secondary;
-    apr_size_t              secret_secondary_len;
-    /* Security review LOW #3 — HKDF-Expand'd per-purpose keys
-     * derived once at config-load time (bs_set_secret_file etc.).
-     * Each purpose tag yields a cryptographically-independent key:
-     * leaking one tells an attacker nothing about the others.
-     * `derived_*_keys_set` is 1 once the master is loaded and
-     * derivation succeeded; the request path checks it before use. */
-    unsigned char    derived_gcm_cookie     [32];
-    unsigned char    derived_hmac_pending   [32];
-    /* MEDIUM #2 — separate purpose key for the bootstrap → verify
-     * IP-binding HMAC. Kept distinct from the cookie key so the
-     * bound-ip signature can't be repurposed against the cookie or
-     * vice versa. */
-    unsigned char    derived_hmac_bootstrap [32];
-    int              derived_keys_set;
-    /* Same for the secondary key, populated when
-     * BotShieldSecondarySecretFile is configured. */
-    unsigned char    derived_gcm_cookie_2   [32];
-    unsigned char    derived_hmac_pending_2 [32];
-    unsigned char    derived_hmac_bootstrap_2[32];
-    int              derived_keys_set_2;
-    int score_silent;           /* score >= this → silent tier (logged only) */
-    int score_hard;             /* score >= this → hard form-PoW tier */
-    int score_captcha;          /* score >= this → captcha tier */
-    /* E17 PoC — what flavor of silent-tier challenge to issue. Stored
-     * as a tri-state with UNSET sentinel so the merge picks the
-     * right scope's value. */
-    int silent_mode;            /* bs_silent_mode; UNSET inherits */
-    /* E18 — inline form captcha. When 1, this scope's POST handler
-     * inspects the request body (url-encoded only in v1) for the
-     * configured captcha provider's response field, siteverifies
-     * via the existing M8 path, mints _bs_verified on success, 403s
-     * on failure. -1 = inherit, 0 = off, 1 = on. */
-    int form_captcha;           /* tri-state */
-    int forgive_silent;         /* score credit on silent-tier pass */
-    int forgive_form;           /* score credit on form-tier pass */
-    int forgive_captcha;        /* score credit on captcha pass */
-    const char *cookie_domain;  /* if set, Set-Cookie Domain= attribute */
-    apr_uint32_t flag_on_match; /* BotShieldFlagIP: bits to add on any hit */
-    int          flag_on_match_ttl;  /* entry TTL when flag_on_match fires */
-    /* --- Captcha tier (M8) --- */
-    const char *endpoint_prefix;            /* default "/botshield" */
-    const bs_captcha_provider *captcha_provider;  /* NULL = tier unused */
-    const char *captcha_site_key;           /* provider-public */
-    const unsigned char *captcha_secret;    /* file bytes, mode-600 */
-    apr_size_t  captcha_secret_len;
-    int         captcha_timeout_ms;         /* siteverify HTTP timeout */
-    /* Security review LOW #13 — connect-phase timeout. Default
-     * BS_CAPTCHA_CONNECT_TIMEOUT (250 ms) is fine for healthy
-     * networks but operators on transient-loss links want headroom. */
-    int         captcha_connect_timeout_ms;
-    /* reCAPTCHA v3: minimum score to accept, in [0.0, 1.0]. -1.0 = unset. */
-    double      recaptcha_v3_min_score;
-    /* M8.1 per-scope verify-endpoint rate limit. -1 unset, 0 disables. */
-    int         captcha_rate_limit;
-    /* Security review findings: binding-metadata validation on the
-     * siteverify response. NULL = use a runtime default
-     * (server_hostname, "botshield"); empty string = skip the check
-     * (operator opted out). Turnstile + reCAPTCHA v2/v3 + hCaptcha
-     * return `hostname`; reCAPTCHA v3 + Turnstile also return
-     * `action`. Without these checks, a valid token for the same
-     * sitekey but a different action or a different origin would
-     * satisfy the verify handler. */
-    const char *captcha_expected_hostname;
-    const char *captcha_expected_action;
-    /* Optional CA bundle for siteverify TLS. NULL = libcurl's
-     * compiled-in default (typically the system bundle). Operators
-     * on stripped-down container images without `ca-certificates`
-     * installed need to point this at the bundle they ship; without
-     * it every siteverify hits CURLE_PEER_FAILED_VERIFICATION and
-     * the captcha tier silently fails-open. */
-    const char *captcha_ca_bundle;
-};
 
-/* E2.2 — robots.txt state bundle. One of these per active parse;
- * swapped atomically by the refresh watchdog. The owning subpool
- * (`pool`) is a child of pconf and is destroyed when this bundle is
- * finally retired — one refresh cycle after being displaced — so
- * request-path readers holding pointers into doc's pool never see
- * freed memory. `slot_by_group_idx` maps each group index in doc to
- * its SHM rate-counter slot, or -1 for groups without a Crawl-delay
- * (or for which the slot pool was exhausted). */
-typedef struct bs_robots_state {
-    robots_doc    *doc;
-    apr_pool_t    *pool;              /* owns doc; sized for one doc */
-    apr_time_t     mtime;              /* source file mtime when parsed */
-    int           *slot_by_group_idx;  /* length = robots_group_count(doc) */
-} bs_robots_state;
-
-/* Per-server config — holds SHM sizing before post-config runs. Only the
- * main server's values are consulted; vhost-level overrides are logged
- * and ignored because the SHM segment is global. */
-typedef struct bs_server_cfg {
-    apr_size_t  shm_size;
-    int         flagged_capacity;
-    int         ipv6_prefix_bits;   /* 0..128; 64 = per-subscriber v6 key */
-    int         bloom_ips;          /* expected working-set size */
-    int         bloom_window_secs;  /* full window; rotation at window/2 */
-    const char *state_file;         /* NULL = persistence off */
-    int         state_save_interval;/* seconds; 0 = shutdown-only */
-    int         captcha_max_inflight;  /* M8.1: cap on outstanding siteverifies */
-    /* E1 — verified legit-crawler allow-list. State loaded in
-     * post_config and read-only thereafter; lives at server scope
-     * because the UA classifier + CIDR lists are global, not per-
-     * directory. */
-    int          allow_enabled;         /* master gate, default 0 */
-    void        *bot_classifier;       /* bs_ua_classifier *, opaque here */
-    apr_hash_t  *bot_ranges;           /* name → apr_array_header_t of apr_ipsubnet_t* */
-    apr_hash_t *allow_bots;         /* name → bs_allow_bot_entry * (directive-defined) */
-    /* E2.1 — policy enforcement (rate limit + path block). Ordered
-     * arrays of entry pointers. Precedence at request time is
-     * declaration order (first match wins). Upsert-by-name at
-     * config time — re-declaring the same name replaces the entry
-     * in place, preserving its position so operators can override
-     * a rule without disturbing relative order of the others. */
-    apr_array_header_t *rate_limits;   /* bs_rate_limit_entry * */
-    /* E9 — repeated-429 escalation. One entry per
-     * BotShieldRateLimitEscalate directive; each one references an
-     * existing rate_limits rule by name. Linked into the matching
-     * bs_rate_limit_entry::escalate at post_config. */
-    apr_array_header_t *rate_escalates; /* bs_rate_escalate_entry * */
-    /* Strike-table capacity (operator-tunable). Read at post_config
-     * from the main server's scfg, same convention as flagged_capacity. */
-    int                 strike_capacity;
-    /* E10 — safeguard config. All server-scope so the single SHM
-     * table is consistently sized. `safeguard_enabled=-1` is the
-     * unset sentinel; merge picks add's value if set, else base's. */
-    int                 safeguard_enabled;      /* -1 unset, 0 off, 1 on */
-    int                 safeguard_threshold;    /* 0 = inherit / default */
-    int                 safeguard_window;       /* seconds; 0 = default */
-    int                 safeguard_ttl;          /* seconds; 0 = default */
-    int                 safeguard_capacity;     /* 0 = default */
-    /* MEDIUM #2 (Phase 2) — embedded nonce table sizing. 0 = default. */
-    int                 nonce_capacity;
-    /* E11 — load-aware throttling. All server-scope; the cached
-     * state and watchdog are module-global. */
-    const char         *load_state_file;        /* NULL = no external file */
-    int                 load_refresh_sec;       /* watchdog tick; 0 = default */
-    int                 load_warm_pct;          /* busy-ratio % for warm; 0 = default */
-    int                 load_hot_pct;           /* busy-ratio % for hot; 0 = default */
-    int                 load_warm_rise;         /* hysteresis; 0 = default */
-    int                 load_hot_rise;          /* hysteresis; 0 = default */
-    int                 load_normal_fall;       /* hysteresis; 0 = default */
-    /* Tick-private: last successfully read external state and the
-     * mtime that produced it. Stored on scfg (not SHM) because the
-     * watchdog runs single-threaded per server; no contention. */
-    bs_load_state       load_external_cached;
-    apr_time_t          load_external_mtime;
-    /* E12 — global shadow mode. -1 unset (merge picks parent's
-     * value), 0 off, 1 on. When on, ALL trigger / rate-limit /
-     * block-path rules behave as if mode=observe regardless of
-     * their per-rule setting. Operator's panic-revert switch. */
-    int                 shadow_mode;
-    /* E13 — reputation namespace for SHM-backed state (flagged-IP,
-     * strike, safeguard, Bloom). Derived at post_config: explicit
-     * BotShieldShareScope token wins; otherwise siphash(ServerName)
-     * truncated to u32. ns_id == 0 means "global default
-     * namespace" — used as a graceful fallback when ServerName is
-     * unset (rare but legal). Lookups in the SHM tables match on
-     * (ip, ns_id) so different namespaces stop sharing reputation
-     * even though they live in the same physical SHM segment.
-     *
-     * Default semantic: each vhost auto-isolates by ServerName.
-     * Operators wanting two vhosts to share state set the same
-     * BotShieldShareScope token on both; same string → same
-     * ns_id → shared rows. */
-    apr_uint32_t        ns_id;            /* effective; resolved post_config */
-    const char         *share_scope_token; /* explicit override; NULL = default */
-    /* E15 — per-cookie hourly forgiveness cap. 0 =
-     * inherit / use BS_DEFAULT_FORGIVE_CAP_PER_HOUR. Operators set
-     * this at server scope to bound forgiveness-farming. */
-    int                 forgive_cap_per_hour;
-    apr_array_header_t *block_paths;   /* bs_block_path_entry * */
-    /* E3 — path-based triggers. Same ordered-array + upsert-by-name
-     * shape as E2.1; first match wins at request time. */
-    apr_array_header_t *path_triggers; /* bs_path_trigger_entry * */
-    /* E4 — cookie triggers. Same ordered-array + upsert-by-name
-     * shape as E3. `session_names` is the list of cookie names
-     * that `cookies=session` matches against — seeded with common
-     * framework defaults at config creation, extended via
-     * BotShieldSessionCookieName. Lowercased at add time for
-     * cheap case-insensitive compare at request time. */
-    apr_array_header_t *cookie_triggers;   /* bs_cookie_trigger_entry * */
-    /* E6 — env-var triggers. Same ordered-array + upsert-by-name
-     * shape as E3/E4. Precedence: declaration order, first match
-     * wins (no accumulation); env signals are discrete per-request,
-     * not layered reputation. */
-    apr_array_header_t *env_triggers;      /* bs_env_trigger_entry * */
-    /* E7.3 — feedback triggers. Signed event names from E5's
-     * response-path header map to module memory (flag+ttl+log) via
-     * these entries. Same ordered-array + upsert-by-name shape. */
-    apr_array_header_t *feedback_triggers; /* bs_feedback_trigger_entry * */
-    /* E11.2 — load triggers. Same ordered-array shape; predicate
-     * matches against the global cached load_state (E11.1). */
-    apr_array_header_t *load_triggers;     /* bs_load_trigger_entry * */
-    /* E14 (rework) — flag triggers. One entry per
-     * BotShieldFlagTrigger directive (operator) or compiled-in
-     * default. Walked on every request after flag bits are known
-     * but before tier decision; SUM the score actions, MAX the
-     * tier_floor actions. Compiled-in defaults are seeded at
-     * post_config so the module Just Works with zero config. */
-    apr_array_header_t *flag_triggers;     /* bs_flag_trigger_entry * */
-    apr_array_header_t *session_names;     /* const char * (lowercased) */
-    /* E2.2 — robots.txt enforcement.
-     *
-     * `robots` is the active state bundle (parsed doc + owning
-     * subpool + per-group SHM slot indices + source-file mtime) —
-     * atomically swappable by the refresh watchdog without quiescing
-     * the hot path. NULL until post_config successfully loads the
-     * file.
-     *
-     * `robots_pending` holds the previously-active bundle for one
-     * refresh cycle, then is destroyed at the next refresh. This
-     * gives request-path readers at least one refresh interval to
-     * finish using an old doc before its pool is reclaimed; with
-     * refresh_interval >> max request duration the window is ample.
-     *
-     * `robots_slot_by_name` is a name → (int*) SHM-slot map
-     * populated at post_config and updated (but not shrunk) by each
-     * refresh. Keying by group name (not index) means unchanged
-     * groups keep their rate-counter state across refreshes —
-     * operators expect that rewriting robots.txt doesn't reset
-     * Crawl-delay windows for crawlers whose entry didn't change.
-     * The slot pool itself is reserved from bs_shm.rate_counters at
-     * post_config; robots_slot_pool_base/size bound it and
-     * robots_slot_pool_used tracks allocation. */
-    const char         *robots_txt_path;
-    int                 robots_wildcard_scope;       /* enum below */
-    bs_robots_state    *robots;                      /* active bundle, atomic */
-    bs_robots_state    *robots_pending;              /* awaits destruction */
-    apr_hash_t         *robots_slot_by_name;         /* name → int * */
-    int                 robots_slot_pool_base;       /* first reserved slot */
-    int                 robots_slot_pool_size;       /* pool capacity */
-    int                 robots_slot_pool_used;       /* slots assigned so far */
-    int                 robots_refresh_interval;     /* seconds; 0 = off */
-    /* E5 — app-to-module reputation feedback. Enabled gates the
-     * parse/validate path; stripping the header always runs when
-     * enabled=-1 (unset) or enabled=0 so a misconfigured app can
-     * never leak the header to clients. Header name + secret are
-     * per-scope. Secret bytes are loaded from the secret file at
-     * post_config. */
-    int                 app_feedback_enabled;        /* -1 unset, 0 off, 1 on */
-    const char         *app_feedback_header;         /* default "X-BotShield-Feedback" */
-    /* E8.2 — module-to-app reputation export. The module sets a
-     * single X-Botshield-Claims request header on the way to the
-     * backend handler, having first stripped any client-supplied
-     * X-Botshield-* (the strip is the trust anchor for apps that
-     * skip HMAC verification). */
-    int                 app_claims_enabled;          /* -1 unset, 0 off, 1 on */
-    /* Single shared HMAC key for both directions of app integration
-     * (feedback envelopes inbound + claims headers outbound). The
-     * two protocols' canonical forms are structurally distinct
-     * (feedback HMACs `event=<name>` only; claims HMAC seven
-     * semicolon-fields with a fixed `v=1` lead) so cross-replay is
-     * not possible — one key with parser-provided domain separation
-     * is sufficient. NULL = no key configured. */
-    const char         *app_integration_secret_file;
-    const unsigned char *app_integration_secret;
-    apr_size_t          app_integration_secret_len;
-} bs_server_cfg;
-
-#define BS_APP_FEEDBACK_UNSET  (-1)
-#define BS_APP_FEEDBACK_DEFAULT_HEADER  "X-BotShield-Feedback"
-
-enum bs_robots_wildcard_scope {
-    BS_ROBOTS_WILDCARD_UNSET     = -1,  /* directive not given at this scope */
-    BS_ROBOTS_WILDCARD_HEURISTIC = 0,   /* default: crawler-candidate test */
-    BS_ROBOTS_WILDCARD_STRICT    = 1,   /* apply * rules to all UAs */
-    BS_ROBOTS_WILDCARD_OFF       = 2,   /* ignore * groups entirely */
-};
 
 /* Sentinel for robots_refresh_interval: the directive hasn't been
  * given at this scope. At post_config time this resolves to
@@ -1545,13 +1072,6 @@ static const char *bs_load_config_file(cmd_parms *cmd,
     return NULL;
 }
 
-/* Forward decl — bs_hkdf_derive_key is defined alongside the other
- * crypto helpers further below. */
-static int bs_hkdf_derive_key(const unsigned char *master,
-                              apr_size_t master_len,
-                              const char *info,
-                              unsigned char out_key[32]);
-
 /* Security review LOW #3 — derive the per-purpose keys for a master
  * secret. Called from the secret-file directive setters AFTER the
  * key bytes have been validated. Returns NULL on success; on
@@ -1665,227 +1185,8 @@ static const char *bs_set_challenge_file(cmd_parms *cmd, void *cfg_v, const char
 }
 
 /* ======================================================================
- * Crypto helpers, challenge struct, algorithm registry, issue/verify.
+ * Challenge struct, algorithm registry, issue/verify.
  * ====================================================================== */
-
-/* --- Low-level crypto wrappers --- */
-
-#define BS_SHA256_LEN 32
-
-static void bs_sha256(const unsigned char *data, apr_size_t len,
-                      unsigned char out[BS_SHA256_LEN])
-{
-    unsigned int outlen = BS_SHA256_LEN;
-    EVP_Digest(data, (size_t)len, out, &outlen, EVP_sha256(), NULL);
-}
-
-static void bs_hmac_sha256(const unsigned char *key, apr_size_t keylen,
-                           const unsigned char *data, apr_size_t datalen,
-                           unsigned char out[BS_SIG_BYTES])
-{
-    unsigned int outlen = BS_SIG_BYTES;
-    HMAC(EVP_sha256(), key, (int)keylen, data, datalen, out, &outlen);
-}
-
-/* Constant-time equality. Returns 1 on equal, 0 on not. */
-static int bs_ct_equal(const unsigned char *a, const unsigned char *b,
-                       apr_size_t len)
-{
-    unsigned char diff = 0;
-    for (apr_size_t i = 0; i < len; i++) diff |= a[i] ^ b[i];
-    return diff == 0;
-}
-
-/* Security review LOW #3 — HKDF-Expand for per-purpose key
- * derivation. RFC 5869. Replaces the prior `SHA256(secret)` ad-hoc
- * derivation with a cryptographically clean per-purpose key model:
- *
- *   key_for_X = HKDF(secret, info="bs:X:v1")
- *
- * Each purpose gets its own derived key. Leaking one (cryptanalysis,
- * side-channel, key extraction from memory) tells an attacker
- * nothing about the others — the HMAC-based extract+expand
- * construction is one-way per purpose-tag.
- *
- * Called once at config-load time per secret/purpose; the derived
- * keys live in dir_cfg and the request path uses them directly with
- * zero per-request HKDF cost.
- *
- * Returns 0 on OpenSSL failure (vanishingly unlikely; treats as
- * fatal in caller — module won't start). */
-static int bs_hkdf_derive_key(const unsigned char *master,
-                              apr_size_t master_len,
-                              const char *info,
-                              unsigned char out_key[32])
-{
-    EVP_KDF *kdf = EVP_KDF_fetch(NULL, "HKDF", NULL);
-    if (!kdf) return 0;
-    EVP_KDF_CTX *ctx = EVP_KDF_CTX_new(kdf);
-    EVP_KDF_free(kdf);
-    if (!ctx) return 0;
-    OSSL_PARAM params[5];
-    int i = 0;
-    params[i++] = OSSL_PARAM_construct_utf8_string("digest",
-                                                   "SHA256", 0);
-    params[i++] = OSSL_PARAM_construct_octet_string("key",
-                                                    (void *)master,
-                                                    master_len);
-    /* Empty salt: HKDF-Extract degenerates to HMAC(zeros, secret).
-     * The per-purpose info tag below provides domain separation. */
-    params[i++] = OSSL_PARAM_construct_octet_string("salt",
-                                                    (void *)"", 0);
-    params[i++] = OSSL_PARAM_construct_octet_string("info",
-                                                    (void *)info,
-                                                    strlen(info));
-    params[i] = OSSL_PARAM_construct_end();
-    int rc = EVP_KDF_derive(ctx, out_key, 32, params);
-    EVP_KDF_CTX_free(ctx);
-    return rc == 1;
-}
-
-/* AES-256-GCM encrypt. Wire layout:
- *     alg_id(1) || nonce(12) || ciphertext || tag(16)
- * The alg_id byte is the only AAD — authenticates the primitive
- * choice so an attacker can't swap 0x01 for (say) 0x02 and drive
- * the verifier into a different algorithm's parse.
- *
- * On success: writes the full envelope into *out_buf (caller-
- * provided, must be at least 1 + 12 + pt_len + 16 bytes), writes
- * the envelope length into *out_len, returns NULL.
- * On failure: returns an error string for logging; *out_len
- * untouched. */
-static const char *bs_gcm_encrypt(const unsigned char aes_key[32],
-                                  const unsigned char *pt,
-                                  apr_size_t pt_len,
-                                  unsigned char *out_buf,
-                                  apr_size_t *out_len)
-{
-    /* LOW #3 — caller passes the HKDF-derived AES key directly;
-     * we no longer derive per-call. */
-    const unsigned char *key = aes_key;
-
-    out_buf[0] = BS_COOKIE_ALG_GCM;
-    if (RAND_bytes(out_buf + 1, BS_GCM_NONCE_LEN) != 1) {
-        return "RAND_bytes(gcm_nonce)";
-    }
-    unsigned char *nonce = out_buf + 1;
-    unsigned char *ct    = out_buf + 1 + BS_GCM_NONCE_LEN;
-    unsigned char *tag   = ct + pt_len;
-
-    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) return "EVP_CIPHER_CTX_new";
-    const char *err = NULL;
-    int outlen = 0, finallen = 0, aadlen = 0;
-
-    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1) {
-        err = "EVP_EncryptInit_ex(aes_256_gcm)"; goto done;
-    }
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN,
-                            BS_GCM_NONCE_LEN, NULL) != 1) {
-        err = "EVP_CIPHER_CTX_ctrl(SET_IVLEN)"; goto done;
-    }
-    if (EVP_EncryptInit_ex(ctx, NULL, NULL, key, nonce) != 1) {
-        err = "EVP_EncryptInit_ex(key+nonce)"; goto done;
-    }
-    if (EVP_EncryptUpdate(ctx, NULL, &aadlen, out_buf, 1) != 1) {
-        err = "EVP_EncryptUpdate(AAD)"; goto done;
-    }
-    if (pt_len > 0) {
-        if (EVP_EncryptUpdate(ctx, ct, &outlen, pt, (int)pt_len) != 1) {
-            err = "EVP_EncryptUpdate(pt)"; goto done;
-        }
-    }
-    if (EVP_EncryptFinal_ex(ctx, ct + outlen, &finallen) != 1) {
-        err = "EVP_EncryptFinal_ex"; goto done;
-    }
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG,
-                            BS_GCM_TAG_LEN, tag) != 1) {
-        err = "EVP_CIPHER_CTX_ctrl(GET_TAG)"; goto done;
-    }
-    *out_len = 1 + BS_GCM_NONCE_LEN + pt_len + BS_GCM_TAG_LEN;
-
-done:
-    EVP_CIPHER_CTX_free(ctx);
-    /* LOW #3 — `key` now points at caller-owned memory (cfg-cached
-     * derived key); the caller's pool cleanup will OPENSSL_cleanse
-     * when the cfg is destroyed. Don't cleanse a borrowed buffer. */
-    return err;
-}
-
-/* AES-256-GCM decrypt. Expects the full envelope
- *     alg_id(1) || nonce(12) || ciphertext || tag(16)
- * Returns NULL on success (tag verified) with plaintext written
- * into *out_pt (caller-provided, must be at least env_len - 1 - 12
- * - 16 bytes) and the plaintext length in *out_pt_len. Returns an
- * error string on any failure including tag-mismatch. */
-static const char *bs_gcm_decrypt(const unsigned char aes_key[32],
-                                  const unsigned char *env,
-                                  apr_size_t env_len,
-                                  unsigned char *out_pt,
-                                  apr_size_t *out_pt_len)
-{
-    if (env_len < (apr_size_t)(1 + BS_GCM_NONCE_LEN + BS_GCM_TAG_LEN)) {
-        return "envelope too short";
-    }
-    if (env[0] != BS_COOKIE_ALG_GCM) return "unknown alg_id";
-
-    apr_size_t ct_len = env_len - 1 - BS_GCM_NONCE_LEN - BS_GCM_TAG_LEN;
-    const unsigned char *nonce = env + 1;
-    const unsigned char *ct    = env + 1 + BS_GCM_NONCE_LEN;
-    const unsigned char *tag   = ct + ct_len;
-
-    /* LOW #3 — caller passes the HKDF-derived AES key directly. */
-    const unsigned char *key = aes_key;
-
-    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) return "EVP_CIPHER_CTX_new";
-    const char *err = NULL;
-    int outlen = 0, finallen = 0, aadlen = 0;
-
-    if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1) {
-        err = "EVP_DecryptInit_ex(aes_256_gcm)"; goto done;
-    }
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN,
-                            BS_GCM_NONCE_LEN, NULL) != 1) {
-        err = "EVP_CIPHER_CTX_ctrl(SET_IVLEN)"; goto done;
-    }
-    if (EVP_DecryptInit_ex(ctx, NULL, NULL, key, nonce) != 1) {
-        err = "EVP_DecryptInit_ex(key+nonce)"; goto done;
-    }
-    if (EVP_DecryptUpdate(ctx, NULL, &aadlen, env, 1) != 1) {
-        err = "EVP_DecryptUpdate(AAD)"; goto done;
-    }
-    if (ct_len > 0) {
-        if (EVP_DecryptUpdate(ctx, out_pt, &outlen, ct, (int)ct_len) != 1) {
-            err = "EVP_DecryptUpdate(ct)"; goto done;
-        }
-    }
-    /* Set expected tag BEFORE Final — required by EVP's GCM contract. */
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG,
-                            BS_GCM_TAG_LEN, (void *)tag) != 1) {
-        err = "EVP_CIPHER_CTX_ctrl(SET_TAG)"; goto done;
-    }
-    if (EVP_DecryptFinal_ex(ctx, out_pt + outlen, &finallen) != 1) {
-        err = "gcm tag verification failed"; goto done;
-    }
-    *out_pt_len = (apr_size_t)(outlen + finallen);
-
-done:
-    EVP_CIPHER_CTX_free(ctx);
-    /* LOW #3 — borrowed key, see encrypt path comment. */
-    return err;
-}
-
-/* Hex helpers. Writes 2*len chars + NUL. */
-static void bs_to_hex(const unsigned char *in, apr_size_t len, char *out)
-{
-    static const char H[] = "0123456789abcdef";
-    for (apr_size_t i = 0; i < len; i++) {
-        out[i*2]   = H[(in[i] >> 4) & 0xF];
-        out[i*2+1] = H[in[i] & 0xF];
-    }
-    out[len*2] = '\0';
-}
 
 /* Bounded integer parser for pre-HMAC cookie fields (security review
  * #2). atoi() and strtoul(..., NULL, 10) both invoke undefined
@@ -1962,36 +1263,6 @@ static int bs_parse_int64_bounded(const char *s,
     return 1;
 }
 
-/* Decode `in_len` hex characters from `in` into `out_len` bytes at
- * `out`. Returns 1 on success, 0 on any of:
- *   - in_len < 2 * out_len  (input too short to fully decode)
- *   - any non-[0-9a-fA-F] byte in the consumed prefix
- *
- * The in_len parameter is defense-in-depth: every existing caller
- * verifies the input length before calling (e.g.
- * `if (strlen(hex) != 32) return "bad nonce hex"`), but checking
- * inside the function makes the contract explicit and prevents a
- * future caller from forgetting the length check and reading past
- * the buffer. */
-static int bs_from_hex(const char *in, apr_size_t in_len,
-                       apr_size_t out_len, unsigned char *out)
-{
-    if (in_len < out_len * 2) return 0;
-    for (apr_size_t i = 0; i < out_len; i++) {
-        int hi = -1, lo = -1;
-        char c = in[i*2];
-        if      (c >= '0' && c <= '9') hi = c - '0';
-        else if (c >= 'a' && c <= 'f') hi = c - 'a' + 10;
-        else if (c >= 'A' && c <= 'F') hi = c - 'A' + 10;
-        c = in[i*2+1];
-        if      (c >= '0' && c <= '9') lo = c - '0';
-        else if (c >= 'a' && c <= 'f') lo = c - 'a' + 10;
-        else if (c >= 'A' && c <= 'F') lo = c - 'A' + 10;
-        if (hi < 0 || lo < 0) return 0;
-        out[i] = (unsigned char)((hi << 4) | lo);
-    }
-    return 1;
-}
 
 /* --- Canonical form for HMAC input ---
  *
@@ -2391,344 +1662,6 @@ static int  bs_verify_bootstrap_sig(apr_pool_t *p,
 #define BS_PENALTY_FAKE_BOT  100   /* enough to force captcha tier */
 #define BS_CREDIT_ALLOW       (-1000) /* dominates any other penalty */
 
-/* --- UA classifier: trie with case-insensitive char match --- */
-
-typedef struct bs_ua_trie_child {
-    unsigned char c;                /* lowercased char this edge matches */
-    struct bs_ua_trie_node *node;
-} bs_ua_trie_child;
-
-typedef struct bs_ua_trie_node {
-    bs_ua_trie_child *kids;         /* pool-allocated, grown on insert */
-    int n_kids;
-    int cap_kids;
-    const char *name;               /* non-NULL → terminal (match here) */
-} bs_ua_trie_node;
-
-typedef struct {
-    apr_pool_t *pool;               /* for node allocation */
-    bs_ua_trie_node *root;
-    int n_patterns;                 /* for logging */
-} bs_ua_classifier;
-
-static bs_ua_classifier *bs_ua_classifier_create(apr_pool_t *p)
-{
-    bs_ua_classifier *c = apr_pcalloc(p, sizeof(*c));
-    c->pool = p;
-    c->root = apr_pcalloc(p, sizeof(*c->root));
-    return c;
-}
-
-static bs_ua_trie_node *bs_ua_trie_walk(bs_ua_trie_node *n, unsigned char c)
-{
-    c = (unsigned char)tolower(c);
-    for (int i = 0; i < n->n_kids; i++) {
-        if (n->kids[i].c == c) return n->kids[i].node;
-    }
-    return NULL;
-}
-
-static bs_ua_trie_node *bs_ua_trie_edge_get_or_add(apr_pool_t *p,
-                                                   bs_ua_trie_node *n,
-                                                   unsigned char c)
-{
-    c = (unsigned char)tolower(c);
-    for (int i = 0; i < n->n_kids; i++) {
-        if (n->kids[i].c == c) return n->kids[i].node;
-    }
-    /* Grow children array. Most nodes have 1-3 kids; start at 2, double. */
-    if (n->n_kids == n->cap_kids) {
-        int new_cap = n->cap_kids ? n->cap_kids * 2 : 2;
-        bs_ua_trie_child *nk = apr_palloc(p,
-            (apr_size_t)new_cap * sizeof(*nk));
-        if (n->n_kids > 0) {
-            memcpy(nk, n->kids, (apr_size_t)n->n_kids * sizeof(*nk));
-        }
-        n->kids = nk;
-        n->cap_kids = new_cap;
-    }
-    bs_ua_trie_node *child = apr_pcalloc(p, sizeof(*child));
-    n->kids[n->n_kids].c = c;
-    n->kids[n->n_kids].node = child;
-    n->n_kids++;
-    return child;
-}
-
-/* Register a substring pattern. The pattern matches anywhere in a UA
- * (case-insensitive). Caller owns the memory for `name` — it must
- * outlive the classifier (typically a static string or pool-alloc
- * on the same pool). */
-static apr_status_t bs_ua_classifier_add(bs_ua_classifier *c,
-                                         const char *name,
-                                         const char *pattern)
-{
-    if (!name || !pattern || !*pattern) return APR_EINVAL;
-    bs_ua_trie_node *n = c->root;
-    for (const char *p = pattern; *p; p++) {
-        n = bs_ua_trie_edge_get_or_add(c->pool, n, (unsigned char)*p);
-        if (!n) return APR_ENOMEM;
-    }
-    /* Last-writer-wins on duplicate registration — the operator
-     * probably meant to override. */
-    n->name = name;
-    c->n_patterns++;
-    return APR_SUCCESS;
-}
-
-/* Classify: walk the trie from each position in the UA and return
- * the longest terminal match (across all start positions). Longest-
- * match semantics matter when operators register overlapping patterns
- * — a more specific "CorpBot/Admin" must shadow a generic "CorpBot"
- * so specific overrides do what operators expect.
- *
- * No prefilter: an earlier revision short-circuited on a hardcoded
- * bot/crawl/spider/fetch/slurp token list, but that silently made
- * operator-defined patterns unreachable for UAs that didn't happen
- * to contain one of those tokens. Correctness beats the ~1 µs we'd
- * save on non-bot traffic, and the trie walk is already O(|ua|)
- * with a small constant (most positions die within 1–2 edges
- * because the trie is sparse). */
-static const char *bs_ua_classify(const bs_ua_classifier *c, const char *ua)
-{
-    if (!c || !ua || !*ua) return NULL;
-
-    const char *best_name = NULL;
-    size_t best_len = 0;
-    for (const char *start = ua; *start; start++) {
-        bs_ua_trie_node *n = c->root;
-        size_t len = 0;
-        for (const char *p = start; *p; p++) {
-            n = bs_ua_trie_walk(n, (unsigned char)*p);
-            if (!n) break;
-            len++;
-            if (n->name && len > best_len) {
-                best_name = n->name;
-                best_len  = len;
-            }
-        }
-    }
-    return best_name;
-}
-
-/* --- Bot entry used by the Allow family ---
- *
- * One of these per bot the operator has declared (or a built-in we
- * seed automatically). Lives in scfg->allow_bots keyed by `name`.
- *
- *  path      — explicit ranges-file path, or NULL for the default
- *              (/var/lib/botshield/bots/<name>.txt). Ignored when
- *              `ua_only` is set.
- *  inline_cidrs — comma-separated CIDR list from the directive's
- *              third arg, parsed at post_config; NULL if a path or
- *              UA-only mode is in use instead.
- *  ua_only   — 1 when the directive's third arg was `*`; the bot
- *              is allowed on UA match alone, no IP check. The
- *              decision log distinguishes this with the reason
- *              "allow-bot-ua:<name>" vs "allow-bot:<name>".
- */
-typedef struct {
-    const char *name;
-    const char *pattern;
-    const char *path;
-    const char *inline_cidrs;
-    int         ua_only;
-} bs_allow_bot_entry;
-
-static const bs_allow_bot_entry bs_builtin_bots[] = {
-    { "googlebot", "Googlebot", NULL, NULL, 0 },
-    { "bingbot",   "bingbot",   NULL, NULL, 0 },
-    { "applebot",  "Applebot",  NULL, NULL, 0 },
-    { NULL, NULL, NULL, NULL, 0 }
-};
-
-/* --- CIDR list loader ---
- *
- * Plain-text format, one CIDR per line, # for comments, empty
- * lines OK. Accepts both IPv4 and IPv6. apr_ipsubnet_create parses
- * the CIDR; we hold them in an apr_array_header_t of
- * apr_ipsubnet_t* that the request-time matcher scans.
- *
- * Max file size: 1 MiB. A ranges file that big would mean thousands
- * of CIDRs, which no published provider list approaches; acts as a
- * sanity cap on accidental misconfiguration (pointing at a JSON
- * file, a log, etc.). */
-#define BS_CRAWLER_MAX_RANGES_FILE  (1024 * 1024)
-
-/* Push one CIDR token into the array. Handles the in-place "/mask"
- * split so apr_ipsubnet_create sees a clean (ip, mask) pair.
- * Returns APR_SUCCESS on push, or APR_EINVAL with *out_err set. The
- * token is mutated in place — callers hand in a scratch copy. */
-static apr_status_t bs_allow_push_cidr(apr_pool_t *p,
-                                       apr_array_header_t *arr,
-                                       char *token,
-                                       const char **out_err)
-{
-    /* trim surrounding whitespace */
-    while (*token == ' ' || *token == '\t') token++;
-    apr_size_t l = strlen(token);
-    while (l > 0 && (token[l-1] == ' ' || token[l-1] == '\t')) {
-        token[--l] = '\0';
-    }
-    if (!*token) return APR_SUCCESS;   /* empty token = skip silently */
-
-    char *slash = strchr(token, '/');
-    apr_ipsubnet_t *net = NULL;
-    apr_status_t rv;
-    if (slash) {
-        *slash = '\0';
-        rv = apr_ipsubnet_create(&net, token, slash + 1, p);
-    } else {
-        rv = apr_ipsubnet_create(&net, token, NULL, p);
-    }
-    if (rv != APR_SUCCESS) {
-        char errbuf[256];
-        apr_strerror(rv, errbuf, sizeof(errbuf));
-        *out_err = apr_psprintf(p, "invalid CIDR '%s': %s", token, errbuf);
-        return APR_EINVAL;
-    }
-    APR_ARRAY_PUSH(arr, apr_ipsubnet_t *) = net;
-    return APR_SUCCESS;
-}
-
-/* Parse a comma-separated CIDR list string into an array. Used by
- * BotShieldAllowBot's inline-CIDR mode. APR has no multi-CIDR
- * helper — apr_strtok splits, bs_allow_push_cidr validates each. */
-static apr_status_t bs_allow_load_ranges_from_string(apr_pool_t *p,
-                                                     const char *csv,
-                                                     apr_array_header_t **out,
-                                                     const char **out_err)
-{
-    *out = NULL;
-    *out_err = NULL;
-    if (!csv || !*csv) {
-        *out_err = "empty CIDR list";
-        return APR_EINVAL;
-    }
-    apr_array_header_t *arr =
-        apr_array_make(p, 4, sizeof(apr_ipsubnet_t *));
-    char *scratch = apr_pstrdup(p, csv);
-    char *saveptr = NULL;
-    for (char *tok = apr_strtok(scratch, ",", &saveptr); tok;
-         tok = apr_strtok(NULL, ",", &saveptr)) {
-        apr_status_t rv = bs_allow_push_cidr(p, arr, tok, out_err);
-        if (rv != APR_SUCCESS) return rv;
-    }
-    if (arr->nelts == 0) {
-        *out_err = "no valid CIDRs parsed from inline list";
-        return APR_EINVAL;
-    }
-    *out = arr;
-    return APR_SUCCESS;
-}
-
-static apr_status_t bs_allow_load_ranges(apr_pool_t *p,
-                                           const char *path,
-                                           apr_array_header_t **out,
-                                           const char **out_err)
-{
-    *out = NULL;
-    *out_err = NULL;
-
-    apr_file_t *f = NULL;
-    apr_status_t rv = apr_file_open(&f, path, APR_FOPEN_READ,
-                                    APR_OS_DEFAULT, p);
-    if (rv != APR_SUCCESS) {
-        char errbuf[256];
-        apr_strerror(rv, errbuf, sizeof(errbuf));
-        *out_err = apr_psprintf(p, "cannot open '%s': %s", path, errbuf);
-        return rv;
-    }
-
-    apr_finfo_t fi;
-    rv = apr_file_info_get(&fi, APR_FINFO_SIZE, f);
-    if (rv == APR_SUCCESS && fi.size > BS_CRAWLER_MAX_RANGES_FILE) {
-        apr_file_close(f);
-        *out_err = apr_psprintf(p,
-            "'%s' is %" APR_OFF_T_FMT " bytes — above %d cap",
-            path, fi.size, BS_CRAWLER_MAX_RANGES_FILE);
-        return APR_EINVAL;
-    }
-
-    apr_array_header_t *arr =
-        apr_array_make(p, 32, sizeof(apr_ipsubnet_t *));
-    char line[512];
-    int lineno = 0;
-
-    while (apr_file_gets(line, sizeof(line), f) == APR_SUCCESS) {
-        lineno++;
-        char *s = line;
-        /* trim trailing CR/LF/whitespace */
-        apr_size_t l = strlen(s);
-        while (l > 0 && (s[l-1] == '\n' || s[l-1] == '\r' ||
-                         s[l-1] == ' '  || s[l-1] == '\t')) {
-            s[--l] = '\0';
-        }
-        /* skip leading whitespace */
-        while (*s == ' ' || *s == '\t') s++;
-        /* skip blanks + comments */
-        if (!*s || *s == '#') continue;
-
-        const char *push_err = NULL;
-        rv = bs_allow_push_cidr(p, arr, s, &push_err);
-        if (rv != APR_SUCCESS) {
-            apr_file_close(f);
-            *out_err = apr_psprintf(p,
-                "'%s' line %d: %s", path, lineno,
-                push_err ? push_err : "parse error");
-            return rv;
-        }
-    }
-    apr_file_close(f);
-
-    if (arr->nelts == 0) {
-        *out_err = apr_psprintf(p, "'%s' contained no CIDR entries", path);
-        return APR_EINVAL;
-    }
-
-    *out = arr;
-    return APR_SUCCESS;
-}
-
-/* Test a client IP (from r->useragent_ip) against a loaded CIDR list. */
-static int bs_allow_ip_in_ranges(const apr_array_header_t *ranges,
-                                   request_rec *r)
-{
-    if (!ranges || ranges->nelts == 0) return 0;
-    /* Convert the client IP string into an apr_sockaddr_t that
-     * apr_ipsubnet_test can inspect. The client IP has already been
-     * normalized by mod_remoteip (if wired) — we take it as-is. */
-    const char *ip_str = r->useragent_ip;
-    if (!ip_str || !*ip_str) return 0;
-
-    /* Defense-in-depth: r->useragent_ip should already be a numeric
-     * address (mod_remoteip rewrites it before our hooks run), but
-     * if mod_remoteip is misconfigured or absent a non-numeric
-     * value would otherwise trigger a blocking DNS lookup on the
-     * worker thread inside apr_sockaddr_info_get (5–30 s OS
-     * resolver timeout). Use inet_pton directly to prove the
-     * input is numeric IPv4 or IPv6 before letting APR's parser
-     * see it; if both fail, refuse. apr_sockaddr_info_get
-     * downstream is then guaranteed to short-circuit on the
-     * inet_pton path it does internally — the DNS fallback is
-     * unreachable from this code path by construction. */
-    unsigned char ipv4_probe[4];
-    unsigned char ipv6_probe[16];
-    if (inet_pton(AF_INET, ip_str, ipv4_probe) != 1 &&
-        inet_pton(AF_INET6, ip_str, ipv6_probe) != 1) {
-        return 0;
-    }
-    apr_sockaddr_t *sa = NULL;
-    apr_status_t rv = apr_sockaddr_info_get(&sa, ip_str,
-                                            APR_UNSPEC, 0, 0,
-                                            r->pool);
-    if (rv != APR_SUCCESS || !sa) return 0;
-
-    for (int i = 0; i < ranges->nelts; i++) {
-        apr_ipsubnet_t *net = APR_ARRAY_IDX(ranges, i, apr_ipsubnet_t *);
-        if (apr_ipsubnet_test(net, sa)) return 1;
-    }
-    return 0;
-}
 
 /* --- Request-time entry point ---
  *
@@ -2999,7 +1932,13 @@ typedef struct {
      * mode-specific metric counter — but applies no side effects:
      * no flag-IP, no score, no status/redirect, no log tag side-
      * effect. Operators stage new rules safely and watch the
-     * decision log before turning enforce on. */
+     * decision log before turning enforce on.
+     *
+     * Server-wide counterpart: BotShieldShadowMode forces every
+     * rule to observe regardless of its individual setting.
+     * Combined via OR at the use sites
+     * (`global_shadow || e->mode == BS_TMODE_OBSERVE`) — either
+     * path says observe and the rule runs dry-run. */
     int           mode;           /* bs_trigger_mode */
 } bs_trigger_action;
 
@@ -3021,14 +1960,13 @@ typedef enum {
 
 /* Forward declarations — bs_check_policy (E3 path) calls these; they
  * live alongside their primary users further down the file. */
-static void bs_set_trigger_tag(request_rec *r, const char *tag);
 static int  bs_parse_client_ip(const char *ip_str, unsigned char out[16]);
 static void bs_mask_ipv6_prefix(unsigned char ip[16], int prefix_bits);
 /* E11 — load-state read used by bs_check_policy's load-trigger
  * walk. Declaration here so the walk compiles before the body. */
 static bs_load_state bs_load_current(void);
 /* SHM-table flagged-IP / strike / safeguard helpers all live in
- * botshield_shm.h. */
+ * shm.h. */
 /* Shared action helpers — see definitions below. The server-cfg
  * struct body appears later in the file, so we forward-declare by
  * struct tag and use `struct bs_server_cfg *` in the signature. */
@@ -5501,7 +4439,15 @@ static int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
          * above, so the ns_id is stable for this Apache process
          * but unpredictable across restarts — which is fine since
          * persistence already keys on ns_id and old state files
-         * get rejected on format mismatch. */
+         * get rejected on format mismatch.
+         *
+         * Operator-facing documentation lives in the README's
+         * "Multi-vhost deployments" section: every vhost gets
+         * isolated reputation by default, and operators opt into
+         * sharing reputation across sibling vhosts by setting the
+         * same BotShieldShareScope token on each. Hundreds of
+         * vhosts on one Apache instance share one SHM segment;
+         * the per-slot ns_id is what makes that work. */
         const char *src = NULL;
         if (vcfg->share_scope_token) {
             apr_uint64_t h = bs_siphash24(bs_shm.header->siphash_key,
@@ -9733,277 +8679,6 @@ static const char *bs_log_suppress_suffix(apr_pool_t *p, apr_uint32_t n)
                         n, BS_CAPTCHA_LOG_WINDOW_SEC);
 }
 
-/* ---------- M9.1: structured per-decision log line ----------
- *
- * One machine-parseable line per terminal decision. Emitted alongside
- * the existing human-readable prose lines, not in place of them, so
- * operators tailing the log still see English and M9.2/M9.3 still have
- * a stable contract to count against.
- *
- * Format (keys always in this order; values always present or "-"):
- *
- *   mod_botshield: decision tier=<t> outcome=<o> ip=<i>
- *     score=<n> cookie=<c> provider=<p|-> alg=<a|->
- *     reason="<r|->" path="<u>"
- *
- * Enum values (see PLAN.md M9.1):
- *   tier     = none | pass | silent | form | captcha
- *   outcome  = declined | challenged | verified | rejected | failopen
- *              | rate_limited | inflight_capped | pending_missing
- *              | misconfigured | debug
- *   cookie   = ok | expired | bad_sig | bad_format | absent | -
- *
- * `reason` and `path` are double-quoted because they can carry
- * short-dashed strings from config/heuristics; everything else is a
- * known enum and left unquoted for logfmt readability. */
-/* ---- M9.2: string → counter index lookups ----
- *
- * These mirror the M9.1 enum strings verbatim. If a string doesn't map,
- * return -1 — the caller logs a single WARNING and skips the increment
- * rather than silently corrupting counters (the validator should catch
- * this at M9.1 gate, so it's a defense-in-depth check). */
-static int bs_m_tier_idx(const char *s)
-{
-    if (!s) return -1;
-    if (strcmp(s, "none")    == 0) return BS_M_TIER_NONE;
-    if (strcmp(s, "pass")    == 0) return BS_M_TIER_PASS;
-    if (strcmp(s, "silent")  == 0) return BS_M_TIER_SILENT;
-    if (strcmp(s, "form")    == 0) return BS_M_TIER_FORM;
-    if (strcmp(s, "captcha") == 0) return BS_M_TIER_CAPTCHA;
-    /* E10 — safeguard activations land in the decision log as
-     * tier="safeguard" so operators can grep/filter for them
-     * (semantically distinct from a regular pass). For metrics
-     * we bin them into the pass counter — they are functionally
-     * pass-through (no challenge issued, request reaches origin).
-     * Operators wanting to dashboard safeguard rate scrape the
-     * decision log for reason="challenge-safeguard". A dedicated
-     * counter could be added later without changing this mapping. */
-    if (strcmp(s, "safeguard") == 0) return BS_M_TIER_PASS;
-    return -1;
-}
-
-static int bs_m_outcome_idx(const char *s)
-{
-    if (!s) return -1;
-    if (strcmp(s, "declined")         == 0) return BS_M_OUTCOME_DECLINED;
-    if (strcmp(s, "challenged")       == 0) return BS_M_OUTCOME_CHALLENGED;
-    if (strcmp(s, "verified")         == 0) return BS_M_OUTCOME_VERIFIED;
-    if (strcmp(s, "rejected")         == 0) return BS_M_OUTCOME_REJECTED;
-    if (strcmp(s, "failopen")         == 0) return BS_M_OUTCOME_FAILOPEN;
-    if (strcmp(s, "rate_limited")     == 0) return BS_M_OUTCOME_RATE_LIMITED;
-    if (strcmp(s, "inflight_capped")  == 0) return BS_M_OUTCOME_INFLIGHT_CAPPED;
-    if (strcmp(s, "pending_missing")  == 0) return BS_M_OUTCOME_PENDING_MISSING;
-    if (strcmp(s, "misconfigured")    == 0) return BS_M_OUTCOME_MISCONFIGURED;
-    if (strcmp(s, "debug")            == 0) return BS_M_OUTCOME_DEBUG;
-    return -1;
-}
-
-static int bs_m_cookie_idx(const char *s)
-{
-    if (!s) return -1;
-    if (strcmp(s, "ok")         == 0) return BS_M_COOKIE_OK;
-    if (strcmp(s, "expired")    == 0) return BS_M_COOKIE_EXPIRED;
-    if (strcmp(s, "bad_sig")    == 0) return BS_M_COOKIE_BAD_SIG;
-    if (strcmp(s, "bad_format") == 0) return BS_M_COOKIE_BAD_FORMAT;
-    if (strcmp(s, "absent")     == 0) return BS_M_COOKIE_ABSENT;
-    return -1;
-}
-
-static int bs_m_provider_idx(const char *s)
-{
-    if (!s) return -1;
-    if (strcmp(s, "turnstile")    == 0) return BS_M_PROV_TURNSTILE;
-    if (strcmp(s, "hcaptcha")     == 0) return BS_M_PROV_HCAPTCHA;
-    if (strcmp(s, "recaptcha-v2") == 0) return BS_M_PROV_RECAPTCHA_V2;
-    if (strcmp(s, "recaptcha-v3") == 0) return BS_M_PROV_RECAPTCHA_V3;
-    if (strcmp(s, "friendly")     == 0) return BS_M_PROV_FRIENDLY;
-    if (strcmp(s, "geetest")      == 0) return BS_M_PROV_GEETEST;
-    return -1;
-}
-
-/* ---- M9.2 on-demand gauge readers ----
- *
- * Called by the metrics export handler (M9.3) when a scraper GETs
- * /botshield/metrics. Not called on the hot decision path. Results
- * cached for 1 second via a tiny static struct so concurrent scrapes
- * don't each walk the flagged-IP table or popcount the Bloom bufs.
- *
- * The cache is deliberately process-local (not SHM) so a read by one
- * worker doesn't stale the value for another — if two workers answer
- * two concurrent scrapes they each do their own computation, but each
- * is still bounded at 1 Hz per worker. */
-typedef struct {
-    apr_time_t   expires_at;
-    apr_uint64_t flagged_used;
-    apr_uint64_t strike_used;
-    apr_uint64_t safeguard_used;
-    apr_uint64_t bloom_bits_active;
-    apr_uint64_t bloom_bits_warming;
-} bs_gauge_cache;
-
-/* Thread-local storage. Each worker thread gets its own cache so
- * concurrent /metrics scrapes in one Apache process can't race on the
- * refresh, and we don't need a lock. The 1-second TTL means at worst
- * a thread computes fresh values once per scrape; cost is bounded. */
-static __thread bs_gauge_cache bs_gauges = {0, 0, 0, 0, 0, 0};
-#define BS_GAUGE_CACHE_TTL_US (1000 * 1000)  /* 1 second */
-
-static void bs_gauges_refresh(void)
-{
-    apr_time_t now = apr_time_now();
-    if (now < bs_gauges.expires_at) return;
-
-    apr_int64_t now_sec = (apr_int64_t)apr_time_sec(now);
-    apr_uint64_t flagged_used = 0;
-    /* Security review LOW #8 — relaxed atomic loads on slot->version
-     * make TSAN happy with the concurrent read. Estimate is fine
-     * (already documented). */
-    if (bs_shm.flagged_table) {
-        for (apr_size_t i = 0; i < bs_shm.flagged_capacity; i++) {
-            const bs_flagged_ip_slot *slot = &bs_shm.flagged_table[i];
-            apr_uint32_t v = __atomic_load_n(&slot->version,
-                                              __ATOMIC_RELAXED);
-            if ((v & 1U) == 0 &&
-                slot->used != 0 &&
-                slot->expires_at > now_sec) {
-                flagged_used++;
-            }
-        }
-    }
-    /* E13.1 — strike + safeguard occupancy. "Used" here means the
-     * slot would force a probe walk (used != 0), regardless of
-     * whether the entry is still TTL-active. That's the right view
-     * for load-factor-based probe-saturation warnings. */
-    apr_uint64_t strike_used = 0;
-    if (bs_shm.strike_table) {
-        for (apr_size_t i = 0; i < bs_shm.strike_capacity; i++) {
-            const bs_strike_slot *slot = &bs_shm.strike_table[i];
-            apr_uint32_t v = __atomic_load_n(&slot->version,
-                                              __ATOMIC_RELAXED);
-            if ((v & 1U) == 0 && slot->used != 0) {
-                strike_used++;
-            }
-        }
-    }
-    apr_uint64_t safeguard_used = 0;
-    if (bs_shm.safeguard_table) {
-        for (apr_size_t i = 0; i < bs_shm.safeguard_capacity; i++) {
-            const bs_safeguard_slot *slot = &bs_shm.safeguard_table[i];
-            apr_uint32_t v = __atomic_load_n(&slot->version,
-                                              __ATOMIC_RELAXED);
-            if ((v & 1U) == 0 && slot->used != 0) {
-                safeguard_used++;
-            }
-        }
-    }
-    apr_uint64_t bloom_active = 0, bloom_warming = 0;
-    if (bs_shm.bloom_bufs[0] && bs_shm.bloom_buf_bytes) {
-        apr_uint32_t act = apr_atomic_read32(&bs_shm.header->bloom_active);
-        apr_size_t bb = bs_shm.bloom_buf_bytes;
-        bloom_active  = bs_popcount_buffer(bs_shm.bloom_bufs[act & 1U], bb);
-        bloom_warming = bs_popcount_buffer(bs_shm.bloom_bufs[(act & 1U) ^ 1], bb);
-    }
-
-    bs_gauges.flagged_used       = flagged_used;
-    bs_gauges.strike_used        = strike_used;
-    bs_gauges.safeguard_used     = safeguard_used;
-    bs_gauges.bloom_bits_active  = bloom_active;
-    bs_gauges.bloom_bits_warming = bloom_warming;
-    bs_gauges.expires_at         = now + BS_GAUGE_CACHE_TTL_US;
-}
-
-/* Public gauge accessors. Each refreshes the cache if stale then
- * returns the cached value. M9.3's export handler calls these. */
-static apr_uint64_t bs_metrics_flagged_used(void)
-{
-    bs_gauges_refresh();
-    return bs_gauges.flagged_used;
-}
-
-static apr_uint64_t bs_metrics_strike_used(void)
-{
-    bs_gauges_refresh();
-    return bs_gauges.strike_used;
-}
-
-static apr_uint64_t bs_metrics_safeguard_used(void)
-{
-    bs_gauges_refresh();
-    return bs_gauges.safeguard_used;
-}
-
-static apr_uint64_t bs_metrics_bloom_bits(int active_buf)
-{
-    bs_gauges_refresh();
-    return active_buf ? bs_gauges.bloom_bits_active
-                      : bs_gauges.bloom_bits_warming;
-}
-
-static apr_uint32_t bs_metrics_inflight_cur(void)
-{
-    if (!bs_shm.cv_inflight) return 0;
-    return apr_atomic_read32(bs_shm.cv_inflight);
-}
-
-/* Bump the M9.2 counters for one decision emission. `cookie` and
- * `provider` may be "-" (not applicable); those dimensions skip.
- * Unknown enum strings log one WARNING and skip that dimension — a
- * loud signal that the producer/consumer drifted out of sync. */
-static void bs_metrics_bump(request_rec *r,
-                            const char *tier, const char *outcome,
-                            const char *cookie, const char *provider)
-{
-    if (!bs_shm.metrics) return;
-
-    int ti = bs_m_tier_idx(tier);
-    int oi = bs_m_outcome_idx(outcome);
-    int ci = (cookie && strcmp(cookie, "-") != 0)
-             ? bs_m_cookie_idx(cookie) : -1;
-    int pi = (provider && strcmp(provider, "-") != 0)
-             ? bs_m_provider_idx(provider) : -1;
-
-    if (ti >= 0) {
-        __atomic_fetch_add(&bs_shm.metrics->tier[ti], 1, __ATOMIC_RELAXED);
-    } else {
-        ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
-            "mod_botshield: metrics: unknown tier=\"%s\" — skipped",
-            tier ? tier : "(null)");
-    }
-    if (oi >= 0) {
-        __atomic_fetch_add(&bs_shm.metrics->outcome[oi], 1, __ATOMIC_RELAXED);
-    } else {
-        ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
-            "mod_botshield: metrics: unknown outcome=\"%s\" — skipped",
-            outcome ? outcome : "(null)");
-    }
-    if (ci >= 0) {
-        __atomic_fetch_add(&bs_shm.metrics->cookie[ci], 1, __ATOMIC_RELAXED);
-    } else if (cookie && strcmp(cookie, "-") != 0) {
-        ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
-            "mod_botshield: metrics: unknown cookie=\"%s\" — skipped",
-            cookie);
-    }
-    if (pi >= 0) {
-        __atomic_fetch_add(&bs_shm.metrics->provider[pi], 1, __ATOMIC_RELAXED);
-    } else if (provider && strcmp(provider, "-") != 0) {
-        ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
-            "mod_botshield: metrics: unknown provider=\"%s\" — skipped",
-            provider);
-    }
-}
-
-/* Map a bs_verify_cookie diagnostic to the cookie enum value. NULL
- * reason (accept) → "ok"; other diagnostics classify into the M9.1
- * documented enum. */
-static const char *bs_decision_cookie_status(const char *verify_reason,
-                                             int had_cookie)
-{
-    if (!had_cookie) return "absent";
-    if (!verify_reason) return "ok";
-    if (strcmp(verify_reason, "expired") == 0) return "expired";
-    if (strcmp(verify_reason, "signature mismatch") == 0) return "bad_sig";
-    return "bad_format";
-}
 
 /* Join the request's score-reason names (no penalties) into a single
  * comma-separated string for the decision line. Returns "-" when no
@@ -10029,119 +8704,7 @@ static const char *bs_decision_reason_names(apr_pool_t *p,
     return apr_array_pstrcat(p, arr, ',');
 }
 
-/* Optional E3 trigger log-tag: set via r->notes so bs_decision_log
- * can emit it without changing the signature that 20+ call sites
- * already use. Read back as a pool-owned string; NULL = no tag. */
-#define BS_TRIGGER_TAG_NOTE   "botshield-trigger-tag"
-static void bs_set_trigger_tag(request_rec *r, const char *tag)
-{
-    if (!tag || !*tag) return;
-    apr_table_setn(r->notes, BS_TRIGGER_TAG_NOTE,
-                   apr_pstrdup(r->pool, tag));
-}
-static const char *bs_get_trigger_tag(request_rec *r)
-{
-    return apr_table_get(r->notes, BS_TRIGGER_TAG_NOTE);
-}
 
-/* Sanitize a string for inclusion inside the `key="value"` quoted
- * fields of the decision log.
- *
- * Browsers always %22-encode '"' in URIs but a hand-rolled HTTP
- * client can send a literal '"' raw; without sanitization it would
- * close the quoting and mis-tokenize the rest of the line for
- * downstream log parsers.
- *
- * Why URL-encoding instead of backslash-escaping: Apache's error-
- * log writer escapes embedded '\' bytes (each '\' becomes "\\" in
- * the log file) but does NOT escape '"'. A naive '"'→'\"' approach
- * therefore lands in the log as '\\"' — three characters that a
- * standard string-literal parser reads as escaped-backslash +
- * close-quote, which still mis-tokenizes. Percent-encoding the
- * troublesome bytes ('"' → "%22", '\' → "%5C") survives Apache's
- * pass-through unchanged and remains operator-readable since the
- * surrounding URI context is already URL-shaped.
- *
- * Fast path: if the input contains no '"' or '\', returns the
- * input pointer unchanged — zero copy, zero pool allocation.
- * Common case for typical request URIs and reason names. */
-static const char *bs_log_quote(apr_pool_t *p, const char *s)
-{
-    if (!s) return "-";
-    apr_size_t extra = 0;
-    for (const char *q = s; *q; q++) {
-        if (*q == '"' || *q == '\\') extra += 2;  /* '"' → "%22"; '\' → "%5C" */
-    }
-    if (extra == 0) return s;
-    apr_size_t in_len = strlen(s);
-    char *out = apr_palloc(p, in_len + extra + 1);
-    char *w = out;
-    for (const char *q = s; *q; q++) {
-        if (*q == '"') {
-            *w++ = '%'; *w++ = '2'; *w++ = '2';
-        } else if (*q == '\\') {
-            *w++ = '%'; *w++ = '5'; *w++ = 'C';
-        } else {
-            *w++ = *q;
-        }
-    }
-    *w = '\0';
-    return out;
-}
-
-static void bs_decision_log(request_rec *r,
-                            const char *tier,
-                            const char *outcome,
-                            const char *cookie,
-                            const char *provider,
-                            const char *alg,
-                            const char *reason,
-                            int score)
-{
-    const char *ip       = (r->useragent_ip && *r->useragent_ip)
-                           ? r->useragent_ip : "-";
-    const char *path     = (r->unparsed_uri && *r->unparsed_uri)
-                           ? r->unparsed_uri : "-";
-    const char *tag      = bs_get_trigger_tag(r);
-    /* Escape backslashes and double-quotes inside the three quoted
-     * fields (reason, path, tag) so a request URI containing a
-     * literal " (which a malicious client can send raw, even though
-     * browsers always %22-encode) doesn't break tokenization for
-     * downstream log parsers. Browsers and well-formed clients pass
-     * through untouched: alpha+digit+typical-URI bytes don't match
-     * \\ or " so the helper returns its input pointer unchanged.
-     * Common case: zero copy. */
-    const char *reason_q = bs_log_quote(r->pool,
-                                         reason ? reason : "-");
-    const char *path_q   = bs_log_quote(r->pool, path);
-    /* tag= suffix only when a trigger set it; normal decision lines
-     * stay byte-identical so existing log parsers don't break. */
-    if (tag && *tag) {
-        const char *tag_q = bs_log_quote(r->pool, tag);
-        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
-            "mod_botshield: decision tier=%s outcome=%s ip=%s score=%d "
-            "cookie=%s provider=%s alg=%s reason=\"%s\" path=\"%s\" "
-            "tag=\"%s\"",
-            tier, outcome, ip, score,
-            cookie   ? cookie   : "-",
-            provider ? provider : "-",
-            alg      ? alg      : "-",
-            reason_q, path_q, tag_q);
-    } else {
-        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
-            "mod_botshield: decision tier=%s outcome=%s ip=%s score=%d "
-            "cookie=%s provider=%s alg=%s reason=\"%s\" path=\"%s\"",
-            tier, outcome, ip, score,
-            cookie   ? cookie   : "-",
-            provider ? provider : "-",
-            alg      ? alg      : "-",
-            reason_q, path_q);
-    }
-    /* M9.2: counters derived from the same enum vocabulary. One log
-     * line, up to four counter increments (tier, outcome, cookie when
-     * applicable, provider when applicable). */
-    bs_metrics_bump(r, tier, outcome, cookie, provider);
-}
 
 /* URL-decode an x-www-form-urlencoded value in place: '+' → ' ',
  * %XX → byte. Unrecognized sequences are left untouched; a value that
@@ -10363,16 +8926,45 @@ static const char *bs_install_verified_cookie(request_rec *r,
  *
  * Name:  _bs_captcha_pending
  * Value: <nonce_hex>|<expiry_unix_sec>|<hmac_hex>
- *        hmac = HMAC-SHA256(cfg->secret, "pending:" || nonce_hex || ":"
+ *        hmac = HMAC-SHA256(derived_hmac_pending,
+ *                           "bs:pending:v1:" || nonce_hex || ":"
  *                           || expiry_unix_sec_ascii)
  * Attrs: HttpOnly, Secure (on HTTPS), SameSite=Lax, Max-Age=300,
  *        Path=<endpoint_prefix>/captcha-verify (so it's only sent on
  *        verify POSTs, not every request).
  *
- * Minted at captcha-interstitial render time. Verified at the verify
- * endpoint before any libcurl call — missing / tampered / expired all
- * short-circuit to 403 cheaply. Turns blind POST spray at the verify
- * endpoint into a guaranteed early reject. */
+ * Why this exists — DoS protection for /captcha-verify:
+ *
+ * Without this cookie, an attacker could POST garbage tokens directly
+ * to /captcha-verify. Each request triggers an outbound libcurl call
+ * to the captcha provider's siteverify endpoint, holding one of
+ * BS_DEFAULT_CAPTCHA_MAX_INFLIGHT (=64) in-flight slots for the call
+ * duration. Saturating that semaphore yields:
+ *   - 503 to legitimate users hitting /captcha-verify
+ *   - Burned API quota with the captcha provider
+ *   - Possible provider-side rate-limiting against the operator
+ *
+ * The pending cookie short-circuits the attack:
+ *   - Minted only at captcha-interstitial render time (one mint per
+ *     legitimate challenge presentation)
+ *   - Required at /captcha-verify; absent / forged / expired → 403 in
+ *     microseconds via HMAC verify, no libcurl call made
+ *   - Path-scoped to /captcha-verify so it's not sent on regular
+ *     requests (zero per-request cookie-size cost in normal traffic)
+ *   - HttpOnly + HMAC-signed so it can't be forged client-side
+ *
+ * Net effect: only clients that actually saw the challenge page can
+ * reach the libcurl call. The verify endpoint's effective attack
+ * surface shrinks from "anyone with a TCP connection" to "rate of
+ * legitimate captcha presentations" — a much smaller number.
+ *
+ * Why this is a separate cookie from _bs_verified, not state inside it:
+ *   - _bs_verified           Path=/, hour-scale TTL, sent every request
+ *   - _bs_captcha_pending    Path=<prefix>/captcha-verify, 5-min TTL,
+ *                            sent only at the verify endpoint
+ * Folding pending-state into _bs_verified would either mix state-
+ * machine concerns into the long-lived trust cookie or carry pending
+ * state on every request — both worse than the current split. */
 #define BS_PENDING_COOKIE_NAME  "_bs_captcha_pending"
 #define BS_PENDING_COOKIE_TTL   300   /* seconds */
 
@@ -11631,271 +10223,6 @@ static int bs_embedded_verify_handler(request_rec *r, bs_dir_cfg *cfg)
 }
 /* end E17 PoC handlers */
 
-/* ---- M9.3: Prometheus text metrics handler ----
- *
- * Mounted at <prefix>/metrics. Emits counters + gauges in a fixed
- * deterministic order with hardcoded metric names (no runtime name
- * construction → no apr_psprintf on the scrape path). Each counter
- * read uses __atomic_load_n with RELAXED; on x86_64 64-bit aligned
- * reads are already atomic, but the intrinsic keeps the compiler
- * from reordering across concurrent writers.
- *
- * Access control is deliberately delegated to Apache: operators gate
- * this endpoint with `<Location /botshield/metrics>` + Require ip /
- * AuthType Basic / etc. The module emits everything to anyone who
- * reaches the handler. Keeps metric exposition out of policy-code. */
-
-#define BS_M_PREFIX "botshield_"
-
-static apr_uint64_t bs_mload(const apr_uint64_t *p)
-{
-    return __atomic_load_n(p, __ATOMIC_RELAXED);
-}
-
-/* Emit one Prometheus metric: HELP, TYPE, value. Using a single
- * ap_rprintf per line keeps the scrape path free of intermediate
- * buffers. `name` and `help` are string literals from the caller. */
-static void bs_m_emit_counter(request_rec *r, const char *name,
-                              const char *help, apr_uint64_t val)
-{
-    ap_rprintf(r, "# HELP %s%s %s\n", BS_M_PREFIX, name, help);
-    ap_rprintf(r, "# TYPE %s%s counter\n", BS_M_PREFIX, name);
-    ap_rprintf(r, "%s%s %" APR_UINT64_T_FMT "\n", BS_M_PREFIX, name, val);
-}
-
-static void bs_m_emit_gauge(request_rec *r, const char *name,
-                            const char *help, apr_uint64_t val)
-{
-    ap_rprintf(r, "# HELP %s%s %s\n", BS_M_PREFIX, name, help);
-    ap_rprintf(r, "# TYPE %s%s gauge\n", BS_M_PREFIX, name);
-    ap_rprintf(r, "%s%s %" APR_UINT64_T_FMT "\n", BS_M_PREFIX, name, val);
-}
-
-static int bs_metrics_handler(request_rec *r, bs_dir_cfg *cfg)
-{
-    (void)cfg;
-    if (r->method_number != M_GET && r->method_number != M_OPTIONS) {
-        r->status = HTTP_METHOD_NOT_ALLOWED;
-        apr_table_setn(r->headers_out, "Allow", "GET, OPTIONS");
-        ap_set_content_type(r, "text/plain; charset=utf-8");
-        ap_rputs("GET required.\n", r);
-        return OK;
-    }
-    if (!bs_shm.metrics) {
-        r->status = HTTP_SERVICE_UNAVAILABLE;
-        ap_set_content_type(r, "text/plain; charset=utf-8");
-        ap_rputs("# metrics not initialized\n", r);
-        return OK;
-    }
-
-    /* Prometheus exposition format 0.0.4. Content-Type per the spec. */
-    ap_set_content_type(r,
-        "text/plain; version=0.0.4; charset=utf-8");
-    apr_table_setn(r->headers_out, "Cache-Control", "no-store");
-
-    bs_metrics *m = bs_shm.metrics;
-
-    /* --- Decision counters (ordered tier → outcome → cookie → provider) --- */
-
-    bs_m_emit_counter(r, "tier_none_total",
-        "Decisions reaching no tier (pre-tier terminations like debug/asset/misconfig).",
-        bs_mload(&m->tier[BS_M_TIER_NONE]));
-    bs_m_emit_counter(r, "tier_pass_total",
-        "Decisions at tier=pass (no challenge served, request DECLINED).",
-        bs_mload(&m->tier[BS_M_TIER_PASS]));
-    bs_m_emit_counter(r, "tier_silent_total",
-        "Decisions at tier=silent (auto-submit splash interstitial served).",
-        bs_mload(&m->tier[BS_M_TIER_SILENT]));
-    bs_m_emit_counter(r, "tier_form_total",
-        "Decisions at tier=form (checkbox PoW interstitial served).",
-        bs_mload(&m->tier[BS_M_TIER_FORM]));
-    bs_m_emit_counter(r, "tier_captcha_total",
-        "Decisions at tier=captcha (third-party provider widget served or verified).",
-        bs_mload(&m->tier[BS_M_TIER_CAPTCHA]));
-
-    bs_m_emit_counter(r, "outcome_declined_total",
-        "Decisions where the module returned DECLINED to Apache (pass tier + asset).",
-        bs_mload(&m->outcome[BS_M_OUTCOME_DECLINED]));
-    bs_m_emit_counter(r, "outcome_challenged_total",
-        "Decisions that served an interstitial.",
-        bs_mload(&m->outcome[BS_M_OUTCOME_CHALLENGED]));
-    bs_m_emit_counter(r, "outcome_verified_total",
-        "Captcha verifications that passed siteverify.",
-        bs_mload(&m->outcome[BS_M_OUTCOME_VERIFIED]));
-    bs_m_emit_counter(r, "outcome_rejected_total",
-        "Requests rejected before or by provider siteverify.",
-        bs_mload(&m->outcome[BS_M_OUTCOME_REJECTED]));
-    bs_m_emit_counter(r, "outcome_failopen_total",
-        "Siteverify calls that failed open (timeout, network error, provider 5xx).",
-        bs_mload(&m->outcome[BS_M_OUTCOME_FAILOPEN]));
-    bs_m_emit_counter(r, "outcome_rate_limited_total",
-        "Verify requests rejected by per-IP rate limit.",
-        bs_mload(&m->outcome[BS_M_OUTCOME_RATE_LIMITED]));
-    bs_m_emit_counter(r, "outcome_inflight_capped_total",
-        "Verify requests rejected by global in-flight semaphore.",
-        bs_mload(&m->outcome[BS_M_OUTCOME_INFLIGHT_CAPPED]));
-    bs_m_emit_counter(r, "outcome_pending_missing_total",
-        "Verify POSTs missing or with tampered pending cookie.",
-        bs_mload(&m->outcome[BS_M_OUTCOME_PENDING_MISSING]));
-    bs_m_emit_counter(r, "outcome_misconfigured_total",
-        "Terminations due to missing scope config or internal state.",
-        bs_mload(&m->outcome[BS_M_OUTCOME_MISCONFIGURED]));
-    bs_m_emit_counter(r, "outcome_debug_total",
-        "BotShieldDebug-forced 403 responses.",
-        bs_mload(&m->outcome[BS_M_OUTCOME_DEBUG]));
-
-    bs_m_emit_counter(r, "cookie_ok_total",
-        "Rep cookies that verified fully (signature + freshness + PoW).",
-        bs_mload(&m->cookie[BS_M_COOKIE_OK]));
-    bs_m_emit_counter(r, "cookie_expired_total",
-        "Rep cookies with valid signature but past expires_at.",
-        bs_mload(&m->cookie[BS_M_COOKIE_EXPIRED]));
-    bs_m_emit_counter(r, "cookie_bad_sig_total",
-        "Rep cookies with HMAC signature mismatch.",
-        bs_mload(&m->cookie[BS_M_COOKIE_BAD_SIG]));
-    bs_m_emit_counter(r, "cookie_bad_format_total",
-        "Rep cookies that failed structural parsing (field count, hex, etc).",
-        bs_mload(&m->cookie[BS_M_COOKIE_BAD_FORMAT]));
-    bs_m_emit_counter(r, "cookie_absent_total",
-        "Requests with no rep cookie.",
-        bs_mload(&m->cookie[BS_M_COOKIE_ABSENT]));
-
-    bs_m_emit_counter(r, "provider_turnstile_total",
-        "Decisions tagged with provider=turnstile.",
-        bs_mload(&m->provider[BS_M_PROV_TURNSTILE]));
-    bs_m_emit_counter(r, "provider_hcaptcha_total",
-        "Decisions tagged with provider=hcaptcha.",
-        bs_mload(&m->provider[BS_M_PROV_HCAPTCHA]));
-    bs_m_emit_counter(r, "provider_recaptcha_v2_total",
-        "Decisions tagged with provider=recaptcha-v2.",
-        bs_mload(&m->provider[BS_M_PROV_RECAPTCHA_V2]));
-    bs_m_emit_counter(r, "provider_recaptcha_v3_total",
-        "Decisions tagged with provider=recaptcha-v3.",
-        bs_mload(&m->provider[BS_M_PROV_RECAPTCHA_V3]));
-    bs_m_emit_counter(r, "provider_friendly_total",
-        "Decisions tagged with provider=friendly.",
-        bs_mload(&m->provider[BS_M_PROV_FRIENDLY]));
-    bs_m_emit_counter(r, "provider_geetest_total",
-        "Decisions tagged with provider=geetest.",
-        bs_mload(&m->provider[BS_M_PROV_GEETEST]));
-
-    /* --- Persistence counters + gauges --- */
-
-    bs_m_emit_counter(r, "state_saves_total",
-        "Successful state-file saves (shutdown + periodic).",
-        bs_mload(&m->state_saves_total));
-    bs_m_emit_counter(r, "state_loads_total",
-        "Successful state-file loads at post-config.",
-        bs_mload(&m->state_loads_total));
-    bs_m_emit_gauge(r, "state_save_last_unix",
-        "Unix seconds of the last successful state save.",
-        bs_mload(&m->state_save_last_unix));
-    bs_m_emit_gauge(r, "state_save_last_bytes",
-        "Byte length of the last successful state save.",
-        bs_mload(&m->state_save_last_bytes));
-    bs_m_emit_gauge(r, "state_save_last_duration_microseconds",
-        "Wall-clock microseconds the last save took (build + fsync + rename + dir fsync).",
-        bs_mload(&m->state_save_last_duration_us));
-    bs_m_emit_gauge(r, "state_load_last_kept",
-        "Flagged-IP entries kept across the last state load.",
-        bs_mload(&m->state_load_last_kept));
-    bs_m_emit_gauge(r, "state_load_last_dropped",
-        "Flagged-IP entries dropped as stale during the last state load.",
-        bs_mload(&m->state_load_last_dropped));
-
-    /* --- E1 crawler-verification counters --- */
-
-    bs_m_emit_counter(r, "bot_allow_total",
-        "Requests whose crawler UA matched the published IP ranges for "
-        "that crawler (legit-bot bypass applied).",
-        bs_mload(&m->bot_allow_total));
-    bs_m_emit_counter(r, "bot_fake_total",
-        "Requests with a known-crawler UA whose IP was NOT in that "
-        "crawler's published ranges (penalty applied, routed to captcha tier).",
-        bs_mload(&m->bot_fake_total));
-    bs_m_emit_counter(r, "bot_unverified_total",
-        "Requests whose crawler UA matched a known pattern but no ranges "
-        "file is configured for that crawler (no score effect, logged).",
-        bs_mload(&m->bot_unverified_total));
-
-    /* --- E2.1 policy-enforcement counters --- */
-
-    bs_m_emit_counter(r, "rate_limit_observed_total",
-        "Rate-limit over-budget events that ran in observe mode "
-        "(per-rule mode=observe or BotShieldShadowMode on); rule "
-        "would have returned 429 but didn't.",
-        bs_mload(&m->rate_limit_observed_total));
-    bs_m_emit_counter(r, "block_path_observed_total",
-        "Block-path matches that ran in observe mode; rule would "
-        "have returned 403 but didn't.",
-        bs_mload(&m->block_path_observed_total));
-    bs_m_emit_counter(r, "trigger_observed_total",
-        "Trigger matches (path/cookie/env/load) that ran in observe "
-        "mode across all families.",
-        bs_mload(&m->trigger_observed_total));
-    bs_m_emit_counter(r, "rate_limit_exceeded_total",
-        "Requests that tripped a BotShieldRateLimit cohort budget "
-        "(response was 429 + Retry-After).",
-        bs_mload(&m->rate_limit_exceeded_total));
-    bs_m_emit_counter(r, "block_path_hit_total",
-        "Requests that matched a BotShieldBlockPath cohort+path-glob "
-        "(response was 403).",
-        bs_mload(&m->block_path_hit_total));
-
-    /* --- On-demand gauges (may refresh a 1-second cache) --- */
-
-    bs_m_emit_gauge(r, "captcha_inflight_current",
-        "Current in-flight captcha siteverify calls.",
-        (apr_uint64_t)bs_metrics_inflight_cur());
-    bs_m_emit_gauge(r, "shm_flagged_used",
-        "Flagged-IP slots currently populated with non-expired entries.",
-        bs_metrics_flagged_used());
-    bs_m_emit_gauge(r, "shm_flagged_capacity",
-        "Configured BotShieldFlaggedIPCapacity.",
-        (apr_uint64_t)bs_shm.flagged_capacity);
-    bs_m_emit_gauge(r, "shm_strike_used",
-        "Strike-table slots physically occupied (used != 0).",
-        bs_metrics_strike_used());
-    bs_m_emit_gauge(r, "shm_strike_capacity",
-        "Configured BotShieldRateLimitEscalateCapacity.",
-        (apr_uint64_t)bs_shm.strike_capacity);
-    bs_m_emit_gauge(r, "shm_safeguard_used",
-        "Safeguard-table slots physically occupied (used != 0).",
-        bs_metrics_safeguard_used());
-    bs_m_emit_gauge(r, "shm_safeguard_capacity",
-        "Configured BotShieldSafeguardCapacity.",
-        (apr_uint64_t)bs_shm.safeguard_capacity);
-    bs_m_emit_gauge(r, "bloom_bits_set_active",
-        "Set bits in the active Bloom buffer (popcount; ~population proxy).",
-        bs_metrics_bloom_bits(1));
-    bs_m_emit_gauge(r, "bloom_bits_set_warming",
-        "Set bits in the warming Bloom buffer.",
-        bs_metrics_bloom_bits(0));
-    bs_m_emit_gauge(r, "bloom_window_seconds",
-        "Configured BotShieldBloomWindow (full window; rotation at half).",
-        (apr_uint64_t)(bs_shm.header
-                       ? bs_shm.header->bloom_window_secs : 0));
-    bs_m_emit_gauge(r, "cv_rate_slot_capacity",
-        "Fixed size of the verify-endpoint rate-limit ring (slots).",
-        (apr_uint64_t)bs_shm.cv_rate_slot_count);
-    bs_m_emit_gauge(r, "cv_log_slot_capacity",
-        "Fixed size of the verify-endpoint log-suppress ring (slots).",
-        (apr_uint64_t)bs_shm.cv_log_slot_count);
-
-    /* E11 — load-state observability. The gauge is the most useful
-     * value to alert on; the counter lets operators graph state
-     * transitions per minute. */
-    bs_m_emit_gauge(r, "load_state",
-        "Current cached load state (0=normal, 1=warm, 2=hot).",
-        (apr_uint64_t)(bs_shm.header
-                       ? bs_shm.header->load_state : 0));
-    bs_m_emit_counter(r, "load_state_changes_total",
-        "Number of load-state transitions since the SHM was created.",
-        (apr_uint64_t)(bs_shm.header
-                       ? bs_shm.header->load_state_changes : 0));
-
-    return OK;
-}
 
 /* ======================================================================
  * E2.2.3 — /botshield/policy-status
@@ -12084,96 +10411,6 @@ static int bs_policy_status_handler(request_rec *r, bs_dir_cfg *cfg)
     return OK;
 }
 
-/* ---- M9.3: mod_status contribution ----
- *
- * Called from `mod_status` (when loaded) for /server-status. Two
- * output modes:
- *   AP_STATUS_SHORT  — machine-readable text; one "Key: value" line
- *                      per top-line metric. Same vocabulary as the
- *                      Prometheus names, without the "botshield_"
- *                      prefix (mod_status uses its own keys already).
- *   default          — compact HTML: <h2> + two <table>s. Only the
- *                      top-line counters + gauges an operator glances
- *                      at; full detail lives at /botshield/metrics.
- *
- * Allocation-free: direct ap_rprintf to the active response. No copy
- * of the metrics struct — atomic loads on each access. */
-static int bs_status_hook(request_rec *r, int flags)
-{
-    if (!bs_shm.metrics) return DECLINED;
-    bs_metrics *m = bs_shm.metrics;
-
-    if (flags & AP_STATUS_SHORT) {
-        ap_rprintf(r,
-            "BotShieldTierPass: %" APR_UINT64_T_FMT "\n"
-            "BotShieldTierSilent: %" APR_UINT64_T_FMT "\n"
-            "BotShieldTierForm: %" APR_UINT64_T_FMT "\n"
-            "BotShieldTierCaptcha: %" APR_UINT64_T_FMT "\n"
-            "BotShieldOutcomeVerified: %" APR_UINT64_T_FMT "\n"
-            "BotShieldOutcomeRejected: %" APR_UINT64_T_FMT "\n"
-            "BotShieldOutcomeFailopen: %" APR_UINT64_T_FMT "\n"
-            "BotShieldOutcomeRateLimited: %" APR_UINT64_T_FMT "\n"
-            "BotShieldCaptchaInflightCurrent: %u\n"
-            "BotShieldFlaggedUsed: %" APR_UINT64_T_FMT "\n"
-            "BotShieldFlaggedCapacity: %" APR_SIZE_T_FMT "\n",
-            bs_mload(&m->tier[BS_M_TIER_PASS]),
-            bs_mload(&m->tier[BS_M_TIER_SILENT]),
-            bs_mload(&m->tier[BS_M_TIER_FORM]),
-            bs_mload(&m->tier[BS_M_TIER_CAPTCHA]),
-            bs_mload(&m->outcome[BS_M_OUTCOME_VERIFIED]),
-            bs_mload(&m->outcome[BS_M_OUTCOME_REJECTED]),
-            bs_mload(&m->outcome[BS_M_OUTCOME_FAILOPEN]),
-            bs_mload(&m->outcome[BS_M_OUTCOME_RATE_LIMITED]),
-            bs_metrics_inflight_cur(),
-            bs_metrics_flagged_used(),
-            bs_shm.flagged_capacity);
-        return OK;
-    }
-
-    ap_rputs("<hr />\n<h2>mod_botshield</h2>\n", r);
-    ap_rputs("<table border=\"0\" cellspacing=\"0\" cellpadding=\"3\">\n",
-             r);
-    ap_rputs("<tr><th>tier</th><th>total</th>"
-             "<th></th><th>outcome</th><th>total</th></tr>\n", r);
-    /* Two parallel columns: tier distribution on the left, outcome
-     * highlights on the right. Keeps the row count tight. */
-    const struct { const char *label; apr_uint64_t val; } rows[] = {
-        { "pass",    bs_mload(&m->tier[BS_M_TIER_PASS])    },
-        { "silent",  bs_mload(&m->tier[BS_M_TIER_SILENT])  },
-        { "form",    bs_mload(&m->tier[BS_M_TIER_FORM])    },
-        { "captcha", bs_mload(&m->tier[BS_M_TIER_CAPTCHA]) },
-        { "none",    bs_mload(&m->tier[BS_M_TIER_NONE])    },
-    };
-    const struct { const char *label; apr_uint64_t val; } out_rows[] = {
-        { "verified",        bs_mload(&m->outcome[BS_M_OUTCOME_VERIFIED])        },
-        { "rejected",        bs_mload(&m->outcome[BS_M_OUTCOME_REJECTED])        },
-        { "failopen",        bs_mload(&m->outcome[BS_M_OUTCOME_FAILOPEN])        },
-        { "rate_limited",    bs_mload(&m->outcome[BS_M_OUTCOME_RATE_LIMITED])    },
-        { "pending_missing", bs_mload(&m->outcome[BS_M_OUTCOME_PENDING_MISSING]) },
-    };
-    for (int i = 0; i < 5; i++) {
-        ap_rprintf(r,
-            "<tr><td>%s</td><td align=\"right\">%" APR_UINT64_T_FMT "</td>"
-            "<td>&nbsp;&nbsp;</td>"
-            "<td>%s</td><td align=\"right\">%" APR_UINT64_T_FMT "</td></tr>\n",
-            rows[i].label, rows[i].val,
-            out_rows[i].label, out_rows[i].val);
-    }
-    ap_rputs("</table>\n", r);
-    ap_rprintf(r,
-        "<p>captcha in-flight: %u &nbsp;&nbsp; "
-        "flagged IPs: %" APR_UINT64_T_FMT " / %" APR_SIZE_T_FMT " &nbsp;&nbsp; "
-        "last state save: %" APR_UINT64_T_FMT " bytes in %" APR_UINT64_T_FMT " \xc2\xb5s "
-        "&nbsp;&nbsp;"
-        "<a href=\"/botshield/metrics\">full metrics</a></p>\n",
-        bs_metrics_inflight_cur(),
-        bs_metrics_flagged_used(),
-        bs_shm.flagged_capacity,
-        bs_mload(&m->state_save_last_bytes),
-        bs_mload(&m->state_save_last_duration_us));
-
-    return OK;
-}
 
 static int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
 {
@@ -12233,10 +10470,14 @@ static int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         return OK;
     }
 
-    /* M8.1 pending-cookie check. A valid cookie proves the client hit
-     * our interstitial within the last 5 minutes; missing or tampered
-     * means this is either a blind POST spray or a badly-timed replay.
-     * Short-circuit to 403 before any rate slot or body parse. */
+    /* M8.1 pending-cookie check MUST run BEFORE the libcurl siteverify
+     * call below. See the M8.1 block comment at bs_mint_pending_cookie
+     * for the full threat model — without this gate, blind POST spray
+     * at /captcha-verify can saturate BS_DEFAULT_CAPTCHA_MAX_INFLIGHT
+     * (=64) and DoS legitimate users (plus burn provider quota). A
+     * valid cookie proves the client hit our interstitial within the
+     * last 5 minutes; missing or tampered short-circuits to 403 in
+     * microseconds before any rate slot or body parse. */
     const char *pend_err = bs_verify_pending_cookie(r, cfg);
     if (pend_err) {
         /* Log throttled — a flood of blind POSTs must not drown the log. */
@@ -12639,11 +10880,29 @@ static bs_request_score *bs_get_score(request_rec *r, int create)
  * user's cookie (per-user, server-stateless); M5 puts serious-event
  * flags in an SHM flagged-IP table (sparse, per-IP). `ttl_seconds`
  * feeds the latter when the caller is a serious-event source. */
+/* Operator-facing documentation: README "Understanding scoring"
+ * (rendered into docs/guide/index.html) explains the score
+ * composition, threshold ladder, and tuning workflow. */
 static void bs_score_add(request_rec *r, int penalty,
                          int ttl_seconds, const char *reason)
 {
     bs_request_score *s = bs_get_score(r, 1);
-    if (s->entries->nelts >= BS_SCORE_MAX_REASONS) return;
+    if (s->entries->nelts >= BS_SCORE_MAX_REASONS) {
+        /* Silent drop on cap could mask a runaway loop or a
+         * misconfigured rule fanout. Log once at DEBUG so the
+         * diagnostic surfaces under verbose-logging without
+         * spamming production. The total still accumulates from
+         * the entries we kept; it's only the per-reason audit trail
+         * that's truncated past this point. */
+        if (!s->cap_warned) {
+            ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
+                "mod_botshield: score-reason cap (%d) reached for %s; "
+                "further bs_score_add calls drop their reason silently",
+                BS_SCORE_MAX_REASONS, r->uri);
+            s->cap_warned = 1;
+        }
+        return;
+    }
     bs_score_entry *e = apr_array_push(s->entries);
     e->penalty     = penalty;
     e->ttl_seconds = ttl_seconds;
@@ -12720,6 +10979,10 @@ static void bs_run_builtin_heuristics(request_rec *r)
  * captcha tier is selected but no provider is configured on the scope,
  * the render code falls through to form-PoW (documented in the
  * decision log as reason="captcha_fallback"). */
+/* Score-to-tier threshold ladder. Three configurable cut-points
+ * (BotShieldScoreSilent / Hard / Captcha) gate four tiers. See the
+ * README "Understanding scoring" section for the operator-facing
+ * tuning workflow. */
 static bs_tier bs_decide_tier(const bs_dir_cfg *cfg, int score)
 {
     int silent  = bs_effective_int(cfg->score_silent,  BS_DEFAULT_SCORE_SILENT);
@@ -13139,7 +11402,10 @@ static const command_rec bs_cmds[] = {
                  "their action — useful for staging a whole policy "
                  "revision before flipping enforcement on. Default "
                  "off; per-rule mode=observe is the finer-grained "
-                 "alternative."),
+                 "alternative for staging a single rule. Typical "
+                 "workflow: add new rules with mode=observe, watch "
+                 "the decision log, flip to enforce when matches "
+                 "look right."),
     /* E14 (rework) — flag-driven trigger family. */
     AP_INIT_TAKE_ARGV("BotShieldFlagTrigger",
                  bs_set_flag_trigger, NULL, RSRC_CONF,
@@ -13864,7 +12130,7 @@ static int bs_handler(request_rec *r)
             return bs_captcha_verify_handler(r, cfg);
         }
         if (strcmp(sub, "/metrics") == 0) {
-            return bs_metrics_handler(r, cfg);
+            return bs_metrics_handler(r);
         }
         if (strcmp(sub, "/policy-status") == 0) {
             return bs_policy_status_handler(r, cfg);
@@ -14105,7 +12371,8 @@ static int bs_handler(request_rec *r)
 
     /* effective_score = per-request heuristic total (already inclusive
      * of any flag-trigger SCORE actions applied above) + the cookie's
-     * accumulated rep score. */
+     * accumulated rep score. Operator-facing tuning workflow lives
+     * in the README "Understanding scoring" section. */
     int cookie_score = have_prior_rep ? prior_ch.rep.score : 0;
     int effective    = heuristic_total + cookie_score;
     bs_tier score_tier = bs_decide_tier(cfg, effective);

@@ -18,11 +18,14 @@ APXS     ?= apxs
 MOD_NAME ?= botshield
 DOCS_PYTHON ?= python3
 DOCS_BUILD  := tools/build_site.py
-# Keep mod_botshield.c first — apxs derives the .la/.so name from the
+# Keep botshield.c first — apxs derives the .la/.so name from the
 # first source. Extra .c files are compiled into the same shared
-# object and share the module's pool/APR linkage.
-MAIN_SRC := src/mod_$(MOD_NAME).c
-EXTRA_SRC := src/robots.c src/botshield_shm.c
+# object and share the module's pool/APR linkage. The installed .so
+# is named mod_botshield.so via apxs's -n flag at install time, which
+# is what Apache's LoadModule directive references; the source file
+# stays bare-named to match the rest of src/.
+MAIN_SRC := src/$(MOD_NAME).c
+EXTRA_SRC := src/robots.c src/shm.c src/crypto.c src/allowlist.c src/metrics.c
 SRC      := $(MAIN_SRC) $(EXTRA_SRC)
 LA       := $(MAIN_SRC:.c=.la)
 
@@ -34,7 +37,7 @@ CFLAGS_WARN := -Wc,-Wall -Wc,-Wextra -Wc,-Wno-unused-parameter
 # this, two modules with same-named non-static functions could resolve
 # to whichever loaded first. The module entry point (botshield_module)
 # stays default-visible via a #pragma GCC visibility push/pop in
-# mod_botshield.c — Apache's LoadModule resolves it via dlsym.
+# botshield.c — Apache's LoadModule resolves it via dlsym.
 CFLAGS_VIS := -Wc,-fvisibility=hidden
 
 # Sanitizer flags for the M10.1 pass. -Wc,... forwards compiler flags
@@ -72,7 +75,13 @@ build:
 	$(APXS) -c $(CFLAGS_WARN) $(CFLAGS_VIS) $(SRC) $(LIBS)
 
 install: build
-	sudo $(APXS) -i -n $(MOD_NAME) $(LA)
+	@# apxs -i derives the installed .so name from the .la basename,
+	@# so a bare-named botshield.c source would install as
+	@# botshield.so — but Apache's LoadModule directive references
+	@# the conventional mod_<name>.so. Install manually to keep the
+	@# operator-visible name correct.
+	sudo install -m 644 src/.libs/$(MOD_NAME).so \
+	    $(shell $(APXS) -q LIBEXECDIR)/mod_$(MOD_NAME).so
 
 enable: install
 	@printf 'LoadModule %s_module /usr/lib/apache2/modules/mod_%s.so\n' \
@@ -102,14 +111,15 @@ sanitize: clean
 	$(APXS) -c $(CFLAGS_WARN) $(CFLAGS_VIS) $(CFLAGS_SAN) $(SRC) $(LIBS)
 
 install-sanitize: sanitize
-	sudo $(APXS) -i -n $(MOD_NAME) $(LA)
+	sudo install -m 644 src/.libs/$(MOD_NAME).so \
+	    $(shell $(APXS) -q LIBEXECDIR)/mod_$(MOD_NAME).so
 
 # --- M11.8 fuzz ---
 #
 # LibFuzzer harness for bs_verify_cookie. Builds with clang +
 # -fsanitize=fuzzer,address,undefined. Requires:
 #   apt install clang libfuzzer-<version>-dev
-# The harness #includes src/mod_botshield.c directly; _fuzz_stubs.h
+# The harness #includes src/botshield.c directly; _fuzz_stubs.h
 # provides weak stubs for Apache runtime symbols the fuzzer never
 # reaches (see the header for the approach).
 

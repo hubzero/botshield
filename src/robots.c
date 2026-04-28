@@ -47,7 +47,7 @@ struct robots_doc {
     apr_array_header_t *groups;       /* robots_group * */
     /* Security review LOW #6 — count of lines that exceeded
      * BOTSHIELD_ROBOTS_MAX_LINE and got truncated during parse.
-     * Caller in mod_botshield.c reads via robots_doc_truncated_lines()
+     * Caller in botshield.c reads via robots_doc_truncated_lines()
      * and emits a NOTICE so operators see the silent truncation
      * the parser-header docs claim is reported. */
     int                 truncated_lines;
@@ -119,8 +119,8 @@ static void bs_rb_rstrip(char *s)
  * filtered out at parse time.
  *
  * Public surface — also used by BotShieldPathTrigger and
- * BotShieldBlockPath in mod_botshield.c. The earlier
- * bs_path_glob_match placeholder in mod_botshield.c was retired
+ * BotShieldBlockPath in botshield.c. The earlier
+ * bs_path_glob_match placeholder in botshield.c was retired
  * once this matcher landed; one path matcher across the codebase. */
 int bs_path_match(const char *pattern, const char *path)
 {

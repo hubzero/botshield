@@ -1,0 +1,435 @@
+/* botshield.h — module-wide private header.
+ *
+ * Cross-file type definitions, enums, and a small handful of
+ * function declarations that the request handler shares across
+ * the file split. Every TU in the module includes this header.
+ *
+ * NOT a public API — the .so is built with -fvisibility=hidden so
+ * none of this leaks outside the module. The single externally-
+ * visible symbol is `botshield_module` (the AP_DECLARE_MODULE
+ * struct), which is annotated with default visibility at its
+ * definition site in botshield.c.
+ *
+ * Layered headers:
+ *   crypto.h     — small primitives (HMAC, GCM, hex, HKDF)
+ *   shm.h        — SHM tables, state save/load, headroom watchdog
+ *   robots.h     — robots.txt parser
+ *   allowlist.h  — verified-crawler classifier + CIDR loader
+ *   metrics.h    — decision log, M9 counters, Prometheus, mod_status
+ *   botshield.h  — THIS file: bs_dir_cfg, bs_server_cfg, request-
+ *                  flow types, cross-file function declarations
+ *   botshield.c — the request handler + glue. Includes all of
+ *                     the above plus the per-feature headers as
+ *                     more extractions land. */
+#ifndef BOTSHIELD_H
+#define BOTSHIELD_H
+
+#include <apr.h>
+#include <apr_pools.h>
+#include <apr_tables.h>
+#include <apr_time.h>
+#include <httpd.h>
+
+#include "crypto.h"
+#include "robots.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ======================================================================
+ * Wire-format constants (cookie / challenge envelopes)
+ * ====================================================================== */
+
+/* Bumped 1->2 for E15: rep envelope grew two fields
+ * (forgive_window_start, forgive_consumed). Old (v1) cookies fail the
+ * version check and trigger a fresh challenge — one-time disruption
+ * per client on upgrade. */
+#define BS_PROTOCOL_VERSION   2
+#define BS_SALT_BYTES         16
+#define BS_NONCE_BYTES        8
+
+/* AES-256-GCM cookie wire format separator: base64-envelope + '.' +
+ * plaintext counter. '.' is outside the standard base64 alphabet so
+ * the split point is unambiguous. */
+#define BS_GCM_COUNTER_SEP    '.'
+
+/* ======================================================================
+ * Tier + silent-mode enums (decision dispatch)
+ * ====================================================================== */
+
+typedef enum {
+    BS_TIER_PASS    = 0,
+    BS_TIER_SILENT  = 1,
+    BS_TIER_HARD    = 2,
+    BS_TIER_CAPTCHA = 3
+} bs_tier;
+
+/* E17 — what flavor of silent-tier dispatch to use. INTERSTITIAL is
+ * the legacy M7 splash that auto-submits the PoW. EMBEDDED hands off
+ * to a wrapper script the operator has already included on the page;
+ * the page serves DECLINED (real content) and the wrapper does the
+ * PoW in a Web Worker, then POSTs back to /botshield/embedded-verify
+ * to mint _bs_verified. */
+typedef enum {
+    BS_SILENT_MODE_UNSET        = -1,
+    BS_SILENT_MODE_INTERSTITIAL =  0,
+    BS_SILENT_MODE_EMBEDDED     =  1
+} bs_silent_mode;
+
+/* ======================================================================
+ * Score system
+ * ====================================================================== */
+
+typedef struct {
+    int         penalty;
+    int         ttl_seconds;   /* accepted for API stability; unused
+                                * today (bs_score_add stores it but
+                                * downstream consumers haven't
+                                * materialized — the flagged-IP table
+                                * carries its own TTL set at insert).
+                                * Kept so callers can annotate "this
+                                * penalty represents an N-second-worth
+                                * signal" without the API churning if
+                                * we ever wire it up. */
+    const char *reason;        /* static string or r->pool-allocated */
+} bs_score_entry;
+
+typedef struct {
+    int                 total;
+    apr_array_header_t *entries;
+    int                 cap_warned;   /* DEBUG-logged when entries
+                                       * first hit BS_SCORE_MAX_REASONS
+                                       * so further drops don't spam
+                                       * the log. apr_pcalloc gives us
+                                       * 0 for free. */
+} bs_request_score;
+
+/* ======================================================================
+ * Reputation state and challenge envelope
+ * ====================================================================== */
+
+/* Reputation state carried in the cookie. Populated fresh on a first-
+ * time challenge (all zeros), and merged forward with forgiveness on
+ * re-issues.
+ *
+ * E15 — forgiveness cap per window. `forgive_window_start` marks the
+ * start of the current rolling hour (unix sec); on every verify-
+ * success we either roll the window if the prior one is over an hour
+ * old, or clamp the new forgiveness so the running consumed total
+ * stays at or below BotShieldForgivenessCapPerHour. */
+typedef struct {
+    int          score;
+    apr_uint32_t flags;
+    int          passes_silent;
+    int          passes_form;
+    int          passes_captcha;
+    apr_time_t   challenged_at;        /* unix sec */
+    apr_uint32_t forgive_window_start; /* unix sec; 0 = no window yet */
+    apr_uint32_t forgive_consumed;     /* points used inside current window */
+} bs_rep_state;
+
+typedef struct {
+    int           version;
+    const char   *alg_name;              /* points into registry */
+    unsigned char salt [BS_SALT_BYTES];
+    unsigned char nonce[BS_NONCE_BYTES];
+    int           difficulty;
+    apr_time_t    expires_at;            /* unix seconds */
+    bs_rep_state  rep;                   /* carried forward across re-issues */
+    int           auto_tier;             /* 1 = silent M7 auto-submit; 0 = form */
+    unsigned char signature[BS_SIG_BYTES];
+} bs_challenge;
+
+/* ======================================================================
+ * PoW algorithm registry
+ * ====================================================================== */
+
+/* Forward declaration so the function-pointer typedefs can
+ * reference bs_dir_cfg before its full definition. */
+typedef struct bs_dir_cfg bs_dir_cfg;
+
+typedef const char *(*bs_alg_issue_fn)(const bs_dir_cfg *cfg,
+                                       bs_challenge *out);
+typedef const char *(*bs_alg_verify_fn)(const bs_challenge *ch,
+                                        const char *counter_str);
+
+typedef struct {
+    const char       *name;
+    int               implemented;   /* 1 = callable, 0 = reserved */
+    bs_alg_issue_fn   issue;
+    bs_alg_verify_fn  verify;
+} bs_pow_algorithm;
+
+/* ======================================================================
+ * Captcha provider registry
+ * ====================================================================== */
+
+typedef struct bs_captcha_provider bs_captcha_provider;
+
+typedef enum {
+    BS_CAPTCHA_OK       = 0,
+    BS_CAPTCHA_REJECTED = 1,
+    BS_CAPTCHA_TIMEOUT  = 2,
+    BS_CAPTCHA_ERROR    = 3
+} bs_captcha_result;
+
+/* Provider-specific siteverify function. NULL on the provider row
+ * means "use the shared secret/response/remoteip POST + json-c parse
+ * path." Providers whose verify protocol diverges materially from
+ * the Google-family contract (GeeTest: HMAC-signed fields, non-bool
+ * result semantics, JSON blob as the client-side token) set this to
+ * their own function instead. */
+typedef bs_captcha_result (*bs_captcha_siteverify_fn)(
+    request_rec *r,
+    const bs_captcha_provider *prov,
+    const unsigned char *secret, apr_size_t secret_len,
+    const char *token, int timeout_ms,
+    /* Optional operator-supplied CA bundle path. NULL = libcurl
+     * default. */
+    const char *ca_bundle,
+    const char **out_details,
+    long *out_http_code,
+    double *out_score,
+    /* Binding-metadata out-params. NULL is a legal value and means
+     * "provider didn't return this field" — a valid signal (e.g.
+     * GeeTest doesn't expose hostname/action over the wire because
+     * its binding is HMAC-signed at request time). Callers only
+     * compare when non-NULL. */
+    const char **out_hostname,
+    const char **out_action);
+
+/* For the Google-family providers (Turnstile, hCaptcha, reCAPTCHA
+ * v2/v3, Friendly Captcha), `siteverify_fn` is NULL and the shared
+ * default path POSTs a body of the form
+ *   secret=<secret>&<siteverify_field>=<token>&remoteip=<ip>
+ * where `siteverify_field` defaults to "response" or is set to e.g.
+ * "solution" (Friendly Captcha).
+ *
+ * For providers whose verify protocol doesn't fit that shape
+ * (GeeTest), `siteverify_fn` is set to a provider-specific function
+ * and the rest of the registry row is informational — the fn decides
+ * how to use it.
+ *
+ * `token_field` is the name of the hidden form input the
+ * interstitial emits to carry the client's token to our verify
+ * endpoint. `widget_script_url` is the async script tag the
+ * interstitial embeds; `widget_class` is the CSS class on the
+ * container div the provider's script looks for (empty for providers
+ * with programmatic init). */
+struct bs_captcha_provider {
+    const char *name;
+    int         implemented;
+    const char *siteverify_url;
+    const char *token_field;
+    const char *widget_script_url;
+    const char *widget_class;
+    const char *siteverify_field;          /* NULL → "response" */
+    bs_captcha_siteverify_fn siteverify_fn; /* NULL → shared path */
+};
+
+/* ======================================================================
+ * Robots.txt active-state bundle
+ *
+ * One per active parse, swapped atomically by the refresh watchdog.
+ * The owning subpool (`pool`) is a child of pconf and is destroyed
+ * when this bundle is finally retired — one refresh cycle after
+ * being displaced — so request-path readers holding pointers into
+ * doc's pool never see freed memory.
+ * ====================================================================== */
+
+typedef struct bs_robots_state {
+    robots_doc *doc;
+    apr_pool_t *pool;              /* owns doc; sized for one doc */
+    apr_time_t  mtime;              /* source file mtime when parsed */
+    int        *slot_by_group_idx;  /* length = robots_group_count(doc) */
+} bs_robots_state;
+
+enum bs_robots_wildcard_scope {
+    BS_ROBOTS_WILDCARD_UNSET     = -1,
+    BS_ROBOTS_WILDCARD_HEURISTIC = 0,
+    BS_ROBOTS_WILDCARD_STRICT    = 1,
+    BS_ROBOTS_WILDCARD_OFF       = 2,
+};
+
+/* ======================================================================
+ * Per-directory configuration
+ * ====================================================================== */
+
+struct bs_dir_cfg {
+    int enabled;
+    int debug;
+    int cookie_ttl;
+    int difficulty;
+    int help_mode;              /* BS_HELP_* or BS_UNSET */
+    int show_logo;              /* 0 = hide, 1 = show, -1 = inherit */
+    int show_label;             /* 0 = hide prompt, 1 = show, -1 = inherit */
+    int show_box;               /* 0 = no box, 1 = boxed, -1 = inherit */
+    const char *prompt;         /* e.g. "I'm not a robot" */
+    const char *logo_svg;       /* full SVG content, loaded at config time */
+    const char *logo_label;     /* small caption under the logo */
+    const char *help_html;      /* panel content, loaded at config time */
+    const char *challenge_html; /* full HTML page template with marker */
+    const bs_pow_algorithm *algorithm;      /* chosen issue algorithm */
+    const unsigned char    *secret;         /* master key bytes */
+    apr_size_t              secret_len;     /* master key length */
+    /* E16 — verify-only secondary secret for graceful rotation. */
+    const unsigned char    *secret_secondary;
+    apr_size_t              secret_secondary_len;
+    /* Security review LOW #3 — HKDF-Expand'd per-purpose keys
+     * derived once at config-load time. Each purpose tag yields a
+     * cryptographically-independent key: leaking one tells an
+     * attacker nothing about the others. */
+    unsigned char    derived_gcm_cookie     [32];
+    unsigned char    derived_hmac_pending   [32];
+    /* MEDIUM #2 — separate purpose key for the bootstrap → verify
+     * IP-binding HMAC. Distinct from the cookie key so the
+     * bound-ip signature can't be repurposed against the cookie. */
+    unsigned char    derived_hmac_bootstrap [32];
+    int              derived_keys_set;
+    /* Same for the secondary key, populated when
+     * BotShieldSecondarySecretFile is configured. */
+    unsigned char    derived_gcm_cookie_2   [32];
+    unsigned char    derived_hmac_pending_2 [32];
+    unsigned char    derived_hmac_bootstrap_2[32];
+    int              derived_keys_set_2;
+    int score_silent;           /* score >= this → silent tier */
+    int score_hard;             /* score >= this → hard form-PoW tier */
+    int score_captcha;          /* score >= this → captcha tier */
+    /* E17 — silent-tier dispatch flavor, tri-state with UNSET so the
+     * merge picks the right scope's value. */
+    int silent_mode;            /* bs_silent_mode; UNSET inherits */
+    /* E18 — inline form captcha. -1 inherit, 0 off, 1 on. */
+    int form_captcha;
+    int forgive_silent;         /* score credit on silent-tier pass */
+    int forgive_form;           /* score credit on form-tier pass */
+    int forgive_captcha;        /* score credit on captcha pass */
+    const char *cookie_domain;  /* if set, Set-Cookie Domain= attribute */
+    apr_uint32_t flag_on_match; /* BotShieldFlagIP: bits to add on any hit */
+    int          flag_on_match_ttl;  /* entry TTL when flag_on_match fires */
+    /* --- Captcha tier (M8) --- */
+    const char *endpoint_prefix;            /* default "/botshield" */
+    const bs_captcha_provider *captcha_provider;  /* NULL = tier unused */
+    const char *captcha_site_key;           /* provider-public */
+    const unsigned char *captcha_secret;    /* file bytes, mode-600 */
+    apr_size_t  captcha_secret_len;
+    int         captcha_timeout_ms;         /* siteverify HTTP timeout */
+    /* Security review LOW #13 — connect-phase timeout. */
+    int         captcha_connect_timeout_ms;
+    /* reCAPTCHA v3: minimum score in [0.0, 1.0]. -1.0 = unset. */
+    double      recaptcha_v3_min_score;
+    /* M8.1 per-scope verify-endpoint rate limit. -1 unset, 0 disables. */
+    int         captcha_rate_limit;
+    /* Binding-metadata validation on the siteverify response. NULL =
+     * runtime default (server_hostname, "botshield"); empty string =
+     * skip the check. */
+    const char *captcha_expected_hostname;
+    const char *captcha_expected_action;
+    /* Optional CA bundle for siteverify TLS. NULL = libcurl's
+     * compiled-in default. */
+    const char *captcha_ca_bundle;
+};
+
+/* ======================================================================
+ * Per-server configuration
+ * ====================================================================== */
+
+#define BS_APP_FEEDBACK_UNSET           (-1)
+#define BS_APP_FEEDBACK_DEFAULT_HEADER  "X-BotShield-Feedback"
+
+typedef struct bs_server_cfg {
+    apr_size_t  shm_size;
+    int         flagged_capacity;
+    int         ipv6_prefix_bits;   /* 0..128; 64 = per-subscriber v6 key */
+    int         bloom_ips;          /* expected working-set size */
+    int         bloom_window_secs;  /* full window; rotation at window/2 */
+    const char *state_file;         /* NULL = persistence off */
+    int         state_save_interval;/* seconds; 0 = shutdown-only */
+    int         captcha_max_inflight;  /* M8.1: cap on outstanding siteverifies */
+    /* E1 — verified legit-crawler allow-list. State loaded in
+     * post_config and read-only thereafter; lives at server scope
+     * because the UA classifier + CIDR lists are global, not per-
+     * directory. */
+    int         allow_enabled;         /* master gate, default 0 */
+    void       *bot_classifier;       /* bs_ua_classifier *, opaque here */
+    apr_hash_t *bot_ranges;           /* name → apr_array_header_t of apr_ipsubnet_t* */
+    apr_hash_t *allow_bots;           /* name → bs_allow_bot_entry * (directive-defined) */
+    /* E2.1 — policy enforcement (rate limit + path block). Ordered
+     * arrays of entry pointers. */
+    apr_array_header_t *rate_limits;
+    /* E9 — repeated-429 escalation. */
+    apr_array_header_t *rate_escalates;
+    int                 strike_capacity;
+    /* E10 — safeguard config. -1 unset sentinel. */
+    int                 safeguard_enabled;
+    int                 safeguard_threshold;
+    int                 safeguard_window;
+    int                 safeguard_ttl;
+    int                 safeguard_capacity;
+    /* MEDIUM #2 (Phase 2) — embedded nonce table sizing. 0 = default. */
+    int                 nonce_capacity;
+    /* E11 — load-aware throttling. */
+    const char         *load_state_file;
+    int                 load_refresh_sec;
+    int                 load_warm_pct;
+    int                 load_hot_pct;
+    int                 load_warm_rise;
+    int                 load_hot_rise;
+    int                 load_normal_fall;
+    bs_load_state       load_external_cached;
+    apr_time_t          load_external_mtime;
+    /* E12 — global shadow mode. -1 unset (inherit), 0 off, 1 on. */
+    int                 shadow_mode;
+    /* E13 — reputation namespace for SHM-backed state. */
+    apr_uint32_t        ns_id;            /* effective; resolved post_config */
+    const char         *share_scope_token; /* explicit override; NULL = default */
+    /* E15 — per-cookie hourly forgiveness cap. */
+    int                 forgive_cap_per_hour;
+    apr_array_header_t *block_paths;
+    /* E3 — path-based triggers. */
+    apr_array_header_t *path_triggers;
+    /* E4 — cookie triggers. */
+    apr_array_header_t *cookie_triggers;
+    /* E6 — env-var triggers. */
+    apr_array_header_t *env_triggers;
+    /* E7.3 — feedback triggers. */
+    apr_array_header_t *feedback_triggers;
+    /* E11.2 — load triggers. */
+    apr_array_header_t *load_triggers;
+    /* E14 (rework) — flag triggers. */
+    apr_array_header_t *flag_triggers;
+    apr_array_header_t *session_names;
+    /* E2.2 — robots.txt enforcement. */
+    const char         *robots_txt_path;
+    int                 robots_wildcard_scope;
+    bs_robots_state    *robots;                      /* active bundle, atomic */
+    bs_robots_state    *robots_pending;              /* awaits destruction */
+    apr_hash_t         *robots_slot_by_name;
+    int                 robots_slot_pool_base;
+    int                 robots_slot_pool_size;
+    int                 robots_slot_pool_used;
+    int                 robots_refresh_interval;
+    /* E5 — app-to-module reputation feedback. */
+    int                 app_feedback_enabled;
+    const char         *app_feedback_header;
+    /* E8.2 — module-to-app reputation export. */
+    int                 app_claims_enabled;
+    /* Single shared HMAC key for both directions of app integration. */
+    const char         *app_integration_secret_file;
+    const unsigned char *app_integration_secret;
+    apr_size_t          app_integration_secret_len;
+} bs_server_cfg;
+
+/* ======================================================================
+ * Module symbol — extern so other TUs can pass &botshield_module to
+ * ap_get_module_config. The definition (and its visibility-default
+ * pragma) lives in botshield.c.
+ * ====================================================================== */
+
+extern module AP_MODULE_DECLARE_DATA botshield_module;
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* BOTSHIELD_H */

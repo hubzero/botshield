@@ -249,7 +249,7 @@ def test_trigger_flag_ip_carries_to_next_request(
 # --- RFC 9309 path matching: middle-`*` patterns -------------------
 #
 # After consolidating onto the RFC 9309 matcher (was: a v1 placeholder
-# in mod_botshield.c that treated middle '*' as a literal byte), '*'
+# in botshield.c that treated middle '*' as a literal byte), '*'
 # in non-trailing position is a proper wildcard.
 
 def test_path_trigger_middle_star_matches_segment(

@@ -1,4 +1,4 @@
-/* botshield_shm.h — SHM table machinery for mod_botshield.
+/* shm.h — SHM table machinery for mod_botshield.
  *
  * mod_botshield holds five tables in a single APR shared-memory segment
  * plus a small fixed header with global counters. Workers read/write
@@ -40,7 +40,7 @@
  *
  * Symbol-namespacing rule (Apache modules share dynamic-linker symbol
  * space): every cross-file function/type/global declared here uses the
- * `bs_` / `BS_` prefix. File-local helpers in botshield_shm.c stay
+ * `bs_` / `BS_` prefix. File-local helpers in shm.c stay
  * `static`. The Apache module entry point `botshield_module` is the
  * one un-prefixed symbol — Apache's `LoadModule` requires that name. */
 #ifndef BOTSHIELD_SHM_H
@@ -202,7 +202,7 @@ typedef enum {
 
 /* E11 load-aware throttling state — value lives in
  * bs_shm_header.load_state (as apr_uint32_t for atomic access). The
- * sampler watchdog + hysteresis logic lives in mod_botshield.c; the
+ * sampler watchdog + hysteresis logic lives in botshield.c; the
  * tunables below are exposed here because the enum is. */
 typedef enum {
     BS_LOAD_NORMAL = 0,
@@ -373,7 +373,7 @@ typedef struct {
 /* Module-global runtime pointer struct. Populated once in post-config;
  * children inherit via fork. `rate_counters` stays opaque (`void *`)
  * because the bs_rate_counter struct is owned by the rate-limit
- * machinery, not the SHM layer — botshield_shm.c only stores the
+ * machinery, not the SHM layer — shm.c only stores the
  * pointer, never dereferences it. */
 typedef struct {
     apr_shm_t           *shm;
@@ -407,7 +407,7 @@ typedef struct {
     apr_size_t           nonce_capacity;
 } bs_shm_runtime;
 
-/* Module-global. Defined in botshield_shm.c; mod_botshield.c
+/* Module-global. Defined in shm.c; botshield.c
  * (and its post_config in particular) writes the slot pointers
  * into this directly during SHM segment layout. */
 extern bs_shm_runtime bs_shm;
@@ -434,7 +434,7 @@ apr_uint64_t bs_siphash24(const unsigned char key[16],
                           const unsigned char *data, apr_size_t len);
 
 /* Bit-population count over a buffer. Used by Bloom-fill metrics
- * gauges (in mod_botshield.c) and the headroom watchdog (here).
+ * gauges (in botshield.c) and the headroom watchdog (here).
  * Uses relaxed atomic loads — Bloom buffers are concurrently
  * mutated; popcount is inherently an approximation. */
 apr_uint64_t bs_popcount_buffer(const unsigned char *buf,
