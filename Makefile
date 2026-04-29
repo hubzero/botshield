@@ -64,7 +64,7 @@ CFLAGS_SAN := \
 # response. apxs forwards trailing -l args to the linker.
 LIBS := -lcrypto -lcurl -ljson-c
 
-.PHONY: all build install enable disable reload clean docs \
+.PHONY: all build install enable disable reload clean test-clean docs \
         sanitize install-sanitize \
         fuzz fuzz-run fuzz-clean \
         fuzz-robots fuzz-robots-run
@@ -101,6 +101,37 @@ reload:
 
 clean:
 	rm -rf src/.libs src/*.lo src/*.la src/*.slo src/*.o
+
+# Transient pytest / __pycache__ / report artifacts. Spares two
+# things on purpose:
+#   - tests/.venv: expensive to recreate (pip install of pytest +
+#     plugins). Wipe with `rm -rf tests/.venv` if you actually want
+#     to start over.
+#   - .hypothesis/examples/: Hypothesis's saved-failure database.
+#     Each entry is a minimized counter-example that gets replayed
+#     on every run, guarding against regression of a property test
+#     that already failed once. Throwing it away on every clean
+#     erases that protection. Use `git clean -fdx` if you really
+#     want a pristine tree.
+#
+# Also wipes .playwright-mcp/ — DOM snapshots and console logs
+# from past Playwright MCP sessions. No replay value; safe to
+# nuke any time.
+test-clean:
+	@# Anchor check + absolute paths via $(CURDIR). The two
+	@# defenses against an `rm -rf` that ran from the wrong place:
+	@# (a) refuse if this directory doesn't look like the repo;
+	@# (b) use $(CURDIR) so a misbehaving sub-shell `cd` can't move
+	@# the deletion target out from under the rule.
+	@test -f "$(CURDIR)/src/botshield.c" || { \
+	  echo "test-clean: $(CURDIR) doesn't look like the mod_botshield repo; refusing." >&2; \
+	  exit 1; \
+	}
+	rm -rf "$(CURDIR)/tests/reports" \
+	       "$(CURDIR)/tests/test-results" \
+	       "$(CURDIR)/.playwright-mcp"
+	find "$(CURDIR)" -type d \( -name .pytest_cache -o -name __pycache__ \) \
+	     -prune -exec rm -rf {} +
 
 docs:
 	$(DOCS_PYTHON) $(DOCS_BUILD)

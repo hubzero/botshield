@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>mod_botshield test docroot</title>
+<style>
+ body{font-family:system-ui,sans-serif;max-width:40em;margin:3em auto;padding:0 1em;color:#222}
+ h1{font-size:1.4em} code{background:#f4f4f4;padding:.1em .3em;border-radius:3px}
+</style>
+</head>
+<body>
+<h1>mod_botshield test docroot</h1>
+<p>This is the static landing page served from <code>tests/site/</code> by the
+mod_botshield development vhost. Pytest uses it as a pass-through baseline:
+the dev vhost serves it when a request makes it past every BotShield check
+without triggering a challenge.</p>
+<p>If you reached this page in a browser, the dev vhost is up and BotShield
+let your request through.</p>
+<!-- Intentionally does NOT include the BotShield interstitial marker; tests
+     check for that marker's presence to distinguish challenged-vs-passed
+     responses. Search the codebase for "interstitial marker" if you need
+     to know what the literal string is. -->
+</body>
+</html>
