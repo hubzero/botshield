@@ -131,7 +131,7 @@ emits at `info`. Apache's default `LogLevel warn` hides them.
 Bump just this module:
 
 ```apache
-LogLevel mod_botshield:info
+LogLevel botshield_module:info
 ```
 
 The `*_observed_total` Prometheus counters increment regardless of

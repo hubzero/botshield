@@ -26,7 +26,7 @@ The decision log emits at Apache's `info` level. Default
 `LogLevel warn` hides it. Bump just this module:
 
 ```apache
-LogLevel mod_botshield:info
+LogLevel botshield_module:info
 ```
 
 `reason`, `path`, and `tag` are double-quoted; embedded `"` and
@@ -271,7 +271,7 @@ curl -i http://localhost/botshield-smoke
 # Hello World
 ```
 
-Pair with `LogLevel mod_botshield:debug` to surface request-path
+Pair with `LogLevel botshield_module:debug` to surface request-path
 DEBUG lines (cookie parse traces, score-add per-reason values, SHM
 slot probes). Disable in production — the verbose lines are
 expensive at scale.

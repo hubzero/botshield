@@ -1,0 +1,46 @@
+# Moderately-sized robots.txt for the bench scenarios that enable
+# BotShieldRobotsTxt. Mirrors the shape a real public site might
+# ship: a wildcard group + a few named-bot groups + ~20 Disallow
+# rules and a Crawl-delay each. Realistic enough to exercise the
+# matcher, small enough that the parse cost is negligible at
+# config-load.
+
+User-agent: *
+Disallow: /admin/
+Disallow: /api/internal/
+Disallow: /private/
+Disallow: /tmp/
+Disallow: /test/
+Disallow: /login.php
+Disallow: /register.php
+Disallow: /search?
+Disallow: /*.json$
+Disallow: /*.xml$
+Crawl-delay: 5
+
+User-agent: Googlebot
+Allow: /
+Disallow: /admin/
+Crawl-delay: 1
+
+User-agent: bingbot
+Allow: /
+Disallow: /admin/
+Disallow: /api/internal/
+Crawl-delay: 2
+
+User-agent: AhrefsBot
+Disallow: /
+Crawl-delay: 60
+
+User-agent: SemrushBot
+Disallow: /
+Crawl-delay: 60
+
+User-agent: GPTBot
+Disallow: /
+Crawl-delay: 60
+
+User-agent: ClaudeBot
+Disallow: /
+Crawl-delay: 60

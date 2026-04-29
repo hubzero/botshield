@@ -138,7 +138,7 @@ decision log is at `info`.
 **Fix**:
 
 ```apache
-LogLevel mod_botshield:info
+LogLevel botshield_module:info
 ```
 
 Reload. Confirm:
@@ -148,7 +148,7 @@ sudo tail -f /var/log/apache2/error.log | grep "mod_botshield: decision"
 ```
 
 For verbose request-path diagnostics (cookie parsing, SHM slot
-probes, per-reason penalty values), use `mod_botshield:debug` —
+probes, per-reason penalty values), use `LogLevel botshield_module:debug` —
 expensive at scale, fine for staging.
 
 ## State file format mismatch on startup
