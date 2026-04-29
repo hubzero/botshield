@@ -113,8 +113,13 @@ clean:
 #     that already failed once. Throwing it away on every clean
 #     erases that protection. Use `git clean -fdx` if you really
 #     want a pristine tree.
+#
+# Also wipes .playwright-mcp/ — DOM snapshots and console logs
+# from past Playwright MCP sessions. No replay value; safe to
+# nuke any time.
 test-clean:
-	rm -rf tests/.pytest_cache tests/reports tests/test-results
+	rm -rf tests/.pytest_cache tests/reports tests/test-results \
+	       .playwright-mcp
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +
 
 docs:

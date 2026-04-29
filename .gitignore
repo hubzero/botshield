@@ -36,6 +36,12 @@ __pycache__/
 # repo doesn't curate it, so ignore the whole directory.
 .claude/
 
+# Playwright MCP server scratch directory — DOM snapshots and
+# console-log dumps from any browser-automation session that ran
+# from this directory. Pure session breadcrumbs; no replay value
+# beyond the moment they were captured.
+.playwright-mcp/
+
 # pytest-playwright screenshot/video artifacts — gitignored; CI
 # uploads as artifacts on failure.
 tests/test-results/
