@@ -755,6 +755,133 @@ static int bs_is_asset_uri(const char *uri)
  *
  * Registered at APR_HOOK_FIRST so we run before the default static-file
  * handler. */
+/* Challenge safeguard: before issuing a challenge, check whether
+ * this IP has been presented N times within the window without
+ * solving. If so, flip to a pass-through (return DECLINED) with
+ * reason=challenge-safeguard so a broken client (JS blocked, CSP-
+ * stripped, cookie handling buggy) stops being looped on the same
+ * challenge. Otherwise record this presentation and proceed.
+ *
+ * Recording the presentation runs unconditionally on safeguard-
+ * eligible paths (have_client_ip + scfg present), regardless of
+ * safeguard_enabled — the embedded → M7 fallback in silent-tier
+ * dispatch reads the same count to decide when to bypass the
+ * embedded short-circuit. The write is cheap (one mutex + a few
+ * SHM stores); the only side-effect when safeguard is "off" is
+ * that embedded mode gets the count it needs.
+ *
+ * Runs AFTER bs_check_policy by construction (caller is already
+ * past the policy short-circuit returns), so 403/429 blocks still
+ * win.
+ *
+ * Returns DECLINED if safeguard short-circuited the request, OK
+ * if the caller should continue to challenge issuance. */
+static int bs_apply_safeguard(request_rec *r, int have_client_ip,
+                              const unsigned char *client_ip,
+                              const char *cookie_status,
+                              bs_request_score *score, int effective)
+{
+    bs_server_cfg *scfg_sg = ap_get_module_config(
+        r->server->module_config, &botshield_module);
+    if (!scfg_sg || !have_client_ip) return OK;
+
+    apr_int64_t now_t = (apr_int64_t)apr_time_sec(apr_time_now());
+    if (scfg_sg->safeguard_enabled == 1 &&
+        bs_safeguard_check(client_ip, now_t, scfg_sg->ns_id)) {
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: challenge-safeguard active for "
+            "%s; skipping challenge-issue and passing "
+            "through (until=%" APR_INT64_T_FMT ")",
+            r->useragent_ip, (apr_int64_t)now_t);
+        bs_score_add(r, 0, 0, "challenge-safeguard");
+        bs_decision_log(r, "safeguard", "declined",
+                        cookie_status, "-", "-",
+                        bs_decision_reason_names(r->pool, score),
+                        effective);
+        return DECLINED;
+    }
+
+    int sg_threshold = bs_safeguard_effective_int(
+        scfg_sg->safeguard_threshold, BS_DEFAULT_SAFEGUARD_THRESHOLD);
+    int sg_window = bs_safeguard_effective_int(
+        scfg_sg->safeguard_window, BS_DEFAULT_SAFEGUARD_WINDOW);
+    int sg_ttl = bs_safeguard_effective_int(
+        scfg_sg->safeguard_ttl, BS_DEFAULT_SAFEGUARD_TTL);
+    bs_safeguard_record_presentation(r, client_ip,
+                                     sg_threshold, sg_window, sg_ttl,
+                                     now_t, scfg_sg->ns_id);
+    return OK;
+}
+
+/* Module-owned endpoint routing. URLs under BotShieldEndpointPrefix
+ * (default /botshield) are served by this module's own handlers, not
+ * the tier dispatch. Today:
+ *   <prefix>/captcha-verify             — single-provider vhost
+ *   <prefix>/captcha-verify/<name>      — per-provider cohabitation
+ *   <prefix>/metrics                    — mod_status-style export
+ *   <prefix>/policy-status              — operator readback
+ *   <prefix>/embedded{.js,-worker.js,-bootstrap,-verify}
+ *                                       — silent-tier embedded path
+ *   <prefix>/form-widget.js             — form-PoW widget shell
+ * The bare /captcha-verify form still works for the single-provider
+ * case so the old dev config and the first-provider-on-a-vhost case
+ * keep working. Called before the debug / asset / cookie paths so
+ * operators can hit the verify endpoint regardless of surrounding
+ * scope.
+ *
+ * Returns the Apache return code if the URI matched a module
+ * endpoint (including 404 OK for unknown-endpoint-under-prefix);
+ * returns -1 if the URI is outside the prefix and the caller should
+ * fall through to the tier dispatch. */
+static int bs_route_module_endpoint(request_rec *r, bs_dir_cfg *cfg)
+{
+    const char *prefix = cfg->endpoint_prefix
+        ? cfg->endpoint_prefix : BS_DEFAULT_ENDPOINT_PREFIX;
+    apr_size_t prefix_len = strlen(prefix);
+    if (!r->uri || strncmp(r->uri, prefix, prefix_len) != 0 ||
+        r->uri[prefix_len] != '/') {
+        return -1;
+    }
+
+    const char *sub = r->uri + prefix_len;
+    if (strcmp(sub, "/captcha-verify") == 0 ||
+        strncmp(sub, "/captcha-verify/", 16) == 0) {
+        return bs_captcha_verify_handler(r, cfg);
+    }
+    if (strcmp(sub, "/metrics") == 0) {
+        return bs_metrics_handler(r);
+    }
+    if (strcmp(sub, "/policy-status") == 0) {
+        return bs_policy_status_handler(r, cfg);
+    }
+    if (strcmp(sub, "/embedded.js") == 0) {
+        return bs_embedded_js_handler(r);
+    }
+    if (strcmp(sub, "/embedded-worker.js") == 0) {
+        return bs_embedded_worker_handler(r);
+    }
+    if (strcmp(sub, "/embedded-bootstrap") == 0) {
+        return bs_embedded_bootstrap_handler(r, cfg);
+    }
+    if (strcmp(sub, "/embedded-verify") == 0) {
+        return bs_embedded_verify_handler(r, cfg);
+    }
+    if (strcmp(sub, "/form-widget.js") == 0) {
+        return bs_form_widget_handler(r);
+    }
+
+    /* Unknown module endpoint under the prefix → 404, so a typo in
+     * an operator's template fails loudly instead of falling through
+     * to Apache and serving some unrelated file. */
+    r->status = HTTP_NOT_FOUND;
+    ap_set_content_type(r, "text/plain; charset=utf-8");
+    apr_table_setn(r->err_headers_out, "X-Botshield", "unknown-endpoint");
+    ap_rputs("Not found.\n", r);
+    bs_decision_log(r, "none", "rejected", "-", "-", "-",
+                    "unknown_endpoint", 0);
+    return OK;
+}
+
 static int bs_handler(request_rec *r)
 {
     bs_dir_cfg *cfg = ap_get_module_config(r->per_dir_config,
@@ -766,58 +893,9 @@ static int bs_handler(request_rec *r)
         return DECLINED;
     }
 
-    /* Module-owned endpoint routing (M8). URLs under BotShieldEndpointPrefix
-     * (default /botshield) are served by this module's own handlers, not
-     * the tier dispatch. Today:
-     *   <prefix>/captcha-verify             — single-provider vhost
-     *   <prefix>/captcha-verify/<name>      — per-provider cohabitation
-     * The bare form still works for the single-provider case so the old
-     * dev config and the first-provider-on-a-vhost case keep working.
-     * Done before the debug / asset / cookie paths so operators can hit
-     * the verify endpoint regardless of surrounding scope. */
-    const char *prefix = cfg->endpoint_prefix
-        ? cfg->endpoint_prefix : BS_DEFAULT_ENDPOINT_PREFIX;
-    apr_size_t prefix_len = strlen(prefix);
-    if (r->uri && strncmp(r->uri, prefix, prefix_len) == 0 &&
-        r->uri[prefix_len] == '/') {
-        const char *sub = r->uri + prefix_len;
-        if (strcmp(sub, "/captcha-verify") == 0 ||
-            strncmp(sub, "/captcha-verify/", 16) == 0) {
-            return bs_captcha_verify_handler(r, cfg);
-        }
-        if (strcmp(sub, "/metrics") == 0) {
-            return bs_metrics_handler(r);
-        }
-        if (strcmp(sub, "/policy-status") == 0) {
-            return bs_policy_status_handler(r, cfg);
-        }
-        /* E17 PoC — embedded silent-verify endpoints. */
-        if (strcmp(sub, "/embedded.js") == 0) {
-            return bs_embedded_js_handler(r);
-        }
-        if (strcmp(sub, "/embedded-worker.js") == 0) {
-            return bs_embedded_worker_handler(r);
-        }
-        if (strcmp(sub, "/embedded-bootstrap") == 0) {
-            return bs_embedded_bootstrap_handler(r, cfg);
-        }
-        if (strcmp(sub, "/embedded-verify") == 0) {
-            return bs_embedded_verify_handler(r, cfg);
-        }
-        /* E18.4 — form-widget shell. */
-        if (strcmp(sub, "/form-widget.js") == 0) {
-            return bs_form_widget_handler(r);
-        }
-        /* Unknown module endpoint under the prefix → 404, so a typo in
-         * an operator's template fails loudly instead of falling through
-         * to Apache and serving some unrelated file. */
-        r->status = HTTP_NOT_FOUND;
-        ap_set_content_type(r, "text/plain; charset=utf-8");
-        apr_table_setn(r->err_headers_out, "X-Botshield", "unknown-endpoint");
-        ap_rputs("Not found.\n", r);
-        bs_decision_log(r, "none", "rejected", "-", "-", "-",
-                        "unknown_endpoint", 0);
-        return OK;
+    int endpoint_rv = bs_route_module_endpoint(r, cfg);
+    if (endpoint_rv != -1) {
+        return endpoint_rv;
     }
 
     /* Debug override keeps the first-commit behavior available for tests. */
@@ -1093,59 +1171,9 @@ static int bs_handler(request_rec *r)
      * writes off the ~99% happy path. */
     if (have_client_ip) bs_bloom_add(client_ip, scfg_h->ns_id);
 
-    /* E10 — challenge safeguard. Before actually issuing the
-     * challenge, check whether this IP has been presented N times
-     * within the window without solving. If so, flip to a pass-
-     * through with reason=challenge-safeguard so a broken client
-     * (JS blocked, CSP-stripped, cookie handling buggy) stops
-     * being looped on the same challenge. Otherwise record this
-     * presentation and proceed. Safeguard runs AFTER bs_check_policy
-     * by construction (we're already past the policy short-circuit
-     * returns), so 403/429 blocks still win. */
-    {
-        bs_server_cfg *scfg_sg = ap_get_module_config(
-            r->server->module_config, &botshield_module);
-        if (scfg_sg && have_client_ip) {
-            apr_int64_t now_t = (apr_int64_t)apr_time_sec(apr_time_now());
-            /* Active-state behavior is gated on safeguard_enabled —
-             * an operator who hasn't opted into safeguard doesn't
-             * want pass-through-after-N. */
-            if (scfg_sg->safeguard_enabled == 1 &&
-                bs_safeguard_check(client_ip, now_t, scfg_sg->ns_id)) {
-                ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
-                    "mod_botshield: challenge-safeguard active for "
-                    "%s; skipping challenge-issue and passing "
-                    "through (until=%" APR_INT64_T_FMT ")",
-                    r->useragent_ip, (apr_int64_t)now_t);
-                bs_score_add(r, 0, 0, "challenge-safeguard");
-                bs_decision_log(r, "safeguard", "declined",
-                                cookie_status, "-", "-",
-                                bs_decision_reason_names(r->pool, score),
-                                effective);
-                return DECLINED;
-            }
-            /* Record the presentation regardless of safeguard_enabled.
-             * E17's embedded → M7 fallback reads the same count to
-             * decide when to bypass the embedded short-circuit. The
-             * write itself is cheap (one mutex + a few SHM stores);
-             * the only side-effect when safeguard is "off" is that
-             * embedded mode gets the count it needs. */
-            int sg_threshold = bs_safeguard_effective_int(
-                scfg_sg->safeguard_threshold,
-                BS_DEFAULT_SAFEGUARD_THRESHOLD);
-            int sg_window = bs_safeguard_effective_int(
-                scfg_sg->safeguard_window,
-                BS_DEFAULT_SAFEGUARD_WINDOW);
-            int sg_ttl = bs_safeguard_effective_int(
-                scfg_sg->safeguard_ttl,
-                BS_DEFAULT_SAFEGUARD_TTL);
-            bs_safeguard_record_presentation(r, client_ip,
-                                             sg_threshold, sg_window,
-                                             sg_ttl,
-                                             now_t,
-                                             scfg_sg->ns_id);
-        }
-    }
+    int safeguard_rv = bs_apply_safeguard(r, have_client_ip, client_ip,
+                                          cookie_status, score, effective);
+    if (safeguard_rv != OK) return safeguard_rv;
 
     /* E17 — silent-tier dispatch with embedded mode. Default behavior:
      * skip the M7 interstitial, serve the real page (DECLINED), let
