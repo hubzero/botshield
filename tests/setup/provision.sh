@@ -143,6 +143,22 @@ rm -f /etc/botshield/app-feedback-secret /etc/botshield/app-claims-secret
 echo "== /var/lib/botshield (state file dir) =="
 install -d -m 750 -o www-data -g www-data /var/lib/botshield
 
+echo "== docroot path traversability for www-data =="
+# Apache runs as www-data; the dev vhost serves files out of the
+# checkout (${BS_REPO}/tests/site/). For Apache to read those, every
+# ancestor directory needs the +x (traversal) bit for OTHERS.
+#
+# On a developer box this is usually already true — /home/<user>/
+# defaults to 0755 or 0750. On GitHub Actions runners /home/runner/
+# is 0700 by default, which means www-data gets EACCES on every
+# request and Apache 403s before the file handler can serve. Walk
+# up from $REPO and add o+x to each ancestor (idempotent).
+parent="$REPO"
+while [[ "$parent" != "/" ]]; do
+    chmod o+x "$parent" 2>/dev/null || true
+    parent=$(dirname "$parent")
+done
+
 echo "== dev vhost =="
 # The vhost references this checkout via ${BS_REPO}; set the variable
 # to *this* clone's path before the vhost is included so docroot,
