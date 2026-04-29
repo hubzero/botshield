@@ -1,0 +1,57 @@
+# EditorConfig — locks indentation, line endings, and trailing-
+# whitespace handling for the codebase. Most editors (VS Code,
+# Vim with editorconfig-vim, JetBrains, Sublime, Emacs) read this
+# file automatically on open and apply the rules.
+#
+# Layout choices beyond indentation (brace placement, alignment of
+# switch-case registries, one-argument-per-line function signatures,
+# multi-line call continuation indentation) are human-maintained;
+# the codebase deliberately doesn't run a clang-format pass because
+# the existing manual layout is more readable than what any
+# clang-format profile preserves. See DESIGN.md "Source style"
+# for the conventions a contributor should match by hand.
+
+root = true
+
+# All C source: 4-space indent, no tabs, trim trailing whitespace.
+[*.{c,h}]
+indent_style    = space
+indent_size     = 4
+charset         = utf-8
+end_of_line     = lf
+trim_trailing_whitespace = true
+insert_final_newline     = true
+
+# Apache config files: 4-space indent matches the dev vhost.
+[*.conf]
+indent_style    = space
+indent_size     = 4
+charset         = utf-8
+end_of_line     = lf
+trim_trailing_whitespace = true
+insert_final_newline     = true
+
+# Shell + Python — 4-space indent, lf, utf-8.
+[*.{sh,py}]
+indent_style    = space
+indent_size     = 4
+charset         = utf-8
+end_of_line     = lf
+trim_trailing_whitespace = true
+insert_final_newline     = true
+
+# Makefile — tabs are mandatory, never replace them.
+[Makefile]
+indent_style    = tab
+charset         = utf-8
+end_of_line     = lf
+
+# Markdown — preserve trailing spaces (used for hard line breaks
+# in some docs); 4-space indent for code blocks consistency.
+[*.md]
+indent_style    = space
+indent_size     = 4
+charset         = utf-8
+end_of_line     = lf
+trim_trailing_whitespace = false
+insert_final_newline     = true
