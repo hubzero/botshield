@@ -607,7 +607,7 @@ Bump just this module to make it visible without raising the
 verbosity of the rest of the server:
 
 ```apache
-LogLevel mod_botshield:info
+LogLevel botshield_module:info
 ```
 
 The `reason`, `path`, and `tag` fields are quoted; embedded `"`
@@ -683,9 +683,11 @@ actually does):
 | `/botshield/metrics` | Prometheus text exposition |
 | `/server-status` | Apache `mod_status` (enables the botshield contribution hook) |
 
-The test site lives under `testsite/` and is git-ignored. See the header
-of `apache/botshield-dev.conf` for how to set up the self-signed cert
-and docroot.
+The dev-vhost docroot is committed at `tests/site/` — a four-file
+fixture (`index.html`, `bs-custom-help.html`, `bs-custom-page.html`,
+`assets/logos/01-guardian.svg`) that's reproducible across machines.
+See the header of `apache/botshield-dev.conf` for how to set up the
+self-signed cert and enable the vhost.
 
 ## License
 

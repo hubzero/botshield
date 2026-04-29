@@ -1,7 +1,3 @@
-# Dev-only content served by the local Apache vhost for testing.
-# Not part of the module; regenerate from scratch if needed.
-/testsite/
-
 # apxs / libtool build artifacts
 *.o
 *.lo
@@ -17,9 +13,12 @@
 .vscode/
 
 # Python test framework (M11.4+) — venv + pytest caches + egg-info
-# + per-run reports are per-box artifacts that don't belong in the repo.
+# + per-run reports are per-box artifacts that don't belong in the
+# repo. .pytest_cache/ pattern is unanchored: pytest writes one
+# wherever its cwd was when invoked, so the repo-root copy and the
+# tests/-relative copy are both caught.
 tests/.venv/
-tests/.pytest_cache/
+.pytest_cache/
 tests/*.egg-info/
 tests/reports/
 __pycache__/
@@ -34,6 +33,12 @@ __pycache__/
 # the team.
 .claude/
 .codex
+
+# Playwright MCP server scratch directory — DOM snapshots and
+# console-log dumps from any browser-automation session that ran
+# from this directory. Pure session breadcrumbs; no replay value
+# beyond the moment they were captured.
+.playwright-mcp/
 
 # pytest-playwright screenshot/video artifacts — gitignored; CI
 # uploads as artifacts on failure.
