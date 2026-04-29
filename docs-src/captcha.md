@@ -207,13 +207,12 @@ compromised app can emit any event name, but only configured
 mappings reach module memory. Renaming, retiring, or muting an
 event is a config change with no app-side coordination.
 
-Feedback honors global `BotShieldShadowMode`. Under
-`BotShieldShadowMode on` the filter logs
-`feedback-trigger:<event>:observe` without mutating the flagged-IP
-table. Per-trigger `mode=observe` is rejected by the parser on
-`BotShieldFeedbackTrigger` — observe is meaningless once the
-response has already shipped, so feedback's only observe gate is
-the global shadow flag.
+Feedback honors both global `BotShieldShadowMode` and per-trigger
+`mode=observe` — under either gate the filter logs
+`feedback-trigger:<event>:observe` and skips the flagged-IP write.
+The "side effect" of a feedback trigger is future-request state
+(the IP flag), so observe-mode is meaningful even though the
+response has already shipped.
 
 ### Module-to-app claims
 

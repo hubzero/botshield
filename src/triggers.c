@@ -199,10 +199,10 @@ static const char *bs_trigger_known_keys(bs_trigger_family fam)
     case BS_TFAMILY_ENV:
         return "status, log, flag, ttl, penalty, credit, mode";
     case BS_TFAMILY_FEEDBACK:
-        /* No mode= for feedback: the response has already been
-         * served, so "observe" doesn't have a meaningful no-op
-         * compared to enforce. */
-        return "flag, ttl, log";
+        /* mode=observe means "log :observe but skip the flagged-IP
+         * write" — meaningful for staging a feedback rule before
+         * mutating server state. */
+        return "flag, ttl, log, mode";
     case BS_TFAMILY_LOAD:
         return "status, log, penalty, credit, mode";
     case BS_TFAMILY_SCOPE:
@@ -334,18 +334,13 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
         }
         a->penalty = (int)pn;
     } else if (BS_AK("mode")) {
-        /* E12 — observe vs enforce. Default enforce; observe makes
-         * the rule log a :observe match without taking the action.
-         * Same enum across path/cookie/env/load families. Feedback
-         * is response-path; observe doesn't have a meaningful no-op
-         * there (the response already shipped), so reject. */
-        if (fam == BS_TFAMILY_FEEDBACK) {
-            return apr_psprintf(pool,
-                "%s: mode= is not supported on feedback triggers "
-                "(observe is meaningless on a response-path rule; "
-                "if you don't want the event applied, just don't "
-                "declare a BotShieldFeedbackTrigger for it)", dname);
-        }
+        /* observe vs enforce. Default enforce; observe makes the
+         * rule log a :observe match without applying side effects.
+         * For feedback triggers the side effect is the flagged-IP
+         * write; observe-mode means "log would-have-flagged but
+         * skip the SHM mutation", which is the same staging gate
+         * operators get for the other families. The bridge.c
+         * filter already honors a->mode == BS_TMODE_OBSERVE. */
         if (!strcasecmp(val, "enforce")) {
             a->mode = BS_TMODE_ENFORCE;
         } else if (!strcasecmp(val, "observe")) {

@@ -288,11 +288,11 @@ compromised app can emit any event name, but only configured
 mappings reach module memory. Wire format details and signing are
 covered in [captcha](../captcha/index.html).
 
-Feedback runs on the response path. Per-trigger `mode=observe` is
-rejected by the parser (observe is meaningless once the response
-has shipped); global `BotShieldShadowMode` still flips feedback
-into observe semantics — matches log `feedback-trigger:<event>:
-observe` without mutating the flagged-IP table. See
+Feedback runs on the response path but its side effect is
+future-request state (the flagged-IP write). Both global
+`BotShieldShadowMode` and per-trigger `mode=observe` apply —
+either gates the filter into logging `feedback-trigger:<event>:
+observe` and skipping the SHM mutation. See
 [staging](../staging/index.html).
 
 ### Load triggers
