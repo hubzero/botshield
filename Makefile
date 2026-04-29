@@ -118,8 +118,19 @@ clean:
 # from past Playwright MCP sessions. No replay value; safe to
 # nuke any time.
 test-clean:
-	rm -rf tests/reports tests/test-results .playwright-mcp
-	find . -type d \( -name .pytest_cache -o -name __pycache__ \) \
+	@# Anchor check + absolute paths via $(CURDIR). The two
+	@# defenses against an `rm -rf` that ran from the wrong place:
+	@# (a) refuse if this directory doesn't look like the repo;
+	@# (b) use $(CURDIR) so a misbehaving sub-shell `cd` can't move
+	@# the deletion target out from under the rule.
+	@test -f "$(CURDIR)/src/botshield.c" || { \
+	  echo "test-clean: $(CURDIR) doesn't look like the mod_botshield repo; refusing." >&2; \
+	  exit 1; \
+	}
+	rm -rf "$(CURDIR)/tests/reports" \
+	       "$(CURDIR)/tests/test-results" \
+	       "$(CURDIR)/.playwright-mcp"
+	find "$(CURDIR)" -type d \( -name .pytest_cache -o -name __pycache__ \) \
 	     -prune -exec rm -rf {} +
 
 docs:
