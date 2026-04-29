@@ -11,7 +11,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-yellow.svg" alt="License: MIT"></a>
   <a href="https://hubzero.github.io/botshield/"><img src="https://img.shields.io/badge/docs-Pages-blue" alt="docs"></a>
   <a href="https://httpd.apache.org/"><img src="https://img.shields.io/badge/Apache-2.4-D22128?logo=apache&logoColor=white" alt="Apache 2.4 module"></a>
-  <a href="https://en.cppreference.com/w/c"><img src="https://img.shields.io/badge/C-99-blue?logo=c&logoColor=white" alt="C"></a>
+  <a href="https://en.cppreference.com/w/c"><img src="https://img.shields.io/badge/C99-blue?logo=c&logoColor=white" alt="C99"></a>
   <a href="#mod_botshield"><img src="https://img.shields.io/badge/status-beta-orange" alt="status: beta"></a>
 </p>
 
