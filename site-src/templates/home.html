@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ site_name }} | Apache-native bot defense</title>
+  <meta name="description" content="{{ site_description }}">
+  <link rel="stylesheet" href="assets/site.css">
+</head>
+<body class="site-home">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <div class="page-shell">
+    <header class="site-header">
+      <a class="brand" href="index.html">
+        <img class="brand__icon" src="{{ logo_href }}" alt="" aria-hidden="true">
+        <span class="brand__wordmark" aria-label="BotShield">
+          <span class="brand__wordmark-soft">Bot</span><span class="brand__wordmark-strong">Shield</span>
+        </span>
+      </a>
+      <nav class="top-nav" aria-label="Primary">
+        <a class="top-nav__link" href="{{ github_href }}">GitHub</a>
+        <a class="top-nav__link" href="{{ docs_href }}">Docs</a>
+        <a class="top-nav__link" href="{{ download_href }}">Download</a>
+      </nav>
+    </header>
+
+    <main id="main-content" class="home-main" tabindex="-1">
+      <section class="hero">
+        <div class="hero__brand hero__brand--split">
+          <img class="hero__emblem" src="{{ logo_href }}" alt="" aria-hidden="true">
+          <div class="hero__brand-copy">
+            <p class="hero__wordmark" aria-label="BotShield">
+              <span class="hero__wordmark-soft">Bot</span><span class="hero__wordmark-strong">Shield</span>
+            </p>
+            <p class="hero__tagline">{{ brand_tagline }}</p>
+          </div>
+        </div>
+        <h1>Adaptive bot mitigation for <span class="hero__nowrap">the Apache HTTP Server</span>.</h1>
+        <p class="hero__lede">
+          BotShield scores requests, tracks short-term reputation, and decides whether to pass,
+          challenge, slow down, or block before application code has to absorb the traffic.
+        </p>
+      </section>
+
+      <section id="overview" class="workflow-panel">
+        <div class="workflow">
+          <article class="workflow-card workflow-card--traffic">
+            <h3 class="sr-only">Wild traffic</h3>
+            <svg class="workflow-visual traffic-stage" viewBox="0 0 620 420" aria-hidden="true">
+              <defs>
+                <clipPath id="traffic-stage-floor-clip">
+                  <path d="M92 400 L528 400 L424 264 L196 264 Z"></path>
+                </clipPath>
+                <linearGradient id="traffic-stage-app-bay-fill" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stop-color="#2f3945" stop-opacity="0.98"></stop>
+                  <stop offset="24%" stop-color="#202933" stop-opacity="0.99"></stop>
+                  <stop offset="70%" stop-color="#141b22" stop-opacity="1"></stop>
+                  <stop offset="100%" stop-color="#10161c" stop-opacity="1"></stop>
+                </linearGradient>
+                <filter id="traffic-stage-app-bay-inset" x="-28%" y="-60%" width="156%" height="220%" color-interpolation-filters="sRGB">
+                  <feOffset in="SourceAlpha" dx="0" dy="-1.5" result="highlight-offset"></feOffset>
+                  <feGaussianBlur in="highlight-offset" stdDeviation="1.5" result="highlight-blur"></feGaussianBlur>
+                  <feComposite in="highlight-blur" in2="SourceAlpha" operator="arithmetic" k2="-1" k3="1" result="highlight-inner"></feComposite>
+                  <feFlood flood-color="#f6fbff" flood-opacity="0.22" result="highlight-color"></feFlood>
+                  <feComposite in="highlight-color" in2="highlight-inner" operator="in" result="highlight-shadow"></feComposite>
+                  <feOffset in="SourceAlpha" dx="0" dy="1.9" result="shadow-offset"></feOffset>
+                  <feGaussianBlur in="shadow-offset" stdDeviation="2" result="shadow-blur"></feGaussianBlur>
+                  <feComposite in="shadow-blur" in2="SourceAlpha" operator="arithmetic" k2="-1" k3="1" result="shadow-inner"></feComposite>
+                  <feFlood flood-color="#020508" flood-opacity="0.74" result="shadow-color"></feFlood>
+                  <feComposite in="shadow-color" in2="shadow-inner" operator="in" result="shadow-fill"></feComposite>
+                  <feMerge>
+                    <feMergeNode in="highlight-shadow"></feMergeNode>
+                    <feMergeNode in="shadow-fill"></feMergeNode>
+                    <feMergeNode in="SourceGraphic"></feMergeNode>
+                  </feMerge>
+                </filter>
+              </defs>
+
+              <g class="traffic-stage__floor" clip-path="url(#traffic-stage-floor-clip)">
+                <rect class="traffic-stage__floor-fill" x="92" y="264" width="436" height="136"></rect>
+                <line class="traffic-stage__grid-line" x1="92" y1="400" x2="196" y2="264"></line>
+                <line class="traffic-stage__grid-line" x1="150" y1="400" x2="236" y2="264"></line>
+                <line class="traffic-stage__grid-line" x1="208" y1="400" x2="274" y2="264"></line>
+                <line class="traffic-stage__grid-line" x1="266" y1="400" x2="302" y2="264"></line>
+                <line class="traffic-stage__grid-line" x1="354" y1="400" x2="318" y2="264"></line>
+                <line class="traffic-stage__grid-line" x1="412" y1="400" x2="346" y2="264"></line>
+                <line class="traffic-stage__grid-line" x1="470" y1="400" x2="384" y2="264"></line>
+                <line class="traffic-stage__grid-line" x1="528" y1="400" x2="424" y2="264"></line>
+                <line class="traffic-stage__grid-line" x1="110" y1="382" x2="510" y2="382"></line>
+                <line class="traffic-stage__grid-line" x1="124" y1="360" x2="496" y2="360"></line>
+                <line class="traffic-stage__grid-line" x1="140" y1="336" x2="480" y2="336"></line>
+                <line class="traffic-stage__grid-line" x1="156" y1="310" x2="464" y2="310"></line>
+                <line class="traffic-stage__grid-line" x1="176" y1="286" x2="444" y2="286"></line>
+              </g>
+
+              <g class="traffic-stage__web">
+                <circle class="traffic-stage__web-ring" cx="310" cy="234" r="68"></circle>
+                <ellipse class="traffic-stage__web-lat" cx="310" cy="234" rx="68" ry="22"></ellipse>
+                <ellipse class="traffic-stage__web-lat" cx="310" cy="234" rx="68" ry="38"></ellipse>
+                <ellipse class="traffic-stage__web-lon" cx="310" cy="234" rx="26" ry="68"></ellipse>
+                <ellipse class="traffic-stage__web-lon" cx="310" cy="234" rx="46" ry="68"></ellipse>
+                <text class="traffic-stage__web-text" x="310" y="248">WEB</text>
+              </g>
+
+              <path class="traffic-stage__route" d="M132 54 C186 94, 232 154, 258 208"></path>
+              <path class="traffic-stage__route" d="M222 94 C252 138, 274 170, 286 212"></path>
+              <path class="traffic-stage__route traffic-stage__route--danger" d="M310 140 C310 168, 310 190, 310 212"></path>
+              <path class="traffic-stage__route" d="M387 54 C372 104, 350 154, 334 210"></path>
+              <path class="traffic-stage__route" d="M465 94 C420 136, 384 168, 356 214"></path>
+              <path class="traffic-stage__downlink" d="M310 302 L310 328"></path>
+
+              <g class="traffic-stage__source traffic-stage__source--browsers" transform="translate(60 18)">
+                <rect class="traffic-stage__source-box" width="144" height="36" rx="12"></rect>
+                <rect class="traffic-stage__icon traffic-stage__icon--window" x="11" y="10" width="20" height="15" rx="3"></rect>
+                <line class="traffic-stage__icon-line" x1="11" y1="14" x2="31" y2="14"></line>
+                <text class="traffic-stage__source-text" x="42" y="24">Browsers</text>
+              </g>
+
+              <g class="traffic-stage__source traffic-stage__source--llm" transform="translate(304 18)">
+                <rect class="traffic-stage__source-box traffic-stage__source-box--llm" width="166" height="36" rx="12"></rect>
+                <rect class="traffic-stage__icon traffic-stage__icon--chip" x="11" y="10" width="20" height="15" rx="4"></rect>
+                <line class="traffic-stage__icon-line traffic-stage__icon-line--llm" x1="7" y1="14" x2="11" y2="14"></line>
+                <line class="traffic-stage__icon-line traffic-stage__icon-line--llm" x1="31" y1="14" x2="35" y2="14"></line>
+                <line class="traffic-stage__icon-line traffic-stage__icon-line--llm" x1="7" y1="21" x2="11" y2="21"></line>
+                <line class="traffic-stage__icon-line traffic-stage__icon-line--llm" x1="31" y1="21" x2="35" y2="21"></line>
+                <text class="traffic-stage__source-text traffic-stage__source-text--llm" x="42" y="24">LLM Trainers</text>
+              </g>
+
+              <g class="traffic-stage__source traffic-stage__source--agents" transform="translate(162 58)">
+                <rect class="traffic-stage__source-box" width="120" height="36" rx="12"></rect>
+                <rect class="traffic-stage__icon traffic-stage__icon--rack" x="11" y="10" width="20" height="15" rx="3"></rect>
+                <circle class="traffic-stage__icon-led" cx="16" cy="15" r="1.2"></circle>
+                <circle class="traffic-stage__icon-led" cx="16" cy="20" r="1.2"></circle>
+                <line class="traffic-stage__icon-line" x1="20" y1="15" x2="28" y2="15"></line>
+                <line class="traffic-stage__icon-line" x1="20" y1="20" x2="28" y2="20"></line>
+                <text class="traffic-stage__source-text" x="42" y="24">Agents</text>
+              </g>
+
+              <g class="traffic-stage__source traffic-stage__source--search" transform="translate(370 58)">
+                <rect class="traffic-stage__source-box traffic-stage__source-box--warn" width="190" height="36" rx="12"></rect>
+                <circle class="traffic-stage__icon traffic-stage__icon--warn" cx="22" cy="18" r="5"></circle>
+                <line class="traffic-stage__icon-line traffic-stage__icon-line--warn" x1="15" y1="18" x2="29" y2="18"></line>
+                <line class="traffic-stage__icon-line traffic-stage__icon-line--warn" x1="22" y1="11" x2="22" y2="25"></line>
+                <text class="traffic-stage__source-text traffic-stage__source-text--warn" x="38" y="24">Search engines</text>
+              </g>
+
+              <g class="traffic-stage__source traffic-stage__source--actors" transform="translate(238 104)">
+                <rect class="traffic-stage__source-box traffic-stage__source-box--danger" width="144" height="36" rx="12"></rect>
+                <path class="traffic-stage__icon traffic-stage__icon--danger" d="M18 11.5 L24.5 23.5 L11.5 23.5 Z"></path>
+                <line class="traffic-stage__icon-line traffic-stage__icon-line--danger" x1="18" y1="15.4" x2="18" y2="19.1"></line>
+                <circle class="traffic-stage__icon-line--danger" cx="18" cy="21.4" r="0.9"></circle>
+                <text class="traffic-stage__source-text traffic-stage__source-text--danger" x="36" y="24">Bad actors</text>
+              </g>
+
+              <g class="traffic-stage__packets">
+                <rect class="traffic-stage__packet" x="120" y="238" width="22" height="16" rx="4"></rect>
+                <rect class="traffic-stage__packet traffic-stage__packet--warn" x="214" y="228" width="18" height="13" rx="4"></rect>
+                <rect class="traffic-stage__packet traffic-stage__packet--llm" x="396" y="230" width="18" height="13" rx="4"></rect>
+                <rect class="traffic-stage__packet" x="472" y="244" width="22" height="16" rx="4"></rect>
+                <rect class="traffic-stage__packet traffic-stage__packet--danger" x="300" y="262" width="16" height="12" rx="4"></rect>
+              </g>
+
+              <g class="traffic-stage__shield" transform="translate(182 328)">
+                <rect class="traffic-stage__shield-box" width="256" height="96" rx="18"></rect>
+                <g class="traffic-stage__shield-lockup" transform="translate(52 10)">
+                  <image class="traffic-stage__shield-logo" href="{{ logo_href }}" x="0" y="1" width="28" height="28" preserveAspectRatio="xMidYMid meet"></image>
+                  <text class="traffic-stage__shield-wordmark" x="35" y="15">
+                    <tspan class="traffic-stage__shield-wordmark-soft">Bot</tspan><tspan class="traffic-stage__shield-wordmark-strong">Shield</tspan>
+                  </text>
+                </g>
+                <g class="traffic-stage__protected-app" transform="translate(48 48)">
+                  <rect class="traffic-stage__protected-app-bay" width="160" height="28" rx="14"></rect>
+                  <g class="traffic-stage__app-content" transform="translate(80 14)">
+                    <rect class="traffic-stage__app-icon" x="-28" y="-7" width="18" height="14" rx="3"></rect>
+                    <line class="traffic-stage__app-icon-line" x1="-28" y1="-3" x2="-10" y2="-3"></line>
+                    <text class="traffic-stage__app-text" x="-4" y="6">App</text>
+                  </g>
+                </g>
+              </g>
+            </svg>
+            <div class="workflow-note-block workflow-note-block--traffic">
+              <p class="workflow-note workflow-note--traffic">
+                Web traffic meets BotShield before requests ever wake the application.
+              </p>
+            </div>
+          </article>
+
+          <article class="workflow-card workflow-card--center workflow-card--judgment">
+            <h3 class="sr-only">Weighted judgment</h3>
+            <div class="workflow-visual judgment-grid" aria-hidden="true">
+              <div class="judgment-column judgment-column--left">
+                <span class="judgment-chip">
+                  <strong>URL</strong>
+                  <small>pattern</small>
+                </span>
+                <span class="judgment-chip">
+                  <strong>Cookies</strong>
+                  <small>state</small>
+                </span>
+                <span class="judgment-chip">
+                  <strong>Load</strong>
+                  <small>signal</small>
+                </span>
+              </div>
+              <div class="judgment-kernel">
+                <span class="judgment-kernel__sigma">&Sigma;</span>
+                <span class="judgment-kernel__formula">(w<sub>i</sub> * f<sub>i</sub>)</span>
+                <span class="judgment-kernel__caption">weighted signals</span>
+              </div>
+              <div class="judgment-column judgment-column--right">
+                <span class="judgment-chip judgment-chip--soft">
+                  <strong>robots.txt</strong>
+                  <small>policy</small>
+                </span>
+                <span class="judgment-chip judgment-chip--warn">
+                  <strong>Score</strong>
+                  <small>tier</small>
+                </span>
+                <span class="judgment-chip judgment-chip--danger">
+                  <strong>App</strong>
+                  <small>feedback</small>
+                </span>
+              </div>
+            </div>
+            <div class="judgment-more" aria-hidden="true">And more...</div>
+            <div class="workflow-note-block workflow-note-block--judgment">
+              <p class="workflow-note workflow-note--judgment">
+                Several signals combine into one score that drives the response.
+              </p>
+            </div>
+          </article>
+
+          <article class="workflow-card workflow-card--response">
+            <h3 class="sr-only">Response ladder</h3>
+            <div class="workflow-visual response-ladder" aria-hidden="true">
+              <span class="response-ladder__step response-ladder__step--soft">Pass</span>
+              <span class="response-ladder__step response-ladder__step--warn">Challenge</span>
+              <span class="response-ladder__step response-ladder__step--alert">Ratelimit</span>
+              <span class="response-ladder__step response-ladder__step--danger">Block</span>
+            </div>
+            <div class="workflow-note-block workflow-note-block--response">
+              <p class="workflow-note workflow-note--response">
+                Each request gets the lightest response that fits the score &mdash; stronger actions only when signals warrant.
+              </p>
+            </div>
+          </article>
+
+        </div>
+      </section>
+
+      <section class="capability-row">
+        <article class="capability-card">
+          <h3>Drop-in challenge providers</h3>
+          <ul class="cap-brands" aria-label="Supported challenge providers">
+            <li class="cap-brand cap-brand--turnstile">
+              <span class="cap-brand__mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M5.5 12.5 L10 17 L18.5 8" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" fill="none"></path></svg>
+              </span>
+              <span class="cap-brand__name">Turnstile</span>
+            </li>
+            <li class="cap-brand cap-brand--hcaptcha">
+              <span class="cap-brand__mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><text x="12" y="17" text-anchor="middle" font-family="var(--font-display)" font-size="15" font-weight="800">h</text></svg>
+              </span>
+              <span class="cap-brand__name">hCaptcha</span>
+            </li>
+            <li class="cap-brand cap-brand--recaptcha">
+              <span class="cap-brand__mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <path d="M19 12 a7 7 0 1 1 -2.6 -5.4" stroke-width="2.4" stroke-linecap="round" fill="none"></path>
+                  <path d="M19 5 V10 H14" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" fill="none"></path>
+                </svg>
+              </span>
+              <span class="cap-brand__name">reCAPTCHA</span>
+            </li>
+            <li class="cap-brand cap-brand--pow">
+              <span class="cap-brand__mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <path d="M9 4 L7 20 M17 4 L15 20 M5 9 L20 9 M4 15 L19 15" stroke-width="2.2" stroke-linecap="round" fill="none"></path>
+                </svg>
+              </span>
+              <span class="cap-brand__name">Form PoW</span>
+            </li>
+          </ul>
+          <p>Cloudflare Turnstile, hCaptcha, reCAPTCHA, or a built-in form proof-of-work &mdash; pick what fits your audience.</p>
+        </article>
+        <article class="capability-card">
+          <h3>Crawlers held to policy</h3>
+          <ul class="cap-brands" aria-label="Recognized crawlers">
+            <li class="cap-brand cap-brand--googlebot">
+              <span class="cap-brand__mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><text x="12" y="17" text-anchor="middle" font-family="var(--font-display)" font-size="14" font-weight="800">G</text></svg>
+              </span>
+              <span class="cap-brand__name">Googlebot</span>
+            </li>
+            <li class="cap-brand cap-brand--bingbot">
+              <span class="cap-brand__mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><text x="12" y="17" text-anchor="middle" font-family="var(--font-display)" font-size="14" font-weight="800">B</text></svg>
+              </span>
+              <span class="cap-brand__name">Bingbot</span>
+            </li>
+            <li class="cap-brand cap-brand--gptbot">
+              <span class="cap-brand__mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><text x="12" y="16" text-anchor="middle" font-family="var(--font-code)" font-size="8" font-weight="800" letter-spacing="0.5">GPT</text></svg>
+              </span>
+              <span class="cap-brand__name">GPTBot</span>
+            </li>
+            <li class="cap-brand cap-brand--claudebot">
+              <span class="cap-brand__mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <path d="M12 4 V20 M5 8 L19 16 M5 16 L19 8" stroke-width="2.2" stroke-linecap="round" fill="none"></path>
+                </svg>
+              </span>
+              <span class="cap-brand__name">ClaudeBot</span>
+            </li>
+          </ul>
+          <p>Real crawlers respect robots.txt. Forged user-agents face the same gate as everyone else.</p>
+        </article>
+        <article class="capability-card">
+          <h3>Tiered local memory</h3>
+          <ul class="cap-brands cap-brands--internal" aria-label="Local memory mechanisms">
+            <li class="cap-brand cap-brand--bloom">
+              <span class="cap-brand__mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <circle cx="6" cy="6" r="2.1"></circle>
+                  <circle cx="12" cy="6" r="2.1" class="cap-brand__hot"></circle>
+                  <circle cx="18" cy="6" r="2.1"></circle>
+                  <circle cx="6" cy="12" r="2.1"></circle>
+                  <circle cx="12" cy="12" r="2.1"></circle>
+                  <circle cx="18" cy="12" r="2.1" class="cap-brand__hot"></circle>
+                  <circle cx="6" cy="18" r="2.1" class="cap-brand__hot"></circle>
+                  <circle cx="12" cy="18" r="2.1"></circle>
+                  <circle cx="18" cy="18" r="2.1"></circle>
+                </svg>
+              </span>
+              <span class="cap-brand__name">Bloom filter</span>
+            </li>
+            <li class="cap-brand cap-brand--shm">
+              <span class="cap-brand__mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <circle cx="12" cy="12" r="7" stroke-width="2" fill="none"></circle>
+                  <circle cx="12" cy="12" r="2" class="cap-brand__hot"></circle>
+                </svg>
+              </span>
+              <span class="cap-brand__name">SHM ring</span>
+            </li>
+            <li class="cap-brand cap-brand--hmac">
+              <span class="cap-brand__mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <circle cx="9" cy="12" r="3.4" stroke-width="2" fill="none"></circle>
+                  <path d="M12.4 12 H20 M17 12 V15 M19.4 12 V14.4" stroke-width="2" stroke-linecap="round" fill="none"></path>
+                </svg>
+              </span>
+              <span class="cap-brand__name">HMAC cookie</span>
+            </li>
+          </ul>
+          <p>First-sight checks, recent reputation, and trust tokens &mdash; local only, no external store.</p>
+        </article>
+      </section>
+
+      <section id="how-it-works" class="matrix-panel">
+        <div class="panel-heading">
+          <p class="eyebrow">Core surface</p>
+          <h2>Built for operators who want clear levers</h2>
+        </div>
+        <div class="table-wrap">
+          <table class="feature-matrix">
+            <caption class="sr-only">Core BotShield capabilities, the operator use cases they support, and the outcomes they drive.</caption>
+            <thead>
+              <tr>
+                <th scope="col">Capability</th>
+                <th scope="col">Use case</th>
+                <th scope="col">Outcome</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Scoring engine</td>
+                <td>Triage browser-like traffic, first-sight clients, and obviously bad probes.</td>
+                <td>One decision ladder with stable logs and metrics.</td>
+              </tr>
+              <tr>
+                <td>Passive threat memory</td>
+                <td>Remember recent abuse without pushing every request into an external store.</td>
+                <td>Cheap local reputation and short-lived trust.</td>
+              </tr>
+              <tr>
+                <td>Challenge orchestration</td>
+                <td>Escalate only when request shape and recent history say it is worth the friction.</td>
+                <td>Silent, form, or provider-backed challenge paths.</td>
+              </tr>
+              <tr>
+                <td>Observability</td>
+                <td>Explain why a request passed, slowed down, or got blocked.</td>
+                <td>Decision logs, metrics, status hooks, and docs-first behavior.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="docs" class="docs-panel">
+        <div class="panel-heading">
+          <p class="eyebrow">Documentation</p>
+          <h2>Guide and roadmap</h2>
+        </div>
+        <div class="doc-card-grid">
+{{ docs_cards }}
+        </div>
+      </section>
+
+      <section class="cta-band">
+        <p class="cta-band__copy">Deploy the module, read the operational model, and decide how aggressive you want it to be.</p>
+        <a class="cta-band__button" href="{{ primary_href }}">Read the BotShield Guide</a>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="site-footer__brand">
+        <img class="brand__icon" src="{{ logo_href }}" alt="" aria-hidden="true">
+        <span class="brand__wordmark" aria-label="BotShield">
+          <span class="brand__wordmark-soft">Bot</span><span class="brand__wordmark-strong">Shield</span>
+        </span>
+      </div>
+      <p class="site-footer__copyright">&copy; 2026 Purdue University. All rights reserved.</p>
+    </footer>
+  </div>
+</body>
+</html>
