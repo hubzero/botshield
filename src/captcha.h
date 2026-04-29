@@ -31,6 +31,8 @@
 #include <http_config.h>
 #include <apr.h>
 
+#include "challenge.h"   /* bs_challenge (out-param of carry_and_mint) */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -164,6 +166,46 @@ const char *bs_mint_pending_cookie(request_rec *r,
                                    const bs_dir_cfg *cfg);
 const char *bs_clear_pending_cookie(request_rec *r,
                                     const bs_dir_cfg *cfg);
+
+/* Carry-forward + mint + install for the three captcha-result
+ * sites that all need the same cookie minting after a successful
+ * provider verify (or a fail-open on TIMEOUT/ERROR): the M8
+ * /captcha-verify handler, the embedded-verify-provider path in
+ * silent.c, and the inline form-captcha fixup in formcaptcha.c.
+ *
+ * The shared logic — read prior `_bs_verified` if sig-verifies-or-
+ * just-expired, apply forgive_amount through the per-cookie hourly
+ * cap, increment the matching passes_* counter, derive the
+ * captcha-<provider> alg row, issue a fresh challenge, install the
+ * cookie via Set-Cookie — used to live in three copies. Both the
+ * forgive-cap regression caught in the E15 review and the
+ * fresh-rep regression caught in the E17 review were drift in
+ * exactly this section. One helper; one place to update.
+ *
+ * passes_kind picks which counter to bump: PASSES_CAPTCHA for the
+ * captcha-tier callers, PASSES_SILENT for the embedded-silent path.
+ * forgive_amount is the per-tier policy the caller picks
+ * (cfg->forgive_captcha vs cfg->forgive_silent). auto_tier is the
+ * silent-tier marker the silent.c caller sets to 1; the captcha-
+ * tier callers leave it 0.
+ *
+ * Returns NULL on success with `*out_ch` populated and the
+ * Set-Cookie row already added to r->err_headers_out. On failure
+ * returns an error-string the caller may log; the caller is
+ * responsible for the HTTP status and decision-log emission. */
+typedef enum {
+    BS_CAPTCHA_PASSES_CAPTCHA = 0,
+    BS_CAPTCHA_PASSES_SILENT  = 1,
+} bs_captcha_passes_kind;
+
+const char *bs_captcha_carry_and_mint(
+    request_rec *r,
+    const bs_dir_cfg *cfg,
+    bs_captcha_passes_kind passes_kind,
+    int forgive_amount,
+    int auto_tier,
+    bs_challenge *out_ch,
+    const char **out_alg_name);
 
 int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg);
 

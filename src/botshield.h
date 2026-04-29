@@ -419,6 +419,17 @@ const char *bs_validate_secret_key(cmd_parms *cmd,
                                    apr_size_t buf_len,
                                    apr_size_t *out_len);
 
+/* End-to-end secret-file loader. stat + mode-600 check +
+ * bs_load_config_file (with BS_MAX_SECRET_BYTES) +
+ * bs_validate_secret_key. Used by every directive that loads an
+ * HMAC / GCM master key. Single point of change for the
+ * mode-600 discipline, the size cap, and the validation rules. */
+const char *bs_load_secret_file(cmd_parms *cmd,
+                                const char *directive,
+                                const char *path,
+                                const char **out_buf,
+                                apr_size_t *out_len);
+
 /* Resolve a directive's (ua, ipspec) arg pair into a bs_cohort.
  * Range parsing for ipspec is deferred to post_config — the cohort
  * stores the raw spec strings here. Returns NULL on success or an

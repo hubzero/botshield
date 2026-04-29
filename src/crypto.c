@@ -261,26 +261,10 @@ const char *bs_set_secret_file(cmd_parms *cmd, void *cfg_v,
 {
     bs_dir_cfg *cfg = cfg_v;
 
-    struct stat st;
-    if (stat(arg, &st) != 0) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldSecretFile: cannot stat '%s'", arg);
-    }
-    if (st.st_mode & (S_IRGRP | S_IROTH | S_IWGRP | S_IWOTH)) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldSecretFile: '%s' is group- or world-accessible "
-            "(mode %04o); chmod 600 it", arg, st.st_mode & 07777);
-    }
-
     const char *buf = NULL;
-    apr_size_t buf_len = 0;
-    const char *err = bs_load_config_file(cmd, "BotShieldSecretFile", arg,
-                                          BS_MAX_SECRET_BYTES, &buf, &buf_len);
-    if (err) return err;
-
     apr_size_t len = 0;
-    err = bs_validate_secret_key(cmd, "BotShieldSecretFile",
-                                 arg, buf, buf_len, &len);
+    const char *err = bs_load_secret_file(cmd, "BotShieldSecretFile",
+                                          arg, &buf, &len);
     if (err) return err;
 
     cfg->secret     = (const unsigned char *)buf;
@@ -322,29 +306,11 @@ const char *bs_set_secondary_secret_file(cmd_parms *cmd,
 {
     bs_dir_cfg *cfg = cfg_v;
 
-    struct stat st;
-    if (stat(arg, &st) != 0) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldSecondarySecretFile: cannot stat '%s'", arg);
-    }
-    if (st.st_mode & (S_IRGRP | S_IROTH | S_IWGRP | S_IWOTH)) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldSecondarySecretFile: '%s' is group- or "
-            "world-accessible (mode %04o); chmod 600 it",
-            arg, st.st_mode & 07777);
-    }
-
     const char *buf = NULL;
-    apr_size_t buf_len = 0;
-    const char *err = bs_load_config_file(cmd,
-                                          "BotShieldSecondarySecretFile",
-                                          arg, BS_MAX_SECRET_BYTES,
-                                          &buf, &buf_len);
-    if (err) return err;
-
     apr_size_t len = 0;
-    err = bs_validate_secret_key(cmd, "BotShieldSecondarySecretFile",
-                                 arg, buf, buf_len, &len);
+    const char *err = bs_load_secret_file(cmd,
+                                          "BotShieldSecondarySecretFile",
+                                          arg, &buf, &len);
     if (err) return err;
 
     cfg->secret_secondary     = (const unsigned char *)buf;
