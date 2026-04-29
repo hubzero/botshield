@@ -17,9 +17,11 @@
 
 # mod_botshield
 
-Low-latency bot detection for Apache 2.4. Cookieless requests get a
-self-contained proof-of-work interstitial; verified visitors receive a
-short-lived cookie and pass through on their next request.
+Adaptive bot mitigation for the Apache HTTP Server.
+
+BotShield scores requests, tracks short-term reputation, and decides
+whether to pass, challenge, slow down, or block before application
+code has to absorb the traffic.
 
 **Status: beta.** Stable shape, exercising in dev; not yet a production
 deployment. Architecture, threat model, and per-extension design notes
