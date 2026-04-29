@@ -117,6 +117,17 @@ apr_status_t bs_ua_classifier_add(bs_ua_classifier *c,
     return APR_SUCCESS;
 }
 
+/* Find the longest registered pattern that appears as a substring of
+ * `ua`, anywhere in the string. Algorithm: slide a start position
+ * across the UA; from each start, walk the trie matching consecutive
+ * characters; track the longest pattern terminal hit. Returns the
+ * registered name of the winning pattern, NULL if no pattern matched.
+ *
+ * Worst case is O(|ua| * max_pattern_length), but the trie is sparse
+ * (most start positions die within 1-2 edges) so realistic cost is
+ * close to O(|ua|). Equivalent to Aho-Corasick without the failure-
+ * link bookkeeping; the simpler form is fast enough at the ~400-
+ * pattern scale this classifier targets. */
 const char *bs_ua_classify(const bs_ua_classifier *c, const char *ua)
 {
     if (!c || !ua || !*ua) return NULL;
@@ -125,9 +136,7 @@ const char *bs_ua_classify(const bs_ua_classifier *c, const char *ua)
      * bot/crawl/spider/fetch/slurp token list, but that silently made
      * operator-defined patterns unreachable for UAs that didn't happen
      * to contain one of those tokens. Correctness beats the ~1 µs we'd
-     * save on non-bot traffic, and the trie walk is already O(|ua|)
-     * with a small constant (most positions die within 1–2 edges
-     * because the trie is sparse). */
+     * save on non-bot traffic. */
     const char *best_name = NULL;
     size_t best_len = 0;
     for (const char *start = ua; *start; start++) {

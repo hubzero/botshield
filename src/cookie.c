@@ -455,12 +455,14 @@ const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
  * returned.
  *
  * Reject when:
- *   - cverr == "signature mismatch"  (rep bytes can't be trusted)
- *   - cverr == "expired"  ── : TTL is the
- *     only mechanism preventing indefinite reputation transfer
- *     across cookie generations. A leaked or stolen cookie that has
- *     aged past TTL must NOT be allowed to transplant good-standing
- *     rep into a fresh _bs_verified via any solve path.
+ *   - cverr == "signature mismatch"  (rep bytes can't be trusted —
+ *     the GCM tag didn't authenticate, so the canonical fields might
+ *     be attacker-chosen).
+ *   - cverr == "expired"  (TTL is the only mechanism preventing
+ *     indefinite reputation transfer across cookie generations. A
+ *     leaked or stolen cookie that has aged past TTL must not be
+ *     allowed to transplant good-standing rep into a fresh
+ *     _bs_verified via any solve path).
  *   - cverr is some other pre-auth failure (decode errors, wrong
  *     field count, "no secret configured", etc.) — bs_verify_cookie
  *     leaves *prior_ch unwritten in those branches, so
@@ -472,19 +474,16 @@ const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
  *     check, etc.) — bs_verify_cookie wrote authenticated rep into
  *     *prior_ch and prior_ch->alg_name is non-NULL.
  *
- * This is the load-bearing carry-forward gate. Both the issuance-
- * side helper (bs_carry_forward_eligible) and the render-side
- * predicate in bs_handler share this single source of truth so a
- * change to the rule only has to land here. The original review
- * WAS a four-site fix that the issuance-side
- * consolidation collapsed to one site; reusing this predicate from
- * bs_handler closes the same drift gap on the render side. */
+ * Single source of truth for the carry-forward rule. Both the
+ * issuance-side helper (bs_carry_forward_eligible) and the render-
+ * side predicate in bs_handler call through here so a change to the
+ * rule only has to land in one place. */
 int bs_should_carry_prior_rep(const char *cverr,
                               const bs_challenge *prior_ch)
 {
     if (cverr == NULL) return 1;
     if (strcmp(cverr, "signature mismatch") == 0) return 0;
-    if (strcmp(cverr, "expired") == 0) return 0;          /* */
+    if (strcmp(cverr, "expired") == 0) return 0;
     return prior_ch->alg_name ? 1 : 0;
 }
 
@@ -515,10 +514,12 @@ int bs_carry_forward_eligible(request_rec *r,
  * This helper does the deterministic math:
  *   - clamp the requested forgive against the per-cookie hourly cap
  *     (writes target->forgive_window_start + forgive_consumed)
- *   - compute new score = prior.score - forgive, clamped against
- *     the flag-penalty floor and zero
+ *   - compute new score = max(0, prior.score - forgive). No flag-
+ *     derived floor: flag effects re-apply at request time via
+ *     bs_apply_flag_triggers, so a forgiven-to-zero score on a
+ *     flagged cookie is simply re-raised on the next request.
  *
- * The caller bumps the appropriate passes_X afterward (the 
+ * The caller bumps the appropriate passes_X afterward (the
  * "ever passed" clamp). Tier knowledge for that decision also stays
  * at the call site. */
 void bs_apply_rep_carry(request_rec *r,
