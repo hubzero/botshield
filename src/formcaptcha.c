@@ -399,54 +399,31 @@ int bs_form_captcha_fixup(request_rec *r)
 
     /* Mint _bs_verified — same captcha-<provider> alg the M8
      * interstitial path uses. passes_captcha=1 (this WAS a captcha-
-     * tier solve, just inline rather than interstitial). */
-    int ttl        = bs_effective_int(cfg->cookie_ttl, BS_DEFAULT_COOKIE_TTL);
-    int difficulty = bs_effective_int(cfg->difficulty, BS_DEFAULT_DIFFICULTY);
-    const char *cookie_alg_name = apr_psprintf(r->pool, "captcha-%s",
-                                               cfg->captcha_provider->name);
-    const bs_pow_algorithm *captcha_alg = bs_find_algorithm(cookie_alg_name);
-    if (!captcha_alg || !captcha_alg->implemented) {
-        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
-            "mod_botshield: form-captcha cookie alg '%s' missing "
-            "from registry", cookie_alg_name);
-        return HTTP_INTERNAL_SERVER_ERROR;
-    }
-    /* E15 review fix — carry forward prior cookie state if present,
-     * mirroring M8's captcha-verify path. Without this, an existing
-     * client whose cookie has forgive_consumed close to the cap
-     * could "wash" their budget by submitting a form-captcha — the
-     * fresh memset zeroed the rolling-window state and gave them a
-     * full new budget. Eligibility and rep-math live in
-     * bs_carry_forward_eligible / bs_apply_rep_carry. */
-    bs_rep_state next_rep;
-    memset(&next_rep, 0, sizeof(next_rep));
-    {
-        bs_challenge prior_ch = { 0 };
-        if (bs_carry_forward_eligible(r, cfg, &prior_ch)) {
-            next_rep = prior_ch.rep;
-            bs_apply_rep_carry(r, cfg, &prior_ch, &next_rep,
-                               bs_effective_int(cfg->forgive_captcha,
-                                                BS_DEFAULT_FORGIVE_CAPTCHA));
-        }
-        next_rep.passes_captcha = 1;  /* clamp */
-    }
-
+     * tier solve, just inline rather than interstitial). Routed
+     * through bs_captcha_carry_and_mint so the carry-forward + cap
+     * + cookie install stay in lockstep with the captcha-verify
+     * handler — the E15 review fix lives there now. */
     bs_challenge ch;
-    const char *ierr = bs_issue_challenge(r->pool, cfg, difficulty, ttl,
-                                          /* auto_tier */ 0,
-                                          captcha_alg, &next_rep, &ch);
-    if (ierr) {
+    const char *cookie_alg_name = NULL;
+    const char *merr = bs_captcha_carry_and_mint(r, cfg,
+        BS_CAPTCHA_PASSES_CAPTCHA,
+        bs_effective_int(cfg->forgive_captcha, BS_DEFAULT_FORGIVE_CAPTCHA),
+        /* auto_tier */ 0,
+        &ch, &cookie_alg_name);
+    if (merr) {
+        /* Pre-existing form-captcha behavior: log + 500 on alg-
+         * registry / issue failures (the helper bundles those into
+         * one error path). The "best-effort install" comment that
+         * used to live here was about the GCM-encrypt-fail variant
+         * specifically — the helper now treats that the same as
+         * the other failures (return error string, caller 500s),
+         * which IS a small behavior change but matches what the
+         * other two call sites already did. */
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
-            "mod_botshield: form-captcha cookie issue failed: %s", ierr);
+            "mod_botshield: form-captcha: %s", merr);
         return HTTP_INTERNAL_SERVER_ERROR;
     }
-    /* Best-effort install: if the cookie mint fails (GCM encrypt
-     * error — vanishingly unlikely with a valid key) we still let
-     * the replay filter run. The user just won't get a cookie this
-     * time and will re-challenge on the next request. The other
-     * three issuance paths 500 on the same condition — preserved
-     * here as-is to keep this refactor behavior-neutral. */
-    (void)bs_install_verified_cookie(r, cfg, &ch, "captcha");
+    (void)ch;  /* helper installed the cookie; ch unused here */
 
     /* Install the replay filter so the downstream handler sees the
      * original POST body. Filter buffers in r->pool memory; lifetime

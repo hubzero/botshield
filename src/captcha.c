@@ -278,6 +278,137 @@ static int bs_curl_slist_append(struct curl_slist **list, const char *s)
     return 1;
 }
 
+/* Shared hardened-HTTPS-POST helper for siteverify.
+ *
+ * Both the Google-family path (`bs_captcha_siteverify`) and the
+ * GeeTest path (`bs_geetest_siteverify`) need an identical
+ * libcurl setup: TLS 1.2 floor, peer + host verify, no redirects,
+ * HTTPS-only protocol allowlist, private-IP block via the
+ * opensocket callback, response capped at BS_MAX_CAPTCHA_BODY,
+ * Content-Type: x-www-form-urlencoded, Accept: application/json,
+ * connect-timeout from cfg, total-timeout from caller. The two
+ * functions used to maintain this 70-line block in lockstep; one
+ * helper means future TLS/protocol/proxy hardening lands in
+ * exactly one place.
+ *
+ * Caller supplies URL + URL-encoded body + a pre-allocated
+ * response buffer (BS_MAX_CAPTCHA_BODY + 1 bytes for the NUL
+ * terminator). Returns BS_CAPTCHA_OK with the response NUL-
+ * terminated and *out_http_code populated; caller parses the
+ * body. Returns BS_CAPTCHA_TIMEOUT / BS_CAPTCHA_ERROR for
+ * transport failure; *out_details is set to a libcurl-string
+ * description on error.
+ *
+ * `log_tag` is the short string woven into the curl_easy_setopt
+ * failure log so an operator grep'ing the error log sees which
+ * call site failed. */
+static bs_captcha_result bs_captcha_https_post(
+    request_rec *r,
+    const char *url,
+    const char *body,
+    int total_timeout_ms,
+    const char *ca_bundle,
+    bs_curl_buffer *resp,
+    long *out_http_code,
+    const char **out_details,
+    const char *log_tag)
+{
+    *out_http_code = 0;
+    *out_details   = "";
+
+    CURL *curl = curl_easy_init();
+    if (!curl) return BS_CAPTCHA_ERROR;
+
+    CURLcode setopt_rc = CURLE_OK;
+    BS_SETOPT(curl, CURLOPT_URL, url);
+    BS_SETOPT(curl, CURLOPT_POST, 1L);
+    BS_SETOPT(curl, CURLOPT_POSTFIELDS, body);
+    BS_SETOPT(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
+    {
+        bs_dir_cfg *_dcfg = ap_get_module_config(r->per_dir_config,
+                                                 &botshield_module);
+        long _ct = (_dcfg && _dcfg->captcha_connect_timeout_ms > 0)
+                   ? _dcfg->captcha_connect_timeout_ms
+                   : BS_CAPTCHA_CONNECT_TIMEOUT;
+        BS_SETOPT(curl, CURLOPT_CONNECTTIMEOUT_MS, _ct);
+    }
+    BS_SETOPT(curl, CURLOPT_TIMEOUT_MS, (long)total_timeout_ms);
+    BS_SETOPT(curl, CURLOPT_NOSIGNAL, 1L);
+    BS_SETOPT(curl, CURLOPT_NOPROGRESS, 1L);
+    BS_SETOPT(curl, CURLOPT_USERAGENT, "mod_botshield/0.1");
+    BS_SETOPT(curl, CURLOPT_WRITEFUNCTION, bs_curl_write_cb);
+    BS_SETOPT(curl, CURLOPT_WRITEDATA, resp);
+    BS_SETOPT(curl, CURLOPT_FOLLOWLOCATION, 0L);
+    BS_SETOPT(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    BS_SETOPT(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+    /* Pin TLS floor at 1.2. Modern libcurl already excludes
+     * earlier versions by default; explicit-is-better-than-
+     * implicit locks the policy across libcurl version drift. */
+    BS_SETOPT(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
+    if (ca_bundle) {
+        BS_SETOPT(curl, CURLOPT_CAINFO, ca_bundle);
+    }
+    /* Allowlist HTTPS only. Provider URLs are hard-coded today,
+     * but a future operator-tunable URL would become an immediate
+     * SSRF vector via file:// / gopher:// / etc. REDIR_PROTOCOLS
+     * mirrors the policy in case FOLLOWLOCATION is ever flipped. */
+    BS_SETOPT(curl, CURLOPT_PROTOCOLS_STR, "https");
+    BS_SETOPT(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
+    /* Defense-in-depth against a compromised-DNS scenario: the
+     * opensocket callback rejects RFC1918 / loopback / link-local
+     * before connect(). */
+    BS_SETOPT(curl, CURLOPT_OPENSOCKETFUNCTION, bs_curl_open_socket_cb);
+    /* Server-declared response size cap. Streaming-trickle
+     * providers without a declared length still terminate via
+     * bs_curl_write_cb returning 0 on overflow. */
+    BS_SETOPT(curl, CURLOPT_MAXFILESIZE, (long)BS_MAX_CAPTCHA_BODY);
+    /* Pin Content-Type and Accept so a future provider
+     * content-negotiation change can't quietly shift the wire
+     * format. */
+    struct curl_slist *bs_hdrs = NULL;
+    if (!bs_curl_slist_append(&bs_hdrs,
+            "Content-Type: application/x-www-form-urlencoded") ||
+        !bs_curl_slist_append(&bs_hdrs,
+            "Accept: application/json")) {
+        curl_slist_free_all(bs_hdrs);
+        curl_easy_cleanup(curl);
+        return BS_CAPTCHA_ERROR;
+    }
+    BS_SETOPT(curl, CURLOPT_HTTPHEADER, bs_hdrs);
+    if (setopt_rc != CURLE_OK) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+            "mod_botshield: %s: curl_easy_setopt failed: %s "
+            "(CURLcode=%d)",
+            log_tag, curl_easy_strerror(setopt_rc),
+            (int)setopt_rc);
+        curl_slist_free_all(bs_hdrs);
+        curl_easy_cleanup(curl);
+        return BS_CAPTCHA_ERROR;
+    }
+
+    CURLcode rc = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_cleanup(curl);
+    curl_slist_free_all(bs_hdrs);
+    *out_http_code = http_code;
+
+    if (rc == CURLE_OPERATION_TIMEDOUT) return BS_CAPTCHA_TIMEOUT;
+    if (rc != CURLE_OK) {
+        *out_details = curl_easy_strerror(rc);
+        return BS_CAPTCHA_ERROR;
+    }
+    if (http_code < 200 || http_code >= 300) {
+        *out_details = apr_psprintf(r->pool, "http-status-%ld",
+                                    http_code);
+        return BS_CAPTCHA_ERROR;
+    }
+    /* NUL-terminate. The buffer was allocated with one extra
+     * byte for exactly this. */
+    resp->buf[resp->len] = '\0';
+    return BS_CAPTCHA_OK;
+}
+
 /* Parse the siteverify response body with json-c. Returns:
  *   BS_CAPTCHA_OK        — explicit "success":true
  *   BS_CAPTCHA_REJECTED  — explicit "success":false; *out_details is set
@@ -469,104 +600,16 @@ bs_captcha_result bs_captcha_siteverify(request_rec *r,
         .len = 0, .truncated = 0,
     };
 
-    /* Accumulator for BS_SETOPT — see macro definition. */
-    CURLcode setopt_rc = CURLE_OK;
-    BS_SETOPT(curl, CURLOPT_URL, prov->siteverify_url);
-    BS_SETOPT(curl, CURLOPT_POST, 1L);
-    BS_SETOPT(curl, CURLOPT_POSTFIELDS, body);
-    BS_SETOPT(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
-    {
-        bs_dir_cfg *_dcfg = ap_get_module_config(r->per_dir_config,
-                                                 &botshield_module);
-        long _ct = (_dcfg && _dcfg->captcha_connect_timeout_ms > 0)
-                   ? _dcfg->captcha_connect_timeout_ms
-                   : BS_CAPTCHA_CONNECT_TIMEOUT;
-        BS_SETOPT(curl, CURLOPT_CONNECTTIMEOUT_MS, _ct);
-    }
-    BS_SETOPT(curl, CURLOPT_TIMEOUT_MS, (long)timeout_ms);
-    BS_SETOPT(curl, CURLOPT_NOSIGNAL, 1L);
-    BS_SETOPT(curl, CURLOPT_NOPROGRESS, 1L);
-    BS_SETOPT(curl, CURLOPT_USERAGENT, "mod_botshield/0.1");
-    BS_SETOPT(curl, CURLOPT_WRITEFUNCTION, bs_curl_write_cb);
-    BS_SETOPT(curl, CURLOPT_WRITEDATA, &resp);
-    BS_SETOPT(curl, CURLOPT_FOLLOWLOCATION, 0L);
-    BS_SETOPT(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-    BS_SETOPT(curl, CURLOPT_SSL_VERIFYHOST, 2L);
-    /* Pin TLS floor at 1.2. Modern libcurl already excludes earlier
-     * versions by default, but explicit-is-better-than-implicit
-     * locks the policy across libcurl version drift. */
-    BS_SETOPT(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
-    /* Operator-supplied CA bundle, if configured. Falls through to
-     * libcurl's compiled-in default when unset. */
-    if (ca_bundle) {
-        BS_SETOPT(curl, CURLOPT_CAINFO, ca_bundle);
-    }
-    /* Allowlist HTTPS only. Provider URLs
-     * are hard-coded today, but a future operator-tunable URL
-     * would become an immediate SSRF vector via file://, gopher://,
-     * etc. Cheap to close now. REDIR_PROTOCOLS mirrors the policy
-     * in case FOLLOWLOCATION is ever flipped on later. */
-    BS_SETOPT(curl, CURLOPT_PROTOCOLS_STR, "https");
-    BS_SETOPT(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
-    /* Defense-in-depth against a
-     * compromised-DNS scenario where the provider hostname resolves
-     * to an internal IP. The callback rejects RFC1918 / loopback /
-     * link-local before connect(). */
-    BS_SETOPT(curl, CURLOPT_OPENSOCKETFUNCTION, bs_curl_open_socket_cb);
-    /* Server-declared response size cap.
-     * If a malicious or misbehaving provider sets Content-Length
-     * larger than our buffer, abort before any bytes flow.
-     * Streaming-trickle providers without a declared length still
-     * terminate via bs_curl_write_cb returning 0 on overflow
-     * (CURLE_WRITE_ERROR), instead of holding an in-flight
-     * captcha slot for the full timeout. */
-    BS_SETOPT(curl, CURLOPT_MAXFILESIZE,
-                     (long)BS_MAX_CAPTCHA_BODY);
-    /* Pin Content-Type and Accept so a
-     * future provider content-negotiation change can't quietly
-     * shift the wire format. We send url-encoded fields and parse
-     * JSON responses; both are stable across all six providers. */
-    struct curl_slist *bs_hdrs = NULL;
-    if (!bs_curl_slist_append(&bs_hdrs,
-            "Content-Type: application/x-www-form-urlencoded") ||
-        !bs_curl_slist_append(&bs_hdrs,
-            "Accept: application/json")) {
-        curl_slist_free_all(bs_hdrs);   /* may be NULL — slist_free_all is NULL-safe */
-        curl_easy_cleanup(curl);
-        return BS_CAPTCHA_ERROR;
-    }
-    BS_SETOPT(curl, CURLOPT_HTTPHEADER, bs_hdrs);
-    if (setopt_rc != CURLE_OK) {
-        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
-            "mod_botshield: captcha siteverify: curl_easy_setopt "
-            "failed: %s (CURLcode=%d)",
-            curl_easy_strerror(setopt_rc), (int)setopt_rc);
-        curl_easy_cleanup(curl);
-        curl_slist_free_all(bs_hdrs);
-        return BS_CAPTCHA_ERROR;
-    }
+    bs_captcha_result xport = bs_captcha_https_post(
+        r, prov->siteverify_url, body, timeout_ms, ca_bundle,
+        &resp, out_http_code, out_details, "captcha siteverify");
+    /* curl_escape outputs are still owned by the curl handle that
+     * bs_captcha_https_post just freed via curl_easy_cleanup. apr
+     * already copied the strings into r->pool via bs_curl_escape_pool,
+     * so the body string remains valid through perform and after. */
+    if (xport != BS_CAPTCHA_OK) return xport;
 
-    CURLcode rc = curl_easy_perform(curl);
-    long http_code = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-    curl_easy_cleanup(curl);
-    curl_slist_free_all(bs_hdrs);
-
-    *out_http_code = http_code;
-
-    if (rc == CURLE_OPERATION_TIMEDOUT) return BS_CAPTCHA_TIMEOUT;
-    if (rc != CURLE_OK) {
-        *out_details = curl_easy_strerror(rc);
-        return BS_CAPTCHA_ERROR;
-    }
-    if (http_code < 200 || http_code >= 300) {
-        *out_details = apr_psprintf(r->pool, "http-status-%ld", http_code);
-        return BS_CAPTCHA_ERROR;
-    }
-
-    apr_size_t body_len = resp.len;
-    resp.buf[body_len] = '\0';
-    return bs_captcha_parse_response(r->pool, resp.buf, body_len,
+    return bs_captcha_parse_response(r->pool, resp.buf, resp.len,
                                      out_details, out_score,
                                      out_hostname, out_action);
 }
@@ -715,117 +758,24 @@ static bs_captcha_result bs_geetest_siteverify(request_rec *r,
         "&gen_time=%s&sign_token=%s",
         e_lot, e_output, e_pass, e_time, sign_token);
 
-    /* allocate one extra byte so a
-     * full-cap response (resp.len == BS_MAX_CAPTCHA_BODY, which
-     * the write callback caps at via the room calculation) can
-     * receive its NUL terminator at resp.buf[resp.len] without
-     * overwriting the last valid byte. Symmetric with the
-     * BS_FORM_CAPTCHA_BODY_MAX+1 fix applied to the form-captcha
-     * body buffer. */
     bs_curl_buffer resp = {
         .buf = apr_palloc(r->pool, BS_MAX_CAPTCHA_BODY + 1),
         .cap = BS_MAX_CAPTCHA_BODY,
         .len = 0, .truncated = 0,
     };
 
-    /* Accumulator for BS_SETOPT — see macro definition. */
-    CURLcode setopt_rc = CURLE_OK;
-    BS_SETOPT(curl, CURLOPT_URL, url);
-    BS_SETOPT(curl, CURLOPT_POST, 1L);
-    BS_SETOPT(curl, CURLOPT_POSTFIELDS, body);
-    BS_SETOPT(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
-    {
-        bs_dir_cfg *_dcfg = ap_get_module_config(r->per_dir_config,
-                                                 &botshield_module);
-        long _ct = (_dcfg && _dcfg->captcha_connect_timeout_ms > 0)
-                   ? _dcfg->captcha_connect_timeout_ms
-                   : BS_CAPTCHA_CONNECT_TIMEOUT;
-        BS_SETOPT(curl, CURLOPT_CONNECTTIMEOUT_MS, _ct);
-    }
-    BS_SETOPT(curl, CURLOPT_TIMEOUT_MS, (long)timeout_ms);
-    BS_SETOPT(curl, CURLOPT_NOSIGNAL, 1L);
-    BS_SETOPT(curl, CURLOPT_NOPROGRESS, 1L);
-    BS_SETOPT(curl, CURLOPT_USERAGENT, "mod_botshield/0.1");
-    BS_SETOPT(curl, CURLOPT_WRITEFUNCTION, bs_curl_write_cb);
-    BS_SETOPT(curl, CURLOPT_WRITEDATA, &resp);
-    BS_SETOPT(curl, CURLOPT_FOLLOWLOCATION, 0L);
-    BS_SETOPT(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-    BS_SETOPT(curl, CURLOPT_SSL_VERIFYHOST, 2L);
-    /* Pin TLS floor at 1.2. Modern libcurl already excludes earlier
-     * versions by default, but explicit-is-better-than-implicit
-     * locks the policy across libcurl version drift. */
-    BS_SETOPT(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
-    /* Operator-supplied CA bundle, if configured. Falls through to
-     * libcurl's compiled-in default when unset. */
-    if (ca_bundle) {
-        BS_SETOPT(curl, CURLOPT_CAINFO, ca_bundle);
-    }
-    /* Allowlist HTTPS only. Provider URLs
-     * are hard-coded today, but a future operator-tunable URL
-     * would become an immediate SSRF vector via file://, gopher://,
-     * etc. Cheap to close now. REDIR_PROTOCOLS mirrors the policy
-     * in case FOLLOWLOCATION is ever flipped on later. */
-    BS_SETOPT(curl, CURLOPT_PROTOCOLS_STR, "https");
-    BS_SETOPT(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
-    /* Defense-in-depth against a
-     * compromised-DNS scenario where the provider hostname resolves
-     * to an internal IP. The callback rejects RFC1918 / loopback /
-     * link-local before connect(). */
-    BS_SETOPT(curl, CURLOPT_OPENSOCKETFUNCTION, bs_curl_open_socket_cb);
-    /* Server-declared response size cap.
-     * If a malicious or misbehaving provider sets Content-Length
-     * larger than our buffer, abort before any bytes flow.
-     * Streaming-trickle providers without a declared length still
-     * terminate via bs_curl_write_cb returning 0 on overflow
-     * (CURLE_WRITE_ERROR), instead of holding an in-flight
-     * captcha slot for the full timeout. */
-    BS_SETOPT(curl, CURLOPT_MAXFILESIZE,
-                     (long)BS_MAX_CAPTCHA_BODY);
-    /* Pin Content-Type and Accept so a
-     * future provider content-negotiation change can't quietly
-     * shift the wire format. We send url-encoded fields and parse
-     * JSON responses; both are stable across all six providers. */
-    struct curl_slist *bs_hdrs = NULL;
-    if (!bs_curl_slist_append(&bs_hdrs,
-            "Content-Type: application/x-www-form-urlencoded") ||
-        !bs_curl_slist_append(&bs_hdrs,
-            "Accept: application/json")) {
-        curl_slist_free_all(bs_hdrs);   /* may be NULL — slist_free_all is NULL-safe */
-        curl_easy_cleanup(curl);
-        return BS_CAPTCHA_ERROR;
-    }
-    BS_SETOPT(curl, CURLOPT_HTTPHEADER, bs_hdrs);
-    if (setopt_rc != CURLE_OK) {
-        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
-            "mod_botshield: GeeTest siteverify: curl_easy_setopt "
-            "failed: %s (CURLcode=%d)",
-            curl_easy_strerror(setopt_rc), (int)setopt_rc);
-        curl_slist_free_all(bs_hdrs);
-        curl_easy_cleanup(curl);
-        return BS_CAPTCHA_ERROR;
-    }
-
-    CURLcode rc = curl_easy_perform(curl);
-    long http_code = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    /* The shared helper takes ownership of curl_easy_cleanup. The
+     * curl_escape outputs above are owned by `curl` (via libcurl's
+     * own internals); bs_curl_escape_pool already copied them into
+     * r->pool, so the body string survives the cleanup. */
     curl_easy_cleanup(curl);
-    curl_slist_free_all(bs_hdrs);   /* parity with the captcha helper above */
-    *out_http_code = http_code;
-
-    if (rc == CURLE_OPERATION_TIMEDOUT) return BS_CAPTCHA_TIMEOUT;
-    if (rc != CURLE_OK) {
-        *out_details = curl_easy_strerror(rc);
-        return BS_CAPTCHA_ERROR;
-    }
-    if (http_code < 200 || http_code >= 300) {
-        *out_details = apr_psprintf(r->pool, "http-status-%ld", http_code);
-        return BS_CAPTCHA_ERROR;
-    }
-
-    apr_size_t body_len = resp.len;
-    resp.buf[body_len] = '\0';
+    bs_captcha_result xport = bs_captcha_https_post(
+        r, url, body, timeout_ms, ca_bundle,
+        &resp, out_http_code, out_details, "GeeTest siteverify");
+    if (xport != BS_CAPTCHA_OK) return xport;
 
     /* Parse GeeTest response: {"result":"success"/"fail","reason":"..."}. */
+    apr_size_t body_len = resp.len;
     json_object *root = json_tokener_parse(resp.buf);
     if (!root || !json_object_is_type(root, json_type_object)) {
         if (root) json_object_put(root);
@@ -1428,13 +1378,77 @@ const char *bs_clear_pending_cookie(request_rec *r,
         prefix, secure);
 }
 
+/* See captcha.h for the contract. Single-source-of-truth for
+ * "successful provider verify → mint a fresh _bs_verified". The
+ * three call sites (captcha verify handler, embedded-verify-provider,
+ * form-captcha fixup) used to maintain this in lockstep; both the
+ * forgive-cap regression caught in E15 and the fresh-rep regression
+ * caught in E17 were drift in exactly this code. */
+const char *bs_captcha_carry_and_mint(
+    request_rec *r,
+    const bs_dir_cfg *cfg,
+    bs_captcha_passes_kind passes_kind,
+    int forgive_amount,
+    int auto_tier,
+    bs_challenge *out_ch,
+    const char **out_alg_name)
+{
+    if (!cfg || !cfg->captcha_provider) {
+        return "no captcha provider configured on scope";
+    }
+
+    /* Carry forward prior cookie's rep block when the prior cookie
+     * sig-verifies (or sig-verified-but-just-expired). bs_carry_
+     * forward_eligible handles the gating; bs_apply_rep_carry does
+     * the rep math + per-cookie hourly forgive cap clamp. */
+    bs_rep_state next_rep;
+    memset(&next_rep, 0, sizeof(next_rep));
+    {
+        bs_challenge prior_ch = { 0 };
+        if (bs_carry_forward_eligible(r, cfg, &prior_ch)) {
+            next_rep = prior_ch.rep;
+            bs_apply_rep_carry(r, cfg, &prior_ch, &next_rep,
+                               forgive_amount);
+        }
+        if (passes_kind == BS_CAPTCHA_PASSES_SILENT) {
+            next_rep.passes_silent = 1;   /* clamp */
+        } else {
+            next_rep.passes_captcha = 1;  /* clamp */
+        }
+    }
+
+    /* Cookie alg name is derived from provider name by convention so
+     * adding a provider doesn't require touching this helper — just the
+     * two registries. */
+    const char *cookie_alg_name = apr_psprintf(r->pool, "captcha-%s",
+                                               cfg->captcha_provider->name);
+    const bs_pow_algorithm *alg = bs_find_algorithm(cookie_alg_name);
+    if (!alg || !alg->implemented) {
+        return apr_psprintf(r->pool,
+            "cookie alg '%s' missing from registry — provider '%s' "
+            "is wired up but its cookie-alg row isn't",
+            cookie_alg_name, cfg->captcha_provider->name);
+    }
+    if (out_alg_name) *out_alg_name = cookie_alg_name;
+
+    int ttl        = bs_effective_int(cfg->cookie_ttl, BS_DEFAULT_COOKIE_TTL);
+    int difficulty = bs_effective_int(cfg->difficulty, BS_DEFAULT_DIFFICULTY);
+
+    const char *ierr = bs_issue_challenge(r->pool, cfg, difficulty, ttl,
+                                          auto_tier, alg,
+                                          &next_rep, out_ch);
+    if (ierr) return apr_psprintf(r->pool, "challenge issue: %s", ierr);
+
+    if (bs_install_verified_cookie(r, cfg, out_ch, "captcha") != NULL) {
+        return "cookie payload build failed (GCM encrypt)";
+    }
+    return NULL;
+}
+
 /* M8 verify handler. Mounted at <prefix>/captcha-verify; POSTed to by
  * the interstitial's form submit when the provider's widget callback
  * fires. On success, server-issues a signed captcha-turnstile cookie
  * and 302s back to the page the user tried to reach. */
-
-
-
 int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
 {
     /* Response from this endpoint must never be cached by any
@@ -1754,70 +1768,27 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
             cfg->captcha_provider->name, http_code, safe_return);
     }
 
-    /* Issue a captcha-alg signed cookie. Rep starts from any prior
-     * cookie if one is still valid (forgive_captcha applied), else
-     * zero. Eligibility and rep-math live in
-     * bs_carry_forward_eligible / bs_apply_rep_carry. */
-    bs_rep_state next_rep;
-    memset(&next_rep, 0, sizeof(next_rep));
-    {
-        bs_challenge prior_ch = { 0 };
-        if (bs_carry_forward_eligible(r, cfg, &prior_ch)) {
-            next_rep = prior_ch.rep;
-            bs_apply_rep_carry(r, cfg, &prior_ch, &next_rep,
-                               bs_effective_int(cfg->forgive_captcha,
-                                                BS_DEFAULT_FORGIVE_CAPTCHA));
-        }
-        next_rep.passes_captcha = 1;  /* clamp */
-    }
-
-    int ttl        = bs_effective_int(cfg->cookie_ttl, BS_DEFAULT_COOKIE_TTL);
-    int difficulty = bs_effective_int(cfg->difficulty, BS_DEFAULT_DIFFICULTY);
-
-    /* Cookie alg name is derived from provider name by convention so
-     * adding a provider doesn't require touching this handler — just the
-     * two registries. If bs_algorithms[] is missing the matching entry,
-     * that's a build-time oversight, not a config error, so fail hard. */
-    const char *cookie_alg_name = apr_psprintf(r->pool, "captcha-%s",
-                                               cfg->captcha_provider->name);
-    const bs_pow_algorithm *captcha_alg = bs_find_algorithm(cookie_alg_name);
-    if (!captcha_alg || !captcha_alg->implemented) {
-        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
-            "mod_botshield: cookie alg '%s' missing from registry — "
-            "provider '%s' is wired up but its cookie-alg row isn't",
-            cookie_alg_name, cfg->captcha_provider->name);
-        r->status = HTTP_INTERNAL_SERVER_ERROR;
-        ap_set_content_type(r, "text/plain; charset=utf-8");
-        ap_rputs("Service error: captcha cookie alg not registered.\n", r);
-        bs_decision_log(r, "captcha", "misconfigured", "-",
-                        cfg->captcha_provider->name, cookie_alg_name,
-                        "cookie_alg_missing", 0);
-        return OK;
-    }
-
+    /* Carry-forward + mint + install — see bs_captcha_carry_and_mint
+     * in captcha.h. Single source of truth for the forgive cap +
+     * passes counter + cookie installation across the captcha-verify
+     * handler, embedded-verify-provider, and form-captcha fixup. */
     bs_challenge ch;
-    const char *ierr = bs_issue_challenge(r->pool, cfg, difficulty, ttl,
-                                          /* auto_tier */ 0,
-                                          captcha_alg, &next_rep, &ch);
-    if (ierr) {
+    const char *cookie_alg_name = NULL;
+    const char *merr = bs_captcha_carry_and_mint(r, cfg,
+        BS_CAPTCHA_PASSES_CAPTCHA,
+        bs_effective_int(cfg->forgive_captcha, BS_DEFAULT_FORGIVE_CAPTCHA),
+        /* auto_tier */ 0,
+        &ch, &cookie_alg_name);
+    if (merr) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
-            "mod_botshield: captcha cookie issue failed: %s", ierr);
+            "mod_botshield: captcha cookie issue: %s", merr);
         r->status = HTTP_INTERNAL_SERVER_ERROR;
         ap_set_content_type(r, "text/plain; charset=utf-8");
         ap_rputs("Service error: could not issue cookie.\n", r);
         bs_decision_log(r, "captcha", "misconfigured", "-",
-                        cfg->captcha_provider->name, cookie_alg_name,
-                        "issue_failed", 0);
-        return OK;
-    }
-
-    if (bs_install_verified_cookie(r, cfg, &ch, "captcha") != NULL) {
-        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
-            "mod_botshield: failed to build cookie payload "
-            "(GCM encrypt failed)");
-        r->status = HTTP_INTERNAL_SERVER_ERROR;
-        ap_set_content_type(r, "text/plain; charset=utf-8");
-        ap_rputs("Service error: could not issue cookie.\n", r);
+                        cfg->captcha_provider->name,
+                        cookie_alg_name ? cookie_alg_name : "-",
+                        "mint_failed", 0);
         return OK;
     }
     /* Second Set-Cookie: Max-Age=0 clear for the pending cookie so
@@ -1908,27 +1879,10 @@ const char *bs_set_captcha_secret_file(cmd_parms *cmd, void *cfg_v,
 {
     bs_dir_cfg *cfg = cfg_v;
 
-    struct stat st;
-    if (stat(arg, &st) != 0) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldCaptchaSecretFile: cannot stat '%s'", arg);
-    }
-    if (st.st_mode & (S_IRGRP | S_IROTH | S_IWGRP | S_IWOTH)) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldCaptchaSecretFile: '%s' is group- or world-accessible "
-            "(mode %04o); chmod 600 it", arg, st.st_mode & 07777);
-    }
-
     const char *buf = NULL;
-    apr_size_t buf_len = 0;
-    const char *err = bs_load_config_file(cmd, "BotShieldCaptchaSecretFile",
-                                          arg, BS_MAX_SECRET_BYTES,
-                                          &buf, &buf_len);
-    if (err) return err;
-
     apr_size_t len = 0;
-    err = bs_validate_secret_key(cmd, "BotShieldCaptchaSecretFile",
-                                 arg, buf, buf_len, &len);
+    const char *err = bs_load_secret_file(cmd, "BotShieldCaptchaSecretFile",
+                                          arg, &buf, &len);
     if (err) return err;
     cfg->captcha_secret     = (const unsigned char *)buf;
     cfg->captcha_secret_len = len;
