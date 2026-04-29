@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Deployment | mod_botshield</title>
+  <meta name="description" content="Reverse proxies, slow-client defense, multi-vhost reputation, secret rotation, capacity sizing.">
+  <link rel="stylesheet" href="../assets/site.css">
+</head>
+<body class="site-doc">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <div class="page-shell">
+    <header class="site-header site-header--compact">
+      <a class="brand" href="../index.html">
+        <img class="brand__icon" src="../assets/logo-botshield-icon.svg" alt="" aria-hidden="true">
+        <span class="brand__wordmark" aria-label="BotShield">
+          <span class="brand__wordmark-soft">Bot</span><span class="brand__wordmark-strong">Shield</span>
+        </span>
+      </a>
+      <nav class="top-nav" aria-label="Primary">
+        <a class="top-nav__link" href="#">GitHub</a>
+        <a class="top-nav__link" href="../getting-started/index.html">Docs</a>
+        <a class="top-nav__link" href="../getting-started/index.html#build">Download</a>
+      </nav>
+    </header>
+
+    <main id="main-content" class="docs-layout" tabindex="-1">
+      <aside class="docs-sidebar">
+        <p class="docs-sidebar__eyebrow">Docs</p>
+        <nav class="docs-nav" aria-label="Documentation">
+<a class="docs-nav__item" href="../getting-started/index.html">
+  <span class="docs-nav__title">Getting started</span>
+  <span class="docs-nav__summary">Install, build, minimal configuration, and verifying a first request.</span>
+</a>
+<a class="docs-nav__item is-active" href="index.html">
+  <span class="docs-nav__title">Deployment</span>
+  <span class="docs-nav__summary">Reverse proxies, slow-client defense, multi-vhost reputation, secret rotation, capacity sizing.</span>
+</a>
+<a class="docs-nav__item" href="../operator-model/index.html">
+  <span class="docs-nav__title">Operator model</span>
+  <span class="docs-nav__summary">Tiers, scoring, cookie-carried reputation, decision log, tuning workflow.</span>
+</a>
+<a class="docs-nav__item" href="../policy/index.html">
+  <span class="docs-nav__title">Policy</span>
+  <span class="docs-nav__summary">Allow lists, rate limits, block paths, robots.txt, the trigger families, and flag triggers.</span>
+</a>
+<a class="docs-nav__item" href="../captcha/index.html">
+  <span class="docs-nav__title">Captcha and app-bridge</span>
+  <span class="docs-nav__summary">Third-party captcha providers, verify-endpoint hardening, and the signed app-bridge protocols.</span>
+</a>
+<a class="docs-nav__item" href="../staging/index.html">
+  <span class="docs-nav__title">Staging</span>
+  <span class="docs-nav__summary">Per-rule observe and global shadow mode for safe rule rollout.</span>
+</a>
+<a class="docs-nav__item" href="../observability/index.html">
+  <span class="docs-nav__title">Observability</span>
+  <span class="docs-nav__summary">Decision log, Prometheus metrics, mod_status contribution, and the policy-status admin page.</span>
+</a>
+<a class="docs-nav__item" href="../directives/index.html">
+  <span class="docs-nav__title">Directive reference</span>
+  <span class="docs-nav__summary">Canonical operator-facing reference for all 78 directives, grouped by family.</span>
+</a>
+<a class="docs-nav__item" href="../troubleshooting/index.html">
+  <span class="docs-nav__title">Troubleshooting</span>
+  <span class="docs-nav__summary">Common operator-visible issues, diagnostics, and fixes.</span>
+</a>
+<a class="docs-nav__item" href="../faq/index.html">
+  <span class="docs-nav__title">FAQ</span>
+  <span class="docs-nav__summary">Honest answers to questions operators ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
+</a>
+<a class="docs-nav__item" href="../guide/index.html">
+  <span class="docs-nav__title">Project README</span>
+  <span class="docs-nav__summary">Repository README — project overview, build instructions, and dev configuration.</span>
+</a>
+<a class="docs-nav__item" href="../roadmap/index.html">
+  <span class="docs-nav__title">Roadmap and changelog</span>
+  <span class="docs-nav__summary">Shipped milestones, extension design notes, and the development backlog.</span>
+</a>
+        </nav>
+      </aside>
+
+      <article class="docs-article">
+        <header class="docs-article__header">
+          <p class="eyebrow">Documentation</p>
+          <h1>Deployment</h1>
+          <p class="docs-article__summary">Reverse proxies, slow-client defense, multi-vhost reputation, secret rotation, capacity sizing.</p>
+          <p class="docs-article__source">Deployment</p>
+        </header>
+<section class="toc">
+  <h2 class="toc__heading">On this page</h2>
+  <ul class="toc__list">
+<li class="toc__item toc__item--level-2"><a href="#behind-a-reverse-proxy-or-load-balancer">Behind a reverse proxy or load balancer</a></li>
+<li class="toc__item toc__item--level-2"><a href="#slow-client-slowloris-defense">Slow-client / slowloris defense</a></li>
+<li class="toc__item toc__item--level-2"><a href="#https-host-cookie-prefix">HTTPS / `__Host-` cookie prefix</a></li>
+<li class="toc__item toc__item--level-2"><a href="#multi-vhost-reputation">Multi-vhost reputation</a></li>
+<li class="toc__item toc__item--level-3"><a href="#default-auto-isolation-per-servername">Default: auto-isolation per ServerName</a></li>
+<li class="toc__item toc__item--level-3"><a href="#opt-in-shared-reputation-botshieldsharescope">Opt-in shared reputation: `BotShieldShareScope`</a></li>
+<li class="toc__item toc__item--level-3"><a href="#missing-servername">Missing `ServerName`</a></li>
+<li class="toc__item toc__item--level-3"><a href="#one-shm-segment-scaling">One SHM segment, scaling</a></li>
+<li class="toc__item toc__item--level-2"><a href="#capacity-sizing">Capacity sizing</a></li>
+<li class="toc__item toc__item--level-2"><a href="#performance-characteristics">Performance characteristics</a></li>
+<li class="toc__item toc__item--level-2"><a href="#state-persistence">State persistence</a></li>
+<li class="toc__item toc__item--level-2"><a href="#secret-rotation">Secret rotation</a></li>
+<li class="toc__item toc__item--level-2"><a href="#where-to-next">Where to next</a></li>
+  </ul>
+</section>
+        <div class="prose">
+<p>This page covers real-world deployment topology: reverse proxies and
+load balancers, slowloris defense, multi-vhost reputation isolation,
+secret rotation, and capacity sizing.</p>
+<h2 id="behind-a-reverse-proxy-or-load-balancer">Behind a reverse proxy or load balancer</h2>
+<p>mod_botshield keys every IP-based signal (flagged-IP table, Bloom
+filter, rate limiters, score) on <code>r-&gt;useragent_ip</code> — the TCP peer
+Apache sees. If Apache sits behind a reverse proxy or load balancer
+(CDN, AWS ELB, nginx in front, etc.) that peer is the proxy, not the
+real client. <strong>Without <code>mod_remoteip</code>, the module will flag your own
+edge and challenge every legitimate visitor.</strong></p>
+<p>The fix is the stock Apache module <code>mod_remoteip</code>. Configure it to
+trust your edge hops; it will rewrite <code>r-&gt;useragent_ip</code> to the real
+client before any botshield hook runs:</p>
+<pre><code class="language-apache">LoadModule remoteip_module modules/mod_remoteip.so
+
+RemoteIPHeader        X-Forwarded-For
+RemoteIPTrustedProxy  10.0.0.0/8
+RemoteIPTrustedProxy  2001:db8:cafe::/48
+# ... one RemoteIPTrustedProxy per edge CIDR ...
+</code></pre>
+<p>This is the same module used for accurate <code>%a</code> in access logs — if
+your access logs already show real client IPs, you're done.</p>
+<p>We deliberately do not reimplement this. <code>mod_remoteip</code> parses
+the configured header (typically <code>X-Forwarded-For</code>) as a comma-
+separated chain of IPs, matches each hop against the trusted-
+proxy CIDR list, and rewrites <code>r-&gt;useragent_ip</code> to the leftmost
+untrusted address — IPv4 and IPv6, multi-hop chains, all in
+Apache core, battle-tested, maintained. If your edge sends
+RFC 7239 <code>Forwarded:</code> headers instead, terminate them at the
+edge and have it forward <code>X-Forwarded-For</code> for Apache; mod_remoteip
+itself does not parse the RFC 7239 grammar.</p>
+<p>For a single-host deployment with no proxy in front, no extra
+configuration is needed: <code>r-&gt;useragent_ip</code> already equals the client
+IP.</p>
+<h2 id="slow-client-slowloris-defense">Slow-client / slowloris defense</h2>
+<p>mod_botshield's body-read paths (form-captcha verify, the
+captcha-verify endpoint, embedded-verify endpoint) inherit Apache's
+slow-client defense. Apache's <code>Timeout</code> directive bounds how long a
+worker can be held by a stalled client; the default is 60 seconds.</p>
+<p>For production deployments, pair mod_botshield with
+<code>mod_reqtimeout</code>. It gives finer-grained controls than <code>Timeout</code> and
+is the standard Apache answer to slowloris-class attacks:</p>
+<pre><code class="language-apache">LoadModule reqtimeout_module modules/mod_reqtimeout.so
+
+RequestReadTimeout header=20-40,minrate=500
+RequestReadTimeout body=20,minrate=500
+</code></pre>
+<p>We deliberately do not implement our own slow-client defense.
+<code>mod_reqtimeout</code> is in Apache core, applies to the whole vhost, and
+mod_botshield's endpoints get the same protection as the
+application's own handlers.</p>
+<h2 id="https-host-cookie-prefix">HTTPS / <code>__Host-</code> cookie prefix</h2>
+<p>When the request is HTTPS <em>and</em> you have not configured
+<code>BotShieldCookieDomain</code>, mod_botshield emits the verified cookie as
+<code>__Host-bs_verified</code>. Browsers refuse to accept <code>__Host-</code> cookies
+over plain HTTP, refuse cookies with a <code>Domain=</code> attribute, and
+constrain <code>Path=/</code> — closing several cookie-injection attack classes
+that the legacy <code>_bs_verified</code> name still has to support for HTTP
+deployments.</p>
+<p>Verify path checks both names (host-prefix first), so existing
+clients with the legacy cookie still work during the transition.</p>
+<h2 id="multi-vhost-reputation">Multi-vhost reputation</h2>
+<p>Each vhost gets its own isolated bot reputation by default. A bot
+flagged on <code>site-a.example.com</code> doesn't carry that flag to
+<code>site-b.example.com</code>. Operators running many vhosts on one Apache
+instance get per-site detection without configuring anything.</p>
+<h3 id="default-auto-isolation-per-servername">Default: auto-isolation per ServerName</h3>
+<p>Each vhost's reputation namespace is derived from its <code>ServerName</code>
+directive — two vhosts with different <code>ServerName</code> values
+automatically maintain separate reputation. No configuration required.</p>
+<pre><code class="language-apache">&lt;VirtualHost *:443&gt;
+    ServerName site-a.example.com
+    BotShieldEnabled on
+&lt;/VirtualHost&gt;
+
+&lt;VirtualHost *:443&gt;
+    ServerName site-b.example.com
+    BotShieldEnabled on
+&lt;/VirtualHost&gt;
+</code></pre>
+<p>Different sites usually have different threat models — the strict
+isolation is what most operators want.</p>
+<h3 id="opt-in-shared-reputation-botshieldsharescope">Opt-in shared reputation: <code>BotShieldShareScope</code></h3>
+<p>When sibling vhosts should share state — dev/prod environments,
+www/api subdomains under the same brand, redundant frontends — set
+<code>BotShieldShareScope</code> to the same string on each vhost:</p>
+<pre><code class="language-apache">&lt;VirtualHost *:443&gt;
+    ServerName www.example.com
+    BotShieldShareScope example-cluster
+&lt;/VirtualHost&gt;
+
+&lt;VirtualHost *:443&gt;
+    ServerName api.example.com
+    BotShieldShareScope example-cluster
+&lt;/VirtualHost&gt;
+</code></pre>
+<p>Both vhosts now share one reputation namespace. A bot flagged on
+either site is flagged on the other. The scope token is hashed; any
+string works, just keep it consistent across the vhosts you want
+grouped. Different tokens produce independent groups.</p>
+<h3 id="missing-servername">Missing <code>ServerName</code></h3>
+<p>A vhost without a <code>ServerName</code> directive falls back to the global
+default namespace (<code>ns_id=0</code>). All such vhosts share reputation;
+mod_botshield logs a NOTICE at startup so the fallback is visible.
+For explicit isolation on a vhost without <code>ServerName</code>, set
+<code>BotShieldShareScope</code> to a unique-per-vhost token.</p>
+<h3 id="one-shm-segment-scaling">One SHM segment, scaling</h3>
+<p>A single Apache instance can handle hundreds of vhosts sharing one
+shared-memory segment. The per-slot namespace tag lets all vhosts
+coexist without per-vhost SHM segments. Monitor SHM utilization via
+the headroom watchdog (logs at <code>info</code>) and tune capacity directives
+for aggregate traffic.</p>
+<h2 id="capacity-sizing">Capacity sizing</h2>
+<p>Default budgets fit a single-site deployment seeing ~1M unique IPs
+per week. Larger deployments (or aggregations across many vhosts)
+should size capacity directives to match.</p>
+<table>
+<thead>
+<tr>
+<th>Directive</th>
+<th>Default</th>
+<th>What it limits</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BotShieldShmSize</code></td>
+<td><code>16M</code></td>
+<td>Total SHM budget (header + tables + Bloom buffers). Range 128K..256M</td>
+</tr>
+<tr>
+<td><code>BotShieldFlaggedIPCapacity</code></td>
+<td><code>50000</code></td>
+<td>Open-addressed slot count for flagged IPs. Range 1024..1000000</td>
+</tr>
+<tr>
+<td><code>BotShieldBloomIPs</code></td>
+<td><code>1000000</code></td>
+<td>Expected unique-IPs working set. Drives Bloom filter dimensions</td>
+</tr>
+<tr>
+<td><code>BotShieldBloomWindow</code></td>
+<td><code>604800</code></td>
+<td>Bloom rotation window (seconds). Rotation at window/2</td>
+</tr>
+<tr>
+<td><code>BotShieldRateLimitEscalateCapacity</code></td>
+<td><code>50000</code></td>
+<td>strike-table slots</td>
+</tr>
+<tr>
+<td><code>BotShieldSafeguardCapacity</code></td>
+<td><code>50000</code></td>
+<td>challenge-loop suppression slots</td>
+</tr>
+<tr>
+<td><code>BotShieldEmbeddedNonceCapacity</code></td>
+<td><code>32768</code></td>
+<td>embedded-bootstrap nonce table</td>
+</tr>
+</tbody>
+</table>
+<p>These are server-scope only — placed inside <code>&lt;VirtualHost&gt;</code> they
+emit a NOTICE and are ignored. The SHM segment is module-global, so
+sizing happens once at the main-server level.</p>
+<p>The headroom watchdog logs notices when any table approaches
+capacity, so operators can size reactively rather than guess
+up-front. Look for log lines of the form:</p>
+<pre><code>mod_botshield: capacity headroom: flagged_ip 38241/50000 (76%)
+</code></pre>
+<h2 id="performance-characteristics">Performance characteristics</h2>
+<p>The in-tree benchmark suite in <code>tests/bench/</code> measures pass-through
+cost against a tiny Apache static-file endpoint. That workload is
+useful because it makes fixed per-request cost visible, but it is
+also the harshest possible denominator: a 140-byte static response
+on localhost is much cheaper than a normal application request.</p>
+<p>Latest saved measurements combine the single-connection and
+saturation <code>wrk</code> sweep (<code>tests/bench/run-bench.sh</code>) with the
+fixed-rate <code>oha</code> sweep (<code>tests/bench/run-rate-bench.sh</code>). All run
+against localhost with browser-like request headers:</p>
+<table>
+<thead>
+<tr>
+<th>Measurement</th>
+<th style="text-align:right">Result</th>
+<th>How to read it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Single connection, Apache static baseline</td>
+<td style="text-align:right">~310us p50</td>
+<td>Cheapest local request path.</td>
+</tr>
+<tr>
+<td>Single connection, <code>BotShieldEnabled on</code>, no policy features</td>
+<td style="text-align:right">~318us p50</td>
+<td>About <strong>+8us</strong> for the basic pass-through path.</td>
+</tr>
+<tr>
+<td>Fixed-rate 1k / 5k rps</td>
+<td style="text-align:right">p50 and p99 deltas mostly noise</td>
+<td>Non-saturating traffic stays flat.</td>
+</tr>
+<tr>
+<td>Fixed-rate 10k rps, trigger-heavy policy</td>
+<td style="text-align:right">~+0.03ms p50, ~+0.28ms p99</td>
+<td>Real cost, still well below normal app latency.</td>
+</tr>
+<tr>
+<td>Fixed-rate 10k rps, kitchen-sink policy</td>
+<td style="text-align:right">~+0.05ms p50, ~+2.7ms p99</td>
+<td>Broadest config shows tail growth before median pain.</td>
+</tr>
+<tr>
+<td>Saturation <code>-t4 -c100</code>, trigger-heavy / kitchen-sink policies</td>
+<td style="text-align:right">~20% lower static-file RPS</td>
+<td>Capacity-ceiling result, amplified by the tiny static baseline.</td>
+</tr>
+</tbody>
+</table>
+<p>The practical reading is: BotShield has a real per-request cost,
+but the absolute cost on passing traffic is small. The worst-looking
+RPS percentage comes from saturating Apache with a tiny static file
+over loopback; it should not be read as &quot;every production request
+gets 20% slower.&quot; The fixed-rate pass is the better proxy for normal
+operation: even at 10k rps, median latency barely moves, and the
+largest effect is a tail-latency signal in the broadest policy
+configuration. For dynamic application traffic, network RTT,
+FastCGI/PHP startup, framework work, database calls, and template
+rendering usually dominate the few microseconds to low milliseconds
+BotShield adds.</p>
+<p>Where the overhead earns its keep: every bot request handled before
+the backend avoids invoking the application at all. Avoiding even
+one framework bootstrap, database query, or upstream proxy trip can
+save more work than many pass-through BotShield checks cost.</p>
+<p>The <code>tests/bench/run-bench.sh</code> and <code>tests/bench/run-rate-bench.sh</code>
+drivers reproduce these measurements on your own hardware. Raw
+<code>wrk</code> / <code>oha</code> output is saved under <code>tests/bench/results/</code> so
+operators can inspect the full latency and throughput distribution
+when sizing a deployment.</p>
+<h2 id="state-persistence">State persistence</h2>
+<p>mod_botshield can snapshot the SHM tables to disk at a configured
+interval (or only at clean shutdown) and reload on next start. This
+lets the flagged-IP table, Bloom filters, and rate-limit counters
+survive Apache restarts.</p>
+<pre><code class="language-apache">BotShieldStateFile         /var/lib/botshield/state.bin
+BotShieldStateSaveInterval 300
+</code></pre>
+<p>Both directives are server-scope. The default is &quot;no persistence&quot;
+(<code>BotShieldStateFile</code> unset). Periodic saves require <code>mod_watchdog</code>;
+the graceful-shutdown save runs regardless.</p>
+<p>The state file format is versioned. Format-version drift between
+saves and loads (e.g. after upgrading the module) results in the
+table starting fresh with a NOTICE — never a startup failure.</p>
+<h2 id="secret-rotation">Secret rotation</h2>
+<p>mod_botshield supports a verify-only secondary key for graceful HMAC
+rotation. The flow:</p>
+<ol>
+<li>
+<p>Generate a new master secret. Install it as a fresh file
+(e.g. <code>/etc/botshield/secret.new</code>).</p>
+</li>
+<li>
+<p>Configure both files, with the <strong>new</strong> key as primary and the
+<strong>old</strong> key as secondary:</p>
+<pre><code class="language-apache">BotShieldSecretFile          /etc/botshield/secret.new
+BotShieldSecondarySecretFile /etc/botshield/secret.old
+</code></pre>
+<p>Reload Apache. New cookies are signed with the new key; existing
+cookies still verify against the secondary.</p>
+</li>
+<li>
+<p>After the cookie TTL elapses (default 1 h, or
+<code>BotShieldCookieTTL</code> if you raised it), every in-flight cookie has
+been re-issued under the new key. Drop the secondary:</p>
+<pre><code class="language-apache">BotShieldSecretFile /etc/botshield/secret.new
+</code></pre>
+<p>Reload. The old secret can now be deleted.</p>
+</li>
+</ol>
+<p>The secondary covers four verify call sites: HMAC <code>_bs_verified</code>,
+GCM <code>_bs_verified</code>, the captcha-pending cookie, and the
+embedded-verify PoW path. App-bridge keys
+(<code>BotShieldAppIntegrationSecretFile</code>) and captcha provider secrets
+are out of rotation scope; rotate those by reloading with the new
+file.</p>
+<h2 id="where-to-next">Where to next</h2>
+<ul>
+<li>Tier model, scoring, decision log: <a href="../operator-model/index.html">operator model</a>.</li>
+<li>Allow lists, rate limits, triggers: <a href="../policy/index.html">policy</a>.</li>
+<li>Captcha and app-bridge integration: <a href="../captcha/index.html">captcha</a>.</li>
+<li>Staging policy changes safely: <a href="../staging/index.html">staging</a>.</li>
+<li>Metrics + decision log + mod_status: <a href="../observability/index.html">observability</a>.</li>
+</ul>
+
+        </div>
+      </article>
+    </main>
+  </div>
+</body>
+</html>

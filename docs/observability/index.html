@@ -1,0 +1,551 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Observability | mod_botshield</title>
+  <meta name="description" content="Decision log, Prometheus metrics, mod_status contribution, and the policy-status admin page.">
+  <link rel="stylesheet" href="../assets/site.css">
+</head>
+<body class="site-doc">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <div class="page-shell">
+    <header class="site-header site-header--compact">
+      <a class="brand" href="../index.html">
+        <img class="brand__icon" src="../assets/logo-botshield-icon.svg" alt="" aria-hidden="true">
+        <span class="brand__wordmark" aria-label="BotShield">
+          <span class="brand__wordmark-soft">Bot</span><span class="brand__wordmark-strong">Shield</span>
+        </span>
+      </a>
+      <nav class="top-nav" aria-label="Primary">
+        <a class="top-nav__link" href="#">GitHub</a>
+        <a class="top-nav__link" href="../getting-started/index.html">Docs</a>
+        <a class="top-nav__link" href="../getting-started/index.html#build">Download</a>
+      </nav>
+    </header>
+
+    <main id="main-content" class="docs-layout" tabindex="-1">
+      <aside class="docs-sidebar">
+        <p class="docs-sidebar__eyebrow">Docs</p>
+        <nav class="docs-nav" aria-label="Documentation">
+<a class="docs-nav__item" href="../getting-started/index.html">
+  <span class="docs-nav__title">Getting started</span>
+  <span class="docs-nav__summary">Install, build, minimal configuration, and verifying a first request.</span>
+</a>
+<a class="docs-nav__item" href="../deployment/index.html">
+  <span class="docs-nav__title">Deployment</span>
+  <span class="docs-nav__summary">Reverse proxies, slow-client defense, multi-vhost reputation, secret rotation, capacity sizing.</span>
+</a>
+<a class="docs-nav__item" href="../operator-model/index.html">
+  <span class="docs-nav__title">Operator model</span>
+  <span class="docs-nav__summary">Tiers, scoring, cookie-carried reputation, decision log, tuning workflow.</span>
+</a>
+<a class="docs-nav__item" href="../policy/index.html">
+  <span class="docs-nav__title">Policy</span>
+  <span class="docs-nav__summary">Allow lists, rate limits, block paths, robots.txt, the trigger families, and flag triggers.</span>
+</a>
+<a class="docs-nav__item" href="../captcha/index.html">
+  <span class="docs-nav__title">Captcha and app-bridge</span>
+  <span class="docs-nav__summary">Third-party captcha providers, verify-endpoint hardening, and the signed app-bridge protocols.</span>
+</a>
+<a class="docs-nav__item" href="../staging/index.html">
+  <span class="docs-nav__title">Staging</span>
+  <span class="docs-nav__summary">Per-rule observe and global shadow mode for safe rule rollout.</span>
+</a>
+<a class="docs-nav__item is-active" href="index.html">
+  <span class="docs-nav__title">Observability</span>
+  <span class="docs-nav__summary">Decision log, Prometheus metrics, mod_status contribution, and the policy-status admin page.</span>
+</a>
+<a class="docs-nav__item" href="../directives/index.html">
+  <span class="docs-nav__title">Directive reference</span>
+  <span class="docs-nav__summary">Canonical operator-facing reference for all 78 directives, grouped by family.</span>
+</a>
+<a class="docs-nav__item" href="../troubleshooting/index.html">
+  <span class="docs-nav__title">Troubleshooting</span>
+  <span class="docs-nav__summary">Common operator-visible issues, diagnostics, and fixes.</span>
+</a>
+<a class="docs-nav__item" href="../faq/index.html">
+  <span class="docs-nav__title">FAQ</span>
+  <span class="docs-nav__summary">Honest answers to questions operators ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
+</a>
+<a class="docs-nav__item" href="../guide/index.html">
+  <span class="docs-nav__title">Project README</span>
+  <span class="docs-nav__summary">Repository README — project overview, build instructions, and dev configuration.</span>
+</a>
+<a class="docs-nav__item" href="../roadmap/index.html">
+  <span class="docs-nav__title">Roadmap and changelog</span>
+  <span class="docs-nav__summary">Shipped milestones, extension design notes, and the development backlog.</span>
+</a>
+        </nav>
+      </aside>
+
+      <article class="docs-article">
+        <header class="docs-article__header">
+          <p class="eyebrow">Documentation</p>
+          <h1>Observability</h1>
+          <p class="docs-article__summary">Decision log, Prometheus metrics, mod_status contribution, and the policy-status admin page.</p>
+          <p class="docs-article__source">Observability</p>
+        </header>
+<section class="toc">
+  <h2 class="toc__heading">On this page</h2>
+  <ul class="toc__list">
+<li class="toc__item toc__item--level-2"><a href="#decision-log">Decision log</a></li>
+<li class="toc__item toc__item--level-3"><a href="#field-vocabulary">Field vocabulary</a></li>
+<li class="toc__item toc__item--level-3"><a href="#reason-name-vocabulary">Reason-name vocabulary</a></li>
+<li class="toc__item toc__item--level-3"><a href="#verbose-prose-line">Verbose prose line</a></li>
+<li class="toc__item toc__item--level-2"><a href="#prometheus-metrics">Prometheus metrics</a></li>
+<li class="toc__item toc__item--level-3"><a href="#access-control">Access control</a></li>
+<li class="toc__item toc__item--level-3"><a href="#counter-inventory">Counter inventory</a></li>
+<li class="toc__item toc__item--level-3"><a href="#sample-scrape">Sample scrape</a></li>
+<li class="toc__item toc__item--level-3"><a href="#validating-the-format">Validating the format</a></li>
+<li class="toc__item toc__item--level-2"><a href="#mod-status-contribution">mod_status contribution</a></li>
+<li class="toc__item toc__item--level-2"><a href="#policy-status-admin-page">Policy-status admin page</a></li>
+<li class="toc__item toc__item--level-2"><a href="#capacity-headroom-watchdog">Capacity headroom watchdog</a></li>
+<li class="toc__item toc__item--level-2"><a href="#debug-mode">Debug mode</a></li>
+<li class="toc__item toc__item--level-2"><a href="#where-to-next">Where to next</a></li>
+  </ul>
+</section>
+        <div class="prose">
+<p>mod_botshield exposes three observability surfaces: a structured
+per-decision log line, a Prometheus exposition endpoint, and a
+<code>mod_status</code> contribution hook. All three derive from one
+canonical decision-log vocabulary — there is no parallel taxonomy.</p>
+<h2 id="decision-log">Decision log</h2>
+<p>Every gated request emits a stable <code>key=value</code> structured line at
+<code>info</code> level (<code>bs_decision_log</code>); challenge-issuing requests also
+emit an <code>info</code> prose line carrying per-reason penalty values, and
+pass-through decisions emit a <code>debug</code> prose line. The structured
+line is the canonical surface — operators tail at <code>info</code> and parse
+the <code>key=value</code> form; the prose lines are forensic detail.</p>
+<p>The structured line:</p>
+<pre><code>mod_botshield: decision tier=&lt;t&gt; outcome=&lt;o&gt; ip=&lt;i&gt; score=&lt;n&gt;
+    cookie=&lt;c&gt; provider=&lt;p|-&gt; alg=&lt;a|-&gt; reason=&quot;&lt;r|-&gt;&quot; path=&quot;&lt;u&gt;&quot;
+    [tag=&quot;&lt;tag&gt;&quot;]
+</code></pre>
+<p>The decision log emits at Apache's <code>info</code> level. Default
+<code>LogLevel warn</code> hides it. Bump just this module:</p>
+<pre><code class="language-apache">LogLevel botshield_module:info
+</code></pre>
+<p><code>reason</code>, <code>path</code>, and <code>tag</code> are double-quoted; embedded <code>&quot;</code> and
+<code>\</code> characters are URL-percent-encoded (<code>%22</code>, <code>%5C</code>) so an
+adversarial URI can't break log-parser tokenization. Browser
+traffic is unaffected — browsers already %-encode those bytes.</p>
+<h3 id="field-vocabulary">Field vocabulary</h3>
+<p>The set of values each field can take is fixed and validated at
+commit time by a small awk validator (<code>tests/scripts/decision-log- awk-validator.sh</code>).</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Values</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>tier</code></td>
+<td><code>none</code>, <code>pass</code>, <code>silent</code>, <code>form</code>, <code>captcha</code>, <code>safeguard</code></td>
+</tr>
+<tr>
+<td><code>outcome</code></td>
+<td><code>declined</code>, <code>challenged</code>, <code>verified</code>, <code>rejected</code>, <code>failopen</code>, <code>rate_limited</code>, <code>inflight_capped</code>, <code>pending_missing</code>, <code>misconfigured</code>, <code>debug</code></td>
+</tr>
+<tr>
+<td><code>cookie</code></td>
+<td><code>ok</code>, <code>expired</code>, <code>bad_sig</code>, <code>bad_format</code>, <code>absent</code>, <code>-</code></td>
+</tr>
+<tr>
+<td><code>provider</code></td>
+<td><code>-</code>, <code>turnstile</code>, <code>hcaptcha</code>, <code>recaptcha-v2</code>, <code>recaptcha-v3</code>, <code>friendly</code>, <code>geetest</code></td>
+</tr>
+<tr>
+<td><code>alg</code></td>
+<td><code>-</code>, <code>sha256-zeros</code>, <code>captcha-&lt;provider&gt;</code></td>
+</tr>
+<tr>
+<td><code>reason</code></td>
+<td>quoted short string (comma-joined reason names) or <code>-</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>tier=safeguard</code> is emitted for challenge-loop suppression
+(pass-through with the flagged-IP entry preserved). For metrics it
+bins into <code>tier_pass_total</code> since it's functionally pass-through;
+operators wanting to dashboard the safeguard rate scrape the
+decision log for <code>reason=&quot;challenge-safeguard&quot;</code>.</p>
+<h3 id="reason-name-vocabulary">Reason-name vocabulary</h3>
+<p>The <code>reason</code> field is a comma-joined list of reason tokens captured
+by <code>bs_score_add</code> calls during the request. Each token usually
+takes the shape <code>&lt;family&gt;:&lt;name&gt;</code> so the source family is visible:</p>
+<table>
+<thead>
+<tr>
+<th>Token shape</th>
+<th>Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>missing-user-agent</code>, <code>missing-accept-language</code>, <code>scraper-ua:&lt;pattern&gt;</code></td>
+<td>Built-in heuristics</td>
+</tr>
+<tr>
+<td><code>first-sight-ip</code></td>
+<td>Bloom filter</td>
+</tr>
+<tr>
+<td><code>verified-&lt;name&gt;</code>, <code>fake-&lt;name&gt;</code>, <code>bot-unverified</code></td>
+<td>allow list</td>
+</tr>
+<tr>
+<td><code>block-path:&lt;name&gt;</code></td>
+<td>block-path</td>
+</tr>
+<tr>
+<td><code>rate-limit-exceeded:&lt;name&gt;</code></td>
+<td>rate limit</td>
+</tr>
+<tr>
+<td><code>robots-block:&lt;group&gt;</code></td>
+<td>robots.txt</td>
+</tr>
+<tr>
+<td><code>flag-trigger:&lt;flag&gt;</code></td>
+<td>flag-trigger score action</td>
+</tr>
+<tr>
+<td><code>flag-tier-floor:&lt;tier&gt;</code></td>
+<td>flag-trigger tier-floor action</td>
+</tr>
+<tr>
+<td><code>path-trigger:&lt;name&gt;</code>, <code>cookie-trigger:&lt;name&gt;</code>, <code>env-trigger:&lt;name&gt;</code>, <code>load-trigger:&lt;name&gt;</code>, <code>feedback-trigger:&lt;event&gt;</code></td>
+<td>trigger families</td>
+</tr>
+<tr>
+<td><code>&lt;reason&gt;:observe</code></td>
+<td>Any of the above with <code>mode=observe</code> or under <code>BotShieldShadowMode on</code> (see <a href="../staging/index.html">staging</a>)</td>
+</tr>
+<tr>
+<td><code>would-flag-trigger:&lt;flag&gt;:observe</code>, <code>would-block:&lt;name&gt;</code>, <code>would-rate-limit:&lt;name&gt;</code></td>
+<td>Observe-mode &quot;would have done&quot; reasons</td>
+</tr>
+<tr>
+<td><code>challenge-safeguard</code></td>
+<td>safeguard pass-through</td>
+</tr>
+</tbody>
+</table>
+<h3 id="verbose-prose-line">Verbose prose line</h3>
+<p>Alongside the structured line, the prose line carries the per-
+reason penalty values (not just the names) for forensic debugging:</p>
+<pre><code>mod_botshield: &lt;action&gt; effective=37 tier=silent heuristic=37
+    cookie_score=0 reasons=[first-sight-ip:5,missing-accept-language:15,scraper-ua:python-requests:50]
+</code></pre>
+<p>Grep the log for the request, read the reasons array, see exactly
+which signals contributed and how much.</p>
+<h2 id="prometheus-metrics">Prometheus metrics</h2>
+<p>The module exports SHM-backed counters and gauges at
+<code>&lt;prefix&gt;/metrics</code> (default <code>/botshield/metrics</code>) in Prometheus 0.0.4
+exposition format.</p>
+<h3 id="access-control">Access control</h3>
+<p>The endpoint is unauthenticated. Wrap it in a <code>&lt;Location&gt;</code> with
+your own ACL — operators usually scrape from a network the public
+internet can't reach:</p>
+<pre><code class="language-apache">&lt;Location /botshield/metrics&gt;
+    Require ip 10.0.0.0/8
+    Require ip 2001:db8::/48
+&lt;/Location&gt;
+</code></pre>
+<p>Or with HTTP Basic auth, <code>Require valid-user</code>, etc.</p>
+<h3 id="counter-inventory">Counter inventory</h3>
+<p>Counter names mechanically track the decision-log enum vocabulary —
+adding a new enum value adds one row to the string→index lookup
+or the string simply doesn't increment a counter (with a visible
+WARNING). Drift is loud, not silent.</p>
+<table>
+<thead>
+<tr>
+<th>Counter family</th>
+<th>Count</th>
+<th>Source field</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>botshield_tier_&lt;t&gt;_total</code></td>
+<td>5</td>
+<td>one per non-<code>safeguard</code> tier; <code>safeguard</code> bins into <code>pass</code></td>
+</tr>
+<tr>
+<td><code>botshield_outcome_&lt;o&gt;_total</code></td>
+<td>10</td>
+<td>one per <code>outcome</code> enum</td>
+</tr>
+<tr>
+<td><code>botshield_cookie_&lt;c&gt;_total</code></td>
+<td>5</td>
+<td>one per <code>cookie</code> enum</td>
+</tr>
+<tr>
+<td><code>botshield_provider_&lt;p&gt;_total</code></td>
+<td>6</td>
+<td>one per built-in provider</td>
+</tr>
+</tbody>
+</table>
+<p>Plus persistence metrics:</p>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Type</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>botshield_state_saves_total</code></td>
+<td>counter</td>
+<td>Successful state-file snapshots</td>
+</tr>
+<tr>
+<td><code>botshield_state_loads_total</code></td>
+<td>counter</td>
+<td>Successful state-file loads at startup</td>
+</tr>
+<tr>
+<td><code>botshield_state_save_last_unix</code></td>
+<td>gauge</td>
+<td>Unix time of last save</td>
+</tr>
+<tr>
+<td><code>botshield_state_save_last_bytes</code></td>
+<td>gauge</td>
+<td>Bytes written in last save</td>
+</tr>
+<tr>
+<td><code>botshield_state_save_last_duration_microseconds</code></td>
+<td>gauge</td>
+<td>Microseconds taken by last save</td>
+</tr>
+<tr>
+<td><code>botshield_state_load_last_kept</code></td>
+<td>gauge</td>
+<td>Slots restored from last load</td>
+</tr>
+<tr>
+<td><code>botshield_state_load_last_dropped</code></td>
+<td>gauge</td>
+<td>Slots discarded (TTL expired, format mismatch)</td>
+</tr>
+</tbody>
+</table>
+<p>Allow-list and policy counters:</p>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Type</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>botshield_bot_allow_total</code></td>
+<td>counter</td>
+<td>Verified-crawler matches</td>
+</tr>
+<tr>
+<td><code>botshield_bot_fake_total</code></td>
+<td>counter</td>
+<td>UA-claims-bot but IP doesn't match</td>
+</tr>
+<tr>
+<td><code>botshield_bot_unverified_total</code></td>
+<td>counter</td>
+<td>UA matches a registered bot but no ranges loaded</td>
+</tr>
+<tr>
+<td><code>botshield_rate_limit_exceeded_total</code></td>
+<td>counter</td>
+<td>Total rate-limit 429s</td>
+</tr>
+<tr>
+<td><code>botshield_block_path_hit_total</code></td>
+<td>counter</td>
+<td>Total block-path 403s</td>
+</tr>
+<tr>
+<td><code>botshield_rate_limit_observed_total</code></td>
+<td>counter</td>
+<td>Observe-mode rate-limit matches</td>
+</tr>
+<tr>
+<td><code>botshield_block_path_observed_total</code></td>
+<td>counter</td>
+<td>Observe-mode block-path matches</td>
+</tr>
+<tr>
+<td><code>botshield_trigger_observed_total</code></td>
+<td>counter</td>
+<td>Observe-mode trigger matches across families</td>
+</tr>
+</tbody>
+</table>
+<p>Plus SHM utilization gauges (computed at scrape time, cached 1 s
+per worker):</p>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Type</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>botshield_shm_flagged_used</code>, <code>botshield_shm_flagged_capacity</code></td>
+<td>gauge</td>
+<td>Flagged-IP slot utilization</td>
+</tr>
+<tr>
+<td><code>botshield_shm_strike_used</code>, <code>botshield_shm_strike_capacity</code></td>
+<td>gauge</td>
+<td>Rate-limit-escalate strike-table utilization</td>
+</tr>
+<tr>
+<td><code>botshield_shm_safeguard_used</code>, <code>botshield_shm_safeguard_capacity</code></td>
+<td>gauge</td>
+<td>Safeguard-table utilization</td>
+</tr>
+<tr>
+<td><code>botshield_bloom_bits_set_active</code>, <code>botshield_bloom_bits_set_warming</code></td>
+<td>gauge</td>
+<td>Bloom buffer fill (current + warming buffer)</td>
+</tr>
+<tr>
+<td><code>botshield_bloom_window_seconds</code></td>
+<td>gauge</td>
+<td>Configured Bloom rotation window</td>
+</tr>
+<tr>
+<td><code>botshield_captcha_inflight_current</code></td>
+<td>gauge</td>
+<td>Outbound captcha-verify calls in flight</td>
+</tr>
+<tr>
+<td><code>botshield_cv_rate_slot_capacity</code>, <code>botshield_cv_log_slot_capacity</code></td>
+<td>gauge</td>
+<td>Captcha-verify rate / log-throttle slot capacity</td>
+</tr>
+<tr>
+<td><code>botshield_load_state</code></td>
+<td>gauge</td>
+<td>Current load tier (0=normal, 1=warm, 2=hot)</td>
+</tr>
+<tr>
+<td><code>botshield_load_state_changes_total</code></td>
+<td>counter</td>
+<td>Load-state transitions since startup</td>
+</tr>
+</tbody>
+</table>
+<h3 id="sample-scrape">Sample scrape</h3>
+<pre><code>$ curl -s http://localhost/botshield/metrics | head -20
+# HELP botshield_tier_pass_total Decisions where the request passed.
+# TYPE botshield_tier_pass_total counter
+botshield_tier_pass_total 1428931
+# HELP botshield_tier_silent_total Decisions where the silent challenge tier was issued.
+# TYPE botshield_tier_silent_total counter
+botshield_tier_silent_total 84217
+...
+</code></pre>
+<h3 id="validating-the-format">Validating the format</h3>
+<p>A small validator script
+(<code>tests/scripts/prometheus-format-validator.sh</code>) parses the entire
+output to confirm 0.0.4 compliance. The pytest suite runs the
+validator on every release.</p>
+<h2 id="mod-status-contribution">mod_status contribution</h2>
+<p>When <code>mod_status</code> is loaded and <code>ExtendedStatus On</code> is set, the
+module contributes to <code>/server-status</code> via an optional hook.
+Browser mode renders a compact HTML table; <code>?auto</code> mode renders
+<code>BotShield&lt;Name&gt;: N</code> key-value lines parseable by external
+collectors.</p>
+<pre><code>$ curl -s http://localhost/server-status?auto
+...
+BotShieldTierPassTotal: 1428931
+BotShieldTierSilentTotal: 84217
+BotShieldTierFormTotal: 18402
+BotShieldTierCaptchaTotal: 4521
+BotShieldFlaggedIpUsed: 38241
+BotShieldFlaggedIpCapacity: 50000
+...
+</code></pre>
+<p>mod_status is a recommended-but-optional dependency. Without it the
+metrics endpoint and decision log still cover everything.</p>
+<h2 id="policy-status-admin-page">Policy-status admin page</h2>
+<p><code>&lt;prefix&gt;/policy-status</code> (default <code>/botshield/policy-status</code>) is a
+plain-text dump of the rules currently being enforced — directive
+rate-limits, directive block-paths, and robots.txt-derived groups.
+Reads the same scfg fields <code>bs_check_policy</code> walks at request time,
+so it's authoritative.</p>
+<pre><code>$ curl -s http://localhost/botshield/policy-status
+mod_botshield policy at request time
+====================================
+
+Rate limits:
+  api-burst    budget=60   window=60s  cohort=(*, 10.0.0.0/8)  shm_slot=0
+  scrapers     budget=10   window=60s  cohort=(wget|curl|python, *)  shm_slot=1
+
+Block paths:
+  legacy-admin &quot;/wp-admin/*&quot;  cohort=(*, *)
+  ...
+
+robots.txt groups:
+  user-agent=googlebot  rules=14  crawl_delay=0
+  user-agent=*          rules=8   crawl_delay=10
+</code></pre>
+<p>Wrap the path in a <code>&lt;Location&gt;</code> with your own ACL — the page
+reveals operator config (already on disk in <code>/etc/apache2/</code>) but no
+cookie secrets or client IPs.</p>
+<h2 id="capacity-headroom-watchdog">Capacity headroom watchdog</h2>
+<p>The headroom watchdog (registered with <code>mod_watchdog</code>) samples
+each SHM table's utilization once per minute. When utilization
+crosses 50% it logs a NOTICE; at 70% a WARN; at 90% an ERROR.</p>
+<pre><code>mod_botshield: capacity headroom: flagged_ip 38241/50000 (76%)
+mod_botshield: capacity headroom: bloom_a 73% filled (rotation
+                 watcher will trigger at 50% past midpoint)
+</code></pre>
+<p>Operators usually use these as the cue to raise capacity directives
+and reload — see <a href="../deployment/index.html">deployment</a> for sizing guidance.</p>
+<h2 id="debug-mode">Debug mode</h2>
+<p><code>BotShieldDebug on</code> returns <code>403 &quot;Hello World&quot;</code> for every request
+in scope. Useful as a smoke test that the module is intercepting
+the request:</p>
+<pre><code class="language-apache">&lt;Location /botshield-smoke&gt;
+    BotShieldDebug on
+&lt;/Location&gt;
+</code></pre>
+<pre><code class="language-sh">curl -i http://localhost/botshield-smoke
+# HTTP/1.1 403 Forbidden
+# ...
+# Hello World
+</code></pre>
+<p>Pair with <code>LogLevel botshield_module:debug</code> to surface request-path
+DEBUG lines (cookie parse traces, score-add per-reason values, SHM
+slot probes). Disable in production — the verbose lines are
+expensive at scale.</p>
+<h2 id="where-to-next">Where to next</h2>
+<ul>
+<li>Tier model and scoring: <a href="../operator-model/index.html">operator model</a>.</li>
+<li>Policy families: <a href="../policy/index.html">policy</a>.</li>
+<li>Captcha and app-bridge: <a href="../captcha/index.html">captcha</a>.</li>
+<li>Safe rule rollout: <a href="../staging/index.html">staging</a>.</li>
+<li>Common issues: <a href="../troubleshooting/index.html">troubleshooting</a>.</li>
+</ul>
+
+        </div>
+      </article>
+    </main>
+  </div>
+</body>
+</html>
