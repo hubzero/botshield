@@ -129,7 +129,7 @@ curl -skI https://example.test/ | grep -i x-botshield
 The default `LogLevel warn` hides them. Bump just this module:
 
 ```apache
-LogLevel mod_botshield:info
+LogLevel botshield_module:info
 ```
 
 Reload and tail the error log:
@@ -141,7 +141,7 @@ sudo tail -f /var/log/apache2/error.log | grep "mod_botshield: decision"
 You should see one line per request:
 
 ```
-[Tue Apr 28 10:00:00 2026] [mod_botshield:info] mod_botshield:
+[Tue Apr 28 10:00:00 2026] [botshield:info] mod_botshield:
   decision tier=pass outcome=declined ip=192.0.2.1 score=0
   cookie=absent provider=- alg=- reason="-" path="/"
 ```
