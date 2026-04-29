@@ -24,6 +24,17 @@ tests/*.egg-info/
 tests/reports/
 __pycache__/
 
+# Hypothesis property-based testing cache. Created wherever pytest is
+# invoked from (repo root or tests/), holds saved failure examples +
+# Unicode DB cache. Local working state, not repo content.
+.hypothesis/
+
+# AI-tool workspace markers / settings — per-user state from
+# Claude Code, OpenAI Codex, etc. Not project content meant for
+# the team.
+.claude/
+.codex
+
 # pytest-playwright screenshot/video artifacts — gitignored; CI
 # uploads as artifacts on failure.
 tests/test-results/
