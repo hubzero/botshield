@@ -260,14 +260,19 @@ def test_directive_rejects_bad_mode_value(config_override):
             pass
 
 
-def test_directive_rejects_mode_on_feedback(config_override):
-    """Feedback runs response-path; observe is meaningless there."""
-    with pytest.raises(Exception):
-        with config_override(
-            r"BotShieldAllow\s+on",
-            'BotShieldAllow on\n'
-            '    BotShieldFeedbackTrigger event-x '
-            'flag=honeypot_hit ttl=3600 mode=observe',
-            count=1,
-        ):
-            pass
+def test_directive_accepts_mode_on_feedback(config_override):
+    """Feedback runs response-path but its side effect is the
+    flagged-IP write — observe-mode means "log :observe but skip
+    the SHM mutation", which is the same staging gate operators
+    get for the other trigger families. The parser must accept
+    `mode=observe` on a feedback trigger; bridge.c honors it.
+    Per-trigger functional verification lives in
+    test_app_feedback.py::test_app_feedback_per_trigger_observe_mode."""
+    with config_override(
+        r"BotShieldAllow\s+on",
+        'BotShieldAllow on\n'
+        '    BotShieldFeedbackTrigger event-x '
+        'flag=honeypot_hit ttl=3600 mode=observe',
+        count=1,
+    ):
+        pass
