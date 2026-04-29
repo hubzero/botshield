@@ -536,13 +536,11 @@ void bs_apply_rep_carry(request_rec *r,
     int forgive = bs_forgiveness_apply_cap(forgive_amount, cap, now_sec,
                                            &target->forgive_window_start,
                                            &target->forgive_consumed);
-    /* E14 (rework) — the prior bs_flag_penalty floor here was tied
-     * to the retired bs_flag_meta.penalty field. Under the new
-     * design flag effects are re-applied at request time via
-     * bs_apply_flag_triggers, so the carry-forward floor became
-     * redundant: a forgiven-to-zero score on a flagged cookie is
-     * simply re-raised on the next request when the trigger fires.
-     * Carry-forward now clamps only at zero. */
+    /* Carry-forward clamps only at zero — no flag-derived floor.
+     * Flag effects are re-applied at request time by
+     * bs_apply_flag_triggers, so a forgiven-to-zero score on a
+     * flagged cookie is simply re-raised on the next request when
+     * the trigger fires. */
     int new_score = prior_ch->rep.score - forgive;
     if (new_score < 0) new_score = 0;
     target->score = new_score;

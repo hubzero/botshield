@@ -1099,10 +1099,10 @@ const char *bs_set_trigger(cmd_parms *cmd, void *cfg_v,
  * without a forward-decl dance over an anonymous-struct array
  * (forward-declaring such arrays in C is awkward).
  *
- * E14 (rework) — registry trimmed to (name, bit). The prior penalty /
- * next_difficulty_delta / next_tier_floor fields were retired when
- * adaptive intensity moved into the unified BotShieldFlagTrigger
- * mechanism (see bs_default_flag_triggers below). */
+ * Registry is just (name, bit) — adaptive intensity (penalty,
+ * difficulty delta, tier floor) lives in BotShieldFlagTrigger
+ * entries instead, including the compiled-in defaults seeded by
+ * bs_default_flag_triggers. */
 typedef struct {
     const char     *name;
     apr_uint32_t    bit;

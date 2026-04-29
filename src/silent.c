@@ -29,7 +29,7 @@
 #include "captcha.h"   /* bs_captcha_siteverify for embedded-verify-provider */
 
 /* ===========================================================
- * E17 PoC — embedded silent verification handlers.
+ * Embedded silent-verification handlers.
  *
  * Three endpoints under <prefix>/embedded*:
  *   GET  /botshield/embedded.js         — static wrapper script
@@ -355,8 +355,8 @@ int bs_embedded_js_handler(request_rec *r)
         return OK;
     }
     ap_set_content_type(r, "application/javascript; charset=utf-8");
-    /* Short max-age so operators can iterate during the PoC without
-     * fighting browser caches; production-hardening is E17.1's job. */
+    /* Short max-age so operators can iterate the embedded wrapper
+     * without fighting browser caches. */
     apr_table_setn(r->headers_out, "Cache-Control", "public, max-age=60");
     ap_rputs(BS_EMBEDDED_JS, r);
     return OK;
@@ -813,10 +813,10 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
         }
     }
 
-    /* (Phase 2) — atomically consume the nonce. Replay of
-     * the same challenge bundle is rejected here: the first verify
-     * wins the slot, all subsequent attempts get 403. Closes Attacks
-     * 1 and 2 (replay multiplier and pool farming). */
+    /* Atomically consume the nonce. Replay of the same challenge
+     * bundle is rejected here: the first verify wins the slot, all
+     * subsequent attempts get 403. Closes the replay-multiplier
+     * and pool-farming attacks against the embedded-verify path. */
     {
         bs_server_cfg *scfg_n = ap_get_module_config(
             r->server->module_config, &botshield_module);
@@ -1083,13 +1083,13 @@ int bs_embedded_verify_handler(request_rec *r, bs_dir_cfg *cfg)
     json_object_put(root);
     return rv;
 }
-/* end E17 PoC handlers */
+/* end embedded handlers */
 
-/* --- E17 directive setters --- */
+/* --- silent-mode directive setters --- */
 
-/* E17 PoC — `BotShieldSilentMode <interstitial|embedded>`. Per-scope
- * picker for what flavor of silent-tier challenge to issue. Default
- * `interstitial` matches the legacy M7 splash. `embedded` opts the
+/* `BotShieldSilentMode <interstitial|embedded>`. Per-scope picker
+ * for what flavor of silent-tier challenge to issue. Default
+ * `interstitial` matches the legacy splash. `embedded` opts the
  * scope into background verification: BotShield serves the real
  * page (DECLINED) and relies on the operator-included
  * `<script src="/botshield/embedded.js" defer>` wrapper to run the
