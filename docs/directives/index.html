@@ -1,0 +1,923 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Directive reference | mod_botshield</title>
+  <meta name="description" content="Canonical operator-facing reference for all 78 directives, grouped by family.">
+  <link rel="stylesheet" href="../assets/site.css">
+</head>
+<body class="site-doc">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <div class="page-shell">
+    <header class="site-header site-header--compact">
+      <a class="brand" href="../index.html">
+        <img class="brand__icon" src="../assets/logo-botshield-icon.svg" alt="" aria-hidden="true">
+        <span class="brand__wordmark" aria-label="BotShield">
+          <span class="brand__wordmark-soft">Bot</span><span class="brand__wordmark-strong">Shield</span>
+        </span>
+      </a>
+      <nav class="top-nav" aria-label="Primary">
+        <a class="top-nav__link" href="#">GitHub</a>
+        <a class="top-nav__link" href="../getting-started/index.html">Docs</a>
+        <a class="top-nav__link" href="../getting-started/index.html#build">Download</a>
+      </nav>
+    </header>
+
+    <main id="main-content" class="docs-layout" tabindex="-1">
+      <aside class="docs-sidebar">
+        <p class="docs-sidebar__eyebrow">Docs</p>
+        <nav class="docs-nav" aria-label="Documentation">
+<a class="docs-nav__item" href="../getting-started/index.html">
+  <span class="docs-nav__title">Getting started</span>
+  <span class="docs-nav__summary">Install, build, minimal configuration, and verifying a first request.</span>
+</a>
+<a class="docs-nav__item" href="../deployment/index.html">
+  <span class="docs-nav__title">Deployment</span>
+  <span class="docs-nav__summary">Reverse proxies, slow-client defense, multi-vhost reputation, secret rotation, capacity sizing.</span>
+</a>
+<a class="docs-nav__item" href="../operator-model/index.html">
+  <span class="docs-nav__title">Operator model</span>
+  <span class="docs-nav__summary">Tiers, scoring, cookie-carried reputation, decision log, tuning workflow.</span>
+</a>
+<a class="docs-nav__item" href="../policy/index.html">
+  <span class="docs-nav__title">Policy</span>
+  <span class="docs-nav__summary">Allow lists, rate limits, block paths, robots.txt, the trigger families, and flag triggers.</span>
+</a>
+<a class="docs-nav__item" href="../captcha/index.html">
+  <span class="docs-nav__title">Captcha and app-bridge</span>
+  <span class="docs-nav__summary">Third-party captcha providers, verify-endpoint hardening, and the signed app-bridge protocols.</span>
+</a>
+<a class="docs-nav__item" href="../staging/index.html">
+  <span class="docs-nav__title">Staging</span>
+  <span class="docs-nav__summary">Per-rule observe and global shadow mode for safe rule rollout.</span>
+</a>
+<a class="docs-nav__item" href="../observability/index.html">
+  <span class="docs-nav__title">Observability</span>
+  <span class="docs-nav__summary">Decision log, Prometheus metrics, mod_status contribution, and the policy-status admin page.</span>
+</a>
+<a class="docs-nav__item is-active" href="index.html">
+  <span class="docs-nav__title">Directive reference</span>
+  <span class="docs-nav__summary">Canonical operator-facing reference for all 78 directives, grouped by family.</span>
+</a>
+<a class="docs-nav__item" href="../troubleshooting/index.html">
+  <span class="docs-nav__title">Troubleshooting</span>
+  <span class="docs-nav__summary">Common operator-visible issues, diagnostics, and fixes.</span>
+</a>
+<a class="docs-nav__item" href="../faq/index.html">
+  <span class="docs-nav__title">FAQ</span>
+  <span class="docs-nav__summary">Honest answers to questions operators ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
+</a>
+<a class="docs-nav__item" href="../guide/index.html">
+  <span class="docs-nav__title">Project README</span>
+  <span class="docs-nav__summary">Repository README — project overview, build instructions, and dev configuration.</span>
+</a>
+<a class="docs-nav__item" href="../roadmap/index.html">
+  <span class="docs-nav__title">Roadmap and changelog</span>
+  <span class="docs-nav__summary">Shipped milestones, extension design notes, and the development backlog.</span>
+</a>
+        </nav>
+      </aside>
+
+      <article class="docs-article">
+        <header class="docs-article__header">
+          <p class="eyebrow">Documentation</p>
+          <h1>Directive reference</h1>
+          <p class="docs-article__summary">Canonical operator-facing reference for all 78 directives, grouped by family.</p>
+          <p class="docs-article__source">Directive reference</p>
+        </header>
+<section class="toc">
+  <h2 class="toc__heading">On this page</h2>
+  <ul class="toc__list">
+<li class="toc__item toc__item--level-2"><a href="#scope-and-validity">Scope and validity</a></li>
+<li class="toc__item toc__item--level-2"><a href="#core">Core</a></li>
+<li class="toc__item toc__item--level-2"><a href="#tier-thresholds-and-forgiveness">Tier thresholds and forgiveness</a></li>
+<li class="toc__item toc__item--level-2"><a href="#silent-tier-dispatch">Silent-tier dispatch</a></li>
+<li class="toc__item toc__item--level-2"><a href="#widget-customization">Widget customization</a></li>
+<li class="toc__item toc__item--level-2"><a href="#captcha-tier">Captcha tier</a></li>
+<li class="toc__item toc__item--level-2"><a href="#captcha-verify-endpoint-hardening">Captcha-verify endpoint hardening</a></li>
+<li class="toc__item toc__item--level-2"><a href="#shm-sizing-and-persistence">SHM sizing and persistence</a></li>
+<li class="toc__item toc__item--level-2"><a href="#allow-list">Allow list</a></li>
+<li class="toc__item toc__item--level-2"><a href="#rate-limit-block-path">Rate limit + block-path</a></li>
+<li class="toc__item toc__item--level-2"><a href="#robots-txt-enforcement">Robots.txt enforcement</a></li>
+<li class="toc__item toc__item--level-2"><a href="#triggers">Triggers</a></li>
+<li class="toc__item toc__item--level-2"><a href="#per-scope-triggers">Per-scope triggers</a></li>
+<li class="toc__item toc__item--level-2"><a href="#flag-triggers">Flag triggers</a></li>
+<li class="toc__item toc__item--level-2"><a href="#safeguard">Safeguard</a></li>
+<li class="toc__item toc__item--level-2"><a href="#load-aware-throttling">Load-aware throttling</a></li>
+<li class="toc__item toc__item--level-2"><a href="#multi-vhost-reputation">Multi-vhost reputation</a></li>
+<li class="toc__item toc__item--level-2"><a href="#shadow-mode">Shadow mode</a></li>
+<li class="toc__item toc__item--level-2"><a href="#app-bridge">App bridge</a></li>
+<li class="toc__item toc__item--level-2"><a href="#where-to-next">Where to next</a></li>
+  </ul>
+</section>
+        <div class="prose">
+<p>mod_botshield registers 78 directives at config time. This page is
+the canonical operator-facing reference, grouped by family. The
+underlying source-of-truth is <code>bs_cmds[]</code> in <code>src/botshield.c:139</code> —
+operators tuning behavior should treat the source as authoritative
+when it disagrees with a doc page.</p>
+<h2 id="scope-and-validity">Scope and validity</h2>
+<p>Most directives accept <code>RSRC_CONF | ACCESS_CONF</code> — they're valid in
+server config, <code>&lt;VirtualHost&gt;</code>, <code>&lt;Directory&gt;</code>, <code>&lt;Location&gt;</code>,
+<code>&lt;Files&gt;</code>, and their <code>*Match</code> variants.</p>
+<p>A few are server-scope only (<code>RSRC_CONF</code>); placing them inside
+<code>&lt;VirtualHost&gt;</code> emits a NOTICE and the directive is ignored. The
+SHM segment is module-global, so any directive that sizes the
+segment or backs it with a state file lives at the main server
+level. These directives carry an explicit &quot;(server scope only)&quot;
+note in the table.</p>
+<p><code>.htaccess</code> is never valid for any BotShield directive — <code>OR_ALL</code>
+is never used. Bot-protection config in writable filesystem
+locations is a deliberate non-goal.</p>
+<p>File-backed <code>*File</code> directives read their targets <strong>once at config-
+parse time</strong> and cache the bytes on the per-directory config — no
+per-request file I/O. Missing, unreadable, or oversized files fail
+<code>apachectl configtest</code>, so a broken template can't be reloaded
+into a running server.</p>
+<h2 id="core">Core</h2>
+<table>
+<thead>
+<tr>
+<th>Directive</th>
+<th>Syntax</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BotShieldEnabled</code></td>
+<td><code>on|off</code></td>
+<td><code>off</code></td>
+</tr>
+<tr>
+<td><code>BotShieldDebug</code></td>
+<td><code>on|off</code></td>
+<td><code>off</code></td>
+</tr>
+<tr>
+<td><code>BotShieldSecretFile</code></td>
+<td><code>/path</code></td>
+<td>unset (required)</td>
+</tr>
+<tr>
+<td><code>BotShieldSecondarySecretFile</code></td>
+<td><code>/path</code></td>
+<td>unset</td>
+</tr>
+<tr>
+<td><code>BotShieldAlgorithm</code></td>
+<td><code>&lt;name&gt;</code></td>
+<td>unset (required)</td>
+</tr>
+<tr>
+<td><code>BotShieldCookieTTL</code></td>
+<td><code>N</code> (sec)</td>
+<td><code>3600</code> (range 1..86400)</td>
+</tr>
+<tr>
+<td><code>BotShieldCookieDomain</code></td>
+<td><code>&quot;.example.com&quot;</code></td>
+<td>unset (host-only)</td>
+</tr>
+<tr>
+<td><code>BotShieldDifficulty</code></td>
+<td><code>N</code></td>
+<td><code>4</code> (range 1..16)</td>
+</tr>
+<tr>
+<td><code>BotShieldEndpointPrefix</code></td>
+<td><code>/path</code></td>
+<td><code>/botshield</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>BotShieldEnabled</code> is the master gate. <code>BotShieldDebug</code> returns
+<code>403 &quot;Hello World&quot;</code> for every request in scope — useful as a smoke
+test that the hook is firing.</p>
+<p><code>BotShieldSecretFile</code> and <code>BotShieldAlgorithm</code> are required. The
+module emits <code>503 X-Botshield: misconfigured</code> for any request
+where both are not resolved on the scope. <code>BotShieldSecondarySecretFile</code>
+is the verify-only secondary key for graceful rotation — see
+<a href="../deployment/index.html#secret-rotation">deployment</a>.</p>
+<p><code>BotShieldAlgorithm</code> only <code>sha256-zeros</code> is built-in today;
+<code>sha384-zeros</code>, <code>sha512-zeros</code>, <code>pbkdf2-sha256</code>, <code>argon2id</code> are
+reserved registry slots that fail with a clear &quot;not implemented&quot;
+diagnostic.</p>
+<p><code>BotShieldCookieDomain</code> adds a <code>Domain=</code> attribute to Set-Cookie so
+reputation follows across subdomains. Default is host-only. When
+HTTPS is in use AND no domain is set, the module emits the
+<code>__Host-bs_verified</code> cookie name; otherwise the legacy
+<code>_bs_verified</code>. Verify path checks both.</p>
+<p><code>BotShieldDifficulty</code> is the leading-hex-zeros count for the PoW.
+Higher = more client work. 4 is ~100ms on a modern phone; 6 is
+~3s; 8 is ~50s — don't go above 6 without a reason.</p>
+<p><code>BotShieldEndpointPrefix</code> is the URL prefix for module-owned
+handlers (<code>/botshield/captcha-verify</code>, <code>/botshield/metrics</code>,
+<code>/botshield/embedded.js</code> etc.). Change it if it collides with
+real app routes.</p>
+<h2 id="tier-thresholds-and-forgiveness">Tier thresholds and forgiveness</h2>
+<table>
+<thead>
+<tr>
+<th>Directive</th>
+<th>Syntax</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BotShieldScoreSilent</code></td>
+<td><code>N</code></td>
+<td><code>20</code></td>
+</tr>
+<tr>
+<td><code>BotShieldScoreHard</code></td>
+<td><code>N</code></td>
+<td><code>50</code></td>
+</tr>
+<tr>
+<td><code>BotShieldScoreCaptcha</code></td>
+<td><code>N</code></td>
+<td><code>80</code></td>
+</tr>
+<tr>
+<td><code>BotShieldForgivenessSilent</code></td>
+<td><code>N</code></td>
+<td><code>10</code></td>
+</tr>
+<tr>
+<td><code>BotShieldForgivenessForm</code></td>
+<td><code>N</code></td>
+<td><code>25</code></td>
+</tr>
+<tr>
+<td><code>BotShieldForgivenessCaptcha</code></td>
+<td><code>N</code></td>
+<td><code>50</code></td>
+</tr>
+<tr>
+<td><code>BotShieldForgivenessCapPerHour</code></td>
+<td><code>N</code></td>
+<td><code>200</code> (0 disables)</td>
+</tr>
+</tbody>
+</table>
+<p>Tier dispatch ladder:</p>
+<ul>
+<li><code>score &lt; BotShieldScoreSilent</code> → pass</li>
+<li><code>BotShieldScoreSilent ≤ score &lt; BotShieldScoreHard</code> → silent</li>
+<li><code>BotShieldScoreHard ≤ score &lt; BotShieldScoreCaptcha</code> → form</li>
+<li><code>BotShieldScoreCaptcha ≤ score</code> → captcha (or form if no provider)</li>
+</ul>
+<p>See <a href="../operator-model/index.html">operator model</a> for the full scoring
+discussion.</p>
+<p><code>BotShieldForgivenessCapPerHour</code> caps total cookie-side
+forgiveness in any rolling 60-minute window. Default 200 ≈ 4–8
+challenge-passes worth of credit. Lower for stricter farming
+resistance; 0 disables (legacy behavior).</p>
+<h2 id="silent-tier-dispatch">Silent-tier dispatch</h2>
+<table>
+<thead>
+<tr>
+<th>Directive</th>
+<th>Syntax</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BotShieldSilentMode</code></td>
+<td><code>interstitial|embedded</code></td>
+<td><code>interstitial</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>interstitial</code> (the default) serves a no-click splash page that
+auto-submits a SHA-256 PoW on load — the legacy silent-tier
+behavior. <code>embedded</code> instead hands off to the operator-included
+<code>/botshield/embedded.js</code> wrapper: the page serves DECLINED (real
+content) and the wrapper does the PoW in a Web Worker, then POSTs
+the result back to <code>/botshield/embedded-verify</code> to mint
+<code>_bs_verified</code> on the next request. Embedded mode trades a brief
+window where the cookie isn't yet on the client (the very first
+request goes through unverified) for a zero-interstitial UX.</p>
+<p>Embedded mode requires the operator to include the wrapper
+script in their page templates; without it, the request still
+serves the real content but no cookie ever lands.</p>
+<h2 id="widget-customization">Widget customization</h2>
+<table>
+<thead>
+<tr>
+<th>Directive</th>
+<th>Syntax</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BotShieldPromptText</code></td>
+<td><code>&quot;text&quot;</code></td>
+<td><code>I'm not a robot</code></td>
+</tr>
+<tr>
+<td><code>BotShieldLogoFile</code></td>
+<td><code>/path.svg</code></td>
+<td>embedded Guardian</td>
+</tr>
+<tr>
+<td><code>BotShieldLogoLabel</code></td>
+<td><code>&quot;text&quot;</code></td>
+<td><code>botshield</code></td>
+</tr>
+<tr>
+<td><code>BotShieldShowLogo</code></td>
+<td><code>on|off</code></td>
+<td><code>on</code></td>
+</tr>
+<tr>
+<td><code>BotShieldShowLabel</code></td>
+<td><code>on|off</code></td>
+<td><code>on</code></td>
+</tr>
+<tr>
+<td><code>BotShieldShowBox</code></td>
+<td><code>on|off</code></td>
+<td><code>on</code></td>
+</tr>
+<tr>
+<td><code>BotShieldHelp</code></td>
+<td><code>off|on|button</code></td>
+<td><code>button</code></td>
+</tr>
+<tr>
+<td><code>BotShieldHelpFile</code></td>
+<td><code>/path.html</code></td>
+<td>built-in text</td>
+</tr>
+<tr>
+<td><code>BotShieldChallengeFile</code></td>
+<td><code>/path.html</code></td>
+<td>built-in shell</td>
+</tr>
+</tbody>
+</table>
+<p><code>BotShieldChallengeFile</code> replaces the full HTML page that wraps the
+widget; the file must contain <code>&lt;!-- BOTSHIELD --&gt;</code> where the widget
+is spliced in. Other widget directives still apply to the widget
+block itself. Max 256 KiB.</p>
+<p>Logo and help files are 64 KiB max each. Logo content is served
+inline as <code>&lt;img&gt;</code>-equivalent SVG; help content is rendered as
+trusted HTML (no escaping — operator owns sanitization).</p>
+<p><code>BotShieldShowLogo/Label/Box</code> strip widget chrome down to a lone
+checkbox if the surrounding page styles its own chrome. When label
+is hidden it moves to the button's <code>aria-label</code> — accessibility is
+preserved.</p>
+<h2 id="captcha-tier">Captcha tier</h2>
+<table>
+<thead>
+<tr>
+<th>Directive</th>
+<th>Syntax</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BotShieldCaptchaProvider</code></td>
+<td><code>&lt;name&gt;</code></td>
+<td>unset</td>
+</tr>
+<tr>
+<td><code>BotShieldCaptchaSiteKey</code></td>
+<td><code>&quot;key&quot;</code></td>
+<td>unset</td>
+</tr>
+<tr>
+<td><code>BotShieldCaptchaSecretFile</code></td>
+<td><code>/path</code></td>
+<td>unset</td>
+</tr>
+<tr>
+<td><code>BotShieldCaptchaTimeout</code></td>
+<td><code>N</code> (ms)</td>
+<td><code>1000</code> (100..5000)</td>
+</tr>
+<tr>
+<td><code>BotShieldCaptchaConnectTimeout</code></td>
+<td><code>N</code> (ms)</td>
+<td><code>250</code> (50..5000)</td>
+</tr>
+<tr>
+<td><code>BotShieldRecaptchaV3MinScore</code></td>
+<td><code>0..1</code></td>
+<td><code>0.5</code></td>
+</tr>
+<tr>
+<td><code>BotShieldCaptchaExpectedHostname</code></td>
+<td><code>&quot;name&quot;</code> or <code>&quot;&quot;</code></td>
+<td>server hostname</td>
+</tr>
+<tr>
+<td><code>BotShieldCaptchaExpectedAction</code></td>
+<td><code>&quot;action&quot;</code> or <code>&quot;&quot;</code></td>
+<td><code>botshield</code></td>
+</tr>
+<tr>
+<td><code>BotShieldCaptchaCABundle</code></td>
+<td><code>/path</code></td>
+<td>libcurl default</td>
+</tr>
+<tr>
+<td><code>BotShieldFormCaptcha</code></td>
+<td><code>on|off</code></td>
+<td><code>off</code></td>
+</tr>
+</tbody>
+</table>
+<p>Provider names: <code>turnstile</code>, <code>hcaptcha</code>, <code>recaptcha-v2</code>,
+<code>recaptcha-v3</code>, <code>friendly</code>, <code>geetest</code>. See
+<a href="../captcha/index.html">captcha</a> for the wire-protocol details.</p>
+<p><code>BotShieldCaptchaTimeout</code> is the total siteverify HTTP budget; on
+timeout the verify path fails open. <code>BotShieldCaptchaConnectTimeout</code>
+is the connect phase only — tighter, raised on links with
+transient packet loss.</p>
+<p><code>BotShieldRecaptchaV3MinScore</code> only matters for <code>recaptcha-v3</code>.
+Reject verifications below this score even on <code>success: true</code>.</p>
+<p><code>BotShieldCaptchaExpectedHostname</code> / <code>Action</code>: empty string
+disables the check; unset uses defaults (<code>server_hostname</code> /
+<code>&quot;botshield&quot;</code>). GeeTest binds host/action via HMAC and doesn't
+return them in the response, so these are no-ops for that
+provider.</p>
+<p><code>BotShieldFormCaptcha</code> intercepts POSTs and validates the
+captcha token inline rather than via interstitial. Requires a
+captcha provider configured on the same scope.</p>
+<h2 id="captcha-verify-endpoint-hardening">Captcha-verify endpoint hardening</h2>
+<table>
+<thead>
+<tr>
+<th>Directive</th>
+<th>Syntax</th>
+<th>Default</th>
+<th>Scope</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BotShieldCaptchaRateLimit</code></td>
+<td><code>N</code> (per IP per minute)</td>
+<td><code>30</code> (0..1000)</td>
+<td>server / vhost</td>
+</tr>
+<tr>
+<td><code>BotShieldCaptchaMaxInFlight</code></td>
+<td><code>N</code> (global concurrent)</td>
+<td><code>64</code> (1..1024)</td>
+<td>server only</td>
+</tr>
+</tbody>
+</table>
+<p>Both reject before any libcurl call. <code>RateLimit</code> returns 429 with
+Retry-After; <code>MaxInFlight</code> returns 503. 0 on <code>RateLimit</code> disables.</p>
+<h2 id="shm-sizing-and-persistence">SHM sizing and persistence</h2>
+<p>All directives in this section are <strong>server scope only</strong>. Inside
+<code>&lt;VirtualHost&gt;</code> they emit a NOTICE and are ignored.</p>
+<table>
+<thead>
+<tr>
+<th>Directive</th>
+<th>Syntax</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BotShieldShmSize</code></td>
+<td><code>&lt;size&gt;</code> (<code>128K..256M</code>)</td>
+<td><code>16M</code></td>
+</tr>
+<tr>
+<td><code>BotShieldFlaggedIPCapacity</code></td>
+<td><code>N</code></td>
+<td><code>50000</code> (1024..1000000)</td>
+</tr>
+<tr>
+<td><code>BotShieldIPv6PrefixLen</code></td>
+<td><code>N</code> (0..128)</td>
+<td><code>64</code></td>
+</tr>
+<tr>
+<td><code>BotShieldBloomIPs</code></td>
+<td><code>N</code></td>
+<td><code>1000000</code> (1000..10000000)</td>
+</tr>
+<tr>
+<td><code>BotShieldBloomWindow</code></td>
+<td><code>N</code> (sec)</td>
+<td><code>604800</code> (3600..2592000)</td>
+</tr>
+<tr>
+<td><code>BotShieldStateFile</code></td>
+<td><code>/path</code></td>
+<td>unset (persistence off)</td>
+</tr>
+<tr>
+<td><code>BotShieldStateSaveInterval</code></td>
+<td><code>N</code> (sec)</td>
+<td><code>300</code> (0=shutdown-only)</td>
+</tr>
+<tr>
+<td><code>BotShieldRateLimitEscalateCapacity</code></td>
+<td><code>N</code></td>
+<td><code>50000</code></td>
+</tr>
+<tr>
+<td><code>BotShieldSafeguardCapacity</code></td>
+<td><code>N</code></td>
+<td><code>50000</code></td>
+</tr>
+<tr>
+<td><code>BotShieldEmbeddedNonceCapacity</code></td>
+<td><code>N</code></td>
+<td><code>32768</code> (1024..1048576)</td>
+</tr>
+</tbody>
+</table>
+<p><code>BotShieldShmSize</code> is the total budget for the flagged-IP / strike
+/ safeguard tables and the Bloom buffers.
+<code>BotShieldFlaggedIPCapacity</code> etc. size individual tables within
+that budget — the headroom watchdog will flag if the segment is
+underprovisioned.</p>
+<p><code>BotShieldIPv6PrefixLen</code> masks IPv6 client IPs before keying the
+SHM tables. Default <code>/64</code> is per-subscriber for typical ISP
+allocations; tighter values (<code>/56</code>, <code>/48</code>) flag larger blocks of
+addresses sharing reputation.</p>
+<p><code>BotShieldStateFile</code> enables crash-durable persistence; the
+periodic save requires <code>mod_watchdog</code>, the graceful-shutdown save
+runs regardless. State format mismatches on load reject the file
+with a NOTICE and start fresh — never a startup failure.</p>
+<h2 id="allow-list">Allow list</h2>
+<table>
+<thead>
+<tr>
+<th>Directive</th>
+<th>Syntax</th>
+<th>Default</th>
+<th>Scope</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BotShieldAllow</code></td>
+<td><code>on|off</code></td>
+<td><code>off</code></td>
+<td>any</td>
+</tr>
+<tr>
+<td><code>BotShieldAllowBot</code></td>
+<td><code>&lt;name&gt; &lt;ua-pattern&gt; [&lt;target&gt;]</code></td>
+<td>builtin only</td>
+<td>server / vhost</td>
+</tr>
+</tbody>
+</table>
+<p><code>BotShieldAllow</code> is the master gate for the allow-list family.</p>
+<p><code>BotShieldAllowBot</code> registers a UA pattern + IP-range pair. The
+third arg is a path to a CIDR file, comma-separated inline CIDRs
+(prefixed with <code>*,</code>), or <code>*</code> alone for UA-only matching. See
+<a href="../policy/index.html#allow-list-e1-verified-crawlers">policy</a> for the
+verified / fake / unverified outcomes.</p>
+<h2 id="rate-limit-block-path">Rate limit + block-path</h2>
+<table>
+<thead>
+<tr>
+<th>Directive</th>
+<th>Syntax</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BotShieldRateLimit</code></td>
+<td><code>&lt;name&gt; &lt;budget&gt; &lt;per&gt; &lt;ua-pattern&gt; &lt;ipspec&gt; [mode=observe]</code></td>
+<td>none</td>
+</tr>
+<tr>
+<td><code>BotShieldRateLimitEscalate</code></td>
+<td><code>&lt;rate-rule&gt; &lt;strikes&gt; &lt;per&gt; [status=N] [ttl=N]</code></td>
+<td>none</td>
+</tr>
+<tr>
+<td><code>BotShieldBlockPath</code></td>
+<td><code>&lt;name&gt; &lt;path-glob&gt; &lt;ua-pattern&gt; &lt;ipspec&gt; [mode=observe]</code></td>
+<td>none</td>
+</tr>
+</tbody>
+</table>
+<p>Cohort: <code>&lt;ua-pattern&gt;</code> is a substring or <code>&quot;&quot;</code>/<code>*</code> for any UA;
+<code>&lt;ipspec&gt;</code> is a path to a CIDR file, comma-separated inline CIDRs,
+or <code>*</code> for any IP. Both axes can't be wildcard — that's rejected
+at config time. <code>&lt;per&gt;</code> accepts <code>sec</code>/<code>min</code>/<code>hour</code> (or <code>s</code>/<code>m</code>/
+<code>h</code>); plain integers are rejected.</p>
+<p><code>BotShieldRateLimitEscalate</code> upgrades repeated 429s on the same
+client to a stickier status code — see
+<a href="../policy/index.html#repeated-429-escalation-e9">policy</a>.</p>
+<h2 id="robots-txt-enforcement">Robots.txt enforcement</h2>
+<table>
+<thead>
+<tr>
+<th>Directive</th>
+<th>Syntax</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BotShieldRobotsTxt</code></td>
+<td><code>/path</code></td>
+<td>unset</td>
+</tr>
+<tr>
+<td><code>BotShieldRobotsRefreshInterval</code></td>
+<td><code>N</code> (sec)</td>
+<td><code>60</code> (0=disabled)</td>
+</tr>
+<tr>
+<td><code>BotShieldRobotsWildcardScope</code></td>
+<td><code>heuristic|strict|off</code></td>
+<td><code>heuristic</code></td>
+</tr>
+</tbody>
+</table>
+<p>See <a href="../policy/index.html#robotstxt-enforcement-e22">policy</a> for the matcher
+semantics and refresh model.</p>
+<h2 id="triggers">Triggers</h2>
+<table>
+<thead>
+<tr>
+<th>Directive</th>
+<th>Predicate args</th>
+<th>Action keys</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BotShieldPathTrigger</code></td>
+<td><code>&lt;name&gt; &lt;path-glob&gt;</code></td>
+<td><code>status=</code>, <code>redirect=</code>, <code>log=</code>, <code>flag=</code>, <code>ttl=</code>, <code>penalty=</code>, <code>mode=</code> (no <code>credit=</code>)</td>
+</tr>
+<tr>
+<td><code>BotShieldCookieTrigger</code></td>
+<td><code>&lt;name&gt; &lt;pred&gt;</code> (see policy page)</td>
+<td><code>status=</code>, <code>redirect=</code>, <code>log=</code>, <code>flag=</code>, <code>ttl=</code>, <code>penalty=</code>, <code>credit=</code>, <code>mode=</code></td>
+</tr>
+<tr>
+<td><code>BotShieldEnvTrigger</code></td>
+<td><code>&lt;name&gt; &lt;env-pred&gt;</code> (see policy page)</td>
+<td><code>status=</code>, <code>log=</code>, <code>flag=</code>, <code>ttl=</code>, <code>penalty=</code>, <code>credit=</code>, <code>mode=</code> (no <code>redirect=</code>)</td>
+</tr>
+<tr>
+<td><code>BotShieldFeedbackTrigger</code></td>
+<td><code>&lt;event&gt;</code></td>
+<td><code>flag=</code>, <code>ttl=</code>, <code>log=</code>, <code>mode=</code></td>
+</tr>
+<tr>
+<td><code>BotShieldLoadTrigger</code></td>
+<td><code>&lt;name&gt; state=&lt;n&gt;|state&gt;=&lt;n&gt;</code></td>
+<td><code>status=</code>, <code>log=</code>, <code>penalty=</code>, <code>mode=</code> (no <code>redirect=</code>, <code>flag=</code>, <code>ttl=</code>)</td>
+</tr>
+<tr>
+<td><code>BotShieldSessionCookieName</code></td>
+<td><code>&lt;name&gt;</code> (single arg, repeatable)</td>
+<td>n/a (feeds cookies=session predicate)</td>
+</tr>
+</tbody>
+</table>
+<p>See <a href="../policy/index.html#triggers--predicate-action-engine-e3-e4-e6-e73-e112">policy</a>
+for full predicate vocabulary and family-by-family semantics.</p>
+<p><code>BotShieldSessionCookieName</code> registers a name that the
+<code>cookies=session</code> cookie-trigger predicate considers a session
+cookie. Repeatable; each call appends.</p>
+<h2 id="per-scope-triggers">Per-scope triggers</h2>
+<table>
+<thead>
+<tr>
+<th>Directive</th>
+<th>Syntax</th>
+<th>Scope</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BotShieldTrigger</code></td>
+<td><code>[reset] [status=N|pass] [redirect=URL] [log=tag] [flag=NAME] [ttl=N] [penalty=N] [credit=N] [mode=enforce|observe]</code></td>
+<td>server / vhost / Directory / Location / LocationMatch / Files / If</td>
+</tr>
+</tbody>
+</table>
+<p>The Apache scope the directive lives in IS the predicate; no path
+glob argument. Multiple <code>BotShieldTrigger</code> lines in one scope
+each append a separate action; they all fire on a pass, the first
+non-pass status short-circuits. <code>reset</code> (no other args) drops
+inherited triggers from outer scopes and clears earlier same-scope
+entries.</p>
+<p>This is the directive that replaces the legacy <code>BotShieldFlagIP</code>
+— the equivalent today is <code>BotShieldTrigger flag=&lt;name&gt; ttl=&lt;sec&gt;</code>.</p>
+<h2 id="flag-triggers">Flag triggers</h2>
+<table>
+<thead>
+<tr>
+<th>Directive</th>
+<th>Syntax</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BotShieldFlagTrigger</code></td>
+<td><code>&lt;flag&gt; [reset] [action=&lt;verb&gt; args...] [mode=observe]</code></td>
+</tr>
+</tbody>
+</table>
+<p>Action verbs: <code>action=score add=N</code> (signed N -1000..1000),
+<code>action=tier_floor min=&lt;tier&gt;</code> (raise effective tier; tier is one
+of <code>pass</code>/<code>silent</code>/<code>form</code>/<code>captcha</code>). The <code>reset</code> keyword clears
+all earlier triggers (compiled-in defaults + prior operator
+declarations) for the named flag at post-config time.</p>
+<p>Flag bits: <code>honeypot_hit</code>, <code>scanner_probe</code>, <code>fake_bot</code>,
+<code>pow_fail_streak</code>, <code>app_verified_human</code>, <code>app_verified_session</code>,
+<code>app_trust_signal</code>. See
+<a href="../policy/index.html#flag-trigger-family-e14">policy</a> for compiled-in
+defaults and override semantics.</p>
+<h2 id="safeguard">Safeguard</h2>
+<table>
+<thead>
+<tr>
+<th>Directive</th>
+<th>Syntax</th>
+<th>Default</th>
+<th>Scope</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BotShieldSafeguard</code></td>
+<td><code>on|off</code></td>
+<td><code>on</code></td>
+<td>server / vhost</td>
+</tr>
+<tr>
+<td><code>BotShieldSafeguardThreshold</code></td>
+<td><code>N</code></td>
+<td><code>5</code></td>
+<td>server / vhost</td>
+</tr>
+<tr>
+<td><code>BotShieldSafeguardWindow</code></td>
+<td><code>N</code> (sec)</td>
+<td><code>600</code></td>
+<td>server / vhost</td>
+</tr>
+<tr>
+<td><code>BotShieldSafeguardTTL</code></td>
+<td><code>N</code> (sec)</td>
+<td><code>900</code></td>
+<td>server / vhost</td>
+</tr>
+</tbody>
+</table>
+<p>challenge-loop suppression. See
+<a href="../policy/index.html#safeguard-e10">policy</a>.</p>
+<h2 id="load-aware-throttling">Load-aware throttling</h2>
+<p>Sampling and hysteresis:</p>
+<table>
+<thead>
+<tr>
+<th>Directive</th>
+<th>Syntax</th>
+<th>Default</th>
+<th>Scope</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BotShieldLoadStateFile</code></td>
+<td><code>/path</code></td>
+<td>unset</td>
+<td>server only</td>
+</tr>
+<tr>
+<td><code>BotShieldLoadRefreshInterval</code></td>
+<td><code>N</code> (sec)</td>
+<td><code>1</code></td>
+<td>server only</td>
+</tr>
+<tr>
+<td><code>BotShieldLoadWarmThreshold</code></td>
+<td><code>N</code> (% workers busy)</td>
+<td><code>65</code></td>
+<td>server only</td>
+</tr>
+<tr>
+<td><code>BotShieldLoadHotThreshold</code></td>
+<td><code>N</code> (% workers busy)</td>
+<td><code>85</code></td>
+<td>server only</td>
+</tr>
+</tbody>
+</table>
+<p><code>BotShieldLoadStateFile</code> points at an external single-word state
+file (managed by an out-of-band collector) that overrides the
+scoreboard sample. Useful when load decisions should key on a
+metric Apache itself doesn't see (queue depth, downstream
+saturation, etc.).</p>
+<p>The trigger family that consumes the state lives under
+<code>BotShieldLoadTrigger</code> (above). See
+<a href="../policy/index.html#load-triggers-e112">policy</a>.</p>
+<h2 id="multi-vhost-reputation">Multi-vhost reputation</h2>
+<table>
+<thead>
+<tr>
+<th>Directive</th>
+<th>Syntax</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BotShieldShareScope</code></td>
+<td><code>&lt;token&gt;</code></td>
+<td>derived from ServerName</td>
+</tr>
+</tbody>
+</table>
+<p>Vhosts with the same token share one reputation namespace. See
+<a href="../deployment/index.html#multi-vhost-reputation">deployment</a>.</p>
+<h2 id="shadow-mode">Shadow mode</h2>
+<table>
+<thead>
+<tr>
+<th>Directive</th>
+<th>Syntax</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BotShieldShadowMode</code></td>
+<td><code>on|off</code></td>
+<td>unset (off)</td>
+</tr>
+</tbody>
+</table>
+<p>Tri-state: unset means &quot;inherit from outer scope or off if no
+outer scope&quot;. When on, every gating decision flips to observe-mode
+regardless of per-rule setting. See <a href="../staging/index.html">staging</a>.</p>
+<h2 id="app-bridge">App bridge</h2>
+<table>
+<thead>
+<tr>
+<th>Directive</th>
+<th>Syntax</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BotShieldAppFeedback</code></td>
+<td><code>on|off</code></td>
+<td><code>off</code></td>
+</tr>
+<tr>
+<td><code>BotShieldAppFeedbackHeader</code></td>
+<td><code>&lt;header-name&gt;</code></td>
+<td><code>X-BotShield-Feedback</code></td>
+</tr>
+<tr>
+<td><code>BotShieldAppClaims</code></td>
+<td><code>on|off</code></td>
+<td><code>off</code></td>
+</tr>
+<tr>
+<td><code>BotShieldAppIntegrationSecretFile</code></td>
+<td><code>/path</code></td>
+<td>unset (required for either above)</td>
+</tr>
+</tbody>
+</table>
+<p>See <a href="../captcha/index.html#app-bridge">captcha</a> for the wire format
+and security model.</p>
+<h2 id="where-to-next">Where to next</h2>
+<ul>
+<li>Conceptual model and scoring: <a href="../operator-model/index.html">operator model</a>.</li>
+<li>Deployment topology and capacity: <a href="../deployment/index.html">deployment</a>.</li>
+<li>Per-family policy semantics: <a href="../policy/index.html">policy</a>.</li>
+<li>Captcha and app-bridge integration: <a href="../captcha/index.html">captcha</a>.</li>
+<li>Decision log and metrics: <a href="../observability/index.html">observability</a>.</li>
+</ul>
+
+        </div>
+      </article>
+    </main>
+  </div>
+</body>
+</html>

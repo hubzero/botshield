@@ -133,6 +133,39 @@ jobs:
             /var/log/apache2/error.log
           retention-days: 7
 
+  # -------- Per-PR gate: docs/ is in sync with sources. --------
+  # GitHub Pages publishes from main:/docs, so docs/ has to be
+  # committed and rebuilt whenever docs-src/ or site-src/ changes.
+  # This job rebuilds the site and fails if the working tree shows
+  # any diff vs the committed docs/ — i.e., the author forgot to
+  # rebuild before pushing.
+  docs-fresh:
+    name: docs/ is up to date with sources
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install docs build deps
+        run: pip install -r tools/requirements-docs.txt
+
+      - name: Rebuild docs/
+        run: make docs
+
+      - name: Fail if rebuild produced changes
+        run: |
+          if ! git diff --quiet docs/; then
+            echo "::error::docs/ is out of sync with docs-src/ or site-src/."
+            echo "Run 'make docs' locally and commit the result before pushing."
+            git --no-pager diff --stat docs/
+            exit 1
+          fi
+
   # -------- Manual: 8h soak. --------
   # Available via the "Run workflow" button in GitHub Actions; not
   # wired to any automatic trigger. 8 h × every-day burns runner

@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Operator model | mod_botshield</title>
+  <meta name="description" content="Tiers, scoring, cookie-carried reputation, decision log, tuning workflow.">
+  <link rel="stylesheet" href="../assets/site.css">
+</head>
+<body class="site-doc">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <div class="page-shell">
+    <header class="site-header site-header--compact">
+      <a class="brand" href="../index.html">
+        <img class="brand__icon" src="../assets/logo-botshield-icon.svg" alt="" aria-hidden="true">
+        <span class="brand__wordmark" aria-label="BotShield">
+          <span class="brand__wordmark-soft">Bot</span><span class="brand__wordmark-strong">Shield</span>
+        </span>
+      </a>
+      <nav class="top-nav" aria-label="Primary">
+        <a class="top-nav__link" href="#">GitHub</a>
+        <a class="top-nav__link" href="../getting-started/index.html">Docs</a>
+        <a class="top-nav__link" href="../getting-started/index.html#build">Download</a>
+      </nav>
+    </header>
+
+    <main id="main-content" class="docs-layout" tabindex="-1">
+      <aside class="docs-sidebar">
+        <p class="docs-sidebar__eyebrow">Docs</p>
+        <nav class="docs-nav" aria-label="Documentation">
+<a class="docs-nav__item" href="../getting-started/index.html">
+  <span class="docs-nav__title">Getting started</span>
+  <span class="docs-nav__summary">Install, build, minimal configuration, and verifying a first request.</span>
+</a>
+<a class="docs-nav__item" href="../deployment/index.html">
+  <span class="docs-nav__title">Deployment</span>
+  <span class="docs-nav__summary">Reverse proxies, slow-client defense, multi-vhost reputation, secret rotation, capacity sizing.</span>
+</a>
+<a class="docs-nav__item is-active" href="index.html">
+  <span class="docs-nav__title">Operator model</span>
+  <span class="docs-nav__summary">Tiers, scoring, cookie-carried reputation, decision log, tuning workflow.</span>
+</a>
+<a class="docs-nav__item" href="../policy/index.html">
+  <span class="docs-nav__title">Policy</span>
+  <span class="docs-nav__summary">Allow lists, rate limits, block paths, robots.txt, the trigger families, and flag triggers.</span>
+</a>
+<a class="docs-nav__item" href="../captcha/index.html">
+  <span class="docs-nav__title">Captcha and app-bridge</span>
+  <span class="docs-nav__summary">Third-party captcha providers, verify-endpoint hardening, and the signed app-bridge protocols.</span>
+</a>
+<a class="docs-nav__item" href="../staging/index.html">
+  <span class="docs-nav__title">Staging</span>
+  <span class="docs-nav__summary">Per-rule observe and global shadow mode for safe rule rollout.</span>
+</a>
+<a class="docs-nav__item" href="../observability/index.html">
+  <span class="docs-nav__title">Observability</span>
+  <span class="docs-nav__summary">Decision log, Prometheus metrics, mod_status contribution, and the policy-status admin page.</span>
+</a>
+<a class="docs-nav__item" href="../directives/index.html">
+  <span class="docs-nav__title">Directive reference</span>
+  <span class="docs-nav__summary">Canonical operator-facing reference for all 78 directives, grouped by family.</span>
+</a>
+<a class="docs-nav__item" href="../troubleshooting/index.html">
+  <span class="docs-nav__title">Troubleshooting</span>
+  <span class="docs-nav__summary">Common operator-visible issues, diagnostics, and fixes.</span>
+</a>
+<a class="docs-nav__item" href="../faq/index.html">
+  <span class="docs-nav__title">FAQ</span>
+  <span class="docs-nav__summary">Honest answers to questions operators ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
+</a>
+<a class="docs-nav__item" href="../guide/index.html">
+  <span class="docs-nav__title">Project README</span>
+  <span class="docs-nav__summary">Repository README — project overview, build instructions, and dev configuration.</span>
+</a>
+<a class="docs-nav__item" href="../roadmap/index.html">
+  <span class="docs-nav__title">Roadmap and changelog</span>
+  <span class="docs-nav__summary">Shipped milestones, extension design notes, and the development backlog.</span>
+</a>
+        </nav>
+      </aside>
+
+      <article class="docs-article">
+        <header class="docs-article__header">
+          <p class="eyebrow">Documentation</p>
+          <h1>Operator model</h1>
+          <p class="docs-article__summary">Tiers, scoring, cookie-carried reputation, decision log, tuning workflow.</p>
+          <p class="docs-article__source">Operator model</p>
+        </header>
+<section class="toc">
+  <h2 class="toc__heading">On this page</h2>
+  <ul class="toc__list">
+<li class="toc__item toc__item--level-2"><a href="#tier-ladder">Tier ladder</a></li>
+<li class="toc__item toc__item--level-2"><a href="#score-composition">Score composition</a></li>
+<li class="toc__item toc__item--level-2"><a href="#built-in-heuristic-signals">Built-in heuristic signals</a></li>
+<li class="toc__item toc__item--level-2"><a href="#cookie-carried-reputation">Cookie-carried reputation</a></li>
+<li class="toc__item toc__item--level-3"><a href="#forgiveness">Forgiveness</a></li>
+<li class="toc__item toc__item--level-3"><a href="#forgiveness-cap">Forgiveness cap</a></li>
+<li class="toc__item toc__item--level-3"><a href="#carry-forward-gate">Carry-forward gate</a></li>
+<li class="toc__item toc__item--level-2"><a href="#inspecting-decisions">Inspecting decisions</a></li>
+<li class="toc__item toc__item--level-2"><a href="#tuning-workflow">Tuning workflow</a></li>
+<li class="toc__item toc__item--level-2"><a href="#how-tier-dispatch-maps-to-outcomes">How tier dispatch maps to outcomes</a></li>
+<li class="toc__item toc__item--level-2"><a href="#where-to-next">Where to next</a></li>
+  </ul>
+</section>
+        <div class="prose">
+<p>mod_botshield decides every request along two orthogonal axes: a
+<strong>tier</strong> (what the visitor experiences) and a <strong>score</strong> (how
+suspicious the request looks). This page explains the tier ladder,
+how the score is composed, how cookie-carried reputation interacts
+with the heuristics, and the day-to-day tuning workflow.</p>
+<h2 id="tier-ladder">Tier ladder</h2>
+<p>mod_botshield supports four user-facing tiers plus a passive
+&quot;safeguard&quot; rendering reserved for challenge-loop suppression.</p>
+<table>
+<thead>
+<tr>
+<th>Tier</th>
+<th>What the user sees</th>
+<th>When it fires</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pass</code></td>
+<td>Real content</td>
+<td><code>effective &lt; BotShieldScoreSilent</code> (default <code>&lt; 20</code>)</td>
+</tr>
+<tr>
+<td><code>silent</code></td>
+<td>&quot;Checking your browser…&quot; splash; auto-submits a SHA-256 PoW</td>
+<td><code>BotShieldScoreSilent ≤ effective &lt; BotShieldScoreHard</code> (default <code>20..49</code>)</td>
+</tr>
+<tr>
+<td><code>form</code></td>
+<td>reCAPTCHA-shaped checkbox interstitial; user clicks once, PoW runs</td>
+<td><code>BotShieldScoreHard ≤ effective &lt; BotShieldScoreCaptcha</code> (default <code>50..79</code>)</td>
+</tr>
+<tr>
+<td><code>captcha</code></td>
+<td>Third-party provider widget (Turnstile / hCaptcha / reCAPTCHA / Friendly / GeeTest)</td>
+<td><code>effective ≥ BotShieldScoreCaptcha</code> (default <code>≥ 80</code>). Falls back to <code>form</code> if no provider configured on the scope</td>
+</tr>
+</tbody>
+</table>
+<p>A fifth value, <code>safeguard</code>, can appear in decision logs. It marks
+the challenge-loop suppression: a client that has been issued
+challenges repeatedly within the safeguard window without ever
+returning a verified cookie gets <code>tier=safeguard outcome=declined</code>
+— pass-through to the real content with no challenge — to break the
+loop. The flagged-IP entry is preserved so the suspicious behavior
+is still recorded for downstream signals.</p>
+<p>Below <code>BotShieldScoreSilent</code> the module returns <code>DECLINED</code> to
+Apache; the content handler runs as if mod_botshield weren't loaded.
+<strong>Legitimate visitors never see us and never receive a cookie.</strong></p>
+<h2 id="score-composition">Score composition</h2>
+<p>Every challenge decision is driven by a single signed integer
+computed at request time:</p>
+<pre><code>effective = heuristic_total + cookie_score
+</code></pre>
+<ul>
+<li><strong><code>heuristic_total</code></strong> — sum of <code>bs_score_add</code> calls that fired
+during this request. Includes built-in heuristics, allow-list /
+rate-limit / block-path / robots / trigger families, and
+<code>BotShieldFlagTrigger action=score</code> effects fired by flags set on
+the IP or carried in the prior cookie.</li>
+<li><strong><code>cookie_score</code></strong> — accumulated reputation in the prior
+<code>_bs_verified</code> cookie, if one was presented and verified. Carries
+forward across requests; expires with the cookie TTL.</li>
+</ul>
+<p>A separate <strong>tier floor</strong> can lift the final tier independent of the
+score: any <code>BotShieldFlagTrigger action=tier_floor min=&lt;tier&gt;</code> that
+fires on a set flag bit raises the chosen tier to AT LEAST that
+level. Score-derived tier wins when it's already above the floor —
+floors never silently downgrade. Floor lifts produce a
+<code>flag-tier-floor:&lt;tier&gt;</code> reason so the reasoning is visible in the
+log.</p>
+<h2 id="built-in-heuristic-signals">Built-in heuristic signals</h2>
+<p>These run on every request before any operator-configured trigger
+or cohort. Signs are absolute; the score either rises or stays put.</p>
+<table>
+<thead>
+<tr>
+<th>Signal</th>
+<th>Penalty</th>
+<th>Reason in log</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Missing <code>User-Agent</code></td>
+<td>+40</td>
+<td><code>missing-user-agent</code></td>
+</tr>
+<tr>
+<td>Missing <code>Accept-Language</code></td>
+<td>+15</td>
+<td><code>missing-accept-language</code></td>
+</tr>
+<tr>
+<td>Scraper-pattern UA</td>
+<td>+50</td>
+<td><code>scraper-ua:&lt;pattern&gt;</code></td>
+</tr>
+<tr>
+<td>First-sight IP (not in Bloom filter)</td>
+<td>+5</td>
+<td><code>first-sight-ip</code></td>
+</tr>
+<tr>
+<td>Block-path match</td>
+<td>+100</td>
+<td><code>block-path:&lt;name&gt;</code></td>
+</tr>
+<tr>
+<td>Rate-limit exceeded</td>
+<td>+50</td>
+<td><code>rate-limit-exceeded:&lt;name&gt;</code></td>
+</tr>
+<tr>
+<td>Robots.txt Disallow</td>
+<td>+100</td>
+<td><code>robots-block:&lt;group&gt;</code></td>
+</tr>
+<tr>
+<td>Honeypot hit (default flag trigger)</td>
+<td>+60</td>
+<td><code>flag-trigger:honeypot_hit</code></td>
+</tr>
+<tr>
+<td>Fake-bot detection (default flag trigger)</td>
+<td>+80</td>
+<td><code>flag-trigger:fake_bot</code></td>
+</tr>
+<tr>
+<td>Verified legit-crawler match</td>
+<td>forces pass</td>
+<td><code>verified-&lt;name&gt;</code></td>
+</tr>
+<tr>
+<td><code>app_verified_human</code> cookie credit (default flag-trigger)</td>
+<td>-80</td>
+<td><code>flag-trigger:app_verified_human</code></td>
+</tr>
+<tr>
+<td>Operator path / load / cookie / env / flag triggers with <code>action=score add=N</code></td>
+<td>configured</td>
+<td><code>&lt;family&gt;-trigger:&lt;name&gt;</code></td>
+</tr>
+</tbody>
+</table>
+<p>Default thresholds and penalty values appear here for orientation.
+Treat the source (<code>src/score.h</code>, <code>src/heuristics.c</code>,
+<code>src/triggers.c</code>, defaults registered in <code>bs_default_flag_triggers</code>)
+as authoritative — see the <a href="../directives/index.html">directives</a> page for
+how to override every value.</p>
+<p>The number of distinct reason entries recorded per request is
+capped at 16 (<code>BS_SCORE_MAX_REASONS</code>). Past the cap, further calls
+still contribute their penalty to the running total but are dropped
+from the audit trail. A one-shot DEBUG line fires on the first drop
+so the diagnostic surfaces under verbose logging.</p>
+<h2 id="cookie-carried-reputation">Cookie-carried reputation</h2>
+<p>Once a request passes (challenged or not), mod_botshield issues a
+<code>_bs_verified</code> (or <code>__Host-bs_verified</code> on HTTPS) cookie carrying
+the user's accumulated reputation. The wire format is an
+authenticated AES-256-GCM envelope; the plaintext fields include:</p>
+<ul>
+<li><code>score</code> — running total</li>
+<li><code>flags</code> — credit/penalty bits accumulated across challenges</li>
+<li><code>passes_silent</code> / <code>passes_form</code> / <code>passes_captcha</code> — counters of
+successful challenges at each tier</li>
+<li><code>forgive_window_start</code> / <code>forgive_consumed</code> — forgiveness-cap
+state (see below)</li>
+<li><code>expires_at</code> — unix timestamp; cookies past expiry fail verify</li>
+</ul>
+<p>On subsequent requests that cookie's <code>score</code> field becomes the
+<code>cookie_score</code> term in the composition. Repeated good behavior
+accumulates negative <code>cookie_score</code> (forgiveness credit applied at
+challenge-issue time); repeated suspicious behavior accumulates
+positive.</p>
+<p>The reputation persists across requests but expires with the cookie
+TTL (<code>BotShieldCookieTTL</code>, default 1 hour). After expiry users
+start fresh.</p>
+<h3 id="forgiveness">Forgiveness</h3>
+<p>Each successful challenge applies a negative score credit
+(&quot;forgiveness&quot;) so a client that has just proven itself doesn't
+get re-challenged on the next request:</p>
+<table>
+<thead>
+<tr>
+<th>Tier</th>
+<th>Default credit</th>
+<th>Directive</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>silent</code></td>
+<td>-10</td>
+<td><code>BotShieldForgivenessSilent</code></td>
+</tr>
+<tr>
+<td><code>form</code></td>
+<td>-25</td>
+<td><code>BotShieldForgivenessForm</code></td>
+</tr>
+<tr>
+<td><code>captcha</code></td>
+<td>-50</td>
+<td><code>BotShieldForgivenessCaptcha</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="forgiveness-cap">Forgiveness cap</h3>
+<p>To prevent farming — bot operators stockpiling forgiveness credit by
+solving many cheap challenges then trading the score down — the
+cookie carries a per-client hourly cap on accumulated forgiveness:</p>
+<pre><code class="language-apache">BotShieldForgivenessCapPerHour 200
+</code></pre>
+<p>Default is 200 points per rolling hour, ≈ 4–8 challenge-passes
+worth of credit. The cap state lives in the cookie itself, so
+forgiveness honors the cap across cookie re-issues without server-
+side bookkeeping.</p>
+<p>Set to 0 to disable the cap (legacy behavior). Set to a smaller
+value for stricter farming resistance.</p>
+<h3 id="carry-forward-gate">Carry-forward gate</h3>
+<p>When the module mints a fresh cookie (silent verify, form-captcha
+verify, captcha-verify, embedded-verify), it tries to carry the
+prior cookie's reputation block forward. Carry-forward is gated:</p>
+<ul>
+<li><code>signature mismatch</code> → reject; rep bytes can't be trusted.</li>
+<li><code>expired</code> → reject; indefinite reputation transfer is exactly the
+evasion this gate prevents.</li>
+<li>pre-auth errors with no rep struct populated → reject.</li>
+<li>everything else → carry forward, apply the per-tier forgiveness
+credit through the cap, increment the matching <code>passes_*</code>
+counter.</li>
+</ul>
+<h2 id="inspecting-decisions">Inspecting decisions</h2>
+<p>Every decision emits two log lines: a human-readable prose line and
+a stable <code>key=value</code> structured line. The structured line is what
+you query when tuning:</p>
+<pre><code>mod_botshield: decision tier=silent outcome=challenged ip=192.0.2.42
+    score=37 cookie=absent provider=- alg=sha256-zeros
+    reason=&quot;first-sight-ip,missing-accept-language&quot; path=&quot;/login&quot;
+</code></pre>
+<p>Bump the module's log level to make these visible:</p>
+<pre><code class="language-apache">LogLevel botshield_module:info
+</code></pre>
+<p>The <code>reason</code> field is the comma-joined reason names captured by
+<code>bs_score_add</code>. The <code>tag</code> field (when present) is the operator-
+supplied <code>log=&lt;tag&gt;</code> value from the matching trigger. See
+<a href="../observability/index.html">observability</a> for the full decision-log
+vocabulary.</p>
+<p>For verbose debugging — the per-reason penalty values, not just the
+names — the prose log line at <code>info</code> level carries the full
+breakdown:</p>
+<pre><code>mod_botshield: &lt;action&gt; effective=37 tier=silent heuristic=37
+    cookie_score=0 reasons=[first-sight-ip:5,missing-accept-language:15,scraper-ua:python-requests:50]
+</code></pre>
+<p>Grep the log for the request, read the reasons array, see exactly
+which signals contributed and how much.</p>
+<h2 id="tuning-workflow">Tuning workflow</h2>
+<ol>
+<li>Start with <code>BotShieldShadowMode on</code> to dry-run all rules without
+enforcement (see <a href="../staging/index.html">staging</a>).</li>
+<li>Watch the decision log for several days under real traffic.</li>
+<li>Inspect the distribution of <code>effective</code> and per-reason
+contributions. The <code>botshield_tier_&lt;t&gt;_total</code> and
+<code>botshield_outcome_&lt;o&gt;_total</code> Prometheus counters at
+<code>&lt;prefix&gt;/metrics</code> give the same data without grep.</li>
+<li>Adjust thresholds and per-rule penalties based on observed
+distributions:
+<ul>
+<li>Too many challenges on legitimate traffic → raise
+<code>BotShieldScoreSilent</code> / <code>BotShieldScoreHard</code> /
+<code>BotShieldScoreCaptcha</code>, or lower the offending heuristic's
+penalty.</li>
+<li>Bots slipping through → lower thresholds, raise scraper-UA
+penalty, add <code>BotShieldPathTrigger</code> rules for known-bad paths.</li>
+</ul>
+</li>
+<li>Flip <code>BotShieldShadowMode off</code> when satisfied.</li>
+<li>Subsequent rule additions can be staged with per-rule
+<code>mode=observe</code> without affecting the rest.</li>
+</ol>
+<h2 id="how-tier-dispatch-maps-to-outcomes">How tier dispatch maps to outcomes</h2>
+<p>The combination of tier and outcome in the decision log captures
+the full lifecycle of a request. Not every (tier, outcome) pair is
+reachable; the common ones:</p>
+<table>
+<thead>
+<tr>
+<th>tier</th>
+<th>outcome</th>
+<th>What happened</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pass</code></td>
+<td><code>declined</code></td>
+<td>Score below silent threshold; real handler ran</td>
+</tr>
+<tr>
+<td><code>pass</code></td>
+<td><code>verified</code></td>
+<td>Valid cookie; declined to real handler</td>
+</tr>
+<tr>
+<td><code>silent</code></td>
+<td><code>challenged</code></td>
+<td>Interstitial served; client is solving PoW</td>
+</tr>
+<tr>
+<td><code>silent</code></td>
+<td><code>verified</code></td>
+<td>Client solved PoW; cookie minted</td>
+</tr>
+<tr>
+<td><code>form</code></td>
+<td><code>challenged</code></td>
+<td>Form-PoW interstitial served</td>
+</tr>
+<tr>
+<td><code>form</code></td>
+<td><code>verified</code></td>
+<td>Client solved form PoW; cookie minted</td>
+</tr>
+<tr>
+<td><code>captcha</code></td>
+<td><code>challenged</code></td>
+<td>Captcha widget served</td>
+</tr>
+<tr>
+<td><code>captcha</code></td>
+<td><code>verified</code></td>
+<td>Provider siteverify accepted; cookie minted</td>
+</tr>
+<tr>
+<td><code>captcha</code></td>
+<td><code>failopen</code></td>
+<td>Provider siteverify timed out; treated as pass to avoid blocking on a third-party outage</td>
+</tr>
+<tr>
+<td><code>captcha</code></td>
+<td><code>rate_limited</code></td>
+<td>Per-IP captcha-verify rate cap exceeded</td>
+</tr>
+<tr>
+<td><code>captcha</code></td>
+<td><code>inflight_capped</code></td>
+<td>Global captcha-verify in-flight cap exceeded</td>
+</tr>
+<tr>
+<td><code>safeguard</code></td>
+<td><code>declined</code></td>
+<td>challenge-loop suppression; pass-through</td>
+</tr>
+</tbody>
+</table>
+<p>See <a href="../observability/index.html">observability</a> for the complete enum
+vocabulary and how it maps to counters.</p>
+<h2 id="where-to-next">Where to next</h2>
+<ul>
+<li>Allow lists, rate limits, robots, triggers: <a href="../policy/index.html">policy</a>.</li>
+<li>Captcha integration: <a href="../captcha/index.html">captcha</a>.</li>
+<li>Safe rule rollout: <a href="../staging/index.html">staging</a>.</li>
+<li>Metrics and dashboards: <a href="../observability/index.html">observability</a>.</li>
+</ul>
+
+        </div>
+      </article>
+    </main>
+  </div>
+</body>
+</html>

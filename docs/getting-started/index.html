@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Getting started | mod_botshield</title>
+  <meta name="description" content="Install, build, minimal configuration, and verifying a first request.">
+  <link rel="stylesheet" href="../assets/site.css">
+</head>
+<body class="site-doc">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <div class="page-shell">
+    <header class="site-header site-header--compact">
+      <a class="brand" href="../index.html">
+        <img class="brand__icon" src="../assets/logo-botshield-icon.svg" alt="" aria-hidden="true">
+        <span class="brand__wordmark" aria-label="BotShield">
+          <span class="brand__wordmark-soft">Bot</span><span class="brand__wordmark-strong">Shield</span>
+        </span>
+      </a>
+      <nav class="top-nav" aria-label="Primary">
+        <a class="top-nav__link" href="#">GitHub</a>
+        <a class="top-nav__link" href="index.html">Docs</a>
+        <a class="top-nav__link" href="index.html#build">Download</a>
+      </nav>
+    </header>
+
+    <main id="main-content" class="docs-layout" tabindex="-1">
+      <aside class="docs-sidebar">
+        <p class="docs-sidebar__eyebrow">Docs</p>
+        <nav class="docs-nav" aria-label="Documentation">
+<a class="docs-nav__item is-active" href="index.html">
+  <span class="docs-nav__title">Getting started</span>
+  <span class="docs-nav__summary">Install, build, minimal configuration, and verifying a first request.</span>
+</a>
+<a class="docs-nav__item" href="../deployment/index.html">
+  <span class="docs-nav__title">Deployment</span>
+  <span class="docs-nav__summary">Reverse proxies, slow-client defense, multi-vhost reputation, secret rotation, capacity sizing.</span>
+</a>
+<a class="docs-nav__item" href="../operator-model/index.html">
+  <span class="docs-nav__title">Operator model</span>
+  <span class="docs-nav__summary">Tiers, scoring, cookie-carried reputation, decision log, tuning workflow.</span>
+</a>
+<a class="docs-nav__item" href="../policy/index.html">
+  <span class="docs-nav__title">Policy</span>
+  <span class="docs-nav__summary">Allow lists, rate limits, block paths, robots.txt, the trigger families, and flag triggers.</span>
+</a>
+<a class="docs-nav__item" href="../captcha/index.html">
+  <span class="docs-nav__title">Captcha and app-bridge</span>
+  <span class="docs-nav__summary">Third-party captcha providers, verify-endpoint hardening, and the signed app-bridge protocols.</span>
+</a>
+<a class="docs-nav__item" href="../staging/index.html">
+  <span class="docs-nav__title">Staging</span>
+  <span class="docs-nav__summary">Per-rule observe and global shadow mode for safe rule rollout.</span>
+</a>
+<a class="docs-nav__item" href="../observability/index.html">
+  <span class="docs-nav__title">Observability</span>
+  <span class="docs-nav__summary">Decision log, Prometheus metrics, mod_status contribution, and the policy-status admin page.</span>
+</a>
+<a class="docs-nav__item" href="../directives/index.html">
+  <span class="docs-nav__title">Directive reference</span>
+  <span class="docs-nav__summary">Canonical operator-facing reference for all 78 directives, grouped by family.</span>
+</a>
+<a class="docs-nav__item" href="../troubleshooting/index.html">
+  <span class="docs-nav__title">Troubleshooting</span>
+  <span class="docs-nav__summary">Common operator-visible issues, diagnostics, and fixes.</span>
+</a>
+<a class="docs-nav__item" href="../faq/index.html">
+  <span class="docs-nav__title">FAQ</span>
+  <span class="docs-nav__summary">Honest answers to questions operators ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
+</a>
+<a class="docs-nav__item" href="../guide/index.html">
+  <span class="docs-nav__title">Project README</span>
+  <span class="docs-nav__summary">Repository README — project overview, build instructions, and dev configuration.</span>
+</a>
+<a class="docs-nav__item" href="../roadmap/index.html">
+  <span class="docs-nav__title">Roadmap and changelog</span>
+  <span class="docs-nav__summary">Shipped milestones, extension design notes, and the development backlog.</span>
+</a>
+        </nav>
+      </aside>
+
+      <article class="docs-article">
+        <header class="docs-article__header">
+          <p class="eyebrow">Documentation</p>
+          <h1>Getting started</h1>
+          <p class="docs-article__summary">Install, build, minimal configuration, and verifying a first request.</p>
+          <p class="docs-article__source">Getting started</p>
+        </header>
+<section class="toc">
+  <h2 class="toc__heading">On this page</h2>
+  <ul class="toc__list">
+<li class="toc__item toc__item--level-2"><a href="#prerequisites">Prerequisites</a></li>
+<li class="toc__item toc__item--level-2"><a href="#build-and-install">Build and install</a></li>
+<li class="toc__item toc__item--level-2"><a href="#generate-a-master-secret">Generate a master secret</a></li>
+<li class="toc__item toc__item--level-2"><a href="#minimal-configuration">Minimal configuration</a></li>
+<li class="toc__item toc__item--level-2"><a href="#verify-it-s-running">Verify it&#x27;s running</a></li>
+<li class="toc__item toc__item--level-2"><a href="#test-that-pow-completes">Test that PoW completes</a></li>
+<li class="toc__item toc__item--level-2"><a href="#disable-temporarily">Disable temporarily</a></li>
+<li class="toc__item toc__item--level-2"><a href="#where-to-next">Where to next</a></li>
+  </ul>
+</section>
+        <div class="prose">
+<p>mod_botshield is an Apache 2.4 module that filters bot and scraper
+traffic in-process before Apache hands the request to PHP / FastCGI /
+upstream. This page covers installing the module, applying a minimal
+working configuration, and verifying that requests are being gated.</p>
+<h2 id="prerequisites">Prerequisites</h2>
+<p>You need:</p>
+<ul>
+<li>Apache 2.4 with the development headers (<code>apache2-dev</code> on
+Debian/Ubuntu, <code>httpd-devel</code> on RHEL-family).</li>
+<li>OpenSSL development headers (<code>libssl-dev</code>).</li>
+<li>libcurl + json-c development headers (<code>libcurl4-openssl-dev</code>,
+<code>libjson-c-dev</code>) — required even if you don't use the captcha tier.</li>
+<li>A 64-bit Linux platform. The module is exercised on Linux x86-64;
+other Unix-like platforms with APR + Apache 2.4 likely work but are
+not part of the regression matrix.</li>
+</ul>
+<p>Optional but recommended:</p>
+<ul>
+<li><code>mod_watchdog</code> for periodic state-file snapshots and the headroom
+monitor. The module degrades gracefully without it (state save
+still runs at clean shutdown, the headroom log lines disappear).</li>
+<li><code>mod_status</code> for the <code>/server-status</code> contribution hook.</li>
+<li><code>mod_remoteip</code> if Apache sits behind a reverse proxy or load
+balancer. See <a href="../deployment/index.html">deployment</a> for why this is critical.</li>
+<li><code>mod_reqtimeout</code> for slow-client / slowloris defense. See
+<a href="../deployment/index.html">deployment</a> for the recommended settings.</li>
+</ul>
+<h2 id="build-and-install">Build and install</h2>
+<pre><code class="language-sh">make enable
+</code></pre>
+<p><code>make enable</code> is the one-shot path: it compiles, installs the <code>.so</code>
+into Apache's modules directory, runs <code>a2enmod botshield</code>,
+<code>apachectl configtest</code>, and <code>systemctl reload apache2</code>. If any step
+fails the script stops before the reload.</p>
+<p>Step-by-step equivalents if you'd rather drive each phase yourself:</p>
+<pre><code class="language-sh">make                                      # apxs -c
+sudo make install                         # cp .so to modules dir
+sudo a2enmod botshield                    # writes mods-enabled symlink
+sudo apachectl configtest                 # syntax check before reload
+sudo systemctl reload apache2             # graceful reload
+</code></pre>
+<p><code>make disable</code> removes the module from <code>mods-enabled</code> without
+deleting the <code>.so</code> — useful for quickly rolling back during
+deployment.</p>
+<h2 id="generate-a-master-secret">Generate a master secret</h2>
+<p>mod_botshield refuses to start without <code>BotShieldSecretFile</code>. The
+file holds the master HMAC key from which per-purpose subkeys are
+HKDF-derived at config-load time (cookie GCM, pending-cookie HMAC,
+embedded-bootstrap binding). It must be:</p>
+<ul>
+<li>mode 0600 (the file watcher rejects looser modes at startup).</li>
+<li>between 16 bytes and 1 KiB.</li>
+<li>a single value; no leading whitespace, no embedded NULs.</li>
+</ul>
+<p>A 32-byte hex string is a reasonable default:</p>
+<pre><code class="language-sh">sudo install -m 600 /dev/null /etc/botshield/secret
+sudo openssl rand -hex 32 | sudo tee /etc/botshield/secret &gt;/dev/null
+</code></pre>
+<p>Keep this file off your repo and out of any backup that gets shared.
+Rotation is supported via <code>BotShieldSecondarySecretFile</code> — see the
+<a href="../deployment/index.html">deployment</a> page.</p>
+<h2 id="minimal-configuration">Minimal configuration</h2>
+<p>Drop a single block into the vhost you want gated:</p>
+<pre><code class="language-apache">&lt;VirtualHost *:443&gt;
+    ServerName example.test
+    DocumentRoot /var/www/example
+    # SSLEngine, certs, logs, etc.
+
+    BotShieldEnabled    on
+    BotShieldSecretFile /etc/botshield/secret
+    BotShieldAlgorithm  sha256-zeros
+&lt;/VirtualHost&gt;
+</code></pre>
+<p>That's the floor. Everything else (tier thresholds, forgiveness,
+allow lists, captcha providers, triggers) ships with reasonable
+defaults documented on the <a href="../operator-model/index.html">operator model</a> and
+<a href="../directives/index.html">directives</a> pages.</p>
+<p><code>BotShieldAlgorithm sha256-zeros</code> is currently the only built-in PoW
+algorithm. Other names (<code>sha384-zeros</code>, <code>pbkdf2-sha256</code>, <code>argon2id</code>)
+are reserved registry slots that fail with a clear &quot;not implemented&quot;
+diagnostic if you set them — there's no silent fallback.</p>
+<h2 id="verify-it-s-running">Verify it's running</h2>
+<p>After reload, confirm the module is loaded and a real request is
+being processed.</p>
+<p><strong>1. Module loaded.</strong></p>
+<pre><code class="language-sh">apachectl -M 2&gt;&amp;1 | grep botshield
+# expected: botshield_module (shared)
+</code></pre>
+<p><strong>2. Module is decorating requests.</strong> Every gated request gets an
+<code>X-Botshield-Env: &lt;env&gt;</code> response header (the env name comes from
+the <code>BotShieldEnv</code> directive if you set one, or <code>prod</code> by default).
+This is the cheapest end-to-end smoke test:</p>
+<pre><code class="language-sh">curl -skI https://example.test/ | grep -i x-botshield
+# expected: X-Botshield-Env: prod
+</code></pre>
+<p><strong>3. Decisions are being logged.</strong> mod_botshield emits a structured
+<code>key=value</code> decision line per request at Apache's <code>info</code> level.
+The default <code>LogLevel warn</code> hides them. Bump just this module:</p>
+<pre><code class="language-apache">LogLevel botshield_module:info
+</code></pre>
+<p>Reload and tail the error log:</p>
+<pre><code class="language-sh">sudo tail -f /var/log/apache2/error.log | grep &quot;mod_botshield: decision&quot;
+</code></pre>
+<p>You should see one line per request:</p>
+<pre><code>[Tue Apr 28 10:00:00 2026] [botshield:info] mod_botshield:
+  decision tier=pass outcome=declined ip=192.0.2.1 score=0
+  cookie=absent provider=- alg=- reason=&quot;-&quot; path=&quot;/&quot;
+</code></pre>
+<p><code>tier=pass outcome=declined</code> is the happy path — the module
+inspected the request, decided it didn't warrant friction, and
+declined so Apache served the real content.</p>
+<p><strong>4. The challenge widget renders.</strong> Force a challenge by spoofing a
+scraper UA so the heuristic score crosses <code>BotShieldScoreSilent</code>
+(default 20):</p>
+<pre><code class="language-sh">curl -sk -A &quot;python-requests/2.31&quot; https://example.test/ | grep -c BOTSHIELD
+# expected: 1 (the widget marker is present in the rendered page)
+</code></pre>
+<p>If you don't see the widget, the heuristic configuration on your
+scope likely diverges from the defaults — see
+<a href="../operator-model/index.html#tuning-workflow">operator model</a> for the
+tuning workflow and <a href="../observability/index.html">observability</a> for how
+to inspect what each request scored.</p>
+<h2 id="test-that-pow-completes">Test that PoW completes</h2>
+<p>Open the gated URL in a real browser. The interstitial should
+auto-submit (silent tier) or render the checkbox widget (form tier),
+solve a few seconds of SHA-256 PoW, and bounce back to the real page.
+Reload — you should see the real content immediately. The browser
+now holds a <code>_bs_verified</code> cookie carrying the signed envelope and
+accumulated reputation.</p>
+<h2 id="disable-temporarily">Disable temporarily</h2>
+<p>If you need to bypass the module without removing it from Apache's
+config (e.g. emergency rollback during a misfire):</p>
+<pre><code class="language-sh">sudo make disable &amp;&amp; sudo systemctl reload apache2
+</code></pre>
+<p><code>make disable</code> flips <code>a2dismod botshield</code> so Apache no longer loads
+the <code>.so</code>. Any directives in your vhost configs become unrecognized
+on the next reload, so this is a &quot;stop everything&quot; switch — for
+gradual rollback prefer <code>BotShieldShadowMode on</code> (see
+<a href="../staging/index.html">staging</a>).</p>
+<h2 id="where-to-next">Where to next</h2>
+<ul>
+<li>Real-world deployments behind a proxy: <a href="../deployment/index.html">deployment</a>.</li>
+<li>Tier model, scoring, and tuning: <a href="../operator-model/index.html">operator model</a>.</li>
+<li>Allow lists, rate limits, and triggers: <a href="../policy/index.html">policy</a>.</li>
+<li>Third-party captcha integration: <a href="../captcha/index.html">captcha</a>.</li>
+<li>Metrics, decision log, mod_status: <a href="../observability/index.html">observability</a>.</li>
+</ul>
+
+        </div>
+      </article>
+    </main>
+  </div>
+</body>
+</html>
