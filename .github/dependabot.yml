@@ -1,0 +1,36 @@
+# Auto-PR dependency updates for the bits of this repo that pin
+# external versions. The C module itself has no package manifest —
+# it links against system Apache + OpenSSL + libcurl + json-c which
+# distros track, so there's nothing for Dependabot to check there.
+#
+# Schedule is weekly (Monday) so PRs land in batches instead of
+# trickling. Open-pull-request limit keeps things manageable.
+
+version: 2
+updates:
+  # GitHub Actions used by .github/workflows/ci.yml — actions/checkout,
+  # actions/setup-python, actions/cache, actions/upload-artifact.
+  # CI's deprecation warnings (Node.js 20 -> 24) will land here as
+  # an update PR when GitHub publishes new majors.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+
+  # Pytest framework + Playwright + Hypothesis + report tooling.
+  - package-ecosystem: "pip"
+    directory: "/tests"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+
+  # Docs renderer (markdown-it-py).
+  - package-ecosystem: "pip"
+    directory: "/tools"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3

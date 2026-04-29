@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BotShield embedded-mode test page</title>
+</head>
+<body>
+<h1>Embedded test</h1>
+<p>Static page used by tests/pytests/test_browser_embedded.py to
+exercise the E17 PoC wrapper. The page itself is intentionally tiny
+so any failure mode (script blocked, Worker crash, fetch refused)
+shows up clearly without other content interfering.</p>
+<script src="/botshield/embedded.js" defer></script>
+</body>
+</html>

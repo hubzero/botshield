@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BotShield form-widget test page</title>
+</head>
+<body>
+<h1>Form widget test</h1>
+<form id="test-form" action="/contact/submit" method="POST">
+  <input id="email" name="email" type="email" value="test@example.com">
+  <div id="captcha-slot"
+       data-bs-form-captcha
+       data-bs-provider="turnstile"
+       data-bs-sitekey="1x00000000000000000000AA"></div>
+  <button id="submit" type="submit">Send</button>
+</form>
+<script src="/botshield/form-widget.js" defer></script>
+</body>
+</html>
