@@ -4,36 +4,53 @@ Low-latency bot detection for Apache 2.4. Cookieless requests get a
 self-contained proof-of-work interstitial; verified visitors receive a
 short-lived cookie and pass through on their next request.
 
-**Status: beta.** End-to-end tiered routing works — pass, silent
-(no-click auto-submit splash), form (checkbox interstitial), and
-captcha (third-party provider). Server-side HMAC signing, scoring
-heuristics, shared-memory flagged-IP table with lockless reads,
-rotating Bloom filter for first-sight IP signals, crash-durable state
-persistence (mod_watchdog periodic snapshots plus shutdown save), and
-captcha-verify-endpoint hardening (per-IP rate limit, global in-flight
-semaphore, HMAC-signed challenge-pending cookie, log throttling) are
-all shipped. Captcha tier routes to Cloudflare Turnstile, hCaptcha,
-Google reCAPTCHA v2, Google reCAPTCHA v3 (with score threshold),
-Friendly Captcha, and GeeTest v4 — configurable per scope, with
-multi-provider cohabitation on one vhost. Observability is shipped:
-structured `key=value` decision-log line per request, 41 Prometheus
-metrics at `<prefix>/metrics`, and a `mod_status` contribution hook.
-Accessibility passes WCAG 2.1 AA on every interstitial variant.
-Production hardening is shipped through M10.4: clean under ASan +
-UBSan, load-tested, MPM-matrix-verified across event / worker /
-prefork with graceful-restart coverage, and 8h-soak-clean (1.4M
-requests, +4MB RSS, zero crashes). The overnight soak now runs as
-a pytest test (`tests/pytests/test_soak.py`), kicked off nightly
-via the GitHub Actions workflow. The test suite shipped through
-M11.8: 60+ pytest tests backed by a reusable `botshield_test`
-framework (`httpx` client, transactional `config_override`,
-structured decision-log parser, time-salted IP allocator,
-data-driven per-provider captcha specs, a real Chromium via
-Playwright for the acceptance layer, axe-core a11y smoke,
-hypothesis property tests for cookie tampering, Prometheus
-exposition-format validator, session-scoped MPM matrix, and a
-LibFuzzer harness for the cookie parser). CI splits a fast
-per-PR lane from a browser lane and a nightly soak.
+**Status: beta.** Stable shape, exercising in dev; not yet a
+production deployment.
+
+What's shipped:
+
+- **Tiered challenges.** Pass / silent (no-click auto-submit) / form
+  (checkbox interstitial) / captcha (third-party provider).
+  Per-scope configurable; multi-provider cohabitation on one vhost.
+  Captcha providers: Turnstile, hCaptcha, reCAPTCHA v2 + v3,
+  Friendly Captcha, GeeTest v4.
+- **Cookie envelope.** AES-256-GCM authenticated encryption,
+  per-purpose HKDF-derived keys, verify-only secondary key for
+  graceful rotation. Per-cookie hourly forgiveness cap closes the
+  rebuild-budget evasion.
+- **Sparse server state.** SHM flagged-IP table with seqlock-guarded
+  lockless reads, rotating Bloom filter for first-sight IP signals,
+  crash-durable persistence via `mod_watchdog` snapshots + shutdown
+  save.
+- **Policy.** Path / cookie / env / load / scope / flag triggers,
+  per-cohort rate limits and block-paths, in-module robots.txt
+  parser (RFC 9309 + Crawl-delay extension), repeated-429
+  escalation, anti-loop safeguard.
+- **Verify-endpoint hardening.** HMAC-signed pending cookie + per-IP
+  rate limit + global in-flight semaphore on `/captcha-verify`. One-
+  time-use nonces + IP-bound bootstrap on the embedded silent path.
+- **Observability.** Structured `key=value` decision-log line per
+  request, 41 Prometheus metrics at `<prefix>/metrics`, `mod_status`
+  contribution hook.
+- **Multi-vhost isolation.** Default-isolate per `ServerName`; opt
+  into shared reputation via `BotShieldShareScope`.
+- **Shadow mode.** Global and per-rule observe for staging policy
+  changes without enforcement.
+- **Accessibility.** Default interstitial passes WCAG 2.1 AA on
+  every variant.
+
+Production hardening: clean under ASan + UBSan, MPM-matrix-verified
+across event / worker / prefork with graceful-restart coverage,
+8h-soak-clean (1.4M requests, +4MB RSS, zero crashes).
+
+Tests: ~250 pytest cases backed by the `botshield_test` framework
+(httpx client, transactional `config_override`, structured
+decision-log parser, time-salted IP allocator, real Chromium via
+Playwright, axe-core a11y smoke, Hypothesis property tests,
+LibFuzzer harnesses for the cookie + robots parsers). CI splits a
+fast per-PR lane from a browser lane; the 8h soak and LibFuzzer
+campaigns are wired but `workflow_dispatch`-only, kicked off
+manually before a release.
 
 ## How it works
 
@@ -64,16 +81,18 @@ per-PR lane from a browser lane and a nightly soak.
      <provider>`, the module siteverifies via libcurl (tight timeout,
      fail-open on provider outage), and issues the cookie.
 
-   PoW tiers produce an HMAC-signed 15-field cookie; captcha tier
-   produces the same envelope with `alg="captcha-<provider>"`.
+   PoW tiers produce an AES-256-GCM-encrypted 15-field cookie;
+   captcha tier produces the same envelope with `alg="captcha-
+   <provider>"`.
 5. Each decision emits two log lines: a human-readable prose line and
    a stable `key=value` structured line (`mod_botshield: decision
    tier=<t> outcome=<o> …`) parseable with a ~50-line awk script.
    Every decision also increments matching SHM counters exported at
    `/botshield/metrics` (Prometheus text) and via a `mod_status`
    contribution hook.
-6. The next request carries the cookie; the server re-derives the
-   HMAC, checks freshness, and declines — Apache serves the real
+6. The next request carries the cookie; the server GCM-decrypts +
+   verifies the auth tag, checks freshness, and declines — Apache
+   serves the real
    content. Flags (honeypot hits, scanner probes) live in SHM, not the
    cookie, so replaying an older cookie can't launder an IP flag.
 
@@ -551,14 +570,19 @@ only `<h1>` is emitted regardless of how much chrome you've removed.
 
 ## Security note
 
-Cookies are HMAC-SHA-256-signed over a 13-field canonical envelope; any
-edit to the score, flag bitmap, tier marker, or PoW proof invalidates
-the signature and forces a fresh challenge. Cookies carrying a genuine
+Cookies are AES-256-GCM authenticated-encrypted over a 15-field
+canonical envelope: any edit to the score, flag bitmap, tier marker,
+forgiveness window, or PoW proof fails the GCM tag check and forces
+a fresh challenge. The AES key is HKDF-derived per-purpose from the
+master secret, and a secondary verify-only key (`BotShieldSecondary
+SecretFile`) supports graceful rotation. Cookies carrying a genuine
 PoW solve can still be replayed within their TTL (default 1 h), which
 is why flags and the first-sight Bloom filter live in shared memory
 rather than only in the cookie — an attacker can replay yesterday's
 lower-score cookie, but an IP that tripped a honeypot stays flagged
-across restarts via the periodic state-file snapshots.
+across restarts via the periodic state-file snapshots. The per-cookie
+hourly forgiveness cap (E15) prevents using cookie expiry as a budget-
+reset bypass.
 
 The captcha-verify endpoint (`<prefix>/captcha-verify/<provider>`) is
 guarded by six layers of pre-libcurl checks: Content-Type prefilter,
@@ -644,50 +668,30 @@ also contributes to `/server-status` via an optional hook: a compact
 HTML table in browser mode, `BotShield<Name>: N` key-value lines in
 `?auto` mode.
 
-## Development
+## Local development
 
-`apache/botshield-dev.conf` is a working HTTPS dev vhost that exercises
-each directive on its own URL of a fake "Crestline Research Library"
-test site:
+The repo ships a working HTTPS dev vhost at
+`apache/botshield-dev.conf` that exercises every directive against
+the committed `tests/site/` docroot. The vhost paths are templated
+through `${BS_REPO}`, so `tests/setup/provision.sh` wires it to
+your checkout location automatically:
 
-**Widget customization:**
+```bash
+sudo tests/setup/provision.sh
+```
 
-| Path | What it demonstrates |
-|---|---|
-| `/` | Default widget |
-| `/debug` | `BotShieldDebug` 403 smoke test |
-| `/about.html` | Custom prompt, logo file, logo caption, help file, help always-on |
-| `/search.html` | All chrome toggles off — just a bare checkbox |
-| `/api/users.json` | `BotShieldShowBox off` — widget without outer box |
-| `/login.html` | `BotShieldChallengeFile` — widget spliced into a site-themed page |
-| `/admin/.env` | Honeypot scope — hits flag the IP via `BotShieldFlagIP honeypot_hit` |
+This is **idempotent** — safe to re-run. It builds + installs the
+module, generates a self-signed cert at `/etc/ssl/botshield-dev/`,
+seeds `/etc/botshield/` with provider dummy secrets, sets up the
+test docroot, and reloads Apache. After it completes, the dev vhost
+listens on `https://localhost/` with the test fixture as DocumentRoot
+and the rendered docs site mounted at `https://localhost/mod_botshield/`.
 
-**Captcha providers** (each uses the provider's published test or
-placeholder keys; see the dev config comments for what each key
-actually does):
-
-| Path | Provider | Notes |
-|---|---|---|
-| `/captcha-demo` | Turnstile | Cloudflare always-pass dummies; full end-to-end works |
-| `/hcaptcha-demo` | hCaptcha | Always-pass dummies; POST body must use the documented test token |
-| `/recaptcha-v2-demo` | reCAPTCHA v2 | Google's published test pair; any token accepted by the test secret |
-| `/recaptcha-v3-demo` | reCAPTCHA v3 | Placeholder keys — real v3 keys from the reCAPTCHA admin console are needed for a true score-threshold test |
-| `/friendly-demo` | Friendly Captcha | Placeholder keys; real keys from friendlycaptcha.com |
-| `/geetest-demo` | GeeTest v4 | Placeholder keys; real keys from dashboard.geetest.com |
-
-**Module-owned endpoints:**
-
-| Path | What |
-|---|---|
-| `/botshield/captcha-verify/<provider>` | Per-provider verify POST target |
-| `/botshield/metrics` | Prometheus text exposition |
-| `/server-status` | Apache `mod_status` (enables the botshield contribution hook) |
-
-The dev-vhost docroot is committed at `tests/site/` — a four-file
-fixture (`index.html`, `bs-custom-help.html`, `bs-custom-page.html`,
-`assets/logos/01-guardian.svg`) that's reproducible across machines.
-See the header of `apache/botshield-dev.conf` for how to set up the
-self-signed cert and enable the vhost.
+The vhost has `<Location>` blocks demonstrating every per-URL widget
+customization, every captcha provider, and the honeypot scope; read
+`apache/botshield-dev.conf` for the full inventory. Test infrastructure
+(pytest harness, fuzz, benchmarks) is documented in
+[`tests/README.md`](tests/README.md).
 
 ## License
 
