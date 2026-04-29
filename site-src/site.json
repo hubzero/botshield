@@ -1,0 +1,81 @@
+{
+  "site_name": "mod_botshield",
+  "brand_tagline": "Disciplined Judgment. Proportionate Response.",
+  "site_tagline": "Apache-native bot and scraper defense that keeps expensive backends asleep.",
+  "site_description": "Low-latency bot detection for Apache 2.4 with proof-of-work challenges, shared-memory reputation, crawler policy, and built-in observability.",
+  "github_href": "#",
+  "docs": [
+    {
+      "slug": "getting-started",
+      "title": "Getting started",
+      "source": "docs-src/getting-started.md",
+      "summary": "Install, build, minimal configuration, and verifying a first request."
+    },
+    {
+      "slug": "deployment",
+      "title": "Deployment",
+      "source": "docs-src/deployment.md",
+      "summary": "Reverse proxies, slow-client defense, multi-vhost reputation, secret rotation, capacity sizing."
+    },
+    {
+      "slug": "operator-model",
+      "title": "Operator model",
+      "source": "docs-src/operator-model.md",
+      "summary": "Tiers, scoring, cookie-carried reputation, decision log, tuning workflow."
+    },
+    {
+      "slug": "policy",
+      "title": "Policy",
+      "source": "docs-src/policy.md",
+      "summary": "Allow lists, rate limits, block paths, robots.txt, the trigger families, and flag triggers."
+    },
+    {
+      "slug": "captcha",
+      "title": "Captcha and app-bridge",
+      "source": "docs-src/captcha.md",
+      "summary": "Third-party captcha providers, verify-endpoint hardening, and the signed app-bridge protocols."
+    },
+    {
+      "slug": "staging",
+      "title": "Staging",
+      "source": "docs-src/staging.md",
+      "summary": "Per-rule observe and global shadow mode for safe rule rollout."
+    },
+    {
+      "slug": "observability",
+      "title": "Observability",
+      "source": "docs-src/observability.md",
+      "summary": "Decision log, Prometheus metrics, mod_status contribution, and the policy-status admin page."
+    },
+    {
+      "slug": "directives",
+      "title": "Directive reference",
+      "source": "docs-src/directives.md",
+      "summary": "Canonical operator-facing reference for all 78 directives, grouped by family."
+    },
+    {
+      "slug": "troubleshooting",
+      "title": "Troubleshooting",
+      "source": "docs-src/troubleshooting.md",
+      "summary": "Common operator-visible issues, diagnostics, and fixes."
+    },
+    {
+      "slug": "faq",
+      "title": "FAQ",
+      "source": "docs-src/faq.md",
+      "summary": "Honest answers to questions operators ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban."
+    },
+    {
+      "slug": "guide",
+      "title": "Project README",
+      "source": "README.md",
+      "summary": "Repository README — project overview, build instructions, and dev configuration."
+    },
+    {
+      "slug": "roadmap",
+      "title": "Roadmap and changelog",
+      "source": "CHANGELOG.md",
+      "summary": "Shipped milestones, extension design notes, and the development backlog."
+    }
+  ]
+}
