@@ -174,6 +174,71 @@ up-front. Look for log lines of the form:
 mod_botshield: capacity headroom: flagged_ip 38241/50000 (76%)
 ```
 
+## Performance characteristics
+
+Per-request overhead the module adds, measured by the in-tree
+benchmark suite in `tests/bench/`. The numbers below come from
+30-second `wrk` sweeps against a 140-byte static file on Apache
+2.4, localhost loopback (no real network), Linux x86_64, with
+realistic browser headers attached. They show the *floor* of the
+module's cost — production traffic depends on hardware, kernel,
+network RTT, header mix, and request rate, all of which dominate
+or shape the numbers below.
+
+**Single-connection isolation** (`-t 1 -c 1`) — the cleanest
+"what does each request actually cost?" measurement, no
+contention effects:
+
+| Configuration | p50 latency | Δ vs Apache static |
+|---|---|---|
+| Apache static (no module) | ~310us | — |
+| `BotShieldEnabled on`, no features | ~318us | **+8us** |
+
+**Sustained concurrent load** (`-t 4 -c 100`) — the throughput
+shape. Multi-connection deltas are dominated by loopback
+contention and Apache worker dynamics, not the module:
+
+| Configuration | RPS hit vs Apache static |
+|---|---|
+| Module loaded, all scopes disabled | -13% |
+| `BotShieldEnabled on`, no features | -10% |
+| + allow-list (6 verified-bot entries) | -11% |
+| + trigger families (3 cookie, 1 env, 3 path, 1 scope) | -21% |
+| + robots.txt (10-rule wildcard group + named groups) | -15% |
+| + `LogLevel botshield_module:info` (decision log) | -9% |
+| + valid `_bs_verified` cookie attached | -18% |
+| Everything on (kitchen sink) | -20% |
+
+What to take from these:
+
+- **Just loading the module** costs ~13% RPS at high concurrency
+  even with no scope enabling it. Apache calls the request hook
+  regardless; the hook short-circuits, but the function call +
+  scope-enabled check still happens.
+- **Enabling the module** on top of having loaded it is roughly
+  free. Bare-on (`-10%`) is within noise of module-loaded-disabled
+  (`-13%`). The actual heuristics + Bloom + score-composition
+  per-request work doesn't measurably move the dial.
+- **Trigger families are the dominant configuration cost.** Both
+  the trigger-only scenario (`-21%`) and kitchen-sink (`-20%`)
+  cluster around the same hit. Each request walks the trigger
+  arrays in declaration order; the more rules, the longer the walk.
+- **Robots.txt enforcement** adds ~5% over bare-on.
+- **Allow-list** is sub-noise — the UA classifier trie is fast.
+- **The decision-log emission** (`LogLevel botshield_module:info`)
+  is sub-noise. Operators can turn observability on without
+  measurable RPS hit.
+- **Carrying a valid cookie isn't a perf win.** GCM-decrypt +
+  canonical reconstruction + algorithm verify cost roughly what
+  the heuristic walk they sometimes replace cost. The cookie
+  path's purpose is correctness (carrying reputation), not cheap
+  pass-through.
+
+The `tests/bench/run-bench.sh` driver reproduces these in your own
+environment in ~12 minutes. Run it before sizing a new deployment
+or whenever you want a fresh baseline against your production
+hardware.
+
 ## State persistence
 
 mod_botshield can snapshot the SHM tables to disk at a configured
