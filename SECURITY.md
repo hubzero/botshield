@@ -4,13 +4,9 @@
 
 **Please do not open public issues for security bugs.** Use GitHub's
 [private security advisory](https://github.com/hubzero/botshield/security/advisories/new)
-flow instead — it gives us a private channel to triage, fix, and
-coordinate disclosure before the bug becomes public knowledge.
-
-If you can't use the GitHub flow for some reason, the maintainers'
-public-key fingerprints are listed in `.github/security/keys.asc`
-(coming soon); you can email an encrypted report to the address on
-the keys.
+flow — it gives us a private channel to triage, fix, and coordinate
+disclosure before the bug becomes public knowledge. A GitHub account
+is required (free); the form is the only supported reporting channel.
 
 When you report, please include:
 
