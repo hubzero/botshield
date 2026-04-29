@@ -126,6 +126,13 @@ install_secret /etc/botshield/recaptcha-v2-secret    "6LeIxAcTAAAAAGG-vFI1TnRWxM
 install_secret /etc/botshield/recaptcha-v3-secret    "6LeIxAcTAAAAAGG-vFI1TnRWxMZNFuojJ4WifJWe"
 install_secret /etc/botshield/friendly-secret        "FRIENDLYCAPTCHA_FREE_TIER_SECRET_REPLACE_ME_WITH_REAL"
 install_secret /etc/botshield/geetest-secret         "GEETEST_CAPTCHA_KEY_REPLACE_WITH_REAL_FROM_DASHBOARD"
+# Always-fail variants for test_captcha_rejected_via_bad_secret. These
+# are well-formed values the provider deliberately rejects (Turnstile
+# publishes 2x000... as the always-fail pair to 1x000...AA always-pass;
+# reCAPTCHA v2 has no published always-fail key, so we use a malformed
+# string that fails siteverify cleanly without crashing the validator).
+install_secret /etc/botshield/turnstile-fail-secret  "2x0000000000000000000000000000000AA"
+install_secret /etc/botshield/recaptcha-v2-badsecret "this-is-not-a-real-recaptcha-secret-aaaaaa"
 # Shared HMAC key for both directions of app integration: app→module
 # feedback envelopes and module→app X-Botshield-Claims headers. The
 # two protocols' canonical forms are structurally distinct (single-
