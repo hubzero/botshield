@@ -5,18 +5,22 @@ name: CI
 # own runner so the Chromium binary can be cached independently of
 # everything else. The 60-second soak smoke rides along in test-fast.
 #
-# The 8h soak is too long per-PR and runs on the nightly schedule.
-# MPM-matrix and sanitizer jobs are planned but not wired here yet
-# (see PLAN.md M11.8 / M10.1).
+# Manual-only jobs (workflow_dispatch via the GitHub Actions "Run
+# workflow" button): `nightly` runs the 8h soak; `fuzz-nightly`
+# runs 30 min each of the cookie + robots LibFuzzer harnesses.
+# Neither fires on a schedule — runner-minute cost outweighs the
+# signal at this project's cadence; kick them off before a release
+# or after a parser change.
 
 on:
   pull_request:
     branches: [ main ]
   push:
     branches: [ main ]
-  # Nightly: runs the 8h soak against mpm_event.
-  schedule:
-    - cron: "0 6 * * *"
+  # Manual trigger only — used to fire the 8h soak and the fuzz
+  # campaigns (each can spend hours of runner time, so we don't run
+  # them on a cron). Hit the "Run workflow" button in GitHub Actions
+  # to invoke.
   workflow_dispatch:
 
 env:
@@ -129,13 +133,14 @@ jobs:
             /var/log/apache2/error.log
           retention-days: 7
 
-  # -------- Nightly: 8h soak only (for now). --------
-  # MPM matrix + sanitizer builds are planned as separate jobs — see
-  # PLAN.md M11.8 (MPM matrix as pytest parametrize) and M10.1
-  # (sanitizer binary, currently a local build target, not CI).
+  # -------- Manual: 8h soak. --------
+  # Available via the "Run workflow" button in GitHub Actions; not
+  # wired to any automatic trigger. 8 h × every-day burns runner
+  # minutes faster than the value warrants for a small project, so
+  # the cron was retired — kick it off manually before a release.
   nightly:
-    name: 8h soak
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: 8h soak (manual)
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 540  # 9h: 8h soak + provision overhead
     steps:
@@ -176,18 +181,21 @@ jobs:
             /var/log/apache2/error.log
           retention-days: 14
 
-  # -------- Nightly: LibFuzzer campaigns. --------
-  # Security review MEDIUM #16. Two harnesses run sequentially within
-  # one job: fuzz_cookie (HMAC + GCM cookie parser via _fuzz_stubs.h)
-  # and fuzz_robots (robots.c parser, APR-only, no httpd dependency).
-  # 30 minutes each is enough to surface meaningful coverage on a
-  # mature corpus; longer campaigns belong on a dedicated runner.
-  # On a finding, the harness writes crash-/leak-/slow-unit-/
-  # timeout-<hash> reproducers next to itself in tests/fuzz/, which
-  # the artifact upload picks up.
+  # -------- Manual: LibFuzzer campaigns. --------
+  # Two harnesses run sequentially within one job: fuzz_cookie
+  # (HMAC + GCM cookie parser via _fuzz_stubs.h) and fuzz_robots
+  # (robots.c parser, APR-only, no httpd dependency). 30 minutes
+  # each is enough to surface meaningful coverage on a mature
+  # corpus; longer campaigns belong on a dedicated runner. On a
+  # finding, the harness writes crash-/leak-/slow-unit-/timeout-
+  # <hash> reproducers next to itself in tests/fuzz/, which the
+  # artifact upload picks up.
+  #
+  # Manual-only — kick off via "Run workflow" before merging a
+  # parser change or before a release.
   fuzz-nightly:
-    name: fuzz (cookie + robots, 30m each)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: fuzz (cookie + robots, 30m each, manual)
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
