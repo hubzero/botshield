@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="docs/assets/logo-botshield-header.svg" alt="mod_botshield" width="600">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-botshield-header.svg">
+    <img src="docs/assets/logo-botshield-header-light.svg" alt="mod_botshield" width="600">
+  </picture>
 </p>
 
 <p align="center">
