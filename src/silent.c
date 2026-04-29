@@ -554,24 +554,24 @@ int bs_embedded_bootstrap_handler(request_rec *r,
     }
 
     int difficulty = bs_effective_int(cfg->difficulty, BS_DEFAULT_DIFFICULTY);
-    /* Bootstrap challenges should expire
-     * fast. The previous code reused cookie_ttl (1h default), which
-     * gave attackers a 60-minute window to grind an issued challenge
-     * in parallel — bs_issue_challenge gives them salt+nonce+sig
-     * with no one-time-use binding, so they can solve once and
-     * replay-verify, OR farm a pool of pre-issued challenges to
-     * solve in bulk. 120 s is generous for a real browser to round-
-     * trip the bootstrap → solve → verify sequence (typical PoW
-     * runtime is sub-second; 120 s covers a slow client + 100 ms
-     * RTT × handful of round-trips with comfortable headroom) and
-     * cuts the grind window by 30x.
+    /* Bootstrap challenges expire fast. Two layers of defense
+     * against pre-issued-pool grinding:
      *
-     * TODO (hardening phase): add a nonce SHM table for one-time-use
-     * binding. The verify path would atomic-insert the challenge
-     * nonce into a small open-addressed table; presenting the same
-     * nonce twice → verify rejects. That fully closes the
-     * pre-issued-pool grind class. The 120 s expiry here is the
-     * cheap partial defense pending that. */
+     *   1. 120 s TTL (here). bs_issue_challenge gives the client
+     *      salt+nonce+sig; without a tight expiry an attacker could
+     *      farm a pool of pre-issued challenges and solve in bulk.
+     *      120 s is generous for a real browser to round-trip
+     *      bootstrap → solve → verify (typical PoW runtime sub-
+     *      second; 120 s covers a slow client + 100 ms RTT × a few
+     *      round-trips with headroom) while cutting the grind
+     *      window by 30x relative to the 1 h cookie TTL.
+     *
+     *   2. One-time-use nonce binding (see the verify path at the
+     *      "atomically consume the nonce" block in
+     *      bs_embedded_verify_handler). Each challenge nonce is
+     *      atomic-inserted into bs_shm.nonce_table; presenting the
+     *      same nonce twice → verify rejects. Fully closes the
+     *      replay-multiplier and pool-farming attacks. */
     int ttl = 120;
 
     bs_challenge ch;

@@ -137,7 +137,9 @@ static int bs_ua_is_crawler_candidate(const char *ua)
  * cookie-trigger evaluator and by bs_check_policy below. */
 
 
-/* Request-time E2.1 + E2.2 + E3 + E4 + E6 check. Return values:
+/* Request-time policy check (cookie / env / load / scope / path
+ * triggers + directive block_paths + robots.txt + rate_limits).
+ * Return values:
  *   OK                     — no rule fired; continue to heuristics.
  *   DECLINED               — a trigger with status=pass fired; the
  *                            bs_handler short-circuits to DECLINED
@@ -150,24 +152,29 @@ static int bs_ua_is_crawler_candidate(const char *ua)
  *                            response body.
  *
  * Order:
- *   1. E4 cookie triggers (declaration order; pass accumulates,
+ *   1. Cookie triggers (declaration order; pass accumulates,
  *      first non-pass short-circuits).
- *   2. E6 env-var triggers (declaration order, first match wins).
- *   3. E3 path triggers (declaration order, first match wins).
- *   4. Directive block_paths (declaration order, first match wins).
- *   5. robots.txt Disallow (if configured).
- *   6. Directive rate_limits.
- *   7. robots.txt Crawl-delay (if configured).
+ *   2. Env-var triggers (declaration order, first match wins).
+ *   3. Load triggers (declaration order, first match wins).
+ *   4. Scope triggers — per-Apache-scope BotShieldTrigger entries
+ *      (merged-scope order, first match wins).
+ *   5. Path triggers (declaration order, first match wins).
+ *   6. Directive block_paths (declaration order, first match wins).
+ *   7. robots.txt Disallow (if configured).
+ *   8. Directive rate_limits.
+ *   9. robots.txt Crawl-delay (if configured).
  *
  * Cookie triggers run first so reputation signals always land on
  * the decision log, even when a later rule short-circuits. Env
  * triggers run next — another reputation/policy shape driven by
- * upstream Apache modules (SetEnvIf / ModSecurity / etc.). Path
- * triggers are the most specific per-path intent the operator
- * can write — a trigger on `/.env` should win against any
- * cohort-scoped block-path that also happens to match. Operator
- * directives always get first say in each family after that;
- * robots.txt fills in where the operator hasn't declared
+ * upstream Apache modules (SetEnvIf / ModSecurity / etc.). Load
+ * and scope triggers run before path/block to let global state
+ * (server load, per-vhost or per-<Location> scope) gate path-
+ * specific rules. Path triggers are the most specific per-path
+ * intent the operator can write — a trigger on `/.env` should
+ * win against any cohort-scoped block-path that also happens to
+ * match. Operator directives get first say in each family after
+ * that; robots.txt fills in where the operator hasn't declared
  * explicit rules.
  *
  * Precedence divergences from E3 (strict first-match-wins, no

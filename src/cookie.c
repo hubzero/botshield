@@ -257,12 +257,12 @@ const char *bs_install_verified_cookie(request_rec *r,
  * verify path would HMAC the RECONSTRUCTED canonical and accept any
  * of those surface forms even though the server only ever emits `5`.
  *
- * Per the reviewer it's not exploitable today (HMAC is over the
- * reconstructed bytes, all variants reconstruct identically). But
- * canonical-form unambiguity is cheap to enforce and removes a
- * future-footgun risk: any code that ever uses raw cookie bytes
- * for replay-tracking / fingerprinting would otherwise have a free
- * surface-form bypass.
+ * Not exploitable today (HMAC is over the reconstructed bytes, and
+ * all variants reconstruct identically). But canonical-form
+ * unambiguity is cheap to enforce and removes a future-footgun
+ * risk: any code that ever uses raw cookie bytes for replay-
+ * tracking or fingerprinting would otherwise have a free surface-
+ * form bypass.
  *
  * Strict canonical: ASCII digit string, optional leading `-` only
  * when allow_negative, no whitespace, no `+`, no leading zeros
