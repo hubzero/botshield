@@ -266,7 +266,7 @@ typedef struct bs_server_cfg {
     int                 safeguard_window;
     int                 safeguard_ttl;
     int                 safeguard_capacity;
-    /* (Phase 2) — embedded nonce table sizing. 0 = default. */
+    /* Embedded-bootstrap nonce table sizing. 0 = default. */
     int                 nonce_capacity;
     /* E11 — load-aware throttling. */
     const char         *load_state_file;
@@ -296,7 +296,7 @@ typedef struct bs_server_cfg {
     apr_array_header_t *feedback_triggers;
     /* E11.2 — load triggers. */
     apr_array_header_t *load_triggers;
-    /* E14 (rework) — flag triggers. */
+    /* Flag triggers. */
     apr_array_header_t *flag_triggers;
     apr_array_header_t *session_names;
     /* E2.2 — robots.txt enforcement. */

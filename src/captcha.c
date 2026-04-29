@@ -1343,14 +1343,12 @@ static const char *bs_verify_pending_cookie(request_rec *r,
     if (!bs_from_hex(mac_hex, BS_SIG_BYTES * 2,
                      BS_SIG_BYTES, got)) return "bad mac hex";
     if (!bs_ct_equal(expect, got, BS_SIG_BYTES)) {
-        /* E16 review fix — pending-cookie path missed the secret-
-         * rotation fallback. _bs_verified and the embedded-verify
-         * path both fall back to cfg->secret_secondary on HMAC
-         * mismatch; the M8.1 pending cookie did not. During a
-         * key-rotation reload, any user with an in-flight
-         * pending cookie (TTL 300s) would 403 on captcha submit
-         * even though the secondary key would have validated.
-         * Same secondary-key retry pattern as the cookie verify path. */
+        /* Secondary-key fallback for the pending cookie. During a
+         * BotShieldSecondarySecretFile rotation reload, any user
+         * with an in-flight pending cookie (TTL 300s) would 403 on
+         * captcha submit if we only checked the primary key — even
+         * though the secondary key would validate. Same retry
+         * pattern as the _bs_verified and embedded-verify paths. */
         if (!cfg->derived_keys_set_2) return "sig mismatch";
         bs_hmac_sha256(cfg->derived_hmac_pending_2, 32,
                        (const unsigned char *)canon, strlen(canon),

@@ -113,7 +113,7 @@ const char *bs_score_reasons_joined(apr_pool_t *p,
     return apr_pstrcat(p, "[", apr_array_pstrcat(p, arr, ','), "]", NULL);
 }
 
-/* E14 (rework) — flag-trigger walker.
+/* Flag-trigger walker.
  *
  * Runs in bs_handler after flag bits are known (after
  * bs_flagged_ip_lookup and after the cookie verify decides

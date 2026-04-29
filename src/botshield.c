@@ -246,7 +246,7 @@ static const command_rec bs_cmds[] = {
                  "never runs. Supports application/x-www-form-"
                  "urlencoded and application/json bodies; "
                  "multipart/form-data (file uploads) is out of scope."),
-    /* E17 PoC — silent-tier dispatch flavor. */
+    /* Silent-tier dispatch flavor. */
     AP_INIT_TAKE1("BotShieldSilentMode", bs_set_silent_mode, NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "How to dispatch silent-tier (low-friction) "
@@ -546,7 +546,7 @@ static const command_rec bs_cmds[] = {
                  "workflow: add new rules with mode=observe, watch "
                  "the decision log, flip to enforce when matches "
                  "look right."),
-    /* E14 (rework) — flag-driven trigger family. */
+    /* Flag-driven trigger family. */
     AP_INIT_TAKE_ARGV("BotShieldFlagTrigger",
                  bs_set_flag_trigger, NULL, RSRC_CONF,
                  "Apply an action when a flag bit fires on the IP- "
@@ -1065,13 +1065,12 @@ static int bs_handler(request_rec *r)
     if (have_client_ip) {
         bs_flagged_ip_lookup(client_ip, &ip_flags, scfg_h->ns_id);
     }
-    /* E14 (rework) — score adjustments for IP-side flags now flow
-     * through bs_apply_flag_triggers below (which also covers
-     * cookie-side flags via the union, and emits per-flag
-     * `flag-trigger:<name>` reasons). Keep a coarse 0-weight
-     * "flagged-ip" reason here so operators (and tests) reading
-     * decision logs still see at a glance "this IP is in the
-     * flagged-IP table" without parsing every trigger name. */
+    /* Coarse 0-weight "flagged-ip" reason so operators (and tests)
+     * reading decision logs see at a glance that this IP is in the
+     * flagged-IP table, without having to parse every trigger name.
+     * The actual score adjustments flow through bs_apply_flag_triggers
+     * below — that walker covers both IP-side and cookie-side flags
+     * via the union and emits per-flag `flag-trigger:<name>` reasons. */
     if (ip_flags != 0) {
         bs_score_add(r, 0, 0, "flagged-ip");
     }
@@ -1086,11 +1085,11 @@ static int bs_handler(request_rec *r)
         bs_score_add(r, BS_FIRST_SIGHT_PENALTY, 0, "first-sight-ip");
     }
 
-    /* E14 (rework) — flag-trigger walker. Walks scfg->flag_triggers
-     * over the union of IP-side and cookie-side flag bits, applying
-     * `score add=N` actions via bs_score_add (which SUMs into the
-     * per-request score) and accumulating MAX into a tier_floor that
-     * we apply after bs_decide_tier. Built-in defaults are seeded at
+    /* Flag-trigger walker. Walks scfg->flag_triggers over the union
+     * of IP-side and cookie-side flag bits, applying `score add=N`
+     * actions via bs_score_add (which SUMs into the per-request
+     * score) and accumulating MAX into a tier_floor that we apply
+     * after bs_decide_tier. Built-in defaults are seeded at
      * post_config; operators tune via BotShieldFlagTrigger. */
     apr_uint32_t all_flags = ip_flags
         | (have_prior_rep ? prior_ch.rep.flags : 0);
@@ -1178,14 +1177,15 @@ static int bs_handler(request_rec *r)
     /* E17 — silent-tier dispatch with embedded mode. Default behavior:
      * skip the M7 interstitial, serve the real page (DECLINED), let
      * the wrapper handle verification in the background. Timing model:
-     * "kicks in eventually" — see CHANGELOG E17.
+     * "kicks in eventually" — see CHANGELOG.
      *
-     * E17 fallback: if this client has had N consecutive silent-tier
-     * dispatches without _bs_verified arriving (count tracked via
-     * bs_safeguard_present_count), the wrapper isn't doing its job
-     * (CSP-blocked, no JS, no Worker support, etc.). Bypass the
-     * embedded short-circuit so the M7 form-PoW path runs. M7's own
-     * safeguard threshold catches the case where M7 also fails. */
+     * Embedded → form-PoW fallback: if this client has had N
+     * consecutive silent-tier dispatches without _bs_verified
+     * arriving (count tracked via bs_safeguard_present_count), the
+     * wrapper isn't doing its job (CSP-blocked, no JS, no Worker
+     * support, etc.). Bypass the embedded short-circuit so the
+     * form-PoW path runs. The form-PoW path's own safeguard
+     * threshold catches the case where it also fails. */
     if (tier == BS_TIER_SILENT &&
         cfg->silent_mode == BS_SILENT_MODE_EMBEDDED) {
         int fall_back = 0;
@@ -1245,10 +1245,11 @@ static int bs_handler(request_rec *r)
                     "forgive-capped:%d/%d",
                     forgive, requested));
         }
-        /* E14 (rework) — bs_flag_penalty floor retired. Flag effects
-         * are re-applied at request time via bs_apply_flag_triggers,
-         * so a forgiven-to-zero score on a flagged cookie is simply
-         * re-raised on the next request when the trigger fires. */
+        /* No floor on the forgiven score even on flagged cookies.
+         * Flag effects are re-applied at request time by
+         * bs_apply_flag_triggers, so a forgiven-to-zero score on a
+         * flagged cookie is simply re-raised on the next request
+         * when the trigger fires. */
         int new_score = prior_ch.rep.score - forgive;
         if (new_score < 0) new_score = 0;
         next_rep.score = new_score;
@@ -1281,13 +1282,12 @@ static int bs_handler(request_rec *r)
                   cookie_fully_ok,
                   next_rep.passes_silent, next_rep.passes_form,
                   next_rep.passes_captcha);
-    /* E14 (rework) — difficulty bumps are no longer derived from
-     * flags. The reworked design promoted tier (silent / form /
-     * captcha) to the primary lever via BotShieldFlagTrigger
-     * action=tier_floor; difficulty stays at the operator-configured
-     * BotShieldDifficulty. If a real future need for "harder PoW for
+    /* Difficulty stays at the operator-configured BotShieldDifficulty.
+     * Tier (silent / form / captcha) is the primary lever for "this
+     * signal needs harder verification" via BotShieldFlagTrigger
+     * action=tier_floor. If a real future need for "harder PoW for
      * this signal" surfaces, add a difficulty action verb at that
-     * time; do not pre-emptively reintroduce one. */
+     * time; don't pre-emptively reintroduce one. */
 
     /* Issue a fresh signed challenge; the worker reads it from the page.
      * The next_rep struct carries forgiveness-adjusted rep from any

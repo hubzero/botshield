@@ -812,7 +812,7 @@ static int bs_init_shm_layout(apr_pool_t *pconf, apr_pool_t *ptemp,
                                : (apr_size_t)BS_DEFAULT_SAFEGUARD_SLOTS;
     apr_size_t safeguard_bytes = safeguard_slots
                                * sizeof(bs_safeguard_slot);
-    /* (Phase 2) — nonce table. */
+    /* Embedded-bootstrap nonce table. */
     apr_size_t nonce_slots = (scfg->nonce_capacity > 0)
                            ? (apr_size_t)scfg->nonce_capacity
                            : (apr_size_t)BS_DEFAULT_NONCE_SLOTS;
@@ -934,9 +934,9 @@ static int bs_init_shm_layout(apr_pool_t *pconf, apr_pool_t *ptemp,
     bs_shm.safeguard_table = (bs_safeguard_slot *)
         ((unsigned char *)bs_shm.strike_table + strike_bytes);
     bs_shm.safeguard_capacity = safeguard_slots;
-    /* (Phase 2): nonce table follows safeguard. memset(base,0)
-     * leaves every expires_at == 0 (empty sentinel) — no explicit
-     * zero pass needed. */
+    /* Nonce table follows safeguard. memset(base,0) leaves every
+     * expires_at == 0 (empty sentinel) — no explicit zero pass
+     * needed. */
     bs_shm.nonce_table = (bs_nonce_slot *)
         ((unsigned char *)bs_shm.safeguard_table + safeguard_bytes);
     bs_shm.nonce_capacity = nonce_slots;
@@ -2525,11 +2525,11 @@ const char *bs_set_safeguard_capacity(cmd_parms *cmd,
     return NULL;
 }
 
-/* (Phase 2) — BotShieldEmbeddedNonceCapacity <n>. SHM
- * slot count for the embedded-bootstrap nonce table. Sized to
- * comfortably hold all in-flight bootstrap challenges within their
- * 120-second expiry window: at 100 bootstraps/sec sustained that's
- * 12K nonces; the 32K default has ~60% headroom. */
+/* BotShieldEmbeddedNonceCapacity <n>. SHM slot count for the
+ * embedded-bootstrap nonce table. Sized to comfortably hold all
+ * in-flight bootstrap challenges within their 120-second expiry
+ * window: at 100 bootstraps/sec sustained that's 12K nonces; the
+ * 32K default has ~60% headroom. */
 const char *bs_set_nonce_capacity(cmd_parms *cmd,
                                          void *dconf,
                                          const char *arg)
