@@ -172,7 +172,7 @@ mod_botshield: decision tier=silent outcome=challenged ip=192.0.2.42
 Bump the module's log level to make these visible:
 
 ```apache
-LogLevel mod_botshield:info
+LogLevel botshield_module:info
 ```
 
 The `reason` field is the comma-joined reason names captured by
