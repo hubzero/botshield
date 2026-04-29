@@ -402,7 +402,9 @@ typedef struct {
     /* E10 safeguard table */
     bs_safeguard_slot   *safeguard_table;
     apr_size_t           safeguard_capacity;
-    /* phase 2 nonce table */
+    /* Embedded-bootstrap nonce table — one-time-use binding for
+     * silent-tier challenges; insert at issue, atomic-consume at
+     * verify, second presentation rejected. */
     bs_nonce_slot       *nonce_table;
     apr_size_t           nonce_capacity;
 } bs_shm_runtime;

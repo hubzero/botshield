@@ -751,10 +751,8 @@ static int bs_is_asset_uri(const char *uri)
 
 
 
-/* --- Request handler ---
- *
- * Registered at APR_HOOK_FIRST so we run before the default static-file
- * handler. */
+/* --- Request-handler helpers --- */
+
 /* Challenge safeguard: before issuing a challenge, check whether
  * this IP has been presented N times within the window without
  * solving. If so, flip to a pass-through (return DECLINED) with
@@ -882,6 +880,31 @@ static int bs_route_module_endpoint(request_rec *r, bs_dir_cfg *cfg)
     return OK;
 }
 
+/* --- Request handler ---
+ *
+ * Registered at APR_HOOK_FIRST so we run before Apache's default
+ * static-file handler. The body is a top-down state machine; each
+ * step either short-circuits with a decision_log line or falls
+ * through to the next:
+ *
+ *   1. Module-config / initial-req gate (cheap drops).
+ *   2. Module-owned endpoint dispatch — /captcha-verify, /metrics,
+ *      /embedded*, /form-widget.js, /policy-status. Returns Apache
+ *      rv directly; never reaches the tier dispatch below.
+ *   3. Debug + asset short-circuits + secret-presence sanity.
+ *   4. Cookie verify — bs_verify_cookie + safeguard-clear-on-solve
+ *      + bs-cookie-state note for cookie-trigger predicates.
+ *   5. Policy check — bs_check_policy (cookie/env/load/scope/path
+ *      triggers + block_paths + robots + rate_limits). DECLINED or
+ *      HTTP_* short-circuits return here.
+ *   6. Heuristics + flagged-IP + first-sight + flag-trigger walker
+ *      → effective score, score_tier, tier_floor.
+ *   7. Pass-tier short-circuit + app_claims emission.
+ *   8. Bloom-add + safeguard presentation accounting.
+ *   9. Embedded silent-tier dispatch with embedded-→-form-PoW
+ *      fallback when the wrapper has had its chances.
+ *   10. Build next_rep (forgiveness + cap), issue challenge, render
+ *       interstitial (silent / form-PoW / captcha widget). */
 static int bs_handler(request_rec *r)
 {
     bs_dir_cfg *cfg = ap_get_module_config(r->per_dir_config,
@@ -1211,9 +1234,14 @@ static int bs_handler(request_rec *r)
         bs_score_add(r, 0, 0, "embedded-fallback-m7");
     }
 
-    /* Decide whether this challenge will be served as the M7 silent-tier
-     * auto-submit splash or as the form-PoW interstitial. Captcha tier
-     * (M8) still stubs to form until that ships. */
+    /* `issue_auto` picks the form-PoW interstitial style: the
+     * silent-tier auto-submit splash (issue_auto=1) for low-friction
+     * challenges, the visible form interstitial (issue_auto=0) for
+     * the harder tier. Captcha tier is rendered separately by
+     * bs_render_challenge_page when cfg->captcha_provider is set;
+     * if the operator selected captcha tier without configuring a
+     * provider, render falls through to the form-PoW interstitial
+     * with reason "captcha_fallback" on the decision log. */
     int issue_auto = (tier == BS_TIER_SILENT);
 
     /* Build the rep state to carry into the new cookie. Forgiveness +
