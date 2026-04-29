@@ -29,6 +29,13 @@ __pycache__/
 # Unicode DB cache. Local working state, not repo content.
 .hypothesis/
 
+# Claude Code (CLI tool) workspace settings — per-user pre-approved
+# command patterns built up from ad-hoc explorations, not project
+# content meant for the team. settings.local.json is per-user by
+# convention; settings.json could in principle be shared, but this
+# repo doesn't curate it, so ignore the whole directory.
+.claude/
+
 # pytest-playwright screenshot/video artifacts — gitignored; CI
 # uploads as artifacts on failure.
 tests/test-results/
