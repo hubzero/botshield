@@ -1,16 +1,19 @@
 # mod_botshield test suite
 
-Pytest-based regression and acceptance tests for the module.
+Pytest-based regression and acceptance tests, plus fuzz and
+benchmark suites for the Apache module.
 
 ## Layout
 
 ```
 tests/
-├── run                   # dispatcher — runs pytest
+├── run                   # dispatcher — runs pytest with sane defaults
 ├── pyproject.toml        # pytest config + editable-install metadata
 ├── requirements-test.txt # pinned deps (installed into tests/.venv)
 ├── conftest.py           # pytest fixtures (apache, fresh_ip, log_slice, …)
-├── botshield_test/       # framework helpers
+├── README.md             # (this file)
+│
+├── botshield_test/       # framework helpers (importable Python package)
 │   ├── apache.py         # reload/restart + transactional config_override
 │   ├── client.py         # httpx wrapper with bs-specific defaults
 │   ├── config.py         # paths + constants, env-var overrides
@@ -21,99 +24,74 @@ tests/
 │   ├── logs.py           # log_slice + structured decision parser + validator
 │   ├── metrics.py        # /metrics snapshot + delta
 │   └── providers.py      # per-captcha-provider specs (quirks as data)
-├── pytests/              # the test files themselves
-│   └── test_soak.py      # soak runner — @slow + @serial pytest
-├── fuzz/                 # LibFuzzer harness (M11.8)
-│   ├── fuzz_cookie.c     # harness for bs_verify_cookie
+│
+├── pytests/              # 55 test files (test_*.py); assets/axe.min.js for a11y
+│   ├── test_acceptance_*.py     # end-to-end user journeys
+│   ├── test_app_*.py            # X-BotShield-Feedback / -Claims (E5/E8.2)
+│   ├── test_browser_a11y.py     # Playwright accessibility smoke
+│   ├── test_capacity_metrics.py # SHM headroom (E13.1)
+│   ├── test_captcha_*.py        # M8 + M8.1 verify endpoint
+│   ├── test_cookie_*.py         # cookie format + verify + property tests
+│   ├── test_form_captcha.py     # E18 inline form captcha
+│   ├── test_load_*.py           # E11 load-aware throttling
+│   ├── test_robots.py           # E2.2 RFC 9309 + Crawl-delay
+│   ├── test_safeguard.py        # E10 anti-loop
+│   ├── test_secret_rotation.py  # E16
+│   ├── test_shadow_mode.py      # E12
+│   ├── test_soak.py             # @slow + @serial soak runner
+│   ├── test_triggers.py         # E3/E4/E6/E7/E14 trigger families
+│   ├── test_namespace.py        # E13 multi-vhost isolation
+│   └── …                        # plus ~30 more
+│
+├── site/                 # dev-vhost docroot (committed; 4 minimum fixtures)
+│   ├── index.html        # pass-through baseline (no __bsChallenge marker)
+│   ├── bs-custom-help.html
+│   ├── bs-custom-page.html
+│   └── assets/logos/01-guardian.svg
+│
+├── fuzz/                 # LibFuzzer harnesses (M11.8)
 │   ├── _fuzz_stubs.h     # minimal Apache runtime stubs
+│   ├── fuzz_cookie.c     # harness for bs_verify_cookie
+│   ├── fuzz_robots.c     # harness for the robots.txt parser
 │   ├── seed_corpus.py    # populates corpus/ with real cookies
-│   └── run.sh            # `run.sh [seconds]` — smokes in 30s
-├── setup/
-│   ├── provision.sh      # idempotent one-shot box setup (creates .venv)
-│   └── reset-state.sh    # between-run state-file wipe
+│   ├── seeds-robots/     # checked-in robots.txt seed corpus
+│   └── run.sh            # `run.sh --target {cookie|robots} <seconds>`
+│
+├── bench/                # benchmark suite (out of pytest)
+│   ├── run-bench.sh      # wrk saturation sweep across 12 scenarios
+│   ├── run-rate-bench.sh # oha fixed-rate sweep at 1k/5k/10k RPS
+│   ├── scenarios/        # 12 vhost configs from baseline → kitchen-sink
+│   ├── bench.html        # tiny static target served by the bench docroot
+│   ├── bench-robots.txt  # robots.txt for the bench scenarios
+│   ├── wrk-cookie.lua    # cookie attacher for the cookied scenario
+│   └── scripts/          # mint_cookie.py, helpers
+│
+└── setup/
+    ├── provision.sh         # idempotent one-shot box setup (creates .venv)
+    ├── reset-state.sh       # between-run state-file wipe
+    └── sudoers.d.example    # template for scoped passwordless apachectl
 ```
 
 ## Prerequisites
 
 The target is **Ubuntu 24.04** on a dev box with sudo. Debian 12 and
-Ubuntu 22.04 work identically. The setup script installs what's needed:
+Ubuntu 22.04 work identically. The setup script installs everything:
 
 - `apache2`, `apache2-dev`
 - `libssl-dev`, `libcurl4-openssl-dev`, `libjson-c-dev`, `libpcre2-dev`
 - `python3`, `python3-venv` (pytest framework lives in `tests/.venv`)
 - `curl`, `openssl`
+- Chromium runtime libs (libnss3, libatk, libxkbcommon, …) for
+  Playwright
 
-Pinned Python deps: `httpx`, `pytest`, `pytest-xdist`,
-`pytest-timeout`, `pytest-playwright`, `playwright`,
+Pinned Python deps (`requirements-test.txt`): `httpx`, `pytest`,
+`pytest-xdist`, `pytest-timeout`, `pytest-playwright`, `playwright`,
 `pytest-rerunfailures`, `pytest-html`, `hypothesis`,
-`prometheus_client` (see `requirements-test.txt`). `provision.sh`
-creates `tests/.venv`, installs them, pulls the Chromium binary
-into `~/.cache/ms-playwright`, and apt-installs Chromium's
-shared-lib dependencies (libnss3, libatk, libxkbcommon, etc.).
+`prometheus_client`. `provision.sh` creates `tests/.venv`, installs
+them, pulls Chromium into `~/.cache/ms-playwright`, and apt-installs
+the matching shared-lib dependencies.
 
-## Reports (M11.7)
-
-Every pytest invocation writes two reports to `tests/reports/`:
-
-- `pytests-<phase>.xml` — JUnit XML, picked up by GitHub Actions'
-  native test-summary view.
-- `pytests-<phase>.html` — self-contained HTML, downloadable as a
-  CI artifact for triage when a test fails.
-
-`<phase>` is `not_serial` / `serial` under `--parallel`, or `all`
-otherwise. The directory is gitignored.
-
-## Rerun-on-flake
-
-`@pytest.mark.live_network` tests automatically get 2 retries via
-`pytest-rerunfailures`. Applied through a collection hook in
-`conftest.py` rather than per-test decorators — new live_network
-tests inherit the policy automatically. Non-live tests have zero
-retries; flake there is a bug to fix, not to mask.
-
-## Fuzzing (M11.8)
-
-Coverage-guided fuzz target for `bs_verify_cookie`. Not in the
-default pytest suite — fuzzing wants minutes-to-hours budgets, not
-per-PR budgets. Run manually:
-
-```bash
-sudo apt install -y clang libfuzzer-18-dev    # one-time
-make fuzz                                      # builds tests/fuzz/fuzz_cookie
-tests/fuzz/run.sh 30                           # 30-second smoke
-tests/fuzz/run.sh 3600 -jobs=4                 # 1-hour parallel campaign
-```
-
-The harness is ASan + UBSan + libFuzzer. A crash, UB report, or
-leak produces a `crash-<hash>` / `leak-<hash>` file next to the
-binary — these are the minimized reproducer inputs.
-
-The hypothesis-driven byte-tamper test in
-`pytests/test_cookie_property.py` covers the same parser at 50
-exec/sec via HTTP; LibFuzzer here covers it at 200k+ exec/sec
-in-process with coverage feedback. Complementary, not redundant:
-HTTP hypothesis catches end-to-end issues (cookies the module
-accepts it shouldn't); LibFuzzer catches memory safety / UB bugs
-in the parsing C.
-
-## Markers
-
-- `@pytest.mark.serial` — mutates shared Apache state (config swap,
-  SHM restart). Runs outside the xdist pool.
-- `@pytest.mark.slow` — multi-second wait (e.g. the 40-second
-  watchdog tick). Excluded by default; opt in with `tests/run --slow`.
-- `@pytest.mark.live_network` — requires reachable third-party
-  captcha siteverify (Cloudflare, Google, hCaptcha, Friendly,
-  GeeTest). Skips if unreachable rather than failing.
-- `@pytest.mark.live_provider` — requires a real provider token
-  passed via env var (e.g. `BS_RECAPTCHA_V3_TOKEN`). Skips without.
-- `@pytest.mark.acceptance` — end-to-end user-journey test.
-- `@pytest.mark.browser` — runs in a real headless Chromium via
-  pytest-playwright. Catches regressions no request library can see
-  (interstitial JS execution, cookie attribute enforcement,
-  auto-submit form wiring).
-
-RHEL-family isn't scripted yet but the dependency list maps cleanly:
+RHEL-family isn't scripted but the dependency list maps cleanly:
 `httpd-devel`, `openssl-devel`, `libcurl-devel`, `json-c-devel`,
 `pcre2-devel`, `python3`.
 
@@ -125,29 +103,41 @@ From a fresh box with the repo checked out:
 sudo tests/setup/provision.sh
 ```
 
-This script is **idempotent** — safe to re-run. On first run it:
+The script is **idempotent** — safe to re-run. On first run it:
 
+- Refuses to proceed if the repo path is group/world-writable
+  (preempts a make-install hijack on shared boxes).
 - Installs apt packages.
 - Builds the module (`make`) and installs it
   (`/usr/lib/apache2/modules/mod_botshield.so`).
 - Creates a self-signed cert at `/etc/ssl/botshield-dev/` (for the
   HTTPS dev vhost on localhost).
 - Generates `/etc/botshield/secret` (HMAC key, 32 bytes hex) if it
-  doesn't exist, `chmod 600`.
-- Writes provider dummy secrets at `/etc/botshield/*-secret` for each
-  supported provider (Turnstile/hCaptcha/reCAPTCHA v2/reCAPTCHA v3/
-  Friendly/GeeTest). The published dummies go in verbatim; the ones
-  without public dummies get placeholder strings that are later
-  overridden by env vars.
-- Creates `/var/lib/botshield/` owned by `www-data` for the state file.
+  doesn't exist, `chmod 600`. Same for the per-provider dummy secret
+  files (`/etc/botshield/{turnstile,hcaptcha,recaptcha-v2,recaptcha-v3,
+  friendly,geetest}-secret`) and the shared
+  `app-integration-secret` for E5/E8.2.
+- Creates `/var/lib/botshield/` owned by `www-data` for the state
+  file, plus seeds `/var/lib/botshield/bots/` from `apache/bots/*.txt`
+  (Googlebot / Bingbot / Applebot CIDR ranges).
+- Stages `/etc/botshield/test-robots/` (writable by the test user,
+  readable by Apache — works around `PrivateTmp=true` for E2.2 tests)
+  and `/etc/botshield/load.state.test` (initial value `normal`, for
+  E11.1 tests).
 - Installs `apache/botshield-dev.conf` as the enabled site, enables
-  `mod_botshield`, `mod_status`, `mod_remoteip`, `mod_ssl`.
-- Selects `mpm_event` as the default MPM.
+  `mod_botshield`, `mod_status`, `mod_remoteip`, `mod_ssl`,
+  `mod_headers`. Selects `mpm_event` as the default MPM.
 - `apachectl configtest` and reloads.
 
 If you later modify the module source, `make && sudo make install &&
 sudo systemctl reload apache2` is enough — you don't need to re-run
 `provision.sh`.
+
+`tests/setup/sudoers.d.example` is a template for granting the
+test user passwordless `apachectl reload` / `systemctl restart
+apache2` so the test runner doesn't prompt mid-run. Operator-
+optional; the suite works without it (sudo will prompt once per
+boot).
 
 ## Running tests
 
@@ -175,30 +165,69 @@ You can also invoke pytest directly — useful for iterating on one
 test with pytest's full traceback + `--pdb`:
 
 ```bash
-tests/.venv/bin/pytest tests/pytests/test_cookie_hmac.py -v
+tests/.venv/bin/pytest tests/pytests/test_cookie_gcm.py -v
 tests/.venv/bin/pytest tests/pytests/ -k "captcha and not rejected"
 tests/.venv/bin/pytest tests/pytests/ -m "not serial" -n auto
 ```
 
+## Markers
+
+Defined in `pyproject.toml`; consumed by `tests/run` and the GitHub
+Actions workflow.
+
+- `@pytest.mark.serial` — mutates shared Apache state (config swap,
+  SHM restart). Runs outside the xdist pool.
+- `@pytest.mark.slow` — multi-second wait (e.g. the 40-second
+  watchdog tick). Excluded by default; opt in with `tests/run --slow`.
+- `@pytest.mark.live_network` — requires reachable third-party
+  captcha siteverify (Cloudflare, Google, hCaptcha, Friendly,
+  GeeTest). Skips if unreachable rather than failing. Auto-retries
+  twice via `pytest-rerunfailures` (applied through a collection
+  hook in `conftest.py` — new live_network tests inherit the policy
+  automatically).
+- `@pytest.mark.live_provider` — requires a real provider secret
+  via env var. Skips without the env var.
+- `@pytest.mark.acceptance` — end-to-end user-journey test.
+- `@pytest.mark.browser` — runs in a real headless Chromium via
+  pytest-playwright. Catches regressions no request library can see
+  (interstitial JS execution, cookie attribute enforcement,
+  auto-submit form wiring).
+
+## Reports
+
+Every pytest invocation writes two reports to `tests/reports/`:
+
+- `pytests-<phase>.xml` — JUnit XML, picked up by GitHub Actions'
+  native test-summary view.
+- `pytests-<phase>.html` — self-contained HTML, downloadable as a
+  CI artifact for triage when a test fails.
+
+`<phase>` is `not_serial` / `serial` under `--parallel`, or `all`
+otherwise. The directory is gitignored.
+
 ## Provider secrets
 
-Three providers don't publish iconic always-pass keys:
+Three providers don't publish iconic always-pass keys, so the
+matching tests skip unless an operator supplies real credentials:
 
-| Provider | Env var | Site key source |
+| Provider | Env vars | Source |
 |---|---|---|
-| Friendly Captcha | `BS_FRIENDLY_SECRET`, `BS_FRIENDLY_SITEKEY` | [friendlycaptcha.com](https://friendlycaptcha.com) free tier |
-| GeeTest v4 | `BS_GEETEST_KEY`, `BS_GEETEST_ID` | [dashboard.geetest.com](https://dashboard.geetest.com) |
-| reCAPTCHA v3 (real score) | `BS_RECAPTCHA_V3_SECRET`, `BS_RECAPTCHA_V3_SITEKEY` | [reCAPTCHA admin](https://www.google.com/recaptcha/admin) |
+| Friendly Captcha | `BS_FRIENDLY_SECRET`, `BS_FRIENDLY_SITEKEY`, `BS_FRIENDLY_SOLUTION` | [friendlycaptcha.com](https://friendlycaptcha.com) free tier |
+| GeeTest v4 | `BS_GEETEST_KEY`, `BS_GEETEST_ID`, `BS_GEETEST_TOKEN` | [dashboard.geetest.com](https://dashboard.geetest.com) |
+| reCAPTCHA v3 (real score) | `BS_RECAPTCHA_V3_SECRET`, `BS_RECAPTCHA_V3_SITEKEY`, `BS_RECAPTCHA_V3_TOKEN` | [reCAPTCHA admin](https://www.google.com/recaptcha/admin) |
 
 Tests that need these print `SKIP: <reason>` if the env var isn't set,
-so the suite passes without them. To run those tests end-to-end, sign
-up for the free tier, then:
+so the suite passes without them. To run those tests end-to-end:
 
 ```bash
 export BS_FRIENDLY_SECRET="..."
 export BS_FRIENDLY_SITEKEY="..."
+export BS_FRIENDLY_SOLUTION="..."
 tests/run --match friendly
 ```
+
+CI passes the `_TOKEN` / `_SOLUTION` flavors as repo secrets to the
+test-fast job (see `.github/workflows/ci.yml`).
 
 Published provider dummies (committed in `provision.sh`):
 
@@ -207,6 +236,59 @@ Published provider dummies (committed in `provision.sh`):
 | Turnstile | `1x00000000000000000000AA` | `1x0000000000000000000000000000000AA` |
 | hCaptcha | `10000000-ffff-ffff-ffff-000000000001` | `0x0000000000000000000000000000000000000000` |
 | reCAPTCHA v2 | `6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI` | `6LeIxAcTAAAAAGG-vFI1TnRWxMZNFuojJ4WifJWe` |
+
+## Fuzzing
+
+Two coverage-guided LibFuzzer harnesses, each ASan + UBSan +
+libFuzzer. Not in the default pytest suite — fuzzing wants minutes-
+to-hours budgets, not per-PR budgets. Run manually:
+
+```bash
+sudo apt install -y clang libclang-rt-dev    # one-time
+make fuzz                                     # builds tests/fuzz/fuzz_cookie
+make fuzz-robots                              # builds tests/fuzz/fuzz_robots
+
+tests/fuzz/run.sh --target cookie 30          # 30-second smoke
+tests/fuzz/run.sh --target cookie 3600        # 1-hour campaign
+tests/fuzz/run.sh --target robots 1800        # 30-minute robots-parser campaign
+```
+
+A crash, UB report, or leak produces a `crash-<hash>` /
+`leak-<hash>` / `timeout-<hash>` / `slow-unit-<hash>` file next to
+the binary — those are the minimized reproducer inputs. The
+`workflow_dispatch`-only `fuzz-nightly` CI job runs both harnesses
+sequentially (30 m each) and uploads artifacts on a finding.
+
+The hypothesis-driven byte-tamper test in
+`pytests/test_cookie_property.py` covers the cookie parser at ~50
+exec/sec via HTTP; LibFuzzer here covers it at 200k+ exec/sec
+in-process with coverage feedback. Complementary, not redundant —
+HTTP hypothesis catches end-to-end issues (cookies the module
+accepts it shouldn't); LibFuzzer catches memory safety / UB bugs
+in the parsing C.
+
+## Benchmarks
+
+Two complementary suites under `tests/bench/`. Out of the pytest
+runner — these are operator-driven measurements, not pass/fail
+gates.
+
+```bash
+tests/bench/run-bench.sh             # wrk saturation: 12 scenarios × 30s
+tests/bench/run-rate-bench.sh        # oha fixed-rate: 1k/5k/10k RPS sweep
+```
+
+`run-bench.sh` answers "what's the capacity ceiling?" — useful for
+sizing but produces deltas amplified by the cheap static-file
+denominator. `run-rate-bench.sh` answers "at production-realistic
+load, how much latency does BotShield add?" — better proxy for
+real-world cost. Both write JSON results under
+`tests/bench/results/<timestamp>-…/`. The directory is gitignored
+and growing — wipe periodically with `rm -rf tests/bench/results/`
+if it gets unwieldy.
+
+See `docs-src/deployment.md` "Performance characteristics" for the
+canonical numbers.
 
 ## What tests must not assume
 
@@ -218,15 +300,17 @@ Published provider dummies (committed in `provision.sh`):
   persist in the state file. Use `rate_slot_ip` (a fresh, un-flagged
   IP per call) or request the `clean_state` fixture to wipe the
   state file + restart.
-- **Fresh Bloom filter.** Same reason. Use `fresh_ip` — the allocator
-  picks from `100.64.0.0/10` (CGN), which no earlier run has touched.
+- **Fresh Bloom filter.** Same reason. Use `fresh_ip` — the
+  allocator picks from `100.64.0.0/10` (CGN), which no earlier run
+  has touched.
 - **Log position.** Use the `log_slice` fixture to extract only this
   test's lines from the botshield error log.
 
 ## Between-run state reset
 
-Most tests use deltas and don't need a reset. For tests that DO need
-a known-clean SHM + state file, request the `clean_state` fixture:
+Most tests use deltas and don't need a reset. For tests that DO
+need a known-clean SHM + state file, request the `clean_state`
+fixture:
 
 ```python
 def test_fresh_setup(clean_state, fresh_ip):
@@ -282,5 +366,5 @@ def test_some_path_emits_challenged(fresh_ip, log_slice):
 ```
 
 Markers (declared at module level via `pytestmark =
-pytest.mark.serial` or per-test via `@pytest.mark.live_network`) are
-documented in the "Markers" section above.
+pytest.mark.serial` or per-test via `@pytest.mark.live_network`)
+are documented in the "Markers" section above.
