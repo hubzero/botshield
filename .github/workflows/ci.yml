@@ -44,7 +44,7 @@ jobs:
       BS_FRIENDLY_SOLUTION:  ${{ secrets.BS_FRIENDLY_SOLUTION }}
       BS_GEETEST_TOKEN:      ${{ secrets.BS_GEETEST_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Provision
         run: sudo tests/setup/provision.sh
@@ -90,7 +90,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # Cache the Chromium binary across runs. provision.sh will
       # `playwright install chromium` but it becomes a no-op when
@@ -144,7 +144,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -177,7 +177,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 540  # 9h: 8h soak + provision overhead
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Provision
         run: sudo tests/setup/provision.sh
@@ -232,7 +232,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install clang + libfuzzer
         run: |
