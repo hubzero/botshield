@@ -3,9 +3,7 @@
 </p>
 
 <p align="center">
-  <em>Low-latency bot detection for Apache 2.4. Cookieless requests get
-  a self-contained proof-of-work interstitial; verified visitors receive
-  a short-lived cookie and pass through on their next request.</em>
+  <strong>Disciplined Judgment. Proportionate Response.</strong>
 </p>
 
 <p align="center">
@@ -18,6 +16,10 @@
 </p>
 
 # mod_botshield
+
+Low-latency bot detection for Apache 2.4. Cookieless requests get a
+self-contained proof-of-work interstitial; verified visitors receive a
+short-lived cookie and pass through on their next request.
 
 **Status: beta.** Stable shape, exercising in dev; not yet a production
 deployment. Architecture, threat model, and per-extension design notes
