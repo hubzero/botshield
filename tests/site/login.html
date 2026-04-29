@@ -1,3 +1,45 @@
 <!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>Login — mod_botshield test docroot</title></head>
-<body><h1>Login</h1><p>Test fixture page for mod_botshield's pytest suite.</p></body></html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in &middot; Crestline Research Library</title>
+<link rel="stylesheet" href="/assets/style.css">
+<link rel="icon" href="/assets/logo.svg" type="image/svg+xml">
+</head>
+<body>
+<header class="site-header">
+  <a class="brand" href="/"><img src="/assets/logo.svg" alt="" width="32" height="32"> Crestline Research Library</a>
+  <nav>
+    <a href="/">Home</a>
+    <a href="/about.html">About</a>
+    <a href="/search.html">Search</a>
+    <a href="/login.html" aria-current="page">Sign in</a>
+  </nav>
+</header>
+<main class="container narrow">
+  <h1>Sign in</h1>
+  <p class="lede">Members-only materials require a library account.</p>
+  <form class="card form" method="post" action="/login.html" autocomplete="on">
+    <label>
+      <span>Username</span>
+      <input type="text" name="username" autocomplete="username" required>
+    </label>
+    <label>
+      <span>Password</span>
+      <input type="password" name="password" autocomplete="current-password" required>
+    </label>
+    <!-- Honeypot: real users don't see this field; bots autofill it. -->
+    <label class="hp" aria-hidden="true">
+      <span>Email (leave blank)</span>
+      <input type="text" name="email_confirm" tabindex="-1" autocomplete="off">
+    </label>
+    <button type="submit" class="btn primary">Sign in</button>
+    <p class="muted"><a href="/">Back to home</a></p>
+  </form>
+</main>
+<footer class="site-footer">
+  <small>Dev environment &middot; served by Apache on <code>https://localhost</code></small>
+</footer>
+</body>
+</html>

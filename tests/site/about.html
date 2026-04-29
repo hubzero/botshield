@@ -1,3 +1,38 @@
 <!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>About — mod_botshield test docroot</title></head>
-<body><h1>About</h1><p>Test fixture page for mod_botshield's pytest suite.</p></body></html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>About &middot; Crestline Research Library</title>
+<link rel="stylesheet" href="/assets/style.css">
+<link rel="icon" href="/assets/logo.svg" type="image/svg+xml">
+</head>
+<body>
+<header class="site-header">
+  <a class="brand" href="/"><img src="/assets/logo.svg" alt="" width="32" height="32"> Crestline Research Library</a>
+  <nav>
+    <a href="/">Home</a>
+    <a href="/about.html" aria-current="page">About</a>
+    <a href="/search.html">Search</a>
+    <a href="/login.html">Sign in</a>
+  </nav>
+</header>
+<main class="container prose">
+  <h1>About this site</h1>
+  <p>Crestline is a fictional research library used as the dev playground for <code>mod_botshield</code>, an Apache 2 module that issues tiered proof-of-work and captcha challenges to suspected bots.</p>
+  <h2>What lives where</h2>
+  <ul>
+    <li><strong>/</strong> &mdash; this marketing-style home page, cheap to serve, should almost never trip a challenge.</li>
+    <li><strong>/search.html</strong> &mdash; form that scrapers love. Good target for rate-limit penalties.</li>
+    <li><strong>/login.html</strong> &mdash; credential-stuffing target. Deserves the aggressive tier even for first-time visitors.</li>
+    <li><strong>/api/*</strong> &mdash; JSON endpoints. Most bot traffic we see goes here.</li>
+    <li><strong>/assets/*</strong> &mdash; static assets. Must never be challenged or the page breaks.</li>
+  </ul>
+  <h2>Why a dev site at all</h2>
+  <p>We need real HTTP requests flowing through Apache so we can watch the module's decisions under representative traffic &mdash; cookie state, rewrite interaction, output filtering, the whole cycle. Unit tests can't cover that.</p>
+</main>
+<footer class="site-footer">
+  <small>Dev environment &middot; served by Apache on <code>https://localhost</code></small>
+</footer>
+</body>
+</html>

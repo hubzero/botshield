@@ -83,7 +83,7 @@ make install >/dev/null
 
 printf "LoadModule botshield_module /usr/lib/apache2/modules/mod_botshield.so\n" \
   > /etc/apache2/mods-available/botshield.load
-a2enmod botshield status remoteip ssl headers >/dev/null
+a2enmod botshield status remoteip ssl headers rewrite >/dev/null
 # Ensure threaded MPM by default
 if [[ ! -e /etc/apache2/mods-enabled/mpm_event.load ]]; then
   a2dismod mpm_prefork mpm_worker 2>/dev/null || true
