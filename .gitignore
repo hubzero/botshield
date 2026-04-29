@@ -28,12 +28,11 @@ __pycache__/
 # Unicode DB cache. Local working state, not repo content.
 .hypothesis/
 
-# Claude Code (CLI tool) workspace settings — per-user pre-approved
-# command patterns built up from ad-hoc explorations, not project
-# content meant for the team. settings.local.json is per-user by
-# convention; settings.json could in principle be shared, but this
-# repo doesn't curate it, so ignore the whole directory.
+# AI-tool workspace markers / settings — per-user state from
+# Claude Code, OpenAI Codex, etc. Not project content meant for
+# the team.
 .claude/
+.codex
 
 # Playwright MCP server scratch directory — DOM snapshots and
 # console-log dumps from any browser-automation session that ran
