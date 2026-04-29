@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ page_title }} | {{ site_name }}</title>
+  <meta name="description" content="{{ page_summary }}">
+  <link rel="stylesheet" href="{{ assets_href }}">
+</head>
+<body class="site-doc">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <div class="page-shell">
+    <header class="site-header site-header--compact">
+      <a class="brand" href="{{ home_href }}">
+        <img class="brand__icon" src="{{ logo_href }}" alt="" aria-hidden="true">
+        <span class="brand__wordmark" aria-label="BotShield">
+          <span class="brand__wordmark-soft">Bot</span><span class="brand__wordmark-strong">Shield</span>
+        </span>
+      </a>
+      <nav class="top-nav" aria-label="Primary">
+        <a class="top-nav__link" href="{{ github_href }}">GitHub</a>
+        <a class="top-nav__link" href="{{ docs_href }}">Docs</a>
+        <a class="top-nav__link" href="{{ download_href }}">Download</a>
+      </nav>
+    </header>
+
+    <main id="main-content" class="docs-layout" tabindex="-1">
+      <aside class="docs-sidebar">
+        <p class="docs-sidebar__eyebrow">Docs</p>
+        <nav class="docs-nav" aria-label="Documentation">
+{{ docs_nav }}
+        </nav>
+      </aside>
+
+      <article class="docs-article">
+        <header class="docs-article__header">
+          <p class="eyebrow">Documentation</p>
+          <h1>{{ page_title }}</h1>
+          <p class="docs-article__summary">{{ page_summary }}</p>
+          <p class="docs-article__source">{{ source_title }}</p>
+        </header>
+{{ toc }}
+        <div class="prose">
+{{ content }}
+        </div>
+      </article>
+    </main>
+  </div>
+</body>
+</html>
