@@ -9,36 +9,33 @@
 #
 # This script answers "at a realistic production load, how much
 # latency does BotShield add?" by issuing a fixed RPS through
-# vegeta (which corrects for coordinated omission) for each
-# scenario. The scenarios are deliberately run well below the
-# saturation point measured by run-bench.sh; if the chosen rate
-# is achievable in the baseline, any latency growth in the
-# BotShield-on scenarios is real per-request work, not contention
-# noise.
+# oha (Rust HTTP load tool) for each scenario. The scenarios are
+# deliberately run well below the saturation point measured by
+# run-bench.sh; if the chosen rate is achievable in the baseline,
+# any latency growth in the BotShield-on scenarios is real per-
+# request work, not contention noise.
 #
-# Vegeta's coordinated-omission-corrected latency distribution
-# (p50 / p95 / p99 / p99.9) is the canonical surface. The script
-# also surfaces success rate; below 99.9% means the rate is too
-# high for that scenario and the latencies are unreliable.
+# oha was picked after vegeta, wrk2, and h2load all failed in
+# this environment (vegeta: connection-pool churn against the
+# WSL2 ephemeral-port ceiling; wrk2: empty histograms / hung
+# connections; h2load: HTTP/2-first design throttles HTTP/1.1
+# request scheduling). oha holds a fixed -c connection pool,
+# paces requests at -q QPS per pool, and reports clean p50/p95/
+# p99/p99.9 in JSON.
 #
 # Usage:
-#   tests/bench/run-rate-bench.sh                       # rates 100, 250
-#   tests/bench/run-rate-bench.sh --rate 250            # single rate
-#   tests/bench/run-rate-bench.sh --rate 100,250,500    # multiple rates
+#   tests/bench/run-rate-bench.sh                       # rates 1000, 5000, 10000
+#   tests/bench/run-rate-bench.sh --rate 1000           # single rate
+#   tests/bench/run-rate-bench.sh --rate 1000,5000      # multiple rates
 #   tests/bench/run-rate-bench.sh --duration 60         # longer run
-#   tests/bench/run-rate-bench.sh --rate 1000 --max-workers 1000
-#                                                       # production-class
-#                                                       # box: raise both
+#   tests/bench/run-rate-bench.sh --connections 100     # bigger conn pool
 #
 # Output: tests/bench/results/<timestamp>-rate-<r>/<scenario>.json
 #         + a stdout summary table per rate.
 #
-# Dev-box ceiling: a stock Apache event-MPM (150 workers) can't
-# sustain target rates above ~400/s in vegeta's open-loop mode.
-# The summary flags scenarios where vegeta's achieved rate fell
-# below 95% of target, since their reported latencies include
-# worker-queue wait. For higher rates, tune mpm_event and bump
-# --max-workers in tandem.
+# The summary flags scenarios where oha's achieved rate fell
+# below 95% of target — those latencies include scheduling wait
+# and aren't comparable.
 
 set -u
 
@@ -52,29 +49,21 @@ DOCROOT=/var/www/botshield-bench
 ROBOTS_PATH=/etc/botshield/bench-robots.txt
 
 DURATION=30
-# Default rates picked for what a stock Apache event-MPM (150
-# workers) on a dev box can sustain in vegeta's open-loop mode
-# without TIME_WAIT exhaustion or worker-pool starvation. On a
-# WSL2 dev box, target rates above ~400 are throttled by the
-# MAX_WORKERS cap below — vegeta reports them as 100% success
-# but the achieved-rate field shows the truth. Higher target
-# rates (1k+) require tuned MPM (MaxRequestWorkers≥1024) and
-# a wider ephemeral-port range; pass --rate explicitly there
-# and bump --max-workers in tandem.
-RATES_STR="100,250"
+RATES_STR="1000,5000,10000"
 URL=http://127.0.0.1:8080/bench.html
-# Cap vegeta's worker goroutines so a stalled scenario can't
-# spawn enough OS threads to crash the Go runtime (errno=11
-# from clone(); seen at unbounded -max-workers when Apache
-# falls behind).
-MAX_WORKERS=200
+# oha keeps -c persistent HTTP/1.1 connections in a pool and
+# paces requests across them at -q QPS. 50 connections fits
+# comfortably under the stock mpm_event 150-worker pool and
+# matches run-bench.sh's -c 100 saturation shape's connection
+# economy without filling the worker pool.
+CONNECTIONS=50
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --rate)        RATES_STR=$2; shift 2;;
         --duration)    DURATION=$2; shift 2;;
         --url)         URL=$2; shift 2;;
-        --max-workers) MAX_WORKERS=$2; shift 2;;
+        --connections) CONNECTIONS=$2; shift 2;;
         -h|--help)
             sed -n '/^# Usage/,/^# Output/p' "$0" | sed 's/^# \?//'
             exit 0;;
@@ -87,7 +76,7 @@ IFS=',' read -ra RATES <<< "$RATES_STR"
 # --- prerequisites ----------------------------------------------------
 
 require() { command -v "$1" >/dev/null || { echo "missing: $1" >&2; exit 1; }; }
-require vegeta
+require oha
 require sudo
 require apachectl
 require jq
@@ -128,7 +117,7 @@ mapfile -t SCENARIOS < <(ls "$SCENARIO_DIR"/*.conf | grep -vE 'singleconn' | sor
 
 echo
 echo "[bench] $TS  fixed-rate mode"
-echo "[bench] rates: ${RATES[*]} duration=${DURATION}s target=$URL"
+echo "[bench] rates: ${RATES[*]} duration=${DURATION}s connections=$CONNECTIONS target=$URL"
 echo
 
 # --- per-rate sweep ---------------------------------------------------
@@ -175,29 +164,25 @@ for rate in "${RATES[@]}"; do
                 echo "  cookie mint failed — skipping" >&2
                 continue
             fi
-            cookie_hdr=(-header "Cookie: _bs_verified=${cookie}")
+            cookie_hdr=(-H "Cookie: _bs_verified=${cookie}")
         fi
 
-        # Vegeta: stdin target spec, stdout binary results stream.
-        # `attack` writes results to stdout; `report` consumes them.
-        echo "GET $URL" | \
-            vegeta attack \
-                -rate="${rate}/s" \
-                -duration="${DURATION}s" \
-                -timeout=10s \
-                -max-workers="$MAX_WORKERS" \
-                -workers=50 \
-                -header="User-Agent: Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/125.0" \
-                -header="Accept-Language: en-US,en;q=0.9" \
-                "${cookie_hdr[@]}" \
-            | vegeta report -type=json \
-            > "$RESULTS/$scenario.json"
+        # oha: -q QPS, -z duration, -c connection pool, JSON output.
+        oha --no-tui --output-format json \
+            -q "$rate" \
+            -z "${DURATION}s" \
+            -c "$CONNECTIONS" \
+            -H "User-Agent: Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/125.0" \
+            -H "Accept-Language: en-US,en;q=0.9" \
+            "${cookie_hdr[@]}" \
+            "$URL" \
+            > "$RESULTS/$scenario.json" 2>/dev/null
 
-        # Quick visual.
-        jq -r '"  hit=" + (.requests|tostring) +
-                " ok=" + ((.success * 100) | tostring | .[0:5]) + "%" +
-                " p50=" + ((.latencies."50th" / 1000000) | tostring | .[0:6]) + "ms" +
-                " p99=" + ((.latencies."99th" / 1000000) | tostring | .[0:6]) + "ms"' \
+        # Quick visual. oha latencies are seconds (float).
+        jq -r '"  achieved=" + ((.summary.requestsPerSec|floor)|tostring) + "/s" +
+                " ok=" + ((.summary.successRate * 100) | tostring | .[0:5]) + "%" +
+                " p50=" + ((.latencyPercentiles.p50 * 1000) | tostring | .[0:6]) + "ms" +
+                " p99=" + ((.latencyPercentiles.p99 * 1000) | tostring | .[0:6]) + "ms"' \
             "$RESULTS/$scenario.json" 2>/dev/null \
             || echo "  (jq parse failed)"
     done
@@ -210,9 +195,10 @@ import json, os, sys
 
 results_dir, rate = sys.argv[1], sys.argv[2]
 
-def fmt_us(ns):
-    if ns is None: return "?"
-    us = ns / 1000.0
+def fmt_s(s):
+    """oha latencies are seconds (float); render as us / ms."""
+    if s is None: return "?"
+    us = s * 1_000_000.0
     if us < 1000: return f"{us:.0f}us"
     return f"{us/1000:.2f}ms"
 
@@ -224,14 +210,16 @@ for f in sorted(os.listdir(results_dir)):
             d = json.load(fh)
     except Exception:
         continue
+    pcts = d.get("latencyPercentiles", {}) or {}
+    summary = d.get("summary", {}) or {}
     rows.append({
         "name":  f.replace(".json", ""),
-        "ok":    d.get("success", 0) * 100,
-        "rps":   d.get("rate", 0),
-        "p50":   d.get("latencies", {}).get("50th"),
-        "p95":   d.get("latencies", {}).get("95th"),
-        "p99":   d.get("latencies", {}).get("99th"),
-        "p999":  d.get("latencies", {}).get("99.9th") or d.get("latencies", {}).get("999th"),
+        "ok":    summary.get("successRate", 0) * 100,
+        "rps":   summary.get("requestsPerSec", 0),
+        "p50":   pcts.get("p50"),
+        "p95":   pcts.get("p95"),
+        "p99":   pcts.get("p99"),
+        "p999":  pcts.get("p99.9"),
     })
 
 target_rate = float(rate)
@@ -253,18 +241,18 @@ print("-" * len(header))
 for r in rows:
     p99d = (((r["p99"] or 0) - b_p99) / b_p99 * 100) if r["p99"] and b_p99 else 0
     print(f"{r['name']:<32} {r['ok']:>5.2f}% "
-          f"{fmt_us(r['p50']):>10} {fmt_us(r['p95']):>10} "
-          f"{fmt_us(r['p99']):>10} {p99d:>+7.1f}%")
+          f"{fmt_s(r['p50']):>10} {fmt_s(r['p95']):>10} "
+          f"{fmt_s(r['p99']):>10} {p99d:>+7.1f}%")
 print()
 print(f"Δ columns are vs {base['name']}.")
 print(f"ok% < 99.9 → rate is too high for this scenario; latencies unreliable.")
 if throttled:
     names = ", ".join(t["name"] for t in throttled)
     print(f"WARN: achieved rate < 95% of target ({rate}/s) for: {names}")
-    print(f"  vegeta is bound by --max-workers; the latencies above include")
-    print(f"  worker-queue wait, not just per-request work. Lower --rate or")
-    print(f"  raise --max-workers to recover a clean signal.")
-print(f"Raw vegeta JSON: {results_dir}")
+    print(f"  oha couldn't sustain the configured rate; latencies above")
+    print(f"  include scheduling wait, not just per-request work. Lower")
+    print(f"  --rate or raise --connections to recover a clean signal.")
+print(f"Raw oha JSON: {results_dir}")
 print()
 PYEOF
 done
