@@ -280,7 +280,7 @@ semantics and refresh model.
 | `BotShieldPathTrigger` | `<name> <path-glob>` | `status=`, `redirect=`, `log=`, `flag=`, `ttl=`, `penalty=`, `mode=` (no `credit=`) |
 | `BotShieldCookieTrigger` | `<name> <pred>` (see policy page) | `status=`, `redirect=`, `log=`, `flag=`, `ttl=`, `penalty=`, `credit=`, `mode=` |
 | `BotShieldEnvTrigger` | `<name> <env-pred>` (see policy page) | `status=`, `log=`, `flag=`, `ttl=`, `penalty=`, `credit=`, `mode=` (no `redirect=`) |
-| `BotShieldFeedbackTrigger` | `<event>` | `flag=`, `ttl=`, `log=` (no `mode=`) |
+| `BotShieldFeedbackTrigger` | `<event>` | `flag=`, `ttl=`, `log=`, `mode=` |
 | `BotShieldLoadTrigger` | `<name> state=<n>\|state>=<n>` | `status=`, `log=`, `penalty=`, `mode=` (no `redirect=`, `flag=`, `ttl=`) |
 | `BotShieldSessionCookieName` | `<name>` (single arg, repeatable) | n/a (feeds cookies=session predicate) |
 

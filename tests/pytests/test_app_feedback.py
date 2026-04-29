@@ -168,6 +168,46 @@ def test_app_feedback_observed_under_shadow_mode(
     )
 
 
+def test_app_feedback_per_trigger_observe_mode(
+    config_override, log_slice,
+):
+    """Per-trigger `mode=observe` on a BotShieldFeedbackTrigger
+    suppresses the flagged-IP write the same way global
+    BotShieldShadowMode does. Even though feedback runs on the
+    response path, the side effect is future-request state — so
+    observe-mode gates that mutation. bridge.c honors
+    `ft->action.mode == BS_TMODE_OBSERVE` next to the global
+    shadow check."""
+    val = _sign("scanner-hit")
+    ip = _ips.fresh_ip()
+    with config_override(
+        r"BotShieldAllow\s+on",
+        'BotShieldAllow on\n'
+        '    BotShieldAppFeedback on\n'
+        f'    BotShieldAppIntegrationSecretFile {SECRET_PATH}\n'
+        '    BotShieldFeedbackTrigger scanner-hit '
+        'flag=honeypot_hit ttl=3600 mode=observe\n'
+        f'    {FEEDBACK_LOC_1}\n'
+        f'        Header always set X-BotShield-Feedback "{val}"\n'
+        f'    </Location>',
+        count=1,
+    ):
+        with log_slice as slc:
+            _g(FEEDBACK_PATH_1, xff=ip)
+            _g("/index.html", xff=ip)
+            lines = slc.decision_lines(ip=ip)
+
+    assert lines, "no decision lines emitted"
+    follow_up = lines[-1]["reason"]
+    assert "flagged-ip" not in follow_up, (
+        f"follow-up request picked up the flagged bit even though "
+        f"the feedback trigger was mode=observe. reason={follow_up}"
+    )
+    assert any("observed" in ln for ln in slc.grep("scanner-hit")), (
+        f"expected observe-mode log line for the feedback event"
+    )
+
+
 def test_app_feedback_credit_flag_lowers_score(
     config_override, log_slice,
 ):

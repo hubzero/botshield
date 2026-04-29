@@ -83,19 +83,12 @@ Both observe signals reach every gating surface:
 | Cookie triggers | yes | yes | `cookie-trigger:<name>:observe` |
 | Env triggers | yes | yes | `env-trigger:<name>:observe` |
 | Load triggers | yes | yes | `load-trigger:<name>:observe` |
-| Feedback triggers | n/a (parser rejects `mode=`) | yes | `feedback-trigger:<event>:observe` |
+| Feedback triggers | yes | yes | `feedback-trigger:<event>:observe` |
 | Flag triggers | yes | yes | `flag-trigger:<flag>:observe` |
 | Block-path | yes | yes | `block-path:<name>:observe` |
 | Rate-limit | yes | yes | `rate-limit:<name>:observe` |
 | Robots Disallow | n/a | yes | `robots-block:<group>:observe` |
 | Form-captcha | n/a | yes | `form-captcha:<scope>:observe` |
-
-Per-trigger `mode=observe` is rejected by the parser on
-`BotShieldFeedbackTrigger` because feedback runs on the response
-path — observe is meaningless once the response has shipped.
-Global `BotShieldShadowMode` still flips feedback into observe
-semantics (matches log `feedback-trigger:<event>:observe`, no
-flagged-IP mutation).
 
 Transport-level errors (415 / 413 / 400 on form-captcha; 503 on
 captcha-verify in-flight cap; 503 misconfigured) intentionally
