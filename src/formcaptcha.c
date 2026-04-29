@@ -51,12 +51,13 @@ apr_status_t bs_form_replay_filter(ap_filter_t *f,
     }
     if (mode == AP_MODE_INIT) return APR_SUCCESS;
 
-    /* E18 review fix — honor readbytes. Emitting the whole body in a
-     * single bucket regardless of what the downstream handler asked
-     * for is an API-conformance violation (a strictly-conformant
-     * caller is allowed to discard excess past readbytes). Stream it
-     * one chunk at a time, capped at readbytes when the caller is in
-     * READBYTES mode. The body buffer is allocated in r->pool and
+    /* Honor the caller's readbytes contract. Emitting the whole body
+     * in a single bucket regardless of what the downstream handler
+     * asked for is an API-conformance violation (a strictly-
+     * conformant caller is allowed to discard excess past
+     * readbytes). Stream it one chunk at a time, capped at readbytes
+     * when the caller is in READBYTES mode. The body buffer is
+     * allocated in r->pool and
      * outlives any bucket the framework derives from it, so
      * apr_bucket_immortal_create is safe and avoids the deferred
      * pool-bucket copy on pool cleanup. */
@@ -113,7 +114,7 @@ static apr_status_t bs_form_captcha_read_body(request_rec *r,
 {
     apr_bucket_brigade *bb = apr_brigade_create(r->pool,
         r->connection->bucket_alloc);
-    /* E18 review fix — allocate one extra byte so a body of exactly
+    /* Allocate one extra byte so a body of exactly
      * BS_FORM_CAPTCHA_BODY_MAX bytes (the read-loop guard is `>`,
      * not `>=`, so this size is accepted) can be NUL-terminated
      * without overwriting the last valid body byte. */
@@ -400,9 +401,9 @@ int bs_form_captcha_fixup(request_rec *r)
     /* Mint _bs_verified — same captcha-<provider> alg the M8
      * interstitial path uses. passes_captcha=1 (this WAS a captcha-
      * tier solve, just inline rather than interstitial). Routed
-     * through bs_captcha_carry_and_mint so the carry-forward + cap
-     * + cookie install stay in lockstep with the captcha-verify
-     * handler — the E15 review fix lives there now. */
+     * through bs_captcha_carry_and_mint so the carry-forward +
+     * forgive cap + cookie install stay in lockstep with the
+     * captcha-verify handler. */
     bs_challenge ch;
     const char *cookie_alg_name = NULL;
     const char *merr = bs_captcha_carry_and_mint(r, cfg,

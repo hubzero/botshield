@@ -62,9 +62,31 @@ _Static_assert(offsetof(bs_shm_header, cv_inflight) == 128,
 /* ======================================================================
  * SipHash-2-4 (bucket hash + nonce fingerprint)
  *
- * Key lives in bs_shm.header->siphash_key, generated at post-config so
- * attackers can't precompute colliding inputs to evict stored entries.
- * ====================================================================== */
+ * SipHash-2-4 is Aumasson & Bernstein's keyed pseudo-random function
+ * (https://www.aumasson.jp/siphash/siphashslides.pdf). The "2-4"
+ * names the round counts: 2 SipRounds per message block plus 4 in
+ * the finalization. We use it for two jobs:
+ *
+ *   1. Bucket index for the open-addressed SHM tables (flagged-IP,
+ *      strike, safeguard, embedded-bootstrap nonce). The 16-byte
+ *      key is randomized at post_config via RAND_bytes — without a
+ *      keyed hash, a cooperative attacker could pick inputs that
+ *      collide on the same bucket and evict legitimate entries from
+ *      the probe window. Standard hashes (FNV / xxhash) don't have
+ *      that property; cryptographic hashes (SHA-256) are an order
+ *      of magnitude slower per call. SipHash hits the
+ *      DoS-resistance-vs-speed sweet spot.
+ *
+ *   2. 64-bit fingerprint for the embedded-bootstrap nonce table
+ *      (bs_embedded_nonce_consume). The nonce slot stores the
+ *      SipHash of the nonce bytes rather than the nonce itself —
+ *      smaller slot, and the keyed hash makes second-preimage on
+ *      the fingerprint cryptographically infeasible.
+ *
+ * Key lives in bs_shm.header->siphash_key. The four 64-bit IV
+ * constants below are the standard SipHash IVs from the paper
+ * (ASCII "somepseudorandomlygeneratedbytes" split into four words);
+ * they are not secret. ====================================================================== */
 
 static inline apr_uint64_t bs_rotl64(apr_uint64_t x, int b)
 {
@@ -85,6 +107,7 @@ apr_uint64_t bs_siphash24(const unsigned char key[16],
     memcpy(&k0, key,     8);
     memcpy(&k1, key + 8, 8);
 
+    /* Standard SipHash IV — not secret. */
     apr_uint64_t v0 = 0x736f6d6570736575ULL ^ k0;
     apr_uint64_t v1 = 0x646f72616e646f6dULL ^ k1;
     apr_uint64_t v2 = 0x6c7967656e657261ULL ^ k0;
