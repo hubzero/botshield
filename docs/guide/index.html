@@ -89,41 +89,10 @@
 <section class="toc">
   <h2 class="toc__heading">On this page</h2>
   <ul class="toc__list">
-<li class="toc__item toc__item--level-2"><a href="#how-it-works">How it works</a></li>
-<li class="toc__item toc__item--level-2"><a href="#build">Build</a></li>
-<li class="toc__item toc__item--level-2"><a href="#minimal-configuration">Minimal configuration</a></li>
-<li class="toc__item toc__item--level-2"><a href="#deployment-behind-a-reverse-proxy-or-load-balancer">Deployment behind a reverse proxy or load balancer</a></li>
-<li class="toc__item toc__item--level-2"><a href="#slow-client-slowloris-defense">Slow-client / slowloris defense</a></li>
-<li class="toc__item toc__item--level-2"><a href="#directives">Directives</a></li>
-<li class="toc__item toc__item--level-3"><a href="#core">Core</a></li>
-<li class="toc__item toc__item--level-3"><a href="#tier-thresholds-and-forgiveness">Tier thresholds and forgiveness</a></li>
-<li class="toc__item toc__item--level-3"><a href="#widget-customization">Widget customization</a></li>
-<li class="toc__item toc__item--level-3"><a href="#captcha-tier-m8">Captcha tier (M8)</a></li>
-<li class="toc__item toc__item--level-3"><a href="#captcha-verify-endpoint-hardening-m8-1">Captcha-verify endpoint hardening (M8.1)</a></li>
-<li class="toc__item toc__item--level-3"><a href="#flagged-ip-table-bloom-filter-state-m5-m6">Flagged-IP table / Bloom filter / state (M5+M6)</a></li>
-<li class="toc__item toc__item--level-2"><a href="#per-url-scoping">Per-URL scoping</a></li>
-<li class="toc__item toc__item--level-2"><a href="#staging-policy-changes">Staging policy changes</a></li>
-<li class="toc__item toc__item--level-3"><a href="#per-rule-observe-mode">Per-rule observe mode</a></li>
-<li class="toc__item toc__item--level-3"><a href="#global-botshieldshadowmode">Global `BotShieldShadowMode`</a></li>
-<li class="toc__item toc__item--level-3"><a href="#how-they-combine">How they combine</a></li>
-<li class="toc__item toc__item--level-3"><a href="#what-observe-means-precisely">What &quot;observe&quot; means precisely</a></li>
-<li class="toc__item toc__item--level-2"><a href="#understanding-scoring">Understanding scoring</a></li>
-<li class="toc__item toc__item--level-3"><a href="#how-score-is-collected">How score is collected</a></li>
-<li class="toc__item toc__item--level-3"><a href="#composition">Composition</a></li>
-<li class="toc__item toc__item--level-3"><a href="#threshold-ladder">Threshold ladder</a></li>
-<li class="toc__item toc__item--level-3"><a href="#inspecting-decisions">Inspecting decisions</a></li>
-<li class="toc__item toc__item--level-3"><a href="#tuning-workflow">Tuning workflow</a></li>
-<li class="toc__item toc__item--level-3"><a href="#cookie-reputation">Cookie reputation</a></li>
-<li class="toc__item toc__item--level-2"><a href="#multi-vhost-deployments">Multi-vhost deployments</a></li>
-<li class="toc__item toc__item--level-3"><a href="#default-behavior-auto-isolation-per-servername">Default behavior: auto-isolation per ServerName</a></li>
-<li class="toc__item toc__item--level-3"><a href="#opt-in-shared-reputation">Opt-in shared reputation</a></li>
-<li class="toc__item toc__item--level-3"><a href="#scaling">Scaling</a></li>
-<li class="toc__item toc__item--level-3"><a href="#when-servername-is-missing">When ServerName is missing</a></li>
-<li class="toc__item toc__item--level-2"><a href="#customizing-the-challenge-page">Customizing the challenge page</a></li>
-<li class="toc__item toc__item--level-2"><a href="#accessibility">Accessibility</a></li>
-<li class="toc__item toc__item--level-2"><a href="#security-note">Security note</a></li>
+<li class="toc__item toc__item--level-2"><a href="#what-s-shipped">What&#x27;s shipped</a></li>
+<li class="toc__item toc__item--level-2"><a href="#quick-start">Quick start</a></li>
+<li class="toc__item toc__item--level-2"><a href="#documentation">Documentation</a></li>
 <li class="toc__item toc__item--level-2"><a href="#module-owned-endpoints">Module-owned endpoints</a></li>
-<li class="toc__item toc__item--level-2"><a href="#observability">Observability</a></li>
 <li class="toc__item toc__item--level-2"><a href="#local-development">Local development</a></li>
 <li class="toc__item toc__item--level-2"><a href="#license">License</a></li>
   </ul>
@@ -132,15 +101,18 @@
 <p>Low-latency bot detection for Apache 2.4. Cookieless requests get a
 self-contained proof-of-work interstitial; verified visitors receive a
 short-lived cookie and pass through on their next request.</p>
-<p><strong>Status: beta.</strong> Stable shape, exercising in dev; not yet a
-production deployment.</p>
-<p>What's shipped:</p>
+<p><strong>Status: beta.</strong> Stable shape, exercising in dev; not yet a production
+deployment. Architecture, threat model, and per-extension design notes
+live in <a href="DESIGN.md">DESIGN.md</a>. Operator-facing handbook is rendered to
+GitHub Pages from <code>docs-src/</code>; see the <a href="#documentation">documentation index</a>
+below.</p>
+<h2 id="what-s-shipped">What's shipped</h2>
 <ul>
 <li><strong>Tiered challenges.</strong> Pass / silent (no-click auto-submit) / form
-(checkbox interstitial) / captcha (third-party provider).
-Per-scope configurable; multi-provider cohabitation on one vhost.
-Captcha providers: Turnstile, hCaptcha, reCAPTCHA v2 + v3,
-Friendly Captcha, GeeTest v4.</li>
+(checkbox interstitial) / captcha (third-party provider). Per-scope
+configurable; multi-provider cohabitation on one vhost. Captcha
+providers: Turnstile, hCaptcha, reCAPTCHA v2 + v3, Friendly Captcha,
+GeeTest v4.</li>
 <li><strong>Cookie envelope.</strong> AES-256-GCM authenticated encryption,
 per-purpose HKDF-derived keys, verify-only secondary key for
 graceful rotation. Per-cookie hourly forgiveness cap closes the
@@ -150,12 +122,13 @@ lockless reads, rotating Bloom filter for first-sight IP signals,
 crash-durable persistence via <code>mod_watchdog</code> snapshots + shutdown
 save.</li>
 <li><strong>Policy.</strong> Path / cookie / env / load / scope / flag triggers,
-per-cohort rate limits and block-paths, in-module robots.txt
-parser (RFC 9309 + Crawl-delay extension), repeated-429
-escalation, anti-loop safeguard.</li>
+per-cohort rate limits and block-paths, in-module robots.txt parser
+(RFC 9309 + Crawl-delay extension), repeated-429 escalation,
+anti-loop safeguard.</li>
 <li><strong>Verify-endpoint hardening.</strong> HMAC-signed pending cookie + per-IP
-rate limit + global in-flight semaphore on <code>/captcha-verify</code>. One-
-time-use nonces + IP-bound bootstrap on the embedded silent path.</li>
+rate limit + global in-flight semaphore on <code>/captcha-verify</code>.
+One-time-use nonces + IP-bound bootstrap on the embedded silent
+path.</li>
 <li><strong>Observability.</strong> Structured <code>key=value</code> decision-log line per
 request, 41 Prometheus metrics at <code>&lt;prefix&gt;/metrics</code>, <code>mod_status</code>
 contribution hook.</li>
@@ -163,753 +136,96 @@ contribution hook.</li>
 into shared reputation via <code>BotShieldShareScope</code>.</li>
 <li><strong>Shadow mode.</strong> Global and per-rule observe for staging policy
 changes without enforcement.</li>
-<li><strong>Accessibility.</strong> Default interstitial passes WCAG 2.1 AA on
-every variant.</li>
+<li><strong>Accessibility.</strong> Default interstitial passes WCAG 2.1 AA on every
+variant.</li>
 </ul>
 <p>Production hardening: clean under ASan + UBSan, MPM-matrix-verified
 across event / worker / prefork with graceful-restart coverage,
-8h-soak-clean (1.4M requests, +4MB RSS, zero crashes).</p>
-<p>Tests: ~250 pytest cases backed by the <code>botshield_test</code> framework
-(httpx client, transactional <code>config_override</code>, structured
-decision-log parser, time-salted IP allocator, real Chromium via
-Playwright, axe-core a11y smoke, Hypothesis property tests,
-LibFuzzer harnesses for the cookie + robots parsers). CI splits a
-fast per-PR lane from a browser lane; the 8h soak and LibFuzzer
-campaigns are wired but <code>workflow_dispatch</code>-only, kicked off
-manually before a release.</p>
-<h2 id="how-it-works">How it works</h2>
-<ol>
-<li>
-<p>An <code>APR_HOOK_FIRST</code> handler runs before Apache's content generator.
-URLs under <code>BotShieldEndpointPrefix</code> (default <code>/botshield</code>) route to
-the module's own handlers (<code>/botshield/captcha-verify/&lt;provider&gt;</code>,
-<code>/botshield/metrics</code>) before tier dispatch. If the URI ends in a
-static-asset extension (<code>.css</code>, <code>.js</code>, <code>.png</code>, <code>.svg</code>, …), the
-module declines so the challenge page's own linked assets work.</p>
-</li>
-<li>
-<p>Each request gets a score. Heuristics (missing User-Agent, missing
-Accept-Language, scraper UA tokens), the flagged-IP table lookup
-(SHM, seqlock-guarded), a first-sight Bloom check, and any rep
-carried in a signed <code>_bs_verified</code> cookie all compose into one
-effective score.</p>
-</li>
-<li>
-<p>The score picks a tier — <strong>pass</strong> below <code>BotShieldScoreSilent</code>,
-<strong>silent</strong> up to <code>BotShieldScoreHard</code>, <strong>form</strong> up to
-<code>BotShieldScoreCaptcha</code>, <strong>captcha</strong> at or above. Below silent the
-module returns <code>DECLINED</code> and Apache serves the real content —
-legitimate visitors never see us and never receive a cookie.</p>
-</li>
-<li>
-<p>Tier behavior:</p>
-<ul>
-<li><strong>silent</strong> — minimal &quot;checking your browser&quot; splash that
-auto-submits a SHA-256 proof-of-work on load.</li>
-<li><strong>form</strong> — reCAPTCHA-shaped checkbox widget; user clicks to start
-the PoW.</li>
-<li><strong>captcha</strong> — third-party provider widget (Turnstile / hCaptcha /
-reCAPTCHA v2/v3 / Friendly Captcha / GeeTest v4); on success the
-client POSTs the provider's token to <code>/botshield/captcha-verify/ &lt;provider&gt;</code>, the module siteverifies via libcurl (tight timeout,
-fail-open on provider outage), and issues the cookie.</li>
-</ul>
-<p>PoW tiers produce an AES-256-GCM-encrypted 15-field cookie;
-captcha tier produces the same envelope with <code>alg=&quot;captcha- &lt;provider&gt;&quot;</code>.</p>
-</li>
-<li>
-<p>Each decision emits two log lines: a human-readable prose line and
-a stable <code>key=value</code> structured line (<code>mod_botshield: decision tier=&lt;t&gt; outcome=&lt;o&gt; …</code>) parseable with a ~50-line awk script.
-Every decision also increments matching SHM counters exported at
-<code>/botshield/metrics</code> (Prometheus text) and via a <code>mod_status</code>
-contribution hook.</p>
-</li>
-<li>
-<p>The next request carries the cookie; the server GCM-decrypts +
-verifies the auth tag, checks freshness, and declines — Apache
-serves the real
-content. Flags (honeypot hits, scanner probes) live in SHM, not the
-cookie, so replaying an older cookie can't launder an IP flag.</p>
-</li>
-</ol>
-<h2 id="build">Build</h2>
-<p>You need Apache 2.4 development headers — <code>apache2-dev</code> on Debian/Ubuntu,
-<code>httpd-devel</code> on RHEL-family.</p>
-<pre><code>make enable     # build, install, a2enmod, configtest, reload
+8h-soak-clean (1.4M requests, +4MB RSS, zero crashes). Tests: ~250
+pytest cases plus LibFuzzer harnesses for the cookie + robots
+parsers; CI splits a fast per-PR lane from a browser lane.</p>
+<h2 id="quick-start">Quick start</h2>
+<p>You need Apache 2.4 development headers — <code>apache2-dev</code> on
+Debian/Ubuntu, <code>httpd-devel</code> on RHEL-family.</p>
+<pre><code class="language-sh">make enable     # build, install, a2enmod, configtest, reload
 </code></pre>
-<p>Step-by-step equivalents:</p>
-<pre><code>make            # compile with apxs -c
-make install    # install the .so into Apache's modules dir
-sudo a2enmod botshield
-sudo apachectl configtest &amp;&amp; sudo systemctl reload apache2
-</code></pre>
-<p><code>make disable</code> removes the module without deleting the <code>.so</code>.</p>
-<h2 id="minimal-configuration">Minimal configuration</h2>
+<p>Step-by-step equivalents: <code>make</code>, <code>sudo make install</code>,
+<code>sudo a2enmod botshield</code>, <code>sudo apachectl configtest &amp;&amp; sudo systemctl reload apache2</code>. <code>make disable</code> removes the module without
+deleting the <code>.so</code>.</p>
+<p>Minimal vhost configuration:</p>
 <pre><code class="language-apache">&lt;VirtualHost *:443&gt;
-    ServerName example.test
+    ServerName example.com
     DocumentRoot /var/www/example
     # ... SSLEngine, cert files, etc.
 
-    BotShieldEnabled On
+    BotShieldEnabled    On
+    BotShieldSecretFile /etc/botshield/secret
+    BotShieldAlgorithm  sha256-zeros
 &lt;/VirtualHost&gt;
 </code></pre>
-<h2 id="deployment-behind-a-reverse-proxy-or-load-balancer">Deployment behind a reverse proxy or load balancer</h2>
-<p><code>mod_botshield</code> keys its IP-based signals — the flagged-IP table, the
-Bloom filter, the score per IP — on <code>r-&gt;useragent_ip</code>, which is the
-TCP peer Apache saw. If Apache sits behind a reverse proxy or load
-balancer, that peer is the proxy, not the real client.</p>
-<p><strong>The fix is the stock Apache module <code>mod_remoteip</code>.</strong> Configure it
-to trust your edge hops, and it will rewrite <code>r-&gt;useragent_ip</code> to the
-real client before any botshield hook runs. This is the same module
-used for accurate <code>%a</code> in access logs — if your logs already show
-real client IPs, you're done. If not:</p>
-<pre><code class="language-apache">LoadModule remoteip_module modules/mod_remoteip.so
-
-RemoteIPHeader        X-Forwarded-For
-RemoteIPTrustedProxy  10.0.0.0/8
-RemoteIPTrustedProxy  2001:db8:cafe::/48
-# ... one RemoteIPTrustedProxy per edge CIDR ...
-
-&lt;VirtualHost *:443&gt;
-    ServerName example.com
-    BotShieldEnabled     On
-    BotShieldSecretFile  /etc/botshield/secret
-    BotShieldAlgorithm   sha256-zeros
-&lt;/VirtualHost&gt;
-</code></pre>
-<p>We deliberately do not reimplement this. <code>mod_remoteip</code> handles
-<code>X-Forwarded-For</code>, <code>Forwarded:</code> (RFC 7239), trusted-proxy CIDR
-matching for both v4 and v6, and multi-hop chains — all in Apache
-core, battle-tested, maintained. A site that skips this and just
-enables <code>BotShieldEnabled</code> behind a proxy will flag its own load
-balancer and then challenge every legitimate visitor.</p>
-<p>For a single-host deployment with no proxy in front, no extra
-configuration is needed — <code>r-&gt;useragent_ip</code> already is the client.</p>
-<h2 id="slow-client-slowloris-defense">Slow-client / slowloris defense</h2>
-<p><code>mod_botshield</code>'s body-read paths (the form-captcha verify, the M8
-captcha-verify endpoint, the embedded-verify endpoint) inherit
-Apache's slow-client defense. Apache's <code>Timeout</code> directive bounds
-how long a worker can be held by a stalled client; the default is
-60 seconds.</p>
-<p><strong>For production deployments, pair <code>mod_botshield</code> with
-<code>mod_reqtimeout</code>.</strong> It gives finer-grained controls than <code>Timeout</code>
-and is the standard Apache answer to slowloris-class attacks. A
-typical configuration:</p>
-<pre><code class="language-apache">LoadModule reqtimeout_module modules/mod_reqtimeout.so
-
-RequestReadTimeout header=20-40,minrate=500
-RequestReadTimeout body=20,minrate=500
-</code></pre>
-<p>We deliberately do not implement our own slow-client defense.
-<code>mod_reqtimeout</code> is in Apache core, battle-tested, and applies to
-the whole vhost — <code>mod_botshield</code>-owned endpoints get the same
-protection as the application's own handlers without any extra
-config on our side.</p>
-<h2 id="directives">Directives</h2>
-<h3 id="core">Core</h3>
+<p>Generate the secret with <code>openssl rand -hex 32 &gt; /etc/botshield/secret; chmod 600 /etc/botshield/secret</code>. Full setup walkthrough in
+<a href="docs-src/getting-started.md"><code>docs-src/getting-started.md</code></a>.</p>
+<h2 id="documentation">Documentation</h2>
+<p>Operator handbook (rendered to
+<a href="https://hubzero.github.io/botshield/">hubzero.github.io/botshield</a>
+from these sources):</p>
 <table>
 <thead>
 <tr>
-<th>Directive</th>
-<th>Default</th>
-<th>Purpose</th>
+<th>Topic</th>
+<th>Source</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td><code>BotShieldEnabled on|off</code></td>
-<td><code>off</code></td>
-<td>Master on/off for the enclosing scope</td>
+<td>Getting started — install, first vhost, smoke test</td>
+<td><a href="docs-src/getting-started.md"><code>docs-src/getting-started.md</code></a></td>
 </tr>
 <tr>
-<td><code>BotShieldDebug on|off</code></td>
-<td><code>off</code></td>
-<td>Return <code>403 &quot;Hello World&quot;</code> for every request (smoke test)</td>
+<td>Operator model — scoring, tiers, cookie reputation, multi-vhost</td>
+<td><a href="docs-src/operator-model.md"><code>docs-src/operator-model.md</code></a></td>
 </tr>
 <tr>
-<td><code>BotShieldSecretFile /path</code></td>
-<td>unset (required)</td>
-<td>HMAC key for cookie/challenge signing; mode 0600, ≥ 16 bytes</td>
+<td>Directives reference</td>
+<td><a href="docs-src/directives.md"><code>docs-src/directives.md</code></a></td>
 </tr>
 <tr>
-<td><code>BotShieldAlgorithm &lt;name&gt;</code></td>
-<td>unset (required)</td>
-<td>PoW algorithm. Only <code>sha256-zeros</code> is built in today; <code>sha384-zeros</code>, <code>sha512-zeros</code>, <code>pbkdf2-sha256</code>, <code>argon2id</code> are reserved registry slots</td>
+<td>Policy — triggers, rate limits, block-paths, robots.txt</td>
+<td><a href="docs-src/policy.md"><code>docs-src/policy.md</code></a></td>
 </tr>
 <tr>
-<td><code>BotShieldCookieTTL N</code></td>
-<td><code>3600</code></td>
-<td>Seconds a verified cookie is honoured</td>
+<td>Captcha tier — providers, hardening, configuration</td>
+<td><a href="docs-src/captcha.md"><code>docs-src/captcha.md</code></a></td>
 </tr>
 <tr>
-<td><code>BotShieldCookieDomain &quot;.example.com&quot;</code></td>
-<td>unset (host-only)</td>
-<td>Set-Cookie Domain= attribute so rep follows across subdomains</td>
+<td>Deployment — reverse proxy, slowloris, capacity sizing, secret rotation</td>
+<td><a href="docs-src/deployment.md"><code>docs-src/deployment.md</code></a></td>
 </tr>
 <tr>
-<td><code>BotShieldDifficulty N</code></td>
-<td><code>4</code></td>
-<td>Leading hex zeros the PoW must produce (1..8)</td>
+<td>Staging policy changes — shadow mode + per-rule observe</td>
+<td><a href="docs-src/staging.md"><code>docs-src/staging.md</code></a></td>
 </tr>
 <tr>
-<td><code>BotShieldEndpointPrefix /path</code></td>
-<td><code>/botshield</code></td>
-<td>URL prefix for module-owned handlers (captcha-verify, metrics)</td>
+<td>Observability — decision log, metrics, mod_status</td>
+<td><a href="docs-src/observability.md"><code>docs-src/observability.md</code></a></td>
+</tr>
+<tr>
+<td>Troubleshooting</td>
+<td><a href="docs-src/troubleshooting.md"><code>docs-src/troubleshooting.md</code></a></td>
+</tr>
+<tr>
+<td>FAQ</td>
+<td><a href="docs-src/faq.md"><code>docs-src/faq.md</code></a></td>
 </tr>
 </tbody>
 </table>
-<h3 id="tier-thresholds-and-forgiveness">Tier thresholds and forgiveness</h3>
-<table>
-<thead>
-<tr>
-<th>Directive</th>
-<th>Default</th>
-<th>Purpose</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>BotShieldScoreSilent N</code></td>
-<td><code>20</code></td>
-<td>Score at or above which the silent-PoW tier is picked</td>
-</tr>
-<tr>
-<td><code>BotShieldScoreHard N</code></td>
-<td><code>50</code></td>
-<td>Score at or above which the form-PoW tier is picked</td>
-</tr>
-<tr>
-<td><code>BotShieldScoreCaptcha N</code></td>
-<td><code>80</code></td>
-<td>Score at or above which the captcha tier is picked</td>
-</tr>
-<tr>
-<td><code>BotShieldForgivenessSilent N</code></td>
-<td><code>10</code></td>
-<td>Score credit on a successful silent-PoW pass</td>
-</tr>
-<tr>
-<td><code>BotShieldForgivenessForm N</code></td>
-<td><code>25</code></td>
-<td>Score credit on a successful form-PoW pass</td>
-</tr>
-<tr>
-<td><code>BotShieldForgivenessCaptcha N</code></td>
-<td><code>50</code></td>
-<td>Score credit on a successful captcha pass</td>
-</tr>
-</tbody>
-</table>
-<h3 id="widget-customization">Widget customization</h3>
-<table>
-<thead>
-<tr>
-<th>Directive</th>
-<th>Default</th>
-<th>Purpose</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>BotShieldPromptText &quot;...&quot;</code></td>
-<td><code>I'm not a robot</code></td>
-<td>Label next to the checkbox</td>
-</tr>
-<tr>
-<td><code>BotShieldLogoFile /path.svg</code></td>
-<td>embedded Guardian</td>
-<td>SVG served inline as the logo (≤ 64 KB)</td>
-</tr>
-<tr>
-<td><code>BotShieldLogoLabel &quot;...&quot;</code></td>
-<td><code>botshield</code></td>
-<td>Small caption under the logo</td>
-</tr>
-<tr>
-<td><code>BotShieldHelp off|on|button</code></td>
-<td><code>button</code></td>
-<td>Help visibility: nothing, always-on panel, or a <code>?</code> link that expands</td>
-</tr>
-<tr>
-<td><code>BotShieldHelpFile /path.html</code></td>
-<td>built-in text</td>
-<td>HTML fragment used as the help panel (≤ 64 KB)</td>
-</tr>
-<tr>
-<td><code>BotShieldChallengeFile /path.html</code></td>
-<td>built-in shell</td>
-<td>Full HTML page template wrapping the widget; must contain the marker <code>&lt;!-- BOTSHIELD --&gt;</code> (≤ 256 KB)</td>
-</tr>
-<tr>
-<td><code>BotShieldShowLogo on|off</code></td>
-<td><code>on</code></td>
-<td>Show the brand column</td>
-</tr>
-<tr>
-<td><code>BotShieldShowLabel on|off</code></td>
-<td><code>on</code></td>
-<td>Show the prompt text; when off, moves to the button's <code>aria-label</code></td>
-</tr>
-<tr>
-<td><code>BotShieldShowBox on|off</code></td>
-<td><code>on</code></td>
-<td>Show the widget's outer box (border/background/shadow)</td>
-</tr>
-</tbody>
-</table>
-<h3 id="captcha-tier-m8">Captcha tier (M8)</h3>
-<table>
-<thead>
-<tr>
-<th>Directive</th>
-<th>Default</th>
-<th>Purpose</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>BotShieldCaptchaProvider &lt;name&gt;</code></td>
-<td>unset</td>
-<td><code>turnstile</code> / <code>hcaptcha</code> / <code>recaptcha-v2</code> / <code>recaptcha-v3</code> / <code>friendly</code> / <code>geetest</code></td>
-</tr>
-<tr>
-<td><code>BotShieldCaptchaSiteKey &quot;...&quot;</code></td>
-<td>unset</td>
-<td>Provider-public site key (GeeTest: captcha_id)</td>
-</tr>
-<tr>
-<td><code>BotShieldCaptchaSecretFile /path</code></td>
-<td>unset</td>
-<td>Provider secret (mode 0600). For GeeTest this is the captcha_key used to HMAC the lot_number</td>
-</tr>
-<tr>
-<td><code>BotShieldCaptchaTimeout N</code></td>
-<td><code>1000</code></td>
-<td>Siteverify HTTP timeout in ms (100..5000). Fail-open on timeout</td>
-</tr>
-<tr>
-<td><code>BotShieldRecaptchaV3MinScore 0..1</code></td>
-<td><code>0.5</code></td>
-<td>Reject v3 verifications below this score even on <code>success:true</code></td>
-</tr>
-</tbody>
-</table>
-<h3 id="captcha-verify-endpoint-hardening-m8-1">Captcha-verify endpoint hardening (M8.1)</h3>
-<table>
-<thead>
-<tr>
-<th>Directive</th>
-<th>Default</th>
-<th>Purpose</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>BotShieldCaptchaRateLimit N</code></td>
-<td><code>30</code></td>
-<td>Per-IP verify POSTs per minute (0 disables, range 0..1000). Over cap → 429 with Retry-After, no libcurl</td>
-</tr>
-<tr>
-<td><code>BotShieldCaptchaMaxInFlight N</code></td>
-<td><code>64</code></td>
-<td>Global cap on concurrent outbound siteverify calls (1..1024). Over cap → 503, no libcurl</td>
-</tr>
-</tbody>
-</table>
-<h3 id="flagged-ip-table-bloom-filter-state-m5-m6">Flagged-IP table / Bloom filter / state (M5+M6)</h3>
-<table>
-<thead>
-<tr>
-<th>Directive</th>
-<th>Default</th>
-<th>Purpose</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>BotShieldFlagIP &lt;bits&gt; [ttl]</code></td>
-<td>unset</td>
-<td>Flag the client IP when this scope is hit. Bits: <code>honeypot_hit</code>, <code>scanner_probe</code>, <code>fake_crawler</code>, <code>pow_fail_streak</code></td>
-</tr>
-<tr>
-<td><code>BotShieldShmSize 8M</code></td>
-<td><code>8M</code></td>
-<td>Total SHM budget (128K..256M)</td>
-</tr>
-<tr>
-<td><code>BotShieldFlaggedIPCapacity N</code></td>
-<td><code>50000</code></td>
-<td>Flagged-IP slot count (1024..1000000)</td>
-</tr>
-<tr>
-<td><code>BotShieldIPv6PrefixLen N</code></td>
-<td><code>64</code></td>
-<td>IPv6 mask length for flagged-IP keying; v4 always /32</td>
-</tr>
-<tr>
-<td><code>BotShieldBloomIPs N</code></td>
-<td><code>1000000</code></td>
-<td>Expected working-set size; drives Bloom filter dimensions</td>
-</tr>
-<tr>
-<td><code>BotShieldBloomWindow N</code></td>
-<td><code>604800</code></td>
-<td>Bloom rotation window in seconds (rotation at window/2)</td>
-</tr>
-<tr>
-<td><code>BotShieldBloomFPRate 0.01</code></td>
-<td><code>0.01</code></td>
-<td>Target false-positive rate</td>
-</tr>
-<tr>
-<td><code>BotShieldStateFile /path</code></td>
-<td>unset (persistence off)</td>
-<td>SHM snapshot path. <strong>Must be at main-server scope</strong>, not inside <code>&lt;VirtualHost&gt;</code></td>
-</tr>
-<tr>
-<td><code>BotShieldStateSaveInterval N</code></td>
-<td><code>300</code></td>
-<td>Periodic save interval in seconds (0 = shutdown-only); requires <code>mod_watchdog</code></td>
-</tr>
-</tbody>
-</table>
-<p>All directives are valid in server config, <code>&lt;VirtualHost&gt;</code>, <code>&lt;Directory&gt;</code>,
-<code>&lt;Location&gt;</code>, <code>&lt;Files&gt;</code>, and their <code>*Match</code> variants. <strong>Not <code>.htaccess</code></strong> —
-keeping bot-protection config out of writable filesystem locations is a
-deliberate choice. SHM-sizing and state-file directives must live at
-main-server scope (not inside <code>&lt;VirtualHost&gt;</code>), since the SHM segment is
-module-global.</p>
-<p>File-backed <code>*File</code> directives read their targets <strong>once at config-parse
-time</strong> and cache the bytes on the per-directory config — no per-request
-file I/O. Missing, unreadable, or oversized files fail <code>apachectl configtest</code>, so a broken template can't be reloaded into a running server.</p>
-<h2 id="per-url-scoping">Per-URL scoping</h2>
-<p><code>&lt;Location&gt;</code> is usually what you want for a bot gate — routes don't always
-map 1:1 to filesystem paths. Example: gate only login and the JSON API,
-leave the rest of the site alone:</p>
-<pre><code class="language-apache">BotShieldEnabled Off
-
-&lt;LocationMatch &quot;^/(login|api)(/|$)&quot;&gt;
-    BotShieldEnabled On
-&lt;/LocationMatch&gt;
-</code></pre>
-<h2 id="staging-policy-changes">Staging policy changes</h2>
-<p>mod_botshield supports two complementary dry-run modes so operators can
-deploy new rules without affecting production traffic until they're
-confident the matches are correct.</p>
-<h3 id="per-rule-observe-mode">Per-rule observe mode</h3>
-<p>Add <code>mode=observe</code> to any directive that supports it (<code>BotShieldPathTrigger</code>,
-<code>BotShieldBlockPath</code>, <code>BotShieldRateLimit</code>, <code>BotShieldFlagTrigger</code>, …):</p>
-<pre><code class="language-apache">BotShieldPathTrigger /admin/$ flag=scanner_probe mode=observe
-</code></pre>
-<p>The rule still evaluates against every matching request, but takes no
-action. Matches appear in the decision log with an <code>:observe</code> suffix:</p>
-<pre><code>botshield: path-trigger:scanner-trap:observe ip=1.2.3.4 path=/admin/
-</code></pre>
-<p>Watch the log for a few hours or days. When matches look correct, remove
-<code>mode=observe</code> and reload Apache to flip the rule to enforce.</p>
-<h3 id="global-botshieldshadowmode">Global <code>BotShieldShadowMode</code></h3>
-<p>For staging a whole policy revision at once, set the server-wide flag:</p>
-<pre><code class="language-apache">BotShieldShadowMode on
-</code></pre>
-<p>This forces every rule to observe regardless of its per-rule setting —
-useful before a release or when comparing a new ruleset against
-production traffic without any enforcement risk. Flip back to <code>off</code> when
-you're ready to enforce.</p>
-<h3 id="how-they-combine">How they combine</h3>
-<p>Either signal is sufficient: a rule runs in observe mode if EITHER its
-per-rule mode is observe OR <code>BotShieldShadowMode on</code> is set. There is no
-priority order to memorize. Use per-rule observe for staging single
-rules; use <code>BotShieldShadowMode</code> for staging an entire policy.</p>
-<h3 id="what-observe-means-precisely">What &quot;observe&quot; means precisely</h3>
+<p>Internal references:</p>
 <ul>
-<li>The rule's predicate evaluates normally (path match, cohort match, etc.)</li>
-<li>The decision log records the would-have-done outcome with <code>:observe</code>
-suffix</li>
-<li>The matching observe-mode metric counter increments
-(e.g. <code>block_path_observed_total</code>, <code>trigger_observed_total</code>)</li>
-<li>No flag bits are set on the IP</li>
-<li>No score is added to the request</li>
-<li>No status code, redirect, or log tag side-effect is emitted</li>
+<li><a href="DESIGN.md">DESIGN.md</a> — current-state design specification.</li>
+<li><a href="CHANGELOG.md">CHANGELOG.md</a> — date-organized log of changes.</li>
+<li><a href="tests/README.md">tests/README.md</a> — test, fuzz, and benchmark
+framework.</li>
 </ul>
-<p>The audit trail captures everything the rule WOULD have done; the
-response is unaffected.</p>
-<h2 id="understanding-scoring">Understanding scoring</h2>
-<p>mod_botshield uses a single signed-integer score per request to decide
-how much friction to apply. Higher score = more suspicious = stronger
-challenge. Operators tune four thresholds and rely on the module to
-collect signals consistently.</p>
-<h3 id="how-score-is-collected">How score is collected</h3>
-<p>Throughout the request lifecycle, signals call <code>bs_score_add</code> with a
-penalty (positive = suspicious, negative = credit) and a reason string.
-Built-in signals (current defaults — verify against
-<code>src/mod_botshield.c</code> if tuning matters):</p>
-<table>
-<thead>
-<tr>
-<th>Signal</th>
-<th>Penalty</th>
-<th>Reason</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>Missing <code>User-Agent</code></td>
-<td>+40</td>
-<td><code>missing-user-agent</code></td>
-</tr>
-<tr>
-<td>Missing <code>Accept-Language</code></td>
-<td>+15</td>
-<td><code>missing-accept-language</code></td>
-</tr>
-<tr>
-<td>Scraper-pattern UA</td>
-<td>+50</td>
-<td><code>scraper-ua:&lt;pattern&gt;</code></td>
-</tr>
-<tr>
-<td>First-sight IP (not in Bloom filter)</td>
-<td>+5</td>
-<td><code>first-sight-ip</code></td>
-</tr>
-<tr>
-<td>Block-path match</td>
-<td>+100</td>
-<td><code>block-path:&lt;name&gt;</code></td>
-</tr>
-<tr>
-<td>Rate-limit exceeded</td>
-<td>+50</td>
-<td><code>rate-limit-exceeded:&lt;name&gt;</code></td>
-</tr>
-<tr>
-<td>Robots.txt Disallow violation</td>
-<td>+100</td>
-<td><code>robots-block:&lt;group&gt;</code></td>
-</tr>
-<tr>
-<td>Honeypot hit (default flag-trigger)</td>
-<td>+60</td>
-<td><code>flag-trigger:honeypot_hit</code></td>
-</tr>
-<tr>
-<td>Fake-bot detection (default)</td>
-<td>+80</td>
-<td><code>flag-trigger:fake_bot</code></td>
-</tr>
-<tr>
-<td>Verified legit-crawler match</td>
-<td>-∞ (forces pass)</td>
-<td><code>verified-&lt;name&gt;</code></td>
-</tr>
-<tr>
-<td><code>app_verified_human</code> cookie credit (default)</td>
-<td>-80</td>
-<td><code>flag-trigger:app_verified_human</code></td>
-</tr>
-<tr>
-<td>Operator path / load / cookie / env / flag triggers with <code>action=score add=N</code></td>
-<td>configured</td>
-<td><code>&lt;family&gt;-trigger:&lt;name&gt;</code></td>
-</tr>
-</tbody>
-</table>
-<p>Every entry carries its reason; the per-request decision log lists
-them all so you can see exactly which signals contributed.</p>
-<p>The number of distinct reasons recorded per request is capped at 16
-(<code>BS_SCORE_MAX_REASONS</code>). Past the cap, further calls still
-contribute their penalty to the running total but are dropped from
-the audit trail. A one-shot DEBUG log line fires on the first drop
-so the diagnostic surfaces under verbose logging.</p>
-<h3 id="composition">Composition</h3>
-<p>When the policy decision is made, two values are summed into one
-effective score:</p>
-<pre><code>effective = heuristic_total + cookie_score
-</code></pre>
-<ul>
-<li><strong>heuristic_total</strong> — sum of <code>bs_score_add</code> calls for THIS request,
-inclusive of any <code>BotShieldFlagTrigger action=score add=N</code> effects
-fired by flags set on the IP or carried in the prior cookie.</li>
-<li><strong>cookie_score</strong> — accumulated reputation in the prior <code>_bs_verified</code>
-cookie. Carries forward across requests; expires with the cookie.</li>
-</ul>
-<p>A separate <strong>tier floor</strong> can also apply: any
-<code>BotShieldFlagTrigger action=tier_floor min=&lt;tier&gt;</code> rule firing on a
-set flag bit lifts the final tier to AT LEAST that level after
-threshold mapping. Score-derived tier wins when it's already above
-the floor — never silently downgrades. The floor lifts produce a
-<code>flag-tier-floor:&lt;tier&gt;</code> reason.</p>
-<h3 id="threshold-ladder">Threshold ladder</h3>
-<p>The composed <code>effective</code> score maps to a tier via three configurable
-thresholds:</p>
-<table>
-<thead>
-<tr>
-<th>Score range</th>
-<th>Tier</th>
-<th>Behavior</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>effective &lt; score_silent</code></td>
-<td>PASS</td>
-<td>request continues normally</td>
-</tr>
-<tr>
-<td><code>score_silent ≤ effective &lt; score_hard</code></td>
-<td>SILENT</td>
-<td>invisible JS proof-of-work</td>
-</tr>
-<tr>
-<td><code>score_hard ≤ effective &lt; score_captcha</code></td>
-<td>FORM</td>
-<td>visible form-submitted PoW</td>
-</tr>
-<tr>
-<td><code>score_captcha ≤ effective</code></td>
-<td>CAPTCHA</td>
-<td>third-party captcha (falls back to FORM if no provider configured)</td>
-</tr>
-</tbody>
-</table>
-<p>Defaults:</p>
-<ul>
-<li><code>BotShieldScoreSilent</code>  20</li>
-<li><code>BotShieldScoreHard</code>    50</li>
-<li><code>BotShieldScoreCaptcha</code> 80</li>
-</ul>
-<p>Tune the thresholds to your tolerance for friction. Lower = more
-requests hit challenges; higher = more requests pass freely.</p>
-<h3 id="inspecting-decisions">Inspecting decisions</h3>
-<p>The decision log line for every served challenge includes the full
-breakdown:</p>
-<pre><code>mod_botshield: &lt;action&gt; effective=N tier=&lt;tier&gt; heuristic=N
-               cookie_score=N reasons=[reason:penalty,reason:penalty,...]
-</code></pre>
-<p>When tuning thresholds or debugging unexpected challenges, grep the
-log for the request and read the <code>reasons</code> array — exactly which
-signals contributed and how much.</p>
-<h3 id="tuning-workflow">Tuning workflow</h3>
-<ol>
-<li>Start with <code>BotShieldShadowMode on</code> to dry-run all rules without
-enforcement (see &quot;Staging policy changes&quot; above).</li>
-<li>Watch the decision log for several days under real traffic.</li>
-<li>Adjust thresholds and per-rule penalties based on observed
-distributions of <code>effective</code> and the per-reason contributions.</li>
-<li>Flip <code>BotShieldShadowMode off</code> when satisfied.</li>
-<li>Subsequent rule additions can be staged with per-rule
-<code>mode=observe</code> without affecting the rest.</li>
-</ol>
-<h3 id="cookie-reputation">Cookie reputation</h3>
-<p>Once a request passes through (challenged or not), mod_botshield
-issues a <code>_bs_verified</code> cookie carrying the user's accumulated
-reputation. On subsequent requests that cookie's score field becomes
-the <code>cookie_score</code> term in the composition. Repeated good behavior
-accumulates negative <code>cookie_score</code> (forgiveness credit applied at
-challenge-issue time); repeated suspicious behavior accumulates
-positive.</p>
-<p>The reputation persists across requests but expires with the cookie
-TTL (<code>BotShieldCookieTTL</code>, default 1 hour). After expiry users start
-fresh.</p>
-<h2 id="multi-vhost-deployments">Multi-vhost deployments</h2>
-<p>mod_botshield gives each vhost its own isolated bot reputation by
-default. A bot flagged on <code>site-a.example.com</code> doesn't carry that flag
-to <code>site-b.example.com</code>. Operators running many vhosts on one Apache
-instance get per-site detection without configuring anything.</p>
-<h3 id="default-behavior-auto-isolation-per-servername">Default behavior: auto-isolation per ServerName</h3>
-<p>Each vhost's reputation namespace is derived from its <code>ServerName</code>
-directive. Two vhosts with different <code>ServerName</code> values automatically
-maintain separate reputation. No configuration required.</p>
-<pre><code class="language-apache">&lt;VirtualHost *:443&gt;
-    ServerName site-a.example.com
-    # bot reputation isolated to site-a.example.com
-&lt;/VirtualHost&gt;
-
-&lt;VirtualHost *:443&gt;
-    ServerName site-b.example.com
-    # bot reputation isolated to site-b.example.com
-&lt;/VirtualHost&gt;
-</code></pre>
-<p>A bot that hits a honeypot on <code>site-a.example.com</code> and gets flagged
-appears clean to <code>site-b.example.com</code> on its next visit. This is usually
-what you want — different sites have different threat models.</p>
-<h3 id="opt-in-shared-reputation">Opt-in shared reputation</h3>
-<p>Sometimes you want sibling vhosts to share state — dev/prod
-environments, www/api subdomains under the same brand, redundant
-frontends. Set <code>BotShieldShareScope</code> to the same string on each vhost:</p>
-<pre><code class="language-apache">&lt;VirtualHost *:443&gt;
-    ServerName www.example.com
-    BotShieldShareScope example-cluster
-&lt;/VirtualHost&gt;
-
-&lt;VirtualHost *:443&gt;
-    ServerName api.example.com
-    BotShieldShareScope example-cluster
-&lt;/VirtualHost&gt;
-</code></pre>
-<p>Both vhosts now share one reputation namespace. A bot flagged on either
-site is flagged on the other.</p>
-<p>The scope token is hashed; any string works, just keep it consistent
-across the vhosts you want grouped. Different tokens produce
-independent groups.</p>
-<h3 id="scaling">Scaling</h3>
-<p>A single Apache instance can handle hundreds of vhosts sharing one
-shared-memory segment. The per-slot namespace tag lets all vhosts
-coexist without spawning per-vhost SHM segments — operationally simpler
-than running per-vhost bot-detection instances.</p>
-<p>For very large deployments, monitor SHM utilization via the existing
-headroom watchdog and tune <code>BotShieldFlaggedIPCapacity</code>,
-<code>BotShieldRateLimitEscalateCapacity</code>, and <code>BotShieldSafeguardCapacity</code>
-to fit the aggregate traffic.</p>
-<h3 id="when-servername-is-missing">When ServerName is missing</h3>
-<p>A vhost without a <code>ServerName</code> directive falls back to the global
-default namespace (<code>ns_id=0</code>). All such vhosts share reputation.
-mod_botshield logs a NOTICE at startup so operators see the fallback.
-For explicit isolation on a vhost without ServerName, set
-<code>BotShieldShareScope</code> to a unique-per-vhost token.</p>
-<h2 id="customizing-the-challenge-page">Customizing the challenge page</h2>
-<p>Three layers, each independent:</p>
-<ul>
-<li><strong>Widget content</strong> — prompt, logo, caption, help text are all strings
-or files you provide.</li>
-<li><strong>Widget chrome</strong> — <code>BotShieldShow{Logo,Label,Box}</code> strip the widget
-down to a lone checkbox if you want to style the surroundings yourself.</li>
-<li><strong>Page shell</strong> — <code>BotShieldChallengeFile</code> replaces the full page HTML
-with your own template. The module splices the widget in at
-<code>&lt;!-- BOTSHIELD --&gt;</code> so the DOM contract the JavaScript relies on stays
-module-controlled.</li>
-</ul>
-<p>See <code>apache/botshield-dev.conf</code> for worked examples of each.</p>
-<h2 id="accessibility">Accessibility</h2>
-<p>The default interstitial passes axe-core WCAG 2.1 AA with zero
-violations — landmarks, focus-visible outlines, <code>aria-live</code> status on the
-progress message, <code>prefers-reduced-motion</code> handling, and sufficient
-contrast in both light and dark regions of the widget. Stripping chrome
-preserves accessibility: the prompt moves to <code>aria-label</code> when visually
-hidden, the live-status region is always present, and the screen-reader-
-only <code>&lt;h1&gt;</code> is emitted regardless of how much chrome you've removed.</p>
-<h2 id="security-note">Security note</h2>
-<p>Cookies are AES-256-GCM authenticated-encrypted over a 15-field
-canonical envelope: any edit to the score, flag bitmap, tier marker,
-forgiveness window, or PoW proof fails the GCM tag check and forces
-a fresh challenge. The AES key is HKDF-derived per-purpose from the
-master secret, and a secondary verify-only key (<code>BotShieldSecondary SecretFile</code>) supports graceful rotation. Cookies carrying a genuine
-PoW solve can still be replayed within their TTL (default 1 h), which
-is why flags and the first-sight Bloom filter live in shared memory
-rather than only in the cookie — an attacker can replay yesterday's
-lower-score cookie, but an IP that tripped a honeypot stays flagged
-across restarts via the periodic state-file snapshots. The per-cookie
-hourly forgiveness cap (E15) prevents using cookie expiry as a budget-
-reset bypass.</p>
-<p>The captcha-verify endpoint (<code>&lt;prefix&gt;/captcha-verify/&lt;provider&gt;</code>) is
-guarded by six layers of pre-libcurl checks: Content-Type prefilter,
-8 KB body cap, token-field presence and length bound, HMAC-signed
-<code>_bs_captcha_pending</code> cookie (set at interstitial render, required at
-verify, HttpOnly/Secure/SameSite=Lax/Max-Age=300), per-IP rate limit
-(<code>BotShieldCaptchaRateLimit</code>), and a global in-flight semaphore
-(<code>BotShieldCaptchaMaxInFlight</code>). Each check rejects cheaply <strong>before</strong>
-any outbound call — the verify endpoint cannot be trivially weaponized
-as a siteverify amplifier or worker-starvation vector.</p>
 <h2 id="module-owned-endpoints">Module-owned endpoints</h2>
 <p>Under <code>BotShieldEndpointPrefix</code> (default <code>/botshield</code>):</p>
 <table>
@@ -924,92 +240,54 @@ as a siteverify amplifier or worker-starvation vector.</p>
 <tr>
 <td><code>&lt;prefix&gt;/captcha-verify</code></td>
 <td>POST</td>
-<td>Bare verify URL for single-provider vhosts</td>
+<td>Bare verify URL (single-provider vhosts)</td>
 </tr>
 <tr>
 <td><code>&lt;prefix&gt;/captcha-verify/&lt;provider&gt;</code></td>
 <td>POST</td>
-<td>Per-provider verify URL (multi-provider vhosts)</td>
+<td>Per-provider verify URL</td>
 </tr>
 <tr>
 <td><code>&lt;prefix&gt;/metrics</code></td>
 <td>GET</td>
 <td>Prometheus 0.0.4 text exposition</td>
 </tr>
+<tr>
+<td><code>&lt;prefix&gt;/policy-status</code></td>
+<td>GET</td>
+<td>Active policy readback (rate limits, block paths, robots.txt)</td>
+</tr>
+<tr>
+<td><code>&lt;prefix&gt;/embedded.js</code></td>
+<td>GET</td>
+<td>Embedded silent-verify wrapper</td>
+</tr>
+<tr>
+<td><code>&lt;prefix&gt;/form-widget.js</code></td>
+<td>GET</td>
+<td>Inline form-captcha widget shell</td>
+</tr>
 </tbody>
 </table>
-<p>Access control is delegated to standard Apache mechanisms — put a
-<code>&lt;Location&gt;</code> with <code>Require ip ...</code> or <code>AuthType Basic</code> around the
-metrics endpoint, for example:</p>
+<p>Access control is delegated to standard Apache mechanisms — wrap any
+of them in <code>&lt;Location&gt;</code> with <code>Require ip</code> / <code>AuthType Basic</code> to
+restrict, e.g.:</p>
 <pre><code class="language-apache">&lt;Location /botshield/metrics&gt;
     Require ip 10.0.0.0/8
 &lt;/Location&gt;
 </code></pre>
-<h2 id="observability">Observability</h2>
-<p>Every decision emits a stable <code>key=value</code> line alongside the existing
-prose log:</p>
-<pre><code>mod_botshield: decision tier=captcha outcome=verified ip=203.0.113.42
-    score=0 cookie=- provider=turnstile alg=captcha-turnstile
-    reason=&quot;-&quot; path=&quot;/captcha-demo&quot;
-</code></pre>
-<p>The decision log emits at Apache's <code>info</code> level. Apache's default
-<code>LogLevel</code> is <code>warn</code>, so the line is invisible until you opt in.
-Bump just this module to make it visible without raising the
-verbosity of the rest of the server:</p>
-<pre><code class="language-apache">LogLevel botshield_module:info
-</code></pre>
-<p>The <code>reason</code>, <code>path</code>, and <code>tag</code> fields are quoted; embedded <code>&quot;</code>
-and <code>\</code> characters are URL-percent-encoded (<code>%22</code> and <code>%5C</code>) so a
-hand-rolled HTTP client sending an adversarial URI can't break
-log-parser tokenization. Browser traffic is unaffected — browsers
-already %-encode those bytes before sending.</p>
-<p>Enum sets:</p>
-<ul>
-<li><code>tier</code>     = <code>none</code> | <code>pass</code> | <code>silent</code> | <code>form</code> | <code>captcha</code></li>
-<li><code>outcome</code>  = <code>declined</code> | <code>challenged</code> | <code>verified</code> | <code>rejected</code> |
-<code>failopen</code> | <code>rate_limited</code> | <code>inflight_capped</code> |
-<code>pending_missing</code> | <code>misconfigured</code> | <code>debug</code></li>
-<li><code>cookie</code>   = <code>ok</code> | <code>expired</code> | <code>bad_sig</code> | <code>bad_format</code> | <code>absent</code> | <code>-</code></li>
-<li><code>provider</code> = <code>-</code> or registry name</li>
-</ul>
-<p>Every decision also increments SHM counters exported at <code>&lt;prefix&gt;/metrics</code>:</p>
-<ul>
-<li><code>botshield_tier_&lt;t&gt;_total</code> — 5 tier counters</li>
-<li><code>botshield_outcome_&lt;o&gt;_total</code> — 10 outcome counters</li>
-<li><code>botshield_cookie_&lt;c&gt;_total</code> — 5 cookie counters</li>
-<li><code>botshield_provider_&lt;p&gt;_total</code> — 6 provider counters</li>
-<li>Plus persistence counters/gauges, Bloom popcount gauges, flagged-IP
-table utilization, in-flight captcha count, SHM capacity static values</li>
-</ul>
-<p>Counter names mechanically track the log enum vocabulary — there is no
-parallel taxonomy. Adding an outcome value adds one row to the
-string→index lookup or the string simply doesn't increment a counter
-(with a visible WARNING), so drift is loud, not silent.</p>
-<p>When <code>mod_status</code> is loaded and <code>ExtendedStatus On</code> is set, the module
-also contributes to <code>/server-status</code> via an optional hook: a compact
-HTML table in browser mode, <code>BotShield&lt;Name&gt;: N</code> key-value lines in
-<code>?auto</code> mode.</p>
 <h2 id="local-development">Local development</h2>
 <p>The repo ships a working HTTPS dev vhost at
 <code>apache/botshield-dev.conf</code> that exercises every directive against
-the committed <code>tests/site/</code> docroot. The vhost paths are templated
-through <code>${BS_REPO}</code>, so <code>tests/setup/provision.sh</code> wires it to
-your checkout location automatically:</p>
-<pre><code class="language-bash">sudo tests/setup/provision.sh
+the committed <code>tests/site/</code> docroot. Bring it up:</p>
+<pre><code class="language-sh">sudo tests/setup/provision.sh
 </code></pre>
-<p>This is <strong>idempotent</strong> — safe to re-run. It builds + installs the
-module, generates a self-signed cert at <code>/etc/ssl/botshield-dev/</code>,
-seeds <code>/etc/botshield/</code> with provider dummy secrets, sets up the
-test docroot, and reloads Apache. After it completes, the dev vhost
-listens on <code>https://localhost/</code> with the test fixture as DocumentRoot
-and the rendered docs site mounted at <code>https://localhost/mod_botshield/</code>.</p>
-<p>The vhost has <code>&lt;Location&gt;</code> blocks demonstrating every per-URL widget
-customization, every captcha provider, and the honeypot scope; read
-<code>apache/botshield-dev.conf</code> for the full inventory. Test infrastructure
-(pytest harness, fuzz, benchmarks) is documented in
+<p>Idempotent — safe to re-run. After it completes, the dev vhost
+listens on <code>https://localhost/</code>. Test infrastructure (pytest harness,
+fuzz, benchmarks) is documented in
 <a href="tests/README.md"><code>tests/README.md</code></a>.</p>
 <h2 id="license">License</h2>
-<p>MIT. See <code>LICENSE</code>.</p>
+<p>MIT. See <a href="LICENSE">LICENSE</a>.</p>
 
         </div>
       </article>
