@@ -1873,6 +1873,56 @@ const char *bs_validate_secret_key(cmd_parms *cmd,
     return NULL;
 }
 
+/* End-to-end secret-file loader: stat + mode check (refuse group-
+ * or world-accessible) + bs_load_config_file + bs_validate_secret_key.
+ *
+ * Used by every directive that loads an HMAC / GCM master key
+ * (BotShieldSecretFile, BotShieldSecondarySecretFile,
+ * BotShieldCaptchaSecretFile, BotShieldAppIntegrationSecretFile).
+ * Consolidating the four sites into one helper means the
+ * mode-600 discipline, the size cap, the NUL-byte check, and the
+ * minimum-key-length floor all change in one place if the
+ * threat model evolves.
+ *
+ * Returns NULL on success with *out_buf and *out_len populated.
+ * On any failure returns an Apache error string keyed on the
+ * caller's `directive` so the operator sees the directive that
+ * actually failed, not a generic message. */
+const char *bs_load_secret_file(cmd_parms *cmd,
+                                const char *directive,
+                                const char *path,
+                                const char **out_buf,
+                                apr_size_t *out_len)
+{
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        return apr_psprintf(cmd->pool,
+            "%s: cannot stat '%s'", directive, path);
+    }
+    if (st.st_mode & (S_IRGRP | S_IROTH | S_IWGRP | S_IWOTH)) {
+        return apr_psprintf(cmd->pool,
+            "%s: '%s' is group- or world-accessible "
+            "(mode %04o); chmod 600 it",
+            directive, path, st.st_mode & 07777);
+    }
+
+    const char *raw_buf = NULL;
+    apr_size_t raw_len = 0;
+    const char *err = bs_load_config_file(cmd, directive, path,
+                                          BS_MAX_SECRET_BYTES,
+                                          &raw_buf, &raw_len);
+    if (err) return err;
+
+    apr_size_t valid_len = 0;
+    err = bs_validate_secret_key(cmd, directive, path,
+                                 raw_buf, raw_len, &valid_len);
+    if (err) return err;
+
+    *out_buf = raw_buf;
+    *out_len = valid_len;
+    return NULL;
+}
+
 const char *bs_set_logo_file(cmd_parms *cmd, void *cfg_v, const char *arg)
 {
     bs_dir_cfg *cfg = cfg_v;

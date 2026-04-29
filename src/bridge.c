@@ -511,28 +511,11 @@ const char *bs_set_app_integration_secret_file(cmd_parms *cmd,
         return "BotShieldAppIntegrationSecretFile: path must be absolute";
     }
 
-    struct stat st;
-    if (stat(arg, &st) != 0) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldAppIntegrationSecretFile: cannot stat '%s'", arg);
-    }
-    if (st.st_mode & (S_IRGRP | S_IROTH | S_IWGRP | S_IWOTH)) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldAppIntegrationSecretFile: '%s' is group- or "
-            "world-accessible (mode %04o); chmod 600 it",
-            arg, st.st_mode & 07777);
-    }
-
     const char *buf = NULL;
-    apr_size_t buf_len = 0;
-    const char *err = bs_load_config_file(cmd,
-        "BotShieldAppIntegrationSecretFile", arg,
-        BS_MAX_SECRET_BYTES, &buf, &buf_len);
-    if (err) return err;
-
     apr_size_t len = 0;
-    err = bs_validate_secret_key(cmd, "BotShieldAppIntegrationSecretFile",
-                                 arg, buf, buf_len, &len);
+    const char *err = bs_load_secret_file(cmd,
+                                          "BotShieldAppIntegrationSecretFile",
+                                          arg, &buf, &len);
     if (err) return err;
 
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,

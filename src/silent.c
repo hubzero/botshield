@@ -1001,54 +1001,25 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
      * path does. The only rep delta is passes_silent=1 vs
      * passes_captcha=1 — this was a silent-tier dispatch that
      * happened to use a captcha provider for the verification, not
-     * a captcha-tier user-interactive solve. */
-    int ttl        = bs_effective_int(cfg->cookie_ttl, BS_DEFAULT_COOKIE_TTL);
-    int difficulty = bs_effective_int(cfg->difficulty, BS_DEFAULT_DIFFICULTY);
-    const char *cookie_alg_name = apr_psprintf(r->pool, "captcha-%s",
-                                               cfg->captcha_provider->name);
-    const bs_pow_algorithm *captcha_alg = bs_find_algorithm(cookie_alg_name);
-    if (!captcha_alg || !captcha_alg->implemented) {
-        r->status = HTTP_INTERNAL_SERVER_ERROR;
-        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
-            "mod_botshield: embedded-verify(%s): cookie alg '%s' "
-            "missing from registry", provider_name, cookie_alg_name);
-        return OK;
-    }
-
-    /* E17 review fix — carry forward prior cookie state if a sig-
-     * verifying _bs_verified is present. Without it, a client near
-     * the E15 forgive_consumed cap could wash their budget by
-     * letting the cookie expire and re-running an embedded provider
-     * verify. bs_issue_challenge() will overwrite challenged_at
-     * with the current time, so unlike the PoW path we don't need
-     * to save/restore it here. */
-    bs_rep_state next_rep;
-    memset(&next_rep, 0, sizeof(next_rep));
-    {
-        bs_challenge prior_ch = { 0 };
-        if (bs_carry_forward_eligible(r, cfg, &prior_ch)) {
-            next_rep = prior_ch.rep;
-            bs_apply_rep_carry(r, cfg, &prior_ch, &next_rep,
-                               bs_effective_int(cfg->forgive_silent,
-                                                BS_DEFAULT_FORGIVE_SILENT));
-        }
-        next_rep.passes_silent = 1;  /* clamp */
-    }
-
+     * a captcha-tier user-interactive solve.
+     *
+     * Carry-forward + mint + install routed through the shared
+     * bs_captcha_carry_and_mint helper so the forgive cap and rep
+     * carry-forward stay in lockstep with the captcha-verify
+     * handler. The E15 + E17 self-audits caught drift in this
+     * exact code; one helper, one place to update. */
     bs_challenge ch;
-    const char *ierr = bs_issue_challenge(r->pool, cfg, difficulty, ttl,
-                                          /* auto_tier */ 1,
-                                          captcha_alg, &next_rep, &ch);
-    if (ierr) {
+    const char *cookie_alg_name = NULL;
+    const char *merr = bs_captcha_carry_and_mint(r, cfg,
+        BS_CAPTCHA_PASSES_SILENT,
+        bs_effective_int(cfg->forgive_silent, BS_DEFAULT_FORGIVE_SILENT),
+        /* auto_tier */ 1,
+        &ch, &cookie_alg_name);
+    if (merr) {
         r->status = HTTP_INTERNAL_SERVER_ERROR;
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
-            "mod_botshield: embedded-verify(%s): cookie issue failed: %s",
-            provider_name, ierr);
-        return OK;
-    }
-
-    if (bs_install_verified_cookie(r, cfg, &ch, "captcha") != NULL) {
-        r->status = HTTP_INTERNAL_SERVER_ERROR;
+            "mod_botshield: embedded-verify(%s): %s",
+            provider_name, merr);
         return OK;
     }
     r->status = HTTP_NO_CONTENT;
