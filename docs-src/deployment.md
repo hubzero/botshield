@@ -174,6 +174,112 @@ up-front. Look for log lines of the form:
 mod_botshield: capacity headroom: flagged_ip 38241/50000 (76%)
 ```
 
+## Performance characteristics
+
+Per-request overhead the module adds, measured by the in-tree
+benchmark suite in `tests/bench/`. The numbers below come from
+30-second `wrk` sweeps against a 140-byte static file on Apache
+2.4, localhost loopback (no real network), Linux x86_64, with
+realistic browser headers attached. They show the *floor* of the
+module's cost — production traffic depends on hardware, kernel,
+network RTT, header mix, and request rate, all of which dominate
+or shape the numbers below.
+
+**Single-connection isolation** (`-t 1 -c 1`) — the cleanest
+"what does each request actually cost?" measurement, no
+contention effects:
+
+| Configuration | p50 latency | Δ vs Apache static |
+|---|---|---|
+| Apache static (no module) | ~310us | — |
+| `BotShieldEnabled on`, no features | ~318us | **+8us** |
+
+**Sustained concurrent load** (`-t 4 -c 100`) — the throughput
+shape. Multi-connection deltas are dominated by loopback
+contention and Apache worker dynamics, not the module:
+
+| Configuration | RPS hit vs Apache static |
+|---|---|
+| Module loaded, all scopes disabled | -13% |
+| `BotShieldEnabled on`, no features | -10% |
+| + allow-list (6 verified-bot entries) | -11% |
+| + trigger families (3 cookie, 1 env, 3 path, 1 scope) | -21% |
+| + robots.txt (10-rule wildcard group + named groups) | -15% |
+| + `LogLevel botshield_module:info` (decision log) | -9% |
+| + valid `_bs_verified` cookie attached | -18% |
+| Everything on (kitchen sink) | -20% |
+
+What to take from these:
+
+- **Just loading the module** costs ~13% RPS at high concurrency
+  even with no scope enabling it. Apache calls the request hook
+  regardless; the hook short-circuits, but the function call +
+  scope-enabled check still happens.
+- **Enabling the module** on top of having loaded it is roughly
+  free. Bare-on (`-10%`) is within noise of module-loaded-disabled
+  (`-13%`). The actual heuristics + Bloom + score-composition
+  per-request work doesn't measurably move the dial.
+- **Trigger families are the dominant configuration cost.** Both
+  the trigger-only scenario (`-21%`) and kitchen-sink (`-20%`)
+  cluster around the same hit. Each request walks the trigger
+  arrays in declaration order; the more rules, the longer the walk.
+- **Robots.txt enforcement** adds ~5% over bare-on.
+- **Allow-list** is sub-noise — the UA classifier trie is fast.
+- **The decision-log emission** (`LogLevel botshield_module:info`)
+  is sub-noise. Operators can turn observability on without
+  measurable RPS hit.
+- **Carrying a valid cookie isn't a perf win.** GCM-decrypt +
+  canonical reconstruction + algorithm verify cost roughly what
+  the heuristic walk they sometimes replace cost. The cookie
+  path's purpose is correctness (carrying reputation), not cheap
+  pass-through.
+
+The `tests/bench/run-bench.sh` driver reproduces these in your own
+environment in ~12 minutes. Run it before sizing a new deployment
+or whenever you want a fresh baseline against your production
+hardware.
+
+### Putting the overhead in perspective
+
+Eight microseconds isn't intuitively meaningful in isolation.
+Some reference points for the same hardware tier:
+
+- One L3 cache miss on a modern x86 CPU is ~10-30 ns; mod_botshield
+  bare-on adds the equivalent of ~300-800 cache misses worth of
+  work per request. Routine for a function that does multiple SHM
+  reads, a Bloom probe, and several short string comparisons.
+- One TCP loopback round-trip to localhost is ~10-30 µs on the
+  same machine; the entire bare-on cost fits comfortably within
+  the cost of just *one* loopback round-trip.
+- One typical real-network RTT (20-100 ms WAN, 1-5 ms intra-DC)
+  is 1,000-10,000× larger than the per-request overhead. For any
+  request crossing a real network, the module's contribution is
+  in the noise.
+- One PHP request through a framework (Laravel, Symfony, Django,
+  Rails) typically spends 20-200 ms in bootstrap + ORM + template
+  render + database round-trips, *before* the application's own
+  business logic runs. Mod_botshield's 8 µs is 0.004-0.04% of that.
+- A static-file response on Apache (the bench's worst case for
+  amortizing the cost) takes ~310 µs on loopback. Adding the
+  module turns that into ~318 µs — a real percentage delta on a
+  best-case request, but the absolute hit is still well under
+  the cost of a single SQL query or a single Redis lookup.
+
+The multi-connection -10% to -20% RPS hit at sustained `-c 100`
+load looks larger because the static-file workload is so cheap
+that any added per-request work shows up as a meaningful fraction.
+The same module added to a typical PHP / framework backend would
+shrink to a sub-1% RPS hit — the application's own work dominates.
+
+Where the overhead earns its keep: every bot request that
+mod_botshield blocks at the silent tier never invokes the backend,
+which means an entire framework bootstrap doesn't run, which
+means tens of milliseconds of CPU time saved per blocked request.
+On a site where ~10% of traffic is unwanted scraping, blocking it
+upstream of the application saves orders of magnitude more
+backend cycles than the module costs the legitimate 90%. That's
+the trade the design assumes.
+
 ## State persistence
 
 mod_botshield can snapshot the SHM tables to disk at a configured
