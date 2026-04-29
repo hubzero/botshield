@@ -40,6 +40,17 @@ THREADS=4
 CONNECTIONS=100
 URL=http://127.0.0.1:8080/bench.html
 
+# Realistic-browser headers attached to every wrk request. wrk's
+# default request has neither User-Agent nor Accept-Language, which
+# the built-in heuristics score as +40 (missing-UA) +15 (missing-AL)
+# = 55, well above the silent threshold of 20. Without these headers
+# every BotShield-enabled request gets challenged and the benchmark
+# measures interstitial-issue throughput instead of pass-through.
+WRK_HEADERS=(
+    -H "User-Agent: Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/125.0"
+    -H "Accept-Language: en-US,en;q=0.9"
+)
+
 if [[ "${1:-}" == "--quick" ]]; then
     MEASURE_SEC=5
 fi
@@ -165,13 +176,35 @@ for scenario_path in "${SCENARIOS[@]}"; do
     # Warmup (always at low concurrency — we're shaking out connection setup,
     # not stressing the server). Cookie hook applies during warmup too so
     # the SHM cookie-cache state is consistent.
-    wrk -t2 -c20 -d${WARMUP_SEC}s --latency "${lua_args[@]}" "$URL" \
+    wrk -t2 -c20 -d${WARMUP_SEC}s --latency \
+        "${WRK_HEADERS[@]}" "${lua_args[@]}" "$URL" \
         >/dev/null 2>&1 || true
 
     # Measure.
     # shellcheck disable=SC2086  # word-split flags intentional
-    wrk $flags -d${MEASURE_SEC}s --latency "${lua_args[@]}" "$URL" \
+    wrk $flags -d${MEASURE_SEC}s --latency \
+        "${WRK_HEADERS[@]}" "${lua_args[@]}" "$URL" \
         > "$RESULTS_DIR/$scenario.txt"
+
+    # Verify the response was the static file, not an interstitial.
+    # The "Bytes/req" sanity check catches the case where heuristics
+    # or a misconfigured scenario challenged every request — the
+    # interstitial HTML is ~10 KB while bench.html is ~140 bytes.
+    bytes_per_req=$(awk '
+        /requests in/ {
+            req=$1
+            gsub(/[^0-9.]/, "", $5); bytes_n=$5
+            unit=$5; gsub(/[0-9.]/, "", unit)
+            if (unit ~ /GB/) bytes_n *= 1024 * 1024 * 1024
+            else if (unit ~ /MB/) bytes_n *= 1024 * 1024
+            else if (unit ~ /KB/) bytes_n *= 1024
+            if (req > 0) printf "%d\n", bytes_n / req
+        }
+    ' "$RESULTS_DIR/$scenario.txt")
+    if [[ -n "$bytes_per_req" ]] && (( bytes_per_req > 1500 )); then
+        echo "  ⚠ ${bytes_per_req}B/req — looks like requests were" \
+             "challenged (interstitial response). Check headers / config." >&2
+    fi
 
     unset BENCH_COOKIE
 
