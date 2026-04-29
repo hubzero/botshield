@@ -64,7 +64,7 @@ CFLAGS_SAN := \
 # response. apxs forwards trailing -l args to the linker.
 LIBS := -lcrypto -lcurl -ljson-c
 
-.PHONY: all build install enable disable reload clean docs \
+.PHONY: all build install enable disable reload clean test-clean docs \
         sanitize install-sanitize \
         fuzz fuzz-run fuzz-clean \
         fuzz-robots fuzz-robots-run
@@ -101,6 +101,21 @@ reload:
 
 clean:
 	rm -rf src/.libs src/*.lo src/*.la src/*.slo src/*.o
+
+# Transient pytest / __pycache__ / report artifacts. Spares two
+# things on purpose:
+#   - tests/.venv: expensive to recreate (pip install of pytest +
+#     plugins). Wipe with `rm -rf tests/.venv` if you actually want
+#     to start over.
+#   - .hypothesis/examples/: Hypothesis's saved-failure database.
+#     Each entry is a minimized counter-example that gets replayed
+#     on every run, guarding against regression of a property test
+#     that already failed once. Throwing it away on every clean
+#     erases that protection. Use `git clean -fdx` if you really
+#     want a pristine tree.
+test-clean:
+	rm -rf tests/.pytest_cache tests/reports tests/test-results
+	find . -type d -name __pycache__ -prune -exec rm -rf {} +
 
 docs:
 	$(DOCS_PYTHON) $(DOCS_BUILD)
