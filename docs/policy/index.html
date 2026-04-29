@@ -1,0 +1,599 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Policy | mod_botshield</title>
+  <meta name="description" content="Allow lists, rate limits, block paths, robots.txt, the trigger families, and flag triggers.">
+  <link rel="stylesheet" href="../assets/site.css">
+</head>
+<body class="site-doc">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <div class="page-shell">
+    <header class="site-header site-header--compact">
+      <a class="brand" href="../index.html">
+        <img class="brand__icon" src="../assets/logo-botshield-icon.svg" alt="" aria-hidden="true">
+        <span class="brand__wordmark" aria-label="BotShield">
+          <span class="brand__wordmark-soft">Bot</span><span class="brand__wordmark-strong">Shield</span>
+        </span>
+      </a>
+      <nav class="top-nav" aria-label="Primary">
+        <a class="top-nav__link" href="#">GitHub</a>
+        <a class="top-nav__link" href="../getting-started/index.html">Docs</a>
+        <a class="top-nav__link" href="../getting-started/index.html#build">Download</a>
+      </nav>
+    </header>
+
+    <main id="main-content" class="docs-layout" tabindex="-1">
+      <aside class="docs-sidebar">
+        <p class="docs-sidebar__eyebrow">Docs</p>
+        <nav class="docs-nav" aria-label="Documentation">
+<a class="docs-nav__item" href="../getting-started/index.html">
+  <span class="docs-nav__title">Getting started</span>
+  <span class="docs-nav__summary">Install, build, minimal configuration, and verifying a first request.</span>
+</a>
+<a class="docs-nav__item" href="../deployment/index.html">
+  <span class="docs-nav__title">Deployment</span>
+  <span class="docs-nav__summary">Reverse proxies, slow-client defense, multi-vhost reputation, secret rotation, capacity sizing.</span>
+</a>
+<a class="docs-nav__item" href="../operator-model/index.html">
+  <span class="docs-nav__title">Operator model</span>
+  <span class="docs-nav__summary">Tiers, scoring, cookie-carried reputation, decision log, tuning workflow.</span>
+</a>
+<a class="docs-nav__item is-active" href="index.html">
+  <span class="docs-nav__title">Policy</span>
+  <span class="docs-nav__summary">Allow lists, rate limits, block paths, robots.txt, the trigger families, and flag triggers.</span>
+</a>
+<a class="docs-nav__item" href="../captcha/index.html">
+  <span class="docs-nav__title">Captcha and app-bridge</span>
+  <span class="docs-nav__summary">Third-party captcha providers, verify-endpoint hardening, and the signed app-bridge protocols.</span>
+</a>
+<a class="docs-nav__item" href="../staging/index.html">
+  <span class="docs-nav__title">Staging</span>
+  <span class="docs-nav__summary">Per-rule observe and global shadow mode for safe rule rollout.</span>
+</a>
+<a class="docs-nav__item" href="../observability/index.html">
+  <span class="docs-nav__title">Observability</span>
+  <span class="docs-nav__summary">Decision log, Prometheus metrics, mod_status contribution, and the policy-status admin page.</span>
+</a>
+<a class="docs-nav__item" href="../directives/index.html">
+  <span class="docs-nav__title">Directive reference</span>
+  <span class="docs-nav__summary">Canonical operator-facing reference for all 78 directives, grouped by family.</span>
+</a>
+<a class="docs-nav__item" href="../troubleshooting/index.html">
+  <span class="docs-nav__title">Troubleshooting</span>
+  <span class="docs-nav__summary">Common operator-visible issues, diagnostics, and fixes.</span>
+</a>
+<a class="docs-nav__item" href="../faq/index.html">
+  <span class="docs-nav__title">FAQ</span>
+  <span class="docs-nav__summary">Honest answers to questions operators ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
+</a>
+<a class="docs-nav__item" href="../guide/index.html">
+  <span class="docs-nav__title">Project README</span>
+  <span class="docs-nav__summary">Repository README — project overview, build instructions, and dev configuration.</span>
+</a>
+<a class="docs-nav__item" href="../roadmap/index.html">
+  <span class="docs-nav__title">Roadmap and changelog</span>
+  <span class="docs-nav__summary">Shipped milestones, extension design notes, and the development backlog.</span>
+</a>
+        </nav>
+      </aside>
+
+      <article class="docs-article">
+        <header class="docs-article__header">
+          <p class="eyebrow">Documentation</p>
+          <h1>Policy</h1>
+          <p class="docs-article__summary">Allow lists, rate limits, block paths, robots.txt, the trigger families, and flag triggers.</p>
+          <p class="docs-article__source">Policy</p>
+        </header>
+<section class="toc">
+  <h2 class="toc__heading">On this page</h2>
+  <ul class="toc__list">
+<li class="toc__item toc__item--level-2"><a href="#allow-list-verified-crawlers">Allow list — verified crawlers</a></li>
+<li class="toc__item toc__item--level-3"><a href="#verified-vs-fake">Verified vs fake</a></li>
+<li class="toc__item toc__item--level-2"><a href="#rate-limits-and-block-paths">Rate limits and block paths</a></li>
+<li class="toc__item toc__item--level-3"><a href="#repeated-429-escalation">Repeated-429 escalation</a></li>
+<li class="toc__item toc__item--level-3"><a href="#path-pattern-semantics">Path-pattern semantics</a></li>
+<li class="toc__item toc__item--level-2"><a href="#robots-txt-enforcement">Robots.txt enforcement</a></li>
+<li class="toc__item toc__item--level-2"><a href="#triggers-predicate-action-engine">Triggers — predicate-action engine</a></li>
+<li class="toc__item toc__item--level-3"><a href="#shared-action-keys">Shared action keys</a></li>
+<li class="toc__item toc__item--level-3"><a href="#path-triggers">Path triggers</a></li>
+<li class="toc__item toc__item--level-3"><a href="#cookie-triggers">Cookie triggers</a></li>
+<li class="toc__item toc__item--level-3"><a href="#env-triggers">Env triggers</a></li>
+<li class="toc__item toc__item--level-3"><a href="#feedback-triggers">Feedback triggers</a></li>
+<li class="toc__item toc__item--level-3"><a href="#load-triggers">Load triggers</a></li>
+<li class="toc__item toc__item--level-2"><a href="#flag-trigger-family">Flag-trigger family</a></li>
+<li class="toc__item toc__item--level-3"><a href="#compiled-in-defaults">Compiled-in defaults</a></li>
+<li class="toc__item toc__item--level-3"><a href="#per-apache-scope-triggers-botshieldtrigger">Per-Apache-scope triggers — `BotShieldTrigger`</a></li>
+<li class="toc__item toc__item--level-2"><a href="#safeguard">Safeguard</a></li>
+<li class="toc__item toc__item--level-2"><a href="#where-to-next">Where to next</a></li>
+  </ul>
+</section>
+        <div class="prose">
+<p>mod_botshield decides which requests deserve friction by composing
+six policy families on top of the score-driven tier ladder. This
+page covers each family's directive, predicate shape, side effects,
+and where it sits in the runtime walk.</p>
+<p>The runtime order (one pass per request, first short-circuit wins):</p>
+<ol>
+<li><strong>Cookie triggers</strong> — pre-handler state. Cookie family
+accumulates pass-with-credit across multiple matches.</li>
+<li><strong>Env triggers</strong> — predicate on Apache environment
+variables (<code>SetEnvIfExpr</code>, mod_rewrite <code>[E=…]</code>). First-match
+wins; gated on <code>ap_is_initial_req</code> so internal-redirect legs
+don't double-apply.</li>
+<li><strong>Load triggers</strong> — predicate on the global load_state
+sampled by the load watchdog.</li>
+<li><strong>Path triggers</strong> — predicate on the request URI.</li>
+<li><strong>Block-path</strong> — cohort + path-glob → 403.</li>
+<li><strong>Robots.txt Disallow</strong> — RFC 9309 matcher → 403.</li>
+<li><strong>Rate-limit</strong> — cohort + budget → 429 with Retry-After.</li>
+<li><strong>Robots.txt Crawl-delay</strong> — per-group rate cap.</li>
+</ol>
+<p>The policy walk runs <em>before</em> the built-in heuristics, so a
+matching policy rule can short-circuit the request even when the
+client also has a valid <code>_bs_verified</code> cookie. Allow-list checks
+and built-in heuristics (missing-UA, missing-Accept-Language,
+scraper-pattern UA) run after the policy walk if the walk
+returns OK; flag-trigger effects are applied last, against the
+IP's accumulated flag bitmap.</p>
+<h2 id="allow-list-verified-crawlers">Allow list — verified crawlers</h2>
+<p><code>BotShieldAllowBot</code> registers a UA pattern + IP-range pair that
+the allow-list classifier checks during the heuristics phase.
+Verified crawlers (UA matches AND IP is in the published range)
+get a hard pass — they bypass the score ladder entirely.</p>
+<pre><code class="language-apache">BotShieldAllow on
+BotShieldAllowBot googlebot &quot;Googlebot/&quot; /var/lib/botshield/bots/googlebot.txt
+BotShieldAllowBot bingbot   &quot;bingbot/&quot;   /var/lib/botshield/bots/bingbot.txt
+BotShieldAllowBot internal-monitor &quot;MonitorBot/&quot; 10.0.0.0/8,2001:db8::/32
+</code></pre>
+<p>The third arg is shape-inspected — no separate flag or sentinel:</p>
+<ul>
+<li><strong>starts with <code>/</code></strong> → absolute path to a CIDR file (one CIDR per
+line, <code>#</code> comments, blank lines OK, IPv4 + IPv6).</li>
+<li><strong>contains <code>/</code> or <code>:</code></strong> → comma-separated inline CIDRs.</li>
+<li><strong><code>*</code> alone</strong> → UA-match only; no IP check. Logged with reason
+<code>allow-bot-ua:&lt;name&gt;</code> instead of <code>allow-bot:&lt;name&gt;</code>.</li>
+<li><strong>omitted</strong> → default file path
+<code>/var/lib/botshield/bots/&lt;name&gt;.txt</code>.</li>
+</ul>
+<p>The CIDR file is read once at config-parse time (size cap 1 MiB) and
+cached on the per-server config. Refresh with a reload.</p>
+<p>A built-in seed list covers Googlebot, Bingbot, Applebot, Yandex,
+DuckDuckBot, and a handful of others — all installed under
+<code>/var/lib/botshield/bots/</code>. The <code>tools/refresh-bot-ranges.sh</code> script
+fetches each provider's published JSON and rewrites the CIDR files
+in place.</p>
+<h3 id="verified-vs-fake">Verified vs fake</h3>
+<p>A request whose UA matches a registered bot pattern is one of three
+states:</p>
+<ul>
+<li><strong>verified</strong> — UA matches, IP is in the range. Hard pass with
+reason <code>verified-&lt;name&gt;</code>.</li>
+<li><strong>fake</strong> — UA matches, IP is NOT in the range. Strong penalty
+with reason <code>fake-&lt;name&gt;</code>. Fake-bot detection is one of the
+most reliable signals — bot operators love claiming Googlebot.</li>
+<li><strong>unverified</strong> — UA matches, classifier hit but ranges aren't
+loaded for this name. Logged with reason <code>bot-unverified</code> for
+operator visibility, no score effect.</li>
+</ul>
+<h2 id="rate-limits-and-block-paths">Rate limits and block paths</h2>
+<p><code>BotShieldRateLimit</code> caps requests-per-window for a cohort. Hits
+return 429 with <code>Retry-After</code> and add 50 to the score. Cohorts pair
+a UA-substring matcher with an IP spec:</p>
+<pre><code class="language-apache">BotShieldRateLimit api-burst 60 min &quot;&quot; 10.0.0.0/8,2001:db8::/48
+BotShieldRateLimit scrapers  10 min &quot;wget|curl|python&quot; *
+</code></pre>
+<p>Args: <code>&lt;name&gt; &lt;budget&gt; &lt;per&gt; &lt;ua-pattern&gt; &lt;ipspec&gt;</code>.</p>
+<ul>
+<li><code>&lt;budget&gt;</code> requests are allowed per <code>&lt;per&gt;</code> (fixed-window counter,
+atomic CAS-updated SHM slot).</li>
+<li><code>&lt;per&gt;</code> accepts <code>sec</code>/<code>min</code>/<code>hour</code> (or <code>s</code>/<code>m</code>/<code>h</code>) — never a
+bare integer; the parser rejects plain numbers.</li>
+<li><code>&lt;ua-pattern&gt;</code> is a substring or <code>&quot;&quot;</code> for &quot;any UA&quot;.</li>
+<li><code>&lt;ipspec&gt;</code> is the same shape as <code>BotShieldAllowBot</code> — a path to a
+CIDR file, comma-separated inline CIDRs, or <code>*</code> for &quot;any IP&quot;.</li>
+</ul>
+<p>Not both axes can be <code>&quot;&quot;</code> / <code>*</code> — that would rate-limit every
+request, rejected at config time.</p>
+<p><code>BotShieldBlockPath</code> is the same cohort + a path glob → 403:</p>
+<pre><code class="language-apache">BotShieldBlockPath legacy-admin &quot;/wp-admin/*&quot; &quot;&quot; *
+BotShieldBlockPath aggressive-scraper &quot;/&quot; &quot;AhrefsBot|SEMrushBot&quot; *
+</code></pre>
+<p>Args: <code>&lt;name&gt; &lt;path-glob&gt; &lt;ua-pattern&gt; &lt;ipspec&gt;</code>.</p>
+<h3 id="repeated-429-escalation">Repeated-429 escalation</h3>
+<p><code>BotShieldRateLimitEscalate</code> upgrades a rule that's already been
+firing — repeated 429s on the same IP escalate to 403 (or any
+configurable status):</p>
+<pre><code class="language-apache">BotShieldRateLimitEscalate api-burst 5 min status=403 ttl=3600
+</code></pre>
+<p>Args: <code>&lt;rate-rule&gt; &lt;strikes&gt; &lt;per&gt; [status=N] [ttl=N]</code>. <code>&lt;per&gt;</code>
+accepts <code>sec</code>/<code>min</code>/<code>hour</code> (same as <code>BotShieldRateLimit</code>). If a
+rate-limited cohort triggers <code>&lt;strikes&gt;</code> 429s within the window,
+the IP is upgraded to the configured status for <code>ttl</code> seconds
+(lives in the strike SHM table). The original rate-limit rule
+still runs; the escalation is a separate decision applied on top.</p>
+<h3 id="path-pattern-semantics">Path-pattern semantics</h3>
+<p>Path globs use a single <code>*</code> wildcard at the trailing edge. A
+non-trailing <code>*</code> (e.g. <code>/api/*/v2/</code>) emits a NOTICE at config-parse
+time — the v1 matcher would have treated the inner <code>*</code> as a
+literal byte; the current matcher follows RFC 9309's leftmost
+greedy semantics. The NOTICE warns operators that intent may have
+shifted; existing configs aren't broken, just verified.</p>
+<h2 id="robots-txt-enforcement">Robots.txt enforcement</h2>
+<p><code>BotShieldRobotsTxt</code> plugs in a parsed RFC 9309 robots.txt file as
+a policy source. Disallow rules become <code>block-path:robots:&lt;group&gt;</code>
+matches; Crawl-delay rules become per-group rate limits.</p>
+<pre><code class="language-apache">BotShieldRobotsTxt              /etc/botshield/robots.txt
+BotShieldRobotsRefreshInterval  60
+BotShieldRobotsWildcardScope    heuristic
+</code></pre>
+<p>Args:</p>
+<ul>
+<li><strong><code>BotShieldRobotsTxt &lt;path&gt;</code></strong> — path to the robots.txt file. A
+background watchdog re-parses on mtime change.</li>
+<li><strong><code>BotShieldRobotsRefreshInterval &lt;sec&gt;</code></strong> — how often the
+watchdog checks mtime. Default 60. Set to 0 to disable
+hot-reload (mtime change won't be picked up until next restart).</li>
+<li><strong><code>BotShieldRobotsWildcardScope &lt;mode&gt;</code></strong> — how strict the
+matcher is on <code>User-agent: *</code> rules:
+<ul>
+<li><code>heuristic</code> (default): wildcard rules apply only when no more
+specific group matches. Closest to operator intent — a <code>*</code>
+block doesn't override a tighter Googlebot allow.</li>
+<li><code>strict</code>: RFC-9309 strict semantics. Wildcard rules participate
+in matching like any other group. May produce surprising
+overrides when wildcard and named groups conflict.</li>
+<li><code>off</code>: ignore wildcard groups entirely. Only named-group rules
+apply.</li>
+</ul>
+</li>
+</ul>
+<p>Group iteration is exposed at <code>&lt;prefix&gt;/policy-status</code> for
+operator inspection (see <a href="../observability/index.html">observability</a>).</p>
+<h2 id="triggers-predicate-action-engine">Triggers — predicate-action engine</h2>
+<p>Five trigger families share one config-time action engine and one
+request-time executor. Each family differs only in its predicate;
+they all funnel through the same <code>bs_trigger_action</code> struct and
+the same shared action keys.</p>
+<table>
+<thead>
+<tr>
+<th>Family</th>
+<th>Directive</th>
+<th>Predicate</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Path</td>
+<td><code>BotShieldPathTrigger</code></td>
+<td>URI glob</td>
+</tr>
+<tr>
+<td>Cookie</td>
+<td><code>BotShieldCookieTrigger</code></td>
+<td>Cookie name + value (or bulk shape)</td>
+</tr>
+<tr>
+<td>Env</td>
+<td><code>BotShieldEnvTrigger</code></td>
+<td>Apache env var</td>
+</tr>
+<tr>
+<td>Feedback</td>
+<td><code>BotShieldFeedbackTrigger</code></td>
+<td>App-emitted event name (response path)</td>
+</tr>
+<tr>
+<td>Load</td>
+<td><code>BotShieldLoadTrigger</code></td>
+<td>Global load_state</td>
+</tr>
+</tbody>
+</table>
+<h3 id="shared-action-keys">Shared action keys</h3>
+<p>Every family parses <code>&lt;predicate-args&gt; &lt;action-key&gt;=&lt;value&gt;...</code>. The
+action keys are:</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>status=&lt;code&gt;</code></td>
+<td>HTTP status to return. <code>pass</code> lets the request continue (cookie/env families accumulate; path family declines to real handler)</td>
+</tr>
+<tr>
+<td><code>redirect=&lt;url&gt;</code></td>
+<td>Send an HTTP redirect with the chosen status (default 302)</td>
+</tr>
+<tr>
+<td><code>log=&lt;tag&gt;</code></td>
+<td>Stash a tag in <code>r-&gt;notes</code> for the access log (<code>%{BS-…}n</code>) and the decision-log line</td>
+</tr>
+<tr>
+<td><code>flag=&lt;name&gt;</code></td>
+<td>Add a flag bit on the IP's flagged-IP entry (e.g. <code>flag=honeypot_hit</code>)</td>
+</tr>
+<tr>
+<td><code>ttl=&lt;sec&gt;</code></td>
+<td>TTL on the flag-IP entry. Required when <code>flag=</code> is set</td>
+</tr>
+<tr>
+<td><code>penalty=N</code></td>
+<td>Add N to the request score</td>
+</tr>
+<tr>
+<td><code>credit=N</code></td>
+<td>Subtract N from the request score (rejected on the path family — paths can't credit)</td>
+</tr>
+<tr>
+<td><code>mode=observe</code></td>
+<td>Per-rule observe mode: predicate evaluates, side-effects suppressed. See <a href="../staging/index.html">staging</a></td>
+</tr>
+</tbody>
+</table>
+<h3 id="path-triggers">Path triggers</h3>
+<pre><code class="language-apache">BotShieldPathTrigger admin-honeypot &quot;/admin/.env&quot; \
+    status=403 flag=honeypot_hit ttl=3600 log=admin-trap
+BotShieldPathTrigger api-burst-trap &quot;/api/*/burst&quot; \
+    penalty=30 log=api-burst
+</code></pre>
+<p>First-match wins (declaration order). On match, the path family's
+<code>status=pass</code> short-circuits to <code>DECLINED</code> (real handler runs); any
+other status is the response code.</p>
+<h3 id="cookie-triggers">Cookie triggers</h3>
+<pre><code class="language-apache">BotShieldCookieTrigger session-active cookie=sessionid \
+    status=pass credit=10
+BotShieldCookieTrigger weak-session cookie=sessionid=guest \
+    penalty=15 log=guest-session
+BotShieldCookieTrigger no-cookies cookies=none \
+    penalty=5 log=cookieless
+</code></pre>
+<p>Predicate shapes:</p>
+<ul>
+<li><code>cookie=&lt;name&gt;</code> — named cookie present (any value).</li>
+<li><code>!cookie=&lt;name&gt;</code> — named cookie absent.</li>
+<li><code>cookie=&lt;name&gt;=&lt;value&gt;</code> — exact value match.</li>
+<li><code>cookie=&lt;name&gt;!&lt;value&gt;</code> — value mismatch.</li>
+<li><code>cookie=&lt;name&gt;~&lt;substring&gt;</code> — value contains substring.</li>
+<li><code>cookies=none</code> / <code>cookies=any</code> — bulk: empty cookie map / any
+cookie set.</li>
+<li><code>cookies=session</code> — bulk: any of the names declared via
+<code>BotShieldSessionCookieName</code> is set.</li>
+<li><code>bs-cookie=verified</code> / <code>bs-cookie=missing</code> / <code>bs-cookie=invalid</code> —
+the BotShield-cookie-state note set by <code>bs_handler</code> (no double
+HMAC check). Predicates against the module's own <code>_bs_verified</code>
+cookie name are rejected — use these instead.</li>
+</ul>
+<p>Cookie family accumulates: <code>status=pass</code> keeps walking and
+collecting credits/penalties from later cookie triggers. First
+non-pass status short-circuits.</p>
+<h3 id="env-triggers">Env triggers</h3>
+<pre><code class="language-apache">SetEnvIfExpr &quot;%{HTTP:CF-Connecting-IP} =~ /:/&quot; BS_IPV6=1
+BotShieldEnvTrigger ipv6-hint env=BS_IPV6 status=pass credit=2
+
+SetEnvIf User-Agent &quot;(?i)\bcurl\b&quot; BS_CLI=1
+BotShieldEnvTrigger curl-hint env=BS_CLI penalty=10 log=cli
+</code></pre>
+<p>Predicate shapes:</p>
+<ul>
+<li><code>env=&lt;name&gt;</code> — env var present (any value, including empty).</li>
+<li><code>!env=&lt;name&gt;</code> — env var absent.</li>
+<li><code>env=&lt;name&gt;=&lt;value&gt;</code> — exact value match.</li>
+</ul>
+<p>Narrower than cookie by design — no substring/contains shape and
+no bulk-state analog. Operators who need rich matching set a
+coarse bucket upstream (<code>SetEnvIfExpr</code>, ModSecurity rule, etc.)
+and consume the bucket here. <code>redirect=</code> is not a valid action
+key on env or load triggers.</p>
+<p>Env triggers gate on <code>ap_is_initial_req(r)</code> to prevent double-
+application on internal redirect legs (ErrorDocument, RewriteRule
+without R). The env producer would otherwise fire a second time
+and double-count score/flag.</p>
+<h3 id="feedback-triggers">Feedback triggers</h3>
+<p>App emits a response header <code>X-BotShield-Feedback: event=&lt;name&gt;;sig=&lt;hmac&gt;</code>;
+the module verifies the HMAC and looks up the event name in the
+configured feedback-trigger table:</p>
+<pre><code class="language-apache">BotShieldAppFeedback                  on
+BotShieldAppIntegrationSecretFile     /etc/botshield/app-integration-secret
+BotShieldFeedbackTrigger scanner-hit  flag=honeypot_hit ttl=3600 log=app-trap
+BotShieldFeedbackTrigger human-pass   flag=app_verified_human ttl=3600
+</code></pre>
+<p>The event-name → action indirection is the security property: a
+compromised app can emit any event name, but only configured
+mappings reach module memory. Wire format details and signing are
+covered in <a href="../captcha/index.html">captcha</a>.</p>
+<p>Feedback runs on the response path but its side effect is
+future-request state (the flagged-IP write). Both global
+<code>BotShieldShadowMode</code> and per-trigger <code>mode=observe</code> apply —
+either gates the filter into logging <code>feedback-trigger:&lt;event&gt;: observe</code> and skipping the SHM mutation. See
+<a href="../staging/index.html">staging</a>.</p>
+<h3 id="load-triggers">Load triggers</h3>
+<pre><code class="language-apache">BotShieldLoadStateFile          /run/botshield/load-state
+BotShieldLoadRefreshInterval    1
+BotShieldLoadWarmThreshold      65
+BotShieldLoadHotThreshold       85
+
+BotShieldLoadTrigger be-strict state&gt;=warm penalty=20 log=brownout
+BotShieldLoadTrigger drop-noise state=hot   status=503 log=hot-shed
+</code></pre>
+<p>Predicates: <code>state=&lt;name&gt;</code> (exact match) or <code>state&gt;=&lt;name&gt;</code> (at
+least). State names: <code>normal</code>, <code>warm</code>, <code>hot</code>. Hysteresis settles
+the state machine over a few sample ticks before rules fire — a
+single load spike doesn't flip the global state.</p>
+<p>Load state is sampled from the Apache scoreboard plus an optional
+external state file (set by an out-of-band collector — e.g.
+collectd writing a single-word state every second). The external
+file lets you key load decisions on whatever metric makes sense
+for your deployment, not just Apache's busy-worker count.</p>
+<h2 id="flag-trigger-family">Flag-trigger family</h2>
+<p>Flag triggers map flag bits → actions, applied after the policy
+walk against the IP's accumulated flag bitmap (IP-side via
+flagged-IP table + cookie-side via prior <code>_bs_verified</code>). They
+have a different action surface than the five trigger families
+above:</p>
+<pre><code class="language-apache">BotShieldFlagTrigger honeypot_hit       action=tier_floor min=captcha
+BotShieldFlagTrigger honeypot_hit       action=score add=60
+BotShieldFlagTrigger app_verified_human action=score add=-80
+</code></pre>
+<p>Args: <code>&lt;flag&gt; [reset] [action=&lt;verb&gt; args...]</code>. The first arg names
+a flag bit (<code>honeypot_hit</code>, <code>scanner_probe</code>, <code>fake_bot</code>,
+<code>pow_fail_streak</code>, <code>app_verified_human</code>, <code>app_verified_session</code>,
+<code>app_trust_signal</code>); each invocation appends one trigger entry for
+that bit.</p>
+<p>Two action verbs:</p>
+<ul>
+<li><strong><code>action=score add=N</code></strong> — accumulate signed N into the
+request's score (positive penalty / negative credit). SUM
+accumulates across triggers.</li>
+<li><strong><code>action=tier_floor min=&lt;tier&gt;</code></strong> — set a minimum tier; <code>&lt;tier&gt;</code>
+is <code>pass</code> / <code>silent</code> / <code>form</code> / <code>captcha</code>. MAX accumulates
+(strictest wins).</li>
+</ul>
+<p>The <code>reset</code> keyword is directive-level (not an action verb): a
+line of the form <code>BotShieldFlagTrigger &lt;flag&gt; reset</code> clears every
+prior trigger (compiled-in default + earlier operator declarations)
+for that flag at post-config time. <code>reset</code> may appear with or
+without a trailing <code>action=...</code>:</p>
+<pre><code class="language-apache"># Wipe defaults, install only one tier-floor rule:
+BotShieldFlagTrigger honeypot_hit reset action=tier_floor min=form
+
+# Disarm a flag entirely:
+BotShieldFlagTrigger pow_fail_streak reset
+</code></pre>
+<h3 id="compiled-in-defaults">Compiled-in defaults</h3>
+<p>mod_botshield seeds the flag-trigger table at config-parse time
+with sensible defaults so a fresh install gets honeypot / fake-bot
+detection without any additional config. Each detection-signal
+flag is seeded as paired score + tier_floor rows:</p>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Default action</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>honeypot_hit</code></td>
+<td><code>score add=+60</code>, <code>tier_floor min=captcha</code></td>
+</tr>
+<tr>
+<td><code>fake_bot</code></td>
+<td><code>score add=+80</code>, <code>tier_floor min=captcha</code></td>
+</tr>
+<tr>
+<td><code>scanner_probe</code></td>
+<td><code>score add=+50</code>, <code>tier_floor min=form</code></td>
+</tr>
+<tr>
+<td><code>pow_fail_streak</code></td>
+<td><code>score add=+30</code>, <code>tier_floor min=silent</code></td>
+</tr>
+<tr>
+<td><code>app_verified_human</code></td>
+<td><code>score add=-80</code></td>
+</tr>
+<tr>
+<td><code>app_verified_session</code></td>
+<td><code>score add=-40</code></td>
+</tr>
+<tr>
+<td><code>app_trust_signal</code></td>
+<td><code>score add=-20</code></td>
+</tr>
+</tbody>
+</table>
+<p>Trust signals (credits) are score-only by design; no credit ever
+forces tier <em>down</em>. A verified-human flag can't unlock a request
+that already tripped a different tier_floor.</p>
+<p>Operator-supplied <code>BotShieldFlagTrigger</code> directives override the
+defaults for the matching flag bit + action verb pair (later
+declarations win, same as every other trigger family).</p>
+<h3 id="per-apache-scope-triggers-botshieldtrigger">Per-Apache-scope triggers — <code>BotShieldTrigger</code></h3>
+<p>For everything else operators want to do at a specific Apache
+scope — flag the IP, add a penalty, return a status, observe in
+shadow — there's a single per-scope directive:</p>
+<pre><code class="language-apache">&lt;Location &quot;/admin/.env&quot;&gt;
+    BotShieldTrigger flag=honeypot_hit ttl=3600 log=admin-trap
+&lt;/Location&gt;
+
+&lt;LocationMatch &quot;(?i)/wp-(login|admin)&quot;&gt;
+    BotShieldTrigger flag=scanner_probe ttl=3600 penalty=20 log=wp-trap
+&lt;/LocationMatch&gt;
+
+&lt;Files &quot;*.php&quot;&gt;
+    &lt;If &quot;%{REQUEST_URI} =~ m#/uploads/#&quot;&gt;
+        BotShieldTrigger status=403 log=php-in-uploads
+    &lt;/If&gt;
+&lt;/Files&gt;
+</code></pre>
+<p>The Apache scope match IS the predicate — no separate path glob,
+because Apache already evaluated the scope. Action keys mirror the
+cookie family: <code>status</code> / <code>redirect</code> / <code>log</code> / <code>flag</code> / <code>ttl</code> /
+<code>penalty</code> / <code>credit</code> / <code>mode</code>. Multiple <code>BotShieldTrigger</code> lines
+in one scope each append a separate action; they all fire on a
+pass, the first non-pass status short-circuits.</p>
+<p><code>BotShieldTrigger</code> works in any Apache container the parser
+accepts (server config, <code>&lt;VirtualHost&gt;</code>, <code>&lt;Directory&gt;</code>,
+<code>&lt;Location&gt;</code>, <code>&lt;LocationMatch&gt;</code>, <code>&lt;Files&gt;</code>, <code>&lt;If&gt;</code>, etc.) — the
+same set that <code>Require</code> and <code>Header</code> work in. This is the
+recommended way to express anything <code>&lt;Location&gt;</code>-shaped.</p>
+<h4 id="reset-semantics-opting-out-of-inherited-triggers">Reset semantics — opting out of inherited triggers</h4>
+<p>By default a child scope inherits its parent's <code>BotShieldTrigger</code>
+list and concatenates its own. To drop the inherited list,
+declare <code>BotShieldTrigger reset</code> in the child:</p>
+<pre><code class="language-apache">&lt;Location &quot;/api&quot;&gt;
+    BotShieldTrigger penalty=10 log=api-tax
+&lt;/Location&gt;
+
+&lt;Location &quot;/api/health&quot;&gt;
+    BotShieldTrigger reset
+&lt;/Location&gt;
+
+&lt;Location &quot;/api/internal&quot;&gt;
+    BotShieldTrigger reset
+    BotShieldTrigger status=pass log=internal-allow
+&lt;/Location&gt;
+</code></pre>
+<p><code>reset</code> as the first arg drops triggers inherited from outer
+scopes (and clears any earlier <code>BotShieldTrigger</code> entries
+appended in the same scope before the reset).</p>
+<h2 id="safeguard">Safeguard</h2>
+<p>The safeguard suppresses a challenge loop: a client that has been
+issued challenges repeatedly within the safeguard window without
+ever returning a verified cookie gets pass-through (<code>tier=safeguard outcome=declined</code>) to break the loop.</p>
+<pre><code class="language-apache">BotShieldSafeguard          on
+BotShieldSafeguardThreshold 5
+BotShieldSafeguardWindow    600
+BotShieldSafeguardTTL       900
+</code></pre>
+<p>Defaults: 5 missed verifications in 600 seconds → 900-second pass-
+through window. The IP's flagged-IP entry is preserved so the
+suspicious behavior is still recorded for downstream signals; only
+the in-line challenge is suppressed.</p>
+<p>Operators staging a fresh deployment with aggressive thresholds
+are the most likely to trip this. Watch the
+<code>tier_pass_total</code> counter for an unusual climb under &quot;safeguard&quot;
+reasons in the decision log (safeguard rolls into pass for metric
+binning; the decision log reason <code>challenge-safeguard</code> is the
+filter).</p>
+<h2 id="where-to-next">Where to next</h2>
+<ul>
+<li>Captcha and app-bridge protocols: <a href="../captcha/index.html">captcha</a>.</li>
+<li>Safe rule rollout: <a href="../staging/index.html">staging</a>.</li>
+<li>Metrics and dashboards: <a href="../observability/index.html">observability</a>.</li>
+<li>Full directive reference: <a href="../directives/index.html">directives</a>.</li>
+</ul>
+
+        </div>
+      </article>
+    </main>
+  </div>
+</body>
+</html>

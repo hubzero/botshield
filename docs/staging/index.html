@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Staging | mod_botshield</title>
+  <meta name="description" content="Per-rule observe and global shadow mode for safe rule rollout.">
+  <link rel="stylesheet" href="../assets/site.css">
+</head>
+<body class="site-doc">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <div class="page-shell">
+    <header class="site-header site-header--compact">
+      <a class="brand" href="../index.html">
+        <img class="brand__icon" src="../assets/logo-botshield-icon.svg" alt="" aria-hidden="true">
+        <span class="brand__wordmark" aria-label="BotShield">
+          <span class="brand__wordmark-soft">Bot</span><span class="brand__wordmark-strong">Shield</span>
+        </span>
+      </a>
+      <nav class="top-nav" aria-label="Primary">
+        <a class="top-nav__link" href="#">GitHub</a>
+        <a class="top-nav__link" href="../getting-started/index.html">Docs</a>
+        <a class="top-nav__link" href="../getting-started/index.html#build">Download</a>
+      </nav>
+    </header>
+
+    <main id="main-content" class="docs-layout" tabindex="-1">
+      <aside class="docs-sidebar">
+        <p class="docs-sidebar__eyebrow">Docs</p>
+        <nav class="docs-nav" aria-label="Documentation">
+<a class="docs-nav__item" href="../getting-started/index.html">
+  <span class="docs-nav__title">Getting started</span>
+  <span class="docs-nav__summary">Install, build, minimal configuration, and verifying a first request.</span>
+</a>
+<a class="docs-nav__item" href="../deployment/index.html">
+  <span class="docs-nav__title">Deployment</span>
+  <span class="docs-nav__summary">Reverse proxies, slow-client defense, multi-vhost reputation, secret rotation, capacity sizing.</span>
+</a>
+<a class="docs-nav__item" href="../operator-model/index.html">
+  <span class="docs-nav__title">Operator model</span>
+  <span class="docs-nav__summary">Tiers, scoring, cookie-carried reputation, decision log, tuning workflow.</span>
+</a>
+<a class="docs-nav__item" href="../policy/index.html">
+  <span class="docs-nav__title">Policy</span>
+  <span class="docs-nav__summary">Allow lists, rate limits, block paths, robots.txt, the trigger families, and flag triggers.</span>
+</a>
+<a class="docs-nav__item" href="../captcha/index.html">
+  <span class="docs-nav__title">Captcha and app-bridge</span>
+  <span class="docs-nav__summary">Third-party captcha providers, verify-endpoint hardening, and the signed app-bridge protocols.</span>
+</a>
+<a class="docs-nav__item is-active" href="index.html">
+  <span class="docs-nav__title">Staging</span>
+  <span class="docs-nav__summary">Per-rule observe and global shadow mode for safe rule rollout.</span>
+</a>
+<a class="docs-nav__item" href="../observability/index.html">
+  <span class="docs-nav__title">Observability</span>
+  <span class="docs-nav__summary">Decision log, Prometheus metrics, mod_status contribution, and the policy-status admin page.</span>
+</a>
+<a class="docs-nav__item" href="../directives/index.html">
+  <span class="docs-nav__title">Directive reference</span>
+  <span class="docs-nav__summary">Canonical operator-facing reference for all 78 directives, grouped by family.</span>
+</a>
+<a class="docs-nav__item" href="../troubleshooting/index.html">
+  <span class="docs-nav__title">Troubleshooting</span>
+  <span class="docs-nav__summary">Common operator-visible issues, diagnostics, and fixes.</span>
+</a>
+<a class="docs-nav__item" href="../faq/index.html">
+  <span class="docs-nav__title">FAQ</span>
+  <span class="docs-nav__summary">Honest answers to questions operators ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
+</a>
+<a class="docs-nav__item" href="../guide/index.html">
+  <span class="docs-nav__title">Project README</span>
+  <span class="docs-nav__summary">Repository README — project overview, build instructions, and dev configuration.</span>
+</a>
+<a class="docs-nav__item" href="../roadmap/index.html">
+  <span class="docs-nav__title">Roadmap and changelog</span>
+  <span class="docs-nav__summary">Shipped milestones, extension design notes, and the development backlog.</span>
+</a>
+        </nav>
+      </aside>
+
+      <article class="docs-article">
+        <header class="docs-article__header">
+          <p class="eyebrow">Documentation</p>
+          <h1>Staging</h1>
+          <p class="docs-article__summary">Per-rule observe and global shadow mode for safe rule rollout.</p>
+          <p class="docs-article__source">Staging policy changes</p>
+        </header>
+<section class="toc">
+  <h2 class="toc__heading">On this page</h2>
+  <ul class="toc__list">
+<li class="toc__item toc__item--level-2"><a href="#what-observe-means-precisely">What &quot;observe&quot; means precisely</a></li>
+<li class="toc__item toc__item--level-2"><a href="#per-rule-observe-mode">Per-rule observe mode</a></li>
+<li class="toc__item toc__item--level-2"><a href="#global-botshieldshadowmode">Global `BotShieldShadowMode`</a></li>
+<li class="toc__item toc__item--level-2"><a href="#coverage">Coverage</a></li>
+<li class="toc__item toc__item--level-2"><a href="#tuning-workflow">Tuning workflow</a></li>
+<li class="toc__item toc__item--level-2"><a href="#common-pitfalls">Common pitfalls</a></li>
+<li class="toc__item toc__item--level-2"><a href="#where-to-next">Where to next</a></li>
+  </ul>
+</section>
+        <div class="prose">
+<p>mod_botshield supports two complementary dry-run modes so operators
+can deploy new rules without affecting production traffic until
+they're confident the matches are correct.</p>
+<ul>
+<li><strong>Per-rule observe</strong> — pin a single directive into observe mode.
+Useful for staging individual rules.</li>
+<li><strong>Global shadow mode</strong> — flip every match to observe regardless
+of per-rule setting. Useful for staging an entire policy revision.</li>
+</ul>
+<p>Either signal is sufficient; they compose with OR semantics. A rule
+runs in observe mode if EITHER its per-rule mode is <code>observe</code> OR
+<code>BotShieldShadowMode on</code> is set. There is no priority order to
+memorize.</p>
+<h2 id="what-observe-means-precisely">What &quot;observe&quot; means precisely</h2>
+<p>When a rule fires in observe mode:</p>
+<ul>
+<li>The rule's predicate evaluates normally (path match, cohort
+match, env present, etc.).</li>
+<li>The decision log records the would-have-done outcome with an
+<code>:observe</code> suffix on the reason token.</li>
+<li>The matching observe-mode metric counter increments
+(<code>block_path_observed_total</code>, <code>trigger_observed_total</code>).</li>
+<li><strong>No</strong> flag bits are set on the IP.</li>
+<li><strong>No</strong> score is added to the request.</li>
+<li><strong>No</strong> status code, redirect, or log tag side-effect is emitted.</li>
+</ul>
+<p>The audit trail captures everything the rule WOULD have done; the
+client response is unaffected. Observe matches never short-circuit
+the policy walk — the next rule still gets its chance.</p>
+<h2 id="per-rule-observe-mode">Per-rule observe mode</h2>
+<p>Add <code>mode=observe</code> to any directive that supports it:</p>
+<pre><code class="language-apache">BotShieldPathTrigger    /admin/.env  flag=scanner_probe ttl=3600 log=admin-trap mode=observe
+BotShieldBlockPath      legacy-admin &quot;/wp-admin/*&quot; &quot;&quot; * mode=observe
+BotShieldRateLimit      api-burst    60 min &quot;&quot; * mode=observe
+BotShieldFlagTrigger    honeypot_hit action=tier_floor min=captcha mode=observe
+</code></pre>
+<p>The rule still evaluates against every matching request, but takes
+no action. Matches appear in the decision log:</p>
+<pre><code>mod_botshield: decision tier=pass outcome=declined ip=192.0.2.42
+    score=0 cookie=absent provider=- alg=- reason=&quot;path-trigger:admin-trap:observe&quot;
+    path=&quot;/admin/.env&quot;
+</code></pre>
+<p>Watch the log for hours or days. When matches look correct, remove
+<code>mode=observe</code> and reload Apache to flip the rule into enforcement.</p>
+<h2 id="global-botshieldshadowmode">Global <code>BotShieldShadowMode</code></h2>
+<p>For staging a whole policy revision at once, set the server-wide
+flag:</p>
+<pre><code class="language-apache">BotShieldShadowMode on
+</code></pre>
+<p>Every rule in scope flips to observe regardless of its per-rule
+setting. Useful before a release or when comparing a new ruleset
+against production traffic without any enforcement risk. Flip back
+to <code>off</code> when you're ready to enforce.</p>
+<p><code>BotShieldShadowMode</code> is tri-state: <code>on</code> / <code>off</code> / unset (inherit).
+Operators usually set it at the main server scope and inherit; per-
+vhost overrides are valid for partial rollouts.</p>
+<h2 id="coverage">Coverage</h2>
+<p>Both observe signals reach every gating surface:</p>
+<table>
+<thead>
+<tr>
+<th>Family</th>
+<th>Honors per-rule</th>
+<th>Honors shadow_mode</th>
+<th>Reason format</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Path triggers</td>
+<td>yes</td>
+<td>yes</td>
+<td><code>path-trigger:&lt;name&gt;:observe</code></td>
+</tr>
+<tr>
+<td>Cookie triggers</td>
+<td>yes</td>
+<td>yes</td>
+<td><code>cookie-trigger:&lt;name&gt;:observe</code></td>
+</tr>
+<tr>
+<td>Env triggers</td>
+<td>yes</td>
+<td>yes</td>
+<td><code>env-trigger:&lt;name&gt;:observe</code></td>
+</tr>
+<tr>
+<td>Load triggers</td>
+<td>yes</td>
+<td>yes</td>
+<td><code>load-trigger:&lt;name&gt;:observe</code></td>
+</tr>
+<tr>
+<td>Feedback triggers</td>
+<td>yes</td>
+<td>yes</td>
+<td><code>feedback-trigger:&lt;event&gt;:observe</code></td>
+</tr>
+<tr>
+<td>Flag triggers</td>
+<td>yes</td>
+<td>yes</td>
+<td><code>flag-trigger:&lt;flag&gt;:observe</code></td>
+</tr>
+<tr>
+<td>Block-path</td>
+<td>yes</td>
+<td>yes</td>
+<td><code>block-path:&lt;name&gt;:observe</code></td>
+</tr>
+<tr>
+<td>Rate-limit</td>
+<td>yes</td>
+<td>yes</td>
+<td><code>rate-limit:&lt;name&gt;:observe</code></td>
+</tr>
+<tr>
+<td>Robots Disallow</td>
+<td>n/a</td>
+<td>yes</td>
+<td><code>robots-block:&lt;group&gt;:observe</code></td>
+</tr>
+<tr>
+<td>Form-captcha</td>
+<td>n/a</td>
+<td>yes</td>
+<td><code>form-captcha:&lt;scope&gt;:observe</code></td>
+</tr>
+</tbody>
+</table>
+<p>Transport-level errors (415 / 413 / 400 on form-captcha; 503 on
+captcha-verify in-flight cap; 503 misconfigured) intentionally
+still fire under shadow mode — those are misconfiguration, not
+policy.</p>
+<h2 id="tuning-workflow">Tuning workflow</h2>
+<p>The full path from &quot;draft policy&quot; to &quot;live enforcement&quot;:</p>
+<ol>
+<li>
+<p><strong>Draft</strong> — write the new rule with <code>mode=observe</code> (or set
+<code>BotShieldShadowMode on</code> to dry-run a whole revision).</p>
+</li>
+<li>
+<p><strong>Reload</strong> — <code>apachectl configtest &amp;&amp; systemctl reload apache2</code>.</p>
+</li>
+<li>
+<p><strong>Watch</strong> — tail the error log for <code>:observe</code> matches, or query
+the matching <code>*_observed_total</code> Prometheus counter:</p>
+<pre><code class="language-sh">curl -s http://localhost/botshield/metrics | grep observed
+# botshield_block_path_observed_total{name=&quot;legacy-admin&quot;} 142
+# botshield_trigger_observed_total{name=&quot;admin-trap&quot;,family=&quot;path&quot;} 38
+</code></pre>
+</li>
+<li>
+<p><strong>Iterate</strong> — if matches are wrong (false positives, missing
+cohort, broken predicate) edit and reload. The observe gate
+isolates iteration from production traffic.</p>
+</li>
+<li>
+<p><strong>Promote</strong> — remove <code>mode=observe</code> (or flip
+<code>BotShieldShadowMode off</code>) and reload. Watch the matching
+non-observe counter (<code>tier_&lt;t&gt;_total</code>, <code>outcome_&lt;o&gt;_total</code>) to
+confirm enforcement is happening.</p>
+</li>
+</ol>
+<h2 id="common-pitfalls">Common pitfalls</h2>
+<p><strong>Promoting individual rules from a shadow-mode revision.</strong>
+<code>BotShieldShadowMode on</code> overrides every rule's per-rule mode. If
+you flip the global off but the rule still has <code>mode=observe</code>, the
+rule is still in observe — that's the OR semantics. Walk the new
+rules and remove <code>mode=observe</code> before flipping the global off.</p>
+<p><strong>Observe-mode logs not appearing.</strong> mod_botshield's decision log
+emits at <code>info</code>. Apache's default <code>LogLevel warn</code> hides them.
+Bump just this module:</p>
+<pre><code class="language-apache">LogLevel botshield_module:info
+</code></pre>
+<p>The <code>*_observed_total</code> Prometheus counters increment regardless of
+log level — useful as a level-independent visibility check.</p>
+<p><strong>Counting observe matches in error log.</strong> The <code>:observe</code> suffix is
+the canonical filter:</p>
+<pre><code class="language-sh">grep -c ':observe' /var/log/apache2/error.log
+</code></pre>
+<p>Counter aggregation across rule names is more efficient at scale —
+prefer Prometheus for production dashboards, log grep for
+forensics.</p>
+<h2 id="where-to-next">Where to next</h2>
+<ul>
+<li>Tier model and scoring: <a href="../operator-model/index.html">operator model</a>.</li>
+<li>Per-family rule semantics: <a href="../policy/index.html">policy</a>.</li>
+<li>Metrics + decision log surface: <a href="../observability/index.html">observability</a>.</li>
+</ul>
+
+        </div>
+      </article>
+    </main>
+  </div>
+</body>
+</html>

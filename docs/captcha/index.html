@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Captcha and app-bridge | mod_botshield</title>
+  <meta name="description" content="Third-party captcha providers, verify-endpoint hardening, and the signed app-bridge protocols.">
+  <link rel="stylesheet" href="../assets/site.css">
+</head>
+<body class="site-doc">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <div class="page-shell">
+    <header class="site-header site-header--compact">
+      <a class="brand" href="../index.html">
+        <img class="brand__icon" src="../assets/logo-botshield-icon.svg" alt="" aria-hidden="true">
+        <span class="brand__wordmark" aria-label="BotShield">
+          <span class="brand__wordmark-soft">Bot</span><span class="brand__wordmark-strong">Shield</span>
+        </span>
+      </a>
+      <nav class="top-nav" aria-label="Primary">
+        <a class="top-nav__link" href="#">GitHub</a>
+        <a class="top-nav__link" href="../getting-started/index.html">Docs</a>
+        <a class="top-nav__link" href="../getting-started/index.html#build">Download</a>
+      </nav>
+    </header>
+
+    <main id="main-content" class="docs-layout" tabindex="-1">
+      <aside class="docs-sidebar">
+        <p class="docs-sidebar__eyebrow">Docs</p>
+        <nav class="docs-nav" aria-label="Documentation">
+<a class="docs-nav__item" href="../getting-started/index.html">
+  <span class="docs-nav__title">Getting started</span>
+  <span class="docs-nav__summary">Install, build, minimal configuration, and verifying a first request.</span>
+</a>
+<a class="docs-nav__item" href="../deployment/index.html">
+  <span class="docs-nav__title">Deployment</span>
+  <span class="docs-nav__summary">Reverse proxies, slow-client defense, multi-vhost reputation, secret rotation, capacity sizing.</span>
+</a>
+<a class="docs-nav__item" href="../operator-model/index.html">
+  <span class="docs-nav__title">Operator model</span>
+  <span class="docs-nav__summary">Tiers, scoring, cookie-carried reputation, decision log, tuning workflow.</span>
+</a>
+<a class="docs-nav__item" href="../policy/index.html">
+  <span class="docs-nav__title">Policy</span>
+  <span class="docs-nav__summary">Allow lists, rate limits, block paths, robots.txt, the trigger families, and flag triggers.</span>
+</a>
+<a class="docs-nav__item is-active" href="index.html">
+  <span class="docs-nav__title">Captcha and app-bridge</span>
+  <span class="docs-nav__summary">Third-party captcha providers, verify-endpoint hardening, and the signed app-bridge protocols.</span>
+</a>
+<a class="docs-nav__item" href="../staging/index.html">
+  <span class="docs-nav__title">Staging</span>
+  <span class="docs-nav__summary">Per-rule observe and global shadow mode for safe rule rollout.</span>
+</a>
+<a class="docs-nav__item" href="../observability/index.html">
+  <span class="docs-nav__title">Observability</span>
+  <span class="docs-nav__summary">Decision log, Prometheus metrics, mod_status contribution, and the policy-status admin page.</span>
+</a>
+<a class="docs-nav__item" href="../directives/index.html">
+  <span class="docs-nav__title">Directive reference</span>
+  <span class="docs-nav__summary">Canonical operator-facing reference for all 78 directives, grouped by family.</span>
+</a>
+<a class="docs-nav__item" href="../troubleshooting/index.html">
+  <span class="docs-nav__title">Troubleshooting</span>
+  <span class="docs-nav__summary">Common operator-visible issues, diagnostics, and fixes.</span>
+</a>
+<a class="docs-nav__item" href="../faq/index.html">
+  <span class="docs-nav__title">FAQ</span>
+  <span class="docs-nav__summary">Honest answers to questions operators ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
+</a>
+<a class="docs-nav__item" href="../guide/index.html">
+  <span class="docs-nav__title">Project README</span>
+  <span class="docs-nav__summary">Repository README — project overview, build instructions, and dev configuration.</span>
+</a>
+<a class="docs-nav__item" href="../roadmap/index.html">
+  <span class="docs-nav__title">Roadmap and changelog</span>
+  <span class="docs-nav__summary">Shipped milestones, extension design notes, and the development backlog.</span>
+</a>
+        </nav>
+      </aside>
+
+      <article class="docs-article">
+        <header class="docs-article__header">
+          <p class="eyebrow">Documentation</p>
+          <h1>Captcha and app-bridge</h1>
+          <p class="docs-article__summary">Third-party captcha providers, verify-endpoint hardening, and the signed app-bridge protocols.</p>
+          <p class="docs-article__source">Captcha and app-bridge</p>
+        </header>
+<section class="toc">
+  <h2 class="toc__heading">On this page</h2>
+  <ul class="toc__list">
+<li class="toc__item toc__item--level-2"><a href="#captcha-tier">Captcha tier</a></li>
+<li class="toc__item toc__item--level-3"><a href="#provider-registry">Provider registry</a></li>
+<li class="toc__item toc__item--level-3"><a href="#configuration">Configuration</a></li>
+<li class="toc__item toc__item--level-3"><a href="#verify-endpoint-hardening">Verify-endpoint hardening</a></li>
+<li class="toc__item toc__item--level-3"><a href="#hostname-action-binding">Hostname / action binding</a></li>
+<li class="toc__item toc__item--level-3"><a href="#multi-provider-per-vhost">Multi-provider per vhost</a></li>
+<li class="toc__item toc__item--level-2"><a href="#inline-form-captcha">Inline form captcha</a></li>
+<li class="toc__item toc__item--level-2"><a href="#app-bridge">App bridge</a></li>
+<li class="toc__item toc__item--level-3"><a href="#app-to-module-feedback">App-to-module feedback</a></li>
+<li class="toc__item toc__item--level-3"><a href="#module-to-app-claims">Module-to-app claims</a></li>
+<li class="toc__item toc__item--level-2"><a href="#where-to-next">Where to next</a></li>
+  </ul>
+</section>
+        <div class="prose">
+<p>mod_botshield ships two integration surfaces with third parties:</p>
+<ol>
+<li><strong>Captcha tier</strong> — when the score crosses
+<code>BotShieldScoreCaptcha</code>, the module renders a third-party
+captcha widget (Turnstile / hCaptcha / reCAPTCHA / Friendly /
+GeeTest) and verifies the token via libcurl on POST.</li>
+<li><strong>App bridge</strong> — a signed two-way protocol between
+mod_botshield and the upstream application: the app emits
+reputation feedback as a response header; the module emits
+verified-claims as a request header.</li>
+</ol>
+<p>Both surfaces share one HMAC key
+(<code>BotShieldAppIntegrationSecretFile</code>) — wire-format separation
+keeps the directions distinct without separate keys.</p>
+<h2 id="captcha-tier">Captcha tier</h2>
+<h3 id="provider-registry">Provider registry</h3>
+<p>Six providers ship in the registry:</p>
+<table>
+<thead>
+<tr>
+<th>Provider</th>
+<th>Token field</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>turnstile</code></td>
+<td><code>cf-turnstile-response</code></td>
+<td>Cloudflare Turnstile. Always-pass test keys at https://developers.cloudflare.com/turnstile/troubleshooting/testing/</td>
+</tr>
+<tr>
+<td><code>hcaptcha</code></td>
+<td><code>h-captcha-response</code></td>
+<td>hCaptcha. Test keys at https://docs.hcaptcha.com/#integration-testing-test-keys</td>
+</tr>
+<tr>
+<td><code>recaptcha-v2</code></td>
+<td><code>g-recaptcha-response</code></td>
+<td>Google reCAPTCHA v2. Test pair at https://developers.google.com/recaptcha/docs/faq</td>
+</tr>
+<tr>
+<td><code>recaptcha-v3</code></td>
+<td><code>g-recaptcha-response</code></td>
+<td>Google reCAPTCHA v3. Score-thresholded; configure via <code>BotShieldRecaptchaV3MinScore</code></td>
+</tr>
+<tr>
+<td><code>friendly</code></td>
+<td><code>frc-captcha-solution</code></td>
+<td>Friendly Captcha. The <code>solution</code> form field is mandated by the provider</td>
+</tr>
+<tr>
+<td><code>geetest</code></td>
+<td><code>geetest-token</code></td>
+<td>GeeTest v4. HMAC-signed; uses <code>captcha_id</code> + <code>captcha_key</code> rather than a generic site key + secret</td>
+</tr>
+</tbody>
+</table>
+<p>Cohabitation: a single vhost can register multiple providers and
+route requests to different ones via <code>&lt;LocationMatch&gt;</code> scopes — the
+registry is per-scope, not per-server.</p>
+<h3 id="configuration">Configuration</h3>
+<pre><code class="language-apache">BotShieldCaptchaProvider        turnstile
+BotShieldCaptchaSiteKey         &quot;1x00000000000000000000AA&quot;
+BotShieldCaptchaSecretFile      /etc/botshield/captcha-turnstile-secret
+BotShieldCaptchaTimeout         1000   # ms; 100..5000
+BotShieldCaptchaConnectTimeout  250    # ms
+BotShieldRecaptchaV3MinScore    0.5    # only meaningful for recaptcha-v3
+BotShieldCaptchaCABundle        /etc/ssl/certs/ca-certificates.crt
+</code></pre>
+<p>The secret file holds the provider's verify-side secret (or for
+GeeTest, the <code>captcha_key</code> used to HMAC the lot_number). Mode 0600,
+read once at config-parse time.</p>
+<p><code>BotShieldCaptchaTimeout</code> is the total HTTP siteverify budget. On
+timeout the verify path <strong>fails open</strong> — the request gets the same
+treatment it would on a clean pass. Provider-outage scenarios
+shouldn't black-hole legitimate traffic.</p>
+<p><code>BotShieldCaptchaCABundle</code> is optional. If unset, libcurl uses its
+compiled-in default (usually <code>/etc/ssl/certs/ca-certificates.crt</code>
+on Debian-family). Operators with custom trust stores or air-gapped
+deployments can pin a specific bundle.</p>
+<h3 id="verify-endpoint-hardening">Verify-endpoint hardening</h3>
+<p>The captcha-verify endpoint
+(<code>&lt;prefix&gt;/captcha-verify/&lt;provider&gt;</code>) is guarded by six layers of
+pre-libcurl checks. Each rejects cheaply before any outbound call,
+so the endpoint cannot be trivially weaponized as a siteverify
+amplifier or worker-starvation vector.</p>
+<table>
+<thead>
+<tr>
+<th>Check</th>
+<th>Reject reason</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Content-Type prefilter</td>
+<td>Not <code>application/x-www-form-urlencoded</code> → 415</td>
+</tr>
+<tr>
+<td>8 KB body cap</td>
+<td>Body exceeded → 413</td>
+</tr>
+<tr>
+<td>Token-field presence</td>
+<td>Missing or empty <code>&lt;token-field&gt;</code> → 400</td>
+</tr>
+<tr>
+<td>HMAC-signed pending cookie</td>
+<td><code>_bs_captcha_pending</code> mismatch / expired → 403</td>
+</tr>
+<tr>
+<td>Per-IP rate limit</td>
+<td>Over <code>BotShieldCaptchaRateLimit</code> per minute → 429 with Retry-After</td>
+</tr>
+<tr>
+<td>Global in-flight semaphore</td>
+<td>Over <code>BotShieldCaptchaMaxInFlight</code> → 503</td>
+</tr>
+</tbody>
+</table>
+<p>The pending cookie is minted at interstitial render time
+(HttpOnly, Secure, SameSite=Lax, Max-Age=300) and required at
+verify time. It binds the verify call to the same client that
+received the challenge, blocking off-host replay.</p>
+<pre><code class="language-apache">BotShieldCaptchaRateLimit    30   # per IP per minute, 0..1000
+BotShieldCaptchaMaxInFlight  64   # global, 1..1024
+</code></pre>
+<h3 id="hostname-action-binding">Hostname / action binding</h3>
+<p>Several providers (hCaptcha, reCAPTCHA, Turnstile) return a
+<code>hostname</code> and <code>action</code> field in the siteverify response. mod_
+botshield validates these against operator-configured expectations:</p>
+<pre><code class="language-apache">BotShieldCaptchaExpectedHostname  example.com
+BotShieldCaptchaExpectedAction    botshield
+</code></pre>
+<p>NULL (unset) uses runtime defaults: server hostname from
+<code>r-&gt;server-&gt;server_hostname</code> and the literal action <code>botshield</code>.
+Empty string disables the check entirely.</p>
+<p>GeeTest binds host/action via HMAC at request time — the runtime
+defaults don't surface in the response — so these directives are
+no-ops for that provider.</p>
+<h3 id="multi-provider-per-vhost">Multi-provider per vhost</h3>
+<pre><code class="language-apache">&lt;VirtualHost *:443&gt;
+    ServerName example.com
+    BotShieldEnabled on
+
+    &lt;LocationMatch &quot;^/login&quot;&gt;
+        BotShieldCaptchaProvider   turnstile
+        BotShieldCaptchaSiteKey    &quot;...&quot;
+        BotShieldCaptchaSecretFile /etc/botshield/turnstile-secret
+    &lt;/LocationMatch&gt;
+
+    &lt;LocationMatch &quot;^/api/v1/auth&quot;&gt;
+        BotShieldCaptchaProvider   hcaptcha
+        BotShieldCaptchaSiteKey    &quot;...&quot;
+        BotShieldCaptchaSecretFile /etc/botshield/hcaptcha-secret
+    &lt;/LocationMatch&gt;
+&lt;/VirtualHost&gt;
+</code></pre>
+<p>The verify endpoint URL is per-provider:
+<code>&lt;prefix&gt;/captcha-verify/&lt;provider&gt;</code> (e.g.
+<code>/botshield/captcha-verify/turnstile</code>). The interstitial JS posts to
+the matching path. A vhost-wide single-provider deployment can use
+the bare <code>&lt;prefix&gt;/captcha-verify</code> form.</p>
+<h2 id="inline-form-captcha">Inline form captcha</h2>
+<p>Some applications already render their own form captcha and want
+mod_botshield to validate the token inline rather than hand
+visitors a separate interstitial. Enable with:</p>
+<pre><code class="language-apache">BotShieldFormCaptcha on
+</code></pre>
+<p>The fixup hook intercepts POSTs to the configured scope, reads the
+form body once (capped at 256 KiB), validates the captcha token via
+the standard provider siteverify path, and either:</p>
+<ul>
+<li>on success: caches the token validity and lets the original
+handler run with the body replayed via an input filter, or</li>
+<li>on failure: returns 403 with a decision-log line explaining why.</li>
+</ul>
+<p>The body-replay filter uses <code>apr_bucket_immortal_create</code> so the
+upstream handler reads the bytes a second time without a
+deferred-pool copy. This lets the application run its existing
+form-handler logic unchanged while mod_botshield enforces captcha
+upstream of the application's own validation.</p>
+<p><code>BotShieldFormCaptcha on</code> requires a captcha provider configured
+on the same scope. Without one, the directive logs a misconfig and
+no-ops.</p>
+<h2 id="app-bridge">App bridge</h2>
+<p>The app bridge gives the upstream application two protocols for
+exchanging signed reputation data with the module without ever
+appearing on the wire to the client.</p>
+<h3 id="app-to-module-feedback">App-to-module feedback</h3>
+<p>The app emits a response header on responses where it has classified
+the request after-the-fact:</p>
+<pre><code>X-BotShield-Feedback: event=scanner-hit;sig=&lt;hmac-sha256-hex&gt;
+</code></pre>
+<p>mod_botshield strips the header before the response leaves the
+server (so it never reaches the client), verifies the HMAC against
+the integration secret, looks up <code>event=scanner-hit</code> in the
+configured <code>BotShieldFeedbackTrigger</code> table, and applies the
+corresponding action.</p>
+<pre><code class="language-apache">BotShieldAppFeedback              on
+BotShieldAppIntegrationSecretFile /etc/botshield/app-integration-secret
+
+BotShieldFeedbackTrigger scanner-hit  flag=honeypot_hit ttl=3600 log=app-trap
+BotShieldFeedbackTrigger human-pass   flag=app_verified_human ttl=3600
+BotShieldFeedbackTrigger session-ok   flag=app_verified_session ttl=3600
+</code></pre>
+<p>Wire format details:</p>
+<ul>
+<li>The HMAC covers everything before <code>;sig=</code>.</li>
+<li><code>event</code> must be a single token from the configured table —
+unmapped events log at DEBUG and are ignored.</li>
+<li>Multiple <code>X-BotShield-Feedback</code> headers on one response are
+rejected (the strip filter catches all copies; the verify path
+rejects multi-value).</li>
+<li>Header name is configurable via <code>BotShieldAppFeedbackHeader</code> if
+the default name conflicts with another module's vocabulary.</li>
+</ul>
+<p>The event-name → action indirection is the security property: a
+compromised app can emit any event name, but only configured
+mappings reach module memory. Renaming, retiring, or muting an
+event is a config change with no app-side coordination.</p>
+<p>Feedback honors both global <code>BotShieldShadowMode</code> and per-trigger
+<code>mode=observe</code> — under either gate the filter logs
+<code>feedback-trigger:&lt;event&gt;:observe</code> and skips the flagged-IP write.
+The &quot;side effect&quot; of a feedback trigger is future-request state
+(the IP flag), so observe-mode is meaningful even though the
+response has already shipped.</p>
+<h3 id="module-to-app-claims">Module-to-app claims</h3>
+<p>mod_botshield can emit a signed claims header on the request seen
+by the upstream application:</p>
+<pre><code>X-Botshield-Claims: v=1;score=12;tier=pass;cookie=ok;
+                    flags=app_verified_human;passes=s=0,f=0,c=1;
+                    ts=1745870400;sig=&lt;hmac-sha256-hex&gt;
+</code></pre>
+<p>The application reads this to know what mod_botshield decided about
+the current request — without re-implementing tier inspection.</p>
+<pre><code class="language-apache">BotShieldAppClaims                on
+BotShieldAppIntegrationSecretFile /etc/botshield/app-integration-secret
+</code></pre>
+<p>mod_botshield strips any client-supplied <code>X-Botshield-Claims</code>
+header on the way in, then emits a fresh signed value before
+handing the request to the next phase. Any application-side
+spoofing attempt is dropped before the app sees it.</p>
+<p>Claims fields (semicolon-separated, in this order):</p>
+<ul>
+<li><code>v=1</code> — wire-format version. Locked to <code>1</code> today.</li>
+<li><code>score=N</code> — running score the request decision used.</li>
+<li><code>tier=&lt;t&gt;</code> — <code>pass</code> / <code>silent</code> / <code>form</code> / <code>captcha</code> / <code>safeguard</code>
+(matches the decision-log <code>tier</code> enum).</li>
+<li><code>cookie=&lt;c&gt;</code> — <code>ok</code> / <code>expired</code> / <code>bad_sig</code> / <code>bad_format</code> /
+<code>absent</code> (matches the <code>cookie</code> enum).</li>
+<li><code>flags=&lt;list&gt;</code> — comma-joined flag-bit names
+(<code>honeypot_hit,app_verified_human</code>, etc.). Empty value when
+no flags set.</li>
+<li><code>passes=s=N,f=N,c=N</code> — counters of successful challenges at
+each tier carried in the prior cookie.</li>
+<li><code>ts=&lt;unix&gt;</code> — emit time in unix seconds.</li>
+<li><code>sig=&lt;hex&gt;</code> — HMAC-SHA-256 over everything before <code>;sig=</code>.</li>
+</ul>
+<p>The client IP is <em>not</em> included in the claims; the application
+already has it via Apache's <code>r-&gt;useragent_ip</code> / access log /
+<code>%a</code> LogFormat after <code>mod_remoteip</code> rewrite.</p>
+<p>The same integration secret file backs both directions; the
+canonical forms differ structurally so cross-replay is blocked by
+parser shape, not by key separation.</p>
+<h2 id="where-to-next">Where to next</h2>
+<ul>
+<li>Real-world deployment topology: <a href="../deployment/index.html">deployment</a>.</li>
+<li>Tier model and scoring: <a href="../operator-model/index.html">operator model</a>.</li>
+<li>Triggers, allow lists, robots: <a href="../policy/index.html">policy</a>.</li>
+<li>Decision log + metrics: <a href="../observability/index.html">observability</a>.</li>
+</ul>
+
+        </div>
+      </article>
+    </main>
+  </div>
+</body>
+</html>

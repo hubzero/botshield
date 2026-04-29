@@ -1,0 +1,649 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FAQ | mod_botshield</title>
+  <meta name="description" content="Honest answers to questions operators ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.">
+  <link rel="stylesheet" href="../assets/site.css">
+</head>
+<body class="site-doc">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <div class="page-shell">
+    <header class="site-header site-header--compact">
+      <a class="brand" href="../index.html">
+        <img class="brand__icon" src="../assets/logo-botshield-icon.svg" alt="" aria-hidden="true">
+        <span class="brand__wordmark" aria-label="BotShield">
+          <span class="brand__wordmark-soft">Bot</span><span class="brand__wordmark-strong">Shield</span>
+        </span>
+      </a>
+      <nav class="top-nav" aria-label="Primary">
+        <a class="top-nav__link" href="#">GitHub</a>
+        <a class="top-nav__link" href="../getting-started/index.html">Docs</a>
+        <a class="top-nav__link" href="../getting-started/index.html#build">Download</a>
+      </nav>
+    </header>
+
+    <main id="main-content" class="docs-layout" tabindex="-1">
+      <aside class="docs-sidebar">
+        <p class="docs-sidebar__eyebrow">Docs</p>
+        <nav class="docs-nav" aria-label="Documentation">
+<a class="docs-nav__item" href="../getting-started/index.html">
+  <span class="docs-nav__title">Getting started</span>
+  <span class="docs-nav__summary">Install, build, minimal configuration, and verifying a first request.</span>
+</a>
+<a class="docs-nav__item" href="../deployment/index.html">
+  <span class="docs-nav__title">Deployment</span>
+  <span class="docs-nav__summary">Reverse proxies, slow-client defense, multi-vhost reputation, secret rotation, capacity sizing.</span>
+</a>
+<a class="docs-nav__item" href="../operator-model/index.html">
+  <span class="docs-nav__title">Operator model</span>
+  <span class="docs-nav__summary">Tiers, scoring, cookie-carried reputation, decision log, tuning workflow.</span>
+</a>
+<a class="docs-nav__item" href="../policy/index.html">
+  <span class="docs-nav__title">Policy</span>
+  <span class="docs-nav__summary">Allow lists, rate limits, block paths, robots.txt, the trigger families, and flag triggers.</span>
+</a>
+<a class="docs-nav__item" href="../captcha/index.html">
+  <span class="docs-nav__title">Captcha and app-bridge</span>
+  <span class="docs-nav__summary">Third-party captcha providers, verify-endpoint hardening, and the signed app-bridge protocols.</span>
+</a>
+<a class="docs-nav__item" href="../staging/index.html">
+  <span class="docs-nav__title">Staging</span>
+  <span class="docs-nav__summary">Per-rule observe and global shadow mode for safe rule rollout.</span>
+</a>
+<a class="docs-nav__item" href="../observability/index.html">
+  <span class="docs-nav__title">Observability</span>
+  <span class="docs-nav__summary">Decision log, Prometheus metrics, mod_status contribution, and the policy-status admin page.</span>
+</a>
+<a class="docs-nav__item" href="../directives/index.html">
+  <span class="docs-nav__title">Directive reference</span>
+  <span class="docs-nav__summary">Canonical operator-facing reference for all 78 directives, grouped by family.</span>
+</a>
+<a class="docs-nav__item" href="../troubleshooting/index.html">
+  <span class="docs-nav__title">Troubleshooting</span>
+  <span class="docs-nav__summary">Common operator-visible issues, diagnostics, and fixes.</span>
+</a>
+<a class="docs-nav__item is-active" href="index.html">
+  <span class="docs-nav__title">FAQ</span>
+  <span class="docs-nav__summary">Honest answers to questions operators ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
+</a>
+<a class="docs-nav__item" href="../guide/index.html">
+  <span class="docs-nav__title">Project README</span>
+  <span class="docs-nav__summary">Repository README — project overview, build instructions, and dev configuration.</span>
+</a>
+<a class="docs-nav__item" href="../roadmap/index.html">
+  <span class="docs-nav__title">Roadmap and changelog</span>
+  <span class="docs-nav__summary">Shipped milestones, extension design notes, and the development backlog.</span>
+</a>
+        </nav>
+      </aside>
+
+      <article class="docs-article">
+        <header class="docs-article__header">
+          <p class="eyebrow">Documentation</p>
+          <h1>FAQ</h1>
+          <p class="docs-article__summary">Honest answers to questions operators ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</p>
+          <p class="docs-article__source">FAQ</p>
+        </header>
+<section class="toc">
+  <h2 class="toc__heading">On this page</h2>
+  <ul class="toc__list">
+<li class="toc__item toc__item--level-2"><a href="#strategy-and-positioning">Strategy and positioning</a></li>
+<li class="toc__item toc__item--level-3"><a href="#does-this-just-block-all-bots">Does this just block all bots?</a></li>
+<li class="toc__item toc__item--level-3"><a href="#should-i-use-mod-botshield-instead-of-cloudflare">Should I use mod_botshield instead of Cloudflare?</a></li>
+<li class="toc__item toc__item--level-3"><a href="#why-not-just-use-cloudflare">Why not just use Cloudflare?</a></li>
+<li class="toc__item toc__item--level-3"><a href="#how-is-this-different-from-mod-security">How is this different from mod_security?</a></li>
+<li class="toc__item toc__item--level-3"><a href="#how-is-this-different-from-fail2ban">How is this different from fail2ban?</a></li>
+<li class="toc__item toc__item--level-2"><a href="#detection-and-accuracy">Detection and accuracy</a></li>
+<li class="toc__item toc__item--level-3"><a href="#will-it-block-real-users">Will it block real users?</a></li>
+<li class="toc__item toc__item--level-3"><a href="#do-bots-actually-solve-proof-of-work-challenges">Do bots actually solve proof-of-work challenges?</a></li>
+<li class="toc__item toc__item--level-3"><a href="#what-about-googlebot-bingbot-gptbot-bots-i-want-to-allow">What about Googlebot, Bingbot, GPTBot — bots I want to allow?</a></li>
+<li class="toc__item toc__item--level-3"><a href="#what-about-api-endpoints-clients-that-legitimately-can-t-run-javascript">What about API endpoints — clients that legitimately can&#x27;t run JavaScript?</a></li>
+<li class="toc__item toc__item--level-2"><a href="#operations-and-overhead">Operations and overhead</a></li>
+<li class="toc__item toc__item--level-3"><a href="#is-there-overhead-per-request">Is there overhead per request?</a></li>
+<li class="toc__item toc__item--level-3"><a href="#will-it-slow-my-site-down">Will it slow my site down?</a></li>
+<li class="toc__item toc__item--level-3"><a href="#does-it-work-with-php-fastcgi-mod-php-mod-proxy-nginx-upstream">Does it work with PHP / FastCGI / mod_php / mod_proxy / nginx upstream?</a></li>
+<li class="toc__item toc__item--level-3"><a href="#does-it-work-in-containers-kubernetes">Does it work in containers / Kubernetes?</a></li>
+<li class="toc__item toc__item--level-3"><a href="#how-much-memory-does-it-use">How much memory does it use?</a></li>
+<li class="toc__item toc__item--level-2"><a href="#privacy-and-compliance">Privacy and compliance</a></li>
+<li class="toc__item toc__item--level-3"><a href="#does-it-phone-home-send-data-anywhere">Does it phone home? Send data anywhere?</a></li>
+<li class="toc__item toc__item--level-3"><a href="#what-client-data-does-it-store">What client data does it store?</a></li>
+<li class="toc__item toc__item--level-3"><a href="#gdpr-data-protection-considerations">GDPR / data-protection considerations?</a></li>
+<li class="toc__item toc__item--level-2"><a href="#architecture-and-edge-cases">Architecture and edge cases</a></li>
+<li class="toc__item toc__item--level-3"><a href="#does-it-support-ipv6">Does it support IPv6?</a></li>
+<li class="toc__item toc__item--level-3"><a href="#what-happens-during-a-captcha-provider-outage">What happens during a captcha-provider outage?</a></li>
+<li class="toc__item toc__item--level-3"><a href="#what-happens-if-mod-watchdog-isn-t-loaded">What happens if mod_watchdog isn&#x27;t loaded?</a></li>
+<li class="toc__item toc__item--level-3"><a href="#what-happens-during-graceful-restart">What happens during graceful restart?</a></li>
+<li class="toc__item toc__item--level-3"><a href="#does-it-cache-anything-that-could-go-stale">Does it cache anything that could go stale?</a></li>
+<li class="toc__item toc__item--level-3"><a href="#why-an-apache-module-instead-of-an-nginx-module-reverse-proxy">Why an Apache module instead of an nginx module / reverse proxy?</a></li>
+<li class="toc__item toc__item--level-2"><a href="#what-it-doesn-t-do">What it doesn&#x27;t do</a></li>
+<li class="toc__item toc__item--level-3"><a href="#distributed-reputation-across-multiple-apache-instances">Distributed reputation across multiple Apache instances</a></li>
+<li class="toc__item toc__item--level-3"><a href="#browser-fingerprinting">Browser fingerprinting</a></li>
+<li class="toc__item toc__item--level-3"><a href="#permanent-bans">Permanent bans</a></li>
+<li class="toc__item toc__item--level-2"><a href="#where-to-next">Where to next</a></li>
+  </ul>
+</section>
+        <div class="prose">
+<p>Honest answers to the questions operators actually ask before
+adopting mod_botshield. If the answer below feels insufficient,
+the <a href="../operator-model/index.html">operator model</a>,
+<a href="../deployment/index.html">deployment</a>, and
+<a href="../policy/index.html">policy</a> pages have the long-form treatment.</p>
+<h2 id="strategy-and-positioning">Strategy and positioning</h2>
+<h3 id="does-this-just-block-all-bots">Does this just block all bots?</h3>
+<p>No, and that's deliberate. The goal isn't bot elimination — it's
+<em>operator control over the terms of access</em>. Search-engine
+crawlers, LLM training bots, archival crawlers, monitoring
+agents, partner integrations — many of these are bots an operator
+<em>wants</em> to reach the content, but on conditions the operator sets:
+when, how often, which paths, with what rate cap, with what
+attribution. mod_botshield's primitives are built around setting
+those terms:</p>
+<ul>
+<li><strong>Allow-list.</strong> When <code>BotShieldAllow on</code> is set and the
+configured CIDR ranges are loaded, verified crawlers (UA-and-IP
+match against the published ranges) bypass the score ladder
+entirely. The built-in seed list covers Googlebot, Bingbot,
+and Applebot; operators add others via <code>BotShieldAllowBot</code> and
+refresh ranges out of band with <code>tools/refresh-bot-ranges.sh</code>.</li>
+<li><strong>Robots.txt enforcement.</strong> A bot that ignores your <code>Disallow</code>
+rules gets enforced at the policy layer — robots.txt is no
+longer advisory text the bot can skip; it's enforced at your
+origin.</li>
+<li><strong>Rate limits and cohorts.</strong> Welcome a known crawler at 60
+requests / minute but not 600. Different rates for different
+cohorts. Different rates by path.</li>
+<li><strong>Trigger families.</strong> Time-of-day, load-aware, per-route,
+env-driven rules — narrow the gate when needed, open it
+otherwise.</li>
+<li><strong>The challenge tier ladder.</strong> Anything not on the allow-list
+gets graduated friction (silent, form, captcha) sized to the
+client's score, not a binary block.</li>
+</ul>
+<p>A site that wanted to block every bot could do that with much
+less than mod_botshield offers. The reason this module exists is
+that &quot;block everything that isn't a real human browser&quot; is the
+<em>wrong</em> answer for most operators — they want search-engine
+indexing, want LLM crawlers to cite them under controlled terms,
+want monitoring to reach health endpoints, want partner bots to
+hit their API. mod_botshield is the policy surface for saying
+yes-with-conditions instead of no.</p>
+<h3 id="should-i-use-mod-botshield-instead-of-cloudflare">Should I use mod_botshield instead of Cloudflare?</h3>
+<p>Probably not. Cloudflare's bot product solves a different scope of
+problem than mod_botshield does, and a site that can sit behind
+Cloudflare and accept the trade-offs is usually better served doing
+exactly that.</p>
+<p>What Cloudflare gives you that mod_botshield doesn't:</p>
+<ul>
+<li><strong>Edge filtering.</strong> Traffic Cloudflare drops never touches your
+origin at all — saving bandwidth, TLS termination, and the cost
+of even a 1 ms decision per request.</li>
+<li><strong>Massive cross-customer bot intelligence.</strong> Cloudflare sees
+traffic across millions of sites and reuses signals (botnets,
+scraper fleets, residential-proxy ranges, fingerprintable
+headless browsers) the moment they appear anywhere.</li>
+<li><strong>DDoS protection at scale.</strong> Cloudflare absorbs volumetric and
+application-layer attacks orders of magnitude bigger than a
+single Apache instance can survive.</li>
+<li><strong>Managed challenges and turnkey product.</strong> No tuning, no
+capacity sizing, no operator log-grepping. Pay the bill, get a
+policy.</li>
+</ul>
+<p>What mod_botshield gives you that Cloudflare doesn't:</p>
+<ul>
+<li><strong>No third party in the request path.</strong> Your traffic never
+leaves your trust boundary.</li>
+<li><strong>No vendor lock-in or recurring cost.</strong> Bot mitigation that
+goes beyond simple known-bad-IP blocking is typically a paid
+tier with managed CDNs.</li>
+<li><strong>Operator control.</strong> You write the rules in Apache config you
+already understand; you don't have to learn a separate dashboard
+or wait for a vendor to add a feature.</li>
+</ul>
+<p>The honest one-liner: if you can put your site behind Cloudflare
+and you don't have a specific reason not to, do that. mod_botshield
+is for the cases where you can't or won't.</p>
+<h3 id="why-not-just-use-cloudflare">Why not just use Cloudflare?</h3>
+<p>You should. If Cloudflare is a viable option for your site, that's
+the answer. mod_botshield exists for the cases where Cloudflare
+isn't a fit:</p>
+<ul>
+<li><strong>The site can't go behind a third-party CDN.</strong></li>
+<li><strong>The cost model doesn't work for your deployment.</strong> When the
+CDN's bot-mitigation pricing exceeds the budget you have for
+the problem, an in-process Apache module may be the right fit.</li>
+<li><strong>The expensive thing isn't the bandwidth.</strong> mod_botshield's
+whole reason for existence is to keep the application stack
+<em>asleep</em>. A real framework bootstrap (PHP / Python / Ruby / Node
+— pick your language) loads configuration, middleware, an ORM,
+plugins / modules / event listeners, and typically opens a
+database connection or pulls one from a pool. That's tens to
+hundreds of milliseconds of work per cold request before the
+first line of business logic runs. Multiplied by millions of
+bot requests per week that adds up whether the bytes are cheap
+or not. A CDN can't always make that decision because it
+doesn't know which routes wake the framework and which serve
+from disk.</li>
+<li><strong>You want to own the rules.</strong> mod_botshield's policy lives in
+Apache config. For sites that need explainable, auditable bot
+policy, the in-process model fits better than a vendor-curated
+ruleset.</li>
+</ul>
+<p>If none of those apply, you're paying configuration tax for
+protection you could have gotten cheaper from a CDN.</p>
+<h3 id="how-is-this-different-from-mod-security">How is this different from mod_security?</h3>
+<p>mod_security is a WAF — pattern-matching rules against request
+attributes (URI, headers, body) to block known attack signatures
+(SQL injection, XSS, RFI, scanner UAs). It's brilliant at what it
+does. mod_botshield is a <em>bot</em> mitigator — proof-of-work
+challenges, scoring, cookie-carried reputation, captcha
+integration. The two are complementary; running them together is
+a sensible pattern (mod_security for attacks, mod_botshield for
+scrapers).</p>
+<p>The clearest functional split:</p>
+<ul>
+<li>mod_security stops a malicious <em>request</em> (drop the SQL
+injection, the XSS payload, the path-traversal attempt).</li>
+<li>mod_botshield stops a malicious <em>client</em> (challenge the scraper,
+flag the honeypot tripper, force a captcha on the credential-
+stuffing source).</li>
+</ul>
+<p>There's overlap on UA-pattern blocking and rate limiting, but the
+fundamental machinery is different.</p>
+<h3 id="how-is-this-different-from-fail2ban">How is this different from fail2ban?</h3>
+<p>fail2ban watches log files, matches patterns, and adds firewall
+rules. It's a great tool for SSH brute force, repeated 401s, and
+similar log-driven detection. For HTTP bot mitigation it has two
+limits:</p>
+<ul>
+<li><strong>Latency.</strong> A bot finishes scraping by the time the log line is
+processed and the firewall rule lands. mod_botshield decides
+per-request, in-process, before the application runs.</li>
+<li><strong>No proof-of-work option.</strong> fail2ban can ban or not-ban; it
+can't issue a challenge that costs the client time and lets
+legitimate users through.</li>
+</ul>
+<p>For &quot;an IP is doing something obviously bad, ban it for an hour&quot;
+fail2ban is fine. For &quot;this request is suspicious, make the client
+prove they're human&quot; you want mod_botshield (or Cloudflare).</p>
+<h2 id="detection-and-accuracy">Detection and accuracy</h2>
+<h3 id="will-it-block-real-users">Will it block real users?</h3>
+<p>Below <code>BotShieldScoreSilent</code> (default 20) the module returns
+DECLINED to Apache; the user's request flows through normally and
+they never see mod_botshield at all. The default heuristics are
+tuned to keep typical browser traffic below that threshold, but
+the line is closer than it looks: a request with no
+<code>Accept-Language</code> header (15 points) plus a first-time IP not in
+the Bloom filter (5 points) lands at exactly 20, which trips the
+silent tier. Browsers in some configurations (privacy modes that
+strip headers, certain mobile webviews, intranet apps with
+non-default settings) can reach the threshold on a clean first
+request. The captcha-tier fail-open story is on the captcha side;
+the silent / form tiers themselves are real friction even for a
+legitimate first-time visitor.</p>
+<p>If real users <em>are</em> hitting challenges, the likely causes are:</p>
+<ul>
+<li>Apache is behind a proxy and <code>mod_remoteip</code> isn't configured —
+every request looks like it comes from the edge LB. See
+<a href="../troubleshooting/index.html">troubleshooting</a>.</li>
+<li>The score thresholds are too low for the site's traffic mix.</li>
+<li>A path-trigger or block-path is matching legitimate routes.</li>
+</ul>
+<p><a href="../staging/index.html">Staging</a> describes the
+<code>BotShieldShadowMode on</code> workflow for catching false positives
+before they hit users.</p>
+<h3 id="do-bots-actually-solve-proof-of-work-challenges">Do bots actually solve proof-of-work challenges?</h3>
+<p>Some of them. The reality is graduated:</p>
+<ul>
+<li><strong>Cheap scrapers</strong> (Python <code>requests</code>, <code>curl</code>, <code>wget</code>,
+HTTP-library clients with no JS engine) cannot solve PoW. They
+fail at the silent and form tiers. This is the bulk of scraper
+traffic.</li>
+<li><strong>Headless browsers</strong> (Puppeteer, Playwright, Selenium) <em>can</em>
+solve PoW because they execute JavaScript. They can also solve
+Cloudflare's managed challenges and most non-captcha gates.</li>
+<li><strong>Sophisticated bot operators</strong> can throw real CPU at PoW
+trivially — a 4-leading-zero SHA-256 challenge is cheap.</li>
+</ul>
+<p>So mod_botshield's PoW tier is not a bot-eliminator. It's a
+<em>friction tax</em>: it makes scraping economically worse than not
+scraping, so a scraper that can scrape an unprotected site gets
+better ROI moving on. Combined with reputation (the cookie carries
+score; flagged IPs get tier_floor=captcha; honeypot trippers get
++60 score on every request) and the third-party captcha tier for
+the suspicious tail, the cumulative effect is: scrapers go
+elsewhere, real users barely notice.</p>
+<p>For paths that genuinely cannot ever serve a bot, the captcha
+tier with hostname/action binding is the design's strongest
+friction setting.</p>
+<h3 id="what-about-googlebot-bingbot-gptbot-bots-i-want-to-allow">What about Googlebot, Bingbot, GPTBot — bots I want to allow?</h3>
+<p>The allow-list family handles this. <code>BotShieldAllowBot</code> registers
+a UA pattern and a published IP range; verified crawlers (UA
+matches AND IP is in the range) bypass the score ladder entirely.
+mod_botshield ships a built-in seed list for the major search-
+engine crawlers; <code>tools/refresh-bot-ranges.sh</code> fetches and updates
+the CIDR files.</p>
+<p>Importantly, the allow-list also catches <em>fakes</em>: a request whose
+UA matches &quot;Googlebot/&quot; but whose IP isn't Googlebot's gets a
+strong penalty (<code>fake-googlebot</code>) — bot operators love claiming
+to be search engines. See <a href="../policy/index.html#allow-list-e1-verified-crawlers">policy</a>.</p>
+<p>For LLM crawlers (GPTBot, ClaudeBot, anthropic-ai, Google-
+Extended) — sites that want to block them by default can pair
+<code>BotShieldRobotsTxt</code> with a robots.txt carrying <code>Disallow: /</code> for
+those groups. mod_botshield enforces robots.txt at the policy
+layer, not as advisory text the bot can ignore.</p>
+<h3 id="what-about-api-endpoints-clients-that-legitimately-can-t-run-javascript">What about API endpoints — clients that legitimately can't run JavaScript?</h3>
+<p>Three tools for this case:</p>
+<ol>
+<li><strong>Don't gate them.</strong> API routes usually deserve a different
+policy than user-facing routes. Scope <code>BotShieldEnabled</code> with
+<code>&lt;LocationMatch&gt;</code> to exclude <code>/api/...</code>.</li>
+<li><strong>Allow-list specific clients.</strong> If your API has a fixed set
+of trusted callers (mobile app, partner integrations,
+internal services) put their UA + IP range in
+<code>BotShieldAllowBot</code> so they bypass the score ladder.</li>
+<li><strong>Use the app-bridge.</strong> The signed app-feedback protocol lets
+your application classify clients after-the-fact and feed the
+verdict back into mod_botshield's reputation. JWT-authenticated
+clients can carry reputation across requests without
+needing to solve PoW. See
+<a href="../captcha/index.html#app-bridge">captcha</a>.</li>
+</ol>
+<p>A fourth option for IoT-style clients: implement the silent-tier
+PoW protocol in your client. The wire format is documented;
+nothing forces you to use a browser to satisfy it.</p>
+<h2 id="operations-and-overhead">Operations and overhead</h2>
+<h3 id="is-there-overhead-per-request">Is there overhead per request?</h3>
+<p>For requests that pass through (real users, valid cookies,
+verified crawlers): a few microseconds to a few hundred. The hot
+path is heuristic checks (header presence) + Bloom filter probe
+(one SHM read, no locks) + optional cookie verify (an AES-256-GCM
+open over a small base64-decoded envelope).</p>
+<p>The in-tree benchmark suite (<code>tests/bench/</code>) measures this on a
+small Apache static-file endpoint. That is intentionally a harsh
+case for percentage overhead: the baseline request is so cheap
+that any fixed per-request work looks large.</p>
+<p>The latest saved runs include both saturation tests and fixed-rate
+tests at 1k, 5k, and 10k requests/second. <code>BotShieldEnabled on</code>
+with no policy features added about <strong>8 microseconds</strong> to the
+single-connection p50 latency. At fixed rates, 1k and 5k rps were
+essentially flat; at 10k rps, heavy policies stayed in the
+tens-of-microseconds range at p50, with low-millisecond p99 tail
+growth only in the kitchen-sink configuration. The saturation test
+still shows roughly 20% lower static-file RPS for heavy policies,
+but that is a capacity-ceiling measurement, not normal request
+latency. See
+<a href="../deployment/index.html#performance-characteristics">deployment</a>
+for the measurement summary.</p>
+<p>For challenged requests: there's a one-time PoW cost paid by the
+<em>client</em> (server work is constant — sign a challenge, sign a
+verify cookie); the server-side latency is dominated by HMAC
+operations. For the captcha tier: one outbound libcurl siteverify
+call, bounded by <code>BotShieldCaptchaTimeout</code> (default 1 s, fail-
+open on timeout).</p>
+<p>These are synthetic-load numbers, not field measurement. Real
+production overhead depends on hardware, kernel version, network
+RTT, and header mix. The benchmark suggests the module's
+contribution is well below the cost of any meaningful upstream
+handler (PHP startup, framework bootstrap, database round-trip).</p>
+<h3 id="will-it-slow-my-site-down">Will it slow my site down?</h3>
+<p>For real users the module returns DECLINED below the silent
+threshold and the request flows through Apache normally. The
+worst case for a passing request is a few hundred microseconds of
+HMAC + header checks. That's well below typical framework
+bootstrap, database query, or template render times — mod_botshield
+isn't the bottleneck.</p>
+<p>For challenged requests, yes, the user experiences friction
+(silent splash for a couple seconds; form-PoW for a few seconds
+of clicked PoW; captcha for as long as the provider takes). That's
+the entire point: <em>make scraping expensive without making real use
+expensive</em>. The threshold tuning workflow in
+<a href="../staging/index.html">staging</a> is the operator handle on where
+that line falls.</p>
+<h3 id="does-it-work-with-php-fastcgi-mod-php-mod-proxy-nginx-upstream">Does it work with PHP / FastCGI / mod_php / mod_proxy / nginx upstream?</h3>
+<p>Yes to all of those. mod_botshield runs as an Apache
+<code>APR_HOOK_FIRST</code> request handler that decides before any content
+generator runs. By the time PHP / FastCGI / mod_proxy gets the
+request, mod_botshield has already returned DECLINED (real
+content) or short-circuited with a challenge response. The
+upstream sees only the requests that mod_botshield decided to
+forward.</p>
+<p><code>mod_proxy_balancer</code>, <code>mod_rewrite</code>, <code>mod_alias</code>, <code>mod_dir</code> —
+none of them interact with mod_botshield in surprising ways. The
+hook ordering is documented in
+<a href="../deployment/index.html">deployment</a> and
+<a href="../observability/index.html">observability</a>.</p>
+<h3 id="does-it-work-in-containers-kubernetes">Does it work in containers / Kubernetes?</h3>
+<p>Yes — it's just an Apache module. The constraints are:</p>
+<ul>
+<li>The SHM segment is per-Apache-instance. Two Apache pods don't
+share reputation. For per-pod isolation that's fine; for cross-
+pod sharing you'd need to centralize on a shared backend (which
+is out of scope today — see &quot;What it doesn't do&quot;).</li>
+<li>The state file (<code>BotShieldStateFile</code>) lets a pod's reputation
+survive restarts if you mount it from a persistent volume.
+Without persistence, a restarted pod starts with a clean
+flagged-IP table.</li>
+<li><code>mod_remoteip</code> configuration is critical when traffic comes from
+an ingress controller (nginx-ingress, AWS ALB Ingress, Traefik).
+See <a href="../deployment/index.html">deployment</a>.</li>
+</ul>
+<h3 id="how-much-memory-does-it-use">How much memory does it use?</h3>
+<p>Default: 16 MiB SHM segment shared across all workers, growing as
+operators raise capacity directives. Per-process overhead is
+negligible (the <code>.so</code> is a few hundred KB; no per-request heap
+allocation outside of Apache's <code>r-&gt;pool</code> which is freed at request
+end).</p>
+<p>The 8-hour soak (1.4M requests) showed +4 MB RSS growth. SHM
+sizing is documented in <a href="../deployment/index.html#capacity-sizing">deployment</a>.</p>
+<h2 id="privacy-and-compliance">Privacy and compliance</h2>
+<h3 id="does-it-phone-home-send-data-anywhere">Does it phone home? Send data anywhere?</h3>
+<p>No. The module makes outbound network calls in two
+operator-controlled categories:</p>
+<ol>
+<li>
+<p><strong>Captcha siteverify.</strong> When <code>BotShieldCaptchaProvider</code> is
+configured, mod_botshield makes one HTTPS POST per verify
+attempt to the configured provider's siteverify URL with the
+client's captcha token (and the client IP as the <code>remoteip</code>
+field). This fires from three paths: the <code>/captcha-verify</code>
+endpoint, the silent-tier embedded-verify endpoint when an
+operator pairs silent with a captcha provider, and the
+form-captcha fixup. No siteverify call ever happens without
+a captcha provider explicitly configured on the scope.</p>
+<p>The captcha widget itself loads provider JavaScript on the
+client side (Turnstile / hCaptcha / etc.) — that's a
+third-party request from the <em>client's</em> browser to the
+provider, not from your Apache. It's still a side-channel
+that lets the provider see the client's IP.</p>
+</li>
+<li>
+<p><strong>Bot-range refresh script.</strong> <code>tools/refresh-bot-ranges.sh</code>
+fetches published JSON from search-engine providers
+(Googlebot, Bingbot, etc.) and rewrites the CIDR files in
+<code>/var/lib/botshield/bots/</code>. This runs only when the operator
+invokes it (cron or manual); the module itself never makes
+these calls at runtime.</p>
+</li>
+</ol>
+<p>No telemetry. No analytics. No phoning the project. The module is
+a single <code>.so</code> that runs in your Apache.</p>
+<h3 id="what-client-data-does-it-store">What client data does it store?</h3>
+<ul>
+<li><strong>Flagged-IP table (SHM).</strong> Client IP (masked to
+<code>BotShieldIPv6PrefixLen</code> for v6) + flag bitmap + TTL. No UA, no
+paths, no headers. Survives restart if <code>BotShieldStateFile</code> is
+configured.</li>
+<li><strong>Bloom filter.</strong> Client IP fingerprint (lossy; you can't
+recover IPs from the filter). Used for &quot;first-sight&quot;
+detection.</li>
+<li><strong>Strike + safeguard tables.</strong> Same shape as flagged-IP —
+client IP keys, small slot data.</li>
+<li><strong>Verified cookie.</strong> AES-256-GCM encrypted; carries the
+client's accumulated score, flag bits, and challenge counters.
+Lives in the <em>client's</em> browser, not on the server.</li>
+<li><strong>Pending cookie.</strong> HMAC-signed; lives in the client's browser
+for 5 minutes between interstitial render and captcha verify.</li>
+<li><strong>Decision log.</strong> Client IP, request path, decision tier, and
+reason tokens go to Apache's error log. Sensitive header values
+(Cookie, Authorization, etc.) are not logged.</li>
+</ul>
+<p>The module avoids storing request bodies, header values
+(including <code>Cookie</code>, <code>Authorization</code>, and the like), or
+application-side session data. IPs and request paths may still
+be personal data under GDPR or comparable regimes — see the
+data-protection notes below.</p>
+<h3 id="gdpr-data-protection-considerations">GDPR / data-protection considerations?</h3>
+<p>The module's data footprint (client IP + flag bits + TTL) is
+generally classified as personal data under GDPR. Considerations:</p>
+<ul>
+<li><strong>Lawful basis.</strong> Bot mitigation is generally a &quot;legitimate
+interest&quot; — preventing scraping of operator data. Document the
+basis in your privacy notice.</li>
+<li><strong>Retention.</strong> Flagged-IP entries expire after the configured
+TTL (default 1 hour for honeypot hits). The Bloom filter
+rotates with <code>BotShieldBloomWindow</code> (default 7 days).
+Reputation in the verified cookie expires with the cookie TTL
+(default 1 hour).</li>
+<li><strong>Right to erasure.</strong> A request to forget an IP can be
+satisfied by reloading Apache (clears in-memory state) and
+deleting the state file (clears persisted state). There's no
+finer-grained &quot;forget this IP&quot; API today; build it via your
+own admin tooling if you need it.</li>
+<li><strong>Data residency.</strong> With the captcha tier enabled, the
+captcha provider sees the client IP twice: once via the
+server-to-provider siteverify call (which sends <code>remoteip</code>
+in the POST body), and once via the provider's client-side
+JavaScript that the interstitial loads. Both are third-party
+data flows from the client's perspective, governed by the
+provider's terms. With the captcha tier disabled,
+mod_botshield is in-process and IP data does not leave the
+server.</li>
+</ul>
+<p>The captcha-provider relationship is governed by the provider's
+terms; review them as part of your processor map.</p>
+<h2 id="architecture-and-edge-cases">Architecture and edge cases</h2>
+<h3 id="does-it-support-ipv6">Does it support IPv6?</h3>
+<p>Yes. v4 keys at <code>/32</code>, v6 keys at the configured prefix length
+(<code>BotShieldIPv6PrefixLen</code>, default 64 — per-subscriber for typical
+ISP allocations; tighter values like <code>/56</code> or <code>/48</code> flag larger
+blocks of addresses sharing reputation).</p>
+<h3 id="what-happens-during-a-captcha-provider-outage">What happens during a captcha-provider outage?</h3>
+<p>mod_botshield fails open for siteverify timeouts. If
+<code>BotShieldCaptchaTimeout</code> (default 1 s) elapses before the
+provider responds, the verification path treats the request as
+passing — same outcome it would get without the provider. A
+WARNING-level log line carries the literal string <code>failing open</code>
+so operators can grep / alert on it. The Prometheus metrics
+count these as <code>outcome=failopen</code>.</p>
+<p>The reasoning: a third-party provider outage shouldn't black-hole
+legitimate traffic. Operators preferring fail-closed semantics
+can wrap the provider in a circuit breaker (e.g. require captcha
+tier through a different path that doesn't fail-open) but that
+isn't the default.</p>
+<h3 id="what-happens-if-mod-watchdog-isn-t-loaded">What happens if mod_watchdog isn't loaded?</h3>
+<p>mod_botshield degrades gracefully:</p>
+<ul>
+<li>Periodic state-file snapshots stop. The graceful-shutdown save
+still runs.</li>
+<li>The capacity headroom watchdog stops emitting NOTICE/WARN
+lines. Operators can read the same data from the on-demand
+Prometheus gauges (<code>botshield_shm_flagged_used</code> etc.).</li>
+<li>The robots.txt mtime-poller stops. Operators must reload Apache
+to pick up robots.txt changes.</li>
+<li>The load sampler stops; load triggers won't fire.</li>
+</ul>
+<p>None of these are fatal. The module continues to serve requests
+and apply policy.</p>
+<h3 id="what-happens-during-graceful-restart">What happens during graceful restart?</h3>
+<p>Apache's <code>apachectl graceful</code> re-runs <code>post_config</code> once. The SHM
+segment is preserved across the restart (Apache attaches to the
+existing segment rather than creating a new one), so flagged-IP
+state, Bloom filters, rate-limit counters all persist. The state
+file is loaded if configured.</p>
+<p>Cookies signed before the restart still verify if the master
+secret is unchanged. For zero-disruption secret rotation, see the
+secondary-secret flow in <a href="../deployment/index.html#secret-rotation">deployment</a>.</p>
+<h3 id="does-it-cache-anything-that-could-go-stale">Does it cache anything that could go stale?</h3>
+<p>Bot ranges (CIDR files for <code>BotShieldAllowBot</code>) are read once at
+config-parse time and cached on the per-server config. To pick up
+a new bot range, reload Apache.</p>
+<p>Robots.txt is parsed at startup and re-parsed by the watchdog on
+mtime change. Default refresh interval 60 s; tunable via
+<code>BotShieldRobotsRefreshInterval</code>.</p>
+<p>The captcha provider's site key, secret, and CA bundle are read
+once at config-parse time. To pick up a key rotation, reload
+Apache.</p>
+<h3 id="why-an-apache-module-instead-of-an-nginx-module-reverse-proxy">Why an Apache module instead of an nginx module / reverse proxy?</h3>
+<p>mod_botshield is Apache 2.4-specific because that's the
+deployment target it was built for. The architecture (request-
+phase hook, SHM-backed reputation, in-process scoring) maps to
+nginx's <code>ngx_http_*_module</code> shape with some translation, but no
+nginx port exists today.</p>
+<p>For nginx deployments the practical answer is: put nginx in front
+of Apache (with <code>mod_remoteip</code> configured for the X-Forwarded-For
+chain), let Apache + mod_botshield handle the bot mitigation. Or
+use Cloudflare / other CDN in front of nginx for the same effect.</p>
+<h2 id="what-it-doesn-t-do">What it doesn't do</h2>
+<h3 id="distributed-reputation-across-multiple-apache-instances">Distributed reputation across multiple Apache instances</h3>
+<p>Each Apache instance has its own SHM segment. There's no
+out-of-the-box mechanism for sharing reputation across pods /
+hosts / data centers. For deployments where a single bot's
+behavior should affect all your instances, you have three
+options:</p>
+<ol>
+<li><strong>Sticky sessions at the LB level.</strong> Ensure each client lands
+on the same Apache instance via consistent hashing. Reputation
+tracks per-instance but a given client's reputation is
+coherent within their session.</li>
+<li><strong>Edge filtering.</strong> Put the cross-instance signal at the edge
+(Cloudflare, AWS WAF, etc.) and let mod_botshield handle
+per-instance decisions.</li>
+<li><strong>App-bridge.</strong> Have your application centralize bot
+classification via a shared backend (Redis, your own
+database) and feed the verdict to each Apache instance via
+the X-BotShield-Feedback protocol.</li>
+</ol>
+<p>Centralized SHM (Redis-backed reputation, pubsub flag
+synchronization) is on the long-term roadmap but not shipped.</p>
+<h3 id="browser-fingerprinting">Browser fingerprinting</h3>
+<p>Commercial bot-management products use canvas/WebGL/font
+fingerprinting, TLS JA3, and many other signals to score
+how-bot-like a client is. mod_botshield doesn't do any of this.
+It's deliberately a small, transparent, Apache-config-driven set
+of signals: header presence, IP reputation, scope-based triggers,
+and proof-of-work.</p>
+<p>If you need fingerprint-based scoring, that's the kind of problem
+specialized vendors solve. mod_botshield aims at the bulk of bot
+traffic those products bill heavily to handle — scrapers,
+scanners, credential stuffers, simple harvesters — and leaves the
+long-tail of headless-Chrome-with-residential-IP
+sophistication to specialized vendors.</p>
+<h3 id="permanent-bans">Permanent bans</h3>
+<p>Flagged-IP entries always have a TTL. There's no &quot;ban this IP
+forever&quot; directive. The reasoning: ban-forever lists at scale are
+operationally hostile (need GUI for un-banning, accumulate ASN-
+level mistakes, become impossible to audit). The combination of
+flag-TTL + tier_floor=captcha + accumulating cookie reputation
+gives you &quot;this IP gets a captcha every time, indefinitely while
+the abuse continues&quot; without the binary ban semantics.</p>
+<p>For genuinely permanent blocks (a CIDR you never want to see),
+use Apache's <code>Require not ip</code> or your firewall — both handle
+permanent denial better than mod_botshield does.</p>
+<h2 id="where-to-next">Where to next</h2>
+<ul>
+<li>Install + minimal config: <a href="../getting-started/index.html">getting-started</a>.</li>
+<li>Tier model and scoring: <a href="../operator-model/index.html">operator-model</a>.</li>
+<li>Allow lists, triggers, robots: <a href="../policy/index.html">policy</a>.</li>
+<li>Captcha + app-bridge: <a href="../captcha/index.html">captcha</a>.</li>
+<li>Common operational issues: <a href="../troubleshooting/index.html">troubleshooting</a>.</li>
+<li>Full directive reference: <a href="../directives/index.html">directives</a>.</li>
+</ul>
+
+        </div>
+      </article>
+    </main>
+  </div>
+</body>
+</html>

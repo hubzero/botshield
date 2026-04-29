@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Troubleshooting | mod_botshield</title>
+  <meta name="description" content="Common operator-visible issues, diagnostics, and fixes.">
+  <link rel="stylesheet" href="../assets/site.css">
+</head>
+<body class="site-doc">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <div class="page-shell">
+    <header class="site-header site-header--compact">
+      <a class="brand" href="../index.html">
+        <img class="brand__icon" src="../assets/logo-botshield-icon.svg" alt="" aria-hidden="true">
+        <span class="brand__wordmark" aria-label="BotShield">
+          <span class="brand__wordmark-soft">Bot</span><span class="brand__wordmark-strong">Shield</span>
+        </span>
+      </a>
+      <nav class="top-nav" aria-label="Primary">
+        <a class="top-nav__link" href="#">GitHub</a>
+        <a class="top-nav__link" href="../getting-started/index.html">Docs</a>
+        <a class="top-nav__link" href="../getting-started/index.html#build">Download</a>
+      </nav>
+    </header>
+
+    <main id="main-content" class="docs-layout" tabindex="-1">
+      <aside class="docs-sidebar">
+        <p class="docs-sidebar__eyebrow">Docs</p>
+        <nav class="docs-nav" aria-label="Documentation">
+<a class="docs-nav__item" href="../getting-started/index.html">
+  <span class="docs-nav__title">Getting started</span>
+  <span class="docs-nav__summary">Install, build, minimal configuration, and verifying a first request.</span>
+</a>
+<a class="docs-nav__item" href="../deployment/index.html">
+  <span class="docs-nav__title">Deployment</span>
+  <span class="docs-nav__summary">Reverse proxies, slow-client defense, multi-vhost reputation, secret rotation, capacity sizing.</span>
+</a>
+<a class="docs-nav__item" href="../operator-model/index.html">
+  <span class="docs-nav__title">Operator model</span>
+  <span class="docs-nav__summary">Tiers, scoring, cookie-carried reputation, decision log, tuning workflow.</span>
+</a>
+<a class="docs-nav__item" href="../policy/index.html">
+  <span class="docs-nav__title">Policy</span>
+  <span class="docs-nav__summary">Allow lists, rate limits, block paths, robots.txt, the trigger families, and flag triggers.</span>
+</a>
+<a class="docs-nav__item" href="../captcha/index.html">
+  <span class="docs-nav__title">Captcha and app-bridge</span>
+  <span class="docs-nav__summary">Third-party captcha providers, verify-endpoint hardening, and the signed app-bridge protocols.</span>
+</a>
+<a class="docs-nav__item" href="../staging/index.html">
+  <span class="docs-nav__title">Staging</span>
+  <span class="docs-nav__summary">Per-rule observe and global shadow mode for safe rule rollout.</span>
+</a>
+<a class="docs-nav__item" href="../observability/index.html">
+  <span class="docs-nav__title">Observability</span>
+  <span class="docs-nav__summary">Decision log, Prometheus metrics, mod_status contribution, and the policy-status admin page.</span>
+</a>
+<a class="docs-nav__item" href="../directives/index.html">
+  <span class="docs-nav__title">Directive reference</span>
+  <span class="docs-nav__summary">Canonical operator-facing reference for all 78 directives, grouped by family.</span>
+</a>
+<a class="docs-nav__item is-active" href="index.html">
+  <span class="docs-nav__title">Troubleshooting</span>
+  <span class="docs-nav__summary">Common operator-visible issues, diagnostics, and fixes.</span>
+</a>
+<a class="docs-nav__item" href="../faq/index.html">
+  <span class="docs-nav__title">FAQ</span>
+  <span class="docs-nav__summary">Honest answers to questions operators ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
+</a>
+<a class="docs-nav__item" href="../guide/index.html">
+  <span class="docs-nav__title">Project README</span>
+  <span class="docs-nav__summary">Repository README — project overview, build instructions, and dev configuration.</span>
+</a>
+<a class="docs-nav__item" href="../roadmap/index.html">
+  <span class="docs-nav__title">Roadmap and changelog</span>
+  <span class="docs-nav__summary">Shipped milestones, extension design notes, and the development backlog.</span>
+</a>
+        </nav>
+      </aside>
+
+      <article class="docs-article">
+        <header class="docs-article__header">
+          <p class="eyebrow">Documentation</p>
+          <h1>Troubleshooting</h1>
+          <p class="docs-article__summary">Common operator-visible issues, diagnostics, and fixes.</p>
+          <p class="docs-article__source">Troubleshooting</p>
+        </header>
+<section class="toc">
+  <h2 class="toc__heading">On this page</h2>
+  <ul class="toc__list">
+<li class="toc__item toc__item--level-2"><a href="#module-fails-to-load">Module fails to load</a></li>
+<li class="toc__item toc__item--level-2"><a href="#misconfigured-503-responses">&quot;Misconfigured&quot; 503 responses</a></li>
+<li class="toc__item toc__item--level-2"><a href="#every-legitimate-request-is-being-challenged">Every legitimate request is being challenged</a></li>
+<li class="toc__item toc__item--level-2"><a href="#bots-passing-through-unchallenged">Bots passing through unchallenged</a></li>
+<li class="toc__item toc__item--level-2"><a href="#captcha-verify-endpoint-returns-403-429-503">Captcha-verify endpoint returns 403 / 429 / 503</a></li>
+<li class="toc__item toc__item--level-2"><a href="#decision-log-lines-missing">Decision log lines missing</a></li>
+<li class="toc__item toc__item--level-2"><a href="#state-file-format-mismatch-on-startup">State file format mismatch on startup</a></li>
+<li class="toc__item toc__item--level-2"><a href="#shm-segment-too-small">SHM segment too small</a></li>
+<li class="toc__item toc__item--level-2"><a href="#cookie-not-being-honored-across-reload">Cookie not being honored across reload</a></li>
+<li class="toc__item toc__item--level-2"><a href="#multi-vhost-bot-flagged-on-one-site-appears-on-another">Multi-vhost: bot flagged on one site appears on another</a></li>
+<li class="toc__item toc__item--level-2"><a href="#mod-status-contribution-not-showing">`mod_status` contribution not showing</a></li>
+<li class="toc__item toc__item--level-2"><a href="#where-to-next">Where to next</a></li>
+  </ul>
+</section>
+        <div class="prose">
+<p>This page covers the most common operator-visible issues, the
+diagnostic for each, and the fix or workaround.</p>
+<h2 id="module-fails-to-load">Module fails to load</h2>
+<p><strong>Symptom</strong>: <code>apachectl configtest</code> reports
+<code>Cannot load /usr/lib/apache2/modules/mod_botshield.so</code> or
+<code>undefined symbol: ...</code>.</p>
+<p><strong>Diagnostic</strong>: check the dynamic-linker symbol resolution:</p>
+<pre><code class="language-sh">ldd /usr/lib/apache2/modules/mod_botshield.so
+</code></pre>
+<p>A missing OpenSSL / libcurl / json-c shared library shows up as
+<code>not found</code>. Install the matching <code>-dev</code> package and rebuild
+(<code>make &amp;&amp; sudo make install</code>).</p>
+<p>If the <code>.so</code> symbol resolution is clean, look at the Apache error
+log on startup — directive parsing errors emit a clear diagnostic
+identifying the line and the offending token.</p>
+<h2 id="misconfigured-503-responses">&quot;Misconfigured&quot; 503 responses</h2>
+<p><strong>Symptom</strong>: every request to a gated scope gets HTTP 503 with
+header <code>X-Botshield: misconfigured</code>. Decision log shows
+<code>outcome=misconfigured</code>.</p>
+<p><strong>Diagnostic</strong>: the master HMAC key (<code>BotShieldSecretFile</code>) and/or
+the PoW algorithm (<code>BotShieldAlgorithm</code>) is unset on the active
+scope. mod_botshield refuses to mint cookies without both — fail-
+closed by design. Check that:</p>
+<pre><code class="language-apache">BotShieldSecretFile /etc/botshield/secret
+BotShieldAlgorithm  sha256-zeros
+</code></pre>
+<p>are present at server scope or inherited into the request scope.</p>
+<p>The secret file must be mode 0600 and at least 16 bytes. The
+config-time loader logs a clear diagnostic if the file is too loose
+or too short, refusing to start rather than defaulting to a weak
+key.</p>
+<h2 id="every-legitimate-request-is-being-challenged">Every legitimate request is being challenged</h2>
+<p><strong>Symptom</strong>: real users see the interstitial; the decision log
+shows everything as <code>tier=silent</code> or higher.</p>
+<p><strong>Most common cause</strong>: Apache is behind a reverse proxy and
+<code>mod_remoteip</code> is not configured. mod_botshield is keying the IP
+signals on your edge load balancer, not the real client.</p>
+<p><strong>Diagnostic</strong>: look at the <code>ip=</code> field in the decision log. If it
+matches your edge's IP, that's the issue. Configure
+<code>mod_remoteip</code> per <a href="../deployment/index.html">deployment</a>.</p>
+<p><strong>Second-most common cause</strong>: the heuristic thresholds are too low
+for your traffic mix. <code>BotShieldScoreSilent</code> defaults to 20; a
+request with <code>missing-accept-language</code> (15 points) and
+<code>first-sight-ip</code> (5 points) hits the silent tier on its first
+request. For sites where most visitors don't send <code>Accept- Language</code> (legitimate use cases exist), raise <code>BotShieldScoreSilent</code>
+to 30 or 40.</p>
+<p><strong>Tuning workflow</strong>:</p>
+<ol>
+<li>Flip <code>BotShieldShadowMode on</code> to dry-run all rules.</li>
+<li>Watch the decision log under real traffic for 24–48 hours.</li>
+<li>Sample the <code>effective</code> distribution and per-reason
+contributions.</li>
+<li>Raise thresholds or lower individual heuristic penalties to
+match.</li>
+</ol>
+<p>See <a href="../operator-model/index.html">operator model</a> for the full tuning
+discussion.</p>
+<h2 id="bots-passing-through-unchallenged">Bots passing through unchallenged</h2>
+<p><strong>Symptom</strong>: scrapers / spammers / exploitation attempts visible in
+access logs aren't being gated. Decision log shows <code>tier=pass</code>.</p>
+<p><strong>Diagnostics</strong>:</p>
+<ol>
+<li>Confirm the request actually reached mod_botshield. The
+decision log line should be present. If absent, check that the
+module is loaded and <code>BotShieldEnabled on</code> is in scope.</li>
+<li>If the line is present, look at the <code>score</code> field. A bot that
+hits no heuristic (sends a normal-looking UA, accepts language,
+has been seen before) won't trigger anything.</li>
+</ol>
+<p><strong>Fixes</strong>:</p>
+<ul>
+<li><strong>Honeypot scopes</strong>: drop <code>&lt;Location&gt;</code> blocks for paths only
+bots scan (<code>/wp-admin/</code>, <code>/.env</code>, <code>/.git/</code>) with
+<code>BotShieldTrigger flag=honeypot_hit ttl=3600</code>. The bot trips
+the honeypot, the IP is flagged, future requests get the
+flag-trigger penalty + tier_floor=captcha. See
+<a href="../policy/index.html">policy</a>.</li>
+<li><strong>Path triggers</strong>: for paths that bots target but legitimate
+users don't, add <code>BotShieldPathTrigger</code> rules with a penalty.</li>
+<li><strong>Block-path / rate-limit</strong>: if you see scraper UA patterns,
+add <code>BotShieldBlockPath</code> or <code>BotShieldRateLimit</code> cohorts.</li>
+<li><strong>Allow-list verification</strong>: if a &quot;bot&quot; is claiming to be
+Googlebot but doesn't have Googlebot's IP range, the fake-bot
+detection fires automatically — assuming <code>BotShieldAllowBot googlebot ...</code> is configured. Check the decision log for
+reason=<code>fake-googlebot</code> to confirm it's working.</li>
+</ul>
+<h2 id="captcha-verify-endpoint-returns-403-429-503">Captcha-verify endpoint returns 403 / 429 / 503</h2>
+<p><strong>Symptom</strong>: clients fail to verify even with a valid captcha
+token.</p>
+<p><strong>Diagnostic</strong>: check the decision log for the verify request.
+The <code>outcome</code> field tells you which guard triggered:</p>
+<table>
+<thead>
+<tr>
+<th>Outcome</th>
+<th>Meaning</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pending_missing</code></td>
+<td>The HMAC-signed <code>_bs_captcha_pending</code> cookie is missing or invalid. Browser dropped it (3rd-party cookie blocking, SameSite, redirect chain)</td>
+<td>Confirm the interstitial is being served from the same origin as the verify endpoint; check Cookie attributes against browser dev tools</td>
+</tr>
+<tr>
+<td><code>rate_limited</code></td>
+<td>Per-IP cap exceeded (default 30/min)</td>
+<td>Raise <code>BotShieldCaptchaRateLimit</code> or distribute traffic across IPs</td>
+</tr>
+<tr>
+<td><code>inflight_capped</code></td>
+<td>Global concurrent siteverify cap (default 64)</td>
+<td>Raise <code>BotShieldCaptchaMaxInFlight</code> or scale Apache workers</td>
+</tr>
+<tr>
+<td><code>failopen</code></td>
+<td>Provider siteverify timed out</td>
+<td>Check provider status; raise <code>BotShieldCaptchaTimeout</code> if your network is slow to the provider; treat as transient and retry</td>
+</tr>
+<tr>
+<td><code>rejected</code></td>
+<td>Provider returned <code>success: false</code></td>
+<td>Token was invalid (replay, wrong sitekey/secret pair, expired). Test with the provider's published always-pass test pair to isolate config drift</td>
+</tr>
+</tbody>
+</table>
+<h2 id="decision-log-lines-missing">Decision log lines missing</h2>
+<p><strong>Symptom</strong>: requests are gated (challenges visible to client) but
+nothing in the error log.</p>
+<p><strong>Cause</strong>: Apache's default <code>LogLevel</code> is <code>warn</code>; the module's
+decision log is at <code>info</code>.</p>
+<p><strong>Fix</strong>:</p>
+<pre><code class="language-apache">LogLevel botshield_module:info
+</code></pre>
+<p>Reload. Confirm:</p>
+<pre><code class="language-sh">sudo tail -f /var/log/apache2/error.log | grep &quot;mod_botshield: decision&quot;
+</code></pre>
+<p>For verbose request-path diagnostics (cookie parsing, SHM slot
+probes, per-reason penalty values), use <code>LogLevel botshield_module:debug</code> —
+expensive at scale, fine for staging.</p>
+<h2 id="state-file-format-mismatch-on-startup">State file format mismatch on startup</h2>
+<p><strong>Symptom</strong>: error log on startup:</p>
+<pre><code>mod_botshield: state file format mismatch (file=v2 module=v3); discarding
+</code></pre>
+<p><strong>Cause</strong>: you upgraded the module to a version with a new SHM
+state format. Slot bytes from the old file don't map cleanly into
+the new layout, so the module rejects the file and starts the
+table fresh.</p>
+<p>This is by design: a slot-level migration could fabricate
+incorrect state in ways that take days to surface as wrong
+decisions. Discarding is safer than silent corruption.</p>
+<p><strong>Fix</strong>: nothing required — the table will re-populate from live
+traffic over the next ~hour as flagged IPs re-trigger. If the
+table was holding very long-TTL flags that you don't want to lose,
+restore from a pre-upgrade backup of the state file (you do back
+it up, right?).</p>
+<h2 id="shm-segment-too-small">SHM segment too small</h2>
+<p><strong>Symptom</strong>: error log shows <code>apr_shm_create</code> failed during
+<code>post_config</code>, or capacity headroom watchdog is logging at WARN
+or ERROR for an extended period.</p>
+<p><strong>Cause</strong>: aggregate traffic across vhosts has outgrown the
+default 16 MiB SHM budget.</p>
+<p><strong>Fix</strong>: raise <code>BotShieldShmSize</code> (server scope only):</p>
+<pre><code class="language-apache">BotShieldShmSize 64M
+</code></pre>
+<p>Range: 128K..256M. The headroom watchdog reports each table's
+utilization separately; size the largest contributor first
+(usually <code>flagged_ip</code> or <code>bloom_a/b</code>).</p>
+<h2 id="cookie-not-being-honored-across-reload">Cookie not being honored across reload</h2>
+<p><strong>Symptom</strong>: after <code>apachectl graceful</code> users get re-challenged
+even though their cookie was valid.</p>
+<p><strong>Cause</strong>: secret-file rotation isn't done correctly, or the
+challenge interstitial JS made a hard reload that dropped the
+cookie.</p>
+<p><strong>Diagnostic</strong>: tail decision log for <code>cookie=bad_sig</code>. If you see
+a spike right after a graceful, the secret is mismatched. Check
+<code>BotShieldSecretFile</code> content didn't change inadvertently.</p>
+<p>For zero-disruption secret rotation use <code>BotShieldSecondarySecretFile</code>
+— see <a href="../deployment/index.html#secret-rotation">deployment</a>.</p>
+<h2 id="multi-vhost-bot-flagged-on-one-site-appears-on-another">Multi-vhost: bot flagged on one site appears on another</h2>
+<p><strong>Symptom</strong>: vhosts that should be isolated are sharing reputation.</p>
+<p><strong>Most common cause</strong>: missing <code>ServerName</code>. mod_botshield uses
+<code>ServerName</code> to derive the namespace; vhosts without one fall back
+to the global <code>ns_id=0</code> namespace and share state.</p>
+<p><strong>Diagnostic</strong>: startup log will show:</p>
+<pre><code>mod_botshield: NOTICE: vhost without ServerName falling back to
+              ns_id=0; configure BotShieldShareScope for isolation
+</code></pre>
+<p><strong>Fix</strong>: set <code>ServerName</code> on every gated vhost, or configure
+<code>BotShieldShareScope &lt;unique-token&gt;</code> on each.</p>
+<h2 id="mod-status-contribution-not-showing"><code>mod_status</code> contribution not showing</h2>
+<p><strong>Symptom</strong>: <code>/server-status</code> doesn't include the <code>BotShield&lt;Name&gt;</code>
+lines.</p>
+<p><strong>Diagnostic checklist</strong>:</p>
+<ol>
+<li><code>mod_status</code> is loaded (<code>apachectl -M | grep status</code>).</li>
+<li><code>ExtendedStatus On</code> is set (often the default in newer Apache;
+confirm).</li>
+<li>The request reaches <code>mod_status</code> (vhost / location is correct).</li>
+</ol>
+<p><code>mod_status</code> is an optional dependency. Without it the
+<code>/botshield/metrics</code> Prometheus endpoint covers everything. The
+contribution hook is purely additive.</p>
+<h2 id="where-to-next">Where to next</h2>
+<ul>
+<li>Real-world deployment topology: <a href="../deployment/index.html">deployment</a>.</li>
+<li>Tier model, scoring, decision log: <a href="../operator-model/index.html">operator model</a>.</li>
+<li>Policy and rule families: <a href="../policy/index.html">policy</a>.</li>
+<li>Captcha + app-bridge integration: <a href="../captcha/index.html">captcha</a>.</li>
+<li>Metrics and dashboards: <a href="../observability/index.html">observability</a>.</li>
+</ul>
+
+        </div>
+      </article>
+    </main>
+  </div>
+</body>
+</html>
