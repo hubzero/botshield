@@ -1,5 +1,12 @@
 # mod_botshield
 
+[![CI](https://github.com/hubzero/botshield/actions/workflows/ci.yml/badge.svg)](https://github.com/hubzero/botshield/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
+[![docs](https://img.shields.io/badge/docs-Pages-blue)](https://hubzero.github.io/botshield/)
+[![Apache 2.4 module](https://img.shields.io/badge/Apache-2.4-D22128?logo=apache&logoColor=white)](https://httpd.apache.org/)
+[![C](https://img.shields.io/badge/C-99-blue?logo=c&logoColor=white)](https://en.cppreference.com/w/c)
+[![status: beta](https://img.shields.io/badge/status-beta-orange)](#mod_botshield)
+
 Low-latency bot detection for Apache 2.4. Cookieless requests get a
 self-contained proof-of-work interstitial; verified visitors receive a
 short-lived cookie and pass through on their next request.
