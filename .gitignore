@@ -17,9 +17,12 @@
 .vscode/
 
 # Python test framework (M11.4+) — venv + pytest caches + egg-info
-# + per-run reports are per-box artifacts that don't belong in the repo.
+# + per-run reports are per-box artifacts that don't belong in the
+# repo. .pytest_cache/ pattern is unanchored: pytest writes one
+# wherever its cwd was when invoked, so the repo-root copy and the
+# tests/-relative copy are both caught.
 tests/.venv/
-tests/.pytest_cache/
+.pytest_cache/
 tests/*.egg-info/
 tests/reports/
 __pycache__/
