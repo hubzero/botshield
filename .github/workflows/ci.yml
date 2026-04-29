@@ -13,14 +13,32 @@ name: CI
 # or after a parser change.
 
 on:
+  # Skip pushes/PRs that only touch docs — repeated `make docs`
+  # iterations or markdown tweaks shouldn't burn a runner. CI still
+  # fires the moment a code/test/config file is in the diff
+  # alongside the docs change. workflow_dispatch is always
+  # available for manual override.
   pull_request:
     branches: [ main ]
+    paths-ignore:
+      - 'docs/**'
+      - 'docs-src/**'
+      - 'site-src/**'
+      - '**/*.md'
+      - 'LICENSE'
   push:
     branches: [ main ]
+    paths-ignore:
+      - 'docs/**'
+      - 'docs-src/**'
+      - 'site-src/**'
+      - '**/*.md'
+      - 'LICENSE'
   # Manual trigger only — used to fire the 8h soak and the fuzz
   # campaigns (each can spend hours of runner time, so we don't run
-  # them on a cron). Hit the "Run workflow" button in GitHub Actions
-  # to invoke.
+  # them on a cron). Also lets you re-run the whole CI on a docs-only
+  # commit when you're done iterating and want one final check. Hit
+  # the "Run workflow" button in GitHub Actions to invoke.
   workflow_dispatch:
 
 env:
