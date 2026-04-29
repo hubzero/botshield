@@ -585,28 +585,37 @@ static const struct {
     (sizeof(bs_default_flag_triggers) / sizeof(bs_default_flag_triggers[0]))
 
 
-int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
-                          apr_pool_t *ptemp, server_rec *s)
-{
-    (void)plog; (void)ptemp;
+/* --- post_config phase helpers ---
+ *
+ * bs_post_config used to be one ~900-line function — startup
+ * sequence inline. The phases are independent and order-explicit,
+ * so each phase lives in its own static helper here and the
+ * orchestrator at the bottom reads as a checklist.
+ *
+ * Helpers are file-local; behavior is identical to the old inline
+ * sequence. None of them are reentrant. */
 
-    /* Apache calls post-config twice on cold boot (syntax-check pass,
-     * then the real one). Skip the first pass so we don't create the
-     * SHM segment and then immediately discard it.
-     *
-     *  the userdata key lives on
-     * s->process->pool, which survives `apachectl graceful`. On
-     * graceful, the previous boot's userdata is still set, so the
-     * FIRST post_config call after graceful runs init directly
-     * (correct — graceful only invokes post_config once). This
-     * relies on Apache's documented post_config-runs-twice-on-cold-
-     * boot, post_config-runs-once-on-graceful behavior. If that
-     * ever changes (cold-boot single pass, or graceful double pass),
-     * this skip would either suppress the only init opportunity
-     * or skip the real one. Behavior is stable on Apache 2.4 today;
-     * a more defensive pattern would key the userdata on a pconf-
-     * scoped marker but Apache doesn't expose a stable one across
-     * post_config invocations. */
+/* Apache calls post-config twice on cold boot (syntax-check pass,
+ * then the real one). Skip the first pass so we don't create the
+ * SHM segment and then immediately discard it.
+ *
+ * The userdata key lives on s->process->pool, which survives
+ * `apachectl graceful`. On graceful, the previous boot's userdata
+ * is still set, so the FIRST post_config call after graceful runs
+ * init directly (correct — graceful only invokes post_config
+ * once). This relies on Apache's documented post_config-runs-
+ * twice-on-cold-boot, post_config-runs-once-on-graceful behavior.
+ * If that ever changes (cold-boot single pass, or graceful double
+ * pass), this skip would either suppress the only init opportunity
+ * or skip the real one. Behavior is stable on Apache 2.4 today;
+ * a more defensive pattern would key the userdata on a pconf-scoped
+ * marker but Apache doesn't expose a stable one across post_config
+ * invocations.
+ *
+ * Returns 1 if this is the first (syntax-check) pass and the caller
+ * should bail out with OK; 0 otherwise. */
+static int bs_post_config_first_pass_skip(server_rec *s)
+{
     void *already;
     apr_pool_userdata_get(&already, "bs_post_config_done",
                           s->process->pool);
@@ -614,25 +623,29 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
         apr_pool_userdata_set((const void *)1, "bs_post_config_done",
                               apr_pool_cleanup_null,
                               s->process->pool);
-        return OK;
+        return 1;
     }
+    return 0;
+}
 
-    /* libcurl global init: must run once before any worker thread
-     * touches a curl easy handle. curl_global_init is explicitly
-     * documented as not thread-safe, so the per-request lazy-init
-     * guard we used to have (bs_curl_ensure_init) had a race under
-     * mpm_event where two workers could both see the flag unset and
-     * race the init. Doing it here, in the parent process pre-fork
-     * and single-threaded, is the only sound place for it. Children
-     * inherit libcurl's global state via fork per libcurl's docs; no
-     * additional init in bs_child_init is needed. curl_global_cleanup
-     * is intentionally not paired — the process exits when Apache
-     * exits, and the kernel reaps the handle.
-     *
-     * Fail loudly if curl global init fails: the captcha tier uses
-     * libcurl on every verify, and curl_easy_init after a failed
-     * global init is undefined behavior. Better to refuse to start
-     * than to silently serve broken captcha. */
+/* libcurl global init: must run once before any worker thread
+ * touches a curl easy handle. curl_global_init is explicitly
+ * documented as not thread-safe, so the per-request lazy-init
+ * guard we used to have (bs_curl_ensure_init) had a race under
+ * mpm_event where two workers could both see the flag unset and
+ * race the init. Doing it here, in the parent process pre-fork
+ * and single-threaded, is the only sound place for it. Children
+ * inherit libcurl's global state via fork per libcurl's docs; no
+ * additional init in bs_child_init is needed. curl_global_cleanup
+ * is intentionally not paired — the process exits when Apache
+ * exits, and the kernel reaps the handle.
+ *
+ * Fail loudly if curl global init fails: the captcha tier uses
+ * libcurl on every verify, and curl_easy_init after a failed
+ * global init is undefined behavior. Better to refuse to start
+ * than to silently serve broken captcha. */
+static int bs_init_curl_global(server_rec *s)
+{
     CURLcode curl_rv = curl_global_init(CURL_GLOBAL_DEFAULT);
     if (curl_rv != CURLE_OK) {
         ap_log_error(APLOG_MARK, APLOG_ERR, 0, s,
@@ -641,17 +654,18 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
             curl_easy_strerror(curl_rv), (int)curl_rv);
         return HTTP_INTERNAL_SERVER_ERROR;
     }
+    return OK;
+}
 
-    bs_server_cfg *scfg = ap_get_module_config(s->module_config,
-                                               &botshield_module);
-
-    /* App integration: warn loudly at startup if a feature is on but
-     * the shared secret is missing. Per-request paths fall through
-     * with their own warning + skip (see bs_app_feedback_verify_filter
-     * / bs_app_claims_set_header), but a single startup notice is
-     * easier for operators to spot than a stream of per-request
-     * warnings. We don't refuse to start: the rest of the module
-     * still works (cookie tier, captcha tier, etc.). */
+/* App integration: warn loudly at startup if a feature is on but
+ * the shared secret is missing. Per-request paths fall through
+ * with their own warning + skip (see bs_app_feedback_verify_filter
+ * / bs_app_claims_set_header), but a single startup notice is
+ * easier for operators to spot than a stream of per-request
+ * warnings. We don't refuse to start: the rest of the module
+ * still works (cookie tier, captcha tier, etc.). */
+static void bs_warn_app_integration_secrets(server_rec *s)
+{
     for (server_rec *sv = s; sv; sv = sv->next) {
         bs_server_cfg *vcfg = ap_get_module_config(sv->module_config,
                                                    &botshield_module);
@@ -667,20 +681,23 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                 "at request time.");
         }
     }
+}
 
-    /* E14 (rework) — flag-trigger registration.
-     *
-     * For each server scope: prepend the compiled-in defaults to
-     * the operator-declared trigger list (so defaults are earliest
-     * and reset entries clear them), then walk the combined array
-     * and process reset sentinels. A `reset` for a flag removes
-     * every prior entry targeting that flag (defaults + operator)
-     * along with the reset sentinel itself; entries declared after
-     * the reset for the same flag are kept.
-     *
-     * Result is a final, request-time-ready scfg->flag_triggers
-     * containing only BS_FLAG_ACT_SCORE / BS_FLAG_ACT_TIER_FLOOR
-     * entries — no resets to dispatch on the hot path. */
+/* Flag-trigger registration.
+ *
+ * For each server scope: prepend the compiled-in defaults to
+ * the operator-declared trigger list (so defaults are earliest
+ * and reset entries clear them), then walk the combined array
+ * and process reset sentinels. A `reset` for a flag removes
+ * every prior entry targeting that flag (defaults + operator)
+ * along with the reset sentinel itself; entries declared after
+ * the reset for the same flag are kept.
+ *
+ * Result is a final, request-time-ready scfg->flag_triggers
+ * containing only BS_FLAG_ACT_SCORE / BS_FLAG_ACT_TIER_FLOOR
+ * entries — no resets to dispatch on the hot path. */
+static void bs_resolve_flag_triggers(apr_pool_t *pconf, server_rec *s)
+{
     for (server_rec *sv = s; sv; sv = sv->next) {
         bs_server_cfg *vcfg = ap_get_module_config(sv->module_config,
                                                    &botshield_module);
@@ -739,7 +756,24 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
         }
         vcfg->flag_triggers = resolved;
     }
+}
 
+/* SHM layout, allocation, header init, mutex creation.
+ *
+ * Computes total size from the configured capacities (header +
+ * flagged-IP table + two Bloom buffers + captcha rate / log
+ * rings + metrics + per-rule rate counters + strike/safeguard/
+ * nonce tables), allocates the segment via apr_shm_create,
+ * sets up every bs_shm.* table pointer, randomizes the SipHash
+ * key, creates the global mutex, and registers the cleanup that
+ * tears down the segment on pool destruction.
+ *
+ * Returns OK or HTTP_INTERNAL_SERVER_ERROR. On error the global
+ * bs_shm is restored to its pre-call snapshot so a botched
+ * graceful-restart attempt can't leave dangling pointers. */
+static int bs_init_shm_layout(apr_pool_t *pconf, apr_pool_t *ptemp,
+                              server_rec *s, bs_server_cfg *scfg)
+{
     /* Compute SHM layout: header + flagged-IP table + two Bloom buffers
      * + M8.1 captcha rate-limit ring + M8.1 captcha log-suppress ring.
      * Each Bloom buffer is sized to hit ~1% FP at the configured
@@ -955,9 +989,18 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
         scfg->shm_size, scfg->flagged_capacity,
         scfg->bloom_ips, scfg->bloom_window_secs, bloom_bytes);
 
-    /* Persistence (M6): load after SHM is ready, register save on
-     * graceful shutdown. A missing or malformed file is non-fatal;
-     * bs_state_load logs NOTICE and returns without touching SHM. */
+    return OK;
+}
+
+/* State persistence: load the previous generation's snapshot if
+ * the operator pointed BotShieldStateFile at one, register the
+ * graceful-shutdown save, and (if mod_watchdog is loaded and an
+ * interval is set) register periodic saves. A missing or malformed
+ * state file is non-fatal — bs_state_load logs NOTICE and returns
+ * without touching SHM. */
+static void bs_init_state_persistence(apr_pool_t *pconf, server_rec *s,
+                                      bs_server_cfg *scfg)
+{
     if (scfg->state_file) {
         bs_state_load(pconf, s, scfg->state_file);
         bs_state_cleanup_ctx *ctx = apr_palloc(pconf, sizeof(*ctx));
@@ -1023,26 +1066,29 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
             "mod_botshield: BotShieldStateFile not set; state is in-memory "
             "only and will reset on restart");
     }
+}
 
-    /* E1 — build the UA classifier + ranges hash for each server
-     * that enabled the Allow family. Walk s, s->next, s->next->next,
-     * ... so a vhost-scope `BotShieldAllow on` fires. Each vhost
-     * gets its own classifier + ranges hash; per-request check reads
-     * from r->server's scfg so scoping matches.
-     *
-     * Per-bot input shape:
-     *   - Built-in bots (bs_builtin_bots[]) seed the Allow set
-     *     unless an operator `BotShieldAllowBot` entry overrides
-     *     by name.
-     *   - Third-arg semantics inspected here, not at directive
-     *     parse time, because we need pconf's allocator for the
-     *     resulting apr_ipsubnet_t objects:
-     *       - ua_only==1 (operator said `*`): no ranges loaded;
-     *         request-time match gives allow-bot-ua:<name>.
-     *       - inline_cidrs set: parse via
-     *         bs_allow_load_ranges_from_string.
-     *       - path set: load from that file.
-     *       - neither: load from the default path. */
+/* Allow-family wiring: build the UA classifier + ranges hash for
+ * each server that enabled the Allow family. Walks s, s->next,
+ * s->next->next, ... so a vhost-scope `BotShieldAllow on` fires.
+ * Each vhost gets its own classifier + ranges hash; per-request
+ * check reads from r->server's scfg so scoping matches.
+ *
+ * Per-bot input shape:
+ *   - Built-in bots (bs_builtin_bots[]) seed the Allow set
+ *     unless an operator `BotShieldAllowBot` entry overrides
+ *     by name.
+ *   - Third-arg semantics inspected here, not at directive
+ *     parse time, because we need pconf's allocator for the
+ *     resulting apr_ipsubnet_t objects:
+ *       - ua_only==1 (operator said `*`): no ranges loaded;
+ *         request-time match gives allow-bot-ua:<name>.
+ *       - inline_cidrs set: parse via
+ *         bs_allow_load_ranges_from_string.
+ *       - path set: load from that file.
+ *       - neither: load from the default path. */
+static void bs_wire_allowlist(apr_pool_t *pconf, server_rec *s)
+{
     for (server_rec *sv = s; sv; sv = sv->next) {
         bs_server_cfg *vcfg = ap_get_module_config(sv->module_config,
                                                    &botshield_module);
@@ -1134,15 +1180,23 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
             "(%d ranges loaded, %d ua-only, %d missing, %d malformed)",
             n_bots, loaded, ua_only, missing, bad);
     }
+}
 
-    /* E2.1 — resolve cohort ipspecs for every rate_limit / block_path
-     * entry across main + vhost scopes, and assign SHM slot indices to
-     * rate_limit entries. Shared counter pool across all vhosts; slot
-     * indices are global, handed out in declaration order. If operators
-     * ever exceed BS_E21_RATE_SLOTS, the overflow entries stay at
-     * shm_slot=-1 and are silently skipped at request time (log warning
-     * surfaces the condition). */
-    int next_slot = 0;
+/* Resolve cohort ipspecs for every rate_limit / block_path entry
+ * across main + vhost scopes, link rate-limit-escalate directives
+ * to their target rate-limit by name, and assign SHM slot indices
+ * to rate_limit entries. Shared counter pool across all vhosts;
+ * slot indices are global, handed out in declaration order. If
+ * operators ever exceed BS_E21_RATE_SLOTS, the overflow entries
+ * stay at shm_slot=-1 and are silently skipped at request time
+ * (log warning surfaces the condition).
+ *
+ * The robots-init phase appends to *next_slot too, so it's an
+ * out-param threaded between the two helpers. */
+static void bs_wire_rate_and_block_cohorts(apr_pool_t *pconf,
+                                           server_rec *s,
+                                           int *next_slot)
+{
     for (server_rec *sv = s; sv; sv = sv->next) {
         bs_server_cfg *vcfg = ap_get_module_config(sv->module_config,
                                                    &botshield_module);
@@ -1177,8 +1231,8 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                 BS_E21_RESOLVE_COHORT(&e->cohort,
                     "BotShieldRateLimit", e->name);
                 if (e->shm_slot < 0) {
-                    if (next_slot < (int)bs_shm.rate_counter_count) {
-                        e->shm_slot = next_slot++;
+                    if (*next_slot < (int)bs_shm.rate_counter_count) {
+                        e->shm_slot = (*next_slot)++;
                     } else {
                         ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
                             "mod_botshield: rate-limit slot pool "
@@ -1236,11 +1290,14 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
         }
         #undef BS_E21_RESOLVE_COHORT
     }
+}
 
-    /* E2.2 — resolve sentinel defaults for any vhost where the
-     * directive wasn't given (either at the vhost or at main scope
-     * that got merged down). After this loop every vhost's scfg has
-     * concrete values; downstream code can read them as-is. */
+/* Resolve sentinel defaults for any vhost where the directive
+ * wasn't given (either at the vhost or at main scope that got
+ * merged down). After this every vhost's scfg has concrete values;
+ * downstream code can read them as-is. */
+static void bs_resolve_robots_defaults(server_rec *s)
+{
     for (server_rec *sv = s; sv; sv = sv->next) {
         bs_server_cfg *vcfg = ap_get_module_config(sv->module_config,
                                                    &botshield_module);
@@ -1251,8 +1308,18 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
         if (vcfg->robots_refresh_interval == BS_ROBOTS_REFRESH_UNSET) {
             vcfg->robots_refresh_interval = BS_ROBOTS_REFRESH_DEFAULT;
         }
+    }
+}
 
-        /* E13 — derive the per-vhost reputation namespace ID.
+/* Derive the per-vhost reputation namespace ID. */
+static void bs_assign_namespace_ids(server_rec *s)
+{
+    for (server_rec *sv = s; sv; sv = sv->next) {
+        bs_server_cfg *vcfg = ap_get_module_config(sv->module_config,
+                                                   &botshield_module);
+        if (!vcfg) continue;
+
+        /* Per-vhost reputation namespace ID.
          * Precedence: explicit BotShieldShareScope token first,
          * then siphash(ServerName), finally fallback to ns_id=0
          * (global default) with a NOTICE so operators see the
@@ -1297,14 +1364,22 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                 vcfg->ns_id, src);
         }
     }
+}
 
-    /* E2.2 — reserve an SHM rate-counter slot pool for each vhost's
-     * robots.txt, then do the initial parse. The SHM slot pool is
-     * sized once at post_config (cannot grow after); refresh reuses
-     * slots by group name so rate-counter state survives across
-     * refreshes. BS_E22_ROBOTS_SLOT_POOL is a deliberate overshoot —
-     * most hand-maintained robots.txt files have <10 Crawl-delay
-     * groups. */
+/* Reserve an SHM rate-counter slot pool for each vhost's
+ * robots.txt, then do the initial parse and register a per-vhost
+ * watchdog for live refresh. The SHM slot pool is sized once at
+ * post_config (cannot grow after); refresh reuses slots by group
+ * name so rate-counter state survives across refreshes.
+ * BS_E22_ROBOTS_SLOT_POOL is a deliberate overshoot — most hand-
+ * maintained robots.txt files have <10 Crawl-delay groups.
+ *
+ * next_slot is consumed (mutated) for slot allocation; the rate-
+ * limit phase already advanced it past the BotShieldRateLimit
+ * cohorts. */
+static void bs_init_robots(apr_pool_t *pconf, server_rec *s,
+                           int *next_slot)
+{
     #define BS_E22_ROBOTS_SLOT_POOL 16
     for (server_rec *sv = s; sv; sv = sv->next) {
         bs_server_cfg *vcfg = ap_get_module_config(sv->module_config,
@@ -1312,7 +1387,7 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
         if (!vcfg || !vcfg->robots_txt_path) continue;
 
         /* Reserve the pool from the global rate-counter table. */
-        int pool_base = next_slot;
+        int pool_base = *next_slot;
         int pool_size = BS_E22_ROBOTS_SLOT_POOL;
         if (pool_base + pool_size > (int)bs_shm.rate_counter_count) {
             pool_size = (int)bs_shm.rate_counter_count - pool_base;
@@ -1321,7 +1396,7 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
         vcfg->robots_slot_pool_base = pool_base;
         vcfg->robots_slot_pool_size = pool_size;
         vcfg->robots_slot_pool_used = 0;
-        next_slot += pool_size;
+        *next_slot += pool_size;
 
         apr_status_t rv = bs_robots_load(sv, vcfg, pconf);
         if (rv != APR_SUCCESS) {
@@ -1374,15 +1449,18 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
             }
         }
     }
+}
 
-    /* E11 — load-state watchdog. One registration on the main
-     * server only — the cached state is module-global, so per-vhost
-     * registrations would just multiply the work for no gain. The
-     * sampler reads scoreboard + (optional) external state file
-     * once per tick and updates SHM. Soft dep on mod_watchdog. */
+/* Load-state sampler watchdog. One registration on the main
+ * server only — the cached state is module-global, so per-vhost
+ * registrations would just multiply the work for no gain. The
+ * sampler reads scoreboard + (optional) external state file once
+ * per tick and updates SHM. Soft dep on mod_watchdog. */
+static void bs_register_load_watchdog(apr_pool_t *pconf, server_rec *s)
+{
+    bs_server_cfg *main_scfg = ap_get_module_config(
+        s->module_config, &botshield_module);
     {
-        bs_server_cfg *main_scfg = ap_get_module_config(
-            s->module_config, &botshield_module);
         /* Propagate load directives from any vhost to the main
          * scfg if main doesn't have them. Operators write
          * BotShieldLoadStateFile in vhost scope (config_override
@@ -1465,35 +1543,74 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
             }
         }
     }
+}
 
-    /* E13.1 — capacity headroom watchdog. Independent of load-state
-     * config; runs whenever mod_watchdog is available. 60s tick is
-     * generous — table populations move on minute-to-hour timescales
-     * and the rewarn cooldown is 5 min anyway. */
-    {
-        APR_OPTIONAL_FN_TYPE(ap_watchdog_get_instance) *fn_get =
-            APR_RETRIEVE_OPTIONAL_FN(ap_watchdog_get_instance);
-        APR_OPTIONAL_FN_TYPE(ap_watchdog_register_callback) *fn_reg =
-            APR_RETRIEVE_OPTIONAL_FN(ap_watchdog_register_callback);
-        if (fn_get && fn_reg) {
-            ap_watchdog_t *wd = NULL;
-            apr_status_t wrv = fn_get(&wd,
-                "mod_botshield_headroom", 0, 1, pconf);
-            if (wrv == APR_SUCCESS && wd) {
-                apr_interval_time_t ival = apr_time_from_sec(60);
-                wrv = fn_reg(wd, ival, s, bs_headroom_watchdog_cb);
-            } else if (wrv == APR_SUCCESS) {
-                wrv = APR_EGENERAL;
-            }
-            if (wrv != APR_SUCCESS) {
-                ap_log_error(APLOG_MARK, APLOG_INFO, wrv, s,
-                    "mod_botshield: headroom watchdog "
-                    "registration failed; capacity warnings "
-                    "will not fire (reactive cliff warnings "
-                    "still in place)");
-            }
+/* Capacity headroom watchdog. Independent of load-state config;
+ * runs whenever mod_watchdog is available. 60s tick is generous —
+ * table populations move on minute-to-hour timescales and the
+ * rewarn cooldown is 5 min anyway. */
+static void bs_register_headroom_watchdog(apr_pool_t *pconf,
+                                          server_rec *s)
+{
+    APR_OPTIONAL_FN_TYPE(ap_watchdog_get_instance) *fn_get =
+        APR_RETRIEVE_OPTIONAL_FN(ap_watchdog_get_instance);
+    APR_OPTIONAL_FN_TYPE(ap_watchdog_register_callback) *fn_reg =
+        APR_RETRIEVE_OPTIONAL_FN(ap_watchdog_register_callback);
+    if (fn_get && fn_reg) {
+        ap_watchdog_t *wd = NULL;
+        apr_status_t wrv = fn_get(&wd,
+            "mod_botshield_headroom", 0, 1, pconf);
+        if (wrv == APR_SUCCESS && wd) {
+            apr_interval_time_t ival = apr_time_from_sec(60);
+            wrv = fn_reg(wd, ival, s, bs_headroom_watchdog_cb);
+        } else if (wrv == APR_SUCCESS) {
+            wrv = APR_EGENERAL;
+        }
+        if (wrv != APR_SUCCESS) {
+            ap_log_error(APLOG_MARK, APLOG_INFO, wrv, s,
+                "mod_botshield: headroom watchdog "
+                "registration failed; capacity warnings "
+                "will not fire (reactive cliff warnings "
+                "still in place)");
         }
     }
+}
+
+/* --- post_config orchestrator ---
+ *
+ * Each phase is its own static helper above; this function reads
+ * as a checklist. Phases that can fail (curl global init, SHM
+ * layout) return non-OK and short-circuit the rest. The remaining
+ * phases are logging-only and keep going on best-effort. */
+int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
+                   apr_pool_t *ptemp, server_rec *s)
+{
+    (void)plog;
+
+    if (bs_post_config_first_pass_skip(s)) return OK;
+
+    int rv = bs_init_curl_global(s);
+    if (rv != OK) return rv;
+
+    bs_warn_app_integration_secrets(s);
+    bs_resolve_flag_triggers(pconf, s);
+
+    bs_server_cfg *scfg = ap_get_module_config(s->module_config,
+                                               &botshield_module);
+
+    rv = bs_init_shm_layout(pconf, ptemp, s, scfg);
+    if (rv != OK) return rv;
+
+    bs_init_state_persistence(pconf, s, scfg);
+    bs_wire_allowlist(pconf, s);
+
+    int next_slot = 0;
+    bs_wire_rate_and_block_cohorts(pconf, s, &next_slot);
+    bs_resolve_robots_defaults(s);
+    bs_assign_namespace_ids(s);
+    bs_init_robots(pconf, s, &next_slot);
+    bs_register_load_watchdog(pconf, s);
+    bs_register_headroom_watchdog(pconf, s);
 
     return OK;
 }
