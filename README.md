@@ -63,12 +63,6 @@ below.
 - **Accessibility.** Default interstitial passes WCAG 2.1 AA on every
   variant.
 
-Production hardening: clean under ASan + UBSan, MPM-matrix-verified
-across event / worker / prefork with graceful-restart coverage,
-8h-soak-clean (1.4M requests, +4MB RSS, zero crashes). Tests: ~250
-pytest cases plus LibFuzzer harnesses for the cookie + robots
-parsers; CI splits a fast per-PR lane from a browser lane.
-
 ## Quick start
 
 You need Apache 2.4 development headers — `apache2-dev` on
