@@ -1439,6 +1439,11 @@ static void bs_register_hooks(apr_pool_t *p)
     ap_hook_post_config (bs_post_config, NULL, NULL, APR_HOOK_MIDDLE);
     ap_hook_child_init  (bs_child_init,  NULL, NULL, APR_HOOK_MIDDLE);
     ap_hook_handler     (bs_handler,     NULL, NULL, APR_HOOK_FIRST);
+    {
+        extern int bs_propagate_decision_env(request_rec *r);
+        ap_hook_log_transaction(bs_propagate_decision_env,
+                                NULL, NULL, APR_HOOK_FIRST);
+    }
     /* E18 — inline form captcha. Fixup runs before content handlers
      * but after auth/header processing, so the request body is still
      * readable from the input filter chain. The hook reads + validates

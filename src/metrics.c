@@ -343,6 +343,49 @@ static const char *bs_log_quote(apr_pool_t *p, const char *s)
     return out;
 }
 
+/* mod_log_config's config_log_transaction evaluates the env=NAME
+ * conditional against the original request_rec passed to
+ * log_transaction, then walks r->next forward to find the last
+ * request in the chain and renders %{NAME}e tokens against THAT
+ * request_rec. For requests that hit an internal_redirect (e.g.
+ * mod_rewrite's per-Directory `RewriteRule (.*) index.php`, used
+ * by HUBzero/Joomla/Drupal/WordPress and friends), the forward
+ * request_rec's subprocess_env was deep-copied from the original
+ * but every key was prefixed with "REDIRECT_" by the
+ * rename_original_env transformation in
+ * server/protocol.c::internal_internal_redirect. Our un-prefixed
+ * BS_* and BOTSHIELD env vars don't survive on the forward request_rec,
+ * so the env=BOTSHIELD conditional matches against the original
+ * (BOTSHIELD set there) but the format render — running on the
+ * forward — sees only REDIRECT_BOTSHIELD and renders every
+ * %{BS_NAME}e as "-".
+ *
+ * Fix: at ap_hook_log_transaction APR_HOOK_FIRST (running
+ * immediately before mod_log_config's APR_HOOK_MIDDLE hook on the
+ * same request), walk r->next forward and copy our
+ * BS_* and BOTSHIELD env vars from the origin to whatever the last
+ * request_rec in the chain is. mod_log_config then renders against
+ * a request_rec where the un-prefixed names exist with the right
+ * values. No-op when there's no chain. */
+int bs_propagate_decision_env(request_rec *r)
+{
+    if (!r->next) return DECLINED;
+    request_rec *fwd = r;
+    while (fwd->next) fwd = fwd->next;
+    if (fwd == r) return DECLINED;
+    const apr_array_header_t *arr = apr_table_elts(r->subprocess_env);
+    apr_table_entry_t *elts = (apr_table_entry_t *)arr->elts;
+    for (int i = 0; i < arr->nelts; i++) {
+        if (!elts[i].key || !elts[i].val) continue;
+        if (strncmp(elts[i].key, "BS_", 3) == 0
+            || strcmp(elts[i].key, "BOTSHIELD") == 0) {
+            apr_table_setn(fwd->subprocess_env,
+                           elts[i].key, elts[i].val);
+        }
+    }
+    return DECLINED;
+}
+
 void bs_decision_log(request_rec *r,
                      const char *tier,
                      const char *outcome,
@@ -376,34 +419,59 @@ void bs_decision_log(request_rec *r,
               && (!reason || !*reason || strcmp(reason, "-") == 0);
     if (boring) level = APLOG_DEBUG;
 
-    /* Stash the same fields as request notes + flip the BOTSHIELD
+    /* Stash the same fields as subprocess_env + flip the BOTSHIELD
      * env var, so an operator can route a dedicated decision log via
      * mod_log_config:
      *
-     *   LogFormat "%t %a tier=%{bs_tier}n outcome=%{bs_outcome}n ..." botshield
+     *   LogFormat "%{cu}t %a %>s tier=%{BS_TIER}e ..." botshield
      *   CustomLog logs/botshield-decisions.log botshield env=BOTSHIELD
      *
-     * Notes/env are populated unconditionally — including for the
+     * subprocess_env (not r->notes) is the right vehicle because
+     * Apache's internal_internal_redirect deep-copies subprocess_env
+     * into the redirect-target request_rec but creates a fresh empty
+     * notes table. mod_rewrite's per-Directory `RewriteRule (.*)
+     * index.php` style rules — used heavily by HUBzero / Joomla /
+     * Drupal / WordPress and friends — trigger exactly that path,
+     * so notes wouldn't survive into the request_rec that
+     * log_transaction logs. Env vars do.
+     *
+     * BS_TIME is the ISO-8601 UTC timestamp of the decision (same
+     * format Apache 2.4.13+ emits via %{cu}t in mod_log_config, but
+     * with millisecond precision instead of microsecond, formatted
+     * here so the LogFormat doesn't have to fight strftime's local-
+     * time-only %t).
+     *
+     * env values are populated unconditionally — including for the
      * boring-pass case — so an operator's CustomLog conditional sees
      * a consistent BOTSHIELD=1 marker on every decision. The
-     * formatter pulls fields by name; missing notes render as "-"
-     * (mod_log_config's standard for absent %{n}). */
-    apr_table_setn(r->notes, "bs_tier",
+     * formatter pulls fields by name; missing values render as "-"
+     * (mod_log_config's standard for absent %{e}). */
+    {
+        apr_time_exp_t tm;
+        apr_time_exp_gmt(&tm, apr_time_now());
+        apr_table_setn(r->subprocess_env, "BS_TIME",
+            apr_psprintf(r->pool,
+                "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
+                tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                tm.tm_hour, tm.tm_min, tm.tm_sec,
+                tm.tm_usec / 1000));
+    }
+    apr_table_setn(r->subprocess_env, "BS_TIER",
                    tier     ? tier     : "-");
-    apr_table_setn(r->notes, "bs_outcome",
+    apr_table_setn(r->subprocess_env, "BS_OUTCOME",
                    outcome  ? outcome  : "-");
-    apr_table_setn(r->notes, "bs_cookie",
+    apr_table_setn(r->subprocess_env, "BS_COOKIE",
                    cookie   ? cookie   : "-");
-    apr_table_setn(r->notes, "bs_provider",
+    apr_table_setn(r->subprocess_env, "BS_PROVIDER",
                    provider ? provider : "-");
-    apr_table_setn(r->notes, "bs_alg",
+    apr_table_setn(r->subprocess_env, "BS_ALG",
                    alg      ? alg      : "-");
-    apr_table_setn(r->notes, "bs_reason",
+    apr_table_setn(r->subprocess_env, "BS_REASON",
                    reason   ? reason   : "-");
-    apr_table_setn(r->notes, "bs_score",
+    apr_table_setn(r->subprocess_env, "BS_SCORE",
                    apr_psprintf(r->pool, "%d", score));
     if (tag && *tag) {
-        apr_table_setn(r->notes, "bs_tag", tag);
+        apr_table_setn(r->subprocess_env, "BS_TAG", tag);
     }
     apr_table_setn(r->subprocess_env, "BOTSHIELD", "1");
 
