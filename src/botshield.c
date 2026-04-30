@@ -948,7 +948,7 @@ static int bs_handler(request_rec *r)
     /* Debug override keeps the first-commit behavior available for tests. */
     if (cfg->debug == 1) {
         ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
-                      "mod_botshield: debug mode — forcing 403 for %s",
+                      "mod_botshield: debug mode - forcing 403 for %s",
                       r->unparsed_uri);
         r->status = HTTP_FORBIDDEN;
         ap_set_content_type(r, "text/plain; charset=utf-8");

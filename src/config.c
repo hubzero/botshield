@@ -660,7 +660,7 @@ static int bs_init_curl_global(server_rec *s)
     if (curl_rv != CURLE_OK) {
         ap_log_error(APLOG_MARK, APLOG_ERR, 0, s,
             "mod_botshield: curl_global_init failed: %s (CURLcode=%d). "
-            "Refusing to start — the captcha tier needs working libcurl.",
+            "Refusing to start - the captcha tier needs working libcurl.",
             curl_easy_strerror(curl_rv), (int)curl_rv);
         return HTTP_INTERNAL_SERVER_ERROR;
     }
@@ -1246,7 +1246,7 @@ static void bs_wire_allowlist(apr_pool_t *pconf, server_rec *s)
                     bad++;
                     ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
                         "mod_botshield: bot '%s' inline CIDRs "
-                        "malformed (%s) — skipping",
+                        "malformed (%s) - skipping",
                         e->name, err ? err : "parse error");
                 }
                 continue;
@@ -1269,13 +1269,13 @@ static void bs_wire_allowlist(apr_pool_t *pconf, server_rec *s)
                 missing++;
                 ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
                     "mod_botshield: bot '%s' ranges file '%s' "
-                    "not loaded (%s) — UA will classify as unverified",
+                    "not loaded (%s) - UA will classify as unverified",
                     e->name, path, err ? err : "");
             } else {
                 bad++;
                 ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
                     "mod_botshield: bot '%s' ranges file '%s' "
-                    "malformed (%s) — skipping", e->name, path,
+                    "malformed (%s) - skipping", e->name, path,
                     err ? err : "parse error");
             }
         }
@@ -1321,7 +1321,7 @@ static void bs_wire_rate_and_block_cohorts(apr_pool_t *pconf,
             }                                                                \
             if (rrv != APR_SUCCESS) {                                        \
                 ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,               \
-                    "mod_botshield: %s '%s' ipspec load failed (%s) — "      \
+                    "mod_botshield: %s '%s' ipspec load failed (%s) - "      \
                     "cohort will never match", feature_, name_,              \
                     rerr ? rerr : "unknown");                                \
                 (c_)->ranges = NULL;                                         \
@@ -1713,7 +1713,7 @@ static apr_status_t bs_load_or_generate_default_secret(
         if (rv == APR_SUCCESS) return APR_SUCCESS;
         ap_log_error(APLOG_MARK, APLOG_ERR, rv, s,
             "mod_botshield: failed to read auto-secret %s; refusing "
-            "to overwrite — inspect or remove the file", path);
+            "to overwrite - inspect or remove the file", path);
         return rv;
     }
     if (!APR_STATUS_IS_ENOENT(rv)) {
@@ -1856,7 +1856,7 @@ static void bs_log_logonly_hint(server_rec *s)
                                                  &botshield_module);
         if (vc && vc->log_only == 1) {
             ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
-                "mod_botshield: BotShieldLogOnly is on — all "
+                "mod_botshield: BotShieldLogOnly is on - all "
                 "client-visible enforcement is suppressed and logged "
                 "as 'would-challenge' / ':observe'. To see the "
                 "decision log, raise the per-module level: "
@@ -2095,7 +2095,7 @@ void bs_warn_if_virtual_scope(cmd_parms *cmd, const char *name)
     if (cmd->server && cmd->server->is_virtual) {
         ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, cmd->server,
             "mod_botshield: %s placed inside <VirtualHost> at %s:%d "
-            "is ignored — SHM is sized once from the main server "
+            "is ignored - SHM is sized once from the main server "
             "scope. Move this directive outside <VirtualHost>.",
             name,
             cmd->directive && cmd->directive->filename

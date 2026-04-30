@@ -1025,7 +1025,7 @@ bs_captcha_result bs_captcha_siteverify_guarded(
         if (emit) {
             ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
                 "mod_botshield: %s in-flight cap reached%s "
-                "(max=%d) — provider likely slow",
+                "(max=%d) - provider likely slow",
                 log_tag, bs_log_suppress_suffix(r->pool, prev),
                 max_inflight);
         }
@@ -1532,7 +1532,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
             ? bs_captcha_log_throttle(ip_for_log, &prev) : 1;
         if (emit) {
             ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
-                "mod_botshield: captcha-verify pending cookie %s%s — 403",
+                "mod_botshield: captcha-verify pending cookie %s%s - 403",
                 pend_err, bs_log_suppress_suffix(r->pool, prev));
         }
         r->status = HTTP_FORBIDDEN;
@@ -1702,7 +1702,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
             int emit = have_ip
                 ? bs_captcha_log_throttle(client_ip, &prev) : 1;
             if (emit) ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
-                "mod_botshield: reCAPTCHA v3 response missing score%s — "
+                "mod_botshield: reCAPTCHA v3 response missing score%s - "
                 "failing open (provider=%s http=%ld)",
                 bs_log_suppress_suffix(r->pool, prev),
                 cfg->captcha_provider->name, http_code);
@@ -1760,7 +1760,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         int emit = have_ip
             ? bs_captcha_log_throttle(client_ip, &prev) : 1;
         if (emit) ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
-            "mod_botshield: captcha %s — failing open%s "
+            "mod_botshield: captcha %s - failing open%s "
             "(provider=%s http=%ld detail=\"%s\")",
             result == BS_CAPTCHA_TIMEOUT ? "TIMEOUT" : "ERROR",
             bs_log_suppress_suffix(r->pool, prev),

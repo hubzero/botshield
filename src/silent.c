@@ -826,7 +826,7 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
             r->status = HTTP_FORBIDDEN;
             ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
                 "mod_botshield: embedded-verify(pow-gcm): nonce "
-                "already redeemed (replay or pool-farm) — rejected");
+                "already redeemed (replay or pool-farm) - rejected");
             return OK;
         }
     }
@@ -985,7 +985,7 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
              * matches the M8 path's behavior. */
             ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
                 "mod_botshield: embedded-verify(recaptcha-v3): "
-                "response missing score — failing open "
+                "response missing score - failing open "
                 "(http=%ld)", http_code);
         } else if (score < min_score) {
             r->status = HTTP_FORBIDDEN;
