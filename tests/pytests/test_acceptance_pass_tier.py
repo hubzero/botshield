@@ -45,7 +45,7 @@ def test_normal_user_passes_through(fresh_ip, log_slice):
     assert resp.status_code == 200
 
     assert any(
-        d["tier"] == "pass" and d["outcome"] == "declined"
+        d["tier"] == "pass" and d["outcome"] == "allow"
         for d in lines
     ), (
         f"expected tier=pass outcome=declined for ip={fresh_ip}; "

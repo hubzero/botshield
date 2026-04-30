@@ -51,7 +51,7 @@ def valid_cookie(request):
 
     # Sanity: the cookie we're about to fuzz around actually
     # round-trips before we start tampering. Otherwise every
-    # "rejected" outcome below is meaningless.
+    # "block" outcome below is meaningless.
     sanity = client.get(
         "/", xff=ip, ua=BROWSER_UA, accept_language="en-US",
         cookies={"__Host-bs_verified": cookie},

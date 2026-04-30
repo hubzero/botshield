@@ -816,7 +816,7 @@ static int bs_apply_safeguard(request_rec *r, int have_client_ip,
             "through (until=%" APR_INT64_T_FMT ")",
             r->useragent_ip, (apr_int64_t)now_t);
         bs_score_add(r, 0, 0, "challenge-safeguard");
-        bs_decision_log(r, "safeguard", "declined",
+        bs_decision_log(r, "safeguard", "allow",
                         cookie_status, "-", "-",
                         bs_decision_reason_names(r->pool, score),
                         effective);
@@ -899,7 +899,7 @@ static int bs_route_module_endpoint(request_rec *r, bs_dir_cfg *cfg)
     ap_set_content_type(r, "text/plain; charset=utf-8");
     apr_table_setn(r->err_headers_out, "X-Botshield", "unknown-endpoint");
     ap_rputs("Not found.\n", r);
-    bs_decision_log(r, "none", "rejected", "-", "-", "-",
+    bs_decision_log(r, "none", "block", "-", "-", "-",
                     "unknown_endpoint", 0);
     return OK;
 }
@@ -962,7 +962,7 @@ static int bs_handler(request_rec *r)
     /* Static assets pass through — a cookieless first page load must still
      * render its CSS/images so the PoW page is usable. */
     if (bs_is_asset_uri(r->uri)) {
-        bs_decision_log(r, "pass", "declined", "-", "-", "-", "asset", 0);
+        bs_decision_log(r, "pass", "allow", "-", "-", "-", "asset", 0);
         return DECLINED;
     }
 
@@ -1073,7 +1073,7 @@ static int bs_handler(request_rec *r)
          * tag side effects already applied in bs_check_policy. */
         bs_request_score *s = bs_get_score(r, 0);
         const char *reasons = bs_score_reasons_joined(r->pool, s);
-        bs_decision_log(r, "pass", "declined", cookie_status, "-", "-",
+        bs_decision_log(r, "pass", "allow", cookie_status, "-", "-",
                         reasons, s ? s->total : 0);
         return DECLINED;
     }
@@ -1082,7 +1082,7 @@ static int bs_handler(request_rec *r)
         const char *reasons = bs_score_reasons_joined(r->pool, s);
         const char *outcome;
         if (policy_rv == HTTP_TOO_MANY_REQUESTS)      outcome = "rate_limited";
-        else                                          outcome = "rejected";
+        else                                          outcome = "block";
         bs_decision_log(r, "pass", outcome, cookie_status, "-", "-",
                         reasons, s ? s->total : 0);
         return policy_rv;
@@ -1209,7 +1209,7 @@ static int bs_handler(request_rec *r)
                     "mod_botshield: app claims not emitted: %s", cerr);
             }
         }
-        bs_decision_log(r, "pass", "declined", cookie_status,
+        bs_decision_log(r, "pass", "allow", cookie_status,
                         "-", "-",
                         bs_decision_reason_names(r->pool, score),
                         effective);
@@ -1267,7 +1267,7 @@ static int bs_handler(request_rec *r)
             }
         }
         if (!fall_back) {
-            bs_decision_log(r, "silent", "declined", cookie_status,
+            bs_decision_log(r, "silent", "allow", cookie_status,
                             "-", "-",
                             bs_decision_reason_names(r->pool, score),
                             effective);

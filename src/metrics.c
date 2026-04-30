@@ -48,10 +48,10 @@ static int bs_m_tier_idx(const char *s)
 static int bs_m_outcome_idx(const char *s)
 {
     if (!s) return -1;
-    if (strcmp(s, "declined")         == 0) return BS_M_OUTCOME_DECLINED;
+    if (strcmp(s, "allow")            == 0) return BS_M_OUTCOME_ALLOW;
     if (strcmp(s, "challenged")       == 0) return BS_M_OUTCOME_CHALLENGED;
     if (strcmp(s, "verified")         == 0) return BS_M_OUTCOME_VERIFIED;
-    if (strcmp(s, "rejected")         == 0) return BS_M_OUTCOME_REJECTED;
+    if (strcmp(s, "block")            == 0) return BS_M_OUTCOME_BLOCK;
     if (strcmp(s, "failopen")         == 0) return BS_M_OUTCOME_FAILOPEN;
     if (strcmp(s, "rate_limited")     == 0) return BS_M_OUTCOME_RATE_LIMITED;
     if (strcmp(s, "inflight_capped")  == 0) return BS_M_OUTCOME_INFLIGHT_CAPPED;
@@ -413,7 +413,7 @@ void bs_decision_log(request_rec *r,
      * tier all stay at INFO. */
     int level = APLOG_INFO;
     int boring = (tier && strcmp(tier, "pass") == 0)
-              && (outcome && strcmp(outcome, "declined") == 0)
+              && (outcome && strcmp(outcome, "allow") == 0)
               && score == 0
               && (!tag || !*tag)
               && (!reason || !*reason || strcmp(reason, "-") == 0);
@@ -586,18 +586,20 @@ int bs_metrics_handler(request_rec *r)
         "Decisions at tier=captcha (third-party provider widget served or verified).",
         bs_mload(&m->tier[BS_M_TIER_CAPTCHA]));
 
-    bs_m_emit_counter(r, "outcome_declined_total",
-        "Decisions where the module returned DECLINED to Apache (pass tier + asset).",
-        bs_mload(&m->outcome[BS_M_OUTCOME_DECLINED]));
+    bs_m_emit_counter(r, "outcome_allow_total",
+        "Decisions that let the request through (pass tier, asset bypass, "
+        "silent embedded pass-through, safeguard pass).",
+        bs_mload(&m->outcome[BS_M_OUTCOME_ALLOW]));
     bs_m_emit_counter(r, "outcome_challenged_total",
         "Decisions that served an interstitial.",
         bs_mload(&m->outcome[BS_M_OUTCOME_CHALLENGED]));
     bs_m_emit_counter(r, "outcome_verified_total",
         "Captcha verifications that passed siteverify.",
         bs_mload(&m->outcome[BS_M_OUTCOME_VERIFIED]));
-    bs_m_emit_counter(r, "outcome_rejected_total",
-        "Requests rejected before or by provider siteverify.",
-        bs_mload(&m->outcome[BS_M_OUTCOME_REJECTED]));
+    bs_m_emit_counter(r, "outcome_block_total",
+        "Requests blocked: invalid cookie, failed captcha verify, "
+        "rate-limit-exceeded, etc.",
+        bs_mload(&m->outcome[BS_M_OUTCOME_BLOCK]));
     bs_m_emit_counter(r, "outcome_failopen_total",
         "Siteverify calls that failed open (timeout, network error, provider 5xx).",
         bs_mload(&m->outcome[BS_M_OUTCOME_FAILOPEN]));
@@ -797,7 +799,7 @@ int bs_status_hook(request_rec *r, int flags)
             bs_mload(&m->tier[BS_M_TIER_FORM]),
             bs_mload(&m->tier[BS_M_TIER_CAPTCHA]),
             bs_mload(&m->outcome[BS_M_OUTCOME_VERIFIED]),
-            bs_mload(&m->outcome[BS_M_OUTCOME_REJECTED]),
+            bs_mload(&m->outcome[BS_M_OUTCOME_BLOCK]),
             bs_mload(&m->outcome[BS_M_OUTCOME_FAILOPEN]),
             bs_mload(&m->outcome[BS_M_OUTCOME_RATE_LIMITED]),
             bs_metrics_inflight_cur(),
@@ -822,7 +824,7 @@ int bs_status_hook(request_rec *r, int flags)
     };
     const struct { const char *label; apr_uint64_t val; } out_rows[] = {
         { "verified",        bs_mload(&m->outcome[BS_M_OUTCOME_VERIFIED])        },
-        { "rejected",        bs_mload(&m->outcome[BS_M_OUTCOME_REJECTED])        },
+        { "block",           bs_mload(&m->outcome[BS_M_OUTCOME_BLOCK])           },
         { "failopen",        bs_mload(&m->outcome[BS_M_OUTCOME_FAILOPEN])        },
         { "rate_limited",    bs_mload(&m->outcome[BS_M_OUTCOME_RATE_LIMITED])    },
         { "pending_missing", bs_mload(&m->outcome[BS_M_OUTCOME_PENDING_MISSING]) },

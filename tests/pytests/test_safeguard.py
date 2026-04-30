@@ -91,7 +91,7 @@ def test_safeguard_trips_after_threshold(config_override, fresh_ip,
     )
 
     # Decision log: at least one challenge-safeguard reason after
-    # threshold crossing. Outcome is "declined" (module got out of
+    # threshold crossing. Outcome is "allow" (module got out of
     # the way) and tier is "safeguard" (distinct from "pass").
     safeguard_lines = [d for d in lines
                        if "challenge-safeguard" in d["reason"]]
