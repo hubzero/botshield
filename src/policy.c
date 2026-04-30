@@ -354,6 +354,7 @@ int bs_check_policy(request_rec *r)
                 bs_score_add(r, 0, 0,
                     apr_pstrcat(r->pool, "block-path:", e->name,
                                 ":observe", NULL));
+                bs_set_would_outcome(r, "~block");
                 if (bs_shm.metrics) {
                     __atomic_fetch_add(
                         &bs_shm.metrics->block_path_observed_total,
@@ -470,6 +471,7 @@ int bs_check_policy(request_rec *r)
                 bs_score_add(r, 0, 0,
                     apr_pstrcat(r->pool, "rate-limit-exceeded:",
                                 e->name, ":observe", NULL));
+                bs_set_would_outcome(r, "~rate_limited");
                 if (bs_shm.metrics) {
                     __atomic_fetch_add(
                         &bs_shm.metrics->rate_limit_observed_total,

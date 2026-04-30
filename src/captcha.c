@@ -1475,7 +1475,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         apr_table_setn(r->headers_out, "Allow", "POST");
         ap_set_content_type(r, "text/plain; charset=utf-8");
         ap_rputs("POST required.\n", r);
-        bs_decision_log(r, "captcha", "rejected", "-",
+        bs_decision_log(r, "captcha", "block", "-",
                         prov_name, "-", "method_not_allowed", 0);
         return OK;
     }
@@ -1492,7 +1492,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         apr_table_setn(r->err_headers_out, "X-Botshield",
                        "captcha-bad-content-type");
         ap_rputs("application/x-www-form-urlencoded required.\n", r);
-        bs_decision_log(r, "captcha", "rejected", "-",
+        bs_decision_log(r, "captcha", "block", "-",
                         prov_name, "-", "bad_content_type", 0);
         return OK;
     }
@@ -1553,12 +1553,12 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
     const char *body = NULL;
     apr_status_t bsr = bs_read_form_body(r, 8 * 1024, &body, &body_len);
     if (bsr == APR_ENOSPC) {
-        bs_decision_log(r, "captcha", "rejected", "-",
+        bs_decision_log(r, "captcha", "block", "-",
                         prov_name, "-", "body_too_large", 0);
         return HTTP_REQUEST_ENTITY_TOO_LARGE;
     }
     if (bsr != APR_SUCCESS || !body) {
-        bs_decision_log(r, "captcha", "rejected", "-",
+        bs_decision_log(r, "captcha", "block", "-",
                         prov_name, "-", "body_read_failed", 0);
         return HTTP_BAD_REQUEST;
     }
@@ -1576,7 +1576,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         r->status = HTTP_BAD_REQUEST;
         ap_set_content_type(r, "text/plain; charset=utf-8");
         ap_rputs("Missing captcha token.\n", r);
-        bs_decision_log(r, "captcha", "rejected", "-",
+        bs_decision_log(r, "captcha", "block", "-",
                         prov_name, "-", "no_token", 0);
         return OK;
     }
@@ -1587,7 +1587,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         r->status = HTTP_BAD_REQUEST;
         ap_set_content_type(r, "text/plain; charset=utf-8");
         ap_rputs("Captcha token too long.\n", r);
-        bs_decision_log(r, "captcha", "rejected", "-",
+        bs_decision_log(r, "captcha", "block", "-",
                         prov_name, "-", "token_too_long", 0);
         return OK;
     }
@@ -1721,7 +1721,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
             ap_set_content_type(r, "text/plain; charset=utf-8");
             apr_table_setn(r->err_headers_out, "X-Botshield", "captcha-rejected");
             ap_rputs("Verification score too low. Go back and try again.\n", r);
-            bs_decision_log(r, "captcha", "rejected", "-",
+            bs_decision_log(r, "captcha", "block", "-",
                             cfg->captcha_provider->name, "-",
                             apr_psprintf(r->pool, "low_score:%.2f", score),
                             0);
@@ -1747,7 +1747,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         ap_set_content_type(r, "text/plain; charset=utf-8");
         apr_table_setn(r->err_headers_out, "X-Botshield", "captcha-rejected");
         ap_rputs("Captcha verification failed. Go back and try again.\n", r);
-        bs_decision_log(r, "captcha", "rejected", "-",
+        bs_decision_log(r, "captcha", "block", "-",
                         cfg->captcha_provider->name, "-",
                         (details && *details) ? details : "-", 0);
         return OK;
@@ -1815,7 +1815,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
     if (result == BS_CAPTCHA_TIMEOUT) d_reason = "provider_timeout";
     else if (result == BS_CAPTCHA_ERROR) d_reason = "provider_error";
     bs_decision_log(r, "captcha", d_outcome, "-",
-                    cfg->captcha_provider->name, cookie_alg_name,
+                    cfg->captcha_provider->name, "-",
                     d_reason, 0);
     return OK;
 }

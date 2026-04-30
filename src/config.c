@@ -2965,8 +2965,9 @@ int bs_forgiveness_apply_cap(int requested,
 /* E12 — BotShieldLogOnly on|off. Server-scope master switch
  * for dry-run enforcement. When on, every trigger / rate-limit /
  * block-path rule behaves as if mode=observe regardless of its
- * per-rule setting, and tier decisions log a 'would-challenge' line
- * and decline rather than serving an interstitial. Operators stage a
+ * per-rule setting, and tier decisions log an 'outcome=~challenge'
+ * line (tilde marks the suppressed counterfactual) and decline
+ * rather than serving an interstitial. Operators stage a
  * whole config revision in one shot, watch the decision log, then
  * flip off to enforce. Off is the default — operators opt in. */
 const char *bs_set_log_only(cmd_parms *cmd, void *dconf, int flag)

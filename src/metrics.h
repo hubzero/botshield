@@ -49,6 +49,18 @@ const char *bs_decision_cookie_status(const char *verify_reason,
  * walks when a matching rule's action carries a log_tag. */
 void bs_set_trigger_tag(request_rec *r, const char *tag);
 
+/* Stash a "would-X" counterfactual outcome on r->notes. Called from
+ * suppression sites (BlockPath observe, RateLimit observe, Trigger
+ * observe with a status side-effect, FormCaptcha observe, tier-
+ * dispatch under BotShieldLogOnly). bs_decision_log reads this note
+ * and renders it in the outcome field with a leading `~` prefix
+ * (e.g. `~block`, `~rate_limited`, `~challenge`) instead of plain
+ * `allow`, so the operator-facing decision log shows what the policy
+ * would have done if not suppressed. Severity-aware: a more-severe
+ * stash (~block) wins over a less-severe one (~challenge) when
+ * multiple suppressions fire on the same request. */
+void bs_set_would_outcome(request_rec *r, const char *would);
+
 /* /botshield/metrics handler — Prometheus exposition format 0.0.4.
  * Mounted via the request dispatcher in botshield.c. Apache's
  * <Location> + Require* gates access; this module emits to anyone

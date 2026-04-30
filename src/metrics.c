@@ -48,10 +48,10 @@ static int bs_m_tier_idx(const char *s)
 static int bs_m_outcome_idx(const char *s)
 {
     if (!s) return -1;
-    if (strcmp(s, "declined")         == 0) return BS_M_OUTCOME_DECLINED;
+    if (strcmp(s, "allow")            == 0) return BS_M_OUTCOME_ALLOW;
     if (strcmp(s, "challenged")       == 0) return BS_M_OUTCOME_CHALLENGED;
     if (strcmp(s, "verified")         == 0) return BS_M_OUTCOME_VERIFIED;
-    if (strcmp(s, "rejected")         == 0) return BS_M_OUTCOME_REJECTED;
+    if (strcmp(s, "block")            == 0) return BS_M_OUTCOME_BLOCK;
     if (strcmp(s, "failopen")         == 0) return BS_M_OUTCOME_FAILOPEN;
     if (strcmp(s, "rate_limited")     == 0) return BS_M_OUTCOME_RATE_LIMITED;
     if (strcmp(s, "inflight_capped")  == 0) return BS_M_OUTCOME_INFLIGHT_CAPPED;
@@ -294,6 +294,37 @@ static const char *bs_get_trigger_tag(request_rec *r)
     return apr_table_get(r->notes, BS_TRIGGER_TAG_NOTE);
 }
 
+#define BS_WOULD_OUTCOME_NOTE "botshield-would-outcome"
+
+/* Severity ordering for would-outcomes. When multiple suppression
+ * sites fire on the same request (e.g. a BlockPath observed AND
+ * tier-dispatch suppressed), the most-severe stashed value wins for
+ * the outcome field — operators want the strongest action the
+ * policy wanted, not the last-evaluated. */
+static int bs_would_severity(const char *would)
+{
+    if (!would) return 0;
+    if (strcmp(would, "~block")        == 0) return 4;
+    if (strcmp(would, "~rate_limited") == 0) return 3;
+    if (strcmp(would, "~challenge")    == 0) return 2;
+    return 1;
+}
+
+void bs_set_would_outcome(request_rec *r, const char *would)
+{
+    if (!would || !*would) return;
+    const char *cur = apr_table_get(r->notes, BS_WOULD_OUTCOME_NOTE);
+    if (bs_would_severity(would) > bs_would_severity(cur)) {
+        apr_table_setn(r->notes, BS_WOULD_OUTCOME_NOTE,
+                       apr_pstrdup(r->pool, would));
+    }
+}
+
+static const char *bs_get_would_outcome(request_rec *r)
+{
+    return apr_table_get(r->notes, BS_WOULD_OUTCOME_NOTE);
+}
+
 /* ======================================================================
  * Decision log
  * ====================================================================== */
@@ -343,6 +374,49 @@ static const char *bs_log_quote(apr_pool_t *p, const char *s)
     return out;
 }
 
+/* mod_log_config's config_log_transaction evaluates the env=NAME
+ * conditional against the original request_rec passed to
+ * log_transaction, then walks r->next forward to find the last
+ * request in the chain and renders %{NAME}e tokens against THAT
+ * request_rec. For requests that hit an internal_redirect (e.g.
+ * mod_rewrite's per-Directory `RewriteRule (.*) index.php`, used
+ * by HUBzero/Joomla/Drupal/WordPress and friends), the forward
+ * request_rec's subprocess_env was deep-copied from the original
+ * but every key was prefixed with "REDIRECT_" by the
+ * rename_original_env transformation in
+ * server/protocol.c::internal_internal_redirect. Our un-prefixed
+ * BS_* and BOTSHIELD env vars don't survive on the forward request_rec,
+ * so the env=BOTSHIELD conditional matches against the original
+ * (BOTSHIELD set there) but the format render — running on the
+ * forward — sees only REDIRECT_BOTSHIELD and renders every
+ * %{BS_NAME}e as "-".
+ *
+ * Fix: at ap_hook_log_transaction APR_HOOK_FIRST (running
+ * immediately before mod_log_config's APR_HOOK_MIDDLE hook on the
+ * same request), walk r->next forward and copy our
+ * BS_* and BOTSHIELD env vars from the origin to whatever the last
+ * request_rec in the chain is. mod_log_config then renders against
+ * a request_rec where the un-prefixed names exist with the right
+ * values. No-op when there's no chain. */
+int bs_propagate_decision_env(request_rec *r)
+{
+    if (!r->next) return DECLINED;
+    request_rec *fwd = r;
+    while (fwd->next) fwd = fwd->next;
+    if (fwd == r) return DECLINED;
+    const apr_array_header_t *arr = apr_table_elts(r->subprocess_env);
+    apr_table_entry_t *elts = (apr_table_entry_t *)arr->elts;
+    for (int i = 0; i < arr->nelts; i++) {
+        if (!elts[i].key || !elts[i].val) continue;
+        if (strncmp(elts[i].key, "BS_", 3) == 0
+            || strcmp(elts[i].key, "BOTSHIELD") == 0) {
+            apr_table_setn(fwd->subprocess_env,
+                           elts[i].key, elts[i].val);
+        }
+    }
+    return DECLINED;
+}
+
 void bs_decision_log(request_rec *r,
                      const char *tier,
                      const char *outcome,
@@ -361,20 +435,90 @@ void bs_decision_log(request_rec *r,
                                          reason ? reason : "-");
     const char *path_q   = bs_log_quote(r->pool, path);
 
-    /* Demote the "boring pass" — tier=pass, outcome=declined,
+    /* Override outcome with the would-X stash if a suppression site
+     * recorded one and the call site passed the natural "allow"
+     * (i.e. nothing else more specific). Most-severe stashed
+     * counterfactual wins. Lets BlockPath / RateLimit / Trigger
+     * observe / FormCaptcha observe / tier-dispatch under
+     * BotShieldLogOnly all surface as `outcome=~block`,
+     * `~rate_limited`, `~challenge` etc. instead of plain `allow`
+     * with the policy intent buried in the reason chain. */
+    const char *would = bs_get_would_outcome(r);
+    if (would && outcome && strcmp(outcome, "allow") == 0) {
+        outcome = would;
+    }
+
+    /* Demote the "boring pass" — tier=pass, outcome=allow,
      * score=0, no reasons, no trigger tag — to DEBUG so an
      * operator running at 'LogLevel botshield:info' for staging /
      * tuning sees only decisions where something actually
      * contributed. Pass-with-credits (score=0 but reasons non-
-     * empty), tagged pass (asset bypass, etc.), and any non-pass
-     * tier all stay at INFO. */
+     * empty), tagged pass (asset bypass, etc.), any non-pass
+     * tier, and any tilde-prefixed counterfactual all stay at
+     * INFO. */
     int level = APLOG_INFO;
     int boring = (tier && strcmp(tier, "pass") == 0)
-              && (outcome && strcmp(outcome, "declined") == 0)
+              && (outcome && strcmp(outcome, "allow") == 0)
               && score == 0
               && (!tag || !*tag)
               && (!reason || !*reason || strcmp(reason, "-") == 0);
     if (boring) level = APLOG_DEBUG;
+
+    /* Stash the same fields as subprocess_env + flip the BOTSHIELD
+     * env var, so an operator can route a dedicated decision log via
+     * mod_log_config:
+     *
+     *   LogFormat "%{cu}t %a %>s tier=%{BS_TIER}e ..." botshield
+     *   CustomLog logs/botshield-decisions.log botshield env=BOTSHIELD
+     *
+     * subprocess_env (not r->notes) is the right vehicle because
+     * Apache's internal_internal_redirect deep-copies subprocess_env
+     * into the redirect-target request_rec but creates a fresh empty
+     * notes table. mod_rewrite's per-Directory `RewriteRule (.*)
+     * index.php` style rules — used heavily by HUBzero / Joomla /
+     * Drupal / WordPress and friends — trigger exactly that path,
+     * so notes wouldn't survive into the request_rec that
+     * log_transaction logs. Env vars do.
+     *
+     * BS_TIME is the ISO-8601 UTC timestamp of the decision (same
+     * format Apache 2.4.13+ emits via %{cu}t in mod_log_config, but
+     * with millisecond precision instead of microsecond, formatted
+     * here so the LogFormat doesn't have to fight strftime's local-
+     * time-only %t).
+     *
+     * env values are populated unconditionally — including for the
+     * boring-pass case — so an operator's CustomLog conditional sees
+     * a consistent BOTSHIELD=1 marker on every decision. The
+     * formatter pulls fields by name; missing values render as "-"
+     * (mod_log_config's standard for absent %{e}). */
+    {
+        apr_time_exp_t tm;
+        apr_time_exp_gmt(&tm, apr_time_now());
+        apr_table_setn(r->subprocess_env, "BS_TIME",
+            apr_psprintf(r->pool,
+                "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
+                tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                tm.tm_hour, tm.tm_min, tm.tm_sec,
+                tm.tm_usec / 1000));
+    }
+    apr_table_setn(r->subprocess_env, "BS_TIER",
+                   tier     ? tier     : "-");
+    apr_table_setn(r->subprocess_env, "BS_OUTCOME",
+                   outcome  ? outcome  : "-");
+    apr_table_setn(r->subprocess_env, "BS_COOKIE",
+                   cookie   ? cookie   : "-");
+    apr_table_setn(r->subprocess_env, "BS_PROVIDER",
+                   provider ? provider : "-");
+    apr_table_setn(r->subprocess_env, "BS_ALG",
+                   alg      ? alg      : "-");
+    apr_table_setn(r->subprocess_env, "BS_REASON",
+                   reason   ? reason   : "-");
+    apr_table_setn(r->subprocess_env, "BS_SCORE",
+                   apr_psprintf(r->pool, "%d", score));
+    if (tag && *tag) {
+        apr_table_setn(r->subprocess_env, "BS_TAG", tag);
+    }
+    apr_table_setn(r->subprocess_env, "BOTSHIELD", "1");
 
     /* tag= suffix only when a trigger set it; normal decision lines
      * stay byte-identical so existing log parsers don't break. */
@@ -487,18 +631,20 @@ int bs_metrics_handler(request_rec *r)
         "Decisions at tier=captcha (third-party provider widget served or verified).",
         bs_mload(&m->tier[BS_M_TIER_CAPTCHA]));
 
-    bs_m_emit_counter(r, "outcome_declined_total",
-        "Decisions where the module returned DECLINED to Apache (pass tier + asset).",
-        bs_mload(&m->outcome[BS_M_OUTCOME_DECLINED]));
+    bs_m_emit_counter(r, "outcome_allow_total",
+        "Decisions that let the request through (pass tier, asset bypass, "
+        "silent embedded pass-through, safeguard pass).",
+        bs_mload(&m->outcome[BS_M_OUTCOME_ALLOW]));
     bs_m_emit_counter(r, "outcome_challenged_total",
         "Decisions that served an interstitial.",
         bs_mload(&m->outcome[BS_M_OUTCOME_CHALLENGED]));
     bs_m_emit_counter(r, "outcome_verified_total",
         "Captcha verifications that passed siteverify.",
         bs_mload(&m->outcome[BS_M_OUTCOME_VERIFIED]));
-    bs_m_emit_counter(r, "outcome_rejected_total",
-        "Requests rejected before or by provider siteverify.",
-        bs_mload(&m->outcome[BS_M_OUTCOME_REJECTED]));
+    bs_m_emit_counter(r, "outcome_block_total",
+        "Requests blocked: invalid cookie, failed captcha verify, "
+        "rate-limit-exceeded, etc.",
+        bs_mload(&m->outcome[BS_M_OUTCOME_BLOCK]));
     bs_m_emit_counter(r, "outcome_failopen_total",
         "Siteverify calls that failed open (timeout, network error, provider 5xx).",
         bs_mload(&m->outcome[BS_M_OUTCOME_FAILOPEN]));
@@ -698,7 +844,7 @@ int bs_status_hook(request_rec *r, int flags)
             bs_mload(&m->tier[BS_M_TIER_FORM]),
             bs_mload(&m->tier[BS_M_TIER_CAPTCHA]),
             bs_mload(&m->outcome[BS_M_OUTCOME_VERIFIED]),
-            bs_mload(&m->outcome[BS_M_OUTCOME_REJECTED]),
+            bs_mload(&m->outcome[BS_M_OUTCOME_BLOCK]),
             bs_mload(&m->outcome[BS_M_OUTCOME_FAILOPEN]),
             bs_mload(&m->outcome[BS_M_OUTCOME_RATE_LIMITED]),
             bs_metrics_inflight_cur(),
@@ -723,7 +869,7 @@ int bs_status_hook(request_rec *r, int flags)
     };
     const struct { const char *label; apr_uint64_t val; } out_rows[] = {
         { "verified",        bs_mload(&m->outcome[BS_M_OUTCOME_VERIFIED])        },
-        { "rejected",        bs_mload(&m->outcome[BS_M_OUTCOME_REJECTED])        },
+        { "block",           bs_mload(&m->outcome[BS_M_OUTCOME_BLOCK])           },
         { "failopen",        bs_mload(&m->outcome[BS_M_OUTCOME_FAILOPEN])        },
         { "rate_limited",    bs_mload(&m->outcome[BS_M_OUTCOME_RATE_LIMITED])    },
         { "pending_missing", bs_mload(&m->outcome[BS_M_OUTCOME_PENDING_MISSING]) },

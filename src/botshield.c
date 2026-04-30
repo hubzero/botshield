@@ -539,7 +539,7 @@ static const command_rec bs_cmds[] = {
                  "client-visible enforcement is suppressed and logged "
                  "instead: trigger / rate-limit / block-path rules log "
                  "matches with a :observe suffix, AND tier decisions "
-                 "(silent / hard / captcha) emit a 'would-challenge' "
+                 "(silent / hard / captcha) emit an 'outcome=~challenge' "
                  "decision log line and decline rather than serving an "
                  "interstitial. Useful for staging a whole policy "
                  "revision — including bare 'BotShieldEnabled On' on a "
@@ -816,7 +816,7 @@ static int bs_apply_safeguard(request_rec *r, int have_client_ip,
             "through (until=%" APR_INT64_T_FMT ")",
             r->useragent_ip, (apr_int64_t)now_t);
         bs_score_add(r, 0, 0, "challenge-safeguard");
-        bs_decision_log(r, "safeguard", "declined",
+        bs_decision_log(r, "safeguard", "allow",
                         cookie_status, "-", "-",
                         bs_decision_reason_names(r->pool, score),
                         effective);
@@ -899,7 +899,7 @@ static int bs_route_module_endpoint(request_rec *r, bs_dir_cfg *cfg)
     ap_set_content_type(r, "text/plain; charset=utf-8");
     apr_table_setn(r->err_headers_out, "X-Botshield", "unknown-endpoint");
     ap_rputs("Not found.\n", r);
-    bs_decision_log(r, "none", "rejected", "-", "-", "-",
+    bs_decision_log(r, "none", "block", "-", "-", "-",
                     "unknown_endpoint", 0);
     return OK;
 }
@@ -962,7 +962,7 @@ static int bs_handler(request_rec *r)
     /* Static assets pass through — a cookieless first page load must still
      * render its CSS/images so the PoW page is usable. */
     if (bs_is_asset_uri(r->uri)) {
-        bs_decision_log(r, "pass", "declined", "-", "-", "-", "asset", 0);
+        bs_decision_log(r, "pass", "allow", "-", "-", "-", "asset", 0);
         return DECLINED;
     }
 
@@ -1073,7 +1073,8 @@ static int bs_handler(request_rec *r)
          * tag side effects already applied in bs_check_policy. */
         bs_request_score *s = bs_get_score(r, 0);
         const char *reasons = bs_score_reasons_joined(r->pool, s);
-        bs_decision_log(r, "pass", "declined", cookie_status, "-", "-",
+        bs_decision_log(r, "pass", "allow", cookie_status, "-",
+                        "-",
                         reasons, s ? s->total : 0);
         return DECLINED;
     }
@@ -1082,8 +1083,9 @@ static int bs_handler(request_rec *r)
         const char *reasons = bs_score_reasons_joined(r->pool, s);
         const char *outcome;
         if (policy_rv == HTTP_TOO_MANY_REQUESTS)      outcome = "rate_limited";
-        else                                          outcome = "rejected";
-        bs_decision_log(r, "pass", outcome, cookie_status, "-", "-",
+        else                                          outcome = "block";
+        bs_decision_log(r, "pass", outcome, cookie_status, "-",
+                        "-",
                         reasons, s ? s->total : 0);
         return policy_rv;
     }
@@ -1209,8 +1211,9 @@ static int bs_handler(request_rec *r)
                     "mod_botshield: app claims not emitted: %s", cerr);
             }
         }
-        bs_decision_log(r, "pass", "declined", cookie_status,
-                        "-", "-",
+        bs_decision_log(r, "pass", "allow", cookie_status,
+                        "-",
+                        "-",
                         bs_decision_reason_names(r->pool, score),
                         effective);
         return DECLINED;
@@ -1225,7 +1228,8 @@ static int bs_handler(request_rec *r)
      * machinery has its own observe paths (honored elsewhere); this
      * branch is the tier-dispatch counterpart. */
     if (scfg_h && scfg_h->log_only == 1) {
-        bs_decision_log(r, bs_tier_name(tier), "would-challenge",
+        bs_set_would_outcome(r, "~challenge");
+        bs_decision_log(r, bs_tier_name(tier), "allow",
                         cookie_status, "-",
                         cfg->algorithm ? cfg->algorithm->name : "-",
                         bs_decision_reason_names(r->pool, score),
@@ -1267,8 +1271,9 @@ static int bs_handler(request_rec *r)
             }
         }
         if (!fall_back) {
-            bs_decision_log(r, "silent", "declined", cookie_status,
-                            "-", "-",
+            bs_decision_log(r, "silent", "allow", cookie_status,
+                            "-",
+                            "-",
                             bs_decision_reason_names(r->pool, score),
                             effective);
             return DECLINED;
@@ -1439,6 +1444,11 @@ static void bs_register_hooks(apr_pool_t *p)
     ap_hook_post_config (bs_post_config, NULL, NULL, APR_HOOK_MIDDLE);
     ap_hook_child_init  (bs_child_init,  NULL, NULL, APR_HOOK_MIDDLE);
     ap_hook_handler     (bs_handler,     NULL, NULL, APR_HOOK_FIRST);
+    {
+        extern int bs_propagate_decision_env(request_rec *r);
+        ap_hook_log_transaction(bs_propagate_decision_env,
+                                NULL, NULL, APR_HOOK_FIRST);
+    }
     /* E18 — inline form captcha. Fixup runs before content handlers
      * but after auth/header processing, so the request body is still
      * readable from the input filter chain. The hook reads + validates

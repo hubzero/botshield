@@ -442,6 +442,15 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
         bs_score_add(r, 0, 0,
             apr_pstrcat(r->pool, family_tag, ":", trigger_name,
                         ":observe", NULL));
+        /* If the rule's action carried a client-visible status
+         * (block / rate-limit), surface that as a ~ counterfactual
+         * on the outcome field. Pure flag-write or score-only
+         * triggers don't change the outcome under observe. */
+        if (a->status_code == HTTP_TOO_MANY_REQUESTS) {
+            bs_set_would_outcome(r, "~rate_limited");
+        } else if (a->status_code >= 400) {
+            bs_set_would_outcome(r, "~block");
+        }
         if (bs_shm.metrics) {
             __atomic_fetch_add(&bs_shm.metrics->trigger_observed_total,
                                1, __ATOMIC_RELAXED);

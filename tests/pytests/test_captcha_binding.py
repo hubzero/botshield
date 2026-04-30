@@ -45,7 +45,7 @@ def test_hostname_mismatch_rejects_valid_token(config_override, log_slice):
                 data={"cf-turnstile-response": "x", "return_to": "/"},
             )
             rejected = slc.decision_lines(
-                outcome="rejected", provider="turnstile",
+                outcome="block", provider="turnstile",
             )
 
     assert resp.status_code == 403, (

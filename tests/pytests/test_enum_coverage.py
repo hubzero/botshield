@@ -26,7 +26,7 @@ pytestmark = [pytest.mark.serial, pytest.mark.live_network]
 
 
 REACHABLE = {
-    "declined", "challenged", "verified", "rejected",
+    "allow", "challenged", "verified", "block",
     "failopen", "rate_limited", "pending_missing",
 }
 

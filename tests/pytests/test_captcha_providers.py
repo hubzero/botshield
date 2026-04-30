@@ -147,7 +147,7 @@ def test_captcha_rejected_via_bad_secret(
             # the prose "captcha REJECTED" line (log-throttled 1/60s
             # per IP — flaky under rapid re-runs).
             matched = slc.decision_lines(
-                outcome="rejected", provider=spec.log_name,
+                outcome="block", provider=spec.log_name,
             )
 
     assert resp.status_code == 403, (
