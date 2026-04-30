@@ -1786,9 +1786,13 @@ Two layers:
 - **Global `BotShieldLogOnly On`**: master switch that turns every
   match (regardless of per-rule `mode=`) into observe-mode semantics
   AND short-circuits tier-decision dispatch (silent / hard / captcha)
-  to a `would-challenge` decision log line. Useful for staging a
-  whole policy revision — including a bare `BotShieldEnabled On` on
-  a fresh vhost — before flipping enforcement on.
+  to an `outcome=~challenge` decision log line. The leading tilde
+  marks a suppressed counterfactual: the real outcome was always
+  `allow` (request flowed through), and the tilde-prefixed value is
+  what *would* have been served under enforcement. Greppable as
+  `outcome=~`. Useful for staging a whole policy revision — including
+  a bare `BotShieldEnabled On` on a fresh vhost — before flipping
+  enforcement on.
 
 Reason strings carry the `:observe` suffix. Metrics counters split:
 `rate_limit_observed_total`, `block_path_observed_total`,

@@ -11,10 +11,12 @@
   unchanged. Beta software, no in-the-wild configs to migrate.
 - `BotShieldLogOnly` now also short-circuits the tier-decision
   dispatch in `bs_handler` (was: trigger / rate-limit / block-path /
-  form-captcha rules only). Non-PASS tier decisions emit a
-  `would-challenge` decision log line and decline rather than serving
-  an interstitial. Lets an operator stage a bare `BotShieldEnabled
-  On` on a fresh vhost and watch what the module would do without any
+  form-captcha rules only). Non-PASS tier decisions emit an
+  `outcome=~challenge` decision log line (the leading tilde marks a
+  suppressed counterfactual: real action was allow, this is what
+  *would* have been served) and decline rather than serving an
+  interstitial. Lets an operator stage a bare `BotShieldEnabled On`
+  on a fresh vhost and watch what the module would do without any
   client seeing a challenge.
 
 ## 2026-04-29

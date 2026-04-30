@@ -539,7 +539,7 @@ static const command_rec bs_cmds[] = {
                  "client-visible enforcement is suppressed and logged "
                  "instead: trigger / rate-limit / block-path rules log "
                  "matches with a :observe suffix, AND tier decisions "
-                 "(silent / hard / captcha) emit a 'would-challenge' "
+                 "(silent / hard / captcha) emit an 'outcome=~challenge' "
                  "decision log line and decline rather than serving an "
                  "interstitial. Useful for staging a whole policy "
                  "revision — including bare 'BotShieldEnabled On' on a "
@@ -1228,7 +1228,7 @@ static int bs_handler(request_rec *r)
      * machinery has its own observe paths (honored elsewhere); this
      * branch is the tier-dispatch counterpart. */
     if (scfg_h && scfg_h->log_only == 1) {
-        bs_decision_log(r, bs_tier_name(tier), "would-challenge",
+        bs_decision_log(r, bs_tier_name(tier), "~challenge",
                         cookie_status, "-",
                         cfg->algorithm ? cfg->algorithm->name : "-",
                         bs_decision_reason_names(r->pool, score),
