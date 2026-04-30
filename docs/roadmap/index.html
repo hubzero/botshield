@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Roadmap and changelog | mod_botshield</title>
+  <title>Roadmap and changelog | BotShield</title>
   <meta name="description" content="Shipped milestones, extension design notes, and the development backlog.">
   <link rel="stylesheet" href="../assets/site.css">
 </head>
@@ -17,10 +17,11 @@
           <span class="brand__wordmark-soft">Bot</span><span class="brand__wordmark-strong">Shield</span>
         </span>
       </a>
+      <span class="site-header__beta" aria-label="Beta release">Beta</span>
       <nav class="top-nav" aria-label="Primary">
-        <a class="top-nav__link" href="#">GitHub</a>
+        <a class="top-nav__link" href="https://github.com/hubzero/botshield">GitHub</a>
         <a class="top-nav__link" href="../getting-started/index.html">Docs</a>
-        <a class="top-nav__link" href="../getting-started/index.html#build">Download</a>
+        <a class="top-nav__link" href="https://github.com/hubzero/botshield/releases">Download</a>
       </nav>
     </header>
 
@@ -36,8 +37,8 @@
   <span class="docs-nav__title">Deployment</span>
   <span class="docs-nav__summary">Reverse proxies, slow-client defense, multi-vhost reputation, secret rotation, capacity sizing.</span>
 </a>
-<a class="docs-nav__item" href="../operator-model/index.html">
-  <span class="docs-nav__title">Operator model</span>
+<a class="docs-nav__item" href="../site-model/index.html">
+  <span class="docs-nav__title">Site model</span>
   <span class="docs-nav__summary">Tiers, scoring, cookie-carried reputation, decision log, tuning workflow.</span>
 </a>
 <a class="docs-nav__item" href="../policy/index.html">
@@ -58,15 +59,15 @@
 </a>
 <a class="docs-nav__item" href="../directives/index.html">
   <span class="docs-nav__title">Directive reference</span>
-  <span class="docs-nav__summary">Canonical operator-facing reference for all 78 directives, grouped by family.</span>
+  <span class="docs-nav__summary">Canonical reference for all 78 directives, grouped by family.</span>
 </a>
 <a class="docs-nav__item" href="../troubleshooting/index.html">
   <span class="docs-nav__title">Troubleshooting</span>
-  <span class="docs-nav__summary">Common operator-visible issues, diagnostics, and fixes.</span>
+  <span class="docs-nav__summary">Common issues, diagnostics, and fixes.</span>
 </a>
 <a class="docs-nav__item" href="../faq/index.html">
   <span class="docs-nav__title">FAQ</span>
-  <span class="docs-nav__summary">Honest answers to questions operators ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
+  <span class="docs-nav__summary">Honest answers to questions teams ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
 </a>
 <a class="docs-nav__item" href="../guide/index.html">
   <span class="docs-nav__title">Project README</span>
@@ -197,7 +198,7 @@ baseline static-file through trigger-heavy / kitchen-sink config,
 wrk-driven, results saved per timestamp. Cookied scenario mints
 a real <code>_bs_verified</code> and replays. <code>LogLevel info</code> scenario
 measures decision-log overhead.</li>
-<li>Operator handbook: 9 markdown source files (~2,400 lines) under
+<li>Site handbook: 9 markdown source files (~2,400 lines) under
 <code>docs-src/</code>, rendered to <code>docs/</code> via <code>tools/build_site.py</code>.</li>
 <li>Performance section in <code>docs-src/deployment.md</code> with single-
 connection / saturation / fixed-rate framing.</li>
@@ -247,7 +248,7 @@ is gone; verify path is single-format. Secondary-key fallback
 <code>app_claims_secret</code> into one shared <code>app_integration_secret</code> —
 the two protocols' canonical forms are structurally distinct
 (single-field vs seven-field) so cross-replay isn't possible,
-and operators no longer maintain two key files.</li>
+and you no longer maintain two key files.</li>
 <li><strong>E14 rework: replaced adaptive-intensity machinery with
 <code>BotShieldFlagTrigger</code>.</strong> Original E14 design used a flag-meta
 registry with <code>penalty=</code> / <code>next_difficulty=</code> / <code>next_tier=</code>

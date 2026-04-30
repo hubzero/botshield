@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Directive reference | mod_botshield</title>
-  <meta name="description" content="Canonical operator-facing reference for all 78 directives, grouped by family.">
+  <title>Directive reference | BotShield</title>
+  <meta name="description" content="Canonical reference for all 78 directives, grouped by family.">
   <link rel="stylesheet" href="../assets/site.css">
 </head>
 <body class="site-doc">
@@ -17,10 +17,11 @@
           <span class="brand__wordmark-soft">Bot</span><span class="brand__wordmark-strong">Shield</span>
         </span>
       </a>
+      <span class="site-header__beta" aria-label="Beta release">Beta</span>
       <nav class="top-nav" aria-label="Primary">
-        <a class="top-nav__link" href="#">GitHub</a>
+        <a class="top-nav__link" href="https://github.com/hubzero/botshield">GitHub</a>
         <a class="top-nav__link" href="../getting-started/index.html">Docs</a>
-        <a class="top-nav__link" href="../getting-started/index.html#build">Download</a>
+        <a class="top-nav__link" href="https://github.com/hubzero/botshield/releases">Download</a>
       </nav>
     </header>
 
@@ -36,8 +37,8 @@
   <span class="docs-nav__title">Deployment</span>
   <span class="docs-nav__summary">Reverse proxies, slow-client defense, multi-vhost reputation, secret rotation, capacity sizing.</span>
 </a>
-<a class="docs-nav__item" href="../operator-model/index.html">
-  <span class="docs-nav__title">Operator model</span>
+<a class="docs-nav__item" href="../site-model/index.html">
+  <span class="docs-nav__title">Site model</span>
   <span class="docs-nav__summary">Tiers, scoring, cookie-carried reputation, decision log, tuning workflow.</span>
 </a>
 <a class="docs-nav__item" href="../policy/index.html">
@@ -58,15 +59,15 @@
 </a>
 <a class="docs-nav__item is-active" href="index.html">
   <span class="docs-nav__title">Directive reference</span>
-  <span class="docs-nav__summary">Canonical operator-facing reference for all 78 directives, grouped by family.</span>
+  <span class="docs-nav__summary">Canonical reference for all 78 directives, grouped by family.</span>
 </a>
 <a class="docs-nav__item" href="../troubleshooting/index.html">
   <span class="docs-nav__title">Troubleshooting</span>
-  <span class="docs-nav__summary">Common operator-visible issues, diagnostics, and fixes.</span>
+  <span class="docs-nav__summary">Common issues, diagnostics, and fixes.</span>
 </a>
 <a class="docs-nav__item" href="../faq/index.html">
   <span class="docs-nav__title">FAQ</span>
-  <span class="docs-nav__summary">Honest answers to questions operators ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
+  <span class="docs-nav__summary">Honest answers to questions teams ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
 </a>
 <a class="docs-nav__item" href="../guide/index.html">
   <span class="docs-nav__title">Project README</span>
@@ -83,7 +84,7 @@
         <header class="docs-article__header">
           <p class="eyebrow">Documentation</p>
           <h1>Directive reference</h1>
-          <p class="docs-article__summary">Canonical operator-facing reference for all 78 directives, grouped by family.</p>
+          <p class="docs-article__summary">Canonical reference for all 78 directives, grouped by family.</p>
           <p class="docs-article__source">Directive reference</p>
         </header>
 <section class="toc">
@@ -113,9 +114,9 @@
 </section>
         <div class="prose">
 <p>mod_botshield registers 78 directives at config time. This page is
-the canonical operator-facing reference, grouped by family. The
+the canonical reference, grouped by family. The
 underlying source-of-truth is <code>bs_cmds[]</code> in <code>src/botshield.c:139</code> —
-operators tuning behavior should treat the source as authoritative
+when tuning behavior, treat the source as authoritative
 when it disagrees with a doc page.</p>
 <h2 id="scope-and-validity">Scope and validity</h2>
 <p>Most directives accept <code>RSRC_CONF | ACCESS_CONF</code> — they're valid in
@@ -270,7 +271,7 @@ real app routes.</p>
 <li><code>BotShieldScoreHard ≤ score &lt; BotShieldScoreCaptcha</code> → form</li>
 <li><code>BotShieldScoreCaptcha ≤ score</code> → captcha (or form if no provider)</li>
 </ul>
-<p>See <a href="../operator-model/index.html">operator model</a> for the full scoring
+<p>See <a href="../site-model/index.html">site model</a> for the full scoring
 discussion.</p>
 <p><code>BotShieldForgivenessCapPerHour</code> caps total cookie-side
 forgiveness in any rolling 60-minute window. Default 200 ≈ 4–8
@@ -295,15 +296,15 @@ resistance; 0 disables (legacy behavior).</p>
 </table>
 <p><code>interstitial</code> (the default) serves a no-click splash page that
 auto-submits a SHA-256 PoW on load — the legacy silent-tier
-behavior. <code>embedded</code> instead hands off to the operator-included
+behavior. <code>embedded</code> instead hands off to the site-included
 <code>/botshield/embedded.js</code> wrapper: the page serves DECLINED (real
 content) and the wrapper does the PoW in a Web Worker, then POSTs
 the result back to <code>/botshield/embedded-verify</code> to mint
 <code>_bs_verified</code> on the next request. Embedded mode trades a brief
 window where the cookie isn't yet on the client (the very first
 request goes through unverified) for a zero-interstitial UX.</p>
-<p>Embedded mode requires the operator to include the wrapper
-script in their page templates; without it, the request still
+<p>Embedded mode requires you to include the wrapper
+script in your page templates; without it, the request still
 serves the real content but no cookie ever lands.</p>
 <h2 id="widget-customization">Widget customization</h2>
 <table>
@@ -368,7 +369,7 @@ is spliced in. Other widget directives still apply to the widget
 block itself. Max 256 KiB.</p>
 <p>Logo and help files are 64 KiB max each. Logo content is served
 inline as <code>&lt;img&gt;</code>-equivalent SVG; help content is rendered as
-trusted HTML (no escaping — operator owns sanitization).</p>
+trusted HTML (no escaping — you own sanitization).</p>
 <p><code>BotShieldShowLogo/Label/Box</code> strip widget chrome down to a lone
 checkbox if the surrounding page styles its own chrome. When label
 is hidden it moves to the button's <code>aria-label</code> — accessibility is
@@ -741,7 +742,7 @@ entries.</p>
 <p>Action verbs: <code>action=score add=N</code> (signed N -1000..1000),
 <code>action=tier_floor min=&lt;tier&gt;</code> (raise effective tier; tier is one
 of <code>pass</code>/<code>silent</code>/<code>form</code>/<code>captcha</code>). The <code>reset</code> keyword clears
-all earlier triggers (compiled-in defaults + prior operator
+all earlier triggers (compiled-in defaults + prior
 declarations) for the named flag at post-config time.</p>
 <p>Flag bits: <code>honeypot_hit</code>, <code>scanner_probe</code>, <code>fake_bot</code>,
 <code>pow_fail_streak</code>, <code>app_verified_human</code>, <code>app_verified_session</code>,
@@ -908,7 +909,7 @@ regardless of per-rule setting. See <a href="../staging/index.html">staging</a>.
 and security model.</p>
 <h2 id="where-to-next">Where to next</h2>
 <ul>
-<li>Conceptual model and scoring: <a href="../operator-model/index.html">operator model</a>.</li>
+<li>Conceptual model and scoring: <a href="../site-model/index.html">site model</a>.</li>
 <li>Deployment topology and capacity: <a href="../deployment/index.html">deployment</a>.</li>
 <li>Per-family policy semantics: <a href="../policy/index.html">policy</a>.</li>
 <li>Captcha and app-bridge integration: <a href="../captcha/index.html">captcha</a>.</li>

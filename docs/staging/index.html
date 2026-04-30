@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Staging | mod_botshield</title>
+  <title>Staging | BotShield</title>
   <meta name="description" content="Per-rule observe and global shadow mode for safe rule rollout.">
   <link rel="stylesheet" href="../assets/site.css">
 </head>
@@ -17,10 +17,11 @@
           <span class="brand__wordmark-soft">Bot</span><span class="brand__wordmark-strong">Shield</span>
         </span>
       </a>
+      <span class="site-header__beta" aria-label="Beta release">Beta</span>
       <nav class="top-nav" aria-label="Primary">
-        <a class="top-nav__link" href="#">GitHub</a>
+        <a class="top-nav__link" href="https://github.com/hubzero/botshield">GitHub</a>
         <a class="top-nav__link" href="../getting-started/index.html">Docs</a>
-        <a class="top-nav__link" href="../getting-started/index.html#build">Download</a>
+        <a class="top-nav__link" href="https://github.com/hubzero/botshield/releases">Download</a>
       </nav>
     </header>
 
@@ -36,8 +37,8 @@
   <span class="docs-nav__title">Deployment</span>
   <span class="docs-nav__summary">Reverse proxies, slow-client defense, multi-vhost reputation, secret rotation, capacity sizing.</span>
 </a>
-<a class="docs-nav__item" href="../operator-model/index.html">
-  <span class="docs-nav__title">Operator model</span>
+<a class="docs-nav__item" href="../site-model/index.html">
+  <span class="docs-nav__title">Site model</span>
   <span class="docs-nav__summary">Tiers, scoring, cookie-carried reputation, decision log, tuning workflow.</span>
 </a>
 <a class="docs-nav__item" href="../policy/index.html">
@@ -58,15 +59,15 @@
 </a>
 <a class="docs-nav__item" href="../directives/index.html">
   <span class="docs-nav__title">Directive reference</span>
-  <span class="docs-nav__summary">Canonical operator-facing reference for all 78 directives, grouped by family.</span>
+  <span class="docs-nav__summary">Canonical reference for all 78 directives, grouped by family.</span>
 </a>
 <a class="docs-nav__item" href="../troubleshooting/index.html">
   <span class="docs-nav__title">Troubleshooting</span>
-  <span class="docs-nav__summary">Common operator-visible issues, diagnostics, and fixes.</span>
+  <span class="docs-nav__summary">Common issues, diagnostics, and fixes.</span>
 </a>
 <a class="docs-nav__item" href="../faq/index.html">
   <span class="docs-nav__title">FAQ</span>
-  <span class="docs-nav__summary">Honest answers to questions operators ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
+  <span class="docs-nav__summary">Honest answers to questions teams ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
 </a>
 <a class="docs-nav__item" href="../guide/index.html">
   <span class="docs-nav__title">Project README</span>
@@ -99,9 +100,9 @@
   </ul>
 </section>
         <div class="prose">
-<p>mod_botshield supports two complementary dry-run modes so operators
+<p>mod_botshield supports two complementary dry-run modes so you
 can deploy new rules without affecting production traffic until
-they're confident the matches are correct.</p>
+you're confident the matches are correct.</p>
 <ul>
 <li><strong>Per-rule observe</strong> — pin a single directive into observe mode.
 Useful for staging individual rules.</li>
@@ -153,7 +154,7 @@ setting. Useful before a release or when comparing a new ruleset
 against production traffic without any enforcement risk. Flip back
 to <code>off</code> when you're ready to enforce.</p>
 <p><code>BotShieldShadowMode</code> is tri-state: <code>on</code> / <code>off</code> / unset (inherit).
-Operators usually set it at the main server scope and inherit; per-
+Sites usually set it at the main server scope and inherit; per-
 vhost overrides are valid for partial rollouts.</p>
 <h2 id="coverage">Coverage</h2>
 <p>Both observe signals reach every gating surface:</p>
@@ -285,7 +286,7 @@ prefer Prometheus for production dashboards, log grep for
 forensics.</p>
 <h2 id="where-to-next">Where to next</h2>
 <ul>
-<li>Tier model and scoring: <a href="../operator-model/index.html">operator model</a>.</li>
+<li>Tier model and scoring: <a href="../site-model/index.html">site model</a>.</li>
 <li>Per-family rule semantics: <a href="../policy/index.html">policy</a>.</li>
 <li>Metrics + decision log surface: <a href="../observability/index.html">observability</a>.</li>
 </ul>

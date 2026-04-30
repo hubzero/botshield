@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Policy | mod_botshield</title>
+  <title>Policy | BotShield</title>
   <meta name="description" content="Allow lists, rate limits, block paths, robots.txt, the trigger families, and flag triggers.">
   <link rel="stylesheet" href="../assets/site.css">
 </head>
@@ -17,10 +17,11 @@
           <span class="brand__wordmark-soft">Bot</span><span class="brand__wordmark-strong">Shield</span>
         </span>
       </a>
+      <span class="site-header__beta" aria-label="Beta release">Beta</span>
       <nav class="top-nav" aria-label="Primary">
-        <a class="top-nav__link" href="#">GitHub</a>
+        <a class="top-nav__link" href="https://github.com/hubzero/botshield">GitHub</a>
         <a class="top-nav__link" href="../getting-started/index.html">Docs</a>
-        <a class="top-nav__link" href="../getting-started/index.html#build">Download</a>
+        <a class="top-nav__link" href="https://github.com/hubzero/botshield/releases">Download</a>
       </nav>
     </header>
 
@@ -36,8 +37,8 @@
   <span class="docs-nav__title">Deployment</span>
   <span class="docs-nav__summary">Reverse proxies, slow-client defense, multi-vhost reputation, secret rotation, capacity sizing.</span>
 </a>
-<a class="docs-nav__item" href="../operator-model/index.html">
-  <span class="docs-nav__title">Operator model</span>
+<a class="docs-nav__item" href="../site-model/index.html">
+  <span class="docs-nav__title">Site model</span>
   <span class="docs-nav__summary">Tiers, scoring, cookie-carried reputation, decision log, tuning workflow.</span>
 </a>
 <a class="docs-nav__item is-active" href="index.html">
@@ -58,15 +59,15 @@
 </a>
 <a class="docs-nav__item" href="../directives/index.html">
   <span class="docs-nav__title">Directive reference</span>
-  <span class="docs-nav__summary">Canonical operator-facing reference for all 78 directives, grouped by family.</span>
+  <span class="docs-nav__summary">Canonical reference for all 78 directives, grouped by family.</span>
 </a>
 <a class="docs-nav__item" href="../troubleshooting/index.html">
   <span class="docs-nav__title">Troubleshooting</span>
-  <span class="docs-nav__summary">Common operator-visible issues, diagnostics, and fixes.</span>
+  <span class="docs-nav__summary">Common issues, diagnostics, and fixes.</span>
 </a>
 <a class="docs-nav__item" href="../faq/index.html">
   <span class="docs-nav__title">FAQ</span>
-  <span class="docs-nav__summary">Honest answers to questions operators ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
+  <span class="docs-nav__summary">Honest answers to questions teams ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
 </a>
 <a class="docs-nav__item" href="../guide/index.html">
   <span class="docs-nav__title">Project README</span>
@@ -175,7 +176,7 @@ with reason <code>fake-&lt;name&gt;</code>. Fake-bot detection is one of the
 most reliable signals — bot operators love claiming Googlebot.</li>
 <li><strong>unverified</strong> — UA matches, classifier hit but ranges aren't
 loaded for this name. Logged with reason <code>bot-unverified</code> for
-operator visibility, no score effect.</li>
+visibility, no score effect.</li>
 </ul>
 <h2 id="rate-limits-and-block-paths">Rate limits and block paths</h2>
 <p><code>BotShieldRateLimit</code> caps requests-per-window for a cohort. Hits
@@ -218,7 +219,7 @@ still runs; the escalation is a separate decision applied on top.</p>
 non-trailing <code>*</code> (e.g. <code>/api/*/v2/</code>) emits a NOTICE at config-parse
 time — the v1 matcher would have treated the inner <code>*</code> as a
 literal byte; the current matcher follows RFC 9309's leftmost
-greedy semantics. The NOTICE warns operators that intent may have
+greedy semantics. The NOTICE warns that intent may have
 shifted; existing configs aren't broken, just verified.</p>
 <h2 id="robots-txt-enforcement">Robots.txt enforcement</h2>
 <p><code>BotShieldRobotsTxt</code> plugs in a parsed RFC 9309 robots.txt file as
@@ -239,7 +240,7 @@ hot-reload (mtime change won't be picked up until next restart).</li>
 matcher is on <code>User-agent: *</code> rules:
 <ul>
 <li><code>heuristic</code> (default): wildcard rules apply only when no more
-specific group matches. Closest to operator intent — a <code>*</code>
+specific group matches. Closest to your intent — a <code>*</code>
 block doesn't override a tighter Googlebot allow.</li>
 <li><code>strict</code>: RFC-9309 strict semantics. Wildcard rules participate
 in matching like any other group. May produce surprising
@@ -250,7 +251,7 @@ apply.</li>
 </li>
 </ul>
 <p>Group iteration is exposed at <code>&lt;prefix&gt;/policy-status</code> for
-operator inspection (see <a href="../observability/index.html">observability</a>).</p>
+inspection (see <a href="../observability/index.html">observability</a>).</p>
 <h2 id="triggers-predicate-action-engine">Triggers — predicate-action engine</h2>
 <p>Five trigger families share one config-time action engine and one
 request-time executor. Each family differs only in its predicate;
@@ -387,7 +388,7 @@ BotShieldEnvTrigger curl-hint env=BS_CLI penalty=10 log=cli
 <li><code>env=&lt;name&gt;=&lt;value&gt;</code> — exact value match.</li>
 </ul>
 <p>Narrower than cookie by design — no substring/contains shape and
-no bulk-state analog. Operators who need rich matching set a
+no bulk-state analog. If you need rich matching, set a
 coarse bucket upstream (<code>SetEnvIfExpr</code>, ModSecurity rule, etc.)
 and consume the bucket here. <code>redirect=</code> is not a valid action
 key on env or load triggers.</p>
@@ -457,7 +458,7 @@ is <code>pass</code> / <code>silent</code> / <code>form</code> / <code>captcha</
 </ul>
 <p>The <code>reset</code> keyword is directive-level (not an action verb): a
 line of the form <code>BotShieldFlagTrigger &lt;flag&gt; reset</code> clears every
-prior trigger (compiled-in default + earlier operator declarations)
+prior trigger (compiled-in default + earlier declarations)
 for that flag at post-config time. <code>reset</code> may appear with or
 without a trailing <code>action=...</code>:</p>
 <pre><code class="language-apache"># Wipe defaults, install only one tier-floor rule:
@@ -512,11 +513,11 @@ flag is seeded as paired score + tier_floor rows:</p>
 <p>Trust signals (credits) are score-only by design; no credit ever
 forces tier <em>down</em>. A verified-human flag can't unlock a request
 that already tripped a different tier_floor.</p>
-<p>Operator-supplied <code>BotShieldFlagTrigger</code> directives override the
+<p>Configured <code>BotShieldFlagTrigger</code> directives override the
 defaults for the matching flag bit + action verb pair (later
 declarations win, same as every other trigger family).</p>
 <h3 id="per-apache-scope-triggers-botshieldtrigger">Per-Apache-scope triggers — <code>BotShieldTrigger</code></h3>
-<p>For everything else operators want to do at a specific Apache
+<p>For everything else you want to do at a specific Apache
 scope — flag the IP, add a penalty, return a status, observe in
 shadow — there's a single per-scope directive:</p>
 <pre><code class="language-apache">&lt;Location &quot;/admin/.env&quot;&gt;
@@ -577,7 +578,7 @@ BotShieldSafeguardTTL       900
 through window. The IP's flagged-IP entry is preserved so the
 suspicious behavior is still recorded for downstream signals; only
 the in-line challenge is suppressed.</p>
-<p>Operators staging a fresh deployment with aggressive thresholds
+<p>Sites staging a fresh deployment with aggressive thresholds
 are the most likely to trip this. Watch the
 <code>tier_pass_total</code> counter for an unusual climb under &quot;safeguard&quot;
 reasons in the decision log (safeguard rolls into pass for metric

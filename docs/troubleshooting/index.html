@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Troubleshooting | mod_botshield</title>
-  <meta name="description" content="Common operator-visible issues, diagnostics, and fixes.">
+  <title>Troubleshooting | BotShield</title>
+  <meta name="description" content="Common issues, diagnostics, and fixes.">
   <link rel="stylesheet" href="../assets/site.css">
 </head>
 <body class="site-doc">
@@ -17,10 +17,11 @@
           <span class="brand__wordmark-soft">Bot</span><span class="brand__wordmark-strong">Shield</span>
         </span>
       </a>
+      <span class="site-header__beta" aria-label="Beta release">Beta</span>
       <nav class="top-nav" aria-label="Primary">
-        <a class="top-nav__link" href="#">GitHub</a>
+        <a class="top-nav__link" href="https://github.com/hubzero/botshield">GitHub</a>
         <a class="top-nav__link" href="../getting-started/index.html">Docs</a>
-        <a class="top-nav__link" href="../getting-started/index.html#build">Download</a>
+        <a class="top-nav__link" href="https://github.com/hubzero/botshield/releases">Download</a>
       </nav>
     </header>
 
@@ -36,8 +37,8 @@
   <span class="docs-nav__title">Deployment</span>
   <span class="docs-nav__summary">Reverse proxies, slow-client defense, multi-vhost reputation, secret rotation, capacity sizing.</span>
 </a>
-<a class="docs-nav__item" href="../operator-model/index.html">
-  <span class="docs-nav__title">Operator model</span>
+<a class="docs-nav__item" href="../site-model/index.html">
+  <span class="docs-nav__title">Site model</span>
   <span class="docs-nav__summary">Tiers, scoring, cookie-carried reputation, decision log, tuning workflow.</span>
 </a>
 <a class="docs-nav__item" href="../policy/index.html">
@@ -58,15 +59,15 @@
 </a>
 <a class="docs-nav__item" href="../directives/index.html">
   <span class="docs-nav__title">Directive reference</span>
-  <span class="docs-nav__summary">Canonical operator-facing reference for all 78 directives, grouped by family.</span>
+  <span class="docs-nav__summary">Canonical reference for all 78 directives, grouped by family.</span>
 </a>
 <a class="docs-nav__item is-active" href="index.html">
   <span class="docs-nav__title">Troubleshooting</span>
-  <span class="docs-nav__summary">Common operator-visible issues, diagnostics, and fixes.</span>
+  <span class="docs-nav__summary">Common issues, diagnostics, and fixes.</span>
 </a>
 <a class="docs-nav__item" href="../faq/index.html">
   <span class="docs-nav__title">FAQ</span>
-  <span class="docs-nav__summary">Honest answers to questions operators ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
+  <span class="docs-nav__summary">Honest answers to questions teams ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
 </a>
 <a class="docs-nav__item" href="../guide/index.html">
   <span class="docs-nav__title">Project README</span>
@@ -83,7 +84,7 @@
         <header class="docs-article__header">
           <p class="eyebrow">Documentation</p>
           <h1>Troubleshooting</h1>
-          <p class="docs-article__summary">Common operator-visible issues, diagnostics, and fixes.</p>
+          <p class="docs-article__summary">Common issues, diagnostics, and fixes.</p>
           <p class="docs-article__source">Troubleshooting</p>
         </header>
 <section class="toc">
@@ -104,7 +105,7 @@
   </ul>
 </section>
         <div class="prose">
-<p>This page covers the most common operator-visible issues, the
+<p>This page covers the most common visible issues, the
 diagnostic for each, and the fix or workaround.</p>
 <h2 id="module-fails-to-load">Module fails to load</h2>
 <p><strong>Symptom</strong>: <code>apachectl configtest</code> reports
@@ -159,7 +160,7 @@ contributions.</li>
 <li>Raise thresholds or lower individual heuristic penalties to
 match.</li>
 </ol>
-<p>See <a href="../operator-model/index.html">operator model</a> for the full tuning
+<p>See <a href="../site-model/index.html">site model</a> for the full tuning
 discussion.</p>
 <h2 id="bots-passing-through-unchallenged">Bots passing through unchallenged</h2>
 <p><strong>Symptom</strong>: scrapers / spammers / exploitation attempts visible in
@@ -311,7 +312,7 @@ contribution hook is purely additive.</p>
 <h2 id="where-to-next">Where to next</h2>
 <ul>
 <li>Real-world deployment topology: <a href="../deployment/index.html">deployment</a>.</li>
-<li>Tier model, scoring, decision log: <a href="../operator-model/index.html">operator model</a>.</li>
+<li>Tier model, scoring, decision log: <a href="../site-model/index.html">site model</a>.</li>
 <li>Policy and rule families: <a href="../policy/index.html">policy</a>.</li>
 <li>Captcha + app-bridge integration: <a href="../captcha/index.html">captcha</a>.</li>
 <li>Metrics and dashboards: <a href="../observability/index.html">observability</a>.</li>

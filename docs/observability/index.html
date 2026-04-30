@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Observability | mod_botshield</title>
+  <title>Observability | BotShield</title>
   <meta name="description" content="Decision log, Prometheus metrics, mod_status contribution, and the policy-status admin page.">
   <link rel="stylesheet" href="../assets/site.css">
 </head>
@@ -17,10 +17,11 @@
           <span class="brand__wordmark-soft">Bot</span><span class="brand__wordmark-strong">Shield</span>
         </span>
       </a>
+      <span class="site-header__beta" aria-label="Beta release">Beta</span>
       <nav class="top-nav" aria-label="Primary">
-        <a class="top-nav__link" href="#">GitHub</a>
+        <a class="top-nav__link" href="https://github.com/hubzero/botshield">GitHub</a>
         <a class="top-nav__link" href="../getting-started/index.html">Docs</a>
-        <a class="top-nav__link" href="../getting-started/index.html#build">Download</a>
+        <a class="top-nav__link" href="https://github.com/hubzero/botshield/releases">Download</a>
       </nav>
     </header>
 
@@ -36,8 +37,8 @@
   <span class="docs-nav__title">Deployment</span>
   <span class="docs-nav__summary">Reverse proxies, slow-client defense, multi-vhost reputation, secret rotation, capacity sizing.</span>
 </a>
-<a class="docs-nav__item" href="../operator-model/index.html">
-  <span class="docs-nav__title">Operator model</span>
+<a class="docs-nav__item" href="../site-model/index.html">
+  <span class="docs-nav__title">Site model</span>
   <span class="docs-nav__summary">Tiers, scoring, cookie-carried reputation, decision log, tuning workflow.</span>
 </a>
 <a class="docs-nav__item" href="../policy/index.html">
@@ -58,15 +59,15 @@
 </a>
 <a class="docs-nav__item" href="../directives/index.html">
   <span class="docs-nav__title">Directive reference</span>
-  <span class="docs-nav__summary">Canonical operator-facing reference for all 78 directives, grouped by family.</span>
+  <span class="docs-nav__summary">Canonical reference for all 78 directives, grouped by family.</span>
 </a>
 <a class="docs-nav__item" href="../troubleshooting/index.html">
   <span class="docs-nav__title">Troubleshooting</span>
-  <span class="docs-nav__summary">Common operator-visible issues, diagnostics, and fixes.</span>
+  <span class="docs-nav__summary">Common issues, diagnostics, and fixes.</span>
 </a>
 <a class="docs-nav__item" href="../faq/index.html">
   <span class="docs-nav__title">FAQ</span>
-  <span class="docs-nav__summary">Honest answers to questions operators ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
+  <span class="docs-nav__summary">Honest answers to questions teams ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
 </a>
 <a class="docs-nav__item" href="../guide/index.html">
   <span class="docs-nav__title">Project README</span>
@@ -115,7 +116,7 @@ canonical decision-log vocabulary — there is no parallel taxonomy.</p>
 <code>info</code> level (<code>bs_decision_log</code>); challenge-issuing requests also
 emit an <code>info</code> prose line carrying per-reason penalty values, and
 pass-through decisions emit a <code>debug</code> prose line. The structured
-line is the canonical surface — operators tail at <code>info</code> and parse
+line is the canonical surface — tail at <code>info</code> and parse
 the <code>key=value</code> form; the prose lines are forensic detail.</p>
 <p>The structured line:</p>
 <pre><code>mod_botshield: decision tier=&lt;t&gt; outcome=&lt;o&gt; ip=&lt;i&gt; score=&lt;n&gt;
@@ -170,7 +171,7 @@ commit time by a small awk validator (<code>tests/scripts/decision-log- awk-vali
 <p><code>tier=safeguard</code> is emitted for challenge-loop suppression
 (pass-through with the flagged-IP entry preserved). For metrics it
 bins into <code>tier_pass_total</code> since it's functionally pass-through;
-operators wanting to dashboard the safeguard rate scrape the
+to dashboard the safeguard rate, scrape the
 decision log for <code>reason=&quot;challenge-safeguard&quot;</code>.</p>
 <h3 id="reason-name-vocabulary">Reason-name vocabulary</h3>
 <p>The <code>reason</code> field is a comma-joined list of reason tokens captured
@@ -248,7 +249,7 @@ which signals contributed and how much.</p>
 exposition format.</p>
 <h3 id="access-control">Access control</h3>
 <p>The endpoint is unauthenticated. Wrap it in a <code>&lt;Location&gt;</code> with
-your own ACL — operators usually scrape from a network the public
+your own ACL — usually scrape from a network the public
 internet can't reach:</p>
 <pre><code class="language-apache">&lt;Location /botshield/metrics&gt;
     Require ip 10.0.0.0/8
@@ -505,7 +506,7 @@ robots.txt groups:
   user-agent=*          rules=8   crawl_delay=10
 </code></pre>
 <p>Wrap the path in a <code>&lt;Location&gt;</code> with your own ACL — the page
-reveals operator config (already on disk in <code>/etc/apache2/</code>) but no
+reveals site config (already on disk in <code>/etc/apache2/</code>) but no
 cookie secrets or client IPs.</p>
 <h2 id="capacity-headroom-watchdog">Capacity headroom watchdog</h2>
 <p>The headroom watchdog (registered with <code>mod_watchdog</code>) samples
@@ -515,7 +516,7 @@ crosses 50% it logs a NOTICE; at 70% a WARN; at 90% an ERROR.</p>
 mod_botshield: capacity headroom: bloom_a 73% filled (rotation
                  watcher will trigger at 50% past midpoint)
 </code></pre>
-<p>Operators usually use these as the cue to raise capacity directives
+<p>Use these as the cue to raise capacity directives
 and reload — see <a href="../deployment/index.html">deployment</a> for sizing guidance.</p>
 <h2 id="debug-mode">Debug mode</h2>
 <p><code>BotShieldDebug on</code> returns <code>403 &quot;Hello World&quot;</code> for every request
@@ -536,7 +537,7 @@ slot probes). Disable in production — the verbose lines are
 expensive at scale.</p>
 <h2 id="where-to-next">Where to next</h2>
 <ul>
-<li>Tier model and scoring: <a href="../operator-model/index.html">operator model</a>.</li>
+<li>Tier model and scoring: <a href="../site-model/index.html">site model</a>.</li>
 <li>Policy families: <a href="../policy/index.html">policy</a>.</li>
 <li>Captcha and app-bridge: <a href="../captcha/index.html">captcha</a>.</li>
 <li>Safe rule rollout: <a href="../staging/index.html">staging</a>.</li>

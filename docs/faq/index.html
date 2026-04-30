@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>FAQ | mod_botshield</title>
-  <meta name="description" content="Honest answers to questions operators ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.">
+  <title>FAQ | BotShield</title>
+  <meta name="description" content="Honest answers to questions teams ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.">
   <link rel="stylesheet" href="../assets/site.css">
 </head>
 <body class="site-doc">
@@ -17,10 +17,11 @@
           <span class="brand__wordmark-soft">Bot</span><span class="brand__wordmark-strong">Shield</span>
         </span>
       </a>
+      <span class="site-header__beta" aria-label="Beta release">Beta</span>
       <nav class="top-nav" aria-label="Primary">
-        <a class="top-nav__link" href="#">GitHub</a>
+        <a class="top-nav__link" href="https://github.com/hubzero/botshield">GitHub</a>
         <a class="top-nav__link" href="../getting-started/index.html">Docs</a>
-        <a class="top-nav__link" href="../getting-started/index.html#build">Download</a>
+        <a class="top-nav__link" href="https://github.com/hubzero/botshield/releases">Download</a>
       </nav>
     </header>
 
@@ -36,8 +37,8 @@
   <span class="docs-nav__title">Deployment</span>
   <span class="docs-nav__summary">Reverse proxies, slow-client defense, multi-vhost reputation, secret rotation, capacity sizing.</span>
 </a>
-<a class="docs-nav__item" href="../operator-model/index.html">
-  <span class="docs-nav__title">Operator model</span>
+<a class="docs-nav__item" href="../site-model/index.html">
+  <span class="docs-nav__title">Site model</span>
   <span class="docs-nav__summary">Tiers, scoring, cookie-carried reputation, decision log, tuning workflow.</span>
 </a>
 <a class="docs-nav__item" href="../policy/index.html">
@@ -58,15 +59,15 @@
 </a>
 <a class="docs-nav__item" href="../directives/index.html">
   <span class="docs-nav__title">Directive reference</span>
-  <span class="docs-nav__summary">Canonical operator-facing reference for all 78 directives, grouped by family.</span>
+  <span class="docs-nav__summary">Canonical reference for all 78 directives, grouped by family.</span>
 </a>
 <a class="docs-nav__item" href="../troubleshooting/index.html">
   <span class="docs-nav__title">Troubleshooting</span>
-  <span class="docs-nav__summary">Common operator-visible issues, diagnostics, and fixes.</span>
+  <span class="docs-nav__summary">Common issues, diagnostics, and fixes.</span>
 </a>
 <a class="docs-nav__item is-active" href="index.html">
   <span class="docs-nav__title">FAQ</span>
-  <span class="docs-nav__summary">Honest answers to questions operators ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
+  <span class="docs-nav__summary">Honest answers to questions teams ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
 </a>
 <a class="docs-nav__item" href="../guide/index.html">
   <span class="docs-nav__title">Project README</span>
@@ -83,7 +84,7 @@
         <header class="docs-article__header">
           <p class="eyebrow">Documentation</p>
           <h1>FAQ</h1>
-          <p class="docs-article__summary">Honest answers to questions operators ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</p>
+          <p class="docs-article__summary">Honest answers to questions teams ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</p>
           <p class="docs-article__source">FAQ</p>
         </header>
 <section class="toc">
@@ -128,10 +129,10 @@
 <h2 id="strategy-and-positioning">Strategy and positioning</h2>
 <h3 id="does-this-just-block-all-bots">Does this just block all bots?</h3>
 <p>No, and that's deliberate. The goal isn't bot elimination — it's
-<em>operator control over the terms of access</em>. Search-engine
+<em>site control over the terms of access</em>. Search-engine
 crawlers, LLM training bots, archival crawlers, monitoring
-agents, partner integrations — many of these are bots an operator
-<em>wants</em> to reach the content, but on conditions the operator sets:
+agents, partner integrations — many of these are bots a site
+<em>wants</em> to reach the content, but on conditions the site sets:
 when, how often, which paths, with what rate cap, with what
 attribution. mod_botshield's primitives are built around setting
 those terms:</p>
@@ -140,7 +141,7 @@ those terms:</p>
 configured CIDR ranges are loaded, verified crawlers (UA-and-IP
 match against the published ranges) bypass the score ladder
 entirely. The built-in seed list covers Googlebot, Bingbot,
-and Applebot; operators add others via <code>BotShieldAllowBot</code> and
+and Applebot; you add others via <code>BotShieldAllowBot</code> and
 refresh ranges out of band with <code>tools/refresh-bot-ranges.sh</code>.</li>
 <li><strong>Robots.txt enforcement.</strong> A bot that ignores your <code>Disallow</code>
 rules gets enforced at the policy layer — robots.txt is no
@@ -159,7 +160,7 @@ client's score, not a binary block.</li>
 <p>A site that wanted to block every bot could do that with much
 less than mod_botshield offers. The reason this module exists is
 that &quot;block everything that isn't a real human browser&quot; is the
-<em>wrong</em> answer for most operators — they want search-engine
+<em>wrong</em> answer for most sites — they want search-engine
 indexing, want LLM crawlers to cite them under controlled terms,
 want monitoring to reach health endpoints, want partner bots to
 hit their API. mod_botshield is the policy surface for saying
@@ -182,7 +183,7 @@ headless browsers) the moment they appear anywhere.</li>
 application-layer attacks orders of magnitude bigger than a
 single Apache instance can survive.</li>
 <li><strong>Managed challenges and turnkey product.</strong> No tuning, no
-capacity sizing, no operator log-grepping. Pay the bill, get a
+capacity sizing, no log-grepping. Pay the bill, get a
 policy.</li>
 </ul>
 <p>What mod_botshield gives you that Cloudflare doesn't:</p>
@@ -192,7 +193,7 @@ leaves your trust boundary.</li>
 <li><strong>No vendor lock-in or recurring cost.</strong> Bot mitigation that
 goes beyond simple known-bad-IP blocking is typically a paid
 tier with managed CDNs.</li>
-<li><strong>Operator control.</strong> You write the rules in Apache config you
+<li><strong>Direct control.</strong> You write the rules in Apache config you
 already understand; you don't have to learn a separate dashboard
 or wait for a vendor to add a feature.</li>
 </ul>
@@ -394,7 +395,7 @@ isn't the bottleneck.</p>
 of clicked PoW; captcha for as long as the provider takes). That's
 the entire point: <em>make scraping expensive without making real use
 expensive</em>. The threshold tuning workflow in
-<a href="../staging/index.html">staging</a> is the operator handle on where
+<a href="../staging/index.html">staging</a> is your handle on where
 that line falls.</p>
 <h3 id="does-it-work-with-php-fastcgi-mod-php-mod-proxy-nginx-upstream">Does it work with PHP / FastCGI / mod_php / mod_proxy / nginx upstream?</h3>
 <p>Yes to all of those. mod_botshield runs as an Apache
@@ -426,7 +427,7 @@ See <a href="../deployment/index.html">deployment</a>.</li>
 </ul>
 <h3 id="how-much-memory-does-it-use">How much memory does it use?</h3>
 <p>Default: 16 MiB SHM segment shared across all workers, growing as
-operators raise capacity directives. Per-process overhead is
+sites raise capacity directives. Per-process overhead is
 negligible (the <code>.so</code> is a few hundred KB; no per-request heap
 allocation outside of Apache's <code>r-&gt;pool</code> which is freed at request
 end).</p>
@@ -435,7 +436,7 @@ sizing is documented in <a href="../deployment/index.html#capacity-sizing">deplo
 <h2 id="privacy-and-compliance">Privacy and compliance</h2>
 <h3 id="does-it-phone-home-send-data-anywhere">Does it phone home? Send data anywhere?</h3>
 <p>No. The module makes outbound network calls in two
-operator-controlled categories:</p>
+configured categories:</p>
 <ol>
 <li>
 <p><strong>Captcha siteverify.</strong> When <code>BotShieldCaptchaProvider</code> is
@@ -444,7 +445,7 @@ attempt to the configured provider's siteverify URL with the
 client's captcha token (and the client IP as the <code>remoteip</code>
 field). This fires from three paths: the <code>/captcha-verify</code>
 endpoint, the silent-tier embedded-verify endpoint when an
-operator pairs silent with a captcha provider, and the
+site pairs silent with a captcha provider, and the
 form-captcha fixup. No siteverify call ever happens without
 a captcha provider explicitly configured on the scope.</p>
 <p>The captcha widget itself loads provider JavaScript on the
@@ -457,8 +458,8 @@ that lets the provider see the client's IP.</p>
 <p><strong>Bot-range refresh script.</strong> <code>tools/refresh-bot-ranges.sh</code>
 fetches published JSON from search-engine providers
 (Googlebot, Bingbot, etc.) and rewrites the CIDR files in
-<code>/var/lib/botshield/bots/</code>. This runs only when the operator
-invokes it (cron or manual); the module itself never makes
+<code>/var/lib/botshield/bots/</code>. This runs only when you
+invoke it (cron or manual); the module itself never makes
 these calls at runtime.</p>
 </li>
 </ol>
@@ -494,7 +495,7 @@ data-protection notes below.</p>
 generally classified as personal data under GDPR. Considerations:</p>
 <ul>
 <li><strong>Lawful basis.</strong> Bot mitigation is generally a &quot;legitimate
-interest&quot; — preventing scraping of operator data. Document the
+interest&quot; — preventing scraping of site data. Document the
 basis in your privacy notice.</li>
 <li><strong>Retention.</strong> Flagged-IP entries expire after the configured
 TTL (default 1 hour for honeypot hits). The Bloom filter
@@ -530,10 +531,10 @@ blocks of addresses sharing reputation).</p>
 provider responds, the verification path treats the request as
 passing — same outcome it would get without the provider. A
 WARNING-level log line carries the literal string <code>failing open</code>
-so operators can grep / alert on it. The Prometheus metrics
+so you can grep / alert on it. The Prometheus metrics
 count these as <code>outcome=failopen</code>.</p>
 <p>The reasoning: a third-party provider outage shouldn't black-hole
-legitimate traffic. Operators preferring fail-closed semantics
+legitimate traffic. Sites preferring fail-closed semantics
 can wrap the provider in a circuit breaker (e.g. require captcha
 tier through a different path that doesn't fail-open) but that
 isn't the default.</p>
@@ -543,9 +544,9 @@ isn't the default.</p>
 <li>Periodic state-file snapshots stop. The graceful-shutdown save
 still runs.</li>
 <li>The capacity headroom watchdog stops emitting NOTICE/WARN
-lines. Operators can read the same data from the on-demand
+lines. You can read the same data from the on-demand
 Prometheus gauges (<code>botshield_shm_flagged_used</code> etc.).</li>
-<li>The robots.txt mtime-poller stops. Operators must reload Apache
+<li>The robots.txt mtime-poller stops. You must reload Apache
 to pick up robots.txt changes.</li>
 <li>The load sampler stops; load triggers won't fire.</li>
 </ul>
@@ -629,7 +630,7 @@ permanent denial better than mod_botshield does.</p>
 <h2 id="where-to-next">Where to next</h2>
 <ul>
 <li>Install + minimal config: <a href="../getting-started/index.html">getting-started</a>.</li>
-<li>Tier model and scoring: <a href="../operator-model/index.html">operator-model</a>.</li>
+<li>Tier model and scoring: <a href="../site-model/index.html">site model</a>.</li>
 <li>Allow lists, triggers, robots: <a href="../policy/index.html">policy</a>.</li>
 <li>Captcha + app-bridge: <a href="../captcha/index.html">captcha</a>.</li>
 <li>Common operational issues: <a href="../troubleshooting/index.html">troubleshooting</a>.</li>

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Project README | mod_botshield</title>
+  <title>Project README | BotShield</title>
   <meta name="description" content="Repository README — project overview, build instructions, and dev configuration.">
   <link rel="stylesheet" href="../assets/site.css">
 </head>
@@ -17,10 +17,11 @@
           <span class="brand__wordmark-soft">Bot</span><span class="brand__wordmark-strong">Shield</span>
         </span>
       </a>
+      <span class="site-header__beta" aria-label="Beta release">Beta</span>
       <nav class="top-nav" aria-label="Primary">
-        <a class="top-nav__link" href="#">GitHub</a>
+        <a class="top-nav__link" href="https://github.com/hubzero/botshield">GitHub</a>
         <a class="top-nav__link" href="../getting-started/index.html">Docs</a>
-        <a class="top-nav__link" href="../getting-started/index.html#build">Download</a>
+        <a class="top-nav__link" href="https://github.com/hubzero/botshield/releases">Download</a>
       </nav>
     </header>
 
@@ -36,8 +37,8 @@
   <span class="docs-nav__title">Deployment</span>
   <span class="docs-nav__summary">Reverse proxies, slow-client defense, multi-vhost reputation, secret rotation, capacity sizing.</span>
 </a>
-<a class="docs-nav__item" href="../operator-model/index.html">
-  <span class="docs-nav__title">Operator model</span>
+<a class="docs-nav__item" href="../site-model/index.html">
+  <span class="docs-nav__title">Site model</span>
   <span class="docs-nav__summary">Tiers, scoring, cookie-carried reputation, decision log, tuning workflow.</span>
 </a>
 <a class="docs-nav__item" href="../policy/index.html">
@@ -58,15 +59,15 @@
 </a>
 <a class="docs-nav__item" href="../directives/index.html">
   <span class="docs-nav__title">Directive reference</span>
-  <span class="docs-nav__summary">Canonical operator-facing reference for all 78 directives, grouped by family.</span>
+  <span class="docs-nav__summary">Canonical reference for all 78 directives, grouped by family.</span>
 </a>
 <a class="docs-nav__item" href="../troubleshooting/index.html">
   <span class="docs-nav__title">Troubleshooting</span>
-  <span class="docs-nav__summary">Common operator-visible issues, diagnostics, and fixes.</span>
+  <span class="docs-nav__summary">Common issues, diagnostics, and fixes.</span>
 </a>
 <a class="docs-nav__item" href="../faq/index.html">
   <span class="docs-nav__title">FAQ</span>
-  <span class="docs-nav__summary">Honest answers to questions operators ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
+  <span class="docs-nav__summary">Honest answers to questions teams ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
 </a>
 <a class="docs-nav__item is-active" href="index.html">
   <span class="docs-nav__title">Project README</span>
@@ -121,7 +122,7 @@ whether to pass, challenge, slow down, or block before application
 code has to absorb the traffic.</p>
 <p><strong>Status: beta.</strong> Stable shape, exercising in dev; not yet a production
 deployment. Architecture, threat model, and per-extension design notes
-live in <a href="DESIGN.md">DESIGN.md</a>. Operator-facing handbook is rendered to
+live in <a href="DESIGN.md">DESIGN.md</a>. Site handbook is rendered to
 GitHub Pages from <code>docs-src/</code>; see the <a href="#documentation">documentation index</a>
 below.</p>
 <h2 id="what-s-shipped">What's shipped</h2>
@@ -179,7 +180,7 @@ deleting the <code>.so</code>.</p>
 <p>Generate the secret with <code>openssl rand -hex 32 &gt; /etc/botshield/secret; chmod 600 /etc/botshield/secret</code>. Full setup walkthrough in
 <a href="docs-src/getting-started.md"><code>docs-src/getting-started.md</code></a>.</p>
 <h2 id="documentation">Documentation</h2>
-<p>Operator handbook (rendered to
+<p>Site handbook (rendered to
 <a href="https://hubzero.github.io/botshield/">hubzero.github.io/botshield</a>
 from these sources):</p>
 <table>
@@ -195,8 +196,8 @@ from these sources):</p>
 <td><a href="docs-src/getting-started.md"><code>docs-src/getting-started.md</code></a></td>
 </tr>
 <tr>
-<td>Operator model — scoring, tiers, cookie reputation, multi-vhost</td>
-<td><a href="docs-src/operator-model.md"><code>docs-src/operator-model.md</code></a></td>
+<td>Site model — scoring, tiers, cookie reputation, multi-vhost</td>
+<td><a href="docs-src/site-model.md"><code>docs-src/site-model.md</code></a></td>
 </tr>
 <tr>
 <td>Directives reference</td>
