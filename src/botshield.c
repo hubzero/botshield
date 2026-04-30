@@ -55,7 +55,6 @@
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
 #include <openssl/kdf.h>
-#include <openssl/params.h>
 #include <openssl/rand.h>
 
 #include <curl/curl.h>
