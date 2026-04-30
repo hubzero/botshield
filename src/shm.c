@@ -33,6 +33,8 @@
 #include <unistd.h>
 #include <errno.h>
 
+#include <apr_version.h>
+
 #include <apr_atomic.h>
 #include <apr_strings.h>
 #include <apr_time.h>
@@ -958,17 +960,23 @@ static void bs_bloom_indices(const unsigned char ip[16],
 void bs_bloom_rotate_if_due(apr_int64_t now_sec)
 {
     if (!bs_shm.bloom_bufs[0]) return;
-    apr_int64_t due =
-        (apr_int64_t)apr_atomic_read64(
-            (apr_uint64_t *)&bs_shm.header->bloom_next_rotate);
+    /* APR's 64-bit atomic helpers (apr_atomic_read64 / apr_atomic_cas64)
+     * are APR 1.7+. On 1.6 (RHEL 8 vintage), use GCC __atomic_*
+     * builtins directly — the rest of this file already does so for
+     * the slot-version protocol, and APR's wrappers are themselves
+     * thin shims over the same primitives. */
+    apr_int64_t due = __atomic_load_n(
+        &bs_shm.header->bloom_next_rotate, __ATOMIC_RELAXED);
     if (now_sec < due) return;
 
     apr_int64_t next = now_sec +
         (apr_int64_t)bs_shm.header->bloom_window_secs / 2;
-    apr_uint64_t prev = apr_atomic_cas64(
-        (apr_uint64_t *)&bs_shm.header->bloom_next_rotate,
-        (apr_uint64_t)next, (apr_uint64_t)due);
-    if ((apr_int64_t)prev != due) return;   /* another worker rotated */
+    apr_int64_t expected = due;
+    if (!__atomic_compare_exchange_n(
+            &bs_shm.header->bloom_next_rotate, &expected, next,
+            0 /* strong */, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+        return;   /* another worker rotated */
+    }
 
     apr_uint32_t old_active = apr_atomic_read32(&bs_shm.header->bloom_active);
     apr_uint32_t new_active = old_active ^ 1U;
@@ -1299,8 +1307,27 @@ apr_status_t bs_state_save(apr_pool_t *p, server_rec *s,
      * followed by short stores; 2s is generous and short enough to
      * fail cleanly if something's wedged. */
     if (rt->mutex) {
+#if APR_MAJOR_VERSION > 1 || \
+    (APR_MAJOR_VERSION == 1 && APR_MINOR_VERSION >= 7)
         apr_status_t lr = apr_global_mutex_timedlock(
             rt->mutex, apr_time_from_sec(2));
+#else
+        /* APR < 1.7: synthesize timedlock with try/sleep until the
+         * deadline. Same 2s ceiling, same fail-clean behavior — just
+         * 20ms-granularity polling instead of a kernel-level wait. */
+        apr_status_t lr;
+        apr_time_t deadline = apr_time_now() + apr_time_from_sec(2);
+        for (;;) {
+            lr = apr_global_mutex_trylock(rt->mutex);
+            if (lr == APR_SUCCESS) break;
+            if (!APR_STATUS_IS_EBUSY(lr)) break;
+            if (apr_time_now() >= deadline) {
+                lr = APR_TIMEUP;
+                break;
+            }
+            apr_sleep(apr_time_from_msec(20));
+        }
+#endif
         if (lr != APR_SUCCESS) {
             ap_log_error(APLOG_MARK, APLOG_WARNING, lr, s,
                 "mod_botshield: state save: could not lock mutex "
