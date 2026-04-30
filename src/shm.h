@@ -364,7 +364,7 @@ typedef struct {
     /* E2.1 — enforcement counters. */
     apr_uint64_t rate_limit_exceeded_total;
     apr_uint64_t block_path_hit_total;
-    /* E12 — shadow / observe-mode counters. */
+    /* E12 — log-only / observe-mode counters. */
     apr_uint64_t rate_limit_observed_total;
     apr_uint64_t block_path_observed_total;
     apr_uint64_t trigger_observed_total;

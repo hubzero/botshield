@@ -290,7 +290,7 @@ covered in [captcha](../captcha/index.html).
 
 Feedback runs on the response path but its side effect is
 future-request state (the flagged-IP write). Both global
-`BotShieldShadowMode` and per-trigger `mode=observe` apply —
+`BotShieldLogOnly` and per-trigger `mode=observe` apply —
 either gates the filter into logging `feedback-trigger:<event>:
 observe` and skipping the SHM mutation. See
 [staging](../staging/index.html).
@@ -390,7 +390,7 @@ declarations win, same as every other trigger family).
 
 For everything else you want to do at a specific Apache
 scope — flag the IP, add a penalty, return a status, observe in
-shadow — there's a single per-scope directive:
+log-only mode — there's a single per-scope directive:
 
 ```apache
 <Location "/admin/.env">

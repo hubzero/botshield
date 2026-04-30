@@ -255,18 +255,18 @@ int bs_form_captcha_fixup(request_rec *r)
         return HTTP_BAD_REQUEST;
     }
 
-    /* E12 — shadow / observe mode for E18. If global BotShieldShadowMode
+    /* E12 — log-only / observe mode for E18. If global BotShieldLogOnly
      * is on, skip siteverify + cookie-mint, log a :observe reason, and
      * pass the request through. The body is still read (we already did
      * it — needed for the replay filter so the app handler sees its
      * original POST). Transport-level errors (415/413/400/503) above
-     * this point intentionally still fire even under shadow mode —
+     * this point intentionally still fire even under log-only mode —
      * those represent misconfiguration or genuinely-malformed requests,
      * not policy decisions an operator is staging. */
     {
         bs_server_cfg *scfg_sh = ap_get_module_config(
             r->server->module_config, &botshield_module);
-        if (scfg_sh && scfg_sh->shadow_mode == 1) {
+        if (scfg_sh && scfg_sh->log_only == 1) {
             bs_form_replay_ctx *ctx = apr_pcalloc(r->pool, sizeof(*ctx));
             ctx->body   = body;
             ctx->len    = body_len;
@@ -285,7 +285,7 @@ int bs_form_captcha_fixup(request_rec *r)
             apr_table_setn(r->headers_in, "Content-Length",
                 apr_psprintf(r->pool, "%" APR_SIZE_T_FMT, body_len));
             ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
-                "mod_botshield: form-captcha:observe (shadow mode; "
+                "mod_botshield: form-captcha:observe (log-only mode; "
                 "body replayed, no siteverify, no cookie mint)");
             return DECLINED;
         }
@@ -435,7 +435,7 @@ int bs_form_captcha_fixup(request_rec *r)
     ctx->offset = 0;
     ap_add_input_filter_handle(bs_form_replay_filter_handle,
                                ctx, r, r->connection);
-    /* See shadow-mode branch above for the rationale: ap_http_filter
+    /* See log-only branch above for the rationale: ap_http_filter
      * de-chunked the body for us, so r->headers_in's
      * Transfer-Encoding: chunked is now a lie. Strip it and set
      * Content-Length to body_len so downstream mod_proxy / mod_cgi

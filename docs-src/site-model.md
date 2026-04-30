@@ -195,7 +195,7 @@ which signals contributed and how much.
 
 ## Tuning workflow
 
-1. Start with `BotShieldShadowMode on` to dry-run all rules without
+1. Start with `BotShieldLogOnly on` to dry-run all rules without
    enforcement (see [staging](../staging/index.html)).
 2. Watch the decision log for several days under real traffic.
 3. Inspect the distribution of `effective` and per-reason
@@ -210,7 +210,7 @@ which signals contributed and how much.
      penalty.
    - Bots slipping through → lower thresholds, raise scraper-UA
      penalty, add `BotShieldPathTrigger` rules for known-bad paths.
-5. Flip `BotShieldShadowMode off` when satisfied.
+5. Flip `BotShieldLogOnly off` when satisfied.
 6. Subsequent rule additions can be staged with per-rule
    `mode=observe` without affecting the rest.
 

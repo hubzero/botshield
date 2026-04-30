@@ -122,7 +122,7 @@ def test_app_feedback_penalty_flag_applies_to_next_request(
 def test_app_feedback_observed_under_shadow_mode(
     config_override, log_slice,
 ):
-    """E12 — `BotShieldShadowMode on` flips every trigger match into
+    """E12 — `BotShieldLogOnly on` flips every trigger match into
     observe semantics. The feedback path lives on the response-side
     E5 filter (not the shared bs_apply_trigger_action executor), so
     bridge.c honors shadow_mode inline. Without that gate, a signed
@@ -138,7 +138,7 @@ def test_app_feedback_observed_under_shadow_mode(
     with config_override(
         r"BotShieldAllow\s+on",
         'BotShieldAllow on\n'
-        '    BotShieldShadowMode on\n'
+        '    BotShieldLogOnly on\n'
         '    BotShieldAppFeedback on\n'
         f'    BotShieldAppIntegrationSecretFile {SECRET_PATH}\n'
         '    BotShieldFeedbackTrigger scanner-hit '
@@ -173,7 +173,7 @@ def test_app_feedback_per_trigger_observe_mode(
 ):
     """Per-trigger `mode=observe` on a BotShieldFeedbackTrigger
     suppresses the flagged-IP write the same way global
-    BotShieldShadowMode does. Even though feedback runs on the
+    BotShieldLogOnly does. Even though feedback runs on the
     response path, the side effect is future-request state — so
     observe-mode gates that mutation. bridge.c honors
     `ft->action.mode == BS_TMODE_OBSERVE` next to the global

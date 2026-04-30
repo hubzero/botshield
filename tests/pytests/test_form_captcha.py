@@ -241,7 +241,7 @@ def test_form_widget_endpoint_serves_provider_dispatch():
 
 
 def test_form_captcha_honors_global_shadow_mode(config_override):
-    """E12 review fix — `BotShieldShadowMode on` (server-scope) must
+    """E12 review fix — `BotShieldLogOnly on` (server-scope) must
     suppress E18's policy-level 403s. A POST with a missing or bad
     captcha token under shadow mode should pass through (DECLINED;
     Apache static handler returns 405 because the test path doesn't
@@ -250,7 +250,7 @@ def test_form_captcha_honors_global_shadow_mode(config_override):
     with config_override(
         r"BotShieldAllow\s+on",
         'BotShieldAllow on\n'
-        '    BotShieldShadowMode on\n'
+        '    BotShieldLogOnly on\n'
         '    <Location /embedded-test.html>\n'
         '        BotShieldCaptchaProvider turnstile\n'
         '        BotShieldCaptchaSiteKey 1x00000000000000000000AA\n'

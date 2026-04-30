@@ -580,7 +580,7 @@ int bs_metrics_handler(request_rec *r)
 
     bs_m_emit_counter(r, "rate_limit_observed_total",
         "Rate-limit over-budget events that ran in observe mode "
-        "(per-rule mode=observe or BotShieldShadowMode on); rule "
+        "(per-rule mode=observe or BotShieldLogOnly on); rule "
         "would have returned 429 but didn't.",
         bs_mload(&m->rate_limit_observed_total));
     bs_m_emit_counter(r, "block_path_observed_total",

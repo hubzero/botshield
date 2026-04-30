@@ -72,7 +72,7 @@ takes the shape `<family>:<name>` so the source family is visible:
 | `flag-trigger:<flag>` | flag-trigger score action |
 | `flag-tier-floor:<tier>` | flag-trigger tier-floor action |
 | `path-trigger:<name>`, `cookie-trigger:<name>`, `env-trigger:<name>`, `load-trigger:<name>`, `feedback-trigger:<event>` | trigger families |
-| `<reason>:observe` | Any of the above with `mode=observe` or under `BotShieldShadowMode on` (see [staging](../staging/index.html)) |
+| `<reason>:observe` | Any of the above with `mode=observe` or under `BotShieldLogOnly on` (see [staging](../staging/index.html)) |
 | `would-flag-trigger:<flag>:observe`, `would-block:<name>`, `would-rate-limit:<name>` | Observe-mode "would have done" reasons |
 | `challenge-safeguard` | safeguard pass-through |
 

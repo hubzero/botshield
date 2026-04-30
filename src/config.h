@@ -100,7 +100,7 @@ const char *bs_set_bloom_ips          (cmd_parms *cmd, void *dconf, const char *
 const char *bs_set_bloom_window       (cmd_parms *cmd, void *dconf, const char *arg);
 const char *bs_set_ipv6_prefix        (cmd_parms *cmd, void *dconf, const char *arg);
 const char *bs_set_share_scope        (cmd_parms *cmd, void *dconf, const char *arg);
-const char *bs_set_shadow_mode        (cmd_parms *cmd, void *dconf, int flag);
+const char *bs_set_log_only           (cmd_parms *cmd, void *dconf, int flag);
 
 /* State-save */
 const char *bs_set_state_file         (cmd_parms *cmd, void *dconf, const char *arg);

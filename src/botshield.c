@@ -532,19 +532,24 @@ static const command_rec bs_cmds[] = {
                  "(e.g., dev+prod for one logical app, or api+www "
                  "subdomains). Strings up to 128 chars; hashed to a "
                  "32-bit ns_id and stored in each SHM slot."),
-    /* E12 — shadow / dry-run enforcement. */
-    AP_INIT_FLAG("BotShieldShadowMode",
-                 bs_set_shadow_mode, NULL, RSRC_CONF,
-                 "Master switch for dry-run enforcement. When on, "
-                 "all trigger / rate-limit / block-path rules log "
-                 "matches with a :observe suffix instead of taking "
-                 "their action — useful for staging a whole policy "
-                 "revision before flipping enforcement on. Default "
+    /* E12 — log-only / dry-run enforcement. */
+    AP_INIT_FLAG("BotShieldLogOnly",
+                 bs_set_log_only, NULL, RSRC_CONF,
+                 "Master switch for dry-run enforcement. When on, all "
+                 "client-visible enforcement is suppressed and logged "
+                 "instead: trigger / rate-limit / block-path rules log "
+                 "matches with a :observe suffix, AND tier decisions "
+                 "(silent / hard / captcha) emit a 'would-challenge' "
+                 "decision log line and decline rather than serving an "
+                 "interstitial. Useful for staging a whole policy "
+                 "revision — including bare 'BotShieldEnabled On' on a "
+                 "fresh vhost — and watching what the module would do "
+                 "before any real client sees a challenge. Default "
                  "off; per-rule mode=observe is the finer-grained "
                  "alternative for staging a single rule. Typical "
-                 "workflow: add new rules with mode=observe, watch "
-                 "the decision log, flip to enforce when matches "
-                 "look right."),
+                 "workflow: turn on at vhost scope, raise LogLevel "
+                 "(e.g. 'LogLevel botshield:info'), watch the decision "
+                 "log, flip off when matches look right."),
     /* Flag-driven trigger family. */
     AP_INIT_TAKE_ARGV("BotShieldFlagTrigger",
                  bs_set_flag_trigger, NULL, RSRC_CONF,
@@ -1182,6 +1187,23 @@ static int bs_handler(request_rec *r)
         }
         bs_decision_log(r, "pass", "declined", cookie_status,
                         "-", "-",
+                        bs_decision_reason_names(r->pool, score),
+                        effective);
+        return DECLINED;
+    }
+
+    /* E12 — global log-only / dry-run mode. Log what the tier
+     * decision would have produced and DECLINE instead of issuing
+     * a challenge. Skips Bloom / safeguard / IP-flag side effects so
+     * the dry-run is purely observational; the operator gets a
+     * per-request decision log without any client seeing an
+     * interstitial or failed challenge. The trigger / rate-limit
+     * machinery has its own observe paths (honored elsewhere); this
+     * branch is the tier-dispatch counterpart. */
+    if (scfg_h && scfg_h->log_only == 1) {
+        bs_decision_log(r, bs_tier_name(tier), "would-challenge",
+                        cookie_status, "-",
+                        cfg->algorithm ? cfg->algorithm->name : "-",
                         bs_decision_reason_names(r->pool, score),
                         effective);
         return DECLINED;

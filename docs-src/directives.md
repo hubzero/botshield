@@ -371,7 +371,7 @@ Vhosts with the same token share one reputation namespace. See
 
 | Directive | Syntax | Default |
 |---|---|---|
-| `BotShieldShadowMode` | `on\|off` | unset (off) |
+| `BotShieldLogOnly` | `on\|off` | unset (off) |
 
 Tri-state: unset means "inherit from outer scope or off if no
 outer scope". When on, every gating decision flips to observe-mode

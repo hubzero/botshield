@@ -186,7 +186,7 @@ sudo make disable && sudo systemctl reload apache2
 `make disable` flips `a2dismod botshield` so Apache no longer loads
 the `.so`. Any directives in your vhost configs become unrecognized
 on the next reload, so this is a "stop everything" switch — for
-gradual rollback prefer `BotShieldShadowMode on` (see
+gradual rollback prefer `BotShieldLogOnly on` (see
 [staging](../staging/index.html)).
 
 ## Where to next

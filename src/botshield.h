@@ -283,8 +283,8 @@ typedef struct bs_server_cfg {
     int                 load_normal_fall;
     bs_load_state       load_external_cached;
     apr_time_t          load_external_mtime;
-    /* E12 — global shadow mode. -1 unset (inherit), 0 off, 1 on. */
-    int                 shadow_mode;
+    /* E12 — global log-only mode. -1 unset (inherit), 0 off, 1 on. */
+    int                 log_only;
     /* E13 — reputation namespace for SHM-backed state. */
     apr_uint32_t        ns_id;            /* effective; resolved post_config */
     const char         *share_scope_token; /* explicit override; NULL = default */

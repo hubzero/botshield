@@ -339,17 +339,17 @@ int bs_check_policy(request_rec *r)
      * no point charging it a token from a rate bucket it's also in.
      * Ordered-array iteration — first match wins; declaration order
      * is the precedence. E12: a matched rule in observe mode (or
-     * any matched rule when global shadow_mode is on) logs
+     * any matched rule when global log-only mode is on) logs
      * `would-block-path:<name>` instead of returning 403, and the
      * walk continues so subsequent rules still get their say. */
-    int global_shadow = (scfg->shadow_mode == 1);
+    int global_log_only = (scfg->log_only == 1);
     if (scfg->block_paths && scfg->block_paths->nelts > 0) {
         for (int i = 0; i < scfg->block_paths->nelts; i++) {
             bs_block_path_entry *e = APR_ARRAY_IDX(
                 scfg->block_paths, i, bs_block_path_entry *);
             if (!bs_path_match(e->path_pattern, r->uri)) continue;
             if (!bs_cohort_matches(&e->cohort, ua, r)) continue;
-            int observe = global_shadow || (e->mode == BS_TMODE_OBSERVE);
+            int observe = global_log_only || (e->mode == BS_TMODE_OBSERVE);
             if (observe) {
                 bs_score_add(r, 0, 0,
                     apr_pstrcat(r->pool, "block-path:", e->name,
@@ -433,7 +433,7 @@ int bs_check_policy(request_rec *r)
             directive_rate_matched = 1;
             if (e->shm_slot < 0 || !counters) continue;
 
-            /* E12 — observe mode (per-rule or global shadow_mode).
+            /* E12 — observe mode (per-rule or global log-only).
              * The counter still ticks (so `would-rate-limit` volume
              * answers the operator's "what would this fire?"
              * question accurately), but over-budget hits log
@@ -442,7 +442,7 @@ int bs_check_policy(request_rec *r)
              * — we don't bump strikes, and any pre-existing
              * escalation state is ignored for this rule under
              * observe. */
-            int observe = global_shadow || (e->mode == BS_TMODE_OBSERVE);
+            int observe = global_log_only || (e->mode == BS_TMODE_OBSERVE);
 
             if (!observe && e->escalate && have_ip
                 && bs_strike_check_escalated(client_ip,
