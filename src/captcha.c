@@ -351,9 +351,17 @@ static bs_captcha_result bs_captcha_https_post(
     /* Allowlist HTTPS only. Provider URLs are hard-coded today,
      * but a future operator-tunable URL would become an immediate
      * SSRF vector via file:// / gopher:// / etc. REDIR_PROTOCOLS
-     * mirrors the policy in case FOLLOWLOCATION is ever flipped. */
+     * mirrors the policy in case FOLLOWLOCATION is ever flipped.
+     *
+     * The string-form _STR variants are libcurl 7.85.0+ (Sept 2022);
+     * pre-7.85 only has the CURLPROTO_* bitmask form. */
+#if LIBCURL_VERSION_NUM >= 0x075500
     BS_SETOPT(curl, CURLOPT_PROTOCOLS_STR, "https");
     BS_SETOPT(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
+#else
+    BS_SETOPT(curl, CURLOPT_PROTOCOLS, (long)CURLPROTO_HTTPS);
+    BS_SETOPT(curl, CURLOPT_REDIR_PROTOCOLS, (long)CURLPROTO_HTTPS);
+#endif
     /* Defense-in-depth against a compromised-DNS scenario: the
      * opensocket callback rejects RFC1918 / loopback / link-local
      * before connect(). */
