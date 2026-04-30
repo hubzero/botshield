@@ -23,6 +23,7 @@
 #include <json-c/json.h>
 
 #include "botshield.h"
+#include "metrics.h"
 #include "captcha.h"     /* bs_form_get, bs_captcha_siteverify, bs_captcha_result */
 #include "challenge.h"   /* bs_find_algorithm, bs_issue_challenge */
 #include "cookie.h"      /* bs_install_verified_cookie */
@@ -284,6 +285,7 @@ int bs_form_captcha_fixup(request_rec *r)
             apr_table_unset(r->headers_in, "Transfer-Encoding");
             apr_table_setn(r->headers_in, "Content-Length",
                 apr_psprintf(r->pool, "%" APR_SIZE_T_FMT, body_len));
+            bs_set_would_outcome(r, "~block");
             ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
                 "mod_botshield: form-captcha:observe (log-only mode; "
                 "body replayed, no siteverify, no cookie mint)");

@@ -294,6 +294,37 @@ static const char *bs_get_trigger_tag(request_rec *r)
     return apr_table_get(r->notes, BS_TRIGGER_TAG_NOTE);
 }
 
+#define BS_WOULD_OUTCOME_NOTE "botshield-would-outcome"
+
+/* Severity ordering for would-outcomes. When multiple suppression
+ * sites fire on the same request (e.g. a BlockPath observed AND
+ * tier-dispatch suppressed), the most-severe stashed value wins for
+ * the outcome field — operators want the strongest action the
+ * policy wanted, not the last-evaluated. */
+static int bs_would_severity(const char *would)
+{
+    if (!would) return 0;
+    if (strcmp(would, "~block")        == 0) return 4;
+    if (strcmp(would, "~rate_limited") == 0) return 3;
+    if (strcmp(would, "~challenge")    == 0) return 2;
+    return 1;
+}
+
+void bs_set_would_outcome(request_rec *r, const char *would)
+{
+    if (!would || !*would) return;
+    const char *cur = apr_table_get(r->notes, BS_WOULD_OUTCOME_NOTE);
+    if (bs_would_severity(would) > bs_would_severity(cur)) {
+        apr_table_setn(r->notes, BS_WOULD_OUTCOME_NOTE,
+                       apr_pstrdup(r->pool, would));
+    }
+}
+
+static const char *bs_get_would_outcome(request_rec *r)
+{
+    return apr_table_get(r->notes, BS_WOULD_OUTCOME_NOTE);
+}
+
 /* ======================================================================
  * Decision log
  * ====================================================================== */
@@ -404,13 +435,27 @@ void bs_decision_log(request_rec *r,
                                          reason ? reason : "-");
     const char *path_q   = bs_log_quote(r->pool, path);
 
-    /* Demote the "boring pass" — tier=pass, outcome=declined,
+    /* Override outcome with the would-X stash if a suppression site
+     * recorded one and the call site passed the natural "allow"
+     * (i.e. nothing else more specific). Most-severe stashed
+     * counterfactual wins. Lets BlockPath / RateLimit / Trigger
+     * observe / FormCaptcha observe / tier-dispatch under
+     * BotShieldLogOnly all surface as `outcome=~block`,
+     * `~rate_limited`, `~challenge` etc. instead of plain `allow`
+     * with the policy intent buried in the reason chain. */
+    const char *would = bs_get_would_outcome(r);
+    if (would && outcome && strcmp(outcome, "allow") == 0) {
+        outcome = would;
+    }
+
+    /* Demote the "boring pass" — tier=pass, outcome=allow,
      * score=0, no reasons, no trigger tag — to DEBUG so an
      * operator running at 'LogLevel botshield:info' for staging /
      * tuning sees only decisions where something actually
      * contributed. Pass-with-credits (score=0 but reasons non-
-     * empty), tagged pass (asset bypass, etc.), and any non-pass
-     * tier all stay at INFO. */
+     * empty), tagged pass (asset bypass, etc.), any non-pass
+     * tier, and any tilde-prefixed counterfactual all stay at
+     * INFO. */
     int level = APLOG_INFO;
     int boring = (tier && strcmp(tier, "pass") == 0)
               && (outcome && strcmp(outcome, "allow") == 0)

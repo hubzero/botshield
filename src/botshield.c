@@ -1228,7 +1228,8 @@ static int bs_handler(request_rec *r)
      * machinery has its own observe paths (honored elsewhere); this
      * branch is the tier-dispatch counterpart. */
     if (scfg_h && scfg_h->log_only == 1) {
-        bs_decision_log(r, bs_tier_name(tier), "~challenge",
+        bs_set_would_outcome(r, "~challenge");
+        bs_decision_log(r, bs_tier_name(tier), "allow",
                         cookie_status, "-",
                         cfg->algorithm ? cfg->algorithm->name : "-",
                         bs_decision_reason_names(r->pool, score),
