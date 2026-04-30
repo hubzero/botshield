@@ -303,6 +303,10 @@ typedef struct bs_server_cfg {
     apr_array_header_t *load_triggers;
     /* Flag triggers. */
     apr_array_header_t *flag_triggers;
+    /* Heuristic triggers (BotShieldHeuristicTrigger).
+     * Holds bs_heuristic_trigger_entry*; resolved at post_config from
+     * defaults + operator declarations + reset sentinels. */
+    apr_array_header_t *heuristic_triggers;
     apr_array_header_t *session_names;
     /* E2.2 — robots.txt enforcement. */
     const char         *robots_txt_path;

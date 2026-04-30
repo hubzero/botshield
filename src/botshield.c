@@ -568,6 +568,26 @@ static const command_rec bs_cmds[] = {
                  "logs would-flag-trigger:<flag>:observe instead of "
                  "applying. Compiled-in defaults cover the common "
                  "cases — see example/flag-triggers.conf.example."),
+    /* Heuristic-driven trigger family. Same shape as the flag family
+     * but the predicate is a compile-time named heuristic on the
+     * request itself rather than a flag bit. */
+    AP_INIT_TAKE_ARGV("BotShieldHeuristicTrigger",
+                 bs_set_heuristic_trigger, NULL, RSRC_CONF,
+                 "Bind an action to one of the built-in request "
+                 "heuristics. Args: <name>|all [reset] [action=<verb> "
+                 "args...]. Names: missing-ua (UA absent or empty), "
+                 "missing-al (Accept-Language absent), scraper-ua "
+                 "(UA contains a known HTTP-library token), "
+                 "first-sight-ip (Bloom-filter miss for the client "
+                 "IP). Action verbs: 'score add=N' (signed, "
+                 "-1000..1000) or 'tier_floor min=<tier>'. "
+                 "'<name> reset' clears defaults + prior declarations "
+                 "for that name; 'all reset' wipes every entry "
+                 "(defaults included) so the operator can build the "
+                 "slate up from zero. mode=observe logs the match "
+                 "with a :observe suffix instead of applying. "
+                 "Compiled-in defaults: missing-ua=40, missing-al=15, "
+                 "scraper-ua=50, first-sight-ip=5."),
     /* E15 — forgiveness farming defense. */
     AP_INIT_TAKE1("BotShieldForgivenessCapPerHour",
                  bs_set_forgive_cap, NULL, RSRC_CONF,
@@ -1106,10 +1126,14 @@ static int bs_handler(request_rec *r)
      * signature-mismatched requests. Sig-verified cookies (even if
      * expired) mean we've already transacted with this browser, so
      * the first-sight signal would just be noise. A valid cookie
-     * likewise skips this. */
+     * likewise skips this.
+     *
+     * Action is bound by the BotShieldHeuristicTrigger
+     * 'first-sight-ip' entry — defaulted to score add=5 at
+     * post_config, operator-tunable or `all reset`-able. */
     if (have_client_ip && !have_prior_rep &&
         !bs_bloom_seen(client_ip, scfg_h->ns_id)) {
-        bs_score_add(r, BS_FIRST_SIGHT_PENALTY, 0, "first-sight-ip");
+        bs_apply_heuristic(r, BS_H_FIRST_SIGHT_IP);
     }
 
     /* Flag-trigger walker. Walks scfg->flag_triggers over the union
