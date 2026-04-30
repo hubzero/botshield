@@ -4,7 +4,7 @@ Two layers, with the global one winning when set:
   - per-rule  `mode=observe` action key (path/cookie/env/load
                 triggers via shared engine; mode=observe trailing
                 token on rate-limit + block-path setters)
-  - global    BotShieldShadowMode on (server-scope flip-all)
+  - global    BotShieldLogOnly on (server-scope flip-all)
 
 Observe-mode invariants:
   - rule matches as normal
@@ -176,19 +176,19 @@ def test_block_path_observe_does_not_403(config_override, fresh_ip):
     )
 
 
-# --- Global BotShieldShadowMode overrides per-rule ------------------
+# --- Global BotShieldLogOnly overrides per-rule ------------------
 
 
 def test_global_shadow_mode_overrides_per_rule_enforce(
     config_override, fresh_ip,
 ):
-    """Per-rule mode is enforce (default) but BotShieldShadowMode on
+    """Per-rule mode is enforce (default) but BotShieldLogOnly on
     flips everything to observe. The 403 path trigger must NOT
     enforce."""
     with config_override(
         r"BotShieldAllow\s+on",
         'BotShieldAllow on\n'
-        '    BotShieldShadowMode on\n'
+        '    BotShieldLogOnly on\n'
         '    BotShieldPathTrigger trap "/.envprobe" status=403',
         count=1,
     ):
@@ -202,7 +202,7 @@ def test_global_shadow_mode_overrides_per_rule_enforce(
 def test_global_shadow_mode_off_lets_per_rule_enforce(
     config_override, fresh_ip,
 ):
-    """Sanity: with BotShieldShadowMode off (the default), a rule
+    """Sanity: with BotShieldLogOnly off (the default), a rule
     in default-enforce mode actually enforces. Catches accidental
     inversion of the global flag's check."""
     with config_override(

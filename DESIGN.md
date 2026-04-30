@@ -1783,10 +1783,12 @@ Two layers:
   path action. Observe-mode matches log a stable `would-X` reason
   (`would-block`, `would-rate-limit`, `would-flag-trigger:<flag>:
   observe`) but skip the side effect.
-- **Global `BotShieldShadowMode On`**: master switch that turns
-  every match (regardless of per-rule `mode=`) into observe-mode
-  semantics. Useful for staging a whole policy revision before
-  flipping enforcement on.
+- **Global `BotShieldLogOnly On`**: master switch that turns every
+  match (regardless of per-rule `mode=`) into observe-mode semantics
+  AND short-circuits tier-decision dispatch (silent / hard / captcha)
+  to a `would-challenge` decision log line. Useful for staging a
+  whole policy revision — including a bare `BotShieldEnabled On` on
+  a fresh vhost — before flipping enforcement on.
 
 Reason strings carry the `:observe` suffix. Metrics counters split:
 `rate_limit_observed_total`, `block_path_observed_total`,
@@ -2060,7 +2062,7 @@ the `bs_cmds[]` table at `src/botshield.c:139`.
 | Safeguard (E10) | `BotShieldSafeguard`, `BotShieldSafeguardThreshold`, `BotShieldSafeguardWindow`, `BotShieldSafeguardTTL` |
 | Load (E11) | `BotShieldLoadStateFile`, `BotShieldLoadRefreshInterval`, `BotShieldLoadWarmThreshold`, `BotShieldLoadHotThreshold` |
 | Multi-vhost (E13) | `BotShieldShareScope` |
-| Shadow (E12) | `BotShieldShadowMode` |
+| Log-only (E12) | `BotShieldLogOnly` |
 | App bridge (E5 / E8.2) | `BotShieldAppFeedback`, `BotShieldAppFeedbackHeader`, `BotShieldAppClaims`, `BotShieldAppIntegrationSecretFile` |
 
 Most directives use `RSRC_CONF | ACCESS_CONF` (server / vhost /

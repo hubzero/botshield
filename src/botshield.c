@@ -532,9 +532,9 @@ static const command_rec bs_cmds[] = {
                  "(e.g., dev+prod for one logical app, or api+www "
                  "subdomains). Strings up to 128 chars; hashed to a "
                  "32-bit ns_id and stored in each SHM slot."),
-    /* E12 — shadow / dry-run enforcement. */
-    AP_INIT_FLAG("BotShieldShadowMode",
-                 bs_set_shadow_mode, NULL, RSRC_CONF,
+    /* E12 — log-only / dry-run enforcement. */
+    AP_INIT_FLAG("BotShieldLogOnly",
+                 bs_set_log_only, NULL, RSRC_CONF,
                  "Master switch for dry-run enforcement. When on, all "
                  "client-visible enforcement is suppressed and logged "
                  "instead: trigger / rate-limit / block-path rules log "
@@ -1192,7 +1192,7 @@ static int bs_handler(request_rec *r)
         return DECLINED;
     }
 
-    /* E12 — global shadow / dry-run mode. Log what the tier
+    /* E12 — global log-only / dry-run mode. Log what the tier
      * decision would have produced and DECLINE instead of issuing
      * a challenge. Skips Bloom / safeguard / IP-flag side effects so
      * the dry-run is purely observational; the operator gets a
@@ -1200,7 +1200,7 @@ static int bs_handler(request_rec *r)
      * interstitial or failed challenge. The trigger / rate-limit
      * machinery has its own observe paths (honored elsewhere); this
      * branch is the tier-dispatch counterpart. */
-    if (scfg_h && scfg_h->shadow_mode == 1) {
+    if (scfg_h && scfg_h->log_only == 1) {
         bs_decision_log(r, bs_tier_name(tier), "would-challenge",
                         cookie_status, "-",
                         cfg->algorithm ? cfg->algorithm->name : "-",

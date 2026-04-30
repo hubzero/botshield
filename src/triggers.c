@@ -428,16 +428,16 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
     const char *family_tag,
     const char *trigger_name)
 {
-    /* E12 — shadow / observe-mode short-circuit. If the rule is
-     * observe-only, OR the global shadow_mode is on, log the match
+    /* E12 — log-only / observe-mode short-circuit. If the rule is
+     * observe-only, OR the global log_only is on, log the match
      * with a :observe suffix and return without applying any side
      * effect (no flag-IP, no score, no status, no redirect, no log
      * tag — observe is a "what would have happened" probe).
      * Caller's loop treats BS_TEXEC_OBSERVE as `continue` so the
      * next rule still gets a chance — observed rules never shadow
      * enforced ones. */
-    int global_shadow = (scfg && scfg->shadow_mode == 1);
-    int observe = global_shadow || (a->mode == BS_TMODE_OBSERVE);
+    int global_log_only = (scfg && scfg->log_only == 1);
+    int observe = global_log_only || (a->mode == BS_TMODE_OBSERVE);
     if (observe) {
         bs_score_add(r, 0, 0,
             apr_pstrcat(r->pool, family_tag, ":", trigger_name,

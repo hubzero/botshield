@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-04-30
+
+### Changed
+- Renamed `BotShieldShadowMode` → `BotShieldLogOnly` (directive,
+  setter `bs_set_shadow_mode` → `bs_set_log_only`, server-cfg field
+  `shadow_mode` → `log_only`). The new name describes what the flag
+  does in plain English; "shadow mode" was security jargon that
+  required prior context to recognize. Per-rule `mode=observe` is
+  unchanged. Beta software, no in-the-wild configs to migrate.
+- `BotShieldLogOnly` now also short-circuits the tier-decision
+  dispatch in `bs_handler` (was: trigger / rate-limit / block-path /
+  form-captcha rules only). Non-PASS tier decisions emit a
+  `would-challenge` decision log line and decline rather than serving
+  an interstitial. Lets an operator stage a bare `BotShieldEnabled
+  On` on a fresh vhost and watch what the module would do without any
+  client seeing a challenge.
+
 ## 2026-04-29
 
 ### Added

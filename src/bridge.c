@@ -266,15 +266,15 @@ apr_status_t bs_app_feedback_filter(ap_filter_t *f,
         return ap_pass_brigade(f->next, bb);
     }
 
-    /* E12 — global shadow mode + per-trigger observe both flip the
+    /* E12 — global log-only mode + per-trigger observe both flip the
      * side-effects off. Mirrors the bs_apply_trigger_action pattern
      * in triggers.c:429. The response-path E5 filter doesn't run
      * through the shared executor (no request-side decision log to
-     * seed), so we honor shadow / observe inline. Without this,
-     * `BotShieldShadowMode on` would still mutate the flagged-IP
-     * table on a signed app-feedback event — a staging hazard. */
-    int global_shadow = (scfg->shadow_mode == 1);
-    int observe = global_shadow || (ft->action.mode == BS_TMODE_OBSERVE);
+     * seed), so we honor log-only / observe inline. Without this,
+     * `BotShieldLogOnly on` would still mutate the flagged-IP table
+     * on a signed app-feedback event — a staging hazard. */
+    int global_log_only = (scfg->log_only == 1);
+    int observe = global_log_only || (ft->action.mode == BS_TMODE_OBSERVE);
     if (observe) {
         bs_score_add(r, 0, 0,
             apr_pstrcat(r->pool, "feedback-trigger:", event,
@@ -285,7 +285,7 @@ apr_status_t bs_app_feedback_filter(ap_filter_t *f,
         }
         ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
             "mod_botshield: app feedback event=%s observed "
-            "(would-flag=0x%x ttl=%d) — shadow/observe", event,
+            "(would-flag=0x%x ttl=%d) — log-only/observe", event,
             ft->action.flag_bit, ft->action.ttl_sec);
         return ap_pass_brigade(f->next, bb);
     }

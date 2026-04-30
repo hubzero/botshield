@@ -69,7 +69,7 @@ to 30 or 40.
 
 **Tuning workflow**:
 
-1. Flip `BotShieldShadowMode on` to dry-run all rules.
+1. Flip `BotShieldLogOnly on` to dry-run all rules.
 2. Watch the decision log under real traffic for 24–48 hours.
 3. Sample the `effective` distribution and per-reason
    contributions.

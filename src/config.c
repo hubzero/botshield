@@ -211,9 +211,9 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
                            ? add->load_hot_rise : base->load_hot_rise;
     out->load_normal_fall  = (add->load_normal_fall > 0)
                            ? add->load_normal_fall : base->load_normal_fall;
-    /* E12 — shadow mode inherits unless explicitly set. */
-    out->shadow_mode = (add->shadow_mode != -1)
-                     ? add->shadow_mode : base->shadow_mode;
+    /* E12 — log-only mode inherits unless explicitly set. */
+    out->log_only = (add->log_only != -1)
+                     ? add->log_only : base->log_only;
     /* E13 — namespace plumbing: explicit share_scope_token survives
      * the merge if either scope set it. ns_id is computed at
      * post_config from the merged config + ServerName, so the
@@ -337,9 +337,9 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->load_normal_fall      = 0;
     scfg->load_external_cached  = BS_LOAD_NORMAL;
     scfg->load_external_mtime   = 0;
-    /* E12 — global shadow mode unset. -1 sentinel means "inherit
+    /* E12 — global log-only mode unset. -1 sentinel means "inherit
      * from parent scope"; merge below picks the right value. */
-    scfg->shadow_mode           = -1;
+    scfg->log_only           = -1;
     /* E13 — namespace defaults. ns_id is filled in at post_config
      * once ServerName is final; here we just zero the field and
      * leave the explicit-token slot NULL. */
@@ -1745,19 +1745,19 @@ static void bs_populate_auto_secret(apr_pool_t *pconf, apr_pool_t *ptemp,
     }
 }
 
-/* When BotShieldShadowMode is set on any server scope, log a one-time
+/* When BotShieldLogOnly is set on any server scope, log a one-time
  * hint at startup pointing at the per-module LogLevel knob. Decision
  * log lines emit at APLOG_INFO; the default vhost LogLevel is warn,
- * so without this nudge the operator turns on shadow mode and sees
+ * so without this nudge the operator turns on log-only mode and sees
  * nothing in their logs. */
-static void bs_log_shadow_hint(server_rec *s)
+static void bs_log_logonly_hint(server_rec *s)
 {
     for (server_rec *sv = s; sv; sv = sv->next) {
         bs_server_cfg *vc = ap_get_module_config(sv->module_config,
                                                  &botshield_module);
-        if (vc && vc->shadow_mode == 1) {
+        if (vc && vc->log_only == 1) {
             ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
-                "mod_botshield: BotShieldShadowMode is on — all "
+                "mod_botshield: BotShieldLogOnly is on — all "
                 "client-visible enforcement is suppressed and logged "
                 "as 'would-challenge' / ':observe'. To see the "
                 "decision log, raise the per-module level: "
@@ -1822,7 +1822,7 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     bs_init_state_persistence(pconf, s, scfg);
     bs_populate_auto_secret(pconf, ptemp, s);
     bs_populate_default_algorithm(s);
-    bs_log_shadow_hint(s);
+    bs_log_logonly_hint(s);
     bs_wire_allowlist(pconf, s);
 
     int next_slot = 0;
@@ -2866,19 +2866,19 @@ int bs_forgiveness_apply_cap(int requested,
     return granted;
 }
 
-/* E12 — BotShieldShadowMode on|off. Server-scope master switch
+/* E12 — BotShieldLogOnly on|off. Server-scope master switch
  * for dry-run enforcement. When on, every trigger / rate-limit /
  * block-path rule behaves as if mode=observe regardless of its
- * per-rule setting. Operators stage a whole config revision in one
- * shot, watch the decision log, then flip off to enforce. Off is
- * the default — operators opt in. */
-const char *bs_set_shadow_mode(cmd_parms *cmd, void *dconf,
-                                      int flag)
+ * per-rule setting, and tier decisions log a 'would-challenge' line
+ * and decline rather than serving an interstitial. Operators stage a
+ * whole config revision in one shot, watch the decision log, then
+ * flip off to enforce. Off is the default — operators opt in. */
+const char *bs_set_log_only(cmd_parms *cmd, void *dconf, int flag)
 {
     (void)dconf;
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
-    scfg->shadow_mode = flag ? 1 : 0;
+    scfg->log_only = flag ? 1 : 0;
     return NULL;
 }
 
