@@ -1,0 +1,88 @@
+# BotShieldHeuristicTrigger — illustrative reference for the compiled-
+# in default rule set.
+#
+# This file is NOT a required include. mod_botshield ships these
+# rules compiled into the module and seeds them into every server
+# scope at post_config time, so the module Just Works with zero
+# config. The file exists only so operators who want to see the
+# defaults can read them in a familiar httpd.conf shape, and so
+# operators tweaking behavior have a starting template.
+#
+# Heuristics are the cheap built-in score signals — UA / header
+# patterns and first-sight Bloom-filter checks — that fire before
+# any operator-configured trigger or rate-limit rule. Promoting them
+# to a directive family means an operator can tune individual
+# penalties, disable a single heuristic, or wipe the whole slate and
+# build it back up from zero, all without recompiling the module.
+#
+# Syntax:
+#   BotShieldHeuristicTrigger <name>|all [reset] [action=<verb> args...]
+#
+# Names:
+#   missing-ua       UA header absent or empty.
+#   missing-al       Accept-Language header absent or empty.
+#   scraper-ua       UA contains a known HTTP-library token (curl,
+#                    Wget, python-requests, urllib, httpx, aiohttp,
+#                    Go-http-client, okhttp, axios, scrapy, java,
+#                    libwww, lwp-request, ...).
+#   first-sight-ip   Client IP not seen in the rotating Bloom filter
+#                    (cookieless / signature-mismatched requests
+#                    only — sig-verified clients skip this signal).
+#
+# Action verbs (same as BotShieldFlagTrigger):
+#   action=score add=N             (signed; SUM across matching entries)
+#   action=tier_floor min=<tier>   (pass|silent|form|captcha; MAX)
+#
+# Reset:
+#   BotShieldHeuristicTrigger <name> reset           # clear that name
+#   BotShieldHeuristicTrigger <name> reset action=...  # clear + redeclare
+#   BotShieldHeuristicTrigger all reset              # wipe ALL entries,
+#                                                    # defaults included
+#
+# Observe-mode (logs `<reason>:observe` instead of applying):
+#   BotShieldHeuristicTrigger missing-ua action=score add=40 mode=observe
+
+# --- Compiled-in defaults --------------------------------------------
+# Conservative score adds — none of these alone is enough to cross
+# the silent-tier threshold (default 20). Two together (a curl with
+# no Accept-Language: 50 + 15 + 5 first-sight = 70) lands in form-
+# PoW tier (>=50). The shape rewards "looks like a real browser" and
+# costs "looks like a script."
+BotShieldHeuristicTrigger missing-ua       action=score add=40
+BotShieldHeuristicTrigger missing-al       action=score add=15
+BotShieldHeuristicTrigger scraper-ua       action=score add=50
+BotShieldHeuristicTrigger first-sight-ip   action=score add=5
+
+# --- Common overrides ------------------------------------------------
+#
+# Clean slate — wipe every default and start from zero. Useful for
+# environments where the operator wants the module to score ONLY on
+# their own configured triggers / rate-limits, with no implicit
+# behavior from the heuristics layer.
+#   BotShieldHeuristicTrigger all reset
+#
+# Soften the missing-UA penalty (keep it as a signal but don't bump
+# tier on its own):
+#   BotShieldHeuristicTrigger missing-ua reset action=score add=10
+#
+# Disable scraper-UA matching entirely (e.g., when a legitimate API
+# integration uses a Go-http-client UA):
+#   BotShieldHeuristicTrigger scraper-ua reset
+#
+# Promote first-sight-ip from a small score nudge to a tier_floor.
+# Every never-before-seen client lands in silent tier regardless of
+# their other signals; verified passes graduate them out:
+#   BotShieldHeuristicTrigger first-sight-ip reset
+#   BotShieldHeuristicTrigger first-sight-ip action=tier_floor min=silent
+#
+# Stage a tighter scraper-UA penalty in observe mode for one release
+# before enforcing:
+#   BotShieldHeuristicTrigger scraper-ua action=score add=80 mode=observe
+#   # logs `scraper-ua-<token>:observe` on every fire; replace
+#   # mode=observe with no flag once the rate looks right.
+#
+# Multiple actions on the same heuristic accumulate (SUM for score,
+# MAX for tier_floor). Example: keep the default +50 score AND add a
+# tier_floor for an extra-strict deployment:
+#   BotShieldHeuristicTrigger scraper-ua action=tier_floor min=form
+#   # combined effect: +50 score (default) AND tier floor at form
