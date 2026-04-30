@@ -69,6 +69,7 @@ static int bs_m_cookie_idx(const char *s)
     if (strcmp(s, "bad_sig")    == 0) return BS_M_COOKIE_BAD_SIG;
     if (strcmp(s, "bad_format") == 0) return BS_M_COOKIE_BAD_FORMAT;
     if (strcmp(s, "absent")     == 0) return BS_M_COOKIE_ABSENT;
+    if (strcmp(s, "skipped")    == 0) return BS_M_COOKIE_SKIPPED;
     return -1;
 }
 

@@ -1475,7 +1475,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         apr_table_setn(r->headers_out, "Allow", "POST");
         ap_set_content_type(r, "text/plain; charset=utf-8");
         ap_rputs("POST required.\n", r);
-        bs_decision_log(r, "captcha", "block", "-",
+        bs_decision_log(r, "captcha", "block", "skipped",
                         prov_name, "-", "method_not_allowed", 0);
         return OK;
     }
@@ -1492,7 +1492,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         apr_table_setn(r->err_headers_out, "X-Botshield",
                        "captcha-bad-content-type");
         ap_rputs("application/x-www-form-urlencoded required.\n", r);
-        bs_decision_log(r, "captcha", "block", "-",
+        bs_decision_log(r, "captcha", "block", "skipped",
                         prov_name, "-", "bad_content_type", 0);
         return OK;
     }
@@ -1508,7 +1508,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         r->status = HTTP_SERVICE_UNAVAILABLE;
         ap_set_content_type(r, "text/plain; charset=utf-8");
         ap_rputs("Captcha verification is not configured on this scope.\n", r);
-        bs_decision_log(r, "captcha", "misconfigured", "-",
+        bs_decision_log(r, "captcha", "misconfigured", "skipped",
                         prov_name, "-", "-", 0);
         return OK;
     }
@@ -1540,7 +1540,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
                        "captcha-pending-missing");
         ap_set_content_type(r, "text/plain; charset=utf-8");
         ap_rputs("Challenge session missing or expired.\n", r);
-        bs_decision_log(r, "captcha", "pending_missing", "-",
+        bs_decision_log(r, "captcha", "pending_missing", "skipped",
                         prov_name, "-", pend_err, 0);
         return OK;
     }
@@ -1553,12 +1553,12 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
     const char *body = NULL;
     apr_status_t bsr = bs_read_form_body(r, 8 * 1024, &body, &body_len);
     if (bsr == APR_ENOSPC) {
-        bs_decision_log(r, "captcha", "block", "-",
+        bs_decision_log(r, "captcha", "block", "skipped",
                         prov_name, "-", "body_too_large", 0);
         return HTTP_REQUEST_ENTITY_TOO_LARGE;
     }
     if (bsr != APR_SUCCESS || !body) {
-        bs_decision_log(r, "captcha", "block", "-",
+        bs_decision_log(r, "captcha", "block", "skipped",
                         prov_name, "-", "body_read_failed", 0);
         return HTTP_BAD_REQUEST;
     }
@@ -1576,7 +1576,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         r->status = HTTP_BAD_REQUEST;
         ap_set_content_type(r, "text/plain; charset=utf-8");
         ap_rputs("Missing captcha token.\n", r);
-        bs_decision_log(r, "captcha", "block", "-",
+        bs_decision_log(r, "captcha", "block", "skipped",
                         prov_name, "-", "no_token", 0);
         return OK;
     }
@@ -1587,7 +1587,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         r->status = HTTP_BAD_REQUEST;
         ap_set_content_type(r, "text/plain; charset=utf-8");
         ap_rputs("Captcha token too long.\n", r);
-        bs_decision_log(r, "captcha", "block", "-",
+        bs_decision_log(r, "captcha", "block", "skipped",
                         prov_name, "-", "token_too_long", 0);
         return OK;
     }
@@ -1622,7 +1622,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
                        "captcha-rate-limited");
         ap_set_content_type(r, "text/plain; charset=utf-8");
         ap_rputs("Too many captcha verification attempts.\n", r);
-        bs_decision_log(r, "captcha", "rate_limited", "-",
+        bs_decision_log(r, "captcha", "rate_limited", "skipped",
                         prov_name, "-", "-", 0);
         return OK;
     }
@@ -1633,7 +1633,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
                        "captcha-saturated");
         ap_set_content_type(r, "text/plain; charset=utf-8");
         ap_rputs("Captcha verification busy, try again shortly.\n", r);
-        bs_decision_log(r, "captcha", "inflight_capped", "-",
+        bs_decision_log(r, "captcha", "inflight_capped", "skipped",
                         prov_name, "-", "-", 0);
         return OK;
     }
@@ -1721,7 +1721,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
             ap_set_content_type(r, "text/plain; charset=utf-8");
             apr_table_setn(r->err_headers_out, "X-Botshield", "captcha-rejected");
             ap_rputs("Verification score too low. Go back and try again.\n", r);
-            bs_decision_log(r, "captcha", "block", "-",
+            bs_decision_log(r, "captcha", "block", "skipped",
                             cfg->captcha_provider->name, "-",
                             apr_psprintf(r->pool, "low_score:%.2f", score),
                             0);
@@ -1747,7 +1747,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         ap_set_content_type(r, "text/plain; charset=utf-8");
         apr_table_setn(r->err_headers_out, "X-Botshield", "captcha-rejected");
         ap_rputs("Captcha verification failed. Go back and try again.\n", r);
-        bs_decision_log(r, "captcha", "block", "-",
+        bs_decision_log(r, "captcha", "block", "skipped",
                         cfg->captcha_provider->name, "-",
                         (details && *details) ? details : "-", 0);
         return OK;
@@ -1791,7 +1791,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         r->status = HTTP_INTERNAL_SERVER_ERROR;
         ap_set_content_type(r, "text/plain; charset=utf-8");
         ap_rputs("Service error: could not issue cookie.\n", r);
-        bs_decision_log(r, "captcha", "misconfigured", "-",
+        bs_decision_log(r, "captcha", "misconfigured", "skipped",
                         cfg->captcha_provider->name,
                         cookie_alg_name ? cookie_alg_name : "-",
                         "mint_failed", 0);

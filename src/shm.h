@@ -187,6 +187,7 @@ typedef enum {
     BS_M_COOKIE_BAD_SIG,
     BS_M_COOKIE_BAD_FORMAT,
     BS_M_COOKIE_ABSENT,
+    BS_M_COOKIE_SKIPPED,
     BS_M_COOKIE_COUNT
 } bs_m_cookie;
 
