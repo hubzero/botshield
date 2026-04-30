@@ -1815,7 +1815,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
     if (result == BS_CAPTCHA_TIMEOUT) d_reason = "provider_timeout";
     else if (result == BS_CAPTCHA_ERROR) d_reason = "provider_error";
     bs_decision_log(r, "captcha", d_outcome, "-",
-                    cfg->captcha_provider->name, cookie_alg_name,
+                    cfg->captcha_provider->name, "-",
                     d_reason, 0);
     return OK;
 }
