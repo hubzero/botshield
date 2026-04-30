@@ -9,7 +9,10 @@
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/kdf.h>
+#include <openssl/opensslv.h>
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
 #include <openssl/params.h>
+#endif
 #include <openssl/rand.h>
 
 #include <apr_strings.h>
@@ -48,6 +51,7 @@ int bs_hkdf_derive_key(const unsigned char *master,
                        const char *info,
                        unsigned char out_key[32])
 {
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
     EVP_KDF *kdf = EVP_KDF_fetch(NULL, "HKDF", NULL);
     if (!kdf) return 0;
     EVP_KDF_CTX *ctx = EVP_KDF_CTX_new(kdf);
@@ -71,6 +75,31 @@ int bs_hkdf_derive_key(const unsigned char *master,
     int rc = EVP_KDF_derive(ctx, out_key, 32, params);
     EVP_KDF_CTX_free(ctx);
     return rc == 1;
+#else
+    /* OpenSSL 1.1.1: EVP_KDF/OSSL_PARAM don't exist; use the
+     * EVP_PKEY-based HKDF interface. Single derive() runs Extract
+     * then Expand (RFC 5869). Same empty-salt + per-purpose-info
+     * shape as the 3.x branch above. */
+    EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, NULL);
+    if (!pctx) return 0;
+    int ok = 0;
+    size_t outlen = 32;
+    if (EVP_PKEY_derive_init(pctx) <= 0) goto out;
+    if (EVP_PKEY_CTX_set_hkdf_md(pctx, EVP_sha256()) <= 0) goto out;
+    if (EVP_PKEY_CTX_set1_hkdf_salt(pctx,
+                                    (const unsigned char *)"", 0) <= 0)
+        goto out;
+    if (EVP_PKEY_CTX_set1_hkdf_key(pctx, master, (int)master_len) <= 0)
+        goto out;
+    if (EVP_PKEY_CTX_add1_hkdf_info(pctx,
+                                    (const unsigned char *)info,
+                                    (int)strlen(info)) <= 0)
+        goto out;
+    ok = (EVP_PKEY_derive(pctx, out_key, &outlen) == 1) && outlen == 32;
+out:
+    EVP_PKEY_CTX_free(pctx);
+    return ok;
+#endif
 }
 
 const char *bs_gcm_encrypt(const unsigned char aes_key[32],
