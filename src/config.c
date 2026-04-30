@@ -788,6 +788,7 @@ static const struct {
     { BS_H_MISSING_AL,     BS_HEUR_ACT_SCORE, 15, BS_TIER_PASS },
     { BS_H_SCRAPER_UA,     BS_HEUR_ACT_SCORE, 50, BS_TIER_PASS },
     { BS_H_FIRST_SIGHT_IP, BS_HEUR_ACT_SCORE,  5, BS_TIER_PASS },
+    { BS_H_DROPPED_COOKIE, BS_HEUR_ACT_SCORE, 25, BS_TIER_PASS },
 };
 #define BS_DEFAULT_HEURISTIC_TRIGGER_COUNT \
     (sizeof(bs_default_heuristic_triggers) / \

@@ -77,6 +77,16 @@ static const char *bs_pred_first_sight_ip(request_rec *r)
     return "first-sight-ip";
 }
 
+/* Same dispatch shape as first-sight-ip: bs_handler establishes the
+ * Bloom-hit + cookie-absent / bad-sig / bad-format combination
+ * before calling bs_apply_heuristic; this predicate just returns the
+ * fixed reason name. */
+static const char *bs_pred_dropped_cookie(request_rec *r)
+{
+    (void)r;
+    return "dropped-cookie";
+}
+
 typedef struct {
     bs_heuristic_meta      meta;
     bs_heuristic_pred_fn   pred;
@@ -91,6 +101,8 @@ static const bs_heuristic_def bs_heuristic_defs[] = {
       bs_pred_scraper_ua },
     { { "first-sight-ip",  BS_H_FIRST_SIGHT_IP,  BS_HP_POST_COOKIE,  5 },
       bs_pred_first_sight_ip },
+    { { "dropped-cookie",  BS_H_DROPPED_COOKIE,  BS_HP_POST_COOKIE, 25 },
+      bs_pred_dropped_cookie },
 };
 #define BS_HEURISTIC_COUNT \
     (sizeof(bs_heuristic_defs) / sizeof(bs_heuristic_defs[0]))

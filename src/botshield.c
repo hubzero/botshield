@@ -578,16 +578,18 @@ static const command_rec bs_cmds[] = {
                  "args...]. Names: missing-ua (UA absent or empty), "
                  "missing-al (Accept-Language absent), scraper-ua "
                  "(UA contains a known HTTP-library token), "
-                 "first-sight-ip (Bloom-filter miss for the client "
-                 "IP). Action verbs: 'score add=N' (signed, "
-                 "-1000..1000) or 'tier_floor min=<tier>'. "
-                 "'<name> reset' clears defaults + prior declarations "
-                 "for that name; 'all reset' wipes every entry "
-                 "(defaults included) so the operator can build the "
-                 "slate up from zero. mode=observe logs the match "
-                 "with a :observe suffix instead of applying. "
+                 "first-sight-ip (Bloom-filter miss - true new IP), "
+                 "dropped-cookie (Bloom-known IP arriving without a "
+                 "usable cookie - private-browsing reset, manual "
+                 "cookie clear, or evasion). Action verbs: 'score "
+                 "add=N' (signed, -1000..1000) or 'tier_floor "
+                 "min=<tier>'. '<name> reset' clears defaults + "
+                 "prior declarations for that name; 'all reset' wipes "
+                 "every entry (defaults included) so the operator can "
+                 "build the slate up from zero. mode=observe logs the "
+                 "match with a :observe suffix instead of applying. "
                  "Compiled-in defaults: missing-ua=40, missing-al=15, "
-                 "scraper-ua=50, first-sight-ip=5."),
+                 "scraper-ua=50, first-sight-ip=5, dropped-cookie=25."),
     /* E15 — forgiveness farming defense. */
     AP_INIT_TAKE1("BotShieldForgivenessCapPerHour",
                  bs_set_forgive_cap, NULL, RSRC_CONF,
@@ -1124,19 +1126,36 @@ static int bs_handler(request_rec *r)
         bs_score_add(r, 0, 0, "flagged-ip");
     }
 
-    /* First-sight Bloom lookup (M5.2). Policy: only on cookieless or
-     * signature-mismatched requests. Sig-verified cookies (even if
-     * expired) mean we've already transacted with this browser, so
-     * the first-sight signal would just be noise. A valid cookie
-     * likewise skips this.
+    /* Bloom-based reputation signals (M5.2). Only fire on cookieless
+     * or signature-mismatched requests; sig-verified cookies (even if
+     * expired) mean we've already transacted with this browser via
+     * cookie state, so neither first-sight nor dropped-cookie carry
+     * useful signal there.
      *
-     * Action is bound by the BotShieldHeuristicTrigger
-     * 'first-sight-ip' entry — defaulted to score add=5 at
-     * post_config, operator-tunable or `all reset`-able. */
-    if (have_client_ip && !have_prior_rep &&
-        !bs_bloom_seen(client_ip, scfg_h->ns_id)) {
-        bs_apply_heuristic(r, BS_H_FIRST_SIGHT_IP);
+     * Two heuristics, mutually exclusive based on Bloom membership:
+     *   - Bloom miss → first-sight-ip (truly first visit)
+     *   - Bloom hit  → dropped-cookie (we know this IP, but they
+     *                  arrived without a usable cookie - reset,
+     *                  cleared, or evasion)
+     *
+     * Bloom is populated EAGERLY below — every request with a
+     * client IP gets added, regardless of tier outcome. Without
+     * eager population, IPs that always pass-tier would never enter
+     * Bloom, and "first-sight-ip" would degrade into "this IP hasn't
+     * been challenge-tier-bumped yet" — wrong semantics. */
+    if (have_client_ip && !have_prior_rep) {
+        if (bs_bloom_seen(client_ip, scfg_h->ns_id)) {
+            bs_apply_heuristic(r, BS_H_DROPPED_COOKIE);
+        } else {
+            bs_apply_heuristic(r, BS_H_FIRST_SIGHT_IP);
+        }
     }
+    /* Eager Bloom population: every request with a client IP feeds
+     * the Bloom filter, so subsequent visits without a cookie trip
+     * dropped-cookie instead of first-sight-ip. The previous
+     * "populate only on challenge" optimization conflated never-
+     * been-here-before with never-been-challenged-from-here. */
+    if (have_client_ip) bs_bloom_add(client_ip, scfg_h->ns_id);
 
     /* Flag-trigger walker. Walks scfg->flag_triggers over the union
      * of IP-side and cookie-side flag bits, applying `score add=N`
@@ -1237,10 +1256,11 @@ static int bs_handler(request_rec *r)
         return DECLINED;
     }
 
-    /* Not pass tier — we will issue a challenge. Feed the Bloom filter
-     * now that we've committed to challenging this client; that keeps
-     * writes off the ~99% happy path. */
-    if (have_client_ip) bs_bloom_add(client_ip, scfg_h->ns_id);
+    /* Bloom is populated eagerly above (right after first-sight /
+     * dropped-cookie dispatch), so by this point the IP is already
+     * recorded for future requests regardless of tier. The pre-eager
+     * implementation populated only here, which created the misleading
+     * first-sight-ip semantics this code path used to live with. */
 
     int safeguard_rv = bs_apply_safeguard(r, have_client_ip, client_ip,
                                           cookie_status, score, effective);
