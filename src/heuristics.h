@@ -2,13 +2,21 @@
  * BotShieldHeuristicTrigger directive.
  *
  * Heuristics are named, compile-time predicates that an operator binds
- * actions to via BotShieldHeuristicTrigger. The four ship today:
+ * actions to via BotShieldHeuristicTrigger. The five ship today:
  *
  *   - missing-ua      : UA header absent or empty
  *   - missing-al      : Accept-Language header absent or empty
  *   - scraper-ua      : UA contains a known HTTP-library token
  *                       (curl/Wget/python-requests/...)
- *   - first-sight-ip  : never-seen-before client IP (Bloom-filter miss)
+ *   - first-sight-ip  : never-seen-before client IP (Bloom-filter miss).
+ *                       Bloom is populated eagerly (every request) so
+ *                       this fires only on truly first visits.
+ *   - dropped-cookie  : Bloom-known IP that arrived without a usable
+ *                       cookie (absent / bad-sig / bad-format). Stronger
+ *                       signal than first-sight: we've transacted with
+ *                       this IP before, so a missing cookie is anomalous
+ *                       (private-browsing reset, manual cookie clear,
+ *                       or evasion).
  *
  * Each is seeded with a sensible default action at post_config (see
  * bs_default_heuristic_triggers in config.c). Operators tune by
@@ -43,6 +51,7 @@ typedef enum {
     BS_H_MISSING_AL,
     BS_H_SCRAPER_UA,
     BS_H_FIRST_SIGHT_IP,
+    BS_H_DROPPED_COOKIE,
     BS_H_COUNT,
     /* Sentinel for `all reset` — never appears in a request-time entry. */
     BS_H_ALL             = -1,
