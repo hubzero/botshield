@@ -899,7 +899,7 @@ static int bs_route_module_endpoint(request_rec *r, bs_dir_cfg *cfg)
     ap_set_content_type(r, "text/plain; charset=utf-8");
     apr_table_setn(r->err_headers_out, "X-Botshield", "unknown-endpoint");
     ap_rputs("Not found.\n", r);
-    bs_decision_log(r, "none", "block", "skipped", "-", "-",
+    bs_decision_log(r, "none", "block", "skipped", "-", "skipped",
                     "unknown_endpoint", 0);
     return OK;
 }
@@ -955,14 +955,14 @@ static int bs_handler(request_rec *r)
         apr_table_setn(r->headers_out,    "Cache-Control", "no-store");
         apr_table_setn(r->err_headers_out, "X-Botshield",  "debug-403");
         ap_rputs("Hello World\n", r);
-        bs_decision_log(r, "none", "debug", "skipped", "-", "-", "-", 0);
+        bs_decision_log(r, "none", "debug", "skipped", "-", "skipped", "-", 0);
         return OK;
     }
 
     /* Static assets pass through — a cookieless first page load must still
      * render its CSS/images so the PoW page is usable. */
     if (bs_is_asset_uri(r->uri)) {
-        bs_decision_log(r, "pass", "allow", "skipped", "-", "-", "asset", 0);
+        bs_decision_log(r, "pass", "allow", "skipped", "-", "skipped", "asset", 0);
         return DECLINED;
     }
 
@@ -982,7 +982,7 @@ static int bs_handler(request_rec *r)
         apr_table_setn(r->headers_out, "Cache-Control", "no-store");
         apr_table_setn(r->err_headers_out, "X-Botshield", "misconfigured");
         ap_rputs("Service unavailable: mod_botshield misconfigured.\n", r);
-        bs_decision_log(r, "none", "misconfigured", "skipped", "-", "-", "-", 0);
+        bs_decision_log(r, "none", "misconfigured", "skipped", "-", "skipped", "-", 0);
         return OK;
     }
 
@@ -1073,7 +1073,8 @@ static int bs_handler(request_rec *r)
          * tag side effects already applied in bs_check_policy. */
         bs_request_score *s = bs_get_score(r, 0);
         const char *reasons = bs_score_reasons_joined(r->pool, s);
-        bs_decision_log(r, "pass", "allow", cookie_status, "-", "-",
+        bs_decision_log(r, "pass", "allow", cookie_status, "-",
+                        cfg->algorithm ? cfg->algorithm->name : "skipped",
                         reasons, s ? s->total : 0);
         return DECLINED;
     }
@@ -1083,7 +1084,8 @@ static int bs_handler(request_rec *r)
         const char *outcome;
         if (policy_rv == HTTP_TOO_MANY_REQUESTS)      outcome = "rate_limited";
         else                                          outcome = "block";
-        bs_decision_log(r, "pass", outcome, cookie_status, "-", "-",
+        bs_decision_log(r, "pass", outcome, cookie_status, "-",
+                        cfg->algorithm ? cfg->algorithm->name : "skipped",
                         reasons, s ? s->total : 0);
         return policy_rv;
     }
@@ -1210,7 +1212,8 @@ static int bs_handler(request_rec *r)
             }
         }
         bs_decision_log(r, "pass", "allow", cookie_status,
-                        "-", "-",
+                        "-",
+                        cfg->algorithm ? cfg->algorithm->name : "skipped",
                         bs_decision_reason_names(r->pool, score),
                         effective);
         return DECLINED;
@@ -1268,7 +1271,8 @@ static int bs_handler(request_rec *r)
         }
         if (!fall_back) {
             bs_decision_log(r, "silent", "allow", cookie_status,
-                            "-", "-",
+                            "-",
+                            cfg->algorithm ? cfg->algorithm->name : "skipped",
                             bs_decision_reason_names(r->pool, score),
                             effective);
             return DECLINED;
