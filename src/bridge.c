@@ -285,7 +285,7 @@ apr_status_t bs_app_feedback_filter(ap_filter_t *f,
         }
         ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
             "mod_botshield: app feedback event=%s observed "
-            "(would-flag=0x%x ttl=%d) — log-only/observe", event,
+            "(would-flag=0x%x ttl=%d) - log-only/observe", event,
             ft->action.flag_bit, ft->action.ttl_sec);
         return ap_pass_brigade(f->next, bb);
     }

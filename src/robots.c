@@ -936,7 +936,7 @@ apr_status_t bs_robots_load(server_rec *sv, bs_server_cfg *scfg,
             slot_exhausted);
     }
     ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
-        "mod_botshield: robots.txt %s %sloaded — %d groups, "
+        "mod_botshield: robots.txt %s %sloaded - %d groups, "
         "%d with Crawl-delay (%d slots reused, %d new)",
         scfg->robots_txt_path, cur ? "re" : "",
         n_groups, delay_count, slot_reused, slot_new);

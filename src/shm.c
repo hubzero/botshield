@@ -319,7 +319,7 @@ void bs_flagged_ip_add(request_rec *r, const unsigned char ip[16],
                 __ATOMIC_RELAXED)) {
             ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
                 "mod_botshield: flagged-IP table probe saturated at bucket %u "
-                "(capacity %" APR_SIZE_T_FMT "); overwriting — consider "
+                "(capacity %" APR_SIZE_T_FMT "); overwriting - consider "
                 "raising BotShieldFlaggedIPCapacity",
                 base, bs_shm.flagged_capacity);
         }
@@ -522,7 +522,7 @@ int bs_strike_record_429(request_rec *r, const unsigned char ip[16],
             ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
                 "mod_botshield: strike-table probe saturated at "
                 "bucket %u (capacity %" APR_SIZE_T_FMT "); "
-                "overwriting — consider raising "
+                "overwriting - consider raising "
                 "BotShieldRateLimitEscalateCapacity",
                 base, bs_shm.strike_capacity);
         }
@@ -743,7 +743,7 @@ void bs_safeguard_record_presentation(request_rec *r,
             ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
                 "mod_botshield: safeguard-table probe saturated at "
                 "bucket %u (capacity %" APR_SIZE_T_FMT "); overwriting "
-                "— consider raising BotShieldSafeguardCapacity",
+                "- consider raising BotShieldSafeguardCapacity",
                 base, bs_shm.safeguard_capacity);
         }
         target_idx = (int)base;
@@ -901,7 +901,7 @@ int bs_embedded_nonce_consume(request_rec *r,
             ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
                 "mod_botshield: nonce-table probe saturated at "
                 "bucket %u (capacity %" APR_SIZE_T_FMT "); failing "
-                "verify closed — consider raising "
+                "verify closed - consider raising "
                 "BotShieldEmbeddedNonceCapacity", base,
                 bs_shm.nonce_capacity);
         }

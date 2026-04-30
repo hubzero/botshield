@@ -231,28 +231,28 @@ static void bs_metrics_bump(request_rec *r,
         __atomic_fetch_add(&bs_shm.metrics->tier[ti], 1, __ATOMIC_RELAXED);
     } else {
         ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
-            "mod_botshield: metrics: unknown tier=\"%s\" — skipped",
+            "mod_botshield: metrics: unknown tier=\"%s\" - skipped",
             tier ? tier : "(null)");
     }
     if (oi >= 0) {
         __atomic_fetch_add(&bs_shm.metrics->outcome[oi], 1, __ATOMIC_RELAXED);
     } else {
         ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
-            "mod_botshield: metrics: unknown outcome=\"%s\" — skipped",
+            "mod_botshield: metrics: unknown outcome=\"%s\" - skipped",
             outcome ? outcome : "(null)");
     }
     if (ci >= 0) {
         __atomic_fetch_add(&bs_shm.metrics->cookie[ci], 1, __ATOMIC_RELAXED);
     } else if (cookie && strcmp(cookie, "-") != 0) {
         ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
-            "mod_botshield: metrics: unknown cookie=\"%s\" — skipped",
+            "mod_botshield: metrics: unknown cookie=\"%s\" - skipped",
             cookie);
     }
     if (pi >= 0) {
         __atomic_fetch_add(&bs_shm.metrics->provider[pi], 1, __ATOMIC_RELAXED);
     } else if (provider && strcmp(provider, "-") != 0) {
         ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
-            "mod_botshield: metrics: unknown provider=\"%s\" — skipped",
+            "mod_botshield: metrics: unknown provider=\"%s\" - skipped",
             provider);
     }
 }
