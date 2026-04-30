@@ -1,6 +1,6 @@
 # Troubleshooting
 
-This page covers the most common operator-visible issues, the
+This page covers the most common visible issues, the
 diagnostic for each, and the fix or workaround.
 
 ## Module fails to load
@@ -76,7 +76,7 @@ to 30 or 40.
 4. Raise thresholds or lower individual heuristic penalties to
    match.
 
-See [operator model](../operator-model/index.html) for the full tuning
+See [site model](../site-model/index.html) for the full tuning
 discussion.
 
 ## Bots passing through unchallenged
@@ -246,7 +246,7 @@ contribution hook is purely additive.
 ## Where to next
 
 - Real-world deployment topology: [deployment](../deployment/index.html).
-- Tier model, scoring, decision log: [operator model](../operator-model/index.html).
+- Tier model, scoring, decision log: [site model](../site-model/index.html).
 - Policy and rule families: [policy](../policy/index.html).
 - Captcha + app-bridge integration: [captcha](../captcha/index.html).
 - Metrics and dashboards: [observability](../observability/index.html).

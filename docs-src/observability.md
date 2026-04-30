@@ -11,7 +11,7 @@ Every gated request emits a stable `key=value` structured line at
 `info` level (`bs_decision_log`); challenge-issuing requests also
 emit an `info` prose line carrying per-reason penalty values, and
 pass-through decisions emit a `debug` prose line. The structured
-line is the canonical surface — operators tail at `info` and parse
+line is the canonical surface — tail at `info` and parse
 the `key=value` form; the prose lines are forensic detail.
 
 The structured line:
@@ -52,7 +52,7 @@ awk-validator.sh`).
 `tier=safeguard` is emitted for challenge-loop suppression
 (pass-through with the flagged-IP entry preserved). For metrics it
 bins into `tier_pass_total` since it's functionally pass-through;
-operators wanting to dashboard the safeguard rate scrape the
+to dashboard the safeguard rate, scrape the
 decision log for `reason="challenge-safeguard"`.
 
 ### Reason-name vocabulary
@@ -98,7 +98,7 @@ exposition format.
 ### Access control
 
 The endpoint is unauthenticated. Wrap it in a `<Location>` with
-your own ACL — operators usually scrape from a network the public
+your own ACL — usually scrape from a network the public
 internet can't reach:
 
 ```apache
@@ -234,7 +234,7 @@ robots.txt groups:
 ```
 
 Wrap the path in a `<Location>` with your own ACL — the page
-reveals operator config (already on disk in `/etc/apache2/`) but no
+reveals site config (already on disk in `/etc/apache2/`) but no
 cookie secrets or client IPs.
 
 ## Capacity headroom watchdog
@@ -249,7 +249,7 @@ mod_botshield: capacity headroom: bloom_a 73% filled (rotation
                  watcher will trigger at 50% past midpoint)
 ```
 
-Operators usually use these as the cue to raise capacity directives
+Use these as the cue to raise capacity directives
 and reload — see [deployment](../deployment/index.html) for sizing guidance.
 
 ## Debug mode
@@ -278,7 +278,7 @@ expensive at scale.
 
 ## Where to next
 
-- Tier model and scoring: [operator model](../operator-model/index.html).
+- Tier model and scoring: [site model](../site-model/index.html).
 - Policy families: [policy](../policy/index.html).
 - Captcha and app-bridge: [captcha](../captcha/index.html).
 - Safe rule rollout: [staging](../staging/index.html).

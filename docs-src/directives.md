@@ -1,9 +1,9 @@
 # Directive reference
 
 mod_botshield registers 78 directives at config time. This page is
-the canonical operator-facing reference, grouped by family. The
+the canonical reference, grouped by family. The
 underlying source-of-truth is `bs_cmds[]` in `src/botshield.c:139` —
-operators tuning behavior should treat the source as authoritative
+when tuning behavior, treat the source as authoritative
 when it disagrees with a doc page.
 
 ## Scope and validity
@@ -92,7 +92,7 @@ Tier dispatch ladder:
 - `BotShieldScoreHard ≤ score < BotShieldScoreCaptcha` → form
 - `BotShieldScoreCaptcha ≤ score` → captcha (or form if no provider)
 
-See [operator model](../operator-model/index.html) for the full scoring
+See [site model](../site-model/index.html) for the full scoring
 discussion.
 
 `BotShieldForgivenessCapPerHour` caps total cookie-side
@@ -108,7 +108,7 @@ resistance; 0 disables (legacy behavior).
 
 `interstitial` (the default) serves a no-click splash page that
 auto-submits a SHA-256 PoW on load — the legacy silent-tier
-behavior. `embedded` instead hands off to the operator-included
+behavior. `embedded` instead hands off to the site-included
 `/botshield/embedded.js` wrapper: the page serves DECLINED (real
 content) and the wrapper does the PoW in a Web Worker, then POSTs
 the result back to `/botshield/embedded-verify` to mint
@@ -116,8 +116,8 @@ the result back to `/botshield/embedded-verify` to mint
 window where the cookie isn't yet on the client (the very first
 request goes through unverified) for a zero-interstitial UX.
 
-Embedded mode requires the operator to include the wrapper
-script in their page templates; without it, the request still
+Embedded mode requires you to include the wrapper
+script in your page templates; without it, the request still
 serves the real content but no cookie ever lands.
 
 ## Widget customization
@@ -141,7 +141,7 @@ block itself. Max 256 KiB.
 
 Logo and help files are 64 KiB max each. Logo content is served
 inline as `<img>`-equivalent SVG; help content is rendered as
-trusted HTML (no escaping — operator owns sanitization).
+trusted HTML (no escaping — you own sanitization).
 
 `BotShieldShowLogo/Label/Box` strip widget chrome down to a lone
 checkbox if the surrounding page styles its own chrome. When label
@@ -316,7 +316,7 @@ This is the directive that replaces the legacy `BotShieldFlagIP`
 Action verbs: `action=score add=N` (signed N -1000..1000),
 `action=tier_floor min=<tier>` (raise effective tier; tier is one
 of `pass`/`silent`/`form`/`captcha`). The `reset` keyword clears
-all earlier triggers (compiled-in defaults + prior operator
+all earlier triggers (compiled-in defaults + prior
 declarations) for the named flag at post-config time.
 
 Flag bits: `honeypot_hit`, `scanner_probe`, `fake_bot`,
@@ -391,7 +391,7 @@ and security model.
 
 ## Where to next
 
-- Conceptual model and scoring: [operator model](../operator-model/index.html).
+- Conceptual model and scoring: [site model](../site-model/index.html).
 - Deployment topology and capacity: [deployment](../deployment/index.html).
 - Per-family policy semantics: [policy](../policy/index.html).
 - Captcha and app-bridge integration: [captcha](../captcha/index.html).

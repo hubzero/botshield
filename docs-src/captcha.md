@@ -57,7 +57,7 @@ shouldn't black-hole legitimate traffic.
 
 `BotShieldCaptchaCABundle` is optional. If unset, libcurl uses its
 compiled-in default (usually `/etc/ssl/certs/ca-certificates.crt`
-on Debian-family). Operators with custom trust stores or air-gapped
+on Debian-family). Sites with custom trust stores or air-gapped
 deployments can pin a specific bundle.
 
 ### Verify-endpoint hardening
@@ -91,7 +91,7 @@ BotShieldCaptchaMaxInFlight  64   # global, 1..1024
 
 Several providers (hCaptcha, reCAPTCHA, Turnstile) return a
 `hostname` and `action` field in the siteverify response. mod_
-botshield validates these against operator-configured expectations:
+botshield validates these against the configured expectations:
 
 ```apache
 BotShieldCaptchaExpectedHostname  example.com
@@ -265,6 +265,6 @@ parser shape, not by key separation.
 ## Where to next
 
 - Real-world deployment topology: [deployment](../deployment/index.html).
-- Tier model and scoring: [operator model](../operator-model/index.html).
+- Tier model and scoring: [site model](../site-model/index.html).
 - Triggers, allow lists, robots: [policy](../policy/index.html).
 - Decision log + metrics: [observability](../observability/index.html).

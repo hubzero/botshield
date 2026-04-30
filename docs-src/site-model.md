@@ -1,4 +1,4 @@
-# Operator model
+# Site model
 
 mod_botshield decides every request along two orthogonal axes: a
 **tier** (what the visitor experiences) and a **score** (how
@@ -58,7 +58,7 @@ log.
 
 ## Built-in heuristic signals
 
-These run on every request before any operator-configured trigger
+These run on every request before any configured trigger
 or cohort. Signs are absolute; the score either rises or stays put.
 
 | Signal | Penalty | Reason in log |
@@ -74,7 +74,7 @@ or cohort. Signs are absolute; the score either rises or stays put.
 | Fake-bot detection (default flag trigger) | +80 | `flag-trigger:fake_bot` |
 | Verified legit-crawler match | forces pass | `verified-<name>` |
 | `app_verified_human` cookie credit (default flag-trigger) | -80 | `flag-trigger:app_verified_human` |
-| Operator path / load / cookie / env / flag triggers with `action=score add=N` | configured | `<family>-trigger:<name>` |
+| Configured path / load / cookie / env / flag triggers with `action=score add=N` | configured | `<family>-trigger:<name>` |
 
 Default thresholds and penalty values appear here for orientation.
 Treat the source (`src/score.h`, `src/heuristics.c`,
@@ -176,8 +176,8 @@ LogLevel botshield_module:info
 ```
 
 The `reason` field is the comma-joined reason names captured by
-`bs_score_add`. The `tag` field (when present) is the operator-
-supplied `log=<tag>` value from the matching trigger. See
+`bs_score_add`. The `tag` field (when present) is the
+configured `log=<tag>` value from the matching trigger. See
 [observability](../observability/index.html) for the full decision-log
 vocabulary.
 

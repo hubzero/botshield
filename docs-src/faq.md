@@ -5,10 +5,10 @@
 ### Does this just block all bots?
 
 No, and that's deliberate. The goal isn't bot elimination — it's
-*operator control over the terms of access*. Search-engine
+*site control over the terms of access*. Search-engine
 crawlers, LLM training bots, archival crawlers, monitoring
-agents, partner integrations — many of these are bots an operator
-*wants* to reach the content, but on conditions the operator sets:
+agents, partner integrations — many of these are bots a site
+*wants* to reach the content, but on conditions the site sets:
 when, how often, which paths, with what rate cap, with what
 attribution. mod_botshield's primitives are built around setting
 those terms:
@@ -17,7 +17,7 @@ those terms:
   configured CIDR ranges are loaded, verified crawlers (UA-and-IP
   match against the published ranges) bypass the score ladder
   entirely. The built-in seed list covers Googlebot, Bingbot,
-  and Applebot; operators add others via `BotShieldAllowBot` and
+  and Applebot; you add others via `BotShieldAllowBot` and
   refresh ranges out of band with `tools/refresh-bot-ranges.sh`.
 - **Robots.txt enforcement.** A bot that ignores your `Disallow`
   rules gets enforced at the policy layer — robots.txt is no
@@ -36,7 +36,7 @@ those terms:
 A site that wanted to block every bot could do that with much
 less than mod_botshield offers. The reason this module exists is
 that "block everything that isn't a real human browser" is the
-*wrong* answer for most operators — they want search-engine
+*wrong* answer for most sites — they want search-engine
 indexing, want LLM crawlers to cite them under controlled terms,
 want monitoring to reach health endpoints, want partner bots to
 hit their API. mod_botshield is the policy surface for saying
@@ -62,7 +62,7 @@ What Cloudflare gives you that mod_botshield doesn't:
   application-layer attacks orders of magnitude bigger than a
   single Apache instance can survive.
 - **Managed challenges and turnkey product.** No tuning, no
-  capacity sizing, no operator log-grepping. Pay the bill, get a
+  capacity sizing, no log-grepping. Pay the bill, get a
   policy.
 
 What mod_botshield gives you that Cloudflare doesn't:
@@ -72,7 +72,7 @@ What mod_botshield gives you that Cloudflare doesn't:
 - **No vendor lock-in or recurring cost.** Bot mitigation that
   goes beyond simple known-bad-IP blocking is typically a paid
   tier with managed CDNs.
-- **Operator control.** You write the rules in Apache config you
+- **Direct control.** You write the rules in Apache config you
   already understand; you don't have to learn a separate dashboard
   or wait for a vendor to add a feature.
 
@@ -304,7 +304,7 @@ For challenged requests, yes, the user experiences friction
 of clicked PoW; captcha for as long as the provider takes). That's
 the entire point: *make scraping expensive without making real use
 expensive*. The threshold tuning workflow in
-[staging](../staging/index.html) is the operator handle on where
+[staging](../staging/index.html) is your handle on where
 that line falls.
 
 ### Does it work with PHP / FastCGI / mod_php / mod_proxy / nginx upstream?
@@ -342,7 +342,7 @@ Yes — it's just an Apache module. The constraints are:
 ### How much memory does it use?
 
 Default: 16 MiB SHM segment shared across all workers, growing as
-operators raise capacity directives. Per-process overhead is
+sites raise capacity directives. Per-process overhead is
 negligible (the `.so` is a few hundred KB; no per-request heap
 allocation outside of Apache's `r->pool` which is freed at request
 end).
@@ -355,7 +355,7 @@ sizing is documented in [deployment](../deployment/index.html#capacity-sizing).
 ### Does it phone home? Send data anywhere?
 
 No. The module makes outbound network calls in two
-operator-controlled categories:
+configured categories:
 
 1. **Captcha siteverify.** When `BotShieldCaptchaProvider` is
    configured, mod_botshield makes one HTTPS POST per verify
@@ -363,7 +363,7 @@ operator-controlled categories:
    client's captcha token (and the client IP as the `remoteip`
    field). This fires from three paths: the `/captcha-verify`
    endpoint, the silent-tier embedded-verify endpoint when an
-   operator pairs silent with a captcha provider, and the
+   site pairs silent with a captcha provider, and the
    form-captcha fixup. No siteverify call ever happens without
    a captcha provider explicitly configured on the scope.
 
@@ -376,8 +376,8 @@ operator-controlled categories:
 2. **Bot-range refresh script.** `tools/refresh-bot-ranges.sh`
    fetches published JSON from search-engine providers
    (Googlebot, Bingbot, etc.) and rewrites the CIDR files in
-   `/var/lib/botshield/bots/`. This runs only when the operator
-   invokes it (cron or manual); the module itself never makes
+   `/var/lib/botshield/bots/`. This runs only when you
+   invoke it (cron or manual); the module itself never makes
    these calls at runtime.
 
 No telemetry. No analytics. No phoning the project. The module is
@@ -415,7 +415,7 @@ The module's data footprint (client IP + flag bits + TTL) is
 generally classified as personal data under GDPR. Considerations:
 
 - **Lawful basis.** Bot mitigation is generally a "legitimate
-  interest" — preventing scraping of operator data. Document the
+  interest" — preventing scraping of site data. Document the
   basis in your privacy notice.
 - **Retention.** Flagged-IP entries expire after the configured
   TTL (default 1 hour for honeypot hits). The Bloom filter
@@ -456,11 +456,11 @@ mod_botshield fails open for siteverify timeouts. If
 provider responds, the verification path treats the request as
 passing — same outcome it would get without the provider. A
 WARNING-level log line carries the literal string `failing open`
-so operators can grep / alert on it. The Prometheus metrics
+so you can grep / alert on it. The Prometheus metrics
 count these as `outcome=failopen`.
 
 The reasoning: a third-party provider outage shouldn't black-hole
-legitimate traffic. Operators preferring fail-closed semantics
+legitimate traffic. Sites preferring fail-closed semantics
 can wrap the provider in a circuit breaker (e.g. require captcha
 tier through a different path that doesn't fail-open) but that
 isn't the default.
@@ -472,9 +472,9 @@ mod_botshield degrades gracefully:
 - Periodic state-file snapshots stop. The graceful-shutdown save
   still runs.
 - The capacity headroom watchdog stops emitting NOTICE/WARN
-  lines. Operators can read the same data from the on-demand
+  lines. You can read the same data from the on-demand
   Prometheus gauges (`botshield_shm_flagged_used` etc.).
-- The robots.txt mtime-poller stops. Operators must reload Apache
+- The robots.txt mtime-poller stops. You must reload Apache
   to pick up robots.txt changes.
 - The load sampler stops; load triggers won't fire.
 
@@ -578,7 +578,7 @@ permanent denial better than mod_botshield does.
 ## Where to next
 
 - Install + minimal config: [getting-started](../getting-started/index.html).
-- Tier model and scoring: [operator-model](../operator-model/index.html).
+- Tier model and scoring: [site model](../site-model/index.html).
 - Allow lists, triggers, robots: [policy](../policy/index.html).
 - Captcha + app-bridge: [captcha](../captcha/index.html).
 - Common operational issues: [troubleshooting](../troubleshooting/index.html).

@@ -94,7 +94,7 @@ Drop a single block into the vhost you want gated:
 
 That's the floor. Everything else (tier thresholds, forgiveness,
 allow lists, captcha providers, triggers) ships with reasonable
-defaults documented on the [operator model](../operator-model/index.html) and
+defaults documented on the [site model](../site-model/index.html) and
 [directives](../directives/index.html) pages.
 
 `BotShieldAlgorithm sha256-zeros` is currently the only built-in PoW
@@ -161,7 +161,7 @@ curl -sk -A "python-requests/2.31" https://example.test/ | grep -c BOTSHIELD
 
 If you don't see the widget, the heuristic configuration on your
 scope likely diverges from the defaults — see
-[operator model](../operator-model/index.html#tuning-workflow) for the
+[site model](../site-model/index.html#tuning-workflow) for the
 tuning workflow and [observability](../observability/index.html) for how
 to inspect what each request scored.
 
@@ -192,7 +192,7 @@ gradual rollback prefer `BotShieldShadowMode on` (see
 ## Where to next
 
 - Real-world deployments behind a proxy: [deployment](../deployment/index.html).
-- Tier model, scoring, and tuning: [operator model](../operator-model/index.html).
+- Tier model, scoring, and tuning: [site model](../site-model/index.html).
 - Allow lists, rate limits, and triggers: [policy](../policy/index.html).
 - Third-party captcha integration: [captcha](../captcha/index.html).
 - Metrics, decision log, mod_status: [observability](../observability/index.html).

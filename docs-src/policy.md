@@ -74,7 +74,7 @@ states:
   most reliable signals — bot operators love claiming Googlebot.
 - **unverified** — UA matches, classifier hit but ranges aren't
   loaded for this name. Logged with reason `bot-unverified` for
-  operator visibility, no score effect.
+  visibility, no score effect.
 
 ## Rate limits and block paths
 
@@ -132,7 +132,7 @@ Path globs use a single `*` wildcard at the trailing edge. A
 non-trailing `*` (e.g. `/api/*/v2/`) emits a NOTICE at config-parse
 time — the v1 matcher would have treated the inner `*` as a
 literal byte; the current matcher follows RFC 9309's leftmost
-greedy semantics. The NOTICE warns operators that intent may have
+greedy semantics. The NOTICE warns that intent may have
 shifted; existing configs aren't broken, just verified.
 
 ## Robots.txt enforcement
@@ -157,7 +157,7 @@ Args:
 - **`BotShieldRobotsWildcardScope <mode>`** — how strict the
   matcher is on `User-agent: *` rules:
   - `heuristic` (default): wildcard rules apply only when no more
-    specific group matches. Closest to operator intent — a `*`
+    specific group matches. Closest to your intent — a `*`
     block doesn't override a tighter Googlebot allow.
   - `strict`: RFC-9309 strict semantics. Wildcard rules participate
     in matching like any other group. May produce surprising
@@ -166,7 +166,7 @@ Args:
     apply.
 
 Group iteration is exposed at `<prefix>/policy-status` for
-operator inspection (see [observability](../observability/index.html)).
+inspection (see [observability](../observability/index.html)).
 
 ## Triggers — predicate-action engine
 
@@ -260,7 +260,7 @@ Predicate shapes:
 - `env=<name>=<value>` — exact value match.
 
 Narrower than cookie by design — no substring/contains shape and
-no bulk-state analog. Operators who need rich matching set a
+no bulk-state analog. If you need rich matching, set a
 coarse bucket upstream (`SetEnvIfExpr`, ModSecurity rule, etc.)
 and consume the bucket here. `redirect=` is not a valid action
 key on env or load triggers.
@@ -349,7 +349,7 @@ Two action verbs:
 
 The `reset` keyword is directive-level (not an action verb): a
 line of the form `BotShieldFlagTrigger <flag> reset` clears every
-prior trigger (compiled-in default + earlier operator declarations)
+prior trigger (compiled-in default + earlier declarations)
 for that flag at post-config time. `reset` may appear with or
 without a trailing `action=...`:
 
@@ -382,13 +382,13 @@ Trust signals (credits) are score-only by design; no credit ever
 forces tier *down*. A verified-human flag can't unlock a request
 that already tripped a different tier_floor.
 
-Operator-supplied `BotShieldFlagTrigger` directives override the
+Configured `BotShieldFlagTrigger` directives override the
 defaults for the matching flag bit + action verb pair (later
 declarations win, same as every other trigger family).
 
 ### Per-Apache-scope triggers — `BotShieldTrigger`
 
-For everything else operators want to do at a specific Apache
+For everything else you want to do at a specific Apache
 scope — flag the IP, add a penalty, return a status, observe in
 shadow — there's a single per-scope directive:
 
@@ -465,7 +465,7 @@ through window. The IP's flagged-IP entry is preserved so the
 suspicious behavior is still recorded for downstream signals; only
 the in-line challenge is suppressed.
 
-Operators staging a fresh deployment with aggressive thresholds
+Sites staging a fresh deployment with aggressive thresholds
 are the most likely to trip this. Watch the
 `tier_pass_total` counter for an unusual climb under "safeguard"
 reasons in the decision log (safeguard rolls into pass for metric

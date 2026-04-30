@@ -26,7 +26,7 @@ code has to absorb the traffic.
 
 **Status: beta.** Stable shape, exercising in dev; not yet a production
 deployment. Architecture, threat model, and per-extension design notes
-live in [DESIGN.md](DESIGN.md). Operator-facing handbook is rendered to
+live in [DESIGN.md](DESIGN.md). Site handbook is rendered to
 GitHub Pages from `docs-src/`; see the [documentation index](#documentation)
 below.
 
@@ -97,14 +97,14 @@ chmod 600 /etc/botshield/secret`. Full setup walkthrough in
 
 ## Documentation
 
-Operator handbook (rendered to
+Site handbook (rendered to
 [hubzero.github.io/botshield](https://hubzero.github.io/botshield/)
 from these sources):
 
 | Topic | Source |
 |---|---|
 | Getting started — install, first vhost, smoke test | [`docs-src/getting-started.md`](docs-src/getting-started.md) |
-| Operator model — scoring, tiers, cookie reputation, multi-vhost | [`docs-src/operator-model.md`](docs-src/operator-model.md) |
+| Site model — scoring, tiers, cookie reputation, multi-vhost | [`docs-src/site-model.md`](docs-src/site-model.md) |
 | Directives reference | [`docs-src/directives.md`](docs-src/directives.md) |
 | Policy — triggers, rate limits, block-paths, robots.txt | [`docs-src/policy.md`](docs-src/policy.md) |
 | Captcha tier — providers, hardening, configuration | [`docs-src/captcha.md`](docs-src/captcha.md) |
