@@ -1745,6 +1745,29 @@ static void bs_populate_auto_secret(apr_pool_t *pconf, apr_pool_t *ptemp,
     }
 }
 
+/* When BotShieldShadowMode is set on any server scope, log a one-time
+ * hint at startup pointing at the per-module LogLevel knob. Decision
+ * log lines emit at APLOG_INFO; the default vhost LogLevel is warn,
+ * so without this nudge the operator turns on shadow mode and sees
+ * nothing in their logs. */
+static void bs_log_shadow_hint(server_rec *s)
+{
+    for (server_rec *sv = s; sv; sv = sv->next) {
+        bs_server_cfg *vc = ap_get_module_config(sv->module_config,
+                                                 &botshield_module);
+        if (vc && vc->shadow_mode == 1) {
+            ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+                "mod_botshield: BotShieldShadowMode is on — all "
+                "client-visible enforcement is suppressed and logged "
+                "as 'would-challenge' / ':observe'. To see the "
+                "decision log, raise the per-module level: "
+                "'LogLevel botshield:info' inside the vhost "
+                "(default is warn, which filters decision lines).");
+            return;   /* one notice is enough */
+        }
+    }
+}
+
 /* Default the PoW algorithm to sha256-zeros when no BotShieldAlgorithm
  * directive was provided. Same lookup_defaults mechanism as the
  * auto-secret: populate the server-scope dir_cfg, let the existing
@@ -1799,6 +1822,7 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     bs_init_state_persistence(pconf, s, scfg);
     bs_populate_auto_secret(pconf, ptemp, s);
     bs_populate_default_algorithm(s);
+    bs_log_shadow_hint(s);
     bs_wire_allowlist(pconf, s);
 
     int next_slot = 0;
