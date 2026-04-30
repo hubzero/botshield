@@ -45,6 +45,7 @@
 #include "botshield.h"
 #include "config.h"
 #include "allowlist.h"
+#include "challenge.h"
 #include "load.h"
 #include "metrics.h"
 #include "robots.h"
@@ -1744,6 +1745,32 @@ static void bs_populate_auto_secret(apr_pool_t *pconf, apr_pool_t *ptemp,
     }
 }
 
+/* Default the PoW algorithm to sha256-zeros when no BotShieldAlgorithm
+ * directive was provided. Same lookup_defaults mechanism as the
+ * auto-secret: populate the server-scope dir_cfg, let the existing
+ * merge fall through into every <Location> that didn't override.
+ *
+ * sha256-zeros is the only standalone-meaningful PoW algorithm; the
+ * captcha-* slots in the registry require provider-specific directives
+ * (BotShieldCaptchaProvider + SiteKey + SecretFile) before they're
+ * useful, so they're never something an operator would land on
+ * by accident. Defaulting here means "BotShieldEnabled On" suffices
+ * for the common case (silent + hard PoW tiers); captcha tier still
+ * needs its provider config but the cookie-alg side is auto-populated
+ * by bs_captcha_set_provider. */
+static void bs_populate_default_algorithm(server_rec *s)
+{
+    const bs_pow_algorithm *alg = bs_find_algorithm("sha256-zeros");
+    if (!alg) return;   /* registry slot unexpectedly missing */
+    for (server_rec *sv = s; sv; sv = sv->next) {
+        bs_dir_cfg *dcfg = ap_get_module_config(
+            sv->lookup_defaults, &botshield_module);
+        if (dcfg && !dcfg->algorithm) {
+            dcfg->algorithm = alg;
+        }
+    }
+}
+
 /* --- post_config orchestrator ---
  *
  * Each phase is its own static helper above; this function reads
@@ -1771,6 +1798,7 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
 
     bs_init_state_persistence(pconf, s, scfg);
     bs_populate_auto_secret(pconf, ptemp, s);
+    bs_populate_default_algorithm(s);
     bs_wire_allowlist(pconf, s);
 
     int next_slot = 0;
