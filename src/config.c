@@ -1856,12 +1856,8 @@ static void bs_log_logonly_hint(server_rec *s)
                                                  &botshield_module);
         if (vc && vc->log_only == 1) {
             ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
-                "mod_botshield: BotShieldLogOnly is on - all "
-                "client-visible enforcement is suppressed and logged "
-                "as 'would-challenge' / ':observe'. To see the "
-                "decision log, raise the per-module level: "
-                "'LogLevel botshield:info' inside the vhost "
-                "(default is warn, which filters decision lines).");
+                "mod_botshield: BotShieldLogOnly on - "
+                "raise 'LogLevel botshield:info' to see decision logs.");
             return;   /* one notice is enough */
         }
     }
