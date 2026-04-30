@@ -17,7 +17,11 @@
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include <errno.h>
 #include <sys/stat.h>
+#include <unistd.h>
+
+#include <apr_file_io.h>
 
 #include <httpd.h>
 #include <http_config.h>
@@ -1576,6 +1580,170 @@ static void bs_register_headroom_watchdog(apr_pool_t *pconf,
     }
 }
 
+/* Auto-managed master secret. If no BotShieldSecretFile is configured at
+ * vhost scope, populate the server's lookup_defaults dir_cfg with a
+ * 32-byte secret loaded from BS_DEFAULT_SECRET_PATH (generating the
+ * file on first run). The existing dir_cfg merge logic propagates
+ * the master + derived keys down to every <Location> that didn't
+ * override.
+ *
+ * Multi-host caveat: each host auto-generates its own file, so cookies
+ * issued by one host won't validate at another. Operators running
+ * BotShield behind a load balancer must distribute one shared file or
+ * configure BotShieldSecretFile pointing at shared storage. The startup
+ * log line below names the path so this isn't silent.
+ *
+ * Idempotent across post_config's two-pass cold-boot behavior — the
+ * first_pass_skip guard means this only runs on the second pass; on
+ * graceful restart it runs once and the file is read, not regenerated. */
+static apr_status_t bs_load_or_generate_default_secret(
+    apr_pool_t *p, apr_pool_t *ptemp, server_rec *s,
+    unsigned char out[BS_AUTO_SECRET_BYTES])
+{
+    const char *path = BS_DEFAULT_SECRET_PATH;
+    const char *dir  = "/var/lib/botshield";
+
+    apr_file_t *f = NULL;
+    apr_status_t rv = apr_file_open(&f, path,
+        APR_FOPEN_READ | APR_FOPEN_BINARY, APR_FPROT_OS_DEFAULT, ptemp);
+    if (rv == APR_SUCCESS) {
+        apr_size_t n = BS_AUTO_SECRET_BYTES;
+        rv = apr_file_read_full(f, out, n, NULL);
+        apr_file_close(f);
+        if (rv == APR_SUCCESS) return APR_SUCCESS;
+        ap_log_error(APLOG_MARK, APLOG_ERR, rv, s,
+            "mod_botshield: failed to read auto-secret %s; refusing "
+            "to overwrite — inspect or remove the file", path);
+        return rv;
+    }
+    if (!APR_STATUS_IS_ENOENT(rv)) {
+        ap_log_error(APLOG_MARK, APLOG_ERR, rv, s,
+            "mod_botshield: cannot open %s for read", path);
+        return rv;
+    }
+
+    /* File missing — first run on this host. Create dir + file. */
+    rv = apr_dir_make_recursive(dir,
+        APR_FPROT_UREAD | APR_FPROT_UWRITE | APR_FPROT_UEXECUTE, p);
+    if (rv != APR_SUCCESS && !APR_STATUS_IS_EEXIST(rv)) {
+        ap_log_error(APLOG_MARK, APLOG_ERR, rv, s,
+            "mod_botshield: cannot create %s for auto-secret", dir);
+        return rv;
+    }
+
+    if (RAND_bytes(out, BS_AUTO_SECRET_BYTES) != 1) {
+        ap_log_error(APLOG_MARK, APLOG_ERR, 0, s,
+            "mod_botshield: RAND_bytes failed for auto-secret");
+        return APR_EGENERAL;
+    }
+
+    /* Atomic write: tmp + rename. EXCL on the tmp open prevents two
+     * concurrent post_config passes (or a botched prior run) from
+     * stepping on each other; if the tmp already exists, fail loud. */
+    const char *tmp = apr_pstrcat(ptemp, path, ".tmp", NULL);
+    rv = apr_file_open(&f, tmp,
+        APR_FOPEN_WRITE | APR_FOPEN_CREATE | APR_FOPEN_TRUNCATE
+            | APR_FOPEN_BINARY | APR_FOPEN_EXCL,
+        APR_FPROT_UREAD | APR_FPROT_UWRITE, ptemp);
+    if (rv != APR_SUCCESS) {
+        ap_log_error(APLOG_MARK, APLOG_ERR, rv, s,
+            "mod_botshield: cannot create tmp file %s", tmp);
+        return rv;
+    }
+    apr_size_t n = BS_AUTO_SECRET_BYTES;
+    rv = apr_file_write_full(f, out, n, NULL);
+    apr_file_close(f);
+    if (rv != APR_SUCCESS) {
+        apr_file_remove(tmp, ptemp);
+        ap_log_error(APLOG_MARK, APLOG_ERR, rv, s,
+            "mod_botshield: write failed for %s", tmp);
+        return rv;
+    }
+
+    /* chown so workers (running as ap_unixd_config.user_id) can read.
+     * Best-effort — if we're not root the chown fails but the file is
+     * still mode 0600 owned by whoever ran post_config; the operator
+     * will see "could not read auto-secret" at next start and can fix
+     * ownership manually. */
+    if (chown(tmp, ap_unixd_config.user_id,
+              ap_unixd_config.group_id) != 0) {
+        ap_log_error(APLOG_MARK, APLOG_WARNING, errno, s,
+            "mod_botshield: chown(%s) failed; auto-secret may not be "
+            "readable by Apache workers", tmp);
+    }
+    /* Same for the parent dir, in case we just created it. Ignore
+     * failures — the dir may pre-exist with an intentional ownership. */
+    if (chown(dir, ap_unixd_config.user_id,
+              ap_unixd_config.group_id) != 0) {
+        /* deliberately ignored */
+    }
+
+    rv = apr_file_rename(tmp, path, ptemp);
+    if (rv != APR_SUCCESS) {
+        apr_file_remove(tmp, ptemp);
+        ap_log_error(APLOG_MARK, APLOG_ERR, rv, s,
+            "mod_botshield: rename(%s -> %s) failed", tmp, path);
+        return rv;
+    }
+
+    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+        "mod_botshield: generated auto-managed master secret at %s. "
+        "For multi-host deployments, distribute this file across hosts "
+        "or configure BotShieldSecretFile to point at shared storage so "
+        "every host validates cookies issued by every other host.",
+        path);
+    return APR_SUCCESS;
+}
+
+/* For each server_rec, populate its lookup_defaults dir_cfg's secret +
+ * derived keys with the auto-managed master if no explicit
+ * BotShieldSecretFile was configured at server scope. Run once with a
+ * shared 32-byte key — every vhost that didn't override gets the same
+ * derived keys, so cookies issued under "<VirtualHost A>" still validate
+ * under "<VirtualHost B>" on the same host. */
+static void bs_populate_auto_secret(apr_pool_t *pconf, apr_pool_t *ptemp,
+                                    server_rec *s)
+{
+    /* Skip if every server has an explicit secret already. */
+    int need = 0;
+    for (server_rec *sv = s; sv; sv = sv->next) {
+        bs_dir_cfg *dcfg = ap_get_module_config(
+            sv->lookup_defaults, &botshield_module);
+        if (dcfg && !dcfg->secret) { need = 1; break; }
+    }
+    if (!need) return;
+
+    unsigned char master[BS_AUTO_SECRET_BYTES];
+    if (bs_load_or_generate_default_secret(pconf, ptemp, s, master)
+        != APR_SUCCESS) {
+        return;
+    }
+
+    /* Stash a pconf-lifetime copy so dir_cfg->secret points at memory
+     * that outlives ptemp. */
+    unsigned char *master_p = apr_palloc(pconf, BS_AUTO_SECRET_BYTES);
+    memcpy(master_p, master, BS_AUTO_SECRET_BYTES);
+
+    for (server_rec *sv = s; sv; sv = sv->next) {
+        bs_dir_cfg *dcfg = ap_get_module_config(
+            sv->lookup_defaults, &botshield_module);
+        if (!dcfg || dcfg->secret) continue;
+        const char *err = bs_derive_purpose_keys(pconf,
+            master_p, BS_AUTO_SECRET_BYTES,
+            dcfg->derived_gcm_cookie,
+            dcfg->derived_hmac_pending,
+            dcfg->derived_hmac_bootstrap);
+        if (err) {
+            ap_log_error(APLOG_MARK, APLOG_ERR, 0, sv,
+                "mod_botshield: HKDF for auto-secret failed: %s", err);
+            continue;
+        }
+        dcfg->secret           = master_p;
+        dcfg->secret_len       = BS_AUTO_SECRET_BYTES;
+        dcfg->derived_keys_set = 1;
+    }
+}
+
 /* --- post_config orchestrator ---
  *
  * Each phase is its own static helper above; this function reads
@@ -1602,6 +1770,7 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     if (rv != OK) return rv;
 
     bs_init_state_persistence(pconf, s, scfg);
+    bs_populate_auto_secret(pconf, ptemp, s);
     bs_wire_allowlist(pconf, s);
 
     int next_slot = 0;

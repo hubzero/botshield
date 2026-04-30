@@ -138,6 +138,18 @@ const char *bs_set_secret_file(cmd_parms *cmd, void *cfg_v,
 const char *bs_set_secondary_secret_file(cmd_parms *cmd, void *cfg_v,
                                          const char *arg);
 
+/* HKDF-derive the three per-purpose 32-byte keys
+ * (cookie GCM, pending HMAC, bootstrap HMAC) from a master secret.
+ * Used by the secret-file directive setters and by the auto-secret
+ * post_config path. Returns NULL on success; on (vanishingly unlikely)
+ * HKDF failure returns a diagnostic string allocated from p. */
+const char *bs_derive_purpose_keys(apr_pool_t *p,
+                                   const unsigned char *master,
+                                   apr_size_t master_len,
+                                   unsigned char *out_gcm,
+                                   unsigned char *out_pending,
+                                   unsigned char *out_bootstrap);
+
 #ifdef __cplusplus
 }
 #endif

@@ -77,6 +77,11 @@ extern "C" {
 #define BS_MAX_PAGE_BYTES     (256 * 1024)
 #define BS_MAX_SECRET_BYTES   1024
 #define BS_MIN_SECRET_BYTES   16
+/* Auto-generated when no BotShieldSecretFile is configured;
+ * see bs_ensure_default_secret. Distribute across hosts for shared
+ * cookie validation, or override with BotShieldSecretFile. */
+#define BS_DEFAULT_SECRET_PATH "/var/lib/botshield/secret"
+#define BS_AUTO_SECRET_BYTES   32
 #define BS_WIDGET_MARKER      "<!-- BOTSHIELD -->"
 
 /* E4 — BotShield-cookie-state note. Set by bs_handler after the

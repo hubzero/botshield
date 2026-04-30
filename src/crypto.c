@@ -260,12 +260,12 @@ int bs_from_hex(const char *in, apr_size_t in_len,
  * derived_hmac_bootstrap in the dir_cfg. Bumping any tag (e.g.
  * "bs:cookie:gcm:v2") is the rotation knob if the underlying
  * crypto contract ever changes. */
-static const char *bs_derive_purpose_keys(apr_pool_t *p,
-                                          const unsigned char *master,
-                                          apr_size_t master_len,
-                                          unsigned char *out_gcm,
-                                          unsigned char *out_pending,
-                                          unsigned char *out_bootstrap)
+const char *bs_derive_purpose_keys(apr_pool_t *p,
+                                   const unsigned char *master,
+                                   apr_size_t master_len,
+                                   unsigned char *out_gcm,
+                                   unsigned char *out_pending,
+                                   unsigned char *out_bootstrap)
 {
     if (!bs_hkdf_derive_key(master, master_len,
                             "bs:cookie:gcm:v1", out_gcm)) {
