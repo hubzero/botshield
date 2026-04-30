@@ -65,7 +65,7 @@
   wrk-driven, results saved per timestamp. Cookied scenario mints
   a real `_bs_verified` and replays. `LogLevel info` scenario
   measures decision-log overhead.
-- Operator handbook: 9 markdown source files (~2,400 lines) under
+- Site handbook: 9 markdown source files (~2,400 lines) under
   `docs-src/`, rendered to `docs/` via `tools/build_site.py`.
 - Performance section in `docs-src/deployment.md` with single-
   connection / saturation / fixed-rate framing.
@@ -113,7 +113,7 @@
   `app_claims_secret` into one shared `app_integration_secret` —
   the two protocols' canonical forms are structurally distinct
   (single-field vs seven-field) so cross-replay isn't possible,
-  and operators no longer maintain two key files.
+  and you no longer maintain two key files.
 - **E14 rework: replaced adaptive-intensity machinery with
   `BotShieldFlagTrigger`.** Original E14 design used a flag-meta
   registry with `penalty=` / `next_difficulty=` / `next_tier=`

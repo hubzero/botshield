@@ -83,7 +83,7 @@ clients with the legacy cookie still work during the transition.
 
 Each vhost gets its own isolated bot reputation by default. A bot
 flagged on `site-a.example.com` doesn't carry that flag to
-`site-b.example.com`. Operators running many vhosts on one Apache
+`site-b.example.com`. Sites running many vhosts on one Apache
 instance get per-site detection without configuring anything.
 
 ### Default: auto-isolation per ServerName
@@ -105,7 +105,7 @@ automatically maintain separate reputation. No configuration required.
 ```
 
 Different sites usually have different threat models — the strict
-isolation is what most operators want.
+isolation is what most sites want.
 
 ### Opt-in shared reputation: `BotShieldShareScope`
 
@@ -167,7 +167,7 @@ emit a NOTICE and are ignored. The SHM segment is module-global, so
 sizing happens once at the main-server level.
 
 The headroom watchdog logs notices when any table approaches
-capacity, so operators can size reactively rather than guess
+capacity, so you can size reactively rather than guess
 up-front. Look for log lines of the form:
 
 ```
@@ -216,7 +216,7 @@ save more work than many pass-through BotShield checks cost.
 The `tests/bench/run-bench.sh` and `tests/bench/run-rate-bench.sh`
 drivers reproduce these measurements on your own hardware. Raw
 `wrk` / `oha` output is saved under `tests/bench/results/` so
-operators can inspect the full latency and throughput distribution
+you can inspect the full latency and throughput distribution
 when sizing a deployment.
 
 ## State persistence
@@ -276,7 +276,7 @@ file.
 
 ## Where to next
 
-- Tier model, scoring, decision log: [operator model](../operator-model/index.html).
+- Tier model, scoring, decision log: [site model](../site-model/index.html).
 - Allow lists, rate limits, triggers: [policy](../policy/index.html).
 - Captcha and app-bridge integration: [captcha](../captcha/index.html).
 - Staging policy changes safely: [staging](../staging/index.html).

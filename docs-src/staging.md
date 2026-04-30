@@ -1,8 +1,8 @@
 # Staging policy changes
 
-mod_botshield supports two complementary dry-run modes so operators
+mod_botshield supports two complementary dry-run modes so you
 can deploy new rules without affecting production traffic until
-they're confident the matches are correct.
+you're confident the matches are correct.
 
 - **Per-rule observe** — pin a single directive into observe mode.
   Useful for staging individual rules.
@@ -70,7 +70,7 @@ against production traffic without any enforcement risk. Flip back
 to `off` when you're ready to enforce.
 
 `BotShieldShadowMode` is tri-state: `on` / `off` / unset (inherit).
-Operators usually set it at the main server scope and inherit; per-
+Sites usually set it at the main server scope and inherit; per-
 vhost overrides are valid for partial rollouts.
 
 ## Coverage
@@ -150,6 +150,6 @@ forensics.
 
 ## Where to next
 
-- Tier model and scoring: [operator model](../operator-model/index.html).
+- Tier model and scoring: [site model](../site-model/index.html).
 - Per-family rule semantics: [policy](../policy/index.html).
 - Metrics + decision log surface: [observability](../observability/index.html).
