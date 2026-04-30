@@ -376,6 +376,37 @@ void bs_decision_log(request_rec *r,
               && (!reason || !*reason || strcmp(reason, "-") == 0);
     if (boring) level = APLOG_DEBUG;
 
+    /* Stash the same fields as request notes + flip the BOTSHIELD
+     * env var, so an operator can route a dedicated decision log via
+     * mod_log_config:
+     *
+     *   LogFormat "%t %a tier=%{bs_tier}n outcome=%{bs_outcome}n ..." botshield
+     *   CustomLog logs/botshield-decisions.log botshield env=BOTSHIELD
+     *
+     * Notes/env are populated unconditionally — including for the
+     * boring-pass case — so an operator's CustomLog conditional sees
+     * a consistent BOTSHIELD=1 marker on every decision. The
+     * formatter pulls fields by name; missing notes render as "-"
+     * (mod_log_config's standard for absent %{n}). */
+    apr_table_setn(r->notes, "bs_tier",
+                   tier     ? tier     : "-");
+    apr_table_setn(r->notes, "bs_outcome",
+                   outcome  ? outcome  : "-");
+    apr_table_setn(r->notes, "bs_cookie",
+                   cookie   ? cookie   : "-");
+    apr_table_setn(r->notes, "bs_provider",
+                   provider ? provider : "-");
+    apr_table_setn(r->notes, "bs_alg",
+                   alg      ? alg      : "-");
+    apr_table_setn(r->notes, "bs_reason",
+                   reason   ? reason   : "-");
+    apr_table_setn(r->notes, "bs_score",
+                   apr_psprintf(r->pool, "%d", score));
+    if (tag && *tag) {
+        apr_table_setn(r->notes, "bs_tag", tag);
+    }
+    apr_table_setn(r->subprocess_env, "BOTSHIELD", "1");
+
     /* tag= suffix only when a trigger set it; normal decision lines
      * stay byte-identical so existing log parsers don't break. */
     if (tag && *tag) {
