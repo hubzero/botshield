@@ -360,11 +360,27 @@ void bs_decision_log(request_rec *r,
     const char *reason_q = bs_log_quote(r->pool,
                                          reason ? reason : "-");
     const char *path_q   = bs_log_quote(r->pool, path);
+
+    /* Demote the "boring pass" — tier=pass, outcome=declined,
+     * score=0, no reasons, no trigger tag — to DEBUG so an
+     * operator running at 'LogLevel botshield:info' for staging /
+     * tuning sees only decisions where something actually
+     * contributed. Pass-with-credits (score=0 but reasons non-
+     * empty), tagged pass (asset bypass, etc.), and any non-pass
+     * tier all stay at INFO. */
+    int level = APLOG_INFO;
+    int boring = (tier && strcmp(tier, "pass") == 0)
+              && (outcome && strcmp(outcome, "declined") == 0)
+              && score == 0
+              && (!tag || !*tag)
+              && (!reason || !*reason || strcmp(reason, "-") == 0);
+    if (boring) level = APLOG_DEBUG;
+
     /* tag= suffix only when a trigger set it; normal decision lines
      * stay byte-identical so existing log parsers don't break. */
     if (tag && *tag) {
         const char *tag_q = bs_log_quote(r->pool, tag);
-        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+        ap_log_rerror(APLOG_MARK, level, 0, r,
             "mod_botshield: decision tier=%s outcome=%s ip=%s score=%d "
             "cookie=%s provider=%s alg=%s reason=\"%s\" path=\"%s\" "
             "tag=\"%s\"",
@@ -374,7 +390,7 @@ void bs_decision_log(request_rec *r,
             alg      ? alg      : "-",
             reason_q, path_q, tag_q);
     } else {
-        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+        ap_log_rerror(APLOG_MARK, level, 0, r,
             "mod_botshield: decision tier=%s outcome=%s ip=%s score=%d "
             "cookie=%s provider=%s alg=%s reason=\"%s\" path=\"%s\"",
             tier, outcome, ip, score,
