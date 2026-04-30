@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Operator model | mod_botshield</title>
+  <title>Site model | BotShield</title>
   <meta name="description" content="Tiers, scoring, cookie-carried reputation, decision log, tuning workflow.">
   <link rel="stylesheet" href="../assets/site.css">
 </head>
@@ -17,10 +17,11 @@
           <span class="brand__wordmark-soft">Bot</span><span class="brand__wordmark-strong">Shield</span>
         </span>
       </a>
+      <span class="site-header__beta" aria-label="Beta release">Beta</span>
       <nav class="top-nav" aria-label="Primary">
-        <a class="top-nav__link" href="#">GitHub</a>
+        <a class="top-nav__link" href="https://github.com/hubzero/botshield">GitHub</a>
         <a class="top-nav__link" href="../getting-started/index.html">Docs</a>
-        <a class="top-nav__link" href="../getting-started/index.html#build">Download</a>
+        <a class="top-nav__link" href="https://github.com/hubzero/botshield/releases">Download</a>
       </nav>
     </header>
 
@@ -37,7 +38,7 @@
   <span class="docs-nav__summary">Reverse proxies, slow-client defense, multi-vhost reputation, secret rotation, capacity sizing.</span>
 </a>
 <a class="docs-nav__item is-active" href="index.html">
-  <span class="docs-nav__title">Operator model</span>
+  <span class="docs-nav__title">Site model</span>
   <span class="docs-nav__summary">Tiers, scoring, cookie-carried reputation, decision log, tuning workflow.</span>
 </a>
 <a class="docs-nav__item" href="../policy/index.html">
@@ -58,15 +59,15 @@
 </a>
 <a class="docs-nav__item" href="../directives/index.html">
   <span class="docs-nav__title">Directive reference</span>
-  <span class="docs-nav__summary">Canonical operator-facing reference for all 78 directives, grouped by family.</span>
+  <span class="docs-nav__summary">Canonical reference for all 78 directives, grouped by family.</span>
 </a>
 <a class="docs-nav__item" href="../troubleshooting/index.html">
   <span class="docs-nav__title">Troubleshooting</span>
-  <span class="docs-nav__summary">Common operator-visible issues, diagnostics, and fixes.</span>
+  <span class="docs-nav__summary">Common issues, diagnostics, and fixes.</span>
 </a>
 <a class="docs-nav__item" href="../faq/index.html">
   <span class="docs-nav__title">FAQ</span>
-  <span class="docs-nav__summary">Honest answers to questions operators ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
+  <span class="docs-nav__summary">Honest answers to questions teams ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
 </a>
 <a class="docs-nav__item" href="../guide/index.html">
   <span class="docs-nav__title">Project README</span>
@@ -82,9 +83,9 @@
       <article class="docs-article">
         <header class="docs-article__header">
           <p class="eyebrow">Documentation</p>
-          <h1>Operator model</h1>
+          <h1>Site model</h1>
           <p class="docs-article__summary">Tiers, scoring, cookie-carried reputation, decision log, tuning workflow.</p>
-          <p class="docs-article__source">Operator model</p>
+          <p class="docs-article__source">Site model</p>
         </header>
 <section class="toc">
   <h2 class="toc__heading">On this page</h2>
@@ -175,7 +176,7 @@ floors never silently downgrade. Floor lifts produce a
 <code>flag-tier-floor:&lt;tier&gt;</code> reason so the reasoning is visible in the
 log.</p>
 <h2 id="built-in-heuristic-signals">Built-in heuristic signals</h2>
-<p>These run on every request before any operator-configured trigger
+<p>These run on every request before any configured trigger
 or cohort. Signs are absolute; the score either rises or stays put.</p>
 <table>
 <thead>
@@ -242,7 +243,7 @@ or cohort. Signs are absolute; the score either rises or stays put.</p>
 <td><code>flag-trigger:app_verified_human</code></td>
 </tr>
 <tr>
-<td>Operator path / load / cookie / env / flag triggers with <code>action=score add=N</code></td>
+<td>Configured path / load / cookie / env / flag triggers with <code>action=score add=N</code></td>
 <td>configured</td>
 <td><code>&lt;family&gt;-trigger:&lt;name&gt;</code></td>
 </tr>
@@ -347,8 +348,8 @@ you query when tuning:</p>
 <pre><code class="language-apache">LogLevel botshield_module:info
 </code></pre>
 <p>The <code>reason</code> field is the comma-joined reason names captured by
-<code>bs_score_add</code>. The <code>tag</code> field (when present) is the operator-
-supplied <code>log=&lt;tag&gt;</code> value from the matching trigger. See
+<code>bs_score_add</code>. The <code>tag</code> field (when present) is the
+configured <code>log=&lt;tag&gt;</code> value from the matching trigger. See
 <a href="../observability/index.html">observability</a> for the full decision-log
 vocabulary.</p>
 <p>For verbose debugging — the per-reason penalty values, not just the

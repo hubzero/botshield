@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Deployment | mod_botshield</title>
+  <title>Deployment | BotShield</title>
   <meta name="description" content="Reverse proxies, slow-client defense, multi-vhost reputation, secret rotation, capacity sizing.">
   <link rel="stylesheet" href="../assets/site.css">
 </head>
@@ -17,10 +17,11 @@
           <span class="brand__wordmark-soft">Bot</span><span class="brand__wordmark-strong">Shield</span>
         </span>
       </a>
+      <span class="site-header__beta" aria-label="Beta release">Beta</span>
       <nav class="top-nav" aria-label="Primary">
-        <a class="top-nav__link" href="#">GitHub</a>
+        <a class="top-nav__link" href="https://github.com/hubzero/botshield">GitHub</a>
         <a class="top-nav__link" href="../getting-started/index.html">Docs</a>
-        <a class="top-nav__link" href="../getting-started/index.html#build">Download</a>
+        <a class="top-nav__link" href="https://github.com/hubzero/botshield/releases">Download</a>
       </nav>
     </header>
 
@@ -36,8 +37,8 @@
   <span class="docs-nav__title">Deployment</span>
   <span class="docs-nav__summary">Reverse proxies, slow-client defense, multi-vhost reputation, secret rotation, capacity sizing.</span>
 </a>
-<a class="docs-nav__item" href="../operator-model/index.html">
-  <span class="docs-nav__title">Operator model</span>
+<a class="docs-nav__item" href="../site-model/index.html">
+  <span class="docs-nav__title">Site model</span>
   <span class="docs-nav__summary">Tiers, scoring, cookie-carried reputation, decision log, tuning workflow.</span>
 </a>
 <a class="docs-nav__item" href="../policy/index.html">
@@ -58,15 +59,15 @@
 </a>
 <a class="docs-nav__item" href="../directives/index.html">
   <span class="docs-nav__title">Directive reference</span>
-  <span class="docs-nav__summary">Canonical operator-facing reference for all 78 directives, grouped by family.</span>
+  <span class="docs-nav__summary">Canonical reference for all 78 directives, grouped by family.</span>
 </a>
 <a class="docs-nav__item" href="../troubleshooting/index.html">
   <span class="docs-nav__title">Troubleshooting</span>
-  <span class="docs-nav__summary">Common operator-visible issues, diagnostics, and fixes.</span>
+  <span class="docs-nav__summary">Common issues, diagnostics, and fixes.</span>
 </a>
 <a class="docs-nav__item" href="../faq/index.html">
   <span class="docs-nav__title">FAQ</span>
-  <span class="docs-nav__summary">Honest answers to questions operators ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
+  <span class="docs-nav__summary">Honest answers to questions teams ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
 </a>
 <a class="docs-nav__item" href="../guide/index.html">
   <span class="docs-nav__title">Project README</span>
@@ -169,7 +170,7 @@ clients with the legacy cookie still work during the transition.</p>
 <h2 id="multi-vhost-reputation">Multi-vhost reputation</h2>
 <p>Each vhost gets its own isolated bot reputation by default. A bot
 flagged on <code>site-a.example.com</code> doesn't carry that flag to
-<code>site-b.example.com</code>. Operators running many vhosts on one Apache
+<code>site-b.example.com</code>. Sites running many vhosts on one Apache
 instance get per-site detection without configuring anything.</p>
 <h3 id="default-auto-isolation-per-servername">Default: auto-isolation per ServerName</h3>
 <p>Each vhost's reputation namespace is derived from its <code>ServerName</code>
@@ -186,7 +187,7 @@ automatically maintain separate reputation. No configuration required.</p>
 &lt;/VirtualHost&gt;
 </code></pre>
 <p>Different sites usually have different threat models — the strict
-isolation is what most operators want.</p>
+isolation is what most sites want.</p>
 <h3 id="opt-in-shared-reputation-botshieldsharescope">Opt-in shared reputation: <code>BotShieldShareScope</code></h3>
 <p>When sibling vhosts should share state — dev/prod environments,
 www/api subdomains under the same brand, redundant frontends — set
@@ -271,7 +272,7 @@ should size capacity directives to match.</p>
 emit a NOTICE and are ignored. The SHM segment is module-global, so
 sizing happens once at the main-server level.</p>
 <p>The headroom watchdog logs notices when any table approaches
-capacity, so operators can size reactively rather than guess
+capacity, so you can size reactively rather than guess
 up-front. Look for log lines of the form:</p>
 <pre><code>mod_botshield: capacity headroom: flagged_ip 38241/50000 (76%)
 </code></pre>
@@ -344,7 +345,7 @@ save more work than many pass-through BotShield checks cost.</p>
 <p>The <code>tests/bench/run-bench.sh</code> and <code>tests/bench/run-rate-bench.sh</code>
 drivers reproduce these measurements on your own hardware. Raw
 <code>wrk</code> / <code>oha</code> output is saved under <code>tests/bench/results/</code> so
-operators can inspect the full latency and throughput distribution
+you can inspect the full latency and throughput distribution
 when sizing a deployment.</p>
 <h2 id="state-persistence">State persistence</h2>
 <p>mod_botshield can snapshot the SHM tables to disk at a configured
@@ -394,7 +395,7 @@ are out of rotation scope; rotate those by reloading with the new
 file.</p>
 <h2 id="where-to-next">Where to next</h2>
 <ul>
-<li>Tier model, scoring, decision log: <a href="../operator-model/index.html">operator model</a>.</li>
+<li>Tier model, scoring, decision log: <a href="../site-model/index.html">site model</a>.</li>
 <li>Allow lists, rate limits, triggers: <a href="../policy/index.html">policy</a>.</li>
 <li>Captcha and app-bridge integration: <a href="../captcha/index.html">captcha</a>.</li>
 <li>Staging policy changes safely: <a href="../staging/index.html">staging</a>.</li>

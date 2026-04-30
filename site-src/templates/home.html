@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{{ site_name }} | Apache-native bot defense</title>
+  <title>{{ site_name }} | Adaptive bot mitigation for Apache</title>
   <meta name="description" content="{{ site_description }}">
   <link rel="stylesheet" href="assets/site.css">
 </head>
@@ -28,6 +28,7 @@
       <section class="hero">
         <div class="hero__brand hero__brand--split">
           <img class="hero__emblem" src="{{ logo_href }}" alt="" aria-hidden="true">
+          <span class="hero__beta-stamp" aria-label="Beta release">Beta</span>
           <div class="hero__brand-copy">
             <p class="hero__wordmark" aria-label="BotShield">
               <span class="hero__wordmark-soft">Bot</span><span class="hero__wordmark-strong">Shield</span>
@@ -250,8 +251,8 @@
 
       <section class="capability-row">
         <article class="capability-card">
-          <h3>Drop-in challenge providers</h3>
-          <ul class="cap-brands" aria-label="Supported challenge providers">
+          <h3>Drop-in CAPTCHA providers</h3>
+          <ul class="cap-brands" aria-label="Supported CAPTCHA providers">
             <li class="cap-brand cap-brand--turnstile">
               <span class="cap-brand__mark" aria-hidden="true">
                 <svg viewBox="0 0 24 24"><path d="M5.5 12.5 L10 17 L18.5 8" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" fill="none"></path></svg>
@@ -273,20 +274,39 @@
               </span>
               <span class="cap-brand__name">reCAPTCHA</span>
             </li>
+            <li class="cap-brand cap-brand--friendly">
+              <span class="cap-brand__mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <circle cx="12" cy="12" r="8" stroke-width="2" fill="none"></circle>
+                  <circle cx="9" cy="10" r="1.1"></circle>
+                  <circle cx="15" cy="10" r="1.1"></circle>
+                  <path d="M8.5 14.5 Q12 17.5 15.5 14.5" stroke-width="1.8" stroke-linecap="round" fill="none"></path>
+                </svg>
+              </span>
+              <span class="cap-brand__name">FriendlyCaptcha</span>
+            </li>
+            <li class="cap-brand cap-brand--geetest">
+              <span class="cap-brand__mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <path d="M16 9 a5 5 0 1 0 0 6 H12" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" fill="none"></path>
+                </svg>
+              </span>
+              <span class="cap-brand__name">GeeTest</span>
+            </li>
             <li class="cap-brand cap-brand--pow">
               <span class="cap-brand__mark" aria-hidden="true">
                 <svg viewBox="0 0 24 24">
                   <path d="M9 4 L7 20 M17 4 L15 20 M5 9 L20 9 M4 15 L19 15" stroke-width="2.2" stroke-linecap="round" fill="none"></path>
                 </svg>
               </span>
-              <span class="cap-brand__name">Form PoW</span>
+              <span class="cap-brand__name">Built-in PoW</span>
             </li>
           </ul>
-          <p>Cloudflare Turnstile, hCaptcha, reCAPTCHA, or a built-in form proof-of-work &mdash; pick what fits your audience.</p>
+          <p>Cloudflare Turnstile, hCaptcha, reCAPTCHA, FriendlyCaptcha, GeeTest, or a built-in form proof-of-work &mdash; pick what fits your audience.</p>
         </article>
         <article class="capability-card">
-          <h3>Crawlers held to policy</h3>
-          <ul class="cap-brands" aria-label="Recognized crawlers">
+          <h3>Bots recognized and held to policy</h3>
+          <ul class="cap-brands" aria-label="Recognized bots">
             <li class="cap-brand cap-brand--googlebot">
               <span class="cap-brand__mark" aria-hidden="true">
                 <svg viewBox="0 0 24 24"><text x="12" y="17" text-anchor="middle" font-family="var(--font-display)" font-size="14" font-weight="800">G</text></svg>
@@ -313,11 +333,43 @@
               </span>
               <span class="cap-brand__name">ClaudeBot</span>
             </li>
+            <li class="cap-brand cap-brand--bytespider">
+              <span class="cap-brand__mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <circle cx="12" cy="12" r="3" stroke-width="2" fill="none"></circle>
+                  <path d="M12 9 V4 M12 15 V20 M9 12 H4 M15 12 H20 M9.5 9.5 L6 6 M14.5 14.5 L18 18 M9.5 14.5 L6 18 M14.5 9.5 L18 6" stroke-width="1.6" stroke-linecap="round" fill="none"></path>
+                </svg>
+              </span>
+              <span class="cap-brand__name">Bytespider</span>
+            </li>
+            <li class="cap-brand cap-brand--perplexitybot">
+              <span class="cap-brand__mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><text x="12" y="17" text-anchor="middle" font-family="var(--font-display)" font-size="14" font-weight="800">P</text></svg>
+              </span>
+              <span class="cap-brand__name">PerplexityBot</span>
+            </li>
+            <li class="cap-brand cap-brand--forged">
+              <span class="cap-brand__mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <circle cx="12" cy="12" r="8" stroke-width="2" fill="none"></circle>
+                  <path d="M6 6 L18 18" stroke-width="2.4" stroke-linecap="round" fill="none"></path>
+                </svg>
+              </span>
+              <span class="cap-brand__name">Forged bot</span>
+            </li>
+            <li class="cap-brand cap-brand--scraper">
+              <span class="cap-brand__mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <path d="M9 7 L4 12 L9 17 M15 7 L20 12 L15 17" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"></path>
+                </svg>
+              </span>
+              <span class="cap-brand__name">Scraper</span>
+            </li>
           </ul>
-          <p>Real crawlers respect robots.txt. Forged user-agents face the same gate as everyone else.</p>
+          <p>We identify bots by user-agent, by behavioral signals, and &mdash; when you load them &mdash; against published IP ranges. The robots.txt policy you declare is enforced against verified, suspected, and forged bots alike.</p>
         </article>
         <article class="capability-card">
-          <h3>Tiered local memory</h3>
+          <h3>Built-in reputation memory</h3>
           <ul class="cap-brands cap-brands--internal" aria-label="Local memory mechanisms">
             <li class="cap-brand cap-brand--bloom">
               <span class="cap-brand__mark" aria-hidden="true">
@@ -333,7 +385,7 @@
                   <circle cx="18" cy="18" r="2.1"></circle>
                 </svg>
               </span>
-              <span class="cap-brand__name">Bloom filter</span>
+              <span class="cap-brand__name">First-sight check</span>
             </li>
             <li class="cap-brand cap-brand--shm">
               <span class="cap-brand__mark" aria-hidden="true">
@@ -342,7 +394,7 @@
                   <circle cx="12" cy="12" r="2" class="cap-brand__hot"></circle>
                 </svg>
               </span>
-              <span class="cap-brand__name">SHM ring</span>
+              <span class="cap-brand__name">IP reputation</span>
             </li>
             <li class="cap-brand cap-brand--hmac">
               <span class="cap-brand__mark" aria-hidden="true">
@@ -351,66 +403,101 @@
                   <path d="M12.4 12 H20 M17 12 V15 M19.4 12 V14.4" stroke-width="2" stroke-linecap="round" fill="none"></path>
                 </svg>
               </span>
-              <span class="cap-brand__name">HMAC cookie</span>
+              <span class="cap-brand__name">User trust cookie</span>
+            </li>
+            <li class="cap-brand cap-brand--restart">
+              <span class="cap-brand__mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <circle cx="12" cy="12" r="8" stroke-width="2"></circle>
+                  <circle cx="12" cy="12" r="4.5" stroke-width="2"></circle>
+                  <circle cx="12" cy="12" r="1.6" class="cap-brand__hot"></circle>
+                </svg>
+              </span>
+              <span class="cap-brand__name">Survives restart</span>
+            </li>
+            <li class="cap-brand cap-brand--load">
+              <span class="cap-brand__mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <circle cx="6" cy="15" r="1.6"></circle>
+                  <circle cx="12" cy="11" r="1.6"></circle>
+                  <circle cx="18" cy="7" r="1.6" class="cap-brand__hot"></circle>
+                  <path d="M5 19 H19" stroke-width="2" stroke-linecap="round"></path>
+                </svg>
+              </span>
+              <span class="cap-brand__name">Host load tracking</span>
+            </li>
+            <li class="cap-brand cap-brand--replay">
+              <span class="cap-brand__mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <circle cx="12" cy="12" r="8" stroke-width="2"></circle>
+                  <path d="M7 12 H17" stroke-width="2.4" stroke-linecap="round"></path>
+                </svg>
+              </span>
+              <span class="cap-brand__name">Replay defense</span>
             </li>
           </ul>
-          <p>First-sight checks, recent reputation, and trust tokens &mdash; local only, no external store.</p>
+          <p>No external service for scoring or reputation memory &mdash; every signal lives inside the Apache process. Evaluation runs in-process; legitimate traffic passes through with minimal delay.</p>
         </article>
       </section>
 
       <section id="how-it-works" class="matrix-panel">
         <div class="panel-heading">
-          <p class="eyebrow">Core surface</p>
-          <h2>Built for operators who want clear levers</h2>
+          <h2>Four capabilities feeding one decision</h2>
         </div>
-        <div class="table-wrap">
-          <table class="feature-matrix">
-            <caption class="sr-only">Core BotShield capabilities, the operator use cases they support, and the outcomes they drive.</caption>
-            <thead>
-              <tr>
-                <th scope="col">Capability</th>
-                <th scope="col">Use case</th>
-                <th scope="col">Outcome</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td>Scoring engine</td>
-                <td>Triage browser-like traffic, first-sight clients, and obviously bad probes.</td>
-                <td>One decision ladder with stable logs and metrics.</td>
-              </tr>
-              <tr>
-                <td>Passive threat memory</td>
-                <td>Remember recent abuse without pushing every request into an external store.</td>
-                <td>Cheap local reputation and short-lived trust.</td>
-              </tr>
-              <tr>
-                <td>Challenge orchestration</td>
-                <td>Escalate only when request shape and recent history say it is worth the friction.</td>
-                <td>Silent, form, or provider-backed challenge paths.</td>
-              </tr>
-              <tr>
-                <td>Observability</td>
-                <td>Explain why a request passed, slowed down, or got blocked.</td>
-                <td>Decision logs, metrics, status hooks, and docs-first behavior.</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+        <ul class="capability-list" aria-label="Core BotShield capabilities, the use cases they support, and the outcomes they drive.">
+          <li class="capability-list__row">
+            <h3 class="capability-list__name">Scoring engine</h3>
+            <div class="capability-list__body">
+              <p class="capability-list__use-case">Triage browser-like traffic, first-sight clients, and obviously bad probes.</p>
+              <p class="capability-list__outcome">One decision ladder with stable logs and metrics.</p>
+            </div>
+          </li>
+          <li class="capability-list__row">
+            <h3 class="capability-list__name">Passive threat memory</h3>
+            <div class="capability-list__body">
+              <p class="capability-list__use-case">Remember recent abuse without pushing every request into an external store.</p>
+              <p class="capability-list__outcome">Cheap local reputation and short-lived trust.</p>
+            </div>
+          </li>
+          <li class="capability-list__row">
+            <h3 class="capability-list__name">Challenge orchestration</h3>
+            <div class="capability-list__body">
+              <p class="capability-list__use-case">Escalate only when request shape and recent history say it is worth the friction.</p>
+              <p class="capability-list__outcome">Silent, form, or third-party CAPTCHA challenge paths.</p>
+            </div>
+          </li>
+          <li class="capability-list__row">
+            <h3 class="capability-list__name">Observability</h3>
+            <div class="capability-list__body">
+              <p class="capability-list__use-case">Explain why a request passed, slowed down, was challenged, or got blocked.</p>
+              <p class="capability-list__outcome">Decision logs, metrics, status hooks, and docs-first behavior.</p>
+            </div>
+          </li>
+        </ul>
       </section>
 
-      <section id="docs" class="docs-panel">
+      <section id="why" class="why-panel">
         <div class="panel-heading">
-          <p class="eyebrow">Documentation</p>
-          <h2>Guide and roadmap</h2>
+          <h2>Apache delivers. BotShield decides.</h2>
         </div>
-        <div class="doc-card-grid">
-{{ docs_cards }}
-        </div>
+        <ul class="why-list">
+          <li class="why-list__item">
+            <h3 class="why-list__name">The decision lands before your app runs.</h3>
+            <p class="why-list__body">BotShield decides inside Apache before your application even gets the request. Before <code>mod_php</code>. Before <code>mod_proxy</code>. Before <code>mod_wsgi</code>. Before whatever handler your stack uses.</p>
+          </li>
+          <li class="why-list__item">
+            <h3 class="why-list__name">Your traffic never crosses a trust boundary.</h3>
+            <p class="why-list__body">Configuration is Apache directives. Live state stays in your Apache&rsquo;s shared memory. Saved state is a file on your disk. Every decision is made inside that process.</p>
+          </li>
+          <li class="why-list__item">
+            <h3 class="why-list__name">Behaves like Apache, because it is Apache.</h3>
+            <p class="why-list__body">Same scoping rules &mdash; server, vhost, <code>Directory</code>, <code>Location</code>. Same <code>mod_log_config</code> output, <code>mod_watchdog</code> heartbeats, <code>mod_status</code> page. Your Apache instincts work here.</p>
+          </li>
+        </ul>
       </section>
 
       <section class="cta-band">
-        <p class="cta-band__copy">Deploy the module, read the operational model, and decide how aggressive you want it to be.</p>
+        <p class="cta-band__copy">Install. Configure. Tune. The Guide walks you through it.</p>
         <a class="cta-band__button" href="{{ primary_href }}">Read the BotShield Guide</a>
       </section>
     </main>

@@ -136,6 +136,7 @@ pre {
 .workflow-panel,
 .matrix-panel,
 .docs-panel,
+.why-panel,
 .cta-band,
 .docs-sidebar,
 .docs-article,
@@ -148,6 +149,7 @@ pre {
 }
 
 .site-header {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: flex-start;
@@ -156,6 +158,33 @@ pre {
   padding: 1.2rem 1.35rem;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0));
+}
+
+.site-header__beta {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%) rotate(-8deg);
+  font-family: var(--font-display);
+  font-weight: 900;
+  font-size: 0.98rem;
+  letter-spacing: 0.18em;
+  color: #d54a3c;
+  border: 2px solid #d54a3c;
+  padding: 0.1rem 0.55rem 0.15rem;
+  border-radius: 0.3rem;
+  opacity: 0.8;
+  text-transform: uppercase;
+  pointer-events: none;
+  user-select: none;
+  white-space: nowrap;
+  z-index: 1;
+}
+
+@media (max-width: 720px) {
+  .site-header__beta {
+    display: none;
+  }
 }
 
 .site-header--compact {
@@ -329,9 +358,42 @@ pre {
 }
 
 .hero__brand--split {
+  position: relative;
   flex-direction: column;
   align-items: center;
   gap: 0.75rem;
+}
+
+.hero__beta-stamp {
+  position: absolute;
+  top: 0.5rem;
+  left: calc(50% + 4.4rem);
+  z-index: 2;
+  font-family: var(--font-display);
+  font-weight: 900;
+  font-size: clamp(2rem, 5vw, 3.2rem);
+  letter-spacing: 0.18em;
+  color: #d54a3c;
+  border: 4px solid #d54a3c;
+  padding: 0.25rem 0.85rem 0.3rem;
+  border-radius: 0.45rem;
+  transform: rotate(-12deg);
+  opacity: 0.78;
+  text-transform: uppercase;
+  pointer-events: none;
+  user-select: none;
+  white-space: nowrap;
+  text-shadow: 0 0 2px rgba(213, 74, 60, 0.18);
+}
+
+@media (max-width: 720px) {
+  .hero__beta-stamp {
+    top: 0.25rem;
+    left: calc(50% + 3rem);
+    font-size: clamp(1.4rem, 7vw, 2rem);
+    border-width: 3px;
+    padding: 0.15rem 0.6rem 0.2rem;
+  }
 }
 
 .hero__emblem {
@@ -427,6 +489,7 @@ pre {
 
 .matrix-panel,
 .docs-panel,
+.why-panel,
 .cta-band {
   margin: 0 0 1.35rem;
   padding: 1.35rem;
@@ -1055,6 +1118,16 @@ pre {
   border-color: rgba(79, 141, 249, 0.5);
 }
 
+.cap-brand--friendly .cap-brand__mark {
+  background: linear-gradient(180deg, #34c759, #1f9d3e);
+  border-color: rgba(52, 199, 89, 0.5);
+}
+
+.cap-brand--geetest .cap-brand__mark {
+  background: linear-gradient(180deg, #8b5cf6, #6d28d9);
+  border-color: rgba(139, 92, 246, 0.5);
+}
+
 .cap-brand--pow .cap-brand__mark {
   background: linear-gradient(180deg, #2cd0ec, #0fb5d2);
   border-color: rgba(68, 226, 255, 0.55);
@@ -1080,9 +1153,32 @@ pre {
   border-color: rgba(217, 119, 87, 0.55);
 }
 
+.cap-brand--bytespider .cap-brand__mark {
+  background: linear-gradient(180deg, #ef4444, #b91c1c);
+  border-color: rgba(239, 68, 68, 0.55);
+}
+
+.cap-brand--perplexitybot .cap-brand__mark {
+  background: linear-gradient(180deg, #f97316, #c2410c);
+  border-color: rgba(249, 115, 22, 0.55);
+}
+
+.cap-brand--forged .cap-brand__mark {
+  background: linear-gradient(180deg, #a16207, #713f12);
+  border-color: rgba(161, 98, 7, 0.55);
+}
+
+.cap-brand--scraper .cap-brand__mark {
+  background: linear-gradient(180deg, #475569, #1e293b);
+  border-color: rgba(71, 85, 105, 0.55);
+}
+
 .cap-brand--bloom .cap-brand__mark,
 .cap-brand--shm .cap-brand__mark,
-.cap-brand--hmac .cap-brand__mark {
+.cap-brand--hmac .cap-brand__mark,
+.cap-brand--restart .cap-brand__mark,
+.cap-brand--load .cap-brand__mark,
+.cap-brand--replay .cap-brand__mark {
   background: linear-gradient(180deg, rgba(68, 226, 255, 0.16), rgba(68, 226, 255, 0.05));
   border-color: rgba(68, 226, 255, 0.45);
 }
@@ -1090,53 +1186,141 @@ pre {
 .cap-brand--bloom .cap-brand__mark svg circle,
 .cap-brand--shm .cap-brand__mark svg circle,
 .cap-brand--hmac .cap-brand__mark svg circle,
+.cap-brand--restart .cap-brand__mark svg circle,
+.cap-brand--load .cap-brand__mark svg circle,
+.cap-brand--replay .cap-brand__mark svg circle,
 .cap-brand--bloom .cap-brand__mark svg path,
 .cap-brand--shm .cap-brand__mark svg path,
-.cap-brand--hmac .cap-brand__mark svg path {
+.cap-brand--hmac .cap-brand__mark svg path,
+.cap-brand--restart .cap-brand__mark svg path,
+.cap-brand--load .cap-brand__mark svg path,
+.cap-brand--replay .cap-brand__mark svg path {
   stroke: rgba(220, 246, 255, 0.78);
   fill: transparent;
 }
 
-.cap-brand--bloom .cap-brand__mark svg circle {
+.cap-brand--bloom .cap-brand__mark svg circle,
+.cap-brand--load .cap-brand__mark svg circle {
   fill: rgba(220, 246, 255, 0.78);
   stroke: none;
 }
 
 .cap-brand--bloom .cap-brand__mark svg circle.cap-brand__hot,
-.cap-brand--shm .cap-brand__mark svg circle.cap-brand__hot {
+.cap-brand--shm .cap-brand__mark svg circle.cap-brand__hot,
+.cap-brand--restart .cap-brand__mark svg circle.cap-brand__hot,
+.cap-brand--load .cap-brand__mark svg circle.cap-brand__hot {
   fill: #44e2ff;
   stroke: none;
   filter: drop-shadow(0 0 4px rgba(68, 226, 255, 0.7));
 }
 
-.table-wrap {
-  overflow-x: auto;
+.capability-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid rgba(68, 226, 255, 0.25);
 }
 
-.feature-matrix {
-  width: 100%;
-  border-collapse: collapse;
-  min-width: 36rem;
+.capability-list__row {
+  display: grid;
+  grid-template-columns: minmax(10rem, 0.45fr) minmax(0, 1fr);
+  gap: 1.25rem 2rem;
+  padding: 1.4rem 0;
+  border-bottom: 1px solid rgba(68, 226, 255, 0.25);
 }
 
-.feature-matrix th,
-.feature-matrix td {
-  padding: 0.9rem 0.95rem;
-  border: 1px solid rgba(68, 226, 255, 0.45);
-  text-align: left;
-  vertical-align: top;
-}
-
-.feature-matrix th {
-  color: #f8fbff;
-  background: rgba(68, 226, 255, 0.1);
-  font-size: 0.92rem;
+.capability-list__name {
+  margin: 0;
+  font-size: 1.05rem;
   font-weight: 700;
+  color: #f8fbff;
+  letter-spacing: 0.005em;
 }
 
-.feature-matrix td {
+.capability-list__body {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.capability-list__use-case {
+  margin: 0;
+  color: var(--ink);
+}
+
+.capability-list__outcome {
+  margin: 0;
   color: var(--ink-soft);
-  background: rgba(255, 255, 255, 0.02);
+  font-size: 0.92rem;
+}
+
+.capability-list__outcome::before {
+  content: "Outcome — ";
+  color: var(--accent);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  margin-right: 0.35rem;
+}
+
+@media (max-width: 640px) {
+  .capability-list__row {
+    grid-template-columns: 1fr;
+    gap: 0.55rem;
+    padding: 1.1rem 0;
+  }
+}
+
+.why-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 2.25rem;
+}
+
+.why-panel .panel-heading {
+  padding-bottom: 1.4rem;
+  margin-bottom: 2rem;
+  border-bottom: 1px solid rgba(68, 226, 255, 0.3);
+}
+
+.why-list__item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.why-list__name {
+  margin: 0;
+  font-size: 1.1rem;
+  color: #f8fbff;
+  letter-spacing: 0.005em;
+  line-height: 1.3;
+}
+
+.why-list__body {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.96rem;
+  line-height: 1.55;
+}
+
+.why-list__body code {
+  font-family: "SFMono-Regular", "Menlo", "Consolas", monospace;
+  font-size: 0.85em;
+  background: rgba(68, 226, 255, 0.12);
+  padding: 0.05em 0.4em;
+  border-radius: 0.25em;
+  color: #d4f8ff;
+}
+
+@media (max-width: 880px) {
+  .why-list {
+    grid-template-columns: 1fr;
+    gap: 1.6rem;
+  }
 }
 
 .doc-card-grid {
@@ -1590,6 +1774,40 @@ pre {
   }
 }
 
+@media (max-width: 980px) and (min-width: 681px) {
+  .judgment-kernel {
+    display: none;
+  }
+
+  .judgment-grid {
+    grid-template-columns: 1fr 1fr;
+    grid-template-areas: none;
+    gap: 0.55rem;
+  }
+
+  .judgment-chip {
+    padding: 0.42rem 0.5rem;
+    min-height: 2.4rem;
+    border-radius: 0.65rem;
+  }
+
+  .judgment-chip strong {
+    font-size: 0.78rem;
+  }
+
+  .judgment-chip small {
+    font-size: 0.6rem;
+  }
+
+  .judgment-more {
+    display: none;
+  }
+
+  .workflow-card--judgment .workflow-note {
+    margin-top: 0.6rem;
+  }
+}
+
 @media (max-width: 680px) {
   .workflow {
     grid-template-columns: 1fr;
@@ -1695,6 +1913,7 @@ pre {
   .workflow-panel,
   .matrix-panel,
   .docs-panel,
+  .why-panel,
   .cta-band,
   .docs-sidebar,
   .docs-article {

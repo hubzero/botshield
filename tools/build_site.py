@@ -182,14 +182,17 @@ def main() -> int:
                 "summary": entry["summary"],
                 "source": entry["source"],
                 "output": str(Path(entry["slug"]) / "index.html"),
+                "featured": bool(entry.get("featured", False)),
             }
         )
 
     for page in docs_pages:
         page["href"] = page["output"].replace(os.sep, "/")
 
+    featured_pages = [page for page in docs_pages if page["featured"]] or docs_pages
+
     docs_cards = []
-    for page in docs_pages:
+    for page in featured_pages:
         docs_cards.append(
             "\n".join(
                 [
@@ -205,7 +208,8 @@ def main() -> int:
     hero_primary = docs_pages[0]["href"] if docs_pages else "#"
     hero_secondary = docs_pages[1]["href"] if len(docs_pages) > 1 else hero_primary
     github_href = config.get("github_href", "#")
-    download_href = f"{hero_primary}#build" if docs_pages else "#"
+    download_href = config.get("download_href",
+                               f"{hero_primary}#build" if docs_pages else "#")
 
     home_html = render_template(
         SOURCE_DIR / "templates" / "home.html",
@@ -236,7 +240,8 @@ def main() -> int:
         logo_href = relative_href(output_path, output_dir / HEADER_LOGO)
         home_href = relative_href(output_path, output_dir / "index.html")
         docs_href = relative_href(output_path, output_dir / docs_pages[0]["output"]) if docs_pages else "#"
-        download_href = f"{docs_href}#build" if docs_pages else "#"
+        download_href = config.get("download_href",
+                                   f"{docs_href}#build" if docs_pages else "#")
 
         doc_html = render_template(
             SOURCE_DIR / "templates" / "doc.html",
