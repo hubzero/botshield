@@ -68,6 +68,15 @@ def test_verified_cookie_attributes_on_silent_solve(bs_browser_context):
     assert c["httpOnly"] is True, (
         f"__Host-bs_session should be HttpOnly post-LOW#1: {c}"
     )
+    # Session-cookie semantics: no Expires=, no Max-Age=. Browser
+    # discards on session end. The server-side expires_at field
+    # inside the GCM envelope is the hard cap that catches cookies
+    # surviving a long-lived browser session.
+    assert c["expires"] in (-1, None), (
+        f"__Host-bs_session is a session cookie; Playwright reports "
+        f"expires={c['expires']!r} (expected -1 / None). The "
+        f"Set-Cookie should not carry Expires= or Max-Age="
+    )
 
 
 def test_pending_cookie_path_scoped(bs_browser_context):
