@@ -442,7 +442,19 @@ void bs_decision_log(request_rec *r,
      * observe / FormCaptcha observe / tier-dispatch under
      * BotShieldEnabled LogOnly all surface as `outcome=~block`,
      * `~rate_limited`, `~challenge` etc. instead of plain `allow`
-     * with the policy intent buried in the reason chain. */
+     * with the policy intent buried in the reason chain.
+     *
+     * Important: the override applies to the operator-facing
+     * surfaces only — decision-log line and BS_OUTCOME env var.
+     * The metrics counter (`outcome_for_metrics`) keeps the
+     * original "allow" because that is what actually happened
+     * (under LogOnly we declined and the request reached origin).
+     * Operators wanting staging-volume metrics use the per-family
+     * *_observed_total counters and the tier counter, both of which
+     * are independent of LogOnly. Conflating ~challenge with real
+     * served challenges in `outcome[challenged]` would corrupt the
+     * production "% served" dashboards. */
+    const char *outcome_for_metrics = outcome;
     const char *would = bs_get_would_outcome(r);
     if (would && outcome && strcmp(outcome, "allow") == 0) {
         outcome = would;
@@ -546,7 +558,7 @@ void bs_decision_log(request_rec *r,
     /* M9.2: counters derived from the same enum vocabulary. One log
      * line, up to four counter increments (tier, outcome, cookie when
      * applicable, provider when applicable). */
-    bs_metrics_bump(r, tier, outcome, cookie, provider);
+    bs_metrics_bump(r, tier, outcome_for_metrics, cookie, provider);
 }
 
 /* ======================================================================
