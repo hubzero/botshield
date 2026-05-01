@@ -266,14 +266,16 @@ apr_status_t bs_app_feedback_filter(ap_filter_t *f,
         return ap_pass_brigade(f->next, bb);
     }
 
-    /* E12 — global log-only mode + per-trigger observe both flip the
+    /* LogOnly mode + per-trigger observe both flip the
      * side-effects off. Mirrors the bs_apply_trigger_action pattern
-     * in triggers.c:429. The response-path E5 filter doesn't run
+     * in triggers.c. The response-path E5 filter doesn't run
      * through the shared executor (no request-side decision log to
      * seed), so we honor log-only / observe inline. Without this,
-     * `BotShieldLogOnly on` would still mutate the flagged-IP table
+     * `BotShieldEnabled LogOnly` would still mutate the flagged-IP table
      * on a signed app-feedback event — a staging hazard. */
-    int global_log_only = (scfg->log_only == 1);
+    bs_dir_cfg *dcfg = ap_get_module_config(r->per_dir_config,
+                                            &botshield_module);
+    int global_log_only = (dcfg && dcfg->enabled == BS_ENABLED_LOGONLY);
     int observe = global_log_only || (ft->action.mode == BS_TMODE_OBSERVE);
     if (observe) {
         bs_score_add(r, 0, 0,

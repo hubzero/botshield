@@ -338,11 +338,11 @@ int bs_check_policy(request_rec *r)
     /* Block paths first: if the request would be 403ed anyway there's
      * no point charging it a token from a rate bucket it's also in.
      * Ordered-array iteration — first match wins; declaration order
-     * is the precedence. E12: a matched rule in observe mode (or
-     * any matched rule when global log-only mode is on) logs
+     * is the precedence. A matched rule in observe mode (or any
+     * matched rule when the dir scope is in LogOnly mode) logs
      * `would-block-path:<name>` instead of returning 403, and the
      * walk continues so subsequent rules still get their say. */
-    int global_log_only = (scfg->log_only == 1);
+    int global_log_only = (dcfg && dcfg->enabled == BS_ENABLED_LOGONLY);
     if (scfg->block_paths && scfg->block_paths->nelts > 0) {
         for (int i = 0; i < scfg->block_paths->nelts; i++) {
             bs_block_path_entry *e = APR_ARRAY_IDX(

@@ -256,8 +256,8 @@ int bs_form_captcha_fixup(request_rec *r)
         return HTTP_BAD_REQUEST;
     }
 
-    /* E12 — log-only / observe mode for E18. If global BotShieldLogOnly
-     * is on, skip siteverify + cookie-mint, log a :observe reason, and
+    /* LogOnly / observe mode for E18. If the dir scope is in LogOnly
+     * mode, skip siteverify + cookie-mint, log a :observe reason, and
      * pass the request through. The body is still read (we already did
      * it — needed for the replay filter so the app handler sees its
      * original POST). Transport-level errors (415/413/400/503) above
@@ -265,9 +265,9 @@ int bs_form_captcha_fixup(request_rec *r)
      * those represent misconfiguration or genuinely-malformed requests,
      * not policy decisions an operator is staging. */
     {
-        bs_server_cfg *scfg_sh = ap_get_module_config(
-            r->server->module_config, &botshield_module);
-        if (scfg_sh && scfg_sh->log_only == 1) {
+        bs_dir_cfg *dcfg_sh = ap_get_module_config(
+            r->per_dir_config, &botshield_module);
+        if (dcfg_sh && dcfg_sh->enabled == BS_ENABLED_LOGONLY) {
             bs_form_replay_ctx *ctx = apr_pcalloc(r->pool, sizeof(*ctx));
             ctx->body   = body;
             ctx->len    = body_len;
