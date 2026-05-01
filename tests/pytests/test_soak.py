@@ -53,7 +53,7 @@ _MONOTONIC_COUNTERS = (
     "botshield_tier_pass_total",
     "botshield_tier_form_total",
     "botshield_tier_captcha_total",
-    "botshield_outcome_declined_total",
+    "botshield_outcome_allow_total",
     "botshield_outcome_challenged_total",
 )
 

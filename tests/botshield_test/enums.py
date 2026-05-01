@@ -6,22 +6,31 @@ drift that M9.2 catches — this module lets every test import the
 same tuple instead of hand-rolling it.
 """
 
-TIERS = ("none", "pass", "silent", "form", "captcha")
+TIERS = ("none", "pass", "silent", "form", "captcha", "safeguard")
 
 OUTCOMES = (
-    "declined",
+    "allow",
     "challenged",
     "verified",
-    "rejected",
+    "block",
+    "redirect",
     "failopen",
     "rate_limited",
     "inflight_capped",
     "pending_missing",
     "misconfigured",
     "debug",
+    # Counterfactual outcomes emitted under BotShieldEnabled LogOnly.
+    # Leading tilde marks "real action was allow; this is what *would*
+    # have happened under enforce". Per-family *_observed_total
+    # counters carry the staging-volume signal; outcome counters bump
+    # the original `allow` slot.
+    "~challenge",
+    "~block",
+    "~rate_limited",
 )
 
-COOKIES = ("ok", "expired", "bad_sig", "bad_format", "absent")
+COOKIES = ("ok", "expired", "bad_sig", "bad_format", "absent", "minted")
 
 # Provider names as the Prometheus counter metric suffix (underscore
 # form). The decision log's `provider=` field uses the hyphenated

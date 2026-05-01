@@ -29,6 +29,18 @@ def test_silent_tier_round_trip(fresh_ip):
     # 1. Cookieless silent-band probe: Mozilla UA + missing Accept-
     #    Language + first-sight-ip = score 20 → silent tier.
     resp = client.get("/", xff=fresh_ip, ua=BROWSER_UA)
+    # Interstitial responses are 403 + X-Robots-Tag noindex,nofollow
+    # so search engines don't index the placeholder body. Browsers
+    # still execute inline JS / captcha widgets on 4xx, so the
+    # auto-solve in step 2 still works.
+    assert resp.status_code == 403, (
+        f"silent interstitial should return 403; got {resp.status_code}"
+    )
+    robots_tag = resp.headers.get("X-Robots-Tag", "")
+    assert "noindex" in robots_tag and "nofollow" in robots_tag, (
+        f"silent interstitial missing X-Robots-Tag noindex,nofollow; "
+        f"got {robots_tag!r}"
+    )
     challenge = cookies.extract_challenge(resp.text)
 
     # auto=1 indicates silent tier. If it's 0 we got form tier —
@@ -46,7 +58,7 @@ def test_silent_tier_round_trip(fresh_ip):
     resp = client.get(
         "/", xff=fresh_ip,
         ua=BROWSER_UA, accept_language="en-US",
-        cookies={"__Host-bs_verified": cookie},
+        cookies={"__Host-bs_session": cookie},
     )
     assert resp.headers.get("X-Botshield") != "challenge", (
         f"cookied replay still challenged; headers={dict(resp.headers)}"
@@ -103,7 +115,7 @@ def test_expired_cookie_does_not_carry_rep_to_render_path(
         with log_slice as slc:
             client.get(
                 "/", xff=ip_replay, ua=BROWSER_UA,
-                cookies={"__Host-bs_verified": cookie},
+                cookies={"__Host-bs_session": cookie},
             )
             matches = slc.grep(r"challenging.*cookie_score=-1")
 

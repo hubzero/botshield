@@ -43,17 +43,24 @@ awk-validator.sh`).
 | Field | Values |
 |---|---|
 | `tier` | `none`, `pass`, `silent`, `form`, `captcha`, `safeguard` |
-| `outcome` | `allow`, `challenged`, `verified`, `block`, `failopen`, `rate_limited`, `inflight_capped`, `pending_missing`, `misconfigured`, `debug` (plus tilde-prefixed counterfactuals: `~challenge`, `~block`, `~rate_limited` under `BotShieldEnabled LogOnly`) |
-| `cookie` | `ok`, `expired`, `bad_sig`, `bad_format`, `absent`, `-` |
+| `outcome` | `allow`, `challenged`, `verified`, `block`, `redirect`, `failopen`, `rate_limited`, `inflight_capped`, `pending_missing`, `misconfigured`, `debug` (plus tilde-prefixed counterfactuals: `~challenge`, `~block`, `~rate_limited` under `BotShieldEnabled LogOnly`) |
+| `cookie` | `ok`, `expired`, `bad_sig`, `bad_format`, `absent`, `minted`, `-` |
 | `provider` | `-`, `turnstile`, `hcaptcha`, `recaptcha-v2`, `recaptcha-v3`, `friendly`, `geetest` |
 | `alg` | `-`, `sha256-zeros`, `captcha-<provider>` |
 | `reason` | quoted short string (comma-joined reason names) or `-` |
 
-`tier=safeguard` is emitted for challenge-loop suppression
-(pass-through with the flagged-IP entry preserved). For metrics it
-bins into `tier_pass_total` since it's functionally pass-through;
-to dashboard the safeguard rate, scrape the
-decision log for `reason="challenge-safeguard"`.
+`tier=safeguard` is emitted for challenge-loop suppression: the
+client gets a 302 redirect to a configured
+`BotShieldSafeguardRedirectURL` (or to the built-in explainer at
+`<BotShieldEndpointPrefix>/safeguard-info`) with the original URI
+appended as `?return=<urlencoded path>`. The flagged-IP entry is
+preserved. The pre-2026 silent pass-through is gone — silent
+pass-through gave bots free access for the safeguard TTL, the
+redirect makes the failure visible to legitimate clients and
+gives bots a non-protected page to land on. The matching
+`outcome=redirect` increments `outcome_redirect_total`; tier
+counts go to `tier_pass_total` (safeguard bins into pass for the
+tier counter).
 
 ### Reason-name vocabulary
 
@@ -74,7 +81,7 @@ takes the shape `<family>:<name>` so the source family is visible:
 | `path-trigger:<name>`, `cookie-trigger:<name>`, `env-trigger:<name>`, `load-trigger:<name>`, `feedback-trigger:<event>` | trigger families |
 | `<reason>:observe` | Any of the above with `mode=observe` or under `BotShieldEnabled LogOnly` (see [staging](../staging/index.html)) |
 | `would-flag-trigger:<flag>:observe`, `would-block:<name>`, `would-rate-limit:<name>` | Observe-mode "would have done" reasons |
-| `challenge-safeguard` | safeguard pass-through |
+| `challenge-safeguard` | safeguard redirect |
 
 ### Verbose prose line
 
@@ -120,8 +127,8 @@ WARNING). Drift is loud, not silent.
 | Counter family | Count | Source field |
 |---|---|---|
 | `botshield_tier_<t>_total` | 5 | one per non-`safeguard` tier; `safeguard` bins into `pass` |
-| `botshield_outcome_<o>_total` | 10 | one per `outcome` enum |
-| `botshield_cookie_<c>_total` | 5 | one per `cookie` enum |
+| `botshield_outcome_<o>_total` | 11 | one per `outcome` enum (incl. `outcome_redirect_total` for safeguard) |
+| `botshield_cookie_<c>_total` | 6 | one per `cookie` enum (incl. `cookie_minted_total` for always-mint events) |
 | `botshield_provider_<p>_total` | 6 | one per built-in provider |
 
 Plus persistence metrics:

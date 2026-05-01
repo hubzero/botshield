@@ -70,10 +70,10 @@ application's own handlers.
 
 When the request is HTTPS *and* you have not configured
 `BotShieldCookieDomain`, mod_botshield emits the verified cookie as
-`__Host-bs_verified`. Browsers refuse to accept `__Host-` cookies
+`__Host-bs_session`. Browsers refuse to accept `__Host-` cookies
 over plain HTTP, refuse cookies with a `Domain=` attribute, and
 constrain `Path=/` — closing several cookie-injection attack classes
-that the legacy `_bs_verified` name still has to support for HTTP
+that the legacy `_bs_session` name still has to support for HTTP
 deployments.
 
 Verify path checks both names (host-prefix first), so existing
@@ -267,8 +267,8 @@ rotation. The flow:
 
    Reload. The old secret can now be deleted.
 
-The secondary covers four verify call sites: HMAC `_bs_verified`,
-GCM `_bs_verified`, the captcha-pending cookie, and the
+The secondary covers four verify call sites: HMAC `_bs_session`,
+GCM `_bs_session`, the captcha-pending cookie, and the
 embedded-verify PoW path. App-bridge keys
 (`BotShieldAppIntegrationSecretFile`) and captcha provider secrets
 are out of rotation scope; rotate those by reloading with the new

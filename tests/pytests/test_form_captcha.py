@@ -4,7 +4,7 @@ When `BotShieldFormCaptcha on` is set on a scope, BotShield's fixup
 hook intercepts POSTs, reads the application/x-www-form-urlencoded
 body, looks for the configured captcha provider's response field,
 calls siteverify, and either:
-  - mints __Host-bs_verified, replays the body via input filter, lets the
+  - mints __Host-bs_session, replays the body via input filter, lets the
     downstream app handler run normally
   - 403s the request before the app handler ever sees it
 
@@ -161,7 +161,7 @@ def test_form_captcha_json_passes_valid_token(config_override, log_slice):
 
 def test_form_captcha_passes_valid_token(config_override, log_slice):
     """Valid Turnstile token (from Cloudflare's always-pass test
-    sitekey) → BotShield mints __Host-bs_verified, body replay filter is
+    sitekey) → BotShield mints __Host-bs_session, body replay filter is
     installed, downstream handler runs.
 
     /embedded-test.html is a static file that doesn't accept POST,
@@ -199,15 +199,15 @@ def test_form_captcha_passes_valid_token(config_override, log_slice):
         f"missing form-captcha-verified log line; "
         f"log tail:\n{log_text[-2000:]}"
     )
-    # Verify __Host-bs_verified was set on the response.
+    # Verify __Host-bs_session was set on the response.
     set_cookies = r.headers.get_list("set-cookie") \
         if hasattr(r.headers, "get_list") \
         else [r.headers.get("set-cookie", "")]
     bs_cookie_set = any(
-        "__Host-bs_verified=" in (c or "") for c in set_cookies
+        "__Host-bs_session=" in (c or "") for c in set_cookies
     )
     assert bs_cookie_set, (
-        f"valid form-captcha should mint __Host-bs_verified; "
+        f"valid form-captcha should mint __Host-bs_session; "
         f"set-cookies={set_cookies}"
     )
 
@@ -240,17 +240,17 @@ def test_form_widget_endpoint_serves_provider_dispatch():
     assert "data-bs-form-captcha" in body
 
 
-def test_form_captcha_honors_global_shadow_mode(config_override):
-    """E12 review fix — `BotShieldLogOnly on` (server-scope) must
-    suppress E18's policy-level 403s. A POST with a missing or bad
-    captcha token under shadow mode should pass through (DECLINED;
-    Apache static handler returns 405 because the test path doesn't
+def test_form_captcha_honors_log_only(config_override):
+    """E12 review fix — `BotShieldEnabled LogOnly` must suppress
+    E18's policy-level 403s. A POST with a missing or bad captcha
+    token under LogOnly should pass through (DECLINED; Apache
+    static handler returns 405 because the test path doesn't
     accept POST). Without the fix, E18 hard-403's regardless of
-    shadow_mode and breaks the dry-run mental model."""
+    log-only and breaks the dry-run mental model."""
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         'BotShieldAllowVerifiedBots on\n'
-        '    BotShieldLogOnly on\n'
+        '    BotShieldEnabled LogOnly\n'
         '    <Location /embedded-test.html>\n'
         '        BotShieldCaptchaProvider turnstile\n'
         '        BotShieldCaptchaSiteKey 1x00000000000000000000AA\n'
@@ -265,10 +265,10 @@ def test_form_captcha_honors_global_shadow_mode(config_override):
             headers={"Content-Type":
                      "application/x-www-form-urlencoded"},
         )
-    # Without shadow mode this would have been 403. Under shadow it
+    # Without LogOnly this would have been 403. Under LogOnly it
     # passes through to Apache, which 405s the static-file POST.
     assert r.status_code != 403, (
-        f"shadow_mode should suppress E18's 403; got {r.status_code}"
+        f"LogOnly should suppress E18's 403; got {r.status_code}"
     )
 
 

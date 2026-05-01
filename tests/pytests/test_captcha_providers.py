@@ -7,7 +7,7 @@ drive the per-provider spec in `botshield_test.providers`.
 Coverage:
   - test_captcha_ok: providers that ship with an always-pass test
     keypair (Turnstile, hCaptcha, reCAPTCHA v2). Asserts 303 +
-    X-Botshield: captcha-ok + __Host-bs_verified cookie issued.
+    X-Botshield: captcha-ok + __Host-bs_session cookie issued.
   - test_captcha_plumbing_smoke: all six providers. Fire a bogus
     token through the verify endpoint and assert the decision log
     carries `provider=<name>`. Regression gate for body-field
@@ -67,8 +67,8 @@ def test_captcha_ok(spec, pending_cookie):
         f"headers={dict(resp.headers)}"
     )
     assert resp.headers.get("X-Botshield") == "captcha-ok"
-    assert resp.cookies.get("__Host-bs_verified"), (
-        f"{spec.name}: no __Host-bs_verified cookie issued"
+    assert resp.cookies.get("__Host-bs_session"), (
+        f"{spec.name}: no __Host-bs_session cookie issued"
     )
 
 
@@ -155,7 +155,7 @@ def test_captcha_rejected_via_bad_secret(
     )
     assert resp.headers.get("X-Botshield") == "captcha-rejected"
     assert matched, (
-        f"{spec.name}: no 'outcome=rejected provider={spec.log_name}' line"
+        f"{spec.name}: no 'outcome=block provider={spec.log_name}' line"
     )
 
 

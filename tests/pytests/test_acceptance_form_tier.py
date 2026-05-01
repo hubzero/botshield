@@ -26,8 +26,18 @@ BROWSER_UA = "Mozilla/5.0 (X11) Chrome/145"
 
 
 def test_cookieless_recoverable_journey(fresh_ip, log_slice):
-    # 1. Initial probe: interstitial with a challenge.
+    # 1. Initial probe: interstitial with a challenge. Form-tier
+    #    interstitial is 403 + X-Robots-Tag noindex,nofollow so
+    #    search engines don't index the placeholder.
     resp = client.get("/", xff=fresh_ip, ua=SUSPICIOUS_UA)
+    assert resp.status_code == 403, (
+        f"form-tier interstitial should return 403; got {resp.status_code}"
+    )
+    robots_tag = resp.headers.get("X-Robots-Tag", "")
+    assert "noindex" in robots_tag and "nofollow" in robots_tag, (
+        f"form-tier interstitial missing X-Robots-Tag noindex,nofollow; "
+        f"got {robots_tag!r}"
+    )
     challenge = cookies.extract_challenge(resp.text)
 
     # 2. Solve + build cookie.
@@ -39,7 +49,7 @@ def test_cookieless_recoverable_journey(fresh_ip, log_slice):
         resp = client.get(
             "/", xff=fresh_ip,
             ua=BROWSER_UA, accept_language="en-US",
-            cookies={"__Host-bs_verified": cookie},
+            cookies={"__Host-bs_session": cookie},
         )
         lines = slc.decision_lines(ip=fresh_ip)
 

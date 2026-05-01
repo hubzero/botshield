@@ -164,7 +164,7 @@ for rate in "${RATES[@]}"; do
                 echo "  cookie mint failed — skipping" >&2
                 continue
             fi
-            cookie_hdr=(-H "Cookie: _bs_verified=${cookie}")
+            cookie_hdr=(-H "Cookie: _bs_session=${cookie}")
         fi
 
         # oha: -q QPS, -z duration, -c connection pool, JSON output.

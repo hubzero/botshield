@@ -148,11 +148,11 @@ commit time by a small awk validator (<code>tests/scripts/decision-log- awk-vali
 </tr>
 <tr>
 <td><code>outcome</code></td>
-<td><code>allow</code>, <code>challenged</code>, <code>verified</code>, <code>block</code>, <code>failopen</code>, <code>rate_limited</code>, <code>inflight_capped</code>, <code>pending_missing</code>, <code>misconfigured</code>, <code>debug</code> (plus tilde-prefixed counterfactuals: <code>~challenge</code>, <code>~block</code>, <code>~rate_limited</code> under <code>BotShieldEnabled LogOnly</code>)</td>
+<td><code>allow</code>, <code>challenged</code>, <code>verified</code>, <code>block</code>, <code>redirect</code>, <code>failopen</code>, <code>rate_limited</code>, <code>inflight_capped</code>, <code>pending_missing</code>, <code>misconfigured</code>, <code>debug</code> (plus tilde-prefixed counterfactuals: <code>~challenge</code>, <code>~block</code>, <code>~rate_limited</code> under <code>BotShieldEnabled LogOnly</code>)</td>
 </tr>
 <tr>
 <td><code>cookie</code></td>
-<td><code>ok</code>, <code>expired</code>, <code>bad_sig</code>, <code>bad_format</code>, <code>absent</code>, <code>-</code></td>
+<td><code>ok</code>, <code>expired</code>, <code>bad_sig</code>, <code>bad_format</code>, <code>absent</code>, <code>minted</code>, <code>-</code></td>
 </tr>
 <tr>
 <td><code>provider</code></td>
@@ -168,11 +168,18 @@ commit time by a small awk validator (<code>tests/scripts/decision-log- awk-vali
 </tr>
 </tbody>
 </table>
-<p><code>tier=safeguard</code> is emitted for challenge-loop suppression
-(pass-through with the flagged-IP entry preserved). For metrics it
-bins into <code>tier_pass_total</code> since it's functionally pass-through;
-to dashboard the safeguard rate, scrape the
-decision log for <code>reason=&quot;challenge-safeguard&quot;</code>.</p>
+<p><code>tier=safeguard</code> is emitted for challenge-loop suppression: the
+client gets a 302 redirect to a configured
+<code>BotShieldSafeguardRedirectURL</code> (or to the built-in explainer at
+<code>&lt;BotShieldEndpointPrefix&gt;/safeguard-info</code>) with the original URI
+appended as <code>?return=&lt;urlencoded path&gt;</code>. The flagged-IP entry is
+preserved. The pre-2026 silent pass-through is gone — silent
+pass-through gave bots free access for the safeguard TTL, the
+redirect makes the failure visible to legitimate clients and
+gives bots a non-protected page to land on. The matching
+<code>outcome=redirect</code> increments <code>outcome_redirect_total</code>; tier
+counts go to <code>tier_pass_total</code> (safeguard bins into pass for the
+tier counter).</p>
 <h3 id="reason-name-vocabulary">Reason-name vocabulary</h3>
 <p>The <code>reason</code> field is a comma-joined list of reason tokens captured
 by <code>bs_score_add</code> calls during the request. Each token usually
@@ -231,7 +238,7 @@ takes the shape <code>&lt;family&gt;:&lt;name&gt;</code> so the source family is
 </tr>
 <tr>
 <td><code>challenge-safeguard</code></td>
-<td>safeguard pass-through</td>
+<td>safeguard redirect</td>
 </tr>
 </tbody>
 </table>
@@ -278,13 +285,13 @@ WARNING). Drift is loud, not silent.</p>
 </tr>
 <tr>
 <td><code>botshield_outcome_&lt;o&gt;_total</code></td>
-<td>10</td>
-<td>one per <code>outcome</code> enum</td>
+<td>11</td>
+<td>one per <code>outcome</code> enum (incl. <code>outcome_redirect_total</code> for safeguard)</td>
 </tr>
 <tr>
 <td><code>botshield_cookie_&lt;c&gt;_total</code></td>
-<td>5</td>
-<td>one per <code>cookie</code> enum</td>
+<td>6</td>
+<td>one per <code>cookie</code> enum (incl. <code>cookie_minted_total</code> for always-mint events)</td>
 </tr>
 <tr>
 <td><code>botshield_provider_&lt;p&gt;_total</code></td>

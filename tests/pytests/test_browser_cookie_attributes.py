@@ -12,7 +12,7 @@ Three assertions:
    subsequent *HTTP* request to the same origin must NOT carry the
    cookie. (We can't test this end-to-end here because the dev vhost
    is HTTPS-only, but we can inspect the Set-Cookie directly and
-   assert the flag is present on both __Host-bs_verified and
+   assert the flag is present on both __Host-bs_session and
    _bs_captcha_pending.)
 
 2. **Path scoping**: `_bs_captcha_pending` is set with
@@ -49,16 +49,16 @@ def test_verified_cookie_attributes_on_silent_solve(bs_browser_context):
         timeout=20_000,
     )
 
-    verified = [c for c in ctx.cookies() if c["name"] == "__Host-bs_verified"]
-    assert len(verified) == 1, f"expected one __Host-bs_verified, got {verified}"
+    verified = [c for c in ctx.cookies() if c["name"] == "__Host-bs_session"]
+    assert len(verified) == 1, f"expected one __Host-bs_session, got {verified}"
     c = verified[0]
 
-    assert c["secure"] is True, f"__Host-bs_verified not marked Secure: {c}"
+    assert c["secure"] is True, f"__Host-bs_session not marked Secure: {c}"
     # "Lax" is the module's documented default; if it ever changes to
     # "Strict" this test should be updated, but silently widening to
     # "None" would be a security regression.
     assert c["sameSite"] in ("Lax", "Strict"), (
-        f"__Host-bs_verified SameSite is too permissive: {c['sameSite']!r}"
+        f"__Host-bs_session SameSite is too permissive: {c['sameSite']!r}"
     )
     # Security review LOW #1 — HttpOnly=True is now correct: the
     # M1 widget JS used to mint the cookie via document.cookie (which
@@ -66,7 +66,16 @@ def test_verified_cookie_attributes_on_silent_solve(bs_browser_context):
     # solution to /botshield/embedded-verify so the server emits
     # Set-Cookie with HttpOnly. Closes XSS-driven cookie theft.
     assert c["httpOnly"] is True, (
-        f"__Host-bs_verified should be HttpOnly post-LOW#1: {c}"
+        f"__Host-bs_session should be HttpOnly post-LOW#1: {c}"
+    )
+    # Session-cookie semantics: no Expires=, no Max-Age=. Browser
+    # discards on session end. The server-side expires_at field
+    # inside the GCM envelope is the hard cap that catches cookies
+    # surviving a long-lived browser session.
+    assert c["expires"] in (-1, None), (
+        f"__Host-bs_session is a session cookie; Playwright reports "
+        f"expires={c['expires']!r} (expected -1 / None). The "
+        f"Set-Cookie should not carry Expires= or Max-Age="
     )
 
 

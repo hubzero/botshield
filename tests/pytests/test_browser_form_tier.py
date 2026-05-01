@@ -11,7 +11,7 @@ see:
     the script).
   - Auto-submit form is broken (wrong method, wrong action, JS
     handler renamed).
-  - Cookie attributes prevent the browser from echoing __Host-bs_verified
+  - Cookie attributes prevent the browser from echoing __Host-bs_session
     on the reload (Secure on http, SameSite wrong, Path wrong).
 """
 
@@ -24,7 +24,7 @@ pytestmark = [pytest.mark.acceptance, pytest.mark.browser]
 
 
 def _has_verified_cookie(ctx) -> bool:
-    return any(c["name"] == "__Host-bs_verified" for c in ctx.cookies())
+    return any(c["name"] == "__Host-bs_session" for c in ctx.cookies())
 
 
 def test_silent_tier_js_pow_round_trip(bs_browser_context):
@@ -44,7 +44,7 @@ def test_silent_tier_js_pow_round_trip(bs_browser_context):
         f"expected interstitial, got title={page.title()!r}"
     )
 
-    # 2. The interstitial JS sets __Host-bs_verified then
+    # 2. The interstitial JS sets __Host-bs_session then
     #    `setTimeout(location.reload, 250)`. Wait for the reload to
     #    finish, not just the cookie-set: the title only changes on
     #    the follow-up navigation when the real origin page renders.
@@ -55,7 +55,7 @@ def test_silent_tier_js_pow_round_trip(bs_browser_context):
 
     # 3. Cookie present in browser context, real page rendered.
     assert _has_verified_cookie(ctx), (
-        f"__Host-bs_verified never landed in the browser cookie jar; "
+        f"__Host-bs_session never landed in the browser cookie jar; "
         f"cookies={[c['name'] for c in ctx.cookies()]}"
     )
 

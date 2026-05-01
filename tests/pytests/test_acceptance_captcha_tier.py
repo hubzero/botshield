@@ -3,7 +3,7 @@
 /captcha-demo is pinned to captcha tier via BotShieldScoreCaptcha 3.
 The user:
   1. hits /captcha-demo → interstitial with a Turnstile widget,
-  2. solves → 303 + __Host-bs_verified cookie,
+  2. solves → 303 + __Host-bs_session cookie,
   3. continues browsing /  → no challenge on normal paths.
 
 Requires Cloudflare reachability. M11.6 replaces step 2 with an
@@ -41,9 +41,21 @@ def test_captcha_journey_end_to_end(pending_cookie, log_slice):
     if not _turnstile_reachable():
         pytest.skip("challenges.cloudflare.com unreachable")
 
-    # 1. Interstitial (pending cookie minted).
+    # 1. Interstitial (pending cookie minted). Captcha-tier
+    #    interstitial is 403 + X-Robots-Tag noindex,nofollow so
+    #    search engines don't index the placeholder body. Browsers
+    #    still execute the Turnstile widget on a 4xx response.
     pending = pending_cookie("captcha-demo")
     interstitial = client.get("/captcha-demo")
+    assert interstitial.status_code == 403, (
+        f"captcha-tier interstitial should return 403; "
+        f"got {interstitial.status_code}"
+    )
+    robots_tag = interstitial.headers.get("X-Robots-Tag", "")
+    assert "noindex" in robots_tag and "nofollow" in robots_tag, (
+        f"captcha-tier interstitial missing X-Robots-Tag "
+        f"noindex,nofollow; got {robots_tag!r}"
+    )
     assert "cf-turnstile" in interstitial.text, (
         "interstitial didn't render the Turnstile widget"
     )
@@ -61,8 +73,8 @@ def test_captcha_journey_end_to_end(pending_cookie, log_slice):
 
     assert resp.status_code == 303
     assert resp.headers.get("X-Botshield") == "captcha-ok"
-    verified = resp.cookies.get("__Host-bs_verified")
-    assert verified, "verify response didn't set __Host-bs_verified"
+    verified = resp.cookies.get("__Host-bs_session")
+    assert verified, "verify response didn't set __Host-bs_session"
     assert lines, (
         "no 'outcome=verified provider=turnstile' decision line emitted"
     )
@@ -71,7 +83,7 @@ def test_captcha_journey_end_to_end(pending_cookie, log_slice):
     resp2 = client.get(
         "/",
         ua=BROWSER_UA, accept_language="en-US",
-        cookies={"__Host-bs_verified": verified},
+        cookies={"__Host-bs_session": verified},
     )
     assert resp2.status_code == 200
     assert resp2.headers.get("X-Botshield") != "challenge", (

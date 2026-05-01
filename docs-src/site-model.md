@@ -19,12 +19,16 @@ mod_botshield supports four user-facing tiers plus a passive
 | `captcha` | Third-party provider widget (Turnstile / hCaptcha / reCAPTCHA / Friendly / GeeTest) | `effective ≥ BotShieldScoreCaptcha` (default `≥ 80`). Falls back to `form` if no provider configured on the scope |
 
 A fifth value, `safeguard`, can appear in decision logs. It marks
-the challenge-loop suppression: a client that has been issued
+challenge-loop suppression: a client that has been issued
 challenges repeatedly within the safeguard window without ever
-returning a verified cookie gets `tier=safeguard outcome=declined`
-— pass-through to the real content with no challenge — to break the
-loop. The flagged-IP entry is preserved so the suspicious behavior
-is still recorded for downstream signals.
+returning a verified cookie gets `tier=safeguard outcome=redirect`
+— a 302 to a configured `BotShieldSafeguardRedirectURL` (or to the
+built-in explainer at `<BotShieldEndpointPrefix>/safeguard-info`)
+with the original URI appended as `?return=<urlencoded path>`. The
+explainer covers common reasons the auto-check failed (JS disabled,
+privacy extension, browser version) and offers a Continue link
+back to the original URL. The flagged-IP entry is preserved so the
+suspicious behavior is still recorded for downstream signals.
 
 Below `BotShieldScoreSilent` the module returns `DECLINED` to
 Apache; the content handler runs as if mod_botshield weren't loaded.
@@ -45,7 +49,7 @@ effective = heuristic_total + cookie_score
   `BotShieldFlagTrigger action=score` effects fired by flags set on
   the IP or carried in the prior cookie.
 - **`cookie_score`** — accumulated reputation in the prior
-  `_bs_verified` cookie, if one was presented and verified. Carries
+  `_bs_session` cookie, if one was presented and verified. Carries
   forward across requests; expires with the cookie TTL.
 
 A separate **tier floor** can lift the final tier independent of the
@@ -90,10 +94,17 @@ so the diagnostic surfaces under verbose logging.
 
 ## Cookie-carried reputation
 
-Once a request passes (challenged or not), mod_botshield issues a
-`_bs_verified` (or `__Host-bs_verified` on HTTPS) cookie carrying
-the user's accumulated reputation. The wire format is an
-authenticated AES-256-GCM envelope; the plaintext fields include:
+Every pass through the handler mints `_bs_session` (or
+`__Host-bs_session` on HTTPS). The cookie's role is twofold: it
+carries any accumulated reputation forward, and on a fresh visitor
+it serves as a per-session marker so the next request from the
+same browser doesn't relitigate the entire heuristic stack. Most
+issued cookies carry `trust=0` (no challenge solved yet) and are
+"this user has been here" markers; cookies issued after a real
+solve carry the accumulated reputation block.
+
+The wire format is an authenticated AES-256-GCM envelope; the
+plaintext fields include:
 
 - `score` — running total
 - `flags` — credit/penalty bits accumulated across challenges
@@ -103,11 +114,24 @@ authenticated AES-256-GCM envelope; the plaintext fields include:
   state (see below)
 - `expires_at` — unix timestamp; cookies past expiry fail verify
 
+The `Set-Cookie` line carries no `Expires` or `Max-Age` attribute
+— it's a session cookie at the browser layer and gets discarded
+when the browsing session ends. The `expires_at` field inside the
+envelope still acts as a server-side hard cap, so a stale cookie
+that survives via a long-lived browser session still gets
+rejected on verify.
+
 On subsequent requests that cookie's `score` field becomes the
 `cookie_score` term in the composition. Repeated good behavior
 accumulates negative `cookie_score` (forgiveness credit applied at
 challenge-issue time); repeated suspicious behavior accumulates
 positive.
+
+The decision log's `cookie=` field reports one of `ok` (verified
+cookie carried forward), `expired`, `bad_sig`, `bad_format`,
+`absent`, or `minted` (no incoming cookie; this response set a
+fresh one). The `cookie_minted_total` Prometheus counter tracks
+the always-mint volume separately from `cookie_ok_total`.
 
 The reputation persists across requests but expires with the cookie
 TTL (`BotShieldCookieTTL`, default 1 hour). After expiry users
@@ -234,7 +258,7 @@ reachable; the common ones:
 | `captcha` | `failopen` | Provider siteverify timed out; treated as pass to avoid blocking on a third-party outage |
 | `captcha` | `rate_limited` | Per-IP captcha-verify rate cap exceeded |
 | `captcha` | `inflight_capped` | Global captcha-verify in-flight cap exceeded |
-| `safeguard` | `allow` | challenge-loop suppression; pass-through |
+| `safeguard` | `redirect` | challenge-loop suppression; 302 to the explainer (or operator-configured URL) with `?return=<original URI>` |
 
 See [observability](../observability/index.html) for the complete enum
 vocabulary and how it maps to counters.

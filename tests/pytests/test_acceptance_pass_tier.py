@@ -48,6 +48,45 @@ def test_normal_user_passes_through(fresh_ip, log_slice):
         d["tier"] == "pass" and d["outcome"] == "allow"
         for d in lines
     ), (
-        f"expected tier=pass outcome=declined for ip={fresh_ip}; "
+        f"expected tier=pass outcome=allow for ip={fresh_ip}; "
         f"got: {lines}"
     )
+
+    # Always-mint: a fresh cookieless visitor's pass-through still
+    # gets a __Host-bs_session minted on the response (most carry
+    # trust=0 and are session markers; any solve evidence rides in
+    # later issuances). The decision log records cookie=minted to
+    # distinguish "no cookie at all" (cookie=absent) from "no cookie
+    # in, fresh one going out".
+    assert any(
+        d["tier"] == "pass" and d["cookie"] == "minted"
+        for d in lines
+    ), (
+        f"expected cookie=minted on a fresh visitor's pass through; "
+        f"got: {[(d['tier'], d['cookie']) for d in lines]}"
+    )
+    assert "__Host-bs_session" in resp.cookies, (
+        f"always-mint should issue __Host-bs_session on pass; "
+        f"got cookies={dict(resp.cookies)}"
+    )
+
+    # Session-cookie semantics: the Set-Cookie line for
+    # __Host-bs_session must NOT carry Expires= or Max-Age= so the
+    # browser discards on session end. The server-side expires_at
+    # field inside the envelope is the hard cap. Inspect the raw
+    # Set-Cookie header rather than the parsed cookie since httpx
+    # collapses some attributes during parse.
+    set_cookies = resp.headers.get_list("set-cookie") \
+        if hasattr(resp.headers, "get_list") \
+        else [resp.headers.get("set-cookie", "")]
+    bs_lines = [c for c in set_cookies if "__Host-bs_session" in c]
+    assert bs_lines, "no Set-Cookie line for __Host-bs_session"
+    for line in bs_lines:
+        assert "Expires=" not in line, (
+            f"__Host-bs_session is a session cookie; Expires= would "
+            f"keep it past browser-session end. Set-Cookie: {line!r}"
+        )
+        assert "Max-Age=" not in line, (
+            f"__Host-bs_session is a session cookie; Max-Age= would "
+            f"keep it past browser-session end. Set-Cookie: {line!r}"
+        )

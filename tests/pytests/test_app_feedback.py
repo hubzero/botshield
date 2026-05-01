@@ -119,18 +119,18 @@ def test_app_feedback_penalty_flag_applies_to_next_request(
     )
 
 
-def test_app_feedback_observed_under_shadow_mode(
+def test_app_feedback_observed_under_log_only(
     config_override, log_slice,
 ):
-    """E12 — `BotShieldLogOnly on` flips every trigger match into
+    """E12 — `BotShieldEnabled LogOnly` flips every trigger match into
     observe semantics. The feedback path lives on the response-side
     E5 filter (not the shared bs_apply_trigger_action executor), so
-    bridge.c honors shadow_mode inline. Without that gate, a signed
-    feedback event would still mutate the flagged-IP table while
-    operators are staging policy under shadow — exactly the staging
+    bridge.c honors the dir-cfg log-only gate inline. Without that
+    gate, a signed feedback event would still mutate the flagged-IP
+    table while staging policy under LogOnly — exactly the staging
     hazard E12 was added to prevent.
 
-    Verify by minting feedback under shadow_mode, then checking that
+    Verify by minting feedback under LogOnly, then checking that
     a follow-up request from the same IP does NOT see the
     flagged-ip reason."""
     val = _sign("scanner-hit")
@@ -138,7 +138,7 @@ def test_app_feedback_observed_under_shadow_mode(
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         'BotShieldAllowVerifiedBots on\n'
-        '    BotShieldLogOnly on\n'
+        '    BotShieldEnabled LogOnly\n'
         '    BotShieldAppFeedback on\n'
         f'    BotShieldAppIntegrationSecretFile {SECRET_PATH}\n'
         '    BotShieldFeedbackTrigger scanner-hit '
@@ -157,8 +157,8 @@ def test_app_feedback_observed_under_shadow_mode(
     follow_up = lines[-1]["reason"]
     assert "flagged-ip" not in follow_up, (
         f"follow-up request picked up the flagged bit even though "
-        f"shadow_mode was on; bridge.c bypassed the observe gate. "
-        f"reason={follow_up}"
+        f"BotShieldEnabled LogOnly was set; bridge.c bypassed the "
+        f"observe gate. reason={follow_up}"
     )
     # An observe match still shows up in the slice text — the filter
     # logs `event=<x> observed (would-flag=...) — shadow/observe`.
@@ -172,12 +172,12 @@ def test_app_feedback_per_trigger_observe_mode(
     config_override, log_slice,
 ):
     """Per-trigger `mode=observe` on a BotShieldFeedbackTrigger
-    suppresses the flagged-IP write the same way global
-    BotShieldLogOnly does. Even though feedback runs on the
-    response path, the side effect is future-request state — so
-    observe-mode gates that mutation. bridge.c honors
-    `ft->action.mode == BS_TMODE_OBSERVE` next to the global
-    shadow check."""
+    suppresses the flagged-IP write the same way scope-level
+    BotShieldEnabled LogOnly does. Even though feedback runs on
+    the response path, the side effect is future-request state —
+    so observe-mode gates that mutation. bridge.c honors
+    `ft->action.mode == BS_TMODE_OBSERVE` next to the dir-cfg
+    log-only check."""
     val = _sign("scanner-hit")
     ip = _ips.fresh_ip()
     with config_override(
