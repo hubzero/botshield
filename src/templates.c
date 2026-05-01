@@ -650,10 +650,19 @@ int bs_render_challenge_page(request_rec *r,
         body = apr_pstrcat(r->pool, page, widget, NULL);
     }
 
-    r->status = HTTP_OK;
+    /* 403 Forbidden + X-Robots-Tag so search engines don't index the
+     * interstitial as if it were the page being crawled. Browsers
+     * still render the body and execute the inline JS / captcha
+     * widget on a 4xx response (Cloudflare / DataDome / Akamai all
+     * use this same pattern), so legitimate clients still solve the
+     * challenge and get redirected back to the original URL.
+     * Setting r->status here + returning OK from the caller bypasses
+     * Apache's ErrorDocument substitution — our body is what ships. */
+    r->status = HTTP_FORBIDDEN;
     ap_set_content_type(r, "text/html; charset=utf-8");
     apr_table_setn(r->headers_out, "Cache-Control", "no-store");
     apr_table_setn(r->headers_out, "X-Botshield",   "challenge");
+    apr_table_setn(r->headers_out, "X-Robots-Tag",  "noindex, nofollow");
     ap_rputs(body, r);
 
     return use_captcha_widget;
