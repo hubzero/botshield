@@ -110,8 +110,8 @@ def test_allow_bot_ua_only_mode(config_override, log_slice, fresh_ip):
     prefilter bug where operator-defined patterns were silently
     unreachable unless the UA happened to match a hardcoded token."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldAllowBot xenophon "Xenophon/" *',
         count=1,
     ):
@@ -136,8 +136,8 @@ def test_allow_bot_inline_cidr(config_override, log_slice, fresh_ip):
     comma-separated CIDR list inline (no file). In-range IPs allow,
     out-of-range IPs fake."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldAllowBot corpbot "CorpBot/" '
         '"198.51.100.0/24,203.0.113.0/24"',
         count=1,
@@ -167,7 +167,7 @@ def test_allow_bot_main_scope_inherits_to_vhost(
     """Regression test for the server-config merge hook.
 
     Declaring `BotShieldAllowBot` at MAIN scope (outside `<VirtualHost>`)
-    must flow into the vhost where `BotShieldAllow on` lives. Without
+    must flow into the vhost where `BotShieldAllowVerifiedBots on` lives. Without
     the merge hook, main-scope entries were invisible to per-request
     matching — a structural mismatch for the common "declare globally,
     enable per-vhost" shape.
@@ -204,8 +204,8 @@ def test_allow_bot_longest_match_wins(
     classify as corpbot-admin, not corpbot — otherwise specific
     overrides are shadowed by the generic pattern registered first."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldAllowBot corpbot       "CorpBot" *\n'
         '    BotShieldAllowBot corpbot-admin "CorpBot/Admin" *',
         count=1,

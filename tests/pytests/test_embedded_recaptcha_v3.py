@@ -42,8 +42,8 @@ def test_bootstrap_returns_recaptcha_v3_provider(config_override):
     can dispatch to grecaptcha.execute(). Action defaults to
     'botshield' if BotShieldCaptchaExpectedAction isn't set."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    <Location /botshield/embedded-bootstrap>\n'
         '        BotShieldCaptchaProvider recaptcha-v3\n'
         '        BotShieldCaptchaSiteKey 6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI\n'
@@ -71,8 +71,8 @@ def test_bootstrap_action_overrideable(config_override):
     operators can have different action strings on different scopes
     without cross-contamination of v3 score semantics."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    <Location /botshield/embedded-bootstrap>\n'
         '        BotShieldCaptchaProvider recaptcha-v3\n'
         '        BotShieldCaptchaSiteKey 6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI\n'
@@ -116,8 +116,8 @@ def test_verify_rejects_recaptcha_v3_missing_token(config_override):
     must be rejected at parse time, before any HTTP call to Google.
     Verifies the bs_embedded_verify_provider input-validation runs."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    <Location /botshield/embedded-verify>\n'
         '        BotShieldCaptchaProvider recaptcha-v3\n'
         '        BotShieldCaptchaSiteKey 6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI\n'
@@ -177,8 +177,8 @@ def test_bootstrap_returns_recaptcha_v2_provider(config_override):
     bootstrap doesn't care about the sitekey type, just transports
     it to the wrapper)."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    <Location /botshield/embedded-bootstrap>\n'
         '        BotShieldCaptchaProvider recaptcha-v2\n'
         '        BotShieldCaptchaSiteKey 6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI\n'
@@ -195,8 +195,8 @@ def test_bootstrap_returns_friendly_provider(config_override):
     """Same check for Friendly. The placeholder sitekey from the dev
     config is fine — bootstrap just round-trips it."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    <Location /botshield/embedded-bootstrap>\n'
         '        BotShieldCaptchaProvider friendly\n'
         '        BotShieldCaptchaSiteKey FRIENDLY_CAPTCHA_SITEKEY_PLACEHOLDER\n'
@@ -214,8 +214,8 @@ def test_verify_rejects_provider_mismatch(config_override):
     for turnstile: must 400 fail-loud, not silently coerce. The
     bs_embedded_verify_provider mismatch check fires."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    <Location /botshield/embedded-verify>\n'
         '        BotShieldCaptchaProvider turnstile\n'
         '        BotShieldCaptchaSiteKey 1x00000000000000000000AA\n'

@@ -63,8 +63,8 @@ def test_isolation_default_per_vhost(
     # IP trips a honeypot path; mod_botshield sets honeypot_hit on
     # the (ip, ns_id_a) row in the flagged-IP table.
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldShareScope vhost-site-a',
         count=1,
     ):
@@ -76,8 +76,8 @@ def test_isolation_default_per_vhost(
     # SHM (state file persists across the reload) but lookups under
     # ns_id_b miss on the ns_id mismatch.
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldShareScope vhost-site-b',
         count=1,
     ):
@@ -111,13 +111,13 @@ def test_sharing_via_share_scope(
     phase A is visible in phase B.
     """
     cfg = (
-        'BotShieldAllow on\n'
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldShareScope example-cluster'
     )
 
     # Phase A: simulate www.example.com under the shared scope.
     # Trip the honeypot; flag is written under ns_id(example-cluster).
-    with config_override(r"BotShieldAllow\s+on", cfg, count=1):
+    with config_override(r"BotShieldAllowVerifiedBots\s+on", cfg, count=1):
         client.get("/admin/.env", xff=rate_slot_ip)
         time.sleep(1)
 
@@ -125,7 +125,7 @@ def test_sharing_via_share_scope(
     # Reload between phases recomputes ns_id from the unchanged token,
     # giving the same ns_id; the flagged-IP entry from phase A is
     # found and re-applied.
-    with config_override(r"BotShieldAllow\s+on", cfg, count=1):
+    with config_override(r"BotShieldAllowVerifiedBots\s+on", cfg, count=1):
         with log_slice as slc:
             client.get("/", xff=rate_slot_ip)
             lines = slc.decision_lines(ip=rate_slot_ip)

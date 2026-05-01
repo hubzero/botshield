@@ -37,7 +37,7 @@ Verified crawlers (UA matches AND IP is in the published range)
 get a hard pass — they bypass the score ladder entirely.
 
 ```apache
-BotShieldAllow on
+BotShieldAllowVerifiedBots on
 BotShieldAllowBot googlebot "Googlebot/" /var/lib/botshield/bots/googlebot.txt
 BotShieldAllowBot bingbot   "bingbot/"   /var/lib/botshield/bots/bingbot.txt
 BotShieldAllowBot internal-monitor "MonitorBot/" 10.0.0.0/8,2001:db8::/32

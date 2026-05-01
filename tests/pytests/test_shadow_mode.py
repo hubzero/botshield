@@ -58,8 +58,8 @@ def test_path_trigger_observe_does_not_enforce(
     static handler serves the path's normal response — 404 here
     since the path doesn't exist)."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldPathTrigger trap "/.envprobe" '
         'status=403 mode=observe',
         count=1,
@@ -85,8 +85,8 @@ def test_path_trigger_observe_does_not_flag_ip(
     trigger with flag=fake_bot ttl=3600 in observe mode; the IP
     must not pick up the flag bit on the next request."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldPathTrigger trap "/.envprobe" '
         'status=pass flag=fake_bot ttl=3600 mode=observe',
         count=1,
@@ -112,8 +112,8 @@ def test_rate_limit_observe_does_not_429(config_override, fresh_ip):
     none return 429 — the over-budget hits log :observe and
     continue."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldRateLimit corpbot 1 sec "CorpBot" * '
         'mode=observe',
         count=1,
@@ -134,8 +134,8 @@ def test_rate_limit_observe_increments_metric(
     rate_limit_observed_total counter, NOT the
     rate_limit_exceeded_total counter."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldRateLimit corpbot 1 sec "CorpBot" * '
         'mode=observe',
         count=1,
@@ -163,8 +163,8 @@ def test_rate_limit_observe_increments_metric(
 
 def test_block_path_observe_does_not_403(config_override, fresh_ip):
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldBlockPath admin-block "/admin/*" '
         '"httpx" * mode=observe',
         count=1,
@@ -186,8 +186,8 @@ def test_global_shadow_mode_overrides_per_rule_enforce(
     flips everything to observe. The 403 path trigger must NOT
     enforce."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldLogOnly on\n'
         '    BotShieldPathTrigger trap "/.envprobe" status=403',
         count=1,
@@ -206,8 +206,8 @@ def test_global_shadow_mode_off_lets_per_rule_enforce(
     in default-enforce mode actually enforces. Catches accidental
     inversion of the global flag's check."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldPathTrigger trap "/.envprobe2" status=403',
         count=1,
     ):
@@ -230,8 +230,8 @@ def test_observe_does_not_shadow_subsequent_enforce_rule(
     With correct semantics: first observes (logs :observe), second
     enforces — request returns 403."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldBlockPath staged "/admin/*" "httpx" * '
         'mode=observe\n'
         '    BotShieldBlockPath active "/admin/*" "httpx" *',
@@ -251,8 +251,8 @@ def test_observe_does_not_shadow_subsequent_enforce_rule(
 def test_directive_rejects_bad_mode_value(config_override):
     with pytest.raises(Exception):
         with config_override(
-            r"BotShieldAllow\s+on",
-            'BotShieldAllow on\n'
+            r"BotShieldAllowVerifiedBots\s+on",
+            'BotShieldAllowVerifiedBots on\n'
             '    BotShieldPathTrigger trap "/foo" '
             'status=403 mode=monitor',
             count=1,
@@ -269,8 +269,8 @@ def test_directive_accepts_mode_on_feedback(config_override):
     Per-trigger functional verification lives in
     test_app_feedback.py::test_app_feedback_per_trigger_observe_mode."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldFeedbackTrigger event-x '
         'flag=honeypot_hit ttl=3600 mode=observe',
         count=1,

@@ -82,8 +82,8 @@ def test_cookie_short_circuit_blocks_env_and_path(
     path reason-tokens on the decision line, and the status is the
     cookie's 403 (not the path trigger's 451 or env's 429)."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldCookieTrigger c-block cookies=none status=403\n'
         '    SetEnvIfExpr "true" BS_CROSS=1\n'
         '    BotShieldEnvTrigger e-block env=BS_CROSS status=429\n'
@@ -120,8 +120,8 @@ def test_env_short_circuit_blocks_path(
     matching trigger). The path trigger that would also match must
     not run."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    SetEnvIfExpr "true" BS_CROSS=1\n'
         '    BotShieldEnvTrigger e-block env=BS_CROSS status=403\n'
         '    BotShieldPathTrigger p-block "/*" status=451',
@@ -154,8 +154,8 @@ def test_cookie_and_env_pass_then_path_runs(
     another; the path trigger then fires with its own status. All
     three families should appear in the reason trace."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldCookieTrigger c-pass cookies=none '
         'status=pass penalty=3\n'
         '    SetEnvIfExpr "true" BS_CROSS=1\n'
@@ -191,8 +191,8 @@ def test_load_short_circuit_blocks_path(
     _set_load_file("hot")
     try:
         with config_override(
-            r"BotShieldAllow\s+on",
-            'BotShieldAllow on\n'
+            r"BotShieldAllowVerifiedBots\s+on",
+            'BotShieldAllowVerifiedBots on\n'
             f'    BotShieldLoadStateFile {LOAD_FILE_PATH}\n'
             '    BotShieldLoadTrigger l-block state=hot status=503\n'
             '    BotShieldPathTrigger p-block "/*" status=451',
@@ -227,8 +227,8 @@ def test_env_pass_then_load_blocks_path(
     _set_load_file("hot")
     try:
         with config_override(
-            r"BotShieldAllow\s+on",
-            'BotShieldAllow on\n'
+            r"BotShieldAllowVerifiedBots\s+on",
+            'BotShieldAllowVerifiedBots on\n'
             f'    BotShieldLoadStateFile {LOAD_FILE_PATH}\n'
             '    SetEnvIfExpr "true" BS_CROSS=1\n'
             '    BotShieldEnvTrigger e-pass env=BS_CROSS '
@@ -276,8 +276,8 @@ def test_env_trigger_no_double_apply_on_internal_redirect(
     leg's decision line should carry env-trigger; the /error leg's
     decision line must NOT."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    SetEnvIfExpr "true" BS_CROSS=1\n'
         '    BotShieldEnvTrigger e-pass env=BS_CROSS '
         'status=pass penalty=5\n'

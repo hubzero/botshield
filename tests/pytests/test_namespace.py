@@ -46,8 +46,8 @@ def _g(path: str, **kw):
 def test_share_scope_rejects_empty_token(config_override):
     with pytest.raises(Exception):
         with config_override(
-            r"BotShieldAllow\s+on",
-            'BotShieldAllow on\n'
+            r"BotShieldAllowVerifiedBots\s+on",
+            'BotShieldAllowVerifiedBots on\n'
             '    BotShieldShareScope ""',
             count=1,
         ):
@@ -58,8 +58,8 @@ def test_share_scope_rejects_overlong_token(config_override):
     long_tok = "x" * 200
     with pytest.raises(Exception):
         with config_override(
-            r"BotShieldAllow\s+on",
-            f'BotShieldAllow on\n'
+            r"BotShieldAllowVerifiedBots\s+on",
+            f'BotShieldAllowVerifiedBots on\n'
             f'    BotShieldShareScope {long_tok}',
             count=1,
         ):
@@ -69,8 +69,8 @@ def test_share_scope_rejects_overlong_token(config_override):
 def test_share_scope_accepts_normal_token(config_override):
     """No-op acceptance — directive parses and Apache reloads cleanly."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldShareScope ns-acceptance-test',
         count=1,
     ):
@@ -100,8 +100,8 @@ def test_flagged_ip_isolated_across_share_scopes(
 
     # --- Phase A: flag IP_X under namespace alpha ----------------
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldShareScope ns-isolation-alpha',
         count=1,
     ):
@@ -110,8 +110,8 @@ def test_flagged_ip_isolated_across_share_scopes(
 
     # --- Phase B: switch namespace; capture the decision line ---
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldShareScope ns-isolation-beta',
         count=1,
     ):
@@ -140,13 +140,13 @@ def test_share_scope_revisit_sees_prior_flag(
     isn't accidentally erasing the ns_id on store, just that lookups
     correctly key on it."""
     cfg_alpha = (
-        'BotShieldAllow on\n'
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldShareScope ns-revisit-alpha'
     )
 
     # Visit 1 — flag the IP.
     with config_override(
-        r"BotShieldAllow\s+on", cfg_alpha, count=1,
+        r"BotShieldAllowVerifiedBots\s+on", cfg_alpha, count=1,
     ):
         client.get("/admin/.env", xff=rate_slot_ip)
         time.sleep(1)
@@ -155,7 +155,7 @@ def test_share_scope_revisit_sees_prior_flag(
     # between phases. State file persistence + matching ns_id keep
     # the flag visible.
     with config_override(
-        r"BotShieldAllow\s+on", cfg_alpha, count=1,
+        r"BotShieldAllowVerifiedBots\s+on", cfg_alpha, count=1,
     ):
         with log_slice as slc:
             client.get("/", xff=rate_slot_ip)

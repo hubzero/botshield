@@ -89,8 +89,8 @@ def secondary_secret_file():
 def test_directive_rejects_missing_file(config_override):
     with pytest.raises(Exception):
         with config_override(
-            r"BotShieldAllow\s+on",
-            'BotShieldAllow on\n'
+            r"BotShieldAllowVerifiedBots\s+on",
+            'BotShieldAllowVerifiedBots on\n'
             '    BotShieldSecondarySecretFile /nonexistent/secret',
             count=1,
         ):
@@ -105,8 +105,8 @@ def test_directive_rejects_world_readable(config_override, tmp_path):
     bad.chmod(0o644)
     with pytest.raises(Exception):
         with config_override(
-            r"BotShieldAllow\s+on",
-            f'BotShieldAllow on\n'
+            r"BotShieldAllowVerifiedBots\s+on",
+            f'BotShieldAllowVerifiedBots on\n'
             f'    BotShieldSecondarySecretFile {bad}',
             count=1,
         ):
@@ -134,8 +134,8 @@ def test_directive_rejects_embedded_nul(config_override, tmp_path):
     bad.chmod(0o600)
     with pytest.raises(Exception):
         with config_override(
-            r"BotShieldAllow\s+on",
-            f'BotShieldAllow on\n'
+            r"BotShieldAllowVerifiedBots\s+on",
+            f'BotShieldAllowVerifiedBots on\n'
             f'    BotShieldSecondarySecretFile {bad}',
             count=1,
         ):
@@ -147,8 +147,8 @@ def test_directive_accepts_well_formed(config_override,
     """Valid secondary file path: reload succeeds, server stays
     healthy."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        f'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        f'BotShieldAllowVerifiedBots on\n'
         f'    BotShieldSecondarySecretFile {secondary_secret_file}',
         count=1,
     ):
@@ -191,8 +191,8 @@ def test_old_cookie_validates_during_rotation(config_override,
     secondary key shouldn't shadow or interfere with primary-key
     verification."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        f'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        f'BotShieldAllowVerifiedBots on\n'
         f'    BotShieldSecondarySecretFile {secondary_secret_file}',
         count=1,
     ):

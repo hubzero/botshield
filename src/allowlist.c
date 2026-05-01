@@ -23,9 +23,16 @@
 #include "shm.h"
 
 const bs_allow_bot_entry bs_builtin_bots[] = {
-    { "googlebot", "Googlebot", NULL, NULL, 0 },
-    { "bingbot",   "bingbot",   NULL, NULL, 0 },
-    { "applebot",  "Applebot",  NULL, NULL, 0 },
+    { "googlebot",   "Googlebot",       NULL, NULL, 0 },
+    { "bingbot",     "bingbot",         NULL, NULL, 0 },
+    { "applebot",    "Applebot",        NULL, NULL, 0 },
+    /* Siteimprove site-scanning crawler. UA matches the
+     * "Siteimprove.com" substring inside their full UA shape
+     * "Mozilla/5.0 ... SiteCheck-sitecrawl by Siteimprove.com; ...".
+     * IP ranges shipped at apache/bots/siteimprove.txt; deploy
+     * to /var/lib/botshield/bots/siteimprove.txt (Makefile install
+     * step). */
+    { "siteimprove", "Siteimprove.com", NULL, NULL, 0 },
     { NULL, NULL, NULL, NULL, 0 }
 };
 
@@ -333,15 +340,19 @@ int bs_allow_ip_in_ranges(const apr_array_header_t *ranges, request_rec *r)
 
 /* --- E1 directive setters --- */
 
-/* BotShieldAllow on|off — master gate for the Allow-list family.
- * Default off (opt-in). Applied at server scope. */
-const char *bs_set_allow_enabled(cmd_parms *cmd, void *dconf,
+/* BotShieldAllowVerifiedBots on|off — opt in to the bundled set of
+ * built-in verified crawlers (currently googlebot, bingbot, applebot,
+ * siteimprove). Default off. Operators wanting only specific bots
+ * skip this and use BotShieldAllowBot per name; the allowlist
+ * machinery activates whenever either this flag or any AllowBot
+ * declaration is present (see bs_wire_allowlist's gate). */
+const char *bs_set_verified_bots(cmd_parms *cmd, void *dconf,
                                         int flag)
 {
     (void)dconf;
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
-    scfg->allow_enabled = flag ? 1 : 0;
+    scfg->verified_bots_enabled = flag ? 1 : 0;
     return NULL;
 }
 /* BotShieldAllowBot <name> <ua-pattern> [<target>] — register a
@@ -451,8 +462,11 @@ void bs_check_allow(request_rec *r,
     (void)cfg;
     bs_server_cfg *scfg = ap_get_module_config(r->server->module_config,
                                                &botshield_module);
-    if (!scfg || !scfg->allow_enabled) return;
-    if (!scfg->bot_classifier) return;
+    /* Activation gate: bs_wire_allowlist creates bot_classifier only
+     * when at least one of {verified_bots_enabled, operator-declared
+     * BotShieldAllowBot} is configured. classifier-presence is
+     * therefore the right activation indicator at request time. */
+    if (!scfg || !scfg->bot_classifier) return;
 
     const char *ua = apr_table_get(r->headers_in, "User-Agent");
     const char *name = bs_ua_classify(scfg->bot_classifier, ua);

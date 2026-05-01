@@ -406,25 +406,44 @@ static const command_rec bs_cmds[] = {
                  "equivalent today is `BotShieldTrigger flag=<name> "
                  "ttl=<sec>`."),
     /* E1 — Allow family */
-    AP_INIT_FLAG("BotShieldAllow", bs_set_allow_enabled,
+    AP_INIT_FLAG("BotShieldAllowVerifiedBots", bs_set_verified_bots,
                  NULL, RSRC_CONF,
-                 "Enable the Allow family (verified-bot first member). "
-                 "Default off. When on, classified bot UAs are matched "
-                 "against loaded IP ranges: in-range gets a large "
-                 "negative credit (tier=pass bypass); out-of-range "
-                 "gets a fake-<name> penalty routing to captcha tier."),
+                 "Opt in to the bundled set of built-in verified "
+                 "crawlers - currently googlebot, bingbot, applebot, "
+                 "siteimprove - which auto-register with their "
+                 "published IP ranges loaded from "
+                 "/var/lib/botshield/bots/<name>.txt (shipped at "
+                 "apache/bots/*.txt; refresh via "
+                 "tools/refresh-bot-ranges.sh). Default off. "
+                 "Independent of BotShieldAllowBot - operators can "
+                 "use either or both, and the allowlist machinery "
+                 "auto-activates when at least one of them is "
+                 "configured. At request time: (a) UA matches a "
+                 "registered bot's token AND source IP is in the "
+                 "loaded ranges -> large negative credit, collapses "
+                 "to tier=pass (reason allow-bot:<name>); (b) UA "
+                 "matches but IP doesn't -> treated as UA forgery: "
+                 "positive penalty + tier_floor captcha (reason "
+                 "fake-<name>); (c) UA doesn't match anything -> no "
+                 "effect."),
     AP_INIT_TAKE23("BotShieldAllowBot",
                  bs_set_allow_bot, NULL, RSRC_CONF,
-                 "Register a bot for the Allow family. Args: "
-                 "<name> <ua-pattern> [<target>]. Name is a [a-z0-9-] "
-                 "token used as the decision-log identifier and "
-                 "default ranges-file basename. UA-pattern is the "
-                 "case-insensitive substring looked for in the "
-                 "User-Agent header. Optional target: '*' for UA-only "
-                 "trust (logs allow-bot-ua:<name>), an absolute file "
-                 "path, a single CIDR, or a comma-separated CIDR "
-                 "list. Omit the target to use the default file path "
-                 "/var/lib/botshield/bots/<name>.txt."),
+                 "Register a bot for the verified-bot allowlist. "
+                 "Args: <name> <ua-pattern> [<target>]. Name is a "
+                 "[a-z0-9-] token used as the decision-log identifier "
+                 "and default ranges-file basename; same-name as a "
+                 "built-in (googlebot, bingbot, applebot, siteimprove) "
+                 "wins over the built-in. UA-pattern is the case-"
+                 "insensitive substring looked for in the User-Agent "
+                 "header. Optional target: '*' for UA-only trust "
+                 "(logs allow-bot-ua:<name>), an absolute file path, "
+                 "a single CIDR, or a comma-separated CIDR list. "
+                 "Omit the target to use the default file path "
+                 "/var/lib/botshield/bots/<name>.txt. Declaring at "
+                 "least one BotShieldAllowBot auto-activates the "
+                 "allowlist machinery without needing "
+                 "BotShieldAllowVerifiedBots; combine the two when "
+                 "you want both the bundled set AND your own."),
     /* E2.1 — policy enforcement. TAKE_ARGV because Apache has no
      * TAKE4/TAKE5 macros; the setters enforce argc themselves. */
     AP_INIT_TAKE_ARGV("BotShieldRateLimit",
