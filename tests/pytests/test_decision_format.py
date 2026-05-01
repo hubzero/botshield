@@ -46,7 +46,7 @@ def test_decision_format_across_outcomes(log_slice):
             data="{}",
         )
 
-        # unknown endpoint (tier=none, outcome=rejected)
+        # unknown endpoint (tier=none, outcome=block)
         client.get("/botshield/nonexistent-path")
 
         lines = slc.decision_lines()

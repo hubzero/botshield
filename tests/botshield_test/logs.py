@@ -3,7 +3,7 @@
 The big win over `grep -q` in bash: `decision_lines()` returns a
 list of dicts. Tests write
 
-    assert any(d["outcome"] == "rejected" for d in lines)
+    assert any(d["outcome"] == "block" for d in lines)
 
 and pytest's tb on failure shows the full list, not `grep: not found`.
 
@@ -72,8 +72,8 @@ def log_slice():
     Usage:
         with log_slice() as slc:
             # ... drive traffic ...
-            lines = slc.decision_lines(outcome="rejected")
-            assert lines, "expected at least one rejection"
+            lines = slc.decision_lines(outcome="block")
+            assert lines, "expected at least one block"
     """
     yield _LogSlice(start=_log_size())
 

@@ -41,9 +41,21 @@ def test_captcha_journey_end_to_end(pending_cookie, log_slice):
     if not _turnstile_reachable():
         pytest.skip("challenges.cloudflare.com unreachable")
 
-    # 1. Interstitial (pending cookie minted).
+    # 1. Interstitial (pending cookie minted). Captcha-tier
+    #    interstitial is 403 + X-Robots-Tag noindex,nofollow so
+    #    search engines don't index the placeholder body. Browsers
+    #    still execute the Turnstile widget on a 4xx response.
     pending = pending_cookie("captcha-demo")
     interstitial = client.get("/captcha-demo")
+    assert interstitial.status_code == 403, (
+        f"captcha-tier interstitial should return 403; "
+        f"got {interstitial.status_code}"
+    )
+    robots_tag = interstitial.headers.get("X-Robots-Tag", "")
+    assert "noindex" in robots_tag and "nofollow" in robots_tag, (
+        f"captcha-tier interstitial missing X-Robots-Tag "
+        f"noindex,nofollow; got {robots_tag!r}"
+    )
     assert "cf-turnstile" in interstitial.text, (
         "interstitial didn't render the Turnstile widget"
     )

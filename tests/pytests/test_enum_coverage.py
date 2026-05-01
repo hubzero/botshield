@@ -2,9 +2,11 @@
 under an ordinary test run.
 
 `misconfigured` and `debug` require intentional config breaks (debug=On,
-or removing secrets) and aren't counted here. The others — declined,
-challenged, verified, rejected, failopen, rate_limited, pending_missing
-— should all fire from routine traffic.
+or removing secrets) and aren't counted here. The tilde-prefixed
+counterfactuals (`~challenge`, `~block`, `~rate_limited`) require
+`BotShieldEnabled LogOnly` and are exercised from test_shadow_mode.py.
+The remainder — allow, challenged, verified, block, failopen,
+rate_limited, pending_missing — should all fire from routine traffic.
 
 Uses config_override to force a fail-open via a 100ms timeout. Serial
 because the override mutates the live vhost.
@@ -42,7 +44,7 @@ def _fire_verify(pending: str, ip: str):
 
 def test_all_reachable_outcomes_emitted(config_override, rate_slot_ip, log_slice):
     with log_slice as slc:
-        # declined: browser-like request
+        # allow: browser-like request
         client.get("/", ua="Mozilla/5.0 (X11) Chrome/145",
                    accept_language="en-US", xff="203.0.113.210")
 
@@ -57,7 +59,7 @@ def test_all_reachable_outcomes_emitted(config_override, rate_slot_ip, log_slice
             data={"cf-turnstile-response": "x", "return_to": "/"},
         )
 
-        # rejected: POST missing token field → 400
+        # block: POST missing token field → 400
         pending = cookies.fetch_pending_cookie("captcha-demo")
         client.post(
             "/botshield/captcha-verify/turnstile",

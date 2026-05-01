@@ -48,6 +48,6 @@ def test_normal_user_passes_through(fresh_ip, log_slice):
         d["tier"] == "pass" and d["outcome"] == "allow"
         for d in lines
     ), (
-        f"expected tier=pass outcome=declined for ip={fresh_ip}; "
+        f"expected tier=pass outcome=allow for ip={fresh_ip}; "
         f"got: {lines}"
     )

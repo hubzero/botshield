@@ -10,7 +10,7 @@ came back. The fix adds:
   - Action check (reCAPTCHA v3 + Turnstile) against "botshield" or
     BotShieldCaptchaExpectedAction.
 
-Mismatch flips OK → REJECTED with outcome=rejected and a reason
+Mismatch flips OK → REJECTED with outcome=block and a reason
 string like "hostname-mismatch:got=example.com,expected=attacker.tld".
 """
 
@@ -52,7 +52,7 @@ def test_hostname_mismatch_rejects_valid_token(config_override, log_slice):
         f"hostname mismatch should 403 a valid token; got {resp.status_code}"
     )
     assert resp.headers.get("X-Botshield") == "captcha-rejected"
-    assert rejected, "no outcome=rejected decision line for hostname mismatch"
+    assert rejected, "no outcome=block decision line for hostname mismatch"
     # Reason carries the mismatch detail so operators can diagnose.
     reasons = {line.get("reason") for line in rejected}
     assert any("hostname-mismatch" in r for r in reasons), (

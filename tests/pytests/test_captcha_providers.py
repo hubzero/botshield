@@ -155,7 +155,7 @@ def test_captcha_rejected_via_bad_secret(
     )
     assert resp.headers.get("X-Botshield") == "captcha-rejected"
     assert matched, (
-        f"{spec.name}: no 'outcome=rejected provider={spec.log_name}' line"
+        f"{spec.name}: no 'outcome=block provider={spec.log_name}' line"
     )
 
 

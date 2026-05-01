@@ -23,7 +23,7 @@ pytestmark = [pytest.mark.live_network, pytest.mark.serial]
 
 
 def _drive_mix():
-    """Tap a range of enum values: declined + challenged + pending_missing
+    """Tap a range of enum values: allow + challenged + pending_missing
     + a captcha interstitial render. Doesn't cover every enum but
     covers enough that drift on any dimension is caught."""
     for i in range(1, 6):

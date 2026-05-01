@@ -1,10 +1,12 @@
 """E12 — shadow mode / dry-run enforcement.
 
-Two layers, with the global one winning when set:
+Two layers, with the scope-level one winning when set:
   - per-rule  `mode=observe` action key (path/cookie/env/load
                 triggers via shared engine; mode=observe trailing
                 token on rate-limit + block-path setters)
-  - global    BotShieldLogOnly on (server-scope flip-all)
+  - scope     BotShieldEnabled LogOnly (vhost / Location / Directory
+                tri-state on bs_dir_cfg.enabled — flip-all within
+                the scope)
 
 Observe-mode invariants:
   - rule matches as normal
@@ -176,35 +178,35 @@ def test_block_path_observe_does_not_403(config_override, fresh_ip):
     )
 
 
-# --- Global BotShieldLogOnly overrides per-rule ------------------
+# --- Scope BotShieldEnabled LogOnly overrides per-rule -------------
 
 
-def test_global_shadow_mode_overrides_per_rule_enforce(
+def test_scope_log_only_overrides_per_rule_enforce(
     config_override, fresh_ip,
 ):
-    """Per-rule mode is enforce (default) but BotShieldLogOnly on
-    flips everything to observe. The 403 path trigger must NOT
-    enforce."""
+    """Per-rule mode is enforce (default) but BotShieldEnabled LogOnly
+    flips everything within scope to observe. The 403 path trigger
+    must NOT enforce."""
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         'BotShieldAllowVerifiedBots on\n'
-        '    BotShieldLogOnly on\n'
+        '    BotShieldEnabled LogOnly\n'
         '    BotShieldPathTrigger trap "/.envprobe" status=403',
         count=1,
     ):
         r = _g("/.envprobe", xff=fresh_ip)
     assert r.status_code != 403, (
-        f"global shadow mode failed to suppress enforcement; "
+        f"scope LogOnly failed to suppress enforcement; "
         f"status={r.status_code}"
     )
 
 
-def test_global_shadow_mode_off_lets_per_rule_enforce(
+def test_scope_log_only_default_lets_per_rule_enforce(
     config_override, fresh_ip,
 ):
-    """Sanity: with BotShieldLogOnly off (the default), a rule
+    """Sanity: without BotShieldEnabled LogOnly (default On), a rule
     in default-enforce mode actually enforces. Catches accidental
-    inversion of the global flag's check."""
+    inversion of the tri-state check."""
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         'BotShieldAllowVerifiedBots on\n'
@@ -276,3 +278,161 @@ def test_directive_accepts_mode_on_feedback(config_override):
         count=1,
     ):
         pass
+
+
+# --- Counterfactual outcomes under BotShieldEnabled LogOnly --------
+#
+# A LogOnly-suppressed enforce site emits a tilde-prefixed outcome in
+# the decision log to signal the suppressed-counterfactual: real
+# action was `allow`, this is what would have happened. The outcome
+# counter still bumps the `allow` slot (since allow is what actually
+# happened); per-family `*_observed_total` counters carry the
+# staging-volume signal.
+
+
+def test_log_only_emits_tilde_block_for_blockpath(
+    config_override, fresh_ip, log_slice,
+):
+    """Scope-level BotShieldEnabled LogOnly + a BlockPath rule that
+    would otherwise 403 must emit `outcome=~block` and serve the real
+    content (no 403)."""
+    with config_override(
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
+        '    BotShieldEnabled LogOnly\n'
+        '    BotShieldBlockPath admin-block "/admin/*" "httpx" *',
+        count=1,
+    ):
+        with log_slice as slc:
+            r = client.get("/admin/login.php", xff=fresh_ip,
+                           ua=SCRAPER_UA)
+            lines = slc.decision_lines(ip=fresh_ip)
+    assert r.status_code != 403, (
+        f"LogOnly should suppress BlockPath enforcement; "
+        f"status={r.status_code}"
+    )
+    outcomes = [d["outcome"] for d in lines]
+    assert "~block" in outcomes, (
+        f"expected outcome=~block in decision log under LogOnly; "
+        f"got outcomes={outcomes}"
+    )
+
+
+def test_log_only_emits_tilde_rate_limited_for_ratelimit(
+    config_override, fresh_ip, log_slice,
+):
+    """Scope-level BotShieldEnabled LogOnly + a RateLimit rule with a
+    tight budget. Over-budget hits would normally 429; under LogOnly
+    every hit lands `outcome=~rate_limited` instead."""
+    with config_override(
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
+        '    BotShieldEnabled LogOnly\n'
+        '    BotShieldRateLimit corpbot 1 sec "CorpBot" *',
+        count=1,
+    ):
+        with log_slice as slc:
+            codes = [
+                client.get("/", xff=fresh_ip,
+                           ua="CorpBot/1.0").status_code
+                for _ in range(5)
+            ]
+            lines = slc.decision_lines(ip=fresh_ip)
+    assert 429 not in codes, (
+        f"LogOnly should suppress RateLimit 429s; got {codes}"
+    )
+    outcomes = [d["outcome"] for d in lines]
+    assert "~rate_limited" in outcomes, (
+        f"expected outcome=~rate_limited under LogOnly; "
+        f"got outcomes={outcomes}"
+    )
+
+
+def test_log_only_emits_tilde_challenge_for_tier_dispatch(
+    config_override, fresh_ip, log_slice,
+):
+    """Scope-level BotShieldEnabled LogOnly + a request whose score
+    crosses BotShieldScoreSilent. Without LogOnly the response would
+    be a tier=silent interstitial; under LogOnly the module logs
+    `outcome=~challenge` and declines so the real handler runs."""
+    with config_override(
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
+        '    BotShieldEnabled LogOnly',
+        count=1,
+    ):
+        with log_slice as slc:
+            r = client.get("/", xff=fresh_ip, ua=SCRAPER_UA)
+            lines = slc.decision_lines(ip=fresh_ip)
+    # Real handler ran; not the interstitial 403.
+    assert r.status_code != 403, (
+        f"LogOnly should suppress tier dispatch; status={r.status_code}"
+    )
+    outcomes = [d["outcome"] for d in lines]
+    assert "~challenge" in outcomes, (
+        f"expected outcome=~challenge for suppressed tier dispatch "
+        f"under LogOnly; got outcomes={outcomes}"
+    )
+
+
+def test_block_path_observe_increments_observed_total(
+    config_override, fresh_ip,
+):
+    """Per-rule mode=observe on a BlockPath bumps
+    `block_path_observed_total` (not `block_path_hit_total`) on
+    match. Mirrors the rate-limit observed-counter check earlier
+    in this file."""
+    with config_override(
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
+        '    BotShieldBlockPath admin-block "/admin/*" "httpx" * '
+        'mode=observe',
+        count=1,
+    ):
+        before_obs = _read_metric("botshield_block_path_observed_total")
+        before_hit = _read_metric("botshield_block_path_hit_total")
+        client.get("/admin/login.php", xff=fresh_ip, ua=SCRAPER_UA)
+        after_obs = _read_metric("botshield_block_path_observed_total")
+        after_hit = _read_metric("botshield_block_path_hit_total")
+
+    assert after_obs - before_obs >= 1, (
+        f"observed counter didn't increment; before={before_obs} "
+        f"after={after_obs}"
+    )
+    assert after_hit == before_hit, (
+        f"hit counter incremented under observe mode; "
+        f"before={before_hit} after={after_hit}"
+    )
+
+
+# --- Per-Location BotShieldEnabled override ------------------------
+
+
+def test_per_location_log_only_with_inner_enforce(
+    config_override, fresh_ip,
+):
+    """BotShieldEnabled is a tri-state at RSRC_CONF | ACCESS_CONF
+    scope. Setting it to LogOnly at vhost scope and overriding to
+    On inside a <Location> must enforce within the location and
+    only-log outside it. Tests the merge in bs_dir_cfg.enabled."""
+    with config_override(
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
+        '    BotShieldEnabled LogOnly\n'
+        '    BotShieldBlockPath everywhere "/*" "httpx" *\n'
+        '    <Location "/enforce-here">\n'
+        '        BotShieldEnabled On\n'
+        '    </Location>',
+        count=1,
+    ):
+        outside = client.get("/", xff=fresh_ip, ua=SCRAPER_UA)
+        inside = client.get("/enforce-here", xff=fresh_ip,
+                            ua=SCRAPER_UA)
+    assert outside.status_code != 403, (
+        f"vhost-scope LogOnly should suppress BlockPath outside the "
+        f"override Location; got {outside.status_code}"
+    )
+    assert inside.status_code == 403, (
+        f"<Location> override to BotShieldEnabled On should re-enable "
+        f"enforcement inside that location; got {inside.status_code}"
+    )

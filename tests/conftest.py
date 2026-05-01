@@ -75,7 +75,7 @@ def log_slice():
         def test_something(log_slice):
             with log_slice as slc:
                 # drive traffic
-                lines = slc.decision_lines(outcome="rejected")
+                lines = slc.decision_lines(outcome="block")
                 assert lines
     """
     return _logs.log_slice()
