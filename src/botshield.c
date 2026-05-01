@@ -791,6 +791,74 @@ static int bs_is_asset_uri(const char *uri)
 
 /* --- Request-handler helpers --- */
 
+/* Always-mint: install a presence-only session cookie if no valid
+ * cookie was carried into the request. Called once from bs_handler
+ * right after cookie verify. Every terminal outcome below it
+ * (pass-tier short-circuit, LogOnly decline, challenge-tier
+ * interstitial render, block 403, safeguard 302) ships the response
+ * with this Set-Cookie already installed on r->err_headers_out, so
+ * none of those outcomes need their own mint logic.
+ *
+ * The cookie carries trust=0 (passes_silent = passes_form =
+ * passes_captcha = 0) and uses the "session" passthrough algorithm
+ * — no PoW solution to verify, just an authenticated envelope
+ * marking "you've been here." When the user later solves a real
+ * challenge at /botshield/embedded-verify or /captcha-verify, those
+ * endpoints mint a higher-trust cookie that replaces this one
+ * (apr_table_add stacks Set-Cookies; browser uses the latest for
+ * the same name).
+ *
+ * No-op on these requests:
+ *   - Cookie verify already accepted a valid existing cookie
+ *   - Module is BS_ENABLED_OFF for this scope (defensive — caller
+ *     already gated on this, but cheap to repeat)
+ *   - Mint failed (typically: no secret configured yet). The next
+ *     request gets another attempt.
+ *
+ * Mint-on-pass design notes:
+ *   - bs_safeguard_clear is gated on solve evidence
+ *     (passes_*) at its call site, so trust=0 cookies don't reset
+ *     safeguard counters. Bots that harvest a fresh cookie can't
+ *     use it to bypass safeguard.
+ *   - The cookie is a session cookie (no Expires/Max-Age), so
+ *     browser drops it at session end. The envelope's server-side
+ *     expires_at still bounds acceptance regardless of browser
+ *     behavior. */
+static int bs_maybe_mint_session(request_rec *r, bs_dir_cfg *cfg,
+                                 int cookie_fully_ok)
+{
+    if (cookie_fully_ok) return 0;
+    if (!cfg || cfg->enabled == BS_ENABLED_OFF) return 0;
+    if (!cfg->secret) return 0;
+
+    const bs_pow_algorithm *session_alg = bs_find_algorithm("session");
+    if (!session_alg) return 0;
+
+    int ttl = (cfg->cookie_ttl > 0) ? cfg->cookie_ttl : BS_DEFAULT_COOKIE_TTL;
+    int difficulty = (cfg->difficulty > 0) ? cfg->difficulty
+                                           : BS_DEFAULT_DIFFICULTY;
+    bs_challenge fresh = { 0 };
+    const char *ierr = bs_issue_challenge(r->pool, cfg,
+                                          difficulty, ttl,
+                                          /*auto_tier*/0,
+                                          /*alg_override*/session_alg,
+                                          /*rep_in*/NULL,
+                                          &fresh);
+    if (ierr) {
+        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
+                      "mod_botshield: session mint deferred: %s",
+                      ierr);
+        return 0;
+    }
+    /* counter slot is required by the wire format but its content
+     * is ignored by the session passthrough verify. "session" reads
+     * cleanly when anyone debugs the wire form. */
+    if (bs_install_verified_cookie(r, cfg, &fresh, "session") != NULL) {
+        return 0;
+    }
+    return 1;
+}
+
 /* Challenge safeguard: before issuing a challenge, check whether
  * this IP has been presented N times within the window without
  * solving. If so, redirect (302) to the configured safeguard URL
@@ -1090,12 +1158,19 @@ static int bs_handler(request_rec *r)
                                                     &prior_ch);
         if (!cookie_verify_reason) {
             cookie_fully_ok = 1;
-            /* E10 — safeguard clear on solve. A successful verify
-             * proves this client CAN complete a challenge, so any
-             * accumulated presentation history was transient noise
-             * (mid-session CSP moment, browser cookie glitch). Reset
-             * the slot so a later failed solve counts from zero. */
-            {
+            /* E10 — safeguard clear on solve. Gated on actual solve
+             * evidence (passes_silent / passes_form / passes_captcha)
+             * rather than just cookie validity. Under always-mint,
+             * trust=0 presence cookies authenticate cleanly via the
+             * GCM tag but represent no challenge solve — they must
+             * NOT clear the safeguard counter or a bot would harvest
+             * a fresh cookie on its first request and bypass safeguard
+             * for every subsequent failed challenge. Only cookies that
+             * carry actual solve proof get to clear. */
+            int has_solve_evidence = prior_ch.rep.passes_silent
+                                  || prior_ch.rep.passes_form
+                                  || prior_ch.rep.passes_captcha;
+            if (has_solve_evidence) {
                 bs_server_cfg *scfg_sg = ap_get_module_config(
                     r->server->module_config, &botshield_module);
                 if (scfg_sg && scfg_sg->safeguard_enabled == 1) {
@@ -1122,7 +1197,7 @@ static int bs_handler(request_rec *r)
     const char *cookie_status =
         bs_decision_cookie_status(cookie_verify_reason, cookie_had_val);
 
-    /* E4 — publish the `_bs_verified` verification verdict as a
+    /* E4 — publish the `_bs_session` verification verdict as a
      * request note so bs_check_policy's cookie-trigger evaluator
      * can surface it via bs-cookie=<state> predicates. Three-state
      * mapping matches the directive surface. */
@@ -1132,6 +1207,26 @@ static int bs_handler(request_rec *r)
         else if (!cookie_verify_reason) bs_state = BS_CK_STATE_VERIFIED;
         else                           bs_state = BS_CK_STATE_INVALID;
         apr_table_setn(r->notes, BS_CK_STATE_NOTE, bs_state);
+    }
+
+    /* Always-mint: install a presence-only session cookie when the
+     * request didn't carry a valid one. Centralized here so every
+     * terminal outcome below (pass / challenge / block / safeguard
+     * redirect / LogOnly decline) ships its response with the
+     * Set-Cookie already in err_headers_out. The verify endpoints
+     * (/botshield/embedded-verify etc.) don't reach this code —
+     * they're routed earlier via bs_route_module_endpoint and do
+     * their own higher-trust mints (apr_table_add stacks Set-Cookie;
+     * browser uses the latest for the same name).
+     *
+     * On successful mint, override cookie_status from "absent" to
+     * "minted" so the decision-log line distinguishes "request
+     * carried no cookie and we did nothing" (cookie=absent, can
+     * happen when module is off or secret isn't configured) from
+     * "request carried no cookie and we issued one" (cookie=minted,
+     * the always-mint case). */
+    if (bs_maybe_mint_session(r, cfg, cookie_fully_ok)) {
+        cookie_status = "minted";
     }
 
     /* E2.1 + E2.2 + E3 policy enforcement. Runs before scoring

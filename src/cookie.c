@@ -164,15 +164,19 @@ const char *bs_build_cookie_payload(apr_pool_t *p,
                         BS_GCM_COUNTER_SEP, counter_str);
 }
 
-/* Set-Cookie string for a server-issued _bs_verified cookie. Mirrors the
- * attributes the M1/M7 interstitial JS produces so a captcha-earned and
- * a PoW-earned cookie are indistinguishable on subsequent requests. */
+/* Set-Cookie string for a server-issued bs_session cookie. The cookie
+ * is a session cookie (no Expires/Max-Age) — the browser drops it on
+ * session end, which matches the per-browsing-session semantic of the
+ * always-mint design. The server-side TTL still exists in the
+ * envelope's expires_at field, so a misbehaving browser that keeps
+ * a session cookie past its server-side TTL still gets rejected at
+ * verify. The expires_at parameter is now used only to set that
+ * server-side bound; it does not appear on the wire. */
 const char *bs_build_set_cookie(request_rec *r, const bs_dir_cfg *cfg,
                                 const char *payload_b64,
                                 apr_time_t expires_at)
 {
-    char expires_buf[APR_RFC822_DATE_LEN];
-    apr_rfc822_date(expires_buf, apr_time_from_sec(expires_at + 60));
+    (void)expires_at;   /* server-side bound, not wire attribute */
     const char *secure = "";
     /* Apache exposes the scheme via ap_run_http_scheme or r->server's
      * SSL config; simplest portable check is ap_is_https if mod_ssl is
@@ -190,22 +194,21 @@ const char *bs_build_set_cookie(request_rec *r, const bs_dir_cfg *cfg,
     if (has_domain) {
         domain = apr_psprintf(r->pool, "; Domain=%s", cfg->cookie_domain);
     }
-    /* Emit __Host-bs_verified when the
+    /* Emit __Host-bs_session when the
      * RFC 6265bis preconditions hold (HTTPS + no Domain). Browsers
      * reject the prefix when those invariants fail, so we only use
      * it where we can. Operators on plain HTTP or with a configured
-     * cookie_domain (cross-subdomain SSO) get the legacy unprefixed
+     * cookie_domain (cross-subdomain SSO) get the unprefixed
      * name; the verify path checks both. */
     const char *name = (is_https && !has_domain)
         ? BS_COOKIE_NAME_HOST : BS_COOKIE_NAME;
-    /*  HttpOnly closes XSS-stealing-the-
-     * cookie. The M1 widget JS used to set this cookie via
-     * document.cookie (which required JS-readability), but that
-     * WAS refactored to a server-mint via /botshield/embedded-verify
-     * so HttpOnly is now compatible with the issue path. */
+    /* HttpOnly closes the XSS theft path. SameSite=Lax matches what
+     * the historical M1 widget JS set via document.cookie before the
+     * mint moved server-side, so cookies issued via either path are
+     * indistinguishable on subsequent requests. */
     return apr_psprintf(r->pool,
-        "%s=%s; Path=/; Expires=%s%s%s; SameSite=Lax; HttpOnly",
-        name, payload_b64, expires_buf, domain, secure);
+        "%s=%s; Path=/%s%s; SameSite=Lax; HttpOnly",
+        name, payload_b64, domain, secure);
 }
 
 /* Build a _bs_verified cookie payload from ch and install the

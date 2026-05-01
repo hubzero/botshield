@@ -150,6 +150,36 @@ static const char *bs_captcha_verify_noop(const bs_challenge *ch,
     return NULL;
 }
 
+/* --- Algorithm: session passthrough -------------------------------
+ *
+ * Used by the always-mint path that issues a presence-only session
+ * cookie when a request arrives without a valid one. The cookie's
+ * envelope carries the same canonical fields as a solve-issued
+ * cookie, but with passes_silent=passes_form=passes_captcha=0 — no
+ * trust is claimed, so there is no PoW solution to verify. The HMAC
+ * (GCM tag) on the envelope authenticates every field against
+ * tampering, which is the only integrity check that's meaningful for
+ * a trust=0 cookie. The verify fn is a noop, mirroring the captcha
+ * passthrough; the issue fn is a trivial salt/nonce randomizer. */
+static const char *bs_session_issue(const bs_dir_cfg *cfg,
+                                    bs_challenge *out)
+{
+    (void)cfg;
+    if (RAND_bytes(out->salt,  BS_SALT_BYTES)  != 1) return "RAND_bytes(salt)";
+    if (RAND_bytes(out->nonce, BS_NONCE_BYTES) != 1) return "RAND_bytes(nonce)";
+    return NULL;
+}
+
+static const char *bs_session_verify_noop(const bs_challenge *ch,
+                                          const char *counter_str)
+{
+    (void)ch;
+    /* counter slot must be non-empty (wire shape requires the dot-
+     * separated tail) but its contents are ignored. */
+    if (!counter_str || !*counter_str) return "empty counter";
+    return NULL;
+}
+
 /* --- Algorithm registry ---
  *
  * Static dispatch table. sha256-zeros is the PoW tier; captcha-turnstile
@@ -159,6 +189,7 @@ static const char *bs_captcha_verify_noop(const bs_challenge *ch,
  * code path. */
 static const bs_pow_algorithm bs_algorithms[] = {
     { "sha256-zeros",          1, bs_sha256_zeros_issue, bs_sha256_zeros_verify },
+    { "session",               1, bs_session_issue,      bs_session_verify_noop },
     { "captcha-turnstile",     1, bs_captcha_issue,      bs_captcha_verify_noop },
     { "captcha-hcaptcha",      1, bs_captcha_issue,      bs_captcha_verify_noop },
     { "captcha-recaptcha-v2",  1, bs_captcha_issue,      bs_captcha_verify_noop },

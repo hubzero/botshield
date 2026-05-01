@@ -70,6 +70,7 @@ static int bs_m_cookie_idx(const char *s)
     if (strcmp(s, "bad_sig")    == 0) return BS_M_COOKIE_BAD_SIG;
     if (strcmp(s, "bad_format") == 0) return BS_M_COOKIE_BAD_FORMAT;
     if (strcmp(s, "absent")     == 0) return BS_M_COOKIE_ABSENT;
+    if (strcmp(s, "minted")     == 0) return BS_M_COOKIE_MINTED;
     return -1;
 }
 
@@ -696,6 +697,10 @@ int bs_metrics_handler(request_rec *r)
     bs_m_emit_counter(r, "cookie_absent_total",
         "Requests with no rep cookie.",
         bs_mload(&m->cookie[BS_M_COOKIE_ABSENT]));
+    bs_m_emit_counter(r, "cookie_minted_total",
+        "Decisions where the response carried a freshly-minted "
+        "presence cookie (always-mint path).",
+        bs_mload(&m->cookie[BS_M_COOKIE_MINTED]));
 
     bs_m_emit_counter(r, "provider_turnstile_total",
         "Decisions tagged with provider=turnstile.",
