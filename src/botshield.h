@@ -65,11 +65,11 @@ extern "C" {
  * points/hour ≈ 4-8 challenge-passes worth of credit. */
 #define BS_DEFAULT_FORGIVE_CAP_PER_HOUR  200
 #define BS_FORGIVE_WINDOW_SEC            3600
-#define BS_COOKIE_NAME        "_bs_verified"
+#define BS_COOKIE_NAME        "_bs_session"
 /*  `__Host-` prefix variant. We emit
  * this when the request is HTTPS AND no operator cookie_domain is
  * in play. Verify path checks both (host-prefix first). */
-#define BS_COOKIE_NAME_HOST   "__Host-bs_verified"
+#define BS_COOKIE_NAME_HOST   "__Host-bs_session"
 #define BS_DEFAULT_PROMPT     "I\xe2\x80\x99m not a robot"  /* U+2019 */
 #define BS_DEFAULT_LOGO_LABEL "botshield"
 #define BS_MAX_LOGO_BYTES     (64 * 1024)
