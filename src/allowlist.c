@@ -23,9 +23,16 @@
 #include "shm.h"
 
 const bs_allow_bot_entry bs_builtin_bots[] = {
-    { "googlebot", "Googlebot", NULL, NULL, 0 },
-    { "bingbot",   "bingbot",   NULL, NULL, 0 },
-    { "applebot",  "Applebot",  NULL, NULL, 0 },
+    { "googlebot",   "Googlebot",       NULL, NULL, 0 },
+    { "bingbot",     "bingbot",         NULL, NULL, 0 },
+    { "applebot",    "Applebot",        NULL, NULL, 0 },
+    /* Siteimprove site-scanning crawler. UA matches the
+     * "Siteimprove.com" substring inside their full UA shape
+     * "Mozilla/5.0 ... SiteCheck-sitecrawl by Siteimprove.com; ...".
+     * IP ranges shipped at apache/bots/siteimprove.txt; deploy
+     * to /var/lib/botshield/bots/siteimprove.txt (Makefile install
+     * step). */
+    { "siteimprove", "Siteimprove.com", NULL, NULL, 0 },
     { NULL, NULL, NULL, NULL, 0 }
 };
 
