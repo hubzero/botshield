@@ -879,7 +879,7 @@ called from `bs_run_builtin_heuristics`.
 ### Built-in seed list
 
 `bs_builtin_bots[]` registers Googlebot, Bingbot, Applebot when
-`BotShieldAllow on`. Each is auto-registered with default ranges file
+`BotShieldAllowVerifiedBots on`. Each is auto-registered with default ranges file
 `/var/lib/botshield/bots/<name>.txt`. Operators refresh the files
 out-of-module via `tools/refresh-bot-ranges.sh` (cron); the module
 reads them once at startup and serves stale ranges if a refresh

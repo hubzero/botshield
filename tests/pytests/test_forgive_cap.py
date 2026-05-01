@@ -30,8 +30,8 @@ pytestmark = pytest.mark.serial
 def test_directive_rejects_negative(config_override):
     with pytest.raises(Exception):
         with config_override(
-            r"BotShieldAllow\s+on",
-            'BotShieldAllow on\n'
+            r"BotShieldAllowVerifiedBots\s+on",
+            'BotShieldAllowVerifiedBots on\n'
             '    BotShieldForgivenessCapPerHour -1',
             count=1,
         ):
@@ -41,8 +41,8 @@ def test_directive_rejects_negative(config_override):
 def test_directive_rejects_out_of_range(config_override):
     with pytest.raises(Exception):
         with config_override(
-            r"BotShieldAllow\s+on",
-            'BotShieldAllow on\n'
+            r"BotShieldAllowVerifiedBots\s+on",
+            'BotShieldAllowVerifiedBots on\n'
             '    BotShieldForgivenessCapPerHour 9999',
             count=1,
         ):
@@ -53,8 +53,8 @@ def test_directive_accepts_zero_to_disable(config_override):
     """0 disables the cap (legacy uncapped behavior). Reload should
     succeed and the server should still respond."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldForgivenessCapPerHour 0',
         count=1,
     ):
@@ -69,8 +69,8 @@ def test_directive_accepts_zero_to_disable(config_override):
 
 def test_directive_accepts_normal_value(config_override):
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldForgivenessCapPerHour 50',
         count=1,
     ):

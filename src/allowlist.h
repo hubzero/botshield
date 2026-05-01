@@ -136,7 +136,7 @@ void bs_check_allow(request_rec *r, const bs_dir_cfg *cfg);
  * BotShieldAllow on|off — master gate for the allow-list family.
  * BotShieldAllowBot <name> <ua-pattern> [<target>] — register a bot
  * with optional UA-only/file/inline-CIDR target. */
-const char *bs_set_allow_enabled(cmd_parms *cmd, void *dconf, int flag);
+const char *bs_set_verified_bots(cmd_parms *cmd, void *dconf, int flag);
 const char *bs_set_allow_bot(cmd_parms *cmd, void *dconf,
                              const char *name,
                              const char *pattern,

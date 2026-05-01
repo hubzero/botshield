@@ -49,7 +49,7 @@ def _hammer(ip: str, n: int) -> list:
 
 def _safeguard_cfg(threshold: int, ttl: int = 900, window: int = 600) -> str:
     return (
-        'BotShieldAllow on\n'
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldSafeguard on\n'
         f'    BotShieldSafeguardThreshold {threshold}\n'
         f'    BotShieldSafeguardWindow {window}\n'
@@ -67,7 +67,7 @@ def test_safeguard_trips_after_threshold(config_override, fresh_ip,
     through with reason=challenge-safeguard — no interstitial, no
     __Host-bs_verified, backend handler serves real content."""
     with config_override(
-        r"BotShieldAllow\s+on",
+        r"BotShieldAllowVerifiedBots\s+on",
         _safeguard_cfg(threshold=3),
         count=1,
     ):
@@ -119,7 +119,7 @@ def test_below_threshold_still_challenges(config_override, fresh_ip):
     """Threshold=10: 5 requests don't cross. Every one gets the
     interstitial, no safeguard pass-through."""
     with config_override(
-        r"BotShieldAllow\s+on",
+        r"BotShieldAllowVerifiedBots\s+on",
         _safeguard_cfg(threshold=10),
         count=1,
     ):
@@ -140,7 +140,7 @@ def test_safeguard_isolates_per_ip(config_override):
     ip_a = "198.51.100.30"
     ip_b = "198.51.100.40"
     with config_override(
-        r"BotShieldAllow\s+on",
+        r"BotShieldAllowVerifiedBots\s+on",
         _safeguard_cfg(threshold=2),
         count=1,
     ):
@@ -166,7 +166,7 @@ def test_safeguard_does_not_override_block_path(
     trip safeguard on /. Then hit /blocked — must still return 403,
     not safeguard pass-through."""
     with config_override(
-        r"BotShieldAllow\s+on",
+        r"BotShieldAllowVerifiedBots\s+on",
         _safeguard_cfg(threshold=2)
         # UA-narrowed cohort: 'httpx' substring keeps the cohort
         # legal (BotShield rejects both-'*'). Our SCRAPER_UA
@@ -207,7 +207,7 @@ def test_solved_cookie_clears_safeguard_counter(
     The decision log of the post-solve request is what
     distinguishes the two behaviors."""
     with config_override(
-        r"BotShieldAllow\s+on",
+        r"BotShieldAllowVerifiedBots\s+on",
         _safeguard_cfg(threshold=4),
         count=1,
     ):
@@ -251,9 +251,9 @@ def test_safeguard_off_by_default(config_override, fresh_ip):
     runs every time regardless of N. Tight-loop hammering never
     promotes to safeguard — pre-E10 behavior preserved."""
     with config_override(
-        r"BotShieldAllow\s+on",
+        r"BotShieldAllowVerifiedBots\s+on",
         # Deliberately no BotShieldSafeguard directive.
-        'BotShieldAllow on\n',
+        'BotShieldAllowVerifiedBots on\n',
         count=1,
     ):
         responses = _hammer(fresh_ip, 10)

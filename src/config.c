@@ -309,7 +309,7 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
      * post_config if the master gate flips on. allow_bots
      * collects directive-declared entries (and seeded built-ins)
      * keyed by name. */
-    scfg->allow_enabled    = 0;
+    scfg->verified_bots_enabled    = 0;
     scfg->bot_classifier   = NULL;
     scfg->bot_ranges       = NULL;
     scfg->allow_bots       = apr_hash_make(p);
@@ -1197,17 +1197,27 @@ static void bs_wire_allowlist(apr_pool_t *pconf, server_rec *s)
     for (server_rec *sv = s; sv; sv = sv->next) {
         bs_server_cfg *vcfg = ap_get_module_config(sv->module_config,
                                                    &botshield_module);
-        if (!vcfg || !vcfg->allow_enabled) continue;
+        if (!vcfg) continue;
+        /* Machinery activates when EITHER the operator opted into
+         * the bundled built-in set (BotShieldAllowVerifiedBots on)
+         * OR they declared at least one specific bot with
+         * BotShieldAllowBot. Both off = nothing to do, skip. */
+        int has_operator_bots = vcfg->allow_bots
+            && apr_hash_count(vcfg->allow_bots) > 0;
+        if (!vcfg->verified_bots_enabled && !has_operator_bots) continue;
 
         vcfg->bot_classifier = bs_ua_classifier_create(pconf);
         vcfg->bot_ranges     = apr_hash_make(pconf);
 
-        /* Seed the Allow set: directive-declared entries win over
-         * built-ins with the same name. Build a working hash keyed
-         * on name. */
+        /* Seed the Allow set. Built-ins go in only if the operator
+         * opted into the bundled set; directive-declared entries
+         * always go in (and win over built-ins of the same name). */
         apr_hash_t *working = apr_hash_make(pconf);
-        for (const bs_allow_bot_entry *b = bs_builtin_bots; b->name; b++) {
-            apr_hash_set(working, b->name, APR_HASH_KEY_STRING, b);
+        if (vcfg->verified_bots_enabled) {
+            for (const bs_allow_bot_entry *b = bs_builtin_bots;
+                 b->name; b++) {
+                apr_hash_set(working, b->name, APR_HASH_KEY_STRING, b);
+            }
         }
         apr_hash_index_t *hi;
         for (hi = apr_hash_first(pconf, vcfg->allow_bots);

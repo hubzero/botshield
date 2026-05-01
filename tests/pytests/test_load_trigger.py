@@ -66,8 +66,8 @@ def _wait_for_metric_load_state(target: int, timeout: float = 12.0) -> int:
 def test_directive_rejects_unrecognized_load_match(config_override):
     with pytest.raises(Exception):
         with config_override(
-            r"BotShieldAllow\s+on",
-            'BotShieldAllow on\n'
+            r"BotShieldAllowVerifiedBots\s+on",
+            'BotShieldAllowVerifiedBots on\n'
             '    BotShieldLoadTrigger bad cpu>=80 penalty=10',
             count=1,
         ):
@@ -77,8 +77,8 @@ def test_directive_rejects_unrecognized_load_match(config_override):
 def test_directive_rejects_bad_state_name(config_override):
     with pytest.raises(Exception):
         with config_override(
-            r"BotShieldAllow\s+on",
-            'BotShieldAllow on\n'
+            r"BotShieldAllowVerifiedBots\s+on",
+            'BotShieldAllowVerifiedBots on\n'
             '    BotShieldLoadTrigger bad state=meltdown penalty=10',
             count=1,
         ):
@@ -90,8 +90,8 @@ def test_directive_rejects_flag_key(config_override):
     The shared parser rejects flag= for this family."""
     with pytest.raises(Exception):
         with config_override(
-            r"BotShieldAllow\s+on",
-            'BotShieldAllow on\n'
+            r"BotShieldAllowVerifiedBots\s+on",
+            'BotShieldAllowVerifiedBots on\n'
             '    BotShieldLoadTrigger bad state=hot '
             'flag=honeypot_hit ttl=3600',
             count=1,
@@ -109,8 +109,8 @@ def test_load_trigger_inert_under_normal(config_override, fresh_ip,
     _set_load_file("normal")
     try:
         with config_override(
-            r"BotShieldAllow\s+on",
-            'BotShieldAllow on\n'
+            r"BotShieldAllowVerifiedBots\s+on",
+            'BotShieldAllowVerifiedBots on\n'
             f'    BotShieldLoadStateFile {LOAD_FILE_PATH}\n'
             '    BotShieldLoadTrigger be-strict state>=warm '
             'penalty=20',
@@ -139,8 +139,8 @@ def test_load_trigger_fires_under_hot(config_override, fresh_ip,
     _set_load_file("hot")
     try:
         with config_override(
-            r"BotShieldAllow\s+on",
-            'BotShieldAllow on\n'
+            r"BotShieldAllowVerifiedBots\s+on",
+            'BotShieldAllowVerifiedBots on\n'
             f'    BotShieldLoadStateFile {LOAD_FILE_PATH}\n'
             '    BotShieldLoadTrigger be-strict state>=warm '
             'penalty=20 log=brownout',
@@ -176,8 +176,8 @@ def test_load_trigger_status_blocks_under_hot(
     _set_load_file("hot")
     try:
         with config_override(
-            r"BotShieldAllow\s+on",
-            'BotShieldAllow on\n'
+            r"BotShieldAllowVerifiedBots\s+on",
+            'BotShieldAllowVerifiedBots on\n'
             f'    BotShieldLoadStateFile {LOAD_FILE_PATH}\n'
             '    BotShieldLoadTrigger drop-noise state=hot '
             'status=503',
@@ -206,8 +206,8 @@ def test_load_trigger_first_match_wins_specific_first(
     _set_load_file("hot")
     try:
         with config_override(
-            r"BotShieldAllow\s+on",
-            'BotShieldAllow on\n'
+            r"BotShieldAllowVerifiedBots\s+on",
+            'BotShieldAllowVerifiedBots on\n'
             f'    BotShieldLoadStateFile {LOAD_FILE_PATH}\n'
             '    BotShieldLoadTrigger only-hot state=hot penalty=80\n'
             '    BotShieldLoadTrigger any-warm state>=warm penalty=20',

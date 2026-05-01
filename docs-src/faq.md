@@ -13,7 +13,7 @@ when, how often, which paths, with what rate cap, with what
 attribution. mod_botshield's primitives are built around setting
 those terms:
 
-- **Allow-list.** When `BotShieldAllow on` is set and the
+- **Allow-list.** When `BotShieldAllowVerifiedBots on` is set and the
   configured CIDR ranges are loaded, verified crawlers (UA-and-IP
   match against the published ranges) bypass the score ladder
   entirely. The built-in seed list covers Googlebot, Bingbot,

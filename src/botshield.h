@@ -255,7 +255,12 @@ typedef struct bs_server_cfg {
      * post_config and read-only thereafter; lives at server scope
      * because the UA classifier + CIDR lists are global, not per-
      * directory. */
-    int         allow_enabled;         /* master gate, default 0 */
+    /* BotShieldAllowVerifiedBots flag: opt in to the bundled set of
+     * built-in crawlers (bs_builtin_bots[]). Default 0. The allowlist
+     * machinery activates if this is on OR if any BotShieldAllowBot
+     * has been declared (apr_hash_count(allow_bots) > 0); both off =
+     * machinery never wires up. */
+    int         verified_bots_enabled;
     void       *bot_classifier;       /* bs_ua_classifier *, opaque here */
     apr_hash_t *bot_ranges;           /* name → apr_array_header_t of apr_ipsubnet_t* */
     apr_hash_t *allow_bots;           /* name → bs_allow_bot_entry * (directive-defined) */

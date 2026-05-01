@@ -74,8 +74,8 @@ def test_robots_disallow_blocks_bot(
         Disallow: /admin
     """)
     with config_override(
-        r"BotShieldAllow\s+on",
-        f'BotShieldAllow on\n    BotShieldRobotsTxt {robots_path}',
+        r"BotShieldAllowVerifiedBots\s+on",
+        f'BotShieldAllowVerifiedBots on\n    BotShieldRobotsTxt {robots_path}',
         count=1,
     ):
         with log_slice as slc:
@@ -100,8 +100,8 @@ def test_robots_allow_longest_match_wins(
         Allow: /admin/public
     """)
     with config_override(
-        r"BotShieldAllow\s+on",
-        f'BotShieldAllow on\n    BotShieldRobotsTxt {robots_path}',
+        r"BotShieldAllowVerifiedBots\s+on",
+        f'BotShieldAllowVerifiedBots on\n    BotShieldRobotsTxt {robots_path}',
         count=1,
     ):
         r_admin  = client.get("/admin",        xff=fresh_ip, ua=GPTBOT_UA)
@@ -127,8 +127,8 @@ def test_robots_crawl_delay_rate_limits(
         Crawl-delay: 60
     """)
     with config_override(
-        r"BotShieldAllow\s+on",
-        f'BotShieldAllow on\n    BotShieldRobotsTxt {robots_path}',
+        r"BotShieldAllowVerifiedBots\s+on",
+        f'BotShieldAllowVerifiedBots on\n    BotShieldRobotsTxt {robots_path}',
         count=1,
     ):
         with log_slice as slc:
@@ -165,8 +165,8 @@ def test_robots_wildcard_heuristic_skips_real_browser(
     read robots.txt; we don't apply * rules to them). curl UA IS
     blocked (scripting tool, crawler-candidate)."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        f'BotShieldAllow on\n    BotShieldRobotsTxt {wildcard_robots}',
+        r"BotShieldAllowVerifiedBots\s+on",
+        f'BotShieldAllowVerifiedBots on\n    BotShieldRobotsTxt {wildcard_robots}',
         count=1,
     ):
         r_firefox = client.get("/admin", xff=fresh_ip, ua=REAL_UA)
@@ -186,8 +186,8 @@ def test_robots_wildcard_strict_applies_to_everyone(
 ):
     """strict: * rules apply to every UA, including real browsers."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        f'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        f'BotShieldAllowVerifiedBots on\n'
         f'    BotShieldRobotsTxt {wildcard_robots}\n'
         f'    BotShieldRobotsWildcardScope strict',
         count=1,
@@ -204,8 +204,8 @@ def test_robots_wildcard_off_skips_wildcard_entirely(
 ):
     """off: * rules are not enforced for any UA."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        f'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        f'BotShieldAllowVerifiedBots on\n'
         f'    BotShieldRobotsTxt {wildcard_robots}\n'
         f'    BotShieldRobotsWildcardScope off',
         count=1,
@@ -243,8 +243,8 @@ def test_robots_ua_match_is_segment_based(
         Disallow: /admin
     """)
     with config_override(
-        r"BotShieldAllow\s+on",
-        f'BotShieldAllow on\n    BotShieldRobotsTxt {robots_path}',
+        r"BotShieldAllowVerifiedBots\s+on",
+        f'BotShieldAllowVerifiedBots on\n    BotShieldRobotsTxt {robots_path}',
         count=1,
     ):
         # A UA that mentions 'bot' only inside a URL in a slug —
@@ -286,8 +286,8 @@ def test_robots_duplicate_ua_groups_are_unioned(
         Disallow: /b
     """)
     with config_override(
-        r"BotShieldAllow\s+on",
-        f'BotShieldAllow on\n    BotShieldRobotsTxt {robots_path}',
+        r"BotShieldAllowVerifiedBots\s+on",
+        f'BotShieldAllowVerifiedBots on\n    BotShieldRobotsTxt {robots_path}',
         count=1,
     ):
         r_a = client.get("/a", xff=fresh_ip, ua=GPTBOT_UA)
@@ -316,8 +316,8 @@ def test_robots_duplicate_crawl_delay_takes_max(
         Crawl-delay: 60
     """)
     with config_override(
-        r"BotShieldAllow\s+on",
-        f'BotShieldAllow on\n    BotShieldRobotsTxt {robots_path}',
+        r"BotShieldAllowVerifiedBots\s+on",
+        f'BotShieldAllowVerifiedBots on\n    BotShieldRobotsTxt {robots_path}',
         count=1,
     ):
         r1 = client.get("/", xff=fresh_ip, ua=GPTBOT_UA)
@@ -388,8 +388,8 @@ def test_robots_live_refresh_picks_up_changes(
         Disallow: /admin
     """)
     with config_override(
-        r"BotShieldAllow\s+on",
-        f'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        f'BotShieldAllowVerifiedBots on\n'
         f'    BotShieldRobotsTxt {robots_path}\n'
         f'    BotShieldRobotsRefreshInterval 1',
         count=1,
@@ -444,8 +444,8 @@ def test_directive_rate_limit_overrides_robots_crawl_delay(
         Crawl-delay: 60
     """)
     with config_override(
-        r"BotShieldAllow\s+on",
-        f'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        f'BotShieldAllowVerifiedBots on\n'
         f'    BotShieldRobotsTxt {robots_path}\n'
         f'    BotShieldRateLimit gptbot 10 sec "GPTBot" *',
         count=1,

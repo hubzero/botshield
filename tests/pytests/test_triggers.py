@@ -40,8 +40,8 @@ def test_trigger_status_code_blocks_and_tags_log(
     # value), otherwise the splitter hands us two separate argv
     # tokens.
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldPathTrigger env-probe "/.env" '
         'status=403 "log=BAN 2h" ttl=3600',
         count=1,
@@ -70,8 +70,8 @@ def test_trigger_status_pass_lets_request_through(
     Apache server serves the response (probably a 404 for a non-
     existent path). No BotShield 403/captcha/etc."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldPathTrigger pass-probe "/definitely-nonexistent" '
         'status=pass',
         count=1,
@@ -94,8 +94,8 @@ def test_trigger_status_pass_does_not_apply_current_request_penalty(
     via flag=/ttl=. Pinned here so E7.2's shared action engine
     can't silently homogenize this with cookie/env semantics."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldPathTrigger passpen "/honey-pass" '
         'status=pass penalty=90 flag=honeypot_hit ttl=3600',
         count=1,
@@ -129,8 +129,8 @@ def test_trigger_redirect_sets_location(
     Request must return 302 (httpx sees allow_redirects=False by
     default on our client, or we check status + header)."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldPathTrigger env-redirect "/.env.redir" '
         'redirect=https://example.org/gone',
         count=1,
@@ -147,8 +147,8 @@ def test_trigger_redirect_honors_explicit_status(
 ):
     """Explicit status=301 sets a permanent redirect."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldPathTrigger env-redirect "/.env.perm" '
         'redirect=https://example.org/gone status=301',
         count=1,
@@ -168,8 +168,8 @@ def test_trigger_declaration_order_wins_on_overlap(
     matched by both. /wp-admin/admin-ajax.php matches both the
     specific pass rule and the generic 403 rule — specific wins."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldPathTrigger wp-ajax "/wp-admin/admin-ajax.php" status=pass\n'
         '    BotShieldPathTrigger wp-all  "/wp-admin*"               status=403',
         count=1,
@@ -222,8 +222,8 @@ def test_trigger_flag_ip_carries_to_next_request(
     request's decision line carries flagged_bits=0x1 (honeypot_hit).
     """
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldPathTrigger bait "/honey-bait" '
         'status=pass flag=honeypot_hit ttl=3600',
         count=1,
@@ -258,8 +258,8 @@ def test_path_trigger_middle_star_matches_segment(
     """`/api/*/admin` matches `/api/v1/admin` and `/api/internal/admin`
     via the RFC 9309 matcher's middle-wildcard semantics."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldPathTrigger api-admin "/api/*/admin" status=403',
         count=1,
     ):
@@ -287,8 +287,8 @@ def test_path_trigger_middle_star_anchored_excludes_suffix(
     `/api/v1/admin/foo` — the trailing $ anchors to end-of-path
     even when '*' appears mid-pattern."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldPathTrigger api-admin-end "/api/*/admin$" status=403',
         count=1,
     ):
@@ -337,8 +337,8 @@ def test_path_trigger_middle_star_emits_notice_on_config_load(
     ).stdout.strip())
 
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldPathTrigger middle-warn "/foo*bar" status=403',
         count=1,
     ):

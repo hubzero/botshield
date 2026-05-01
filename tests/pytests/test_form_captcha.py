@@ -45,7 +45,7 @@ def _override_form_captcha(provider: str = "turnstile",
     example.com — without the override, the M8 hostname binding
     fires (got=example.com expected=localhost) and rejects."""
     return (
-        'BotShieldAllow on\n'
+        'BotShieldAllowVerifiedBots on\n'
         '    <Location /embedded-test.html>\n'
         f'        BotShieldCaptchaProvider {provider}\n'
         f'        BotShieldCaptchaSiteKey {sitekey}\n'
@@ -60,7 +60,7 @@ def test_form_captcha_rejects_missing_token(config_override):
     """POST without a captcha-response field must 403 — fixup hook
     short-circuits before any app handler sees the body."""
     with config_override(
-        r"BotShieldAllow\s+on", _override_form_captcha(), count=1,
+        r"BotShieldAllowVerifiedBots\s+on", _override_form_captcha(), count=1,
     ):
         r = client.post(
             "/embedded-test.html",
@@ -75,7 +75,7 @@ def test_form_captcha_rejects_missing_token(config_override):
 def test_form_captcha_rejects_empty_token(config_override):
     """Empty token field is the same as missing — 403."""
     with config_override(
-        r"BotShieldAllow\s+on", _override_form_captcha(), count=1,
+        r"BotShieldAllowVerifiedBots\s+on", _override_form_captcha(), count=1,
     ):
         r = client.post(
             "/embedded-test.html",
@@ -89,7 +89,7 @@ def test_form_captcha_rejects_wrong_content_type(config_override):
     """E18 supports url-encoded + JSON. Multipart and other shapes
     get 415 with diagnostic so operators notice the gap."""
     with config_override(
-        r"BotShieldAllow\s+on", _override_form_captcha(), count=1,
+        r"BotShieldAllowVerifiedBots\s+on", _override_form_captcha(), count=1,
     ):
         r = client.post(
             "/embedded-test.html",
@@ -106,7 +106,7 @@ def test_form_captcha_json_rejects_missing_token(config_override):
     rejected the same way url-encoded missing-token is."""
     import json as _json
     with config_override(
-        r"BotShieldAllow\s+on", _override_form_captcha(), count=1,
+        r"BotShieldAllowVerifiedBots\s+on", _override_form_captcha(), count=1,
     ):
         r = client.post(
             "/embedded-test.html",
@@ -119,7 +119,7 @@ def test_form_captcha_json_rejects_missing_token(config_override):
 def test_form_captcha_json_rejects_malformed(config_override):
     """E18.3 — non-JSON body claiming JSON content-type is a 400."""
     with config_override(
-        r"BotShieldAllow\s+on", _override_form_captcha(), count=1,
+        r"BotShieldAllowVerifiedBots\s+on", _override_form_captcha(), count=1,
     ):
         r = client.post(
             "/embedded-test.html",
@@ -137,7 +137,7 @@ def test_form_captcha_json_passes_valid_token(config_override, log_slice):
     import json as _json
     valid_token = "any-token-the-always-pass-secret-accepts"
     with config_override(
-        r"BotShieldAllow\s+on", _override_form_captcha(), count=1,
+        r"BotShieldAllowVerifiedBots\s+on", _override_form_captcha(), count=1,
     ):
         with log_slice as slc:
             r = client.post(
@@ -173,7 +173,7 @@ def test_form_captcha_passes_valid_token(config_override, log_slice):
     # this is fine. Real production tokens are JWT-shaped.
     valid_token = "any-token-the-always-pass-secret-accepts"
     with config_override(
-        r"BotShieldAllow\s+on", _override_form_captcha(), count=1,
+        r"BotShieldAllowVerifiedBots\s+on", _override_form_captcha(), count=1,
     ):
         with log_slice as slc:
             r = client.post(
@@ -248,8 +248,8 @@ def test_form_captcha_honors_global_shadow_mode(config_override):
     accept POST). Without the fix, E18 hard-403's regardless of
     shadow_mode and breaks the dry-run mental model."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    BotShieldLogOnly on\n'
         '    <Location /embedded-test.html>\n'
         '        BotShieldCaptchaProvider turnstile\n'
@@ -276,8 +276,8 @@ def test_form_captcha_misconfigured_scope_503(config_override):
     """BotShieldFormCaptcha on without a configured provider on the
     scope is misconfiguration — 503 rather than silent allow."""
     with config_override(
-        r"BotShieldAllow\s+on",
-        'BotShieldAllow on\n'
+        r"BotShieldAllowVerifiedBots\s+on",
+        'BotShieldAllowVerifiedBots on\n'
         '    <Location /embedded-test.html>\n'
         '        BotShieldFormCaptcha on\n'
         '    </Location>',
@@ -306,7 +306,7 @@ def test_form_captcha_rejects_embedded_nul_byte(config_override, log_slice):
     any validator runs."""
     body = b"cf-turnstile-response=x\x00&hidden=evil"
     with config_override(
-        r"BotShieldAllow\s+on", _override_form_captcha(), count=1,
+        r"BotShieldAllowVerifiedBots\s+on", _override_form_captcha(), count=1,
     ):
         with log_slice as slc:
             r = client.post(
@@ -345,7 +345,7 @@ def test_form_captcha_accepts_clean_body_with_high_bytes(
         b"name=" + "café".encode("utf-8")
     )
     with config_override(
-        r"BotShieldAllow\s+on", _override_form_captcha(), count=1,
+        r"BotShieldAllowVerifiedBots\s+on", _override_form_captcha(), count=1,
     ):
         r = client.post(
             "/embedded-test.html",

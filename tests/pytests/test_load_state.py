@@ -85,8 +85,8 @@ def _wait_for_state(target: int, timeout: float = 12.0) -> int:
 def test_directive_rejects_bad_refresh_interval(config_override):
     with pytest.raises(Exception):
         with config_override(
-            r"BotShieldAllow\s+on",
-            'BotShieldAllow on\n'
+            r"BotShieldAllowVerifiedBots\s+on",
+            'BotShieldAllowVerifiedBots on\n'
             '    BotShieldLoadRefreshInterval 0',
             count=1,
         ):
@@ -96,8 +96,8 @@ def test_directive_rejects_bad_refresh_interval(config_override):
 def test_directive_rejects_bad_warm_threshold(config_override):
     with pytest.raises(Exception):
         with config_override(
-            r"BotShieldAllow\s+on",
-            'BotShieldAllow on\n'
+            r"BotShieldAllowVerifiedBots\s+on",
+            'BotShieldAllowVerifiedBots on\n'
             '    BotShieldLoadWarmThreshold 0',
             count=1,
         ):
@@ -107,8 +107,8 @@ def test_directive_rejects_bad_warm_threshold(config_override):
 def test_directive_rejects_relative_state_file_path(config_override):
     with pytest.raises(Exception):
         with config_override(
-            r"BotShieldAllow\s+on",
-            'BotShieldAllow on\n'
+            r"BotShieldAllowVerifiedBots\s+on",
+            'BotShieldAllowVerifiedBots on\n'
             '    BotShieldLoadStateFile relative/path',
             count=1,
         ):
@@ -151,8 +151,8 @@ def test_invalid_state_file_value_treated_as_normal(config_override):
     _set_load_file("not-a-real-state")
     try:
         with config_override(
-            r"BotShieldAllow\s+on",
-            'BotShieldAllow on\n'
+            r"BotShieldAllowVerifiedBots\s+on",
+            'BotShieldAllowVerifiedBots on\n'
             f'    BotShieldLoadStateFile {LOAD_FILE_PATH}',
             count=1,
         ):
@@ -176,8 +176,8 @@ def test_external_hot_promotes_through_hysteresis(config_override):
     _set_load_file("hot")
     try:
         with config_override(
-            r"BotShieldAllow\s+on",
-            'BotShieldAllow on\n'
+            r"BotShieldAllowVerifiedBots\s+on",
+            'BotShieldAllowVerifiedBots on\n'
             f'    BotShieldLoadStateFile {LOAD_FILE_PATH}',
             count=1,
         ):
