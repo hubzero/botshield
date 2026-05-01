@@ -153,7 +153,7 @@ request. For sites where most visitors don't send <code>Accept- Language</code> 
 to 30 or 40.</p>
 <p><strong>Tuning workflow</strong>:</p>
 <ol>
-<li>Flip <code>BotShieldShadowMode on</code> to dry-run all rules.</li>
+<li>Set <code>BotShieldEnabled LogOnly</code> to dry-run all rules.</li>
 <li>Watch the decision log under real traffic for 24–48 hours.</li>
 <li>Sample the <code>effective</code> distribution and per-reason
 contributions.</li>
@@ -169,7 +169,7 @@ access logs aren't being gated. Decision log shows <code>tier=pass</code>.</p>
 <ol>
 <li>Confirm the request actually reached mod_botshield. The
 decision log line should be present. If absent, check that the
-module is loaded and <code>BotShieldEnabled on</code> is in scope.</li>
+module is loaded and <code>BotShieldEnabled On</code> is in scope.</li>
 <li>If the line is present, look at the <code>score</code> field. A bot that
 hits no heuristic (sends a normal-looking UA, accepts language,
 has been seen before) won't trigger anything.</li>

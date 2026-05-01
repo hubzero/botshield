@@ -195,7 +195,7 @@ which signals contributed and how much.
 
 ## Tuning workflow
 
-1. Start with `BotShieldLogOnly on` to dry-run all rules without
+1. Start with `BotShieldEnabled LogOnly` to dry-run all rules without
    enforcement (see [staging](../staging/index.html)).
 2. Watch the decision log for several days under real traffic.
 3. Inspect the distribution of `effective` and per-reason
@@ -210,7 +210,7 @@ which signals contributed and how much.
      penalty.
    - Bots slipping through → lower thresholds, raise scraper-UA
      penalty, add `BotShieldPathTrigger` rules for known-bad paths.
-5. Flip `BotShieldLogOnly off` when satisfied.
+5. Switch to `BotShieldEnabled On` when satisfied.
 6. Subsequent rule additions can be staged with per-rule
    `mode=observe` without affecting the rest.
 
@@ -222,18 +222,19 @@ reachable; the common ones:
 
 | tier | outcome | What happened |
 |---|---|---|
-| `pass` | `declined` | Score below silent threshold; real handler ran |
-| `pass` | `verified` | Valid cookie; declined to real handler |
+| `pass` | `allow` | Score below silent threshold; real handler ran |
+| `pass` | `verified` | Valid cookie; allowed to real handler |
 | `silent` | `challenged` | Interstitial served; client is solving PoW |
 | `silent` | `verified` | Client solved PoW; cookie minted |
-| `form` | `challenged` | Form-PoW interstitial served |
+| `silent` | `~challenge` | LogOnly: would have served interstitial |
+| `form` | `challenged` | Form-PoW interstitial served (HTTP 403) |
 | `form` | `verified` | Client solved form PoW; cookie minted |
-| `captcha` | `challenged` | Captcha widget served |
+| `captcha` | `challenged` | Captcha widget served (HTTP 403) |
 | `captcha` | `verified` | Provider siteverify accepted; cookie minted |
 | `captcha` | `failopen` | Provider siteverify timed out; treated as pass to avoid blocking on a third-party outage |
 | `captcha` | `rate_limited` | Per-IP captcha-verify rate cap exceeded |
 | `captcha` | `inflight_capped` | Global captcha-verify in-flight cap exceeded |
-| `safeguard` | `declined` | challenge-loop suppression; pass-through |
+| `safeguard` | `allow` | challenge-loop suppression; pass-through |
 
 See [observability](../observability/index.html) for the complete enum
 vocabulary and how it maps to counters.

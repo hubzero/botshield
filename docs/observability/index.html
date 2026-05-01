@@ -148,7 +148,7 @@ commit time by a small awk validator (<code>tests/scripts/decision-log- awk-vali
 </tr>
 <tr>
 <td><code>outcome</code></td>
-<td><code>declined</code>, <code>challenged</code>, <code>verified</code>, <code>rejected</code>, <code>failopen</code>, <code>rate_limited</code>, <code>inflight_capped</code>, <code>pending_missing</code>, <code>misconfigured</code>, <code>debug</code></td>
+<td><code>allow</code>, <code>challenged</code>, <code>verified</code>, <code>block</code>, <code>failopen</code>, <code>rate_limited</code>, <code>inflight_capped</code>, <code>pending_missing</code>, <code>misconfigured</code>, <code>debug</code> (plus tilde-prefixed counterfactuals: <code>~challenge</code>, <code>~block</code>, <code>~rate_limited</code> under <code>BotShieldEnabled LogOnly</code>)</td>
 </tr>
 <tr>
 <td><code>cookie</code></td>
@@ -223,7 +223,7 @@ takes the shape <code>&lt;family&gt;:&lt;name&gt;</code> so the source family is
 </tr>
 <tr>
 <td><code>&lt;reason&gt;:observe</code></td>
-<td>Any of the above with <code>mode=observe</code> or under <code>BotShieldShadowMode on</code> (see <a href="../staging/index.html">staging</a>)</td>
+<td>Any of the above with <code>mode=observe</code> or under <code>BotShieldEnabled LogOnly</code> (see <a href="../staging/index.html">staging</a>)</td>
 </tr>
 <tr>
 <td><code>would-flag-trigger:&lt;flag&gt;:observe</code>, <code>would-block:&lt;name&gt;</code>, <code>would-rate-limit:&lt;name&gt;</code></td>

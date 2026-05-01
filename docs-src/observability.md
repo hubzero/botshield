@@ -43,7 +43,7 @@ awk-validator.sh`).
 | Field | Values |
 |---|---|
 | `tier` | `none`, `pass`, `silent`, `form`, `captcha`, `safeguard` |
-| `outcome` | `declined`, `challenged`, `verified`, `rejected`, `failopen`, `rate_limited`, `inflight_capped`, `pending_missing`, `misconfigured`, `debug` |
+| `outcome` | `allow`, `challenged`, `verified`, `block`, `failopen`, `rate_limited`, `inflight_capped`, `pending_missing`, `misconfigured`, `debug` (plus tilde-prefixed counterfactuals: `~challenge`, `~block`, `~rate_limited` under `BotShieldEnabled LogOnly`) |
 | `cookie` | `ok`, `expired`, `bad_sig`, `bad_format`, `absent`, `-` |
 | `provider` | `-`, `turnstile`, `hcaptcha`, `recaptcha-v2`, `recaptcha-v3`, `friendly`, `geetest` |
 | `alg` | `-`, `sha256-zeros`, `captcha-<provider>` |
@@ -72,7 +72,7 @@ takes the shape `<family>:<name>` so the source family is visible:
 | `flag-trigger:<flag>` | flag-trigger score action |
 | `flag-tier-floor:<tier>` | flag-trigger tier-floor action |
 | `path-trigger:<name>`, `cookie-trigger:<name>`, `env-trigger:<name>`, `load-trigger:<name>`, `feedback-trigger:<event>` | trigger families |
-| `<reason>:observe` | Any of the above with `mode=observe` or under `BotShieldLogOnly on` (see [staging](../staging/index.html)) |
+| `<reason>:observe` | Any of the above with `mode=observe` or under `BotShieldEnabled LogOnly` (see [staging](../staging/index.html)) |
 | `would-flag-trigger:<flag>:observe`, `would-block:<name>`, `would-rate-limit:<name>` | Observe-mode "would have done" reasons |
 | `challenge-safeguard` | safeguard pass-through |
 

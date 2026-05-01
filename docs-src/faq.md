@@ -177,7 +177,7 @@ If real users *are* hitting challenges, the likely causes are:
 - A path-trigger or block-path is matching legitimate routes.
 
 [Staging](../staging/index.html) describes the
-`BotShieldLogOnly on` workflow for catching false positives
+`BotShieldEnabled LogOnly` workflow for catching false positives
 before they hit users.
 
 ### Do bots actually solve proof-of-work challenges?

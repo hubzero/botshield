@@ -90,46 +90,113 @@
 <section class="toc">
   <h2 class="toc__heading">On this page</h2>
   <ul class="toc__list">
-<li class="toc__item toc__item--level-2"><a href="#2026-04-29">2026-04-29</a></li>
-<li class="toc__item toc__item--level-3"><a href="#added">Added</a></li>
+<li class="toc__item toc__item--level-2"><a href="#2026-05-01">2026-05-01</a></li>
 <li class="toc__item toc__item--level-3"><a href="#changed">Changed</a></li>
 <li class="toc__item toc__item--level-3"><a href="#fixed">Fixed</a></li>
+<li class="toc__item toc__item--level-2"><a href="#2026-04-30">2026-04-30</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-2">Changed</a></li>
+<li class="toc__item toc__item--level-2"><a href="#2026-04-29">2026-04-29</a></li>
+<li class="toc__item toc__item--level-3"><a href="#added">Added</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-3">Changed</a></li>
+<li class="toc__item toc__item--level-3"><a href="#fixed-2">Fixed</a></li>
 <li class="toc__item toc__item--level-3"><a href="#removed">Removed</a></li>
 <li class="toc__item toc__item--level-3"><a href="#hygiene">Hygiene</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-04-28">2026-04-28</a></li>
 <li class="toc__item toc__item--level-3"><a href="#added-2">Added</a></li>
-<li class="toc__item toc__item--level-3"><a href="#changed-2">Changed</a></li>
-<li class="toc__item toc__item--level-3"><a href="#fixed-2">Fixed</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-4">Changed</a></li>
+<li class="toc__item toc__item--level-3"><a href="#fixed-3">Fixed</a></li>
 <li class="toc__item toc__item--level-3"><a href="#removed-2">Removed</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-04-27">2026-04-27</a></li>
-<li class="toc__item toc__item--level-3"><a href="#changed-3">Changed</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-5">Changed</a></li>
 <li class="toc__item toc__item--level-3"><a href="#added-3">Added</a></li>
-<li class="toc__item toc__item--level-3"><a href="#fixed-3">Fixed</a></li>
+<li class="toc__item toc__item--level-3"><a href="#fixed-4">Fixed</a></li>
 <li class="toc__item toc__item--level-3"><a href="#removed-3">Removed</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-04-26">2026-04-26</a></li>
 <li class="toc__item toc__item--level-3"><a href="#added-4">Added</a></li>
-<li class="toc__item toc__item--level-3"><a href="#changed-4">Changed</a></li>
-<li class="toc__item toc__item--level-3"><a href="#fixed-4">Fixed</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-6">Changed</a></li>
+<li class="toc__item toc__item--level-3"><a href="#fixed-5">Fixed</a></li>
 <li class="toc__item toc__item--level-3"><a href="#hygiene-2">Hygiene</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-04-25">2026-04-25</a></li>
 <li class="toc__item toc__item--level-3"><a href="#added-5">Added</a></li>
-<li class="toc__item toc__item--level-3"><a href="#changed-5">Changed</a></li>
-<li class="toc__item toc__item--level-3"><a href="#fixed-5">Fixed</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-7">Changed</a></li>
+<li class="toc__item toc__item--level-3"><a href="#fixed-6">Fixed</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-04-24">2026-04-24</a></li>
 <li class="toc__item toc__item--level-3"><a href="#added-6">Added</a></li>
-<li class="toc__item toc__item--level-3"><a href="#fixed-6">Fixed</a></li>
+<li class="toc__item toc__item--level-3"><a href="#fixed-7">Fixed</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-04-23">2026-04-23</a></li>
 <li class="toc__item toc__item--level-3"><a href="#added-7">Added</a></li>
-<li class="toc__item toc__item--level-3"><a href="#fixed-7">Fixed</a></li>
+<li class="toc__item toc__item--level-3"><a href="#fixed-8">Fixed</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-04-22">2026-04-22</a></li>
 <li class="toc__item toc__item--level-3"><a href="#added-8">Added</a></li>
-<li class="toc__item toc__item--level-3"><a href="#fixed-8">Fixed</a></li>
+<li class="toc__item toc__item--level-3"><a href="#fixed-9">Fixed</a></li>
 <li class="toc__item toc__item--level-3"><a href="#docs">Docs</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-04-21">2026-04-21</a></li>
 <li class="toc__item toc__item--level-3"><a href="#added-9">Added</a></li>
   </ul>
 </section>
         <div class="prose">
+<h2 id="2026-05-01">2026-05-01</h2>
+<h3 id="changed">Changed</h3>
+<ul>
+<li>
+<p>Folded <code>BotShieldLogOnly</code> into <code>BotShieldEnabled</code> as a tri-state
+TAKE1 directive: <code>On</code> (enforce) / <code>Off</code> (disabled) / <code>LogOnly</code>
+(observe). The standalone <code>BotShieldLogOnly</code> directive and
+<code>bs_server_cfg.log_only</code> field are removed. The new shape lives
+on <code>bs_dir_cfg.enabled</code> (already a tristate) at <code>RSRC_CONF | ACCESS_CONF</code> scope, so per-<code>&lt;Location&gt;</code> overrides work without
+any further refactor:</p>
+<pre><code>BotShieldEnabled LogOnly                # vhost: observe
+&lt;Location &quot;/about&quot;&gt;
+    BotShieldEnabled On                 # /about: enforce
+&lt;/Location&gt;
+</code></pre>
+<p>The 5 enforcement-suppression sites (tier dispatch, BlockPath
+observe, RateLimit observe, heuristic-trigger executor,
+app-feedback filter, form-captcha) now read
+<code>dcfg-&gt;enabled == BS_ENABLED_LOGONLY</code> from <code>r-&gt;per_dir_config</code>
+instead of a server-scope flag.</p>
+</li>
+<li>
+<p>Interstitial response is now <code>403 Forbidden</code> with
+<code>X-Robots-Tag: noindex, nofollow</code> instead of <code>200 OK</code>. Search
+engines that hit a protected URL won't index the placeholder
+(&quot;Verifying you are human...&quot;) as if it were the page content.
+Browsers still execute inline JS / captcha widgets on 4xx
+responses, so the silent-tier auto-solve and captcha widgets
+keep working for legitimate clients (matches the Cloudflare /
+DataDome / Akamai pattern).</p>
+</li>
+</ul>
+<h3 id="fixed">Fixed</h3>
+<ul>
+<li>M9.2 metrics: tilde-prefixed counterfactual outcomes
+(<code>~challenge</code>, <code>~block</code>, <code>~rate_limited</code>) no longer log a
+<code>metrics: unknown outcome</code> warning per LogOnly-suppressed
+decision. The override applies only to operator-facing surfaces
+(decision-log line + <code>BS_OUTCOME</code> env); the counter bump uses
+the original <code>allow</code> because that's what actually happened.
+Per-family <code>*_observed_total</code> counters continue to capture the
+staging-volume signal.</li>
+</ul>
+<h2 id="2026-04-30">2026-04-30</h2>
+<h3 id="changed-2">Changed</h3>
+<ul>
+<li>Renamed <code>BotShieldShadowMode</code> → <code>BotShieldLogOnly</code> (directive,
+setter <code>bs_set_shadow_mode</code> → <code>bs_set_log_only</code>, server-cfg field
+<code>shadow_mode</code> → <code>log_only</code>). The new name describes what the flag
+does in plain English; &quot;shadow mode&quot; was security jargon that
+required prior context to recognize. Per-rule <code>mode=observe</code> is
+unchanged. Beta software, no in-the-wild configs to migrate.</li>
+<li><code>BotShieldLogOnly</code> now also short-circuits the tier-decision
+dispatch in <code>bs_handler</code> (was: trigger / rate-limit / block-path /
+form-captcha rules only). Non-PASS tier decisions emit an
+<code>outcome=~challenge</code> decision log line (the leading tilde marks a
+suppressed counterfactual: real action was allow, this is what
+<em>would</em> have been served) and decline rather than serving an
+interstitial. Lets an operator stage a bare <code>BotShieldEnabled On</code>
+on a fresh vhost and watch what the module would do without any
+client seeing a challenge.</li>
+</ul>
 <h2 id="2026-04-29">2026-04-29</h2>
 <h3 id="added">Added</h3>
 <ul>
@@ -149,7 +216,7 @@ WSL2 (ephemeral-port + worker-pool churn / empty histograms /
 HTTP/2-first throttling). Hits 1k/5k/10k RPS within 0.1% of
 target.</li>
 </ul>
-<h3 id="changed">Changed</h3>
+<h3 id="changed-3">Changed</h3>
 <ul>
 <li><code>bs_post_config</code> decomposed into 13 named phase helpers + 25-line
 orchestrator (911-line monolith → checklist; LTO inlines back so
@@ -167,7 +234,7 @@ in <code>bs_ua_classify</code>; misc doc-drift fixes.</li>
 <code>~/mod_botshield-testsite/</code>.</li>
 <li><code>docs/</code> committed for GitHub Pages serving from <code>main:/docs</code>.</li>
 </ul>
-<h3 id="fixed">Fixed</h3>
+<h3 id="fixed-2">Fixed</h3>
 <ul>
 <li>Four documentation lies: stale &quot;TODO: add a nonce SHM table&quot; /
 &quot;phase 2 nonce table&quot; / &quot;captcha stubs to form until that ships&quot; /
@@ -207,7 +274,7 @@ connection / saturation / fixed-rate framing.</li>
 <code>BotShieldFeedbackTrigger</code>.</li>
 <li><code>.editorconfig</code> for indent / line endings / trailing whitespace.</li>
 </ul>
-<h3 id="changed-2">Changed</h3>
+<h3 id="changed-4">Changed</h3>
 <ul>
 <li>File-split campaign continued (Phases 6–34): triggers, config
 (incl. directive-setter distribution), templates, formcaptcha,
@@ -222,7 +289,7 @@ types relocated to feature headers.</li>
 (<code>bs_app_feedback_filter</code> honors <code>shadow_mode</code> + per-trigger
 <code>observe</code>).</li>
 </ul>
-<h3 id="fixed-2">Fixed</h3>
+<h3 id="fixed-3">Fixed</h3>
 <ul>
 <li>Bench harness was measuring challenge-issuance, not pass-through —
 wrk's default no-UA / no-Accept-Language triggered heuristic
@@ -238,7 +305,7 @@ source comments — review-history archaeology, not code rationale.</li>
 </ul>
 <hr />
 <h2 id="2026-04-27">2026-04-27</h2>
-<h3 id="changed-3">Changed</h3>
+<h3 id="changed-5">Changed</h3>
 <ul>
 <li><strong>Cookie format: GCM-only on the wire.</strong> Retired the legacy
 HMAC-only envelope. The dual-format compat switch from E8.1
@@ -282,7 +349,7 @@ exported.</li>
 isolation, scoring + tier-decision system, pending-cookie threat
 model.</li>
 </ul>
-<h3 id="fixed-3">Fixed</h3>
+<h3 id="fixed-4">Fixed</h3>
 <ul>
 <li><strong>MEDIUM #1: render-side carry-forward leak.</strong> A path through the
 challenge-render hook could carry forward rep from an expired
@@ -315,7 +382,7 @@ mismatches.</li>
 <li>Captcha-verify endpoint hardening (M8.1): pending cookie + per-IP
 rate limit + global in-flight semaphore.</li>
 </ul>
-<h3 id="changed-4">Changed</h3>
+<h3 id="changed-6">Changed</h3>
 <ul>
 <li>Cookie tokenizer rewritten + post_config restore + mutex split
 (HIGH #3, #4, #6).</li>
@@ -347,7 +414,7 @@ job.</li>
 <li><code>provision.sh</code> refuses to build if repo path is group/world-
 writable (preempts a make-install hijack on shared boxes).</li>
 </ul>
-<h3 id="fixed-4">Fixed</h3>
+<h3 id="fixed-5">Fixed</h3>
 <ul>
 <li><strong>E10</strong>: <code>tier=&quot;safeguard&quot;</code> decision lines bin to
 <code>BS_M_TIER_PASS</code> in metrics index (Gemini reviewer caught the
@@ -419,7 +486,7 @@ HTML forms; reuses M8 provider config; mints <code>_bs_verified</code> on
 success. <strong>E18.3</strong> JSON body support; <strong>E18.4</strong> form-widget
 shell at <code>/botshield/form-widget.js</code>.</li>
 </ul>
-<h3 id="changed-5">Changed</h3>
+<h3 id="changed-7">Changed</h3>
 <ul>
 <li>Resolved open questions #3 (forgiveness cap) and #5 (secret
 rotation); renamed in-source comments to E16 / E17; renumbered
@@ -433,7 +500,7 @@ verify-only secondary key.</li>
 <li>E18 multipart explicitly out of scope (deferred → permanently
 deferred).</li>
 </ul>
-<h3 id="fixed-5">Fixed</h3>
+<h3 id="fixed-6">Fixed</h3>
 <ul>
 <li>De-flake <code>test_escalation_isolates_per_ip</code> and
 <code>test_robots_live_refresh</code>.</li>
@@ -463,7 +530,7 @@ directive + E5 wire-format change + dispatch order cleanup.</li>
 addressed, keyed <code>(ip, rule_slot, ns_id)</code>) escalates response on
 sustained rate-limit hits.</li>
 </ul>
-<h3 id="fixed-6">Fixed</h3>
+<h3 id="fixed-7">Fixed</h3>
 <ul>
 <li><strong>E4</strong>: documented + tested &quot;pass accumulates, non-pass short-
 circuits&quot; semantics.</li>
@@ -501,7 +568,7 @@ test-browser), soak port to pytest.</li>
 Prometheus exposition-format validator, MPM matrix tests.</li>
 <li><strong>M11.8d — LibFuzzer harness for <code>bs_verify_cookie</code>.</strong></li>
 </ul>
-<h3 id="fixed-7">Fixed</h3>
+<h3 id="fixed-8">Fixed</h3>
 <ul>
 <li>M11.5 review fixes: <code>tests/run</code> false-green + false-fail; stale
 docs.</li>
@@ -558,7 +625,7 @@ in M11.7).</li>
 <li><strong>M11.3 — Acceptance flows</strong>, remaining provider ports, CI hook.</li>
 <li><strong>M11.4 — Pytest framework foundation</strong> + 3 migrated POC tests.</li>
 </ul>
-<h3 id="fixed-8">Fixed</h3>
+<h3 id="fixed-9">Fixed</h3>
 <ul>
 <li>M11.3 review fixes: truth-in-advertising; <code>tests/run</code> false-pass
 hole.</li>

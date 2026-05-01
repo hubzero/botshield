@@ -69,7 +69,7 @@ to 30 or 40.
 
 **Tuning workflow**:
 
-1. Flip `BotShieldLogOnly on` to dry-run all rules.
+1. Set `BotShieldEnabled LogOnly` to dry-run all rules.
 2. Watch the decision log under real traffic for 24–48 hours.
 3. Sample the `effective` distribution and per-reason
    contributions.
@@ -88,7 +88,7 @@ access logs aren't being gated. Decision log shows `tier=pass`.
 
 1. Confirm the request actually reached mod_botshield. The
    decision log line should be present. If absent, check that the
-   module is loaded and `BotShieldEnabled on` is in scope.
+   module is loaded and `BotShieldEnabled On` is in scope.
 2. If the line is present, look at the `score` field. A bot that
    hits no heuristic (sends a normal-looking UA, accepts language,
    has been seen before) won't trigger anything.

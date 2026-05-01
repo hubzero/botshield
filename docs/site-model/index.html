@@ -362,7 +362,7 @@ breakdown:</p>
 which signals contributed and how much.</p>
 <h2 id="tuning-workflow">Tuning workflow</h2>
 <ol>
-<li>Start with <code>BotShieldShadowMode on</code> to dry-run all rules without
+<li>Start with <code>BotShieldEnabled LogOnly</code> to dry-run all rules without
 enforcement (see <a href="../staging/index.html">staging</a>).</li>
 <li>Watch the decision log for several days under real traffic.</li>
 <li>Inspect the distribution of <code>effective</code> and per-reason
@@ -380,7 +380,7 @@ penalty.</li>
 penalty, add <code>BotShieldPathTrigger</code> rules for known-bad paths.</li>
 </ul>
 </li>
-<li>Flip <code>BotShieldShadowMode off</code> when satisfied.</li>
+<li>Switch to <code>BotShieldEnabled On</code> when satisfied.</li>
 <li>Subsequent rule additions can be staged with per-rule
 <code>mode=observe</code> without affecting the rest.</li>
 </ol>
@@ -399,13 +399,13 @@ reachable; the common ones:</p>
 <tbody>
 <tr>
 <td><code>pass</code></td>
-<td><code>declined</code></td>
+<td><code>allow</code></td>
 <td>Score below silent threshold; real handler ran</td>
 </tr>
 <tr>
 <td><code>pass</code></td>
 <td><code>verified</code></td>
-<td>Valid cookie; declined to real handler</td>
+<td>Valid cookie; allowed to real handler</td>
 </tr>
 <tr>
 <td><code>silent</code></td>
@@ -418,9 +418,14 @@ reachable; the common ones:</p>
 <td>Client solved PoW; cookie minted</td>
 </tr>
 <tr>
+<td><code>silent</code></td>
+<td><code>~challenge</code></td>
+<td>LogOnly: would have served interstitial</td>
+</tr>
+<tr>
 <td><code>form</code></td>
 <td><code>challenged</code></td>
-<td>Form-PoW interstitial served</td>
+<td>Form-PoW interstitial served (HTTP 403)</td>
 </tr>
 <tr>
 <td><code>form</code></td>
@@ -430,7 +435,7 @@ reachable; the common ones:</p>
 <tr>
 <td><code>captcha</code></td>
 <td><code>challenged</code></td>
-<td>Captcha widget served</td>
+<td>Captcha widget served (HTTP 403)</td>
 </tr>
 <tr>
 <td><code>captcha</code></td>
@@ -454,7 +459,7 @@ reachable; the common ones:</p>
 </tr>
 <tr>
 <td><code>safeguard</code></td>
-<td><code>declined</code></td>
+<td><code>allow</code></td>
 <td>challenge-loop suppression; pass-through</td>
 </tr>
 </tbody>

@@ -107,7 +107,7 @@
 <li class="toc__item toc__item--level-2"><a href="#safeguard">Safeguard</a></li>
 <li class="toc__item toc__item--level-2"><a href="#load-aware-throttling">Load-aware throttling</a></li>
 <li class="toc__item toc__item--level-2"><a href="#multi-vhost-reputation">Multi-vhost reputation</a></li>
-<li class="toc__item toc__item--level-2"><a href="#shadow-mode">Shadow mode</a></li>
+<li class="toc__item toc__item--level-2"><a href="#log-only-staging-mode">Log-only / staging mode</a></li>
 <li class="toc__item toc__item--level-2"><a href="#app-bridge">App bridge</a></li>
 <li class="toc__item toc__item--level-2"><a href="#where-to-next">Where to next</a></li>
   </ul>
@@ -148,7 +148,7 @@ into a running server.</p>
 <tbody>
 <tr>
 <td><code>BotShieldEnabled</code></td>
-<td><code>on|off</code></td>
+<td><code>on|off|logonly</code></td>
 <td><code>off</code></td>
 </tr>
 <tr>
@@ -193,9 +193,29 @@ into a running server.</p>
 </tr>
 </tbody>
 </table>
-<p><code>BotShieldEnabled</code> is the master gate. <code>BotShieldDebug</code> returns
-<code>403 &quot;Hello World&quot;</code> for every request in scope — useful as a smoke
-test that the hook is firing.</p>
+<p><code>BotShieldEnabled</code> is the master gate. It is tri-state:</p>
+<ul>
+<li><code>on</code> — enforce. Tier decisions serve interstitials, triggers /
+rate-limit / block-path rules act on matches.</li>
+<li><code>off</code> — module declines every request in scope; same shape as
+unloading the module on this path.</li>
+<li><code>logonly</code> — observe-only. The handler runs and emits decision
+logs, but every enforcement-suppression site short-circuits:
+tier dispatch logs <code>outcome=~challenge</code> and declines instead of
+serving the interstitial; trigger / rate-limit / block-path
+matches log <code>:observe</code> and skip side effects. Use this to stage
+a whole policy revision before flipping enforcement on. See
+<a href="../staging/index.html">staging</a>.</li>
+</ul>
+<p>Because <code>BotShieldEnabled</code> is per-<code>&lt;Directory&gt;</code> / <code>&lt;Location&gt;</code>,
+operators can carve out exceptions:</p>
+<pre><code>BotShieldEnabled LogOnly                # vhost: observe
+&lt;Location &quot;/about&quot;&gt;
+    BotShieldEnabled On                 # /about: enforce
+&lt;/Location&gt;
+</code></pre>
+<p><code>BotShieldDebug</code> returns <code>403 &quot;Hello World&quot;</code> for every request in
+scope — useful as a smoke test that the hook is firing.</p>
 <p><code>BotShieldSecretFile</code> and <code>BotShieldAlgorithm</code> are required. The
 module emits <code>503 X-Botshield: misconfigured</code> for any request
 where both are not resolved on the scope. <code>BotShieldSecondarySecretFile</code>
@@ -853,26 +873,10 @@ saturation, etc.).</p>
 </table>
 <p>Vhosts with the same token share one reputation namespace. See
 <a href="../deployment/index.html#multi-vhost-reputation">deployment</a>.</p>
-<h2 id="shadow-mode">Shadow mode</h2>
-<table>
-<thead>
-<tr>
-<th>Directive</th>
-<th>Syntax</th>
-<th>Default</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>BotShieldShadowMode</code></td>
-<td><code>on|off</code></td>
-<td>unset (off)</td>
-</tr>
-</tbody>
-</table>
-<p>Tri-state: unset means &quot;inherit from outer scope or off if no
-outer scope&quot;. When on, every gating decision flips to observe-mode
-regardless of per-rule setting. See <a href="../staging/index.html">staging</a>.</p>
+<h2 id="log-only-staging-mode">Log-only / staging mode</h2>
+<p>Folded into <code>BotShieldEnabled</code> (tri-state <code>on</code> / <code>off</code> /
+<code>logonly</code>). See the <a href="#core">Core</a> section above and the
+<a href="../staging/index.html">staging</a> guide.</p>
 <h2 id="app-bridge">App bridge</h2>
 <table>
 <thead>

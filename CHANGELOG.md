@@ -1,5 +1,45 @@
 # Changelog
 
+## 2026-05-01
+
+### Changed
+- Folded `BotShieldLogOnly` into `BotShieldEnabled` as a tri-state
+  TAKE1 directive: `On` (enforce) / `Off` (disabled) / `LogOnly`
+  (observe). The standalone `BotShieldLogOnly` directive and
+  `bs_server_cfg.log_only` field are removed. The new shape lives
+  on `bs_dir_cfg.enabled` (already a tristate) at `RSRC_CONF |
+  ACCESS_CONF` scope, so per-`<Location>` overrides work without
+  any further refactor:
+
+      BotShieldEnabled LogOnly                # vhost: observe
+      <Location "/about">
+          BotShieldEnabled On                 # /about: enforce
+      </Location>
+
+  The 5 enforcement-suppression sites (tier dispatch, BlockPath
+  observe, RateLimit observe, heuristic-trigger executor,
+  app-feedback filter, form-captcha) now read
+  `dcfg->enabled == BS_ENABLED_LOGONLY` from `r->per_dir_config`
+  instead of a server-scope flag.
+- Interstitial response is now `403 Forbidden` with
+  `X-Robots-Tag: noindex, nofollow` instead of `200 OK`. Search
+  engines that hit a protected URL won't index the placeholder
+  ("Verifying you are human...") as if it were the page content.
+  Browsers still execute inline JS / captcha widgets on 4xx
+  responses, so the silent-tier auto-solve and captcha widgets
+  keep working for legitimate clients (matches the Cloudflare /
+  DataDome / Akamai pattern).
+
+### Fixed
+- M9.2 metrics: tilde-prefixed counterfactual outcomes
+  (`~challenge`, `~block`, `~rate_limited`) no longer log a
+  `metrics: unknown outcome` warning per LogOnly-suppressed
+  decision. The override applies only to operator-facing surfaces
+  (decision-log line + `BS_OUTCOME` env); the counter bump uses
+  the original `allow` because that's what actually happened.
+  Per-family `*_observed_total` counters continue to capture the
+  staging-volume signal.
+
 ## 2026-04-30
 
 ### Changed
