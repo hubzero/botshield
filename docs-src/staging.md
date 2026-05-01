@@ -50,7 +50,7 @@ The rule still evaluates against every matching request, but takes
 no action. Matches appear in the decision log:
 
 ```
-mod_botshield: decision tier=pass outcome=declined ip=192.0.2.42
+mod_botshield: decision tier=pass outcome=allow ip=192.0.2.42
     score=0 cookie=absent provider=- alg=- reason="path-trigger:admin-trap:observe"
     path="/admin/.env"
 ```

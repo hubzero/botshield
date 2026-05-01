@@ -206,10 +206,10 @@ The default <code>LogLevel warn</code> hides them. Bump just this module:</p>
 </code></pre>
 <p>You should see one line per request:</p>
 <pre><code>[Tue Apr 28 10:00:00 2026] [botshield:info] mod_botshield:
-  decision tier=pass outcome=declined ip=192.0.2.1 score=0
+  decision tier=pass outcome=allow ip=192.0.2.1 score=0
   cookie=absent provider=- alg=- reason=&quot;-&quot; path=&quot;/&quot;
 </code></pre>
-<p><code>tier=pass outcome=declined</code> is the happy path — the module
+<p><code>tier=pass outcome=allow</code> is the happy path — the module
 inspected the request, decided it didn't warrant friction, and
 declined so Apache served the real content.</p>
 <p><strong>4. The challenge widget renders.</strong> Force a challenge by spoofing a

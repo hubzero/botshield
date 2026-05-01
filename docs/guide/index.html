@@ -135,7 +135,12 @@ GeeTest v4.</li>
 <li><strong>Cookie envelope.</strong> AES-256-GCM authenticated encryption,
 per-purpose HKDF-derived keys, verify-only secondary key for
 graceful rotation. Per-cookie hourly forgiveness cap closes the
-rebuild-budget evasion.</li>
+rebuild-budget evasion. Cookies are session-scoped at the
+browser layer (no <code>Expires=</code> / <code>Max-Age=</code>); the server-side
+<code>expires_at</code> field is the hard cap. Every pass through the
+handler mints <code>__Host-bs_session</code> so the next request from the
+same browser carries an identifier (most cookies carry trust=0
+— they're per-session markers, not trust receipts).</li>
 <li><strong>Sparse server state.</strong> SHM flagged-IP table with seqlock-guarded
 lockless reads, rotating Bloom filter for first-sight IP signals,
 crash-durable persistence via <code>mod_watchdog</code> snapshots + shutdown
@@ -143,7 +148,9 @@ save.</li>
 <li><strong>Policy.</strong> Path / cookie / env / load / scope / flag triggers,
 per-cohort rate limits and block-paths, in-module robots.txt parser
 (RFC 9309 + Crawl-delay extension), repeated-429 escalation,
-anti-loop safeguard.</li>
+anti-loop safeguard (302 redirect to a built-in explainer or to
+a configured <code>BotShieldSafeguardRedirectURL</code> after a client loops
+on challenges without solving).</li>
 <li><strong>Verify-endpoint hardening.</strong> HMAC-signed pending cookie + per-IP
 rate limit + global in-flight semaphore on <code>/captcha-verify</code>.
 One-time-use nonces + IP-bound bootstrap on the embedded silent
@@ -153,8 +160,11 @@ request, 41 Prometheus metrics at <code>&lt;prefix&gt;/metrics</code>, <code>mod
 contribution hook.</li>
 <li><strong>Multi-vhost isolation.</strong> Default-isolate per <code>ServerName</code>; opt
 into shared reputation via <code>BotShieldShareScope</code>.</li>
-<li><strong>Shadow mode.</strong> Global and per-rule observe for staging policy
-changes without enforcement.</li>
+<li><strong>Log-only / shadow mode.</strong> Scope-level <code>BotShieldEnabled LogOnly</code>
+and per-rule <code>mode=observe</code> for staging policy changes without
+enforcement. Counterfactual outcomes (<code>~challenge</code>, <code>~block</code>,
+<code>~rate_limited</code>) surface in the decision log so you can see what
+the rule would have done.</li>
 <li><strong>Accessibility.</strong> Default interstitial passes WCAG 2.1 AA on every
 variant.</li>
 </ul>

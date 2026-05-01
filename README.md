@@ -40,7 +40,12 @@ below.
 - **Cookie envelope.** AES-256-GCM authenticated encryption,
   per-purpose HKDF-derived keys, verify-only secondary key for
   graceful rotation. Per-cookie hourly forgiveness cap closes the
-  rebuild-budget evasion.
+  rebuild-budget evasion. Cookies are session-scoped at the
+  browser layer (no `Expires=` / `Max-Age=`); the server-side
+  `expires_at` field is the hard cap. Every pass through the
+  handler mints `__Host-bs_session` so the next request from the
+  same browser carries an identifier (most cookies carry trust=0
+  — they're per-session markers, not trust receipts).
 - **Sparse server state.** SHM flagged-IP table with seqlock-guarded
   lockless reads, rotating Bloom filter for first-sight IP signals,
   crash-durable persistence via `mod_watchdog` snapshots + shutdown
@@ -48,7 +53,9 @@ below.
 - **Policy.** Path / cookie / env / load / scope / flag triggers,
   per-cohort rate limits and block-paths, in-module robots.txt parser
   (RFC 9309 + Crawl-delay extension), repeated-429 escalation,
-  anti-loop safeguard.
+  anti-loop safeguard (302 redirect to a built-in explainer or to
+  a configured `BotShieldSafeguardRedirectURL` after a client loops
+  on challenges without solving).
 - **Verify-endpoint hardening.** HMAC-signed pending cookie + per-IP
   rate limit + global in-flight semaphore on `/captcha-verify`.
   One-time-use nonces + IP-bound bootstrap on the embedded silent
@@ -58,8 +65,11 @@ below.
   contribution hook.
 - **Multi-vhost isolation.** Default-isolate per `ServerName`; opt
   into shared reputation via `BotShieldShareScope`.
-- **Shadow mode.** Global and per-rule observe for staging policy
-  changes without enforcement.
+- **Log-only / shadow mode.** Scope-level `BotShieldEnabled LogOnly`
+  and per-rule `mode=observe` for staging policy changes without
+  enforcement. Counterfactual outcomes (`~challenge`, `~block`,
+  `~rate_limited`) surface in the decision log so you can see what
+  the rule would have done.
 - **Accessibility.** Default interstitial passes WCAG 2.1 AA on every
   variant.
 
