@@ -59,6 +59,14 @@ int bs_render_challenge_page(request_rec *r,
                              const char *challenge_js,
                              int issue_auto);
 
+/* Built-in safeguard explainer page handler, served at
+ * <BotShieldEndpointPrefix>/safeguard-info. Reads `?return=` for the
+ * continue link and renders a static HTML explanation of why the
+ * client landed here (auto-check failed N times). The counter reset
+ * already happened upstream in bs_apply_safeguard, so this handler
+ * is a pure render. GET only. */
+int bs_safeguard_info_handler(request_rec *r);
+
 #ifdef __cplusplus
 }
 #endif

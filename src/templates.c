@@ -667,3 +667,123 @@ int bs_render_challenge_page(request_rec *r,
 
     return use_captcha_widget;
 }
+
+/* --- Safeguard explainer page (E10 redirect mode) ------------------
+ *
+ * Served at <BotShieldEndpointPrefix>/safeguard-info when a client
+ * trips the safeguard threshold. The redirect itself happens in
+ * bs_apply_safeguard which also clears the per-IP counter, so this
+ * handler is a pure render — no SHM mutation, no state.
+ *
+ * The page explains what happened in plain language and offers a
+ * Continue link back to the original URL (passed as ?return=).
+ * Continue is a normal anchor link; clicking it re-fetches the
+ * original URL, which gets a fresh challenge cycle (because the
+ * counter was already cleared at redirect time).
+ *
+ * The return URL is validated for same-origin shape (must be a path
+ * starting with a single '/') to avoid open-redirect risk if a bot
+ * crafts a malicious return param. Failed validation falls back to
+ * '/'. */
+
+static const char BS_SAFEGUARD_INFO_TEMPLATE[] =
+"<!DOCTYPE html>\n"
+"<html lang=\"en\">\n"
+"<head>\n"
+"<meta charset=\"utf-8\">\n"
+"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
+"<meta name=\"robots\" content=\"noindex,nofollow\">\n"
+"<title>Verification interrupted</title>\n"
+"<style>\n"
+" html,body{margin:0;padding:0}\n"
+" body{background:#f5f5f2;min-height:100vh;display:flex;\n"
+"  flex-direction:column;align-items:center;justify-content:center;\n"
+"  padding:1rem;font:14px/1.5 system-ui,-apple-system,\"Segoe UI\",sans-serif;color:#222}\n"
+" main{max-width:520px;background:#fff;border:1px solid #ddd;\n"
+"  border-radius:8px;padding:1.5rem 1.75rem;box-shadow:0 1px 3px rgba(0,0,0,.05)}\n"
+" h1{margin:0 0 .75rem;font-size:1.25rem;color:#2f5d50}\n"
+" p{margin:.5rem 0}\n"
+" ul{margin:.5rem 0 1rem;padding-left:1.25rem}\n"
+" li{margin:.25rem 0}\n"
+" .continue{display:inline-block;margin-top:.75rem;padding:.5rem 1rem;\n"
+"  background:#2f5d50;color:#fff;text-decoration:none;border-radius:4px}\n"
+" .continue:hover{background:#264a40}\n"
+" .small{color:#666;font-size:.875rem;margin-top:1.25rem}\n"
+"</style>\n"
+"</head>\n"
+"<body>\n"
+"<main>\n"
+"<h1>We could not auto-verify your browser</h1>\n"
+"<p>Our automated check did not complete successfully. This usually\n"
+"happens because of one of the following:</p>\n"
+"<ul>\n"
+"<li>JavaScript is disabled in your browser.</li>\n"
+"<li>A privacy or security extension is blocking cookies or scripts on this site.</li>\n"
+"<li>Your browser version does not support the verification check.</li>\n"
+"</ul>\n"
+"<p>You can try again by following the link below. If the same thing\n"
+"keeps happening, try a different browser or contact the site\n"
+"administrator.</p>\n"
+"<p><a class=\"continue\" href=\"%s\">Continue to %s</a></p>\n"
+"<p class=\"small\">Your auto-verification counter has been reset.\n"
+"Following this link will start a fresh check.</p>\n"
+"</main>\n"
+"</body>\n"
+"</html>\n";
+
+/* Pull and validate the `?return=` query parameter. Returns a pool-
+ * allocated path that's guaranteed to start with a single '/'. On
+ * any validation failure (missing, malformed, scheme-bearing, double-
+ * slash open-redirect attempt) returns "/". */
+static const char *bs_safeguard_extract_return(request_rec *r)
+{
+    if (!r->args || !*r->args) return "/";
+    const char *q = r->args;
+    while (*q) {
+        const char *amp = strchr(q, '&');
+        apr_size_t pair_len = amp ? (apr_size_t)(amp - q) : strlen(q);
+        if (pair_len > 7 && strncmp(q, "return=", 7) == 0) {
+            char *enc = apr_pstrmemdup(r->pool, q + 7, pair_len - 7);
+            ap_unescape_url(enc);
+            /* Same-origin path only: must start with a single '/'.
+             * Reject "//", "/\\", or anything that looks like a host
+             * specifier — those are open-redirect vectors. Also
+             * reject empty after unescape. */
+            if (!*enc) return "/";
+            if (enc[0] != '/') return "/";
+            if (enc[1] == '/' || enc[1] == '\\') return "/";
+            return enc;
+        }
+        if (!amp) break;
+        q = amp + 1;
+    }
+    return "/";
+}
+
+int bs_safeguard_info_handler(request_rec *r)
+{
+    if (r->method_number != M_GET) {
+        r->status = HTTP_METHOD_NOT_ALLOWED;
+        apr_table_setn(r->headers_out, "Allow", "GET");
+        ap_set_content_type(r, "text/plain; charset=utf-8");
+        ap_rputs("GET required.\n", r);
+        return OK;
+    }
+
+    const char *return_url = bs_safeguard_extract_return(r);
+    const char *return_url_attr = ap_escape_html(r->pool, return_url);
+    /* Display version is the same path; no special truncation needed
+     * for typical HUBzero URLs. Operators with very long URIs can
+     * customize via a future BotShieldSafeguardPageFile if it ever
+     * matters. */
+    const char *body = apr_psprintf(r->pool,
+        BS_SAFEGUARD_INFO_TEMPLATE, return_url_attr, return_url_attr);
+
+    r->status = HTTP_OK;
+    ap_set_content_type(r, "text/html; charset=utf-8");
+    apr_table_setn(r->headers_out, "Cache-Control", "no-store");
+    apr_table_setn(r->headers_out, "X-Botshield",   "safeguard-info");
+    apr_table_setn(r->headers_out, "X-Robots-Tag",  "noindex, nofollow");
+    ap_rputs(body, r);
+    return OK;
+}

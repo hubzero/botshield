@@ -286,6 +286,12 @@ typedef struct bs_server_cfg {
     int                 safeguard_window;
     int                 safeguard_ttl;
     int                 safeguard_capacity;
+    /* On safeguard trip, redirect the client here (302 with original
+     * URI as ?return=). NULL → use the built-in explainer page at
+     * <endpoint_prefix>/safeguard-info. The built-in page is auto-
+     * routed by bs_route_module_endpoint so operators don't need a
+     * Location carve-out. */
+    const char         *safeguard_redirect_url;
     /* Embedded-bootstrap nonce table sizing. 0 = default. */
     int                 nonce_capacity;
     /* E11 — load-aware throttling. */

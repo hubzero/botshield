@@ -189,6 +189,9 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
     out->safeguard_ttl      = (add->safeguard_ttl > 0)
                             ? add->safeguard_ttl
                             : base->safeguard_ttl;
+    out->safeguard_redirect_url = add->safeguard_redirect_url
+                                ? add->safeguard_redirect_url
+                                : base->safeguard_redirect_url;
     out->nonce_capacity = (add->nonce_capacity > 0)
                         ? add->nonce_capacity : base->nonce_capacity;
     out->safeguard_capacity = (add->safeguard_capacity > 0)
@@ -325,6 +328,7 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->safeguard_window    = 0;
     scfg->safeguard_ttl       = 0;
     scfg->safeguard_capacity  = 0;
+    scfg->safeguard_redirect_url = NULL;   /* NULL = use built-in */
     scfg->nonce_capacity      = 0;   /* 0 = inherit/default */
     /* E11 — load-state defaults. NULL state file = no external
      * override path; all numeric thresholds default to 0 (request-
@@ -2841,6 +2845,34 @@ const char *bs_set_safeguard_ttl(cmd_parms *cmd,
     scfg->safeguard_ttl = (int)n;
     return NULL;
 }
+
+/* E10 — BotShieldSafeguardRedirectURL <url>. Where to send a client
+ * that trips the safeguard threshold. NULL (unset) → use the built-
+ * in explainer at <BotShieldEndpointPrefix>/safeguard-info. The
+ * built-in endpoint is auto-routed by the module so operators don't
+ * need a Location carve-out. The original URI is appended as
+ * ?return=<urlencoded path> so the explainer (or operator's own
+ * page) can offer a continue link. URL must start with '/' (same-
+ * origin path) to avoid open-redirect risk. */
+const char *bs_set_safeguard_redirect_url(cmd_parms *cmd,
+                                          void *dconf,
+                                          const char *arg)
+{
+    (void)dconf;
+    if (!arg || !*arg) {
+        return "BotShieldSafeguardRedirectURL requires a path";
+    }
+    if (arg[0] != '/' || (arg[0] == '/' && arg[1] == '/')) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldSafeguardRedirectURL: '%s' must be a same-origin "
+            "absolute path starting with a single '/'", arg);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->safeguard_redirect_url = apr_pstrdup(cmd->pool, arg);
+    return NULL;
+}
+
 
 /* E10 — BotShieldSafeguardCapacity <n>. SHM slot count. Same
  * per-server-scope convention as the other SHM-sizing directives:
