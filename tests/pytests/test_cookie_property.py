@@ -1,4 +1,4 @@
-"""M11.8: property-style byte-level fuzz of the __Host-bs_verified cookie
+"""M11.8: property-style byte-level fuzz of the __Host-bs_session cookie
 parser.
 
 Premise: a valid cookie that round-trips cleanly (we build one with
@@ -54,7 +54,7 @@ def valid_cookie(request):
     # "block" outcome below is meaningless.
     sanity = client.get(
         "/", xff=ip, ua=BROWSER_UA, accept_language="en-US",
-        cookies={"__Host-bs_verified": cookie},
+        cookies={"__Host-bs_session": cookie},
     )
     assert sanity.headers.get("X-Botshield") != "challenge", (
         "valid-cookie sanity check failed: fuzzing would be useless"
@@ -100,7 +100,7 @@ def test_single_byte_tamper_always_rejected(valid_cookie, index, bitmask):
         resp = client.get(
             "/", xff=valid_cookie["ip"],
             ua=BROWSER_UA, accept_language="en-US",
-            cookies={"__Host-bs_verified": tampered},
+            cookies={"__Host-bs_session": tampered},
         )
     except httpx.LocalProtocolError:
         # httpx refuses to send control bytes (0x00–0x1F) in header
@@ -123,12 +123,12 @@ def test_single_byte_tamper_always_rejected(valid_cookie, index, bitmask):
         return  # perfect: rejected
     # Otherwise, the module MUST NOT have minted a new verified
     # cookie on the back of a tampered one. Set-Cookie of
-    # __Host-bs_verified= on this response would be the bug.
+    # __Host-bs_session= on this response would be the bug.
     set_cookies = resp.headers.get_list("set-cookie") if hasattr(
         resp.headers, "get_list"
     ) else [resp.headers.get("set-cookie", "")]
     for sc in set_cookies:
-        assert "__Host-bs_verified=" not in sc, (
+        assert "__Host-bs_session=" not in sc, (
             f"tamper at index={index} bitmask={bitmask:#04x} produced "
-            f"a fresh __Host-bs_verified: {sc!r}"
+            f"a fresh __Host-bs_session: {sc!r}"
         )

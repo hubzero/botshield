@@ -171,7 +171,7 @@ Open the gated URL in a real browser. The interstitial should
 auto-submit (silent tier) or render the checkbox widget (form tier),
 solve a few seconds of SHA-256 PoW, and bounce back to the real page.
 Reload — you should see the real content immediately. The browser
-now holds a `_bs_verified` cookie carrying the signed envelope and
+now holds a `_bs_session` cookie carrying the signed envelope and
 accumulated reputation.
 
 ## Disable temporarily

@@ -82,8 +82,8 @@ diagnostic.
 `BotShieldCookieDomain` adds a `Domain=` attribute to Set-Cookie so
 reputation follows across subdomains. Default is host-only. When
 HTTPS is in use AND no domain is set, the module emits the
-`__Host-bs_verified` cookie name; otherwise the legacy
-`_bs_verified`. Verify path checks both.
+`__Host-bs_session` cookie name; otherwise the legacy
+`_bs_session`. Verify path checks both.
 
 `BotShieldDifficulty` is the leading-hex-zeros count for the PoW.
 Higher = more client work. 4 is ~100ms on a modern phone; 6 is
@@ -91,8 +91,8 @@ Higher = more client work. 4 is ~100ms on a modern phone; 6 is
 
 `BotShieldEndpointPrefix` is the URL prefix for module-owned
 handlers (`/botshield/captcha-verify`, `/botshield/metrics`,
-`/botshield/embedded.js` etc.). Change it if it collides with
-real app routes.
+`/botshield/embedded.js`, `/botshield/safeguard-info` etc.).
+Change it if it collides with real app routes.
 
 ## Tier thresholds and forgiveness
 
@@ -133,7 +133,7 @@ behavior. `embedded` instead hands off to the site-included
 `/botshield/embedded.js` wrapper: the page serves DECLINED (real
 content) and the wrapper does the PoW in a Web Worker, then POSTs
 the result back to `/botshield/embedded-verify` to mint
-`_bs_verified` on the next request. Embedded mode trades a brief
+`_bs_session` on the next request. Embedded mode trades a brief
 window where the cookie isn't yet on the client (the very first
 request goes through unverified) for a zero-interstitial UX.
 
@@ -354,9 +354,32 @@ defaults and override semantics.
 | `BotShieldSafeguardThreshold` | `N` | `5` | server / vhost |
 | `BotShieldSafeguardWindow` | `N` (sec) | `600` | server / vhost |
 | `BotShieldSafeguardTTL` | `N` (sec) | `900` | server / vhost |
+| `BotShieldSafeguardRedirectURL` | `<url>` | unset (uses built-in explainer) | server / vhost |
 
-challenge-loop suppression. See
-[policy](../policy/index.html#safeguard-e10).
+Challenge-loop suppression. When a client has been issued the
+threshold number of challenges within the window without ever
+returning a verified cookie, the next request gets a 302 redirect
+to break the loop.
+
+`BotShieldSafeguardRedirectURL` lets the operator point the
+redirect at their own page (a status page, a help article, a
+login flow). When unset, the module redirects to its built-in
+explainer at `<BotShieldEndpointPrefix>/safeguard-info`. The
+original URI is appended as `?return=<urlencoded path>` regardless
+of which target is chosen, so the user can resume their journey
+once the underlying problem is fixed. The return parameter is
+validated for same-origin shape (must start with a single `/`,
+no scheme, no double-slash) to prevent open-redirect abuse.
+
+The built-in explainer page describes common reasons the
+auto-check failed (JavaScript disabled, privacy extension,
+browser version) and offers a Continue link back to the original
+URL. It is auto-routed by the module — no `<Location>` carve-out
+needed.
+
+See [policy](../policy/index.html#safeguard-e10) and
+[site model](../site-model/index.html#tier-ladder) for the
+behavior arc.
 
 ## Load-aware throttling
 

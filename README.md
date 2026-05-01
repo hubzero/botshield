@@ -133,6 +133,7 @@ Under `BotShieldEndpointPrefix` (default `/botshield`):
 | `<prefix>/policy-status` | GET | Active policy readback (rate limits, block paths, robots.txt) |
 | `<prefix>/embedded.js` | GET | Embedded silent-verify wrapper |
 | `<prefix>/form-widget.js` | GET | Inline form-captcha widget shell |
+| `<prefix>/safeguard-info` | GET | Built-in explainer page rendered when challenge-safeguard trips (and no `BotShieldSafeguardRedirectURL` is set). Accepts `?return=<urlencoded path>` |
 
 Access control is delegated to standard Apache mechanisms — wrap any
 of them in `<Location>` with `Require ip` / `AuthType Basic` to

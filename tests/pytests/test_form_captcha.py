@@ -4,7 +4,7 @@ When `BotShieldFormCaptcha on` is set on a scope, BotShield's fixup
 hook intercepts POSTs, reads the application/x-www-form-urlencoded
 body, looks for the configured captcha provider's response field,
 calls siteverify, and either:
-  - mints __Host-bs_verified, replays the body via input filter, lets the
+  - mints __Host-bs_session, replays the body via input filter, lets the
     downstream app handler run normally
   - 403s the request before the app handler ever sees it
 
@@ -161,7 +161,7 @@ def test_form_captcha_json_passes_valid_token(config_override, log_slice):
 
 def test_form_captcha_passes_valid_token(config_override, log_slice):
     """Valid Turnstile token (from Cloudflare's always-pass test
-    sitekey) → BotShield mints __Host-bs_verified, body replay filter is
+    sitekey) → BotShield mints __Host-bs_session, body replay filter is
     installed, downstream handler runs.
 
     /embedded-test.html is a static file that doesn't accept POST,
@@ -199,15 +199,15 @@ def test_form_captcha_passes_valid_token(config_override, log_slice):
         f"missing form-captcha-verified log line; "
         f"log tail:\n{log_text[-2000:]}"
     )
-    # Verify __Host-bs_verified was set on the response.
+    # Verify __Host-bs_session was set on the response.
     set_cookies = r.headers.get_list("set-cookie") \
         if hasattr(r.headers, "get_list") \
         else [r.headers.get("set-cookie", "")]
     bs_cookie_set = any(
-        "__Host-bs_verified=" in (c or "") for c in set_cookies
+        "__Host-bs_session=" in (c or "") for c in set_cookies
     )
     assert bs_cookie_set, (
-        f"valid form-captcha should mint __Host-bs_verified; "
+        f"valid form-captcha should mint __Host-bs_session; "
         f"set-cookies={set_cookies}"
     )
 

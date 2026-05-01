@@ -228,15 +228,15 @@ diagnostic.</p>
 <p><code>BotShieldCookieDomain</code> adds a <code>Domain=</code> attribute to Set-Cookie so
 reputation follows across subdomains. Default is host-only. When
 HTTPS is in use AND no domain is set, the module emits the
-<code>__Host-bs_verified</code> cookie name; otherwise the legacy
-<code>_bs_verified</code>. Verify path checks both.</p>
+<code>__Host-bs_session</code> cookie name; otherwise the legacy
+<code>_bs_session</code>. Verify path checks both.</p>
 <p><code>BotShieldDifficulty</code> is the leading-hex-zeros count for the PoW.
 Higher = more client work. 4 is ~100ms on a modern phone; 6 is
 ~3s; 8 is ~50s — don't go above 6 without a reason.</p>
 <p><code>BotShieldEndpointPrefix</code> is the URL prefix for module-owned
 handlers (<code>/botshield/captcha-verify</code>, <code>/botshield/metrics</code>,
-<code>/botshield/embedded.js</code> etc.). Change it if it collides with
-real app routes.</p>
+<code>/botshield/embedded.js</code>, <code>/botshield/safeguard-info</code> etc.).
+Change it if it collides with real app routes.</p>
 <h2 id="tier-thresholds-and-forgiveness">Tier thresholds and forgiveness</h2>
 <table>
 <thead>
@@ -320,7 +320,7 @@ behavior. <code>embedded</code> instead hands off to the site-included
 <code>/botshield/embedded.js</code> wrapper: the page serves DECLINED (real
 content) and the wrapper does the PoW in a Web Worker, then POSTs
 the result back to <code>/botshield/embedded-verify</code> to mint
-<code>_bs_verified</code> on the next request. Embedded mode trades a brief
+<code>_bs_session</code> on the next request. Embedded mode trades a brief
 window where the cookie isn't yet on the client (the very first
 request goes through unverified) for a zero-interstitial UX.</p>
 <p>Embedded mode requires you to include the wrapper
@@ -804,10 +804,35 @@ defaults and override semantics.</p>
 <td><code>900</code></td>
 <td>server / vhost</td>
 </tr>
+<tr>
+<td><code>BotShieldSafeguardRedirectURL</code></td>
+<td><code>&lt;url&gt;</code></td>
+<td>unset (uses built-in explainer)</td>
+<td>server / vhost</td>
+</tr>
 </tbody>
 </table>
-<p>challenge-loop suppression. See
-<a href="../policy/index.html#safeguard-e10">policy</a>.</p>
+<p>Challenge-loop suppression. When a client has been issued the
+threshold number of challenges within the window without ever
+returning a verified cookie, the next request gets a 302 redirect
+to break the loop.</p>
+<p><code>BotShieldSafeguardRedirectURL</code> lets the operator point the
+redirect at their own page (a status page, a help article, a
+login flow). When unset, the module redirects to its built-in
+explainer at <code>&lt;BotShieldEndpointPrefix&gt;/safeguard-info</code>. The
+original URI is appended as <code>?return=&lt;urlencoded path&gt;</code> regardless
+of which target is chosen, so the user can resume their journey
+once the underlying problem is fixed. The return parameter is
+validated for same-origin shape (must start with a single <code>/</code>,
+no scheme, no double-slash) to prevent open-redirect abuse.</p>
+<p>The built-in explainer page describes common reasons the
+auto-check failed (JavaScript disabled, privacy extension,
+browser version) and offers a Continue link back to the original
+URL. It is auto-routed by the module — no <code>&lt;Location&gt;</code> carve-out
+needed.</p>
+<p>See <a href="../policy/index.html#safeguard-e10">policy</a> and
+<a href="../site-model/index.html#tier-ladder">site model</a> for the
+behavior arc.</p>
 <h2 id="load-aware-throttling">Load-aware throttling</h2>
 <p>Sampling and hysteresis:</p>
 <table>

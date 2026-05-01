@@ -1,6 +1,6 @@
 """AES-256-GCM cookie confidentiality.
 
-The `__Host-bs_verified` cookie is an AES-256-GCM envelope wrapping the
+The `__Host-bs_session` cookie is an AES-256-GCM envelope wrapping the
 canonical pipe-delimited form. Wire format:
 
     base64( alg_id(1) || nonce(12) || ct || tag(16) ) "." counter
@@ -88,7 +88,7 @@ def test_gcm_mode_roundtrip(fresh_ip):
     resp = client.get(
         "/", xff=fresh_ip,
         ua=BROWSER_UA, accept_language="en-US",
-        cookies={"__Host-bs_verified": cookie},
+        cookies={"__Host-bs_session": cookie},
     )
     assert resp.headers.get("X-Botshield") != "challenge", (
         f"valid GCM cookie was challenged; "
@@ -137,10 +137,10 @@ def test_gcm_tampered_envelope_rejected(fresh_ip, log_slice):
         client.get(
             "/", xff=fresh_ip,
             ua=BROWSER_UA, accept_language="en-US",
-            cookies={"__Host-bs_verified": tampered},
+            cookies={"__Host-bs_session": tampered},
         )
         matches = slc.grep(
-            r"__Host-bs_verified rejected: signature mismatch"
+            r"__Host-bs_session rejected: signature mismatch"
         )
 
     assert matches, (
@@ -166,10 +166,10 @@ def test_legacy_hmac_shape_cookie_rejected(fresh_ip, log_slice):
         client.get(
             "/", xff=fresh_ip,
             ua=BROWSER_UA, accept_language="en-US",
-            cookies={"__Host-bs_verified": fake_legacy},
+            cookies={"__Host-bs_session": fake_legacy},
         )
         matches = slc.grep(
-            r"__Host-bs_verified rejected: unsupported cookie format"
+            r"__Host-bs_session rejected: unsupported cookie format"
         )
 
     assert matches, (

@@ -23,7 +23,7 @@ The runtime order (one pass per request, first short-circuit wins):
 
 The policy walk runs *before* the built-in heuristics, so a
 matching policy rule can short-circuit the request even when the
-client also has a valid `_bs_verified` cookie. Allow-list checks
+client also has a valid `_bs_session` cookie. Allow-list checks
 and built-in heuristics (missing-UA, missing-Accept-Language,
 scraper-pattern UA) run after the policy walk if the walk
 returns OK; flag-trigger effects are applied last, against the
@@ -236,7 +236,7 @@ Predicate shapes:
   `BotShieldSessionCookieName` is set.
 - `bs-cookie=verified` / `bs-cookie=missing` / `bs-cookie=invalid` —
   the BotShield-cookie-state note set by `bs_handler` (no double
-  HMAC check). Predicates against the module's own `_bs_verified`
+  HMAC check). Predicates against the module's own `_bs_session`
   cookie name are rejected — use these instead.
 
 Cookie family accumulates: `status=pass` keeps walking and
@@ -322,7 +322,7 @@ for your deployment, not just Apache's busy-worker count.
 
 Flag triggers map flag bits → actions, applied after the policy
 walk against the IP's accumulated flag bitmap (IP-side via
-flagged-IP table + cookie-side via prior `_bs_verified`). They
+flagged-IP table + cookie-side via prior `_bs_session`). They
 have a different action surface than the five trigger families
 above:
 

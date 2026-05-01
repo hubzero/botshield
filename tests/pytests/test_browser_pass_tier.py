@@ -39,6 +39,6 @@ def test_pass_tier_no_challenge(bs_browser_context_pass):
     # mint one until the visitor clears a challenge. (Legitimate
     # users never receive a cookie; that's the design.)
     cookies = {c["name"] for c in bs_browser_context_pass.cookies()}
-    assert "__Host-bs_verified" not in cookies, (
-        f"pass tier shouldn't mint __Host-bs_verified; cookies={cookies}"
+    assert "__Host-bs_session" not in cookies, (
+        f"pass tier shouldn't mint __Host-bs_session; cookies={cookies}"
     )

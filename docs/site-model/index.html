@@ -144,12 +144,16 @@ with the heuristics, and the day-to-day tuning workflow.</p>
 </tbody>
 </table>
 <p>A fifth value, <code>safeguard</code>, can appear in decision logs. It marks
-the challenge-loop suppression: a client that has been issued
+challenge-loop suppression: a client that has been issued
 challenges repeatedly within the safeguard window without ever
-returning a verified cookie gets <code>tier=safeguard outcome=declined</code>
-— pass-through to the real content with no challenge — to break the
-loop. The flagged-IP entry is preserved so the suspicious behavior
-is still recorded for downstream signals.</p>
+returning a verified cookie gets <code>tier=safeguard outcome=redirect</code>
+— a 302 to a configured <code>BotShieldSafeguardRedirectURL</code> (or to the
+built-in explainer at <code>&lt;BotShieldEndpointPrefix&gt;/safeguard-info</code>)
+with the original URI appended as <code>?return=&lt;urlencoded path&gt;</code>. The
+explainer covers common reasons the auto-check failed (JS disabled,
+privacy extension, browser version) and offers a Continue link
+back to the original URL. The flagged-IP entry is preserved so the
+suspicious behavior is still recorded for downstream signals.</p>
 <p>Below <code>BotShieldScoreSilent</code> the module returns <code>DECLINED</code> to
 Apache; the content handler runs as if mod_botshield weren't loaded.
 <strong>Legitimate visitors never see us and never receive a cookie.</strong></p>
@@ -165,7 +169,7 @@ rate-limit / block-path / robots / trigger families, and
 <code>BotShieldFlagTrigger action=score</code> effects fired by flags set on
 the IP or carried in the prior cookie.</li>
 <li><strong><code>cookie_score</code></strong> — accumulated reputation in the prior
-<code>_bs_verified</code> cookie, if one was presented and verified. Carries
+<code>_bs_session</code> cookie, if one was presented and verified. Carries
 forward across requests; expires with the cookie TTL.</li>
 </ul>
 <p>A separate <strong>tier floor</strong> can lift the final tier independent of the
@@ -260,10 +264,16 @@ still contribute their penalty to the running total but are dropped
 from the audit trail. A one-shot DEBUG line fires on the first drop
 so the diagnostic surfaces under verbose logging.</p>
 <h2 id="cookie-carried-reputation">Cookie-carried reputation</h2>
-<p>Once a request passes (challenged or not), mod_botshield issues a
-<code>_bs_verified</code> (or <code>__Host-bs_verified</code> on HTTPS) cookie carrying
-the user's accumulated reputation. The wire format is an
-authenticated AES-256-GCM envelope; the plaintext fields include:</p>
+<p>Every pass through the handler mints <code>_bs_session</code> (or
+<code>__Host-bs_session</code> on HTTPS). The cookie's role is twofold: it
+carries any accumulated reputation forward, and on a fresh visitor
+it serves as a per-session marker so the next request from the
+same browser doesn't relitigate the entire heuristic stack. Most
+issued cookies carry <code>trust=0</code> (no challenge solved yet) and are
+&quot;this user has been here&quot; markers; cookies issued after a real
+solve carry the accumulated reputation block.</p>
+<p>The wire format is an authenticated AES-256-GCM envelope; the
+plaintext fields include:</p>
 <ul>
 <li><code>score</code> — running total</li>
 <li><code>flags</code> — credit/penalty bits accumulated across challenges</li>
@@ -273,11 +283,22 @@ successful challenges at each tier</li>
 state (see below)</li>
 <li><code>expires_at</code> — unix timestamp; cookies past expiry fail verify</li>
 </ul>
+<p>The <code>Set-Cookie</code> line carries no <code>Expires</code> or <code>Max-Age</code> attribute
+— it's a session cookie at the browser layer and gets discarded
+when the browsing session ends. The <code>expires_at</code> field inside the
+envelope still acts as a server-side hard cap, so a stale cookie
+that survives via a long-lived browser session still gets
+rejected on verify.</p>
 <p>On subsequent requests that cookie's <code>score</code> field becomes the
 <code>cookie_score</code> term in the composition. Repeated good behavior
 accumulates negative <code>cookie_score</code> (forgiveness credit applied at
 challenge-issue time); repeated suspicious behavior accumulates
 positive.</p>
+<p>The decision log's <code>cookie=</code> field reports one of <code>ok</code> (verified
+cookie carried forward), <code>expired</code>, <code>bad_sig</code>, <code>bad_format</code>,
+<code>absent</code>, or <code>minted</code> (no incoming cookie; this response set a
+fresh one). The <code>cookie_minted_total</code> Prometheus counter tracks
+the always-mint volume separately from <code>cookie_ok_total</code>.</p>
 <p>The reputation persists across requests but expires with the cookie
 TTL (<code>BotShieldCookieTTL</code>, default 1 hour). After expiry users
 start fresh.</p>
@@ -459,8 +480,8 @@ reachable; the common ones:</p>
 </tr>
 <tr>
 <td><code>safeguard</code></td>
-<td><code>allow</code></td>
-<td>challenge-loop suppression; pass-through</td>
+<td><code>redirect</code></td>
+<td>challenge-loop suppression; 302 to the explainer (or operator-configured URL) with <code>?return=&lt;original URI&gt;</code></td>
 </tr>
 </tbody>
 </table>

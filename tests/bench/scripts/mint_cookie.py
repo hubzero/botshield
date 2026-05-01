@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mint a valid `_bs_verified` cookie for the bench vhost.
+"""Mint a valid `_bs_session` cookie for the bench vhost.
 
 Hits the bench endpoint with a scraper UA to force the silent
 challenge tier, parses the challenge JSON out of the interstitial,

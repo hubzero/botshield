@@ -133,7 +133,7 @@ sampled by the load watchdog.</li>
 </ol>
 <p>The policy walk runs <em>before</em> the built-in heuristics, so a
 matching policy rule can short-circuit the request even when the
-client also has a valid <code>_bs_verified</code> cookie. Allow-list checks
+client also has a valid <code>_bs_session</code> cookie. Allow-list checks
 and built-in heuristics (missing-UA, missing-Accept-Language,
 scraper-pattern UA) run after the policy walk if the walk
 returns OK; flag-trigger effects are applied last, against the
@@ -368,7 +368,7 @@ cookie set.</li>
 <code>BotShieldSessionCookieName</code> is set.</li>
 <li><code>bs-cookie=verified</code> / <code>bs-cookie=missing</code> / <code>bs-cookie=invalid</code> —
 the BotShield-cookie-state note set by <code>bs_handler</code> (no double
-HMAC check). Predicates against the module's own <code>_bs_verified</code>
+HMAC check). Predicates against the module's own <code>_bs_session</code>
 cookie name are rejected — use these instead.</li>
 </ul>
 <p>Cookie family accumulates: <code>status=pass</code> keeps walking and
@@ -435,7 +435,7 @@ for your deployment, not just Apache's busy-worker count.</p>
 <h2 id="flag-trigger-family">Flag-trigger family</h2>
 <p>Flag triggers map flag bits → actions, applied after the policy
 walk against the IP's accumulated flag bitmap (IP-side via
-flagged-IP table + cookie-side via prior <code>_bs_verified</code>). They
+flagged-IP table + cookie-side via prior <code>_bs_session</code>). They
 have a different action surface than the five trigger families
 above:</p>
 <pre><code class="language-apache">BotShieldFlagTrigger honeypot_hit       action=tier_floor min=captcha

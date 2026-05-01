@@ -58,7 +58,7 @@ def test_silent_tier_round_trip(fresh_ip):
     resp = client.get(
         "/", xff=fresh_ip,
         ua=BROWSER_UA, accept_language="en-US",
-        cookies={"__Host-bs_verified": cookie},
+        cookies={"__Host-bs_session": cookie},
     )
     assert resp.headers.get("X-Botshield") != "challenge", (
         f"cookied replay still challenged; headers={dict(resp.headers)}"
@@ -115,7 +115,7 @@ def test_expired_cookie_does_not_carry_rep_to_render_path(
         with log_slice as slc:
             client.get(
                 "/", xff=ip_replay, ua=BROWSER_UA,
-                cookies={"__Host-bs_verified": cookie},
+                cookies={"__Host-bs_session": cookie},
             )
             matches = slc.grep(r"challenging.*cookie_score=-1")
 

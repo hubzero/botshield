@@ -1,17 +1,30 @@
 """E10 — challenge safeguard / anti-loop hysteresis.
 
 Track presentations without a solve per IP. After N presentations
-inside window W, flip to a short-lived pass-through for the
-safeguard TTL so a client broken on challenge-solving (JS disabled,
-CSP strips the interstitial, privacy extensions mangle cookies)
-stops being looped on the same challenge forever.
+inside window W, the next presentation gets a 302 redirect to a
+configured URL (BotShieldSafeguardRedirectURL) or to the built-in
+explainer at <BotShieldEndpointPrefix>/safeguard-info. The original
+URI is appended as ?return=<urlencoded path>. The per-IP counter
+clears on redirect so a fresh failure cycle starts after the
+client engages with the redirect target.
+
+The redirect-with-explainer behavior replaced the pre-2026 silent
+pass-through. Silent pass-through gave determined bots free access
+for the TTL window without informing real-but-broken users about
+what was happening. The redirect makes the failure mode visible to
+legitimate clients and gives bots nothing useful (the explainer has
+no scrapable content; redirect followers land on it but never
+reach the protected URL).
 
 Safeguard is opt-in (BotShieldSafeguard off by default). These
 tests enable it explicitly and check:
-  - threshold crossing promotes the request to safeguard pass-through
+  - threshold crossing promotes the request to a 302 redirect
+  - decision log carries tier=safeguard outcome=redirect
+  - the Location header points at the explainer (or operator URL)
+    with a same-origin ?return= parameter
   - below threshold still issues a challenge
   - per-IP isolation (IP-A safeguarded doesn't carry to IP-B)
-  - safeguard doesn't mint `__Host-bs_verified` (no cookie issued)
+  - safeguard doesn't mint a __Host-bs_session cookie
   - safeguard doesn't override a 403 block decision
   - successful cookie verify resets the per-IP counter
 
@@ -63,9 +76,10 @@ def _safeguard_cfg(threshold: int, ttl: int = 900, window: int = 600) -> str:
 def test_safeguard_trips_after_threshold(config_override, fresh_ip,
                                          log_slice):
     """Threshold=3: first 3 cookieless requests get challenged
-    (interstitial HTML + _bs_pending cookie). The 4th is passed
-    through with reason=challenge-safeguard — no interstitial, no
-    __Host-bs_verified, backend handler serves real content."""
+    (interstitial 403 + _bs_pending cookie). The 4th is a 302
+    redirect to the explainer page, with the original URI appended
+    as ?return=/. The per-IP counter clears on redirect, so the 5th
+    gets a fresh challenge again rather than a second redirect."""
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         _safeguard_cfg(threshold=3),
@@ -75,40 +89,57 @@ def test_safeguard_trips_after_threshold(config_override, fresh_ip,
             responses = _hammer(fresh_ip, 5)
             lines = slc.decision_lines(ip=fresh_ip)
 
-    # Interstitial HTML has the window.__bsChallenge marker; real
-    # content (index.html in the testsite) does not. Use that to
-    # distinguish challenged vs passed-through responses.
-    challenged = ["__bsChallenge" in r.text for r in responses]
+    # First threshold presentations get the 403 interstitial.
+    for i, r in enumerate(responses[:3]):
+        assert r.status_code == 403 and "__bsChallenge" in r.text, (
+            f"request {i} should have been challenged "
+            f"(403 + __bsChallenge); got status={r.status_code}, "
+            f"body-marker={'__bsChallenge' in r.text}"
+        )
 
-    # First threshold presentations get the interstitial.
-    assert all(challenged[:3]), (
-        f"first 3 should have been challenged; got {challenged}"
+    # 4th presentation: 302 redirect to the safeguard explainer.
+    sg = responses[3]
+    assert sg.status_code == 302, (
+        f"4th request should be 302 (safeguard redirect); "
+        f"got {sg.status_code}"
     )
-    # Next requests get passed through — no interstitial.
-    assert not any(challenged[3:]), (
-        f"requests after threshold should be safeguard pass-through "
-        f"(no interstitial); got {challenged}"
+    assert sg.headers.get("X-Botshield") == "safeguard-redirect", (
+        f"missing X-Botshield: safeguard-redirect; "
+        f"headers={dict(sg.headers)}"
+    )
+    location = sg.headers.get("Location", "")
+    assert "/safeguard-info" in location, (
+        f"Location should point at the built-in explainer when no "
+        f"BotShieldSafeguardRedirectURL is set; got {location!r}"
+    )
+    assert "return=" in location, (
+        f"Location must carry the original URI as ?return=; "
+        f"got {location!r}"
+    )
+    # No-store on a redirect prevents broken intermediaries from
+    # caching the safeguard response and serving it to a healthy
+    # client later.
+    assert sg.headers.get("Cache-Control") == "no-store"
+
+    # Decision log: tier=safeguard outcome=redirect with the
+    # challenge-safeguard reason.
+    sg_lines = [d for d in lines if d["tier"] == "safeguard"]
+    assert sg_lines, f"no tier=safeguard decision line; lines={lines}"
+    assert sg_lines[0]["outcome"] == "redirect", (
+        f"safeguard decision should have outcome=redirect; "
+        f"got {sg_lines[0]}"
+    )
+    assert "challenge-safeguard" in sg_lines[0]["reason"], (
+        f"safeguard line should carry reason=challenge-safeguard; "
+        f"got {sg_lines[0]}"
     )
 
-    # Decision log: at least one challenge-safeguard reason after
-    # threshold crossing. Outcome is "allow" (module got out of
-    # the way) and tier is "safeguard" (distinct from "pass").
-    safeguard_lines = [d for d in lines
-                       if "challenge-safeguard" in d["reason"]]
-    assert safeguard_lines, (
-        f"no challenge-safeguard decision line; lines={lines}"
-    )
-    assert safeguard_lines[0]["tier"] == "safeguard", (
-        f"expected tier=safeguard; got {safeguard_lines[0]}"
-    )
-
-    # Sanity: no __Host-bs_verified cookie ever set by safeguard (the
-    # point is to NOT grant trust). The pending cookie from the
-    # pre-threshold challenges may exist; the verified one must not.
-    for r in responses:
-        assert "__Host-bs_verified" not in r.cookies, (
-            f"safeguard must not mint __Host-bs_verified; got "
-            f"cookies={dict(r.cookies)}"
+    # Safeguard never mints a __Host-bs_session cookie — the whole
+    # point is to NOT grant trust to a client we can't verify.
+    for i, r in enumerate(responses):
+        assert "__Host-bs_session" not in r.cookies, (
+            f"safeguard must not mint __Host-bs_session at request "
+            f"{i}; got cookies={dict(r.cookies)}"
         )
 
 
@@ -144,14 +175,19 @@ def test_safeguard_isolates_per_ip(config_override):
         _safeguard_cfg(threshold=2),
         count=1,
     ):
-        # Trip IP-A: 2 challenges, then pass-through.
+        # Trip IP-A: 2 challenges, then a redirect.
         _hammer(ip_a, 3)
-        # IP-B's first visit — must be challenged (fresh slate).
+        # IP-B's first visit — must be challenged (fresh slate),
+        # not redirected.
         r_b = client.get("/", xff=ip_b, ua=SCRAPER_UA)
 
+    assert r_b.status_code != 302, (
+        f"IP-B got safeguard redirect but IP-A is the broken one; "
+        f"safeguard leaked across IPs (status={r_b.status_code})"
+    )
     assert "__bsChallenge" in r_b.text, (
-        f"IP-B got safeguard pass-through but IP-A is the broken one; "
-        f"safeguard leaked across IPs"
+        f"IP-B should have been challenged; got body without "
+        f"interstitial marker"
     )
 
 
@@ -225,7 +261,7 @@ def test_solved_cookie_clears_safeguard_counter(
         with log_slice as slc:
             r_solved = client.get(
                 "/", xff=fresh_ip, ua=SCRAPER_UA,
-                cookies={"__Host-bs_verified": solved},
+                cookies={"__Host-bs_session": solved},
             )
             lines = slc.decision_lines(ip=fresh_ip)
     # The post-solve request's decision line must NOT carry the
@@ -258,7 +294,84 @@ def test_safeguard_off_by_default(config_override, fresh_ip):
     ):
         responses = _hammer(fresh_ip, 10)
     challenged = ["__bsChallenge" in r.text for r in responses]
-    assert all(challenged), (
-        f"safeguard should be off by default; got {challenged} "
-        f"(expected all True)"
+    redirected = [r.status_code == 302 for r in responses]
+    assert all(challenged) and not any(redirected), (
+        f"safeguard should be off by default; got "
+        f"challenged={challenged}, redirected={redirected}"
+    )
+
+
+# --- BotShieldSafeguardRedirectURL override ------------------------
+
+
+def test_safeguard_redirect_url_override(config_override, fresh_ip):
+    """`BotShieldSafeguardRedirectURL` lets the operator point the
+    redirect at their own page (a status page, a help article, a
+    login flow). When set, the Location should target that URL with
+    the original URI appended as ?return=<urlencoded path>."""
+    custom_url = "/help/please-enable-javascript"
+    cfg = (
+        _safeguard_cfg(threshold=2)
+        + f'    BotShieldSafeguardRedirectURL {custom_url}\n'
+    )
+    with config_override(
+        r"BotShieldAllowVerifiedBots\s+on", cfg, count=1,
+    ):
+        # Trip threshold + 1 redirect.
+        responses = _hammer(fresh_ip, 3)
+
+    sg = responses[2]
+    assert sg.status_code == 302, (
+        f"3rd request should redirect; got {sg.status_code}"
+    )
+    location = sg.headers.get("Location", "")
+    assert location.startswith(custom_url), (
+        f"Location should target the configured override URL; "
+        f"got {location!r}"
+    )
+    assert "return=" in location, (
+        f"Location must carry ?return=; got {location!r}"
+    )
+
+
+# --- Built-in explainer page ---------------------------------------
+
+
+def test_safeguard_info_endpoint_serves_explainer():
+    """`<BotShieldEndpointPrefix>/safeguard-info` is auto-routed by
+    the module — no <Location> carve-out needed. It serves a small
+    HTML body explaining why the auto-check failed and offering a
+    Continue link."""
+    r = client.get("/botshield/safeguard-info")
+    assert r.status_code == 200, (
+        f"safeguard-info endpoint should serve 200; got {r.status_code}"
+    )
+    body = r.text.lower()
+    # Body should mention the troubleshooting context — a few common
+    # phrases the explainer references.
+    assert any(s in body for s in (
+        "javascript", "js", "browser", "extension",
+    )), (
+        f"explainer body missing expected troubleshooting hints; "
+        f"first 300 chars: {r.text[:300]!r}"
+    )
+
+
+def test_safeguard_info_passes_return_param_through(fresh_ip,
+                                                    config_override):
+    """When the explainer is hit with ?return=<path>, the rendered
+    Continue link should carry the same return value through to the
+    user (so they can resume their original journey after fixing
+    their browser)."""
+    target = "/some/protected/path"
+    r = client.get(
+        f"/botshield/safeguard-info?return={target}",
+    )
+    assert r.status_code == 200
+    # The Continue link / form should reference the return target so
+    # the user can navigate back. Be loose about the exact markup —
+    # the page may use a Link, a form action, or a header link.
+    assert target in r.text, (
+        f"explainer should propagate the return param to the page; "
+        f"target={target!r} not found in body"
     )

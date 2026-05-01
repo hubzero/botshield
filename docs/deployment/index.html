@@ -160,10 +160,10 @@ application's own handlers.</p>
 <h2 id="https-host-cookie-prefix">HTTPS / <code>__Host-</code> cookie prefix</h2>
 <p>When the request is HTTPS <em>and</em> you have not configured
 <code>BotShieldCookieDomain</code>, mod_botshield emits the verified cookie as
-<code>__Host-bs_verified</code>. Browsers refuse to accept <code>__Host-</code> cookies
+<code>__Host-bs_session</code>. Browsers refuse to accept <code>__Host-</code> cookies
 over plain HTTP, refuse cookies with a <code>Domain=</code> attribute, and
 constrain <code>Path=/</code> — closing several cookie-injection attack classes
-that the legacy <code>_bs_verified</code> name still has to support for HTTP
+that the legacy <code>_bs_session</code> name still has to support for HTTP
 deployments.</p>
 <p>Verify path checks both names (host-prefix first), so existing
 clients with the legacy cookie still work during the transition.</p>
@@ -387,8 +387,8 @@ been re-issued under the new key. Drop the secondary:</p>
 <p>Reload. The old secret can now be deleted.</p>
 </li>
 </ol>
-<p>The secondary covers four verify call sites: HMAC <code>_bs_verified</code>,
-GCM <code>_bs_verified</code>, the captcha-pending cookie, and the
+<p>The secondary covers four verify call sites: HMAC <code>_bs_session</code>,
+GCM <code>_bs_session</code>, the captcha-pending cookie, and the
 embedded-verify PoW path. App-bridge keys
 (<code>BotShieldAppIntegrationSecretFile</code>) and captcha provider secrets
 are out of rotation scope; rotate those by reloading with the new

@@ -66,7 +66,7 @@ def test_cookie_hmac_roundtrip(mpm):
 
     resp = client.get(
         "/", xff=ip, ua=BROWSER_UA, accept_language="en-US",
-        cookies={"__Host-bs_verified": cookie},
+        cookies={"__Host-bs_session": cookie},
     )
     assert resp.headers.get("X-Botshield") != "challenge", (
         f"cookie replay challenged on MPM={mpm}"
