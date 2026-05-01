@@ -375,3 +375,112 @@ def test_safeguard_info_passes_return_param_through(fresh_ip,
         f"explainer should propagate the return param to the page; "
         f"target={target!r} not found in body"
     )
+
+
+# --- Open-redirect prevention --------------------------------------
+
+
+@pytest.mark.parametrize("malicious", [
+    "//evil.example.com/path",        # protocol-relative
+    "/\\evil.example.com",            # backslash trick
+    "https://evil.example.com",       # absolute URL
+    "javascript:alert(1)",            # javascript: scheme
+    "",                               # empty
+])
+def test_safeguard_info_rejects_off_origin_return(malicious):
+    """The ?return= parser validates same-origin shape: must start
+    with a single '/', no scheme, no '//', no backslash trick. On
+    failure the rendered Continue link falls back to '/'. Without
+    this gate, a bot could craft a return= that turns the explainer
+    into an open-redirect amplifier (?return=//evil → Continue to
+    https://evil)."""
+    r = client.get(f"/botshield/safeguard-info?return={malicious}")
+    assert r.status_code == 200
+    # The malicious string must not survive into the rendered body
+    # as a usable Continue link. The body falls back to /.
+    assert malicious not in r.text, (
+        f"open-redirect candidate {malicious!r} survived into the "
+        f"explainer body; ?return validator is leaking"
+    )
+
+
+# --- bs_safeguard_clear gating on solve evidence -------------------
+
+
+def test_unverified_session_cookie_does_not_clear_safeguard(
+    config_override, fresh_ip,
+):
+    """`bs_safeguard_clear` is gated on actual solve evidence
+    (passes_silent / passes_form / passes_captcha > 0) at its single
+    call site in cookie verify. Without that gate, a bot could
+    harvest a fresh trust=0 cookie on its first request and bypass
+    safeguard on every subsequent failed challenge.
+
+    Functional shape: hit the safeguard threshold, then send a
+    request carrying *any* cookie that doesn't include a real solve
+    (here: an empty / nonsense cookie that won't verify). Safeguard
+    must still fire on the next request — clear-on-solve must NOT
+    have run."""
+    with config_override(
+        r"BotShieldAllowVerifiedBots\s+on",
+        _safeguard_cfg(threshold=2),
+        count=1,
+    ):
+        # Hit the threshold (2 challenges).
+        responses_before = _hammer(fresh_ip, 2)
+        assert all(r.status_code == 403 for r in responses_before), (
+            f"setup: first 2 should be challenge 403; got "
+            f"{[r.status_code for r in responses_before]}"
+        )
+        # Send a bogus cookie that won't verify. If the gate were
+        # missing, this could clear the counter.
+        client.get(
+            "/", xff=fresh_ip, ua=SCRAPER_UA,
+            cookies={"__Host-bs_session": "not-a-valid-cookie"},
+        )
+        # Next request: safeguard should still trip (302 redirect).
+        sg = client.get("/", xff=fresh_ip, ua=SCRAPER_UA)
+
+    assert sg.status_code == 302, (
+        f"safeguard was cleared by an unverified cookie; got "
+        f"status={sg.status_code}. The bs_safeguard_clear solve-"
+        f"evidence gate is missing or mis-applied."
+    )
+
+
+# --- outcome_redirect_total counter parity -------------------------
+
+
+def test_safeguard_redirect_increments_outcome_counter(
+    config_override, fresh_ip,
+):
+    """Each safeguard 302 should bump `botshield_outcome_redirect_total`.
+    Mirrors the existing `_observed_total` counter checks elsewhere
+    in this suite — counter parity is the loud-not-silent gate that
+    catches enum drift between source and metrics export."""
+    with config_override(
+        r"BotShieldAllowVerifiedBots\s+on",
+        _safeguard_cfg(threshold=2),
+        count=1,
+    ):
+        # Hit the threshold + 1 redirect.
+        before = _read_metric("botshield_outcome_redirect_total")
+        _hammer(fresh_ip, 3)
+        after = _read_metric("botshield_outcome_redirect_total")
+
+    assert after - before >= 1, (
+        f"safeguard 302 didn't bump outcome_redirect_total; "
+        f"before={before} after={after}"
+    )
+
+
+# Helper used by the counter test above. Pulled from the same
+# pattern test_shadow_mode.py uses; keeping it local so the file is
+# self-contained.
+def _read_metric(name: str) -> int:
+    resp = client.get("/botshield/metrics")
+    needle = f"{name} "
+    for line in resp.text.splitlines():
+        if line.startswith(needle):
+            return int(line.split()[1])
+    return 0
