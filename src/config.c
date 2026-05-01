@@ -212,9 +212,6 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
                            ? add->load_hot_rise : base->load_hot_rise;
     out->load_normal_fall  = (add->load_normal_fall > 0)
                            ? add->load_normal_fall : base->load_normal_fall;
-    /* E12 — log-only mode inherits unless explicitly set. */
-    out->log_only = (add->log_only != -1)
-                     ? add->log_only : base->log_only;
     /* E13 — namespace plumbing: explicit share_scope_token survives
      * the merge if either scope set it. ns_id is computed at
      * post_config from the merged config + ServerName, so the
@@ -341,9 +338,6 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->load_normal_fall      = 0;
     scfg->load_external_cached  = BS_LOAD_NORMAL;
     scfg->load_external_mtime   = 0;
-    /* E12 — global log-only mode unset. -1 sentinel means "inherit
-     * from parent scope"; merge below picks the right value. */
-    scfg->log_only           = -1;
     /* E13 — namespace defaults. ns_id is filled in at post_config
      * once ServerName is final; here we just zero the field and
      * leave the explicit-token slot NULL. */
@@ -1855,19 +1849,22 @@ static void bs_populate_auto_secret(apr_pool_t *pconf, apr_pool_t *ptemp,
     }
 }
 
-/* When BotShieldLogOnly is set on any server scope, log a one-time
- * hint at startup pointing at the per-module LogLevel knob. Decision
- * log lines emit at APLOG_INFO; the default vhost LogLevel is warn,
- * so without this nudge the operator turns on log-only mode and sees
- * nothing in their logs. */
+/* When any server scope's root dir_cfg has BotShieldEnabled LogOnly,
+ * log a one-time hint at startup pointing at the per-module LogLevel
+ * knob. Decision log lines emit at APLOG_INFO; the default vhost
+ * LogLevel is warn, so without this nudge the operator turns on
+ * log-only mode and sees nothing in their logs.
+ *
+ * Per-Location LogOnly overrides aren't surfaced here — too noisy at
+ * startup and the operator who wrote one already knows to look. */
 static void bs_log_logonly_hint(server_rec *s)
 {
     for (server_rec *sv = s; sv; sv = sv->next) {
-        bs_server_cfg *vc = ap_get_module_config(sv->module_config,
-                                                 &botshield_module);
-        if (vc && vc->log_only == 1) {
+        bs_dir_cfg *dcfg = ap_get_module_config(sv->lookup_defaults,
+                                                &botshield_module);
+        if (dcfg && dcfg->enabled == BS_ENABLED_LOGONLY) {
             ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
-                "mod_botshield: BotShieldLogOnly on - "
+                "mod_botshield: BotShieldEnabled LogOnly - "
                 "raise 'LogLevel botshield:info' to see decision logs.");
             return;   /* one notice is enough */
         }
@@ -1965,10 +1962,25 @@ void bs_child_init(apr_pool_t *p, server_rec *s)
 
 /* --- Directive setters --- */
 
-const char *bs_set_enabled(cmd_parms *cmd, void *cfg_v, int flag)
+const char *bs_set_enabled(cmd_parms *cmd, void *cfg_v, const char *arg)
 {
-    (void)cmd;
-    ((bs_dir_cfg *)cfg_v)->enabled = flag ? 1 : 0;
+    bs_dir_cfg *cfg = cfg_v;
+    if (!arg || !*arg) {
+        return "BotShieldEnabled requires an argument: On, Off, or LogOnly";
+    }
+    if (strcasecmp(arg, "on") == 0) {
+        cfg->enabled = BS_ENABLED_ON;
+    } else if (strcasecmp(arg, "off") == 0) {
+        cfg->enabled = BS_ENABLED_OFF;
+    } else if (strcasecmp(arg, "logonly") == 0
+            || strcasecmp(arg, "log-only") == 0
+            || strcasecmp(arg, "log_only") == 0) {
+        cfg->enabled = BS_ENABLED_LOGONLY;
+    } else {
+        return apr_psprintf(cmd->pool,
+            "BotShieldEnabled: unknown mode '%s' (expected On, Off, "
+            "or LogOnly)", arg);
+    }
     return NULL;
 }
 
@@ -2972,24 +2984,6 @@ int bs_forgiveness_apply_cap(int requested,
     *consumed = (apr_uint32_t)(*consumed + granted);
     return granted;
 }
-
-/* E12 — BotShieldLogOnly on|off. Server-scope master switch
- * for dry-run enforcement. When on, every trigger / rate-limit /
- * block-path rule behaves as if mode=observe regardless of its
- * per-rule setting, and tier decisions log an 'outcome=~challenge'
- * line (tilde marks the suppressed counterfactual) and decline
- * rather than serving an interstitial. Operators stage a
- * whole config revision in one shot, watch the decision log, then
- * flip off to enforce. Off is the default — operators opt in. */
-const char *bs_set_log_only(cmd_parms *cmd, void *dconf, int flag)
-{
-    (void)dconf;
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    scfg->log_only = flag ? 1 : 0;
-    return NULL;
-}
-
 
 /* BotShieldBlockPath <name> <path-glob> <ua> <ipspec> — cohort-
  * conditional path block. Matching requests get 403 + a scoring

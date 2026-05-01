@@ -107,6 +107,16 @@ enum bs_help_mode {
 };
 #define BS_DEFAULT_HELP_MODE BS_HELP_BUTTON
 
+/* BotShieldEnabled tri-state. Stored in bs_dir_cfg.enabled.
+ * BS_UNSET (-1) means "inherit from parent scope" so the dir-merge
+ * picks the right value. Operators write On/Off/LogOnly; the setter
+ * maps the strings to these constants. */
+enum bs_enabled_state {
+    BS_ENABLED_OFF     = 0,
+    BS_ENABLED_ON      = 1,   /* enforce: tier decisions act */
+    BS_ENABLED_LOGONLY = 2,   /* observe: log decisions, decline */
+};
+
 /* --- Flag-bit registry ----------------------------------------
  *
  * Each bit represents a *serious* event we want to remember about
@@ -288,8 +298,6 @@ typedef struct bs_server_cfg {
     int                 load_normal_fall;
     bs_load_state       load_external_cached;
     apr_time_t          load_external_mtime;
-    /* E12 — global log-only mode. -1 unset (inherit), 0 off, 1 on. */
-    int                 log_only;
     /* E13 — reputation namespace for SHM-backed state. */
     apr_uint32_t        ns_id;            /* effective; resolved post_config */
     const char         *share_scope_token; /* explicit override; NULL = default */

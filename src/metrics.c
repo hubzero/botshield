@@ -440,7 +440,7 @@ void bs_decision_log(request_rec *r,
      * (i.e. nothing else more specific). Most-severe stashed
      * counterfactual wins. Lets BlockPath / RateLimit / Trigger
      * observe / FormCaptcha observe / tier-dispatch under
-     * BotShieldLogOnly all surface as `outcome=~block`,
+     * BotShieldEnabled LogOnly all surface as `outcome=~block`,
      * `~rate_limited`, `~challenge` etc. instead of plain `allow`
      * with the policy intent buried in the reason chain. */
     const char *would = bs_get_would_outcome(r);
@@ -742,7 +742,7 @@ int bs_metrics_handler(request_rec *r)
 
     bs_m_emit_counter(r, "rate_limit_observed_total",
         "Rate-limit over-budget events that ran in observe mode "
-        "(per-rule mode=observe or BotShieldLogOnly on); rule "
+        "(per-rule mode=observe or BotShieldEnabled LogOnly); rule "
         "would have returned 429 but didn't.",
         bs_mload(&m->rate_limit_observed_total));
     bs_m_emit_counter(r, "block_path_observed_total",

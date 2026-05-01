@@ -136,9 +136,11 @@ int bs_bot_name_valid(const char *s)
 
 
 static const command_rec bs_cmds[] = {
-    AP_INIT_FLAG("BotShieldEnabled",    bs_set_enabled,    NULL,
+    AP_INIT_TAKE1("BotShieldEnabled",   bs_set_enabled,    NULL,
                  RSRC_CONF | ACCESS_CONF,
-                 "Turn mod_botshield on/off for the enclosing scope (default: off)"),
+                 "Mode for the enclosing scope: On (enforce), Off (disabled), "
+                 "or LogOnly (observe-only — log decisions without acting). "
+                 "Default: Off"),
     AP_INIT_FLAG("BotShieldDebug",      bs_set_debug,      NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "If on, return 403 'Hello World' for every request in the "
@@ -551,24 +553,6 @@ static const command_rec bs_cmds[] = {
                  "(e.g., dev+prod for one logical app, or api+www "
                  "subdomains). Strings up to 128 chars; hashed to a "
                  "32-bit ns_id and stored in each SHM slot."),
-    /* E12 — log-only / dry-run enforcement. */
-    AP_INIT_FLAG("BotShieldLogOnly",
-                 bs_set_log_only, NULL, RSRC_CONF,
-                 "Master switch for dry-run enforcement. When on, all "
-                 "client-visible enforcement is suppressed and logged "
-                 "instead: trigger / rate-limit / block-path rules log "
-                 "matches with a :observe suffix, AND tier decisions "
-                 "(silent / hard / captcha) emit an 'outcome=~challenge' "
-                 "decision log line and decline rather than serving an "
-                 "interstitial. Useful for staging a whole policy "
-                 "revision — including bare 'BotShieldEnabled On' on a "
-                 "fresh vhost — and watching what the module would do "
-                 "before any real client sees a challenge. Default "
-                 "off; per-rule mode=observe is the finer-grained "
-                 "alternative for staging a single rule. Typical "
-                 "workflow: turn on at vhost scope, raise LogLevel "
-                 "(e.g. 'LogLevel botshield:info'), watch the decision "
-                 "log, flip off when matches look right."),
     /* Flag-driven trigger family. */
     AP_INIT_TAKE_ARGV("BotShieldFlagTrigger",
                  bs_set_flag_trigger, NULL, RSRC_CONF,
@@ -954,7 +938,12 @@ static int bs_handler(request_rec *r)
 {
     bs_dir_cfg *cfg = ap_get_module_config(r->per_dir_config,
                                            &botshield_module);
-    if (!cfg || cfg->enabled != 1) {
+    /* enabled is a tristate: BS_ENABLED_ON enforces, BS_ENABLED_LOGONLY
+     * runs the handler for observation, BS_ENABLED_OFF (or BS_UNSET
+     * meaning "no setting inherited") declines. */
+    if (!cfg
+        || cfg->enabled == BS_ENABLED_OFF
+        || cfg->enabled == BS_UNSET) {
         return DECLINED;
     }
     if (!ap_is_initial_req(r)) {
@@ -1257,7 +1246,7 @@ static int bs_handler(request_rec *r)
         return DECLINED;
     }
 
-    /* E12 — global log-only / dry-run mode. Log what the tier
+    /* BotShieldEnabled LogOnly — dry-run mode. Log what the tier
      * decision would have produced and DECLINE instead of issuing
      * a challenge. Skips Bloom / safeguard / IP-flag side effects so
      * the dry-run is purely observational; the operator gets a
@@ -1265,7 +1254,7 @@ static int bs_handler(request_rec *r)
      * interstitial or failed challenge. The trigger / rate-limit
      * machinery has its own observe paths (honored elsewhere); this
      * branch is the tier-dispatch counterpart. */
-    if (scfg_h && scfg_h->log_only == 1) {
+    if (cfg && cfg->enabled == BS_ENABLED_LOGONLY) {
         bs_set_would_outcome(r, "~challenge");
         bs_decision_log(r, bs_tier_name(tier), "allow",
                         cookie_status, "-",
