@@ -504,6 +504,15 @@ static const command_rec bs_cmds[] = {
                  "presentation (default 900 seconds; range "
                  "1..604800). Slides on each fresh presentation "
                  "during active safeguard."),
+    AP_INIT_TAKE1("BotShieldSafeguardRedirectURL",
+                 bs_set_safeguard_redirect_url, NULL, RSRC_CONF,
+                 "Where to redirect (302) a client that trips the "
+                 "safeguard threshold. Original URI is appended as "
+                 "?return=<urlencoded path>. Unset (default) uses the "
+                 "built-in explainer at "
+                 "<BotShieldEndpointPrefix>/safeguard-info, which is "
+                 "auto-routed by the module so no Location carve-out "
+                 "is needed. Must be a same-origin absolute path."),
     AP_INIT_TAKE1("BotShieldSafeguardCapacity",
                  bs_set_safeguard_capacity, NULL, RSRC_CONF,
                  "SHM safeguard-table slot count (default 50000). "
@@ -784,10 +793,18 @@ static int bs_is_asset_uri(const char *uri)
 
 /* Challenge safeguard: before issuing a challenge, check whether
  * this IP has been presented N times within the window without
- * solving. If so, flip to a pass-through (return DECLINED) with
- * reason=challenge-safeguard so a broken client (JS blocked, CSP-
- * stripped, cookie handling buggy) stops being looped on the same
- * challenge. Otherwise record this presentation and proceed.
+ * solving. If so, redirect (302) to the configured safeguard URL
+ * (or built-in explainer) with the original URI as `?return=`, and
+ * clear the per-IP counter so the user gets a fresh challenge cycle
+ * after they engage with the redirect target.
+ *
+ * Pre-2026 behavior was a silent pass-through (return DECLINED),
+ * which gave determined bots free access to content for the TTL
+ * window without informing real-but-broken users about what was
+ * happening. The redirect-with-explainer model makes the failure
+ * mode visible to legitimate clients and gives bots nothing useful
+ * (the explainer page has no scrapable content; redirect followers
+ * land on it but don't reach the protected URL).
  *
  * Recording the presentation runs unconditionally on safeguard-
  * eligible paths (have_client_ip + scfg present), regardless of
@@ -801,8 +818,8 @@ static int bs_is_asset_uri(const char *uri)
  * past the policy short-circuit returns), so 403/429 blocks still
  * win.
  *
- * Returns DECLINED if safeguard short-circuited the request, OK
- * if the caller should continue to challenge issuance. */
+ * Returns OK with r->status set to 302 if safeguard redirected the
+ * request, OK if the caller should continue to challenge issuance. */
 static int bs_apply_safeguard(request_rec *r, int have_client_ip,
                               const unsigned char *client_ip,
                               const char *cookie_status,
@@ -815,17 +832,57 @@ static int bs_apply_safeguard(request_rec *r, int have_client_ip,
     apr_int64_t now_t = (apr_int64_t)apr_time_sec(apr_time_now());
     if (scfg_sg->safeguard_enabled == 1 &&
         bs_safeguard_check(client_ip, now_t, scfg_sg->ns_id)) {
+        /* Resolve the redirect target. Operator override via
+         * BotShieldSafeguardRedirectURL, otherwise the built-in
+         * explainer at <endpoint_prefix>/safeguard-info. */
+        bs_dir_cfg *dcfg_sg = ap_get_module_config(
+            r->per_dir_config, &botshield_module);
+        const char *prefix = (dcfg_sg && dcfg_sg->endpoint_prefix)
+            ? dcfg_sg->endpoint_prefix
+            : BS_DEFAULT_ENDPOINT_PREFIX;
+        const char *base = scfg_sg->safeguard_redirect_url
+            ? scfg_sg->safeguard_redirect_url
+            : apr_pstrcat(r->pool, prefix, "/safeguard-info", NULL);
+
+        /* Build Location: <base>?return=<urlencoded original URI>.
+         * unparsed_uri preserves the query string so the user comes
+         * back to where they were. */
+        const char *orig = (r->unparsed_uri && *r->unparsed_uri)
+                         ? r->unparsed_uri : "/";
+        const char *orig_enc = ap_escape_uri(r->pool, orig);
+        char sep = strchr(base, '?') ? '&' : '?';
+        const char *location = apr_psprintf(r->pool,
+            "%s%creturn=%s", base, sep, orig_enc);
+
+        /* Clear the counter so the next failure cycle starts fresh.
+         * This is the operational equivalent of "the safeguard fired,
+         * stop accumulating against this IP" — without it, the next
+         * request would just trigger the redirect again immediately. */
+        bs_safeguard_clear(r, client_ip, scfg_sg->ns_id);
+
         ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
-            "mod_botshield: challenge-safeguard active for "
-            "%s; skipping challenge-issue and passing "
-            "through (until=%" APR_INT64_T_FMT ")",
-            r->useragent_ip, (apr_int64_t)now_t);
+            "mod_botshield: challenge-safeguard tripped for "
+            "%s; redirecting to %s", r->useragent_ip, location);
         bs_score_add(r, 0, 0, "challenge-safeguard");
-        bs_decision_log(r, "safeguard", "allow",
+        bs_decision_log(r, "safeguard", "redirect",
                         cookie_status, "-", "-",
                         bs_decision_reason_names(r->pool, score),
                         effective);
-        return DECLINED;
+
+        /* Apache's redirect idiom: set Location, return the 3xx
+         * status. ap_die builds the small "click here" body. The
+         * caller propagates this rv up through bs_handler.
+         *
+         * Use err_headers_out for our supplementary headers because
+         * ap_die clears r->headers_out on error/redirect responses
+         * but preserves err_headers_out (Apache's contract for
+         * "headers I want on the error response too"). Location is
+         * special-cased and goes through either way, but explicit
+         * is clearer. */
+        apr_table_setn(r->err_headers_out, "Location", location);
+        apr_table_setn(r->err_headers_out, "Cache-Control", "no-store");
+        apr_table_setn(r->err_headers_out, "X-Botshield", "safeguard-redirect");
+        return HTTP_MOVED_TEMPORARILY;
     }
 
     int sg_threshold = bs_safeguard_effective_int(
@@ -895,6 +952,12 @@ static int bs_route_module_endpoint(request_rec *r, bs_dir_cfg *cfg)
     }
     if (strcmp(sub, "/form-widget.js") == 0) {
         return bs_form_widget_handler(r);
+    }
+    if (strcmp(sub, "/safeguard-info") == 0) {
+        /* Built-in explainer page served on safeguard redirect.
+         * Renders unconditionally (counter reset already happened
+         * upstream when the safeguard tripped). */
+        return bs_safeguard_info_handler(r);
     }
 
     /* Unknown module endpoint under the prefix → 404, so a typo in

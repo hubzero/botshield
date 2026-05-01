@@ -58,6 +58,7 @@ static int bs_m_outcome_idx(const char *s)
     if (strcmp(s, "pending_missing")  == 0) return BS_M_OUTCOME_PENDING_MISSING;
     if (strcmp(s, "misconfigured")    == 0) return BS_M_OUTCOME_MISCONFIGURED;
     if (strcmp(s, "debug")            == 0) return BS_M_OUTCOME_DEBUG;
+    if (strcmp(s, "redirect")         == 0) return BS_M_OUTCOME_REDIRECT;
     return -1;
 }
 
@@ -675,6 +676,10 @@ int bs_metrics_handler(request_rec *r)
     bs_m_emit_counter(r, "outcome_debug_total",
         "BotShieldDebug-forced 403 responses.",
         bs_mload(&m->outcome[BS_M_OUTCOME_DEBUG]));
+    bs_m_emit_counter(r, "outcome_redirect_total",
+        "Decisions that issued a 302 redirect (e.g., safeguard "
+        "explainer).",
+        bs_mload(&m->outcome[BS_M_OUTCOME_REDIRECT]));
 
     bs_m_emit_counter(r, "cookie_ok_total",
         "Rep cookies that verified fully (signature + freshness + PoW).",

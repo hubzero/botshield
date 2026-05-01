@@ -116,6 +116,7 @@ const char *bs_set_safeguard          (cmd_parms *cmd, void *dconf, int flag);
 const char *bs_set_safeguard_threshold(cmd_parms *cmd, void *dconf, const char *arg);
 const char *bs_set_safeguard_window   (cmd_parms *cmd, void *dconf, const char *arg);
 const char *bs_set_safeguard_ttl      (cmd_parms *cmd, void *dconf, const char *arg);
+const char *bs_set_safeguard_redirect_url(cmd_parms *cmd, void *dconf, const char *arg);
 const char *bs_set_safeguard_capacity (cmd_parms *cmd, void *dconf, const char *arg);
 const char *bs_set_nonce_capacity     (cmd_parms *cmd, void *dconf, const char *arg);
 const char *bs_set_block_path         (cmd_parms *cmd, void *dconf,
