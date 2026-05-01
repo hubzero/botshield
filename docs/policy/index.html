@@ -568,11 +568,20 @@ appended in the same scope before the reset).</p>
 <h2 id="safeguard">Safeguard</h2>
 <p>The safeguard suppresses a challenge loop: a client that has been
 issued challenges repeatedly within the safeguard window without
-ever returning a verified cookie gets pass-through (<code>tier=safeguard outcome=declined</code>) to break the loop.</p>
-<pre><code class="language-apache">BotShieldSafeguard          on
-BotShieldSafeguardThreshold 5
-BotShieldSafeguardWindow    600
-BotShieldSafeguardTTL       900
+ever returning a verified cookie gets a 302 redirect
+(<code>tier=safeguard outcome=redirect</code>) to a configured
+<code>BotShieldSafeguardRedirectURL</code> or to the built-in explainer at
+<code>&lt;BotShieldEndpointPrefix&gt;/safeguard-info</code>. The original URI is
+appended as <code>?return=&lt;urlencoded path&gt;</code>. The per-IP counter clears
+on redirect so a fresh failure cycle starts after the client
+engages with the redirect target.</p>
+<pre><code class="language-apache">BotShieldSafeguard             on
+BotShieldSafeguardThreshold    5
+BotShieldSafeguardWindow       600
+BotShieldSafeguardTTL          900
+# Optional. When unset, the redirect points at
+# /botshield/safeguard-info (the module's built-in explainer).
+BotShieldSafeguardRedirectURL  /help/auto-check-failed
 </code></pre>
 <p>Defaults: 5 missed verifications in 600 seconds → 900-second pass-
 through window. The IP's flagged-IP entry is preserved so the

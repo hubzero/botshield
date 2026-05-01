@@ -141,7 +141,7 @@ BotShieldFlagTrigger    honeypot_hit action=tier_floor min=captcha mode=observe
 </code></pre>
 <p>The rule still evaluates against every matching request, but takes
 no action. Matches appear in the decision log:</p>
-<pre><code>mod_botshield: decision tier=pass outcome=declined ip=192.0.2.42
+<pre><code>mod_botshield: decision tier=pass outcome=allow ip=192.0.2.42
     score=0 cookie=absent provider=- alg=- reason=&quot;path-trigger:admin-trap:observe&quot;
     path=&quot;/admin/.env&quot;
 </code></pre>

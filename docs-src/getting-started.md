@@ -142,11 +142,11 @@ You should see one line per request:
 
 ```
 [Tue Apr 28 10:00:00 2026] [botshield:info] mod_botshield:
-  decision tier=pass outcome=declined ip=192.0.2.1 score=0
+  decision tier=pass outcome=allow ip=192.0.2.1 score=0
   cookie=absent provider=- alg=- reason="-" path="/"
 ```
 
-`tier=pass outcome=declined` is the happy path — the module
+`tier=pass outcome=allow` is the happy path — the module
 inspected the request, decided it didn't warrant friction, and
 declined so Apache served the real content.
 
