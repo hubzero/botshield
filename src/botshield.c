@@ -408,11 +408,24 @@ static const command_rec bs_cmds[] = {
     /* E1 — Allow family */
     AP_INIT_FLAG("BotShieldAllow", bs_set_allow_enabled,
                  NULL, RSRC_CONF,
-                 "Enable the Allow family (verified-bot first member). "
-                 "Default off. When on, classified bot UAs are matched "
-                 "against loaded IP ranges: in-range gets a large "
-                 "negative credit (tier=pass bypass); out-of-range "
-                 "gets a fake-<name> penalty routing to captcha tier."),
+                 "Master gate for the verified-bot allowlist. Default "
+                 "off. When on, the module auto-registers a built-in "
+                 "set of widely-used legitimate crawlers - currently "
+                 "googlebot, bingbot, applebot, siteimprove - and "
+                 "loads their published IP ranges from "
+                 "/var/lib/botshield/bots/<name>.txt (shipped at "
+                 "apache/bots/*.txt; refresh via "
+                 "tools/refresh-bot-ranges.sh). At request time: "
+                 "(a) UA matches a registered bot's token AND source "
+                 "IP is in the loaded ranges -> large negative credit, "
+                 "collapses to tier=pass (reason allow-bot:<name>); "
+                 "(b) UA matches but IP doesn't -> treated as UA "
+                 "forgery: positive penalty + tier_floor captcha "
+                 "(reason fake-<name>); (c) UA doesn't match anything -> "
+                 "no effect. Operators can add their own bots or "
+                 "override a built-in's IP source with "
+                 "BotShieldAllowBot - same-name declarations win over "
+                 "built-ins."),
     AP_INIT_TAKE23("BotShieldAllowBot",
                  bs_set_allow_bot, NULL, RSRC_CONF,
                  "Register a bot for the Allow family. Args: "
