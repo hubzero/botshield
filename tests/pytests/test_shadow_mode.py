@@ -164,6 +164,12 @@ def test_rate_limit_observe_increments_metric(
 
 
 def test_block_path_observe_does_not_403(config_override, fresh_ip):
+    """A scraper-UA hit on /admin/* under observe-mode BlockPath
+    must not 403 from BlockPath enforcement. The challenge tier
+    may still serve a 403 interstitial (signaled by
+    `X-Botshield: challenge`) — the test distinguishes the two by
+    that header rather than status code alone, since interstitials
+    moved from 200 to 403 in 2026."""
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         'BotShieldAllowVerifiedBots on\n'
@@ -173,9 +179,14 @@ def test_block_path_observe_does_not_403(config_override, fresh_ip):
     ):
         r = client.get("/admin/login.php", xff=fresh_ip,
                        ua=SCRAPER_UA)
-    assert r.status_code != 403, (
-        f"observe-mode block path enforced; status={r.status_code}"
-    )
+    # Acceptable outcomes: not-403, OR a 403 interstitial
+    # (X-Botshield: challenge). Anything else means BlockPath
+    # enforced through observe mode.
+    if r.status_code == 403:
+        assert r.headers.get("X-Botshield") == "challenge", (
+            f"observe-mode block path enforced (403 without "
+            f"challenge interstitial); headers={dict(r.headers)}"
+        )
 
 
 # --- Scope BotShieldEnabled LogOnly overrides per-rule -------------
