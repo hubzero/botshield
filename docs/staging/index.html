@@ -92,7 +92,7 @@
   <ul class="toc__list">
 <li class="toc__item toc__item--level-2"><a href="#what-observe-means-precisely">What &quot;observe&quot; means precisely</a></li>
 <li class="toc__item toc__item--level-2"><a href="#per-rule-observe-mode">Per-rule observe mode</a></li>
-<li class="toc__item toc__item--level-2"><a href="#global-botshieldshadowmode">Global `BotShieldShadowMode`</a></li>
+<li class="toc__item toc__item--level-2"><a href="#scope-level-botshieldenabled-logonly">Scope-level `BotShieldEnabled LogOnly`</a></li>
 <li class="toc__item toc__item--level-2"><a href="#coverage">Coverage</a></li>
 <li class="toc__item toc__item--level-2"><a href="#tuning-workflow">Tuning workflow</a></li>
 <li class="toc__item toc__item--level-2"><a href="#common-pitfalls">Common pitfalls</a></li>
@@ -106,13 +106,16 @@ you're confident the matches are correct.</p>
 <ul>
 <li><strong>Per-rule observe</strong> — pin a single directive into observe mode.
 Useful for staging individual rules.</li>
-<li><strong>Global shadow mode</strong> — flip every match to observe regardless
-of per-rule setting. Useful for staging an entire policy revision.</li>
+<li><strong>Scope-level <code>BotShieldEnabled LogOnly</code></strong> — flip every match to
+observe within the enclosing <code>&lt;VirtualHost&gt;</code> / <code>&lt;Location&gt;</code> /
+<code>&lt;Directory&gt;</code> regardless of per-rule setting. Useful for staging
+an entire policy revision, with per-<code>&lt;Location&gt;</code> carve-outs for
+paths you want to enforce immediately.</li>
 </ul>
 <p>Either signal is sufficient; they compose with OR semantics. A rule
 runs in observe mode if EITHER its per-rule mode is <code>observe</code> OR
-<code>BotShieldShadowMode on</code> is set. There is no priority order to
-memorize.</p>
+the effective <code>BotShieldEnabled</code> for the request's scope is
+<code>LogOnly</code>. There is no priority order to memorize.</p>
 <h2 id="what-observe-means-precisely">What &quot;observe&quot; means precisely</h2>
 <p>When a rule fires in observe mode:</p>
 <ul>
@@ -144,18 +147,31 @@ no action. Matches appear in the decision log:</p>
 </code></pre>
 <p>Watch the log for hours or days. When matches look correct, remove
 <code>mode=observe</code> and reload Apache to flip the rule into enforcement.</p>
-<h2 id="global-botshieldshadowmode">Global <code>BotShieldShadowMode</code></h2>
-<p>For staging a whole policy revision at once, set the server-wide
-flag:</p>
-<pre><code class="language-apache">BotShieldShadowMode on
+<h2 id="scope-level-botshieldenabled-logonly">Scope-level <code>BotShieldEnabled LogOnly</code></h2>
+<p>For staging a whole policy revision at once, set the directive at
+vhost scope:</p>
+<pre><code class="language-apache">BotShieldEnabled LogOnly
 </code></pre>
 <p>Every rule in scope flips to observe regardless of its per-rule
 setting. Useful before a release or when comparing a new ruleset
-against production traffic without any enforcement risk. Flip back
-to <code>off</code> when you're ready to enforce.</p>
-<p><code>BotShieldShadowMode</code> is tri-state: <code>on</code> / <code>off</code> / unset (inherit).
-Sites usually set it at the main server scope and inherit; per-
-vhost overrides are valid for partial rollouts.</p>
+against production traffic without any enforcement risk. Switch to
+<code>BotShieldEnabled On</code> when you're ready to enforce.</p>
+<p><code>BotShieldEnabled</code> is tri-state: <code>On</code> / <code>Off</code> / <code>LogOnly</code>. It is
+valid in <code>RSRC_CONF | ACCESS_CONF</code> scope, so per-<code>&lt;Location&gt;</code>
+overrides give you fine-grained partial rollouts:</p>
+<pre><code class="language-apache">&lt;VirtualHost *:443&gt;
+    ServerName example.com
+    BotShieldEnabled LogOnly                # most paths: observe
+    &lt;Location &quot;/login&quot;&gt;
+        BotShieldEnabled On                 # /login: enforce now
+    &lt;/Location&gt;
+    &lt;Location &quot;/healthcheck&quot;&gt;
+        BotShieldEnabled Off                # bare-metal probe: skip
+    &lt;/Location&gt;
+&lt;/VirtualHost&gt;
+</code></pre>
+<p>The <code>bs_dir_cfg</code> merge picks the most-specific scope. An unset
+inner scope inherits the outer.</p>
 <h2 id="coverage">Coverage</h2>
 <p>Both observe signals reach every gating surface:</p>
 <table>
@@ -163,7 +179,7 @@ vhost overrides are valid for partial rollouts.</p>
 <tr>
 <th>Family</th>
 <th>Honors per-rule</th>
-<th>Honors shadow_mode</th>
+<th>Honors <code>LogOnly</code></th>
 <th>Reason format</th>
 </tr>
 </thead>
@@ -232,14 +248,14 @@ vhost overrides are valid for partial rollouts.</p>
 </table>
 <p>Transport-level errors (415 / 413 / 400 on form-captcha; 503 on
 captcha-verify in-flight cap; 503 misconfigured) intentionally
-still fire under shadow mode — those are misconfiguration, not
+still fire under log-only mode — those are misconfiguration, not
 policy.</p>
 <h2 id="tuning-workflow">Tuning workflow</h2>
 <p>The full path from &quot;draft policy&quot; to &quot;live enforcement&quot;:</p>
 <ol>
 <li>
 <p><strong>Draft</strong> — write the new rule with <code>mode=observe</code> (or set
-<code>BotShieldShadowMode on</code> to dry-run a whole revision).</p>
+<code>BotShieldEnabled LogOnly</code> to dry-run a whole revision).</p>
 </li>
 <li>
 <p><strong>Reload</strong> — <code>apachectl configtest &amp;&amp; systemctl reload apache2</code>.</p>
@@ -258,18 +274,19 @@ cohort, broken predicate) edit and reload. The observe gate
 isolates iteration from production traffic.</p>
 </li>
 <li>
-<p><strong>Promote</strong> — remove <code>mode=observe</code> (or flip
-<code>BotShieldShadowMode off</code>) and reload. Watch the matching
+<p><strong>Promote</strong> — remove <code>mode=observe</code> (or change
+<code>BotShieldEnabled LogOnly</code> to <code>On</code>) and reload. Watch the matching
 non-observe counter (<code>tier_&lt;t&gt;_total</code>, <code>outcome_&lt;o&gt;_total</code>) to
 confirm enforcement is happening.</p>
 </li>
 </ol>
 <h2 id="common-pitfalls">Common pitfalls</h2>
-<p><strong>Promoting individual rules from a shadow-mode revision.</strong>
-<code>BotShieldShadowMode on</code> overrides every rule's per-rule mode. If
-you flip the global off but the rule still has <code>mode=observe</code>, the
-rule is still in observe — that's the OR semantics. Walk the new
-rules and remove <code>mode=observe</code> before flipping the global off.</p>
+<p><strong>Promoting individual rules from a log-only revision.</strong>
+<code>BotShieldEnabled LogOnly</code> overrides every rule's per-rule mode. If
+you switch the scope to <code>On</code> but the rule still has <code>mode=observe</code>,
+the rule is still in observe — that's the OR semantics. Walk the
+new rules and remove <code>mode=observe</code> before flipping the scope to
+<code>On</code>.</p>
 <p><strong>Observe-mode logs not appearing.</strong> mod_botshield's decision log
 emits at <code>info</code>. Apache's default <code>LogLevel warn</code> hides them.
 Bump just this module:</p>

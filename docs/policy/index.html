@@ -143,7 +143,7 @@ IP's accumulated flag bitmap.</p>
 the allow-list classifier checks during the heuristics phase.
 Verified crawlers (UA matches AND IP is in the published range)
 get a hard pass — they bypass the score ladder entirely.</p>
-<pre><code class="language-apache">BotShieldAllow on
+<pre><code class="language-apache">BotShieldAllowVerifiedBots on
 BotShieldAllowBot googlebot &quot;Googlebot/&quot; /var/lib/botshield/bots/googlebot.txt
 BotShieldAllowBot bingbot   &quot;bingbot/&quot;   /var/lib/botshield/bots/bingbot.txt
 BotShieldAllowBot internal-monitor &quot;MonitorBot/&quot; 10.0.0.0/8,2001:db8::/32
@@ -410,8 +410,8 @@ compromised app can emit any event name, but only configured
 mappings reach module memory. Wire format details and signing are
 covered in <a href="../captcha/index.html">captcha</a>.</p>
 <p>Feedback runs on the response path but its side effect is
-future-request state (the flagged-IP write). Both global
-<code>BotShieldShadowMode</code> and per-trigger <code>mode=observe</code> apply —
+future-request state (the flagged-IP write). Both
+<code>BotShieldEnabled LogOnly</code> and per-trigger <code>mode=observe</code> apply —
 either gates the filter into logging <code>feedback-trigger:&lt;event&gt;: observe</code> and skipping the SHM mutation. See
 <a href="../staging/index.html">staging</a>.</p>
 <h3 id="load-triggers">Load triggers</h3>
@@ -519,7 +519,7 @@ declarations win, same as every other trigger family).</p>
 <h3 id="per-apache-scope-triggers-botshieldtrigger">Per-Apache-scope triggers — <code>BotShieldTrigger</code></h3>
 <p>For everything else you want to do at a specific Apache
 scope — flag the IP, add a penalty, return a status, observe in
-shadow — there's a single per-scope directive:</p>
+log-only mode — there's a single per-scope directive:</p>
 <pre><code class="language-apache">&lt;Location &quot;/admin/.env&quot;&gt;
     BotShieldTrigger flag=honeypot_hit ttl=3600 log=admin-trap
 &lt;/Location&gt;

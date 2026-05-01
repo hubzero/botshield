@@ -1783,16 +1783,21 @@ Two layers:
   path action. Observe-mode matches log a stable `would-X` reason
   (`would-block`, `would-rate-limit`, `would-flag-trigger:<flag>:
   observe`) but skip the side effect.
-- **Global `BotShieldLogOnly On`**: master switch that turns every
-  match (regardless of per-rule `mode=`) into observe-mode semantics
-  AND short-circuits tier-decision dispatch (silent / hard / captcha)
-  to an `outcome=~challenge` decision log line. The leading tilde
-  marks a suppressed counterfactual: the real outcome was always
-  `allow` (request flowed through), and the tilde-prefixed value is
-  what *would* have been served under enforcement. Greppable as
-  `outcome=~`. Useful for staging a whole policy revision — including
-  a bare `BotShieldEnabled On` on a fresh vhost — before flipping
-  enforcement on.
+- **Scope-level `BotShieldEnabled LogOnly`**: tri-state directive
+  on `bs_dir_cfg.enabled` (`On` / `Off` / `LogOnly`). When the
+  effective dir-cfg is in `LogOnly`, every match (regardless of
+  per-rule `mode=`) becomes observe-mode AND tier-decision dispatch
+  (silent / hard / captcha) short-circuits to an `outcome=~challenge`
+  decision log line. The leading tilde marks a suppressed
+  counterfactual: the real outcome was always `allow` (request
+  flowed through), and the tilde-prefixed value is what *would*
+  have been served under enforcement. Greppable as `outcome=~`.
+  Useful for staging a whole policy revision before flipping
+  enforcement on. Because the field lives in `bs_dir_cfg` at
+  `RSRC_CONF | ACCESS_CONF` scope, operators can carve out
+  per-`<Location>` exceptions: vhost-wide `LogOnly`, then
+  `BotShieldEnabled On` inside a `<Location "/about">` to enforce
+  one path while leaving the rest observational.
 
 Reason strings carry the `:observe` suffix. Metrics counters split:
 `rate_limit_observed_total`, `block_path_observed_total`,
@@ -2066,7 +2071,6 @@ the `bs_cmds[]` table at `src/botshield.c:139`.
 | Safeguard (E10) | `BotShieldSafeguard`, `BotShieldSafeguardThreshold`, `BotShieldSafeguardWindow`, `BotShieldSafeguardTTL` |
 | Load (E11) | `BotShieldLoadStateFile`, `BotShieldLoadRefreshInterval`, `BotShieldLoadWarmThreshold`, `BotShieldLoadHotThreshold` |
 | Multi-vhost (E13) | `BotShieldShareScope` |
-| Log-only (E12) | `BotShieldLogOnly` |
 | App bridge (E5 / E8.2) | `BotShieldAppFeedback`, `BotShieldAppFeedbackHeader`, `BotShieldAppClaims`, `BotShieldAppIntegrationSecretFile` |
 
 Most directives use `RSRC_CONF | ACCESS_CONF` (server / vhost /

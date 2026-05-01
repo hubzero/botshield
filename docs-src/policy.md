@@ -289,8 +289,8 @@ mappings reach module memory. Wire format details and signing are
 covered in [captcha](../captcha/index.html).
 
 Feedback runs on the response path but its side effect is
-future-request state (the flagged-IP write). Both global
-`BotShieldLogOnly` and per-trigger `mode=observe` apply —
+future-request state (the flagged-IP write). Both
+`BotShieldEnabled LogOnly` and per-trigger `mode=observe` apply —
 either gates the filter into logging `feedback-trigger:<event>:
 observe` and skipping the SHM mutation. See
 [staging](../staging/index.html).

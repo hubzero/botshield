@@ -33,7 +33,7 @@ into a running server.
 
 | Directive | Syntax | Default |
 |---|---|---|
-| `BotShieldEnabled` | `on\|off` | `off` |
+| `BotShieldEnabled` | `on\|off\|logonly` | `off` |
 | `BotShieldDebug` | `on\|off` | `off` |
 | `BotShieldSecretFile` | `/path` | unset (required) |
 | `BotShieldSecondarySecretFile` | `/path` | unset |
@@ -43,9 +43,30 @@ into a running server.
 | `BotShieldDifficulty` | `N` | `4` (range 1..16) |
 | `BotShieldEndpointPrefix` | `/path` | `/botshield` |
 
-`BotShieldEnabled` is the master gate. `BotShieldDebug` returns
-`403 "Hello World"` for every request in scope — useful as a smoke
-test that the hook is firing.
+`BotShieldEnabled` is the master gate. It is tri-state:
+
+- `on` — enforce. Tier decisions serve interstitials, triggers /
+  rate-limit / block-path rules act on matches.
+- `off` — module declines every request in scope; same shape as
+  unloading the module on this path.
+- `logonly` — observe-only. The handler runs and emits decision
+  logs, but every enforcement-suppression site short-circuits:
+  tier dispatch logs `outcome=~challenge` and declines instead of
+  serving the interstitial; trigger / rate-limit / block-path
+  matches log `:observe` and skip side effects. Use this to stage
+  a whole policy revision before flipping enforcement on. See
+  [staging](../staging/index.html).
+
+Because `BotShieldEnabled` is per-`<Directory>` / `<Location>`,
+operators can carve out exceptions:
+
+    BotShieldEnabled LogOnly                # vhost: observe
+    <Location "/about">
+        BotShieldEnabled On                 # /about: enforce
+    </Location>
+
+`BotShieldDebug` returns `403 "Hello World"` for every request in
+scope — useful as a smoke test that the hook is firing.
 
 `BotShieldSecretFile` and `BotShieldAlgorithm` are required. The
 module emits `503 X-Botshield: misconfigured` for any request
@@ -367,15 +388,11 @@ The trigger family that consumes the state lives under
 Vhosts with the same token share one reputation namespace. See
 [deployment](../deployment/index.html#multi-vhost-reputation).
 
-## Shadow mode
+## Log-only / staging mode
 
-| Directive | Syntax | Default |
-|---|---|---|
-| `BotShieldLogOnly` | `on\|off` | unset (off) |
-
-Tri-state: unset means "inherit from outer scope or off if no
-outer scope". When on, every gating decision flips to observe-mode
-regardless of per-rule setting. See [staging](../staging/index.html).
+Folded into `BotShieldEnabled` (tri-state `on` / `off` /
+`logonly`). See the [Core](#core) section above and the
+[staging](../staging/index.html) guide.
 
 ## App bridge
 

@@ -326,7 +326,7 @@ the default name conflicts with another module's vocabulary.</li>
 compromised app can emit any event name, but only configured
 mappings reach module memory. Renaming, retiring, or muting an
 event is a config change with no app-side coordination.</p>
-<p>Feedback honors both global <code>BotShieldShadowMode</code> and per-trigger
+<p>Feedback honors both <code>BotShieldEnabled LogOnly</code> and per-trigger
 <code>mode=observe</code> — under either gate the filter logs
 <code>feedback-trigger:&lt;event&gt;:observe</code> and skips the flagged-IP write.
 The &quot;side effect&quot; of a feedback trigger is future-request state

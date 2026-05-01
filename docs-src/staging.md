@@ -6,13 +6,16 @@ you're confident the matches are correct.
 
 - **Per-rule observe** — pin a single directive into observe mode.
   Useful for staging individual rules.
-- **Global log-only mode** — flip every match to observe regardless
-  of per-rule setting. Useful for staging an entire policy revision.
+- **Scope-level `BotShieldEnabled LogOnly`** — flip every match to
+  observe within the enclosing `<VirtualHost>` / `<Location>` /
+  `<Directory>` regardless of per-rule setting. Useful for staging
+  an entire policy revision, with per-`<Location>` carve-outs for
+  paths you want to enforce immediately.
 
 Either signal is sufficient; they compose with OR semantics. A rule
 runs in observe mode if EITHER its per-rule mode is `observe` OR
-`BotShieldLogOnly on` is set. There is no priority order to
-memorize.
+the effective `BotShieldEnabled` for the request's scope is
+`LogOnly`. There is no priority order to memorize.
 
 ## What "observe" means precisely
 
@@ -55,29 +58,45 @@ mod_botshield: decision tier=pass outcome=declined ip=192.0.2.42
 Watch the log for hours or days. When matches look correct, remove
 `mode=observe` and reload Apache to flip the rule into enforcement.
 
-## Global `BotShieldLogOnly`
+## Scope-level `BotShieldEnabled LogOnly`
 
-For staging a whole policy revision at once, set the server-wide
-flag:
+For staging a whole policy revision at once, set the directive at
+vhost scope:
 
 ```apache
-BotShieldLogOnly on
+BotShieldEnabled LogOnly
 ```
 
 Every rule in scope flips to observe regardless of its per-rule
 setting. Useful before a release or when comparing a new ruleset
-against production traffic without any enforcement risk. Flip back
-to `off` when you're ready to enforce.
+against production traffic without any enforcement risk. Switch to
+`BotShieldEnabled On` when you're ready to enforce.
 
-`BotShieldLogOnly` is tri-state: `on` / `off` / unset (inherit).
-Sites usually set it at the main server scope and inherit; per-
-vhost overrides are valid for partial rollouts.
+`BotShieldEnabled` is tri-state: `On` / `Off` / `LogOnly`. It is
+valid in `RSRC_CONF | ACCESS_CONF` scope, so per-`<Location>`
+overrides give you fine-grained partial rollouts:
+
+```apache
+<VirtualHost *:443>
+    ServerName example.com
+    BotShieldEnabled LogOnly                # most paths: observe
+    <Location "/login">
+        BotShieldEnabled On                 # /login: enforce now
+    </Location>
+    <Location "/healthcheck">
+        BotShieldEnabled Off                # bare-metal probe: skip
+    </Location>
+</VirtualHost>
+```
+
+The `bs_dir_cfg` merge picks the most-specific scope. An unset
+inner scope inherits the outer.
 
 ## Coverage
 
 Both observe signals reach every gating surface:
 
-| Family | Honors per-rule | Honors log_only | Reason format |
+| Family | Honors per-rule | Honors `LogOnly` | Reason format |
 |---|---|---|---|
 | Path triggers | yes | yes | `path-trigger:<name>:observe` |
 | Cookie triggers | yes | yes | `cookie-trigger:<name>:observe` |
@@ -100,7 +119,7 @@ policy.
 The full path from "draft policy" to "live enforcement":
 
 1. **Draft** — write the new rule with `mode=observe` (or set
-   `BotShieldLogOnly on` to dry-run a whole revision).
+   `BotShieldEnabled LogOnly` to dry-run a whole revision).
 2. **Reload** — `apachectl configtest && systemctl reload apache2`.
 3. **Watch** — tail the error log for `:observe` matches, or query
    the matching `*_observed_total` Prometheus counter:
@@ -113,18 +132,19 @@ The full path from "draft policy" to "live enforcement":
 4. **Iterate** — if matches are wrong (false positives, missing
    cohort, broken predicate) edit and reload. The observe gate
    isolates iteration from production traffic.
-5. **Promote** — remove `mode=observe` (or flip
-   `BotShieldLogOnly off`) and reload. Watch the matching
+5. **Promote** — remove `mode=observe` (or change
+   `BotShieldEnabled LogOnly` to `On`) and reload. Watch the matching
    non-observe counter (`tier_<t>_total`, `outcome_<o>_total`) to
    confirm enforcement is happening.
 
 ## Common pitfalls
 
 **Promoting individual rules from a log-only revision.**
-`BotShieldLogOnly on` overrides every rule's per-rule mode. If
-you flip the global off but the rule still has `mode=observe`, the
-rule is still in observe — that's the OR semantics. Walk the new
-rules and remove `mode=observe` before flipping the global off.
+`BotShieldEnabled LogOnly` overrides every rule's per-rule mode. If
+you switch the scope to `On` but the rule still has `mode=observe`,
+the rule is still in observe — that's the OR semantics. Walk the
+new rules and remove `mode=observe` before flipping the scope to
+`On`.
 
 **Observe-mode logs not appearing.** mod_botshield's decision log
 emits at `info`. Apache's default `LogLevel warn` hides them.
