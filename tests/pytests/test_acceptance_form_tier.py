@@ -45,20 +45,21 @@ def test_cookieless_recoverable_journey(fresh_ip, log_slice):
     cookie = cookies.build_cookie(challenge, counter)
 
     # 3. Replay with browser-like headers + the signed cookie.
-    with log_slice as slc:
-        resp = client.get(
-            "/", xff=fresh_ip,
-            ua=BROWSER_UA, accept_language="en-US",
-            cookies={"__Host-bs_session": cookie},
-        )
-        lines = slc.decision_lines(ip=fresh_ip)
+    resp = client.get(
+        "/", xff=fresh_ip,
+        ua=BROWSER_UA, accept_language="en-US",
+        cookies={"__Host-bs_session": cookie},
+    )
 
     assert resp.headers.get("X-Botshield") != "challenge", (
         f"cookied replay still challenged; headers={dict(resp.headers)}"
     )
     assert resp.status_code == 200
 
-    assert any(
-        d["tier"] == "pass" and d["cookie"] == "ok"
-        for d in lines
-    ), f"expected tier=pass cookie=ok for ip={fresh_ip}; got: {lines}"
+    # Note: pre-2026 this test also asserted a `tier=pass cookie=ok`
+    # decision line in the log slice. The source now demotes the
+    # "boring pass" decision (tier=pass, outcome=allow, score=0, no
+    # reasons, no tag) to DEBUG level — so a verified-cookie replay
+    # from a clean browser produces no INFO-level decision line. The
+    # response-shape assertions above are the load-bearing check
+    # that the cookie verified and granted trust.

@@ -31,6 +31,11 @@ pytestmark = pytest.mark.serial
 # Cloudflare always-pass Turnstile pair.
 SITEKEY = "1x00000000000000000000AA"
 SECRET_PATH = "/etc/botshield/turnstile-secret"
+# Browser-shaped headers so the request scores below the silent
+# threshold (otherwise missing-ua + missing-al + dropped-cookie
+# push it into challenge tier and the form-captcha fixup never
+# gets a chance to run).
+BROWSER_UA = "Mozilla/5.0 (X11) Chrome/145"
 
 
 def _override_form_captcha(provider: str = "turnstile",
@@ -129,7 +134,8 @@ def test_form_captcha_json_rejects_malformed(config_override):
     assert r.status_code == 400
 
 
-def test_form_captcha_json_passes_valid_token(config_override, log_slice):
+def test_form_captcha_json_passes_valid_token(config_override,
+                                              log_slice, fresh_ip):
     """E18.3 — JSON body with a valid Turnstile token round-trips
     through siteverify the same way url-encoded does. Cookie minted,
     body replay installed, downstream handler runs (Apache returns
@@ -142,6 +148,7 @@ def test_form_captcha_json_passes_valid_token(config_override, log_slice):
         with log_slice as slc:
             r = client.post(
                 "/embedded-test.html",
+                ua=BROWSER_UA, accept_language="en-US", xff=fresh_ip,
                 data=_json.dumps({
                     "email": "foo@example.com",
                     "cf-turnstile-response": valid_token,
@@ -159,7 +166,8 @@ def test_form_captcha_json_passes_valid_token(config_override, log_slice):
     )
 
 
-def test_form_captcha_passes_valid_token(config_override, log_slice):
+def test_form_captcha_passes_valid_token(config_override, log_slice,
+                                         fresh_ip):
     """Valid Turnstile token (from Cloudflare's always-pass test
     sitekey) → BotShield mints __Host-bs_session, body replay filter is
     installed, downstream handler runs.
@@ -178,6 +186,7 @@ def test_form_captcha_passes_valid_token(config_override, log_slice):
         with log_slice as slc:
             r = client.post(
                 "/embedded-test.html",
+                ua=BROWSER_UA, accept_language="en-US", xff=fresh_ip,
                 data=(f"email=foo@example.com&"
                       f"cf-turnstile-response={valid_token}"),
                 headers={

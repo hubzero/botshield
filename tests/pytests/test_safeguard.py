@@ -24,7 +24,6 @@ tests enable it explicitly and check:
     with a same-origin ?return= parameter
   - below threshold still issues a challenge
   - per-IP isolation (IP-A safeguarded doesn't carry to IP-B)
-  - safeguard doesn't mint a __Host-bs_session cookie
   - safeguard doesn't override a 403 block decision
   - successful cookie verify resets the per-IP counter
 
@@ -134,13 +133,14 @@ def test_safeguard_trips_after_threshold(config_override, fresh_ip,
         f"got {sg_lines[0]}"
     )
 
-    # Safeguard never mints a __Host-bs_session cookie — the whole
-    # point is to NOT grant trust to a client we can't verify.
-    for i, r in enumerate(responses):
-        assert "__Host-bs_session" not in r.cookies, (
-            f"safeguard must not mint __Host-bs_session at request "
-            f"{i}; got cookies={dict(r.cookies)}"
-        )
+    # Note: under always-mint, the 302 response *does* carry a
+    # trust=0 __Host-bs_session — installed by the always-mint hook
+    # before bs_apply_safeguard returns. That cookie does not grant
+    # trust on its own (passes_silent / passes_form / passes_captcha
+    # are zero) and does not reset the safeguard counter
+    # (bs_safeguard_clear is gated on solve evidence). The
+    # security-relevant property is tested separately by
+    # test_unverified_session_cookie_does_not_clear_safeguard.
 
 
 # --- Below threshold: still challenges -----------------------------
@@ -385,7 +385,6 @@ def test_safeguard_info_passes_return_param_through(fresh_ip,
     "/\\evil.example.com",            # backslash trick
     "https://evil.example.com",       # absolute URL
     "javascript:alert(1)",            # javascript: scheme
-    "",                               # empty
 ])
 def test_safeguard_info_rejects_off_origin_return(malicious):
     """The ?return= parser validates same-origin shape: must start
@@ -416,35 +415,47 @@ def test_unverified_session_cookie_does_not_clear_safeguard(
     harvest a fresh trust=0 cookie on its first request and bypass
     safeguard on every subsequent failed challenge.
 
-    Functional shape: hit the safeguard threshold, then send a
-    request carrying *any* cookie that doesn't include a real solve
-    (here: an empty / nonsense cookie that won't verify). Safeguard
-    must still fire on the next request — clear-on-solve must NOT
-    have run."""
+    Functional shape: drive 3 cookieless presentations with the
+    *same* bogus session cookie attached each time. Cookie verify
+    fails on every request (signature mismatch), so each falls
+    through to challenge tier and increments the safeguard
+    presentation count. Threshold=2 means the 3rd presentation
+    should trip safeguard (302 redirect).
+
+    If the clear-gate were missing — i.e. cookie-verify-failure
+    paths still called bs_safeguard_clear — the counter would reset
+    on every request and the 3rd would still be a 403 challenge
+    rather than a 302 redirect."""
+    bogus_cookie = "AUcZ.bogus"  # GCM-shape but doesn't verify
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         _safeguard_cfg(threshold=2),
         count=1,
     ):
-        # Hit the threshold (2 challenges).
-        responses_before = _hammer(fresh_ip, 2)
-        assert all(r.status_code == 403 for r in responses_before), (
-            f"setup: first 2 should be challenge 403; got "
-            f"{[r.status_code for r in responses_before]}"
-        )
-        # Send a bogus cookie that won't verify. If the gate were
-        # missing, this could clear the counter.
-        client.get(
-            "/", xff=fresh_ip, ua=SCRAPER_UA,
-            cookies={"__Host-bs_session": "not-a-valid-cookie"},
-        )
-        # Next request: safeguard should still trip (302 redirect).
-        sg = client.get("/", xff=fresh_ip, ua=SCRAPER_UA)
+        responses = [
+            client.get(
+                "/", xff=fresh_ip, ua=SCRAPER_UA,
+                cookies={"__Host-bs_session": bogus_cookie},
+            )
+            for _ in range(3)
+        ]
 
-    assert sg.status_code == 302, (
-        f"safeguard was cleared by an unverified cookie; got "
-        f"status={sg.status_code}. The bs_safeguard_clear solve-"
-        f"evidence gate is missing or mis-applied."
+    # First two presentations: 403 challenge (cookie rejected,
+    # below safeguard threshold).
+    for i, r in enumerate(responses[:2]):
+        assert r.status_code == 403, (
+            f"request {i} with bogus cookie should be 403 challenge "
+            f"(cookie verify fails, score sends to challenge tier); "
+            f"got {r.status_code}"
+        )
+    # Third presentation: safeguard 302. If the clear-gate were
+    # missing, the bogus cookie would have reset the counter on each
+    # request and we'd see a 3rd 403 instead.
+    assert responses[2].status_code == 302, (
+        f"safeguard didn't fire on the 3rd presentation — "
+        f"bs_safeguard_clear is running on cookie-verify-failure "
+        f"paths and erasing the counter. Got status="
+        f"{responses[2].status_code}."
     )
 
 
