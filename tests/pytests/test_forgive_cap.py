@@ -49,32 +49,35 @@ def test_directive_rejects_out_of_range(config_override):
             pass
 
 
-def test_directive_accepts_zero_to_disable(config_override):
+def test_directive_accepts_zero_to_disable(config_override, fresh_ip):
     """0 disables the cap (legacy uncapped behavior). Reload should
-    succeed and the server should still respond."""
+    succeed and the server should still respond. Smoke test on the
+    directive parser; not load-bearing on tier behavior, so we
+    accept the new 403 interstitial as a healthy response too —
+    the only way this should fail is a 5xx from a misconfig."""
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         'BotShieldAllowVerifiedBots on\n'
         '    BotShieldForgivenessCapPerHour 0',
         count=1,
     ):
-        r = client.get("/", xff="203.0.113.123",
+        r = client.get("/", xff=fresh_ip,
                        ua="Mozilla/5.0 Firefox/125.0",
                        accept_language="en-US,en;q=0.9")
-        assert r.status_code in (200, 304), (
+        assert r.status_code < 500, (
             f"server unhealthy after cap-disable reload; "
             f"status={r.status_code}"
         )
 
 
-def test_directive_accepts_normal_value(config_override):
+def test_directive_accepts_normal_value(config_override, fresh_ip):
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         'BotShieldAllowVerifiedBots on\n'
         '    BotShieldForgivenessCapPerHour 50',
         count=1,
     ):
-        r = client.get("/", xff="203.0.113.124",
+        r = client.get("/", xff=fresh_ip,
                        ua="Mozilla/5.0 Firefox/125.0",
                        accept_language="en-US,en;q=0.9")
-        assert r.status_code in (200, 304)
+        assert r.status_code < 500
