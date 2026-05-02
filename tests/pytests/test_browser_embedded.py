@@ -203,9 +203,14 @@ def test_embedded_falls_back_to_m7_when_wrapper_blocked(
     Simulate a CSP-blocked wrapper by intercepting the
     /botshield/embedded.js URL with Playwright's route() and
     aborting the request. The page loads, wrapper never runs,
-    no __Host-bs_session arrives. After 3 silent-tier dispatches without
-    verify (default fallback threshold), the server switches to
-    issuing the M7 form-PoW interstitial.
+    no __Host-bs_session arrives. The fallback threshold is 3
+    (BS_DEFAULT_EMBEDDED_FALLBACK_THRESHOLD): bs_apply_safeguard
+    increments present_count on each silent-tier dispatch, then
+    the embedded short-circuit reads it and falls back when
+    `count >= 3`. Concretely: requests 1 and 2 take the embedded
+    short-circuit (count goes 0→1→2, fallback condition unmet),
+    request 3 falls back (count was just bumped to 3 inside
+    bs_apply_safeguard, and the embedded read sees 3 ≥ 3).
 
     Test pins silent tier explicitly via tight ScoreSilent + relaxed
     ScoreHard so successive requests don't drop to pass tier after
@@ -228,24 +233,26 @@ def test_embedded_falls_back_to_m7_when_wrapper_blocked(
         # killing /botshield/embedded.js.
         page.route("**/botshield/embedded.js", lambda r: r.abort())
 
-        # Three attempts that should land at silent-tier-embedded
-        # (the embedded short-circuit fires; real page served; no
-        # cookie because wrapper is blocked).
-        for _ in range(3):
+        # Two attempts land at silent-tier-embedded (the embedded
+        # short-circuit fires; real page served; always-mint cookie
+        # is trust=0 and doesn't clear the safeguard counter).
+        for _ in range(2):
             resp = page.goto(f"https://localhost{EMBEDDED_PATH}")
             assert resp.status == 200, (
                 f"unexpected status during embedded attempt; "
                 f"status={resp.status}"
             )
 
-        # 4th request — embedded fallback threshold (3) crossed; M7
-        # interstitial should now be served instead. The interstitial
-        # template title is "Verify you are human".
+        # 3rd request — present_count just hit threshold (3) inside
+        # bs_apply_safeguard, the embedded short-circuit's read sees
+        # 3 ≥ 3, and M7 form-PoW fallback fires instead. The
+        # interstitial template title is "Verify you are human".
         resp = page.goto(f"https://localhost{EMBEDDED_PATH}")
         title = page.title()
         assert "Verify you are human" in title, (
-            f"after 3 embedded attempts without verify, M7 fallback "
-            f"should fire; got title={title!r} (status={resp.status})"
+            f"after 2 embedded attempts without verify, M7 fallback "
+            f"should fire on the 3rd; got title={title!r} "
+            f"(status={resp.status})"
         )
 
 
