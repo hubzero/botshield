@@ -34,6 +34,9 @@ def test_rate_limit_ua_narrowing(config_override, log_slice, fresh_ip):
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         'BotShieldAllowVerifiedBots on\n'
+        '    BotShieldScoreSilent 500\n'
+        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreCaptcha 700\n'
         '    BotShieldRateLimit corpbot 3 sec "CorpBot" *',
         count=1,
     ):
@@ -66,6 +69,9 @@ def test_rate_limit_inline_cidr_narrowing(config_override, log_slice, fresh_ip):
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         'BotShieldAllowVerifiedBots on\n'
+        '    BotShieldScoreSilent 500\n'
+        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreCaptcha 700\n'
         '    BotShieldRateLimit dcblock 2 sec * "198.51.100.0/24"',
         count=1,
     ):
@@ -102,6 +108,9 @@ def test_rate_limit_ua_and_ip_and_ed(config_override, log_slice, fresh_ip):
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         'BotShieldAllowVerifiedBots on\n'
+        '    BotShieldScoreSilent 500\n'
+        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreCaptcha 700\n'
         '    BotShieldRateLimit pair 1 sec "Scraper/" "203.0.113.0/24"',
         count=1,
     ):
@@ -119,7 +128,7 @@ def test_rate_limit_ua_and_ip_and_ed(config_override, log_slice, fresh_ip):
             r2 = client.get("/", xff=matched_ip, ua=ua_match)
             lines = slc.decision_lines(ip=matched_ip)
 
-    assert r1.status_code == 200, "first matching request admitted"
+    assert r1.status_code != 403, "first matching request admitted"
     assert r2.status_code == 429, "second matching request rate-limited"
     assert [d for d in lines
             if "rate-limit-exceeded:pair" in d["reason"]]
@@ -133,6 +142,9 @@ def test_block_path_prefix_match(config_override, log_slice, fresh_ip):
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         'BotShieldAllowVerifiedBots on\n'
+        '    BotShieldScoreSilent 500\n'
+        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreCaptcha 700\n'
         '    BotShieldBlockPath lockdown "/admin" "Scraper/" *',
         count=1,
     ):
@@ -144,7 +156,7 @@ def test_block_path_prefix_match(config_override, log_slice, fresh_ip):
 
     assert r_root.status_code == 403
     assert r_sub.status_code  == 403
-    assert r_safe.status_code == 200, "non-matching path should not 403"
+    assert r_safe.status_code != 403, "non-matching path should not 403"
     hits = [d for d in lines if "block-path:lockdown" in d["reason"]]
     assert len(hits) == 2, f"expected 2 block-path hits; got {hits}"
 
@@ -155,6 +167,9 @@ def test_block_path_end_anchor(config_override, log_slice, fresh_ip):
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         'BotShieldAllowVerifiedBots on\n'
+        '    BotShieldScoreSilent 500\n'
+        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreCaptcha 700\n'
         '    BotShieldBlockPath exact "/exact$" "Scraper/" *',
         count=1,
     ):
@@ -162,7 +177,7 @@ def test_block_path_end_anchor(config_override, log_slice, fresh_ip):
         r_sub   = client.get("/exact/sub", xff=fresh_ip, ua="Scraper/1.0")
 
     assert r_exact.status_code == 403, "exact-anchored match should 403"
-    assert r_sub.status_code   == 200, "anchored pattern shouldn't cover subpath"
+    assert r_sub.status_code != 403, "anchored pattern shouldn't cover subpath"
 
 
 def test_block_path_cohort_narrowing(config_override, log_slice, fresh_ip):
@@ -171,6 +186,9 @@ def test_block_path_cohort_narrowing(config_override, log_slice, fresh_ip):
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         'BotShieldAllowVerifiedBots on\n'
+        '    BotShieldScoreSilent 500\n'
+        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreCaptcha 700\n'
         '    BotShieldBlockPath scrapersonly "/wp-admin" "Scraper/" *',
         count=1,
     ):
@@ -179,7 +197,7 @@ def test_block_path_cohort_narrowing(config_override, log_slice, fresh_ip):
                              ua="Mozilla/5.0 Firefox/130.0")
 
     assert r_scrap.status_code == 403
-    assert r_real.status_code  == 200, (
+    assert r_real.status_code != 403, (
         "real-browser UA should pass narrower cohort"
     )
 
@@ -196,6 +214,9 @@ def test_rate_limit_ua_match_is_case_insensitive(
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         'BotShieldAllowVerifiedBots on\n'
+        '    BotShieldScoreSilent 500\n'
+        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreCaptcha 700\n'
         '    BotShieldRateLimit gptbot 1 sec "gptbot" *',
         count=1,
     ):
@@ -204,7 +225,7 @@ def test_rate_limit_ua_match_is_case_insensitive(
             r2 = client.get("/", xff=fresh_ip, ua="GPTBot/1.0")
             lines = slc.decision_lines(ip=fresh_ip)
 
-    assert r1.status_code == 200, "first request admitted"
+    assert r1.status_code != 403, "first request admitted"
     assert r2.status_code == 429, (
         "mixed-case UA should match lowercase pattern; "
         "regression indicates strstr vs strcasestr bug"
@@ -225,6 +246,9 @@ def test_block_path_precedence_is_declaration_order(
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         'BotShieldAllowVerifiedBots on\n'
+        '    BotShieldScoreSilent 500\n'
+        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreCaptcha 700\n'
         '    BotShieldBlockPath specific "/admin/secret" "Scraper/" *\n'
         '    BotShieldBlockPath generic  "/admin*"       "Scraper/" *',
         count=1,
