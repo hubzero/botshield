@@ -42,6 +42,9 @@ def test_trigger_status_code_blocks_and_tags_log(
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         'BotShieldAllowVerifiedBots on\n'
+        '    BotShieldScoreSilent 500\n'
+        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreCaptcha 700\n'
         '    BotShieldPathTrigger env-probe "/.env" '
         'status=403 "log=BAN 2h" ttl=3600',
         count=1,
@@ -72,6 +75,9 @@ def test_trigger_status_pass_lets_request_through(
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         'BotShieldAllowVerifiedBots on\n'
+        '    BotShieldScoreSilent 500\n'
+        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreCaptcha 700\n'
         '    BotShieldPathTrigger pass-probe "/definitely-nonexistent" '
         'status=pass',
         count=1,
@@ -96,6 +102,9 @@ def test_trigger_status_pass_does_not_apply_current_request_penalty(
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         'BotShieldAllowVerifiedBots on\n'
+        '    BotShieldScoreSilent 500\n'
+        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreCaptcha 700\n'
         '    BotShieldPathTrigger passpen "/honey-pass" '
         'status=pass penalty=90 flag=honeypot_hit ttl=3600',
         count=1,
@@ -131,6 +140,9 @@ def test_trigger_redirect_sets_location(
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         'BotShieldAllowVerifiedBots on\n'
+        '    BotShieldScoreSilent 500\n'
+        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreCaptcha 700\n'
         '    BotShieldPathTrigger env-redirect "/.env.redir" '
         'redirect=https://example.org/gone',
         count=1,
@@ -149,6 +161,9 @@ def test_trigger_redirect_honors_explicit_status(
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         'BotShieldAllowVerifiedBots on\n'
+        '    BotShieldScoreSilent 500\n'
+        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreCaptcha 700\n'
         '    BotShieldPathTrigger env-redirect "/.env.perm" '
         'redirect=https://example.org/gone status=301',
         count=1,
@@ -170,6 +185,9 @@ def test_trigger_declaration_order_wins_on_overlap(
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         'BotShieldAllowVerifiedBots on\n'
+        '    BotShieldScoreSilent 500\n'
+        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreCaptcha 700\n'
         '    BotShieldPathTrigger wp-ajax "/wp-admin/admin-ajax.php" status=pass\n'
         '    BotShieldPathTrigger wp-all  "/wp-admin*"               status=403',
         count=1,
@@ -224,6 +242,9 @@ def test_trigger_flag_ip_carries_to_next_request(
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         'BotShieldAllowVerifiedBots on\n'
+        '    BotShieldScoreSilent 500\n'
+        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreCaptcha 700\n'
         '    BotShieldPathTrigger bait "/honey-bait" '
         'status=pass flag=honeypot_hit ttl=3600',
         count=1,
@@ -260,6 +281,9 @@ def test_path_trigger_middle_star_matches_segment(
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         'BotShieldAllowVerifiedBots on\n'
+        '    BotShieldScoreSilent 500\n'
+        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreCaptcha 700\n'
         '    BotShieldPathTrigger api-admin "/api/*/admin" status=403',
         count=1,
     ):
@@ -281,21 +305,29 @@ def test_path_trigger_middle_star_matches_segment(
 
 
 def test_path_trigger_middle_star_anchored_excludes_suffix(
-    config_override, log_slice, fresh_ip,
+    config_override, log_slice,
 ):
     """`/api/*/admin$` matches `/api/v1/admin` but NOT
     `/api/v1/admin/foo` — the trailing $ anchors to end-of-path
-    even when '*' appears mid-pattern."""
+    even when '*' appears mid-pattern. Uses two different fresh
+    IPs so any reputation-side-effect on the matched request
+    doesn't carry forward into the suffix-beyond-anchor request."""
+    from botshield_test import ips as _ips
+    ip_match = _ips.fresh_ip()
+    ip_after = _ips.fresh_ip()
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         'BotShieldAllowVerifiedBots on\n'
+        '    BotShieldScoreSilent 500\n'
+        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreCaptcha 700\n'
         '    BotShieldPathTrigger api-admin-end "/api/*/admin$" status=403',
         count=1,
     ):
         with log_slice as slc:
-            r_match  = client.get("/api/v1/admin",     xff=fresh_ip)
-            r_after  = client.get("/api/v1/admin/foo", xff=fresh_ip)
-            lines = slc.decision_lines(ip=fresh_ip)
+            r_match  = client.get("/api/v1/admin",     xff=ip_match)
+            r_after  = client.get("/api/v1/admin/foo", xff=ip_after)
+            lines = slc.decision_lines()
 
     assert r_match.status_code == 403, (
         f"middle-*-with-$ anchor didn't match /api/v1/admin; "
@@ -339,6 +371,9 @@ def test_path_trigger_middle_star_emits_notice_on_config_load(
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         'BotShieldAllowVerifiedBots on\n'
+        '    BotShieldScoreSilent 500\n'
+        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreCaptcha 700\n'
         '    BotShieldPathTrigger middle-warn "/foo*bar" status=403',
         count=1,
     ):

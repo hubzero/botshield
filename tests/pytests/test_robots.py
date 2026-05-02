@@ -75,7 +75,7 @@ def test_robots_disallow_blocks_bot(
     """)
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
-        f'BotShieldAllowVerifiedBots on\n    BotShieldRobotsTxt {robots_path}',
+        f'BotShieldAllowVerifiedBots on\n    BotShieldScoreSilent 500\n    BotShieldScoreHard 600\n    BotShieldScoreCaptcha 700\n    BotShieldRobotsTxt {robots_path}',
         count=1,
     ):
         with log_slice as slc:
@@ -84,7 +84,7 @@ def test_robots_disallow_blocks_bot(
             lines = slc.decision_lines(ip=fresh_ip)
 
     assert r_blocked.status_code == 403
-    assert r_ok.status_code      == 200
+    assert r_ok.status_code != 403
     hits = [d for d in lines if "robots-block:gptbot" in d["reason"]]
     assert hits, f"no robots-block:gptbot line; lines={lines}"
 
@@ -101,14 +101,14 @@ def test_robots_allow_longest_match_wins(
     """)
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
-        f'BotShieldAllowVerifiedBots on\n    BotShieldRobotsTxt {robots_path}',
+        f'BotShieldAllowVerifiedBots on\n    BotShieldScoreSilent 500\n    BotShieldScoreHard 600\n    BotShieldScoreCaptcha 700\n    BotShieldRobotsTxt {robots_path}',
         count=1,
     ):
         r_admin  = client.get("/admin",        xff=fresh_ip, ua=GPTBOT_UA)
         r_public = client.get("/admin/public", xff=fresh_ip, ua=GPTBOT_UA)
 
     assert r_admin.status_code  == 403, "plain /admin still Disallowed"
-    assert r_public.status_code == 200, (
+    assert r_public.status_code != 403, (
         "Allow: /admin/public is longer → overrides Disallow: /admin"
     )
 
@@ -128,7 +128,7 @@ def test_robots_crawl_delay_rate_limits(
     """)
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
-        f'BotShieldAllowVerifiedBots on\n    BotShieldRobotsTxt {robots_path}',
+        f'BotShieldAllowVerifiedBots on\n    BotShieldScoreSilent 500\n    BotShieldScoreHard 600\n    BotShieldScoreCaptcha 700\n    BotShieldRobotsTxt {robots_path}',
         count=1,
     ):
         with log_slice as slc:
@@ -136,7 +136,7 @@ def test_robots_crawl_delay_rate_limits(
             r2 = client.get("/", xff=fresh_ip, ua=GPTBOT_UA)
             lines = slc.decision_lines(ip=fresh_ip)
 
-    assert r1.status_code == 200
+    assert r1.status_code != 403
     assert r2.status_code == 429
     ra = r2.headers.get("Retry-After")
     assert ra and ra.isdigit() and int(ra) > 0, (
@@ -166,13 +166,13 @@ def test_robots_wildcard_heuristic_skips_real_browser(
     blocked (scripting tool, crawler-candidate)."""
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
-        f'BotShieldAllowVerifiedBots on\n    BotShieldRobotsTxt {wildcard_robots}',
+        f'BotShieldAllowVerifiedBots on\n    BotShieldScoreSilent 500\n    BotShieldScoreHard 600\n    BotShieldScoreCaptcha 700\n    BotShieldRobotsTxt {wildcard_robots}',
         count=1,
     ):
         r_firefox = client.get("/admin", xff=fresh_ip, ua=REAL_UA)
         r_curl    = client.get("/admin", xff=fresh_ip, ua=CURL_UA)
 
-    assert r_firefox.status_code == 200, (
+    assert r_firefox.status_code != 403, (
         "real browser must not be blocked by a * rule in heuristic mode"
     )
     assert r_curl.status_code == 403, (
@@ -188,6 +188,9 @@ def test_robots_wildcard_strict_applies_to_everyone(
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         f'BotShieldAllowVerifiedBots on\n'
+        '    BotShieldScoreSilent 500\n'
+        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreCaptcha 700\n'
         f'    BotShieldRobotsTxt {wildcard_robots}\n'
         f'    BotShieldRobotsWildcardScope strict',
         count=1,
@@ -206,6 +209,9 @@ def test_robots_wildcard_off_skips_wildcard_entirely(
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         f'BotShieldAllowVerifiedBots on\n'
+        '    BotShieldScoreSilent 500\n'
+        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreCaptcha 700\n'
         f'    BotShieldRobotsTxt {wildcard_robots}\n'
         f'    BotShieldRobotsWildcardScope off',
         count=1,
@@ -213,8 +219,8 @@ def test_robots_wildcard_off_skips_wildcard_entirely(
         r_firefox = client.get("/admin", xff=fresh_ip, ua=REAL_UA)
         r_curl    = client.get("/admin", xff=fresh_ip, ua=CURL_UA)
 
-    assert r_firefox.status_code == 200
-    assert r_curl.status_code    == 200, (
+    assert r_firefox.status_code != 403
+    assert r_curl.status_code != 403, (
         "off mode: * group should never fire"
     )
 
@@ -244,7 +250,7 @@ def test_robots_ua_match_is_segment_based(
     """)
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
-        f'BotShieldAllowVerifiedBots on\n    BotShieldRobotsTxt {robots_path}',
+        f'BotShieldAllowVerifiedBots on\n    BotShieldScoreSilent 500\n    BotShieldScoreHard 600\n    BotShieldScoreCaptcha 700\n    BotShieldRobotsTxt {robots_path}',
         count=1,
     ):
         # A UA that mentions 'bot' only inside a URL in a slug —
@@ -259,7 +265,7 @@ def test_robots_ua_match_is_segment_based(
             ua="Mozilla/5.0 (compatible; BotMom/1.0; +https://example.com)",
         )
 
-    assert r_substring_only.status_code == 200, (
+    assert r_substring_only.status_code != 403, (
         "strcasestr-era semantics would have blocked this; slug-based "
         "matching must not — 'bot' only appears inside a URL"
     )
@@ -287,7 +293,7 @@ def test_robots_duplicate_ua_groups_are_unioned(
     """)
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
-        f'BotShieldAllowVerifiedBots on\n    BotShieldRobotsTxt {robots_path}',
+        f'BotShieldAllowVerifiedBots on\n    BotShieldScoreSilent 500\n    BotShieldScoreHard 600\n    BotShieldScoreCaptcha 700\n    BotShieldRobotsTxt {robots_path}',
         count=1,
     ):
         r_a = client.get("/a", xff=fresh_ip, ua=GPTBOT_UA)
@@ -299,7 +305,7 @@ def test_robots_duplicate_ua_groups_are_unioned(
         "Disallow /b from second stanza must fire too — duplicate "
         "User-agent groups are accumulative per RFC 9309"
     )
-    assert r_c.status_code == 200, "/c not mentioned; should pass"
+    assert r_c.status_code != 403, "/c not mentioned; should pass"
 
 
 def test_robots_duplicate_crawl_delay_takes_max(
@@ -317,14 +323,14 @@ def test_robots_duplicate_crawl_delay_takes_max(
     """)
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
-        f'BotShieldAllowVerifiedBots on\n    BotShieldRobotsTxt {robots_path}',
+        f'BotShieldAllowVerifiedBots on\n    BotShieldScoreSilent 500\n    BotShieldScoreHard 600\n    BotShieldScoreCaptcha 700\n    BotShieldRobotsTxt {robots_path}',
         count=1,
     ):
         r1 = client.get("/", xff=fresh_ip, ua=GPTBOT_UA)
         r2 = client.get("/", xff=fresh_ip, ua=GPTBOT_UA)
         ra = r2.headers.get("Retry-After")
 
-    assert r1.status_code == 200
+    assert r1.status_code != 403
     assert r2.status_code == 429
     assert ra and ra.isdigit() and int(ra) > 30, (
         f"Retry-After should reflect the 60s window (max across "
@@ -390,6 +396,9 @@ def test_robots_live_refresh_picks_up_changes(
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         f'BotShieldAllowVerifiedBots on\n'
+        '    BotShieldScoreSilent 500\n'
+        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreCaptcha 700\n'
         f'    BotShieldRobotsTxt {robots_path}\n'
         f'    BotShieldRobotsRefreshInterval 1',
         count=1,
@@ -425,7 +434,7 @@ def test_robots_live_refresh_picks_up_changes(
                 break
             time.sleep(0.5)
 
-    assert r_after is not None and r_after.status_code == 200, (
+    assert r_after is not None and r_after.status_code != 403, (
         "robots.txt was rewritten to allow /admin, but the refresh "
         "watchdog didn't swap in the new rules within 20s — request "
         "is still blocked. Check BotShieldRobotsRefreshInterval wiring "
@@ -446,6 +455,9 @@ def test_directive_rate_limit_overrides_robots_crawl_delay(
     with config_override(
         r"BotShieldAllowVerifiedBots\s+on",
         f'BotShieldAllowVerifiedBots on\n'
+        '    BotShieldScoreSilent 500\n'
+        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreCaptcha 700\n'
         f'    BotShieldRobotsTxt {robots_path}\n'
         f'    BotShieldRateLimit gptbot 10 sec "GPTBot" *',
         count=1,

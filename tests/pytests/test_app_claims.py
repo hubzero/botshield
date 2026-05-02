@@ -127,11 +127,14 @@ def test_claim_header_emitted_and_signed(config_override, fresh_ip):
         assert k in parsed, f"claim missing key '{k}'; parsed={parsed}"
     assert parsed["v"] == "1", parsed
     assert parsed["tier"] == "pass", parsed
-    # Cookieless first-sight visit → cookie state is "absent".
-    # `bs_decision_cookie_status` returns "absent" for the no-cookie
-    # case; "missing" was an older internal name. Accept either to
-    # keep this test resilient to the canonical spelling.
-    assert parsed["cookie"] in ("absent", "missing"), parsed
+    # Cookieless first-sight visit → cookie state surfaces as
+    # "minted" under the always-mint design (the response sets a
+    # fresh trust=0 __Host-bs_session). The legacy "absent" /
+    # "missing" values applied before always-mint, when no cookie
+    # was issued on a pass-tier first request. Accept any of them
+    # so this test is resilient to whether the deployment has
+    # always-mint enabled.
+    assert parsed["cookie"] in ("minted", "absent", "missing"), parsed
     # passes counters are a fresh-cookie zero on this first request.
     assert parsed["passes"] == "s=0,f=0,c=0", parsed
 
