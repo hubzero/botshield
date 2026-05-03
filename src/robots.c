@@ -221,18 +221,19 @@ static int bs_rb_ua_segment_match(const char *ua, const char *token)
 }
 
 /* Does a User-agent token apply to this request? Three cases:
- *   "*"           — wildcard, applies only as fallback
- *   "@<signal>"   — matches when request's classified signal equals <signal>
- *   <substring>   — case-insensitive segment-prefix match against UA
+ *   "*"             — wildcard, applies only as fallback
+ *   "@<botgroup>"   — matches when request's classified botgroup
+ *                     equals <botgroup>
+ *   <substring>     — case-insensitive segment-prefix match against UA
  * Returns 1 on match (excluding wildcard, which the caller handles
  * separately for specificity ordering). */
 static int bs_rb_token_matches(const char *tok, const char *ua,
-                               const char *signal)
+                               const char *botgroup)
 {
     if (!tok || !*tok) return 0;
     if (tok[0] == '@') {
-        if (!signal) return 0;
-        return strcasecmp(tok + 1, signal) == 0;
+        if (!botgroup) return 0;
+        return strcasecmp(tok + 1, botgroup) == 0;
     }
     return bs_rb_ua_segment_match(ua, tok);
 }
@@ -243,7 +244,7 @@ static int bs_rb_token_matches(const char *tok, const char *ua,
  * so callers can distinguish the wildcard fallback case.
  * `*_has_wildcard` is set to 1 if any group's UA list contains `*`. */
 static int bs_rb_best_token_len(const robots_doc *doc, const char *ua,
-                                const char *signal, int *out_has_wildcard)
+                                const char *botgroup, int *out_has_wildcard)
 {
     int best_len = 0;
     int has_wildcard = 0;
@@ -252,7 +253,7 @@ static int bs_rb_best_token_len(const robots_doc *doc, const char *ua,
         for (int j = 0; j < g->user_agents->nelts; j++) {
             const char *tok = APR_ARRAY_IDX(g->user_agents, j, const char *);
             if (strcmp(tok, "*") == 0) { has_wildcard = 1; continue; }
-            if (bs_rb_token_matches(tok, ua, signal)) {
+            if (bs_rb_token_matches(tok, ua, botgroup)) {
                 int len = (int)strlen(tok);
                 if (len > best_len) best_len = len;
             }
@@ -267,7 +268,7 @@ static int bs_rb_best_token_len(const robots_doc *doc, const char *ua,
  * length == best_len that matches the request. If `best_len == 0`
  * (no specific match), the group qualifies iff it contains `*`. */
 static int bs_rb_group_qualifies(const robots_group *g, const char *ua,
-                                 const char *signal, int best_len)
+                                 const char *botgroup, int best_len)
 {
     for (int j = 0; j < g->user_agents->nelts; j++) {
         const char *tok = APR_ARRAY_IDX(g->user_agents, j, const char *);
@@ -276,7 +277,7 @@ static int bs_rb_group_qualifies(const robots_group *g, const char *ua,
         } else {
             if (strcmp(tok, "*") == 0) continue;
             if ((int)strlen(tok) == best_len
-                && bs_rb_token_matches(tok, ua, signal)) return 1;
+                && bs_rb_token_matches(tok, ua, botgroup)) return 1;
         }
     }
     return 0;
@@ -569,7 +570,7 @@ apr_status_t robots_parse_file(apr_pool_t *p, const char *path,
  *      stable identifier for the decision log and for the slot
  *      lookup downstream (duplicate-name groups share an SHM slot
  *      by construction of scfg->robots_slot_by_name). */
-void robots_query(const robots_doc *doc, const char *ua, const char *signal,
+void robots_query(const robots_doc *doc, const char *ua, const char *botgroup,
                   const char *path, robots_match *out)
 {
     if (!out) return;
@@ -581,7 +582,7 @@ void robots_query(const robots_doc *doc, const char *ua, const char *signal,
     if (!doc || !ua || !doc->groups || doc->groups->nelts == 0) return;
 
     int has_wildcard = 0;
-    int best_len = bs_rb_best_token_len(doc, ua, signal, &has_wildcard);
+    int best_len = bs_rb_best_token_len(doc, ua, botgroup, &has_wildcard);
     if (best_len == 0 && !has_wildcard) return;  /* nothing to enforce */
 
     int best_rule_len = -1;
@@ -591,7 +592,7 @@ void robots_query(const robots_doc *doc, const char *ua, const char *signal,
 
     for (int i = 0; i < doc->groups->nelts; i++) {
         robots_group *g = APR_ARRAY_IDX(doc->groups, i, robots_group *);
-        if (!bs_rb_group_qualifies(g, ua, signal, best_len)) continue;
+        if (!bs_rb_group_qualifies(g, ua, botgroup, best_len)) continue;
         if (first_relevant_idx < 0) first_relevant_idx = i;
 
         if (g->crawl_delay > max_crawl_delay) {

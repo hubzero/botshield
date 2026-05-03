@@ -99,17 +99,17 @@ apr_status_t robots_parse_buf(apr_pool_t *p, const char *buf,
                               robots_doc **out, const char **err);
 
 /* One-shot enforcement query. Fills *out with the result of matching
- * (ua, signal, path) against doc. Safe to call with doc=NULL or
+ * (ua, botgroup, path) against doc. Safe to call with doc=NULL or
  * ua=NULL — produces a "no match" result.
  *
- * `signal` is the request's classified content-signal (see
- * bs_ua_class.known_signal) — "search", "ai-input", "ai-train",
- * "monitor", or NULL. Stanzas of the form `User-agent: @<signal>`
- * match when the request's `signal` argument equals that signal
- * name. Pass NULL when no signal is known; @signal stanzas won't
- * match in that case (UA-substring stanzas still apply). */
+ * `botgroup` is the request's classified botgroup (see
+ * bs_ua_class.known_botgroup) — "search", "ai-input", "ai-train",
+ * "monitor", or NULL. Stanzas of the form `User-agent: @<botgroup>`
+ * match when the request's `botgroup` argument equals that group
+ * name. Pass NULL when no botgroup is known; @botgroup stanzas
+ * won't match in that case (UA-substring stanzas still apply). */
 void robots_query(const robots_doc *doc,
-                  const char *ua, const char *signal,
+                  const char *ua, const char *botgroup,
                   const char *path,
                   robots_match *out);
 

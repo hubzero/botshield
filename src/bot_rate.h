@@ -52,13 +52,13 @@ typedef struct bs_bot_rate_slot {
  * shapes:
  *   specific (default):  slugs = resolved set (sharing one counter slot)
  *   is_wildcard = 1:     slugs = NULL; expands at init over directory
- *   is_signal = 1:       slugs = resolved set; per-slug allocation
- *                        like wildcard but filtered by signal category */
+ *   is_botgroup = 1:     slugs = resolved set; per-slug allocation
+ *                        like wildcard but filtered by botgroup */
 typedef struct bs_bot_rate_entry {
     const char         *origin;
     int                 is_wildcard;
-    int                 is_signal;     /* @signal selector */
-    const char         *signal_name;   /* "search"/"ai-input"/etc.; non-NULL when is_signal */
+    int                 is_botgroup;     /* @botgroup selector */
+    const char         *botgroup_name;   /* "search"/"ai-input"/etc.; non-NULL when is_botgroup */
     apr_uint32_t        budget;
     apr_uint32_t        window_sec;
     apr_array_header_t *slugs;       /* const char *; NULL for wildcard */

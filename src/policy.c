@@ -39,19 +39,19 @@
 
 /* Cohort match at request time. Returns 1 when this request belongs
  * to the cohort. UA axis can be:
- *   ua_any=1            matches any UA
- *   ua_signal != NULL   matches by classified content-signal
- *                       (search/ai-input/ai-train/monitor)
- *   ua_pattern != NULL  matches by UA-substring (case-insensitive)
+ *   ua_any=1              matches any UA
+ *   ua_botgroup != NULL   matches by classified botgroup
+ *                         (search/ai-input/ai-train/monitor)
+ *   ua_pattern != NULL    matches by UA-substring (case-insensitive)
  * IP axis: ip_any=1 OR client IP ∈ ranges. */
 static int bs_cohort_matches(const bs_cohort *c,
                              const char *ua, request_rec *r)
 {
     if (!c->ua_any) {
-        if (c->ua_signal) {
+        if (c->ua_botgroup) {
             const bs_ua_class *cls = bs_classify_request_ua(r);
-            if (!cls || !cls->known_signal) return 0;
-            if (strcasecmp(cls->known_signal, c->ua_signal) != 0) return 0;
+            if (!cls || !cls->known_botgroup) return 0;
+            if (strcasecmp(cls->known_botgroup, c->ua_botgroup) != 0) return 0;
         } else if (c->ua_pattern) {
             if (!ua || !strcasestr(ua, c->ua_pattern)) return 0;
         } else {
@@ -405,10 +405,10 @@ int bs_check_policy(request_rec *r)
     int robots_apply = 0;
     if (rstate && rstate->doc && ua) {
         const bs_ua_class *cls_for_robots = bs_classify_request_ua(r);
-        const char *robots_signal = (cls_for_robots
-                                     && cls_for_robots->known_signal)
-                                  ? cls_for_robots->known_signal : NULL;
-        robots_query(rstate->doc, ua, robots_signal, r->uri, &rmatch);
+        const char *robots_botgroup = (cls_for_robots
+                                       && cls_for_robots->known_botgroup)
+                                    ? cls_for_robots->known_botgroup : NULL;
+        robots_query(rstate->doc, ua, robots_botgroup, r->uri, &rmatch);
         if (rmatch.group_idx >= 0) {
             robots_apply = 1;
             if (rmatch.is_wildcard) {

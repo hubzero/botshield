@@ -3505,14 +3505,15 @@ const char *bs_cohort_resolve(cmd_parms *cmd, bs_cohort *out,
     if (!ua || !*ua || strcmp(ua, "*") == 0) {
         out->ua_any = 1;
     } else if (ua[0] == '@') {
-        /* @signal selector — match by classified content-signal
-         * instead of UA-substring. Recognized signals: search,
-         * ai-input, ai-train, monitor (mod_botshield extension). */
+        /* @botgroup selector — match by the request's classified
+         * botgroup instead of UA-substring. Recognized botgroups:
+         * search, ai-input, ai-train, monitor (mod_botshield
+         * extension; the others are IETF aipref vocabulary). */
         if (!ua[1]) {
-            return "UA selector '@' must be followed by a signal name "
-                   "(search, ai-input, ai-train, monitor)";
+            return "UA selector '@' must be followed by a botgroup "
+                   "name (search, ai-input, ai-train, monitor)";
         }
-        out->ua_signal = apr_pstrdup(cmd->pool, ua + 1);
+        out->ua_botgroup = apr_pstrdup(cmd->pool, ua + 1);
     } else {
         out->ua_pattern = apr_pstrdup(cmd->pool, ua);
     }

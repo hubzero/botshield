@@ -75,11 +75,11 @@ static int bs_ac_find_edge(const bs_ac_node *n, unsigned char b)
 int bs_ua_is_known_bot(const char *ua,
                        const char **out_slug,
                        const char **out_category,
-                       const char **out_signal)
+                       const char **out_botgroup)
 {
     if (out_slug)     *out_slug = NULL;
     if (out_category) *out_category = NULL;
-    if (out_signal)   *out_signal = NULL;
+    if (out_botgroup) *out_botgroup = NULL;
     if (!ua || !*ua) return 0;
 
     /* Atomic-load the active runtime override. Acquire ordering
@@ -107,7 +107,7 @@ int bs_ua_is_known_bot(const char *ua,
             if (idx >= 0) {
                 if (out_slug)     *out_slug = st->entries[idx].slug;
                 if (out_category) *out_category = st->entries[idx].category;
-                if (out_signal)   *out_signal = st->entries[idx].signal;
+                if (out_botgroup) *out_botgroup = st->entries[idx].botgroup;
                 return 1;
             }
         }
@@ -123,7 +123,7 @@ int bs_ua_is_known_bot(const char *ua,
         if (strcasestr(ua, e->pattern) != NULL) {
             if (out_slug)     *out_slug = e->slug;
             if (out_category) *out_category = e->category;
-            if (out_signal)   *out_signal = e->signal;
+            if (out_botgroup) *out_botgroup = e->botgroup;
             return 1;
         }
     }
@@ -168,17 +168,17 @@ apr_array_header_t *bs_known_bots_resolve_slugs(apr_pool_t *pool,
 }
 
 
-/* Resolve all directory slugs whose `signal` field matches. Same
+/* Resolve all directory slugs whose `botgroup` field matches. Same
  * dedupe shape as bs_known_bots_resolve_slugs. Match is case-
- * insensitive on the signal string. NULL `signal` entries never
- * match — those bots weren't classified into an aipref signal at
- * codegen time. */
-apr_array_header_t *bs_known_bots_resolve_by_signal(apr_pool_t *pool,
-                                                    const char *signal)
+ * insensitive on the botgroup string. NULL `botgroup` entries never
+ * match — those bots weren't classified into a botgroup at codegen
+ * time. */
+apr_array_header_t *bs_known_bots_resolve_by_botgroup(apr_pool_t *pool,
+                                                      const char *botgroup)
 {
     apr_array_header_t *out =
         apr_array_make(pool, 8, sizeof(const char *));
-    if (!signal || !*signal) return out;
+    if (!botgroup || !*botgroup) return out;
 
     bs_known_bots_state *st =
         __atomic_load_n(&bs_bot_directory_active, __ATOMIC_ACQUIRE);
@@ -187,8 +187,8 @@ apr_array_header_t *bs_known_bots_resolve_by_signal(apr_pool_t *pool,
 
     apr_hash_t *seen = apr_hash_make(pool);
     for (const bs_known_bot_entry *e = entries; e->pattern != NULL; e++) {
-        if (!e->signal) continue;
-        if (strcasecmp(e->signal, signal) != 0) continue;
+        if (!e->botgroup) continue;
+        if (strcasecmp(e->botgroup, botgroup) != 0) continue;
         if (!apr_hash_get(seen, e->slug, APR_HASH_KEY_STRING)) {
             apr_hash_set(seen, e->slug, APR_HASH_KEY_STRING,
                          (void *)1);

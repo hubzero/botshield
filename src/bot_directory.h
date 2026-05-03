@@ -47,16 +47,19 @@ typedef struct {
     const char *pattern;    /* UA substring to match (case-insensitive) */
     const char *slug;       /* canonical bot slug, e.g. "google" */
     const char *category;   /* category from upstream taxonomy */
-    /* Content-signal classification — IETF aipref vocabulary plus one
-     * mod_botshield extension. Computed from `category` at codegen
-     * time; per-bot override via vendor/bot-directory.local.json.
+    /* Bot-group classification — names taken from the IETF aipref
+     * content-signal vocabulary (search, ai-input, ai-train) plus a
+     * mod_botshield extension "monitor" for operational categories.
+     * Computed from `category` at codegen time; per-bot override via
+     * vendor/bot-directory.local.json with an explicit `botgroup`
+     * field.
      *
      * Values: "search", "ai-input", "ai-train", "monitor", or NULL
      * (operational/ambiguous bots — security scanners, generic
-     * libraries, OTHER). Used by BotShieldBotRateLimit @signal,
-     * BotShieldBlockPath @signal, BotShieldPathTrigger @signal,
-     * and robots.txt User-agent: @signal stanzas. */
-    const char *signal;
+     * libraries, OTHER). Used by BotShieldBotRateLimit @botgroup,
+     * BotShieldBlockPath @botgroup, and robots.txt User-agent:
+     * @botgroup stanzas. */
+    const char *botgroup;
 } bs_known_bot_entry;
 
 /* Generated baseline: array terminated by an all-NULL sentinel.
@@ -127,16 +130,16 @@ bs_known_bots_state *bs_known_bots_build_baseline(server_rec *s,
  * Atomically loads the active runtime-override state, falling back
  * to the compiled-in baseline if no override is loaded.
  *
- * On match, *out_slug, *out_category, *out_signal (any of which may
- * be NULL to skip) are populated with pointers into the active
+ * On match, *out_slug, *out_category, *out_botgroup (any of which
+ * may be NULL to skip) are populated with pointers into the active
  * state's storage — callers must NOT free them and must NOT retain
- * across a watchdog refresh. *out_signal is NULL when the matched
- * entry's category doesn't map to a content-signal.
+ * across a watchdog refresh. *out_botgroup is NULL when the matched
+ * entry's category doesn't map to a botgroup.
  * NULL UA returns 0. */
 int bs_ua_is_known_bot(const char *ua,
                        const char **out_slug,
                        const char **out_category,
-                       const char **out_signal);
+                       const char **out_botgroup);
 
 /* Parse a TSV file at `path` into a fresh state allocated from a
  * subpool of `parent_pool`. Returns NULL on any failure (open,
@@ -188,14 +191,14 @@ apr_status_t bs_bot_directory_watchdog_cb(int state, void *data,
 apr_array_header_t *bs_known_bots_resolve_slugs(apr_pool_t *pool,
                                                 const char *pattern);
 
-/* Resolve all directory slugs whose `signal` field matches the given
- * signal name (case-insensitive). Returns an apr_array of `const char *`
- * slug pointers allocated from `pool`. Empty array if no entries match
- * (signal misspelled, or no bots in that category). Used by the
- * @signal selector in BotShieldBotRateLimit / BlockPath / PathTrigger /
- * robots.txt extension. */
-apr_array_header_t *bs_known_bots_resolve_by_signal(apr_pool_t *pool,
-                                                    const char *signal);
+/* Resolve all directory slugs whose `botgroup` field matches the
+ * given group name (case-insensitive). Returns an apr_array of
+ * `const char *` slug pointers allocated from `pool`. Empty array if
+ * no entries match (botgroup misspelled, or no bots in that
+ * category). Used by the @botgroup selector in BotShieldBotRateLimit
+ * / BlockPath / robots.txt extension. */
+apr_array_header_t *bs_known_bots_resolve_by_botgroup(apr_pool_t *pool,
+                                                      const char *botgroup);
 
 /* Setters wired into bs_cmds[]. */
 const char *bs_set_bot_directory(cmd_parms *cmd, void *dconf,

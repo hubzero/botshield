@@ -246,9 +246,9 @@ def test_bot_rate_off_disables_default_synthesis(
     )
 
 
-def test_bot_rate_signal_selector(config_override, fresh_ip):
+def test_bot_rate_botgroup_selector(config_override, fresh_ip):
     """`@search` selector resolves to all directory slugs with the
-    `search` content-signal. Each matched slug gets its own counter
+    `search` botgroup. Each matched slug gets its own counter
     at the entry's budget (per-slug, not aggregate)."""
     with config_override(
         r"BotShieldEnabled\s+On",
@@ -256,7 +256,7 @@ def test_bot_rate_signal_selector(config_override, fresh_ip):
         '    BotShieldBotRateLimit @search 1 hour',
         count=1,
     ):
-        # Bingbot is in SEARCH_ENGINE_CRAWLER → signal=search.
+        # Bingbot is in SEARCH_ENGINE_CRAWLER → botgroup=search.
         # First request admits (counter starts at 0 in 1-hour window).
         b1 = client.get("/", xff=fresh_ip, ua=BINGBOT_UA)
         b2 = client.get("/", xff=fresh_ip, ua=BINGBOT_UA)
@@ -266,8 +266,8 @@ def test_bot_rate_signal_selector(config_override, fresh_ip):
     )
 
 
-def test_bot_rate_signal_specific_overrides(config_override, fresh_ip):
-    """Specific slug rule wins over @signal rule. With both
+def test_bot_rate_botgroup_specific_overrides(config_override, fresh_ip):
+    """Specific slug rule wins over @botgroup rule. With both
     `@search 1 hour` (strict) and `googlebot 100 min` (looser),
     Googlebot uses the specific budget — many requests admit."""
     with config_override(
@@ -289,10 +289,10 @@ def test_bot_rate_signal_specific_overrides(config_override, fresh_ip):
     )
 
 
-def test_bot_rate_signal_unknown_signal_rejected(
+def test_bot_rate_botgroup_unknown_rejected(
     config_override, fresh_ip,
 ):
-    """An @signal selector that doesn't match any directory entry
+    """An @botgroup selector that doesn't match any directory entry
     is a config-time error. Apache reload would fail; we observe via
     test harness that the module is still serving (didn't load the
     bad config) or via apachectl -t complaint."""

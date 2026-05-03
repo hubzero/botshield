@@ -200,12 +200,12 @@ const bs_ua_class *bs_classify_request_ua(request_rec *r)
     }
 
     /* Known-bot directory walk (Aho-Corasick over ~600 patterns).
-     * Sets known_slug + known_category + known_signal if the UA
+     * Sets known_slug + known_category + known_botgroup if the UA
      * matches any directory entry. Gated by classify.known_bots. */
     if (flags.known_bots
         && bs_ua_is_known_bot(ua, &cached->known_slug,
                               &cached->known_category,
-                              &cached->known_signal)) {
+                              &cached->known_botgroup)) {
         cached->is_known_bot = 1;
     }
 
