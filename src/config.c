@@ -45,6 +45,8 @@
 #include "botshield.h"
 #include "config.h"
 #include "allowlist.h"
+#include "bot_directory.h"
+#include "browser_classifier.h"
 #include "challenge.h"
 #include "heuristics.h"
 #include "load.h"
@@ -273,6 +275,21 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
     if (add->robots_refresh_interval == BS_ROBOTS_REFRESH_UNSET) {
         out->robots_refresh_interval = base->robots_refresh_interval;
     }
+    /* Bot-directory runtime override inherits unless explicitly set. */
+    if (!add->bot_directory_path && base->bot_directory_path) {
+        out->bot_directory_path = base->bot_directory_path;
+    }
+    if (add->bot_directory_refresh_interval == 0) {
+        out->bot_directory_refresh_interval = base->bot_directory_refresh_interval;
+    }
+    /* Browser-templates runtime override — same inheritance shape. */
+    if (!add->browser_templates_path && base->browser_templates_path) {
+        out->browser_templates_path = base->browser_templates_path;
+    }
+    if (add->browser_templates_refresh_interval == 0) {
+        out->browser_templates_refresh_interval =
+            base->browser_templates_refresh_interval;
+    }
 
     /* App integration server-scope inheritance. */
     if (add->app_feedback_enabled == BS_APP_FEEDBACK_UNSET) {
@@ -304,14 +321,16 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->state_file            = NULL;
     scfg->state_save_interval   = 300;   /* 5 min default when state file set */
     scfg->captcha_max_inflight  = BS_DEFAULT_CAPTCHA_MAX_INFLIGHT;
-    /* E1 Allow-family defaults — master gate off (opt-in).
-     * bot_classifier / bot_ranges stay NULL and get built in
-     * post_config if the master gate flips on. allow_bots
-     * collects directive-declared entries (and seeded built-ins)
-     * keyed by name. */
-    scfg->verified_bots_enabled    = 0;
+    /* E1 Allow-family defaults. bot_classifier / bot_ranges are
+     * built at post_config from the bundled bs_builtin_bots[] (set
+     * via vendor/verified-bots.json) plus any operator-declared
+     * BotShieldAllowBot entries. allow_bots collects directive-
+     * declared entries keyed by name. */
+    scfg->classify         = BS_CLASSIFY_FLAGS_ALL;
     scfg->bot_classifier   = NULL;
     scfg->bot_ranges       = NULL;
+    scfg->bot_ranges_manifest = NULL;
+    scfg->allow_ranges_refresh_interval = 0;   /* opt-in via directive */
     scfg->allow_bots       = apr_hash_make(p);
     /* E2.1 — rate-limit + block-path ordered arrays; populated by
      * directives in declaration order, post_config resolves cohort
@@ -385,6 +404,16 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->robots_slot_pool_size   = 0;
     scfg->robots_slot_pool_used   = 0;
     scfg->robots_refresh_interval = BS_ROBOTS_REFRESH_UNSET;
+    /* Bot-directory runtime override. NULL path = no override
+     * (compiled-in baseline stays active). Refresh interval 0 =
+     * use compile-time default at post_config. */
+    scfg->bot_directory_path             = NULL;
+    scfg->bot_directory_refresh_interval = 0;
+    /* Browser-templates runtime override defaults. NULL path =
+     * compiled-in baseline stays active. Refresh interval 0 = use
+     * compile-time default at post_config. */
+    scfg->browser_templates_path             = NULL;
+    scfg->browser_templates_refresh_interval = 0;
     /* App integration defaults — UNSET sentinel so the server-scope
      * merge can tell "unset at this scope" from explicit off. */
     scfg->app_feedback_enabled        = BS_APP_FEEDBACK_UNSET;
@@ -1196,26 +1225,22 @@ static void bs_wire_allowlist(apr_pool_t *pconf, server_rec *s)
         bs_server_cfg *vcfg = ap_get_module_config(sv->module_config,
                                                    &botshield_module);
         if (!vcfg) continue;
-        /* Machinery activates when EITHER the operator opted into
-         * the bundled built-in set (BotShieldAllowVerifiedBots on)
-         * OR they declared at least one specific bot with
-         * BotShieldAllowBot. Both off = nothing to do, skip. */
-        int has_operator_bots = vcfg->allow_bots
-            && apr_hash_count(vcfg->allow_bots) > 0;
-        if (!vcfg->verified_bots_enabled && !has_operator_bots) continue;
 
         vcfg->bot_classifier = bs_ua_classifier_create(pconf);
-        vcfg->bot_ranges     = apr_hash_make(pconf);
 
-        /* Seed the Allow set. Built-ins go in only if the operator
-         * opted into the bundled set; directive-declared entries
-         * always go in (and win over built-ins of the same name). */
+        /* Seed the Allow set with the bundled built-ins
+         * (vendor/verified-bots.json → bs_builtin_bots[]). Operator-
+         * declared entries are overlaid on top; same-name operator
+         * entries replace the built-in (last-writer-wins). The
+         * runtime BotShieldClassify -verified-bots flag controls
+         * whether the IP cross-check runs at request time, not
+         * whether the allowlist is loaded — keeping the allowlist
+         * loaded means operators can flip the flag at any time
+         * without a reload-with-rebuild cycle. */
         apr_hash_t *working = apr_hash_make(pconf);
-        if (vcfg->verified_bots_enabled) {
-            for (const bs_allow_bot_entry *b = bs_builtin_bots;
-                 b->name; b++) {
-                apr_hash_set(working, b->name, APR_HASH_KEY_STRING, b);
-            }
+        for (const bs_allow_bot_entry *b = bs_builtin_bots;
+             b->name; b++) {
+            apr_hash_set(working, b->name, APR_HASH_KEY_STRING, b);
         }
         apr_hash_index_t *hi;
         for (hi = apr_hash_first(pconf, vcfg->allow_bots);
@@ -1225,7 +1250,21 @@ static void bs_wire_allowlist(apr_pool_t *pconf, server_rec *s)
             apr_hash_set(working, k, APR_HASH_KEY_STRING, v);
         }
 
-        int n_bots = 0, loaded = 0, missing = 0, bad = 0, ua_only = 0;
+        /* Build the live-reloadable manifest. The ranges machinery
+         * is split between the manifest (what to load — owned by
+         * pconf, immutable across watchdog ticks) and the state
+         * (loaded ranges + observed mtimes — owned by a per-
+         * generation subpool, atomic-swapped on file change). */
+        bs_bot_ranges_manifest *manifest =
+            apr_pcalloc(pconf, sizeof(*manifest));
+        manifest->s           = sv;
+        manifest->pool        = pconf;
+        manifest->file_bots   = apr_array_make(pconf, 4,
+                                  sizeof(bs_bot_file_manifest_entry));
+        manifest->inline_bots = apr_array_make(pconf, 4,
+                                  sizeof(bs_bot_inline_manifest_entry));
+
+        int n_bots = 0, ua_only = 0;
         for (hi = apr_hash_first(pconf, working); hi; hi = apr_hash_next(hi)) {
             const void *k; void *v;
             apr_hash_this(hi, &k, NULL, &v);
@@ -1241,57 +1280,41 @@ static void bs_wire_allowlist(apr_pool_t *pconf, server_rec *s)
                 continue;
             }
 
-            /* Inline CIDR list mode. */
             if (e->inline_cidrs) {
-                apr_array_header_t *arr = NULL;
-                const char *err = NULL;
-                apr_status_t rv = bs_allow_load_ranges_from_string(
-                    pconf, e->inline_cidrs, &arr, &err);
-                if (rv == APR_SUCCESS) {
-                    apr_hash_set(vcfg->bot_ranges, e->name,
-                                 APR_HASH_KEY_STRING, arr);
-                    loaded++;
-                } else {
-                    bad++;
-                    ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
-                        "mod_botshield: bot '%s' inline CIDRs "
-                        "malformed (%s) - skipping",
-                        e->name, err ? err : "parse error");
-                }
+                bs_bot_inline_manifest_entry *me =
+                    apr_array_push(manifest->inline_bots);
+                me->name         = apr_pstrdup(pconf, e->name);
+                me->inline_cidrs = apr_pstrdup(pconf, e->inline_cidrs);
                 continue;
             }
 
-            /* File-path mode (explicit or default). */
             const char *path = e->path
                 ? e->path
                 : apr_psprintf(pconf,
                     "/var/lib/botshield/bots/%s.txt", e->name);
 
-            apr_array_header_t *arr = NULL;
-            const char *err = NULL;
-            apr_status_t rv = bs_allow_load_ranges(pconf, path, &arr, &err);
-            if (rv == APR_SUCCESS) {
-                apr_hash_set(vcfg->bot_ranges, e->name,
-                             APR_HASH_KEY_STRING, arr);
-                loaded++;
-            } else if (APR_STATUS_IS_ENOENT(rv) || !e->path) {
-                missing++;
-                ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
-                    "mod_botshield: bot '%s' ranges file '%s' "
-                    "not loaded (%s) - UA will classify as unverified",
-                    e->name, path, err ? err : "");
-            } else {
-                bad++;
-                ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
-                    "mod_botshield: bot '%s' ranges file '%s' "
-                    "malformed (%s) - skipping", e->name, path,
-                    err ? err : "parse error");
-            }
+            bs_bot_file_manifest_entry *me =
+                apr_array_push(manifest->file_bots);
+            me->name           = apr_pstrdup(pconf, e->name);
+            me->canonical_path = apr_pstrdup(pconf, path);
+            me->sidecar_path   = bs_allow_sidecar_path(pconf, path);
         }
+
+        vcfg->bot_ranges_manifest = manifest;
+
+        /* Build + publish the initial state. publish() reads the
+         * vcfg->bot_ranges_manifest pointer, so the assignment above
+         * must precede this. */
+        bs_bot_ranges_state *initial = bs_allow_ranges_build(manifest);
+        if (initial) {
+            bs_allow_ranges_publish(sv, initial);
+        }
+
         ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
             "mod_botshield: Allow enabled; %d bots "
-            "(%d ranges loaded, %d ua-only, %d missing, %d malformed)",
-            n_bots, loaded, ua_only, missing, bad);
+            "(%d file-backed, %d inline, %d ua-only)",
+            n_bots, manifest->file_bots->nelts,
+            manifest->inline_bots->nelts, ua_only);
     }
 }
 
@@ -1563,6 +1586,355 @@ static void bs_init_robots(apr_pool_t *pconf, server_rec *s,
         }
     }
 }
+
+/* Bot-directory runtime override loader + watchdog.
+ *
+ * The bot-directory active state is module-global (one
+ * classification table for the whole module), but the
+ * BotShieldBotDirectory directive is server-scope and operators
+ * commonly place it inside a <VirtualHost> block — so we have to
+ * walk the vhost list to find the configured path. First non-NULL
+ * wins; cross-vhost competing paths aren't a supported shape (the
+ * data file is module-global, not per-vhost). Soft dep on
+ * mod_watchdog — absence falls back to post_config-only load.
+ *
+ * Always publishes a state at startup so the lookup hot path can
+ * use the Aho-Corasick fast path even when no override is
+ * configured. The baseline state wraps the compiled-in
+ * bs_known_bots[] rodata table in a fresh pool with its own AC
+ * trie. */
+static void bs_init_bot_directory(apr_pool_t *pconf, server_rec *s)
+{
+    /* Find any vhost (including the main server) that set the
+     * directive. */
+    server_rec       *src_sv   = NULL;
+    bs_server_cfg    *src_scfg = NULL;
+    for (server_rec *sv = s; sv; sv = sv->next) {
+        bs_server_cfg *vcfg = ap_get_module_config(sv->module_config,
+                                                   &botshield_module);
+        if (vcfg && vcfg->bot_directory_path) {
+            src_sv   = sv;
+            src_scfg = vcfg;
+            break;
+        }
+    }
+
+    /* Always publish a baseline state so the AC fast path is
+     * active from request 1, regardless of operator config. If a
+     * runtime override is configured below, it'll replace this. */
+    bs_known_bots_state *baseline = bs_known_bots_build_baseline(s, pconf);
+    if (baseline) {
+        bs_known_bots_publish(s, baseline);
+    } else {
+        ap_log_error(APLOG_MARK, APLOG_WARNING, 0, s,
+            "mod_botshield: bot-directory baseline AC build failed; "
+            "request-time lookup will fall back to sequential "
+            "strcasestr (slow but correct)");
+    }
+
+    if (!src_scfg) {
+        /* No runtime override configured — baseline stays active. */
+        return;
+    }
+
+    /* Initial load of runtime override — failure here is non-fatal;
+     * the baseline (just published above) stays active. */
+    bs_known_bots_state *initial = bs_known_bots_load(
+        src_sv, src_scfg->bot_directory_path, pconf);
+    if (initial) {
+        bs_known_bots_publish(src_sv, initial);
+    } else {
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, src_sv,
+            "mod_botshield: bot-directory %s not loaded at "
+            "post_config; compiled-in baseline (~%" APR_SIZE_T_FMT
+            " entries) stays active. Watchdog will retry on file "
+            "change if a refresh interval is set.",
+            src_scfg->bot_directory_path, bs_known_bots_count);
+    }
+
+    /* Default refresh interval if operator didn't override and
+     * watchdog is desired. 0 = leave watchdog unregistered. */
+    int refresh = src_scfg->bot_directory_refresh_interval;
+    if (refresh == 0) refresh = 300;   /* default 5 min */
+    if (refresh < 0) return;
+
+    APR_OPTIONAL_FN_TYPE(ap_watchdog_get_instance) *fn_get =
+        APR_RETRIEVE_OPTIONAL_FN(ap_watchdog_get_instance);
+    APR_OPTIONAL_FN_TYPE(ap_watchdog_register_callback) *fn_reg =
+        APR_RETRIEVE_OPTIONAL_FN(ap_watchdog_register_callback);
+    if (!fn_get || !fn_reg) {
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, src_sv,
+            "mod_botshield: mod_watchdog not loaded; "
+            "bot-directory live-refresh disabled "
+            "(post_config load still in effect)");
+        return;
+    }
+
+    /* Per-worker watchdog (singleton=0 means each child process
+     * registers and runs its own tick). Required because the bot-
+     * directory active pointer is process-local — a single
+     * singleton tick would only update one worker's view, leaving
+     * other workers serving requests against stale state. Cost is
+     * low: each tick is one apr_stat + early-out on unchanged
+     * mtime, and the parser only runs when the file actually
+     * changed. */
+    const char *wd_name = "mod_botshield_bot_directory";
+    ap_watchdog_t *wd = NULL;
+    apr_status_t wrv = fn_get(&wd, wd_name, 0, 0, pconf);
+    if (wrv == APR_SUCCESS && wd) {
+        wrv = fn_reg(wd, apr_time_from_sec(refresh), src_sv,
+                     bs_bot_directory_watchdog_cb);
+    } else if (wrv == APR_SUCCESS) {
+        wrv = APR_EGENERAL;
+    }
+    if (wrv == APR_SUCCESS) {
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, src_sv,
+            "mod_botshield: bot-directory live-refresh enabled "
+            "every %d s (path=%s)",
+            refresh, src_scfg->bot_directory_path);
+    } else {
+        ap_log_error(APLOG_MARK, APLOG_WARNING, wrv, src_sv,
+            "mod_botshield: bot-directory watchdog registration "
+            "failed; live-refresh disabled (post_config load still "
+            "in effect)");
+    }
+}
+
+
+/* Browser-templates runtime override loader + watchdog.
+ *
+ * Same shape as bs_init_bot_directory — walk vhosts to find the
+ * configured path, do an initial load, register a per-worker
+ * watchdog (singleton=0) so all worker processes pick up file
+ * changes within one refresh interval. Soft dep on mod_watchdog. */
+static void bs_init_browser_templates(apr_pool_t *pconf, server_rec *s)
+{
+    server_rec    *src_sv   = NULL;
+    bs_server_cfg *src_scfg = NULL;
+    for (server_rec *sv = s; sv; sv = sv->next) {
+        bs_server_cfg *vcfg = ap_get_module_config(sv->module_config,
+                                                   &botshield_module);
+        if (vcfg && vcfg->browser_templates_path) {
+            src_sv   = sv;
+            src_scfg = vcfg;
+            break;
+        }
+    }
+    if (!src_scfg) return;
+
+    bs_browser_templates_state *initial = bs_browser_templates_load(
+        src_sv, src_scfg->browser_templates_path, pconf);
+    if (initial) {
+        bs_browser_templates_publish(src_sv, initial);
+    } else {
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, src_sv,
+            "mod_botshield: browser-templates %s not loaded at "
+            "post_config; compiled-in baseline (~%" APR_SIZE_T_FMT
+            " templates) stays active. Watchdog will retry on file "
+            "change.",
+            src_scfg->browser_templates_path,
+            bs_browser_templates_count);
+    }
+
+    int refresh = src_scfg->browser_templates_refresh_interval;
+    if (refresh == 0) refresh = 300;
+    if (refresh < 0) return;
+
+    APR_OPTIONAL_FN_TYPE(ap_watchdog_get_instance) *fn_get =
+        APR_RETRIEVE_OPTIONAL_FN(ap_watchdog_get_instance);
+    APR_OPTIONAL_FN_TYPE(ap_watchdog_register_callback) *fn_reg =
+        APR_RETRIEVE_OPTIONAL_FN(ap_watchdog_register_callback);
+    if (!fn_get || !fn_reg) {
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, src_sv,
+            "mod_botshield: mod_watchdog not loaded; "
+            "browser-templates live-refresh disabled "
+            "(post_config load still in effect)");
+        return;
+    }
+
+    const char *wd_name = "mod_botshield_browser_templates";
+    ap_watchdog_t *wd = NULL;
+    apr_status_t wrv = fn_get(&wd, wd_name, 0, 0, pconf);
+    if (wrv == APR_SUCCESS && wd) {
+        wrv = fn_reg(wd, apr_time_from_sec(refresh), src_sv,
+                     bs_browser_templates_watchdog_cb);
+    } else if (wrv == APR_SUCCESS) {
+        wrv = APR_EGENERAL;
+    }
+    if (wrv == APR_SUCCESS) {
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, src_sv,
+            "mod_botshield: browser-templates live-refresh enabled "
+            "every %d s (path=%s)",
+            refresh, src_scfg->browser_templates_path);
+    } else {
+        ap_log_error(APLOG_MARK, APLOG_WARNING, wrv, src_sv,
+            "mod_botshield: browser-templates watchdog "
+            "registration failed; live-refresh disabled");
+    }
+}
+
+
+/* Allow-list ranges live-refresh watchdog.
+ *
+ * Iterates every vhost that wired a bot-ranges manifest and
+ * registers a per-worker (singleton=0) watchdog tick that
+ * stat()s canonical + sidecar files and rebuilds + atomic-swaps
+ * the active state on mtime change. Per-vhost registration
+ * because the ranges configuration can vary between vhosts.
+ *
+ * The interval comes from BotShieldAllowRangesRefreshInterval.
+ * If unset (0), live-refresh is disabled — operators get the
+ * post_config load only and must `apachectl graceful` to pick
+ * up sidecar edits. */
+static void bs_init_allow_ranges(apr_pool_t *pconf, server_rec *s)
+{
+    APR_OPTIONAL_FN_TYPE(ap_watchdog_get_instance) *fn_get =
+        APR_RETRIEVE_OPTIONAL_FN(ap_watchdog_get_instance);
+    APR_OPTIONAL_FN_TYPE(ap_watchdog_register_callback) *fn_reg =
+        APR_RETRIEVE_OPTIONAL_FN(ap_watchdog_register_callback);
+
+    /* Each vhost manifest gets its own watchdog instance. ap_
+     * watchdog_get_instance is keyed by name; we mint one per
+     * vhost so each registration is independent. */
+    int vhost_idx = 0;
+    int registrations = 0;
+    for (server_rec *sv = s; sv; sv = sv->next, vhost_idx++) {
+        bs_server_cfg *vcfg = ap_get_module_config(sv->module_config,
+                                                   &botshield_module);
+        if (!vcfg || !vcfg->bot_ranges_manifest) continue;
+
+        int refresh = vcfg->allow_ranges_refresh_interval;
+        if (refresh <= 0) continue;   /* opt-in via directive */
+
+        if (!fn_get || !fn_reg) {
+            ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+                "mod_botshield: mod_watchdog not loaded; "
+                "allow-ranges live-refresh disabled "
+                "(post_config load still in effect)");
+            return;
+        }
+
+        const char *wd_name = apr_psprintf(pconf,
+            "mod_botshield_allow_ranges_%d", vhost_idx);
+        ap_watchdog_t *wd = NULL;
+        apr_status_t wrv = fn_get(&wd, wd_name, 0, 0, pconf);
+        if (wrv == APR_SUCCESS && wd) {
+            wrv = fn_reg(wd, apr_time_from_sec(refresh), sv,
+                         bs_allow_ranges_watchdog_cb);
+        } else if (wrv == APR_SUCCESS) {
+            wrv = APR_EGENERAL;
+        }
+        if (wrv == APR_SUCCESS) {
+            ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+                "mod_botshield: allow-ranges live-refresh enabled "
+                "every %d s (%d file-backed bots, sidecars at "
+                "<base>.local.txt)",
+                refresh, vcfg->bot_ranges_manifest->file_bots->nelts);
+            registrations++;
+        } else {
+            ap_log_error(APLOG_MARK, APLOG_WARNING, wrv, sv,
+                "mod_botshield: allow-ranges watchdog registration "
+                "failed; live-refresh disabled for this vhost");
+        }
+    }
+    (void)registrations;
+}
+
+
+/* Data-source staleness check at post_config.
+ *
+ * Each classifier pass depends on data files that age at different
+ * rates: the bot directory adds new bots monthly, browser templates
+ * cycle every few weeks (Chrome's release cadence), verified-bot
+ * IP ranges churn quarterly. If an operator's deployment sits long
+ * enough between refreshes, the data drifts and the relevant
+ * classifier silently misclassifies — most damagingly, real bots
+ * from new IPs get fake-bot penalties, and real users on current
+ * Chrome versions get treated as bot-candidates.
+ *
+ * This emits a NOTICE per stale file at startup so operators see
+ * the staleness in their reload logs. The threshold is hardcoded
+ * at 180 days — generous enough that healthy deployments never see
+ * the message, tight enough that drift is flagged before accuracy
+ * degrades materially. The fix-hint points operators at either the
+ * refresh tool or the matching BotShieldClassify flag for graceful
+ * degradation. */
+#define BS_STALE_AGE_DAYS 180
+
+static void bs_check_one_file_staleness(server_rec *s,
+                                        const char *path,
+                                        const char *which,
+                                        const char *fix_hint)
+{
+    apr_finfo_t fi;
+    if (apr_stat(&fi, path, APR_FINFO_MTIME,
+                 s->process->pconf) != APR_SUCCESS) {
+        return;   /* file missing or unstattable — not our problem here */
+    }
+    apr_time_t now = apr_time_now();
+    apr_int64_t age_us = (apr_int64_t)now - (apr_int64_t)fi.mtime;
+    if (age_us <= 0) return;
+    apr_int64_t age_days =
+        age_us / ((apr_int64_t)1000 * 1000 * 60 * 60 * 24);
+    if (age_days < BS_STALE_AGE_DAYS) return;
+
+    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+        "mod_botshield: %s data is stale: %s mtime is %" APR_INT64_T_FMT
+        " days old (threshold %d). %s",
+        which, path, age_days, BS_STALE_AGE_DAYS, fix_hint);
+}
+
+static void bs_check_staleness(apr_pool_t *pconf, server_rec *s)
+{
+    (void)pconf;
+
+    /* Bot-directory runtime override (if configured). */
+    bs_server_cfg *main_scfg = ap_get_module_config(
+        s->module_config, &botshield_module);
+    if (main_scfg && main_scfg->bot_directory_path) {
+        bs_check_one_file_staleness(s,
+            main_scfg->bot_directory_path,
+            "bot-directory",
+            "Refresh via tools/refresh-bot-directory.py, or skip the "
+            "pass with 'BotShieldClassify -known-bots'.");
+    }
+
+    /* Browser-templates runtime override (if configured). */
+    if (main_scfg && main_scfg->browser_templates_path) {
+        bs_check_one_file_staleness(s,
+            main_scfg->browser_templates_path,
+            "browser-templates",
+            "Refresh via tools/refresh-top-user-agents.py, or skip "
+            "the pass with 'BotShieldClassify -browsers'.");
+    }
+
+    /* Verified-bot CIDR ranges files — one per built-in / declared
+     * bot. Walk every vhost's manifest. Same canonical path can
+     * appear in multiple vhosts; check each anyway since the cost
+     * is cheap and the per-vhost log line is operator-useful. */
+    for (server_rec *sv = s; sv; sv = sv->next) {
+        bs_server_cfg *vcfg = ap_get_module_config(
+            sv->module_config, &botshield_module);
+        if (!vcfg || !vcfg->bot_ranges_manifest) continue;
+        bs_bot_ranges_manifest *m = vcfg->bot_ranges_manifest;
+        if (!m->file_bots) continue;
+        for (int i = 0; i < m->file_bots->nelts; i++) {
+            const bs_bot_file_manifest_entry *e =
+                &APR_ARRAY_IDX(m->file_bots, i,
+                               bs_bot_file_manifest_entry);
+            char which[128];
+            apr_snprintf(which, sizeof(which),
+                "verified-bot ranges (%s)", e->name);
+            bs_check_one_file_staleness(sv,
+                e->canonical_path, which,
+                "Refresh via tools/refresh-bot-ranges.sh, or skip "
+                "the IP cross-check with "
+                "'BotShieldClassify -verified-bots' (degrades to "
+                "UA-only verify).");
+        }
+    }
+}
+
 
 /* Load-state sampler watchdog. One registration on the main
  * server only — the cached state is module-global, so per-vhost
@@ -1938,6 +2310,10 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     bs_resolve_robots_defaults(s);
     bs_assign_namespace_ids(s);
     bs_init_robots(pconf, s, &next_slot);
+    bs_init_bot_directory(pconf, s);
+    bs_init_browser_templates(pconf, s);
+    bs_init_allow_ranges(pconf, s);
+    bs_check_staleness(pconf, s);
     bs_register_load_watchdog(pconf, s);
     bs_register_headroom_watchdog(pconf, s);
 

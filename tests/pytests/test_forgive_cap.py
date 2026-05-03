@@ -30,8 +30,8 @@ pytestmark = pytest.mark.serial
 def test_directive_rejects_negative(config_override):
     with pytest.raises(Exception):
         with config_override(
-            r"BotShieldAllowVerifiedBots\s+on",
-            'BotShieldAllowVerifiedBots on\n'
+            r"BotShieldEnabled\s+On",
+            'BotShieldEnabled On\n'
             '    BotShieldForgivenessCapPerHour -1',
             count=1,
         ):
@@ -41,8 +41,8 @@ def test_directive_rejects_negative(config_override):
 def test_directive_rejects_out_of_range(config_override):
     with pytest.raises(Exception):
         with config_override(
-            r"BotShieldAllowVerifiedBots\s+on",
-            'BotShieldAllowVerifiedBots on\n'
+            r"BotShieldEnabled\s+On",
+            'BotShieldEnabled On\n'
             '    BotShieldForgivenessCapPerHour 9999',
             count=1,
         ):
@@ -56,8 +56,8 @@ def test_directive_accepts_zero_to_disable(config_override, fresh_ip):
     accept the new 403 interstitial as a healthy response too —
     the only way this should fail is a 5xx from a misconfig."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldForgivenessCapPerHour 0',
         count=1,
     ):
@@ -72,8 +72,8 @@ def test_directive_accepts_zero_to_disable(config_override, fresh_ip):
 
 def test_directive_accepts_normal_value(config_override, fresh_ip):
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldForgivenessCapPerHour 50',
         count=1,
     ):

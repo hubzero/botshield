@@ -23,15 +23,18 @@
 #include <apr_time.h>
 
 #include "botshield.h"
-#include "allowlist.h"   /* bs_allow_ip_in_ranges (cohort match) */
-#include "cookie.h"      /* bs_parse_cookies_once */
-#include "load.h"        /* bs_load_current */
-#include "metrics.h"     /* bs_set_trigger_tag */
+#include "allowlist.h"     /* bs_allow_ip_in_ranges (cohort match) */
+#include "bot_directory.h" /* bs_ua_is_known_bot (Cloudflare directory) */
+#include "browser_classifier.h" /* bs_ua_is_browser (top-100 templates) */
+#include "ua_class.h"     /* unified per-request classification */
+#include "cookie.h"        /* bs_parse_cookies_once */
+#include "load.h"          /* bs_load_current */
+#include "metrics.h"       /* bs_set_trigger_tag */
 #include "policy.h"
-#include "robots.h"      /* bs_path_match, robots_query, robots_match */
-#include "score.h"       /* bs_score_add */
-#include "shm.h"         /* bs_shm.metrics, rate_counters, strike helpers */
-#include "triggers.h"    /* bs_apply_trigger_action, bs_cookie_pred_match */
+#include "robots.h"        /* bs_path_match, robots_query, robots_match */
+#include "score.h"         /* bs_score_add */
+#include "shm.h"           /* bs_shm.metrics, rate_counters, strike helpers */
+#include "triggers.h"      /* bs_apply_trigger_action, bs_cookie_pred_match */
 
 /* Cohort match at request time. Returns 1 when this request belongs
  * to the cohort. UA match is case-insensitive via strcasestr to
@@ -101,34 +104,39 @@ static int bs_rate_counter_admit(bs_rate_counter *slot,
     return 1;
 }
 
-/* Is this UA a plausible crawler for the purpose of applying
- * robots.txt User-agent: * rules in heuristic mode? See CHANGELOG.md for
- * the rationale — the point is to avoid rate-limiting or blocking
- * real users' browsers, which never read robots.txt and so should
- * never be subject to its rules. */
-static int bs_ua_is_crawler_candidate(const char *ua)
+/* Is this UA a plausible crawler for applying robots.txt
+ * User-agent: * rules in heuristic mode? Reads the unified
+ * classification cached on r->pool by bs_classify_request_hook.
+ *
+ * Semantics: real-browser template match → not a candidate
+ * (browsers don't read robots.txt and shouldn't be subject to
+ * its restrictions); everything else (known-bot, fake-bot,
+ * verified-bot, unknown — including Mozilla-prefix scrapers
+ * with custom appended tokens) defaults to candidate.
+ *
+ * The bot-token heuristic (bot/crawl/spider/fetch/slurp) was
+ * dropped: with ~600-entry AC directory + the strict browser-
+ * template check, anything those substrings would catch already
+ * lands on the candidate side via the "not a browser" default.
+ *
+ * Trade-off (unchanged from prior implementation): a brand-new
+ * browser entering the top-100 won't match the strict-template
+ * check until the runtime template file is refreshed; until then
+ * those visitors are misclassified as candidates. The runtime-
+ * refresh watchdog bounds that to one refresh interval. */
+static int bs_ua_is_crawler_candidate(request_rec *r)
 {
-    if (!ua || !*ua) return 0;
+    /* Browser fail-safe: if BotShieldClassify -browsers disabled
+     * the strict-template pass, treat all UAs as if they were
+     * real browsers (not candidates). Otherwise stale templates
+     * would silently misclassify real users as candidates and
+     * subject them to robots.txt wildcard rules. */
+    bs_server_cfg *scfg =
+        ap_get_module_config(r->server->module_config, &botshield_module);
+    if (scfg && !scfg->classify.browsers) return 0;
 
-    int has_bot_token =
-           strcasestr(ua, "bot")    != NULL
-        || strcasestr(ua, "crawl")  != NULL
-        || strcasestr(ua, "spider") != NULL
-        || strcasestr(ua, "fetch")  != NULL
-        || strcasestr(ua, "slurp")  != NULL;
-    if (has_bot_token) return 1;
-
-    /* Bot-less UA that starts with a real-browser prefix: skip.
-     * Everything else (curl/python/etc.) defaults to candidate —
-     * those tools are used by scrapers and rarely by humans. */
-    static const char *const browser_prefixes[] = {
-        "Mozilla/", "Opera/", "Firefox/", "Edge/", "Safari/", NULL
-    };
-    for (int i = 0; browser_prefixes[i]; i++) {
-        apr_size_t plen = strlen(browser_prefixes[i]);
-        if (strncasecmp(ua, browser_prefixes[i], plen) == 0) return 0;
-    }
-    return 1;
+    const bs_ua_class *c = bs_classify_request_ua(r);
+    return !c->is_browser;
 }
 
 /* BS_CK_STATE_NOTE / _VERIFIED / _MISSING / _INVALID are now
@@ -394,7 +402,7 @@ int bs_check_policy(request_rec *r)
                     robots_apply = 0;
                     break;
                 case BS_ROBOTS_WILDCARD_HEURISTIC:
-                    if (!bs_ua_is_crawler_candidate(ua)) robots_apply = 0;
+                    if (!bs_ua_is_crawler_candidate(r)) robots_apply = 0;
                     break;
                 case BS_ROBOTS_WILDCARD_STRICT:
                 default:

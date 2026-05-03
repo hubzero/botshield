@@ -111,8 +111,8 @@ def test_operator_extra_score_sums_with_default(
     default `score add=60`. Both fire — score effect is the SUM, +80.
     Two `flag-trigger:honeypot_hit` reasons appear in the chain."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldFlagTrigger honeypot_hit action=score add=20',
         count=1,
     ):
@@ -141,8 +141,8 @@ def test_softer_tier_floor_does_not_relax_default(
     chain (the visible audit signal) rather than the landed tier,
     since dev rigs may downgrade captcha → form via captcha_fallback."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldFlagTrigger honeypot_hit action=tier_floor min=form',
         count=1,
     ):
@@ -183,8 +183,8 @@ def test_reset_then_softer_tier_floor_takes_effect(
     operator-supplied `tier_floor=form` clears the captcha default
     and the form floor takes effect — request lands at form tier."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldFlagTrigger honeypot_hit reset\n'
         '    BotShieldFlagTrigger honeypot_hit action=tier_floor min=form',
         count=1,
@@ -213,8 +213,8 @@ def test_reset_with_no_replacement_clears_default(
     set (honeypot path is unchanged), but no flag-trigger:honeypot_hit
     reason or flag-tier-floor reason should appear."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldFlagTrigger honeypot_hit reset',
         count=1,
     ):
@@ -243,8 +243,8 @@ def test_reset_inline_replacement(
     is the syntactic-sugar form: reset + one inline replacement on a
     single line. Default score+60 is gone; only +10 contributes."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldFlagTrigger honeypot_hit reset action=score add=10',
         count=1,
     ):
@@ -271,8 +271,8 @@ def test_botshield_flag_directive_unknown(config_override):
     `config_override` surfaces that as an exception."""
     with pytest.raises(Exception):
         with config_override(
-            r"BotShieldAllowVerifiedBots\s+on",
-            'BotShieldAllowVerifiedBots on\n'
+            r"BotShieldEnabled\s+On",
+            'BotShieldEnabled On\n'
             '    BotShieldFlag honeypot_hit penalty=10',
             count=1,
         ):
@@ -284,8 +284,8 @@ def test_botshield_max_difficulty_directive_unknown(config_override):
     difficulty knob it capped. Apache reports it as unknown."""
     with pytest.raises(Exception):
         with config_override(
-            r"BotShieldAllowVerifiedBots\s+on",
-            'BotShieldAllowVerifiedBots on\n'
+            r"BotShieldEnabled\s+On",
+            'BotShieldEnabled On\n'
             '    BotShieldMaxDifficulty 12',
             count=1,
         ):
@@ -298,8 +298,8 @@ def test_botshield_max_difficulty_directive_unknown(config_override):
 def test_unknown_flag_rejected(config_override):
     with pytest.raises(Exception):
         with config_override(
-            r"BotShieldAllowVerifiedBots\s+on",
-            'BotShieldAllowVerifiedBots on\n'
+            r"BotShieldEnabled\s+On",
+            'BotShieldEnabled On\n'
             '    BotShieldFlagTrigger never_existed action=score add=10',
             count=1,
         ):
@@ -309,8 +309,8 @@ def test_unknown_flag_rejected(config_override):
 def test_unknown_action_verb_rejected(config_override):
     with pytest.raises(Exception):
         with config_override(
-            r"BotShieldAllowVerifiedBots\s+on",
-            'BotShieldAllowVerifiedBots on\n'
+            r"BotShieldEnabled\s+On",
+            'BotShieldEnabled On\n'
             '    BotShieldFlagTrigger honeypot_hit action=meltdown',
             count=1,
         ):
@@ -320,8 +320,8 @@ def test_unknown_action_verb_rejected(config_override):
 def test_bad_tier_value_rejected(config_override):
     with pytest.raises(Exception):
         with config_override(
-            r"BotShieldAllowVerifiedBots\s+on",
-            'BotShieldAllowVerifiedBots on\n'
+            r"BotShieldEnabled\s+On",
+            'BotShieldEnabled On\n'
             '    BotShieldFlagTrigger honeypot_hit action=tier_floor '
             'min=meltdown',
             count=1,

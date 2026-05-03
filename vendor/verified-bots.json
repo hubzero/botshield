@@ -1,0 +1,57 @@
+[
+  {
+    "slug": "googlebot",
+    "name": "Googlebot",
+    "uaPattern": "Googlebot",
+    "uaOnly": false,
+    "rangesPath": null,
+    "inlineCidrs": null,
+    "operator": "Google",
+    "operatorUrl": "https://developers.google.com/search/docs/crawling-indexing/verifying-googlebot",
+    "description": "Google's primary search-engine crawler. UA-pattern match plus IP cross-check against Google's published common-crawlers.json range file (refreshed by tools/refresh-bot-ranges.sh into /var/lib/botshield/bots/googlebot.txt)."
+  },
+  {
+    "slug": "bingbot",
+    "name": "bingbot",
+    "uaPattern": "bingbot",
+    "uaOnly": false,
+    "rangesPath": null,
+    "inlineCidrs": null,
+    "operator": "Microsoft",
+    "operatorUrl": "https://www.bing.com/webmasters/help/how-to-verify-bingbot-3905dc26",
+    "description": "Microsoft's Bing search-engine crawler. UA-pattern match plus IP cross-check against Microsoft's published bingbot.json range file."
+  },
+  {
+    "slug": "applebot",
+    "name": "Applebot",
+    "uaPattern": "Applebot",
+    "uaOnly": false,
+    "rangesPath": null,
+    "inlineCidrs": null,
+    "operator": "Apple",
+    "operatorUrl": "https://support.apple.com/en-us/HT204683",
+    "description": "Apple's search-engine crawler used by Siri Suggestions, Safari Smart Search, and Apple's Spotlight. UA-pattern match plus IP cross-check against Apple's published applebot.json range file."
+  },
+  {
+    "slug": "googleother",
+    "name": "GoogleOther",
+    "uaPattern": "GoogleOther",
+    "uaOnly": false,
+    "rangesPath": null,
+    "inlineCidrs": null,
+    "operator": "Google",
+    "operatorUrl": "https://developers.google.com/search/docs/crawling-indexing/google-special-case-crawlers",
+    "description": "Google's research / experimental crawler family. Distinct UA token from Googlebot. Ranges published via special-crawlers.json (separate from Googlebot's common-crawlers.json)."
+  },
+  {
+    "slug": "siteimprove",
+    "name": "Siteimprove.com",
+    "uaPattern": "Siteimprove.com",
+    "uaOnly": false,
+    "rangesPath": null,
+    "inlineCidrs": null,
+    "operator": "Siteimprove",
+    "operatorUrl": "https://help.siteimprove.com/support/solutions/articles/80000448553-what-ip-addresses-and-user-agents-are-used-by-siteimprove-",
+    "description": "Siteimprove site-scanning crawler. UA matches the 'Siteimprove.com' substring inside the full UA shape 'Mozilla/5.0 ... SiteCheck-sitecrawl by Siteimprove.com; ...'. IP ranges scraped from Siteimprove's help-center article (no published JSON feed)."
+  }
+]

@@ -77,6 +77,9 @@
 #include "shm.h"       /* SHM tables, state save/load, headroom watchdog */
 #include "crypto.h"    /* SHA-256, HMAC, AES-256-GCM, HKDF, hex codec */
 #include "allowlist.h" /* E1 — UA classifier, CIDR list loader, builtin bots */
+#include "bot_directory.h" /* known-bot UA classifier (Cloudflare directory) */
+#include "browser_classifier.h" /* strict-template browser UA classifier */
+#include "ua_class.h"     /* unified UA classifier (browser/known/verified/fake) */
 #include "metrics.h"   /* M9 — decision log, counters, Prometheus, mod_status */
 #include "botshield.h" /* module-wide types: bs_dir_cfg, bs_server_cfg, ... */
 #include "config.h"    /* module-config lifecycle (create/merge/post/child) */
@@ -408,44 +411,58 @@ static const command_rec bs_cmds[] = {
                  "equivalent today is `BotShieldTrigger flag=<name> "
                  "ttl=<sec>`."),
     /* E1 — Allow family */
-    AP_INIT_FLAG("BotShieldAllowVerifiedBots", bs_set_verified_bots,
-                 NULL, RSRC_CONF,
-                 "Opt in to the bundled set of built-in verified "
-                 "crawlers - currently googlebot, bingbot, applebot, "
-                 "siteimprove - which auto-register with their "
-                 "published IP ranges loaded from "
-                 "/var/lib/botshield/bots/<name>.txt (shipped at "
-                 "apache/bots/*.txt; refresh via "
-                 "tools/refresh-bot-ranges.sh). Default off. "
-                 "Independent of BotShieldAllowBot - operators can "
-                 "use either or both, and the allowlist machinery "
-                 "auto-activates when at least one of them is "
-                 "configured. At request time: (a) UA matches a "
-                 "registered bot's token AND source IP is in the "
-                 "loaded ranges -> large negative credit, collapses "
-                 "to tier=pass (reason allow-bot:<name>); (b) UA "
-                 "matches but IP doesn't -> treated as UA forgery: "
-                 "positive penalty + tier_floor captcha (reason "
-                 "fake-<name>); (c) UA doesn't match anything -> no "
-                 "effect."),
+    AP_INIT_TAKE_ARGV("BotShieldClassify", bs_set_classify, NULL,
+                 RSRC_CONF,
+                 "Per-pass enable/disable for the unified UA "
+                 "classifier. Two grammars: standalone form "
+                 "'BotShieldClassify On|Off' (one token, exclusive); "
+                 "compositional form 'BotShieldClassify [All|None] "
+                 "[+/-flag]...' where flag is one of: browsers, "
+                 "known-bots, verified-bots, unknown-bots. Default "
+                 "is all four passes enabled. Mixing On/Off with "
+                 "deltas is a config-time error; use All/None for "
+                 "the compositional form. Each disabled pass has a "
+                 "fail-safe: -browsers treats all UAs as browsers "
+                 "for robots.txt wildcard purposes; -known-bots "
+                 "skips the AC directory (no log slug); "
+                 "-verified-bots skips the IP cross-check (matched "
+                 "UAs always allow-bot, never fake-bot — the natural "
+                 "response to stale CIDR data); -unknown-bots skips "
+                 "the heuristic substring scan."),
     AP_INIT_TAKE23("BotShieldAllowBot",
                  bs_set_allow_bot, NULL, RSRC_CONF,
-                 "Register a bot for the verified-bot allowlist. "
-                 "Args: <name> <ua-pattern> [<target>]. Name is a "
-                 "[a-z0-9-] token used as the decision-log identifier "
-                 "and default ranges-file basename; same-name as a "
-                 "built-in (googlebot, bingbot, applebot, siteimprove) "
-                 "wins over the built-in. UA-pattern is the case-"
-                 "insensitive substring looked for in the User-Agent "
-                 "header. Optional target: '*' for UA-only trust "
-                 "(logs allow-bot-ua:<name>), an absolute file path, "
-                 "a single CIDR, or a comma-separated CIDR list. "
-                 "Omit the target to use the default file path "
-                 "/var/lib/botshield/bots/<name>.txt. Declaring at "
-                 "least one BotShieldAllowBot auto-activates the "
-                 "allowlist machinery without needing "
-                 "BotShieldAllowVerifiedBots; combine the two when "
-                 "you want both the bundled set AND your own."),
+                 "Register a verified-bot entry. Args: <name> "
+                 "<ua-pattern> [<target>]. Name is a [a-z0-9-] token "
+                 "used as the decision-log identifier and default "
+                 "ranges-file basename; same-name as a bundled "
+                 "built-in (googlebot, bingbot, applebot, "
+                 "googleother, siteimprove from "
+                 "vendor/verified-bots.json) replaces the built-in. "
+                 "UA-pattern is the case-insensitive substring "
+                 "looked for in the User-Agent header. Optional "
+                 "target: '*' for UA-only trust (logs "
+                 "allow-bot-ua:<name>), an absolute file path, a "
+                 "single CIDR, or a comma-separated CIDR list. Omit "
+                 "the target to use the default file path "
+                 "/var/lib/botshield/bots/<name>.txt. Whether the "
+                 "verified-bot pass actually runs is controlled by "
+                 "BotShieldClassify."),
+    AP_INIT_TAKE1("BotShieldAllowRangesRefreshInterval",
+                 bs_set_allow_ranges_refresh_interval, NULL, RSRC_CONF,
+                 "Seconds between watchdog ticks that re-stat the "
+                 "verified-bot CIDR files (canonical "
+                 "/var/lib/botshield/bots/<name>.txt and operator "
+                 "sidecar <base>.local.txt). On any mtime change the "
+                 "module rebuilds the active range set in a private "
+                 "subpool and atomic-swaps it into place; previous "
+                 "state is held one tick before destruction so in-"
+                 "flight readers can't deref freed memory. The "
+                 "sidecar is the supported seam for adding custom "
+                 "scanner IPs that aren't in a vendor's public feed "
+                 "(e.g. dedicated Siteimprove enterprise scans). "
+                 "0 disables (default; post_config load remains in "
+                 "effect, reload via graceful restart). Range "
+                 "0..86400; recommended 60-300."),
     /* E2.1 — policy enforcement. TAKE_ARGV because Apache has no
      * TAKE4/TAKE5 macros; the setters enforce argc themselves. */
     AP_INIT_TAKE_ARGV("BotShieldRateLimit",
@@ -712,6 +729,40 @@ static const command_rec bs_cmds[] = {
                  "atomically swapped — no Apache reload needed. "
                  "Default 60. Set 0 to disable live-refresh and "
                  "require an explicit reload after editing."),
+    AP_INIT_TAKE1("BotShieldBotDirectory",
+                 bs_set_bot_directory, NULL, RSRC_CONF,
+                 "Path to a TSV file overriding the compiled-in "
+                 "bot-directory baseline. Format: pattern|slug|"
+                 "category|followsRobotsTxt, one record per line, "
+                 "comments with '#'. Refresh via "
+                 "tools/refresh-bot-directory.py; the watchdog re-"
+                 "parses on mtime change so updates take effect "
+                 "without Apache reload. Optional; if unset the "
+                 "compiled-in baseline (~600 entries from the "
+                 "vendored Cloudflare directory at build time) "
+                 "stays active."),
+    AP_INIT_TAKE1("BotShieldBotDirectoryRefreshInterval",
+                 bs_set_bot_directory_refresh_interval, NULL, RSRC_CONF,
+                 "Seconds between mod_watchdog re-checks of the "
+                 "BotShieldBotDirectory file. Default 300. Set 0 to "
+                 "disable live-refresh; the post_config-time load "
+                 "still happens once."),
+    AP_INIT_TAKE1("BotShieldBrowserTemplates",
+                 bs_set_browser_templates, NULL, RSRC_CONF,
+                 "Path to a text file overriding the compiled-in "
+                 "browser-template baseline. Each non-comment line "
+                 "is a normalized UA template (runs of [0-9._]+ "
+                 "replaced by 'X'). Refresh via "
+                 "tools/refresh-top-user-agents.py; the watchdog "
+                 "re-loads on mtime change. Optional; if unset the "
+                 "compiled-in baseline (~23 templates from the "
+                 "build-time vendored top-100 list) stays active."),
+    AP_INIT_TAKE1("BotShieldBrowserTemplatesRefreshInterval",
+                 bs_set_browser_templates_refresh_interval, NULL,
+                 RSRC_CONF,
+                 "Seconds between mod_watchdog re-checks of the "
+                 "BotShieldBrowserTemplates file. Default 300. Set "
+                 "0 to disable live-refresh."),
     AP_INIT_TAKE1("BotShieldRobotsWildcardScope",
                  bs_set_robots_wildcard_scope, NULL, RSRC_CONF,
                  "How to apply User-agent: * rules: 'heuristic' "
@@ -1229,6 +1280,21 @@ static int bs_handler(request_rec *r)
         cookie_status = "minted";
     }
 
+    /* Tag known-bot UAs in the decision log via a zero-impact score
+     * reason. Reads the unified classification cached on r->pool by
+     * bs_classify_request_hook — no extra trie walk here. Reason
+     * embeds the upstream slug (e.g. "known-bot:google-other") so
+     * operators can grep their decision log for specific bot
+     * families. Score impact is 0 — this is observability, not
+     * policy. */
+    {
+        const bs_ua_class *cls = bs_classify_request_ua(r);
+        if (cls && cls->known_slug && *cls->known_slug) {
+            bs_score_add(r, 0, 0,
+                apr_pstrcat(r->pool, "known-bot:", cls->known_slug, NULL));
+        }
+    }
+
     /* E2.1 + E2.2 + E3 policy enforcement. Runs before scoring
      * heuristics so a block / rate / trigger short-circuits cleanly.
      * Applies to cookie-valid requests too — operator policy
@@ -1630,6 +1696,13 @@ static void bs_register_hooks(apr_pool_t *p)
     ap_hook_post_config (bs_post_config, NULL, NULL, APR_HOOK_MIDDLE);
     ap_hook_child_init  (bs_child_init,  NULL, NULL, APR_HOOK_MIDDLE);
     ap_hook_handler     (bs_handler,     NULL, NULL, APR_HOOK_FIRST);
+    /* Unified UA classifier — runs late in post_read_request so
+     * mod_remoteip's earlier hook (default APR_HOOK_FIRST) has
+     * rewritten r->useragent_ip into the real client address before
+     * we do the verified-bot IP cross-check. The result is cached on
+     * r->pool so every downstream consumer reads the same answer. */
+    ap_hook_post_read_request(bs_classify_request_hook,
+                              NULL, NULL, APR_HOOK_LAST);
     {
         extern int bs_propagate_decision_env(request_rec *r);
         ap_hook_log_transaction(bs_propagate_decision_env,

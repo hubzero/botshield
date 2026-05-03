@@ -37,13 +37,20 @@ trap 'rm -rf "$TMP"' EXIT
 # keep serving the last-good cached file — the cost of a URL rotation
 # is staleness, not module breakage. Check the provider docs and update
 # the URL here when that happens.
-#   Google:  https://developers.google.com/search/docs/crawling-indexing/verifying-googlebot
-#   Bing:    https://www.bing.com/webmasters/help/how-to-verify-bingbot-3905dc26
-#   Apple:   https://support.apple.com/en-us/HT204683
+#   Google:           https://developers.google.com/search/docs/crawling-indexing/verifying-googlebot
+#   GoogleOther/...:  same docs page, "Special-case crawlers" section.
+#                     Same JSON pool covers GoogleOther, GoogleProducer,
+#                     AdsBot, etc.; the allowlist matches only on the
+#                     "GoogleOther" UA token, so our ranges file labels
+#                     itself "googleother" even though the underlying
+#                     payload covers the broader family.
+#   Bing:             https://www.bing.com/webmasters/help/how-to-verify-bingbot-3905dc26
+#   Apple:            https://support.apple.com/en-us/HT204683
 declare -a PROVIDERS=(
-  "googlebot https://developers.google.com/static/crawling/ipranges/common-crawlers.json"
-  "bingbot   https://www.bing.com/toolbox/bingbot.json"
-  "applebot  https://search.developer.apple.com/applebot.json"
+  "googlebot   https://developers.google.com/static/crawling/ipranges/common-crawlers.json"
+  "googleother https://developers.google.com/static/crawling/ipranges/special-crawlers.json"
+  "bingbot     https://www.bing.com/toolbox/bingbot.json"
+  "applebot    https://search.developer.apple.com/applebot.json"
 )
 
 mkdir -p "$DEST"

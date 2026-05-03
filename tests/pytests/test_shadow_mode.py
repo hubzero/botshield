@@ -60,8 +60,8 @@ def test_path_trigger_observe_does_not_enforce(
     static handler serves the path's normal response — 404 here
     since the path doesn't exist)."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldPathTrigger trap "/.envprobe" '
         'status=403 mode=observe',
         count=1,
@@ -87,8 +87,8 @@ def test_path_trigger_observe_does_not_flag_ip(
     trigger with flag=fake_bot ttl=3600 in observe mode; the IP
     must not pick up the flag bit on the next request."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldPathTrigger trap "/.envprobe" '
         'status=pass flag=fake_bot ttl=3600 mode=observe',
         count=1,
@@ -114,8 +114,8 @@ def test_rate_limit_observe_does_not_429(config_override, fresh_ip):
     none return 429 — the over-budget hits log :observe and
     continue."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldRateLimit corpbot 1 sec "CorpBot" * '
         'mode=observe',
         count=1,
@@ -136,8 +136,8 @@ def test_rate_limit_observe_increments_metric(
     rate_limit_observed_total counter, NOT the
     rate_limit_exceeded_total counter."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldRateLimit corpbot 1 sec "CorpBot" * '
         'mode=observe',
         count=1,
@@ -171,8 +171,8 @@ def test_block_path_observe_does_not_403(config_override, fresh_ip):
     that header rather than status code alone, since interstitials
     moved from 200 to 403 in 2026."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldBlockPath admin-block "/admin/*" '
         '"httpx" * mode=observe',
         count=1,
@@ -199,8 +199,8 @@ def test_scope_log_only_overrides_per_rule_enforce(
     flips everything within scope to observe. The 403 path trigger
     must NOT enforce."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldEnabled LogOnly\n'
         '    BotShieldPathTrigger trap "/.envprobe" status=403',
         count=1,
@@ -219,8 +219,8 @@ def test_scope_log_only_default_lets_per_rule_enforce(
     in default-enforce mode actually enforces. Catches accidental
     inversion of the tri-state check."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldPathTrigger trap "/.envprobe2" status=403',
         count=1,
     ):
@@ -243,8 +243,8 @@ def test_observe_does_not_shadow_subsequent_enforce_rule(
     With correct semantics: first observes (logs :observe), second
     enforces — request returns 403."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldBlockPath staged "/admin/*" "httpx" * '
         'mode=observe\n'
         '    BotShieldBlockPath active "/admin/*" "httpx" *',
@@ -264,8 +264,8 @@ def test_observe_does_not_shadow_subsequent_enforce_rule(
 def test_directive_rejects_bad_mode_value(config_override):
     with pytest.raises(Exception):
         with config_override(
-            r"BotShieldAllowVerifiedBots\s+on",
-            'BotShieldAllowVerifiedBots on\n'
+            r"BotShieldEnabled\s+On",
+            'BotShieldEnabled On\n'
             '    BotShieldPathTrigger trap "/foo" '
             'status=403 mode=monitor',
             count=1,
@@ -282,8 +282,8 @@ def test_directive_accepts_mode_on_feedback(config_override):
     Per-trigger functional verification lives in
     test_app_feedback.py::test_app_feedback_per_trigger_observe_mode."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldFeedbackTrigger event-x '
         'flag=honeypot_hit ttl=3600 mode=observe',
         count=1,
@@ -308,8 +308,8 @@ def test_log_only_emits_tilde_block_for_blockpath(
     would otherwise 403 must emit `outcome=~block` and serve the real
     content (no 403)."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldEnabled LogOnly\n'
         '    BotShieldBlockPath admin-block "/admin/*" "httpx" *',
         count=1,
@@ -336,8 +336,8 @@ def test_log_only_emits_tilde_rate_limited_for_ratelimit(
     tight budget. Over-budget hits would normally 429; under LogOnly
     every hit lands `outcome=~rate_limited` instead."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldEnabled LogOnly\n'
         '    BotShieldRateLimit corpbot 1 sec "CorpBot" *',
         count=1,
@@ -367,8 +367,8 @@ def test_log_only_emits_tilde_challenge_for_tier_dispatch(
     be a tier=silent interstitial; under LogOnly the module logs
     `outcome=~challenge` and declines so the real handler runs."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldEnabled LogOnly',
         count=1,
     ):
@@ -394,8 +394,8 @@ def test_block_path_observe_increments_observed_total(
     match. Mirrors the rate-limit observed-counter check earlier
     in this file."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldBlockPath admin-block "/admin/*" "httpx" * '
         'mode=observe',
         count=1,
@@ -427,8 +427,8 @@ def test_per_location_log_only_with_inner_enforce(
     On inside a <Location> must enforce within the location and
     only-log outside it. Tests the merge in bs_dir_cfg.enabled."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldEnabled LogOnly\n'
         '    BotShieldBlockPath everywhere "/*" "httpx" *\n'
         '    <Location "/enforce-here">\n'

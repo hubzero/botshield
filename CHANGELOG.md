@@ -1,8 +1,138 @@
 # Changelog
 
+## 2026-05-02
+
+### Added
+- `BotShieldClassify` directive — granular per-pass control for the
+  unified UA classifier. Two grammars:
+
+      BotShieldClassify On|Off                     # standalone
+      BotShieldClassify [All|None] [+/-flag]...    # compositional
+
+  Recognized flags: `browsers`, `known-bots`, `verified-bots`,
+  `unknown-bots`. Default is all four passes enabled. Mixing
+  standalone with deltas is a config-time error; use `All`/`None`
+  for the compositional form.
+
+  Each disabled pass has a deliberate fail-safe so the module
+  degrades permissively instead of silently misclassifying:
+    - `-browsers` — `bs_ua_is_crawler_candidate` returns 0 for all
+      UAs (treat as browsers), so robots.txt wildcard rules don't
+      punish real users when templates are stale.
+    - `-known-bots` — AC directory walk skipped; no
+      `known-bot:<slug>` log tag.
+    - `-verified-bots` — UA-classifier match still runs; IP
+      cross-check skipped; matched UAs always emit
+      `allow-bot:<name>` (UA-only verify), never `fake-bot`. The
+      natural response to stale CIDR data without disabling
+      verified-bot detection entirely.
+    - `-unknown-bots` — heuristic substring scan skipped.
+- `vendor/verified-bots.json` — the bundled set of verified-bot
+  built-ins (googlebot, bingbot, applebot, googleother, siteimprove)
+  used to live as a hardcoded C array in `src/allowlist.c`. Moving
+  it to a vendor JSON gains the same `.local`-overlay capability
+  the bot-directory and browser-templates data sources already
+  have, without any new module directive. Per-data-source layering
+  is now consistent across the three:
+
+      bot-directory   — external upstream + .builtin + .local (4 layers)
+      top-user-agents — same 4 layers
+      verified-bots   — .json + .local (3 layers, no .builtin
+                        because no external upstream — we maintain
+                        the curated set ourselves)
+
+  Operators wanting to tune the set (disable `applebot`, add a
+  custom bot, etc.) drop their changes into
+  `vendor/verified-bots.local.json` (gitignored) and re-run
+  `make build`.
+- 180-day data-source staleness check at `post_config`. stat()s
+  every loaded runtime file (bot-directory TSV, browser-templates
+  TXT, per-bot CIDR ranges) and emits a `NOTICE` per file older
+  than 180 days, pointing operators at the matching refresh tool
+  plus the `BotShieldClassify` flag that would gracefully degrade
+  the affected pass. Hardcoded threshold — generous enough that
+  healthy deployments never see the message; the harder lever
+  (`BotShieldClassify`) stays the configurable surface.
+
+### Removed
+- `BotShieldAllowVerifiedBots` directive. The verified-bot
+  machinery is now activated by default (built-ins always load).
+  Operators wanting "verified-bot opt-in" should use
+  `BotShieldClassify -verified-bots` (skip the IP cross-check;
+  matched UAs still get `allow-bot:` credit) or edit
+  `vendor/verified-bots.local.json` to disable specific built-ins.
+  Breaking change: existing configs containing the directive will
+  fail with "Invalid command" until removed. The corresponding
+  `bs_server_cfg.verified_bots_enabled` field and
+  `bs_set_verified_bots` setter are gone too.
+
 ## 2026-05-01
 
+### Added
+- Vendored snapshot of the Cloudflare bot directory
+  (`vendor/bot-directory.json`, ~600 entries) classifies known bots
+  for robots.txt wildcard-rule application. Real browsers and
+  custom apps bypass `User-agent: *` rules; entries matching the
+  directory fall under wildcard policy. Codegenned into a static
+  `bs_known_bots[]` table at build, optionally overridden by a
+  TSV file at `BotShieldBotDirectory` and refreshed in-place via
+  `tools/refresh-bot-directory.py` + a per-worker `mod_watchdog`
+  tick (`BotShieldBotDirectoryRefreshInterval`, default 5 min).
+  This is UA-only — *not* a trust authority. A scraper claiming
+  `User-Agent: Googlebot/2.1` matches the directory and is
+  classified as a bot, which is the desired outcome (subject to
+  whatever wildcard policy applies). Real verification (UA token
+  + IP-range cross-check) remains the verified-bot machinery.
+- Browser-templates UA classifier
+  (`vendor/top-user-agents.json`, top-100 real-browser UAs from
+  microlinkhq/top-user-agents, codegenned into
+  `generated_browser_templates.c`). Used by
+  `bs_ua_is_crawler_candidate` in policy.c to distinguish real-
+  browser UAs from everything else when applying robots.txt
+  `User-agent: *` rules. Runtime override via
+  `BotShieldBrowserTemplates` + `BotShieldBrowserTemplatesRefreshInterval`,
+  same atomic-swap + one-tick destroy-grace pattern as the bot
+  directory.
+- `GoogleOther` to the built-in verified-bot allowlist
+  (googlebot, bingbot, applebot, googleother, siteimprove). Closes
+  a real coverage gap on help.hubzero.org where Google's research /
+  experimental crawler family was matching no verified entry and
+  getting challenged at silent tier despite being a legitimate
+  Google crawler. UA token is the literal "GoogleOther" substring;
+  IP ranges live in Google's `special-crawlers.json` (separate
+  from Googlebot's `common-crawlers.json`) and are pulled into
+  `/var/lib/botshield/bots/googleother.txt` by
+  `tools/refresh-bot-ranges.sh`, now extended to cover both feeds.
+- Live-reload of verified-bot CIDR files via per-vhost watchdog
+  (`BotShieldAllowRangesRefreshInterval <0..86400>`, default 0 =
+  disabled). On any mtime change to a canonical or sidecar file
+  the module rebuilds the active range set in a private subpool
+  and atomic-swaps it into place; the previously-active state is
+  held one tick before destruction so in-flight readers can't
+  deref freed memory. Per-worker (singleton=0) so each child
+  picks up the change within one tick.
+- Operator sidecar convention for verified-bot CIDRs:
+  `<canonical-base>.local.txt` is co-loaded next to
+  `<base>.txt` and concatenated into the active range set. The
+  supported seam for adding custom enterprise-scanner IPs that
+  aren't published in a vendor's public feed (e.g. dedicated
+  Siteimprove enterprise scans contracted for one site) without
+  fully redeclaring the bot via `BotShieldAllowBot` and without
+  losing cron-driven canonical updates. Missing sidecar = no
+  extras, malformed sidecar = hard error so operator typos
+  surface.
+
 ### Changed
+- Bot-directory request-time lookup switched from sequential
+  `strcasestr` over the pattern array to Aho-Corasick. Single UA
+  scan visits the trie at every position with O(|UA|) work
+  regardless of pattern count; bench on real-traffic UAs shows
+  ~152× speedup against the sequential baseline. ~5500 trie nodes
+  for the current ~600-entry directory, ~200 KB per worker
+  steady-state, fully owned by APR pools (no malloc). Build at
+  post_config and on every runtime-override refresh; failure path
+  falls back to sequential `strcasestr` rather than failing the
+  module load.
 - Folded `BotShieldLogOnly` into `BotShieldEnabled` as a tri-state
   TAKE1 directive: `On` (enforce) / `Off` (disabled) / `LogOnly`
   (observe). The standalone `BotShieldLogOnly` directive and
@@ -39,6 +169,17 @@
   the original `allow` because that's what actually happened.
   Per-family `*_observed_total` counters continue to capture the
   staging-volume signal.
+
+### Hygiene
+- Bench harness for the browser-templates UA classifier
+  (`tools/bench-browser-classifier.c`) compares the custom
+  classifier against a POSIX-regex equivalent built from the same
+  template set. The custom path wins by ~19× on the test corpus,
+  validating the choice not to lean on regex.
+- Bench harness for the bot-directory lookup
+  (`tools/bench-bot-directory.c`) compares sequential
+  `strcasestr`, a first-byte bucket variant, and Aho-Corasick.
+  AC wins ~152× over sequential, motivating the lookup switch.
 
 ## 2026-04-30
 

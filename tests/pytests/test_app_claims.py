@@ -51,7 +51,7 @@ def _g(path, **kw):
 
 def _cfg_on(extra: str = "") -> str:
     return (
-        'BotShieldAllowVerifiedBots on\n'
+        'BotShieldEnabled On\n'
         '    BotShieldAppClaims on\n'
         f'    BotShieldAppIntegrationSecretFile {SECRET_PATH}\n'
         # mod_headers echo: copy any X-Botshield-* request header
@@ -87,9 +87,9 @@ def test_no_claim_header_when_feature_off(config_override, fresh_ip):
     set on the request, so the echo header carries the empty
     placeholder mod_headers emits when the source header is missing."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
+        r"BotShieldEnabled\s+On",
         # No BotShieldAppClaims at all — feature stays off.
-        'BotShieldAllowVerifiedBots on\n'
+        'BotShieldEnabled On\n'
         '    Header always set X-Echo-Claims "%{X-Botshield-Claims}i"',
         count=1,
     ):
@@ -114,7 +114,7 @@ def test_claim_header_emitted_and_signed(config_override, fresh_ip):
     """Feature on: every PASS-tier request gets a signed claim
     header. Body fields reflect the request's effective decision."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on", _cfg_on(), count=1,
+        r"BotShieldEnabled\s+On", _cfg_on(), count=1,
     ):
         r = _g("/", xff=fresh_ip)
     claim = r.headers.get("X-Botshield-Claims")
@@ -150,7 +150,7 @@ def test_client_supplied_x_botshield_headers_are_stripped(
     module strips all X-Botshield-* on read before setting its own
     claim header, so the attacker's values never reach the backend."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on", _cfg_on(), count=1,
+        r"BotShieldEnabled\s+On", _cfg_on(), count=1,
     ):
         r = _g("/", xff=fresh_ip, headers={
             "X-Botshield-Score": "0",
@@ -190,7 +190,7 @@ def test_tampered_claim_body_fails_app_side_verify(
     accidental shape drift in our canonical-form serializer
     (whitespace, field ordering, value escaping, etc.)."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on", _cfg_on(), count=1,
+        r"BotShieldEnabled\s+On", _cfg_on(), count=1,
     ):
         r = _g("/", xff=fresh_ip)
     claim = r.headers["X-Botshield-Claims"]
@@ -212,8 +212,8 @@ def test_claims_not_emitted_without_secret(config_override, fresh_ip):
     rate-limiting — should still work even when the operator has
     half-configured the optional app integration.)"""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldAppClaims on\n'
         # deliberately no SecretFile
         '    Header always set X-Echo-Claims "%{X-Botshield-Claims}i"',

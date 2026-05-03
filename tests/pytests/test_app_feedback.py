@@ -74,7 +74,7 @@ def _cfg(feedback_triggers: str, body_inserts: str) -> str:
     the header on the test path.
     """
     return (
-        'BotShieldAllowVerifiedBots on\n'
+        'BotShieldEnabled On\n'
         '    BotShieldAppFeedback on\n'
         f'    BotShieldAppIntegrationSecretFile {SECRET_PATH}\n'
         + feedback_triggers
@@ -94,7 +94,7 @@ def test_app_feedback_penalty_flag_applies_to_next_request(
     val = _sign("scanner-hit")
     ip = _ips.fresh_ip()
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
+        r"BotShieldEnabled\s+On",
         _cfg(
             '    BotShieldFeedbackTrigger scanner-hit '
             'flag=honeypot_hit ttl=3600\n',
@@ -136,8 +136,8 @@ def test_app_feedback_observed_under_log_only(
     val = _sign("scanner-hit")
     ip = _ips.fresh_ip()
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldEnabled LogOnly\n'
         '    BotShieldAppFeedback on\n'
         f'    BotShieldAppIntegrationSecretFile {SECRET_PATH}\n'
@@ -181,8 +181,8 @@ def test_app_feedback_per_trigger_observe_mode(
     val = _sign("scanner-hit")
     ip = _ips.fresh_ip()
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldAppFeedback on\n'
         f'    BotShieldAppIntegrationSecretFile {SECRET_PATH}\n'
         '    BotShieldFeedbackTrigger scanner-hit '
@@ -217,7 +217,7 @@ def test_app_feedback_credit_flag_lowers_score(
     ip_base = _ips.fresh_ip()
     ip_cred = _ips.fresh_ip()
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
+        r"BotShieldEnabled\s+On",
         _cfg(
             '    BotShieldFeedbackTrigger human-verified '
             'flag=app_verified_human ttl=3600\n',
@@ -265,7 +265,7 @@ def test_app_feedback_strips_from_404_error_response(
     val = _sign("scanner-hit")
     missing_path = "/this-file-does-not-exist-404.html"
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
+        r"BotShieldEnabled\s+On",
         _cfg(
             '    BotShieldFeedbackTrigger scanner-hit '
             'flag=honeypot_hit ttl=3600\n',
@@ -288,8 +288,8 @@ def test_app_feedback_strips_from_404_error_response(
 def test_app_feedback_strips_when_feature_off(config_override):
     val = _sign("scanner-hit")
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldAppFeedback off\n'
         f'    BotShieldAppIntegrationSecretFile {SECRET_PATH}\n'
         '    BotShieldFeedbackTrigger scanner-hit '
@@ -313,7 +313,7 @@ def test_app_feedback_tampered_sig_rejected_and_stripped(
     tampered = val[:-1] + ("0" if val[-1] != "0" else "1")
     ip = _ips.fresh_ip()
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
+        r"BotShieldEnabled\s+On",
         _cfg(
             '    BotShieldFeedbackTrigger scanner-hit '
             'flag=honeypot_hit ttl=3600\n',
@@ -350,7 +350,7 @@ def test_app_feedback_unmapped_event_is_ignored(
     val = _sign("brand-new-event-name")
     ip = _ips.fresh_ip()
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
+        r"BotShieldEnabled\s+On",
         _cfg(
             # deliberately no BotShieldFeedbackTrigger for the event
             '',
@@ -386,7 +386,7 @@ def test_app_feedback_legacy_wire_format_rejected(
     val = f"{body};sig={sig}"
     ip = _ips.fresh_ip()
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
+        r"BotShieldEnabled\s+On",
         _cfg(
             '    BotShieldFeedbackTrigger legacy-guard '
             'flag=honeypot_hit ttl=3600\n',
@@ -424,7 +424,7 @@ def test_app_feedback_credit_and_penalty_compose(
     credit_val  = _sign("human-verified")
     ip_both = _ips.fresh_ip()
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
+        r"BotShieldEnabled\s+On",
         _cfg(
             '    BotShieldFeedbackTrigger scanner-hit '
             'flag=honeypot_hit ttl=3600\n'

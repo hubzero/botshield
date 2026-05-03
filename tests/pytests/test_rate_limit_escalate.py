@@ -52,8 +52,8 @@ def test_repeated_429_escalates_to_403(config_override, fresh_ip,
     third 429 crosses the threshold, so the FOURTH overage and
     every subsequent request gets the escalated 403."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
@@ -109,8 +109,8 @@ def test_below_strike_threshold_stays_at_429(
     """Budget=2/60s, escalate after 5 strikes. Only 4 overage
     requests: never crosses the threshold, all 429, no 403s."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
@@ -149,8 +149,8 @@ def test_escalation_isolates_per_rule(
     different UA patterns: only the matching one's escalation
     applies. The other's normal 429 stays normal."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
@@ -211,8 +211,8 @@ def test_escalation_isolates_per_ip(config_override):
     ip_a = "198.51.100.10"
     ip_b = "198.51.100.20"
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
@@ -251,8 +251,8 @@ def test_directive_rejects_bogus_status(config_override):
     """status=29 is below 100 → parse error, configtest fails."""
     with pytest.raises(Exception):
         with config_override(
-            r"BotShieldAllowVerifiedBots\s+on",
-            'BotShieldAllowVerifiedBots on\n'
+            r"BotShieldEnabled\s+On",
+            'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
@@ -269,8 +269,8 @@ def test_directive_rejects_status_429(config_override):
     that have no effect."""
     with pytest.raises(Exception):
         with config_override(
-            r"BotShieldAllowVerifiedBots\s+on",
-            'BotShieldAllowVerifiedBots on\n'
+            r"BotShieldEnabled\s+On",
+            'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
@@ -285,8 +285,8 @@ def test_directive_rejects_unknown_key(config_override):
     """Unknown action keys fail parse rather than silently."""
     with pytest.raises(Exception):
         with config_override(
-            r"BotShieldAllowVerifiedBots\s+on",
-            'BotShieldAllowVerifiedBots on\n'
+            r"BotShieldEnabled\s+On",
+            'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
@@ -306,8 +306,8 @@ def test_directive_warns_on_unmatched_rate_name(
     but it logs a warning at post_config and stays inert at runtime."""
     with log_slice as slc:
         with config_override(
-            r"BotShieldAllowVerifiedBots\s+on",
-            'BotShieldAllowVerifiedBots on\n'
+            r"BotShieldEnabled\s+On",
+            'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
