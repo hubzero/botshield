@@ -74,10 +74,12 @@ static int bs_ac_find_edge(const bs_ac_node *n, unsigned char b)
 
 int bs_ua_is_known_bot(const char *ua,
                        const char **out_slug,
-                       const char **out_category)
+                       const char **out_category,
+                       const char **out_signal)
 {
     if (out_slug)     *out_slug = NULL;
     if (out_category) *out_category = NULL;
+    if (out_signal)   *out_signal = NULL;
     if (!ua || !*ua) return 0;
 
     /* Atomic-load the active runtime override. Acquire ordering
@@ -105,6 +107,7 @@ int bs_ua_is_known_bot(const char *ua,
             if (idx >= 0) {
                 if (out_slug)     *out_slug = st->entries[idx].slug;
                 if (out_category) *out_category = st->entries[idx].category;
+                if (out_signal)   *out_signal = st->entries[idx].signal;
                 return 1;
             }
         }
@@ -120,6 +123,7 @@ int bs_ua_is_known_bot(const char *ua,
         if (strcasestr(ua, e->pattern) != NULL) {
             if (out_slug)     *out_slug = e->slug;
             if (out_category) *out_category = e->category;
+            if (out_signal)   *out_signal = e->signal;
             return 1;
         }
     }
@@ -147,8 +151,47 @@ apr_array_header_t *bs_known_bots_resolve_slugs(apr_pool_t *pool,
     const bs_known_bot_entry *entries = st ? st->entries : bs_known_bots;
     if (!entries) return out;
 
+    /* Dedupe by slug — multiple patterns can share a slug (a bot with
+     * several UA variants); we want one slug entry in the output. */
+    apr_hash_t *seen = apr_hash_make(pool);
     for (const bs_known_bot_entry *e = entries; e->pattern != NULL; e++) {
         if (strcasestr(e->pattern, pattern) != NULL) {
+            if (!apr_hash_get(seen, e->slug, APR_HASH_KEY_STRING)) {
+                apr_hash_set(seen, e->slug, APR_HASH_KEY_STRING,
+                             (void *)1);
+                *(const char **)apr_array_push(out) =
+                    apr_pstrdup(pool, e->slug);
+            }
+        }
+    }
+    return out;
+}
+
+
+/* Resolve all directory slugs whose `signal` field matches. Same
+ * dedupe shape as bs_known_bots_resolve_slugs. Match is case-
+ * insensitive on the signal string. NULL `signal` entries never
+ * match — those bots weren't classified into an aipref signal at
+ * codegen time. */
+apr_array_header_t *bs_known_bots_resolve_by_signal(apr_pool_t *pool,
+                                                    const char *signal)
+{
+    apr_array_header_t *out =
+        apr_array_make(pool, 8, sizeof(const char *));
+    if (!signal || !*signal) return out;
+
+    bs_known_bots_state *st =
+        __atomic_load_n(&bs_bot_directory_active, __ATOMIC_ACQUIRE);
+    const bs_known_bot_entry *entries = st ? st->entries : bs_known_bots;
+    if (!entries) return out;
+
+    apr_hash_t *seen = apr_hash_make(pool);
+    for (const bs_known_bot_entry *e = entries; e->pattern != NULL; e++) {
+        if (!e->signal) continue;
+        if (strcasecmp(e->signal, signal) != 0) continue;
+        if (!apr_hash_get(seen, e->slug, APR_HASH_KEY_STRING)) {
+            apr_hash_set(seen, e->slug, APR_HASH_KEY_STRING,
+                         (void *)1);
             *(const char **)apr_array_push(out) =
                 apr_pstrdup(pool, e->slug);
         }

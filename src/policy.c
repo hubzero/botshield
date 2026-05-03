@@ -38,15 +38,25 @@
 #include "triggers.h"      /* bs_apply_trigger_action, bs_cookie_pred_match */
 
 /* Cohort match at request time. Returns 1 when this request belongs
- * to the cohort. UA match is case-insensitive via strcasestr to
- * match the directive's documented contract. strcasestr is a GNU
- * extension, already relied on elsewhere in the module on the
- * platforms we target (Linux/FreeBSD/macOS). */
+ * to the cohort. UA axis can be:
+ *   ua_any=1            matches any UA
+ *   ua_signal != NULL   matches by classified content-signal
+ *                       (search/ai-input/ai-train/monitor)
+ *   ua_pattern != NULL  matches by UA-substring (case-insensitive)
+ * IP axis: ip_any=1 OR client IP ∈ ranges. */
 static int bs_cohort_matches(const bs_cohort *c,
                              const char *ua, request_rec *r)
 {
     if (!c->ua_any) {
-        if (!ua || !c->ua_pattern || !strcasestr(ua, c->ua_pattern)) return 0;
+        if (c->ua_signal) {
+            const bs_ua_class *cls = bs_classify_request_ua(r);
+            if (!cls || !cls->known_signal) return 0;
+            if (strcasecmp(cls->known_signal, c->ua_signal) != 0) return 0;
+        } else if (c->ua_pattern) {
+            if (!ua || !strcasestr(ua, c->ua_pattern)) return 0;
+        } else {
+            return 0;
+        }
     }
     if (!c->ip_any) {
         if (!c->ranges || !bs_allow_ip_in_ranges(c->ranges, r)) return 0;
@@ -394,7 +404,11 @@ int bs_check_policy(request_rec *r)
     robots_match rmatch = { -1, 0, 1, 0, NULL };
     int robots_apply = 0;
     if (rstate && rstate->doc && ua) {
-        robots_query(rstate->doc, ua, r->uri, &rmatch);
+        const bs_ua_class *cls_for_robots = bs_classify_request_ua(r);
+        const char *robots_signal = (cls_for_robots
+                                     && cls_for_robots->known_signal)
+                                  ? cls_for_robots->known_signal : NULL;
+        robots_query(rstate->doc, ua, robots_signal, r->uri, &rmatch);
         if (rmatch.group_idx >= 0) {
             robots_apply = 1;
             if (rmatch.is_wildcard) {

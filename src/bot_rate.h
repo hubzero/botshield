@@ -48,16 +48,21 @@ typedef struct bs_bot_rate_slot {
     const char  *origin;         /* "directive" or "wildcard" or "robots.txt" */
 } bs_bot_rate_slot;
 
-/* One configured rule (directive or robots.txt-derived). Specific
- * entries carry their resolved slug set; wildcard entries don't —
- * they expand at init time over the directory. */
+/* One configured rule (directive or robots.txt-derived). Three
+ * shapes:
+ *   specific (default):  slugs = resolved set (sharing one counter slot)
+ *   is_wildcard = 1:     slugs = NULL; expands at init over directory
+ *   is_signal = 1:       slugs = resolved set; per-slug allocation
+ *                        like wildcard but filtered by signal category */
 typedef struct bs_bot_rate_entry {
     const char         *origin;
     int                 is_wildcard;
+    int                 is_signal;     /* @signal selector */
+    const char         *signal_name;   /* "search"/"ai-input"/etc.; non-NULL when is_signal */
     apr_uint32_t        budget;
     apr_uint32_t        window_sec;
     apr_array_header_t *slugs;       /* const char *; NULL for wildcard */
-    int                 shm_slot;    /* shared across this entry's slugs */
+    int                 shm_slot;    /* shared across this entry's slugs (specific only) */
 } bs_bot_rate_entry;
 
 /* Per-vhost state. */

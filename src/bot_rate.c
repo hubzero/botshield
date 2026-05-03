@@ -120,6 +120,28 @@ const char *bs_set_bot_rate_limit(cmd_parms *cmd, void *dconf,
                 "wildcard entry is permitted per scope");
         }
         st->wildcard_entry = e;
+    } else if (argv[0][0] == '@') {
+        /* @signal selector — resolve to all directory slugs whose
+         * `signal` field matches. Each matched slug gets its own
+         * counter (per-slug allocation, like the * wildcard but
+         * scoped to one signal category). */
+        const char *signal_name = argv[0] + 1;
+        if (!*signal_name) {
+            return "BotShieldBotRateLimit: '@' must be followed by a "
+                   "signal name (search, ai-input, ai-train, monitor)";
+        }
+        e->is_signal = 1;
+        e->signal_name = apr_pstrdup(cmd->pool, signal_name);
+        e->slugs = bs_known_bots_resolve_by_signal(cmd->pool,
+                                                    signal_name);
+        if (e->slugs->nelts == 0) {
+            return apr_psprintf(cmd->pool,
+                "BotShieldBotRateLimit: '@%s' did not resolve to any "
+                "directory slug. Recognized signals: search, ai-input, "
+                "ai-train, monitor. Check spelling or update vendor/"
+                "bot-directory*.json with explicit signal fields.",
+                signal_name);
+        }
     } else {
         e->slugs = bs_known_bots_resolve_slugs(cmd->pool, argv[0]);
         if (e->slugs->nelts == 0) {
@@ -344,14 +366,16 @@ void bs_bot_rate_init(apr_pool_t *pconf, server_rec *s, int *next_slot)
                                                    next_slot);
 
         int specific_count = 0;
+        int signal_count   = 0;
         int wildcard_count = 0;
 
-        /* Pass 1 — specific entries. Each entry's resolved slugs
-         * share ONE counter slot at the entry's budget. */
+        /* Pass 1 — specific entries (substring-resolved or
+         * literal-slug-resolved). Each entry's resolved slug set
+         * shares ONE counter slot at the entry's budget. */
         for (int i = 0; i < st->entries->nelts; i++) {
             bs_bot_rate_entry *e = APR_ARRAY_IDX(st->entries, i,
                                                  bs_bot_rate_entry *);
-            if (e->is_wildcard) continue;
+            if (e->is_wildcard || e->is_signal) continue;
             const char *first_slug = (e->slugs && e->slugs->nelts > 0)
                 ? APR_ARRAY_IDX(e->slugs, 0, const char *) : "?";
             bs_bot_rate_slot *h = allocate_holder(pconf, sv,
@@ -376,7 +400,33 @@ void bs_bot_rate_init(apr_pool_t *pconf, server_rec *s, int *next_slot)
             }
         }
 
-        /* Pass 2 — wildcard. For every directory slug not yet mapped,
+        /* Pass 2 — @signal entries. For each entry, walk its resolved
+         * slug set; for slugs not yet mapped (specific entries already
+         * claimed them), allocate one slot per slug at the entry's
+         * budget. Per-slug allocation, NOT aggregate — matches the
+         * wildcard pattern but scoped to a signal category. */
+        for (int i = 0; i < st->entries->nelts; i++) {
+            bs_bot_rate_entry *e = APR_ARRAY_IDX(st->entries, i,
+                                                 bs_bot_rate_entry *);
+            if (!e->is_signal) continue;
+            for (int j = 0; j < e->slugs->nelts; j++) {
+                const char *slug = APR_ARRAY_IDX(e->slugs, j,
+                                                 const char *);
+                if (apr_hash_get(st->by_slug, slug, APR_HASH_KEY_STRING)) {
+                    continue;   /* specific entry won */
+                }
+                bs_bot_rate_slot *h = allocate_holder(pconf, sv,
+                    apr_pstrcat(pconf, "signal:", e->signal_name,
+                                " ", slug, NULL),
+                    next_slot, e->budget, e->window_sec,
+                    apr_pstrcat(pconf, "signal:", e->signal_name, NULL));
+                if (!h) break;
+                apr_hash_set(st->by_slug, slug, APR_HASH_KEY_STRING, h);
+                signal_count++;
+            }
+        }
+
+        /* Pass 3 — wildcard. For every directory slug not yet mapped,
          * allocate a separate slot at the wildcard's budget. Plus the
          * two reserved aggregate slots (unknown-bot, fake-bot). */
         if (st->wildcard_entry) {
@@ -411,19 +461,21 @@ void bs_bot_rate_init(apr_pool_t *pconf, server_rec *s, int *next_slot)
 
             ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
                 "mod_botshield: BotShieldBotRateLimit: %d directive + "
-                "%d robots.txt slot(s) + %d wildcard slot(s) + %s%s%s"
-                "aggregate(s) (pool cursor at %d/%d)",
-                specific_count, robots_count, wildcard_count,
+                "%d robots.txt + %d signal + %d wildcard slot(s) + "
+                "%s%s%saggregate(s) (pool cursor at %d/%d)",
+                specific_count, robots_count, signal_count,
+                wildcard_count,
                 st->unknown_bot_holder        ? "unknown-bot "        : "",
                 st->fake_bot_holder           ? "fake-bot "           : "",
                 st->wildcard_fallback_holder  ? "wildcard-fallback "  : "",
                 *next_slot, (int)bs_shm.rate_counter_count);
-        } else if (specific_count > 0 || robots_count > 0) {
+        } else if (specific_count > 0 || signal_count > 0
+                   || robots_count > 0) {
             ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
                 "mod_botshield: BotShieldBotRateLimit: %d directive + "
-                "%d robots.txt slot(s); no wildcard rule (unmatched "
-                "bots not rate-limited)",
-                specific_count, robots_count);
+                "%d robots.txt + %d signal slot(s); no wildcard rule "
+                "(unmatched bots not rate-limited)",
+                specific_count, robots_count, signal_count);
         }
     }
 }

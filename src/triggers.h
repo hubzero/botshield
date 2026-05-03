@@ -184,6 +184,12 @@ typedef struct {
 typedef struct {
     const char         *ua_pattern;
     int                 ua_any;
+    /* @signal selector — when non-NULL, the UA axis matches by the
+     * request's classified content-signal instead of UA-substring.
+     * Mutually exclusive with ua_pattern; setter rejects both. Set
+     * by `BotShieldBlockPath @search ...` or `BotShieldPathTrigger
+     * @ai-train ...`. */
+    const char         *ua_signal;
     int                 ip_any;
     const char         *path;
     const char         *inline_cidrs;

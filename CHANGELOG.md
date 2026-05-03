@@ -1,5 +1,104 @@
 # Changelog
 
+## 2026-05-03 (signals)
+
+### Added — content-signal vocabulary throughout
+
+Adopt the IETF aipref content-signal vocabulary (`search`, `ai-input`,
+`ai-train`) plus a mod_botshield extension `monitor` for operational
+crawler categories. Signals are attached per directory entry at
+codegen time (mapped from category) and surfaced as a new selector
+`@<signal>` in three directives plus robots.txt.
+
+#### Directory schema
+
+`bs_known_bot_entry` gains a `signal` field; `tools/gen-bot-directory.py`
+maps Cloudflare bot-directory categories to signals at codegen time:
+
+  | bot-directory category    | signal     |
+  |---------------------------|------------|
+  | AI_CRAWLER                | ai-train   |
+  | AI_ASSISTANT, AI_SEARCH   | ai-input   |
+  | ACADEMIC_RESEARCH         | ai-train   |
+  | SEARCH_ENGINE_CRAWLER     | search     |
+  | SEARCH_ENGINE_OPTIMIZATION| search     |
+  | PAGE_PREVIEW, ARCHIVER    | search     |
+  | MONITORING_AND_ANALYTICS  | monitor    |
+  | ACCESSIBILITY             | monitor    |
+  | (other)                   | NULL       |
+
+  Today's directory: 166 search, 135 monitor, 47 ai-train, 33 ai-input,
+  250 NULL. Per-bot override via `vendor/bot-directory.local.json`
+  with an explicit `signal` field. `bs_known_bots_resolve_by_signal`
+  helper enumerates slugs by signal.
+
+  `bs_ua_class` gains a `known_signal` field, populated alongside
+  `known_slug` and `known_category` at classification time so
+  downstream code reads it once per request.
+
+#### Directive `@signal` selector
+
+  - `BotShieldBotRateLimit @search 1 sec` — rate-limit by signal.
+    Per-slug allocation (each bot in the category gets its own
+    counter at the entry's budget). Specific slug rules still
+    win over @signal; @signal wins over `*` wildcard.
+  - `BotShieldBlockPath ai-train-pubs @ai-train * /publications/*`
+    — 403 when classified-as-ai-train hits the path.
+  - `BotShieldRateLimit search-burst @search * 100 sec` — cohort
+    rate limit by signal. Bonus side-effect of extending the shared
+    cohort matcher.
+
+  Cohort matcher (`bs_cohort_matches`) reads `cls->known_signal`
+  directly — no per-request directory walk.
+
+#### Robots.txt `User-agent: @signal`
+
+  ```
+  User-agent: @ai-train
+  Disallow: /publications/
+  Crawl-delay: 3600
+  ```
+
+  At parse time, `@`-prefixed User-agent stanzas are stored as-is.
+  At query time, `robots_query` accepts a `signal` parameter
+  (caller passes `cls->known_signal` from policy.c); `@signal`
+  stanzas match when the request's classified signal equals the
+  stanza value. Crawl-delay flows through bot_rate's slug-keyed
+  machinery as before. Disallow rules apply the same way as
+  UA-substring stanzas — same group qualifies, same path-rule
+  longest-match-wins logic.
+
+  Caveat — this is a server-side-only convention. Real-world
+  scrapers reading the file see `@ai-train` and (correctly) ignore
+  the stanza as not-applicable. For *publishing* signal preferences
+  to AI companies that honor aipref, use the `Content-Signal:` HTTP
+  header (separate feature, not yet implemented).
+
+### Operator-facing summary
+
+A coherent signal-aware policy:
+
+```apache
+# rate-limit by signal (per-slug allocation; each bot independent)
+BotShieldBotRateLimit @search    1 sec
+BotShieldBotRateLimit @ai-train  1 hour
+BotShieldBotRateLimit @ai-input  0          # admit all (effectively block via 0=admit)
+BotShieldBotRateLimit @monitor   5 sec
+
+# hard 403 by signal+path
+BotShieldBlockPath ai-train-pubs @ai-train * /publications/*
+
+# robots.txt declarative form (server-side enforcement only)
+User-agent: @ai-train
+Disallow: /publications/
+Crawl-delay: 3600
+```
+
+Specific slugs still override @signal (e.g.,
+`BotShieldBotRateLimit googlebot 0` excepts Googlebot from any
+@search rule). Operator workflow stays the same: write rules in
+order of specificity, the matcher picks the most-specific.
+
 ## 2026-05-03 (latest)
 
 ### Added

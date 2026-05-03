@@ -91,7 +91,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     for (size_t i = 0; i < sizeof(g_uas) / sizeof(g_uas[0]); i++) {
         for (size_t j = 0; j < sizeof(g_paths) / sizeof(g_paths[0]); j++) {
             robots_match m;
-            robots_query(doc, g_uas[i], g_paths[j], &m);
+            robots_query(doc, g_uas[i], NULL, g_paths[j], &m);
         }
     }
 

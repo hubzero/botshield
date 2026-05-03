@@ -52,6 +52,11 @@ typedef struct bs_ua_class {
     int          is_known_bot;      /* matched the Cloudflare bot directory */
     const char  *known_slug;        /* e.g. "google", NULL if not */
     const char  *known_category;    /* e.g. "search engine" */
+    /* Content-signal for the matched directory entry — IETF aipref
+     * vocabulary plus mod_botshield's "monitor" extension. NULL if
+     * the bot's category doesn't map to a signal. Used by @signal
+     * selectors in BotShieldBotRateLimit / BlockPath / robots.txt. */
+    const char  *known_signal;
 
     /* Strict semantics: is_verified_bot means "IP cross-checked AND
      * confirmed." The no-IP-check fall-throughs (verified_ua_only,
