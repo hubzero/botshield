@@ -46,6 +46,7 @@
 #include "config.h"
 #include "allowlist.h"
 #include "bot_directory.h"
+#include "bot_rate.h"
 #include "browser_classifier.h"
 #include "challenge.h"
 #include "heuristics.h"
@@ -925,10 +926,21 @@ static int bs_init_shm_layout(apr_pool_t *pconf, apr_pool_t *ptemp,
     apr_size_t cv_log_bytes  = (apr_size_t)BS_DEFAULT_CV_LOG_SLOTS
                                * sizeof(bs_cv_slot);
     apr_size_t metrics_bytes = sizeof(bs_metrics);
-    /* E2.1 — fixed-size table of rate-limit counter slots. 256 slots
-     * covers hand-written directives comfortably; E2.2's robots.txt
-     * rules will share the same pool. Trivial size (~2 KB). */
-    #define BS_E21_RATE_SLOTS 256
+    /* E2.1 — fixed-size table of rate-limit counter slots. Sized to
+     * fit the bot-directory (~640 known-bot slugs + verified-bots,
+     * each pre-allocated one slot when BotShieldBotRateLimit is
+     * configured) plus directive rate-limits + robots.txt group
+     * counters + generous headroom for directory growth between
+     * graceful-restarts. 2048 slots × 8 bytes = 16 KB SHM —
+     * trivial cost; leaves ~1400 slots free above today's directory.
+     * Mid-run directory growth via watchdog refresh (vendor/bot-
+     * directory.json updates) currently does NOT allocate new rate-
+     * limit slots — operators graceful-restart for major directory
+     * drops. Dynamic watchdog-driven slot allocation is a future
+     * enhancement; new slugs in the meantime fall through to the
+     * unknown-bot / fake-bot aggregate slots (graceful degradation,
+     * no request failures). */
+    #define BS_E21_RATE_SLOTS 2048
     apr_size_t e21_rate_bytes = BS_E21_RATE_SLOTS * sizeof(bs_rate_counter);
     /* E9 — strike table for repeated-429 escalation. Sized by the
      * main server's BotShieldRateLimitEscalateCapacity (default
@@ -2314,6 +2326,9 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     bs_init_bot_directory(pconf, s);
     bs_init_browser_templates(pconf, s);
     bs_init_allow_ranges(pconf, s);
+    /* Slug-keyed bot rate limit needs the directory loaded (above)
+     * and shares the rate-counter pool with directives + robots.txt. */
+    bs_bot_rate_init(pconf, s, &next_slot);
     bs_check_staleness(pconf, s);
     bs_register_load_watchdog(pconf, s);
     bs_register_headroom_watchdog(pconf, s);

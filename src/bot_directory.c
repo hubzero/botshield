@@ -127,6 +127,36 @@ int bs_ua_is_known_bot(const char *ua,
 }
 
 
+/* --- Slug-set resolver -------------------------------------------- */
+
+/* A directory pattern P is "covered by" an operator pattern S iff S
+ * is a substring of P (case-insensitive). Reasoning: any request UA
+ * matching P contains P as a substring; if S is a substring of P,
+ * then S is also a substring of the request UA, so an operator-
+ * specified User-agent: S would apply to that bot via directory
+ * entry P. Conservative: covers only when guaranteed. */
+apr_array_header_t *bs_known_bots_resolve_slugs(apr_pool_t *pool,
+                                                const char *pattern)
+{
+    apr_array_header_t *out =
+        apr_array_make(pool, 4, sizeof(const char *));
+    if (!pattern || !*pattern) return out;
+
+    bs_known_bots_state *st =
+        __atomic_load_n(&bs_bot_directory_active, __ATOMIC_ACQUIRE);
+    const bs_known_bot_entry *entries = st ? st->entries : bs_known_bots;
+    if (!entries) return out;
+
+    for (const bs_known_bot_entry *e = entries; e->pattern != NULL; e++) {
+        if (strcasestr(e->pattern, pattern) != NULL) {
+            *(const char **)apr_array_push(out) =
+                apr_pstrdup(pool, e->slug);
+        }
+    }
+    return out;
+}
+
+
 /* --- Aho-Corasick builder ---------------------------------------- */
 
 /* Build representation. Per-node `edges` is a growable APR array

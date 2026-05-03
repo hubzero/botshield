@@ -1,5 +1,157 @@
 # Changelog
 
+## 2026-05-03 (later)
+
+### Added
+
+- `BotShieldBotRateLimit` directive — slug-keyed rate limit per known
+  bot identity. Args: `<slug-or-pattern-or-*> <budget> <per>`.
+
+  ```apache
+  BotShieldBotRateLimit googlebot 1000 min   # specific slug
+  BotShieldBotRateLimit Google    5000 min   # pattern → all Google-family slugs share one budget
+  BotShieldBotRateLimit *         200  min   # per-slug fallback
+  ```
+
+  Slug-or-pattern resolves against the bot directory (substring
+  match, case-insensitive). A pattern like `Google` covers every
+  directory entry whose pattern contains "Google" — `googlebot`,
+  `google-other`, `google-extended`, etc. — sharing **one** counter
+  across the family. A specific slug like `googlebot` matches just
+  that one entry.
+
+  `*` is the wildcard fallback — at post_config it pre-allocates
+  one counter slot **per directory slug** that isn't covered by a
+  specific rule. Each unmatched bot gets its own counter at the
+  wildcard budget. This matches robots.txt's per-bot self-discipline
+  semantic (each crawler reads the spec and obeys its own rate
+  limit) without coordinating across bots. Two reserved aggregate
+  slots additionally cap the `unknown-bot` and `fake-bot` labels
+  (no stable slug; aggregate cap at the wildcard budget).
+
+  Lookup at request time is one O(1) hash probe + one atomic CAS.
+  Slot universe is bounded by the directory size (~640 today);
+  pool size bumped to 2,048 (16 KB SHM) to leave headroom for
+  directive rate limits, robots.txt groups, and directory growth.
+
+  Over-budget responses: 429 + Retry-After + score+=50 +
+  decision-log reason `bot-rate:<slug>`. Browser-classified UAs,
+  unknown-ua, and empty-ua bypass the wildcard entirely (the rule
+  applies to bots, not real users or unclassified clients).
+
+  When `*` is configured, three reserved aggregate slots back the
+  wildcard:
+    - `unknown-bot` aggregate — caps requests with the
+      heuristic-substring label (`bot`, `crawl`, `spider`, etc.) at
+      the wildcard budget.
+    - `fake-bot` aggregate — caps requests where the verified-bot
+      pattern matched but the IP cross-check failed.
+    - `wildcard-fallback` aggregate — catches "classified-as-known/
+      verified-bot but the slug isn't in the post_config slug map"
+      requests. This protects the gap between bot-directory updates
+      arriving via watchdog refresh and the next graceful-restart
+      (which would re-allocate per-slug counters at post_config).
+      The actual slug name is preserved in the decision-log reason
+      (`bot-rate:<slug>`), so the observability stays clean even
+      while multiple unmapped slugs share one counter.
+
+### Changed
+
+- Rate-counter SHM pool: `BS_E21_RATE_SLOTS` raised from 256 → 2048
+  (16 KB total). Headroom for the bot-rate-limit per-slug pre-
+  allocation plus existing directive rate limits and robots.txt
+  Crawl-delay groups.
+
+- **robots.txt Crawl-delay rekeyed onto the slug-keyed bot-rate
+  machinery** (formerly per-group-index slot pool at `policy.c:540`).
+  Each robots.txt group's User-agent stanzas resolve at post_config
+  to a slug set via the bot directory; the group's Crawl-delay
+  becomes the slug entries' window. Both sources (directive +
+  robots.txt) now feed one `slug → counter` map. Directive entries
+  override robots.txt-derived ones on conflict (a config-time
+  NOTICE flags overwrites).
+
+  Operator-visible changes:
+
+  - **Decision-log reason rename**: `robots-rate:<group_name>` →
+    `bot-rate:<slug>`. Operators with grep/dashboard tooling on
+    the old reason will need to update.
+  - **Robots.txt User-agent stanzas that don't resolve to a
+    directory slug get no enforcement.** Add matching entries to
+    `vendor/bot-directory.local.json` if you want enforcement for
+    a UA that isn't in the upstream directory.
+  - **`BotShieldRateLimit` cohort matching no longer suppresses
+    robots.txt Crawl-delay** (the legacy `directive_rate_matched`
+    short-circuit was retired). Cohort directives and bot-rate are
+    now independent families that compose — whichever trips first
+    short-circuits the policy walk. Operators wanting "directive
+    overrides robots.txt for this slug" should use
+    `BotShieldBotRateLimit <slug> <budget> <per>` directly, which
+    overwrites the robots.txt-derived entry on the same slug.
+
+## 2026-05-03
+
+### Changed (breaking — decision-log reasons)
+
+- Unified UA-classifier reason vocabulary in the decision log. Every
+  request now gets **exactly one UA-class tag**:
+
+  | classifier outcome | reason | score |
+  |---|---|---|
+  | UA matched + IP cross-checked + IP confirmed | `verified-bot:name` | `BS_CREDIT_ALLOW` |
+  | UA matched + IP cross-checked + IP failed | `fake-bot:name` | `BS_PENALTY_FAKE_BOT` |
+  | UA matched, no IP check ran (any reason) | `known-bot:name` | 0 |
+  | directory match (only) | `known-bot:slug` | 0 |
+  | unknown-bot heuristic substring | `unknown-bot:token` | 0 |
+  | browser-template match | `browser:slug` | 0 |
+  | UA present, no classifier signal | `unknown-ua` | 0 |
+  | no `User-Agent` header | `empty-ua` | 0 |
+
+  Browser slugs identify the family from distinctive UA tokens:
+  `chrome`, `chrome-mobile`, `chrome-ios`, `firefox`, `firefox-ios`,
+  `edge`, `edge-mobile`, `edge-ios`, `safari`, `safari-mobile`,
+  `opera`, `opera-ios`, `samsung`, `brave`, `duckduckgo`, `yandex`,
+  `avg`, `avast`, `adguard`, `median`, `obsidian`, `scalboost`,
+  `ios-webview`, plus a generic `browser` fallback when a template
+  matched but no family token was recognized. Order of detection
+  matters because Chromium derivatives carry `Chrome/` in their UA;
+  the family-token check (`Edg/`, `OPR/`, `EdgA/`, `SamsungBrowser/`,
+  `Brave`, etc.) wins before the bare-Chrome catch.
+
+  Renames against the previous vocabulary:
+  - `allow-bot:<name>` → `verified-bot:<name>` (now strictly means
+    "IP cross-check ran and confirmed").
+  - `allow-bot-ua:<name>` → `known-bot:<name>` **and the score
+    drops to 0** (see breaking-behavior note below).
+  - `bot-unverified:<name>` → `known-bot:<name>` (score unchanged
+    at 0; the diagnostic stays available via the
+    `bot_unverified_total` Prometheus counter).
+  - `fake-<name>` → `fake-bot:<name>` (consistent prefix).
+
+  New tags emitted that weren't before: `unknown-bot:<token>`,
+  `unknown-ua`, `empty-ua`. These give the absence-of-tag the
+  unambiguous meaning "browser-template match."
+
+- **Behavior change for `BotShieldAllowBot * <name>` (UA-only mode):**
+  declarations using `*` (operator opts out of IP verification) no
+  longer grant `BS_CREDIT_ALLOW` to the matched UA. They contribute
+  the UA pattern to the known-bot pool — score 0, no automatic
+  pass-tier credit. Verified-bot credit now requires a real IP
+  cross-check. Operators who relied on UA-only auto-pass should
+  add a `rangesPath` (or comma-separated CIDR list) so the IP
+  cross-check can actually run.
+
+- `BotShieldClassify -verified-bots` semantics tightened to match.
+  Previously, matched UAs were treated as "UA-only verified" and
+  got `BS_CREDIT_ALLOW`. Now they degrade to `known-bot:<name>`
+  with score 0 — neither verified-bot credit nor fake-bot penalty.
+  Same fail-safe response to stale CIDR data, with the asymmetry
+  removed.
+
+  Operators with grep/dashboard tooling on the old reason names
+  (`allow-bot:`, `allow-bot-ua:`, `bot-unverified:`, `fake-`)
+  will need to update their patterns.
+
 ## 2026-05-02
 
 ### Added

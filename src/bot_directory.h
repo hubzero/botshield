@@ -157,6 +157,24 @@ void bs_known_bots_publish(server_rec *s,
 apr_status_t bs_bot_directory_watchdog_cb(int state, void *data,
                                           apr_pool_t *pool);
 
+/* Resolve an operator-supplied UA-pattern argument (from a directive
+ * or robots.txt User-agent stanza) to the SET of directory slugs the
+ * pattern covers.
+ *
+ * Substring semantics: an arg like "Google" includes every directory
+ * entry whose .pattern field contains "Google" (case-insensitive) —
+ * "Googlebot/", "GoogleOther/", "Google-Extended", etc. — so all the
+ * Google-family slugs share the resolved set. An arg like "Googlebot"
+ * narrows to just the googlebot slug. Reads the active runtime-
+ * override state if present, otherwise the compiled-in baseline.
+ *
+ * Returns an apr_array of `const char *` slug pointers allocated from
+ * `pool`. Empty array (nelts == 0) means no directory entry matched
+ * the pattern — caller should warn the operator. The returned slug
+ * pointers are duplicated into `pool`, safe to retain. */
+apr_array_header_t *bs_known_bots_resolve_slugs(apr_pool_t *pool,
+                                                const char *pattern);
+
 /* Setters wired into bs_cmds[]. */
 const char *bs_set_bot_directory(cmd_parms *cmd, void *dconf,
                                  const char *path);

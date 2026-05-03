@@ -142,8 +142,10 @@ def test_robots_crawl_delay_rate_limits(
     assert ra and ra.isdigit() and int(ra) > 0, (
         f"Retry-After missing or not a positive integer: {ra!r}"
     )
-    assert [d for d in lines if "robots-rate:gptbot" in d["reason"]], (
-        f"no robots-rate:gptbot decision line; lines={lines}"
+    # Reason name changed when robots.txt Crawl-delay was rekeyed onto
+    # the slug-keyed bot_rate machinery (formerly "robots-rate:<group>").
+    assert [d for d in lines if "bot-rate:gptbot" in d["reason"]], (
+        f"no bot-rate:gptbot decision line; lines={lines}"
     )
 
 
@@ -445,9 +447,13 @@ def test_robots_live_refresh_picks_up_changes(
 def test_directive_rate_limit_overrides_robots_crawl_delay(
     robots_path, config_override, fresh_ip,
 ):
-    """Operator directive takes precedence over robots.txt in the same
-    feature family. robots.txt says 1/60s; directive says 10/sec. The
-    directive's looser bucket is checked first; request admits."""
+    """Operator directive takes precedence over robots.txt in the
+    slug-keyed rate-limit family. robots.txt says 1/60s; directive
+    says 10/sec for the same slug; directive's looser bucket wins —
+    all three requests admit. After the robots.txt rekey, both
+    sources feed the same slug→counter map, and bot_rate_init
+    processes directives second so they overwrite robots.txt-
+    derived entries on slug conflict (with a config-time NOTICE)."""
     robots_path = _write_robots(robots_path, """
         User-agent: GPTBot
         Crawl-delay: 60
@@ -459,7 +465,7 @@ def test_directive_rate_limit_overrides_robots_crawl_delay(
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
         f'    BotShieldRobotsTxt {robots_path}\n'
-        f'    BotShieldRateLimit gptbot 10 sec "GPTBot" *',
+        f'    BotShieldBotRateLimit gptbot 10 sec',
         count=1,
     ):
         r1 = client.get("/", xff=fresh_ip, ua=GPTBOT_UA)
@@ -467,5 +473,5 @@ def test_directive_rate_limit_overrides_robots_crawl_delay(
         r3 = client.get("/", xff=fresh_ip, ua=GPTBOT_UA)
 
     # Directive budget is 10/sec; all three should admit. If robots.txt's
-    # 1/60s were being consulted, r2 would be 429.
+    # 1/60s were being consulted (i.e., directive didn't win), r2 = 429.
     assert [r1.status_code, r2.status_code, r3.status_code] == [200, 200, 200]

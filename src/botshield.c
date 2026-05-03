@@ -78,6 +78,7 @@
 #include "crypto.h"    /* SHA-256, HMAC, AES-256-GCM, HKDF, hex codec */
 #include "allowlist.h" /* E1 — UA classifier, CIDR list loader, builtin bots */
 #include "bot_directory.h" /* known-bot UA classifier (Cloudflare directory) */
+#include "bot_rate.h" /* slug-keyed bot rate limit */
 #include "browser_classifier.h" /* strict-template browser UA classifier */
 #include "ua_class.h"     /* unified UA classifier (browser/known/verified/fake) */
 #include "metrics.h"   /* M9 — decision log, counters, Prometheus, mod_status */
@@ -477,6 +478,21 @@ static const command_rec bs_cmds[] = {
                  "Both-'*' is rejected. Over-budget requests return "
                  "429 + Retry-After and get a +50 score penalty "
                  "under reason rate-limit-exceeded:<name>."),
+    AP_INIT_TAKE_ARGV("BotShieldBotRateLimit",
+                 bs_set_bot_rate_limit, NULL, RSRC_CONF,
+                 "Per-bot-slug rate limit. Args: "
+                 "<slug-or-pattern-or-*> <budget> <per>. "
+                 "Slug-or-pattern is matched (case-insensitive "
+                 "substring) against the bot directory; resolves to "
+                 "all matching slugs which share one counter. '*' "
+                 "is the wildcard fallback — pre-allocates one "
+                 "counter PER directory slug not covered by a "
+                 "specific rule (each unmatched bot gets its own "
+                 "budget; matches robots.txt per-bot semantic), "
+                 "plus two reserved aggregate slots for unknown-bot "
+                 "and fake-bot labels. Per is sec/min/hour (or "
+                 "s/m/h); budget 1..1000000. Over-budget returns "
+                 "429 + Retry-After + reason bot-rate:<slug>."),
     /* E9 — repeated-429 escalation. Sits on top of BotShieldRateLimit;
      * does not apply to robots.txt Crawl-delay 429s in v1 (no operator
      * handle for them). */
