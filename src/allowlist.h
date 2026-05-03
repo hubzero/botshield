@@ -47,9 +47,11 @@ typedef struct bs_ua_classifier bs_ua_classifier;
  *  inline_cidrs — comma-separated CIDR list from the directive's third
  *                 arg, parsed at post_config; NULL if a path or
  *                 UA-only mode is in use instead.
- *  ua_only      — 1 when the directive's third arg was `*`; the bot is
- *                 allowed on UA match alone, no IP check. Logged with
- *                 reason "allow-bot-ua:<name>" instead of "allow-bot:". */
+ *  ua_only      — 1 when the directive's third arg was `*`; operator
+ *                 opted out of IP verification for this bot. UA match
+ *                 alone doesn't qualify for verified-bot credit, so
+ *                 the entry just contributes its UA pattern to the
+ *                 known-bot pool (logged as "known-bot:<name>", score 0). */
 typedef struct {
     const char *name;
     const char *pattern;
@@ -192,9 +194,10 @@ const char *bs_allow_sidecar_path(apr_pool_t *p, const char *canonical);
  * Build a fresh bs_bot_ranges_state from the manifest. Every entry
  * in `manifest` is loaded and its ranges populated into the new
  * state; missing file-backed bots are logged but don't fail the
- * whole rebuild (they just have no ranges this generation, classifying
- * as bot-unverified at request time). Returns NULL only on subpool
- * allocation failure. */
+ * whole rebuild (they just have no ranges this generation; the bot's
+ * UA pattern still matches but lands in the known-bot pool with
+ * score 0 instead of getting verified-bot credit). Returns NULL only
+ * on subpool allocation failure. */
 bs_bot_ranges_state *bs_allow_ranges_build(
     const bs_bot_ranges_manifest *manifest);
 
@@ -236,11 +239,12 @@ int bs_parse_client_ip(const char *ip_str, unsigned char out[16]);
  * are left untouched. */
 void bs_mask_ipv6_prefix(unsigned char ip[16], int prefix_bits);
 
-/* E1 request-time entry. Called from bs_run_builtin_heuristics when
- * BotShieldLegitCrawlers is on. Emits at most one bs_score_add call
- * per request (a dominant credit for verified crawlers, a strong
- * penalty for fakes claiming a crawler UA from the wrong IP, or a
- * neutral "bot-unverified" reason when ranges aren't loaded). */
+/* E1 request-time entry. Called from bs_run_builtin_heuristics.
+ * Emits at most one bs_score_add call per request (verified-bot:name
+ * with BS_CREDIT_ALLOW for IP-confirmed crawlers, or fake-bot:name
+ * with BS_PENALTY_FAKE_BOT for fakes claiming a crawler UA from the
+ * wrong IP). UA-only and ranges-not-loaded states emit nothing here;
+ * bs_handler's known-bot block tags them as known-bot:<name>. */
 void bs_check_allow(request_rec *r, const bs_dir_cfg *cfg);
 
 /* --- E1 directive setters --- *

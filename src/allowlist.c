@@ -419,8 +419,13 @@ int bs_allow_ip_in_ranges(const apr_array_header_t *ranges, request_rec *r)
  *   _(omitted)_           → default file path
  *                           /var/lib/botshield/bots/<name>.txt
  *   starts with '/'       → explicit file path
- *   equals "*"            → UA-only mode; trust on UA match with no
- *                           IP verification. Logs allow-bot-ua:<name>.
+ *   equals "*"            → UA-only mode; the operator opts out of
+ *                           IP verification for this bot. Without
+ *                           an IP check the request can't qualify
+ *                           for the verified-bot credit, so the
+ *                           UA pattern just contributes to the
+ *                           known-bot pool (logged as
+ *                           known-bot:<name>, score 0).
  *   anything else         → inline CIDR (single, or comma-separated
  *                           for multiple: "10.0.0.0/8,192.168.0.0/16").
  *
@@ -484,13 +489,16 @@ const char *bs_set_allow_bot(cmd_parms *cmd, void *dconf,
  *      crawler name or NULL.
  *   2. If classified, look up the matching CIDR list for that name
  *      and test the client IP against it.
- *   3. Match → verified-<name>; apply a large negative penalty so
+ *   3. IP confirmed → emit verified-bot:<name>, BS_CREDIT_ALLOW so
  *      tier dispatch collapses to pass.
- *   4. No match → fake-<name>; apply BS_PENALTY_FAKE_BOT so the
- *      request sails into captcha tier with a loud reason.
- *   5. Classified but no ranges loaded → "unverified" — log, don't
- *      score either way. Operator hasn't authorized verification
- *      for this crawler yet.
+ *   4. IP failed    → emit fake-bot:<name>, BS_PENALTY_FAKE_BOT so
+ *      the request sails into captcha tier with a loud reason.
+ *   5. UA-only mode (operator's `*` target) or ranges not loaded →
+ *      no emission here. The bs_handler known-bot block in
+ *      botshield.c picks up cls->verified_name and tags
+ *      known-bot:<name> with score 0. Verified-bot credit requires
+ *      an actual IP check; without one, the UA pattern just
+ *      contributes to the known-bot pool.
  *
  * The UA classifier is a vanilla trie (no Aho-Corasick failure
  * links — simpler to read, indistinguishable on realistic UAs).
@@ -532,50 +540,39 @@ void bs_check_allow(request_rec *r,
     if (!c || !c->verified_name) return;
     const char *name = c->verified_name;
 
-    /* UA-only mode: operator's `*` target. Different reason-string
-     * than full verify so operators can distinguish in log analysis. */
-    if (c->verified_ua_only) {
-        if (bs_shm.metrics) {
-            __atomic_fetch_add(&bs_shm.metrics->bot_allow_total,
-                               1, __ATOMIC_RELAXED);
-        }
-        bs_score_add(r, BS_CREDIT_ALLOW, 0,
-            apr_pstrcat(r->pool, "allow-bot-ua:", name, NULL));
-        return;
-    }
-
-    if (c->verified_unranged) {
-        /* Pattern matched but no ranges loaded — operator hasn't
-         * authorized IP verification for this bot (missing/malformed
-         * file, or declared without a path+not-UA-only). Log but
-         * don't score either way. */
-        if (bs_shm.metrics) {
-            __atomic_fetch_add(&bs_shm.metrics->bot_unverified_total,
-                               1, __ATOMIC_RELAXED);
-        }
-        bs_score_add(r, 0, 0,
-            apr_pstrcat(r->pool, "bot-unverified:", name, NULL));
-        return;
-    }
-
     if (c->is_verified_bot) {
-        /* Verified — large negative penalty dominates tier decision. */
+        /* UA pattern matched + client IP confirmed against the
+         * crawler's published ranges. Large negative credit dominates
+         * the tier decision and drives to pass. */
         if (bs_shm.metrics) {
             __atomic_fetch_add(&bs_shm.metrics->bot_allow_total,
                                1, __ATOMIC_RELAXED);
         }
         bs_score_add(r, BS_CREDIT_ALLOW, 0,
-            apr_pstrcat(r->pool, "allow-bot:", name, NULL));
-    } else if (c->is_fake_bot) {
-        /* Fake: claims crawler UA but IP isn't in that crawler's
-         * published ranges. Large penalty drives the request straight
-         * to captcha tier; the reason string surfaces in the log. */
+            apr_pstrcat(r->pool, "verified-bot:", name, NULL));
+        return;
+    }
+    if (c->is_fake_bot) {
+        /* UA claims a verified-bot identity but client IP isn't in
+         * the published ranges. Large penalty drives to captcha tier. */
         if (bs_shm.metrics) {
             __atomic_fetch_add(&bs_shm.metrics->bot_fake_total,
                                1, __ATOMIC_RELAXED);
         }
         bs_score_add(r, BS_PENALTY_FAKE_BOT, 3600,
-            apr_pstrcat(r->pool, "fake-", name, NULL));
+            apr_pstrcat(r->pool, "fake-bot:", name, NULL));
+        return;
+    }
+    /* UA-only mode (operator's `*` target) and verified_unranged
+     * (rangesPath declared but file not yet loaded) both fall through
+     * — no IP check ran, so no verified-bot credit. The known-bot
+     * block in bs_handler picks up cls->verified_name and tags
+     * known-bot:<name> with score 0. We still bump the unverified
+     * counter here so operators can monitor the load-gap rate via
+     * the /metrics endpoint. */
+    if (c->verified_unranged && bs_shm.metrics) {
+        __atomic_fetch_add(&bs_shm.metrics->bot_unverified_total,
+                           1, __ATOMIC_RELAXED);
     }
 }
 

@@ -22,10 +22,10 @@
     - `-known-bots` — AC directory walk skipped; no
       `known-bot:<slug>` log tag.
     - `-verified-bots` — UA-classifier match still runs; IP
-      cross-check skipped; matched UAs always emit
-      `allow-bot:<name>` (UA-only verify), never `fake-bot`. The
-      natural response to stale CIDR data without disabling
-      verified-bot detection entirely.
+      cross-check skipped; matched UAs degrade to
+      `known-bot:<name>` with score 0 (neither verified-bot credit
+      nor fake-bot penalty). The natural response to stale CIDR
+      data without disabling verified-bot detection entirely.
     - `-unknown-bots` — heuristic substring scan skipped.
 - `vendor/verified-bots.json` — the bundled set of verified-bot
   built-ins (googlebot, bingbot, applebot, googleother, siteimprove)

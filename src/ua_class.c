@@ -86,10 +86,18 @@ static const bs_allow_bot_entry *find_allow_entry(bs_server_cfg *scfg,
 
 /* Phase 2: verified-bot UA pattern + IP cross-check. Splits out
  * cleanly from the browser-first short-circuit so the hot path stays
- * readable. The IP cross-check is gated by classify.verified_bots:
- * when off, every UA-classifier match becomes UA-only (allow-bot
- * credit, no fake-bot penalty). The natural response to stale CIDR
- * data without disabling verified-bot detection entirely. */
+ * readable.
+ *
+ * is_verified_bot is set ONLY when the IP cross-check ran AND the
+ * client IP was confirmed. Without an actual IP check, the UA pattern
+ * just contributes the bot's name to the known-bot pool — the
+ * verified-bot credit (BS_CREDIT_ALLOW) requires real verification.
+ *
+ * Three no-IP-check fall-throughs all land in the known-bot pool
+ * downstream:
+ *   - operator's `*` target           → verified_ua_only=1
+ *   - BotShieldClassify -verified-bots → verified_unranged=1
+ *   - rangesPath declared, file not loaded → verified_unranged=1 */
 static void classify_verified(request_rec *r, const char *ua,
                               bs_ua_class *out)
 {
@@ -104,18 +112,18 @@ static void classify_verified(request_rec *r, const char *ua,
 
     const bs_allow_bot_entry *entry = find_allow_entry(scfg, name);
     if (entry && entry->ua_only) {
-        /* Operator's `*` target — UA match alone is enough. */
-        out->is_verified_bot   = 1;
-        out->verified_ua_only  = 1;
+        /* Operator's `*` target — they explicitly opted out of IP
+         * verification for this bot. UA match alone doesn't qualify
+         * for verified-bot credit; bot lands in known-bot pool. */
+        out->verified_ua_only = 1;
         return;
     }
 
-    /* BotShieldClassify -verified-bots: skip IP cross-check, treat
-     * matched UAs as UA-only verified. Same downstream path as the
-     * per-bot `*` flag, applied subsystem-wide. */
+    /* BotShieldClassify -verified-bots: subsystem-wide IP check
+     * disabled. Same effect as ranges-not-loaded — bot lands in
+     * known-bot pool without credit. */
     if (!scfg->classify.verified_bots) {
-        out->is_verified_bot   = 1;
-        out->verified_ua_only  = 1;
+        out->verified_unranged = 1;
         return;
     }
 
@@ -129,10 +137,10 @@ static void classify_verified(request_rec *r, const char *ua,
     }
 
     if (!ranges) {
-        /* UA matched but no ranges loaded — operator hasn't
-         * authorized IP verification for this bot yet. Don't claim
-         * verified or fake; bs_check_allow logs this as bot-
-         * unverified. */
+        /* UA matched but no ranges loaded — file missing, malformed,
+         * or fetch hasn't completed yet. Bot lands in known-bot pool;
+         * bs_check_allow bumps bot_unverified_total so operators can
+         * monitor the load-gap rate. */
         out->verified_unranged = 1;
         return;
     }
@@ -181,10 +189,14 @@ const bs_ua_class *bs_classify_request_ua(request_rec *r)
      * skipped here (is_browser stays 0); the fail-safe for
      * downstream consumers like bs_ua_is_crawler_candidate is
      * handled there, not by faking is_browser=1 here. */
-    if (flags.browsers && bs_ua_is_browser(ua)) {
-        cached->is_browser = 1;
-        cached->label      = BS_UA_CLASS_BROWSER;
-        return cached;
+    if (flags.browsers) {
+        const char *bslug = bs_ua_browser_slug(ua);
+        if (bslug) {
+            cached->is_browser   = 1;
+            cached->browser_slug = bslug;
+            cached->label        = BS_UA_CLASS_BROWSER;
+            return cached;
+        }
     }
 
     /* Known-bot directory walk (Aho-Corasick over ~600 patterns).
@@ -222,12 +234,14 @@ const bs_ua_class *bs_classify_request_ua(request_rec *r)
         }
     }
 
-    /* Final label: highest-signal wins. */
+    /* Final label: highest-signal wins. verified_name without
+     * is_verified_bot/is_fake_bot (UA-only target or unranged) lands
+     * in KNOWN_BOT — the bot is known to us, just not IP-verified. */
     if (cached->is_verified_bot) {
         cached->label = BS_UA_CLASS_VERIFIED_BOT;
     } else if (cached->is_fake_bot) {
         cached->label = BS_UA_CLASS_FAKE_BOT;
-    } else if (cached->is_known_bot) {
+    } else if (cached->is_known_bot || cached->verified_name) {
         cached->label = BS_UA_CLASS_KNOWN_BOT;
     } else if (cached->is_unknown_bot) {
         cached->label = BS_UA_CLASS_UNKNOWN_BOT;

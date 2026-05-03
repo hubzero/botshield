@@ -1214,7 +1214,8 @@ static void bs_init_state_persistence(apr_pool_t *pconf, server_rec *s,
  *     parse time, because we need pconf's allocator for the
  *     resulting apr_ipsubnet_t objects:
  *       - ua_only==1 (operator said `*`): no ranges loaded;
- *         request-time match gives allow-bot-ua:<name>.
+ *         request-time match gives known-bot:<name> (score 0,
+ *         no verified-bot credit since no IP check happened).
  *       - inline_cidrs set: parse via
  *         bs_allow_load_ranges_from_string.
  *       - path set: load from that file.

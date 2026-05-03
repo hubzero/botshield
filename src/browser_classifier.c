@@ -68,32 +68,99 @@ static int bs_browser_normalize(const char *ua, char *out, apr_size_t out_cap)
 }
 
 
+/* --- Family slug detection ---------------------------------------- *
+ *
+ * The codegen pre-computes the family slug for every compile-time
+ * template (gen-browser-templates.py runs the same priority-ordered
+ * substring detection in Python at build time). At request time the
+ * lookup just returns entry->slug — zero strstr.
+ *
+ * This function exists for the runtime-override loader: the override
+ * file ships normalized templates only, so the loader runs this once
+ * per entry at load time and stashes the result on the struct.
+ *
+ * Order matters: Chromium derivatives (Edge, Opera, Brave, Samsung,
+ * etc.) carry "Chrome/" in their UA, so they must be detected by
+ * their distinguishing token first. Most-specific tokens win.
+ *
+ * Operates on either the raw UA or the normalized template — the
+ * family-identifying tokens (Edg/, OPR/, Chrome/, etc.) don't contain
+ * digits/dots/underscores, so they survive normalization unchanged. */
+const char *bs_browser_family(const char *s)
+{
+    if (!s) return "browser";
+
+    /* Chromium derivatives identified by their distinctive token. */
+    if (strstr(s, "EdgA/"))             return "edge-mobile";
+    if (strstr(s, "EdgiOS/"))           return "edge-ios";
+    if (strstr(s, "Edg/"))              return "edge";
+    if (strstr(s, "OPiOS/"))            return "opera-ios";
+    if (strstr(s, "OPR/"))              return "opera";
+    if (strstr(s, "SamsungBrowser/"))   return "samsung";
+    if (strstr(s, "Brave"))             return "brave";
+    if (strstr(s, "YaBrowser/"))        return "yandex";
+    if (strstr(s, "Ddg/"))              return "duckduckgo";
+    if (strstr(s, "AVG/"))              return "avg";
+    if (strstr(s, "Avast/"))            return "avast";
+    if (strstr(s, "ADG/"))              return "adguard";
+    if (strstr(s, "median"))            return "median";
+    if (strstr(s, "obsidian"))          return "obsidian";
+    if (strstr(s, "ScalboostBrowser/")) return "scalboost";
+    if (strstr(s, "CriOS/"))            return "chrome-ios";
+    if (strstr(s, "FxiOS/"))            return "firefox-ios";
+
+    /* Engine-based identification — Firefox before Chrome since
+     * Gecko UAs don't carry "Chrome/" but the reverse isn't true. */
+    if (strstr(s, "Firefox/"))          return "firefox";
+
+    if (strstr(s, "Chrome/")) {
+        return strstr(s, "Mobile") ? "chrome-mobile" : "chrome";
+    }
+
+    /* Safari: Version/+Safari/ token combo. iOS variants carry Mobile/. */
+    if (strstr(s, "Safari/")) {
+        return strstr(s, "Mobile/") ? "safari-mobile" : "safari";
+    }
+
+    /* iOS WebView — Mobile/ token without Safari/. */
+    if (strstr(s, "Mobile/"))           return "ios-webview";
+
+    /* Template matched but didn't fit any family bucket. Generic. */
+    return "browser";
+}
+
+
 /* --- Lookup ------------------------------------------------------ */
 
-int bs_ua_is_browser(const char *ua)
+const char *bs_ua_browser_slug(const char *ua)
 {
-    if (!ua || !*ua) return 0;
+    if (!ua || !*ua) return NULL;
 
     /* Stack buffer: 1024 covers every real-world browser UA
      * comfortably (top-100 max is ~210 chars). Anything longer is
      * almost certainly not a real browser; treating it as
      * "not-a-browser" is the right outcome. */
     char buf[1024];
-    if (!bs_browser_normalize(ua, buf, sizeof(buf))) return 0;
+    if (!bs_browser_normalize(ua, buf, sizeof(buf))) return NULL;
 
     /* Atomic-load the active runtime override; fall back to baseline. */
     bs_browser_templates_state *st =
         __atomic_load_n(&bs_browser_active, __ATOMIC_ACQUIRE);
 
-    const char *const *entries = st ? st->entries : bs_browser_templates;
-    if (!entries) return 0;
+    const bs_browser_template *entries = st ? st->entries : bs_browser_templates;
+    if (!entries) return NULL;
 
     /* Sorted alphabetically — could bsearch, but at N≈23 sequential
      * strcmp wins on simplicity and is still sub-microsecond. */
-    for (const char *const *e = entries; *e != NULL; e++) {
-        if (strcmp(buf, *e) == 0) return 1;
+    for (const bs_browser_template *e = entries; e->normalized != NULL; e++) {
+        if (strcmp(buf, e->normalized) == 0) return e->slug;
     }
-    return 0;
+    return NULL;
+}
+
+int bs_ua_is_browser(const char *ua)
+{
+    return bs_ua_browser_slug(ua) != NULL;
 }
 
 
@@ -138,13 +205,32 @@ bs_browser_templates_state *bs_browser_templates_load(
     apr_finfo_t finfo;
     apr_file_info_get(&finfo, APR_FINFO_MTIME, f);
 
-    apr_array_header_t *rows = apr_array_make(pool, 32, sizeof(char *));
+    apr_array_header_t *rows =
+        apr_array_make(pool, 32, sizeof(bs_browser_template));
 
     char line[2048];
     while (apr_file_gets(line, sizeof(line), f) == APR_SUCCESS) {
         char *trimmed = bs_trim(line);
         if (!*trimmed || *trimmed == '#') continue;
-        *(char **)apr_array_push(rows) = apr_pstrdup(pool, trimmed);
+        /* Format: <normalized template>\t<slug>. The slug column is
+         * optional for backward compatibility — older files (and any
+         * hand-written entries) get auto-slugged via the family
+         * function at load time. The family-identifying tokens
+         * (Edg/, OPR/, Chrome/, ...) don't contain digits/dots/
+         * underscores so they survive normalization unchanged. */
+        bs_browser_template *e = apr_array_push(rows);
+        char *tab = strchr(trimmed, '\t');
+        if (tab) {
+            *tab = '\0';
+            e->normalized = apr_pstrdup(pool, trimmed);
+            char *slug = bs_trim(tab + 1);
+            e->slug = (slug && *slug)
+                    ? apr_pstrdup(pool, slug)
+                    : bs_browser_family(e->normalized);
+        } else {
+            e->normalized = apr_pstrdup(pool, trimmed);
+            e->slug       = bs_browser_family(e->normalized);
+        }
     }
     apr_file_close(f);
 
@@ -157,12 +243,14 @@ bs_browser_templates_state *bs_browser_templates_load(
         return NULL;
     }
 
-    /* Append NULL sentinel for the lookup loop. */
-    *(char **)apr_array_push(rows) = NULL;
+    /* Append NULL-normalized sentinel for the lookup loop. */
+    bs_browser_template *sentinel = apr_array_push(rows);
+    sentinel->normalized = NULL;
+    sentinel->slug       = NULL;
 
     bs_browser_templates_state *st = apr_pcalloc(pool, sizeof(*st));
     st->pool         = pool;
-    st->entries      = (const char *const *)rows->elts;
+    st->entries      = (const bs_browser_template *)rows->elts;
     st->count        = (apr_size_t)(rows->nelts - 1);
     st->source_mtime = finfo.mtime;
     st->source_path  = apr_pstrdup(pool, path);

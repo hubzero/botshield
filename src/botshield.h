@@ -261,14 +261,15 @@ struct bs_dir_cfg {
  *   browsers      → treat all UAs as if browser=1 for robots.txt
  *                   wildcard gating (no real users punished by
  *                   stale templates). Other passes still run.
- *   known_bots    → AC directory walk skipped; no known-bot:<slug>
- *                   log tag.
+ *   known_bots    → AC directory walk skipped; directory-only
+ *                   matches won't surface known-bot:<slug> tags.
  *   verified_bots → UA-classifier match still happens; IP cross-
- *                   check skipped; matched UAs get allow-bot:<name>
- *                   credit (UA-only verify). fake-bot never emitted.
- *                   The natural response to stale CIDR data.
+ *                   check skipped; matched UAs degrade to known-bot:
+ *                   <name> (score 0). Neither verified-bot credit nor
+ *                   fake-bot penalty fires. The natural response to
+ *                   stale CIDR data without losing the directory tag.
  *   unknown_bots  → heuristic substring scan skipped; would-be
- *                   unknown-bot UAs fall to plain unknown. */
+ *                   unknown-bot UAs fall to unknown-ua. */
 typedef struct bs_classify_flags {
     unsigned int browsers      : 1;
     unsigned int known_bots    : 1;

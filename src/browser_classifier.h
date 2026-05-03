@@ -44,27 +44,63 @@
 extern "C" {
 #endif
 
-/* Generated baseline: NULL-terminated array of normalized template
- * strings (sorted alphabetically). Lifetime is process. */
-extern const char *const bs_browser_templates[];
-extern const apr_size_t  bs_browser_templates_count;
+/* One entry in the active template set: the normalized UA template
+ * plus the browser-family slug ("chrome", "firefox", "edge", ...).
+ * Both pointers are immutable for the entry's lifetime. */
+typedef struct bs_browser_template {
+    const char *normalized;
+    const char *slug;
+} bs_browser_template;
+
+/* Generated baseline: NULL-terminated (entry with normalized==NULL)
+ * array of templates, sorted alphabetically by `normalized`. Lifetime
+ * is process. */
+extern const bs_browser_template bs_browser_templates[];
+extern const apr_size_t          bs_browser_templates_count;
 
 /* Runtime override state. Loaded from a text file, owned by a
  * private pool whose lifetime extends one watchdog tick beyond
  * the swap. */
 typedef struct bs_browser_templates_state {
-    apr_pool_t        *pool;
-    const char *const *entries;     /* NULL-terminated */
-    apr_size_t         count;
-    apr_time_t         source_mtime;
-    const char        *source_path;
+    apr_pool_t                *pool;
+    const bs_browser_template *entries;   /* NULL-normalized terminator */
+    apr_size_t                 count;
+    apr_time_t                 source_mtime;
+    const char                *source_path;
 } bs_browser_templates_state;
+
+/* Internal: identify the browser family from a raw UA or a normalized
+ * template. The family-identifying tokens (Edg/, OPR/, Chrome/,
+ * Firefox/, etc.) don't contain digits/dots/underscores, so they
+ * survive normalization unchanged — same call works for either input.
+ * Used by the runtime-override loader to slug each parsed entry once
+ * at load time. The codegen runs the same priority-ordered logic in
+ * Python so compile-time templates carry their slug at link time
+ * without needing this call. Returns a static-storage slug; never
+ * returns NULL (falls back to "browser" generic). */
+const char *bs_browser_family(const char *s);
 
 /* Returns 1 if the UA matches a known browser template, 0
  * otherwise. NULL UA returns 0. Atomically loads the active
  * runtime-override state, falling back to the compiled-in baseline
- * if no override is loaded. */
+ * if no override is loaded. Thin wrapper around bs_ua_browser_slug. */
 int bs_ua_is_browser(const char *ua);
+
+/* Returns a browser-family slug if the UA matches a curated template,
+ * NULL otherwise. The slug is identified from distinctive tokens in
+ * the UA (Chromium derivatives carry "Chrome/" but each ships its own
+ * marker — Edg/, OPR/, EdgA/, SamsungBrowser/, Brave, YaBrowser/,
+ * etc.) so we can tell Chrome-derived browsers apart from bare Chrome.
+ *
+ * Possible return values (static rodata; safe to store): "chrome",
+ * "chrome-mobile", "chrome-ios", "firefox", "firefox-ios", "edge",
+ * "edge-mobile", "edge-ios", "safari", "safari-mobile", "opera",
+ * "opera-ios", "samsung", "brave", "duckduckgo", "yandex", "avg",
+ * "avast", "adguard", "median", "obsidian", "scalboost",
+ * "ios-webview", "browser" (fallback when template matched but no
+ * family token recognized). NULL means "no template match" — caller
+ * should treat as not-a-browser. */
+const char *bs_ua_browser_slug(const char *ua);
 
 /* Parse a templates file at `path` into a fresh state allocated
  * from a subpool of `parent_pool`. Returns NULL on any failure
