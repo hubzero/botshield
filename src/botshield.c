@@ -426,8 +426,9 @@ static const command_rec bs_cmds[] = {
                  "for robots.txt wildcard purposes; -known-bots "
                  "skips the AC directory (no log slug); "
                  "-verified-bots skips the IP cross-check (matched "
-                 "UAs always allow-bot, never fake-bot — the natural "
-                 "response to stale CIDR data); -unknown-bots skips "
+                 "UAs degrade to known-bot, neither verified-bot "
+                 "credit nor fake-bot penalty — the natural response "
+                 "to stale CIDR data); -unknown-bots skips "
                  "the heuristic substring scan."),
     AP_INIT_TAKE23("BotShieldAllowBot",
                  bs_set_allow_bot, NULL, RSRC_CONF,
@@ -440,9 +441,10 @@ static const command_rec bs_cmds[] = {
                  "vendor/verified-bots.json) replaces the built-in. "
                  "UA-pattern is the case-insensitive substring "
                  "looked for in the User-Agent header. Optional "
-                 "target: '*' for UA-only trust (logs "
-                 "allow-bot-ua:<name>), an absolute file path, a "
-                 "single CIDR, or a comma-separated CIDR list. Omit "
+                 "target: '*' opts out of IP verification (UA "
+                 "match alone, logged as known-bot:<name> with "
+                 "score 0); an absolute file path; a single CIDR; "
+                 "or a comma-separated CIDR list. Omit "
                  "the target to use the default file path "
                  "/var/lib/botshield/bots/<name>.txt. Whether the "
                  "verified-bot pass actually runs is controlled by "
@@ -816,10 +818,14 @@ static const command_rec bs_cmds[] = {
  * replaced by the interstitial on first load. Anything not in this list —
  * including JSON, XML, paths with no extension — is subject to the gate. */
 static const char *const BS_ASSET_EXTS[] = {
-    ".css", ".js", ".mjs", ".map",
-    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".bmp",
+    ".css", ".js", ".mjs", ".map", ".wasm", ".webmanifest",
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif",
+    ".svg", ".ico", ".bmp", ".heic", ".heif",
     ".woff", ".woff2", ".ttf", ".eot", ".otf",
-    ".mp3", ".mp4", ".webm", ".ogg",
+    ".mp3", ".wav", ".flac", ".aac", ".m4a", ".opus", ".ogg",
+    ".mp4", ".webm", ".mov", ".m4v", ".ogv",
+    ".vtt",
+    ".m3u8", ".mpd", ".m4s",
     NULL
 };
 
@@ -1280,18 +1286,50 @@ static int bs_handler(request_rec *r)
         cookie_status = "minted";
     }
 
-    /* Tag known-bot UAs in the decision log via a zero-impact score
-     * reason. Reads the unified classification cached on r->pool by
-     * bs_classify_request_hook — no extra trie walk here. Reason
-     * embeds the upstream slug (e.g. "known-bot:google-other") so
-     * operators can grep their decision log for specific bot
-     * families. Score impact is 0 — this is observability, not
-     * policy. */
+    /* Attach the UA classification result as a zero-impact score
+     * reason so it surfaces in the decision-log line. Reads the
+     * unified classification cached on r->pool by
+     * bs_classify_request_hook — no extra trie walk here.
+     *
+     * Every request gets exactly one UA-class tag:
+     *   verified-bot:name  (UA + IP confirmed; emitted from allowlist.c)
+     *   fake-bot:name      (UA + IP failed;    emitted from allowlist.c)
+     *   known-bot:name     (directory match OR allowlist UA pattern without IP check)
+     *   unknown-bot:token  (heuristic substring hit, no other signal)
+     *   browser:slug       (top-100 real-browser template match)
+     *   unknown-ua         (UA present but didn't classify anywhere)
+     *   empty-ua           (no User-Agent header)
+     *
+     * Skip emission entirely when allowlist already speaks
+     * (is_verified_bot/is_fake_bot) to avoid double-tagging. */
     {
         const bs_ua_class *cls = bs_classify_request_ua(r);
-        if (cls && cls->known_slug && *cls->known_slug) {
-            bs_score_add(r, 0, 0,
-                apr_pstrcat(r->pool, "known-bot:", cls->known_slug, NULL));
+        if (cls && !cls->is_verified_bot && !cls->is_fake_bot) {
+            if (cls->is_browser) {
+                const char *slug = cls->browser_slug
+                                 ? cls->browser_slug : "browser";
+                bs_score_add(r, 0, 0,
+                    apr_pstrcat(r->pool, "browser:", slug, NULL));
+            } else if (cls->known_slug && *cls->known_slug) {
+                bs_score_add(r, 0, 0,
+                    apr_pstrcat(r->pool, "known-bot:", cls->known_slug, NULL));
+            } else if (cls->verified_name && *cls->verified_name) {
+                /* Allowlist UA pattern matched but no IP check ran
+                 * (UA-only target or ranges not loaded). The
+                 * operator-declared name lands in the known-bot pool. */
+                bs_score_add(r, 0, 0,
+                    apr_pstrcat(r->pool, "known-bot:", cls->verified_name, NULL));
+            } else if (cls->is_unknown_bot && cls->unknown_bot_token) {
+                bs_score_add(r, 0, 0,
+                    apr_pstrcat(r->pool, "unknown-bot:", cls->unknown_bot_token, NULL));
+            } else {
+                /* No classifier signal. Distinguish empty UA (header
+                 * missing or empty) from unknown UA (header present
+                 * but didn't match templates/directory/heuristic). */
+                const char *ua = apr_table_get(r->headers_in, "User-Agent");
+                bs_score_add(r, 0, 0,
+                    (!ua || !*ua) ? "empty-ua" : "unknown-ua");
+            }
         }
     }
 

@@ -38,25 +38,30 @@ typedef enum {
     BS_UA_CLASS_UNKNOWN = 0,
     BS_UA_CLASS_BROWSER,
     BS_UA_CLASS_UNKNOWN_BOT,  /* no directory hit, but UA has bot-y tokens (bot/crawl/spider/curl/...) */
-    BS_UA_CLASS_KNOWN_BOT,    /* matches AC directory, no verified-bot UA pattern */
-    BS_UA_CLASS_FAKE_BOT,     /* verified-bot UA pattern, IP not in ranges */
-    BS_UA_CLASS_VERIFIED_BOT, /* verified-bot UA pattern + IP confirmed (or ua-only mode) */
+    BS_UA_CLASS_KNOWN_BOT,    /* directory hit OR allowlist UA pattern without IP verification */
+    BS_UA_CLASS_FAKE_BOT,     /* allowlist UA pattern + IP cross-checked + IP not in ranges */
+    BS_UA_CLASS_VERIFIED_BOT, /* allowlist UA pattern + IP cross-checked + IP confirmed */
 } bs_ua_class_label;
 
 typedef struct bs_ua_class {
     bs_ua_class_label label;
 
     int          is_browser;        /* matched a top-100 real-browser template */
+    const char  *browser_slug;      /* "chrome", "firefox", "edge", "safari", ... when is_browser=1 */
 
     int          is_known_bot;      /* matched the Cloudflare bot directory */
     const char  *known_slug;        /* e.g. "google", NULL if not */
     const char  *known_category;    /* e.g. "search engine" */
 
-    int          is_verified_bot;   /* allowlist UA pattern + IP confirmed (or ua_only) */
-    int          is_fake_bot;       /* allowlist UA pattern matched, IP missed */
+    /* Strict semantics: is_verified_bot means "IP cross-checked AND
+     * confirmed." The no-IP-check fall-throughs (verified_ua_only,
+     * verified_unranged) leave both is_verified_bot and is_fake_bot
+     * zero — those land in the known-bot pool downstream. */
+    int          is_verified_bot;   /* allowlist UA pattern + IP confirmed */
+    int          is_fake_bot;       /* allowlist UA pattern + IP cross-checked + IP missed */
     const char  *verified_name;     /* operator-declared name on UA pattern match */
-    int          verified_ua_only;  /* trusted on UA alone (operator's `*` target) */
-    int          verified_unranged; /* UA matched but no ranges loaded yet (bot-unverified) */
+    int          verified_ua_only;  /* operator's `*` target — IP check intentionally skipped */
+    int          verified_unranged; /* IP check expected but data not available (ranges not loaded, or `-verified-bots`) */
 
     /* Heuristic last-resort signal. Set when none of the directory
      * / verified-bot / browser-template passes hit AND the UA
