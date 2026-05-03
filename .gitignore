@@ -57,3 +57,21 @@ leak-*
 timeout-*
 slow-unit-*
 tests/bench/results/
+
+# Backup of the previous active vendor file produced by
+# tools/refresh-bot-directory.py and refresh-top-user-agents.py.
+# Operator-local rollback artifacts; the committed .json + .default.json
+# are the canonical sources.
+vendor/bot-directory.json.prev
+vendor/top-user-agents.json.prev
+
+# Operator-managed overlay files. Loaded last (after upstream + the
+# committed .builtin overlay) by both the build-time codegen and the
+# refresh scripts; entries here win on slug collision. Optional — an
+# operator who doesn't want custom additions can skip the file
+# entirely. NOT committed: this is for deployment-specific bots,
+# internal scrapers, custom monitoring tools, or named entries an
+# operator wants to override locally.
+vendor/bot-directory.local.json
+vendor/top-user-agents.local.json
+vendor/verified-bots.local.json

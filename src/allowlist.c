@@ -17,24 +17,21 @@
 #include <apr_hash.h>
 
 #include <http_config.h>
+#include <http_log.h>
+#include <mod_watchdog.h>
 
 #include "botshield.h"
 #include "score.h"
 #include "shm.h"
+#include "ua_class.h"
 
-const bs_allow_bot_entry bs_builtin_bots[] = {
-    { "googlebot",   "Googlebot",       NULL, NULL, 0 },
-    { "bingbot",     "bingbot",         NULL, NULL, 0 },
-    { "applebot",    "Applebot",        NULL, NULL, 0 },
-    /* Siteimprove site-scanning crawler. UA matches the
-     * "Siteimprove.com" substring inside their full UA shape
-     * "Mozilla/5.0 ... SiteCheck-sitecrawl by Siteimprove.com; ...".
-     * IP ranges shipped at apache/bots/siteimprove.txt; deploy
-     * to /var/lib/botshield/bots/siteimprove.txt (Makefile install
-     * step). */
-    { "siteimprove", "Siteimprove.com", NULL, NULL, 0 },
-    { NULL, NULL, NULL, NULL, 0 }
-};
+/* bs_builtin_bots[] is now defined in src/generated_verified_bots.c,
+ * codegenned from vendor/verified-bots.json by
+ * tools/gen-verified-bots.py. The .json file is the source of
+ * truth for the bundled set of verified-bot entries; an operator
+ * overlay at vendor/verified-bots.local.json (gitignored) can add
+ * entries or override built-ins on slug collision. See
+ * tools/gen-verified-bots.py for the layering details. */
 
 /* --- UA classifier ---------------------------------------------- *
  *
@@ -299,6 +296,81 @@ apr_status_t bs_allow_load_ranges(apr_pool_t *p, const char *path,
     return APR_SUCCESS;
 }
 
+const char *bs_allow_sidecar_path(apr_pool_t *p, const char *canonical)
+{
+    if (!canonical || !*canonical) return NULL;
+    apr_size_t l = strlen(canonical);
+    /* Convention: "<base>.txt" → "<base>.local.txt"; otherwise
+     * "<canonical>.local". Keeps the common case readable
+     * (siteimprove.txt + siteimprove.local.txt next to each other)
+     * while still working for operators who pointed the directive
+     * at a file with no .txt suffix. */
+    if (l > 4 && strcmp(canonical + l - 4, ".txt") == 0) {
+        char *base = apr_pstrmemdup(p, canonical, l - 4);
+        return apr_pstrcat(p, base, ".local.txt", NULL);
+    }
+    return apr_pstrcat(p, canonical, ".local", NULL);
+}
+
+apr_status_t bs_allow_load_ranges_with_sidecar(
+    apr_pool_t *p,
+    const char *canonical_path,
+    const char *sidecar_path,
+    apr_array_header_t **out,
+    apr_time_t *out_canonical_mtime,
+    apr_time_t *out_sidecar_mtime,
+    const char **out_err)
+{
+    *out = NULL;
+    if (out_err) *out_err = NULL;
+    if (out_canonical_mtime) *out_canonical_mtime = 0;
+    if (out_sidecar_mtime)   *out_sidecar_mtime   = 0;
+
+    apr_array_header_t *canon = NULL;
+    apr_status_t rv = bs_allow_load_ranges(p, canonical_path, &canon, out_err);
+    if (rv != APR_SUCCESS) {
+        return rv;
+    }
+
+    apr_finfo_t fi;
+    if (apr_stat(&fi, canonical_path, APR_FINFO_MTIME, p) == APR_SUCCESS) {
+        if (out_canonical_mtime) *out_canonical_mtime = fi.mtime;
+    }
+
+    /* Sidecar is optional — missing file = no extras. Any other
+     * problem (parse error, permissions, oversize) is a hard
+     * error: silently dropping a malformed sidecar would let
+     * operator typos disappear without surfacing. */
+    if (sidecar_path && *sidecar_path) {
+        apr_finfo_t sfi;
+        apr_status_t srv = apr_stat(&sfi, sidecar_path, APR_FINFO_MTIME, p);
+        if (srv == APR_SUCCESS) {
+            if (out_sidecar_mtime) *out_sidecar_mtime = sfi.mtime;
+            apr_array_header_t *side = NULL;
+            const char *side_err = NULL;
+            srv = bs_allow_load_ranges(p, sidecar_path, &side, &side_err);
+            if (srv != APR_SUCCESS) {
+                if (out_err) *out_err = side_err
+                    ? apr_psprintf(p, "sidecar %s: %s",
+                                   sidecar_path, side_err)
+                    : apr_psprintf(p, "sidecar %s: parse error",
+                                   sidecar_path);
+                return srv;
+            }
+            for (int i = 0; i < side->nelts; i++) {
+                APR_ARRAY_PUSH(canon, apr_ipsubnet_t *) =
+                    APR_ARRAY_IDX(side, i, apr_ipsubnet_t *);
+            }
+        }
+        /* APR_STATUS_IS_ENOENT or any other stat failure → treat as
+         * no sidecar present. Don't propagate; operator hasn't asked
+         * for a sidecar and the canonical loaded fine. */
+    }
+
+    *out = canon;
+    return APR_SUCCESS;
+}
+
 int bs_allow_ip_in_ranges(const apr_array_header_t *ranges, request_rec *r)
 {
     if (!ranges || ranges->nelts == 0) return 0;
@@ -340,21 +412,6 @@ int bs_allow_ip_in_ranges(const apr_array_header_t *ranges, request_rec *r)
 
 /* --- E1 directive setters --- */
 
-/* BotShieldAllowVerifiedBots on|off — opt in to the bundled set of
- * built-in verified crawlers (currently googlebot, bingbot, applebot,
- * siteimprove). Default off. Operators wanting only specific bots
- * skip this and use BotShieldAllowBot per name; the allowlist
- * machinery activates whenever either this flag or any AllowBot
- * declaration is present (see bs_wire_allowlist's gate). */
-const char *bs_set_verified_bots(cmd_parms *cmd, void *dconf,
-                                        int flag)
-{
-    (void)dconf;
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    scfg->verified_bots_enabled = flag ? 1 : 0;
-    return NULL;
-}
 /* BotShieldAllowBot <name> <ua-pattern> [<target>] — register a
  * bot (or override a built-in). The optional third argument is
  * polymorphic — shape-inspected here, not a separate directive:
@@ -452,43 +509,32 @@ const char *bs_set_allow_bot(cmd_parms *cmd, void *dconf,
 
 /* --- Request-time entry point ---
  *
- * Called from bs_run_builtin_heuristics. Does nothing unless E1 is
- * enabled via BotShieldLegitCrawlers on. Emits at most one
- * bs_score_add call per request (dominant penalty/credit).
- */
+ * Called from bs_run_builtin_heuristics. Reads the unified
+ * classification cached on r->pool by bs_classify_request_hook
+ * (post_read_request) — the UA classifier walk + IP cross-check
+ * have already run there. This function is now just the score-
+ * emission and metrics-bump policy applied to the cached answer.
+ *
+ * Emits at most one bs_score_add call per request (dominant
+ * penalty/credit). */
 void bs_check_allow(request_rec *r,
                                    const bs_dir_cfg *cfg)
 {
     (void)cfg;
     bs_server_cfg *scfg = ap_get_module_config(r->server->module_config,
                                                &botshield_module);
-    /* Activation gate: bs_wire_allowlist creates bot_classifier only
-     * when at least one of {verified_bots_enabled, operator-declared
-     * BotShieldAllowBot} is configured. classifier-presence is
-     * therefore the right activation indicator at request time. */
+    /* Activation gate: bot_classifier is only created when
+     * verified_bots_enabled or any operator BotShieldAllowBot is
+     * configured. No classifier = nothing to score. */
     if (!scfg || !scfg->bot_classifier) return;
 
-    const char *ua = apr_table_get(r->headers_in, "User-Agent");
-    const char *name = bs_ua_classify(scfg->bot_classifier, ua);
-    if (!name) return;
+    const bs_ua_class *c = bs_classify_request_ua(r);
+    if (!c || !c->verified_name) return;
+    const char *name = c->verified_name;
 
-    /* Look up the bot entry + its (optional) ranges. */
-    const bs_allow_bot_entry *entry = scfg->allow_bots
-        ? apr_hash_get(scfg->allow_bots, name, APR_HASH_KEY_STRING)
-        : NULL;
-    /* Fall back to built-in entry if operator didn't declare this
-     * name (the classifier's name came from the built-in pattern). */
-    if (!entry) {
-        for (const bs_allow_bot_entry *b = bs_builtin_bots;
-             b->name; b++) {
-            if (strcmp(b->name, name) == 0) { entry = b; break; }
-        }
-    }
-
-    /* UA-only mode: operator explicitly said "trust this UA, no IP
-     * verification." Different reason-string than full verify so
-     * operators can distinguish in log analysis. */
-    if (entry && entry->ua_only) {
+    /* UA-only mode: operator's `*` target. Different reason-string
+     * than full verify so operators can distinguish in log analysis. */
+    if (c->verified_ua_only) {
         if (bs_shm.metrics) {
             __atomic_fetch_add(&bs_shm.metrics->bot_allow_total,
                                1, __ATOMIC_RELAXED);
@@ -498,12 +544,7 @@ void bs_check_allow(request_rec *r,
         return;
     }
 
-    apr_array_header_t *ranges = NULL;
-    if (scfg->bot_ranges) {
-        ranges = apr_hash_get(scfg->bot_ranges, name, APR_HASH_KEY_STRING);
-    }
-
-    if (!ranges) {
+    if (c->verified_unranged) {
         /* Pattern matched but no ranges loaded — operator hasn't
          * authorized IP verification for this bot (missing/malformed
          * file, or declared without a path+not-UA-only). Log but
@@ -517,7 +558,7 @@ void bs_check_allow(request_rec *r,
         return;
     }
 
-    if (bs_allow_ip_in_ranges(ranges, r)) {
+    if (c->is_verified_bot) {
         /* Verified — large negative penalty dominates tier decision. */
         if (bs_shm.metrics) {
             __atomic_fetch_add(&bs_shm.metrics->bot_allow_total,
@@ -525,7 +566,7 @@ void bs_check_allow(request_rec *r,
         }
         bs_score_add(r, BS_CREDIT_ALLOW, 0,
             apr_pstrcat(r->pool, "allow-bot:", name, NULL));
-    } else {
+    } else if (c->is_fake_bot) {
         /* Fake: claims crawler UA but IP isn't in that crawler's
          * published ranges. Large penalty drives the request straight
          * to captcha tier; the reason string surfaces in the log. */
@@ -582,4 +623,219 @@ void bs_mask_ipv6_prefix(unsigned char ip[16], int prefix_bits)
         full_bytes++;
     }
     for (int i = full_bytes; i < 16; i++) ip[i] = 0;
+}
+
+/* --- Live-reloadable bot-ranges machinery ------------------------- *
+ *
+ * Modeled on bot_directory.c / browser_classifier.c: a private
+ * subpool per generation, atomic-swap of the active pointer, one-
+ * tick destroy-grace for concurrent readers. Per-vhost rather than
+ * module-global because bot-range configuration is server-scope —
+ * different vhosts can have different operator overrides via
+ * BotShieldAllowBot. */
+
+bs_bot_ranges_state *bs_allow_ranges_build(
+    const bs_bot_ranges_manifest *manifest)
+{
+    if (!manifest || !manifest->pool) return NULL;
+
+    apr_pool_t *gen_pool = NULL;
+    if (apr_pool_create(&gen_pool, manifest->pool) != APR_SUCCESS) {
+        ap_log_error(APLOG_MARK, APLOG_ERR, 0, manifest->s,
+            "mod_botshield: allow-ranges: subpool create failed; "
+            "active state unchanged");
+        return NULL;
+    }
+
+    bs_bot_ranges_state *st = apr_pcalloc(gen_pool, sizeof(*st));
+    st->pool        = gen_pool;
+    st->by_name     = apr_hash_make(gen_pool);
+    st->file_mtimes = apr_hash_make(gen_pool);
+
+    int loaded = 0, missing = 0, bad = 0;
+
+    if (manifest->file_bots) {
+        for (int i = 0; i < manifest->file_bots->nelts; i++) {
+            const bs_bot_file_manifest_entry *e =
+                &APR_ARRAY_IDX(manifest->file_bots, i,
+                               bs_bot_file_manifest_entry);
+
+            apr_array_header_t *arr = NULL;
+            apr_time_t cm = 0, sm = 0;
+            const char *err = NULL;
+            apr_status_t rv = bs_allow_load_ranges_with_sidecar(
+                gen_pool, e->canonical_path, e->sidecar_path,
+                &arr, &cm, &sm, &err);
+
+            /* Always record observed mtimes — the watchdog uses these
+             * for change detection regardless of whether the load
+             * succeeded. A missing canonical with mtime=0 plus a
+             * future appearance becomes a 0→non-zero transition,
+             * which correctly triggers a reload. */
+            bs_bot_file_mtimes *mt = apr_pcalloc(gen_pool, sizeof(*mt));
+            mt->canonical_mtime = cm;
+            mt->sidecar_mtime   = sm;
+            apr_hash_set(st->file_mtimes, e->name,
+                         APR_HASH_KEY_STRING, mt);
+
+            if (rv == APR_SUCCESS && arr) {
+                apr_hash_set(st->by_name, e->name,
+                             APR_HASH_KEY_STRING, arr);
+                loaded++;
+            } else if (APR_STATUS_IS_ENOENT(rv)) {
+                missing++;
+                ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, manifest->s,
+                    "mod_botshield: bot '%s' ranges file '%s' not "
+                    "loaded (%s) - UA will classify as unverified",
+                    e->name, e->canonical_path,
+                    err ? err : "missing");
+            } else {
+                bad++;
+                ap_log_error(APLOG_MARK, APLOG_WARNING, rv, manifest->s,
+                    "mod_botshield: bot '%s' ranges '%s' malformed "
+                    "(%s) - skipping", e->name, e->canonical_path,
+                    err ? err : "parse error");
+            }
+        }
+    }
+
+    if (manifest->inline_bots) {
+        for (int i = 0; i < manifest->inline_bots->nelts; i++) {
+            const bs_bot_inline_manifest_entry *e =
+                &APR_ARRAY_IDX(manifest->inline_bots, i,
+                               bs_bot_inline_manifest_entry);
+            apr_array_header_t *arr = NULL;
+            const char *err = NULL;
+            apr_status_t rv = bs_allow_load_ranges_from_string(
+                gen_pool, e->inline_cidrs, &arr, &err);
+            if (rv == APR_SUCCESS) {
+                apr_hash_set(st->by_name, e->name,
+                             APR_HASH_KEY_STRING, arr);
+                loaded++;
+            } else {
+                bad++;
+                ap_log_error(APLOG_MARK, APLOG_WARNING, rv, manifest->s,
+                    "mod_botshield: bot '%s' inline CIDRs malformed "
+                    "(%s) - skipping", e->name,
+                    err ? err : "parse error");
+            }
+        }
+    }
+
+    ap_log_error(APLOG_MARK, APLOG_INFO, 0, manifest->s,
+        "mod_botshield: allow-ranges build: %d loaded, %d missing, "
+        "%d malformed", loaded, missing, bad);
+    return st;
+}
+
+void bs_allow_ranges_publish(server_rec *s,
+                             bs_bot_ranges_state *new_state)
+{
+    bs_server_cfg *scfg =
+        ap_get_module_config(s->module_config, &botshield_module);
+    if (!scfg || !scfg->bot_ranges_manifest) return;
+
+    bs_bot_ranges_manifest *m = scfg->bot_ranges_manifest;
+
+    /* Two-step destroy: the slot holds the state we parked at the
+     * previous publish — by now any reader that loaded that pointer
+     * has long since finished its hash lookup. Drop it before
+     * parking a new one. */
+    bs_bot_ranges_state *to_destroy = m->pending_drain;
+    m->pending_drain = NULL;
+
+    bs_bot_ranges_state *prior = __atomic_exchange_n(
+        &scfg->bot_ranges, new_state, __ATOMIC_ACQ_REL);
+
+    m->pending_drain = prior;
+
+    if (to_destroy) {
+        apr_pool_destroy(to_destroy->pool);
+    }
+}
+
+apr_status_t bs_allow_ranges_watchdog_cb(int state, void *data,
+                                         apr_pool_t *pool)
+{
+    if (state != AP_WATCHDOG_STATE_RUNNING) return APR_SUCCESS;
+
+    server_rec *s = data;
+    if (!s) return APR_SUCCESS;
+    bs_server_cfg *scfg =
+        ap_get_module_config(s->module_config, &botshield_module);
+    if (!scfg || !scfg->bot_ranges_manifest) return APR_SUCCESS;
+
+    bs_bot_ranges_manifest *m = scfg->bot_ranges_manifest;
+    bs_bot_ranges_state *active =
+        __atomic_load_n(&scfg->bot_ranges, __ATOMIC_ACQUIRE);
+
+    /* Inline bots can't change at runtime (string came from the
+     * directive); only file-backed bots need stat()ing. Walk the
+     * manifest and compare against last observed mtimes. */
+    int changed = 0;
+    if (m->file_bots) {
+        for (int i = 0; i < m->file_bots->nelts && !changed; i++) {
+            const bs_bot_file_manifest_entry *e =
+                &APR_ARRAY_IDX(m->file_bots, i,
+                               bs_bot_file_manifest_entry);
+
+            apr_finfo_t fi;
+            apr_time_t cm = 0, sm = 0;
+            if (apr_stat(&fi, e->canonical_path,
+                         APR_FINFO_MTIME, pool) == APR_SUCCESS) {
+                cm = fi.mtime;
+            }
+            if (e->sidecar_path
+                && apr_stat(&fi, e->sidecar_path,
+                            APR_FINFO_MTIME, pool) == APR_SUCCESS) {
+                sm = fi.mtime;
+            }
+
+            const bs_bot_file_mtimes *prev = (active && active->file_mtimes)
+                ? apr_hash_get(active->file_mtimes, e->name,
+                               APR_HASH_KEY_STRING)
+                : NULL;
+            if (!prev
+                || prev->canonical_mtime != cm
+                || prev->sidecar_mtime   != sm) {
+                changed = 1;
+            }
+        }
+    }
+    if (!changed) return APR_SUCCESS;
+
+    bs_bot_ranges_state *fresh = bs_allow_ranges_build(m);
+    if (!fresh) return APR_SUCCESS;
+    bs_allow_ranges_publish(s, fresh);
+
+    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+        "mod_botshield: allow-ranges reloaded "
+        "(file change detected, %d bots active)",
+        (int)apr_hash_count(fresh->by_name));
+    return APR_SUCCESS;
+}
+
+/* BotShieldAllowRangesRefreshInterval <seconds> — watchdog tick
+ * cadence for the verified-bot CIDR files. 0 disables (post_config
+ * load remains in effect; reload via graceful restart). 86400 max
+ * is just a sanity ceiling — the live-refresh story is meant for
+ * "operator added an IP, want it live in <minute>", not
+ * once-a-day. */
+const char *bs_set_allow_ranges_refresh_interval(cmd_parms *cmd,
+                                                 void *dconf,
+                                                 const char *arg)
+{
+    (void)dconf;
+    char *end = NULL;
+    long v = strtol(arg, &end, 10);
+    if (!end || *end || v < 0 || v > 86400) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldAllowRangesRefreshInterval: '%s' must be an "
+            "integer 0..86400 seconds (0 = disable live refresh)",
+            arg);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(
+        cmd->server->module_config, &botshield_module);
+    scfg->allow_ranges_refresh_interval = (int)v;
+    return NULL;
 }

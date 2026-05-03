@@ -252,6 +252,33 @@ struct bs_dir_cfg {
 #define BS_APP_FEEDBACK_UNSET           (-1)
 #define BS_APP_FEEDBACK_DEFAULT_HEADER  "X-BotShield-Feedback"
 
+/* Per-pass enable/disable for the unified UA classifier. Wired
+ * through BotShieldClassify. Defaults to all four passes on; the
+ * struct is read by bs_classify_request_ua to gate each pass and
+ * by bs_ua_is_crawler_candidate for the browsers fail-safe.
+ *
+ * Fail-safe semantics when a flag is 0:
+ *   browsers      → treat all UAs as if browser=1 for robots.txt
+ *                   wildcard gating (no real users punished by
+ *                   stale templates). Other passes still run.
+ *   known_bots    → AC directory walk skipped; no known-bot:<slug>
+ *                   log tag.
+ *   verified_bots → UA-classifier match still happens; IP cross-
+ *                   check skipped; matched UAs get allow-bot:<name>
+ *                   credit (UA-only verify). fake-bot never emitted.
+ *                   The natural response to stale CIDR data.
+ *   unknown_bots  → heuristic substring scan skipped; would-be
+ *                   unknown-bot UAs fall to plain unknown. */
+typedef struct bs_classify_flags {
+    unsigned int browsers      : 1;
+    unsigned int known_bots    : 1;
+    unsigned int verified_bots : 1;
+    unsigned int unknown_bots  : 1;
+} bs_classify_flags;
+
+#define BS_CLASSIFY_FLAGS_ALL  ((bs_classify_flags){1, 1, 1, 1})
+#define BS_CLASSIFY_FLAGS_NONE ((bs_classify_flags){0, 0, 0, 0})
+
 typedef struct bs_server_cfg {
     apr_size_t  shm_size;
     int         flagged_capacity;
@@ -265,14 +292,25 @@ typedef struct bs_server_cfg {
      * post_config and read-only thereafter; lives at server scope
      * because the UA classifier + CIDR lists are global, not per-
      * directory. */
-    /* BotShieldAllowVerifiedBots flag: opt in to the bundled set of
-     * built-in crawlers (bs_builtin_bots[]). Default 0. The allowlist
-     * machinery activates if this is on OR if any BotShieldAllowBot
-     * has been declared (apr_hash_count(allow_bots) > 0); both off =
-     * machinery never wires up. */
-    int         verified_bots_enabled;
+    /* Per-pass classifier on/off, set by BotShieldClassify. Default
+     * is all four passes enabled. Read at request time by
+     * bs_classify_request_ua + bs_ua_is_crawler_candidate to gate
+     * each pass with its fail-safe semantic. */
+    bs_classify_flags classify;
     void       *bot_classifier;       /* bs_ua_classifier *, opaque here */
-    apr_hash_t *bot_ranges;           /* name → apr_array_header_t of apr_ipsubnet_t* */
+    /* Live-reloadable per-vhost CIDR state. Concrete struct lives in
+     * allowlist.h; opaque here to avoid pulling that header. The
+     * watchdog rebuilds + atomic-swaps this pointer when source
+     * files change on disk. NULL until bs_wire_allowlist runs. */
+    struct bs_bot_ranges_state    *bot_ranges;
+    /* Manifest of file-backed and inline bots, retained for the
+     * watchdog rebuilder. Built once in post_config; immutable. */
+    struct bs_bot_ranges_manifest *bot_ranges_manifest;
+    /* BotShieldAllowRangesRefreshInterval — seconds between watchdog
+     * ticks that re-stat the canonical + sidecar files. 0 disables
+     * (post_config load remains in effect; reload via graceful
+     * restart). Default 0 (off). */
+    int         allow_ranges_refresh_interval;
     apr_hash_t *allow_bots;           /* name → bs_allow_bot_entry * (directive-defined) */
     /* E2.1 — policy enforcement (rate limit + path block). Ordered
      * arrays of entry pointers. */
@@ -337,6 +375,29 @@ typedef struct bs_server_cfg {
     int                 robots_slot_pool_size;
     int                 robots_slot_pool_used;
     int                 robots_refresh_interval;
+    /* Cloudflare bot directory runtime override.
+     *
+     * The compiled-in bs_known_bots[] table is the baseline. If
+     * BotShieldBotDirectory points at a TSV file, post_config parses
+     * it into a fresh bs_known_bots_state and atomic-swaps the active
+     * pointer. A periodic watchdog re-parses on file mtime change so
+     * operators can refresh the directory (via tools/refresh-bot-directory.py)
+     * without rebuilding the .so or reloading httpd.
+     *
+     * Path / refresh interval are server-scope; the active state
+     * pointer is module-global (bot_directory.c owns it). NULL path
+     * leaves the compiled-in baseline in effect. */
+    const char         *bot_directory_path;
+    int                 bot_directory_refresh_interval;
+    /* Top-user-agents browser-templates runtime override.
+     * Same shape as bot_directory: NULL path = compiled-in baseline
+     * stays active; non-NULL path = parse + atomic-swap, refreshed
+     * by per-worker watchdog on file mtime change. The classifier
+     * is consumed by bs_ua_is_crawler_candidate (policy.c) to
+     * distinguish real-browser UAs from everything else when
+     * applying robots.txt User-agent: * rules. */
+    const char         *browser_templates_path;
+    int                 browser_templates_refresh_interval;
     /* E5 — app-to-module reputation feedback. */
     int                 app_feedback_enabled;
     const char         *app_feedback_header;

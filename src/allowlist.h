@@ -67,6 +67,65 @@ extern const bs_allow_bot_entry bs_builtin_bots[];
  * a JSON / log / wrong file. Reject loudly rather than slurp. */
 #define BS_CRAWLER_MAX_RANGES_FILE  (1024 * 1024)
 
+/* --- Live-reloadable bot-ranges state ---------------------------- *
+ *
+ * The set of CIDR lists that bs_check_allow reads at request time.
+ * Allocated from a private subpool of pconf and atomic-swapped by
+ * bs_allow_ranges_watchdog_cb when any of the source files change
+ * on disk. The previously-active state is held one watchdog tick
+ * before its pool is destroyed so concurrent readers can't deref
+ * freed memory.
+ *
+ * Per-vhost: scfg->bot_ranges points at the active state; the
+ * watchdog walks scfg->bot_ranges_manifest to know what to stat.
+ *
+ * Sidecar convention: each file-backed bot is loaded from
+ *   <canonical>          (refreshed by tools/refresh-bot-ranges.sh)
+ *   <canonical-without-.txt>.local.txt   (operator-managed extras)
+ * The sidecar is optional. If both exist, their CIDR sets are
+ * concatenated. The sidecar is the seam for adding custom enterprise
+ * scanner IPs that aren't published in the provider's public feed
+ * (e.g. dedicated Siteimprove scans contracted for one site). */
+typedef struct bs_bot_ranges_state {
+    apr_pool_t *pool;          /* owns by_name + every contained array */
+    apr_hash_t *by_name;       /* name (const char *) → apr_array_header_t * of apr_ipsubnet_t * */
+    apr_hash_t *file_mtimes;   /* name → bs_bot_file_mtimes *; only file-backed bots */
+} bs_bot_ranges_state;
+
+typedef struct bs_bot_file_mtimes {
+    apr_time_t canonical_mtime; /* 0 if file missing at last check */
+    apr_time_t sidecar_mtime;   /* 0 if file missing at last check */
+} bs_bot_file_mtimes;
+
+/* Manifest: the set of bots configured for this vhost, retained
+ * across watchdog ticks so the rebuilder knows what to load. Built
+ * once in bs_wire_allowlist from pconf; immutable thereafter (apart
+ * from `pending_drain`, the one-tick destroy-deferred slot used by
+ * bs_allow_ranges_publish). */
+typedef struct bs_bot_ranges_manifest {
+    server_rec         *s;            /* for log context */
+    apr_pool_t         *pool;         /* pconf — outlives all generations */
+    apr_array_header_t *file_bots;    /* of bs_bot_file_manifest_entry */
+    apr_array_header_t *inline_bots;  /* of bs_bot_inline_manifest_entry */
+    /* Previously-active state, parked here so concurrent readers
+     * still finishing apr_hash_get on the old hash can't deref freed
+     * memory. Destroyed on the *next* publish, giving readers a
+     * full watchdog tick of grace. Touched only by the watchdog
+     * thread, no lock required. */
+    bs_bot_ranges_state *pending_drain;
+} bs_bot_ranges_manifest;
+
+typedef struct bs_bot_file_manifest_entry {
+    const char *name;             /* bot key */
+    const char *canonical_path;   /* explicit path or default-derived */
+    const char *sidecar_path;     /* derived: <base>.local.txt or <path>.local */
+} bs_bot_file_manifest_entry;
+
+typedef struct bs_bot_inline_manifest_entry {
+    const char *name;             /* bot key */
+    const char *inline_cidrs;     /* directive's inline list, re-parsed each rebuild */
+} bs_bot_inline_manifest_entry;
+
 /* --- UA classifier ----------------------------------------------- */
 
 /* Allocate an empty classifier on `p`. The classifier's lifetime is
@@ -105,6 +164,59 @@ apr_status_t bs_allow_load_ranges_from_string(apr_pool_t *p,
                                               apr_array_header_t **out,
                                               const char **out_err);
 
+/* Sidecar-aware loader. Reads `canonical_path` (required) and
+ * `sidecar_path` (optional — missing file is fine, anything else is
+ * a parse error). Returns the concatenation in *out. Sets
+ * *out_canonical_mtime / *out_sidecar_mtime to the observed mtimes
+ * (0 if a file was absent). On any failure of the canonical file,
+ * returns the underlying APR error and *out stays NULL.
+ *
+ * Pass NULL for sidecar_path to skip the sidecar entirely. */
+apr_status_t bs_allow_load_ranges_with_sidecar(
+    apr_pool_t *p,
+    const char *canonical_path,
+    const char *sidecar_path,
+    apr_array_header_t **out,
+    apr_time_t *out_canonical_mtime,
+    apr_time_t *out_sidecar_mtime,
+    const char **out_err);
+
+/* Derive a sidecar path from a canonical path. Convention: if the
+ * canonical ends in ".txt", swap to "<base>.local.txt"; otherwise
+ * append ".local". Result allocated on `p`. Stable across calls so
+ * the watchdog can stat the same path it'll later load. */
+const char *bs_allow_sidecar_path(apr_pool_t *p, const char *canonical);
+
+/* --- Live-reloadable state machinery ---------------------------- *
+ *
+ * Build a fresh bs_bot_ranges_state from the manifest. Every entry
+ * in `manifest` is loaded and its ranges populated into the new
+ * state; missing file-backed bots are logged but don't fail the
+ * whole rebuild (they just have no ranges this generation, classifying
+ * as bot-unverified at request time). Returns NULL only on subpool
+ * allocation failure. */
+bs_bot_ranges_state *bs_allow_ranges_build(
+    const bs_bot_ranges_manifest *manifest);
+
+/* Atomically swap `new_state` in as the active per-vhost state.
+ * Drains the previously-active state on the next swap (one-tick
+ * grace). Pass NULL only at process teardown — request-time readers
+ * tolerate it but the result is "no verification possible." */
+void bs_allow_ranges_publish(server_rec *s,
+                             bs_bot_ranges_state *new_state);
+
+/* mod_watchdog tick callback. Registered with singleton=0 so each
+ * worker child gets its own update — the active state pointer is
+ * process-local. Stat()s every manifest file each tick; rebuilds +
+ * publishes only on observed mtime change. */
+apr_status_t bs_allow_ranges_watchdog_cb(int state, void *data,
+                                         apr_pool_t *pool);
+
+/* Setter for BotShieldAllowRangesRefreshInterval. */
+const char *bs_set_allow_ranges_refresh_interval(cmd_parms *cmd,
+                                                 void *dconf,
+                                                 const char *arg);
+
 /* Test r->useragent_ip against a loaded CIDR list. Returns 1 on hit,
  * 0 on miss or any parse problem with the client IP string. Defends
  * against blocking DNS via inet_pton-validate before handing the IP
@@ -133,10 +245,13 @@ void bs_check_allow(request_rec *r, const bs_dir_cfg *cfg);
 
 /* --- E1 directive setters --- *
  *
- * BotShieldAllow on|off — master gate for the allow-list family.
- * BotShieldAllowBot <name> <ua-pattern> [<target>] — register a bot
- * with optional UA-only/file/inline-CIDR target. */
-const char *bs_set_verified_bots(cmd_parms *cmd, void *dconf, int flag);
+ * BotShieldAllowBot <name> <ua-pattern> [<target>] — register a
+ * verified-bot entry with optional UA-only/file/inline-CIDR target.
+ * The bundled built-in set (vendor/verified-bots.json) loads
+ * automatically; operator-declared entries via this directive are
+ * overlaid on top (same-name operator entries replace the built-in).
+ * Whether the verified-bot pass actually runs at request time is
+ * controlled by BotShieldClassify. */
 const char *bs_set_allow_bot(cmd_parms *cmd, void *dconf,
                              const char *name,
                              const char *pattern,

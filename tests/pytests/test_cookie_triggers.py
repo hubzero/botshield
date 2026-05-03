@@ -39,8 +39,8 @@ def test_cookie_trigger_named_present_applies_credit(
     ip_base = _ips.fresh_ip()
     ip_with = _ips.fresh_ip()
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
@@ -79,8 +79,8 @@ def test_cookie_trigger_named_eq_value_blocks(
     ip_hit = _ips.fresh_ip()
     ip_ok  = _ips.fresh_ip()
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
@@ -104,8 +104,8 @@ def test_cookie_trigger_named_contains_substring(
     """cookie=<name>~<substr> fires when the value contains the
     substring anywhere."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
@@ -127,8 +127,8 @@ def test_cookie_trigger_named_absent_fires(
 ):
     """!cookie=<name> fires when the cookie is missing."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
@@ -152,8 +152,8 @@ def test_cookie_trigger_cookies_none(
 ):
     """cookies=none fires when the request carries zero cookies."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
@@ -174,8 +174,8 @@ def test_cookie_trigger_cookies_session_matches_curated_name(
     curated list (PHPSESSID, JSESSIONID, etc.). Unknown cookie
     names don't match."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
@@ -200,8 +200,8 @@ def test_cookie_trigger_session_name_directive_extends_list(
     """BotShieldSessionCookieName adds to the session list so
     cookies=session fires on the operator's custom name."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
@@ -224,8 +224,8 @@ def test_cookie_trigger_bs_cookie_missing(
     """bs-cookie=missing fires when no __Host-bs_session cookie present —
     the most common case (first-sight visitor)."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
@@ -242,8 +242,8 @@ def test_cookie_trigger_bs_cookie_invalid(
     """bs-cookie=invalid fires when __Host-bs_session is present but
     fails verification (tampered HMAC, wrong format, etc.)."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
@@ -274,8 +274,8 @@ def test_cookie_trigger_status_pass_still_applies_credit(
     ip_base = _ips.fresh_ip()
     ip_with = _ips.fresh_ip()
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
@@ -315,8 +315,8 @@ def test_cookie_trigger_pass_triggers_stack_credits(
     ip_base = _ips.fresh_ip()
     ip_both = _ips.fresh_ip()
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
@@ -352,8 +352,8 @@ def test_cookie_trigger_non_pass_shortcircuits_after_pass(
     from the non-pass rule, not the pass one). The pass trigger's
     credit still contributes to the decision-log score."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
@@ -387,8 +387,8 @@ def test_cookie_trigger_first_non_pass_wins_over_second(
     """Two non-pass triggers in declaration order: the first to
     match wins. Second never runs."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
@@ -431,8 +431,8 @@ def test_cookie_trigger_bs_session_raw_name_rejected(
     import pytest as _pytest
     with _pytest.raises(Exception) as ei:
         with config_override(
-            r"BotShieldAllowVerifiedBots\s+on",
-            'BotShieldAllowVerifiedBots on\n'
+            r"BotShieldEnabled\s+On",
+            'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'

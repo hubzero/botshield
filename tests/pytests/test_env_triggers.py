@@ -42,8 +42,8 @@ def test_env_trigger_penalty_on_presence(config_override, log_slice):
     ip_base = _ips.fresh_ip()
     ip_trig = _ips.fresh_ip()
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    SetEnvIfNoCase User-Agent "curl" BS_SUSPECT_UA=1\n'
         '    BotShieldEnvTrigger suspect-ua env=BS_SUSPECT_UA '
         'penalty=25 log=env-suspect',
@@ -76,8 +76,8 @@ def test_env_trigger_absent(config_override, log_slice, fresh_ip):
     """!env=<var> matches when the var is not set; use it to
     penalize requests that don't carry an upstream-set signal."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldEnvTrigger no-marker !env=BS_MARKER '
         'penalty=30',
         count=1,
@@ -102,8 +102,8 @@ def test_env_trigger_value_exact_match(config_override, log_slice):
     ip_hi = _ips.fresh_ip()
     ip_med = _ips.fresh_ip()
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    SetEnvIf Request_URI "/hi$" BS_LEVEL=high\n'
         '    SetEnvIf Request_URI "/med$" BS_LEVEL=medium\n'
         '    BotShieldEnvTrigger hi-match env=BS_LEVEL=high penalty=80\n'
@@ -127,8 +127,8 @@ def test_env_trigger_value_exact_match(config_override, log_slice):
 def test_env_trigger_status_code_blocks(config_override, fresh_ip):
     """status=<code> short-circuits the response with that code."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    SetEnvIfExpr "%{REQUEST_URI} =~ /hostile/" BS_HOSTILE=1\n'
         '    BotShieldEnvTrigger hostile env=BS_HOSTILE status=403',
         count=1,
@@ -148,8 +148,8 @@ def test_env_trigger_from_rewrite_producer(config_override, log_slice,
     """Producer variation: RewriteRule [E=VAR:VAL] sets the env at
     fixups phase. Handler reads it fine."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    RewriteEngine On\n'
         '    RewriteRule ^/rw-flag /index.html [E=BS_FROM_RW:1,L]\n'
         '    BotShieldEnvTrigger rw-origin env=BS_FROM_RW penalty=15',
@@ -175,8 +175,8 @@ def test_env_trigger_flag_persists(config_override, log_slice):
     reason trace."""
     ip = _ips.fresh_ip()
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    SetEnvIf Request_URI "/flag-me" BS_FLAG_ME=1\n'
         '    BotShieldEnvTrigger flagger env=BS_FLAG_ME '
         'flag=scanner_probe ttl=3600',
@@ -199,8 +199,8 @@ def test_env_trigger_first_match_wins(config_override, log_slice,
     declared fires (strict first-match-wins, unlike E4's cookies
     which accumulate pass matches)."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    SetEnvIf Request_URI ".*" BS_PING=1\n'
         '    BotShieldEnvTrigger first  env=BS_PING penalty=5\n'
         '    BotShieldEnvTrigger second env=BS_PING penalty=50',
@@ -242,8 +242,8 @@ def test_env_trigger_redirect_rejected_at_config_time(
     import pytest as _p
     with _p.raises(Exception):
         with config_override(
-            r"BotShieldAllowVerifiedBots\s+on",
-            'BotShieldAllowVerifiedBots on\n'
+            r"BotShieldEnabled\s+On",
+            'BotShieldEnabled On\n'
             '    BotShieldEnvTrigger r-test env=X redirect=https://x',
             count=1,
         ):

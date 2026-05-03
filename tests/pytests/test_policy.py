@@ -32,8 +32,8 @@ def test_rate_limit_ua_narrowing(config_override, log_slice, fresh_ip):
     request of the window should fire 429 + Retry-After + the
     rate-limit-exceeded reason."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
@@ -67,8 +67,8 @@ def test_rate_limit_inline_cidr_narrowing(config_override, log_slice, fresh_ip):
     ua = "AnyBrowser/1.0"
 
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
@@ -106,8 +106,8 @@ def test_rate_limit_ua_and_ip_and_ed(config_override, log_slice, fresh_ip):
     ua_miss  = "OtherClient/1.0"
 
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
@@ -140,8 +140,8 @@ def test_rate_limit_ua_and_ip_and_ed(config_override, log_slice, fresh_ip):
 def test_block_path_prefix_match(config_override, log_slice, fresh_ip):
     """Plain prefix: `/admin` matches `/admin/foo` as well as `/admin`."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
@@ -165,8 +165,8 @@ def test_block_path_end_anchor(config_override, log_slice, fresh_ip):
     """Trailing `$` anchors to exact equality: `/exact$` matches only
     `/exact`, not `/exact/sub`."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
@@ -184,8 +184,8 @@ def test_block_path_cohort_narrowing(config_override, log_slice, fresh_ip):
     """A block-path with a UA predicate must NOT fire when the UA
     doesn't match — cohort narrowing still applies to block-path."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
@@ -212,8 +212,8 @@ def test_rate_limit_ua_match_is_case_insensitive(
     Configure a lowercase pattern, send a mixed-case UA, expect the
     cohort to match and trip the rate limit."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
@@ -244,8 +244,8 @@ def test_block_path_precedence_is_declaration_order(
     rule declared FIRST should win when both it and a generic
     `/admin*` rule match."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'

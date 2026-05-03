@@ -54,8 +54,8 @@ def test_policy_status_surfaces_rate_limit(config_override):
     """A BotShieldRateLimit directive appears in the directive
     section with its cohort + live counter state."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldRateLimit gptbot 60 min "GPTBot" *',
         count=1,
     ):
@@ -73,8 +73,8 @@ def test_policy_status_surfaces_rate_limit(config_override):
 
 def test_policy_status_surfaces_block_path(config_override):
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldBlockPath admin-block "/admin/*" "Scraper/" *',
         count=1,
     ):
@@ -101,8 +101,8 @@ def test_policy_status_surfaces_robots(robots_path, config_override):
     os.chmod(robots_path, 0o644)
 
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        f'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        f'BotShieldEnabled On\n'
         f'    BotShieldRobotsTxt {robots_path}',
         count=1,
     ):

@@ -61,7 +61,7 @@ def _hammer(ip: str, n: int) -> list:
 
 def _safeguard_cfg(threshold: int, ttl: int = 900, window: int = 600) -> str:
     return (
-        'BotShieldAllowVerifiedBots on\n'
+        'BotShieldEnabled On\n'
         '    BotShieldSafeguard on\n'
         f'    BotShieldSafeguardThreshold {threshold}\n'
         f'    BotShieldSafeguardWindow {window}\n'
@@ -80,7 +80,7 @@ def test_safeguard_trips_after_threshold(config_override, fresh_ip,
     as ?return=/. The per-IP counter clears on redirect, so the 5th
     gets a fresh challenge again rather than a second redirect."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
+        r"BotShieldEnabled\s+On",
         _safeguard_cfg(threshold=3),
         count=1,
     ):
@@ -150,7 +150,7 @@ def test_below_threshold_still_challenges(config_override, fresh_ip):
     """Threshold=10: 5 requests don't cross. Every one gets the
     interstitial, no safeguard pass-through."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
+        r"BotShieldEnabled\s+On",
         _safeguard_cfg(threshold=10),
         count=1,
     ):
@@ -171,7 +171,7 @@ def test_safeguard_isolates_per_ip(config_override):
     ip_a = "198.51.100.30"
     ip_b = "198.51.100.40"
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
+        r"BotShieldEnabled\s+On",
         _safeguard_cfg(threshold=2),
         count=1,
     ):
@@ -202,7 +202,7 @@ def test_safeguard_does_not_override_block_path(
     trip safeguard on /. Then hit /blocked — must still return 403,
     not safeguard pass-through."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
+        r"BotShieldEnabled\s+On",
         _safeguard_cfg(threshold=2)
         # UA-narrowed cohort: 'httpx' substring keeps the cohort
         # legal (BotShield rejects both-'*'). Our SCRAPER_UA
@@ -243,7 +243,7 @@ def test_solved_cookie_clears_safeguard_counter(
     The decision log of the post-solve request is what
     distinguishes the two behaviors."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
+        r"BotShieldEnabled\s+On",
         _safeguard_cfg(threshold=4),
         count=1,
     ):
@@ -287,9 +287,9 @@ def test_safeguard_off_by_default(config_override, fresh_ip):
     runs every time regardless of N. Tight-loop hammering never
     promotes to safeguard — pre-E10 behavior preserved."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
+        r"BotShieldEnabled\s+On",
         # Deliberately no BotShieldSafeguard directive.
-        'BotShieldAllowVerifiedBots on\n',
+        'BotShieldEnabled On\n',
         count=1,
     ):
         responses = _hammer(fresh_ip, 10)
@@ -315,7 +315,7 @@ def test_safeguard_redirect_url_override(config_override, fresh_ip):
         + f'    BotShieldSafeguardRedirectURL {custom_url}\n'
     )
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on", cfg, count=1,
+        r"BotShieldEnabled\s+On", cfg, count=1,
     ):
         # Trip threshold + 1 redirect.
         responses = _hammer(fresh_ip, 3)
@@ -428,7 +428,7 @@ def test_unverified_session_cookie_does_not_clear_safeguard(
     rather than a 302 redirect."""
     bogus_cookie = "AUcZ.bogus"  # GCM-shape but doesn't verify
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
+        r"BotShieldEnabled\s+On",
         _safeguard_cfg(threshold=2),
         count=1,
     ):
@@ -470,7 +470,7 @@ def test_safeguard_redirect_increments_outcome_counter(
     in this suite — counter parity is the loud-not-silent gate that
     catches enum drift between source and metrics export."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
+        r"BotShieldEnabled\s+On",
         _safeguard_cfg(threshold=2),
         count=1,
     ):

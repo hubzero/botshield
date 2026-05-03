@@ -39,8 +39,8 @@ def test_scope_trigger_status_blocks_inside_location_only(
     requests to /trap, and DOES NOT fire for requests to other
     paths in the same vhost."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    <Location "/trap">\n'
         '        BotShieldTrigger status=403 log=trap-block\n'
         '    </Location>',
@@ -76,8 +76,8 @@ def test_scope_trigger_flag_persists_to_next_request(
     (tier_floor=captcha + +60 score) — same behavior the legacy
     BotShieldFlagIP directive provided."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    <Location "/admin/.env">\n'
         '        BotShieldTrigger flag=honeypot_hit ttl=3600\n'
         '    </Location>',
@@ -108,8 +108,8 @@ def test_scope_trigger_reset_drops_inherited(
     """A BotShieldTrigger reset in a deeper scope drops triggers
     that would otherwise be inherited from the parent scope."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    <Location "/api">\n'
         '        BotShieldTrigger penalty=15 log=api-tax\n'
         '    </Location>\n'
@@ -146,8 +146,8 @@ def test_scope_trigger_observe_mode_does_not_enforce(
     """A BotShieldTrigger with mode=observe logs `:observe` but
     does not return the configured status."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    <Location "/staging">\n'
         '        BotShieldTrigger status=403 log=staging-trial mode=observe\n'
         '    </Location>',

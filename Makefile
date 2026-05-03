@@ -25,9 +25,41 @@ DOCS_BUILD  := tools/build_site.py
 # is what Apache's LoadModule directive references; the source file
 # stays bare-named to match the rest of src/.
 MAIN_SRC := src/$(MOD_NAME).c
-EXTRA_SRC := src/robots.c src/shm.c src/crypto.c src/allowlist.c src/metrics.c src/challenge.c src/cookie.c src/load.c src/triggers.c src/config.c src/templates.c src/formcaptcha.c src/score.c src/policy.c src/heuristics.c src/silent.c src/captcha.c src/bridge.c
+EXTRA_SRC := src/robots.c src/shm.c src/crypto.c src/allowlist.c src/generated_verified_bots.c src/metrics.c src/challenge.c src/cookie.c src/load.c src/triggers.c src/config.c src/templates.c src/formcaptcha.c src/score.c src/policy.c src/heuristics.c src/silent.c src/captcha.c src/bridge.c src/bot_directory.c src/generated_bot_directory.c src/browser_classifier.c src/generated_browser_templates.c src/ua_class.c
 SRC      := $(MAIN_SRC) $(EXTRA_SRC)
 LA       := $(MAIN_SRC:.c=.la)
+
+# generated_bot_directory.c is regenerated from the vendored JSON.
+# Codegen runs whenever the JSON's mtime is newer than the .c.
+# Operators refresh the JSON via tools/refresh-bot-directory.py
+# (network fetch + validation + atomic replace); we never auto-run
+# refresh from the build, only codegen.
+GEN_BOT_DIR_C    := src/generated_bot_directory.c
+GEN_BOT_DIR_JSON := vendor/bot-directory.json
+GEN_BOT_DIR_TOOL := tools/gen-bot-directory.py
+
+$(GEN_BOT_DIR_C): $(GEN_BOT_DIR_JSON) $(GEN_BOT_DIR_TOOL)
+	$(DOCS_PYTHON) $(GEN_BOT_DIR_TOOL)
+
+# Browser-templates codegen — same shape as bot-directory.
+GEN_BROWSER_C    := src/generated_browser_templates.c
+GEN_BROWSER_JSON := vendor/top-user-agents.json
+GEN_BROWSER_TOOL := tools/gen-browser-templates.py
+
+$(GEN_BROWSER_C): $(GEN_BROWSER_JSON) $(GEN_BROWSER_TOOL)
+	$(DOCS_PYTHON) $(GEN_BROWSER_TOOL)
+
+# Verified-bot built-ins codegen — bs_builtin_bots[] used to be a
+# hardcoded C array; now codegenned from a vendor JSON for symmetry
+# with the other two data sources. No external upstream, so the
+# .json IS the project's curated set (no .builtin layer); operator
+# overlay at vendor/verified-bots.local.json (gitignored).
+GEN_VBOTS_C    := src/generated_verified_bots.c
+GEN_VBOTS_JSON := vendor/verified-bots.json
+GEN_VBOTS_TOOL := tools/gen-verified-bots.py
+
+$(GEN_VBOTS_C): $(GEN_VBOTS_JSON) $(GEN_VBOTS_TOOL)
+	$(DOCS_PYTHON) $(GEN_VBOTS_TOOL)
 
 # Pass warnings through apxs to the underlying compiler.
 CFLAGS_WARN := -Wc,-Wall -Wc,-Wextra -Wc,-Wno-unused-parameter
@@ -71,7 +103,7 @@ LIBS := -lcrypto -lcurl -ljson-c
 
 all: build
 
-build:
+build: $(GEN_BOT_DIR_C) $(GEN_BROWSER_C) $(GEN_VBOTS_C)
 	$(APXS) -c $(CFLAGS_WARN) $(CFLAGS_VIS) $(SRC) $(LIBS)
 
 install: build

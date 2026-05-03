@@ -40,8 +40,8 @@ def test_embedded_serves_real_page_immediately(
     interstitial. The page title is 'BotShield embedded-mode test
     page', not 'Verify you are human'."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    <Location /embedded-test.html>\n'
         '        BotShieldSilentMode embedded\n'
         '    </Location>',
@@ -69,8 +69,8 @@ def test_embedded_wrapper_mints_verified_cookie(
     background), wait a few seconds for the Worker + POST to
     complete, observe __Host-bs_session in the cookie jar."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    <Location /embedded-test.html>\n'
         '        BotShieldSilentMode embedded\n'
         '    </Location>',
@@ -113,8 +113,8 @@ def test_embedded_turnstile_mints_verified_cookie(
     + flakier than the PoW path, but proves the provider-dispatch
     mechanism works end-to-end."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    <Location /embedded-test.html>\n'
         '        BotShieldSilentMode embedded\n'
         '        BotShieldCaptchaProvider turnstile\n'
@@ -161,8 +161,8 @@ def test_embedded_hcaptcha_mints_verified_cookie(
       secret:  0x0000000000000000000000000000000000000000
     """
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    <Location /embedded-test.html>\n'
         '        BotShieldSilentMode embedded\n'
         '        BotShieldCaptchaProvider hcaptcha\n'
@@ -218,8 +218,8 @@ def test_embedded_falls_back_to_m7_when_wrapper_blocked(
     the first request would be silent-tier and the count couldn't
     accumulate."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    <Location /embedded-test.html>\n'
         '        BotShieldSilentMode embedded\n'
         '        BotShieldScoreSilent 1\n'
@@ -346,8 +346,8 @@ def test_embedded_subsequent_request_declined_through(
     cookie minted → cookie sent → cookie verified server-side → real
     content."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    <Location /embedded-test.html>\n'
         '        BotShieldSilentMode embedded\n'
         '    </Location>',

@@ -76,8 +76,8 @@ def test_strike_used_grows_when_429_burst_recorded(
     Sleeps >1s before scraping so the thread-local gauge cache
     expires and the scrape sees fresh values."""
     with config_override(
-        r"BotShieldAllowVerifiedBots\s+on",
-        'BotShieldAllowVerifiedBots on\n'
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
         '    BotShieldRateLimit corpbot 2 min "CorpBot" *\n'
         '    BotShieldRateLimitEscalate corpbot 3 min status=403 ttl=60',
         count=1,
