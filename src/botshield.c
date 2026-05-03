@@ -480,19 +480,26 @@ static const command_rec bs_cmds[] = {
                  "under reason rate-limit-exceeded:<name>."),
     AP_INIT_TAKE_ARGV("BotShieldBotRateLimit",
                  bs_set_bot_rate_limit, NULL, RSRC_CONF,
-                 "Per-bot-slug rate limit. Args: "
-                 "<slug-or-pattern-or-*> <budget> <per>. "
+                 "Per-bot-slug rate limit. Three forms:\n"
+                 "  Off                            disable post_config "
+                 "default synthesis (specific entries still apply)\n"
+                 "  <slug-or-pattern-or-*> <delay-sec>    1 req per "
+                 "<delay> seconds (Crawl-delay style); 0 admits all\n"
+                 "  <slug-or-pattern-or-*> <budget> <per>  3-arg form: "
+                 "<budget> requests per <per> period (sec/min/hour).\n"
                  "Slug-or-pattern is matched (case-insensitive "
                  "substring) against the bot directory; resolves to "
-                 "all matching slugs which share one counter. '*' "
-                 "is the wildcard fallback — pre-allocates one "
-                 "counter PER directory slug not covered by a "
-                 "specific rule (each unmatched bot gets its own "
-                 "budget; matches robots.txt per-bot semantic), "
-                 "plus two reserved aggregate slots for unknown-bot "
-                 "and fake-bot labels. Per is sec/min/hour (or "
-                 "s/m/h); budget 1..1000000. Over-budget returns "
-                 "429 + Retry-After + reason bot-rate:<slug>."),
+                 "all matching slugs which share one counter. '*' is "
+                 "the wildcard fallback — pre-allocates one counter "
+                 "PER directory slug not covered by a specific rule "
+                 "(each unmatched bot gets its own budget; matches "
+                 "robots.txt per-bot semantic), plus three reserved "
+                 "aggregate slots for unknown-bot, fake-bot, and "
+                 "wildcard-fallback labels. Default when no "
+                 "BotShieldBotRateLimit directive is configured: "
+                 "synthesize '* 1 sec' so cookieless bot traffic "
+                 "is throttled by default. Over-budget returns 429 "
+                 "+ Retry-After + reason bot-rate:<slug>."),
     /* E9 — repeated-429 escalation. Sits on top of BotShieldRateLimit;
      * does not apply to robots.txt Crawl-delay 429s in v1 (no operator
      * handle for them). */

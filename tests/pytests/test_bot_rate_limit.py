@@ -182,6 +182,97 @@ def test_bot_rate_specific_overrides_wildcard(
     )
 
 
+def test_bot_rate_two_arg_delay_form(config_override, fresh_ip):
+    """2-arg shorthand: <slug> <delay-sec> = 1 req per delay seconds.
+    Crawl-delay-style. Expressed as `bingbot 5` instead of
+    `bingbot 1 5sec`."""
+    with config_override(
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
+        '    BotShieldBotRateLimit bingbot 5',  # 1 req per 5 sec
+        count=1,
+    ):
+        b1 = client.get("/", xff=fresh_ip, ua=BINGBOT_UA)
+        b2 = client.get("/", xff=fresh_ip, ua=BINGBOT_UA)
+
+    assert b1.status_code in (200, 302), f"b1 status={b1.status_code}"
+    assert b2.status_code == 429, (
+        f"b2 expected 429 within 5sec window; got {b2.status_code}"
+    )
+
+
+def test_bot_rate_zero_delay_admits_all(config_override, fresh_ip):
+    """Delay value of 0 admits all requests — the per-slug opt-out
+    sentinel. Useful for excepting one slug from a stricter wildcard."""
+    with config_override(
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
+        '    BotShieldBotRateLimit * 1\n'             # everyone 1/sec
+        '    BotShieldBotRateLimit bingbot 0',        # except bingbot
+        count=1,
+    ):
+        # 5 rapid bingbot requests — none should 429 because slug=0.
+        results = [
+            client.get("/", xff=fresh_ip, ua=BINGBOT_UA)
+            for _ in range(5)
+        ]
+    assert all(r.status_code != 429 for r in results), (
+        f"bingbot at delay=0 should never 429; got "
+        f"{[r.status_code for r in results]}"
+    )
+
+
+def test_bot_rate_off_disables_default_synthesis(
+    config_override, fresh_ip,
+):
+    """`BotShieldBotRateLimit Off` skips the post_config default-
+    synthesis step. Specific entries (if any) still apply, but no
+    automatic wildcard means unmatched bots aren't rate-limited."""
+    with config_override(
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
+        '    BotShieldBotRateLimit Off',
+        count=1,
+    ):
+        # Many rapid bingbot requests — should all admit because
+        # no wildcard exists and no specific bingbot entry.
+        results = [
+            client.get("/", xff=fresh_ip, ua=BINGBOT_UA)
+            for _ in range(5)
+        ]
+    assert all(r.status_code != 429 for r in results), (
+        f"BotShieldBotRateLimit Off should disable rate limiting; "
+        f"got {[r.status_code for r in results]}"
+    )
+
+
+def test_bot_rate_off_with_specific_entry(config_override, fresh_ip):
+    """`Off` + a specific entry: the specific entry still applies, but
+    no wildcard fallback for unmatched slugs."""
+    with config_override(
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
+        '    BotShieldBotRateLimit Off\n'
+        '    BotShieldBotRateLimit bingbot 60',  # only bingbot rate-limited
+        count=1,
+    ):
+        # bingbot trips the specific rule
+        b1 = client.get("/", xff=fresh_ip, ua=BINGBOT_UA)
+        b2 = client.get("/", xff=fresh_ip, ua=BINGBOT_UA)
+        # Other bots are unprotected (Gatus has no specific entry, no
+        # wildcard since Off)
+        gatus_ua = "Gatus/1.0"
+        g1 = client.get("/", xff=fresh_ip, ua=gatus_ua)
+        g2 = client.get("/", xff=fresh_ip, ua=gatus_ua)
+
+    assert b1.status_code in (200, 302), f"b1 status={b1.status_code}"
+    assert b2.status_code == 429, f"b2 expected 429 (bingbot specific rule)"
+    assert g1.status_code != 429 and g2.status_code != 429, (
+        f"gatus should not be rate-limited under Off + bingbot-only; "
+        f"got g1={g1.status_code} g2={g2.status_code}"
+    )
+
+
 def test_bot_rate_bad_directive_args():
     """Config-time validation: bad budget, bad period, unresolvable
     pattern. These would fail the apachectl -t syntax check; we test

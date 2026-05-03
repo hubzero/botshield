@@ -7,6 +7,7 @@
 #include "bot_rate.h"
 #include "bot_directory.h"
 #include "botshield.h"
+#include "metrics.h"       /* bs_set_would_outcome */
 #include "policy.h"        /* bs_rate_counter_admit */
 #include "robots.h"        /* bs_robots_state, robots_group_* */
 #include "score.h"
@@ -45,13 +46,35 @@ parse_budget_window(apr_pool_t *p, const char *budget_s, const char *per_s,
 }
 
 
+/* Parse a single integer "<delay-sec>" into (budget=1, window). 0 is
+ * accepted and means "admit all" — bs_rate_counter_admit treats
+ * window_sec=0 as a constantly-rolling window where every CAS lands
+ * a fresh count=1. */
+static const char *
+parse_delay(apr_pool_t *p, const char *delay_s,
+            apr_uint32_t *out_budget, apr_uint32_t *out_window)
+{
+    char *end;
+    long ns = strtol(delay_s, &end, 10);
+    if (!end || *end || ns < 0 || ns > 86400) {
+        return apr_psprintf(p,
+            "delay '%s' must be 0..86400 seconds (0 admits all)",
+            delay_s);
+    }
+    *out_budget = 1;
+    *out_window = (apr_uint32_t)ns;
+    return NULL;
+}
+
+
 const char *bs_set_bot_rate_limit(cmd_parms *cmd, void *dconf,
                                   int argc, char *const argv[])
 {
     (void)dconf;
-    if (argc != 3) {
-        return "BotShieldBotRateLimit: expects <slug-or-pattern-or-*> "
-               "<budget> <per>";
+    if (argc < 1 || argc > 3) {
+        return "BotShieldBotRateLimit: expects 'Off', or "
+               "<slug-or-pattern-or-*> <delay-sec>, or "
+               "<slug-or-pattern-or-*> <budget> <per>";
     }
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
@@ -63,9 +86,22 @@ const char *bs_set_bot_rate_limit(cmd_parms *cmd, void *dconf,
     }
     bs_bot_rate_state *st = scfg->bot_rate_state;
 
+    /* 1-arg form: 'Off' — disable post_config default synthesis. */
+    if (argc == 1) {
+        if (strcasecmp(argv[0], "off") != 0) {
+            return apr_psprintf(cmd->pool,
+                "BotShieldBotRateLimit: single-arg form must be 'Off'; "
+                "got '%s'. Use <slug> <delay-sec>, or "
+                "<slug> <budget> <per>.", argv[0]);
+        }
+        st->default_disabled = 1;
+        return NULL;
+    }
+
     apr_uint32_t budget = 0, window = 0;
-    const char *err = parse_budget_window(cmd->pool, argv[1], argv[2],
-                                          &budget, &window);
+    const char *err = (argc == 2)
+        ? parse_delay(cmd->pool, argv[1], &budget, &window)
+        : parse_budget_window(cmd->pool, argv[1], argv[2], &budget, &window);
     if (err) {
         return apr_psprintf(cmd->pool, "BotShieldBotRateLimit: %s", err);
     }
@@ -255,16 +291,51 @@ void bs_bot_rate_init(apr_pool_t *pconf, server_rec *s, int *next_slot)
                                                    &botshield_module);
         if (!scfg) continue;
 
-        /* Lazy-init state when robots.txt has rate-limit content but
-         * no directives were configured. */
+        /* Default synthesis condition: module is enabled at vhost
+         * scope (On or LogOnly), no operator BotShieldBotRateLimit
+         * directive was configured, and the operator didn't write
+         * `BotShieldBotRateLimit Off` to opt out. The default is
+         * `* 1 sec` — 1 req/sec per directory slug, Crawl-delay-style. */
+        bs_dir_cfg *dcfg = ap_get_module_config(sv->lookup_defaults,
+                                                &botshield_module);
+        int module_enabled = dcfg
+            && (dcfg->enabled == BS_ENABLED_ON
+             || dcfg->enabled == BS_ENABLED_LOGONLY);
+
+        /* Lazy-init state when there's robots.txt content or the
+         * module is enabled (so the default can fire). */
         if (!scfg->bot_rate_state) {
-            if (!robots_has_crawl_delay(scfg)) continue;
+            int robots = robots_has_crawl_delay(scfg);
+            if (!robots && !module_enabled) continue;
             scfg->bot_rate_state = apr_pcalloc(pconf,
                 sizeof(*scfg->bot_rate_state));
             scfg->bot_rate_state->entries = apr_array_make(pconf, 8,
                 sizeof(bs_bot_rate_entry *));
         }
         bs_bot_rate_state *st = scfg->bot_rate_state;
+
+        /* Pre-init synthesis: if the operator wrote nothing, install
+         * a synthetic wildcard at 1 req/sec. The synthetic entry
+         * goes through the same pre-allocation path as a directive
+         * wildcard. */
+        if (module_enabled
+            && !st->wildcard_entry
+            && !st->default_disabled
+            && st->entries->nelts == 0) {
+            bs_bot_rate_entry *def = apr_pcalloc(pconf, sizeof(*def));
+            def->origin     = "default";
+            def->is_wildcard = 1;
+            def->budget     = 1;
+            def->window_sec = 1;
+            def->shm_slot   = -1;
+            st->wildcard_entry = def;
+            ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+                "mod_botshield: BotShieldBotRateLimit default applied: "
+                "* 1 sec (1 req/sec per directory slug). Override with "
+                "explicit BotShieldBotRateLimit directives, or "
+                "'BotShieldBotRateLimit Off' to disable entirely.");
+        }
+
         st->by_slug = apr_hash_make(pconf);
 
         /* Pass 0 — robots.txt-derived entries. Processed first so the
@@ -367,6 +438,13 @@ int bs_bot_rate_check(request_rec *r)
     }
     bs_bot_rate_state *st = scfg->bot_rate_state;
 
+    /* LogOnly observe — over-budget gets logged as ~rate_limited
+     * instead of returning 429. Mirrors the directive rate-limit
+     * cohort path's observe handling at policy.c:478-488. */
+    bs_dir_cfg *dcfg = ap_get_module_config(r->per_dir_config,
+                                            &botshield_module);
+    int log_only = dcfg && dcfg->enabled == BS_ENABLED_LOGONLY;
+
     const bs_ua_class *cls = bs_classify_request_ua(r);
     if (!cls) return OK;
 
@@ -420,6 +498,21 @@ int bs_bot_rate_check(request_rec *r)
     }
 
     /* Over budget. */
+    if (log_only) {
+        /* Observation only — log a ~rate_limited would-outcome and
+         * a :observe-suffixed reason, don't 429 the request.
+         * Mirrors the directive rate-limit cohort observe path. */
+        bs_score_add(r, 0, 0,
+            apr_pstrcat(r->pool, "bot-rate:",
+                slug_for_log ? slug_for_log : "?",
+                ":observe", NULL));
+        bs_set_would_outcome(r, "~rate_limited");
+        if (bs_shm.metrics) {
+            __atomic_fetch_add(&bs_shm.metrics->rate_limit_observed_total,
+                               1, __ATOMIC_RELAXED);
+        }
+        return OK;
+    }
     apr_uint32_t win = __atomic_load_n(&slot->window_start_sec,
                                        __ATOMIC_RELAXED);
     apr_uint32_t now = (apr_uint32_t)apr_time_sec(apr_time_now());

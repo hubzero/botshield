@@ -1,5 +1,46 @@
 # Changelog
 
+## 2026-05-03 (latest)
+
+### Added
+
+- `BotShieldBotRateLimit` — three forms now, two new:
+
+  ```apache
+  BotShieldBotRateLimit Off                       # NEW
+  BotShieldBotRateLimit <slug> <delay-sec>        # NEW (Crawl-delay style)
+  BotShieldBotRateLimit <slug> <budget> <per>     # original
+  ```
+
+  - `Off` — disable post_config default synthesis. Specific entries
+    (if any) still apply; just no automatic wildcard.
+  - `<slug> <delay>` — 1 request per `<delay>` seconds. Matches
+    robots.txt Crawl-delay convention. `0` admits all (per-slug
+    opt-out sentinel).
+
+- Default rate-limit synthesis. When `BotShieldEnabled On|LogOnly`
+  is set and no operator `BotShieldBotRateLimit` directive was
+  configured, post_config synthesizes `* 1 sec` automatically. Each
+  directory slug gets its own counter at 1 req/sec — Crawl-delay-
+  style, generous enough that well-behaved crawlers aren't
+  affected, aggressive ones are throttled. Logs a NOTICE at
+  startup so operators know it fired:
+
+  ```
+  mod_botshield: BotShieldBotRateLimit default applied: * 1 sec
+  ```
+
+  Operators wanting a different default: explicit
+  `BotShieldBotRateLimit *` with their preferred budget.
+  Operators wanting NO rate limit: `BotShieldBotRateLimit Off`.
+
+### Changed
+
+- `bs_bot_rate_check` honors `BotShieldEnabled LogOnly` —
+  over-budget hits log `bot-rate:<slug>:observe` +
+  `~rate_limited` would-outcome instead of returning 429.
+  Mirrors the directive rate-limit cohort path's observe handling.
+
 ## 2026-05-03 (later)
 
 ### Added

@@ -75,12 +75,27 @@ typedef struct bs_bot_rate_state {
      * wildcard rule is configured. */
     bs_bot_rate_slot    *wildcard_fallback_holder;
     bs_bot_rate_entry   *wildcard_entry;     /* NULL if no * rule */
+    /* Set by `BotShieldBotRateLimit Off` — skip the post_config
+     * default-synthesis step. Specific entries (if any) still
+     * apply. Operators wanting "no rate limit at all" use this;
+     * operators wanting "default + specific overrides" simply omit
+     * the wildcard directive. */
+    int                  default_disabled;
 } bs_bot_rate_state;
 
-/* BotShieldBotRateLimit <slug-or-pattern-or-*> <budget> <per>.
+/* BotShieldBotRateLimit. Three forms:
+ *
+ *   Off                              # disable the post_config
+ *                                      default-synthesis step
+ *   <slug-or-pattern-or-*> <delay>   # 1 req per <delay> seconds
+ *                                      (Crawl-delay style); 0 = admit all
+ *   <slug-or-pattern-or-*> <budget> <per>
+ *                                    # 3-arg form: <budget> requests
+ *                                      per <per> period (sec/min/hour)
+ *
  * Slug-or-pattern resolves via bs_known_bots_resolve_slugs. "*"
- * reserves the wildcard-fallback semantic. Budget is 1..1000000;
- * per is sec|min|hour (or s|m|h). */
+ * reserves the wildcard-fallback semantic. Budget 1..1000000; delay
+ * 0..86400 seconds. */
 const char *bs_set_bot_rate_limit(cmd_parms *cmd, void *dconf,
                                   int argc, char *const argv[]);
 
