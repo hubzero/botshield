@@ -47,6 +47,19 @@ typedef struct {
     const char *pattern;    /* UA substring to match (case-insensitive) */
     const char *slug;       /* canonical bot slug, e.g. "google" */
     const char *category;   /* category from upstream taxonomy */
+    /* Bot-group classification — names taken from the IETF aipref
+     * content-signal vocabulary (search, ai-input, ai-train) plus a
+     * mod_botshield extension "monitor" for operational categories.
+     * Computed from `category` at codegen time; per-bot override via
+     * vendor/bot-directory.local.json with an explicit `botgroup`
+     * field.
+     *
+     * Values: "search", "ai-input", "ai-train", "monitor", or NULL
+     * (operational/ambiguous bots — security scanners, generic
+     * libraries, OTHER). Used by BotShieldBotRateLimit @botgroup,
+     * BotShieldBlockPath @botgroup, and robots.txt User-agent:
+     * @botgroup stanzas. */
+    const char *botgroup;
 } bs_known_bot_entry;
 
 /* Generated baseline: array terminated by an all-NULL sentinel.
@@ -117,13 +130,16 @@ bs_known_bots_state *bs_known_bots_build_baseline(server_rec *s,
  * Atomically loads the active runtime-override state, falling back
  * to the compiled-in baseline if no override is loaded.
  *
- * On match, *out_slug and *out_category (if non-NULL) are populated
- * with pointers into the active state's storage — callers must NOT
- * free them and must NOT retain across a watchdog refresh.
+ * On match, *out_slug, *out_category, *out_botgroup (any of which
+ * may be NULL to skip) are populated with pointers into the active
+ * state's storage — callers must NOT free them and must NOT retain
+ * across a watchdog refresh. *out_botgroup is NULL when the matched
+ * entry's category doesn't map to a botgroup.
  * NULL UA returns 0. */
 int bs_ua_is_known_bot(const char *ua,
                        const char **out_slug,
-                       const char **out_category);
+                       const char **out_category,
+                       const char **out_botgroup);
 
 /* Parse a TSV file at `path` into a fresh state allocated from a
  * subpool of `parent_pool`. Returns NULL on any failure (open,
@@ -156,6 +172,33 @@ void bs_known_bots_publish(server_rec *s,
  * mtime change (early-out if mtime unchanged). */
 apr_status_t bs_bot_directory_watchdog_cb(int state, void *data,
                                           apr_pool_t *pool);
+
+/* Resolve an operator-supplied UA-pattern argument (from a directive
+ * or robots.txt User-agent stanza) to the SET of directory slugs the
+ * pattern covers.
+ *
+ * Substring semantics: an arg like "Google" includes every directory
+ * entry whose .pattern field contains "Google" (case-insensitive) —
+ * "Googlebot/", "GoogleOther/", "Google-Extended", etc. — so all the
+ * Google-family slugs share the resolved set. An arg like "Googlebot"
+ * narrows to just the googlebot slug. Reads the active runtime-
+ * override state if present, otherwise the compiled-in baseline.
+ *
+ * Returns an apr_array of `const char *` slug pointers allocated from
+ * `pool`. Empty array (nelts == 0) means no directory entry matched
+ * the pattern — caller should warn the operator. The returned slug
+ * pointers are duplicated into `pool`, safe to retain. */
+apr_array_header_t *bs_known_bots_resolve_slugs(apr_pool_t *pool,
+                                                const char *pattern);
+
+/* Resolve all directory slugs whose `botgroup` field matches the
+ * given group name (case-insensitive). Returns an apr_array of
+ * `const char *` slug pointers allocated from `pool`. Empty array if
+ * no entries match (botgroup misspelled, or no bots in that
+ * category). Used by the @botgroup selector in BotShieldBotRateLimit
+ * / BlockPath / robots.txt extension. */
+apr_array_header_t *bs_known_bots_resolve_by_botgroup(apr_pool_t *pool,
+                                                      const char *botgroup);
 
 /* Setters wired into bs_cmds[]. */
 const char *bs_set_bot_directory(cmd_parms *cmd, void *dconf,

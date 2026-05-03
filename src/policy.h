@@ -47,6 +47,7 @@
 #include <httpd.h>
 
 #include "botshield.h"
+#include "triggers.h"   /* bs_rate_counter */
 
 #ifdef __cplusplus
 extern "C" {
@@ -69,6 +70,14 @@ int bs_check_policy(request_rec *r);
  * own ACL; the page reveals operator config (already on disk in
  * /etc/apache2/) but no cookie secrets or client IPs. */
 int bs_policy_status_handler(request_rec *r, bs_dir_cfg *cfg);
+
+/* Atomic fixed-window admission test against a SHM rate-counter
+ * slot. Returns 1 if the request fits under budget (count was
+ * incremented), 0 if the window is full. Shared with bot_rate.c
+ * for the slug-keyed bot rate limit. */
+int bs_rate_counter_admit(bs_rate_counter *slot,
+                          apr_uint32_t budget,
+                          apr_uint32_t window_sec);
 
 #ifdef __cplusplus
 }

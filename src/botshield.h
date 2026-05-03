@@ -408,6 +408,12 @@ typedef struct bs_server_cfg {
     const char         *app_integration_secret_file;
     const unsigned char *app_integration_secret;
     apr_size_t          app_integration_secret_len;
+
+    /* Slug-keyed bot rate limit (BotShieldBotRateLimit + robots.txt
+     * Crawl-delay slug-rekey). State is opaque here; bot_rate.c owns
+     * the struct definition + lifecycle. NULL when no rules are
+     * configured for this vhost. */
+    struct bs_bot_rate_state *bot_rate_state;
 } bs_server_cfg;
 
 /* Trigger and policy family types (bs_trigger_*, bs_*_trigger_entry,

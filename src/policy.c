@@ -24,6 +24,7 @@
 
 #include "botshield.h"
 #include "allowlist.h"     /* bs_allow_ip_in_ranges (cohort match) */
+#include "bot_rate.h"      /* bs_bot_rate_check */
 #include "bot_directory.h" /* bs_ua_is_known_bot (Cloudflare directory) */
 #include "browser_classifier.h" /* bs_ua_is_browser (top-100 templates) */
 #include "ua_class.h"     /* unified per-request classification */
@@ -37,15 +38,25 @@
 #include "triggers.h"      /* bs_apply_trigger_action, bs_cookie_pred_match */
 
 /* Cohort match at request time. Returns 1 when this request belongs
- * to the cohort. UA match is case-insensitive via strcasestr to
- * match the directive's documented contract. strcasestr is a GNU
- * extension, already relied on elsewhere in the module on the
- * platforms we target (Linux/FreeBSD/macOS). */
+ * to the cohort. UA axis can be:
+ *   ua_any=1              matches any UA
+ *   ua_botgroup != NULL   matches by classified botgroup
+ *                         (search/ai-input/ai-train/monitor)
+ *   ua_pattern != NULL    matches by UA-substring (case-insensitive)
+ * IP axis: ip_any=1 OR client IP ∈ ranges. */
 static int bs_cohort_matches(const bs_cohort *c,
                              const char *ua, request_rec *r)
 {
     if (!c->ua_any) {
-        if (!ua || !c->ua_pattern || !strcasestr(ua, c->ua_pattern)) return 0;
+        if (c->ua_botgroup) {
+            const bs_ua_class *cls = bs_classify_request_ua(r);
+            if (!cls || !cls->known_botgroup) return 0;
+            if (strcasecmp(cls->known_botgroup, c->ua_botgroup) != 0) return 0;
+        } else if (c->ua_pattern) {
+            if (!ua || !strcasestr(ua, c->ua_pattern)) return 0;
+        } else {
+            return 0;
+        }
     }
     if (!c->ip_any) {
         if (!c->ranges || !bs_allow_ip_in_ranges(c->ranges, r)) return 0;
@@ -71,9 +82,9 @@ static int bs_cohort_matches(const bs_cohort *c,
  * either rolls the window AND sets count atomically, or
  * increments count alone — no torn intermediate visible to
  * other threads. */
-static int bs_rate_counter_admit(bs_rate_counter *slot,
-                                 apr_uint32_t budget,
-                                 apr_uint32_t window_sec)
+int bs_rate_counter_admit(bs_rate_counter *slot,
+                          apr_uint32_t budget,
+                          apr_uint32_t window_sec)
 {
     _Static_assert(sizeof(bs_rate_counter) == sizeof(apr_uint64_t),
                    "bs_rate_counter must be 8 bytes for u64 CAS");
@@ -393,7 +404,11 @@ int bs_check_policy(request_rec *r)
     robots_match rmatch = { -1, 0, 1, 0, NULL };
     int robots_apply = 0;
     if (rstate && rstate->doc && ua) {
-        robots_query(rstate->doc, ua, r->uri, &rmatch);
+        const bs_ua_class *cls_for_robots = bs_classify_request_ua(r);
+        const char *robots_botgroup = (cls_for_robots
+                                       && cls_for_robots->known_botgroup)
+                                    ? cls_for_robots->known_botgroup : NULL;
+        robots_query(rstate->doc, ua, robots_botgroup, r->uri, &rmatch);
         if (rmatch.group_idx >= 0) {
             robots_apply = 1;
             if (rmatch.is_wildcard) {
@@ -424,11 +439,11 @@ int bs_check_policy(request_rec *r)
     }
 
     /* A directive rate-limit cohort that MATCHES this request is
-     * authoritative for it — operator policy overrides robots.txt in
-     * the rate-limit family. If a directive matched, we skip the
-     * robots.txt crawl-delay check below regardless of whether the
-     * directive admitted or tripped. */
-    int directive_rate_matched = 0;
+     * authoritative for it. (Pre-rekey, this also suppressed the
+     * robots.txt Crawl-delay check below; that legacy enforcement
+     * has been replaced by bs_bot_rate_check, which absorbs
+     * robots.txt and is independent of cohort-based rate limits —
+     * the two compose naturally, whichever trips first wins.) */
     if (scfg->rate_limits && scfg->rate_limits->nelts > 0) {
         bs_rate_counter *counters = (bs_rate_counter *)bs_shm.rate_counters;
         unsigned char client_ip[16];
@@ -439,7 +454,6 @@ int bs_check_policy(request_rec *r)
             bs_rate_limit_entry *e = APR_ARRAY_IDX(
                 scfg->rate_limits, i, bs_rate_limit_entry *);
             if (!bs_cohort_matches(&e->cohort, ua, r)) continue;
-            directive_rate_matched = 1;
             if (e->shm_slot < 0 || !counters) continue;
 
             /* E12 — observe mode (per-rule or global log-only).
@@ -531,44 +545,19 @@ int bs_check_policy(request_rec *r)
         }
     }
 
-    /* E2.2 — robots.txt Crawl-delay enforcement. Budget=1 per
-     * Crawl-delay seconds; slot assignment is held inside rstate's
-     * bundle (allocated at post_config + preserved by name across
-     * refreshes). Skipped when a directive rate-limit already
-     * matched this request: operator policy is authoritative in the
-     * rate family. */
-    if (robots_apply && rmatch.crawl_delay_sec > 0
-        && !directive_rate_matched
-        && rstate && rstate->slot_by_group_idx
-        && rmatch.group_idx < robots_group_count(rstate->doc)) {
-        int slot_idx = rstate->slot_by_group_idx[rmatch.group_idx];
-        bs_rate_counter *counters = (bs_rate_counter *)bs_shm.rate_counters;
-        if (slot_idx >= 0 && counters) {
-            bs_rate_counter *slot = &counters[slot_idx];
-            if (!bs_rate_counter_admit(slot, 1,
-                    (apr_uint32_t)rmatch.crawl_delay_sec)) {
-                apr_uint32_t win = __atomic_load_n(
-                    &slot->window_start_sec, __ATOMIC_RELAXED);
-                apr_uint32_t now =
-                    (apr_uint32_t)apr_time_sec(apr_time_now());
-                apr_uint32_t wsec =
-                    (apr_uint32_t)rmatch.crawl_delay_sec;
-                apr_uint32_t retry = (now >= win && now - win < wsec)
-                                      ? wsec - (now - win) : 1;
-                apr_table_setn(r->err_headers_out, "Retry-After",
-                    apr_psprintf(r->pool, "%u", retry));
-                bs_score_add(r, BS_PENALTY_RATE_LIMIT, 3600,
-                    apr_pstrcat(r->pool, "robots-rate:",
-                        rmatch.group_name ? rmatch.group_name : "?",
-                        NULL));
-                if (bs_shm.metrics) {
-                    __atomic_fetch_add(
-                        &bs_shm.metrics->rate_limit_exceeded_total,
-                        1, __ATOMIC_RELAXED);
-                }
-                return HTTP_TOO_MANY_REQUESTS;
-            }
-        }
+    /* Slug-keyed bot rate limit. Absorbs both BotShieldBotRateLimit
+     * directives and robots.txt Crawl-delay groups (the latter
+     * resolved to slugs at post_config via the bot directory). The
+     * legacy group-index keyed Crawl-delay enforcement was retired
+     * here when the rekey landed; bot_rate_check now covers both
+     * sources via one slug→counter map. Lookup keys on
+     * cls->known_slug or cls->verified_name (then unknown-bot /
+     * fake-bot / wildcard-fallback aggregates). Composes with
+     * BotShieldRateLimit directive cohorts above: whichever trips
+     * first short-circuits the policy walk. */
+    {
+        int botrate_rv = bs_bot_rate_check(r);
+        if (botrate_rv != OK) return botrate_rv;
     }
 
     return OK;

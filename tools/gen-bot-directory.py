@@ -53,6 +53,56 @@ def c_string_literal(s):
     return "".join(out)
 
 
+def c_optional_string(s):
+    """Like c_string_literal but emits NULL for empty/missing values.
+    Used for the `botgroup` field which is intentionally NULL for
+    bots whose category doesn't map to a botgroup."""
+    if not s:
+        return "NULL"
+    return c_string_literal(s)
+
+
+# Category → botgroup mapping. Defaults computed at codegen time;
+# per-entry overrides via vendor/bot-directory.local.json (entries
+# with an explicit "botgroup" field bypass this map).
+#
+# Botgroup values come from the IETF aipref content-signal vocabulary
+# ("search", "ai-input", "ai-train") plus "monitor" as a mod_botshield
+# extension for operational categories. NULL means "not classified" —
+# operators rate-limit/block these via specific slug rules rather
+# than @botgroup selectors.
+#
+# Categories not listed below fall through to NULL. Conservative on
+# purpose — when in doubt about whether a bot fits a botgroup, leave
+# it out and let operators target it specifically.
+CATEGORY_TO_BOTGROUP = {
+    "AI_CRAWLER":                  "ai-train",
+    "AI_ASSISTANT":                "ai-input",
+    "AI_SEARCH":                   "ai-input",
+    "ACADEMIC_RESEARCH":           "ai-train",
+    "SEARCH_ENGINE_CRAWLER":       "search",
+    "SEARCH_ENGINE_OPTIMIZATION":  "search",
+    "PAGE_PREVIEW":                "search",
+    "ARCHIVER":                    "search",
+    "MONITORING_AND_ANALYTICS":    "monitor",
+    "ACCESSIBILITY":               "monitor",
+    # Intentionally not mapped (NULL botgroup):
+    #   SECURITY, WEBHOOKS, ADVERTISING_AND_MARKETING, FEED_FETCHER,
+    #   AGGREGATOR, LIBRARY_OR_TOOL, SOCIAL_MEDIA_MARKETING, OTHER
+}
+
+
+def botgroup_for(entry):
+    """Return the botgroup string for a directory entry. Per-entry
+    "botgroup" field wins (operator-curated override); otherwise
+    fall back to the category mapping."""
+    explicit = entry.get("botgroup")
+    if isinstance(explicit, str) and explicit:
+        return explicit.strip().lower()
+    category = entry.get("category") or ""
+    return CATEGORY_TO_BOTGROUP.get(category)
+
+
 def load_active():
     """Load the active vendor JSON. Falls back to the default
     baseline if the active file is missing or unreadable — this
@@ -127,23 +177,24 @@ def main():
     data = merge_overlay(data, BUILTIN_JSON)
     data = merge_overlay(data, LOCAL_JSON)
 
-    # Flatten: each (pattern, slug, category) is one entry. A bot
-    # entry can have multiple userAgentPatterns; we emit one row per
-    # pattern. Patterns longer first so substring matching prefers
-    # the more specific pattern when two could match (operationally
-    # rare; just being defensive).
+    # Flatten: each (pattern, slug, category, botgroup) is one entry.
+    # A bot entry can have multiple userAgentPatterns; we emit one
+    # row per pattern. Patterns longer first so substring matching
+    # prefers the more specific pattern when two could match
+    # (operationally rare; just being defensive).
     rows = []
     for entry in data:
         if not isinstance(entry, dict):
             continue
         slug = entry.get("slug") or ""
         category = entry.get("category") or ""
+        botgroup = botgroup_for(entry)
         patterns = entry.get("userAgentPatterns") or []
         if not isinstance(patterns, list):
             continue
         for p in patterns:
             if isinstance(p, str) and p:
-                rows.append((p, slug, category))
+                rows.append((p, slug, category, botgroup))
     rows.sort(key=lambda r: -len(r[0]))   # longest pattern first
 
     # Compose C source
@@ -160,21 +211,28 @@ def main():
         "",
         "const bs_known_bot_entry bs_known_bots[] = {",
     ]
-    for pattern, slug, category in rows:
-        lines.append("    {{ {}, {}, {} }},".format(
+    for pattern, slug, category, botgroup in rows:
+        lines.append("    {{ {}, {}, {}, {} }},".format(
             c_string_literal(pattern),
             c_string_literal(slug),
             c_string_literal(category),
+            c_optional_string(botgroup),
         ))
-    lines.append("    { NULL, NULL, NULL }")
+    lines.append("    { NULL, NULL, NULL, NULL }")
     lines.append("};")
     lines.append("")
     lines.append("const apr_size_t bs_known_bots_count = {};".format(len(rows)))
     lines.append("")
 
     OUTPUT_C.write_text("\n".join(lines), encoding="utf-8")
-    print("# wrote {} ({} pattern rows from {} bot entries)".format(
-        OUTPUT_C.name, len(rows), len(data)), file=sys.stderr)
+
+    # Brief stderr summary so operators see the botgroup distribution
+    from collections import Counter
+    bg_counts = Counter(r[3] or "(none)" for r in rows)
+    print("# wrote {} ({} pattern rows from {} bot entries; botgroups: {})".format(
+        OUTPUT_C.name, len(rows), len(data),
+        ", ".join("{}={}".format(k, v) for k, v in sorted(bg_counts.items()))),
+        file=sys.stderr)
 
 
 if __name__ == "__main__":
