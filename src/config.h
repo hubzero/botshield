@@ -105,7 +105,7 @@ const char *bs_set_share_scope        (cmd_parms *cmd, void *dconf, const char *
 const char *bs_set_state_file         (cmd_parms *cmd, void *dconf, const char *arg);
 const char *bs_set_state_save_interval(cmd_parms *cmd, void *dconf, const char *arg);
 
-/* Rate-limit / safeguard / block-path family */
+/* Rate-limit / safeguard family */
 const char *bs_set_rate_limit            (cmd_parms *cmd, void *dconf,
                                           int argc, char *const argv[]);
 const char *bs_set_rate_limit_escalate   (cmd_parms *cmd, void *dconf,
@@ -119,8 +119,6 @@ const char *bs_set_safeguard_ttl      (cmd_parms *cmd, void *dconf, const char *
 const char *bs_set_safeguard_redirect_url(cmd_parms *cmd, void *dconf, const char *arg);
 const char *bs_set_safeguard_capacity (cmd_parms *cmd, void *dconf, const char *arg);
 const char *bs_set_nonce_capacity     (cmd_parms *cmd, void *dconf, const char *arg);
-const char *bs_set_block_path         (cmd_parms *cmd, void *dconf,
-                                       int argc, char *const argv[]);
 
 #ifdef __cplusplus
 }

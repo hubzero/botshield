@@ -50,9 +50,9 @@ const char *bs_decision_cookie_status(const char *verify_reason,
 void bs_set_trigger_tag(request_rec *r, const char *tag);
 
 /* Stash a "would-X" counterfactual outcome on r->notes. Called from
- * suppression sites (BlockPath observe, RateLimit observe, Trigger
- * observe with a status side-effect, FormCaptcha observe, tier-
- * dispatch under BotShieldEnabled LogOnly). bs_decision_log reads this note
+ * suppression sites (RateLimit observe, Trigger observe with a
+ * status side-effect, FormCaptcha observe, tier-dispatch under
+ * BotShieldEnabled LogOnly). bs_decision_log reads this note
  * and renders it in the outcome field with a leading `~` prefix
  * (e.g. `~block`, `~rate_limited`, `~challenge`) instead of plain
  * `allow`, so the operator-facing decision log shows what the policy

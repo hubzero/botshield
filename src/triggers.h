@@ -15,9 +15,9 @@
  * The sixth (E14 flag-trigger) uses a separate action surface
  * (score-add / tier_floor) whose entry type also lives here.
  *
- * The E2.1 rate-limit + block-path family shares its (UA?, IP?)
- * cohort predicate (bs_cohort) with the same setters and likewise
- * lives here for cohesion.
+ * The E2.1 rate-limit family and the E3 path-trigger family share
+ * their (UA?, IP?) cohort predicate (bs_cohort), declared up front
+ * so per-family entry types can embed it.
  *
  * Each family has its own directive setter (bs_set_*_trigger) that
  * parses family-specific predicate args, then delegates the shared
@@ -98,11 +98,36 @@ typedef struct {
  * (action keys parsed by bs_parse_trigger_action_key in triggers.c).
  * scfg holds parallel apr_arrays of these — bs_check_policy walks
  * each in declaration order.
- * ====================================================================== */
+ *
+ * bs_cohort (the shared "(UA?, IP?) predicate" struct) is declared
+ * up here so per-family entry types can embed it. The path-trigger
+ * family uses it for optional ua=/ipspec= gating; the rate-limit
+ * family further down reuses the same type. */
+
+typedef struct {
+    const char         *ua_pattern;
+    int                 ua_any;
+    /* @botgroup selector — when non-NULL, the UA axis matches by
+     * the request's classified botgroup instead of UA-substring.
+     * Mutually exclusive with ua_pattern; setter rejects both. Set
+     * by `BotShieldRateLimit @ai-train ...` or
+     * `BotShieldPathTrigger ... ua=@search ...`. */
+    const char         *ua_botgroup;
+    int                 ip_any;
+    const char         *path;
+    const char         *inline_cidrs;
+    apr_array_header_t *ranges;
+} bs_cohort;
 
 typedef struct {
     const char        *name;
     const char        *path_pattern;
+    /* Optional UA / IP gate. Zero-init means "no cohort restriction —
+     * fire whenever path-glob matches." Set when the directive uses
+     * `ua=...` or `ipspec=...` keys. The cohort match (when present)
+     * ANDs with the path glob. See bs_set_path_trigger. */
+    bs_cohort          cohort;
+    int                has_cohort;
     bs_trigger_action  action;
 } bs_path_trigger_entry;
 
@@ -170,31 +195,15 @@ typedef struct {
 } bs_feedback_trigger_entry;
 
 /* ======================================================================
- * E2.1 rate-limit + block-path family
+ * E2.1 rate-limit family
  *
- * bs_cohort is the shared (UA?, IP?) predicate; bs_rate_limit_entry,
- * bs_block_path_entry, bs_rate_escalate_entry are the per-directive
- * configs they parameterize. Defined here because config.c's
- * post_config hook walks them at SHM-slot assignment time.
+ * bs_rate_limit_entry and bs_rate_escalate_entry are the per-directive
+ * configs that consume the bs_cohort predicate declared above. Defined
+ * here because config.c's post_config hook walks them at SHM-slot
+ * assignment time.
  * ====================================================================== */
 
 #define BS_PENALTY_RATE_LIMIT  50
-#define BS_PENALTY_BLOCK_PATH 100
-
-typedef struct {
-    const char         *ua_pattern;
-    int                 ua_any;
-    /* @botgroup selector — when non-NULL, the UA axis matches by
-     * the request's classified botgroup instead of UA-substring.
-     * Mutually exclusive with ua_pattern; setter rejects both. Set
-     * by `BotShieldBlockPath @search ...` or `BotShieldRateLimit
-     * @ai-train ...`. */
-    const char         *ua_botgroup;
-    int                 ip_any;
-    const char         *path;
-    const char         *inline_cidrs;
-    apr_array_header_t *ranges;
-} bs_cohort;
 
 typedef struct bs_rate_escalate_entry bs_rate_escalate_entry;
 
@@ -216,13 +225,6 @@ struct bs_rate_escalate_entry {
     int           ttl_sec;
     const char   *log_tag;
 };
-
-typedef struct {
-    const char *name;
-    const char *path_pattern;
-    bs_cohort   cohort;
-    int         mode;
-} bs_block_path_entry;
 
 /* SHM slot for the fixed-window counter. 8 bytes; CAS would target
  * the pair as a u64 on a 64-bit-atomic platform. v1 uses 32-bit

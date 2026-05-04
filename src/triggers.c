@@ -524,7 +524,11 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
  *
  * Path-unique bits live here; action-key parsing and cross-validation
  * are delegated to the shared bs_parse_trigger_action_key +
- * bs_finalize_trigger_action (see E7.2 above). Upsert-by-name
+ * bs_finalize_trigger_action (see E7.2 above). Two match keys
+ * (`ua=`, `ipspec=`) are intercepted before the action-key parser
+ * and routed to bs_cohort_resolve so the trigger fires only when
+ * path AND cohort match. Convention is match keys first, action
+ * keys after — the parser doesn't enforce ordering. Upsert-by-name
  * preserves declaration order. */
 const char *bs_set_path_trigger(cmd_parms *cmd, void *dconf,
                                        int argc, char *const argv[])
@@ -556,11 +560,42 @@ const char *bs_set_path_trigger(cmd_parms *cmd, void *dconf,
     e->path_pattern = apr_pstrdup(cmd->pool, pattern);
     bs_trigger_action_init(BS_TFAMILY_PATH, &e->action);
 
+    const char *ua_arg = NULL, *ipspec_arg = NULL;
     for (int i = 2; i < argc; i++) {
+        const char *arg = argv[i];
+        const char *eq  = strchr(arg, '=');
+        if (eq) {
+            apr_size_t klen = (apr_size_t)(eq - arg);
+            const char *val = eq + 1;
+            if (klen == 2 && strncasecmp(arg, "ua", 2) == 0) {
+                ua_arg = val;
+                continue;
+            }
+            if (klen == 6 && strncasecmp(arg, "ipspec", 6) == 0) {
+                ipspec_arg = val;
+                continue;
+            }
+        }
         const char *err = bs_parse_trigger_action_key(cmd->pool,
-            BS_TFAMILY_PATH, argv[i], &e->action);
+            BS_TFAMILY_PATH, arg, &e->action);
         if (err) return err;
     }
+
+    /* If at least one match key carries an actual restriction (i.e.
+     * isn't empty or "*"), populate the cohort. A bare `ua=*` or
+     * `ipspec=*` is treated as if omitted — the operator's intent is
+     * "match any" which is also the default. */
+    int ua_restricts     = ua_arg     && ua_arg[0]     && strcmp(ua_arg, "*") != 0;
+    int ipspec_restricts = ipspec_arg && ipspec_arg[0] && strcmp(ipspec_arg, "*") != 0;
+    if (ua_restricts || ipspec_restricts) {
+        const char *ua_eff = ua_restricts     ? ua_arg     : "*";
+        const char *ip_eff = ipspec_restricts ? ipspec_arg : "*";
+        const char *cerr = bs_cohort_resolve(cmd, &e->cohort, ua_eff, ip_eff);
+        if (cerr) return apr_pstrcat(cmd->pool,
+            "BotShieldPathTrigger: ", cerr, NULL);
+        e->has_cohort = 1;
+    }
+
     const char *err = bs_finalize_trigger_action(cmd->pool,
         BS_TFAMILY_PATH, &e->action);
     if (err) return err;

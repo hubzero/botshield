@@ -1,5 +1,77 @@
 # Changelog
 
+## 2026-05-03 (path-trigger absorbs block-path)
+
+### Changed — `BotShieldBlockPath` retired; cohort gating moves into `BotShieldPathTrigger`
+
+`BotShieldPathTrigger` gains two new optional match keys, `ua=` and
+`ipspec=`, that AND with the path glob. Same cohort grammar as
+`BotShieldRateLimit` (UA substring, `@botgroup`, polymorphic ipspec).
+With those keys plus `status=4xx`, PathTrigger fully subsumes what
+`BotShieldBlockPath` used to do — and composes naturally with the
+other trigger action keys (`flag=`, `ttl=`, `redirect=`, `mode=`,
+`penalty=`, `log=`).
+
+`BotShieldBlockPath` is removed. **Breaking change**, no soft-deprecate
+window. Configs that referenced it will fail at config-time with
+`unknown directive`.
+
+#### Migration
+
+```apache
+# BEFORE
+BotShieldBlockPath legacy-admin "/wp-admin/*" "" *
+BotShieldBlockPath ai-pubs       "/publications/*" "@ai-train" *
+BotShieldBlockPath admin-locked  "/admin"          "*" "10.0.0.0/8"
+
+# AFTER
+BotShieldPathTrigger legacy-admin "/wp-admin/*" status=403
+BotShieldPathTrigger ai-pubs      "/publications/*" ua=@ai-train status=403
+BotShieldPathTrigger admin-locked "/admin"          ipspec=10.0.0.0/8 status=403
+```
+
+Convention: write match keys (`ua=`, `ipspec=`) before action keys
+(`status=`, `penalty=`, etc.). Parser doesn't enforce ordering, but
+operators reading a rule should be able to see at a glance where the
+"who/where" predicate ends and the "what to do" action begins.
+
+Defaults if you omit a match key:
+- omit `ua=` → match any UA (same as `ua=*`)
+- omit `ipspec=` → match any IP (same as `ipspec=*`)
+- both omitted → no cohort gating, just path-glob (same as today's
+  PathTrigger semantics)
+
+#### Metrics retired
+
+- `botshield_block_path_hit_total` — gone. Path-triggers that fire
+  with status=4xx don't have a per-family hit counter; the request
+  outcome lands in the standard `decision_total{outcome}` and the
+  decision log carries `path-trigger:<name>` in the reason chain.
+- `botshield_block_path_observed_total` — gone. Observe-mode path
+  triggers bump the shared `botshield_trigger_observed_total` (which
+  already covers cookie/env/load/path observe).
+
+Operators who scraped these counters should switch to
+`botshield_decision_total{outcome="block"}` plus the decision-log
+reason tag.
+
+#### `/botshield/policy-status`
+
+The `## BotShieldBlockPath (directive)` section is removed. Cohort-
+scoped path rules now appear as PathTrigger entries (visible in the
+emitted directive list, future enhancement: render the cohort in the
+status page too).
+
+#### Reason tag
+
+A path-trigger fire emits `path-trigger:<name>` in the decision log
+(was: `block-path:<name>` for BlockPath). If you grep logs for
+`block-path:`, switch to `path-trigger:`.
+
+The `~block` would-outcome under `BotShieldEnabled LogOnly` continues
+to work — path triggers with `status>=400` set it on the would-fire
+path the same way BlockPath did.
+
 ## 2026-05-03 (botgroups)
 
 ### Added — botgroup vocabulary throughout
@@ -44,8 +116,11 @@ to botgroups at codegen time:
     Per-slug allocation (each bot in the group gets its own counter
     at the entry's budget). Specific slug rules still win over
     @botgroup; @botgroup wins over `*` wildcard.
-  - `BotShieldBlockPath ai-train-pubs @ai-train * /publications/*`
-    — 403 when classified-as-ai-train hits the path.
+  - `BotShieldPathTrigger ai-train-pubs /publications/* ua=@ai-train status=403`
+    — 403 when classified-as-ai-train hits the path. (Was previously
+    expressed as `BotShieldBlockPath ai-train-pubs @ai-train *
+    /publications/*`; see the path-trigger-absorbs-block-path entry
+    above.)
   - `BotShieldRateLimit search-burst @search * 100 sec` — cohort
     rate limit by botgroup. Bonus side-effect of extending the shared
     cohort matcher.
@@ -88,7 +163,7 @@ BotShieldBotRateLimit @ai-input  0          # admit all (effectively block via 0
 BotShieldBotRateLimit @monitor   5 sec
 
 # hard 403 by botgroup+path
-BotShieldBlockPath ai-train-pubs @ai-train * /publications/*
+BotShieldPathTrigger ai-train-pubs /publications/* ua=@ai-train status=403
 
 # robots.txt declarative form (server-side enforcement only)
 User-agent: @ai-train

@@ -102,9 +102,11 @@ access logs aren't being gated. Decision log shows `tier=pass`.
   flag-trigger penalty + tier_floor=captcha. See
   [policy](../policy/index.html).
 - **Path triggers**: for paths that bots target but legitimate
-  users don't, add `BotShieldPathTrigger` rules with a penalty.
-- **Block-path / rate-limit**: if you see scraper UA patterns,
-  add `BotShieldBlockPath` or `BotShieldRateLimit` cohorts.
+  users don't, add `BotShieldPathTrigger` rules with a penalty,
+  status=403, or both. UA / IP cohort gating goes inline as
+  `ua=...` / `ipspec=...` keys.
+- **Rate-limit**: if you see scraper UA patterns, add a
+  `BotShieldRateLimit` cohort.
 - **Allow-list verification**: if a "bot" is claiming to be
   Googlebot but doesn't have Googlebot's IP range, the fake-bot
   detection fires automatically — assuming `BotShieldAllowBot

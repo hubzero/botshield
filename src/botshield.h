@@ -348,7 +348,6 @@ typedef struct bs_server_cfg {
     const char         *share_scope_token; /* explicit override; NULL = default */
     /* E15 — per-cookie hourly forgiveness cap. */
     int                 forgive_cap_per_hour;
-    apr_array_header_t *block_paths;
     /* E3 — path-based triggers. */
     apr_array_header_t *path_triggers;
     /* E4 — cookie triggers. */
@@ -417,9 +416,9 @@ typedef struct bs_server_cfg {
 } bs_server_cfg;
 
 /* Trigger and policy family types (bs_trigger_*, bs_*_trigger_entry,
- * bs_cohort, bs_rate_limit_entry, bs_block_path_entry, bs_rate_counter,
+ * bs_cohort, bs_rate_limit_entry, bs_rate_counter,
  * bs_flag_trigger_entry, BS_TFAMILY_*, BS_TMODE_*, BS_TEXEC_*,
- * BS_FLAG_ACT_*, BS_PENALTY_RATE_LIMIT/BLOCK_PATH) live in triggers.h. */
+ * BS_FLAG_ACT_*, BS_PENALTY_RATE_LIMIT) live in triggers.h. */
 
 /* ======================================================================
  * Module symbol — extern so other TUs can pass &botshield_module to
@@ -535,8 +534,8 @@ const char *bs_cohort_resolve(cmd_parms *cmd, bs_cohort *out,
 
 /* RFC 9309 path-pattern warning — log a NOTICE when a directive's
  * path pattern contains a non-trailing '*' that the retired v1
- * matcher would have treated as a literal byte. Used by E2.1
- * BotShieldBlockPath and by E3 BotShieldPathTrigger. */
+ * matcher would have treated as a literal byte. Used by E3
+ * BotShieldPathTrigger. */
 void bs_path_pattern_warn_middle_star(cmd_parms *cmd,
                                       const char *directive,
                                       const char *name,

@@ -3,7 +3,7 @@
 Two layers, with the scope-level one winning when set:
   - per-rule  `mode=observe` action key (path/cookie/env/load
                 triggers via shared engine; mode=observe trailing
-                token on rate-limit + block-path setters)
+                token on the rate-limit setter)
   - scope     BotShieldEnabled LogOnly (vhost / Location / Directory
                 tri-state on bs_dir_cfg.enabled — flip-all within
                 the scope)
@@ -160,31 +160,28 @@ def test_rate_limit_observe_increments_metric(
     )
 
 
-# --- Per-rule observe: block path -----------------------------------
+# --- Per-rule observe: path trigger as a path-block ----------------
 
 
-def test_block_path_observe_does_not_403(config_override, fresh_ip):
-    """A scraper-UA hit on /admin/* under observe-mode BlockPath
-    must not 403 from BlockPath enforcement. The challenge tier
-    may still serve a 403 interstitial (signaled by
-    `X-Botshield: challenge`) — the test distinguishes the two by
-    that header rather than status code alone, since interstitials
-    moved from 200 to 403 in 2026."""
+def test_path_trigger_observe_does_not_403(config_override, fresh_ip):
+    """A scraper-UA hit on /admin/* under observe-mode PathTrigger
+    (status=403 mode=observe) must not 403 from path-trigger
+    enforcement. The challenge tier may still serve a 403
+    interstitial (signaled by `X-Botshield: challenge`) — the test
+    distinguishes the two by that header rather than status code
+    alone, since interstitials moved from 200 to 403 in 2026."""
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldBlockPath admin-block "/admin/*" '
-        '"httpx" * mode=observe',
+        '    BotShieldPathTrigger admin-block "/admin/*" '
+        'ua="httpx" status=403 mode=observe',
         count=1,
     ):
         r = client.get("/admin/login.php", xff=fresh_ip,
                        ua=SCRAPER_UA)
-    # Acceptable outcomes: not-403, OR a 403 interstitial
-    # (X-Botshield: challenge). Anything else means BlockPath
-    # enforced through observe mode.
     if r.status_code == 403:
         assert r.headers.get("X-Botshield") == "challenge", (
-            f"observe-mode block path enforced (403 without "
+            f"observe-mode path trigger enforced (403 without "
             f"challenge interstitial); headers={dict(r.headers)}"
         )
 
@@ -237,7 +234,7 @@ def test_scope_log_only_default_lets_per_rule_enforce(
 def test_observe_does_not_shadow_subsequent_enforce_rule(
     config_override, fresh_ip,
 ):
-    """Two block-path rules match the same URL. First is observe-
+    """Two path-trigger rules match the same URL. First is observe-
     only; second is enforce. Without proper handling, the first
     match would either wrongly enforce or wrongly skip the second.
     With correct semantics: first observes (logs :observe), second
@@ -245,9 +242,10 @@ def test_observe_does_not_shadow_subsequent_enforce_rule(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldBlockPath staged "/admin/*" "httpx" * '
-        'mode=observe\n'
-        '    BotShieldBlockPath active "/admin/*" "httpx" *',
+        '    BotShieldPathTrigger staged "/admin/*" ua="httpx" '
+        'status=403 mode=observe\n'
+        '    BotShieldPathTrigger active "/admin/*" ua="httpx" '
+        'status=403',
         count=1,
     ):
         r = client.get("/admin/login.php", xff=fresh_ip,
@@ -301,17 +299,17 @@ def test_directive_accepts_mode_on_feedback(config_override):
 # staging-volume signal.
 
 
-def test_log_only_emits_tilde_block_for_blockpath(
+def test_log_only_emits_tilde_block_for_path_trigger(
     config_override, fresh_ip, log_slice,
 ):
-    """Scope-level BotShieldEnabled LogOnly + a BlockPath rule that
-    would otherwise 403 must emit `outcome=~block` and serve the real
-    content (no 403)."""
+    """Scope-level BotShieldEnabled LogOnly + a PathTrigger rule
+    that would otherwise 403 must emit `outcome=~block` and serve
+    the real content (no 403)."""
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldEnabled LogOnly\n'
-        '    BotShieldBlockPath admin-block "/admin/*" "httpx" *',
+        '    BotShieldPathTrigger admin-block "/admin/*" ua="httpx" status=403',
         count=1,
     ):
         with log_slice as slc:
@@ -319,7 +317,7 @@ def test_log_only_emits_tilde_block_for_blockpath(
                            ua=SCRAPER_UA)
             lines = slc.decision_lines(ip=fresh_ip)
     assert r.status_code != 403, (
-        f"LogOnly should suppress BlockPath enforcement; "
+        f"LogOnly should suppress PathTrigger enforcement; "
         f"status={r.status_code}"
     )
     outcomes = [d["outcome"] for d in lines]
@@ -386,33 +384,26 @@ def test_log_only_emits_tilde_challenge_for_tier_dispatch(
     )
 
 
-def test_block_path_observe_increments_observed_total(
+def test_path_trigger_observe_increments_observed_total(
     config_override, fresh_ip,
 ):
-    """Per-rule mode=observe on a BlockPath bumps
-    `block_path_observed_total` (not `block_path_hit_total`) on
-    match. Mirrors the rate-limit observed-counter check earlier
-    in this file."""
+    """Per-rule mode=observe on a PathTrigger bumps the shared
+    `trigger_observed_total` counter on match. Mirrors the
+    rate-limit observed-counter check earlier in this file."""
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldBlockPath admin-block "/admin/*" "httpx" * '
-        'mode=observe',
+        '    BotShieldPathTrigger admin-block "/admin/*" ua="httpx" '
+        'status=403 mode=observe',
         count=1,
     ):
-        before_obs = _read_metric("botshield_block_path_observed_total")
-        before_hit = _read_metric("botshield_block_path_hit_total")
+        before_obs = _read_metric("botshield_trigger_observed_total")
         client.get("/admin/login.php", xff=fresh_ip, ua=SCRAPER_UA)
-        after_obs = _read_metric("botshield_block_path_observed_total")
-        after_hit = _read_metric("botshield_block_path_hit_total")
+        after_obs = _read_metric("botshield_trigger_observed_total")
 
     assert after_obs - before_obs >= 1, (
-        f"observed counter didn't increment; before={before_obs} "
+        f"trigger_observed_total didn't increment; before={before_obs} "
         f"after={after_obs}"
-    )
-    assert after_hit == before_hit, (
-        f"hit counter incremented under observe mode; "
-        f"before={before_hit} after={after_hit}"
     )
 
 
@@ -430,7 +421,7 @@ def test_per_location_log_only_with_inner_enforce(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldEnabled LogOnly\n'
-        '    BotShieldBlockPath everywhere "/*" "httpx" *\n'
+        '    BotShieldPathTrigger everywhere "/*" ua="httpx" status=403\n'
         '    <Location "/enforce-here">\n'
         '        BotShieldEnabled On\n'
         '    </Location>',
@@ -440,7 +431,7 @@ def test_per_location_log_only_with_inner_enforce(
         inside = client.get("/enforce-here", xff=fresh_ip,
                             ua=SCRAPER_UA)
     assert outside.status_code != 403, (
-        f"vhost-scope LogOnly should suppress BlockPath outside the "
+        f"vhost-scope LogOnly should suppress path-trigger outside the "
         f"override Location; got {outside.status_code}"
     )
     assert inside.status_code == 403, (

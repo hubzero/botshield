@@ -657,14 +657,6 @@ static const command_rec bs_cmds[] = {
                  "a patient bot solving every few minutes stops "
                  "earning forgiveness past the cap. 0 disables the "
                  "cap (legacy behavior). Range 0..1000."),
-    AP_INIT_TAKE_ARGV("BotShieldBlockPath",
-                 bs_set_block_path, NULL, RSRC_CONF,
-                 "Block a named cohort from a path glob. Args: "
-                 "<name> <path-glob> <ua> <ipspec>. Path-glob must "
-                 "begin with '/'; trailing '*' = prefix match, "
-                 "trailing '$' = exact match. Hits return 403 with "
-                 "a +100 score penalty under reason "
-                 "block-path:<name>."),
     /* E4 — cookie triggers */
     AP_INIT_TAKE_ARGV("BotShieldCookieTrigger",
                  bs_set_cookie_trigger, NULL, RSRC_CONF,
@@ -1138,7 +1130,7 @@ static int bs_route_module_endpoint(request_rec *r, bs_dir_cfg *cfg)
  *   4. Cookie verify — bs_verify_cookie + safeguard-clear-on-solve
  *      + bs-cookie-state note for cookie-trigger predicates.
  *   5. Policy check — bs_check_policy (cookie/env/load/scope/path
- *      triggers + block_paths + robots + rate_limits). DECLINED or
+ *      triggers + robots + rate_limits). DECLINED or
  *      HTTP_* short-circuits return here.
  *   6. Heuristics + flagged-IP + first-sight + flag-trigger walker
  *      → effective score, score_tier, tier_floor.

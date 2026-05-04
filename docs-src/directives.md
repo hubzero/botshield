@@ -45,15 +45,15 @@ into a running server.
 
 `BotShieldEnabled` is the master gate. It is tri-state:
 
-- `on` — enforce. Tier decisions serve interstitials, triggers /
-  rate-limit / block-path rules act on matches.
+- `on` — enforce. Tier decisions serve interstitials, triggers
+  and rate-limit rules act on matches.
 - `off` — module declines every request in scope; same shape as
   unloading the module on this path.
 - `logonly` — observe-only. The handler runs and emits decision
   logs, but every enforcement-suppression site short-circuits:
   tier dispatch logs `outcome=~challenge` and declines instead of
-  serving the interstitial; trigger / rate-limit / block-path
-  matches log `:observe` and skip side effects. Use this to stage
+  serving the interstitial; trigger / rate-limit matches log
+  `:observe` and skip side effects. Use this to stage
   a whole policy revision before flipping enforcement on. See
   [staging](../staging/index.html).
 
@@ -265,19 +265,23 @@ third arg is a path to a CIDR file, comma-separated inline CIDRs
 [policy](../policy/index.html#allow-list-e1-verified-crawlers) for the
 verified / fake / unverified outcomes.
 
-## Rate limit + block-path
+## Rate limit
 
 | Directive | Syntax | Default |
 |---|---|---|
 | `BotShieldRateLimit` | `<name> <budget> <per> <ua-pattern> <ipspec> [mode=observe]` | none |
 | `BotShieldRateLimitEscalate` | `<rate-rule> <strikes> <per> [status=N] [ttl=N]` | none |
-| `BotShieldBlockPath` | `<name> <path-glob> <ua-pattern> <ipspec> [mode=observe]` | none |
 
 Cohort: `<ua-pattern>` is a substring or `""`/`*` for any UA;
 `<ipspec>` is a path to a CIDR file, comma-separated inline CIDRs,
 or `*` for any IP. Both axes can't be wildcard — that's rejected
 at config time. `<per>` accepts `sec`/`min`/`hour` (or `s`/`m`/
 `h`); plain integers are rejected.
+
+For path-conditional 403s (the former `BotShieldBlockPath`
+directive, retired), use `BotShieldPathTrigger` with `status=403`
+plus optional `ua=` / `ipspec=` match keys — see the [Triggers](
+#triggers) section below.
 
 `BotShieldRateLimitEscalate` upgrades repeated 429s on the same
 client to a stickier status code — see

@@ -50,8 +50,9 @@ below.
   lockless reads, rotating Bloom filter for first-sight IP signals,
   crash-durable persistence via `mod_watchdog` snapshots + shutdown
   save.
-- **Policy.** Path / cookie / env / load / scope / flag triggers,
-  per-cohort rate limits and block-paths, in-module robots.txt parser
+- **Policy.** Path / cookie / env / load / scope / flag triggers
+  (path triggers carry optional UA / IP cohort gates), per-cohort
+  rate limits, in-module robots.txt parser
   (RFC 9309 + Crawl-delay extension), repeated-429 escalation,
   anti-loop safeguard (302 redirect to a built-in explainer or to
   a configured `BotShieldSafeguardRedirectURL` after a client loops
@@ -116,7 +117,7 @@ from these sources):
 | Getting started — install, first vhost, smoke test | [`docs-src/getting-started.md`](docs-src/getting-started.md) |
 | Site model — scoring, tiers, cookie reputation, multi-vhost | [`docs-src/site-model.md`](docs-src/site-model.md) |
 | Directives reference | [`docs-src/directives.md`](docs-src/directives.md) |
-| Policy — triggers, rate limits, block-paths, robots.txt | [`docs-src/policy.md`](docs-src/policy.md) |
+| Policy — triggers, rate limits, robots.txt | [`docs-src/policy.md`](docs-src/policy.md) |
 | Captcha tier — providers, hardening, configuration | [`docs-src/captcha.md`](docs-src/captcha.md) |
 | Deployment — reverse proxy, slowloris, capacity sizing, secret rotation | [`docs-src/deployment.md`](docs-src/deployment.md) |
 | Staging policy changes — shadow mode + per-rule observe | [`docs-src/staging.md`](docs-src/staging.md) |

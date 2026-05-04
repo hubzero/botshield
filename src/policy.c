@@ -157,7 +157,7 @@ static int bs_ua_is_crawler_candidate(request_rec *r)
 
 
 /* Request-time policy check (cookie / env / load / scope / path
- * triggers + directive block_paths + robots.txt + rate_limits).
+ * triggers + robots.txt + rate_limits).
  * Return values:
  *   OK                     — no rule fired; continue to heuristics.
  *   DECLINED               — a trigger with status=pass fired; the
@@ -178,23 +178,21 @@ static int bs_ua_is_crawler_candidate(request_rec *r)
  *   4. Scope triggers — per-Apache-scope BotShieldTrigger entries
  *      (merged-scope order, first match wins).
  *   5. Path triggers (declaration order, first match wins).
- *   6. Directive block_paths (declaration order, first match wins).
- *   7. robots.txt Disallow (if configured).
- *   8. Directive rate_limits.
- *   9. robots.txt Crawl-delay (if configured).
+ *      A path trigger with `ua=` / `ipspec=` keys ANDs the cohort
+ *      match with the path glob; trigger fires only when both match.
+ *   6. robots.txt Disallow (if configured).
+ *   7. Directive rate_limits.
+ *   8. robots.txt Crawl-delay (if configured).
  *
  * Cookie triggers run first so reputation signals always land on
  * the decision log, even when a later rule short-circuits. Env
  * triggers run next — another reputation/policy shape driven by
  * upstream Apache modules (SetEnvIf / ModSecurity / etc.). Load
- * and scope triggers run before path/block to let global state
+ * and scope triggers run before path triggers to let global state
  * (server load, per-vhost or per-<Location> scope) gate path-
  * specific rules. Path triggers are the most specific per-path
- * intent the operator can write — a trigger on `/.env` should
- * win against any cohort-scoped block-path that also happens to
- * match. Operator directives get first say in each family after
- * that; robots.txt fills in where the operator hasn't declared
- * explicit rules.
+ * intent the operator can write; robots.txt fills in where the
+ * operator hasn't declared explicit rules.
  *
  * Precedence divergences from E3 (strict first-match-wins, no
  * accumulation) worth keeping straight:
@@ -334,12 +332,19 @@ int bs_check_policy(request_rec *r)
         }
     }
 
-    /* E3 — path triggers. First match wins; no accumulation. */
+    const char *ua = apr_table_get(r->headers_in, "User-Agent");
+
+    /* E3 — path triggers. First match wins; no accumulation. A trigger
+     * with `ua=` or `ipspec=` keys carries a populated cohort that
+     * ANDs with the path-glob match (path-only triggers leave
+     * has_cohort==0 and skip the cohort check). */
     if (scfg->path_triggers && scfg->path_triggers->nelts > 0) {
         for (int i = 0; i < scfg->path_triggers->nelts; i++) {
             bs_path_trigger_entry *t = APR_ARRAY_IDX(
                 scfg->path_triggers, i, bs_path_trigger_entry *);
             if (!bs_path_match(t->path_pattern, r->uri)) continue;
+            if (t->has_cohort && !bs_cohort_matches(&t->cohort, ua, r))
+                continue;
             bs_trigger_exec_outcome o = bs_apply_trigger_action(
                 r, scfg, BS_TFAMILY_PATH, &t->action,
                 "path-trigger", t->name);
@@ -352,44 +357,7 @@ int bs_check_policy(request_rec *r)
         }
     }
 
-    const char *ua = apr_table_get(r->headers_in, "User-Agent");
-
-    /* Block paths first: if the request would be 403ed anyway there's
-     * no point charging it a token from a rate bucket it's also in.
-     * Ordered-array iteration — first match wins; declaration order
-     * is the precedence. A matched rule in observe mode (or any
-     * matched rule when the dir scope is in LogOnly mode) logs
-     * `would-block-path:<name>` instead of returning 403, and the
-     * walk continues so subsequent rules still get their say. */
     int global_log_only = (dcfg && dcfg->enabled == BS_ENABLED_LOGONLY);
-    if (scfg->block_paths && scfg->block_paths->nelts > 0) {
-        for (int i = 0; i < scfg->block_paths->nelts; i++) {
-            bs_block_path_entry *e = APR_ARRAY_IDX(
-                scfg->block_paths, i, bs_block_path_entry *);
-            if (!bs_path_match(e->path_pattern, r->uri)) continue;
-            if (!bs_cohort_matches(&e->cohort, ua, r)) continue;
-            int observe = global_log_only || (e->mode == BS_TMODE_OBSERVE);
-            if (observe) {
-                bs_score_add(r, 0, 0,
-                    apr_pstrcat(r->pool, "block-path:", e->name,
-                                ":observe", NULL));
-                bs_set_would_outcome(r, "~block");
-                if (bs_shm.metrics) {
-                    __atomic_fetch_add(
-                        &bs_shm.metrics->block_path_observed_total,
-                        1, __ATOMIC_RELAXED);
-                }
-                continue;
-            }
-            bs_score_add(r, BS_PENALTY_BLOCK_PATH, 3600,
-                apr_pstrcat(r->pool, "block-path:", e->name, NULL));
-            if (bs_shm.metrics) {
-                __atomic_fetch_add(&bs_shm.metrics->block_path_hit_total,
-                                   1, __ATOMIC_RELAXED);
-            }
-            return HTTP_FORBIDDEN;
-        }
-    }
 
     /* E2.2 — robots.txt Disallow enforcement. Queried once for
      * (ua, path); the result also carries the Crawl-delay we'll use
@@ -428,13 +396,12 @@ int bs_check_policy(request_rec *r)
         }
     }
     if (robots_apply && !rmatch.allowed) {
-        bs_score_add(r, BS_PENALTY_BLOCK_PATH, 3600,
+        /* Robots.txt Disallow → 403 with a +100 score hit and a
+         * 1-hour flag, mirroring the deny weight an explicit
+         * BotShieldPathTrigger ... status=403 would carry. */
+        bs_score_add(r, 100, 3600,
             apr_pstrcat(r->pool, "robots-block:",
                         rmatch.group_name ? rmatch.group_name : "?", NULL));
-        if (bs_shm.metrics) {
-            __atomic_fetch_add(&bs_shm.metrics->block_path_hit_total,
-                               1, __ATOMIC_RELAXED);
-        }
         return HTTP_FORBIDDEN;
     }
 
@@ -568,7 +535,6 @@ int bs_check_policy(request_rec *r)
  *
  * Plain-text dump of the rules currently being enforced:
  *   - BotShieldRateLimit directives (directive rate_limits array).
- *   - BotShieldBlockPath directives (directive block_paths array).
  *   - robots.txt-derived groups (if BotShieldRobotsTxt is set) —
  *     source file path, mtime, every group's UA tokens + rules +
  *     Crawl-delay.
@@ -664,26 +630,6 @@ int bs_policy_status_handler(request_rec *r, bs_dir_cfg *cfg)
                                   + (e->cohort.inline_cidrs ? strlen(e->cohort.inline_cidrs) : 0)))),
                        "", e->shm_slot);
             bs_psh_render_counter(r, e->shm_slot, e->budget);
-            ap_rputs("\n", r);
-        }
-        ap_rputs("\n", r);
-    }
-
-    /* --- directive block paths --- */
-    ap_rputs("## BotShieldBlockPath (directive)\n", r);
-    if (!scfg->block_paths || scfg->block_paths->nelts == 0) {
-        ap_rputs("# (none)\n\n", r);
-    } else {
-        ap_rputs("# name               path-glob                     "
-                 "ua                          ipspec\n", r);
-        for (int i = 0; i < scfg->block_paths->nelts; i++) {
-            bs_block_path_entry *e = APR_ARRAY_IDX(
-                scfg->block_paths, i, bs_block_path_entry *);
-            ap_rprintf(r, "%-18s  %-28s  %-26s  ",
-                e->name, e->path_pattern,
-                e->cohort.ua_any ? "*"
-                    : apr_psprintf(r->pool, "\"%s\"", e->cohort.ua_pattern));
-            bs_psh_cohort_ipspec(r, &e->cohort);
             ap_rputs("\n", r);
         }
         ap_rputs("\n", r);

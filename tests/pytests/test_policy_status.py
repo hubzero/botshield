@@ -35,15 +35,14 @@ def robots_path():
 
 
 def test_policy_status_without_config_shows_none(config_override):
-    """With a vanilla vhost (no rate limits, block paths, or robots.txt
-    configured) the page loads and marks each section as empty / not
-    configured — the handler doesn't crash on a scfg with nothing in it."""
+    """With a vanilla vhost (no rate limits or robots.txt configured)
+    the page loads and marks each section as empty / not configured
+    — the handler doesn't crash on a scfg with nothing in it."""
     resp = client.get("/botshield/policy-status")
     assert resp.status_code == 200
     body = resp.text
     assert "# mod_botshield policy status" in body
     assert "## BotShieldRateLimit" in body
-    assert "## BotShieldBlockPath" in body
     assert "## robots.txt" in body
     # Dev vhost doesn't declare any of these by default.
     assert "# (none)" in body
@@ -69,22 +68,6 @@ def test_policy_status_surfaces_rate_limit(config_override):
     # The counter column — format is "count/budget"; we don't care
     # about the count but the /60 is the budget we configured.
     assert "/60" in body
-
-
-def test_policy_status_surfaces_block_path(config_override):
-    with config_override(
-        r"BotShieldEnabled\s+On",
-        'BotShieldEnabled On\n'
-        '    BotShieldBlockPath admin-block "/admin/*" "Scraper/" *',
-        count=1,
-    ):
-        resp = client.get("/botshield/policy-status")
-
-    assert resp.status_code == 200
-    body = resp.text
-    assert "admin-block" in body
-    assert "/admin/*" in body
-    assert '"Scraper/"' in body
 
 
 def test_policy_status_surfaces_robots(robots_path, config_override):

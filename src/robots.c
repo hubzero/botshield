@@ -134,10 +134,10 @@ static void bs_rb_rstrip(char *s)
  * empty Disallow/Allow is robots.txt's "no rule" sentinel and is
  * filtered out at parse time.
  *
- * Public surface — also used by BotShieldPathTrigger and
- * BotShieldBlockPath in botshield.c. The earlier
- * bs_path_glob_match placeholder in botshield.c was retired
- * once this matcher landed; one path matcher across the codebase. */
+ * Public surface — also used by BotShieldPathTrigger in
+ * triggers.c. The earlier bs_path_glob_match placeholder in
+ * botshield.c was retired once this matcher landed; one path
+ * matcher across the codebase. */
 int bs_path_match(const char *pattern, const char *path)
 {
     if (!pattern || !*pattern || !path) return 0;
@@ -769,10 +769,9 @@ const char *bs_set_robots_wildcard_scope(cmd_parms *cmd, void *dconf,
 }
 
 /* The bs_path_pattern_warn_middle_star helper below is a config-time
- * validator shared by E2.1 BotShieldBlockPath (config.c),
- * E3 BotShieldPathTrigger (triggers.c), and the request-path glob
- * matcher (robots.c's bs_path_match). Lives here so all three
- * callers find it without circular includes. */
+ * validator shared by E3 BotShieldPathTrigger (triggers.c) and the
+ * request-path glob matcher (robots.c's bs_path_match). Lives here
+ * so both callers find it without circular includes. */
 
 /* Surface a NOTICE at config-load when a pattern contains a non-
  * trailing '*'. Under the retired v1 matcher those characters were

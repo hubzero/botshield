@@ -100,14 +100,24 @@ Args: `<name> <budget> <per> <ua-pattern> <ipspec>`.
 Not both axes can be `""` / `*` — that would rate-limit every
 request, rejected at config time.
 
-`BotShieldBlockPath` is the same cohort + a path glob → 403:
+For path-conditional 403s, use `BotShieldPathTrigger` with
+`status=403` plus optional `ua=` / `ipspec=` match keys (the
+former `BotShieldBlockPath` directive, retired):
 
 ```apache
-BotShieldBlockPath legacy-admin "/wp-admin/*" "" *
-BotShieldBlockPath aggressive-scraper "/" "AhrefsBot|SEMrushBot" *
+BotShieldPathTrigger legacy-admin "/wp-admin/*" status=403
+BotShieldPathTrigger aggressive-scraper "/" ua="AhrefsBot" status=403
 ```
 
-Args: `<name> <path-glob> <ua-pattern> <ipspec>`.
+Match keys (any of):
+- `ua=<substring>` or `ua=@<botgroup>` — UA gate
+- `ipspec=<spec>` — same shape as `BotShieldAllowBot` (CIDR file,
+  comma-separated inline CIDRs, or omit/`*` for "any IP")
+
+Action keys (any of): `status=`, `redirect=`, `flag=`, `ttl=`,
+`penalty=`, `log=`, `mode=enforce|observe`. Convention is match
+keys first, action keys after — the parser doesn't enforce ordering
+but readability rewards consistency.
 
 ### Repeated-429 escalation
 
@@ -138,7 +148,7 @@ shifted; existing configs aren't broken, just verified.
 ## Robots.txt enforcement
 
 `BotShieldRobotsTxt` plugs in a parsed RFC 9309 robots.txt file as
-a policy source. Disallow rules become `block-path:robots:<group>`
+a policy source. Disallow rules become `robots-block:<group>`
 matches; Crawl-delay rules become per-group rate limits.
 
 ```apache

@@ -198,16 +198,15 @@ def test_safeguard_does_not_override_block_path(
     config_override, fresh_ip,
 ):
     """CHANGELOG: 'safeguard should never override a clear hard block /
-    deny decision.' Configure a BotShieldBlockPath on /blocked and
-    trip safeguard on /. Then hit /blocked — must still return 403,
-    not safeguard pass-through."""
+    deny decision.' Configure a BotShieldPathTrigger that 403s on
+    /blocked and trip safeguard on /. Then hit /blocked — must still
+    return 403, not safeguard pass-through."""
     with config_override(
         r"BotShieldEnabled\s+On",
         _safeguard_cfg(threshold=2)
-        # UA-narrowed cohort: 'httpx' substring keeps the cohort
-        # legal (BotShield rejects both-'*'). Our SCRAPER_UA
-        # contains 'httpx' so the test request matches.
-        + '    BotShieldBlockPath badpath "/blocked" "httpx" *',
+        # UA-narrowed cohort: 'httpx' substring matches SCRAPER_UA.
+        + '    BotShieldPathTrigger badpath "/blocked" '
+          'ua="httpx" status=403',
         count=1,
     ):
         # Trip safeguard on /.
@@ -216,7 +215,7 @@ def test_safeguard_does_not_override_block_path(
         r = client.get("/blocked", xff=fresh_ip, ua=SCRAPER_UA)
 
     assert r.status_code == 403, (
-        f"safeguard must not override BotShieldBlockPath 403; "
+        f"safeguard must not override path-trigger 403; "
         f"got {r.status_code}"
     )
 

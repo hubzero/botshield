@@ -45,7 +45,7 @@ effective = heuristic_total + cookie_score
 
 - **`heuristic_total`** — sum of `bs_score_add` calls that fired
   during this request. Includes built-in heuristics, allow-list /
-  rate-limit / block-path / robots / trigger families, and
+  rate-limit / robots / trigger families, and
   `BotShieldFlagTrigger action=score` effects fired by flags set on
   the IP or carried in the prior cookie.
 - **`cookie_score`** — accumulated reputation in the prior
@@ -71,7 +71,7 @@ or cohort. Signs are absolute; the score either rises or stays put.
 | Missing `Accept-Language` | +15 | `missing-accept-language` |
 | Scraper-pattern UA | +50 | `scraper-ua:<pattern>` |
 | First-sight IP (not in Bloom filter) | +5 | `first-sight-ip` |
-| Block-path match | +100 | `block-path:<name>` |
+| Path-trigger fire (status=4xx) | per-rule `penalty=` | `path-trigger:<name>` |
 | Rate-limit exceeded | +50 | `rate-limit-exceeded:<name>` |
 | Robots.txt Disallow | +100 | `robots-block:<group>` |
 | Honeypot hit (default flag trigger) | +60 | `flag-trigger:honeypot_hit` |

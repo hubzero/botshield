@@ -167,10 +167,10 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
      * If a name exists in both, the vhost version wins and the
      * main version is skipped entirely (no shadowed duplicates).
      *
-     * Both struct types (bs_rate_limit_entry, bs_block_path_entry)
-     * share a const char *name as their first field, so we can
-     * key the dedup by the leading pointer word without branching
-     * per-type. */
+     * Every entry type stored here (bs_rate_limit_entry,
+     * bs_path_trigger_entry, etc.) shares a const char *name as its
+     * first field, so we can key the dedup by the leading pointer
+     * word without branching per-type. */
     out->rate_limits = bs_merge_rule_array(p, base->rate_limits,
                                            add->rate_limits);
     out->rate_escalates = bs_merge_rule_array(p, base->rate_escalates,
@@ -228,8 +228,6 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
     /* E15 — child-set value wins; 0 means "inherit". */
     out->forgive_cap_per_hour = (add->forgive_cap_per_hour > 0)
         ? add->forgive_cap_per_hour : base->forgive_cap_per_hour;
-    out->block_paths = bs_merge_rule_array(p, base->block_paths,
-                                           add->block_paths);
     out->path_triggers = bs_merge_rule_array(p, base->path_triggers,
                                              add->path_triggers);
     out->cookie_triggers = bs_merge_rule_array(p, base->cookie_triggers,
@@ -333,9 +331,9 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->bot_ranges_manifest = NULL;
     scfg->allow_ranges_refresh_interval = 0;   /* opt-in via directive */
     scfg->allow_bots       = apr_hash_make(p);
-    /* E2.1 — rate-limit + block-path ordered arrays; populated by
-     * directives in declaration order, post_config resolves cohort
-     * ipspecs and assigns SHM slots. */
+    /* E2.1 — rate-limit ordered arrays; populated by directives in
+     * declaration order, post_config resolves cohort ipspecs and
+     * assigns SHM slots. */
     scfg->rate_limits      = apr_array_make(p, 4, sizeof(void *));
     scfg->rate_escalates   = apr_array_make(p, 2, sizeof(void *));
     scfg->strike_capacity  = 0;   /* 0 = inherit / use default */
@@ -369,7 +367,6 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->share_scope_token     = NULL;
     /* E15 — 0 means "inherit / use default". */
     scfg->forgive_cap_per_hour  = 0;
-    scfg->block_paths      = apr_array_make(p, 4, sizeof(void *));
     scfg->path_triggers         = apr_array_make(p, 4, sizeof(void *));
     scfg->cookie_triggers  = apr_array_make(p, 4, sizeof(void *));
     scfg->env_triggers     = apr_array_make(p, 4, sizeof(void *));
@@ -1331,7 +1328,7 @@ static void bs_wire_allowlist(apr_pool_t *pconf, server_rec *s)
     }
 }
 
-/* Resolve cohort ipspecs for every rate_limit / block_path entry
+/* Resolve cohort ipspecs for every rate_limit / path_trigger entry
  * across main + vhost scopes, link rate-limit-escalate directives
  * to their target rate-limit by name, and assign SHM slot indices
  * to rate_limit entries. Shared counter pool across all vhosts;
@@ -1352,7 +1349,7 @@ static void bs_wire_rate_and_block_cohorts(apr_pool_t *pconf,
         if (!vcfg) continue;
 
         /* Resolve a cohort's ipspec (path or inline CIDRs) into the
-         * ranges array. Shared between rate_limits and block_paths. */
+         * ranges array. Shared between rate_limits and path_triggers. */
         #define BS_E21_RESOLVE_COHORT(c_, feature_, name_) do {              \
             if ((c_)->ip_any || (c_)->ranges) break;                         \
             const char *rerr = NULL;                                         \
@@ -1426,16 +1423,25 @@ static void bs_wire_rate_and_block_cohorts(apr_pool_t *pconf,
             }
         }
 
-        if (vcfg->block_paths && vcfg->block_paths->nelts > 0) {
-            for (int i = 0; i < vcfg->block_paths->nelts; i++) {
-                bs_block_path_entry *e = APR_ARRAY_IDX(
-                    vcfg->block_paths, i, bs_block_path_entry *);
+        /* Path triggers with ua=/ipspec= keys carry a populated
+         * cohort; resolve its ipspec the same way rate-limit cohorts
+         * are resolved. Path triggers without those keys leave
+         * has_cohort=0 and are skipped here. */
+        if (vcfg->path_triggers && vcfg->path_triggers->nelts > 0) {
+            int wired = 0;
+            for (int i = 0; i < vcfg->path_triggers->nelts; i++) {
+                bs_path_trigger_entry *e = APR_ARRAY_IDX(
+                    vcfg->path_triggers, i, bs_path_trigger_entry *);
+                if (!e->has_cohort) continue;
                 BS_E21_RESOLVE_COHORT(&e->cohort,
-                    "BotShieldBlockPath", e->name);
+                    "BotShieldPathTrigger", e->name);
+                wired++;
             }
-            ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
-                "mod_botshield: %d block-path cohorts wired",
-                vcfg->block_paths->nelts);
+            if (wired > 0) {
+                ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+                    "mod_botshield: %d path-trigger cohorts wired",
+                    wired);
+            }
         }
         #undef BS_E21_RESOLVE_COHORT
     }
@@ -2937,11 +2943,11 @@ static int bs_rate_unit_seconds(const char *u)
  * Apache doesn't ship AP_INIT_TAKE4/5, so this uses TAKE_ARGV and
  * enforces argc itself. */
 /* E12 — parse the optional trailing `mode=enforce|observe` argv
- * token shared by BotShieldRateLimit and BotShieldBlockPath. The
- * directive grammar is positional (5 args for rate-limit, 4 for
- * block-path), so this is strict: the token must be the LAST
- * argument and it must be `mode=...`. Returns the parsed mode in
- * *out_mode and shrinks *argc by 1 if the token was consumed. */
+ * token used by BotShieldRateLimit. The directive grammar is
+ * positional (5 args for rate-limit), so this is strict: the
+ * token must be the LAST argument and it must be `mode=...`.
+ * Returns the parsed mode in *out_mode and shrinks *argc by 1 if
+ * the token was consumed. */
 static const char *bs_parse_optional_mode(apr_pool_t *p,
                                           const char *dname,
                                           int *argc,
@@ -3409,70 +3415,6 @@ int bs_forgiveness_apply_cap(int requested,
     return granted;
 }
 
-/* BotShieldBlockPath <name> <path-glob> <ua> <ipspec> — cohort-
- * conditional path block. Matching requests get 403 + a scoring
- * hook. Glob semantics are minimal in v1 (prefix / trailing '*' /
- * trailing '$'); full RFC 9309 wildcards arrive in E2.2 with
- * robots.c so block-paths derived from robots.txt Disallow behave
- * identically to the reference parser.
- *
- * Uses TAKE_ARGV (Apache has no TAKE4). */
-const char *bs_set_block_path(cmd_parms *cmd, void *dconf,
-                                     int argc, char *const argv[])
-{
-    (void)dconf;
-    /* E12 — strip optional trailing mode= token before counting
-     * positional args. */
-    int mode = BS_TMODE_ENFORCE;
-    {
-        const char *merr = bs_parse_optional_mode(cmd->pool,
-            "BotShieldBlockPath", &argc, argv, &mode);
-        if (merr) return merr;
-    }
-    if (argc != 4) {
-        return "BotShieldBlockPath: expects exactly 4 args — "
-               "<name> <path-glob> <ua> <ipspec> "
-               "[mode=enforce|observe]";
-    }
-    const char *name    = argv[0];
-    const char *pattern = argv[1];
-    const char *ua      = argv[2];
-    const char *ipspec  = argv[3];
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    if (!bs_bot_name_valid(name)) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldBlockPath: name '%s' must be [a-z0-9-]{1,32}", name);
-    }
-    if (!pattern || !*pattern || pattern[0] != '/') {
-        return "BotShieldBlockPath: path-glob must start with '/'";
-    }
-    if (strlen(pattern) > 256) {
-        return "BotShieldBlockPath: path-glob longer than 256 chars";
-    }
-    bs_path_pattern_warn_middle_star(cmd, "BotShieldBlockPath",
-                                      name, pattern);
-
-    bs_block_path_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
-    e->name         = apr_pstrdup(cmd->pool, name);
-    e->path_pattern = apr_pstrdup(cmd->pool, pattern);
-    e->mode         = mode;   /* E12 */
-    const char *err = bs_cohort_resolve(cmd, &e->cohort, ua, ipspec);
-    if (err) return apr_pstrcat(cmd->pool,
-        "BotShieldBlockPath: ", err, NULL);
-
-    /* Upsert by name — same semantics as BotShieldRateLimit. */
-    for (int i = 0; i < scfg->block_paths->nelts; i++) {
-        bs_block_path_entry *ex =
-            APR_ARRAY_IDX(scfg->block_paths, i, bs_block_path_entry *);
-        if (strcmp(ex->name, e->name) == 0) {
-            APR_ARRAY_IDX(scfg->block_paths, i, bs_block_path_entry *) = e;
-            return NULL;
-        }
-    }
-    *(bs_block_path_entry **)apr_array_push(scfg->block_paths) = e;
-    return NULL;
-}
 const char *bs_set_endpoint_prefix(cmd_parms *cmd, void *cfg_v,
                                           const char *arg)
 {

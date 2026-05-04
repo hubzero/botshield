@@ -271,8 +271,8 @@ def test_env_trigger_no_double_apply_on_internal_redirect(
     on the ErrorDocument leg.
 
     Setup: env=BS_CROSS on every request (status=pass + penalty so
-    we can see whether it fired in the reason trace), block-path on
-    /start, ErrorDocument 403 → /error. Hit /start. The original
+    we can see whether it fired in the reason trace), path-trigger
+    on /start, ErrorDocument 403 → /error. Hit /start. The original
     leg's decision line should carry env-trigger; the /error leg's
     decision line must NOT."""
     with config_override(
