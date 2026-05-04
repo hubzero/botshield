@@ -269,14 +269,19 @@ verified / fake / unverified outcomes.
 
 | Directive | Syntax | Default |
 |---|---|---|
-| `BotShieldRateLimit` | `<name> <budget> <per> <ua-pattern> <ipspec> [mode=observe]` | none |
+| `BotShieldRateLimit` | `<name> [budget=N] [per=U] [ua=...] [ipspec=...] [mode=...]` (or legacy `<name> <budget> <per> <ua-pattern> <ipspec> [mode=observe]`) | none |
 | `BotShieldRateLimitEscalate` | `<rate-rule> <strikes> <per> [status=N] [ttl=N]` | none |
 
-Cohort: `<ua-pattern>` is a substring or `""`/`*` for any UA;
-`<ipspec>` is a path to a CIDR file, comma-separated inline CIDRs,
-or `*` for any IP. Both axes can't be wildcard — that's rejected
-at config time. `<per>` accepts `sec`/`min`/`hour` (or `s`/`m`/
-`h`); plain integers are rejected.
+Match keys: `ua=<substring>` or `ua=@<botgroup>` for the UA gate
+(`*` or omit for any UA); `ipspec=<spec>` for the IP gate (CIDR file
+path, comma-separated inline CIDRs, `*` or omit for any IP). Both
+axes can't be wildcard — that's rejected at config time.
+
+Rate keys: `budget=N` (required) and `per=<sec|min|hour>` (required;
+also accepts `s`/`m`/`h`). Plain integer for `per` is rejected.
+
+The legacy 5-arg positional form is still accepted (form is detected
+by sniffing for `=` in the args); no deprecation warning yet.
 
 For path-conditional 403s (the former `BotShieldBlockPath`
 directive, retired), use `BotShieldPathTrigger` with `status=403`

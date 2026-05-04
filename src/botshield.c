@@ -470,14 +470,19 @@ static const command_rec bs_cmds[] = {
      * TAKE4/TAKE5 macros; the setters enforce argc themselves. */
     AP_INIT_TAKE_ARGV("BotShieldRateLimit",
                  bs_set_rate_limit, NULL, RSRC_CONF,
-                 "Rate-limit a named cohort. Args: <name> <budget> "
-                 "<per> <ua> <ipspec>. Per is sec/min/hour (or "
-                 "s/m/h). UA is a substring (case-insensitive) or "
-                 "'*' for any UA. Ipspec is '*', an absolute file "
-                 "path, or a single / comma-separated CIDR list. "
-                 "Both-'*' is rejected. Over-budget requests return "
-                 "429 + Retry-After and get a +50 score penalty "
-                 "under reason rate-limit-exceeded:<name>."),
+                 "Rate-limit a named cohort. Two forms:\n"
+                 "  <name> [budget=N] [per=U] [ua=...] [ipspec=...] "
+                 "[mode=enforce|observe]   (key=value form)\n"
+                 "  <name> <budget> <per> <ua> <ipspec> "
+                 "[mode=enforce|observe]   (legacy positional)\n"
+                 "Per is sec/min/hour (or s/m/h). UA is a substring "
+                 "(case-insensitive), `@<botgroup>`, or '*' for any "
+                 "UA. Ipspec is '*', an absolute file path, or a "
+                 "single / comma-separated CIDR list. Both-'*' (or "
+                 "both keys omitted in the key=value form) is "
+                 "rejected. Over-budget requests return 429 + "
+                 "Retry-After and get a +50 score penalty under "
+                 "reason rate-limit-exceeded:<name>."),
     AP_INIT_TAKE_ARGV("BotShieldBotRateLimit",
                  bs_set_bot_rate_limit, NULL, RSRC_CONF,
                  "Per-bot-slug rate limit. Three forms:\n"

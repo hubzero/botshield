@@ -2933,11 +2933,18 @@ static int bs_rate_unit_seconds(const char *u)
     return 0;
 }
 
-/* BotShieldRateLimit <name> <budget> <per-unit> <ua> <ipspec> — cohort
- * rate-limit. Cohort semantics mirror BotShieldAllowBot (UA substring,
- * polymorphic ipspec, '*' for "any" on either axis). Both-'*' is
- * rejected because that would rate-limit every request on the server.
- * Budget + window are stored as-is; SHM slot assignment happens in
+/* BotShieldRateLimit <name> [budget=N] [per=U] [ua=...] [ipspec=...]
+ * [mode=...] — cohort rate-limit. Legacy positional form
+ * `<name> <budget> <per> <ua> <ipspec> [mode=...]` is also accepted
+ * and parses the same way internally; the form is detected by
+ * sniffing the args (every arg after <name> contains '=' → new
+ * shape; any positional arg without '=' → legacy).
+ *
+ * Cohort semantics mirror BotShieldPathTrigger ua=/ipspec= (UA
+ * substring, @botgroup, polymorphic ipspec, '*' for "any" on either
+ * axis). Both-'*' (or both keys omitted in the new form) is rejected
+ * because that would rate-limit every request on the server. Budget
+ * + window are stored as-is; SHM slot assignment happens in
  * post_config.
  *
  * Apache doesn't ship AP_INIT_TAKE4/5, so this uses TAKE_ARGV and
@@ -2975,30 +2982,85 @@ const char *bs_set_rate_limit(cmd_parms *cmd, void *dconf,
                                      int argc, char *const argv[])
 {
     (void)dconf;
-    /* E12 — strip optional trailing mode= token before counting
-     * positional args. */
-    int mode = BS_TMODE_ENFORCE;
-    {
-        const char *merr = bs_parse_optional_mode(cmd->pool,
-            "BotShieldRateLimit", &argc, argv, &mode);
-        if (merr) return merr;
+    if (argc < 1) {
+        return "BotShieldRateLimit: expects at least <name>";
     }
-    if (argc != 5) {
-        return "BotShieldRateLimit: expects exactly 5 args — "
-               "<name> <budget> <per> <ua> <ipspec> "
-               "[mode=enforce|observe]";
-    }
-    const char *name     = argv[0];
-    const char *budget_s = argv[1];
-    const char *per_s    = argv[2];
-    const char *ua       = argv[3];
-    const char *ipspec   = argv[4];
+    const char *name = argv[0];
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
     if (!bs_bot_name_valid(name)) {
         return apr_psprintf(cmd->pool,
             "BotShieldRateLimit: name '%s' must be [a-z0-9-]{1,32}", name);
     }
+
+    /* Form detection — every arg after <name> is key=value (contains
+     * '=') in the new shape; the legacy positional shape has at most
+     * a single trailing `mode=...` token. If any non-trailing arg
+     * lacks '=', fall through to the legacy parser. */
+    int new_form = (argc > 1);
+    for (int i = 1; i < argc; i++) {
+        if (!strchr(argv[i], '=')) { new_form = 0; break; }
+    }
+
+    const char *budget_s = NULL, *per_s = NULL;
+    const char *ua_arg = NULL, *ipspec_arg = NULL;
+    int mode = BS_TMODE_ENFORCE;
+
+    if (new_form) {
+        for (int i = 1; i < argc; i++) {
+            const char *arg = argv[i];
+            const char *eq  = strchr(arg, '=');
+            apr_size_t klen = (apr_size_t)(eq - arg);
+            const char *val = eq + 1;
+            if (klen == 6 && strncasecmp(arg, "budget", 6) == 0) {
+                budget_s = val;
+            } else if (klen == 3 && strncasecmp(arg, "per", 3) == 0) {
+                per_s = val;
+            } else if (klen == 2 && strncasecmp(arg, "ua", 2) == 0) {
+                ua_arg = val;
+            } else if (klen == 6 && strncasecmp(arg, "ipspec", 6) == 0) {
+                ipspec_arg = val;
+            } else if (klen == 4 && strncasecmp(arg, "mode", 4) == 0) {
+                if (!strcasecmp(val, "enforce")) {
+                    mode = BS_TMODE_ENFORCE;
+                } else if (!strcasecmp(val, "observe")) {
+                    mode = BS_TMODE_OBSERVE;
+                } else {
+                    return apr_psprintf(cmd->pool,
+                        "BotShieldRateLimit: mode='%s' must be 'enforce' "
+                        "or 'observe'", val);
+                }
+            } else {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldRateLimit: unknown key '%.*s' (known: "
+                    "budget, per, ua, ipspec, mode)", (int)klen, arg);
+            }
+        }
+        if (!budget_s) {
+            return "BotShieldRateLimit: budget=<N> is required";
+        }
+        if (!per_s) {
+            return "BotShieldRateLimit: per=<sec|min|hour> is required";
+        }
+    } else {
+        /* Legacy positional: <name> <budget> <per> <ua> <ipspec>
+         * [mode=enforce|observe]. Strip optional trailing mode=
+         * before counting. */
+        const char *merr = bs_parse_optional_mode(cmd->pool,
+            "BotShieldRateLimit", &argc, argv, &mode);
+        if (merr) return merr;
+        if (argc != 5) {
+            return "BotShieldRateLimit: expects either "
+                   "<name> [budget=N] [per=U] [ua=...] [ipspec=...] "
+                   "[mode=...]  or legacy "
+                   "<name> <budget> <per> <ua> <ipspec> [mode=...]";
+        }
+        budget_s   = argv[1];
+        per_s      = argv[2];
+        ua_arg     = argv[3];
+        ipspec_arg = argv[4];
+    }
+
     char *end = NULL;
     long budget = strtol(budget_s, &end, 10);
     if (!end || *end || budget <= 0 || budget > 1000000) {
@@ -3018,8 +3080,13 @@ const char *bs_set_rate_limit(cmd_parms *cmd, void *dconf,
     e->budget     = (apr_uint32_t)budget;
     e->window_sec = (apr_uint32_t)unit;
     e->shm_slot   = -1;
-    e->mode       = mode;   /* E12 */
-    const char *err = bs_cohort_resolve(cmd, &e->cohort, ua, ipspec);
+    e->mode       = mode;
+    /* In the new form an omitted ua=/ipspec= defaults to "*" (any).
+     * bs_cohort_resolve enforces the both-* rejection so a
+     * key=value form with neither set still errors at config time. */
+    const char *ua_eff     = ua_arg     ? ua_arg     : "*";
+    const char *ipspec_eff = ipspec_arg ? ipspec_arg : "*";
+    const char *err = bs_cohort_resolve(cmd, &e->cohort, ua_eff, ipspec_eff);
     if (err) return apr_pstrcat(cmd->pool,
         "BotShieldRateLimit: ", err, NULL);
 

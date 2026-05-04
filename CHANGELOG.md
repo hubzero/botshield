@@ -1,5 +1,40 @@
 # Changelog
 
+## 2026-05-03 (RateLimit cohort-grammar unification)
+
+### Added — `BotShieldRateLimit` accepts key=value form
+
+`BotShieldRateLimit` now accepts a key=value form alongside the
+existing 5-arg positional form. Same cohort vocabulary as
+`BotShieldPathTrigger` (`ua=`, `ipspec=`), plus `budget=` / `per=`
+for the rate parameters and the existing `mode=enforce|observe`.
+
+```apache
+# NEW — key=value form
+BotShieldRateLimit api-burst budget=60 per=min ua="GPTBot"
+BotShieldRateLimit ai-bots   budget=1  per=sec ua=@ai-train
+BotShieldRateLimit corp-only budget=100 per=min ipspec=10.0.0.0/8
+BotShieldRateLimit staging   budget=5  per=sec ua="X" mode=observe
+
+# LEGACY — still works
+BotShieldRateLimit api-burst 60 min "GPTBot" * mode=observe
+```
+
+Form is detected by sniffing args — every arg after `<name>`
+contains `=` → new shape; any positional arg without `=` → legacy.
+No deprecation warning yet; soft migration. The runtime behavior
+is identical for either form.
+
+Defaults in the new form: omit `ua=` → match any UA; omit
+`ipspec=` → match any IP. Both omitted is rejected at config time
+(same both-`*` rejection as before — that would rate-limit every
+request on the server). Required: `budget=` and `per=`.
+
+This is the cohort vocabulary that `BotShieldPathTrigger` adopted
+in the BlockPath retirement; consolidating `BotShieldRateLimit`
+onto the same grammar means operators learn one cohort syntax for
+every directive that takes one.
+
 ## 2026-05-03 (path-trigger absorbs block-path)
 
 ### Changed — `BotShieldBlockPath` retired; cohort gating moves into `BotShieldPathTrigger`
