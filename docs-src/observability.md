@@ -73,7 +73,6 @@ takes the shape `<family>:<name>` so the source family is visible:
 | `missing-user-agent`, `missing-accept-language`, `scraper-ua:<pattern>` | Built-in heuristics |
 | `first-sight-ip` | Bloom filter |
 | `verified-<name>`, `fake-<name>`, `bot-unverified` | allow list |
-| `block-path:<name>` | block-path |
 | `rate-limit-exceeded:<name>` | rate limit |
 | `robots-block:<group>` | robots.txt |
 | `flag-trigger:<flag>` | flag-trigger score action |
@@ -151,10 +150,8 @@ Allow-list and policy counters:
 | `botshield_bot_fake_total` | counter | UA-claims-bot but IP doesn't match |
 | `botshield_bot_unverified_total` | counter | UA matches a registered bot but no ranges loaded |
 | `botshield_rate_limit_exceeded_total` | counter | Total rate-limit 429s |
-| `botshield_block_path_hit_total` | counter | Total block-path 403s |
 | `botshield_rate_limit_observed_total` | counter | Observe-mode rate-limit matches |
-| `botshield_block_path_observed_total` | counter | Observe-mode block-path matches |
-| `botshield_trigger_observed_total` | counter | Observe-mode trigger matches across families |
+| `botshield_trigger_observed_total` | counter | Observe-mode trigger matches across families (path/cookie/env/load/scope) |
 
 Plus SHM utilization gauges (computed at scrape time, cached 1 s
 per worker):
@@ -218,9 +215,9 @@ metrics endpoint and decision log still cover everything.
 
 `<prefix>/policy-status` (default `/botshield/policy-status`) is a
 plain-text dump of the rules currently being enforced — directive
-rate-limits, directive block-paths, and robots.txt-derived groups.
-Reads the same scfg fields `bs_check_policy` walks at request time,
-so it's authoritative.
+rate-limits and robots.txt-derived groups. Reads the same scfg
+fields `bs_check_policy` walks at request time, so it's
+authoritative.
 
 ```
 $ curl -s http://localhost/botshield/policy-status

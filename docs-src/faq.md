@@ -174,7 +174,7 @@ If real users *are* hitting challenges, the likely causes are:
   every request looks like it comes from the edge LB. See
   [troubleshooting](../troubleshooting/index.html).
 - The score thresholds are too low for the site's traffic mix.
-- A path-trigger or block-path is matching legitimate routes.
+- A path-trigger is matching legitimate routes.
 
 [Staging](../staging/index.html) describes the
 `BotShieldEnabled LogOnly` workflow for catching false positives

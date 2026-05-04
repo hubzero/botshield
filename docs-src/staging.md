@@ -26,7 +26,7 @@ When a rule fires in observe mode:
 - The decision log records the would-have-done outcome with an
   `:observe` suffix on the reason token.
 - The matching observe-mode metric counter increments
-  (`block_path_observed_total`, `trigger_observed_total`).
+  (`trigger_observed_total`, `rate_limit_observed_total`).
 - **No** flag bits are set on the IP.
 - **No** score is added to the request.
 - **No** status code, redirect, or log tag side-effect is emitted.
@@ -40,8 +40,8 @@ the policy walk — the next rule still gets its chance.
 Add `mode=observe` to any directive that supports it:
 
 ```apache
-BotShieldPathTrigger    /admin/.env  flag=scanner_probe ttl=3600 log=admin-trap mode=observe
-BotShieldBlockPath      legacy-admin "/wp-admin/*" "" * mode=observe
+BotShieldPathTrigger    admin-trap   "/admin/.env"  flag=scanner_probe ttl=3600 log=admin-trap mode=observe
+BotShieldPathTrigger    legacy-admin "/wp-admin/*"  status=403 mode=observe
 BotShieldRateLimit      api-burst    60 min "" * mode=observe
 BotShieldFlagTrigger    honeypot_hit action=tier_floor min=captcha mode=observe
 ```
@@ -104,7 +104,6 @@ Both observe signals reach every gating surface:
 | Load triggers | yes | yes | `load-trigger:<name>:observe` |
 | Feedback triggers | yes | yes | `feedback-trigger:<event>:observe` |
 | Flag triggers | yes | yes | `flag-trigger:<flag>:observe` |
-| Block-path | yes | yes | `block-path:<name>:observe` |
 | Rate-limit | yes | yes | `rate-limit:<name>:observe` |
 | Robots Disallow | n/a | yes | `robots-block:<group>:observe` |
 | Form-captcha | n/a | yes | `form-captcha:<scope>:observe` |
@@ -126,8 +125,8 @@ The full path from "draft policy" to "live enforcement":
 
    ```sh
    curl -s http://localhost/botshield/metrics | grep observed
-   # botshield_block_path_observed_total{name="legacy-admin"} 142
    # botshield_trigger_observed_total{name="admin-trap",family="path"} 38
+   # botshield_rate_limit_observed_total{name="api-burst"} 142
    ```
 4. **Iterate** — if matches are wrong (false positives, missing
    cohort, broken predicate) edit and reload. The observe gate

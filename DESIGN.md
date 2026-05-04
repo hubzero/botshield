@@ -99,14 +99,14 @@ deliver an incremental-rebuild win — punted as a follow-up.
 | File | Responsibility |
 |------|---------------|
 | `botshield.{c,h}` | Module entry point: `bs_handler` request dispatch, `cmds[]` directive table, hook registration, `botshield_module` struct. Hosts the central `bs_dir_cfg` / `bs_server_cfg` config types and operator-tunable defaults. Also: bot-name token validation, asset-extension skip list |
-| `config.{c,h}` | Config lifecycle: `create_dir_cfg` / `merge_dir_cfg` / `create_server_cfg` / `merge_server_cfg` / `post_config` / `child_init`. Setters for top-level / UI / score-threshold / forgiveness / SHM-sizing / state-file / rate-limit / safeguard / block-path directives |
+| `config.{c,h}` | Config lifecycle: `create_dir_cfg` / `merge_dir_cfg` / `create_server_cfg` / `merge_server_cfg` / `post_config` / `child_init`. Setters for top-level / UI / score-threshold / forgiveness / SHM-sizing / state-file / rate-limit / safeguard directives |
 | `crypto.{c,h}` | OpenSSL wrappers: `bs_sha256`, `bs_hmac_sha256`, `bs_ct_equal`, `bs_hkdf_derive_key`, `bs_gcm_encrypt`, `bs_gcm_decrypt`, hex codec. Plus `BotShieldSecretFile` / `BotShieldSecondarySecretFile` setters and the bounded integer parsers (`bs_parse_int_bounded`, `bs_parse_uint32_bounded`, `bs_parse_int64_bounded`) used at config-time and on the cookie parse path |
 | `shm.{c,h}` | Single-segment SHM layout: header, flagged-IP / strike / safeguard / nonce tables, two Bloom buffers, captcha-verify rate + log slots, fixed-window rate-counter pool, M9.2 metrics block. Open-addressing seqlock helpers, SipHash-2-4, popcount, `bs_state_save` / `bs_state_load`, `bs_headroom_watchdog_cb` |
 | `cookie.{c,h}` | AES-GCM cookie envelope: `bs_build_cookie_prefix_gcm`, `bs_build_cookie_payload`, `bs_build_set_cookie`, `bs_install_verified_cookie`, `bs_verify_cookie_gcm`, `bs_verify_cookie`. Cookie-header tokenizer (`bs_parse_cookies_once`, `bs_get_cookie_value`, `bs_get_verified_cookie_value`). Carry-forward predicate + math (`bs_should_carry_prior_rep`, `bs_carry_forward_eligible`, `bs_apply_rep_carry`). Cookie wire-format constant (`BS_GCM_COUNTER_SEP`) |
 | `challenge.{c,h}` | Challenge issuance (`bs_issue_challenge`), PoW algorithm registry + lookup (`bs_find_algorithm`), canonical pipe-delimited HMAC input (`bs_challenge_canonical`), inline-JSON renderer (`bs_challenge_json`), bootstrap-binding helpers (`bs_format_bound_ip_hex`, `bs_compute_bootstrap_sig`). `BotShieldAlgorithm` setter. Hosts `bs_challenge` envelope, `bs_rep_state` reputation block, `bs_pow_algorithm` registry types, and challenge wire constants (`BS_PROTOCOL_VERSION`, `BS_SALT_BYTES`, `BS_NONCE_BYTES`) |
 | `score.{c,h}` | Per-request score struct on `r->request_config`, `bs_score_add` accumulator, reason renderers (`bs_decision_reason_names`, `bs_score_reasons_joined`), `bs_apply_flag_triggers` walker, `bs_decide_tier` score → tier picker, `bs_tier_name`. Hosts `bs_tier` and `bs_silent_mode` enums, `bs_score_entry` / `bs_request_score` types, score thresholds (`BS_DEFAULT_SCORE_*`) and heuristic penalties (`BS_PENALTY_*`) |
-| `policy.{c,h}` | `bs_check_policy` request-time policy walker (cookie / env / load / path triggers, block-path, robots, rate-limit, robots Crawl-delay). `/policy-status` admin handler |
-| `triggers.{c,h}` | Per-family trigger setters (`bs_set_path_trigger`, `bs_set_cookie_trigger`, `bs_set_env_trigger`, `bs_set_feedback_trigger`, `bs_set_load_trigger`), shared action-key parser, `bs_apply_trigger_action` executor. `bs_set_flag_ip` and `bs_set_flag_trigger` setters for the E14 flag-trigger family. `bs_cookie_pred_match` predicate evaluator. Hosts the shared action engine (`bs_trigger_action`, `bs_trigger_family`, `BS_T*` enums), per-family entry types (`bs_path_trigger_entry` et al.), the E2.1 cohort + rate-limit + block-path types (`bs_cohort`, `bs_rate_limit_entry`, `bs_rate_escalate_entry`, `bs_block_path_entry`, `bs_rate_counter`), and the E14 flag-trigger entry type (`bs_flag_trigger_entry`, `bs_flag_action_kind`) |
+| `policy.{c,h}` | `bs_check_policy` request-time policy walker (cookie / env / load / path triggers, robots, rate-limit, robots Crawl-delay). `/policy-status` admin handler |
+| `triggers.{c,h}` | Per-family trigger setters (`bs_set_path_trigger`, `bs_set_cookie_trigger`, `bs_set_env_trigger`, `bs_set_feedback_trigger`, `bs_set_load_trigger`), shared action-key parser, `bs_apply_trigger_action` executor. `bs_set_flag_ip` and `bs_set_flag_trigger` setters for the E14 flag-trigger family. `bs_cookie_pred_match` predicate evaluator. Hosts the shared action engine (`bs_trigger_action`, `bs_trigger_family`, `BS_T*` enums), per-family entry types (`bs_path_trigger_entry` et al.), the E2.1 cohort + rate-limit types (`bs_cohort`, `bs_rate_limit_entry`, `bs_rate_escalate_entry`, `bs_rate_counter`), and the E14 flag-trigger entry type (`bs_flag_trigger_entry`, `bs_flag_action_kind`) |
 | `captcha.{c,h}` | M8 provider registry (`bs_find_provider`), libcurl-backed `bs_captcha_siteverify` shared shim, `bs_geetest_siteverify` provider-specific verifier, M8.1 pending cookie (`bs_mint_pending_cookie`, `bs_clear_pending_cookie`), `bs_captcha_verify_handler`, URL-encoded form lookup helper (`bs_form_get`). All eleven captcha directive setters. Hosts `bs_captcha_provider` registry struct, `bs_captcha_result` enum, `bs_captcha_siteverify_fn` typedef |
 | `silent.{c,h}` | E17 embedded handlers: `bs_embedded_js_handler`, `bs_embedded_worker_handler`, `bs_embedded_bootstrap_handler`, `bs_embedded_verify_handler`, `bs_form_widget_handler`. `BotShieldSilentMode` setter |
 | `templates.{c,h}` | Static HTML/CSS/JS strings for the PoW widget, captcha-tier widgets, and the page shell. Two-step substitution renderer (`bs_render_challenge_page`) |
@@ -908,13 +908,15 @@ family's matcher / action lives in its own feature file
 3. **E11.2 load triggers** — `state==target` or `state>=target`,
    first match wins.
 4. **E3 path triggers** — declaration order, first match wins.
-5. **E2.1 BotShieldBlockPath** — cohort + path-glob → 403.
-6. **E2.2 robots.txt Disallow** — wildcard-gated, longest-match-
+   Optional `ua=` / `ipspec=` keys on the directive populate a
+   bs_cohort that ANDs with the path-glob (this is the surface
+   that absorbed the retired BotShieldBlockPath).
+5. **E2.2 robots.txt Disallow** — wildcard-gated, longest-match-
    wins between Allow/Disallow within the matching group.
-7. **E2.1 BotShieldRateLimit** — fixed-window counter; over-budget
+6. **E2.1 BotShieldRateLimit** — fixed-window counter; over-budget
    → 429 + Retry-After. With E9 strike escalation: repeat 429s on
    the same rule promote into a configurable status (default 403).
-8. **E2.2 robots.txt Crawl-delay** — wildcard-gated; per-group rate
+7. **E2.2 robots.txt Crawl-delay** — wildcard-gated; per-group rate
    limit. Skipped if a directive rate-limit cohort already matched
    ("operator overrides robots.txt").
 
@@ -973,19 +975,11 @@ allocated in post_config. Atomic CAS on each `count` /
 
 ### Block-path (E2.1)
 
-```c
-typedef struct {
-    const char *name;
-    const char *path_pattern;
-    bs_cohort   cohort;
-    int         mode;
-} bs_block_path_entry;
-```
-
-Directive: `BotShieldBlockPath <name> <path-glob> <ua> <ipspec>`. Hits
-return 403 + `bs_score_add(+100, "block-path:<name>")`. Path-glob
-uses the same `bs_path_match` matcher as robots.txt and path
-triggers (prefix + `*` anywhere + trailing `$` end-anchor).
+Path-conditional 403s are expressed via the E3 path-trigger family
+with `status=403` + optional `ua=` / `ipspec=` match keys (the
+former E2.1 BotShieldBlockPath was retired in favor of this).
+Path-glob uses the same `bs_path_match` matcher as robots.txt
+(prefix + `*` anywhere + trailing `$` end-anchor).
 
 ### Strike escalation (E9)
 
@@ -1109,12 +1103,12 @@ the file.
 ### `/policy-status` admin endpoint (E2.2.3)
 
 `bs_policy_status_handler` dumps every active rule with its source —
-directive `rate_limits` (name, cohort, SHM slot, live counter
-state), directive `block_paths` (name, cohort), and robots.txt-
-derived groups (source path, mtime, wildcard-scope mode, refresh
-interval, slot-pool usage, per-group UA tokens, each Allow/Disallow
-rule, Crawl-delay + slot + counter). No built-in auth; operators wrap
-it in `<Location>` the way they protect `/server-status`.
+directive `rate_limits` (name, cohort, SHM slot, live counter state)
+and robots.txt-derived groups (source path, mtime, wildcard-scope
+mode, refresh interval, slot-pool usage, per-group UA tokens, each
+Allow/Disallow rule, Crawl-delay + slot + counter). No built-in
+auth; operators wrap it in `<Location>` the way they protect
+`/server-status`.
 
 ### Triggers
 
@@ -1163,8 +1157,9 @@ flag/ttl/optional-log subset.
 
 `BotShieldPathTrigger <name> <path-glob> [key=value ...]`. Anyone
 hitting the path triggers the action — unscoped (unlike E2.1
-`BotShieldBlockPath`, which is cohort-scoped). Default
-`status=403`, default `flag=scanner_probe`, default `ttl=3600`.
+a path trigger with `ua=`/`ipspec=` keys, which is cohort-scoped).
+Default `status=403`, default `flag=scanner_probe`, default
+`ttl=3600`.
 
 Under `status=pass`: the request flows through to the real handler
 with `DECLINED`; `penalty` is **ignored** (only flag-IP + log
@@ -1800,10 +1795,10 @@ Two layers:
   one path while leaving the rest observational.
 
 Reason strings carry the `:observe` suffix. Metrics counters split:
-`rate_limit_observed_total`, `block_path_observed_total`,
-`trigger_observed_total` are separate from the corresponding
-`*_exceeded_total` / `*_hit_total`. Operators correlate observed
-volume with would-be-hit volume before promoting `enforce`.
+`rate_limit_observed_total` and `trigger_observed_total` (which
+covers path/cookie/env/load/scope observe) are separate from
+`rate_limit_exceeded_total`. Operators correlate observed volume
+with would-be-hit volume before promoting `enforce`.
 
 ## Observability (M9)
 
@@ -1863,8 +1858,8 @@ and reset across `apachectl graceful` (Prometheus convention).
 | `provider_<p>_total` | one per built-in provider | 6 |
 | persistence | `state_saves_total`, `state_loads_total` | 2 |
 | E1 | `bot_allow_total`, `bot_fake_total`, `bot_unverified_total` | 3 |
-| E2.1 | `rate_limit_exceeded_total`, `block_path_hit_total` | 2 |
-| E12 | `rate_limit_observed_total`, `block_path_observed_total`, `trigger_observed_total` | 3 |
+| E2.1 | `rate_limit_exceeded_total` | 1 |
+| E12 | `rate_limit_observed_total`, `trigger_observed_total` | 2 |
 
 #### Gauges (computed when scraped, cached 1 s per worker)
 
@@ -2064,7 +2059,7 @@ the `bs_cmds[]` table at `src/botshield.c:139`.
 | Silent (E17) | `BotShieldSilentMode` |
 | SHM sizing | `BotShieldShmSize`, `BotShieldFlaggedIPCapacity`, `BotShieldIPv6PrefixLen`, `BotShieldBloomIPs`, `BotShieldBloomWindow`, `BotShieldStateFile`, `BotShieldStateSaveInterval`, `BotShieldRateLimitEscalateCapacity`, `BotShieldSafeguardCapacity`, `BotShieldEmbeddedNonceCapacity` |
 | Allow (E1) | `BotShieldAllow`, `BotShieldAllowBot` |
-| Policy (E2.1) | `BotShieldRateLimit`, `BotShieldBlockPath`, `BotShieldRateLimitEscalate` |
+| Policy (E2.1) | `BotShieldRateLimit`, `BotShieldRateLimitEscalate` |
 | Robots (E2.2) | `BotShieldRobotsTxt`, `BotShieldRobotsRefreshInterval`, `BotShieldRobotsWildcardScope` |
 | Triggers | `BotShieldPathTrigger` (E3), `BotShieldCookieTrigger` (E4), `BotShieldEnvTrigger` (E6), `BotShieldFeedbackTrigger` (E7.3), `BotShieldLoadTrigger` (E11.2), `BotShieldFlagTrigger` (E14), `BotShieldSessionCookieName` (E4) |
 | Flag-IP / E14 | `BotShieldFlagIP` |
@@ -2081,8 +2076,8 @@ directives use `RSRC_CONF` only and emit a NOTICE if placed inside
 The module is not valid in `.htaccess` — `OR_ALL` is never used.
 
 `AP_INIT_TAKE_ARGV` is used for the trigger families and the
-rate-limit / block-path / flag-trigger setters because Apache has no
-TAKE4/5 macros; setters enforce argc themselves.
+rate-limit / flag-trigger setters because Apache has no TAKE4/5
+macros; setters enforce argc themselves.
 
 ### Hook registration
 

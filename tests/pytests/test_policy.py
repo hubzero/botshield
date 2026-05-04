@@ -1,14 +1,16 @@
 """E2.1 — policy enforcement (rate limit + path block).
 
-Exercises the two new cohort-conditional directives:
+Exercises the two cohort-conditional surfaces:
 
   BotShieldRateLimit <name> <budget> <per> <ua> <ipspec>
-  BotShieldBlockPath  <name> <path-glob>            <ua> <ipspec>
+  BotShieldPathTrigger <name> <path-glob> [ua=...] [ipspec=...] status=403
 
-Cohort shape reuses E1 (UA substring + polymorphic ipspec). '*' means
-"any" on either axis; both-'*' is rejected at config time. On trip,
-rate-limit → 429 + Retry-After + rate-limit-exceeded:<name>; block-path
-→ 403 + block-path:<name>. Metrics exposed alongside the E1 counters.
+The legacy `BotShieldBlockPath` directive was retired in favor of a
+PathTrigger with `status=403` plus optional `ua=`/`ipspec=` match
+keys. Cohort shape still reuses E1 (UA substring + polymorphic
+ipspec). '*' means "any" on either axis; both-'*' is rejected at
+config time. On trip, rate-limit → 429 + Retry-After +
+rate-limit-exceeded:<name>; path-trigger → status + path-trigger:<name>.
 """
 
 from __future__ import annotations
@@ -134,10 +136,10 @@ def test_rate_limit_ua_and_ip_and_ed(config_override, log_slice, fresh_ip):
             if "rate-limit-exceeded:pair" in d["reason"]]
 
 
-# --- Block path ------------------------------------------------------
+# --- PathTrigger as path-block (BlockPath replacement) --------------
 
 
-def test_block_path_prefix_match(config_override, log_slice, fresh_ip):
+def test_path_trigger_block_prefix_match(config_override, log_slice, fresh_ip):
     """Plain prefix: `/admin` matches `/admin/foo` as well as `/admin`."""
     with config_override(
         r"BotShieldEnabled\s+On",
@@ -145,7 +147,7 @@ def test_block_path_prefix_match(config_override, log_slice, fresh_ip):
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldBlockPath lockdown "/admin" "Scraper/" *',
+        '    BotShieldPathTrigger lockdown "/admin" ua="Scraper/" status=403',
         count=1,
     ):
         with log_slice as slc:
@@ -157,11 +159,11 @@ def test_block_path_prefix_match(config_override, log_slice, fresh_ip):
     assert r_root.status_code == 403
     assert r_sub.status_code  == 403
     assert r_safe.status_code != 403, "non-matching path should not 403"
-    hits = [d for d in lines if "block-path:lockdown" in d["reason"]]
-    assert len(hits) == 2, f"expected 2 block-path hits; got {hits}"
+    hits = [d for d in lines if "path-trigger:lockdown" in d["reason"]]
+    assert len(hits) == 2, f"expected 2 path-trigger hits; got {hits}"
 
 
-def test_block_path_end_anchor(config_override, log_slice, fresh_ip):
+def test_path_trigger_block_end_anchor(config_override, log_slice, fresh_ip):
     """Trailing `$` anchors to exact equality: `/exact$` matches only
     `/exact`, not `/exact/sub`."""
     with config_override(
@@ -170,7 +172,7 @@ def test_block_path_end_anchor(config_override, log_slice, fresh_ip):
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldBlockPath exact "/exact$" "Scraper/" *',
+        '    BotShieldPathTrigger exact "/exact$" ua="Scraper/" status=403',
         count=1,
     ):
         r_exact = client.get("/exact",     xff=fresh_ip, ua="Scraper/1.0")
@@ -180,16 +182,16 @@ def test_block_path_end_anchor(config_override, log_slice, fresh_ip):
     assert r_sub.status_code != 403, "anchored pattern shouldn't cover subpath"
 
 
-def test_block_path_cohort_narrowing(config_override, log_slice, fresh_ip):
-    """A block-path with a UA predicate must NOT fire when the UA
-    doesn't match — cohort narrowing still applies to block-path."""
+def test_path_trigger_cohort_narrowing(config_override, log_slice, fresh_ip):
+    """A path-trigger with a `ua=` predicate must NOT fire when the UA
+    doesn't match — cohort narrowing applies to path triggers too."""
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldBlockPath scrapersonly "/wp-admin" "Scraper/" *',
+        '    BotShieldPathTrigger scrapersonly "/wp-admin" ua="Scraper/" status=403',
         count=1,
     ):
         r_scrap = client.get("/wp-admin", xff=fresh_ip, ua="Scraper/1.0")
@@ -236,10 +238,10 @@ def test_rate_limit_ua_match_is_case_insensitive(
     )
 
 
-def test_block_path_precedence_is_declaration_order(
+def test_path_trigger_precedence_is_declaration_order(
     config_override, log_slice, fresh_ip,
 ):
-    """Overlapping BotShieldBlockPath rules must resolve by declaration
+    """Overlapping BotShieldPathTrigger rules must resolve by declaration
     order, not by hash-iteration chance. A specific `/admin/secret`
     rule declared FIRST should win when both it and a generic
     `/admin*` rule match."""
@@ -249,8 +251,8 @@ def test_block_path_precedence_is_declaration_order(
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldBlockPath specific "/admin/secret" "Scraper/" *\n'
-        '    BotShieldBlockPath generic  "/admin*"       "Scraper/" *',
+        '    BotShieldPathTrigger specific "/admin/secret" ua="Scraper/" status=403\n'
+        '    BotShieldPathTrigger generic  "/admin*"       ua="Scraper/" status=403',
         count=1,
     ):
         with log_slice as slc:
@@ -264,9 +266,9 @@ def test_block_path_precedence_is_declaration_order(
     assert r_other.status_code  == 403
 
     specific_hits = [d for d in lines
-                     if "block-path:specific" in d["reason"]]
+                     if "path-trigger:specific" in d["reason"]]
     generic_hits  = [d for d in lines
-                     if "block-path:generic"  in d["reason"]]
+                     if "path-trigger:generic"  in d["reason"]]
     assert len(specific_hits) == 1, (
         f"/admin/secret should hit the specific rule (declared first); "
         f"specific_hits={specific_hits}"
@@ -281,9 +283,8 @@ def test_block_path_precedence_is_declaration_order(
 
 
 def test_policy_metrics_present():
-    """Sanity: /metrics exposes the two E2.1 counters."""
+    """Sanity: /metrics exposes the rate-limit counter."""
     resp = client.get("/botshield/metrics")
     assert resp.status_code == 200
     body = resp.text
     assert "botshield_rate_limit_exceeded_total" in body
-    assert "botshield_block_path_hit_total" in body

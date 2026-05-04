@@ -299,7 +299,7 @@ static const char *bs_get_trigger_tag(request_rec *r)
 #define BS_WOULD_OUTCOME_NOTE "botshield-would-outcome"
 
 /* Severity ordering for would-outcomes. When multiple suppression
- * sites fire on the same request (e.g. a BlockPath observed AND
+ * sites fire on the same request (e.g. a path-trigger observed AND
  * tier-dispatch suppressed), the most-severe stashed value wins for
  * the outcome field — operators want the strongest action the
  * policy wanted, not the last-evaluated. */
@@ -440,11 +440,11 @@ void bs_decision_log(request_rec *r,
     /* Override outcome with the would-X stash if a suppression site
      * recorded one and the call site passed the natural "allow"
      * (i.e. nothing else more specific). Most-severe stashed
-     * counterfactual wins. Lets BlockPath / RateLimit / Trigger
-     * observe / FormCaptcha observe / tier-dispatch under
-     * BotShieldEnabled LogOnly all surface as `outcome=~block`,
-     * `~rate_limited`, `~challenge` etc. instead of plain `allow`
-     * with the policy intent buried in the reason chain.
+     * counterfactual wins. Lets RateLimit / Trigger observe /
+     * FormCaptcha observe / tier-dispatch under BotShieldEnabled
+     * LogOnly all surface as `outcome=~block`, `~rate_limited`,
+     * `~challenge` etc. instead of plain `allow` with the policy
+     * intent buried in the reason chain.
      *
      * Important: the override applies to the operator-facing
      * surfaces only — decision-log line and BS_OUTCOME env var.
@@ -767,10 +767,6 @@ int bs_metrics_handler(request_rec *r)
         "(per-rule mode=observe or BotShieldEnabled LogOnly); rule "
         "would have returned 429 but didn't.",
         bs_mload(&m->rate_limit_observed_total));
-    bs_m_emit_counter(r, "block_path_observed_total",
-        "Block-path matches that ran in observe mode; rule would "
-        "have returned 403 but didn't.",
-        bs_mload(&m->block_path_observed_total));
     bs_m_emit_counter(r, "trigger_observed_total",
         "Trigger matches (path/cookie/env/load) that ran in observe "
         "mode across all families.",
@@ -779,10 +775,6 @@ int bs_metrics_handler(request_rec *r)
         "Requests that tripped a BotShieldRateLimit cohort budget "
         "(response was 429 + Retry-After).",
         bs_mload(&m->rate_limit_exceeded_total));
-    bs_m_emit_counter(r, "block_path_hit_total",
-        "Requests that matched a BotShieldBlockPath cohort+path-glob "
-        "(response was 403).",
-        bs_mload(&m->block_path_hit_total));
 
     /* --- On-demand gauges (may refresh a 1-second cache) --- */
 

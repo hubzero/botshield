@@ -83,31 +83,46 @@ return 429 with `Retry-After` and add 50 to the score. Cohorts pair
 a UA-substring matcher with an IP spec:
 
 ```apache
-BotShieldRateLimit api-burst 60 min "" 10.0.0.0/8,2001:db8::/48
-BotShieldRateLimit scrapers  10 min "wget|curl|python" *
+BotShieldRateLimit api-burst budget=60 per=min ipspec=10.0.0.0/8,2001:db8::/48
+BotShieldRateLimit scrapers  budget=10 per=min ua="wget"
+BotShieldRateLimit ai-bots   budget=1  per=sec ua=@ai-train
 ```
 
-Args: `<name> <budget> <per> <ua-pattern> <ipspec>`.
+Match keys (any of):
+- `ua=<substring>` or `ua=@<botgroup>` — UA gate; omit or set to
+  `*` for any UA.
+- `ipspec=<spec>` — same shape as `BotShieldAllowBot`: a path to
+  a CIDR file, comma-separated inline CIDRs, or omit / `*` for
+  any IP.
 
-- `<budget>` requests are allowed per `<per>` (fixed-window counter,
+Rate keys (required):
+- `budget=<N>` — requests allowed per window (fixed-window counter,
   atomic CAS-updated SHM slot).
-- `<per>` accepts `sec`/`min`/`hour` (or `s`/`m`/`h`) — never a
-  bare integer; the parser rejects plain numbers.
-- `<ua-pattern>` is a substring or `""` for "any UA".
-- `<ipspec>` is the same shape as `BotShieldAllowBot` — a path to a
-  CIDR file, comma-separated inline CIDRs, or `*` for "any IP".
+- `per=<sec|min|hour>` (also accepts `s`/`m`/`h`) — bare integer
+  rejected.
 
-Not both axes can be `""` / `*` — that would rate-limit every
-request, rejected at config time.
+Both axes can't be `*`/omitted — that would rate-limit every
+request, rejected at config time. The legacy 5-arg positional form
+`<name> <budget> <per> <ua-pattern> <ipspec>` is still accepted.
 
-`BotShieldBlockPath` is the same cohort + a path glob → 403:
+For path-conditional 403s, use `BotShieldPathTrigger` with
+`status=403` plus optional `ua=` / `ipspec=` match keys (the
+former `BotShieldBlockPath` directive, retired):
 
 ```apache
-BotShieldBlockPath legacy-admin "/wp-admin/*" "" *
-BotShieldBlockPath aggressive-scraper "/" "AhrefsBot|SEMrushBot" *
+BotShieldPathTrigger legacy-admin "/wp-admin/*" status=403
+BotShieldPathTrigger aggressive-scraper "/" ua="AhrefsBot" status=403
 ```
 
-Args: `<name> <path-glob> <ua-pattern> <ipspec>`.
+Match keys (any of):
+- `ua=<substring>` or `ua=@<botgroup>` — UA gate
+- `ipspec=<spec>` — same shape as `BotShieldAllowBot` (CIDR file,
+  comma-separated inline CIDRs, or omit/`*` for "any IP")
+
+Action keys (any of): `status=`, `redirect=`, `flag=`, `ttl=`,
+`penalty=`, `log=`, `mode=enforce|observe`. Convention is match
+keys first, action keys after — the parser doesn't enforce ordering
+but readability rewards consistency.
 
 ### Repeated-429 escalation
 
@@ -138,7 +153,7 @@ shifted; existing configs aren't broken, just verified.
 ## Robots.txt enforcement
 
 `BotShieldRobotsTxt` plugs in a parsed RFC 9309 robots.txt file as
-a policy source. Disallow rules become `block-path:robots:<group>`
+a policy source. Disallow rules become `robots-block:<group>`
 matches; Crawl-delay rules become per-group rate limits.
 
 ```apache
