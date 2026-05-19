@@ -26,5 +26,5 @@ pytest-html==4.2.0
 # pytest-hypothesis integration.
 # prometheus_client — the official Prometheus Python lib; its parser
 # is the ground-truth for Prometheus exposition-format validation.
-hypothesis==6.152.1
+hypothesis==6.152.8
 prometheus_client==0.25.0
