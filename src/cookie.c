@@ -1,4 +1,4 @@
-/* cookie.c — _bs_verified GCM cookie envelope + Cookie-header parser.
+/* cookie.c — _bs_session GCM cookie envelope + Cookie-header parser.
  *
  * Two halves of cookie handling, both small and tightly coupled to
  * the GCM envelope format:
@@ -105,11 +105,12 @@ const char *bs_get_cookie_value(request_rec *r, const char *name)
     return apr_table_get(map, name);
 }
 
-/* Verified-cookie lookup that prefers
- * `__Host-bs_verified` and falls back to legacy `_bs_verified`.
+/* Session-cookie lookup that prefers `__Host-bs_session` and falls
+ * back to the unprefixed `_bs_session`.
  * Both can be valid in some operator setups: HTTPS-only deployment
  * always sees the prefixed variant; a Domain-configured (cross-
- * subdomain SSO) deployment falls back to the legacy name. */
+ * subdomain SSO) deployment can't use the __Host- prefix at all and
+ * so only ever presents the unprefixed name. */
 const char *bs_get_verified_cookie_value(request_rec *r)
 {
     const char *v = bs_get_cookie_value(r, BS_COOKIE_NAME_HOST);
@@ -211,7 +212,7 @@ const char *bs_build_set_cookie(request_rec *r, const bs_dir_cfg *cfg,
         name, payload_b64, domain, secure);
 }
 
-/* Build a _bs_verified cookie payload from ch and install the
+/* Build a _bs_session cookie payload from ch and install the
  * resulting Set-Cookie header on the request's err_headers_out
  * (so it reaches the client even on non-2xx responses). Returns
  * NULL on success, an error-string diagnostic on failure (the only
@@ -465,7 +466,7 @@ const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
  *     indefinite reputation transfer across cookie generations. A
  *     leaked or stolen cookie that has aged past TTL must not be
  *     allowed to transplant good-standing rep into a fresh
- *     _bs_verified via any solve path).
+ *     _bs_session via any solve path).
  *   - cverr is some other pre-auth failure (decode errors, wrong
  *     field count, "no secret configured", etc.) — bs_verify_cookie
  *     leaves *prior_ch unwritten in those branches, so
@@ -491,7 +492,7 @@ int bs_should_carry_prior_rep(const char *cverr,
 }
 
 /* Carry-forward eligibility predicate for issuance call sites. Reads
- * the request's __Host-bs_verified cookie, verifies it, and applies
+ * the request's __Host-bs_session cookie, verifies it, and applies
  * bs_should_carry_prior_rep to the result. Returns 1 with *out_prior_ch
  * populated when carry-forward is allowed; 0 (and leaves *out_prior_ch
  * untouched beyond what bs_verify_cookie wrote) when not.

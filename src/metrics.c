@@ -4,15 +4,18 @@
  * mod_status contribution. */
 
 #include "metrics.h"
+#include "botshield.h"  /* bs_server_cfg, botshield_module */
 #include "shm.h"
 
 #include <string.h>
 
 #include <apr_atomic.h>
+#include <apr_file_io.h>
 #include <apr_strings.h>
 #include <apr_tables.h>
 #include <apr_time.h>
 
+#include <http_config.h>
 #include <http_log.h>
 #include <http_protocol.h>
 #include <mod_status.h>
@@ -400,23 +403,180 @@ static const char *bs_log_quote(apr_pool_t *p, const char *s)
  * request_rec in the chain is. mod_log_config then renders against
  * a request_rec where the un-prefixed names exist with the right
  * values. No-op when there's no chain. */
-int bs_propagate_decision_env(request_rec *r)
+void bs_suppress_access_log(request_rec *r)
 {
-    if (!r->next) return DECLINED;
-    request_rec *fwd = r;
-    while (fwd->next) fwd = fwd->next;
-    if (fwd == r) return DECLINED;
-    const apr_array_header_t *arr = apr_table_elts(r->subprocess_env);
-    apr_table_entry_t *elts = (apr_table_entry_t *)arr->elts;
-    for (int i = 0; i < arr->nelts; i++) {
-        if (!elts[i].key || !elts[i].val) continue;
-        if (strncmp(elts[i].key, "BS_", 3) == 0
-            || strcmp(elts[i].key, "BOTSHIELD") == 0) {
-            apr_table_setn(fwd->subprocess_env,
-                           elts[i].key, elts[i].val);
+    apr_table_setn(r->subprocess_env, BS_NOLOG_ENV, "1");
+}
+
+/* ======================================================================
+ * Module-owned decision log (BotShieldDecisionLog)
+ *
+ * Why this exists alongside the CustomLog route: mod_log_config serves
+ * every CustomLog from one log_transaction hook, so `accesslog=off` — which
+ * breaks that chain — cannot suppress the access log while keeping a
+ * decision record. Writing our own line at decision time decouples the
+ * two, which is the whole point: rapid-rotate the detection log,
+ * archive the access log, and keep flood traffic out of the latter.
+ *
+ * Concurrency: one descriptor per vhost, opened at post_config and
+ * inherited by every mpm_event child. Every write is a single
+ * apr_file_write of a fully pre-formatted line onto an O_APPEND
+ * descriptor. Decision lines run ~200-900 bytes, under PIPE_BUF (4096),
+ * so concurrent appends from multiple processes do not interleave —
+ * the same guarantee mod_log_config relies on. No mutex is taken on
+ * the request path.
+ *
+ * Rotation: an O_APPEND descriptor survives logrotate's copytruncate
+ * (the inode is reused). A move-and-create rotation would strand this
+ * fd on the old inode until the next graceful restart re-runs
+ * post_config, so operators wanting that style should use a piped
+ * spec ("|/usr/bin/rotatelogs ...") instead, which owns its own
+ * rotation.
+ * ====================================================================== */
+
+const char *bs_set_decision_log(cmd_parms *cmd, void *cfg_v,
+                                const char *arg)
+{
+    (void)cfg_v;
+    if (!arg || !*arg) {
+        return "BotShieldDecisionLog requires a path or a |program spec";
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->decision_log_path = apr_pstrdup(cmd->pool, arg);
+    return NULL;
+}
+
+int bs_open_decision_logs(apr_pool_t *pconf, server_rec *s)
+{
+    for (server_rec *sv = s; sv; sv = sv->next) {
+        bs_server_cfg *scfg = ap_get_module_config(sv->module_config,
+                                                   &botshield_module);
+        if (!scfg || !scfg->decision_log_path || scfg->decision_log_fd) {
+            continue;
         }
+
+        const char *spec = scfg->decision_log_path;
+
+        if (*spec == '|') {
+            /* Piped log. Skip the '|' and any leading space, then hand
+             * off to Apache's own helper so restart/respawn semantics
+             * match mod_log_config exactly. */
+            const char *program = spec + 1;
+            while (*program == ' ' || *program == '\t') program++;
+            if (!*program) {
+                ap_log_error(APLOG_MARK, APLOG_ERR, 0, sv,
+                    "mod_botshield: BotShieldDecisionLog '%s' names no "
+                    "program after the pipe", spec);
+                return HTTP_INTERNAL_SERVER_ERROR;
+            }
+            piped_log *pl = ap_open_piped_log(pconf, program);
+            if (!pl) {
+                ap_log_error(APLOG_MARK, APLOG_ERR, 0, sv,
+                    "mod_botshield: BotShieldDecisionLog could not start "
+                    "piped-log program '%s'", program);
+                return HTTP_INTERNAL_SERVER_ERROR;
+            }
+            scfg->decision_log_fd = ap_piped_log_write_fd(pl);
+        }
+        else {
+            const char *path = ap_server_root_relative(pconf, spec);
+            if (!path) {
+                ap_log_error(APLOG_MARK, APLOG_ERR, 0, sv,
+                    "mod_botshield: BotShieldDecisionLog path '%s' does "
+                    "not resolve", spec);
+                return HTTP_INTERNAL_SERVER_ERROR;
+            }
+            apr_file_t *fd = NULL;
+            apr_status_t rv = apr_file_open(&fd, path,
+                APR_FOPEN_WRITE | APR_FOPEN_CREATE | APR_FOPEN_APPEND,
+                APR_FPROT_UREAD | APR_FPROT_UWRITE | APR_FPROT_GREAD,
+                pconf);
+            if (rv != APR_SUCCESS) {
+                char errbuf[120];
+                apr_strerror(rv, errbuf, sizeof(errbuf));
+                ap_log_error(APLOG_MARK, APLOG_ERR, rv, sv,
+                    "mod_botshield: BotShieldDecisionLog cannot open "
+                    "'%s': %s. Refusing to start - a decision log the "
+                    "operator asked for and did not get is a silent "
+                    "blind spot.", path, errbuf);
+                return HTTP_INTERNAL_SERVER_ERROR;
+            }
+            scfg->decision_log_fd = fd;
+        }
+
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+            "mod_botshield: decision log active: %s", spec);
+    }
+    return OK;
+}
+
+/* Emit one pre-formatted decision line to the owned log, if any.
+ * Single write, no locking — see the concurrency note above.
+ *
+ * Line shape:  <iso8601-utc> <payload> ua="<user-agent>"
+ *
+ * Deliberately NOT carrying an HTTP status field. This runs at decision
+ * time, before the response is finalized, so r->status is not yet the
+ * code the client will receive (a block logs 200 here while the handler
+ * goes on to return 403). The CustomLog route could use %>s because it
+ * ran at log_transaction; we cannot, and printing a number we know to be
+ * unreliable is worse than omitting it. `outcome=` in the payload is the
+ * authoritative decision, and unlike a status code it distinguishes
+ * block from rate_limited from challenged.
+ *
+ * The client IP is not repeated positionally either — the payload
+ * already carries ip=. */
+static void bs_decision_log_write(request_rec *r, const char *payload)
+{
+    bs_server_cfg *scfg = ap_get_module_config(r->server->module_config,
+                                               &botshield_module);
+    if (!scfg || !scfg->decision_log_fd) return;
+
+    const char *ua = apr_table_get(r->headers_in, "User-Agent");
+    const char *ts = apr_table_get(r->subprocess_env, "BS_TIME");
+    const char *line = apr_psprintf(r->pool, "%s %s ua=\"%s\"\n",
+        ts ? ts : "-",
+        payload,
+        ua ? bs_log_quote(r->pool, ua) : "-");
+    apr_size_t len = strlen(line);
+    apr_file_write(scfg->decision_log_fd, line, &len);
+}
+
+/* `accesslog=off` verdict for the log_transaction chain. DONE breaks a
+ * RUN_ALL hook declared with (OK, DECLINED), so returning it here means
+ * mod_log_config never runs and nothing is written for this request.
+ * Checked on both ends of an internal-redirect chain: the trigger fires
+ * on the origin request, but a later hook may be handed either. */
+static int bs_nolog_verdict(request_rec *origin, request_rec *fwd)
+{
+    if (apr_table_get(origin->subprocess_env, BS_NOLOG_ENV)
+        || (fwd != origin
+            && apr_table_get(fwd->subprocess_env, BS_NOLOG_ENV))) {
+        return DONE;
     }
     return DECLINED;
+}
+
+int bs_propagate_decision_env(request_rec *r)
+{
+    request_rec *fwd = r;
+    while (fwd->next) fwd = fwd->next;
+
+    if (fwd != r) {
+        const apr_array_header_t *arr = apr_table_elts(r->subprocess_env);
+        apr_table_entry_t *elts = (apr_table_entry_t *)arr->elts;
+        for (int i = 0; i < arr->nelts; i++) {
+            if (!elts[i].key || !elts[i].val) continue;
+            if (strncmp(elts[i].key, "BS_", 3) == 0
+                || strcmp(elts[i].key, "BOTSHIELD") == 0) {
+                apr_table_setn(fwd->subprocess_env,
+                               elts[i].key, elts[i].val);
+            }
+        }
+    }
+
+    return bs_nolog_verdict(r, fwd);
 }
 
 void bs_decision_log(request_rec *r,
@@ -534,22 +694,29 @@ void bs_decision_log(request_rec *r,
     }
     apr_table_setn(r->subprocess_env, "BOTSHIELD", "1");
 
-    /* tag= suffix only when a trigger set it; normal decision lines
-     * stay byte-identical so existing log parsers don't break. */
+    /* Build the key=value payload once, then feed it to both sinks:
+     * Apache's error log (always) and the module-owned decision log
+     * (when BotShieldDecisionLog is configured). Passing the assembled
+     * string through a single %s keeps the error-log line byte-identical
+     * to what the previous two-branch printf produced, so existing
+     * parsers — including the pytest framework, which slices decisions
+     * out of the error log — are unaffected.
+     *
+     * tag= suffix only when a trigger set it. */
+    const char *payload;
     if (tag && *tag) {
-        const char *tag_q = bs_log_quote(r->pool, tag);
-        ap_log_rerror(APLOG_MARK, level, 0, r,
-            "mod_botshield: decision tier=%s outcome=%s ip=%s score=%d "
+        payload = apr_psprintf(r->pool,
+            "tier=%s outcome=%s ip=%s score=%d "
             "cookie=%s provider=%s alg=%s reason=\"%s\" path=\"%s\" "
             "tag=\"%s\"",
             tier, outcome, ip, score,
             cookie   ? cookie   : "-",
             provider ? provider : "-",
             alg      ? alg      : "-",
-            reason_q, path_q, tag_q);
+            reason_q, path_q, bs_log_quote(r->pool, tag));
     } else {
-        ap_log_rerror(APLOG_MARK, level, 0, r,
-            "mod_botshield: decision tier=%s outcome=%s ip=%s score=%d "
+        payload = apr_psprintf(r->pool,
+            "tier=%s outcome=%s ip=%s score=%d "
             "cookie=%s provider=%s alg=%s reason=\"%s\" path=\"%s\"",
             tier, outcome, ip, score,
             cookie   ? cookie   : "-",
@@ -557,6 +724,9 @@ void bs_decision_log(request_rec *r,
             alg      ? alg      : "-",
             reason_q, path_q);
     }
+    ap_log_rerror(APLOG_MARK, level, 0, r,
+                  "mod_botshield: decision %s", payload);
+    bs_decision_log_write(r, payload);
     /* M9.2: counters derived from the same enum vocabulary. One log
      * line, up to four counter increments (tier, outcome, cookie when
      * applicable, provider when applicable). */

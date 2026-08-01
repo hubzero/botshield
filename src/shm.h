@@ -114,7 +114,7 @@ extern "C" {
 #define BS_NONCE_MAX_SLOTS         1048576
 /* E17 — embedded → M7 fallback threshold. After N consecutive silent-
  * tier-embedded dispatches in the safeguard window without
- * _bs_verified arriving, the embedded short-circuit is bypassed and
+ * _bs_session arriving, the embedded short-circuit is bypassed and
  * M7 issues. Set lower than safeguard threshold so M7 gets a chance
  * before pass-through fully kicks in. Reuses the safeguard table's
  * present_count to avoid a fourth SHM table just for this counter. */
@@ -269,7 +269,7 @@ typedef struct {
 /* E10 — challenge safeguard / anti-loop hysteresis.
  *
  *   `present_count` accumulates inside `present_window_start +
- *   window_sec`. Resets on bs_safeguard_clear (valid _bs_verified
+ *   window_sec`. Resets on bs_safeguard_clear (valid _bs_session
  *   arrived; client can solve, history was noise) or on window roll.
  *
  *   `safeguard_until == 0` → inactive; non-zero → request-time check

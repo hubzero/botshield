@@ -428,7 +428,8 @@ void bs_bot_rate_init(apr_pool_t *pconf, server_rec *s, int *next_slot)
 
         /* Pass 3 — wildcard. For every directory slug not yet mapped,
          * allocate a separate slot at the wildcard's budget. Plus the
-         * two reserved aggregate slots (unknown-bot, fake-bot). */
+         * three reserved aggregate slots (unknown-bot, fake-bot,
+         * wildcard-fallback). */
         if (st->wildcard_entry) {
             apr_uint32_t budget = st->wildcard_entry->budget;
             apr_uint32_t window = st->wildcard_entry->window_sec;

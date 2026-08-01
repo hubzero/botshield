@@ -11,7 +11,7 @@
  *   POST <prefix>/embedded-verify      JSON: client posts solved
  *                                      counter (PoW-GCM) or captcha
  *                                      provider token, gets
- *                                      _bs_verified back
+ *                                      _bs_session back
  *
  * Plus a side endpoint:
  *

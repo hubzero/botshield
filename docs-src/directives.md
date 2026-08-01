@@ -1,8 +1,10 @@
 # Directive reference
 
-mod_botshield registers 78 directives at config time. This page is
+mod_botshield registers 86 usable directives at config time (plus one
+retired name, `BotShieldPathTrigger`, kept registered only to emit a
+migration error). This page is
 the canonical reference, grouped by family. The
-underlying source-of-truth is `bs_cmds[]` in `src/botshield.c:139` —
+underlying source-of-truth is `bs_cmds[]` in `src/botshield.c:142` —
 when tuning behavior, treat the source as authoritative
 when it disagrees with a doc page.
 
@@ -34,6 +36,7 @@ into a running server.
 | Directive | Syntax | Default |
 |---|---|---|
 | `BotShieldEnabled` | `on\|off\|logonly` | `off` |
+| `BotShieldChallenge` | `on\|off` | `on` |
 | `BotShieldDebug` | `on\|off` | `off` |
 | `BotShieldSecretFile` | `/path` | unset (required) |
 | `BotShieldSecondarySecretFile` | `/path` | unset |
@@ -64,6 +67,20 @@ operators can carve out exceptions:
     <Location "/about">
         BotShieldEnabled On                 # /about: enforce
     </Location>
+
+`BotShieldChallenge Off` makes a scope **block-only**: triggers, rate
+limits and scoring all still run and still log, but no interstitial,
+form or captcha is ever rendered — any selected tier collapses back to
+`pass`, and the suppression appears in the decision log as
+`challenge-off:<tier>`.
+
+Use it where an explicit `status=4xx` trigger is meant to be the only
+action. Parking `BotShieldScoreSilent`/`Hard`/`Captcha` at `10000` is
+**not** equivalent, which is easy to get wrong: a flag `tier_floor` is
+MAX'd in *after* the score-to-tier decision and ignores thresholds
+entirely, so an IP carrying `honeypot_hit`, `fake_bot`, `scanner_probe`
+or `pow_fail_streak` is still challenged. `BotShieldChallenge Off` is
+applied after the floor, so it holds.
 
 `BotShieldDebug` returns `403 "Hello World"` for every request in
 scope — useful as a smoke test that the hook is firing.
@@ -250,26 +267,75 @@ periodic save requires `mod_watchdog`, the graceful-shutdown save
 runs regardless. State format mismatches on load reject the file
 with a NOTICE and start fresh — never a startup failure.
 
-## Allow list
+## UA classification and allow list
+
+Each request gets one User-Agent classification, computed once and
+cached for every downstream consumer. It composes four passes:
+real-browser templates, the known-bot directory, verified-bot IP
+cross-check, and a heuristic scan for bot-shaped UAs matching
+nothing else.
 
 | Directive | Syntax | Default | Scope |
 |---|---|---|---|
-| `BotShieldAllow` | `on\|off` | `off` | any |
+| `BotShieldClassify` | `on\|off`, or `[all\|none] [+/-<pass>]...` | all four passes on | server / vhost |
 | `BotShieldAllowBot` | `<name> <ua-pattern> [<target>]` | builtin only | server / vhost |
+| `BotShieldAllowRangesRefreshInterval` | `N` (sec, 0..86400) | `0` (disabled) | server / vhost |
+| `BotShieldBotDirectory` | `/path` (TSV) | unset (compiled-in baseline) | server / vhost |
+| `BotShieldBotDirectoryRefreshInterval` | `N` (sec) | `300` (0=disabled) | server / vhost |
+| `BotShieldBrowserTemplates` | `/path` (text) | unset (compiled-in baseline) | server / vhost |
+| `BotShieldBrowserTemplatesRefreshInterval` | `N` (sec) | `300` (0=disabled) | server / vhost |
 
-`BotShieldAllow` is the master gate for the allow-list family.
+`BotShieldClassify` toggles individual passes — `browsers`,
+`known-bots`, `verified-bots`, `unknown-bots`. Mixing the two
+grammars is a config-time error:
 
-`BotShieldAllowBot` registers a UA pattern + IP-range pair. The
-third arg is a path to a CIDR file, comma-separated inline CIDRs
-(prefixed with `*,`), or `*` alone for UA-only matching. See
+```apache
+BotShieldClassify Off                   # standalone form, one token
+BotShieldClassify All -verified-bots    # compositional form
+BotShieldClassify None +browsers        # start from nothing, add back
+```
+
+Each disabled pass has a fail-safe rather than a silent behavior
+change: `-browsers` treats every UA as a browser for robots.txt
+wildcard purposes; `-known-bots` skips the directory walk, so no bot
+slug reaches the log; `-verified-bots` skips the IP cross-check and
+matched UAs degrade to known-bot, earning neither verified-bot credit
+nor fake-bot penalty (the intended response to stale CIDR data);
+`-unknown-bots` skips the bot-token substring scan.
+
+`BotShieldAllowBot` registers a UA pattern + IP-range pair. The third
+arg is a path to a CIDR file, a single CIDR, comma-separated inline
+CIDRs, or `*` alone for UA-only matching (logged as
+`known-bot:<name>`, score 0); omit it for
+`/var/lib/botshield/bots/<name>.txt`. A `<name>` matching a bundled
+built-in (`googlebot`, `bingbot`, `applebot`, `googleother`,
+`siteimprove`) replaces that built-in. See
 [policy](../policy/index.html#allow-list-e1-verified-crawlers) for the
 verified / fake / unverified outcomes.
+
+`BotShieldAllowRangesRefreshInterval` re-stats the verified-bot CIDR
+files (`<name>.txt` plus an operator sidecar `<base>.local.txt`) and
+atomic-swaps a rebuilt range set on any mtime change. The sidecar is
+the supported seam for scanner IPs absent from a vendor's public
+feed. Recommended 60-300 when enabled; `0` keeps the config-time load
+and needs a graceful restart to pick up edits.
+
+The two data-source pairs override their compiled-in baselines
+without a rebuild — refresh the files with
+`tools/refresh-bot-directory.py` and
+`tools/refresh-top-user-agents.py`, and the watchdog re-parses on
+mtime change. If a file disappears or fails to parse, lookups fall
+back to the baseline codegenned into the `.so` at build time.
+`BotShieldBotDirectory` is TSV (`pattern|slug|category|followsRobotsTxt`,
+`#` comments); `BotShieldBrowserTemplates` is one normalized UA
+template per line (runs of `[0-9._]+` replaced by `X`).
 
 ## Rate limit
 
 | Directive | Syntax | Default |
 |---|---|---|
 | `BotShieldRateLimit` | `<name> [budget=N] [per=U] [ua=...] [ipspec=...] [mode=...]` (or legacy `<name> <budget> <per> <ua-pattern> <ipspec> [mode=observe]`) | none |
+| `BotShieldBotRateLimit` | `off`, or `<target> <delay-sec>`, or `<target> <budget> <per>` | `* 1 sec` (synthesized) |
 | `BotShieldRateLimitEscalate` | `<rate-rule> <strikes> <per> [status=N] [ttl=N]` | none |
 
 Match keys: `ua=<substring>` or `ua=@<botgroup>` for the UA gate
@@ -283,8 +349,27 @@ also accepts `s`/`m`/`h`). Plain integer for `per` is rejected.
 The legacy 5-arg positional form is still accepted (form is detected
 by sniffing for `=` in the args); no deprecation warning yet.
 
+`BotShieldBotRateLimit` caps volume per known-bot slug rather than
+per cohort. `<target>` is a bot slug or UA substring resolved against
+the bot directory, `@<botgroup>` (`search`, `ai-input`, `ai-train`,
+`monitor`), or `*`. The two-arg form is Crawl-delay shaped — one
+request per `<delay-sec>`, where `0` admits everything. Precedence is
+specific > `@botgroup` > `*`.
+
+`*` pre-allocates one counter per directory slug not covered by a
+more specific rule, so each unmatched bot gets its own budget rather
+than sharing one; three reserved aggregate slots at the same budget
+cover unknown-bot, fake-bot, and slugs a mid-run directory refresh
+added after startup. Because the slug universe is bounded by the
+directory, every slot is allocated at config time — request time is a
+single hash probe. With no `BotShieldBotRateLimit` configured the
+module synthesizes `* 1 sec`; `off` suppresses that synthesis while
+leaving explicit entries in force. Over-budget returns 429 +
+`Retry-After` with reason `bot-rate:<slug>`. Robots.txt `Crawl-delay`
+groups feed the same machinery.
+
 For path-conditional 403s (the former `BotShieldBlockPath`
-directive, retired), use `BotShieldPathTrigger` with `status=403`
+directive, retired), use `BotShieldRequestTrigger` with `status=403`
 plus optional `ua=` / `ipspec=` match keys — see the [Triggers](
 #triggers) section below.
 
@@ -307,11 +392,11 @@ semantics and refresh model.
 
 | Directive | Predicate args | Action keys |
 |---|---|---|
-| `BotShieldPathTrigger` | `<name> <path-glob>` | `status=`, `redirect=`, `log=`, `flag=`, `ttl=`, `penalty=`, `mode=` (no `credit=`) |
-| `BotShieldCookieTrigger` | `<name> <pred>` (see policy page) | `status=`, `redirect=`, `log=`, `flag=`, `ttl=`, `penalty=`, `credit=`, `mode=` |
-| `BotShieldEnvTrigger` | `<name> <env-pred>` (see policy page) | `status=`, `log=`, `flag=`, `ttl=`, `penalty=`, `credit=`, `mode=` (no `redirect=`) |
-| `BotShieldFeedbackTrigger` | `<event>` | `flag=`, `ttl=`, `log=`, `mode=` |
-| `BotShieldLoadTrigger` | `<name> state=<n>\|state>=<n>` | `status=`, `log=`, `penalty=`, `mode=` (no `redirect=`, `flag=`, `ttl=`) |
+| `BotShieldRequestTrigger` | `<name>` + any of `path=<glob>` `query=<glob>` `cookies=none\|any\|session` `ua=<substring>\|@<botgroup>` `ipspec=<spec>` — ANDed, at least one required | `status=`, `redirect=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `penalty=`, `mode=` (no `credit=`) |
+| `BotShieldCookieTrigger` | `<name> <pred>` (see policy page) | `status=`, `redirect=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `penalty=`, `credit=`, `mode=` |
+| `BotShieldEnvTrigger` | `<name> <env-pred>` (see policy page) | `status=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `penalty=`, `credit=`, `mode=` (no `redirect=`) |
+| `BotShieldFeedbackTrigger` | `<event>` | `flag=`, `ttl=`, `log=`, `accesslog=`, `mode=` |
+| `BotShieldLoadTrigger` | `<name> state=<n>\|state>=<n>` | `status=`, `log=`, `accesslog=`, `penalty=`, `mode=` (no `redirect=`, `flag=`, `ttl=`) |
 | `BotShieldSessionCookieName` | `<name>` (single arg, repeatable) | n/a (feeds cookies=session predicate) |
 
 See [policy](../policy/index.html#triggers--predicate-action-engine-e3-e4-e6-e73-e112)
@@ -321,11 +406,136 @@ for full predicate vocabulary and family-by-family semantics.
 `cookies=session` cookie-trigger predicate considers a session
 cookie. Repeatable; each call appends.
 
+### `accesslog=off` — keep a request out of the access log
+
+`log=<tag>` names a tag that rides the decision line as `tag="<x>"`
+for fail2ban handoff. `accesslog=off` is separate and independent: it
+suppresses the access-log line for a matching request.
+
+They compose, which is the point — a scanner probe usually wants both:
+
+```apache
+BotShieldRequestTrigger env-probe path="/.env" status=403 \
+    log=scanner-probe accesslog=off
+```
+
+(An earlier development build overloaded `log=off` for this. That form is
+now rejected at config time with a pointer here, rather than silently
+being treated as a tag named "off" and losing the suppression.)
+
+The mechanism is Apache's own. `log_transaction` is a `RUN_ALL` hook
+declared with `(OK, DECLINED)`, so a hook returning any other value
+breaks the chain. The module's `bs_propagate_decision_env` hook runs at
+`APR_HOOK_FIRST` — ahead of mod_log_config — and returns `DONE` when the
+marker is set. Nothing downstream ever formats or writes a line.
+
+Three consequences to understand before using it:
+
+- **A `CustomLog`-based decision log is suppressed too.** mod_log_config
+  services every `CustomLog` from a single hook function, so there is no
+  way to keep one and starve another. `BotShieldDecisionLog` is written
+  by the module itself and is **unaffected**, as is the error-log line —
+  pair the two and you get the useful split: flood traffic out of an
+  archived access log, every decision still recorded in a
+  separately-rotated detection log.
+- **Third-party loggers are also skipped** if their `log_transaction`
+  hook is ordered after this module's (audit logging, analytics).
+- **It never applies under `mode=observe` or `BotShieldEnabled LogOnly`.**
+  The action engine returns before any side effect in that path, so a
+  dry run always leaves its evidence.
+
+If you want a request dropped from one specific `CustomLog` while
+keeping the others, this is the wrong tool — use mod_log_config's own
+conditional form,
+which can key off the decision the module already published to the
+request environment:
+
+```apache
+CustomLog logs/access.log combined "expr=%{reqenv:BS_OUTCOME} != 'block'"
+```
+
+That is the right tool when you only want to thin one log.
+
+### `BotShieldRequestTrigger` — match on any request property
+
+Every match key is optional and they **AND** together; at least one is
+required. A rule with no condition would match every request, which is
+what `BotShieldTrigger` in an Apache scope is for, so the parser rejects
+it.
+
+| Key | Matches against | Notes |
+|---|---|---|
+| `path=<glob>` | `r->uri` — path only, **no** query string | must start with `/`, ≤256 chars |
+| `query=<glob>` | the query string alone | e.g. `query="*return=*"` |
+| `cookies=none\|any\|session` | the parsed `Cookie` header | bulk forms only |
+| `ua=<substring>\|@<botgroup>` | User-Agent | `*` means "any", same as omitting |
+| `ipspec=<spec>` | client IP | `*`, a CIDR list, or a file path |
+
+Globs take `*` wildcards and a trailing `$` anchor. Named-cookie
+predicates (`cookie=<n>`, `cookie=<n>~<substr>`, `bs-cookie=<state>`)
+stay on [`BotShieldCookieTrigger`](#triggers) — that vocabulary does not
+compress into one key.
+
+```apache
+# cookieless crawler walking a login redirect chain: path AND query AND
+# cookie-state, one cheap 403 from the policy walk, tagged for fail2ban
+# and kept out of the access log
+BotShieldRequestTrigger login-trap path="/login*" query="*return=*" \
+    cookies=none status=403 log=login-trap accesslog=off
+
+# no path condition at all — any URL carrying ?debug=1
+BotShieldRequestTrigger debugparam query="*debug=1*" penalty=20
+```
+
+Because it fires from the policy walk it short-circuits **before**
+scoring, so a `status=4xx` rule never renders a challenge and never
+reaches PHP.
+
+**Watch the flag default.** This family flags the matching IP with
+`scanner_probe` for 3600 s unless you say otherwise — inherited from
+`BotShieldPathTrigger`, where the target was a handful of scanners
+probing `/.env` and per-IP memory was worth having. It is the wrong
+default for high-cardinality traffic: at roughly one request per IP the
+flag is never read again, it churns the 50,000-slot flagged-IP table,
+and `scanner_probe` carries a compiled-in `tier_floor` of `form` that
+**overrides parked score thresholds** and turns a block-only scope into
+one that renders interstitials. Write `ttl=0` on rules that match
+one-shot traffic:
+
+```apache
+BotShieldRequestTrigger login-trap path="/login*" query="*return=*" \
+    cookies=none status=403 ttl=0 log=login-trap accesslog=off
+```
+
+#### Renamed from `BotShieldPathTrigger`
+
+`BotShieldPathTrigger` was renamed on 2026-08-01 and its path glob moved
+from a positional argument to the `path=` key. The old name had stopped
+being accurate when the family gained `ua=`/`ipspec=`; `query=` and
+`cookies=` made "path" one dimension out of five. Making path a key is
+also what allows a rule with no path condition at all.
+
+The old name is still registered, purely so an old config fails with a
+migration note rather than "unknown directive":
+
+```apache
+# before
+BotShieldPathTrigger blocked "/wp-admin/*" status=403
+# after
+BotShieldRequestTrigger blocked path="/wp-admin/*" status=403
+```
+
+A note on quoting: values are unquoted by the module, so
+`path="/login*"` and `path=/login*` behave identically. Apache's
+`TAKE_ARGV` tokenizer only strips quotes that begin a token, so without
+this a quoted `key="value"` would retain its quotes and silently never
+match.
+
 ## Per-scope triggers
 
 | Directive | Syntax | Scope |
 |---|---|---|
-| `BotShieldTrigger` | `[reset] [status=N\|pass] [redirect=URL] [log=tag] [flag=NAME] [ttl=N] [penalty=N] [credit=N] [mode=enforce\|observe]` | server / vhost / Directory / Location / LocationMatch / Files / If |
+| `BotShieldTrigger` | `[reset] [status=N\|pass] [redirect=URL] [log=tag] [accesslog=on\|off] [flag=NAME] [ttl=N] [penalty=N] [credit=N] [mode=enforce\|observe]` | server / vhost / Directory / Location / LocationMatch / Files / If |
 
 The Apache scope the directive lives in IS the predicate; no path
 glob argument. Multiple `BotShieldTrigger` lines in one scope
@@ -349,23 +559,79 @@ of `pass`/`silent`/`form`/`captcha`). The `reset` keyword clears
 all earlier triggers (compiled-in defaults + prior
 declarations) for the named flag at post-config time.
 
+**A `tier_floor` bypasses your score thresholds.** It is MAX'd in
+*after* the score-to-tier decision, so it does not consult
+`BotShieldScoreSilent`/`Hard`/`Captcha` at all. Four of the compiled-in
+defaults carry one — `honeypot_hit` and `fake_bot` (captcha),
+`scanner_probe` (form), `pow_fail_streak` (silent) — so an IP carrying
+any of them is challenged even in a scope whose thresholds are parked to
+disable challenges entirely. To make a scope genuinely block-only, reset
+the floors and keep the scores:
+
+```apache
+BotShieldFlagTrigger honeypot_hit    reset action=score add=60
+BotShieldFlagTrigger fake_bot        reset action=score add=80
+BotShieldFlagTrigger scanner_probe   reset action=score add=50
+BotShieldFlagTrigger pow_fail_streak reset action=score add=30
+```
+
 Flag bits: `honeypot_hit`, `scanner_probe`, `fake_bot`,
 `pow_fail_streak`, `app_verified_human`, `app_verified_session`,
 `app_trust_signal`. See
 [policy](../policy/index.html#flag-trigger-family-e14) for compiled-in
 defaults and override semantics.
 
+## Heuristic triggers
+
+| Directive | Syntax |
+|---|---|
+| `BotShieldHeuristicTrigger` | `<name>\|all [reset] [action=<verb> args...] [mode=observe]` |
+
+Same action grammar as the flag family, but the predicate is a
+built-in heuristic on the request itself rather than a flag bit. This
+is the operator handle for retuning the built-in penalties — they are
+not separate directives.
+
+| Heuristic | Fires when | Default |
+|---|---|---|
+| `missing-ua` | User-Agent absent or empty | `score add=40` |
+| `missing-al` | Accept-Language absent | `score add=15` |
+| `scraper-ua` | UA contains a known HTTP-library token | `score add=50` |
+| `first-sight-ip` | Bloom-filter miss — genuinely new IP | `score add=5` |
+| `dropped-cookie` | Bloom-known IP arriving with no usable cookie | `score add=25` |
+
+Action verbs are `action=score add=N` (signed, -1000..1000) and
+`action=tier_floor min=<tier>`. `<name> reset` clears the compiled-in
+default plus prior declarations for that one heuristic; `all reset`
+wipes every entry so the slate can be rebuilt from zero.
+`mode=observe` logs the match with an `:observe` suffix instead of
+applying it.
+
+A `dropped-cookie` hit is ambiguous by design — private-browsing
+resets and manual cookie clears look the same as evasion — so the
+default penalty is deliberately mild.
+
 ## Safeguard
 
 | Directive | Syntax | Default | Scope |
 |---|---|---|---|
-| `BotShieldSafeguard` | `on\|off` | `on` | server / vhost |
+| `BotShieldSafeguard` | `on\|off` | **`on`** | server / vhost |
 | `BotShieldSafeguardThreshold` | `N` | `5` | server / vhost |
 | `BotShieldSafeguardWindow` | `N` (sec) | `600` | server / vhost |
 | `BotShieldSafeguardTTL` | `N` (sec) | `900` | server / vhost |
 | `BotShieldSafeguardRedirectURL` | `<url>` | unset (uses built-in explainer) | server / vhost |
 
-Challenge-loop suppression. When a client has been issued the
+Challenge-loop suppression, **on by default** — only an explicit
+`Off` disables it. A client that cannot solve the challenge (JS
+disabled, a privacy extension, an old browser) would otherwise be
+re-challenged forever with nothing in the logs shouting about it, and
+that client is indistinguishable from a non-JS crawler. The redirect
+resolves that without having to tell them apart: it is useful to a
+human and useless to a crawler. The tripped client is **not** admitted
+— it lands on an explainer, never on protected content, and its
+flagged-IP entry survives.
+
+When a client has been issued the
 threshold number of challenges within the window without ever
 returning a verified cookie, the next request gets a 302 redirect
 to break the loop.
@@ -419,6 +685,42 @@ The trigger family that consumes the state lives under
 
 Vhosts with the same token share one reputation namespace. See
 [deployment](../deployment/index.html#multi-vhost-reputation).
+
+## Decision log
+
+| Directive | Syntax | Default | Scope |
+|---|---|---|---|
+| `BotShieldDecisionLog` | `/path`, `logs/path`, or `"\|program"` | unset | server / vhost |
+
+A module-owned decision log, written directly from the decision path
+instead of through mod_log_config:
+
+```apache
+BotShieldDecisionLog logs/botshield-decisions.log
+BotShieldDecisionLog "|/usr/bin/rotatelogs /var/log/httpd/bs.%Y%m%d 86400"
+```
+
+Relative paths resolve against `ServerRoot`, exactly like `ErrorLog`.
+A value beginning with `|` is a piped-log spec handed to Apache's own
+`ap_open_piped_log`, so `rotatelogs` and friends work as they do for any
+other Apache log.
+
+Why it exists: a `CustomLog` cannot survive `accesslog=off`, because
+mod_log_config serves every `CustomLog` from the single
+`log_transaction` hook that `accesslog=off` breaks. An owned log is
+independent of the access log, which is what lets you **rapid-rotate the
+detection log and archive the access log separately**. It also records
+boring passes at full fidelity with no `LogLevel` change.
+
+One descriptor per vhost, opened at `post_config` before the children
+fork; one write per line, no request-path locking. **If the log cannot
+be opened, startup fails** — a decision log you asked for and did not
+get is a silent blind spot.
+
+Optional. Without it the authoritative record remains the error-log
+`mod_botshield: decision ...` line, plus whatever `CustomLog` you wire
+up. See [observability](../observability/index.html#where-the-decision-line-goes)
+for the line format and the trade-offs between all three routes.
 
 ## Log-only / staging mode
 

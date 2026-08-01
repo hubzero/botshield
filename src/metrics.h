@@ -14,6 +14,8 @@
 #define BOTSHIELD_METRICS_H
 
 #include <httpd.h>
+#include <http_config.h>   /* cmd_parms for the directive setter */
+#include <apr_pools.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -60,6 +62,63 @@ void bs_set_trigger_tag(request_rec *r, const char *tag);
  * stash (~block) wins over a less-severe one (~challenge) when
  * multiple suppressions fire on the same request. */
 void bs_set_would_outcome(request_rec *r, const char *would);
+
+/* BotShieldDecisionLog setter. Accepts a server-root-relative path
+ * ("logs/botshield.log"), an absolute path, or a piped-log spec
+ * ("|/usr/bin/rotatelogs ..."). Config-time only stores the string;
+ * bs_open_decision_logs does the opening. */
+const char *bs_set_decision_log(cmd_parms *cmd, void *cfg_v,
+                                const char *arg);
+
+/* Open every configured BotShieldDecisionLog. Called from post_config
+ * (as root, before privilege drop) so the descriptor is inherited by
+ * every child process. Piped specs go through ap_open_piped_log, the
+ * same path mod_log_config uses, which is what makes
+ * `|/usr/bin/rotatelogs` work. Returns OK, or HTTP_INTERNAL_SERVER_ERROR
+ * if a configured log cannot be opened — a decision log the operator
+ * asked for and did not get is a silent blind spot, so we refuse to
+ * start rather than pretend. */
+int bs_open_decision_logs(apr_pool_t *pconf, server_rec *s);
+
+/* subprocess_env marker for `accesslog=off`. Env (not notes) because it has
+ * to survive mod_rewrite's internal_redirect the same way the BS_*
+ * decision fields do — see bs_propagate_decision_env. */
+#define BS_NOLOG_ENV "BS_NOLOG"
+
+/* Suppress ALL access logging for this request.
+ *
+ * Set from the trigger action engine when a matching rule carries
+ * `accesslog=off`. bs_propagate_decision_env — registered on
+ * ap_hook_log_transaction at APR_HOOK_FIRST — sees the marker and
+ * returns DONE. log_transaction is a RUN_ALL hook declared with
+ * (OK, DECLINED), so any other return value breaks the chain and every
+ * later-ordered logger is skipped, mod_log_config included. No
+ * CustomLog line is formatted or written.
+ *
+ * Consequences the operator is buying, deliberately:
+ *   - A CustomLog-based decision log is suppressed too: mod_log_config
+ *     services every CustomLog directive from one hook function, so
+ *     there is no way to keep one and starve another. BotShieldDecisionLog
+ *     is written by the module itself and is unaffected, as is the
+ *     error-log line bs_decision_log emits. That is the intended split —
+ *     access log off, detection record intact.
+ *   - Any third-party module with a log_transaction hook ordered after
+ *     ours (audit logging, analytics) is also skipped.
+ * Pair it with BotShieldDecisionLog and you get the useful combination:
+ * flood traffic kept out of an archived access log while every decision
+ * is still recorded in a separately-rotated detection log. Without an
+ * owned decision log the only surviving record is the error-log line
+ * (and boring passes there are demoted to DEBUG).
+ *
+ * If you want to drop a line from one specific CustomLog while keeping
+ * the others, this is the wrong tool — use mod_log_config's own
+ * conditional form, which can key off what we already published:
+ *   CustomLog logs/access.log combined "expr=%{reqenv:BS_OUTCOME} != 'block'"
+ *
+ * Never applies under observe / LogOnly: bs_apply_trigger_action
+ * returns before any side effect in that path, so a dry run still
+ * produces its evidence. */
+void bs_suppress_access_log(request_rec *r);
 
 /* /botshield/metrics handler — Prometheus exposition format 0.0.4.
  * Mounted via the request dispatcher in botshield.c. Apache's

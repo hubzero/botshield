@@ -61,7 +61,8 @@ void *bs_create_dir_cfg(apr_pool_t *p, char *path)
 {
     (void)path;
     bs_dir_cfg *cfg = apr_pcalloc(p, sizeof(*cfg));
-    cfg->enabled    = BS_UNSET;
+    cfg->enabled           = BS_UNSET;
+    cfg->challenge_enabled = BS_UNSET;
     cfg->debug      = BS_UNSET;
     cfg->cookie_ttl = BS_UNSET;
     cfg->difficulty = BS_UNSET;
@@ -168,7 +169,7 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
      * main version is skipped entirely (no shadowed duplicates).
      *
      * Every entry type stored here (bs_rate_limit_entry,
-     * bs_path_trigger_entry, etc.) shares a const char *name as its
+     * bs_request_trigger_entry, etc.) shares a const char *name as its
      * first field, so we can key the dedup by the leading pointer
      * word without branching per-type. */
     out->rate_limits = bs_merge_rule_array(p, base->rate_limits,
@@ -228,8 +229,8 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
     /* E15 — child-set value wins; 0 means "inherit". */
     out->forgive_cap_per_hour = (add->forgive_cap_per_hour > 0)
         ? add->forgive_cap_per_hour : base->forgive_cap_per_hour;
-    out->path_triggers = bs_merge_rule_array(p, base->path_triggers,
-                                             add->path_triggers);
+    out->request_triggers = bs_merge_rule_array(p, base->request_triggers,
+                                             add->request_triggers);
     out->cookie_triggers = bs_merge_rule_array(p, base->cookie_triggers,
                                                add->cookie_triggers);
     out->env_triggers    = bs_merge_rule_array(p, base->env_triggers,
@@ -297,6 +298,16 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
     if (!add->app_feedback_header && base->app_feedback_header) {
         out->app_feedback_header = base->app_feedback_header;
     }
+    /* Inherit the decision-log path, but never the open fd: each vhost
+     * that resolves to a path gets its own descriptor at post_config,
+     * so two vhosts sharing a path still each hold an O_APPEND fd
+     * rather than aliasing one struct. */
+    if (!add->decision_log_path && base->decision_log_path) {
+        out->decision_log_path = base->decision_log_path;
+    }
+    /* Sticky: enabling anywhere in the tree makes the vhost endpoint-
+     * serving, so a vhost inherits a server-level enable. */
+    out->any_enabled = base->any_enabled | add->any_enabled;
     if (add->app_claims_enabled == BS_APP_FEEDBACK_UNSET) {
         out->app_claims_enabled = base->app_claims_enabled;
     }
@@ -367,7 +378,7 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->share_scope_token     = NULL;
     /* E15 — 0 means "inherit / use default". */
     scfg->forgive_cap_per_hour  = 0;
-    scfg->path_triggers         = apr_array_make(p, 4, sizeof(void *));
+    scfg->request_triggers         = apr_array_make(p, 4, sizeof(void *));
     scfg->cookie_triggers  = apr_array_make(p, 4, sizeof(void *));
     scfg->env_triggers     = apr_array_make(p, 4, sizeof(void *));
     scfg->feedback_triggers = apr_array_make(p, 4, sizeof(void *));
@@ -420,6 +431,10 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->app_integration_secret_file = NULL;
     scfg->app_integration_secret      = NULL;
     scfg->app_integration_secret_len  = 0;
+    /* Module-owned decision log — opened in post_config, not here. */
+    scfg->decision_log_path           = NULL;
+    scfg->decision_log_fd             = NULL;
+    scfg->any_enabled                 = 0;
     return scfg;
 }
 
@@ -429,6 +444,8 @@ void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     bs_dir_cfg *add  = add_v;
     bs_dir_cfg *out  = apr_pcalloc(p, sizeof(*out));
     out->enabled    = (add->enabled    == BS_UNSET) ? base->enabled    : add->enabled;
+    out->challenge_enabled = (add->challenge_enabled == BS_UNSET)
+                           ? base->challenge_enabled : add->challenge_enabled;
     out->debug      = (add->debug      == BS_UNSET) ? base->debug      : add->debug;
     out->cookie_ttl = (add->cookie_ttl == BS_UNSET) ? base->cookie_ttl : add->cookie_ttl;
     out->difficulty = (add->difficulty == BS_UNSET) ? base->difficulty : add->difficulty;
@@ -1349,7 +1366,7 @@ static void bs_wire_rate_and_block_cohorts(apr_pool_t *pconf,
         if (!vcfg) continue;
 
         /* Resolve a cohort's ipspec (path or inline CIDRs) into the
-         * ranges array. Shared between rate_limits and path_triggers. */
+         * ranges array. Shared between rate_limits and request_triggers. */
         #define BS_E21_RESOLVE_COHORT(c_, feature_, name_) do {              \
             if ((c_)->ip_any || (c_)->ranges) break;                         \
             const char *rerr = NULL;                                         \
@@ -1427,11 +1444,11 @@ static void bs_wire_rate_and_block_cohorts(apr_pool_t *pconf,
          * cohort; resolve its ipspec the same way rate-limit cohorts
          * are resolved. Path triggers without those keys leave
          * has_cohort=0 and are skipped here. */
-        if (vcfg->path_triggers && vcfg->path_triggers->nelts > 0) {
+        if (vcfg->request_triggers && vcfg->request_triggers->nelts > 0) {
             int wired = 0;
-            for (int i = 0; i < vcfg->path_triggers->nelts; i++) {
-                bs_path_trigger_entry *e = APR_ARRAY_IDX(
-                    vcfg->path_triggers, i, bs_path_trigger_entry *);
+            for (int i = 0; i < vcfg->request_triggers->nelts; i++) {
+                bs_request_trigger_entry *e = APR_ARRAY_IDX(
+                    vcfg->request_triggers, i, bs_request_trigger_entry *);
                 if (!e->has_cohort) continue;
                 BS_E21_RESOLVE_COHORT(&e->cohort,
                     "BotShieldPathTrigger", e->name);
@@ -2318,6 +2335,12 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     rv = bs_init_shm_layout(pconf, ptemp, s, scfg);
     if (rv != OK) return rv;
 
+    /* Owned decision logs: opened here, as root and before the child
+     * processes fork, so every worker inherits the descriptor. Fatal on
+     * failure — see bs_open_decision_logs. */
+    rv = bs_open_decision_logs(pconf, s);
+    if (rv != OK) return rv;
+
     bs_init_state_persistence(pconf, s, scfg);
     bs_populate_auto_secret(pconf, ptemp, s);
     bs_populate_default_algorithm(s);
@@ -2383,6 +2406,21 @@ const char *bs_set_enabled(cmd_parms *cmd, void *cfg_v, const char *arg)
             "BotShieldEnabled: unknown mode '%s' (expected On, Off, "
             "or LogOnly)", arg);
     }
+    /* Record on the server config that this vhost has the module live
+     * somewhere, so bs_handler will serve the module-owned endpoints
+     * even when the enable is scoped to a <Location>. */
+    if (cfg->enabled == BS_ENABLED_ON || cfg->enabled == BS_ENABLED_LOGONLY) {
+        bs_server_cfg *scfg = ap_get_module_config(
+            cmd->server->module_config, &botshield_module);
+        if (scfg) scfg->any_enabled = 1;
+    }
+    return NULL;
+}
+
+const char *bs_set_challenge(cmd_parms *cmd, void *cfg_v, int flag)
+{
+    (void)cmd;
+    ((bs_dir_cfg *)cfg_v)->challenge_enabled = flag ? 1 : 0;
     return NULL;
 }
 
@@ -2492,7 +2530,7 @@ const char *bs_set_forgive_captcha(cmd_parms *cmd, void *cfg_v, const char *arg)
  * form captcha verification on POST submit. When on, BotShield
  * inspects the request body for the configured captcha provider's
  * response field, siteverifies via the existing M8 client, mints
- * _bs_verified on success, and replays the body back via input
+ * _bs_session on success, and replays the body back via input
  * filter so the downstream app handler still sees its original
  * POST. Supports application/x-www-form-urlencoded and
  * application/json. multipart/form-data (file uploads) is out of

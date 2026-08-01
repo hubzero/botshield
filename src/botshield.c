@@ -24,7 +24,7 @@
  *   captcha  third-party provider widget (Turnstile, hCaptcha, reCAPTCHA,
  *            Friendly, GeeTest) on the M8 verify endpoint
  *
- * The tier-earned cookie (_bs_verified or __Host-bs_verified, AES-GCM
+ * The tier-earned cookie (_bs_session or __Host-bs_session, AES-GCM
  * envelope) carries forward across requests, with a forgiveness-window
  * cap so a one-time solve doesn't whitewash a flagged client forever.
  *
@@ -139,12 +139,44 @@ int bs_bot_name_valid(const char *s)
 
 
 
+/* Retired 2026-08-01. BotShieldPathTrigger became
+ * BotShieldRequestTrigger and its path glob became a key. Registered
+ * purely so an old config fails with a migration note rather than
+ * Apache's bare "Invalid command" — the same courtesy log=off got. */
+static const char *bs_retired_path_trigger(cmd_parms *cmd, void *dconf,
+                                           const char *args)
+{
+    (void)dconf; (void)args;
+    return apr_pstrdup(cmd->pool,
+        "BotShieldPathTrigger was renamed to BotShieldRequestTrigger on "
+        "2026-08-01, and the path glob is now a key. Migrate: "
+        "`BotShieldPathTrigger blocked \"/wp-admin/*\" status=403` becomes "
+        "`BotShieldRequestTrigger blocked path=\"/wp-admin/*\" status=403`. "
+        "The new family also matches query=, cookies=, ua= and ipspec=, "
+        "all ANDed.");
+}
+
 static const command_rec bs_cmds[] = {
     AP_INIT_TAKE1("BotShieldEnabled",   bs_set_enabled,    NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "Mode for the enclosing scope: On (enforce), Off (disabled), "
                  "or LogOnly (observe-only — log decisions without acting). "
                  "Default: Off"),
+    AP_INIT_FLAG("BotShieldChallenge", bs_set_challenge, NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "Whether this scope may render a challenge. Default On. "
+                 "Off collapses any selected tier back to pass: triggers, "
+                 "rate limits and scoring all still run and still log, but "
+                 "no interstitial, form or captcha is ever served. Use it "
+                 "for a block-only scope, where an explicit status=4xx "
+                 "trigger is meant to be the only action. Parking "
+                 "BotShieldScoreSilent/Hard/Captcha at 10000 is NOT "
+                 "equivalent: a flag tier_floor is MAXed in after the "
+                 "score-to-tier decision and ignores thresholds entirely, "
+                 "so an IP carrying honeypot_hit, fake_bot, scanner_probe "
+                 "or pow_fail_streak would still be challenged. This is "
+                 "applied after the floor, so it holds. Suppression shows "
+                 "in the decision log as challenge-off:<tier>."),
     AP_INIT_FLAG("BotShieldDebug",      bs_set_debug,      NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "If on, return 403 'Hello World' for every request in the "
@@ -245,7 +277,7 @@ static const command_rec bs_cmds[] = {
                  "provider's response token in the POST body of form "
                  "submissions. Requires BotShieldCaptchaProvider + "
                  "SiteKey + SecretFile in the same scope (or "
-                 "inherited). On valid token: mints _bs_verified, "
+                 "inherited). On valid token: mints _bs_session, "
                  "DECLINED so the app handler runs with the original "
                  "body intact. On bad/missing token: 403, app handler "
                  "never runs. Supports application/x-www-form-"
@@ -278,7 +310,7 @@ static const command_rec bs_cmds[] = {
                  "(default: 50). Clamped at max(0, flag_penalty)."),
     AP_INIT_TAKE1("BotShieldCookieDomain", bs_set_cookie_domain, NULL,
                  RSRC_CONF | ACCESS_CONF,
-                 "If set, Set-Cookie for _bs_verified includes a Domain= "
+                 "If set, Set-Cookie for _bs_session includes a Domain= "
                  "attribute so reputation follows users across subdomains. "
                  "Use '.example.com' for subdomain sharing. Default: host-only."),
     AP_INIT_TAKE1("BotShieldEndpointPrefix", bs_set_endpoint_prefix, NULL,
@@ -402,6 +434,7 @@ static const command_rec bs_cmds[] = {
                  "<LocationMatch> / <Files> / <If>) the directive "
                  "lives in IS the predicate. Action keys: "
                  "status=<code|pass>, redirect=<url>, log=<tag>, "
+                 "accesslog=on|off, "
                  "flag=<name>, ttl=<sec>, penalty=<N>, credit=<N>, "
                  "mode=enforce|observe. The literal 'reset' as the "
                  "first arg drops triggers inherited from outer "
@@ -533,13 +566,17 @@ static const command_rec bs_cmds[] = {
     /* E10 — challenge safeguard / anti-loop hysteresis. */
     AP_INIT_FLAG("BotShieldSafeguard",
                  bs_set_safeguard, NULL, RSRC_CONF,
-                 "Enable anti-loop hysteresis (default off). When on, "
+                 "Anti-loop hysteresis. Default ON - only an explicit Off "
+                 "disables it. When on, "
                  "a client that gets challenged N times within W "
                  "seconds without solving any challenge is passed "
                  "through for a TTL window instead of being re-"
                  "challenged. Decision log shows reason "
-                 "challenge-safeguard. Doesn't mint _bs_verified; "
-                 "doesn't override 403/429 blocks."),
+                 "challenge-safeguard. Doesn't mint _bs_session; "
+                 "doesn't override 403/429 blocks. Default-on because a client that cannot solve the challenge - JS disabled, a "
+                 "privacy extension, an old browser - would otherwise be re-challenged forever with no way out, and nothing in the "
+                 "logs shouts about it. The tripped client is redirected to an explainer, NOT admitted: it never reaches protected "
+                 "content, and its flagged-IP entry survives."),
     AP_INIT_TAKE1("BotShieldSafeguardThreshold",
                  bs_set_safeguard_threshold, NULL, RSRC_CONF,
                  "Presentations-without-solve inside the window "
@@ -672,7 +709,8 @@ static const command_rec bs_cmds[] = {
                  "session>, bs-cookie=<verified|missing|invalid>. "
                  "Keys: status=<code|pass> (default pass; diverges "
                  "from E3 — credit/penalty here ALWAYS apply, even "
-                 "under pass), redirect=<url>, log=<tag>, flag=<bit>, "
+                 "under pass), redirect=<url>, log=<tag>, accesslog=on|off, "
+                 "flag=<bit>, "
                  "ttl=<sec>, penalty=<n>, credit=<n>. Declaration "
                  "order; pass triggers accumulate credit/penalty "
                  "(layered reputation signals), first non-pass "
@@ -694,7 +732,7 @@ static const command_rec bs_cmds[] = {
                  "env=<var>=<value> (exact match, case-sensitive), "
                  "!env=<var> (absent). Keys: status=<code|pass> "
                  "(default pass; credit/penalty apply under pass "
-                 "like E4), log=<tag>, flag=<bit>, ttl=<sec>, "
+                 "like E4), log=<tag>, accesslog=on|off, flag=<bit>, ttl=<sec>, "
                  "penalty=<n>, credit=<n>. No redirect= (env "
                  "signals are scoring/flagging only). Declaration "
                  "order, first match wins; upsert-by-name. Main "
@@ -705,7 +743,7 @@ static const command_rec bs_cmds[] = {
                  "Map an app-signed event (via X-BotShield-Feedback "
                  "header) to module memory. Args: <event> "
                  "[key=value ...]. Required keys: flag=<bit>, "
-                 "ttl=<sec>. Optional: log=<tag>. The app signs "
+                 "ttl=<sec>. Optional: log=<tag>, accesslog=on|off. The app signs "
                  "event=<name>;sig=<hex>; the module looks up <name> "
                  "here and applies flag+ttl to the flagged-IP table. "
                  "No status/redirect/penalty/credit (response is "
@@ -718,23 +756,59 @@ static const command_rec bs_cmds[] = {
                  "<load-match> [key=value ...]. load-match is one of "
                  "state=<level> or state>=<level> where <level> is "
                  "normal|warm|hot. Keys: status=<code|pass>, "
-                 "log=<tag>, penalty=<n>, credit=<n>. flag/ttl/"
+                 "log=<tag>, accesslog=on|off, penalty=<n>, credit=<n>. flag/ttl/"
                  "redirect rejected — load is global state, not "
                  "per-IP behavior. First-match-wins."),
     /* E3 — path-based triggers */
-    AP_INIT_TAKE_ARGV("BotShieldPathTrigger",
-                 bs_set_path_trigger, NULL, RSRC_CONF,
-                 "Path-based trigger. Args: <name> <path-glob> "
-                 "[key=value ...]. Keys: status=<code|pass> (default "
-                 "403; 'pass' means the real handler runs), "
-                 "redirect=<url> (implies 302 unless status=3xx "
-                 "explicit), log=<tag> (emitted as tag=\"<x>\" on "
-                 "the decision log), flag=<bit> (M5.1 flag name; "
-                 "default scanner_probe), ttl=<sec> (flagged-IP "
-                 "TTL; default 3600; 0 = don't flag), penalty=<n> "
-                 "(score_add amount on this request; default 0; "
-                 "ignored under status=pass). Declaration order, "
-                 "first match wins; upsert-by-name."),
+    AP_INIT_TAKE_ARGV("BotShieldRequestTrigger",
+                 bs_set_request_trigger, NULL, RSRC_CONF,
+                 "Match a request on any combination of its properties "
+                 "and act once. Args: <name> [key=value ...]. Match "
+                 "keys, all optional, ANDed together - at least one is "
+                 "required: path=<glob> (vs the URI path, no query "
+                 "string), query=<glob> (vs the query string alone), "
+                 "cookies=none|any|session, ua=<substring>|@<botgroup>, "
+                 "ipspec=*|<file>|<cidr[,cidr]>. Globs take '*' "
+                 "wildcards and a trailing '$' anchor. Action keys: "
+                 "status=<code|pass> (default 403; 'pass' means the "
+                 "real handler runs), redirect=<url> (implies 302 "
+                 "unless status=3xx explicit), log=<tag>, "
+                 "accesslog=on|off, flag=<bit> (default "
+                 "scanner_probe), ttl=<sec> (default 3600; 0 = don't "
+                 "flag), penalty=<n>, mode=enforce|observe. "
+                 "Declaration order, first match wins; upsert-by-name. "
+                 "Named-cookie predicates (cookie=<n>, bs-cookie=...) "
+                 "live on BotShieldCookieTrigger, whose vocabulary is "
+                 "richer than one key. A rule with no match key is "
+                 "rejected - use BotShieldTrigger in the scope you "
+                 "mean. Renamed from BotShieldPathTrigger 2026-08-01, "
+                 "when the path glob became a key."),
+    AP_INIT_RAW_ARGS("BotShieldPathTrigger", bs_retired_path_trigger,
+                 NULL, RSRC_CONF,
+                 "RETIRED 2026-08-01 - renamed to BotShieldRequestTrigger, "
+                 "and the path glob is now a key. Kept as a loud "
+                 "config-time error so an old config fails with a "
+                 "migration note instead of 'unknown directive'."),
+    AP_INIT_TAKE1("BotShieldDecisionLog", bs_set_decision_log,
+                 NULL, RSRC_CONF,
+                 "Module-owned decision log. Value is a server-root-"
+                 "relative path (\"logs/botshield-decisions.log\"), an "
+                 "absolute path, or a piped-log spec "
+                 "(\"|/usr/bin/rotatelogs /var/log/bs.%Y%m%d 86400\"). "
+                 "Written directly from the decision path rather than "
+                 "through mod_log_config, so it is independent of the "
+                 "access log: `accesslog=off` can suppress access logging "
+                 "while this log still records, which is what lets you "
+                 "rapid-rotate the detection log and archive the access "
+                 "log separately. One descriptor per vhost, opened at "
+                 "post_config and inherited by every child; single "
+                 "O_APPEND write per line, no request-path locking. "
+                 "Optional - without it the authoritative record is the "
+                 "error-log `mod_botshield: decision ...` line (boring "
+                 "passes demoted to DEBUG) plus whatever CustomLog the "
+                 "operator wires up. Failure to open is fatal at "
+                 "startup: a decision log you asked for and did not get "
+                 "is a silent blind spot."),
     /* E2.2 — robots.txt enforcement */
     AP_INIT_TAKE1("BotShieldRobotsTxt", bs_set_robots_txt,
                  NULL, RSRC_CONF,
@@ -978,7 +1052,10 @@ static int bs_apply_safeguard(request_rec *r, int have_client_ip,
     if (!scfg_sg || !have_client_ip) return OK;
 
     apr_int64_t now_t = (apr_int64_t)apr_time_sec(apr_time_now());
-    if (scfg_sg->safeguard_enabled == 1 &&
+    /* Default-on: -1 is "operator said nothing", and the anti-loop
+     * valve is not something you want to have to remember. Only an
+     * explicit BotShieldSafeguard Off disables it. */
+    if (scfg_sg->safeguard_enabled != 0 &&
         bs_safeguard_check(client_ip, now_t, scfg_sg->ns_id)) {
         /* Resolve the redirect target. Operator override via
          * BotShieldSafeguardRedirectURL, otherwise the built-in
@@ -1152,18 +1229,44 @@ static int bs_handler(request_rec *r)
     /* enabled is a tristate: BS_ENABLED_ON enforces, BS_ENABLED_LOGONLY
      * runs the handler for observation, BS_ENABLED_OFF (or BS_UNSET
      * meaning "no setting inherited") declines. */
-    if (!cfg
-        || cfg->enabled == BS_ENABLED_OFF
-        || cfg->enabled == BS_UNSET) {
-        return DECLINED;
-    }
     if (!ap_is_initial_req(r)) {
         return DECLINED;
     }
 
-    int endpoint_rv = bs_route_module_endpoint(r, cfg);
-    if (endpoint_rv != -1) {
-        return endpoint_rv;
+    /* Module-owned endpoints are dispatched on whether the module is
+     * live ANYWHERE on this vhost, not on the per-directory enabled
+     * state of the requested URL. They belong to the vhost.
+     *
+     * Gating them on the per-directory state was wrong in a way that
+     * only shows up once an operator scopes the enable: with
+     * `BotShieldEnabled On` inside a <Location>, the /botshield prefix is
+     * outside that scope, so every endpoint 404s. That silently breaks
+     * the captcha tier (captcha-verify unreachable) and embedded mode
+     * (embedded-verify, embedded.js), and points the safeguard redirect
+     * at a 404 — the anti-lockout valve landing on a broken page is
+     * worse than either not redirecting or not challenging.
+     *
+     * An explicit `BotShieldEnabled Off` on the endpoint path still
+     * wins, so operators keep a way to switch them off. Access control
+     * remains Apache's job: wrap the prefix in <Location> with
+     * Require ip / AuthType to restrict. */
+    bs_server_cfg *scfg_ep = ap_get_module_config(r->server->module_config,
+                                                  &botshield_module);
+    if (scfg_ep && scfg_ep->any_enabled
+        && !(cfg && cfg->enabled == BS_ENABLED_OFF)) {
+        int endpoint_rv = bs_route_module_endpoint(r, cfg);
+        if (endpoint_rv != -1) {
+            return endpoint_rv;
+        }
+    }
+
+    /* enabled is a tristate: BS_ENABLED_ON enforces, BS_ENABLED_LOGONLY
+     * runs the handler for observation, BS_ENABLED_OFF (or BS_UNSET
+     * meaning "no setting inherited") declines. */
+    if (!cfg
+        || cfg->enabled == BS_ENABLED_OFF
+        || cfg->enabled == BS_UNSET) {
+        return DECLINED;
     }
 
     /* Debug override keeps the first-commit behavior available for tests. */
@@ -1253,7 +1356,7 @@ static int bs_handler(request_rec *r)
             if (has_solve_evidence) {
                 bs_server_cfg *scfg_sg = ap_get_module_config(
                     r->server->module_config, &botshield_module);
-                if (scfg_sg && scfg_sg->safeguard_enabled == 1) {
+                if (scfg_sg && scfg_sg->safeguard_enabled != 0) {
                     unsigned char sg_ip[16];
                     if (bs_parse_client_ip(r->useragent_ip, sg_ip)) {
                         bs_mask_ipv6_prefix(sg_ip,
@@ -1487,6 +1590,23 @@ static int bs_handler(request_rec *r)
                          bs_tier_name(tier_floor_from_flags)));
     }
 
+    /* BotShieldChallenge Off — collapse any challenge tier back to pass
+     * for this scope. Deliberately applied AFTER the floor MAX above: a
+     * flag tier_floor ignores the score thresholds entirely, so parking
+     * BotShieldScoreSilent/Hard/Captcha cannot express "never challenge
+     * here" on its own. This can.
+     *
+     * Everything else still runs — triggers act, rate limits act, score
+     * accumulates, the decision is logged. Only the rendering is
+     * suppressed, and the suppression is visible in the reason chain
+     * rather than silent, in the same spirit as :observe and the
+     * ~counterfactual outcomes. */
+    if (cfg->challenge_enabled == 0 && tier != BS_TIER_PASS) {
+        bs_score_add(r, 0, 0,
+            apr_psprintf(r->pool, "challenge-off:%s", bs_tier_name(tier)));
+        tier = BS_TIER_PASS;
+    }
+
     /* Per-scope flag/TTL writes happen inside bs_check_policy via
      * the BotShieldTrigger walker (BS_TFAMILY_SCOPE). The legacy
      * BotShieldFlagIP directive that used to live here was
@@ -1565,7 +1685,7 @@ static int bs_handler(request_rec *r)
      * "kicks in eventually" — see CHANGELOG.
      *
      * Embedded → form-PoW fallback: if this client has had N
-     * consecutive silent-tier dispatches without _bs_verified
+     * consecutive silent-tier dispatches without _bs_session
      * arriving (count tracked via bs_safeguard_present_count), the
      * wrapper isn't doing its job (CSP-blocked, no JS, no Worker
      * support, etc.). Bypass the embedded short-circuit so the

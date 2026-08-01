@@ -105,10 +105,29 @@ int bs_cookie_pred_match(const bs_cookie_trigger_entry *e,
 }
 
 
+/* Strip one layer of matching surrounding quotes from a key's value.
+ *
+ * Apache's TAKE_ARGV tokenizer only honours quotes that begin a token,
+ * so `key="value"` arrives with the quotes still attached to the value
+ * while a bare positional `"value"` arrives clean. Operators reasonably
+ * write the quoted form — the CHANGELOG's own examples do
+ * (`ua="GPTBot"`) — and without this the stored pattern is `"GPTBot"`,
+ * which can never match a real User-Agent. Silent non-match, no
+ * diagnostic. Strip here so both spellings behave the same. */
+static const char *bs_unquote(apr_pool_t *pool, const char *v)
+{
+    if (!v) return v;
+    apr_size_t n = strlen(v);
+    if (n >= 2 && (v[0] == '"' || v[0] == '\'') && v[n - 1] == v[0]) {
+        return apr_pstrndup(pool, v + 1, n - 2);
+    }
+    return v;
+}
+
 static const char *bs_trigger_family_dname(bs_trigger_family fam)
 {
     switch (fam) {
-    case BS_TFAMILY_PATH:     return "BotShieldPathTrigger";
+    case BS_TFAMILY_REQUEST:  return "BotShieldRequestTrigger";
     case BS_TFAMILY_COOKIE:   return "BotShieldCookieTrigger";
     case BS_TFAMILY_ENV:      return "BotShieldEnvTrigger";
     case BS_TFAMILY_FEEDBACK: return "BotShieldFeedbackTrigger";
@@ -124,10 +143,19 @@ static void bs_trigger_action_init(bs_trigger_family fam,
 {
     memset(a, 0, sizeof(*a));
     switch (fam) {
-    case BS_TFAMILY_PATH:
-        /* Path defaults per CHANGELOG.md E3: immediate 403, flag the IP
-         * with scanner_probe for an hour. Operators override by
-         * writing status=/flag=/ttl= explicitly. */
+    case BS_TFAMILY_REQUEST:
+        /* Defaults inherited from E3 BotShieldPathTrigger: immediate
+         * 403, and flag the IP with scanner_probe for an hour.
+         *
+         * The flag default suits the original use (a handful of
+         * scanners probing /.env, where per-IP memory is worth having).
+         * It is actively wrong for a high-cardinality flood: at ~1
+         * request per IP the flag is never read again, and 50k slots of
+         * flagged-IP table churn buys nothing. Worse, scanner_probe
+         * carries a compiled-in tier_floor of form, which overrides
+         * parked score thresholds and turns a block-only scope into one
+         * that renders interstitials. Write ttl=0 to disable flagging
+         * on rules that match one-shot traffic. */
         a->status_code = 403;
         a->flag_bit    = BS_FLAG_SCANNER_PROBE;
         a->ttl_sec     = 3600;
@@ -192,21 +220,21 @@ static void bs_trigger_action_init(bs_trigger_family fam,
 static const char *bs_trigger_known_keys(bs_trigger_family fam)
 {
     switch (fam) {
-    case BS_TFAMILY_PATH:
-        return "status, redirect, log, flag, ttl, penalty, mode";
+    case BS_TFAMILY_REQUEST:
+        return "status, redirect, log, accesslog, flag, ttl, penalty, mode";
     case BS_TFAMILY_COOKIE:
-        return "status, redirect, log, flag, ttl, penalty, credit, mode";
+        return "status, redirect, log, accesslog, flag, ttl, penalty, credit, mode";
     case BS_TFAMILY_ENV:
-        return "status, log, flag, ttl, penalty, credit, mode";
+        return "status, log, accesslog, flag, ttl, penalty, credit, mode";
     case BS_TFAMILY_FEEDBACK:
         /* mode=observe means "log :observe but skip the flagged-IP
          * write" — meaningful for staging a feedback rule before
          * mutating server state. */
-        return "flag, ttl, log, mode";
+        return "flag, ttl, log, accesslog, mode";
     case BS_TFAMILY_LOAD:
-        return "status, log, penalty, credit, mode";
+        return "status, log, accesslog, penalty, credit, mode";
     case BS_TFAMILY_SCOPE:
-        return "status, redirect, log, flag, ttl, penalty, credit, mode";
+        return "status, redirect, log, accesslog, flag, ttl, penalty, credit, mode";
     case BS_TFAMILY_FLAG:
         /* Flag triggers use a separate parser. This entry exists
          * for switch-exhaustiveness; the flag setter prints its
@@ -245,7 +273,7 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
             "%s: extra arg '%s' must be key=value", dname, arg);
     }
     apr_size_t klen = (apr_size_t)(eq - arg);
-    const char *val = eq + 1;
+    const char *val = bs_unquote(pool, eq + 1);
 
     /* Feedback family: reject the request-path-only keys up front
      * with a pointed error message so operators don't confuse this
@@ -290,7 +318,39 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
         }
         a->redirect_url = apr_pstrdup(pool, val);
     } else if (BS_AK("log")) {
+        if (!*val) {
+            return apr_psprintf(pool,
+                "%s: log= requires a tag", dname);
+        }
+        /* Reject the shape that briefly meant "suppress" during
+         * development. Silently treating it as a tag named "off" would
+         * strip suppression from a config that depended on it; failing
+         * loudly costs nothing and names the replacement. */
+        if (strcasecmp(val, "off") == 0) {
+            return apr_psprintf(pool,
+                "%s: log=off is not a tag and no longer suppresses "
+                "logging - use accesslog=off, which composes with "
+                "log=<tag> so a rule can carry a fail2ban tag AND "
+                "keep its request out of the access log", dname);
+        }
         a->log_tag = apr_pstrdup(pool, val);
+    } else if (BS_AK("accesslog")) {
+        /* Independent of log= on purpose: the canonical use is a
+         * scanner probe that wants BOTH a tag for fail2ban handoff and
+         * no access-log line. Overloading log= made those mutually
+         * exclusive, which cost the tag on exactly the traffic most
+         * worth tagging. */
+        if (strcasecmp(val, "off") == 0) {
+            a->suppress_access_log = 1;
+        } else if (strcasecmp(val, "on") == 0) {
+            a->suppress_access_log = 0;
+        } else {
+            return apr_psprintf(pool,
+                "%s: accesslog=%s must be 'on' or 'off' ('off' drops "
+                "the access-log line for a matching request; the "
+                "module's own decision record is unaffected)",
+                dname, val);
+        }
     } else if (BS_AK("flag")) {
         if (fam == BS_TFAMILY_LOAD) {
             return apr_psprintf(pool,
@@ -351,7 +411,7 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
                 dname, val);
         }
     } else if (BS_AK("credit")) {
-        if (fam == BS_TFAMILY_PATH) {
+        if (fam == BS_TFAMILY_REQUEST) {
             return apr_psprintf(pool,
                 "%s: credit= is not supported on path triggers "
                 "(path matches are discrete events; running "
@@ -473,10 +533,16 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
     }
     bs_set_trigger_tag(r, a->log_tag);
 
+    /* accesslog=off. Deliberately placed after the observe short-circuit
+     * above, so a dry run still leaves its evidence in the log. */
+    if (a->suppress_access_log) {
+        bs_suppress_access_log(r);
+    }
+
     int is_pass = (a->status_code == BS_TRIGGER_STATUS_PASS);
 
     if (is_pass) {
-        if (fam == BS_TFAMILY_PATH) {
+        if (fam == BS_TFAMILY_REQUEST) {
             /* Path pass: record the match for the decision-log
              * reason trace but do NOT bump the score. "pass" here
              * means "don't enforce anything on this request" — the
@@ -520,53 +586,100 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
     return BS_TEXEC_STATUS;
 }
 
-/* E3 — BotShieldPathTrigger <name> <path-glob> [key=value ...].
+/* BotShieldRequestTrigger <name> [key=value ...].
  *
- * Path-unique bits live here; action-key parsing and cross-validation
- * are delegated to the shared bs_parse_trigger_action_key +
- * bs_finalize_trigger_action (see E7.2 above). Two match keys
- * (`ua=`, `ipspec=`) are intercepted before the action-key parser
- * and routed to bs_cohort_resolve so the trigger fires only when
- * path AND cohort match. Convention is match keys first, action
- * keys after — the parser doesn't enforce ordering. Upsert-by-name
- * preserves declaration order. */
-const char *bs_set_path_trigger(cmd_parms *cmd, void *dconf,
+ * Renamed from BotShieldPathTrigger 2026-08-01, and the path glob moved
+ * from a positional arg to a key. The old name had already stopped being
+ * true: the family took ua= and ipspec= cohort keys when it absorbed
+ * BlockPath, and now takes query= and cookies= as well, so "path" named
+ * one dimension out of five.
+ *
+ * Every match dimension is optional and they AND together. Making path
+ * a key is what lets a rule match on query or cookie state at ANY path,
+ * which the positional form could not express. A rule with no match
+ * dimension at all is rejected: that is the per-scope BotShieldTrigger's
+ * job, and silently matching every request is too sharp an edge. */
+const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                                        int argc, char *const argv[])
 {
     (void)dconf;
-    if (argc < 2) {
-        return "BotShieldPathTrigger: expects <name> <path-glob> "
-               "[key=value ...]";
+    static const char *D = "BotShieldRequestTrigger";
+    if (argc < 1) {
+        return "BotShieldRequestTrigger: expects <name> [key=value ...] "
+               "with at least one of path= query= cookies= ua= ipspec=";
     }
-    const char *name    = argv[0];
-    const char *pattern = argv[1];
+    const char *name = argv[0];
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
     if (!bs_bot_name_valid(name)) {
         return apr_psprintf(cmd->pool,
-            "BotShieldPathTrigger: name '%s' must be [a-z0-9-]{1,32}", name);
+            "%s: name '%s' must be [a-z0-9-]{1,32}", D, name);
     }
-    if (!pattern || !*pattern || pattern[0] != '/') {
-        return "BotShieldPathTrigger: path-glob must start with '/'";
+    /* Catch the retired positional form rather than let it fall through
+     * to the action-key parser as an unknown key. */
+    if (argc >= 2 && argv[1][0] == '/') {
+        return apr_psprintf(cmd->pool,
+            "%s: the path glob is now a key, not a positional argument - "
+            "write path=\"%s\" instead of a bare %s", D, argv[1], argv[1]);
     }
-    if (strlen(pattern) > 256) {
-        return "BotShieldPathTrigger: path-glob longer than 256 chars";
-    }
-    bs_path_pattern_warn_middle_star(cmd, "BotShieldPathTrigger",
-                                      name, pattern);
 
-    bs_path_trigger_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
-    e->name         = apr_pstrdup(cmd->pool, name);
-    e->path_pattern = apr_pstrdup(cmd->pool, pattern);
-    bs_trigger_action_init(BS_TFAMILY_PATH, &e->action);
+    bs_request_trigger_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
+    e->name        = apr_pstrdup(cmd->pool, name);
+    e->cookie_pred = -1;              /* no cookie condition */
+    bs_trigger_action_init(BS_TFAMILY_REQUEST, &e->action);
 
     const char *ua_arg = NULL, *ipspec_arg = NULL;
-    for (int i = 2; i < argc; i++) {
+    for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
         const char *eq  = strchr(arg, '=');
         if (eq) {
             apr_size_t klen = (apr_size_t)(eq - arg);
-            const char *val = eq + 1;
+            const char *val = bs_unquote(cmd->pool, eq + 1);
+            if (klen == 4 && strncasecmp(arg, "path", 4) == 0) {
+                if (!*val || val[0] != '/') {
+                    return apr_psprintf(cmd->pool,
+                        "%s: path= must start with '/'", D);
+                }
+                if (strlen(val) > 256) {
+                    return apr_psprintf(cmd->pool,
+                        "%s: path= longer than 256 chars", D);
+                }
+                bs_path_pattern_warn_middle_star(cmd, D, name, val);
+                e->path_pattern = apr_pstrdup(cmd->pool, val);
+                continue;
+            }
+            if (klen == 5 && strncasecmp(arg, "query", 5) == 0) {
+                if (!*val) {
+                    return apr_psprintf(cmd->pool,
+                        "%s: query= requires a glob (e.g. query=\"*return=*\")",
+                        D);
+                }
+                if (strlen(val) > 256) {
+                    return apr_psprintf(cmd->pool,
+                        "%s: query= longer than 256 chars", D);
+                }
+                e->query_pattern = apr_pstrdup(cmd->pool, val);
+                continue;
+            }
+            if (klen == 7 && strncasecmp(arg, "cookies", 7) == 0) {
+                /* Bulk forms only. Named-cookie predicates
+                 * (cookie=<n>, bs-cookie=<state>, ...) stay with
+                 * BotShieldCookieTrigger, whose vocabulary does not
+                 * compress into one key. */
+                if (strcasecmp(val, "none") == 0) {
+                    e->cookie_pred = BS_CP_BULK_NONE;
+                } else if (strcasecmp(val, "any") == 0) {
+                    e->cookie_pred = BS_CP_BULK_ANY;
+                } else if (strcasecmp(val, "session") == 0) {
+                    e->cookie_pred = BS_CP_BULK_SESSION;
+                } else {
+                    return apr_psprintf(cmd->pool,
+                        "%s: cookies=%s must be none, any or session "
+                        "(named-cookie predicates live on "
+                        "BotShieldCookieTrigger)", D, val);
+                }
+                continue;
+            }
             if (klen == 2 && strncasecmp(arg, "ua", 2) == 0) {
                 ua_arg = val;
                 continue;
@@ -577,39 +690,45 @@ const char *bs_set_path_trigger(cmd_parms *cmd, void *dconf,
             }
         }
         const char *err = bs_parse_trigger_action_key(cmd->pool,
-            BS_TFAMILY_PATH, arg, &e->action);
+            BS_TFAMILY_REQUEST, arg, &e->action);
         if (err) return err;
     }
 
-    /* If at least one match key carries an actual restriction (i.e.
-     * isn't empty or "*"), populate the cohort. A bare `ua=*` or
-     * `ipspec=*` is treated as if omitted — the operator's intent is
-     * "match any" which is also the default. */
+    /* A bare `ua=*` / `ipspec=*` means "match any", which is the
+     * default, so it is treated as if omitted. */
     int ua_restricts     = ua_arg     && ua_arg[0]     && strcmp(ua_arg, "*") != 0;
     int ipspec_restricts = ipspec_arg && ipspec_arg[0] && strcmp(ipspec_arg, "*") != 0;
     if (ua_restricts || ipspec_restricts) {
         const char *ua_eff = ua_restricts     ? ua_arg     : "*";
         const char *ip_eff = ipspec_restricts ? ipspec_arg : "*";
         const char *cerr = bs_cohort_resolve(cmd, &e->cohort, ua_eff, ip_eff);
-        if (cerr) return apr_pstrcat(cmd->pool,
-            "BotShieldPathTrigger: ", cerr, NULL);
+        if (cerr) return apr_pstrcat(cmd->pool, D, ": ", cerr, NULL);
         e->has_cohort = 1;
     }
 
+    if (!e->path_pattern && !e->query_pattern
+        && e->cookie_pred < 0 && !e->has_cohort) {
+        return apr_psprintf(cmd->pool,
+            "%s '%s': needs at least one match key (path=, query=, "
+            "cookies=, ua=, ipspec=). A rule with no condition matches "
+            "every request - use BotShieldTrigger in the scope you mean "
+            "instead", D, name);
+    }
+
     const char *err = bs_finalize_trigger_action(cmd->pool,
-        BS_TFAMILY_PATH, &e->action);
+        BS_TFAMILY_REQUEST, &e->action);
     if (err) return err;
 
     /* Upsert-by-name; preserves declaration order. */
-    for (int i = 0; i < scfg->path_triggers->nelts; i++) {
-        bs_path_trigger_entry *ex =
-            APR_ARRAY_IDX(scfg->path_triggers, i, bs_path_trigger_entry *);
+    for (int i = 0; i < scfg->request_triggers->nelts; i++) {
+        bs_request_trigger_entry *ex =
+            APR_ARRAY_IDX(scfg->request_triggers, i, bs_request_trigger_entry *);
         if (strcmp(ex->name, e->name) == 0) {
-            APR_ARRAY_IDX(scfg->path_triggers, i, bs_path_trigger_entry *) = e;
+            APR_ARRAY_IDX(scfg->request_triggers, i, bs_request_trigger_entry *) = e;
             return NULL;
         }
     }
-    *(bs_path_trigger_entry **)apr_array_push(scfg->path_triggers) = e;
+    *(bs_request_trigger_entry **)apr_array_push(scfg->request_triggers) = e;
     return NULL;
 }
 
@@ -661,8 +780,8 @@ const char *bs_set_session_cookie_name(cmd_parms *cmd, void *dconf,
  * Parses the cookie-match predicate (see CHANGELOG.md E4 for the full
  * predicate grammar) and the action keys, enforces cross-
  * validation (status=pass + redirect= is a config error;
- * _bs_verified as cookie=name is redirected to bs-cookie=<state>),
- * and upserts by name. See bs_path_trigger_entry for the action-key
+ * _bs_session as cookie=name is redirected to bs-cookie=<state>),
+ * and upserts by name. See bs_request_trigger_entry for the action-key
  * semantics shared with E3; the semantic divergences are:
  *
  *   - credit= always applies (even under status=pass), because a

@@ -8,7 +8,7 @@
  * The fixup hook is the meat: dispatches by Content-Type, reads
  * the body, extracts the provider's token field, calls the M8
  * siteverify client, validates hostname / action / v3 score, mints
- * _bs_verified, and installs the replay filter. */
+ * _bs_session, and installs the replay filter. */
 #include <string.h>
 
 #include <httpd.h>
@@ -400,7 +400,7 @@ int bs_form_captcha_fixup(request_rec *r)
         }
     }
 
-    /* Mint _bs_verified — same captcha-<provider> alg the M8
+    /* Mint _bs_session — same captcha-<provider> alg the M8
      * interstitial path uses. passes_captcha=1 (this WAS a captcha-
      * tier solve, just inline rather than interstitial). Routed
      * through bs_captcha_carry_and_mint so the carry-forward +

@@ -41,7 +41,7 @@
  * page. When the request lands at silent tier, BotShield serves
  * DECLINED (real content) instead of the M7 splash; the wrapper runs
  * on page-load, fetches the bootstrap, solves PoW in a Web Worker,
- * and POSTs back. The verify endpoint mints _bs_verified the same
+ * and POSTs back. The verify endpoint mints _bs_session the same
  * way the M7 form-PoW path does, so subsequent requests round-trip
  * cleanly.
  * =========================================================== */
@@ -104,7 +104,7 @@ static const char BS_EMBEDDED_WORKER_JS[] =
  *   - SubtleCrypto.digest is async, so PoW runs as Promise.all
  *     batches with setTimeout yields between them — same shape the
  *     M2 form interstitial uses, copied here for parity.
- *   - Short-circuit on existing _bs_verified cookie (cheap read of
+ *   - Short-circuit on existing _bs_session cookie (cheap read of
  *     document.cookie). If the cookie is already there, no Worker
  *     is spawned and no fetch fires.
  *   - One Worker per page-load. _bsEmbeddedRan guard prevents
@@ -114,7 +114,7 @@ static const char BS_EMBEDDED_JS[] =
 " if (window._bsEmbeddedRan) return;\n"
 " window._bsEmbeddedRan = true;\n"
 " /*  used to short-circuit on\n"
-"    document.cookie containing _bs_verified, but HttpOnly now\n"
+"    document.cookie containing _bs_session, but HttpOnly now\n"
 "    hides the cookie from JS. /embedded-bootstrap returns\n"
 "    {mode:'off'} when a valid cookie is present, so the\n"
 "    server-side check below covers it for free. */\n"
@@ -510,7 +510,7 @@ int bs_embedded_bootstrap_handler(request_rec *r,
     ap_set_content_type(r, "application/json; charset=utf-8");
     apr_table_setn(r->headers_out, "Cache-Control", "no-store");
 
-    /* If the client already has a valid _bs_verified, no point in
+    /* If the client already has a valid _bs_session, no point in
      * burning Worker cycles or loading provider scripts. The wrapper
      * short-circuits on its end too, but a redundant check here
      * costs almost nothing and keeps the bootstrap honest. */
@@ -831,7 +831,7 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
         }
     }
 
-    /* Carry forward rep from any prior valid _bs_verified. The
+    /* Carry forward rep from any prior valid _bs_session. The
      * eligibility predicate and rep-math live in
      * bs_carry_forward_eligible / bs_apply_rep_carry. Pattern A: ch
      * is already populated from the decrypted bootstrap challenge,
@@ -867,7 +867,7 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
 /* Provider-path verify (E17.2 — first lands Turnstile invisible).
  * The wrapper has called the provider's invisible widget and got a
  * token; we siteverify it against the configured provider via the
- * existing M8 client, then mint _bs_verified using the same
+ * existing M8 client, then mint _bs_session using the same
  * captcha-<provider> cookie alg the M8 interstitial path uses.
  *
  * Body shape: {"provider":"<name>","token":"<token>"}. */
@@ -1039,7 +1039,7 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
  *   Provider path (turnstile et al.):
  *     {"provider":"turnstile","token":"<token>"}
  *
- * On success: 204 + Set-Cookie: _bs_verified=...; ...
+ * On success: 204 + Set-Cookie: _bs_session=...; ...
  * On failure: 4xx; no cookie. */
 #define BS_EMBEDDED_BODY_MAX 8192   /* turnstile tokens are ~600 bytes */
 int bs_embedded_verify_handler(request_rec *r, bs_dir_cfg *cfg)

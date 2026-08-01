@@ -28,7 +28,7 @@
  * every request, which the setter rejects at config time).
  *
  * Storage:
- *  - Config: scfg->rate_limits and scfg->path_triggers arrays, keyed
+ *  - Config: scfg->rate_limits and scfg->request_triggers arrays, keyed
  *    by name; merged across main/vhost scope via bs_merge_server_cfg.
  *  - Runtime: rate counters live in SHM as a flat slot array
  *    (bs_shm.rate_counters[]). Each bs_rate_limit_entry's shm_slot

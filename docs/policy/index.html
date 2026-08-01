@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Policy | BotShield</title>
-  <meta name="description" content="Allow lists, rate limits, block paths, robots.txt, the trigger families, and flag triggers.">
+  <meta name="description" content="UA classification, rate limits, path triggers, robots.txt, the trigger families, and flag triggers.">
   <link rel="stylesheet" href="../assets/site.css">
 </head>
 <body class="site-doc">
@@ -43,7 +43,7 @@
 </a>
 <a class="docs-nav__item is-active" href="index.html">
   <span class="docs-nav__title">Policy</span>
-  <span class="docs-nav__summary">Allow lists, rate limits, block paths, robots.txt, the trigger families, and flag triggers.</span>
+  <span class="docs-nav__summary">UA classification, rate limits, path triggers, robots.txt, the trigger families, and flag triggers.</span>
 </a>
 <a class="docs-nav__item" href="../captcha/index.html">
   <span class="docs-nav__title">Captcha and app-bridge</span>
@@ -59,7 +59,7 @@
 </a>
 <a class="docs-nav__item" href="../directives/index.html">
   <span class="docs-nav__title">Directive reference</span>
-  <span class="docs-nav__summary">Canonical reference for all 78 directives, grouped by family.</span>
+  <span class="docs-nav__summary">Canonical reference for all 85 directives, grouped by family.</span>
 </a>
 <a class="docs-nav__item" href="../troubleshooting/index.html">
   <span class="docs-nav__title">Troubleshooting</span>
@@ -84,7 +84,7 @@
         <header class="docs-article__header">
           <p class="eyebrow">Documentation</p>
           <h1>Policy</h1>
-          <p class="docs-article__summary">Allow lists, rate limits, block paths, robots.txt, the trigger families, and flag triggers.</p>
+          <p class="docs-article__summary">UA classification, rate limits, path triggers, robots.txt, the trigger families, and flag triggers.</p>
           <p class="docs-article__source">Policy</p>
         </header>
 <section class="toc">
@@ -182,26 +182,44 @@ visibility, no score effect.</li>
 <p><code>BotShieldRateLimit</code> caps requests-per-window for a cohort. Hits
 return 429 with <code>Retry-After</code> and add 50 to the score. Cohorts pair
 a UA-substring matcher with an IP spec:</p>
-<pre><code class="language-apache">BotShieldRateLimit api-burst 60 min &quot;&quot; 10.0.0.0/8,2001:db8::/48
-BotShieldRateLimit scrapers  10 min &quot;wget|curl|python&quot; *
+<pre><code class="language-apache">BotShieldRateLimit api-burst budget=60 per=min ipspec=10.0.0.0/8,2001:db8::/48
+BotShieldRateLimit scrapers  budget=10 per=min ua=&quot;wget&quot;
+BotShieldRateLimit ai-bots   budget=1  per=sec ua=@ai-train
 </code></pre>
-<p>Args: <code>&lt;name&gt; &lt;budget&gt; &lt;per&gt; &lt;ua-pattern&gt; &lt;ipspec&gt;</code>.</p>
+<p>Match keys (any of):</p>
 <ul>
-<li><code>&lt;budget&gt;</code> requests are allowed per <code>&lt;per&gt;</code> (fixed-window counter,
-atomic CAS-updated SHM slot).</li>
-<li><code>&lt;per&gt;</code> accepts <code>sec</code>/<code>min</code>/<code>hour</code> (or <code>s</code>/<code>m</code>/<code>h</code>) — never a
-bare integer; the parser rejects plain numbers.</li>
-<li><code>&lt;ua-pattern&gt;</code> is a substring or <code>&quot;&quot;</code> for &quot;any UA&quot;.</li>
-<li><code>&lt;ipspec&gt;</code> is the same shape as <code>BotShieldAllowBot</code> — a path to a
-CIDR file, comma-separated inline CIDRs, or <code>*</code> for &quot;any IP&quot;.</li>
+<li><code>ua=&lt;substring&gt;</code> or <code>ua=@&lt;botgroup&gt;</code> — UA gate; omit or set to
+<code>*</code> for any UA.</li>
+<li><code>ipspec=&lt;spec&gt;</code> — same shape as <code>BotShieldAllowBot</code>: a path to
+a CIDR file, comma-separated inline CIDRs, or omit / <code>*</code> for
+any IP.</li>
 </ul>
-<p>Not both axes can be <code>&quot;&quot;</code> / <code>*</code> — that would rate-limit every
-request, rejected at config time.</p>
-<p><code>BotShieldBlockPath</code> is the same cohort + a path glob → 403:</p>
-<pre><code class="language-apache">BotShieldBlockPath legacy-admin &quot;/wp-admin/*&quot; &quot;&quot; *
-BotShieldBlockPath aggressive-scraper &quot;/&quot; &quot;AhrefsBot|SEMrushBot&quot; *
+<p>Rate keys (required):</p>
+<ul>
+<li><code>budget=&lt;N&gt;</code> — requests allowed per window (fixed-window counter,
+atomic CAS-updated SHM slot).</li>
+<li><code>per=&lt;sec|min|hour&gt;</code> (also accepts <code>s</code>/<code>m</code>/<code>h</code>) — bare integer
+rejected.</li>
+</ul>
+<p>Both axes can't be <code>*</code>/omitted — that would rate-limit every
+request, rejected at config time. The legacy 5-arg positional form
+<code>&lt;name&gt; &lt;budget&gt; &lt;per&gt; &lt;ua-pattern&gt; &lt;ipspec&gt;</code> is still accepted.</p>
+<p>For path-conditional 403s, use <code>BotShieldRequestTrigger</code> with
+<code>status=403</code> plus optional <code>ua=</code> / <code>ipspec=</code> match keys (the
+former <code>BotShieldBlockPath</code> directive, retired):</p>
+<pre><code class="language-apache">BotShieldRequestTrigger legacy-admin path=&quot;/wp-admin/*&quot; status=403
+BotShieldRequestTrigger aggressive-scraper path=&quot;/&quot; ua=&quot;AhrefsBot&quot; status=403
 </code></pre>
-<p>Args: <code>&lt;name&gt; &lt;path-glob&gt; &lt;ua-pattern&gt; &lt;ipspec&gt;</code>.</p>
+<p>Match keys (any of):</p>
+<ul>
+<li><code>ua=&lt;substring&gt;</code> or <code>ua=@&lt;botgroup&gt;</code> — UA gate</li>
+<li><code>ipspec=&lt;spec&gt;</code> — same shape as <code>BotShieldAllowBot</code> (CIDR file,
+comma-separated inline CIDRs, or omit/<code>*</code> for &quot;any IP&quot;)</li>
+</ul>
+<p>Action keys (any of): <code>status=</code>, <code>redirect=</code>, <code>flag=</code>, <code>ttl=</code>,
+<code>penalty=</code>, <code>log=</code>, <code>mode=enforce|observe</code>. Convention is match
+keys first, action keys after — the parser doesn't enforce ordering
+but readability rewards consistency.</p>
 <h3 id="repeated-429-escalation">Repeated-429 escalation</h3>
 <p><code>BotShieldRateLimitEscalate</code> upgrades a rule that's already been
 firing — repeated 429s on the same IP escalate to 403 (or any
@@ -223,7 +241,7 @@ greedy semantics. The NOTICE warns that intent may have
 shifted; existing configs aren't broken, just verified.</p>
 <h2 id="robots-txt-enforcement">Robots.txt enforcement</h2>
 <p><code>BotShieldRobotsTxt</code> plugs in a parsed RFC 9309 robots.txt file as
-a policy source. Disallow rules become <code>block-path:robots:&lt;group&gt;</code>
+a policy source. Disallow rules become <code>robots-block:&lt;group&gt;</code>
 matches; Crawl-delay rules become per-group rate limits.</p>
 <pre><code class="language-apache">BotShieldRobotsTxt              /etc/botshield/robots.txt
 BotShieldRobotsRefreshInterval  60
@@ -268,7 +286,7 @@ the same shared action keys.</p>
 <tbody>
 <tr>
 <td>Path</td>
-<td><code>BotShieldPathTrigger</code></td>
+<td><code>BotShieldRequestTrigger</code></td>
 <td>URI glob</td>
 </tr>
 <tr>
@@ -339,9 +357,9 @@ action keys are:</p>
 </tbody>
 </table>
 <h3 id="path-triggers">Path triggers</h3>
-<pre><code class="language-apache">BotShieldPathTrigger admin-honeypot &quot;/admin/.env&quot; \
+<pre><code class="language-apache">BotShieldRequestTrigger admin-honeypot path=&quot;/admin/.env&quot; \
     status=403 flag=honeypot_hit ttl=3600 log=admin-trap
-BotShieldPathTrigger api-burst-trap &quot;/api/*/burst&quot; \
+BotShieldRequestTrigger api-burst-trap path=&quot;/api/*/burst&quot; \
     penalty=30 log=api-burst
 </code></pre>
 <p>First-match wins (declaration order). On match, the path family's

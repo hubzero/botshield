@@ -43,7 +43,7 @@
 </a>
 <a class="docs-nav__item" href="../policy/index.html">
   <span class="docs-nav__title">Policy</span>
-  <span class="docs-nav__summary">Allow lists, rate limits, block paths, robots.txt, the trigger families, and flag triggers.</span>
+  <span class="docs-nav__summary">UA classification, rate limits, path triggers, robots.txt, the trigger families, and flag triggers.</span>
 </a>
 <a class="docs-nav__item" href="../captcha/index.html">
   <span class="docs-nav__title">Captcha and app-bridge</span>
@@ -59,7 +59,7 @@
 </a>
 <a class="docs-nav__item" href="../directives/index.html">
   <span class="docs-nav__title">Directive reference</span>
-  <span class="docs-nav__summary">Canonical reference for all 78 directives, grouped by family.</span>
+  <span class="docs-nav__summary">Canonical reference for all 85 directives, grouped by family.</span>
 </a>
 <a class="docs-nav__item" href="../troubleshooting/index.html">
   <span class="docs-nav__title">Troubleshooting</span>
@@ -145,8 +145,9 @@ same browser carries an identifier (most cookies carry trust=0
 lockless reads, rotating Bloom filter for first-sight IP signals,
 crash-durable persistence via <code>mod_watchdog</code> snapshots + shutdown
 save.</li>
-<li><strong>Policy.</strong> Path / cookie / env / load / scope / flag triggers,
-per-cohort rate limits and block-paths, in-module robots.txt parser
+<li><strong>Policy.</strong> Path / cookie / env / load / scope / flag triggers
+(path triggers carry optional UA / IP cohort gates), per-cohort
+rate limits, in-module robots.txt parser
 (RFC 9309 + Crawl-delay extension), repeated-429 escalation,
 anti-loop safeguard (302 redirect to a built-in explainer or to
 a configured <code>BotShieldSafeguardRedirectURL</code> after a client loops
@@ -214,7 +215,7 @@ from these sources):</p>
 <td><a href="docs-src/directives.md"><code>docs-src/directives.md</code></a></td>
 </tr>
 <tr>
-<td>Policy — triggers, rate limits, block-paths, robots.txt</td>
+<td>Policy — triggers, rate limits, robots.txt</td>
 <td><a href="docs-src/policy.md"><code>docs-src/policy.md</code></a></td>
 </tr>
 <tr>

@@ -173,7 +173,7 @@ const char *bs_clear_pending_cookie(request_rec *r,
  * /captcha-verify handler, the embedded-verify-provider path in
  * silent.c, and the inline form-captcha fixup in formcaptcha.c.
  *
- * The shared logic — read prior `_bs_verified` if sig-verifies-or-
+ * The shared logic — read prior `_bs_session` if sig-verifies-or-
  * just-expired, apply forgive_amount through the per-cookie hourly
  * cap, increment the matching passes_* counter, derive the
  * captcha-<provider> alg row, issue a fresh challenge, install the
