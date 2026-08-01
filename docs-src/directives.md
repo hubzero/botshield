@@ -1,6 +1,6 @@
 # Directive reference
 
-mod_botshield registers 85 usable directives at config time (plus one
+mod_botshield registers 86 usable directives at config time (plus one
 retired name, `BotShieldPathTrigger`, kept registered only to emit a
 migration error). This page is
 the canonical reference, grouped by family. The
@@ -36,6 +36,7 @@ into a running server.
 | Directive | Syntax | Default |
 |---|---|---|
 | `BotShieldEnabled` | `on\|off\|logonly` | `off` |
+| `BotShieldChallenge` | `on\|off` | `on` |
 | `BotShieldDebug` | `on\|off` | `off` |
 | `BotShieldSecretFile` | `/path` | unset (required) |
 | `BotShieldSecondarySecretFile` | `/path` | unset |
@@ -66,6 +67,20 @@ operators can carve out exceptions:
     <Location "/about">
         BotShieldEnabled On                 # /about: enforce
     </Location>
+
+`BotShieldChallenge Off` makes a scope **block-only**: triggers, rate
+limits and scoring all still run and still log, but no interstitial,
+form or captcha is ever rendered — any selected tier collapses back to
+`pass`, and the suppression appears in the decision log as
+`challenge-off:<tier>`.
+
+Use it where an explicit `status=4xx` trigger is meant to be the only
+action. Parking `BotShieldScoreSilent`/`Hard`/`Captcha` at `10000` is
+**not** equivalent, which is easy to get wrong: a flag `tier_floor` is
+MAX'd in *after* the score-to-tier decision and ignores thresholds
+entirely, so an IP carrying `honeypot_hit`, `fake_bot`, `scanner_probe`
+or `pow_fail_streak` is still challenged. `BotShieldChallenge Off` is
+applied after the floor, so it holds.
 
 `BotShieldDebug` returns `403 "Hello World"` for every request in
 scope — useful as a smoke test that the hook is firing.
@@ -600,13 +615,23 @@ default penalty is deliberately mild.
 
 | Directive | Syntax | Default | Scope |
 |---|---|---|---|
-| `BotShieldSafeguard` | `on\|off` | `off` | server / vhost |
+| `BotShieldSafeguard` | `on\|off` | **`on`** | server / vhost |
 | `BotShieldSafeguardThreshold` | `N` | `5` | server / vhost |
 | `BotShieldSafeguardWindow` | `N` (sec) | `600` | server / vhost |
 | `BotShieldSafeguardTTL` | `N` (sec) | `900` | server / vhost |
 | `BotShieldSafeguardRedirectURL` | `<url>` | unset (uses built-in explainer) | server / vhost |
 
-Challenge-loop suppression. When a client has been issued the
+Challenge-loop suppression, **on by default** — only an explicit
+`Off` disables it. A client that cannot solve the challenge (JS
+disabled, a privacy extension, an old browser) would otherwise be
+re-challenged forever with nothing in the logs shouting about it, and
+that client is indistinguishable from a non-JS crawler. The redirect
+resolves that without having to tell them apart: it is useful to a
+human and useless to a crawler. The tripped client is **not** admitted
+— it lands on an explainer, never on protected content, and its
+flagged-IP entry survives.
+
+When a client has been issued the
 threshold number of challenges within the window without ever
 returning a verified cookie, the next request gets a 302 redirect
 to break the loop.

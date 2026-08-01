@@ -117,7 +117,7 @@
   </ul>
 </section>
         <div class="prose">
-<p>mod_botshield registers 85 usable directives at config time (plus one
+<p>mod_botshield registers 86 usable directives at config time (plus one
 retired name, <code>BotShieldPathTrigger</code>, kept registered only to emit a
 migration error). This page is
 the canonical reference, grouped by family. The
@@ -156,6 +156,11 @@ into a running server.</p>
 <td><code>BotShieldEnabled</code></td>
 <td><code>on|off|logonly</code></td>
 <td><code>off</code></td>
+</tr>
+<tr>
+<td><code>BotShieldChallenge</code></td>
+<td><code>on|off</code></td>
+<td><code>on</code></td>
 </tr>
 <tr>
 <td><code>BotShieldDebug</code></td>
@@ -220,6 +225,18 @@ operators can carve out exceptions:</p>
     BotShieldEnabled On                 # /about: enforce
 &lt;/Location&gt;
 </code></pre>
+<p><code>BotShieldChallenge Off</code> makes a scope <strong>block-only</strong>: triggers, rate
+limits and scoring all still run and still log, but no interstitial,
+form or captcha is ever rendered — any selected tier collapses back to
+<code>pass</code>, and the suppression appears in the decision log as
+<code>challenge-off:&lt;tier&gt;</code>.</p>
+<p>Use it where an explicit <code>status=4xx</code> trigger is meant to be the only
+action. Parking <code>BotShieldScoreSilent</code>/<code>Hard</code>/<code>Captcha</code> at <code>10000</code> is
+<strong>not</strong> equivalent, which is easy to get wrong: a flag <code>tier_floor</code> is
+MAX'd in <em>after</em> the score-to-tier decision and ignores thresholds
+entirely, so an IP carrying <code>honeypot_hit</code>, <code>fake_bot</code>, <code>scanner_probe</code>
+or <code>pow_fail_streak</code> is still challenged. <code>BotShieldChallenge Off</code> is
+applied after the floor, so it holds.</p>
 <p><code>BotShieldDebug</code> returns <code>403 &quot;Hello World&quot;</code> for every request in
 scope — useful as a smoke test that the hook is firing.</p>
 <p><code>BotShieldSecretFile</code> and <code>BotShieldAlgorithm</code> are required. The
@@ -1083,7 +1100,7 @@ default penalty is deliberately mild.</p>
 <tr>
 <td><code>BotShieldSafeguard</code></td>
 <td><code>on|off</code></td>
-<td><code>off</code></td>
+<td><strong><code>on</code></strong></td>
 <td>server / vhost</td>
 </tr>
 <tr>
@@ -1112,7 +1129,16 @@ default penalty is deliberately mild.</p>
 </tr>
 </tbody>
 </table>
-<p>Challenge-loop suppression. When a client has been issued the
+<p>Challenge-loop suppression, <strong>on by default</strong> — only an explicit
+<code>Off</code> disables it. A client that cannot solve the challenge (JS
+disabled, a privacy extension, an old browser) would otherwise be
+re-challenged forever with nothing in the logs shouting about it, and
+that client is indistinguishable from a non-JS crawler. The redirect
+resolves that without having to tell them apart: it is useful to a
+human and useless to a crawler. The tripped client is <strong>not</strong> admitted
+— it lands on an explainer, never on protected content, and its
+flagged-IP entry survives.</p>
+<p>When a client has been issued the
 threshold number of challenges within the window without ever
 returning a verified cookie, the next request gets a 302 redirect
 to break the loop.</p>

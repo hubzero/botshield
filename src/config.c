@@ -61,7 +61,8 @@ void *bs_create_dir_cfg(apr_pool_t *p, char *path)
 {
     (void)path;
     bs_dir_cfg *cfg = apr_pcalloc(p, sizeof(*cfg));
-    cfg->enabled    = BS_UNSET;
+    cfg->enabled           = BS_UNSET;
+    cfg->challenge_enabled = BS_UNSET;
     cfg->debug      = BS_UNSET;
     cfg->cookie_ttl = BS_UNSET;
     cfg->difficulty = BS_UNSET;
@@ -304,6 +305,9 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
     if (!add->decision_log_path && base->decision_log_path) {
         out->decision_log_path = base->decision_log_path;
     }
+    /* Sticky: enabling anywhere in the tree makes the vhost endpoint-
+     * serving, so a vhost inherits a server-level enable. */
+    out->any_enabled = base->any_enabled | add->any_enabled;
     if (add->app_claims_enabled == BS_APP_FEEDBACK_UNSET) {
         out->app_claims_enabled = base->app_claims_enabled;
     }
@@ -430,6 +434,7 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     /* Module-owned decision log — opened in post_config, not here. */
     scfg->decision_log_path           = NULL;
     scfg->decision_log_fd             = NULL;
+    scfg->any_enabled                 = 0;
     return scfg;
 }
 
@@ -439,6 +444,8 @@ void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     bs_dir_cfg *add  = add_v;
     bs_dir_cfg *out  = apr_pcalloc(p, sizeof(*out));
     out->enabled    = (add->enabled    == BS_UNSET) ? base->enabled    : add->enabled;
+    out->challenge_enabled = (add->challenge_enabled == BS_UNSET)
+                           ? base->challenge_enabled : add->challenge_enabled;
     out->debug      = (add->debug      == BS_UNSET) ? base->debug      : add->debug;
     out->cookie_ttl = (add->cookie_ttl == BS_UNSET) ? base->cookie_ttl : add->cookie_ttl;
     out->difficulty = (add->difficulty == BS_UNSET) ? base->difficulty : add->difficulty;
@@ -2399,6 +2406,21 @@ const char *bs_set_enabled(cmd_parms *cmd, void *cfg_v, const char *arg)
             "BotShieldEnabled: unknown mode '%s' (expected On, Off, "
             "or LogOnly)", arg);
     }
+    /* Record on the server config that this vhost has the module live
+     * somewhere, so bs_handler will serve the module-owned endpoints
+     * even when the enable is scoped to a <Location>. */
+    if (cfg->enabled == BS_ENABLED_ON || cfg->enabled == BS_ENABLED_LOGONLY) {
+        bs_server_cfg *scfg = ap_get_module_config(
+            cmd->server->module_config, &botshield_module);
+        if (scfg) scfg->any_enabled = 1;
+    }
+    return NULL;
+}
+
+const char *bs_set_challenge(cmd_parms *cmd, void *cfg_v, int flag)
+{
+    (void)cmd;
+    ((bs_dir_cfg *)cfg_v)->challenge_enabled = flag ? 1 : 0;
     return NULL;
 }
 

@@ -90,6 +90,10 @@
 <section class="toc">
   <h2 class="toc__heading">On this page</h2>
   <ul class="toc__list">
+<li class="toc__item toc__item--level-2"><a href="#2026-08-01-botshieldchallenge-endpoint-dispatch-safeguard-default">2026-08-01 (BotShieldChallenge, endpoint dispatch, safeguard default)</a></li>
+<li class="toc__item toc__item--level-3"><a href="#added-botshieldchallenge-on-off">Added — `BotShieldChallenge On|Off`</a></li>
+<li class="toc__item toc__item--level-3"><a href="#fixed-module-endpoints-404-when-the-enable-is-scoped-to-a-location">Fixed — module endpoints 404 when the enable is scoped to a Location</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-botshieldsafeguard-now-defaults-to-on">Changed — `BotShieldSafeguard` now defaults to On</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-08-01-botshieldrequesttrigger">2026-08-01 (BotShieldRequestTrigger)</a></li>
 <li class="toc__item toc__item--level-3"><a href="#fixed-request-trigger-family-display-name-documented-two-sharp-defaults">Fixed — request-trigger family display name; documented two sharp defaults</a></li>
 <li class="toc__item toc__item--level-3"><a href="#changed-botshieldpathtrigger-is-now-botshieldrequesttrigger-path-is-a-key">Changed — `BotShieldPathTrigger` is now `BotShieldRequestTrigger`, path is a key</a></li>
@@ -165,6 +169,57 @@
   </ul>
 </section>
         <div class="prose">
+<h2 id="2026-08-01-botshieldchallenge-endpoint-dispatch-safeguard-default">2026-08-01 (BotShieldChallenge, endpoint dispatch, safeguard default)</h2>
+<h3 id="added-botshieldchallenge-on-off">Added — <code>BotShieldChallenge On|Off</code></h3>
+<pre><code>&lt;Location &quot;/api&quot;&gt;
+    BotShieldEnabled   On
+    BotShieldChallenge Off
+&lt;/Location&gt;
+</code></pre>
+<p>Makes a scope block-only. Triggers, rate limits and scoring still run
+and still log; any selected tier collapses to pass and nothing is
+rendered. Visible in the decision log as <code>challenge-off:&lt;tier&gt;</code>.</p>
+<p>Applied AFTER the flag tier-floor MAX, which is the entire point.
+Parking BotShieldScoreSilent/Hard/Captcha at 10000 looks like it says
+&quot;never challenge here&quot; but does not: a tier_floor ignores the
+thresholds, so any IP carrying honeypot_hit, fake_bot, scanner_probe or
+pow_fail_streak is still challenged. Found the hard way on a live
+deployment, where a scope parked at 10000 served an interstitial to an
+IP its own trap rule had flagged.</p>
+<h3 id="fixed-module-endpoints-404-when-the-enable-is-scoped-to-a-location">Fixed — module endpoints 404 when the enable is scoped to a Location</h3>
+<p>bs_handler gated endpoint dispatch on the per-directory enabled state of
+the requested URL. With <code>BotShieldEnabled On</code> inside a <Location>, the
+endpoint prefix falls outside that scope, so every module-owned endpoint
+404s: captcha-verify, embedded-verify, embedded.js, form-widget.js,
+safeguard-info, metrics and policy-status.</p>
+<p>That silently breaks the captcha tier and embedded mode outright -- both
+depend on reaching a verify endpoint -- and points the safeguard
+redirect at a 404, which is worse than either not redirecting or not
+challenging. Scoping the enable to a <Location> is something the docs
+actively encourage, so this was reachable from documented usage.</p>
+<p>Endpoints now dispatch on a new server-config flag set when any scope on
+the vhost enables the module. They belong to the vhost, not to whichever
+<Location> happens to enable scoring. An explicit <code>BotShieldEnabled Off</code>
+on the endpoint path still wins, and access control remains Apache's
+job.</p>
+<h3 id="changed-botshieldsafeguard-now-defaults-to-on">Changed — <code>BotShieldSafeguard</code> now defaults to On</h3>
+<p>Both arguments for defaulting off fail on inspection. It is not a
+bypass: a tripped client is 302-redirected to an explainer, never
+reaches protected content, and keeps its flagged-IP entry. And it saves
+no memory: the SHM safeguard table is allocated regardless of the flag.</p>
+<p>What defaulting off did cost was a silent infinite challenge loop for
+any client that cannot solve the check -- JS disabled, a privacy
+extension, an old browser -- with nothing in the logs shouting about it.
+A JS-disabled human is indistinguishable from a non-JS crawler at the
+protocol level, so the design does not try to tell them apart: the
+redirect is useful to a human and useless to a crawler.</p>
+<p>Only an explicit <code>BotShieldSafeguard Off</code> disables it now. The option is
+kept: &quot;disable by parking a numeric knob at its extreme&quot; is the
+anti-pattern BotShieldChallenge exists to remove, and removing this
+boolean would reintroduce it via BotShieldSafeguardThreshold.</p>
+<p>DESIGN.md still described the retired pre-2026 pass-through behaviour in
+two places (lifecycle step 14, and an <code>outcome=declined</code> reference).
+Both now match the code: 302 to the explainer, <code>outcome=redirect</code>.</p>
 <h2 id="2026-08-01-botshieldrequesttrigger">2026-08-01 (BotShieldRequestTrigger)</h2>
 <h3 id="fixed-request-trigger-family-display-name-documented-two-sharp-defaults">Fixed — request-trigger family display name; documented two sharp defaults</h3>
 <p><code>bs_trigger_family_dname()</code> still returned <code>&quot;BotShieldPathTrigger&quot;</code> for

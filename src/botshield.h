@@ -168,6 +168,13 @@ enum bs_enabled_state {
 
 struct bs_dir_cfg {
     int enabled;
+    /* BotShieldChallenge — On (default) or Off. Off means no tier
+     * above pass is ever selected in this scope: triggers, rate
+     * limits and scoring all still run, but nothing is rendered.
+     * Applied AFTER the flag tier-floor MAX, which is the point --
+     * parking the score thresholds does not stop a floor, so it
+     * cannot express "never challenge here" on its own. */
+    int challenge_enabled;
     int debug;
     int cookie_ttl;
     int difficulty;
@@ -423,6 +430,18 @@ typedef struct bs_server_cfg {
      * relying on the error log and/or their own CustomLog. */
     const char         *decision_log_path;
     apr_file_t         *decision_log_fd;
+
+    /* Set when any scope on this vhost turns the module on (On or
+     * LogOnly). Module-owned endpoints under BotShieldEndpointPrefix
+     * are dispatched on this, NOT on the per-directory enabled state of
+     * the requested URL: the endpoints belong to the vhost, not to
+     * whichever <Location> happens to enable scoring. Without that,
+     * scoping `BotShieldEnabled On` to a <Location> silently 404s
+     * captcha-verify, embedded-verify, embedded.js, form-widget.js,
+     * safeguard-info, metrics and policy-status — which breaks the
+     * captcha and embedded tiers outright, and leaves the safeguard
+     * redirect pointing at a 404. */
+    int                 any_enabled;
 } bs_server_cfg;
 
 /* Trigger and policy family types (bs_trigger_*, bs_*_trigger_entry,

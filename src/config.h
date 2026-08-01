@@ -81,6 +81,7 @@ const char *bs_set_logo_label    (cmd_parms *cmd, void *cfg_v, const char *arg);
 const char *bs_set_logo_file     (cmd_parms *cmd, void *cfg_v, const char *arg);
 const char *bs_set_help          (cmd_parms *cmd, void *cfg_v, const char *arg);
 const char *bs_set_help_file     (cmd_parms *cmd, void *cfg_v, const char *arg);
+const char *bs_set_challenge(cmd_parms *cmd, void *cfg_v, int flag);
 const char *bs_set_challenge_file(cmd_parms *cmd, void *cfg_v, const char *arg);
 const char *bs_set_endpoint_prefix(cmd_parms *cmd, void *cfg_v, const char *arg);
 

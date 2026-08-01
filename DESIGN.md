@@ -277,10 +277,14 @@ default static-file handler. Its walk:
 13. **Bloom feed.** Once a challenge is committed-to, the IP is added
     to the active Bloom buffer (writes stay off the ~99% happy path).
 14. **Safeguard / anti-loop.** E10's `bs_safeguard_check` returns
-    true if N presentations have piled up without a solve; if
-    `BotShieldSafeguard On`, the request is passed through with
-    reason `challenge-safeguard`. Otherwise the presentation is
-    recorded.
+    true if N presentations have piled up without a solve. The client
+    is then 302-redirected to `BotShieldSafeguardRedirectURL`, or to
+    the built-in explainer at `<prefix>/safeguard-info`, with the
+    original URI appended as `?return=`. It is **not** passed through
+    — it never reaches protected content, and its flagged-IP entry
+    survives. Logged `tier=safeguard outcome=redirect`. Enabled by
+    default; only an explicit `BotShieldSafeguard Off` disables it.
+    Otherwise the presentation is recorded.
 15. **E17 embedded short-circuit.** `tier == BS_TIER_SILENT &&
     cfg->silent_mode == BS_SILENT_MODE_EMBEDDED` and the safeguard
     presentation count is below `BS_DEFAULT_EMBEDDED_FALLBACK_THRESHOLD`
@@ -1720,7 +1724,7 @@ fully-valid cookie verifies — a successful solve proves the client
 
 When `BotShieldSafeguard On` and `bs_safeguard_check()` returns
 true, the request is short-circuited with reason
-`challenge-safeguard`, `tier=safeguard outcome=declined`, and
+`challenge-safeguard`, `tier=safeguard outcome=redirect`, and
 returns `DECLINED`. The real handler runs.
 
 Safeguard:
@@ -2093,7 +2097,7 @@ the linker on Apache symbols.
 
 ### Directive table
 
-`bs_cmds[]` registers 86 entries: 85 usable directives plus the retired
+`bs_cmds[]` registers 87 entries: 86 usable directives plus the retired
 `BotShieldPathTrigger` name, kept only so an old config fails with a
 migration note instead of "unknown directive".
 The family groupings below summarize the surface — the canonical
@@ -2102,7 +2106,7 @@ the `bs_cmds[]` table at `src/botshield.c:142`.
 
 | Family | Directives |
 |--------|-----------|
-| Top-level / UI | `BotShieldEnabled`, `BotShieldDebug`, `BotShieldCookieTTL`, `BotShieldDifficulty`, `BotShieldPromptText`, `BotShieldLogoFile`, `BotShieldLogoLabel`, `BotShieldShowLogo`, `BotShieldShowLabel`, `BotShieldShowBox`, `BotShieldHelp`, `BotShieldHelpFile`, `BotShieldChallengeFile`, `BotShieldEndpointPrefix` |
+| Top-level / UI | `BotShieldEnabled`, `BotShieldChallenge`, `BotShieldDebug`, `BotShieldCookieTTL`, `BotShieldDifficulty`, `BotShieldPromptText`, `BotShieldLogoFile`, `BotShieldLogoLabel`, `BotShieldShowLogo`, `BotShieldShowLabel`, `BotShieldShowBox`, `BotShieldHelp`, `BotShieldHelpFile`, `BotShieldChallengeFile`, `BotShieldEndpointPrefix` |
 | Crypto | `BotShieldSecretFile`, `BotShieldSecondarySecretFile`, `BotShieldAlgorithm` |
 | Score / forgiveness | `BotShieldScoreSilent`, `BotShieldScoreHard`, `BotShieldScoreCaptcha`, `BotShieldForgivenessSilent`, `BotShieldForgivenessForm`, `BotShieldForgivenessCaptcha`, `BotShieldForgivenessCapPerHour` |
 | Cookie | `BotShieldCookieDomain` |

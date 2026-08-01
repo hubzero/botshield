@@ -162,6 +162,21 @@ static const command_rec bs_cmds[] = {
                  "Mode for the enclosing scope: On (enforce), Off (disabled), "
                  "or LogOnly (observe-only — log decisions without acting). "
                  "Default: Off"),
+    AP_INIT_FLAG("BotShieldChallenge", bs_set_challenge, NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "Whether this scope may render a challenge. Default On. "
+                 "Off collapses any selected tier back to pass: triggers, "
+                 "rate limits and scoring all still run and still log, but "
+                 "no interstitial, form or captcha is ever served. Use it "
+                 "for a block-only scope, where an explicit status=4xx "
+                 "trigger is meant to be the only action. Parking "
+                 "BotShieldScoreSilent/Hard/Captcha at 10000 is NOT "
+                 "equivalent: a flag tier_floor is MAXed in after the "
+                 "score-to-tier decision and ignores thresholds entirely, "
+                 "so an IP carrying honeypot_hit, fake_bot, scanner_probe "
+                 "or pow_fail_streak would still be challenged. This is "
+                 "applied after the floor, so it holds. Suppression shows "
+                 "in the decision log as challenge-off:<tier>."),
     AP_INIT_FLAG("BotShieldDebug",      bs_set_debug,      NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "If on, return 403 'Hello World' for every request in the "
@@ -551,13 +566,17 @@ static const command_rec bs_cmds[] = {
     /* E10 — challenge safeguard / anti-loop hysteresis. */
     AP_INIT_FLAG("BotShieldSafeguard",
                  bs_set_safeguard, NULL, RSRC_CONF,
-                 "Enable anti-loop hysteresis (default off). When on, "
+                 "Anti-loop hysteresis. Default ON - only an explicit Off "
+                 "disables it. When on, "
                  "a client that gets challenged N times within W "
                  "seconds without solving any challenge is passed "
                  "through for a TTL window instead of being re-"
                  "challenged. Decision log shows reason "
                  "challenge-safeguard. Doesn't mint _bs_session; "
-                 "doesn't override 403/429 blocks."),
+                 "doesn't override 403/429 blocks. Default-on because a client that cannot solve the challenge - JS disabled, a "
+                 "privacy extension, an old browser - would otherwise be re-challenged forever with no way out, and nothing in the "
+                 "logs shouts about it. The tripped client is redirected to an explainer, NOT admitted: it never reaches protected "
+                 "content, and its flagged-IP entry survives."),
     AP_INIT_TAKE1("BotShieldSafeguardThreshold",
                  bs_set_safeguard_threshold, NULL, RSRC_CONF,
                  "Presentations-without-solve inside the window "
@@ -1033,7 +1052,10 @@ static int bs_apply_safeguard(request_rec *r, int have_client_ip,
     if (!scfg_sg || !have_client_ip) return OK;
 
     apr_int64_t now_t = (apr_int64_t)apr_time_sec(apr_time_now());
-    if (scfg_sg->safeguard_enabled == 1 &&
+    /* Default-on: -1 is "operator said nothing", and the anti-loop
+     * valve is not something you want to have to remember. Only an
+     * explicit BotShieldSafeguard Off disables it. */
+    if (scfg_sg->safeguard_enabled != 0 &&
         bs_safeguard_check(client_ip, now_t, scfg_sg->ns_id)) {
         /* Resolve the redirect target. Operator override via
          * BotShieldSafeguardRedirectURL, otherwise the built-in
@@ -1207,18 +1229,44 @@ static int bs_handler(request_rec *r)
     /* enabled is a tristate: BS_ENABLED_ON enforces, BS_ENABLED_LOGONLY
      * runs the handler for observation, BS_ENABLED_OFF (or BS_UNSET
      * meaning "no setting inherited") declines. */
-    if (!cfg
-        || cfg->enabled == BS_ENABLED_OFF
-        || cfg->enabled == BS_UNSET) {
-        return DECLINED;
-    }
     if (!ap_is_initial_req(r)) {
         return DECLINED;
     }
 
-    int endpoint_rv = bs_route_module_endpoint(r, cfg);
-    if (endpoint_rv != -1) {
-        return endpoint_rv;
+    /* Module-owned endpoints are dispatched on whether the module is
+     * live ANYWHERE on this vhost, not on the per-directory enabled
+     * state of the requested URL. They belong to the vhost.
+     *
+     * Gating them on the per-directory state was wrong in a way that
+     * only shows up once an operator scopes the enable: with
+     * `BotShieldEnabled On` inside a <Location>, the /botshield prefix is
+     * outside that scope, so every endpoint 404s. That silently breaks
+     * the captcha tier (captcha-verify unreachable) and embedded mode
+     * (embedded-verify, embedded.js), and points the safeguard redirect
+     * at a 404 — the anti-lockout valve landing on a broken page is
+     * worse than either not redirecting or not challenging.
+     *
+     * An explicit `BotShieldEnabled Off` on the endpoint path still
+     * wins, so operators keep a way to switch them off. Access control
+     * remains Apache's job: wrap the prefix in <Location> with
+     * Require ip / AuthType to restrict. */
+    bs_server_cfg *scfg_ep = ap_get_module_config(r->server->module_config,
+                                                  &botshield_module);
+    if (scfg_ep && scfg_ep->any_enabled
+        && !(cfg && cfg->enabled == BS_ENABLED_OFF)) {
+        int endpoint_rv = bs_route_module_endpoint(r, cfg);
+        if (endpoint_rv != -1) {
+            return endpoint_rv;
+        }
+    }
+
+    /* enabled is a tristate: BS_ENABLED_ON enforces, BS_ENABLED_LOGONLY
+     * runs the handler for observation, BS_ENABLED_OFF (or BS_UNSET
+     * meaning "no setting inherited") declines. */
+    if (!cfg
+        || cfg->enabled == BS_ENABLED_OFF
+        || cfg->enabled == BS_UNSET) {
+        return DECLINED;
     }
 
     /* Debug override keeps the first-commit behavior available for tests. */
@@ -1308,7 +1356,7 @@ static int bs_handler(request_rec *r)
             if (has_solve_evidence) {
                 bs_server_cfg *scfg_sg = ap_get_module_config(
                     r->server->module_config, &botshield_module);
-                if (scfg_sg && scfg_sg->safeguard_enabled == 1) {
+                if (scfg_sg && scfg_sg->safeguard_enabled != 0) {
                     unsigned char sg_ip[16];
                     if (bs_parse_client_ip(r->useragent_ip, sg_ip)) {
                         bs_mask_ipv6_prefix(sg_ip,
@@ -1540,6 +1588,23 @@ static int bs_handler(request_rec *r)
         bs_score_add(r, 0, 0,
             apr_psprintf(r->pool, "flag-tier-floor:%s",
                          bs_tier_name(tier_floor_from_flags)));
+    }
+
+    /* BotShieldChallenge Off — collapse any challenge tier back to pass
+     * for this scope. Deliberately applied AFTER the floor MAX above: a
+     * flag tier_floor ignores the score thresholds entirely, so parking
+     * BotShieldScoreSilent/Hard/Captcha cannot express "never challenge
+     * here" on its own. This can.
+     *
+     * Everything else still runs — triggers act, rate limits act, score
+     * accumulates, the decision is logged. Only the rendering is
+     * suppressed, and the suppression is visible in the reason chain
+     * rather than silent, in the same spirit as :observe and the
+     * ~counterfactual outcomes. */
+    if (cfg->challenge_enabled == 0 && tier != BS_TIER_PASS) {
+        bs_score_add(r, 0, 0,
+            apr_psprintf(r->pool, "challenge-off:%s", bs_tier_name(tier)));
+        tier = BS_TIER_PASS;
     }
 
     /* Per-scope flag/TTL writes happen inside bs_check_policy via

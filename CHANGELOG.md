@@ -1,5 +1,69 @@
 # Changelog
 
+## 2026-08-01 (BotShieldChallenge, endpoint dispatch, safeguard default)
+
+### Added — `BotShieldChallenge On|Off`
+
+    <Location "/api">
+        BotShieldEnabled   On
+        BotShieldChallenge Off
+    </Location>
+
+Makes a scope block-only. Triggers, rate limits and scoring still run
+and still log; any selected tier collapses to pass and nothing is
+rendered. Visible in the decision log as `challenge-off:<tier>`.
+
+Applied AFTER the flag tier-floor MAX, which is the entire point.
+Parking BotShieldScoreSilent/Hard/Captcha at 10000 looks like it says
+"never challenge here" but does not: a tier_floor ignores the
+thresholds, so any IP carrying honeypot_hit, fake_bot, scanner_probe or
+pow_fail_streak is still challenged. Found the hard way on a live
+deployment, where a scope parked at 10000 served an interstitial to an
+IP its own trap rule had flagged.
+
+### Fixed — module endpoints 404 when the enable is scoped to a Location
+
+bs_handler gated endpoint dispatch on the per-directory enabled state of
+the requested URL. With `BotShieldEnabled On` inside a <Location>, the
+endpoint prefix falls outside that scope, so every module-owned endpoint
+404s: captcha-verify, embedded-verify, embedded.js, form-widget.js,
+safeguard-info, metrics and policy-status.
+
+That silently breaks the captcha tier and embedded mode outright -- both
+depend on reaching a verify endpoint -- and points the safeguard
+redirect at a 404, which is worse than either not redirecting or not
+challenging. Scoping the enable to a <Location> is something the docs
+actively encourage, so this was reachable from documented usage.
+
+Endpoints now dispatch on a new server-config flag set when any scope on
+the vhost enables the module. They belong to the vhost, not to whichever
+<Location> happens to enable scoring. An explicit `BotShieldEnabled Off`
+on the endpoint path still wins, and access control remains Apache's
+job.
+
+### Changed — `BotShieldSafeguard` now defaults to On
+
+Both arguments for defaulting off fail on inspection. It is not a
+bypass: a tripped client is 302-redirected to an explainer, never
+reaches protected content, and keeps its flagged-IP entry. And it saves
+no memory: the SHM safeguard table is allocated regardless of the flag.
+
+What defaulting off did cost was a silent infinite challenge loop for
+any client that cannot solve the check -- JS disabled, a privacy
+extension, an old browser -- with nothing in the logs shouting about it.
+A JS-disabled human is indistinguishable from a non-JS crawler at the
+protocol level, so the design does not try to tell them apart: the
+redirect is useful to a human and useless to a crawler.
+
+Only an explicit `BotShieldSafeguard Off` disables it now. The option is
+kept: "disable by parking a numeric knob at its extreme" is the
+anti-pattern BotShieldChallenge exists to remove, and removing this
+boolean would reintroduce it via BotShieldSafeguardThreshold.
+
+DESIGN.md still described the retired pre-2026 pass-through behaviour in
+two places (lifecycle step 14, and an `outcome=declined` reference).
+Both now match the code: 302 to the explainer, `outcome=redirect`.
+
 ## 2026-08-01 (BotShieldRequestTrigger)
 
 ### Fixed — request-trigger family display name; documented two sharp defaults
