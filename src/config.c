@@ -830,7 +830,18 @@ static const struct {
     { BS_H_MISSING_UA,     BS_HEUR_ACT_SCORE, 40, BS_TIER_PASS },
     { BS_H_MISSING_AL,     BS_HEUR_ACT_SCORE, 15, BS_TIER_PASS },
     { BS_H_SCRAPER_UA,     BS_HEUR_ACT_SCORE, 50, BS_TIER_PASS },
-    { BS_H_FIRST_SIGHT_IP, BS_HEUR_ACT_SCORE,  5, BS_TIER_PASS },
+    /* 20 == BS_DEFAULT_SCORE_SILENT. Both post-cookie heuristics fire
+     * only when the request carries no usable cookie, so together they
+     * mean "no session context". dropped-cookie (IP already in Bloom)
+     * was 25 and acted; first-sight-ip (new IP) sat at 5 and did not,
+     * leaving one hole: a crawler spreading one request per address is
+     * first-sight every time and never crossed a threshold on score
+     * alone. At the silent threshold an enabled scope challenges any
+     * request with no session context, invisibly, with no rule for the
+     * operator to write. NOTE: this table is what actually applies --
+     * the weight in bs_heuristic_defs[] (heuristics.c) is a second
+     * declaration of the same number and must be kept in step. */
+    { BS_H_FIRST_SIGHT_IP, BS_HEUR_ACT_SCORE, 20, BS_TIER_PASS },
     { BS_H_DROPPED_COOKIE, BS_HEUR_ACT_SCORE, 25, BS_TIER_PASS },
 };
 #define BS_DEFAULT_HEURISTIC_TRIGGER_COUNT \

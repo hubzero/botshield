@@ -245,3 +245,30 @@ const char *bs_tier_name(bs_tier t)
     }
     return "?";
 }
+
+/* ----------------------------------------------------------------------
+ * Per-request tier floor (trigger tier= action)
+ * -------------------------------------------------------------------- */
+
+#define BS_TIER_FLOOR_NOTE "bs-tier-floor"
+
+void bs_set_request_tier_floor(request_rec *r, int tier)
+{
+    if (!r || tier < BS_TIER_PASS || tier > BS_TIER_CAPTCHA) return;
+    /* MAX rather than overwrite: two rules can match one request and
+     * the stronger demand should win, matching how flag tier_floors
+     * compose. */
+    if (bs_get_request_tier_floor(r) >= tier) return;
+    apr_table_setn(r->notes, BS_TIER_FLOOR_NOTE,
+                   apr_psprintf(r->pool, "%d", tier));
+}
+
+int bs_get_request_tier_floor(request_rec *r)
+{
+    if (!r) return BS_TIER_PASS;
+    const char *v = apr_table_get(r->notes, BS_TIER_FLOOR_NOTE);
+    if (!v) return BS_TIER_PASS;
+    int t = atoi(v);
+    if (t < BS_TIER_PASS || t > BS_TIER_CAPTCHA) return BS_TIER_PASS;
+    return t;
+}

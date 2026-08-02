@@ -919,6 +919,56 @@ it.</p>
 predicates (<code>cookie=&lt;n&gt;</code>, <code>cookie=&lt;n&gt;~&lt;substr&gt;</code>, <code>bs-cookie=&lt;state&gt;</code>)
 stay on <a href="#triggers"><code>BotShieldCookieTrigger</code></a> — that vocabulary does not
 compress into one key.</p>
+<p><strong>What a matching rule can do.</strong> Four outcomes, set by the action keys:</p>
+<table>
+<thead>
+<tr>
+<th>Intent</th>
+<th>Keys</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Block</td>
+<td><code>status=403</code> (family default)</td>
+<td>Refused from the policy walk. No scoring, no cookie mint, no render.</td>
+</tr>
+<tr>
+<td>Challenge</td>
+<td><code>status=pass tier=silent</code></td>
+<td>Invisible auto-submitting check. <code>tier=form</code> for the visible one.</td>
+</tr>
+<tr>
+<td>Captcha</td>
+<td><code>status=pass tier=captcha</code></td>
+<td>The configured provider's widget.</td>
+</tr>
+<tr>
+<td>Score only</td>
+<td><code>status=pass penalty=&lt;n&gt;</code></td>
+<td>Adds to the score and lets normal thresholds decide.</td>
+</tr>
+</tbody>
+</table>
+<p><code>tier=</code> and <code>penalty=</code> both require <code>status=pass</code>, because a concrete
+status short-circuits the request before any tier is chosen. <code>tier=</code>
+accepts <code>pass</code>, <code>silent</code>, <code>form</code> (alias <code>hard</code>) and <code>captcha</code>, and
+composes by MAX with the score-derived tier and any flag tier floor —
+it raises the floor, it never downgrades.</p>
+<p><code>tier=</code> sets that floor on <strong>this request only</strong>. That is the
+difference from <code>flag=</code> plus a <code>BotShieldFlagTrigger</code> tier floor, which
+writes per-IP state with a TTL: a client that solves the challenge
+would keep being re-challenged for the life of a flag it has no way to
+clear. Use <code>flag=</code> when you want the reputation to persist, <code>tier=</code>
+when you want to challenge the request in front of you.</p>
+<blockquote>
+<p>A bare <code>status=pass</code> — with neither <code>tier=</code> nor <code>penalty=</code> — keeps its
+original meaning of &quot;record the match and decline out of the handler&quot;.
+That skips scoring entirely, so it will <em>disable</em> challenges the
+defaults would otherwise have raised on those requests. It is a
+logging-and-flagging form, not a no-op.</p>
+</blockquote>
 <pre><code class="language-apache"># cookieless crawler walking a login redirect chain: path AND query AND
 # cookie-state, one cheap 403 from the policy walk, tagged for fail2ban
 # and kept out of the access log
@@ -1070,8 +1120,8 @@ not separate directives.</p>
 </tr>
 <tr>
 <td><code>first-sight-ip</code></td>
-<td>Bloom-filter miss — genuinely new IP</td>
-<td><code>score add=5</code></td>
+<td>Bloom-filter miss — genuinely new IP, arriving with no usable cookie</td>
+<td><code>score add=20</code></td>
 </tr>
 <tr>
 <td><code>dropped-cookie</code></td>
@@ -1080,6 +1130,15 @@ not separate directives.</p>
 </tr>
 </tbody>
 </table>
+<p><code>first-sight-ip</code> and <code>dropped-cookie</code> are the two halves of one signal —
+both fire only when the request carries no usable cookie, differing on
+whether the IP is already in the Bloom filter. <code>first-sight-ip</code> sits at
+exactly <code>BotShieldScoreSilent</code>, so <strong>an enabled scope challenges any
+request with no session context by default</strong>, with no rule to write.
+That is usually what you want on a login or registration path, where the
+check is invisible and a real browser clears it in one auto-submitted
+round trip. Lower it if you enable BotShield site-wide and would rather
+new visitors reach content without a check.</p>
 <p>Action verbs are <code>action=score add=N</code> (signed, -1000..1000) and
 <code>action=tier_floor min=&lt;tier&gt;</code>. <code>&lt;name&gt; reset</code> clears the compiled-in
 default plus prior declarations for that one heuristic; <code>all reset</code>

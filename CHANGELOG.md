@@ -1,5 +1,56 @@
 # Changelog
 
+## 2026-08-02 (request triggers can challenge; no-session-context is challenged by default)
+
+### Added — `tier=` action key on triggers
+
+A request trigger could previously only refuse or step aside. It can now
+express all four outcomes:
+
+    status=403                     block   (family default)
+    status=pass tier=silent        challenge, invisible
+    status=pass tier=form          challenge, visible
+    status=pass tier=captcha       captcha provider
+    status=pass penalty=<n>        score only
+
+`tier=` and `penalty=` require `status=pass`, since a concrete status
+short-circuits before a tier is chosen. `tier=` composes by MAX with the
+score-derived tier and any flag tier floor, and applies to **this
+request only** -- unlike `flag=` plus a flag-trigger floor, which writes
+per-IP state with a TTL and would keep re-challenging a client that
+already solved the check.
+
+Note the sharp edge, now documented: a bare `status=pass` still means
+"record the match and decline out of the handler", which skips scoring
+and therefore *disables* challenges the defaults would have raised.
+
+### Changed — `first-sight-ip` default 5 -> 20
+
+`first-sight-ip` and `dropped-cookie` are two halves of one signal: both
+fire only when a request carries no usable cookie, differing on whether
+the IP is already in the Bloom filter. The known-IP half scored 25 and
+acted; the new-IP half scored 5 and did not. That left one hole, and it
+is precisely the one a distributed crawler walks through -- spread one
+request per address and every hit is first-sight, so nothing ever
+crossed a threshold on score alone.
+
+At 20 (== `BotShieldScoreSilent`) an enabled scope challenges any
+request with no session context, invisibly, with no rule for the
+operator to write.
+
+This is a real change in default behaviour: enable BotShield site-wide
+and new visitors now get an invisible check before content. Scope the
+enable, or `BotShieldHeuristicTrigger first-sight-ip reset action=score
+add=5` to restore the old weight.
+
+### Fixed — the default was declared twice
+
+`bs_heuristic_defs[]` in heuristics.c and `bs_default_heuristic_triggers[]`
+in config.c both carry a weight for every heuristic, and the config.c
+table is the one that applies. Changing only heuristics.c looked correct,
+compiled, deployed, and did nothing. Both now carry a comment saying the
+other exists.
+
 ## 2026-08-01 (response breakout: who answered; v7 -> v8)
 
 ### Added — `botshield_responses_*`

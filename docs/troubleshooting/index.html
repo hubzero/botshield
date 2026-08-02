@@ -145,12 +145,18 @@ signals on your edge load balancer, not the real client.</p>
 <p><strong>Diagnostic</strong>: look at the <code>ip=</code> field in the decision log. If it
 matches your edge's IP, that's the issue. Configure
 <code>mod_remoteip</code> per <a href="../deployment/index.html">deployment</a>.</p>
-<p><strong>Second-most common cause</strong>: the heuristic thresholds are too low
-for your traffic mix. <code>BotShieldScoreSilent</code> defaults to 20; a
-request with <code>missing-accept-language</code> (15 points) and
-<code>first-sight-ip</code> (5 points) hits the silent tier on its first
-request. For sites where most visitors don't send <code>Accept- Language</code> (legitimate use cases exist), raise <code>BotShieldScoreSilent</code>
-to 30 or 40.</p>
+<p><strong>Second-most common cause</strong>: the defaults are challenging more than
+you expected. <code>first-sight-ip</code> scores 20, which <em>is</em>
+<code>BotShieldScoreSilent</code>, so any request arriving with no usable cookie
+gets the invisible check on its first visit — by design, but surprising
+if you enabled BotShield site-wide rather than on an auth path. Either
+scope the enable, or lower the heuristic:</p>
+<pre><code class="language-apache">BotShieldHeuristicTrigger first-sight-ip reset action=score add=5
+</code></pre>
+<p>For sites where most visitors don't send <code>Accept-Language</code> (legitimate
+use cases exist), <code>missing-accept-language</code> adds another 15 on top;
+raise <code>BotShieldScoreSilent</code> to 30 or 40 if that combination is
+over-firing.</p>
 <p><strong>Tuning workflow</strong>:</p>
 <ol>
 <li>Set <code>BotShieldEnabled LogOnly</code> to dry-run all rules.</li>

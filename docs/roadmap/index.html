@@ -90,6 +90,10 @@
 <section class="toc">
   <h2 class="toc__heading">On this page</h2>
   <ul class="toc__list">
+<li class="toc__item toc__item--level-2"><a href="#2026-08-02-request-triggers-can-challenge-no-session-context-is-challenged-by-default">2026-08-02 (request triggers can challenge; no-session-context is challenged by default)</a></li>
+<li class="toc__item toc__item--level-3"><a href="#added-tier-action-key-on-triggers">Added — `tier=` action key on triggers</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-first-sight-ip-default-5-20">Changed — `first-sight-ip` default 5 -&gt; 20</a></li>
+<li class="toc__item toc__item--level-3"><a href="#fixed-the-default-was-declared-twice">Fixed — the default was declared twice</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-08-01-response-breakout-who-answered-v7-v8">2026-08-01 (response breakout: who answered; v7 -&gt; v8)</a></li>
 <li class="toc__item toc__item--level-3"><a href="#added-botshield-responses">Added — `botshield_responses_*`</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-08-01-per-vhost-metrics-and-dashboard-tabs-v6-v7">2026-08-01 (per-vhost metrics and dashboard tabs; v6 -&gt; v7)</a></li>
@@ -185,6 +189,45 @@
   </ul>
 </section>
         <div class="prose">
+<h2 id="2026-08-02-request-triggers-can-challenge-no-session-context-is-challenged-by-default">2026-08-02 (request triggers can challenge; no-session-context is challenged by default)</h2>
+<h3 id="added-tier-action-key-on-triggers">Added — <code>tier=</code> action key on triggers</h3>
+<p>A request trigger could previously only refuse or step aside. It can now
+express all four outcomes:</p>
+<pre><code>status=403                     block   (family default)
+status=pass tier=silent        challenge, invisible
+status=pass tier=form          challenge, visible
+status=pass tier=captcha       captcha provider
+status=pass penalty=&lt;n&gt;        score only
+</code></pre>
+<p><code>tier=</code> and <code>penalty=</code> require <code>status=pass</code>, since a concrete status
+short-circuits before a tier is chosen. <code>tier=</code> composes by MAX with the
+score-derived tier and any flag tier floor, and applies to <strong>this
+request only</strong> -- unlike <code>flag=</code> plus a flag-trigger floor, which writes
+per-IP state with a TTL and would keep re-challenging a client that
+already solved the check.</p>
+<p>Note the sharp edge, now documented: a bare <code>status=pass</code> still means
+&quot;record the match and decline out of the handler&quot;, which skips scoring
+and therefore <em>disables</em> challenges the defaults would have raised.</p>
+<h3 id="changed-first-sight-ip-default-5-20">Changed — <code>first-sight-ip</code> default 5 -&gt; 20</h3>
+<p><code>first-sight-ip</code> and <code>dropped-cookie</code> are two halves of one signal: both
+fire only when a request carries no usable cookie, differing on whether
+the IP is already in the Bloom filter. The known-IP half scored 25 and
+acted; the new-IP half scored 5 and did not. That left one hole, and it
+is precisely the one a distributed crawler walks through -- spread one
+request per address and every hit is first-sight, so nothing ever
+crossed a threshold on score alone.</p>
+<p>At 20 (== <code>BotShieldScoreSilent</code>) an enabled scope challenges any
+request with no session context, invisibly, with no rule for the
+operator to write.</p>
+<p>This is a real change in default behaviour: enable BotShield site-wide
+and new visitors now get an invisible check before content. Scope the
+enable, or <code>BotShieldHeuristicTrigger first-sight-ip reset action=score add=5</code> to restore the old weight.</p>
+<h3 id="fixed-the-default-was-declared-twice">Fixed — the default was declared twice</h3>
+<p><code>bs_heuristic_defs[]</code> in heuristics.c and <code>bs_default_heuristic_triggers[]</code>
+in config.c both carry a weight for every heuristic, and the config.c
+table is the one that applies. Changing only heuristics.c looked correct,
+compiled, deployed, and did nothing. Both now carry a comment saying the
+other exists.</p>
 <h2 id="2026-08-01-response-breakout-who-answered-v7-v8">2026-08-01 (response breakout: who answered; v7 -&gt; v8)</h2>
 <h3 id="added-botshield-responses">Added — <code>botshield_responses_*</code></h3>
 <p>The status-class counters cannot distinguish a BotShield 403 from an
