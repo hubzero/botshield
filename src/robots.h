@@ -73,6 +73,20 @@ enum bs_robots_wildcard_scope {
 #define BS_ROBOTS_REFRESH_UNSET    (-1)
 #define BS_ROBOTS_REFRESH_DEFAULT  60
 
+/* Whether robots.txt Disallow rules enforce or merely record.
+ *
+ * Observe exists because a robots.txt is usually published long before
+ * anyone enforces it, and switching enforcement on is a real change in
+ * what the site refuses. An operator needs to see who actually ignores
+ * the file before starting to 403 them -- and the answer is often
+ * surprising, since the violators tend to be crawlers the operator
+ * would have assumed were well behaved. */
+typedef enum {
+    BS_ROBOTS_MODE_UNSET   = -1,
+    BS_ROBOTS_MODE_ENFORCE = 0,
+    BS_ROBOTS_MODE_OBSERVE = 1
+} bs_robots_mode;
+
 typedef struct robots_match {
     int          group_idx;       /* -1 if no group matched */
     int          is_wildcard;     /* 1 if matching group was User-agent: * */

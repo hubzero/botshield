@@ -97,6 +97,7 @@
 <li class="toc__item toc__item--level-3"><a href="#the-decision-log">The decision log</a></li>
 <li class="toc__item toc__item--level-3"><a href="#controlling-decision-log-volume">Controlling decision-log volume</a></li>
 <li class="toc__item toc__item--level-3"><a href="#controlling-the-access-log">Controlling the access log</a></li>
+<li class="toc__item toc__item--level-3"><a href="#observing-robots-txt-before-enforcing-it">Observing robots.txt before enforcing it</a></li>
 <li class="toc__item toc__item--level-3"><a href="#client-classification-who-is-visiting">Client classification — who is visiting</a></li>
 <li class="toc__item toc__item--level-3"><a href="#response-breakout-who-answered">Response breakout — who answered</a></li>
 <li class="toc__item toc__item--level-3"><a href="#per-vhost-breakdown">Per-vhost breakdown</a></li>
@@ -398,6 +399,26 @@ traffic on the strength of a decision that never took effect.</p>
 <p>Suppressing the access log does not touch the decision log, which is
 the point — the access log is the traffic record, the decision log is
 the security record.</p>
+<h3 id="observing-robots-txt-before-enforcing-it">Observing robots.txt before enforcing it</h3>
+<p>Two directives let robots.txt-derived rules record without acting, so a
+file most sites publish and never enforce can be measured first:</p>
+<pre><code class="language-apache">BotShieldRobotsMode   observe                  # Disallow -&gt; ~block, no 403
+BotShieldBotRateLimit * 1 sec mode=observe     # Crawl-delay -&gt; ~rate_limited, no 429
+</code></pre>
+<p>Both are independent of <code>BotShieldEnabled</code>, so a scope can enforce its
+scoring while robots.txt stays advisory. <code>BotShieldRobotsMode observe</code>
+also suppresses the +100 score and the 1-hour flag, not just the status
+— otherwise the penalty follows the client into later requests and
+changes its tier, which is enforcement by another route.</p>
+<p><code>mode=enforce|observe</code> may follow any <code>BotShieldBotRateLimit</code> form. It
+matters most for the <strong>synthesised</strong> wildcard: when the module is
+enabled at vhost scope and no rule is written, a <code>* 1 sec</code> limit is
+created automatically. Nobody chose it, and it enforces wherever
+<code>BotShieldEnabled On</code> applies — on the deployment this was built for,
+that meant real 429s to verified Bingbot before anyone had decided to
+rate-limit it. Writing the rule out explicitly with <code>mode=observe</code>
+replaces the synthetic default and keeps the evidence without refusing
+anyone.</p>
 <h3 id="client-classification-who-is-visiting">Client classification — who is visiting</h3>
 <p>Every request is classified once at <code>post_read_request</code> and the result
 cached, so recording it costs a pointer deref. Six classes, on the

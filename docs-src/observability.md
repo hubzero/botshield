@@ -290,6 +290,32 @@ Suppressing the access log does not touch the decision log, which is
 the point — the access log is the traffic record, the decision log is
 the security record.
 
+### Observing robots.txt before enforcing it
+
+Two directives let robots.txt-derived rules record without acting, so a
+file most sites publish and never enforce can be measured first:
+
+```apache
+BotShieldRobotsMode   observe                  # Disallow -> ~block, no 403
+BotShieldBotRateLimit * 1 sec mode=observe     # Crawl-delay -> ~rate_limited, no 429
+```
+
+Both are independent of `BotShieldEnabled`, so a scope can enforce its
+scoring while robots.txt stays advisory. `BotShieldRobotsMode observe`
+also suppresses the +100 score and the 1-hour flag, not just the status
+— otherwise the penalty follows the client into later requests and
+changes its tier, which is enforcement by another route.
+
+`mode=enforce|observe` may follow any `BotShieldBotRateLimit` form. It
+matters most for the **synthesised** wildcard: when the module is
+enabled at vhost scope and no rule is written, a `* 1 sec` limit is
+created automatically. Nobody chose it, and it enforces wherever
+`BotShieldEnabled On` applies — on the deployment this was built for,
+that meant real 429s to verified Bingbot before anyone had decided to
+rate-limit it. Writing the rule out explicitly with `mode=observe`
+replaces the synthetic default and keeps the evidence without refusing
+anyone.
+
 ### Client classification — who is visiting
 
 Every request is classified once at `post_read_request` and the result

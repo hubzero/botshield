@@ -390,6 +390,7 @@ typedef struct bs_server_cfg {
     int                 robots_slot_pool_size;
     int                 robots_slot_pool_used;
     int                 robots_refresh_interval;
+    int                 robots_mode;   /* bs_robots_mode */
     /* Cloudflare bot directory runtime override.
      *
      * The compiled-in bs_known_bots[] table is the baseline. If

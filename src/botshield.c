@@ -546,6 +546,10 @@ static const command_rec bs_cmds[] = {
                  "admits all\n"
                  "  <slug-or-pattern-or-@bg-or-*> <budget> <per>  "
                  "<budget> requests per <per> period (sec/min/hour).\n"
+                 "Any form may be followed by mode=enforce|observe "
+                 "(default enforce); observe counts and logs "
+                 "bot-rate:<slug>:observe with outcome=~rate_limited "
+                 "but never returns 429. "
                  "Slug-or-pattern is matched (case-insensitive "
                  "substring) against the bot directory; resolves to "
                  "all matching slugs which share one counter. '*' is "
@@ -851,6 +855,18 @@ static const command_rec bs_cmds[] = {
                  "paths return 403 (reason robots-block:<group>); "
                  "Crawl-delay trips return 429 + Retry-After "
                  "(reason robots-rate:<group>)."),
+    AP_INIT_TAKE1("BotShieldRobotsMode", bs_set_robots_mode,
+                 NULL, RSRC_CONF,
+                 "Whether robots.txt Disallow rules enforce or only "
+                 "record. 'enforce' (default) returns 403 with reason "
+                 "robots-block:<group>; 'observe' logs "
+                 "robots-block:<group>:observe with outcome=~block and "
+                 "lets the request through, suppressing the score bump "
+                 "and the flag as well so nothing leaks into later "
+                 "requests. Use observe to find out who actually "
+                 "ignores a robots.txt before starting to refuse them "
+                 "- independent of BotShieldEnabled, so a scope can "
+                 "enforce its scoring while robots stays advisory."),
     AP_INIT_TAKE1("BotShieldRobotsRefreshInterval",
                  bs_set_robots_refresh_interval, NULL, RSRC_CONF,
                  "Seconds between mod_watchdog-driven re-checks of "

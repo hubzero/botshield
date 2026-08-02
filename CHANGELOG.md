@@ -1,5 +1,38 @@
 # Changelog
 
+## 2026-08-02 (observe robots.txt before enforcing it)
+
+### Added — `BotShieldRobotsMode enforce|observe`
+
+`BotShieldRobotsTxt` had no way to record without acting: the
+`Disallow` path returned 403 unconditionally, while the `Crawl-delay`
+path beside it had always honoured observe. So switching robots.txt on
+to find out who ignores it instead started refusing them immediately --
+GPTBot and ClaudeBot were taking real 403s within minutes.
+
+Observe logs `robots-block:<group>:observe` with `outcome=~block` and
+suppresses the score bump and the flag as well as the status, so
+nothing leaks into later requests. Independent of `BotShieldEnabled`,
+so a scope can enforce its scoring while robots.txt stays advisory.
+
+### Added — `mode=enforce|observe` on `BotShieldBotRateLimit`
+
+Any form may now carry a trailing `mode=`. This matters most for the
+synthesised wildcard: enabling the module at vhost scope creates a
+`* 1 sec` limit automatically, and it enforces wherever
+`BotShieldEnabled On` applies. Nobody wrote it, and on this deployment
+it was issuing real 429s to verified Bingbot. The only prior lever was
+`Off`, which would have discarded the evidence along with the
+enforcement.
+
+### Changed — dashboard status colours follow the usual convention
+
+Response status now reads green / blue / orange / red. Blue is not in
+the reserved status palette, so 3xx and 4xx take categorical slots;
+mixing the two vocabularies in one chart is normally wrong, but the
+convention is strong enough that following it beats internal purity,
+and every segment is direct-labelled so identity never rides on colour.
+
 ## 2026-08-02 (heuristic weights become defaults; one source for them)
 
 ### Changed — `scraper-ua` 50 -> 10, `missing-al` 15 -> 5

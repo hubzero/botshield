@@ -432,7 +432,10 @@ int bs_check_policy(request_rec *r)
          * status: a +100 with a 1-hour TTL would follow the client into
          * later requests and change their tier, which is enforcement by
          * another route. */
-        if (global_log_only) {
+        int robots_observe = global_log_only
+                          || (scfg && scfg->robots_mode
+                                        == BS_ROBOTS_MODE_OBSERVE);
+        if (robots_observe) {
             bs_score_add(r, 0, 0,
                 apr_pstrcat(r->pool, "robots-block:", rgroup,
                             ":observe", NULL));

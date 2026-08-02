@@ -1703,8 +1703,18 @@ int bs_dashboard_handler(request_rec *r)
      * the required mitigation for the sub-3:1 light-surface steps. */
     {
         const char *labels[] = { "2xx", "3xx", "4xx", "5xx", "other" };
-        const char *fills[]  = { "var(--good)", "var(--neutral)",
-                                 "var(--warn)", "var(--crit)",
+        /* HTTP status classes follow the convention every devtools and
+         * log viewer already uses -- green / blue / orange / red -- so
+         * the chart reads without consulting a legend. Blue is not in
+         * the reserved status palette, which only has
+         * good/warning/serious/critical, so 3xx and 4xx take
+         * categorical slots 1 and 2. Mixing the two vocabularies in one
+         * chart is normally wrong; here the convention is strong enough
+         * that following it beats internal purity, and every segment is
+         * direct-labelled with its value and share so identity never
+         * rides on colour alone. */
+        const char *fills[]  = { "var(--good)", "var(--c1)",
+                                 "var(--c2)", "var(--crit)",
                                  "var(--muted)" };
         apr_uint64_t vals[]  = { w.req_status[BS_M_STATUS_2XX],
                                  w.req_status[BS_M_STATUS_3XX],
