@@ -59,10 +59,37 @@ int  bs_get_request_tier_floor(request_rec *r);
  * dropped; the score total still accumulates. */
 #define BS_SCORE_MAX_REASONS      16
 
-/* Built-in heuristic penalties (consumed by heuristics.c). */
-#define BS_PENALTY_MISSING_UA     40
-#define BS_PENALTY_MISSING_AL     15
-#define BS_PENALTY_SCRAPER_UA     50
+/* Built-in heuristic penalties.
+ *
+ * THE single source for these numbers. Both the metadata registry in
+ * heuristics.c and the seeded default-trigger table in config.c refer
+ * to these macros; config.c's table is what actually applies at
+ * request time, and heuristics.c's is the fallback metadata. Until
+ * 2026-08-02 each table carried its own literal and these macros were
+ * dead -- three declarations, no compiler able to notice when they
+ * disagreed. They did: changing first-sight-ip in heuristics.c alone
+ * compiled clean, deployed, and changed nothing.
+ *
+ * scraper-ua is 10, not the 50 it was through 2026-08-02. robots.txt
+ * tells undeclared clients they may fetch anything outside the
+ * Disallow list at the published Crawl-delay; 50 put a checkbox they
+ * cannot render in front of curl, wget and python-requests instead --
+ * the module enforcing a policy the site never published. At 10 it is
+ * a signal that composes rather than a verdict on its own, and volume
+ * abuse is caught by the rate limit, which is what the published
+ * policy actually promises.
+ *
+ * missing-al is 5 rather than 15 for the same reason: almost nothing
+ * scripted sends Accept-Language, so the old weight mostly taxed
+ * legitimate automation.
+ *
+ * first-sight-ip is deliberately equal to BS_DEFAULT_SCORE_SILENT --
+ * see the note beside it in config.c. */
+#define BS_PENALTY_MISSING_UA       40
+#define BS_PENALTY_MISSING_AL        5
+#define BS_PENALTY_SCRAPER_UA       10
+#define BS_PENALTY_FIRST_SIGHT_IP   20
+#define BS_PENALTY_DROPPED_COOKIE   25
 
 /* ======================================================================
  * Tier + silent-mode enums (decision dispatch)

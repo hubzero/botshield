@@ -71,7 +71,7 @@ BotShieldHeuristicTrigger first-sight-ip reset action=score add=5
 ```
 
 For sites where most visitors don't send `Accept-Language` (legitimate
-use cases exist), `missing-accept-language` adds another 15 on top;
+use cases exist), `missing-accept-language` adds another 5 on top;
 raise `BotShieldScoreSilent` to 30 or 40 if that combination is
 over-firing.
 

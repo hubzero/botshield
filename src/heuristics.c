@@ -93,11 +93,11 @@ typedef struct {
 } bs_heuristic_def;
 
 static const bs_heuristic_def bs_heuristic_defs[] = {
-    { { "missing-ua",      BS_H_MISSING_UA,      BS_HP_HEADER,      40 },
+    { { "missing-ua",      BS_H_MISSING_UA,      BS_HP_HEADER, BS_PENALTY_MISSING_UA },
       bs_pred_missing_ua },
-    { { "missing-al",      BS_H_MISSING_AL,      BS_HP_HEADER,      15 },
+    { { "missing-al",      BS_H_MISSING_AL,      BS_HP_HEADER, BS_PENALTY_MISSING_AL },
       bs_pred_missing_al },
-    { { "scraper-ua",      BS_H_SCRAPER_UA,      BS_HP_HEADER,      50 },
+    { { "scraper-ua",      BS_H_SCRAPER_UA,      BS_HP_HEADER, BS_PENALTY_SCRAPER_UA },
       bs_pred_scraper_ua },
     /* 20 == BS_DEFAULT_SCORE_SILENT, deliberately. Both post-cookie
      * heuristics fire only when the request carries no usable cookie,
@@ -110,9 +110,9 @@ static const bs_heuristic_def bs_heuristic_defs[] = {
      * -- an enabled scope now challenges any request with no session
      * context, invisibly, and a real browser clears it in one
      * auto-submitted round trip. */
-    { { "first-sight-ip",  BS_H_FIRST_SIGHT_IP,  BS_HP_POST_COOKIE, 20 },
+    { { "first-sight-ip",  BS_H_FIRST_SIGHT_IP,  BS_HP_POST_COOKIE, BS_PENALTY_FIRST_SIGHT_IP },
       bs_pred_first_sight_ip },
-    { { "dropped-cookie",  BS_H_DROPPED_COOKIE,  BS_HP_POST_COOKIE, 25 },
+    { { "dropped-cookie",  BS_H_DROPPED_COOKIE,  BS_HP_POST_COOKIE, BS_PENALTY_DROPPED_COOKIE },
       bs_pred_dropped_cookie },
 };
 #define BS_HEURISTIC_COUNT \

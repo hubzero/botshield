@@ -1,5 +1,40 @@
 # Changelog
 
+## 2026-08-02 (heuristic weights become defaults; one source for them)
+
+### Changed — `scraper-ua` 50 -> 10, `missing-al` 15 -> 5
+
+robots.txt tells undeclared clients they may fetch anything outside the
+`Disallow` list at the published `Crawl-delay`. `scraper-ua` at 50 put
+an unrenderable checkbox in front of `curl`, `wget` and
+`python-requests` instead -- the module enforcing a policy the site
+never published, and unreachable for the client to discover. Of the 14
+tokens in that heuristic, exactly one (`Scrapy`) appeared in the
+deployment's robots.txt, where `robots-block` handles it honestly.
+
+At 10 it composes with other signals instead of deciding alone, and
+volume abuse is caught by the rate limit -- which is what the published
+policy actually promises. `missing-al` drops to 5 for the same reason:
+almost nothing scripted sends `Accept-Language`.
+
+Net effect: a plain `python-requests` scores 15, under the silent
+threshold, so scripted dataset access works; a runaway script still
+trips the rate limit.
+
+### Fixed — the weights were declared in three places
+
+`BS_PENALTY_*` in score.h carried a comment saying "consumed by
+heuristics.c" and had **zero** uses. Both the registry in heuristics.c
+and the seeded table in config.c carried their own literals. Three
+declarations, no compiler able to notice a disagreement -- and they had
+already disagreed once: changing `first-sight-ip` in heuristics.c alone
+compiled clean, deployed, and changed nothing, because config.c's table
+is what applies.
+
+Both tables now reference the macros, so score.h is the single source.
+`BS_PENALTY_FIRST_SIGHT_IP` and `BS_PENALTY_DROPPED_COOKIE` were added
+so the whole set lives together.
+
 ## 2026-08-02 (browser classification covers real mobile devices)
 
 ### Fixed — real phones classified as `unknown-ua`

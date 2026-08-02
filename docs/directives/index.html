@@ -1111,12 +1111,12 @@ not separate directives.</p>
 <tr>
 <td><code>missing-al</code></td>
 <td>Accept-Language absent</td>
-<td><code>score add=15</code></td>
+<td><code>score add=5</code></td>
 </tr>
 <tr>
 <td><code>scraper-ua</code></td>
 <td>UA contains a known HTTP-library token</td>
-<td><code>score add=50</code></td>
+<td><code>score add=10</code></td>
 </tr>
 <tr>
 <td><code>first-sight-ip</code></td>
@@ -1130,6 +1130,15 @@ not separate directives.</p>
 </tr>
 </tbody>
 </table>
+<p><code>scraper-ua</code> is deliberately low. robots.txt tells undeclared clients
+they may fetch anything outside the <code>Disallow</code> list at the published
+<code>Crawl-delay</code>; a weight of 50 put an unrenderable checkbox in front of
+<code>curl</code>, <code>wget</code> and <code>python-requests</code> instead — the module enforcing a
+policy the site never published. At 10 it composes with other signals
+rather than deciding on its own, and volume abuse is caught by the rate
+limit, which is what the published policy actually promises.
+<code>missing-al</code> is 5 for the same reason: almost nothing scripted sends
+<code>Accept-Language</code>.</p>
 <p><code>first-sight-ip</code> and <code>dropped-cookie</code> are the two halves of one signal —
 both fire only when the request carries no usable cookie, differing on
 whether the IP is already in the Bloom filter. <code>first-sight-ip</code> sits at
