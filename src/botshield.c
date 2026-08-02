@@ -256,6 +256,25 @@ static const command_rec bs_cmds[] = {
                  "into this module today; 'sha384-zeros' / 'sha512-zeros' / "
                  "'pbkdf2-sha256' / 'argon2id' are registry slots reserved "
                  "for future opt-in builds."),
+    AP_INIT_TAKE_ARGV("BotShieldAccessLog", bs_set_access_log, NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "Control the Apache access-log line for requests "
+                 "BotShield decided on. 'on' (default) logs normally; "
+                 "'off' suppresses every decided outcome; "
+                 "'suppress=<outcome[,outcome...]>' suppresses only "
+                 "those, e.g. suppress=challenged,block. Outcome names "
+                 "are the decision-log vocabulary: allow, challenged, "
+                 "verified, block, failopen, rate_limited, "
+                 "inflight_capped, pending_missing, misconfigured, "
+                 "debug, redirect. Scope-level and keyed on the "
+                 "decision, so it covers challenges raised by the "
+                 "scoring defaults - unlike the per-rule "
+                 "accesslog=on|off action key, which only covers "
+                 "requests that rule's predicate matched. Under "
+                 "LogOnly a counterfactual (~block) is NOT suppressed: "
+                 "nothing was enforced and the origin answered, so it "
+                 "is ordinary traffic. Requests BotShield never "
+                 "evaluated always log."),
     AP_INIT_TAKE1("BotShieldScoreSilent",  bs_set_score_silent,  NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "Score at or above which the silent-PoW tier is picked "
@@ -798,7 +817,7 @@ static const command_rec bs_cmds[] = {
                  "and the path glob is now a key. Kept as a loud "
                  "config-time error so an old config fails with a "
                  "migration note instead of 'unknown directive'."),
-    AP_INIT_TAKE1("BotShieldDecisionLog", bs_set_decision_log,
+    AP_INIT_TAKE_ARGV("BotShieldDecisionLog", bs_set_decision_log,
                  NULL, RSRC_CONF,
                  "Module-owned decision log. Value is a server-root-"
                  "relative path (\"logs/botshield-decisions.log\"), an "

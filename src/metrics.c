@@ -48,6 +48,22 @@ static int bs_m_tier_idx(const char *s)
     return -1;
 }
 
+/* Outcome index -> name. Paired with bs_m_outcome_idx below and kept
+ * adjacent to it on purpose: these are inverses, and the one thing this
+ * file must not grow is a third place where the outcome vocabulary is
+ * spelled out. */
+static const char *const bs_m_outcome_names[BS_M_OUTCOME_COUNT] = {
+    "allow", "challenged", "verified", "block", "failopen",
+    "rate_limited", "inflight_capped", "pending_missing",
+    "misconfigured", "debug", "redirect"
+};
+
+const char *bs_m_outcome_name(int idx)
+{
+    if (idx < 0 || idx >= BS_M_OUTCOME_COUNT) return "?";
+    return bs_m_outcome_names[idx];
+}
+
 static int bs_m_outcome_idx(const char *s)
 {
     if (!s) return -1;
@@ -646,6 +662,11 @@ void bs_suppress_access_log(request_rec *r)
     apr_table_setn(r->subprocess_env, BS_NOLOG_ENV, "1");
 }
 
+int bs_outcome_index(const char *name)
+{
+    return bs_m_outcome_idx(name);
+}
+
 /* ======================================================================
  * Module-owned decision log (BotShieldDecisionLog)
  *
@@ -673,15 +694,50 @@ void bs_suppress_access_log(request_rec *r)
  * ====================================================================== */
 
 const char *bs_set_decision_log(cmd_parms *cmd, void *cfg_v,
-                                const char *arg)
+                                int argc, char *const argv[])
 {
     (void)cfg_v;
-    if (!arg || !*arg) {
+    if (argc < 1 || !argv[0] || !*argv[0]) {
         return "BotShieldDecisionLog requires a path or a |program spec";
     }
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
-    scfg->decision_log_path = apr_pstrdup(cmd->pool, arg);
+    scfg->decision_log_path = apr_pstrdup(cmd->pool, argv[0]);
+
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (strncasecmp(a, "outcomes=", 9) != 0) {
+            return apr_psprintf(cmd->pool,
+                "BotShieldDecisionLog: unknown key '%s' (want "
+                "outcomes=<outcome[,outcome...]>)", a);
+        }
+        unsigned mask = 0;
+        char *list = apr_pstrdup(cmd->pool, a + 9);
+        char *save = NULL;
+        for (char *tok = apr_strtok(list, ",", &save); tok;
+             tok = apr_strtok(NULL, ",", &save)) {
+            while (*tok == ' ') tok++;
+            if (!*tok) continue;
+            if (!strcasecmp(tok, "all")) {
+                mask = (1U << BS_M_OUTCOME_COUNT) - 1U;
+                continue;
+            }
+            int oi = bs_m_outcome_idx(tok);
+            if (oi < 0) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldDecisionLog: unknown outcome '%s'. Valid: "
+                    "all, allow, challenged, verified, block, failopen, "
+                    "rate_limited, inflight_capped, pending_missing, "
+                    "misconfigured, debug, redirect", tok);
+            }
+            mask |= (1U << (unsigned)oi);
+        }
+        if (!mask) {
+            return "BotShieldDecisionLog: outcomes= needs at least one "
+                   "outcome (omit the key entirely to record all)";
+        }
+        scfg->decision_log_outcomes = (int)mask;
+    }
     return NULL;
 }
 
@@ -743,8 +799,33 @@ int bs_open_decision_logs(apr_pool_t *pconf, server_rec *s)
             scfg->decision_log_fd = fd;
         }
 
-        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
-            "mod_botshield: decision log active: %s", spec);
+        /* Say what is being recorded, not just that recording is on.
+         * A filtered log looks identical to a complete one from the
+         * outside, and "the log says nothing happened" is a very
+         * expensive thing to get wrong during an incident. */
+        if (scfg->decision_log_outcomes == -1) {
+            ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+                "mod_botshield: decision log active: %s (default set: "
+                "block, verified, rate_limited, misconfigured, failopen, "
+                "redirect, plus whatever BotShieldAccessLog suppresses "
+                "for the request - so nothing the server answered is "
+                "absent from both logs). Name outcomes= to override.",
+                spec);
+        } else {
+            const char *kept = "", *sep = "";
+            for (int oi = 0; oi < BS_M_OUTCOME_COUNT; oi++) {
+                if (scfg->decision_log_outcomes & (1U << (unsigned)oi)) {
+                    kept = apr_pstrcat(pconf, kept, sep,
+                                       bs_m_outcome_name(oi), NULL);
+                    sep = ",";
+                }
+            }
+            ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+                "mod_botshield: decision log active: %s (outcomes=%s "
+                "only, each logged in full; other outcomes get no "
+                "per-request line but are still counted exactly in "
+                "/botshield/metrics and the dashboard)", spec, kept);
+        }
     }
     return OK;
 }
@@ -765,11 +846,38 @@ int bs_open_decision_logs(apr_pool_t *pconf, server_rec *s)
  *
  * The client IP is not repeated positionally either — the payload
  * already carries ip=. */
-static void bs_decision_log_write(request_rec *r, const char *payload)
+static void bs_decision_log_write(request_rec *r, const char *payload,
+                                  int outcome_idx, unsigned al_suppress)
 {
     bs_server_cfg *scfg = ap_get_module_config(r->server->module_config,
                                                &botshield_module);
     if (!scfg || !scfg->decision_log_fd) return;
+
+    /* outcomes= filter. Only the module-owned log is filtered; the
+     * error-log line is gated by LogLevel and is not where the volume
+     * lives (measured at 0 B/min against 265 MB/hr here), and the
+     * metrics counters are bumped by the caller regardless -- so a
+     * filtered-out outcome is still counted, still on the dashboard,
+     * still in Prometheus. What is dropped is the per-request detail. */
+    /* Explicit outcomes= is taken literally -- an operator who names a
+     * set has accepted responsibility for what falls outside it. With
+     * no key, default to the actionable set UNION whatever the access
+     * log is dropping, so nothing the server answered goes unrecorded
+     * in both places. */
+    unsigned dl_mask = (scfg->decision_log_outcomes != -1)
+                     ? (unsigned)scfg->decision_log_outcomes
+                     : (BS_DEFAULT_DECISIONLOG_OUTCOMES | al_suppress);
+    {
+        if (outcome_idx < 0) return;
+        if (!(dl_mask & (1U << (unsigned)outcome_idx))) {
+            /* Not a kept outcome: no line. Deliberately not sampled --
+             * a partial record would mean an absent line no longer
+             * proves the event did not happen, which is the one thing
+             * a security log has to be able to say. The count is exact
+             * on /botshield/metrics and the dashboard regardless. */
+            return;
+        }
+    }
 
     const char *ua = apr_table_get(r->headers_in, "User-Agent");
     const char *ts = apr_table_get(r->subprocess_env, "BS_TIME");
@@ -1050,7 +1158,39 @@ void bs_decision_log(request_rec *r,
     }
     ap_log_rerror(APLOG_MARK, level, 0, r,
                   "mod_botshield: decision %s", payload);
-    bs_decision_log_write(r, payload);
+
+    /* BotShieldAccessLog suppress=<outcomes>. Applied here because
+     * bs_decision_log is the one funnel every outcome passes through,
+     * and it runs before log_transaction, which is where the
+     * suppression is read.
+     *
+     * Keyed on outcome_for_metrics, not the possibly ~-prefixed log
+     * outcome: under LogOnly a "~block" did not block, the origin
+     * answered, and that request belongs in the access log like any
+     * other. Suppressing it would hide real traffic on the strength of
+     * a decision that was never enforced. */
+    unsigned al_mask = 0;
+    {
+        bs_dir_cfg *dc = ap_get_module_config(r->per_dir_config,
+                                              &botshield_module);
+        if (outcome_for_metrics) {
+            /* Unset means "operator expressed no opinion", which takes
+             * the compiled-in default rather than "log everything" --
+             * the common case should not need a directive. An explicit
+             * `BotShieldAccessLog on` sets the mask to 0 and is
+             * therefore distinguishable from unset. */
+            al_mask = (dc && dc->accesslog_suppress != BS_UNSET)
+                    ? (unsigned)dc->accesslog_suppress
+                    : BS_DEFAULT_ACCESSLOG_SUPPRESS;
+            int oi = bs_m_outcome_idx(outcome_for_metrics);
+            if (oi >= 0 && (al_mask & (1U << (unsigned)oi))) {
+                bs_suppress_access_log(r);
+            }
+        }
+    }
+
+    bs_decision_log_write(r, payload,
+                          bs_m_outcome_idx(outcome_for_metrics), al_mask);
     /* M9.2: counters derived from the same enum vocabulary. One log
      * line, up to four counter increments (tier, outcome, cookie when
      * applicable, provider when applicable). */
@@ -1604,10 +1744,7 @@ int bs_dashboard_handler(request_rec *r)
     ap_rputs("<section><h2>Outcomes</h2><table><thead><tr><th>Outcome</th>"
              "<th class='n'>Count</th><th class='n'>Share</th></tr></thead><tbody>", r);
     {
-        static const char *onames[BS_M_OUTCOME_COUNT] = {
-            "allow", "challenged", "verified", "block", "failopen",
-            "rate_limited", "inflight_capped", "pending_missing",
-            "misconfigured", "debug", "redirect" };
+        const char *const *onames = bs_m_outcome_names;
         int shown = 0;
         for (int i = 0; i < BS_M_OUTCOME_COUNT; i++) {
             if (!w.outcome[i]) continue;

@@ -175,6 +175,14 @@ struct bs_dir_cfg {
      * parking the score thresholds does not stop a floor, so it
      * cannot express "never challenge here" on its own. */
     int challenge_enabled;
+    /* BotShieldAccessLog: bitmask over BS_M_OUTCOME_*, suppress the
+     * Apache access-log line when the decision lands on a set bit.
+     * BS_UNSET = inherit / no suppression. An int mask rather than a
+     * bool because the two logs answer different questions: the access
+     * log is the traffic record, the decision log is the security
+     * record, and a flood should be able to leave the second while
+     * staying out of the first. */
+    int accesslog_suppress;
     int debug;
     int cookie_ttl;
     int difficulty;
@@ -430,6 +438,19 @@ typedef struct bs_server_cfg {
      * relying on the error log and/or their own CustomLog. */
     const char         *decision_log_path;
     apr_file_t         *decision_log_fd;
+    /* outcomes= filter: bitmask over BS_M_OUTCOME_*, -1 = record
+     * everything (the default and the historical behaviour). Under a
+     * flood the log is dominated by one repeated outcome -- 5,000
+     * near-identical challenged lines a minute measured live -- which
+     * rotates the interesting rarities out of retention.
+     *
+     * Filtering is all-or-nothing per outcome, with no sample rate on
+     * purpose. Whatever is named is kept whole: in a security log an
+     * absent line must mean "it did not happen", and sampling destroys
+     * that property for every outcome it touches. Volume and shape of
+     * what is not logged live on /botshield/dashboard, which counts
+     * every outcome exactly. */
+    int                 decision_log_outcomes;
     /* Index of this server's per-vhost metrics block, assigned once at
      * post_config. -1 until then (and for any server that somehow
      * misses the pass), which the metric writers read as "global

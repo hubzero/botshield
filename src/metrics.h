@@ -70,7 +70,7 @@ void bs_set_would_outcome(request_rec *r, const char *would);
  * ("|/usr/bin/rotatelogs ..."). Config-time only stores the string;
  * bs_open_decision_logs does the opening. */
 const char *bs_set_decision_log(cmd_parms *cmd, void *cfg_v,
-                                const char *arg);
+                                int argc, char *const argv[]);
 
 /* Open every configured BotShieldDecisionLog. Called from post_config
  * (as root, before privilege drop) so the descriptor is inherited by
@@ -121,6 +121,56 @@ int bs_open_decision_logs(apr_pool_t *pconf, server_rec *s);
  * returns before any side effect in that path, so a dry run still
  * produces its evidence. */
 void bs_suppress_access_log(request_rec *r);
+
+/* Outcome name -> BS_M_OUTCOME_* index, or -1. Exposed so the
+ * BotShieldAccessLog parser validates against the SAME vocabulary the
+ * decision log and metrics use, rather than a second copy of the list
+ * that would drift the first time an outcome is added. */
+/* Access-log suppression applied when the operator sets no
+ * BotShieldAccessLog. These four are the outcomes where BotShield
+ * generated the response itself and the application never ran, so the
+ * line records something the site did not serve. `allow` and the
+ * verify-endpoint outcomes are NOT in here: those either reached the
+ * origin or are the module answering its own endpoint, and both are
+ * real traffic.
+ *
+ * This is a deliberate incompleteness in the access log and is
+ * announced at startup rather than left to be discovered. Every
+ * suppressed request is still counted in requests_total, still on the
+ * dashboard, and still eligible for the decision log.
+ * `BotShieldAccessLog on` restores full logging. */
+/* Outcomes the decision log records when the operator sets no
+ * outcomes= key: the rare, actionable ones, UNION whatever the access
+ * log is suppressing for that request.
+ *
+ * The union is the point. Suppressing a line from the access log and
+ * omitting it from the decision log makes the request vanish from every
+ * log on the box -- it happened, the server answered it, and nothing
+ * says so. Deriving the default from the access-log mask makes
+ * "recorded somewhere" a property of the module rather than of the
+ * operator remembering to keep two directives in step.
+ *
+ * Computed per request, because BotShieldAccessLog is per-directory
+ * while BotShieldDecisionLog is per-server: there is no single
+ * suppression set at config time to union with. */
+#define BS_DEFAULT_DECISIONLOG_OUTCOMES \
+    ((1U << BS_M_OUTCOME_BLOCK)         | \
+     (1U << BS_M_OUTCOME_VERIFIED)      | \
+     (1U << BS_M_OUTCOME_RATE_LIMITED)  | \
+     (1U << BS_M_OUTCOME_MISCONFIGURED) | \
+     (1U << BS_M_OUTCOME_FAILOPEN)      | \
+     (1U << BS_M_OUTCOME_REDIRECT))
+
+#define BS_DEFAULT_ACCESSLOG_SUPPRESS \
+    ((1U << BS_M_OUTCOME_CHALLENGED)   | \
+     (1U << BS_M_OUTCOME_BLOCK)        | \
+     (1U << BS_M_OUTCOME_RATE_LIMITED) | \
+     (1U << BS_M_OUTCOME_REDIRECT))
+
+int bs_outcome_index(const char *name);
+
+/* Inverse of bs_outcome_index. Returns "?" out of range. */
+const char *bs_m_outcome_name(int idx);
 
 
 /* ----------------------------------------------------------------------

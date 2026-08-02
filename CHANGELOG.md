@@ -1,5 +1,151 @@
 # Changelog
 
+## 2026-08-02 (no request goes unrecorded)
+
+### Changed — the decision-log default now unions the access-log suppression
+
+With no `outcomes=` key, `BotShieldDecisionLog` records the actionable
+set -- `block`, `verified`, `rate_limited`, `misconfigured`, `failopen`,
+`redirect` -- **plus whatever `BotShieldAccessLog` is suppressing for
+that request**.
+
+Access-log suppression defaults to BotShield's own responses, and the
+decision log defaulted to the actionable set. Those two sensible
+defaults composed into a hole: a `challenged` request was suppressed
+from the access log AND absent from the decision log, so a request the
+server answered was recorded nowhere at all. Both settings looked
+correct in isolation.
+
+Unioning them makes "every request the server answered is recorded
+somewhere" a property of the module rather than of an operator keeping
+two directives in step. Computed per request, since `BotShieldAccessLog`
+is per-directory while `BotShieldDecisionLog` is per-server -- there is
+no single set at config time to union with.
+
+The cost is honest and should be planned for: `challenged` returns to
+the decision log, which under flood measured ~265 MB/hr of 1,125-byte
+lines, against ~31 MB/hr of shorter lines when the access log carried
+them. Naming `outcomes=` explicitly overrides the union and accepts the
+gap.
+
+The startup notice describes the real default rather than claiming
+"all outcomes", which is what unset used to mean.
+
+## 2026-08-02 (access-log suppression is the default)
+
+### Changed — `BotShieldAccessLog` defaults to suppressing BotShield's own responses
+
+With no directive, access-log lines are now suppressed for `challenged`,
+`block`, `rate_limited` and `redirect` -- the outcomes where BotShield
+generated the response and the application never ran. `allow` and the
+verify-endpoint outcomes still log: those either reached the origin or
+are the module answering its own endpoint, and both are real traffic.
+
+This makes the common case need no configuration. It also makes the
+access log deliberately incomplete relative to what the server answered,
+which is a real tradeoff in a file many sites treat as a system of
+record -- so it is announced once at startup rather than discovered by
+someone hunting for missing requests. `BotShieldAccessLog on` restores
+full logging; nothing is ever hidden from `botshield_requests_total`,
+the dashboard, or the decision log.
+
+`on` and unset are now distinguishable: unset takes the compiled default,
+`on` explicitly sets an empty suppression mask.
+
+### Result on the deployment this was built for
+
+The vhost config for a site under active crawl flood is now:
+
+    <LocationMatch "^/(login|register)(/|$)">
+        BotShieldEnabled On
+        BotShieldScoreHard    10000
+        BotShieldScoreCaptcha 10000
+    </LocationMatch>
+
+Both `BotShieldRequestTrigger` rules were removed. They no longer
+produced the challenge -- `first-sight-ip` does -- and their surviving
+job, the `log=` tag, had no automated consumer, with `path=` in the
+decision log already distinguishing the crawl pattern. The explicit
+`BotShieldAccessLog` line went too, being the default now.
+
+Measured with all three lines gone: `/login` and `/register` still serve
+the invisible check, the homepage is untouched, access log 0.86 MB/hr,
+decision log 0.36 MB/hr. The two parked thresholds remain, and are the
+only tuning left -- they guarantee the scope can never escalate past the
+invisible tier.
+
+## 2026-08-02 (decision-log volume control)
+
+### Added — `outcomes=` on `BotShieldDecisionLog`
+
+    BotShieldDecisionLog <path> [outcomes=<list>]
+
+Names the outcomes written to the module-owned decision log. Each named
+outcome is written **in full**; the rest get no per-request line.
+Omitting the key keeps the previous behaviour of logging every decision,
+so existing configs are unaffected -- the directive moved from `TAKE1`
+to `TAKE_ARGV` and the one-argument form still parses.
+
+Measured live under an active flood: **258 MB/hr -> 0**, with the rare
+actionable outcomes still recorded completely. At 1,125 bytes a line and
+5,000 challenges a minute, that volume is what spends whatever retention
+a rotation rule buys -- on the host this was built for, `size 100M
+rotate 6` from an hourly cron, it means every kept file is one hour of
+flood and the live file reaches ~258 MB between checks.
+
+**No sample rate, on purpose.** A 1-in-n mode was built and then removed
+before release. It is the obvious way to keep a cheap trace of a noisy
+outcome, and it costs the one property a security log must have: that an
+absent line means the event did not happen. It fails silently too --
+a thinned period and a quiet one read identically. An outcome is now
+either recorded completely or not at all.
+
+What filtering gives up is per-request detail, not knowledge: every
+outcome is still counted exactly in `/botshield/metrics` and on the
+dashboard. For forensic detail on a filtered outcome, add it to the list
+for the duration of the incident.
+
+Startup logs exactly what is being recorded, since a filtered log is
+indistinguishable from a complete one from the outside.
+
+### Changed — outcome names are now one table
+
+`bs_m_outcome_names[]` is file-scope with a `bs_m_outcome_name()`
+accessor, replacing a copy that lived inside the dashboard handler.
+Third place the vocabulary would have been spelled out; this session
+already lost time to `first-sight-ip` having two disagreeing defaults.
+
+## 2026-08-02 (BotShieldAccessLog)
+
+### Added — outcome-keyed access-log control, decoupled from triggers
+
+    BotShieldAccessLog on | off | suppress=<outcome[,outcome...]>
+
+Scope-level (`RSRC_CONF | ACCESS_CONF`), keyed on the decision outcome.
+
+Access-log suppression previously existed only as the `accesslog=on|off`
+trigger action key, which covers just the requests some rule's predicate
+matched. That was fine while rules made the decisions. It stopped being
+fine once the scoring defaults began raising challenges on their own:
+a scope could be fully protected and still pouring noise into the access
+log from challenged requests no rule matched, with the only workaround
+being to invent a rule whose sole purpose was logging.
+
+Measured on a live flood: `/register?return=<base64>` -- the same
+infinite URL space as `/login` -- was correctly challenged by the
+defaults while adding ~31 MB/hr to the archived access log, because the
+existing rule's glob was `path="/login*"`. With this directive the
+whole scope drops to 1.6 MB/hr and both rules keep their `log=` tag
+with no `accesslog=off` at all.
+
+Deliberate limits: requests BotShield never evaluated always log, so it
+cannot silence a site; and a `LogOnly` counterfactual (`~block`) is not
+suppressed, because nothing was enforced and the origin answered.
+
+Outcome names validate against `bs_outcome_index()`, the same table the
+decision log and metrics use, rather than a second copy of the list --
+this session already lost time to a default declared in two places.
+
 ## 2026-08-02 (request triggers can challenge; no-session-context is challenged by default)
 
 ### Added — `tier=` action key on triggers
