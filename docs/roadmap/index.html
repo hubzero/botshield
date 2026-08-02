@@ -90,6 +90,8 @@
 <section class="toc">
   <h2 class="toc__heading">On this page</h2>
   <ul class="toc__list">
+<li class="toc__item toc__item--level-2"><a href="#2026-08-02-client-classification-on-the-dashboard-v8-v9">2026-08-02 (client classification on the dashboard; v8 -&gt; v9)</a></li>
+<li class="toc__item toc__item--level-3"><a href="#added-botshield-clients-total-and-a-client-classification-chart">Added — `botshield_clients_*_total` and a Client classification chart</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-08-02-known-bots-pass-robots-txt-can-be-observed-before-it-is-enforced">2026-08-02 (known bots pass; robots.txt can be observed before it is enforced)</a></li>
 <li class="toc__item toc__item--level-3"><a href="#fixed-robots-txt-disallow-ignored-observe-mode">Fixed — robots.txt `Disallow` ignored observe mode</a></li>
 <li class="toc__item toc__item--level-3"><a href="#changed-declared-crawlers-are-no-longer-challenged-for-being-stateless">Changed — declared crawlers are no longer challenged for being stateless</a></li>
@@ -205,6 +207,29 @@
   </ul>
 </section>
         <div class="prose">
+<h2 id="2026-08-02-client-classification-on-the-dashboard-v8-v9">2026-08-02 (client classification on the dashboard; v8 -&gt; v9)</h2>
+<h3 id="added-botshield-clients-total-and-a-client-classification-chart">Added — <code>botshield_clients_*_total</code> and a Client classification chart</h3>
+<p>Six classes recorded per request: <code>browser</code>, <code>verified-bot</code>,
+<code>known-bot</code>, <code>unknown-bot</code>, <code>fake-bot</code>, <code>unknown</code>. Classification is
+already computed once at <code>post_read_request</code> and cached on the request
+pool, so recording it is a pointer deref and one relaxed add.</p>
+<p>The operationally useful split is <code>verified-bot</code> vs <code>fake-bot</code> -- same
+User-Agent, separated only by the IP cross-check against published
+ranges. It also makes a stale ranges file visible as a shape change
+(<code>known-bot</code> climbing while <code>verified-bot</code> flatlines) rather than as
+silently lost crawler credit.</p>
+<p>The metrics enum is a deliberate copy of <code>bs_ua_class_label</code>, not a cast
+of it: this index is persisted in the state file and therefore a wire
+format, so it must not shift if the classifier's enum is reordered.
+<code>bs_m_class_idx()</code> is the single mapping point and is a <code>switch</code> without
+a <code>default</code>, so a label added to the classifier fails the build here.</p>
+<p>In the rings and the per-vhost blocks like the other traffic dimensions,
+so it is windowed and tabbed. Slot grows 296 -&gt; 344 bytes.</p>
+<p>Drawn with categorical slots rather than status tokens. These are kinds
+of client, not a severity scale -- a known bot is not &quot;worse&quot; than a
+browser. <code>fake-bot</code> is the one class carrying a verdict and it still
+takes a categorical slot, because mixing the two vocabularies in one
+chart would make the other five read as severity levels.</p>
 <h2 id="2026-08-02-known-bots-pass-robots-txt-can-be-observed-before-it-is-enforced">2026-08-02 (known bots pass; robots.txt can be observed before it is enforced)</h2>
 <h3 id="fixed-robots-txt-disallow-ignored-observe-mode">Fixed — robots.txt <code>Disallow</code> ignored observe mode</h3>
 <p><code>BotShieldRobotsTxt</code> returned 403 for a disallowed path unconditionally,

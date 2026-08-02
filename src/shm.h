@@ -160,7 +160,7 @@ extern "C" {
  * size-checked on load, so an older file would be refused on size
  * alone even without the version bump; the bump makes the rejection
  * say why. */
-#define BS_STATE_FORMAT_VERSION   8
+#define BS_STATE_FORMAT_VERSION   9
 #define BS_STATE_MAX_AGE_SECS     (14 * 86400)
 #define BS_FNV64_SEED             0xcbf29ce484222325ULL
 
@@ -221,6 +221,24 @@ typedef enum {
     BS_M_RESP_OBSERVE,         /* dashboard / metrics / policy-status */
     BS_M_RESP_COUNT
 } bs_m_resp;
+
+/* Client classification, mirroring bs_ua_class_label in ua_class.h.
+ * Recorded per request alongside the status class, so the dashboard can
+ * answer "who is visiting" and not only "what did we answer".
+ *
+ * Indices are a deliberate copy rather than a reuse of the ua_class
+ * enum: this one is persisted in the state file, so its numbering is a
+ * wire format that must not shift if the classifier's enum is
+ * reordered. bs_m_class_idx() maps between them in one place. */
+typedef enum {
+    BS_M_CLASS_BROWSER = 0,
+    BS_M_CLASS_VERIFIED_BOT,
+    BS_M_CLASS_KNOWN_BOT,
+    BS_M_CLASS_UNKNOWN_BOT,
+    BS_M_CLASS_FAKE_BOT,
+    BS_M_CLASS_UNKNOWN,
+    BS_M_CLASS_COUNT
+} bs_m_class;
 
 /* HTTP status class for the site-wide traffic counters. Separate from
  * the decision vocabulary: these count every request the server logs,
@@ -472,6 +490,7 @@ typedef struct {
     apr_uint64_t req_cookie;               /* carried a session cookie */
     apr_uint64_t req_status[BS_M_STATUS_COUNT];
     apr_uint64_t req_resp[BS_M_RESP_COUNT];
+    apr_uint64_t req_class[BS_M_CLASS_COUNT];
 } bs_metrics_slot;
 
 /* M9.2 metrics block. Lives in SHM next to the rate-counter pool. */
@@ -485,6 +504,7 @@ typedef struct {
     apr_uint64_t req_cookie;
     apr_uint64_t req_status[BS_M_STATUS_COUNT];
     apr_uint64_t req_resp[BS_M_RESP_COUNT];
+    apr_uint64_t req_class[BS_M_CLASS_COUNT];
     /* Persistence gauges. */
     apr_uint64_t state_saves_total;
     apr_uint64_t state_save_last_unix;

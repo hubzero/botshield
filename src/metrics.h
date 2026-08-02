@@ -183,6 +183,9 @@ int bs_outcome_index(const char *name);
 /* Inverse of bs_outcome_index. Returns "?" out of range. */
 const char *bs_m_outcome_name(int idx);
 
+/* Classification index -> display name ("browser", "verified-bot", ...). */
+const char *bs_m_class_name(int idx);
+
 
 /* ----------------------------------------------------------------------
  * Windowed counter reads (dashboard)
@@ -197,6 +200,7 @@ typedef struct {
     apr_uint64_t req_cookie;
     apr_uint64_t req_status[BS_M_STATUS_COUNT];
     apr_uint64_t req_resp[BS_M_RESP_COUNT];
+    apr_uint64_t req_class[BS_M_CLASS_COUNT];
     apr_uint64_t decisions;      /* sum of outcome[] — every decision logs one */
 } bs_metrics_window;
 
@@ -223,7 +227,7 @@ void bs_metrics_bucket_add(int vhost_idx, int tier_idx,
  * vhost — including requests BotShield never evaluated, which is the
  * whole point: it supplies the denominator for coverage. */
 void bs_metrics_traffic_add(int vhost_idx, int status_idx,
-                            int has_cookie, int resp_idx);
+                            int has_cookie, int resp_idx, int class_idx);
 
 /* /botshield/metrics handler — Prometheus exposition format 0.0.4.
  * Mounted via the request dispatcher in botshield.c. Apache's

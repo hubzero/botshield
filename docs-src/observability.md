@@ -290,6 +290,37 @@ Suppressing the access log does not touch the decision log, which is
 the point — the access log is the traffic record, the decision log is
 the security record.
 
+### Client classification — who is visiting
+
+Every request is classified once at `post_read_request` and the result
+cached, so recording it costs a pointer deref. Six classes, on the
+dashboard as **Client classification** and in Prometheus as
+`botshield_clients_*_total`:
+
+| Class | Meaning |
+|---|---|
+| `browser` | UA matched a real-browser template. |
+| `verified-bot` | UA matched the allow list **and** the IP is in that crawler's published ranges. |
+| `known-bot` | UA is in the bot directory, but not IP-verified. |
+| `unknown-bot` | UA has bot-shaped tokens with no directory entry. |
+| `fake-bot` | UA claims a crawler, IP is outside its published ranges — spoofed. |
+| `unknown` | Matched no classifier. |
+
+The distinction that matters operationally is `verified-bot` vs
+`fake-bot`: both send the same User-Agent, and only the IP cross-check
+separates them. A rising `fake-bot` count is someone impersonating a
+crawler; a rising `known-bot` count with `verified-bot` flat can mean a
+ranges file has gone stale rather than that traffic changed.
+
+The metrics index is a deliberate copy of `bs_ua_class_label` rather
+than a cast of it. This one is persisted in the state file, so its
+numbering is a wire format; `bs_m_class_idx()` maps between the two in
+one place, and a new label added to the classifier without a case there
+fails the build.
+
+Like the other traffic dimensions it lives in the bucket rings and the
+per-vhost blocks, so it is windowed and tabbed with everything else.
+
 ### Response breakout — who answered
 
 The status-class counters cannot tell a BotShield 403 from an

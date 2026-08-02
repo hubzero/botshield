@@ -1,5 +1,35 @@
 # Changelog
 
+## 2026-08-02 (client classification on the dashboard; v8 -> v9)
+
+### Added — `botshield_clients_*_total` and a Client classification chart
+
+Six classes recorded per request: `browser`, `verified-bot`,
+`known-bot`, `unknown-bot`, `fake-bot`, `unknown`. Classification is
+already computed once at `post_read_request` and cached on the request
+pool, so recording it is a pointer deref and one relaxed add.
+
+The operationally useful split is `verified-bot` vs `fake-bot` -- same
+User-Agent, separated only by the IP cross-check against published
+ranges. It also makes a stale ranges file visible as a shape change
+(`known-bot` climbing while `verified-bot` flatlines) rather than as
+silently lost crawler credit.
+
+The metrics enum is a deliberate copy of `bs_ua_class_label`, not a cast
+of it: this index is persisted in the state file and therefore a wire
+format, so it must not shift if the classifier's enum is reordered.
+`bs_m_class_idx()` is the single mapping point and is a `switch` without
+a `default`, so a label added to the classifier fails the build here.
+
+In the rings and the per-vhost blocks like the other traffic dimensions,
+so it is windowed and tabbed. Slot grows 296 -> 344 bytes.
+
+Drawn with categorical slots rather than status tokens. These are kinds
+of client, not a severity scale -- a known bot is not "worse" than a
+browser. `fake-bot` is the one class carrying a verdict and it still
+takes a categorical slot, because mixing the two vocabularies in one
+chart would make the other five read as severity levels.
+
 ## 2026-08-02 (known bots pass; robots.txt can be observed before it is enforced)
 
 ### Fixed — robots.txt `Disallow` ignored observe mode
