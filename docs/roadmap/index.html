@@ -90,6 +90,8 @@
 <section class="toc">
   <h2 class="toc__heading">On this page</h2>
   <ul class="toc__list">
+<li class="toc__item toc__item--level-2"><a href="#2026-08-02-decision-log-defaults-on">2026-08-02 (decision log defaults on)</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-botshielddecisionlog-defaults-to-logs-botshield-log">Changed — `BotShieldDecisionLog` defaults to `logs/botshield.log`</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-08-02-no-request-goes-unrecorded">2026-08-02 (no request goes unrecorded)</a></li>
 <li class="toc__item toc__item--level-3"><a href="#changed-the-decision-log-default-now-unions-the-access-log-suppression">Changed — the decision-log default now unions the access-log suppression</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-08-02-access-log-suppression-is-the-default">2026-08-02 (access-log suppression is the default)</a></li>
@@ -199,6 +201,19 @@
   </ul>
 </section>
         <div class="prose">
+<h2 id="2026-08-02-decision-log-defaults-on">2026-08-02 (decision log defaults on)</h2>
+<h3 id="changed-botshielddecisionlog-defaults-to-logs-botshield-log">Changed — <code>BotShieldDecisionLog</code> defaults to <code>logs/botshield.log</code></h3>
+<p>With no directive, any server that has <code>BotShieldEnabled</code> somewhere in
+it now writes a decision log to <code>logs/botshield.log</code>, server-root
+relative like Apache's own <code>ErrorLog</code>. A module that is loaded but never
+switched on still writes nothing, so installing the package does not
+leave a file on hosts that never turn it on -- the same reasoning that
+keeps a <code>CustomLog</code> out of the shipped drop-in.</p>
+<p>Defaulting it on is what makes the &quot;recorded somewhere&quot; guarantee hold
+without configuration. Access-log suppression is already a default; with
+no decision log by default the two composed into requests that appeared
+in no log at all.</p>
+<p>Set the directive to move the path or hand it to a piped-log program.</p>
 <h2 id="2026-08-02-no-request-goes-unrecorded">2026-08-02 (no request goes unrecorded)</h2>
 <h3 id="changed-the-decision-log-default-now-unions-the-access-log-suppression">Changed — the decision-log default now unions the access-log suppression</h3>
 <p>With no <code>outcomes=</code> key, <code>BotShieldDecisionLog</code> records the actionable

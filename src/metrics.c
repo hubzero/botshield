@@ -746,8 +746,15 @@ int bs_open_decision_logs(apr_pool_t *pconf, server_rec *s)
     for (server_rec *sv = s; sv; sv = sv->next) {
         bs_server_cfg *scfg = ap_get_module_config(sv->module_config,
                                                    &botshield_module);
-        if (!scfg || !scfg->decision_log_path || scfg->decision_log_fd) {
-            continue;
+        if (!scfg || scfg->decision_log_fd) continue;
+        /* No directive: fall back to the default path, but only where
+         * BotShield is actually enabled. The decision log is the only
+         * record of a suppressed request, so defaulting it on is what
+         * makes "recorded somewhere" hold without configuration --
+         * see BS_DEFAULT_ACCESSLOG_SUPPRESS. */
+        if (!scfg->decision_log_path) {
+            if (!scfg->any_enabled) continue;
+            scfg->decision_log_path = BS_DEFAULT_DECISION_LOG;
         }
 
         const char *spec = scfg->decision_log_path;
@@ -1075,7 +1082,7 @@ void bs_decision_log(request_rec *r,
      * mod_log_config:
      *
      *   LogFormat "%{cu}t %a %>s tier=%{BS_TIER}e ..." botshield
-     *   CustomLog logs/botshield-decisions.log botshield env=BOTSHIELD
+     *   CustomLog logs/botshield.log botshield env=BOTSHIELD
      *
      * subprocess_env (not r->notes) is the right vehicle because
      * Apache's internal_internal_redirect deep-copies subprocess_env

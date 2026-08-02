@@ -94,6 +94,7 @@
 <li class="toc__item toc__item--level-3"><a href="#where-the-decision-line-goes">Where the decision line goes</a></li>
 <li class="toc__item toc__item--level-3"><a href="#trimming-access-log-volume-without-losing-decisions">Trimming access-log volume without losing decisions</a></li>
 <li class="toc__item toc__item--level-3"><a href="#field-vocabulary">Field vocabulary</a></li>
+<li class="toc__item toc__item--level-3"><a href="#the-decision-log">The decision log</a></li>
 <li class="toc__item toc__item--level-3"><a href="#controlling-decision-log-volume">Controlling decision-log volume</a></li>
 <li class="toc__item toc__item--level-3"><a href="#controlling-the-access-log">Controlling the access log</a></li>
 <li class="toc__item toc__item--level-3"><a href="#response-breakout-who-answered">Response breakout — who answered</a></li>
@@ -149,7 +150,7 @@ The cost is Apache's <code>[timestamp] [:notice] [pid]</code> prefix, interleavi
 with every other message, and boring passes demoted to <code>debug</code>.</p>
 <p><strong>2. <code>BotShieldDecisionLog</code> (recommended for a dedicated file).</strong> A
 module-owned file, written at decision time:</p>
-<pre><code class="language-apache">BotShieldDecisionLog logs/botshield-decisions.log
+<pre><code class="language-apache">BotShieldDecisionLog logs/botshield.log
 # or hand rotation to Apache's helper:
 BotShieldDecisionLog &quot;|/usr/bin/rotatelogs /var/log/httpd/bs.%Y%m%d 86400&quot;
 </code></pre>
@@ -183,7 +184,7 @@ did not get is a silent blind spot.</p>
 <p><strong>3. A <code>CustomLog</code> via mod_log_config (legacy).</strong> The module publishes
 every field to <code>subprocess_env</code> (<code>BS_TIER</code>, <code>BS_OUTCOME</code>, …) plus a
 <code>BOTSHIELD</code> marker, so a <code>CustomLog</code> can render them:</p>
-<pre><code class="language-apache">CustomLog logs/botshield-decisions.log botshield env=BOTSHIELD
+<pre><code class="language-apache">CustomLog logs/botshield.log botshield env=BOTSHIELD
 </code></pre>
 <p>Still supported, and the right choice if you want to compose botshield
 fields into an existing format. Two limitations: it cannot survive
@@ -234,8 +235,20 @@ commit time by a small awk validator (<code>tests/scripts/decision-log- awk-vali
 </tr>
 </tbody>
 </table>
+<h3 id="the-decision-log">The decision log</h3>
+<p><code>BotShieldDecisionLog</code> defaults to <strong><code>logs/botshield.log</code></strong> (server-root
+relative, like Apache's own <code>ErrorLog</code>) for any server with
+<code>BotShieldEnabled</code> somewhere in it. A module that is loaded but never
+switched on writes nothing, so installing the package does not litter
+<code>/var/log/httpd</code> on hosts that never turn it on.</p>
+<p>Defaulting it on is what makes the &quot;recorded somewhere&quot; guarantee hold
+without configuration: access-log suppression is also a default, so
+without a decision log by default the two would compose into requests
+that appear in no log at all.</p>
+<p>Set the directive to move it, or to hand it to a piped-log program that
+owns its own rotation.</p>
 <h3 id="controlling-decision-log-volume">Controlling decision-log volume</h3>
-<pre><code class="language-apache">BotShieldDecisionLog logs/botshield-decisions.log \
+<pre><code class="language-apache">BotShieldDecisionLog logs/botshield.log \
     outcomes=block,verified,rate_limited,misconfigured,failopen,redirect
 </code></pre>
 <table>
@@ -305,7 +318,7 @@ lasts and accept the volume. That is a deliberate, reversible decision
 rather than a standing lottery.</p>
 <p>Startup states exactly what is being recorded, because a filtered log
 looks identical to a complete one from the outside:</p>
-<pre><code>decision log active: logs/botshield-decisions.log (outcomes=verified,
+<pre><code>decision log active: logs/botshield.log (outcomes=verified,
 block,failopen,rate_limited,misconfigured,redirect only, each logged in
 full; other outcomes get no per-request line but are still counted
 exactly in /botshield/metrics and the dashboard)

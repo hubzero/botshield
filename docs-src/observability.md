@@ -50,7 +50,7 @@ with every other message, and boring passes demoted to `debug`.
 module-owned file, written at decision time:
 
 ```apache
-BotShieldDecisionLog logs/botshield-decisions.log
+BotShieldDecisionLog logs/botshield.log
 # or hand rotation to Apache's helper:
 BotShieldDecisionLog "|/usr/bin/rotatelogs /var/log/httpd/bs.%Y%m%d 86400"
 ```
@@ -93,7 +93,7 @@ every field to `subprocess_env` (`BS_TIER`, `BS_OUTCOME`, …) plus a
 `BOTSHIELD` marker, so a `CustomLog` can render them:
 
 ```apache
-CustomLog logs/botshield-decisions.log botshield env=BOTSHIELD
+CustomLog logs/botshield.log botshield env=BOTSHIELD
 ```
 
 Still supported, and the right choice if you want to compose botshield
@@ -128,10 +128,26 @@ awk-validator.sh`).
 | `alg` | `-`, `sha256-zeros`, `captcha-<provider>` |
 | `reason` | quoted short string (comma-joined reason names) or `-` |
 
+### The decision log
+
+`BotShieldDecisionLog` defaults to **`logs/botshield.log`** (server-root
+relative, like Apache's own `ErrorLog`) for any server with
+`BotShieldEnabled` somewhere in it. A module that is loaded but never
+switched on writes nothing, so installing the package does not litter
+`/var/log/httpd` on hosts that never turn it on.
+
+Defaulting it on is what makes the "recorded somewhere" guarantee hold
+without configuration: access-log suppression is also a default, so
+without a decision log by default the two would compose into requests
+that appear in no log at all.
+
+Set the directive to move it, or to hand it to a piped-log program that
+owns its own rotation.
+
 ### Controlling decision-log volume
 
 ```apache
-BotShieldDecisionLog logs/botshield-decisions.log \
+BotShieldDecisionLog logs/botshield.log \
     outcomes=block,verified,rate_limited,misconfigured,failopen,redirect
 ```
 
@@ -201,7 +217,7 @@ rather than a standing lottery.
 Startup states exactly what is being recorded, because a filtered log
 looks identical to a complete one from the outside:
 
-    decision log active: logs/botshield-decisions.log (outcomes=verified,
+    decision log active: logs/botshield.log (outcomes=verified,
     block,failopen,rate_limited,misconfigured,redirect only, each logged in
     full; other outcomes get no per-request line but are still counted
     exactly in /botshield/metrics and the dashboard)

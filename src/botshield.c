@@ -819,8 +819,11 @@ static const command_rec bs_cmds[] = {
                  "migration note instead of 'unknown directive'."),
     AP_INIT_TAKE_ARGV("BotShieldDecisionLog", bs_set_decision_log,
                  NULL, RSRC_CONF,
-                 "Module-owned decision log. Value is a server-root-"
-                 "relative path (\"logs/botshield-decisions.log\"), an "
+                 "Module-owned decision log. Defaults to "
+                 "logs/botshield.log for any server with "
+                 "BotShieldEnabled somewhere in it; a loaded but "
+                 "unused module writes nothing. Value is a "
+                 "server-root-relative path, an "
                  "absolute path, or a piped-log spec "
                  "(\"|/usr/bin/rotatelogs /var/log/bs.%Y%m%d 86400\"). "
                  "Written directly from the decision path rather than "

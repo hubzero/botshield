@@ -167,6 +167,17 @@ void bs_suppress_access_log(request_rec *r);
      (1U << BS_M_OUTCOME_RATE_LIMITED) | \
      (1U << BS_M_OUTCOME_REDIRECT))
 
+/* Path the decision log takes when BotShieldDecisionLog is absent.
+ * Server-root relative, so logs/ resolves the same way Apache's own
+ * ErrorLog and CustomLog do.
+ *
+ * Only opened for a server with BotShieldEnabled somewhere in it. A
+ * module that is loaded but never switched on writes nothing -- same
+ * reasoning as the shipped drop-in not carrying a CustomLog, which
+ * would otherwise leave an empty file on every host that installed the
+ * RPM. */
+#define BS_DEFAULT_DECISION_LOG "logs/botshield.log"
+
 int bs_outcome_index(const char *name);
 
 /* Inverse of bs_outcome_index. Returns "?" out of range. */

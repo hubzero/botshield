@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-08-02 (decision log defaults on)
+
+### Changed — `BotShieldDecisionLog` defaults to `logs/botshield.log`
+
+With no directive, any server that has `BotShieldEnabled` somewhere in
+it now writes a decision log to `logs/botshield.log`, server-root
+relative like Apache's own `ErrorLog`. A module that is loaded but never
+switched on still writes nothing, so installing the package does not
+leave a file on hosts that never turn it on -- the same reasoning that
+keeps a `CustomLog` out of the shipped drop-in.
+
+Defaulting it on is what makes the "recorded somewhere" guarantee hold
+without configuration. Access-log suppression is already a default; with
+no decision log by default the two composed into requests that appeared
+in no log at all.
+
+Set the directive to move the path or hand it to a piped-log program.
+
 ## 2026-08-02 (no request goes unrecorded)
 
 ### Changed — the decision-log default now unions the access-log suppression
