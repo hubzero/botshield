@@ -186,6 +186,10 @@ const char *bs_m_outcome_name(int idx);
 /* Classification index -> display name ("browser", "verified-bot", ...). */
 const char *bs_m_class_name(int idx);
 
+/* Log an observability-endpoint hit to the decision log and suppress
+ * its access-log line. Does not touch the decision counters. */
+void bs_log_observability_request(request_rec *r);
+
 
 /* ----------------------------------------------------------------------
  * Windowed counter reads (dashboard)

@@ -1,20 +1,5 @@
 [
   {
-    "slug": "amzn-searchbot",
-    "name": "Amzn-SearchBot",
-    "kind": "BOT",
-    "operator": "Amazon",
-    "operatorUrl": "https://developer.amazon.com/amazonbot",
-    "category": "SEARCH_ENGINE_CRAWLER",
-    "description": "Amazon's search-focused crawler that indexes content for surfacing in Amazon search experiences such as Alexa and Rufus (distinct from Amazonbot, which is used for AI training).",
-    "followsRobotsTxt": true,
-    "userAgentPatterns": ["Amzn-SearchBot"],
-    "userAgents": [
-      "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; Amzn-SearchBot/0.1) Chrome/119.0.6045.214 Safari/537.36"
-    ],
-    "signatureAgentUrl": null
-  },
-  {
     "slug": "ccbot",
     "name": "CCBot",
     "kind": "BOT",
@@ -23,8 +8,12 @@
     "category": "ARCHIVER",
     "description": "Nutch-based crawler that builds the Common Crawl open web corpus, an openly-licensed snapshot of the web widely used for research and AI training.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["CCBot"],
-    "userAgents": ["CCBot/2.0 (https://commoncrawl.org/faq/)"],
+    "userAgentPatterns": [
+      "CCBot"
+    ],
+    "userAgents": [
+      "CCBot/2.0 (https://commoncrawl.org/faq/)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -36,24 +25,11 @@
     "category": "AI_CRAWLER",
     "description": "Anthropic's general-purpose web crawler that collects public web content potentially used for training and improving Claude foundation models.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["ClaudeBot"],
+    "userAgentPatterns": [
+      "ClaudeBot"
+    ],
     "userAgents": [
       "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; ClaudeBot/1.0; +claudebot@anthropic.com)"
-    ],
-    "signatureAgentUrl": null
-  },
-  {
-    "slug": "claude-searchbot",
-    "name": "Claude-SearchBot",
-    "kind": "BOT",
-    "operator": "Anthropic",
-    "operatorUrl": "https://support.claude.com/en/articles/8896518-does-anthropic-crawl-data-from-the-web-and-how-can-site-owners-block-the-crawler",
-    "category": "AI_SEARCH",
-    "description": "Anthropic crawler that fetches and indexes pages to improve search-result quality for Claude's web-search feature, distinct from training and user-initiated fetches.",
-    "followsRobotsTxt": true,
-    "userAgentPatterns": ["Claude-SearchBot"],
-    "userAgents": [
-      "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; Claude-SearchBot/1.0; +searchbot@anthropic.com)"
     ],
     "signatureAgentUrl": null
   },
@@ -66,8 +42,12 @@
     "category": "AI_SEARCH",
     "description": "xAI crawler associated with Grok's web-search tooling that fetches pages to provide current information for AI-generated answers.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["xAI-SearchBot"],
-    "userAgents": ["Mozilla/5.0 (compatible; xAI-SearchBot/1.0; +https://x.ai)"],
+    "userAgentPatterns": [
+      "xAI-SearchBot"
+    ],
+    "userAgents": [
+      "Mozilla/5.0 (compatible; xAI-SearchBot/1.0; +https://x.ai)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -79,7 +59,9 @@
     "category": "ACADEMIC_RESEARCH",
     "description": "Crawler that discovers and indexes academic papers and PDFs for the Semantic Scholar scholarly search engine operated by Ai2.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["SemanticScholarBot"],
+    "userAgentPatterns": [
+      "SemanticScholarBot"
+    ],
     "userAgents": [
       "Mozilla/5.0 (compatible) SemanticScholarBot (+https://www.semanticscholar.org/crawler)"
     ],
@@ -94,7 +76,9 @@
     "category": "ACADEMIC_RESEARCH",
     "description": "Nutch-based research crawler operated by CMU that builds the ClueWeb web-corpus datasets used for information-retrieval and NLP research.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["ClueWeb-Crawler"],
+    "userAgentPatterns": [
+      "ClueWeb-Crawler"
+    ],
     "userAgents": [
       "ClueWeb-Crawler/1.0 (+https://boston.lti.cs.cmu.edu/CMU-ClueWeb-Crawler/; mailto:cmu-clueweb-crawler@andrew.cmu.edu)/Nutch-1.22-SNAPSHOT (CMU ClueWeb Crawler for research; https://boston.lti.cs.cmu.edu/CMU-ClueWeb-Crawler/)"
     ],
@@ -107,10 +91,14 @@
     "operator": "Amazon Web Services",
     "operatorUrl": "https://docs.aws.amazon.com/kendra/latest/dg/data-source-v2-web-crawler.html",
     "category": "OTHER",
-    "description": "Customer-operated AWS Kendra web crawler connector that indexes public or intranet sites into a Kendra enterprise-search index on behalf of an AWS account holder.",
+    "description": "Customer-operated AWS Kendra web crawler connector: each AWS customer configures it over sites they choose, so it is not Amazon crawling for its own AI training. Deliberately overrides the upstream entry, which classifies it AI_CRAWLER (botgroup ai-train) and uses the narrower pattern 'amazon-kendra-'.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["amazon-kendra"],
-    "userAgents": ["amazon-kendra"],
+    "userAgentPatterns": [
+      "amazon-kendra"
+    ],
+    "userAgents": [
+      "amazon-kendra"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -122,8 +110,12 @@
     "category": "SEARCH_ENGINE_OPTIMIZATION",
     "description": "Russian SEO/backlink intelligence crawler that indexes pages and links to power MegaIndex's competitive-research and SEO tooling.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["MegaIndex.ru"],
-    "userAgents": ["Mozilla/5.0 (compatible; MegaIndex.ru/2.0; +http://megaindex.com/crawler)"],
+    "userAgentPatterns": [
+      "MegaIndex.ru"
+    ],
+    "userAgents": [
+      "Mozilla/5.0 (compatible; MegaIndex.ru/2.0; +http://megaindex.com/crawler)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -135,8 +127,12 @@
     "category": "SEARCH_ENGINE_CRAWLER",
     "description": "Web crawler for the Exalead search engine (now part of Dassault Systemes), historically used to power public web search and now backing enterprise/vertical search products.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["Exabot"],
-    "userAgents": ["Exabot"],
+    "userAgentPatterns": [
+      "Exabot"
+    ],
+    "userAgents": [
+      "Exabot"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -148,7 +144,9 @@
     "category": "SEARCH_ENGINE_CRAWLER",
     "description": "Legacy crawler originally built by Fast Search & Transfer for the AlltheWeb / Overture / AltaVista search engines (the public service was shut down by Yahoo in 2011, so any current traffic is most likely a spoof or a fork still using the historical UA).",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["FAST-WebCrawler"],
+    "userAgentPatterns": [
+      "FAST-WebCrawler"
+    ],
     "userAgents": [
       "FAST-WebCrawler/3.8 (crawler at trd dot overture dot com; http://www.alltheweb.com/help/webmaster/crawler)"
     ],
@@ -163,8 +161,12 @@
     "category": "OTHER",
     "description": "Google-operated CONNECT proxy that prefetches cross-origin resources on behalf of Chrome users without revealing user identity to the destination origin. Honours /.well-known/traffic-advice rather than robots.txt.",
     "followsRobotsTxt": false,
-    "userAgentPatterns": ["Chrome Privacy Preserving Prefetch Proxy"],
-    "userAgents": ["Chrome Privacy Preserving Prefetch Proxy"],
+    "userAgentPatterns": [
+      "Chrome Privacy Preserving Prefetch Proxy"
+    ],
+    "userAgents": [
+      "Chrome Privacy Preserving Prefetch Proxy"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -176,7 +178,9 @@
     "category": "AI_SEARCH",
     "description": "Perplexity's indexing crawler that fetches pages to populate the Perplexity AI search engine's results.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["PerplexityBot"],
+    "userAgentPatterns": [
+      "PerplexityBot"
+    ],
     "userAgents": [
       "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; PerplexityBot/1.0; +https://perplexity.ai/perplexitybot)"
     ],
@@ -191,7 +195,9 @@
     "category": "AI_ASSISTANT",
     "description": "Perplexity's on-demand fetcher invoked when a user asks the AI to read a specific page; distinct from the indexing crawler PerplexityBot.",
     "followsRobotsTxt": false,
-    "userAgentPatterns": ["Perplexity-User"],
+    "userAgentPatterns": [
+      "Perplexity-User"
+    ],
     "userAgents": [
       "Mozilla/5.0 (compatible; Perplexity-User/1.0; +https://perplexity.ai/perplexity-user)"
     ],
@@ -206,8 +212,12 @@
     "category": "AI_CRAWLER",
     "description": "Mistral AI's web crawler used to gather public web content for model training and downstream products.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["MistralBot"],
-    "userAgents": ["Mozilla/5.0 (compatible; MistralBot/1.0; +https://mistral.ai)"],
+    "userAgentPatterns": [
+      "MistralBot"
+    ],
+    "userAgents": [
+      "Mozilla/5.0 (compatible; MistralBot/1.0; +https://mistral.ai)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -219,8 +229,12 @@
     "category": "AI_CRAWLER",
     "description": "Cohere's web crawler used to gather public web content for foundation-model training and product features.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["CohereBot"],
-    "userAgents": ["Mozilla/5.0 (compatible; CohereBot/1.0; +https://cohere.com/bot)"],
+    "userAgentPatterns": [
+      "CohereBot"
+    ],
+    "userAgents": [
+      "Mozilla/5.0 (compatible; CohereBot/1.0; +https://cohere.com/bot)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -232,7 +246,9 @@
     "category": "AI_CRAWLER",
     "description": "ByteDance's general-purpose crawler used for content discovery and AI training across TikTok / Douyin / Toutiao products. Multiple UA variants exist; this entry matches the 'Bytespider' substring, catching the spider-feedback@bytedance.com variant and other Bytespider-tagged shapes.",
     "followsRobotsTxt": false,
-    "userAgentPatterns": ["Bytespider"],
+    "userAgentPatterns": [
+      "Bytespider"
+    ],
     "userAgents": [
       "Mozilla/5.0 (Linux; Android 5.0) AppleWebKit/537.36 (KHTML, like Gecko) Mobile Safari/537.36 (compatible; Bytespider; spider-feedback@bytedance.com)"
     ],
@@ -247,8 +263,12 @@
     "category": "PAGE_PREVIEW",
     "description": "Bit.ly's link-expander/metadata fetcher that resolves shortened URLs and extracts page metadata for previews surfaced in Bitly products.",
     "followsRobotsTxt": false,
-    "userAgentPatterns": ["bitlybot"],
-    "userAgents": ["bitlybot/3.0 (+http://bit.ly/)"],
+    "userAgentPatterns": [
+      "bitlybot"
+    ],
+    "userAgents": [
+      "bitlybot/3.0 (+http://bit.ly/)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -260,8 +280,12 @@
     "category": "SEARCH_ENGINE_OPTIMIZATION",
     "description": "Operator-controlled desktop SEO auditing spider used by site owners and consultants to crawl and audit their own (or contracted) sites for SEO issues. UA is sometimes customized; default identifies as Screaming Frog SEO Spider.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["Screaming Frog SEO Spider"],
-    "userAgents": ["Screaming Frog SEO Spider/23.2"],
+    "userAgentPatterns": [
+      "Screaming Frog SEO Spider"
+    ],
+    "userAgents": [
+      "Screaming Frog SEO Spider/23.2"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -273,7 +297,9 @@
     "category": "OTHER",
     "description": "Chrome running with --headless. Distinct UA token (HeadlessChrome instead of Chrome) used by Puppeteer / Playwright / WebDriver and other automation harnesses. No single operator; flag identifies the request as automated regardless of who's driving it.",
     "followsRobotsTxt": false,
-    "userAgentPatterns": ["HeadlessChrome"],
+    "userAgentPatterns": [
+      "HeadlessChrome"
+    ],
     "userAgents": [
       "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/133.0.0.0 Safari/537.36"
     ],
@@ -288,8 +314,12 @@
     "category": "AI_CRAWLER",
     "description": "DeepSeek's web crawler used to gather public web content for training the DeepSeek family of foundation models.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["DeepSeekBot"],
-    "userAgents": ["Mozilla/5.0 (compatible; DeepSeekBot/1.0; +https://www.deepseek.com/bot)"],
+    "userAgentPatterns": [
+      "DeepSeekBot"
+    ],
+    "userAgents": [
+      "Mozilla/5.0 (compatible; DeepSeekBot/1.0; +https://www.deepseek.com/bot)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -301,7 +331,9 @@
     "category": "OTHER",
     "description": "Self-described 'test phase' crawler with no documented operator or homepage. UA itself reads 'In_the_test_phase,_if_the_ThinkBot_brings_you_trouble,_please_block_its_IP_address'. Catalogued to give it a stable slug for log analysis and rate-limiting; the entry asserts no claim about legitimacy.",
     "followsRobotsTxt": false,
-    "userAgentPatterns": ["ThinkBot"],
+    "userAgentPatterns": [
+      "ThinkBot"
+    ],
     "userAgents": [
       "Mozilla/5.0 (compatible; ThinkBot/0.5.8; +In_the_test_phase,_if_the_ThinkBot_brings_you_trouble,_please_block_its_IP_address._Thank_you.)"
     ],
@@ -316,7 +348,9 @@
     "category": "LIBRARY_OR_TOOL",
     "description": "PycURL is the Python binding for libcurl. Not a single-operator bot — any caller using the library defaults to this UA.",
     "followsRobotsTxt": false,
-    "userAgentPatterns": ["PycURL"],
+    "userAgentPatterns": [
+      "PycURL"
+    ],
     "userAgents": [
       "PycURL/7.43.0.5 libcurl/7.61.1 OpenSSL/1.1.1k zlib/1.2.11 brotli/1.0.6 libidn2/2.2.0 libpsl/0.20.2 (+libidn2/2.2.0) libssh/0.9.6/openssl/zlib nghttp2/1.33.0"
     ],
@@ -331,7 +365,9 @@
     "category": "AI_CRAWLER",
     "description": "ByteDance crawler associated with TikTok content discovery and recommendation. Distinct from Bytespider (general ByteDance crawler) - both are operator-attributed to the same parent but show up under different UA tokens.",
     "followsRobotsTxt": false,
-    "userAgentPatterns": ["TikTokSpider"],
+    "userAgentPatterns": [
+      "TikTokSpider"
+    ],
     "userAgents": [
       "Mozilla/5.0 (Linux; Android 5.0) AppleWebKit/537.36 (KHTML, like Gecko) Mobile Safari/537.36 (compatible; TikTokSpider; ttspider-feedback@tiktok.com)"
     ],
@@ -346,8 +382,12 @@
     "category": "MONITORING_AND_ANALYTICS",
     "description": "BrokenLinks.io's site-auditing crawler that scans pages for broken outbound links on behalf of subscribed customers. Has a documented operator URL in its self-identifying UA suffix.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["BrokenLinksBot"],
-    "userAgents": ["BrokenLinksBot/1.0 (+https://brokenlinks.io/bot)"],
+    "userAgentPatterns": [
+      "BrokenLinksBot"
+    ],
+    "userAgents": [
+      "BrokenLinksBot/1.0 (+https://brokenlinks.io/bot)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -359,7 +399,9 @@
     "category": "ARCHIVER",
     "description": "Archive Team's IRC-controlled crawler that captures sites flagged for preservation, with output uploaded to the Internet Archive's Wayback Machine. wpull-based and self-identifies in the UA.",
     "followsRobotsTxt": false,
-    "userAgentPatterns": ["ArchiveTeam ArchiveBot"],
+    "userAgentPatterns": [
+      "ArchiveTeam ArchiveBot"
+    ],
     "userAgents": [
       "ArchiveTeam ArchiveBot/20240923.203d40a (wpull 2.0.3) and not Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/42.0.2311.90 Safari/537.36"
     ],
@@ -374,8 +416,12 @@
     "category": "MONITORING_AND_ANALYTICS",
     "description": "well-known.dev's crawler that discovers and indexes /.well-known/ files (security.txt, host-meta, robots.txt, etc.) for the well-known.dev directory and tooling.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["WellKnownBot"],
-    "userAgents": ["Mozilla/5.0 (compatible; WellKnownBot/0.1; +https://well-known.dev/about/#bot)"],
+    "userAgentPatterns": [
+      "WellKnownBot"
+    ],
+    "userAgents": [
+      "Mozilla/5.0 (compatible; WellKnownBot/0.1; +https://well-known.dev/about/#bot)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -387,7 +433,9 @@
     "category": "AI_SEARCH",
     "description": "Linkup's web indexer used to power the linkup.so AI search product.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["LinkupBot"],
+    "userAgentPatterns": [
+      "LinkupBot"
+    ],
     "userAgents": [
       "LinkupBot/1.0 (LinkupBot for web indexing; https://linkup.so/bot; bot@linkup.so)"
     ],
@@ -402,7 +450,9 @@
     "category": "SECURITY",
     "description": "BitSight's security-rating crawler. Scans sites to fingerprint exposed services and configuration for the BitSight third-party-risk and security-ratings products used by enterprises and insurers.",
     "followsRobotsTxt": false,
-    "userAgentPatterns": ["BitSightBot"],
+    "userAgentPatterns": [
+      "BitSightBot"
+    ],
     "userAgents": [
       "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.6312.86 Safari/537.36 BitSightBot/1.0"
     ],
@@ -417,8 +467,12 @@
     "category": "LIBRARY_OR_TOOL",
     "description": "Scrapy is an open-source Python web-crawling framework. Not a single-operator bot — any caller using the framework defaults to this UA unless they override it. The slug exists for log-analysis stability and to make rate-limiting Scrapy traffic straightforward.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["Scrapy/"],
-    "userAgents": ["Scrapy/2.11.2 (+https://scrapy.org)"],
+    "userAgentPatterns": [
+      "Scrapy/"
+    ],
+    "userAgents": [
+      "Scrapy/2.11.2 (+https://scrapy.org)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -430,7 +484,11 @@
     "category": "SECURITY",
     "description": "Leakix.net's internet-asset and leak-discovery scanner. Two distinct UA shapes observed: l9explore (focused service-discovery walker) and l9scan (broader probe), both reporting back to leakix.net.",
     "followsRobotsTxt": false,
-    "userAgentPatterns": ["l9explore", "l9scan", "leakix.net"],
+    "userAgentPatterns": [
+      "l9explore",
+      "l9scan",
+      "leakix.net"
+    ],
     "userAgents": [
       "l9explore/1.2.2",
       "Mozilla/5.0 (l9scan/2.0.030323e2534313e2131323e2832313; +https://leakix.net)"
@@ -446,8 +504,12 @@
     "category": "SECURITY",
     "description": "Censys's internet-scanning crawler that indexes public services and TLS endpoints for the Censys search and threat-intel products. Documented opt-out via robots.txt.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["CensysInspect"],
-    "userAgents": ["Mozilla/5.0 (compatible; CensysInspect/1.1; +https://about.censys.io/)"],
+    "userAgentPatterns": [
+      "CensysInspect"
+    ],
+    "userAgents": [
+      "Mozilla/5.0 (compatible; CensysInspect/1.1; +https://about.censys.io/)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -459,8 +521,12 @@
     "category": "SECURITY",
     "description": "zgrab is the application-layer scanner from the ZMap project (originally University of Michigan / Stanford). Open-source banner-grabber widely used by security researchers, threat-intel platforms, and academics. No single operator; the UA identifies the tool, not the user.",
     "followsRobotsTxt": false,
-    "userAgentPatterns": ["zgrab/"],
-    "userAgents": ["Mozilla/5.0 zgrab/0.x"],
+    "userAgentPatterns": [
+      "zgrab/"
+    ],
+    "userAgents": [
+      "Mozilla/5.0 zgrab/0.x"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -472,7 +538,9 @@
     "category": "SECURITY",
     "description": "Palo Alto Networks' Cortex Xpanse internet-scanning service. Probes public-facing assets to feed the Xpanse attack-surface-management product used by enterprises.",
     "followsRobotsTxt": false,
-    "userAgentPatterns": ["paloaltonetworks.com/r/1/Cortex-Xpanse"],
+    "userAgentPatterns": [
+      "paloaltonetworks.com/r/1/Cortex-Xpanse"
+    ],
     "userAgents": [
       "Hello from Palo Alto Networks, find out more about our scans in https://docs-cortex.paloaltonetworks.com/r/1/Cortex-Xpanse/Scanning-activity"
     ],
@@ -487,8 +555,12 @@
     "category": "OTHER",
     "description": "ELinks is a text-mode web browser commonly used for accessibility, scripted curling, and probing. No JS execution; behaves like a fetcher rather than a real-user browser, so it is classified as a bot for robots.txt wildcard purposes.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["ELinks/"],
-    "userAgents": ["ELinks/0.12pre6 (textmode; Linux; -)"],
+    "userAgentPatterns": [
+      "ELinks/"
+    ],
+    "userAgents": [
+      "ELinks/0.12pre6 (textmode; Linux; -)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -500,8 +572,12 @@
     "category": "LIBRARY_OR_TOOL",
     "description": "TCPDF is a PHP library for PDF generation. When generating PDFs that include external resources (images, etc.), it fetches them with this default UA. Traffic typically originates from a server-side PHP application calling out for embedded asset URLs.",
     "followsRobotsTxt": false,
-    "userAgentPatterns": ["tcpdf"],
-    "userAgents": ["tcpdf"],
+    "userAgentPatterns": [
+      "tcpdf"
+    ],
+    "userAgents": [
+      "tcpdf"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -555,8 +631,12 @@
     "category": "SECURITY",
     "description": "internet-measurement.com's internet-scanning crawler operated by Driftnet. Probes public services to fingerprint exposed configurations for research and threat-intel feeds.",
     "followsRobotsTxt": false,
-    "userAgentPatterns": ["InternetMeasurement"],
-    "userAgents": ["Mozilla/5.0 (compatible; InternetMeasurement/1.0; +https://internet-measurement.com/)"],
+    "userAgentPatterns": [
+      "InternetMeasurement"
+    ],
+    "userAgents": [
+      "Mozilla/5.0 (compatible; InternetMeasurement/1.0; +https://internet-measurement.com/)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -568,7 +648,9 @@
     "category": "SECURITY",
     "description": "visionheight.com's security/asset scanner. Self-identifies via 'visionheight.com/scan' prefix on an otherwise normal-looking Mac Chrome UA; fingerprints exposed services for visionheight.com's products.",
     "followsRobotsTxt": false,
-    "userAgentPatterns": ["visionheight.com/scan"],
+    "userAgentPatterns": [
+      "visionheight.com/scan"
+    ],
     "userAgents": [
       "visionheight.com/scan Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/126.0.0.0 Safari/537.36"
     ],
@@ -583,8 +665,12 @@
     "category": "LIBRARY_OR_TOOL",
     "description": "python-requests is the dominant Python HTTP client library. Not a single-operator bot — any caller using the library defaults to this UA.",
     "followsRobotsTxt": false,
-    "userAgentPatterns": ["python-requests/"],
-    "userAgents": ["python-requests/2.32.5"],
+    "userAgentPatterns": [
+      "python-requests/"
+    ],
+    "userAgents": [
+      "python-requests/2.32.5"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -596,8 +682,12 @@
     "category": "ACADEMIC_RESEARCH",
     "description": "Self-identifies as 'Seamus the Search Engine (web crawler for university course)'. No university or contact named in the UA. Cataloged for log-analysis stability; semester-bound traffic typical of student search-engine course projects.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["Seamus the Search Engine"],
-    "userAgents": ["Seamus the Search Engine (web crawler for university course)"],
+    "userAgentPatterns": [
+      "Seamus the Search Engine"
+    ],
+    "userAgents": [
+      "Seamus the Search Engine (web crawler for university course)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -609,8 +699,12 @@
     "category": "OTHER",
     "description": "Norwegian-hosted crawler self-identifying via the sxq-hive.thwd.no/crawler-info URL. Documented operator info on the linked page.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["ScaleUpXQ-Crawler"],
-    "userAgents": ["ScaleUpXQ-Crawler/1.0 (+https://sxq-hive.thwd.no/crawler-info)"],
+    "userAgentPatterns": [
+      "ScaleUpXQ-Crawler"
+    ],
+    "userAgents": [
+      "ScaleUpXQ-Crawler/1.0 (+https://sxq-hive.thwd.no/crawler-info)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -622,8 +716,13 @@
     "category": "LIBRARY_OR_TOOL",
     "description": "Bare curl command-line tool / libcurl client. Default UA from the curl binary or any caller using libcurl without overriding. Distinct from PycURL, whose UA is prefixed with 'PycURL/' before 'libcurl/' — a longest-match substring matcher therefore routes PycURL traffic to its specific slug and bare curl to this one.",
     "followsRobotsTxt": false,
-    "userAgentPatterns": ["curl/"],
-    "userAgents": ["curl/8.7.1", "curl/7.61.1"],
+    "userAgentPatterns": [
+      "curl/"
+    ],
+    "userAgents": [
+      "curl/8.7.1",
+      "curl/7.61.1"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -635,8 +734,12 @@
     "category": "LIBRARY_OR_TOOL",
     "description": "Default UA emitted by Go's net/http standard library when callers don't set User-Agent. Not a single-operator bot - any Go program making HTTP requests without an explicit UA shows up under this string.",
     "followsRobotsTxt": false,
-    "userAgentPatterns": ["Go-http-client/"],
-    "userAgents": ["Go-http-client/1.1"],
+    "userAgentPatterns": [
+      "Go-http-client/"
+    ],
+    "userAgents": [
+      "Go-http-client/1.1"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -648,8 +751,12 @@
     "category": "SECURITY",
     "description": "Alibaba Cloud's security crawler. Self-identifies as 'AliyunSecBot/Aliyun' with contact AliyunSecBot@service.alibaba.com; scans public services for asset/security analysis tied to Alibaba Cloud security products.",
     "followsRobotsTxt": false,
-    "userAgentPatterns": ["AliyunSecBot"],
-    "userAgents": ["AliyunSecBot/Aliyun (AliyunSecBot@service.alibaba.com)"],
+    "userAgentPatterns": [
+      "AliyunSecBot"
+    ],
+    "userAgents": [
+      "AliyunSecBot/Aliyun (AliyunSecBot@service.alibaba.com)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -661,8 +768,12 @@
     "category": "LIBRARY_OR_TOOL",
     "description": "GNU Wget command-line downloader. Default UA from the wget binary; not a single-operator bot — any caller using wget without overriding -U shows up under this string.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["Wget/"],
-    "userAgents": ["Wget/1.20.3 (linux-gnu)"],
+    "userAgentPatterns": [
+      "Wget/"
+    ],
+    "userAgents": [
+      "Wget/1.20.3 (linux-gnu)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -674,8 +785,12 @@
     "category": "MONITORING_AND_ANALYTICS",
     "description": "UrlBee.com's crawler that scans pages for the UrlBee monitoring/analytics product. Self-identifies with the documented contact support@urlbee.com.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["UrlBeeBot"],
-    "userAgents": ["UrlBeeBot/1.0 (+https://urlbee.com; contact: support@urlbee.com)"],
+    "userAgentPatterns": [
+      "UrlBeeBot"
+    ],
+    "userAgents": [
+      "UrlBeeBot/1.0 (+https://urlbee.com; contact: support@urlbee.com)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -687,8 +802,12 @@
     "category": "MONITORING_AND_ANALYTICS",
     "description": "Owler.com's crawler that gathers public web data to power the Owler business-intelligence and competitive-intel products.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["Owler (ows.eu/owler)"],
-    "userAgents": ["Owler (ows.eu/owler)"],
+    "userAgentPatterns": [
+      "Owler (ows.eu/owler)"
+    ],
+    "userAgents": [
+      "Owler (ows.eu/owler)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -700,8 +819,12 @@
     "category": "MONITORING_AND_ANALYTICS",
     "description": "Paessler PRTG Network Monitor is an operator-deployed monitoring/uptime tool that probes target URLs from the customer's PRTG installation. Not a single-operator bot — any PRTG customer monitoring a target site shows up under this UA.",
     "followsRobotsTxt": false,
-    "userAgentPatterns": ["PRTG Network Monitor"],
-    "userAgents": ["Mozilla/5.0 (compatible; PRTG Network Monitor (www.paessler.com); Windows)"],
+    "userAgentPatterns": [
+      "PRTG Network Monitor"
+    ],
+    "userAgents": [
+      "Mozilla/5.0 (compatible; PRTG Network Monitor (www.paessler.com); Windows)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -713,8 +836,12 @@
     "category": "OTHER",
     "description": "Velen.io's public web crawler. Self-identifies via the velen.io URL in its UA suffix; documented contact and opt-out on the linked page.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["VelenPublicWebCrawler"],
-    "userAgents": ["Mozilla/5.0 (compatible; VelenPublicWebCrawler/1.0; +https://velen.io)"],
+    "userAgentPatterns": [
+      "VelenPublicWebCrawler"
+    ],
+    "userAgents": [
+      "Mozilla/5.0 (compatible; VelenPublicWebCrawler/1.0; +https://velen.io)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -726,8 +853,12 @@
     "category": "SEARCH_ENGINE_OPTIMIZATION",
     "description": "SEOkicks.de's backlink/SEO crawler. Documented opt-out on the operator's robot info page.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["SEOkicks"],
-    "userAgents": ["Mozilla/5.0 (compatible; SEOkicks; +https://www.seokicks.de/robot.html)"],
+    "userAgentPatterns": [
+      "SEOkicks"
+    ],
+    "userAgents": [
+      "Mozilla/5.0 (compatible; SEOkicks; +https://www.seokicks.de/robot.html)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -739,8 +870,12 @@
     "category": "OTHER",
     "description": "Linguee.com's translation-context crawler operated by DeepL (Linguee's parent). Fetches pages to feed Linguee's bilingual example-sentence corpus.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["Linguee Bot"],
-    "userAgents": ["Linguee Bot (bot@linguee.com)"],
+    "userAgentPatterns": [
+      "Linguee Bot"
+    ],
+    "userAgents": [
+      "Linguee Bot (bot@linguee.com)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -752,8 +887,12 @@
     "category": "ACADEMIC_RESEARCH",
     "description": "Nokia Bell Labs' Genome Crawler — research crawler associated with internet-scale measurement work. Documented at the linked URL.",
     "followsRobotsTxt": false,
-    "userAgentPatterns": ["GenomeCrawlerd"],
-    "userAgents": ["Mozilla/5.0 (compatible; GenomeCrawlerd/1.0; +https://www.nokia.com/genomecrawler)"],
+    "userAgentPatterns": [
+      "GenomeCrawlerd"
+    ],
+    "userAgents": [
+      "Mozilla/5.0 (compatible; GenomeCrawlerd/1.0; +https://www.nokia.com/genomecrawler)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -765,8 +904,12 @@
     "category": "OTHER",
     "description": "Wadoo.net's web crawler. Self-identifies with documented contact on the linked operator page.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["WadooBot"],
-    "userAgents": ["Mozilla/5.0 (compatible; WadooBot/1.0; +https://www.wadoo.net/wadoobot/)"],
+    "userAgentPatterns": [
+      "WadooBot"
+    ],
+    "userAgents": [
+      "Mozilla/5.0 (compatible; WadooBot/1.0; +https://www.wadoo.net/wadoobot/)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -778,8 +921,12 @@
     "category": "PAGE_PREVIEW",
     "description": "Slack's link-unfurling fetcher. Triggered when a user pastes a URL into Slack; fetches page metadata (title, og: tags, etc.) to render the unfurl preview. Customer-attributed (any Slack workspace where the URL is shared), not Slack itself crawling autonomously.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["Slackbot-LinkExpanding"],
-    "userAgents": ["Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)"],
+    "userAgentPatterns": [
+      "Slackbot-LinkExpanding"
+    ],
+    "userAgents": [
+      "Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -791,8 +938,12 @@
     "category": "AI_CRAWLER",
     "description": "Almost-certainly Hugging Face's FinePDFs dataset crawler. The UA string 'FinepdfsBot/1.0' first appeared in early 2026 alongside the FinePDFs dataset release; HF does not publicly document this UA on a dedicated bot page (operator attribution is best-guess based on naming and timing). Earlier 'finepdf-downloader/1.0' UA from the same era is likely a precursor.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["FinepdfsBot"],
-    "userAgents": ["Mozilla/5.0 (compatible; FinepdfsBot/1.0)"],
+    "userAgentPatterns": [
+      "FinepdfsBot"
+    ],
+    "userAgents": [
+      "Mozilla/5.0 (compatible; FinepdfsBot/1.0)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -804,8 +955,12 @@
     "category": "ACADEMIC_RESEARCH",
     "description": "Self-identifies via mailto:fruitsaladisland@gmail.com — anonymous gmail contact, no documented institution. Catalogued for log-analysis stability; behaviour consistent with a student / hobbyist crawl project.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["MyEducationalCrawler"],
-    "userAgents": ["MyEducationalCrawler/1.0 (mailto:fruitsaladisland@gmail.com)"],
+    "userAgentPatterns": [
+      "MyEducationalCrawler"
+    ],
+    "userAgents": [
+      "MyEducationalCrawler/1.0 (mailto:fruitsaladisland@gmail.com)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -817,8 +972,12 @@
     "category": "LIBRARY_OR_TOOL",
     "description": "OkHttp is Square's HTTP client library, dominant in the Java / Kotlin / Android ecosystem. Default UA from any caller using OkHttp without overriding.",
     "followsRobotsTxt": false,
-    "userAgentPatterns": ["okhttp/"],
-    "userAgents": ["okhttp/4.12.0"],
+    "userAgentPatterns": [
+      "okhttp/"
+    ],
+    "userAgents": [
+      "okhttp/4.12.0"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -830,8 +989,12 @@
     "category": "SEARCH_ENGINE_OPTIMIZATION",
     "description": "Haloscan.com's web crawler powering its SEO/SERP-monitoring product. Self-identifies via the documented contact bot@haloscan.com.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["HaloBot"],
-    "userAgents": ["Mozilla/5.0 (compatible; HaloBot/1.0; +bot@haloscan.com; +https://www.haloscan.com/)"],
+    "userAgentPatterns": [
+      "HaloBot"
+    ],
+    "userAgents": [
+      "Mozilla/5.0 (compatible; HaloBot/1.0; +bot@haloscan.com; +https://www.haloscan.com/)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -843,7 +1006,9 @@
     "category": "OTHER",
     "description": "Self-identifies as 'FriendlyCrawler/1.0' inside (KHTML, like Gecko; compatible; ...) on a UA that uses Safari's AppleWebKit/605.1.15 with bare Chrome/X — an impossible Chrome+WebKit/605 fingerprint, but with a self-disclosed bot name embedded in the parens. The bot-name pattern is matched here directly; no public documentation of an operator was found.",
     "followsRobotsTxt": false,
-    "userAgentPatterns": ["FriendlyCrawler"],
+    "userAgentPatterns": [
+      "FriendlyCrawler"
+    ],
     "userAgents": [
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/605.1.15 (KHTML, like Gecko; compatible; FriendlyCrawler/1.0) Chrome/120.0.6099.216 Safari/605.1.15"
     ],
@@ -858,8 +1023,12 @@
     "category": "SEARCH_ENGINE_CRAWLER",
     "description": "Timpi.io's web crawler powering the Timpi decentralized search engine.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["Timpibot"],
-    "userAgents": ["Timpibot/0.9 (+http://www.timpi.io)"],
+    "userAgentPatterns": [
+      "Timpibot"
+    ],
+    "userAgents": [
+      "Timpibot/0.9 (+http://www.timpi.io)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -871,8 +1040,12 @@
     "category": "OTHER",
     "description": "ImageSift's web crawler that fetches images from public sites to feed the imagesift.com reverse-image-search and image-discovery products.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["ImagesiftBot"],
-    "userAgents": ["Mozilla/5.0 (compatible; ImagesiftBot; +imagesift.com)"],
+    "userAgentPatterns": [
+      "ImagesiftBot"
+    ],
+    "userAgents": [
+      "Mozilla/5.0 (compatible; ImagesiftBot; +imagesift.com)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -884,8 +1057,12 @@
     "category": "MONITORING_AND_ANALYTICS",
     "description": "aiHitData.com's web crawler that gathers public business data for the aiHit B2B data product.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["aiHitBot"],
-    "userAgents": ["Mozilla/5.0 (compatible; aiHitBot/2.9; +https://www.aihitdata.com/about)"],
+    "userAgentPatterns": [
+      "aiHitBot"
+    ],
+    "userAgents": [
+      "Mozilla/5.0 (compatible; aiHitBot/2.9; +https://www.aihitdata.com/about)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -897,8 +1074,12 @@
     "category": "SEARCH_ENGINE_CRAWLER",
     "description": "Sogou's web crawler powering the Sogou Chinese search engine (one of the larger Chinese search engines, owned by Tencent).",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["Sogou web spider"],
-    "userAgents": ["Sogou web spider/4.0(+http://www.sogou.com/docs/help/webmasters.htm#07)"],
+    "userAgentPatterns": [
+      "Sogou web spider"
+    ],
+    "userAgents": [
+      "Sogou web spider/4.0(+http://www.sogou.com/docs/help/webmasters.htm#07)"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -910,7 +1091,9 @@
     "category": "SEARCH_ENGINE_CRAWLER",
     "description": "RightDao.com's crawler powering its search engine. Documented opt-out at the linked operator page.",
     "followsRobotsTxt": true,
-    "userAgentPatterns": ["Centurybot"],
+    "userAgentPatterns": [
+      "Centurybot"
+    ],
     "userAgents": [
       "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; Centurybot/1.0; +http://www.rightdao.com/bot.html) Chrome/131.0.0.0 Safari/537.36"
     ],
@@ -925,8 +1108,12 @@
     "category": "OTHER",
     "description": "Impossible UA shape: claims Chrome/X but ships Safari's AppleWebKit/605.1.15. Real desktop / Android Chrome universally reports AppleWebKit/537.36; AppleWebKit/605.x is Safari's WebKit and pairs with Version/X (Safari) or CriOS/EdgiOS/FxiOS (iOS forks), never bare Chrome/X. The combination 'AppleWebKit/605.1.15 (KHTML, like Gecko) Chrome/' is a deliberate spoof — the pattern uses forced adjacency so no real browser can match.",
     "followsRobotsTxt": false,
-    "userAgentPatterns": ["AppleWebKit/605.1.15 (KHTML, like Gecko) Chrome/"],
-    "userAgents": ["Mozilla/5.0 AppleWebKit/605.1.15 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/605.1.15"],
+    "userAgentPatterns": [
+      "AppleWebKit/605.1.15 (KHTML, like Gecko) Chrome/"
+    ],
+    "userAgents": [
+      "Mozilla/5.0 AppleWebKit/605.1.15 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/605.1.15"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -938,8 +1125,13 @@
     "category": "LIBRARY_OR_TOOL",
     "description": "HTTPX is a modern async-capable Python HTTP client library. Default UA from any caller using httpx without overriding.",
     "followsRobotsTxt": false,
-    "userAgentPatterns": ["python-httpx/"],
-    "userAgents": ["python-httpx/0.27", "python-httpx/0.28.1"],
+    "userAgentPatterns": [
+      "python-httpx/"
+    ],
+    "userAgents": [
+      "python-httpx/0.27",
+      "python-httpx/0.28.1"
+    ],
     "signatureAgentUrl": null
   },
   {
@@ -951,8 +1143,115 @@
     "category": "LIBRARY_OR_TOOL",
     "description": "Guzzle is the dominant PHP HTTP client library. Default UA from any PHP caller using Guzzle without overriding.",
     "followsRobotsTxt": false,
-    "userAgentPatterns": ["GuzzleHttp/"],
-    "userAgents": ["GuzzleHttp/7"],
+    "userAgentPatterns": [
+      "GuzzleHttp/"
+    ],
+    "userAgents": [
+      "GuzzleHttp/7"
+    ],
+    "signatureAgentUrl": null
+  },
+  {
+    "slug": "diffbot",
+    "name": "Diffbot",
+    "kind": "BOT",
+    "operator": "Diffbot",
+    "operatorUrl": "https://docs.diffbot.com/docs/en/guides-diffbot-crawler",
+    "category": "AI_CRAWLER",
+    "description": "Commercial crawler that extracts structured data from pages to build Diffbot's Knowledge Graph, sold as a data product.",
+    "followsRobotsTxt": true,
+    "userAgentPatterns": [
+      "Diffbot"
+    ],
+    "userAgents": [
+      "Mozilla/5.0 (compatible; Diffbot/0.1; +http://www.diffbot.com)"
+    ],
+    "signatureAgentUrl": null
+  },
+  {
+    "slug": "facebookbot",
+    "name": "FacebookBot",
+    "kind": "BOT",
+    "operator": "Meta",
+    "operatorUrl": "https://developers.facebook.com/docs/sharing/bot",
+    "category": "AI_CRAWLER",
+    "description": "Meta's crawler for training speech and language models. Distinct from facebookexternalhit, which fetches link previews.",
+    "followsRobotsTxt": true,
+    "userAgentPatterns": [
+      "FacebookBot"
+    ],
+    "userAgents": [
+      "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)"
+    ],
+    "signatureAgentUrl": null
+  },
+  {
+    "slug": "omgili",
+    "name": "omgili",
+    "kind": "BOT",
+    "operator": "Webz.io",
+    "operatorUrl": "https://webz.io/blog/machine-learning/what-is-the-omgili-bot-and-why-is-it-crawling-your-website/",
+    "category": "AI_CRAWLER",
+    "description": "Webz.io crawler focused on forums, message boards and other user-generated content, resold as a web data feed. Also seen as omgilibot.",
+    "followsRobotsTxt": true,
+    "userAgentPatterns": [
+      "omgili"
+    ],
+    "userAgents": [
+      "omgili/0.5 +http://omgili.com",
+      "omgilibot/0.13.1 +http://omgili.com"
+    ],
+    "signatureAgentUrl": null
+  },
+  {
+    "slug": "peer39-crawler",
+    "name": "peer39_crawler",
+    "kind": "BOT",
+    "operator": "Peer39",
+    "operatorUrl": "https://www.peer39.com/peer39-crawler",
+    "category": "MONITORING_AND_ANALYTICS",
+    "description": "Peer39 crawler that classifies page content for advertising contextual-targeting databases.",
+    "followsRobotsTxt": true,
+    "userAgentPatterns": [
+      "peer39_crawler"
+    ],
+    "userAgents": [
+      "Mozilla/5.0 (compatible; peer39_crawler/1.0; +https://www.peer39.com/peer39-crawler)"
+    ],
+    "signatureAgentUrl": null
+  },
+  {
+    "slug": "news-please",
+    "name": "news-please",
+    "kind": "BOT",
+    "operator": "news-please (open source)",
+    "operatorUrl": "https://github.com/fhamborg/news-please",
+    "category": "LIBRARY_OR_TOOL",
+    "description": "Open-source news-crawling and extraction toolkit. Any operator can run it, so the UA identifies the software rather than a party.",
+    "followsRobotsTxt": true,
+    "userAgentPatterns": [
+      "news-please"
+    ],
+    "userAgents": [
+      "news-please (+https://github.com/fhamborg/news-please)"
+    ],
+    "signatureAgentUrl": null
+  },
+  {
+    "slug": "cohere-ai",
+    "name": "cohere-ai",
+    "kind": "BOT",
+    "operator": "Cohere",
+    "operatorUrl": "https://cohere.com",
+    "category": "AI_CRAWLER",
+    "description": "User-agent token named in robots.txt guidance for Cohere. Widely published as blockable; no vendor IP ranges are documented, so it cannot be verified.",
+    "followsRobotsTxt": true,
+    "userAgentPatterns": [
+      "cohere-ai"
+    ],
+    "userAgents": [
+      "Mozilla/5.0 (compatible; cohere-ai/1.0; +https://cohere.com)"
+    ],
     "signatureAgentUrl": null
   }
 ]

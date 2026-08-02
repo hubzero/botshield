@@ -47,6 +47,7 @@ typedef struct bs_bot_rate_slot {
     apr_uint32_t budget;
     apr_uint32_t window_sec;
     const char  *origin;         /* "directive" or "wildcard" or "robots.txt" */
+    int          observe;        /* copied from the entry that created it */
 } bs_bot_rate_slot;
 
 /* One configured rule (directive or robots.txt-derived). Three
@@ -64,6 +65,13 @@ typedef struct bs_bot_rate_entry {
     apr_uint32_t        window_sec;
     apr_array_header_t *slugs;       /* const char *; NULL for wildcard */
     int                 shm_slot;    /* shared across this entry's slugs (specific only) */
+    /* mode=observe: count and log, never 429. Mirrors the trigger and
+     * cohort rate-limit families. Needed because the wildcard default
+     * is synthesised, not written -- so enabling the module at vhost
+     * scope silently starts enforcing a crawl-delay nobody chose, and
+     * on this deployment that meant real 429s to verified Bingbot
+     * before anyone had decided to rate-limit it. */
+    int                 observe;
 } bs_bot_rate_entry;
 
 /* Per-vhost state. */

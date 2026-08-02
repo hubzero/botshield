@@ -276,6 +276,9 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
     if (add->robots_refresh_interval == BS_ROBOTS_REFRESH_UNSET) {
         out->robots_refresh_interval = base->robots_refresh_interval;
     }
+    if (add->robots_mode == BS_ROBOTS_MODE_UNSET) {
+        out->robots_mode = base->robots_mode;
+    }
     /* Bot-directory runtime override inherits unless explicitly set. */
     if (!add->bot_directory_path && base->bot_directory_path) {
         out->bot_directory_path = base->bot_directory_path;
@@ -416,6 +419,7 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->robots_slot_pool_size   = 0;
     scfg->robots_slot_pool_used   = 0;
     scfg->robots_refresh_interval = BS_ROBOTS_REFRESH_UNSET;
+    scfg->robots_mode             = BS_ROBOTS_MODE_UNSET;
     /* Bot-directory runtime override. NULL path = no override
      * (compiled-in baseline stays active). Refresh interval 0 =
      * use compile-time default at post_config. */
@@ -1598,6 +1602,9 @@ static void bs_resolve_robots_defaults(server_rec *s)
         if (vcfg->robots_refresh_interval == BS_ROBOTS_REFRESH_UNSET) {
             vcfg->robots_refresh_interval = BS_ROBOTS_REFRESH_DEFAULT;
         }
+        if (vcfg->robots_mode == BS_ROBOTS_MODE_UNSET) {
+            vcfg->robots_mode = BS_ROBOTS_MODE_ENFORCE;
+        }
     }
 }
 
@@ -2637,6 +2644,19 @@ static const char *bs_set_score_int(const char *directive, int *slot,
  * only purpose was logging -- and any request the rule's predicate
  * missed silently kept logging. Outcome-keyed and scope-level, so it
  * follows the decision rather than the rule that produced it. */
+const char *bs_set_robots_mode(cmd_parms *cmd, void *cfg_v,
+                               const char *arg)
+{
+    (void)cfg_v;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    if (!strcasecmp(arg, "enforce"))      scfg->robots_mode = BS_ROBOTS_MODE_ENFORCE;
+    else if (!strcasecmp(arg, "observe")) scfg->robots_mode = BS_ROBOTS_MODE_OBSERVE;
+    else return apr_psprintf(cmd->pool,
+        "BotShieldRobotsMode: '%s' must be enforce or observe", arg);
+    return NULL;
+}
+
 const char *bs_set_access_log(cmd_parms *cmd, void *cfg_v, int argc,
                               char *const argv[])
 {

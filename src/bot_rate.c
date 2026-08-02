@@ -71,7 +71,9 @@ const char *bs_set_bot_rate_limit(cmd_parms *cmd, void *dconf,
                                   int argc, char *const argv[])
 {
     (void)dconf;
-    if (argc < 1 || argc > 3) {
+    /* 4 args is the 3-arg form plus a trailing mode=; the mode token is
+     * consumed below, after the Off check. */
+    if (argc < 1 || argc > 4) {
         return "BotShieldBotRateLimit: expects 'Off', or "
                "<slug-or-pattern-or-*> <delay-sec>, or "
                "<slug-or-pattern-or-*> <budget> <per>";
@@ -98,6 +100,24 @@ const char *bs_set_bot_rate_limit(cmd_parms *cmd, void *dconf,
         return NULL;
     }
 
+    /* Optional trailing mode=enforce|observe, consumed before the
+     * positional parse so the existing 2- and 3-arg forms are
+     * unchanged. */
+    int want_observe = 0;
+    if (argc > 1 && strncasecmp(argv[argc - 1], "mode=", 5) == 0) {
+        const char *m = argv[argc - 1] + 5;
+        if (!strcasecmp(m, "observe"))      want_observe = 1;
+        else if (!strcasecmp(m, "enforce")) want_observe = 0;
+        else return apr_psprintf(cmd->pool,
+            "BotShieldBotRateLimit: mode='%s' must be enforce or observe", m);
+        argc--;
+    }
+    if (argc < 2 || argc > 3) {
+        return "BotShieldBotRateLimit: expected <slug> <delay-sec> or "
+               "<slug> <budget> <per>, optionally followed by "
+               "mode=enforce|observe";
+    }
+
     apr_uint32_t budget = 0, window = 0;
     const char *err = (argc == 2)
         ? parse_delay(cmd->pool, argv[1], &budget, &window)
@@ -109,6 +129,7 @@ const char *bs_set_bot_rate_limit(cmd_parms *cmd, void *dconf,
     bs_bot_rate_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
     e->origin     = "directive";
     e->shm_slot   = -1;
+    e->observe    = want_observe;
     e->budget     = budget;
     e->window_sec = window;
 
@@ -163,7 +184,7 @@ static bs_bot_rate_slot *
 allocate_holder(apr_pool_t *pconf, server_rec *sv,
                 const char *what, int *next_slot,
                 apr_uint32_t budget, apr_uint32_t window_sec,
-                const char *origin)
+                const char *origin, int observe)
 {
     if (*next_slot >= (int)bs_shm.rate_counter_count) {
         ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
@@ -178,6 +199,7 @@ allocate_holder(apr_pool_t *pconf, server_rec *sv,
     h->budget     = budget;
     h->window_sec = window_sec;
     h->origin     = origin;
+    h->observe    = observe;
     return h;
 }
 
@@ -292,7 +314,7 @@ static int register_robots_entries(apr_pool_t *pconf, server_rec *sv,
         bs_bot_rate_slot *h = allocate_holder(pconf, sv,
             apr_pstrcat(pconf, "robots.txt ",
                 APR_ARRAY_IDX(e->slugs, 0, const char *), NULL),
-            next_slot, e->budget, e->window_sec, e->origin);
+            next_slot, e->budget, e->window_sec, e->origin, e->observe);
         if (!h) continue;
         e->shm_slot = h->shm_slot;
         for (int j = 0; j < e->slugs->nelts; j++) {
@@ -379,7 +401,7 @@ void bs_bot_rate_init(apr_pool_t *pconf, server_rec *s, int *next_slot)
                 ? APR_ARRAY_IDX(e->slugs, 0, const char *) : "?";
             bs_bot_rate_slot *h = allocate_holder(pconf, sv,
                 apr_pstrcat(pconf, "directive ", first_slug, NULL),
-                next_slot, e->budget, e->window_sec, e->origin);
+                next_slot, e->budget, e->window_sec, e->origin, e->observe);
             if (!h) continue;
             e->shm_slot = h->shm_slot;
             specific_count++;
@@ -419,7 +441,7 @@ void bs_bot_rate_init(apr_pool_t *pconf, server_rec *s, int *next_slot)
                                 " ", slug, NULL),
                     next_slot, e->budget, e->window_sec,
                     apr_pstrcat(pconf, "botgroup:", e->botgroup_name,
-                                NULL));
+                                NULL), e->observe);
                 if (!h) break;
                 apr_hash_set(st->by_slug, slug, APR_HASH_KEY_STRING, h);
                 botgroup_count++;
@@ -440,17 +462,17 @@ void bs_bot_rate_init(apr_pool_t *pconf, server_rec *s, int *next_slot)
                 }
                 bs_bot_rate_slot *h = allocate_holder(pconf, sv,
                     apr_pstrcat(pconf, "wildcard ", slug, NULL),
-                    next_slot, budget, window, "wildcard");
+                    next_slot, budget, window, "wildcard", st->wildcard_entry->observe);
                 if (!h) break;  /* pool exhausted; remaining slugs unprotected */
                 apr_hash_set(st->by_slug, slug, APR_HASH_KEY_STRING, h);
                 wildcard_count++;
             }
             st->unknown_bot_holder = allocate_holder(pconf, sv,
                 "unknown-bot aggregate", next_slot,
-                budget, window, "wildcard:unknown-bot");
+                budget, window, "wildcard:unknown-bot", st->wildcard_entry->observe);
             st->fake_bot_holder    = allocate_holder(pconf, sv,
                 "fake-bot aggregate", next_slot,
-                budget, window, "wildcard:fake-bot");
+                budget, window, "wildcard:fake-bot", st->wildcard_entry->observe);
             /* v2a — fallback for slugs added mid-run that missed
              * the post_config snapshot (e.g., bot-directory watchdog
              * refresh adds entries; their slugs aren't in by_slug
@@ -458,7 +480,7 @@ void bs_bot_rate_init(apr_pool_t *pconf, server_rec *s, int *next_slot)
              * v2b's SHM-resident slot table lands. */
             st->wildcard_fallback_holder = allocate_holder(pconf, sv,
                 "wildcard-fallback aggregate", next_slot,
-                budget, window, "wildcard:fallback");
+                budget, window, "wildcard:fallback", st->wildcard_entry->observe);
 
             ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
                 "mod_botshield: BotShieldBotRateLimit: %d directive + "
@@ -550,8 +572,13 @@ int bs_bot_rate_check(request_rec *r)
         return OK;
     }
 
-    /* Over budget. */
-    if (log_only) {
+    /* Over budget. Observe when the scope is LogOnly, or when the rule
+     * itself says mode=observe. The per-rule form matters because the
+     * wildcard default is synthesised rather than written: enabling the
+     * module at vhost scope starts enforcing a crawl-delay nobody
+     * chose, and there is otherwise no way to watch it first short of
+     * turning rate limiting off entirely and losing the evidence. */
+    if (log_only || holder->observe) {
         /* Observation only — log a ~rate_limited would-outcome and
          * a :observe-suffixed reason, don't 429 the request.
          * Mirrors the directive rate-limit cohort observe path. */

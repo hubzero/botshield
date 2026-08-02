@@ -90,6 +90,15 @@
 <section class="toc">
   <h2 class="toc__heading">On this page</h2>
   <ul class="toc__list">
+<li class="toc__item toc__item--level-2"><a href="#2026-08-02-bot-directory-refresh-retired-agents-quieter-observability">2026-08-02 (bot directory refresh; retired agents; quieter observability)</a></li>
+<li class="toc__item toc__item--level-3"><a href="#added-retired-and-non-existent-agent-identities-classify-as-fake-bot">Added — retired and non-existent agent identities classify as `fake-bot`</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-bot-directory-refreshed-587-688-upstream-entries">Changed — bot directory refreshed, 587 -&gt; 688 upstream entries</a></li>
+<li class="toc__item toc__item--level-3"><a href="#fixed-builtin-overrides-reduced-from-3-to-1">Fixed — builtin overrides reduced from 3 to 1</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-observability-endpoints-suppressed-from-the-access-log">Changed — observability endpoints suppressed from the access log</a></li>
+<li class="toc__item toc__item--level-2"><a href="#2026-08-02-observe-robots-txt-before-enforcing-it">2026-08-02 (observe robots.txt before enforcing it)</a></li>
+<li class="toc__item toc__item--level-3"><a href="#added-botshieldrobotsmode-enforce-observe">Added — `BotShieldRobotsMode enforce|observe`</a></li>
+<li class="toc__item toc__item--level-3"><a href="#added-mode-enforce-observe-on-botshieldbotratelimit">Added — `mode=enforce|observe` on `BotShieldBotRateLimit`</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-dashboard-status-colours-follow-the-usual-convention">Changed — dashboard status colours follow the usual convention</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-08-02-heuristic-weights-become-defaults-one-source-for-them">2026-08-02 (heuristic weights become defaults; one source for them)</a></li>
 <li class="toc__item toc__item--level-3"><a href="#changed-scraper-ua-50-10-missing-al-15-5">Changed — `scraper-ua` 50 -&gt; 10, `missing-al` 15 -&gt; 5</a></li>
 <li class="toc__item toc__item--level-3"><a href="#fixed-the-weights-were-declared-in-three-places">Fixed — the weights were declared in three places</a></li>
@@ -213,6 +222,76 @@
   </ul>
 </section>
         <div class="prose">
+<h2 id="2026-08-02-bot-directory-refresh-retired-agents-quieter-observability">2026-08-02 (bot directory refresh; retired agents; quieter observability)</h2>
+<h3 id="added-retired-and-non-existent-agent-identities-classify-as-fake-bot">Added — retired and non-existent agent identities classify as <code>fake-bot</code></h3>
+<p><code>Google-Extended</code>, <code>Claude-Web</code> and <code>anthropic-ai</code>. The first was never
+a crawler -- it is a robots.txt control token governing whether content
+Googlebot already fetched may train Gemini/Vertex, and nothing fetches
+under that name. The other two were retired by Anthropic in favour of
+ClaudeBot / Claude-User / Claude-SearchBot.</p>
+<p>No ranges file is involved: unlike the allow-list fake-bot path, no IP
+could make these genuine. Checked before the directory walk, which
+turned out to matter within the hour -- the directory refresh below
+introduced a broad bare-<code>Claude</code> pattern that would otherwise have
+classified the retired <code>Claude-Web</code> as a trusted known bot.</p>
+<p>Prompted by observing one Google Cloud address send all three
+identities, ten requests each, cycling vendor names to find which were
+blocked.</p>
+<h3 id="changed-bot-directory-refreshed-587-688-upstream-entries">Changed — bot directory refreshed, 587 -&gt; 688 upstream entries</h3>
+<p>First refresh since the directory was vendored. Closes a real gap:
+<code>Claude-User</code> and <code>Claude-SearchBot</code>, both live Anthropic agents
+documented in February 2026, were previously unclassified.</p>
+<p>Six entries added to <code>bot-directory.builtin.json</code> so every deployment
+gets them: <code>diffbot</code>, <code>facebookbot</code>, <code>omgili</code>, <code>peer39-crawler</code>,
+<code>news-please</code>, <code>cohere-ai</code>. All are real crawlers named in common
+robots.txt files but absent upstream, and none publishes IP ranges, so
+they can only ever be UA-matched.</p>
+<h3 id="fixed-builtin-overrides-reduced-from-3-to-1">Fixed — builtin overrides reduced from 3 to 1</h3>
+<p><code>claude-searchbot</code> and <code>amzn-searchbot</code> were overriding upstream in
+fields the module does not read (<code>followsRobotsTxt</code>, which is
+&quot;carried for future use&quot;) or on a taxonomy call better left to the
+tracking dataset. Both dropped.</p>
+<p><code>amazon-kendra</code> is kept and now documents itself: Kendra is
+customer-operated, so upstream's <code>AI_CRAWLER</code> / botgroup <code>ai-train</code>
+implies Amazon is training on your content when in fact an AWS customer
+is crawling sites they chose.</p>
+<p>Note <code>followsRobotsTxt</code> is 620 false / 68 true upstream -- unpopulated
+rather than researched. It should not be relied on if it ever becomes
+load-bearing.</p>
+<h3 id="changed-observability-endpoints-suppressed-from-the-access-log">Changed — observability endpoints suppressed from the access log</h3>
+<p><code>/botshield/dashboard</code>, <code>/metrics</code> and <code>/policy-status</code> no longer write
+an access-log line; they are recorded in the decision log as
+<code>outcome=observe</code>. Measured at 8.1% of all requests on one deployment,
+they were distorting every traffic figure derived from that log.</p>
+<p>Deliberately not routed through <code>bs_decision_log</code>: that would count
+viewing the dashboard as a decision and inflate the numbers the page
+shows. Functional endpoints (verify, bootstrap, assets) still log
+normally.</p>
+<h2 id="2026-08-02-observe-robots-txt-before-enforcing-it">2026-08-02 (observe robots.txt before enforcing it)</h2>
+<h3 id="added-botshieldrobotsmode-enforce-observe">Added — <code>BotShieldRobotsMode enforce|observe</code></h3>
+<p><code>BotShieldRobotsTxt</code> had no way to record without acting: the
+<code>Disallow</code> path returned 403 unconditionally, while the <code>Crawl-delay</code>
+path beside it had always honoured observe. So switching robots.txt on
+to find out who ignores it instead started refusing them immediately --
+GPTBot and ClaudeBot were taking real 403s within minutes.</p>
+<p>Observe logs <code>robots-block:&lt;group&gt;:observe</code> with <code>outcome=~block</code> and
+suppresses the score bump and the flag as well as the status, so
+nothing leaks into later requests. Independent of <code>BotShieldEnabled</code>,
+so a scope can enforce its scoring while robots.txt stays advisory.</p>
+<h3 id="added-mode-enforce-observe-on-botshieldbotratelimit">Added — <code>mode=enforce|observe</code> on <code>BotShieldBotRateLimit</code></h3>
+<p>Any form may now carry a trailing <code>mode=</code>. This matters most for the
+synthesised wildcard: enabling the module at vhost scope creates a
+<code>* 1 sec</code> limit automatically, and it enforces wherever
+<code>BotShieldEnabled On</code> applies. Nobody wrote it, and on this deployment
+it was issuing real 429s to verified Bingbot. The only prior lever was
+<code>Off</code>, which would have discarded the evidence along with the
+enforcement.</p>
+<h3 id="changed-dashboard-status-colours-follow-the-usual-convention">Changed — dashboard status colours follow the usual convention</h3>
+<p>Response status now reads green / blue / orange / red. Blue is not in
+the reserved status palette, so 3xx and 4xx take categorical slots;
+mixing the two vocabularies in one chart is normally wrong, but the
+convention is strong enough that following it beats internal purity,
+and every segment is direct-labelled so identity never rides on colour.</p>
 <h2 id="2026-08-02-heuristic-weights-become-defaults-one-source-for-them">2026-08-02 (heuristic weights become defaults; one source for them)</h2>
 <h3 id="changed-scraper-ua-50-10-missing-al-15-5">Changed — <code>scraper-ua</code> 50 -&gt; 10, <code>missing-al</code> 15 -&gt; 5</h3>
 <p>robots.txt tells undeclared clients they may fetch anything outside the

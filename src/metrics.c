@@ -1461,9 +1461,56 @@ static void bs_d_meter(request_rec *r, const char *label,
         label, used, cap, bs_d_pct(r->pool, used, cap), frac * 100.0);
 }
 
+/* Record an observability-endpoint request in the decision log and keep
+ * it out of the access log.
+ *
+ * These are the measuring instrument, not site traffic: a dashboard left
+ * open on a 10s refresh was 8.1% of all requests on this deployment and
+ * the source of 3,023 of 4,347 request timeouts. In the access log that
+ * distorts every traffic figure derived from it.
+ *
+ * Suppressing without recording would break the rule the rest of the
+ * module keeps -- anything hidden from the access log appears in the
+ * decision log -- so the line is written here, deliberately NOT through
+ * bs_decision_log: that would call bs_metrics_bump and count viewing the
+ * dashboard as a decision, inflating the very numbers the page shows.
+ * The counters already track these separately as
+ * botshield_responses_observe_total. */
+void bs_log_observability_request(request_rec *r)
+{
+    bs_server_cfg *scfg = ap_get_module_config(r->server->module_config,
+                                               &botshield_module);
+    bs_suppress_access_log(r);
+    if (!scfg || !scfg->decision_log_fd) return;
+
+    const char *ua   = apr_table_get(r->headers_in, "User-Agent");
+    const char *path = (r->unparsed_uri && *r->unparsed_uri)
+                       ? r->unparsed_uri : "-";
+    /* Format the stamp here rather than reading BS_TIME: that env var is
+     * set by bs_decision_log, which this function deliberately does not
+     * call, so it is absent on this path. Same format so the two line
+     * kinds sort together. */
+    apr_time_exp_t tm;
+    apr_time_exp_gmt(&tm, apr_time_now());
+    const char *ts = apr_psprintf(r->pool,
+        "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
+        tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+        tm.tm_hour, tm.tm_min, tm.tm_sec, tm.tm_usec / 1000);
+    const char *line = apr_psprintf(r->pool,
+        "%s tier=none outcome=observe ip=%s score=0 cookie=- provider=- "
+        "alg=- reason=\"observability-endpoint\" path=\"%s\" ua=\"%s\"\n",
+        ts,
+        (r->useragent_ip && *r->useragent_ip) ? r->useragent_ip : "-",
+        bs_log_quote(r->pool, path),
+        ua ? bs_log_quote(r->pool, ua) : "-");
+    apr_size_t len = strlen(line);
+    apr_file_write(scfg->decision_log_fd, line, &len);
+}
+
 int bs_dashboard_handler(request_rec *r)
 {
     apr_table_setn(r->subprocess_env, "BS_ENDPOINT", "obs");
+    bs_log_observability_request(r);
     int span = 60;
     /* Auto-refresh seconds. Defaults to 30 because the common use is a
      * page left open while watching traffic; r=0 turns it off. Offering
@@ -1703,8 +1750,18 @@ int bs_dashboard_handler(request_rec *r)
      * the required mitigation for the sub-3:1 light-surface steps. */
     {
         const char *labels[] = { "2xx", "3xx", "4xx", "5xx", "other" };
-        const char *fills[]  = { "var(--good)", "var(--neutral)",
-                                 "var(--warn)", "var(--crit)",
+        /* HTTP status classes follow the convention every devtools and
+         * log viewer already uses -- green / blue / orange / red -- so
+         * the chart reads without consulting a legend. Blue is not in
+         * the reserved status palette, which only has
+         * good/warning/serious/critical, so 3xx and 4xx take
+         * categorical slots 1 and 2. Mixing the two vocabularies in one
+         * chart is normally wrong; here the convention is strong enough
+         * that following it beats internal purity, and every segment is
+         * direct-labelled with its value and share so identity never
+         * rides on colour alone. */
+        const char *fills[]  = { "var(--good)", "var(--c1)",
+                                 "var(--c2)", "var(--crit)",
                                  "var(--muted)" };
         apr_uint64_t vals[]  = { w.req_status[BS_M_STATUS_2XX],
                                  w.req_status[BS_M_STATUS_3XX],
@@ -1865,6 +1922,7 @@ int bs_dashboard_handler(request_rec *r)
 int bs_metrics_handler(request_rec *r)
 {
     apr_table_setn(r->subprocess_env, "BS_ENDPOINT", "obs");
+    bs_log_observability_request(r);
     if (r->method_number != M_GET && r->method_number != M_OPTIONS) {
         r->status = HTTP_METHOD_NOT_ALLOWED;
         apr_table_setn(r->headers_out, "Allow", "GET, OPTIONS");
