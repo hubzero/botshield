@@ -1307,7 +1307,7 @@ saturation, etc.).</p>
 </table>
 <p>A module-owned decision log, written directly from the decision path
 instead of through mod_log_config:</p>
-<pre><code class="language-apache">BotShieldDecisionLog logs/botshield-decisions.log
+<pre><code class="language-apache">BotShieldDecisionLog logs/botshield.log
 BotShieldDecisionLog &quot;|/usr/bin/rotatelogs /var/log/httpd/bs.%Y%m%d 86400&quot;
 </code></pre>
 <p>Relative paths resolve against <code>ServerRoot</code>, exactly like <code>ErrorLog</code>.

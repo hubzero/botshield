@@ -94,6 +94,9 @@
 <li class="toc__item toc__item--level-3"><a href="#where-the-decision-line-goes">Where the decision line goes</a></li>
 <li class="toc__item toc__item--level-3"><a href="#trimming-access-log-volume-without-losing-decisions">Trimming access-log volume without losing decisions</a></li>
 <li class="toc__item toc__item--level-3"><a href="#field-vocabulary">Field vocabulary</a></li>
+<li class="toc__item toc__item--level-3"><a href="#the-decision-log">The decision log</a></li>
+<li class="toc__item toc__item--level-3"><a href="#controlling-decision-log-volume">Controlling decision-log volume</a></li>
+<li class="toc__item toc__item--level-3"><a href="#controlling-the-access-log">Controlling the access log</a></li>
 <li class="toc__item toc__item--level-3"><a href="#response-breakout-who-answered">Response breakout — who answered</a></li>
 <li class="toc__item toc__item--level-3"><a href="#per-vhost-breakdown">Per-vhost breakdown</a></li>
 <li class="toc__item toc__item--level-3"><a href="#site-wide-traffic-counters">Site-wide traffic counters</a></li>
@@ -147,7 +150,7 @@ The cost is Apache's <code>[timestamp] [:notice] [pid]</code> prefix, interleavi
 with every other message, and boring passes demoted to <code>debug</code>.</p>
 <p><strong>2. <code>BotShieldDecisionLog</code> (recommended for a dedicated file).</strong> A
 module-owned file, written at decision time:</p>
-<pre><code class="language-apache">BotShieldDecisionLog logs/botshield-decisions.log
+<pre><code class="language-apache">BotShieldDecisionLog logs/botshield.log
 # or hand rotation to Apache's helper:
 BotShieldDecisionLog &quot;|/usr/bin/rotatelogs /var/log/httpd/bs.%Y%m%d 86400&quot;
 </code></pre>
@@ -181,7 +184,7 @@ did not get is a silent blind spot.</p>
 <p><strong>3. A <code>CustomLog</code> via mod_log_config (legacy).</strong> The module publishes
 every field to <code>subprocess_env</code> (<code>BS_TIER</code>, <code>BS_OUTCOME</code>, …) plus a
 <code>BOTSHIELD</code> marker, so a <code>CustomLog</code> can render them:</p>
-<pre><code class="language-apache">CustomLog logs/botshield-decisions.log botshield env=BOTSHIELD
+<pre><code class="language-apache">CustomLog logs/botshield.log botshield env=BOTSHIELD
 </code></pre>
 <p>Still supported, and the right choice if you want to compose botshield
 fields into an existing format. Two limitations: it cannot survive
@@ -232,6 +235,168 @@ commit time by a small awk validator (<code>tests/scripts/decision-log- awk-vali
 </tr>
 </tbody>
 </table>
+<h3 id="the-decision-log">The decision log</h3>
+<p><code>BotShieldDecisionLog</code> defaults to <strong><code>logs/botshield.log</code></strong> (server-root
+relative, like Apache's own <code>ErrorLog</code>) for any server with
+<code>BotShieldEnabled</code> somewhere in it. A module that is loaded but never
+switched on writes nothing, so installing the package does not litter
+<code>/var/log/httpd</code> on hosts that never turn it on.</p>
+<p>Defaulting it on is what makes the &quot;recorded somewhere&quot; guarantee hold
+without configuration: access-log suppression is also a default, so
+without a decision log by default the two would compose into requests
+that appear in no log at all.</p>
+<p>Set the directive to move it, or to hand it to a piped-log program that
+owns its own rotation.</p>
+<h3 id="controlling-decision-log-volume">Controlling decision-log volume</h3>
+<pre><code class="language-apache">BotShieldDecisionLog logs/botshield.log \
+    outcomes=block,verified,rate_limited,misconfigured,failopen,redirect
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><em>(omitted)</em></td>
+<td>The <strong>default set</strong> — <code>block</code>, <code>verified</code>, <code>rate_limited</code>, <code>misconfigured</code>, <code>failopen</code>, <code>redirect</code> — <strong>union whatever <code>BotShieldAccessLog</code> is suppressing</strong> for that request.</td>
+</tr>
+<tr>
+<td><code>outcomes=&lt;list&gt;</code></td>
+<td>Exactly these, overriding the union. Each is written <strong>in full</strong>.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>The union is the point.</strong> Suppressing a line from the access log and
+omitting the same outcome from the decision log makes the request vanish
+from every log on the box: it happened, the server answered it, and
+nothing records it. Deriving the default from the access-log mask makes
+<em>&quot;every request the server answered is recorded somewhere&quot;</em> a property
+of the module, rather than of an operator remembering to keep two
+directives in step.</p>
+<p>It is computed per request, because <code>BotShieldAccessLog</code> is
+per-directory while <code>BotShieldDecisionLog</code> is per-server — there is no
+single suppression set at config time to union with.</p>
+<p>Requests BotShield never evaluated are never suppressed from the access
+log, so the invariant covers them too.</p>
+<p><strong>Naming <code>outcomes=</code> overrides the union</strong> and accepts the resulting
+gap. That is a legitimate choice — the volume is real — but it is now an
+explicit one.</p>
+<p><code>all</code> is accepted in the list as an explicit &quot;everything&quot;.</p>
+<p><strong>Why filter by outcome.</strong> Under a flood the log is dominated by one
+repeated outcome — measured live at 5,000 near-identical <code>challenged</code>
+lines a minute, <strong>258 MB/hr</strong> at 1,125 bytes a line.</p>
+<p>Whatever retention your rotation buys, that volume is what spends it.
+Work it out for your own rule rather than assuming: a size-triggered
+rotation checked on a timer does <strong>not</strong> rotate the moment the size is
+hit, only at the next check, so the live file grows to a full check
+interval's worth of data no matter how small the size threshold is. The
+deployment this was built for runs <code>size 100M rotate 6 compress</code> from an
+hourly cron, which under this load means each rotated file covers one
+hour and roughly six hours are kept — the live file reaching ~258 MB
+between checks, and the seven files totalling ~570 MB compressed.</p>
+<p>Filtering trades per-request detail for that retention. The counts never
+move: every outcome stays exact in <code>/botshield/metrics</code> and on the
+dashboard.</p>
+<p><strong>Why there is no sample rate.</strong> It would be the obvious way to keep a
+cheap trace of the noisy outcome, and it is deliberately not offered. A
+security log's most important property is that an absent line means the
+event did not happen. Sampling destroys that for every outcome it
+touches, and destroys it silently — you cannot tell a quiet period from
+a thinned one by reading the file. An outcome is either recorded
+completely or not at all.</p>
+<p>What you give up is per-request detail for the outcomes you exclude, not
+knowledge that they occurred: <strong>every outcome is always counted</strong> in
+<code>/botshield/metrics</code> and on <code>/botshield/dashboard</code>, exactly, regardless
+of this setting. Filtering only decides whether a per-request line is
+written.</p>
+<p>When you do need forensic detail on a filtered outcome — attacker IPs,
+UA patterns, paths — add it to the list for as long as the incident
+lasts and accept the volume. That is a deliberate, reversible decision
+rather than a standing lottery.</p>
+<p>Startup states exactly what is being recorded, because a filtered log
+looks identical to a complete one from the outside:</p>
+<pre><code>decision log active: logs/botshield.log (outcomes=verified,
+block,failopen,rate_limited,misconfigured,redirect only, each logged in
+full; other outcomes get no per-request line but are still counted
+exactly in /botshield/metrics and the dashboard)
+</code></pre>
+<p>Note this lands in the <strong>vhost's</strong> <code>ErrorLog</code>, not the main one.</p>
+<h3 id="controlling-the-access-log">Controlling the access log</h3>
+<p><code>BotShieldAccessLog</code> decides whether a request BotShield acted on also
+gets an Apache access-log line. Scope-level (<code>RSRC_CONF | ACCESS_CONF</code>)
+and keyed on the <strong>outcome</strong>:</p>
+<pre><code class="language-apache">&lt;LocationMatch &quot;^/(login|register)(/|$)&quot;&gt;
+    BotShieldEnabled   On
+    BotShieldAccessLog suppress=challenged,block
+&lt;/LocationMatch&gt;
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Form</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><em>(omitted)</em></td>
+<td><strong>Default.</strong> Suppresses <code>challenged</code>, <code>block</code>, <code>rate_limited</code>, <code>redirect</code> — the outcomes where BotShield generated the response and the application never ran.</td>
+</tr>
+<tr>
+<td><code>on</code></td>
+<td>Restores full logging.</td>
+</tr>
+<tr>
+<td><code>off</code></td>
+<td>Suppresses every outcome BotShield decided on.</td>
+</tr>
+<tr>
+<td><code>suppress=&lt;outcome[,…]&gt;</code></td>
+<td>Suppresses exactly those.</td>
+</tr>
+</tbody>
+</table>
+<p>The default deliberately leaves the access log <strong>incomplete</strong> relative
+to what the server answered. That is a real tradeoff in a file many
+sites treat as a system of record, so it is announced once at startup
+rather than left to be discovered by someone hunting for missing
+requests:</p>
+<pre><code>access-log lines are suppressed by default for responses BotShield
+generated (challenged, block, rate_limited, redirect) - those requests
+never reached the application. They are still counted in
+botshield_requests_total and on the dashboard. 'BotShieldAccessLog on'
+restores full logging.
+</code></pre>
+<p><code>allow</code> and the verify-endpoint outcomes are <strong>not</strong> suppressed by
+default: those either reached the origin or are the module answering its
+own endpoint, and both are real traffic. Nothing is ever hidden from
+<code>botshield_requests_total</code>, the dashboard, or the decision log.</p>
+<p>If you audit from the access log, set <code>BotShieldAccessLog on</code>.</p>
+<p>Outcome names are the decision-log vocabulary, validated against the
+same table the log and metrics use.</p>
+<p><strong>Why this exists next to the <code>accesslog=on|off</code> action key.</strong> That key
+is a <em>trigger</em> action, so it only covers requests some rule's predicate
+matched. Once the scoring defaults started raising challenges on their
+own, that stopped being the same set: a scope could be fully protected
+and still writing megabytes an hour of access-log noise from challenged
+requests no rule happened to match — with the only workaround being to
+invent a rule whose sole purpose was logging. Measured on a live flood:
+<code>/register</code> challenges were adding ~31 MB/hr that way. This directive
+follows the decision instead of the rule.</p>
+<p>The action key still works and is still the right tool for
+&quot;this specific rule's matches shouldn't be logged&quot;. Both compose;
+either one suppressing is enough.</p>
+<p><strong>Two things it deliberately will not do.</strong> Requests BotShield never
+evaluated always log — this cannot silence the site. And under
+<code>LogOnly</code>, a counterfactual (<code>~block</code>) is not suppressed: nothing was
+enforced, the origin answered, and hiding it would misrepresent real
+traffic on the strength of a decision that never took effect.</p>
+<p>Suppressing the access log does not touch the decision log, which is
+the point — the access log is the traffic record, the decision log is
+the security record.</p>
 <h3 id="response-breakout-who-answered">Response breakout — who answered</h3>
 <p>The status-class counters cannot tell a BotShield 403 from an
 application 403. <code>botshield_responses_*</code> splits them:</p>

@@ -737,7 +737,7 @@ A module-owned decision log, written directly from the decision path
 instead of through mod_log_config:
 
 ```apache
-BotShieldDecisionLog logs/botshield-decisions.log
+BotShieldDecisionLog logs/botshield.log
 BotShieldDecisionLog "|/usr/bin/rotatelogs /var/log/httpd/bs.%Y%m%d 86400"
 ```
 

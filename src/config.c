@@ -63,6 +63,7 @@ void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     bs_dir_cfg *cfg = apr_pcalloc(p, sizeof(*cfg));
     cfg->enabled           = BS_UNSET;
     cfg->challenge_enabled = BS_UNSET;
+    cfg->accesslog_suppress = BS_UNSET;
     cfg->debug      = BS_UNSET;
     cfg->cookie_ttl = BS_UNSET;
     cfg->difficulty = BS_UNSET;
@@ -304,6 +305,7 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
      * rather than aliasing one struct. */
     if (!add->decision_log_path && base->decision_log_path) {
         out->decision_log_path = base->decision_log_path;
+        out->decision_log_outcomes = base->decision_log_outcomes;
     }
     /* Sticky: enabling anywhere in the tree makes the vhost endpoint-
      * serving, so a vhost inherits a server-level enable. */
@@ -435,6 +437,7 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     /* Module-owned decision log — opened in post_config, not here. */
     scfg->decision_log_path           = NULL;
     scfg->decision_log_fd             = NULL;
+    scfg->decision_log_outcomes       = -1;   /* all */
     scfg->any_enabled                 = 0;
     return scfg;
 }
@@ -447,6 +450,9 @@ void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     out->enabled    = (add->enabled    == BS_UNSET) ? base->enabled    : add->enabled;
     out->challenge_enabled = (add->challenge_enabled == BS_UNSET)
                            ? base->challenge_enabled : add->challenge_enabled;
+    out->accesslog_suppress = (add->accesslog_suppress == BS_UNSET)
+                            ? base->accesslog_suppress
+                            : add->accesslog_suppress;
     out->debug      = (add->debug      == BS_UNSET) ? base->debug      : add->debug;
     out->cookie_ttl = (add->cookie_ttl == BS_UNSET) ? base->cookie_ttl : add->cookie_ttl;
     out->difficulty = (add->difficulty == BS_UNSET) ? base->difficulty : add->difficulty;
@@ -2454,6 +2460,28 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     rv = bs_open_decision_logs(pconf, s);
     if (rv != OK) return rv;
 
+    /* Announce the access-log default. Suppressing lines by default is
+     * a deliberate incompleteness in a file operators treat as a
+     * system of record, so it gets said out loud once per start rather
+     * than discovered by someone wondering where their requests went.
+     * Only for servers that actually have BotShield enabled somewhere;
+     * a loaded-but-unused module stays quiet. */
+    for (server_rec *sv = s; sv; sv = sv->next) {
+        bs_server_cfg *sc = ap_get_module_config(sv->module_config,
+                                                 &botshield_module);
+        if (!sc || !sc->any_enabled) continue;
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+            "mod_botshield: access-log lines are suppressed by default "
+            "for responses BotShield generated (challenged, block, "
+            "rate_limited, redirect) - those requests never reached the "
+            "application. They are still counted in "
+            "botshield_requests_total and on the dashboard. "
+            "'BotShieldAccessLog on' restores full logging; "
+            "'suppress=<outcomes>' selects a different set.");
+        break;
+    }
+    if (rv != OK) return rv;
+
     bs_init_state_persistence(pconf, s, scfg);
     bs_populate_auto_secret(pconf, ptemp, s);
     bs_populate_default_algorithm(s);
@@ -2599,6 +2627,65 @@ static const char *bs_set_score_int(const char *directive, int *slot,
             "%s: expected an integer in 0..10000, got '%s'", directive, arg);
     }
     *slot = (int)n;
+    return NULL;
+}
+
+/* BotShieldAccessLog on|off|suppress=<outcome[,outcome...]>
+ *
+ * Decouples access-log control from the trigger families. It used to be
+ * reachable only as a trigger action key, which meant an operator whose
+ * challenges came from the scoring defaults had to invent a rule whose
+ * only purpose was logging -- and any request the rule's predicate
+ * missed silently kept logging. Outcome-keyed and scope-level, so it
+ * follows the decision rather than the rule that produced it. */
+const char *bs_set_access_log(cmd_parms *cmd, void *cfg_v, int argc,
+                              char *const argv[])
+{
+    bs_dir_cfg *cfg = (bs_dir_cfg *)cfg_v;
+    if (argc != 1) {
+        return "BotShieldAccessLog: takes exactly one argument: "
+               "on, off, or suppress=<outcome[,outcome...]>";
+    }
+    const char *v = argv[0];
+
+    if (!strcasecmp(v, "on")) {
+        cfg->accesslog_suppress = 0;
+        return NULL;
+    }
+    if (!strcasecmp(v, "off")) {
+        /* "off" means every outcome BotShield reaches a decision on.
+         * Requests it never evaluated are outside its reach and keep
+         * logging -- this directive cannot silence the whole site. */
+        cfg->accesslog_suppress = (int)((1U << BS_M_OUTCOME_COUNT) - 1U);
+        return NULL;
+    }
+    if (strncasecmp(v, "suppress=", 9) != 0) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldAccessLog: '%s' must be on, off, or "
+            "suppress=<outcome[,outcome...]>", v);
+    }
+
+    unsigned mask = 0;
+    char *list = apr_pstrdup(cmd->pool, v + 9);
+    char *save = NULL;
+    for (char *tok = apr_strtok(list, ",", &save); tok;
+         tok = apr_strtok(NULL, ",", &save)) {
+        while (*tok == ' ') tok++;
+        if (!*tok) continue;
+        int oi = bs_outcome_index(tok);
+        if (oi < 0) {
+            return apr_psprintf(cmd->pool,
+                "BotShieldAccessLog: unknown outcome '%s'. Valid: "
+                "allow, challenged, verified, block, failopen, "
+                "rate_limited, inflight_capped, pending_missing, "
+                "misconfigured, debug, redirect", tok);
+        }
+        mask |= (1U << (unsigned)oi);
+    }
+    if (!mask) {
+        return "BotShieldAccessLog: suppress= needs at least one outcome";
+    }
+    cfg->accesslog_suppress = (int)mask;
     return NULL;
 }
 

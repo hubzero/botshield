@@ -86,6 +86,8 @@ const char *bs_set_challenge_file(cmd_parms *cmd, void *cfg_v, const char *arg);
 const char *bs_set_endpoint_prefix(cmd_parms *cmd, void *cfg_v, const char *arg);
 
 /* Score thresholds + forgiveness */
+const char *bs_set_access_log    (cmd_parms *cmd, void *cfg_v, int argc,
+                                  char *const argv[]);
 const char *bs_set_score_silent  (cmd_parms *cmd, void *cfg_v, const char *arg);
 const char *bs_set_score_hard    (cmd_parms *cmd, void *cfg_v, const char *arg);
 const char *bs_set_score_captcha (cmd_parms *cmd, void *cfg_v, const char *arg);

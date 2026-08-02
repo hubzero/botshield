@@ -90,6 +90,18 @@
 <section class="toc">
   <h2 class="toc__heading">On this page</h2>
   <ul class="toc__list">
+<li class="toc__item toc__item--level-2"><a href="#2026-08-02-decision-log-defaults-on">2026-08-02 (decision log defaults on)</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-botshielddecisionlog-defaults-to-logs-botshield-log">Changed — `BotShieldDecisionLog` defaults to `logs/botshield.log`</a></li>
+<li class="toc__item toc__item--level-2"><a href="#2026-08-02-no-request-goes-unrecorded">2026-08-02 (no request goes unrecorded)</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-the-decision-log-default-now-unions-the-access-log-suppression">Changed — the decision-log default now unions the access-log suppression</a></li>
+<li class="toc__item toc__item--level-2"><a href="#2026-08-02-access-log-suppression-is-the-default">2026-08-02 (access-log suppression is the default)</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-botshieldaccesslog-defaults-to-suppressing-botshield-s-own-responses">Changed — `BotShieldAccessLog` defaults to suppressing BotShield&#x27;s own responses</a></li>
+<li class="toc__item toc__item--level-3"><a href="#result-on-the-deployment-this-was-built-for">Result on the deployment this was built for</a></li>
+<li class="toc__item toc__item--level-2"><a href="#2026-08-02-decision-log-volume-control">2026-08-02 (decision-log volume control)</a></li>
+<li class="toc__item toc__item--level-3"><a href="#added-outcomes-on-botshielddecisionlog">Added — `outcomes=` on `BotShieldDecisionLog`</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-outcome-names-are-now-one-table">Changed — outcome names are now one table</a></li>
+<li class="toc__item toc__item--level-2"><a href="#2026-08-02-botshieldaccesslog">2026-08-02 (BotShieldAccessLog)</a></li>
+<li class="toc__item toc__item--level-3"><a href="#added-outcome-keyed-access-log-control-decoupled-from-triggers">Added — outcome-keyed access-log control, decoupled from triggers</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-08-02-request-triggers-can-challenge-no-session-context-is-challenged-by-default">2026-08-02 (request triggers can challenge; no-session-context is challenged by default)</a></li>
 <li class="toc__item toc__item--level-3"><a href="#added-tier-action-key-on-triggers">Added — `tier=` action key on triggers</a></li>
 <li class="toc__item toc__item--level-3"><a href="#changed-first-sight-ip-default-5-20">Changed — `first-sight-ip` default 5 -&gt; 20</a></li>
@@ -189,6 +201,132 @@
   </ul>
 </section>
         <div class="prose">
+<h2 id="2026-08-02-decision-log-defaults-on">2026-08-02 (decision log defaults on)</h2>
+<h3 id="changed-botshielddecisionlog-defaults-to-logs-botshield-log">Changed — <code>BotShieldDecisionLog</code> defaults to <code>logs/botshield.log</code></h3>
+<p>With no directive, any server that has <code>BotShieldEnabled</code> somewhere in
+it now writes a decision log to <code>logs/botshield.log</code>, server-root
+relative like Apache's own <code>ErrorLog</code>. A module that is loaded but never
+switched on still writes nothing, so installing the package does not
+leave a file on hosts that never turn it on -- the same reasoning that
+keeps a <code>CustomLog</code> out of the shipped drop-in.</p>
+<p>Defaulting it on is what makes the &quot;recorded somewhere&quot; guarantee hold
+without configuration. Access-log suppression is already a default; with
+no decision log by default the two composed into requests that appeared
+in no log at all.</p>
+<p>Set the directive to move the path or hand it to a piped-log program.</p>
+<h2 id="2026-08-02-no-request-goes-unrecorded">2026-08-02 (no request goes unrecorded)</h2>
+<h3 id="changed-the-decision-log-default-now-unions-the-access-log-suppression">Changed — the decision-log default now unions the access-log suppression</h3>
+<p>With no <code>outcomes=</code> key, <code>BotShieldDecisionLog</code> records the actionable
+set -- <code>block</code>, <code>verified</code>, <code>rate_limited</code>, <code>misconfigured</code>, <code>failopen</code>,
+<code>redirect</code> -- <strong>plus whatever <code>BotShieldAccessLog</code> is suppressing for
+that request</strong>.</p>
+<p>Access-log suppression defaults to BotShield's own responses, and the
+decision log defaulted to the actionable set. Those two sensible
+defaults composed into a hole: a <code>challenged</code> request was suppressed
+from the access log AND absent from the decision log, so a request the
+server answered was recorded nowhere at all. Both settings looked
+correct in isolation.</p>
+<p>Unioning them makes &quot;every request the server answered is recorded
+somewhere&quot; a property of the module rather than of an operator keeping
+two directives in step. Computed per request, since <code>BotShieldAccessLog</code>
+is per-directory while <code>BotShieldDecisionLog</code> is per-server -- there is
+no single set at config time to union with.</p>
+<p>The cost is honest and should be planned for: <code>challenged</code> returns to
+the decision log, which under flood measured ~265 MB/hr of 1,125-byte
+lines, against ~31 MB/hr of shorter lines when the access log carried
+them. Naming <code>outcomes=</code> explicitly overrides the union and accepts the
+gap.</p>
+<p>The startup notice describes the real default rather than claiming
+&quot;all outcomes&quot;, which is what unset used to mean.</p>
+<h2 id="2026-08-02-access-log-suppression-is-the-default">2026-08-02 (access-log suppression is the default)</h2>
+<h3 id="changed-botshieldaccesslog-defaults-to-suppressing-botshield-s-own-responses">Changed — <code>BotShieldAccessLog</code> defaults to suppressing BotShield's own responses</h3>
+<p>With no directive, access-log lines are now suppressed for <code>challenged</code>,
+<code>block</code>, <code>rate_limited</code> and <code>redirect</code> -- the outcomes where BotShield
+generated the response and the application never ran. <code>allow</code> and the
+verify-endpoint outcomes still log: those either reached the origin or
+are the module answering its own endpoint, and both are real traffic.</p>
+<p>This makes the common case need no configuration. It also makes the
+access log deliberately incomplete relative to what the server answered,
+which is a real tradeoff in a file many sites treat as a system of
+record -- so it is announced once at startup rather than discovered by
+someone hunting for missing requests. <code>BotShieldAccessLog on</code> restores
+full logging; nothing is ever hidden from <code>botshield_requests_total</code>,
+the dashboard, or the decision log.</p>
+<p><code>on</code> and unset are now distinguishable: unset takes the compiled default,
+<code>on</code> explicitly sets an empty suppression mask.</p>
+<h3 id="result-on-the-deployment-this-was-built-for">Result on the deployment this was built for</h3>
+<p>The vhost config for a site under active crawl flood is now:</p>
+<pre><code>&lt;LocationMatch &quot;^/(login|register)(/|$)&quot;&gt;
+    BotShieldEnabled On
+    BotShieldScoreHard    10000
+    BotShieldScoreCaptcha 10000
+&lt;/LocationMatch&gt;
+</code></pre>
+<p>Both <code>BotShieldRequestTrigger</code> rules were removed. They no longer
+produced the challenge -- <code>first-sight-ip</code> does -- and their surviving
+job, the <code>log=</code> tag, had no automated consumer, with <code>path=</code> in the
+decision log already distinguishing the crawl pattern. The explicit
+<code>BotShieldAccessLog</code> line went too, being the default now.</p>
+<p>Measured with all three lines gone: <code>/login</code> and <code>/register</code> still serve
+the invisible check, the homepage is untouched, access log 0.86 MB/hr,
+decision log 0.36 MB/hr. The two parked thresholds remain, and are the
+only tuning left -- they guarantee the scope can never escalate past the
+invisible tier.</p>
+<h2 id="2026-08-02-decision-log-volume-control">2026-08-02 (decision-log volume control)</h2>
+<h3 id="added-outcomes-on-botshielddecisionlog">Added — <code>outcomes=</code> on <code>BotShieldDecisionLog</code></h3>
+<pre><code>BotShieldDecisionLog &lt;path&gt; [outcomes=&lt;list&gt;]
+</code></pre>
+<p>Names the outcomes written to the module-owned decision log. Each named
+outcome is written <strong>in full</strong>; the rest get no per-request line.
+Omitting the key keeps the previous behaviour of logging every decision,
+so existing configs are unaffected -- the directive moved from <code>TAKE1</code>
+to <code>TAKE_ARGV</code> and the one-argument form still parses.</p>
+<p>Measured live under an active flood: <strong>258 MB/hr -&gt; 0</strong>, with the rare
+actionable outcomes still recorded completely. At 1,125 bytes a line and
+5,000 challenges a minute, that volume is what spends whatever retention
+a rotation rule buys -- on the host this was built for, <code>size 100M rotate 6</code> from an hourly cron, it means every kept file is one hour of
+flood and the live file reaches ~258 MB between checks.</p>
+<p><strong>No sample rate, on purpose.</strong> A 1-in-n mode was built and then removed
+before release. It is the obvious way to keep a cheap trace of a noisy
+outcome, and it costs the one property a security log must have: that an
+absent line means the event did not happen. It fails silently too --
+a thinned period and a quiet one read identically. An outcome is now
+either recorded completely or not at all.</p>
+<p>What filtering gives up is per-request detail, not knowledge: every
+outcome is still counted exactly in <code>/botshield/metrics</code> and on the
+dashboard. For forensic detail on a filtered outcome, add it to the list
+for the duration of the incident.</p>
+<p>Startup logs exactly what is being recorded, since a filtered log is
+indistinguishable from a complete one from the outside.</p>
+<h3 id="changed-outcome-names-are-now-one-table">Changed — outcome names are now one table</h3>
+<p><code>bs_m_outcome_names[]</code> is file-scope with a <code>bs_m_outcome_name()</code>
+accessor, replacing a copy that lived inside the dashboard handler.
+Third place the vocabulary would have been spelled out; this session
+already lost time to <code>first-sight-ip</code> having two disagreeing defaults.</p>
+<h2 id="2026-08-02-botshieldaccesslog">2026-08-02 (BotShieldAccessLog)</h2>
+<h3 id="added-outcome-keyed-access-log-control-decoupled-from-triggers">Added — outcome-keyed access-log control, decoupled from triggers</h3>
+<pre><code>BotShieldAccessLog on | off | suppress=&lt;outcome[,outcome...]&gt;
+</code></pre>
+<p>Scope-level (<code>RSRC_CONF | ACCESS_CONF</code>), keyed on the decision outcome.</p>
+<p>Access-log suppression previously existed only as the <code>accesslog=on|off</code>
+trigger action key, which covers just the requests some rule's predicate
+matched. That was fine while rules made the decisions. It stopped being
+fine once the scoring defaults began raising challenges on their own:
+a scope could be fully protected and still pouring noise into the access
+log from challenged requests no rule matched, with the only workaround
+being to invent a rule whose sole purpose was logging.</p>
+<p>Measured on a live flood: <code>/register?return=&lt;base64&gt;</code> -- the same
+infinite URL space as <code>/login</code> -- was correctly challenged by the
+defaults while adding ~31 MB/hr to the archived access log, because the
+existing rule's glob was <code>path=&quot;/login*&quot;</code>. With this directive the
+whole scope drops to 1.6 MB/hr and both rules keep their <code>log=</code> tag
+with no <code>accesslog=off</code> at all.</p>
+<p>Deliberate limits: requests BotShield never evaluated always log, so it
+cannot silence a site; and a <code>LogOnly</code> counterfactual (<code>~block</code>) is not
+suppressed, because nothing was enforced and the origin answered.</p>
+<p>Outcome names validate against <code>bs_outcome_index()</code>, the same table the
+decision log and metrics use, rather than a second copy of the list --
+this session already lost time to a default declared in two places.</p>
 <h2 id="2026-08-02-request-triggers-can-challenge-no-session-context-is-challenged-by-default">2026-08-02 (request triggers can challenge; no-session-context is challenged by default)</h2>
 <h3 id="added-tier-action-key-on-triggers">Added — <code>tier=</code> action key on triggers</h3>
 <p>A request trigger could previously only refuse or step aside. It can now
