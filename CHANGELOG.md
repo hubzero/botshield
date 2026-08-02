@@ -1,5 +1,50 @@
 # Changelog
 
+## 2026-08-02 (known bots pass; robots.txt can be observed before it is enforced)
+
+### Fixed — robots.txt `Disallow` ignored observe mode
+
+`BotShieldRobotsTxt` returned 403 for a disallowed path unconditionally,
+even under `BotShieldEnabled LogOnly`. The `Crawl-delay` path beside it
+has always honoured observe; `Disallow` never did.
+
+The consequence was that a robots.txt could not be measured before being
+enforced. An operator switching it on to find out who ignores their file
+would instead start refusing them on the spot -- and for a file most
+sites publish and never enforce, that is the wrong order. Now logs
+`robots-block:<group>:observe` with `outcome=~block`, and suppresses the
++100 score and the 1-hour flag too: those would follow the client into
+later requests and change its tier, which is enforcement by another
+route.
+
+### Changed — declared crawlers are no longer challenged for being stateless
+
+`first-sight-ip` and `dropped-cookie` both detect "no session context",
+which is suspicious for a browser and simply normal for a crawler. Every
+known bot therefore crossed the silent threshold on arrival -- measured:
+`semrush-bl` at 40, from `missing-accept-language` 15 + `dropped-cookie`
+25 -- and got challenged despite being a recognised, well-behaved
+crawler.
+
+Both heuristics are now suppressed for a UA the bot directory
+classifies, leaving every other signal intact. Keyed on `is_known_bot
+&& !is_fake_bot`, so a UA claiming a crawler whose IP fails the ranges
+cross-check keeps all its penalties.
+
+UA-only trust is spoofable and the answer is the rate limit, not a
+challenge: a spoofer claiming a crawler UA inherits that crawler's
+declared budget. That makes a configured `BotShieldBotRateLimit` a
+prerequisite for widening scope.
+
+### Fixed — observe records were filtered out of the decision log
+
+Counterfactuals now always get a decision-log line regardless of
+`outcomes=`. Under observe the real outcome is `allow`, which the
+default filter excludes, so the one record observation exists to produce
+was being discarded -- LogOnly looked like it was working while writing
+nothing. Bounded by policy matches rather than traffic, so exempting it
+is cheap.
+
 ## 2026-08-02 (decision log defaults on)
 
 ### Changed — `BotShieldDecisionLog` defaults to `logs/botshield.log`

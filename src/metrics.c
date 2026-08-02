@@ -874,7 +874,18 @@ static void bs_decision_log_write(request_rec *r, const char *payload,
     unsigned dl_mask = (scfg->decision_log_outcomes != -1)
                      ? (unsigned)scfg->decision_log_outcomes
                      : (BS_DEFAULT_DECISIONLOG_OUTCOMES | al_suppress);
-    {
+
+    /* A counterfactual always gets a line, whatever the filter says.
+     * Under observe mode the real outcome is `allow` -- the request was
+     * declined and the origin answered -- so the outcome filter drops
+     * it, which silently discards the one record observation exists to
+     * produce. An operator running LogOnly to find out who ignores
+     * their robots.txt would have seen nothing at all.
+     *
+     * Safe to exempt: a would-outcome is only stashed when a rule
+     * actually would have acted, so this is bounded by policy matches,
+     * not by traffic. */
+    if (!bs_get_would_outcome(r)) {
         if (outcome_idx < 0) return;
         if (!(dl_mask & (1U << (unsigned)outcome_idx))) {
             /* Not a kept outcome: no line. Deliberately not sampled --

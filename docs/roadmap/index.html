@@ -90,6 +90,10 @@
 <section class="toc">
   <h2 class="toc__heading">On this page</h2>
   <ul class="toc__list">
+<li class="toc__item toc__item--level-2"><a href="#2026-08-02-known-bots-pass-robots-txt-can-be-observed-before-it-is-enforced">2026-08-02 (known bots pass; robots.txt can be observed before it is enforced)</a></li>
+<li class="toc__item toc__item--level-3"><a href="#fixed-robots-txt-disallow-ignored-observe-mode">Fixed — robots.txt `Disallow` ignored observe mode</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-declared-crawlers-are-no-longer-challenged-for-being-stateless">Changed — declared crawlers are no longer challenged for being stateless</a></li>
+<li class="toc__item toc__item--level-3"><a href="#fixed-observe-records-were-filtered-out-of-the-decision-log">Fixed — observe records were filtered out of the decision log</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-08-02-decision-log-defaults-on">2026-08-02 (decision log defaults on)</a></li>
 <li class="toc__item toc__item--level-3"><a href="#changed-botshielddecisionlog-defaults-to-logs-botshield-log">Changed — `BotShieldDecisionLog` defaults to `logs/botshield.log`</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-08-02-no-request-goes-unrecorded">2026-08-02 (no request goes unrecorded)</a></li>
@@ -201,6 +205,40 @@
   </ul>
 </section>
         <div class="prose">
+<h2 id="2026-08-02-known-bots-pass-robots-txt-can-be-observed-before-it-is-enforced">2026-08-02 (known bots pass; robots.txt can be observed before it is enforced)</h2>
+<h3 id="fixed-robots-txt-disallow-ignored-observe-mode">Fixed — robots.txt <code>Disallow</code> ignored observe mode</h3>
+<p><code>BotShieldRobotsTxt</code> returned 403 for a disallowed path unconditionally,
+even under <code>BotShieldEnabled LogOnly</code>. The <code>Crawl-delay</code> path beside it
+has always honoured observe; <code>Disallow</code> never did.</p>
+<p>The consequence was that a robots.txt could not be measured before being
+enforced. An operator switching it on to find out who ignores their file
+would instead start refusing them on the spot -- and for a file most
+sites publish and never enforce, that is the wrong order. Now logs
+<code>robots-block:&lt;group&gt;:observe</code> with <code>outcome=~block</code>, and suppresses the
++100 score and the 1-hour flag too: those would follow the client into
+later requests and change its tier, which is enforcement by another
+route.</p>
+<h3 id="changed-declared-crawlers-are-no-longer-challenged-for-being-stateless">Changed — declared crawlers are no longer challenged for being stateless</h3>
+<p><code>first-sight-ip</code> and <code>dropped-cookie</code> both detect &quot;no session context&quot;,
+which is suspicious for a browser and simply normal for a crawler. Every
+known bot therefore crossed the silent threshold on arrival -- measured:
+<code>semrush-bl</code> at 40, from <code>missing-accept-language</code> 15 + <code>dropped-cookie</code>
+25 -- and got challenged despite being a recognised, well-behaved
+crawler.</p>
+<p>Both heuristics are now suppressed for a UA the bot directory
+classifies, leaving every other signal intact. Keyed on <code>is_known_bot &amp;&amp; !is_fake_bot</code>, so a UA claiming a crawler whose IP fails the ranges
+cross-check keeps all its penalties.</p>
+<p>UA-only trust is spoofable and the answer is the rate limit, not a
+challenge: a spoofer claiming a crawler UA inherits that crawler's
+declared budget. That makes a configured <code>BotShieldBotRateLimit</code> a
+prerequisite for widening scope.</p>
+<h3 id="fixed-observe-records-were-filtered-out-of-the-decision-log">Fixed — observe records were filtered out of the decision log</h3>
+<p>Counterfactuals now always get a decision-log line regardless of
+<code>outcomes=</code>. Under observe the real outcome is <code>allow</code>, which the
+default filter excludes, so the one record observation exists to produce
+was being discarded -- LogOnly looked like it was working while writing
+nothing. Bounded by policy matches rather than traffic, so exempting it
+is cheap.</p>
 <h2 id="2026-08-02-decision-log-defaults-on">2026-08-02 (decision log defaults on)</h2>
 <h3 id="changed-botshielddecisionlog-defaults-to-logs-botshield-log">Changed — <code>BotShieldDecisionLog</code> defaults to <code>logs/botshield.log</code></h3>
 <p>With no directive, any server that has <code>BotShieldEnabled</code> somewhere in

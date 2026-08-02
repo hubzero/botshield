@@ -419,13 +419,36 @@ int bs_check_policy(request_rec *r)
         }
     }
     if (robots_apply && !rmatch.allowed) {
-        /* Robots.txt Disallow → 403 with a +100 score hit and a
-         * 1-hour flag, mirroring the deny weight an explicit
-         * BotShieldPathTrigger ... status=403 would carry. */
-        bs_score_add(r, 100, 3600,
-            apr_pstrcat(r->pool, "robots-block:",
-                        rmatch.group_name ? rmatch.group_name : "?", NULL));
-        return HTTP_FORBIDDEN;
+        const char *rgroup = rmatch.group_name ? rmatch.group_name : "?";
+        /* Observe mode must not enforce -- the same contract the
+         * rate-limit path below has always honoured. Without this,
+         * switching BotShieldRobotsTxt on turned every Disallow into a
+         * hard 403 even under BotShieldEnabled LogOnly, so there was no
+         * way to find out who ignores your robots.txt before starting
+         * to refuse them. That is the wrong order for a rule set an
+         * operator has often published but never enforced.
+         *
+         * The score bump and the flag are suppressed too, not just the
+         * status: a +100 with a 1-hour TTL would follow the client into
+         * later requests and change their tier, which is enforcement by
+         * another route. */
+        if (global_log_only) {
+            bs_score_add(r, 0, 0,
+                apr_pstrcat(r->pool, "robots-block:", rgroup,
+                            ":observe", NULL));
+            bs_set_would_outcome(r, "~block");
+            if (bs_shm.metrics) {
+                __atomic_fetch_add(&bs_shm.metrics->trigger_observed_total,
+                                   1, __ATOMIC_RELAXED);
+            }
+        } else {
+            /* Robots.txt Disallow → 403 with a +100 score hit and a
+             * 1-hour flag, mirroring the deny weight an explicit
+             * BotShieldRequestTrigger ... status=403 would carry. */
+            bs_score_add(r, 100, 3600,
+                apr_pstrcat(r->pool, "robots-block:", rgroup, NULL));
+            return HTTP_FORBIDDEN;
+        }
     }
 
     /* A directive rate-limit cohort that MATCHES this request is
