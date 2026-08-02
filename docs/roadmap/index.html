@@ -90,6 +90,11 @@
 <section class="toc">
   <h2 class="toc__heading">On this page</h2>
   <ul class="toc__list">
+<li class="toc__item toc__item--level-2"><a href="#2026-08-01-botshieldrequesttrigger">2026-08-01 (BotShieldRequestTrigger)</a></li>
+<li class="toc__item toc__item--level-3"><a href="#fixed-request-trigger-family-display-name-documented-two-sharp-defaults">Fixed — request-trigger family display name; documented two sharp defaults</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-botshieldpathtrigger-is-now-botshieldrequesttrigger-path-is-a-key">Changed — `BotShieldPathTrigger` is now `BotShieldRequestTrigger`, path is a key</a></li>
+<li class="toc__item toc__item--level-3"><a href="#added-query-and-cookies-match-keys">Added — `query=` and `cookies=` match keys</a></li>
+<li class="toc__item toc__item--level-3"><a href="#fixed-quoted-key-values-were-retained-verbatim">Fixed — quoted key values were retained verbatim</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-07-31-accesslog-off">2026-07-31 (accesslog=off)</a></li>
 <li class="toc__item toc__item--level-3"><a href="#changed-log-off-becomes-accesslog-on-off">Changed — `log=off` becomes `accesslog=on|off`</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-07-31-log-off">2026-07-31 (log=off)</a></li>
@@ -160,6 +165,73 @@
   </ul>
 </section>
         <div class="prose">
+<h2 id="2026-08-01-botshieldrequesttrigger">2026-08-01 (BotShieldRequestTrigger)</h2>
+<h3 id="fixed-request-trigger-family-display-name-documented-two-sharp-defaults">Fixed — request-trigger family display name; documented two sharp defaults</h3>
+<p><code>bs_trigger_family_dname()</code> still returned <code>&quot;BotShieldPathTrigger&quot;</code> for
+the renamed family, so config-error messages cited a directive that no
+longer exists.</p>
+<p>Two defaults are now documented rather than left to be discovered, both
+found by watching production behave unexpectedly:</p>
+<ul>
+<li><strong>The family flags the matching IP</strong> (<code>scanner_probe</code>, 3600 s) unless
+<code>ttl=0</code>. Sensible for a few <code>/.env</code> scanners; wrong for
+high-cardinality traffic, where the flag is never read again and
+churns the 50k-slot flagged-IP table.</li>
+<li><strong>A <code>tier_floor</code> overrides parked score thresholds.</strong> It is MAX'd in
+after the score-to-tier decision, so <code>BotShieldScoreSilent 10000</code> does
+not stop it. Four compiled-in defaults carry one, which means a scope
+configured to be block-only will still render interstitials to any IP
+carrying <code>honeypot_hit</code>, <code>fake_bot</code>, <code>scanner_probe</code> or
+<code>pow_fail_streak</code>. Observed live: an IP flagged by our own trap rule
+was served <code>tier=form outcome=challenged</code> on a page the parked
+thresholds were meant to protect.</li>
+</ul>
+<h3 id="changed-botshieldpathtrigger-is-now-botshieldrequesttrigger-path-is-a-key">Changed — <code>BotShieldPathTrigger</code> is now <code>BotShieldRequestTrigger</code>, path is a key</h3>
+<p><strong>Breaking</strong>, no soft-deprecate window — same treatment <code>BotShieldBlockPath</code>
+got when this family absorbed it.</p>
+<pre><code class="language-apache"># before
+BotShieldPathTrigger  blocked &quot;/wp-admin/*&quot; status=403
+# after
+BotShieldRequestTrigger blocked path=&quot;/wp-admin/*&quot; status=403
+</code></pre>
+<p>The old name had already stopped being true. The family gained <code>ua=</code> and
+<code>ipspec=</code> cohort keys in the BlockPath absorption, so it had not matched
+on path alone for a while; adding <code>query=</code> and <code>cookies=</code> makes &quot;path&quot;
+one dimension out of five. The old name stays registered as a
+config-time error carrying the migration text, so an existing config
+fails with a note rather than &quot;unknown directive&quot;.</p>
+<h3 id="added-query-and-cookies-match-keys">Added — <code>query=</code> and <code>cookies=</code> match keys</h3>
+<pre><code class="language-apache">BotShieldRequestTrigger login-trap path=&quot;/login*&quot; query=&quot;*return=*&quot; \
+    cookies=none status=403 log=login-trap accesslog=off
+</code></pre>
+<ul>
+<li><code>query=&lt;glob&gt;</code> matches the query string alone (<code>r-&gt;args</code>). <code>path=</code>
+continues to match <code>r-&gt;uri</code>, which never contains the query.</li>
+<li><code>cookies=none|any|session</code> — the bulk predicates only. Named-cookie
+forms (<code>cookie=&lt;n&gt;</code>, <code>bs-cookie=&lt;state&gt;</code>) stay on
+<code>BotShieldCookieTrigger</code>; that vocabulary does not compress into one
+key.</li>
+</ul>
+<p>All match keys AND together, and a rule with none is rejected — that is
+what the per-scope <code>BotShieldTrigger</code> is for, and silently matching every
+request is too sharp an edge.</p>
+<p>Together these let one directive express a conjunction that previously
+needed a <code>SetEnvIfExpr</code> bridging into <code>BotShieldEnvTrigger</code>, or an
+<code>&lt;If&gt;</code> block. Keeping the predicate inside the module also means the
+decision log names it: <code>request-trigger:&lt;name&gt;</code> rather than an opaque
+env var.</p>
+<p>The cookie map is parsed lazily and at most once per request, only when
+some rule actually carries <code>cookies=</code>, so path-only rules pay nothing.</p>
+<h3 id="fixed-quoted-key-values-were-retained-verbatim">Fixed — quoted key values were retained verbatim</h3>
+<p><code>key=&quot;value&quot;</code> kept its quotes. Apache's <code>TAKE_ARGV</code> tokenizer only strips
+quotes that <em>begin a token</em>, so a quoted positional arg arrived clean
+while a quoted key value did not. <code>ua=&quot;GPTBot&quot;</code> — the spelling this
+changelog itself used — stored <code>&quot;GPTBot&quot;</code> including quotes and could
+never match a User-Agent. Silent non-match, no diagnostic.</p>
+<p>Values are now unquoted for all trigger match keys and all shared action
+keys, so both spellings behave identically. <code>BotShieldRateLimit</code> has its
+own arg parser and is <strong>not</strong> covered by this fix; its quoted <code>ua=</code> /
+<code>ipspec=</code> values are still affected.</p>
 <h2 id="2026-07-31-accesslog-off">2026-07-31 (accesslog=off)</h2>
 <h3 id="changed-log-off-becomes-accesslog-on-off">Changed — <code>log=off</code> becomes <code>accesslog=on|off</code></h3>
 <p>Renamed before it reached a release. Suppression is now its own key

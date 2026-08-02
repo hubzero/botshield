@@ -1,6 +1,8 @@
 # Directive reference
 
-mod_botshield registers 85 directives at config time. This page is
+mod_botshield registers 85 usable directives at config time (plus one
+retired name, `BotShieldPathTrigger`, kept registered only to emit a
+migration error). This page is
 the canonical reference, grouped by family. The
 underlying source-of-truth is `bs_cmds[]` in `src/botshield.c:142` —
 when tuning behavior, treat the source as authoritative
@@ -352,7 +354,7 @@ leaving explicit entries in force. Over-budget returns 429 +
 groups feed the same machinery.
 
 For path-conditional 403s (the former `BotShieldBlockPath`
-directive, retired), use `BotShieldPathTrigger` with `status=403`
+directive, retired), use `BotShieldRequestTrigger` with `status=403`
 plus optional `ua=` / `ipspec=` match keys — see the [Triggers](
 #triggers) section below.
 
@@ -375,7 +377,7 @@ semantics and refresh model.
 
 | Directive | Predicate args | Action keys |
 |---|---|---|
-| `BotShieldPathTrigger` | `<name> <path-glob> [ua=<substring>\|@<botgroup>] [ipspec=<spec>]` | `status=`, `redirect=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `penalty=`, `mode=` (no `credit=`) |
+| `BotShieldRequestTrigger` | `<name>` + any of `path=<glob>` `query=<glob>` `cookies=none\|any\|session` `ua=<substring>\|@<botgroup>` `ipspec=<spec>` — ANDed, at least one required | `status=`, `redirect=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `penalty=`, `mode=` (no `credit=`) |
 | `BotShieldCookieTrigger` | `<name> <pred>` (see policy page) | `status=`, `redirect=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `penalty=`, `credit=`, `mode=` |
 | `BotShieldEnvTrigger` | `<name> <env-pred>` (see policy page) | `status=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `penalty=`, `credit=`, `mode=` (no `redirect=`) |
 | `BotShieldFeedbackTrigger` | `<event>` | `flag=`, `ttl=`, `log=`, `accesslog=`, `mode=` |
@@ -398,7 +400,7 @@ suppresses the access-log line for a matching request.
 They compose, which is the point — a scanner probe usually wants both:
 
 ```apache
-BotShieldPathTrigger env-probe "/.env" status=403 \
+BotShieldRequestTrigger env-probe path="/.env" status=403 \
     log=scanner-probe accesslog=off
 ```
 
@@ -439,6 +441,81 @@ CustomLog logs/access.log combined "expr=%{reqenv:BS_OUTCOME} != 'block'"
 
 That is the right tool when you only want to thin one log.
 
+### `BotShieldRequestTrigger` — match on any request property
+
+Every match key is optional and they **AND** together; at least one is
+required. A rule with no condition would match every request, which is
+what `BotShieldTrigger` in an Apache scope is for, so the parser rejects
+it.
+
+| Key | Matches against | Notes |
+|---|---|---|
+| `path=<glob>` | `r->uri` — path only, **no** query string | must start with `/`, ≤256 chars |
+| `query=<glob>` | the query string alone | e.g. `query="*return=*"` |
+| `cookies=none\|any\|session` | the parsed `Cookie` header | bulk forms only |
+| `ua=<substring>\|@<botgroup>` | User-Agent | `*` means "any", same as omitting |
+| `ipspec=<spec>` | client IP | `*`, a CIDR list, or a file path |
+
+Globs take `*` wildcards and a trailing `$` anchor. Named-cookie
+predicates (`cookie=<n>`, `cookie=<n>~<substr>`, `bs-cookie=<state>`)
+stay on [`BotShieldCookieTrigger`](#triggers) — that vocabulary does not
+compress into one key.
+
+```apache
+# cookieless crawler walking a login redirect chain: path AND query AND
+# cookie-state, one cheap 403 from the policy walk, tagged for fail2ban
+# and kept out of the access log
+BotShieldRequestTrigger login-trap path="/login*" query="*return=*" \
+    cookies=none status=403 log=login-trap accesslog=off
+
+# no path condition at all — any URL carrying ?debug=1
+BotShieldRequestTrigger debugparam query="*debug=1*" penalty=20
+```
+
+Because it fires from the policy walk it short-circuits **before**
+scoring, so a `status=4xx` rule never renders a challenge and never
+reaches PHP.
+
+**Watch the flag default.** This family flags the matching IP with
+`scanner_probe` for 3600 s unless you say otherwise — inherited from
+`BotShieldPathTrigger`, where the target was a handful of scanners
+probing `/.env` and per-IP memory was worth having. It is the wrong
+default for high-cardinality traffic: at roughly one request per IP the
+flag is never read again, it churns the 50,000-slot flagged-IP table,
+and `scanner_probe` carries a compiled-in `tier_floor` of `form` that
+**overrides parked score thresholds** and turns a block-only scope into
+one that renders interstitials. Write `ttl=0` on rules that match
+one-shot traffic:
+
+```apache
+BotShieldRequestTrigger login-trap path="/login*" query="*return=*" \
+    cookies=none status=403 ttl=0 log=login-trap accesslog=off
+```
+
+#### Renamed from `BotShieldPathTrigger`
+
+`BotShieldPathTrigger` was renamed on 2026-08-01 and its path glob moved
+from a positional argument to the `path=` key. The old name had stopped
+being accurate when the family gained `ua=`/`ipspec=`; `query=` and
+`cookies=` made "path" one dimension out of five. Making path a key is
+also what allows a rule with no path condition at all.
+
+The old name is still registered, purely so an old config fails with a
+migration note rather than "unknown directive":
+
+```apache
+# before
+BotShieldPathTrigger blocked "/wp-admin/*" status=403
+# after
+BotShieldRequestTrigger blocked path="/wp-admin/*" status=403
+```
+
+A note on quoting: values are unquoted by the module, so
+`path="/login*"` and `path=/login*` behave identically. Apache's
+`TAKE_ARGV` tokenizer only strips quotes that begin a token, so without
+this a quoted `key="value"` would retain its quotes and silently never
+match.
+
 ## Per-scope triggers
 
 | Directive | Syntax | Scope |
@@ -466,6 +543,22 @@ Action verbs: `action=score add=N` (signed N -1000..1000),
 of `pass`/`silent`/`form`/`captcha`). The `reset` keyword clears
 all earlier triggers (compiled-in defaults + prior
 declarations) for the named flag at post-config time.
+
+**A `tier_floor` bypasses your score thresholds.** It is MAX'd in
+*after* the score-to-tier decision, so it does not consult
+`BotShieldScoreSilent`/`Hard`/`Captcha` at all. Four of the compiled-in
+defaults carry one — `honeypot_hit` and `fake_bot` (captcha),
+`scanner_probe` (form), `pow_fail_streak` (silent) — so an IP carrying
+any of them is challenged even in a scope whose thresholds are parked to
+disable challenges entirely. To make a scope genuinely block-only, reset
+the floors and keep the scores:
+
+```apache
+BotShieldFlagTrigger honeypot_hit    reset action=score add=60
+BotShieldFlagTrigger fake_bot        reset action=score add=80
+BotShieldFlagTrigger scanner_probe   reset action=score add=50
+BotShieldFlagTrigger pow_fail_streak reset action=score add=30
+```
 
 Flag bits: `honeypot_hit`, `scanner_probe`, `fake_bot`,
 `pow_fail_streak`, `app_verified_human`, `app_verified_session`,

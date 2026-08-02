@@ -139,6 +139,23 @@ int bs_bot_name_valid(const char *s)
 
 
 
+/* Retired 2026-08-01. BotShieldPathTrigger became
+ * BotShieldRequestTrigger and its path glob became a key. Registered
+ * purely so an old config fails with a migration note rather than
+ * Apache's bare "Invalid command" — the same courtesy log=off got. */
+static const char *bs_retired_path_trigger(cmd_parms *cmd, void *dconf,
+                                           const char *args)
+{
+    (void)dconf; (void)args;
+    return apr_pstrdup(cmd->pool,
+        "BotShieldPathTrigger was renamed to BotShieldRequestTrigger on "
+        "2026-08-01, and the path glob is now a key. Migrate: "
+        "`BotShieldPathTrigger blocked \"/wp-admin/*\" status=403` becomes "
+        "`BotShieldRequestTrigger blocked path=\"/wp-admin/*\" status=403`. "
+        "The new family also matches query=, cookies=, ua= and ipspec=, "
+        "all ANDed.");
+}
+
 static const command_rec bs_cmds[] = {
     AP_INIT_TAKE1("BotShieldEnabled",   bs_set_enabled,    NULL,
                  RSRC_CONF | ACCESS_CONF,
@@ -724,30 +741,35 @@ static const command_rec bs_cmds[] = {
                  "redirect rejected — load is global state, not "
                  "per-IP behavior. First-match-wins."),
     /* E3 — path-based triggers */
-    AP_INIT_TAKE_ARGV("BotShieldPathTrigger",
-                 bs_set_path_trigger, NULL, RSRC_CONF,
-                 "Path-based trigger. Args: <name> <path-glob> "
-                 "[key=value ...]. Keys: status=<code|pass> (default "
-                 "403; 'pass' means the real handler runs), "
-                 "redirect=<url> (implies 302 unless status=3xx "
-                 "explicit), log=<tag> (emitted as tag=\"<x>\" on the "
-                 "decision log, for fail2ban handoff), "
-                 "accesslog=on|off (default on; 'off' drops the "
-                 "access-log line for a matching request by breaking "
-                 "the log_transaction hook chain. Composes with "
-                 "log=<tag>, so a rule can carry a tag AND stay out of "
-                 "the access log — the usual want for scanner probes. "
-                 "Because mod_log_config serves every CustomLog from "
-                 "that one hook, a CustomLog-based decision log is "
-                 "suppressed too; BotShieldDecisionLog is written by "
-                 "the module and is unaffected, as is the error-log "
-                 "line. Never applies under observe/LogOnly), "
-                 "flag=<bit> (M5.1 flag name; "
-                 "default scanner_probe), ttl=<sec> (flagged-IP "
-                 "TTL; default 3600; 0 = don't flag), penalty=<n> "
-                 "(score_add amount on this request; default 0; "
-                 "ignored under status=pass). Declaration order, "
-                 "first match wins; upsert-by-name."),
+    AP_INIT_TAKE_ARGV("BotShieldRequestTrigger",
+                 bs_set_request_trigger, NULL, RSRC_CONF,
+                 "Match a request on any combination of its properties "
+                 "and act once. Args: <name> [key=value ...]. Match "
+                 "keys, all optional, ANDed together - at least one is "
+                 "required: path=<glob> (vs the URI path, no query "
+                 "string), query=<glob> (vs the query string alone), "
+                 "cookies=none|any|session, ua=<substring>|@<botgroup>, "
+                 "ipspec=*|<file>|<cidr[,cidr]>. Globs take '*' "
+                 "wildcards and a trailing '$' anchor. Action keys: "
+                 "status=<code|pass> (default 403; 'pass' means the "
+                 "real handler runs), redirect=<url> (implies 302 "
+                 "unless status=3xx explicit), log=<tag>, "
+                 "accesslog=on|off, flag=<bit> (default "
+                 "scanner_probe), ttl=<sec> (default 3600; 0 = don't "
+                 "flag), penalty=<n>, mode=enforce|observe. "
+                 "Declaration order, first match wins; upsert-by-name. "
+                 "Named-cookie predicates (cookie=<n>, bs-cookie=...) "
+                 "live on BotShieldCookieTrigger, whose vocabulary is "
+                 "richer than one key. A rule with no match key is "
+                 "rejected - use BotShieldTrigger in the scope you "
+                 "mean. Renamed from BotShieldPathTrigger 2026-08-01, "
+                 "when the path glob became a key."),
+    AP_INIT_RAW_ARGS("BotShieldPathTrigger", bs_retired_path_trigger,
+                 NULL, RSRC_CONF,
+                 "RETIRED 2026-08-01 - renamed to BotShieldRequestTrigger, "
+                 "and the path glob is now a key. Kept as a loud "
+                 "config-time error so an old config fails with a "
+                 "migration note instead of 'unknown directive'."),
     AP_INIT_TAKE1("BotShieldDecisionLog", bs_set_decision_log,
                  NULL, RSRC_CONF,
                  "Module-owned decision log. Value is a server-root-"

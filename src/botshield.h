@@ -349,7 +349,7 @@ typedef struct bs_server_cfg {
     /* E15 — per-cookie hourly forgiveness cap. */
     int                 forgive_cap_per_hour;
     /* E3 — path-based triggers. */
-    apr_array_header_t *path_triggers;
+    apr_array_header_t *request_triggers;
     /* E4 — cookie triggers. */
     apr_array_header_t *cookie_triggers;
     /* E6 — env-var triggers. */

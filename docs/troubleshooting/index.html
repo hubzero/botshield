@@ -183,7 +183,7 @@ the honeypot, the IP is flagged, future requests get the
 flag-trigger penalty + tier_floor=captcha. See
 <a href="../policy/index.html">policy</a>.</li>
 <li><strong>Path triggers</strong>: for paths that bots target but legitimate
-users don't, add <code>BotShieldPathTrigger</code> rules with a penalty,
+users don't, add <code>BotShieldRequestTrigger</code> rules with a penalty,
 status=403, or both. UA / IP cohort gating goes inline as
 <code>ua=...</code> / <code>ipspec=...</code> keys.</li>
 <li><strong>Rate-limit</strong>: if you see scraper UA patterns, add a

@@ -338,16 +338,36 @@ int bs_check_policy(request_rec *r)
      * with `ua=` or `ipspec=` keys carries a populated cohort that
      * ANDs with the path-glob match (path-only triggers leave
      * has_cohort==0 and skip the cohort check). */
-    if (scfg->path_triggers && scfg->path_triggers->nelts > 0) {
-        for (int i = 0; i < scfg->path_triggers->nelts; i++) {
-            bs_path_trigger_entry *t = APR_ARRAY_IDX(
-                scfg->path_triggers, i, bs_path_trigger_entry *);
-            if (!bs_path_match(t->path_pattern, r->uri)) continue;
+    if (scfg->request_triggers && scfg->request_triggers->nelts > 0) {
+        /* Cookie map is parsed lazily and only once, and only if some
+         * rule actually carries a cookies= condition — the common case
+         * (path-only rules) must not pay for it. */
+        apr_table_t *rt_cmap = NULL;
+        for (int i = 0; i < scfg->request_triggers->nelts; i++) {
+            bs_request_trigger_entry *t = APR_ARRAY_IDX(
+                scfg->request_triggers, i, bs_request_trigger_entry *);
+            /* Every dimension is optional; absent means "no restriction".
+             * Ordered cheapest-first: path and query are byte globs, the
+             * cohort may hit the UA classifier / CIDR ranges. */
+            if (t->path_pattern
+                && !bs_path_match(t->path_pattern, r->uri)) continue;
+            if (t->query_pattern
+                && !bs_path_match(t->query_pattern, r->args ? r->args : ""))
+                continue;
+            if (t->cookie_pred >= 0) {
+                if (!rt_cmap) rt_cmap = bs_parse_cookies_once(r);
+                bs_cookie_trigger_entry probe;
+                memset(&probe, 0, sizeof(probe));
+                probe.pred_kind = t->cookie_pred;
+                if (!bs_cookie_pred_match(&probe, rt_cmap,
+                                          scfg->session_names, NULL))
+                    continue;
+            }
             if (t->has_cohort && !bs_cohort_matches(&t->cohort, ua, r))
                 continue;
             bs_trigger_exec_outcome o = bs_apply_trigger_action(
-                r, scfg, BS_TFAMILY_PATH, &t->action,
-                "path-trigger", t->name);
+                r, scfg, BS_TFAMILY_REQUEST, &t->action,
+                "request-trigger", t->name);
             /* Path family: PASS decays to DECLINED (handler lets
              * the real Apache response through); STATUS emits
              * Location/code short-circuit. CONTINUE/BREAK aren't

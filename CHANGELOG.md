@@ -1,5 +1,88 @@
 # Changelog
 
+## 2026-08-01 (BotShieldRequestTrigger)
+
+### Fixed — request-trigger family display name; documented two sharp defaults
+
+`bs_trigger_family_dname()` still returned `"BotShieldPathTrigger"` for
+the renamed family, so config-error messages cited a directive that no
+longer exists.
+
+Two defaults are now documented rather than left to be discovered, both
+found by watching production behave unexpectedly:
+
+- **The family flags the matching IP** (`scanner_probe`, 3600 s) unless
+  `ttl=0`. Sensible for a few `/.env` scanners; wrong for
+  high-cardinality traffic, where the flag is never read again and
+  churns the 50k-slot flagged-IP table.
+- **A `tier_floor` overrides parked score thresholds.** It is MAX'd in
+  after the score-to-tier decision, so `BotShieldScoreSilent 10000` does
+  not stop it. Four compiled-in defaults carry one, which means a scope
+  configured to be block-only will still render interstitials to any IP
+  carrying `honeypot_hit`, `fake_bot`, `scanner_probe` or
+  `pow_fail_streak`. Observed live: an IP flagged by our own trap rule
+  was served `tier=form outcome=challenged` on a page the parked
+  thresholds were meant to protect.
+
+### Changed — `BotShieldPathTrigger` is now `BotShieldRequestTrigger`, path is a key
+
+**Breaking**, no soft-deprecate window — same treatment `BotShieldBlockPath`
+got when this family absorbed it.
+
+```apache
+# before
+BotShieldPathTrigger  blocked "/wp-admin/*" status=403
+# after
+BotShieldRequestTrigger blocked path="/wp-admin/*" status=403
+```
+
+The old name had already stopped being true. The family gained `ua=` and
+`ipspec=` cohort keys in the BlockPath absorption, so it had not matched
+on path alone for a while; adding `query=` and `cookies=` makes "path"
+one dimension out of five. The old name stays registered as a
+config-time error carrying the migration text, so an existing config
+fails with a note rather than "unknown directive".
+
+### Added — `query=` and `cookies=` match keys
+
+```apache
+BotShieldRequestTrigger login-trap path="/login*" query="*return=*" \
+    cookies=none status=403 log=login-trap accesslog=off
+```
+
+- `query=<glob>` matches the query string alone (`r->args`). `path=`
+  continues to match `r->uri`, which never contains the query.
+- `cookies=none|any|session` — the bulk predicates only. Named-cookie
+  forms (`cookie=<n>`, `bs-cookie=<state>`) stay on
+  `BotShieldCookieTrigger`; that vocabulary does not compress into one
+  key.
+
+All match keys AND together, and a rule with none is rejected — that is
+what the per-scope `BotShieldTrigger` is for, and silently matching every
+request is too sharp an edge.
+
+Together these let one directive express a conjunction that previously
+needed a `SetEnvIfExpr` bridging into `BotShieldEnvTrigger`, or an
+`<If>` block. Keeping the predicate inside the module also means the
+decision log names it: `request-trigger:<name>` rather than an opaque
+env var.
+
+The cookie map is parsed lazily and at most once per request, only when
+some rule actually carries `cookies=`, so path-only rules pay nothing.
+
+### Fixed — quoted key values were retained verbatim
+
+`key="value"` kept its quotes. Apache's `TAKE_ARGV` tokenizer only strips
+quotes that *begin a token*, so a quoted positional arg arrived clean
+while a quoted key value did not. `ua="GPTBot"` — the spelling this
+changelog itself used — stored `"GPTBot"` including quotes and could
+never match a User-Agent. Silent non-match, no diagnostic.
+
+Values are now unquoted for all trigger match keys and all shared action
+keys, so both spellings behave identically. `BotShieldRateLimit` has its
+own arg parser and is **not** covered by this fix; its quoted `ua=` /
+`ipspec=` values are still affected.
+
 ## 2026-07-31 (accesslog=off)
 
 ### Changed — `log=off` becomes `accesslog=on|off`

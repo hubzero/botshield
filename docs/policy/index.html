@@ -204,11 +204,11 @@ rejected.</li>
 <p>Both axes can't be <code>*</code>/omitted — that would rate-limit every
 request, rejected at config time. The legacy 5-arg positional form
 <code>&lt;name&gt; &lt;budget&gt; &lt;per&gt; &lt;ua-pattern&gt; &lt;ipspec&gt;</code> is still accepted.</p>
-<p>For path-conditional 403s, use <code>BotShieldPathTrigger</code> with
+<p>For path-conditional 403s, use <code>BotShieldRequestTrigger</code> with
 <code>status=403</code> plus optional <code>ua=</code> / <code>ipspec=</code> match keys (the
 former <code>BotShieldBlockPath</code> directive, retired):</p>
-<pre><code class="language-apache">BotShieldPathTrigger legacy-admin &quot;/wp-admin/*&quot; status=403
-BotShieldPathTrigger aggressive-scraper &quot;/&quot; ua=&quot;AhrefsBot&quot; status=403
+<pre><code class="language-apache">BotShieldRequestTrigger legacy-admin path=&quot;/wp-admin/*&quot; status=403
+BotShieldRequestTrigger aggressive-scraper path=&quot;/&quot; ua=&quot;AhrefsBot&quot; status=403
 </code></pre>
 <p>Match keys (any of):</p>
 <ul>
@@ -286,7 +286,7 @@ the same shared action keys.</p>
 <tbody>
 <tr>
 <td>Path</td>
-<td><code>BotShieldPathTrigger</code></td>
+<td><code>BotShieldRequestTrigger</code></td>
 <td>URI glob</td>
 </tr>
 <tr>
@@ -357,9 +357,9 @@ action keys are:</p>
 </tbody>
 </table>
 <h3 id="path-triggers">Path triggers</h3>
-<pre><code class="language-apache">BotShieldPathTrigger admin-honeypot &quot;/admin/.env&quot; \
+<pre><code class="language-apache">BotShieldRequestTrigger admin-honeypot path=&quot;/admin/.env&quot; \
     status=403 flag=honeypot_hit ttl=3600 log=admin-trap
-BotShieldPathTrigger api-burst-trap &quot;/api/*/burst&quot; \
+BotShieldRequestTrigger api-burst-trap path=&quot;/api/*/burst&quot; \
     penalty=30 log=api-burst
 </code></pre>
 <p>First-match wins (declaration order). On match, the path family's

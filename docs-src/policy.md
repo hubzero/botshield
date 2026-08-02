@@ -105,13 +105,13 @@ Both axes can't be `*`/omitted — that would rate-limit every
 request, rejected at config time. The legacy 5-arg positional form
 `<name> <budget> <per> <ua-pattern> <ipspec>` is still accepted.
 
-For path-conditional 403s, use `BotShieldPathTrigger` with
+For path-conditional 403s, use `BotShieldRequestTrigger` with
 `status=403` plus optional `ua=` / `ipspec=` match keys (the
 former `BotShieldBlockPath` directive, retired):
 
 ```apache
-BotShieldPathTrigger legacy-admin "/wp-admin/*" status=403
-BotShieldPathTrigger aggressive-scraper "/" ua="AhrefsBot" status=403
+BotShieldRequestTrigger legacy-admin path="/wp-admin/*" status=403
+BotShieldRequestTrigger aggressive-scraper path="/" ua="AhrefsBot" status=403
 ```
 
 Match keys (any of):
@@ -192,7 +192,7 @@ the same shared action keys.
 
 | Family | Directive | Predicate |
 |---|---|---|
-| Path | `BotShieldPathTrigger` | URI glob |
+| Path | `BotShieldRequestTrigger` | URI glob |
 | Cookie | `BotShieldCookieTrigger` | Cookie name + value (or bulk shape) |
 | Env | `BotShieldEnvTrigger` | Apache env var |
 | Feedback | `BotShieldFeedbackTrigger` | App-emitted event name (response path) |
@@ -217,9 +217,9 @@ action keys are:
 ### Path triggers
 
 ```apache
-BotShieldPathTrigger admin-honeypot "/admin/.env" \
+BotShieldRequestTrigger admin-honeypot path="/admin/.env" \
     status=403 flag=honeypot_hit ttl=3600 log=admin-trap
-BotShieldPathTrigger api-burst-trap "/api/*/burst" \
+BotShieldRequestTrigger api-burst-trap path="/api/*/burst" \
     penalty=30 log=api-burst
 ```
 

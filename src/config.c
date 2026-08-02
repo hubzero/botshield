@@ -168,7 +168,7 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
      * main version is skipped entirely (no shadowed duplicates).
      *
      * Every entry type stored here (bs_rate_limit_entry,
-     * bs_path_trigger_entry, etc.) shares a const char *name as its
+     * bs_request_trigger_entry, etc.) shares a const char *name as its
      * first field, so we can key the dedup by the leading pointer
      * word without branching per-type. */
     out->rate_limits = bs_merge_rule_array(p, base->rate_limits,
@@ -228,8 +228,8 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
     /* E15 — child-set value wins; 0 means "inherit". */
     out->forgive_cap_per_hour = (add->forgive_cap_per_hour > 0)
         ? add->forgive_cap_per_hour : base->forgive_cap_per_hour;
-    out->path_triggers = bs_merge_rule_array(p, base->path_triggers,
-                                             add->path_triggers);
+    out->request_triggers = bs_merge_rule_array(p, base->request_triggers,
+                                             add->request_triggers);
     out->cookie_triggers = bs_merge_rule_array(p, base->cookie_triggers,
                                                add->cookie_triggers);
     out->env_triggers    = bs_merge_rule_array(p, base->env_triggers,
@@ -374,7 +374,7 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->share_scope_token     = NULL;
     /* E15 — 0 means "inherit / use default". */
     scfg->forgive_cap_per_hour  = 0;
-    scfg->path_triggers         = apr_array_make(p, 4, sizeof(void *));
+    scfg->request_triggers         = apr_array_make(p, 4, sizeof(void *));
     scfg->cookie_triggers  = apr_array_make(p, 4, sizeof(void *));
     scfg->env_triggers     = apr_array_make(p, 4, sizeof(void *));
     scfg->feedback_triggers = apr_array_make(p, 4, sizeof(void *));
@@ -1359,7 +1359,7 @@ static void bs_wire_rate_and_block_cohorts(apr_pool_t *pconf,
         if (!vcfg) continue;
 
         /* Resolve a cohort's ipspec (path or inline CIDRs) into the
-         * ranges array. Shared between rate_limits and path_triggers. */
+         * ranges array. Shared between rate_limits and request_triggers. */
         #define BS_E21_RESOLVE_COHORT(c_, feature_, name_) do {              \
             if ((c_)->ip_any || (c_)->ranges) break;                         \
             const char *rerr = NULL;                                         \
@@ -1437,11 +1437,11 @@ static void bs_wire_rate_and_block_cohorts(apr_pool_t *pconf,
          * cohort; resolve its ipspec the same way rate-limit cohorts
          * are resolved. Path triggers without those keys leave
          * has_cohort=0 and are skipped here. */
-        if (vcfg->path_triggers && vcfg->path_triggers->nelts > 0) {
+        if (vcfg->request_triggers && vcfg->request_triggers->nelts > 0) {
             int wired = 0;
-            for (int i = 0; i < vcfg->path_triggers->nelts; i++) {
-                bs_path_trigger_entry *e = APR_ARRAY_IDX(
-                    vcfg->path_triggers, i, bs_path_trigger_entry *);
+            for (int i = 0; i < vcfg->request_triggers->nelts; i++) {
+                bs_request_trigger_entry *e = APR_ARRAY_IDX(
+                    vcfg->request_triggers, i, bs_request_trigger_entry *);
                 if (!e->has_cohort) continue;
                 BS_E21_RESOLVE_COHORT(&e->cohort,
                     "BotShieldPathTrigger", e->name);

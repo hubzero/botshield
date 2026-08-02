@@ -56,7 +56,7 @@ struct bs_server_cfg;
 #define BS_TRIGGER_STATUS_PASS   (-1)
 
 typedef enum {
-    BS_TFAMILY_PATH = 0,
+    BS_TFAMILY_REQUEST = 0,
     BS_TFAMILY_COOKIE,
     BS_TFAMILY_ENV,
     BS_TFAMILY_FEEDBACK,
@@ -126,17 +126,24 @@ typedef struct {
     apr_array_header_t *ranges;
 } bs_cohort;
 
+/* Request trigger (was BotShieldPathTrigger through 2026-07). Every
+ * match dimension is optional and they AND together; the setter
+ * rejects a rule with none, since that is what the per-scope
+ * BotShieldTrigger is for. NULL / -1 means "this dimension does not
+ * restrict". */
 typedef struct {
     const char        *name;
-    const char        *path_pattern;
-    /* Optional UA / IP gate. Zero-init means "no cohort restriction —
-     * fire whenever path-glob matches." Set when the directive uses
-     * `ua=...` or `ipspec=...` keys. The cohort match (when present)
-     * ANDs with the path glob. See bs_set_path_trigger. */
+    const char        *path_pattern;   /* path=  glob vs r->uri;  NULL = any */
+    const char        *query_pattern;  /* query= glob vs r->args; NULL = any */
+    /* cookies= bulk predicate: one of BS_CP_BULK_NONE / _ANY / _SESSION,
+     * or -1 for no cookie condition. Named-cookie predicates stay with
+     * BotShieldCookieTrigger, whose vocabulary is richer than one key. */
+    int                cookie_pred;
+    /* ua= / ipspec= cohort. has_cohort==0 means no UA/IP restriction. */
     bs_cohort          cohort;
     int                has_cohort;
     bs_trigger_action  action;
-} bs_path_trigger_entry;
+} bs_request_trigger_entry;
 
 /* Cookie predicate kinds. Per-named lookups (NAMED_*) target a
  * specific cookie name; bulk variants (BULK_*) examine the cookie
@@ -313,7 +320,7 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
  * appends.
  * ====================================================================== */
 
-const char *bs_set_path_trigger    (cmd_parms *cmd, void *dconf,
+const char *bs_set_request_trigger    (cmd_parms *cmd, void *dconf,
                                     int argc, char *const argv[]);
 const char *bs_set_cookie_trigger  (cmd_parms *cmd, void *dconf,
                                     int argc, char *const argv[]);

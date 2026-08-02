@@ -40,8 +40,8 @@ the policy walk — the next rule still gets its chance.
 Add `mode=observe` to any directive that supports it:
 
 ```apache
-BotShieldPathTrigger    admin-trap   "/admin/.env"  flag=scanner_probe ttl=3600 log=admin-trap mode=observe
-BotShieldPathTrigger    legacy-admin "/wp-admin/*"  status=403 mode=observe
+BotShieldRequestTrigger    admin-trap   path="/admin/.env"  flag=scanner_probe ttl=3600 log=admin-trap mode=observe
+BotShieldRequestTrigger    legacy-admin path="/wp-admin/*"  status=403 mode=observe
 BotShieldRateLimit      api-burst    60 min "" * mode=observe
 BotShieldFlagTrigger    honeypot_hit action=tier_floor min=captcha mode=observe
 ```

@@ -115,7 +115,7 @@ deliver an incremental-rebuild win — punted as a follow-up.
 | `challenge.{c,h}` | Challenge issuance (`bs_issue_challenge`), PoW algorithm registry + lookup (`bs_find_algorithm`), canonical pipe-delimited HMAC input (`bs_challenge_canonical`), inline-JSON renderer (`bs_challenge_json`), bootstrap-binding helpers (`bs_format_bound_ip_hex`, `bs_compute_bootstrap_sig`). `BotShieldAlgorithm` setter. Hosts `bs_challenge` envelope, `bs_rep_state` reputation block, `bs_pow_algorithm` registry types, and challenge wire constants (`BS_PROTOCOL_VERSION`, `BS_SALT_BYTES`, `BS_NONCE_BYTES`) |
 | `score.{c,h}` | Per-request score struct on `r->request_config`, `bs_score_add` accumulator, reason renderers (`bs_decision_reason_names`, `bs_score_reasons_joined`), `bs_apply_flag_triggers` walker, `bs_decide_tier` score → tier picker, `bs_tier_name`. Hosts `bs_tier` and `bs_silent_mode` enums, `bs_score_entry` / `bs_request_score` types, score thresholds (`BS_DEFAULT_SCORE_*`) and heuristic penalties (`BS_PENALTY_*`) |
 | `policy.{c,h}` | `bs_check_policy` request-time policy walker (cookie / env / load / path triggers, robots, rate-limit, robots Crawl-delay). `/policy-status` admin handler |
-| `triggers.{c,h}` | Per-family trigger setters (`bs_set_path_trigger`, `bs_set_cookie_trigger`, `bs_set_env_trigger`, `bs_set_feedback_trigger`, `bs_set_load_trigger`), shared action-key parser, `bs_apply_trigger_action` executor. `bs_set_flag_ip` and `bs_set_flag_trigger` setters for the E14 flag-trigger family. `bs_cookie_pred_match` predicate evaluator. Hosts the shared action engine (`bs_trigger_action`, `bs_trigger_family`, `BS_T*` enums), per-family entry types (`bs_path_trigger_entry` et al.), the E2.1 cohort + rate-limit types (`bs_cohort`, `bs_rate_limit_entry`, `bs_rate_escalate_entry`, `bs_rate_counter`), and the E14 flag-trigger entry type (`bs_flag_trigger_entry`, `bs_flag_action_kind`) |
+| `triggers.{c,h}` | Per-family trigger setters (`bs_set_request_trigger`, `bs_set_cookie_trigger`, `bs_set_env_trigger`, `bs_set_feedback_trigger`, `bs_set_load_trigger`), shared action-key parser, `bs_apply_trigger_action` executor. `bs_set_flag_ip` and `bs_set_flag_trigger` setters for the E14 flag-trigger family. `bs_cookie_pred_match` predicate evaluator. Hosts the shared action engine (`bs_trigger_action`, `bs_trigger_family`, `BS_T*` enums), per-family entry types (`bs_request_trigger_entry` et al.), the E2.1 cohort + rate-limit types (`bs_cohort`, `bs_rate_limit_entry`, `bs_rate_escalate_entry`, `bs_rate_counter`), and the E14 flag-trigger entry type (`bs_flag_trigger_entry`, `bs_flag_action_kind`) |
 | `captcha.{c,h}` | M8 provider registry (`bs_find_provider`), libcurl-backed `bs_captcha_siteverify` shared shim, `bs_geetest_siteverify` provider-specific verifier, M8.1 pending cookie (`bs_mint_pending_cookie`, `bs_clear_pending_cookie`), `bs_captcha_verify_handler`, URL-encoded form lookup helper (`bs_form_get`). All eleven captcha directive setters. Hosts `bs_captcha_provider` registry struct, `bs_captcha_result` enum, `bs_captcha_siteverify_fn` typedef |
 | `silent.{c,h}` | E17 embedded handlers: `bs_embedded_js_handler`, `bs_embedded_worker_handler`, `bs_embedded_bootstrap_handler`, `bs_embedded_verify_handler`, `bs_form_widget_handler`. `BotShieldSilentMode` setter |
 | `templates.{c,h}` | Static HTML/CSS/JS strings for the PoW widget, captcha-tier widgets, and the page shell. Two-step substitution renderer (`bs_render_challenge_page`) |
@@ -1201,7 +1201,7 @@ flag/ttl/optional-log subset.
 
 #### Path triggers (E3)
 
-`BotShieldPathTrigger <name> <path-glob> [key=value ...]`. Anyone
+`BotShieldRequestTrigger <name> <path-glob> [key=value ...]`. Anyone
 hitting the path triggers the action — unscoped (unlike E2.1
 a path trigger with `ua=`/`ipspec=` keys, which is cohort-scoped).
 Default `status=403`, default `flag=scanner_probe`, default
@@ -2093,7 +2093,9 @@ the linker on Apache symbols.
 
 ### Directive table
 
-`bs_cmds[]` registers 85 directives, organized roughly by feature.
+`bs_cmds[]` registers 86 entries: 85 usable directives plus the retired
+`BotShieldPathTrigger` name, kept only so an old config fails with a
+migration note instead of "unknown directive".
 The family groupings below summarize the surface — the canonical
 per-directive spec (handler, arg count, scope flags, help text) is
 the `bs_cmds[]` table at `src/botshield.c:142`.
@@ -2110,7 +2112,7 @@ the `bs_cmds[]` table at `src/botshield.c:142`.
 | UA classification (E1) | `BotShieldClassify`, `BotShieldAllowBot`, `BotShieldAllowRangesRefreshInterval`, `BotShieldBotDirectory`, `BotShieldBotDirectoryRefreshInterval`, `BotShieldBrowserTemplates`, `BotShieldBrowserTemplatesRefreshInterval` |
 | Policy (E2.1 / E9) | `BotShieldRateLimit`, `BotShieldBotRateLimit`, `BotShieldRateLimitEscalate` |
 | Robots (E2.2) | `BotShieldRobotsTxt`, `BotShieldRobotsRefreshInterval`, `BotShieldRobotsWildcardScope` |
-| Triggers | `BotShieldTrigger` (per-scope), `BotShieldPathTrigger` (E3), `BotShieldCookieTrigger` (E4), `BotShieldEnvTrigger` (E6), `BotShieldFeedbackTrigger` (E7.3), `BotShieldLoadTrigger` (E11.2), `BotShieldFlagTrigger` (E14), `BotShieldHeuristicTrigger`, `BotShieldSessionCookieName` (E4) |
+| Triggers | `BotShieldTrigger` (per-scope), `BotShieldRequestTrigger` (E3, was BotShieldPathTrigger), `BotShieldCookieTrigger` (E4), `BotShieldEnvTrigger` (E6), `BotShieldFeedbackTrigger` (E7.3), `BotShieldLoadTrigger` (E11.2), `BotShieldFlagTrigger` (E14), `BotShieldHeuristicTrigger`, `BotShieldSessionCookieName` (E4) |
 | Safeguard (E10) | `BotShieldSafeguard`, `BotShieldSafeguardThreshold`, `BotShieldSafeguardWindow`, `BotShieldSafeguardTTL`, `BotShieldSafeguardRedirectURL` |
 | Load (E11) | `BotShieldLoadStateFile`, `BotShieldLoadRefreshInterval`, `BotShieldLoadWarmThreshold`, `BotShieldLoadHotThreshold` |
 | Multi-vhost (E13) | `BotShieldShareScope` |
