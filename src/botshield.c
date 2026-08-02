@@ -1579,7 +1579,30 @@ static int bs_handler(request_rec *r)
      * eager population, IPs that always pass-tier would never enter
      * Bloom, and "first-sight-ip" would degrade into "this IP hasn't
      * been challenge-tier-bumped yet" — wrong semantics. */
-    if (have_client_ip && !have_prior_rep) {
+    /* Not for declared crawlers. Both heuristics detect "no session
+     * context", which is suspicious for a browser and simply normal for
+     * a crawler -- they do not carry cookies, and penalising them for
+     * it made every known bot cross the silent threshold on arrival
+     * (semrush-bl measured 40: missing-accept-language 15 +
+     * dropped-cookie 25). Known bots are meant to be admitted and
+     * governed by robots.txt and rate limits, not challenged for being
+     * stateless.
+     *
+     * Deliberately keyed on is_known_bot, so it does NOT cover
+     * is_fake_bot: a UA claiming a crawler whose IP failed the ranges
+     * cross-check keeps every penalty, including these. The other
+     * bot-shaped signals -- missing-ua, scraper-ua, the fake-bot
+     * penalty itself -- are untouched.
+     *
+     * UA-only trust is spoofable, and the answer to that is the rate
+     * limit, not a challenge: a spoofer claiming a crawler UA inherits
+     * that crawler's declared budget. */
+    const bs_ua_class *uac_h = bs_classify_request_ua(r);
+    int declared_crawler = uac_h && uac_h->is_known_bot && !uac_h->is_fake_bot;
+    if (declared_crawler) {
+        bs_score_add(r, 0, 0, "known-bot-stateless-ok");
+    }
+    if (have_client_ip && !have_prior_rep && !declared_crawler) {
         if (bs_bloom_seen(client_ip, scfg_h->ns_id)) {
             bs_apply_heuristic(r, BS_H_DROPPED_COOKIE);
         } else {

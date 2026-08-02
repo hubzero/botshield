@@ -47,8 +47,17 @@ OUTPUT_C     = REPO_ROOT / "src" / "generated_browser_templates.c"
 VERSION_TOKEN_RE = re.compile(r"[\d._]+")
 
 
+# Must stay byte-identical in behaviour to bs_browser_normalize()
+# in src/browser_classifier.c -- if the two disagree, no template
+# ever matches at runtime.
+ANDROID_DEV_RE = re.compile(r"Android X; [^)]*\)")
+IOS_BUILD_RE   = re.compile(r"Mobile/[A-Za-z0-9]+")
+
 def normalize(ua):
-    return VERSION_TOKEN_RE.sub("X", ua)
+    u = VERSION_TOKEN_RE.sub("X", ua)
+    u = ANDROID_DEV_RE.sub("Android X; D)", u)
+    u = IOS_BUILD_RE.sub("Mobile/B", u)
+    return u
 
 
 # Family detection lives in browser_family.py — used at upstream-fetch

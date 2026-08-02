@@ -90,6 +90,15 @@
 <section class="toc">
   <h2 class="toc__heading">On this page</h2>
   <ul class="toc__list">
+<li class="toc__item toc__item--level-2"><a href="#2026-08-02-browser-classification-covers-real-mobile-devices">2026-08-02 (browser classification covers real mobile devices)</a></li>
+<li class="toc__item toc__item--level-3"><a href="#fixed-real-phones-classified-as-unknown-ua">Fixed — real phones classified as `unknown-ua`</a></li>
+<li class="toc__item toc__item--level-3"><a href="#also-vendor-top-user-agents-json-refreshed">Also — `vendor/top-user-agents.json` refreshed</a></li>
+<li class="toc__item toc__item--level-2"><a href="#2026-08-02-client-classification-on-the-dashboard-v8-v9">2026-08-02 (client classification on the dashboard; v8 -&gt; v9)</a></li>
+<li class="toc__item toc__item--level-3"><a href="#added-botshield-clients-total-and-a-client-classification-chart">Added — `botshield_clients_*_total` and a Client classification chart</a></li>
+<li class="toc__item toc__item--level-2"><a href="#2026-08-02-known-bots-pass-robots-txt-can-be-observed-before-it-is-enforced">2026-08-02 (known bots pass; robots.txt can be observed before it is enforced)</a></li>
+<li class="toc__item toc__item--level-3"><a href="#fixed-robots-txt-disallow-ignored-observe-mode">Fixed — robots.txt `Disallow` ignored observe mode</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-declared-crawlers-are-no-longer-challenged-for-being-stateless">Changed — declared crawlers are no longer challenged for being stateless</a></li>
+<li class="toc__item toc__item--level-3"><a href="#fixed-observe-records-were-filtered-out-of-the-decision-log">Fixed — observe records were filtered out of the decision log</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-08-02-decision-log-defaults-on">2026-08-02 (decision log defaults on)</a></li>
 <li class="toc__item toc__item--level-3"><a href="#changed-botshielddecisionlog-defaults-to-logs-botshield-log">Changed — `BotShieldDecisionLog` defaults to `logs/botshield.log`</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-08-02-no-request-goes-unrecorded">2026-08-02 (no request goes unrecorded)</a></li>
@@ -201,6 +210,91 @@
   </ul>
 </section>
         <div class="prose">
+<h2 id="2026-08-02-browser-classification-covers-real-mobile-devices">2026-08-02 (browser classification covers real mobile devices)</h2>
+<h3 id="fixed-real-phones-classified-as-unknown-ua">Fixed — real phones classified as <code>unknown-ua</code></h3>
+<p><code>normalize()</code> masked digit runs but not the Android device model or the
+iOS build token, both of which are alphabetic. Chrome's frozen <code>K</code>
+device token matched; an actual <code>Pixel 6 Pro</code> or <code>SM-J330G</code> did not, and
+neither did an iPhone (<code>Mobile/15E148</code>).</p>
+<p>Two anchored rewrites now run after digit-masking, identically in
+<code>bs_browser_normalize()</code> and the codegen -- they must agree exactly or
+no template ever matches:</p>
+<pre><code>&quot;Android X; SM-SXB)&quot;  -&gt;  &quot;Android X; D)&quot;
+&quot;Mobile/XEX&quot;          -&gt;  &quot;Mobile/B&quot;
+</code></pre>
+<p>Template coverage of real browser-shaped traffic went 93.3% -&gt; 97.4%.</p>
+<p>Deliberately biased toward over-matching. A scraper that hand-builds a
+browser-shaped UA now classifies as a browser and gets challenged --
+which it cannot solve. A real phone that failed to classify was treated
+as a crawler candidate and, with robots.txt wildcard rules active, was
+refused outright with no challenge to solve. The first error costs
+nothing; the second locks a user out.</p>
+<p>Bot detection does not regress: bot UAs append
+<code>(compatible; &lt;bot&gt;/X; +url)</code> after the browser-shaped part, so they
+still fail the exact match and fall through to the directory pass.
+Verified mobile Googlebot, bingbot, GPTBot and SemrushBot all still
+classify as bots.</p>
+<h3 id="also-vendor-top-user-agents-json-refreshed">Also — <code>vendor/top-user-agents.json</code> refreshed</h3>
+<p>100 entries, 59 rotated, +15 merged from the builtin list. Routine
+version drift; it did not and could not fix the mobile gap, which was
+structural rather than staleness.</p>
+<h2 id="2026-08-02-client-classification-on-the-dashboard-v8-v9">2026-08-02 (client classification on the dashboard; v8 -&gt; v9)</h2>
+<h3 id="added-botshield-clients-total-and-a-client-classification-chart">Added — <code>botshield_clients_*_total</code> and a Client classification chart</h3>
+<p>Six classes recorded per request: <code>browser</code>, <code>verified-bot</code>,
+<code>known-bot</code>, <code>unknown-bot</code>, <code>fake-bot</code>, <code>unknown</code>. Classification is
+already computed once at <code>post_read_request</code> and cached on the request
+pool, so recording it is a pointer deref and one relaxed add.</p>
+<p>The operationally useful split is <code>verified-bot</code> vs <code>fake-bot</code> -- same
+User-Agent, separated only by the IP cross-check against published
+ranges. It also makes a stale ranges file visible as a shape change
+(<code>known-bot</code> climbing while <code>verified-bot</code> flatlines) rather than as
+silently lost crawler credit.</p>
+<p>The metrics enum is a deliberate copy of <code>bs_ua_class_label</code>, not a cast
+of it: this index is persisted in the state file and therefore a wire
+format, so it must not shift if the classifier's enum is reordered.
+<code>bs_m_class_idx()</code> is the single mapping point and is a <code>switch</code> without
+a <code>default</code>, so a label added to the classifier fails the build here.</p>
+<p>In the rings and the per-vhost blocks like the other traffic dimensions,
+so it is windowed and tabbed. Slot grows 296 -&gt; 344 bytes.</p>
+<p>Drawn with categorical slots rather than status tokens. These are kinds
+of client, not a severity scale -- a known bot is not &quot;worse&quot; than a
+browser. <code>fake-bot</code> is the one class carrying a verdict and it still
+takes a categorical slot, because mixing the two vocabularies in one
+chart would make the other five read as severity levels.</p>
+<h2 id="2026-08-02-known-bots-pass-robots-txt-can-be-observed-before-it-is-enforced">2026-08-02 (known bots pass; robots.txt can be observed before it is enforced)</h2>
+<h3 id="fixed-robots-txt-disallow-ignored-observe-mode">Fixed — robots.txt <code>Disallow</code> ignored observe mode</h3>
+<p><code>BotShieldRobotsTxt</code> returned 403 for a disallowed path unconditionally,
+even under <code>BotShieldEnabled LogOnly</code>. The <code>Crawl-delay</code> path beside it
+has always honoured observe; <code>Disallow</code> never did.</p>
+<p>The consequence was that a robots.txt could not be measured before being
+enforced. An operator switching it on to find out who ignores their file
+would instead start refusing them on the spot -- and for a file most
+sites publish and never enforce, that is the wrong order. Now logs
+<code>robots-block:&lt;group&gt;:observe</code> with <code>outcome=~block</code>, and suppresses the
++100 score and the 1-hour flag too: those would follow the client into
+later requests and change its tier, which is enforcement by another
+route.</p>
+<h3 id="changed-declared-crawlers-are-no-longer-challenged-for-being-stateless">Changed — declared crawlers are no longer challenged for being stateless</h3>
+<p><code>first-sight-ip</code> and <code>dropped-cookie</code> both detect &quot;no session context&quot;,
+which is suspicious for a browser and simply normal for a crawler. Every
+known bot therefore crossed the silent threshold on arrival -- measured:
+<code>semrush-bl</code> at 40, from <code>missing-accept-language</code> 15 + <code>dropped-cookie</code>
+25 -- and got challenged despite being a recognised, well-behaved
+crawler.</p>
+<p>Both heuristics are now suppressed for a UA the bot directory
+classifies, leaving every other signal intact. Keyed on <code>is_known_bot &amp;&amp; !is_fake_bot</code>, so a UA claiming a crawler whose IP fails the ranges
+cross-check keeps all its penalties.</p>
+<p>UA-only trust is spoofable and the answer is the rate limit, not a
+challenge: a spoofer claiming a crawler UA inherits that crawler's
+declared budget. That makes a configured <code>BotShieldBotRateLimit</code> a
+prerequisite for widening scope.</p>
+<h3 id="fixed-observe-records-were-filtered-out-of-the-decision-log">Fixed — observe records were filtered out of the decision log</h3>
+<p>Counterfactuals now always get a decision-log line regardless of
+<code>outcomes=</code>. Under observe the real outcome is <code>allow</code>, which the
+default filter excludes, so the one record observation exists to produce
+was being discarded -- LogOnly looked like it was working while writing
+nothing. Bounded by policy matches rather than traffic, so exempting it
+is cheap.</p>
 <h2 id="2026-08-02-decision-log-defaults-on">2026-08-02 (decision log defaults on)</h2>
 <h3 id="changed-botshielddecisionlog-defaults-to-logs-botshield-log">Changed — <code>BotShieldDecisionLog</code> defaults to <code>logs/botshield.log</code></h3>
 <p>With no directive, any server that has <code>BotShieldEnabled</code> somewhere in

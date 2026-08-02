@@ -6,6 +6,7 @@
 #include "metrics.h"
 #include "botshield.h"  /* bs_server_cfg, botshield_module */
 #include "shm.h"
+#include "ua_class.h"
 
 #include <string.h>
 
@@ -62,6 +63,34 @@ const char *bs_m_outcome_name(int idx)
 {
     if (idx < 0 || idx >= BS_M_OUTCOME_COUNT) return "?";
     return bs_m_outcome_names[idx];
+}
+
+static const char *const bs_m_class_names[BS_M_CLASS_COUNT] = {
+    "browser", "verified-bot", "known-bot",
+    "unknown-bot", "fake-bot", "unknown"
+};
+
+const char *bs_m_class_name(int idx)
+{
+    if (idx < 0 || idx >= BS_M_CLASS_COUNT) return "?";
+    return bs_m_class_names[idx];
+}
+
+/* ua_class label -> persisted metrics index. Explicit switch rather
+ * than a cast: the two enums are ordered differently on purpose, so the
+ * on-disk numbering stays stable if the classifier's is reordered. A
+ * new label added there without a case here fails the build. */
+static int bs_m_class_idx(bs_ua_class_label l)
+{
+    switch (l) {
+    case BS_UA_CLASS_BROWSER:      return BS_M_CLASS_BROWSER;
+    case BS_UA_CLASS_VERIFIED_BOT: return BS_M_CLASS_VERIFIED_BOT;
+    case BS_UA_CLASS_KNOWN_BOT:    return BS_M_CLASS_KNOWN_BOT;
+    case BS_UA_CLASS_UNKNOWN_BOT:  return BS_M_CLASS_UNKNOWN_BOT;
+    case BS_UA_CLASS_FAKE_BOT:     return BS_M_CLASS_FAKE_BOT;
+    case BS_UA_CLASS_UNKNOWN:      return BS_M_CLASS_UNKNOWN;
+    }
+    return BS_M_CLASS_UNKNOWN;
 }
 
 static int bs_m_outcome_idx(const char *s)
@@ -484,6 +513,9 @@ static void bs_m_slot_claim(bs_metrics_slot *slot, apr_uint64_t epoch)
         for (int i = 0; i < BS_M_RESP_COUNT; i++) {
             __atomic_store_n(&slot->req_resp[i], 0, __ATOMIC_RELAXED);
         }
+        for (int i = 0; i < BS_M_CLASS_COUNT; i++) {
+            __atomic_store_n(&slot->req_class[i], 0, __ATOMIC_RELAXED);
+        }
     }
 }
 
@@ -524,7 +556,8 @@ void bs_metrics_bucket_add(int vhost_idx, int tier_idx,
  * handles — static assets included — so anything more expensive would
  * be a tax on the whole site, not just the protected scopes. */
 static void bs_m_slot_traffic(bs_metrics_slot *slot, apr_uint64_t epoch,
-                              int status_idx, int has_cookie, int resp_idx)
+                              int status_idx, int has_cookie, int resp_idx,
+                              int class_idx)
 {
     bs_m_slot_claim(slot, epoch);
     __atomic_fetch_add(&slot->req_total, 1, __ATOMIC_RELAXED);
@@ -538,10 +571,13 @@ static void bs_m_slot_traffic(bs_metrics_slot *slot, apr_uint64_t epoch,
     if (resp_idx >= 0) {
         __atomic_fetch_add(&slot->req_resp[resp_idx], 1, __ATOMIC_RELAXED);
     }
+    if (class_idx >= 0) {
+        __atomic_fetch_add(&slot->req_class[class_idx], 1, __ATOMIC_RELAXED);
+    }
 }
 
 void bs_metrics_traffic_add(int vhost_idx, int status_idx, int has_cookie,
-                            int resp_idx)
+                            int resp_idx, int class_idx)
 {
     if (!bs_shm.metrics) return;
     apr_uint64_t minute = (apr_uint64_t)(apr_time_sec(apr_time_now()) / 60);
@@ -552,9 +588,9 @@ void bs_metrics_traffic_add(int vhost_idx, int status_idx, int has_cookie,
         bs_metrics *m = blocks[b];
         if (!m) continue;
         bs_m_slot_traffic(&m->min_slots[minute % BS_M_MIN_SLOTS],
-                          minute, status_idx, has_cookie, resp_idx);
+                          minute, status_idx, has_cookie, resp_idx, class_idx);
         bs_m_slot_traffic(&m->hour_slots[hour % BS_M_HOUR_SLOTS],
-                          hour, status_idx, has_cookie, resp_idx);
+                          hour, status_idx, has_cookie, resp_idx, class_idx);
         __atomic_fetch_add(&m->req_total, 1, __ATOMIC_RELAXED);
         if (has_cookie) {
             __atomic_fetch_add(&m->req_cookie, 1, __ATOMIC_RELAXED);
@@ -565,6 +601,9 @@ void bs_metrics_traffic_add(int vhost_idx, int status_idx, int has_cookie,
         }
         if (resp_idx >= 0) {
             __atomic_fetch_add(&m->req_resp[resp_idx], 1, __ATOMIC_RELAXED);
+        }
+        if (class_idx >= 0) {
+            __atomic_fetch_add(&m->req_class[class_idx], 1, __ATOMIC_RELAXED);
         }
     }
 }
@@ -600,6 +639,10 @@ static void bs_m_sum_ring(const bs_metrics_slot *ring, int nslots,
         for (int rk = 0; rk < BS_M_RESP_COUNT; rk++) {
             out->req_resp[rk] += __atomic_load_n(&ring[i].req_resp[rk],
                                                  __ATOMIC_RELAXED);
+        }
+        for (int ck = 0; ck < BS_M_CLASS_COUNT; ck++) {
+            out->req_class[ck] += __atomic_load_n(&ring[i].req_class[ck],
+                                                  __ATOMIC_RELAXED);
         }
     }
 }
@@ -639,6 +682,10 @@ void bs_metrics_read_window(int span_minutes, int vhost_idx,
         for (int rk = 0; rk < BS_M_RESP_COUNT; rk++) {
             out->req_resp[rk] = __atomic_load_n(&m->req_resp[rk],
                                                 __ATOMIC_RELAXED);
+        }
+        for (int ck = 0; ck < BS_M_CLASS_COUNT; ck++) {
+            out->req_class[ck] = __atomic_load_n(&m->req_class[ck],
+                                                 __ATOMIC_RELAXED);
         }
     } else {
         apr_uint64_t minute = (apr_uint64_t)(apr_time_sec(apr_time_now()) / 60);
@@ -874,7 +921,18 @@ static void bs_decision_log_write(request_rec *r, const char *payload,
     unsigned dl_mask = (scfg->decision_log_outcomes != -1)
                      ? (unsigned)scfg->decision_log_outcomes
                      : (BS_DEFAULT_DECISIONLOG_OUTCOMES | al_suppress);
-    {
+
+    /* A counterfactual always gets a line, whatever the filter says.
+     * Under observe mode the real outcome is `allow` -- the request was
+     * declined and the origin answered -- so the outcome filter drops
+     * it, which silently discards the one record observation exists to
+     * produce. An operator running LogOnly to find out who ignores
+     * their robots.txt would have seen nothing at all.
+     *
+     * Safe to exempt: a would-outcome is only stashed when a rule
+     * actually would have acted, so this is bounded by policy matches,
+     * not by traffic. */
+    if (!bs_get_would_outcome(r)) {
         if (outcome_idx < 0) return;
         if (!(dl_mask & (1U << (unsigned)outcome_idx))) {
             /* Not a kept outcome: no line. Deliberately not sampled --
@@ -997,9 +1055,14 @@ int bs_propagate_decision_env(request_rec *r)
                                 || bs_cookie_named(ck, BS_COOKIE_NAME_HOST));
         bs_server_cfg *scfg_t =
             ap_get_module_config(r->server->module_config, &botshield_module);
+        /* Classification is computed once at post_read_request and
+         * cached on r->pool, so reading it here is a pointer deref. */
+        const bs_ua_class *uac = bs_classify_request_ua(r);
         bs_metrics_traffic_add(scfg_t ? scfg_t->vhost_idx : -1,
                                bs_status_class_idx(fwd->status), has_cookie,
-                               bs_resp_kind_idx(r));
+                               bs_resp_kind_idx(r),
+                               uac ? bs_m_class_idx(uac->label)
+                                   : BS_M_CLASS_UNKNOWN);
     }
 
     if (fwd != r) {
@@ -1609,6 +1672,30 @@ int bs_dashboard_handler(request_rec *r)
                bs_d_pct(r->pool, w.decisions, w.req_total), w.decisions);
     ap_rputs("</div></section>", r);
 
+    /* Who is visiting. Categorical: these are kinds of client, not a
+     * scale -- a known bot is not "worse" than a browser. fake-bot is
+     * the one with a verdict in it, and it still takes a categorical
+     * slot rather than the critical status token, because mixing the
+     * two vocabularies in one chart makes the other five look like
+     * severity levels. The label carries the meaning; the hue only
+     * carries identity. */
+    {
+        const char *labels[] = { "browser", "verified bot", "known bot",
+                                 "unknown bot", "fake bot", "unclassified" };
+        const char *fills[]  = { "var(--c1)", "var(--c2)", "var(--c3)",
+                                 "var(--c4)", "var(--c5)", "var(--neutral)" };
+        apr_uint64_t vals[]  = { w.req_class[BS_M_CLASS_BROWSER],
+                                 w.req_class[BS_M_CLASS_VERIFIED_BOT],
+                                 w.req_class[BS_M_CLASS_KNOWN_BOT],
+                                 w.req_class[BS_M_CLASS_UNKNOWN_BOT],
+                                 w.req_class[BS_M_CLASS_FAKE_BOT],
+                                 w.req_class[BS_M_CLASS_UNKNOWN] };
+        apr_uint64_t tot = 0;
+        for (int i = 0; i < 6; i++) tot += vals[i];
+        bs_d_stacked(r, "cls", "Client classification", labels, vals,
+                     fills, 6, tot);
+    }
+
     /* Status class carries polarity (good -> bad), so it wears the
      * reserved status tokens rather than categorical slots. 3xx takes a
      * neutral: a redirect is not a warning, and saying so in colour
@@ -1836,6 +1923,27 @@ int bs_metrics_handler(request_rec *r)
     bs_m_emit_counter(r, "requests_status_other_total",
         "Requests answered outside 2xx-5xx (1xx, or no status recorded).",
         bs_mload(&m->req_status[BS_M_STATUS_OTHER]));
+
+    bs_m_emit_counter(r, "clients_browser_total",
+        "Requests from a UA matching a real-browser template.",
+        bs_mload(&m->req_class[BS_M_CLASS_BROWSER]));
+    bs_m_emit_counter(r, "clients_verified_bot_total",
+        "Requests from a crawler whose UA matched the allow list AND "
+        "whose IP is in that crawler's published ranges.",
+        bs_mload(&m->req_class[BS_M_CLASS_VERIFIED_BOT]));
+    bs_m_emit_counter(r, "clients_known_bot_total",
+        "Requests from a UA in the bot directory, not IP-verified.",
+        bs_mload(&m->req_class[BS_M_CLASS_KNOWN_BOT]));
+    bs_m_emit_counter(r, "clients_unknown_bot_total",
+        "Requests from a UA with bot-shaped tokens but no directory "
+        "entry.", bs_mload(&m->req_class[BS_M_CLASS_UNKNOWN_BOT]));
+    bs_m_emit_counter(r, "clients_fake_bot_total",
+        "Requests claiming a crawler UA from an IP outside that "
+        "crawler's published ranges - spoofed.",
+        bs_mload(&m->req_class[BS_M_CLASS_FAKE_BOT]));
+    bs_m_emit_counter(r, "clients_unknown_total",
+        "Requests matching no classifier.",
+        bs_mload(&m->req_class[BS_M_CLASS_UNKNOWN]));
 
     bs_m_emit_counter(r, "responses_origin_total",
         "Requests the application answered (BotShield did not respond).",
