@@ -99,6 +99,7 @@
 <li class="toc__item toc__item--level-3"><a href="#controlling-the-access-log">Controlling the access log</a></li>
 <li class="toc__item toc__item--level-3"><a href="#observing-robots-txt-before-enforcing-it">Observing robots.txt before enforcing it</a></li>
 <li class="toc__item toc__item--level-3"><a href="#client-classification-who-is-visiting">Client classification — who is visiting</a></li>
+<li class="toc__item toc__item--level-3"><a href="#observability-endpoints-stay-out-of-the-access-log">Observability endpoints stay out of the access log</a></li>
 <li class="toc__item toc__item--level-3"><a href="#response-breakout-who-answered">Response breakout — who answered</a></li>
 <li class="toc__item toc__item--level-3"><a href="#per-vhost-breakdown">Per-vhost breakdown</a></li>
 <li class="toc__item toc__item--level-3"><a href="#site-wide-traffic-counters">Site-wide traffic counters</a></li>
@@ -420,6 +421,27 @@ rate-limit it. Writing the rule out explicitly with <code>mode=observe</code>
 replaces the synthetic default and keeps the evidence without refusing
 anyone.</p>
 <h3 id="client-classification-who-is-visiting">Client classification — who is visiting</h3>
+<p><strong>Retired and non-existent agent identities</strong> are classified <code>fake-bot</code>
+without any IP check. Three are recognised: <code>Google-Extended</code>, which was
+never a crawler at all (a robots.txt control token governing whether
+content Googlebot already fetched may train Gemini), and <code>Claude-Web</code>
+and <code>anthropic-ai</code>, both retired by Anthropic in favour of <code>ClaudeBot</code> /
+<code>Claude-User</code> / <code>Claude-SearchBot</code>.</p>
+<p>Unlike the allow-list fake-bot path these need no ranges file: no IP
+could make them genuine. The check runs <em>before</em> the directory walk,
+which matters because upstream carries a broad bare-<code>Claude</code> pattern
+that would otherwise classify <code>Claude-Web</code> as a trusted known bot.</p>
+<h3 id="observability-endpoints-stay-out-of-the-access-log">Observability endpoints stay out of the access log</h3>
+<p><code>/botshield/dashboard</code>, <code>/botshield/metrics</code> and
+<code>/botshield/policy-status</code> are suppressed from the access log by default
+and recorded in the decision log as <code>outcome=observe</code>. They are the
+measuring instrument, not traffic: a dashboard left open on a 10s
+refresh measured 8.1% of all requests on one deployment, distorting
+every figure derived from the access log.</p>
+<p>They are deliberately not routed through the normal decision path, so
+viewing the dashboard does not count as a decision and cannot inflate
+the numbers the page displays. Volume is still visible as
+<code>botshield_responses_observe_total</code>.</p>
 <p>Every request is classified once at <code>post_read_request</code> and the result
 cached, so recording it costs a pointer deref. Six classes, on the
 dashboard as <strong>Client classification</strong> and in Prometheus as

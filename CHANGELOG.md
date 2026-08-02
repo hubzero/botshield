@@ -1,5 +1,65 @@
 # Changelog
 
+## 2026-08-02 (bot directory refresh; retired agents; quieter observability)
+
+### Added — retired and non-existent agent identities classify as `fake-bot`
+
+`Google-Extended`, `Claude-Web` and `anthropic-ai`. The first was never
+a crawler -- it is a robots.txt control token governing whether content
+Googlebot already fetched may train Gemini/Vertex, and nothing fetches
+under that name. The other two were retired by Anthropic in favour of
+ClaudeBot / Claude-User / Claude-SearchBot.
+
+No ranges file is involved: unlike the allow-list fake-bot path, no IP
+could make these genuine. Checked before the directory walk, which
+turned out to matter within the hour -- the directory refresh below
+introduced a broad bare-`Claude` pattern that would otherwise have
+classified the retired `Claude-Web` as a trusted known bot.
+
+Prompted by observing one Google Cloud address send all three
+identities, ten requests each, cycling vendor names to find which were
+blocked.
+
+### Changed — bot directory refreshed, 587 -> 688 upstream entries
+
+First refresh since the directory was vendored. Closes a real gap:
+`Claude-User` and `Claude-SearchBot`, both live Anthropic agents
+documented in February 2026, were previously unclassified.
+
+Six entries added to `bot-directory.builtin.json` so every deployment
+gets them: `diffbot`, `facebookbot`, `omgili`, `peer39-crawler`,
+`news-please`, `cohere-ai`. All are real crawlers named in common
+robots.txt files but absent upstream, and none publishes IP ranges, so
+they can only ever be UA-matched.
+
+### Fixed — builtin overrides reduced from 3 to 1
+
+`claude-searchbot` and `amzn-searchbot` were overriding upstream in
+fields the module does not read (`followsRobotsTxt`, which is
+"carried for future use") or on a taxonomy call better left to the
+tracking dataset. Both dropped.
+
+`amazon-kendra` is kept and now documents itself: Kendra is
+customer-operated, so upstream's `AI_CRAWLER` / botgroup `ai-train`
+implies Amazon is training on your content when in fact an AWS customer
+is crawling sites they chose.
+
+Note `followsRobotsTxt` is 620 false / 68 true upstream -- unpopulated
+rather than researched. It should not be relied on if it ever becomes
+load-bearing.
+
+### Changed — observability endpoints suppressed from the access log
+
+`/botshield/dashboard`, `/metrics` and `/policy-status` no longer write
+an access-log line; they are recorded in the decision log as
+`outcome=observe`. Measured at 8.1% of all requests on one deployment,
+they were distorting every traffic figure derived from that log.
+
+Deliberately not routed through `bs_decision_log`: that would count
+viewing the dashboard as a decision and inflate the numbers the page
+shows. Functional endpoints (verify, bootstrap, assets) still log
+normally.
+
 ## 2026-08-02 (observe robots.txt before enforcing it)
 
 ### Added — `BotShieldRobotsMode enforce|observe`

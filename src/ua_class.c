@@ -199,6 +199,53 @@ const bs_ua_class *bs_classify_request_ua(request_rec *r)
         }
     }
 
+    /* Retired and non-existent agent identities.
+     *
+     * Checked before the directory walk because these are spoofed by
+     * construction: no IP could make them genuine, so unlike the
+     * allow-list fake-bot path this needs no ranges file.
+     *
+     *   Google-Extended  never a crawler at all -- a robots.txt control
+     *                    token, introduced 2023-09, governing whether
+     *                    content Googlebot ALREADY fetched may train
+     *                    Gemini/Vertex. Nothing fetches under this name.
+     *   Claude-Web       retired by Anthropic, superseded by ClaudeBot /
+     *   anthropic-ai     Claude-User / Claude-SearchBot (documented
+     *                    2026-02).
+     *
+     * Observed on this deployment: one Google Cloud address sent all
+     * three, ten requests each, cycling vendor identities -- UA probing
+     * to find which names are blocked.
+     *
+     * Patterns are checked against live agents before being added here:
+     * ClaudeBot, Claude-User and Claude-SearchBot contain none of these
+     * substrings ("anthropic.com" does not contain "anthropic-ai"), and
+     * Googlebot does not contain "Google-Extended". */
+    static const struct {
+        const char *pattern;
+        const char *slug;
+    } bs_retired_agents[] = {
+        { "Google-Extended", "google-extended" },
+        { "Claude-Web",      "claude-web" },
+        { "anthropic-ai",    "anthropic-ai" },
+        { NULL, NULL }
+    };
+    for (int i = 0; bs_retired_agents[i].pattern; i++) {
+        if (strcasestr(ua, bs_retired_agents[i].pattern)) {
+            cached->is_fake_bot   = 1;
+            /* verified_name, not just known_slug: the scoring path in
+             * allowlist.c gates on verified_name being set, and that is
+             * what applies BS_PENALTY_FAKE_BOT and emits the
+             * fake-bot:<name> reason. Setting only known_slug
+             * classified the request correctly and then scored it as if
+             * nothing had happened. */
+            cached->verified_name = bs_retired_agents[i].slug;
+            cached->known_slug    = bs_retired_agents[i].slug;
+            cached->label         = BS_UA_CLASS_FAKE_BOT;
+            return cached;
+        }
+    }
+
     /* Known-bot directory walk (Aho-Corasick over ~600 patterns).
      * Sets known_slug + known_category + known_botgroup if the UA
      * matches any directory entry. Gated by classify.known_bots. */

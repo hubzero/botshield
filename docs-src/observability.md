@@ -318,6 +318,34 @@ anyone.
 
 ### Client classification — who is visiting
 
+**Retired and non-existent agent identities** are classified `fake-bot`
+without any IP check. Three are recognised: `Google-Extended`, which was
+never a crawler at all (a robots.txt control token governing whether
+content Googlebot already fetched may train Gemini), and `Claude-Web`
+and `anthropic-ai`, both retired by Anthropic in favour of `ClaudeBot` /
+`Claude-User` / `Claude-SearchBot`.
+
+Unlike the allow-list fake-bot path these need no ranges file: no IP
+could make them genuine. The check runs *before* the directory walk,
+which matters because upstream carries a broad bare-`Claude` pattern
+that would otherwise classify `Claude-Web` as a trusted known bot.
+
+### Observability endpoints stay out of the access log
+
+`/botshield/dashboard`, `/botshield/metrics` and
+`/botshield/policy-status` are suppressed from the access log by default
+and recorded in the decision log as `outcome=observe`. They are the
+measuring instrument, not traffic: a dashboard left open on a 10s
+refresh measured 8.1% of all requests on one deployment, distorting
+every figure derived from the access log.
+
+They are deliberately not routed through the normal decision path, so
+viewing the dashboard does not count as a decision and cannot inflate
+the numbers the page displays. Volume is still visible as
+`botshield_responses_observe_total`.
+
+
+
 Every request is classified once at `post_read_request` and the result
 cached, so recording it costs a pointer deref. Six classes, on the
 dashboard as **Client classification** and in Prometheus as
