@@ -128,6 +128,140 @@ awk-validator.sh`).
 | `alg` | `-`, `sha256-zeros`, `captcha-<provider>` |
 | `reason` | quoted short string (comma-joined reason names) or `-` |
 
+### Response breakout — who answered
+
+The status-class counters cannot tell a BotShield 403 from an
+application 403. `botshield_responses_*` splits them:
+
+| Metric | Meaning |
+|---|---|
+| `botshield_responses_origin_total` | The application answered. BotShield did not respond. |
+| `botshield_responses_challenge_total` | BotShield served an interstitial. |
+| `botshield_responses_block_total` | BotShield refused the request. |
+| `botshield_responses_rate_limited_total` | BotShield rate-limited or shed the request. |
+| `botshield_responses_redirect_total` | BotShield issued a safeguard redirect. |
+| `botshield_responses_endpoint_total` | A functional BotShield endpoint answered (verify, bootstrap, assets). |
+| `botshield_responses_observe_total` | An observability endpoint answered (dashboard, metrics, policy-status). |
+
+Classification reads the env the decision path already stashes, so it
+costs two table lookups. Three cases bin as **origin** even though a
+decision was recorded:
+
+- `allow` / `verified` — the request went on to the application.
+- A `~`-prefixed counterfactual — under `LogOnly` the log says `~block`
+  but nothing was blocked. Counting it as ours would overstate
+  enforcement in precisely the mode chosen not to enforce.
+- No `BS_OUTCOME` at all — the scope was never evaluated.
+
+`misconfigured` and `debug` do terminate the request, so they bin as
+**block**: a refusal should never be invisible, even when its cause is
+a config bug rather than policy.
+
+**Why `observe` is separate.** The dashboard and the metrics scrape are
+the measuring instrument, not traffic. A dashboard left open on a 10s
+refresh is 360 requests an hour of self-inflicted load; folded in with
+the verify endpoints it would quietly dominate the breakdown. They are
+still counted in `requests_total` — that has to keep matching the
+access logs — just kept separable, and on the dashboard the segment
+wears a neutral rather than a policy colour.
+
+The dashboard shows the share as a KPI and the breakdown as its own bar
+scaled to BotShield's own responses, rather than as segments inside the
+status chart: on a healthy site the origin is the overwhelming majority
+of traffic, which would squeeze every BotShield response into an
+unreadable sliver.
+
+### Per-vhost breakdown
+
+Every distinct `ServerName` gets its own metrics block, and
+`/botshield/dashboard` shows a tab row to switch between them:
+
+    /botshield/dashboard?vh=all      aggregate (default)
+    /botshield/dashboard?vh=<n>      one vhost, by directory index
+
+Vhosts that share a `ServerName` — the usual `:80` and `:443` pair —
+share one block, on the grounds that an operator reads the dashboard
+thinking in sites rather than listeners. Past 32 distinct names the
+overflow shares one slot labelled `(other vhosts)`, with a NOTICE at
+startup; nothing is silently dropped.
+
+`/botshield/metrics` and `mod_status` are **unchanged** — both still
+report the server-wide aggregate with no vhost dimension. The global
+block is still written directly rather than summed at read time, so
+the dashboard's "All vhosts" tab cannot disagree with the Prometheus
+numbers.
+
+Cost is a second set of relaxed atomic adds per event: the global block
+and the vhost's block. Storage is one `bs_metrics` per vhost — the same
+struct as the global one, so a few hundred bytes per vhost go unused on
+server-wide-only fields, in exchange for no second struct to drift and
+no separate read path.
+
+Per-vhost blocks are persisted, and restored by **matching ServerName**
+rather than saved position. Adding or removing a vhost therefore
+re-files history correctly instead of shifting every site onto its
+neighbour's numbers; a saved vhost that no longer exists is dropped and
+a new one starts at zero, both reported at startup:
+
+    per-vhost metrics restored for 3 of 4 saved vhost(s); 1 no longer configured
+
+### Site-wide traffic counters
+
+BotShield also counts **every** request the server handles, on every
+vhost, whether or not it evaluated them. Collection happens in the
+`log_transaction` hook, which is registered at server scope and runs
+once per client request (subrequests never reach it), so these are
+independent of where `BotShieldEnabled` is switched on.
+
+| Metric | Meaning |
+|---|---|
+| `botshield_requests_total` | Every request logged, anywhere on the server. |
+| `botshield_requests_with_cookie_total` | Requests that arrived carrying a BotShield session cookie. |
+| `botshield_requests_status_{2xx,3xx,4xx,5xx,other}_total` | Response status class. `4xx` includes BotShield's own blocks. |
+
+The point of the denominator is coverage. With the enable scoped to a
+`<Location>`, `decisions / requests_total` is the fraction of site
+traffic BotShield actually sees — a number that is otherwise easy to
+assume is 100% when it is single digits. The dashboard shows it
+directly as **Evaluated**.
+
+These fields are in the bucket rings too, so all of it is windowed
+alongside the decision counters.
+
+Cost is three relaxed atomic adds per ring plus three cumulative, on
+every request including static assets. That is deliberate — anything
+more expensive would tax the whole site rather than just the protected
+scopes.
+
+Outcome meanings, grouped by where they originate:
+
+| Outcome | Meaning |
+|---|---|
+| `allow` | Request reached origin — `pass` tier, asset bypass, silent embedded pass-through, or safeguard pass. |
+| `challenged` | An interstitial was served. |
+| `verified` | A challenge was **completed**: captcha siteverify returned OK, or an embedded-verify PoW was accepted. One per solve. |
+| `block` | Refused outright — invalid cookie, a `status=` trigger, failed captcha verify. |
+| `rate_limited` | Refused with 429 by a rate limit. Kept distinct from `block` so policy-refusal is separable from volume-refusal. |
+| `redirect` | A 302 was issued (safeguard explainer). |
+| `failopen` | Siteverify was unreachable (timeout, network error, provider 5xx) and the request was let through rather than blocking on a provider outage. |
+| `pending_missing` | A verify POST arrived with no pending cookie, or a tampered one — typically a replayed or hand-crafted POST. |
+| `inflight_capped` | Rejected by the global in-flight semaphore. Backpressure, not a verdict on the client. |
+| `misconfigured` | Terminated on missing scope config or internal state. Non-zero means a config bug, not a bot. |
+| `debug` | A `BotShieldDebug`-forced 403. Should be zero in production. |
+
+`failopen`, `pending_missing` and `inflight_capped` only arise on the
+verify endpoints, so they stay at zero unless a captcha provider or the
+embedded silent mode is in use.
+
+**`verified` counts solves, not requests.** A client that completes a
+silent/form PoW returns on a *fresh* request carrying its new cookie,
+which logs `outcome=allow cookie=ok`. Do not compute a solve rate from
+`cookie=ok` — that counts every request bearing a valid cookie, so one
+human browsing 50 pages would read as 50 solves. Before 2026-08-01 the
+PoW path emitted nothing at all, so a deployment running the silent or
+form tier with no captcha provider reported a permanent 0% solve rate
+while challenges were in fact being solved.
+
 `tier=safeguard` is emitted for challenge-loop suppression: the
 client gets a 302 redirect to a configured
 `BotShieldSafeguardRedirectURL` (or to the built-in explainer at

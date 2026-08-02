@@ -324,6 +324,7 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     (void)s;
     bs_server_cfg *scfg = apr_pcalloc(p, sizeof(*scfg));
     scfg->shm_size          = BS_DEFAULT_SHM_SIZE;
+    scfg->vhost_idx         = -1;   /* until post_config assigns */
     scfg->flagged_capacity  = BS_DEFAULT_FLAGGED_SLOTS;
     scfg->ipv6_prefix_bits  = 64;   /* /64 aggregation by default */
     scfg->bloom_ips             = BS_DEFAULT_BLOOM_IPS;
@@ -905,6 +906,94 @@ static void bs_resolve_heuristic_triggers(apr_pool_t *pconf,
     }
 }
 
+/* Normalise a server_rec into a vhost directory key.
+ *
+ * ServerName, lowercased. Vhosts that share a name -- the usual :80
+ * and :443 pair -- deliberately collapse onto one block: an operator
+ * reading the dashboard thinks in sites, not listeners, and splitting
+ * geodynamics.org across two tabs by port would obscure more than it
+ * reveals. A server with no ServerName falls back to a stable literal
+ * so it still gets counted somewhere nameable. */
+static const char *bs_vhost_key(server_rec *s)
+{
+    if (s && s->server_hostname && *s->server_hostname) {
+        return s->server_hostname;
+    }
+    return "(unnamed)";
+}
+
+/* Distinct ServerNames across the main server and every vhost, capped
+ * at BS_M_MAX_VHOSTS. When the cap is hit the count includes the
+ * catch-all slot, so callers can size for exactly what will be used. */
+static apr_uint32_t bs_vhost_count(server_rec *base)
+{
+    const char *seen[BS_M_MAX_VHOSTS];
+    apr_uint32_t n = 0;
+    for (server_rec *s = base; s; s = s->next) {
+        const char *key = bs_vhost_key(s);
+        int dup = 0;
+        for (apr_uint32_t i = 0; i < n; i++) {
+            if (strcasecmp(seen[i], key) == 0) { dup = 1; break; }
+        }
+        if (dup) continue;
+        if (n >= BS_M_MAX_VHOSTS) return BS_M_MAX_VHOSTS;
+        seen[n++] = key;
+    }
+    return n ? n : 1;
+}
+
+/* Fill the SHM directory and stamp each server's block index into its
+ * config, so the per-request path is a deref rather than a lookup.
+ * Runs after the segment is carved and zeroed. */
+static void bs_vhost_dir_init(server_rec *base, apr_uint32_t n)
+{
+    bs_vhost_dir *dir = bs_shm.vhost_dir;
+    if (!dir) return;
+    dir->count = n;
+    dir->overflowed = 0;
+
+    for (server_rec *s = base; s; s = s->next) {
+        bs_server_cfg *sc = ap_get_module_config(s->module_config,
+                                                 &botshield_module);
+        if (!sc) continue;
+        const char *key = bs_vhost_key(s);
+        int idx = -1;
+        for (apr_uint32_t i = 0; i < dir->count; i++) {
+            if (dir->name[i][0]
+                && strcasecmp(dir->name[i], key) == 0) {
+                idx = (int)i;
+                break;
+            }
+        }
+        if (idx < 0) {
+            for (apr_uint32_t i = 0; i < dir->count; i++) {
+                if (!dir->name[i][0]) {
+                    apr_cpystrn(dir->name[i], key, BS_M_VHOST_NAME_MAX);
+                    idx = (int)i;
+                    break;
+                }
+            }
+        }
+        if (idx < 0) {
+            /* Directory full: everything else shares the last slot,
+             * relabelled so the dashboard says so instead of
+             * attributing the overflow to whoever got there first. */
+            idx = (int)dir->count - 1;
+            dir->overflowed = 1;
+            apr_cpystrn(dir->name[idx], "(other vhosts)",
+                        BS_M_VHOST_NAME_MAX);
+        }
+        sc->vhost_idx = idx;
+    }
+
+    if (dir->overflowed) {
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, base,
+            "mod_botshield: more than %d distinct ServerNames; the "
+            "extras share one per-vhost metrics slot labelled "
+            "\"(other vhosts)\"", BS_M_MAX_VHOSTS);
+    }
+}
+
 /* SHM layout, allocation, header init, mutex creation.
  *
  * Computes total size from the configured capacities (header +
@@ -940,6 +1029,12 @@ static int bs_init_shm_layout(apr_pool_t *pconf, apr_pool_t *ptemp,
     apr_size_t cv_log_bytes  = (apr_size_t)BS_DEFAULT_CV_LOG_SLOTS
                                * sizeof(bs_cv_slot);
     apr_size_t metrics_bytes = sizeof(bs_metrics);
+    /* Per-vhost blocks. Counted here so the segment is sized for the
+     * config actually loaded rather than for BS_M_MAX_VHOSTS worth of
+     * worst case. */
+    apr_uint32_t vhost_n = bs_vhost_count(s);
+    apr_size_t vhost_bytes = sizeof(bs_vhost_dir)
+                           + (apr_size_t)vhost_n * sizeof(bs_metrics);
     /* E2.1 — fixed-size table of rate-limit counter slots. Sized to
      * fit the bot-directory (~640 known-bot slugs + verified-bots,
      * each pre-allocated one slot when BotShieldBotRateLimit is
@@ -979,7 +1074,7 @@ static int bs_init_shm_layout(apr_pool_t *pconf, apr_pool_t *ptemp,
                               + cv_rate_bytes + cv_log_bytes
                               + metrics_bytes + e21_rate_bytes
                               + strike_bytes + safeguard_bytes
-                              + nonce_bytes;
+                              + nonce_bytes + vhost_bytes;
 
     if (scfg->shm_size < total_bytes) {
         ap_log_error(APLOG_MARK, APLOG_ERR, 0, s,
@@ -1098,6 +1193,13 @@ static int bs_init_shm_layout(apr_pool_t *pconf, apr_pool_t *ptemp,
     bs_shm.nonce_table = (bs_nonce_slot *)
         ((unsigned char *)bs_shm.safeguard_table + safeguard_bytes);
     bs_shm.nonce_capacity = nonce_slots;
+    /* Per-vhost metrics last, so adding them leaves every offset above
+     * unchanged. Directory first, then the blocks it indexes. */
+    bs_shm.vhost_dir = (bs_vhost_dir *)
+        ((unsigned char *)bs_shm.nonce_table + nonce_bytes);
+    bs_shm.vmetrics  = (bs_metrics *)
+        ((unsigned char *)bs_shm.vhost_dir + sizeof(bs_vhost_dir));
+    bs_vhost_dir_init(s, vhost_n);
 
     bs_shm.header->bloom_active        = 0;
     bs_shm.header->bloom_buf_bytes     = (apr_uint32_t)bloom_bytes;

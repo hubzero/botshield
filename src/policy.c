@@ -603,6 +603,7 @@ static void bs_psh_render_counter(request_rec *r, int slot_idx,
 
 int bs_policy_status_handler(request_rec *r, bs_dir_cfg *cfg)
 {
+    apr_table_setn(r->subprocess_env, "BS_ENDPOINT", "obs");
     (void)cfg;
     if (r->method_number != M_GET && r->method_number != M_OPTIONS) {
         r->status = HTTP_METHOD_NOT_ALLOWED;

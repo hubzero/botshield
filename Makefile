@@ -16,7 +16,27 @@
 
 APXS     ?= apxs
 MOD_NAME ?= botshield
-DOCS_PYTHON ?= python3
+# build_site.py needs 3.7+ (it uses `from __future__ import
+# annotations`) and markdown-it-py. RHEL 8 ships 3.6 as plain
+# `python3`, and a newer interpreter on PATH is not necessarily the
+# one the docs deps were installed into -- so probe for an
+# interpreter that can actually import markdown_it, and only fall
+# back to a version check when none can (so the build still reaches
+# build_site.py's own install hint instead of dying on a
+# SyntaxError). Override DOCS_PYTHON to force one.
+DOCS_PY_CANDIDATES := python3 python3.12 python3.11 python3.10 \
+	python3.9 python3.8
+DOCS_PYTHON ?= $(shell \
+	for py in $(DOCS_PY_CANDIDATES); do \
+		command -v $$py >/dev/null 2>&1 || continue; \
+		if $$py -c 'import markdown_it' 2>/dev/null; then \
+			echo $$py; exit 0; fi; \
+	done; \
+	for py in $(DOCS_PY_CANDIDATES); do \
+		command -v $$py >/dev/null 2>&1 || continue; \
+		if $$py -c 'import sys; sys.exit(sys.version_info < (3,7))' \
+		   2>/dev/null; then echo $$py; exit 0; fi; \
+	done; echo python3)
 DOCS_BUILD  := tools/build_site.py
 # Keep botshield.c first — apxs derives the .la/.so name from the
 # first source. Extra .c files are compiled into the same shared

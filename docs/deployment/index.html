@@ -350,8 +350,14 @@ when sizing a deployment.</p>
 <h2 id="state-persistence">State persistence</h2>
 <p>mod_botshield can snapshot the SHM tables to disk at a configured
 interval (or only at clean shutdown) and reload on next start. This
-lets the flagged-IP table, Bloom filters, and rate-limit counters
+lets the flagged-IP table, the Bloom filters, and the metrics
+counters behind <code>/botshield/dashboard</code> and <code>/botshield/metrics</code>
 survive Apache restarts.</p>
+<p>Rate-limit counters are <strong>not</strong> persisted. They are short-window
+buckets whose whole meaning is &quot;requests in the last N seconds&quot;, so
+restoring them from a file written minutes ago would either
+double-count or restore a window that has already elapsed. They
+restart empty by design.</p>
 <pre><code class="language-apache">BotShieldStateFile         /var/lib/botshield/state.bin
 BotShieldStateSaveInterval 300
 </code></pre>
@@ -361,6 +367,15 @@ the graceful-shutdown save runs regardless.</p>
 <p>The state file format is versioned. Format-version drift between
 saves and loads (e.g. after upgrading the module) results in the
 table starting fresh with a NOTICE — never a startup failure.</p>
+<p>Persisting metrics matters more than it looks if you rotate logs by
+restarting Apache: without a state file, a nightly restart zeroes the
+dashboard's 24-hour and all-time windows every night, and the
+&quot;outstanding challenges&quot; gauge resets along with them.</p>
+<p>The dashboard's bucket rings are epoch-stamped per slot, so downtime
+needs no special handling on reload: slots whose epoch has fallen
+outside the requested window are skipped by the reader. Restarting
+after 20 minutes of downtime shows a 15-minute window that has
+correctly aged to empty, while the all-time counters carry over.</p>
 <h2 id="secret-rotation">Secret rotation</h2>
 <p>mod_botshield supports a verify-only secondary key for graceful HMAC
 rotation. The flow:</p>

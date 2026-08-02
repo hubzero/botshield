@@ -1,5 +1,225 @@
 # Changelog
 
+## 2026-08-01 (response breakout: who answered; v7 -> v8)
+
+### Added — `botshield_responses_*`
+
+The status-class counters cannot distinguish a BotShield 403 from an
+application 403. A response-kind dimension now splits them: `origin`,
+`challenge`, `block`, `rate_limited`, `redirect`, `endpoint` and
+`observe`.
+
+Classification reads the env the decision path already stashes, so it
+costs two table lookups and no new bookkeeping. Counterfactuals bin as
+`origin`: under `LogOnly` the log says `~block` but nothing was
+blocked, and counting it as ours would overstate enforcement in exactly
+the mode chosen not to enforce. `misconfigured` and `debug` bin as
+`block` -- a refusal should never be invisible, even when its cause is
+a config bug.
+
+`observe` (dashboard, metrics, policy-status) is deliberately separate
+from `endpoint` (verify, bootstrap, assets). Those are the measuring
+instrument, not traffic: a dashboard left open on a 10s refresh is 360
+requests an hour of self-inflicted load, and folded in with the verify
+endpoints it would quietly dominate the breakdown. Still counted in
+`requests_total`, which has to keep matching the access logs -- just
+kept separable, and drawn in a neutral rather than a policy colour.
+
+On the dashboard this is a KPI for the share plus its own bar scaled to
+BotShield's own responses, not extra segments inside the status chart:
+the origin is the overwhelming majority on a healthy site, which would
+squeeze every BotShield response into an unreadable sliver.
+
+## 2026-08-01 (per-vhost metrics and dashboard tabs; v6 -> v7)
+
+### Added — per-vhost stats behind a tab row
+
+Every distinct `ServerName` gets its own `bs_metrics` block, and the
+dashboard gains a tab row:
+
+    /botshield/dashboard?vh=all      aggregate (default)
+    /botshield/dashboard?vh=<n>      a single vhost
+
+Vhosts sharing a `ServerName` (the usual `:80`/`:443` pair) share one
+block -- an operator reads this thinking in sites, not listeners. Past
+32 distinct names the overflow shares a slot labelled
+`(other vhosts)`, announced with a NOTICE rather than silently
+dropped.
+
+`/botshield/metrics` and `mod_status` are unchanged: still server-wide
+aggregate, no vhost dimension, existing scrapers unaffected. The global
+block keeps being written directly instead of summed on read, so the
+"All vhosts" tab cannot disagree with Prometheus.
+
+Per-vhost blocks are persisted and restored by **matching ServerName**,
+not saved position -- so adding or removing a vhost re-files history
+instead of sliding every site onto its neighbour's numbers.
+
+### Fixed — dashboard query parsing could not survive a third parameter
+
+Window and refresh were parsed with a chain of `strstr(r->args, "w=15")`
+probes, which worked only because no two parameter values could
+collide. Adding `vh=` breaks that invariant by inspection, so parsing
+now goes through a token-aware helper that anchors at the start or
+after `&` and requires the `=`. Every self-link and the meta-refresh
+URL now carry all three parameters, so switching one no longer resets
+the others.
+
+## 2026-08-01 (site-wide traffic counters; state format v5 -> v6)
+
+### Added — request counts for the whole server, not just protected scopes
+
+Collected in the `log_transaction` hook, which is registered at server
+scope and runs once per client request on every vhost regardless of
+where `BotShieldEnabled` is switched on. Subrequests never reach it, so
+it is exactly one count per request.
+
+    botshield_requests_total
+    botshield_requests_with_cookie_total
+    botshield_requests_status_{2xx,3xx,4xx,5xx,other}_total
+
+Verified against Apache's own logging on a live host: over a 60-second
+window the combined access logs grew by 45 lines and
+`requests_total` by exactly 45.
+
+The reason to want the whole-server denominator is **coverage**. With
+the enable scoped to a `<Location>`, `decisions / requests_total` is
+the share of site traffic BotShield actually evaluates, and it is easy
+to assume that is 100% when it is single digits -- on the deployment
+this was built for it reads 5.6%. The dashboard surfaces it as
+"Evaluated" in a new "Site traffic (all vhosts)" row, above the
+decision stats, with a "Response status" chart beside it.
+
+Status class carries polarity, so it wears the reserved status tokens
+rather than categorical slots -- with 3xx on a neutral, because a
+redirect is not a warning and colouring it as one would misstate it.
+
+Fields are in the bucket rings as well as the cumulative counters, so
+traffic is windowed like everything else. Slot grows 184 -> 240 bytes;
+rings are 20,160 bytes and the whole metrics block 20,544, of a 16 MB
+segment.
+
+Cost is three relaxed atomic adds per ring plus three cumulative, on
+every request including static assets. Deliberately cheap: this runs
+site-wide, so anything heavier would tax every request rather than
+just the protected scopes. `bs_m_slot_claim` was split out of
+`bs_m_slot_add` because two independent writers -- the decision path
+and the traffic path -- now land in the same slot and either may
+trigger the rollover.
+
+Cookie detection is token-aware (matches at the header start or after a
+separator, and requires the `=`), so a cookie merely ending in the
+session-cookie name is not counted. Both the plain and `__Host-`
+prefixed names are recognised.
+
+## 2026-08-01 (PoW solves are counted; cookie state in the windows)
+
+### Fixed — the silent/form PoW solve was invisible to metrics
+
+`outcome=verified` was emitted from exactly one place, the captcha
+siteverify path. The embedded-verify PoW success site minted its cookie
+and returned 204 without recording anything, so a deployment running
+the silent or form tier with no captcha provider reported a permanent
+0% solve rate on the dashboard, and the challenge-resolution chart
+counted every served challenge as abandoned.
+
+The PoW success path now logs `tier=silent outcome=verified
+reason=pow_ok`, so `verified` means "a challenge was completed" for
+both the captcha and PoW paths and the solve rate is meaningful for
+either.
+
+Deliberately not computed from `cookie=ok`: that counts every request
+carrying a valid cookie, so one human browsing 50 pages would read as
+50 solves. The mint is the one-per-solve event.
+
+### Added — cookie state in the bucket rings (state format v4 -> v5)
+
+`bs_metrics_slot` gains `cookie[BS_M_COOKIE_COUNT]`, so the reputation
+cookie breakdown is windowed like tier and outcome rather than
+all-time only. The dashboard gains a "Reputation cookie state" chart:
+`bad_sig`/`bad_format` above noise means forgery or a secret mismatch,
+`expired` means TTL churn.
+
+Slot grows 136 -> 184 bytes; the two rings are 15,456 bytes of the
+16 MB segment. The metrics block is length-prefixed and size-checked
+on load, so a v4 file would be refused on size alone -- the version
+bump makes the rejection say why.
+
+Cookie state is categorical, not ordinal, so it takes the categorical
+theme's fixed slot order rather than the tier ramp's single-hue scale.
+Slots 1-6 in order; their adjacent pairs are a strict subset of the
+reference theme's validated eight. Three light-mode slots fall under
+3:1 on the light surface, so the relief rule applies -- every series is
+direct-labelled with its value and identity never rides on colour
+alone.
+
+## 2026-08-01 (dashboard, metric windows, state persistence)
+
+### Added — `/botshield/dashboard`
+
+A no-JavaScript HTML dashboard: inline SVG charts, headline stats for
+challenge rate and solve rate, and tier/outcome breakdowns. Answers
+"how many challenges are outstanding vs resolved human" without
+scraping Prometheus.
+
+Two query parameters, both optional:
+
+    /botshield/dashboard?w=15|60|1440|all   window in minutes
+    /botshield/dashboard?r=<seconds>        auto-refresh, r=0 disables
+
+Refresh is a `<meta http-equiv='refresh'>` carrying the current window
+forward, so it re-renders without scripts and without losing the
+selected window. It is user-controllable (`r=0`) rather than fixed,
+which is what WCAG 2.2.1 asks of an auto-updating page.
+
+### Added — windowed metrics
+
+Two epoch-stamped ring buffers in SHM: 60 one-minute slots (serving the
+15-minute and 1-hour views) and 24 one-hour slots (serving 24 hours).
+A slot is zeroed by whichever writer wins a CAS on its epoch, so
+rollover costs one atomic op and no lock. Adds 11,752 bytes to the SHM
+segment.
+
+Aging is a property of the read, not a sweep: the reader skips slots
+whose epoch is outside the requested window. Nothing has to run on a
+timer to expire data, which is also why downtime needs no handling.
+
+### Added — metrics persistence (state format v3 -> v4)
+
+`BotShieldStateFile` now carries the metrics block, so counters and
+both bucket rings survive a restart. This matters for anyone rotating
+logs with a restart: previously a nightly restart silently zeroed the
+24-hour and all-time windows.
+
+The block is length-prefixed and restored only when its size matches
+the running struct, so a rebuilt module with a different metrics
+layout keeps fresh counters instead of reinterpreting stale bytes.
+Old v3 files are rejected by the existing version check with a NOTICE
+and a fresh start.
+
+Copied without the SHM mutex: these are relaxed atomic counters that
+tolerate a torn read, and holding the lock across a ~12 KB memcpy
+would serialise against the decision path. A save can land a counter
+mid-increment; being off by one on a restored gauge is not worth the
+contention.
+
+### Fixed — docs claimed rate-limit counters were persisted
+
+They never were, and shouldn't be: they are short-window buckets whose
+meaning is "requests in the last N seconds", so restoring one written
+minutes ago either double-counts or restores an elapsed window.
+Documented as a deliberate exclusion.
+
+### Note — the endpoints are unauthenticated
+
+`/botshield/dashboard` and `/botshield/metrics` have no access control
+of their own. On a public vhost they are world-readable. Restrict them
+in the server config until the module grows its own gate:
+
+    <Location "/botshield/dashboard">
+        Require ip 10.0.0.0/8
+    </Location>
+
 ## 2026-08-01 (BotShieldChallenge, endpoint dispatch, safeguard default)
 
 ### Added — `BotShieldChallenge On|Off`

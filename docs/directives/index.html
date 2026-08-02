@@ -596,10 +596,13 @@ underprovisioned.</p>
 SHM tables. Default <code>/64</code> is per-subscriber for typical ISP
 allocations; tighter values (<code>/56</code>, <code>/48</code>) flag larger blocks of
 addresses sharing reputation.</p>
-<p><code>BotShieldStateFile</code> enables crash-durable persistence; the
-periodic save requires <code>mod_watchdog</code>, the graceful-shutdown save
-runs regardless. State format mismatches on load reject the file
-with a NOTICE and start fresh — never a startup failure.</p>
+<p><code>BotShieldStateFile</code> enables crash-durable persistence for the
+flagged-IP table, the Bloom filters, and the metrics counters and
+dashboard bucket rings. Rate-limit counters are deliberately
+excluded — see <a href="deployment.md">Deployment</a>. The periodic save
+requires <code>mod_watchdog</code>, the graceful-shutdown save runs regardless.
+State format mismatches on load reject the file with a NOTICE and
+start fresh — never a startup failure.</p>
 <h2 id="ua-classification-and-allow-list">UA classification and allow list</h2>
 <p>Each request gets one User-Agent classification, computed once and
 cached for every downstream consumer. It composes four passes:

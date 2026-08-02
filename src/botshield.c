@@ -1160,6 +1160,9 @@ static int bs_route_module_endpoint(request_rec *r, bs_dir_cfg *cfg)
     if (strcmp(sub, "/metrics") == 0) {
         return bs_metrics_handler(r);
     }
+    if (strcmp(sub, "/dashboard") == 0) {
+        return bs_dashboard_handler(r);
+    }
     if (strcmp(sub, "/policy-status") == 0) {
         return bs_policy_status_handler(r, cfg);
     }
@@ -1256,6 +1259,12 @@ static int bs_handler(request_rec *r)
         && !(cfg && cfg->enabled == BS_ENABLED_OFF)) {
         int endpoint_rv = bs_route_module_endpoint(r, cfg);
         if (endpoint_rv != -1) {
+            /* Marker for the response breakout: these never reach the
+             * decision path, so BS_OUTCOME is absent and they would
+             * otherwise be attributed to the origin. */
+            if (!apr_table_get(r->subprocess_env, "BS_ENDPOINT")) {
+                apr_table_setn(r->subprocess_env, "BS_ENDPOINT", "1");
+            }
             return endpoint_rv;
         }
     }

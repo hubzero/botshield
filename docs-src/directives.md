@@ -262,10 +262,13 @@ SHM tables. Default `/64` is per-subscriber for typical ISP
 allocations; tighter values (`/56`, `/48`) flag larger blocks of
 addresses sharing reputation.
 
-`BotShieldStateFile` enables crash-durable persistence; the
-periodic save requires `mod_watchdog`, the graceful-shutdown save
-runs regardless. State format mismatches on load reject the file
-with a NOTICE and start fresh — never a startup failure.
+`BotShieldStateFile` enables crash-durable persistence for the
+flagged-IP table, the Bloom filters, and the metrics counters and
+dashboard bucket rings. Rate-limit counters are deliberately
+excluded — see [Deployment](deployment.md). The periodic save
+requires `mod_watchdog`, the graceful-shutdown save runs regardless.
+State format mismatches on load reject the file with a NOTICE and
+start fresh — never a startup failure.
 
 ## UA classification and allow list
 

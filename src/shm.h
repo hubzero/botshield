@@ -145,7 +145,22 @@ extern "C" {
  *       consistency cleanup. Slot bytes from v2 state files don't
  *       map cleanly into v3 layout, so older files are rejected
  *       with a NOTICE and the table starts fresh. */
-#define BS_STATE_FORMAT_VERSION   3
+/* v4 appends the M9.2 metrics block (cumulative counters plus the
+ * dashboard bucket rings) so decision history survives a restart. The
+ * rings carry their own epoch stamps, so slots that aged out while the
+ * server was down are simply skipped by the window reader — no special
+ * handling on reload. A version mismatch is already rejected with a
+ * NOTICE and a fresh start, so old files degrade rather than break.
+ *
+ * v5 widens bs_metrics_slot with the cookie dimension; v6 adds the
+ * site-wide traffic fields; v7 appends the per-vhost blocks, which are
+ * restored by matching saved ServerName against the running directory
+ * so adding or removing a vhost re-files history instead of
+ * scrambling it. The block is length-prefixed and
+ * size-checked on load, so an older file would be refused on size
+ * alone even without the version bump; the bump makes the rejection
+ * say why. */
+#define BS_STATE_FORMAT_VERSION   8
 #define BS_STATE_MAX_AGE_SECS     (14 * 86400)
 #define BS_FNV64_SEED             0xcbf29ce484222325ULL
 
@@ -181,6 +196,43 @@ typedef enum {
     BS_M_OUTCOME_REDIRECT,
     BS_M_OUTCOME_COUNT
 } bs_m_outcome;
+
+/* Who produced the response, and if it was us, what kind. Lets the
+ * dashboard separate a BotShield 403 from an application 403, which are
+ * indistinguishable in the status-class counters.
+ *
+ * Counterfactuals do not count as ours: under LogOnly the decision log
+ * says ~block but the request was declined and the origin answered, so
+ * it bins as ORIGIN.
+ *
+ * OBSERVE is split from ENDPOINT because the dashboard and the metrics
+ * scrape are the measuring instrument, not traffic. A dashboard left
+ * open on a 10s refresh is 360 requests an hour of self-inflicted load;
+ * folded in with the verify endpoints it would quietly dominate the
+ * breakdown. They are still counted in req_total -- that has to keep
+ * matching the access logs -- just kept separable. */
+typedef enum {
+    BS_M_RESP_ORIGIN = 0,      /* the application answered */
+    BS_M_RESP_CHALLENGE,       /* interstitial served */
+    BS_M_RESP_BLOCK,           /* refused (403 and friends) */
+    BS_M_RESP_RATE_LIMITED,    /* 429 */
+    BS_M_RESP_REDIRECT,        /* safeguard 302 */
+    BS_M_RESP_ENDPOINT,        /* module endpoint: verify, assets */
+    BS_M_RESP_OBSERVE,         /* dashboard / metrics / policy-status */
+    BS_M_RESP_COUNT
+} bs_m_resp;
+
+/* HTTP status class for the site-wide traffic counters. Separate from
+ * the decision vocabulary: these count every request the server logs,
+ * including ones BotShield never evaluated. */
+typedef enum {
+    BS_M_STATUS_2XX = 0,
+    BS_M_STATUS_3XX,
+    BS_M_STATUS_4XX,
+    BS_M_STATUS_5XX,
+    BS_M_STATUS_OTHER,
+    BS_M_STATUS_COUNT
+} bs_m_status;
 
 typedef enum {
     BS_M_COOKIE_OK = 0,
@@ -345,12 +397,94 @@ typedef struct {
     apr_uint32_t  _pad_cl2[6];
 } bs_shm_header;
 
+
+/* ----------------------------------------------------------------------
+ * Per-vhost metrics
+ *
+ * Each distinct ServerName gets its own bs_metrics block, so the
+ * dashboard can break the numbers down per site. Blocks are the same
+ * type as the global one: a few hundred bytes per vhost are wasted on
+ * the server-wide-only fields (persistence gauges and such, which stay
+ * zero in a vhost block), and in exchange there is no second struct to
+ * drift out of sync and no separate read path.
+ *
+ * The global block is still written directly and remains the
+ * aggregate, so Prometheus and mod_status are untouched by any of this
+ * and the "All" tab cannot disagree with them.
+ *
+ * Vhosts sharing a ServerName -- the usual :80 and :443 pair -- share
+ * one block, because an operator thinks in sites, not in listeners.
+ * Past BS_M_MAX_VHOSTS distinct names, the overflow all lands in the
+ * last slot, which the dashboard labels as such rather than silently
+ * dropping it.
+ * -------------------------------------------------------------------- */
+#define BS_M_MAX_VHOSTS      32
+#define BS_M_VHOST_NAME_MAX  64
+
+typedef struct {
+    apr_uint32_t count;                 /* blocks actually allocated */
+    apr_uint32_t overflowed;            /* 1 = last slot is the catch-all */
+    char name[BS_M_MAX_VHOSTS][BS_M_VHOST_NAME_MAX];
+} bs_vhost_dir;
+
+/* ----------------------------------------------------------------------
+ * Time-bucketed decision counters (dashboard windows)
+ *
+ * Two epoch-stamped rings give 15-minute, 1-hour and 24-hour views
+ * without a time-series store. A slot records which epoch (minute
+ * number, or hour number) it holds; a writer landing on a slot from an
+ * older wrap claims it via CAS and zeroes it, and a reader simply skips
+ * any slot whose epoch falls outside the window. Nothing sweeps.
+ *
+ * The minute ring is 60 slots so it serves both the 15-minute and the
+ * 1-hour window; the hour ring covers a day. All-time stays the plain
+ * cumulative counters below.
+ *
+ * Cost: (60 + 24) slots x ~240 bytes = ~20 KB of a 16 MB segment.
+ * Three extra relaxed atomic adds per decision, and three per request
+ * for the site-wide traffic fields (which run on every request, not
+ * just evaluated ones).
+ *
+ * Accuracy: two writers crossing a bucket boundary can race, and the
+ * loser's increment may land in the slot the winner just zeroed. These
+ * counters are advisory — the same posture the gauges already take —
+ * and a CAS-per-increment is not worth paying on the decision path.
+ * -------------------------------------------------------------------- */
+#define BS_M_MIN_SLOTS   60   /* 1-minute slots: serves 15min and 1h */
+#define BS_M_HOUR_SLOTS  24   /* 1-hour slots: serves 24h */
+
+typedef struct {
+    apr_uint64_t epoch;                    /* minute or hour number; 0 = unused */
+    apr_uint64_t tier   [BS_M_TIER_COUNT];
+    apr_uint64_t outcome[BS_M_OUTCOME_COUNT];
+    /* Cookie state is in the ring because it carries the only solve
+     * signal the PoW tiers produce. outcome=verified comes solely from
+     * captcha siteverify; a client that solves a silent/form
+     * interstitial returns on a fresh request that reads cookie=ok, so
+     * a windowed solve rate needs this dimension, not just outcome[]. */
+    apr_uint64_t cookie [BS_M_COOKIE_COUNT];
+    /* Site-wide traffic, counted at log_transaction — which runs for
+     * every request on every vhost, regardless of BotShieldEnabled
+     * scope. Decisions are a subset: with the enable scoped to a
+     * <Location>, req_total is the denominator that makes "how much of
+     * the site is actually covered" answerable. */
+    apr_uint64_t req_total;
+    apr_uint64_t req_cookie;               /* carried a session cookie */
+    apr_uint64_t req_status[BS_M_STATUS_COUNT];
+    apr_uint64_t req_resp[BS_M_RESP_COUNT];
+} bs_metrics_slot;
+
 /* M9.2 metrics block. Lives in SHM next to the rate-counter pool. */
 typedef struct {
     apr_uint64_t tier   [BS_M_TIER_COUNT];
     apr_uint64_t outcome[BS_M_OUTCOME_COUNT];
     apr_uint64_t cookie [BS_M_COOKIE_COUNT];
     apr_uint64_t provider[BS_M_PROV_COUNT];
+    /* Site-wide traffic (see bs_metrics_slot). */
+    apr_uint64_t req_total;
+    apr_uint64_t req_cookie;
+    apr_uint64_t req_status[BS_M_STATUS_COUNT];
+    apr_uint64_t req_resp[BS_M_RESP_COUNT];
     /* Persistence gauges. */
     apr_uint64_t state_saves_total;
     apr_uint64_t state_save_last_unix;
@@ -368,6 +502,9 @@ typedef struct {
     /* E12 — log-only / observe-mode counters. */
     apr_uint64_t rate_limit_observed_total;
     apr_uint64_t trigger_observed_total;
+    /* Windowed views of tier/outcome — see bs_metrics_slot above. */
+    bs_metrics_slot min_slots [BS_M_MIN_SLOTS];
+    bs_metrics_slot hour_slots[BS_M_HOUR_SLOTS];
 } bs_metrics;
 
 /* Module-global runtime pointer struct. Populated once in post-config;
@@ -392,6 +529,9 @@ typedef struct {
     apr_uint32_t        *cv_inflight;
     /* M9.2 */
     bs_metrics          *metrics;
+    /* Per-vhost blocks + the ServerName directory that indexes them. */
+    bs_vhost_dir        *vhost_dir;
+    bs_metrics          *vmetrics;
     /* E2.1 — fixed-window rate-limit counter pool, opaque from
      * the SHM layer's perspective. */
     void                *rate_counters;

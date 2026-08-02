@@ -17,6 +17,8 @@
 #include <http_config.h>   /* cmd_parms for the directive setter */
 #include <apr_pools.h>
 
+#include "shm.h"       /* BS_M_*_COUNT enum sizes, bs_metrics_slot */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -120,11 +122,61 @@ int bs_open_decision_logs(apr_pool_t *pconf, server_rec *s);
  * produces its evidence. */
 void bs_suppress_access_log(request_rec *r);
 
+
+/* ----------------------------------------------------------------------
+ * Windowed counter reads (dashboard)
+ * -------------------------------------------------------------------- */
+
+/* One window's worth of tier/outcome totals. */
+typedef struct {
+    apr_uint64_t tier   [BS_M_TIER_COUNT];
+    apr_uint64_t outcome[BS_M_OUTCOME_COUNT];
+    apr_uint64_t cookie [BS_M_COOKIE_COUNT];
+    apr_uint64_t req_total;      /* every request, evaluated or not */
+    apr_uint64_t req_cookie;
+    apr_uint64_t req_status[BS_M_STATUS_COUNT];
+    apr_uint64_t req_resp[BS_M_RESP_COUNT];
+    apr_uint64_t decisions;      /* sum of outcome[] — every decision logs one */
+} bs_metrics_window;
+
+/* Sum the buckets covering the last `span_minutes`.
+ *   15 / 60  -> the minute ring
+ *   1440     -> the hour ring
+ *   0        -> all-time cumulative counters (no ring)
+ * Any other span is rounded up onto whichever ring can serve it.
+ * Slots outside the window are skipped, so a quiet period reads as
+ * zero rather than as stale data. */
+/* vhost_idx -1 reads the global aggregate; 0..count-1 reads that
+ * vhost's block. */
+void bs_metrics_read_window(int span_minutes, int vhost_idx,
+                            bs_metrics_window *out);
+
+/* Record one decision into both rings. Called from bs_decision_log
+ * alongside the cumulative bumps; indices are the same bs_m_*_idx
+ * values, and -1 means "no counter for this dimension". */
+void bs_metrics_bucket_add(int vhost_idx, int tier_idx,
+                           int outcome_idx, int cookie_idx);
+
+/* Record one request into the site-wide traffic counters. Called from
+ * the log_transaction hook, which runs for every request on every
+ * vhost — including requests BotShield never evaluated, which is the
+ * whole point: it supplies the denominator for coverage. */
+void bs_metrics_traffic_add(int vhost_idx, int status_idx,
+                            int has_cookie, int resp_idx);
+
 /* /botshield/metrics handler — Prometheus exposition format 0.0.4.
  * Mounted via the request dispatcher in botshield.c. Apache's
  * <Location> + Require* gates access; this module emits to anyone
  * who reaches the handler. */
 int bs_metrics_handler(request_rec *r);
+
+/* /botshield/dashboard — operator-facing HTML view of the same
+ * counters /metrics exposes, with 15min / 1h / 24h / all-time
+ * windows from the bucket rings. Self-contained: inline CSS and
+ * inline SVG, no scripts or external assets, so a strict site CSP
+ * cannot break it. Same access-control story as /metrics — wrap it
+ * in <Location> with Require ip if it should not be public. */
+int bs_dashboard_handler(request_rec *r);
 
 /* mod_status contribution — registered via APR_OPTIONAL_HOOK in
  * bs_register_hooks. Renders the same top-line counters in either
