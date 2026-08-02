@@ -90,6 +90,9 @@
 <section class="toc">
   <h2 class="toc__heading">On this page</h2>
   <ul class="toc__list">
+<li class="toc__item toc__item--level-2"><a href="#2026-08-02-browser-classification-covers-real-mobile-devices">2026-08-02 (browser classification covers real mobile devices)</a></li>
+<li class="toc__item toc__item--level-3"><a href="#fixed-real-phones-classified-as-unknown-ua">Fixed — real phones classified as `unknown-ua`</a></li>
+<li class="toc__item toc__item--level-3"><a href="#also-vendor-top-user-agents-json-refreshed">Also — `vendor/top-user-agents.json` refreshed</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-08-02-client-classification-on-the-dashboard-v8-v9">2026-08-02 (client classification on the dashboard; v8 -&gt; v9)</a></li>
 <li class="toc__item toc__item--level-3"><a href="#added-botshield-clients-total-and-a-client-classification-chart">Added — `botshield_clients_*_total` and a Client classification chart</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-08-02-known-bots-pass-robots-txt-can-be-observed-before-it-is-enforced">2026-08-02 (known bots pass; robots.txt can be observed before it is enforced)</a></li>
@@ -207,6 +210,34 @@
   </ul>
 </section>
         <div class="prose">
+<h2 id="2026-08-02-browser-classification-covers-real-mobile-devices">2026-08-02 (browser classification covers real mobile devices)</h2>
+<h3 id="fixed-real-phones-classified-as-unknown-ua">Fixed — real phones classified as <code>unknown-ua</code></h3>
+<p><code>normalize()</code> masked digit runs but not the Android device model or the
+iOS build token, both of which are alphabetic. Chrome's frozen <code>K</code>
+device token matched; an actual <code>Pixel 6 Pro</code> or <code>SM-J330G</code> did not, and
+neither did an iPhone (<code>Mobile/15E148</code>).</p>
+<p>Two anchored rewrites now run after digit-masking, identically in
+<code>bs_browser_normalize()</code> and the codegen -- they must agree exactly or
+no template ever matches:</p>
+<pre><code>&quot;Android X; SM-SXB)&quot;  -&gt;  &quot;Android X; D)&quot;
+&quot;Mobile/XEX&quot;          -&gt;  &quot;Mobile/B&quot;
+</code></pre>
+<p>Template coverage of real browser-shaped traffic went 93.3% -&gt; 97.4%.</p>
+<p>Deliberately biased toward over-matching. A scraper that hand-builds a
+browser-shaped UA now classifies as a browser and gets challenged --
+which it cannot solve. A real phone that failed to classify was treated
+as a crawler candidate and, with robots.txt wildcard rules active, was
+refused outright with no challenge to solve. The first error costs
+nothing; the second locks a user out.</p>
+<p>Bot detection does not regress: bot UAs append
+<code>(compatible; &lt;bot&gt;/X; +url)</code> after the browser-shaped part, so they
+still fail the exact match and fall through to the directory pass.
+Verified mobile Googlebot, bingbot, GPTBot and SemrushBot all still
+classify as bots.</p>
+<h3 id="also-vendor-top-user-agents-json-refreshed">Also — <code>vendor/top-user-agents.json</code> refreshed</h3>
+<p>100 entries, 59 rotated, +15 merged from the builtin list. Routine
+version drift; it did not and could not fix the mobile gap, which was
+structural rather than staleness.</p>
 <h2 id="2026-08-02-client-classification-on-the-dashboard-v8-v9">2026-08-02 (client classification on the dashboard; v8 -&gt; v9)</h2>
 <h3 id="added-botshield-clients-total-and-a-client-classification-chart">Added — <code>botshield_clients_*_total</code> and a Client classification chart</h3>
 <p>Six classes recorded per request: <code>browser</code>, <code>verified-bot</code>,

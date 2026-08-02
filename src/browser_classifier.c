@@ -42,6 +42,37 @@ static bs_browser_templates_state *bs_browser_pending = NULL;
  * up to out_cap-1 bytes plus NUL. Returns 1 on success, 0 if the
  * normalized form would overflow out (in practice this means the
  * UA was unreasonably long; caller treats as "not a browser"). */
+/* In-place collapse of device-varying tokens. See the call site in
+ * bs_browser_normalize for why. Both rewrites shrink the string, so
+ * they can never overflow. */
+static void bs_browser_collapse_device(char *s, apr_size_t cap)
+{
+    (void)cap;
+    /* "Android X; <device>)" -> "Android X; D)" */
+    char *a = strstr(s, "Android X; ");
+    if (a) {
+        char *dev = a + sizeof("Android X; ") - 1;
+        char *close = strchr(dev, ')');
+        if (close && close > dev) {
+            *dev++ = 'D';
+            memmove(dev, close, strlen(close) + 1);
+        }
+    }
+    /* "Mobile/<build>" -> "Mobile/B"  (build is the alnum run) */
+    char *m = strstr(s, "Mobile/");
+    if (m) {
+        char *b = m + sizeof("Mobile/") - 1;
+        char *e = b;
+        while (*e && (((*e >= '0' && *e <= '9')
+                    || (*e >= 'A' && *e <= 'Z')
+                    || (*e >= 'a' && *e <= 'z')))) e++;
+        if (e > b) {
+            *b++ = 'B';
+            memmove(b, e, strlen(e) + 1);
+        }
+    }
+}
+
 static int bs_browser_normalize(const char *ua, char *out, apr_size_t out_cap)
 {
     if (!out_cap) return 0;
@@ -64,6 +95,34 @@ static int bs_browser_normalize(const char *ua, char *out, apr_size_t out_cap)
         }
     }
     out[w] = '\0';
+
+    /* Second pass: collapse two tokens that vary per *device* rather
+     * than per browser build. Digit-masking alone cannot reach them
+     * because they are alphabetic.
+     *
+     *   "Android X; SM-SXB)"  ->  "Android X; D)"
+     *   "Mobile/XEX"          ->  "Mobile/B"
+     *
+     * Android device models are effectively unbounded -- thousands of
+     * model strings -- so no template list can enumerate them, and a
+     * genuine phone that sends a real model (rather than Chrome's
+     * frozen "K") would never match. Same for the iOS build token,
+     * which carries a letter and so survives digit-masking.
+     *
+     * Deliberately biased toward over-matching. A scraper that
+     * hand-builds a browser-shaped UA now classifies as a browser and
+     * gets challenged -- which it cannot solve. A real phone that
+     * failed to classify got treated as a crawler candidate and, with
+     * robots.txt wildcard rules on, was refused outright with no
+     * challenge to solve. The first error costs nothing; the second
+     * locks a user out.
+     *
+     * Kept narrow on purpose: both rewrites are anchored to a literal
+     * prefix, so a UA without that prefix is untouched. In particular
+     * bot UAs that append "(compatible; <bot>/X; +url)" after the
+     * browser-shaped part still fail the exact-match and fall through
+     * to the bot-directory pass. */
+    bs_browser_collapse_device(out, out_cap);
     return 1;
 }
 

@@ -1,5 +1,42 @@
 # Changelog
 
+## 2026-08-02 (browser classification covers real mobile devices)
+
+### Fixed — real phones classified as `unknown-ua`
+
+`normalize()` masked digit runs but not the Android device model or the
+iOS build token, both of which are alphabetic. Chrome's frozen `K`
+device token matched; an actual `Pixel 6 Pro` or `SM-J330G` did not, and
+neither did an iPhone (`Mobile/15E148`).
+
+Two anchored rewrites now run after digit-masking, identically in
+`bs_browser_normalize()` and the codegen -- they must agree exactly or
+no template ever matches:
+
+    "Android X; SM-SXB)"  ->  "Android X; D)"
+    "Mobile/XEX"          ->  "Mobile/B"
+
+Template coverage of real browser-shaped traffic went 93.3% -> 97.4%.
+
+Deliberately biased toward over-matching. A scraper that hand-builds a
+browser-shaped UA now classifies as a browser and gets challenged --
+which it cannot solve. A real phone that failed to classify was treated
+as a crawler candidate and, with robots.txt wildcard rules active, was
+refused outright with no challenge to solve. The first error costs
+nothing; the second locks a user out.
+
+Bot detection does not regress: bot UAs append
+`(compatible; <bot>/X; +url)` after the browser-shaped part, so they
+still fail the exact match and fall through to the directory pass.
+Verified mobile Googlebot, bingbot, GPTBot and SemrushBot all still
+classify as bots.
+
+### Also — `vendor/top-user-agents.json` refreshed
+
+100 entries, 59 rotated, +15 merged from the builtin list. Routine
+version drift; it did not and could not fix the mobile gap, which was
+structural rather than staleness.
+
 ## 2026-08-02 (client classification on the dashboard; v8 -> v9)
 
 ### Added — `botshield_clients_*_total` and a Client classification chart
