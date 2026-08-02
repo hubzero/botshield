@@ -1,4 +1,4 @@
-/* cookie.h — _bs_verified GCM cookie envelope + Cookie-header parser.
+/* cookie.h — _bs_session GCM cookie envelope + Cookie-header parser.
  *
  * Two halves of the cookie surface meet here:
  *
@@ -51,9 +51,9 @@ apr_table_t *bs_parse_cookies_once(request_rec *r);
 /* Look up `name` in the parsed cookie map. Returns NULL on miss. */
 const char *bs_get_cookie_value(request_rec *r, const char *name);
 
-/* verified-cookie lookup. Prefers __Host-bs_verified
- * (modern HTTPS deployments) and falls back to legacy _bs_verified
- * (cross-subdomain SSO via Domain=). */
+/* Session-cookie lookup. Prefers __Host-bs_session
+ * (modern HTTPS deployments) and falls back to the unprefixed
+ * _bs_session (cross-subdomain SSO via Domain=). */
 const char *bs_get_verified_cookie_value(request_rec *r);
 
 /* --- Mint side ------------------------------------------------- */
@@ -76,7 +76,7 @@ const char *bs_build_cookie_payload(apr_pool_t *p,
 
 /* Render the Set-Cookie header line (name=value; Path=/; Expires=…;
  * SameSite=Lax; HttpOnly; Secure on HTTPS; Domain when configured).
- * emits __Host-bs_verified when prefix preconditions hold. */
+ * emits __Host-bs_session when prefix preconditions hold. */
 const char *bs_build_set_cookie(request_rec *r, const bs_dir_cfg *cfg,
                                 const char *payload_b64,
                                 apr_time_t expires_at);

@@ -43,7 +43,7 @@
 </a>
 <a class="docs-nav__item" href="../policy/index.html">
   <span class="docs-nav__title">Policy</span>
-  <span class="docs-nav__summary">Allow lists, rate limits, block paths, robots.txt, the trigger families, and flag triggers.</span>
+  <span class="docs-nav__summary">UA classification, rate limits, path triggers, robots.txt, the trigger families, and flag triggers.</span>
 </a>
 <a class="docs-nav__item" href="../captcha/index.html">
   <span class="docs-nav__title">Captcha and app-bridge</span>
@@ -59,7 +59,7 @@
 </a>
 <a class="docs-nav__item" href="../directives/index.html">
   <span class="docs-nav__title">Directive reference</span>
-  <span class="docs-nav__summary">Canonical reference for all 78 directives, grouped by family.</span>
+  <span class="docs-nav__summary">Canonical reference for all 85 directives, grouped by family.</span>
 </a>
 <a class="docs-nav__item" href="../troubleshooting/index.html">
   <span class="docs-nav__title">Troubleshooting</span>
@@ -124,7 +124,7 @@ match, env present, etc.).</li>
 <li>The decision log records the would-have-done outcome with an
 <code>:observe</code> suffix on the reason token.</li>
 <li>The matching observe-mode metric counter increments
-(<code>block_path_observed_total</code>, <code>trigger_observed_total</code>).</li>
+(<code>trigger_observed_total</code>, <code>rate_limit_observed_total</code>).</li>
 <li><strong>No</strong> flag bits are set on the IP.</li>
 <li><strong>No</strong> score is added to the request.</li>
 <li><strong>No</strong> status code, redirect, or log tag side-effect is emitted.</li>
@@ -134,8 +134,8 @@ client response is unaffected. Observe matches never short-circuit
 the policy walk — the next rule still gets its chance.</p>
 <h2 id="per-rule-observe-mode">Per-rule observe mode</h2>
 <p>Add <code>mode=observe</code> to any directive that supports it:</p>
-<pre><code class="language-apache">BotShieldPathTrigger    /admin/.env  flag=scanner_probe ttl=3600 log=admin-trap mode=observe
-BotShieldBlockPath      legacy-admin &quot;/wp-admin/*&quot; &quot;&quot; * mode=observe
+<pre><code class="language-apache">BotShieldPathTrigger    admin-trap   &quot;/admin/.env&quot;  flag=scanner_probe ttl=3600 log=admin-trap mode=observe
+BotShieldPathTrigger    legacy-admin &quot;/wp-admin/*&quot;  status=403 mode=observe
 BotShieldRateLimit      api-burst    60 min &quot;&quot; * mode=observe
 BotShieldFlagTrigger    honeypot_hit action=tier_floor min=captcha mode=observe
 </code></pre>
@@ -221,12 +221,6 @@ inner scope inherits the outer.</p>
 <td><code>flag-trigger:&lt;flag&gt;:observe</code></td>
 </tr>
 <tr>
-<td>Block-path</td>
-<td>yes</td>
-<td>yes</td>
-<td><code>block-path:&lt;name&gt;:observe</code></td>
-</tr>
-<tr>
 <td>Rate-limit</td>
 <td>yes</td>
 <td>yes</td>
@@ -264,8 +258,8 @@ policy.</p>
 <p><strong>Watch</strong> — tail the error log for <code>:observe</code> matches, or query
 the matching <code>*_observed_total</code> Prometheus counter:</p>
 <pre><code class="language-sh">curl -s http://localhost/botshield/metrics | grep observed
-# botshield_block_path_observed_total{name=&quot;legacy-admin&quot;} 142
 # botshield_trigger_observed_total{name=&quot;admin-trap&quot;,family=&quot;path&quot;} 38
+# botshield_rate_limit_observed_total{name=&quot;api-burst&quot;} 142
 </code></pre>
 </li>
 <li>

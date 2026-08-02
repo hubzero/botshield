@@ -43,7 +43,7 @@
 </a>
 <a class="docs-nav__item" href="../policy/index.html">
   <span class="docs-nav__title">Policy</span>
-  <span class="docs-nav__summary">Allow lists, rate limits, block paths, robots.txt, the trigger families, and flag triggers.</span>
+  <span class="docs-nav__summary">UA classification, rate limits, path triggers, robots.txt, the trigger families, and flag triggers.</span>
 </a>
 <a class="docs-nav__item" href="../captcha/index.html">
   <span class="docs-nav__title">Captcha and app-bridge</span>
@@ -59,7 +59,7 @@
 </a>
 <a class="docs-nav__item" href="../directives/index.html">
   <span class="docs-nav__title">Directive reference</span>
-  <span class="docs-nav__summary">Canonical reference for all 78 directives, grouped by family.</span>
+  <span class="docs-nav__summary">Canonical reference for all 85 directives, grouped by family.</span>
 </a>
 <a class="docs-nav__item is-active" href="index.html">
   <span class="docs-nav__title">Troubleshooting</span>
@@ -183,9 +183,11 @@ the honeypot, the IP is flagged, future requests get the
 flag-trigger penalty + tier_floor=captcha. See
 <a href="../policy/index.html">policy</a>.</li>
 <li><strong>Path triggers</strong>: for paths that bots target but legitimate
-users don't, add <code>BotShieldPathTrigger</code> rules with a penalty.</li>
-<li><strong>Block-path / rate-limit</strong>: if you see scraper UA patterns,
-add <code>BotShieldBlockPath</code> or <code>BotShieldRateLimit</code> cohorts.</li>
+users don't, add <code>BotShieldPathTrigger</code> rules with a penalty,
+status=403, or both. UA / IP cohort gating goes inline as
+<code>ua=...</code> / <code>ipspec=...</code> keys.</li>
+<li><strong>Rate-limit</strong>: if you see scraper UA patterns, add a
+<code>BotShieldRateLimit</code> cohort.</li>
 <li><strong>Allow-list verification</strong>: if a &quot;bot&quot; is claiming to be
 Googlebot but doesn't have Googlebot's IP range, the fake-bot
 detection fires automatically — assuming <code>BotShieldAllowBot googlebot ...</code> is configured. Check the decision log for

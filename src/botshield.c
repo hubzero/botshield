@@ -24,7 +24,7 @@
  *   captcha  third-party provider widget (Turnstile, hCaptcha, reCAPTCHA,
  *            Friendly, GeeTest) on the M8 verify endpoint
  *
- * The tier-earned cookie (_bs_verified or __Host-bs_verified, AES-GCM
+ * The tier-earned cookie (_bs_session or __Host-bs_session, AES-GCM
  * envelope) carries forward across requests, with a forgiveness-window
  * cap so a one-time solve doesn't whitewash a flagged client forever.
  *
@@ -245,7 +245,7 @@ static const command_rec bs_cmds[] = {
                  "provider's response token in the POST body of form "
                  "submissions. Requires BotShieldCaptchaProvider + "
                  "SiteKey + SecretFile in the same scope (or "
-                 "inherited). On valid token: mints _bs_verified, "
+                 "inherited). On valid token: mints _bs_session, "
                  "DECLINED so the app handler runs with the original "
                  "body intact. On bad/missing token: 403, app handler "
                  "never runs. Supports application/x-www-form-"
@@ -278,7 +278,7 @@ static const command_rec bs_cmds[] = {
                  "(default: 50). Clamped at max(0, flag_penalty)."),
     AP_INIT_TAKE1("BotShieldCookieDomain", bs_set_cookie_domain, NULL,
                  RSRC_CONF | ACCESS_CONF,
-                 "If set, Set-Cookie for _bs_verified includes a Domain= "
+                 "If set, Set-Cookie for _bs_session includes a Domain= "
                  "attribute so reputation follows users across subdomains. "
                  "Use '.example.com' for subdomain sharing. Default: host-only."),
     AP_INIT_TAKE1("BotShieldEndpointPrefix", bs_set_endpoint_prefix, NULL,
@@ -402,6 +402,7 @@ static const command_rec bs_cmds[] = {
                  "<LocationMatch> / <Files> / <If>) the directive "
                  "lives in IS the predicate. Action keys: "
                  "status=<code|pass>, redirect=<url>, log=<tag>, "
+                 "accesslog=on|off, "
                  "flag=<name>, ttl=<sec>, penalty=<N>, credit=<N>, "
                  "mode=enforce|observe. The literal 'reset' as the "
                  "first arg drops triggers inherited from outer "
@@ -538,7 +539,7 @@ static const command_rec bs_cmds[] = {
                  "seconds without solving any challenge is passed "
                  "through for a TTL window instead of being re-"
                  "challenged. Decision log shows reason "
-                 "challenge-safeguard. Doesn't mint _bs_verified; "
+                 "challenge-safeguard. Doesn't mint _bs_session; "
                  "doesn't override 403/429 blocks."),
     AP_INIT_TAKE1("BotShieldSafeguardThreshold",
                  bs_set_safeguard_threshold, NULL, RSRC_CONF,
@@ -672,7 +673,8 @@ static const command_rec bs_cmds[] = {
                  "session>, bs-cookie=<verified|missing|invalid>. "
                  "Keys: status=<code|pass> (default pass; diverges "
                  "from E3 — credit/penalty here ALWAYS apply, even "
-                 "under pass), redirect=<url>, log=<tag>, flag=<bit>, "
+                 "under pass), redirect=<url>, log=<tag>, accesslog=on|off, "
+                 "flag=<bit>, "
                  "ttl=<sec>, penalty=<n>, credit=<n>. Declaration "
                  "order; pass triggers accumulate credit/penalty "
                  "(layered reputation signals), first non-pass "
@@ -694,7 +696,7 @@ static const command_rec bs_cmds[] = {
                  "env=<var>=<value> (exact match, case-sensitive), "
                  "!env=<var> (absent). Keys: status=<code|pass> "
                  "(default pass; credit/penalty apply under pass "
-                 "like E4), log=<tag>, flag=<bit>, ttl=<sec>, "
+                 "like E4), log=<tag>, accesslog=on|off, flag=<bit>, ttl=<sec>, "
                  "penalty=<n>, credit=<n>. No redirect= (env "
                  "signals are scoring/flagging only). Declaration "
                  "order, first match wins; upsert-by-name. Main "
@@ -705,7 +707,7 @@ static const command_rec bs_cmds[] = {
                  "Map an app-signed event (via X-BotShield-Feedback "
                  "header) to module memory. Args: <event> "
                  "[key=value ...]. Required keys: flag=<bit>, "
-                 "ttl=<sec>. Optional: log=<tag>. The app signs "
+                 "ttl=<sec>. Optional: log=<tag>, accesslog=on|off. The app signs "
                  "event=<name>;sig=<hex>; the module looks up <name> "
                  "here and applies flag+ttl to the flagged-IP table. "
                  "No status/redirect/penalty/credit (response is "
@@ -718,7 +720,7 @@ static const command_rec bs_cmds[] = {
                  "<load-match> [key=value ...]. load-match is one of "
                  "state=<level> or state>=<level> where <level> is "
                  "normal|warm|hot. Keys: status=<code|pass>, "
-                 "log=<tag>, penalty=<n>, credit=<n>. flag/ttl/"
+                 "log=<tag>, accesslog=on|off, penalty=<n>, credit=<n>. flag/ttl/"
                  "redirect rejected — load is global state, not "
                  "per-IP behavior. First-match-wins."),
     /* E3 — path-based triggers */
@@ -728,13 +730,44 @@ static const command_rec bs_cmds[] = {
                  "[key=value ...]. Keys: status=<code|pass> (default "
                  "403; 'pass' means the real handler runs), "
                  "redirect=<url> (implies 302 unless status=3xx "
-                 "explicit), log=<tag> (emitted as tag=\"<x>\" on "
-                 "the decision log), flag=<bit> (M5.1 flag name; "
+                 "explicit), log=<tag> (emitted as tag=\"<x>\" on the "
+                 "decision log, for fail2ban handoff), "
+                 "accesslog=on|off (default on; 'off' drops the "
+                 "access-log line for a matching request by breaking "
+                 "the log_transaction hook chain. Composes with "
+                 "log=<tag>, so a rule can carry a tag AND stay out of "
+                 "the access log — the usual want for scanner probes. "
+                 "Because mod_log_config serves every CustomLog from "
+                 "that one hook, a CustomLog-based decision log is "
+                 "suppressed too; BotShieldDecisionLog is written by "
+                 "the module and is unaffected, as is the error-log "
+                 "line. Never applies under observe/LogOnly), "
+                 "flag=<bit> (M5.1 flag name; "
                  "default scanner_probe), ttl=<sec> (flagged-IP "
                  "TTL; default 3600; 0 = don't flag), penalty=<n> "
                  "(score_add amount on this request; default 0; "
                  "ignored under status=pass). Declaration order, "
                  "first match wins; upsert-by-name."),
+    AP_INIT_TAKE1("BotShieldDecisionLog", bs_set_decision_log,
+                 NULL, RSRC_CONF,
+                 "Module-owned decision log. Value is a server-root-"
+                 "relative path (\"logs/botshield-decisions.log\"), an "
+                 "absolute path, or a piped-log spec "
+                 "(\"|/usr/bin/rotatelogs /var/log/bs.%Y%m%d 86400\"). "
+                 "Written directly from the decision path rather than "
+                 "through mod_log_config, so it is independent of the "
+                 "access log: `accesslog=off` can suppress access logging "
+                 "while this log still records, which is what lets you "
+                 "rapid-rotate the detection log and archive the access "
+                 "log separately. One descriptor per vhost, opened at "
+                 "post_config and inherited by every child; single "
+                 "O_APPEND write per line, no request-path locking. "
+                 "Optional - without it the authoritative record is the "
+                 "error-log `mod_botshield: decision ...` line (boring "
+                 "passes demoted to DEBUG) plus whatever CustomLog the "
+                 "operator wires up. Failure to open is fatal at "
+                 "startup: a decision log you asked for and did not get "
+                 "is a silent blind spot."),
     /* E2.2 — robots.txt enforcement */
     AP_INIT_TAKE1("BotShieldRobotsTxt", bs_set_robots_txt,
                  NULL, RSRC_CONF,
@@ -1565,7 +1598,7 @@ static int bs_handler(request_rec *r)
      * "kicks in eventually" — see CHANGELOG.
      *
      * Embedded → form-PoW fallback: if this client has had N
-     * consecutive silent-tier dispatches without _bs_verified
+     * consecutive silent-tier dispatches without _bs_session
      * arriving (count tracked via bs_safeguard_present_count), the
      * wrapper isn't doing its job (CSP-blocked, no JS, no Worker
      * support, etc.). Bypass the embedded short-circuit so the

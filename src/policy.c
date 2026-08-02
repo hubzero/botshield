@@ -152,7 +152,7 @@ static int bs_ua_is_crawler_candidate(request_rec *r)
 
 /* BS_CK_STATE_NOTE / _VERIFIED / _MISSING / _INVALID are now
  * declared cross-file in botshield.h — set by bs_handler after the
- * `_bs_verified` verification pass; consumed by triggers.c's
+ * `_bs_session` verification pass; consumed by triggers.c's
  * cookie-trigger evaluator and by bs_check_policy below. */
 
 

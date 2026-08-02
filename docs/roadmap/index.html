@@ -43,7 +43,7 @@
 </a>
 <a class="docs-nav__item" href="../policy/index.html">
   <span class="docs-nav__title">Policy</span>
-  <span class="docs-nav__summary">Allow lists, rate limits, block paths, robots.txt, the trigger families, and flag triggers.</span>
+  <span class="docs-nav__summary">UA classification, rate limits, path triggers, robots.txt, the trigger families, and flag triggers.</span>
 </a>
 <a class="docs-nav__item" href="../captcha/index.html">
   <span class="docs-nav__title">Captcha and app-bridge</span>
@@ -59,7 +59,7 @@
 </a>
 <a class="docs-nav__item" href="../directives/index.html">
   <span class="docs-nav__title">Directive reference</span>
-  <span class="docs-nav__summary">Canonical reference for all 78 directives, grouped by family.</span>
+  <span class="docs-nav__summary">Canonical reference for all 85 directives, grouped by family.</span>
 </a>
 <a class="docs-nav__item" href="../troubleshooting/index.html">
   <span class="docs-nav__title">Troubleshooting</span>
@@ -90,54 +90,758 @@
 <section class="toc">
   <h2 class="toc__heading">On this page</h2>
   <ul class="toc__list">
-<li class="toc__item toc__item--level-2"><a href="#2026-05-01">2026-05-01</a></li>
-<li class="toc__item toc__item--level-3"><a href="#changed">Changed</a></li>
-<li class="toc__item toc__item--level-3"><a href="#fixed">Fixed</a></li>
-<li class="toc__item toc__item--level-2"><a href="#2026-04-30">2026-04-30</a></li>
-<li class="toc__item toc__item--level-3"><a href="#changed-2">Changed</a></li>
-<li class="toc__item toc__item--level-2"><a href="#2026-04-29">2026-04-29</a></li>
+<li class="toc__item toc__item--level-2"><a href="#2026-07-31-accesslog-off">2026-07-31 (accesslog=off)</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-log-off-becomes-accesslog-on-off">Changed — `log=off` becomes `accesslog=on|off`</a></li>
+<li class="toc__item toc__item--level-2"><a href="#2026-07-31-log-off">2026-07-31 (log=off)</a></li>
+<li class="toc__item toc__item--level-3"><a href="#added-botshielddecisionlog-a-module-owned-decision-log">Added — `BotShieldDecisionLog`, a module-owned decision log</a></li>
+<li class="toc__item toc__item--level-3"><a href="#added-log-off-suppresses-access-logging-for-matching-requests">Added — `log=off` suppresses access logging for matching requests</a></li>
+<li class="toc__item toc__item--level-2"><a href="#2026-05-03-ratelimit-cohort-grammar-unification">2026-05-03 (RateLimit cohort-grammar unification)</a></li>
+<li class="toc__item toc__item--level-3"><a href="#added-botshieldratelimit-accepts-key-value-form">Added — `BotShieldRateLimit` accepts key=value form</a></li>
+<li class="toc__item toc__item--level-2"><a href="#2026-05-03-path-trigger-absorbs-block-path">2026-05-03 (path-trigger absorbs block-path)</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-botshieldblockpath-retired-cohort-gating-moves-into-botshieldpathtrigger">Changed — `BotShieldBlockPath` retired; cohort gating moves into `BotShieldPathTrigger`</a></li>
+<li class="toc__item toc__item--level-2"><a href="#2026-05-03-botgroups">2026-05-03 (botgroups)</a></li>
+<li class="toc__item toc__item--level-3"><a href="#added-botgroup-vocabulary-throughout">Added — botgroup vocabulary throughout</a></li>
+<li class="toc__item toc__item--level-3"><a href="#operator-facing-summary">Operator-facing summary</a></li>
+<li class="toc__item toc__item--level-2"><a href="#2026-05-03-latest">2026-05-03 (latest)</a></li>
 <li class="toc__item toc__item--level-3"><a href="#added">Added</a></li>
-<li class="toc__item toc__item--level-3"><a href="#changed-3">Changed</a></li>
-<li class="toc__item toc__item--level-3"><a href="#fixed-2">Fixed</a></li>
-<li class="toc__item toc__item--level-3"><a href="#removed">Removed</a></li>
-<li class="toc__item toc__item--level-3"><a href="#hygiene">Hygiene</a></li>
-<li class="toc__item toc__item--level-2"><a href="#2026-04-28">2026-04-28</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed">Changed</a></li>
+<li class="toc__item toc__item--level-2"><a href="#2026-05-03-later">2026-05-03 (later)</a></li>
 <li class="toc__item toc__item--level-3"><a href="#added-2">Added</a></li>
-<li class="toc__item toc__item--level-3"><a href="#changed-4">Changed</a></li>
-<li class="toc__item toc__item--level-3"><a href="#fixed-3">Fixed</a></li>
-<li class="toc__item toc__item--level-3"><a href="#removed-2">Removed</a></li>
-<li class="toc__item toc__item--level-2"><a href="#2026-04-27">2026-04-27</a></li>
-<li class="toc__item toc__item--level-3"><a href="#changed-5">Changed</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-2">Changed</a></li>
+<li class="toc__item toc__item--level-2"><a href="#2026-05-03">2026-05-03</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-breaking-decision-log-reasons">Changed (breaking — decision-log reasons)</a></li>
+<li class="toc__item toc__item--level-2"><a href="#2026-05-02">2026-05-02</a></li>
 <li class="toc__item toc__item--level-3"><a href="#added-3">Added</a></li>
-<li class="toc__item toc__item--level-3"><a href="#fixed-4">Fixed</a></li>
-<li class="toc__item toc__item--level-3"><a href="#removed-3">Removed</a></li>
-<li class="toc__item toc__item--level-2"><a href="#2026-04-26">2026-04-26</a></li>
+<li class="toc__item toc__item--level-3"><a href="#removed">Removed</a></li>
+<li class="toc__item toc__item--level-2"><a href="#2026-05-01">2026-05-01</a></li>
 <li class="toc__item toc__item--level-3"><a href="#added-4">Added</a></li>
-<li class="toc__item toc__item--level-3"><a href="#changed-6">Changed</a></li>
-<li class="toc__item toc__item--level-3"><a href="#fixed-5">Fixed</a></li>
-<li class="toc__item toc__item--level-3"><a href="#hygiene-2">Hygiene</a></li>
-<li class="toc__item toc__item--level-2"><a href="#2026-04-25">2026-04-25</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-3">Changed</a></li>
+<li class="toc__item toc__item--level-3"><a href="#fixed">Fixed</a></li>
+<li class="toc__item toc__item--level-3"><a href="#hygiene">Hygiene</a></li>
+<li class="toc__item toc__item--level-2"><a href="#2026-04-30">2026-04-30</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-4">Changed</a></li>
+<li class="toc__item toc__item--level-2"><a href="#2026-04-29">2026-04-29</a></li>
 <li class="toc__item toc__item--level-3"><a href="#added-5">Added</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-5">Changed</a></li>
+<li class="toc__item toc__item--level-3"><a href="#fixed-2">Fixed</a></li>
+<li class="toc__item toc__item--level-3"><a href="#removed-2">Removed</a></li>
+<li class="toc__item toc__item--level-3"><a href="#hygiene-2">Hygiene</a></li>
+<li class="toc__item toc__item--level-2"><a href="#2026-04-28">2026-04-28</a></li>
+<li class="toc__item toc__item--level-3"><a href="#added-6">Added</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-6">Changed</a></li>
+<li class="toc__item toc__item--level-3"><a href="#fixed-3">Fixed</a></li>
+<li class="toc__item toc__item--level-3"><a href="#removed-3">Removed</a></li>
+<li class="toc__item toc__item--level-2"><a href="#2026-04-27">2026-04-27</a></li>
 <li class="toc__item toc__item--level-3"><a href="#changed-7">Changed</a></li>
+<li class="toc__item toc__item--level-3"><a href="#added-7">Added</a></li>
+<li class="toc__item toc__item--level-3"><a href="#fixed-4">Fixed</a></li>
+<li class="toc__item toc__item--level-3"><a href="#removed-4">Removed</a></li>
+<li class="toc__item toc__item--level-2"><a href="#2026-04-26">2026-04-26</a></li>
+<li class="toc__item toc__item--level-3"><a href="#added-8">Added</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-8">Changed</a></li>
+<li class="toc__item toc__item--level-3"><a href="#fixed-5">Fixed</a></li>
+<li class="toc__item toc__item--level-3"><a href="#hygiene-3">Hygiene</a></li>
+<li class="toc__item toc__item--level-2"><a href="#2026-04-25">2026-04-25</a></li>
+<li class="toc__item toc__item--level-3"><a href="#added-9">Added</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-9">Changed</a></li>
 <li class="toc__item toc__item--level-3"><a href="#fixed-6">Fixed</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-04-24">2026-04-24</a></li>
-<li class="toc__item toc__item--level-3"><a href="#added-6">Added</a></li>
+<li class="toc__item toc__item--level-3"><a href="#added-10">Added</a></li>
 <li class="toc__item toc__item--level-3"><a href="#fixed-7">Fixed</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-04-23">2026-04-23</a></li>
-<li class="toc__item toc__item--level-3"><a href="#added-7">Added</a></li>
+<li class="toc__item toc__item--level-3"><a href="#added-11">Added</a></li>
 <li class="toc__item toc__item--level-3"><a href="#fixed-8">Fixed</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-04-22">2026-04-22</a></li>
-<li class="toc__item toc__item--level-3"><a href="#added-8">Added</a></li>
+<li class="toc__item toc__item--level-3"><a href="#added-12">Added</a></li>
 <li class="toc__item toc__item--level-3"><a href="#fixed-9">Fixed</a></li>
 <li class="toc__item toc__item--level-3"><a href="#docs">Docs</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-04-21">2026-04-21</a></li>
-<li class="toc__item toc__item--level-3"><a href="#added-9">Added</a></li>
+<li class="toc__item toc__item--level-3"><a href="#added-13">Added</a></li>
   </ul>
 </section>
         <div class="prose">
-<h2 id="2026-05-01">2026-05-01</h2>
+<h2 id="2026-07-31-accesslog-off">2026-07-31 (accesslog=off)</h2>
+<h3 id="changed-log-off-becomes-accesslog-on-off">Changed — <code>log=off</code> becomes <code>accesslog=on|off</code></h3>
+<p>Renamed before it reached a release. Suppression is now its own key
+instead of a reserved value of <code>log=</code>:</p>
+<pre><code class="language-apache">BotShieldPathTrigger env-probe &quot;/.env&quot; status=403 \
+    log=scanner-probe accesslog=off
+</code></pre>
+<p>The clarity is the smaller reason. The real problem with the overload was
+that it made the two meanings <strong>mutually exclusive</strong> — a rule could name
+a fail2ban tag or suppress its access-log line, never both. That cost the
+tag on precisely the traffic most worth tagging, since a scanner probe
+usually wants both. Separate keys compose.</p>
+<p><code>log=off</code> is now rejected at config time with a message naming the
+replacement, rather than silently degrading to a tag literally spelled
+&quot;off&quot; and dropping suppression a config depended on. <code>log=</code> with an empty
+value is likewise an error now instead of setting an empty tag.</p>
+<p><code>accesslog=</code> accepts <code>on</code> (the default) or <code>off</code>; anything else is a
+config error. Added to the known-keys list of all six families that share
+the action-key parser, so an unknown-key diagnostic lists it.</p>
+<p>Struct field <code>suppress_log</code> renamed to <code>suppress_access_log</code> to match.</p>
+<p>Behavior is otherwise unchanged: suppression still breaks the
+<code>log_transaction</code> chain via <code>DONE</code>, still leaves <code>BotShieldDecisionLog</code>
+and the error-log line intact, and still never fires under
+<code>mode=observe</code> / <code>BotShieldEnabled LogOnly</code>.</p>
+<h2 id="2026-07-31-log-off">2026-07-31 (log=off)</h2>
+<h3 id="added-botshielddecisionlog-a-module-owned-decision-log">Added — <code>BotShieldDecisionLog</code>, a module-owned decision log</h3>
+<pre><code class="language-apache">BotShieldDecisionLog logs/botshield-decisions.log
+BotShieldDecisionLog &quot;|/usr/bin/rotatelogs /var/log/httpd/bs.%Y%m%d 86400&quot;
+</code></pre>
+<p>Written directly from <code>bs_decision_log</code> rather than through
+mod_log_config, which makes it independent of the access log. That is
+the point: <code>log=off</code> can suppress access logging for flood traffic while
+this log still records every decision, so a detection log can be
+rapid-rotated while the access log is archived on its own schedule.</p>
+<p>Reuses Apache's own plumbing rather than reinventing it —
+<code>ap_open_piped_log</code> / <code>ap_piped_log_write_fd</code> for <code>|program</code> specs (so
+<code>rotatelogs</code> works as it does for any Apache log), and
+<code>ap_server_root_relative</code> + <code>apr_file_open(WRITE|CREATE|APPEND)</code> for
+paths.</p>
+<ul>
+<li>One descriptor per vhost, opened at <code>post_config</code> before the children
+fork, so every worker inherits it.</li>
+<li>One <code>apr_file_write</code> of a pre-formatted line per decision, no
+request-path locking: lines are well under <code>PIPE_BUF</code>, so concurrent
+appends from separate processes do not interleave. Same guarantee
+mod_log_config relies on.</li>
+<li>An <code>O_APPEND</code> descriptor survives logrotate <code>copytruncate</code>. A
+move-and-create rotation would strand it until the next graceful
+restart — use a piped spec for that style.</li>
+<li><strong>Failure to open is fatal at startup.</strong> A decision log the operator
+asked for and did not get is a silent blind spot.</li>
+</ul>
+<p>Line shape is the same <code>key=value</code> payload as the error-log line, with
+an ISO-8601 UTC timestamp prepended and the User-Agent appended. There
+is deliberately no HTTP status field: this writes at decision time,
+before the response is finalized, so <code>r-&gt;status</code> is not yet the code the
+client receives (a block would log <code>200</code> while the handler goes on to
+return <code>403</code>). <code>outcome=</code> is authoritative and, unlike a status code,
+distinguishes <code>block</code> from <code>rate_limited</code> from <code>challenged</code>.</p>
+<p><code>bs_decision_log</code> was refactored to build its payload once and feed both
+sinks. The error-log line is byte-identical to before — the pytest
+framework parses decisions out of that file, so its shape is a contract.</p>
+<p>The <code>CustomLog</code> + <code>%{BS_*}e</code> route still works and remains the right
+choice for composing botshield fields into an existing format.</p>
+<h3 id="added-log-off-suppresses-access-logging-for-matching-requests">Added — <code>log=off</code> suppresses access logging for matching requests</h3>
+<p><code>log=</code> on the six trigger families that share the action-key parser
+(path, cookie, env, feedback, load, and the per-scope <code>BotShieldTrigger</code>)
+gains a reserved value:</p>
+<pre><code class="language-apache">BotShieldPathTrigger env-probe &quot;/.env&quot; status=403 log=off
+</code></pre>
+<p>A value still names a tag that rides the decision line as <code>tag=&quot;&lt;x&gt;&quot;</code>.
+The literal <code>off</code> instead suppresses <strong>all</strong> access logging for a
+matching request.</p>
+<p>Mechanism: <code>log_transaction</code> is a <code>RUN_ALL</code> hook declared with
+<code>(OK, DECLINED)</code>, so any other return value breaks the chain.
+<code>bs_propagate_decision_env</code> already sat on that hook at
+<code>APR_HOOK_FIRST</code> — ahead of mod_log_config — to re-publish <code>BS_*</code> env
+across internal redirects; it now also returns <code>DONE</code> when the trigger
+set the <code>BS_NOLOG</code> marker. No later logger formats or writes anything.</p>
+<p>Three properties operators should know:</p>
+<ul>
+<li><strong>All-or-nothing.</strong> mod_log_config services every <code>CustomLog</code>
+directive from one hook function, so there is no way to keep one log
+and starve another. <code>log=off</code> therefore discards this module's own
+decision-log line along with the access-log line. The error-log line
+from <code>bs_decision_log</code> is unaffected.</li>
+<li><strong>Third-party loggers are skipped too</strong> when their <code>log_transaction</code>
+hook is ordered after this module's.</li>
+<li><strong>Never fires under observe.</strong> The suppression is applied after the
+observe short-circuit in <code>bs_apply_trigger_action</code>, so <code>mode=observe</code>
+and <code>BotShieldEnabled LogOnly</code> always leave their evidence.</li>
+</ul>
+<p>To trim one specific log while keeping the others, use mod_log_config's
+own conditional form against the decision this module already publishes
+to the request environment, not <code>log=off</code>:</p>
+<pre><code class="language-apache">CustomLog logs/access.log combined &quot;expr=%{reqenv:BS_OUTCOME} != 'block'&quot;
+</code></pre>
+<p>Cost of the overload: a tag literally spelled <code>off</code> is now unreachable.
+Accepted, to keep one key for &quot;what happens to the log&quot; instead of two.</p>
+<p><code>BotShieldRateLimitEscalate</code> has its own arg parser and is unchanged —
+its <code>log=&lt;tag&gt;</code> still only names a tag.</p>
+<h2 id="2026-05-03-ratelimit-cohort-grammar-unification">2026-05-03 (RateLimit cohort-grammar unification)</h2>
+<h3 id="added-botshieldratelimit-accepts-key-value-form">Added — <code>BotShieldRateLimit</code> accepts key=value form</h3>
+<p><code>BotShieldRateLimit</code> now accepts a key=value form alongside the
+existing 5-arg positional form. Same cohort vocabulary as
+<code>BotShieldPathTrigger</code> (<code>ua=</code>, <code>ipspec=</code>), plus <code>budget=</code> / <code>per=</code>
+for the rate parameters and the existing <code>mode=enforce|observe</code>.</p>
+<pre><code class="language-apache"># NEW — key=value form
+BotShieldRateLimit api-burst budget=60 per=min ua=&quot;GPTBot&quot;
+BotShieldRateLimit ai-bots   budget=1  per=sec ua=@ai-train
+BotShieldRateLimit corp-only budget=100 per=min ipspec=10.0.0.0/8
+BotShieldRateLimit staging   budget=5  per=sec ua=&quot;X&quot; mode=observe
+
+# LEGACY — still works
+BotShieldRateLimit api-burst 60 min &quot;GPTBot&quot; * mode=observe
+</code></pre>
+<p>Form is detected by sniffing args — every arg after <code>&lt;name&gt;</code>
+contains <code>=</code> → new shape; any positional arg without <code>=</code> → legacy.
+No deprecation warning yet; soft migration. The runtime behavior
+is identical for either form.</p>
+<p>Defaults in the new form: omit <code>ua=</code> → match any UA; omit
+<code>ipspec=</code> → match any IP. Both omitted is rejected at config time
+(same both-<code>*</code> rejection as before — that would rate-limit every
+request on the server). Required: <code>budget=</code> and <code>per=</code>.</p>
+<p>This is the cohort vocabulary that <code>BotShieldPathTrigger</code> adopted
+in the BlockPath retirement; consolidating <code>BotShieldRateLimit</code>
+onto the same grammar means operators learn one cohort syntax for
+every directive that takes one.</p>
+<h2 id="2026-05-03-path-trigger-absorbs-block-path">2026-05-03 (path-trigger absorbs block-path)</h2>
+<h3 id="changed-botshieldblockpath-retired-cohort-gating-moves-into-botshieldpathtrigger">Changed — <code>BotShieldBlockPath</code> retired; cohort gating moves into <code>BotShieldPathTrigger</code></h3>
+<p><code>BotShieldPathTrigger</code> gains two new optional match keys, <code>ua=</code> and
+<code>ipspec=</code>, that AND with the path glob. Same cohort grammar as
+<code>BotShieldRateLimit</code> (UA substring, <code>@botgroup</code>, polymorphic ipspec).
+With those keys plus <code>status=4xx</code>, PathTrigger fully subsumes what
+<code>BotShieldBlockPath</code> used to do — and composes naturally with the
+other trigger action keys (<code>flag=</code>, <code>ttl=</code>, <code>redirect=</code>, <code>mode=</code>,
+<code>penalty=</code>, <code>log=</code>).</p>
+<p><code>BotShieldBlockPath</code> is removed. <strong>Breaking change</strong>, no soft-deprecate
+window. Configs that referenced it will fail at config-time with
+<code>unknown directive</code>.</p>
+<h4 id="migration">Migration</h4>
+<pre><code class="language-apache"># BEFORE
+BotShieldBlockPath legacy-admin &quot;/wp-admin/*&quot; &quot;&quot; *
+BotShieldBlockPath ai-pubs       &quot;/publications/*&quot; &quot;@ai-train&quot; *
+BotShieldBlockPath admin-locked  &quot;/admin&quot;          &quot;*&quot; &quot;10.0.0.0/8&quot;
+
+# AFTER
+BotShieldPathTrigger legacy-admin &quot;/wp-admin/*&quot; status=403
+BotShieldPathTrigger ai-pubs      &quot;/publications/*&quot; ua=@ai-train status=403
+BotShieldPathTrigger admin-locked &quot;/admin&quot;          ipspec=10.0.0.0/8 status=403
+</code></pre>
+<p>Convention: write match keys (<code>ua=</code>, <code>ipspec=</code>) before action keys
+(<code>status=</code>, <code>penalty=</code>, etc.). Parser doesn't enforce ordering, but
+operators reading a rule should be able to see at a glance where the
+&quot;who/where&quot; predicate ends and the &quot;what to do&quot; action begins.</p>
+<p>Defaults if you omit a match key:</p>
+<ul>
+<li>omit <code>ua=</code> → match any UA (same as <code>ua=*</code>)</li>
+<li>omit <code>ipspec=</code> → match any IP (same as <code>ipspec=*</code>)</li>
+<li>both omitted → no cohort gating, just path-glob (same as today's
+PathTrigger semantics)</li>
+</ul>
+<h4 id="metrics-retired">Metrics retired</h4>
+<ul>
+<li><code>botshield_block_path_hit_total</code> — gone. Path-triggers that fire
+with status=4xx don't have a per-family hit counter; the request
+outcome lands in the standard <code>decision_total{outcome}</code> and the
+decision log carries <code>path-trigger:&lt;name&gt;</code> in the reason chain.</li>
+<li><code>botshield_block_path_observed_total</code> — gone. Observe-mode path
+triggers bump the shared <code>botshield_trigger_observed_total</code> (which
+already covers cookie/env/load/path observe).</li>
+</ul>
+<p>Operators who scraped these counters should switch to
+<code>botshield_decision_total{outcome=&quot;block&quot;}</code> plus the decision-log
+reason tag.</p>
+<h4 id="botshield-policy-status"><code>/botshield/policy-status</code></h4>
+<p>The <code>## BotShieldBlockPath (directive)</code> section is removed. Cohort-
+scoped path rules now appear as PathTrigger entries (visible in the
+emitted directive list, future enhancement: render the cohort in the
+status page too).</p>
+<h4 id="reason-tag">Reason tag</h4>
+<p>A path-trigger fire emits <code>path-trigger:&lt;name&gt;</code> in the decision log
+(was: <code>block-path:&lt;name&gt;</code> for BlockPath). If you grep logs for
+<code>block-path:</code>, switch to <code>path-trigger:</code>.</p>
+<p>The <code>~block</code> would-outcome under <code>BotShieldEnabled LogOnly</code> continues
+to work — path triggers with <code>status&gt;=400</code> set it on the would-fire
+path the same way BlockPath did.</p>
+<h2 id="2026-05-03-botgroups">2026-05-03 (botgroups)</h2>
+<h3 id="added-botgroup-vocabulary-throughout">Added — botgroup vocabulary throughout</h3>
+<p>Adopt the names from the IETF aipref content-signal vocabulary
+(<code>search</code>, <code>ai-input</code>, <code>ai-train</code>) plus a mod_botshield extension
+<code>monitor</code> for operational crawler categories. Group membership is
+attached per directory entry at codegen time (mapped from category)
+and surfaced as a new selector <code>@&lt;botgroup&gt;</code> in three directives
+plus robots.txt.</p>
+<h4 id="directory-schema">Directory schema</h4>
+<p><code>bs_known_bot_entry</code> gains a <code>botgroup</code> field;
+<code>tools/gen-bot-directory.py</code> maps Cloudflare bot-directory categories
+to botgroups at codegen time:</p>
+<table>
+<thead>
+<tr>
+<th>bot-directory category</th>
+<th>botgroup</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>AI_CRAWLER</td>
+<td>ai-train</td>
+</tr>
+<tr>
+<td>AI_ASSISTANT, AI_SEARCH</td>
+<td>ai-input</td>
+</tr>
+<tr>
+<td>ACADEMIC_RESEARCH</td>
+<td>ai-train</td>
+</tr>
+<tr>
+<td>SEARCH_ENGINE_CRAWLER</td>
+<td>search</td>
+</tr>
+<tr>
+<td>SEARCH_ENGINE_OPTIMIZATION</td>
+<td>search</td>
+</tr>
+<tr>
+<td>PAGE_PREVIEW, ARCHIVER</td>
+<td>search</td>
+</tr>
+<tr>
+<td>MONITORING_AND_ANALYTICS</td>
+<td>monitor</td>
+</tr>
+<tr>
+<td>ACCESSIBILITY</td>
+<td>monitor</td>
+</tr>
+<tr>
+<td>(other)</td>
+<td>NULL</td>
+</tr>
+</tbody>
+</table>
+<p>Today's directory: 166 search, 135 monitor, 47 ai-train, 33 ai-input,
+250 NULL. Per-bot override via <code>vendor/bot-directory.local.json</code>
+with an explicit <code>botgroup</code> field. <code>bs_known_bots_resolve_by_botgroup</code>
+helper enumerates slugs by botgroup.</p>
+<p><code>bs_ua_class</code> gains a <code>known_botgroup</code> field, populated alongside
+<code>known_slug</code> and <code>known_category</code> at classification time so
+downstream code reads it once per request.</p>
+<h4 id="directive-botgroup-selector">Directive <code>@botgroup</code> selector</h4>
+<ul>
+<li><code>BotShieldBotRateLimit @search 1 sec</code> — rate-limit by botgroup.
+Per-slug allocation (each bot in the group gets its own counter
+at the entry's budget). Specific slug rules still win over
+@botgroup; @botgroup wins over <code>*</code> wildcard.</li>
+<li><code>BotShieldPathTrigger ai-train-pubs /publications/* ua=@ai-train status=403</code>
+— 403 when classified-as-ai-train hits the path. (Was previously
+expressed as <code>BotShieldBlockPath ai-train-pubs @ai-train * /publications/*</code>; see the path-trigger-absorbs-block-path entry
+above.)</li>
+<li><code>BotShieldRateLimit search-burst @search * 100 sec</code> — cohort
+rate limit by botgroup. Bonus side-effect of extending the shared
+cohort matcher.</li>
+</ul>
+<p>Cohort matcher (<code>bs_cohort_matches</code>) reads <code>cls-&gt;known_botgroup</code>
+directly — no per-request directory walk.</p>
+<h4 id="robots-txt-user-agent-botgroup">Robots.txt <code>User-agent: @botgroup</code></h4>
+<pre><code>User-agent: @ai-train
+Disallow: /publications/
+Crawl-delay: 3600
+</code></pre>
+<p>At parse time, <code>@</code>-prefixed User-agent stanzas are stored as-is.
+At query time, <code>robots_query</code> accepts a <code>botgroup</code> parameter
+(caller passes <code>cls-&gt;known_botgroup</code> from policy.c); <code>@botgroup</code>
+stanzas match when the request's classified botgroup equals the
+stanza value. Crawl-delay flows through bot_rate's slug-keyed
+machinery as before. Disallow rules apply the same way as
+UA-substring stanzas — same group qualifies, same path-rule
+longest-match-wins logic.</p>
+<p>Caveat — this is a server-side-only convention. Real-world
+scrapers reading the file see <code>@ai-train</code> and (correctly) ignore
+the stanza as not-applicable. For <em>publishing</em> preferences to
+AI companies that honor aipref, use the <code>Content-Signal:</code> HTTP
+header (separate feature, not yet implemented).</p>
+<h3 id="operator-facing-summary">Operator-facing summary</h3>
+<p>A coherent botgroup-aware policy:</p>
+<pre><code class="language-apache"># rate-limit by botgroup (per-slug allocation; each bot independent)
+BotShieldBotRateLimit @search    1 sec
+BotShieldBotRateLimit @ai-train  1 hour
+BotShieldBotRateLimit @ai-input  0          # admit all (effectively block via 0=admit)
+BotShieldBotRateLimit @monitor   5 sec
+
+# hard 403 by botgroup+path
+BotShieldPathTrigger ai-train-pubs /publications/* ua=@ai-train status=403
+
+# robots.txt declarative form (server-side enforcement only)
+User-agent: @ai-train
+Disallow: /publications/
+Crawl-delay: 3600
+</code></pre>
+<p>Specific slugs still override @botgroup (e.g.,
+<code>BotShieldBotRateLimit googlebot 0</code> excepts Googlebot from any
+@search rule). Operator workflow stays the same: write rules in
+order of specificity, the matcher picks the most-specific.</p>
+<h2 id="2026-05-03-latest">2026-05-03 (latest)</h2>
+<h3 id="added">Added</h3>
+<ul>
+<li>
+<p><code>BotShieldBotRateLimit</code> — three forms now, two new:</p>
+<pre><code class="language-apache">BotShieldBotRateLimit Off                       # NEW
+BotShieldBotRateLimit &lt;slug&gt; &lt;delay-sec&gt;        # NEW (Crawl-delay style)
+BotShieldBotRateLimit &lt;slug&gt; &lt;budget&gt; &lt;per&gt;     # original
+</code></pre>
+<ul>
+<li><code>Off</code> — disable post_config default synthesis. Specific entries
+(if any) still apply; just no automatic wildcard.</li>
+<li><code>&lt;slug&gt; &lt;delay&gt;</code> — 1 request per <code>&lt;delay&gt;</code> seconds. Matches
+robots.txt Crawl-delay convention. <code>0</code> admits all (per-slug
+opt-out sentinel).</li>
+</ul>
+</li>
+<li>
+<p>Default rate-limit synthesis. When <code>BotShieldEnabled On|LogOnly</code>
+is set and no operator <code>BotShieldBotRateLimit</code> directive was
+configured, post_config synthesizes <code>* 1 sec</code> automatically. Each
+directory slug gets its own counter at 1 req/sec — Crawl-delay-
+style, generous enough that well-behaved crawlers aren't
+affected, aggressive ones are throttled. Logs a NOTICE at
+startup so operators know it fired:</p>
+<pre><code>mod_botshield: BotShieldBotRateLimit default applied: * 1 sec
+</code></pre>
+<p>Operators wanting a different default: explicit
+<code>BotShieldBotRateLimit *</code> with their preferred budget.
+Operators wanting NO rate limit: <code>BotShieldBotRateLimit Off</code>.</p>
+</li>
+</ul>
 <h3 id="changed">Changed</h3>
 <ul>
+<li><code>bs_bot_rate_check</code> honors <code>BotShieldEnabled LogOnly</code> —
+over-budget hits log <code>bot-rate:&lt;slug&gt;:observe</code> +
+<code>~rate_limited</code> would-outcome instead of returning 429.
+Mirrors the directive rate-limit cohort path's observe handling.</li>
+</ul>
+<h2 id="2026-05-03-later">2026-05-03 (later)</h2>
+<h3 id="added-2">Added</h3>
+<ul>
+<li>
+<p><code>BotShieldBotRateLimit</code> directive — slug-keyed rate limit per known
+bot identity. Args: <code>&lt;slug-or-pattern-or-*&gt; &lt;budget&gt; &lt;per&gt;</code>.</p>
+<pre><code class="language-apache">BotShieldBotRateLimit googlebot 1000 min   # specific slug
+BotShieldBotRateLimit Google    5000 min   # pattern → all Google-family slugs share one budget
+BotShieldBotRateLimit *         200  min   # per-slug fallback
+</code></pre>
+<p>Slug-or-pattern resolves against the bot directory (substring
+match, case-insensitive). A pattern like <code>Google</code> covers every
+directory entry whose pattern contains &quot;Google&quot; — <code>googlebot</code>,
+<code>google-other</code>, <code>google-extended</code>, etc. — sharing <strong>one</strong> counter
+across the family. A specific slug like <code>googlebot</code> matches just
+that one entry.</p>
+<p><code>*</code> is the wildcard fallback — at post_config it pre-allocates
+one counter slot <strong>per directory slug</strong> that isn't covered by a
+specific rule. Each unmatched bot gets its own counter at the
+wildcard budget. This matches robots.txt's per-bot self-discipline
+semantic (each crawler reads the spec and obeys its own rate
+limit) without coordinating across bots. Two reserved aggregate
+slots additionally cap the <code>unknown-bot</code> and <code>fake-bot</code> labels
+(no stable slug; aggregate cap at the wildcard budget).</p>
+<p>Lookup at request time is one O(1) hash probe + one atomic CAS.
+Slot universe is bounded by the directory size (~640 today);
+pool size bumped to 2,048 (16 KB SHM) to leave headroom for
+directive rate limits, robots.txt groups, and directory growth.</p>
+<p>Over-budget responses: 429 + Retry-After + score+=50 +
+decision-log reason <code>bot-rate:&lt;slug&gt;</code>. Browser-classified UAs,
+unknown-ua, and empty-ua bypass the wildcard entirely (the rule
+applies to bots, not real users or unclassified clients).</p>
+<p>When <code>*</code> is configured, three reserved aggregate slots back the
+wildcard:</p>
+<ul>
+<li><code>unknown-bot</code> aggregate — caps requests with the
+heuristic-substring label (<code>bot</code>, <code>crawl</code>, <code>spider</code>, etc.) at
+the wildcard budget.</li>
+<li><code>fake-bot</code> aggregate — caps requests where the verified-bot
+pattern matched but the IP cross-check failed.</li>
+<li><code>wildcard-fallback</code> aggregate — catches &quot;classified-as-known/
+verified-bot but the slug isn't in the post_config slug map&quot;
+requests. This protects the gap between bot-directory updates
+arriving via watchdog refresh and the next graceful-restart
+(which would re-allocate per-slug counters at post_config).
+The actual slug name is preserved in the decision-log reason
+(<code>bot-rate:&lt;slug&gt;</code>), so the observability stays clean even
+while multiple unmapped slugs share one counter.</li>
+</ul>
+</li>
+</ul>
+<h3 id="changed-2">Changed</h3>
+<ul>
+<li>
+<p>Rate-counter SHM pool: <code>BS_E21_RATE_SLOTS</code> raised from 256 → 2048
+(16 KB total). Headroom for the bot-rate-limit per-slug pre-
+allocation plus existing directive rate limits and robots.txt
+Crawl-delay groups.</p>
+</li>
+<li>
+<p><strong>robots.txt Crawl-delay rekeyed onto the slug-keyed bot-rate
+machinery</strong> (formerly per-group-index slot pool at <code>policy.c:540</code>).
+Each robots.txt group's User-agent stanzas resolve at post_config
+to a slug set via the bot directory; the group's Crawl-delay
+becomes the slug entries' window. Both sources (directive +
+robots.txt) now feed one <code>slug → counter</code> map. Directive entries
+override robots.txt-derived ones on conflict (a config-time
+NOTICE flags overwrites).</p>
+<p>Operator-visible changes:</p>
+<ul>
+<li><strong>Decision-log reason rename</strong>: <code>robots-rate:&lt;group_name&gt;</code> →
+<code>bot-rate:&lt;slug&gt;</code>. Operators with grep/dashboard tooling on
+the old reason will need to update.</li>
+<li><strong>Robots.txt User-agent stanzas that don't resolve to a
+directory slug get no enforcement.</strong> Add matching entries to
+<code>vendor/bot-directory.local.json</code> if you want enforcement for
+a UA that isn't in the upstream directory.</li>
+<li><strong><code>BotShieldRateLimit</code> cohort matching no longer suppresses
+robots.txt Crawl-delay</strong> (the legacy <code>directive_rate_matched</code>
+short-circuit was retired). Cohort directives and bot-rate are
+now independent families that compose — whichever trips first
+short-circuits the policy walk. Operators wanting &quot;directive
+overrides robots.txt for this slug&quot; should use
+<code>BotShieldBotRateLimit &lt;slug&gt; &lt;budget&gt; &lt;per&gt;</code> directly, which
+overwrites the robots.txt-derived entry on the same slug.</li>
+</ul>
+</li>
+</ul>
+<h2 id="2026-05-03">2026-05-03</h2>
+<h3 id="changed-breaking-decision-log-reasons">Changed (breaking — decision-log reasons)</h3>
+<ul>
+<li>
+<p>Unified UA-classifier reason vocabulary in the decision log. Every
+request now gets <strong>exactly one UA-class tag</strong>:</p>
+<table>
+<thead>
+<tr>
+<th>classifier outcome</th>
+<th>reason</th>
+<th>score</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>UA matched + IP cross-checked + IP confirmed</td>
+<td><code>verified-bot:name</code></td>
+<td><code>BS_CREDIT_ALLOW</code></td>
+</tr>
+<tr>
+<td>UA matched + IP cross-checked + IP failed</td>
+<td><code>fake-bot:name</code></td>
+<td><code>BS_PENALTY_FAKE_BOT</code></td>
+</tr>
+<tr>
+<td>UA matched, no IP check ran (any reason)</td>
+<td><code>known-bot:name</code></td>
+<td>0</td>
+</tr>
+<tr>
+<td>directory match (only)</td>
+<td><code>known-bot:slug</code></td>
+<td>0</td>
+</tr>
+<tr>
+<td>unknown-bot heuristic substring</td>
+<td><code>unknown-bot:token</code></td>
+<td>0</td>
+</tr>
+<tr>
+<td>browser-template match</td>
+<td><code>browser:slug</code></td>
+<td>0</td>
+</tr>
+<tr>
+<td>UA present, no classifier signal</td>
+<td><code>unknown-ua</code></td>
+<td>0</td>
+</tr>
+<tr>
+<td>no <code>User-Agent</code> header</td>
+<td><code>empty-ua</code></td>
+<td>0</td>
+</tr>
+</tbody>
+</table>
+<p>Browser slugs identify the family from distinctive UA tokens:
+<code>chrome</code>, <code>chrome-mobile</code>, <code>chrome-ios</code>, <code>firefox</code>, <code>firefox-ios</code>,
+<code>edge</code>, <code>edge-mobile</code>, <code>edge-ios</code>, <code>safari</code>, <code>safari-mobile</code>,
+<code>opera</code>, <code>opera-ios</code>, <code>samsung</code>, <code>brave</code>, <code>duckduckgo</code>, <code>yandex</code>,
+<code>avg</code>, <code>avast</code>, <code>adguard</code>, <code>median</code>, <code>obsidian</code>, <code>scalboost</code>,
+<code>ios-webview</code>, plus a generic <code>browser</code> fallback when a template
+matched but no family token was recognized. Order of detection
+matters because Chromium derivatives carry <code>Chrome/</code> in their UA;
+the family-token check (<code>Edg/</code>, <code>OPR/</code>, <code>EdgA/</code>, <code>SamsungBrowser/</code>,
+<code>Brave</code>, etc.) wins before the bare-Chrome catch.</p>
+<p>Renames against the previous vocabulary:</p>
+<ul>
+<li><code>allow-bot:&lt;name&gt;</code> → <code>verified-bot:&lt;name&gt;</code> (now strictly means
+&quot;IP cross-check ran and confirmed&quot;).</li>
+<li><code>allow-bot-ua:&lt;name&gt;</code> → <code>known-bot:&lt;name&gt;</code> <strong>and the score
+drops to 0</strong> (see breaking-behavior note below).</li>
+<li><code>bot-unverified:&lt;name&gt;</code> → <code>known-bot:&lt;name&gt;</code> (score unchanged
+at 0; the diagnostic stays available via the
+<code>bot_unverified_total</code> Prometheus counter).</li>
+<li><code>fake-&lt;name&gt;</code> → <code>fake-bot:&lt;name&gt;</code> (consistent prefix).</li>
+</ul>
+<p>New tags emitted that weren't before: <code>unknown-bot:&lt;token&gt;</code>,
+<code>unknown-ua</code>, <code>empty-ua</code>. These give the absence-of-tag the
+unambiguous meaning &quot;browser-template match.&quot;</p>
+</li>
+<li>
+<p><strong>Behavior change for <code>BotShieldAllowBot * &lt;name&gt;</code> (UA-only mode):</strong>
+declarations using <code>*</code> (operator opts out of IP verification) no
+longer grant <code>BS_CREDIT_ALLOW</code> to the matched UA. They contribute
+the UA pattern to the known-bot pool — score 0, no automatic
+pass-tier credit. Verified-bot credit now requires a real IP
+cross-check. Operators who relied on UA-only auto-pass should
+add a <code>rangesPath</code> (or comma-separated CIDR list) so the IP
+cross-check can actually run.</p>
+</li>
+<li>
+<p><code>BotShieldClassify -verified-bots</code> semantics tightened to match.
+Previously, matched UAs were treated as &quot;UA-only verified&quot; and
+got <code>BS_CREDIT_ALLOW</code>. Now they degrade to <code>known-bot:&lt;name&gt;</code>
+with score 0 — neither verified-bot credit nor fake-bot penalty.
+Same fail-safe response to stale CIDR data, with the asymmetry
+removed.</p>
+<p>Operators with grep/dashboard tooling on the old reason names
+(<code>allow-bot:</code>, <code>allow-bot-ua:</code>, <code>bot-unverified:</code>, <code>fake-</code>)
+will need to update their patterns.</p>
+</li>
+</ul>
+<h2 id="2026-05-02">2026-05-02</h2>
+<h3 id="added-3">Added</h3>
+<ul>
+<li>
+<p><code>BotShieldClassify</code> directive — granular per-pass control for the
+unified UA classifier. Two grammars:</p>
+<pre><code>BotShieldClassify On|Off                     # standalone
+BotShieldClassify [All|None] [+/-flag]...    # compositional
+</code></pre>
+<p>Recognized flags: <code>browsers</code>, <code>known-bots</code>, <code>verified-bots</code>,
+<code>unknown-bots</code>. Default is all four passes enabled. Mixing
+standalone with deltas is a config-time error; use <code>All</code>/<code>None</code>
+for the compositional form.</p>
+<p>Each disabled pass has a deliberate fail-safe so the module
+degrades permissively instead of silently misclassifying:</p>
+<ul>
+<li><code>-browsers</code> — <code>bs_ua_is_crawler_candidate</code> returns 0 for all
+UAs (treat as browsers), so robots.txt wildcard rules don't
+punish real users when templates are stale.</li>
+<li><code>-known-bots</code> — AC directory walk skipped; no
+<code>known-bot:&lt;slug&gt;</code> log tag.</li>
+<li><code>-verified-bots</code> — UA-classifier match still runs; IP
+cross-check skipped; matched UAs degrade to
+<code>known-bot:&lt;name&gt;</code> with score 0 (neither verified-bot credit
+nor fake-bot penalty). The natural response to stale CIDR
+data without disabling verified-bot detection entirely.</li>
+<li><code>-unknown-bots</code> — heuristic substring scan skipped.</li>
+</ul>
+</li>
+<li>
+<p><code>vendor/verified-bots.json</code> — the bundled set of verified-bot
+built-ins (googlebot, bingbot, applebot, googleother, siteimprove)
+used to live as a hardcoded C array in <code>src/allowlist.c</code>. Moving
+it to a vendor JSON gains the same <code>.local</code>-overlay capability
+the bot-directory and browser-templates data sources already
+have, without any new module directive. Per-data-source layering
+is now consistent across the three:</p>
+<pre><code>bot-directory   — external upstream + .builtin + .local (4 layers)
+top-user-agents — same 4 layers
+verified-bots   — .json + .local (3 layers, no .builtin
+                  because no external upstream — we maintain
+                  the curated set ourselves)
+</code></pre>
+<p>Operators wanting to tune the set (disable <code>applebot</code>, add a
+custom bot, etc.) drop their changes into
+<code>vendor/verified-bots.local.json</code> (gitignored) and re-run
+<code>make build</code>.</p>
+</li>
+<li>
+<p>180-day data-source staleness check at <code>post_config</code>. stat()s
+every loaded runtime file (bot-directory TSV, browser-templates
+TXT, per-bot CIDR ranges) and emits a <code>NOTICE</code> per file older
+than 180 days, pointing operators at the matching refresh tool
+plus the <code>BotShieldClassify</code> flag that would gracefully degrade
+the affected pass. Hardcoded threshold — generous enough that
+healthy deployments never see the message; the harder lever
+(<code>BotShieldClassify</code>) stays the configurable surface.</p>
+</li>
+</ul>
+<h3 id="removed">Removed</h3>
+<ul>
+<li><code>BotShieldAllowVerifiedBots</code> directive. The verified-bot
+machinery is now activated by default (built-ins always load).
+Operators wanting &quot;verified-bot opt-in&quot; should use
+<code>BotShieldClassify -verified-bots</code> (skip the IP cross-check;
+matched UAs still get <code>allow-bot:</code> credit) or edit
+<code>vendor/verified-bots.local.json</code> to disable specific built-ins.
+Breaking change: existing configs containing the directive will
+fail with &quot;Invalid command&quot; until removed. The corresponding
+<code>bs_server_cfg.verified_bots_enabled</code> field and
+<code>bs_set_verified_bots</code> setter are gone too.</li>
+</ul>
+<h2 id="2026-05-01">2026-05-01</h2>
+<h3 id="added-4">Added</h3>
+<ul>
+<li>Vendored snapshot of the Cloudflare bot directory
+(<code>vendor/bot-directory.json</code>, ~600 entries) classifies known bots
+for robots.txt wildcard-rule application. Real browsers and
+custom apps bypass <code>User-agent: *</code> rules; entries matching the
+directory fall under wildcard policy. Codegenned into a static
+<code>bs_known_bots[]</code> table at build, optionally overridden by a
+TSV file at <code>BotShieldBotDirectory</code> and refreshed in-place via
+<code>tools/refresh-bot-directory.py</code> + a per-worker <code>mod_watchdog</code>
+tick (<code>BotShieldBotDirectoryRefreshInterval</code>, default 5 min).
+This is UA-only — <em>not</em> a trust authority. A scraper claiming
+<code>User-Agent: Googlebot/2.1</code> matches the directory and is
+classified as a bot, which is the desired outcome (subject to
+whatever wildcard policy applies). Real verification (UA token
+<ul>
+<li>IP-range cross-check) remains the verified-bot machinery.</li>
+</ul>
+</li>
+<li>Browser-templates UA classifier
+(<code>vendor/top-user-agents.json</code>, top-100 real-browser UAs from
+microlinkhq/top-user-agents, codegenned into
+<code>generated_browser_templates.c</code>). Used by
+<code>bs_ua_is_crawler_candidate</code> in policy.c to distinguish real-
+browser UAs from everything else when applying robots.txt
+<code>User-agent: *</code> rules. Runtime override via
+<code>BotShieldBrowserTemplates</code> + <code>BotShieldBrowserTemplatesRefreshInterval</code>,
+same atomic-swap + one-tick destroy-grace pattern as the bot
+directory.</li>
+<li><code>GoogleOther</code> to the built-in verified-bot allowlist
+(googlebot, bingbot, applebot, googleother, siteimprove). Closes
+a real coverage gap on help.hubzero.org where Google's research /
+experimental crawler family was matching no verified entry and
+getting challenged at silent tier despite being a legitimate
+Google crawler. UA token is the literal &quot;GoogleOther&quot; substring;
+IP ranges live in Google's <code>special-crawlers.json</code> (separate
+from Googlebot's <code>common-crawlers.json</code>) and are pulled into
+<code>/var/lib/botshield/bots/googleother.txt</code> by
+<code>tools/refresh-bot-ranges.sh</code>, now extended to cover both feeds.</li>
+<li>Live-reload of verified-bot CIDR files via per-vhost watchdog
+(<code>BotShieldAllowRangesRefreshInterval &lt;0..86400&gt;</code>, default 0 =
+disabled). On any mtime change to a canonical or sidecar file
+the module rebuilds the active range set in a private subpool
+and atomic-swaps it into place; the previously-active state is
+held one tick before destruction so in-flight readers can't
+deref freed memory. Per-worker (singleton=0) so each child
+picks up the change within one tick.</li>
+<li>Operator sidecar convention for verified-bot CIDRs:
+<code>&lt;canonical-base&gt;.local.txt</code> is co-loaded next to
+<code>&lt;base&gt;.txt</code> and concatenated into the active range set. The
+supported seam for adding custom enterprise-scanner IPs that
+aren't published in a vendor's public feed (e.g. dedicated
+Siteimprove enterprise scans contracted for one site) without
+fully redeclaring the bot via <code>BotShieldAllowBot</code> and without
+losing cron-driven canonical updates. Missing sidecar = no
+extras, malformed sidecar = hard error so operator typos
+surface.</li>
+</ul>
+<h3 id="changed-3">Changed</h3>
+<ul>
+<li>
+<p>Bot-directory request-time lookup switched from sequential
+<code>strcasestr</code> over the pattern array to Aho-Corasick. Single UA
+scan visits the trie at every position with O(|UA|) work
+regardless of pattern count; bench on real-traffic UAs shows
+~152× speedup against the sequential baseline. ~5500 trie nodes
+for the current ~600-entry directory, ~200 KB per worker
+steady-state, fully owned by APR pools (no malloc). Build at
+post_config and on every runtime-override refresh; failure path
+falls back to sequential <code>strcasestr</code> rather than failing the
+module load.</p>
+</li>
 <li>
 <p>Folded <code>BotShieldLogOnly</code> into <code>BotShieldEnabled</code> as a tri-state
 TAKE1 directive: <code>On</code> (enforce) / <code>Off</code> (disabled) / <code>LogOnly</code>
@@ -178,8 +882,20 @@ the original <code>allow</code> because that's what actually happened.
 Per-family <code>*_observed_total</code> counters continue to capture the
 staging-volume signal.</li>
 </ul>
+<h3 id="hygiene">Hygiene</h3>
+<ul>
+<li>Bench harness for the browser-templates UA classifier
+(<code>tools/bench-browser-classifier.c</code>) compares the custom
+classifier against a POSIX-regex equivalent built from the same
+template set. The custom path wins by ~19× on the test corpus,
+validating the choice not to lean on regex.</li>
+<li>Bench harness for the bot-directory lookup
+(<code>tools/bench-bot-directory.c</code>) compares sequential
+<code>strcasestr</code>, a first-byte bucket variant, and Aho-Corasick.
+AC wins ~152× over sequential, motivating the lookup switch.</li>
+</ul>
 <h2 id="2026-04-30">2026-04-30</h2>
-<h3 id="changed-2">Changed</h3>
+<h3 id="changed-4">Changed</h3>
 <ul>
 <li>Renamed <code>BotShieldShadowMode</code> → <code>BotShieldLogOnly</code> (directive,
 setter <code>bs_set_shadow_mode</code> → <code>bs_set_log_only</code>, server-cfg field
@@ -198,7 +914,7 @@ on a fresh vhost and watch what the module would do without any
 client seeing a challenge.</li>
 </ul>
 <h2 id="2026-04-29">2026-04-29</h2>
-<h3 id="added">Added</h3>
+<h3 id="added-5">Added</h3>
 <ul>
 <li><code>make test-clean</code> target — wipes pytest caches, reports,
 test-results, <code>.playwright-mcp/</code>, and <code>__pycache__/</code> trees.
@@ -216,7 +932,7 @@ WSL2 (ephemeral-port + worker-pool churn / empty histograms /
 HTTP/2-first throttling). Hits 1k/5k/10k RPS within 0.1% of
 target.</li>
 </ul>
-<h3 id="changed-3">Changed</h3>
+<h3 id="changed-5">Changed</h3>
 <ul>
 <li><code>bs_post_config</code> decomposed into 13 named phase helpers + 25-line
 orchestrator (911-line monolith → checklist; LTO inlines back so
@@ -243,7 +959,7 @@ triggers).</li>
 <li><code>bs_apply_rep_carry</code> docstring claimed flag-penalty floor that no
 longer existed.</li>
 </ul>
-<h3 id="removed">Removed</h3>
+<h3 id="removed-2">Removed</h3>
 <ul>
 <li>Nightly cron for 8 h soak + LibFuzzer (cookie + robots, 30 m
 each) — both moved to <code>workflow_dispatch</code> only.</li>
@@ -251,14 +967,14 @@ each) — both moved to <code>workflow_dispatch</code> only.</li>
 <li><code>REVIEWS.md</code> from repo (in-session tracking only).</li>
 <li><code>/testsite/</code> from <code>.gitignore</code>.</li>
 </ul>
-<h3 id="hygiene">Hygiene</h3>
+<h3 id="hygiene-2">Hygiene</h3>
 <ul>
 <li>Gitignore: <code>.hypothesis/</code>, <code>.claude/</code>, <code>.codex</code>,
 <code>.playwright-mcp/</code>, <code>.pytest_cache/</code> (anywhere), <code>.vscode/</code>.</li>
 </ul>
 <hr />
 <h2 id="2026-04-28">2026-04-28</h2>
-<h3 id="added-2">Added</h3>
+<h3 id="added-6">Added</h3>
 <ul>
 <li>Comparative benchmark suite at <code>tests/bench/</code> — 12 scenarios from
 baseline static-file through trigger-heavy / kitchen-sink config,
@@ -274,7 +990,7 @@ connection / saturation / fixed-rate framing.</li>
 <code>BotShieldFeedbackTrigger</code>.</li>
 <li><code>.editorconfig</code> for indent / line endings / trailing whitespace.</li>
 </ul>
-<h3 id="changed-4">Changed</h3>
+<h3 id="changed-6">Changed</h3>
 <ul>
 <li>File-split campaign continued (Phases 6–34): triggers, config
 (incl. directive-setter distribution), templates, formcaptcha,
@@ -298,14 +1014,14 @@ bytes/req sanity check.</li>
 <li><code>BotShieldShmSize</code> help text claimed wrong default.</li>
 <li>Security review batch (1 HIGH + 4 LOW/MED): assorted hardening.</li>
 </ul>
-<h3 id="removed-2">Removed</h3>
+<h3 id="removed-3">Removed</h3>
 <ul>
 <li>Stripped security-scan severity labels (HIGH/MED/LOW #N) from
 source comments — review-history archaeology, not code rationale.</li>
 </ul>
 <hr />
 <h2 id="2026-04-27">2026-04-27</h2>
-<h3 id="changed-5">Changed</h3>
+<h3 id="changed-7">Changed</h3>
 <ul>
 <li><strong>Cookie format: GCM-only on the wire.</strong> Retired the legacy
 HMAC-only envelope. The dual-format compat switch from E8.1
@@ -339,7 +1055,7 @@ predicate + rep math, then install-side helper.</li>
 <li>Build with <code>-fvisibility=hidden</code>; only <code>botshield_module</code> is
 exported.</li>
 </ul>
-<h3 id="added-3">Added</h3>
+<h3 id="added-7">Added</h3>
 <ul>
 <li><code>BotShieldCaptchaCABundle</code> directive (libcurl LOW finding).</li>
 <li>TLS pin + <code>CURLOPT_NOPROGRESS</code> on captcha siteverify.</li>
@@ -361,13 +1077,13 @@ APR's flag-based filter.</li>
 <li><code>test_secret_rotation</code> flake: NUL-free hex key in fixture.</li>
 <li>Memory-safety / lifecycle / race LOW batch.</li>
 </ul>
-<h3 id="removed-3">Removed</h3>
+<h3 id="removed-4">Removed</h3>
 <ul>
 <li>Bash test archive retired (paid off in M11.5).</li>
 </ul>
 <hr />
 <h2 id="2026-04-26">2026-04-26</h2>
-<h3 id="added-4">Added</h3>
+<h3 id="added-8">Added</h3>
 <ul>
 <li>Nonce SHM table for embedded-bootstrap one-time-use binding
 (security review MEDIUM #2 Phase 2). Closes replay-multiplier
@@ -382,7 +1098,7 @@ mismatches.</li>
 <li>Captcha-verify endpoint hardening (M8.1): pending cookie + per-IP
 rate limit + global in-flight semaphore.</li>
 </ul>
-<h3 id="changed-6">Changed</h3>
+<h3 id="changed-8">Changed</h3>
 <ul>
 <li>Cookie tokenizer rewritten + post_config restore + mutex split
 (HIGH #3, #4, #6).</li>
@@ -443,7 +1159,7 @@ now read prior cookie + carry forward via <code>bs_apply_rep_carry</code>.</li>
 one NUL; Set-Cookie <code>apr_table_set</code> clobbering prior rows. All
 six Set-Cookie write sites now use <code>apr_table_add</code>.</li>
 </ul>
-<h3 id="hygiene-2">Hygiene</h3>
+<h3 id="hygiene-3">Hygiene</h3>
 <ul>
 <li>LOW batch: passes_* clamp + connect-timeout directive + header
 pinning + relaxed atomic loads on probe paths + tests/run reads
@@ -452,7 +1168,7 @@ flag scoped to loopback.</li>
 </ul>
 <hr />
 <h2 id="2026-04-25">2026-04-25</h2>
-<h3 id="added-5">Added</h3>
+<h3 id="added-9">Added</h3>
 <ul>
 <li><strong>E10 — Challenge safeguard / anti-loop.</strong> After N challenges in
 window without solving, fall through to <code>DECLINED</code> with reason
@@ -486,7 +1202,7 @@ HTML forms; reuses M8 provider config; mints <code>_bs_verified</code> on
 success. <strong>E18.3</strong> JSON body support; <strong>E18.4</strong> form-widget
 shell at <code>/botshield/form-widget.js</code>.</li>
 </ul>
-<h3 id="changed-7">Changed</h3>
+<h3 id="changed-9">Changed</h3>
 <ul>
 <li>Resolved open questions #3 (forgiveness cap) and #5 (secret
 rotation); renamed in-source comments to E16 / E17; renumbered
@@ -507,7 +1223,7 @@ deferred).</li>
 </ul>
 <hr />
 <h2 id="2026-04-24">2026-04-24</h2>
-<h3 id="added-6">Added</h3>
+<h3 id="added-10">Added</h3>
 <ul>
 <li><strong>E4 — Cookie triggers.</strong> <code>BotShieldCookieTrigger &lt;name&gt; &lt;predicate&gt; &lt;action&gt;</code> matching on cookie presence / value /
 <code>_bs_verified</code>-state. Pass matches accumulate; first non-pass
@@ -541,7 +1257,7 @@ gate.</li>
 </ul>
 <hr />
 <h2 id="2026-04-23">2026-04-23</h2>
-<h3 id="added-7">Added</h3>
+<h3 id="added-11">Added</h3>
 <ul>
 <li><strong>E1 — Allow family / verified-bot policy.</strong> <code>BotShieldAllow on</code> + <code>BotShieldAllowBot &lt;name&gt; &lt;ua-pattern&gt; [path | inline-cidrs | *]</code>. Trie-based UA classifier; per-bot CIDR
 files. Built-ins for Googlebot, Bingbot, Applebot.</li>
@@ -588,7 +1304,7 @@ parsing.</li>
 <hr />
 <h2 id="2026-04-22">2026-04-22</h2>
 <p>The day everything basic shipped.</p>
-<h3 id="added-8">Added</h3>
+<h3 id="added-12">Added</h3>
 <ul>
 <li><strong>M2 — Signed-envelope verification protocol.</strong> Crypto helpers,
 PoW algorithm registry (<code>sha256-zeros</code> + reserved rows for
@@ -638,7 +1354,7 @@ hole.</li>
 </ul>
 <hr />
 <h2 id="2026-04-21">2026-04-21</h2>
-<h3 id="added-9">Added</h3>
+<h3 id="added-13">Added</h3>
 <ul>
 <li><strong>M0 — Skeleton.</strong> Module builds, loads, reads config.
 <code>BotShieldDebug On</code> returns 403 &quot;Hello World&quot; to prove the hook

@@ -14,9 +14,10 @@
  * slug not covered by a specific rule. Each unmatched bot gets its
  * own counter at the wildcard budget — matches robots.txt convention
  * (per-bot self-discipline) and bounds total slot use to the
- * directory size. The unknown-bot and fake-bot labels (no stable
- * slug) share two reserved aggregate slots, also at the wildcard
- * budget.
+ * directory size. Three reserved aggregate slots back the wildcard,
+ * also at its budget: unknown-bot and fake-bot (labels with no
+ * stable slug), plus wildcard-fallback for slugs a mid-run directory
+ * refresh added after the post_config snapshot.
  *
  * Lookup at request time: O(1) hash probe.
  *   1. cls->known_slug    → slug-table lookup

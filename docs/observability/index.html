@@ -43,7 +43,7 @@
 </a>
 <a class="docs-nav__item" href="../policy/index.html">
   <span class="docs-nav__title">Policy</span>
-  <span class="docs-nav__summary">Allow lists, rate limits, block paths, robots.txt, the trigger families, and flag triggers.</span>
+  <span class="docs-nav__summary">UA classification, rate limits, path triggers, robots.txt, the trigger families, and flag triggers.</span>
 </a>
 <a class="docs-nav__item" href="../captcha/index.html">
   <span class="docs-nav__title">Captcha and app-bridge</span>
@@ -59,7 +59,7 @@
 </a>
 <a class="docs-nav__item" href="../directives/index.html">
   <span class="docs-nav__title">Directive reference</span>
-  <span class="docs-nav__summary">Canonical reference for all 78 directives, grouped by family.</span>
+  <span class="docs-nav__summary">Canonical reference for all 85 directives, grouped by family.</span>
 </a>
 <a class="docs-nav__item" href="../troubleshooting/index.html">
   <span class="docs-nav__title">Troubleshooting</span>
@@ -91,6 +91,8 @@
   <h2 class="toc__heading">On this page</h2>
   <ul class="toc__list">
 <li class="toc__item toc__item--level-2"><a href="#decision-log">Decision log</a></li>
+<li class="toc__item toc__item--level-3"><a href="#where-the-decision-line-goes">Where the decision line goes</a></li>
+<li class="toc__item toc__item--level-3"><a href="#trimming-access-log-volume-without-losing-decisions">Trimming access-log volume without losing decisions</a></li>
 <li class="toc__item toc__item--level-3"><a href="#field-vocabulary">Field vocabulary</a></li>
 <li class="toc__item toc__item--level-3"><a href="#reason-name-vocabulary">Reason-name vocabulary</a></li>
 <li class="toc__item toc__item--level-3"><a href="#verbose-prose-line">Verbose prose line</a></li>
@@ -131,6 +133,65 @@ the <code>key=value</code> form; the prose lines are forensic detail.</p>
 <code>\</code> characters are URL-percent-encoded (<code>%22</code>, <code>%5C</code>) so an
 adversarial URI can't break log-parser tokenization. Browser
 traffic is unaffected — browsers already %-encode those bytes.</p>
+<h3 id="where-the-decision-line-goes">Where the decision line goes</h3>
+<p>There are three routes, and they are not equivalent.</p>
+<p><strong>1. The error log (always).</strong> The line above is written by
+<code>bs_decision_log</code> via <code>ap_log_rerror</code>, so it lands in whichever
+<code>ErrorLog</code> covers the request — a vhost's own <code>ErrorLog</code> if it defines
+one. This is the authoritative record: it needs no configuration, and
+<code>accesslog=off</code> does not suppress it. It is also what the pytest suite parses.
+The cost is Apache's <code>[timestamp] [:notice] [pid]</code> prefix, interleaving
+with every other message, and boring passes demoted to <code>debug</code>.</p>
+<p><strong>2. <code>BotShieldDecisionLog</code> (recommended for a dedicated file).</strong> A
+module-owned file, written at decision time:</p>
+<pre><code class="language-apache">BotShieldDecisionLog logs/botshield-decisions.log
+# or hand rotation to Apache's helper:
+BotShieldDecisionLog &quot;|/usr/bin/rotatelogs /var/log/httpd/bs.%Y%m%d 86400&quot;
+</code></pre>
+<p>Line shape — the same <code>key=value</code> payload as the error-log line, with an
+ISO-8601 UTC timestamp in front and the User-Agent appended:</p>
+<pre><code>2026-07-31T15:50:07.677Z tier=pass outcome=block ip=203.0.113.9 score=0
+    cookie=minted provider=- alg=- reason=&quot;env-trigger:login-trap:0&quot;
+    path=&quot;/login?return=...&quot; ua=&quot;Mozilla/5.0 ...&quot;
+</code></pre>
+<p>Because it is written by the module rather than mod_log_config, it is
+<strong>independent of the access log</strong> — which is the point: it survives
+<code>accesslog=off</code>, so you can keep flood traffic out of an archived access log
+while still recording every decision in a rapidly-rotated detection log.
+It also records boring passes at full fidelity, with no <code>LogLevel</code>
+change.</p>
+<p>There is deliberately <strong>no HTTP status field</strong>. This writes at decision
+time, before the response is finalized, so <code>r-&gt;status</code> is not yet the
+code the client receives — a block would log <code>200</code> while the handler
+goes on to return <code>403</code>. <code>outcome=</code> is the authoritative decision and,
+unlike a status code, distinguishes <code>block</code> from <code>rate_limited</code> from
+<code>challenged</code>.</p>
+<p>Operational notes: one descriptor per vhost, opened at <code>post_config</code>
+before the children fork, one <code>apr_file_write</code> per line with no
+request-path locking (lines are well under <code>PIPE_BUF</code>, so concurrent
+appends from multiple processes do not interleave — the same guarantee
+mod_log_config relies on). An <code>O_APPEND</code> descriptor survives logrotate's
+<code>copytruncate</code>; a move-and-create rotation would strand it until the next
+graceful restart, so use a piped spec if you want that style. If the log
+cannot be opened, <strong>startup fails</strong> — a decision log you asked for and
+did not get is a silent blind spot.</p>
+<p><strong>3. A <code>CustomLog</code> via mod_log_config (legacy).</strong> The module publishes
+every field to <code>subprocess_env</code> (<code>BS_TIER</code>, <code>BS_OUTCOME</code>, …) plus a
+<code>BOTSHIELD</code> marker, so a <code>CustomLog</code> can render them:</p>
+<pre><code class="language-apache">CustomLog logs/botshield-decisions.log botshield env=BOTSHIELD
+</code></pre>
+<p>Still supported, and the right choice if you want to compose botshield
+fields into an existing format. Two limitations: it cannot survive
+<code>accesslog=off</code> (mod_log_config serves every <code>CustomLog</code> from the one
+hook <code>accesslog=off</code> breaks), and it must be declared <strong>inside</strong> the vhost if that
+vhost defines its own <code>CustomLog</code> — mod_log_config's fallback semantics
+mean a server-scope declaration never fires for such a vhost, which is
+an easy way to end up with a silently empty decision log.</p>
+<h3 id="trimming-access-log-volume-without-losing-decisions">Trimming access-log volume without losing decisions</h3>
+<p>To thin one specific <code>CustomLog</code> while keeping the others, gate it on the
+decision rather than reaching for <code>accesslog=off</code>:</p>
+<pre><code class="language-apache">CustomLog logs/access.log combined &quot;expr=%{reqenv:BS_OUTCOME} != 'block'&quot;
+</code></pre>
 <h3 id="field-vocabulary">Field vocabulary</h3>
 <p>The set of values each field can take is fixed and validated at
 commit time by a small awk validator (<code>tests/scripts/decision-log- awk-validator.sh</code>).</p>
@@ -203,10 +264,6 @@ takes the shape <code>&lt;family&gt;:&lt;name&gt;</code> so the source family is
 <tr>
 <td><code>verified-&lt;name&gt;</code>, <code>fake-&lt;name&gt;</code>, <code>bot-unverified</code></td>
 <td>allow list</td>
-</tr>
-<tr>
-<td><code>block-path:&lt;name&gt;</code></td>
-<td>block-path</td>
 </tr>
 <tr>
 <td><code>rate-limit-exceeded:&lt;name&gt;</code></td>
@@ -378,24 +435,14 @@ WARNING). Drift is loud, not silent.</p>
 <td>Total rate-limit 429s</td>
 </tr>
 <tr>
-<td><code>botshield_block_path_hit_total</code></td>
-<td>counter</td>
-<td>Total block-path 403s</td>
-</tr>
-<tr>
 <td><code>botshield_rate_limit_observed_total</code></td>
 <td>counter</td>
 <td>Observe-mode rate-limit matches</td>
 </tr>
 <tr>
-<td><code>botshield_block_path_observed_total</code></td>
-<td>counter</td>
-<td>Observe-mode block-path matches</td>
-</tr>
-<tr>
 <td><code>botshield_trigger_observed_total</code></td>
 <td>counter</td>
-<td>Observe-mode trigger matches across families</td>
+<td>Observe-mode trigger matches across families (path/cookie/env/load/scope)</td>
 </tr>
 </tbody>
 </table>
@@ -493,9 +540,9 @@ metrics endpoint and decision log still cover everything.</p>
 <h2 id="policy-status-admin-page">Policy-status admin page</h2>
 <p><code>&lt;prefix&gt;/policy-status</code> (default <code>/botshield/policy-status</code>) is a
 plain-text dump of the rules currently being enforced — directive
-rate-limits, directive block-paths, and robots.txt-derived groups.
-Reads the same scfg fields <code>bs_check_policy</code> walks at request time,
-so it's authoritative.</p>
+rate-limits and robots.txt-derived groups. Reads the same scfg
+fields <code>bs_check_policy</code> walks at request time, so it's
+authoritative.</p>
 <pre><code>$ curl -s http://localhost/botshield/policy-status
 mod_botshield policy at request time
 ====================================

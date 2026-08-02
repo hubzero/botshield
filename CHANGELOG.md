@@ -1,5 +1,135 @@
 # Changelog
 
+## 2026-07-31 (accesslog=off)
+
+### Changed — `log=off` becomes `accesslog=on|off`
+
+Renamed before it reached a release. Suppression is now its own key
+instead of a reserved value of `log=`:
+
+```apache
+BotShieldPathTrigger env-probe "/.env" status=403 \
+    log=scanner-probe accesslog=off
+```
+
+The clarity is the smaller reason. The real problem with the overload was
+that it made the two meanings **mutually exclusive** — a rule could name
+a fail2ban tag or suppress its access-log line, never both. That cost the
+tag on precisely the traffic most worth tagging, since a scanner probe
+usually wants both. Separate keys compose.
+
+`log=off` is now rejected at config time with a message naming the
+replacement, rather than silently degrading to a tag literally spelled
+"off" and dropping suppression a config depended on. `log=` with an empty
+value is likewise an error now instead of setting an empty tag.
+
+`accesslog=` accepts `on` (the default) or `off`; anything else is a
+config error. Added to the known-keys list of all six families that share
+the action-key parser, so an unknown-key diagnostic lists it.
+
+Struct field `suppress_log` renamed to `suppress_access_log` to match.
+
+Behavior is otherwise unchanged: suppression still breaks the
+`log_transaction` chain via `DONE`, still leaves `BotShieldDecisionLog`
+and the error-log line intact, and still never fires under
+`mode=observe` / `BotShieldEnabled LogOnly`.
+
+## 2026-07-31 (log=off)
+
+### Added — `BotShieldDecisionLog`, a module-owned decision log
+
+```apache
+BotShieldDecisionLog logs/botshield-decisions.log
+BotShieldDecisionLog "|/usr/bin/rotatelogs /var/log/httpd/bs.%Y%m%d 86400"
+```
+
+Written directly from `bs_decision_log` rather than through
+mod_log_config, which makes it independent of the access log. That is
+the point: `log=off` can suppress access logging for flood traffic while
+this log still records every decision, so a detection log can be
+rapid-rotated while the access log is archived on its own schedule.
+
+Reuses Apache's own plumbing rather than reinventing it —
+`ap_open_piped_log` / `ap_piped_log_write_fd` for `|program` specs (so
+`rotatelogs` works as it does for any Apache log), and
+`ap_server_root_relative` + `apr_file_open(WRITE|CREATE|APPEND)` for
+paths.
+
+- One descriptor per vhost, opened at `post_config` before the children
+  fork, so every worker inherits it.
+- One `apr_file_write` of a pre-formatted line per decision, no
+  request-path locking: lines are well under `PIPE_BUF`, so concurrent
+  appends from separate processes do not interleave. Same guarantee
+  mod_log_config relies on.
+- An `O_APPEND` descriptor survives logrotate `copytruncate`. A
+  move-and-create rotation would strand it until the next graceful
+  restart — use a piped spec for that style.
+- **Failure to open is fatal at startup.** A decision log the operator
+  asked for and did not get is a silent blind spot.
+
+Line shape is the same `key=value` payload as the error-log line, with
+an ISO-8601 UTC timestamp prepended and the User-Agent appended. There
+is deliberately no HTTP status field: this writes at decision time,
+before the response is finalized, so `r->status` is not yet the code the
+client receives (a block would log `200` while the handler goes on to
+return `403`). `outcome=` is authoritative and, unlike a status code,
+distinguishes `block` from `rate_limited` from `challenged`.
+
+`bs_decision_log` was refactored to build its payload once and feed both
+sinks. The error-log line is byte-identical to before — the pytest
+framework parses decisions out of that file, so its shape is a contract.
+
+The `CustomLog` + `%{BS_*}e` route still works and remains the right
+choice for composing botshield fields into an existing format.
+
+### Added — `log=off` suppresses access logging for matching requests
+
+`log=` on the six trigger families that share the action-key parser
+(path, cookie, env, feedback, load, and the per-scope `BotShieldTrigger`)
+gains a reserved value:
+
+```apache
+BotShieldPathTrigger env-probe "/.env" status=403 log=off
+```
+
+A value still names a tag that rides the decision line as `tag="<x>"`.
+The literal `off` instead suppresses **all** access logging for a
+matching request.
+
+Mechanism: `log_transaction` is a `RUN_ALL` hook declared with
+`(OK, DECLINED)`, so any other return value breaks the chain.
+`bs_propagate_decision_env` already sat on that hook at
+`APR_HOOK_FIRST` — ahead of mod_log_config — to re-publish `BS_*` env
+across internal redirects; it now also returns `DONE` when the trigger
+set the `BS_NOLOG` marker. No later logger formats or writes anything.
+
+Three properties operators should know:
+
+- **All-or-nothing.** mod_log_config services every `CustomLog`
+  directive from one hook function, so there is no way to keep one log
+  and starve another. `log=off` therefore discards this module's own
+  decision-log line along with the access-log line. The error-log line
+  from `bs_decision_log` is unaffected.
+- **Third-party loggers are skipped too** when their `log_transaction`
+  hook is ordered after this module's.
+- **Never fires under observe.** The suppression is applied after the
+  observe short-circuit in `bs_apply_trigger_action`, so `mode=observe`
+  and `BotShieldEnabled LogOnly` always leave their evidence.
+
+To trim one specific log while keeping the others, use mod_log_config's
+own conditional form against the decision this module already publishes
+to the request environment, not `log=off`:
+
+```apache
+CustomLog logs/access.log combined "expr=%{reqenv:BS_OUTCOME} != 'block'"
+```
+
+Cost of the overload: a tag literally spelled `off` is now unreachable.
+Accepted, to keep one key for "what happens to the log" instead of two.
+
+`BotShieldRateLimitEscalate` has its own arg parser and is unchanged —
+its `log=<tag>` still only names a tag.
+
 ## 2026-05-03 (RateLimit cohort-grammar unification)
 
 ### Added — `BotShieldRateLimit` accepts key=value form

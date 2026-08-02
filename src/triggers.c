@@ -193,20 +193,20 @@ static const char *bs_trigger_known_keys(bs_trigger_family fam)
 {
     switch (fam) {
     case BS_TFAMILY_PATH:
-        return "status, redirect, log, flag, ttl, penalty, mode";
+        return "status, redirect, log, accesslog, flag, ttl, penalty, mode";
     case BS_TFAMILY_COOKIE:
-        return "status, redirect, log, flag, ttl, penalty, credit, mode";
+        return "status, redirect, log, accesslog, flag, ttl, penalty, credit, mode";
     case BS_TFAMILY_ENV:
-        return "status, log, flag, ttl, penalty, credit, mode";
+        return "status, log, accesslog, flag, ttl, penalty, credit, mode";
     case BS_TFAMILY_FEEDBACK:
         /* mode=observe means "log :observe but skip the flagged-IP
          * write" — meaningful for staging a feedback rule before
          * mutating server state. */
-        return "flag, ttl, log, mode";
+        return "flag, ttl, log, accesslog, mode";
     case BS_TFAMILY_LOAD:
-        return "status, log, penalty, credit, mode";
+        return "status, log, accesslog, penalty, credit, mode";
     case BS_TFAMILY_SCOPE:
-        return "status, redirect, log, flag, ttl, penalty, credit, mode";
+        return "status, redirect, log, accesslog, flag, ttl, penalty, credit, mode";
     case BS_TFAMILY_FLAG:
         /* Flag triggers use a separate parser. This entry exists
          * for switch-exhaustiveness; the flag setter prints its
@@ -290,7 +290,39 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
         }
         a->redirect_url = apr_pstrdup(pool, val);
     } else if (BS_AK("log")) {
+        if (!*val) {
+            return apr_psprintf(pool,
+                "%s: log= requires a tag", dname);
+        }
+        /* Reject the shape that briefly meant "suppress" during
+         * development. Silently treating it as a tag named "off" would
+         * strip suppression from a config that depended on it; failing
+         * loudly costs nothing and names the replacement. */
+        if (strcasecmp(val, "off") == 0) {
+            return apr_psprintf(pool,
+                "%s: log=off is not a tag and no longer suppresses "
+                "logging - use accesslog=off, which composes with "
+                "log=<tag> so a rule can carry a fail2ban tag AND "
+                "keep its request out of the access log", dname);
+        }
         a->log_tag = apr_pstrdup(pool, val);
+    } else if (BS_AK("accesslog")) {
+        /* Independent of log= on purpose: the canonical use is a
+         * scanner probe that wants BOTH a tag for fail2ban handoff and
+         * no access-log line. Overloading log= made those mutually
+         * exclusive, which cost the tag on exactly the traffic most
+         * worth tagging. */
+        if (strcasecmp(val, "off") == 0) {
+            a->suppress_access_log = 1;
+        } else if (strcasecmp(val, "on") == 0) {
+            a->suppress_access_log = 0;
+        } else {
+            return apr_psprintf(pool,
+                "%s: accesslog=%s must be 'on' or 'off' ('off' drops "
+                "the access-log line for a matching request; the "
+                "module's own decision record is unaffected)",
+                dname, val);
+        }
     } else if (BS_AK("flag")) {
         if (fam == BS_TFAMILY_LOAD) {
             return apr_psprintf(pool,
@@ -472,6 +504,12 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
         }
     }
     bs_set_trigger_tag(r, a->log_tag);
+
+    /* accesslog=off. Deliberately placed after the observe short-circuit
+     * above, so a dry run still leaves its evidence in the log. */
+    if (a->suppress_access_log) {
+        bs_suppress_access_log(r);
+    }
 
     int is_pass = (a->status_code == BS_TRIGGER_STATUS_PASS);
 
@@ -661,7 +699,7 @@ const char *bs_set_session_cookie_name(cmd_parms *cmd, void *dconf,
  * Parses the cookie-match predicate (see CHANGELOG.md E4 for the full
  * predicate grammar) and the action keys, enforces cross-
  * validation (status=pass + redirect= is a config error;
- * _bs_verified as cookie=name is redirected to bs-cookie=<state>),
+ * _bs_session as cookie=name is redirected to bs-cookie=<state>),
  * and upserts by name. See bs_path_trigger_entry for the action-key
  * semantics shared with E3; the semantic divergences are:
  *

@@ -85,7 +85,7 @@ extern "C" {
 #define BS_WIDGET_MARKER      "<!-- BOTSHIELD -->"
 
 /* E4 — BotShield-cookie-state note. Set by bs_handler after the
- * `_bs_verified` verification pass so the cookie-trigger predicate
+ * `_bs_session` verification pass so the cookie-trigger predicate
  * matcher (and other consumers) can surface the verdict without
  * re-running the HMAC check. Values: "verified" / "missing" /
  * "invalid". */
@@ -413,6 +413,16 @@ typedef struct bs_server_cfg {
      * the struct definition + lifecycle. NULL when no rules are
      * configured for this vhost. */
     struct bs_bot_rate_state *bot_rate_state;
+
+    /* Module-owned decision log (BotShieldDecisionLog). Written
+     * directly from bs_decision_log at decision time, so it does not
+     * depend on mod_log_config and survives `accesslog=off`. `path` is the
+     * operator string ("logs/x.log", "/abs/path", or "|program");
+     * `fd` is opened once at post_config and inherited by every child.
+     * Both NULL when the directive is absent — the operator is then
+     * relying on the error log and/or their own CustomLog. */
+    const char         *decision_log_path;
+    apr_file_t         *decision_log_fd;
 } bs_server_cfg;
 
 /* Trigger and policy family types (bs_trigger_*, bs_*_trigger_entry,

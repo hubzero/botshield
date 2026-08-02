@@ -1238,11 +1238,11 @@ static const char *bs_sanitize_return_to(const char *s)
  * surface shrinks from "anyone with a TCP connection" to "rate of
  * legitimate captcha presentations" — a much smaller number.
  *
- * Why this is a separate cookie from _bs_verified, not state inside it:
- *   - _bs_verified           Path=/, hour-scale TTL, sent every request
+ * Why this is a separate cookie from _bs_session, not state inside it:
+ *   - _bs_session           Path=/, hour-scale TTL, sent every request
  *   - _bs_captcha_pending    Path=<prefix>/captcha-verify, 5-min TTL,
  *                            sent only at the verify endpoint
- * Folding pending-state into _bs_verified would either mix state-
+ * Folding pending-state into _bs_session would either mix state-
  * machine concerns into the long-lived trust cookie or carry pending
  * state on every request — both worse than the current split. */
 #define BS_PENDING_COOKIE_NAME  "_bs_captcha_pending"
@@ -1356,7 +1356,7 @@ static const char *bs_verify_pending_cookie(request_rec *r,
          * with an in-flight pending cookie (TTL 300s) would 403 on
          * captcha submit if we only checked the primary key — even
          * though the secondary key would validate. Same retry
-         * pattern as the _bs_verified and embedded-verify paths. */
+         * pattern as the _bs_session and embedded-verify paths. */
         if (!cfg->derived_keys_set_2) return "sig mismatch";
         bs_hmac_sha256(cfg->derived_hmac_pending_2, 32,
                        (const unsigned char *)canon, strlen(canon),
@@ -1385,7 +1385,7 @@ const char *bs_clear_pending_cookie(request_rec *r,
 }
 
 /* See captcha.h for the contract. Single-source-of-truth for
- * "successful provider verify → mint a fresh _bs_verified". The
+ * "successful provider verify → mint a fresh _bs_session". The
  * three call sites (captcha verify handler, embedded-verify-provider,
  * form-captcha fixup) used to maintain this in lockstep; both the
  * forgive-cap regression caught in E15 and the fresh-rep regression

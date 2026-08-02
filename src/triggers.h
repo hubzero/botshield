@@ -88,6 +88,13 @@ typedef struct {
     int           credit;         /* 0..1000 (rejected on path family) */
     int           status_explicit; /* 1 if operator wrote status= */
     int           mode;           /* bs_trigger_mode */
+    /* accesslog=off — suppress the access-log line for a matching
+     * request by breaking the log_transaction hook chain. Independent
+     * of log_tag: a rule can carry a fail2ban tag AND keep its request
+     * out of the access log, which is the usual want for scanner
+     * probes. The module's own decision record is unaffected. See
+     * bs_suppress_access_log in metrics.h for what it costs. */
+    int           suppress_access_log;
 } bs_trigger_action;
 
 /* ======================================================================

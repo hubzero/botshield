@@ -34,6 +34,85 @@ LogLevel botshield_module:info
 adversarial URI can't break log-parser tokenization. Browser
 traffic is unaffected — browsers already %-encode those bytes.
 
+### Where the decision line goes
+
+There are three routes, and they are not equivalent.
+
+**1. The error log (always).** The line above is written by
+`bs_decision_log` via `ap_log_rerror`, so it lands in whichever
+`ErrorLog` covers the request — a vhost's own `ErrorLog` if it defines
+one. This is the authoritative record: it needs no configuration, and
+`accesslog=off` does not suppress it. It is also what the pytest suite parses.
+The cost is Apache's `[timestamp] [:notice] [pid]` prefix, interleaving
+with every other message, and boring passes demoted to `debug`.
+
+**2. `BotShieldDecisionLog` (recommended for a dedicated file).** A
+module-owned file, written at decision time:
+
+```apache
+BotShieldDecisionLog logs/botshield-decisions.log
+# or hand rotation to Apache's helper:
+BotShieldDecisionLog "|/usr/bin/rotatelogs /var/log/httpd/bs.%Y%m%d 86400"
+```
+
+Line shape — the same `key=value` payload as the error-log line, with an
+ISO-8601 UTC timestamp in front and the User-Agent appended:
+
+```
+2026-07-31T15:50:07.677Z tier=pass outcome=block ip=203.0.113.9 score=0
+    cookie=minted provider=- alg=- reason="env-trigger:login-trap:0"
+    path="/login?return=..." ua="Mozilla/5.0 ..."
+```
+
+Because it is written by the module rather than mod_log_config, it is
+**independent of the access log** — which is the point: it survives
+`accesslog=off`, so you can keep flood traffic out of an archived access log
+while still recording every decision in a rapidly-rotated detection log.
+It also records boring passes at full fidelity, with no `LogLevel`
+change.
+
+There is deliberately **no HTTP status field**. This writes at decision
+time, before the response is finalized, so `r->status` is not yet the
+code the client receives — a block would log `200` while the handler
+goes on to return `403`. `outcome=` is the authoritative decision and,
+unlike a status code, distinguishes `block` from `rate_limited` from
+`challenged`.
+
+Operational notes: one descriptor per vhost, opened at `post_config`
+before the children fork, one `apr_file_write` per line with no
+request-path locking (lines are well under `PIPE_BUF`, so concurrent
+appends from multiple processes do not interleave — the same guarantee
+mod_log_config relies on). An `O_APPEND` descriptor survives logrotate's
+`copytruncate`; a move-and-create rotation would strand it until the next
+graceful restart, so use a piped spec if you want that style. If the log
+cannot be opened, **startup fails** — a decision log you asked for and
+did not get is a silent blind spot.
+
+**3. A `CustomLog` via mod_log_config (legacy).** The module publishes
+every field to `subprocess_env` (`BS_TIER`, `BS_OUTCOME`, …) plus a
+`BOTSHIELD` marker, so a `CustomLog` can render them:
+
+```apache
+CustomLog logs/botshield-decisions.log botshield env=BOTSHIELD
+```
+
+Still supported, and the right choice if you want to compose botshield
+fields into an existing format. Two limitations: it cannot survive
+`accesslog=off` (mod_log_config serves every `CustomLog` from the one
+hook `accesslog=off` breaks), and it must be declared **inside** the vhost if that
+vhost defines its own `CustomLog` — mod_log_config's fallback semantics
+mean a server-scope declaration never fires for such a vhost, which is
+an easy way to end up with a silently empty decision log.
+
+### Trimming access-log volume without losing decisions
+
+To thin one specific `CustomLog` while keeping the others, gate it on the
+decision rather than reaching for `accesslog=off`:
+
+```apache
+CustomLog logs/access.log combined "expr=%{reqenv:BS_OUTCOME} != 'block'"
+```
+
 ### Field vocabulary
 
 The set of values each field can take is fixed and validated at

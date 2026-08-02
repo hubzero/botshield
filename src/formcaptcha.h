@@ -5,7 +5,7 @@
  * fixup hook reads the request body (url-encoded or JSON), extracts
  * the configured captcha provider's response field, calls
  * siteverify, and either:
- *   - mints _bs_verified, installs an input replay filter so the
+ *   - mints _bs_session, installs an input replay filter so the
  *     downstream app handler still sees the original body, returns
  *     DECLINED → app's handler runs normally
  *   - returns 403 → app's handler never sees the bad request

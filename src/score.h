@@ -71,7 +71,7 @@ typedef enum {
  * to a wrapper script the operator has already included on the page;
  * the page serves DECLINED (real content) and the wrapper does the
  * PoW in a Web Worker, then POSTs back to /botshield/embedded-verify
- * to mint _bs_verified. */
+ * to mint _bs_session. */
 typedef enum {
     BS_SILENT_MODE_UNSET        = -1,
     BS_SILENT_MODE_INTERSTITIAL =  0,

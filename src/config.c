@@ -297,6 +297,13 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
     if (!add->app_feedback_header && base->app_feedback_header) {
         out->app_feedback_header = base->app_feedback_header;
     }
+    /* Inherit the decision-log path, but never the open fd: each vhost
+     * that resolves to a path gets its own descriptor at post_config,
+     * so two vhosts sharing a path still each hold an O_APPEND fd
+     * rather than aliasing one struct. */
+    if (!add->decision_log_path && base->decision_log_path) {
+        out->decision_log_path = base->decision_log_path;
+    }
     if (add->app_claims_enabled == BS_APP_FEEDBACK_UNSET) {
         out->app_claims_enabled = base->app_claims_enabled;
     }
@@ -420,6 +427,9 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->app_integration_secret_file = NULL;
     scfg->app_integration_secret      = NULL;
     scfg->app_integration_secret_len  = 0;
+    /* Module-owned decision log — opened in post_config, not here. */
+    scfg->decision_log_path           = NULL;
+    scfg->decision_log_fd             = NULL;
     return scfg;
 }
 
@@ -2318,6 +2328,12 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     rv = bs_init_shm_layout(pconf, ptemp, s, scfg);
     if (rv != OK) return rv;
 
+    /* Owned decision logs: opened here, as root and before the child
+     * processes fork, so every worker inherits the descriptor. Fatal on
+     * failure — see bs_open_decision_logs. */
+    rv = bs_open_decision_logs(pconf, s);
+    if (rv != OK) return rv;
+
     bs_init_state_persistence(pconf, s, scfg);
     bs_populate_auto_secret(pconf, ptemp, s);
     bs_populate_default_algorithm(s);
@@ -2492,7 +2508,7 @@ const char *bs_set_forgive_captcha(cmd_parms *cmd, void *cfg_v, const char *arg)
  * form captcha verification on POST submit. When on, BotShield
  * inspects the request body for the configured captcha provider's
  * response field, siteverifies via the existing M8 client, mints
- * _bs_verified on success, and replays the body back via input
+ * _bs_session on success, and replays the body back via input
  * filter so the downstream app handler still sees its original
  * POST. Supports application/x-www-form-urlencoded and
  * application/json. multipart/form-data (file uploads) is out of
