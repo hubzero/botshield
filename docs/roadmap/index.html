@@ -90,6 +90,9 @@
 <section class="toc">
   <h2 class="toc__heading">On this page</h2>
   <ul class="toc__list">
+<li class="toc__item toc__item--level-2"><a href="#2026-08-02-heuristic-weights-become-defaults-one-source-for-them">2026-08-02 (heuristic weights become defaults; one source for them)</a></li>
+<li class="toc__item toc__item--level-3"><a href="#changed-scraper-ua-50-10-missing-al-15-5">Changed — `scraper-ua` 50 -&gt; 10, `missing-al` 15 -&gt; 5</a></li>
+<li class="toc__item toc__item--level-3"><a href="#fixed-the-weights-were-declared-in-three-places">Fixed — the weights were declared in three places</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-08-02-browser-classification-covers-real-mobile-devices">2026-08-02 (browser classification covers real mobile devices)</a></li>
 <li class="toc__item toc__item--level-3"><a href="#fixed-real-phones-classified-as-unknown-ua">Fixed — real phones classified as `unknown-ua`</a></li>
 <li class="toc__item toc__item--level-3"><a href="#also-vendor-top-user-agents-json-refreshed">Also — `vendor/top-user-agents.json` refreshed</a></li>
@@ -210,6 +213,33 @@
   </ul>
 </section>
         <div class="prose">
+<h2 id="2026-08-02-heuristic-weights-become-defaults-one-source-for-them">2026-08-02 (heuristic weights become defaults; one source for them)</h2>
+<h3 id="changed-scraper-ua-50-10-missing-al-15-5">Changed — <code>scraper-ua</code> 50 -&gt; 10, <code>missing-al</code> 15 -&gt; 5</h3>
+<p>robots.txt tells undeclared clients they may fetch anything outside the
+<code>Disallow</code> list at the published <code>Crawl-delay</code>. <code>scraper-ua</code> at 50 put
+an unrenderable checkbox in front of <code>curl</code>, <code>wget</code> and
+<code>python-requests</code> instead -- the module enforcing a policy the site
+never published, and unreachable for the client to discover. Of the 14
+tokens in that heuristic, exactly one (<code>Scrapy</code>) appeared in the
+deployment's robots.txt, where <code>robots-block</code> handles it honestly.</p>
+<p>At 10 it composes with other signals instead of deciding alone, and
+volume abuse is caught by the rate limit -- which is what the published
+policy actually promises. <code>missing-al</code> drops to 5 for the same reason:
+almost nothing scripted sends <code>Accept-Language</code>.</p>
+<p>Net effect: a plain <code>python-requests</code> scores 15, under the silent
+threshold, so scripted dataset access works; a runaway script still
+trips the rate limit.</p>
+<h3 id="fixed-the-weights-were-declared-in-three-places">Fixed — the weights were declared in three places</h3>
+<p><code>BS_PENALTY_*</code> in score.h carried a comment saying &quot;consumed by
+heuristics.c&quot; and had <strong>zero</strong> uses. Both the registry in heuristics.c
+and the seeded table in config.c carried their own literals. Three
+declarations, no compiler able to notice a disagreement -- and they had
+already disagreed once: changing <code>first-sight-ip</code> in heuristics.c alone
+compiled clean, deployed, and changed nothing, because config.c's table
+is what applies.</p>
+<p>Both tables now reference the macros, so score.h is the single source.
+<code>BS_PENALTY_FIRST_SIGHT_IP</code> and <code>BS_PENALTY_DROPPED_COOKIE</code> were added
+so the whole set lives together.</p>
 <h2 id="2026-08-02-browser-classification-covers-real-mobile-devices">2026-08-02 (browser classification covers real mobile devices)</h2>
 <h3 id="fixed-real-phones-classified-as-unknown-ua">Fixed — real phones classified as <code>unknown-ua</code></h3>
 <p><code>normalize()</code> masked digit runs but not the Android device model or the

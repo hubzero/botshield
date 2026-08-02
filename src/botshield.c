@@ -706,8 +706,8 @@ static const command_rec bs_cmds[] = {
                  "every entry (defaults included) so the operator can "
                  "build the slate up from zero. mode=observe logs the "
                  "match with a :observe suffix instead of applying. "
-                 "Compiled-in defaults: missing-ua=40, missing-al=15, "
-                 "scraper-ua=50, first-sight-ip=20, dropped-cookie=25."),
+                 "Compiled-in defaults: missing-ua=40, missing-al=5, "
+                 "scraper-ua=10, first-sight-ip=20, dropped-cookie=25."),
     /* E15 — forgiveness farming defense. */
     AP_INIT_TAKE1("BotShieldForgivenessCapPerHour",
                  bs_set_forgive_cap, NULL, RSRC_CONF,

@@ -626,10 +626,20 @@ not separate directives.
 | Heuristic | Fires when | Default |
 |---|---|---|
 | `missing-ua` | User-Agent absent or empty | `score add=40` |
-| `missing-al` | Accept-Language absent | `score add=15` |
-| `scraper-ua` | UA contains a known HTTP-library token | `score add=50` |
+| `missing-al` | Accept-Language absent | `score add=5` |
+| `scraper-ua` | UA contains a known HTTP-library token | `score add=10` |
 | `first-sight-ip` | Bloom-filter miss — genuinely new IP, arriving with no usable cookie | `score add=20` |
 | `dropped-cookie` | Bloom-known IP arriving with no usable cookie | `score add=25` |
+
+`scraper-ua` is deliberately low. robots.txt tells undeclared clients
+they may fetch anything outside the `Disallow` list at the published
+`Crawl-delay`; a weight of 50 put an unrenderable checkbox in front of
+`curl`, `wget` and `python-requests` instead — the module enforcing a
+policy the site never published. At 10 it composes with other signals
+rather than deciding on its own, and volume abuse is caught by the rate
+limit, which is what the published policy actually promises.
+`missing-al` is 5 for the same reason: almost nothing scripted sends
+`Accept-Language`.
 
 `first-sight-ip` and `dropped-cookie` are the two halves of one signal —
 both fire only when the request carries no usable cookie, differing on

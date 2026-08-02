@@ -154,7 +154,7 @@ scope the enable, or lower the heuristic:</p>
 <pre><code class="language-apache">BotShieldHeuristicTrigger first-sight-ip reset action=score add=5
 </code></pre>
 <p>For sites where most visitors don't send <code>Accept-Language</code> (legitimate
-use cases exist), <code>missing-accept-language</code> adds another 15 on top;
+use cases exist), <code>missing-accept-language</code> adds another 5 on top;
 raise <code>BotShieldScoreSilent</code> to 30 or 40 if that combination is
 over-firing.</p>
 <p><strong>Tuning workflow</strong>:</p>
