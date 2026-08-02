@@ -94,6 +94,9 @@
 <li class="toc__item toc__item--level-3"><a href="#where-the-decision-line-goes">Where the decision line goes</a></li>
 <li class="toc__item toc__item--level-3"><a href="#trimming-access-log-volume-without-losing-decisions">Trimming access-log volume without losing decisions</a></li>
 <li class="toc__item toc__item--level-3"><a href="#field-vocabulary">Field vocabulary</a></li>
+<li class="toc__item toc__item--level-3"><a href="#response-breakout-who-answered">Response breakout — who answered</a></li>
+<li class="toc__item toc__item--level-3"><a href="#per-vhost-breakdown">Per-vhost breakdown</a></li>
+<li class="toc__item toc__item--level-3"><a href="#site-wide-traffic-counters">Site-wide traffic counters</a></li>
 <li class="toc__item toc__item--level-3"><a href="#reason-name-vocabulary">Reason-name vocabulary</a></li>
 <li class="toc__item toc__item--level-3"><a href="#verbose-prose-line">Verbose prose line</a></li>
 <li class="toc__item toc__item--level-2"><a href="#prometheus-metrics">Prometheus metrics</a></li>
@@ -229,6 +232,205 @@ commit time by a small awk validator (<code>tests/scripts/decision-log- awk-vali
 </tr>
 </tbody>
 </table>
+<h3 id="response-breakout-who-answered">Response breakout — who answered</h3>
+<p>The status-class counters cannot tell a BotShield 403 from an
+application 403. <code>botshield_responses_*</code> splits them:</p>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>botshield_responses_origin_total</code></td>
+<td>The application answered. BotShield did not respond.</td>
+</tr>
+<tr>
+<td><code>botshield_responses_challenge_total</code></td>
+<td>BotShield served an interstitial.</td>
+</tr>
+<tr>
+<td><code>botshield_responses_block_total</code></td>
+<td>BotShield refused the request.</td>
+</tr>
+<tr>
+<td><code>botshield_responses_rate_limited_total</code></td>
+<td>BotShield rate-limited or shed the request.</td>
+</tr>
+<tr>
+<td><code>botshield_responses_redirect_total</code></td>
+<td>BotShield issued a safeguard redirect.</td>
+</tr>
+<tr>
+<td><code>botshield_responses_endpoint_total</code></td>
+<td>A functional BotShield endpoint answered (verify, bootstrap, assets).</td>
+</tr>
+<tr>
+<td><code>botshield_responses_observe_total</code></td>
+<td>An observability endpoint answered (dashboard, metrics, policy-status).</td>
+</tr>
+</tbody>
+</table>
+<p>Classification reads the env the decision path already stashes, so it
+costs two table lookups. Three cases bin as <strong>origin</strong> even though a
+decision was recorded:</p>
+<ul>
+<li><code>allow</code> / <code>verified</code> — the request went on to the application.</li>
+<li>A <code>~</code>-prefixed counterfactual — under <code>LogOnly</code> the log says <code>~block</code>
+but nothing was blocked. Counting it as ours would overstate
+enforcement in precisely the mode chosen not to enforce.</li>
+<li>No <code>BS_OUTCOME</code> at all — the scope was never evaluated.</li>
+</ul>
+<p><code>misconfigured</code> and <code>debug</code> do terminate the request, so they bin as
+<strong>block</strong>: a refusal should never be invisible, even when its cause is
+a config bug rather than policy.</p>
+<p><strong>Why <code>observe</code> is separate.</strong> The dashboard and the metrics scrape are
+the measuring instrument, not traffic. A dashboard left open on a 10s
+refresh is 360 requests an hour of self-inflicted load; folded in with
+the verify endpoints it would quietly dominate the breakdown. They are
+still counted in <code>requests_total</code> — that has to keep matching the
+access logs — just kept separable, and on the dashboard the segment
+wears a neutral rather than a policy colour.</p>
+<p>The dashboard shows the share as a KPI and the breakdown as its own bar
+scaled to BotShield's own responses, rather than as segments inside the
+status chart: on a healthy site the origin is the overwhelming majority
+of traffic, which would squeeze every BotShield response into an
+unreadable sliver.</p>
+<h3 id="per-vhost-breakdown">Per-vhost breakdown</h3>
+<p>Every distinct <code>ServerName</code> gets its own metrics block, and
+<code>/botshield/dashboard</code> shows a tab row to switch between them:</p>
+<pre><code>/botshield/dashboard?vh=all      aggregate (default)
+/botshield/dashboard?vh=&lt;n&gt;      one vhost, by directory index
+</code></pre>
+<p>Vhosts that share a <code>ServerName</code> — the usual <code>:80</code> and <code>:443</code> pair —
+share one block, on the grounds that an operator reads the dashboard
+thinking in sites rather than listeners. Past 32 distinct names the
+overflow shares one slot labelled <code>(other vhosts)</code>, with a NOTICE at
+startup; nothing is silently dropped.</p>
+<p><code>/botshield/metrics</code> and <code>mod_status</code> are <strong>unchanged</strong> — both still
+report the server-wide aggregate with no vhost dimension. The global
+block is still written directly rather than summed at read time, so
+the dashboard's &quot;All vhosts&quot; tab cannot disagree with the Prometheus
+numbers.</p>
+<p>Cost is a second set of relaxed atomic adds per event: the global block
+and the vhost's block. Storage is one <code>bs_metrics</code> per vhost — the same
+struct as the global one, so a few hundred bytes per vhost go unused on
+server-wide-only fields, in exchange for no second struct to drift and
+no separate read path.</p>
+<p>Per-vhost blocks are persisted, and restored by <strong>matching ServerName</strong>
+rather than saved position. Adding or removing a vhost therefore
+re-files history correctly instead of shifting every site onto its
+neighbour's numbers; a saved vhost that no longer exists is dropped and
+a new one starts at zero, both reported at startup:</p>
+<pre><code>per-vhost metrics restored for 3 of 4 saved vhost(s); 1 no longer configured
+</code></pre>
+<h3 id="site-wide-traffic-counters">Site-wide traffic counters</h3>
+<p>BotShield also counts <strong>every</strong> request the server handles, on every
+vhost, whether or not it evaluated them. Collection happens in the
+<code>log_transaction</code> hook, which is registered at server scope and runs
+once per client request (subrequests never reach it), so these are
+independent of where <code>BotShieldEnabled</code> is switched on.</p>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>botshield_requests_total</code></td>
+<td>Every request logged, anywhere on the server.</td>
+</tr>
+<tr>
+<td><code>botshield_requests_with_cookie_total</code></td>
+<td>Requests that arrived carrying a BotShield session cookie.</td>
+</tr>
+<tr>
+<td><code>botshield_requests_status_{2xx,3xx,4xx,5xx,other}_total</code></td>
+<td>Response status class. <code>4xx</code> includes BotShield's own blocks.</td>
+</tr>
+</tbody>
+</table>
+<p>The point of the denominator is coverage. With the enable scoped to a
+<code>&lt;Location&gt;</code>, <code>decisions / requests_total</code> is the fraction of site
+traffic BotShield actually sees — a number that is otherwise easy to
+assume is 100% when it is single digits. The dashboard shows it
+directly as <strong>Evaluated</strong>.</p>
+<p>These fields are in the bucket rings too, so all of it is windowed
+alongside the decision counters.</p>
+<p>Cost is three relaxed atomic adds per ring plus three cumulative, on
+every request including static assets. That is deliberate — anything
+more expensive would tax the whole site rather than just the protected
+scopes.</p>
+<p>Outcome meanings, grouped by where they originate:</p>
+<table>
+<thead>
+<tr>
+<th>Outcome</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>allow</code></td>
+<td>Request reached origin — <code>pass</code> tier, asset bypass, silent embedded pass-through, or safeguard pass.</td>
+</tr>
+<tr>
+<td><code>challenged</code></td>
+<td>An interstitial was served.</td>
+</tr>
+<tr>
+<td><code>verified</code></td>
+<td>A challenge was <strong>completed</strong>: captcha siteverify returned OK, or an embedded-verify PoW was accepted. One per solve.</td>
+</tr>
+<tr>
+<td><code>block</code></td>
+<td>Refused outright — invalid cookie, a <code>status=</code> trigger, failed captcha verify.</td>
+</tr>
+<tr>
+<td><code>rate_limited</code></td>
+<td>Refused with 429 by a rate limit. Kept distinct from <code>block</code> so policy-refusal is separable from volume-refusal.</td>
+</tr>
+<tr>
+<td><code>redirect</code></td>
+<td>A 302 was issued (safeguard explainer).</td>
+</tr>
+<tr>
+<td><code>failopen</code></td>
+<td>Siteverify was unreachable (timeout, network error, provider 5xx) and the request was let through rather than blocking on a provider outage.</td>
+</tr>
+<tr>
+<td><code>pending_missing</code></td>
+<td>A verify POST arrived with no pending cookie, or a tampered one — typically a replayed or hand-crafted POST.</td>
+</tr>
+<tr>
+<td><code>inflight_capped</code></td>
+<td>Rejected by the global in-flight semaphore. Backpressure, not a verdict on the client.</td>
+</tr>
+<tr>
+<td><code>misconfigured</code></td>
+<td>Terminated on missing scope config or internal state. Non-zero means a config bug, not a bot.</td>
+</tr>
+<tr>
+<td><code>debug</code></td>
+<td>A <code>BotShieldDebug</code>-forced 403. Should be zero in production.</td>
+</tr>
+</tbody>
+</table>
+<p><code>failopen</code>, <code>pending_missing</code> and <code>inflight_capped</code> only arise on the
+verify endpoints, so they stay at zero unless a captcha provider or the
+embedded silent mode is in use.</p>
+<p><strong><code>verified</code> counts solves, not requests.</strong> A client that completes a
+silent/form PoW returns on a <em>fresh</em> request carrying its new cookie,
+which logs <code>outcome=allow cookie=ok</code>. Do not compute a solve rate from
+<code>cookie=ok</code> — that counts every request bearing a valid cookie, so one
+human browsing 50 pages would read as 50 solves. Before 2026-08-01 the
+PoW path emitted nothing at all, so a deployment running the silent or
+form tier with no captcha provider reported a permanent 0% solve rate
+while challenges were in fact being solved.</p>
 <p><code>tier=safeguard</code> is emitted for challenge-loop suppression: the
 client gets a 302 redirect to a configured
 <code>BotShieldSafeguardRedirectURL</code> (or to the built-in explainer at

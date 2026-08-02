@@ -688,7 +688,7 @@ static const command_rec bs_cmds[] = {
                  "build the slate up from zero. mode=observe logs the "
                  "match with a :observe suffix instead of applying. "
                  "Compiled-in defaults: missing-ua=40, missing-al=15, "
-                 "scraper-ua=50, first-sight-ip=5, dropped-cookie=25."),
+                 "scraper-ua=50, first-sight-ip=20, dropped-cookie=25."),
     /* E15 — forgiveness farming defense. */
     AP_INIT_TAKE1("BotShieldForgivenessCapPerHour",
                  bs_set_forgive_cap, NULL, RSRC_CONF,
@@ -775,7 +775,16 @@ static const command_rec bs_cmds[] = {
                  "unless status=3xx explicit), log=<tag>, "
                  "accesslog=on|off, flag=<bit> (default "
                  "scanner_probe), ttl=<sec> (default 3600; 0 = don't "
-                 "flag), penalty=<n>, mode=enforce|observe. "
+                 "flag), penalty=<n>, tier=pass|silent|form|captcha, "
+                 "mode=enforce|observe. A rule can therefore block "
+                 "(status=4xx), challenge (status=pass tier=silent "
+                 "for the invisible check, tier=form for the visible "
+                 "one), demand a captcha (status=pass tier=captcha), "
+                 "or only shape the score (status=pass penalty=N). "
+                 "tier= and penalty= both need status=pass, since a "
+                 "concrete status short-circuits before any tier is "
+                 "chosen; tier= floors THIS request only and writes "
+                 "no per-IP state, unlike flag=. "
                  "Declaration order, first match wins; upsert-by-name. "
                  "Named-cookie predicates (cookie=<n>, bs-cookie=...) "
                  "live on BotShieldCookieTrigger, whose vocabulary is "
@@ -1160,6 +1169,9 @@ static int bs_route_module_endpoint(request_rec *r, bs_dir_cfg *cfg)
     if (strcmp(sub, "/metrics") == 0) {
         return bs_metrics_handler(r);
     }
+    if (strcmp(sub, "/dashboard") == 0) {
+        return bs_dashboard_handler(r);
+    }
     if (strcmp(sub, "/policy-status") == 0) {
         return bs_policy_status_handler(r, cfg);
     }
@@ -1256,6 +1268,12 @@ static int bs_handler(request_rec *r)
         && !(cfg && cfg->enabled == BS_ENABLED_OFF)) {
         int endpoint_rv = bs_route_module_endpoint(r, cfg);
         if (endpoint_rv != -1) {
+            /* Marker for the response breakout: these never reach the
+             * decision path, so BS_OUTCOME is absent and they would
+             * otherwise be attributed to the origin. */
+            if (!apr_table_get(r->subprocess_env, "BS_ENDPOINT")) {
+                apr_table_setn(r->subprocess_env, "BS_ENDPOINT", "1");
+            }
             return endpoint_rv;
         }
     }
@@ -1582,6 +1600,12 @@ static int bs_handler(request_rec *r)
      * (MAX of any TIER_FLOOR actions across the union of flags).
      * The score-derived tier wins when it's already at-or-above the
      * floor — we never silently downgrade. */
+    /* A trigger tier= floor composes with the flag floor and the
+     * score-derived tier by MAX, same as everything else here. */
+    bs_tier trig_floor = (bs_tier)bs_get_request_tier_floor(r);
+    if (trig_floor > tier_floor_from_flags) {
+        tier_floor_from_flags = trig_floor;
+    }
     bs_tier tier = (tier_floor_from_flags > score_tier)
                  ? tier_floor_from_flags : score_tier;
     if (tier_floor_from_flags > score_tier) {

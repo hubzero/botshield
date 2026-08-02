@@ -374,6 +374,9 @@ int bs_check_policy(request_rec *r)
              * produced for this family. */
             if (o == BS_TEXEC_PASS_DECLINE) return DECLINED;
             if (o == BS_TEXEC_STATUS)       return t->action.status_code;
+            /* tier=: the rule asked for a challenge, so the request
+             * must reach the scoring pipeline. Keep walking. */
+            if (o == BS_TEXEC_PASS_CONTINUE) continue;
         }
     }
 
@@ -603,6 +606,7 @@ static void bs_psh_render_counter(request_rec *r, int slot_idx,
 
 int bs_policy_status_handler(request_rec *r, bs_dir_cfg *cfg)
 {
+    apr_table_setn(r->subprocess_env, "BS_ENDPOINT", "obs");
     (void)cfg;
     if (r->method_number != M_GET && r->method_number != M_OPTIONS) {
         r->status = HTTP_METHOD_NOT_ALLOWED;

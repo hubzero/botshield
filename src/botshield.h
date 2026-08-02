@@ -430,6 +430,12 @@ typedef struct bs_server_cfg {
      * relying on the error log and/or their own CustomLog. */
     const char         *decision_log_path;
     apr_file_t         *decision_log_fd;
+    /* Index of this server's per-vhost metrics block, assigned once at
+     * post_config. -1 until then (and for any server that somehow
+     * misses the pass), which the metric writers read as "global
+     * only". Resolved here rather than looked up per request: the
+     * decision path should pay a pointer deref, not a string compare. */
+    int                 vhost_idx;
 
     /* Set when any scope on this vhost turns the module on (On or
      * LogOnly). Module-owned endpoints under BotShieldEndpointPrefix

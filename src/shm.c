@@ -1221,6 +1221,66 @@ void bs_state_load(apr_pool_t *p, server_rec *s, const char *path)
     apr_atomic_set32(&bs_shm.header->bloom_active, saved_active & 1U);
     bs_shm.header->bloom_next_rotate = saved_next_rotate;
 
+    /* v4 metrics block. Restored only when the saved size matches the
+     * running struct — a rebuilt module with a different metrics layout
+     * keeps its fresh counters rather than reinterpreting stale bytes.
+     * The bucket rings are epoch-stamped, so any slot that aged out
+     * while the server was down is skipped by the window reader; no
+     * clearing needed here. */
+    apr_uint32_t saved_metrics_bytes = 0;
+    if (p_end - p_cur >= 4) {
+        memcpy(&saved_metrics_bytes, p_cur, 4); p_cur += 4;
+        if (saved_metrics_bytes && bs_shm.metrics
+            && saved_metrics_bytes == (apr_uint32_t)sizeof(bs_metrics)
+            && (apr_size_t)(p_end - p_cur) >= saved_metrics_bytes) {
+            memcpy(bs_shm.metrics, p_cur, saved_metrics_bytes);
+            p_cur += saved_metrics_bytes;
+        } else if (saved_metrics_bytes) {
+            ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+                "mod_botshield: state file %s metrics block is %u bytes, "
+                "this build expects %" APR_SIZE_T_FMT "; counters start "
+                "fresh", path, saved_metrics_bytes, sizeof(bs_metrics));
+        }
+    }
+
+    /* v7 per-vhost blocks, re-filed by ServerName. Matching on the name
+     * rather than the saved position is what makes a config change
+     * survivable: add a vhost and every other site keeps its history
+     * instead of inheriting its neighbour's. A saved vhost that no
+     * longer exists is skipped, and one that is new to this config
+     * simply starts at zero. */
+    if (bs_shm.vhost_dir && bs_shm.vmetrics && p_end - p_cur >= 4) {
+        apr_uint32_t saved_v = 0;
+        memcpy(&saved_v, p_cur, 4); p_cur += 4;
+        apr_size_t rec = BS_M_VHOST_NAME_MAX + sizeof(bs_metrics);
+        apr_uint32_t restored = 0, dropped = 0;
+        for (apr_uint32_t i = 0; i < saved_v; i++) {
+            if ((apr_size_t)(p_end - p_cur) < rec) break;
+            char nm[BS_M_VHOST_NAME_MAX];
+            memcpy(nm, p_cur, BS_M_VHOST_NAME_MAX);
+            nm[BS_M_VHOST_NAME_MAX - 1] = '\0';
+            const unsigned char *blk = p_cur + BS_M_VHOST_NAME_MAX;
+            p_cur += rec;
+
+            int dst = -1;
+            for (apr_uint32_t j = 0; j < bs_shm.vhost_dir->count; j++) {
+                if (strcasecmp(bs_shm.vhost_dir->name[j], nm) == 0) {
+                    dst = (int)j;
+                    break;
+                }
+            }
+            if (dst < 0) { dropped++; continue; }
+            memcpy(&bs_shm.vmetrics[dst], blk, sizeof(bs_metrics));
+            restored++;
+        }
+        if (saved_v) {
+            ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+                "mod_botshield: per-vhost metrics restored for %u of %u "
+                "saved vhost(s); %u no longer configured",
+                restored, saved_v, dropped);
+        }
+    }
+
 done_log:
     if (bs_shm.metrics) {
         __atomic_fetch_add(&bs_shm.metrics->state_loads_total, 1,
@@ -1275,10 +1335,22 @@ apr_status_t bs_state_save(apr_pool_t *p, server_rec *s,
                                * sizeof(bs_flagged_ip_slot);
     apr_size_t bloom_bytes   = rt->bloom_buf_bytes;
     apr_size_t key_bytes     = sizeof(rt->header->siphash_key);
+    /* v4: the metrics block rides along so counters and the dashboard
+     * bucket rings survive a restart. Length-prefixed so a future
+     * struct change is a version bump, not a silent misparse. */
+    apr_size_t metrics_bytes = rt->metrics ? sizeof(bs_metrics) : 0;
+    /* v7: per-vhost blocks, each preceded by its ServerName so the
+     * loader can re-file them by name instead of by position. */
+    apr_uint32_t vcount = (rt->vhost_dir && rt->vmetrics)
+                          ? rt->vhost_dir->count : 0;
+    apr_size_t vhost_bytes = 4 + (apr_size_t)vcount
+                             * (BS_M_VHOST_NAME_MAX + sizeof(bs_metrics));
     apr_size_t total = 4 + 4 + 8                    /* header */
                      + key_bytes                    /* siphash key */
                      + 4 + flagged_bytes            /* flagged */
                      + 4 + 4 + 8 + 2 * bloom_bytes  /* bloom */
+                     + 4 + metrics_bytes            /* metrics */
+                     + vhost_bytes                  /* per-vhost */
                      + 8;                           /* fnv */
 
     unsigned char *buf = apr_palloc(p, total);
@@ -1355,6 +1427,28 @@ apr_status_t bs_state_save(apr_pool_t *p, server_rec *s,
             pc[i] = __atomic_load_n(&src[i], __ATOMIC_RELAXED);
         }
         pc += bb;
+    }
+
+    /* v4 metrics block. Copied without the SHM mutex: these are
+     * relaxed atomic counters that tolerate a torn read, and taking the
+     * lock here would serialise against the decision path for a
+     * ~12 KB memcpy. A save can therefore land a counter mid-increment;
+     * being off by one on a restored gauge is not worth the contention. */
+    apr_uint32_t mb = (apr_uint32_t)metrics_bytes;
+    memcpy(pc, &mb, 4); pc += 4;
+    if (metrics_bytes) {
+        memcpy(pc, rt->metrics, metrics_bytes);
+        pc += metrics_bytes;
+    }
+
+    /* v7 per-vhost blocks. Same relaxed-copy posture as the global
+     * block above. */
+    memcpy(pc, &vcount, 4); pc += 4;
+    for (apr_uint32_t i = 0; i < vcount; i++) {
+        memcpy(pc, rt->vhost_dir->name[i], BS_M_VHOST_NAME_MAX);
+        pc += BS_M_VHOST_NAME_MAX;
+        memcpy(pc, &rt->vmetrics[i], sizeof(bs_metrics));
+        pc += sizeof(bs_metrics);
     }
 
     apr_uint64_t fnv = bs_fnv64(BS_FNV64_SEED, buf, pc - buf);

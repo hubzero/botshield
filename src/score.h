@@ -42,6 +42,15 @@ typedef struct bs_dir_cfg bs_dir_cfg;
 
 /* Score → tier cut-points (defaults; operator-tunable via the
  * BotShieldScoreSilent / Hard / Captcha directives). */
+/* Per-request tier floor set by a trigger's tier= action. Request
+ * scoped (r->notes), not per-IP: a client that solves the challenge is
+ * not re-challenged by state it cannot clear. Returns BS_TIER_PASS when
+ * unset, so callers can MAX unconditionally. */
+/* int rather than bs_tier: score.h is included ahead of the tier enum
+ * in some translation units. Values are BS_TIER_*. */
+void bs_set_request_tier_floor(request_rec *r, int tier);
+int  bs_get_request_tier_floor(request_rec *r);
+
 #define BS_DEFAULT_SCORE_SILENT   20
 #define BS_DEFAULT_SCORE_HARD     50
 #define BS_DEFAULT_SCORE_CAPTCHA  80

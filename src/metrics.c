@@ -211,6 +211,8 @@ static apr_uint32_t bs_metrics_inflight_cur(void)
     return apr_atomic_read32(bs_shm.cv_inflight);
 }
 
+static bs_metrics *bs_vhost_block(int idx);   /* defined with the rings */
+
 /* ======================================================================
  * M9.2 counter bump
  * ====================================================================== */
@@ -231,6 +233,22 @@ static void bs_metrics_bump(request_rec *r,
              ? bs_m_cookie_idx(cookie) : -1;
     int pi = (provider && strcmp(provider, "-") != 0)
              ? bs_m_provider_idx(provider) : -1;
+
+    /* Same indices feed the windowed rings that back the dashboard. */
+    bs_server_cfg *scfg_v = ap_get_module_config(r->server->module_config,
+                                                 &botshield_module);
+    int vidx = scfg_v ? scfg_v->vhost_idx : -1;
+    bs_metrics_bucket_add(vidx, ti, oi, ci);
+
+    /* Cumulative side of the same event, mirrored into the vhost
+     * block. The global block keeps being written directly so the
+     * Prometheus and mod_status surfaces are unchanged. */
+    bs_metrics *vm = bs_vhost_block(vidx);
+    if (vm) {
+        if (ti >= 0) __atomic_fetch_add(&vm->tier[ti], 1, __ATOMIC_RELAXED);
+        if (oi >= 0) __atomic_fetch_add(&vm->outcome[oi], 1, __ATOMIC_RELAXED);
+        if (ci >= 0) __atomic_fetch_add(&vm->cookie[ci], 1, __ATOMIC_RELAXED);
+    }
 
     if (ti >= 0) {
         __atomic_fetch_add(&bs_shm.metrics->tier[ti], 1, __ATOMIC_RELAXED);
@@ -403,6 +421,226 @@ static const char *bs_log_quote(apr_pool_t *p, const char *s)
  * request_rec in the chain is. mod_log_config then renders against
  * a request_rec where the un-prefixed names exist with the right
  * values. No-op when there's no chain. */
+
+/* ======================================================================
+ * Time-bucketed counters — see bs_metrics_slot in shm.h for the design
+ * ====================================================================== */
+
+/* Claim a slot for `epoch` if it still holds an older wrap, then add.
+ * The CAS means exactly one writer zeroes the slot; a concurrent writer
+ * that already read the stale epoch may add into the freshly-zeroed slot
+ * (its count survives) or lose a single increment. Advisory by design. */
+/* The per-vhost block for `idx`, or NULL when there is none (index not
+ * yet assigned, directory absent, or index out of range). Callers write
+ * the global block unconditionally and this one additionally, so a NULL
+ * here degrades to "aggregate only" rather than losing the event. */
+static bs_metrics *bs_vhost_block(int idx)
+{
+    if (idx < 0 || !bs_shm.vmetrics || !bs_shm.vhost_dir) return NULL;
+    if ((apr_uint32_t)idx >= bs_shm.vhost_dir->count) return NULL;
+    return &bs_shm.vmetrics[idx];
+}
+
+/* Claim `slot` for `epoch`, zeroing it if it still holds an older wrap.
+ * Split out from the adders because two independent writers land in the
+ * same slot — the decision path and the per-request traffic path — and
+ * both must be able to trigger the rollover. */
+static void bs_m_slot_claim(bs_metrics_slot *slot, apr_uint64_t epoch)
+{
+    apr_uint64_t seen = __atomic_load_n(&slot->epoch, __ATOMIC_RELAXED);
+    if (seen == epoch) return;
+    if (__atomic_compare_exchange_n(&slot->epoch, &seen, epoch, 0,
+                                    __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+        for (int i = 0; i < BS_M_TIER_COUNT; i++) {
+            __atomic_store_n(&slot->tier[i], 0, __ATOMIC_RELAXED);
+        }
+        for (int i = 0; i < BS_M_OUTCOME_COUNT; i++) {
+            __atomic_store_n(&slot->outcome[i], 0, __ATOMIC_RELAXED);
+        }
+        for (int i = 0; i < BS_M_COOKIE_COUNT; i++) {
+            __atomic_store_n(&slot->cookie[i], 0, __ATOMIC_RELAXED);
+        }
+        __atomic_store_n(&slot->req_total,  0, __ATOMIC_RELAXED);
+        __atomic_store_n(&slot->req_cookie, 0, __ATOMIC_RELAXED);
+        for (int i = 0; i < BS_M_STATUS_COUNT; i++) {
+            __atomic_store_n(&slot->req_status[i], 0, __ATOMIC_RELAXED);
+        }
+        for (int i = 0; i < BS_M_RESP_COUNT; i++) {
+            __atomic_store_n(&slot->req_resp[i], 0, __ATOMIC_RELAXED);
+        }
+    }
+}
+
+static void bs_m_slot_add(bs_metrics_slot *slot, apr_uint64_t epoch,
+                          int tier_idx, int outcome_idx, int cookie_idx)
+{
+    bs_m_slot_claim(slot, epoch);
+    if (tier_idx >= 0) {
+        __atomic_fetch_add(&slot->tier[tier_idx], 1, __ATOMIC_RELAXED);
+    }
+    if (outcome_idx >= 0) {
+        __atomic_fetch_add(&slot->outcome[outcome_idx], 1, __ATOMIC_RELAXED);
+    }
+    if (cookie_idx >= 0) {
+        __atomic_fetch_add(&slot->cookie[cookie_idx], 1, __ATOMIC_RELAXED);
+    }
+}
+
+void bs_metrics_bucket_add(int vhost_idx, int tier_idx,
+                           int outcome_idx, int cookie_idx)
+{
+    if (!bs_shm.metrics) return;
+    apr_uint64_t minute = (apr_uint64_t)(apr_time_sec(apr_time_now()) / 60);
+    apr_uint64_t hour   = minute / 60;
+    bs_metrics *vm = bs_vhost_block(vhost_idx);
+    bs_metrics *blocks[2] = { bs_shm.metrics, vm };
+    for (int b = 0; b < 2; b++) {
+        if (!blocks[b]) continue;
+        bs_m_slot_add(&blocks[b]->min_slots[minute % BS_M_MIN_SLOTS],
+                      minute, tier_idx, outcome_idx, cookie_idx);
+        bs_m_slot_add(&blocks[b]->hour_slots[hour % BS_M_HOUR_SLOTS],
+                      hour, tier_idx, outcome_idx, cookie_idx);
+    }
+}
+
+/* Per-request traffic. Deliberately cheap: one epoch load plus at most
+ * three relaxed adds per ring. This runs on every request the server
+ * handles — static assets included — so anything more expensive would
+ * be a tax on the whole site, not just the protected scopes. */
+static void bs_m_slot_traffic(bs_metrics_slot *slot, apr_uint64_t epoch,
+                              int status_idx, int has_cookie, int resp_idx)
+{
+    bs_m_slot_claim(slot, epoch);
+    __atomic_fetch_add(&slot->req_total, 1, __ATOMIC_RELAXED);
+    if (has_cookie) {
+        __atomic_fetch_add(&slot->req_cookie, 1, __ATOMIC_RELAXED);
+    }
+    if (status_idx >= 0) {
+        __atomic_fetch_add(&slot->req_status[status_idx], 1,
+                           __ATOMIC_RELAXED);
+    }
+    if (resp_idx >= 0) {
+        __atomic_fetch_add(&slot->req_resp[resp_idx], 1, __ATOMIC_RELAXED);
+    }
+}
+
+void bs_metrics_traffic_add(int vhost_idx, int status_idx, int has_cookie,
+                            int resp_idx)
+{
+    if (!bs_shm.metrics) return;
+    apr_uint64_t minute = (apr_uint64_t)(apr_time_sec(apr_time_now()) / 60);
+    apr_uint64_t hour   = minute / 60;
+    bs_metrics *vm = bs_vhost_block(vhost_idx);
+    bs_metrics *blocks[2] = { bs_shm.metrics, vm };
+    for (int b = 0; b < 2; b++) {
+        bs_metrics *m = blocks[b];
+        if (!m) continue;
+        bs_m_slot_traffic(&m->min_slots[minute % BS_M_MIN_SLOTS],
+                          minute, status_idx, has_cookie, resp_idx);
+        bs_m_slot_traffic(&m->hour_slots[hour % BS_M_HOUR_SLOTS],
+                          hour, status_idx, has_cookie, resp_idx);
+        __atomic_fetch_add(&m->req_total, 1, __ATOMIC_RELAXED);
+        if (has_cookie) {
+            __atomic_fetch_add(&m->req_cookie, 1, __ATOMIC_RELAXED);
+        }
+        if (status_idx >= 0) {
+            __atomic_fetch_add(&m->req_status[status_idx], 1,
+                               __ATOMIC_RELAXED);
+        }
+        if (resp_idx >= 0) {
+            __atomic_fetch_add(&m->req_resp[resp_idx], 1, __ATOMIC_RELAXED);
+        }
+    }
+}
+
+/* Sum every slot of `ring` whose epoch lies in (now - span, now]. */
+static void bs_m_sum_ring(const bs_metrics_slot *ring, int nslots,
+                          apr_uint64_t now_epoch, apr_uint64_t span,
+                          bs_metrics_window *out)
+{
+    apr_uint64_t oldest = (now_epoch >= span - 1) ? now_epoch - (span - 1) : 0;
+    for (int i = 0; i < nslots; i++) {
+        apr_uint64_t e = __atomic_load_n(&ring[i].epoch, __ATOMIC_RELAXED);
+        if (e == 0 || e < oldest || e > now_epoch) continue;
+        for (int t = 0; t < BS_M_TIER_COUNT; t++) {
+            out->tier[t] += __atomic_load_n(&ring[i].tier[t], __ATOMIC_RELAXED);
+        }
+        for (int o = 0; o < BS_M_OUTCOME_COUNT; o++) {
+            out->outcome[o] += __atomic_load_n(&ring[i].outcome[o],
+                                               __ATOMIC_RELAXED);
+        }
+        for (int c = 0; c < BS_M_COOKIE_COUNT; c++) {
+            out->cookie[c] += __atomic_load_n(&ring[i].cookie[c],
+                                              __ATOMIC_RELAXED);
+        }
+        out->req_total  += __atomic_load_n(&ring[i].req_total,
+                                           __ATOMIC_RELAXED);
+        out->req_cookie += __atomic_load_n(&ring[i].req_cookie,
+                                           __ATOMIC_RELAXED);
+        for (int st = 0; st < BS_M_STATUS_COUNT; st++) {
+            out->req_status[st] += __atomic_load_n(&ring[i].req_status[st],
+                                                   __ATOMIC_RELAXED);
+        }
+        for (int rk = 0; rk < BS_M_RESP_COUNT; rk++) {
+            out->req_resp[rk] += __atomic_load_n(&ring[i].req_resp[rk],
+                                                 __ATOMIC_RELAXED);
+        }
+    }
+}
+
+void bs_metrics_read_window(int span_minutes, int vhost_idx,
+                            bs_metrics_window *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (!bs_shm.metrics) return;
+    const bs_metrics *m = (vhost_idx < 0) ? bs_shm.metrics
+                                          : bs_vhost_block(vhost_idx);
+    if (!m) return;
+
+    if (span_minutes <= 0) {
+        /* All-time: the plain cumulative counters. */
+        for (int t = 0; t < BS_M_TIER_COUNT; t++) {
+            out->tier[t] = __atomic_load_n(&m->tier[t],
+                                           __ATOMIC_RELAXED);
+        }
+        for (int o = 0; o < BS_M_OUTCOME_COUNT; o++) {
+            out->outcome[o] = __atomic_load_n(&m->outcome[o],
+                                              __ATOMIC_RELAXED);
+        }
+        for (int c = 0; c < BS_M_COOKIE_COUNT; c++) {
+            out->cookie[c] = __atomic_load_n(&m->cookie[c],
+                                             __ATOMIC_RELAXED);
+        }
+        out->req_total  = __atomic_load_n(&m->req_total,
+                                          __ATOMIC_RELAXED);
+        out->req_cookie = __atomic_load_n(&m->req_cookie,
+                                          __ATOMIC_RELAXED);
+        for (int st = 0; st < BS_M_STATUS_COUNT; st++) {
+            out->req_status[st] =
+                __atomic_load_n(&m->req_status[st],
+                                __ATOMIC_RELAXED);
+        }
+        for (int rk = 0; rk < BS_M_RESP_COUNT; rk++) {
+            out->req_resp[rk] = __atomic_load_n(&m->req_resp[rk],
+                                                __ATOMIC_RELAXED);
+        }
+    } else {
+        apr_uint64_t minute = (apr_uint64_t)(apr_time_sec(apr_time_now()) / 60);
+        if (span_minutes <= BS_M_MIN_SLOTS) {
+            bs_m_sum_ring(m->min_slots, BS_M_MIN_SLOTS,
+                          minute, (apr_uint64_t)span_minutes, out);
+        } else {
+            /* Round up onto whole hours — the hour ring is the only
+             * thing that reaches past 60 minutes. */
+            apr_uint64_t hours = (apr_uint64_t)((span_minutes + 59) / 60);
+            if (hours > BS_M_HOUR_SLOTS) hours = BS_M_HOUR_SLOTS;
+            bs_m_sum_ring(m->hour_slots, BS_M_HOUR_SLOTS,
+                          minute / 60, hours, out);
+        }
+    }
+    for (int o = 0; o < BS_M_OUTCOME_COUNT; o++) out->decisions += out->outcome[o];
+}
+
 void bs_suppress_access_log(request_rec *r)
 {
     apr_table_setn(r->subprocess_env, BS_NOLOG_ENV, "1");
@@ -558,10 +796,96 @@ static int bs_nolog_verdict(request_rec *origin, request_rec *fwd)
     return DECLINED;
 }
 
+/* Is `name` present as a cookie name in `hdr`? Token-aware: matches at
+ * the header start or after a "; " separator and requires the '=', so
+ * a cookie merely *ending* in the name does not count. */
+static int bs_cookie_named(const char *hdr, const char *name)
+{
+    apr_size_t nlen = strlen(name);
+    for (const char *p = hdr; (p = strstr(p, name)) != NULL; p += nlen) {
+        if (p != hdr) {
+            const char *prev = p - 1;
+            /* Walk back over spaces to find the real separator. */
+            while (prev > hdr && *prev == ' ') prev--;
+            if (*prev != ';' && *prev != ',') continue;
+        }
+        const char *q = p + nlen;
+        while (*q == ' ') q++;
+        if (*q == '=') return 1;
+    }
+    return 0;
+}
+
+/* Which response did BotShield produce, if any?
+ *
+ * Read from the env the decision path already stashes, so this costs
+ * two table lookups and no new bookkeeping. Three cases bin as ORIGIN
+ * even though a decision was recorded:
+ *
+ *   - allow / verified: the request went on to the application.
+ *   - a ~-prefixed counterfactual: under LogOnly the log says ~block
+ *     but nothing was blocked, and counting it as ours would overstate
+ *     enforcement in exactly the mode chosen to avoid enforcing.
+ *   - no BS_OUTCOME at all: the scope was never evaluated.
+ *
+ * misconfigured and debug do terminate the request, but they are
+ * failure modes rather than a policy response; they bin as BLOCK so a
+ * refusal is never invisible. */
+static int bs_resp_kind_idx(request_rec *r)
+{
+    const char *ep = apr_table_get(r->subprocess_env, "BS_ENDPOINT");
+    if (ep) {
+        return (strcmp(ep, "obs") == 0) ? BS_M_RESP_OBSERVE
+                                        : BS_M_RESP_ENDPOINT;
+    }
+    const char *o = apr_table_get(r->subprocess_env, "BS_OUTCOME");
+    if (!o || !*o || *o == '~') return BS_M_RESP_ORIGIN;
+
+    if (strcmp(o, "challenged")      == 0) return BS_M_RESP_CHALLENGE;
+    if (strcmp(o, "block")           == 0) return BS_M_RESP_BLOCK;
+    if (strcmp(o, "misconfigured")   == 0) return BS_M_RESP_BLOCK;
+    if (strcmp(o, "debug")           == 0) return BS_M_RESP_BLOCK;
+    if (strcmp(o, "rate_limited")    == 0) return BS_M_RESP_RATE_LIMITED;
+    if (strcmp(o, "inflight_capped") == 0) return BS_M_RESP_RATE_LIMITED;
+    if (strcmp(o, "redirect")        == 0) return BS_M_RESP_REDIRECT;
+    if (strcmp(o, "pending_missing") == 0) return BS_M_RESP_ENDPOINT;
+    return BS_M_RESP_ORIGIN;
+}
+
+static int bs_status_class_idx(int status)
+{
+    if (status >= 200 && status < 300) return BS_M_STATUS_2XX;
+    if (status >= 300 && status < 400) return BS_M_STATUS_3XX;
+    if (status >= 400 && status < 500) return BS_M_STATUS_4XX;
+    if (status >= 500 && status < 600) return BS_M_STATUS_5XX;
+    return BS_M_STATUS_OTHER;
+}
+
 int bs_propagate_decision_env(request_rec *r)
 {
     request_rec *fwd = r;
     while (fwd->next) fwd = fwd->next;
+
+    /* Site-wide traffic. This hook runs once per client request on
+     * every vhost regardless of BotShieldEnabled scope, and
+     * subrequests never reach it — so this is one count per request,
+     * and it includes everything BotShield never evaluated. That is
+     * deliberate: decisions/req_total is the coverage figure, which is
+     * only meaningful if the denominator is the whole site.
+     *
+     * Status comes from the end of the internal-redirect chain, which
+     * is what the client actually received; cookies come from the
+     * origin, which is what the client actually sent. */
+    {
+        const char *ck = apr_table_get(r->headers_in, "Cookie");
+        int has_cookie = ck && (bs_cookie_named(ck, BS_COOKIE_NAME)
+                                || bs_cookie_named(ck, BS_COOKIE_NAME_HOST));
+        bs_server_cfg *scfg_t =
+            ap_get_module_config(r->server->module_config, &botshield_module);
+        bs_metrics_traffic_add(scfg_t ? scfg_t->vhost_idx : -1,
+                               bs_status_class_idx(fwd->status), has_cookie,
+                               bs_resp_kind_idx(r));
+    }
 
     if (fwd != r) {
         const apr_array_header_t *arr = apr_table_elts(r->subprocess_env);
@@ -774,8 +1098,542 @@ static void bs_m_emit_gauge(request_rec *r, const char *name,
     ap_rprintf(r, "%s%s %" APR_UINT64_T_FMT "\n", BS_M_PREFIX, name, val);
 }
 
+/* ======================================================================
+ * /botshield/dashboard — operator-facing view of the same counters the
+ * Prometheus endpoint exposes.
+ *
+ * Self-contained: inline CSS and inline SVG, no scripts, no external
+ * fonts or images. A strict site CSP would block a CDN, and an
+ * operational page should not depend on the network being healthy.
+ * Hover detail rides on SVG <title>, which browsers render natively —
+ * an interaction layer that costs no JavaScript.
+ *
+ * Form choices follow from what each number is for, not from what looks
+ * busy. Part-to-whole is a stacked bar rather than a pie: the slices
+ * that matter here (block, rate_limited) are the small ones, and those
+ * are exactly what a pie renders unreadable. Ratios against a limit are
+ * meters. Eleven outcome classes are a table, because past ~7 classes a
+ * chart stops adding anything. The tier ladder is an ORDINAL ramp (one
+ * hue, light→dark) rather than categorical hues, because pass → silent
+ * → form → captcha is an ordered escalation, not four unrelated
+ * identities.
+ *
+ * Both ramps below were machine-validated (monotone lightness, adjacent
+ * ΔL ≥ 0.06, light end ≥ 2:1 against its own surface, single hue). The
+ * dark ramp is a separate selection, not an inversion of the light one —
+ * an inverted ramp fails the contrast check against #1a1a19.
+ * ====================================================================== */
+
+/* Ordinal tier ramp — validated light: 2.06:1 at the pale end. */
+/* Cookie state is categorical — distinct states, not a scale — so it
+ * takes the categorical theme's fixed slot order rather than the tier
+ * ramp. Slots 1-6 in order; their adjacent pairs (the pairlist a
+ * stacked bar uses) are a strict subset of the reference theme's
+ * validated eight, worst adjacent CVD dE 9.1 light / 8.4 dark against
+ * these exact surfaces. Three light slots sit under 3:1 on #fcfcfb, so
+ * the relief rule applies — bs_d_stacked direct-labels every series
+ * with its value, and identity never rides on colour alone. */
+#define BS_D_C1 "#2a78d6"
+#define BS_D_C2 "#eb6834"
+#define BS_D_C3 "#1baf7a"
+#define BS_D_C4 "#eda100"
+#define BS_D_C5 "#e87ba4"
+#define BS_D_C6 "#008300"
+
+#define BS_D_T1 "#86b6ef"
+#define BS_D_T2 "#5598e7"
+#define BS_D_T3 "#256abf"
+#define BS_D_T4 "#104281"
+
+/* Value of `key` in a query string, or NULL. Token-aware: matches at
+ * the start or after '&', so vh=1 cannot be read out of a parameter
+ * that merely contains "vh=". Replaces a chain of strstr() probes that
+ * worked only because no two parameter values could collide -- an
+ * invariant that stops holding the moment a parameter is added. */
+static const char *bs_d_qparam(apr_pool_t *pool, const char *args,
+                               const char *key)
+{
+    if (!args || !key) return NULL;
+    apr_size_t klen = strlen(key);
+    for (const char *p = args; *p; ) {
+        const char *amp = strchr(p, '&');
+        apr_size_t seglen = amp ? (apr_size_t)(amp - p) : strlen(p);
+        if (seglen > klen && p[klen] == '=' 
+            && strncasecmp(p, key, klen) == 0) {
+            return apr_pstrndup(pool, p + klen + 1, seglen - klen - 1);
+        }
+        if (!amp) break;
+        p = amp + 1;
+    }
+    return NULL;
+}
+
+static const char *bs_d_window_label(int span)
+{
+    switch (span) {
+    case 15:   return "last 15 min";
+    case 60:   return "last hour";
+    case 1440: return "last 24 h";
+    default:   return "since restart";
+    }
+}
+
+/* Percentage with one decimal, guarding the zero-denominator case that
+ * a quiet window makes routine rather than exceptional. */
+static const char *bs_d_pct(apr_pool_t *p, apr_uint64_t num, apr_uint64_t den)
+{
+    if (!den) return "—";
+    return apr_psprintf(p, "%.1f%%", (double)num * 100.0 / (double)den);
+}
+
+/* One segment of a horizontal stacked bar. Segments are drawn inside a
+ * rounded clip so the outer ends are 4px-rounded while internal joins
+ * stay square, and each is inset by a 2px surface gap. */
+static void bs_d_seg(request_rec *r, double x, double w, const char *fill,
+                     const char *label, apr_uint64_t v, const char *pct)
+{
+    if (w <= 0) return;
+    ap_rprintf(r,
+        "<rect x='%.2f' y='0' width='%.2f' height='34' fill='%s'>"
+        "<title>%s: %" APR_UINT64_T_FMT " (%s)</title></rect>",
+        x, w > 2 ? w - 2 : w, fill, label, v, pct);
+}
+
+static void bs_d_stacked(request_rec *r, const char *id, const char *title,
+                         const char **labels, const apr_uint64_t *vals,
+                         const char **fills, int n, apr_uint64_t total)
+{
+    ap_rprintf(r, "<section><h2>%s</h2>", title);
+    if (!total) {
+        ap_rputs("<p class='empty'>No decisions in this window.</p></section>", r);
+        return;
+    }
+    /* Unique clip id per chart: two elements sharing an id is invalid
+     * markup, and browsers resolve every reference to the first one. */
+    ap_rprintf(r,
+        "<svg viewBox='0 0 600 34' width='100%%' height='34' "
+        "role='img' preserveAspectRatio='none'>"
+        "<clipPath id='clip-%s'>"
+        "<rect x='0' y='0' width='600' height='34' rx='4'/></clipPath>"
+        "<g clip-path='url(#clip-%s)'>", id, id);
+    double x = 0;
+    for (int i = 0; i < n; i++) {
+        double w = 600.0 * (double)vals[i] / (double)total;
+        bs_d_seg(r, x, w, fills[i], labels[i], vals[i],
+                 bs_d_pct(r->pool, vals[i], total));
+        x += w;
+    }
+    ap_rputs("</g></svg><ul class='legend'>", r);
+    for (int i = 0; i < n; i++) {
+        /* Legend always present for >= 2 series, and every series is
+         * also direct-labelled with its value — identity is never
+         * carried by colour alone. Text stays in ink tokens; only the
+         * swatch wears the series colour. */
+        ap_rprintf(r, "<li><i style='background:%s'></i>%s "
+                      "<b>%" APR_UINT64_T_FMT "</b> <span>%s</span></li>",
+                   fills[i], labels[i], vals[i],
+                   bs_d_pct(r->pool, vals[i], total));
+    }
+    ap_rputs("</ul></section>", r);
+}
+
+/* Ratio against a limit — a meter on a same-hue track, not a two-slice pie. */
+static void bs_d_meter(request_rec *r, const char *label,
+                       apr_uint64_t used, apr_uint64_t cap)
+{
+    double frac = cap ? (double)used / (double)cap : 0.0;
+    if (frac > 1.0) frac = 1.0;
+    ap_rprintf(r,
+        "<div class='meter'><div class='mrow'><span>%s</span>"
+        "<span class='mval'>%" APR_UINT64_T_FMT " / %" APR_UINT64_T_FMT
+        " <b>%s</b></span></div>"
+        "<div class='track'><div class='fill' style='width:%.1f%%'></div></div></div>",
+        label, used, cap, bs_d_pct(r->pool, used, cap), frac * 100.0);
+}
+
+int bs_dashboard_handler(request_rec *r)
+{
+    apr_table_setn(r->subprocess_env, "BS_ENDPOINT", "obs");
+    int span = 60;
+    /* Auto-refresh seconds. Defaults to 30 because the common use is a
+     * page left open while watching traffic; r=0 turns it off. Offering
+     * the off switch is not optional politeness — WCAG 2.2.1 wants
+     * auto-updating content to be pausable or adjustable. */
+    int refresh = 30;
+    if (r->args) {
+        const char *wv = bs_d_qparam(r->pool, r->args, "w");
+        if (wv) {
+            if      (strcmp(wv, "15")   == 0) span = 15;
+            else if (strcmp(wv, "60")   == 0) span = 60;
+            else if (strcmp(wv, "1440") == 0) span = 1440;
+            else if (strcmp(wv, "all")  == 0) span = 0;
+        }
+        const char *rv = bs_d_qparam(r->pool, r->args, "r");
+        if (rv) {
+            if      (strcmp(rv, "0")  == 0) refresh = 0;
+            else if (strcmp(rv, "10") == 0) refresh = 10;
+            else if (strcmp(rv, "30") == 0) refresh = 30;
+            else if (strcmp(rv, "60") == 0) refresh = 60;
+        }
+    }
+    const char *wq = (span == 15) ? "15" : (span == 1440) ? "1440"
+                   : (span == 0)  ? "all" : "60";
+
+    /* Vhost tab. -1 is the aggregate and stays the default: the
+     * whole-server view is what an operator wants first, and it is the
+     * one guaranteed to agree with /botshield/metrics. */
+    int vsel = -1;
+    const bs_vhost_dir *vdir = bs_shm.vhost_dir;
+    {
+        const char *v = bs_d_qparam(r->pool, r->args, "vh");
+        if (v && strcmp(v, "all") != 0 && vdir) {
+            char *end = NULL;
+            long n = strtol(v, &end, 10);
+            if (end && *end == '\0' && n >= 0
+                && (apr_uint32_t)n < vdir->count) {
+                vsel = (int)n;
+            }
+        }
+    }
+    const char *vq = (vsel < 0) ? "all"
+                                : apr_psprintf(r->pool, "%d", vsel);
+
+    bs_metrics_window w;
+    bs_metrics_read_window(span, vsel, &w);
+    bs_gauges_refresh();
+
+    apr_uint64_t decisions  = w.decisions;
+    apr_uint64_t challenged = w.outcome[BS_M_OUTCOME_CHALLENGED];
+    /* One per solve, from both the captcha and the PoW path. Not
+     * cookie[ok] — that counts every request carrying a valid cookie,
+     * so one human browsing 50 pages would read as 50 solves. */
+    apr_uint64_t verified   = w.outcome[BS_M_OUTCOME_VERIFIED];
+    apr_uint64_t blocked    = w.outcome[BS_M_OUTCOME_BLOCK]
+                            + w.outcome[BS_M_OUTCOME_RATE_LIMITED];
+    /* Unsolved, not "pending": these clients did not stay waiting, they
+     * left. A high number is the module working, not a backlog. */
+    apr_uint64_t unsolved   = (challenged > verified) ? challenged - verified : 0;
+
+    ap_set_content_type(r, "text/html; charset=utf-8");
+    apr_table_setn(r->headers_out, "Cache-Control", "no-store");
+    apr_table_setn(r->headers_out, "X-Robots-Tag", "noindex, nofollow");
+
+    ap_rputs(
+      "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+      "<meta name='viewport' content='width=device-width,initial-scale=1'>", r);
+    if (refresh > 0) {
+        /* Carry the current window through the refresh, or the page
+         * would silently snap back to the default every interval. */
+        ap_rprintf(r,
+            "<meta http-equiv='refresh' "
+            "content='%d;url=?w=%s&amp;r=%d&amp;vh=%s'>",
+            refresh, wq, refresh, vq);
+    }
+    ap_rputs(
+      "<title>mod_botshield dashboard</title><style>"
+      ":root{--surface:#fcfcfb;--ink:#1a1a19;--ink2:#5c5c58;--muted:#8a8a84;"
+      "--line:#e4e4e0;--t1:" BS_D_T1 ";--t2:" BS_D_T2 ";--t3:" BS_D_T3 ";--t4:" BS_D_T4 ";"
+      "--c1:" BS_D_C1 ";--c2:" BS_D_C2 ";--c3:" BS_D_C3 ";"
+      "--c4:" BS_D_C4 ";--c5:" BS_D_C5 ";--c6:" BS_D_C6 ";"
+      "--track:#eef2f7;--good:#0ca30c;--warn:#fab219;--crit:#d03b3b;"
+      "--neutral:#8a8a84}"
+      "@media(prefers-color-scheme:dark){:root{--surface:#1a1a19;--ink:#f2f2ef;"
+      "--ink2:#b9b9b2;--muted:#8a8a84;--line:#33332f;"
+      /* Separate dark selection, validated against #1a1a19 — not a flip. */
+      "--t1:#3987e5;--t2:#6da7ec;--t3:#9ec5f4;--t4:#cde2fb;"
+      "--c1:#3987e5;--c2:#d95926;--c3:#199e70;--c4:#c98500;"
+      "--c5:#d55181;--c6:#008300;--track:#26262340}}"
+      "*{box-sizing:border-box}"
+      "body{margin:0;padding:28px 24px 56px;background:var(--surface);color:var(--ink);"
+      "font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}"
+      "main{max-width:860px;margin:0 auto}"
+      "h1{font-size:19px;margin:0 0 2px;font-weight:600}"
+      "h2{font-size:13px;font-weight:600;color:var(--ink2);margin:0 0 10px;"
+      "text-transform:uppercase;letter-spacing:.04em}"
+      ".sub{color:var(--muted);font-size:13px;margin:0 0 20px}"
+      "nav{display:flex;gap:6px;margin:0 0 26px;flex-wrap:wrap}"
+      "nav a{padding:5px 12px;border:1px solid var(--line);border-radius:999px;"
+      "text-decoration:none;color:var(--ink2);font-size:13px}"
+      "nav a.on{background:var(--t3);border-color:var(--t3);color:#fff}"
+      "nav.rf{align-items:center;margin-top:-16px;margin-bottom:26px}"
+      "nav.rf span{font-size:12px;color:var(--muted)}"
+      "nav.rf a{padding:3px 9px;font-size:12px}"
+      "nav.rf .ts{margin-left:auto;font-variant-numeric:tabular-nums}"
+      "section{margin:0 0 28px}"
+      ".kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}"
+      ".kpi{border:1px solid var(--line);border-radius:8px;padding:12px 14px}"
+      ".kpi .k{font-size:12px;color:var(--muted);margin-bottom:4px}"
+      ".kpi .v{font-size:27px;font-weight:600;letter-spacing:-.02em;line-height:1.1}"
+      ".kpi .n{font-size:12px;color:var(--muted);margin-top:2px}"
+      ".legend{list-style:none;display:flex;flex-wrap:wrap;gap:14px;padding:8px 0 0;margin:0}"
+      ".legend li{font-size:13px;color:var(--ink2);display:flex;align-items:center;gap:6px}"
+      ".legend i{width:10px;height:10px;border-radius:2px;display:inline-block}"
+      ".legend b{color:var(--ink);font-weight:600}"
+      ".legend span{color:var(--muted)}"
+      ".meter{margin:0 0 12px}"
+      ".mrow{display:flex;justify-content:space-between;font-size:13px;color:var(--ink2)}"
+      ".mval b{color:var(--ink)}"
+      ".track{height:8px;border-radius:4px;background:var(--track);margin-top:5px;overflow:hidden}"
+      ".fill{height:100%;background:var(--t3);border-radius:4px}"
+      "table{border-collapse:collapse;width:100%;font-size:14px}"
+      "th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}"
+      "th{font-size:12px;color:var(--muted);font-weight:600}"
+      "td.n{text-align:right;font-variant-numeric:tabular-nums}"
+      ".empty{color:var(--muted);font-size:14px;margin:0}"
+      "nav.vh{margin:-10px 0 18px;flex-wrap:wrap}"
+      "nav.vh a{font-size:12px}"
+      "footer{color:var(--muted);font-size:12px;margin-top:34px;border-top:1px solid var(--line);padding-top:12px}"
+      "</style></head><body><main>", r);
+
+    {
+        const char *scope = (vsel < 0)
+            ? "all vhosts"
+            : ap_escape_html(r->pool, vdir->name[vsel]);
+        ap_rprintf(r,
+            "<h1>mod_botshield</h1><p class='sub'>%s &middot; %s</p>",
+            bs_d_window_label(span), scope);
+    }
+
+    ap_rputs("<nav>", r);
+    const struct { const char *q, *t; int s; } wins[] = {
+        {"15", "15 min", 15}, {"60", "1 hour", 60},
+        {"1440", "24 hours", 1440}, {"all", "All time", 0} };
+    for (int i = 0; i < 4; i++) {
+        ap_rprintf(r, "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%s'>%s</a>",
+                   span == wins[i].s ? "on" : "", wins[i].q, refresh,
+                   vq, wins[i].t);
+    }
+    ap_rputs("</nav>", r);
+
+    /* Vhost tabs. Only worth drawing when there is more than one site
+     * to choose between; a single-vhost server gets no row rather than
+     * a row with one inert tab in it. */
+    if (vdir && vdir->count > 1) {
+        ap_rputs("<nav class='vh'>", r);
+        ap_rprintf(r, "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=all'>"
+                      "All vhosts</a>",
+                   vsel < 0 ? "on" : "", wq, refresh);
+        for (apr_uint32_t i = 0; i < vdir->count; i++) {
+            if (!vdir->name[i][0]) continue;
+            ap_rprintf(r,
+                "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%u'>%s</a>",
+                vsel == (int)i ? "on" : "", wq, refresh, i,
+                ap_escape_html(r->pool, vdir->name[i]));
+        }
+        ap_rputs("</nav>", r);
+    }
+
+    /* Refresh control, and a rendered-at stamp so a stale tab is
+     * obvious at a glance rather than quietly wrong. */
+    {
+        char ts[32];
+        apr_time_exp_t tm;
+        apr_time_exp_lt(&tm, apr_time_now());
+        apr_snprintf(ts, sizeof(ts), "%02d:%02d:%02d",
+                     tm.tm_hour, tm.tm_min, tm.tm_sec);
+        ap_rputs("<nav class='rf'><span>Auto-refresh</span>", r);
+        static const int opts[4] = { 0, 10, 30, 60 };
+        for (int i = 0; i < 4; i++) {
+            char lbl[8];
+            if (opts[i] == 0) apr_snprintf(lbl, sizeof(lbl), "Off");
+            else              apr_snprintf(lbl, sizeof(lbl), "%ds", opts[i]);
+            ap_rprintf(r,
+                       "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%s'>%s</a>",
+                       refresh == opts[i] ? "on" : "", wq, opts[i], vq, lbl);
+        }
+        ap_rprintf(r, "<span class='ts'>rendered %s</span></nav>", ts);
+    }
+
+    /* Site traffic first: it is the denominator everything below is a
+     * share of, and with the enable scoped to a <Location> the gap
+     * between requests and decisions is the single most important
+     * thing an operator can misread. */
+    ap_rputs("<section><h2>Site traffic (all vhosts)</h2><div class='kpis'>", r);
+    ap_rprintf(r, "<div class='kpi'><div class='k'>Requests</div>"
+                  "<div class='v'>%" APR_UINT64_T_FMT "</div></div>",
+               w.req_total);
+    ap_rprintf(r, "<div class='kpi'><div class='k'>With BS cookie</div>"
+                  "<div class='v'>%s</div><div class='n'>%" APR_UINT64_T_FMT
+                  " requests</div></div>",
+               bs_d_pct(r->pool, w.req_cookie, w.req_total), w.req_cookie);
+    ap_rprintf(r, "<div class='kpi'><div class='k'>Evaluated</div>"
+                  "<div class='v'>%s</div><div class='n'>%" APR_UINT64_T_FMT
+                  " reached a decision</div></div>",
+               bs_d_pct(r->pool, w.decisions, w.req_total), w.decisions);
+    ap_rputs("</div></section>", r);
+
+    /* Status class carries polarity (good -> bad), so it wears the
+     * reserved status tokens rather than categorical slots. 3xx takes a
+     * neutral: a redirect is not a warning, and saying so in colour
+     * would be a lie. Every segment is direct-labelled, which is also
+     * the required mitigation for the sub-3:1 light-surface steps. */
+    {
+        const char *labels[] = { "2xx", "3xx", "4xx", "5xx", "other" };
+        const char *fills[]  = { "var(--good)", "var(--neutral)",
+                                 "var(--warn)", "var(--crit)",
+                                 "var(--muted)" };
+        apr_uint64_t vals[]  = { w.req_status[BS_M_STATUS_2XX],
+                                 w.req_status[BS_M_STATUS_3XX],
+                                 w.req_status[BS_M_STATUS_4XX],
+                                 w.req_status[BS_M_STATUS_5XX],
+                                 w.req_status[BS_M_STATUS_OTHER] };
+        apr_uint64_t tot = 0;
+        for (int i = 0; i < 5; i++) tot += vals[i];
+        bs_d_stacked(r, "st", "Response status", labels, vals, fills, 5, tot);
+    }
+
+    /* What BotShield itself answered. Deliberately NOT a segment inside
+     * the status chart: on a healthy site the origin is ~99% of the
+     * bar, which would squeeze every BotShield response into an
+     * unreadable sliver. The share goes in a KPI, and the breakdown
+     * gets its own bar scaled to BotShield's own responses. */
+    {
+        apr_uint64_t ours = 0;
+        for (int i = 1; i < BS_M_RESP_COUNT; i++) ours += w.req_resp[i];
+
+        ap_rputs("<section><h2>Answered by BotShield</h2>"
+                 "<div class='kpis'>", r);
+        ap_rprintf(r, "<div class='kpi'><div class='k'>BotShield responses"
+                      "</div><div class='v'>%s</div>"
+                      "<div class='n'>%" APR_UINT64_T_FMT " of %"
+                      APR_UINT64_T_FMT " requests</div></div>",
+                   bs_d_pct(r->pool, ours, w.req_total), ours, w.req_total);
+        ap_rprintf(r, "<div class='kpi'><div class='k'>Origin</div>"
+                      "<div class='v'>%s</div><div class='n'>%"
+                      APR_UINT64_T_FMT " reached the app</div></div>",
+                   bs_d_pct(r->pool, w.req_resp[BS_M_RESP_ORIGIN],
+                            w.req_total),
+                   w.req_resp[BS_M_RESP_ORIGIN]);
+        ap_rputs("</div></section>", r);
+
+        /* Kinds of response, not a good-to-bad scale: a block is
+         * BotShield working, not a failure. So categorical slots
+         * rather than status tokens. Scaled to `ours`, so this reads
+         * as "of what we answered, what was it". */
+        const char *labels[] = { "challenge", "block", "rate limited",
+                                 "redirect", "endpoint", "dashboard" };
+        const char *fills[]  = { "var(--c1)", "var(--c2)", "var(--c3)",
+                                 "var(--c4)", "var(--c5)", "var(--neutral)" };
+        apr_uint64_t vals[]  = { w.req_resp[BS_M_RESP_CHALLENGE],
+                                 w.req_resp[BS_M_RESP_BLOCK],
+                                 w.req_resp[BS_M_RESP_RATE_LIMITED],
+                                 w.req_resp[BS_M_RESP_REDIRECT],
+                                 w.req_resp[BS_M_RESP_ENDPOINT],
+                                 w.req_resp[BS_M_RESP_OBSERVE] };
+        /* The instrument wears the neutral, not a categorical slot: it
+         * is not one of the policy responses, it is you looking. */
+        bs_d_stacked(r, "rk", "BotShield response breakdown", labels, vals,
+                     fills, 6, ours);
+    }
+
+    /* KPI row — a handful of headline numbers is a stat row, not a chart. */
+    ap_rputs("<section><h2>BotShield decisions</h2><div class='kpis'>", r);
+    ap_rprintf(r, "<div class='kpi'><div class='k'>Decisions</div>"
+                  "<div class='v'>%" APR_UINT64_T_FMT "</div></div>", decisions);
+    ap_rprintf(r, "<div class='kpi'><div class='k'>Challenge rate</div>"
+                  "<div class='v'>%s</div><div class='n'>%" APR_UINT64_T_FMT
+                  " issued</div></div>",
+               bs_d_pct(r->pool, challenged, decisions), challenged);
+    ap_rprintf(r, "<div class='kpi'><div class='k'>Solve rate</div>"
+                  "<div class='v'>%s</div><div class='n'>%" APR_UINT64_T_FMT
+                  " solved by a human</div></div>",
+               bs_d_pct(r->pool, verified, challenged), verified);
+    ap_rprintf(r, "<div class='kpi'><div class='k'>Blocked</div>"
+                  "<div class='v'>%" APR_UINT64_T_FMT "</div>"
+                  "<div class='n'>%s of decisions</div></div>",
+               blocked, bs_d_pct(r->pool, blocked, decisions));
+    ap_rputs("</div></section>", r);
+
+    /* Challenge resolution. Two parts, so a meter would also serve — the
+     * stacked bar is used for consistency with the tier bar below and
+     * because both counts are worth reading, not just the ratio. */
+    {
+        const char *labels[] = { "Solved by a human", "Unsolved (left)" };
+        const char *fills[]  = { "var(--t4)", "var(--t1)" };
+        apr_uint64_t vals[]  = { verified, unsolved };
+        bs_d_stacked(r, "res", "Challenge resolution", labels, vals,
+                     fills, 2, challenged);
+    }
+
+    /* Cookie state — categorical, not ordinal: these are distinct
+     * states, not a scale. Windowed now that the ring carries the
+     * dimension. Reads as the reputation-cookie health of the window:
+     * bad_sig/bad_format above noise means forgery or a secret
+     * mismatch, expired means TTL churn. */
+    {
+        const char *labels[] = { "ok", "minted", "absent",
+                                 "expired", "bad sig", "bad format" };
+        const char *fills[]  = { "var(--c1)", "var(--c2)", "var(--c3)",
+                                 "var(--c4)", "var(--c5)", "var(--c6)" };
+        apr_uint64_t vals[]  = { w.cookie[BS_M_COOKIE_OK],
+                                 w.cookie[BS_M_COOKIE_MINTED],
+                                 w.cookie[BS_M_COOKIE_ABSENT],
+                                 w.cookie[BS_M_COOKIE_EXPIRED],
+                                 w.cookie[BS_M_COOKIE_BAD_SIG],
+                                 w.cookie[BS_M_COOKIE_BAD_FORMAT] };
+        apr_uint64_t tot = 0;
+        for (int i = 0; i < 6; i++) tot += vals[i];
+        bs_d_stacked(r, "ck", "Reputation cookie state", labels, vals,
+                     fills, 6, tot);
+    }
+
+    /* Tier mix — ordinal escalation, one hue light to dark. */
+    {
+        const char *labels[] = { "pass", "silent", "form", "captcha" };
+        const char *fills[]  = { "var(--t1)", "var(--t2)", "var(--t3)", "var(--t4)" };
+        apr_uint64_t vals[]  = { w.tier[BS_M_TIER_PASS], w.tier[BS_M_TIER_SILENT],
+                                 w.tier[BS_M_TIER_FORM], w.tier[BS_M_TIER_CAPTCHA] };
+        apr_uint64_t tot = vals[0] + vals[1] + vals[2] + vals[3];
+        bs_d_stacked(r, "tier", "Tier mix", labels, vals, fills, 4, tot);
+    }
+
+    /* Live capacity — ratios against a limit, so meters. These are
+     * point-in-time gauges and ignore the window selector; labelled as
+     * such rather than left to imply they follow it. */
+    ap_rputs("<section><h2>Capacity now <span style='text-transform:none;"
+             "font-weight:400'>(live, not windowed)</span></h2>", r);
+    bs_d_meter(r, "Flagged IPs", bs_gauges.flagged_used,
+               (apr_uint64_t)bs_shm.flagged_capacity);
+    bs_d_meter(r, "Safeguard entries", bs_gauges.safeguard_used,
+               (apr_uint64_t)bs_shm.safeguard_capacity);
+    bs_d_meter(r, "Rate-limit strikes", bs_gauges.strike_used,
+               (apr_uint64_t)bs_shm.strike_capacity);
+    ap_rputs("</section>", r);
+
+    /* Eleven outcome classes is a table, not eleven hues. */
+    ap_rputs("<section><h2>Outcomes</h2><table><thead><tr><th>Outcome</th>"
+             "<th class='n'>Count</th><th class='n'>Share</th></tr></thead><tbody>", r);
+    {
+        static const char *onames[BS_M_OUTCOME_COUNT] = {
+            "allow", "challenged", "verified", "block", "failopen",
+            "rate_limited", "inflight_capped", "pending_missing",
+            "misconfigured", "debug", "redirect" };
+        int shown = 0;
+        for (int i = 0; i < BS_M_OUTCOME_COUNT; i++) {
+            if (!w.outcome[i]) continue;
+            ap_rprintf(r, "<tr><td>%s</td><td class='n'>%" APR_UINT64_T_FMT
+                          "</td><td class='n'>%s</td></tr>",
+                       onames[i], w.outcome[i],
+                       bs_d_pct(r->pool, w.outcome[i], decisions));
+            shown++;
+        }
+        if (!shown) ap_rputs("<tr><td colspan='3' class='empty'>"
+                             "Nothing recorded in this window.</td></tr>", r);
+    }
+    ap_rputs("</tbody></table></section>", r);
+
+    ap_rputs("<footer>Counters reset when the SHM segment is recreated, which "
+             "a graceful restart does. Windowed views are bucketed and "
+             "advisory: a writer crossing a bucket boundary can lose an "
+             "increment. &ldquo;Unsolved&rdquo; means a challenge was issued "
+             "and the client never came back &mdash; they are gone, not "
+             "queued.</footer></main></body></html>", r);
+    return OK;
+}
+
 int bs_metrics_handler(request_rec *r)
 {
+    apr_table_setn(r->subprocess_env, "BS_ENDPOINT", "obs");
     if (r->method_number != M_GET && r->method_number != M_OPTIONS) {
         r->status = HTTP_METHOD_NOT_ALLOWED;
         apr_table_setn(r->headers_out, "Allow", "GET, OPTIONS");
@@ -815,6 +1673,51 @@ int bs_metrics_handler(request_rec *r)
         "Decisions at tier=captcha (third-party provider widget served or verified).",
         bs_mload(&m->tier[BS_M_TIER_CAPTCHA]));
 
+    bs_m_emit_counter(r, "requests_total",
+        "Every request the server logged, on every vhost, whether or "
+        "not BotShield evaluated it. Denominator for coverage.",
+        bs_mload(&m->req_total));
+    bs_m_emit_counter(r, "requests_with_cookie_total",
+        "Requests that arrived carrying a BotShield session cookie.",
+        bs_mload(&m->req_cookie));
+    bs_m_emit_counter(r, "requests_status_2xx_total",
+        "Requests answered 2xx.", bs_mload(&m->req_status[BS_M_STATUS_2XX]));
+    bs_m_emit_counter(r, "requests_status_3xx_total",
+        "Requests answered 3xx.", bs_mload(&m->req_status[BS_M_STATUS_3XX]));
+    bs_m_emit_counter(r, "requests_status_4xx_total",
+        "Requests answered 4xx (includes BotShield blocks).",
+        bs_mload(&m->req_status[BS_M_STATUS_4XX]));
+    bs_m_emit_counter(r, "requests_status_5xx_total",
+        "Requests answered 5xx.", bs_mload(&m->req_status[BS_M_STATUS_5XX]));
+    bs_m_emit_counter(r, "requests_status_other_total",
+        "Requests answered outside 2xx-5xx (1xx, or no status recorded).",
+        bs_mload(&m->req_status[BS_M_STATUS_OTHER]));
+
+    bs_m_emit_counter(r, "responses_origin_total",
+        "Requests the application answered (BotShield did not respond).",
+        bs_mload(&m->req_resp[BS_M_RESP_ORIGIN]));
+    bs_m_emit_counter(r, "responses_challenge_total",
+        "Responses where BotShield served an interstitial.",
+        bs_mload(&m->req_resp[BS_M_RESP_CHALLENGE]));
+    bs_m_emit_counter(r, "responses_block_total",
+        "Responses where BotShield refused the request.",
+        bs_mload(&m->req_resp[BS_M_RESP_BLOCK]));
+    bs_m_emit_counter(r, "responses_rate_limited_total",
+        "Responses where BotShield rate-limited or shed the request.",
+        bs_mload(&m->req_resp[BS_M_RESP_RATE_LIMITED]));
+    bs_m_emit_counter(r, "responses_redirect_total",
+        "Responses where BotShield issued a safeguard redirect.",
+        bs_mload(&m->req_resp[BS_M_RESP_REDIRECT]));
+    bs_m_emit_counter(r, "responses_endpoint_total",
+        "Responses served by a functional BotShield endpoint "
+        "(verify, bootstrap, assets).",
+        bs_mload(&m->req_resp[BS_M_RESP_ENDPOINT]));
+    bs_m_emit_counter(r, "responses_observe_total",
+        "Responses served by an observability endpoint (dashboard, "
+        "metrics, policy-status) -- the measuring instrument, counted "
+        "so it can be discounted.",
+        bs_mload(&m->req_resp[BS_M_RESP_OBSERVE]));
+
     bs_m_emit_counter(r, "outcome_allow_total",
         "Decisions that let the request through (pass tier, asset bypass, "
         "silent embedded pass-through, safeguard pass).",
@@ -823,7 +1726,8 @@ int bs_metrics_handler(request_rec *r)
         "Decisions that served an interstitial.",
         bs_mload(&m->outcome[BS_M_OUTCOME_CHALLENGED]));
     bs_m_emit_counter(r, "outcome_verified_total",
-        "Captcha verifications that passed siteverify.",
+        "Challenges completed successfully: captcha siteverify OK, or "
+        "an embedded-verify PoW accepted. One per solve.",
         bs_mload(&m->outcome[BS_M_OUTCOME_VERIFIED]));
     bs_m_emit_counter(r, "outcome_block_total",
         "Requests blocked: invalid cookie, failed captcha verify, "

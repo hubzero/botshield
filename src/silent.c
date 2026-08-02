@@ -858,6 +858,16 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
     }
     r->status = HTTP_NO_CONTENT;
     apr_table_setn(r->headers_out, "Cache-Control", "no-store");
+    /* Decision log + metrics: this is the only place a silent/form PoW
+     * solve becomes observable. Without it `outcome=verified` came
+     * solely from captcha siteverify, so a deployment running the PoW
+     * tiers with no captcha provider reported a permanent 0% solve
+     * rate while the challenge was in fact being solved. The client
+     * returns on a fresh request that reads cookie=ok, but that counts
+     * requests-with-a-cookie, not solves — one human browsing 50 pages
+     * logs 50 of them. The mint is the one-per-solve event. */
+    bs_decision_log(r, "silent", "verified", "minted", "-", "-",
+                    "pow_ok", 0);
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
         "mod_botshield: embedded-verify(pow-gcm): cookie minted "
         "(counter=%d)", counter);

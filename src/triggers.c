@@ -212,6 +212,7 @@ static void bs_trigger_action_init(bs_trigger_family fam,
     }
     a->penalty         = 0;
     a->credit          = 0;
+    a->tier_floor      = -1;
     a->redirect_url    = NULL;
     a->log_tag         = NULL;
     a->status_explicit = 0;
@@ -305,6 +306,18 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
             a->status_code = (int)code;
         }
         a->status_explicit = 1;
+    } else if (BS_AK("tier")) {
+        if      (!strcasecmp(val, "pass"))    a->tier_floor = BS_TIER_PASS;
+        else if (!strcasecmp(val, "silent"))  a->tier_floor = BS_TIER_SILENT;
+        /* "form" and "hard" are the same tier: the decision log and
+         * metrics call it form, the threshold directive calls it
+         * BotShieldScoreHard. Accept both rather than make the
+         * operator remember which surface they are on. */
+        else if (!strcasecmp(val, "form")
+                 || !strcasecmp(val, "hard"))  a->tier_floor = BS_TIER_HARD;
+        else if (!strcasecmp(val, "captcha")) a->tier_floor = BS_TIER_CAPTCHA;
+        else return apr_psprintf(pool,
+            "%s: tier='%s' must be pass/silent/form/captcha", dname, val);
     } else if (BS_AK("redirect")) {
         if (fam == BS_TFAMILY_ENV || fam == BS_TFAMILY_LOAD) {
             return apr_psprintf(pool,
@@ -543,6 +556,30 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
 
     if (is_pass) {
         if (fam == BS_TFAMILY_REQUEST) {
+            if (a->tier_floor >= 0 || a->penalty || a->credit) {
+                /* tier= turns the match into "challenge this", not
+                 * "ignore this". Score contribution and the floor
+                 * both apply, and we return CONTINUE so the caller
+                 * keeps walking into the scoring pipeline instead of
+                 * declining out of the handler. */
+                /* status=pass with score-shaping and/or a tier
+                 * demand. Either way the request must reach the
+                 * scoring pipeline, so CONTINUE rather than the bare
+                 * pass's DECLINE. A bare status=pass with neither key
+                 * keeps its original log-only meaning below. */
+                int d = a->penalty - a->credit;
+                const char *why = (a->tier_floor >= 0)
+                    ? apr_pstrcat(r->pool, family_tag, ":", trigger_name,
+                                  ":tier-", bs_tier_name(a->tier_floor),
+                                  NULL)
+                    : apr_pstrcat(r->pool, family_tag, ":", trigger_name,
+                                  NULL);
+                bs_score_add(r, d, 0, why);
+                if (a->tier_floor >= 0) {
+                    bs_set_request_tier_floor(r, a->tier_floor);
+                }
+                return BS_TEXEC_PASS_CONTINUE;
+            }
             /* Path pass: record the match for the decision-log
              * reason trace but do NOT bump the score. "pass" here
              * means "don't enforce anything on this request" — the

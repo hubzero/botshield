@@ -99,7 +99,18 @@ static const bs_heuristic_def bs_heuristic_defs[] = {
       bs_pred_missing_al },
     { { "scraper-ua",      BS_H_SCRAPER_UA,      BS_HP_HEADER,      50 },
       bs_pred_scraper_ua },
-    { { "first-sight-ip",  BS_H_FIRST_SIGHT_IP,  BS_HP_POST_COOKIE,  5 },
+    /* 20 == BS_DEFAULT_SCORE_SILENT, deliberately. Both post-cookie
+     * heuristics fire only when the request carries no usable cookie,
+     * so together they mean "no session context". dropped-cookie (known
+     * IP) was already 25 and acted on; first-sight-ip (new IP) sat at 5
+     * and did not, which left exactly one hole: a crawler spreading one
+     * request across many addresses is first-sight every time and was
+     * never challenged on score alone. Setting it to the silent
+     * threshold closes that without an operator having to write a rule
+     * -- an enabled scope now challenges any request with no session
+     * context, invisibly, and a real browser clears it in one
+     * auto-submitted round trip. */
+    { { "first-sight-ip",  BS_H_FIRST_SIGHT_IP,  BS_HP_POST_COOKIE, 20 },
       bs_pred_first_sight_ip },
     { { "dropped-cookie",  BS_H_DROPPED_COOKIE,  BS_HP_POST_COOKIE, 25 },
       bs_pred_dropped_cookie },

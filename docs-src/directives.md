@@ -262,10 +262,13 @@ SHM tables. Default `/64` is per-subscriber for typical ISP
 allocations; tighter values (`/56`, `/48`) flag larger blocks of
 addresses sharing reputation.
 
-`BotShieldStateFile` enables crash-durable persistence; the
-periodic save requires `mod_watchdog`, the graceful-shutdown save
-runs regardless. State format mismatches on load reject the file
-with a NOTICE and start fresh — never a startup failure.
+`BotShieldStateFile` enables crash-durable persistence for the
+flagged-IP table, the Bloom filters, and the metrics counters and
+dashboard bucket rings. Rate-limit counters are deliberately
+excluded — see [Deployment](deployment.md). The periodic save
+requires `mod_watchdog`, the graceful-shutdown save runs regardless.
+State format mismatches on load reject the file with a NOTICE and
+start fresh — never a startup failure.
 
 ## UA classification and allow list
 
@@ -476,6 +479,34 @@ predicates (`cookie=<n>`, `cookie=<n>~<substr>`, `bs-cookie=<state>`)
 stay on [`BotShieldCookieTrigger`](#triggers) — that vocabulary does not
 compress into one key.
 
+**What a matching rule can do.** Four outcomes, set by the action keys:
+
+| Intent | Keys | Effect |
+|---|---|---|
+| Block | `status=403` (family default) | Refused from the policy walk. No scoring, no cookie mint, no render. |
+| Challenge | `status=pass tier=silent` | Invisible auto-submitting check. `tier=form` for the visible one. |
+| Captcha | `status=pass tier=captcha` | The configured provider's widget. |
+| Score only | `status=pass penalty=<n>` | Adds to the score and lets normal thresholds decide. |
+
+`tier=` and `penalty=` both require `status=pass`, because a concrete
+status short-circuits the request before any tier is chosen. `tier=`
+accepts `pass`, `silent`, `form` (alias `hard`) and `captcha`, and
+composes by MAX with the score-derived tier and any flag tier floor —
+it raises the floor, it never downgrades.
+
+`tier=` sets that floor on **this request only**. That is the
+difference from `flag=` plus a `BotShieldFlagTrigger` tier floor, which
+writes per-IP state with a TTL: a client that solves the challenge
+would keep being re-challenged for the life of a flag it has no way to
+clear. Use `flag=` when you want the reputation to persist, `tier=`
+when you want to challenge the request in front of you.
+
+> A bare `status=pass` — with neither `tier=` nor `penalty=` — keeps its
+> original meaning of "record the match and decline out of the handler".
+> That skips scoring entirely, so it will *disable* challenges the
+> defaults would otherwise have raised on those requests. It is a
+> logging-and-flagging form, not a no-op.
+
 ```apache
 # cookieless crawler walking a login redirect chain: path AND query AND
 # cookie-state, one cheap 403 from the policy walk, tagged for fail2ban
@@ -597,8 +628,18 @@ not separate directives.
 | `missing-ua` | User-Agent absent or empty | `score add=40` |
 | `missing-al` | Accept-Language absent | `score add=15` |
 | `scraper-ua` | UA contains a known HTTP-library token | `score add=50` |
-| `first-sight-ip` | Bloom-filter miss — genuinely new IP | `score add=5` |
+| `first-sight-ip` | Bloom-filter miss — genuinely new IP, arriving with no usable cookie | `score add=20` |
 | `dropped-cookie` | Bloom-known IP arriving with no usable cookie | `score add=25` |
+
+`first-sight-ip` and `dropped-cookie` are the two halves of one signal —
+both fire only when the request carries no usable cookie, differing on
+whether the IP is already in the Bloom filter. `first-sight-ip` sits at
+exactly `BotShieldScoreSilent`, so **an enabled scope challenges any
+request with no session context by default**, with no rule to write.
+That is usually what you want on a login or registration path, where the
+check is invisible and a real browser clears it in one auto-submitted
+round trip. Lower it if you enable BotShield site-wide and would rather
+new visitors reach content without a check.
 
 Action verbs are `action=score add=N` (signed, -1000..1000) and
 `action=tier_floor min=<tier>`. `<name> reset` clears the compiled-in

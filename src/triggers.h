@@ -95,6 +95,14 @@ typedef struct {
      * probes. The module's own decision record is unaffected. See
      * bs_suppress_access_log in metrics.h for what it costs. */
     int           suppress_access_log;
+    /* tier=<t>: route the match into a challenge tier instead of
+     * refusing it. -1 = unset. Distinct from flag= + a flag-trigger
+     * tier_floor, which writes per-IP state with a TTL: this applies
+     * to THIS request only, so a client that solves the challenge is
+     * not re-challenged on its next request by a flag it cannot
+     * clear. Only meaningful alongside status=pass -- a concrete
+     * status short-circuits before any tier is chosen. */
+    int          tier_floor;
 } bs_trigger_action;
 
 /* ======================================================================
