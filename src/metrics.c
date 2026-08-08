@@ -1025,6 +1025,63 @@ static int bs_resp_kind_idx(request_rec *r)
     return BS_M_RESP_ORIGIN;
 }
 
+/* The invariant: if BotShield produced the response, the application did
+ * not, so the client cannot have received a 2xx.
+ *
+ * Only the four kinds that mean "refused or intercepted" are asserted.
+ * The exclusions are not oversights:
+ *   ORIGIN    — the application answering is the correct outcome.
+ *   ENDPOINT  — verify, embedded.js, assets: 200 is their success case.
+ *   OBSERVE   — dashboard / metrics / policy-status, likewise.
+ * `~`-prefixed counterfactuals and allow/verified already bin as ORIGIN
+ * inside bs_resp_kind_idx, so LogOnly never trips this.
+ *
+ * `status` is the end of the internal-redirect chain — what the client
+ * actually received — while the response kind comes from the origin
+ * request, which is where the decision was recorded. Comparing across
+ * the chain is the entire point: a rewrite re-dispatching to the
+ * application after BotShield answered is precisely the fault this
+ * catches.
+ *
+ * Counter first, log second, and the log throttled to one line a minute
+ * across all workers: this runs on every request, so a systematic fault
+ * would otherwise write one line per request into a decision log that
+ * already measured 258 MB/hour under flood. The counter is the
+ * monitorable signal; the log line just tells you where to look. */
+static void bs_check_resp_status_invariant(request_rec *r, int resp_idx,
+                                           int status_idx, int status)
+{
+    if (status_idx != BS_M_STATUS_2XX)   return;
+    if (resp_idx != BS_M_RESP_CHALLENGE
+        && resp_idx != BS_M_RESP_BLOCK
+        && resp_idx != BS_M_RESP_RATE_LIMITED
+        && resp_idx != BS_M_RESP_REDIRECT) return;
+    if (!bs_shm.metrics) return;
+
+    __atomic_fetch_add(&bs_shm.metrics->resp_status_mismatch_total, 1,
+                       __ATOMIC_RELAXED);
+
+    if (!bs_shm.header) return;
+    apr_time_t now_t = apr_time_now();
+    apr_int64_t prev = __atomic_load_n(&bs_shm.header->resp_mismatch_warn_us,
+                                       __ATOMIC_RELAXED);
+    if (now_t - (apr_time_t)prev > apr_time_from_sec(60)
+        && __atomic_compare_exchange_n(&bs_shm.header->resp_mismatch_warn_us,
+                                       &prev, (apr_int64_t)now_t, 0,
+                                       __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+        const char *o = apr_table_get(r->subprocess_env, "BS_OUTCOME");
+        ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+            "mod_botshield: response-kind/status mismatch: recorded "
+            "outcome=%s but the client received %d -- the application "
+            "answered a request BotShield reported as handled. "
+            "Enforcement is being overstated; check for an ErrorDocument "
+            "or a rewrite re-dispatching after the handler. uri=%s "
+            "(botshield_resp_status_mismatch_total is the running count; "
+            "further lines throttled to one per minute)",
+            o ? o : "-", status, r->uri ? r->uri : "-");
+    }
+}
+
 static int bs_status_class_idx(int status)
 {
     if (status >= 200 && status < 300) return BS_M_STATUS_2XX;
@@ -1058,11 +1115,14 @@ int bs_propagate_decision_env(request_rec *r)
         /* Classification is computed once at post_read_request and
          * cached on r->pool, so reading it here is a pointer deref. */
         const bs_ua_class *uac = bs_classify_request_ua(r);
+        int status_idx = bs_status_class_idx(fwd->status);
+        int resp_idx   = bs_resp_kind_idx(r);
         bs_metrics_traffic_add(scfg_t ? scfg_t->vhost_idx : -1,
-                               bs_status_class_idx(fwd->status), has_cookie,
-                               bs_resp_kind_idx(r),
+                               status_idx, has_cookie, resp_idx,
                                uac ? bs_m_class_idx(uac->label)
                                    : BS_M_CLASS_UNKNOWN);
+        bs_check_resp_status_invariant(r, resp_idx, status_idx,
+                                       fwd->status);
     }
 
     if (fwd != r) {
@@ -1817,6 +1877,89 @@ int bs_dashboard_handler(request_rec *r)
                      fills, 6, ours);
     }
 
+    /* Rate limiting, broken out of the response bar above.
+     *
+     * It earns its own section for a display reason and a semantic one.
+     * Display: rate-limited is routinely a fraction of a percent of
+     * BotShield's responses, which is around a pixel of a 600px bar —
+     * the <title> is there but the segment is too narrow to hover, so
+     * the bar cannot answer "is the rate limit doing anything".
+     * Semantic: the others are per-request verdicts on a client, while
+     * this is a budget decision about a crawler across all its IPs. It
+     * is tuned with different directives and read on a different
+     * cadence.
+     *
+     * MIND THE TIME BASES — they are deliberately not the same, and
+     * mixing them silently is how a dashboard starts lying:
+     *   - "429s in this window" is windowed, from req_resp[], and moves
+     *     with the w= selector like everything else on the page.
+     *   - enforced/observed totals are plain bs_metrics fields, so they
+     *     are cumulative SINCE RESTART regardless of w=. They are
+     *     labelled as such rather than being quietly rescaled.
+     *   - and they are read from the GLOBAL block, not the per-vhost
+     *     one, because bot_rate.c and policy.c only ever increment
+     *     bs_shm.metrics->. There is no per-vhost copy to select, so
+     *     with vh= set these two do not narrow with the rest of the
+     *     page. Labelled "all vhosts" for that reason; do not "fix" it
+     *     by pointing them at bs_vhost_block(), which would read a
+     *     field nothing writes and render a confident zero.
+     * Both totals also span BOTH families — BotShieldBotRateLimit
+     * (slug-keyed) and BotShieldRateLimit (cohort) — because
+     * bot_rate.c and policy.c increment the same pair. On a host with
+     * only one family configured that is the same number; on a host
+     * with both it is a sum, and the split is not recoverable here.
+     *
+     * Not shown, because the counters do not exist: which bot slugs are
+     * being limited. That is per-holder state and needs a cumulative
+     * counter on bs_bot_rate_slot; until then the decision log is the
+     * only place to get it:
+     *   grep -oE 'bot-rate:[a-z0-9-]+' botshield.log | sort | uniq -c
+     */
+    {
+        /* Recomputed, not borrowed: `ours` above is scoped to the
+         * response-breakdown block. */
+        apr_uint64_t rl_total = 0;
+        for (int i = 1; i < BS_M_RESP_COUNT; i++) rl_total += w.req_resp[i];
+
+        apr_uint64_t rl_win = w.req_resp[BS_M_RESP_RATE_LIMITED];
+        apr_uint64_t enforced = 0, observed = 0;
+        if (bs_shm.metrics) {
+            enforced = bs_mload(&bs_shm.metrics->rate_limit_exceeded_total);
+            observed = bs_mload(&bs_shm.metrics->rate_limit_observed_total);
+        }
+
+        ap_rputs("<section><h2>Rate limiting</h2><div class='kpis'>", r);
+        ap_rprintf(r, "<div class='kpi'><div class='k'>429s issued</div>"
+                      "<div class='v'>%" APR_UINT64_T_FMT "</div>"
+                      "<div class='n'>%s of BotShield responses, %s</div>"
+                      "</div>",
+                   rl_win, bs_d_pct(r->pool, rl_win, rl_total),
+                   bs_d_window_label(span));
+        ap_rprintf(r, "<div class='kpi'><div class='k'>Enforced</div>"
+                      "<div class='v'>%" APR_UINT64_T_FMT "</div>"
+                      "<div class='n'>all vhosts, since restart</div></div>",
+                   enforced);
+        ap_rprintf(r, "<div class='kpi'><div class='k'>Observed</div>"
+                      "<div class='v'>%" APR_UINT64_T_FMT "</div>"
+                      "<div class='n'>would have 429'd, all vhosts</div>"
+                      "</div>", observed);
+        ap_rputs("</div>", r);
+
+        /* Enforced vs observed is the tuning question — how much of the
+         * configured limit is actually acting. Only drawn when there is
+         * something to draw; a site with rate limiting off should show
+         * the KPIs reading zero, not an empty chart frame. */
+        if (enforced || observed) {
+            const char *rl_labels[] = { "enforced", "observed" };
+            const char *rl_fills[]  = { "var(--c3)", "var(--neutral)" };
+            apr_uint64_t rl_vals[]  = { enforced, observed };
+            bs_d_stacked(r, "rl", "Rate limit: enforced vs observed",
+                         rl_labels, rl_vals, rl_fills, 2,
+                         enforced + observed);
+        }
+        ap_rputs("</section>", r);
+    }
+
     /* KPI row — a handful of headline numbers is a stat row, not a chart. */
     ap_rputs("<section><h2>BotShield decisions</h2><div class='kpis'>", r);
     ap_rprintf(r, "<div class='kpi'><div class='k'>Decisions</div>"
@@ -2151,6 +2294,15 @@ int bs_metrics_handler(request_rec *r)
         "(per-rule mode=observe or BotShieldEnabled LogOnly); rule "
         "would have returned 429 but didn't.",
         bs_mload(&m->rate_limit_observed_total));
+    bs_m_emit_counter(r, "resp_status_mismatch_total",
+        "Requests recorded as answered BY BotShield (challenge, block, "
+        "rate-limit, safeguard redirect) where the client nevertheless "
+        "received a 2xx, i.e. the application answered. Mutually "
+        "exclusive by construction: ALERT ON ANY NON-ZERO VALUE. A "
+        "non-zero count means the decision log is overstating "
+        "enforcement -- typically an ErrorDocument or a rewrite "
+        "re-dispatching after the handler ran.",
+        bs_mload(&m->resp_status_mismatch_total));
     bs_m_emit_counter(r, "trigger_observed_total",
         "Trigger matches (path/cookie/env/load) that ran in observe "
         "mode across all families.",

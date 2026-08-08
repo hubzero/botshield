@@ -412,7 +412,15 @@ typedef struct {
     apr_int64_t   probe_warn_flagged_us;
     apr_int64_t   probe_warn_strike_us;
     apr_int64_t   probe_warn_safeguard_us;
-    apr_uint32_t  _pad_cl2[6];
+    /* Log-throttle for the response-kind/status invariant (see
+     * resp_status_mismatch_total). Same shared-across-workers shape as
+     * the probe-saturation throttles above: this fires from
+     * log_transaction, which runs on every request, so an unthrottled
+     * warning would be one log line per request under a systematic
+     * fault -- exactly when the log is least affordable. Carved from
+     * the trailing pad so the header keeps its size. */
+    apr_int64_t   resp_mismatch_warn_us;
+    apr_uint32_t  _pad_cl2[4];
 } bs_shm_header;
 
 
@@ -522,6 +530,27 @@ typedef struct {
     /* E12 — log-only / observe-mode counters. */
     apr_uint64_t rate_limit_observed_total;
     apr_uint64_t trigger_observed_total;
+    /* Requests where BotShield recorded that IT produced the response
+     * -- challenge, block, rate-limit, safeguard redirect -- and the
+     * client nevertheless received a 2xx, i.e. the application answered.
+     * The two are mutually exclusive by construction, so this counter
+     * should read zero forever.
+     *
+     * It exists because both halves of the comparison were already being
+     * computed side by side in bs_propagate_decision_env and then filed
+     * into separate marginal tallies (req_resp[] and req_status[]),
+     * which cannot express "these two happened on the SAME request".
+     * You could read 500 challenges and 40,000 2xx off /metrics and
+     * never learn whether any single request was both.
+     *
+     * What a non-zero value means: something downstream overrode
+     * BotShield's response -- an ErrorDocument, an internal redirect
+     * re-dispatching to the handler -- and the decision log is
+     * overstating enforcement. That is the silent-failure shape this
+     * deployment has been bitten by: green configtest, running httpd,
+     * nothing alerting, traffic unprotected. A counter that should be
+     * zero is the cheapest way to make it loud. */
+    apr_uint64_t resp_status_mismatch_total;
     /* Windowed views of tier/outcome — see bs_metrics_slot above. */
     bs_metrics_slot min_slots [BS_M_MIN_SLOTS];
     bs_metrics_slot hour_slots[BS_M_HOUR_SLOTS];
