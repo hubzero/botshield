@@ -765,6 +765,10 @@ static void bs_resolve_flag_triggers(apr_pool_t *pconf, server_rec *s)
         bs_server_cfg *vcfg = ap_get_module_config(sv->module_config,
                                                    &botshield_module);
         if (!vcfg) continue;
+        /* Aliased server configs are reachable more than once in
+         * this walk; resolving twice would re-seed the defaults on
+         * top of the previous result. See bs_server_cfg. */
+        if (vcfg->flag_triggers_resolved) continue;
         apr_array_header_t *operator_decls = vcfg->flag_triggers;
         apr_array_header_t *combined = apr_array_make(pconf,
             BS_DEFAULT_FLAG_TRIGGER_COUNT
@@ -818,6 +822,7 @@ static void bs_resolve_flag_triggers(apr_pool_t *pconf, server_rec *s)
             *(bs_flag_trigger_entry **)apr_array_push(resolved) = e;
         }
         vcfg->flag_triggers = resolved;
+        vcfg->flag_triggers_resolved = 1;
     }
 }
 
@@ -869,6 +874,10 @@ static void bs_resolve_heuristic_triggers(apr_pool_t *pconf,
         bs_server_cfg *vcfg = ap_get_module_config(sv->module_config,
                                                    &botshield_module);
         if (!vcfg) continue;
+        /* Aliased server configs are reachable more than once in
+         * this walk; resolving twice would re-seed the defaults on
+         * top of the previous result. See bs_server_cfg. */
+        if (vcfg->heuristic_triggers_resolved) continue;
         apr_array_header_t *operator_decls = vcfg->heuristic_triggers;
         apr_array_header_t *combined = apr_array_make(pconf,
             BS_DEFAULT_HEURISTIC_TRIGGER_COUNT
@@ -923,6 +932,7 @@ static void bs_resolve_heuristic_triggers(apr_pool_t *pconf,
             *(bs_heuristic_trigger_entry **)apr_array_push(resolved) = e;
         }
         vcfg->heuristic_triggers = resolved;
+        vcfg->heuristic_triggers_resolved = 1;
     }
 }
 

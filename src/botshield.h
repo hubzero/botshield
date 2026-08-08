@@ -379,6 +379,25 @@ typedef struct bs_server_cfg {
      * Holds bs_heuristic_trigger_entry*; resolved at post_config from
      * defaults + operator declarations + reset sentinels. */
     apr_array_header_t *heuristic_triggers;
+    /* Idempotence guards for the two post_config resolvers.
+     *
+     * bs_resolve_flag_triggers and bs_resolve_heuristic_triggers each
+     * read and write the SAME field: it carries operator declarations on
+     * input and the fully resolved list on output. That is only safe if
+     * every bs_server_cfg is visited exactly once. It is not guaranteed
+     * -- these configs are shared between server_recs, because
+     * bs_merge_rule_array returns the caller's array object unchanged
+     * when one side is empty (`if (nadd == 0) return base;`). A second
+     * visit then treats the first visit's output, compiled-in defaults
+     * included, as operator input and seeds the defaults again.
+     *
+     * Observed on a HubZero hub with 102 namevhosts and the config at
+     * main scope: every heuristic fired 107 times. first-sight-ip (20)
+     * scored 2140, dropped-cookie (25) scored 2675,
+     * missing-accept-language (5) scored 535 -- all exactly x107, which
+     * pushed ordinary browsers into the captcha tier. */
+    int                 flag_triggers_resolved;
+    int                 heuristic_triggers_resolved;
     apr_array_header_t *session_names;
     /* E2.2 — robots.txt enforcement. */
     const char         *robots_txt_path;
