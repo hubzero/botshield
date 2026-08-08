@@ -612,6 +612,7 @@ Allow-list and policy counters:
 | `botshield_rate_limit_exceeded_total` | counter | Total rate-limit 429s |
 | `botshield_rate_limit_observed_total` | counter | Observe-mode rate-limit matches |
 | `botshield_trigger_observed_total` | counter | Observe-mode trigger matches across families (path/cookie/env/load/scope) |
+| `botshield_resp_status_mismatch_total` | counter | **Should always be 0 — alert on any non-zero value.** Requests recorded as answered by BotShield (challenge / block / rate-limit / safeguard redirect) where the client nevertheless received a 2xx, meaning the application answered. See [Invariant check](#invariant-check) below. |
 
 Plus SHM utilization gauges (computed at scrape time, cached 1 s
 per worker):
@@ -627,6 +628,51 @@ per worker):
 | `botshield_cv_rate_slot_capacity`, `botshield_cv_log_slot_capacity` | gauge | Captcha-verify rate / log-throttle slot capacity |
 | `botshield_load_state` | gauge | Current load tier (0=normal, 1=warm, 2=hot) |
 | `botshield_load_state_changes_total` | counter | Load-state transitions since startup |
+
+### Invariant check
+
+`botshield_resp_status_mismatch_total` is not a workload metric. It
+counts violations of a claim the module makes about itself, and the only
+correct value is **0**.
+
+When BotShield records `outcome=challenged`, `block`, `rate_limited` or a
+safeguard `redirect`, it is asserting that *it* produced the response and
+the application never ran. The interstitial sets `403`, a block sets
+`403`, rate-limiting sets `429`, the safeguard sets `302` — so a client
+receiving a **2xx** on such a request means the application answered
+after all, and the decision log is overstating enforcement.
+
+Both halves of that comparison were already being computed side by side
+at `log_transaction` — the response kind from the origin request, the
+final status from the end of the internal-redirect chain — and then filed
+into two separate marginal tallies (`req_resp[]` and `req_status[]`).
+Marginals cannot express "these two happened on the *same* request": you
+could read 500 challenges and 40,000 2xx off a scrape and never learn
+whether any single request was both. This counter closes that gap.
+
+Excluded by design, because a 2xx is their correct outcome: `origin`
+(the application answering), the module's own endpoints (`verify`,
+`embedded.js`, assets), and the observability endpoints. `~`-prefixed
+counterfactuals and `allow`/`verified` already bin as `origin`, so
+LogOnly and shadow mode never trip it.
+
+A non-zero value almost always means something downstream overrode
+BotShield's response — an `ErrorDocument`, or a rewrite re-dispatching to
+the application after the handler ran. That is the silent-failure shape
+worth alerting on: green configtest, running httpd, nothing else
+complaining, and traffic quietly less protected than the logs claim.
+
+The module also emits one `WARNING` to the error log naming the outcome,
+the status and the URI, **throttled to one line per minute** across all
+workers — this check runs on every request, so an unthrottled line would
+mean one log entry per request exactly when the fault is systematic. The
+counter is the signal to alert on; the log line only tells you where to
+look.
+
+```
+# Alert if this is ever above zero.
+botshield_resp_status_mismatch_total > 0
+```
 
 ### Sample scrape
 

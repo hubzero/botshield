@@ -1025,6 +1025,63 @@ static int bs_resp_kind_idx(request_rec *r)
     return BS_M_RESP_ORIGIN;
 }
 
+/* The invariant: if BotShield produced the response, the application did
+ * not, so the client cannot have received a 2xx.
+ *
+ * Only the four kinds that mean "refused or intercepted" are asserted.
+ * The exclusions are not oversights:
+ *   ORIGIN    — the application answering is the correct outcome.
+ *   ENDPOINT  — verify, embedded.js, assets: 200 is their success case.
+ *   OBSERVE   — dashboard / metrics / policy-status, likewise.
+ * `~`-prefixed counterfactuals and allow/verified already bin as ORIGIN
+ * inside bs_resp_kind_idx, so LogOnly never trips this.
+ *
+ * `status` is the end of the internal-redirect chain — what the client
+ * actually received — while the response kind comes from the origin
+ * request, which is where the decision was recorded. Comparing across
+ * the chain is the entire point: a rewrite re-dispatching to the
+ * application after BotShield answered is precisely the fault this
+ * catches.
+ *
+ * Counter first, log second, and the log throttled to one line a minute
+ * across all workers: this runs on every request, so a systematic fault
+ * would otherwise write one line per request into a decision log that
+ * already measured 258 MB/hour under flood. The counter is the
+ * monitorable signal; the log line just tells you where to look. */
+static void bs_check_resp_status_invariant(request_rec *r, int resp_idx,
+                                           int status_idx, int status)
+{
+    if (status_idx != BS_M_STATUS_2XX)   return;
+    if (resp_idx != BS_M_RESP_CHALLENGE
+        && resp_idx != BS_M_RESP_BLOCK
+        && resp_idx != BS_M_RESP_RATE_LIMITED
+        && resp_idx != BS_M_RESP_REDIRECT) return;
+    if (!bs_shm.metrics) return;
+
+    __atomic_fetch_add(&bs_shm.metrics->resp_status_mismatch_total, 1,
+                       __ATOMIC_RELAXED);
+
+    if (!bs_shm.header) return;
+    apr_time_t now_t = apr_time_now();
+    apr_int64_t prev = __atomic_load_n(&bs_shm.header->resp_mismatch_warn_us,
+                                       __ATOMIC_RELAXED);
+    if (now_t - (apr_time_t)prev > apr_time_from_sec(60)
+        && __atomic_compare_exchange_n(&bs_shm.header->resp_mismatch_warn_us,
+                                       &prev, (apr_int64_t)now_t, 0,
+                                       __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+        const char *o = apr_table_get(r->subprocess_env, "BS_OUTCOME");
+        ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+            "mod_botshield: response-kind/status mismatch: recorded "
+            "outcome=%s but the client received %d -- the application "
+            "answered a request BotShield reported as handled. "
+            "Enforcement is being overstated; check for an ErrorDocument "
+            "or a rewrite re-dispatching after the handler. uri=%s "
+            "(botshield_resp_status_mismatch_total is the running count; "
+            "further lines throttled to one per minute)",
+            o ? o : "-", status, r->uri ? r->uri : "-");
+    }
+}
+
 static int bs_status_class_idx(int status)
 {
     if (status >= 200 && status < 300) return BS_M_STATUS_2XX;
@@ -1058,11 +1115,14 @@ int bs_propagate_decision_env(request_rec *r)
         /* Classification is computed once at post_read_request and
          * cached on r->pool, so reading it here is a pointer deref. */
         const bs_ua_class *uac = bs_classify_request_ua(r);
+        int status_idx = bs_status_class_idx(fwd->status);
+        int resp_idx   = bs_resp_kind_idx(r);
         bs_metrics_traffic_add(scfg_t ? scfg_t->vhost_idx : -1,
-                               bs_status_class_idx(fwd->status), has_cookie,
-                               bs_resp_kind_idx(r),
+                               status_idx, has_cookie, resp_idx,
                                uac ? bs_m_class_idx(uac->label)
                                    : BS_M_CLASS_UNKNOWN);
+        bs_check_resp_status_invariant(r, resp_idx, status_idx,
+                                       fwd->status);
     }
 
     if (fwd != r) {
@@ -2151,6 +2211,15 @@ int bs_metrics_handler(request_rec *r)
         "(per-rule mode=observe or BotShieldEnabled LogOnly); rule "
         "would have returned 429 but didn't.",
         bs_mload(&m->rate_limit_observed_total));
+    bs_m_emit_counter(r, "resp_status_mismatch_total",
+        "Requests recorded as answered BY BotShield (challenge, block, "
+        "rate-limit, safeguard redirect) where the client nevertheless "
+        "received a 2xx, i.e. the application answered. Mutually "
+        "exclusive by construction: ALERT ON ANY NON-ZERO VALUE. A "
+        "non-zero count means the decision log is overstating "
+        "enforcement -- typically an ErrorDocument or a rewrite "
+        "re-dispatching after the handler ran.",
+        bs_mload(&m->resp_status_mismatch_total));
     bs_m_emit_counter(r, "trigger_observed_total",
         "Trigger matches (path/cookie/env/load) that ran in observe "
         "mode across all families.",

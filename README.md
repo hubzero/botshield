@@ -62,7 +62,7 @@ below.
   One-time-use nonces + IP-bound bootstrap on the embedded silent
   path.
 - **Observability.** Structured `key=value` decision-log line per
-  request, 41 Prometheus metrics at `<prefix>/metrics`, `mod_status`
+  request, 42 Prometheus metrics at `<prefix>/metrics`, `mod_status`
   contribution hook.
 - **Multi-vhost isolation.** Default-isolate per `ServerName`; opt
   into shared reputation via `BotShieldShareScope`.
