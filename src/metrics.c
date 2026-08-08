@@ -1877,6 +1877,89 @@ int bs_dashboard_handler(request_rec *r)
                      fills, 6, ours);
     }
 
+    /* Rate limiting, broken out of the response bar above.
+     *
+     * It earns its own section for a display reason and a semantic one.
+     * Display: rate-limited is routinely a fraction of a percent of
+     * BotShield's responses, which is around a pixel of a 600px bar —
+     * the <title> is there but the segment is too narrow to hover, so
+     * the bar cannot answer "is the rate limit doing anything".
+     * Semantic: the others are per-request verdicts on a client, while
+     * this is a budget decision about a crawler across all its IPs. It
+     * is tuned with different directives and read on a different
+     * cadence.
+     *
+     * MIND THE TIME BASES — they are deliberately not the same, and
+     * mixing them silently is how a dashboard starts lying:
+     *   - "429s in this window" is windowed, from req_resp[], and moves
+     *     with the w= selector like everything else on the page.
+     *   - enforced/observed totals are plain bs_metrics fields, so they
+     *     are cumulative SINCE RESTART regardless of w=. They are
+     *     labelled as such rather than being quietly rescaled.
+     *   - and they are read from the GLOBAL block, not the per-vhost
+     *     one, because bot_rate.c and policy.c only ever increment
+     *     bs_shm.metrics->. There is no per-vhost copy to select, so
+     *     with vh= set these two do not narrow with the rest of the
+     *     page. Labelled "all vhosts" for that reason; do not "fix" it
+     *     by pointing them at bs_vhost_block(), which would read a
+     *     field nothing writes and render a confident zero.
+     * Both totals also span BOTH families — BotShieldBotRateLimit
+     * (slug-keyed) and BotShieldRateLimit (cohort) — because
+     * bot_rate.c and policy.c increment the same pair. On a host with
+     * only one family configured that is the same number; on a host
+     * with both it is a sum, and the split is not recoverable here.
+     *
+     * Not shown, because the counters do not exist: which bot slugs are
+     * being limited. That is per-holder state and needs a cumulative
+     * counter on bs_bot_rate_slot; until then the decision log is the
+     * only place to get it:
+     *   grep -oE 'bot-rate:[a-z0-9-]+' botshield.log | sort | uniq -c
+     */
+    {
+        /* Recomputed, not borrowed: `ours` above is scoped to the
+         * response-breakdown block. */
+        apr_uint64_t rl_total = 0;
+        for (int i = 1; i < BS_M_RESP_COUNT; i++) rl_total += w.req_resp[i];
+
+        apr_uint64_t rl_win = w.req_resp[BS_M_RESP_RATE_LIMITED];
+        apr_uint64_t enforced = 0, observed = 0;
+        if (bs_shm.metrics) {
+            enforced = bs_mload(&bs_shm.metrics->rate_limit_exceeded_total);
+            observed = bs_mload(&bs_shm.metrics->rate_limit_observed_total);
+        }
+
+        ap_rputs("<section><h2>Rate limiting</h2><div class='kpis'>", r);
+        ap_rprintf(r, "<div class='kpi'><div class='k'>429s issued</div>"
+                      "<div class='v'>%" APR_UINT64_T_FMT "</div>"
+                      "<div class='n'>%s of BotShield responses, %s</div>"
+                      "</div>",
+                   rl_win, bs_d_pct(r->pool, rl_win, rl_total),
+                   bs_d_window_label(span));
+        ap_rprintf(r, "<div class='kpi'><div class='k'>Enforced</div>"
+                      "<div class='v'>%" APR_UINT64_T_FMT "</div>"
+                      "<div class='n'>all vhosts, since restart</div></div>",
+                   enforced);
+        ap_rprintf(r, "<div class='kpi'><div class='k'>Observed</div>"
+                      "<div class='v'>%" APR_UINT64_T_FMT "</div>"
+                      "<div class='n'>would have 429'd, all vhosts</div>"
+                      "</div>", observed);
+        ap_rputs("</div>", r);
+
+        /* Enforced vs observed is the tuning question — how much of the
+         * configured limit is actually acting. Only drawn when there is
+         * something to draw; a site with rate limiting off should show
+         * the KPIs reading zero, not an empty chart frame. */
+        if (enforced || observed) {
+            const char *rl_labels[] = { "enforced", "observed" };
+            const char *rl_fills[]  = { "var(--c3)", "var(--neutral)" };
+            apr_uint64_t rl_vals[]  = { enforced, observed };
+            bs_d_stacked(r, "rl", "Rate limit: enforced vs observed",
+                         rl_labels, rl_vals, rl_fills, 2,
+                         enforced + observed);
+        }
+        ap_rputs("</section>", r);
+    }
+
     /* KPI row — a handful of headline numbers is a stat row, not a chart. */
     ap_rputs("<section><h2>BotShield decisions</h2><div class='kpis'>", r);
     ap_rprintf(r, "<div class='kpi'><div class='k'>Decisions</div>"
