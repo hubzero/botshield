@@ -1,6 +1,41 @@
 # Changelog
 
-## 2026-08-09 (ua="" match; safeguard/strike slot reclamation)
+## 2026-08-09 (ua="" match; mode=enforce vs LogOnly; slot reclamation)
+
+### `mode=enforce` now overrides a LogOnly scope
+
+`mode=enforce` parsed but did nothing: `BS_TMODE_ENFORCE` is 0, the same
+as the default, and the observe test was
+
+    observe = global_log_only || (mode == BS_TMODE_OBSERVE)
+
+so a LogOnly scope won regardless. It read exactly like the thing an
+operator would reach for and was silently a no-op.
+
+An explicitly written `mode=enforce` on a `BotShieldRequestTrigger` now
+acts even under `BotShieldEnabled LogOnly`. This is what makes "observe
+the whole site, but act on THIS rule" expressible in the module. The
+alternative was wrapping a scope in an Apache
+`<If "-z %{HTTP_USER_AGENT}">`, which works but puts half the policy
+where the decision log and dashboard cannot see it — the same
+precedence trap as legacy `mod_rewrite` rules.
+
+A rule that omits `mode=` does NOT override LogOnly, even though the
+field defaults to enforce: a scope set to observe has to keep its
+promise unless someone says otherwise on the rule itself. The two are
+told apart by a `mode_explicit_enforce` flag, mirroring the existing
+`status_explicit`.
+
+There were two gates, not one. `bs_apply_trigger_action` decides whether
+the rule's side effects apply; the handler separately decides whether to
+dispatch the resulting tier, and declined under LogOnly regardless.
+Teaching only the first produced a decision log reading
+`request-trigger:...:tier-silent` with an outcome of `~challenge` — the
+tier floor set and then thrown away. A per-request note carries the
+explicit-enforce demand to the dispatch gate.
+
+Unchanged: `BotShieldTrigger` and `BotShieldBotRateLimit` also document
+`mode=enforce|observe`, and their handling of it is not touched here.
 
 ### `ua=""` — match a request with no User-Agent
 
