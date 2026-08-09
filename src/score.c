@@ -263,32 +263,6 @@ void bs_set_request_tier_floor(request_rec *r, int tier)
                    apr_psprintf(r->pool, "%d", tier));
 }
 
-/* Marker: a trigger carrying an explicit mode=enforce acted on this
- * request, so the tier-dispatch LogOnly gate must not decline it.
- *
- * Needed because there are two independent gates. bs_apply_trigger_action
- * decides whether the RULE's side effects apply; the handler separately
- * decides whether to DISPATCH the resulting tier, and under LogOnly it
- * declines regardless (botshield.c). Teaching only the first gate about
- * mode=enforce set a tier floor that the second then threw away — the
- * decision log said tier-silent and the outcome was still ~challenge.
- *
- * A note rather than an env var: this is consumed inside the same
- * request by our own handler, not read at log_transaction, so it does
- * not need to survive an internal redirect the way the BS_* fields do. */
-#define BS_TRIG_ENFORCE_NOTE "bs-trigger-enforce"
-
-void bs_set_request_trigger_enforce(request_rec *r)
-{
-    if (!r) return;
-    apr_table_setn(r->notes, BS_TRIG_ENFORCE_NOTE, "1");
-}
-
-int bs_get_request_trigger_enforce(request_rec *r)
-{
-    return r && apr_table_get(r->notes, BS_TRIG_ENFORCE_NOTE) != NULL;
-}
-
 int bs_get_request_tier_floor(request_rec *r)
 {
     if (!r) return BS_TIER_PASS;

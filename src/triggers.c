@@ -416,10 +416,6 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
          * filter already honors a->mode == BS_TMODE_OBSERVE. */
         if (!strcasecmp(val, "enforce")) {
             a->mode = BS_TMODE_ENFORCE;
-            /* Distinguish "operator asked for enforce" from the
-             * default, which is the same enum value. Only the explicit
-             * form overrides a LogOnly scope. */
-            a->mode_explicit_enforce = 1;
         } else if (!strcasecmp(val, "observe")) {
             a->mode = BS_TMODE_OBSERVE;
         } else {
@@ -516,12 +512,7 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
     bs_dir_cfg *dcfg = ap_get_module_config(r->per_dir_config,
                                             &botshield_module);
     int global_log_only = (dcfg && dcfg->enabled == BS_ENABLED_LOGONLY);
-    /* mode=observe always wins — a rule asking to be quiet is never
-     * made loud by its scope. Otherwise a LogOnly scope forces observe,
-     * UNLESS the operator wrote mode=enforce on this rule, which is the
-     * one way to say "watch the whole site, but act on this". */
-    int observe = (a->mode == BS_TMODE_OBSERVE)
-                  || (global_log_only && !a->mode_explicit_enforce);
+    int observe = global_log_only || (a->mode == BS_TMODE_OBSERVE);
     if (observe) {
         bs_score_add(r, 0, 0,
             apr_pstrcat(r->pool, family_tag, ":", trigger_name,
@@ -586,12 +577,6 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
                 bs_score_add(r, d, 0, why);
                 if (a->tier_floor >= 0) {
                     bs_set_request_tier_floor(r, a->tier_floor);
-                    if (a->mode_explicit_enforce) {
-                        /* Tell the handler's LogOnly gate that this
-                         * tier was demanded explicitly, not merely
-                         * derived from score under observation. */
-                        bs_set_request_trigger_enforce(r);
-                    }
                 }
                 return BS_TEXEC_PASS_CONTINUE;
             }

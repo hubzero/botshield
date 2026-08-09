@@ -8,34 +8,14 @@ you're confident the matches are correct.
   Useful for staging individual rules.
 - **Scope-level `BotShieldEnabled LogOnly`** — flip every match to
   observe within the enclosing `<VirtualHost>` / `<Location>` /
-  `<Directory>`. Useful for staging an entire policy revision, with
-  per-`<Location>` carve-outs for paths you want to enforce
-  immediately.
+  `<Directory>` regardless of per-rule setting. Useful for staging
+  an entire policy revision, with per-`<Location>` carve-outs for
+  paths you want to enforce immediately.
 
-A rule runs in observe mode if EITHER its per-rule mode is `observe`
-OR the effective `BotShieldEnabled` for the request's scope is
-`LogOnly`.
-
-**One exception, and it is opt-in.** A `BotShieldRequestTrigger`
-carrying an explicit `mode=enforce` acts even where the scope is
-`LogOnly`. That is how you say "observe the whole site, but act on
-this one rule" without switching the scope — which otherwise needs an
-Apache `<If>` wrapper and moves half the policy somewhere the decision
-log and dashboard cannot see it.
-
-Note the word *explicit*. The `mode` field already defaults to
-`enforce`, and a rule that simply omits `mode=` does **not** override
-`LogOnly` — otherwise the setting would mean nothing. Only the written
-form does. A scope set to observe keeps its promise unless someone
-said otherwise on the rule itself:
-
-```apache
-BotShieldEnabled LogOnly
-# observes, like everything else
-BotShieldRequestTrigger a ua="BadBot" status=403
-# acts, despite the scope
-BotShieldRequestTrigger b ua="" status=pass tier=silent mode=enforce
-```
+Either signal is sufficient; they compose with OR semantics. A rule
+runs in observe mode if EITHER its per-rule mode is `observe` OR
+the effective `BotShieldEnabled` for the request's scope is
+`LogOnly`. There is no priority order to memorize.
 
 ## What "observe" means precisely
 
