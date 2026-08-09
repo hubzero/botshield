@@ -1744,7 +1744,15 @@ static int bs_handler(request_rec *r)
      * interstitial or failed challenge. The trigger / rate-limit
      * machinery has its own observe paths (honored elsewhere); this
      * branch is the tier-dispatch counterpart. */
-    if (cfg && cfg->enabled == BS_ENABLED_LOGONLY) {
+    if (cfg && cfg->enabled == BS_ENABLED_LOGONLY
+        && !bs_get_request_trigger_enforce(r)) {
+        /* ...unless a trigger carrying an explicit mode=enforce acted
+         * on this request. That is the one way to say "observe the
+         * whole site, but act on this rule" without switching the
+         * scope, which otherwise needs an Apache <If> and moves half
+         * the policy out of the module's sight. A trigger that merely
+         * defaulted to enforce does NOT reach here: LogOnly keeps its
+         * promise unless someone said so on the rule itself. */
         bs_set_would_outcome(r, "~challenge");
         bs_decision_log(r, bs_tier_name(tier), "allow",
                         cookie_status, "-",

@@ -50,6 +50,10 @@ typedef struct bs_dir_cfg bs_dir_cfg;
  * in some translation units. Values are BS_TIER_*. */
 void bs_set_request_tier_floor(request_rec *r, int tier);
 int  bs_get_request_tier_floor(request_rec *r);
+/* Set when a trigger carrying an explicit mode=enforce acts, so the
+ * handler's LogOnly tier-dispatch gate knows to dispatch anyway. */
+void bs_set_request_trigger_enforce(request_rec *r);
+int  bs_get_request_trigger_enforce(request_rec *r);
 
 #define BS_DEFAULT_SCORE_SILENT   20
 #define BS_DEFAULT_SCORE_HARD     50

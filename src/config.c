@@ -3778,8 +3778,28 @@ const char *bs_cohort_resolve(cmd_parms *cmd, bs_cohort *out,
                                      const char *ua, const char *ipspec)
 {
     memset(out, 0, sizeof(*out));
-    if (!ua || !*ua || strcmp(ua, "*") == 0) {
+    if (!ua || strcmp(ua, "*") == 0) {
+        /* NULL is "the caller supplied no UA axis at all" — the
+         * key-form parser normalises an omitted ua= to "*" before it
+         * gets here (see the ua_eff default), so this is the
+         * positional/internal path. */
         out->ua_any = 1;
+    } else if (!*ua) {
+        /* ua="" (or a bare ua=) — no User-Agent header, or one present
+         * but empty. Absence is not a substring of anything, so the
+         * substring form below could never express it; before this the
+         * only way to write "challenge requests with no UA" was to wrap
+         * a scope in an Apache <If "-z %{HTTP_USER_AGENT}">, which
+         * works but puts half the policy outside the module and out of
+         * the decision log's reach.
+         *
+         * This used to fold into "any" alongside "*". Nothing shipped
+         * wrote it — an empty value was a redundant second spelling of
+         * a meaning "*" and omission already covered — so the slot was
+         * free to carry the useful meaning instead. "*" remains the
+         * spelling for "any", and it has to: the legacy positional form
+         * cannot omit the UA argument, so it needs a placeholder. */
+        out->ua_none = 1;
     } else if (ua[0] == '@') {
         /* @botgroup selector — match by the request's classified
          * botgroup instead of UA-substring. Recognized botgroups:

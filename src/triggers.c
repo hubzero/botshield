@@ -416,6 +416,10 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
          * filter already honors a->mode == BS_TMODE_OBSERVE. */
         if (!strcasecmp(val, "enforce")) {
             a->mode = BS_TMODE_ENFORCE;
+            /* Distinguish "operator asked for enforce" from the
+             * default, which is the same enum value. Only the explicit
+             * form overrides a LogOnly scope. */
+            a->mode_explicit_enforce = 1;
         } else if (!strcasecmp(val, "observe")) {
             a->mode = BS_TMODE_OBSERVE;
         } else {
@@ -512,7 +516,12 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
     bs_dir_cfg *dcfg = ap_get_module_config(r->per_dir_config,
                                             &botshield_module);
     int global_log_only = (dcfg && dcfg->enabled == BS_ENABLED_LOGONLY);
-    int observe = global_log_only || (a->mode == BS_TMODE_OBSERVE);
+    /* mode=observe always wins — a rule asking to be quiet is never
+     * made loud by its scope. Otherwise a LogOnly scope forces observe,
+     * UNLESS the operator wrote mode=enforce on this rule, which is the
+     * one way to say "watch the whole site, but act on this". */
+    int observe = (a->mode == BS_TMODE_OBSERVE)
+                  || (global_log_only && !a->mode_explicit_enforce);
     if (observe) {
         bs_score_add(r, 0, 0,
             apr_pstrcat(r->pool, family_tag, ":", trigger_name,
@@ -577,6 +586,12 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
                 bs_score_add(r, d, 0, why);
                 if (a->tier_floor >= 0) {
                     bs_set_request_tier_floor(r, a->tier_floor);
+                    if (a->mode_explicit_enforce) {
+                        /* Tell the handler's LogOnly gate that this
+                         * tier was demanded explicitly, not merely
+                         * derived from score under observation. */
+                        bs_set_request_trigger_enforce(r);
+                    }
                 }
                 return BS_TEXEC_PASS_CONTINUE;
             }
@@ -732,8 +747,17 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
     }
 
     /* A bare `ua=*` / `ipspec=*` means "match any", which is the
-     * default, so it is treated as if omitted. */
-    int ua_restricts     = ua_arg     && ua_arg[0]     && strcmp(ua_arg, "*") != 0;
+     * default, so it is treated as if omitted.
+     *
+     * `ua=""` is NOT that: an empty value means "no User-Agent header,
+     * or an empty one", which is a real restriction and must survive to
+     * bs_cohort_resolve. Testing ua_arg[0] alone would drop it here and
+     * then reject the whole rule below as having no match key — so the
+     * emptiness test is deliberately absent on the ua axis.
+     *
+     * ipspec keeps its emptiness test: there is no equivalent "absent
+     * client IP" to express, so an empty ipspec really is a no-op. */
+    int ua_restricts     = ua_arg     && strcmp(ua_arg, "*") != 0;
     int ipspec_restricts = ipspec_arg && ipspec_arg[0] && strcmp(ipspec_arg, "*") != 0;
     if (ua_restricts || ipspec_restricts) {
         const char *ua_eff = ua_restricts     ? ua_arg     : "*";

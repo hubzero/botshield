@@ -39,7 +39,8 @@
 
 /* Cohort match at request time. Returns 1 when this request belongs
  * to the cohort. UA axis can be:
- *   ua_any=1              matches any UA
+ *   ua_any=1              matches any UA            (ua=* or omitted)
+ *   ua_none=1             absent or empty UA only   (ua="")
  *   ua_botgroup != NULL   matches by classified botgroup
  *                         (search/ai-input/ai-train/monitor)
  *   ua_pattern != NULL    matches by UA-substring (case-insensitive)
@@ -48,7 +49,13 @@ static int bs_cohort_matches(const bs_cohort *c,
                              const char *ua, request_rec *r)
 {
     if (!c->ua_any) {
-        if (c->ua_botgroup) {
+        if (c->ua_none) {
+            /* Absent and present-but-empty are the same thing to a
+             * policy author, and both occur in the wild: some clients
+             * omit the header, others send "User-Agent:" with nothing
+             * after it. Treating them differently would be a trap. */
+            if (ua && *ua) return 0;
+        } else if (c->ua_botgroup) {
             const bs_ua_class *cls = bs_classify_request_ua(r);
             if (!cls || !cls->known_botgroup) return 0;
             if (strcasecmp(cls->known_botgroup, c->ua_botgroup) != 0) return 0;

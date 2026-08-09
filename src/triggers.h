@@ -88,6 +88,21 @@ typedef struct {
     int           credit;         /* 0..1000 (rejected on path family) */
     int           status_explicit; /* 1 if operator wrote status= */
     int           mode;           /* bs_trigger_mode */
+    /* 1 if the operator wrote mode=enforce, as distinct from the mode
+     * field merely defaulting to BS_TMODE_ENFORCE (which is 0, so the
+     * two are otherwise indistinguishable).
+     *
+     * Explicit enforce overrides a LogOnly scope. Without that, a
+     * site-wide "BotShieldEnabled LogOnly" forced every trigger to
+     * observe, and there was no way to say "watch the whole site, but
+     * act on THIS" short of switching the scope with an Apache
+     * <If> — which moves half the policy outside the module, where the
+     * decision log cannot see it.
+     *
+     * Defaulted enforce is deliberately NOT enough: a scope set to
+     * LogOnly must keep its promise that nothing acts unless someone
+     * said so on the rule itself. */
+    int           mode_explicit_enforce;
     /* accesslog=off — suppress the access-log line for a matching
      * request by breaking the log_transaction hook chain. Independent
      * of log_tag: a rule can carry a fail2ban tag AND keep its request
@@ -122,6 +137,14 @@ typedef struct {
 typedef struct {
     const char         *ua_pattern;
     int                 ua_any;
+    /* ua="" — matches a request with NO User-Agent header, or one
+     * present but empty. Absence is not a substring of anything, so
+     * ua_pattern could never express it.
+     *
+     * The empty value used to mean "any", redundantly with "*" and with
+     * omitting the key entirely. Nothing shipped used it, so it now
+     * carries the meaning it reads as. "*" is still "any". */
+    int                 ua_none;
     /* @botgroup selector — when non-NULL, the UA axis matches by
      * the request's classified botgroup instead of UA-substring.
      * Mutually exclusive with ua_pattern; setter rejects both. Set
