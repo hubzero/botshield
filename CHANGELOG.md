@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-08-09 (safeguard/strike slot reclamation)
+
+### Reclaim dead safeguard and strike slots
+
+Both tables filled monotonically and only emptied on restart: slots were
+freed on success (a solved challenge, in the safeguard case) but never
+on expiry. The flagged-IP table has always reclaimed expired entries
+during its probe walk; these two were built from the same template and
+never got that branch, so at saturation they degraded to overwriting a
+fixed bucket and unrelated clients began clobbering each other.
+
+A safeguard entry is dead once its counting window has rolled *and* its
+pass-through grant has expired — both required, or a client mid-safeguard
+would be re-challenged instead of redirected. The strike table uses the
+equivalent predicate on `strike_window_start` / `escalation_until`.
+
+The capacity-headroom watchdog additionally sweeps the safeguard table,
+reclaiming in bounded chunks under `trylock` so housekeeping can never
+stall the request path. It already walked every slot to build the
+utilisation gauge; it now acts on what it finds.
+
+
 ## 2026-08-02 (bot directory refresh; retired agents; quieter observability)
 
 ### Added — retired and non-existent agent identities classify as `fake-bot`
