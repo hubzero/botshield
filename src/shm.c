@@ -502,6 +502,23 @@ int bs_strike_record_429(request_rec *r, const unsigned char ip[16],
             matched_idx = (int)idx;
             break;
         }
+        /* Reclaim a dead entry rather than letting the table fill and
+         * fall through to overwriting bucket `base`. Dead here means the
+         * strike window has rolled (strike_count is about to be reset
+         * to 1 anyway) AND no escalation is outstanding. Same branch the
+         * flagged-IP table has always had, and the same one the
+         * safeguard table was missing.
+         *
+         * per_sec is the strike window in seconds; escalation_until==0
+         * means "never escalated", which is dead once the window rolls. */
+        if (empty_idx < 0 && slot->used
+            && (slot->strike_window_start == 0
+                || ((apr_uint32_t)now - slot->strike_window_start)
+                       >= per_sec)
+            && (slot->escalation_until == 0
+                || slot->escalation_until < now)) {
+            empty_idx = (int)idx;
+        }
     }
 
     int target_idx;
@@ -686,6 +703,35 @@ apr_uint32_t bs_safeguard_present_count(const unsigned char ip[16],
     return 0;
 }
 
+/* Is this safeguard entry dead — nothing it holds can affect a future
+ * decision?
+ *
+ * Two conditions, and both are required:
+ *   - the counting window has rolled, so present_count is already
+ *     meaningless: the next presentation resets it to 1 regardless
+ *     (see the window-roll branch in bs_safeguard_record_presentation).
+ *   - safeguard_until has passed, so no pass-through grant is live.
+ *     A slot inside its grant must survive even with a rolled window,
+ *     or a client mid-safeguard would be re-challenged instead of
+ *     redirected — the opposite of what the safeguard is for.
+ *
+ * Caller holds bs_shm.mutex and has already checked the version is
+ * even, so the fields are readable without a seqlock retry. */
+static int bs_safeguard_slot_dead(const bs_safeguard_slot *slot,
+                                  apr_int64_t now, int window)
+{
+    if (!slot->used) return 1;
+    apr_uint32_t now_sec = (apr_uint32_t)now;
+    if (slot->present_window_start != 0
+        && (now_sec - slot->present_window_start) < (apr_uint32_t)window) {
+        return 0;               /* still counting inside its window */
+    }
+    if (slot->safeguard_until != 0 && slot->safeguard_until >= now) {
+        return 0;               /* grant still live */
+    }
+    return 1;
+}
+
 void bs_safeguard_record_presentation(request_rec *r,
                                       const unsigned char ip[16],
                                       int threshold, int window, int ttl,
@@ -719,10 +765,31 @@ void bs_safeguard_record_presentation(request_rec *r,
             if (empty_idx < 0) empty_idx = (int)idx;
             continue;
         }
-        if (slot->ns_id != ns_id) continue;
+        if (slot->ns_id != ns_id) {
+            /* Not ours, but reclaimable if it is dead — see below. */
+            if (empty_idx < 0 && bs_safeguard_slot_dead(slot, now, window)) {
+                empty_idx = (int)idx;
+            }
+            continue;
+        }
         if (memcmp(slot->ip, ip, 16) == 0) {
             matched_idx = (int)idx;
             break;
+        }
+        /* Live slot, different IP. Reclaim it if it is dead: the
+         * counting window has rolled AND no pass-through grant is
+         * outstanding, so nothing it holds can change a decision. The
+         * flagged-IP table has had this branch all along
+         * (`slot->used && slot->expires_at < now` → victim); this table
+         * and the strike table were built from the same template and
+         * never got it, which is why they fill monotonically and only
+         * empty on restart.
+         *
+         * Keep scanning after taking a victim: an exact-IP match
+         * further along the probe sequence must still win, or we would
+         * duplicate an entry we should have merged into. */
+        if (empty_idx < 0 && bs_safeguard_slot_dead(slot, now, window)) {
+            empty_idx = (int)idx;
         }
     }
 
@@ -1616,6 +1683,68 @@ static apr_uint64_t bs_headroom_count_safeguard(apr_int64_t now_sec)
     return used;
 }
 
+/* Reclaim dead safeguard entries, in bounded chunks.
+ *
+ * The probe-loop branch added to bs_safeguard_record_presentation only
+ * reclaims within the probe window of a colliding insert, which is
+ * enough to stop the table degrading into overwrite-bucket-base but not
+ * enough to keep `used` honest: a slot nothing ever collides with stays
+ * marked used forever, so the utilisation gauge reports space that will
+ * never be read again. This is the global pass.
+ *
+ * Runs from the headroom watchdog tick, which already walks every slot
+ * to produce that gauge — the walk is paid for; this just stops
+ * throwing away what it learns.
+ *
+ * CHUNKED ON PURPOSE. The insert path takes bs_shm.mutex, so a sweep
+ * holding it across 50,000 slots would stall every request thread that
+ * wants to record a presentation. Instead take the lock, clear a
+ * bounded run, drop it, and continue from where we left off on the next
+ * tick. Progress is a cursor in static parent-process state, which is
+ * safe because mod_watchdog runs callbacks in a single process.
+ *
+ * trylock, not lock: this is housekeeping. If the request path is busy
+ * enough that the mutex is contended, skipping a chunk costs nothing —
+ * the next tick picks it up, and the probe-loop branch is meanwhile
+ * doing the load-bearing part. */
+#define BS_SWEEP_CHUNK 2048
+
+static apr_size_t bs_safeguard_sweep_cursor = 0;
+
+static apr_uint64_t bs_safeguard_reclaim(apr_int64_t now_sec, int window)
+{
+    if (!bs_shm.safeguard_table || !bs_shm.safeguard_capacity
+        || !bs_shm.mutex) return 0;
+
+    apr_status_t rv = apr_global_mutex_trylock(bs_shm.mutex);
+    if (rv != APR_SUCCESS) return 0;
+
+    apr_uint64_t freed = 0;
+    apr_size_t cap = bs_shm.safeguard_capacity;
+    for (apr_size_t n = 0; n < BS_SWEEP_CHUNK; n++) {
+        apr_size_t i = (bs_safeguard_sweep_cursor + n) % cap;
+        bs_safeguard_slot *slot = &bs_shm.safeguard_table[i];
+        apr_uint32_t v = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
+        if (v & 1U) continue;              /* mid-write; leave it alone */
+        if (!slot->used) continue;
+        if (!bs_safeguard_slot_dead(slot, now_sec, window)) continue;
+
+        __atomic_store_n(&slot->version, v | 1U, __ATOMIC_RELEASE);
+        slot->used                 = 0;
+        slot->ns_id                = 0;
+        slot->present_window_start = 0;
+        slot->present_count        = 0;
+        slot->safeguard_until      = 0;
+        memset(slot->ip, 0, 16);
+        __atomic_store_n(&slot->version, (v | 1U) + 1U, __ATOMIC_RELEASE);
+        freed++;
+    }
+    bs_safeguard_sweep_cursor = (bs_safeguard_sweep_cursor + BS_SWEEP_CHUNK)
+                                % cap;
+    apr_global_mutex_unlock(bs_shm.mutex);
+    return freed;
+}
+
 typedef struct {
     const char            *table_name;
     const char            *directive_name;
@@ -1671,6 +1800,31 @@ apr_status_t bs_headroom_watchdog_cb(int state, void *data, apr_pool_t *pool)
     if (!sv) return APR_SUCCESS;
 
     apr_int64_t now_sec = (apr_int64_t)apr_time_sec(apr_time_now());
+
+    /* Reclaim dead safeguard entries BEFORE counting, so the gauge
+     * below reports live occupancy rather than including slots this
+     * tick is about to free. Bounded chunk, trylock, cursor carried
+     * across ticks — see bs_safeguard_reclaim.
+     *
+     * The window passed here is the compiled-in default rather than the
+     * operator's BotShieldSafeguardWindow: the watchdog callback has a
+     * server_rec but the safeguard policy ints are per-directory, and
+     * there is no single value to read at this level. Using the default
+     * makes the sweep CONSERVATIVE when an operator has widened the
+     * window (it will decline to free entries that are still counting
+     * under the larger value only if the default is smaller — so pick
+     * the larger of the two to stay safe). Entries it declines to free
+     * are still reclaimed opportunistically by the probe-loop branch,
+     * which does have the real window. */
+    {
+        apr_uint64_t freed = bs_safeguard_reclaim(now_sec,
+                                                  BS_DEFAULT_SAFEGUARD_WINDOW);
+        if (freed) {
+            ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, sv,
+                "mod_botshield: safeguard sweep reclaimed %"
+                APR_UINT64_T_FMT " dead entries", freed);
+        }
+    }
 
     /* Walk the open-addressed reputation tables via the unified
      * dispatch table. Each entry's count() does the per-table
