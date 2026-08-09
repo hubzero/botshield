@@ -341,7 +341,8 @@ template per line (runs of `[0-9._]+` replaced by `X`).
 | `BotShieldBotRateLimit` | `off`, or `<target> <delay-sec>`, or `<target> <budget> <per>` | `* 1 sec` (synthesized) |
 | `BotShieldRateLimitEscalate` | `<rate-rule> <strikes> <per> [status=N] [ttl=N]` | none |
 
-Match keys: `ua=<substring>` or `ua=@<botgroup>` for the UA gate
+Match keys: `ua=<substring>`, `ua=@<botgroup>`, or `ua=""` (no/empty
+User-Agent) for the UA gate
 (`*` or omit for any UA); `ipspec=<spec>` for the IP gate (CIDR file
 path, comma-separated inline CIDRs, `*` or omit for any IP). Both
 axes can't be wildcard — that's rejected at config time.
@@ -395,7 +396,7 @@ semantics and refresh model.
 
 | Directive | Predicate args | Action keys |
 |---|---|---|
-| `BotShieldRequestTrigger` | `<name>` + any of `path=<glob>` `query=<glob>` `cookies=none\|any\|session` `ua=<substring>\|@<botgroup>` `ipspec=<spec>` — ANDed, at least one required | `status=`, `redirect=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `penalty=`, `mode=` (no `credit=`) |
+| `BotShieldRequestTrigger` | `<name>` + any of `path=<glob>` `query=<glob>` `cookies=none\|any\|session` `ua=<substring>\|@<botgroup>\|""` `ipspec=<spec>` — ANDed, at least one required | `status=`, `redirect=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `penalty=`, `mode=` (no `credit=`) |
 | `BotShieldCookieTrigger` | `<name> <pred>` (see policy page) | `status=`, `redirect=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `penalty=`, `credit=`, `mode=` |
 | `BotShieldEnvTrigger` | `<name> <env-pred>` (see policy page) | `status=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `penalty=`, `credit=`, `mode=` (no `redirect=`) |
 | `BotShieldFeedbackTrigger` | `<event>` | `flag=`, `ttl=`, `log=`, `accesslog=`, `mode=` |
@@ -471,7 +472,7 @@ it.
 | `path=<glob>` | `r->uri` — path only, **no** query string | must start with `/`, ≤256 chars |
 | `query=<glob>` | the query string alone | e.g. `query="*return=*"` |
 | `cookies=none\|any\|session` | the parsed `Cookie` header | bulk forms only |
-| `ua=<substring>\|@<botgroup>` | User-Agent | `*` means "any", same as omitting |
+| `ua=<substring>\|@<botgroup>\|""` | User-Agent | `*` means "any", same as omitting. `ua=""` matches a request with **no** User-Agent header, or one present but empty — absence is not a substring, so it needs its own spelling. |
 | `ipspec=<spec>` | client IP | `*`, a CIDR list, or a file path |
 
 Globs take `*` wildcards and a trailing `$` anchor. Named-cookie
@@ -516,6 +517,12 @@ BotShieldRequestTrigger login-trap path="/login*" query="*return=*" \
 
 # no path condition at all — any URL carrying ?debug=1
 BotShieldRequestTrigger debugparam query="*debug=1*" penalty=20
+
+# no User-Agent at all. Absence is not a substring, so this is the one
+# UA form the pattern match cannot express. Note ua="" is a restriction
+# and ua=* is not: "*" (or omitting the key) means "any", which is why a
+# rule carrying only ua=* is rejected as having no condition.
+BotShieldRequestTrigger no-ua ua="" status=pass tier=silent ttl=0 log=no-ua
 ```
 
 Because it fires from the policy walk it short-circuits **before**

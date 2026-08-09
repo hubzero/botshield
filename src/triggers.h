@@ -122,6 +122,14 @@ typedef struct {
 typedef struct {
     const char         *ua_pattern;
     int                 ua_any;
+    /* ua="" — matches a request with NO User-Agent header, or one
+     * present but empty. Absence is not a substring of anything, so
+     * ua_pattern could never express it.
+     *
+     * The empty value used to mean "any", redundantly with "*" and with
+     * omitting the key entirely. Nothing shipped used it, so it now
+     * carries the meaning it reads as. "*" is still "any". */
+    int                 ua_none;
     /* @botgroup selector — when non-NULL, the UA axis matches by
      * the request's classified botgroup instead of UA-substring.
      * Mutually exclusive with ua_pattern; setter rejects both. Set

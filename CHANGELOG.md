@@ -1,6 +1,32 @@
 # Changelog
 
-## 2026-08-09 (safeguard/strike slot reclamation)
+## 2026-08-09 (ua="" match; safeguard/strike slot reclamation)
+
+### `ua=""` — match a request with no User-Agent
+
+`ua=` is a substring test, and absence is not a substring of anything,
+so there was no way to write "challenge requests that send no
+User-Agent". The only expression available was wrapping a scope in an
+Apache `<If "-z %{HTTP_USER_AGENT}">`, which works but puts half the
+policy outside the module, where the decision log cannot see it.
+
+`ua=""` now matches a request with no `User-Agent` header, or one
+present but empty. Both spellings occur in the wild and mean the same
+thing to a policy author. It works anywhere the cohort keys do —
+`BotShieldRequestTrigger` and `BotShieldRateLimit`.
+
+```apache
+BotShieldRequestTrigger no-ua ua="" status=pass tier=silent ttl=0 log=no-ua
+```
+
+**Meaning change.** An empty `ua=` value previously folded into "any",
+redundantly with `*` and with omitting the key. Nothing shipped used it,
+so the slot now carries the meaning it reads as. `ua=*` is unchanged and
+remains the spelling for "any" — the legacy positional
+`BotShieldRateLimit` form cannot omit its UA argument, so it still needs
+a placeholder. A rule carrying only `ua=*` is still rejected as having
+no condition; a rule carrying `ua=""` is a real restriction and is
+accepted.
 
 ### Reclaim dead safeguard and strike slots
 

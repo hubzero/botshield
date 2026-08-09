@@ -732,8 +732,17 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
     }
 
     /* A bare `ua=*` / `ipspec=*` means "match any", which is the
-     * default, so it is treated as if omitted. */
-    int ua_restricts     = ua_arg     && ua_arg[0]     && strcmp(ua_arg, "*") != 0;
+     * default, so it is treated as if omitted.
+     *
+     * `ua=""` is NOT that: an empty value means "no User-Agent header,
+     * or an empty one", which is a real restriction and must survive to
+     * bs_cohort_resolve. Testing ua_arg[0] alone would drop it here and
+     * then reject the whole rule below as having no match key — so the
+     * emptiness test is deliberately absent on the ua axis.
+     *
+     * ipspec keeps its emptiness test: there is no equivalent "absent
+     * client IP" to express, so an empty ipspec really is a no-op. */
+    int ua_restricts     = ua_arg     && strcmp(ua_arg, "*") != 0;
     int ipspec_restricts = ipspec_arg && ipspec_arg[0] && strcmp(ipspec_arg, "*") != 0;
     if (ua_restricts || ipspec_restricts) {
         const char *ua_eff = ua_restricts     ? ua_arg     : "*";
