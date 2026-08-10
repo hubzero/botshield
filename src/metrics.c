@@ -1368,6 +1368,11 @@ void bs_decision_log(request_rec *r,
         apr_table_setn(r->subprocess_env, "BS_TAG", tag);
     }
     apr_table_setn(r->subprocess_env, "BOTSHIELD", "1");
+    {
+        const bs_ua_class *uac_e = bs_classify_request_ua(r);
+        apr_table_setn(r->subprocess_env, "BS_CLASS",
+                       uac_e ? bs_ua_class_label_str(uac_e->label) : "-");
+    }
 
     /* Build the key=value payload once, then feed it to both sinks:
      * Apache's error log (always) and the module-owned decision log
@@ -1378,26 +1383,43 @@ void bs_decision_log(request_rec *r,
      * out of the error log — are unaffected.
      *
      * tag= suffix only when a trigger set it. */
+    /* class= is the UA classifier's verdict, the same one the dashboard
+     * splits its bot/user tabs on. Without it the log cannot be sliced
+     * the way the dashboard is, so a question like "why is the user
+     * challenge rate only 50%" could be posed on the dashboard and not
+     * answered from the log -- the two disagreed about who was a bot
+     * because the log never said. Cached on the request by the
+     * post_read_request hook, so this is a pointer read.
+     *
+     * Appended last, after tag=, so every existing prefix stays byte
+     * identical. Parsers that slice fields positionally from the front
+     * -- the pytest framework reads decisions out of the error log --
+     * see exactly what they saw before, and key=value greps pick the
+     * new field up for free. */
+    const bs_ua_class *uac_l = bs_classify_request_ua(r);
+    const char *cls = uac_l ? bs_ua_class_label_str(uac_l->label) : "-";
+
     const char *payload;
     if (tag && *tag) {
         payload = apr_psprintf(r->pool,
             "tier=%s outcome=%s ip=%s score=%d "
             "cookie=%s provider=%s alg=%s reason=\"%s\" path=\"%s\" "
-            "tag=\"%s\"",
+            "tag=\"%s\" class=%s",
             tier, outcome, ip, score,
             cookie   ? cookie   : "-",
             provider ? provider : "-",
             alg      ? alg      : "-",
-            reason_q, path_q, bs_log_quote(r->pool, tag));
+            reason_q, path_q, bs_log_quote(r->pool, tag), cls);
     } else {
         payload = apr_psprintf(r->pool,
             "tier=%s outcome=%s ip=%s score=%d "
-            "cookie=%s provider=%s alg=%s reason=\"%s\" path=\"%s\"",
+            "cookie=%s provider=%s alg=%s reason=\"%s\" path=\"%s\" "
+            "class=%s",
             tier, outcome, ip, score,
             cookie   ? cookie   : "-",
             provider ? provider : "-",
             alg      ? alg      : "-",
-            reason_q, path_q);
+            reason_q, path_q, cls);
     }
     ap_log_rerror(APLOG_MARK, level, 0, r,
                   "mod_botshield: decision %s", payload);
