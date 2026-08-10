@@ -1,5 +1,45 @@
 # Changelog
 
+## 2026-08-10 (a cookie earns the dropped-cookie waiver only by solving)
+
+### Holding a cookie is not evidence of anything
+
+`first-sight-ip` and `dropped-cookie` were waived for any request
+presenting a signature-valid, unexpired cookie (`have_prior_rep`).
+Under always-mint that is every client that has made one prior request,
+so the waiver was granted for keeping a cookie jar rather than for
+passing a check.
+
+Measured on a production hub: no-UA scanners on Azure that stored and
+replayed their minted cookie sat at score 45 (silent tier); the same
+clients when they dropped the cookie scored 65-70 (form tier). They
+were using cookie persistence to hold themselves in the cheaper tier —
+4,069 requests in that state against 94 that were not, and 70% of all
+valid-cookie traffic on the hub sent no User-Agent at all.
+
+Both heuristics now gate on `have_solve_proof` — `passes_silent`,
+`passes_form`, or `passes_captcha` in the authenticated rep block —
+instead of on cookie validity. This is the rule the safeguard-clear
+path at the top of the same function already applied, with a comment
+making exactly this argument; the two call sites had drifted apart and
+are now consistent.
+
+Solve proof is read under `have_prior_rep`, not under full cookie
+validity: a cookie failing only a post-tag check still carries
+trustworthy pass counters, while a signature-mismatched or expired one
+carries none we may believe.
+
+Cost to a real browser is one silent challenge. It arrives without
+proof, scores `dropped-cookie` into the silent tier, clears it in one
+auto-submitted round trip, and every later request carries
+`passes_silent` and lands clean.
+
+Operators running with the default `BotShieldScoreHard 50` should know
+this can push a persistent no-session client from silent into form. If
+the form and captcha tiers have not been exercised on your deployment,
+raise `BotShieldScoreHard` / `BotShieldScoreCaptcha` before taking this
+change, so escalation stays where you have tested it.
+
 ## 2026-08-09 (ua="" match; safeguard/strike slot reclamation)
 
 ### `ua=""` — match a request with no User-Agent

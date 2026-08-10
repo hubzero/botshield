@@ -649,8 +649,18 @@ limit, which is what the published policy actually promises.
 `Accept-Language`.
 
 `first-sight-ip` and `dropped-cookie` are the two halves of one signal —
-both fire only when the request carries no usable cookie, differing on
-whether the IP is already in the Bloom filter. `first-sight-ip` sits at
+both fire unless the request carries a cookie that **proves a challenge
+was solved**, differing on whether the IP is already in the Bloom filter.
+
+A merely valid cookie is not enough. Under always-mint every client
+receives a signature-valid cookie on its first request, so waiving these
+two on validity alone would let a bot mint one, keep it, and permanently
+suppress a penalty it never earned. The waiver requires solve evidence
+(`passes_silent`, `passes_form`, or `passes_captcha`) in the
+authenticated rep block — the same evidence the safeguard-clear path
+requires. A real browser pays for this exactly once: it arrives with no
+proof, scores `dropped-cookie` into the silent tier, clears it in one
+auto-submitted round trip, and every later request carries proof. `first-sight-ip` sits at
 exactly `BotShieldScoreSilent`, so **an enabled scope challenges any
 request with no session context by default**, with no rule to write.
 That is usually what you want on a login or registration path, where the
