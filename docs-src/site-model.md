@@ -127,11 +127,24 @@ accumulates negative `cookie_score` (forgiveness credit applied at
 challenge-issue time); repeated suspicious behavior accumulates
 positive.
 
-The decision log's `cookie=` field reports one of `ok` (verified
-cookie carried forward), `expired`, `bad_sig`, `bad_format`,
-`absent`, or `minted` (no incoming cookie; this response set a
-fresh one). The `cookie_minted_total` Prometheus counter tracks
-the always-mint volume separately from `cookie_ok_total`.
+The decision log's `cookie=` field reports one of `solved` (verified
+**and** carrying challenge-solve proof), `ok` (verified, no such proof
+— a presence cookie), `expired`, `bad_sig`, `bad_format`, `absent`, or
+`minted` (no incoming cookie; this response set a fresh one).
+
+`solved` and `ok` are disjoint and the distinction matters: under
+always-mint every client holds a valid cookie after one request, so
+`ok` says only that the client keeps a cookie jar. `solved` is the
+only state that waives `first-sight-ip` / `dropped-cookie`. The
+`cookie_solved_total` and `cookie_ok_total` Prometheus counters track
+the two separately, alongside `cookie_minted_total` for always-mint
+volume, and the dashboard's cookie-state bar shows them as separate
+slices.
+
+Expect few `cookie=solved` lines in the decision log itself: a client
+holding solve proof usually passes, and passes are not actionable
+outcomes, so they are counted but not written. Read the counters, not
+the log, for this ratio.
 
 The reputation persists across requests but expires with the cookie
 TTL (`BotShieldCookieTTL`, default 1 hour). After expiry users

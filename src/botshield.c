@@ -1447,6 +1447,16 @@ static int bs_handler(request_rec *r)
     }
     const char *cookie_status =
         bs_decision_cookie_status(cookie_verify_reason, cookie_had_val);
+    /* Split the "ok" bucket on solve proof. Under always-mint a valid
+     * cookie is the normal state of every returning client, so "ok"
+     * alone answered a question nobody was asking; what an operator
+     * needs to see is whether the holder ever passed a challenge.
+     * "solved" means verified AND carrying passes_silent/form/captcha;
+     * "ok" now means verified with no such proof -- a presence cookie,
+     * which is exactly what a cookie-harvesting bot holds. */
+    if (have_solve_proof && strcmp(cookie_status, "ok") == 0) {
+        cookie_status = "solved";
+    }
 
     /* E4 — publish the `_bs_session` verification verdict as a
      * request note so bs_check_policy's cookie-trigger evaluator

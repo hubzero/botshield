@@ -159,8 +159,14 @@ extern "C" {
  * scrambling it. The block is length-prefixed and
  * size-checked on load, so an older file would be refused on size
  * alone even without the version bump; the bump makes the rejection
- * say why. */
-#define BS_STATE_FORMAT_VERSION   9
+ * say why.
+ *
+ * v10 adds the `solved` cookie state, which widens both cookie[] arrays
+ * (cumulative and per-slot) and so changes sizeof(bs_metrics). The
+ * length check would refuse a v9 file anyway; the bump makes the NOTICE
+ * explain itself instead of reporting a bare size mismatch. Cost of the
+ * bump is one restart's worth of dashboard history. */
+#define BS_STATE_FORMAT_VERSION   10
 #define BS_STATE_MAX_AGE_SECS     (14 * 86400)
 #define BS_FNV64_SEED             0xcbf29ce484222325ULL
 
@@ -253,12 +259,21 @@ typedef enum {
 } bs_m_status;
 
 typedef enum {
+    /* BS_M_COOKIE_OK is "verified but carries no solve proof" -- a
+     * presence cookie. BS_M_COOKIE_SOLVED is the same verification
+     * plus passes_silent/form/captcha in the authenticated rep block.
+     * The two are disjoint, deliberately: under always-mint every
+     * client holds a valid cookie after one request, so "valid" says
+     * nothing about whether a challenge was ever passed, and the
+     * dashboard needs to show the difference rather than hide it
+     * inside a single ok bucket. */
     BS_M_COOKIE_OK = 0,
     BS_M_COOKIE_EXPIRED,
     BS_M_COOKIE_BAD_SIG,
     BS_M_COOKIE_BAD_FORMAT,
     BS_M_COOKIE_ABSENT,
     BS_M_COOKIE_MINTED,
+    BS_M_COOKIE_SOLVED,
     BS_M_COOKIE_COUNT
 } bs_m_cookie;
 

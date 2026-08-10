@@ -119,6 +119,7 @@ static int bs_m_cookie_idx(const char *s)
     if (strcmp(s, "bad_format") == 0) return BS_M_COOKIE_BAD_FORMAT;
     if (strcmp(s, "absent")     == 0) return BS_M_COOKIE_ABSENT;
     if (strcmp(s, "minted")     == 0) return BS_M_COOKIE_MINTED;
+    if (strcmp(s, "solved")     == 0) return BS_M_COOKIE_SOLVED;
     return -1;
 }
 
@@ -1409,6 +1410,11 @@ static void bs_m_emit_gauge(request_rec *r, const char *name,
 #define BS_D_C4 "#eda100"
 #define BS_D_C5 "#e87ba4"
 #define BS_D_C6 "#008300"
+/* C7 carries the cookie `solved` slice. Violet, chosen to sit apart
+ * from C1's blue and C3/C6's greens so the one state that means "this
+ * client actually passed a challenge" is not read as another shade of
+ * the states that only mean "this client has a cookie". */
+#define BS_D_C7 "#7a4fd0"
 
 #define BS_D_T1 "#86b6ef"
 #define BS_D_T2 "#5598e7"
@@ -1652,6 +1658,7 @@ int bs_dashboard_handler(request_rec *r)
       "--line:#e4e4e0;--t1:" BS_D_T1 ";--t2:" BS_D_T2 ";--t3:" BS_D_T3 ";--t4:" BS_D_T4 ";"
       "--c1:" BS_D_C1 ";--c2:" BS_D_C2 ";--c3:" BS_D_C3 ";"
       "--c4:" BS_D_C4 ";--c5:" BS_D_C5 ";--c6:" BS_D_C6 ";"
+      "--c7:" BS_D_C7 ";"
       "--track:#eef2f7;--good:#0ca30c;--warn:#fab219;--crit:#d03b3b;"
       "--neutral:#8a8a84}"
       "@media(prefers-color-scheme:dark){:root{--surface:#1a1a19;--ink:#f2f2ef;"
@@ -1659,7 +1666,7 @@ int bs_dashboard_handler(request_rec *r)
       /* Separate dark selection, validated against #1a1a19 — not a flip. */
       "--t1:#3987e5;--t2:#6da7ec;--t3:#9ec5f4;--t4:#cde2fb;"
       "--c1:#3987e5;--c2:#d95926;--c3:#199e70;--c4:#c98500;"
-      "--c5:#d55181;--c6:#008300;--track:#26262340}}"
+      "--c5:#d55181;--c6:#008300;--c7:#9d86e0;--track:#26262340}}"
       "*{box-sizing:border-box}"
       "body{margin:0;padding:28px 24px 56px;background:var(--surface);color:var(--ink);"
       "font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}"
@@ -1995,20 +2002,30 @@ int bs_dashboard_handler(request_rec *r)
      * bad_sig/bad_format above noise means forgery or a secret
      * mismatch, expired means TTL churn. */
     {
-        const char *labels[] = { "ok", "minted", "absent",
-                                 "expired", "bad sig", "bad format" };
-        const char *fills[]  = { "var(--c1)", "var(--c2)", "var(--c3)",
-                                 "var(--c4)", "var(--c5)", "var(--c6)" };
-        apr_uint64_t vals[]  = { w.cookie[BS_M_COOKIE_OK],
+        /* `solved` leads, and is separated from `ok` on purpose. They
+         * verify identically; the difference is whether the holder ever
+         * passed a challenge. Under always-mint every returning client
+         * has a valid cookie, so a single "ok" bar showed cookie uptake
+         * and was read as trust -- on this hub 70% of valid-cookie
+         * traffic sent no User-Agent at all. `ok` here means presence
+         * only, which is what a cookie-harvesting bot holds. */
+        const char *labels[] = { "solved", "ok (no solve)", "minted",
+                                 "absent", "expired", "bad sig",
+                                 "bad format" };
+        const char *fills[]  = { "var(--c7)", "var(--c1)", "var(--c2)",
+                                 "var(--c3)", "var(--c4)", "var(--c5)",
+                                 "var(--c6)" };
+        apr_uint64_t vals[]  = { w.cookie[BS_M_COOKIE_SOLVED],
+                                 w.cookie[BS_M_COOKIE_OK],
                                  w.cookie[BS_M_COOKIE_MINTED],
                                  w.cookie[BS_M_COOKIE_ABSENT],
                                  w.cookie[BS_M_COOKIE_EXPIRED],
                                  w.cookie[BS_M_COOKIE_BAD_SIG],
                                  w.cookie[BS_M_COOKIE_BAD_FORMAT] };
         apr_uint64_t tot = 0;
-        for (int i = 0; i < 6; i++) tot += vals[i];
+        for (int i = 0; i < 7; i++) tot += vals[i];
         bs_d_stacked(r, "ck", "Reputation cookie state", labels, vals,
-                     fills, 6, tot);
+                     fills, 7, tot);
     }
 
     /* Tier mix — ordinal escalation, one hue light to dark. */
@@ -2210,8 +2227,15 @@ int bs_metrics_handler(request_rec *r)
         bs_mload(&m->outcome[BS_M_OUTCOME_REDIRECT]));
 
     bs_m_emit_counter(r, "cookie_ok_total",
-        "Rep cookies that verified fully (signature + freshness + PoW).",
+        "Rep cookies that verified fully (signature + freshness + PoW) "
+        "but carry NO challenge-solve proof -- presence cookies. Under "
+        "always-mint this is what a cookie-harvesting bot holds.",
         bs_mload(&m->cookie[BS_M_COOKIE_OK]));
+    bs_m_emit_counter(r, "cookie_solved_total",
+        "Rep cookies that verified fully AND carry solve proof "
+        "(passes_silent/form/captcha). The only cookie state that "
+        "waives first-sight-ip / dropped-cookie.",
+        bs_mload(&m->cookie[BS_M_COOKIE_SOLVED]));
     bs_m_emit_counter(r, "cookie_expired_total",
         "Rep cookies with valid signature but past expires_at.",
         bs_mload(&m->cookie[BS_M_COOKIE_EXPIRED]));
