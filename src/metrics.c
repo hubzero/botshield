@@ -575,6 +575,9 @@ static void bs_m_slot_claim(bs_metrics_slot *slot, apr_uint64_t epoch)
          * in; a missed reset here would let a recycled slot carry a
          * previous window's bot counts into the current one. */
         for (int g = 0; g < BS_M_GROUP_COUNT; g++) {
+            for (int i = 0; i < BS_M_RESP_COUNT; i++) {
+                __atomic_store_n(&slot->g_resp[g][i], 0, __ATOMIC_RELAXED);
+            }
             for (int i = 0; i < BS_M_TIER_COUNT; i++) {
                 __atomic_store_n(&slot->g_tier[g][i], 0, __ATOMIC_RELAXED);
             }
@@ -639,7 +642,7 @@ void bs_metrics_bucket_add(int vhost_idx, int tier_idx,
  * handles — static assets included — so anything more expensive would
  * be a tax on the whole site, not just the protected scopes. */
 static void bs_m_slot_traffic(bs_metrics_slot *slot, apr_uint64_t epoch,
-                              int status_idx, int has_cookie, int resp_idx,
+                              int status_idx, int has_cookie, int resp_idx, int group_idx,
                               int class_idx)
 {
     bs_m_slot_claim(slot, epoch);
@@ -653,6 +656,10 @@ static void bs_m_slot_traffic(bs_metrics_slot *slot, apr_uint64_t epoch,
     }
     if (resp_idx >= 0) {
         __atomic_fetch_add(&slot->req_resp[resp_idx], 1, __ATOMIC_RELAXED);
+        if (group_idx >= 0) {
+            __atomic_fetch_add(&slot->g_resp[group_idx][resp_idx],
+                               1, __ATOMIC_RELAXED);
+        }
     }
     if (class_idx >= 0) {
         __atomic_fetch_add(&slot->req_class[class_idx], 1, __ATOMIC_RELAXED);
@@ -665,15 +672,20 @@ void bs_metrics_traffic_add(int vhost_idx, int status_idx, int has_cookie,
     if (!bs_shm.metrics) return;
     apr_uint64_t minute = (apr_uint64_t)(apr_time_sec(apr_time_now()) / 60);
     apr_uint64_t hour   = minute / 60;
+    /* Derived here rather than passed in: the caller already resolved
+     * the class, and the group is a pure function of it. */
+    int group_idx = (class_idx >= 0) ? bs_m_group_of_class(class_idx) : -1;
     bs_metrics *vm = bs_vhost_block(vhost_idx);
     bs_metrics *blocks[2] = { bs_shm.metrics, vm };
     for (int b = 0; b < 2; b++) {
         bs_metrics *m = blocks[b];
         if (!m) continue;
         bs_m_slot_traffic(&m->min_slots[minute % BS_M_MIN_SLOTS],
-                          minute, status_idx, has_cookie, resp_idx, class_idx);
+                          minute, status_idx, has_cookie, resp_idx,
+                          group_idx, class_idx);
         bs_m_slot_traffic(&m->hour_slots[hour % BS_M_HOUR_SLOTS],
-                          hour, status_idx, has_cookie, resp_idx, class_idx);
+                          hour, status_idx, has_cookie, resp_idx,
+                          group_idx, class_idx);
         __atomic_fetch_add(&m->req_total, 1, __ATOMIC_RELAXED);
         if (has_cookie) {
             __atomic_fetch_add(&m->req_cookie, 1, __ATOMIC_RELAXED);
@@ -684,6 +696,10 @@ void bs_metrics_traffic_add(int vhost_idx, int status_idx, int has_cookie,
         }
         if (resp_idx >= 0) {
             __atomic_fetch_add(&m->req_resp[resp_idx], 1, __ATOMIC_RELAXED);
+        }
+        if (resp_idx >= 0 && group_idx >= 0) {
+            __atomic_fetch_add(&m->g_resp[group_idx][resp_idx],
+                               1, __ATOMIC_RELAXED);
         }
         if (class_idx >= 0) {
             __atomic_fetch_add(&m->req_class[class_idx], 1, __ATOMIC_RELAXED);
@@ -728,6 +744,10 @@ static void bs_m_sum_ring(const bs_metrics_slot *ring, int nslots,
                                                   __ATOMIC_RELAXED);
         }
         for (int g = 0; g < BS_M_GROUP_COUNT; g++) {
+            for (int k = 0; k < BS_M_RESP_COUNT; k++) {
+                out->g_resp[g][k] += __atomic_load_n(&ring[i].g_resp[g][k],
+                                                     __ATOMIC_RELAXED);
+            }
             for (int t = 0; t < BS_M_TIER_COUNT; t++) {
                 out->g_tier[g][t] += __atomic_load_n(&ring[i].g_tier[g][t],
                                                      __ATOMIC_RELAXED);
@@ -787,6 +807,10 @@ void bs_metrics_read_window(int span_minutes, int vhost_idx,
                                                  __ATOMIC_RELAXED);
         }
         for (int g = 0; g < BS_M_GROUP_COUNT; g++) {
+            for (int k = 0; k < BS_M_RESP_COUNT; k++) {
+                out->g_resp[g][k] = __atomic_load_n(&m->g_resp[g][k],
+                                                    __ATOMIC_RELAXED);
+            }
             for (int t = 0; t < BS_M_TIER_COUNT; t++) {
                 out->g_tier[g][t] = __atomic_load_n(&m->g_tier[g][t],
                                                     __ATOMIC_RELAXED);
@@ -1117,6 +1141,27 @@ static int bs_cookie_named(const char *hdr, const char *name)
  * misconfigured and debug do terminate the request, but they are
  * failure modes rather than a policy response; they bin as BLOCK so a
  * refusal is never invisible. */
+/* Did the application answer, or did the core hand back a file?
+ *
+ * Keyed on how the response was produced, not on the URI. An extension
+ * test would be guesswork -- .php can be static and an extensionless
+ * URL is usually the app -- while this reads what actually happened:
+ * anything handed to a proxied backend is the application, anything
+ * else that resolved to a regular file on disk was served off disk.
+ *
+ * r->finfo is filled in by map_to_storage, and r->proxyreq / r->handler
+ * are set by the time log_transaction runs, so this is struct reads on
+ * a path that executes for every request on the server. */
+static int bs_origin_or_static(request_rec *r)
+{
+    if (r->proxyreq != PROXYREQ_NONE) return BS_M_RESP_ORIGIN;
+    if (r->handler && strncmp(r->handler, "proxy:", 6) == 0) {
+        return BS_M_RESP_ORIGIN;
+    }
+    if (r->finfo.filetype == APR_REG) return BS_M_RESP_STATIC;
+    return BS_M_RESP_ORIGIN;
+}
+
 static int bs_resp_kind_idx(request_rec *r)
 {
     const char *ep = apr_table_get(r->subprocess_env, "BS_ENDPOINT");
@@ -1125,7 +1170,7 @@ static int bs_resp_kind_idx(request_rec *r)
                                         : BS_M_RESP_ENDPOINT;
     }
     const char *o = apr_table_get(r->subprocess_env, "BS_OUTCOME");
-    if (!o || !*o || *o == '~') return BS_M_RESP_ORIGIN;
+    if (!o || !*o || *o == '~') return bs_origin_or_static(r);
 
     if (strcmp(o, "challenged")      == 0) return BS_M_RESP_CHALLENGE;
     if (strcmp(o, "block")           == 0) return BS_M_RESP_BLOCK;
@@ -1135,7 +1180,7 @@ static int bs_resp_kind_idx(request_rec *r)
     if (strcmp(o, "inflight_capped") == 0) return BS_M_RESP_RATE_LIMITED;
     if (strcmp(o, "redirect")        == 0) return BS_M_RESP_REDIRECT;
     if (strcmp(o, "pending_missing") == 0) return BS_M_RESP_ENDPOINT;
-    return BS_M_RESP_ORIGIN;
+    return bs_origin_or_static(r);
 }
 
 /* The invariant: if BotShield produced the response, the application did
@@ -2108,23 +2153,71 @@ int bs_dashboard_handler(request_rec *r)
      * unreadable sliver. The share goes in a KPI, and the breakdown
      * gets its own bar scaled to BotShield's own responses. */
     {
+        /* Four-way: BotShield / static / app-to-bot / app-to-user.
+         *
+         * `ours` must skip BOTH non-BotShield kinds. ORIGIN was already
+         * excluded; STATIC has to be too, or every stylesheet counts as
+         * something this module answered.
+         *
+         * Splitting the application row by audience is the point of the
+         * arrangement. "The app answered a crawler" and "the app
+         * answered a person" are the same row in req_resp[] and
+         * completely different facts -- the first is crawl budget spent
+         * on machines that will never convert, the second is the site
+         * doing its job. Merged, a hub whose application load is mostly
+         * search bots looks identical to one serving readers, and the
+         * only lever that moves the first (rate limits) is invisible.
+         *
+         * Static is NOT split by audience on purpose: bots rarely fetch
+         * sub-resources, so that row is almost entirely human by
+         * construction and splitting it would add a slice that is
+         * always ~0 while making the bar harder to read. */
         apr_uint64_t ours = 0;
-        for (int i = 1; i < BS_M_RESP_COUNT; i++) ours += w.req_resp[i];
+        for (int i = 1; i < BS_M_RESP_COUNT; i++) {
+            if (i == BS_M_RESP_STATIC) continue;
+            ours += w.req_resp[i];
+        }
+        apr_uint64_t stat_n   = w.req_resp[BS_M_RESP_STATIC];
+        apr_uint64_t app_bot  = w.g_resp[BS_M_GROUP_BOT][BS_M_RESP_ORIGIN];
+        apr_uint64_t app_usr  = w.g_resp[BS_M_GROUP_USER][BS_M_RESP_ORIGIN];
+        apr_uint64_t app_all  = w.req_resp[BS_M_RESP_ORIGIN];
+        /* Anything the classifier could not place lands in neither
+         * group; show it rather than let the slices silently under-sum. */
+        apr_uint64_t app_unk  = (app_all > app_bot + app_usr)
+                              ? app_all - app_bot - app_usr : 0;
 
-        ap_rputs("<section><h2>Answered by BotShield</h2>"
-                 "<div class='kpis'>", r);
-        ap_rprintf(r, "<div class='kpi'><div class='k'>BotShield responses"
-                      "</div><div class='v'>%s</div>"
-                      "<div class='n'>%" APR_UINT64_T_FMT " of %"
-                      APR_UINT64_T_FMT " requests</div></div>",
-                   bs_d_pct(r->pool, ours, w.req_total), ours, w.req_total);
-        ap_rprintf(r, "<div class='kpi'><div class='k'>Origin</div>"
+        ap_rputs("<section><h2>Who answered</h2><div class='kpis'>", r);
+        ap_rprintf(r, "<div class='kpi'><div class='k'>BotShield</div>"
                       "<div class='v'>%s</div><div class='n'>%"
-                      APR_UINT64_T_FMT " reached the app</div></div>",
-                   bs_d_pct(r->pool, w.req_resp[BS_M_RESP_ORIGIN],
-                            w.req_total),
-                   w.req_resp[BS_M_RESP_ORIGIN]);
-        ap_rputs("</div></section>", r);
+                      APR_UINT64_T_FMT " of %" APR_UINT64_T_FMT
+                      " requests</div></div>",
+                   bs_d_pct(r->pool, ours, w.req_total), ours, w.req_total);
+        ap_rprintf(r, "<div class='kpi'><div class='k'>Static files</div>"
+                      "<div class='v'>%s</div><div class='n'>%"
+                      APR_UINT64_T_FMT " served off disk</div></div>",
+                   bs_d_pct(r->pool, stat_n, w.req_total), stat_n);
+        ap_rprintf(r, "<div class='kpi'><div class='k'>App &rarr; bot</div>"
+                      "<div class='v'>%s</div><div class='n'>%"
+                      APR_UINT64_T_FMT " crawler requests</div></div>",
+                   bs_d_pct(r->pool, app_bot, w.req_total), app_bot);
+        ap_rprintf(r, "<div class='kpi'><div class='k'>App &rarr; user</div>"
+                      "<div class='v'>%s</div><div class='n'>%"
+                      APR_UINT64_T_FMT " human requests</div></div>",
+                   bs_d_pct(r->pool, app_usr, w.req_total), app_usr);
+        ap_rputs("</div>", r);
+
+        {
+            const char *wl[] = { "BotShield", "static files",
+                                 "app &rarr; bot", "app &rarr; user",
+                                 "app (unclassified)" };
+            const char *wf[] = { "var(--t2)", "var(--neutral)",
+                                 "var(--c2)", "var(--c3)", "var(--muted)" };
+            apr_uint64_t wv[] = { ours, stat_n, app_bot, app_usr, app_unk };
+            apr_uint64_t tot = ours + stat_n + app_all;
+            bs_d_stacked(r, "who", "Requests by responder", wl, wv,
+                         wf, app_unk ? 5 : 4, tot);
+        }
+        ap_rputs("</section>", r);
 
         /* Kinds of response, not a good-to-bad scale: a block is
          * BotShield working, not a failure. So categorical slots
@@ -2422,6 +2515,19 @@ int bs_metrics_handler(request_rec *r)
     bs_m_emit_counter(r, "responses_origin_total",
         "Requests the application answered (BotShield did not respond).",
         bs_mload(&m->req_resp[BS_M_RESP_ORIGIN]));
+    bs_m_emit_counter(r, "responses_app_bot_total",
+        "Application responses served to a classified bot (verified, "
+        "known or unknown bot). Crawl budget rather than readership.",
+        bs_mload(&m->g_resp[BS_M_GROUP_BOT][BS_M_RESP_ORIGIN]));
+    bs_m_emit_counter(r, "responses_app_user_total",
+        "Application responses served to a browser, spoofed bot or "
+        "unclassified client -- everything not a real crawler.",
+        bs_mload(&m->g_resp[BS_M_GROUP_USER][BS_M_RESP_ORIGIN]));
+    bs_m_emit_counter(r, "responses_static_total",
+        "Requests answered off disk by the core handler (CSS, JS, "
+        "images, uploads). Split out of responses_origin_total, which "
+        "now counts application responses only.",
+        bs_mload(&m->req_resp[BS_M_RESP_STATIC]));
     bs_m_emit_counter(r, "responses_challenge_total",
         "Responses where BotShield served an interstitial.",
         bs_mload(&m->req_resp[BS_M_RESP_CHALLENGE]));

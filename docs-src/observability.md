@@ -382,7 +382,10 @@ application 403. `botshield_responses_*` splits them:
 
 | Metric | Meaning |
 |---|---|
-| `botshield_responses_origin_total` | The application answered. BotShield did not respond. |
+| `botshield_responses_origin_total` | The **application** answered. Excludes static files since 2026-08-10. |
+| `botshield_responses_static_total` | Apache served a file off disk: CSS, JS, images, uploads. |
+| `botshield_responses_app_bot_total` | Application responses served to a classified bot — crawl budget. |
+| `botshield_responses_app_user_total` | Application responses served to everything else. |
 | `botshield_responses_challenge_total` | BotShield served an interstitial. |
 | `botshield_responses_block_total` | BotShield refused the request. |
 | `botshield_responses_rate_limited_total` | BotShield rate-limited or shed the request. |
