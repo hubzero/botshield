@@ -1,5 +1,37 @@
 # Changelog
 
+## 2026-08-10b (proxied paths were invisible to the module)
+
+### mod_proxy was answering before mod_botshield ran
+
+Any path with a `ProxyPass` inside a `<Location>` was never evaluated.
+No policy could reach it -- not a scope, not a server-level path
+trigger, not `BotShieldEnabled On` written directly on that Location.
+On a production hub that silently exempted the three most sensitive
+entry points on the site: `/index.php` (both the homepage target and
+the CILogon OAuth callback), `/administrator/index.php`, and
+`/api/index.php`.
+
+The cause was handler precedence, not request phases. Both modules
+registered their content handler at `APR_HOOK_FIRST`; ties break on
+module load order and mod_proxy loads first, so it claimed the request
+before this module got a turn. Diagnosed with a temporary fixups probe:
+the request arrived with `proxyreq=2`, `handler=proxy-server` and
+`enabled=2` (LogOnly) -- the phases ran and the per-directory config had
+merged correctly, and only this module's handler never fired.
+
+`bs_handler` now registers at `APR_HOOK_REALLY_FIRST`. Declining still
+hands the request straight back to mod_proxy, so a proxied path is
+evaluated like any other and proxied exactly as before.
+
+Operators who worked around this with `<Location> ProxyPass !` plus
+`SetHandler "proxy:..."` can drop it. That workaround also had a trap:
+releasing a path whose file exists puts it back under the directory
+walk, so a `<FilesMatch \.php$> Require all denied` -- common in
+php-fpm vhosts, since ProxyPass previously made it unreachable -- starts
+answering, and the homepage 403s.
+
+
 ## 2026-08-10 (a cookie earns the dropped-cookie waiver only by solving)
 
 ### Holding a cookie is not evidence of anything

@@ -2004,7 +2004,25 @@ static void bs_register_hooks(apr_pool_t *p)
     (void)p;
     ap_hook_post_config (bs_post_config, NULL, NULL, APR_HOOK_MIDDLE);
     ap_hook_child_init  (bs_child_init,  NULL, NULL, APR_HOOK_MIDDLE);
-    ap_hook_handler     (bs_handler,     NULL, NULL, APR_HOOK_FIRST);
+    /* REALLY_FIRST, not FIRST. mod_proxy also registers its content
+     * handler at APR_HOOK_FIRST; ties there break on module load order,
+     * and mod_proxy loads first -- so it answered every ProxyPass'd
+     * request before this module ran, and no policy could reach those
+     * paths. On one production hub that silently exempted /index.php
+     * (the homepage target and the OAuth callback),
+     * /administrator/index.php and /api/index.php: the three most
+     * sensitive entry points on the site.
+     *
+     * Diagnosed rather than guessed. A fixups probe showed the request
+     * arriving with proxyreq=2, handler=proxy-server AND enabled=2
+     * (LogOnly) -- the phases ran and the per-directory config merged
+     * correctly; only this module's handler never fired. That ruled out
+     * the phase-ordering theories and left handler precedence.
+     *
+     * Declining still hands the request back: mod_proxy serves anything
+     * this module passes on, so a proxied path is now evaluated exactly
+     * like any other and proxied exactly as before. */
+    ap_hook_handler     (bs_handler,     NULL, NULL, APR_HOOK_REALLY_FIRST);
     /* Unified UA classifier — runs late in post_read_request so
      * mod_remoteip's earlier hook (default APR_HOOK_FIRST) has
      * rewritten r->useragent_ip into the real client address before
