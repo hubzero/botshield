@@ -3804,12 +3804,26 @@ const char *bs_cohort_resolve(cmd_parms *cmd, bs_cohort *out,
         /* @botgroup selector — match by the request's classified
          * botgroup instead of UA-substring. Recognized botgroups:
          * search, ai-input, ai-train, monitor (mod_botshield
-         * extension; the others are IETF aipref vocabulary). */
+         * extension; the others are IETF aipref vocabulary).
+         *
+         * @bot and @fake-bot are class selectors rather than botgroups:
+         * they match the classifier's verdict directly. A botgroup can
+         * only name a bot the UA directory already knows, so before
+         * these existed class=unknown-bot could not be named in a rule
+         * at all, and "act on every bot" had to be spelled as one rule
+         * per botgroup -- which silently missed that class. */
         if (!ua[1]) {
             return "UA selector '@' must be followed by a botgroup "
-                   "name (search, ai-input, ai-train, monitor)";
+                   "name (search, ai-input, ai-train, monitor) or a "
+                   "class (bot, fake-bot)";
         }
-        out->ua_botgroup = apr_pstrdup(cmd->pool, ua + 1);
+        if (strcasecmp(ua + 1, "bot") == 0) {
+            out->ua_class_bot = 1;
+        } else if (strcasecmp(ua + 1, "fake-bot") == 0) {
+            out->ua_class_fake = 1;
+        } else {
+            out->ua_botgroup = apr_pstrdup(cmd->pool, ua + 1);
+        }
     } else {
         out->ua_pattern = apr_pstrdup(cmd->pool, ua);
     }

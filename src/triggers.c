@@ -663,6 +663,7 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
     bs_request_trigger_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
     e->name        = apr_pstrdup(cmd->pool, name);
     e->cookie_pred = -1;              /* no cookie condition */
+    e->exists_pred = -1;              /* no filesystem condition */
     bs_trigger_action_init(BS_TFAMILY_REQUEST, &e->action);
 
     const char *ua_arg = NULL, *ipspec_arg = NULL;
@@ -696,6 +697,15 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                         "%s: query= longer than 256 chars", D);
                 }
                 e->query_pattern = apr_pstrdup(cmd->pool, val);
+                continue;
+            }
+            if (klen == 6 && strncasecmp(arg, "exists", 6) == 0) {
+                if      (!strcasecmp(val, "yes")) e->exists_pred = 1;
+                else if (!strcasecmp(val, "no"))  e->exists_pred = 0;
+                else {
+                    return apr_psprintf(cmd->pool,
+                        "%s: exists='%s' not one of yes|no", D, val);
+                }
                 continue;
             }
             if (klen == 7 && strncasecmp(arg, "cookies", 7) == 0) {
@@ -753,12 +763,12 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
     }
 
     if (!e->path_pattern && !e->query_pattern
-        && e->cookie_pred < 0 && !e->has_cohort) {
+        && e->cookie_pred < 0 && e->exists_pred < 0 && !e->has_cohort) {
         return apr_psprintf(cmd->pool,
             "%s '%s': needs at least one match key (path=, query=, "
-            "cookies=, ua=, ipspec=). A rule with no condition matches "
-            "every request - use BotShieldTrigger in the scope you mean "
-            "instead", D, name);
+            "cookies=, exists=, ua=, ipspec=). A rule with no condition "
+            "matches every request - use BotShieldTrigger in the scope "
+            "you mean instead", D, name);
     }
 
     const char *err = bs_finalize_trigger_action(cmd->pool,
