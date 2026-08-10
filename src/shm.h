@@ -170,7 +170,9 @@ extern "C" {
  * v11 adds the audience-split g_tier/g_outcome/g_cookie mirrors to both
  * the ring slot and the cumulative block, widening sizeof(bs_metrics)
  * again. Same rejection path, same one-restart cost. */
-#define BS_STATE_FORMAT_VERSION   11
+/* v12 adds BS_M_RESP_STATIC, widening req_resp[] in both the ring slot
+ * and the cumulative block. */
+#define BS_STATE_FORMAT_VERSION   12
 #define BS_STATE_MAX_AGE_SECS     (14 * 86400)
 #define BS_FNV64_SEED             0xcbf29ce484222325ULL
 
@@ -229,6 +231,13 @@ typedef enum {
     BS_M_RESP_REDIRECT,        /* safeguard 302 */
     BS_M_RESP_ENDPOINT,        /* module endpoint: verify, assets */
     BS_M_RESP_OBSERVE,         /* dashboard / metrics / policy-status */
+    /* Served off disk by the core handler: CSS, JS, images, uploads.
+     * Split out of ORIGIN because lumping them together made the
+     * "how much are we actually answering" ratio meaningless -- a page
+     * drags in 20 sub-resources, so static volume swamps app volume and
+     * the interesting comparison (BotShield vs the application) got
+     * buried. ORIGIN now means the application answered. */
+    BS_M_RESP_STATIC,
     BS_M_RESP_COUNT
 } bs_m_resp;
 

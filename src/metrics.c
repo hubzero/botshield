@@ -1117,6 +1117,27 @@ static int bs_cookie_named(const char *hdr, const char *name)
  * misconfigured and debug do terminate the request, but they are
  * failure modes rather than a policy response; they bin as BLOCK so a
  * refusal is never invisible. */
+/* Did the application answer, or did the core hand back a file?
+ *
+ * Keyed on how the response was produced, not on the URI. An extension
+ * test would be guesswork -- .php can be static and an extensionless
+ * URL is usually the app -- while this reads what actually happened:
+ * anything handed to a proxied backend is the application, anything
+ * else that resolved to a regular file on disk was served off disk.
+ *
+ * r->finfo is filled in by map_to_storage, and r->proxyreq / r->handler
+ * are set by the time log_transaction runs, so this is struct reads on
+ * a path that executes for every request on the server. */
+static int bs_origin_or_static(request_rec *r)
+{
+    if (r->proxyreq != PROXYREQ_NONE) return BS_M_RESP_ORIGIN;
+    if (r->handler && strncmp(r->handler, "proxy:", 6) == 0) {
+        return BS_M_RESP_ORIGIN;
+    }
+    if (r->finfo.filetype == APR_REG) return BS_M_RESP_STATIC;
+    return BS_M_RESP_ORIGIN;
+}
+
 static int bs_resp_kind_idx(request_rec *r)
 {
     const char *ep = apr_table_get(r->subprocess_env, "BS_ENDPOINT");
@@ -1125,7 +1146,7 @@ static int bs_resp_kind_idx(request_rec *r)
                                         : BS_M_RESP_ENDPOINT;
     }
     const char *o = apr_table_get(r->subprocess_env, "BS_OUTCOME");
-    if (!o || !*o || *o == '~') return BS_M_RESP_ORIGIN;
+    if (!o || !*o || *o == '~') return bs_origin_or_static(r);
 
     if (strcmp(o, "challenged")      == 0) return BS_M_RESP_CHALLENGE;
     if (strcmp(o, "block")           == 0) return BS_M_RESP_BLOCK;
@@ -1135,7 +1156,7 @@ static int bs_resp_kind_idx(request_rec *r)
     if (strcmp(o, "inflight_capped") == 0) return BS_M_RESP_RATE_LIMITED;
     if (strcmp(o, "redirect")        == 0) return BS_M_RESP_REDIRECT;
     if (strcmp(o, "pending_missing") == 0) return BS_M_RESP_ENDPOINT;
-    return BS_M_RESP_ORIGIN;
+    return bs_origin_or_static(r);
 }
 
 /* The invariant: if BotShield produced the response, the application did
@@ -2108,23 +2129,54 @@ int bs_dashboard_handler(request_rec *r)
      * unreadable sliver. The share goes in a KPI, and the breakdown
      * gets its own bar scaled to BotShield's own responses. */
     {
+        /* Three-way: BotShield / static files / the application.
+         *
+         * `ours` must skip BOTH non-BotShield kinds. ORIGIN was already
+         * excluded; STATIC has to be too, or every stylesheet and image
+         * counts as something this module answered.
+         *
+         * The split exists because two of these three answer different
+         * questions and used to be one number. A page pulls in twenty
+         * sub-resources, so static volume dwarfs application volume:
+         * with them merged, "how much reached the app" was really "how
+         * many files did Apache hand back", and the comparison anyone
+         * actually wants -- BotShield versus the application -- was
+         * buried under asset traffic that no policy will ever touch. */
         apr_uint64_t ours = 0;
-        for (int i = 1; i < BS_M_RESP_COUNT; i++) ours += w.req_resp[i];
+        for (int i = 1; i < BS_M_RESP_COUNT; i++) {
+            if (i == BS_M_RESP_STATIC) continue;
+            ours += w.req_resp[i];
+        }
+        apr_uint64_t stat_n = w.req_resp[BS_M_RESP_STATIC];
+        apr_uint64_t app_n  = w.req_resp[BS_M_RESP_ORIGIN];
 
-        ap_rputs("<section><h2>Answered by BotShield</h2>"
+        ap_rputs("<section><h2>Who answered</h2>"
                  "<div class='kpis'>", r);
-        ap_rprintf(r, "<div class='kpi'><div class='k'>BotShield responses"
+        ap_rprintf(r, "<div class='kpi'><div class='k'>BotShield"
                       "</div><div class='v'>%s</div>"
                       "<div class='n'>%" APR_UINT64_T_FMT " of %"
                       APR_UINT64_T_FMT " requests</div></div>",
                    bs_d_pct(r->pool, ours, w.req_total), ours, w.req_total);
-        ap_rprintf(r, "<div class='kpi'><div class='k'>Origin</div>"
+        ap_rprintf(r, "<div class='kpi'><div class='k'>Static files</div>"
+                      "<div class='v'>%s</div><div class='n'>%"
+                      APR_UINT64_T_FMT " served off disk</div></div>",
+                   bs_d_pct(r->pool, stat_n, w.req_total), stat_n);
+        ap_rprintf(r, "<div class='kpi'><div class='k'>Application</div>"
                       "<div class='v'>%s</div><div class='n'>%"
                       APR_UINT64_T_FMT " reached the app</div></div>",
-                   bs_d_pct(r->pool, w.req_resp[BS_M_RESP_ORIGIN],
-                            w.req_total),
-                   w.req_resp[BS_M_RESP_ORIGIN]);
-        ap_rputs("</div></section>", r);
+                   bs_d_pct(r->pool, app_n, w.req_total), app_n);
+        ap_rputs("</div>", r);
+
+        {
+            const char *wlabels[] = { "BotShield", "static files",
+                                      "application" };
+            const char *wfills[]  = { "var(--t2)", "var(--neutral)",
+                                      "var(--c3)" };
+            apr_uint64_t wvals[]  = { ours, stat_n, app_n };
+            bs_d_stacked(r, "who", "Requests by responder", wlabels, wvals,
+                         wfills, 3, ours + stat_n + app_n);
+        }
+        ap_rputs("</section>", r);
 
         /* Kinds of response, not a good-to-bad scale: a block is
          * BotShield working, not a failure. So categorical slots
@@ -2422,6 +2474,11 @@ int bs_metrics_handler(request_rec *r)
     bs_m_emit_counter(r, "responses_origin_total",
         "Requests the application answered (BotShield did not respond).",
         bs_mload(&m->req_resp[BS_M_RESP_ORIGIN]));
+    bs_m_emit_counter(r, "responses_static_total",
+        "Requests answered off disk by the core handler (CSS, JS, "
+        "images, uploads). Split out of responses_origin_total, which "
+        "now counts application responses only.",
+        bs_mload(&m->req_resp[BS_M_RESP_STATIC]));
     bs_m_emit_counter(r, "responses_challenge_total",
         "Responses where BotShield served an interstitial.",
         bs_mload(&m->req_resp[BS_M_RESP_CHALLENGE]));
