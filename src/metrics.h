@@ -205,6 +205,11 @@ typedef struct {
     apr_uint64_t req_status[BS_M_STATUS_COUNT];
     apr_uint64_t req_resp[BS_M_RESP_COUNT];
     apr_uint64_t req_class[BS_M_CLASS_COUNT];
+    /* Same three decision dimensions split by audience (bot / user),
+     * backing the dashboard's two tabs. */
+    apr_uint64_t g_tier   [BS_M_GROUP_COUNT][BS_M_TIER_COUNT];
+    apr_uint64_t g_outcome[BS_M_GROUP_COUNT][BS_M_OUTCOME_COUNT];
+    apr_uint64_t g_cookie [BS_M_GROUP_COUNT][BS_M_COOKIE_COUNT];
     apr_uint64_t decisions;      /* sum of outcome[] — every decision logs one */
 } bs_metrics_window;
 
@@ -224,7 +229,8 @@ void bs_metrics_read_window(int span_minutes, int vhost_idx,
  * alongside the cumulative bumps; indices are the same bs_m_*_idx
  * values, and -1 means "no counter for this dimension". */
 void bs_metrics_bucket_add(int vhost_idx, int tier_idx,
-                           int outcome_idx, int cookie_idx);
+                           int outcome_idx, int cookie_idx,
+                           int group_idx);
 
 /* Record one request into the site-wide traffic counters. Called from
  * the log_transaction hook, which runs for every request on every

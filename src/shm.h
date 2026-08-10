@@ -165,8 +165,12 @@ extern "C" {
  * (cumulative and per-slot) and so changes sizeof(bs_metrics). The
  * length check would refuse a v9 file anyway; the bump makes the NOTICE
  * explain itself instead of reporting a bare size mismatch. Cost of the
- * bump is one restart's worth of dashboard history. */
-#define BS_STATE_FORMAT_VERSION   10
+ * bump is one restart's worth of dashboard history.
+ *
+ * v11 adds the audience-split g_tier/g_outcome/g_cookie mirrors to both
+ * the ring slot and the cumulative block, widening sizeof(bs_metrics)
+ * again. Same rejection path, same one-restart cost. */
+#define BS_STATE_FORMAT_VERSION   11
 #define BS_STATE_MAX_AGE_SECS     (14 * 86400)
 #define BS_FNV64_SEED             0xcbf29ce484222325ULL
 
@@ -245,6 +249,28 @@ typedef enum {
     BS_M_CLASS_UNKNOWN,
     BS_M_CLASS_COUNT
 } bs_m_class;
+
+/* Coarse audience split, used to cross tier/outcome/cookie so the
+ * dashboard can report bots and humans separately. Mixing them makes
+ * both readings useless: on a research hub 52% of server time is
+ * declared crawlers that BotShield passes ON PURPOSE, which drags the
+ * challenge rate down and hides what is happening to actual visitors.
+ *
+ * Two groups, not six. Crossing all six classes would cost ~3.2 MB of
+ * ring across the 32-vhost cap, in the same 16 MB segment as the
+ * safeguard table; two costs ~1.1 MB. The per-class detail inside each
+ * tab comes from the existing flat req_class[], which is already
+ * windowed -- so nothing is lost by keeping the crossed dimension
+ * coarse.
+ *
+ * FAKE_BOT counts as USER, deliberately: a UA claiming to be a crawler
+ * whose IP fails the cross-check is not a crawler, and filing it under
+ * bots would let a spoofer hide inside the population we exempt. */
+typedef enum {
+    BS_M_GROUP_BOT = 0,
+    BS_M_GROUP_USER,
+    BS_M_GROUP_COUNT
+} bs_m_group;
 
 /* HTTP status class for the site-wide traffic counters. Separate from
  * the decision vocabulary: these count every request the server logs,
@@ -504,6 +530,11 @@ typedef struct {
      * interstitial returns on a fresh request that reads cookie=ok, so
      * a windowed solve rate needs this dimension, not just outcome[]. */
     apr_uint64_t cookie [BS_M_COOKIE_COUNT];
+    /* Same three dimensions, split by audience, so the dashboard can
+     * report bots and humans without one drowning out the other. */
+    apr_uint64_t g_tier   [BS_M_GROUP_COUNT][BS_M_TIER_COUNT];
+    apr_uint64_t g_outcome[BS_M_GROUP_COUNT][BS_M_OUTCOME_COUNT];
+    apr_uint64_t g_cookie [BS_M_GROUP_COUNT][BS_M_COOKIE_COUNT];
     /* Site-wide traffic, counted at log_transaction — which runs for
      * every request on every vhost, regardless of BotShieldEnabled
      * scope. Decisions are a subset: with the enable scoped to a
@@ -522,6 +553,10 @@ typedef struct {
     apr_uint64_t outcome[BS_M_OUTCOME_COUNT];
     apr_uint64_t cookie [BS_M_COOKIE_COUNT];
     apr_uint64_t provider[BS_M_PROV_COUNT];
+    /* Audience-split mirrors of the three decision dimensions. */
+    apr_uint64_t g_tier   [BS_M_GROUP_COUNT][BS_M_TIER_COUNT];
+    apr_uint64_t g_outcome[BS_M_GROUP_COUNT][BS_M_OUTCOME_COUNT];
+    apr_uint64_t g_cookie [BS_M_GROUP_COUNT][BS_M_COOKIE_COUNT];
     /* Site-wide traffic (see bs_metrics_slot). */
     apr_uint64_t req_total;
     apr_uint64_t req_cookie;
