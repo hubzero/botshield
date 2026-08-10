@@ -207,6 +207,7 @@ typedef struct {
     apr_uint64_t req_class[BS_M_CLASS_COUNT];
     /* Same three decision dimensions split by audience (bot / user),
      * backing the dashboard's two tabs. */
+    apr_uint64_t g_resp   [BS_M_GROUP_COUNT][BS_M_RESP_COUNT];
     apr_uint64_t g_tier   [BS_M_GROUP_COUNT][BS_M_TIER_COUNT];
     apr_uint64_t g_outcome[BS_M_GROUP_COUNT][BS_M_OUTCOME_COUNT];
     apr_uint64_t g_cookie [BS_M_GROUP_COUNT][BS_M_COOKIE_COUNT];

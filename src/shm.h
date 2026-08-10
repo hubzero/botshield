@@ -172,7 +172,8 @@ extern "C" {
  * again. Same rejection path, same one-restart cost. */
 /* v12 adds BS_M_RESP_STATIC, widening req_resp[] in both the ring slot
  * and the cumulative block. */
-#define BS_STATE_FORMAT_VERSION   12
+/* v13 adds g_resp[]: responder crossed with audience. */
+#define BS_STATE_FORMAT_VERSION   13
 #define BS_STATE_MAX_AGE_SECS     (14 * 86400)
 #define BS_FNV64_SEED             0xcbf29ce484222325ULL
 
@@ -554,6 +555,10 @@ typedef struct {
     apr_uint64_t req_status[BS_M_STATUS_COUNT];
     apr_uint64_t req_resp[BS_M_RESP_COUNT];
     apr_uint64_t req_class[BS_M_CLASS_COUNT];
+    /* Responder crossed with audience. Separates "the app answered a
+     * crawler" from "the app answered a person" -- the same row in
+     * req_resp[], but crawl budget versus real use. */
+    apr_uint64_t g_resp[BS_M_GROUP_COUNT][BS_M_RESP_COUNT];
 } bs_metrics_slot;
 
 /* M9.2 metrics block. Lives in SHM next to the rate-counter pool. */
@@ -572,6 +577,7 @@ typedef struct {
     apr_uint64_t req_status[BS_M_STATUS_COUNT];
     apr_uint64_t req_resp[BS_M_RESP_COUNT];
     apr_uint64_t req_class[BS_M_CLASS_COUNT];
+    apr_uint64_t g_resp[BS_M_GROUP_COUNT][BS_M_RESP_COUNT];
     /* Persistence gauges. */
     apr_uint64_t state_saves_total;
     apr_uint64_t state_save_last_unix;
