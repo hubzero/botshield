@@ -136,6 +136,20 @@ typedef struct {
      * by `BotShieldRateLimit @ai-train ...` or
      * `BotShieldPathTrigger ... ua=@search ...`. */
     const char         *ua_botgroup;
+    /* @bot / @fake-bot — match on the classifier's verdict rather than
+     * on a declared botgroup. @botgroup can only name a bot the UA
+     * directory already knows, which leaves class=unknown-bot (a
+     * bot-shaped UA with no directory entry) impossible to name in a
+     * rule at all.
+     *
+     * @bot deliberately means verified-bot + known-bot + unknown-bot,
+     * the same three the dashboard's Bots tab counts. A fake bot is a
+     * UA claiming a crawler whose IP failed the cross-check -- it is
+     * not a crawler, and folding it in here would put a spoofer inside
+     * whatever exemption an operator grants "bots". It gets its own
+     * selector so it stays nameable. 0 = axis unused. */
+    int                 ua_class_bot;
+    int                 ua_class_fake;
     int                 ip_any;
     const char         *path;
     const char         *inline_cidrs;
@@ -155,6 +169,19 @@ typedef struct {
      * or -1 for no cookie condition. Named-cookie predicates stay with
      * BotShieldCookieTrigger, whose vocabulary is richer than one key. */
     int                cookie_pred;
+    /* exists=yes|no — does the request map to something on disk?
+     * Read from r->finfo, which map_to_storage has already filled in by
+     * the time the handler runs, so this costs no extra stat().
+     *
+     * The use it exists for: on an admin path, the real UI is files
+     * that are there (templates, CSS, JS, images) while a scanner is
+     * asking for thousands of paths that are not. "Challenge what does
+     * not resolve, leave what does alone" separates the two without
+     * enumerating either, and keeps a challenge off the sub-resources
+     * that could not solve one anyway.
+     *
+     * -1 = no condition, 1 = must exist, 0 = must not exist. */
+    int                exists_pred;
     /* ua= / ipspec= cohort. has_cohort==0 means no UA/IP restriction. */
     bs_cohort          cohort;
     int                has_cohort;

@@ -41,6 +41,8 @@
  * to the cohort. UA axis can be:
  *   ua_any=1              matches any UA            (ua=* or omitted)
  *   ua_none=1             absent or empty UA only   (ua="")
+ *   ua_class_bot=1        any real bot   (ua=@bot)
+ *   ua_class_fake=1       spoofed bot    (ua=@fake-bot)
  *   ua_botgroup != NULL   matches by classified botgroup
  *                         (search/ai-input/ai-train/monitor)
  *   ua_pattern != NULL    matches by UA-substring (case-insensitive)
@@ -55,6 +57,21 @@ static int bs_cohort_matches(const bs_cohort *c,
              * omit the header, others send "User-Agent:" with nothing
              * after it. Treating them differently would be a trap. */
             if (ua && *ua) return 0;
+        } else if (c->ua_class_bot) {
+            /* @bot — the classifier says this IS a bot. Verified,
+             * known and unknown-bot; NOT fake-bot, which is a client
+             * lying about being one and must not inherit an exemption
+             * written for real crawlers. Same three the dashboard's
+             * Bots tab counts, so policy and reporting agree on who a
+             * bot is. */
+            const bs_ua_class *cls = bs_classify_request_ua(r);
+            if (!cls) return 0;
+            if (cls->label != BS_UA_CLASS_VERIFIED_BOT
+             && cls->label != BS_UA_CLASS_KNOWN_BOT
+             && cls->label != BS_UA_CLASS_UNKNOWN_BOT) return 0;
+        } else if (c->ua_class_fake) {
+            const bs_ua_class *cls = bs_classify_request_ua(r);
+            if (!cls || cls->label != BS_UA_CLASS_FAKE_BOT) return 0;
         } else if (c->ua_botgroup) {
             const bs_ua_class *cls = bs_classify_request_ua(r);
             if (!cls || !cls->known_botgroup) return 0;
@@ -369,6 +386,20 @@ int bs_check_policy(request_rec *r)
                 if (!bs_cookie_pred_match(&probe, rt_cmap,
                                           scfg->session_names, NULL))
                     continue;
+            }
+            if (t->exists_pred >= 0) {
+                /* map_to_storage has already stat()ed for us, so this
+                 * is a struct read. filetype is APR_NOFILE when nothing
+                 * resolved; a directory counts as existing, which is
+                 * what "files or directories that exist" has to mean
+                 * for an admin UI whose assets live in real folders.
+                 *
+                 * Requests the core never resolved to a path at all
+                 * (proxied, or answered before map_to_storage) read as
+                 * "does not exist" -- correct for exists=no rules,
+                 * which are the scanner-facing ones. */
+                int have = (r->finfo.filetype != APR_NOFILE);
+                if (have != t->exists_pred) continue;
             }
             if (t->has_cohort && !bs_cohort_matches(&t->cohort, ua, r))
                 continue;
