@@ -1830,6 +1830,20 @@ int bs_dashboard_handler(request_rec *r)
     const char *vq = (vsel < 0) ? "all"
                                 : apr_psprintf(r->pool, "%d", vsel);
 
+    /* Audience tab. In the query string for the same reason w/r/vh are:
+     * the page auto-refreshes, and any selection the URL does not carry
+     * snaps back to its default every interval. That ruled out the
+     * CSS-only :checked approach this started as -- a radio resets on
+     * every load, so the tab would flip back to Bots under anyone
+     * watching the page. Carrying it here also makes a tab linkable,
+     * which the radio version was not. */
+    int aud = BS_M_GROUP_BOT;
+    {
+        const char *t = bs_d_qparam(r->pool, r->args, "tab");
+        if (t && strcmp(t, "usr") == 0) aud = BS_M_GROUP_USER;
+    }
+    const char *tq = (aud == BS_M_GROUP_USER) ? "usr" : "bot";
+
     bs_metrics_window w;
     bs_metrics_read_window(span, vsel, &w);
     bs_gauges_refresh();
@@ -1854,8 +1868,8 @@ int bs_dashboard_handler(request_rec *r)
          * would silently snap back to the default every interval. */
         ap_rprintf(r,
             "<meta http-equiv='refresh' "
-            "content='%d;url=?w=%s&amp;r=%d&amp;vh=%s'>",
-            refresh, wq, refresh, vq);
+            "content='%d;url=?w=%s&amp;r=%d&amp;vh=%s&amp;tab=%s'>",
+            refresh, wq, refresh, vq, tq);
     }
     ap_rputs(
       "<title>mod_botshield dashboard</title><style>"
@@ -1890,28 +1904,21 @@ int bs_dashboard_handler(request_rec *r)
       "nav.rf .ts{margin-left:auto;font-variant-numeric:tabular-nums}"
       "section{margin:0 0 28px}"
       ".kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}"
-      /* CSS-only tabs. The radios keep their place in the tab order --
-       * opacity rather than display:none -- so the tabs are reachable
-       * and operable from the keyboard without any script. */
-      ".tabs input{position:absolute;opacity:0;width:0;height:0}"
+      /* Audience tabs. Plain links, because the selection lives in the
+       * query string -- see the `tab` parse -- so it survives the
+       * auto-refresh. Ordinary anchors are keyboard-operable and
+       * linkable for free. */
       ".tabbar{display:flex;gap:2px;border-bottom:1px solid var(--line);"
       "margin:0 0 16px}"
-      ".tabbar label{padding:8px 14px;cursor:pointer;font-size:13px;"
-      "font-weight:600;letter-spacing:.02em;color:var(--muted);"
+      ".tabbar a{padding:8px 14px;font-size:13px;font-weight:600;"
+      "letter-spacing:.02em;color:var(--muted);text-decoration:none;"
       "border-bottom:2px solid transparent;margin-bottom:-1px;"
       "white-space:nowrap}"
-      ".tabbar label span{font-weight:400;color:var(--muted);"
-      "margin-left:6px;font-variant-numeric:tabular-nums}"
-      ".tabs .panel{display:none}"
-      "#tab-bot:checked~.tabbar label[for=tab-bot],"
-      "#tab-usr:checked~.tabbar label[for=tab-usr]"
-      "{color:var(--ink);border-bottom-color:var(--t2)}"
-      "#tab-bot:checked~.tabbar label[for=tab-bot] span,"
-      "#tab-usr:checked~.tabbar label[for=tab-usr] span{color:var(--ink2)}"
-      "#tab-bot:focus-visible~.tabbar label[for=tab-bot],"
-      "#tab-usr:focus-visible~.tabbar label[for=tab-usr]"
-      "{outline:2px solid var(--t2);outline-offset:-2px;border-radius:3px}"
-      "#tab-bot:checked~.p-bot,#tab-usr:checked~.p-usr{display:block}"
+      ".tabbar a span{font-weight:400;color:var(--muted);margin-left:6px;"
+      "font-variant-numeric:tabular-nums}"
+      ".tabbar a:hover{color:var(--ink2)}"
+      ".tabbar a.on{color:var(--ink);border-bottom-color:var(--t2)}"
+      ".tabbar a.on span{color:var(--ink2)}"
       ".note{margin:0 0 16px;font-size:13px;line-height:1.45;"
       "color:var(--ink2);max-width:62ch}"
       ".kpi{border:1px solid var(--line);border-radius:8px;padding:12px 14px}"
@@ -1952,9 +1959,10 @@ int bs_dashboard_handler(request_rec *r)
         {"15", "15 min", 15}, {"60", "1 hour", 60},
         {"1440", "24 hours", 1440}, {"all", "All time", 0} };
     for (int i = 0; i < 4; i++) {
-        ap_rprintf(r, "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%s'>%s</a>",
+        ap_rprintf(r,
+                   "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%s&amp;tab=%s'>%s</a>",
                    span == wins[i].s ? "on" : "", wins[i].q, refresh,
-                   vq, wins[i].t);
+                   vq, tq, wins[i].t);
     }
     ap_rputs("</nav>", r);
 
@@ -1963,14 +1971,15 @@ int bs_dashboard_handler(request_rec *r)
      * a row with one inert tab in it. */
     if (vdir && vdir->count > 1) {
         ap_rputs("<nav class='vh'>", r);
-        ap_rprintf(r, "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=all'>"
-                      "All vhosts</a>",
-                   vsel < 0 ? "on" : "", wq, refresh);
+        ap_rprintf(r, "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=all"
+                      "&amp;tab=%s'>All vhosts</a>",
+                   vsel < 0 ? "on" : "", wq, refresh, tq);
         for (apr_uint32_t i = 0; i < vdir->count; i++) {
             if (!vdir->name[i][0]) continue;
             ap_rprintf(r,
-                "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%u'>%s</a>",
-                vsel == (int)i ? "on" : "", wq, refresh, i,
+                "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%u"
+                "&amp;tab=%s'>%s</a>",
+                vsel == (int)i ? "on" : "", wq, refresh, i, tq,
                 ap_escape_html(r->pool, vdir->name[i]));
         }
         ap_rputs("</nav>", r);
@@ -1991,8 +2000,10 @@ int bs_dashboard_handler(request_rec *r)
             if (opts[i] == 0) apr_snprintf(lbl, sizeof(lbl), "Off");
             else              apr_snprintf(lbl, sizeof(lbl), "%ds", opts[i]);
             ap_rprintf(r,
-                       "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%s'>%s</a>",
-                       refresh == opts[i] ? "on" : "", wq, opts[i], vq, lbl);
+                       "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%s"
+                       "&amp;tab=%s'>%s</a>",
+                       refresh == opts[i] ? "on" : "", wq, opts[i], vq,
+                       tq, lbl);
         }
         ap_rprintf(r, "<span class='ts'>rendered %s</span></nav>", ts);
     }
@@ -2231,33 +2242,34 @@ int bs_dashboard_handler(request_rec *r)
                                        BS_M_CLASS_UNKNOWN };
         static const char *usr_lbl[] = { "browser", "fake bot", "unknown" };
 
-        ap_rputs("<section><h2>BotShield decisions</h2><div class='tabs'>", r);
-        ap_rputs("<input type='radio' name='aud' id='tab-bot' checked>"
-                 "<input type='radio' name='aud' id='tab-usr'>", r);
+        ap_rputs("<section><h2>BotShield decisions</h2>", r);
         ap_rprintf(r,
-            "<div class='tabbar'>"
-            "<label for='tab-bot'>Bots <span>%" APR_UINT64_T_FMT "</span></label>"
-            "<label for='tab-usr'>Users &amp; unknown <span>%"
-            APR_UINT64_T_FMT "</span></label></div>", bot_dec, usr_dec);
+            "<nav class='tabbar'>"
+            "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%s&amp;tab=bot'>"
+            "Bots <span>%" APR_UINT64_T_FMT "</span></a>"
+            "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%s&amp;tab=usr'>"
+            "Users &amp; unknown <span>%" APR_UINT64_T_FMT "</span></a>"
+            "</nav>",
+            aud == BS_M_GROUP_BOT ? "on" : "", wq, refresh, vq, bot_dec,
+            aud == BS_M_GROUP_USER ? "on" : "", wq, refresh, vq, usr_dec);
 
-        ap_rputs("<div class='panel p-bot'>", r);
-        ap_rputs("<p class='note'>Declared crawlers. Most are passed "
-                 "deliberately and governed by BotShieldBotRateLimit "
-                 "rather than by challenges, so a low challenge rate "
-                 "here is the policy working, not a gap.</p>", r);
-        bs_d_audience_panel(r, &w, BS_M_GROUP_BOT, "b", bot_cls, bot_lbl, 3);
-        ap_rputs("</div>", r);
-
-        ap_rputs("<div class='panel p-usr'>", r);
-        ap_rputs("<p class='note'>Browsers, unclassified clients, and "
-                 "UAs claiming to be crawlers whose IP failed the "
-                 "cross-check. This is the population challenges are "
-                 "aimed at, so challenge and solve rates here are the "
-                 "ones to read.</p>", r);
-        bs_d_audience_panel(r, &w, BS_M_GROUP_USER, "u", usr_cls, usr_lbl, 3);
-        ap_rputs("</div>", r);
-
-        ap_rputs("</div></section>", r);
+        if (aud == BS_M_GROUP_BOT) {
+            ap_rputs("<p class='note'>Declared crawlers. Most are passed "
+                     "deliberately and governed by BotShieldBotRateLimit "
+                     "rather than by challenges, so a low challenge rate "
+                     "here is the policy working, not a gap.</p>", r);
+            bs_d_audience_panel(r, &w, BS_M_GROUP_BOT, "b",
+                                bot_cls, bot_lbl, 3);
+        } else {
+            ap_rputs("<p class='note'>Browsers, unclassified clients, and "
+                     "UAs claiming to be crawlers whose IP failed the "
+                     "cross-check. This is the population challenges are "
+                     "aimed at, so challenge and solve rates here are the "
+                     "ones to read.</p>", r);
+            bs_d_audience_panel(r, &w, BS_M_GROUP_USER, "u",
+                                usr_cls, usr_lbl, 3);
+        }
+        ap_rputs("</section>", r);
     }
 
     /* Live capacity — ratios against a limit, so meters. These are
