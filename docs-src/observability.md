@@ -123,7 +123,7 @@ awk-validator.sh`).
 |---|---|
 | `tier` | `none`, `pass`, `silent`, `form`, `captcha`, `safeguard` |
 | `outcome` | `allow`, `challenged`, `verified`, `block`, `redirect`, `failopen`, `rate_limited`, `inflight_capped`, `pending_missing`, `misconfigured`, `debug` (plus tilde-prefixed counterfactuals: `~challenge`, `~block`, `~rate_limited` under `BotShieldEnabled LogOnly`) |
-| `cookie` | `ok`, `expired`, `bad_sig`, `bad_format`, `absent`, `minted`, `-` |
+| `cookie` | `solved`, `ok`, `expired`, `bad_sig`, `bad_format`, `absent`, `minted`, `-` |
 | `provider` | `-`, `turnstile`, `hcaptcha`, `recaptcha-v2`, `recaptcha-v3`, `friendly`, `geetest` |
 | `alg` | `-`, `sha256-zeros`, `captcha-<provider>` |
 | `reason` | quoted short string (comma-joined reason names) or `-` |
@@ -502,9 +502,17 @@ embedded silent mode is in use.
 
 **`verified` counts solves, not requests.** A client that completes a
 silent/form PoW returns on a *fresh* request carrying its new cookie,
-which logs `outcome=allow cookie=ok`. Do not compute a solve rate from
-`cookie=ok` — that counts every request bearing a valid cookie, so one
-human browsing 50 pages would read as 50 solves. Before 2026-08-01 the
+which logs `outcome=allow cookie=solved`. Do not compute a solve rate
+from either cookie state — both count every request bearing a cookie,
+so one human browsing 50 pages would read as 50 solves.
+
+`cookie=solved` vs `cookie=ok` is nonetheless the ratio to watch for
+cookie harvesting. Both verify identically; only `solved` carries proof
+that a challenge was passed. A large `ok` share means clients are
+holding cookies they never earned — on one production hub 70% of
+valid-cookie traffic sent no User-Agent at all, replaying minted
+cookies to suppress the `dropped-cookie` penalty. `cookie_ok_total`
+rising while `cookie_solved_total` stays flat is that signature. Before 2026-08-01 the
 PoW path emitted nothing at all, so a deployment running the silent or
 form tier with no captcha provider reported a permanent 0% solve rate
 while challenges were in fact being solved.

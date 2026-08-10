@@ -93,6 +93,41 @@ static int bs_m_class_idx(bs_ua_class_label l)
     return BS_M_CLASS_UNKNOWN;
 }
 
+/* Audience split for the dashboard tabs. Switch rather than a range
+ * test on the class enum, for the same reason bs_m_class_idx is: a new
+ * class must fail the build here and force a decision about which side
+ * it belongs on, instead of silently landing in whichever half the
+ * numbering puts it.
+ *
+ * FAKE_BOT is USER on purpose. It is a UA claiming to be a crawler
+ * whose IP failed the cross-check -- filing it under bots would let a
+ * spoofer hide inside exactly the population the bot tab exempts from
+ * scrutiny. UNKNOWN is USER for the same reason: unclassified traffic
+ * belongs with the population we still challenge, not with the one we
+ * pass on sight. */
+static int bs_m_group_of_class(int class_idx)
+{
+    switch (class_idx) {
+    case BS_M_CLASS_VERIFIED_BOT:
+    case BS_M_CLASS_KNOWN_BOT:
+    case BS_M_CLASS_UNKNOWN_BOT:
+        return BS_M_GROUP_BOT;
+    case BS_M_CLASS_BROWSER:
+    case BS_M_CLASS_FAKE_BOT:
+    case BS_M_CLASS_UNKNOWN:
+        return BS_M_GROUP_USER;
+    }
+    return BS_M_GROUP_USER;
+}
+
+/* Group for the request in hand, from the shared UA classifier. */
+static int bs_m_request_group(request_rec *r)
+{
+    const bs_ua_class *uac = bs_classify_request_ua(r);
+    return bs_m_group_of_class(uac ? bs_m_class_idx(uac->label)
+                                   : BS_M_CLASS_UNKNOWN);
+}
+
 static int bs_m_outcome_idx(const char *s)
 {
     if (!s) return -1;
@@ -119,6 +154,7 @@ static int bs_m_cookie_idx(const char *s)
     if (strcmp(s, "bad_format") == 0) return BS_M_COOKIE_BAD_FORMAT;
     if (strcmp(s, "absent")     == 0) return BS_M_COOKIE_ABSENT;
     if (strcmp(s, "minted")     == 0) return BS_M_COOKIE_MINTED;
+    if (strcmp(s, "solved")     == 0) return BS_M_COOKIE_SOLVED;
     return -1;
 }
 
@@ -283,7 +319,8 @@ static void bs_metrics_bump(request_rec *r,
     bs_server_cfg *scfg_v = ap_get_module_config(r->server->module_config,
                                                  &botshield_module);
     int vidx = scfg_v ? scfg_v->vhost_idx : -1;
-    bs_metrics_bucket_add(vidx, ti, oi, ci);
+    int gi   = bs_m_request_group(r);
+    bs_metrics_bucket_add(vidx, ti, oi, ci, gi);
 
     /* Cumulative side of the same event, mirrored into the vhost
      * block. The global block keeps being written directly so the
@@ -293,6 +330,24 @@ static void bs_metrics_bump(request_rec *r,
         if (ti >= 0) __atomic_fetch_add(&vm->tier[ti], 1, __ATOMIC_RELAXED);
         if (oi >= 0) __atomic_fetch_add(&vm->outcome[oi], 1, __ATOMIC_RELAXED);
         if (ci >= 0) __atomic_fetch_add(&vm->cookie[ci], 1, __ATOMIC_RELAXED);
+        if (gi >= 0) {
+            if (ti >= 0) __atomic_fetch_add(&vm->g_tier[gi][ti],
+                                            1, __ATOMIC_RELAXED);
+            if (oi >= 0) __atomic_fetch_add(&vm->g_outcome[gi][oi],
+                                            1, __ATOMIC_RELAXED);
+            if (ci >= 0) __atomic_fetch_add(&vm->g_cookie[gi][ci],
+                                            1, __ATOMIC_RELAXED);
+        }
+    }
+
+    /* Cumulative audience-split mirrors, alongside the flat counters. */
+    if (gi >= 0) {
+        if (ti >= 0) __atomic_fetch_add(&bs_shm.metrics->g_tier[gi][ti],
+                                        1, __ATOMIC_RELAXED);
+        if (oi >= 0) __atomic_fetch_add(&bs_shm.metrics->g_outcome[gi][oi],
+                                        1, __ATOMIC_RELAXED);
+        if (ci >= 0) __atomic_fetch_add(&bs_shm.metrics->g_cookie[gi][ci],
+                                        1, __ATOMIC_RELAXED);
     }
 
     if (ti >= 0) {
@@ -516,26 +571,54 @@ static void bs_m_slot_claim(bs_metrics_slot *slot, apr_uint64_t epoch)
         for (int i = 0; i < BS_M_CLASS_COUNT; i++) {
             __atomic_store_n(&slot->req_class[i], 0, __ATOMIC_RELAXED);
         }
+        /* Audience-split mirrors must be reset with the slot they live
+         * in; a missed reset here would let a recycled slot carry a
+         * previous window's bot counts into the current one. */
+        for (int g = 0; g < BS_M_GROUP_COUNT; g++) {
+            for (int i = 0; i < BS_M_TIER_COUNT; i++) {
+                __atomic_store_n(&slot->g_tier[g][i], 0, __ATOMIC_RELAXED);
+            }
+            for (int i = 0; i < BS_M_OUTCOME_COUNT; i++) {
+                __atomic_store_n(&slot->g_outcome[g][i], 0, __ATOMIC_RELAXED);
+            }
+            for (int i = 0; i < BS_M_COOKIE_COUNT; i++) {
+                __atomic_store_n(&slot->g_cookie[g][i], 0, __ATOMIC_RELAXED);
+            }
+        }
     }
 }
 
 static void bs_m_slot_add(bs_metrics_slot *slot, apr_uint64_t epoch,
-                          int tier_idx, int outcome_idx, int cookie_idx)
+                          int tier_idx, int outcome_idx, int cookie_idx,
+                          int group_idx)
 {
     bs_m_slot_claim(slot, epoch);
     if (tier_idx >= 0) {
         __atomic_fetch_add(&slot->tier[tier_idx], 1, __ATOMIC_RELAXED);
+        if (group_idx >= 0) {
+            __atomic_fetch_add(&slot->g_tier[group_idx][tier_idx],
+                               1, __ATOMIC_RELAXED);
+        }
     }
     if (outcome_idx >= 0) {
         __atomic_fetch_add(&slot->outcome[outcome_idx], 1, __ATOMIC_RELAXED);
+        if (group_idx >= 0) {
+            __atomic_fetch_add(&slot->g_outcome[group_idx][outcome_idx],
+                               1, __ATOMIC_RELAXED);
+        }
     }
     if (cookie_idx >= 0) {
         __atomic_fetch_add(&slot->cookie[cookie_idx], 1, __ATOMIC_RELAXED);
+        if (group_idx >= 0) {
+            __atomic_fetch_add(&slot->g_cookie[group_idx][cookie_idx],
+                               1, __ATOMIC_RELAXED);
+        }
     }
 }
 
 void bs_metrics_bucket_add(int vhost_idx, int tier_idx,
-                           int outcome_idx, int cookie_idx)
+                           int outcome_idx, int cookie_idx,
+                           int group_idx)
 {
     if (!bs_shm.metrics) return;
     apr_uint64_t minute = (apr_uint64_t)(apr_time_sec(apr_time_now()) / 60);
@@ -545,9 +628,9 @@ void bs_metrics_bucket_add(int vhost_idx, int tier_idx,
     for (int b = 0; b < 2; b++) {
         if (!blocks[b]) continue;
         bs_m_slot_add(&blocks[b]->min_slots[minute % BS_M_MIN_SLOTS],
-                      minute, tier_idx, outcome_idx, cookie_idx);
+                      minute, tier_idx, outcome_idx, cookie_idx, group_idx);
         bs_m_slot_add(&blocks[b]->hour_slots[hour % BS_M_HOUR_SLOTS],
-                      hour, tier_idx, outcome_idx, cookie_idx);
+                      hour, tier_idx, outcome_idx, cookie_idx, group_idx);
     }
 }
 
@@ -644,6 +727,22 @@ static void bs_m_sum_ring(const bs_metrics_slot *ring, int nslots,
             out->req_class[ck] += __atomic_load_n(&ring[i].req_class[ck],
                                                   __ATOMIC_RELAXED);
         }
+        for (int g = 0; g < BS_M_GROUP_COUNT; g++) {
+            for (int t = 0; t < BS_M_TIER_COUNT; t++) {
+                out->g_tier[g][t] += __atomic_load_n(&ring[i].g_tier[g][t],
+                                                     __ATOMIC_RELAXED);
+            }
+            for (int o = 0; o < BS_M_OUTCOME_COUNT; o++) {
+                out->g_outcome[g][o] +=
+                    __atomic_load_n(&ring[i].g_outcome[g][o],
+                                    __ATOMIC_RELAXED);
+            }
+            for (int c = 0; c < BS_M_COOKIE_COUNT; c++) {
+                out->g_cookie[g][c] +=
+                    __atomic_load_n(&ring[i].g_cookie[g][c],
+                                    __ATOMIC_RELAXED);
+            }
+        }
     }
 }
 
@@ -686,6 +785,20 @@ void bs_metrics_read_window(int span_minutes, int vhost_idx,
         for (int ck = 0; ck < BS_M_CLASS_COUNT; ck++) {
             out->req_class[ck] = __atomic_load_n(&m->req_class[ck],
                                                  __ATOMIC_RELAXED);
+        }
+        for (int g = 0; g < BS_M_GROUP_COUNT; g++) {
+            for (int t = 0; t < BS_M_TIER_COUNT; t++) {
+                out->g_tier[g][t] = __atomic_load_n(&m->g_tier[g][t],
+                                                    __ATOMIC_RELAXED);
+            }
+            for (int o = 0; o < BS_M_OUTCOME_COUNT; o++) {
+                out->g_outcome[g][o] = __atomic_load_n(&m->g_outcome[g][o],
+                                                       __ATOMIC_RELAXED);
+            }
+            for (int c = 0; c < BS_M_COOKIE_COUNT; c++) {
+                out->g_cookie[g][c] = __atomic_load_n(&m->g_cookie[g][c],
+                                                      __ATOMIC_RELAXED);
+            }
         }
     } else {
         apr_uint64_t minute = (apr_uint64_t)(apr_time_sec(apr_time_now()) / 60);
@@ -1255,6 +1368,11 @@ void bs_decision_log(request_rec *r,
         apr_table_setn(r->subprocess_env, "BS_TAG", tag);
     }
     apr_table_setn(r->subprocess_env, "BOTSHIELD", "1");
+    {
+        const bs_ua_class *uac_e = bs_classify_request_ua(r);
+        apr_table_setn(r->subprocess_env, "BS_CLASS",
+                       uac_e ? bs_ua_class_label_str(uac_e->label) : "-");
+    }
 
     /* Build the key=value payload once, then feed it to both sinks:
      * Apache's error log (always) and the module-owned decision log
@@ -1265,26 +1383,43 @@ void bs_decision_log(request_rec *r,
      * out of the error log — are unaffected.
      *
      * tag= suffix only when a trigger set it. */
+    /* class= is the UA classifier's verdict, the same one the dashboard
+     * splits its bot/user tabs on. Without it the log cannot be sliced
+     * the way the dashboard is, so a question like "why is the user
+     * challenge rate only 50%" could be posed on the dashboard and not
+     * answered from the log -- the two disagreed about who was a bot
+     * because the log never said. Cached on the request by the
+     * post_read_request hook, so this is a pointer read.
+     *
+     * Appended last, after tag=, so every existing prefix stays byte
+     * identical. Parsers that slice fields positionally from the front
+     * -- the pytest framework reads decisions out of the error log --
+     * see exactly what they saw before, and key=value greps pick the
+     * new field up for free. */
+    const bs_ua_class *uac_l = bs_classify_request_ua(r);
+    const char *cls = uac_l ? bs_ua_class_label_str(uac_l->label) : "-";
+
     const char *payload;
     if (tag && *tag) {
         payload = apr_psprintf(r->pool,
             "tier=%s outcome=%s ip=%s score=%d "
             "cookie=%s provider=%s alg=%s reason=\"%s\" path=\"%s\" "
-            "tag=\"%s\"",
+            "tag=\"%s\" class=%s",
             tier, outcome, ip, score,
             cookie   ? cookie   : "-",
             provider ? provider : "-",
             alg      ? alg      : "-",
-            reason_q, path_q, bs_log_quote(r->pool, tag));
+            reason_q, path_q, bs_log_quote(r->pool, tag), cls);
     } else {
         payload = apr_psprintf(r->pool,
             "tier=%s outcome=%s ip=%s score=%d "
-            "cookie=%s provider=%s alg=%s reason=\"%s\" path=\"%s\"",
+            "cookie=%s provider=%s alg=%s reason=\"%s\" path=\"%s\" "
+            "class=%s",
             tier, outcome, ip, score,
             cookie   ? cookie   : "-",
             provider ? provider : "-",
             alg      ? alg      : "-",
-            reason_q, path_q);
+            reason_q, path_q, cls);
     }
     ap_log_rerror(APLOG_MARK, level, 0, r,
                   "mod_botshield: decision %s", payload);
@@ -1409,6 +1544,11 @@ static void bs_m_emit_gauge(request_rec *r, const char *name,
 #define BS_D_C4 "#eda100"
 #define BS_D_C5 "#e87ba4"
 #define BS_D_C6 "#008300"
+/* C7 carries the cookie `solved` slice. Violet, chosen to sit apart
+ * from C1's blue and C3/C6's greens so the one state that means "this
+ * client actually passed a challenge" is not read as another shade of
+ * the states that only mean "this client has a cookie". */
+#define BS_D_C7 "#7a4fd0"
 
 #define BS_D_T1 "#86b6ef"
 #define BS_D_T2 "#5598e7"
@@ -1508,6 +1648,103 @@ static void bs_d_stacked(request_rec *r, const char *id, const char *title,
 }
 
 /* Ratio against a limit — a meter on a same-hue track, not a two-slice pie. */
+/* One audience tab's worth of decision stats. Same four KPIs and three
+ * bars as the untabbed section used to show, read out of the
+ * audience-split mirrors instead of the flat arrays.
+ *
+ * `idp` prefixes every bar's element id: the two panels render the same
+ * charts and the ids have to stay unique across the document.
+ *
+ * The per-class strip at the bottom comes from the flat req_class[],
+ * which counts REQUESTS (log_transaction, every request on the vhost),
+ * while everything above it counts DECISIONS (only requests an enabled
+ * scope evaluated). The two are different denominators on purpose --
+ * the gap between them is how much of the site the policy actually
+ * covers -- so they are labelled separately rather than summed. */
+static void bs_d_audience_panel(request_rec *r, const bs_metrics_window *w,
+                                int g, const char *idp,
+                                const int *classes, const char **class_labels,
+                                int nclasses)
+{
+    apr_uint64_t decisions = 0;
+    for (int o = 0; o < BS_M_OUTCOME_COUNT; o++) decisions += w->g_outcome[g][o];
+    apr_uint64_t challenged = w->g_outcome[g][BS_M_OUTCOME_CHALLENGED];
+    apr_uint64_t verified   = w->g_outcome[g][BS_M_OUTCOME_VERIFIED];
+    apr_uint64_t blocked    = w->g_outcome[g][BS_M_OUTCOME_BLOCK]
+                            + w->g_outcome[g][BS_M_OUTCOME_RATE_LIMITED];
+    apr_uint64_t unsolved   = (challenged > verified) ? challenged - verified : 0;
+
+    ap_rputs("<div class='kpis'>", r);
+    ap_rprintf(r, "<div class='kpi'><div class='k'>Decisions</div>"
+                  "<div class='v'>%" APR_UINT64_T_FMT "</div></div>", decisions);
+    ap_rprintf(r, "<div class='kpi'><div class='k'>Challenge rate</div>"
+                  "<div class='v'>%s</div><div class='n'>%" APR_UINT64_T_FMT
+                  " issued</div></div>",
+               bs_d_pct(r->pool, challenged, decisions), challenged);
+    ap_rprintf(r, "<div class='kpi'><div class='k'>Solve rate</div>"
+                  "<div class='v'>%s</div><div class='n'>%" APR_UINT64_T_FMT
+                  " solved</div></div>",
+               bs_d_pct(r->pool, verified, challenged), verified);
+    ap_rprintf(r, "<div class='kpi'><div class='k'>Blocked</div>"
+                  "<div class='v'>%" APR_UINT64_T_FMT "</div>"
+                  "<div class='n'>%s of decisions</div></div>",
+               blocked, bs_d_pct(r->pool, blocked, decisions));
+    ap_rputs("</div>", r);
+
+    {
+        const char *labels[] = { "Solved", "Unsolved (left)" };
+        const char *fills[]  = { "var(--t4)", "var(--t1)" };
+        apr_uint64_t vals[]  = { verified, unsolved };
+        bs_d_stacked(r, apr_pstrcat(r->pool, idp, "res", NULL),
+                     "Challenge resolution", labels, vals, fills, 2,
+                     challenged);
+    }
+    {
+        const char *labels[] = { "solved", "ok (no solve)", "minted",
+                                 "absent", "expired", "bad sig",
+                                 "bad format" };
+        const char *fills[]  = { "var(--c7)", "var(--c1)", "var(--c2)",
+                                 "var(--c3)", "var(--c4)", "var(--c5)",
+                                 "var(--c6)" };
+        apr_uint64_t vals[]  = { w->g_cookie[g][BS_M_COOKIE_SOLVED],
+                                 w->g_cookie[g][BS_M_COOKIE_OK],
+                                 w->g_cookie[g][BS_M_COOKIE_MINTED],
+                                 w->g_cookie[g][BS_M_COOKIE_ABSENT],
+                                 w->g_cookie[g][BS_M_COOKIE_EXPIRED],
+                                 w->g_cookie[g][BS_M_COOKIE_BAD_SIG],
+                                 w->g_cookie[g][BS_M_COOKIE_BAD_FORMAT] };
+        apr_uint64_t tot = 0;
+        for (int i = 0; i < 7; i++) tot += vals[i];
+        bs_d_stacked(r, apr_pstrcat(r->pool, idp, "ck", NULL),
+                     "Reputation cookie state", labels, vals, fills, 7, tot);
+    }
+    {
+        const char *labels[] = { "pass", "silent", "form", "captcha" };
+        const char *fills[]  = { "var(--t1)", "var(--t2)",
+                                 "var(--t3)", "var(--t4)" };
+        apr_uint64_t vals[]  = { w->g_tier[g][BS_M_TIER_PASS],
+                                 w->g_tier[g][BS_M_TIER_SILENT],
+                                 w->g_tier[g][BS_M_TIER_FORM],
+                                 w->g_tier[g][BS_M_TIER_CAPTCHA] };
+        apr_uint64_t tot = vals[0] + vals[1] + vals[2] + vals[3];
+        bs_d_stacked(r, apr_pstrcat(r->pool, idp, "tier", NULL),
+                     "Tier mix", labels, vals, fills, 4, tot);
+    }
+    {
+        const char *fills[] = { "var(--c1)", "var(--c2)", "var(--c3)",
+                                "var(--c4)", "var(--c5)", "var(--c6)" };
+        apr_uint64_t vals[BS_M_CLASS_COUNT];
+        apr_uint64_t tot = 0;
+        for (int i = 0; i < nclasses; i++) {
+            vals[i] = w->req_class[classes[i]];
+            tot += vals[i];
+        }
+        bs_d_stacked(r, apr_pstrcat(r->pool, idp, "cls", NULL),
+                     "Requests by classification", class_labels, vals,
+                     fills, nclasses, tot);
+    }
+}
+
 static void bs_d_meter(request_rec *r, const char *label,
                        apr_uint64_t used, apr_uint64_t cap)
 {
@@ -1615,21 +1852,31 @@ int bs_dashboard_handler(request_rec *r)
     const char *vq = (vsel < 0) ? "all"
                                 : apr_psprintf(r->pool, "%d", vsel);
 
+    /* Audience tab. In the query string for the same reason w/r/vh are:
+     * the page auto-refreshes, and any selection the URL does not carry
+     * snaps back to its default every interval. That ruled out the
+     * CSS-only :checked approach this started as -- a radio resets on
+     * every load, so the tab would flip back to Bots under anyone
+     * watching the page. Carrying it here also makes a tab linkable,
+     * which the radio version was not. */
+    int aud = BS_M_GROUP_BOT;
+    {
+        const char *t = bs_d_qparam(r->pool, r->args, "tab");
+        if (t && strcmp(t, "usr") == 0) aud = BS_M_GROUP_USER;
+    }
+    const char *tq = (aud == BS_M_GROUP_USER) ? "usr" : "bot";
+
     bs_metrics_window w;
     bs_metrics_read_window(span, vsel, &w);
     bs_gauges_refresh();
 
-    apr_uint64_t decisions  = w.decisions;
-    apr_uint64_t challenged = w.outcome[BS_M_OUTCOME_CHALLENGED];
-    /* One per solve, from both the captcha and the PoW path. Not
-     * cookie[ok] — that counts every request carrying a valid cookie,
-     * so one human browsing 50 pages would read as 50 solves. */
-    apr_uint64_t verified   = w.outcome[BS_M_OUTCOME_VERIFIED];
-    apr_uint64_t blocked    = w.outcome[BS_M_OUTCOME_BLOCK]
-                            + w.outcome[BS_M_OUTCOME_RATE_LIMITED];
-    /* Unsolved, not "pending": these clients did not stay waiting, they
-     * left. A high number is the module working, not a backlog. */
-    apr_uint64_t unsolved   = (challenged > verified) ? challenged - verified : 0;
+    /* The site-wide decisions/challenged/verified/blocked/unsolved
+     * locals that used to live here fed the single decisions section.
+     * That section is now split by audience, and bs_d_audience_panel
+     * derives each figure from g_outcome[] for its own group -- summing
+     * the two tabs reproduces the old totals. Solve counts still come
+     * from outcome[verified] rather than cookie[], since one human
+     * browsing 50 pages carries a cookie on all 50 but solved once. */
 
     ap_set_content_type(r, "text/html; charset=utf-8");
     apr_table_setn(r->headers_out, "Cache-Control", "no-store");
@@ -1643,8 +1890,8 @@ int bs_dashboard_handler(request_rec *r)
          * would silently snap back to the default every interval. */
         ap_rprintf(r,
             "<meta http-equiv='refresh' "
-            "content='%d;url=?w=%s&amp;r=%d&amp;vh=%s'>",
-            refresh, wq, refresh, vq);
+            "content='%d;url=?w=%s&amp;r=%d&amp;vh=%s&amp;tab=%s'>",
+            refresh, wq, refresh, vq, tq);
     }
     ap_rputs(
       "<title>mod_botshield dashboard</title><style>"
@@ -1652,6 +1899,7 @@ int bs_dashboard_handler(request_rec *r)
       "--line:#e4e4e0;--t1:" BS_D_T1 ";--t2:" BS_D_T2 ";--t3:" BS_D_T3 ";--t4:" BS_D_T4 ";"
       "--c1:" BS_D_C1 ";--c2:" BS_D_C2 ";--c3:" BS_D_C3 ";"
       "--c4:" BS_D_C4 ";--c5:" BS_D_C5 ";--c6:" BS_D_C6 ";"
+      "--c7:" BS_D_C7 ";"
       "--track:#eef2f7;--good:#0ca30c;--warn:#fab219;--crit:#d03b3b;"
       "--neutral:#8a8a84}"
       "@media(prefers-color-scheme:dark){:root{--surface:#1a1a19;--ink:#f2f2ef;"
@@ -1659,7 +1907,7 @@ int bs_dashboard_handler(request_rec *r)
       /* Separate dark selection, validated against #1a1a19 — not a flip. */
       "--t1:#3987e5;--t2:#6da7ec;--t3:#9ec5f4;--t4:#cde2fb;"
       "--c1:#3987e5;--c2:#d95926;--c3:#199e70;--c4:#c98500;"
-      "--c5:#d55181;--c6:#008300;--track:#26262340}}"
+      "--c5:#d55181;--c6:#008300;--c7:#9d86e0;--track:#26262340}}"
       "*{box-sizing:border-box}"
       "body{margin:0;padding:28px 24px 56px;background:var(--surface);color:var(--ink);"
       "font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}"
@@ -1678,6 +1926,23 @@ int bs_dashboard_handler(request_rec *r)
       "nav.rf .ts{margin-left:auto;font-variant-numeric:tabular-nums}"
       "section{margin:0 0 28px}"
       ".kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}"
+      /* Audience tabs. Plain links, because the selection lives in the
+       * query string -- see the `tab` parse -- so it survives the
+       * auto-refresh. Ordinary anchors are keyboard-operable and
+       * linkable for free. */
+      ".tabbar{display:flex;gap:2px;border-bottom:1px solid var(--line);"
+      "margin:0 0 16px}"
+      ".tabbar a{padding:8px 14px;font-size:13px;font-weight:600;"
+      "letter-spacing:.02em;color:var(--muted);text-decoration:none;"
+      "border-bottom:2px solid transparent;margin-bottom:-1px;"
+      "white-space:nowrap}"
+      ".tabbar a span{font-weight:400;color:var(--muted);margin-left:6px;"
+      "font-variant-numeric:tabular-nums}"
+      ".tabbar a:hover{color:var(--ink2)}"
+      ".tabbar a.on{color:var(--ink);border-bottom-color:var(--t2)}"
+      ".tabbar a.on span{color:var(--ink2)}"
+      ".note{margin:0 0 16px;font-size:13px;line-height:1.45;"
+      "color:var(--ink2);max-width:62ch}"
       ".kpi{border:1px solid var(--line);border-radius:8px;padding:12px 14px}"
       ".kpi .k{font-size:12px;color:var(--muted);margin-bottom:4px}"
       ".kpi .v{font-size:27px;font-weight:600;letter-spacing:-.02em;line-height:1.1}"
@@ -1716,9 +1981,10 @@ int bs_dashboard_handler(request_rec *r)
         {"15", "15 min", 15}, {"60", "1 hour", 60},
         {"1440", "24 hours", 1440}, {"all", "All time", 0} };
     for (int i = 0; i < 4; i++) {
-        ap_rprintf(r, "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%s'>%s</a>",
+        ap_rprintf(r,
+                   "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%s&amp;tab=%s'>%s</a>",
                    span == wins[i].s ? "on" : "", wins[i].q, refresh,
-                   vq, wins[i].t);
+                   vq, tq, wins[i].t);
     }
     ap_rputs("</nav>", r);
 
@@ -1727,14 +1993,15 @@ int bs_dashboard_handler(request_rec *r)
      * a row with one inert tab in it. */
     if (vdir && vdir->count > 1) {
         ap_rputs("<nav class='vh'>", r);
-        ap_rprintf(r, "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=all'>"
-                      "All vhosts</a>",
-                   vsel < 0 ? "on" : "", wq, refresh);
+        ap_rprintf(r, "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=all"
+                      "&amp;tab=%s'>All vhosts</a>",
+                   vsel < 0 ? "on" : "", wq, refresh, tq);
         for (apr_uint32_t i = 0; i < vdir->count; i++) {
             if (!vdir->name[i][0]) continue;
             ap_rprintf(r,
-                "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%u'>%s</a>",
-                vsel == (int)i ? "on" : "", wq, refresh, i,
+                "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%u"
+                "&amp;tab=%s'>%s</a>",
+                vsel == (int)i ? "on" : "", wq, refresh, i, tq,
                 ap_escape_html(r->pool, vdir->name[i]));
         }
         ap_rputs("</nav>", r);
@@ -1755,8 +2022,10 @@ int bs_dashboard_handler(request_rec *r)
             if (opts[i] == 0) apr_snprintf(lbl, sizeof(lbl), "Off");
             else              apr_snprintf(lbl, sizeof(lbl), "%ds", opts[i]);
             ap_rprintf(r,
-                       "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%s'>%s</a>",
-                       refresh == opts[i] ? "on" : "", wq, opts[i], vq, lbl);
+                       "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%s"
+                       "&amp;tab=%s'>%s</a>",
+                       refresh == opts[i] ? "on" : "", wq, opts[i], vq,
+                       tq, lbl);
         }
         ap_rprintf(r, "<span class='ts'>rendered %s</span></nav>", ts);
     }
@@ -1961,64 +2230,68 @@ int bs_dashboard_handler(request_rec *r)
     }
 
     /* KPI row — a handful of headline numbers is a stat row, not a chart. */
-    ap_rputs("<section><h2>BotShield decisions</h2><div class='kpis'>", r);
-    ap_rprintf(r, "<div class='kpi'><div class='k'>Decisions</div>"
-                  "<div class='v'>%" APR_UINT64_T_FMT "</div></div>", decisions);
-    ap_rprintf(r, "<div class='kpi'><div class='k'>Challenge rate</div>"
-                  "<div class='v'>%s</div><div class='n'>%" APR_UINT64_T_FMT
-                  " issued</div></div>",
-               bs_d_pct(r->pool, challenged, decisions), challenged);
-    ap_rprintf(r, "<div class='kpi'><div class='k'>Solve rate</div>"
-                  "<div class='v'>%s</div><div class='n'>%" APR_UINT64_T_FMT
-                  " solved by a human</div></div>",
-               bs_d_pct(r->pool, verified, challenged), verified);
-    ap_rprintf(r, "<div class='kpi'><div class='k'>Blocked</div>"
-                  "<div class='v'>%" APR_UINT64_T_FMT "</div>"
-                  "<div class='n'>%s of decisions</div></div>",
-               blocked, bs_d_pct(r->pool, blocked, decisions));
-    ap_rputs("</div></section>", r);
-
-    /* Challenge resolution. Two parts, so a meter would also serve — the
-     * stacked bar is used for consistency with the tier bar below and
-     * because both counts are worth reading, not just the ratio. */
+    /* Decisions, split by audience into two tabs.
+     *
+     * Mixing bots and humans in one set of numbers made both unreadable.
+     * On this hub the majority of evaluated traffic is declared crawlers
+     * that BotShield passes ON PURPOSE -- they cannot solve a JS
+     * challenge and are governed by rate limits instead -- so they drag
+     * the aggregate challenge rate down and hide what is actually
+     * happening to visitors. Separating them means each tab's challenge
+     * and solve rates are answerable questions.
+     *
+     * CSS-only tabs: two radios and sibling :checked selectors. The
+     * dashboard ships no JavaScript and this does not change that. The
+     * radios stay in the tab order (opacity, not display:none) so the
+     * tabs remain keyboard-reachable.
+     *
+     * Both panels are always rendered; the tab only chooses which is
+     * visible. That keeps the page a single request with no state, and
+     * costs one extra set of bars in the HTML. */
     {
-        const char *labels[] = { "Solved by a human", "Unsolved (left)" };
-        const char *fills[]  = { "var(--t4)", "var(--t1)" };
-        apr_uint64_t vals[]  = { verified, unsolved };
-        bs_d_stacked(r, "res", "Challenge resolution", labels, vals,
-                     fills, 2, challenged);
-    }
+        apr_uint64_t bot_dec = 0, usr_dec = 0;
+        for (int o = 0; o < BS_M_OUTCOME_COUNT; o++) {
+            bot_dec += w.g_outcome[BS_M_GROUP_BOT][o];
+            usr_dec += w.g_outcome[BS_M_GROUP_USER][o];
+        }
+        static const int bot_cls[] = { BS_M_CLASS_VERIFIED_BOT,
+                                       BS_M_CLASS_KNOWN_BOT,
+                                       BS_M_CLASS_UNKNOWN_BOT };
+        static const char *bot_lbl[] = { "verified bot", "known bot",
+                                         "unknown bot" };
+        static const int usr_cls[] = { BS_M_CLASS_BROWSER,
+                                       BS_M_CLASS_FAKE_BOT,
+                                       BS_M_CLASS_UNKNOWN };
+        static const char *usr_lbl[] = { "browser", "fake bot", "unknown" };
 
-    /* Cookie state — categorical, not ordinal: these are distinct
-     * states, not a scale. Windowed now that the ring carries the
-     * dimension. Reads as the reputation-cookie health of the window:
-     * bad_sig/bad_format above noise means forgery or a secret
-     * mismatch, expired means TTL churn. */
-    {
-        const char *labels[] = { "ok", "minted", "absent",
-                                 "expired", "bad sig", "bad format" };
-        const char *fills[]  = { "var(--c1)", "var(--c2)", "var(--c3)",
-                                 "var(--c4)", "var(--c5)", "var(--c6)" };
-        apr_uint64_t vals[]  = { w.cookie[BS_M_COOKIE_OK],
-                                 w.cookie[BS_M_COOKIE_MINTED],
-                                 w.cookie[BS_M_COOKIE_ABSENT],
-                                 w.cookie[BS_M_COOKIE_EXPIRED],
-                                 w.cookie[BS_M_COOKIE_BAD_SIG],
-                                 w.cookie[BS_M_COOKIE_BAD_FORMAT] };
-        apr_uint64_t tot = 0;
-        for (int i = 0; i < 6; i++) tot += vals[i];
-        bs_d_stacked(r, "ck", "Reputation cookie state", labels, vals,
-                     fills, 6, tot);
-    }
+        ap_rputs("<section><h2>BotShield decisions</h2>", r);
+        ap_rprintf(r,
+            "<nav class='tabbar'>"
+            "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%s&amp;tab=bot'>"
+            "Bots <span>%" APR_UINT64_T_FMT "</span></a>"
+            "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%s&amp;tab=usr'>"
+            "Users &amp; unknown <span>%" APR_UINT64_T_FMT "</span></a>"
+            "</nav>",
+            aud == BS_M_GROUP_BOT ? "on" : "", wq, refresh, vq, bot_dec,
+            aud == BS_M_GROUP_USER ? "on" : "", wq, refresh, vq, usr_dec);
 
-    /* Tier mix — ordinal escalation, one hue light to dark. */
-    {
-        const char *labels[] = { "pass", "silent", "form", "captcha" };
-        const char *fills[]  = { "var(--t1)", "var(--t2)", "var(--t3)", "var(--t4)" };
-        apr_uint64_t vals[]  = { w.tier[BS_M_TIER_PASS], w.tier[BS_M_TIER_SILENT],
-                                 w.tier[BS_M_TIER_FORM], w.tier[BS_M_TIER_CAPTCHA] };
-        apr_uint64_t tot = vals[0] + vals[1] + vals[2] + vals[3];
-        bs_d_stacked(r, "tier", "Tier mix", labels, vals, fills, 4, tot);
+        if (aud == BS_M_GROUP_BOT) {
+            ap_rputs("<p class='note'>Declared crawlers. Most are passed "
+                     "deliberately and governed by BotShieldBotRateLimit "
+                     "rather than by challenges, so a low challenge rate "
+                     "here is the policy working, not a gap.</p>", r);
+            bs_d_audience_panel(r, &w, BS_M_GROUP_BOT, "b",
+                                bot_cls, bot_lbl, 3);
+        } else {
+            ap_rputs("<p class='note'>Browsers, unclassified clients, and "
+                     "UAs claiming to be crawlers whose IP failed the "
+                     "cross-check. This is the population challenges are "
+                     "aimed at, so challenge and solve rates here are the "
+                     "ones to read.</p>", r);
+            bs_d_audience_panel(r, &w, BS_M_GROUP_USER, "u",
+                                usr_cls, usr_lbl, 3);
+        }
+        ap_rputs("</section>", r);
     }
 
     /* Live capacity — ratios against a limit, so meters. These are
@@ -2045,7 +2318,7 @@ int bs_dashboard_handler(request_rec *r)
             ap_rprintf(r, "<tr><td>%s</td><td class='n'>%" APR_UINT64_T_FMT
                           "</td><td class='n'>%s</td></tr>",
                        onames[i], w.outcome[i],
-                       bs_d_pct(r->pool, w.outcome[i], decisions));
+                       bs_d_pct(r->pool, w.outcome[i], w.decisions));
             shown++;
         }
         if (!shown) ap_rputs("<tr><td colspan='3' class='empty'>"
@@ -2210,8 +2483,15 @@ int bs_metrics_handler(request_rec *r)
         bs_mload(&m->outcome[BS_M_OUTCOME_REDIRECT]));
 
     bs_m_emit_counter(r, "cookie_ok_total",
-        "Rep cookies that verified fully (signature + freshness + PoW).",
+        "Rep cookies that verified fully (signature + freshness + PoW) "
+        "but carry NO challenge-solve proof -- presence cookies. Under "
+        "always-mint this is what a cookie-harvesting bot holds.",
         bs_mload(&m->cookie[BS_M_COOKIE_OK]));
+    bs_m_emit_counter(r, "cookie_solved_total",
+        "Rep cookies that verified fully AND carry solve proof "
+        "(passes_silent/form/captcha). The only cookie state that "
+        "waives first-sight-ip / dropped-cookie.",
+        bs_mload(&m->cookie[BS_M_COOKIE_SOLVED]));
     bs_m_emit_counter(r, "cookie_expired_total",
         "Rep cookies with valid signature but past expires_at.",
         bs_mload(&m->cookie[BS_M_COOKIE_EXPIRED]));

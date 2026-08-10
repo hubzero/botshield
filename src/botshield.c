@@ -1381,6 +1381,11 @@ static int bs_handler(request_rec *r)
     bs_challenge prior_ch = { 0 };
     int have_prior_rep   = 0;
     int cookie_fully_ok  = 0;
+    /* Does the presented cookie carry proof that a challenge was
+     * actually solved, as opposed to merely being a cookie we once
+     * handed out? Under always-mint the two are very different things,
+     * and several call sites below must not confuse them. */
+    int have_solve_proof = 0;
     const char *cookie_verify_reason = NULL;
     int cookie_had_val = (cookie_val && *cookie_val);
     if (cookie_had_val) {
@@ -1395,6 +1400,16 @@ static int bs_handler(request_rec *r)
          * keeps the two predicates from drifting. */
         have_prior_rep = bs_should_carry_prior_rep(cookie_verify_reason,
                                                     &prior_ch);
+        /* Solve proof is read off the AUTHENTICATED rep block, so it
+         * is gated on have_prior_rep rather than on full cookie
+         * validity: a cookie that failed only a post-tag check (PoW
+         * counter, etc.) still has trustworthy pass counters, while a
+         * signature-mismatched or expired one has none we may believe. */
+        if (have_prior_rep) {
+            have_solve_proof = prior_ch.rep.passes_silent
+                            || prior_ch.rep.passes_form
+                            || prior_ch.rep.passes_captcha;
+        }
         if (!cookie_verify_reason) {
             cookie_fully_ok = 1;
             /* E10 — safeguard clear on solve. Gated on actual solve
@@ -1406,10 +1421,7 @@ static int bs_handler(request_rec *r)
              * a fresh cookie on its first request and bypass safeguard
              * for every subsequent failed challenge. Only cookies that
              * carry actual solve proof get to clear. */
-            int has_solve_evidence = prior_ch.rep.passes_silent
-                                  || prior_ch.rep.passes_form
-                                  || prior_ch.rep.passes_captcha;
-            if (has_solve_evidence) {
+            if (have_solve_proof) {
                 bs_server_cfg *scfg_sg = ap_get_module_config(
                     r->server->module_config, &botshield_module);
                 if (scfg_sg && scfg_sg->safeguard_enabled != 0) {
@@ -1435,6 +1447,16 @@ static int bs_handler(request_rec *r)
     }
     const char *cookie_status =
         bs_decision_cookie_status(cookie_verify_reason, cookie_had_val);
+    /* Split the "ok" bucket on solve proof. Under always-mint a valid
+     * cookie is the normal state of every returning client, so "ok"
+     * alone answered a question nobody was asking; what an operator
+     * needs to see is whether the holder ever passed a challenge.
+     * "solved" means verified AND carrying passes_silent/form/captcha;
+     * "ok" now means verified with no such proof -- a presence cookie,
+     * which is exactly what a cookie-harvesting bot holds. */
+    if (have_solve_proof && strcmp(cookie_status, "ok") == 0) {
+        cookie_status = "solved";
+    }
 
     /* E4 — publish the `_bs_session` verification verdict as a
      * request note so bs_check_policy's cookie-trigger evaluator
@@ -1618,7 +1640,25 @@ static int bs_handler(request_rec *r)
     if (declared_crawler) {
         bs_score_add(r, 0, 0, "known-bot-stateless-ok");
     }
-    if (have_client_ip && !have_prior_rep && !declared_crawler) {
+    /* Gated on have_solve_proof, NOT have_prior_rep. A cookie only
+     * earns the waiver by proving a challenge was solved; merely
+     * holding one we handed out proves nothing but that the client
+     * keeps a cookie jar.
+     *
+     * Under always-mint, every client gets a signature-valid cookie on
+     * its first request. Waiving on validity alone let a bot mint one,
+     * store it, and permanently suppress a 25-point penalty it had
+     * never earned -- measured on this hub as no-UA scanners sitting
+     * at score 45 (silent tier) instead of 70 (form tier), i.e. using
+     * cookie persistence to hold themselves in the CHEAPER challenge
+     * tier. Same reasoning the safeguard-clear path above already
+     * applies; these two call sites had drifted apart.
+     *
+     * Cost to real browsers is one silent challenge: they arrive with
+     * no proof, get scored 25 (dropped-cookie) into the silent tier,
+     * solve it transparently, and every later request carries
+     * passes_silent and lands back here clean. */
+    if (have_client_ip && !have_solve_proof && !declared_crawler) {
         if (bs_bloom_seen(client_ip, scfg_h->ns_id)) {
             bs_apply_heuristic(r, BS_H_DROPPED_COOKIE);
         } else {

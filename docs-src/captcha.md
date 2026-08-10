@@ -244,8 +244,10 @@ Claims fields (semicolon-separated, in this order):
 - `score=N` — running score the request decision used.
 - `tier=<t>` — `pass` / `silent` / `form` / `captcha` / `safeguard`
   (matches the decision-log `tier` enum).
-- `cookie=<c>` — `ok` / `expired` / `bad_sig` / `bad_format` /
-  `absent` (matches the `cookie` enum).
+- `cookie=<c>` — `solved` / `ok` / `expired` / `bad_sig` /
+  `bad_format` / `absent` (matches the `cookie` enum). `solved` is a
+  verified cookie carrying challenge-solve proof; `ok` is verified
+  without it.
 - `flags=<list>` — comma-joined flag-bit names
   (`honeypot_hit,app_verified_human`, etc.). Empty value when
   no flags set.
