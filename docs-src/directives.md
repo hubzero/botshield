@@ -1,8 +1,6 @@
 # Directive reference
 
-mod_botshield registers 86 usable directives at config time (plus one
-retired name, `BotShieldPathTrigger`, kept registered only to emit a
-migration error). This page is
+mod_botshield registers 86 directives at config time. This page is
 the canonical reference, grouped by family. The
 underlying source-of-truth is `bs_cmds[]` in `src/botshield.c:142` —
 when tuning behavior, treat the source as authoritative
@@ -545,16 +543,17 @@ BotShieldRequestTrigger login-trap path="/login*" query="*return=*" \
     cookies=none status=403 ttl=0 log=login-trap accesslog=off
 ```
 
-#### Renamed from `BotShieldPathTrigger`
+#### Migrating from `BotShieldPathTrigger`
 
 `BotShieldPathTrigger` was renamed on 2026-08-01 and its path glob moved
 from a positional argument to the `path=` key. The old name had stopped
-being accurate when the family gained `ua=`/`ipspec=`; `query=` and
-`cookies=` made "path" one dimension out of five. Making path a key is
-also what allows a rule with no path condition at all.
+being accurate when the family gained `ua=`/`ipspec=`; `query=`,
+`cookies=` and `exists=` made "path" one dimension out of six. Making
+path a key is also what allows a rule with no path condition at all.
 
-The old name is still registered, purely so an old config fails with a
-migration note rather than "unknown directive":
+**The old name was removed on 2026-08-10** and now fails with Apache's
+`Invalid command` at config time — loudly, at startup, not silently at
+runtime:
 
 ```apache
 # before

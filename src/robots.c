@@ -134,7 +134,7 @@ static void bs_rb_rstrip(char *s)
  * empty Disallow/Allow is robots.txt's "no rule" sentinel and is
  * filtered out at parse time.
  *
- * Public surface — also used by BotShieldPathTrigger in
+ * Public surface — also used by BotShieldRequestTrigger in
  * triggers.c. The earlier bs_path_glob_match placeholder in
  * botshield.c was retired once this matcher landed; one path
  * matcher across the codebase. */
@@ -769,7 +769,7 @@ const char *bs_set_robots_wildcard_scope(cmd_parms *cmd, void *dconf,
 }
 
 /* The bs_path_pattern_warn_middle_star helper below is a config-time
- * validator shared by E3 BotShieldPathTrigger (triggers.c) and the
+ * validator shared by E3 BotShieldRequestTrigger (triggers.c) and the
  * request-path glob matcher (robots.c's bs_path_match). Lives here
  * so both callers find it without circular includes. */
 

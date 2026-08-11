@@ -159,7 +159,7 @@ int         robots_group_rule_at(const robots_doc *doc, int idx, int rule_idx,
  * Returns 1 on match, 0 otherwise. An empty pattern never matches.
  *
  * Originally robots.txt-internal but promoted to public so
- * BotShieldPathTrigger reuses the same matcher rather than
+ * BotShieldRequestTrigger reuses the same matcher rather than
  * maintaining a parallel placeholder. */
 int bs_path_match(const char *pattern, const char *path);
 

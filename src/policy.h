@@ -19,7 +19,7 @@
  * orchestrator that walks them in the right order and converts the
  * outcomes into Apache-friendly status codes.
  *
- * E2.1 specifics — BotShieldRateLimit and BotShieldPathTrigger share
+ * E2.1 specifics — BotShieldRateLimit and BotShieldRequestTrigger share
  * one cohort definition: a (ua-substring?, ipspec?) predicate pair.
  * The ipspec reuses E1's polymorphic shape — omitted / explicit path
  * / '*' / inline CIDRs — via bs_allow_load_ranges{,_from_string}.
