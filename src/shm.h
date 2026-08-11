@@ -90,7 +90,6 @@ extern "C" {
 #define BS_BLOOM_MAX_IPS          10000000
 #define BS_BLOOM_MIN_WINDOW       3600
 #define BS_BLOOM_MAX_WINDOW       (30 * 86400)
-#define BS_FIRST_SIGHT_PENALTY    5
 
 /* Strike table (E9) */
 #define BS_STRIKE_PROBE_LIMIT      8

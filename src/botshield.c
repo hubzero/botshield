@@ -1615,7 +1615,26 @@ static int bs_handler(request_rec *r)
      * limit, not a challenge: a spoofer claiming a crawler UA inherits
      * that crawler's declared budget. */
     const bs_ua_class *uac_h = bs_classify_request_ua(r);
-    int declared_crawler = uac_h && uac_h->is_known_bot && !uac_h->is_fake_bot;
+    /* LIBRARY_OR_TOOL is NOT a declared crawler. The exemption below
+     * exists because a real crawler -- one with a published identity,
+     * an operator, and verifiable IP ranges -- is legitimately
+     * stateless, and penalising it for carrying no cookie made every
+     * known bot cross the silent threshold on arrival.
+     *
+     * None of that applies to a generic HTTP client library. The
+     * directory lists python-requests, python-httpx, Go-http-client,
+     * okhttp, GuzzleHttp, PycURL and Scrapy under this category --
+     * Scrapy being a scraping framework by name. Granting them the
+     * stateless exemption waived first-sight-ip (20) and
+     * dropped-cookie (25), which put the most common scraper
+     * transports BELOW an anonymous browser: measured at score 15 and
+     * admitted, where the same request from an unknown UA scored 20
+     * and was challenged. A library string is evidence about the
+     * transport, not about who is driving it. */
+    int lib_or_tool = uac_h && uac_h->known_category
+                   && strcmp(uac_h->known_category, "LIBRARY_OR_TOOL") == 0;
+    int declared_crawler = uac_h && uac_h->is_known_bot
+                        && !uac_h->is_fake_bot && !lib_or_tool;
     if (declared_crawler) {
         bs_score_add(r, 0, 0, "known-bot-stateless-ok");
     }
