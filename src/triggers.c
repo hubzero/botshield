@@ -3,7 +3,7 @@
  * Five trigger families share one config-time action engine and one
  * request-time executor:
  *
- *   E3   BotShieldPathTrigger      path glob       request-path
+ *   E3   BotShieldRequestTrigger      path glob       request-path
  *   E4   BotShieldCookieTrigger    cookie name/val request-path
  *   E6   BotShieldEnvTrigger       env var         request-path
  *   E7.3 BotShieldFeedbackTrigger  event name      response-path
@@ -144,7 +144,7 @@ static void bs_trigger_action_init(bs_trigger_family fam,
     memset(a, 0, sizeof(*a));
     switch (fam) {
     case BS_TFAMILY_REQUEST:
-        /* Defaults inherited from E3 BotShieldPathTrigger: immediate
+        /* Defaults inherited from E3 BotShieldRequestTrigger: immediate
          * 403, and flag the IP with scanner_probe for an hour.
          *
          * The flag default suits the original use (a handful of
@@ -625,11 +625,9 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
 
 /* BotShieldRequestTrigger <name> [key=value ...].
  *
- * Renamed from BotShieldPathTrigger 2026-08-01, and the path glob moved
- * from a positional arg to a key. The old name had already stopped being
- * true: the family took ua= and ipspec= cohort keys when it absorbed
- * BlockPath, and now takes query= and cookies= as well, so "path" named
- * one dimension out of five.
+ * The family matches on up to six dimensions -- path, query, cookies,
+ * exists, ua and ipspec -- so no single one of them belongs in the
+ * directive name or in a positional slot.
  *
  * Every match dimension is optional and they AND together. Making path
  * a key is what lets a rule match on query or cookie state at ANY path,
@@ -1355,7 +1353,7 @@ static const bs_flag_meta *bs_flag_meta_for_name(const char *name)
  * One unified config language for "when this flag fires, do X." Replaces
  * the prior BotShieldFlag directive (which mutated bs_flag_meta entries
  * to attach penalty/next_difficulty/next_tier metadata) with the same
- * shape as the existing BotShieldPathTrigger / BotShieldFeedbackTrigger /
+ * shape as the existing BotShieldRequestTrigger / BotShieldFeedbackTrigger /
  * BotShieldLoadTrigger family.
  *
  * Two action verbs:

@@ -87,7 +87,7 @@ def test_cookie_short_circuit_blocks_env_and_path(
         '    BotShieldCookieTrigger c-block cookies=none status=403\n'
         '    SetEnvIfExpr "true" BS_CROSS=1\n'
         '    BotShieldEnvTrigger e-block env=BS_CROSS status=429\n'
-        '    BotShieldPathTrigger p-block "/*" status=451',
+        '    BotShieldRequestTrigger p-block path="/*" status=451',
         count=1,
     ):
         with log_slice as slc:
@@ -124,7 +124,7 @@ def test_env_short_circuit_blocks_path(
         'BotShieldEnabled On\n'
         '    SetEnvIfExpr "true" BS_CROSS=1\n'
         '    BotShieldEnvTrigger e-block env=BS_CROSS status=403\n'
-        '    BotShieldPathTrigger p-block "/*" status=451',
+        '    BotShieldRequestTrigger p-block path="/*" status=451',
         count=1,
     ):
         with log_slice as slc:
@@ -161,7 +161,7 @@ def test_cookie_and_env_pass_then_path_runs(
         '    SetEnvIfExpr "true" BS_CROSS=1\n'
         '    BotShieldEnvTrigger e-pass env=BS_CROSS '
         'status=pass penalty=7\n'
-        '    BotShieldPathTrigger p-block "/*" status=403',
+        '    BotShieldRequestTrigger p-block path="/*" status=403',
         count=1,
     ):
         with log_slice as slc:
@@ -195,7 +195,7 @@ def test_load_short_circuit_blocks_path(
             'BotShieldEnabled On\n'
             f'    BotShieldLoadStateFile {LOAD_FILE_PATH}\n'
             '    BotShieldLoadTrigger l-block state=hot status=503\n'
-            '    BotShieldPathTrigger p-block "/*" status=451',
+            '    BotShieldRequestTrigger p-block path="/*" status=451',
             count=1,
         ):
             _wait_for_metric_load_state(target=2, timeout=12.0)
@@ -234,7 +234,7 @@ def test_env_pass_then_load_blocks_path(
             '    BotShieldEnvTrigger e-pass env=BS_CROSS '
             'status=pass penalty=4\n'
             '    BotShieldLoadTrigger l-block state=hot status=503\n'
-            '    BotShieldPathTrigger p-block "/*" status=451',
+            '    BotShieldRequestTrigger p-block path="/*" status=451',
             count=1,
         ):
             _wait_for_metric_load_state(target=2, timeout=12.0)
@@ -281,7 +281,7 @@ def test_env_trigger_no_double_apply_on_internal_redirect(
         '    SetEnvIfExpr "true" BS_CROSS=1\n'
         '    BotShieldEnvTrigger e-pass env=BS_CROSS '
         'status=pass penalty=5\n'
-        '    BotShieldPathTrigger p-block "/start" status=403\n'
+        '    BotShieldRequestTrigger p-block path="/start" status=403\n'
         '    ErrorDocument 403 /error',
         count=1,
     ):

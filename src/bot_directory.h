@@ -57,7 +57,7 @@ typedef struct {
      * Values: "search", "ai-input", "ai-train", "monitor", or NULL
      * (operational/ambiguous bots — security scanners, generic
      * libraries, OTHER). Used by BotShieldBotRateLimit @botgroup,
-     * BotShieldRateLimit @botgroup, BotShieldPathTrigger ua=@botgroup,
+     * BotShieldRateLimit @botgroup, BotShieldRequestTrigger ua=@botgroup,
      * and robots.txt User-agent: @botgroup stanzas. */
     const char *botgroup;
 } bs_known_bot_entry;
@@ -196,7 +196,7 @@ apr_array_header_t *bs_known_bots_resolve_slugs(apr_pool_t *pool,
  * `const char *` slug pointers allocated from `pool`. Empty array if
  * no entries match (botgroup misspelled, or no bots in that
  * category). Used by the @botgroup selector in BotShieldBotRateLimit
- * / BotShieldRateLimit / BotShieldPathTrigger / robots.txt
+ * / BotShieldRateLimit / BotShieldRequestTrigger / robots.txt
  * extension. */
 apr_array_header_t *bs_known_bots_resolve_by_botgroup(apr_pool_t *pool,
                                                       const char *botgroup);

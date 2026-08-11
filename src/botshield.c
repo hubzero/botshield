@@ -139,23 +139,6 @@ int bs_bot_name_valid(const char *s)
 
 
 
-/* Retired 2026-08-01. BotShieldPathTrigger became
- * BotShieldRequestTrigger and its path glob became a key. Registered
- * purely so an old config fails with a migration note rather than
- * Apache's bare "Invalid command" — the same courtesy log=off got. */
-static const char *bs_retired_path_trigger(cmd_parms *cmd, void *dconf,
-                                           const char *args)
-{
-    (void)dconf; (void)args;
-    return apr_pstrdup(cmd->pool,
-        "BotShieldPathTrigger was renamed to BotShieldRequestTrigger on "
-        "2026-08-01, and the path glob is now a key. Migrate: "
-        "`BotShieldPathTrigger blocked \"/wp-admin/*\" status=403` becomes "
-        "`BotShieldRequestTrigger blocked path=\"/wp-admin/*\" status=403`. "
-        "The new family also matches query=, cookies=, ua= and ipspec=, "
-        "all ANDed.");
-}
-
 static const command_rec bs_cmds[] = {
     AP_INIT_TAKE1("BotShieldEnabled",   bs_set_enabled,    NULL,
                  RSRC_CONF | ACCESS_CONF,
@@ -816,14 +799,7 @@ static const command_rec bs_cmds[] = {
                  "live on BotShieldCookieTrigger, whose vocabulary is "
                  "richer than one key. A rule with no match key is "
                  "rejected - use BotShieldTrigger in the scope you "
-                 "mean. Renamed from BotShieldPathTrigger 2026-08-01, "
-                 "when the path glob became a key."),
-    AP_INIT_RAW_ARGS("BotShieldPathTrigger", bs_retired_path_trigger,
-                 NULL, RSRC_CONF,
-                 "RETIRED 2026-08-01 - renamed to BotShieldRequestTrigger, "
-                 "and the path glob is now a key. Kept as a loud "
-                 "config-time error so an old config fails with a "
-                 "migration note instead of 'unknown directive'."),
+                 "mean."),
     AP_INIT_TAKE_ARGV("BotShieldDecisionLog", bs_set_decision_log,
                  NULL, RSRC_CONF,
                  "Module-owned decision log. Defaults to "

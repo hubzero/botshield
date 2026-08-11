@@ -611,7 +611,7 @@ const char *bs_cohort_resolve(cmd_parms *cmd, bs_cohort *out,
 /* RFC 9309 path-pattern warning — log a NOTICE when a directive's
  * path pattern contains a non-trailing '*' that the retired v1
  * matcher would have treated as a literal byte. Used by E3
- * BotShieldPathTrigger. */
+ * BotShieldRequestTrigger. */
 void bs_path_pattern_warn_middle_star(cmd_parms *cmd,
                                       const char *directive,
                                       const char *name,

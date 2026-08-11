@@ -1,6 +1,6 @@
 """E3 — path-based triggers.
 
-Exercises BotShieldPathTrigger directives:
+Exercises BotShieldRequestTrigger directives:
 
   status=<code>       → Apache returns that code; ErrorDocument
                         compatible (we don't write a body).
@@ -14,7 +14,7 @@ Exercises BotShieldPathTrigger directives:
                         so future requests inherit the bit's penalty.
 
 Precedence: declaration order, first match wins. Main-scope
-BotShieldPathTrigger inherits into vhosts.
+BotShieldRequestTrigger inherits into vhosts.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ def test_trigger_status_code_blocks_and_tags_log(
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldPathTrigger env-probe "/.env" '
+        '    BotShieldRequestTrigger env-probe path="/.env" '
         'status=403 "log=BAN 2h" ttl=3600',
         count=1,
     ):
@@ -78,7 +78,7 @@ def test_trigger_status_pass_lets_request_through(
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldPathTrigger pass-probe "/definitely-nonexistent" '
+        '    BotShieldRequestTrigger pass-probe path="/definitely-nonexistent" '
         'status=pass',
         count=1,
     ):
@@ -105,7 +105,7 @@ def test_trigger_status_pass_does_not_apply_current_request_penalty(
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldPathTrigger passpen "/honey-pass" '
+        '    BotShieldRequestTrigger passpen path="/honey-pass" '
         'status=pass penalty=90 flag=honeypot_hit ttl=3600',
         count=1,
     ):
@@ -143,7 +143,7 @@ def test_trigger_redirect_sets_location(
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldPathTrigger env-redirect "/.env.redir" '
+        '    BotShieldRequestTrigger env-redirect path="/.env.redir" '
         'redirect=https://example.org/gone',
         count=1,
     ):
@@ -164,7 +164,7 @@ def test_trigger_redirect_honors_explicit_status(
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldPathTrigger env-redirect "/.env.perm" '
+        '    BotShieldRequestTrigger env-redirect path="/.env.perm" '
         'redirect=https://example.org/gone status=301',
         count=1,
     ):
@@ -188,8 +188,8 @@ def test_trigger_declaration_order_wins_on_overlap(
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldPathTrigger wp-ajax "/wp-admin/admin-ajax.php" status=pass\n'
-        '    BotShieldPathTrigger wp-all  "/wp-admin*"               status=403',
+        '    BotShieldRequestTrigger wp-ajax path="/wp-admin/admin-ajax.php" status=pass\n'
+        '    BotShieldRequestTrigger wp-all  path="/wp-admin*"               status=403',
         count=1,
     ):
         r_ajax  = client.get("/wp-admin/admin-ajax.php", xff=fresh_ip)
@@ -209,19 +209,19 @@ def test_trigger_declaration_order_wins_on_overlap(
 def test_trigger_main_scope_inherits_into_vhost(
     config_override, log_slice, fresh_ip,
 ):
-    """BotShieldPathTrigger declared outside <VirtualHost> must flow
+    """BotShieldRequestTrigger declared outside <VirtualHost> must flow
     into the vhost via bs_merge_server_cfg — same guarantee the
     other E2.x directives got."""
     with config_override(
         r"BotShieldStateFile\s+\S+",
-        'BotShieldPathTrigger main-scope-trap "/main-scope-env" '
+        'BotShieldRequestTrigger main-scope-trap path="/main-scope-env" '
         'status=403 log="MAIN"\n'
         'BotShieldStateFile /var/lib/botshield/state.bin',
         count=1,
     ):
         resp = client.get("/main-scope-env", xff=fresh_ip)
     assert resp.status_code == 403, (
-        "main-scope BotShieldPathTrigger did not inherit into the vhost"
+        "main-scope BotShieldRequestTrigger did not inherit into the vhost"
     )
 
 
@@ -245,7 +245,7 @@ def test_trigger_flag_ip_carries_to_next_request(
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldPathTrigger bait "/honey-bait" '
+        '    BotShieldRequestTrigger bait path="/honey-bait" '
         'status=pass flag=honeypot_hit ttl=3600',
         count=1,
     ):
@@ -284,7 +284,7 @@ def test_path_trigger_middle_star_matches_segment(
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldPathTrigger api-admin "/api/*/admin" status=403',
+        '    BotShieldRequestTrigger api-admin path="/api/*/admin" status=403',
         count=1,
     ):
         with log_slice as slc:
@@ -321,7 +321,7 @@ def test_path_trigger_middle_star_anchored_excludes_suffix(
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldPathTrigger api-admin-end "/api/*/admin$" status=403',
+        '    BotShieldRequestTrigger api-admin-end path="/api/*/admin$" status=403',
         count=1,
     ):
         with log_slice as slc:
@@ -374,7 +374,7 @@ def test_path_trigger_middle_star_emits_notice_on_config_load(
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldPathTrigger middle-warn "/foo*bar" status=403',
+        '    BotShieldRequestTrigger middle-warn path="/foo*bar" status=403',
         count=1,
     ):
         pass
@@ -384,7 +384,7 @@ def test_path_trigger_middle_star_emits_notice_on_config_load(
         capture_output=True, text=True, check=True,
     ).stdout
 
-    assert "BotShieldPathTrigger 'middle-warn'" in tail and \
+    assert "BotShieldRequestTrigger 'middle-warn'" in tail and \
            "non-trailing '*'" in tail, (
         "expected a NOTICE about non-trailing '*' on config load; "
         f"main-log tail: {tail!r}"

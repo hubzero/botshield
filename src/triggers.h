@@ -6,7 +6,7 @@
  * load tier) but funnel through the same bs_trigger_action struct
  * and the same bs_apply_trigger_action executor:
  *
- *   E3  BotShieldPathTrigger      path glob       request-path
+ *   E3  BotShieldRequestTrigger      path glob       request-path
  *   E4  BotShieldCookieTrigger    cookie name/val request-path
  *   E6  BotShieldEnvTrigger       env var         request-path
  *   E7.3 BotShieldFeedbackTrigger event name      response-path
@@ -134,7 +134,7 @@ typedef struct {
      * the request's classified botgroup instead of UA-substring.
      * Mutually exclusive with ua_pattern; setter rejects both. Set
      * by `BotShieldRateLimit @ai-train ...` or
-     * `BotShieldPathTrigger ... ua=@search ...`. */
+     * `BotShieldRequestTrigger ... ua=@search ...`. */
     const char         *ua_botgroup;
     /* @bot / @fake-bot — match on the classifier's verdict rather than
      * on a declared botgroup. @botgroup can only name a bot the UA
@@ -156,7 +156,7 @@ typedef struct {
     apr_array_header_t *ranges;
 } bs_cohort;
 
-/* Request trigger (was BotShieldPathTrigger through 2026-07). Every
+/* Request trigger. Every
  * match dimension is optional and they AND together; the setter
  * rejects a rule with none, since that is what the per-scope
  * BotShieldTrigger is for. NULL / -1 means "this dimension does not
