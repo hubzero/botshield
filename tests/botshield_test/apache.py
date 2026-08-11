@@ -186,3 +186,17 @@ def _atomic_write(path: Path, content: str) -> None:
         check=True,
         stdout=subprocess.DEVNULL,
     )
+    # Restore world-readability explicitly rather than inheriting
+    # root's umask. `sudo tee` creates the temp file with whatever
+    # umask root has; on Debian that is 022 and the result is 0644, but
+    # on a hardened host (RHEL/Rocky with umask 077) it is 0600 -- and
+    # config_override reads the file back with a plain
+    # Path.read_text() as the unprivileged test user. Without this the
+    # first override poisons the file and every later test dies with
+    # EACCES, which looks like 150+ module failures rather than one
+    # permissions bug.
+    subprocess.run(
+        ["sudo", "chmod", "644", str(path)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
