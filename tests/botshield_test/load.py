@@ -45,7 +45,13 @@ _DEFAULT_MIX = (
         "User-Agent": "Mozilla/5.0 (X11) Chrome/145",
         "Accept-Language": "en-US",
     }),
-    (20, "/", {
+    # /form-demo, not "/": this slice exists to drive FORM tier, and a
+    # scraper UA on / scores 20 (first-sight 5 + missing-AL 5 +
+    # scraper-ua 10), which is silent tier. Form needs 50, so the
+    # botshield_tier_form_total assertion in test_soak could never
+    # grow. /form-demo pins the tier instead of hoping the score
+    # lands there.
+    (20, "/form-demo", {
         "User-Agent": "python-requests/2.31",
     }),
     (10, "/captcha-demo", {}),
@@ -125,6 +131,16 @@ class LoadGenerator:
 
     def _fire_one(self) -> None:
         path, headers = random.choice(self._weighted)
+        # Distinct client IP per request. Without this every request
+        # arrives as 127.0.0.1, which is Bloom-known the moment the
+        # soak starts, so each one collects dropped-cookie (25) and is
+        # challenged -- outcome_allow_total never grows and the soak
+        # reports "driver not landing traffic" while landing plenty.
+        # 198.18.0.0/15 is the RFC 2544 benchmarking range, reserved
+        # for exactly this and never routable.
+        headers = dict(headers)
+        headers["X-Forwarded-For"] = "198.18.%d.%d" % (
+            random.randint(0, 255), random.randint(1, 254))
         try:
             req = urllib.request.Request(self.base_url + path, headers=headers)
             urllib.request.urlopen(req, context=self._ssl, timeout=5).read()
