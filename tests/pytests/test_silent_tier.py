@@ -24,11 +24,15 @@ pytestmark = pytest.mark.serial
 
 BROWSER_UA = "Mozilla/5.0 (X11) Chrome/145"
 
+# Forced silent tier rather than relying on the ambient first-sight-ip
+# default -- see the note in test_cookie_gcm.py.
+SILENT_PATH = "/silent-demo"
+
 
 def test_silent_tier_round_trip(fresh_ip):
     # 1. Cookieless silent-band probe: Mozilla UA + missing Accept-
     #    Language + first-sight-ip = score 20 → silent tier.
-    resp = client.get("/", xff=fresh_ip, ua=BROWSER_UA)
+    resp = client.get(SILENT_PATH, xff=fresh_ip, ua=BROWSER_UA)
     # Interstitial responses are 403 + X-Robots-Tag noindex,nofollow
     # so search engines don't index the placeholder body. Browsers
     # still execute inline JS / captcha widgets on 4xx, so the
@@ -101,7 +105,7 @@ def test_expired_cookie_does_not_carry_rep_to_render_path(
         "BotShieldAlgorithm sha256-zeros\n"
         "    BotShieldCookieTTL 2",
     ):
-        resp = client.get("/", xff=ip_issue, ua=BROWSER_UA)
+        resp = client.get(SILENT_PATH, xff=ip_issue, ua=BROWSER_UA)
         challenge = cookies.extract_challenge(resp.text)
         counter   = cookies.solve_pow(challenge)
         cookie    = cookies.build_cookie(challenge, counter)
