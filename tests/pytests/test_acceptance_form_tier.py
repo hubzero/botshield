@@ -22,6 +22,12 @@ pytestmark = pytest.mark.acceptance
 
 
 SUSPICIOUS_UA = "Mozilla/5.0 (X11) Chrome/145"
+
+# Forced form tier. SUSPICIOUS_UA scores 10, which never reaches
+# BotShieldScoreHard (50) at any sane first-sight-ip value, so relying
+# on the ambient score to produce a form interstitial was never going
+# to hold. Same rationale as SILENT_PATH in test_cookie_gcm.
+FORM_PATH = "/form-demo"
 BROWSER_UA = "Mozilla/5.0 (X11) Chrome/145"
 
 
@@ -29,7 +35,7 @@ def test_cookieless_recoverable_journey(fresh_ip, log_slice):
     # 1. Initial probe: interstitial with a challenge. Form-tier
     #    interstitial is 403 + X-Robots-Tag noindex,nofollow so
     #    search engines don't index the placeholder.
-    resp = client.get("/", xff=fresh_ip, ua=SUSPICIOUS_UA)
+    resp = client.get(FORM_PATH, xff=fresh_ip, ua=SUSPICIOUS_UA)
     assert resp.status_code == 403, (
         f"form-tier interstitial should return 403; got {resp.status_code}"
     )
