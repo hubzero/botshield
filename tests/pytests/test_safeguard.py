@@ -278,13 +278,23 @@ def test_solved_cookie_clears_safeguard_counter(
     )
 
 
-# --- Default off ---------------------------------------------------
+# --- Default on ----------------------------------------------------
 
 
-def test_safeguard_off_by_default(config_override, fresh_ip):
-    """Without BotShieldSafeguard on, the challenge-issue path
-    runs every time regardless of N. Tight-loop hammering never
-    promotes to safeguard — pre-E10 behavior preserved."""
+def test_safeguard_on_by_default(config_override, fresh_ip):
+    """Safeguard is ON without any directive. directives.md documents
+    the default as `on`, and the code agrees: safeguard_enabled
+    initialises to -1 (unset) and the runtime test is `!= 0`, so an
+    unconfigured scope takes the safeguard path.
+
+    This test previously asserted the opposite ("opt-in, off by
+    default"), which was true pre-E10 and stopped being true when the
+    default flipped. Docs and code were updated; the test was not, and
+    it had never run since.
+
+    On-by-default is the right shape for this feature: it is the
+    anti-lockout valve, so a deployment that never configures it should
+    still not be able to trap a client in a challenge loop."""
     with config_override(
         r"BotShieldEnabled\s+On",
         # Deliberately no BotShieldSafeguard directive.
@@ -292,11 +302,16 @@ def test_safeguard_off_by_default(config_override, fresh_ip):
         count=1,
     ):
         responses = _hammer(fresh_ip, 10)
-    challenged = ["__bsChallenge" in r.text for r in responses]
     redirected = [r.status_code == 302 for r in responses]
-    assert all(challenged) and not any(redirected), (
-        f"safeguard should be off by default; got "
-        f"challenged={challenged}, redirected={redirected}"
+    assert any(redirected), (
+        f"safeguard should engage by default once the threshold is "
+        f"crossed; got redirected={redirected}"
+    )
+    # And it must not redirect EVERY request -- the counter clears on
+    # redirect, so the next one gets a fresh challenge.
+    assert not all(redirected), (
+        f"safeguard redirected every request; the per-IP counter is "
+        f"not clearing on redirect. redirected={redirected}"
     )
 
 
