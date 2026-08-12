@@ -143,7 +143,7 @@ def test_directive_rejects_embedded_nul(config_override, tmp_path):
 
 
 def test_directive_accepts_well_formed(config_override,
-                                       secondary_secret_file):
+                                       secondary_secret_file, fresh_ip):
     """Valid secondary file path: reload succeeds, server stays
     healthy."""
     with config_override(
@@ -153,7 +153,7 @@ def test_directive_accepts_well_formed(config_override,
         count=1,
     ):
         r = client.get(
-            "/", xff="203.0.113.50",
+            "/", xff=fresh_ip,
             ua="Mozilla/5.0 Firefox/125.0",
             accept_language="en-US,en;q=0.9",
         )
@@ -167,7 +167,8 @@ def test_directive_accepts_well_formed(config_override,
 
 
 def test_old_cookie_validates_during_rotation(config_override,
-                                              secondary_secret_file):
+                                              secondary_secret_file,
+                                              fresh_ip):
     """The headline case: a cookie issued under the OLD key (now
     moved to BotShieldSecondarySecretFile) still passes verify after
     rotation. Without multi-key verify, every existing client would
@@ -198,7 +199,7 @@ def test_old_cookie_validates_during_rotation(config_override,
     ):
         # First request: no cookie, gets challenge or pass-through.
         r1 = client.get(
-            "/", xff="203.0.113.51",
+            "/", xff=fresh_ip,
             ua="Mozilla/5.0 Firefox/125.0",
             accept_language="en-US,en;q=0.9",
         )

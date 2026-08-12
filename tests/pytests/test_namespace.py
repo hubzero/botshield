@@ -66,7 +66,7 @@ def test_share_scope_rejects_overlong_token(config_override):
             pass
 
 
-def test_share_scope_accepts_normal_token(config_override):
+def test_share_scope_accepts_normal_token(config_override, fresh_ip):
     """No-op acceptance — directive parses and Apache reloads cleanly."""
     with config_override(
         r"BotShieldEnabled\s+On",
@@ -75,7 +75,10 @@ def test_share_scope_accepts_normal_token(config_override):
         count=1,
     ):
         # Reload succeeded if we got here; sanity-poke the server.
-        r = _g("/")
+        # fresh_ip, not the default client address: 127.0.0.1 is
+        # Bloom-known after any earlier test, which adds
+        # dropped-cookie (25) and challenges this sanity poke.
+        r = _g("/", xff=fresh_ip)
         assert r.status_code in (200, 304), (
             f"server unhealthy after share-scope reload; "
             f"status={r.status_code}"
