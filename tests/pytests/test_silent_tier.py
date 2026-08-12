@@ -117,8 +117,11 @@ def test_expired_cookie_does_not_carry_rep_to_render_path(
 
         ip_replay = _ips.fresh_ip()
         with log_slice as slc:
+            # SILENT_PATH, not "/": this asserts on the log line the
+            # RENDER path emits, so a challenge has to actually be
+            # rendered for there to be anything to match.
             client.get(
-                "/", xff=ip_replay, ua=BROWSER_UA,
+                SILENT_PATH, xff=ip_replay, ua=BROWSER_UA,
                 cookies={"__Host-bs_session": cookie},
             )
             matches = slc.grep(r"challenging.*cookie_score=-1")
