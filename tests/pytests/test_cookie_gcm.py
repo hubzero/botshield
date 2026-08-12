@@ -29,6 +29,13 @@ pytestmark = [pytest.mark.serial]
 
 BROWSER_UA = "Mozilla/5.0 (X11) Chrome/145"
 
+# These tests need an interstitial to parse, so they must force the
+# tier rather than rely on the ambient first-sight-ip default: the same
+# default that makes a fresh browser challenged here makes
+# test_acceptance_pass_tier fail, and vice versa. /silent-demo pins
+# silent tier in the dev vhost so neither test constrains the other.
+SILENT_PATH = "/silent-demo"
+
 
 # --- Retired directive --------------------------------------------
 
@@ -61,7 +68,7 @@ def test_gcm_mode_roundtrip(fresh_ip):
     """End-to-end: the silent-tier interstitial JSON carries
     `cookie_prefix` (no rep fields). Solving the PoW and replaying
     the assembled cookie passes verify."""
-    resp = client.get("/", xff=fresh_ip, ua=BROWSER_UA)
+    resp = client.get(SILENT_PATH, xff=fresh_ip, ua=BROWSER_UA)
     challenge = cookies.extract_challenge(resp.text)
 
     # GCM JSON deliberately omits the rep block — the whole point
@@ -101,7 +108,7 @@ def test_gcm_cookie_envelope_is_random_bytes(fresh_ip):
     high-entropy bytes. The first byte is alg_id (currently 0x01),
     then 12-byte nonce, ciphertext, 16-byte tag — none of which
     should look like the legacy '|'-delimited canonical form."""
-    resp = client.get("/", xff=fresh_ip, ua=BROWSER_UA)
+    resp = client.get(SILENT_PATH, xff=fresh_ip, ua=BROWSER_UA)
     challenge = cookies.extract_challenge(resp.text)
 
     prefix = challenge["cookie_prefix"]
@@ -127,7 +134,7 @@ def test_gcm_tampered_envelope_rejected(fresh_ip, log_slice):
     auth. The module rejects with `signature mismatch` (same string
     the legacy HMAC tamper produced — callers don't carry rep
     forward in either case)."""
-    resp = client.get("/", xff=fresh_ip, ua=BROWSER_UA)
+    resp = client.get(SILENT_PATH, xff=fresh_ip, ua=BROWSER_UA)
     challenge = cookies.extract_challenge(resp.text)
     counter = cookies.solve_pow(challenge)
     cookie = cookies.build_cookie(challenge, counter)
