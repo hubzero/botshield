@@ -53,6 +53,16 @@ which is production's.
   user**: `config_override()` replaces files, which needs directory write.
 - DocumentRoot cannot live under a `0700` home directory. Copy
   `tests/site` somewhere apache can traverse.
+- Secret files need mode `0600`, but **`/etc/botshield/load.state.test`
+  does not** — it is not a secret and the module reads it at RUNTIME as
+  the `apache` user, not at config-parse time as root. A blanket
+  `chmod 600 /etc/botshield/*` leaves `load_state` pinned at 0 and every
+  load test timing out on a file the server cannot open. It needs `0644`.
+- `test_app_feedback` and `test_app_claims` hardcode the expected value
+  of `/etc/botshield/app-integration-secret`
+  (`0123456789abcdef` repeated to 64 chars). A random secret there means
+  no HMAC can ever verify and the failures look like the feedback
+  feature being broken.
 - `BS_ERROR_LOG` must match the vhost's `ErrorLog` exactly. The
   reference vhost writes `botshield-dev-error.log`; pointing the env at
   a different name makes every log assertion fail with `assert []`
