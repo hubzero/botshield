@@ -35,6 +35,12 @@ BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 # Real Googlebot range so the request is verified, not faked. This
 # isolates the rate-limit behaviour from the fake-bot penalty path.
 REAL_GOOGLEBOT_IP = "66.249.66.1"
+# Bingbot must arrive from a real Bing range too. Sending BINGBOT_UA
+# from an arbitrary fresh_ip makes it class=fake-bot -- a UA claiming a
+# crawler whose IP fails the cross-check -- which is challenged, not
+# rate-limited, so every assertion about bot-rate budgets failed on the
+# challenge instead. The tests predate IP verification covering Bing.
+REAL_BINGBOT_IP = "157.55.39.1"
 
 
 def test_bot_rate_specific_slug_trips(config_override, log_slice, fresh_ip):
@@ -91,7 +97,7 @@ def test_bot_rate_pattern_shares_budget(
                 "/", xff=fresh_ip, ua=GOOGLEOTHER_UA,
             )
             r3 = client.get(
-                "/", xff=fresh_ip, ua=GOOGLEBOT_UA,
+                "/", xff=REAL_GOOGLEBOT_IP, ua=GOOGLEBOT_UA,
             )
 
     # Either of the first two might 200 or 200; third must be 429
@@ -113,8 +119,8 @@ def test_bot_rate_wildcard_per_slug(config_override, fresh_ip):
         count=1,
     ):
         # First Bingbot request: admitted. Second: 429.
-        b1 = client.get("/", xff=fresh_ip, ua=BINGBOT_UA)
-        b2 = client.get("/", xff=fresh_ip, ua=BINGBOT_UA)
+        b1 = client.get("/", xff=REAL_BINGBOT_IP, ua=BINGBOT_UA)
+        b2 = client.get("/", xff=REAL_BINGBOT_IP, ua=BINGBOT_UA)
         # Googlebot's counter is independent — first request still admits.
         g1 = client.get(
             "/", xff=REAL_GOOGLEBOT_IP, ua=GOOGLEBOT_UA,
@@ -192,8 +198,8 @@ def test_bot_rate_two_arg_delay_form(config_override, fresh_ip):
         '    BotShieldBotRateLimit bingbot 5',  # 1 req per 5 sec
         count=1,
     ):
-        b1 = client.get("/", xff=fresh_ip, ua=BINGBOT_UA)
-        b2 = client.get("/", xff=fresh_ip, ua=BINGBOT_UA)
+        b1 = client.get("/", xff=REAL_BINGBOT_IP, ua=BINGBOT_UA)
+        b2 = client.get("/", xff=REAL_BINGBOT_IP, ua=BINGBOT_UA)
 
     assert b1.status_code in (200, 302), f"b1 status={b1.status_code}"
     assert b2.status_code == 429, (
@@ -213,7 +219,7 @@ def test_bot_rate_zero_delay_admits_all(config_override, fresh_ip):
     ):
         # 5 rapid bingbot requests — none should 429 because slug=0.
         results = [
-            client.get("/", xff=fresh_ip, ua=BINGBOT_UA)
+            client.get("/", xff=REAL_BINGBOT_IP, ua=BINGBOT_UA)
             for _ in range(5)
         ]
     assert all(r.status_code != 429 for r in results), (
@@ -237,7 +243,7 @@ def test_bot_rate_off_disables_default_synthesis(
         # Many rapid bingbot requests — should all admit because
         # no wildcard exists and no specific bingbot entry.
         results = [
-            client.get("/", xff=fresh_ip, ua=BINGBOT_UA)
+            client.get("/", xff=REAL_BINGBOT_IP, ua=BINGBOT_UA)
             for _ in range(5)
         ]
     assert all(r.status_code != 429 for r in results), (
@@ -258,8 +264,8 @@ def test_bot_rate_botgroup_selector(config_override, fresh_ip):
     ):
         # Bingbot is in SEARCH_ENGINE_CRAWLER → botgroup=search.
         # First request admits (counter starts at 0 in 1-hour window).
-        b1 = client.get("/", xff=fresh_ip, ua=BINGBOT_UA)
-        b2 = client.get("/", xff=fresh_ip, ua=BINGBOT_UA)
+        b1 = client.get("/", xff=REAL_BINGBOT_IP, ua=BINGBOT_UA)
+        b2 = client.get("/", xff=REAL_BINGBOT_IP, ua=BINGBOT_UA)
     assert b1.status_code in (200, 302), f"b1={b1.status_code}"
     assert b2.status_code == 429, (
         f"b2 should hit @search 1/hour cap; got {b2.status_code}"
@@ -312,8 +318,8 @@ def test_bot_rate_off_with_specific_entry(config_override, fresh_ip):
         count=1,
     ):
         # bingbot trips the specific rule
-        b1 = client.get("/", xff=fresh_ip, ua=BINGBOT_UA)
-        b2 = client.get("/", xff=fresh_ip, ua=BINGBOT_UA)
+        b1 = client.get("/", xff=REAL_BINGBOT_IP, ua=BINGBOT_UA)
+        b2 = client.get("/", xff=REAL_BINGBOT_IP, ua=BINGBOT_UA)
         # Other bots are unprotected (Gatus has no specific entry, no
         # wildcard since Off)
         gatus_ua = "Gatus/1.0"
