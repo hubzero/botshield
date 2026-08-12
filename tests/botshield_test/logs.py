@@ -50,6 +50,14 @@ def _parse_decision(line: str) -> dict | None:
     if idx < 0:
         return None
     tail = line[idx + len(_DECISION_PREFIX):]
+    # The prefix also matches the startup notice
+    #   "mod_botshield: decision log active: <path> (default set: ...)"
+    # which parses into a dict of whatever k=v happens to appear in the
+    # tail and no `outcome`, so callers doing d["outcome"] hit a
+    # KeyError on a line that was never a decision. Every real decision
+    # payload begins with tier=.
+    if not tail.startswith("tier="):
+        return None
     out: dict[str, str] = {}
     for key, val in _KV.findall(tail):
         if val.startswith('"') and val.endswith('"'):
