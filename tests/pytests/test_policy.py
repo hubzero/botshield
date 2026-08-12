@@ -10,7 +10,7 @@ PathTrigger with `status=403` plus optional `ua=`/`ipspec=` match
 keys. Cohort shape still reuses E1 (UA substring + polymorphic
 ipspec). '*' means "any" on either axis; both-'*' is rejected at
 config time. On trip, rate-limit → 429 + Retry-After +
-rate-limit-exceeded:<name>; path-trigger → status + path-trigger:<name>.
+rate-limit-exceeded:<name>; request-trigger → status + request-trigger:<name>.
 """
 
 from __future__ import annotations
@@ -159,8 +159,8 @@ def test_path_trigger_block_prefix_match(config_override, log_slice, fresh_ip):
     assert r_root.status_code == 403
     assert r_sub.status_code  == 403
     assert r_safe.status_code != 403, "non-matching path should not 403"
-    hits = [d for d in lines if "path-trigger:lockdown" in d["reason"]]
-    assert len(hits) == 2, f"expected 2 path-trigger hits; got {hits}"
+    hits = [d for d in lines if "request-trigger:lockdown" in d["reason"]]
+    assert len(hits) == 2, f"expected 2 request-trigger hits; got {hits}"
 
 
 def test_path_trigger_block_end_anchor(config_override, log_slice, fresh_ip):
@@ -183,7 +183,7 @@ def test_path_trigger_block_end_anchor(config_override, log_slice, fresh_ip):
 
 
 def test_path_trigger_cohort_narrowing(config_override, log_slice, fresh_ip):
-    """A path-trigger with a `ua=` predicate must NOT fire when the UA
+    """A request-trigger with a `ua=` predicate must NOT fire when the UA
     doesn't match — cohort narrowing applies to path triggers too."""
     with config_override(
         r"BotShieldEnabled\s+On",
@@ -266,9 +266,9 @@ def test_path_trigger_precedence_is_declaration_order(
     assert r_other.status_code  == 403
 
     specific_hits = [d for d in lines
-                     if "path-trigger:specific" in d["reason"]]
+                     if "request-trigger:specific" in d["reason"]]
     generic_hits  = [d for d in lines
-                     if "path-trigger:generic"  in d["reason"]]
+                     if "request-trigger:generic"  in d["reason"]]
     assert len(specific_hits) == 1, (
         f"/admin/secret should hit the specific rule (declared first); "
         f"specific_hits={specific_hits}"

@@ -54,8 +54,8 @@ def test_trigger_status_code_blocks_and_tags_log(
             lines = slc.decision_lines(ip=fresh_ip)
 
     assert resp.status_code == 403
-    hits = [d for d in lines if "path-trigger:env-probe" in d["reason"]]
-    assert hits, f"no path-trigger:env-probe decision line; lines={lines}"
+    hits = [d for d in lines if "request-trigger:env-probe" in d["reason"]]
+    assert hits, f"no request-trigger:env-probe decision line; lines={lines}"
     # The tag rides the existing decision log line — decision_lines
     # should pick it up as the "tag" field.
     assert any(d.get("tag") == "BAN 2h" for d in hits), (
@@ -116,14 +116,14 @@ def test_trigger_status_pass_does_not_apply_current_request_penalty(
     d = lines[-1]
     # Reason trace records the match with the :pass suffix so
     # operators can correlate, but the score delta is 0 — not 90.
-    assert "path-trigger:passpen:pass" in d["reason"], (
-        f"path-trigger:passpen:pass missing from reason; d={d}"
+    assert "request-trigger:passpen:pass" in d["reason"], (
+        f"request-trigger:passpen:pass missing from reason; d={d}"
     )
     # Score the decision logs should only carry first-sight-ip (+5)
     # and whatever clean-UA signals pile up — NEVER the +90 penalty.
     score = int(d["score"])
     assert score < 60, (
-        f"path-trigger status=pass leaked the penalty=90 bump into "
+        f"request-trigger status=pass leaked the penalty=90 bump into "
         f"the current request's score; reason={d['reason']} score={score}"
     )
 
@@ -299,8 +299,8 @@ def test_path_trigger_middle_star_matches_segment(
         f"middle-* didn't match /api/internal/admin; got {r2.status_code}"
     )
     assert sum(1 for d in lines
-               if "path-trigger:api-admin" in d["reason"]) >= 2, (
-        f"expected two path-trigger:api-admin decisions; lines={lines}"
+               if "request-trigger:api-admin" in d["reason"]) >= 2, (
+        f"expected two request-trigger:api-admin decisions; lines={lines}"
     )
 
 
@@ -338,7 +338,7 @@ def test_path_trigger_middle_star_anchored_excludes_suffix(
         f"(suffix beyond anchor); got {r_after.status_code}"
     )
     triggered = [d for d in lines
-                 if "path-trigger:api-admin-end" in d["reason"]]
+                 if "request-trigger:api-admin-end" in d["reason"]]
     assert len(triggered) == 1, (
         f"expected exactly one trigger fire (the /admin path); "
         f"lines={lines}"

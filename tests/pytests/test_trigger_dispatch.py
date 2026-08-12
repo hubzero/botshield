@@ -107,7 +107,7 @@ def test_cookie_short_circuit_blocks_env_and_path(
         f"env trigger must not have run after cookie short-circuit; "
         f"reason={reason}"
     )
-    assert "path-trigger:p-block" not in reason, (
+    assert "request-trigger:p-block" not in reason, (
         f"path trigger must not have run after cookie short-circuit; "
         f"reason={reason}"
     )
@@ -138,7 +138,7 @@ def test_env_short_circuit_blocks_path(
     assert lines
     reason = lines[-1]["reason"]
     assert "env-trigger:e-block" in reason
-    assert "path-trigger:p-block" not in reason, (
+    assert "request-trigger:p-block" not in reason, (
         f"path trigger must not have run after env short-circuit; "
         f"reason={reason}"
     )
@@ -176,7 +176,7 @@ def test_cookie_and_env_pass_then_path_runs(
     reason = lines[-1]["reason"]
     assert "cookie-trigger:c-pass" in reason, reason
     assert "env-trigger:e-pass"    in reason, reason
-    assert "path-trigger:p-block"  in reason, reason
+    assert "request-trigger:p-block"  in reason, reason
 
 
 # --- Load triggers in the shared family ----------------------------
@@ -212,7 +212,7 @@ def test_load_short_circuit_blocks_path(
     assert lines
     reason = lines[-1]["reason"]
     assert "load-trigger:l-block" in reason, reason
-    assert "path-trigger:p-block" not in reason, (
+    assert "request-trigger:p-block" not in reason, (
         f"path trigger must not have run after load short-circuit; "
         f"reason={reason}"
     )
@@ -251,7 +251,7 @@ def test_env_pass_then_load_blocks_path(
     reason = lines[-1]["reason"]
     assert "env-trigger:e-pass" in reason, reason
     assert "load-trigger:l-block" in reason, reason
-    assert "path-trigger:p-block" not in reason, (
+    assert "request-trigger:p-block" not in reason, (
         f"path trigger must not have run after load short-circuit; "
         f"reason={reason}"
     )
@@ -271,7 +271,7 @@ def test_env_trigger_no_double_apply_on_internal_redirect(
     on the ErrorDocument leg.
 
     Setup: env=BS_CROSS on every request (status=pass + penalty so
-    we can see whether it fired in the reason trace), path-trigger
+    we can see whether it fired in the reason trace), request-trigger
     on /start, ErrorDocument 403 → /error. Hit /start. The original
     leg's decision line should carry env-trigger; the /error leg's
     decision line must NOT."""
