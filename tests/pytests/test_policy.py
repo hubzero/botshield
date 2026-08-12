@@ -3,10 +3,10 @@
 Exercises the two cohort-conditional surfaces:
 
   BotShieldRateLimit <name> <budget> <per> <ua> <ipspec>
-  BotShieldRequestTrigger <name> <path-glob> [ua=...] [ipspec=...] status=403
+  BotShieldRequestTrigger <name> path=<glob> [ua=...] [ipspec=...] status=403
 
 The legacy `BotShieldBlockPath` directive was retired in favor of a
-PathTrigger with `status=403` plus optional `ua=`/`ipspec=` match
+A request trigger with `status=403` plus optional `ua=`/`ipspec=` match
 keys. Cohort shape still reuses E1 (UA substring + polymorphic
 ipspec). '*' means "any" on either axis; both-'*' is rejected at
 config time. On trip, rate-limit → 429 + Retry-After +
@@ -147,7 +147,7 @@ def test_path_trigger_block_prefix_match(config_override, log_slice, fresh_ip):
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldRequestTrigger lockdown path="/admin" ua="Scraper/" status=403',
+        '    BotShieldRequestTrigger lockdown path="/admin" ua="Scraper/" status=403 ttl=0',
         count=1,
     ):
         with log_slice as slc:
@@ -172,7 +172,7 @@ def test_path_trigger_block_end_anchor(config_override, log_slice, fresh_ip):
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldRequestTrigger exact path="/exact$" ua="Scraper/" status=403',
+        '    BotShieldRequestTrigger exact path="/exact$" ua="Scraper/" status=403 ttl=0',
         count=1,
     ):
         r_exact = client.get("/exact",     xff=fresh_ip, ua="Scraper/1.0")
@@ -191,7 +191,7 @@ def test_path_trigger_cohort_narrowing(config_override, log_slice, fresh_ip):
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldRequestTrigger scrapersonly path="/wp-admin" ua="Scraper/" status=403',
+        '    BotShieldRequestTrigger scrapersonly path="/wp-admin" ua="Scraper/" status=403 ttl=0',
         count=1,
     ):
         r_scrap = client.get("/wp-admin", xff=fresh_ip, ua="Scraper/1.0")
@@ -251,8 +251,8 @@ def test_path_trigger_precedence_is_declaration_order(
         '    BotShieldScoreSilent 500\n'
         '    BotShieldScoreHard 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldRequestTrigger specific path="/admin/secret" ua="Scraper/" status=403\n'
-        '    BotShieldRequestTrigger generic  path="/admin*"       ua="Scraper/" status=403',
+        '    BotShieldRequestTrigger specific path="/admin/secret" ua="Scraper/" status=403 ttl=0\n'
+        '    BotShieldRequestTrigger generic  path="/admin*"       ua="Scraper/" status=403 ttl=0',
         count=1,
     ):
         with log_slice as slc:
