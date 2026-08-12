@@ -75,7 +75,7 @@ def test_path_trigger_observe_does_not_enforce(
     )
     # Decision log shows the :observe suffix.
     reason = lines[-1]["reason"]
-    assert "path-trigger:trap:observe" in reason, (
+    assert "request-trigger:trap:observe" in reason, (
         f"expected observe suffix in reason; got {reason!r}"
     )
 
@@ -165,7 +165,7 @@ def test_rate_limit_observe_increments_metric(
 
 def test_path_trigger_observe_does_not_403(config_override, fresh_ip):
     """A scraper-UA hit on /admin/* under observe-mode PathTrigger
-    (status=403 mode=observe) must not 403 from path-trigger
+    (status=403 mode=observe) must not 403 from request-trigger
     enforcement. The challenge tier may still serve a 403
     interstitial (signaled by `X-Botshield: challenge`) — the test
     distinguishes the two by that header rather than status code
@@ -234,7 +234,7 @@ def test_scope_log_only_default_lets_per_rule_enforce(
 def test_observe_does_not_shadow_subsequent_enforce_rule(
     config_override, fresh_ip,
 ):
-    """Two path-trigger rules match the same URL. First is observe-
+    """Two request-trigger rules match the same URL. First is observe-
     only; second is enforce. Without proper handling, the first
     match would either wrongly enforce or wrongly skip the second.
     With correct semantics: first observes (logs :observe), second
@@ -431,7 +431,7 @@ def test_per_location_log_only_with_inner_enforce(
         inside = client.get("/enforce-here", xff=fresh_ip,
                             ua=SCRAPER_UA)
     assert outside.status_code != 403, (
-        f"vhost-scope LogOnly should suppress path-trigger outside the "
+        f"vhost-scope LogOnly should suppress request-trigger outside the "
         f"override Location; got {outside.status_code}"
     )
     assert inside.status_code == 403, (

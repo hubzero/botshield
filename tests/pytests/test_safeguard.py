@@ -215,7 +215,7 @@ def test_safeguard_does_not_override_block_path(
         r = client.get("/blocked", xff=fresh_ip, ua=SCRAPER_UA)
 
     assert r.status_code == 403, (
-        f"safeguard must not override path-trigger 403; "
+        f"safeguard must not override request-trigger 403; "
         f"got {r.status_code}"
     )
 
