@@ -136,6 +136,13 @@ bs_known_bots_state *bs_known_bots_build_baseline(server_rec *s,
  * across a watchdog refresh. *out_botgroup is NULL when the matched
  * entry's category doesn't map to a botgroup.
  * NULL UA returns 0. */
+/* Reverse lookup by canonical slug, for reporting surfaces that have a
+ * slug in hand (the rate-limit table keys on it) and want the category
+ * / botgroup for display. Linear; not for the request path. */
+int bs_bot_dir_lookup_slug(const char *slug,
+                           const char **out_category,
+                           const char **out_botgroup);
+
 int bs_ua_is_known_bot(const char *ua,
                        const char **out_slug,
                        const char **out_category,

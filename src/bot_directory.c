@@ -72,6 +72,36 @@ static int bs_ac_find_edge(const bs_ac_node *n, unsigned char b)
     return -1;
 }
 
+/* Reverse lookup: canonical slug -> category / botgroup.
+ *
+ * Linear over the directory rather than indexed, deliberately. The one
+ * caller is the /dashboard/bots renderer, which runs per page view over
+ * at most a few dozen slugs -- a hash built at publish time would cost
+ * memory on every worker to save microseconds on a page nobody loads in
+ * a loop. bs_ua_is_known_bot keeps its Aho-Corasick fast path because
+ * that one IS on the request path.
+ *
+ * Returns 1 and fills the out params on a hit, 0 otherwise. Pointers
+ * borrow the active state's storage under the same rules as
+ * bs_ua_is_known_bot: do not free, do not retain across a refresh. */
+int bs_bot_dir_lookup_slug(const char *slug,
+                           const char **out_category,
+                           const char **out_botgroup)
+{
+    if (!slug || !*slug) return 0;
+    bs_known_bots_state *st =
+        __atomic_load_n(&bs_bot_directory_active, __ATOMIC_ACQUIRE);
+    if (!st || !st->entries) return 0;
+    for (apr_size_t i = 0; i < st->count; i++) {
+        if (st->entries[i].slug && strcmp(st->entries[i].slug, slug) == 0) {
+            if (out_category) *out_category = st->entries[i].category;
+            if (out_botgroup) *out_botgroup = st->entries[i].botgroup;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int bs_ua_is_known_bot(const char *ua,
                        const char **out_slug,
                        const char **out_category,

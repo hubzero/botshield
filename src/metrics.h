@@ -254,6 +254,12 @@ int bs_metrics_handler(request_rec *r);
  * in <Location> with Require ip if it should not be public. */
 int bs_dashboard_handler(request_rec *r);
 
+/* /dashboard/bots — per-bot detail: every slug the rate limiter has
+ * allocated a counter for, with its budget, origin, mode and current
+ * window usage, plus a breakdown by botgroup. Rendered from the live
+ * bot-rate state and the bot directory; adds no counters of its own. */
+int bs_dashboard_bots_handler(request_rec *r);
+
 /* mod_status contribution — registered via APR_OPTIONAL_HOOK in
  * bs_register_hooks. Renders the same top-line counters in either
  * AP_STATUS_SHORT (one "Key: value" per line) or compact-HTML mode
