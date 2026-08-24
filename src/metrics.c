@@ -7,6 +7,8 @@
 #include "botshield.h"  /* bs_server_cfg, botshield_module */
 #include "shm.h"
 #include "ua_class.h"
+#include "bot_directory.h"  /* bs_bot_dir_lookup_slug for /dashboard/bots */
+#include "bot_rate.h"       /* bs_bot_rate_slot / state, same page */
 
 #include <string.h>
 
@@ -1849,6 +1851,310 @@ void bs_log_observability_request(request_rec *r)
     apr_file_write(scfg->decision_log_fd, line, &len);
 }
 
+/* Shared page chrome for the dashboard family.
+ *
+ * Extracted when /dashboard/bots arrived: the stylesheet is ~70
+ * lines and a second copy would drift the moment either page gained
+ * a rule. Title is the only parameter; everything else is identical
+ * on purpose, because the two pages are one tool and should not look
+ * like two.
+ *
+ * Emits through the opening <main>; the caller emits its own body. */
+static void bs_d_page_open(request_rec *r, const char *title)
+{
+    ap_rprintf(r, "<title>%s</title>", title);
+    ap_rputs(
+      "<style>"
+      ":root{--surface:#fcfcfb;--ink:#1a1a19;--ink2:#5c5c58;--muted:#8a8a84;"
+      "--line:#e4e4e0;--t1:" BS_D_T1 ";--t2:" BS_D_T2 ";--t3:" BS_D_T3 ";--t4:" BS_D_T4 ";"
+      "--c1:" BS_D_C1 ";--c2:" BS_D_C2 ";--c3:" BS_D_C3 ";"
+      "--c4:" BS_D_C4 ";--c5:" BS_D_C5 ";--c6:" BS_D_C6 ";"
+      "--c7:" BS_D_C7 ";"
+      "--track:#eef2f7;--good:#0ca30c;--warn:#fab219;--crit:#d03b3b;"
+      "--neutral:#8a8a84}"
+      "@media(prefers-color-scheme:dark){:root{--surface:#1a1a19;--ink:#f2f2ef;"
+      "--ink2:#b9b9b2;--muted:#8a8a84;--line:#33332f;"
+      /* Separate dark selection, validated against #1a1a19 — not a flip. */
+      "--t1:#3987e5;--t2:#6da7ec;--t3:#9ec5f4;--t4:#cde2fb;"
+      "--c1:#3987e5;--c2:#d95926;--c3:#199e70;--c4:#c98500;"
+      "--c5:#d55181;--c6:#008300;--c7:#9d86e0;--track:#26262340}}"
+      "*{box-sizing:border-box}"
+      "body{margin:0;padding:28px 24px 56px;background:var(--surface);color:var(--ink);"
+      "font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}"
+      "main{max-width:860px;margin:0 auto}"
+      "h1{font-size:19px;margin:0 0 2px;font-weight:600}"
+      "h2{font-size:13px;font-weight:600;color:var(--ink2);margin:0 0 10px;"
+      "text-transform:uppercase;letter-spacing:.04em}"
+      ".sub{color:var(--muted);font-size:13px;margin:0 0 20px}"
+      "nav{display:flex;gap:6px;margin:0 0 26px;flex-wrap:wrap}"
+      "nav a{padding:5px 12px;border:1px solid var(--line);border-radius:999px;"
+      "text-decoration:none;color:var(--ink2);font-size:13px}"
+      "nav a.on{background:var(--t3);border-color:var(--t3);color:#fff}"
+      "nav.rf{align-items:center;margin-top:-16px;margin-bottom:26px}"
+      "nav.rf span{font-size:12px;color:var(--muted)}"
+      "nav.rf a{padding:3px 9px;font-size:12px}"
+      "nav.rf .ts{margin-left:auto;font-variant-numeric:tabular-nums}"
+      "section{margin:0 0 28px}"
+      ".kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}"
+      /* Audience tabs. Plain links, because the selection lives in the
+       * query string -- see the `tab` parse -- so it survives the
+       * auto-refresh. Ordinary anchors are keyboard-operable and
+       * linkable for free. */
+      ".tabbar{display:flex;gap:2px;border-bottom:1px solid var(--line);"
+      "margin:0 0 16px}"
+      ".tabbar a{padding:8px 14px;font-size:13px;font-weight:600;"
+      "letter-spacing:.02em;color:var(--muted);text-decoration:none;"
+      "border-bottom:2px solid transparent;margin-bottom:-1px;"
+      "white-space:nowrap}"
+      ".tabbar a span{font-weight:400;color:var(--muted);margin-left:6px;"
+      "font-variant-numeric:tabular-nums}"
+      ".tabbar a:hover{color:var(--ink2)}"
+      ".tabbar a.on{color:var(--ink);border-bottom-color:var(--t2)}"
+      ".tabbar a.on span{color:var(--ink2)}"
+      ".note{margin:0 0 16px;font-size:13px;line-height:1.45;"
+      "color:var(--ink2);max-width:62ch}"
+      ".kpi{border:1px solid var(--line);border-radius:8px;padding:12px 14px}"
+      ".kpi .k{font-size:12px;color:var(--muted);margin-bottom:4px}"
+      ".kpi .v{font-size:27px;font-weight:600;letter-spacing:-.02em;line-height:1.1}"
+      ".kpi .n{font-size:12px;color:var(--muted);margin-top:2px}"
+      ".legend{list-style:none;display:flex;flex-wrap:wrap;gap:14px;padding:8px 0 0;margin:0}"
+      ".legend li{font-size:13px;color:var(--ink2);display:flex;align-items:center;gap:6px}"
+      ".legend i{width:10px;height:10px;border-radius:2px;display:inline-block}"
+      ".legend b{color:var(--ink);font-weight:600}"
+      ".legend span{color:var(--muted)}"
+      ".meter{margin:0 0 12px}"
+      ".mrow{display:flex;justify-content:space-between;font-size:13px;color:var(--ink2)}"
+      ".mval b{color:var(--ink)}"
+      ".track{height:8px;border-radius:4px;background:var(--track);margin-top:5px;overflow:hidden}"
+      ".fill{height:100%;background:var(--t3);border-radius:4px}"
+      "table{border-collapse:collapse;width:100%;font-size:14px}"
+      "th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}"
+      "th{font-size:12px;color:var(--muted);font-weight:600}"
+      "td.n{text-align:right;font-variant-numeric:tabular-nums}"
+      ".empty{color:var(--muted);font-size:14px;margin:0}"
+      "nav.vh{margin:-10px 0 18px;flex-wrap:wrap}"
+      "nav.vh a{font-size:12px}"
+      "footer{color:var(--muted);font-size:12px;margin-top:34px;border-top:1px solid var(--line);padding-top:12px}"
+      "</style></head><body><main>", r);
+}
+
+/* ======================================================================
+ * /dashboard/bots — per-bot detail
+ *
+ * Rendered entirely from state that already exists: the rate limiter's
+ * per-slug holders (budget, window, origin, mode, live counter) and the
+ * bot directory (category, botgroup). It adds no counters of its own,
+ * which is why "traffic" here means CURRENT WINDOW USAGE rather than a
+ * lifetime total -- the fixed-window counter is what the limiter keeps,
+ * and inventing a second cumulative table to make this page prettier
+ * would be storage nobody asked for.
+ *
+ * What that costs the reader is stated on the page rather than left to
+ * be discovered: a bot idle for longer than its window reads 0, and the
+ * ordering is "busiest right now", not "biggest talker today".
+ * ====================================================================== */
+
+typedef struct {
+    const char *slug;
+    const char *category;
+    const char *botgroup;
+    apr_uint32_t used;
+    apr_uint32_t budget;
+    apr_uint32_t window_sec;
+    const char *origin;
+    int observe;
+} bs_d_botrow;
+
+static int bs_d_botrow_cmp(const void *a, const void *b)
+{
+    const bs_d_botrow *x = a, *y = b;
+    if (x->used != y->used) return (x->used < y->used) ? 1 : -1;
+    return strcmp(x->slug ? x->slug : "", y->slug ? y->slug : "");
+}
+
+int bs_dashboard_bots_handler(request_rec *r)
+{
+    apr_table_setn(r->subprocess_env, "BS_ENDPOINT", "obs");
+    bs_log_observability_request(r);
+
+    ap_set_content_type(r, "text/html; charset=utf-8");
+    apr_table_setn(r->headers_out, "Cache-Control", "no-store");
+    apr_table_setn(r->headers_out, "X-Robots-Tag", "noindex, nofollow");
+
+    bs_server_cfg *scfg = ap_get_module_config(r->server->module_config,
+                                               &botshield_module);
+    bs_d_page_open(r, "mod_botshield bots");
+
+    ap_rputs("<h1>Bots</h1>"
+             "<p class='sub'>per-bot rate-limit state and identity</p>"
+             "<nav><a href='../dashboard'>&larr; Dashboard</a></nav>", r);
+
+    /* Collect rows from the rate limiter's slug table. */
+    apr_array_header_t *rows =
+        apr_array_make(r->pool, 64, sizeof(bs_d_botrow));
+    bs_rate_counter *counters = (bs_rate_counter *)bs_shm.rate_counters;
+    apr_uint64_t now_sec = (apr_uint64_t)apr_time_sec(apr_time_now());
+
+    if (scfg && scfg->bot_rate_state && scfg->bot_rate_state->by_slug) {
+        apr_hash_index_t *hi;
+        for (hi = apr_hash_first(r->pool, scfg->bot_rate_state->by_slug);
+             hi; hi = apr_hash_next(hi)) {
+            const void *k; void *v;
+            apr_hash_this(hi, &k, NULL, &v);
+            bs_bot_rate_slot *h = v;
+            if (!h) continue;
+            bs_d_botrow row;
+            memset(&row, 0, sizeof(row));
+            row.slug       = (const char *)k;
+            row.budget     = h->budget;
+            row.window_sec = h->window_sec;
+            row.origin     = h->origin ? h->origin : "-";
+            row.observe    = h->observe;
+            /* Live window count. A slot whose window has already rolled
+             * reads as 0 rather than a stale figure -- showing the old
+             * count would imply current pressure that is gone. */
+            if (counters && h->shm_slot >= 0) {
+                bs_rate_counter *c = &counters[h->shm_slot];
+                apr_uint32_t ws = __atomic_load_n(&c->window_start_sec,
+                                                  __ATOMIC_RELAXED);
+                apr_uint32_t n  = __atomic_load_n(&c->count,
+                                                  __ATOMIC_RELAXED);
+                if (h->window_sec && now_sec < (apr_uint64_t)ws + h->window_sec) {
+                    row.used = n;
+                }
+            }
+            bs_bot_dir_lookup_slug(row.slug, &row.category, &row.botgroup);
+            *(bs_d_botrow *)apr_array_push(rows) = row;
+        }
+    }
+
+    if (rows->nelts == 0) {
+        ap_rputs("<section><p class='empty'>No per-bot rate-limit slots "
+                 "are allocated. That means either no BotShieldBotRateLimit "
+                 "rule is in effect, or the module has not been enabled in "
+                 "a scope on this vhost.</p></section>"
+                 "</main></body></html>", r);
+        return OK;
+    }
+
+    qsort(rows->elts, rows->nelts, sizeof(bs_d_botrow), bs_d_botrow_cmp);
+
+    /* Botgroup breakdown across every allocated slug. */
+    {
+        static const char *names[] = { "search", "ai-input", "ai-train",
+                                       "monitor", "(ungrouped)" };
+        apr_uint64_t vals[5] = { 0, 0, 0, 0, 0 };
+        const char *fills[] = { "var(--c1)", "var(--c2)", "var(--c3)",
+                                "var(--c4)", "var(--neutral)" };
+        for (int i = 0; i < rows->nelts; i++) {
+            bs_d_botrow *b = &((bs_d_botrow *)rows->elts)[i];
+            int slot = 4;
+            if (b->botgroup) {
+                for (int g = 0; g < 4; g++) {
+                    if (strcmp(b->botgroup, names[g]) == 0) { slot = g; break; }
+                }
+            }
+            vals[slot]++;
+        }
+        apr_uint64_t tot = 0;
+        for (int i = 0; i < 5; i++) tot += vals[i];
+        ap_rputs("<section><h2>Bot types</h2>", r);
+        bs_d_stacked(r, "bg", "Known bots by group", names, vals,
+                     fills, 5, tot);
+        ap_rputs("<p class='note'>Counts BOTS, not requests: one row per "
+                 "slug the limiter tracks. Groups come from the IETF "
+                 "aipref content-signal vocabulary, plus monitor as a "
+                 "mod_botshield extension. Ungrouped means the directory "
+                 "category does not map to a group -- libraries and tools "
+                 "mostly land there.</p></section>", r);
+    }
+
+    /* Global bot-facing counters, moved off the main dashboard. */
+    if (bs_shm.metrics) {
+        bs_metrics *m = bs_shm.metrics;
+        ap_rputs("<section><h2>Rate limiting &amp; blocks</h2>"
+                 "<div class='kpis'>", r);
+        ap_rprintf(r, "<div class='kpi'><div class='k'>429s issued</div>"
+                      "<div class='v'>%" APR_UINT64_T_FMT "</div>"
+                      "<div class='n'>enforced</div></div>",
+                   bs_mload(&m->rate_limit_exceeded_total));
+        ap_rprintf(r, "<div class='kpi'><div class='k'>Would-429</div>"
+                      "<div class='v'>%" APR_UINT64_T_FMT "</div>"
+                      "<div class='n'>observe mode</div></div>",
+                   bs_mload(&m->rate_limit_observed_total));
+        ap_rprintf(r, "<div class='kpi'><div class='k'>Bots admitted</div>"
+                      "<div class='v'>%" APR_UINT64_T_FMT "</div>"
+                      "<div class='n'>allow-listed / verified</div></div>",
+                   bs_mload(&m->bot_allow_total));
+        ap_rprintf(r, "<div class='kpi'><div class='k'>Fake bots</div>"
+                      "<div class='v'>%" APR_UINT64_T_FMT "</div>"
+                      "<div class='n'>UA claimed a crawler, IP failed</div>"
+                      "</div>", bs_mload(&m->bot_fake_total));
+        ap_rputs("</div></section>", r);
+    }
+
+    /* The table. Top 50 by current-window usage. */
+    {
+        /* Only bots with live usage, per the ">0 traffic" ask. The
+         * fixed-window counter is the only per-bot number that exists,
+         * and at the default 1-second window it has almost always
+         * rolled by the time anyone loads this page -- so an unfiltered
+         * table is 700 rows of zeros with the interesting ones buried.
+         * Filtering makes the emptiness honest instead of hiding it in
+         * noise, and the empty case says why. */
+        int active = 0;
+        for (int i = 0; i < rows->nelts; i++) {
+            if (((bs_d_botrow *)rows->elts)[i].used > 0) active++;
+        }
+        int shown = active < 50 ? active : 50;
+        ap_rprintf(r, "<section><h2>Per-bot state</h2>"
+                      "<p class='note'>%d bot%s tracked, %d with traffic "
+                      "in the current window%s. This is a LIVE SNAPSHOT, "
+                      "not a running total: the rate limiter keeps a "
+                      "fixed-window counter and nothing cumulative, so a "
+                      "bot idle longer than its own window reads 0. At a "
+                      "1-second window that is nearly all of them nearly "
+                      "all of the time. Budget 0 means unlimited.</p>",
+                   rows->nelts, rows->nelts == 1 ? "" : "s", active,
+                   shown < active ? ", top 50 shown" : "");
+        ap_rputs("<table><thead><tr><th>Bot</th><th>Group</th>"
+                 "<th>Category</th><th class='n'>Window use</th>"
+                 "<th class='n'>Budget</th><th>Origin</th><th>Mode</th>"
+                 "</tr></thead><tbody>", r);
+        if (active == 0) {
+            ap_rputs("<tr><td colspan='7' class='empty'>No bot has "
+                     "traffic in its current window right now. Reload "
+                     "while a crawler is active, or widen the window "
+                     "with BotShieldBotRateLimit to make this readable."
+                     "</td></tr>", r);
+        }
+        for (int i = 0; i < shown; i++) {
+            bs_d_botrow *b = &((bs_d_botrow *)rows->elts)[i];
+            char budget[64];
+            if (b->budget == 0) {
+                apr_snprintf(budget, sizeof(budget), "unlimited");
+            } else {
+                apr_snprintf(budget, sizeof(budget),
+                             "%u / %us", b->budget, b->window_sec);
+            }
+            ap_rprintf(r,
+                "<tr><td>%s</td><td>%s</td><td>%s</td>"
+                "<td class='n'>%u</td><td class='n'>%s</td>"
+                "<td>%s</td><td>%s</td></tr>",
+                ap_escape_html(r->pool, b->slug),
+                b->botgroup ? ap_escape_html(r->pool, b->botgroup) : "&mdash;",
+                b->category ? ap_escape_html(r->pool, b->category) : "&mdash;",
+                b->used, budget,
+                ap_escape_html(r->pool, b->origin),
+                b->observe ? "observe" : "enforce");
+        }
+        ap_rputs("</tbody></table></section>", r);
+    }
+
+    ap_rputs("</main></body></html>", r);
+    return OK;
+}
+
 int bs_dashboard_handler(request_rec *r)
 {
     apr_table_setn(r->subprocess_env, "BS_ENDPOINT", "obs");
@@ -1938,79 +2244,7 @@ int bs_dashboard_handler(request_rec *r)
             "content='%d;url=?w=%s&amp;r=%d&amp;vh=%s&amp;tab=%s'>",
             refresh, wq, refresh, vq, tq);
     }
-    ap_rputs(
-      "<title>mod_botshield dashboard</title><style>"
-      ":root{--surface:#fcfcfb;--ink:#1a1a19;--ink2:#5c5c58;--muted:#8a8a84;"
-      "--line:#e4e4e0;--t1:" BS_D_T1 ";--t2:" BS_D_T2 ";--t3:" BS_D_T3 ";--t4:" BS_D_T4 ";"
-      "--c1:" BS_D_C1 ";--c2:" BS_D_C2 ";--c3:" BS_D_C3 ";"
-      "--c4:" BS_D_C4 ";--c5:" BS_D_C5 ";--c6:" BS_D_C6 ";"
-      "--c7:" BS_D_C7 ";"
-      "--track:#eef2f7;--good:#0ca30c;--warn:#fab219;--crit:#d03b3b;"
-      "--neutral:#8a8a84}"
-      "@media(prefers-color-scheme:dark){:root{--surface:#1a1a19;--ink:#f2f2ef;"
-      "--ink2:#b9b9b2;--muted:#8a8a84;--line:#33332f;"
-      /* Separate dark selection, validated against #1a1a19 — not a flip. */
-      "--t1:#3987e5;--t2:#6da7ec;--t3:#9ec5f4;--t4:#cde2fb;"
-      "--c1:#3987e5;--c2:#d95926;--c3:#199e70;--c4:#c98500;"
-      "--c5:#d55181;--c6:#008300;--c7:#9d86e0;--track:#26262340}}"
-      "*{box-sizing:border-box}"
-      "body{margin:0;padding:28px 24px 56px;background:var(--surface);color:var(--ink);"
-      "font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}"
-      "main{max-width:860px;margin:0 auto}"
-      "h1{font-size:19px;margin:0 0 2px;font-weight:600}"
-      "h2{font-size:13px;font-weight:600;color:var(--ink2);margin:0 0 10px;"
-      "text-transform:uppercase;letter-spacing:.04em}"
-      ".sub{color:var(--muted);font-size:13px;margin:0 0 20px}"
-      "nav{display:flex;gap:6px;margin:0 0 26px;flex-wrap:wrap}"
-      "nav a{padding:5px 12px;border:1px solid var(--line);border-radius:999px;"
-      "text-decoration:none;color:var(--ink2);font-size:13px}"
-      "nav a.on{background:var(--t3);border-color:var(--t3);color:#fff}"
-      "nav.rf{align-items:center;margin-top:-16px;margin-bottom:26px}"
-      "nav.rf span{font-size:12px;color:var(--muted)}"
-      "nav.rf a{padding:3px 9px;font-size:12px}"
-      "nav.rf .ts{margin-left:auto;font-variant-numeric:tabular-nums}"
-      "section{margin:0 0 28px}"
-      ".kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}"
-      /* Audience tabs. Plain links, because the selection lives in the
-       * query string -- see the `tab` parse -- so it survives the
-       * auto-refresh. Ordinary anchors are keyboard-operable and
-       * linkable for free. */
-      ".tabbar{display:flex;gap:2px;border-bottom:1px solid var(--line);"
-      "margin:0 0 16px}"
-      ".tabbar a{padding:8px 14px;font-size:13px;font-weight:600;"
-      "letter-spacing:.02em;color:var(--muted);text-decoration:none;"
-      "border-bottom:2px solid transparent;margin-bottom:-1px;"
-      "white-space:nowrap}"
-      ".tabbar a span{font-weight:400;color:var(--muted);margin-left:6px;"
-      "font-variant-numeric:tabular-nums}"
-      ".tabbar a:hover{color:var(--ink2)}"
-      ".tabbar a.on{color:var(--ink);border-bottom-color:var(--t2)}"
-      ".tabbar a.on span{color:var(--ink2)}"
-      ".note{margin:0 0 16px;font-size:13px;line-height:1.45;"
-      "color:var(--ink2);max-width:62ch}"
-      ".kpi{border:1px solid var(--line);border-radius:8px;padding:12px 14px}"
-      ".kpi .k{font-size:12px;color:var(--muted);margin-bottom:4px}"
-      ".kpi .v{font-size:27px;font-weight:600;letter-spacing:-.02em;line-height:1.1}"
-      ".kpi .n{font-size:12px;color:var(--muted);margin-top:2px}"
-      ".legend{list-style:none;display:flex;flex-wrap:wrap;gap:14px;padding:8px 0 0;margin:0}"
-      ".legend li{font-size:13px;color:var(--ink2);display:flex;align-items:center;gap:6px}"
-      ".legend i{width:10px;height:10px;border-radius:2px;display:inline-block}"
-      ".legend b{color:var(--ink);font-weight:600}"
-      ".legend span{color:var(--muted)}"
-      ".meter{margin:0 0 12px}"
-      ".mrow{display:flex;justify-content:space-between;font-size:13px;color:var(--ink2)}"
-      ".mval b{color:var(--ink)}"
-      ".track{height:8px;border-radius:4px;background:var(--track);margin-top:5px;overflow:hidden}"
-      ".fill{height:100%;background:var(--t3);border-radius:4px}"
-      "table{border-collapse:collapse;width:100%;font-size:14px}"
-      "th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}"
-      "th{font-size:12px;color:var(--muted);font-weight:600}"
-      "td.n{text-align:right;font-variant-numeric:tabular-nums}"
-      ".empty{color:var(--muted);font-size:14px;margin:0}"
-      "nav.vh{margin:-10px 0 18px;flex-wrap:wrap}"
-      "nav.vh a{font-size:12px}"
-      "footer{color:var(--muted);font-size:12px;margin-top:34px;border-top:1px solid var(--line);padding-top:12px}"
-      "</style></head><body><main>", r);
+    bs_d_page_open(r, "mod_botshield dashboard");
 
     {
         const char *scope = (vsel < 0)
@@ -2239,88 +2473,24 @@ int bs_dashboard_handler(request_rec *r)
                      fills, 6, ours);
     }
 
-    /* Rate limiting, broken out of the response bar above.
+    /* Rate limiting and the per-bot view moved to /dashboard/bots.
      *
-     * It earns its own section for a display reason and a semantic one.
-     * Display: rate-limited is routinely a fraction of a percent of
-     * BotShield's responses, which is around a pixel of a 600px bar —
-     * the <title> is there but the segment is too narrow to hover, so
-     * the bar cannot answer "is the rate limit doing anything".
-     * Semantic: the others are per-request verdicts on a client, while
-     * this is a budget decision about a crawler across all its IPs. It
-     * is tuned with different directives and read on a different
-     * cadence.
+     * They never belonged beside the per-request verdicts here. Those
+     * judge one client; a rate limit is a budget decision about a
+     * crawler across all of its IPs, tuned with different directives
+     * and read on a different cadence. On the bots page they sit with
+     * the per-bot state they describe.
      *
-     * MIND THE TIME BASES — they are deliberately not the same, and
-     * mixing them silently is how a dashboard starts lying:
-     *   - "429s in this window" is windowed, from req_resp[], and moves
-     *     with the w= selector like everything else on the page.
-     *   - enforced/observed totals are plain bs_metrics fields, so they
-     *     are cumulative SINCE RESTART regardless of w=. They are
-     *     labelled as such rather than being quietly rescaled.
-     *   - and they are read from the GLOBAL block, not the per-vhost
-     *     one, because bot_rate.c and policy.c only ever increment
-     *     bs_shm.metrics->. There is no per-vhost copy to select, so
-     *     with vh= set these two do not narrow with the rest of the
-     *     page. Labelled "all vhosts" for that reason; do not "fix" it
-     *     by pointing them at bs_vhost_block(), which would read a
-     *     field nothing writes and render a confident zero.
-     * Both totals also span BOTH families — BotShieldBotRateLimit
-     * (slug-keyed) and BotShieldRateLimit (cohort) — because
-     * bot_rate.c and policy.c increment the same pair. On a host with
-     * only one family configured that is the same number; on a host
-     * with both it is a sum, and the split is not recoverable here.
-     *
-     * Not shown, because the counters do not exist: which bot slugs are
-     * being limited. That is per-holder state and needs a cumulative
-     * counter on bs_bot_rate_slot; until then the decision log is the
-     * only place to get it:
-     *   grep -oE 'bot-rate:[a-z0-9-]+' botshield.log | sort | uniq -c
-     */
-    {
-        /* Recomputed, not borrowed: `ours` above is scoped to the
-         * response-breakdown block. */
-        apr_uint64_t rl_total = 0;
-        for (int i = 1; i < BS_M_RESP_COUNT; i++) rl_total += w.req_resp[i];
-
-        apr_uint64_t rl_win = w.req_resp[BS_M_RESP_RATE_LIMITED];
-        apr_uint64_t enforced = 0, observed = 0;
-        if (bs_shm.metrics) {
-            enforced = bs_mload(&bs_shm.metrics->rate_limit_exceeded_total);
-            observed = bs_mload(&bs_shm.metrics->rate_limit_observed_total);
-        }
-
-        ap_rputs("<section><h2>Rate limiting</h2><div class='kpis'>", r);
-        ap_rprintf(r, "<div class='kpi'><div class='k'>429s issued</div>"
-                      "<div class='v'>%" APR_UINT64_T_FMT "</div>"
-                      "<div class='n'>%s of BotShield responses, %s</div>"
-                      "</div>",
-                   rl_win, bs_d_pct(r->pool, rl_win, rl_total),
-                   bs_d_window_label(span));
-        ap_rprintf(r, "<div class='kpi'><div class='k'>Enforced</div>"
-                      "<div class='v'>%" APR_UINT64_T_FMT "</div>"
-                      "<div class='n'>all vhosts, since restart</div></div>",
-                   enforced);
-        ap_rprintf(r, "<div class='kpi'><div class='k'>Observed</div>"
-                      "<div class='v'>%" APR_UINT64_T_FMT "</div>"
-                      "<div class='n'>would have 429'd, all vhosts</div>"
-                      "</div>", observed);
-        ap_rputs("</div>", r);
-
-        /* Enforced vs observed is the tuning question — how much of the
-         * configured limit is actually acting. Only drawn when there is
-         * something to draw; a site with rate limiting off should show
-         * the KPIs reading zero, not an empty chart frame. */
-        if (enforced || observed) {
-            const char *rl_labels[] = { "enforced", "observed" };
-            const char *rl_fills[]  = { "var(--c3)", "var(--neutral)" };
-            apr_uint64_t rl_vals[]  = { enforced, observed };
-            bs_d_stacked(r, "rl", "Rate limit: enforced vs observed",
-                         rl_labels, rl_vals, rl_fills, 2,
-                         enforced + observed);
-        }
-        ap_rputs("</section>", r);
-    }
+     * That page also answers what the old comment here said was
+     * unanswerable -- WHICH slugs are being limited -- by reading the
+     * rate limiter's own per-slug holders. It reports live window
+     * usage rather than a lifetime total, because the fixed-window
+     * counter is the only per-bot number that exists and adding a
+     * cumulative one was not worth the storage. */
+    ap_rputs("<section><h2>Bots</h2><p class='note'>Rate limiting, "
+             "block counts, bot types and per-bot state live on their "
+             "own page: <a href='dashboard/bots'>bots &rarr;</a></p>"
+             "</section>", r);
 
     /* KPI row — a handful of headline numbers is a stat row, not a chart. */
     /* Decisions, split by audience into two tabs.

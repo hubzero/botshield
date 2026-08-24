@@ -1189,6 +1189,12 @@ static int bs_route_module_endpoint(request_rec *r, bs_dir_cfg *cfg)
     if (strcmp(sub, "/dashboard") == 0) {
         return bs_dashboard_handler(r);
     }
+    /* Bot detail page. Same observability class as /dashboard -- it is
+     * listed alongside it in the world-readable scope in the shipped
+     * config, so an operator who exposes one has exposed both. */
+    if (strcmp(sub, "/dashboard/bots") == 0) {
+        return bs_dashboard_bots_handler(r);
+    }
     if (strcmp(sub, "/policy-status") == 0) {
         return bs_policy_status_handler(r, cfg);
     }
