@@ -1900,6 +1900,11 @@ static void bs_d_page_open(request_rec *r, const char *title)
        * query string -- see the `tab` parse -- so it survives the
        * auto-refresh. Ordinary anchors are keyboard-operable and
        * linkable for free. */
+      /* Page nav: same pill vocabulary as the window/vhost navs so it
+       * reads as navigation, with extra space beneath to separate
+       * "which page" from "which view of it". */
+      "nav.pages{margin-bottom:14px}"
+      "nav.pages a{font-weight:600}"
       ".tabbar{display:flex;gap:2px;border-bottom:1px solid var(--line);"
       "margin:0 0 16px}"
       ".tabbar a{padding:8px 14px;font-size:13px;font-weight:600;"
@@ -1985,9 +1990,10 @@ int bs_dashboard_bots_handler(request_rec *r)
                                                &botshield_module);
     bs_d_page_open(r, "mod_botshield bots");
 
-    ap_rputs("<h1>Bots</h1>"
+    ap_rputs("<h1>mod_botshield</h1>"
              "<p class='sub'>per-bot rate-limit state and identity</p>"
-             "<nav><a href='../dashboard'>&larr; Dashboard</a></nav>", r);
+             "<nav class='pages'><a href='../dashboard'>Overview</a>"
+             "<a class='on' href='bots'>Bots</a></nav>", r);
 
     /* Collect rows from the rate limiter's slug table. */
     apr_array_header_t *rows =
@@ -2255,6 +2261,13 @@ int bs_dashboard_handler(request_rec *r)
             bs_d_window_label(span), scope);
     }
 
+    /* Page nav first. A second page needs a navigation affordance, not
+     * a sentence in the body: the link lived in a 13px muted <p> in the
+     * middle of a long page and was reported as "I don't see any new
+     * links", which is a fair verdict on that placement. Order matters
+     * too -- which page you are on reads before which window. */
+    ap_rputs("<nav class='pages'><a class='on' href='dashboard'>Overview</a>"
+             "<a href='dashboard/bots'>Bots</a></nav>", r);
     ap_rputs("<nav>", r);
     const struct { const char *q, *t; int s; } wins[] = {
         {"15", "15 min", 15}, {"60", "1 hour", 60},
@@ -2487,10 +2500,8 @@ int bs_dashboard_handler(request_rec *r)
      * usage rather than a lifetime total, because the fixed-window
      * counter is the only per-bot number that exists and adding a
      * cumulative one was not worth the storage. */
-    ap_rputs("<section><h2>Bots</h2><p class='note'>Rate limiting, "
-             "block counts, bot types and per-bot state live on their "
-             "own page: <a href='dashboard/bots'>bots &rarr;</a></p>"
-             "</section>", r);
+    /* No mid-page teaser section: the page nav at the top is the
+     * affordance now. */
 
     /* KPI row — a handful of headline numbers is a stat row, not a chart. */
     /* Decisions, split by audience into two tabs.
