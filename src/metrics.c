@@ -1905,17 +1905,6 @@ static void bs_d_page_open(request_rec *r, const char *title)
        * "which page" from "which view of it". */
       "nav.pages{margin-bottom:14px}"
       "nav.pages a{font-weight:600}"
-      ".tabbar{display:flex;gap:2px;border-bottom:1px solid var(--line);"
-      "margin:0 0 16px}"
-      ".tabbar a{padding:8px 14px;font-size:13px;font-weight:600;"
-      "letter-spacing:.02em;color:var(--muted);text-decoration:none;"
-      "border-bottom:2px solid transparent;margin-bottom:-1px;"
-      "white-space:nowrap}"
-      ".tabbar a span{font-weight:400;color:var(--muted);margin-left:6px;"
-      "font-variant-numeric:tabular-nums}"
-      ".tabbar a:hover{color:var(--ink2)}"
-      ".tabbar a.on{color:var(--ink);border-bottom-color:var(--t2)}"
-      ".tabbar a.on span{color:var(--ink2)}"
       ".note{margin:0 0 16px;font-size:13px;line-height:1.45;"
       "color:var(--ink2);max-width:62ch}"
       ".kpi{border:1px solid var(--line);border-radius:8px;padding:12px 14px}"
@@ -1941,6 +1930,52 @@ static void bs_d_page_open(request_rec *r, const char *title)
       "nav.vh a{font-size:12px}"
       "footer{color:var(--muted);font-size:12px;margin-top:34px;border-top:1px solid var(--line);padding-top:12px}"
       "</style></head><body><main>", r);
+}
+
+/* Dashboard page navigation.
+ *
+ * Absolute hrefs built from BotShieldEndpointPrefix, not relative ones.
+ * The pages sit at two depths (/dashboard and /dashboard/<page>), so
+ * relative links would need different spellings per page -- and the
+ * first attempt at that shipped an href='.' that resolved to the
+ * prefix root instead of the dashboard. Absolute is one spelling that
+ * is correct from anywhere.
+ *
+ * `active` is matched against the page slug; "" means the overview. */
+static void bs_d_nav(request_rec *r, const char *active)
+{
+    bs_dir_cfg *dcfg = ap_get_module_config(r->per_dir_config,
+                                            &botshield_module);
+    const char *px = (dcfg && dcfg->endpoint_prefix)
+                   ? dcfg->endpoint_prefix : BS_DEFAULT_ENDPOINT_PREFIX;
+    static const char *slug[]  = { "", "responses", "app-bots",
+                                   "app-users", "bots" };
+    static const char *label[] = { "Overview", "BotShield responses",
+                                   "App &rarr; bots", "App &rarr; users",
+                                   "Bots" };
+    ap_rputs("<nav class='pages'>", r);
+    for (int i = 0; i < 5; i++) {
+        int on = strcmp(active, slug[i]) == 0;
+        if (!*slug[i]) {
+            ap_rprintf(r, "<a class='%s' href='%s/dashboard'>%s</a>",
+                       on ? "on" : "", px, label[i]);
+        } else {
+            ap_rprintf(r, "<a class='%s' href='%s/dashboard/%s'>%s</a>",
+                       on ? "on" : "", px, slug[i], label[i]);
+        }
+    }
+    ap_rputs("</nav>", r);
+}
+
+/* Head + nav + heading, shared by every dashboard page so they cannot
+ * drift into looking like separate tools. */
+static void bs_d_page_start(request_rec *r, const char *title,
+                            const char *sub, const char *active)
+{
+    bs_d_page_open(r, title);
+    ap_rprintf(r, "<h1>mod_botshield</h1><p class='sub'>%s</p>",
+               sub ? sub : "");
+    bs_d_nav(r, active);
 }
 
 /* ======================================================================
@@ -1990,10 +2025,9 @@ int bs_dashboard_bots_handler(request_rec *r)
                                                &botshield_module);
     bs_d_page_open(r, "mod_botshield bots");
 
-    ap_rputs("<h1>mod_botshield</h1>"
-             "<p class='sub'>per-bot rate-limit state and identity</p>"
-             "<nav class='pages'><a href='../dashboard'>Overview</a>"
-             "<a class='on' href='bots'>Bots</a></nav>", r);
+    ap_rprintf(r, "<h1>mod_botshield</h1><p class='sub'>%s</p>",
+               "per-bot rate-limit state and identity");
+    bs_d_nav(r, "bots");
 
     /* Collect rows from the rate limiter's slug table. */
     apr_array_header_t *rows =
@@ -2161,6 +2195,176 @@ int bs_dashboard_bots_handler(request_rec *r)
     return OK;
 }
 
+/* ======================================================================
+ * Audience pages: /dashboard/app-bots and /dashboard/app-users
+ *
+ * These were tabs on the overview. A tab is a page in disguise when the
+ * two halves share no numbers, and these share none: one is crawl
+ * budget, the other is readership. As pages they also drop the tab CSS,
+ * the tab= query param, and the plumbing that carried that param
+ * through the auto-refresh.
+ * ====================================================================== */
+static int bs_d_audience_page(request_rec *r, int group)
+{
+    apr_table_setn(r->subprocess_env, "BS_ENDPOINT", "obs");
+    bs_log_observability_request(r);
+    ap_set_content_type(r, "text/html; charset=utf-8");
+    apr_table_setn(r->headers_out, "Cache-Control", "no-store");
+    apr_table_setn(r->headers_out, "X-Robots-Tag", "noindex, nofollow");
+
+    int span = 60;
+    if (r->args) {
+        const char *wv = bs_d_qparam(r->pool, r->args, "w");
+        if (wv) {
+            if      (!strcmp(wv, "15"))   span = 15;
+            else if (!strcmp(wv, "1440")) span = 1440;
+            else if (!strcmp(wv, "all"))  span = 0;
+        }
+    }
+    bs_metrics_window w;
+    bs_metrics_read_window(span, -1, &w);
+
+    int is_bot = (group == BS_M_GROUP_BOT);
+    bs_d_page_start(r,
+        is_bot ? "mod_botshield app to bots" : "mod_botshield app to users",
+        bs_d_window_label(span),
+        is_bot ? "app-bots" : "app-users");
+
+    static const int bot_cls[] = { BS_M_CLASS_VERIFIED_BOT,
+                                   BS_M_CLASS_KNOWN_BOT,
+                                   BS_M_CLASS_UNKNOWN_BOT };
+    static const char *bot_lbl[] = { "verified bot", "known bot",
+                                     "unknown bot" };
+    static const int usr_cls[] = { BS_M_CLASS_BROWSER,
+                                   BS_M_CLASS_FAKE_BOT,
+                                   BS_M_CLASS_UNKNOWN };
+    static const char *usr_lbl[] = { "browser", "fake bot", "unknown" };
+
+    ap_rprintf(r, "<section><h2>%s</h2>",
+               is_bot ? "Application served to bots"
+                      : "Application served to users");
+    if (is_bot) {
+        ap_rputs("<p class='note'>Declared crawlers. Most are passed "
+                 "deliberately and governed by BotShieldBotRateLimit "
+                 "rather than by challenges, so a low challenge rate "
+                 "here is the policy working, not a gap.</p>", r);
+        bs_d_audience_panel(r, &w, BS_M_GROUP_BOT, "b", bot_cls, bot_lbl, 3);
+    } else {
+        ap_rputs("<p class='note'>Browsers, unclassified clients, and UAs "
+                 "claiming to be crawlers whose IP failed the cross-check. "
+                 "This is the population challenges are aimed at, so "
+                 "challenge and solve rates here are the ones to read.</p>",
+                 r);
+        bs_d_audience_panel(r, &w, BS_M_GROUP_USER, "u", usr_cls, usr_lbl, 3);
+    }
+    ap_rputs("</section></main></body></html>", r);
+    return OK;
+}
+
+int bs_dashboard_app_bots_handler(request_rec *r)
+{
+    return bs_d_audience_page(r, BS_M_GROUP_BOT);
+}
+
+int bs_dashboard_app_users_handler(request_rec *r)
+{
+    return bs_d_audience_page(r, BS_M_GROUP_USER);
+}
+
+/* ======================================================================
+ * /dashboard/responses — what BotShield itself answered
+ * ====================================================================== */
+int bs_dashboard_responses_handler(request_rec *r)
+{
+    apr_table_setn(r->subprocess_env, "BS_ENDPOINT", "obs");
+    bs_log_observability_request(r);
+    ap_set_content_type(r, "text/html; charset=utf-8");
+    apr_table_setn(r->headers_out, "Cache-Control", "no-store");
+    apr_table_setn(r->headers_out, "X-Robots-Tag", "noindex, nofollow");
+
+    int span = 60;
+    if (r->args) {
+        const char *wv = bs_d_qparam(r->pool, r->args, "w");
+        if (wv) {
+            if      (!strcmp(wv, "15"))   span = 15;
+            else if (!strcmp(wv, "1440")) span = 1440;
+            else if (!strcmp(wv, "all"))  span = 0;
+        }
+    }
+    bs_metrics_window w;
+    bs_metrics_read_window(span, -1, &w);
+
+    bs_d_page_start(r, "mod_botshield responses",
+                    bs_d_window_label(span), "responses");
+
+    apr_uint64_t ours = 0;
+    for (int i = 1; i < BS_M_RESP_COUNT; i++) {
+        if (i == BS_M_RESP_STATIC) continue;
+        ours += w.req_resp[i];
+    }
+
+    ap_rputs("<section><h2>Answered by BotShield</h2><div class='kpis'>", r);
+    ap_rprintf(r, "<div class='kpi'><div class='k'>BotShield responses</div>"
+                  "<div class='v'>%s</div><div class='n'>%" APR_UINT64_T_FMT
+                  " of %" APR_UINT64_T_FMT " requests</div></div>",
+               bs_d_pct(r->pool, ours, w.req_total), ours, w.req_total);
+    ap_rprintf(r, "<div class='kpi'><div class='k'>Challenges</div>"
+                  "<div class='v'>%" APR_UINT64_T_FMT "</div>"
+                  "<div class='n'>interstitials served</div></div>",
+               w.req_resp[BS_M_RESP_CHALLENGE]);
+    ap_rprintf(r, "<div class='kpi'><div class='k'>Solved</div>"
+                  "<div class='v'>%" APR_UINT64_T_FMT "</div>"
+                  "<div class='n'>challenge passed</div></div>",
+               w.outcome[BS_M_OUTCOME_VERIFIED]);
+    ap_rputs("</div>", r);
+
+    {
+        const char *labels[] = { "challenge", "block", "rate limited",
+                                 "redirect", "endpoint", "dashboard" };
+        const char *fills[]  = { "var(--c1)", "var(--c2)", "var(--c3)",
+                                 "var(--c4)", "var(--c5)", "var(--neutral)" };
+        apr_uint64_t vals[]  = { w.req_resp[BS_M_RESP_CHALLENGE],
+                                 w.req_resp[BS_M_RESP_BLOCK],
+                                 w.req_resp[BS_M_RESP_RATE_LIMITED],
+                                 w.req_resp[BS_M_RESP_REDIRECT],
+                                 w.req_resp[BS_M_RESP_ENDPOINT],
+                                 w.req_resp[BS_M_RESP_OBSERVE] };
+        bs_d_stacked(r, "rk", "BotShield response breakdown", labels, vals,
+                     fills, 6, ours);
+        ap_rputs("<p class='note'>Scaled to what BotShield answered, not "
+                 "to all traffic: on a healthy site the origin is most of "
+                 "the bar and would squeeze these into slivers. "
+                 "\"dashboard\" is this page and its siblings -- the "
+                 "measuring instrument, counted so it can be discounted."
+                 "</p>", r);
+    }
+
+    ap_rputs("</section>", r);
+
+    /* Outcome table: the full vocabulary, including the rare ones. */
+    {
+        const char *const *onames = bs_m_outcome_names;
+        int shown = 0;
+        ap_rputs("<section><h2>Outcomes</h2><table><thead><tr>"
+                 "<th>Outcome</th><th class='n'>Count</th>"
+                 "<th class='n'>Share</th></tr></thead><tbody>", r);
+        for (int i = 0; i < BS_M_OUTCOME_COUNT; i++) {
+            if (!w.outcome[i]) continue;
+            ap_rprintf(r, "<tr><td>%s</td><td class='n'>%" APR_UINT64_T_FMT
+                          "</td><td class='n'>%s</td></tr>",
+                       onames[i], w.outcome[i],
+                       bs_d_pct(r->pool, w.outcome[i], w.decisions));
+            shown++;
+        }
+        if (!shown) ap_rputs("<tr><td colspan='3' class='empty'>"
+                             "Nothing recorded in this window.</td></tr>", r);
+        ap_rputs("</tbody></table></section>", r);
+    }
+
+    ap_rputs("</main></body></html>", r);
+    return OK;
+}
+
 int bs_dashboard_handler(request_rec *r)
 {
     apr_table_setn(r->subprocess_env, "BS_ENDPOINT", "obs");
@@ -2209,19 +2413,6 @@ int bs_dashboard_handler(request_rec *r)
     const char *vq = (vsel < 0) ? "all"
                                 : apr_psprintf(r->pool, "%d", vsel);
 
-    /* Audience tab. In the query string for the same reason w/r/vh are:
-     * the page auto-refreshes, and any selection the URL does not carry
-     * snaps back to its default every interval. That ruled out the
-     * CSS-only :checked approach this started as -- a radio resets on
-     * every load, so the tab would flip back to Bots under anyone
-     * watching the page. Carrying it here also makes a tab linkable,
-     * which the radio version was not. */
-    int aud = BS_M_GROUP_BOT;
-    {
-        const char *t = bs_d_qparam(r->pool, r->args, "tab");
-        if (t && strcmp(t, "usr") == 0) aud = BS_M_GROUP_USER;
-    }
-    const char *tq = (aud == BS_M_GROUP_USER) ? "usr" : "bot";
 
     bs_metrics_window w;
     bs_metrics_read_window(span, vsel, &w);
@@ -2247,8 +2438,8 @@ int bs_dashboard_handler(request_rec *r)
          * would silently snap back to the default every interval. */
         ap_rprintf(r,
             "<meta http-equiv='refresh' "
-            "content='%d;url=?w=%s&amp;r=%d&amp;vh=%s&amp;tab=%s'>",
-            refresh, wq, refresh, vq, tq);
+            "content='%d;url=?w=%s&amp;r=%d&amp;vh=%s'>",
+            refresh, wq, refresh, vq);
     }
     bs_d_page_open(r, "mod_botshield dashboard");
 
@@ -2266,17 +2457,16 @@ int bs_dashboard_handler(request_rec *r)
      * middle of a long page and was reported as "I don't see any new
      * links", which is a fair verdict on that placement. Order matters
      * too -- which page you are on reads before which window. */
-    ap_rputs("<nav class='pages'><a class='on' href='dashboard'>Overview</a>"
-             "<a href='dashboard/bots'>Bots</a></nav>", r);
+    bs_d_nav(r, "");
     ap_rputs("<nav>", r);
     const struct { const char *q, *t; int s; } wins[] = {
         {"15", "15 min", 15}, {"60", "1 hour", 60},
         {"1440", "24 hours", 1440}, {"all", "All time", 0} };
     for (int i = 0; i < 4; i++) {
         ap_rprintf(r,
-                   "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%s&amp;tab=%s'>%s</a>",
+                   "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%s'>%s</a>",
                    span == wins[i].s ? "on" : "", wins[i].q, refresh,
-                   vq, tq, wins[i].t);
+                   vq, wins[i].t);
     }
     ap_rputs("</nav>", r);
 
@@ -2286,15 +2476,14 @@ int bs_dashboard_handler(request_rec *r)
     if (vdir && vdir->count > 1) {
         ap_rputs("<nav class='vh'>", r);
         ap_rprintf(r, "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=all"
-                      "&amp;tab=%s'>All vhosts</a>",
-                   vsel < 0 ? "on" : "", wq, refresh, tq);
+                      "'>All vhosts</a>",
+                   vsel < 0 ? "on" : "", wq, refresh);
         for (apr_uint32_t i = 0; i < vdir->count; i++) {
             if (!vdir->name[i][0]) continue;
             ap_rprintf(r,
                 "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%u"
-                "&amp;tab=%s'>%s</a>",
-                vsel == (int)i ? "on" : "", wq, refresh, i, tq,
-                ap_escape_html(r->pool, vdir->name[i]));
+                "'>%s</a>",
+                vsel == (int)i ? "on" : "", wq, refresh, i, ap_escape_html(r->pool, vdir->name[i]));
         }
         ap_rputs("</nav>", r);
     }
@@ -2315,9 +2504,9 @@ int bs_dashboard_handler(request_rec *r)
             else              apr_snprintf(lbl, sizeof(lbl), "%ds", opts[i]);
             ap_rprintf(r,
                        "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%s"
-                       "&amp;tab=%s'>%s</a>",
+                       "'>%s</a>",
                        refresh == opts[i] ? "on" : "", wq, opts[i], vq,
-                       tq, lbl);
+                        lbl);
         }
         ap_rprintf(r, "<span class='ts'>rendered %s</span></nav>", ts);
     }
@@ -2522,51 +2711,11 @@ int bs_dashboard_handler(request_rec *r)
      * Both panels are always rendered; the tab only chooses which is
      * visible. That keeps the page a single request with no state, and
      * costs one extra set of bars in the HTML. */
-    {
-        apr_uint64_t bot_dec = 0, usr_dec = 0;
-        for (int o = 0; o < BS_M_OUTCOME_COUNT; o++) {
-            bot_dec += w.g_outcome[BS_M_GROUP_BOT][o];
-            usr_dec += w.g_outcome[BS_M_GROUP_USER][o];
-        }
-        static const int bot_cls[] = { BS_M_CLASS_VERIFIED_BOT,
-                                       BS_M_CLASS_KNOWN_BOT,
-                                       BS_M_CLASS_UNKNOWN_BOT };
-        static const char *bot_lbl[] = { "verified bot", "known bot",
-                                         "unknown bot" };
-        static const int usr_cls[] = { BS_M_CLASS_BROWSER,
-                                       BS_M_CLASS_FAKE_BOT,
-                                       BS_M_CLASS_UNKNOWN };
-        static const char *usr_lbl[] = { "browser", "fake bot", "unknown" };
-
-        ap_rputs("<section><h2>BotShield decisions</h2>", r);
-        ap_rprintf(r,
-            "<nav class='tabbar'>"
-            "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%s&amp;tab=bot'>"
-            "Bots <span>%" APR_UINT64_T_FMT "</span></a>"
-            "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%s&amp;tab=usr'>"
-            "Users &amp; unknown <span>%" APR_UINT64_T_FMT "</span></a>"
-            "</nav>",
-            aud == BS_M_GROUP_BOT ? "on" : "", wq, refresh, vq, bot_dec,
-            aud == BS_M_GROUP_USER ? "on" : "", wq, refresh, vq, usr_dec);
-
-        if (aud == BS_M_GROUP_BOT) {
-            ap_rputs("<p class='note'>Declared crawlers. Most are passed "
-                     "deliberately and governed by BotShieldBotRateLimit "
-                     "rather than by challenges, so a low challenge rate "
-                     "here is the policy working, not a gap.</p>", r);
-            bs_d_audience_panel(r, &w, BS_M_GROUP_BOT, "b",
-                                bot_cls, bot_lbl, 3);
-        } else {
-            ap_rputs("<p class='note'>Browsers, unclassified clients, and "
-                     "UAs claiming to be crawlers whose IP failed the "
-                     "cross-check. This is the population challenges are "
-                     "aimed at, so challenge and solve rates here are the "
-                     "ones to read.</p>", r);
-            bs_d_audience_panel(r, &w, BS_M_GROUP_USER, "u",
-                                usr_cls, usr_lbl, 3);
-        }
-        ap_rputs("</section>", r);
-    }
+    /* Audience split moved to its own pages (app-bots / app-users).
+     * It was a tabbed section here; a tab is a page in disguise when the
+     * two halves share no numbers, and making them real pages removed
+     * the tab CSS, the tab= query param and the "keep the tab through
+     * the refresh" plumbing that param needed. */
 
     /* Live capacity — ratios against a limit, so meters. These are
      * point-in-time gauges and ignore the window selector; labelled as
