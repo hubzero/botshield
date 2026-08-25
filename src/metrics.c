@@ -1932,6 +1932,128 @@ static void bs_d_page_open(request_rec *r, const char *title)
       "</style></head><body><main>", r);
 }
 
+/* Parse the view controls every dashboard page shares: window, refresh
+ * interval, vhost. One parser rather than a copy per page -- the first
+ * cut of the extra pages duplicated the w= parsing three times and
+ * silently supported a different subset of values on each.
+ *
+ * Out params are left untouched when the corresponding arg is absent,
+ * so callers set their defaults before calling. */
+static void bs_d_view_params(request_rec *r, int *span, int *refresh,
+                             int *vsel)
+{
+    if (!r->args) return;
+    const char *v;
+    if ((v = bs_d_qparam(r->pool, r->args, "w")) != NULL) {
+        if      (!strcmp(v, "15"))   *span = 15;
+        else if (!strcmp(v, "60"))   *span = 60;
+        else if (!strcmp(v, "1440")) *span = 1440;
+        else if (!strcmp(v, "all"))  *span = 0;
+    }
+    if ((v = bs_d_qparam(r->pool, r->args, "r")) != NULL) {
+        if      (!strcmp(v, "0"))  *refresh = 0;
+        else if (!strcmp(v, "10")) *refresh = 10;
+        else if (!strcmp(v, "30")) *refresh = 30;
+        else if (!strcmp(v, "60")) *refresh = 60;
+    }
+    if (vsel && (v = bs_d_qparam(r->pool, r->args, "vh")) != NULL) {
+        const bs_vhost_dir *vd = bs_shm.vhost_dir;
+        if (strcmp(v, "all") != 0 && vd) {
+            char *end = NULL;
+            long n = strtol(v, &end, 10);
+            if (end && *end == '\0' && n >= 0 && (apr_uint32_t)n < vd->count) {
+                *vsel = (int)n;
+            }
+        }
+    }
+}
+
+/* Window / vhost / refresh selectors, shared by every dashboard page.
+ *
+ * Links are query-only ("?w=..."), so they resolve against whichever
+ * page is rendering and each page keeps its own path. Every link
+ * carries all three parameters: dropping one would silently reset it as
+ * a side effect of changing another, which is the bug the tab= plumbing
+ * used to have.
+ *
+ * Emitted on every page because "what am I looking at" and "over what
+ * period" are the same question. A page that shows numbers without
+ * saying which window they cover is a page you have to guess at. */
+static void bs_d_view_controls(request_rec *r, int span, int refresh,
+                               int vsel, const char *vq)
+{
+    ap_rputs("<nav>", r);
+    const struct { const char *q, *t; int s; } wins[] = {
+        {"15", "15 min", 15}, {"60", "1 hour", 60},
+        {"1440", "24 hours", 1440}, {"all", "All time", 0} };
+    for (int i = 0; i < 4; i++) {
+        ap_rprintf(r, "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%s'>%s</a>",
+                   span == wins[i].s ? "on" : "", wins[i].q, refresh,
+                   vq, wins[i].t);
+    }
+    ap_rputs("</nav>", r);
+
+    /* Vhost row only when there is a choice to make. */
+    const bs_vhost_dir *vdir = bs_shm.vhost_dir;
+    if (vdir && vdir->count > 1) {
+        char wq[8];
+        apr_snprintf(wq, sizeof(wq), "%s",
+                     span == 0 ? "all" : (span == 15 ? "15"
+                                : (span == 1440 ? "1440" : "60")));
+        ap_rputs("<nav class='vh'>", r);
+        ap_rprintf(r, "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=all'>"
+                      "All vhosts</a>", vsel < 0 ? "on" : "", wq, refresh);
+        for (apr_uint32_t i = 0; i < vdir->count; i++) {
+            if (!vdir->name[i][0]) continue;
+            ap_rprintf(r, "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%u'>"
+                          "%s</a>", vsel == (int)i ? "on" : "", wq, refresh,
+                       i, ap_escape_html(r->pool, vdir->name[i]));
+        }
+        ap_rputs("</nav>", r);
+    }
+
+    /* Refresh control plus a rendered-at stamp, so a stale tab is
+     * obvious at a glance rather than quietly wrong. Off is offered
+     * because WCAG 2.2.1 wants auto-updating content adjustable. */
+    {
+        char ts[32];
+        apr_time_exp_t tm;
+        char wq[8];
+        apr_snprintf(wq, sizeof(wq), "%s",
+                     span == 0 ? "all" : (span == 15 ? "15"
+                                : (span == 1440 ? "1440" : "60")));
+        apr_time_exp_lt(&tm, apr_time_now());
+        apr_snprintf(ts, sizeof(ts), "%02d:%02d:%02d",
+                     tm.tm_hour, tm.tm_min, tm.tm_sec);
+        ap_rputs("<nav class='rf'><span>Auto-refresh</span>", r);
+        static const int opts[4] = { 0, 10, 30, 60 };
+        for (int i = 0; i < 4; i++) {
+            char lbl[8];
+            if (opts[i] == 0) apr_snprintf(lbl, sizeof(lbl), "Off");
+            else              apr_snprintf(lbl, sizeof(lbl), "%ds", opts[i]);
+            ap_rprintf(r, "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%s'>"
+                          "%s</a>", refresh == opts[i] ? "on" : "", wq,
+                       opts[i], vq, lbl);
+        }
+        ap_rprintf(r, "<span class='ts'>rendered %s</span></nav>", ts);
+    }
+}
+
+/* The <meta refresh> that makes a left-open page keep itself current.
+ * Query-only URL, so it re-requests the page it is on. Every parameter
+ * is carried or the refresh would reset the view the operator chose --
+ * the failure the old tab= param was fixed for. */
+static void bs_d_meta_refresh(request_rec *r, int span, int refresh,
+                              const char *vq)
+{
+    if (refresh <= 0) return;
+    const char *wq = span == 0 ? "all"
+                   : (span == 15 ? "15" : (span == 1440 ? "1440" : "60"));
+    ap_rprintf(r, "<meta http-equiv='refresh' "
+                  "content='%d;url=?w=%s&amp;r=%d&amp;vh=%s'>",
+               refresh, wq, refresh, vq);
+}
+
 /* Dashboard page navigation.
  *
  * Absolute hrefs built from BotShieldEndpointPrefix, not relative ones.
@@ -2023,11 +2145,22 @@ int bs_dashboard_bots_handler(request_rec *r)
 
     bs_server_cfg *scfg = ap_get_module_config(r->server->module_config,
                                                &botshield_module);
+    /* The bots page is a live snapshot, so the window selector does not
+     * change its table -- the rate limiter keeps one current-window
+     * counter and nothing historical. The controls are still drawn, and
+     * the refresh is what makes the page useful: leave it open and the
+     * table repopulates as crawlers arrive. */
+    int span = 60, refresh = 30, vsel = -1;
+    bs_d_view_params(r, &span, &refresh, &vsel);
+    const char *vq = (vsel < 0) ? "all"
+                                : apr_psprintf(r->pool, "%d", vsel);
+    bs_d_meta_refresh(r, span, refresh, vq);
     bs_d_page_open(r, "mod_botshield bots");
 
     ap_rprintf(r, "<h1>mod_botshield</h1><p class='sub'>%s</p>",
                "per-bot rate-limit state and identity");
     bs_d_nav(r, "bots");
+    bs_d_view_controls(r, span, refresh, vsel, vq);
 
     /* Collect rows from the rate limiter's slug table. */
     apr_array_header_t *rows =
@@ -2212,23 +2345,20 @@ static int bs_d_audience_page(request_rec *r, int group)
     apr_table_setn(r->headers_out, "Cache-Control", "no-store");
     apr_table_setn(r->headers_out, "X-Robots-Tag", "noindex, nofollow");
 
-    int span = 60;
-    if (r->args) {
-        const char *wv = bs_d_qparam(r->pool, r->args, "w");
-        if (wv) {
-            if      (!strcmp(wv, "15"))   span = 15;
-            else if (!strcmp(wv, "1440")) span = 1440;
-            else if (!strcmp(wv, "all"))  span = 0;
-        }
-    }
+    int span = 60, refresh = 30, vsel = -1;
+    bs_d_view_params(r, &span, &refresh, &vsel);
+    const char *vq = (vsel < 0) ? "all"
+                                : apr_psprintf(r->pool, "%d", vsel);
     bs_metrics_window w;
-    bs_metrics_read_window(span, -1, &w);
+    bs_metrics_read_window(span, vsel, &w);
 
     int is_bot = (group == BS_M_GROUP_BOT);
+    bs_d_meta_refresh(r, span, refresh, vq);
     bs_d_page_start(r,
         is_bot ? "mod_botshield app to bots" : "mod_botshield app to users",
         bs_d_window_label(span),
         is_bot ? "app-bots" : "app-users");
+    bs_d_view_controls(r, span, refresh, vsel, vq);
 
     static const int bot_cls[] = { BS_M_CLASS_VERIFIED_BOT,
                                    BS_M_CLASS_KNOWN_BOT,
@@ -2282,20 +2412,17 @@ int bs_dashboard_responses_handler(request_rec *r)
     apr_table_setn(r->headers_out, "Cache-Control", "no-store");
     apr_table_setn(r->headers_out, "X-Robots-Tag", "noindex, nofollow");
 
-    int span = 60;
-    if (r->args) {
-        const char *wv = bs_d_qparam(r->pool, r->args, "w");
-        if (wv) {
-            if      (!strcmp(wv, "15"))   span = 15;
-            else if (!strcmp(wv, "1440")) span = 1440;
-            else if (!strcmp(wv, "all"))  span = 0;
-        }
-    }
+    int span = 60, refresh = 30, vsel = -1;
+    bs_d_view_params(r, &span, &refresh, &vsel);
+    const char *vq = (vsel < 0) ? "all"
+                                : apr_psprintf(r->pool, "%d", vsel);
     bs_metrics_window w;
-    bs_metrics_read_window(span, -1, &w);
+    bs_metrics_read_window(span, vsel, &w);
 
+    bs_d_meta_refresh(r, span, refresh, vq);
     bs_d_page_start(r, "mod_botshield responses",
                     bs_d_window_label(span), "responses");
+    bs_d_view_controls(r, span, refresh, vsel, vq);
 
     apr_uint64_t ours = 0;
     for (int i = 1; i < BS_M_RESP_COUNT; i++) {
@@ -2369,49 +2496,17 @@ int bs_dashboard_handler(request_rec *r)
 {
     apr_table_setn(r->subprocess_env, "BS_ENDPOINT", "obs");
     bs_log_observability_request(r);
-    int span = 60;
-    /* Auto-refresh seconds. Defaults to 30 because the common use is a
-     * page left open while watching traffic; r=0 turns it off. Offering
-     * the off switch is not optional politeness — WCAG 2.2.1 wants
-     * auto-updating content to be pausable or adjustable. */
-    int refresh = 30;
-    if (r->args) {
-        const char *wv = bs_d_qparam(r->pool, r->args, "w");
-        if (wv) {
-            if      (strcmp(wv, "15")   == 0) span = 15;
-            else if (strcmp(wv, "60")   == 0) span = 60;
-            else if (strcmp(wv, "1440") == 0) span = 1440;
-            else if (strcmp(wv, "all")  == 0) span = 0;
-        }
-        const char *rv = bs_d_qparam(r->pool, r->args, "r");
-        if (rv) {
-            if      (strcmp(rv, "0")  == 0) refresh = 0;
-            else if (strcmp(rv, "10") == 0) refresh = 10;
-            else if (strcmp(rv, "30") == 0) refresh = 30;
-            else if (strcmp(rv, "60") == 0) refresh = 60;
-        }
-    }
+    /* Same parser and defaults as every other dashboard page. This
+     * block used to be ~45 lines of inline w/r/vh parsing duplicated
+     * in spirit on each new page; one parser means one set of accepted
+     * values. */
+    int span = 60, refresh = 30, vsel = -1;
+    bs_d_view_params(r, &span, &refresh, &vsel);
     const char *wq = (span == 15) ? "15" : (span == 1440) ? "1440"
                    : (span == 0)  ? "all" : "60";
-
-    /* Vhost tab. -1 is the aggregate and stays the default: the
-     * whole-server view is what an operator wants first, and it is the
-     * one guaranteed to agree with /botshield/metrics. */
-    int vsel = -1;
-    const bs_vhost_dir *vdir = bs_shm.vhost_dir;
-    {
-        const char *v = bs_d_qparam(r->pool, r->args, "vh");
-        if (v && strcmp(v, "all") != 0 && vdir) {
-            char *end = NULL;
-            long n = strtol(v, &end, 10);
-            if (end && *end == '\0' && n >= 0
-                && (apr_uint32_t)n < vdir->count) {
-                vsel = (int)n;
-            }
-        }
-    }
     const char *vq = (vsel < 0) ? "all"
                                 : apr_psprintf(r->pool, "%d", vsel);
+    const bs_vhost_dir *vdir = bs_shm.vhost_dir;
 
 
     bs_metrics_window w;
