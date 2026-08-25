@@ -1926,8 +1926,20 @@ static void bs_d_page_open(request_rec *r, const char *title)
       "th{font-size:12px;color:var(--muted);font-weight:600}"
       "td.n{text-align:right;font-variant-numeric:tabular-nums}"
       ".empty{color:var(--muted);font-size:14px;margin:0}"
-      "nav.vh{margin:-10px 0 18px;flex-wrap:wrap}"
-      "nav.vh a{font-size:12px}"
+      /* Vhost picker. Borrows the pill vocabulary so the control row
+       * reads as one set: same border, radius and muted ink as the
+       * window and refresh links. */
+      "form.vh{display:flex;align-items:center;gap:8px;"
+      "margin:-10px 0 18px;flex-wrap:wrap}"
+      "form.vh label{font-size:12px;color:var(--muted);"
+      "text-transform:uppercase;letter-spacing:.04em}"
+      "form.vh select{font:inherit;font-size:13px;padding:5px 10px;"
+      "border:1px solid var(--line);border-radius:999px;"
+      "background:var(--surface);color:var(--ink);max-width:22rem}"
+      "form.vh button{font:inherit;font-size:13px;padding:5px 14px;"
+      "border:1px solid var(--line);border-radius:999px;cursor:pointer;"
+      "background:var(--surface);color:var(--ink2)}"
+      "form.vh button:hover{color:var(--ink);border-color:var(--t2)}"
       "footer{color:var(--muted);font-size:12px;margin-top:34px;border-top:1px solid var(--line);padding-top:12px}"
       "</style></head><body><main>", r);
 }
@@ -1993,23 +2005,40 @@ static void bs_d_view_controls(request_rec *r, int span, int refresh,
     }
     ap_rputs("</nav>", r);
 
-    /* Vhost row only when there is a choice to make. */
+    /* Vhost selector: a dropdown, not a row of pills.
+     *
+     * Pills were fine at two or three vhosts and unusable at thirty-two
+     * -- and a hub that fronts one site behind many certificate vhosts
+     * gets exactly that, a wall of near-identical names wrapping over
+     * three lines above every chart.
+     *
+     * A GET form rather than a <select onchange>: this page ships no
+     * JavaScript and that is worth keeping. The browser builds the query
+     * string, w and r ride along as hidden inputs so switching vhost
+     * does not reset the window, and the submit button means it works
+     * with keyboard, screen reader and scripting disabled alike.
+     *
+     * Only drawn when there is a choice to make; one vhost gets no row
+     * rather than a row with one inert entry. */
     const bs_vhost_dir *vdir = bs_shm.vhost_dir;
     if (vdir && vdir->count > 1) {
-        char wq[8];
-        apr_snprintf(wq, sizeof(wq), "%s",
-                     span == 0 ? "all" : (span == 15 ? "15"
-                                : (span == 1440 ? "1440" : "60")));
-        ap_rputs("<nav class='vh'>", r);
-        ap_rprintf(r, "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=all'>"
-                      "All vhosts</a>", vsel < 0 ? "on" : "", wq, refresh);
+        const char *wq = span == 0 ? "all"
+                       : (span == 15 ? "15"
+                       : (span == 1440 ? "1440" : "60"));
+        ap_rputs("<form class='vh' method='get'>", r);
+        ap_rprintf(r, "<input type='hidden' name='w' value='%s'>", wq);
+        ap_rprintf(r, "<input type='hidden' name='r' value='%d'>", refresh);
+        ap_rputs("<label for='vh'>Vhost</label>"
+                 "<select id='vh' name='vh'>", r);
+        ap_rprintf(r, "<option value='all'%s>All vhosts</option>",
+                   vsel < 0 ? " selected" : "");
         for (apr_uint32_t i = 0; i < vdir->count; i++) {
             if (!vdir->name[i][0]) continue;
-            ap_rprintf(r, "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%u'>"
-                          "%s</a>", vsel == (int)i ? "on" : "", wq, refresh,
-                       i, ap_escape_html(r->pool, vdir->name[i]));
+            ap_rprintf(r, "<option value='%u'%s>%s</option>", i,
+                       vsel == (int)i ? " selected" : "",
+                       ap_escape_html(r->pool, vdir->name[i]));
         }
-        ap_rputs("</nav>", r);
+        ap_rputs("</select><button type='submit'>Show</button></form>", r);
     }
 
     /* Refresh control plus a rendered-at stamp, so a stale tab is
