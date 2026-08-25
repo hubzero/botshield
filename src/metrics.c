@@ -2582,58 +2582,7 @@ int bs_dashboard_handler(request_rec *r)
      * links", which is a fair verdict on that placement. Order matters
      * too -- which page you are on reads before which window. */
     bs_d_nav(r, "");
-    ap_rputs("<nav>", r);
-    const struct { const char *q, *t; int s; } wins[] = {
-        {"15", "15 min", 15}, {"60", "1 hour", 60},
-        {"1440", "24 hours", 1440}, {"all", "All time", 0} };
-    for (int i = 0; i < 4; i++) {
-        ap_rprintf(r,
-                   "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%s'>%s</a>",
-                   span == wins[i].s ? "on" : "", wins[i].q, refresh,
-                   vq, wins[i].t);
-    }
-    ap_rputs("</nav>", r);
-
-    /* Vhost tabs. Only worth drawing when there is more than one site
-     * to choose between; a single-vhost server gets no row rather than
-     * a row with one inert tab in it. */
-    if (vdir && vdir->count > 1) {
-        ap_rputs("<nav class='vh'>", r);
-        ap_rprintf(r, "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=all"
-                      "'>All vhosts</a>",
-                   vsel < 0 ? "on" : "", wq, refresh);
-        for (apr_uint32_t i = 0; i < vdir->count; i++) {
-            if (!vdir->name[i][0]) continue;
-            ap_rprintf(r,
-                "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%u"
-                "'>%s</a>",
-                vsel == (int)i ? "on" : "", wq, refresh, i, ap_escape_html(r->pool, vdir->name[i]));
-        }
-        ap_rputs("</nav>", r);
-    }
-
-    /* Refresh control, and a rendered-at stamp so a stale tab is
-     * obvious at a glance rather than quietly wrong. */
-    {
-        char ts[32];
-        apr_time_exp_t tm;
-        apr_time_exp_lt(&tm, apr_time_now());
-        apr_snprintf(ts, sizeof(ts), "%02d:%02d:%02d",
-                     tm.tm_hour, tm.tm_min, tm.tm_sec);
-        ap_rputs("<nav class='rf'><span>Auto-refresh</span>", r);
-        static const int opts[4] = { 0, 10, 30, 60 };
-        for (int i = 0; i < 4; i++) {
-            char lbl[8];
-            if (opts[i] == 0) apr_snprintf(lbl, sizeof(lbl), "Off");
-            else              apr_snprintf(lbl, sizeof(lbl), "%ds", opts[i]);
-            ap_rprintf(r,
-                       "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%s"
-                       "'>%s</a>",
-                       refresh == opts[i] ? "on" : "", wq, opts[i], vq,
-                        lbl);
-        }
-        ap_rprintf(r, "<span class='ts'>rendered %s</span></nav>", ts);
-    }
+    bs_d_view_controls(r, span, refresh, vsel, vq);
 
     /* Site traffic first: it is the denominator everything below is a
      * share of, and with the enable scoped to a <Location> the gap
