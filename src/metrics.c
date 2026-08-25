@@ -1900,61 +1900,93 @@ static void bs_d_page_open(request_rec *r, const char *title,
       "--c4:" BS_D_C4 ";--c5:" BS_D_C5 ";--c6:" BS_D_C6 ";"
       "--c7:" BS_D_C7 ";"
       "--track:#eef2f7;--good:#0ca30c;--warn:#fab219;--crit:#d03b3b;"
+      /* Rail is its own surface, a shade off the content so the eye
+       * reads two regions without needing a hard divider. */
+      "--rail:#f4f3ef;--hov:#00000008;--act:#0000000f;"
       "--neutral:#8a8a84}"
       "@media(prefers-color-scheme:dark){:root{--surface:#1a1a19;--ink:#f2f2ef;"
       "--ink2:#b9b9b2;--muted:#8a8a84;--line:#33332f;"
       /* Separate dark selection, validated against #1a1a19 — not a flip. */
       "--t1:#3987e5;--t2:#6da7ec;--t3:#9ec5f4;--t4:#cde2fb;"
       "--c1:#3987e5;--c2:#d95926;--c3:#199e70;--c4:#c98500;"
-      "--c5:#d55181;--c6:#008300;--c7:#9d86e0;--track:#26262340}}"
+      "--c5:#d55181;--c6:#008300;--c7:#9d86e0;--track:#26262340;"
+      "--rail:#141413;--hov:#ffffff0d;--act:#ffffff17}}"
       "*{box-sizing:border-box}"
-      /* Two-column shell: a sticky filter rail beside the content.
-       * The controls used to be four stacked rows above the first
-       * chart -- page nav, window, vhost, refresh -- which is a wall
-       * to scroll past before reaching any number. In a rail they are
-       * beside the data instead of in front of it, and they stay put
-       * while the page scrolls.
+      /* App shell: a full-height rail on its own surface, flush to the
+       * left edge, beside the content. The controls used to be four
+       * stacked rows above the first chart -- a wall to scroll past
+       * before reaching any number.
        *
-       * Single column under 900px: a 230px rail plus charts does not
-       * fit a phone, and a sticky sidebar on a short viewport eats the
-       * screen. Below that the rail simply becomes the top of the
-       * page, which is where it started. */
-      ".shell{display:grid;grid-template-columns:230px minmax(0,1fr);"
-      "gap:36px;max-width:1200px;margin:0 auto;"
-      "transition:grid-template-columns .22s ease,gap .22s ease}"
-      "aside{align-self:start;position:sticky;top:28px;overflow:hidden;"
-      "transition:opacity .18s ease}"
-      /* Collapsible rail, CSS only.
+       * Single column under 900px, where a fixed rail plus charts does
+       * not fit and a sticky sidebar would eat the viewport. */
+      ".shell{display:grid;grid-template-columns:248px minmax(0,1fr);"
+      "min-height:100vh;transition:grid-template-columns .2s ease}"
+      "aside{background:var(--rail);border-right:1px solid var(--line);"
+      "padding:14px 10px 24px;height:100vh;position:sticky;top:0;"
+      "overflow-y:auto;overflow-x:hidden;display:flex;"
+      "flex-direction:column;gap:2px}"
+      "main{padding:26px 26px 60px;max-width:1000px;min-width:0}"
+      /* Rail header: product name and the collapse control on one line,
+       * the way a sidebar you can put away usually reads. */
+      ".railhead{display:flex;align-items:center;justify-content:space-"
+      "between;gap:8px;margin:0 4px 2px}"
+      "aside h1{font-size:14px;margin:0;font-weight:600}"
+      "aside .sub{font-size:11px;margin:0 4px 16px;color:var(--muted)}"
+      /* Nav rows: full-width rounded targets with a hover fill, rather
+       * than outlined pills. Pills were fine as a horizontal strip and
+       * look like scattered buttons stacked in a column. */
+      "aside nav{display:flex;flex-direction:column;gap:1px;margin:0 0 14px}"
+      "aside nav a{display:block;padding:6px 10px;border:0;border-radius:7px;"
+      "font-size:13px;color:var(--ink2);text-decoration:none;"
+      "background:none;text-align:left}"
+      "aside nav a:hover{background:var(--hov);color:var(--ink)}"
+      "aside nav a.on{background:var(--act);color:var(--ink);font-weight:600}"
+      "aside .flabel{font-size:10px;text-transform:uppercase;"
+      "letter-spacing:.07em;color:var(--muted);margin:6px 4px 5px;"
+      "font-weight:600}"
+      "aside form.vh{flex-direction:column;align-items:stretch;gap:6px;"
+      "margin:0 0 14px}"
+      "aside form.vh label{display:none}"
+      "aside form.vh select,aside form.vh button{max-width:100%;width:100%;"
+      "border-radius:7px;font-size:13px}"
+      "aside nav.rf{flex-direction:column;gap:1px}"
+      "aside nav.rf>span:first-child{display:none}"
+      "aside nav.rf .ts{margin:8px 4px 0;font-size:11px;color:var(--muted)}"
+      /* Collapse, CSS only: a checkbox and sibling selectors, so no
+       * JavaScript and no page load. The rail's column animates to zero
+       * and its content is clipped by overflow:hidden.
        *
-       * A checkbox and a sibling selector: no JavaScript, and the slide
-       * is instant with no page load. The grid column animates to 0 and
-       * the rail fades with it, so the content reflows smoothly rather
-       * than jumping.
+       * Two toggles for one checkbox: one in the rail header, one at the
+       * top of the content. Exactly one is ever visible, so the control
+       * is always where you would reach for it and never both places at
+       * once. A control that hides itself is a control you cannot get
+       * back.
        *
-       * The toggle stays visible when collapsed -- a control that hides
-       * itself is a control you cannot get back. It parks at the top of
-       * the content column as a narrow button.
-       *
-       * KNOWN LIMIT: this is in-page state, so the auto-refresh resets
-       * it. A reader who collapses the rail gets it back on the next
-       * tick unless refresh is off. The alternative -- a URL parameter
-       * carried through every link, like w/r/vh -- survives the refresh
-       * but cannot animate, because each toggle is then a page load.
-       * Chose the slide; set Auto-refresh to Off to make it stick. */
+       * KNOWN LIMIT: in-page state, so the auto-refresh resets it. Set
+       * Auto-refresh to Off to make it stick. A URL parameter would
+       * survive the refresh but could not animate, since each toggle
+       * would become a page load. */
       "#rail{position:absolute;opacity:0;width:0;height:0}"
-      "#rail:checked~.shell{grid-template-columns:0 minmax(0,1fr);gap:0}"
-      "#rail:checked~.shell aside{opacity:0;pointer-events:none}"
-      ".railtog{display:inline-flex;align-items:center;gap:7px;"
-      "cursor:pointer;font-size:12px;color:var(--muted);"
-      "border:1px solid var(--line);border-radius:999px;padding:4px 11px;"
-      "margin:0 0 16px;user-select:none;background:var(--surface)}"
-      ".railtog:hover{color:var(--ink);border-color:var(--t2)}"
-      "#rail:focus-visible~.shell .railtog{outline:2px solid var(--t2);"
-      "outline-offset:2px}"
-      ".railtog .bars{font-size:14px;line-height:1}"
-      "#rail:checked~.shell .railtog .txt::after{content:\"Show filters\"}"
-      ".railtog .txt::after{content:\"Hide filters\"}"
-      "@media(max-width:900px){#rail:checked~.shell{grid-template-columns:1fr}}"
+      "#rail:checked~.shell{grid-template-columns:0 minmax(0,1fr)}"
+      "#rail:checked~.shell aside{padding-left:0;padding-right:0;"
+      "border-right:0}"
+      ".icontog{display:inline-flex;align-items:center;justify-content:"
+      "center;width:28px;height:28px;flex:none;cursor:pointer;"
+      "border-radius:7px;color:var(--muted);font-size:15px;line-height:1;"
+      "user-select:none}"
+      ".icontog:hover{background:var(--hov);color:var(--ink)}"
+      "#rail:focus-visible~.shell .icontog{outline:2px solid var(--t2);"
+      "outline-offset:1px}"
+      /* The content-side toggle only exists while the rail is away. */
+      "main>.icontog{display:none;margin:0 0 14px}"
+      "#rail:checked~.shell main>.icontog{display:inline-flex}"
+      "#rail:checked~.shell aside .icontog{display:none}"
+      "@media(max-width:900px){.shell,#rail:checked~.shell"
+      "{grid-template-columns:1fr}"
+      "aside{position:static;height:auto;border-right:0;"
+      "border-bottom:1px solid var(--line)}"
+      "#rail:checked~.shell aside{display:none}"
+      "#rail:checked~.shell main>.icontog{display:inline-flex}}"
       "@media(max-width:900px){.shell{grid-template-columns:1fr;gap:8px}"
       "aside{position:static}}"
       "body{margin:0;padding:28px 24px 56px;background:var(--surface);color:var(--ink);"
@@ -2090,7 +2122,7 @@ static void bs_d_view_params(request_rec *r, int *span, int *refresh,
 static void bs_d_view_controls(request_rec *r, int span, int refresh,
                                int vsel, const char *vq)
 {
-    ap_rputs("<nav>", r);
+    ap_rputs("<p class='flabel'>Window</p><nav>", r);
     const struct { const char *q, *t; int s; } wins[] = {
         {"15", "15 min", 15}, {"60", "1 hour", 60},
         {"1440", "24 hours", 1440}, {"all", "All time", 0} };
@@ -2121,7 +2153,8 @@ static void bs_d_view_controls(request_rec *r, int span, int refresh,
         const char *wq = span == 0 ? "all"
                        : (span == 15 ? "15"
                        : (span == 1440 ? "1440" : "60"));
-        ap_rputs("<form class='vh' method='get'>", r);
+        ap_rputs("<p class='flabel'>Vhost</p>"
+                 "<form class='vh' method='get'>", r);
         ap_rprintf(r, "<input type='hidden' name='w' value='%s'>", wq);
         ap_rprintf(r, "<input type='hidden' name='r' value='%d'>", refresh);
         ap_rputs("<label for='vh'>Vhost</label>"
@@ -2150,7 +2183,8 @@ static void bs_d_view_controls(request_rec *r, int span, int refresh,
         apr_time_exp_lt(&tm, apr_time_now());
         apr_snprintf(ts, sizeof(ts), "%02d:%02d:%02d",
                      tm.tm_hour, tm.tm_min, tm.tm_sec);
-        ap_rputs("<nav class='rf'><span>Auto-refresh</span>", r);
+        ap_rputs("<p class='flabel'>Auto-refresh</p>"
+                 "<nav class='rf'><span>Auto-refresh</span>", r);
         static const int opts[4] = { 0, 10, 30, 60 };
         for (int i = 0; i < 4; i++) {
             char lbl[8];
@@ -2214,9 +2248,10 @@ static void bs_d_page_start(request_rec *r, const char *title,
                             int span, int refresh, const char *vq)
 {
     bs_d_page_open(r, title, span, refresh, vq);
-    ap_rputs("<aside>", r);
-    ap_rprintf(r, "<h1>mod_botshield</h1><p class='sub'>%s</p>",
-               sub ? sub : "");
+    ap_rputs("<aside><div class='railhead'><h1>mod_botshield</h1>"
+             "<label class='icontog' for='rail' title='Hide sidebar' "
+             "aria-label='Hide sidebar'>&#10094;</label></div>", r);
+    ap_rprintf(r, "<p class='sub'>%s</p>", sub ? sub : "");
     bs_d_nav(r, active);
 }
 
@@ -2226,9 +2261,8 @@ static void bs_d_page_start(request_rec *r, const char *title,
 static void bs_d_page_body(request_rec *r)
 {
     ap_rputs("</aside><main>"
-             "<label class='railtog' for='rail'>"
-             "<span class='bars'>&#9776;</span><span class='txt'></span>"
-             "</label>", r);
+             "<label class='icontog' for='rail' title='Show sidebar' "
+             "aria-label='Show sidebar'>&#9776;</label>", r);
 }
 
 /* ======================================================================
@@ -2286,7 +2320,9 @@ int bs_dashboard_bots_handler(request_rec *r)
     const char *vq = (vsel < 0) ? "all"
                                 : apr_psprintf(r->pool, "%d", vsel);
     bs_d_page_open(r, "mod_botshield bots", span, refresh, vq);
-    ap_rputs("<aside>", r);
+    ap_rputs("<aside><div class='railhead'><h1>mod_botshield</h1>"
+             "<label class='icontog' for='rail' title='Hide sidebar' "
+             "aria-label='Hide sidebar'>&#10094;</label></div>", r);
 
     ap_rprintf(r, "<h1>mod_botshield</h1><p class='sub'>%s</p>",
                "per-bot rate-limit state and identity");
@@ -2660,13 +2696,15 @@ int bs_dashboard_handler(request_rec *r)
     /* Opens the rail. The overview builds its own subtitle rather than
      * going through bs_d_page_start because it names the selected vhost
      * as well as the window; the rest of the sequence is identical. */
-    ap_rputs("<aside>", r);
+    ap_rputs("<aside><div class='railhead'><h1>mod_botshield</h1>"
+             "<label class='icontog' for='rail' title='Hide sidebar' "
+             "aria-label='Hide sidebar'>&#10094;</label></div>", r);
     {
         const char *scope = (vsel < 0)
             ? "all vhosts"
             : ap_escape_html(r->pool, vdir->name[vsel]);
         ap_rprintf(r,
-            "<h1>mod_botshield</h1><p class='sub'>%s &middot; %s</p>",
+            "<p class='sub'>%s &middot; %s</p>",
             bs_d_window_label(span), scope);
     }
 
