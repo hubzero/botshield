@@ -1851,6 +1851,21 @@ void bs_log_observability_request(request_rec *r)
     apr_file_write(scfg->decision_log_fd, line, &len);
 }
 
+/* The <meta refresh> that makes a left-open page keep itself current.
+ * Query-only URL, so it re-requests the page it is on. Every parameter
+ * is carried or the refresh would reset the view the operator chose --
+ * the failure the old tab= param was fixed for. */
+static void bs_d_meta_refresh(request_rec *r, int span, int refresh,
+                              const char *vq)
+{
+    if (refresh <= 0) return;
+    const char *wq = span == 0 ? "all"
+                   : (span == 15 ? "15" : (span == 1440 ? "1440" : "60"));
+    ap_rprintf(r, "<meta http-equiv='refresh' "
+                  "content='%d;url=?w=%s&amp;r=%d&amp;vh=%s'>",
+               refresh, wq, refresh, vq);
+}
+
 /* Shared page chrome for the dashboard family.
  *
  * Extracted when /dashboard/bots arrived: the stylesheet is ~70
@@ -1860,8 +1875,22 @@ void bs_log_observability_request(request_rec *r)
  * like two.
  *
  * Emits through the opening <main>; the caller emits its own body. */
-static void bs_d_page_open(request_rec *r, const char *title)
+static void bs_d_page_open(request_rec *r, const char *title,
+                           int span, int refresh, const char *vq)
 {
+    /* Prologue lives here, not in a caller. It used to be emitted by
+     * bs_dashboard_handler alone, so every page split off it shipped
+     * with no doctype, no charset and no viewport -- quirks mode on a
+     * desktop and an unscaled layout on a phone. Sharing the chrome
+     * means sharing all of it.
+     *
+     * The meta refresh is emitted here too, for ordering: it has to be
+     * inside <head>, and a separate call left that to each caller to
+     * remember. */
+    ap_rputs("<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+             "<meta name='viewport' "
+             "content='width=device-width,initial-scale=1'>", r);
+    bs_d_meta_refresh(r, span, refresh, vq);
     ap_rprintf(r, "<title>%s</title>", title);
     ap_rputs(
       "<style>"
@@ -1879,14 +1908,78 @@ static void bs_d_page_open(request_rec *r, const char *title)
       "--c1:#3987e5;--c2:#d95926;--c3:#199e70;--c4:#c98500;"
       "--c5:#d55181;--c6:#008300;--c7:#9d86e0;--track:#26262340}}"
       "*{box-sizing:border-box}"
+      /* Two-column shell: a sticky filter rail beside the content.
+       * The controls used to be four stacked rows above the first
+       * chart -- page nav, window, vhost, refresh -- which is a wall
+       * to scroll past before reaching any number. In a rail they are
+       * beside the data instead of in front of it, and they stay put
+       * while the page scrolls.
+       *
+       * Single column under 900px: a 230px rail plus charts does not
+       * fit a phone, and a sticky sidebar on a short viewport eats the
+       * screen. Below that the rail simply becomes the top of the
+       * page, which is where it started. */
+      ".shell{display:grid;grid-template-columns:230px minmax(0,1fr);"
+      "gap:36px;max-width:1200px;margin:0 auto;"
+      "transition:grid-template-columns .22s ease,gap .22s ease}"
+      "aside{align-self:start;position:sticky;top:28px;overflow:hidden;"
+      "transition:opacity .18s ease}"
+      /* Collapsible rail, CSS only.
+       *
+       * A checkbox and a sibling selector: no JavaScript, and the slide
+       * is instant with no page load. The grid column animates to 0 and
+       * the rail fades with it, so the content reflows smoothly rather
+       * than jumping.
+       *
+       * The toggle stays visible when collapsed -- a control that hides
+       * itself is a control you cannot get back. It parks at the top of
+       * the content column as a narrow button.
+       *
+       * KNOWN LIMIT: this is in-page state, so the auto-refresh resets
+       * it. A reader who collapses the rail gets it back on the next
+       * tick unless refresh is off. The alternative -- a URL parameter
+       * carried through every link, like w/r/vh -- survives the refresh
+       * but cannot animate, because each toggle is then a page load.
+       * Chose the slide; set Auto-refresh to Off to make it stick. */
+      "#rail{position:absolute;opacity:0;width:0;height:0}"
+      "#rail:checked~.shell{grid-template-columns:0 minmax(0,1fr);gap:0}"
+      "#rail:checked~.shell aside{opacity:0;pointer-events:none}"
+      ".railtog{display:inline-flex;align-items:center;gap:7px;"
+      "cursor:pointer;font-size:12px;color:var(--muted);"
+      "border:1px solid var(--line);border-radius:999px;padding:4px 11px;"
+      "margin:0 0 16px;user-select:none;background:var(--surface)}"
+      ".railtog:hover{color:var(--ink);border-color:var(--t2)}"
+      "#rail:focus-visible~.shell .railtog{outline:2px solid var(--t2);"
+      "outline-offset:2px}"
+      ".railtog .bars{font-size:14px;line-height:1}"
+      "#rail:checked~.shell .railtog .txt::after{content:\"Show filters\"}"
+      ".railtog .txt::after{content:\"Hide filters\"}"
+      "@media(max-width:900px){#rail:checked~.shell{grid-template-columns:1fr}}"
+      "@media(max-width:900px){.shell{grid-template-columns:1fr;gap:8px}"
+      "aside{position:static}}"
       "body{margin:0;padding:28px 24px 56px;background:var(--surface);color:var(--ink);"
       "font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}"
-      "main{max-width:860px;margin:0 auto}"
+      "main{min-width:0}"
       "h1{font-size:19px;margin:0 0 2px;font-weight:600}"
       "h2{font-size:13px;font-weight:600;color:var(--ink2);margin:0 0 10px;"
       "text-transform:uppercase;letter-spacing:.04em}"
       ".sub{color:var(--muted);font-size:13px;margin:0 0 20px}"
-      "nav{display:flex;gap:6px;margin:0 0 26px;flex-wrap:wrap}"
+      "nav{display:flex;gap:6px;margin:0 0 18px;flex-wrap:wrap}"
+      /* Inside the rail every control stacks and fills the width, so
+       * the eye runs down one column instead of wrapping through
+       * three. Outside it (nothing does today) the flex row above
+       * still applies. */
+      "aside nav{flex-direction:column;gap:2px;margin:0 0 20px}"
+      "aside nav a{text-align:left;border-color:transparent}"
+      "aside nav a:hover{border-color:var(--line)}"
+      "aside .flabel{font-size:11px;text-transform:uppercase;"
+      "letter-spacing:.06em;color:var(--muted);margin:0 0 6px;"
+      "font-weight:600}"
+      "aside form.vh{flex-direction:column;align-items:stretch;gap:6px;"
+      "margin:0 0 20px}"
+      "aside form.vh select,aside form.vh button{max-width:100%;width:100%}"
+      "aside nav.rf{flex-direction:column}"
+      "aside nav.rf .ts{margin:6px 0 0;font-size:11px}"
       "nav a{padding:5px 12px;border:1px solid var(--line);border-radius:999px;"
       "text-decoration:none;color:var(--ink2);font-size:13px}"
       "nav a.on{background:var(--t3);border-color:var(--t3);color:#fff}"
@@ -1941,7 +2034,10 @@ static void bs_d_page_open(request_rec *r, const char *title)
       "background:var(--surface);color:var(--ink2)}"
       "form.vh button:hover{color:var(--ink);border-color:var(--t2)}"
       "footer{color:var(--muted);font-size:12px;margin-top:34px;border-top:1px solid var(--line);padding-top:12px}"
-      "</style></head><body><main>", r);
+      "</style></head><body>"
+      /* Checkbox before the shell so the sibling selectors reach it. */
+      "<input type='checkbox' id='rail'>"
+      "<div class='shell'>", r);
 }
 
 /* Parse the view controls every dashboard page shares: window, refresh
@@ -2068,21 +2164,6 @@ static void bs_d_view_controls(request_rec *r, int span, int refresh,
     }
 }
 
-/* The <meta refresh> that makes a left-open page keep itself current.
- * Query-only URL, so it re-requests the page it is on. Every parameter
- * is carried or the refresh would reset the view the operator chose --
- * the failure the old tab= param was fixed for. */
-static void bs_d_meta_refresh(request_rec *r, int span, int refresh,
-                              const char *vq)
-{
-    if (refresh <= 0) return;
-    const char *wq = span == 0 ? "all"
-                   : (span == 15 ? "15" : (span == 1440 ? "1440" : "60"));
-    ap_rprintf(r, "<meta http-equiv='refresh' "
-                  "content='%d;url=?w=%s&amp;r=%d&amp;vh=%s'>",
-               refresh, wq, refresh, vq);
-}
-
 /* Dashboard page navigation.
  *
  * Absolute hrefs built from BotShieldEndpointPrefix, not relative ones.
@@ -2120,13 +2201,34 @@ static void bs_d_nav(request_rec *r, const char *active)
 
 /* Head + nav + heading, shared by every dashboard page so they cannot
  * drift into looking like separate tools. */
+/* Open the rail, emit brand + page nav, and leave it open for the
+ * caller's filter controls. bs_d_page_body then closes the rail and
+ * opens <main>.
+ *
+ * Split in two rather than taking the filters as a callback: the
+ * controls need span/refresh/vsel that only the handler has, and
+ * threading six parameters through here to hand them straight back
+ * would be worse than two calls that read in order. */
 static void bs_d_page_start(request_rec *r, const char *title,
-                            const char *sub, const char *active)
+                            const char *sub, const char *active,
+                            int span, int refresh, const char *vq)
 {
-    bs_d_page_open(r, title);
+    bs_d_page_open(r, title, span, refresh, vq);
+    ap_rputs("<aside>", r);
     ap_rprintf(r, "<h1>mod_botshield</h1><p class='sub'>%s</p>",
                sub ? sub : "");
     bs_d_nav(r, active);
+}
+
+/* Close the rail, open the content column, and put the collapse toggle
+ * at the top of it -- inside <main> so it stays reachable when the rail
+ * is hidden. */
+static void bs_d_page_body(request_rec *r)
+{
+    ap_rputs("</aside><main>"
+             "<label class='railtog' for='rail'>"
+             "<span class='bars'>&#9776;</span><span class='txt'></span>"
+             "</label>", r);
 }
 
 /* ======================================================================
@@ -2183,13 +2285,14 @@ int bs_dashboard_bots_handler(request_rec *r)
     bs_d_view_params(r, &span, &refresh, &vsel);
     const char *vq = (vsel < 0) ? "all"
                                 : apr_psprintf(r->pool, "%d", vsel);
-    bs_d_meta_refresh(r, span, refresh, vq);
-    bs_d_page_open(r, "mod_botshield bots");
+    bs_d_page_open(r, "mod_botshield bots", span, refresh, vq);
+    ap_rputs("<aside>", r);
 
     ap_rprintf(r, "<h1>mod_botshield</h1><p class='sub'>%s</p>",
                "per-bot rate-limit state and identity");
     bs_d_nav(r, "bots");
     bs_d_view_controls(r, span, refresh, vsel, vq);
+    bs_d_page_body(r);
 
     /* Collect rows from the rate limiter's slug table. */
     apr_array_header_t *rows =
@@ -2235,7 +2338,7 @@ int bs_dashboard_bots_handler(request_rec *r)
                  "are allocated. That means either no BotShieldBotRateLimit "
                  "rule is in effect, or the module has not been enabled in "
                  "a scope on this vhost.</p></section>"
-                 "</main></body></html>", r);
+                 "</main></div></body></html>", r);
         return OK;
     }
 
@@ -2353,7 +2456,7 @@ int bs_dashboard_bots_handler(request_rec *r)
         ap_rputs("</tbody></table></section>", r);
     }
 
-    ap_rputs("</main></body></html>", r);
+    ap_rputs("</main></div></body></html>", r);
     return OK;
 }
 
@@ -2382,12 +2485,12 @@ static int bs_d_audience_page(request_rec *r, int group)
     bs_metrics_read_window(span, vsel, &w);
 
     int is_bot = (group == BS_M_GROUP_BOT);
-    bs_d_meta_refresh(r, span, refresh, vq);
     bs_d_page_start(r,
         is_bot ? "mod_botshield app to bots" : "mod_botshield app to users",
         bs_d_window_label(span),
-        is_bot ? "app-bots" : "app-users");
+        is_bot ? "app-bots" : "app-users", span, refresh, vq);
     bs_d_view_controls(r, span, refresh, vsel, vq);
+    bs_d_page_body(r);
 
     static const int bot_cls[] = { BS_M_CLASS_VERIFIED_BOT,
                                    BS_M_CLASS_KNOWN_BOT,
@@ -2416,7 +2519,7 @@ static int bs_d_audience_page(request_rec *r, int group)
                  r);
         bs_d_audience_panel(r, &w, BS_M_GROUP_USER, "u", usr_cls, usr_lbl, 3);
     }
-    ap_rputs("</section></main></body></html>", r);
+    ap_rputs("</section></main></div></body></html>", r);
     return OK;
 }
 
@@ -2448,10 +2551,10 @@ int bs_dashboard_responses_handler(request_rec *r)
     bs_metrics_window w;
     bs_metrics_read_window(span, vsel, &w);
 
-    bs_d_meta_refresh(r, span, refresh, vq);
     bs_d_page_start(r, "mod_botshield responses",
-                    bs_d_window_label(span), "responses");
+                    bs_d_window_label(span), "responses", span, refresh, vq);
     bs_d_view_controls(r, span, refresh, vsel, vq);
+    bs_d_page_body(r);
 
     apr_uint64_t ours = 0;
     for (int i = 1; i < BS_M_RESP_COUNT; i++) {
@@ -2517,7 +2620,7 @@ int bs_dashboard_responses_handler(request_rec *r)
         ap_rputs("</tbody></table></section>", r);
     }
 
-    ap_rputs("</main></body></html>", r);
+    ap_rputs("</main></div></body></html>", r);
     return OK;
 }
 
@@ -2531,8 +2634,6 @@ int bs_dashboard_handler(request_rec *r)
      * values. */
     int span = 60, refresh = 30, vsel = -1;
     bs_d_view_params(r, &span, &refresh, &vsel);
-    const char *wq = (span == 15) ? "15" : (span == 1440) ? "1440"
-                   : (span == 0)  ? "all" : "60";
     const char *vq = (vsel < 0) ? "all"
                                 : apr_psprintf(r->pool, "%d", vsel);
     const bs_vhost_dir *vdir = bs_shm.vhost_dir;
@@ -2554,19 +2655,12 @@ int bs_dashboard_handler(request_rec *r)
     apr_table_setn(r->headers_out, "Cache-Control", "no-store");
     apr_table_setn(r->headers_out, "X-Robots-Tag", "noindex, nofollow");
 
-    ap_rputs(
-      "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
-      "<meta name='viewport' content='width=device-width,initial-scale=1'>", r);
-    if (refresh > 0) {
-        /* Carry the current window through the refresh, or the page
-         * would silently snap back to the default every interval. */
-        ap_rprintf(r,
-            "<meta http-equiv='refresh' "
-            "content='%d;url=?w=%s&amp;r=%d&amp;vh=%s'>",
-            refresh, wq, refresh, vq);
-    }
-    bs_d_page_open(r, "mod_botshield dashboard");
+    bs_d_page_open(r, "mod_botshield dashboard", span, refresh, vq);
 
+    /* Opens the rail. The overview builds its own subtitle rather than
+     * going through bs_d_page_start because it names the selected vhost
+     * as well as the window; the rest of the sequence is identical. */
+    ap_rputs("<aside>", r);
     {
         const char *scope = (vsel < 0)
             ? "all vhosts"
@@ -2583,6 +2677,7 @@ int bs_dashboard_handler(request_rec *r)
      * too -- which page you are on reads before which window. */
     bs_d_nav(r, "");
     bs_d_view_controls(r, span, refresh, vsel, vq);
+    bs_d_page_body(r);
 
     /* Site traffic first: it is the denominator everything below is a
      * share of, and with the enable scoped to a <Location> the gap
@@ -2827,7 +2922,7 @@ int bs_dashboard_handler(request_rec *r)
              "advisory: a writer crossing a bucket boundary can lose an "
              "increment. &ldquo;Unsolved&rdquo; means a challenge was issued "
              "and the client never came back &mdash; they are gone, not "
-             "queued.</footer></main></body></html>", r);
+             "queued.</footer></main></div></body></html>", r);
     return OK;
 }
 
