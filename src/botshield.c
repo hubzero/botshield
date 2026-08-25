@@ -1195,6 +1195,15 @@ static int bs_route_module_endpoint(request_rec *r, bs_dir_cfg *cfg)
     if (strcmp(sub, "/dashboard/bots") == 0) {
         return bs_dashboard_bots_handler(r);
     }
+    if (strcmp(sub, "/dashboard/responses") == 0) {
+        return bs_dashboard_responses_handler(r);
+    }
+    if (strcmp(sub, "/dashboard/app-bots") == 0) {
+        return bs_dashboard_app_bots_handler(r);
+    }
+    if (strcmp(sub, "/dashboard/app-users") == 0) {
+        return bs_dashboard_app_users_handler(r);
+    }
     if (strcmp(sub, "/policy-status") == 0) {
         return bs_policy_status_handler(r, cfg);
     }

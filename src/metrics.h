@@ -260,6 +260,13 @@ int bs_dashboard_handler(request_rec *r);
  * bot-rate state and the bot directory; adds no counters of its own. */
 int bs_dashboard_bots_handler(request_rec *r);
 
+/* The remaining dashboard pages. Each renders one coherent view over
+ * the same window data; they were sections and tabs on one long page
+ * until the page outgrew a single scroll. */
+int bs_dashboard_responses_handler(request_rec *r);
+int bs_dashboard_app_bots_handler(request_rec *r);
+int bs_dashboard_app_users_handler(request_rec *r);
+
 /* mod_status contribution — registered via APR_OPTIONAL_HOOK in
  * bs_register_hooks. Renders the same top-line counters in either
  * AP_STATUS_SHORT (one "Key: value" per line) or compact-HTML mode
