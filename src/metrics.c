@@ -2018,10 +2018,9 @@ static void bs_d_page_open(request_rec *r, const char *title,
       "margin:0 12px}"
       "aside nav.rf a{padding:4px 9px;border-radius:6px;margin:0;"
       "font-size:12px}"
-      /* Sits inside the refresh section, just under its options: the
-       * stamp says when this view was drawn, which is a fact about the
-       * refresh, not a footer. */
-      "aside .ts{margin:9px 16px 0;font-size:11px;color:var(--muted)}"
+      /* Directly under the refresh section, outside its box. The
+       * section's own bottom margin supplies the gap above. */
+      "aside>.ts{margin:0 16px;font-size:11px;color:var(--muted)}"
       /* Collapse, CSS only: a checkbox and sibling selectors, so no
        * JavaScript and no page load. The rail's column animates to zero
        * and its content is clipped by overflow:hidden.
@@ -2261,7 +2260,11 @@ static void bs_d_view_controls(request_rec *r, int span, int refresh,
          * which is what makes a forgotten tab obviously stale -- so it
          * belongs out of the way at the foot of the page, not wedged
          * between two sets of buttons. */
-        ap_rprintf(r, "</nav><p class='ts'>rendered %s</p></div>", ts);
+        /* Stamp sits OUTSIDE the refresh box, just below it. It labels
+         * the page, not the control -- when this view was drawn -- so
+         * enclosing it in the auto-refresh panel implied it was one of
+         * that panel's settings. */
+        ap_rprintf(r, "</nav></div><p class='ts'>rendered %s</p>", ts);
     }
 }
 
