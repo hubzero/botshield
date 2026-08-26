@@ -1921,37 +1921,53 @@ static void bs_d_page_open(request_rec *r, const char *title,
        * not fit and a sticky sidebar would eat the viewport. */
       ".shell{display:grid;grid-template-columns:248px minmax(0,1fr);"
       "min-height:100vh;transition:grid-template-columns .2s ease}"
+      /* No horizontal padding: nav rows span the full rail width so the
+       * selected one can reach the border and bleed past it. Children
+       * that should stay inset carry their own margin.
+       *
+       * overflow is visible so that bleed is not clipped, and is only
+       * switched to hidden while collapsed, where the rail's content
+       * would otherwise spill out of a zero-width column. */
       "aside{background:var(--rail);border-right:1px solid var(--line);"
-      "padding:14px 10px 24px;height:100vh;position:sticky;top:0;"
-      "overflow-y:auto;overflow-x:hidden;display:flex;"
-      "flex-direction:column;gap:2px}"
+      "padding:14px 0 24px;min-height:100vh;position:sticky;top:0;"
+      "overflow:visible;display:flex;flex-direction:column;gap:2px}"
       "main{padding:26px 26px 60px;max-width:1000px;min-width:0}"
       /* Rail header: product name and the collapse control on one line,
        * the way a sidebar you can put away usually reads. */
       ".railhead{display:flex;align-items:center;justify-content:space-"
-      "between;gap:8px;margin:0 4px 2px}"
+      "between;gap:8px;margin:0 12px 2px}"
       "aside h1{font-size:14px;margin:0;font-weight:600}"
-      "aside .sub{font-size:11px;margin:0 4px 16px;color:var(--muted)}"
+      "aside .sub{font-size:11px;margin:0 14px 16px;color:var(--muted)}"
       /* Nav rows: full-width rounded targets with a hover fill, rather
        * than outlined pills. Pills were fine as a horizontal strip and
        * look like scattered buttons stacked in a column. */
       "aside nav{display:flex;flex-direction:column;gap:1px;margin:0 0 14px}"
-      "aside nav a{display:block;padding:6px 10px;border:0;border-radius:7px;"
+      "aside nav a{display:block;padding:7px 14px;border:0;border-radius:0;"
       "font-size:13px;color:var(--ink2);text-decoration:none;"
       "background:none;text-align:left}"
       "aside nav a:hover{background:var(--hov);color:var(--ink)}"
-      "aside nav a.on{background:var(--act);color:var(--ink);font-weight:600}"
+      /* Selected page: painted in the CONTENT background and run one
+       * pixel past the rail's right border, so it reads as the tab whose
+       * page you are on rather than a highlighted list row. The border
+       * is drawn on the aside, so covering it takes the extra pixel --
+       * a background match alone still leaves a hairline cutting across
+       * the selected row and breaks the join. */
+      "aside nav.pages a.on{background:var(--surface);color:var(--ink);"
+      "font-weight:600;margin-right:-1px;position:relative;z-index:1}"
+      /* Filter rows stay list-like; only page nav is a tab. */
+      "aside nav:not(.pages) a.on{background:var(--act);color:var(--ink);"
+      "font-weight:600}"
       "aside .flabel{font-size:10px;text-transform:uppercase;"
-      "letter-spacing:.07em;color:var(--muted);margin:6px 4px 5px;"
+      "letter-spacing:.07em;color:var(--muted);margin:8px 14px 5px;"
       "font-weight:600}"
       "aside form.vh{flex-direction:column;align-items:stretch;gap:6px;"
-      "margin:0 0 14px}"
+      "margin:0 14px 14px}"
       "aside form.vh label{display:none}"
       "aside form.vh select,aside form.vh button{max-width:100%;width:100%;"
       "border-radius:7px;font-size:13px}"
       "aside nav.rf{flex-direction:column;gap:1px}"
       "aside nav.rf>span:first-child{display:none}"
-      "aside nav.rf .ts{margin:8px 4px 0;font-size:11px;color:var(--muted)}"
+      "aside nav.rf .ts{margin:8px 14px 0;font-size:11px;color:var(--muted)}"
       /* Collapse, CSS only: a checkbox and sibling selectors, so no
        * JavaScript and no page load. The rail's column animates to zero
        * and its content is clipped by overflow:hidden.
@@ -1968,8 +1984,7 @@ static void bs_d_page_open(request_rec *r, const char *title,
        * would become a page load. */
       "#rail{position:absolute;opacity:0;width:0;height:0}"
       "#rail:checked~.shell{grid-template-columns:0 minmax(0,1fr)}"
-      "#rail:checked~.shell aside{padding-left:0;padding-right:0;"
-      "border-right:0}"
+      "#rail:checked~.shell aside{border-right:0;overflow:hidden}"
       ".icontog{display:inline-flex;align-items:center;justify-content:"
       "center;width:28px;height:28px;flex:none;cursor:pointer;"
       "border-radius:7px;color:var(--muted);font-size:15px;line-height:1;"
