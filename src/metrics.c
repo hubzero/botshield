@@ -1967,16 +1967,27 @@ static void bs_d_page_open(request_rec *r, const char *title,
       "aside nav:not(.pages) a.on{background:var(--act);color:var(--ink);"
       "font-weight:600}"
       "aside .flabel{font-size:10px;text-transform:uppercase;"
-      "letter-spacing:.07em;color:var(--muted);margin:8px 14px 5px;"
+      "letter-spacing:.07em;color:var(--muted);margin:2px 10px 6px;"
       "font-weight:600}"
+      /* Each filter is its own panel, sitting on the content surface so
+       * the rail tone shows through between them. Three unseparated
+       * rows read as one long list of unrelated buttons; boxed, each
+       * label clearly owns the control beneath it. */
+      "aside .fgroup{background:var(--surface);border:1px solid var(--line);"
+      "border-radius:9px;margin:0 8px 8px;padding:8px 2px 6px}"
+      "aside .fgroup nav{margin:0}"
+      "aside .fgroup nav a{border-radius:6px;margin:0 4px;padding:5px 10px}"
+      "aside .fgroup form.vh{margin:0 6px}"
       "aside form.vh{flex-direction:column;align-items:stretch;gap:6px;"
       "margin:0 14px 14px}"
       "aside form.vh label{display:none}"
       "aside form.vh select,aside form.vh button{max-width:100%;width:100%;"
       "border-radius:7px;font-size:13px}"
       "aside nav.rf{flex-direction:column;gap:1px}"
-      "aside nav.rf>span:first-child{display:none}"
-      "aside nav.rf .ts{margin:8px 14px 0;font-size:11px;color:var(--muted)}"
+      /* margin-top:auto in the rail's flex column parks this at the
+       * foot of the sidebar, below whatever the filters occupy. */
+      "aside>.ts{margin:auto 0 0;padding:16px 14px 0;font-size:11px;"
+      "color:var(--muted)}"
       /* Collapse, CSS only: a checkbox and sibling selectors, so no
        * JavaScript and no page load. The rail's column animates to zero
        * and its content is clipped by overflow:hidden.
@@ -1994,11 +2005,14 @@ static void bs_d_page_open(request_rec *r, const char *title,
       "#rail{position:absolute;opacity:0;width:0;height:0}"
       "#rail:checked~.shell{grid-template-columns:0 minmax(0,1fr)}"
       "#rail:checked~.shell aside{border-right:0;overflow:hidden}"
+      /* Sized to be seen. At 28px with muted ink the chevron was
+       * legible only if you already knew it was there. */
       ".icontog{display:inline-flex;align-items:center;justify-content:"
-      "center;width:28px;height:28px;flex:none;cursor:pointer;"
-      "border-radius:7px;color:var(--muted);font-size:15px;line-height:1;"
-      "user-select:none}"
-      ".icontog:hover{background:var(--hov);color:var(--ink)}"
+      "center;width:34px;height:34px;flex:none;cursor:pointer;"
+      "border-radius:8px;color:var(--ink2);font-size:22px;line-height:1;"
+      "font-weight:600;user-select:none;border:1px solid transparent}"
+      ".icontog:hover{background:var(--hov);color:var(--ink);"
+      "border-color:var(--line)}"
       "#rail:focus-visible~.shell .icontog{outline:2px solid var(--t2);"
       "outline-offset:1px}"
       /* The content-side toggle only exists while the rail is away. */
@@ -2146,7 +2160,7 @@ static void bs_d_view_params(request_rec *r, int *span, int *refresh,
 static void bs_d_view_controls(request_rec *r, int span, int refresh,
                                int vsel, const char *vq)
 {
-    ap_rputs("<p class='flabel'>Time range</p><nav>", r);
+    ap_rputs("<div class='fgroup'><p class='flabel'>Time range</p><nav>", r);
     const struct { const char *q, *t; int s; } wins[] = {
         {"15", "15 min", 15}, {"60", "1 hour", 60},
         {"1440", "24 hours", 1440}, {"all", "All time", 0} };
@@ -2155,7 +2169,7 @@ static void bs_d_view_controls(request_rec *r, int span, int refresh,
                    span == wins[i].s ? "on" : "", wins[i].q, refresh,
                    vq, wins[i].t);
     }
-    ap_rputs("</nav>", r);
+    ap_rputs("</nav></div>", r);
 
     /* Vhost selector: a dropdown, not a row of pills.
      *
@@ -2177,7 +2191,7 @@ static void bs_d_view_controls(request_rec *r, int span, int refresh,
         const char *wq = span == 0 ? "all"
                        : (span == 15 ? "15"
                        : (span == 1440 ? "1440" : "60"));
-        ap_rputs("<p class='flabel'>Vhost</p>"
+        ap_rputs("<div class='fgroup'><p class='flabel'>Vhost</p>"
                  "<form class='vh' method='get'>", r);
         ap_rprintf(r, "<input type='hidden' name='w' value='%s'>", wq);
         ap_rprintf(r, "<input type='hidden' name='r' value='%d'>", refresh);
@@ -2196,7 +2210,8 @@ static void bs_d_view_controls(request_rec *r, int span, int refresh,
          * nowhere on its own, so something has to submit it. "Apply"
          * rather than "Show" -- it applies the choice next to it, and
          * "Show" read like it revealed something. */
-        ap_rputs("</select><button type='submit'>Apply</button></form>", r);
+        ap_rputs("</select><button type='submit'>Apply</button>"
+                 "</form></div>", r);
     }
 
     /* Refresh control plus a rendered-at stamp, so a stale tab is
@@ -2212,8 +2227,8 @@ static void bs_d_view_controls(request_rec *r, int span, int refresh,
         apr_time_exp_lt(&tm, apr_time_now());
         apr_snprintf(ts, sizeof(ts), "%02d:%02d:%02d",
                      tm.tm_hour, tm.tm_min, tm.tm_sec);
-        ap_rputs("<p class='flabel'>Auto-refresh</p>"
-                 "<nav class='rf'><span>Auto-refresh</span>", r);
+        ap_rputs("<div class='fgroup'><p class='flabel'>Auto-refresh</p>"
+                 "<nav class='rf'>", r);
         static const int opts[4] = { 0, 10, 30, 60 };
         for (int i = 0; i < 4; i++) {
             char lbl[8];
@@ -2223,7 +2238,14 @@ static void bs_d_view_controls(request_rec *r, int span, int refresh,
                           "%s</a>", refresh == opts[i] ? "on" : "", wq,
                        opts[i], vq, lbl);
         }
-        ap_rprintf(r, "<span class='ts'>rendered %s</span></nav>", ts);
+        /* Stamp lives outside the group, as the rail's last child, so
+         * margin-top:auto parks it at the bottom of the sidebar. It is
+         * provenance rather than a control -- when this view was drawn,
+         * which is what makes a forgotten tab obviously stale -- so it
+         * belongs out of the way at the foot of the page, not wedged
+         * between two sets of buttons. */
+        ap_rputs("</nav></div>", r);
+        ap_rprintf(r, "<p class='ts'>rendered %s</p>", ts);
     }
 }
 
