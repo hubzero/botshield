@@ -1851,6 +1851,21 @@ void bs_log_observability_request(request_rec *r)
     apr_file_write(scfg->decision_log_fd, line, &len);
 }
 
+/* The <meta refresh> that makes a left-open page keep itself current.
+ * Query-only URL, so it re-requests the page it is on. Every parameter
+ * is carried or the refresh would reset the view the operator chose --
+ * the failure the old tab= param was fixed for. */
+static void bs_d_meta_refresh(request_rec *r, int span, int refresh,
+                              const char *vq)
+{
+    if (refresh <= 0) return;
+    const char *wq = span == 0 ? "all"
+                   : (span == 15 ? "15" : (span == 1440 ? "1440" : "60"));
+    ap_rprintf(r, "<meta http-equiv='refresh' "
+                  "content='%d;url=?w=%s&amp;r=%d&amp;vh=%s'>",
+               refresh, wq, refresh, vq);
+}
+
 /* Shared page chrome for the dashboard family.
  *
  * Extracted when /dashboard/bots arrived: the stylesheet is ~70
@@ -1860,8 +1875,22 @@ void bs_log_observability_request(request_rec *r)
  * like two.
  *
  * Emits through the opening <main>; the caller emits its own body. */
-static void bs_d_page_open(request_rec *r, const char *title)
+static void bs_d_page_open(request_rec *r, const char *title,
+                           int span, int refresh, const char *vq)
 {
+    /* Prologue lives here, not in a caller. It used to be emitted by
+     * bs_dashboard_handler alone, so every page split off it shipped
+     * with no doctype, no charset and no viewport -- quirks mode on a
+     * desktop and an unscaled layout on a phone. Sharing the chrome
+     * means sharing all of it.
+     *
+     * The meta refresh is emitted here too, for ordering: it has to be
+     * inside <head>, and a separate call left that to each caller to
+     * remember. */
+    ap_rputs("<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+             "<meta name='viewport' "
+             "content='width=device-width,initial-scale=1'>", r);
+    bs_d_meta_refresh(r, span, refresh, vq);
     ap_rprintf(r, "<title>%s</title>", title);
     ap_rputs(
       "<style>"
@@ -1871,22 +1900,187 @@ static void bs_d_page_open(request_rec *r, const char *title)
       "--c4:" BS_D_C4 ";--c5:" BS_D_C5 ";--c6:" BS_D_C6 ";"
       "--c7:" BS_D_C7 ";"
       "--track:#eef2f7;--good:#0ca30c;--warn:#fab219;--crit:#d03b3b;"
+      /* Rail is its own surface, a shade off the content so the eye
+       * reads two regions without needing a hard divider. */
+      "--rail:#f4f3ef;--hov:#00000008;--act:#0000000f;"
       "--neutral:#8a8a84}"
       "@media(prefers-color-scheme:dark){:root{--surface:#1a1a19;--ink:#f2f2ef;"
       "--ink2:#b9b9b2;--muted:#8a8a84;--line:#33332f;"
       /* Separate dark selection, validated against #1a1a19 — not a flip. */
       "--t1:#3987e5;--t2:#6da7ec;--t3:#9ec5f4;--t4:#cde2fb;"
       "--c1:#3987e5;--c2:#d95926;--c3:#199e70;--c4:#c98500;"
-      "--c5:#d55181;--c6:#008300;--c7:#9d86e0;--track:#26262340}}"
+      "--c5:#d55181;--c6:#008300;--c7:#9d86e0;--track:#26262340;"
+      "--rail:#141413;--hov:#ffffff0d;--act:#ffffff17}}"
       "*{box-sizing:border-box}"
+      /* App shell: a full-height rail on its own surface, flush to the
+       * left edge, beside the content. The controls used to be four
+       * stacked rows above the first chart -- a wall to scroll past
+       * before reaching any number.
+       *
+       * Single column under 900px, where a fixed rail plus charts does
+       * not fit and a sticky sidebar would eat the viewport. */
+      ".shell{display:grid;grid-template-columns:248px minmax(0,1fr);"
+      "min-height:100vh;transition:grid-template-columns .2s ease}"
+      /* No horizontal padding: nav rows span the full rail width so the
+       * selected one can reach the border and bleed past it. Children
+       * that should stay inset carry their own margin.
+       *
+       * overflow is visible so that bleed is not clipped, and is only
+       * switched to hidden while collapsed, where the rail's content
+       * would otherwise spill out of a zero-width column. */
+      /* The rail's own background is the CONTENT surface, and each
+       * section carries the rail tone. Inverted from the obvious way
+       * round on purpose: the gaps between sections then read as the
+       * page showing through, which is what separates them, and the
+       * selected tab -- painted in the content surface -- reads as a
+       * hole cut through its section straight into the page. */
+      "aside{background:var(--surface);border-right:1px solid var(--line);"
+      "padding:0 0 24px;min-height:100vh;position:sticky;top:0;"
+      "overflow:visible;display:flex;flex-direction:column;gap:0}"
+      "main{padding:26px 26px 60px;max-width:1000px;min-width:0}"
+      /* Rail header: product name and the collapse control on one line,
+       * the way a sidebar you can put away usually reads. */
+      ".railhead{display:flex;align-items:center;justify-content:space-"
+      "between;gap:8px;margin:0 10px 2px}"
+      "aside h1{font-size:14px;margin:0;font-weight:600}"
+      "aside .sub{font-size:11px;margin:0 14px 12px;color:var(--muted)}"
+      /* Nav rows: full-width rounded targets with a hover fill, rather
+       * than outlined pills. Pills were fine as a horizontal strip and
+       * look like scattered buttons stacked in a column. */
+      "aside nav{display:flex;flex-direction:column;gap:1px;margin:0 0 14px}"
+      /* Page nav and filters are different kinds of control -- one moves
+       * you, the others reshape what you are looking at -- so they get a
+       * rule between them rather than running together as one list. */
+      "aside nav.pages{margin:0}"
+      "aside nav a{display:block;padding:7px 14px;border:0;border-radius:0;"
+      "font-size:13px;color:var(--ink2);text-decoration:none;"
+      "background:none;text-align:left}"
+      "aside nav a:hover{background:var(--hov);color:var(--ink)}"
+      /* Selected page: painted in the CONTENT background and run one
+       * pixel past the rail's right border, so it reads as the tab whose
+       * page you are on rather than a highlighted list row. The border
+       * is drawn on the aside, so covering it takes the extra pixel --
+       * a background match alone still leaves a hairline cutting across
+       * the selected row and breaks the join. */
+      "aside nav.pages a.on{background:var(--surface);color:var(--ink);"
+      "font-weight:600;margin-right:-1px;position:relative;z-index:1;"
+      /* Inset, not a real border: a 3px border-left would push the
+       * label 3px right on selection and make the list twitch as you
+       * move between pages. */
+      "box-shadow:inset 3px 0 0 var(--t2)}"
+      /* Filter rows stay list-like; only page nav is a tab. */
+      "aside nav:not(.pages) a.on{background:var(--act);color:var(--ink);"
+      "font-weight:600}"
+      "aside .flabel{font-size:10px;text-transform:uppercase;"
+      "letter-spacing:.07em;color:var(--muted);margin:0 16px 7px;"
+      "font-weight:600}"
+      /* Each filter is its own panel, sitting on the content surface so
+       * the rail tone shows through between them. Three unseparated
+       * rows read as one long list of unrelated buttons; boxed, each
+       * label clearly owns the control beneath it. */
+      /* Every section is the same full width. They are bands across the
+       * rail separated by horizontal gutters of page colour, not cards
+       * floating in it -- and the navigation section has to be full
+       * width regardless, since the selected tab must reach the right
+       * border to join the content. Uniform width keeps the rail from
+       * looking like two different systems stacked. */
+      "aside .fgroup{background:var(--rail);border-radius:0;"
+      "margin:0 0 9px;padding:10px 0 9px}"
+      "aside .navsec{padding:14px 0 10px}"
+      "aside .fgroup nav{margin:0}"
+      "aside .fgroup nav a{border-radius:6px;margin:0 8px;padding:5px 12px}"
+      /* Disclosure picker. The summary is the current selection and the
+       * panel is a plain link list, so no submit button is needed. */
+      ".vhpick{margin:0 12px}"
+      ".vhpick summary{cursor:pointer;list-style:none;padding:6px 10px;"
+      "border:1px solid var(--line);border-radius:7px;font-size:12px;"
+      "background:var(--surface);color:var(--ink);display:flex;"
+      "align-items:center;justify-content:space-between;gap:6px;"
+      "overflow:hidden;white-space:nowrap;text-overflow:ellipsis}"
+      ".vhpick summary::-webkit-details-marker{display:none}"
+      ".vhpick summary:hover{border-color:var(--t2)}"
+      ".vhpick .cv{color:var(--muted);flex:none}"
+      /* Capped and scrollable: 32 vhosts would otherwise push the rest
+       * of the rail off the bottom of the screen when opened. */
+      ".vhpick .vhlist{max-height:210px;overflow-y:auto;margin:5px 0 0;"
+      "border:1px solid var(--line);border-radius:7px;"
+      "background:var(--surface)}"
+      ".vhpick .vhlist a{display:block;padding:5px 10px;font-size:12px;"
+      "color:var(--ink2);text-decoration:none;white-space:nowrap;"
+      "overflow:hidden;text-overflow:ellipsis}"
+      ".vhpick .vhlist a:hover{background:var(--hov);color:var(--ink)}"
+      ".vhpick .vhlist a.on{font-weight:600;color:var(--ink);"
+      "background:var(--act)}"
+      /* Off / 10s / 30s / 60s are short enough to sit on one line, and
+       * a row of four reads as a single choice rather than four
+       * unrelated rows. */
+      "aside nav.rf{flex-direction:row;flex-wrap:wrap;gap:4px;"
+      "margin:0 12px}"
+      "aside nav.rf a{padding:4px 9px;border-radius:6px;margin:0;"
+      "font-size:12px}"
+      /* Directly under the refresh section, outside its box. The
+       * section's own bottom margin supplies the gap above. */
+      "aside>.ts{margin:0 16px;font-size:11px;color:var(--muted)}"
+      /* Collapse, CSS only: a checkbox and sibling selectors, so no
+       * JavaScript and no page load. The rail's column animates to zero
+       * and its content is clipped by overflow:hidden.
+       *
+       * Two toggles for one checkbox: one in the rail header, one at the
+       * top of the content. Exactly one is ever visible, so the control
+       * is always where you would reach for it and never both places at
+       * once. A control that hides itself is a control you cannot get
+       * back.
+       *
+       * KNOWN LIMIT: in-page state, so the auto-refresh resets it. Set
+       * Auto-refresh to Off to make it stick. A URL parameter would
+       * survive the refresh but could not animate, since each toggle
+       * would become a page load. */
+      "#rail{position:absolute;opacity:0;width:0;height:0}"
+      "#rail:checked~.shell{grid-template-columns:0 minmax(0,1fr)}"
+      "#rail:checked~.shell aside{border-right:0;overflow:hidden}"
+      /* Sized to be seen. At 28px with muted ink the chevron was
+       * legible only if you already knew it was there. */
+      ".icontog{display:inline-flex;align-items:center;justify-content:"
+      "center;width:34px;height:34px;flex:none;cursor:pointer;"
+      "border-radius:8px;color:var(--ink2);font-size:22px;line-height:1;"
+      "font-weight:600;user-select:none;border:1px solid transparent}"
+      ".icontog:hover{background:var(--hov);color:var(--ink);"
+      "border-color:var(--line)}"
+      "#rail:focus-visible~.shell .icontog{outline:2px solid var(--t2);"
+      "outline-offset:1px}"
+      /* The content-side toggle only exists while the rail is away. */
+      "main>.icontog{display:none;margin:0 0 14px}"
+      "#rail:checked~.shell main>.icontog{display:inline-flex}"
+      "#rail:checked~.shell aside .icontog{display:none}"
+      "@media(max-width:900px){.shell,#rail:checked~.shell"
+      "{grid-template-columns:1fr}"
+      "aside{position:static;height:auto;border-right:0;"
+      "border-bottom:1px solid var(--line)}"
+      "#rail:checked~.shell aside{display:none}"
+      "#rail:checked~.shell main>.icontog{display:inline-flex}}"
+      "@media(max-width:900px){.shell{grid-template-columns:1fr;gap:8px}"
+      "aside{position:static}}"
       "body{margin:0;padding:28px 24px 56px;background:var(--surface);color:var(--ink);"
       "font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}"
-      "main{max-width:860px;margin:0 auto}"
+      "main{min-width:0}"
       "h1{font-size:19px;margin:0 0 2px;font-weight:600}"
       "h2{font-size:13px;font-weight:600;color:var(--ink2);margin:0 0 10px;"
       "text-transform:uppercase;letter-spacing:.04em}"
       ".sub{color:var(--muted);font-size:13px;margin:0 0 20px}"
-      "nav{display:flex;gap:6px;margin:0 0 26px;flex-wrap:wrap}"
+      "nav{display:flex;gap:6px;margin:0 0 18px;flex-wrap:wrap}"
+      /* Inside the rail every control stacks and fills the width, so
+       * the eye runs down one column instead of wrapping through
+       * three. Outside it (nothing does today) the flex row above
+       * still applies. */
+      "aside nav{flex-direction:column;gap:2px;margin:0 0 20px}"
+      "aside nav a{text-align:left;border-color:transparent}"
+      "aside nav a:hover{border-color:var(--line)}"
+      "aside .flabel{font-size:11px;text-transform:uppercase;"
+      "letter-spacing:.06em;color:var(--muted);margin:0 0 6px;"
+      "font-weight:600}"
+      "margin:0 0 20px}"
+      "aside nav.rf{flex-direction:column}"
+      "aside nav.rf .ts{margin:6px 0 0;font-size:11px}"
       "nav a{padding:5px 12px;border:1px solid var(--line);border-radius:999px;"
       "text-decoration:none;color:var(--ink2);font-size:13px}"
       "nav a.on{background:var(--t3);border-color:var(--t3);color:#fff}"
@@ -1926,22 +2120,16 @@ static void bs_d_page_open(request_rec *r, const char *title)
       "th{font-size:12px;color:var(--muted);font-weight:600}"
       "td.n{text-align:right;font-variant-numeric:tabular-nums}"
       ".empty{color:var(--muted);font-size:14px;margin:0}"
-      /* Vhost picker. Borrows the pill vocabulary so the control row
-       * reads as one set: same border, radius and muted ink as the
-       * window and refresh links. */
-      "form.vh{display:flex;align-items:center;gap:8px;"
-      "margin:-10px 0 18px;flex-wrap:wrap}"
-      "form.vh label{font-size:12px;color:var(--muted);"
       "text-transform:uppercase;letter-spacing:.04em}"
-      "form.vh select{font:inherit;font-size:13px;padding:5px 10px;"
       "border:1px solid var(--line);border-radius:999px;"
       "background:var(--surface);color:var(--ink);max-width:22rem}"
-      "form.vh button{font:inherit;font-size:13px;padding:5px 14px;"
       "border:1px solid var(--line);border-radius:999px;cursor:pointer;"
       "background:var(--surface);color:var(--ink2)}"
-      "form.vh button:hover{color:var(--ink);border-color:var(--t2)}"
       "footer{color:var(--muted);font-size:12px;margin-top:34px;border-top:1px solid var(--line);padding-top:12px}"
-      "</style></head><body><main>", r);
+      "</style></head><body>"
+      /* Checkbox before the shell so the sibling selectors reach it. */
+      "<input type='checkbox' id='rail'>"
+      "<div class='shell'>", r);
 }
 
 /* Parse the view controls every dashboard page shares: window, refresh
@@ -1994,7 +2182,7 @@ static void bs_d_view_params(request_rec *r, int *span, int *refresh,
 static void bs_d_view_controls(request_rec *r, int span, int refresh,
                                int vsel, const char *vq)
 {
-    ap_rputs("<nav>", r);
+    ap_rputs("<div class='fgroup'><p class='flabel'>Time range</p><nav>", r);
     const struct { const char *q, *t; int s; } wins[] = {
         {"15", "15 min", 15}, {"60", "1 hour", 60},
         {"1440", "24 hours", 1440}, {"all", "All time", 0} };
@@ -2003,42 +2191,43 @@ static void bs_d_view_controls(request_rec *r, int span, int refresh,
                    span == wins[i].s ? "on" : "", wins[i].q, refresh,
                    vq, wins[i].t);
     }
-    ap_rputs("</nav>", r);
+    ap_rputs("</nav></div>", r);
 
-    /* Vhost selector: a dropdown, not a row of pills.
+    /* Vhost picker: a <details> disclosure of plain links.
      *
-     * Pills were fine at two or three vhosts and unusable at thirty-two
-     * -- and a hub that fronts one site behind many certificate vhosts
-     * gets exactly that, a wall of near-identical names wrapping over
-     * three lines above every chart.
+     * It was a <select> in a GET form, which needed an Apply button --
+     * without JavaScript a select navigates nowhere on its own, so
+     * something had to submit it. A disclosure has no such problem:
+     * every entry is an ordinary link that carries w and r along, so
+     * choosing one IS the navigation and the extra button disappears.
+     * Still no JavaScript.
      *
-     * A GET form rather than a <select onchange>: this page ships no
-     * JavaScript and that is worth keeping. The browser builds the query
-     * string, w and r ride along as hidden inputs so switching vhost
-     * does not reset the window, and the submit button means it works
-     * with keyboard, screen reader and scripting disabled alike.
+     * Capped height with its own scroll: this hub has 32 vhosts and a
+     * list that long would otherwise push the rest of the rail off the
+     * bottom of the screen when opened.
      *
-     * Only drawn when there is a choice to make; one vhost gets no row
-     * rather than a row with one inert entry. */
+     * Only drawn when there is a choice to make. */
     const bs_vhost_dir *vdir = bs_shm.vhost_dir;
     if (vdir && vdir->count > 1) {
         const char *wq = span == 0 ? "all"
                        : (span == 15 ? "15"
                        : (span == 1440 ? "1440" : "60"));
-        ap_rputs("<form class='vh' method='get'>", r);
-        ap_rprintf(r, "<input type='hidden' name='w' value='%s'>", wq);
-        ap_rprintf(r, "<input type='hidden' name='r' value='%d'>", refresh);
-        ap_rputs("<label for='vh'>Vhost</label>"
-                 "<select id='vh' name='vh'>", r);
-        ap_rprintf(r, "<option value='all'%s>All vhosts</option>",
-                   vsel < 0 ? " selected" : "");
+        const char *cur = (vsel < 0 || !vdir->name[vsel][0])
+                        ? "All vhosts"
+                        : ap_escape_html(r->pool, vdir->name[vsel]);
+        ap_rputs("<div class='fgroup'><p class='flabel'>Vhost</p>"
+                 "<details class='vhpick'><summary>", r);
+        ap_rprintf(r, "%s<span class='cv'>&#9662;</span></summary>", cur);
+        ap_rputs("<div class='vhlist'>", r);
+        ap_rprintf(r, "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=all'>"
+                      "All vhosts</a>", vsel < 0 ? "on" : "", wq, refresh);
         for (apr_uint32_t i = 0; i < vdir->count; i++) {
             if (!vdir->name[i][0]) continue;
-            ap_rprintf(r, "<option value='%u'%s>%s</option>", i,
-                       vsel == (int)i ? " selected" : "",
-                       ap_escape_html(r->pool, vdir->name[i]));
+            ap_rprintf(r, "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%u'>"
+                          "%s</a>", vsel == (int)i ? "on" : "", wq, refresh,
+                       i, ap_escape_html(r->pool, vdir->name[i]));
         }
-        ap_rputs("</select><button type='submit'>Show</button></form>", r);
+        ap_rputs("</div></details></div>", r);
     }
 
     /* Refresh control plus a rendered-at stamp, so a stale tab is
@@ -2054,7 +2243,8 @@ static void bs_d_view_controls(request_rec *r, int span, int refresh,
         apr_time_exp_lt(&tm, apr_time_now());
         apr_snprintf(ts, sizeof(ts), "%02d:%02d:%02d",
                      tm.tm_hour, tm.tm_min, tm.tm_sec);
-        ap_rputs("<nav class='rf'><span>Auto-refresh</span>", r);
+        ap_rputs("<div class='fgroup'><p class='flabel'>Auto-refresh</p>"
+                 "<nav class='rf'>", r);
         static const int opts[4] = { 0, 10, 30, 60 };
         for (int i = 0; i < 4; i++) {
             char lbl[8];
@@ -2064,23 +2254,18 @@ static void bs_d_view_controls(request_rec *r, int span, int refresh,
                           "%s</a>", refresh == opts[i] ? "on" : "", wq,
                        opts[i], vq, lbl);
         }
-        ap_rprintf(r, "<span class='ts'>rendered %s</span></nav>", ts);
+        /* Stamp lives outside the group, as the rail's last child, so
+         * margin-top:auto parks it at the bottom of the sidebar. It is
+         * provenance rather than a control -- when this view was drawn,
+         * which is what makes a forgotten tab obviously stale -- so it
+         * belongs out of the way at the foot of the page, not wedged
+         * between two sets of buttons. */
+        /* Stamp sits OUTSIDE the refresh box, just below it. It labels
+         * the page, not the control -- when this view was drawn -- so
+         * enclosing it in the auto-refresh panel implied it was one of
+         * that panel's settings. */
+        ap_rprintf(r, "</nav></div><p class='ts'>rendered %s</p>", ts);
     }
-}
-
-/* The <meta refresh> that makes a left-open page keep itself current.
- * Query-only URL, so it re-requests the page it is on. Every parameter
- * is carried or the refresh would reset the view the operator chose --
- * the failure the old tab= param was fixed for. */
-static void bs_d_meta_refresh(request_rec *r, int span, int refresh,
-                              const char *vq)
-{
-    if (refresh <= 0) return;
-    const char *wq = span == 0 ? "all"
-                   : (span == 15 ? "15" : (span == 1440 ? "1440" : "60"));
-    ap_rprintf(r, "<meta http-equiv='refresh' "
-                  "content='%d;url=?w=%s&amp;r=%d&amp;vh=%s'>",
-               refresh, wq, refresh, vq);
 }
 
 /* Dashboard page navigation.
@@ -2115,18 +2300,41 @@ static void bs_d_nav(request_rec *r, const char *active)
                        on ? "on" : "", px, slug[i], label[i]);
         }
     }
-    ap_rputs("</nav>", r);
+    /* Closes the navigation section opened alongside <aside>. */
+    ap_rputs("</nav></div>", r);
 }
 
 /* Head + nav + heading, shared by every dashboard page so they cannot
  * drift into looking like separate tools. */
+/* Open the rail, emit brand + page nav, and leave it open for the
+ * caller's filter controls. bs_d_page_body then closes the rail and
+ * opens <main>.
+ *
+ * Split in two rather than taking the filters as a callback: the
+ * controls need span/refresh/vsel that only the handler has, and
+ * threading six parameters through here to hand them straight back
+ * would be worse than two calls that read in order. */
 static void bs_d_page_start(request_rec *r, const char *title,
-                            const char *sub, const char *active)
+                            const char *sub, const char *active,
+                            int span, int refresh, const char *vq)
 {
-    bs_d_page_open(r, title);
-    ap_rprintf(r, "<h1>mod_botshield</h1><p class='sub'>%s</p>",
-               sub ? sub : "");
+    bs_d_page_open(r, title, span, refresh, vq);
+    ap_rputs("<aside><div class='fgroup navsec'>"
+             "<div class='railhead'><h1>mod_botshield</h1>"
+             "<label class='icontog' for='rail' title='Hide sidebar' "
+             "aria-label='Hide sidebar'>&laquo;</label></div>", r);
+    ap_rprintf(r, "<p class='sub'>%s</p>", sub ? sub : "");
     bs_d_nav(r, active);
+}
+
+/* Close the rail, open the content column, and put the collapse toggle
+ * at the top of it -- inside <main> so it stays reachable when the rail
+ * is hidden. */
+static void bs_d_page_body(request_rec *r)
+{
+    ap_rputs("</aside><main>"
+             "<label class='icontog' for='rail' title='Show sidebar' "
+             "aria-label='Show sidebar'>&raquo;</label>", r);
 }
 
 /* ======================================================================
@@ -2183,13 +2391,19 @@ int bs_dashboard_bots_handler(request_rec *r)
     bs_d_view_params(r, &span, &refresh, &vsel);
     const char *vq = (vsel < 0) ? "all"
                                 : apr_psprintf(r->pool, "%d", vsel);
-    bs_d_meta_refresh(r, span, refresh, vq);
-    bs_d_page_open(r, "mod_botshield bots");
+    bs_d_page_open(r, "mod_botshield bots", span, refresh, vq);
+    ap_rputs("<aside><div class='fgroup navsec'>"
+             "<div class='railhead'><h1>mod_botshield</h1>"
+             "<label class='icontog' for='rail' title='Hide sidebar' "
+             "aria-label='Hide sidebar'>&laquo;</label></div>", r);
 
-    ap_rprintf(r, "<h1>mod_botshield</h1><p class='sub'>%s</p>",
-               "per-bot rate-limit state and identity");
+    /* Subtitle only -- the rail header above already carries the h1.
+     * This line kept its own when the header was introduced, so the
+     * bots page shipped the product name twice. */
+    ap_rputs("<p class='sub'>per-bot rate-limit state and identity</p>", r);
     bs_d_nav(r, "bots");
     bs_d_view_controls(r, span, refresh, vsel, vq);
+    bs_d_page_body(r);
 
     /* Collect rows from the rate limiter's slug table. */
     apr_array_header_t *rows =
@@ -2235,7 +2449,7 @@ int bs_dashboard_bots_handler(request_rec *r)
                  "are allocated. That means either no BotShieldBotRateLimit "
                  "rule is in effect, or the module has not been enabled in "
                  "a scope on this vhost.</p></section>"
-                 "</main></body></html>", r);
+                 "</main></div></body></html>", r);
         return OK;
     }
 
@@ -2353,7 +2567,7 @@ int bs_dashboard_bots_handler(request_rec *r)
         ap_rputs("</tbody></table></section>", r);
     }
 
-    ap_rputs("</main></body></html>", r);
+    ap_rputs("</main></div></body></html>", r);
     return OK;
 }
 
@@ -2382,12 +2596,12 @@ static int bs_d_audience_page(request_rec *r, int group)
     bs_metrics_read_window(span, vsel, &w);
 
     int is_bot = (group == BS_M_GROUP_BOT);
-    bs_d_meta_refresh(r, span, refresh, vq);
     bs_d_page_start(r,
         is_bot ? "mod_botshield app to bots" : "mod_botshield app to users",
         bs_d_window_label(span),
-        is_bot ? "app-bots" : "app-users");
+        is_bot ? "app-bots" : "app-users", span, refresh, vq);
     bs_d_view_controls(r, span, refresh, vsel, vq);
+    bs_d_page_body(r);
 
     static const int bot_cls[] = { BS_M_CLASS_VERIFIED_BOT,
                                    BS_M_CLASS_KNOWN_BOT,
@@ -2416,7 +2630,7 @@ static int bs_d_audience_page(request_rec *r, int group)
                  r);
         bs_d_audience_panel(r, &w, BS_M_GROUP_USER, "u", usr_cls, usr_lbl, 3);
     }
-    ap_rputs("</section></main></body></html>", r);
+    ap_rputs("</section></main></div></body></html>", r);
     return OK;
 }
 
@@ -2448,10 +2662,10 @@ int bs_dashboard_responses_handler(request_rec *r)
     bs_metrics_window w;
     bs_metrics_read_window(span, vsel, &w);
 
-    bs_d_meta_refresh(r, span, refresh, vq);
     bs_d_page_start(r, "mod_botshield responses",
-                    bs_d_window_label(span), "responses");
+                    bs_d_window_label(span), "responses", span, refresh, vq);
     bs_d_view_controls(r, span, refresh, vsel, vq);
+    bs_d_page_body(r);
 
     apr_uint64_t ours = 0;
     for (int i = 1; i < BS_M_RESP_COUNT; i++) {
@@ -2517,7 +2731,7 @@ int bs_dashboard_responses_handler(request_rec *r)
         ap_rputs("</tbody></table></section>", r);
     }
 
-    ap_rputs("</main></body></html>", r);
+    ap_rputs("</main></div></body></html>", r);
     return OK;
 }
 
@@ -2531,8 +2745,6 @@ int bs_dashboard_handler(request_rec *r)
      * values. */
     int span = 60, refresh = 30, vsel = -1;
     bs_d_view_params(r, &span, &refresh, &vsel);
-    const char *wq = (span == 15) ? "15" : (span == 1440) ? "1440"
-                   : (span == 0)  ? "all" : "60";
     const char *vq = (vsel < 0) ? "all"
                                 : apr_psprintf(r->pool, "%d", vsel);
     const bs_vhost_dir *vdir = bs_shm.vhost_dir;
@@ -2554,25 +2766,21 @@ int bs_dashboard_handler(request_rec *r)
     apr_table_setn(r->headers_out, "Cache-Control", "no-store");
     apr_table_setn(r->headers_out, "X-Robots-Tag", "noindex, nofollow");
 
-    ap_rputs(
-      "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
-      "<meta name='viewport' content='width=device-width,initial-scale=1'>", r);
-    if (refresh > 0) {
-        /* Carry the current window through the refresh, or the page
-         * would silently snap back to the default every interval. */
-        ap_rprintf(r,
-            "<meta http-equiv='refresh' "
-            "content='%d;url=?w=%s&amp;r=%d&amp;vh=%s'>",
-            refresh, wq, refresh, vq);
-    }
-    bs_d_page_open(r, "mod_botshield dashboard");
+    bs_d_page_open(r, "mod_botshield dashboard", span, refresh, vq);
 
+    /* Opens the rail. The overview builds its own subtitle rather than
+     * going through bs_d_page_start because it names the selected vhost
+     * as well as the window; the rest of the sequence is identical. */
+    ap_rputs("<aside><div class='fgroup navsec'>"
+             "<div class='railhead'><h1>mod_botshield</h1>"
+             "<label class='icontog' for='rail' title='Hide sidebar' "
+             "aria-label='Hide sidebar'>&laquo;</label></div>", r);
     {
         const char *scope = (vsel < 0)
             ? "all vhosts"
             : ap_escape_html(r->pool, vdir->name[vsel]);
         ap_rprintf(r,
-            "<h1>mod_botshield</h1><p class='sub'>%s &middot; %s</p>",
+            "<p class='sub'>%s &middot; %s</p>",
             bs_d_window_label(span), scope);
     }
 
@@ -2583,6 +2791,7 @@ int bs_dashboard_handler(request_rec *r)
      * too -- which page you are on reads before which window. */
     bs_d_nav(r, "");
     bs_d_view_controls(r, span, refresh, vsel, vq);
+    bs_d_page_body(r);
 
     /* Site traffic first: it is the denominator everything below is a
      * share of, and with the enable scoped to a <Location> the gap
@@ -2827,7 +3036,7 @@ int bs_dashboard_handler(request_rec *r)
              "advisory: a writer crossing a bucket boundary can lose an "
              "increment. &ldquo;Unsolved&rdquo; means a challenge was issued "
              "and the client never came back &mdash; they are gone, not "
-             "queued.</footer></main></body></html>", r);
+             "queued.</footer></main></div></body></html>", r);
     return OK;
 }
 
