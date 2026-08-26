@@ -1942,6 +1942,11 @@ static void bs_d_page_open(request_rec *r, const char *title,
        * than outlined pills. Pills were fine as a horizontal strip and
        * look like scattered buttons stacked in a column. */
       "aside nav{display:flex;flex-direction:column;gap:1px;margin:0 0 14px}"
+      /* Page nav and filters are different kinds of control -- one moves
+       * you, the others reshape what you are looking at -- so they get a
+       * rule between them rather than running together as one list. */
+      "aside nav.pages{border-bottom:1px solid var(--line);"
+      "padding-bottom:12px;margin-bottom:14px}"
       "aside nav a{display:block;padding:7px 14px;border:0;border-radius:0;"
       "font-size:13px;color:var(--ink2);text-decoration:none;"
       "background:none;text-align:left}"
@@ -1953,7 +1958,11 @@ static void bs_d_page_open(request_rec *r, const char *title,
        * a background match alone still leaves a hairline cutting across
        * the selected row and breaks the join. */
       "aside nav.pages a.on{background:var(--surface);color:var(--ink);"
-      "font-weight:600;margin-right:-1px;position:relative;z-index:1}"
+      "font-weight:600;margin-right:-1px;position:relative;z-index:1;"
+      /* Inset, not a real border: a 3px border-left would push the
+       * label 3px right on selection and make the list twitch as you
+       * move between pages. */
+      "box-shadow:inset 3px 0 0 var(--t2)}"
       /* Filter rows stay list-like; only page nav is a tab. */
       "aside nav:not(.pages) a.on{background:var(--act);color:var(--ink);"
       "font-weight:600}"
@@ -2137,7 +2146,7 @@ static void bs_d_view_params(request_rec *r, int *span, int *refresh,
 static void bs_d_view_controls(request_rec *r, int span, int refresh,
                                int vsel, const char *vq)
 {
-    ap_rputs("<p class='flabel'>Window</p><nav>", r);
+    ap_rputs("<p class='flabel'>Time range</p><nav>", r);
     const struct { const char *q, *t; int s; } wins[] = {
         {"15", "15 min", 15}, {"60", "1 hour", 60},
         {"1440", "24 hours", 1440}, {"all", "All time", 0} };
@@ -2182,7 +2191,12 @@ static void bs_d_view_controls(request_rec *r, int span, int refresh,
                        vsel == (int)i ? " selected" : "",
                        ap_escape_html(r->pool, vdir->name[i]));
         }
-        ap_rputs("</select><button type='submit'>Show</button></form>", r);
+        /* The button exists because this is a plain GET form and the
+         * page ships no JavaScript: changing a <select> navigates
+         * nowhere on its own, so something has to submit it. "Apply"
+         * rather than "Show" -- it applies the choice next to it, and
+         * "Show" read like it revealed something. */
+        ap_rputs("</select><button type='submit'>Apply</button></form>", r);
     }
 
     /* Refresh control plus a rendered-at stamp, so a stale tab is
@@ -2265,7 +2279,7 @@ static void bs_d_page_start(request_rec *r, const char *title,
     bs_d_page_open(r, title, span, refresh, vq);
     ap_rputs("<aside><div class='railhead'><h1>mod_botshield</h1>"
              "<label class='icontog' for='rail' title='Hide sidebar' "
-             "aria-label='Hide sidebar'>&#10094;</label></div>", r);
+             "aria-label='Hide sidebar'>&laquo;</label></div>", r);
     ap_rprintf(r, "<p class='sub'>%s</p>", sub ? sub : "");
     bs_d_nav(r, active);
 }
@@ -2277,7 +2291,7 @@ static void bs_d_page_body(request_rec *r)
 {
     ap_rputs("</aside><main>"
              "<label class='icontog' for='rail' title='Show sidebar' "
-             "aria-label='Show sidebar'>&#9776;</label>", r);
+             "aria-label='Show sidebar'>&raquo;</label>", r);
 }
 
 /* ======================================================================
@@ -2337,7 +2351,7 @@ int bs_dashboard_bots_handler(request_rec *r)
     bs_d_page_open(r, "mod_botshield bots", span, refresh, vq);
     ap_rputs("<aside><div class='railhead'><h1>mod_botshield</h1>"
              "<label class='icontog' for='rail' title='Hide sidebar' "
-             "aria-label='Hide sidebar'>&#10094;</label></div>", r);
+             "aria-label='Hide sidebar'>&laquo;</label></div>", r);
 
     ap_rprintf(r, "<h1>mod_botshield</h1><p class='sub'>%s</p>",
                "per-bot rate-limit state and identity");
@@ -2713,7 +2727,7 @@ int bs_dashboard_handler(request_rec *r)
      * as well as the window; the rest of the sequence is identical. */
     ap_rputs("<aside><div class='railhead'><h1>mod_botshield</h1>"
              "<label class='icontog' for='rail' title='Hide sidebar' "
-             "aria-label='Hide sidebar'>&#10094;</label></div>", r);
+             "aria-label='Hide sidebar'>&laquo;</label></div>", r);
     {
         const char *scope = (vsel < 0)
             ? "all vhosts"
