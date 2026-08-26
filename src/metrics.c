@@ -1928,16 +1928,22 @@ static void bs_d_page_open(request_rec *r, const char *title,
        * overflow is visible so that bleed is not clipped, and is only
        * switched to hidden while collapsed, where the rail's content
        * would otherwise spill out of a zero-width column. */
-      "aside{background:var(--rail);border-right:1px solid var(--line);"
-      "padding:14px 0 24px;min-height:100vh;position:sticky;top:0;"
-      "overflow:visible;display:flex;flex-direction:column;gap:2px}"
+      /* The rail's own background is the CONTENT surface, and each
+       * section carries the rail tone. Inverted from the obvious way
+       * round on purpose: the gaps between sections then read as the
+       * page showing through, which is what separates them, and the
+       * selected tab -- painted in the content surface -- reads as a
+       * hole cut through its section straight into the page. */
+      "aside{background:var(--surface);border-right:1px solid var(--line);"
+      "padding:0 0 24px;min-height:100vh;position:sticky;top:0;"
+      "overflow:visible;display:flex;flex-direction:column;gap:0}"
       "main{padding:26px 26px 60px;max-width:1000px;min-width:0}"
       /* Rail header: product name and the collapse control on one line,
        * the way a sidebar you can put away usually reads. */
       ".railhead{display:flex;align-items:center;justify-content:space-"
-      "between;gap:8px;margin:0 12px 2px}"
+      "between;gap:8px;margin:0 10px 2px}"
       "aside h1{font-size:14px;margin:0;font-weight:600}"
-      "aside .sub{font-size:11px;margin:0 14px 16px;color:var(--muted)}"
+      "aside .sub{font-size:11px;margin:0 14px 12px;color:var(--muted)}"
       /* Nav rows: full-width rounded targets with a hover fill, rather
        * than outlined pills. Pills were fine as a horizontal strip and
        * look like scattered buttons stacked in a column. */
@@ -1945,8 +1951,7 @@ static void bs_d_page_open(request_rec *r, const char *title,
       /* Page nav and filters are different kinds of control -- one moves
        * you, the others reshape what you are looking at -- so they get a
        * rule between them rather than running together as one list. */
-      "aside nav.pages{border-bottom:1px solid var(--line);"
-      "padding-bottom:12px;margin-bottom:14px}"
+      "aside nav.pages{margin:0}"
       "aside nav a{display:block;padding:7px 14px;border:0;border-radius:0;"
       "font-size:13px;color:var(--ink2);text-decoration:none;"
       "background:none;text-align:left}"
@@ -1973,8 +1978,13 @@ static void bs_d_page_open(request_rec *r, const char *title,
        * the rail tone shows through between them. Three unseparated
        * rows read as one long list of unrelated buttons; boxed, each
        * label clearly owns the control beneath it. */
-      "aside .fgroup{background:var(--surface);border:1px solid var(--line);"
-      "border-radius:9px;margin:0 8px 8px;padding:8px 2px 6px}"
+      "aside .fgroup{background:var(--rail);border-radius:9px;"
+      "margin:0 8px 9px;padding:9px 2px 7px}"
+      /* The navigation section spans the full width, unlike the filter
+       * panels: the selected tab has to reach the rail's right border to
+       * join the content, and an inset card would hold it 8px short. */
+      "aside .navsec{margin:0 0 9px;border-radius:0 0 9px 0;"
+      "padding:14px 0 10px}"
       "aside .fgroup nav{margin:0}"
       "aside .fgroup nav a{border-radius:6px;margin:0 4px;padding:5px 10px}"
       "aside .fgroup form.vh{margin:0 6px}"
@@ -2281,7 +2291,8 @@ static void bs_d_nav(request_rec *r, const char *active)
                        on ? "on" : "", px, slug[i], label[i]);
         }
     }
-    ap_rputs("</nav>", r);
+    /* Closes the navigation section opened alongside <aside>. */
+    ap_rputs("</nav></div>", r);
 }
 
 /* Head + nav + heading, shared by every dashboard page so they cannot
@@ -2299,7 +2310,8 @@ static void bs_d_page_start(request_rec *r, const char *title,
                             int span, int refresh, const char *vq)
 {
     bs_d_page_open(r, title, span, refresh, vq);
-    ap_rputs("<aside><div class='railhead'><h1>mod_botshield</h1>"
+    ap_rputs("<aside><div class='fgroup navsec'>"
+             "<div class='railhead'><h1>mod_botshield</h1>"
              "<label class='icontog' for='rail' title='Hide sidebar' "
              "aria-label='Hide sidebar'>&laquo;</label></div>", r);
     ap_rprintf(r, "<p class='sub'>%s</p>", sub ? sub : "");
@@ -2371,12 +2383,15 @@ int bs_dashboard_bots_handler(request_rec *r)
     const char *vq = (vsel < 0) ? "all"
                                 : apr_psprintf(r->pool, "%d", vsel);
     bs_d_page_open(r, "mod_botshield bots", span, refresh, vq);
-    ap_rputs("<aside><div class='railhead'><h1>mod_botshield</h1>"
+    ap_rputs("<aside><div class='fgroup navsec'>"
+             "<div class='railhead'><h1>mod_botshield</h1>"
              "<label class='icontog' for='rail' title='Hide sidebar' "
              "aria-label='Hide sidebar'>&laquo;</label></div>", r);
 
-    ap_rprintf(r, "<h1>mod_botshield</h1><p class='sub'>%s</p>",
-               "per-bot rate-limit state and identity");
+    /* Subtitle only -- the rail header above already carries the h1.
+     * This line kept its own when the header was introduced, so the
+     * bots page shipped the product name twice. */
+    ap_rputs("<p class='sub'>per-bot rate-limit state and identity</p>", r);
     bs_d_nav(r, "bots");
     bs_d_view_controls(r, span, refresh, vsel, vq);
     bs_d_page_body(r);
@@ -2747,7 +2762,8 @@ int bs_dashboard_handler(request_rec *r)
     /* Opens the rail. The overview builds its own subtitle rather than
      * going through bs_d_page_start because it names the selected vhost
      * as well as the window; the rest of the sequence is identical. */
-    ap_rputs("<aside><div class='railhead'><h1>mod_botshield</h1>"
+    ap_rputs("<aside><div class='fgroup navsec'>"
+             "<div class='railhead'><h1>mod_botshield</h1>"
              "<label class='icontog' for='rail' title='Hide sidebar' "
              "aria-label='Hide sidebar'>&laquo;</label></div>", r);
     {
