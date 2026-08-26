@@ -1972,32 +1972,56 @@ static void bs_d_page_open(request_rec *r, const char *title,
       "aside nav:not(.pages) a.on{background:var(--act);color:var(--ink);"
       "font-weight:600}"
       "aside .flabel{font-size:10px;text-transform:uppercase;"
-      "letter-spacing:.07em;color:var(--muted);margin:2px 10px 6px;"
+      "letter-spacing:.07em;color:var(--muted);margin:0 16px 7px;"
       "font-weight:600}"
       /* Each filter is its own panel, sitting on the content surface so
        * the rail tone shows through between them. Three unseparated
        * rows read as one long list of unrelated buttons; boxed, each
        * label clearly owns the control beneath it. */
-      "aside .fgroup{background:var(--rail);border-radius:9px;"
-      "margin:0 8px 9px;padding:9px 2px 7px}"
-      /* The navigation section spans the full width, unlike the filter
-       * panels: the selected tab has to reach the rail's right border to
-       * join the content, and an inset card would hold it 8px short. */
-      "aside .navsec{margin:0 0 9px;border-radius:0 0 9px 0;"
-      "padding:14px 0 10px}"
+      /* Every section is the same full width. They are bands across the
+       * rail separated by horizontal gutters of page colour, not cards
+       * floating in it -- and the navigation section has to be full
+       * width regardless, since the selected tab must reach the right
+       * border to join the content. Uniform width keeps the rail from
+       * looking like two different systems stacked. */
+      "aside .fgroup{background:var(--rail);border-radius:0;"
+      "margin:0 0 9px;padding:10px 0 9px}"
+      "aside .navsec{padding:14px 0 10px}"
       "aside .fgroup nav{margin:0}"
-      "aside .fgroup nav a{border-radius:6px;margin:0 4px;padding:5px 10px}"
-      "aside .fgroup form.vh{margin:0 6px}"
-      "aside form.vh{flex-direction:column;align-items:stretch;gap:6px;"
-      "margin:0 14px 14px}"
-      "aside form.vh label{display:none}"
-      "aside form.vh select,aside form.vh button{max-width:100%;width:100%;"
-      "border-radius:7px;font-size:13px}"
-      "aside nav.rf{flex-direction:column;gap:1px}"
-      /* margin-top:auto in the rail's flex column parks this at the
-       * foot of the sidebar, below whatever the filters occupy. */
-      "aside>.ts{margin:auto 0 0;padding:16px 14px 0;font-size:11px;"
-      "color:var(--muted)}"
+      "aside .fgroup nav a{border-radius:6px;margin:0 8px;padding:5px 12px}"
+      /* Disclosure picker. The summary is the current selection and the
+       * panel is a plain link list, so no submit button is needed. */
+      ".vhpick{margin:0 12px}"
+      ".vhpick summary{cursor:pointer;list-style:none;padding:6px 10px;"
+      "border:1px solid var(--line);border-radius:7px;font-size:12px;"
+      "background:var(--surface);color:var(--ink);display:flex;"
+      "align-items:center;justify-content:space-between;gap:6px;"
+      "overflow:hidden;white-space:nowrap;text-overflow:ellipsis}"
+      ".vhpick summary::-webkit-details-marker{display:none}"
+      ".vhpick summary:hover{border-color:var(--t2)}"
+      ".vhpick .cv{color:var(--muted);flex:none}"
+      /* Capped and scrollable: 32 vhosts would otherwise push the rest
+       * of the rail off the bottom of the screen when opened. */
+      ".vhpick .vhlist{max-height:210px;overflow-y:auto;margin:5px 0 0;"
+      "border:1px solid var(--line);border-radius:7px;"
+      "background:var(--surface)}"
+      ".vhpick .vhlist a{display:block;padding:5px 10px;font-size:12px;"
+      "color:var(--ink2);text-decoration:none;white-space:nowrap;"
+      "overflow:hidden;text-overflow:ellipsis}"
+      ".vhpick .vhlist a:hover{background:var(--hov);color:var(--ink)}"
+      ".vhpick .vhlist a.on{font-weight:600;color:var(--ink);"
+      "background:var(--act)}"
+      /* Off / 10s / 30s / 60s are short enough to sit on one line, and
+       * a row of four reads as a single choice rather than four
+       * unrelated rows. */
+      "aside nav.rf{flex-direction:row;flex-wrap:wrap;gap:4px;"
+      "margin:0 12px}"
+      "aside nav.rf a{padding:4px 9px;border-radius:6px;margin:0;"
+      "font-size:12px}"
+      /* Sits inside the refresh section, just under its options: the
+       * stamp says when this view was drawn, which is a fact about the
+       * refresh, not a footer. */
+      "aside .ts{margin:9px 16px 0;font-size:11px;color:var(--muted)}"
       /* Collapse, CSS only: a checkbox and sibling selectors, so no
        * JavaScript and no page load. The rail's column animates to zero
        * and its content is clipped by overflow:hidden.
@@ -2055,9 +2079,7 @@ static void bs_d_page_open(request_rec *r, const char *title,
       "aside .flabel{font-size:11px;text-transform:uppercase;"
       "letter-spacing:.06em;color:var(--muted);margin:0 0 6px;"
       "font-weight:600}"
-      "aside form.vh{flex-direction:column;align-items:stretch;gap:6px;"
       "margin:0 0 20px}"
-      "aside form.vh select,aside form.vh button{max-width:100%;width:100%}"
       "aside nav.rf{flex-direction:column}"
       "aside nav.rf .ts{margin:6px 0 0;font-size:11px}"
       "nav a{padding:5px 12px;border:1px solid var(--line);border-radius:999px;"
@@ -2099,20 +2121,11 @@ static void bs_d_page_open(request_rec *r, const char *title,
       "th{font-size:12px;color:var(--muted);font-weight:600}"
       "td.n{text-align:right;font-variant-numeric:tabular-nums}"
       ".empty{color:var(--muted);font-size:14px;margin:0}"
-      /* Vhost picker. Borrows the pill vocabulary so the control row
-       * reads as one set: same border, radius and muted ink as the
-       * window and refresh links. */
-      "form.vh{display:flex;align-items:center;gap:8px;"
-      "margin:-10px 0 18px;flex-wrap:wrap}"
-      "form.vh label{font-size:12px;color:var(--muted);"
       "text-transform:uppercase;letter-spacing:.04em}"
-      "form.vh select{font:inherit;font-size:13px;padding:5px 10px;"
       "border:1px solid var(--line);border-radius:999px;"
       "background:var(--surface);color:var(--ink);max-width:22rem}"
-      "form.vh button{font:inherit;font-size:13px;padding:5px 14px;"
       "border:1px solid var(--line);border-radius:999px;cursor:pointer;"
       "background:var(--surface);color:var(--ink2)}"
-      "form.vh button:hover{color:var(--ink);border-color:var(--t2)}"
       "footer{color:var(--muted);font-size:12px;margin-top:34px;border-top:1px solid var(--line);padding-top:12px}"
       "</style></head><body>"
       /* Checkbox before the shell so the sibling selectors reach it. */
@@ -2181,47 +2194,41 @@ static void bs_d_view_controls(request_rec *r, int span, int refresh,
     }
     ap_rputs("</nav></div>", r);
 
-    /* Vhost selector: a dropdown, not a row of pills.
+    /* Vhost picker: a <details> disclosure of plain links.
      *
-     * Pills were fine at two or three vhosts and unusable at thirty-two
-     * -- and a hub that fronts one site behind many certificate vhosts
-     * gets exactly that, a wall of near-identical names wrapping over
-     * three lines above every chart.
+     * It was a <select> in a GET form, which needed an Apply button --
+     * without JavaScript a select navigates nowhere on its own, so
+     * something had to submit it. A disclosure has no such problem:
+     * every entry is an ordinary link that carries w and r along, so
+     * choosing one IS the navigation and the extra button disappears.
+     * Still no JavaScript.
      *
-     * A GET form rather than a <select onchange>: this page ships no
-     * JavaScript and that is worth keeping. The browser builds the query
-     * string, w and r ride along as hidden inputs so switching vhost
-     * does not reset the window, and the submit button means it works
-     * with keyboard, screen reader and scripting disabled alike.
+     * Capped height with its own scroll: this hub has 32 vhosts and a
+     * list that long would otherwise push the rest of the rail off the
+     * bottom of the screen when opened.
      *
-     * Only drawn when there is a choice to make; one vhost gets no row
-     * rather than a row with one inert entry. */
+     * Only drawn when there is a choice to make. */
     const bs_vhost_dir *vdir = bs_shm.vhost_dir;
     if (vdir && vdir->count > 1) {
         const char *wq = span == 0 ? "all"
                        : (span == 15 ? "15"
                        : (span == 1440 ? "1440" : "60"));
+        const char *cur = (vsel < 0 || !vdir->name[vsel][0])
+                        ? "All vhosts"
+                        : ap_escape_html(r->pool, vdir->name[vsel]);
         ap_rputs("<div class='fgroup'><p class='flabel'>Vhost</p>"
-                 "<form class='vh' method='get'>", r);
-        ap_rprintf(r, "<input type='hidden' name='w' value='%s'>", wq);
-        ap_rprintf(r, "<input type='hidden' name='r' value='%d'>", refresh);
-        ap_rputs("<label for='vh'>Vhost</label>"
-                 "<select id='vh' name='vh'>", r);
-        ap_rprintf(r, "<option value='all'%s>All vhosts</option>",
-                   vsel < 0 ? " selected" : "");
+                 "<details class='vhpick'><summary>", r);
+        ap_rprintf(r, "%s<span class='cv'>&#9662;</span></summary>", cur);
+        ap_rputs("<div class='vhlist'>", r);
+        ap_rprintf(r, "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=all'>"
+                      "All vhosts</a>", vsel < 0 ? "on" : "", wq, refresh);
         for (apr_uint32_t i = 0; i < vdir->count; i++) {
             if (!vdir->name[i][0]) continue;
-            ap_rprintf(r, "<option value='%u'%s>%s</option>", i,
-                       vsel == (int)i ? " selected" : "",
-                       ap_escape_html(r->pool, vdir->name[i]));
+            ap_rprintf(r, "<a class='%s' href='?w=%s&amp;r=%d&amp;vh=%u'>"
+                          "%s</a>", vsel == (int)i ? "on" : "", wq, refresh,
+                       i, ap_escape_html(r->pool, vdir->name[i]));
         }
-        /* The button exists because this is a plain GET form and the
-         * page ships no JavaScript: changing a <select> navigates
-         * nowhere on its own, so something has to submit it. "Apply"
-         * rather than "Show" -- it applies the choice next to it, and
-         * "Show" read like it revealed something. */
-        ap_rputs("</select><button type='submit'>Apply</button>"
-                 "</form></div>", r);
+        ap_rputs("</div></details></div>", r);
     }
 
     /* Refresh control plus a rendered-at stamp, so a stale tab is
@@ -2254,8 +2261,7 @@ static void bs_d_view_controls(request_rec *r, int span, int refresh,
          * which is what makes a forgotten tab obviously stale -- so it
          * belongs out of the way at the foot of the page, not wedged
          * between two sets of buttons. */
-        ap_rputs("</nav></div>", r);
-        ap_rprintf(r, "<p class='ts'>rendered %s</p>", ts);
+        ap_rprintf(r, "</nav><p class='ts'>rendered %s</p></div>", ts);
     }
 }
 
