@@ -371,6 +371,8 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->load_state_file       = NULL;
     scfg->load_refresh_sec      = 0;
     scfg->load_warm_pct         = 0;
+    scfg->loadavg_warm          = 0;
+    scfg->loadavg_hot           = 0;
     scfg->load_hot_pct          = 0;
     scfg->load_warm_rise        = 0;
     scfg->load_hot_rise         = 0;

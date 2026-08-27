@@ -7,6 +7,7 @@
 #include "botshield.h"  /* bs_server_cfg, botshield_module */
 #include "shm.h"
 #include "ua_class.h"
+#include "load.h"        /* bs_load_current, bs_loadavg_current */
 #include "bot_directory.h"  /* bs_bot_dir_lookup_slug for /dashboard/bots */
 #include "bot_rate.h"       /* bs_bot_rate_slot / state, same page */
 
@@ -2391,6 +2392,10 @@ int bs_dashboard_bots_handler(request_rec *r)
     bs_d_view_params(r, &span, &refresh, &vsel);
     const char *vq = (vsel < 0) ? "all"
                                 : apr_psprintf(r->pool, "%d", vsel);
+    /* The per-bot table is a live snapshot, but the counters beside it
+     * are windowed like every other page. */
+    bs_metrics_window w;
+    bs_metrics_read_window(span, vsel, &w);
     bs_d_page_open(r, "mod_botshield bots", span, refresh, vq);
     ap_rputs("<aside><div class='fgroup navsec'>"
              "<div class='railhead'><h1>mod_botshield</h1>"
@@ -2400,7 +2405,8 @@ int bs_dashboard_bots_handler(request_rec *r)
     /* Subtitle only -- the rail header above already carries the h1.
      * This line kept its own when the header was introduced, so the
      * bots page shipped the product name twice. */
-    ap_rputs("<p class='sub'>per-bot rate-limit state and identity</p>", r);
+    ap_rprintf(r, "<p class='sub'>%s &middot; per-bot state</p>",
+               bs_d_window_label(span));
     bs_d_nav(r, "bots");
     bs_d_view_controls(r, span, refresh, vsel, vq);
     bs_d_page_body(r);
@@ -2486,26 +2492,40 @@ int bs_dashboard_bots_handler(request_rec *r)
     }
 
     /* Global bot-facing counters, moved off the main dashboard. */
-    if (bs_shm.metrics) {
-        bs_metrics *m = bs_shm.metrics;
+    {
+        /* Windowed, not cumulative. These KPIs read all-time totals
+         * while the page carried a time-range selector, so choosing
+         * "last hour" changed the label and not the numbers -- the
+         * worst kind of wrong, because it looks like it worked.
+         *
+         * Three have faithful windowed equivalents. The fourth,
+         * observed-but-not-enforced rate limits, exists only as a
+         * cumulative counter, so it says "since restart" on its face
+         * rather than pretending to honour the selector. */
+        apr_uint64_t rl_win = w.outcome[BS_M_OUTCOME_RATE_LIMITED];
+        apr_uint64_t bots_win = w.req_class[BS_M_CLASS_VERIFIED_BOT]
+                              + w.req_class[BS_M_CLASS_KNOWN_BOT];
+        apr_uint64_t fake_win = w.req_class[BS_M_CLASS_FAKE_BOT];
+        apr_uint64_t obs_all = bs_shm.metrics
+            ? bs_mload(&bs_shm.metrics->rate_limit_observed_total) : 0;
+
         ap_rputs("<section><h2>Rate limiting &amp; blocks</h2>"
                  "<div class='kpis'>", r);
         ap_rprintf(r, "<div class='kpi'><div class='k'>429s issued</div>"
                       "<div class='v'>%" APR_UINT64_T_FMT "</div>"
-                      "<div class='n'>enforced</div></div>",
-                   bs_mload(&m->rate_limit_exceeded_total));
-        ap_rprintf(r, "<div class='kpi'><div class='k'>Would-429</div>"
+                      "<div class='n'>enforced</div></div>", rl_win);
+        ap_rprintf(r, "<div class='kpi'><div class='k'>Bots seen</div>"
                       "<div class='v'>%" APR_UINT64_T_FMT "</div>"
-                      "<div class='n'>observe mode</div></div>",
-                   bs_mload(&m->rate_limit_observed_total));
-        ap_rprintf(r, "<div class='kpi'><div class='k'>Bots admitted</div>"
-                      "<div class='v'>%" APR_UINT64_T_FMT "</div>"
-                      "<div class='n'>allow-listed / verified</div></div>",
-                   bs_mload(&m->bot_allow_total));
+                      "<div class='n'>verified + known</div></div>",
+                   bots_win);
         ap_rprintf(r, "<div class='kpi'><div class='k'>Fake bots</div>"
                       "<div class='v'>%" APR_UINT64_T_FMT "</div>"
-                      "<div class='n'>UA claimed a crawler, IP failed</div>"
-                      "</div>", bs_mload(&m->bot_fake_total));
+                      "<div class='n'>UA claimed a crawler, IP failed"
+                      "</div></div>", fake_win);
+        ap_rprintf(r, "<div class='kpi'><div class='k'>Would-429</div>"
+                      "<div class='v'>%" APR_UINT64_T_FMT "</div>"
+                      "<div class='n'>observe mode, since restart</div>"
+                      "</div>", obs_all);
         ap_rputs("</div></section>", r);
     }
 
@@ -3002,6 +3022,40 @@ int bs_dashboard_handler(request_rec *r)
     /* Live capacity — ratios against a limit, so meters. These are
      * point-in-time gauges and ignore the window selector; labelled as
      * such rather than left to imply they follow it. */
+    /* Server load. Point-in-time like the capacity gauges below, not a
+     * windowed figure -- a load average already carries its own window.
+     *
+     * Both signals are shown because they disagree in the way that
+     * matters here: with 1024 MaxRequestWorkers on 6 cores, four
+     * outages ran at 2-3% busy workers while the per-CPU load average
+     * was well past 2.0. A dashboard showing only the worker ratio
+     * would have reported those incidents as an idle server. */
+    {
+        apr_uint32_t la = bs_loadavg_current();
+        bs_load_state ls = bs_load_current();
+        const char *lname = (ls == BS_LOAD_HOT)  ? "hot"
+                          : (ls == BS_LOAD_WARM) ? "warm" : "normal";
+        const char *tone  = (ls == BS_LOAD_HOT)  ? "var(--crit)"
+                          : (ls == BS_LOAD_WARM) ? "var(--warn)"
+                                                 : "var(--good)";
+        ap_rputs("<section><h2>Server load <span style='text-transform:"
+                 "none;font-weight:400;color:var(--muted)'>right now"
+                 "</span></h2><div class='kpis'>", r);
+        ap_rprintf(r, "<div class='kpi'><div class='k'>Load per CPU</div>"
+                      "<div class='v'>%u.%02u</div>"
+                      "<div class='n'>1-minute average</div></div>",
+                   la / 100, la % 100);
+        ap_rprintf(r, "<div class='kpi'><div class='k'>Load state</div>"
+                      "<div class='v' style='color:%s'>%s</div>"
+                      "<div class='n'>what policy matches on</div></div>",
+                   tone, lname);
+        ap_rputs("</div><p class='note'>Load state is the most severe of "
+                 "three signals: per-CPU load average, Apache busy-worker "
+                 "ratio, and any external state file. Rules match it with "
+                 "<code>minload=warm</code> or <code>minload=hot</code>."
+                 "</p></section>", r);
+    }
+
     ap_rputs("<section><h2>Capacity now <span style='text-transform:none;"
              "font-weight:400'>(live, not windowed)</span></h2>", r);
     bs_d_meter(r, "Flagged IPs", bs_gauges.flagged_used,

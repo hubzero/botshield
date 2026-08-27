@@ -632,6 +632,21 @@ static const command_rec bs_cmds[] = {
                  "Watchdog tick period in seconds (default 1; "
                  "1..60). Lower = faster brownout response; higher "
                  "= less work in mod_watchdog."),
+    /* Load-average thresholds, per CPU. The worker-ratio thresholds
+     * below cannot see this deployment's failure mode: with 1024
+     * MaxRequestWorkers on 6 cores the box is CPU-saturated at a busy
+     * ratio of 2-3%, which is where four outages actually ran. */
+    AP_INIT_TAKE1("BotShieldLoadAvgWarm", bs_set_loadavg_warm, NULL,
+                 RSRC_CONF,
+                 "1-minute load average PER CPU at which the load state "
+                 "samples as 'warm', as a ratio (default 1.0). Same unit "
+                 "as a host shedding script whose HIGH is 2x cores; keep "
+                 "this under that so policy can shed selectively before "
+                 "a blunt site-wide 503 engages."),
+    AP_INIT_TAKE1("BotShieldLoadAvgHot", bs_set_loadavg_hot, NULL,
+                 RSRC_CONF,
+                 "Per-CPU load average at which the state samples as "
+                 "'hot' (default 1.5). Must exceed BotShieldLoadAvgWarm."),
     AP_INIT_TAKE1("BotShieldLoadWarmThreshold",
                  bs_set_load_warm_pct, NULL, RSRC_CONF,
                  "Busy-worker percentage at which a tick samples "
@@ -766,6 +781,39 @@ static const command_rec bs_cmds[] = {
                  "redirect rejected — load is global state, not "
                  "per-IP behavior. First-match-wins."),
     /* E3 — path-based triggers */
+    /* BotShieldRule — the name this family should have had.
+     *
+     * Same setter, same parser, same entry type as
+     * BotShieldRequestTrigger; only the spelling differs. The family
+     * stopped being about requests-versus-something-else once it grew
+     * ua=, ipspec=, query=, cookies=, exists=, solved= and minload=:
+     * it is simply "match a request on any combination of its
+     * properties and act", which is what a rule is.
+     *
+     * Both names stay registered. An existing config keeps working,
+     * and the docs lead with BotShieldRule.
+     *
+     * The two match keys that make a load-shed ladder expressible
+     * without arithmetic:
+     *   solved=yes|no        did this client pass a challenge
+     *   minload=normal|warm|hot   fires at that load state or above
+     * Combined with ua=@bot / @search / @ai-train / @fake-bot, a shed
+     * ladder reads as one line per rung with no score to reason about.
+     */
+    AP_INIT_TAKE_ARGV("BotShieldRule",
+                 bs_set_request_trigger, NULL, RSRC_CONF,
+                 "Match a request on any combination of its properties "
+                 "and act once. Args: <name> [key=value ...]. Match "
+                 "keys, all optional and ANDed, at least one required: "
+                 "path=<glob>, query=<glob>, cookies=none|any|session, "
+                 "exists=yes|no, solved=yes|no (client holds a cookie "
+                 "proving it passed a challenge), "
+                 "minload=normal|warm|hot (fires at that load state or "
+                 "above), ua=<substring>|@<botgroup>|@bot|@fake-bot, "
+                 "ipspec=*|<file>|<cidr[,cidr]>. Action keys: "
+                 "status=<code|pass>, redirect=<url>, tier=<t>, "
+                 "penalty=<n>, log=<tag>, accesslog=on|off, flag=<bit>, "
+                 "ttl=<sec>, mode=enforce|observe."),
     AP_INIT_TAKE_ARGV("BotShieldRequestTrigger",
                  bs_set_request_trigger, NULL, RSRC_CONF,
                  "Match a request on any combination of its properties "
@@ -1462,6 +1510,11 @@ static int bs_handler(request_rec *r)
         else if (!cookie_verify_reason) bs_state = BS_CK_STATE_VERIFIED;
         else                           bs_state = BS_CK_STATE_INVALID;
         apr_table_setn(r->notes, BS_CK_STATE_NOTE, bs_state);
+        /* Solve proof is a different question from cookie validity --
+         * under always-mint every returning client has a valid cookie --
+         * so it gets its own note rather than a fourth state. */
+        apr_table_setn(r->notes, BS_CK_SOLVED_NOTE,
+                       have_solve_proof ? "1" : "0");
     }
 
     /* Always-mint: install a presence-only session cookie when the

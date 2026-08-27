@@ -28,6 +28,8 @@
 #include <apr_atomic.h>
 #include <apr_strings.h>
 #include <apr_file_io.h>
+#include <stdio.h>      /* sscanf for /proc/loadavg */
+#include <unistd.h>     /* sysconf(_SC_NPROCESSORS_ONLN) */
 
 #include "botshield.h"
 #include "load.h"
@@ -111,6 +113,46 @@ static bs_load_state bs_load_read_external(server_rec *sv,
             scfg->load_state_file, p);
     }
     return parsed;
+}
+
+/* Sample the 1-minute load average, normalised per CPU, in hundredths
+ * (loadavg 3.0 on 6 cores -> 50).
+ *
+ * The scoreboard ratio below cannot see this deployment's failure mode.
+ * With MaxRequestWorkers 1024 on 6 cores, the box is CPU-saturated at a
+ * busy ratio in the single digits: four separate outages ran at 25-30
+ * busy workers -- 2-3% -- while the 1-minute load average was well past
+ * the point where requests took thirty seconds. A worker-ratio trigger
+ * calibrated to fire there would be indistinguishable from noise.
+ *
+ * Per-CPU normalisation so one threshold means the same thing on a
+ * 6-core hub and a 64-core one. Read every tick: /proc/loadavg is a
+ * kernel-computed value, so this is one small read, not a scan.
+ *
+ * Returns -1 when unavailable (non-Linux, /proc not mounted), which
+ * the caller treats as "this signal has no opinion" rather than as
+ * zero -- zero would be an active claim that the box is idle. */
+static int bs_load_sample_loadavg(apr_pool_t *pool)
+{
+    apr_file_t *f = NULL;
+    char buf[64];
+    apr_size_t n = sizeof(buf) - 1;
+    if (apr_file_open(&f, "/proc/loadavg", APR_READ | APR_BINARY, 0,
+                      pool) != APR_SUCCESS) {
+        return -1;
+    }
+    apr_status_t rv = apr_file_read(f, buf, &n);
+    apr_file_close(f);
+    if (rv != APR_SUCCESS || n == 0) return -1;
+    buf[n] = '\0';
+
+    /* "0.31 0.48 1.31 1/523 12345" -- first field only. */
+    double one = 0.0;
+    if (sscanf(buf, "%lf", &one) != 1) return -1;
+
+    long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+    if (ncpu < 1) ncpu = 1;
+    return (int)((one * 100.0) / (double)ncpu);
 }
 
 /* Sample the Apache scoreboard. Returns busy_pct = 100 *
@@ -232,8 +274,32 @@ apr_status_t bs_load_watchdog_cb(int state, void *data,
                                                     warm_pct, hot_pct);
     bs_load_state external = bs_load_read_external(sv, scfg);
 
-    /* Most-severe-wins merge. */
+    /* Load average, per CPU, in hundredths. Thresholds are expressed in
+     * the same unit the site's own shedding script uses -- HIGH is
+     * 2x cores, LOW is 1x cores -- so one number means the same thing
+     * to both systems.
+     *
+     * Deliberately BELOW that script's HIGH. The script publishes a
+     * marker at 2.0/core and the vhost answers /index.php and
+     * /api/index.php with a flat 503 for everyone, logged-in humans
+     * included. That is the right last rung and a poor first one. These
+     * thresholds sit under it so the module can shed selectively --
+     * crawlers, then clients with no solve proof -- while there is
+     * still headroom, and the blunt rung only arrives if that failed. */
+    bs_load_state avg = BS_LOAD_NORMAL;
+    int la = bs_load_sample_loadavg(sv->process->pconf);
+    if (la >= 0) {
+        int aw = bs_load_effective_int(scfg->loadavg_warm,
+                                       BS_DEFAULT_LOADAVG_WARM);
+        int ah = bs_load_effective_int(scfg->loadavg_hot,
+                                       BS_DEFAULT_LOADAVG_HOT);
+        avg = bs_load_state_from_pct(la, aw, ah);
+        apr_atomic_set32(&bs_shm.header->loadavg_pct, (apr_uint32_t)la);
+    }
+
+    /* Most-severe-wins merge across all three signals. */
     bs_load_state candidate = (internal > external) ? internal : external;
+    if (avg > candidate) candidate = avg;
     bs_load_apply_tick(sv, scfg, candidate);
     return APR_SUCCESS;
 }
@@ -326,4 +392,58 @@ const char *bs_set_load_hot_pct(cmd_parms *cmd, void *dconf,
                                                &botshield_module);
     scfg->load_hot_pct = (int)n;
     return NULL;
+}
+
+/* BotShieldLoadAvgWarm / …Hot <ratio>
+ *
+ * Per-CPU 1-minute load average, given as a decimal ratio: 1.0 means
+ * "one runnable process per core". Stored in hundredths.
+ *
+ * A ratio rather than a raw load figure so one number carries across
+ * machines -- and so it reads in the same unit the host's own shedding
+ * script uses, whose defaults are HIGH = 2x cores and LOW = 1x cores.
+ * Keep these under that HIGH; see BS_DEFAULT_LOADAVG_WARM. */
+static const char *bs_set_loadavg_thr(cmd_parms *cmd, const char *arg,
+                                      const char *dname, int *slot)
+{
+    char *end = NULL;
+    double v = strtod(arg, &end);
+    if (!end || *end || !(v > 0.0) || v > 100.0) {
+        return apr_psprintf(cmd->pool,
+            "%s: '%s' must be a ratio greater than 0 and at most 100 "
+            "(1.0 = one runnable process per core)", dname, arg);
+    }
+    *slot = (int)(v * 100.0);
+    return NULL;
+}
+
+const char *bs_set_loadavg_warm(cmd_parms *cmd, void *dconf, const char *arg)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    return bs_set_loadavg_thr(cmd, arg, "BotShieldLoadAvgWarm",
+                              &scfg->loadavg_warm);
+}
+
+const char *bs_set_loadavg_hot(cmd_parms *cmd, void *dconf, const char *arg)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    const char *err = bs_set_loadavg_thr(cmd, arg, "BotShieldLoadAvgHot",
+                                         &scfg->loadavg_hot);
+    if (err) return err;
+    if (scfg->loadavg_warm > 0 && scfg->loadavg_hot <= scfg->loadavg_warm) {
+        return "BotShieldLoadAvgHot must be greater than "
+               "BotShieldLoadAvgWarm";
+    }
+    return NULL;
+}
+
+/* Last sampled per-CPU load average, hundredths. Dashboard only. */
+apr_uint32_t bs_loadavg_current(void)
+{
+    if (!bs_shm.header) return 0;
+    return apr_atomic_read32(&bs_shm.header->loadavg_pct);
 }

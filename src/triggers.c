@@ -662,6 +662,8 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
     e->name        = apr_pstrdup(cmd->pool, name);
     e->cookie_pred = -1;              /* no cookie condition */
     e->exists_pred = -1;              /* no filesystem condition */
+    e->solved_pred = -1;              /* no solve-proof condition */
+    e->minload     = -1;              /* no load condition */
     bs_trigger_action_init(BS_TFAMILY_REQUEST, &e->action);
 
     const char *ua_arg = NULL, *ipspec_arg = NULL;
@@ -695,6 +697,25 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                         "%s: query= longer than 256 chars", D);
                 }
                 e->query_pattern = apr_pstrdup(cmd->pool, val);
+                continue;
+            }
+            if (klen == 6 && strncasecmp(arg, "solved", 6) == 0) {
+                if      (!strcasecmp(val, "yes")) e->solved_pred = 1;
+                else if (!strcasecmp(val, "no"))  e->solved_pred = 0;
+                else {
+                    return apr_psprintf(cmd->pool,
+                        "%s: solved='%s' not one of yes|no", D, val);
+                }
+                continue;
+            }
+            if (klen == 7 && strncasecmp(arg, "minload", 7) == 0) {
+                if      (!strcasecmp(val, "normal")) e->minload = BS_LOAD_NORMAL;
+                else if (!strcasecmp(val, "warm"))   e->minload = BS_LOAD_WARM;
+                else if (!strcasecmp(val, "hot"))    e->minload = BS_LOAD_HOT;
+                else {
+                    return apr_psprintf(cmd->pool,
+                        "%s: minload='%s' not one of normal|warm|hot", D, val);
+                }
                 continue;
             }
             if (klen == 6 && strncasecmp(arg, "exists", 6) == 0) {
@@ -761,10 +782,12 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
     }
 
     if (!e->path_pattern && !e->query_pattern
-        && e->cookie_pred < 0 && e->exists_pred < 0 && !e->has_cohort) {
+        && e->cookie_pred < 0 && e->exists_pred < 0
+        && e->solved_pred < 0 && e->minload < 0 && !e->has_cohort) {
         return apr_psprintf(cmd->pool,
             "%s '%s': needs at least one match key (path=, query=, "
-            "cookies=, exists=, ua=, ipspec=). A rule with no condition "
+            "cookies=, exists=, solved=, minload=, ua=, ipspec=). A rule "
+            "with no condition "
             "matches every request - use BotShieldTrigger in the scope "
             "you mean instead", D, name);
     }

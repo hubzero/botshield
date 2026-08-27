@@ -90,6 +90,11 @@ extern "C" {
  * re-running the HMAC check. Values: "verified" / "missing" /
  * "invalid". */
 #define BS_CK_STATE_NOTE      "botshield-cookie-state"
+/* Whether the presented cookie carries proof that a challenge was
+ * actually solved, as opposed to merely verifying. Published as a note
+ * so the policy walk can match on it -- the walk runs after cookie
+ * verification, so the answer is known by then. "1" or "0". */
+#define BS_CK_SOLVED_NOTE     "botshield-cookie-solved"
 #define BS_CK_STATE_VERIFIED  "verified"
 #define BS_CK_STATE_MISSING   "missing"
 #define BS_CK_STATE_INVALID   "invalid"
@@ -352,6 +357,8 @@ typedef struct bs_server_cfg {
     const char         *load_state_file;
     int                 load_refresh_sec;
     int                 load_warm_pct;
+    int                 loadavg_warm;   /* per-CPU hundredths; 0 = default */
+    int                 loadavg_hot;
     int                 load_hot_pct;
     int                 load_warm_rise;
     int                 load_hot_rise;
