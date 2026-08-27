@@ -2813,6 +2813,40 @@ int bs_dashboard_handler(request_rec *r)
     bs_d_view_controls(r, span, refresh, vsel, vq);
     bs_d_page_body(r);
 
+    /* Server load. Point-in-time like the capacity gauges further down,
+     * not a windowed figure -- a load average carries its own window.
+     *
+     * Both signals are shown because they disagree in the way that
+     * matters here: with 1024 MaxRequestWorkers on 6 cores, four
+     * outages ran at 2-3% busy workers while the per-CPU load average
+     * was well past 2.0. A dashboard showing only the worker ratio
+     * would have reported those incidents as an idle server. */
+    {
+        apr_uint32_t la = bs_loadavg_current();
+        bs_load_state ls = bs_load_current();
+        const char *lname = (ls == BS_LOAD_HOT)  ? "hot"
+                          : (ls == BS_LOAD_WARM) ? "warm" : "normal";
+        const char *tone  = (ls == BS_LOAD_HOT)  ? "var(--crit)"
+                          : (ls == BS_LOAD_WARM) ? "var(--warn)"
+                                                 : "var(--good)";
+        ap_rputs("<section><h2>Server load <span style='text-transform:"
+                 "none;font-weight:400;color:var(--muted)'>right now"
+                 "</span></h2><div class='kpis'>", r);
+        ap_rprintf(r, "<div class='kpi'><div class='k'>Load per CPU</div>"
+                      "<div class='v'>%u.%02u</div>"
+                      "<div class='n'>1-minute average</div></div>",
+                   la / 100, la % 100);
+        ap_rprintf(r, "<div class='kpi'><div class='k'>Load state</div>"
+                      "<div class='v' style='color:%s'>%s</div>"
+                      "<div class='n'>what policy matches on</div></div>",
+                   tone, lname);
+        ap_rputs("</div><p class='note'>Load state is the most severe of "
+                 "three signals: per-CPU load average, Apache busy-worker "
+                 "ratio, and any external state file. Rules match it with "
+                 "<code>minload=warm</code> or <code>minload=hot</code>."
+                 "</p></section>", r);
+    }
+
     /* Site traffic first: it is the denominator everything below is a
      * share of, and with the enable scoped to a <Location> the gap
      * between requests and decisions is the single most important
@@ -3022,39 +3056,6 @@ int bs_dashboard_handler(request_rec *r)
     /* Live capacity — ratios against a limit, so meters. These are
      * point-in-time gauges and ignore the window selector; labelled as
      * such rather than left to imply they follow it. */
-    /* Server load. Point-in-time like the capacity gauges below, not a
-     * windowed figure -- a load average already carries its own window.
-     *
-     * Both signals are shown because they disagree in the way that
-     * matters here: with 1024 MaxRequestWorkers on 6 cores, four
-     * outages ran at 2-3% busy workers while the per-CPU load average
-     * was well past 2.0. A dashboard showing only the worker ratio
-     * would have reported those incidents as an idle server. */
-    {
-        apr_uint32_t la = bs_loadavg_current();
-        bs_load_state ls = bs_load_current();
-        const char *lname = (ls == BS_LOAD_HOT)  ? "hot"
-                          : (ls == BS_LOAD_WARM) ? "warm" : "normal";
-        const char *tone  = (ls == BS_LOAD_HOT)  ? "var(--crit)"
-                          : (ls == BS_LOAD_WARM) ? "var(--warn)"
-                                                 : "var(--good)";
-        ap_rputs("<section><h2>Server load <span style='text-transform:"
-                 "none;font-weight:400;color:var(--muted)'>right now"
-                 "</span></h2><div class='kpis'>", r);
-        ap_rprintf(r, "<div class='kpi'><div class='k'>Load per CPU</div>"
-                      "<div class='v'>%u.%02u</div>"
-                      "<div class='n'>1-minute average</div></div>",
-                   la / 100, la % 100);
-        ap_rprintf(r, "<div class='kpi'><div class='k'>Load state</div>"
-                      "<div class='v' style='color:%s'>%s</div>"
-                      "<div class='n'>what policy matches on</div></div>",
-                   tone, lname);
-        ap_rputs("</div><p class='note'>Load state is the most severe of "
-                 "three signals: per-CPU load average, Apache busy-worker "
-                 "ratio, and any external state file. Rules match it with "
-                 "<code>minload=warm</code> or <code>minload=hot</code>."
-                 "</p></section>", r);
-    }
 
     ap_rputs("<section><h2>Capacity now <span style='text-transform:none;"
              "font-weight:400'>(live, not windowed)</span></h2>", r);
