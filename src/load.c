@@ -295,6 +295,21 @@ apr_status_t bs_load_watchdog_cb(int state, void *data,
                                        BS_DEFAULT_LOADAVG_HOT);
         avg = bs_load_state_from_pct(la, aw, ah);
         apr_atomic_set32(&bs_shm.header->loadavg_pct, (apr_uint32_t)la);
+        /* History ring, one sample per BS_M_LA_PERIOD seconds. Gated on
+         * elapsed time rather than tick count so the cadence holds if
+         * BotShieldLoadRefreshInterval is retuned. */
+        if (bs_shm.metrics) {
+            bs_metrics *m = bs_shm.metrics;
+            apr_uint32_t now = (apr_uint32_t)apr_time_sec(apr_time_now());
+            apr_uint32_t last = apr_atomic_read32(&m->la_last_sec);
+            if (now >= last + BS_M_LA_PERIOD) {
+                apr_uint32_t pos = apr_atomic_read32(&m->la_pos);
+                pos = (pos + 1) % BS_M_LA_SLOTS;
+                m->la_ring[pos] = (la > 65534) ? 65534 : (apr_uint16_t)la;
+                apr_atomic_set32(&m->la_pos, pos);
+                apr_atomic_set32(&m->la_last_sec, now);
+            }
+        }
     }
 
     /* Most-severe-wins merge across all three signals. */
@@ -446,4 +461,28 @@ apr_uint32_t bs_loadavg_current(void)
 {
     if (!bs_shm.header) return 0;
     return apr_atomic_read32(&bs_shm.header->loadavg_pct);
+}
+
+/* Effective load-average thresholds for this server, defaults applied.
+ *
+ * Exists so reporting surfaces do not have to duplicate the "0 means
+ * default" convention -- and because bs_load_effective_int is static:
+ * calling it from another translation unit built fine and then failed
+ * at module load with an undefined symbol, which is a slower way to
+ * find out. */
+void bs_loadavg_thresholds(server_rec *s, int *warm, int *hot)
+{
+    int w = BS_DEFAULT_LOADAVG_WARM, h = BS_DEFAULT_LOADAVG_HOT;
+    if (s) {
+        bs_server_cfg *scfg =
+            ap_get_module_config(s->module_config, &botshield_module);
+        if (scfg) {
+            w = bs_load_effective_int(scfg->loadavg_warm,
+                                      BS_DEFAULT_LOADAVG_WARM);
+            h = bs_load_effective_int(scfg->loadavg_hot,
+                                      BS_DEFAULT_LOADAVG_HOT);
+        }
+    }
+    if (warm) *warm = w;
+    if (hot)  *hot  = h;
 }

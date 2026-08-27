@@ -172,7 +172,8 @@ extern "C" {
 /* v12 adds BS_M_RESP_STATIC, widening req_resp[] in both the ring slot
  * and the cumulative block. */
 /* v13 adds g_resp[]: responder crossed with audience. */
-#define BS_STATE_FORMAT_VERSION   13
+/* v14 appends the load-average ring (la_ring). */
+#define BS_STATE_FORMAT_VERSION   14
 #define BS_STATE_MAX_AGE_SECS     (14 * 86400)
 #define BS_FNV64_SEED             0xcbf29ce484222325ULL
 
@@ -542,6 +543,11 @@ typedef struct {
  * counters are advisory — the same posture the gauges already take —
  * and a CAS-per-increment is not worth paying on the decision path.
  * -------------------------------------------------------------------- */
+/* Load-average ring: 720 x 5s = one hour. */
+#define BS_M_LA_SLOTS    720
+#define BS_M_LA_PERIOD   5
+#define BS_M_LA_EMPTY    0xFFFF
+
 #define BS_M_MIN_SLOTS   60   /* 1-minute slots: serves 15min and 1h */
 #define BS_M_HOUR_SLOTS  24   /* 1-hour slots: serves 24h */
 
@@ -594,6 +600,23 @@ typedef struct {
     apr_uint64_t req_class[BS_M_CLASS_COUNT];
     apr_uint64_t g_resp[BS_M_GROUP_COUNT][BS_M_RESP_COUNT];
     /* Persistence gauges. */
+    /* Load-average history for the dashboard graph.
+     *
+     * 720 samples at 5s = one hour, 1.4 KB. Five seconds because that
+     * is how often the KERNEL recomputes loadavg (LOAD_FREQ = 5*HZ+1);
+     * measured on this box as ~4 changes in 15s. The watchdog already
+     * ticks every second, so the source is over-sampled already and a
+     * faster ring would just store duplicates.
+     *
+     * Cost is one u16 store every fifth tick, against a scoreboard scan
+     * of 1,024 slots that already runs every tick.
+     *
+     * u16 holds per-CPU hundredths: 0..655.35 per core, far past
+     * anything worth graphing. BS_M_LA_EMPTY marks "no sample" so a
+     * partly-filled ring renders as a short line rather than a cliff. */
+    apr_uint16_t la_ring[BS_M_LA_SLOTS];
+    apr_uint32_t la_pos;        /* index of the most recent sample */
+    apr_uint32_t la_last_sec;   /* unix seconds of that sample */
     apr_uint64_t state_saves_total;
     apr_uint64_t state_save_last_unix;
     apr_uint64_t state_save_last_bytes;

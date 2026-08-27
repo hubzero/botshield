@@ -1231,6 +1231,16 @@ static int bs_init_shm_layout(apr_pool_t *pconf, apr_pool_t *ptemp,
         ((unsigned char *)bs_shm.nonce_table + nonce_bytes);
     bs_shm.vmetrics  = (bs_metrics *)
         ((unsigned char *)bs_shm.vhost_dir + sizeof(bs_vhost_dir));
+    /* The segment arrives zeroed, and zero is a legitimate load value.
+     * Mark every history slot empty so a freshly started server draws
+     * a short line from now rather than an hour of flat 0.00 that
+     * never happened. */
+    if (bs_shm.metrics) {
+        for (int i = 0; i < BS_M_LA_SLOTS; i++) {
+            bs_shm.metrics->la_ring[i] = BS_M_LA_EMPTY;
+        }
+    }
+
     bs_vhost_dir_init(s, vhost_n);
 
     bs_shm.header->bloom_active        = 0;
