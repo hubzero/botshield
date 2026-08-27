@@ -1626,6 +1626,149 @@ static const char *bs_d_qparam(apr_pool_t *pool, const char *args,
     return NULL;
 }
 
+/* Load-average chart: one hour of per-CPU load, sized to sit beside the
+ * number in its KPI box.
+ *
+ * COLOUR BY VALUE, not by series. A single stroke gradient in user
+ * space maps blue -> amber -> orange -> red onto the y axis, so the
+ * line changes colour as it climbs and the band boundaries are the
+ * warm and hot thresholds themselves. One <linearGradient> and one
+ * <polyline> does what per-segment colouring would need up to 719
+ * separate elements to do, and it gradates instead of stepping.
+ *
+ * Newest on the right. Reading stops at the first BS_M_LA_EMPTY slot,
+ * so a partly-filled ring draws a short line rather than a cliff down
+ * to an hour of idle that never happened.
+ *
+ * The y axis scales to whichever is larger, the observed peak or the
+ * hot threshold, so the thresholds are always on screen: a quiet hour
+ * that hid where "hot" sits would show the level without showing
+ * whether it matters. */
+static void bs_d_load_spark(request_rec *r)
+{
+    bs_metrics *m = bs_shm.metrics;
+    if (!m) return;
+    int aw, ah;
+    bs_loadavg_thresholds(r->server, &aw, &ah);
+
+    apr_uint32_t pos = apr_atomic_read32(&m->la_pos);
+    int vals[BS_M_LA_SLOTS], n = 0, peak = ah;
+    for (int i = 0; i < BS_M_LA_SLOTS; i++) {
+        apr_uint32_t idx =
+            (pos + BS_M_LA_SLOTS - (apr_uint32_t)i) % BS_M_LA_SLOTS;
+        apr_uint16_t v = m->la_ring[idx];
+        if (v == BS_M_LA_EMPTY) break;
+        vals[n++] = v;
+        if (v > peak) peak = v;
+    }
+    if (n < 2) return;
+    /* A tenth of headroom above whatever tops the axis. Without it the
+     * quiet case -- where the peak IS the hot threshold -- squeezes the
+     * red band to zero width and runs the line along the top edge, so
+     * the chart shows neither where "too high" is nor that today was
+     * nowhere near it. */
+    int seen_peak = peak;          /* before headroom: a real observation */
+    peak = peak + peak / 10;
+
+    /* Plot box inside the viewBox; the margins hold the tick labels. */
+    const int W = 360, H = 96;
+    const int X0 = 34, X1 = 356, Y0 = 6, Y1 = 72;
+    const int PH = Y1 - Y0;
+    #define BS_LA_Y(v) (Y1 - ((v) * PH) / peak)
+    #define BS_LA_X(i) (X1 - ((i) * (X1 - X0)) / (BS_M_LA_SLOTS - 1))
+
+    ap_rprintf(r, "<svg class='spark' viewBox='0 0 %d %d' role='img' "
+                  "aria-label='per-CPU load average over the last hour'>",
+               W, H);
+
+    /* Gradient stops are the thresholds, expressed as a fraction of the
+     * axis. gradientUnits='userSpaceOnUse' so the stops track the plot
+     * box rather than the path's own bounding box -- otherwise the
+     * colours would rescale with whatever the line happens to span. */
+    ap_rprintf(r,
+        "<defs><linearGradient id='lag' gradientUnits='userSpaceOnUse' "
+        "x1='0' y1='%d' x2='0' y2='%d'>"
+        "<stop offset='0' stop-color='var(--c1)'/>"
+        "<stop offset='%d%%' stop-color='var(--c1)'/>"
+        "<stop offset='%d%%' stop-color='var(--warn)'/>"
+        "<stop offset='%d%%' stop-color='var(--c2)'/>"
+        "<stop offset='100%%' stop-color='var(--crit)'/>"
+        "</linearGradient></defs>",
+        Y1, Y0,
+        (aw * 50) / peak,      /* still calm below half of warm */
+        (aw * 100) / peak,     /* amber from warm */
+        (ah * 100) / peak);    /* orange from hot, red above */
+
+    /* Threshold guides. */
+    ap_rprintf(r, "<line x1='%d' y1='%d' x2='%d' y2='%d' "
+                  "stroke='var(--warn)' stroke-width='1' "
+                  "stroke-dasharray='3 3' opacity='.55'/>",
+               X0, BS_LA_Y(aw), X1, BS_LA_Y(aw));
+    ap_rprintf(r, "<line x1='%d' y1='%d' x2='%d' y2='%d' "
+                  "stroke='var(--crit)' stroke-width='1' "
+                  "stroke-dasharray='3 3' opacity='.55'/>",
+               X0, BS_LA_Y(ah), X1, BS_LA_Y(ah));
+
+    /* Axes. */
+    ap_rprintf(r, "<line x1='%d' y1='%d' x2='%d' y2='%d' "
+                  "stroke='var(--line)' stroke-width='1'/>",
+               X0, Y1, X1, Y1);
+    ap_rprintf(r, "<line x1='%d' y1='%d' x2='%d' y2='%d' "
+                  "stroke='var(--line)' stroke-width='1'/>",
+               X0, Y0, X0, Y1);
+
+    /* Y ticks: baseline, the two thresholds, and the peak when it rises
+     * above hot -- four labels at most, which is all that fits. */
+    {
+        int yv[4]; int yn = 0;
+        yv[yn++] = 0; yv[yn++] = aw; yv[yn++] = ah;
+        /* Label the observed peak only when load actually rose above
+         * hot. Labelling the headroom-inflated axis top would claim a
+         * reading that never happened. */
+        if (seen_peak > ah) yv[yn++] = seen_peak;
+        for (int i = 0; i < yn; i++) {
+            int y = BS_LA_Y(yv[i]);
+            ap_rprintf(r, "<line x1='%d' y1='%d' x2='%d' y2='%d' "
+                          "stroke='var(--line)'/>", X0 - 3, y, X0, y);
+            ap_rprintf(r, "<text x='%d' y='%d' text-anchor='end' "
+                          "font-size='8' fill='var(--muted)'>%d.%02d</text>",
+                       X0 - 5, y + 3, yv[i] / 100, yv[i] % 100);
+        }
+    }
+
+    /* X ticks every 15 minutes, drawn only where there is data. */
+    {
+        for (int mins = 0; mins <= 60; mins += 15) {
+            int i = (mins * 60) / BS_M_LA_PERIOD;
+            /* The ring holds 719 intervals, so a full hour lands one
+             * slot past the end; clamp so the -60m tick sits on the
+             * left edge instead of being dropped. */
+            if (i > BS_M_LA_SLOTS - 1) i = BS_M_LA_SLOTS - 1;
+            int x = BS_LA_X(i);
+            ap_rprintf(r, "<line x1='%d' y1='%d' x2='%d' y2='%d' "
+                          "stroke='var(--line)'/>", x, Y1, x, Y1 + 3);
+            if (mins == 0) {
+                ap_rprintf(r, "<text x='%d' y='%d' text-anchor='end' "
+                              "font-size='8' fill='var(--muted)'>now</text>",
+                           x, Y1 + 13);
+            } else {
+                ap_rprintf(r, "<text x='%d' y='%d' text-anchor='middle' "
+                              "font-size='8' fill='var(--muted)'>-%dm</text>",
+                           x, Y1 + 13, mins);
+            }
+        }
+    }
+
+    ap_rputs("<polyline fill='none' stroke='url(#lag)' stroke-width='1.6' "
+             "stroke-linejoin='round' points='", r);
+    for (int i = n - 1; i >= 0; i--) {
+        ap_rprintf(r, "%d,%d ", BS_LA_X(i), BS_LA_Y(vals[i]));
+    }
+    ap_rputs("'/></svg>", r);
+    #undef BS_LA_Y
+    #undef BS_LA_X
+}
+
 static const char *bs_d_window_label(int span)
 {
     switch (span) {
@@ -2091,6 +2234,16 @@ static void bs_d_page_open(request_rec *r, const char *title,
       "nav.rf .ts{margin-left:auto;font-variant-numeric:tabular-nums}"
       "section{margin:0 0 28px}"
       ".kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}"
+      /* The load box holds a number and a sparkline side by side, so
+       * it needs roughly twice the width of a plain stat tile. */
+      ".kpi-load{grid-column:span 2;min-width:390px}"
+      ".loadrow{display:flex;align-items:center;gap:14px}"
+      ".loadrow .v{flex:none}"
+      /* Taller than a sparkline: tick labels need the room. Still
+       * inside the KPI box, just a chart rather than a squiggle. */
+      ".spark{flex:1;min-width:0;height:96px;display:block}"
+      "@media(max-width:600px){.kpi-load{grid-column:span 1;"
+      "min-width:0}.spark{display:none}}"
       /* Audience tabs. Plain links, because the selection lives in the
        * query string -- see the `tab` parse -- so it survives the
        * auto-refresh. Ordinary anchors are keyboard-operable and
@@ -2832,87 +2985,21 @@ int bs_dashboard_handler(request_rec *r)
         ap_rputs("<section><h2>Server load <span style='text-transform:"
                  "none;font-weight:400;color:var(--muted)'>right now"
                  "</span></h2><div class='kpis'>", r);
-        ap_rprintf(r, "<div class='kpi'><div class='k'>Load per CPU</div>"
-                      "<div class='v'>%u.%02u</div>"
-                      "<div class='n'>1-minute average</div></div>",
-                   la / 100, la % 100);
+        /* Number and sparkline share one box: the value says where you
+         * are, the line says how you got here, and reading one without
+         * the other is what made four overnight spikes look like
+         * unrelated events. */
+        ap_rprintf(r, "<div class='kpi kpi-load'><div class='k'>Load per "
+                      "CPU</div><div class='loadrow'><div class='v'>"
+                      "%u.%02u</div>", la / 100, la % 100);
+        bs_d_load_spark(r);
+        ap_rputs("</div><div class='n'>1-minute average, last hour"
+                 "</div></div>", r);
         ap_rprintf(r, "<div class='kpi'><div class='k'>Load state</div>"
                       "<div class='v' style='color:%s'>%s</div>"
                       "<div class='n'>what policy matches on</div></div>",
                    tone, lname);
         ap_rputs("</div>", r);   /* closes the KPI row */
-        /* One hour of per-CPU load average as an area chart.
-         *
-         * Inline SVG, no JavaScript, same as every other chart here.
-         * Walks the ring backwards from the newest sample so a
-         * partly-filled ring simply draws a shorter line -- the first
-         * BS_M_LA_EMPTY ends the series rather than dropping it to
-         * zero, which would invent an hour of idle that never happened.
-         *
-         * The y-axis is scaled to the larger of the observed peak and
-         * the hot threshold, so the threshold guides are always on
-         * screen: a graph of a quiet hour that hides where "hot" sits
-         * tells you the level without telling you whether it matters. */
-        {
-            bs_metrics *m = bs_shm.metrics;
-            if (m) {
-                int aw, ah;
-                bs_loadavg_thresholds(r->server, &aw, &ah);
-                apr_uint32_t pos = apr_atomic_read32(&m->la_pos);
-                int vals[BS_M_LA_SLOTS], n = 0, peak = ah;
-                for (int i = 0; i < BS_M_LA_SLOTS; i++) {
-                    apr_uint32_t idx =
-                        (pos + BS_M_LA_SLOTS - (apr_uint32_t)i) % BS_M_LA_SLOTS;
-                    apr_uint16_t v = m->la_ring[idx];
-                    if (v == BS_M_LA_EMPTY) break;
-                    vals[n++] = v;
-                    if (v > peak) peak = v;
-                }
-                if (n >= 2) {
-                    const int W = 600, H = 90;
-                    ap_rprintf(r,
-                        "<svg viewBox='0 0 %d %d' width='100%%' "
-                        "height='%d' role='img' preserveAspectRatio='none' "
-                        "aria-label='per-CPU load average, last hour'>",
-                        W, H, H);
-                    /* Threshold guides, drawn under the series. */
-                    int yw = H - (aw * H) / peak;
-                    int yh = H - (ah * H) / peak;
-                    ap_rprintf(r, "<line x1='0' y1='%d' x2='%d' y2='%d' "
-                                  "stroke='var(--warn)' stroke-width='1' "
-                                  "stroke-dasharray='4 4' opacity='.7'/>",
-                               yw, W, yw);
-                    ap_rprintf(r, "<line x1='0' y1='%d' x2='%d' y2='%d' "
-                                  "stroke='var(--crit)' stroke-width='1' "
-                                  "stroke-dasharray='4 4' opacity='.7'/>",
-                               yh, W, yh);
-                    /* Newest sample on the right. */
-                    ap_rputs("<polyline fill='none' stroke='var(--t2)' "
-                             "stroke-width='1.5' stroke-linejoin='round' "
-                             "points='", r);
-                    for (int i = n - 1; i >= 0; i--) {
-                        int x = W - (i * W) / (BS_M_LA_SLOTS - 1);
-                        int y = H - (vals[i] * H) / peak;
-                        ap_rprintf(r, "%d,%d ", x, y);
-                    }
-                    ap_rputs("'/></svg>", r);
-                    ap_rprintf(r, "<p class='note'>Per-CPU load average, "
-                        "newest on the right, %d sample%s at %ds "
-                        "(%d min). Dashed guides are the warm (%d.%02d) "
-                        "and hot (%d.%02d) thresholds. Sampled every %ds "
-                        "because that is how often the kernel recomputes "
-                        "the value.</p>",
-                        n, n == 1 ? "" : "s", BS_M_LA_PERIOD,
-                        (n * BS_M_LA_PERIOD) / 60,
-                        aw / 100, aw % 100, ah / 100, ah % 100,
-                        BS_M_LA_PERIOD);
-                } else {
-                    ap_rputs("<p class='note'>Load history is still "
-                             "filling; the graph appears after a few "
-                             "samples.</p>", r);
-                }
-            }
-        }
         ap_rputs("<p class='note'>Load state is the most severe of "
                  "three signals: per-CPU load average, Apache busy-worker "
                  "ratio, and any external state file. Rules match it with "

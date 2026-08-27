@@ -80,6 +80,37 @@ entirely, so an IP carrying `honeypot_hit`, `fake_bot`, `scanner_probe`
 or `pow_fail_streak` is still challenged. `BotShieldChallenge Off` is
 applied after the floor, so it holds.
 
+**This has bitten a production deployment, so it is worth spelling out
+what the ceiling does and does not buy.** A hub running only the silent
+tier parked `Hard` and `Captcha` at `10000`, believing form and captcha
+were unreachable. They were not: the compiled-in flag defaults force a
+tier directly.
+
+| flag | forced tier | score |
+|---|---|---|
+| `honeypot_hit` | captcha | 60 |
+| `fake_bot` | captcha | 80 |
+| `scanner_probe` | **form** | 50 |
+| `pow_fail_streak` | silent | 30 |
+
+A residential visitor who had already solved a silent challenge —
+`cookie=solved` — was pushed into the untested form widget six seconds
+later because their IP carried `scanner_probe`. 124 of the 132
+form-tier decisions in that window carried solve proof.
+
+To genuinely cap the tier, reset each floor and re-add only the score:
+
+```apache
+BotShieldFlagTrigger honeypot_hit  reset action=score add=60
+BotShieldFlagTrigger fake_bot      reset action=score add=80
+BotShieldFlagTrigger scanner_probe reset action=score add=50
+```
+
+`reset` is required rather than stylistic: **tier floors MAX across
+triggers**, so adding a lower floor beside the compiled-in one is
+silently useless — it MAXes straight back up. `pow_fail_streak` needs
+no reset; its floor is already `silent`.
+
 `BotShieldDebug` returns `403 "Hello World"` for every request in
 scope — useful as a smoke test that the hook is firing.
 
