@@ -67,6 +67,9 @@ const char *bs_set_loadavg_warm(cmd_parms *cmd, void *dconf,
                                 const char *arg);
 const char *bs_set_loadavg_hot(cmd_parms *cmd, void *dconf,
                                const char *arg);
+/* Effective per-CPU load-average thresholds, defaults applied. */
+void bs_loadavg_thresholds(server_rec *s, int *warm, int *hot);
+
 /* Last sampled 1-minute load average per CPU, in hundredths. */
 apr_uint32_t bs_loadavg_current(void);
 

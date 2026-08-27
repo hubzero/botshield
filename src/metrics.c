@@ -2813,6 +2813,113 @@ int bs_dashboard_handler(request_rec *r)
     bs_d_view_controls(r, span, refresh, vsel, vq);
     bs_d_page_body(r);
 
+    /* Server load. Point-in-time like the capacity gauges further down,
+     * not a windowed figure -- a load average carries its own window.
+     *
+     * Both signals are shown because they disagree in the way that
+     * matters here: with 1024 MaxRequestWorkers on 6 cores, four
+     * outages ran at 2-3% busy workers while the per-CPU load average
+     * was well past 2.0. A dashboard showing only the worker ratio
+     * would have reported those incidents as an idle server. */
+    {
+        apr_uint32_t la = bs_loadavg_current();
+        bs_load_state ls = bs_load_current();
+        const char *lname = (ls == BS_LOAD_HOT)  ? "hot"
+                          : (ls == BS_LOAD_WARM) ? "warm" : "normal";
+        const char *tone  = (ls == BS_LOAD_HOT)  ? "var(--crit)"
+                          : (ls == BS_LOAD_WARM) ? "var(--warn)"
+                                                 : "var(--good)";
+        ap_rputs("<section><h2>Server load <span style='text-transform:"
+                 "none;font-weight:400;color:var(--muted)'>right now"
+                 "</span></h2><div class='kpis'>", r);
+        ap_rprintf(r, "<div class='kpi'><div class='k'>Load per CPU</div>"
+                      "<div class='v'>%u.%02u</div>"
+                      "<div class='n'>1-minute average</div></div>",
+                   la / 100, la % 100);
+        ap_rprintf(r, "<div class='kpi'><div class='k'>Load state</div>"
+                      "<div class='v' style='color:%s'>%s</div>"
+                      "<div class='n'>what policy matches on</div></div>",
+                   tone, lname);
+        ap_rputs("</div>", r);   /* closes the KPI row */
+        /* One hour of per-CPU load average as an area chart.
+         *
+         * Inline SVG, no JavaScript, same as every other chart here.
+         * Walks the ring backwards from the newest sample so a
+         * partly-filled ring simply draws a shorter line -- the first
+         * BS_M_LA_EMPTY ends the series rather than dropping it to
+         * zero, which would invent an hour of idle that never happened.
+         *
+         * The y-axis is scaled to the larger of the observed peak and
+         * the hot threshold, so the threshold guides are always on
+         * screen: a graph of a quiet hour that hides where "hot" sits
+         * tells you the level without telling you whether it matters. */
+        {
+            bs_metrics *m = bs_shm.metrics;
+            if (m) {
+                int aw, ah;
+                bs_loadavg_thresholds(r->server, &aw, &ah);
+                apr_uint32_t pos = apr_atomic_read32(&m->la_pos);
+                int vals[BS_M_LA_SLOTS], n = 0, peak = ah;
+                for (int i = 0; i < BS_M_LA_SLOTS; i++) {
+                    apr_uint32_t idx =
+                        (pos + BS_M_LA_SLOTS - (apr_uint32_t)i) % BS_M_LA_SLOTS;
+                    apr_uint16_t v = m->la_ring[idx];
+                    if (v == BS_M_LA_EMPTY) break;
+                    vals[n++] = v;
+                    if (v > peak) peak = v;
+                }
+                if (n >= 2) {
+                    const int W = 600, H = 90;
+                    ap_rprintf(r,
+                        "<svg viewBox='0 0 %d %d' width='100%%' "
+                        "height='%d' role='img' preserveAspectRatio='none' "
+                        "aria-label='per-CPU load average, last hour'>",
+                        W, H, H);
+                    /* Threshold guides, drawn under the series. */
+                    int yw = H - (aw * H) / peak;
+                    int yh = H - (ah * H) / peak;
+                    ap_rprintf(r, "<line x1='0' y1='%d' x2='%d' y2='%d' "
+                                  "stroke='var(--warn)' stroke-width='1' "
+                                  "stroke-dasharray='4 4' opacity='.7'/>",
+                               yw, W, yw);
+                    ap_rprintf(r, "<line x1='0' y1='%d' x2='%d' y2='%d' "
+                                  "stroke='var(--crit)' stroke-width='1' "
+                                  "stroke-dasharray='4 4' opacity='.7'/>",
+                               yh, W, yh);
+                    /* Newest sample on the right. */
+                    ap_rputs("<polyline fill='none' stroke='var(--t2)' "
+                             "stroke-width='1.5' stroke-linejoin='round' "
+                             "points='", r);
+                    for (int i = n - 1; i >= 0; i--) {
+                        int x = W - (i * W) / (BS_M_LA_SLOTS - 1);
+                        int y = H - (vals[i] * H) / peak;
+                        ap_rprintf(r, "%d,%d ", x, y);
+                    }
+                    ap_rputs("'/></svg>", r);
+                    ap_rprintf(r, "<p class='note'>Per-CPU load average, "
+                        "newest on the right, %d sample%s at %ds "
+                        "(%d min). Dashed guides are the warm (%d.%02d) "
+                        "and hot (%d.%02d) thresholds. Sampled every %ds "
+                        "because that is how often the kernel recomputes "
+                        "the value.</p>",
+                        n, n == 1 ? "" : "s", BS_M_LA_PERIOD,
+                        (n * BS_M_LA_PERIOD) / 60,
+                        aw / 100, aw % 100, ah / 100, ah % 100,
+                        BS_M_LA_PERIOD);
+                } else {
+                    ap_rputs("<p class='note'>Load history is still "
+                             "filling; the graph appears after a few "
+                             "samples.</p>", r);
+                }
+            }
+        }
+        ap_rputs("<p class='note'>Load state is the most severe of "
+                 "three signals: per-CPU load average, Apache busy-worker "
+                 "ratio, and any external state file. Rules match it with "
+                 "<code>minload=warm</code> or <code>minload=hot</code>."
+                 "</p></section>", r);
+    }
+
     /* Site traffic first: it is the denominator everything below is a
      * share of, and with the enable scoped to a <Location> the gap
      * between requests and decisions is the single most important
@@ -3022,39 +3129,6 @@ int bs_dashboard_handler(request_rec *r)
     /* Live capacity — ratios against a limit, so meters. These are
      * point-in-time gauges and ignore the window selector; labelled as
      * such rather than left to imply they follow it. */
-    /* Server load. Point-in-time like the capacity gauges below, not a
-     * windowed figure -- a load average already carries its own window.
-     *
-     * Both signals are shown because they disagree in the way that
-     * matters here: with 1024 MaxRequestWorkers on 6 cores, four
-     * outages ran at 2-3% busy workers while the per-CPU load average
-     * was well past 2.0. A dashboard showing only the worker ratio
-     * would have reported those incidents as an idle server. */
-    {
-        apr_uint32_t la = bs_loadavg_current();
-        bs_load_state ls = bs_load_current();
-        const char *lname = (ls == BS_LOAD_HOT)  ? "hot"
-                          : (ls == BS_LOAD_WARM) ? "warm" : "normal";
-        const char *tone  = (ls == BS_LOAD_HOT)  ? "var(--crit)"
-                          : (ls == BS_LOAD_WARM) ? "var(--warn)"
-                                                 : "var(--good)";
-        ap_rputs("<section><h2>Server load <span style='text-transform:"
-                 "none;font-weight:400;color:var(--muted)'>right now"
-                 "</span></h2><div class='kpis'>", r);
-        ap_rprintf(r, "<div class='kpi'><div class='k'>Load per CPU</div>"
-                      "<div class='v'>%u.%02u</div>"
-                      "<div class='n'>1-minute average</div></div>",
-                   la / 100, la % 100);
-        ap_rprintf(r, "<div class='kpi'><div class='k'>Load state</div>"
-                      "<div class='v' style='color:%s'>%s</div>"
-                      "<div class='n'>what policy matches on</div></div>",
-                   tone, lname);
-        ap_rputs("</div><p class='note'>Load state is the most severe of "
-                 "three signals: per-CPU load average, Apache busy-worker "
-                 "ratio, and any external state file. Rules match it with "
-                 "<code>minload=warm</code> or <code>minload=hot</code>."
-                 "</p></section>", r);
-    }
 
     ap_rputs("<section><h2>Capacity now <span style='text-transform:none;"
              "font-weight:400'>(live, not windowed)</span></h2>", r);
