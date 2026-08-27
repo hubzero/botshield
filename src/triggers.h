@@ -182,6 +182,18 @@ typedef struct {
      *
      * -1 = no condition, 1 = must exist, 0 = must not exist. */
     int                exists_pred;
+    /* solved=yes|no -- does the client hold a cookie proving it passed
+     * a challenge? The single strongest predicate this module has: on a
+     * production hub 100.0% of challenges carried "no solve proof", so
+     * this one key reproduces what the whole scoring ladder decided.
+     * -1 = no condition. */
+    int                solved_pred;
+    /* minload=normal|warm|hot -- fires when the current load state is
+     * AT OR ABOVE this level. Spelled as a minimum rather than an
+     * operator so it parses as an ordinary key=value; "fires from warm
+     * upwards" is the only comparison a shed ladder ever wants.
+     * -1 = no condition. */
+    int                minload;
     /* ua= / ipspec= cohort. has_cohort==0 means no UA/IP restriction. */
     bs_cohort          cohort;
     int                has_cohort;

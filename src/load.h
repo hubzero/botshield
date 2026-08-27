@@ -63,6 +63,13 @@ const char *bs_set_load_refresh(cmd_parms *cmd, void *dconf,
 /* BotShieldLoadWarmThreshold <percent> — busy-worker ratio at which
  * a sample is classified warm. 1..99, default
  * BS_DEFAULT_LOAD_WARM_RATIO_PCT. */
+const char *bs_set_loadavg_warm(cmd_parms *cmd, void *dconf,
+                                const char *arg);
+const char *bs_set_loadavg_hot(cmd_parms *cmd, void *dconf,
+                               const char *arg);
+/* Last sampled 1-minute load average per CPU, in hundredths. */
+apr_uint32_t bs_loadavg_current(void);
+
 const char *bs_set_load_warm_pct(cmd_parms *cmd, void *dconf,
                                  const char *arg);
 

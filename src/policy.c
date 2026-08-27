@@ -401,6 +401,16 @@ int bs_check_policy(request_rec *r)
                 int have = (r->finfo.filetype != APR_NOFILE);
                 if (have != t->exists_pred) continue;
             }
+            /* Load axis before the cohort: an atomic read is cheaper
+             * than the UA classifier, and under a shed ladder most
+             * rules will not be at their level. */
+            if (t->minload >= 0 && (int)bs_load_current() < t->minload)
+                continue;
+            if (t->solved_pred >= 0) {
+                const char *sv = apr_table_get(r->notes, BS_CK_SOLVED_NOTE);
+                int solved = (sv && *sv == '1');
+                if (solved != t->solved_pred) continue;
+            }
             if (t->has_cohort && !bs_cohort_matches(&t->cohort, ua, r))
                 continue;
             bs_trigger_exec_outcome o = bs_apply_trigger_action(

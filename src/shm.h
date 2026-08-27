@@ -335,6 +335,18 @@ typedef enum {
 #define BS_DEFAULT_LOAD_REFRESH_SEC      1
 #define BS_DEFAULT_LOAD_WARM_RATIO_PCT   65    /* busy_workers / total */
 #define BS_DEFAULT_LOAD_HOT_RATIO_PCT    85
+
+/* Load-average thresholds, per CPU in hundredths: 100 = 1.0 per core.
+ *
+ * Same unit the host shedding script uses, whose defaults are HIGH =
+ * 2x cores and LOW = 1x cores. These sit UNDER that HIGH on purpose:
+ * the script publishes a marker the vhost turns into a flat 503 for
+ * everyone on the PHP entry points, which is the right LAST rung and a
+ * poor first one. Firing earlier lets policy shed selectively --
+ * crawlers first, then clients with no solve proof -- while headroom
+ * remains, so the blunt rung only arrives if that was not enough. */
+#define BS_DEFAULT_LOADAVG_WARM  100   /* 1.0 per core */
+#define BS_DEFAULT_LOADAVG_HOT   150   /* 1.5 per core */
 /* Hysteresis: asymmetric. Easy to enter (3 escalating samples to
  * warm, 2 more to hot), slow to exit (5 normal samples to demote
  * one level). Tunes the responsiveness vs. flap-resistance tradeoff. */
@@ -447,11 +459,15 @@ typedef struct {
     /* === Cacheline 1: hot-read, rare-write === */
     apr_uint32_t  bloom_active;
     apr_uint32_t  load_state;
+    /* Last sampled 1-minute load average per CPU, in hundredths (3.0 on
+     * 6 cores -> 50). Published for the dashboard; the state above is
+     * what policy matches on. */
+    apr_uint32_t  loadavg_pct;
     apr_uint32_t  load_state_since_sec;
     apr_uint32_t  load_escalation_streak;
     apr_uint32_t  load_recovery_streak;
     apr_uint32_t  load_state_changes;
-    apr_uint32_t  _pad_cl1[10];
+    apr_uint32_t  _pad_cl1[9];
 
     /* === Cacheline 2: write-frequently === */
     apr_uint32_t  cv_inflight;
