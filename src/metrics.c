@@ -1846,13 +1846,17 @@ static void bs_d_chartbox_open(request_rec *r, const char *id,
                                const char *title,
                                const char *state, const char *tone)
 {
+    /* Filled pill. Ink is chosen against the fill rather than fixed to
+     * white: --warn is a mid amber (#fab219) and white on it is around
+     * 1.9:1, which fails badly. Dark ink on amber clears 4.5:1; white
+     * clears it on the green, red and grey. */
+    const char *ink = strstr(tone, "warn") ? "#231f11" : "#fff";
     ap_rprintf(r,
         "<input type='checkbox' class='zoomcb' id='zoom-%s'>"
         "<div class='kpi kpi-load' id='box-%s'>"
-        "<span class='pill' style='color:%s'>"
-        "<span class='dot' style='background:%s'></span>%s</span>"
+        "<span class='pill' style='background:%s;color:%s'>%s</span>"
         "<div class='k'>%s</div><div class='loadrow'>",
-        id, id, tone, tone, state, title);
+        id, id, tone, ink, state, title);
 }
 
 /* Close the box, wrapping the chart just emitted in the toggle label.
@@ -2290,7 +2294,7 @@ static void bs_d_page_open(request_rec *r, const char *title,
       "aside{background:var(--surface);border-right:1px solid var(--line);"
       "padding:0 0 24px;min-height:100vh;position:sticky;top:0;"
       "overflow:visible;display:flex;flex-direction:column;gap:0}"
-      "main{padding:26px 26px 60px;max-width:1000px;min-width:0}"
+      "main{padding:6px 26px 60px;max-width:1000px;min-width:0}"
       /* Rail header: product name and the collapse control on one line,
        * the way a sidebar you can put away usually reads. */
       ".railhead{display:flex;align-items:center;justify-content:space-"
@@ -2413,7 +2417,7 @@ static void bs_d_page_open(request_rec *r, const char *title,
       "#rail:checked~.shell main>.icontog{display:inline-flex}}"
       "@media(max-width:900px){.shell{grid-template-columns:1fr;gap:8px}"
       "aside{position:static}}"
-      "body{margin:0;padding:28px 24px 56px;background:var(--surface);color:var(--ink);"
+      "body{margin:0;padding:10px 24px 56px;background:var(--surface);color:var(--ink);"
       "font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}"
       "main{min-width:0}"
       "h1{font-size:19px;margin:0 0 2px;font-weight:600}"
@@ -2531,12 +2535,11 @@ static void bs_d_page_open(request_rec *r, const char *title,
        * without spending a row on it. Colour is doubled by the word,
        * so the state never rides on hue alone. */
       ".kpi-load{position:relative}"
-      ".pill{position:absolute;top:10px;right:12px;display:inline-flex;"
-      "align-items:center;gap:5px;font-size:11px;font-weight:600;"
-      "letter-spacing:.02em;background:var(--surface);"
-      "border:1px solid var(--line);border-radius:999px;padding:2px 8px;"
-      "white-space:nowrap}"
-      ".pill .dot{width:7px;height:7px;border-radius:50%;flex:none}"
+      ".capline{margin:0;font-size:13px;color:var(--ink2)}"
+      ".capline span{color:var(--muted)}"
+      ".pill{position:absolute;top:10px;right:12px;font-size:11px;"
+      "font-weight:700;letter-spacing:.03em;text-transform:uppercase;"
+      "border-radius:999px;padding:3px 9px;white-space:nowrap}"
       "@media(max-width:600px){.kpi-load{grid-column:span 1;"
       "min-width:0}.spark{display:none}"
       ".loadpair{grid-template-columns:1fr}}"
@@ -3703,15 +3706,53 @@ int bs_dashboard_handler(request_rec *r)
      * point-in-time gauges and ignore the window selector; labelled as
      * such rather than left to imply they follow it. */
 
-    ap_rputs("<section><h2>Capacity now <span style='text-transform:none;"
-             "font-weight:400'>(live, not windowed)</span></h2>", r);
-    bs_d_meter(r, "Flagged IPs", bs_gauges.flagged_used,
-               (apr_uint64_t)bs_shm.flagged_capacity);
-    bs_d_meter(r, "Safeguard entries", bs_gauges.safeguard_used,
-               (apr_uint64_t)bs_shm.safeguard_capacity);
-    bs_d_meter(r, "Rate-limit strikes", bs_gauges.strike_used,
-               (apr_uint64_t)bs_shm.strike_capacity);
-    ap_rputs("</section>", r);
+    /* SHM table occupancy. This is NOT a load signal -- it measures
+     * BotShield's own memory, not the machine's -- so it does not
+     * overlap the four monitors above. But it is inert in normal
+     * operation: measured here at 0.06%, 0.03% and 0.00% of 50,000,
+     * which is three meters drawing zero and a section's worth of
+     * height to do it.
+     *
+     * It still has to be visible, because filling one of these tables
+     * is a real failure mode: probe saturation starts evicting entries
+     * and the module logs about it. So it is quiet while quiet and
+     * expands the moment anything approaches its ceiling.
+     *
+     * 25% is the trip point rather than something higher because these
+     * are open-addressed tables -- probe cost climbs well before the
+     * table is full, so "getting busy" matters earlier than "nearly
+     * out of room". */
+    {
+        struct { const char *label; apr_uint64_t used, cap; } tab[3] = {
+            { "Flagged IPs",        bs_gauges.flagged_used,
+              (apr_uint64_t)bs_shm.flagged_capacity },
+            { "Safeguard entries",  bs_gauges.safeguard_used,
+              (apr_uint64_t)bs_shm.safeguard_capacity },
+            { "Rate-limit strikes", bs_gauges.strike_used,
+              (apr_uint64_t)bs_shm.strike_capacity },
+        };
+        int busy = 0;
+        for (int i = 0; i < 3; i++) {
+            if (tab[i].cap && tab[i].used * 4 >= tab[i].cap) busy = 1;
+        }
+        ap_rputs("<section><h2>Capacity now <span style='text-transform:none;"
+                 "font-weight:400'>(live, not windowed)</span></h2>", r);
+        if (busy) {
+            for (int i = 0; i < 3; i++) {
+                bs_d_meter(r, tab[i].label, tab[i].used, tab[i].cap);
+            }
+        } else {
+            ap_rputs("<p class='capline'>", r);
+            for (int i = 0; i < 3; i++) {
+                ap_rprintf(r, "%s<span>%s</span> %" APR_UINT64_T_FMT
+                              " <span>of %" APR_UINT64_T_FMT "</span>",
+                           i ? " &middot; " : "", tab[i].label,
+                           tab[i].used, tab[i].cap);
+            }
+            ap_rputs("</p>", r);
+        }
+        ap_rputs("</section>", r);
+    }
 
     /* The Outcomes table that used to sit here is gone. Five of its
      * rows were already on the page: challenged, block and rate_limited
