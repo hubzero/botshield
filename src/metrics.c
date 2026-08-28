@@ -2344,7 +2344,11 @@ static void bs_d_page_open(request_rec *r, const char *title,
       /* Compact: four boxes is a lot of vertical space at the full
        * chart height, and these are a glanceable header for the page,
        * not the subject of it. */
-      ".loadpair .kpi-load{min-width:0;padding:10px 12px}"
+      /* span 1, explicitly. .kpi-load carries grid-column:span 2 from
+       * the wide auto-fit KPI row it was designed for; inherited into
+       * a 2-column grid that makes every box full-width and stacks
+       * the four monitors into four rows instead of a 2x2. */
+      ".loadpair .kpi-load{grid-column:span 1;min-width:0;padding:10px 12px}"
       ".loadpair .spark{height:68px}"
       ".loadpair .v{font-size:22px}"
       ".loadpair .loadrow{gap:10px}"
