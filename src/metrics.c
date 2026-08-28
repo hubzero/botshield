@@ -645,7 +645,8 @@ void bs_metrics_bucket_add(int vhost_idx, int tier_idx,
  * handles — static assets included — so anything more expensive would
  * be a tax on the whole site, not just the protected scopes. */
 static void bs_m_slot_traffic(bs_metrics_slot *slot, apr_uint64_t epoch,
-                              int status_idx, int has_cookie, int resp_idx, int group_idx,
+                              int status_idx, int code_idx, int has_cookie,
+                              int resp_idx, int group_idx,
                               int class_idx)
 {
     bs_m_slot_claim(slot, epoch);
@@ -656,6 +657,9 @@ static void bs_m_slot_traffic(bs_metrics_slot *slot, apr_uint64_t epoch,
     if (status_idx >= 0) {
         __atomic_fetch_add(&slot->req_status[status_idx], 1,
                            __ATOMIC_RELAXED);
+    }
+    if (code_idx >= 0) {
+        __atomic_fetch_add(&slot->req_code[code_idx], 1, __ATOMIC_RELAXED);
     }
     if (resp_idx >= 0) {
         __atomic_fetch_add(&slot->req_resp[resp_idx], 1, __ATOMIC_RELAXED);
@@ -669,8 +673,8 @@ static void bs_m_slot_traffic(bs_metrics_slot *slot, apr_uint64_t epoch,
     }
 }
 
-void bs_metrics_traffic_add(int vhost_idx, int status_idx, int has_cookie,
-                            int resp_idx, int class_idx)
+void bs_metrics_traffic_add(int vhost_idx, int status_idx, int code_idx,
+                            int has_cookie, int resp_idx, int class_idx)
 {
     if (!bs_shm.metrics) return;
     apr_uint64_t minute = (apr_uint64_t)(apr_time_sec(apr_time_now()) / 60);
@@ -684,11 +688,11 @@ void bs_metrics_traffic_add(int vhost_idx, int status_idx, int has_cookie,
         bs_metrics *m = blocks[b];
         if (!m) continue;
         bs_m_slot_traffic(&m->min_slots[minute % BS_M_MIN_SLOTS],
-                          minute, status_idx, has_cookie, resp_idx,
-                          group_idx, class_idx);
+                          minute, status_idx, code_idx, has_cookie,
+                          resp_idx, group_idx, class_idx);
         bs_m_slot_traffic(&m->hour_slots[hour % BS_M_HOUR_SLOTS],
-                          hour, status_idx, has_cookie, resp_idx,
-                          group_idx, class_idx);
+                          hour, status_idx, code_idx, has_cookie,
+                          resp_idx, group_idx, class_idx);
         __atomic_fetch_add(&m->req_total, 1, __ATOMIC_RELAXED);
         if (has_cookie) {
             __atomic_fetch_add(&m->req_cookie, 1, __ATOMIC_RELAXED);
@@ -696,6 +700,9 @@ void bs_metrics_traffic_add(int vhost_idx, int status_idx, int has_cookie,
         if (status_idx >= 0) {
             __atomic_fetch_add(&m->req_status[status_idx], 1,
                                __ATOMIC_RELAXED);
+        }
+        if (code_idx >= 0) {
+            __atomic_fetch_add(&m->req_code[code_idx], 1, __ATOMIC_RELAXED);
         }
         if (resp_idx >= 0) {
             __atomic_fetch_add(&m->req_resp[resp_idx], 1, __ATOMIC_RELAXED);
@@ -737,6 +744,10 @@ static void bs_m_sum_ring(const bs_metrics_slot *ring, int nslots,
         for (int st = 0; st < BS_M_STATUS_COUNT; st++) {
             out->req_status[st] += __atomic_load_n(&ring[i].req_status[st],
                                                    __ATOMIC_RELAXED);
+        }
+        for (int cd = 0; cd < BS_M_CODE_COUNT; cd++) {
+            out->req_code[cd] += __atomic_load_n(&ring[i].req_code[cd],
+                                                 __ATOMIC_RELAXED);
         }
         for (int rk = 0; rk < BS_M_RESP_COUNT; rk++) {
             out->req_resp[rk] += __atomic_load_n(&ring[i].req_resp[rk],
@@ -800,6 +811,10 @@ void bs_metrics_read_window(int span_minutes, int vhost_idx,
             out->req_status[st] =
                 __atomic_load_n(&m->req_status[st],
                                 __ATOMIC_RELAXED);
+        }
+        for (int cd = 0; cd < BS_M_CODE_COUNT; cd++) {
+            out->req_code[cd] =
+                __atomic_load_n(&m->req_code[cd], __ATOMIC_RELAXED);
         }
         for (int rk = 0; rk < BS_M_RESP_COUNT; rk++) {
             out->req_resp[rk] = __atomic_load_n(&m->req_resp[rk],
@@ -1243,6 +1258,30 @@ static void bs_check_resp_status_invariant(request_rec *r, int resp_idx,
     }
 }
 
+/* Exact status code to counter index, or -1 for codes we do not track
+ * individually. Those still reach their class counter, so the
+ * per-code breakdown is always a subset of the class it decomposes
+ * and can be presented as "the rest" without a second lookup. */
+static int bs_status_code_idx(int status)
+{
+    switch (status) {
+    case 200: return BS_M_CODE_200;  case 204: return BS_M_CODE_204;
+    case 206: return BS_M_CODE_206;  case 301: return BS_M_CODE_301;
+    case 302: return BS_M_CODE_302;  case 304: return BS_M_CODE_304;
+    case 400: return BS_M_CODE_400;  case 401: return BS_M_CODE_401;
+    case 403: return BS_M_CODE_403;  case 404: return BS_M_CODE_404;
+    case 408: return BS_M_CODE_408;  case 426: return BS_M_CODE_426;
+    case 429: return BS_M_CODE_429;  case 500: return BS_M_CODE_500;
+    case 502: return BS_M_CODE_502;  case 503: return BS_M_CODE_503;
+    default:  return -1;
+    }
+}
+
+/* Numeric label for each tracked index, for rendering. */
+static const int bs_m_code_values[BS_M_CODE_COUNT] = {
+    200,204,206, 301,302,304, 400,401,403,404,408,426,429, 500,502,503
+};
+
 static int bs_status_class_idx(int status)
 {
     if (status >= 200 && status < 300) return BS_M_STATUS_2XX;
@@ -1277,9 +1316,10 @@ int bs_propagate_decision_env(request_rec *r)
          * cached on r->pool, so reading it here is a pointer deref. */
         const bs_ua_class *uac = bs_classify_request_ua(r);
         int status_idx = bs_status_class_idx(fwd->status);
+        int code_idx   = bs_status_code_idx(fwd->status);
         int resp_idx   = bs_resp_kind_idx(r);
         bs_metrics_traffic_add(scfg_t ? scfg_t->vhost_idx : -1,
-                               status_idx, has_cookie, resp_idx,
+                               status_idx, code_idx, has_cookie, resp_idx,
                                uac ? bs_m_class_idx(uac->label)
                                    : BS_M_CLASS_UNKNOWN);
         bs_check_resp_status_invariant(r, resp_idx, status_idx,
@@ -1789,6 +1829,38 @@ static void bs_d_spark(request_rec *r, const bs_spark_spec *sp)
     #undef BS_LA_X
 }
 
+/* Open a load-monitor box whose chart expands when clicked.
+ *
+ * CSS-only, because this dashboard ships no JavaScript. A hidden
+ * checkbox before the box holds the state and a <label> covering the
+ * chart toggles it; the :checked sibling selector then lets the box
+ * span the full grid width and grow the chart. Clicking again
+ * collapses it.
+ *
+ * The label wraps only the chart, not the whole tile, so selecting the
+ * headline number with the mouse still works.
+ *
+ * `id` must be unique per page -- four of these render on the overview
+ * and a duplicate id would make every label drive the first box. */
+static void bs_d_chartbox_open(request_rec *r, const char *id,
+                               const char *title)
+{
+    ap_rprintf(r,
+        "<input type='checkbox' class='zoomcb' id='zoom-%s'>"
+        "<div class='kpi kpi-load' id='box-%s'>"
+        "<div class='k'>%s</div><div class='loadrow'>", id, id, title);
+}
+
+/* Close the box, wrapping the chart just emitted in the toggle label.
+ * Split from _open so the caller can emit its number and chart between
+ * them without this helper needing to know either. */
+static void bs_d_chartbox_close(request_rec *r, const char *id)
+{
+    ap_rprintf(r,
+        "<label class='zoomlab' for='zoom-%s' title='Click to enlarge'>"
+        "</label></div></div>", id);
+}
+
 /* Per-CPU load average over the last hour. */
 static void bs_d_load_spark(request_rec *r)
 {
@@ -1882,9 +1954,18 @@ static const char *bs_d_pct(apr_pool_t *p, apr_uint64_t num, apr_uint64_t den)
  * squeezed into a sliver or spilling over its neighbour. */
 #define BS_D_INBAR_MIN_PCT 8.0
 
-static void bs_d_stacked(request_rec *r, const char *id, const char *title,
-                         const char **labels, const apr_uint64_t *vals,
-                         const char **fills, int n, apr_uint64_t total)
+/* As bs_d_stacked, but each series may carry a `detail` string that is
+ * appended to the hover text on both the bar segment and the legend
+ * row. Used to break a status class down into the individual codes
+ * inside it -- "4xx" is a poor answer when the question is whether
+ * those are 403s or 404s. NULL detail renders exactly as before. */
+static void bs_d_stacked_detail(request_rec *r, const char *id,
+                                const char *title,
+                                const char **labels,
+                                const apr_uint64_t *vals,
+                                const char **fills,
+                                const char **detail,
+                                int n, apr_uint64_t total)
 {
     ap_rprintf(r, "<section><h2>%s</h2>", title);
     if (!total) {
@@ -1910,8 +1991,9 @@ static void bs_d_stacked(request_rec *r, const char *id, const char *title,
         const char *pcts = bs_d_pct(r->pool, vals[i], total);
         ap_rprintf(r,
             "<div class='seg' style='flex:0 0 %.4f%%;background:%s' "
-            "title='%s: %" APR_UINT64_T_FMT " (%s)'>",
-            pct, fills[i], labels[i], vals[i], pcts);
+            "title='%s: %" APR_UINT64_T_FMT " (%s)%s'>",
+            pct, fills[i], labels[i], vals[i], pcts,
+            (detail && detail[i]) ? detail[i] : "");
         if (pct >= BS_D_INBAR_MIN_PCT) {
             ap_rprintf(r, "<span>%s</span>", pcts);
         }
@@ -1923,12 +2005,22 @@ static void bs_d_stacked(request_rec *r, const char *id, const char *title,
          * also direct-labelled with its value — identity is never
          * carried by colour alone. Text stays in ink tokens; only the
          * swatch wears the series colour. */
-        ap_rprintf(r, "<li><i style='background:%s'></i>%s "
+        ap_rprintf(r, "<li title='%s: %" APR_UINT64_T_FMT "%s'>"
+                      "<i style='background:%s'></i>%s "
                       "<b>%" APR_UINT64_T_FMT "</b> <span>%s</span></li>",
+                   labels[i], vals[i],
+                   (detail && detail[i]) ? detail[i] : "",
                    fills[i], labels[i], vals[i],
                    bs_d_pct(r->pool, vals[i], total));
     }
     ap_rputs("</ul></section>", r);
+}
+
+static void bs_d_stacked(request_rec *r, const char *id, const char *title,
+                         const char **labels, const apr_uint64_t *vals,
+                         const char **fills, int n, apr_uint64_t total)
+{
+    bs_d_stacked_detail(r, id, title, labels, vals, fills, NULL, n, total);
 }
 
 /* Ratio against a limit — a meter on a same-hue track, not a two-slice pie. */
@@ -2352,6 +2444,24 @@ static void bs_d_page_open(request_rec *r, const char *title,
       ".loadpair .spark{height:68px}"
       ".loadpair .v{font-size:22px}"
       ".loadpair .loadrow{gap:10px}"
+      /* Click-to-enlarge, CSS only -- this dashboard ships no
+       * JavaScript. The checkbox lives immediately before its box so
+       * the :checked + .kpi sibling selector can reach it; the label
+       * sits over the chart and toggles it. */
+      ".zoomcb{position:absolute;opacity:0;pointer-events:none}"
+      ".loadrow{position:relative}"
+      ".zoomlab{position:absolute;inset:0;cursor:zoom-in}"
+      ".zoomcb:checked + .kpi .zoomlab{cursor:zoom-out}"
+      /* Expanded: span the full grid width and give the chart real
+       * height. 240px is enough for the tick labels to breathe, which
+       * is the actual reason to enlarge one of these. */
+      ".zoomcb:checked + .kpi{grid-column:1/-1}"
+      ".zoomcb:checked + .kpi .spark{height:240px}"
+      ".zoomcb:checked + .kpi .v{font-size:30px}"
+      /* Keyboard: the checkbox is off-screen but still focusable, so
+       * show a ring on the box when it has focus. */
+      ".zoomcb:focus-visible + .kpi{outline:2px solid var(--c1);"
+      "outline-offset:2px}"
       /* Composite verdict strip above the pair. */
       /* Stacked share bar. overflow:hidden on the rounded track gives
        * the 4px outer corners the old SVG clip-path provided, while
@@ -3228,12 +3338,10 @@ int bs_dashboard_handler(request_rec *r)
          * are, the line says how you got here, and reading one without
          * the other is what made four overnight spikes look like
          * unrelated events. */
-        ap_rprintf(r, "<div class='kpi kpi-load'><div class='k'>Load per "
-                      "CPU</div><div class='loadrow'><div class='v'>"
-                      "%u.%02u</div>", la / 100, la % 100);
+        bs_d_chartbox_open(r, "cpu", "Load per CPU");
+        ap_rprintf(r, "<div class='v'>%u.%02u</div>", la / 100, la % 100);
         bs_d_load_spark(r);
-        ap_rputs("</div><div class='n'>1-minute average, last hour"
-                 "</div></div>", r);
+        bs_d_chartbox_close(r, "cpu");
 
         /* Apache request latency. Deliberately NOT the busy-worker
          * ratio: with 1024 slots on 6 cores that reads 2-3% while the
@@ -3241,9 +3349,8 @@ int bs_dashboard_handler(request_rec *r)
          * like an idle server. */
         {
             apr_uint32_t lat_us = bs_latency_current_us();
-            ap_rputs("<div class='kpi kpi-load'><div class='k'>Apache "
-                     "request latency</div><div class='loadrow'>"
-                     "<div class='v'>", r);
+            bs_d_chartbox_open(r, "apache", "Apache request latency");
+            ap_rputs("<div class='v'>", r);
             if (lat_us == BS_M_AP_NO_STATUS) {
                 /* No number at all rather than a zero. Zero here would
                  * read as an instantaneous server, which is the exact
@@ -3268,20 +3375,17 @@ int bs_dashboard_handler(request_rec *r)
                     ap_rprintf(r, "0.%ums</div>", lat_us / 100);
                 }
                 bs_d_apache_spark(r);
-                ap_rputs("</div><div class='n'>mean per request, last hour"
-                         "</div></div>", r);
+                bs_d_chartbox_close(r, "apache");
             }
         }
 
         /* Database, same shape so the two read against each other. */
         if (db_have && !db_stale) {
-            ap_rprintf(r, "<div class='kpi kpi-load'><div class='k'>Database "
-                          "threads running</div><div class='loadrow'>"
-                          "<div class='v'>%u</div>", dbthr);
+            bs_d_chartbox_open(r, "db", "Database threads running");
+            ap_rprintf(r, "<div class='v'>%u</div>", dbthr);
             bs_d_db_spark(r);
-            ap_rprintf(r, "</div><div class='n'>%u queries/s, %u.%02u%% lock "
-                          "contention, last hour</div></div>",
-                       dbqps, dblck / 100, dblck % 100);
+            (void)dbqps; (void)dblck;
+            bs_d_chartbox_close(r, "db");
         } else {
             ap_rprintf(r, "<div class='kpi kpi-load'><div class='k'>Database "
                           "threads running</div><div class='loadrow'>"
@@ -3300,17 +3404,12 @@ int bs_dashboard_handler(request_rec *r)
             bs_metrics *fm = bs_shm.metrics;
             apr_uint32_t fsec = fm ? apr_atomic_read32(&fm->fpm_sample_sec) : 0;
             int fstale = fsec && (nowsec > fsec + 120);
-            ap_rputs("<div class='kpi kpi-load'><div class='k'>PHP-FPM "
-                     "workers busy</div><div class='loadrow'>", r);
+            bs_d_chartbox_open(r, "fpm", "PHP-FPM workers busy");
             if (fsec && !fstale) {
                 ap_rprintf(r, "<div class='v'>%u%%</div>",
                            apr_atomic_read32(&fm->fpm_pct));
                 bs_d_fpm_spark(r);
-                ap_rprintf(r, "</div><div class='n'>%u of %u children, "
-                              "%u queued for one, last hour</div></div>",
-                           apr_atomic_read32(&fm->fpm_active),
-                           apr_atomic_read32(&fm->fpm_max_children),
-                           apr_atomic_read32(&fm->fpm_queue));
+                bs_d_chartbox_close(r, "fpm");
             } else {
                 ap_rprintf(r, "<div class='v' style='color:var(--muted)'>"
                               "&mdash;</div></div><div class='n'>%s</div>"
@@ -3401,7 +3500,36 @@ int bs_dashboard_handler(request_rec *r)
                                  w.req_status[BS_M_STATUS_OTHER] };
         apr_uint64_t tot = 0;
         for (int i = 0; i < 5; i++) tot += vals[i];
-        bs_d_stacked(r, "st", "Response status", labels, vals, fills, 5, tot);
+
+        /* Break each class into the codes actually seen inside it, for
+         * the hover. Only tracked codes appear; whatever is left over
+         * is reported as "other" rather than silently dropped, so the
+         * parts always reconcile with the class total the user is
+         * looking at. */
+        const char *detail[5] = { NULL, NULL, NULL, NULL, NULL };
+        {
+            static const int lo[5] = { 200, 300, 400, 500, 0 };
+            static const int hi[5] = { 299, 399, 499, 599, 0 };
+            for (int c = 0; c < 4; c++) {
+                char *d = apr_pstrdup(r->pool, "");
+                apr_uint64_t named = 0;
+                for (int k = 0; k < BS_M_CODE_COUNT; k++) {
+                    int code = bs_m_code_values[k];
+                    if (code < lo[c] || code > hi[c]) continue;
+                    if (!w.req_code[k]) continue;
+                    named += w.req_code[k];
+                    d = apr_psprintf(r->pool, "%s\n  %d: %" APR_UINT64_T_FMT,
+                                     d, code, w.req_code[k]);
+                }
+                if (vals[c] > named) {
+                    d = apr_psprintf(r->pool, "%s\n  other: %" APR_UINT64_T_FMT,
+                                     d, vals[c] - named);
+                }
+                if (*d) detail[c] = d;
+            }
+        }
+        bs_d_stacked_detail(r, "st", "Response status", labels, vals,
+                            fills, detail, 5, tot);
     }
 
     /* What BotShield itself answered. Deliberately NOT a segment inside

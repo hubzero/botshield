@@ -172,8 +172,9 @@ extern "C" {
 /* v12 adds BS_M_RESP_STATIC, widening req_resp[] in both the ring slot
  * and the cumulative block. */
 /* v13 adds g_resp[]: responder crossed with audience. */
-/* v17 appends the PHP-FPM ring (fpm_ring) and its display fields. */
-#define BS_STATE_FORMAT_VERSION   17
+/* v18 appends per-status-code counters (req_code) alongside the
+ * existing status-class ones. */
+#define BS_STATE_FORMAT_VERSION   18
 #define BS_STATE_MAX_AGE_SECS     (14 * 86400)
 #define BS_FNV64_SEED             0xcbf29ce484222325ULL
 
@@ -293,6 +294,23 @@ typedef enum {
     BS_M_STATUS_OTHER,
     BS_M_STATUS_COUNT
 } bs_m_status;
+
+/* Individual status codes, so the dashboard can break a class down
+ * instead of only saying "4xx". A curated list rather than a 100..599
+ * array: the wide array is 500 counters per ring slot for a handful of
+ * codes that ever occur, and the per-slot rings are multiplied by 84
+ * slots and 33 vhost blocks. These sixteen cover every code observed on
+ * this deployment plus the ones BotShield itself can emit. Anything not
+ * listed still lands in its class total, so the breakdown is a subset
+ * that never disagrees with the class it decomposes. */
+typedef enum {
+    BS_M_CODE_200 = 0, BS_M_CODE_204, BS_M_CODE_206,
+    BS_M_CODE_301, BS_M_CODE_302, BS_M_CODE_304,
+    BS_M_CODE_400, BS_M_CODE_401, BS_M_CODE_403,
+    BS_M_CODE_404, BS_M_CODE_408, BS_M_CODE_426, BS_M_CODE_429,
+    BS_M_CODE_500, BS_M_CODE_502, BS_M_CODE_503,
+    BS_M_CODE_COUNT
+} bs_m_code;
 
 typedef enum {
     /* BS_M_COOKIE_OK is "verified but carries no solve proof" -- a
@@ -631,6 +649,7 @@ typedef struct {
     apr_uint64_t req_total;
     apr_uint64_t req_cookie;               /* carried a session cookie */
     apr_uint64_t req_status[BS_M_STATUS_COUNT];
+    apr_uint64_t req_code[BS_M_CODE_COUNT];
     apr_uint64_t req_resp[BS_M_RESP_COUNT];
     apr_uint64_t req_class[BS_M_CLASS_COUNT];
     /* Responder crossed with audience. Separates "the app answered a
@@ -653,6 +672,7 @@ typedef struct {
     apr_uint64_t req_total;
     apr_uint64_t req_cookie;
     apr_uint64_t req_status[BS_M_STATUS_COUNT];
+    apr_uint64_t req_code[BS_M_CODE_COUNT];
     apr_uint64_t req_resp[BS_M_RESP_COUNT];
     apr_uint64_t req_class[BS_M_CLASS_COUNT];
     apr_uint64_t g_resp[BS_M_GROUP_COUNT][BS_M_RESP_COUNT];
