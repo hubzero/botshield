@@ -1239,6 +1239,15 @@ static int bs_init_shm_layout(apr_pool_t *pconf, apr_pool_t *ptemp,
         for (int i = 0; i < BS_M_LA_SLOTS; i++) {
             bs_shm.metrics->la_ring[i] = BS_M_LA_EMPTY;
         }
+        for (int i = 0; i < BS_M_DB_SLOTS; i++) {
+            bs_shm.metrics->db_ring[i] = BS_M_DB_EMPTY;
+        }
+        for (int i = 0; i < BS_M_AP_SLOTS; i++) {
+            bs_shm.metrics->ap_ring[i] = BS_M_AP_EMPTY;
+        }
+        for (int i = 0; i < BS_M_FPM_SLOTS; i++) {
+            bs_shm.metrics->fpm_ring[i] = BS_M_FPM_EMPTY;
+        }
     }
 
     bs_vhost_dir_init(s, vhost_n);

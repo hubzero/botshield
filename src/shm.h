@@ -172,9 +172,8 @@ extern "C" {
 /* v12 adds BS_M_RESP_STATIC, widening req_resp[] in both the ring slot
  * and the cumulative block. */
 /* v13 adds g_resp[]: responder crossed with audience. */
-/* v15 appends the database ring (db_ring) and the db_* header
- * fields carved from _pad_cl1. */
-#define BS_STATE_FORMAT_VERSION   15
+/* v17 appends the PHP-FPM ring (fpm_ring) and its display fields. */
+#define BS_STATE_FORMAT_VERSION   17
 #define BS_STATE_MAX_AGE_SECS     (14 * 86400)
 #define BS_FNV64_SEED             0xcbf29ce484222325ULL
 
@@ -347,6 +346,13 @@ typedef enum {
  * poor first one. Firing earlier lets policy shed selectively --
  * crawlers first, then clients with no solve proof -- while headroom
  * remains, so the blunt rung only arrives if that was not enough. */
+/* Apache mean request latency, milliseconds. Normal on this host is
+ * 31-52ms; the overnight outages ran 29,000-36,000ms. These sit far
+ * above routine variation and far below catastrophe, so the signal
+ * rises while there is still headroom to act. */
+#define BS_DEFAULT_LATENCY_WARM_MS   250
+#define BS_DEFAULT_LATENCY_HOT_MS   1000
+
 #define BS_DEFAULT_LOADAVG_WARM  100   /* 1.0 per core */
 #define BS_DEFAULT_LOADAVG_HOT   150   /* 1.5 per core */
 /* Hysteresis: asymmetric. Easy to enter (3 escalating samples to
@@ -579,6 +585,26 @@ typedef struct {
 #define BS_M_DB_PERIOD   10
 #define BS_M_DB_EMPTY    0xFFFF
 
+/* Apache mean-request-latency ring: 720 x 5s = one hour, matching the
+ * load-average cadence because both are sampled by the same watchdog
+ * tick from the same scoreboard walk. */
+/* PHP-FPM saturation ring: 360 x 10s = one hour, matching the external
+ * monitor's cadence for the same reason the database ring does. */
+#define BS_M_FPM_SLOTS   360
+#define BS_M_FPM_PERIOD  10
+#define BS_M_FPM_EMPTY   0xFFFF
+
+#define BS_M_AP_SLOTS    720
+#define BS_M_AP_PERIOD   5
+#define BS_M_AP_EMPTY    0xFFFF
+/* Milliseconds. u16 caps at 65534, comfortably past the 29-36 SECOND
+ * means seen during the overnight outages. */
+#define BS_M_AP_MAX_MS   65534
+/* Sentinel: ExtendedStatus is off, so Apache never populates the
+ * per-worker counters this metric is derived from. Distinct from zero,
+ * which would claim the server is instantaneous. */
+#define BS_M_AP_NO_STATUS 0xFFFFFFFFu
+
 #define BS_M_MIN_SLOTS   60   /* 1-minute slots: serves 15min and 1h */
 #define BS_M_HOUR_SLOTS  24   /* 1-hour slots: serves 24h */
 
@@ -661,6 +687,42 @@ typedef struct {
     apr_uint16_t db_ring[BS_M_DB_SLOTS];
     apr_uint32_t db_pos;
     apr_uint32_t db_last_sec;
+    /* Apache mean request latency, milliseconds per slot.
+     *
+     * The busy-worker ratio cannot see this deployment's failure mode --
+     * 1024 worker slots on 6 cores means a fully unusable site still
+     * reads 2-3% -- so latency is the Apache-side signal that actually
+     * moves. See bs_load_sample_latency.
+     *
+     * The two accumulators below are watchdog-private: the previous
+     * cumulative totals the next delta subtracts from. They live here
+     * rather than in statics because the watchdog is not guaranteed to
+     * stay in one process across a graceful restart. */
+    apr_uint16_t ap_ring[BS_M_AP_SLOTS];
+    apr_uint32_t ap_pos;
+    apr_uint32_t ap_last_sec;
+    apr_uint32_t ap_latency_us;      /* most recent sample, microseconds */
+    apr_uint64_t ap_prev_access;
+    apr_uint64_t ap_prev_duration;
+    /* PHP-FPM, published by the external monitor. Percent of
+     * pm.max_children busy -- a real ceiling, unlike MaxRequestWorkers,
+     * which is why this is worth its own signal.
+     *
+     * These live here rather than in the SHM header only because the
+     * header's reserved cachelines are full; they are display data, not
+     * hot-path state. PHP-FPM reaches policy through
+     * BotShieldLoadStateFile like every other external signal. */
+    apr_uint16_t fpm_ring[BS_M_FPM_SLOTS];
+    apr_uint32_t fpm_pos;
+    apr_uint32_t fpm_last_sec;
+    apr_uint32_t fpm_state;
+    apr_uint32_t fpm_pct;
+    apr_uint32_t fpm_active;
+    apr_uint32_t fpm_max_children;
+    apr_uint32_t fpm_queue;
+    apr_uint32_t fpm_sample_sec;
+    apr_uint32_t fpm_warm_pct;
+    apr_uint32_t fpm_hot_pct;
     apr_uint64_t state_saves_total;
     apr_uint64_t state_save_last_unix;
     apr_uint64_t state_save_last_bytes;

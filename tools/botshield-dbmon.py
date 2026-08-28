@@ -239,10 +239,16 @@ def run_loop(args, cfg):
                 sys.stdout.flush()
             last_state = state
 
-        write_atomic(stats_path, "ts=%d %s state=%s" % (
-            time.time(),
-            " ".join("%s=%s" % kv for kv in sorted(s.items())),
-            state))
+        # Thresholds go in the file alongside the readings. The
+        # dashboard draws its warm/hot bands from these, so the graph
+        # cannot disagree with the state we published; a second copy of
+        # the numbers in httpd.conf could drift and nothing would catch
+        # it.
+        write_atomic(stats_path, "ts=%d %s state=%s warm_threads=%d "
+                     "hot_threads=%d" % (
+                         time.time(),
+                         " ".join("%s=%s" % kv for kv in sorted(s.items())),
+                         state, cfg["warm_threads"], cfg["hot_threads"]))
 
 
 def run_report(args, cfg):

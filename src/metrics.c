@@ -1804,6 +1804,37 @@ static void bs_d_load_spark(request_rec *r)
     bs_d_spark(r, &sp);
 }
 
+/* Apache mean request latency over the last hour. */
+static void bs_d_apache_spark(request_rec *r)
+{
+    bs_metrics *m = bs_shm.metrics;
+    if (!m) return;
+    int lw, lh;
+    bs_latency_thresholds(r->server, &lw, &lh);
+    bs_spark_spec sp = {
+        m->ap_ring, BS_M_AP_SLOTS, BS_M_AP_PERIOD, BS_M_AP_EMPTY,
+        apr_atomic_read32(&m->ap_pos), lw, lh, 0, "apg",
+        "Apache mean request latency over the last hour"
+    };
+    bs_d_spark(r, &sp);
+}
+
+/* PHP-FPM saturation, percent of pm.max_children, over the last hour. */
+static void bs_d_fpm_spark(request_rec *r)
+{
+    bs_metrics *m = bs_shm.metrics;
+    if (!m) return;
+    int warm = (int)apr_atomic_read32(&m->fpm_warm_pct);
+    int hot  = (int)apr_atomic_read32(&m->fpm_hot_pct);
+    if (hot <= 0) return;           /* no monitor has ever reported */
+    bs_spark_spec sp = {
+        m->fpm_ring, BS_M_FPM_SLOTS, BS_M_FPM_PERIOD, BS_M_FPM_EMPTY,
+        apr_atomic_read32(&m->fpm_pos), warm, hot, 0, "fpg",
+        "PHP-FPM workers busy, percent of the pool ceiling, last hour"
+    };
+    bs_d_spark(r, &sp);
+}
+
 /* Database threads-running over the last hour. Thresholds come from the
  * monitor's own stats file rather than from module config: they are the
  * numbers it actually classified against, so the graph's bands cannot
@@ -3096,6 +3127,28 @@ int bs_dashboard_handler(request_rec *r)
             ap_rprintf(r, "<span class='src'>CPU <b style='color:%s'>%s</b>"
                           "</span>", ct, cs);
         }
+        {
+            /* Apache latency: the signal the busy-worker ratio cannot
+             * see. 1024 worker slots on 6 cores means an unusable site
+             * still reads 2-3% utilisation. */
+            apr_uint32_t lat_us = bs_latency_current_us();
+            int lat = (lat_us == BS_M_AP_NO_STATUS)
+                    ? -1 : (int)(lat_us / 1000);
+            if (lat < 0) {
+                ap_rputs("<span class='src'>Apache <b style='color:"
+                         "var(--muted)'>needs ExtendedStatus</b></span>", r);
+            } else {
+                int lw, lh;
+                bs_latency_thresholds(r->server, &lw, &lh);
+                const char *as = ((int)lat >= lh) ? "hot"
+                               : ((int)lat >= lw) ? "warm" : "normal";
+                const char *at = ((int)lat >= lh) ? "var(--crit)"
+                               : ((int)lat >= lw) ? "var(--warn)"
+                                                  : "var(--good)";
+                ap_rprintf(r, "<span class='src'>Apache "
+                              "<b style='color:%s'>%s</b></span>", at, as);
+            }
+        }
         if (!db_have) {
             ap_rputs("<span class='src'>Database "
                      "<b style='color:var(--muted)'>no monitor</b></span>", r);
@@ -3112,6 +3165,27 @@ int bs_dashboard_handler(request_rec *r)
             ap_rprintf(r, "<span class='src'>Database "
                           "<b style='color:%s'>%s</b></span>", dt, ds);
         }
+        {
+            bs_metrics *fm = bs_shm.metrics;
+            apr_uint32_t fsec = fm ? apr_atomic_read32(&fm->fpm_sample_sec) : 0;
+            apr_uint32_t fst  = fm ? apr_atomic_read32(&fm->fpm_state) : 0;
+            if (!fsec) {
+                ap_rputs("<span class='src'>PHP-FPM <b style='color:"
+                         "var(--muted)'>no monitor</b></span>", r);
+            } else if (nowsec > fsec + 120) {
+                ap_rprintf(r, "<span class='src'>PHP-FPM "
+                              "<b style='color:var(--warn)'>stale %us</b>"
+                              "</span>", nowsec - fsec);
+            } else {
+                const char *fs = (fst == BS_LOAD_HOT)  ? "hot"
+                               : (fst == BS_LOAD_WARM) ? "warm" : "normal";
+                const char *ft = (fst == BS_LOAD_HOT)  ? "var(--crit)"
+                               : (fst == BS_LOAD_WARM) ? "var(--warn)"
+                                                       : "var(--good)";
+                ap_rprintf(r, "<span class='src'>PHP-FPM "
+                              "<b style='color:%s'>%s</b></span>", ft, fs);
+            }
+        }
         ap_rputs("</div></div>", r);
 
         ap_rputs("<div class='kpis loadpair'>", r);
@@ -3125,6 +3199,44 @@ int bs_dashboard_handler(request_rec *r)
         bs_d_load_spark(r);
         ap_rputs("</div><div class='n'>1-minute average, last hour"
                  "</div></div>", r);
+
+        /* Apache request latency. Deliberately NOT the busy-worker
+         * ratio: with 1024 slots on 6 cores that reads 2-3% while the
+         * site is unusable, which is how four overnight outages looked
+         * like an idle server. */
+        {
+            apr_uint32_t lat_us = bs_latency_current_us();
+            ap_rputs("<div class='kpi kpi-load'><div class='k'>Apache "
+                     "request latency</div><div class='loadrow'>"
+                     "<div class='v'>", r);
+            if (lat_us == BS_M_AP_NO_STATUS) {
+                /* No number at all rather than a zero. Zero here would
+                 * read as an instantaneous server, which is the exact
+                 * opposite of what an absent measurement means. */
+                ap_rputs("<span style='color:var(--muted)'>&mdash;</span>"
+                         "</div></div><div class='n'>unavailable: this "
+                         "metric is derived from Apache's per-worker "
+                         "counters, which are only maintained under "
+                         "<code>ExtendedStatus On</code></div></div>", r);
+            } else {
+                /* Three scales, because this number legitimately spans
+                 * five orders of magnitude: sub-millisecond on a static
+                 * hit, tens of ms normally, tens of SECONDS during the
+                 * outages. Printing everything in ms would show "0ms"
+                 * for a fast server and "36000ms" for a dying one. */
+                if (lat_us >= 1000000) {
+                    ap_rprintf(r, "%u.%us</div>", lat_us / 1000000,
+                               (lat_us % 1000000) / 100000);
+                } else if (lat_us >= 1000) {
+                    ap_rprintf(r, "%ums</div>", lat_us / 1000);
+                } else {
+                    ap_rprintf(r, "0.%ums</div>", lat_us / 100);
+                }
+                bs_d_apache_spark(r);
+                ap_rputs("</div><div class='n'>mean per request, last hour"
+                         "</div></div>", r);
+            }
+        }
 
         /* Database, same shape so the two read against each other. */
         if (db_have && !db_stale) {
@@ -3145,6 +3257,35 @@ int bs_dashboard_handler(request_rec *r)
                            "not shown because a dead monitor looks calm"
                          : "no monitor configured "
                            "(BotShieldDbStatsFile)");
+        }
+        /* PHP-FPM. pm.max_children is a real ceiling, which is what
+         * makes a percentage here meaningful in a way the Apache
+         * busy-worker ratio is not. */
+        {
+            bs_metrics *fm = bs_shm.metrics;
+            apr_uint32_t fsec = fm ? apr_atomic_read32(&fm->fpm_sample_sec) : 0;
+            int fstale = fsec && (nowsec > fsec + 120);
+            ap_rputs("<div class='kpi kpi-load'><div class='k'>PHP-FPM "
+                     "workers busy</div><div class='loadrow'>", r);
+            if (fsec && !fstale) {
+                ap_rprintf(r, "<div class='v'>%u%%</div>",
+                           apr_atomic_read32(&fm->fpm_pct));
+                bs_d_fpm_spark(r);
+                ap_rprintf(r, "</div><div class='n'>%u of %u children, "
+                              "%u queued for one, last hour</div></div>",
+                           apr_atomic_read32(&fm->fpm_active),
+                           apr_atomic_read32(&fm->fpm_max_children),
+                           apr_atomic_read32(&fm->fpm_queue));
+            } else {
+                ap_rprintf(r, "<div class='v' style='color:var(--muted)'>"
+                              "&mdash;</div></div><div class='n'>%s</div>"
+                              "</div>",
+                           fsec ? "monitor stopped reporting; the last "
+                                  "reading is not shown because a dead "
+                                  "monitor looks calm"
+                                : "no monitor configured "
+                                  "(BotShieldFpmStatsFile)");
+            }
         }
         ap_rputs("</div>", r);   /* closes the KPI row */
         ap_rputs("<p class='note'>Load state is the most severe of the "
@@ -3717,6 +3858,17 @@ int bs_metrics_handler(request_rec *r)
     /* E11 — load-state observability. The gauge is the most useful
      * value to alert on; the counter lets operators graph state
      * transitions per minute. */
+    {
+        /* -1, not the sentinel and not 0: a scrape must be able to tell
+         * "not measured" from "measured as instant". */
+        apr_uint32_t lat_us = bs_latency_current_us();
+        bs_m_emit_gauge(r, "apache_latency_us",
+            "Mean Apache request latency over the last sample window, "
+            "microseconds. A delta between watchdog ticks, not an "
+            "average since restart. -1 when unavailable (requires "
+            "ExtendedStatus On).",
+            lat_us == BS_M_AP_NO_STATUS ? -1.0 : (double)lat_us);
+    }
     bs_m_emit_gauge(r, "load_state",
         "Current cached load state (0=normal, 1=warm, 2=hot).",
         (apr_uint64_t)(bs_shm.header

@@ -1,0 +1,66 @@
+[Unit]
+# Samples PHP-FPM saturation and publishes it for mod_botshield.
+# Deliberately not a dependency of httpd: if this dies, BotShield keeps
+# serving on its other load signals. Monitoring must not be able to take
+# the web server down with it.
+#
+# A separate unit from botshield-dbmon rather than a second collector
+# inside it: the two fail for unrelated reasons, and a database that
+# stalls a scrape for its full connect timeout must not delay a PHP-FPM
+# sample. Each restarts, backs off, and withdraws its claim on its own.
+Description=BotShield PHP-FPM load monitor
+Documentation=file:/usr/local/share/botshield/botshield-fpmmon.py
+After=php82-php-fpm.service
+Wants=php82-php-fpm.service
+
+[Service]
+Type=simple
+User=botshield-mon
+Group=botshield-mon
+ExecStart=/usr/local/share/botshield/botshield-fpmmon.py \
+    --state-file /run/botshield/fpm-load.state --interval 10 \
+    --address 127.0.0.1:9000 --status-path /status
+
+# Reset to normal on the way out, however we get there -- ExecStopPost
+# runs on crash and on clean stop alike. The module caches the last
+# value it read and has no staleness timeout, so a monitor that dies
+# while the pool is hot would otherwise shed traffic indefinitely
+# against a pool that had already recovered.
+ExecStopPost=/bin/sh -c 'echo normal > /run/botshield/fpm-load.state 2>/dev/null || true'
+
+Restart=always
+RestartSec=5s
+
+# Shared with botshield-dbmon. Preserve on stop or systemd deletes the
+# directory out from under the ExecStopPost above -- and would also take
+# the other monitor's state file with it.
+RuntimeDirectory=botshield
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+
+# Unprivileged. It opens one loopback TCP connection, reads the pool
+# config once for pm.max_children, and writes one directory.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+# AF_INET as well as AF_UNIX: this pool listens on 127.0.0.1:9000. A
+# pool on a unix socket would need only AF_UNIX.
+RestrictAddressFamilies=AF_UNIX AF_INET
+IPAddressAllow=localhost
+IPAddressDeny=any
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

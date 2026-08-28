@@ -800,12 +800,52 @@ Sampling and hysteresis:
 | `BotShieldLoadRefreshInterval` | `N` (sec) | `1` | server only |
 | `BotShieldLoadWarmThreshold` | `N` (% workers busy) | `65` | server only |
 | `BotShieldLoadHotThreshold` | `N` (% workers busy) | `85` | server only |
+| `BotShieldLatencyWarm` | `N` (ms) | `250` | server only |
+| `BotShieldLatencyHot` | `N` (ms) | `1000` | server only |
+| `BotShieldDbStatsFile` | `/path` | unset | server only |
 
 `BotShieldLoadStateFile` points at an external single-word state
 file (managed by an out-of-band collector) that overrides the
 scoreboard sample. Useful when load decisions should key on a
 metric Apache itself doesn't see (queue depth, downstream
 saturation, etc.).
+
+### Why the busy-worker ratio is often the wrong signal
+
+`BotShieldLoadWarmThreshold` and `BotShieldLoadHotThreshold` are a
+percentage of `MaxRequestWorkers`, which is only meaningful if that
+setting reflects what the machine can actually serve. It frequently
+does not. On a host running `MaxRequestWorkers 1024` against 6 cores,
+four separate outages ran at 25-30 busy workers — the site returning
+500s and taking half a minute per request — which is **2-3%**
+utilisation. No threshold on that ratio can distinguish those outages
+from an idle server.
+
+`BotShieldLatencyWarm` / `BotShieldLatencyHot` exist for that case.
+They compare the **mean request latency**, measured as a delta between
+watchdog ticks, against a duration you choose. On the host above the
+same outages moved this number from ~31ms to 29,000-36,000ms — roughly
+a thousandfold, on the same data the worker ratio read as flat.
+
+It is derived from Apache's own per-worker counters, the same ones
+`mod_status` sums for `Total Duration` and `Total Accesses`, read
+straight out of the scoreboard the watchdog already walks. No extra
+sampling cost and no external process. Two consequences worth knowing:
+
+- It requires `ExtendedStatus On`. Without it Apache never maintains
+  those counters and the metric reports *unavailable* rather than
+  zero — zero would mean "answering instantly", which is the opposite
+  of what a missing measurement means.
+- It averages over **all** requests, static files included, so a flood
+  of cheap static hits dilutes it. It answers "is the server slow right
+  now", not "is this endpoint slow".
+
+`BotShieldDbStatsFile` reads key=value telemetry from an external
+database monitor for the dashboard's graph. Database load reaches
+policy through `BotShieldLoadStateFile`, not through this — the module
+never links a database client, because blocking I/O has no place in
+the watchdog and a database too sick to answer must not be able to
+stall the code whose job is to shed load because the database is sick.
 
 The trigger family that consumes the state lives under
 `BotShieldLoadTrigger` (above). See

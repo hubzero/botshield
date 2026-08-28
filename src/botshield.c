@@ -636,6 +636,20 @@ static const command_rec bs_cmds[] = {
      * below cannot see this deployment's failure mode: with 1024
      * MaxRequestWorkers on 6 cores the box is CPU-saturated at a busy
      * ratio of 2-3%, which is where four outages actually ran. */
+    AP_INIT_TAKE1("BotShieldLatencyWarm", bs_set_latency_warm, NULL,
+                 RSRC_CONF,
+                 "Apache mean request latency in ms at which load is "
+                 "'warm' (default 250). Measured as a delta between "
+                 "watchdog ticks, not since restart."),
+    AP_INIT_TAKE1("BotShieldLatencyHot", bs_set_latency_hot, NULL,
+                 RSRC_CONF,
+                 "Apache mean request latency in ms at which load is "
+                 "'hot' (default 1000). Must exceed BotShieldLatencyWarm."),
+    AP_INIT_TAKE1("BotShieldFpmStatsFile",
+                 bs_set_fpm_stats_file, NULL, RSRC_CONF,
+                 "Path to the external PHP-FPM monitor's key=value "
+                 "telemetry file. Dashboard display only; PHP-FPM load "
+                 "reaches policy via BotShieldLoadStateFile."),
     AP_INIT_TAKE1("BotShieldDbStatsFile",
                  bs_set_db_stats_file, NULL, RSRC_CONF,
                  "Path to the external database monitor's key=value "
