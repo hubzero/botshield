@@ -68,6 +68,28 @@ and the decision log records each individual challenge as a normal event.
 A thousand identical challenges to one IP looks like a thousand rows,
 not like one bug.
 
+## A third instance, found while writing this down
+
+Adding `BotShieldDbStatsFile` to `conf/botshield.conf` did nothing. The
+directive is `RSRC_CONF`, that file is included at vhost scope, and an
+`RSRC_CONF` directive inside a `<VirtualHost>` parses cleanly and is
+then ignored. `apachectl configtest` said `Syntax OK`, the reload
+succeeded, and the dashboard reported "no monitor configured" — which
+reads as *the operator forgot the directive* rather than *the directive
+is present and being discarded*.
+
+This is the same five properties again, with a different mechanism.
+That file's own header documents the trap for `BotShieldStateFile`,
+which is how it was diagnosed in under a minute — but documentation in
+one file cannot protect a directive added later, and nothing in the
+system said a word. Scope errors are mechanically detectable: the
+module knows a directive's required scope and knows where it was found.
+
+It is worth noting that the same class of bug has now produced two user
+lockouts and one silently dead feature within one week, which is
+evidence about the configuration system rather than about the people
+using it.
+
 ## What a refactor should probably provide
 
 Roughly in order of how much each would have helped:
@@ -83,6 +105,11 @@ Roughly in order of how much each would have helped:
   `tier_floor` above a parked ceiling. These are checkable at
   post-config, where a warning costs nothing and reaches the operator
   before the users do.
+
+- **Warn on a directive accepted into a scope where it does nothing.**
+  Silently discarding an `RSRC_CONF` directive found inside a vhost is
+  the single cheapest thing on this list to fix and has already cost
+  one debugging session.
 
 - **Make lifecycle explicit in the directive surface.** The real bug in
   #2 is that "score" and "flag" have different lifetimes — one is
