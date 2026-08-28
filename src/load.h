@@ -72,6 +72,18 @@ const char *bs_set_loadavg_hot(cmd_parms *cmd, void *dconf,
 const char *bs_set_db_stats_file(cmd_parms *cmd, void *dconf,
                                  const char *arg);
 
+/* BotShieldFpmStatsFile <path> -- key=value telemetry from the external
+ * PHP-FPM monitor, surfaced on the dashboard. */
+const char *bs_set_fpm_stats_file(cmd_parms *cmd, void *dconf,
+                                  const char *arg);
+
+/* BotShieldLatencyWarm / BotShieldLatencyHot <ms> -- Apache mean
+ * request latency thresholds. */
+const char *bs_set_latency_warm(cmd_parms *cmd, void *dconf, const char *arg);
+const char *bs_set_latency_hot (cmd_parms *cmd, void *dconf, const char *arg);
+void bs_latency_thresholds(server_rec *sv, int *warm, int *hot);
+apr_uint32_t bs_latency_current_us(void);
+
 /* Effective per-CPU load-average thresholds, defaults applied. */
 void bs_loadavg_thresholds(server_rec *s, int *warm, int *hot);
 

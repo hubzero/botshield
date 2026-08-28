@@ -204,31 +204,62 @@ static int bs_kv_int(const char *line, const char *key, int scale)
  * writes separately and which merges with every other signal. Keeping
  * telemetry off the policy path means a malformed stats line can make
  * the graph wrong but cannot make the module shed. */
-static void bs_load_read_db_stats(server_rec *sv, bs_server_cfg *scfg)
+/* Read one monitor's key=value line, mtime-gated so an unchanged file
+ * costs a stat rather than an open+read. Returns 0 when there is
+ * nothing new to parse -- missing file, unchanged mtime, or read
+ * failure, all of which mean "keep whatever we last published" rather
+ * than "the thing being monitored is fine". */
+static int bs_load_read_stats_line(server_rec *sv, const char *path,
+                                   apr_time_t *cached_mtime,
+                                   char *buf, apr_size_t buflen)
 {
-    if (!scfg->db_stats_file || !bs_shm.header) return;
-
+    if (!path) return 0;
     apr_finfo_t finfo;
-    if (apr_stat(&finfo, scfg->db_stats_file, APR_FINFO_MTIME,
+    if (apr_stat(&finfo, path, APR_FINFO_MTIME,
                  sv->process->pconf) != APR_SUCCESS) {
-        return;   /* monitor not installed or not running yet */
+        return 0;   /* monitor not installed or not running yet */
     }
-    if (finfo.mtime == scfg->db_stats_mtime) return;   /* unchanged */
-    scfg->db_stats_mtime = finfo.mtime;
+    if (finfo.mtime == *cached_mtime) return 0;
+    *cached_mtime = finfo.mtime;
 
     apr_file_t *f = NULL;
-    if (apr_file_open(&f, scfg->db_stats_file, APR_READ | APR_BINARY, 0,
+    if (apr_file_open(&f, path, APR_READ | APR_BINARY, 0,
                       sv->process->pconf) != APR_SUCCESS) {
-        return;
+        return 0;
     }
-    char buf[512];
-    apr_size_t got = sizeof(buf) - 1;
+    apr_size_t got = buflen - 1;
     apr_status_t rv = apr_file_read(f, buf, &got);
     apr_file_close(f);
-    if ((rv != APR_SUCCESS && rv != APR_EOF) || got == 0) return;
+    if ((rv != APR_SUCCESS && rv != APR_EOF) || got == 0) return 0;
     buf[got] = '\0';
     for (apr_size_t i = 0; i < got; i++) {
         if (buf[i] == '\n' || buf[i] == '\r') { buf[i] = '\0'; break; }
+    }
+    return 1;
+}
+
+/* Parse the state= token a monitor publishes. Its own verdict, not one
+ * re-derived here: the monitors classify on dimensions the module never
+ * sees (lock contention, listen queue), so recomputing from the numbers
+ * alone could disagree with the state that is actually driving policy. */
+static apr_uint32_t bs_load_parse_state_kv(const char *buf)
+{
+    const char *sp = strstr(buf, "state=");
+    if (sp && (sp == buf || sp[-1] == ' ')) {
+        sp += 6;
+        if      (!strncmp(sp, "hot",  3)) return BS_LOAD_HOT;
+        else if (!strncmp(sp, "warm", 4)) return BS_LOAD_WARM;
+    }
+    return BS_LOAD_NORMAL;
+}
+
+static void bs_load_read_db_stats(server_rec *sv, bs_server_cfg *scfg)
+{
+    if (!bs_shm.header) return;
+    char buf[512];
+    if (!bs_load_read_stats_line(sv, scfg->db_stats_file,
+                                 &scfg->db_stats_mtime, buf, sizeof(buf))) {
+        return;
     }
 
     int threads = bs_kv_int(buf, "threads_run", 1);
@@ -238,16 +269,8 @@ static void bs_load_read_db_stats(server_rec *sv, bs_server_cfg *scfg)
      * lock contention as well as thread count, so recomputing from
      * threads alone here would sometimes disagree with the state it
      * published -- and the state file is what actually drives policy. */
-    {
-        const char *sp = strstr(buf, "state=");
-        apr_uint32_t st = BS_LOAD_NORMAL;
-        if (sp && (sp == buf || sp[-1] == ' ')) {
-            sp += 6;
-            if      (!strncmp(sp, "hot",  3)) st = BS_LOAD_HOT;
-            else if (!strncmp(sp, "warm", 4)) st = BS_LOAD_WARM;
-        }
-        apr_atomic_set32(&bs_shm.header->db_state, st);
-    }
+    apr_atomic_set32(&bs_shm.header->db_state,
+                     bs_load_parse_state_kv(buf));
     int qps     = bs_kv_int(buf, "qps", 1);
     int lockx   = bs_kv_int(buf, "lock_pct", 100);
     int ts      = bs_kv_int(buf, "ts", 1);
@@ -284,12 +307,60 @@ static void bs_load_read_db_stats(server_rec *sv, bs_server_cfg *scfg)
     }
 }
 
+/* Read the PHP-FPM monitor's telemetry (BotShieldFpmStatsFile).
+ *
+ * Display only, exactly like the database path: PHP-FPM reaches policy
+ * through BotShieldLoadStateFile, so a malformed stats line can make a
+ * graph wrong but cannot make the module shed. */
+static void bs_load_read_fpm_stats(server_rec *sv, bs_server_cfg *scfg)
+{
+    if (!bs_shm.metrics) return;
+    char buf[512];
+    if (!bs_load_read_stats_line(sv, scfg->fpm_stats_file,
+                                 &scfg->fpm_stats_mtime, buf, sizeof(buf))) {
+        return;
+    }
+
+    int pct = bs_kv_int(buf, "pct", 1);
+    if (pct < 0) return;              /* no usable reading; leave last */
+    bs_metrics *m = bs_shm.metrics;
+
+    int active = bs_kv_int(buf, "active", 1);
+    int maxc   = bs_kv_int(buf, "max_children", 1);
+    int queue  = bs_kv_int(buf, "listen_queue", 1);
+    int ts     = bs_kv_int(buf, "ts", 1);
+    int wp     = bs_kv_int(buf, "warm_pct", 1);
+    int hp     = bs_kv_int(buf, "hot_pct", 1);
+
+    if (pct > 65534) pct = 65534;
+    apr_atomic_set32(&m->fpm_pct,   (apr_uint32_t)pct);
+    apr_atomic_set32(&m->fpm_state, bs_load_parse_state_kv(buf));
+    if (active >= 0) apr_atomic_set32(&m->fpm_active, (apr_uint32_t)active);
+    if (maxc   >  0) apr_atomic_set32(&m->fpm_max_children,
+                                      (apr_uint32_t)maxc);
+    if (queue  >= 0) apr_atomic_set32(&m->fpm_queue, (apr_uint32_t)queue);
+    if (ts     >= 0) apr_atomic_set32(&m->fpm_sample_sec, (apr_uint32_t)ts);
+    if (wp     >  0) apr_atomic_set32(&m->fpm_warm_pct, (apr_uint32_t)wp);
+    if (hp     >  0) apr_atomic_set32(&m->fpm_hot_pct,  (apr_uint32_t)hp);
+
+    apr_uint32_t now  = (apr_uint32_t)apr_time_sec(apr_time_now());
+    apr_uint32_t last = apr_atomic_read32(&m->fpm_last_sec);
+    if (now >= last + BS_M_FPM_PERIOD) {
+        apr_uint32_t pos = apr_atomic_read32(&m->fpm_pos);
+        pos = (pos + 1) % BS_M_FPM_SLOTS;
+        m->fpm_ring[pos] = (apr_uint16_t)pct;
+        apr_atomic_set32(&m->fpm_pos, pos);
+        apr_atomic_set32(&m->fpm_last_sec, now);
+    }
+}
+
 /* Sample the Apache scoreboard. Returns busy_pct = 100 *
  * busy_workers / total_worker_slots. "Busy" = anything that's
  * actively servicing a request: BUSY_READ/WRITE/KEEPALIVE/LOG/DNS
  * + GRACEFUL (still serving its current request). READY and DEAD
  * slots don't count as busy. */
-static int bs_load_sample_scoreboard(void)
+static int bs_load_sample_scoreboard(apr_uint64_t *out_access,
+                                    apr_uint64_t *out_duration)
 {
     if (!ap_exists_scoreboard_image()) return 0;
     global_score *gs = ap_get_scoreboard_global();
@@ -298,11 +369,17 @@ static int bs_load_sample_scoreboard(void)
     if (total <= 0) return 0;
 
     int busy = 0;
+    apr_uint64_t acc = 0, dur = 0;
     for (int i = 0; i < gs->server_limit; i++) {
         for (int j = 0; j < gs->thread_limit; j++) {
             worker_score *ws =
                 ap_get_scoreboard_worker_from_indexes(i, j);
             if (!ws) continue;
+            /* Same two fields mod_status sums for Total Accesses and
+             * Total Duration. Free to collect: this loop already walks
+             * every slot for the busy count. */
+            acc += ws->access_count;
+            dur += (apr_uint64_t)ws->duration;
             switch (ws->status) {
             case SERVER_BUSY_READ:
             case SERVER_BUSY_WRITE:
@@ -317,7 +394,51 @@ static int bs_load_sample_scoreboard(void)
             }
         }
     }
+    if (out_access)   *out_access   = acc;
+    if (out_duration) *out_duration = dur;
     return (busy * 100) / total;
+}
+
+/* Mean request latency in microseconds over the interval since the last
+ * call, or -1 when there is no usable sample yet.
+ *
+ * A DELTA, because the cumulative figure is an average over the whole
+ * uptime and goes numb exactly when it matters: measured on this host,
+ * cumulative read 31.7ms while the live window read 52ms, and during
+ * the overnight outages the homepage was taking 29-36 SECONDS while the
+ * since-restart mean stayed in the tens of milliseconds.
+ *
+ * This is the one Apache-side number those outages moved. The
+ * busy-worker ratio could not see them at all: MaxRequestWorkers is
+ * 1024 on 6 cores, so 25-30 stuck workers -- the whole site
+ * unusable -- reads as 2-3% utilisation.
+ *
+ * Counters live in SHM rather than in statics because the watchdog is
+ * not guaranteed to stay in one process across a graceful restart.
+ *
+ * A child recycling (MaxConnectionsPerChild) resets its slots to zero,
+ * which can make the summed delta negative. That is indistinguishable
+ * here from a counter wrap, so the sample is dropped rather than
+ * guessed at -- one missed tick against reporting a nonsense latency. */
+static int bs_load_sample_latency(apr_uint64_t acc, apr_uint64_t dur)
+{
+    /* access_count and duration are only maintained when ExtendedStatus
+     * is on; with it off they sit at zero forever. Reporting that as a
+     * 0ms mean would be the worst possible failure -- a jammed server
+     * would read as the fastest one imaginable, and the shed ladder
+     * would see its calmest input. Report "no opinion" instead, and let
+     * the dashboard say why. */
+    if (!ap_extended_status) return -2;
+    if (!bs_shm.metrics) return -1;
+    bs_metrics *m = bs_shm.metrics;
+    apr_uint64_t pa = m->ap_prev_access, pd = m->ap_prev_duration;
+    m->ap_prev_access   = acc;
+    m->ap_prev_duration = dur;
+    if (pa == 0 && pd == 0) return -1;      /* first call: no baseline */
+    if (acc < pa || dur < pd) return -1;    /* slots recycled */
+    apr_uint64_t dn = acc - pa;
+    if (dn == 0) return -1;                 /* idle window says nothing */
+    return (int)((dur - pd) / dn);
 }
 
 /* Apply hysteresis. Given a candidate state from this tick's
@@ -398,11 +519,65 @@ apr_status_t bs_load_watchdog_cb(int state, void *data,
                        BS_DEFAULT_LOAD_WARM_RATIO_PCT);
     int hot_pct  = bs_load_effective_int(scfg->load_hot_pct,
                        BS_DEFAULT_LOAD_HOT_RATIO_PCT);
-    int busy_pct = bs_load_sample_scoreboard();
+    apr_uint64_t sb_access = 0, sb_duration = 0;
+    int busy_pct = bs_load_sample_scoreboard(&sb_access, &sb_duration);
     bs_load_state internal = bs_load_state_from_pct(busy_pct,
                                                     warm_pct, hot_pct);
     bs_load_state external = bs_load_read_external(sv, scfg);
     bs_load_read_db_stats(sv, scfg);
+    bs_load_read_fpm_stats(sv, scfg);
+
+    /* Apache mean request latency. Same scoreboard walk, one delta.
+     *
+     * Sampled every tick so the accumulators stay current, but only
+     * written to the history ring on the ring's own cadence -- the
+     * delta must span a real interval to mean anything, and a
+     * sub-second window on a quiet site is mostly noise. */
+    bs_load_state lat_state = BS_LOAD_NORMAL;
+    if (bs_shm.metrics) {
+        bs_metrics *m = bs_shm.metrics;
+        apr_uint32_t now  = (apr_uint32_t)apr_time_sec(apr_time_now());
+        apr_uint32_t last = apr_atomic_read32(&m->ap_last_sec);
+        if (now >= last + BS_M_AP_PERIOD) {
+            int us = bs_load_sample_latency(sb_access, sb_duration);
+            if (us == -2) {
+                /* Distinct from "no sample yet": this one never
+                 * resolves on its own and needs an operator. */
+                apr_atomic_set32(&m->ap_latency_us, BS_M_AP_NO_STATUS);
+            } else if (us >= 0) {
+                /* The ring is milliseconds, which is the resolution the
+                 * warm/hot thresholds work at. The headline number keeps
+                 * microseconds: a server answering in 290us is not
+                 * answering in 0ms, and rounding it to zero on the
+                 * dashboard reads as a broken metric rather than a fast
+                 * one. Caught on a dev box; production runs 31-52ms and
+                 * would never have shown it. */
+                int ms = us / 1000;
+                if (ms > BS_M_AP_MAX_MS) ms = BS_M_AP_MAX_MS;
+                apr_uint32_t pos = apr_atomic_read32(&m->ap_pos);
+                pos = (pos + 1) % BS_M_AP_SLOTS;
+                m->ap_ring[pos] = (apr_uint16_t)ms;
+                apr_atomic_set32(&m->ap_pos, pos);
+                apr_atomic_set32(&m->ap_latency_us, (apr_uint32_t)us);
+            }
+            apr_atomic_set32(&m->ap_last_sec, now);
+        }
+        /* State from the last published sample rather than only from a
+         * fresh one, so the signal holds its value between ring writes
+         * instead of collapsing to normal on four ticks out of five. */
+        /* Compare in the sentinel's own type. Round-tripping it through
+         * int made the comparison signed-vs-unsigned, which is exactly
+         * the kind of thing that works until the value changes. */
+        apr_uint32_t cur_us = apr_atomic_read32(&m->ap_latency_us);
+        if (cur_us != BS_M_AP_NO_STATUS) {
+            int cur = (int)(cur_us / 1000);
+            int lw = bs_load_effective_int(scfg->latency_warm_ms,
+                                           BS_DEFAULT_LATENCY_WARM_MS);
+            int lh = bs_load_effective_int(scfg->latency_hot_ms,
+                                           BS_DEFAULT_LATENCY_HOT_MS);
+            lat_state = bs_load_state_from_pct(cur, lw, lh);
+        }
+    }
 
     /* Load average, per CPU, in hundredths. Thresholds are expressed in
      * the same unit the site's own shedding script uses -- HIGH is
@@ -445,6 +620,7 @@ apr_status_t bs_load_watchdog_cb(int state, void *data,
     /* Most-severe-wins merge across all three signals. */
     bs_load_state candidate = (internal > external) ? internal : external;
     if (avg > candidate) candidate = avg;
+    if (lat_state > candidate) candidate = lat_state;
     bs_load_apply_tick(sv, scfg, candidate);
     return APR_SUCCESS;
 }
@@ -478,6 +654,77 @@ const char *bs_set_load_state_file(cmd_parms *cmd, void *dconf,
                                                &botshield_module);
     scfg->load_state_file = apr_pstrdup(cmd->pool, arg);
     return NULL;
+}
+
+/* BotShieldFpmStatsFile <path>. */
+const char *bs_set_fpm_stats_file(cmd_parms *cmd, void *dconf,
+                                  const char *arg)
+{
+    (void)dconf;
+    if (!arg || !*arg) return "BotShieldFpmStatsFile: path required";
+    if (arg[0] != '/') return "BotShieldFpmStatsFile: path must be absolute";
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->fpm_stats_file = apr_pstrdup(cmd->pool, arg);
+    return NULL;
+}
+
+/* BotShieldLatencyWarm / BotShieldLatencyHot <milliseconds>. Mean
+ * request latency at which a sample is classified warm / hot. */
+static const char *bs_set_latency_ms(cmd_parms *cmd, const char *arg,
+                                     int *slot, const char *name)
+{
+    if (!arg || !*arg) return apr_psprintf(cmd->pool,
+                                           "%s: milliseconds required", name);
+    char *end = NULL;
+    long v = strtol(arg, &end, 10);
+    if (end == arg || (end && *end) || v < 1 || v > BS_M_AP_MAX_MS) {
+        return apr_psprintf(cmd->pool,
+            "%s: expected 1..%d milliseconds, got '%s'",
+            name, BS_M_AP_MAX_MS, arg);
+    }
+    *slot = (int)v;
+    return NULL;
+}
+
+const char *bs_set_latency_warm(cmd_parms *cmd, void *dconf, const char *arg)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    return bs_set_latency_ms(cmd, arg, &scfg->latency_warm_ms,
+                             "BotShieldLatencyWarm");
+}
+
+const char *bs_set_latency_hot(cmd_parms *cmd, void *dconf, const char *arg)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    return bs_set_latency_ms(cmd, arg, &scfg->latency_hot_ms,
+                             "BotShieldLatencyHot");
+}
+
+/* Effective latency thresholds, defaults applied. Exported for the
+ * dashboard, which needs the same numbers to draw its bands. */
+void bs_latency_thresholds(server_rec *sv, int *warm, int *hot)
+{
+    bs_server_cfg *scfg =
+        ap_get_module_config(sv->module_config, &botshield_module);
+    int w = scfg ? scfg->latency_warm_ms : 0;
+    int h = scfg ? scfg->latency_hot_ms  : 0;
+    if (warm) *warm = bs_load_effective_int(w, BS_DEFAULT_LATENCY_WARM_MS);
+    if (hot)  *hot  = bs_load_effective_int(h, BS_DEFAULT_LATENCY_HOT_MS);
+}
+
+/* Most recent Apache mean-latency sample, milliseconds. */
+/* Most recent Apache mean-latency sample, MICROSECONDS, or
+ * BS_M_AP_NO_STATUS when the metric is unavailable. */
+apr_uint32_t bs_latency_current_us(void)
+{
+    return bs_shm.metrics
+         ? apr_atomic_read32(&bs_shm.metrics->ap_latency_us)
+         : BS_M_AP_NO_STATUS;
 }
 
 /* BotShieldDbStatsFile <path>. Written by the external monitor; read

@@ -1804,6 +1804,37 @@ static void bs_d_load_spark(request_rec *r)
     bs_d_spark(r, &sp);
 }
 
+/* Apache mean request latency over the last hour. */
+static void bs_d_apache_spark(request_rec *r)
+{
+    bs_metrics *m = bs_shm.metrics;
+    if (!m) return;
+    int lw, lh;
+    bs_latency_thresholds(r->server, &lw, &lh);
+    bs_spark_spec sp = {
+        m->ap_ring, BS_M_AP_SLOTS, BS_M_AP_PERIOD, BS_M_AP_EMPTY,
+        apr_atomic_read32(&m->ap_pos), lw, lh, 0, "apg",
+        "Apache mean request latency over the last hour"
+    };
+    bs_d_spark(r, &sp);
+}
+
+/* PHP-FPM saturation, percent of pm.max_children, over the last hour. */
+static void bs_d_fpm_spark(request_rec *r)
+{
+    bs_metrics *m = bs_shm.metrics;
+    if (!m) return;
+    int warm = (int)apr_atomic_read32(&m->fpm_warm_pct);
+    int hot  = (int)apr_atomic_read32(&m->fpm_hot_pct);
+    if (hot <= 0) return;           /* no monitor has ever reported */
+    bs_spark_spec sp = {
+        m->fpm_ring, BS_M_FPM_SLOTS, BS_M_FPM_PERIOD, BS_M_FPM_EMPTY,
+        apr_atomic_read32(&m->fpm_pos), warm, hot, 0, "fpg",
+        "PHP-FPM workers busy, percent of the pool ceiling, last hour"
+    };
+    bs_d_spark(r, &sp);
+}
+
 /* Database threads-running over the last hour. Thresholds come from the
  * monitor's own stats file rather than from module config: they are the
  * numbers it actually classified against, so the graph's bands cannot
@@ -1841,18 +1872,15 @@ static const char *bs_d_pct(apr_pool_t *p, apr_uint64_t num, apr_uint64_t den)
     return apr_psprintf(p, "%.1f%%", (double)num * 100.0 / (double)den);
 }
 
-/* One segment of a horizontal stacked bar. Segments are drawn inside a
- * rounded clip so the outer ends are 4px-rounded while internal joins
- * stay square, and each is inset by a 2px surface gap. */
-static void bs_d_seg(request_rec *r, double x, double w, const char *fill,
-                     const char *label, apr_uint64_t v, const char *pct)
-{
-    if (w <= 0) return;
-    ap_rprintf(r,
-        "<rect x='%.2f' y='0' width='%.2f' height='34' fill='%s'>"
-        "<title>%s: %" APR_UINT64_T_FMT " (%s)</title></rect>",
-        x, w > 2 ? w - 2 : w, fill, label, v, pct);
-}
+/* Percentage at which a segment is wide enough to hold its own label.
+ *
+ * Decided server-side from the share, because CSS cannot measure text
+ * and there is no JavaScript here. A label like "12.3%" needs roughly
+ * 42px; the bar is commonly 600-900px wide in this layout, so 8% is
+ * the smallest share that reliably clears it with air on both sides.
+ * Below that the number goes to the legend only rather than being
+ * squeezed into a sliver or spilling over its neighbour. */
+#define BS_D_INBAR_MIN_PCT 8.0
 
 static void bs_d_stacked(request_rec *r, const char *id, const char *title,
                          const char **labels, const apr_uint64_t *vals,
@@ -1863,22 +1891,33 @@ static void bs_d_stacked(request_rec *r, const char *id, const char *title,
         ap_rputs("<p class='empty'>No decisions in this window.</p></section>", r);
         return;
     }
-    /* Unique clip id per chart: two elements sharing an id is invalid
-     * markup, and browsers resolve every reference to the first one. */
-    ap_rprintf(r,
-        "<svg viewBox='0 0 600 34' width='100%%' height='34' "
-        "role='img' preserveAspectRatio='none'>"
-        "<clipPath id='clip-%s'>"
-        "<rect x='0' y='0' width='600' height='34' rx='4'/></clipPath>"
-        "<g clip-path='url(#clip-%s)'>", id, id);
-    double x = 0;
+    /* Flex divs rather than an SVG.
+     *
+     * The SVG this replaces used preserveAspectRatio='none' to stretch a
+     * 600-unit viewBox across the container, which is fine for plain
+     * rectangles and ruinous for text: every glyph would be scaled
+     * horizontally by whatever the container happened to be. Percentage
+     * flex-basis gives the same proportional widths with labels that
+     * render at their natural shape.
+     *
+     * (void)id now -- the clip-path it disambiguated is gone, replaced
+     * by overflow:hidden on the rounded track. */
+    (void)id;
+    ap_rputs("<div class='stack'>", r);
     for (int i = 0; i < n; i++) {
-        double w = 600.0 * (double)vals[i] / (double)total;
-        bs_d_seg(r, x, w, fills[i], labels[i], vals[i],
-                 bs_d_pct(r->pool, vals[i], total));
-        x += w;
+        if (!vals[i]) continue;      /* no zero-width slivers */
+        double pct = 100.0 * (double)vals[i] / (double)total;
+        const char *pcts = bs_d_pct(r->pool, vals[i], total);
+        ap_rprintf(r,
+            "<div class='seg' style='flex:0 0 %.4f%%;background:%s' "
+            "title='%s: %" APR_UINT64_T_FMT " (%s)'>",
+            pct, fills[i], labels[i], vals[i], pcts);
+        if (pct >= BS_D_INBAR_MIN_PCT) {
+            ap_rprintf(r, "<span>%s</span>", pcts);
+        }
+        ap_rputs("</div>", r);
     }
-    ap_rputs("</g></svg><ul class='legend'>", r);
+    ap_rputs("</div><ul class='legend'>", r);
     for (int i = 0; i < n; i++) {
         /* Legend always present for >= 2 series, and every series is
          * also direct-labelled with its value — identity is never
@@ -2296,12 +2335,39 @@ static void bs_d_page_open(request_rec *r, const char *title,
       /* Taller than a sparkline: tick labels need the room. Still
        * inside the KPI box, just a chart rather than a squiggle. */
       ".spark{flex:1;min-width:0;height:96px;display:block}"
-      /* Two chart boxes of equal width rather than auto-fit, so the two
-       * series line up column-for-column. Auto-fit would size them by
-       * content and leave the time axes offset from each other, which
-       * defeats the reason for showing them together. */
-      ".loadpair{grid-template-columns:repeat(auto-fit,minmax(390px,1fr))}"
+      /* Fixed 2x2 for the four load monitors. Explicit columns rather
+       * than auto-fit so the charts line up column-for-column and share
+       * a visual x-axis; auto-fit sizes by content and would leave the
+       * time axes offset from each other, which defeats the reason for
+       * showing them together. */
+      ".loadpair{grid-template-columns:repeat(2,minmax(0,1fr))}"
+      /* Compact: four boxes is a lot of vertical space at the full
+       * chart height, and these are a glanceable header for the page,
+       * not the subject of it. */
+      /* span 1, explicitly. .kpi-load carries grid-column:span 2 from
+       * the wide auto-fit KPI row it was designed for; inherited into
+       * a 2-column grid that makes every box full-width and stacks
+       * the four monitors into four rows instead of a 2x2. */
+      ".loadpair .kpi-load{grid-column:span 1;min-width:0;padding:10px 12px}"
+      ".loadpair .spark{height:68px}"
+      ".loadpair .v{font-size:22px}"
+      ".loadpair .loadrow{gap:10px}"
       /* Composite verdict strip above the pair. */
+      /* Stacked share bar. overflow:hidden on the rounded track gives
+       * the 4px outer corners the old SVG clip-path provided, while
+       * internal joins stay square. */
+      ".stack{display:flex;width:100%;height:34px;border-radius:4px;"
+      "overflow:hidden;background:var(--track)}"
+      ".seg{position:relative;display:flex;align-items:center;"
+      "justify-content:center;min-width:0;overflow:hidden;"
+      "box-shadow:inset -2px 0 0 var(--surface)}"
+      ".seg:last-child{box-shadow:none}"
+      /* White on the saturated series fills, with a soft dark halo so
+       * it stays legible on the lighter ones (amber especially) in
+       * both themes without hard-coding a per-series text colour. */
+      ".seg span{font-size:11px;font-weight:600;color:#fff;"
+      "text-shadow:0 0 3px rgba(0,0,0,.55);white-space:nowrap;"
+      "padding:0 4px}"
       ".loadbar{display:flex;align-items:center;gap:20px;flex-wrap:wrap;"
       "background:var(--surface);border:1px solid var(--line);"
       "border-radius:8px;padding:10px 14px;margin-bottom:12px}"
@@ -3096,6 +3162,28 @@ int bs_dashboard_handler(request_rec *r)
             ap_rprintf(r, "<span class='src'>CPU <b style='color:%s'>%s</b>"
                           "</span>", ct, cs);
         }
+        {
+            /* Apache latency: the signal the busy-worker ratio cannot
+             * see. 1024 worker slots on 6 cores means an unusable site
+             * still reads 2-3% utilisation. */
+            apr_uint32_t lat_us = bs_latency_current_us();
+            int lat = (lat_us == BS_M_AP_NO_STATUS)
+                    ? -1 : (int)(lat_us / 1000);
+            if (lat < 0) {
+                ap_rputs("<span class='src'>Apache <b style='color:"
+                         "var(--muted)'>needs ExtendedStatus</b></span>", r);
+            } else {
+                int lw, lh;
+                bs_latency_thresholds(r->server, &lw, &lh);
+                const char *as = ((int)lat >= lh) ? "hot"
+                               : ((int)lat >= lw) ? "warm" : "normal";
+                const char *at = ((int)lat >= lh) ? "var(--crit)"
+                               : ((int)lat >= lw) ? "var(--warn)"
+                                                  : "var(--good)";
+                ap_rprintf(r, "<span class='src'>Apache "
+                              "<b style='color:%s'>%s</b></span>", at, as);
+            }
+        }
         if (!db_have) {
             ap_rputs("<span class='src'>Database "
                      "<b style='color:var(--muted)'>no monitor</b></span>", r);
@@ -3112,6 +3200,27 @@ int bs_dashboard_handler(request_rec *r)
             ap_rprintf(r, "<span class='src'>Database "
                           "<b style='color:%s'>%s</b></span>", dt, ds);
         }
+        {
+            bs_metrics *fm = bs_shm.metrics;
+            apr_uint32_t fsec = fm ? apr_atomic_read32(&fm->fpm_sample_sec) : 0;
+            apr_uint32_t fst  = fm ? apr_atomic_read32(&fm->fpm_state) : 0;
+            if (!fsec) {
+                ap_rputs("<span class='src'>PHP-FPM <b style='color:"
+                         "var(--muted)'>no monitor</b></span>", r);
+            } else if (nowsec > fsec + 120) {
+                ap_rprintf(r, "<span class='src'>PHP-FPM "
+                              "<b style='color:var(--warn)'>stale %us</b>"
+                              "</span>", nowsec - fsec);
+            } else {
+                const char *fs = (fst == BS_LOAD_HOT)  ? "hot"
+                               : (fst == BS_LOAD_WARM) ? "warm" : "normal";
+                const char *ft = (fst == BS_LOAD_HOT)  ? "var(--crit)"
+                               : (fst == BS_LOAD_WARM) ? "var(--warn)"
+                                                       : "var(--good)";
+                ap_rprintf(r, "<span class='src'>PHP-FPM "
+                              "<b style='color:%s'>%s</b></span>", ft, fs);
+            }
+        }
         ap_rputs("</div></div>", r);
 
         ap_rputs("<div class='kpis loadpair'>", r);
@@ -3125,6 +3234,44 @@ int bs_dashboard_handler(request_rec *r)
         bs_d_load_spark(r);
         ap_rputs("</div><div class='n'>1-minute average, last hour"
                  "</div></div>", r);
+
+        /* Apache request latency. Deliberately NOT the busy-worker
+         * ratio: with 1024 slots on 6 cores that reads 2-3% while the
+         * site is unusable, which is how four overnight outages looked
+         * like an idle server. */
+        {
+            apr_uint32_t lat_us = bs_latency_current_us();
+            ap_rputs("<div class='kpi kpi-load'><div class='k'>Apache "
+                     "request latency</div><div class='loadrow'>"
+                     "<div class='v'>", r);
+            if (lat_us == BS_M_AP_NO_STATUS) {
+                /* No number at all rather than a zero. Zero here would
+                 * read as an instantaneous server, which is the exact
+                 * opposite of what an absent measurement means. */
+                ap_rputs("<span style='color:var(--muted)'>&mdash;</span>"
+                         "</div></div><div class='n'>unavailable: this "
+                         "metric is derived from Apache's per-worker "
+                         "counters, which are only maintained under "
+                         "<code>ExtendedStatus On</code></div></div>", r);
+            } else {
+                /* Three scales, because this number legitimately spans
+                 * five orders of magnitude: sub-millisecond on a static
+                 * hit, tens of ms normally, tens of SECONDS during the
+                 * outages. Printing everything in ms would show "0ms"
+                 * for a fast server and "36000ms" for a dying one. */
+                if (lat_us >= 1000000) {
+                    ap_rprintf(r, "%u.%us</div>", lat_us / 1000000,
+                               (lat_us % 1000000) / 100000);
+                } else if (lat_us >= 1000) {
+                    ap_rprintf(r, "%ums</div>", lat_us / 1000);
+                } else {
+                    ap_rprintf(r, "0.%ums</div>", lat_us / 100);
+                }
+                bs_d_apache_spark(r);
+                ap_rputs("</div><div class='n'>mean per request, last hour"
+                         "</div></div>", r);
+            }
+        }
 
         /* Database, same shape so the two read against each other. */
         if (db_have && !db_stale) {
@@ -3145,6 +3292,35 @@ int bs_dashboard_handler(request_rec *r)
                            "not shown because a dead monitor looks calm"
                          : "no monitor configured "
                            "(BotShieldDbStatsFile)");
+        }
+        /* PHP-FPM. pm.max_children is a real ceiling, which is what
+         * makes a percentage here meaningful in a way the Apache
+         * busy-worker ratio is not. */
+        {
+            bs_metrics *fm = bs_shm.metrics;
+            apr_uint32_t fsec = fm ? apr_atomic_read32(&fm->fpm_sample_sec) : 0;
+            int fstale = fsec && (nowsec > fsec + 120);
+            ap_rputs("<div class='kpi kpi-load'><div class='k'>PHP-FPM "
+                     "workers busy</div><div class='loadrow'>", r);
+            if (fsec && !fstale) {
+                ap_rprintf(r, "<div class='v'>%u%%</div>",
+                           apr_atomic_read32(&fm->fpm_pct));
+                bs_d_fpm_spark(r);
+                ap_rprintf(r, "</div><div class='n'>%u of %u children, "
+                              "%u queued for one, last hour</div></div>",
+                           apr_atomic_read32(&fm->fpm_active),
+                           apr_atomic_read32(&fm->fpm_max_children),
+                           apr_atomic_read32(&fm->fpm_queue));
+            } else {
+                ap_rprintf(r, "<div class='v' style='color:var(--muted)'>"
+                              "&mdash;</div></div><div class='n'>%s</div>"
+                              "</div>",
+                           fsec ? "monitor stopped reporting; the last "
+                                  "reading is not shown because a dead "
+                                  "monitor looks calm"
+                                : "no monitor configured "
+                                  "(BotShieldFpmStatsFile)");
+            }
         }
         ap_rputs("</div>", r);   /* closes the KPI row */
         ap_rputs("<p class='note'>Load state is the most severe of the "
@@ -3717,6 +3893,17 @@ int bs_metrics_handler(request_rec *r)
     /* E11 — load-state observability. The gauge is the most useful
      * value to alert on; the counter lets operators graph state
      * transitions per minute. */
+    {
+        /* -1, not the sentinel and not 0: a scrape must be able to tell
+         * "not measured" from "measured as instant". */
+        apr_uint32_t lat_us = bs_latency_current_us();
+        bs_m_emit_gauge(r, "apache_latency_us",
+            "Mean Apache request latency over the last sample window, "
+            "microseconds. A delta between watchdog ticks, not an "
+            "average since restart. -1 when unavailable (requires "
+            "ExtendedStatus On).",
+            lat_us == BS_M_AP_NO_STATUS ? -1.0 : (double)lat_us);
+    }
     bs_m_emit_gauge(r, "load_state",
         "Current cached load state (0=normal, 1=warm, 2=hot).",
         (apr_uint64_t)(bs_shm.header
