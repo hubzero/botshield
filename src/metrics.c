@@ -3490,6 +3490,18 @@ int bs_dashboard_handler(request_rec *r)
                   "<div class='v'>%s</div><div class='n'>%" APR_UINT64_T_FMT
                   " reached a decision</div></div>",
                bs_d_pct(r->pool, w.decisions, w.req_total), w.decisions);
+    /* Solve rate against challenges issued, not against all decisions.
+     * A challenge nobody answers is a client that left, so this is the
+     * one number that says whether the challenge is working -- and it
+     * is what separates a real browser population from a scraper farm
+     * or a broken interstitial. */
+    ap_rprintf(r, "<div class='kpi'><div class='k'>Solved</div>"
+                  "<div class='v'>%s</div><div class='n'>%" APR_UINT64_T_FMT
+                  " of %" APR_UINT64_T_FMT " challenges</div></div>",
+               bs_d_pct(r->pool, w.outcome[BS_M_OUTCOME_VERIFIED],
+                        w.outcome[BS_M_OUTCOME_CHALLENGED]),
+               w.outcome[BS_M_OUTCOME_VERIFIED],
+               w.outcome[BS_M_OUTCOME_CHALLENGED]);
     ap_rputs("</div></section>", r);
 
     /* Who is visiting. Categorical: these are kinds of client, not a
@@ -3723,31 +3735,18 @@ int bs_dashboard_handler(request_rec *r)
                (apr_uint64_t)bs_shm.strike_capacity);
     ap_rputs("</section>", r);
 
-    /* Eleven outcome classes is a table, not eleven hues. */
-    ap_rputs("<section><h2>Outcomes</h2><table><thead><tr><th>Outcome</th>"
-             "<th class='n'>Count</th><th class='n'>Share</th></tr></thead><tbody>", r);
-    {
-        const char *const *onames = bs_m_outcome_names;
-        int shown = 0;
-        for (int i = 0; i < BS_M_OUTCOME_COUNT; i++) {
-            if (!w.outcome[i]) continue;
-            ap_rprintf(r, "<tr><td>%s</td><td class='n'>%" APR_UINT64_T_FMT
-                          "</td><td class='n'>%s</td></tr>",
-                       onames[i], w.outcome[i],
-                       bs_d_pct(r->pool, w.outcome[i], w.decisions));
-            shown++;
-        }
-        if (!shown) ap_rputs("<tr><td colspan='3' class='empty'>"
-                             "Nothing recorded in this window.</td></tr>", r);
-    }
-    ap_rputs("</tbody></table></section>", r);
-
-    ap_rputs("<footer>Counters reset when the SHM segment is recreated, which "
-             "a graceful restart does. Windowed views are bucketed and "
-             "advisory: a writer crossing a bucket boundary can lose an "
-             "increment. &ldquo;Unsolved&rdquo; means a challenge was issued "
-             "and the client never came back &mdash; they are gone, not "
-             "queued.</footer></main></div></body></html>", r);
+    /* The Outcomes table that used to sit here is gone. Five of its
+     * rows were already on the page: challenged, block and rate_limited
+     * are the same numbers the "BotShield response breakdown" bar
+     * shows, and allow is just decisions minus those. Only `verified`
+     * -- the count of challenges actually solved -- appeared nowhere
+     * else, and burying the single most diagnostic number on the page
+     * in the last row of the last table was the wrong place for it. It
+     * is now a KPI in the traffic row, expressed against challenges
+     * issued rather than against all decisions, because "what fraction
+     * of the clients we challenged came back and solved it" is the
+     * question that number answers. */
+    ap_rputs("</main></div></body></html>", r);
     return OK;
 }
 
