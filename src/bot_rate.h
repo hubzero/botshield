@@ -79,6 +79,12 @@ typedef struct bs_bot_rate_state {
     apr_array_header_t  *entries;            /* bs_bot_rate_entry*, declaration order */
     apr_hash_t          *by_slug;            /* slug → bs_bot_rate_slot* */
     bs_bot_rate_slot    *unknown_bot_holder; /* NULL if no wildcard */
+    /* Absent-UA traffic gets its own aggregate rather than sharing the
+     * unknown-bot one. On this deployment that is ~39k requests/day
+     * against ~2k for everything else in that bucket, so sharing would
+     * hold the shared budget permanently exhausted and 429 every
+     * genuine unknown bot as collateral. */
+    bs_bot_rate_slot    *no_ua_holder;
     bs_bot_rate_slot    *fake_bot_holder;    /* NULL if no wildcard */
     /* Catches "classified-as-bot but slug not in by_slug" — covers
      * new directory slugs added mid-run via watchdog refresh that

@@ -356,9 +356,25 @@ dashboard as **Client classification** and in Prometheus as
 | `browser` | UA matched a real-browser template. |
 | `verified-bot` | UA matched the allow list **and** the IP is in that crawler's published ranges. |
 | `known-bot` | UA is in the bot directory, but not IP-verified. |
-| `unknown-bot` | UA has bot-shaped tokens with no directory entry. |
+| `unknown-bot` | UA has bot-shaped tokens with no directory entry, **or no User-Agent at all**. |
 | `fake-bot` | UA claims a crawler, IP is outside its published ranges — spoofed. |
 | `unknown` | Matched no classifier. |
+
+A request with no `User-Agent` header counts as `unknown-bot`, not
+`unknown`. Absence of the header is not ambiguity: every real browser
+sends one, so we positively know the client is not a browser, and
+filing it under `unknown` overstated our uncertainty. It also dominated
+that bucket — 84% of `unknown` on this deployment — which made 41% of
+all traffic look like a classifier gap when it was a well-understood
+scanner population already being challenged.
+
+The reason chain still separates the two cases: `unknown-bot:no-ua`
+versus `unknown-bot:<token>` for a UA that named itself bot-shaped.
+
+Rate limiting meters absent-UA traffic in its **own** aggregate rather
+than the shared `unknown-bot` one. At ~39k requests/day against ~2k for
+the rest of that bucket, sharing would hold the budget permanently
+exhausted and 429 every genuine unknown bot as collateral.
 
 The distinction that matters operationally is `verified-bot` vs
 `fake-bot`: both send the same User-Agent, and only the IP cross-check
