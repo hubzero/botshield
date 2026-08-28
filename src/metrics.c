@@ -2296,8 +2296,25 @@ static void bs_d_page_open(request_rec *r, const char *title,
       /* Taller than a sparkline: tick labels need the room. Still
        * inside the KPI box, just a chart rather than a squiggle. */
       ".spark{flex:1;min-width:0;height:96px;display:block}"
+      /* Two chart boxes of equal width rather than auto-fit, so the two
+       * series line up column-for-column. Auto-fit would size them by
+       * content and leave the time axes offset from each other, which
+       * defeats the reason for showing them together. */
+      ".loadpair{grid-template-columns:repeat(auto-fit,minmax(390px,1fr))}"
+      /* Composite verdict strip above the pair. */
+      ".loadbar{display:flex;align-items:center;gap:20px;flex-wrap:wrap;"
+      "background:var(--surface);border:1px solid var(--line);"
+      "border-radius:8px;padding:10px 14px;margin-bottom:12px}"
+      ".lb-state{display:flex;align-items:baseline;gap:8px}"
+      ".lb-k{font-size:11px;text-transform:uppercase;letter-spacing:.04em;"
+      "color:var(--muted)}"
+      ".lb-v{font-size:20px;font-weight:600}"
+      ".lb-src{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;"
+      "color:var(--muted)}"
+      ".lb-src .src b{font-weight:600}"
       "@media(max-width:600px){.kpi-load{grid-column:span 1;"
-      "min-width:0}.spark{display:none}}"
+      "min-width:0}.spark{display:none}"
+      ".loadpair{grid-template-columns:1fr}}"
       /* Audience tabs. Plain links, because the selection lives in the
        * query string -- see the `tab` parse -- so it survives the
        * auto-refresh. Ordinary anchors are keyboard-operable and
@@ -3036,9 +3053,68 @@ int bs_dashboard_handler(request_rec *r)
         const char *tone  = (ls == BS_LOAD_HOT)  ? "var(--crit)"
                           : (ls == BS_LOAD_WARM) ? "var(--warn)"
                                                  : "var(--good)";
+        apr_uint32_t dbst  = bs_shm.header
+            ? apr_atomic_read32(&bs_shm.header->db_state) : 0;
+        apr_uint32_t dbthr = bs_shm.header
+            ? apr_atomic_read32(&bs_shm.header->db_threads_run) : 0;
+        apr_uint32_t dbqps = bs_shm.header
+            ? apr_atomic_read32(&bs_shm.header->db_qps) : 0;
+        apr_uint32_t dblck = bs_shm.header
+            ? apr_atomic_read32(&bs_shm.header->db_lock_pct_x100) : 0;
+        apr_uint32_t dbsec = bs_shm.header
+            ? apr_atomic_read32(&bs_shm.header->db_sample_sec) : 0;
+        apr_uint32_t nowsec = (apr_uint32_t)apr_time_sec(apr_time_now());
+        /* A monitor that died an hour ago reads exactly like a database
+         * that is perfectly calm. Age is the only thing that separates
+         * them, so it decides whether these numbers are shown at all. */
+        int db_have  = (dbsec > 0);
+        int db_stale = db_have && (nowsec > dbsec + 120);
+
         ap_rputs("<section><h2>Server load <span style='text-transform:"
                  "none;font-weight:400;color:var(--muted)'>right now"
-                 "</span></h2><div class='kpis'>", r);
+                 "</span></h2>", r);
+
+        /* Composite verdict above the two series it is derived from.
+         * The merged state is what policy matches on, but it is a MAX,
+         * so on its own it cannot say which input drove it -- and
+         * "why are we shedding" is the question an operator actually
+         * has. Each contributor is named with its own state beside it. */
+        ap_rprintf(r,
+            "<div class='loadbar' style='border-left:4px solid %s'>"
+            "<div class='lb-state'><span class='lb-k'>Load state</span>"
+            "<span class='lb-v' style='color:%s'>%s</span></div>"
+            "<div class='lb-src'>", tone, tone, lname);
+        {
+            /* Per-CPU load average: the signal that caught the outages
+             * the worker ratio missed. */
+            int aw, ah;
+            bs_loadavg_thresholds(r->server, &aw, &ah);
+            const char *cs = ((int)la >= ah) ? "hot"
+                           : ((int)la >= aw) ? "warm" : "normal";
+            const char *ct = ((int)la >= ah) ? "var(--crit)"
+                           : ((int)la >= aw) ? "var(--warn)" : "var(--good)";
+            ap_rprintf(r, "<span class='src'>CPU <b style='color:%s'>%s</b>"
+                          "</span>", ct, cs);
+        }
+        if (!db_have) {
+            ap_rputs("<span class='src'>Database "
+                     "<b style='color:var(--muted)'>no monitor</b></span>", r);
+        } else if (db_stale) {
+            ap_rprintf(r, "<span class='src'>Database "
+                          "<b style='color:var(--warn)'>stale %us</b></span>",
+                       nowsec - dbsec);
+        } else {
+            const char *ds = (dbst == BS_LOAD_HOT)  ? "hot"
+                           : (dbst == BS_LOAD_WARM) ? "warm" : "normal";
+            const char *dt = (dbst == BS_LOAD_HOT)  ? "var(--crit)"
+                           : (dbst == BS_LOAD_WARM) ? "var(--warn)"
+                                                    : "var(--good)";
+            ap_rprintf(r, "<span class='src'>Database "
+                          "<b style='color:%s'>%s</b></span>", dt, ds);
+        }
+        ap_rputs("</div></div>", r);
+
+        ap_rputs("<div class='kpis loadpair'>", r);
         /* Number and sparkline share one box: the value says where you
          * are, the line says how you got here, and reading one without
          * the other is what made four overnight spikes look like
@@ -3049,14 +3125,33 @@ int bs_dashboard_handler(request_rec *r)
         bs_d_load_spark(r);
         ap_rputs("</div><div class='n'>1-minute average, last hour"
                  "</div></div>", r);
-        ap_rprintf(r, "<div class='kpi'><div class='k'>Load state</div>"
-                      "<div class='v' style='color:%s'>%s</div>"
-                      "<div class='n'>what policy matches on</div></div>",
-                   tone, lname);
+
+        /* Database, same shape so the two read against each other. */
+        if (db_have && !db_stale) {
+            ap_rprintf(r, "<div class='kpi kpi-load'><div class='k'>Database "
+                          "threads running</div><div class='loadrow'>"
+                          "<div class='v'>%u</div>", dbthr);
+            bs_d_db_spark(r);
+            ap_rprintf(r, "</div><div class='n'>%u queries/s, %u.%02u%% lock "
+                          "contention, last hour</div></div>",
+                       dbqps, dblck / 100, dblck % 100);
+        } else {
+            ap_rprintf(r, "<div class='kpi kpi-load'><div class='k'>Database "
+                          "threads running</div><div class='loadrow'>"
+                          "<div class='v' style='color:var(--muted)'>—</div>"
+                          "</div><div class='n'>%s</div></div>",
+                       db_have
+                         ? "monitor stopped reporting; the last reading is "
+                           "not shown because a dead monitor looks calm"
+                         : "no monitor configured "
+                           "(BotShieldDbStatsFile)");
+        }
         ap_rputs("</div>", r);   /* closes the KPI row */
-        ap_rputs("<p class='note'>Load state is the most severe of "
-                 "three signals: per-CPU load average, Apache busy-worker "
-                 "ratio, and any external state file. Rules match it with "
+        ap_rputs("<p class='note'>Load state is the most severe of the "
+                 "signals available: per-CPU load average, Apache "
+                 "busy-worker ratio, and any external state file — which "
+                 "is how the database reaches policy, since the module "
+                 "never talks to it directly. Rules match with "
                  "<code>minload=warm</code> or <code>minload=hot</code>."
                  "</p></section>", r);
     }

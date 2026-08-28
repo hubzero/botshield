@@ -233,6 +233,21 @@ static void bs_load_read_db_stats(server_rec *sv, bs_server_cfg *scfg)
 
     int threads = bs_kv_int(buf, "threads_run", 1);
     if (threads < 0) return;          /* no usable reading; leave last */
+
+    /* The monitor's own verdict, not one we re-derive. It classifies on
+     * lock contention as well as thread count, so recomputing from
+     * threads alone here would sometimes disagree with the state it
+     * published -- and the state file is what actually drives policy. */
+    {
+        const char *sp = strstr(buf, "state=");
+        apr_uint32_t st = BS_LOAD_NORMAL;
+        if (sp && (sp == buf || sp[-1] == ' ')) {
+            sp += 6;
+            if      (!strncmp(sp, "hot",  3)) st = BS_LOAD_HOT;
+            else if (!strncmp(sp, "warm", 4)) st = BS_LOAD_WARM;
+        }
+        apr_atomic_set32(&bs_shm.header->db_state, st);
+    }
     int qps     = bs_kv_int(buf, "qps", 1);
     int lockx   = bs_kv_int(buf, "lock_pct", 100);
     int ts      = bs_kv_int(buf, "ts", 1);
