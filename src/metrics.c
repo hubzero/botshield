@@ -2277,7 +2277,10 @@ static void bs_d_page_open(request_rec *r, const char *title,
        * Single column under 900px, where a fixed rail plus charts does
        * not fit and a sticky sidebar would eat the viewport. */
       ".shell{display:grid;grid-template-columns:248px minmax(0,1fr);"
-      "min-height:100vh;transition:grid-template-columns .2s ease}"
+      /* 100vh MINUS the body padding, or the document is always taller
+       * than the viewport by exactly that padding and the page scrolls
+       * even when nothing overflows. */
+      "min-height:calc(100vh - 24px);transition:grid-template-columns .2s ease}"
       /* No horizontal padding: nav rows span the full rail width so the
        * selected one can reach the border and bleed past it. Children
        * that should stay inset carry their own margin.
@@ -2292,7 +2295,7 @@ static void bs_d_page_open(request_rec *r, const char *title,
        * selected tab -- painted in the content surface -- reads as a
        * hole cut through its section straight into the page. */
       "aside{background:var(--surface);border-right:1px solid var(--line);"
-      "padding:0 0 24px;min-height:100vh;position:sticky;top:0;"
+      "padding:0 0 24px;min-height:calc(100vh - 24px);position:sticky;top:0;"
       "overflow:visible;display:flex;flex-direction:column;gap:0}"
       "main{padding:6px 26px 18px;max-width:1000px;min-width:0}"
       /* Rail header: product name and the collapse control on one line,
@@ -2446,6 +2449,7 @@ static void bs_d_page_open(request_rec *r, const char *title,
       "nav.rf a{padding:3px 9px;font-size:12px}"
       "nav.rf .ts{margin-left:auto;font-variant-numeric:tabular-nums}"
       "section{margin:0 0 28px}"
+      ".shell main>section:last-of-type{margin-bottom:0}"
       ".kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}"
       /* The load box holds a number and a sparkline side by side, so
        * it needs roughly twice the width of a plain stat tile. */
