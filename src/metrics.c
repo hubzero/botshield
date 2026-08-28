@@ -1872,18 +1872,15 @@ static const char *bs_d_pct(apr_pool_t *p, apr_uint64_t num, apr_uint64_t den)
     return apr_psprintf(p, "%.1f%%", (double)num * 100.0 / (double)den);
 }
 
-/* One segment of a horizontal stacked bar. Segments are drawn inside a
- * rounded clip so the outer ends are 4px-rounded while internal joins
- * stay square, and each is inset by a 2px surface gap. */
-static void bs_d_seg(request_rec *r, double x, double w, const char *fill,
-                     const char *label, apr_uint64_t v, const char *pct)
-{
-    if (w <= 0) return;
-    ap_rprintf(r,
-        "<rect x='%.2f' y='0' width='%.2f' height='34' fill='%s'>"
-        "<title>%s: %" APR_UINT64_T_FMT " (%s)</title></rect>",
-        x, w > 2 ? w - 2 : w, fill, label, v, pct);
-}
+/* Percentage at which a segment is wide enough to hold its own label.
+ *
+ * Decided server-side from the share, because CSS cannot measure text
+ * and there is no JavaScript here. A label like "12.3%" needs roughly
+ * 42px; the bar is commonly 600-900px wide in this layout, so 8% is
+ * the smallest share that reliably clears it with air on both sides.
+ * Below that the number goes to the legend only rather than being
+ * squeezed into a sliver or spilling over its neighbour. */
+#define BS_D_INBAR_MIN_PCT 8.0
 
 static void bs_d_stacked(request_rec *r, const char *id, const char *title,
                          const char **labels, const apr_uint64_t *vals,
@@ -1894,22 +1891,33 @@ static void bs_d_stacked(request_rec *r, const char *id, const char *title,
         ap_rputs("<p class='empty'>No decisions in this window.</p></section>", r);
         return;
     }
-    /* Unique clip id per chart: two elements sharing an id is invalid
-     * markup, and browsers resolve every reference to the first one. */
-    ap_rprintf(r,
-        "<svg viewBox='0 0 600 34' width='100%%' height='34' "
-        "role='img' preserveAspectRatio='none'>"
-        "<clipPath id='clip-%s'>"
-        "<rect x='0' y='0' width='600' height='34' rx='4'/></clipPath>"
-        "<g clip-path='url(#clip-%s)'>", id, id);
-    double x = 0;
+    /* Flex divs rather than an SVG.
+     *
+     * The SVG this replaces used preserveAspectRatio='none' to stretch a
+     * 600-unit viewBox across the container, which is fine for plain
+     * rectangles and ruinous for text: every glyph would be scaled
+     * horizontally by whatever the container happened to be. Percentage
+     * flex-basis gives the same proportional widths with labels that
+     * render at their natural shape.
+     *
+     * (void)id now -- the clip-path it disambiguated is gone, replaced
+     * by overflow:hidden on the rounded track. */
+    (void)id;
+    ap_rputs("<div class='stack'>", r);
     for (int i = 0; i < n; i++) {
-        double w = 600.0 * (double)vals[i] / (double)total;
-        bs_d_seg(r, x, w, fills[i], labels[i], vals[i],
-                 bs_d_pct(r->pool, vals[i], total));
-        x += w;
+        if (!vals[i]) continue;      /* no zero-width slivers */
+        double pct = 100.0 * (double)vals[i] / (double)total;
+        const char *pcts = bs_d_pct(r->pool, vals[i], total);
+        ap_rprintf(r,
+            "<div class='seg' style='flex:0 0 %.4f%%;background:%s' "
+            "title='%s: %" APR_UINT64_T_FMT " (%s)'>",
+            pct, fills[i], labels[i], vals[i], pcts);
+        if (pct >= BS_D_INBAR_MIN_PCT) {
+            ap_rprintf(r, "<span>%s</span>", pcts);
+        }
+        ap_rputs("</div>", r);
     }
-    ap_rputs("</g></svg><ul class='legend'>", r);
+    ap_rputs("</div><ul class='legend'>", r);
     for (int i = 0; i < n; i++) {
         /* Legend always present for >= 2 series, and every series is
          * also direct-labelled with its value — identity is never
@@ -2327,12 +2335,35 @@ static void bs_d_page_open(request_rec *r, const char *title,
       /* Taller than a sparkline: tick labels need the room. Still
        * inside the KPI box, just a chart rather than a squiggle. */
       ".spark{flex:1;min-width:0;height:96px;display:block}"
-      /* Two chart boxes of equal width rather than auto-fit, so the two
-       * series line up column-for-column. Auto-fit would size them by
-       * content and leave the time axes offset from each other, which
-       * defeats the reason for showing them together. */
-      ".loadpair{grid-template-columns:repeat(auto-fit,minmax(390px,1fr))}"
+      /* Fixed 2x2 for the four load monitors. Explicit columns rather
+       * than auto-fit so the charts line up column-for-column and share
+       * a visual x-axis; auto-fit sizes by content and would leave the
+       * time axes offset from each other, which defeats the reason for
+       * showing them together. */
+      ".loadpair{grid-template-columns:repeat(2,minmax(0,1fr))}"
+      /* Compact: four boxes is a lot of vertical space at the full
+       * chart height, and these are a glanceable header for the page,
+       * not the subject of it. */
+      ".loadpair .kpi-load{min-width:0;padding:10px 12px}"
+      ".loadpair .spark{height:68px}"
+      ".loadpair .v{font-size:22px}"
+      ".loadpair .loadrow{gap:10px}"
       /* Composite verdict strip above the pair. */
+      /* Stacked share bar. overflow:hidden on the rounded track gives
+       * the 4px outer corners the old SVG clip-path provided, while
+       * internal joins stay square. */
+      ".stack{display:flex;width:100%;height:34px;border-radius:4px;"
+      "overflow:hidden;background:var(--track)}"
+      ".seg{position:relative;display:flex;align-items:center;"
+      "justify-content:center;min-width:0;overflow:hidden;"
+      "box-shadow:inset -2px 0 0 var(--surface)}"
+      ".seg:last-child{box-shadow:none}"
+      /* White on the saturated series fills, with a soft dark halo so
+       * it stays legible on the lighter ones (amber especially) in
+       * both themes without hard-coding a per-series text colour. */
+      ".seg span{font-size:11px;font-weight:600;color:#fff;"
+      "text-shadow:0 0 3px rgba(0,0,0,.55);white-space:nowrap;"
+      "padding:0 4px}"
       ".loadbar{display:flex;align-items:center;gap:20px;flex-wrap:wrap;"
       "background:var(--surface);border:1px solid var(--line);"
       "border-radius:8px;padding:10px 14px;margin-bottom:12px}"

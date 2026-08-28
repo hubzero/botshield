@@ -565,10 +565,12 @@ apr_status_t bs_load_watchdog_cb(int state, void *data,
         /* State from the last published sample rather than only from a
          * fresh one, so the signal holds its value between ring writes
          * instead of collapsing to normal on four ticks out of five. */
+        /* Compare in the sentinel's own type. Round-tripping it through
+         * int made the comparison signed-vs-unsigned, which is exactly
+         * the kind of thing that works until the value changes. */
         apr_uint32_t cur_us = apr_atomic_read32(&m->ap_latency_us);
-        int cur = (cur_us == BS_M_AP_NO_STATUS) ? BS_M_AP_NO_STATUS
-                                                : (int)(cur_us / 1000);
-        if (cur != BS_M_AP_NO_STATUS) {
+        if (cur_us != BS_M_AP_NO_STATUS) {
+            int cur = (int)(cur_us / 1000);
             int lw = bs_load_effective_int(scfg->latency_warm_ms,
                                            BS_DEFAULT_LATENCY_WARM_MS);
             int lh = bs_load_effective_int(scfg->latency_hot_ms,
