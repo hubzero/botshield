@@ -1,0 +1,65 @@
+[Unit]
+# Samples MariaDB saturation and publishes it for mod_botshield.
+# Deliberately not a dependency of httpd: if this dies, BotShield keeps
+# serving on its CPU-derived load signal alone. Monitoring must not be
+# able to take the web server down with it.
+Description=BotShield MariaDB load monitor
+Documentation=file:/usr/local/share/botshield/botshield-dbmon.py
+After=mariadb.service
+Wants=mariadb.service
+
+[Service]
+Type=simple
+User=botshield-mon
+Group=botshield-mon
+ExecStart=/usr/local/share/botshield/botshield-dbmon.py \
+    --state-file /run/botshield/db-load.state --interval 10 \
+    --db-user botshield-mon
+
+# Reset to normal on the way out, however we get there -- ExecStopPost
+# runs on crash and on clean stop alike. Without it a monitor that dies
+# while the DB is hot leaves "hot" latched in the file, and the module,
+# which caches the last value it saw and has no staleness timeout,
+# would shed traffic indefinitely against a database that recovered.
+ExecStopPost=/bin/sh -c 'echo normal > /run/botshield/db-load.state 2>/dev/null || true'
+
+Restart=always
+RestartSec=5s
+
+# /run/botshield, made at start and removed at stop. 0755 so the httpd
+# child processes (running as apache) can read what we write.
+RuntimeDirectory=botshield
+RuntimeDirectoryMode=0755
+# Preserve on stop, or systemd deletes the directory out from under the
+# ExecStopPost above and takes the "normal" reset with it -- leaving the
+# module with a missing file, which it treats as "keep the last value I
+# cached". That is precisely the latched-hot case the reset exists to
+# prevent.
+RuntimeDirectoryPreserve=yes
+
+# Unprivileged, and granted only USAGE plus SELECT on
+# performance_schema -- it can read server counters and is refused site
+# data outright. The sandboxing below is the second layer: it reaches a
+# unix socket and one directory, and nothing else.
+NoNewPrivileges=yes
+ProtectSystem=strict
+# Safe at "yes" now: unix_socket auth means the kernel vouches for our
+# uid and there is no credentials file in /root to read.
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target
