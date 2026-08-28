@@ -1843,12 +1843,16 @@ static void bs_d_spark(request_rec *r, const bs_spark_spec *sp)
  * `id` must be unique per page -- four of these render on the overview
  * and a duplicate id would make every label drive the first box. */
 static void bs_d_chartbox_open(request_rec *r, const char *id,
-                               const char *title)
+                               const char *title,
+                               const char *state, const char *tone)
 {
     ap_rprintf(r,
         "<input type='checkbox' class='zoomcb' id='zoom-%s'>"
         "<div class='kpi kpi-load' id='box-%s'>"
-        "<div class='k'>%s</div><div class='loadrow'>", id, id, title);
+        "<span class='pill' style='color:%s'>"
+        "<span class='dot' style='background:%s'></span>%s</span>"
+        "<div class='k'>%s</div><div class='loadrow'>",
+        id, id, tone, tone, state, title);
 }
 
 /* Close the box, wrapping the chart just emitted in the toggle label.
@@ -2521,16 +2525,18 @@ static void bs_d_page_open(request_rec *r, const char *title,
       ".seg span{font-size:11px;font-weight:600;color:#fff;"
       "text-shadow:0 0 3px rgba(0,0,0,.55);white-space:nowrap;"
       "padding:0 4px}"
-      ".loadbar{display:flex;align-items:center;gap:20px;flex-wrap:wrap;"
-      "background:var(--surface);border:1px solid var(--line);"
-      "border-radius:8px;padding:10px 14px;margin-bottom:12px}"
-      ".lb-state{display:flex;align-items:baseline;gap:8px}"
-      ".lb-k{font-size:11px;text-transform:uppercase;letter-spacing:.04em;"
-      "color:var(--muted)}"
-      ".lb-v{font-size:20px;font-weight:600}"
-      ".lb-src{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;"
-      "color:var(--muted)}"
-      ".lb-src .src b{font-weight:600}"
+      /* State pill, top-right of each monitor box. Replaces the
+       * composite strip that used to sit above the grid: the merged
+       * verdict is the worst of these four, which reads at a glance
+       * without spending a row on it. Colour is doubled by the word,
+       * so the state never rides on hue alone. */
+      ".kpi-load{position:relative}"
+      ".pill{position:absolute;top:10px;right:12px;display:inline-flex;"
+      "align-items:center;gap:5px;font-size:11px;font-weight:600;"
+      "letter-spacing:.02em;background:var(--surface);"
+      "border:1px solid var(--line);border-radius:999px;padding:2px 8px;"
+      "white-space:nowrap}"
+      ".pill .dot{width:7px;height:7px;border-radius:50%;flex:none}"
       "@media(max-width:600px){.kpi-load{grid-column:span 1;"
       "min-width:0}.spark{display:none}"
       ".loadpair{grid-template-columns:1fr}}"
@@ -3266,12 +3272,10 @@ int bs_dashboard_handler(request_rec *r)
      * would have reported those incidents as an idle server. */
     {
         apr_uint32_t la = bs_loadavg_current();
-        bs_load_state ls = bs_load_current();
-        const char *lname = (ls == BS_LOAD_HOT)  ? "hot"
-                          : (ls == BS_LOAD_WARM) ? "warm" : "normal";
-        const char *tone  = (ls == BS_LOAD_HOT)  ? "var(--crit)"
-                          : (ls == BS_LOAD_WARM) ? "var(--warn)"
-                                                 : "var(--good)";
+        /* The merged state is no longer rendered here -- it is the
+         * worst of the four pills below, and printing it again cost a
+         * row. It is still what policy matches on; see bs_load_current
+         * and the minload= predicate. */
         apr_uint32_t dbst  = bs_shm.header
             ? apr_atomic_read32(&bs_shm.header->db_state) : 0;
         apr_uint32_t dbthr = bs_shm.header
@@ -3289,99 +3293,73 @@ int bs_dashboard_handler(request_rec *r)
         int db_have  = (dbsec > 0);
         int db_stale = db_have && (nowsec > dbsec + 120);
 
-        ap_rputs("<section><h2>Server load <span style='text-transform:"
-                 "none;font-weight:400;color:var(--muted)'>right now"
-                 "</span></h2>", r);
-
-        /* Composite verdict above the two series it is derived from.
-         * The merged state is what policy matches on, but it is a MAX,
-         * so on its own it cannot say which input drove it -- and
-         * "why are we shedding" is the question an operator actually
-         * has. Each contributor is named with its own state beside it. */
-        ap_rprintf(r,
-            "<div class='loadbar' style='border-left:4px solid %s'>"
-            "<div class='lb-state'><span class='lb-k'>Load state</span>"
-            "<span class='lb-v' style='color:%s'>%s</span></div>"
-            "<div class='lb-src'>", tone, tone, lname);
+        /* No section heading and no composite status bar. The four
+         * boxes below each carry their own state pill, so a strip that
+         * repeated all four states above them was a second copy that
+         * cost a whole row of vertical space. The merged verdict is
+         * still what policy matches on -- it is simply the worst of the
+         * four pills, which is legible at a glance without a caption
+         * saying so.
+         *
+         * Each state is computed here and handed to the box that owns
+         * it; the pill markup lives in bs_d_chartbox_open. */
+        const char *cpu_s, *cpu_t;
         {
-            /* Per-CPU load average: the signal that caught the outages
-             * the worker ratio missed. */
             int aw, ah;
             bs_loadavg_thresholds(r->server, &aw, &ah);
-            const char *cs = ((int)la >= ah) ? "hot"
-                           : ((int)la >= aw) ? "warm" : "normal";
-            const char *ct = ((int)la >= ah) ? "var(--crit)"
-                           : ((int)la >= aw) ? "var(--warn)" : "var(--good)";
-            ap_rprintf(r, "<span class='src'>CPU <b style='color:%s'>%s</b>"
-                          "</span>", ct, cs);
+            cpu_s = ((int)la >= ah) ? "hot" : ((int)la >= aw) ? "warm" : "normal";
+            cpu_t = ((int)la >= ah) ? "var(--crit)"
+                  : ((int)la >= aw) ? "var(--warn)" : "var(--good)";
         }
+        const char *ap_s, *ap_t;
         {
-            /* Apache latency: the signal the busy-worker ratio cannot
-             * see. 1024 worker slots on 6 cores means an unusable site
-             * still reads 2-3% utilisation. */
             apr_uint32_t lat_us = bs_latency_current_us();
-            int lat = (lat_us == BS_M_AP_NO_STATUS)
-                    ? -1 : (int)(lat_us / 1000);
-            if (lat < 0) {
-                ap_rputs("<span class='src'>Apache <b style='color:"
-                         "var(--muted)'>needs ExtendedStatus</b></span>", r);
+            if (lat_us == BS_M_AP_NO_STATUS) {
+                ap_s = "no status"; ap_t = "var(--muted)";
             } else {
-                int lw, lh;
+                int lat = (int)(lat_us / 1000), lw, lh;
                 bs_latency_thresholds(r->server, &lw, &lh);
-                const char *as = ((int)lat >= lh) ? "hot"
-                               : ((int)lat >= lw) ? "warm" : "normal";
-                const char *at = ((int)lat >= lh) ? "var(--crit)"
-                               : ((int)lat >= lw) ? "var(--warn)"
-                                                  : "var(--good)";
-                ap_rprintf(r, "<span class='src'>Apache "
-                              "<b style='color:%s'>%s</b></span>", at, as);
+                ap_s = (lat >= lh) ? "hot" : (lat >= lw) ? "warm" : "normal";
+                ap_t = (lat >= lh) ? "var(--crit)"
+                     : (lat >= lw) ? "var(--warn)" : "var(--good)";
             }
         }
-        if (!db_have) {
-            ap_rputs("<span class='src'>Database "
-                     "<b style='color:var(--muted)'>no monitor</b></span>", r);
-        } else if (db_stale) {
-            ap_rprintf(r, "<span class='src'>Database "
-                          "<b style='color:var(--warn)'>stale %us</b></span>",
-                       nowsec - dbsec);
-        } else {
-            const char *ds = (dbst == BS_LOAD_HOT)  ? "hot"
-                           : (dbst == BS_LOAD_WARM) ? "warm" : "normal";
-            const char *dt = (dbst == BS_LOAD_HOT)  ? "var(--crit)"
-                           : (dbst == BS_LOAD_WARM) ? "var(--warn)"
-                                                    : "var(--good)";
-            ap_rprintf(r, "<span class='src'>Database "
-                          "<b style='color:%s'>%s</b></span>", dt, ds);
+        const char *db_s, *db_t;
+        if (!db_have)       { db_s = "no monitor"; db_t = "var(--muted)"; }
+        else if (db_stale)  { db_s = apr_psprintf(r->pool, "stale %us",
+                                                  nowsec - dbsec);
+                              db_t = "var(--warn)"; }
+        else {
+            db_s = (dbst == BS_LOAD_HOT) ? "hot"
+                 : (dbst == BS_LOAD_WARM) ? "warm" : "normal";
+            db_t = (dbst == BS_LOAD_HOT) ? "var(--crit)"
+                 : (dbst == BS_LOAD_WARM) ? "var(--warn)" : "var(--good)";
         }
+        const char *fpm_s, *fpm_t;
         {
             bs_metrics *fm = bs_shm.metrics;
             apr_uint32_t fsec = fm ? apr_atomic_read32(&fm->fpm_sample_sec) : 0;
             apr_uint32_t fst  = fm ? apr_atomic_read32(&fm->fpm_state) : 0;
-            if (!fsec) {
-                ap_rputs("<span class='src'>PHP-FPM <b style='color:"
-                         "var(--muted)'>no monitor</b></span>", r);
-            } else if (nowsec > fsec + 120) {
-                ap_rprintf(r, "<span class='src'>PHP-FPM "
-                              "<b style='color:var(--warn)'>stale %us</b>"
-                              "</span>", nowsec - fsec);
-            } else {
-                const char *fs = (fst == BS_LOAD_HOT)  ? "hot"
-                               : (fst == BS_LOAD_WARM) ? "warm" : "normal";
-                const char *ft = (fst == BS_LOAD_HOT)  ? "var(--crit)"
-                               : (fst == BS_LOAD_WARM) ? "var(--warn)"
-                                                       : "var(--good)";
-                ap_rprintf(r, "<span class='src'>PHP-FPM "
-                              "<b style='color:%s'>%s</b></span>", ft, fs);
+            if (!fsec)                    { fpm_s = "no monitor";
+                                            fpm_t = "var(--muted)"; }
+            else if (nowsec > fsec + 120) { fpm_s = apr_psprintf(r->pool,
+                                                "stale %us", nowsec - fsec);
+                                            fpm_t = "var(--warn)"; }
+            else {
+                fpm_s = (fst == BS_LOAD_HOT) ? "hot"
+                      : (fst == BS_LOAD_WARM) ? "warm" : "normal";
+                fpm_t = (fst == BS_LOAD_HOT) ? "var(--crit)"
+                      : (fst == BS_LOAD_WARM) ? "var(--warn)" : "var(--good)";
             }
         }
-        ap_rputs("</div></div>", r);
+        ap_rputs("<section>", r);
 
         ap_rputs("<div class='kpis loadpair'>", r);
         /* Number and sparkline share one box: the value says where you
          * are, the line says how you got here, and reading one without
          * the other is what made four overnight spikes look like
          * unrelated events. */
-        bs_d_chartbox_open(r, "cpu", "Load per CPU");
+        bs_d_chartbox_open(r, "cpu", "Load per CPU", cpu_s, cpu_t);
         ap_rprintf(r, "<div class='v'>%u.%02u</div>", la / 100, la % 100);
         bs_d_load_spark(r);
         bs_d_chartbox_close(r, "cpu", "1-minute average, last hour");
@@ -3392,7 +3370,7 @@ int bs_dashboard_handler(request_rec *r)
          * like an idle server. */
         {
             apr_uint32_t lat_us = bs_latency_current_us();
-            bs_d_chartbox_open(r, "apache", "Apache request latency");
+            bs_d_chartbox_open(r, "apache", "Apache request latency", ap_s, ap_t);
             ap_rputs("<div class='v'>", r);
             if (lat_us == BS_M_AP_NO_STATUS) {
                 /* No number at all rather than a zero. Zero here would
@@ -3424,7 +3402,7 @@ int bs_dashboard_handler(request_rec *r)
 
         /* Database, same shape so the two read against each other. */
         if (db_have && !db_stale) {
-            bs_d_chartbox_open(r, "db", "Database threads running");
+            bs_d_chartbox_open(r, "db", "Database threads running", db_s, db_t);
             ap_rprintf(r, "<div class='v'>%u</div>", dbthr);
             bs_d_db_spark(r);
             bs_d_chartbox_close(r, apr_psprintf(r->pool, "db"),
@@ -3449,7 +3427,7 @@ int bs_dashboard_handler(request_rec *r)
             bs_metrics *fm = bs_shm.metrics;
             apr_uint32_t fsec = fm ? apr_atomic_read32(&fm->fpm_sample_sec) : 0;
             int fstale = fsec && (nowsec > fsec + 120);
-            bs_d_chartbox_open(r, "fpm", "PHP-FPM workers busy");
+            bs_d_chartbox_open(r, "fpm", "PHP-FPM workers busy", fpm_s, fpm_t);
             if (fsec && !fstale) {
                 ap_rprintf(r, "<div class='v'>%u%%</div>",
                            apr_atomic_read32(&fm->fpm_pct));
