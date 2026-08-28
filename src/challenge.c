@@ -64,7 +64,7 @@ const char *bs_challenge_canonical(apr_pool_t *p,
         "|%d|%u|%d|%d|%d|%" APR_TIME_T_FMT "|%d|%u|%u",
         ch->version, ch->alg_name, salt_hex, nonce_hex,
         ch->difficulty, ch->expires_at,
-        ch->rep.score, (unsigned)ch->rep.flags,
+        ch->rep.score, (unsigned)ch->rep.flags_excused,
         ch->rep.passes_silent, ch->rep.passes_form, ch->rep.passes_captcha,
         ch->rep.challenged_at,
         ch->auto_tier ? 1 : 0,
@@ -310,7 +310,7 @@ const char *bs_issue_challenge(apr_pool_t *p, const bs_dir_cfg *cfg,
         out->rep = *rep_in;
     } else {
         out->rep.score          = 0;
-        out->rep.flags          = 0;
+        out->rep.flags_excused  = 0;
         out->rep.passes_silent  = 0;
         out->rep.passes_form    = 0;
         out->rep.passes_captcha = 0;

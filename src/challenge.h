@@ -76,7 +76,26 @@ typedef struct bs_dir_cfg bs_dir_cfg;
  * stays at or below BotShieldForgivenessCapPerHour. */
 typedef struct {
     int          score;
-    apr_uint32_t flags;
+    /* Flags the holder has already answered for.
+     *
+     * Wire field 7. It was originally "cookie-side flags", OR'd into the
+     * IP-side set so a flag followed the cookie -- but nothing ever
+     * wrote it, so it has always been zero on the wire. It now records
+     * the flag set that was live at the moment this cookie's challenge
+     * was solved, and those flags are skipped on later requests.
+     *
+     * This is what stops a flagged client looping forever. Solving does
+     * not clear a flag, and flag scores are re-applied on every request,
+     * so before this a flag worth more than BotShieldScoreSilent meant
+     * an unbreakable challenge loop no matter how many times the client
+     * solved. Flags acquired AFTER the solve are absent from this set
+     * and still fire, so the excusal pays off the debt that existed at
+     * solve time without granting immunity to new evidence.
+     *
+     * No protocol bump: same slot, same width, and the old always-zero
+     * value reads as "nothing excused", which is exactly the previous
+     * behaviour until the client next solves. */
+    apr_uint32_t flags_excused;
     int          passes_silent;
     int          passes_form;
     int          passes_captcha;

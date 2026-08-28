@@ -355,6 +355,13 @@ typedef struct bs_server_cfg {
     int                 nonce_capacity;
     /* E11 — load-aware throttling. */
     const char         *load_state_file;
+    /* BotShieldDbStatsFile -- telemetry published by the external
+     * database monitor. Read for the dashboard only; the database's
+     * effect on policy travels through load_state_file above, so a
+     * malformed stats line can make a graph wrong but cannot make the
+     * module shed. */
+    const char         *db_stats_file;
+    apr_time_t          db_stats_mtime;
     int                 load_refresh_sec;
     int                 load_warm_pct;
     int                 loadavg_warm;   /* per-CPU hundredths; 0 = default */

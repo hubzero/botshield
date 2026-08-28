@@ -636,6 +636,11 @@ static const command_rec bs_cmds[] = {
      * below cannot see this deployment's failure mode: with 1024
      * MaxRequestWorkers on 6 cores the box is CPU-saturated at a busy
      * ratio of 2-3%, which is where four outages actually ran. */
+    AP_INIT_TAKE1("BotShieldDbStatsFile",
+                 bs_set_db_stats_file, NULL, RSRC_CONF,
+                 "Path to the external database monitor's key=value "
+                 "telemetry file. Dashboard display only; database load "
+                 "reaches policy via BotShieldLoadStateFile."),
     AP_INIT_TAKE1("BotShieldLoadAvgWarm", bs_set_loadavg_warm, NULL,
                  RSRC_CONF,
                  "1-minute load average PER CPU at which the load state "
@@ -1744,10 +1749,30 @@ static int bs_handler(request_rec *r)
      * score) and accumulating MAX into a tier_floor that we apply
      * after bs_decide_tier. Built-in defaults are seeded at
      * post_config; operators tune via BotShieldFlagTrigger. */
-    apr_uint32_t all_flags = ip_flags
-        | (have_prior_rep ? prior_ch.rep.flags : 0);
+    apr_uint32_t all_flags = ip_flags;
+    /* Skip flags this client already answered for. Solving does not
+     * clear a flag and flag scores re-apply every request, so without
+     * this a flag worth more than BotShieldScoreSilent is an unbreakable
+     * loop: solve, get re-flagged, get re-challenged, forever. Observed
+     * in production as pow_ok succeeding once a second, each success
+     * followed immediately by another challenge carrying cookie=solved.
+     *
+     * Only genuine solve proof excuses anything -- a presence cookie
+     * ("ok", which is what a cookie-harvesting bot holds) does not.
+     * Flags acquired after the solve are not in the excused set and
+     * still fire, so this forgives the debt that existed at solve time
+     * rather than granting blanket immunity. The cookie's own lifetime
+     * bounds it; no separate TTL. */
+    apr_uint32_t excused = (have_solve_proof && have_prior_rep)
+                         ? prior_ch.rep.flags_excused : 0;
+    apr_uint32_t firing_flags = all_flags & ~excused;
+    if (all_flags & excused) {
+        bs_score_add(r, 0, 0,
+            apr_psprintf(r->pool, "flags-excused:0x%x",
+                         (unsigned)(all_flags & excused)));
+    }
     bs_tier tier_floor_from_flags = BS_TIER_PASS;
-    bs_apply_flag_triggers(r, scfg_h, all_flags, &tier_floor_from_flags);
+    bs_apply_flag_triggers(r, scfg_h, firing_flags, &tier_floor_from_flags);
 
     /* Fetch the score struct *after* all per-request adds. Using create=1
      * so a request with zero hits still gets a valid (empty) pointer and
@@ -1810,10 +1835,10 @@ static int bs_handler(request_rec *r)
         ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
                       "mod_botshield: pass %s effective=%d "
                       "(heuristic=%d cookie_score=%d "
-                      "ip_flags=0x%x cookie_flags=0x%x) cookie_ok=%d",
+                      "ip_flags=0x%x excused=0x%x) cookie_ok=%d",
                       r->uri, effective, heuristic_total, cookie_score,
                       (unsigned)ip_flags,
-                      have_prior_rep ? (unsigned)prior_ch.rep.flags : 0,
+                      have_prior_rep ? (unsigned)prior_ch.rep.flags_excused : 0,
                       cookie_fully_ok);
         /* E8.2 — module-to-app reputation export. Strip incoming
          * X-Botshield-* and set a single signed claim envelope so
@@ -1822,8 +1847,12 @@ static int bs_handler(request_rec *r)
         {
             bs_server_cfg *scfg2 = ap_get_module_config(
                 r->server->module_config, &botshield_module);
-            apr_uint32_t composite_flags = ip_flags
-                | (have_prior_rep ? prior_ch.rep.flags : 0);
+            /* Deliberately the raw IP-side set, not the post-excusal
+             * firing set: the app is being told what BotShield knows
+             * about this client, and a flag that was excused from
+             * scoring is still a fact about it. Excusal governs whether
+             * we re-challenge, not what we report. */
+            apr_uint32_t composite_flags = ip_flags;
             const char *cerr = bs_app_claims_set(r, scfg2,
                 effective, tier, cookie_status, composite_flags,
                 have_prior_rep ? prior_ch.rep.passes_silent  : 0,
@@ -1947,11 +1976,10 @@ static int bs_handler(request_rec *r)
                     "forgive-capped:%d/%d",
                     forgive, requested));
         }
-        /* No floor on the forgiven score even on flagged cookies.
-         * Flag effects are re-applied at request time by
-         * bs_apply_flag_triggers, so a forgiven-to-zero score on a
-         * flagged cookie is simply re-raised on the next request
-         * when the trigger fires. */
+        /* The forgiven score has no flag-derived floor. Flag effects
+         * re-apply at request time, so forgiveness alone never breaks
+         * a flagged client out of a challenge loop -- that is what
+         * flags_excused below is for. */
         int new_score = prior_ch.rep.score - forgive;
         if (new_score < 0) new_score = 0;
         next_rep.score = new_score;
@@ -1962,7 +1990,7 @@ static int bs_handler(request_rec *r)
         }
     } else {
         next_rep.score          = 0;
-        next_rep.flags          = 0;
+        next_rep.flags_excused  = 0;
         next_rep.passes_silent  = issue_auto ? 1 : 0;
         next_rep.passes_form    = issue_auto ? 0 : 1;
         next_rep.passes_captcha = 0;
@@ -1970,6 +1998,24 @@ static int bs_handler(request_rec *r)
         next_rep.forgive_window_start = 0;
         next_rep.forgive_consumed     = 0;
     }
+
+    /* Stamp the flags this client is being challenged over into the
+     * cookie we are about to issue.
+     *
+     * Needed because the M7 form path never re-mints: the client
+     * assembles its cookie as <envelope>.<counter> from the envelope
+     * issued right here, and no server-side mint follows the solve. The
+     * verify endpoints DO re-mint and stamp this themselves, so this is
+     * the same excusal arriving by the only route the form tier has.
+     *
+     * Safe to record before the work is done, because the envelope is
+     * inert without a valid PoW counter -- a client that never solves
+     * can never present this cookie, so "excused at issue" and "excused
+     * on solve" are the same event from the server's side.
+     *
+     * OR'd so re-challenges accumulate rather than resetting what an
+     * earlier solve already settled. */
+    next_rep.flags_excused |= all_flags;
 
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
                   "mod_botshield: challenging %s (alg=%s, difficulty=%d, "
@@ -1980,7 +2026,7 @@ static int bs_handler(request_rec *r)
                   effective, bs_tier_name(tier), heuristic_total,
                   bs_score_reasons_joined(r->pool, score),
                   have_prior_rep ? cookie_score : -1,
-                  have_prior_rep ? (unsigned)prior_ch.rep.flags : 0,
+                  have_prior_rep ? (unsigned)prior_ch.rep.flags_excused : 0,
                   cookie_fully_ok,
                   next_rep.passes_silent, next_rep.passes_form,
                   next_rep.passes_captcha);
