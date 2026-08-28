@@ -10,9 +10,11 @@ Wants=mariadb.service
 
 [Service]
 Type=simple
-User=root
+User=botshield-mon
+Group=botshield-mon
 ExecStart=/usr/local/share/botshield/botshield-dbmon.py \
-    --state-file /run/botshield/db-load.state --interval 10
+    --state-file /run/botshield/db-load.state --interval 10 \
+    --db-user botshield-mon
 
 # Reset to normal on the way out, however we get there -- ExecStopPost
 # runs on crash and on clean stop alike. Without it a monitor that dies
@@ -35,14 +37,15 @@ RuntimeDirectoryMode=0755
 # prevent.
 RuntimeDirectoryPreserve=yes
 
-# It reads a unix socket and writes one directory. Nothing else is
-# reachable, which is what keeps "runs as root" from meaning "is a
-# useful thing to compromise".
+# Unprivileged, and granted only USAGE plus SELECT on
+# performance_schema -- it can read server counters and is refused site
+# data outright. The sandboxing below is the second layer: it reaches a
+# unix socket and one directory, and nothing else.
 NoNewPrivileges=yes
 ProtectSystem=strict
-# read-only, not yes: "yes" would hide /root and with it the
-# /root/.my.cnf this authenticates from.
-ProtectHome=read-only
+# Safe at "yes" now: unix_socket auth means the kernel vouches for our
+# uid and there is no credentials file in /root to read.
+ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectKernelTunables=yes

@@ -18,8 +18,12 @@ rules:
                  every pass: it is a time series, and a gap in it is
                  indistinguishable from a gap in the data.
 
-Auth is whatever /root/.my.cnf already provides, so no credential is
-introduced or duplicated by this service.
+Auth is unix_socket: the kernel vouches for the process uid, so there
+is no password stored anywhere and nothing to rotate or leak. The DB
+user needs only USAGE (which covers SHOW GLOBAL STATUS) plus SELECT on
+performance_schema for --report's per-table breakdown; it is refused
+site data outright. A --defaults-file path remains for hosts without
+unix_socket auth available.
 """
 
 import argparse
@@ -55,16 +59,27 @@ DEFAULTS = {
 
 
 class Sampler(object):
-    def __init__(self, defaults_file="/root/.my.cnf"):
+    def __init__(self, defaults_file=None, db_user=None,
+                 socket="/var/lib/mysql/mysql.sock"):
         self.defaults_file = defaults_file
+        self.db_user = db_user
+        self.socket = socket
         self.conn = None
         self.prev = None
 
     def _connect(self):
         # connect_timeout so a wedged server surfaces as a scrape
         # failure on a bounded schedule instead of parking the loop.
-        self.conn = MySQLdb.connect(read_default_file=self.defaults_file,
-                                    connect_timeout=5)
+        if self.db_user:
+            # unix_socket auth: the kernel vouches for our uid, so there
+            # is no password to store, rotate, or leak. Preferred over a
+            # defaults file precisely because there is no secret at all.
+            self.conn = MySQLdb.connect(user=self.db_user,
+                                        unix_socket=self.socket,
+                                        connect_timeout=5)
+        else:
+            self.conn = MySQLdb.connect(read_default_file=self.defaults_file,
+                                        connect_timeout=5)
 
     def raw(self):
         """Current counter values, reconnecting once if the link died."""
@@ -172,10 +187,11 @@ def write_atomic(path, text):
 
 
 def run_loop(args, cfg):
-    sampler = Sampler(args.defaults_file)
+    sampler = Sampler(args.defaults_file, args.db_user, args.socket)
     stats_path = (args.state_file[:-6] if args.state_file.endswith(".state")
                   else args.state_file) + ".stats"
     last_state = None
+    fails = 0
     last_t = time.monotonic()   # monotonic: immune to clock steps
     sampler.prime()             # so the first delta spans a real window
 
@@ -185,11 +201,30 @@ def run_loop(args, cfg):
         s = sampler.sample(now - last_t)
         last_t = now
         if s is None:
-            # Can't reach the DB, or no baseline yet. Say nothing rather
-            # than guess: a scrape failure is not evidence of load, and
-            # asserting "hot" here would shed live traffic over a broken
-            # monitoring credential.
+            # A scrape failure is not evidence of load, so we don't
+            # invent one. But staying silent forever is its own bug: the
+            # module caches the last value it read, so an outage that
+            # begins while we are saying "hot" would shed traffic
+            # indefinitely against a database nobody can even see.
+            #
+            # So: ride out short outages (a DB restart is routine and
+            # reconnects within a tick or two), then withdraw the claim.
+            # We exit rather than write "normal" inline so there is one
+            # recovery path instead of two -- systemd restarts us with a
+            # clean connection and a fresh baseline, and ExecStopPost
+            # performs the reset. Exiting on the *first* failure would
+            # be wrong: routine DB restarts would burn through
+            # StartLimitBurst and systemd would stop restarting us
+            # altogether, which is how a monitor ends up dead.
+            fails += 1
+            if fails >= args.fail_grace:
+                sys.stderr.write(
+                    "mariadb unreachable for %d consecutive samples; "
+                    "withdrawing load claim and exiting for restart\n"
+                    % fails)
+                return 0
             continue
+        fails = 0
 
         state = classify(s, cfg)
         # The exists() check covers first pass and someone deleting the
@@ -211,7 +246,7 @@ def run_loop(args, cfg):
 
 
 def run_report(args, cfg):
-    sampler = Sampler(args.defaults_file)
+    sampler = Sampler(args.defaults_file, args.db_user, args.socket)
     if not sampler.prime():
         sys.stderr.write("cannot reach mariadb\n")
         return 1
@@ -259,7 +294,14 @@ def main():
     p.add_argument("--interval", type=int, default=10, help="seconds between samples")
     p.add_argument("--report", type=int, nargs="?", const=10, metavar="SECS",
                    help="one-shot baseline to stdout instead of the publish loop")
-    p.add_argument("--defaults-file", default="/root/.my.cnf")
+    p.add_argument("--db-user", help="connect as this user over the unix "
+                   "socket (no password; requires unix_socket auth)")
+    p.add_argument("--socket", default="/var/lib/mysql/mysql.sock")
+    p.add_argument("--defaults-file", default="/root/.my.cnf",
+                   help="credentials file, used only when --db-user is absent")
+    p.add_argument("--fail-grace", type=int, default=6, metavar="N",
+                   help="consecutive failed samples tolerated before "
+                        "withdrawing the load claim and exiting (default 6)")
     for k, v in sorted(DEFAULTS.items()):
         p.add_argument("--" + k.replace("_", "-"), type=type(v), default=v)
     args = p.parse_args()
