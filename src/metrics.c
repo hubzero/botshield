@@ -4141,6 +4141,72 @@ int bs_metrics_handler(request_rec *r)
     /* E11 — load-state observability. The gauge is the most useful
      * value to alert on; the counter lets operators graph state
      * transitions per minute. */
+    /* The other three load signals. Without these the dashboard shows
+     * data that nothing can retain: the in-module rings hold exactly
+     * one hour and then overwrite, so anything longer has to be
+     * scraped. Apache latency and the merged state were already here;
+     * these complete the set.
+     *
+     * Flat names rather than a labelled series, matching every other
+     * metric this endpoint emits. */
+    {
+        apr_uint32_t la5 = 0, la15 = 0;
+        bs_loadavg_current_all(&la5, &la15);
+        bs_m_emit_gauge(r, "loadavg_1m_pct",
+            "1-minute load average per CPU, in hundredths (1.50 per core "
+            "-> 150). Per-CPU so one threshold means the same thing on a "
+            "6-core host and a 64-core one.", bs_loadavg_current());
+        bs_m_emit_gauge(r, "loadavg_5m_pct",
+            "5-minute load average per CPU, in hundredths.", la5);
+        bs_m_emit_gauge(r, "loadavg_15m_pct",
+            "15-minute load average per CPU, in hundredths.", la15);
+    }
+    if (bs_shm.header) {
+        bs_m_emit_gauge(r, "db_threads_running",
+            "MariaDB threads actively executing, from the external "
+            "monitor. Saturation, not throughput: a pool stuck on lock "
+            "waits shows high threads and LOW queries per second.",
+            apr_atomic_read32(&bs_shm.header->db_threads_run));
+        bs_m_emit_gauge(r, "db_queries_per_sec",
+            "MariaDB queries per second over the monitor's sample "
+            "window. A delta, not the since-boot average.",
+            apr_atomic_read32(&bs_shm.header->db_qps));
+        bs_m_emit_gauge(r, "db_lock_contention_pct_x100",
+            "Share of table-lock acquisitions that had to wait, percent "
+            "x100 (1.25% -> 125), over the sample window.",
+            apr_atomic_read32(&bs_shm.header->db_lock_pct_x100));
+        bs_m_emit_gauge(r, "db_sample_unix",
+            "Unix time of the database monitor's last sample. Compare "
+            "against scrape time to detect a dead monitor: a stopped "
+            "monitor otherwise reads exactly like a calm database.",
+            apr_atomic_read32(&bs_shm.header->db_sample_sec));
+        bs_m_emit_gauge(r, "db_load_state",
+            "Database load state as the monitor classified it: "
+            "0 normal, 1 warm, 2 hot.",
+            apr_atomic_read32(&bs_shm.header->db_state));
+    }
+    if (bs_shm.metrics) {
+        bs_metrics *fm = bs_shm.metrics;
+        bs_m_emit_gauge(r, "fpm_active_processes",
+            "PHP-FPM children currently serving a request.",
+            apr_atomic_read32(&fm->fpm_active));
+        bs_m_emit_gauge(r, "fpm_max_children",
+            "pm.max_children, read from the pool config. The real "
+            "ceiling for dynamic content, unlike MaxRequestWorkers.",
+            apr_atomic_read32(&fm->fpm_max_children));
+        bs_m_emit_gauge(r, "fpm_listen_queue",
+            "Requests waiting for a free PHP-FPM child. Any non-zero "
+            "value means users are already queueing.",
+            apr_atomic_read32(&fm->fpm_queue));
+        bs_m_emit_gauge(r, "fpm_sample_unix",
+            "Unix time of the PHP-FPM monitor's last sample; same "
+            "staleness check as db_sample_unix.",
+            apr_atomic_read32(&fm->fpm_sample_sec));
+        bs_m_emit_gauge(r, "fpm_load_state",
+            "PHP-FPM load state as the monitor classified it: "
+            "0 normal, 1 warm, 2 hot.",
+            apr_atomic_read32(&fm->fpm_state));
+    }
     {
         /* -1, not the sentinel and not 0: a scrape must be able to tell
          * "not measured" from "measured as instant". */
