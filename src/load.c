@@ -132,7 +132,7 @@ static bs_load_state bs_load_read_external(server_rec *sv,
  * Returns -1 when unavailable (non-Linux, /proc not mounted), which
  * the caller treats as "this signal has no opinion" rather than as
  * zero -- zero would be an active claim that the box is idle. */
-static int bs_load_sample_loadavg(apr_pool_t *pool)
+static int bs_load_sample_loadavg(apr_pool_t *pool, int *out5, int *out15)
 {
     apr_file_t *f = NULL;
     char buf[64];
@@ -146,12 +146,17 @@ static int bs_load_sample_loadavg(apr_pool_t *pool)
     if (rv != APR_SUCCESS || n == 0) return -1;
     buf[n] = '\0';
 
-    /* "0.31 0.48 1.31 1/523 12345" -- first field only. */
-    double one = 0.0;
-    if (sscanf(buf, "%lf", &one) != 1) return -1;
+    /* "0.31 0.48 1.31 1/523 12345" -- all three averages. The kernel
+     * computes them whether or not we read them, and they arrive in the
+     * same read, so taking all three is free. */
+    double one = 0.0, five = 0.0, fifteen = 0.0;
+    int got = sscanf(buf, "%lf %lf %lf", &one, &five, &fifteen);
+    if (got < 1) return -1;
 
     long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
     if (ncpu < 1) ncpu = 1;
+    if (out5)  *out5  = (got >= 2) ? (int)((five    * 100.0) / (double)ncpu) : -1;
+    if (out15) *out15 = (got >= 3) ? (int)((fifteen * 100.0) / (double)ncpu) : -1;
     return (int)((one * 100.0) / (double)ncpu);
 }
 
@@ -592,8 +597,13 @@ apr_status_t bs_load_watchdog_cb(int state, void *data,
      * crawlers, then clients with no solve proof -- while there is
      * still headroom, and the blunt rung only arrives if that failed. */
     bs_load_state avg = BS_LOAD_NORMAL;
-    int la = bs_load_sample_loadavg(sv->process->pconf);
+    int la5 = -1, la15 = -1;
+    int la = bs_load_sample_loadavg(sv->process->pconf, &la5, &la15);
     if (la >= 0) {
+        if (la5  >= 0) apr_atomic_set32(&bs_shm.header->loadavg5_pct,
+                                        (apr_uint32_t)la5);
+        if (la15 >= 0) apr_atomic_set32(&bs_shm.header->loadavg15_pct,
+                                        (apr_uint32_t)la15);
         int aw = bs_load_effective_int(scfg->loadavg_warm,
                                        BS_DEFAULT_LOADAVG_WARM);
         int ah = bs_load_effective_int(scfg->loadavg_hot,
@@ -848,6 +858,15 @@ const char *bs_set_loadavg_hot(cmd_parms *cmd, void *dconf, const char *arg)
 }
 
 /* Last sampled per-CPU load average, hundredths. Dashboard only. */
+/* The 5- and 15-minute averages, per-CPU hundredths. */
+void bs_loadavg_current_all(apr_uint32_t *m5, apr_uint32_t *m15)
+{
+    if (m5)  *m5  = bs_shm.header
+        ? apr_atomic_read32(&bs_shm.header->loadavg5_pct)  : 0;
+    if (m15) *m15 = bs_shm.header
+        ? apr_atomic_read32(&bs_shm.header->loadavg15_pct) : 0;
+}
+
 apr_uint32_t bs_loadavg_current(void)
 {
     if (!bs_shm.header) return 0;

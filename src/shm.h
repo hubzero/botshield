@@ -489,6 +489,15 @@ typedef struct {
      * 6 cores -> 50). Published for the dashboard; the state above is
      * what policy matches on. */
     apr_uint32_t  loadavg_pct;
+    /* The 5- and 15-minute averages, same per-CPU hundredths as above.
+     * The kernel already computes all three and /proc/loadavg hands
+     * them over in one read, so carrying them costs nothing beyond two
+     * words. Only the 1-minute figure feeds policy -- it is the one
+     * that moves fast enough to shed on -- but a reader needs the other
+     * two to tell a spike from a plateau, which is the first question
+     * anyone asks of a load average. */
+    apr_uint32_t  loadavg5_pct;
+    apr_uint32_t  loadavg15_pct;
     apr_uint32_t  load_state_since_sec;
     apr_uint32_t  load_escalation_streak;
     apr_uint32_t  load_recovery_streak;
@@ -514,7 +523,7 @@ typedef struct {
      * nothing would catch it. */
     apr_uint32_t  db_warm_threads;
     apr_uint32_t  db_hot_threads;
-    apr_uint32_t  _pad_cl1[2];
+    apr_uint32_t  _pad_cl1[0];
 
     /* === Cacheline 2: write-frequently === */
     apr_uint32_t  cv_inflight;

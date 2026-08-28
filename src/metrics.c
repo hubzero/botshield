@@ -2541,6 +2541,12 @@ static void bs_d_page_open(request_rec *r, const char *title,
        * without spending a row on it. Colour is doubled by the word,
        * so the state never rides on hue alone. */
       ".kpi-load{position:relative}"
+      /* The 5/15-minute pair rides alongside the 1-minute headline at
+       * a smaller size: present for context, never competing with the
+       * number the chart and the pill are about. */
+      ".la2{font-size:13px;font-weight:500;color:var(--muted);"
+      "margin-left:7px;letter-spacing:.01em;white-space:nowrap;"
+      "font-variant-numeric:tabular-nums}"
       ".capline{margin:0;font-size:13px;color:var(--ink2)}"
       ".capline span{color:var(--muted)}"
       ".pill{position:absolute;top:10px;right:12px;font-size:11px;"
@@ -3369,7 +3375,20 @@ int bs_dashboard_handler(request_rec *r)
          * the other is what made four overnight spikes look like
          * unrelated events. */
         bs_d_chartbox_open(r, "cpu", "Load per CPU", cpu_s, cpu_t);
-        ap_rprintf(r, "<div class='v'>%u.%02u</div>", la / 100, la % 100);
+        {
+            /* All three averages, as every other load readout on a unix
+             * box shows them. The 1-minute stays the headline because
+             * it is the one policy matches on and the one the chart
+             * plots; the 5 and 15 are what distinguish a spike that is
+             * passing from a plateau that is not, which is the first
+             * thing anyone wants to know from a load average. */
+            apr_uint32_t la5 = 0, la15 = 0;
+            bs_loadavg_current_all(&la5, &la15);
+            ap_rprintf(r, "<div class='v'>%u.%02u"
+                          "<span class='la2'>%u.%02u %u.%02u</span></div>",
+                       la / 100, la % 100,
+                       la5 / 100, la5 % 100, la15 / 100, la15 % 100);
+        }
         bs_d_load_spark(r);
         bs_d_chartbox_close(r, "cpu", "1-minute average, last hour");
 
