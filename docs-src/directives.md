@@ -643,6 +643,42 @@ BotShieldFlagTrigger scanner_probe   reset action=score add=50
 BotShieldFlagTrigger pow_fail_streak reset action=score add=30
 ```
 
+**A flag score at or above `BotShieldScoreSilent` is an unbreakable
+loop, not a challenge.** The replacement scores above fix the
+`tier_floor` bypass but leave a second trap, and `add=50` against the
+default silent threshold of `20` walks straight into it. Solving does
+not clear a flag. Forgiveness reduces the score carried *in the
+cookie*, and then `bs_apply_flag_triggers` re-adds the flag's score on
+the very next request — `botshield.c` says so at the forgiveness site:
+
+> No floor on the forgiven score even on flagged cookies. Flag effects
+> are re-applied at request time [...] so a forgiven-to-zero score on a
+> flagged cookie is simply re-raised on the next request.
+
+So a flagged client is re-challenged forever however many times it
+solves. In production this looked like `pow_ok` succeeding roughly once
+a second, each success followed immediately by another
+`outcome=challenged` carrying `cookie=solved` and
+`forgive-capped:0/10` — the hourly forgiveness cap exhausted by the
+loop it could not escape. The affected user had tripped
+`scanner_probe` while filing a support ticket about being blocked: the
+attachment upload posts a negative ticket id, which reads as probing.
+
+Keep flag scores **below** `BotShieldScoreSilent` unless you intend the
+flag alone to challenge indefinitely. A flag worth less than the
+threshold still contributes toward a challenge in combination with
+other signals, which is usually what was meant:
+
+```apache
+# with the default BotShieldScoreSilent of 20
+BotShieldFlagTrigger scanner_probe   reset action=score add=10
+```
+
+Setting `add=0` is worse than a low value: it discards the evidence
+rather than de-weighting it. And note this trap is invisible in
+testing that solves once — it only appears on the *second* request
+after a solve.
+
 Flag bits: `honeypot_hit`, `scanner_probe`, `fake_bot`,
 `pow_fail_streak`, `app_verified_human`, `app_verified_session`,
 `app_trust_signal`. See
