@@ -89,6 +89,7 @@ void bs_loadavg_thresholds(server_rec *s, int *warm, int *hot);
 
 /* Last sampled 1-minute load average per CPU, in hundredths. */
 apr_uint32_t bs_loadavg_current(void);
+void bs_loadavg_current_all(apr_uint32_t *m5, apr_uint32_t *m15);
 
 const char *bs_set_load_warm_pct(cmd_parms *cmd, void *dconf,
                                  const char *arg);

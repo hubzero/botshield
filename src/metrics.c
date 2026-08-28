@@ -645,7 +645,8 @@ void bs_metrics_bucket_add(int vhost_idx, int tier_idx,
  * handles — static assets included — so anything more expensive would
  * be a tax on the whole site, not just the protected scopes. */
 static void bs_m_slot_traffic(bs_metrics_slot *slot, apr_uint64_t epoch,
-                              int status_idx, int has_cookie, int resp_idx, int group_idx,
+                              int status_idx, int code_idx, int has_cookie,
+                              int resp_idx, int group_idx,
                               int class_idx)
 {
     bs_m_slot_claim(slot, epoch);
@@ -656,6 +657,9 @@ static void bs_m_slot_traffic(bs_metrics_slot *slot, apr_uint64_t epoch,
     if (status_idx >= 0) {
         __atomic_fetch_add(&slot->req_status[status_idx], 1,
                            __ATOMIC_RELAXED);
+    }
+    if (code_idx >= 0) {
+        __atomic_fetch_add(&slot->req_code[code_idx], 1, __ATOMIC_RELAXED);
     }
     if (resp_idx >= 0) {
         __atomic_fetch_add(&slot->req_resp[resp_idx], 1, __ATOMIC_RELAXED);
@@ -669,8 +673,8 @@ static void bs_m_slot_traffic(bs_metrics_slot *slot, apr_uint64_t epoch,
     }
 }
 
-void bs_metrics_traffic_add(int vhost_idx, int status_idx, int has_cookie,
-                            int resp_idx, int class_idx)
+void bs_metrics_traffic_add(int vhost_idx, int status_idx, int code_idx,
+                            int has_cookie, int resp_idx, int class_idx)
 {
     if (!bs_shm.metrics) return;
     apr_uint64_t minute = (apr_uint64_t)(apr_time_sec(apr_time_now()) / 60);
@@ -684,11 +688,11 @@ void bs_metrics_traffic_add(int vhost_idx, int status_idx, int has_cookie,
         bs_metrics *m = blocks[b];
         if (!m) continue;
         bs_m_slot_traffic(&m->min_slots[minute % BS_M_MIN_SLOTS],
-                          minute, status_idx, has_cookie, resp_idx,
-                          group_idx, class_idx);
+                          minute, status_idx, code_idx, has_cookie,
+                          resp_idx, group_idx, class_idx);
         bs_m_slot_traffic(&m->hour_slots[hour % BS_M_HOUR_SLOTS],
-                          hour, status_idx, has_cookie, resp_idx,
-                          group_idx, class_idx);
+                          hour, status_idx, code_idx, has_cookie,
+                          resp_idx, group_idx, class_idx);
         __atomic_fetch_add(&m->req_total, 1, __ATOMIC_RELAXED);
         if (has_cookie) {
             __atomic_fetch_add(&m->req_cookie, 1, __ATOMIC_RELAXED);
@@ -696,6 +700,9 @@ void bs_metrics_traffic_add(int vhost_idx, int status_idx, int has_cookie,
         if (status_idx >= 0) {
             __atomic_fetch_add(&m->req_status[status_idx], 1,
                                __ATOMIC_RELAXED);
+        }
+        if (code_idx >= 0) {
+            __atomic_fetch_add(&m->req_code[code_idx], 1, __ATOMIC_RELAXED);
         }
         if (resp_idx >= 0) {
             __atomic_fetch_add(&m->req_resp[resp_idx], 1, __ATOMIC_RELAXED);
@@ -737,6 +744,10 @@ static void bs_m_sum_ring(const bs_metrics_slot *ring, int nslots,
         for (int st = 0; st < BS_M_STATUS_COUNT; st++) {
             out->req_status[st] += __atomic_load_n(&ring[i].req_status[st],
                                                    __ATOMIC_RELAXED);
+        }
+        for (int cd = 0; cd < BS_M_CODE_COUNT; cd++) {
+            out->req_code[cd] += __atomic_load_n(&ring[i].req_code[cd],
+                                                 __ATOMIC_RELAXED);
         }
         for (int rk = 0; rk < BS_M_RESP_COUNT; rk++) {
             out->req_resp[rk] += __atomic_load_n(&ring[i].req_resp[rk],
@@ -800,6 +811,10 @@ void bs_metrics_read_window(int span_minutes, int vhost_idx,
             out->req_status[st] =
                 __atomic_load_n(&m->req_status[st],
                                 __ATOMIC_RELAXED);
+        }
+        for (int cd = 0; cd < BS_M_CODE_COUNT; cd++) {
+            out->req_code[cd] =
+                __atomic_load_n(&m->req_code[cd], __ATOMIC_RELAXED);
         }
         for (int rk = 0; rk < BS_M_RESP_COUNT; rk++) {
             out->req_resp[rk] = __atomic_load_n(&m->req_resp[rk],
@@ -1243,6 +1258,30 @@ static void bs_check_resp_status_invariant(request_rec *r, int resp_idx,
     }
 }
 
+/* Exact status code to counter index, or -1 for codes we do not track
+ * individually. Those still reach their class counter, so the
+ * per-code breakdown is always a subset of the class it decomposes
+ * and can be presented as "the rest" without a second lookup. */
+static int bs_status_code_idx(int status)
+{
+    switch (status) {
+    case 200: return BS_M_CODE_200;  case 204: return BS_M_CODE_204;
+    case 206: return BS_M_CODE_206;  case 301: return BS_M_CODE_301;
+    case 302: return BS_M_CODE_302;  case 304: return BS_M_CODE_304;
+    case 400: return BS_M_CODE_400;  case 401: return BS_M_CODE_401;
+    case 403: return BS_M_CODE_403;  case 404: return BS_M_CODE_404;
+    case 408: return BS_M_CODE_408;  case 426: return BS_M_CODE_426;
+    case 429: return BS_M_CODE_429;  case 500: return BS_M_CODE_500;
+    case 502: return BS_M_CODE_502;  case 503: return BS_M_CODE_503;
+    default:  return -1;
+    }
+}
+
+/* Numeric label for each tracked index, for rendering. */
+static const int bs_m_code_values[BS_M_CODE_COUNT] = {
+    200,204,206, 301,302,304, 400,401,403,404,408,426,429, 500,502,503
+};
+
 static int bs_status_class_idx(int status)
 {
     if (status >= 200 && status < 300) return BS_M_STATUS_2XX;
@@ -1277,9 +1316,10 @@ int bs_propagate_decision_env(request_rec *r)
          * cached on r->pool, so reading it here is a pointer deref. */
         const bs_ua_class *uac = bs_classify_request_ua(r);
         int status_idx = bs_status_class_idx(fwd->status);
+        int code_idx   = bs_status_code_idx(fwd->status);
         int resp_idx   = bs_resp_kind_idx(r);
         bs_metrics_traffic_add(scfg_t ? scfg_t->vhost_idx : -1,
-                               status_idx, has_cookie, resp_idx,
+                               status_idx, code_idx, has_cookie, resp_idx,
                                uac ? bs_m_class_idx(uac->label)
                                    : BS_M_CLASS_UNKNOWN);
         bs_check_resp_status_invariant(r, resp_idx, status_idx,
@@ -1755,26 +1795,34 @@ static void bs_d_spark(request_rec *r, const bs_spark_spec *sp)
         }
     }
 
-    /* X ticks every 15 minutes, drawn only where there is data. */
+    /* X ticks every 15 minutes, labelled with wall-clock time.
+     *
+     * Absolute rather than "-30m": these charts sit beside an error log
+     * and an access log, and correlating a bump against either means
+     * reading a clock. A relative label forces that arithmetic on every
+     * glance, and gets it wrong the moment the page has been open a
+     * while without refreshing -- the labels stay put while the data
+     * scrolls under them.
+     *
+     * Local time, matching the rendered-at stamp below the controls and
+     * the access log's own timestamps. */
     {
+        apr_time_t base = apr_time_now();
         for (int mins = 0; mins <= 60; mins += 15) {
             int i = (mins * 60) / sp->period;
             /* A ring of N slots holds N-1 intervals, so a full hour
-             * lands one slot past the end; clamp so the -60m tick sits
-             * on the left edge instead of being dropped. */
+             * lands one slot past the end; clamp so the leftmost tick
+             * sits on the edge instead of being dropped. */
             if (i > sp->slots - 1) i = sp->slots - 1;
             int x = BS_LA_X(i);
+            apr_time_exp_t tm;
+            apr_time_exp_lt(&tm, base - apr_time_from_sec(mins * 60));
             ap_rprintf(r, "<line x1='%d' y1='%d' x2='%d' y2='%d' "
                           "stroke='var(--line)'/>", x, Y1, x, Y1 + 3);
-            if (mins == 0) {
-                ap_rprintf(r, "<text x='%d' y='%d' text-anchor='end' "
-                              "font-size='8' fill='var(--muted)'>now</text>",
-                           x, Y1 + 13);
-            } else {
-                ap_rprintf(r, "<text x='%d' y='%d' text-anchor='middle' "
-                              "font-size='8' fill='var(--muted)'>-%dm</text>",
-                           x, Y1 + 13, mins);
-            }
+            ap_rprintf(r, "<text x='%d' y='%d' text-anchor='%s' "
+                          "font-size='8' fill='var(--muted)'>%02d:%02d</text>",
+                       x, Y1 + 13, mins == 0 ? "end" : "middle",
+                       tm.tm_hour, tm.tm_min);
         }
     }
 
@@ -1787,6 +1835,62 @@ static void bs_d_spark(request_rec *r, const bs_spark_spec *sp)
     ap_rputs("'/></svg>", r);
     #undef BS_LA_Y
     #undef BS_LA_X
+}
+
+/* Today's date, for the chart captions. A screenshot of one of these
+ * boxes should carry enough to place it in time: the x axis gives the
+ * clock, this gives the day. */
+static const char *bs_d_today(request_rec *r)
+{
+    apr_time_exp_t tm;
+    apr_time_exp_lt(&tm, apr_time_now());
+    return apr_psprintf(r->pool, "%04d-%02d-%02d",
+                        tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+}
+
+/* Open a load-monitor box whose chart expands when clicked.
+ *
+ * CSS-only, because this dashboard ships no JavaScript. A hidden
+ * checkbox before the box holds the state and a <label> covering the
+ * chart toggles it; the :checked sibling selector then lets the box
+ * span the full grid width and grow the chart. Clicking again
+ * collapses it.
+ *
+ * The label wraps only the chart, not the whole tile, so selecting the
+ * headline number with the mouse still works.
+ *
+ * `id` must be unique per page -- four of these render on the overview
+ * and a duplicate id would make every label drive the first box. */
+static void bs_d_chartbox_open(request_rec *r, const char *id,
+                               const char *title,
+                               const char *state, const char *tone)
+{
+    /* Filled pill. Ink is chosen against the fill rather than fixed to
+     * white: --warn is a mid amber (#fab219) and white on it is around
+     * 1.9:1, which fails badly. Dark ink on amber clears 4.5:1; white
+     * clears it on the green, red and grey. */
+    const char *ink = strstr(tone, "warn") ? "#231f11" : "#fff";
+    ap_rprintf(r,
+        "<input type='checkbox' class='zoomcb' id='zoom-%s'>"
+        "<div class='kpi kpi-load' id='box-%s'>"
+        "<span class='pill' style='background:%s;color:%s'>%s</span>"
+        "<div class='k'>%s</div><div class='loadrow'>",
+        id, id, tone, ink, state, title);
+}
+
+/* Close the box, wrapping the chart just emitted in the toggle label.
+ * Split from _open so the caller can emit its number and chart between
+ * them without this helper needing to know either. */
+static void bs_d_chartbox_close(request_rec *r, const char *id,
+                                const char *caption)
+{
+    ap_rprintf(r,
+        "<label class='zoomlab' for='zoom-%s' title='Click to enlarge'>"
+        "</label></div>", id);
+    if (caption && *caption) {
+        ap_rprintf(r, "<div class='n'>%s</div>", caption);
+    }
+    ap_rputs("</div>", r);
 }
 
 /* Per-CPU load average over the last hour. */
@@ -1882,9 +1986,18 @@ static const char *bs_d_pct(apr_pool_t *p, apr_uint64_t num, apr_uint64_t den)
  * squeezed into a sliver or spilling over its neighbour. */
 #define BS_D_INBAR_MIN_PCT 8.0
 
-static void bs_d_stacked(request_rec *r, const char *id, const char *title,
-                         const char **labels, const apr_uint64_t *vals,
-                         const char **fills, int n, apr_uint64_t total)
+/* As bs_d_stacked, but each series may carry a `detail` string that is
+ * appended to the hover text on both the bar segment and the legend
+ * row. Used to break a status class down into the individual codes
+ * inside it -- "4xx" is a poor answer when the question is whether
+ * those are 403s or 404s. NULL detail renders exactly as before. */
+static void bs_d_stacked_detail(request_rec *r, const char *id,
+                                const char *title,
+                                const char **labels,
+                                const apr_uint64_t *vals,
+                                const char **fills,
+                                const char **detail,
+                                int n, apr_uint64_t total)
 {
     ap_rprintf(r, "<section><h2>%s</h2>", title);
     if (!total) {
@@ -1908,10 +2021,24 @@ static void bs_d_stacked(request_rec *r, const char *id, const char *title,
         if (!vals[i]) continue;      /* no zero-width slivers */
         double pct = 100.0 * (double)vals[i] / (double)total;
         const char *pcts = bs_d_pct(r->pool, vals[i], total);
+        /* data-tip drives a CSS tooltip rather than title=, because the
+         * native one has a browser-controlled delay of about a second
+         * that no markup can shorten. aria-label carries the same text
+         * for screen readers; it is deliberately not title=, which
+         * would put the slow native tooltip back alongside this one.
+         *
+         * When a breakdown exists the tooltip is ONLY the breakdown --
+         * the class total and its share are already on the bar and in
+         * the legend, so repeating them just pushes the useful lines
+         * further from the cursor. */
+        const char *tip = (detail && detail[i] && *detail[i])
+            ? detail[i]
+            : apr_psprintf(r->pool, "%s: %" APR_UINT64_T_FMT " (%s)",
+                           labels[i], vals[i], pcts);
         ap_rprintf(r,
             "<div class='seg' style='flex:0 0 %.4f%%;background:%s' "
-            "title='%s: %" APR_UINT64_T_FMT " (%s)'>",
-            pct, fills[i], labels[i], vals[i], pcts);
+            "data-tip='%s' aria-label='%s: %" APR_UINT64_T_FMT " (%s)'>",
+            pct, fills[i], tip, labels[i], vals[i], pcts);
         if (pct >= BS_D_INBAR_MIN_PCT) {
             ap_rprintf(r, "<span>%s</span>", pcts);
         }
@@ -1923,12 +2050,24 @@ static void bs_d_stacked(request_rec *r, const char *id, const char *title,
          * also direct-labelled with its value — identity is never
          * carried by colour alone. Text stays in ink tokens; only the
          * swatch wears the series colour. */
-        ap_rprintf(r, "<li><i style='background:%s'></i>%s "
+        const char *ltip = (detail && detail[i] && *detail[i])
+            ? detail[i]
+            : apr_psprintf(r->pool, "%s: %" APR_UINT64_T_FMT,
+                           labels[i], vals[i]);
+        ap_rprintf(r, "<li data-tip='%s'>"
+                      "<i style='background:%s'></i>%s "
                       "<b>%" APR_UINT64_T_FMT "</b> <span>%s</span></li>",
-                   fills[i], labels[i], vals[i],
+                   ltip, fills[i], labels[i], vals[i],
                    bs_d_pct(r->pool, vals[i], total));
     }
     ap_rputs("</ul></section>", r);
+}
+
+static void bs_d_stacked(request_rec *r, const char *id, const char *title,
+                         const char **labels, const apr_uint64_t *vals,
+                         const char **fills, int n, apr_uint64_t total)
+{
+    bs_d_stacked_detail(r, id, title, labels, vals, fills, NULL, n, total);
 }
 
 /* Ratio against a limit — a meter on a same-hue track, not a two-slice pie. */
@@ -2157,7 +2296,10 @@ static void bs_d_page_open(request_rec *r, const char *title,
        * Single column under 900px, where a fixed rail plus charts does
        * not fit and a sticky sidebar would eat the viewport. */
       ".shell{display:grid;grid-template-columns:248px minmax(0,1fr);"
-      "min-height:100vh;transition:grid-template-columns .2s ease}"
+      /* 100vh MINUS the body padding, or the document is always taller
+       * than the viewport by exactly that padding and the page scrolls
+       * even when nothing overflows. */
+      "min-height:calc(100vh - 24px);transition:grid-template-columns .2s ease}"
       /* No horizontal padding: nav rows span the full rail width so the
        * selected one can reach the border and bleed past it. Children
        * that should stay inset carry their own margin.
@@ -2172,9 +2314,9 @@ static void bs_d_page_open(request_rec *r, const char *title,
        * selected tab -- painted in the content surface -- reads as a
        * hole cut through its section straight into the page. */
       "aside{background:var(--surface);border-right:1px solid var(--line);"
-      "padding:0 0 24px;min-height:100vh;position:sticky;top:0;"
+      "padding:0 0 24px;min-height:calc(100vh - 24px);position:sticky;top:0;"
       "overflow:visible;display:flex;flex-direction:column;gap:0}"
-      "main{padding:26px 26px 60px;max-width:1000px;min-width:0}"
+      "main{padding:6px 26px 18px;max-width:1000px;min-width:0}"
       /* Rail header: product name and the collapse control on one line,
        * the way a sidebar you can put away usually reads. */
       ".railhead{display:flex;align-items:center;justify-content:space-"
@@ -2297,7 +2439,7 @@ static void bs_d_page_open(request_rec *r, const char *title,
       "#rail:checked~.shell main>.icontog{display:inline-flex}}"
       "@media(max-width:900px){.shell{grid-template-columns:1fr;gap:8px}"
       "aside{position:static}}"
-      "body{margin:0;padding:28px 24px 56px;background:var(--surface);color:var(--ink);"
+      "body{margin:0;padding:10px 24px 14px;background:var(--surface);color:var(--ink);"
       "font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}"
       "main{min-width:0}"
       "h1{font-size:19px;margin:0 0 2px;font-weight:600}"
@@ -2326,6 +2468,7 @@ static void bs_d_page_open(request_rec *r, const char *title,
       "nav.rf a{padding:3px 9px;font-size:12px}"
       "nav.rf .ts{margin-left:auto;font-variant-numeric:tabular-nums}"
       "section{margin:0 0 28px}"
+      ".shell main>section:last-of-type{margin-bottom:0}"
       ".kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}"
       /* The load box holds a number and a sparkline side by side, so
        * it needs roughly twice the width of a plain stat tile. */
@@ -2352,14 +2495,57 @@ static void bs_d_page_open(request_rec *r, const char *title,
       ".loadpair .spark{height:68px}"
       ".loadpair .v{font-size:22px}"
       ".loadpair .loadrow{gap:10px}"
+      /* Click-to-enlarge, CSS only -- this dashboard ships no
+       * JavaScript. The checkbox lives immediately before its box so
+       * the :checked + .kpi sibling selector can reach it; the label
+       * sits over the chart and toggles it. */
+      ".zoomcb{position:absolute;opacity:0;pointer-events:none}"
+      ".loadrow{position:relative}"
+      ".zoomlab{position:absolute;inset:0;cursor:zoom-in}"
+      ".zoomcb:checked + .kpi .zoomlab{cursor:zoom-out}"
+      /* Expanded: span the full grid width and give the chart real
+       * height. 240px is enough for the tick labels to breathe, which
+       * is the actual reason to enlarge one of these. */
+      ".zoomcb:checked + .kpi{grid-column:1/-1}"
+      ".zoomcb:checked + .kpi .spark{height:240px}"
+      ".zoomcb:checked + .kpi .v{font-size:30px}"
+      /* Keyboard: the checkbox is off-screen but still focusable, so
+       * show a ring on the box when it has focus. */
+      ".zoomcb:focus-visible + .kpi{outline:2px solid var(--c1);"
+      "outline-offset:2px}"
+      /* Instant tooltips. title= is unusable here: browsers hold it for
+       * roughly a second before showing anything, which is longer than
+       * it takes to move the pointer along a stacked bar. This appears
+       * on hover with no delay.
+       *
+       * white-space:pre so the newlines in data-tip render as lines --
+       * the whole point is a per-code list, not one long run-on. */
+      ".seg[data-tip],.legend li[data-tip]{position:relative}"
+      ".seg[data-tip]:hover::after,.legend li[data-tip]:hover::after{"
+      "content:attr(data-tip);white-space:pre;position:absolute;"
+      "left:50%;bottom:calc(100% + 6px);transform:translateX(-50%);"
+      "background:var(--ink);color:var(--surface);font-size:11px;"
+      "font-weight:500;line-height:1.45;padding:6px 9px;border-radius:6px;"
+      "box-shadow:0 2px 10px rgba(0,0,0,.28);z-index:50;"
+      "pointer-events:none;text-align:left}"
+      ".seg:first-child{border-top-left-radius:4px;"
+      "border-bottom-left-radius:4px}"
+      ".seg:last-child{border-top-right-radius:4px;"
+      "border-bottom-right-radius:4px}"
       /* Composite verdict strip above the pair. */
       /* Stacked share bar. overflow:hidden on the rounded track gives
        * the 4px outer corners the old SVG clip-path provided, while
        * internal joins stay square. */
+      /* overflow stays VISIBLE on both the track and the segments so a
+       * segment's tooltip can escape the bar. The rounded ends that
+       * overflow:hidden used to provide now come from border-radius on
+       * the first and last segment, and the only thing that genuinely
+       * needed clipping -- the in-bar percentage label -- clips
+       * itself. */
       ".stack{display:flex;width:100%;height:34px;border-radius:4px;"
-      "overflow:hidden;background:var(--track)}"
+      "overflow:visible;background:var(--track)}"
       ".seg{position:relative;display:flex;align-items:center;"
-      "justify-content:center;min-width:0;overflow:hidden;"
+      "justify-content:center;min-width:0;overflow:visible;"
       "box-shadow:inset -2px 0 0 var(--surface)}"
       ".seg:last-child{box-shadow:none}"
       /* White on the saturated series fills, with a soft dark halo so
@@ -2367,17 +2553,24 @@ static void bs_d_page_open(request_rec *r, const char *title,
        * both themes without hard-coding a per-series text colour. */
       ".seg span{font-size:11px;font-weight:600;color:#fff;"
       "text-shadow:0 0 3px rgba(0,0,0,.55);white-space:nowrap;"
-      "padding:0 4px}"
-      ".loadbar{display:flex;align-items:center;gap:20px;flex-wrap:wrap;"
-      "background:var(--surface);border:1px solid var(--line);"
-      "border-radius:8px;padding:10px 14px;margin-bottom:12px}"
-      ".lb-state{display:flex;align-items:baseline;gap:8px}"
-      ".lb-k{font-size:11px;text-transform:uppercase;letter-spacing:.04em;"
-      "color:var(--muted)}"
-      ".lb-v{font-size:20px;font-weight:600}"
-      ".lb-src{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;"
-      "color:var(--muted)}"
-      ".lb-src .src b{font-weight:600}"
+      "padding:0 4px;max-width:100%;overflow:hidden}"
+      /* State pill, top-right of each monitor box. Replaces the
+       * composite strip that used to sit above the grid: the merged
+       * verdict is the worst of these four, which reads at a glance
+       * without spending a row on it. Colour is doubled by the word,
+       * so the state never rides on hue alone. */
+      ".kpi-load{position:relative}"
+      /* The 5/15-minute pair rides alongside the 1-minute headline at
+       * a smaller size: present for context, never competing with the
+       * number the chart and the pill are about. */
+      ".la2{font-size:13px;font-weight:500;color:var(--muted);"
+      "margin-left:7px;letter-spacing:.01em;white-space:nowrap;"
+      "font-variant-numeric:tabular-nums}"
+      ".capline{margin:0;font-size:13px;color:var(--ink2)}"
+      ".capline span{color:var(--muted)}"
+      ".pill{position:absolute;top:10px;right:12px;font-size:11px;"
+      "font-weight:700;letter-spacing:.03em;text-transform:uppercase;"
+      "border-radius:999px;padding:3px 9px;white-space:nowrap}"
       "@media(max-width:600px){.kpi-load{grid-column:span 1;"
       "min-width:0}.spark{display:none}"
       ".loadpair{grid-template-columns:1fr}}"
@@ -3113,12 +3306,10 @@ int bs_dashboard_handler(request_rec *r)
      * would have reported those incidents as an idle server. */
     {
         apr_uint32_t la = bs_loadavg_current();
-        bs_load_state ls = bs_load_current();
-        const char *lname = (ls == BS_LOAD_HOT)  ? "hot"
-                          : (ls == BS_LOAD_WARM) ? "warm" : "normal";
-        const char *tone  = (ls == BS_LOAD_HOT)  ? "var(--crit)"
-                          : (ls == BS_LOAD_WARM) ? "var(--warn)"
-                                                 : "var(--good)";
+        /* The merged state is no longer rendered here -- it is the
+         * worst of the four pills below, and printing it again cost a
+         * row. It is still what policy matches on; see bs_load_current
+         * and the minload= predicate. */
         apr_uint32_t dbst  = bs_shm.header
             ? apr_atomic_read32(&bs_shm.header->db_state) : 0;
         apr_uint32_t dbthr = bs_shm.header
@@ -3136,104 +3327,90 @@ int bs_dashboard_handler(request_rec *r)
         int db_have  = (dbsec > 0);
         int db_stale = db_have && (nowsec > dbsec + 120);
 
-        ap_rputs("<section><h2>Server load <span style='text-transform:"
-                 "none;font-weight:400;color:var(--muted)'>right now"
-                 "</span></h2>", r);
-
-        /* Composite verdict above the two series it is derived from.
-         * The merged state is what policy matches on, but it is a MAX,
-         * so on its own it cannot say which input drove it -- and
-         * "why are we shedding" is the question an operator actually
-         * has. Each contributor is named with its own state beside it. */
-        ap_rprintf(r,
-            "<div class='loadbar' style='border-left:4px solid %s'>"
-            "<div class='lb-state'><span class='lb-k'>Load state</span>"
-            "<span class='lb-v' style='color:%s'>%s</span></div>"
-            "<div class='lb-src'>", tone, tone, lname);
+        /* No section heading and no composite status bar. The four
+         * boxes below each carry their own state pill, so a strip that
+         * repeated all four states above them was a second copy that
+         * cost a whole row of vertical space. The merged verdict is
+         * still what policy matches on -- it is simply the worst of the
+         * four pills, which is legible at a glance without a caption
+         * saying so.
+         *
+         * Each state is computed here and handed to the box that owns
+         * it; the pill markup lives in bs_d_chartbox_open. */
+        const char *cpu_s, *cpu_t;
         {
-            /* Per-CPU load average: the signal that caught the outages
-             * the worker ratio missed. */
             int aw, ah;
             bs_loadavg_thresholds(r->server, &aw, &ah);
-            const char *cs = ((int)la >= ah) ? "hot"
-                           : ((int)la >= aw) ? "warm" : "normal";
-            const char *ct = ((int)la >= ah) ? "var(--crit)"
-                           : ((int)la >= aw) ? "var(--warn)" : "var(--good)";
-            ap_rprintf(r, "<span class='src'>CPU <b style='color:%s'>%s</b>"
-                          "</span>", ct, cs);
+            cpu_s = ((int)la >= ah) ? "hot" : ((int)la >= aw) ? "warm" : "normal";
+            cpu_t = ((int)la >= ah) ? "var(--crit)"
+                  : ((int)la >= aw) ? "var(--warn)" : "var(--good)";
         }
+        const char *ap_s, *ap_t;
         {
-            /* Apache latency: the signal the busy-worker ratio cannot
-             * see. 1024 worker slots on 6 cores means an unusable site
-             * still reads 2-3% utilisation. */
             apr_uint32_t lat_us = bs_latency_current_us();
-            int lat = (lat_us == BS_M_AP_NO_STATUS)
-                    ? -1 : (int)(lat_us / 1000);
-            if (lat < 0) {
-                ap_rputs("<span class='src'>Apache <b style='color:"
-                         "var(--muted)'>needs ExtendedStatus</b></span>", r);
+            if (lat_us == BS_M_AP_NO_STATUS) {
+                ap_s = "no status"; ap_t = "var(--muted)";
             } else {
-                int lw, lh;
+                int lat = (int)(lat_us / 1000), lw, lh;
                 bs_latency_thresholds(r->server, &lw, &lh);
-                const char *as = ((int)lat >= lh) ? "hot"
-                               : ((int)lat >= lw) ? "warm" : "normal";
-                const char *at = ((int)lat >= lh) ? "var(--crit)"
-                               : ((int)lat >= lw) ? "var(--warn)"
-                                                  : "var(--good)";
-                ap_rprintf(r, "<span class='src'>Apache "
-                              "<b style='color:%s'>%s</b></span>", at, as);
+                ap_s = (lat >= lh) ? "hot" : (lat >= lw) ? "warm" : "normal";
+                ap_t = (lat >= lh) ? "var(--crit)"
+                     : (lat >= lw) ? "var(--warn)" : "var(--good)";
             }
         }
-        if (!db_have) {
-            ap_rputs("<span class='src'>Database "
-                     "<b style='color:var(--muted)'>no monitor</b></span>", r);
-        } else if (db_stale) {
-            ap_rprintf(r, "<span class='src'>Database "
-                          "<b style='color:var(--warn)'>stale %us</b></span>",
-                       nowsec - dbsec);
-        } else {
-            const char *ds = (dbst == BS_LOAD_HOT)  ? "hot"
-                           : (dbst == BS_LOAD_WARM) ? "warm" : "normal";
-            const char *dt = (dbst == BS_LOAD_HOT)  ? "var(--crit)"
-                           : (dbst == BS_LOAD_WARM) ? "var(--warn)"
-                                                    : "var(--good)";
-            ap_rprintf(r, "<span class='src'>Database "
-                          "<b style='color:%s'>%s</b></span>", dt, ds);
+        const char *db_s, *db_t;
+        if (!db_have)       { db_s = "no monitor"; db_t = "var(--muted)"; }
+        else if (db_stale)  { db_s = apr_psprintf(r->pool, "stale %us",
+                                                  nowsec - dbsec);
+                              db_t = "var(--warn)"; }
+        else {
+            db_s = (dbst == BS_LOAD_HOT) ? "hot"
+                 : (dbst == BS_LOAD_WARM) ? "warm" : "normal";
+            db_t = (dbst == BS_LOAD_HOT) ? "var(--crit)"
+                 : (dbst == BS_LOAD_WARM) ? "var(--warn)" : "var(--good)";
         }
+        const char *fpm_s, *fpm_t;
         {
             bs_metrics *fm = bs_shm.metrics;
             apr_uint32_t fsec = fm ? apr_atomic_read32(&fm->fpm_sample_sec) : 0;
             apr_uint32_t fst  = fm ? apr_atomic_read32(&fm->fpm_state) : 0;
-            if (!fsec) {
-                ap_rputs("<span class='src'>PHP-FPM <b style='color:"
-                         "var(--muted)'>no monitor</b></span>", r);
-            } else if (nowsec > fsec + 120) {
-                ap_rprintf(r, "<span class='src'>PHP-FPM "
-                              "<b style='color:var(--warn)'>stale %us</b>"
-                              "</span>", nowsec - fsec);
-            } else {
-                const char *fs = (fst == BS_LOAD_HOT)  ? "hot"
-                               : (fst == BS_LOAD_WARM) ? "warm" : "normal";
-                const char *ft = (fst == BS_LOAD_HOT)  ? "var(--crit)"
-                               : (fst == BS_LOAD_WARM) ? "var(--warn)"
-                                                       : "var(--good)";
-                ap_rprintf(r, "<span class='src'>PHP-FPM "
-                              "<b style='color:%s'>%s</b></span>", ft, fs);
+            if (!fsec)                    { fpm_s = "no monitor";
+                                            fpm_t = "var(--muted)"; }
+            else if (nowsec > fsec + 120) { fpm_s = apr_psprintf(r->pool,
+                                                "stale %us", nowsec - fsec);
+                                            fpm_t = "var(--warn)"; }
+            else {
+                fpm_s = (fst == BS_LOAD_HOT) ? "hot"
+                      : (fst == BS_LOAD_WARM) ? "warm" : "normal";
+                fpm_t = (fst == BS_LOAD_HOT) ? "var(--crit)"
+                      : (fst == BS_LOAD_WARM) ? "var(--warn)" : "var(--good)";
             }
         }
-        ap_rputs("</div></div>", r);
+        ap_rputs("<section>", r);
 
         ap_rputs("<div class='kpis loadpair'>", r);
         /* Number and sparkline share one box: the value says where you
          * are, the line says how you got here, and reading one without
          * the other is what made four overnight spikes look like
          * unrelated events. */
-        ap_rprintf(r, "<div class='kpi kpi-load'><div class='k'>Load per "
-                      "CPU</div><div class='loadrow'><div class='v'>"
-                      "%u.%02u</div>", la / 100, la % 100);
+        bs_d_chartbox_open(r, "cpu", "Load per CPU", cpu_s, cpu_t);
+        {
+            /* All three averages, as every other load readout on a unix
+             * box shows them. The 1-minute stays the headline because
+             * it is the one policy matches on and the one the chart
+             * plots; the 5 and 15 are what distinguish a spike that is
+             * passing from a plateau that is not, which is the first
+             * thing anyone wants to know from a load average. */
+            apr_uint32_t la5 = 0, la15 = 0;
+            bs_loadavg_current_all(&la5, &la15);
+            ap_rprintf(r, "<div class='v'>%u.%02u"
+                          "<span class='la2'>%u.%02u %u.%02u</span></div>",
+                       la / 100, la % 100,
+                       la5 / 100, la5 % 100, la15 / 100, la15 % 100);
+        }
         bs_d_load_spark(r);
-        ap_rputs("</div><div class='n'>1-minute average, last hour"
-                 "</div></div>", r);
+        bs_d_chartbox_close(r, "cpu", apr_psprintf(r->pool,
+            "1-minute average, last hour &middot; %s", bs_d_today(r)));
 
         /* Apache request latency. Deliberately NOT the busy-worker
          * ratio: with 1024 slots on 6 cores that reads 2-3% while the
@@ -3241,9 +3418,8 @@ int bs_dashboard_handler(request_rec *r)
          * like an idle server. */
         {
             apr_uint32_t lat_us = bs_latency_current_us();
-            ap_rputs("<div class='kpi kpi-load'><div class='k'>Apache "
-                     "request latency</div><div class='loadrow'>"
-                     "<div class='v'>", r);
+            bs_d_chartbox_open(r, "apache", "Apache request latency", ap_s, ap_t);
+            ap_rputs("<div class='v'>", r);
             if (lat_us == BS_M_AP_NO_STATUS) {
                 /* No number at all rather than a zero. Zero here would
                  * read as an instantaneous server, which is the exact
@@ -3268,20 +3444,33 @@ int bs_dashboard_handler(request_rec *r)
                     ap_rprintf(r, "0.%ums</div>", lat_us / 100);
                 }
                 bs_d_apache_spark(r);
-                ap_rputs("</div><div class='n'>mean per request, last hour"
-                         "</div></div>", r);
+                bs_d_chartbox_close(r, "apache", apr_psprintf(r->pool,
+                    "mean per request, last hour &middot; %s",
+                    bs_d_today(r)));
             }
         }
 
         /* Database, same shape so the two read against each other. */
         if (db_have && !db_stale) {
-            ap_rprintf(r, "<div class='kpi kpi-load'><div class='k'>Database "
-                          "threads running</div><div class='loadrow'>"
-                          "<div class='v'>%u</div>", dbthr);
+            /* Threads-running stays the plotted and headline metric,
+             * with queries/s alongside it.
+             *
+             * QPS is the more interesting number to watch and the worse
+             * one to chart: it has no ceiling to draw bands against --
+             * every other chart here normalises to a real limit (cores,
+             * pm.max_children, a saturation point) and 500 q/s is
+             * neither high nor low without context. It also inverts
+             * under the failure we care about, because a pool stuck on
+             * lock waits serves FEWER queries per second, so a QPS line
+             * goes quiet exactly when the database is in trouble. */
+            bs_d_chartbox_open(r, "db", "Database threads running", db_s, db_t);
+            ap_rprintf(r, "<div class='v'>%u<span class='la2'>%u q/s</span>"
+                          "</div>", dbthr, dbqps);
             bs_d_db_spark(r);
-            ap_rprintf(r, "</div><div class='n'>%u queries/s, %u.%02u%% lock "
-                          "contention, last hour</div></div>",
-                       dbqps, dblck / 100, dblck % 100);
+            bs_d_chartbox_close(r, "db",
+                apr_psprintf(r->pool,
+                    "%u.%02u%% lock contention, last hour &middot; %s",
+                    dblck / 100, dblck % 100, bs_d_today(r)));
         } else {
             ap_rprintf(r, "<div class='kpi kpi-load'><div class='k'>Database "
                           "threads running</div><div class='loadrow'>"
@@ -3300,17 +3489,16 @@ int bs_dashboard_handler(request_rec *r)
             bs_metrics *fm = bs_shm.metrics;
             apr_uint32_t fsec = fm ? apr_atomic_read32(&fm->fpm_sample_sec) : 0;
             int fstale = fsec && (nowsec > fsec + 120);
-            ap_rputs("<div class='kpi kpi-load'><div class='k'>PHP-FPM "
-                     "workers busy</div><div class='loadrow'>", r);
+            bs_d_chartbox_open(r, "fpm", "PHP-FPM workers busy", fpm_s, fpm_t);
             if (fsec && !fstale) {
                 ap_rprintf(r, "<div class='v'>%u%%</div>",
                            apr_atomic_read32(&fm->fpm_pct));
                 bs_d_fpm_spark(r);
-                ap_rprintf(r, "</div><div class='n'>%u of %u children, "
-                              "%u queued for one, last hour</div></div>",
-                           apr_atomic_read32(&fm->fpm_active),
-                           apr_atomic_read32(&fm->fpm_max_children),
-                           apr_atomic_read32(&fm->fpm_queue));
+                bs_d_chartbox_close(r, "fpm", apr_psprintf(r->pool,
+                    "%u of %u children, %u queued, last hour &middot; %s",
+                    apr_atomic_read32(&fm->fpm_active),
+                    apr_atomic_read32(&fm->fpm_max_children),
+                    apr_atomic_read32(&fm->fpm_queue), bs_d_today(r)));
             } else {
                 ap_rprintf(r, "<div class='v' style='color:var(--muted)'>"
                               "&mdash;</div></div><div class='n'>%s</div>"
@@ -3323,13 +3511,7 @@ int bs_dashboard_handler(request_rec *r)
             }
         }
         ap_rputs("</div>", r);   /* closes the KPI row */
-        ap_rputs("<p class='note'>Load state is the most severe of the "
-                 "signals available: per-CPU load average, Apache "
-                 "busy-worker ratio, and any external state file — which "
-                 "is how the database reaches policy, since the module "
-                 "never talks to it directly. Rules match with "
-                 "<code>minload=warm</code> or <code>minload=hot</code>."
-                 "</p></section>", r);
+        ap_rputs("</section>", r);
     }
 
     /* Site traffic first: it is the denominator everything below is a
@@ -3348,6 +3530,18 @@ int bs_dashboard_handler(request_rec *r)
                   "<div class='v'>%s</div><div class='n'>%" APR_UINT64_T_FMT
                   " reached a decision</div></div>",
                bs_d_pct(r->pool, w.decisions, w.req_total), w.decisions);
+    /* Solve rate against challenges issued, not against all decisions.
+     * A challenge nobody answers is a client that left, so this is the
+     * one number that says whether the challenge is working -- and it
+     * is what separates a real browser population from a scraper farm
+     * or a broken interstitial. */
+    ap_rprintf(r, "<div class='kpi'><div class='k'>Solved</div>"
+                  "<div class='v'>%s</div><div class='n'>%" APR_UINT64_T_FMT
+                  " of %" APR_UINT64_T_FMT " challenges</div></div>",
+               bs_d_pct(r->pool, w.outcome[BS_M_OUTCOME_VERIFIED],
+                        w.outcome[BS_M_OUTCOME_CHALLENGED]),
+               w.outcome[BS_M_OUTCOME_VERIFIED],
+               w.outcome[BS_M_OUTCOME_CHALLENGED]);
     ap_rputs("</div></section>", r);
 
     /* Who is visiting. Categorical: these are kinds of client, not a
@@ -3401,7 +3595,36 @@ int bs_dashboard_handler(request_rec *r)
                                  w.req_status[BS_M_STATUS_OTHER] };
         apr_uint64_t tot = 0;
         for (int i = 0; i < 5; i++) tot += vals[i];
-        bs_d_stacked(r, "st", "Response status", labels, vals, fills, 5, tot);
+
+        /* Break each class into the codes actually seen inside it, for
+         * the hover. Only tracked codes appear; whatever is left over
+         * is reported as "other" rather than silently dropped, so the
+         * parts always reconcile with the class total the user is
+         * looking at. */
+        const char *detail[5] = { NULL, NULL, NULL, NULL, NULL };
+        {
+            static const int lo[5] = { 200, 300, 400, 500, 0 };
+            static const int hi[5] = { 299, 399, 499, 599, 0 };
+            for (int c = 0; c < 4; c++) {
+                char *d = apr_pstrdup(r->pool, "");
+                apr_uint64_t named = 0;
+                for (int k = 0; k < BS_M_CODE_COUNT; k++) {
+                    int code = bs_m_code_values[k];
+                    if (code < lo[c] || code > hi[c]) continue;
+                    if (!w.req_code[k]) continue;
+                    named += w.req_code[k];
+                    d = apr_psprintf(r->pool, "%s%s%d: %" APR_UINT64_T_FMT,
+                                     d, *d ? "\n" : "", code, w.req_code[k]);
+                }
+                if (vals[c] > named) {
+                    d = apr_psprintf(r->pool, "%s%sother: %" APR_UINT64_T_FMT,
+                                     d, *d ? "\n" : "", vals[c] - named);
+                }
+                if (*d) detail[c] = d;
+            }
+        }
+        bs_d_stacked_detail(r, "st", "Response status", labels, vals,
+                            fills, detail, 5, tot);
     }
 
     /* What BotShield itself answered. Deliberately NOT a segment inside
@@ -3542,41 +3765,66 @@ int bs_dashboard_handler(request_rec *r)
      * point-in-time gauges and ignore the window selector; labelled as
      * such rather than left to imply they follow it. */
 
-    ap_rputs("<section><h2>Capacity now <span style='text-transform:none;"
-             "font-weight:400'>(live, not windowed)</span></h2>", r);
-    bs_d_meter(r, "Flagged IPs", bs_gauges.flagged_used,
-               (apr_uint64_t)bs_shm.flagged_capacity);
-    bs_d_meter(r, "Safeguard entries", bs_gauges.safeguard_used,
-               (apr_uint64_t)bs_shm.safeguard_capacity);
-    bs_d_meter(r, "Rate-limit strikes", bs_gauges.strike_used,
-               (apr_uint64_t)bs_shm.strike_capacity);
-    ap_rputs("</section>", r);
-
-    /* Eleven outcome classes is a table, not eleven hues. */
-    ap_rputs("<section><h2>Outcomes</h2><table><thead><tr><th>Outcome</th>"
-             "<th class='n'>Count</th><th class='n'>Share</th></tr></thead><tbody>", r);
+    /* SHM table occupancy. This is NOT a load signal -- it measures
+     * BotShield's own memory, not the machine's -- so it does not
+     * overlap the four monitors above. But it is inert in normal
+     * operation: measured here at 0.06%, 0.03% and 0.00% of 50,000,
+     * which is three meters drawing zero and a section's worth of
+     * height to do it.
+     *
+     * It still has to be visible, because filling one of these tables
+     * is a real failure mode: probe saturation starts evicting entries
+     * and the module logs about it. So it is quiet while quiet and
+     * expands the moment anything approaches its ceiling.
+     *
+     * 25% is the trip point rather than something higher because these
+     * are open-addressed tables -- probe cost climbs well before the
+     * table is full, so "getting busy" matters earlier than "nearly
+     * out of room". */
     {
-        const char *const *onames = bs_m_outcome_names;
-        int shown = 0;
-        for (int i = 0; i < BS_M_OUTCOME_COUNT; i++) {
-            if (!w.outcome[i]) continue;
-            ap_rprintf(r, "<tr><td>%s</td><td class='n'>%" APR_UINT64_T_FMT
-                          "</td><td class='n'>%s</td></tr>",
-                       onames[i], w.outcome[i],
-                       bs_d_pct(r->pool, w.outcome[i], w.decisions));
-            shown++;
+        struct { const char *label; apr_uint64_t used, cap; } tab[3] = {
+            { "Flagged IPs",        bs_gauges.flagged_used,
+              (apr_uint64_t)bs_shm.flagged_capacity },
+            { "Safeguard entries",  bs_gauges.safeguard_used,
+              (apr_uint64_t)bs_shm.safeguard_capacity },
+            { "Rate-limit strikes", bs_gauges.strike_used,
+              (apr_uint64_t)bs_shm.strike_capacity },
+        };
+        int busy = 0;
+        for (int i = 0; i < 3; i++) {
+            if (tab[i].cap && tab[i].used * 4 >= tab[i].cap) busy = 1;
         }
-        if (!shown) ap_rputs("<tr><td colspan='3' class='empty'>"
-                             "Nothing recorded in this window.</td></tr>", r);
+        ap_rputs("<section><h2>Capacity now <span style='text-transform:none;"
+                 "font-weight:400'>(live, not windowed)</span></h2>", r);
+        if (busy) {
+            for (int i = 0; i < 3; i++) {
+                bs_d_meter(r, tab[i].label, tab[i].used, tab[i].cap);
+            }
+        } else {
+            ap_rputs("<p class='capline'>", r);
+            for (int i = 0; i < 3; i++) {
+                ap_rprintf(r, "%s<span>%s</span> %" APR_UINT64_T_FMT
+                              " <span>of %" APR_UINT64_T_FMT "</span>",
+                           i ? " &middot; " : "", tab[i].label,
+                           tab[i].used, tab[i].cap);
+            }
+            ap_rputs("</p>", r);
+        }
+        ap_rputs("</section>", r);
     }
-    ap_rputs("</tbody></table></section>", r);
 
-    ap_rputs("<footer>Counters reset when the SHM segment is recreated, which "
-             "a graceful restart does. Windowed views are bucketed and "
-             "advisory: a writer crossing a bucket boundary can lose an "
-             "increment. &ldquo;Unsolved&rdquo; means a challenge was issued "
-             "and the client never came back &mdash; they are gone, not "
-             "queued.</footer></main></div></body></html>", r);
+    /* The Outcomes table that used to sit here is gone. Five of its
+     * rows were already on the page: challenged, block and rate_limited
+     * are the same numbers the "BotShield response breakdown" bar
+     * shows, and allow is just decisions minus those. Only `verified`
+     * -- the count of challenges actually solved -- appeared nowhere
+     * else, and burying the single most diagnostic number on the page
+     * in the last row of the last table was the wrong place for it. It
+     * is now a KPI in the traffic row, expressed against challenges
+     * issued rather than against all decisions, because "what fraction
+     * of the clients we challenged came back and solved it" is the
+     * question that number answers. */
+    ap_rputs("</main></div></body></html>", r);
     return OK;
 }
 
@@ -3893,6 +4141,72 @@ int bs_metrics_handler(request_rec *r)
     /* E11 — load-state observability. The gauge is the most useful
      * value to alert on; the counter lets operators graph state
      * transitions per minute. */
+    /* The other three load signals. Without these the dashboard shows
+     * data that nothing can retain: the in-module rings hold exactly
+     * one hour and then overwrite, so anything longer has to be
+     * scraped. Apache latency and the merged state were already here;
+     * these complete the set.
+     *
+     * Flat names rather than a labelled series, matching every other
+     * metric this endpoint emits. */
+    {
+        apr_uint32_t la5 = 0, la15 = 0;
+        bs_loadavg_current_all(&la5, &la15);
+        bs_m_emit_gauge(r, "loadavg_1m_pct",
+            "1-minute load average per CPU, in hundredths (1.50 per core "
+            "-> 150). Per-CPU so one threshold means the same thing on a "
+            "6-core host and a 64-core one.", bs_loadavg_current());
+        bs_m_emit_gauge(r, "loadavg_5m_pct",
+            "5-minute load average per CPU, in hundredths.", la5);
+        bs_m_emit_gauge(r, "loadavg_15m_pct",
+            "15-minute load average per CPU, in hundredths.", la15);
+    }
+    if (bs_shm.header) {
+        bs_m_emit_gauge(r, "db_threads_running",
+            "MariaDB threads actively executing, from the external "
+            "monitor. Saturation, not throughput: a pool stuck on lock "
+            "waits shows high threads and LOW queries per second.",
+            apr_atomic_read32(&bs_shm.header->db_threads_run));
+        bs_m_emit_gauge(r, "db_queries_per_sec",
+            "MariaDB queries per second over the monitor's sample "
+            "window. A delta, not the since-boot average.",
+            apr_atomic_read32(&bs_shm.header->db_qps));
+        bs_m_emit_gauge(r, "db_lock_contention_pct_x100",
+            "Share of table-lock acquisitions that had to wait, percent "
+            "x100 (1.25% -> 125), over the sample window.",
+            apr_atomic_read32(&bs_shm.header->db_lock_pct_x100));
+        bs_m_emit_gauge(r, "db_sample_unix",
+            "Unix time of the database monitor's last sample. Compare "
+            "against scrape time to detect a dead monitor: a stopped "
+            "monitor otherwise reads exactly like a calm database.",
+            apr_atomic_read32(&bs_shm.header->db_sample_sec));
+        bs_m_emit_gauge(r, "db_load_state",
+            "Database load state as the monitor classified it: "
+            "0 normal, 1 warm, 2 hot.",
+            apr_atomic_read32(&bs_shm.header->db_state));
+    }
+    if (bs_shm.metrics) {
+        bs_metrics *fm = bs_shm.metrics;
+        bs_m_emit_gauge(r, "fpm_active_processes",
+            "PHP-FPM children currently serving a request.",
+            apr_atomic_read32(&fm->fpm_active));
+        bs_m_emit_gauge(r, "fpm_max_children",
+            "pm.max_children, read from the pool config. The real "
+            "ceiling for dynamic content, unlike MaxRequestWorkers.",
+            apr_atomic_read32(&fm->fpm_max_children));
+        bs_m_emit_gauge(r, "fpm_listen_queue",
+            "Requests waiting for a free PHP-FPM child. Any non-zero "
+            "value means users are already queueing.",
+            apr_atomic_read32(&fm->fpm_queue));
+        bs_m_emit_gauge(r, "fpm_sample_unix",
+            "Unix time of the PHP-FPM monitor's last sample; same "
+            "staleness check as db_sample_unix.",
+            apr_atomic_read32(&fm->fpm_sample_sec));
+        bs_m_emit_gauge(r, "fpm_load_state",
+            "PHP-FPM load state as the monitor classified it: "
+            "0 normal, 1 warm, 2 hot.",
+            apr_atomic_read32(&fm->fpm_state));
+    }
     {
         /* -1, not the sentinel and not 0: a scrape must be able to tell
          * "not measured" from "measured as instant". */

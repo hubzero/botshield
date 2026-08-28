@@ -203,6 +203,7 @@ typedef struct {
     apr_uint64_t req_total;      /* every request, evaluated or not */
     apr_uint64_t req_cookie;
     apr_uint64_t req_status[BS_M_STATUS_COUNT];
+    apr_uint64_t req_code[BS_M_CODE_COUNT];
     apr_uint64_t req_resp[BS_M_RESP_COUNT];
     apr_uint64_t req_class[BS_M_CLASS_COUNT];
     /* Same three decision dimensions split by audience (bot / user),
@@ -237,7 +238,7 @@ void bs_metrics_bucket_add(int vhost_idx, int tier_idx,
  * the log_transaction hook, which runs for every request on every
  * vhost — including requests BotShield never evaluated, which is the
  * whole point: it supplies the denominator for coverage. */
-void bs_metrics_traffic_add(int vhost_idx, int status_idx,
+void bs_metrics_traffic_add(int vhost_idx, int status_idx, int code_idx,
                             int has_cookie, int resp_idx, int class_idx);
 
 /* /botshield/metrics handler — Prometheus exposition format 0.0.4.
