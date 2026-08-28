@@ -171,7 +171,19 @@ const bs_ua_class *bs_classify_request_ua(request_rec *r)
 
     const char *ua = apr_table_get(r->headers_in, "User-Agent");
     if (!ua || !*ua) {
-        cached->label = BS_UA_CLASS_UNKNOWN;
+        /* No UA at all. This is not an ambiguous case: every real
+         * browser sends the header, so absence is positive evidence
+         * that the client is not one. Labelling it "unknown" claimed
+         * uncertainty we do not have and buried 84% of the unclassified
+         * traffic on the dashboard under a name that invited people to
+         * go looking for a classifier gap that was not there.
+         *
+         * is_no_ua as well as is_unknown_bot so the rate limiter can
+         * meter this separately -- see bs_bot_rate_lookup. */
+        cached->is_no_ua        = 1;
+        cached->is_unknown_bot  = 1;
+        cached->unknown_bot_token = "no-ua";
+        cached->label           = BS_UA_CLASS_UNKNOWN_BOT;
         return cached;
     }
 

@@ -450,7 +450,7 @@ void bs_bot_rate_init(apr_pool_t *pconf, server_rec *s, int *next_slot)
 
         /* Pass 3 — wildcard. For every directory slug not yet mapped,
          * allocate a separate slot at the wildcard's budget. Plus the
-         * three reserved aggregate slots (unknown-bot, fake-bot,
+         * four reserved aggregate slots (unknown-bot, no-ua, fake-bot,
          * wildcard-fallback). */
         if (st->wildcard_entry) {
             apr_uint32_t budget = st->wildcard_entry->budget;
@@ -470,6 +470,9 @@ void bs_bot_rate_init(apr_pool_t *pconf, server_rec *s, int *next_slot)
             st->unknown_bot_holder = allocate_holder(pconf, sv,
                 "unknown-bot aggregate", next_slot,
                 budget, window, "wildcard:unknown-bot", st->wildcard_entry->observe);
+            st->no_ua_holder       = allocate_holder(pconf, sv,
+                "no-ua aggregate", next_slot,
+                budget, window, "wildcard:no-ua", st->wildcard_entry->observe);
             st->fake_bot_holder    = allocate_holder(pconf, sv,
                 "fake-bot aggregate", next_slot,
                 budget, window, "wildcard:fake-bot", st->wildcard_entry->observe);
@@ -485,10 +488,11 @@ void bs_bot_rate_init(apr_pool_t *pconf, server_rec *s, int *next_slot)
             ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
                 "mod_botshield: BotShieldBotRateLimit: %d directive + "
                 "%d robots.txt + %d botgroup + %d wildcard slot(s) + "
-                "%s%s%saggregate(s) (pool cursor at %d/%d)",
+                "%s%s%s%saggregate(s) (pool cursor at %d/%d)",
                 specific_count, robots_count, botgroup_count,
                 wildcard_count,
                 st->unknown_bot_holder        ? "unknown-bot "        : "",
+                st->no_ua_holder              ? "no-ua "              : "",
                 st->fake_bot_holder           ? "fake-bot "           : "",
                 st->wildcard_fallback_holder  ? "wildcard-fallback "  : "",
                 *next_slot, (int)bs_shm.rate_counter_count);
@@ -537,6 +541,12 @@ int bs_bot_rate_check(request_rec *r)
         holder = apr_hash_get(st->by_slug, cls->verified_name,
                               APR_HASH_KEY_STRING);
         if (holder) slug_for_log = cls->verified_name;
+    }
+    /* Before the unknown-bot check, because is_no_ua implies
+     * is_unknown_bot and the more specific bucket must win. */
+    if (!holder && cls->is_no_ua && st->no_ua_holder) {
+        holder = st->no_ua_holder;
+        slug_for_log = "no-ua";
     }
     if (!holder && cls->is_unknown_bot && st->unknown_bot_holder) {
         holder = st->unknown_bot_holder;
