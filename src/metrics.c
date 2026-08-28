@@ -1854,11 +1854,16 @@ static void bs_d_chartbox_open(request_rec *r, const char *id,
 /* Close the box, wrapping the chart just emitted in the toggle label.
  * Split from _open so the caller can emit its number and chart between
  * them without this helper needing to know either. */
-static void bs_d_chartbox_close(request_rec *r, const char *id)
+static void bs_d_chartbox_close(request_rec *r, const char *id,
+                                const char *caption)
 {
     ap_rprintf(r,
         "<label class='zoomlab' for='zoom-%s' title='Click to enlarge'>"
-        "</label></div></div>", id);
+        "</label></div>", id);
+    if (caption && *caption) {
+        ap_rprintf(r, "<div class='n'>%s</div>", caption);
+    }
+    ap_rputs("</div>", r);
 }
 
 /* Per-CPU load average over the last hour. */
@@ -1989,11 +1994,24 @@ static void bs_d_stacked_detail(request_rec *r, const char *id,
         if (!vals[i]) continue;      /* no zero-width slivers */
         double pct = 100.0 * (double)vals[i] / (double)total;
         const char *pcts = bs_d_pct(r->pool, vals[i], total);
+        /* data-tip drives a CSS tooltip rather than title=, because the
+         * native one has a browser-controlled delay of about a second
+         * that no markup can shorten. aria-label carries the same text
+         * for screen readers; it is deliberately not title=, which
+         * would put the slow native tooltip back alongside this one.
+         *
+         * When a breakdown exists the tooltip is ONLY the breakdown --
+         * the class total and its share are already on the bar and in
+         * the legend, so repeating them just pushes the useful lines
+         * further from the cursor. */
+        const char *tip = (detail && detail[i] && *detail[i])
+            ? detail[i]
+            : apr_psprintf(r->pool, "%s: %" APR_UINT64_T_FMT " (%s)",
+                           labels[i], vals[i], pcts);
         ap_rprintf(r,
             "<div class='seg' style='flex:0 0 %.4f%%;background:%s' "
-            "title='%s: %" APR_UINT64_T_FMT " (%s)%s'>",
-            pct, fills[i], labels[i], vals[i], pcts,
-            (detail && detail[i]) ? detail[i] : "");
+            "data-tip='%s' aria-label='%s: %" APR_UINT64_T_FMT " (%s)'>",
+            pct, fills[i], tip, labels[i], vals[i], pcts);
         if (pct >= BS_D_INBAR_MIN_PCT) {
             ap_rprintf(r, "<span>%s</span>", pcts);
         }
@@ -2005,12 +2023,14 @@ static void bs_d_stacked_detail(request_rec *r, const char *id,
          * also direct-labelled with its value — identity is never
          * carried by colour alone. Text stays in ink tokens; only the
          * swatch wears the series colour. */
-        ap_rprintf(r, "<li title='%s: %" APR_UINT64_T_FMT "%s'>"
+        const char *ltip = (detail && detail[i] && *detail[i])
+            ? detail[i]
+            : apr_psprintf(r->pool, "%s: %" APR_UINT64_T_FMT,
+                           labels[i], vals[i]);
+        ap_rprintf(r, "<li data-tip='%s'>"
                       "<i style='background:%s'></i>%s "
                       "<b>%" APR_UINT64_T_FMT "</b> <span>%s</span></li>",
-                   labels[i], vals[i],
-                   (detail && detail[i]) ? detail[i] : "",
-                   fills[i], labels[i], vals[i],
+                   ltip, fills[i], labels[i], vals[i],
                    bs_d_pct(r->pool, vals[i], total));
     }
     ap_rputs("</ul></section>", r);
@@ -2462,6 +2482,29 @@ static void bs_d_page_open(request_rec *r, const char *title,
        * show a ring on the box when it has focus. */
       ".zoomcb:focus-visible + .kpi{outline:2px solid var(--c1);"
       "outline-offset:2px}"
+      /* Instant tooltips. title= is unusable here: browsers hold it for
+       * roughly a second before showing anything, which is longer than
+       * it takes to move the pointer along a stacked bar. This appears
+       * on hover with no delay.
+       *
+       * white-space:pre so the newlines in data-tip render as lines --
+       * the whole point is a per-code list, not one long run-on. */
+      ".seg[data-tip],.legend li[data-tip]{position:relative}"
+      ".seg[data-tip]:hover::after,.legend li[data-tip]:hover::after{"
+      "content:attr(data-tip);white-space:pre;position:absolute;"
+      "left:50%;bottom:calc(100% + 6px);transform:translateX(-50%);"
+      "background:var(--ink);color:var(--surface);font-size:11px;"
+      "font-weight:500;line-height:1.45;padding:6px 9px;border-radius:6px;"
+      "box-shadow:0 2px 10px rgba(0,0,0,.28);z-index:50;"
+      "pointer-events:none;text-align:left}"
+      /* The bar clips its segments to get rounded ends, which would
+       * also clip a tooltip drawn inside one. Let it escape. */
+      ".stack{overflow:visible}"
+      ".stack{border-radius:4px}"
+      ".seg:first-child{border-top-left-radius:4px;"
+      "border-bottom-left-radius:4px}"
+      ".seg:last-child{border-top-right-radius:4px;"
+      "border-bottom-right-radius:4px}"
       /* Composite verdict strip above the pair. */
       /* Stacked share bar. overflow:hidden on the rounded track gives
        * the 4px outer corners the old SVG clip-path provided, while
@@ -3341,7 +3384,7 @@ int bs_dashboard_handler(request_rec *r)
         bs_d_chartbox_open(r, "cpu", "Load per CPU");
         ap_rprintf(r, "<div class='v'>%u.%02u</div>", la / 100, la % 100);
         bs_d_load_spark(r);
-        bs_d_chartbox_close(r, "cpu");
+        bs_d_chartbox_close(r, "cpu", "1-minute average, last hour");
 
         /* Apache request latency. Deliberately NOT the busy-worker
          * ratio: with 1024 slots on 6 cores that reads 2-3% while the
@@ -3375,7 +3418,7 @@ int bs_dashboard_handler(request_rec *r)
                     ap_rprintf(r, "0.%ums</div>", lat_us / 100);
                 }
                 bs_d_apache_spark(r);
-                bs_d_chartbox_close(r, "apache");
+                bs_d_chartbox_close(r, "apache", "mean per request, last hour");
             }
         }
 
@@ -3384,8 +3427,10 @@ int bs_dashboard_handler(request_rec *r)
             bs_d_chartbox_open(r, "db", "Database threads running");
             ap_rprintf(r, "<div class='v'>%u</div>", dbthr);
             bs_d_db_spark(r);
-            (void)dbqps; (void)dblck;
-            bs_d_chartbox_close(r, "db");
+            bs_d_chartbox_close(r, apr_psprintf(r->pool, "db"),
+                apr_psprintf(r->pool,
+                    "%u queries/s, %u.%02u%% lock contention, last hour",
+                    dbqps, dblck / 100, dblck % 100));
         } else {
             ap_rprintf(r, "<div class='kpi kpi-load'><div class='k'>Database "
                           "threads running</div><div class='loadrow'>"
@@ -3409,7 +3454,11 @@ int bs_dashboard_handler(request_rec *r)
                 ap_rprintf(r, "<div class='v'>%u%%</div>",
                            apr_atomic_read32(&fm->fpm_pct));
                 bs_d_fpm_spark(r);
-                bs_d_chartbox_close(r, "fpm");
+                bs_d_chartbox_close(r, "fpm", apr_psprintf(r->pool,
+                    "%u of %u children, %u queued for one, last hour",
+                    apr_atomic_read32(&fm->fpm_active),
+                    apr_atomic_read32(&fm->fpm_max_children),
+                    apr_atomic_read32(&fm->fpm_queue)));
             } else {
                 ap_rprintf(r, "<div class='v' style='color:var(--muted)'>"
                               "&mdash;</div></div><div class='n'>%s</div>"
@@ -3422,13 +3471,7 @@ int bs_dashboard_handler(request_rec *r)
             }
         }
         ap_rputs("</div>", r);   /* closes the KPI row */
-        ap_rputs("<p class='note'>Load state is the most severe of the "
-                 "signals available: per-CPU load average, Apache "
-                 "busy-worker ratio, and any external state file — which "
-                 "is how the database reaches policy, since the module "
-                 "never talks to it directly. Rules match with "
-                 "<code>minload=warm</code> or <code>minload=hot</code>."
-                 "</p></section>", r);
+        ap_rputs("</section>", r);
     }
 
     /* Site traffic first: it is the denominator everything below is a
@@ -3518,12 +3561,12 @@ int bs_dashboard_handler(request_rec *r)
                     if (code < lo[c] || code > hi[c]) continue;
                     if (!w.req_code[k]) continue;
                     named += w.req_code[k];
-                    d = apr_psprintf(r->pool, "%s\n  %d: %" APR_UINT64_T_FMT,
-                                     d, code, w.req_code[k]);
+                    d = apr_psprintf(r->pool, "%s%s%d: %" APR_UINT64_T_FMT,
+                                     d, *d ? "\n" : "", code, w.req_code[k]);
                 }
                 if (vals[c] > named) {
-                    d = apr_psprintf(r->pool, "%s\n  other: %" APR_UINT64_T_FMT,
-                                     d, vals[c] - named);
+                    d = apr_psprintf(r->pool, "%s%sother: %" APR_UINT64_T_FMT,
+                                     d, *d ? "\n" : "", vals[c] - named);
                 }
                 if (*d) detail[c] = d;
             }
