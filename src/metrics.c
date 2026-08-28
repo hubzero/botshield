@@ -1795,26 +1795,34 @@ static void bs_d_spark(request_rec *r, const bs_spark_spec *sp)
         }
     }
 
-    /* X ticks every 15 minutes, drawn only where there is data. */
+    /* X ticks every 15 minutes, labelled with wall-clock time.
+     *
+     * Absolute rather than "-30m": these charts sit beside an error log
+     * and an access log, and correlating a bump against either means
+     * reading a clock. A relative label forces that arithmetic on every
+     * glance, and gets it wrong the moment the page has been open a
+     * while without refreshing -- the labels stay put while the data
+     * scrolls under them.
+     *
+     * Local time, matching the rendered-at stamp below the controls and
+     * the access log's own timestamps. */
     {
+        apr_time_t base = apr_time_now();
         for (int mins = 0; mins <= 60; mins += 15) {
             int i = (mins * 60) / sp->period;
             /* A ring of N slots holds N-1 intervals, so a full hour
-             * lands one slot past the end; clamp so the -60m tick sits
-             * on the left edge instead of being dropped. */
+             * lands one slot past the end; clamp so the leftmost tick
+             * sits on the edge instead of being dropped. */
             if (i > sp->slots - 1) i = sp->slots - 1;
             int x = BS_LA_X(i);
+            apr_time_exp_t tm;
+            apr_time_exp_lt(&tm, base - apr_time_from_sec(mins * 60));
             ap_rprintf(r, "<line x1='%d' y1='%d' x2='%d' y2='%d' "
                           "stroke='var(--line)'/>", x, Y1, x, Y1 + 3);
-            if (mins == 0) {
-                ap_rprintf(r, "<text x='%d' y='%d' text-anchor='end' "
-                              "font-size='8' fill='var(--muted)'>now</text>",
-                           x, Y1 + 13);
-            } else {
-                ap_rprintf(r, "<text x='%d' y='%d' text-anchor='middle' "
-                              "font-size='8' fill='var(--muted)'>-%dm</text>",
-                           x, Y1 + 13, mins);
-            }
+            ap_rprintf(r, "<text x='%d' y='%d' text-anchor='%s' "
+                          "font-size='8' fill='var(--muted)'>%02d:%02d</text>",
+                       x, Y1 + 13, mins == 0 ? "end" : "middle",
+                       tm.tm_hour, tm.tm_min);
         }
     }
 
