@@ -172,8 +172,9 @@ extern "C" {
 /* v12 adds BS_M_RESP_STATIC, widening req_resp[] in both the ring slot
  * and the cumulative block. */
 /* v13 adds g_resp[]: responder crossed with audience. */
-/* v14 appends the load-average ring (la_ring). */
-#define BS_STATE_FORMAT_VERSION   14
+/* v15 appends the database ring (db_ring) and the db_* header
+ * fields carved from _pad_cl1. */
+#define BS_STATE_FORMAT_VERSION   15
 #define BS_STATE_MAX_AGE_SECS     (14 * 86400)
 #define BS_FNV64_SEED             0xcbf29ce484222325ULL
 
@@ -468,7 +469,28 @@ typedef struct {
     apr_uint32_t  load_escalation_streak;
     apr_uint32_t  load_recovery_streak;
     apr_uint32_t  load_state_changes;
-    apr_uint32_t  _pad_cl1[9];
+    /* Database signal, published by the external monitor (see
+     * BotShieldDbStatsFile). Kept separate from load_state rather than
+     * folded into it: load_state is the merged verdict policy matches
+     * on, and the dashboard needs to show which input drove it. A
+     * composite that can't be decomposed is not diagnosable.
+     *
+     * db_sample_sec is the monitor's own timestamp, not ours -- it is
+     * what makes staleness visible. Without it a monitor that died an
+     * hour ago is indistinguishable from one reporting calm. */
+    apr_uint32_t  db_state;
+    apr_uint32_t  db_threads_run;
+    apr_uint32_t  db_qps;
+    apr_uint32_t  db_lock_pct_x100;  /* percent x100; 1.25% -> 125 */
+    apr_uint32_t  db_sample_sec;
+    /* The monitor's own thresholds, echoed back in its stats file. Read
+     * from there rather than configured here so the graph's bands are
+     * necessarily the numbers that produced the published state --
+     * a second copy in httpd.conf could disagree with the monitor and
+     * nothing would catch it. */
+    apr_uint32_t  db_warm_threads;
+    apr_uint32_t  db_hot_threads;
+    apr_uint32_t  _pad_cl1[2];
 
     /* === Cacheline 2: write-frequently === */
     apr_uint32_t  cv_inflight;
@@ -548,6 +570,15 @@ typedef struct {
 #define BS_M_LA_PERIOD   5
 #define BS_M_LA_EMPTY    0xFFFF
 
+/* Database ring: 360 x 10s = one hour. Same span as la_ring so the two
+ * graphs share an x-axis and can be read against each other; a
+ * different span would invite comparing points that aren't contemporary.
+ * Coarser period because the source is an external monitor sampling at
+ * 10s, and a 5s ring would store each of its readings twice. */
+#define BS_M_DB_SLOTS    360
+#define BS_M_DB_PERIOD   10
+#define BS_M_DB_EMPTY    0xFFFF
+
 #define BS_M_MIN_SLOTS   60   /* 1-minute slots: serves 15min and 1h */
 #define BS_M_HOUR_SLOTS  24   /* 1-hour slots: serves 24h */
 
@@ -617,6 +648,19 @@ typedef struct {
     apr_uint16_t la_ring[BS_M_LA_SLOTS];
     apr_uint32_t la_pos;        /* index of the most recent sample */
     apr_uint32_t la_last_sec;   /* unix seconds of that sample */
+    /* Database history, same shape as la_ring above. Holds
+     * Threads_running -- the saturation measure, not throughput. QPS
+     * would make a prettier line and a worse signal: a database jammed
+     * on lock waits serves *fewer* queries per second, so a QPS graph
+     * dips at exactly the moment things are going wrong.
+     *
+     * Samples arrive from a file written by an external process, so
+     * gaps are expected whenever that process is down; BS_M_DB_EMPTY
+     * marks them so the graph breaks rather than interpolating across
+     * an outage and inventing data. */
+    apr_uint16_t db_ring[BS_M_DB_SLOTS];
+    apr_uint32_t db_pos;
+    apr_uint32_t db_last_sec;
     apr_uint64_t state_saves_total;
     apr_uint64_t state_save_last_unix;
     apr_uint64_t state_save_last_bytes;

@@ -149,4 +149,10 @@ void bs_apply_rep_carry(request_rec *r, const bs_dir_cfg *cfg,
 }
 #endif
 
+
+/* Mark the flags currently set on this client's IP as already answered
+ * for, so they stop re-firing after a successful solve. See the
+ * definition in cookie.c for why this exists. */
+void bs_rep_excuse_current_flags(request_rec *r, bs_rep_state *rep);
+
 #endif /* BOTSHIELD_COOKIE_H */

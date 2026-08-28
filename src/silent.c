@@ -852,6 +852,10 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
         }
         ch.rep.passes_silent = 1;
     }
+
+    /* Record what this client was flagged for at the instant it did
+     * the work; see bs_rep_excuse_current_flags. */
+    bs_rep_excuse_current_flags(r, &ch.rep);
     if (bs_install_verified_cookie(r, cfg, &ch, counter_str) != NULL) {
         r->status = HTTP_INTERNAL_SERVER_ERROR;
         return OK;

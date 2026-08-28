@@ -1644,20 +1644,33 @@ static const char *bs_d_qparam(apr_pool_t *pool, const char *args,
  * hot threshold, so the thresholds are always on screen: a quiet hour
  * that hid where "hot" sits would show the level without showing
  * whether it matters. */
-static void bs_d_load_spark(request_rec *r)
-{
-    bs_metrics *m = bs_shm.metrics;
-    if (!m) return;
-    int aw, ah;
-    bs_loadavg_thresholds(r->server, &aw, &ah);
+/* Both graphs are the same picture of different numbers, so they share
+ * one renderer rather than two copies that drift apart. What varies is
+ * the ring, its cadence, the thresholds, and how a value prints -- the
+ * load average is hundredths-per-CPU and wants "1.50", the database
+ * series is a thread count and wants "12". */
+typedef struct {
+    const apr_uint16_t *ring;
+    int          slots;
+    int          period;      /* seconds per slot */
+    apr_uint16_t empty;
+    apr_uint32_t pos;
+    int          warm, hot;   /* thresholds, in the series' own units */
+    int          hundredths;  /* print values as x.yy rather than as an int */
+    const char  *grad_id;     /* must be unique per page: two SVGs, one DOM */
+    const char  *aria;
+} bs_spark_spec;
 
-    apr_uint32_t pos = apr_atomic_read32(&m->la_pos);
-    int vals[BS_M_LA_SLOTS], n = 0, peak = ah;
-    for (int i = 0; i < BS_M_LA_SLOTS; i++) {
+static void bs_d_spark(request_rec *r, const bs_spark_spec *sp)
+{
+    const int aw = sp->warm, ah = sp->hot;
+    int vals[BS_M_LA_SLOTS], n = 0, peak = ah;   /* LA is the larger ring */
+    for (int i = 0; i < sp->slots; i++) {
         apr_uint32_t idx =
-            (pos + BS_M_LA_SLOTS - (apr_uint32_t)i) % BS_M_LA_SLOTS;
-        apr_uint16_t v = m->la_ring[idx];
-        if (v == BS_M_LA_EMPTY) break;
+            (sp->pos + (apr_uint32_t)sp->slots - (apr_uint32_t)i)
+            % (apr_uint32_t)sp->slots;
+        apr_uint16_t v = sp->ring[idx];
+        if (v == sp->empty) break;
         vals[n++] = v;
         if (v > peak) peak = v;
     }
@@ -1675,18 +1688,17 @@ static void bs_d_load_spark(request_rec *r)
     const int X0 = 34, X1 = 356, Y0 = 6, Y1 = 72;
     const int PH = Y1 - Y0;
     #define BS_LA_Y(v) (Y1 - ((v) * PH) / peak)
-    #define BS_LA_X(i) (X1 - ((i) * (X1 - X0)) / (BS_M_LA_SLOTS - 1))
+    #define BS_LA_X(i) (X1 - ((i) * (X1 - X0)) / (sp->slots - 1))
 
     ap_rprintf(r, "<svg class='spark' viewBox='0 0 %d %d' role='img' "
-                  "aria-label='per-CPU load average over the last hour'>",
-               W, H);
+                  "aria-label='%s'>", W, H, sp->aria);
 
     /* Gradient stops are the thresholds, expressed as a fraction of the
      * axis. gradientUnits='userSpaceOnUse' so the stops track the plot
      * box rather than the path's own bounding box -- otherwise the
      * colours would rescale with whatever the line happens to span. */
     ap_rprintf(r,
-        "<defs><linearGradient id='lag' gradientUnits='userSpaceOnUse' "
+        "<defs><linearGradient id='%s' gradientUnits='userSpaceOnUse' "
         "x1='0' y1='%d' x2='0' y2='%d'>"
         "<stop offset='0' stop-color='var(--c1)'/>"
         "<stop offset='%d%%' stop-color='var(--c1)'/>"
@@ -1694,7 +1706,7 @@ static void bs_d_load_spark(request_rec *r)
         "<stop offset='%d%%' stop-color='var(--c2)'/>"
         "<stop offset='100%%' stop-color='var(--crit)'/>"
         "</linearGradient></defs>",
-        Y1, Y0,
+        sp->grad_id, Y1, Y0,
         (aw * 50) / peak,      /* still calm below half of warm */
         (aw * 100) / peak,     /* amber from warm */
         (ah * 100) / peak);    /* orange from hot, red above */
@@ -1730,20 +1742,27 @@ static void bs_d_load_spark(request_rec *r)
             int y = BS_LA_Y(yv[i]);
             ap_rprintf(r, "<line x1='%d' y1='%d' x2='%d' y2='%d' "
                           "stroke='var(--line)'/>", X0 - 3, y, X0, y);
-            ap_rprintf(r, "<text x='%d' y='%d' text-anchor='end' "
-                          "font-size='8' fill='var(--muted)'>%d.%02d</text>",
-                       X0 - 5, y + 3, yv[i] / 100, yv[i] % 100);
+            if (sp->hundredths) {
+                ap_rprintf(r, "<text x='%d' y='%d' text-anchor='end' "
+                              "font-size='8' fill='var(--muted)'>"
+                              "%d.%02d</text>",
+                           X0 - 5, y + 3, yv[i] / 100, yv[i] % 100);
+            } else {
+                ap_rprintf(r, "<text x='%d' y='%d' text-anchor='end' "
+                              "font-size='8' fill='var(--muted)'>%d</text>",
+                           X0 - 5, y + 3, yv[i]);
+            }
         }
     }
 
     /* X ticks every 15 minutes, drawn only where there is data. */
     {
         for (int mins = 0; mins <= 60; mins += 15) {
-            int i = (mins * 60) / BS_M_LA_PERIOD;
-            /* The ring holds 719 intervals, so a full hour lands one
-             * slot past the end; clamp so the -60m tick sits on the
-             * left edge instead of being dropped. */
-            if (i > BS_M_LA_SLOTS - 1) i = BS_M_LA_SLOTS - 1;
+            int i = (mins * 60) / sp->period;
+            /* A ring of N slots holds N-1 intervals, so a full hour
+             * lands one slot past the end; clamp so the -60m tick sits
+             * on the left edge instead of being dropped. */
+            if (i > sp->slots - 1) i = sp->slots - 1;
             int x = BS_LA_X(i);
             ap_rprintf(r, "<line x1='%d' y1='%d' x2='%d' y2='%d' "
                           "stroke='var(--line)'/>", x, Y1, x, Y1 + 3);
@@ -1759,14 +1778,49 @@ static void bs_d_load_spark(request_rec *r)
         }
     }
 
-    ap_rputs("<polyline fill='none' stroke='url(#lag)' stroke-width='1.6' "
-             "stroke-linejoin='round' points='", r);
+    ap_rprintf(r, "<polyline fill='none' stroke='url(#%s)' "
+                  "stroke-width='1.6' stroke-linejoin='round' points='",
+               sp->grad_id);
     for (int i = n - 1; i >= 0; i--) {
         ap_rprintf(r, "%d,%d ", BS_LA_X(i), BS_LA_Y(vals[i]));
     }
     ap_rputs("'/></svg>", r);
     #undef BS_LA_Y
     #undef BS_LA_X
+}
+
+/* Per-CPU load average over the last hour. */
+static void bs_d_load_spark(request_rec *r)
+{
+    bs_metrics *m = bs_shm.metrics;
+    if (!m) return;
+    int aw, ah;
+    bs_loadavg_thresholds(r->server, &aw, &ah);
+    bs_spark_spec sp = {
+        m->la_ring, BS_M_LA_SLOTS, BS_M_LA_PERIOD, BS_M_LA_EMPTY,
+        apr_atomic_read32(&m->la_pos), aw, ah, 1, "lag",
+        "per-CPU load average over the last hour"
+    };
+    bs_d_spark(r, &sp);
+}
+
+/* Database threads-running over the last hour. Thresholds come from the
+ * monitor's own stats file rather than from module config: they are the
+ * numbers it actually classified against, so the graph's bands cannot
+ * disagree with the state it published. */
+static void bs_d_db_spark(request_rec *r)
+{
+    bs_metrics *m = bs_shm.metrics;
+    if (!m) return;
+    int warm = (int)apr_atomic_read32(&bs_shm.header->db_warm_threads);
+    int hot  = (int)apr_atomic_read32(&bs_shm.header->db_hot_threads);
+    if (hot <= 0) return;           /* no monitor has ever reported */
+    bs_spark_spec sp = {
+        m->db_ring, BS_M_DB_SLOTS, BS_M_DB_PERIOD, BS_M_DB_EMPTY,
+        apr_atomic_read32(&m->db_pos), warm, hot, 0, "dbg",
+        "database threads running over the last hour"
+    };
+    bs_d_spark(r, &sp);
 }
 
 static const char *bs_d_window_label(int span)

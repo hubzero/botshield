@@ -67,6 +67,11 @@ const char *bs_set_loadavg_warm(cmd_parms *cmd, void *dconf,
                                 const char *arg);
 const char *bs_set_loadavg_hot(cmd_parms *cmd, void *dconf,
                                const char *arg);
+/* BotShieldDbStatsFile <path> -- key=value telemetry from the external
+ * database monitor, surfaced on the dashboard. */
+const char *bs_set_db_stats_file(cmd_parms *cmd, void *dconf,
+                                 const char *arg);
+
 /* Effective per-CPU load-average thresholds, defaults applied. */
 void bs_loadavg_thresholds(server_rec *s, int *warm, int *hot);
 

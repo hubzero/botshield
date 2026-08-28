@@ -1421,6 +1421,9 @@ const char *bs_captcha_carry_and_mint(
         } else {
             next_rep.passes_captcha = 1;  /* clamp */
         }
+        /* Same excusal the embedded PoW path applies -- this is a
+         * solve too, and the loop is not specific to one tier. */
+        bs_rep_excuse_current_flags(r, &next_rep);
     }
 
     /* Cookie alg name is derived from provider name by convention so

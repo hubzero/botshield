@@ -343,7 +343,8 @@ static const char *bs_parse_canonical_fields(char *const fields[],
 
     if (!bs_parse_int_bounded(fields[6], INT_MIN, INT_MAX, 11, &v)) return "bad score";
     ch->rep.score = (int)v;
-    if (!bs_parse_uint32_bounded(fields[7], 10, &ch->rep.flags)) return "bad flags";
+    if (!bs_parse_uint32_bounded(fields[7], 10, &ch->rep.flags_excused))
+        return "bad flags";
     if (!bs_parse_int_bounded(fields[8],  0, 1, 1, &v)) return "bad passes_silent";
     ch->rep.passes_silent  = (int)v;
     if (!bs_parse_int_bounded(fields[9],  0, 1, 1, &v)) return "bad passes_form";
@@ -526,6 +527,36 @@ int bs_carry_forward_eligible(request_rec *r,
  * The caller bumps the appropriate passes_X afterward (the
  * "ever passed" clamp). Tier knowledge for that decision also stays
  * at the call site. */
+/* Record the client's currently-flagged bits as answered-for.
+ *
+ * Called at every point a challenge is successfully solved, because
+ * solving does not clear a flag and flag scores re-apply on every
+ * request: without this, any flag scoring at or above
+ * BotShieldScoreSilent is an unbreakable challenge loop. Seen in
+ * production as pow_ok succeeding roughly once a second, each success
+ * followed immediately by another challenge carrying cookie=solved.
+ *
+ * Only flags live at THIS moment are excused. Anything flagged later is
+ * new evidence and still fires, so a solve settles the debt it was
+ * challenged for without buying immunity. OR'd rather than assigned so
+ * a client solving twice keeps what it already earned.
+ *
+ * Reads the IP table directly: the verify endpoints are routed before
+ * the decision path runs, so there is no ip_flags in scope to pass in. */
+void bs_rep_excuse_current_flags(request_rec *r, bs_rep_state *rep)
+{
+    if (!rep) return;
+    bs_server_cfg *scfg = ap_get_module_config(r->server->module_config,
+                                               &botshield_module);
+    if (!scfg) return;
+    unsigned char ip[16];
+    apr_uint32_t  flags = 0;
+    if (!bs_parse_client_ip(r->useragent_ip, ip)) return;
+    bs_mask_ipv6_prefix(ip, scfg->ipv6_prefix_bits);
+    bs_flagged_ip_lookup(ip, &flags, scfg->ns_id);
+    rep->flags_excused |= flags;
+}
+
 void bs_apply_rep_carry(request_rec *r,
                                 const bs_dir_cfg *cfg,
                                 const bs_challenge *prior_ch,

@@ -155,6 +155,120 @@ static int bs_load_sample_loadavg(apr_pool_t *pool)
     return (int)((one * 100.0) / (double)ncpu);
 }
 
+/* Read one unsigned integer field out of a "k=v k=v" line. Returns -1
+ * when the key is absent, which callers treat as "not reported" rather
+ * than as zero -- a monitor that omits a field is not claiming it is 0.
+ * Scaled by `scale` so a decimal like lock_pct=1.25 can be carried as
+ * an integer 125 without a float parse in the watchdog. */
+static int bs_kv_int(const char *line, const char *key, int scale)
+{
+    size_t klen = strlen(key);
+    const char *p = line;
+    while ((p = strstr(p, key)) != NULL) {
+        /* Must be at a field boundary and followed by '=', or "state"
+         * would match inside "warm_threads=..." style neighbours and
+         * "threads_run" would match "threads_running". */
+        int at_start = (p == line) || (p[-1] == ' ');
+        if (at_start && p[klen] == '=') {
+            const char *v = p + klen + 1;
+            if (*v < '0' || *v > '9') return -1;
+            int whole = 0;
+            while (*v >= '0' && *v <= '9') whole = whole * 10 + (*v++ - '0');
+
+            /* Fractional part, renormalised to exactly the number of
+             * digits `scale` carries: scale=100 keeps two, scale=1
+             * discards them. Done by padding or truncating rather than
+             * by dividing at the end, so "1.5" reads as 150 and not 15. */
+            int frac = 0, want = 0;
+            for (int t = scale; t > 1; t /= 10) want++;
+            if (*v == '.') {
+                v++;
+                int have = 0;
+                while (*v >= '0' && *v <= '9') {
+                    if (have < want) { frac = frac * 10 + (*v - '0'); have++; }
+                    v++;
+                }
+                while (have < want) { frac *= 10; have++; }
+            }
+            return whole * scale + frac;
+        }
+        p += klen;
+    }
+    return -1;
+}
+
+/* Read the external monitor's telemetry file (BotShieldDbStatsFile).
+ *
+ * Publishes to SHM for the dashboard only -- the database's effect on
+ * policy travels through BotShieldLoadStateFile, which the monitor
+ * writes separately and which merges with every other signal. Keeping
+ * telemetry off the policy path means a malformed stats line can make
+ * the graph wrong but cannot make the module shed. */
+static void bs_load_read_db_stats(server_rec *sv, bs_server_cfg *scfg)
+{
+    if (!scfg->db_stats_file || !bs_shm.header) return;
+
+    apr_finfo_t finfo;
+    if (apr_stat(&finfo, scfg->db_stats_file, APR_FINFO_MTIME,
+                 sv->process->pconf) != APR_SUCCESS) {
+        return;   /* monitor not installed or not running yet */
+    }
+    if (finfo.mtime == scfg->db_stats_mtime) return;   /* unchanged */
+    scfg->db_stats_mtime = finfo.mtime;
+
+    apr_file_t *f = NULL;
+    if (apr_file_open(&f, scfg->db_stats_file, APR_READ | APR_BINARY, 0,
+                      sv->process->pconf) != APR_SUCCESS) {
+        return;
+    }
+    char buf[512];
+    apr_size_t got = sizeof(buf) - 1;
+    apr_status_t rv = apr_file_read(f, buf, &got);
+    apr_file_close(f);
+    if ((rv != APR_SUCCESS && rv != APR_EOF) || got == 0) return;
+    buf[got] = '\0';
+    for (apr_size_t i = 0; i < got; i++) {
+        if (buf[i] == '\n' || buf[i] == '\r') { buf[i] = '\0'; break; }
+    }
+
+    int threads = bs_kv_int(buf, "threads_run", 1);
+    if (threads < 0) return;          /* no usable reading; leave last */
+    int qps     = bs_kv_int(buf, "qps", 1);
+    int lockx   = bs_kv_int(buf, "lock_pct", 100);
+    int ts      = bs_kv_int(buf, "ts", 1);
+    int warm    = bs_kv_int(buf, "warm_threads", 1);
+    int hot     = bs_kv_int(buf, "hot_threads", 1);
+
+    if (threads > 65534) threads = 65534;
+    apr_atomic_set32(&bs_shm.header->db_threads_run, (apr_uint32_t)threads);
+    if (qps   >= 0) apr_atomic_set32(&bs_shm.header->db_qps, (apr_uint32_t)qps);
+    if (lockx >= 0) apr_atomic_set32(&bs_shm.header->db_lock_pct_x100,
+                                     (apr_uint32_t)lockx);
+    if (ts    >= 0) apr_atomic_set32(&bs_shm.header->db_sample_sec,
+                                     (apr_uint32_t)ts);
+    if (warm  >  0) apr_atomic_set32(&bs_shm.header->db_warm_threads,
+                                     (apr_uint32_t)warm);
+    if (hot   >  0) apr_atomic_set32(&bs_shm.header->db_hot_threads,
+                                     (apr_uint32_t)hot);
+
+    /* History ring, gated on elapsed time like la_ring. The monitor and
+     * the watchdog tick independently, so this stores whatever the
+     * newest published reading is at each period boundary rather than
+     * assuming a 1:1 correspondence between their cadences. */
+    if (bs_shm.metrics) {
+        bs_metrics *m = bs_shm.metrics;
+        apr_uint32_t now = (apr_uint32_t)apr_time_sec(apr_time_now());
+        apr_uint32_t last = apr_atomic_read32(&m->db_last_sec);
+        if (now >= last + BS_M_DB_PERIOD) {
+            apr_uint32_t pos = apr_atomic_read32(&m->db_pos);
+            pos = (pos + 1) % BS_M_DB_SLOTS;
+            m->db_ring[pos] = (apr_uint16_t)threads;
+            apr_atomic_set32(&m->db_pos, pos);
+            apr_atomic_set32(&m->db_last_sec, now);
+        }
+    }
+}
+
 /* Sample the Apache scoreboard. Returns busy_pct = 100 *
  * busy_workers / total_worker_slots. "Busy" = anything that's
  * actively servicing a request: BUSY_READ/WRITE/KEEPALIVE/LOG/DNS
@@ -273,6 +387,7 @@ apr_status_t bs_load_watchdog_cb(int state, void *data,
     bs_load_state internal = bs_load_state_from_pct(busy_pct,
                                                     warm_pct, hot_pct);
     bs_load_state external = bs_load_read_external(sv, scfg);
+    bs_load_read_db_stats(sv, scfg);
 
     /* Load average, per CPU, in hundredths. Thresholds are expressed in
      * the same unit the site's own shedding script uses -- HIGH is
@@ -347,6 +462,20 @@ const char *bs_set_load_state_file(cmd_parms *cmd, void *dconf,
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
     scfg->load_state_file = apr_pstrdup(cmd->pool, arg);
+    return NULL;
+}
+
+/* BotShieldDbStatsFile <path>. Written by the external monitor; read
+ * for the dashboard only, never for policy. */
+const char *bs_set_db_stats_file(cmd_parms *cmd, void *dconf,
+                                 const char *arg)
+{
+    (void)dconf;
+    if (!arg || !*arg) return "BotShieldDbStatsFile: path required";
+    if (arg[0] != '/') return "BotShieldDbStatsFile: path must be absolute";
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->db_stats_file = apr_pstrdup(cmd->pool, arg);
     return NULL;
 }
 
