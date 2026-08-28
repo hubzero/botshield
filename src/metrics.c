@@ -1837,6 +1837,17 @@ static void bs_d_spark(request_rec *r, const bs_spark_spec *sp)
     #undef BS_LA_X
 }
 
+/* Today's date, for the chart captions. A screenshot of one of these
+ * boxes should carry enough to place it in time: the x axis gives the
+ * clock, this gives the day. */
+static const char *bs_d_today(request_rec *r)
+{
+    apr_time_exp_t tm;
+    apr_time_exp_lt(&tm, apr_time_now());
+    return apr_psprintf(r->pool, "%04d-%02d-%02d",
+                        tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+}
+
 /* Open a load-monitor box whose chart expands when clicked.
  *
  * CSS-only, because this dashboard ships no JavaScript. A hidden
@@ -3398,7 +3409,8 @@ int bs_dashboard_handler(request_rec *r)
                        la5 / 100, la5 % 100, la15 / 100, la15 % 100);
         }
         bs_d_load_spark(r);
-        bs_d_chartbox_close(r, "cpu", "1-minute average, last hour");
+        bs_d_chartbox_close(r, "cpu", apr_psprintf(r->pool,
+            "1-minute average, last hour &middot; %s", bs_d_today(r)));
 
         /* Apache request latency. Deliberately NOT the busy-worker
          * ratio: with 1024 slots on 6 cores that reads 2-3% while the
@@ -3432,19 +3444,33 @@ int bs_dashboard_handler(request_rec *r)
                     ap_rprintf(r, "0.%ums</div>", lat_us / 100);
                 }
                 bs_d_apache_spark(r);
-                bs_d_chartbox_close(r, "apache", "mean per request, last hour");
+                bs_d_chartbox_close(r, "apache", apr_psprintf(r->pool,
+                    "mean per request, last hour &middot; %s",
+                    bs_d_today(r)));
             }
         }
 
         /* Database, same shape so the two read against each other. */
         if (db_have && !db_stale) {
+            /* Threads-running stays the plotted and headline metric,
+             * with queries/s alongside it.
+             *
+             * QPS is the more interesting number to watch and the worse
+             * one to chart: it has no ceiling to draw bands against --
+             * every other chart here normalises to a real limit (cores,
+             * pm.max_children, a saturation point) and 500 q/s is
+             * neither high nor low without context. It also inverts
+             * under the failure we care about, because a pool stuck on
+             * lock waits serves FEWER queries per second, so a QPS line
+             * goes quiet exactly when the database is in trouble. */
             bs_d_chartbox_open(r, "db", "Database threads running", db_s, db_t);
-            ap_rprintf(r, "<div class='v'>%u</div>", dbthr);
+            ap_rprintf(r, "<div class='v'>%u<span class='la2'>%u q/s</span>"
+                          "</div>", dbthr, dbqps);
             bs_d_db_spark(r);
-            bs_d_chartbox_close(r, apr_psprintf(r->pool, "db"),
+            bs_d_chartbox_close(r, "db",
                 apr_psprintf(r->pool,
-                    "%u queries/s, %u.%02u%% lock contention, last hour",
-                    dbqps, dblck / 100, dblck % 100));
+                    "%u.%02u%% lock contention, last hour &middot; %s",
+                    dblck / 100, dblck % 100, bs_d_today(r)));
         } else {
             ap_rprintf(r, "<div class='kpi kpi-load'><div class='k'>Database "
                           "threads running</div><div class='loadrow'>"
@@ -3469,10 +3495,10 @@ int bs_dashboard_handler(request_rec *r)
                            apr_atomic_read32(&fm->fpm_pct));
                 bs_d_fpm_spark(r);
                 bs_d_chartbox_close(r, "fpm", apr_psprintf(r->pool,
-                    "%u of %u children, %u queued for one, last hour",
+                    "%u of %u children, %u queued, last hour &middot; %s",
                     apr_atomic_read32(&fm->fpm_active),
                     apr_atomic_read32(&fm->fpm_max_children),
-                    apr_atomic_read32(&fm->fpm_queue)));
+                    apr_atomic_read32(&fm->fpm_queue), bs_d_today(r)));
             } else {
                 ap_rprintf(r, "<div class='v' style='color:var(--muted)'>"
                               "&mdash;</div></div><div class='n'>%s</div>"
