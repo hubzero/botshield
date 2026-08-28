@@ -2294,7 +2294,7 @@ static void bs_d_page_open(request_rec *r, const char *title,
       "aside{background:var(--surface);border-right:1px solid var(--line);"
       "padding:0 0 24px;min-height:100vh;position:sticky;top:0;"
       "overflow:visible;display:flex;flex-direction:column;gap:0}"
-      "main{padding:6px 26px 60px;max-width:1000px;min-width:0}"
+      "main{padding:6px 26px 18px;max-width:1000px;min-width:0}"
       /* Rail header: product name and the collapse control on one line,
        * the way a sidebar you can put away usually reads. */
       ".railhead{display:flex;align-items:center;justify-content:space-"
@@ -2417,7 +2417,7 @@ static void bs_d_page_open(request_rec *r, const char *title,
       "#rail:checked~.shell main>.icontog{display:inline-flex}}"
       "@media(max-width:900px){.shell{grid-template-columns:1fr;gap:8px}"
       "aside{position:static}}"
-      "body{margin:0;padding:10px 24px 56px;background:var(--surface);color:var(--ink);"
+      "body{margin:0;padding:10px 24px 14px;background:var(--surface);color:var(--ink);"
       "font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}"
       "main{min-width:0}"
       "h1{font-size:19px;margin:0 0 2px;font-weight:600}"
@@ -2505,10 +2505,6 @@ static void bs_d_page_open(request_rec *r, const char *title,
       "font-weight:500;line-height:1.45;padding:6px 9px;border-radius:6px;"
       "box-shadow:0 2px 10px rgba(0,0,0,.28);z-index:50;"
       "pointer-events:none;text-align:left}"
-      /* The bar clips its segments to get rounded ends, which would
-       * also clip a tooltip drawn inside one. Let it escape. */
-      ".stack{overflow:visible}"
-      ".stack{border-radius:4px}"
       ".seg:first-child{border-top-left-radius:4px;"
       "border-bottom-left-radius:4px}"
       ".seg:last-child{border-top-right-radius:4px;"
@@ -2517,10 +2513,16 @@ static void bs_d_page_open(request_rec *r, const char *title,
       /* Stacked share bar. overflow:hidden on the rounded track gives
        * the 4px outer corners the old SVG clip-path provided, while
        * internal joins stay square. */
+      /* overflow stays VISIBLE on both the track and the segments so a
+       * segment's tooltip can escape the bar. The rounded ends that
+       * overflow:hidden used to provide now come from border-radius on
+       * the first and last segment, and the only thing that genuinely
+       * needed clipping -- the in-bar percentage label -- clips
+       * itself. */
       ".stack{display:flex;width:100%;height:34px;border-radius:4px;"
-      "overflow:hidden;background:var(--track)}"
+      "overflow:visible;background:var(--track)}"
       ".seg{position:relative;display:flex;align-items:center;"
-      "justify-content:center;min-width:0;overflow:hidden;"
+      "justify-content:center;min-width:0;overflow:visible;"
       "box-shadow:inset -2px 0 0 var(--surface)}"
       ".seg:last-child{box-shadow:none}"
       /* White on the saturated series fills, with a soft dark halo so
@@ -2528,7 +2530,7 @@ static void bs_d_page_open(request_rec *r, const char *title,
        * both themes without hard-coding a per-series text colour. */
       ".seg span{font-size:11px;font-weight:600;color:#fff;"
       "text-shadow:0 0 3px rgba(0,0,0,.55);white-space:nowrap;"
-      "padding:0 4px}"
+      "padding:0 4px;max-width:100%;overflow:hidden}"
       /* State pill, top-right of each monitor box. Replaces the
        * composite strip that used to sit above the grid: the merged
        * verdict is the worst of these four, which reads at a glance
