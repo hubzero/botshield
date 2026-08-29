@@ -634,6 +634,21 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
  * which the positional form could not express. A rule with no match
  * dimension at all is rejected: that is the per-scope BotShieldTrigger's
  * job, and silently matching every request is too sharp an edge. */
+/* Is `ua` a comma list of @selectors, e.g. "@search,@ai-input"?
+ *
+ * Only @selectors split. A bare substring pattern is passed through
+ * untouched, because a User-Agent legitimately contains commas
+ * ("Mozilla/5.0 (X11; Linux x86_64)") and splitting those would
+ * silently change what a rule matches. */
+static int bs_ua_is_selector_list(const char *ua)
+{
+    if (!ua || ua[0] != '@' || !strchr(ua, ',')) return 0;
+    for (const char *p = ua; *p; p++) {
+        if (*p == ',' && p[1] != '@') return 0;
+    }
+    return 1;
+}
+
 const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                                        int argc, char *const argv[])
 {
@@ -795,6 +810,44 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
     const char *err = bs_finalize_trigger_action(cmd->pool,
         BS_TFAMILY_REQUEST, &e->action);
     if (err) return err;
+
+    /* `ua=@a,@b` becomes one entry per alternative.
+     *
+     * Expanded here rather than by teaching the cohort to hold a list,
+     * because this family is strict first-match-wins: N adjacent
+     * entries differing only on the UA axis, carrying identical
+     * actions, are exactly equivalent to one entry with an OR -- and
+     * need no change to the struct or to the request-path matcher.
+     *
+     * That duplication is why four near-identical /api rules existed:
+     * same path, same action, one token apart.
+     *
+     * Each copy takes a #N name so upsert-by-name stays exact. The
+     * decision log is unaffected: it reports the action's log= tag,
+     * which every copy shares. */
+    if (bs_ua_is_selector_list(ua_arg)) {
+        char *list = apr_pstrdup(cmd->pool, ua_arg);
+        char *save = NULL, *tok = apr_strtok(list, ",", &save);
+        int n = 0;
+        while (tok) {
+            while (*tok == ' ' || *tok == '\t') tok++;
+            n++;
+            bs_request_trigger_entry *c =
+                apr_pmemdup(cmd->pool, e, sizeof(*e));
+            memset(&c->cohort, 0, sizeof(c->cohort));
+            const char *cerr = bs_cohort_resolve(cmd, &c->cohort, tok,
+                ipspec_arg && ipspec_arg[0] ? ipspec_arg : "*");
+            if (cerr) return apr_pstrcat(cmd->pool, D, ": ", cerr, NULL);
+            c->has_cohort = 1;
+            if (n > 1) {
+                c->name = apr_psprintf(cmd->pool, "%s#%d", e->name, n);
+            }
+            *(bs_request_trigger_entry **)
+                apr_array_push(scfg->request_triggers) = c;
+            tok = apr_strtok(NULL, ",", &save);
+        }
+        return NULL;
+    }
 
     /* Upsert-by-name; preserves declaration order. */
     for (int i = 0; i < scfg->request_triggers->nelts; i++) {
