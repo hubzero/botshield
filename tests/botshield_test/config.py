@@ -50,6 +50,13 @@ DEV_VHOST_CONF = _pick("BS_DEV_VHOST_CONF",
                        "/etc/httpd/bstest/w%d/dev-vhost.conf" % (WORKER_N or 0))
 APACHE_SERVICE = _pick("BS_APACHE_SERVICE", "apache2",
                        "httpd-bstest@%d" % (WORKER_N or 0))
+# The instance's own httpd.conf, for `httpd -f ... -C <directive> -t`
+# config-rejection checks. These MUST NOT run against the production
+# config: it loads the deployed module, so a test for a directive the
+# working tree has just added would assert against the old build and
+# report a parser error that says nothing about the new code.
+HTTPD_CONF = _pick("BS_HTTPD_CONF", "/etc/apache2/apache2.conf",
+                   "/etc/httpd/bstest/w%d/httpd.conf" % (WORKER_N or 0))
 STATE_FILE = _pick("BS_STATE_FILE", "/var/lib/botshield/state.bin",
                    "/var/lib/botshield-test/state-w%d.bin" % (WORKER_N or 0))
 # The external load-state file BotShieldLoadStateFile points at. Tests

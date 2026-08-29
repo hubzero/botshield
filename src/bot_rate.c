@@ -104,18 +104,35 @@ const char *bs_set_bot_rate_limit(cmd_parms *cmd, void *dconf,
      * positional parse so the existing 2- and 3-arg forms are
      * unchanged. */
     int want_observe = 0;
-    if (argc > 1 && strncasecmp(argv[argc - 1], "mode=", 5) == 0) {
-        const char *m = argv[argc - 1] + 5;
-        if (!strcasecmp(m, "observe"))      want_observe = 1;
-        else if (!strcasecmp(m, "enforce")) want_observe = 0;
-        else return apr_psprintf(cmd->pool,
-            "BotShieldBotRateLimit: mode='%s' must be enforce or observe", m);
+    bs_bot_rate_scope want_scope = BS_BOT_RATE_EACH;
+    /* Both trailing tokens are optional and order-independent, so a
+     * loop rather than two positional checks. */
+    while (argc > 1) {
+        const char *last = argv[argc - 1];
+        if (strncasecmp(last, "mode=", 5) == 0) {
+            const char *m = last + 5;
+            if (!strcasecmp(m, "observe"))      want_observe = 1;
+            else if (!strcasecmp(m, "enforce")) want_observe = 0;
+            else return apr_psprintf(cmd->pool,
+                "BotShieldBotRateLimit: mode='%s' must be enforce or "
+                "observe", m);
+        } else if (strncasecmp(last, "scope=", 6) == 0) {
+            const char *sc = last + 6;
+            if      (!strcasecmp(sc, "each"))  want_scope = BS_BOT_RATE_EACH;
+            else if (!strcasecmp(sc, "group")) want_scope = BS_BOT_RATE_GROUP;
+            else if (!strcasecmp(sc, "total")) want_scope = BS_BOT_RATE_TOTAL;
+            else return apr_psprintf(cmd->pool,
+                "BotShieldBotRateLimit: scope='%s' must be each, group "
+                "or total", sc);
+        } else {
+            break;
+        }
         argc--;
     }
     if (argc < 2 || argc > 3) {
         return "BotShieldBotRateLimit: expected <slug> <delay-sec> or "
                "<slug> <budget> <per>, optionally followed by "
-               "mode=enforce|observe";
+               "mode=enforce|observe and/or scope=each|group|total";
     }
 
     apr_uint32_t budget = 0, window = 0;
@@ -132,8 +149,57 @@ const char *bs_set_bot_rate_limit(cmd_parms *cmd, void *dconf,
     e->observe    = want_observe;
     e->budget     = budget;
     e->window_sec = window;
+    e->scope      = want_scope;
 
-    if (strcmp(argv[0], "*") == 0) {
+    /* The selector and the scope have to agree. A shared budget over a
+     * population of one is scope=each wearing a costume, and silently
+     * accepting it would put an operator one typo away from believing
+     * a group cap exists when it does not. */
+    if (want_scope == BS_BOT_RATE_GROUP && argv[0][0] != '@') {
+        return apr_psprintf(cmd->pool,
+            "BotShieldBotRateLimit: scope=group requires an @botgroup "
+            "selector; '%s' names %s. Use '@search', '@ai-input', "
+            "'@ai-train' or '@monitor'.", argv[0],
+            strcmp(argv[0], "*") == 0 ? "every bot (did you mean "
+                                        "scope=total?)" : "one bot");
+    }
+    if (want_scope == BS_BOT_RATE_TOTAL && strcmp(argv[0], "*") != 0) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldBotRateLimit: scope=total applies to every bot "
+            "and so requires the '*' selector; got '%s'.", argv[0]);
+    }
+
+    if (want_scope == BS_BOT_RATE_TOTAL) {
+        /* Not the per-slug wildcard: this rule allocates exactly one
+         * counter and never expands over the directory, so it must not
+         * claim wildcard_entry -- doing so would suppress the per-slug
+         * default synthesis and leave individual bots uncapped. The
+         * two `*` rules are complementary and expected together. */
+        if (st->global_entry) {
+            return "BotShieldBotRateLimit: scope=total already defined; "
+                   "only one total ceiling is permitted per scope";
+        }
+        st->global_entry = e;
+    } else if (want_scope == BS_BOT_RATE_GROUP) {
+        /* Resolution is for validation only -- the group counter is
+         * wired to slugs at post_config via the directory's botgroup
+         * field, so it picks up slugs added by a mid-run refresh that
+         * this snapshot never saw. */
+        const char *bg_name = argv[0] + 1;
+        if (!*bg_name) {
+            return "BotShieldBotRateLimit: '@' must be followed by a "
+                   "botgroup name (search, ai-input, ai-train, monitor)";
+        }
+        e->botgroup_name = apr_pstrdup(cmd->pool, bg_name);
+        apr_array_header_t *probe =
+            bs_known_bots_resolve_by_botgroup(cmd->pool, bg_name);
+        if (probe->nelts == 0) {
+            return apr_psprintf(cmd->pool,
+                "BotShieldBotRateLimit: '@%s' did not resolve to any "
+                "directory slug. Recognized botgroups: search, ai-input, "
+                "ai-train, monitor.", bg_name);
+        }
+    } else if (strcmp(argv[0], "*") == 0) {
         e->is_wildcard = 1;
         if (st->wildcard_entry) {
             return apr_psprintf(cmd->pool,
@@ -396,7 +462,12 @@ void bs_bot_rate_init(apr_pool_t *pconf, server_rec *s, int *next_slot)
         for (int i = 0; i < st->entries->nelts; i++) {
             bs_bot_rate_entry *e = APR_ARRAY_IDX(st->entries, i,
                                                  bs_bot_rate_entry *);
+            /* scope=group and scope=total allocate one shared counter
+             * in the tier passes below and carry no slug list at all,
+             * so they must not reach the per-slug walk -- it
+             * dereferences e->slugs unconditionally. */
             if (e->is_wildcard || e->is_botgroup) continue;
+            if (e->scope != BS_BOT_RATE_EACH) continue;
             const char *first_slug = (e->slugs && e->slugs->nelts > 0)
                 ? APR_ARRAY_IDX(e->slugs, 0, const char *) : "?";
             bs_bot_rate_slot *h = allocate_holder(pconf, sv,
@@ -485,6 +556,7 @@ void bs_bot_rate_init(apr_pool_t *pconf, server_rec *s, int *next_slot)
                 "wildcard-fallback aggregate", next_slot,
                 budget, window, "wildcard:fallback", st->wildcard_entry->observe);
 
+            /* fallthrough to the tier-2/3 allocation below */
             ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
                 "mod_botshield: BotShieldBotRateLimit: %d directive + "
                 "%d robots.txt + %d botgroup + %d wildcard slot(s) + "
@@ -503,6 +575,79 @@ void bs_bot_rate_init(apr_pool_t *pconf, server_rec *s, int *next_slot)
                 "%d robots.txt + %d botgroup slot(s); no wildcard rule "
                 "(unmatched bots not rate-limited)",
                 specific_count, robots_count, botgroup_count);
+        }
+
+        /* ---- Tier 2: one shared counter per scope=group rule ---- */
+        for (int i = 0; i < st->entries->nelts; i++) {
+            bs_bot_rate_entry *e = APR_ARRAY_IDX(st->entries, i,
+                                                 bs_bot_rate_entry *);
+            if (e->scope != BS_BOT_RATE_GROUP) continue;
+            if (!st->group_holders) {
+                st->group_holders = apr_hash_make(pconf);
+            }
+            if (apr_hash_get(st->group_holders, e->botgroup_name,
+                             APR_HASH_KEY_STRING)) {
+                ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+                    "mod_botshield: BotShieldBotRateLimit: '@%s "
+                    "scope=group' declared more than once; keeping the "
+                    "first", e->botgroup_name);
+                continue;
+            }
+            bs_bot_rate_slot *h = allocate_holder(pconf, sv,
+                apr_pstrcat(pconf, "group aggregate ",
+                            e->botgroup_name, NULL),
+                next_slot, e->budget, e->window_sec,
+                "directive:group", e->observe);
+            if (!h) continue;
+            h->label = apr_pstrcat(pconf, "@", e->botgroup_name, NULL);
+            apr_hash_set(st->group_holders, e->botgroup_name,
+                         APR_HASH_KEY_STRING, h);
+        }
+
+        /* Wire every allocated slug to its group counter, once, so the
+         * request path never touches the directory. Done from the
+         * directory's botgroup field rather than from the rule's
+         * resolved slug list: a mid-run directory refresh can add slugs
+         * this snapshot never saw, and they should still count against
+         * their group. */
+        if (st->group_holders) {
+            int wired = 0;
+            for (apr_hash_index_t *hi = apr_hash_first(pconf, st->by_slug);
+                 hi; hi = apr_hash_next(hi)) {
+                const void *k; void *v;
+                apr_hash_this(hi, &k, NULL, &v);
+                bs_bot_rate_slot *h = v;
+                const char *cat = NULL, *bg = NULL;
+                if (!h) continue;
+                bs_bot_dir_lookup_slug((const char *)k, &cat, &bg);
+                if (!bg) continue;
+                h->group = apr_hash_get(st->group_holders, bg,
+                                        APR_HASH_KEY_STRING);
+                if (h->group) wired++;
+            }
+            ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+                "mod_botshield: BotShieldBotRateLimit: %d group "
+                "aggregate(s), %d slug(s) wired to one",
+                apr_hash_count(st->group_holders), wired);
+        }
+
+        /* ---- Tier 3: the total ceiling ---- */
+        if (st->global_entry) {
+            st->global_holder = allocate_holder(pconf, sv,
+                "total ceiling", next_slot,
+                st->global_entry->budget, st->global_entry->window_sec,
+                "directive:total", st->global_entry->observe);
+            if (st->global_holder) {
+                st->global_holder->label = "*";
+                ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+                    "mod_botshield: BotShieldBotRateLimit: total "
+                    "ceiling %u req / %us across every bot (%s). This "
+                    "is a circuit breaker: if it trips in normal "
+                    "operation it is set too low.",
+                    st->global_entry->budget,
+                    st->global_entry->window_sec,
+                    st->global_entry->observe ? "observe" : "enforce");
+            }
         }
     }
 }
@@ -608,11 +753,63 @@ int bs_bot_rate_check(request_rec *r)
 
     bs_rate_counter *counters = (bs_rate_counter *)bs_shm.rate_counters;
     if (!counters) return OK;
-    bs_rate_counter *slot = &counters[holder->shm_slot];
 
-    if (bs_rate_counter_admit(slot, holder->budget, holder->window_sec)) {
+    /* ---- Multi-tier evaluation ------------------------------------
+     * Three budgets can apply to one request: this bot's own, its
+     * botgroup's, and the total ceiling. Every applicable tier is
+     * charged even when an earlier one has already refused, because a
+     * tier that stops counting during the event it exists to detect
+     * undercounts exactly when its number matters. The refusal is the
+     * first tier that trips, most specific first, and Retry-After is
+     * the longest wait among those that tripped -- retrying sooner
+     * than the widest budget allows is guaranteed to fail again.
+     *
+     * The status differs by tier and that difference is the point. A
+     * slug trip means this client exceeded its own quota: 429. A group
+     * or total trip means the client did nothing wrong and the site is
+     * out of what it is willing to give: 503 with Retry-After, which
+     * crawlers treat as "come back later" rather than as a signal to
+     * drop the URL. Answering 429 there would blame a well-behaved bot
+     * for a capacity decision. */
+    bs_bot_rate_slot *tiers[3];
+    int ntiers = 0;
+    tiers[ntiers++] = holder;
+    if (holder->group)    tiers[ntiers++] = holder->group;
+    if (st->global_holder) tiers[ntiers++] = st->global_holder;
+
+    bs_bot_rate_slot *tripped = NULL;   /* first (most specific) */
+    apr_uint32_t retry_max = 0;
+    apr_uint32_t now = (apr_uint32_t)apr_time_sec(apr_time_now());
+    int tripped_is_slug = 0;
+
+    for (int i = 0; i < ntiers; i++) {
+        bs_bot_rate_slot *t = tiers[i];
+        if (t->shm_slot < 0) continue;
+        if (bs_rate_counter_admit(&counters[t->shm_slot],
+                                  t->budget, t->window_sec)) {
+            continue;
+        }
+        if (!tripped) {
+            tripped = t;
+            tripped_is_slug = (i == 0);
+        }
+        apr_uint32_t win = __atomic_load_n(
+            &counters[t->shm_slot].window_start_sec, __ATOMIC_RELAXED);
+        apr_uint32_t rt = (now >= win && now - win < t->window_sec)
+                            ? t->window_sec - (now - win) : 1;
+        if (rt > retry_max) retry_max = rt;
+    }
+
+    if (!tripped) {
         return OK;
     }
+    /* Reported as whichever tier refused: "bot-rate:@ai-train" reads
+     * very differently from "bot-rate:claude-searchbot", and an
+     * operator seeing the latter would go tune the wrong budget. */
+    const char *trip_label = tripped->label ? tripped->label
+                           : (slug_for_log ? slug_for_log : "?");
+    holder = tripped;
+    slug_for_log = trip_label;
 
     /* Over budget. Observe when the scope is LogOnly, or when the rule
      * itself says mode=observe. The per-rule form matters because the
@@ -635,19 +832,21 @@ int bs_bot_rate_check(request_rec *r)
         }
         return OK;
     }
-    apr_uint32_t win = __atomic_load_n(&slot->window_start_sec,
-                                       __ATOMIC_RELAXED);
-    apr_uint32_t now = (apr_uint32_t)apr_time_sec(apr_time_now());
-    apr_uint32_t retry = (now >= win && now - win < holder->window_sec)
-                          ? holder->window_sec - (now - win) : 1;
     apr_table_setn(r->err_headers_out, "Retry-After",
-        apr_psprintf(r->pool, "%u", retry));
-    bs_score_add(r, BS_PENALTY_RATE_LIMIT, 3600,
-        apr_pstrcat(r->pool, "bot-rate:",
-            slug_for_log ? slug_for_log : "?", NULL));
+        apr_psprintf(r->pool, "%u", retry_max ? retry_max : 1));
+    /* The score penalty is the client's record of misbehaviour, so it
+     * is charged only when the client is the one who overspent. A bot
+     * refused because the site hit its own ceiling has done nothing to
+     * earn a mark against it, and would otherwise accumulate score
+     * toward a challenge for being present during someone else's
+     * spike. */
+    bs_score_add(r, tripped_is_slug ? BS_PENALTY_RATE_LIMIT : 0,
+                 tripped_is_slug ? 3600 : 0,
+                 apr_pstrcat(r->pool, "bot-rate:", trip_label, NULL));
     if (bs_shm.metrics) {
         __atomic_fetch_add(&bs_shm.metrics->rate_limit_exceeded_total,
                            1, __ATOMIC_RELAXED);
     }
-    return HTTP_TOO_MANY_REQUESTS;
+    return tripped_is_slug ? HTTP_TOO_MANY_REQUESTS
+                           : HTTP_SERVICE_UNAVAILABLE;
 }

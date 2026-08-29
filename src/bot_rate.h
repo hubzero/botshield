@@ -48,7 +48,43 @@ typedef struct bs_bot_rate_slot {
     apr_uint32_t window_sec;
     const char  *origin;         /* "directive" or "wildcard" or "robots.txt" */
     int          observe;        /* copied from the entry that created it */
+    /* Botgroup aggregate this slug also counts against, or NULL.
+     * Resolved once at post_config so the request path is a pointer
+     * dereference rather than a directory lookup. */
+    struct bs_bot_rate_slot *group;
+    const char  *label;          /* for the decision log: what this counts */
 } bs_bot_rate_slot;
+
+/* Which population a rule's budget applies to.
+ *
+ * BS_BOT_RATE_EACH is what every rule meant before tiering existed and
+ * remains the default: the budget is per bot. A `*` rule at 1/sec with
+ * 700 directory slugs therefore permits 700 req/sec in aggregate, all
+ * of it fully compliant, because no single counter ever trips. That is
+ * the hole the other two scopes exist to close.
+ *
+ * BS_BOT_RATE_GROUP is a policy control, not a capacity one: "AI
+ * trainers collectively get N/sec" is a statement about what the site
+ * gives away for free, and it holds whether or not the server is busy.
+ * Its collateral is coherent -- when the ai-train budget is gone, the
+ * requests refused are all ai-train.
+ *
+ * BS_BOT_RATE_TOTAL is a circuit breaker and should be set far above
+ * normal traffic. It exists because load is a lagging signal: the
+ * sampling rings are 5s (loadavg, scoreboard) and 10s (db, fpm), so
+ * shedding cannot react to a thousand bots arriving at once until the
+ * queue has already formed. A request-rate ceiling fires on the cause
+ * instead of the symptom. Set as a fairness budget it would be
+ * actively harmful -- one shared counter across every bot is
+ * first-come-first-served, and the bot that crawls at 05:00:00
+ * exhausts it for the one that arrives at 05:00:01. Set as a ceiling
+ * that is inert in normal operation, that objection does not arise:
+ * by the time it fires, refusing bots indiscriminately is correct. */
+typedef enum {
+    BS_BOT_RATE_EACH = 0,
+    BS_BOT_RATE_GROUP,
+    BS_BOT_RATE_TOTAL
+} bs_bot_rate_scope;
 
 /* One configured rule (directive or robots.txt-derived). Three
  * shapes:
@@ -64,6 +100,7 @@ typedef struct bs_bot_rate_entry {
     apr_uint32_t        budget;
     apr_uint32_t        window_sec;
     apr_array_header_t *slugs;       /* const char *; NULL for wildcard */
+    bs_bot_rate_scope   scope;       /* each (default) | group | total */
     int                 shm_slot;    /* shared across this entry's slugs (specific only) */
     /* mode=observe: count and log, never 429. Mirrors the trigger and
      * cohort rate-limit families. Needed because the wildcard default
@@ -95,6 +132,13 @@ typedef struct bs_bot_rate_state {
      * wildcard rule is configured. */
     bs_bot_rate_slot    *wildcard_fallback_holder;
     bs_bot_rate_entry   *wildcard_entry;     /* NULL if no * rule */
+    bs_bot_rate_entry   *global_entry;       /* NULL if no scope=total rule */
+    /* Tier 2: botgroup name -> one shared bs_bot_rate_slot*. Distinct
+     * from an `@group` rule at scope=each, which allocates a separate
+     * counter per slug in the group and so cannot see group totals. */
+    apr_hash_t          *group_holders;
+    /* Tier 3: one counter every bot request counts against. */
+    bs_bot_rate_slot    *global_holder;
     /* Set by `BotShieldBotRateLimit Off` — skip the post_config
      * default-synthesis step. Specific entries (if any) still
      * apply. Operators wanting "no rate limit at all" use this;
@@ -112,6 +156,15 @@ typedef struct bs_bot_rate_state {
  *   <slug-or-pattern-or-*> <budget> <per>
  *                                    # 3-arg form: <budget> requests
  *                                      per <per> period (sec/min/hour)
+ *
+ * Either form accepts trailing mode=enforce|observe and
+ * scope=each|group|total. scope=group requires an @botgroup selector
+ * and scope=total requires `*`; both are refused otherwise, because a
+ * shared budget whose population is a single slug is just a confusing
+ * spelling of scope=each.
+ *
+ *   BotShieldBotRateLimit @ai-train 30 sec scope=group
+ *   BotShieldBotRateLimit *        300 sec scope=total
  *
  * Slug-or-pattern resolves via bs_known_bots_resolve_slugs. "*"
  * reserves the wildcard-fallback semantic. Budget 1..1000000; delay
