@@ -12,6 +12,7 @@
 #include "bot_rate.h"       /* bs_bot_rate_slot / state, same page */
 
 #include <string.h>
+#include <unistd.h>   /* sysconf(_SC_PAGESIZE) for the RSS sample */
 
 #include <apr_atomic.h>
 #include <apr_file_io.h>
@@ -2520,6 +2521,21 @@ static void bs_d_page_open(request_rec *r, const char *title,
        *
        * white-space:pre so the newlines in data-tip render as lines --
        * the whole point is a per-code list, not one long run-on. */
+      /* Generic hoverable term. The bar/legend tooltips above use
+       * white-space:pre because their content is short pre-formatted
+       * lines; this one carries sentences, so it wraps and takes a
+       * max-width. The dotted underline is the affordance -- an
+       * explanation nobody knows to hover for is not an explanation. */
+      ".tip{border-bottom:1px dotted var(--muted);cursor:help}"
+      ".tip[data-tip]{position:relative}"
+      ".tip[data-tip]:hover::after{content:attr(data-tip);"
+      "white-space:pre-wrap;width:max-content;max-width:300px;"
+      "position:absolute;left:0;bottom:calc(100% + 6px);"
+      "background:var(--ink);color:var(--surface);font-size:11px;"
+      "font-weight:400;line-height:1.5;padding:7px 10px;border-radius:6px;"
+      "box-shadow:0 2px 10px rgba(0,0,0,.28);z-index:60;"
+      "pointer-events:none;text-align:left}"
+      "th .tip{border-bottom-color:var(--line)}"
       ".seg[data-tip],.legend li[data-tip]{position:relative}"
       ".seg[data-tip]:hover::after,.legend li[data-tip]:hover::after{"
       "content:attr(data-tip);white-space:pre;position:absolute;"
@@ -2770,12 +2786,12 @@ static void bs_d_nav(request_rec *r, const char *active)
     const char *px = (dcfg && dcfg->endpoint_prefix)
                    ? dcfg->endpoint_prefix : BS_DEFAULT_ENDPOINT_PREFIX;
     static const char *slug[]  = { "", "responses", "app-bots",
-                                   "app-users", "bots" };
+                                   "app-users", "bots", "internals" };
     static const char *label[] = { "Overview", "BotShield responses",
                                    "App &rarr; bots", "App &rarr; users",
-                                   "Bots" };
+                                   "Bots", "Internals" };
     ap_rputs("<nav class='pages'>", r);
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 6; i++) {
         int on = strcmp(active, slug[i]) == 0;
         if (!*slug[i]) {
             ap_rprintf(r, "<a class='%s' href='%s/dashboard'>%s</a>",
@@ -3256,6 +3272,687 @@ int bs_dashboard_bots_handler(request_rec *r)
             }
         }
         ap_rputs("</section>", r);
+    }
+
+    ap_rputs("</main></div></body></html>", r);
+    return OK;
+}
+
+/* ======================================================================
+ * /dashboard/internals — is the module itself healthy?
+ *
+ * Deliberately separate from /dashboard/responses. That page answers
+ * "what did BotShield do to traffic", which is a question about
+ * policy; this one answers "is BotShield working", which is a question
+ * about the tool. Same screen, different job, different reader.
+ *
+ * Everything here is read at render time. Nothing is sampled into a
+ * ring, because none of it is a rate: these are levels, and a level you
+ * can re-read on demand does not need a history to be useful. The load
+ * charts on the overview already cover the things that do.
+ * ====================================================================== */
+
+typedef struct {
+    int      have_mem, have_stat, have_uptime, have_fd, have_self;
+    apr_uint64_t mem_total, mem_avail, mem_free, cached, buffers;
+    apr_uint64_t swap_total, swap_free, dirty, committed;   /* kB */
+    apr_uint64_t procs_running, procs_blocked;
+    apr_uint64_t uptime_sec;
+    apr_uint64_t fd_used, fd_max;
+    apr_uint64_t self_rss_kb;
+} bs_os_snap;
+
+/* Pull one "Key: value kB" out of a /proc/meminfo-shaped buffer. */
+static apr_uint64_t bs_meminfo_kb(const char *buf, const char *key)
+{
+    apr_size_t klen = strlen(key);
+    for (const char *p = buf; p && *p; ) {
+        if (strncmp(p, key, klen) == 0 && p[klen] == ':') {
+            return (apr_uint64_t)apr_atoi64(p + klen + 1);
+        }
+        p = strchr(p, '\n');
+        if (p) p++;
+    }
+    return 0;
+}
+
+static int bs_slurp(apr_pool_t *pool, const char *path,
+                    char *buf, apr_size_t cap)
+{
+    apr_file_t *f = NULL;
+    if (apr_file_open(&f, path, APR_READ | APR_BINARY, 0, pool)
+        != APR_SUCCESS) {
+        return 0;
+    }
+    apr_size_t got = cap - 1;
+    apr_status_t rv = apr_file_read(f, buf, &got);
+    apr_file_close(f);
+    if (rv != APR_SUCCESS && rv != APR_EOF) return 0;
+    buf[got] = '\0';
+    return 1;
+}
+
+/* Every field is optional. A container or a hardened kernel can hide
+ * any of these, and a dashboard that renders "0" for "could not read"
+ * is worse than one that says so. */
+static void bs_os_read(apr_pool_t *pool, bs_os_snap *o)
+{
+    char buf[8192];
+    memset(o, 0, sizeof(*o));
+
+    if (bs_slurp(pool, "/proc/meminfo", buf, sizeof(buf))) {
+        o->have_mem   = 1;
+        o->mem_total  = bs_meminfo_kb(buf, "MemTotal");
+        o->mem_avail  = bs_meminfo_kb(buf, "MemAvailable");
+        o->mem_free   = bs_meminfo_kb(buf, "MemFree");
+        o->cached     = bs_meminfo_kb(buf, "Cached");
+        o->buffers    = bs_meminfo_kb(buf, "Buffers");
+        o->swap_total = bs_meminfo_kb(buf, "SwapTotal");
+        o->swap_free  = bs_meminfo_kb(buf, "SwapFree");
+        o->dirty      = bs_meminfo_kb(buf, "Dirty");
+        o->committed  = bs_meminfo_kb(buf, "Committed_AS");
+    }
+    if (bs_slurp(pool, "/proc/stat", buf, sizeof(buf))) {
+        const char *p;
+        o->have_stat = 1;
+        if ((p = strstr(buf, "procs_running")))
+            o->procs_running = (apr_uint64_t)apr_atoi64(p + 13);
+        if ((p = strstr(buf, "procs_blocked")))
+            o->procs_blocked = (apr_uint64_t)apr_atoi64(p + 13);
+    }
+    if (bs_slurp(pool, "/proc/uptime", buf, sizeof(buf))) {
+        o->have_uptime = 1;
+        o->uptime_sec  = (apr_uint64_t)apr_atoi64(buf);
+    }
+    if (bs_slurp(pool, "/proc/sys/fs/file-nr", buf, sizeof(buf))) {
+        char *end = NULL;
+        o->have_fd  = 1;
+        o->fd_used  = (apr_uint64_t)apr_strtoi64(buf, &end, 10);
+        if (end) {
+            /* field 2 is the (always-0 since 2.6) free count; max is 3rd */
+            (void)apr_strtoi64(end, &end, 10);
+            o->fd_max = (apr_uint64_t)apr_strtoi64(end, &end, 10);
+        }
+    }
+    /* statm field 2 is resident pages. Only this child -- a module
+     * cannot see its siblings, so this is a sample of the fleet, not
+     * the fleet. */
+    if (bs_slurp(pool, "/proc/self/statm", buf, sizeof(buf))) {
+        char *end = NULL;
+        (void)apr_strtoi64(buf, &end, 10);
+        apr_int64_t rss_pages = apr_strtoi64(end, &end, 10);
+        long pg = sysconf(_SC_PAGESIZE);
+        if (rss_pages > 0 && pg > 0) {
+            o->have_self    = 1;
+            o->self_rss_kb  = (apr_uint64_t)rss_pages * (apr_uint64_t)pg / 1024;
+        }
+    }
+}
+
+static const char *bs_d_kb(apr_pool_t *pool, apr_uint64_t kb);
+
+/* One capacity row. `used` past `cap` is impossible for the tables and
+ * merely alarming for the pools, so the bar is clamped and the number
+ * is not -- an operator needs to see 102 against 32, not a full bar. */
+/* `alloc` is how many slots the segment actually reserved, which for
+ * every table equals cap -- except the per-vhost directory, where only
+ * the vhosts running the module get a block. Reporting cap * per_slot
+ * there would bill 32 blocks' worth of memory that was never carved. */
+static void bs_d_cap_row(request_rec *r, const char *name,
+                         apr_uint64_t used, apr_uint64_t cap,
+                         apr_uint64_t alloc, apr_uint64_t per_slot,
+                         const char *note)
+{
+    double pct = cap ? (100.0 * (double)used / (double)cap) : 0.0;
+    double bar = pct > 100.0 ? 100.0 : pct;
+    const char *fill = (pct >= 90.0) ? "var(--crit)"
+                     : (pct >= 70.0) ? "var(--warn)" : "var(--good)";
+    /* The overflow consequence rides on the table name rather than
+     * occupying a column: it is the same sentence for the life of the
+     * deployment, and six rows of static prose crowd out the numbers
+     * that actually change. */
+    ap_rprintf(r,
+        "<tr><td><span class='tip' data-tip='%s'>%s</span></td>"
+        "<td class='n'>%" APR_UINT64_T_FMT "</td>"
+        "<td class='n'>%" APR_UINT64_T_FMT "</td>"
+        "<td class='n'>%.1f%%</td>"
+        "<td><div class='stack' style='height:8px'>"
+        "<div class='seg' style='flex:0 0 %.2f%%;background:%s'></div>"
+        "<div class='seg' style='flex:1 1 auto;background:var(--track)'></div>"
+        "</div></td>"
+        "<td class='n'>%s</td></tr>",
+        note ? note : "", name, used, cap, pct, bar, fill,
+        bs_d_kb(r->pool, alloc * per_slot / 1024));
+}
+
+static const char *bs_d_kb(apr_pool_t *pool, apr_uint64_t kb)
+{
+    if (kb >= 1024ULL * 1024ULL) {
+        return apr_psprintf(pool, "%.1f GB", (double)kb / 1048576.0);
+    }
+    if (kb >= 1024ULL) {
+        return apr_psprintf(pool, "%.0f MB", (double)kb / 1024.0);
+    }
+    return apr_psprintf(pool, "%" APR_UINT64_T_FMT " kB", kb);
+}
+
+static const char *bs_d_dur(apr_pool_t *pool, apr_uint64_t sec)
+{
+    if (sec >= 86400) return apr_psprintf(pool, "%" APR_UINT64_T_FMT "d %" APR_UINT64_T_FMT "h",
+                                          sec / 86400, (sec % 86400) / 3600);
+    if (sec >= 3600)  return apr_psprintf(pool, "%" APR_UINT64_T_FMT "h %" APR_UINT64_T_FMT "m",
+                                          sec / 3600, (sec % 3600) / 60);
+    if (sec >= 60)    return apr_psprintf(pool, "%" APR_UINT64_T_FMT "m", sec / 60);
+    return apr_psprintf(pool, "%" APR_UINT64_T_FMT "s", sec);
+}
+
+/* --- Per-device I/O -----------------------------------------------
+ * /proc/diskstats and /proc/net/dev are counters since boot, and a
+ * total since boot answers a question nobody asks: an average over
+ * fourteen days goes numb to whatever is happening now. So both are
+ * read twice a fraction of a second apart and reported as rates.
+ *
+ * That costs the request one short sleep. It is paid on an operator
+ * page that is already doing table scans, never on the decision path,
+ * and it is the difference between a number you can act on and a
+ * number you can only file.
+ * ------------------------------------------------------------------ */
+#define BS_IO_MAX_DEV   24
+#define BS_IO_NAME_MAX  20
+/* The window costs a parked worker thread, not CPU: 20 concurrent
+ * renders measured 0.34s wall and no measurable CPU at all, where
+ * serialized work would have taken 5s. So the only thing a short
+ * window buys is a faster page, and the only thing it costs is
+ * precision -- at 250ms a single 4 KB I/O reads as 16 KB/s. 500ms
+ * halves that quantization and still feels immediate. */
+#define BS_IO_SAMPLE_US 500000
+
+typedef struct {
+    char         name[BS_IO_NAME_MAX];
+    apr_uint64_t a, b, c, d, e;   /* meaning depends on the source */
+} bs_io_dev;
+
+typedef struct {
+    int        n;
+    bs_io_dev  dev[BS_IO_MAX_DEV];
+} bs_io_set;
+
+static bs_io_dev *bs_io_find(bs_io_set *set, const char *name)
+{
+    for (int i = 0; i < set->n; i++) {
+        if (strcmp(set->dev[i].name, name) == 0) return &set->dev[i];
+    }
+    return NULL;
+}
+
+/* diskstats: name, reads, sectors read, writes, sectors written, ms
+ * doing I/O. Sectors are 512 bytes on this interface regardless of the
+ * device's real sector size -- the kernel normalises them. */
+static void bs_io_read_disks(apr_pool_t *pool, bs_io_set *set)
+{
+    char buf[16384];
+    set->n = 0;
+    if (!bs_slurp(pool, "/proc/diskstats", buf, sizeof(buf))) return;
+    for (char *line = buf, *save = NULL;
+         (line = apr_strtok(line ? line : NULL, "\n", &save)) != NULL;
+         line = NULL) {
+        char nm[BS_IO_NAME_MAX];
+        unsigned long long rd, rdsec, wr, wrsec, ioms;
+        if (sscanf(line,
+                   " %*u %*u %19s %llu %*u %llu %*u %llu %*u %llu %*u %*u %llu",
+                   nm, &rd, &rdsec, &wr, &wrsec, &ioms) != 6) {
+            continue;
+        }
+        if (rd == 0 && wr == 0) continue;              /* never used */
+        if (strncmp(nm, "loop", 4) == 0) continue;
+        if (strncmp(nm, "ram", 3) == 0)  continue;
+        if (set->n >= BS_IO_MAX_DEV) break;
+        bs_io_dev *d = &set->dev[set->n++];
+        apr_cpystrn(d->name, nm, sizeof(d->name));
+        d->a = rd; d->b = rdsec; d->c = wr; d->d = wrsec; d->e = ioms;
+    }
+}
+
+/* Drop partitions, keeping whole devices. A name is a partition when
+ * stripping its trailing digits leaves a device that is also present
+ * -- vda5 against vda. Done by lookup rather than by assuming a naming
+ * scheme, so nvme0n1 (whose parent nvme0 is not a device) survives. */
+static void bs_io_drop_partitions(bs_io_set *set)
+{
+    bs_io_set kept;
+    kept.n = 0;
+    for (int i = 0; i < set->n; i++) {
+        char parent[BS_IO_NAME_MAX];
+        apr_cpystrn(parent, set->dev[i].name, sizeof(parent));
+        apr_size_t L = strlen(parent);
+        while (L > 0 && parent[L - 1] >= '0' && parent[L - 1] <= '9') {
+            parent[--L] = '\0';
+        }
+        if (L > 0 && L != strlen(set->dev[i].name)
+            && bs_io_find(set, parent)) {
+            continue;   /* it is a slice of something we already list */
+        }
+        if (kept.n < BS_IO_MAX_DEV) kept.dev[kept.n++] = set->dev[i];
+    }
+    *set = kept;
+}
+
+/* net/dev: rx bytes, rx errs+drop, tx bytes, tx errs+drop. */
+static void bs_io_read_nics(apr_pool_t *pool, bs_io_set *set)
+{
+    char buf[16384];
+    set->n = 0;
+    if (!bs_slurp(pool, "/proc/net/dev", buf, sizeof(buf))) return;
+    for (char *line = buf, *save = NULL;
+         (line = apr_strtok(line ? line : NULL, "\n", &save)) != NULL;
+         line = NULL) {
+        char *colon = strchr(line, ':');
+        if (!colon) continue;                 /* the two header rows */
+        *colon = '\0';
+        char *nm = line;
+        while (*nm == ' ' || *nm == '\t') nm++;
+        unsigned long long rxb, rxe, rxd, txb, txe, txd;
+        if (sscanf(colon + 1,
+                   " %llu %*u %llu %llu %*u %*u %*u %*u %llu %*u %llu %llu",
+                   &rxb, &rxe, &rxd, &txb, &txe, &txd) != 6) {
+            continue;
+        }
+        if (set->n >= BS_IO_MAX_DEV) break;
+        bs_io_dev *d = &set->dev[set->n++];
+        apr_cpystrn(d->name, nm, sizeof(d->name));
+        d->a = rxb; d->b = txb; d->c = rxe + rxd; d->d = txe + txd; d->e = 0;
+    }
+}
+
+static const char *bs_d_rate(apr_pool_t *pool, double bytes_per_sec)
+{
+    if (bytes_per_sec >= 1048576.0)
+        return apr_psprintf(pool, "%.1f MB/s", bytes_per_sec / 1048576.0);
+    if (bytes_per_sec >= 1024.0)
+        return apr_psprintf(pool, "%.0f kB/s", bytes_per_sec / 1024.0);
+    if (bytes_per_sec >= 1.0)
+        return apr_psprintf(pool, "%.0f B/s", bytes_per_sec);
+    return "&mdash;";
+}
+
+int bs_dashboard_internals_handler(request_rec *r)
+{
+    apr_table_setn(r->subprocess_env, "BS_ENDPOINT", "obs");
+    bs_log_observability_request(r);
+    ap_set_content_type(r, "text/html; charset=utf-8");
+    apr_table_setn(r->headers_out, "Cache-Control", "no-store");
+    apr_table_setn(r->headers_out, "X-Robots-Tag", "noindex, nofollow");
+
+    bs_server_cfg *scfg = ap_get_module_config(r->server->module_config,
+                                               &botshield_module);
+    int span = 60, refresh = 30, vsel = -1;
+    bs_d_view_params(r, &span, &refresh, &vsel);
+    const char *vq = (vsel < 0) ? "all" : apr_psprintf(r->pool, "%d", vsel);
+
+    bs_d_page_open(r, "mod_botshield internals", span, refresh, vq);
+    ap_rputs("<aside><div class='fgroup navsec'>"
+             "<div class='railhead'><h1>mod_botshield</h1>"
+             "<label class='icontog' for='rail' title='Hide sidebar' "
+             "aria-label='Hide sidebar'>&laquo;</label></div>", r);
+    ap_rputs("<p class='sub'>live snapshot &middot; module health</p>", r);
+    bs_d_nav(r, "internals");
+    bs_d_view_controls(r, span, refresh, vsel, vq);
+    bs_d_page_body(r);
+
+    bs_gauges_refresh();
+
+    /* --- Shared memory ------------------------------------------- */
+    {
+        ap_rputs("<section><h2>Shared memory</h2>"
+                 "<p class='note'>Carved once at startup, never grows "
+                 "&middot; every table <span class='tip' data-tip='"
+                 "Nothing errors when a table fills. Flagged IPs, "
+                 "strikes and safeguard entries evict the oldest; the "
+                 "rate-counter pool stops handing out slots and the "
+                 "bots that missed one are no longer limited at all."
+                 "'>degrades silently when full</span></p>", r);
+        ap_rputs("<table><thead><tr><th>Table</th><th class='n'>Used</th>"
+                 "<th class='n'>Capacity</th><th class='n'>Full</th>"
+                 "<th>&nbsp;</th><th class='n'>Costs</th>"
+                 "</tr></thead><tbody>", r);
+
+        bs_d_cap_row(r, "Flagged IPs", bs_gauges.flagged_used,
+                     (apr_uint64_t)bs_shm.flagged_capacity,
+                     (apr_uint64_t)bs_shm.flagged_capacity,
+                     sizeof(bs_flagged_ip_slot),
+                     "evicts oldest; a flagged client escapes early");
+        bs_d_cap_row(r, "Strikes", bs_gauges.strike_used,
+                     (apr_uint64_t)bs_shm.strike_capacity,
+                     (apr_uint64_t)bs_shm.strike_capacity,
+                     sizeof(bs_strike_slot),
+                     "evicts; escalation forgets repeat offenders");
+        bs_d_cap_row(r, "Safeguard", bs_gauges.safeguard_used,
+                     (apr_uint64_t)bs_shm.safeguard_capacity,
+                     (apr_uint64_t)bs_shm.safeguard_capacity,
+                     sizeof(bs_safeguard_slot),
+                     "evicts; loop detection misses a looping client");
+        bs_d_cap_row(r, "Nonces", 0,
+                     (apr_uint64_t)bs_shm.nonce_capacity,
+                     (apr_uint64_t)bs_shm.nonce_capacity,
+                     sizeof(bs_nonce_slot),
+                     "oldest binding drops; a challenge must be reissued");
+        bs_d_cap_row(r, "Rate counters", (apr_uint64_t)bs_shm.rate_slots_used,
+                     (apr_uint64_t)bs_shm.rate_counter_count,
+                     (apr_uint64_t)bs_shm.rate_counter_count,
+                     sizeof(bs_rate_counter) + sizeof(apr_uint64_t)
+                       + BS_RATE_UA_MAX,
+                     "unallocated bots are NOT rate limited");
+        {
+            apr_uint32_t vused = bs_shm.vhost_dir
+                ? __atomic_load_n(&bs_shm.vhost_dir->count, __ATOMIC_RELAXED)
+                : 0;
+            /* Only vhosts running the module get a block, so the
+             * allocation is vused, not the cap. */
+            bs_d_cap_row(r, "Per-vhost metric blocks", vused,
+                         (apr_uint64_t)BS_M_MAX_VHOSTS, vused,
+                         BS_M_VHOST_NAME_MAX + sizeof(bs_metrics),
+                         "further vhosts RUNNING the module share the "
+                         "last slot; ones that do not are not counted "
+                         "here at all");
+        }
+        ap_rputs("</tbody></table>", r);
+        if (bs_shm.segment_total) {
+            double pct = 100.0 * (double)bs_shm.segment_used
+                                / (double)bs_shm.segment_total;
+            ap_rprintf(r,
+                "<p class='note'>Segment <strong>%s of %s</strong> "
+                "(%.0f%%) &middot; <span class='tip' data-tip='Set by "
+                "BotShieldShmSize. The unused part is reserved at "
+                "startup, not grown into, so it is headroom for raising "
+                "a capacity at the next restart rather than room the "
+                "module will take on its own.'>BotShieldShmSize</span> "
+                "&middot; per-vhost block <span class='tip' data-tip='"
+                "A full copy of every counter plus the minute and hour "
+                "rings; the 84 windowed slots are 82 KB of it. Only "
+                "vhosts that actually run the module get one.'>%s each"
+                "</span></p>",
+                bs_d_kb(r->pool, (apr_uint64_t)bs_shm.segment_used / 1024),
+                bs_d_kb(r->pool, (apr_uint64_t)bs_shm.segment_total / 1024),
+                pct,
+                bs_d_kb(r->pool,
+                        (apr_uint64_t)(BS_M_VHOST_NAME_MAX
+                                       + sizeof(bs_metrics)) / 1024));
+        }
+        ap_rputs("</section>", r);
+    }
+
+    /* --- Hot-swap generations ------------------------------------ */
+    {
+        static const char *gname[BS_GEN_COUNT] = {
+            "Bot directory (AC trie)", "robots.txt",
+            "Verified-bot IP ranges", "Browser templates"
+        };
+        /* Scope decides what a healthy Live number looks like, so it
+         * has to be on the page. The directory and the templates are
+         * process-global (one live generation); robots and the IP
+         * ranges hang off bs_server_cfg and so have one generation per
+         * configured vhost. Reading a per-vhost row against a global
+         * expectation is how a fine number gets read as a leak. */
+        static const char *gscope[BS_GEN_COUNT] = {
+            "global", "per-vhost", "per-vhost", "global"
+        };
+        apr_uint32_t now = (apr_uint32_t)apr_time_sec(apr_time_now());
+        ap_rputs("<section><h2>Hot-swap generations</h2>"
+                 "<p class='note'>The only place this module can leak. "
+                 "<span class='tip' data-tip='Each subsystem builds new "
+                 "state into a private pool, swaps it in, and destroys "
+                 "the one retired on the previous tick, so a reader "
+                 "holding a pointer across the swap never reads freed "
+                 "memory. Counted directly rather than inferred from "
+                 "process RSS, which belongs to every module in the "
+                 "child and can attribute growth to none of them."
+                 "'>Leak shape: Built climbing while Freed stays flat."
+                 "</span></p>", r);
+        ap_rputs("<table><thead><tr><th>Subsystem</th>"
+                 "<th><span class='tip' data-tip='Global subsystems have "
+                 "one publisher. Per-vhost ones have a generation per "
+                 "configured vhost, so a larger Live there is the shape "
+                 "of the deployment, not a fault.'>Scope</span></th>"
+                 "<th class='n'>Built</th>"
+                 "<th class='n'><span class='tip' data-tip='Lags Built "
+                 "by one generation per publisher by design: a "
+                 "generation is retired on the NEXT rebuild, not its "
+                 "own. Where sources never change this rests at 0, "
+                 "which is healthy.'>Freed</span></th>"
+                 "<th class='n'><span class='tip' data-tip='Built minus "
+                 "Freed. Uncoloured on purpose -- the healthy value "
+                 "depends on publisher count and refresh rate, and a "
+                 "guessed threshold would cry wolf on a normal server."
+                 "'>Live</span></th>"
+                 "<th>Last rebuild</th></tr></thead><tbody>", r);
+        for (int i = 0; i < BS_GEN_COUNT; i++) {
+            apr_uint64_t b = 0, f = 0; apr_uint32_t t = 0;
+            if (bs_shm.gen) {
+                b = __atomic_load_n(&bs_shm.gen->built[i], __ATOMIC_RELAXED);
+                f = __atomic_load_n(&bs_shm.gen->freed[i], __ATOMIC_RELAXED);
+                t = __atomic_load_n(&bs_shm.gen->last_sec[i], __ATOMIC_RELAXED);
+            }
+            apr_uint64_t live = (b > f) ? b - f : 0;
+            /* Uncoloured on purpose. The resting value is publishers
+             * x 1, and publishers depends on vhost count and on which
+             * subsystems have file-backed sources at all -- neither of
+             * which this row knows. A threshold invented here would
+             * paint a correct number red on an ordinary server, which
+             * is how an operator learns to ignore a dashboard. */
+            const char *tone = "var(--ink)";
+            ap_rprintf(r,
+                "<tr><td>%s</td><td class='muted'>%s</td>"
+                "<td class='n'>%" APR_UINT64_T_FMT "</td>"
+                "<td class='n'>%" APR_UINT64_T_FMT "</td>"
+                "<td class='n' style='color:%s;font-weight:600'>%"
+                APR_UINT64_T_FMT "</td><td>%s</td></tr>",
+                gname[i], gscope[i], b, f, tone, live,
+                t ? apr_psprintf(r->pool, "%s ago",
+                                 bs_d_dur(r->pool, (apr_uint64_t)(now - t)))
+                  : "<span class='muted'>never (compiled-in only)</span>");
+        }
+        ap_rputs("</tbody></table></section>", r);
+    }
+
+    /* --- Machine ------------------------------------------------- */
+    {
+        bs_os_snap o;
+        bs_os_read(r->pool, &o);
+        ap_rputs("<section><h2>Machine</h2>"
+                 "<div class='kpis'>", r);
+
+        if (bs_shm.header) {
+            apr_uint32_t l1 = __atomic_load_n(&bs_shm.header->loadavg_pct, __ATOMIC_RELAXED);
+            apr_uint32_t l5 = __atomic_load_n(&bs_shm.header->loadavg5_pct, __ATOMIC_RELAXED);
+            apr_uint32_t l15 = __atomic_load_n(&bs_shm.header->loadavg15_pct, __ATOMIC_RELAXED);
+            ap_rprintf(r, "<div class='kpi'><div class='k'>Load average</div>"
+                          "<div class='v'>%.2f</div><div class='n'>%.2f / %.2f "
+                          "(5m / 15m)</div></div>",
+                       l1 / 100.0, l5 / 100.0, l15 / 100.0);
+        }
+        if (o.have_mem) {
+            double used_pct = o.mem_total
+                ? 100.0 * (double)(o.mem_total - o.mem_avail) / (double)o.mem_total
+                : 0.0;
+            ap_rprintf(r, "<div class='kpi'><div class='k'>Memory in use</div>"
+                          "<div class='v'>%.0f%%</div><div class='n'>%s "
+                          "available of %s</div></div>",
+                       used_pct, bs_d_kb(r->pool, o.mem_avail),
+                       bs_d_kb(r->pool, o.mem_total));
+            /* Swap absent is a real operational fact, not a missing
+             * reading: with none configured the kernel has no way to
+             * relieve pressure short of the OOM killer. */
+            if (o.swap_total == 0) {
+                ap_rputs("<div class='kpi'><div class='k'>Swap</div>"
+                         "<div class='v'>none</div><div class='n'>pressure "
+                         "ends at the OOM killer</div></div>", r);
+            } else {
+                ap_rprintf(r, "<div class='kpi'><div class='k'>Swap free</div>"
+                              "<div class='v'>%s</div><div class='n'>of %s"
+                              "</div></div>",
+                           bs_d_kb(r->pool, o.swap_free),
+                           bs_d_kb(r->pool, o.swap_total));
+            }
+            if (o.committed && o.mem_total) {
+                double ov = 100.0 * (double)o.committed / (double)o.mem_total;
+                ap_rprintf(r, "<div class='kpi'><div class='k'>Committed</div>"
+                              "<div class='v'>%.0f%%</div><div class='n'>%s "
+                              "promised vs RAM</div></div>",
+                           ov, bs_d_kb(r->pool, o.committed));
+            }
+        }
+        if (o.have_stat) {
+            /* procs_blocked is uninterruptible sleep -- almost always
+             * storage. It is the one number here that says "the disk is
+             * the problem" rather than "the CPU is". */
+            ap_rprintf(r, "<div class='kpi'><div class='k'>Runnable</div>"
+                          "<div class='v'>%" APR_UINT64_T_FMT "</div>"
+                          "<div class='n'>%" APR_UINT64_T_FMT " blocked on I/O"
+                          "</div></div>", o.procs_running, o.procs_blocked);
+        }
+        if (o.have_fd && o.fd_max) {
+            ap_rprintf(r, "<div class='kpi'><div class='k'>Open files</div>"
+                          "<div class='v'>%.1f%%</div><div class='n'>%"
+                          APR_UINT64_T_FMT " of %" APR_UINT64_T_FMT
+                          "</div></div>",
+                       100.0 * (double)o.fd_used / (double)o.fd_max,
+                       o.fd_used, o.fd_max);
+        }
+        if (o.have_uptime) {
+            ap_rprintf(r, "<div class='kpi'><div class='k'>Host uptime</div>"
+                          "<div class='v'>%s</div><div class='n'>since last "
+                          "boot</div></div>", bs_d_dur(r->pool, o.uptime_sec));
+        }
+        if (o.have_self) {
+            ap_rprintf(r, "<div class='kpi'><div class='k'>This worker RSS</div>"
+                          "<div class='v'>%s</div><div class='n'>one child, "
+                          "all modules</div></div>",
+                       bs_d_kb(r->pool, o.self_rss_kb));
+        }
+        ap_rputs("</div>", r);
+        ap_rputs("<p class='note'>Point-in-time from /proc &middot; "
+                 "<span class='tip' data-tip='One httpd child, covering "
+                 "every module in it. A sample of the fleet, not the "
+                 "fleet, and it cannot attribute growth to BotShield -- "
+                 "the generations table does that.'>RSS caveat</span>"
+                 "</p></section>", r);
+    }
+
+    /* --- Per-device I/O ------------------------------------------ */
+    {
+        bs_io_set d0, d1, n0, n1;
+        apr_time_t t0 = apr_time_now();
+        bs_io_read_disks(r->pool, &d0);
+        bs_io_read_nics(r->pool, &n0);
+        apr_sleep(BS_IO_SAMPLE_US);
+        apr_time_t t1 = apr_time_now();
+        bs_io_read_disks(r->pool, &d1);
+        bs_io_read_nics(r->pool, &n1);
+        double secs = (double)(t1 - t0) / (double)APR_USEC_PER_SEC;
+        if (secs <= 0.0) secs = (double)BS_IO_SAMPLE_US / 1000000.0;
+        bs_io_drop_partitions(&d0);
+        bs_io_drop_partitions(&d1);
+
+        ap_rprintf(r, "<section><h2>Disks</h2>"
+                      "<p class='note'>Sampled over %.2fs at page load "
+                      "&middot; <span class='tip' data-tip='Counters in "
+                      "/proc are totals since boot, and an average "
+                      "across the whole uptime goes numb to whatever is "
+                      "happening now. Two reads a fraction of a second "
+                      "apart give a rate instead. The wait parks one "
+                      "worker thread and uses no measurable CPU."
+                      "'>why sampled</span> &middot; <span class='tip' "
+                      "data-tip='Partitions fold into their whole "
+                      "device. Stacked ones do not: a dm-* or md* "
+                      "volume reports the same I/O as the disk beneath "
+                      "it, so those rows overlap rather than add."
+                      "'>device rollup</span></p>", secs);
+        ap_rputs("<table><thead><tr><th>Device</th>"
+                 "<th class='n'>Read</th><th class='n'>Write</th>"
+                 "<th class='n'>IOPS</th>"
+                 "<th class='n'><span class='tip' data-tip='Share of the "
+                 "interval the device had at least one request in "
+                 "flight -- what iostat calls %%util. Near 100%% means "
+                 "saturated. Pairs with the I/O-blocked process count "
+                 "under Machine: high busy at low throughput is "
+                 "seek-bound random I/O.'>Busy</span></th>"
+                 "<th>&nbsp;</th></tr></thead><tbody>", r);
+        int shown = 0;
+        for (int i = 0; i < d1.n; i++) {
+            bs_io_dev *b = &d1.dev[i];
+            bs_io_dev *a = bs_io_find(&d0, b->name);
+            if (!a) continue;
+            double rd  = (double)(b->b - a->b) * 512.0 / secs;
+            double wr  = (double)(b->d - a->d) * 512.0 / secs;
+            double ops = (double)((b->a - a->a) + (b->c - a->c)) / secs;
+            double busy = (double)(b->e - a->e) / (secs * 1000.0) * 100.0;
+            if (busy > 100.0) busy = 100.0;   /* parallel queues can exceed */
+            if (rd < 1.0 && wr < 1.0 && ops < 0.5) continue;  /* idle */
+            const char *fill = (busy >= 80.0) ? "var(--crit)"
+                             : (busy >= 40.0) ? "var(--warn)" : "var(--good)";
+            ap_rprintf(r,
+                "<tr><td>%s</td><td class='n'>%s</td><td class='n'>%s</td>"
+                "<td class='n'>%.0f</td><td class='n'>%.0f%%</td>"
+                "<td><div class='stack' style='height:8px'>"
+                "<div class='seg' style='flex:0 0 %.2f%%;background:%s'></div>"
+                "<div class='seg' style='flex:1 1 auto;background:var(--track)'>"
+                "</div></div></td></tr>",
+                ap_escape_html(r->pool, b->name),
+                bs_d_rate(r->pool, rd), bs_d_rate(r->pool, wr),
+                ops, busy, busy, fill);
+            shown++;
+        }
+        if (!shown) {
+            ap_rputs("<tr><td colspan='6' class='empty'>No device moved "
+                     "during the sample. On a quiet server that is the "
+                     "normal reading, not a missing one.</td></tr>", r);
+        }
+        ap_rputs("</tbody></table></section>", r);
+
+        ap_rputs("<section><h2>Network</h2>"
+                 "<p class='note'>Same sample &middot; <span class='tip' "
+                 "data-tip='Loopback is kept rather than filtered as "
+                 "noise: PHP-FPM is reached over 127.0.0.1, so lo "
+                 "carries the application traffic this server generates "
+                 "for itself.'>lo included</span></p>", r);
+        ap_rputs("<table><thead><tr><th>Interface</th>"
+                 "<th class='n'>In</th><th class='n'>Out</th>"
+                 "<th class='n'><span class='tip' data-tip='Cumulative "
+                 "since boot, not a rate -- for errors the total is the "
+                 "interesting number, and a rate would hide a problem "
+                 "that has stopped growing.'>Errors / drops</span></th>"
+                 "</tr></thead><tbody>", r);
+        for (int i = 0; i < n1.n; i++) {
+            bs_io_dev *b = &n1.dev[i];
+            bs_io_dev *a = bs_io_find(&n0, b->name);
+            if (!a) continue;
+            double rx = (double)(b->a - a->a) / secs;
+            double tx = (double)(b->b - a->b) / secs;
+            apr_uint64_t bad = b->c + b->d;
+            ap_rprintf(r,
+                "<tr><td>%s</td><td class='n'>%s</td><td class='n'>%s</td>"
+                "<td class='n'%s>%" APR_UINT64_T_FMT "</td></tr>",
+                ap_escape_html(r->pool, b->name),
+                bs_d_rate(r->pool, rx), bs_d_rate(r->pool, tx),
+                bad ? " style='color:var(--warn);font-weight:600'" : "",
+                bad);
+        }
+        ap_rputs("</tbody></table></section>", r);
+    }
+
+    /* --- Build / config ------------------------------------------ */
+    {
+        ap_rputs("<section><h2>Build</h2><table><tbody>", r);
+        ap_rprintf(r, "<tr><td>SHM format</td><td class='n'>v%d</td></tr>",
+                   BS_SHM_FORMAT_VERSION);
+        ap_rprintf(r, "<tr><td>State-file format</td><td class='n'>v%d</td></tr>",
+                   BS_STATE_FORMAT_VERSION);
+        ap_rprintf(r, "<tr><td>Segment size</td><td class='n'>%s</td></tr>",
+                   scfg ? bs_d_kb(r->pool, (apr_uint64_t)scfg->shm_size / 1024)
+                        : "&mdash;");
+        ap_rprintf(r, "<tr><td>Built</td><td class='n'>%s %s</td></tr>",
+                   __DATE__, __TIME__);
+        ap_rputs("</tbody></table></section>", r);
     }
 
     ap_rputs("</main></div></body></html>", r);

@@ -261,6 +261,13 @@ int bs_dashboard_handler(request_rec *r);
  * bot-rate state and the bot directory; adds no counters of its own. */
 int bs_dashboard_bots_handler(request_rec *r);
 
+/* /dashboard/internals — module health: SHM table occupancy, hot-swap
+ * generation accounting (the only leak-shaped risk here), and a
+ * point-in-time read of the machine. Separate from /dashboard/responses
+ * because "is my policy right" and "is the module working" are
+ * different questions asked at different moments. */
+int bs_dashboard_internals_handler(request_rec *r);
+
 /* The remaining dashboard pages. Each renders one coherent view over
  * the same window data; they were sections and tabs on one long page
  * until the page outgrew a single scroll. */

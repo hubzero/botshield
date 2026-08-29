@@ -19,6 +19,7 @@
  * as untrusted. Length caps, line caps, and unknown-key tolerance
  * keep a malformed file from crashing the module or blowing memory.
  */
+#include "shm.h"
 #include "robots.h"
 
 #include <http_log.h>
@@ -937,9 +938,11 @@ apr_status_t bs_robots_load(server_rec *sv, bs_server_cfg *scfg,
     bs_robots_state *to_destroy = scfg->robots_pending;
     bs_robots_state *displaced  = cur;
     __atomic_store_n(&scfg->robots, ns, __ATOMIC_RELEASE);
+    bs_gen_note_built(BS_GEN_ROBOTS);
     scfg->robots_pending = displaced;
     if (to_destroy && to_destroy->pool) {
         apr_pool_destroy(to_destroy->pool);
+        bs_gen_note_freed(BS_GEN_ROBOTS);
     }
 
     if (slot_exhausted > 0) {

@@ -21,6 +21,7 @@
  * If lookups become hot-path concern, profile first; the request
  * pipeline is dominated by other costs (heuristic walk, cookie
  * verify, GCM ops). */
+#include "shm.h"
 #include "bot_directory.h"
 #include "botshield.h"
 
@@ -585,6 +586,7 @@ void bs_known_bots_publish(server_rec *s,
 
     /* Swap in the new active state. Release ordering pairs with the
      * acquire load in bs_ua_is_known_bot. */
+    bs_gen_note_built(BS_GEN_DIRECTORY);
     bs_known_bots_state *prior = __atomic_exchange_n(
         &bs_bot_directory_active, new_state, __ATOMIC_ACQ_REL);
 
@@ -594,6 +596,7 @@ void bs_known_bots_publish(server_rec *s,
 
     if (to_destroy) {
         apr_pool_destroy(to_destroy->pool);
+        bs_gen_note_freed(BS_GEN_DIRECTORY);
     }
 
     if (s) {

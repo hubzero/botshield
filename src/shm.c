@@ -1888,3 +1888,26 @@ apr_status_t bs_state_save_watchdog_cb(int state, void *data,
     bs_state_save(pool, ctx->server, ctx->path, &ctx->shm_rt);
     return APR_SUCCESS;
 }
+
+/* --- Hot-swap generation accounting -------------------------------
+ * Relaxed atomics: these are read by a dashboard, never by a decision,
+ * and exactness across a concurrent rebuild is worth nothing. Both are
+ * no-ops until SHM exists, which matters because the first build of
+ * every subsystem happens during post_config, before the segment is
+ * mapped -- so the very first generation is deliberately uncounted and
+ * built-minus-freed reads 1 rather than 2 until the first refresh.
+ * ------------------------------------------------------------------ */
+void bs_gen_note_built(bs_gen_subsys which)
+{
+    if (!bs_shm.gen || which < 0 || which >= BS_GEN_COUNT) return;
+    __atomic_fetch_add(&bs_shm.gen->built[which], 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&bs_shm.gen->last_sec[which],
+                     (apr_uint32_t)apr_time_sec(apr_time_now()),
+                     __ATOMIC_RELAXED);
+}
+
+void bs_gen_note_freed(bs_gen_subsys which)
+{
+    if (!bs_shm.gen || which < 0 || which >= BS_GEN_COUNT) return;
+    __atomic_fetch_add(&bs_shm.gen->freed[which], 1, __ATOMIC_RELAXED);
+}

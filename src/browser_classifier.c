@@ -17,6 +17,7 @@
  * Per-worker mod_watchdog ticks (singleton=0) so all worker
  * processes see the same active template set within one refresh
  * interval. */
+#include "shm.h"
 #include "browser_classifier.h"
 #include "botshield.h"
 
@@ -329,6 +330,7 @@ void bs_browser_templates_publish(server_rec *s,
     bs_browser_templates_state *to_destroy = bs_browser_pending;
     bs_browser_pending = NULL;
 
+    bs_gen_note_built(BS_GEN_TEMPLATES);
     bs_browser_templates_state *prior = __atomic_exchange_n(
         &bs_browser_active, new_state, __ATOMIC_ACQ_REL);
 
@@ -336,6 +338,7 @@ void bs_browser_templates_publish(server_rec *s,
 
     if (to_destroy) {
         apr_pool_destroy(to_destroy->pool);
+        bs_gen_note_freed(BS_GEN_TEMPLATES);
     }
 
     if (s) {

@@ -605,6 +605,16 @@ typedef struct {
  * counters are advisory — the same posture the gauges already take —
  * and a CAS-per-increment is not worth paying on the decision path.
  * -------------------------------------------------------------------- */
+/* Subsystems that rebuild and hot-swap their state at runtime. Order is
+ * used as an array index into bs_gen_counters, so append only. */
+typedef enum {
+    BS_GEN_DIRECTORY = 0,   /* bot directory + Aho-Corasick trie */
+    BS_GEN_ROBOTS,          /* parsed robots.txt */
+    BS_GEN_ALLOWLIST,       /* verified-bot IP ranges */
+    BS_GEN_TEMPLATES,       /* browser UA templates */
+    BS_GEN_COUNT
+} bs_gen_subsys;
+
 /* Load-average ring: 720 x 5s = one hour. */
 #define BS_M_LA_SLOTS    720
 #define BS_M_LA_PERIOD   5
@@ -796,10 +806,44 @@ typedef struct {
      * nothing alerting, traffic unprotected. A counter that should be
      * zero is the cheapest way to make it loud. */
     apr_uint64_t resp_status_mismatch_total;
+
     /* Windowed views of tier/outcome — see bs_metrics_slot above. */
     bs_metrics_slot min_slots [BS_M_MIN_SLOTS];
     bs_metrics_slot hour_slots[BS_M_HOUR_SLOTS];
 } bs_metrics;
+
+
+/* Per-subsystem hot-swap accounting. Lives at the end of the SHM
+ * segment, outside the persisted metrics block.
+ *
+ * Four subsystems rebuild themselves at runtime: build into a private
+ * pool, atomically swap it in, and retire the generation retired last
+ * tick -- so a reader holding a pointer across the swap never reads
+ * freed memory. That deferred free is the only place this module can
+ * leak. Shared memory cannot: it is carved once at post_config and
+ * never grows.
+ *
+ * Counting the builds and the frees measures that directly. The
+ * alternative -- watching process RSS -- cannot attribute growth to
+ * anyone, because every module in the child allocates from the same
+ * heap.
+ *
+ * freed lags built by one generation per publisher by design: a
+ * generation is retired on the NEXT rebuild, not its own. So a
+ * deployment whose sources never change rests at freed == 0, and that
+ * is healthy. The leak shape is built climbing while freed stays flat
+ * across repeated rebuilds. */
+typedef struct bs_gen_counters {
+    apr_uint64_t built[BS_GEN_COUNT];
+    apr_uint64_t freed[BS_GEN_COUNT];
+    apr_uint32_t last_sec[BS_GEN_COUNT];
+    apr_uint32_t _pad;
+} bs_gen_counters;
+
+/* Record a hot-swap generation build/free. Safe before SHM exists
+ * (post_config ordering) and from any child. */
+void bs_gen_note_built(bs_gen_subsys which);
+void bs_gen_note_freed(bs_gen_subsys which);
 
 /* Module-global runtime pointer struct. Populated once in post-config;
  * children inherit via fork. `rate_counters` stays opaque (`void *`)
@@ -873,6 +917,30 @@ typedef struct {
      * ATTACKER-CONTROLLED. Escape on output, including single quotes:
      * the dashboard quotes its attributes with them. */
     char                *rate_ua;
+    /* How many of rate_counter_count slots post_config actually handed
+     * out. Process-global rather than SHM: post_config runs before the
+     * fork, so every child inherits the same number. Exists because
+     * exhausting this pool degrades silently -- allocate_holder logs
+     * once and the affected bots simply stop being rate limited. */
+    apr_size_t           rate_slots_used;
+    /* Hot-swap generation accounting (see bs_gen_counters).
+     *
+     * Deliberately NOT inside bs_metrics, which is persisted across a
+     * restart. These count pools in a process, and a process's pools do
+     * not survive it -- carrying the numbers over would make Built
+     * accumulate across restarts and read as unbounded growth when
+     * nothing had grown. Keeping them here also spares the state-file
+     * format a version bump, which on this deployment would have thrown
+     * away the flagged table and an hour of load history to add a
+     * diagnostic. */
+    struct bs_gen_counters *gen;
+    /* Bytes the layout actually consumed, and the segment it was
+     * carved from. Recorded at post_config because that is the only
+     * place the individual table sizes are in scope, and an operator
+     * sizing BotShieldShmSize needs to see both numbers together --
+     * "16 MB" alone does not say whether there is room for anything. */
+    apr_size_t           segment_used;
+    apr_size_t           segment_total;
 } bs_shm_runtime;
 
 /* Module-global. Defined in shm.c; botshield.c

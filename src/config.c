@@ -957,11 +957,43 @@ static const char *bs_vhost_key(server_rec *s)
 /* Distinct ServerNames across the main server and every vhost, capped
  * at BS_M_MAX_VHOSTS. When the cap is hit the count includes the
  * catch-all slot, so callers can size for exactly what will be used. */
+/* Does this vhost run BotShield at all?
+ *
+ * scfg->any_enabled is set by bs_set_enabled wherever BotShieldEnabled
+ * On|LogOnly appears, so it is true for a vhost that only turns the
+ * module on inside a <Location> -- which the vhost-scope lookup_defaults
+ * would have missed. It already exists for bs_handler's endpoint
+ * routing; this reuses it rather than inventing a second answer to the
+ * same question.
+ *
+ * The main-server fallback covers config set outside any <VirtualHost>:
+ * cmd->server is the main server there, so only its scfg is flagged,
+ * but every vhost inherits the per-dir config and so really does run
+ * the module. */
+static int bs_vhost_runs_botshield(server_rec *sv, server_rec *base)
+{
+    bs_server_cfg *sc = ap_get_module_config(sv->module_config,
+                                             &botshield_module);
+    if (sc && sc->any_enabled) return 1;
+    bs_server_cfg *mc = ap_get_module_config(base->module_config,
+                                             &botshield_module);
+    return (mc && mc->any_enabled) ? 1 : 0;
+}
+
 static apr_uint32_t bs_vhost_count(server_rec *base)
 {
     const char *seen[BS_M_MAX_VHOSTS];
     apr_uint32_t n = 0;
     for (server_rec *s = base; s; s = s->next) {
+        /* Only vhosts that actually run the module. A block is 86 KB
+         * -- a full copy of every counter plus the minute and hour
+         * rings -- and a vhost that never evaluates a request would
+         * spend all of it on zeros. This host serves ~100 namevhosts,
+         * of which all but a couple are a ServerName, a certificate
+         * and a RedirectMatch; before this filter they consumed 31 of
+         * the 32 slots and 2.7 MB of shared memory holding nothing,
+         * while the directory read 100% full. */
+        if (!bs_vhost_runs_botshield(s, base)) continue;
         const char *key = bs_vhost_key(s);
         int dup = 0;
         for (apr_uint32_t i = 0; i < n; i++) {
@@ -983,11 +1015,21 @@ static void bs_vhost_dir_init(server_rec *base, apr_uint32_t n)
     if (!dir) return;
     dir->count = n;
     dir->overflowed = 0;
+    apr_uint32_t skipped = 0;
 
     for (server_rec *s = base; s; s = s->next) {
         bs_server_cfg *sc = ap_get_module_config(s->module_config,
                                                  &botshield_module);
         if (!sc) continue;
+        /* Same filter as bs_vhost_count, or the two would disagree
+         * about which vhost owns which index. A skipped vhost keeps
+         * vhost_idx 0 and its traffic lands in the global block only,
+         * which is where a redirect-only vhost belongs. */
+        if (!bs_vhost_runs_botshield(s, base)) {
+            sc->vhost_idx = 0;
+            skipped++;
+            continue;
+        }
         const char *key = bs_vhost_key(s);
         int idx = -1;
         for (apr_uint32_t i = 0; i < dir->count; i++) {
@@ -1018,11 +1060,21 @@ static void bs_vhost_dir_init(server_rec *base, apr_uint32_t n)
         sc->vhost_idx = idx;
     }
 
+    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, base,
+        "mod_botshield: per-vhost metrics: %u of %d slot(s) assigned, "
+        "%u vhost(s) skipped as not running the module (%" APR_SIZE_T_FMT
+        " KB each). A skipped vhost still counts toward the site-wide "
+        "totals; only its separate breakdown is dropped.",
+        n, BS_M_MAX_VHOSTS, skipped,
+        (apr_size_t)(BS_M_VHOST_NAME_MAX + sizeof(bs_metrics)) / 1024);
+
     if (dir->overflowed) {
         ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, base,
-            "mod_botshield: more than %d distinct ServerNames; the "
-            "extras share one per-vhost metrics slot labelled "
-            "\"(other vhosts)\"", BS_M_MAX_VHOSTS);
+            "mod_botshield: more than %d distinct ServerNames RUNNING "
+            "the module; the extras share one per-vhost metrics slot "
+            "labelled \"(other vhosts)\". Raise BS_M_MAX_VHOSTS and "
+            "BotShieldShmSize together if the breakdown matters.",
+            BS_M_MAX_VHOSTS);
     }
 }
 
@@ -1087,6 +1139,7 @@ static int bs_init_shm_layout(apr_pool_t *pconf, apr_pool_t *ptemp,
      * very end of the segment so every offset above stays put. */
     apr_size_t e21_total_bytes = BS_E21_RATE_SLOTS * sizeof(apr_uint64_t);
     apr_size_t e21_ua_bytes    = BS_E21_RATE_SLOTS * BS_RATE_UA_MAX;
+    apr_size_t gen_bytes       = sizeof(bs_gen_counters);
     /* E9 — strike table for repeated-429 escalation. Sized by the
      * main server's BotShieldRateLimitEscalateCapacity (default
      * BS_DEFAULT_STRIKE_SLOTS). */
@@ -1111,7 +1164,11 @@ static int bs_init_shm_layout(apr_pool_t *pconf, apr_pool_t *ptemp,
                               + metrics_bytes + e21_rate_bytes
                               + strike_bytes + safeguard_bytes
                               + nonce_bytes + vhost_bytes
-                              + e21_total_bytes + e21_ua_bytes;
+                              + e21_total_bytes + e21_ua_bytes
+                              + gen_bytes;
+
+    bs_shm.segment_used  = total_bytes;
+    bs_shm.segment_total = scfg->shm_size;
 
     if (scfg->shm_size < total_bytes) {
         ap_log_error(APLOG_MARK, APLOG_ERR, 0, s,
@@ -1241,6 +1298,8 @@ static int bs_init_shm_layout(apr_pool_t *pconf, apr_pool_t *ptemp,
         ((unsigned char *)bs_shm.vhost_dir + vhost_bytes);
     bs_shm.rate_ua = (char *)
         ((unsigned char *)bs_shm.rate_totals + e21_total_bytes);
+    bs_shm.gen = (bs_gen_counters *)
+        ((unsigned char *)bs_shm.rate_ua + e21_ua_bytes);
     /* The segment arrives zeroed, and zero is a legitimate load value.
      * Mark every history slot empty so a freshly started server draws
      * a short line from now rather than an hour of flat 0.00 that
@@ -2546,6 +2605,8 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     /* Slug-keyed bot rate limit needs the directory loaded (above)
      * and shares the rate-counter pool with directives + robots.txt. */
     bs_bot_rate_init(pconf, s, &next_slot);
+    /* Cursor after every allocator has run -- see rate_slots_used. */
+    bs_shm.rate_slots_used = (apr_size_t)(next_slot > 0 ? next_slot : 0);
     bs_check_staleness(pconf, s);
     bs_register_load_watchdog(pconf, s);
     bs_register_headroom_watchdog(pconf, s);

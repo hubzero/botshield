@@ -741,6 +741,7 @@ void bs_allow_ranges_publish(server_rec *s,
     bs_bot_ranges_state *to_destroy = m->pending_drain;
     m->pending_drain = NULL;
 
+    bs_gen_note_built(BS_GEN_ALLOWLIST);
     bs_bot_ranges_state *prior = __atomic_exchange_n(
         &scfg->bot_ranges, new_state, __ATOMIC_ACQ_REL);
 
@@ -748,6 +749,7 @@ void bs_allow_ranges_publish(server_rec *s,
 
     if (to_destroy) {
         apr_pool_destroy(to_destroy->pool);
+        bs_gen_note_freed(BS_GEN_ALLOWLIST);
     }
 }
 
