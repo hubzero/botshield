@@ -142,8 +142,9 @@ boot).
 ## Running tests
 
 ```bash
-tests/run                      # pytest suite, default markers
-tests/run --parallel           # xdist parallel (non-serial tests); ~20% faster
+tests/run                      # pytest suite, default markers (~9 min)
+tests/run --parallel           # one httpd per worker; ~3x faster (~3 min)
+tests/run --fast               # skip @heavy and @browser; quick edit loop
 tests/run --slow               # include @slow tests (soak, periodic_save)
 tests/run --match cookie       # substring filter; passed to pytest as -k
 tests/run --mark "not browser" # pytest -m marker expression
@@ -175,8 +176,17 @@ tests/.venv/bin/pytest tests/pytests/ -m "not serial" -n auto
 Defined in `pyproject.toml`; consumed by `tests/run` and the GitHub
 Actions workflow.
 
-- `@pytest.mark.serial` — mutates shared Apache state (config swap,
-  SHM restart). Runs outside the xdist pool.
+- `@pytest.mark.serial` — mutates state that is global to the httpd
+  *installation*, not just one instance. Runs outside the xdist pool.
+  Now rare: `test_mpm_matrix` is the honest case, because `a2enmod`
+  switches the MPM for every server on the box. Most tests carried
+  this marker only because they all shared one Apache; per-worker
+  instances (below) removed that reason and 27 files were unmarked.
+- `@pytest.mark.heavy` — several seconds, usually waiting on the 1s
+  watchdog. In the full gate, out of `--fast`. Deliberately *not*
+  `@slow`: that marker is opt-in and already filtered from the default
+  run, so reusing it would quietly drop load-state, trigger-dispatch
+  and namespace isolation from the gate to make one lane quicker.
 - `@pytest.mark.slow` — multi-second wait (e.g. the 40-second
   watchdog tick). Excluded by default; opt in with `tests/run --slow`.
 - `@pytest.mark.live_network` — requires reachable third-party
@@ -192,6 +202,46 @@ Actions workflow.
   pytest-playwright. Catches regressions no request library can see
   (interstitial JS execution, cookie attribute enforcement,
   auto-submit form wiring).
+
+## Parallel testing
+
+`--parallel` gives each xdist worker its own httpd instance rather than
+sharing one. That is the whole reason it works: the tests swap vhost
+config and reload, so on a shared server concurrent workers interleave
+edits into invalid config. Measured before this existed — two overrides
+collided into `mode='monitor'`, httpd refused to start, and 177 tests
+failed for that reason rather than on their own merits.
+
+Provision the instances once:
+
+```bash
+tests/setup/make-instances.sh 6      # w0..w5
+```
+
+Each gets its own port (8543+n), runtime dir, logs, SHM state file and
+external load-state file. `config.py` resolves all of it from
+`PYTEST_XDIST_WORKER`, and those per-worker values deliberately outrank
+the `BS_*` environment variables — `bstest.env` points at the single
+instance, and honouring it under xdist would send every worker back to
+one server. Outside xdist nothing changes, so a plain `pytest` run is
+unaffected.
+
+`tests/run --parallel` derives `-n` from how many instances are
+actually running, never `auto`. `auto` picks one worker per core, and a
+worker whose instance does not exist just gets connection refused —
+which surfaces as dozens of unrelated test failures rather than as
+"provision more instances".
+
+Worker ports start at 8543 so they never collide with the original
+single instance on 8443, which `--parallel`'s second phase still uses
+for the serial tests.
+
+### If a run crashes
+
+A crashed run can leave the shared vhost mid-override — e.g. a stray
+`BotShieldScoreSilent 500`, which then fails unrelated tests *even
+single-process*. If tests start failing inexplicably, diff the vhost
+against a known-good copy before suspecting the code.
 
 ## Reports
 

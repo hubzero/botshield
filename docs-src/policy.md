@@ -183,6 +183,42 @@ Args:
 Group iteration is exposed at `<prefix>/policy-status` for
 inspection (see [observability](../observability/index.html)).
 
+### Reading the effective policy
+
+`<prefix>/policy-status` also prints the tier thresholds and every flag
+trigger **after** `reset` processing, each with the source it came
+from:
+
+```
+## Tier thresholds (effective)
+silent       20   compiled default
+hard      10000   configured
+
+## Flag triggers (effective, after reset)
+# flag              action      value    mode      source
+honeypot_hit       score       +60      enforce   configured
+pow_fail_streak    tier_floor  silent   enforce   compiled default
+```
+
+The source column is the point. "Not in the config file" and "not in
+effect" are different things, and two production lockouts came from
+confusing them: a flag was configured to score 50 against a
+`BotShieldScoreSilent` of 20 that was a compiled-in default and
+appeared nowhere an operator could read. The config said `add=50` and
+nothing on the system said what 50 meant.
+
+Two interactions are called out inline rather than left to
+documentation nobody consults at the moment it matters:
+
+`~` — a flag scoring at or above the silent threshold. Such a flag is a
+challenge switch rather than a contributing signal. Bounded by
+`flags_excused` (one solve clears it for that cookie), so the residual
+risk is a client that *cannot* solve.
+
+`!!` — a `tier_floor` at or above `form` while the hard threshold is
+parked. The floor is MAX'd in after the score-to-tier decision and
+ignores thresholds entirely, so parking them does not contain it.
+
 ## Triggers — predicate-action engine
 
 Five trigger families share one config-time action engine and one

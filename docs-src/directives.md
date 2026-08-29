@@ -370,6 +370,30 @@ template per line (runs of `[0-9._]+` replaced by `X`).
 | `BotShieldBotRateLimit` | `off`, or `<target> <delay-sec>`, or `<target> <budget> <per>` | `* 1 sec` (synthesized) |
 | `BotShieldRateLimitEscalate` | `<rate-rule> <strikes> <per> [status=N] [ttl=N]` | none |
 
+### Alternation on `ua=`
+
+`ua=` accepts a comma-separated list of `@selectors`, matching if any
+one does:
+
+```apache
+BotShieldRule api-bot path="/api/*" \
+    ua=@search,@ai-input,@ai-train,@monitor \
+    status=403 ttl=0 log=api-bot
+```
+
+That replaces four rules identical but for a single token. Expanded at
+parse time into one entry per alternative — this family is strict
+first-match-wins, so N adjacent entries differing only on the UA axis
+and carrying identical actions are exactly equivalent to one entry with
+an OR. Copies take a `#N` name internally; the decision log is
+unaffected, since it reports the action's `log=` tag, which every copy
+shares.
+
+**Only `@selectors` split.** A bare substring pattern is passed through
+untouched, because a User-Agent legitimately contains commas —
+`Mozilla/5.0 (X11; Linux x86_64)` is full of them — and splitting those
+would silently change what an existing rule matches.
+
 Match keys: `ua=<substring>`, `ua=@<botgroup>`, or `ua=""` (no/empty
 User-Agent) for the UA gate
 (`*` or omit for any UA); `ipspec=<spec>` for the IP gate (CIDR file
@@ -501,7 +525,7 @@ it.
 | `path=<glob>` | `r->uri` — path only, **no** query string | must start with `/`, ≤256 chars |
 | `query=<glob>` | the query string alone | e.g. `query="*return=*"` |
 | `cookies=none\|any\|session` | the parsed `Cookie` header | bulk forms only |
-| `ua=<substring>\|@<botgroup>\|""` | User-Agent | `*` means "any", same as omitting. `ua=""` matches a request with **no** User-Agent header, or one present but empty — absence is not a substring, so it needs its own spelling. |
+| `ua=<substring>\|@<botgroup>[,@<botgroup>...]\|""` | User-Agent | `*` means "any", same as omitting. `ua=""` matches a request with **no** User-Agent header, or one present but empty — absence is not a substring, so it needs its own spelling. A **comma list of `@selectors`** matches if any of them does. |
 | `ipspec=<spec>` | client IP | `*`, a CIDR list, or a file path |
 
 Globs take `*` wildcards and a trailing `$` anchor. Named-cookie
