@@ -2893,6 +2893,12 @@ static int bs_d_botrow_cmp(const void *a, const void *b)
 {
     const bs_d_botrow *x = a, *y = b;
     if (x->seen != y->seen) return (x->seen < y->seen) ? 1 : -1;
+    /* Groups lead their tier, which is what keeps an idle one visible:
+     * at zero traffic it would otherwise sort in among ~700 idle bots
+     * and fall off the end of the table. An absent group row is
+     * ambiguous in a way a zero is not -- it could mean the bucket is
+     * empty or that no wildcard rule allocated the holder at all. */
+    if (x->aggregate != y->aggregate) return y->aggregate - x->aggregate;
     if (x->used != y->used) return (x->used < y->used) ? 1 : -1;
     return strcmp(x->slug ? x->slug : "", y->slug ? y->slug : "");
 }
@@ -3157,15 +3163,19 @@ int bs_dashboard_bots_handler(request_rec *r)
          * table is 700 rows of zeros with the interesting ones buried.
          * Filtering makes the emptiness honest instead of hiding it in
          * noise, and the empty case says why. */
-        int seen_n = 0, active = 0, nbots = 0;
+        int seen_n = 0, active = 0, nbots = 0, idle_groups = 0;
         apr_uint64_t seen_sum = 0;
         for (int i = 0; i < rows->nelts; i++) {
             bs_d_botrow *b = &((bs_d_botrow *)rows->elts)[i];
             if (!b->aggregate) nbots++;
             if (b->seen > 0) { seen_n++; seen_sum += b->seen; }
+            else if (b->aggregate) idle_groups++;
             if (b->used > 0) active++;
         }
-        int shown = seen_n < 100 ? seen_n : 100;
+        /* The sort puts every seen row first, then the idle groups, so
+         * one count covers both. */
+        int listed = seen_n + idle_groups;
+        int shown = listed < 100 ? listed : 100;
         ap_rprintf(r, "<section><h2>Per-bot state</h2>"
                       "<p class='note'>%d bot%s allocated a counter, %d "
                       "seen since restart (%" APR_UINT64_T_FMT " requests"
@@ -3183,13 +3193,13 @@ int bs_dashboard_bots_handler(request_rec *r)
                       "are catch-alls rather than one bot.</p>",
                    nbots, nbots == 1 ? "" : "s", seen_n,
                    seen_sum, active,
-                   shown < seen_n ? ", top 100 shown" : "");
+                   shown < listed ? ", top 100 shown" : "");
         ap_rputs("<table><thead><tr><th>Bot</th><th>Group</th>"
                  "<th>Category</th><th class='n'>Requests</th>"
                  "<th class='n'>Window use</th>"
                  "<th class='n'>Budget</th><th>Origin</th><th>Mode</th>"
                  "</tr></thead><tbody>", r);
-        if (seen_n == 0) {
+        if (listed == 0) {
             ap_rputs("<tr><td colspan='8' class='empty'>No bot has been "
                      "seen since the last restart. If this persists, the "
                      "module is classifying nothing as a known bot on "
