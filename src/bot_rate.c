@@ -574,6 +574,38 @@ int bs_bot_rate_check(request_rec *r)
 
     if (!holder || holder->shm_slot < 0) return OK;
 
+    /* Count the request before deciding on it. This is "requests seen
+     * attributed to this slot", not "requests admitted": a bot that is
+     * being 429'd is precisely the one an operator wants to find on the
+     * bots page, and a total that excluded its refusals would shrink as
+     * the limiter started working. */
+    if (bs_shm.rate_totals &&
+        (apr_size_t)holder->shm_slot < bs_shm.rate_counter_count) {
+        __atomic_fetch_add(&bs_shm.rate_totals[holder->shm_slot], 1,
+                           __ATOMIC_RELAXED);
+    }
+
+    /* Sample the agent for the bots page. The whole fixed-size block is
+     * written from a NUL-padded local, so whichever child lands last
+     * leaves a terminated string even if two interleave mid-copy.
+     *
+     * Skipped when the stored sample already matches: for a single-bot
+     * slot that is every request after the first, and the compare is
+     * cheaper than dirtying a shared cacheline 200 times a second. */
+    if (bs_shm.rate_ua &&
+        (apr_size_t)holder->shm_slot < bs_shm.rate_counter_count) {
+        const char *ua = apr_table_get(r->headers_in, "User-Agent");
+        char *dst = bs_shm.rate_ua + (apr_size_t)holder->shm_slot
+                                     * BS_RATE_UA_MAX;
+        if (!ua) ua = "";
+        if (strncmp(dst, ua, BS_RATE_UA_MAX - 1) != 0) {
+            char buf[BS_RATE_UA_MAX];
+            memset(buf, 0, sizeof(buf));
+            apr_cpystrn(buf, ua, sizeof(buf));
+            memcpy(dst, buf, sizeof(buf));
+        }
+    }
+
     bs_rate_counter *counters = (bs_rate_counter *)bs_shm.rate_counters;
     if (!counters) return OK;
     bs_rate_counter *slot = &counters[holder->shm_slot];

@@ -1083,6 +1083,10 @@ static int bs_init_shm_layout(apr_pool_t *pconf, apr_pool_t *ptemp,
      * no request failures). */
     #define BS_E21_RATE_SLOTS 2048
     apr_size_t e21_rate_bytes = BS_E21_RATE_SLOTS * sizeof(bs_rate_counter);
+    /* Cumulative companion to the fixed-window counters. Lives at the
+     * very end of the segment so every offset above stays put. */
+    apr_size_t e21_total_bytes = BS_E21_RATE_SLOTS * sizeof(apr_uint64_t);
+    apr_size_t e21_ua_bytes    = BS_E21_RATE_SLOTS * BS_RATE_UA_MAX;
     /* E9 — strike table for repeated-429 escalation. Sized by the
      * main server's BotShieldRateLimitEscalateCapacity (default
      * BS_DEFAULT_STRIKE_SLOTS). */
@@ -1106,7 +1110,8 @@ static int bs_init_shm_layout(apr_pool_t *pconf, apr_pool_t *ptemp,
                               + cv_rate_bytes + cv_log_bytes
                               + metrics_bytes + e21_rate_bytes
                               + strike_bytes + safeguard_bytes
-                              + nonce_bytes + vhost_bytes;
+                              + nonce_bytes + vhost_bytes
+                              + e21_total_bytes + e21_ua_bytes;
 
     if (scfg->shm_size < total_bytes) {
         ap_log_error(APLOG_MARK, APLOG_ERR, 0, s,
@@ -1231,6 +1236,11 @@ static int bs_init_shm_layout(apr_pool_t *pconf, apr_pool_t *ptemp,
         ((unsigned char *)bs_shm.nonce_table + nonce_bytes);
     bs_shm.vmetrics  = (bs_metrics *)
         ((unsigned char *)bs_shm.vhost_dir + sizeof(bs_vhost_dir));
+    /* Last block in the segment, so introducing it moved nothing. */
+    bs_shm.rate_totals = (apr_uint64_t *)
+        ((unsigned char *)bs_shm.vhost_dir + vhost_bytes);
+    bs_shm.rate_ua = (char *)
+        ((unsigned char *)bs_shm.rate_totals + e21_total_bytes);
     /* The segment arrives zeroed, and zero is a legitimate load value.
      * Mark every history slot empty so a freshly started server draws
      * a short line from now rather than an hour of flat 0.00 that

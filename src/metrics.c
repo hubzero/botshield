@@ -2604,6 +2604,7 @@ static void bs_d_page_open(request_rec *r, const char *title,
       "th{font-size:12px;color:var(--muted);font-weight:600}"
       "td.n{text-align:right;font-variant-numeric:tabular-nums}"
       ".empty{color:var(--muted);font-size:14px;margin:0}"
+      ".muted{color:var(--muted)}"
       "text-transform:uppercase;letter-spacing:.04em}"
       "border:1px solid var(--line);border-radius:999px;"
       "background:var(--surface);color:var(--ink);max-width:22rem}"
@@ -2826,15 +2827,20 @@ static void bs_d_page_body(request_rec *r)
  *
  * Rendered entirely from state that already exists: the rate limiter's
  * per-slug holders (budget, window, origin, mode, live counter) and the
- * bot directory (category, botgroup). It adds no counters of its own,
- * which is why "traffic" here means CURRENT WINDOW USAGE rather than a
- * lifetime total -- the fixed-window counter is what the limiter keeps,
- * and inventing a second cumulative table to make this page prettier
- * would be storage nobody asked for.
+ * bot directory (category, botgroup).
  *
- * What that costs the reader is stated on the page rather than left to
- * be discovered: a bot idle for longer than its window reads 0, and the
- * ordering is "busiest right now", not "biggest talker today".
+ * It used to show only the limiter's fixed-window counter, on the
+ * argument that a second cumulative table was storage nobody asked
+ * for. That was wrong in a way worth recording: at the default
+ * 1-second window the snapshot is empty essentially always -- 723 bots
+ * allocated, one row rendered -- so the page could not answer "which
+ * crawlers are hitting this site", which is the only question anyone
+ * opens it to ask. Cheap to store, and the absence was not neutral.
+ *
+ * So there are two numbers per row and they mean different things:
+ *   Requests     cumulative since restart. Who is actually here.
+ *   Window use   the limiter's live counter. Pressure right now, and
+ *                0 for any bot idle longer than its own window.
  * ====================================================================== */
 
 typedef struct {
@@ -2842,15 +2848,51 @@ typedef struct {
     const char *category;
     const char *botgroup;
     apr_uint32_t used;
+    apr_uint64_t seen;
     apr_uint32_t budget;
     apr_uint32_t window_sec;
     const char *origin;
+    const char *ua;          /* last agent seen on this slot, or NULL */
     int observe;
+    /* Not one bot: a catch-all holder whose contents are defined by
+     * what missed everything else. Rendered plainly rather than made
+     * to look like a directory entry. */
+    int aggregate;
+    /* How many slugs share this row's counter slot. >1 means the
+     * numbers are the group's, not this bot's -- a multi-slug
+     * BotShieldBotRateLimit directive resolves to one shared holder.
+     * Left unflagged, identical totals repeated down the table read as
+     * a rendering bug. */
+    int shared;
 } bs_d_botrow;
 
+/* ap_escape_html covers & < > and the double quote, but leaves the
+ * apostrophe -- and every attribute this dashboard emits is
+ * single-quoted, so a User-Agent carrying one would close the
+ * attribute and start writing markup. Every other data-tip on these
+ * pages is a module-generated label; this is the first one built from
+ * request input, so it gets its own pass. */
+static const char *bs_d_attr(apr_pool_t *pool, const char *s)
+{
+    const char *esc = ap_escape_html(pool, s ? s : "");
+    if (!strchr(esc, '\'')) return esc;
+    apr_size_t n = 0;
+    for (const char *p = esc; *p; p++) n += (*p == '\'') ? 5 : 1;
+    char *out = apr_palloc(pool, n + 1), *w = out;
+    for (const char *p = esc; *p; p++) {
+        if (*p == '\'') { memcpy(w, "&#39;", 5); w += 5; }
+        else             { *w++ = *p; }
+    }
+    *w = '\0';
+    return out;
+}
+
+/* Cumulative first: the table's job is "who is here", and the live
+ * window is the tiebreak among bots that are here right now. */
 static int bs_d_botrow_cmp(const void *a, const void *b)
 {
     const bs_d_botrow *x = a, *y = b;
+    if (x->seen != y->seen) return (x->seen < y->seen) ? 1 : -1;
     if (x->used != y->used) return (x->used < y->used) ? 1 : -1;
     return strcmp(x->slug ? x->slug : "", y->slug ? y->slug : "");
 }
@@ -2928,7 +2970,82 @@ int bs_dashboard_bots_handler(request_rec *r)
                     row.used = n;
                 }
             }
+            if (bs_shm.rate_totals && h->shm_slot >= 0 &&
+                (apr_size_t)h->shm_slot < bs_shm.rate_counter_count) {
+                row.seen = __atomic_load_n(
+                    &bs_shm.rate_totals[h->shm_slot], __ATOMIC_RELAXED);
+            }
+            if (bs_shm.rate_ua && h->shm_slot >= 0 &&
+                (apr_size_t)h->shm_slot < bs_shm.rate_counter_count) {
+                const char *ua = bs_shm.rate_ua
+                               + (apr_size_t)h->shm_slot * BS_RATE_UA_MAX;
+                /* Copied out of SHM before rendering: another child can
+                 * overwrite it mid-page, and half of one agent followed
+                 * by half of another is not worth the sharper number. */
+                if (*ua) row.ua = apr_pstrndup(r->pool, ua,
+                                               BS_RATE_UA_MAX - 1);
+            }
+            row.shared = h->shm_slot;   /* resolved to a count below */
             bs_bot_dir_lookup_slug(row.slug, &row.category, &row.botgroup);
+            *(bs_d_botrow *)apr_array_push(rows) = row;
+        }
+    }
+
+    /* The four aggregate holders live in their own fields, not in
+     * by_slug, so this table has never shown them -- and on this
+     * deployment they carry the single largest share of bot traffic
+     * (no-ua alone was ~39k requests/day when it was split out). A
+     * page titled "per-bot state" that silently omits the biggest
+     * buckets is worse than one that admits they are buckets. */
+    if (scfg && scfg->bot_rate_state) {
+        bs_bot_rate_state *st = scfg->bot_rate_state;
+        struct { const char *name; bs_bot_rate_slot *h; const char *what; }
+        agg[] = {
+            { "unknown-bot", st->unknown_bot_holder,
+              "bot-like UA that matches no directory entry" },
+            { "no-ua", st->no_ua_holder,
+              "no User-Agent header at all" },
+            { "fake-bot", st->fake_bot_holder,
+              "UA claimed a crawler, IP failed the cross-check" },
+            { "wildcard-fallback", st->wildcard_fallback_holder,
+              "known slug with no counter of its own, usually one the "
+              "directory gained since startup" },
+        };
+        for (unsigned a = 0; a < sizeof(agg) / sizeof(agg[0]); a++) {
+            bs_bot_rate_slot *h = agg[a].h;
+            if (!h) continue;
+            bs_d_botrow row;
+            memset(&row, 0, sizeof(row));
+            row.slug       = agg[a].name;
+            row.category   = agg[a].what;
+            row.budget     = h->budget;
+            row.window_sec = h->window_sec;
+            row.origin     = h->origin ? h->origin : "-";
+            row.observe    = h->observe;
+            row.aggregate  = 1;
+            if (counters && h->shm_slot >= 0) {
+                bs_rate_counter *c = &counters[h->shm_slot];
+                apr_uint32_t ws = __atomic_load_n(&c->window_start_sec,
+                                                  __ATOMIC_RELAXED);
+                apr_uint32_t n  = __atomic_load_n(&c->count,
+                                                  __ATOMIC_RELAXED);
+                if (h->window_sec && now_sec < (apr_uint64_t)ws + h->window_sec) {
+                    row.used = n;
+                }
+            }
+            if (bs_shm.rate_totals && h->shm_slot >= 0 &&
+                (apr_size_t)h->shm_slot < bs_shm.rate_counter_count) {
+                row.seen = __atomic_load_n(
+                    &bs_shm.rate_totals[h->shm_slot], __ATOMIC_RELAXED);
+            }
+            if (bs_shm.rate_ua && h->shm_slot >= 0 &&
+                (apr_size_t)h->shm_slot < bs_shm.rate_counter_count) {
+                const char *ua = bs_shm.rate_ua
+                               + (apr_size_t)h->shm_slot * BS_RATE_UA_MAX;
+                if (*ua) row.ua = apr_pstrndup(r->pool, ua,
+                                               BS_RATE_UA_MAX - 1);
+            }
+            row.shared = h->shm_slot;
             *(bs_d_botrow *)apr_array_push(rows) = row;
         }
     }
@@ -2940,6 +3057,25 @@ int bs_dashboard_bots_handler(request_rec *r)
                  "a scope on this vhost.</p></section>"
                  "</main></div></body></html>", r);
         return OK;
+    }
+
+    /* Turn each row's stashed slot index into "how many slugs land on
+     * this slot". Two passes over an array this size is nothing, and it
+     * avoids a second hash walk. */
+    {
+        apr_size_t nslots = bs_shm.rate_counter_count;
+        int *per_slot = nslots ? apr_pcalloc(r->pool, nslots * sizeof(int))
+                               : NULL;
+        for (int i = 0; per_slot && i < rows->nelts; i++) {
+            int sl = ((bs_d_botrow *)rows->elts)[i].shared;
+            if (sl >= 0 && (apr_size_t)sl < nslots) per_slot[sl]++;
+        }
+        for (int i = 0; i < rows->nelts; i++) {
+            bs_d_botrow *b = &((bs_d_botrow *)rows->elts)[i];
+            int sl = b->shared;
+            b->shared = (per_slot && sl >= 0 && (apr_size_t)sl < nslots)
+                      ? per_slot[sl] : 1;
+        }
     }
 
     qsort(rows->elts, rows->nelts, sizeof(bs_d_botrow), bs_d_botrow_cmp);
@@ -3021,31 +3157,44 @@ int bs_dashboard_bots_handler(request_rec *r)
          * table is 700 rows of zeros with the interesting ones buried.
          * Filtering makes the emptiness honest instead of hiding it in
          * noise, and the empty case says why. */
-        int active = 0;
+        int seen_n = 0, active = 0, nbots = 0;
+        apr_uint64_t seen_sum = 0;
         for (int i = 0; i < rows->nelts; i++) {
-            if (((bs_d_botrow *)rows->elts)[i].used > 0) active++;
+            bs_d_botrow *b = &((bs_d_botrow *)rows->elts)[i];
+            if (!b->aggregate) nbots++;
+            if (b->seen > 0) { seen_n++; seen_sum += b->seen; }
+            if (b->used > 0) active++;
         }
-        int shown = active < 50 ? active : 50;
+        int shown = seen_n < 100 ? seen_n : 100;
         ap_rprintf(r, "<section><h2>Per-bot state</h2>"
-                      "<p class='note'>%d bot%s tracked, %d with traffic "
-                      "in the current window%s. This is a LIVE SNAPSHOT, "
-                      "not a running total: the rate limiter keeps a "
-                      "fixed-window counter and nothing cumulative, so a "
-                      "bot idle longer than its own window reads 0. At a "
-                      "1-second window that is nearly all of them nearly "
-                      "all of the time. Budget 0 means unlimited.</p>",
-                   rows->nelts, rows->nelts == 1 ? "" : "s", active,
-                   shown < active ? ", top 50 shown" : "");
+                      "<p class='note'>%d bot%s allocated a counter, %d "
+                      "seen since restart (%" APR_UINT64_T_FMT " requests"
+                      "), %d with traffic in the current window%s. Bots "
+                      "never seen are not listed &mdash; the directory is "
+                      "the full roster, this is who turned up. "
+                      "&ldquo;Requests&rdquo; is cumulative and counts "
+                      "refusals as well as admissions; &ldquo;window "
+                      "use&rdquo; is the limiter's live counter, which "
+                      "reads 0 for any bot idle longer than its own "
+                      "window. Budget 0 means unlimited. Hover a bot "
+                      "name for the last User-Agent seen on it &mdash; "
+                      "on the rows marked (group) that sample is the "
+                      "only view of what is in the bucket, since those "
+                      "are catch-alls rather than one bot.</p>",
+                   nbots, nbots == 1 ? "" : "s", seen_n,
+                   seen_sum, active,
+                   shown < seen_n ? ", top 100 shown" : "");
         ap_rputs("<table><thead><tr><th>Bot</th><th>Group</th>"
-                 "<th>Category</th><th class='n'>Window use</th>"
+                 "<th>Category</th><th class='n'>Requests</th>"
+                 "<th class='n'>Window use</th>"
                  "<th class='n'>Budget</th><th>Origin</th><th>Mode</th>"
                  "</tr></thead><tbody>", r);
-        if (active == 0) {
-            ap_rputs("<tr><td colspan='7' class='empty'>No bot has "
-                     "traffic in its current window right now. Reload "
-                     "while a crawler is active, or widen the window "
-                     "with BotShieldBotRateLimit to make this readable."
-                     "</td></tr>", r);
+        if (seen_n == 0) {
+            ap_rputs("<tr><td colspan='8' class='empty'>No bot has been "
+                     "seen since the last restart. If this persists, the "
+                     "module is classifying nothing as a known bot on "
+                     "this vhost &mdash; check that a scope has it "
+                     "enabled.</td></tr>", r);
         }
         for (int i = 0; i < shown; i++) {
             bs_d_botrow *b = &((bs_d_botrow *)rows->elts)[i];
@@ -3056,18 +3205,47 @@ int bs_dashboard_bots_handler(request_rec *r)
                 apr_snprintf(budget, sizeof(budget),
                              "%u / %us", b->budget, b->window_sec);
             }
+            /* The agent hangs off the bot name, which is the cell a
+             * reader is already pointing at to ask "who is this". A
+             * slot seen only before the last restart has no sample. */
+            const char *uacell = b->ua
+                ? apr_psprintf(r->pool, "<span data-tip='%s'>%s</span>",
+                               bs_d_attr(r->pool, b->ua),
+                               ap_escape_html(r->pool, b->slug))
+                : ap_escape_html(r->pool, b->slug);
             ap_rprintf(r,
-                "<tr><td>%s</td><td>%s</td><td>%s</td>"
+                "<tr><td>%s%s</td><td>%s</td><td>%s</td>"
+                "<td class='n'>%" APR_UINT64_T_FMT "%s</td>"
                 "<td class='n'>%u</td><td class='n'>%s</td>"
                 "<td>%s</td><td>%s</td></tr>",
-                ap_escape_html(r->pool, b->slug),
+                uacell,
+                b->aggregate ? " <span class='muted'>(group)</span>" : "",
                 b->botgroup ? ap_escape_html(r->pool, b->botgroup) : "&mdash;",
                 b->category ? ap_escape_html(r->pool, b->category) : "&mdash;",
+                b->seen,
+                /* Marked, not hidden: the number is real, it just
+                 * belongs to every slug on the shared holder. */
+                b->shared > 1 ? "<span class='muted'>&#8225;</span>" : "",
                 b->used, budget,
                 ap_escape_html(r->pool, b->origin),
                 b->observe ? "observe" : "enforce");
         }
-        ap_rputs("</tbody></table></section>", r);
+        ap_rputs("</tbody></table>", r);
+        {
+            int any_shared = 0;
+            for (int i = 0; i < shown; i++) {
+                if (((bs_d_botrow *)rows->elts)[i].shared > 1) {
+                    any_shared = 1; break;
+                }
+            }
+            if (any_shared) {
+                ap_rputs("<p class='note'>&#8225; counter is shared by "
+                         "every slug on one multi-slug rule, so the "
+                         "request total is the group's, not this bot's."
+                         "</p>", r);
+            }
+        }
+        ap_rputs("</section>", r);
     }
 
     ap_rputs("</main></div></body></html>", r);
@@ -3213,6 +3391,66 @@ int bs_dashboard_responses_handler(request_rec *r)
     }
 
     ap_rputs("</section>", r);
+
+    /* Which tier was selected.
+     *
+     * Recorded since M9.2 and never rendered, so the only way to learn
+     * that the form and captcha tiers have never fired on this
+     * deployment was to grep the decision log -- which is exactly what
+     * had to be done during two incidents. It is also the fastest
+     * check that a threshold change did what was intended. */
+    {
+        const char *tl[] = { "none", "pass", "silent", "form", "captcha" };
+        /* pass is the good outcome and wears it; the three challenge
+         * tiers escalate through the categorical slots rather than the
+         * status palette, because a captcha is not a "worse" outcome
+         * than a silent challenge, it is a costlier one. */
+        const char *tf[] = { "var(--neutral)", "var(--good)", "var(--c1)",
+                             "var(--c4)", "var(--c2)" };
+        apr_uint64_t tv[BS_M_TIER_COUNT], tt = 0;
+        for (int i = 0; i < BS_M_TIER_COUNT; i++) {
+            tv[i] = w.tier[i]; tt += tv[i];
+        }
+        bs_d_stacked(r, "tier", "Tier selected", tl, tv, tf,
+                     BS_M_TIER_COUNT, tt);
+        ap_rputs("<section><p class='note'>A tier that never appears is a "
+                 "tier that has never run. Both form and captcha are "
+                 "untested on this deployment and the score thresholds "
+                 "are parked to keep them unreachable &mdash; this is "
+                 "where that shows.</p></section>", r);
+    }
+
+    /* Cookie state on arrival.
+     *
+     * The distinction that matters is solved vs ok. Under always-mint
+     * every returning client holds a signature-valid cookie, so "valid"
+     * says nothing about whether a challenge was ever passed -- and a
+     * cookie-harvesting bot looks identical to a real visitor until you
+     * separate the two.
+     *
+     * It is also the challenge-loop signature. The lockout in ticket
+     * #5168 looked exactly like this: solved cookies arriving
+     * repeatedly alongside challenges, once per second. On a bar it is
+     * one glance rather than a log query. */
+    {
+        const char *cl[] = { "ok", "expired", "bad sig", "bad format",
+                             "absent", "minted", "solved" };
+        const char *cf[] = { "var(--c1)", "var(--c4)", "var(--crit)",
+                             "var(--c2)", "var(--neutral)", "var(--c5)",
+                             "var(--good)" };
+        apr_uint64_t cv[BS_M_COOKIE_COUNT], ct = 0;
+        for (int i = 0; i < BS_M_COOKIE_COUNT; i++) {
+            cv[i] = w.cookie[i]; ct += cv[i];
+        }
+        bs_d_stacked(r, "ck", "Cookie state on arrival", cl, cv, cf,
+                     BS_M_COOKIE_COUNT, ct);
+        ap_rputs("<section><p class='note'>&ldquo;solved&rdquo; carries "
+                 "proof a challenge was passed; &ldquo;ok&rdquo; is a "
+                 "valid cookie with no such proof, which is what a "
+                 "cookie-harvesting bot holds. Solved cookies arriving in "
+                 "quantity beside a high challenge count is the shape of "
+                 "a challenge loop.</p></section>", r);
+    }
 
     /* Outcome table: the full vocabulary, including the rare ones. */
     {
@@ -3699,24 +3937,13 @@ int bs_dashboard_handler(request_rec *r)
         }
         ap_rputs("</section>", r);
 
-        /* Kinds of response, not a good-to-bad scale: a block is
-         * BotShield working, not a failure. So categorical slots
-         * rather than status tokens. Scaled to `ours`, so this reads
-         * as "of what we answered, what was it". */
-        const char *labels[] = { "challenge", "block", "rate limited",
-                                 "redirect", "endpoint", "dashboard" };
-        const char *fills[]  = { "var(--c1)", "var(--c2)", "var(--c3)",
-                                 "var(--c4)", "var(--c5)", "var(--neutral)" };
-        apr_uint64_t vals[]  = { w.req_resp[BS_M_RESP_CHALLENGE],
-                                 w.req_resp[BS_M_RESP_BLOCK],
-                                 w.req_resp[BS_M_RESP_RATE_LIMITED],
-                                 w.req_resp[BS_M_RESP_REDIRECT],
-                                 w.req_resp[BS_M_RESP_ENDPOINT],
-                                 w.req_resp[BS_M_RESP_OBSERVE] };
-        /* The instrument wears the neutral, not a categorical slot: it
-         * is not one of the policy responses, it is you looking. */
-        bs_d_stacked(r, "rk", "BotShield response breakdown", labels, vals,
-                     fills, 6, ours);
+        /* The response breakdown that used to sit here lives on
+         * /dashboard/responses, which is the page about exactly this
+         * and shows the same bar plus the outcome vocabulary. Two
+         * copies of one chart is one chart too many, and the overview
+         * already answers "how much did BotShield answer" in the
+         * responder bar above -- the split of that share is the
+         * responses page's whole subject. */
     }
 
     /* Rate limiting and the per-bot view moved to /dashboard/bots.

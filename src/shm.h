@@ -74,6 +74,13 @@ extern "C" {
  * at default capacities). 8M no longer fits the default config. */
 #define BS_DEFAULT_SHM_SIZE       (16 * 1024 * 1024)
 
+/* Bytes reserved per rate-limit slot for the last-seen User-Agent,
+ * NUL included. Long enough for the real crawler agents (the longest
+ * in the shipped directory is ~130 bytes) without paying for the
+ * multi-kilobyte junk that probe traffic sends; anything longer is
+ * truncated, which is fine for a hint. */
+#define BS_RATE_UA_MAX            192
+
 /* Flagged-IP table */
 #define BS_DEFAULT_FLAGGED_SLOTS  50000
 #define BS_FLAGGED_MIN_SLOTS      1024
@@ -834,6 +841,38 @@ typedef struct {
      * verify, second presentation rejected. */
     bs_nonce_slot       *nonce_table;
     apr_size_t           nonce_capacity;
+    /* Cumulative per-slot request totals, parallel to rate_counters
+     * and the same length. Separate array rather than a third field
+     * on bs_rate_counter: that struct is CAS'd as a single u64 (see
+     * the _Static_assert in bs_rate_counter_admit) and widening it
+     * would need a 128-bit CAS for no gain. These are plain relaxed
+     * fetch-adds -- an exact count is not worth ordering guarantees
+     * on a dashboard statistic.
+     *
+     * Not persisted across restart, like every other counter on the
+     * bots page; the page says "since restart" on its face. */
+    apr_uint64_t        *rate_totals;
+    /* Most recent User-Agent attributed to each rate-limit slot, as a
+     * flat rate_counter_count * BS_RATE_UA_MAX char array. The bots
+     * page is built from the config-time slug table, which knows a
+     * bot's directory pattern but has never seen a request -- so
+     * without this there is no way to show what actually arrived.
+     *
+     * It matters most for the slots that are not one bot: the
+     * unknown-bot, no-ua, fake-bot and wildcard-fallback aggregates
+     * are defined by what falls into them, and a sample UA is the only
+     * view inside.
+     *
+     * A sample, not a history: last writer wins, and concurrent
+     * children can interleave bytes from two agents. Garbled text is
+     * an acceptable outcome for a diagnostic hint; the buffer stays
+     * NUL-terminated regardless because every writer writes the full
+     * fixed-size block from a NUL-padded local, so the final byte is 0
+     * no matter which writer lands last.
+     *
+     * ATTACKER-CONTROLLED. Escape on output, including single quotes:
+     * the dashboard quotes its attributes with them. */
+    char                *rate_ua;
 } bs_shm_runtime;
 
 /* Module-global. Defined in shm.c; botshield.c
