@@ -682,7 +682,6 @@ int bs_policy_status_handler(request_rec *r, bs_dir_cfg *cfg)
 {
     apr_table_setn(r->subprocess_env, "BS_ENDPOINT", "obs");
     bs_log_observability_request(r);
-    (void)cfg;
     if (r->method_number != M_GET && r->method_number != M_OPTIONS) {
         r->status = HTTP_METHOD_NOT_ALLOWED;
         apr_table_setn(r->headers_out, "Allow", "GET, OPTIONS");
@@ -735,6 +734,98 @@ int bs_policy_status_handler(request_rec *r, bs_dir_cfg *cfg)
     }
 
     /* --- robots.txt --- */
+    /* --- effective tier thresholds ---
+     *
+     * Printed with their source because "not in the config file" and
+     * "not in effect" are different things, and confusing them is what
+     * made a flag worth 50 points a permanent challenge loop: the 20
+     * it had to clear was a compiled-in default that appeared nowhere
+     * an operator could read. */
+    {
+        int sil = bs_effective_int(cfg ? cfg->score_silent : 0,
+                                   BS_DEFAULT_SCORE_SILENT);
+        int hrd = bs_effective_int(cfg ? cfg->score_hard : 0,
+                                   BS_DEFAULT_SCORE_HARD);
+        int cap = bs_effective_int(cfg ? cfg->score_captcha : 0,
+                                   BS_DEFAULT_SCORE_CAPTCHA);
+        ap_rputs("## Tier thresholds (effective)\n", r);
+        ap_rprintf(r, "silent   %6d   %s\n", sil,
+                   (cfg && cfg->score_silent > 0) ? "configured"
+                                                  : "compiled default");
+        ap_rprintf(r, "hard     %6d   %s\n", hrd,
+                   (cfg && cfg->score_hard > 0) ? "configured"
+                                                : "compiled default");
+        ap_rprintf(r, "captcha  %6d   %s\n\n", cap,
+                   (cfg && cfg->score_captcha > 0) ? "configured"
+                                                   : "compiled default");
+
+        /* --- effective flag triggers, after reset processing --- */
+        ap_rputs("## Flag triggers (effective, after reset)\n", r);
+        if (!scfg->flag_triggers || scfg->flag_triggers->nelts == 0) {
+            ap_rputs("# (none)\n\n", r);
+        } else {
+            ap_rputs("# flag              action      value    mode      "
+                     "source\n", r);
+            int warned = 0;
+            for (int i = 0; i < scfg->flag_triggers->nelts; i++) {
+                bs_flag_trigger_entry *e = APR_ARRAY_IDX(
+                    scfg->flag_triggers, i, bs_flag_trigger_entry *);
+                const char *act = e->action == BS_FLAG_ACT_SCORE ? "score"
+                                : e->action == BS_FLAG_ACT_TIER_FLOOR
+                                  ? "tier_floor" : "reset";
+                char val[32];
+                if (e->action == BS_FLAG_ACT_SCORE) {
+                    apr_snprintf(val, sizeof(val), "%+d", e->score_add);
+                } else if (e->action == BS_FLAG_ACT_TIER_FLOOR) {
+                    apr_snprintf(val, sizeof(val), "%s",
+                                 bs_tier_name(e->tier_min));
+                } else {
+                    apr_snprintf(val, sizeof(val), "-");
+                }
+                ap_rprintf(r, "%-18s %-11s %-8s %-9s %s\n",
+                           e->flag_name, act, val,
+                           e->mode == BS_TMODE_OBSERVE ? "observe" : "enforce",
+                           e->from_default ? "compiled default" : "configured");
+                /* The two conditions that have actually locked users
+                 * out of this deployment. Reported here rather than
+                 * only in the docs, because both were invisible in the
+                 * config that produced them. */
+                /* Note what this does NOT say any more. Before
+                 * flags_excused it said "forever", which was accurate
+                 * then: flags re-apply every request and solving did
+                 * not clear them. It is no longer true -- a client that
+                 * solves once has the flags it carried at that moment
+                 * excused for the life of the cookie -- and leaving the
+                 * stronger wording in would push operators into
+                 * lowering scores that no longer need lowering. */
+                if (e->action == BS_FLAG_ACT_SCORE
+                    && e->mode != BS_TMODE_OBSERVE
+                    && e->score_add >= sil) {
+                    ap_rprintf(r, "  ~  %s scores %+d on its own, at or above "
+                                  "the silent threshold of %d: this flag is a "
+                                  "challenge switch, not a contributing "
+                                  "signal. Bounded by flags_excused -- one "
+                                  "solve clears it for that cookie -- so a "
+                                  "client that CANNOT solve stays "
+                                  "challenged.\n",
+                               e->flag_name, e->score_add, sil);
+                    warned++;
+                }
+                if (e->action == BS_FLAG_ACT_TIER_FLOOR
+                    && e->mode != BS_TMODE_OBSERVE
+                    && e->tier_min >= BS_TIER_HARD && hrd >= 10000) {
+                    ap_rprintf(r, "  !! %s forces tier %s, which is MAXed in "
+                                  "after the score decision and ignores the "
+                                  "parked hard threshold of %d.\n",
+                               e->flag_name, bs_tier_name(e->tier_min), hrd);
+                    warned++;
+                }
+            }
+            ap_rprintf(r, "# %d note(s). '!!' is a fault; '~' is a design\n"
+                          "# consequence worth knowing.\n\n", warned);
+        }
+    }
+
     ap_rputs("## robots.txt (BotShieldRobotsTxt)\n", r);
     if (!scfg->robots_txt_path) {
         ap_rputs("# (not configured)\n", r);
