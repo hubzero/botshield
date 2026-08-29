@@ -24,7 +24,11 @@ import pytest
 from botshield_test import client
 
 
-pytestmark = pytest.mark.serial
+# No longer serial. The marker meant "mutates Apache config or SHM",
+# and both were only a problem because every test shared one server.
+# Each xdist worker now drives its own httpd instance with its own
+# ports, logs, SHM and state file (tests/setup/make-instance.sh), so
+# these are independent. Verified: this file's tests pass under -n 4.
 
 
 # --- status=<code> ---------------------------------------------------

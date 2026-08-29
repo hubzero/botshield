@@ -1,0 +1,25 @@
+[Unit]
+# One isolated BotShield test server per xdist worker.
+#
+# Templated rather than a single shared instance because the tests
+# mutate server config: config_override rewrites a vhost file and
+# reloads. With one server, concurrent workers overwrite each other's
+# edits and Apache refuses to start on the resulting file. Separate
+# processes, ports, logs and state files are what make the suite
+# actually parallelisable.
+Description=BotShield isolated test httpd (worker %i)
+After=network.target
+
+[Service]
+Type=forking
+PIDFile=/run/httpd-bstest-w%i/httpd.pid
+ExecStartPre=/usr/bin/mkdir -p /run/httpd-bstest-w%i
+ExecStartPre=/usr/bin/chown apache:apache /run/httpd-bstest-w%i
+ExecStart=/usr/sbin/httpd -f /etc/httpd/bstest/w%i/httpd.conf
+ExecReload=/usr/sbin/httpd -f /etc/httpd/bstest/w%i/httpd.conf -k graceful
+ExecStop=/usr/sbin/httpd -f /etc/httpd/bstest/w%i/httpd.conf -k graceful-stop
+KillSignal=SIGCONT
+PrivateTmp=false
+
+[Install]
+WantedBy=multi-user.target

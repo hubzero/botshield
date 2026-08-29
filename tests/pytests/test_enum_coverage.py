@@ -42,6 +42,7 @@ def _fire_verify(pending: str, ip: str):
     )
 
 
+@pytest.mark.heavy
 def test_all_reachable_outcomes_emitted(config_override, rate_slot_ip, log_slice):
     with log_slice as slc:
         # allow: browser-like request

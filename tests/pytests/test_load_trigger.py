@@ -131,6 +131,7 @@ def test_load_trigger_inert_under_normal(config_override, fresh_ip,
 # --- Trigger fires under hot ------------------------------------
 
 
+@pytest.mark.heavy
 def test_load_trigger_fires_under_hot(config_override, fresh_ip,
                                       log_slice):
     """state>=warm trigger fires when state has escalated to hot.
@@ -167,6 +168,7 @@ def test_load_trigger_fires_under_hot(config_override, fresh_ip,
 # --- status=403 short-circuits the request ----------------------
 
 
+@pytest.mark.heavy
 def test_load_trigger_status_blocks_under_hot(
     config_override, fresh_ip,
 ):
@@ -196,6 +198,7 @@ def test_load_trigger_status_blocks_under_hot(
 # --- Specificity: state=hot fires before state>=warm if listed first
 
 
+@pytest.mark.heavy
 def test_load_trigger_first_match_wins_specific_first(
     config_override, fresh_ip, log_slice,
 ):

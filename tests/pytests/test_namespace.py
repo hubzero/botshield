@@ -29,7 +29,11 @@ import pytest
 from botshield_test import client
 
 
-pytestmark = pytest.mark.serial
+# No longer serial. The marker meant "mutates Apache config or SHM",
+# and both were only a problem because every test shared one server.
+# Each xdist worker now drives its own httpd instance with its own
+# ports, logs, SHM and state file (tests/setup/make-instance.sh), so
+# these are independent. Verified: this file's tests pass under -n 4.
 
 
 PASS_UA = "Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/125.0"
@@ -88,6 +92,7 @@ def test_share_scope_accepts_normal_token(config_override, fresh_ip):
 # --- Flagged-IP isolation across namespaces -------------------------
 
 
+@pytest.mark.heavy
 def test_flagged_ip_isolated_across_share_scopes(
     config_override, rate_slot_ip, log_slice,
 ):
@@ -134,6 +139,7 @@ def test_flagged_ip_isolated_across_share_scopes(
 # --- Re-entry under same scope sees flag again ----------------------
 
 
+@pytest.mark.heavy
 def test_share_scope_revisit_sees_prior_flag(
     config_override, rate_slot_ip, log_slice,
 ):

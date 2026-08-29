@@ -25,7 +25,11 @@ import pytest
 from botshield_test import client, cookies
 
 
-pytestmark = pytest.mark.serial
+# No longer serial. The marker meant "mutates Apache config or SHM",
+# and both were only a problem because every test shared one server.
+# Each xdist worker now drives its own httpd instance with its own
+# ports, logs, SHM and state file (tests/setup/make-instance.sh), so
+# these are independent. Verified: this file's tests pass under -n 4.
 
 BROWSER_UA = "Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/125.0"
 ACCEPT_LANG = "en-US,en;q=0.9"

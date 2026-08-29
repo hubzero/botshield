@@ -19,7 +19,11 @@ import pytest
 from botshield_test import client, cookies, ips as _ips
 
 
-pytestmark = pytest.mark.serial
+# No longer serial. The marker meant "mutates Apache config or SHM",
+# and both were only a problem because every test shared one server.
+# Each xdist worker now drives its own httpd instance with its own
+# ports, logs, SHM and state file (tests/setup/make-instance.sh), so
+# these are independent. Verified: this file's tests pass under -n 4.
 
 
 BROWSER_UA = "Mozilla/5.0 (X11) Chrome/145"
@@ -71,6 +75,7 @@ def test_silent_tier_round_trip(fresh_ip):
 
 # --- MEDIUM #1: render-side carry-forward refuses expired cookies --
 
+@pytest.mark.heavy
 def test_expired_cookie_does_not_carry_rep_to_render_path(
     config_override, log_slice,
 ):

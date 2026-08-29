@@ -140,6 +140,7 @@ def test_metrics_endpoint_emits_load_state_and_counter():
 # --- External file path ------------------------------------------
 
 
+@pytest.mark.heavy
 def test_invalid_state_file_value_treated_as_normal(config_override):
     """Garbage in the file → watchdog parses as 'normal' rather
     than crashing or jumping to a wrong state. The warning gets
@@ -169,6 +170,7 @@ def test_invalid_state_file_value_treated_as_normal(config_override):
     )
 
 
+@pytest.mark.heavy
 def test_external_hot_promotes_through_hysteresis(config_override):
     """Set the file to `hot`. Hysteresis: 3 ticks to promote to
     warm + 2 ticks to promote to hot = 5 ticks at 1s/tick. Allow

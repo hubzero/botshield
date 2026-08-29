@@ -22,6 +22,10 @@
 #                      non-serial tests in parallel (-n auto), then
 #                      serial tests sequentially. Default is fully
 #                      sequential (-n 0).
+#   --fast             Quick lane for the edit-test loop: skips @heavy
+#                      and @browser. NOT a substitute for a full run
+#                      before deploying, and not parallel -- see the
+#                      note on config_override below.
 #   --slow             Include tests marked @slow (e.g. the 40s
 #                      periodic-save watchdog wait). Excluded by
 #                      default so the suite finishes fast.
@@ -50,6 +54,20 @@ CATEGORIES=("${DEFAULT_CATEGORIES[@]}")
 ONLY=()
 MATCH=""
 MARK_EXTRA=""
+# --fast: the edit-build-test loop, not the gate. Drops the two
+# categories that cost wall-clock without changing often: @heavy
+# (seconds spent waiting on the 1s watchdog) and @browser (a real
+# Chromium per test). The default run is deliberately left alone --
+# making the quick lane quick by weakening the gate everyone relies on
+# is how a suite stops catching things.
+#
+# Deliberately does NOT imply --parallel. config_override rewrites one
+# shared dev-vhost.conf and 206 call sites use it, so concurrent
+# workers interleave edits into invalid config: a measured run left
+# mode='monitor' in the file, httpd refused to start, and 177 tests
+# failed for that reason rather than on their own merits. Parallelism
+# needs per-worker config first.
+FAST=0
 VERBOSE=0
 LIST_ONLY=0
 PARALLEL=0
@@ -68,6 +86,7 @@ while [[ $# -gt 0 ]]; do
     --mark)     MARK_EXTRA="$2"; shift 2 ;;
     --parallel) PARALLEL=1;      shift   ;;
     --slow)     SLOW=1;          shift   ;;
+    --fast)     FAST=1;          shift   ;;
     --verbose)  VERBOSE=1;       shift   ;;
     --list)     LIST_ONLY=1;     shift   ;;
     --help|-h)
@@ -111,6 +130,8 @@ run_pytests() {
   # Slow tests opt-in; default filter excludes them.
   local slow_filter=""
   [[ $SLOW -eq 0 ]] && slow_filter="not slow"
+  local fast_filter=""
+  [[ $FAST -eq 1 ]] && fast_filter="not heavy and not browser"
 
   # Reports land under tests/reports/ (gitignored). One JUnit XML
   # per phase (so CI can surface them as separate steps), plus one
@@ -146,7 +167,7 @@ run_pytests() {
     # Compose phase-marker + --slow filter + caller's --mark, in that
     # order. Everything is optional.
     local m_expr
-    m_expr=$(_join_and "$marker" "$slow_filter" "$MARK_EXTRA")
+    m_expr=$(_join_and "$marker" "$slow_filter" "$fast_filter" "$MARK_EXTRA")
     # Sanitize the marker for use in a filename.
     local phase="${marker:-all}"
     phase="${phase// /_}"; phase="${phase//\(/}"; phase="${phase//\)/}"
@@ -228,7 +249,24 @@ run_pytests() {
   local start_pass=$pass start_skip=$skip start_fail=$fail
 
   if [[ $PARALLEL -eq 1 ]]; then
-    _one_pytest_invocation "not serial" "auto"
+    # -n is the number of PROVISIONED instances, never "auto". xdist's
+    # auto picks one worker per core, and a worker whose instance does
+    # not exist gets connection refused -- which shows up as dozens of
+    # unrelated failures rather than as "provision more instances".
+    # Measured: auto span 6 workers against 4 instances and produced 72
+    # connection errors and 187 failures.
+    local _inst=0
+    for _i in 0 1 2 3 4 5 6 7; do
+      systemctl is-active --quiet "httpd-bstest@$_i" 2>/dev/null && _inst=$((_inst+1))
+    done
+    if [[ $_inst -lt 2 ]]; then
+      echo "  no per-worker instances running; run tests/setup/make-instances.sh N" >&2
+      echo "  falling back to a single-process run" >&2
+      _one_pytest_invocation "not serial" ""
+    else
+      echo "  parallel across $_inst provisioned instances"
+      _one_pytest_invocation "not serial" "$_inst"
+    fi
     _one_pytest_invocation "serial" ""
   else
     _one_pytest_invocation "" ""

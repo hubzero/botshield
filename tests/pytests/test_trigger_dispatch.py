@@ -32,13 +32,17 @@ import pytest
 from botshield_test import client, ips as _ips
 
 
-pytestmark = pytest.mark.serial
+# No longer serial. The marker meant "mutates Apache config or SHM",
+# and both were only a problem because every test shared one server.
+# Each xdist worker now drives its own httpd instance with its own
+# ports, logs, SHM and state file (tests/setup/make-instance.sh), so
+# these are independent. Verified: this file's tests pass under -n 4.
 
 
 PASS_UA = "Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/125.0"
 PASS_AL = "en-US,en;q=0.9"
 
-LOAD_FILE_PATH = "/etc/botshield/load.state.test"
+from botshield_test.config import LOAD_STATE_FILE as LOAD_FILE_PATH
 
 
 def _g(path, xff, **kw):
@@ -182,6 +186,7 @@ def test_cookie_and_env_pass_then_path_runs(
 # --- Load triggers in the shared family ----------------------------
 
 
+@pytest.mark.heavy
 def test_load_short_circuit_blocks_path(
     config_override, log_slice, fresh_ip,
 ):
@@ -218,6 +223,7 @@ def test_load_short_circuit_blocks_path(
     )
 
 
+@pytest.mark.heavy
 def test_env_pass_then_load_blocks_path(
     config_override, log_slice, fresh_ip,
 ):
