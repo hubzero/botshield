@@ -52,6 +52,12 @@ DEFAULTS = {
     # already forming and shedding is late.
     "warm_pct": 50,
     "hot_pct": 80,
+    # Listen-queue depth that on its own means hot. A queue of 1 is
+    # scheduling jitter, not backlog: observed on 2026-08-31 declaring
+    # hot at active=1/100, i.e. with 99 children idle. That single
+    # sample gated the shed ladder's hot rungs, which fired 193 times
+    # against a server whose latency never left 26-39ms.
+    "hot_queue": 5,
 }
 
 
@@ -147,25 +153,44 @@ def read_max_children(pool_conf):
     return 0
 
 
+_RANK = {"normal": 0, "warm": 1, "hot": 2}
+
+
+def _worst(a, b):
+    """Worst-of, so no signal can quietly downgrade another."""
+    return a if _RANK[a] >= _RANK[b] else b
+
+
 def classify(s, cfg):
     """Worst-of across saturation and queueing.
 
     Percent-of-children is the smooth signal; the queue is the discrete
     one. They are not redundant: a pool can sit at 100% of children with
     an empty queue and be keeping up exactly, and it can show a modest
-    active count with a queue if requests are arriving in bursts. The
-    queue is the one that means users are waiting.
+    active count with a queue if requests are arriving in bursts.
+
+    A queue does mean someone waited, but depth matters. This used to
+    call hot on any queue at all, and in production that meant
+    `active=1/100 queue=1` -- one busy child, ninety-nine idle --
+    publishing the same state as a genuinely exhausted pool. Depth 1 is
+    a request that arrived between accepts, not a backlog. So a shallow
+    queue is warm, and hot needs either real depth or a queue forming
+    while the pool is already near its ceiling.
     """
     state = "normal"
     if s["pct"] >= cfg["warm_pct"]:
-        state = "warm"
+        state = _worst(state, "warm")
     if s["pct"] >= cfg["hot_pct"]:
-        state = "hot"
+        state = _worst(state, "hot")
     if s["listen_queue"] > 0:
-        # Requests are already waiting for a child. Never merely warm.
-        state = "hot"
+        state = _worst(state, "warm")
+    if (s["listen_queue"] >= cfg["hot_queue"]
+            or (s["listen_queue"] > 0 and s["pct"] >= cfg["hot_pct"])):
+        state = _worst(state, "hot")
     if s["max_children_reached_delta"] > 0:
-        state = "hot"
+        # Unchanged: the pool actually ran out of children. That is the
+        # one signal here that is never jitter.
+        state = _worst(state, "hot")
     return state
 
 
@@ -225,8 +250,9 @@ def run_report(args, cfg):
     print("children ceiling hit %d times since pool start"
           % s["max_children_reached"])
     print("slow requests    %d" % s["slow_requests"])
-    print("state            %s  (warm>=%d%% hot>=%d%%, any queue = hot)"
-          % (classify(s, cfg), cfg["warm_pct"], cfg["hot_pct"]))
+    print("state            %s  (warm>=%d%% hot>=%d%%, queue>=%d = hot)"
+          % (classify(s, cfg), cfg["warm_pct"], cfg["hot_pct"],
+             cfg["hot_queue"]))
     return 0
 
 

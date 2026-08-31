@@ -244,11 +244,18 @@ def run_loop(args, cfg):
         # cannot disagree with the state we published; a second copy of
         # the numbers in httpd.conf could drift and nothing would catch
         # it.
+        # All four thresholds, not just the thread pair. The dashboard
+        # draws its bands from this line, and publishing only half of
+        # them meant a state driven by lock contention had no visible
+        # threshold to explain it -- which is how 1% lock on a single
+        # running thread flipped the state 128 times in a day without
+        # anything on screen saying why.
         write_atomic(stats_path, "ts=%d %s state=%s warm_threads=%d "
-                     "hot_threads=%d" % (
+                     "hot_threads=%d warm_lockpct=%s hot_lockpct=%s" % (
                          time.time(),
                          " ".join("%s=%s" % kv for kv in sorted(s.items())),
-                         state, cfg["warm_threads"], cfg["hot_threads"]))
+                         state, cfg["warm_threads"], cfg["hot_threads"],
+                         cfg["warm_lockpct"], cfg["hot_lockpct"]))
 
 
 def run_report(args, cfg):
