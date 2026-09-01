@@ -50,12 +50,16 @@ const bs_browser_template bs_browser_templates[] = {
     { "Mozilla/X (XX; Linux xX) AppleWebKit/X Chrome/X Safari/X", "chrome" },
     { "Mozilla/X (XX; Linux xX; rv:X) Gecko/X Firefox/X", "firefox" },
     { "Mozilla/X (XX; Ubuntu; Linux xX; rv:X) Gecko/X Firefox/X", "firefox" },
+    { "Mozilla/X (iPad; CPU OS X like Mac OS X) AppleWebKit/X (KHTML, like Gecko) EdgiOS/X Version/X Mobile/B Safari/X", "edge-ios" },
+    { "Mozilla/X (iPad; CPU OS X like Mac OS X) AppleWebKit/X (KHTML, like Gecko) FxiOS/X Mobile/B Safari/X", "firefox-ios" },
     { "Mozilla/X (iPad; CPU OS X like Mac OS X) AppleWebKit/X (KHTML, like Gecko) Version/X Mobile/B Safari/X", "safari-mobile" },
     { "Mozilla/X (iPhone; CPU iPhone OS X like Mac OS X) AppleWebKit/X (KHTML, like Gecko) CriOS/X Mobile/B Safari/X", "chrome-ios" },
+    { "Mozilla/X (iPhone; CPU iPhone OS X like Mac OS X) AppleWebKit/X (KHTML, like Gecko) EdgiOS/X Version/X Mobile/B Safari/X", "edge-ios" },
+    { "Mozilla/X (iPhone; CPU iPhone OS X like Mac OS X) AppleWebKit/X (KHTML, like Gecko) FxiOS/X Mobile/B Safari/X", "firefox-ios" },
     { "Mozilla/X (iPhone; CPU iPhone OS X like Mac OS X) AppleWebKit/X (KHTML, like Gecko) GSA/X Mobile/B Safari/X", "safari-mobile" },
     { "Mozilla/X (iPhone; CPU iPhone OS X like Mac OS X) AppleWebKit/X (KHTML, like Gecko) Mobile/B", "ios-webview" },
     { "Mozilla/X (iPhone; CPU iPhone OS X like Mac OS X) AppleWebKit/X (KHTML, like Gecko) Version/X Mobile/B Safari/X", "safari-mobile" },
     { NULL, NULL }
 };
 
-const apr_size_t bs_browser_templates_count = 37;
+const apr_size_t bs_browser_templates_count = 41;

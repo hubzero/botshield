@@ -57,16 +57,25 @@ LA       := $(MAIN_SRC:.c=.la)
 GEN_BOT_DIR_C    := src/generated_bot_directory.c
 GEN_BOT_DIR_JSON := vendor/bot-directory.json
 GEN_BOT_DIR_TOOL := tools/gen-bot-directory.py
+# The generator also reads the .builtin (committed) and .local
+# (gitignored) overlays. They have to be prerequisites too, or editing
+# one leaves a stale .c behind with no error and no output -- the
+# build succeeds and silently ships the previous data. wildcard so a
+# missing .local is simply no prerequisite rather than a hard failure.
+GEN_BOT_DIR_OVERLAYS := $(wildcard vendor/bot-directory.builtin.json \
+                                   vendor/bot-directory.local.json)
 
-$(GEN_BOT_DIR_C): $(GEN_BOT_DIR_JSON) $(GEN_BOT_DIR_TOOL)
+$(GEN_BOT_DIR_C): $(GEN_BOT_DIR_JSON) $(GEN_BOT_DIR_OVERLAYS) $(GEN_BOT_DIR_TOOL)
 	$(DOCS_PYTHON) $(GEN_BOT_DIR_TOOL)
 
 # Browser-templates codegen — same shape as bot-directory.
 GEN_BROWSER_C    := src/generated_browser_templates.c
 GEN_BROWSER_JSON := vendor/top-user-agents.json
 GEN_BROWSER_TOOL := tools/gen-browser-templates.py
+GEN_BROWSER_OVERLAYS := $(wildcard vendor/top-user-agents.builtin.json \
+                                   vendor/top-user-agents.local.json)
 
-$(GEN_BROWSER_C): $(GEN_BROWSER_JSON) $(GEN_BROWSER_TOOL)
+$(GEN_BROWSER_C): $(GEN_BROWSER_JSON) $(GEN_BROWSER_OVERLAYS) $(GEN_BROWSER_TOOL)
 	$(DOCS_PYTHON) $(GEN_BROWSER_TOOL)
 
 # Verified-bot built-ins codegen — bs_builtin_bots[] used to be a
@@ -77,8 +86,9 @@ $(GEN_BROWSER_C): $(GEN_BROWSER_JSON) $(GEN_BROWSER_TOOL)
 GEN_VBOTS_C    := src/generated_verified_bots.c
 GEN_VBOTS_JSON := vendor/verified-bots.json
 GEN_VBOTS_TOOL := tools/gen-verified-bots.py
+GEN_VBOTS_OVERLAYS := $(wildcard vendor/verified-bots.local.json)
 
-$(GEN_VBOTS_C): $(GEN_VBOTS_JSON) $(GEN_VBOTS_TOOL)
+$(GEN_VBOTS_C): $(GEN_VBOTS_JSON) $(GEN_VBOTS_OVERLAYS) $(GEN_VBOTS_TOOL)
 	$(DOCS_PYTHON) $(GEN_VBOTS_TOOL)
 
 # Pass warnings through apxs to the underlying compiler.
