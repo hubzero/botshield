@@ -39,8 +39,8 @@ static int bs_m_tier_idx(const char *s)
     if (!s) return -1;
     if (strcmp(s, "none")    == 0) return BS_M_TIER_NONE;
     if (strcmp(s, "pass")    == 0) return BS_M_TIER_PASS;
-    if (strcmp(s, "silent")  == 0) return BS_M_TIER_SILENT;
-    if (strcmp(s, "form")    == 0) return BS_M_TIER_FORM;
+    if (strcmp(s, "non-interactive") == 0) return BS_M_TIER_NONINTERACTIVE;
+    if (strcmp(s, "interactive") == 0) return BS_M_TIER_INTERACTIVE;
     if (strcmp(s, "captcha") == 0) return BS_M_TIER_CAPTCHA;
     /* E10 — safeguard activations land in the decision log as
      * tier="safeguard" so operators can grep/filter for them
@@ -788,7 +788,7 @@ static void bs_m_sum_ring(const bs_metrics_slot *ring, int nslots,
  * on -- which is the honest denominator for "how much of what arrives
  * here is a bot".
  *
- * Rendered on the silent interstitial. Only the percentage leaves the
+ * Rendered on the non-interactive interstitial. Only the percentage leaves the
  * module: absolute volumes are operational data, and a public page
  * reachable by anyone who trips a challenge is not where they belong.
  */
@@ -1640,7 +1640,7 @@ static void bs_m_emit_gauge(request_rec *r, const char *name,
  * are exactly what a pie renders unreadable. Ratios against a limit are
  * meters. Eleven outcome classes are a table, because past ~7 classes a
  * chart stops adding anything. The tier ladder is an ORDINAL ramp (one
- * hue, light→dark) rather than categorical hues, because pass → silent
+ * hue, light→dark) rather than categorical hues, because pass -> non-interactive
  * → form → captcha is an ordered escalation, not four unrelated
  * identities.
  *
@@ -2175,12 +2175,13 @@ static void bs_d_audience_panel(request_rec *r, const bs_metrics_window *w,
                      "Reputation cookie state", labels, vals, fills, 7, tot);
     }
     {
-        const char *labels[] = { "pass", "silent", "form", "captcha" };
+        const char *labels[] = { "pass", "non-interactive", "interactive",
+                                 "captcha" };
         const char *fills[]  = { "var(--t1)", "var(--t2)",
                                  "var(--t3)", "var(--t4)" };
         apr_uint64_t vals[]  = { w->g_tier[g][BS_M_TIER_PASS],
-                                 w->g_tier[g][BS_M_TIER_SILENT],
-                                 w->g_tier[g][BS_M_TIER_FORM],
+                                 w->g_tier[g][BS_M_TIER_NONINTERACTIVE],
+                                 w->g_tier[g][BS_M_TIER_INTERACTIVE],
                                  w->g_tier[g][BS_M_TIER_CAPTCHA] };
         apr_uint64_t tot = vals[0] + vals[1] + vals[2] + vals[3];
         bs_d_stacked(r, apr_pstrcat(r->pool, idp, "tier", NULL),
@@ -4158,11 +4159,12 @@ int bs_dashboard_responses_handler(request_rec *r)
      * had to be done during two incidents. It is also the fastest
      * check that a threshold change did what was intended. */
     {
-        const char *tl[] = { "none", "pass", "silent", "form", "captcha" };
+        const char *tl[] = { "none", "pass", "non-interactive",
+                             "interactive", "captcha" };
         /* pass is the good outcome and wears it; the three challenge
          * tiers escalate through the categorical slots rather than the
          * status palette, because a captcha is not a "worse" outcome
-         * than a silent challenge, it is a costlier one. */
+         * than a non-interactive challenge, it is a costlier one. */
         const char *tf[] = { "var(--neutral)", "var(--good)", "var(--c1)",
                              "var(--c4)", "var(--c2)" };
         apr_uint64_t tv[BS_M_TIER_COUNT], tt = 0;
@@ -4846,12 +4848,12 @@ int bs_metrics_handler(request_rec *r)
     bs_m_emit_counter(r, "tier_pass_total",
         "Decisions at tier=pass (no challenge served, request DECLINED).",
         bs_mload(&m->tier[BS_M_TIER_PASS]));
-    bs_m_emit_counter(r, "tier_silent_total",
-        "Decisions at tier=silent (auto-submit splash interstitial served).",
-        bs_mload(&m->tier[BS_M_TIER_SILENT]));
-    bs_m_emit_counter(r, "tier_form_total",
+    bs_m_emit_counter(r, "tier_non_interactive_total",
+        "Decisions at tier=non-interactive (self-solving widget served).",
+        bs_mload(&m->tier[BS_M_TIER_NONINTERACTIVE]));
+    bs_m_emit_counter(r, "tier_interactive_total",
         "Decisions at tier=form (checkbox PoW interstitial served).",
-        bs_mload(&m->tier[BS_M_TIER_FORM]));
+        bs_mload(&m->tier[BS_M_TIER_INTERACTIVE]));
     bs_m_emit_counter(r, "tier_captcha_total",
         "Decisions at tier=captcha (third-party provider widget served or verified).",
         bs_mload(&m->tier[BS_M_TIER_CAPTCHA]));
@@ -4937,7 +4939,7 @@ int bs_metrics_handler(request_rec *r)
 
     bs_m_emit_counter(r, "outcome_allow_total",
         "Decisions that let the request through (pass tier, asset bypass, "
-        "silent embedded pass-through, safeguard pass).",
+        "non-interactive embedded pass-through, safeguard pass).",
         bs_mload(&m->outcome[BS_M_OUTCOME_ALLOW]));
     bs_m_emit_counter(r, "outcome_challenged_total",
         "Decisions that served an interstitial.",
@@ -4980,7 +4982,7 @@ int bs_metrics_handler(request_rec *r)
         bs_mload(&m->cookie[BS_M_COOKIE_OK]));
     bs_m_emit_counter(r, "cookie_solved_total",
         "Rep cookies that verified fully AND carry solve proof "
-        "(passes_silent/form/captcha). The only cookie state that "
+        "(passes_non_interactive/form/captcha). The only cookie state that "
         "waives first-sight-ip / dropped-cookie.",
         bs_mload(&m->cookie[BS_M_COOKIE_SOLVED]));
     bs_m_emit_counter(r, "cookie_expired_total",
@@ -5244,8 +5246,8 @@ int bs_status_hook(request_rec *r, int flags)
             "BotShieldFlaggedUsed: %" APR_UINT64_T_FMT "\n"
             "BotShieldFlaggedCapacity: %" APR_SIZE_T_FMT "\n",
             bs_mload(&m->tier[BS_M_TIER_PASS]),
-            bs_mload(&m->tier[BS_M_TIER_SILENT]),
-            bs_mload(&m->tier[BS_M_TIER_FORM]),
+            bs_mload(&m->tier[BS_M_TIER_NONINTERACTIVE]),
+            bs_mload(&m->tier[BS_M_TIER_INTERACTIVE]),
             bs_mload(&m->tier[BS_M_TIER_CAPTCHA]),
             bs_mload(&m->outcome[BS_M_OUTCOME_VERIFIED]),
             bs_mload(&m->outcome[BS_M_OUTCOME_BLOCK]),
@@ -5266,8 +5268,8 @@ int bs_status_hook(request_rec *r, int flags)
      * highlights on the right. Keeps the row count tight. */
     const struct { const char *label; apr_uint64_t val; } rows[] = {
         { "pass",    bs_mload(&m->tier[BS_M_TIER_PASS])    },
-        { "silent",  bs_mload(&m->tier[BS_M_TIER_SILENT])  },
-        { "form",    bs_mload(&m->tier[BS_M_TIER_FORM])    },
+        { "non-interactive", bs_mload(&m->tier[BS_M_TIER_NONINTERACTIVE]) },
+        { "interactive", bs_mload(&m->tier[BS_M_TIER_INTERACTIVE]) },
         { "captcha", bs_mload(&m->tier[BS_M_TIER_CAPTCHA]) },
         { "none",    bs_mload(&m->tier[BS_M_TIER_NONE])    },
     };

@@ -13,9 +13,9 @@ mod_botshield supports four user-facing tiers plus a passive
 
 | Tier | What the user sees | When it fires |
 |---|---|---|
-| `pass` | Real content | `effective < BotShieldScoreSilent` (default `< 20`) |
-| `silent` | "Checking your browser…" splash; auto-submits a SHA-256 PoW | `BotShieldScoreSilent ≤ effective < BotShieldScoreHard` (default `20..49`) |
-| `form` | reCAPTCHA-shaped checkbox interstitial; user clicks once, PoW runs | `BotShieldScoreHard ≤ effective < BotShieldScoreCaptcha` (default `50..79`) |
+| `pass` | Real content | `effective < BotShieldScoreNonInteractive` (default `< 20`) |
+| `silent` | "Checking your browser…" splash; auto-submits a SHA-256 PoW | `BotShieldScoreNonInteractive ≤ effective < BotShieldScoreInteractive` (default `20..49`) |
+| `form` | reCAPTCHA-shaped checkbox interstitial; user clicks once, PoW runs | `BotShieldScoreInteractive ≤ effective < BotShieldScoreCaptcha` (default `50..79`) |
 | `captcha` | Third-party provider widget (Turnstile / hCaptcha / reCAPTCHA / Friendly / GeeTest) | `effective ≥ BotShieldScoreCaptcha` (default `≥ 80`). Falls back to `form` if no provider configured on the scope |
 
 A fifth value, `safeguard`, can appear in decision logs. It marks
@@ -30,7 +30,7 @@ privacy extension, browser version) and offers a Continue link
 back to the original URL. The flagged-IP entry is preserved so the
 suspicious behavior is still recorded for downstream signals.
 
-Below `BotShieldScoreSilent` the module returns `DECLINED` to
+Below `BotShieldScoreNonInteractive` the module returns `DECLINED` to
 Apache; the content handler runs as if mod_botshield weren't loaded.
 **Legitimate visitors never see us and never receive a cookie.**
 
@@ -158,8 +158,8 @@ get re-challenged on the next request:
 
 | Tier | Default credit | Directive |
 |---|---|---|
-| `silent` | -10 | `BotShieldForgivenessSilent` |
-| `form` | -25 | `BotShieldForgivenessForm` |
+| `silent` | -10 | `BotShieldForgivenessNonInteractive` |
+| `form` | -25 | `BotShieldForgivenessInteractive` |
 | `captcha` | -50 | `BotShieldForgivenessCaptcha` |
 
 ### Forgiveness cap
@@ -201,7 +201,7 @@ a stable `key=value` structured line. The structured line is what
 you query when tuning:
 
 ```
-mod_botshield: decision tier=silent outcome=challenged ip=192.0.2.42
+mod_botshield: decision tier=non-interactive outcome=challenged ip=192.0.2.42
     score=37 cookie=absent provider=- alg=sha256-zeros
     reason="first-sight-ip,missing-accept-language" path="/login"
 ```
@@ -223,7 +223,7 @@ names — the prose log line at `info` level carries the full
 breakdown:
 
 ```
-mod_botshield: <action> effective=37 tier=silent heuristic=37
+mod_botshield: <action> effective=37 tier=non-interactive heuristic=37
     cookie_score=0 reasons=[first-sight-ip:5,missing-accept-language:15,scraper-ua:python-requests:50]
 ```
 
@@ -242,7 +242,7 @@ which signals contributed and how much.
 4. Adjust thresholds and per-rule penalties based on observed
    distributions:
    - Too many challenges on legitimate traffic → raise
-     `BotShieldScoreSilent` / `BotShieldScoreHard` /
+     `BotShieldScoreNonInteractive` / `BotShieldScoreInteractive` /
      `BotShieldScoreCaptcha`, or lower the offending heuristic's
      penalty.
    - Bots slipping through → lower thresholds, raise scraper-UA

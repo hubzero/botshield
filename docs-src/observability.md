@@ -533,7 +533,7 @@ valid-cookie traffic sent no User-Agent at all, replaying minted
 cookies to suppress the `dropped-cookie` penalty. `cookie_ok_total`
 rising while `cookie_solved_total` stays flat is that signature. Before 2026-08-01 the
 PoW path emitted nothing at all, so a deployment running the silent or
-form tier with no captcha provider reported a permanent 0% solve rate
+interactive tier with no captcha provider reported a permanent 0% solve rate
 while challenges were in fact being solved.
 
 `tier=safeguard` is emitted for challenge-loop suppression: the
@@ -575,7 +575,7 @@ Alongside the structured line, the prose line carries the per-
 reason penalty values (not just the names) for forensic debugging:
 
 ```
-mod_botshield: <action> effective=37 tier=silent heuristic=37
+mod_botshield: <action> effective=37 tier=non-interactive heuristic=37
     cookie_score=0 reasons=[first-sight-ip:5,missing-accept-language:15,scraper-ua:python-requests:50]
 ```
 

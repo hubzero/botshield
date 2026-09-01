@@ -306,8 +306,8 @@ static const char *bs_parse_canonical_fields(char *const fields[],
         { 5,  0 },   /* expires_at */
         { 6,  1 },   /* score (signed) */
         { 7,  0 },   /* flags */
-        { 8,  0 },   /* passes_silent */
-        { 9,  0 },   /* passes_form */
+        { 8,  0 },   /* passes_non_interactive */
+        { 9,  0 },   /* passes_interactive */
         { 10, 0 },   /* passes_captcha */
         { 11, 0 },   /* challenged_at */
         { 12, 0 },   /* auto */
@@ -346,10 +346,10 @@ static const char *bs_parse_canonical_fields(char *const fields[],
     ch->rep.score = (int)v;
     if (!bs_parse_uint32_bounded(fields[7], 10, &ch->rep.flags_excused))
         return "bad flags";
-    if (!bs_parse_int_bounded(fields[8],  0, 1, 1, &v)) return "bad passes_silent";
-    ch->rep.passes_silent  = (int)v;
-    if (!bs_parse_int_bounded(fields[9],  0, 1, 1, &v)) return "bad passes_form";
-    ch->rep.passes_form    = (int)v;
+    if (!bs_parse_int_bounded(fields[8],  0, 1, 1, &v)) return "bad passes_non_interactive";
+    ch->rep.passes_non_interactive  = (int)v;
+    if (!bs_parse_int_bounded(fields[9],  0, 1, 1, &v)) return "bad passes_interactive";
+    ch->rep.passes_interactive    = (int)v;
     if (!bs_parse_int_bounded(fields[10], 0, 1, 1, &v)) return "bad passes_captcha";
     ch->rep.passes_captcha = (int)v;
     if (!bs_parse_int64_bounded(fields[11], 0, APR_INT64_MAX, &v64)) return "bad challenged_at";
@@ -514,7 +514,7 @@ int bs_carry_forward_eligible(request_rec *r,
 /* Apply the rep-carry-forward computation to *target.
  *
  * The caller has chosen forgive_amount based on the issuance tier
- * (cfg->forgive_silent / forgive_captcha / etc.) — that knowledge
+ * (cfg->forgive_non_interactive / forgive_captcha / etc.) — that knowledge
  * stays at the call site because forgive bands are per-tier policy.
  *
  * This helper does the deterministic math:
@@ -533,7 +533,7 @@ int bs_carry_forward_eligible(request_rec *r,
  * Called at every point a challenge is successfully solved, because
  * solving does not clear a flag and flag scores re-apply on every
  * request: without this, any flag scoring at or above
- * BotShieldScoreSilent is an unbreakable challenge loop. Seen in
+ * BotShieldScoreNonInteractive is an unbreakable challenge loop. Seen in
  * production as pow_ok succeeding roughly once a second, each success
  * followed immediately by another challenge carrying cookie=solved.
  *

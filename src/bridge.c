@@ -397,8 +397,8 @@ const char *bs_app_claims_set(request_rec *r,
                                      bs_tier tier,
                                      const char *cookie_status,
                                      apr_uint32_t flags,
-                                     int passes_silent,
-                                     int passes_form,
+                                     int passes_non_interactive,
+                                     int passes_interactive,
                                      int passes_captcha)
 {
     if (!scfg || scfg->app_claims_enabled != 1) return NULL;
@@ -415,7 +415,7 @@ const char *bs_app_claims_set(request_rec *r,
         "v=1;score=%d;tier=%s;cookie=%s;flags=%s;"
         "passes=s=%d,f=%d,c=%d;ts=%" APR_TIME_T_FMT,
         score, bs_tier_name(tier), cookie_status, flag_names,
-        passes_silent, passes_form, passes_captcha, now);
+        passes_non_interactive, passes_interactive, passes_captcha, now);
 
     unsigned char mac[BS_SIG_BYTES];
     bs_hmac_sha256(scfg->app_integration_secret,

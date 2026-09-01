@@ -53,8 +53,8 @@ const char *bs_app_claims_set(request_rec *r,
                               int score, bs_tier tier,
                               const char *cookie_status,
                               apr_uint32_t flags,
-                              int passes_silent,
-                              int passes_form,
+                              int passes_non_interactive,
+                              int passes_interactive,
                               int passes_captcha);
 
 /* --- E5 + E8.2 directive setters --- *

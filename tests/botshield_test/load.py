@@ -48,7 +48,7 @@ _DEFAULT_MIX = (
     # /form-demo, not "/": this slice exists to drive FORM tier, and a
     # scraper UA on / scores 20 (first-sight 5 + missing-AL 5 +
     # scraper-ua 10), which is silent tier. Form needs 50, so the
-    # botshield_tier_form_total assertion in test_soak could never
+    # botshield_tier_interactive_total assertion in test_soak could never
     # grow. /form-demo pins the tier instead of hoping the score
     # lands there.
     (20, "/form-demo", {

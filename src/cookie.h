@@ -12,7 +12,7 @@
  *           appends the counter; bs_build_set_cookie assembles the
  *           Set-Cookie header line; bs_install_verified_cookie ties
  *           those together for the four issuance call sites
- *           (silent embedded-verify, M8 captcha-verify, form-captcha-
+ *           (non-interactive embedded-verify, M8 captcha-verify, form-captcha-
  *           replay, and the immediate post-PoW path). bs_verify_cookie
  *           is the inverse — base64-decode, GCM-decrypt, parse into a
  *           bs_challenge struct, dispatch to the alg's verify fn.
@@ -112,7 +112,7 @@ const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
 
 /* --- Carry-forward: rep state across cookie generations ------- *
  *
- * Issuance call sites (silent embedded-verify, M8 captcha-verify,
+ * Issuance call sites (non-interactive embedded-verify, M8 captcha-verify,
  * E18 form-captcha) read the prior cookie via bs_carry_forward_eligible,
  * then bs_apply_rep_carry computes the carried score with the
  * forgive-band the call site picks per tier policy. */
@@ -137,7 +137,7 @@ int bs_carry_forward_eligible(request_rec *r, const bs_dir_cfg *cfg,
 /* Apply rep-carry math: clamp forgive_amount against the per-cookie
  * hourly cap, compute new score = prior.score - forgive, clamp at
  * zero. forgive_amount is per-tier policy, picked by the caller
- * (cfg->forgive_silent / forgive_form / forgive_captcha). The
+ * (cfg->forgive_non_interactive / forgive_interactive / forgive_captcha). The
  * caller bumps target->passes_X afterward (the "ever
  * passed" clamp). */
 void bs_apply_rep_carry(request_rec *r, const bs_dir_cfg *cfg,

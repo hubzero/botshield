@@ -11,7 +11,7 @@ what the failures had in common while it is still fresh.
 ## The two incidents
 
 **#1 — `tier_floor` bypasses the score ceiling.** The operator parked
-`BotShieldScoreHard` and `BotShieldScoreCaptcha` at 10000 to make a scope
+`BotShieldScoreInteractive` and `BotShieldScoreCaptcha` at 10000 to make a scope
 effectively challenge-free. A `scanner_probe` flag carries a compiled-in
 `tier_floor` of `form`, which is MAX'd in *after* the score-to-tier
 decision and never consults the thresholds. Users hit a form challenge in
@@ -48,7 +48,7 @@ way to ask the module what it will actually do.
 
 **3. Units are unmarked and thresholds are action-at-a-distance.**
 
-`add=50` is meaningless without knowing `BotShieldScoreSilent` is 20, and
+`add=50` is meaningless without knowing `BotShieldScoreNonInteractive` is 20, and
 that directive was not present in the deployed file at all — it was the
 compiled default. The number that made 50 dangerous was in neither the
 config nor the docs page being followed.

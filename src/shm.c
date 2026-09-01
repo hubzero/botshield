@@ -652,9 +652,9 @@ int bs_safeguard_check(const unsigned char ip[16], apr_int64_t now,
 }
 
 /* E17 — read present_count for this IP (lockless seqlock). Used by
- * the embedded → M7 fallback decision: after N consecutive silent-
- * tier-embedded dispatches without _bs_session, the embedded short-
- * circuit is bypassed and M7 issues. */
+ * the embedded → M7 fallback decision: after N consecutive
+ * non-interactive-tier-embedded dispatches without _bs_session,
+ * the embedded short-circuit is bypassed and M7 issues. */
 apr_uint32_t bs_safeguard_present_count(const unsigned char ip[16],
                                         apr_int64_t now,
                                         apr_uint32_t ns_id)

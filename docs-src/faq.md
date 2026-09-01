@@ -154,18 +154,18 @@ prove they're human" you want mod_botshield (or Cloudflare).
 
 ### Will it block real users?
 
-Below `BotShieldScoreSilent` (default 20) the module returns
+Below `BotShieldScoreNonInteractive` (default 20) the module returns
 DECLINED to Apache; the user's request flows through normally and
 they never see mod_botshield at all. The default heuristics are
 tuned to keep typical browser traffic below that threshold, but
 the line is closer than it looks: a request with no
 `Accept-Language` header (15 points) plus a first-time IP not in
 the Bloom filter (5 points) lands at exactly 20, which trips the
-silent tier. Browsers in some configurations (privacy modes that
+non-interactive tier. Browsers in some configurations (privacy modes that
 strip headers, certain mobile webviews, intranet apps with
 non-default settings) can reach the threshold on a clean first
 request. The captcha-tier fail-open story is on the captcha side;
-the silent / form tiers themselves are real friction even for a
+the non-interactive / interactive tiers themselves are real friction even for a
 legitimate first-time visitor.
 
 If real users *are* hitting challenges, the likely causes are:
@@ -186,7 +186,7 @@ Some of them. The reality is graduated:
 
 - **Cheap scrapers** (Python `requests`, `curl`, `wget`,
   HTTP-library clients with no JS engine) cannot solve PoW. They
-  fail at the silent and form tiers. This is the bulk of scraper
+  fail at the non-interactive and interactive tiers. This is the bulk of scraper
   traffic.
 - **Headless browsers** (Puppeteer, Playwright, Selenium) *can*
   solve PoW because they execute JavaScript. They can also solve
@@ -245,7 +245,7 @@ Three tools for this case:
    needing to solve PoW. See
    [captcha](../captcha/index.html#app-bridge).
 
-A fourth option for IoT-style clients: implement the silent-tier
+A fourth option for IoT-style clients: implement the non-interactive-tier
 PoW protocol in your client. The wire format is documented;
 nothing forces you to use a browser to satisfy it.
 
@@ -362,7 +362,7 @@ configured categories:
    attempt to the configured provider's siteverify URL with the
    client's captcha token (and the client IP as the `remoteip`
    field). This fires from three paths: the `/captcha-verify`
-   endpoint, the silent-tier embedded-verify endpoint when an
+   endpoint, the non-interactive-tier embedded-verify endpoint when an
    site pairs silent with a captcha provider, and the
    form-captcha fixup. No siteverify call ever happens without
    a captcha provider explicitly configured on the scope.

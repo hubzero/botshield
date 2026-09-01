@@ -79,7 +79,7 @@ def test_robots_disallow_blocks_bot(
     """)
     with config_override(
         r"BotShieldEnabled\s+On",
-        f'BotShieldEnabled On\n    BotShieldScoreSilent 500\n    BotShieldScoreHard 600\n    BotShieldScoreCaptcha 700\n    BotShieldRobotsTxt {robots_path}',
+        f'BotShieldEnabled On\n    BotShieldScoreNonInteractive 500\n    BotShieldScoreInteractive 600\n    BotShieldScoreCaptcha 700\n    BotShieldRobotsTxt {robots_path}',
         count=1,
     ):
         with log_slice as slc:
@@ -105,7 +105,7 @@ def test_robots_allow_longest_match_wins(
     """)
     with config_override(
         r"BotShieldEnabled\s+On",
-        f'BotShieldEnabled On\n    BotShieldScoreSilent 500\n    BotShieldScoreHard 600\n    BotShieldScoreCaptcha 700\n    BotShieldRobotsTxt {robots_path}',
+        f'BotShieldEnabled On\n    BotShieldScoreNonInteractive 500\n    BotShieldScoreInteractive 600\n    BotShieldScoreCaptcha 700\n    BotShieldRobotsTxt {robots_path}',
         count=1,
     ):
         r_admin  = client.get("/admin",        xff=fresh_ip, ua=GPTBOT_UA)
@@ -132,7 +132,7 @@ def test_robots_crawl_delay_rate_limits(
     """)
     with config_override(
         r"BotShieldEnabled\s+On",
-        f'BotShieldEnabled On\n    BotShieldScoreSilent 500\n    BotShieldScoreHard 600\n    BotShieldScoreCaptcha 700\n    BotShieldRobotsTxt {robots_path}',
+        f'BotShieldEnabled On\n    BotShieldScoreNonInteractive 500\n    BotShieldScoreInteractive 600\n    BotShieldScoreCaptcha 700\n    BotShieldRobotsTxt {robots_path}',
         count=1,
     ):
         with log_slice as slc:
@@ -172,7 +172,7 @@ def test_robots_wildcard_heuristic_skips_real_browser(
     blocked (scripting tool, crawler-candidate)."""
     with config_override(
         r"BotShieldEnabled\s+On",
-        f'BotShieldEnabled On\n    BotShieldScoreSilent 500\n    BotShieldScoreHard 600\n    BotShieldScoreCaptcha 700\n    BotShieldRobotsTxt {wildcard_robots}',
+        f'BotShieldEnabled On\n    BotShieldScoreNonInteractive 500\n    BotShieldScoreInteractive 600\n    BotShieldScoreCaptcha 700\n    BotShieldRobotsTxt {wildcard_robots}',
         count=1,
     ):
         r_firefox = client.get("/admin", xff=fresh_ip, ua=REAL_UA)
@@ -194,8 +194,8 @@ def test_robots_wildcard_strict_applies_to_everyone(
     with config_override(
         r"BotShieldEnabled\s+On",
         f'BotShieldEnabled On\n'
-        '    BotShieldScoreSilent 500\n'
-        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreNonInteractive 500\n'
+        '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
         f'    BotShieldRobotsTxt {wildcard_robots}\n'
         f'    BotShieldRobotsWildcardScope strict',
@@ -215,8 +215,8 @@ def test_robots_wildcard_off_skips_wildcard_entirely(
     with config_override(
         r"BotShieldEnabled\s+On",
         f'BotShieldEnabled On\n'
-        '    BotShieldScoreSilent 500\n'
-        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreNonInteractive 500\n'
+        '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
         f'    BotShieldRobotsTxt {wildcard_robots}\n'
         f'    BotShieldRobotsWildcardScope off',
@@ -256,7 +256,7 @@ def test_robots_ua_match_is_segment_based(
     """)
     with config_override(
         r"BotShieldEnabled\s+On",
-        f'BotShieldEnabled On\n    BotShieldScoreSilent 500\n    BotShieldScoreHard 600\n    BotShieldScoreCaptcha 700\n    BotShieldRobotsTxt {robots_path}',
+        f'BotShieldEnabled On\n    BotShieldScoreNonInteractive 500\n    BotShieldScoreInteractive 600\n    BotShieldScoreCaptcha 700\n    BotShieldRobotsTxt {robots_path}',
         count=1,
     ):
         # A UA that mentions 'bot' only inside a URL in a slug —
@@ -299,7 +299,7 @@ def test_robots_duplicate_ua_groups_are_unioned(
     """)
     with config_override(
         r"BotShieldEnabled\s+On",
-        f'BotShieldEnabled On\n    BotShieldScoreSilent 500\n    BotShieldScoreHard 600\n    BotShieldScoreCaptcha 700\n    BotShieldRobotsTxt {robots_path}',
+        f'BotShieldEnabled On\n    BotShieldScoreNonInteractive 500\n    BotShieldScoreInteractive 600\n    BotShieldScoreCaptcha 700\n    BotShieldRobotsTxt {robots_path}',
         count=1,
     ):
         r_a = client.get("/a", xff=fresh_ip, ua=GPTBOT_UA)
@@ -329,7 +329,7 @@ def test_robots_duplicate_crawl_delay_takes_max(
     """)
     with config_override(
         r"BotShieldEnabled\s+On",
-        f'BotShieldEnabled On\n    BotShieldScoreSilent 500\n    BotShieldScoreHard 600\n    BotShieldScoreCaptcha 700\n    BotShieldRobotsTxt {robots_path}',
+        f'BotShieldEnabled On\n    BotShieldScoreNonInteractive 500\n    BotShieldScoreInteractive 600\n    BotShieldScoreCaptcha 700\n    BotShieldRobotsTxt {robots_path}',
         count=1,
     ):
         r1 = client.get("/", xff=fresh_ip, ua=GPTBOT_UA)
@@ -402,8 +402,8 @@ def test_robots_live_refresh_picks_up_changes(
     with config_override(
         r"BotShieldEnabled\s+On",
         f'BotShieldEnabled On\n'
-        '    BotShieldScoreSilent 500\n'
-        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreNonInteractive 500\n'
+        '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
         f'    BotShieldRobotsTxt {robots_path}\n'
         f'    BotShieldRobotsRefreshInterval 1',
@@ -465,8 +465,8 @@ def test_directive_rate_limit_overrides_robots_crawl_delay(
     with config_override(
         r"BotShieldEnabled\s+On",
         f'BotShieldEnabled On\n'
-        '    BotShieldScoreSilent 500\n'
-        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreNonInteractive 500\n'
+        '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
         f'    BotShieldRobotsTxt {robots_path}\n'
         f'    BotShieldBotRateLimit gptbot 10 sec',

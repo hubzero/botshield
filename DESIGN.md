@@ -100,7 +100,7 @@ were written that way from the start — they take their inputs as
 plain arguments and so need no config forward-declaration at all.
 The remaining feature
 headers (`allowlist.h`, `bridge.h`, `config.h`, `cookie.h`,
-`formcaptcha.h`, `heuristics.h`, `load.h`, `policy.h`, `silent.h`,
+`formcaptcha.h`, `heuristics.h`, `load.h`, `policy.h`, `non_interactive.h`,
 `templates.h`) still `#include "botshield.h"` for full visibility
 into the config structs they parameterize. Decoupling those would
 deliver an incremental-rebuild win — punted as a follow-up.
@@ -354,7 +354,7 @@ v|alg|salthex|noncehex|difficulty|expires_at
 
 Pipe-delimited ASCII. The `forgive_*` fields were added in protocol
 version 2 (E15); v1 cookies fail the version check and trigger a
-fresh challenge. `auto` is the silent-tier (M7) marker — 1 means the
+fresh challenge. `auto` is the non-interactive-tier (M7) marker — 1 means the
 challenge was served as the no-click splash, 0 means form-PoW. Knowing
 which tier was actually served is what lets the verify path pick
 `passes_silent` vs `passes_form` and the matching forgiveness amount.
@@ -1543,11 +1543,11 @@ the surrounding decision-log entry.
 ### Widget variants
 
 - **PoW widget** (M2/M7): inline JS, inline CSS, inline embedded
-  challenge JSON. Two visual modes — visible checkbox (form tier) or
-  neutral "checking your browser" splash (silent tier with
+  challenge JSON. Two visual modes — visible checkbox (interactive tier) or
+  neutral "checking your browser" splash (non-interactive tier with
   `auto:true`). WCAG 2.1 AA; landmarks, `aria-live` status, focus
   order, reduced-motion, `<html lang>`, `.bs-sr` clip-offscreen
-  technique on the silent-tier label so axe-core sees the accessible
+  technique on the non-interactive-tier label so axe-core sees the accessible
   name.
 - **Captcha widgets** (M8): three render templates keyed on provider
   - "render" pattern (Turnstile / hCaptcha / reCAPTCHA v2 /
@@ -1736,7 +1736,7 @@ Safeguard:
 ### E17 embedded fallback
 
 The same SHM table is consumed by E17's embedded → M7 fallback. After
-`BS_DEFAULT_EMBEDDED_FALLBACK_THRESHOLD = 3` consecutive silent-tier-
+`BS_DEFAULT_EMBEDDED_FALLBACK_THRESHOLD = 3` consecutive non-interactive-tier-
 embedded dispatches in the safeguard window without `_bs_session`
 arriving, the embedded short-circuit is bypassed and M7 issues a
 visible interstitial. M7's own safeguard threshold catches the case
@@ -2052,7 +2052,7 @@ live_network + slow.
 ### Browser tests (a11y / Playwright) (M11.6, M11.8)
 
 - Real Chromium via pytest-playwright. Three acceptance flows:
-  pass-tier (no challenge), form-tier (PoW worker, auto-submit,
+  pass-tier (no challenge), interactive-tier (PoW worker, auto-submit,
   redirect, cookie attribute enforcement), captcha-tier (Turnstile
   always-pass sitekey).
 - `tests/pyproject.toml` `addopts` sets
@@ -2061,7 +2061,7 @@ live_network + slow.
 - `test_browser_a11y.py` runs axe-core (Deque's engine, bundled at
   `tests/pytests/assets/axe.min.js`, MPL-2.0) against the silent
   interstitial, asserts zero critical + zero serious violations,
-  plus targeted keyboard-tab-to-`#btn` checks against the form-tier
+  plus targeted keyboard-tab-to-`#btn` checks against the interactive-tier
   variant and `<html lang>` assertion.
 - Cookie attribute assertions impossible in bash: `Secure` /
   `SameSite` / `Path` honored by a real browser (Chromium enforces
@@ -2235,7 +2235,7 @@ EXTRA_SRC := src/robots.c src/shm.c src/crypto.c src/allowlist.c
              src/metrics.c src/challenge.c src/cookie.c src/load.c
              src/triggers.c src/config.c src/templates.c
              src/formcaptcha.c src/score.c src/policy.c
-             src/heuristics.c src/silent.c src/captcha.c
+             src/heuristics.c src/non_interactive.c src/captcha.c
              src/bridge.c
 ```
 

@@ -58,8 +58,8 @@ def test_repeated_429_escalates_to_403(config_override, fresh_ip,
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreSilent 500\n'
-        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreNonInteractive 500\n'
+        '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
         '    BotShieldRateLimit corpbot 2 sec "CorpBot" *\n'
         '    BotShieldRateLimitEscalate corpbot 3 min '
@@ -115,8 +115,8 @@ def test_below_strike_threshold_stays_at_429(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreSilent 500\n'
-        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreNonInteractive 500\n'
+        '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
         '    BotShieldRateLimit corpbot 2 sec "CorpBot" *\n'
         '    BotShieldRateLimitEscalate corpbot 5 min '
@@ -155,8 +155,8 @@ def test_escalation_isolates_per_rule(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreSilent 500\n'
-        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreNonInteractive 500\n'
+        '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
         # Rule-A matches "CorpBot" with escalation. Tight budget +
         # tight strike count to escalate quickly.
@@ -217,8 +217,8 @@ def test_escalation_isolates_per_ip(config_override):
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreSilent 500\n'
-        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreNonInteractive 500\n'
+        '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
         '    BotShieldRateLimit corpbot 1 sec "CorpBot" *\n'
         '    BotShieldRateLimitEscalate corpbot 3 min '
@@ -257,8 +257,8 @@ def test_directive_rejects_bogus_status(config_override):
         with config_override(
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
-        '    BotShieldScoreSilent 500\n'
-        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreNonInteractive 500\n'
+        '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
             '    BotShieldRateLimit corpbot 1 sec "CorpBot" *\n'
             '    BotShieldRateLimitEscalate corpbot 2 sec status=29',
@@ -275,8 +275,8 @@ def test_directive_rejects_status_429(config_override):
         with config_override(
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
-        '    BotShieldScoreSilent 500\n'
-        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreNonInteractive 500\n'
+        '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
             '    BotShieldRateLimit corpbot 1 sec "CorpBot" *\n'
             '    BotShieldRateLimitEscalate corpbot 2 sec status=429',
@@ -291,8 +291,8 @@ def test_directive_rejects_unknown_key(config_override):
         with config_override(
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
-        '    BotShieldScoreSilent 500\n'
-        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreNonInteractive 500\n'
+        '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
             '    BotShieldRateLimit corpbot 1 sec "CorpBot" *\n'
             '    BotShieldRateLimitEscalate corpbot 2 sec '
@@ -312,8 +312,8 @@ def test_directive_warns_on_unmatched_rate_name(
         with config_override(
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
-        '    BotShieldScoreSilent 500\n'
-        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreNonInteractive 500\n'
+        '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
             '    BotShieldRateLimitEscalate ghostrule 2 sec',
             count=1,

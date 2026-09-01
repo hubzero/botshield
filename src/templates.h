@@ -8,12 +8,12 @@
  *
  * Per-tier interstitial mapping (driven by bs_decide_tier in
  * botshield.c):
- *   silent  → auto-submit splash (no user click)
+ *   non-interactive → auto-submit splash (no user click)
  *   form    → reCAPTCHA-shaped checkbox the JS solves
  *   captcha → configured third-party provider's widget
  *
  * When captcha tier is selected but no provider is configured on
- * the scope, the render code falls through to form-PoW (documented
+ * the scope, the render code falls through to interactive PoW (documented
  * in the decision log as reason="captcha_fallback").
  *
  * Two-step substitution model:
@@ -46,10 +46,10 @@ extern "C" {
  *
  *   r            — request to write to
  *   cfg          — directory cfg with prompt/logo/help/captcha bits
- *   tier         — silent/form/captcha (drives widget choice)
+ *   tier         — non-interactive/interactive/captcha (drives widget choice)
  *   challenge_js — the inline-challenge JSON from bs_challenge_json
- *   issue_auto   — 1 for the auto-submitting silent splash, 0 for
- *                  the visible-checkbox form-PoW
+ *   issue_auto   — 1 for the auto-submitting non-interactive splash, 0 for
+ *                  the visible-checkbox interactive PoW
  *
  * Returns 1 if served via a captcha provider widget (caller logs
  * the captcha alg), 0 if served via the PoW widget. */
@@ -67,7 +67,7 @@ int bs_render_challenge_page(request_rec *r,
  * is a pure render. GET only. */
 int bs_safeguard_info_handler(request_rec *r);
 
-/* <prefix>/preview/{silent,form}. Renders the real interstitial with a
+/* <prefix>/preview/{non-interactive,interactive}. Renders the real interstitial with a
  * deliberately unsolvable payload so the page can be looked at in its
  * working state. Mints nothing and changes no state. */
 int bs_preview_handler(request_rec *r, int want_auto);

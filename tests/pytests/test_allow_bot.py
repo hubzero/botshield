@@ -79,7 +79,7 @@ def test_allow_bot_fake_routed_to_captcha(log_slice, fresh_ip):
         f"no decision line for fake-bot:googlebot on ip={fresh_ip}; "
         f"lines={lines}"
     )
-    assert fake[0]["tier"] in ("form", "captcha"), (
+    assert fake[0]["tier"] in ("interactive", "captcha"), (
         f"fake bot didn't reach form/captcha tier: "
         f"tier={fake[0]['tier']}"
     )
@@ -169,7 +169,7 @@ def test_allow_bot_inline_cidr(config_override, log_slice, fresh_ip):
 
     fake = [d for d in out_lines if "fake-bot:corpbot" in d["reason"]]
     assert fake, f"out-of-range CorpBot not faked; lines={out_lines}"
-    assert fake[0]["tier"] in ("form", "captcha")
+    assert fake[0]["tier"] in ("interactive", "captcha")
 
 
 def test_allow_bot_main_scope_inherits_to_vhost(

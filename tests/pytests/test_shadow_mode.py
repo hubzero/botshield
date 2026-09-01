@@ -365,8 +365,8 @@ def test_log_only_emits_tilde_challenge_for_tier_dispatch(
     config_override, fresh_ip, log_slice,
 ):
     """Scope-level BotShieldEnabled LogOnly + a request whose score
-    crosses BotShieldScoreSilent. Without LogOnly the response would
-    be a tier=silent interstitial; under LogOnly the module logs
+    crosses BotShieldScoreNonInteractive. Without LogOnly the response would
+    be a tier=non-interactive interstitial; under LogOnly the module logs
     `outcome=~challenge` and declines so the real handler runs."""
     with config_override(
         r"BotShieldEnabled\s+On",

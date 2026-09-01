@@ -83,7 +83,7 @@ def test_default_honeypot_forces_captcha(fresh_ip, log_slice):
     )
     # Tier landed at the floor or a captcha-fallback (form) — never
     # below form.
-    assert last["tier"] in ("captcha", "form"), (
+    assert last["tier"] in ("captcha", "interactive"), (
         f"tier should be captcha (or form via captcha_fallback); "
         f"got {last['tier']!r} reason={reason!r}"
     )
@@ -147,7 +147,7 @@ def test_softer_tier_floor_does_not_relax_default(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldFlagTrigger honeypot_hit action=tier_floor min=form',
+        '    BotShieldFlagTrigger honeypot_hit action=tier_floor min=interactive',
         count=1,
     ):
         _trip_honeypot(fresh_ip)
@@ -170,7 +170,7 @@ def test_softer_tier_floor_does_not_relax_default(
         f"the softer form floor must NOT be the winning floor reason; "
         f"got {reason!r}"
     )
-    assert last["tier"] in ("captcha", "form"), (
+    assert last["tier"] in ("captcha", "interactive"), (
         f"tier should land at captcha (or form via captcha_fallback) "
         f"despite the softer floor override; got {last['tier']!r} "
         f"reason={reason!r}"
@@ -190,7 +190,7 @@ def test_reset_then_softer_tier_floor_takes_effect(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldFlagTrigger honeypot_hit reset\n'
-        '    BotShieldFlagTrigger honeypot_hit action=tier_floor min=form',
+        '    BotShieldFlagTrigger honeypot_hit action=tier_floor min=interactive',
         count=1,
     ):
         _trip_honeypot(fresh_ip)

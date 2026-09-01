@@ -76,13 +76,13 @@ void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->secret_len = 0;
     cfg->secret_secondary     = NULL;
     cfg->secret_secondary_len = 0;
-    cfg->score_silent  = BS_UNSET;
-    cfg->score_hard    = BS_UNSET;
+    cfg->score_non_interactive  = BS_UNSET;
+    cfg->score_interactive    = BS_UNSET;
     cfg->score_captcha = BS_UNSET;
-    cfg->silent_mode   = BS_SILENT_MODE_UNSET;
+    cfg->non_interactive_mode   = BS_NON_INTERACTIVE_MODE_UNSET;
     cfg->form_captcha  = BS_UNSET;
-    cfg->forgive_silent  = BS_UNSET;
-    cfg->forgive_form    = BS_UNSET;
+    cfg->forgive_non_interactive  = BS_UNSET;
+    cfg->forgive_interactive    = BS_UNSET;
     cfg->forgive_captcha = BS_UNSET;
     cfg->cookie_domain   = NULL;
     cfg->scope_triggers       = NULL;
@@ -525,15 +525,15 @@ void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
                base->derived_hmac_bootstrap_2, 32);
         out->derived_keys_set_2 = base->derived_keys_set_2;
     }
-    out->score_silent  = (add->score_silent  == BS_UNSET) ? base->score_silent  : add->score_silent;
-    out->score_hard    = (add->score_hard    == BS_UNSET) ? base->score_hard    : add->score_hard;
+    out->score_non_interactive  = (add->score_non_interactive  == BS_UNSET) ? base->score_non_interactive  : add->score_non_interactive;
+    out->score_interactive    = (add->score_interactive    == BS_UNSET) ? base->score_interactive    : add->score_interactive;
     out->score_captcha = (add->score_captcha == BS_UNSET) ? base->score_captcha : add->score_captcha;
-    out->silent_mode   = (add->silent_mode   == BS_SILENT_MODE_UNSET)
-                       ? base->silent_mode : add->silent_mode;
+    out->non_interactive_mode   = (add->non_interactive_mode   == BS_NON_INTERACTIVE_MODE_UNSET)
+                       ? base->non_interactive_mode : add->non_interactive_mode;
     out->form_captcha  = (add->form_captcha  == BS_UNSET)
                        ? base->form_captcha : add->form_captcha;
-    out->forgive_silent  = (add->forgive_silent  == BS_UNSET) ? base->forgive_silent  : add->forgive_silent;
-    out->forgive_form    = (add->forgive_form    == BS_UNSET) ? base->forgive_form    : add->forgive_form;
+    out->forgive_non_interactive  = (add->forgive_non_interactive  == BS_UNSET) ? base->forgive_non_interactive  : add->forgive_non_interactive;
+    out->forgive_interactive    = (add->forgive_interactive    == BS_UNSET) ? base->forgive_interactive    : add->forgive_interactive;
     out->forgive_captcha = (add->forgive_captcha == BS_UNSET) ? base->forgive_captcha : add->forgive_captcha;
     out->cookie_domain   = add->cookie_domain ? add->cookie_domain : base->cookie_domain;
     /* Flag-on-match is additive: a more-specific scope that adds a flag
@@ -636,12 +636,12 @@ static const struct {
     { "scanner_probe",        BS_FLAG_SCANNER_PROBE,
                               BS_FLAG_ACT_SCORE,        50, BS_TIER_PASS },
     { "scanner_probe",        BS_FLAG_SCANNER_PROBE,
-                              BS_FLAG_ACT_TIER_FLOOR,    0, BS_TIER_HARD },
+                              BS_FLAG_ACT_TIER_FLOOR,    0, BS_TIER_INTERACTIVE },
     /* Detection signals — accumulating */
     { "pow_fail_streak",      BS_FLAG_POW_FAIL_STREAK,
                               BS_FLAG_ACT_SCORE,        30, BS_TIER_PASS },
     { "pow_fail_streak",      BS_FLAG_POW_FAIL_STREAK,
-                              BS_FLAG_ACT_TIER_FLOOR,    0, BS_TIER_SILENT },
+                              BS_FLAG_ACT_TIER_FLOOR,    0, BS_TIER_NONINTERACTIVE },
     /* Trust signals (credits) — score-only; never force tier up. */
     { "app_verified_human",   BS_FLAG_APP_VERIFIED_HUMAN,
                               BS_FLAG_ACT_SCORE,       -80, BS_TIER_PASS },
@@ -854,9 +854,9 @@ static const struct {
       BS_PENALTY_MISSING_AL,     BS_TIER_PASS },
     { BS_H_SCRAPER_UA,     BS_HEUR_ACT_SCORE,
       BS_PENALTY_SCRAPER_UA,     BS_TIER_PASS },
-    /* == BS_DEFAULT_SCORE_SILENT. Both post-cookie heuristics fire only
+    /* == BS_DEFAULT_SCORE_NON_INTERACTIVE. Both post-cookie heuristics fire only
      * when the request carries no usable cookie, so together they mean
-     * "no session context"; at the silent threshold an enabled scope
+     * "no session context"; at the non-interactive threshold an enabled scope
      * challenges that by default, with no rule for the operator to
      * write. */
     { BS_H_FIRST_SIGHT_IP, BS_HEUR_ACT_SCORE,
@@ -2522,7 +2522,7 @@ static void bs_log_logonly_hint(server_rec *s)
  * (BotShieldCaptchaProvider + SiteKey + SecretFile) before they're
  * useful, so they're never something an operator would land on
  * by accident. Defaulting here means "BotShieldEnabled On" suffices
- * for the common case (silent + hard PoW tiers); captcha tier still
+ * for the common case (non-interactive + interactive PoW tiers); captcha tier still
  * needs its provider config but the cookie-alg side is auto-populated
  * by bs_captcha_set_provider. */
 static void bs_populate_default_algorithm(server_rec *s)
@@ -2814,16 +2814,16 @@ const char *bs_set_access_log(cmd_parms *cmd, void *cfg_v, int argc,
     return NULL;
 }
 
-const char *bs_set_score_silent(cmd_parms *cmd, void *cfg_v, const char *arg)
+const char *bs_set_score_non_interactive(cmd_parms *cmd, void *cfg_v, const char *arg)
 {
-    return bs_set_score_int("BotShieldScoreSilent",
-        &((bs_dir_cfg *)cfg_v)->score_silent, arg, cmd->pool);
+    return bs_set_score_int("BotShieldScoreNonInteractive",
+        &((bs_dir_cfg *)cfg_v)->score_non_interactive, arg, cmd->pool);
 }
 
-const char *bs_set_score_hard(cmd_parms *cmd, void *cfg_v, const char *arg)
+const char *bs_set_score_interactive(cmd_parms *cmd, void *cfg_v, const char *arg)
 {
-    return bs_set_score_int("BotShieldScoreHard",
-        &((bs_dir_cfg *)cfg_v)->score_hard, arg, cmd->pool);
+    return bs_set_score_int("BotShieldScoreInteractive",
+        &((bs_dir_cfg *)cfg_v)->score_interactive, arg, cmd->pool);
 }
 
 const char *bs_set_score_captcha(cmd_parms *cmd, void *cfg_v, const char *arg)
@@ -2832,16 +2832,16 @@ const char *bs_set_score_captcha(cmd_parms *cmd, void *cfg_v, const char *arg)
         &((bs_dir_cfg *)cfg_v)->score_captcha, arg, cmd->pool);
 }
 
-const char *bs_set_forgive_silent(cmd_parms *cmd, void *cfg_v, const char *arg)
+const char *bs_set_forgive_non_interactive(cmd_parms *cmd, void *cfg_v, const char *arg)
 {
-    return bs_set_score_int("BotShieldForgivenessSilent",
-        &((bs_dir_cfg *)cfg_v)->forgive_silent, arg, cmd->pool);
+    return bs_set_score_int("BotShieldForgivenessNonInteractive",
+        &((bs_dir_cfg *)cfg_v)->forgive_non_interactive, arg, cmd->pool);
 }
 
-const char *bs_set_forgive_form(cmd_parms *cmd, void *cfg_v, const char *arg)
+const char *bs_set_forgive_interactive(cmd_parms *cmd, void *cfg_v, const char *arg)
 {
-    return bs_set_score_int("BotShieldForgivenessForm",
-        &((bs_dir_cfg *)cfg_v)->forgive_form, arg, cmd->pool);
+    return bs_set_score_int("BotShieldForgivenessInteractive",
+        &((bs_dir_cfg *)cfg_v)->forgive_interactive, arg, cmd->pool);
 }
 
 const char *bs_set_forgive_captcha(cmd_parms *cmd, void *cfg_v, const char *arg)

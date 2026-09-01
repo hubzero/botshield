@@ -6,7 +6,7 @@
  * decision log can replay why a tier was chosen.
  *
  * Score → tier mapping happens via bs_decide_tier (compares total to
- * bs_dir_cfg->score_silent / _hard / _captcha thresholds), but the
+ * bs_dir_cfg->score_non_interactive / _hard / _captcha thresholds), but the
  * score struct itself is request-scoped and lives on r->request_config
  * under the module's slot.
  *
@@ -41,7 +41,7 @@ typedef struct bs_dir_cfg bs_dir_cfg;
  * ====================================================================== */
 
 /* Score → tier cut-points (defaults; operator-tunable via the
- * BotShieldScoreSilent / Hard / Captcha directives). */
+ * BotShieldScoreNonInteractive / Hard / Captcha directives). */
 /* Per-request tier floor set by a trigger's tier= action. Request
  * scoped (r->notes), not per-IP: a client that solves the challenge is
  * not re-challenged by state it cannot clear. Returns BS_TIER_PASS when
@@ -51,8 +51,8 @@ typedef struct bs_dir_cfg bs_dir_cfg;
 void bs_set_request_tier_floor(request_rec *r, int tier);
 int  bs_get_request_tier_floor(request_rec *r);
 
-#define BS_DEFAULT_SCORE_SILENT   20
-#define BS_DEFAULT_SCORE_HARD     50
+#define BS_DEFAULT_SCORE_NON_INTERACTIVE   20
+#define BS_DEFAULT_SCORE_INTERACTIVE     50
 #define BS_DEFAULT_SCORE_CAPTCHA  80
 
 /* Cap on stored reason entries per request. Overflow is silently
@@ -83,7 +83,7 @@ int  bs_get_request_tier_floor(request_rec *r);
  * scripted sends Accept-Language, so the old weight mostly taxed
  * legitimate automation.
  *
- * first-sight-ip is deliberately equal to BS_DEFAULT_SCORE_SILENT --
+ * first-sight-ip is deliberately equal to BS_DEFAULT_SCORE_NON_INTERACTIVE --
  * see the note beside it in config.c. */
 #define BS_PENALTY_MISSING_UA       40
 #define BS_PENALTY_MISSING_AL        5
@@ -92,27 +92,27 @@ int  bs_get_request_tier_floor(request_rec *r);
 #define BS_PENALTY_DROPPED_COOKIE   25
 
 /* ======================================================================
- * Tier + silent-mode enums (decision dispatch)
+ * Tier + non-interactive-mode enums (decision dispatch)
  * ====================================================================== */
 
 typedef enum {
     BS_TIER_PASS    = 0,
-    BS_TIER_SILENT  = 1,
-    BS_TIER_HARD    = 2,
+    BS_TIER_NONINTERACTIVE  = 1,
+    BS_TIER_INTERACTIVE    = 2,
     BS_TIER_CAPTCHA = 3
 } bs_tier;
 
-/* E17 — what flavor of silent-tier dispatch to use. INTERSTITIAL is
+/* E17 — what flavor of non-interactive tier dispatch to use. INTERSTITIAL is
  * the legacy M7 splash that auto-submits the PoW. EMBEDDED hands off
  * to a wrapper script the operator has already included on the page;
  * the page serves DECLINED (real content) and the wrapper does the
  * PoW in a Web Worker, then POSTs back to /botshield/embedded-verify
  * to mint _bs_session. */
 typedef enum {
-    BS_SILENT_MODE_UNSET        = -1,
-    BS_SILENT_MODE_INTERSTITIAL =  0,
-    BS_SILENT_MODE_EMBEDDED     =  1
-} bs_silent_mode;
+    BS_NON_INTERACTIVE_MODE_UNSET        = -1,
+    BS_NON_INTERACTIVE_MODE_INTERSTITIAL =  0,
+    BS_NON_INTERACTIVE_MODE_EMBEDDED     =  1
+} bs_non_interactive_mode;
 
 /* ======================================================================
  * Score system
@@ -182,14 +182,14 @@ int bs_apply_flag_triggers(request_rec *r,
                            bs_tier *out_tier_floor);
 
 /* Score-to-tier picker. Three configurable cut-points
- * (BotShieldScoreSilent / Hard / Captcha) gate four tiers
- * (pass / silent / form / captcha). The README "Understanding
+ * (BotShieldScoreNonInteractive / Hard / Captcha) gate four tiers
+ * (pass / non-interactive / interactive / captcha). The README "Understanding
  * scoring" section covers operator tuning; templates.h documents
  * the per-tier interstitial rendering. */
 bs_tier bs_decide_tier(const bs_dir_cfg *cfg, int score);
 
 /* Tier-name string for the decision log + claims-bridge wire
- * format. Returns "pass" / "silent" / "form" / "captcha", or "?"
+ * format. Returns "pass" / "non-interactive" / "interactive" / "captcha", or "?"
  * for an unknown enum value. */
 const char *bs_tier_name(bs_tier t);
 

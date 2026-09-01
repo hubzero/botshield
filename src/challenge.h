@@ -1,16 +1,16 @@
 /* challenge.h — challenge issuance, PoW algorithm registry,
  * reputation state envelope, and the bootstrap-sig helpers shared
- * between M7 (interstitial) and E17 (silent-tier embedded mode).
+ * between M7 (interstitial) and E17 (non-interactive tier embedded mode).
  *
  * The "challenge" abstraction is a pre-shared opaque envelope the
  * server signs once and the client returns having proved possession
  * of a small bit of work (PoW counter) or a third-party attestation
- * (captcha siteverify response). Both interstitial and silent paths
+ * (captcha siteverify response). Both interstitial and non-interactive paths
  * use the same bs_challenge struct + algorithm registry.
  *
  * Wire format (embedded inline in the interstitial, JSON):
  *     { v, alg, salt, nonce, difficulty, expires_at,
- *       score, flags, passes_silent, passes_form, passes_captcha,
+ *       score, flags, passes_non_interactive, passes_interactive, passes_captcha,
  *       challenged_at, auto, signature }
  *
  * Canonical HMAC input (deterministic, pipe-delimited ASCII):
@@ -21,13 +21,13 @@
  * — a single base64 blob the server can parse by splitting on '|',
  * no JSON parser required.
  *
- * `auto` is the silent-tier (M7) marker: 1 means the challenge was
- * served as a no-click auto-submit splash, 0 means the form-PoW
+ * `auto` is the non-interactive tier (M7) marker: 1 means the challenge was
+ * served as a no-click auto-submit splash, 0 means the interactive PoW
  * interstitial. HMAC-covered so an accepted cookie tells the server
- * which tier actually served it — used to pick passes_silent vs
- * passes_form and the matching forgiveness amount on verify.
+ * which tier actually served it — used to pick passes_non_interactive vs
+ * passes_interactive and the matching forgiveness amount on verify.
  *
- * Keep in sync with the JS worker (silent.c) when the template
+ * Keep in sync with the JS worker (non_interactive.c) when the template
  * ships the wire bits. */
 #ifndef BOTSHIELD_CHALLENGE_H
 #define BOTSHIELD_CHALLENGE_H
@@ -86,7 +86,7 @@ typedef struct {
      *
      * This is what stops a flagged client looping forever. Solving does
      * not clear a flag, and flag scores are re-applied on every request,
-     * so before this a flag worth more than BotShieldScoreSilent meant
+     * so before this a flag worth more than BotShieldScoreNonInteractive meant
      * an unbreakable challenge loop no matter how many times the client
      * solved. Flags acquired AFTER the solve are absent from this set
      * and still fire, so the excusal pays off the debt that existed at
@@ -96,8 +96,8 @@ typedef struct {
      * value reads as "nothing excused", which is exactly the previous
      * behaviour until the client next solves. */
     apr_uint32_t flags_excused;
-    int          passes_silent;
-    int          passes_form;
+    int          passes_non_interactive;
+    int          passes_interactive;
     int          passes_captcha;
     apr_time_t   challenged_at;        /* unix sec */
     apr_uint32_t forgive_window_start; /* unix sec; 0 = no window yet */
@@ -112,7 +112,7 @@ typedef struct {
     int           difficulty;
     apr_time_t    expires_at;            /* unix seconds */
     bs_rep_state  rep;                   /* carried forward across re-issues */
-    int           auto_tier;             /* 1 = silent M7 auto-submit; 0 = form */
+    int           auto_tier;             /* 1 = non-interactive M7 auto-submit; 0 = form */
     unsigned char signature[BS_SIG_BYTES];
 } bs_challenge;
 
@@ -161,13 +161,13 @@ const char *bs_issue_challenge(apr_pool_t *p, const bs_dir_cfg *cfg,
 
 /* Render a challenge as the inline JSON the M7 interstitial JS
  * consumes. Includes the encrypted cookie prefix, salt/nonce/
- * difficulty/expires, and (for embedded silent-tier mode) the
+ * difficulty/expires, and (for embedded non-interactive tier mode) the
  * bound-IP HMAC pair. */
 const char *bs_challenge_json(request_rec *r, apr_pool_t *p,
                               const bs_dir_cfg *cfg,
                               const bs_challenge *ch);
 
-/* bootstrap-binding helpers — bind the silent-tier
+/* bootstrap-binding helpers — bind the non-interactive tier
  * embedded-bootstrap to the originating client IP via an HMAC over
  * (nonce, bound_ip_hex, expires_at). Issued at bootstrap time,
  * verified at /embedded-verify time. */

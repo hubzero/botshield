@@ -12,15 +12,15 @@
  *                               post_config and the mod_watchdog tick
  *   - policy-status handler   : the admin-visible /botshield/policy-status
  *                               text dump
- *   - bs_decide_tier          : score → (pass | silent | form | captcha)
+ *   - bs_decide_tier          : score → (pass | non-interactive | interactive | captcha)
  *
  * Everything else fans out through the per-feature .h includes below.
  * Each subsystem owns its runtime, its directive setters, and its tests.
  *
  * Operator model. Four tiers, decided per request from a running score:
  *   pass     no challenge, real handler runs
- *   silent   embedded silent-tier verification (E17) or auto-submit splash
- *   form     visible form-PoW interstitial — a checkbox the JS solves
+ *   non-interactive  embedded non-interactive tier verification (E17) or auto-submit splash
+ *   form     visible interactive PoW interstitial — a checkbox the JS solves
  *   captcha  third-party provider widget (Turnstile, hCaptcha, reCAPTCHA,
  *            Friendly, GeeTest) on the M8 verify endpoint
  *
@@ -88,7 +88,7 @@
 #include "challenge.h" /* M7 — challenge issuance, alg registry, bootstrap-sig */
 #include "load.h"      /* E11 — load-aware throttling watchdog + state read */
 #include "triggers.h"  /* E3/E4/E6/E7.3/E11.2 — trigger families */
-#include "silent.h"    /* E17 — silent-tier embedded handlers */
+#include "non_interactive.h"    /* E17 — non-interactive tier embedded handlers */
 #include "captcha.h"   /* M8 — provider registry, siteverify, pending cookie */
 #include "bridge.h"    /* E5 + E8.2 — module ↔ app feedback / claims bridge */
 #include "templates.h" /* challenge page widget + shell rendering */
@@ -153,7 +153,7 @@ static const command_rec bs_cmds[] = {
                  "no interstitial, form or captcha is ever served. Use it "
                  "for a block-only scope, where an explicit status=4xx "
                  "trigger is meant to be the only action. Parking "
-                 "BotShieldScoreSilent/Hard/Captcha at 10000 is NOT "
+                 "BotShieldScoreNonInteractive/Hard/Captcha at 10000 is NOT "
                  "equivalent: a flag tier_floor is MAXed in after the "
                  "score-to-tier decision and ignores thresholds entirely, "
                  "so an IP carrying honeypot_hit, fake_bot, scanner_probe "
@@ -258,19 +258,19 @@ static const command_rec bs_cmds[] = {
                  "nothing was enforced and the origin answered, so it "
                  "is ordinary traffic. Requests BotShield never "
                  "evaluated always log."),
-    AP_INIT_TAKE1("BotShieldScoreSilent",  bs_set_score_silent,  NULL,
+    AP_INIT_TAKE1("BotShieldScoreNonInteractive",  bs_set_score_non_interactive,  NULL,
                  RSRC_CONF | ACCESS_CONF,
-                 "Score at or above which the silent-PoW tier is picked "
+                 "Score at or above which the non-interactive PoW tier is picked "
                  "(default: 20). Serves a no-click auto-submit splash."),
-    AP_INIT_TAKE1("BotShieldScoreHard",    bs_set_score_hard,    NULL,
+    AP_INIT_TAKE1("BotShieldScoreInteractive",    bs_set_score_interactive,    NULL,
                  RSRC_CONF | ACCESS_CONF,
-                 "Score at or above which the form-PoW tier is picked "
+                 "Score at or above which the interactive PoW tier is picked "
                  "(default: 50). Serves the checkbox interstitial."),
     AP_INIT_TAKE1("BotShieldScoreCaptcha", bs_set_score_captcha, NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "Score at or above which the captcha tier is picked "
                  "(default: 80). Serves the configured third-party "
-                 "provider's widget; falls through to form-PoW if no "
+                 "provider's widget; falls through to interactive PoW if no "
                  "BotShieldCaptchaProvider is set on the scope."),
     /* E18 — inline form captcha. */
     AP_INIT_FLAG("BotShieldFormCaptcha", bs_set_form_captcha, NULL,
@@ -286,9 +286,9 @@ static const command_rec bs_cmds[] = {
                  "urlencoded and application/json bodies; "
                  "multipart/form-data (file uploads) is out of scope."),
     /* Silent-tier dispatch flavor. */
-    AP_INIT_TAKE1("BotShieldSilentMode", bs_set_silent_mode, NULL,
+    AP_INIT_TAKE1("BotShieldNonInteractiveMode", bs_set_non_interactive_mode, NULL,
                  RSRC_CONF | ACCESS_CONF,
-                 "How to dispatch silent-tier (low-friction) "
+                 "How to dispatch non-interactive tier (low-friction) "
                  "challenges. 'interstitial' (default) = legacy M7 "
                  "auto-submit splash. 'embedded' = serve real page "
                  "(DECLINED) and rely on the operator-included "
@@ -298,13 +298,13 @@ static const command_rec bs_cmds[] = {
                  "may not arrive in time for the very first request, "
                  "but it lands within a few page-views — see CHANGELOG "
                  "E17 for the timing model."),
-    AP_INIT_TAKE1("BotShieldForgivenessSilent", bs_set_forgive_silent, NULL,
+    AP_INIT_TAKE1("BotShieldForgivenessNonInteractive", bs_set_forgive_non_interactive, NULL,
                  RSRC_CONF | ACCESS_CONF,
-                 "Score credit applied on a successful silent-PoW pass "
+                 "Score credit applied on a successful non-interactive PoW pass "
                  "(default: 10). Clamped at max(0, flag_penalty)."),
-    AP_INIT_TAKE1("BotShieldForgivenessForm",   bs_set_forgive_form,   NULL,
+    AP_INIT_TAKE1("BotShieldForgivenessInteractive",   bs_set_forgive_interactive,   NULL,
                  RSRC_CONF | ACCESS_CONF,
-                 "Score credit applied on a successful form-PoW pass "
+                 "Score credit applied on a successful interactive PoW pass "
                  "(default: 25). Clamped at max(0, flag_penalty)."),
     AP_INIT_TAKE1("BotShieldForgivenessCaptcha",bs_set_forgive_captcha,NULL,
                  RSRC_CONF | ACCESS_CONF,
@@ -574,7 +574,7 @@ static const command_rec bs_cmds[] = {
                  bs_set_scoring, NULL, RSRC_CONF,
                  "Implicit scoring. Default OFF. When on, built-in "
                  "heuristics and flag triggers accumulate a score and "
-                 "BotShieldScoreSilent/Hard/Captcha turn it into a "
+                 "BotShieldScoreNonInteractive/Hard/Captcha turn it into a "
                  "tier. When off, none of that runs and a tier comes "
                  "only from an explicit tier= on a rule. Off does NOT "
                  "disable challenging, rate limiting, classification or "
@@ -715,7 +715,7 @@ static const command_rec bs_cmds[] = {
                  "app_verified_session, app_trust_signal. Action "
                  "verbs: 'score add=N' (signed, -1000..1000; SUMs "
                  "across triggers) or 'tier_floor min=<tier>' "
-                 "(pass|silent|form|captcha; MAXes across triggers). "
+                 "(pass|non-interactive|interactive|captcha; MAXes across triggers). "
                  "'reset' clears compiled-in defaults + prior "
                  "operator declarations for the named flag before "
                  "this directive's effect is added. mode=observe "
@@ -866,9 +866,10 @@ static const command_rec bs_cmds[] = {
                  "unless status=3xx explicit), log=<tag>, "
                  "accesslog=on|off, flag=<bit> (default "
                  "scanner_probe), ttl=<sec> (default 3600; 0 = don't "
-                 "flag), penalty=<n>, tier=pass|silent|form|captcha, "
+                 "flag), penalty=<n>, tier=pass|non-interactive|interactive|captcha, "
                  "mode=enforce|observe. A rule can therefore block "
-                 "(status=4xx), challenge (status=pass tier=silent "
+                 "(status=4xx), challenge (status=pass "
+                 "tier=non-interactive "
                  "for the invisible check, tier=form for the visible "
                  "one), demand a captcha (status=pass tier=captcha), "
                  "or only shape the score (status=pass penalty=N). "
@@ -1061,7 +1062,7 @@ static int bs_is_asset_uri(const char *uri)
  * with this Set-Cookie already installed on r->err_headers_out, so
  * none of those outcomes need their own mint logic.
  *
- * The cookie carries trust=0 (passes_silent = passes_form =
+ * The cookie carries trust=0 (passes_non_interactive = passes_interactive =
  * passes_captcha = 0) and uses the "session" passthrough algorithm
  * — no PoW solution to verify, just an authenticated envelope
  * marking "you've been here." When the user later solves a real
@@ -1138,7 +1139,7 @@ static int bs_maybe_mint_session(request_rec *r, bs_dir_cfg *cfg,
  *
  * Recording the presentation runs unconditionally on safeguard-
  * eligible paths (have_client_ip + scfg present), regardless of
- * safeguard_enabled — the embedded → M7 fallback in silent-tier
+ * safeguard_enabled — the embedded → M7 fallback in non-interactive tier
  * dispatch reads the same count to decide when to bypass the
  * embedded short-circuit. The write is cheap (one mutex + a few
  * SHM stores); the only side-effect when safeguard is "off" is
@@ -1242,8 +1243,8 @@ static int bs_apply_safeguard(request_rec *r, int have_client_ip,
  *   <prefix>/metrics                    — mod_status-style export
  *   <prefix>/policy-status              — operator readback
  *   <prefix>/embedded{.js,-worker.js,-bootstrap,-verify}
- *                                       — silent-tier embedded path
- *   <prefix>/form-widget.js             — form-PoW widget shell
+ *                                       — non-interactive tier embedded path
+ *   <prefix>/form-widget.js             — interactive PoW widget shell
  * The bare /captcha-verify form still works for the single-provider
  * case so the old dev config and the first-provider-on-a-vhost case
  * keep working. Called before the debug / asset / cookie paths so
@@ -1294,10 +1295,10 @@ static int bs_route_module_endpoint(request_rec *r, bs_dir_cfg *cfg)
     if (strcmp(sub, "/preview") == 0 || strcmp(sub, "/preview/") == 0) {
         return bs_preview_index_handler(r);
     }
-    if (strcmp(sub, "/preview/silent") == 0) {
+    if (strcmp(sub, "/preview/non-interactive") == 0) {
         return bs_preview_handler(r, 1);
     }
-    if (strcmp(sub, "/preview/form") == 0) {
+    if (strcmp(sub, "/preview/interactive") == 0) {
         return bs_preview_handler(r, 0);
     }
     /* The explainer is already served at /safeguard-info, but it lives
@@ -1371,10 +1372,10 @@ static int bs_route_module_endpoint(request_rec *r, bs_dir_cfg *cfg)
  *      → effective score, score_tier, tier_floor.
  *   7. Pass-tier short-circuit + app_claims emission.
  *   8. Bloom-add + safeguard presentation accounting.
- *   9. Embedded silent-tier dispatch with embedded-→-form-PoW
+ *   9. Embedded non-interactive tier dispatch with embedded-→-interactive PoW
  *      fallback when the wrapper has had its chances.
  *   10. Build next_rep (forgiveness + cap), issue challenge, render
- *       interstitial (silent / form-PoW / captcha widget). */
+ *       interstitial (non-interactive / interactive PoW / captcha widget). */
 static int bs_handler(request_rec *r)
 {
     bs_dir_cfg *cfg = ap_get_module_config(r->per_dir_config,
@@ -1509,14 +1510,14 @@ static int bs_handler(request_rec *r)
          * counter, etc.) still has trustworthy pass counters, while a
          * signature-mismatched or expired one has none we may believe. */
         if (have_prior_rep) {
-            have_solve_proof = prior_ch.rep.passes_silent
-                            || prior_ch.rep.passes_form
+            have_solve_proof = prior_ch.rep.passes_non_interactive
+                            || prior_ch.rep.passes_interactive
                             || prior_ch.rep.passes_captcha;
         }
         if (!cookie_verify_reason) {
             cookie_fully_ok = 1;
             /* E10 — safeguard clear on solve. Gated on actual solve
-             * evidence (passes_silent / passes_form / passes_captcha)
+             * evidence (passes_non_interactive / passes_interactive / passes_captcha)
              * rather than just cookie validity. Under always-mint,
              * trust=0 presence cookies authenticate cleanly via the
              * GCM tag but represent no challenge solve — they must
@@ -1554,7 +1555,7 @@ static int bs_handler(request_rec *r)
      * cookie is the normal state of every returning client, so "ok"
      * alone answered a question nobody was asking; what an operator
      * needs to see is whether the holder ever passed a challenge.
-     * "solved" means verified AND carrying passes_silent/form/captcha;
+     * "solved" means verified AND carrying passes_non_interactive/form/captcha;
      * "ok" now means verified with no such proof -- a presence cookie,
      * which is exactly what a cookie-harvesting bot holds. */
     if (have_solve_proof && strcmp(cookie_status, "ok") == 0) {
@@ -1740,7 +1741,7 @@ static int bs_handler(request_rec *r)
     /* Not for declared crawlers. Both heuristics detect "no session
      * context", which is suspicious for a browser and simply normal for
      * a crawler -- they do not carry cookies, and penalising them for
-     * it made every known bot cross the silent threshold on arrival
+     * it made every known bot cross the non-interactive threshold on arrival
      * (semrush-bl measured 40: missing-accept-language 15 +
      * dropped-cookie 25). Known bots are meant to be admitted and
      * governed by robots.txt and rate limits, not challenged for being
@@ -1760,7 +1761,7 @@ static int bs_handler(request_rec *r)
      * exists because a real crawler -- one with a published identity,
      * an operator, and verifiable IP ranges -- is legitimately
      * stateless, and penalising it for carrying no cookie made every
-     * known bot cross the silent threshold on arrival.
+     * known bot cross the non-interactive threshold on arrival.
      *
      * None of that applies to a generic HTTP client library. The
      * directory lists python-requests, python-httpx, Go-http-client,
@@ -1785,15 +1786,15 @@ static int bs_handler(request_rec *r)
      * its first request. Waiving on validity alone let a bot mint one,
      * store it, and permanently suppress a 25-point penalty it had
      * never earned -- measured on this hub as no-UA scanners sitting
-     * at score 45 (silent tier) instead of 70 (form tier), i.e. using
+     * at score 45 (non-interactive tier) instead of 70 (interactive tier), i.e. using
      * cookie persistence to hold themselves in the CHEAPER challenge
      * tier. Same reasoning the safeguard-clear path above already
      * applies; these two call sites had drifted apart.
      *
-     * Cost to real browsers is one silent challenge: they arrive with
-     * no proof, get scored 25 (dropped-cookie) into the silent tier,
+     * Cost to real browsers is one non-interactive challenge: they arrive with
+     * no proof, get scored 25 (dropped-cookie) into the non-interactive tier,
      * solve it transparently, and every later request carries
-     * passes_silent and lands back here clean. */
+     * passes_non_interactive and lands back here clean. */
     if (have_client_ip && !have_solve_proof && !declared_crawler) {
         if (bs_bloom_seen(client_ip, scfg_h->ns_id)) {
             bs_apply_heuristic(r, BS_H_DROPPED_COOKIE);
@@ -1817,7 +1818,7 @@ static int bs_handler(request_rec *r)
     apr_uint32_t all_flags = ip_flags;
     /* Skip flags this client already answered for. Solving does not
      * clear a flag and flag scores re-apply every request, so without
-     * this a flag worth more than BotShieldScoreSilent is an unbreakable
+     * this a flag worth more than BotShieldScoreNonInteractive is an unbreakable
      * loop: solve, get re-flagged, get re-challenged, forever. Observed
      * in production as pow_ok succeeding once a second, each success
      * followed immediately by another challenge carrying cookie=solved.
@@ -1885,13 +1886,13 @@ static int bs_handler(request_rec *r)
     /* BotShieldChallenge Off — collapse any challenge tier back to pass
      * for this scope. Deliberately applied AFTER the floor MAX above: a
      * flag tier_floor ignores the score thresholds entirely, so parking
-     * BotShieldScoreSilent/Hard/Captcha cannot express "never challenge
+     * BotShieldScoreNonInteractive/Hard/Captcha cannot express "never challenge
      * here" on its own. This can.
      *
      * Everything else still runs — triggers act, rate limits act, score
      * accumulates, the decision is logged. Only the rendering is
      * suppressed, and the suppression is visible in the reason chain
-     * rather than silent, in the same spirit as :observe and the
+     * rather than quietly, in the same spirit as :observe and the
      * ~counterfactual outcomes. */
     if (cfg->challenge_enabled == 0 && tier != BS_TIER_PASS) {
         bs_score_add(r, 0, 0,
@@ -1904,7 +1905,7 @@ static int bs_handler(request_rec *r)
      * BotShieldFlagIP directive that used to live here was
      * superseded by `BotShieldTrigger flag=<name> ttl=<sec>`. */
 
-    /* Happy path: score below the silent threshold → pass through.
+    /* Happy path: score below the non-interactive threshold → pass through.
      * If there's no cookie this means no cookie is ever issued —
      * legitimate users experience mod_botshield as invisible. */
     if (tier == BS_TIER_PASS) {
@@ -1931,8 +1932,8 @@ static int bs_handler(request_rec *r)
             apr_uint32_t composite_flags = ip_flags;
             const char *cerr = bs_app_claims_set(r, scfg2,
                 effective, tier, cookie_status, composite_flags,
-                have_prior_rep ? prior_ch.rep.passes_silent  : 0,
-                have_prior_rep ? prior_ch.rep.passes_form    : 0,
+                have_prior_rep ? prior_ch.rep.passes_non_interactive  : 0,
+                have_prior_rep ? prior_ch.rep.passes_interactive    : 0,
                 have_prior_rep ? prior_ch.rep.passes_captcha : 0);
             if (cerr) {
                 ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
@@ -1975,20 +1976,20 @@ static int bs_handler(request_rec *r)
                                           cookie_status, score, effective);
     if (safeguard_rv != OK) return safeguard_rv;
 
-    /* E17 — silent-tier dispatch with embedded mode. Default behavior:
+    /* E17 — non-interactive tier dispatch with embedded mode. Default behavior:
      * skip the M7 interstitial, serve the real page (DECLINED), let
      * the wrapper handle verification in the background. Timing model:
      * "kicks in eventually" — see CHANGELOG.
      *
-     * Embedded → form-PoW fallback: if this client has had N
-     * consecutive silent-tier dispatches without _bs_session
+     * Embedded → interactive PoW fallback: if this client has had N
+     * consecutive non-interactive tier dispatches without _bs_session
      * arriving (count tracked via bs_safeguard_present_count), the
      * wrapper isn't doing its job (CSP-blocked, no JS, no Worker
      * support, etc.). Bypass the embedded short-circuit so the
-     * form-PoW path runs. The form-PoW path's own safeguard
+     * interactive PoW path runs. The interactive PoW path's own safeguard
      * threshold catches the case where it also fails. */
-    if (tier == BS_TIER_SILENT &&
-        cfg->silent_mode == BS_SILENT_MODE_EMBEDDED) {
+    if (tier == BS_TIER_NONINTERACTIVE &&
+        cfg->non_interactive_mode == BS_NON_INTERACTIVE_MODE_EMBEDDED) {
         int fall_back = 0;
         if (have_client_ip) {
             apr_int64_t now_t = (apr_int64_t)apr_time_sec(apr_time_now());
@@ -2000,7 +2001,7 @@ static int bs_handler(request_rec *r)
             }
         }
         if (!fall_back) {
-            bs_decision_log(r, "silent", "allow", cookie_status,
+            bs_decision_log(r, "non-interactive", "allow", cookie_status,
                             "-",
                             "-",
                             bs_decision_reason_names(r->pool, score),
@@ -2013,15 +2014,15 @@ static int bs_handler(request_rec *r)
         bs_score_add(r, 0, 0, "embedded-fallback-m7");
     }
 
-    /* `issue_auto` picks the form-PoW interstitial style: the
-     * silent-tier auto-submit splash (issue_auto=1) for low-friction
+    /* `issue_auto` picks the interactive PoW interstitial style: the
+     * non-interactive tier auto-submit splash (issue_auto=1) for low-friction
      * challenges, the visible form interstitial (issue_auto=0) for
      * the harder tier. Captcha tier is rendered separately by
      * bs_render_challenge_page when cfg->captcha_provider is set;
      * if the operator selected captcha tier without configuring a
-     * provider, render falls through to the form-PoW interstitial
+     * provider, render falls through to the interactive PoW interstitial
      * with reason "captcha_fallback" on the decision log. */
-    int issue_auto = (tier == BS_TIER_SILENT);
+    int issue_auto = (tier == BS_TIER_NONINTERACTIVE);
 
     /* Build the rep state to carry into the new cookie. Forgiveness +
      * pass-counter bump are picked from the tier the *prior* cookie was
@@ -2032,8 +2033,8 @@ static int bs_handler(request_rec *r)
     bs_rep_state next_rep;
     if (have_prior_rep) {
         int forgive = prior_ch.auto_tier
-            ? bs_effective_int(cfg->forgive_silent, BS_DEFAULT_FORGIVE_SILENT)
-            : bs_effective_int(cfg->forgive_form,   BS_DEFAULT_FORGIVE_FORM);
+            ? bs_effective_int(cfg->forgive_non_interactive, BS_DEFAULT_FORGIVE_NON_INTERACTIVE)
+            : bs_effective_int(cfg->forgive_interactive,   BS_DEFAULT_FORGIVE_INTERACTIVE);
         /* E15 — clamp against the per-cookie hourly cap
          * and surface the granted vs requested via reason chain when
          * the cap kicks in. */
@@ -2060,15 +2061,15 @@ static int bs_handler(request_rec *r)
         if (new_score < 0) new_score = 0;
         next_rep.score = new_score;
         if (prior_ch.auto_tier) {
-            next_rep.passes_silent = 1;  /* clamp */
+            next_rep.passes_non_interactive = 1;  /* clamp */
         } else {
-            next_rep.passes_form = 1;  /* clamp */
+            next_rep.passes_interactive = 1;  /* clamp */
         }
     } else {
         next_rep.score          = 0;
         next_rep.flags_excused  = 0;
-        next_rep.passes_silent  = issue_auto ? 1 : 0;
-        next_rep.passes_form    = issue_auto ? 0 : 1;
+        next_rep.passes_non_interactive  = issue_auto ? 1 : 0;
+        next_rep.passes_interactive    = issue_auto ? 0 : 1;
         next_rep.passes_captcha = 0;
         next_rep.challenged_at  = 0;   /* overwritten by issue() */
         next_rep.forgive_window_start = 0;
@@ -2082,7 +2083,7 @@ static int bs_handler(request_rec *r)
      * assembles its cookie as <envelope>.<counter> from the envelope
      * issued right here, and no server-side mint follows the solve. The
      * verify endpoints DO re-mint and stamp this themselves, so this is
-     * the same excusal arriving by the only route the form tier has.
+     * the same excusal arriving by the only route the interactive tier has.
      *
      * Safe to record before the work is done, because the envelope is
      * inert without a valid PoW counter -- a client that never solves
@@ -2104,10 +2105,10 @@ static int bs_handler(request_rec *r)
                   have_prior_rep ? cookie_score : -1,
                   have_prior_rep ? (unsigned)prior_ch.rep.flags_excused : 0,
                   cookie_fully_ok,
-                  next_rep.passes_silent, next_rep.passes_form,
+                  next_rep.passes_non_interactive, next_rep.passes_interactive,
                   next_rep.passes_captcha);
     /* Difficulty stays at the operator-configured BotShieldDifficulty.
-     * Tier (silent / form / captcha) is the primary lever for "this
+     * Tier (non-interactive / interactive / captcha) is the primary lever for "this
      * signal needs harder verification" via BotShieldFlagTrigger
      * action=tier_floor. If a real future need for "harder PoW for
      * this signal" surfaces, add a difficulty action verb at that
@@ -2148,7 +2149,7 @@ static int bs_handler(request_rec *r)
     /* Decision log for the challenge we just served. For non-captcha
      * tiers the provider/alg are the PoW algorithm the cookie will be
      * signed under; captcha tier names the configured provider and its
-     * cookie alg. When captcha tier falls through to form-PoW (no
+     * cookie alg. When captcha tier falls through to interactive PoW (no
      * provider configured), report the actual served tier (form) with
      * reason "captcha_fallback". */
     const char *served_tier_name = bs_tier_name(tier);
@@ -2162,9 +2163,9 @@ static int bs_handler(request_rec *r)
                                        cfg->captcha_provider->name);
     } else if (tier == BS_TIER_CAPTCHA) {
         /* Captcha tier asked for but no provider configured on this
-         * scope — interstitial we actually served is form-PoW. Label
+         * scope — interstitial we actually served is interactive PoW. Label
          * honestly. */
-        served_tier_name = "form";
+        served_tier_name = "interactive";
         served_reason    = (!score || !score->entries ||
                             score->entries->nelts == 0)
             ? "captcha_fallback"

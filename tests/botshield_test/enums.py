@@ -6,7 +6,19 @@ drift that M9.2 catches — this module lets every test import the
 same tuple instead of hand-rolling it.
 """
 
-TIERS = ("none", "pass", "silent", "form", "captcha", "safeguard")
+# Tier names as the Prometheus counter metric suffix (underscore
+# form). The decision log's `tier=` field spells non-interactive with
+# a hyphen; `tier_log()` converts. Prometheus metric names may only
+# contain [a-zA-Z0-9_:], so the two spellings cannot be unified --
+# same split the providers below already have.
+TIERS = ("none", "pass", "non_interactive", "interactive", "captcha",
+         "safeguard")
+
+
+def tier_log(tier):
+    """Metric suffix -> decision-log spelling."""
+    return tier.replace("_", "-")
+
 
 OUTCOMES = (
     "allow",

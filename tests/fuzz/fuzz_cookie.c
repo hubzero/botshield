@@ -64,7 +64,7 @@
 #include "../../src/score.c"
 #include "../../src/policy.c"
 #include "../../src/heuristics.c"
-#include "../../src/silent.c"
+#include "../../src/non_interactive.c"
 #include "../../src/captcha.c"
 #include "../../src/bridge.c"
 #include "../../src/botshield.c"

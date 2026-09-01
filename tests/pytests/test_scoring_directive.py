@@ -88,7 +88,7 @@ def test_explicit_tier_still_fires_with_scoring_off(
         r"BotShieldScoring\s+On",
         'BotShieldScoring Off\n'
         '    BotShieldRequestTrigger gate-test path="/" '
-        'status=pass tier=silent ttl=0 log=gate-test',
+        'status=pass tier=non-interactive ttl=0 log=gate-test',
         count=1,
     ):
         with log_slice as slc:
@@ -96,7 +96,7 @@ def test_explicit_tier_still_fires_with_scoring_off(
             lines = slc.decision_lines(ip=fresh_ip)
 
     assert r.status_code == 403, (
-        f"an explicit tier=silent must still challenge with scoring "
+        f"an explicit tier=non-interactive must still challenge with scoring "
         f"off; got {r.status_code}"
     )
     assert any("gate-test" in d["reason"] for d in lines), (

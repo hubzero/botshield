@@ -54,14 +54,17 @@ def test_counter_log_parity(log_slice):
 
     drift: list[str] = []
 
-    # tier / outcome / cookie: log spelling matches metric suffix.
+    # outcome / cookie: log spelling matches metric suffix. Tier does
+    # not -- non_interactive is a hyphen in the log and cannot be one
+    # in a Prometheus name -- so it converts, like provider below.
     for prefix, values in (("tier", enums.TIERS),
                             ("outcome", enums.OUTCOMES),
                             ("cookie", enums.COOKIES)):
         for v in values:
             metric = f"botshield_{prefix}_{v}_total"
+            log_v = enums.tier_log(v) if prefix == "tier" else v
             d = deltas.get(metric, 0.0)
-            log_count = sum(1 for ln in lines if ln.get(prefix) == v)
+            log_count = sum(1 for ln in lines if ln.get(prefix) == log_v)
             if int(d) != log_count:
                 drift.append(f"{metric}: metric Δ={d}, log={log_count}")
 

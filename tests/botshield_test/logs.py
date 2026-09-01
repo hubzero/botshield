@@ -18,7 +18,8 @@ import subprocess
 from contextlib import contextmanager
 
 from .config import ERROR_LOG
-from .enums import COOKIES, OUTCOMES, PROVIDERS, TIERS, provider_log
+from .enums import (COOKIES, OUTCOMES, PROVIDERS, TIERS, provider_log,
+                    tier_log)
 
 REQUIRED_DECISION_KEYS = (
     "tier", "outcome", "ip", "score",
@@ -152,7 +153,9 @@ def validate_decision(d: dict) -> list[str]:
         if key not in d:
             problems.append(f"missing key {key!r}")
 
-    if d.get("tier") and d["tier"] not in TIERS:
+    # TIERS holds the metric spelling; the log spells non_interactive
+    # with a hyphen (see enums.tier_log).
+    if d.get("tier") and d["tier"] not in {tier_log(t) for t in TIERS}:
         problems.append(f"tier={d['tier']!r} not in enum")
     if d.get("outcome") and d["outcome"] not in OUTCOMES:
         problems.append(f"outcome={d['outcome']!r} not in enum")

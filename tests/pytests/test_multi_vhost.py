@@ -70,8 +70,8 @@ def test_isolation_default_per_vhost(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreSilent 500\n'
-        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreNonInteractive 500\n'
+        '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
         '    BotShieldShareScope vhost-site-a',
         count=1,
@@ -86,8 +86,8 @@ def test_isolation_default_per_vhost(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreSilent 500\n'
-        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreNonInteractive 500\n'
+        '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
         '    BotShieldShareScope vhost-site-b',
         count=1,
@@ -124,8 +124,8 @@ def test_sharing_via_share_scope(
     """
     cfg = (
         'BotShieldEnabled On\n'
-        '    BotShieldScoreSilent 500\n'
-        '    BotShieldScoreHard 600\n'
+        '    BotShieldScoreNonInteractive 500\n'
+        '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
         '    BotShieldShareScope example-cluster'
     )

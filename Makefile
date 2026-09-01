@@ -45,7 +45,7 @@ DOCS_BUILD  := tools/build_site.py
 # is what Apache's LoadModule directive references; the source file
 # stays bare-named to match the rest of src/.
 MAIN_SRC := src/$(MOD_NAME).c
-EXTRA_SRC := src/robots.c src/shm.c src/crypto.c src/allowlist.c src/generated_verified_bots.c src/metrics.c src/challenge.c src/cookie.c src/load.c src/triggers.c src/config.c src/templates.c src/formcaptcha.c src/score.c src/policy.c src/heuristics.c src/silent.c src/captcha.c src/bridge.c src/bot_directory.c src/generated_bot_directory.c src/browser_classifier.c src/generated_browser_templates.c src/ua_class.c src/bot_rate.c
+EXTRA_SRC := src/robots.c src/shm.c src/crypto.c src/allowlist.c src/generated_verified_bots.c src/metrics.c src/challenge.c src/cookie.c src/load.c src/triggers.c src/config.c src/templates.c src/formcaptcha.c src/score.c src/policy.c src/heuristics.c src/non_interactive.c src/captcha.c src/bridge.c src/bot_directory.c src/generated_bot_directory.c src/browser_classifier.c src/generated_browser_templates.c src/ua_class.c src/bot_rate.c
 SRC      := $(MAIN_SRC) $(EXTRA_SRC)
 LA       := $(MAIN_SRC:.c=.la)
 

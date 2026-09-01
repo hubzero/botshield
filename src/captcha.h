@@ -56,7 +56,7 @@ typedef enum {
     /* Guard short-circuits emitted by bs_captcha_siteverify_guarded.
      * Caller maps to HTTP status (typically 429 / 503) and emits its
      * own decision_log line so the tier label matches the call site
-     * (captcha / silent / form). */
+     * (captcha / non-interactive / interactive). */
     BS_CAPTCHA_RATE_LIMITED    = 4,
     BS_CAPTCHA_INFLIGHT_CAPPED = 5
 } bs_captcha_result;
@@ -171,7 +171,7 @@ const char *bs_clear_pending_cookie(request_rec *r,
  * sites that all need the same cookie minting after a successful
  * provider verify (or a fail-open on TIMEOUT/ERROR): the M8
  * /captcha-verify handler, the embedded-verify-provider path in
- * silent.c, and the inline form-captcha fixup in formcaptcha.c.
+ * non_interactive.c, and the inline form-captcha fixup in formcaptcha.c.
  *
  * The shared logic — read prior `_bs_session` if sig-verifies-or-
  * just-expired, apply forgive_amount through the per-cookie hourly
@@ -183,10 +183,10 @@ const char *bs_clear_pending_cookie(request_rec *r,
  * exactly this section. One helper; one place to update.
  *
  * passes_kind picks which counter to bump: PASSES_CAPTCHA for the
- * captcha-tier callers, PASSES_SILENT for the embedded-silent path.
+ * captcha-tier callers, PASSES_NON_INTERACTIVE for the embedded non-interactive path.
  * forgive_amount is the per-tier policy the caller picks
- * (cfg->forgive_captcha vs cfg->forgive_silent). auto_tier is the
- * silent-tier marker the silent.c caller sets to 1; the captcha-
+ * (cfg->forgive_captcha vs cfg->forgive_non_interactive). auto_tier is the
+ * non-interactive tier marker the non_interactive.c caller sets to 1; the captcha-
  * tier callers leave it 0.
  *
  * Returns NULL on success with `*out_ch` populated and the

@@ -51,7 +51,7 @@ pytestmark = [pytest.mark.slow, pytest.mark.serial]
 # reload).
 _MONOTONIC_COUNTERS = (
     "botshield_tier_pass_total",
-    "botshield_tier_form_total",
+    "botshield_tier_interactive_total",
     "botshield_tier_captcha_total",
     "botshield_outcome_allow_total",
     "botshield_outcome_challenged_total",
@@ -346,7 +346,7 @@ def _write_report(path, samples, start_unix, duration_sec, rps, stats):
                 f"t={int(s['t'])} rss_kb={s['rss_kb']} "
                 f"log_bytes={s['log_bytes']} "
                 f"tier_pass={int(m.get('botshield_tier_pass_total', 0))} "
-                f"tier_form={int(m.get('botshield_tier_form_total', 0))} "
+                f"tier_interactive={int(m.get('botshield_tier_interactive_total', 0))} "
                 f"tier_captcha={int(m.get('botshield_tier_captcha_total', 0))} "
                 f"state_saves={int(m.get('botshield_state_saves_total', 0))}\n"
             )

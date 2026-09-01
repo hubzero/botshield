@@ -778,18 +778,18 @@ int bs_policy_status_handler(request_rec *r, bs_dir_cfg *cfg)
      * it had to clear was a compiled-in default that appeared nowhere
      * an operator could read. */
     {
-        int sil = bs_effective_int(cfg ? cfg->score_silent : 0,
-                                   BS_DEFAULT_SCORE_SILENT);
-        int hrd = bs_effective_int(cfg ? cfg->score_hard : 0,
-                                   BS_DEFAULT_SCORE_HARD);
+        int sil = bs_effective_int(cfg ? cfg->score_non_interactive : 0,
+                                   BS_DEFAULT_SCORE_NON_INTERACTIVE);
+        int hrd = bs_effective_int(cfg ? cfg->score_interactive : 0,
+                                   BS_DEFAULT_SCORE_INTERACTIVE);
         int cap = bs_effective_int(cfg ? cfg->score_captcha : 0,
                                    BS_DEFAULT_SCORE_CAPTCHA);
         ap_rputs("## Tier thresholds (effective)\n", r);
-        ap_rprintf(r, "silent   %6d   %s\n", sil,
-                   (cfg && cfg->score_silent > 0) ? "configured"
+        ap_rprintf(r, "non-interactive %6d   %s\n", sil,
+                   (cfg && cfg->score_non_interactive > 0) ? "configured"
                                                   : "compiled default");
         ap_rprintf(r, "hard     %6d   %s\n", hrd,
-                   (cfg && cfg->score_hard > 0) ? "configured"
+                   (cfg && cfg->score_interactive > 0) ? "configured"
                                                 : "compiled default");
         ap_rprintf(r, "captcha  %6d   %s\n\n", cap,
                    (cfg && cfg->score_captcha > 0) ? "configured"
@@ -838,7 +838,7 @@ int bs_policy_status_handler(request_rec *r, bs_dir_cfg *cfg)
                     && e->mode != BS_TMODE_OBSERVE
                     && e->score_add >= sil) {
                     ap_rprintf(r, "  ~  %s scores %+d on its own, at or above "
-                                  "the silent threshold of %d: this flag is a "
+                                  "the non-interactive threshold of %d: this flag is a "
                                   "challenge switch, not a contributing "
                                   "signal. Bounded by flags_excused -- one "
                                   "solve clears it for that cookie -- so a "
@@ -849,7 +849,7 @@ int bs_policy_status_handler(request_rec *r, bs_dir_cfg *cfg)
                 }
                 if (e->action == BS_FLAG_ACT_TIER_FLOOR
                     && e->mode != BS_TMODE_OBSERVE
-                    && e->tier_min >= BS_TIER_HARD && hrd >= 10000) {
+                    && e->tier_min >= BS_TIER_INTERACTIVE && hrd >= 10000) {
                     ap_rprintf(r, "  !! %s forces tier %s, which is MAXed in "
                                   "after the score decision and ignores the "
                                   "parked hard threshold of %d.\n",

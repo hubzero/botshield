@@ -36,7 +36,7 @@
 #include "challenge.h"/* bs_challenge, bs_rep_state, PoW algorithm registry */
 #include "crypto.h"
 #include "robots.h"
-#include "score.h"    /* bs_tier, bs_silent_mode, score system */
+#include "score.h"    /* bs_tier, bs_non_interactive_mode, score system */
 #include "shm.h"      /* bs_load_state, bs_metrics typedefs */
 #include "triggers.h" /* trigger + policy family types */
 
@@ -58,8 +58,8 @@ extern "C" {
 #define BS_DEFAULT_COOKIE_TTL 3600  /* seconds a verified cookie is good for */
 #define BS_DEFAULT_DIFFICULTY 4     /* leading hex zeros */
 #define BS_CLOCK_SKEW_AHEAD   60    /* grace if client clock runs ahead */
-#define BS_DEFAULT_FORGIVE_SILENT   10
-#define BS_DEFAULT_FORGIVE_FORM     25
+#define BS_DEFAULT_FORGIVE_NON_INTERACTIVE   10
+#define BS_DEFAULT_FORGIVE_INTERACTIVE     25
 #define BS_DEFAULT_FORGIVE_CAPTCHA  50
 /* E15 — per-cookie hourly cap on accumulated forgiveness. 200
  * points/hour ≈ 4-8 challenge-passes worth of credit. */
@@ -153,7 +153,7 @@ enum bs_enabled_state {
 #define BS_MAX_CAPTCHA_BODY         8192   /* siteverify response cap */
 #define BS_DEFAULT_RECAPTCHA_V3_MIN_SCORE 0.5  /* Google's suggested baseline */
 
-/* Tier + silent-mode enums (bs_tier, bs_silent_mode) and the per-
+/* Tier + non-interactive-mode enums (bs_tier, bs_non_interactive_mode) and the per-
  * request score system (bs_score_entry, bs_request_score) live in
  * score.h. */
 
@@ -223,16 +223,16 @@ struct bs_dir_cfg {
     unsigned char    derived_hmac_pending_2 [32];
     unsigned char    derived_hmac_bootstrap_2[32];
     int              derived_keys_set_2;
-    int score_silent;           /* score >= this → silent tier */
-    int score_hard;             /* score >= this → hard form-PoW tier */
+    int score_non_interactive;           /* score >= this → non-interactive tier */
+    int score_interactive;             /* score >= this → hard interactive PoW tier */
     int score_captcha;          /* score >= this → captcha tier */
-    /* E17 — silent-tier dispatch flavor, tri-state with UNSET so the
+    /* E17 — non-interactive tier dispatch flavor, tri-state with UNSET so the
      * merge picks the right scope's value. */
-    int silent_mode;            /* bs_silent_mode; UNSET inherits */
+    int non_interactive_mode;            /* bs_non_interactive_mode; UNSET inherits */
     /* E18 — inline form captcha. -1 inherit, 0 off, 1 on. */
     int form_captcha;
-    int forgive_silent;         /* score credit on silent-tier pass */
-    int forgive_form;           /* score credit on form-tier pass */
+    int forgive_non_interactive;         /* score credit on non-interactive tier pass */
+    int forgive_interactive;           /* score credit on form-tier pass */
     int forgive_captcha;        /* score credit on captcha pass */
     const char *cookie_domain;  /* if set, Set-Cookie Domain= attribute */
     /* BotShieldTrigger — per-Apache-scope trigger list. Each entry
@@ -572,7 +572,7 @@ extern const struct bs_flag_name { const char *name; apr_uint32_t bit; }
 
 /* Form-body reader — slurps a POST body up to `max_len` and writes
  * it as a NUL-terminated string. Returns APR_SUCCESS or an APR
- * error. Used by the verify handlers (silent + M8). */
+ * error. Used by the verify handlers (non-interactive + M8). */
 apr_status_t bs_read_form_body(request_rec *r, apr_size_t max_len,
                                const char **out_body,
                                apr_size_t *out_len);

@@ -118,9 +118,9 @@ extern "C" {
 #define BS_DEFAULT_NONCE_SLOTS     32768
 #define BS_NONCE_MIN_SLOTS         1024
 #define BS_NONCE_MAX_SLOTS         1048576
-/* E17 — embedded → M7 fallback threshold. After N consecutive silent-
- * tier-embedded dispatches in the safeguard window without
- * _bs_session arriving, the embedded short-circuit is bypassed and
+/* E17 — embedded → M7 fallback threshold. After N consecutive
+ * non-interactive-tier-embedded dispatches in the safeguard
+ * window without _bs_session arriving, the embedded short-circuit is bypassed and
  * M7 issues. Set lower than safeguard threshold so M7 gets a chance
  * before pass-through fully kicks in. Reuses the safeguard table's
  * present_count to avoid a fourth SHM table just for this counter. */
@@ -197,8 +197,8 @@ extern "C" {
 typedef enum {
     BS_M_TIER_NONE = 0,
     BS_M_TIER_PASS,
-    BS_M_TIER_SILENT,
-    BS_M_TIER_FORM,
+    BS_M_TIER_NONINTERACTIVE,
+    BS_M_TIER_INTERACTIVE,
     BS_M_TIER_CAPTCHA,
     BS_M_TIER_COUNT
 } bs_m_tier;
@@ -322,7 +322,7 @@ typedef enum {
 typedef enum {
     /* BS_M_COOKIE_OK is "verified but carries no solve proof" -- a
      * presence cookie. BS_M_COOKIE_SOLVED is the same verification
-     * plus passes_silent/form/captcha in the authenticated rep block.
+     * plus passes_non_interactive/form/captcha in the authenticated rep block.
      * The two are disjoint, deliberately: under always-mint every
      * client holds a valid cookie after one request, so "valid" says
      * nothing about whether a challenge was ever passed, and the
@@ -658,7 +658,7 @@ typedef struct {
     apr_uint64_t outcome[BS_M_OUTCOME_COUNT];
     /* Cookie state is in the ring because it carries the only solve
      * signal the PoW tiers produce. outcome=verified comes solely from
-     * captcha siteverify; a client that solves a silent/form
+     * captcha siteverify; a client that solves a non-interactive/interactive
      * interstitial returns on a fresh request that reads cookie=ok, so
      * a windowed solve rate needs this dimension, not just outcome[]. */
     apr_uint64_t cookie [BS_M_COOKIE_COUNT];
@@ -891,7 +891,7 @@ typedef struct {
     bs_safeguard_slot   *safeguard_table;
     apr_size_t           safeguard_capacity;
     /* Embedded-bootstrap nonce table — one-time-use binding for
-     * silent-tier challenges; insert at issue, atomic-consume at
+     * non-interactive tier challenges; insert at issue, atomic-consume at
      * verify, second presentation rejected. */
     bs_nonce_slot       *nonce_table;
     apr_size_t           nonce_capacity;

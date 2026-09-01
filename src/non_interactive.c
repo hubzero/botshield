@@ -1,7 +1,7 @@
-/* silent.c — implementations behind silent.h. E17 silent-tier
+/* non_interactive.c — implementations behind non_interactive.h. E17 non-interactive tier
  * verification handlers + their bootstrap-sig helpers. */
 
-#include "silent.h"
+#include "non_interactive.h"
 
 #include <string.h>
 #include <limits.h>
@@ -29,20 +29,20 @@
 #include "captcha.h"   /* bs_captcha_siteverify for embedded-verify-provider */
 
 /* ===========================================================
- * Embedded silent-verification handlers.
+ * Embedded non-interactive verification handlers.
  *
  * Three endpoints under <prefix>/embedded*:
  *   GET  /botshield/embedded.js         — static wrapper script
  *   GET  /botshield/embedded-bootstrap  — JSON: per-call PoW challenge
  *   POST /botshield/embedded-verify     — JSON: validates + sets cookie
  *
- * Activation: scope opts in via `BotShieldSilentMode embedded`.
+ * Activation: scope opts in via `BotShieldNonInteractiveMode embedded`.
  * Operator adds <script src="/botshield/embedded.js" defer> to their
- * page. When the request lands at silent tier, BotShield serves
+ * page. When the request lands at non-interactive tier, BotShield serves
  * DECLINED (real content) instead of the M7 splash; the wrapper runs
  * on page-load, fetches the bootstrap, solves PoW in a Web Worker,
  * and POSTs back. The verify endpoint mints _bs_session the same
- * way the M7 form-PoW path does, so subsequent requests round-trip
+ * way the M7 interactive PoW path does, so subsequent requests round-trip
  * cleanly.
  * =========================================================== */
 
@@ -121,7 +121,7 @@ static const char BS_EMBEDDED_JS[] =
 " fetch('/botshield/embedded-bootstrap', {credentials:'same-origin'})\n"
 "  .then(function(r){ return r.ok ? r.json() : null; })\n"
 "  .then(function(j){\n"
-"   if (!j || j.mode !== 'silent') return;\n"
+"   if (!j || j.mode !== 'non-interactive') return;\n"
 "   if (j.provider === 'turnstile') { runTurnstile(j); return; }\n"
 "   if (j.provider === 'recaptcha-v3') { runRecaptchaV3(j); return; }\n"
 "   if (j.provider === 'recaptcha-v2') { runRecaptchaV2(j); return; }\n"
@@ -492,7 +492,7 @@ int bs_form_widget_handler(request_rec *r)
  *
  * Returns one of:
  *   {"mode":"off"}                          — cookie already valid; wrapper exits
- *   {"mode":"silent","provider":"pow-gcm","challenge":{...}}
+ *   {"mode":"non-interactive","provider":"pow-gcm",...}
  *
  * The challenge object carries an opaque `cookie_prefix` — the same
  * AES-256-GCM-encrypted canonical form that bs_challenge_json emits
@@ -541,7 +541,7 @@ int bs_embedded_bootstrap_handler(request_rec *r,
         const char *action = cfg->captcha_expected_action
             ? cfg->captcha_expected_action : "botshield";
         ap_rprintf(r,
-            "{\"mode\":\"silent\",\"provider\":\"%s\","
+            "{\"mode\":\"non-interactive\",\"provider\":\"%s\","
             "\"sitekey\":\"%s\",\"action\":\"%s\"}\n",
             cfg->captcha_provider->name,
             cfg->captcha_site_key, action);
@@ -578,7 +578,7 @@ int bs_embedded_bootstrap_handler(request_rec *r,
     memset(&ch, 0, sizeof(ch));
     /* Issue a fresh challenge with default-zero rep state. The
      * verify path will mint a cookie carrying this same rep, which
-     * matches what a first-time silent-tier solver would receive. */
+     * matches what a first-time non-interactive tier solver would receive. */
     const char *ierr = bs_issue_challenge(r->pool, cfg, difficulty, ttl,
                                           /* auto_tier */ 1, NULL, NULL, &ch);
     if (ierr) {
@@ -630,7 +630,7 @@ int bs_embedded_bootstrap_handler(request_rec *r,
     }
 
     ap_rprintf(r,
-        "{\"mode\":\"silent\",\"provider\":\"pow-gcm\","
+        "{\"mode\":\"non-interactive\",\"provider\":\"pow-gcm\","
         "\"challenge\":{"
         "\"salt\":\"%s\",\"nonce\":\"%s\","
         "\"difficulty\":%d,\"expires_at\":%" APR_TIME_T_FMT ","
@@ -838,7 +838,7 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
      * so we mutate ch.rep directly and preserve its server-set
      * challenged_at (the issue path stamped "now" into ch when the
      * bootstrap was minted; we don't want prior_ch's older value to
-     * overwrite it). clamp passes_silent to 1 (it's an
+     * overwrite it). clamp passes_non_interactive to 1 (it's an
      * "ever passed" flag, not a counter). */
     {
         bs_challenge prior_ch = { 0 };
@@ -847,10 +847,10 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
             ch.rep = prior_ch.rep;
             ch.rep.challenged_at = challenged_at;
             bs_apply_rep_carry(r, cfg, &prior_ch, &ch.rep,
-                               bs_effective_int(cfg->forgive_silent,
-                                                BS_DEFAULT_FORGIVE_SILENT));
+                               bs_effective_int(cfg->forgive_non_interactive,
+                                                BS_DEFAULT_FORGIVE_NON_INTERACTIVE));
         }
-        ch.rep.passes_silent = 1;
+        ch.rep.passes_non_interactive = 1;
     }
 
     /* Record what this client was flagged for at the instant it did
@@ -862,7 +862,7 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
     }
     r->status = HTTP_NO_CONTENT;
     apr_table_setn(r->headers_out, "Cache-Control", "no-store");
-    /* Decision log + metrics: this is the only place a silent/form PoW
+    /* Decision log + metrics: this is the only place a non-interactive/interactive PoW
      * solve becomes observable. Without it `outcome=verified` came
      * solely from captcha siteverify, so a deployment running the PoW
      * tiers with no captcha provider reported a permanent 0% solve
@@ -870,7 +870,7 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
      * returns on a fresh request that reads cookie=ok, but that counts
      * requests-with-a-cookie, not solves — one human browsing 50 pages
      * logs 50 of them. The mint is the one-per-solve event. */
-    bs_decision_log(r, "silent", "verified", "minted", "-", "-",
+    bs_decision_log(r, "non-interactive", "verified", "minted", "-", "-",
                     "pow_ok", 0);
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
         "mod_botshield: embedded-verify(pow-gcm): cookie minted "
@@ -917,7 +917,7 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
     /* Reuse M8's siteverify path. Same provider entry, same
      * secret/sitekey, same body shape — the only difference vs.
      * /captcha-verify is that we don't redirect afterward and that
-     * we mint a cookie marked passes_silent=1 instead of
+     * we mint a cookie marked passes_non_interactive=1 instead of
      * passes_captcha=1. */
     int timeout_ms = cfg->captcha_timeout_ms > 0
         ? cfg->captcha_timeout_ms : BS_DEFAULT_CAPTCHA_TIMEOUT;
@@ -1012,8 +1012,8 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
     }
 
     /* Mint a captcha-<provider> cookie just like the M8 interstitial
-     * path does. The only rep delta is passes_silent=1 vs
-     * passes_captcha=1 — this was a silent-tier dispatch that
+     * path does. The only rep delta is passes_non_interactive=1 vs
+     * passes_captcha=1 — this was a non-interactive tier dispatch that
      * happened to use a captcha provider for the verification, not
      * a captcha-tier user-interactive solve.
      *
@@ -1026,7 +1026,7 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
     const char *cookie_alg_name = NULL;
     const char *merr = bs_captcha_carry_and_mint(r, cfg,
         BS_CAPTCHA_PASSES_SILENT,
-        bs_effective_int(cfg->forgive_silent, BS_DEFAULT_FORGIVE_SILENT),
+        bs_effective_int(cfg->forgive_non_interactive, BS_DEFAULT_FORGIVE_NON_INTERACTIVE),
         /* auto_tier */ 1,
         &ch, &cookie_alg_name);
     if (merr) {
@@ -1099,10 +1099,10 @@ int bs_embedded_verify_handler(request_rec *r, bs_dir_cfg *cfg)
 }
 /* end embedded handlers */
 
-/* --- silent-mode directive setters --- */
+/* --- non-interactive-mode directive setters --- */
 
-/* `BotShieldSilentMode <interstitial|embedded>`. Per-scope picker
- * for what flavor of silent-tier challenge to issue. Default
+/* `BotShieldNonInteractiveMode <interstitial|embedded>`. Per-scope picker
+ * for what flavor of non-interactive tier challenge to issue. Default
  * `interstitial` matches the legacy splash. `embedded` opts the
  * scope into background verification: BotShield serves the real
  * page (DECLINED) and relies on the operator-included
@@ -1110,15 +1110,15 @@ int bs_embedded_verify_handler(request_rec *r, bs_dir_cfg *cfg)
  * PoW in a Web Worker and POST the result back. The cookie may
  * arrive after the first request — see CHANGELOG E17 for the
  * "kicks in eventually" guarantee. */
-const char *bs_set_silent_mode(cmd_parms *cmd, void *cfg_v,
+const char *bs_set_non_interactive_mode(cmd_parms *cmd, void *cfg_v,
                                       const char *arg)
 {
     bs_dir_cfg *cfg = cfg_v;
-    if      (!strcasecmp(arg, "interstitial")) cfg->silent_mode = BS_SILENT_MODE_INTERSTITIAL;
-    else if (!strcasecmp(arg, "embedded"))     cfg->silent_mode = BS_SILENT_MODE_EMBEDDED;
+    if      (!strcasecmp(arg, "interstitial")) cfg->non_interactive_mode = BS_NON_INTERACTIVE_MODE_INTERSTITIAL;
+    else if (!strcasecmp(arg, "embedded"))     cfg->non_interactive_mode = BS_NON_INTERACTIVE_MODE_EMBEDDED;
     else {
         return apr_psprintf(cmd->pool,
-            "BotShieldSilentMode: '%s' must be 'interstitial' or "
+            "BotShieldNonInteractiveMode: '%s' must be 'interstitial' or "
             "'embedded'", arg);
     }
     return NULL;

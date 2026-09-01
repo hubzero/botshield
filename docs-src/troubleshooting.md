@@ -49,7 +49,7 @@ key.
 ## Every legitimate request is being challenged
 
 **Symptom**: real users see the interstitial; the decision log
-shows everything as `tier=silent` or higher.
+shows everything as `tier=non-interactive` or higher.
 
 **Most common cause**: Apache is behind a reverse proxy and
 `mod_remoteip` is not configured. mod_botshield is keying the IP
@@ -61,7 +61,7 @@ matches your edge's IP, that's the issue. Configure
 
 **Second-most common cause**: the defaults are challenging more than
 you expected. `first-sight-ip` scores 20, which *is*
-`BotShieldScoreSilent`, so any request arriving with no usable cookie
+`BotShieldScoreNonInteractive`, so any request arriving with no usable cookie
 gets the invisible check on its first visit — by design, but surprising
 if you enabled BotShield site-wide rather than on an auth path. Either
 scope the enable, or lower the heuristic:
@@ -72,7 +72,7 @@ BotShieldHeuristicTrigger first-sight-ip reset action=score add=5
 
 For sites where most visitors don't send `Accept-Language` (legitimate
 use cases exist), `missing-accept-language` adds another 5 on top;
-raise `BotShieldScoreSilent` to 30 or 40 if that combination is
+raise `BotShieldScoreNonInteractive` to 30 or 40 if that combination is
 over-firing.
 
 **Tuning workflow**:

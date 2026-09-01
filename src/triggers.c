@@ -308,16 +308,18 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
         a->status_explicit = 1;
     } else if (BS_AK("tier")) {
         if      (!strcasecmp(val, "pass"))    a->tier_floor = BS_TIER_PASS;
-        else if (!strcasecmp(val, "silent"))  a->tier_floor = BS_TIER_SILENT;
-        /* "form" and "hard" are the same tier: the decision log and
-         * metrics call it form, the threshold directive calls it
-         * BotShieldScoreHard. Accept both rather than make the
-         * operator remember which surface they are on. */
-        else if (!strcasecmp(val, "form")
-                 || !strcasecmp(val, "hard"))  a->tier_floor = BS_TIER_HARD;
+        else if (!strcasecmp(val, "non-interactive"))
+            a->tier_floor = BS_TIER_NONINTERACTIVE;
+        /* The form/hard alias this used to carry is gone. It existed
+         * because the wire string said "form" while the threshold
+         * directive said Hard, so an operator could not guess which
+         * surface they were on. One name on every surface now. */
+        else if (!strcasecmp(val, "interactive"))
+            a->tier_floor = BS_TIER_INTERACTIVE;
         else if (!strcasecmp(val, "captcha")) a->tier_floor = BS_TIER_CAPTCHA;
         else return apr_psprintf(pool,
-            "%s: tier='%s' must be pass/silent/form/captcha", dname, val);
+            "%s: tier='%s' must be pass/non-interactive/interactive/"
+            "captcha", dname, val);
     } else if (BS_AK("redirect")) {
         if (fam == BS_TFAMILY_ENV || fam == BS_TFAMILY_LOAD) {
             return apr_psprintf(pool,
@@ -1507,7 +1509,7 @@ static const bs_flag_meta *bs_flag_meta_for_name(const char *name)
  *                                  request score. SUM accumulates across
  *                                  triggers.
  *   action=tier_floor min=<tier> — set a minimum tier; <tier> is
- *                                  pass|silent|form|captcha. MAX
+ *                                  pass|non-interactive|interactive|captcha. MAX
  *                                  accumulates (strictest wins).
  *
  * Reset keyword: `BotShieldFlagTrigger <flag> reset` clears all earlier
@@ -1623,13 +1625,15 @@ const char *bs_set_flag_trigger(cmd_parms *cmd, void *dconf,
             if (strncasecmp(arg, "min=", 4) == 0) {
                 const char *t = arg + 4;
                 if      (strcasecmp(t, "pass")    == 0) e->tier_min = BS_TIER_PASS;
-                else if (strcasecmp(t, "silent")  == 0) e->tier_min = BS_TIER_SILENT;
-                else if (strcasecmp(t, "form")    == 0) e->tier_min = BS_TIER_HARD;
+                else if (strcasecmp(t, "non-interactive") == 0)
+                    e->tier_min = BS_TIER_NONINTERACTIVE;
+                else if (strcasecmp(t, "interactive") == 0)
+                    e->tier_min = BS_TIER_INTERACTIVE;
                 else if (strcasecmp(t, "captcha") == 0) e->tier_min = BS_TIER_CAPTCHA;
                 else {
                     return apr_psprintf(cmd->pool,
                         "BotShieldFlagTrigger '%s' action=tier_floor: "
-                        "min='%s' must be one of pass/silent/form/captcha",
+                        "min='%s' must be one of pass/non-interactive/interactive/captcha",
                         flag_name, t);
                 }
                 saw_min = 1;

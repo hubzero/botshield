@@ -73,7 +73,7 @@ form or captcha is ever rendered — any selected tier collapses back to
 `challenge-off:<tier>`.
 
 Use it where an explicit `status=4xx` trigger is meant to be the only
-action. Parking `BotShieldScoreSilent`/`Hard`/`Captcha` at `10000` is
+action. Parking `BotShieldScoreNonInteractive`/`Hard`/`Captcha` at `10000` is
 **not** equivalent, which is easy to get wrong: a flag `tier_floor` is
 MAX'd in *after* the score-to-tier decision and ignores thresholds
 entirely, so an IP carrying `honeypot_hit`, `fake_bot`, `scanner_probe`
@@ -96,7 +96,7 @@ tier directly.
 A residential visitor who had already solved a silent challenge —
 `cookie=solved` — was pushed into the untested form widget six seconds
 later because their IP carried `scanner_probe`. 124 of the 132
-form-tier decisions in that window carried solve proof.
+interactive-tier decisions in that window carried solve proof.
 
 To genuinely cap the tier, reset each floor and re-add only the score:
 
@@ -144,19 +144,19 @@ Change it if it collides with real app routes.
 
 | Directive | Syntax | Default |
 |---|---|---|
-| `BotShieldScoreSilent` | `N` | `20` |
-| `BotShieldScoreHard` | `N` | `50` |
+| `BotShieldScoreNonInteractive` | `N` | `20` |
+| `BotShieldScoreInteractive` | `N` | `50` |
 | `BotShieldScoreCaptcha` | `N` | `80` |
-| `BotShieldForgivenessSilent` | `N` | `10` |
-| `BotShieldForgivenessForm` | `N` | `25` |
+| `BotShieldForgivenessNonInteractive` | `N` | `10` |
+| `BotShieldForgivenessInteractive` | `N` | `25` |
 | `BotShieldForgivenessCaptcha` | `N` | `50` |
 | `BotShieldForgivenessCapPerHour` | `N` | `200` (0 disables) |
 
 Tier dispatch ladder:
 
-- `score < BotShieldScoreSilent` → pass
-- `BotShieldScoreSilent ≤ score < BotShieldScoreHard` → silent
-- `BotShieldScoreHard ≤ score < BotShieldScoreCaptcha` → form
+- `score < BotShieldScoreNonInteractive` → pass
+- `BotShieldScoreNonInteractive ≤ score < BotShieldScoreInteractive` → silent
+- `BotShieldScoreInteractive ≤ score < BotShieldScoreCaptcha` → form
 - `BotShieldScoreCaptcha ≤ score` → captcha (or form if no provider)
 
 See [site model](../site-model/index.html) for the full scoring
@@ -171,10 +171,10 @@ resistance; 0 disables (legacy behavior).
 
 | Directive | Syntax | Default |
 |---|---|---|
-| `BotShieldSilentMode` | `interstitial\|embedded` | `interstitial` |
+| `BotShieldNonInteractiveMode` | `interstitial\|embedded` | `interstitial` |
 
 `interstitial` (the default) serves a no-click splash page that
-auto-submits a SHA-256 PoW on load — the legacy silent-tier
+auto-submits a SHA-256 PoW on load — the legacy non-interactive-tier
 behavior. `embedded` instead hands off to the site-included
 `/botshield/embedded.js` wrapper: the page serves DECLINED (real
 content) and the wrapper does the PoW in a Web Worker, then POSTs
@@ -538,7 +538,7 @@ compress into one key.
 | Intent | Keys | Effect |
 |---|---|---|
 | Block | `status=403` (family default) | Refused from the policy walk. No scoring, no cookie mint, no render. |
-| Challenge | `status=pass tier=silent` | Invisible auto-submitting check. `tier=form` for the visible one. |
+| Challenge | `status=pass tier=non-interactive` | Invisible auto-submitting check. `tier=interactive` for the visible one. |
 | Captcha | `status=pass tier=captcha` | The configured provider's widget. |
 | Score only | `status=pass penalty=<n>` | Adds to the score and lets normal thresholds decide. |
 
@@ -575,7 +575,7 @@ BotShieldRequestTrigger debugparam query="*debug=1*" penalty=20
 # UA form the pattern match cannot express. Note ua="" is a restriction
 # and ua=* is not: "*" (or omitting the key) means "any", which is why a
 # rule carrying only ua=* is rejected as having no condition.
-BotShieldRequestTrigger no-ua ua="" status=pass tier=silent ttl=0 log=no-ua
+BotShieldRequestTrigger no-ua ua="" status=pass tier=non-interactive ttl=0 log=no-ua
 ```
 
 Because it fires from the policy walk it short-circuits **before**
@@ -653,7 +653,7 @@ declarations) for the named flag at post-config time.
 
 **A `tier_floor` bypasses your score thresholds.** It is MAX'd in
 *after* the score-to-tier decision, so it does not consult
-`BotShieldScoreSilent`/`Hard`/`Captcha` at all. Four of the compiled-in
+`BotShieldScoreNonInteractive`/`Hard`/`Captcha` at all. Four of the compiled-in
 defaults carry one — `honeypot_hit` and `fake_bot` (captcha),
 `scanner_probe` (form), `pow_fail_streak` (silent) — so an IP carrying
 any of them is challenged even in a scope whose thresholds are parked to
@@ -667,7 +667,7 @@ BotShieldFlagTrigger scanner_probe   reset action=score add=50
 BotShieldFlagTrigger pow_fail_streak reset action=score add=30
 ```
 
-**A flag score at or above `BotShieldScoreSilent` is an unbreakable
+**A flag score at or above `BotShieldScoreNonInteractive` is an unbreakable
 loop, not a challenge.** The replacement scores above fix the
 `tier_floor` bypass but leave a second trap, and `add=50` against the
 default silent threshold of `20` walks straight into it. Solving does
@@ -688,13 +688,13 @@ loop it could not escape. The affected user had tripped
 `scanner_probe` while filing a support ticket about being blocked: the
 attachment upload posts a negative ticket id, which reads as probing.
 
-Keep flag scores **below** `BotShieldScoreSilent` unless you intend the
+Keep flag scores **below** `BotShieldScoreNonInteractive` unless you intend the
 flag alone to challenge indefinitely. A flag worth less than the
 threshold still contributes toward a challenge in combination with
 other signals, which is usually what was meant:
 
 ```apache
-# with the default BotShieldScoreSilent of 20
+# with the default BotShieldScoreNonInteractive of 20
 BotShieldFlagTrigger scanner_probe   reset action=score add=10
 ```
 
@@ -749,9 +749,9 @@ suppress a penalty it never earned. The waiver requires solve evidence
 (`passes_silent`, `passes_form`, or `passes_captcha`) in the
 authenticated rep block — the same evidence the safeguard-clear path
 requires. A real browser pays for this exactly once: it arrives with no
-proof, scores `dropped-cookie` into the silent tier, clears it in one
+proof, scores `dropped-cookie` into the non-interactive tier, clears it in one
 auto-submitted round trip, and every later request carries proof. `first-sight-ip` sits at
-exactly `BotShieldScoreSilent`, so **an enabled scope challenges any
+exactly `BotShieldScoreNonInteractive`, so **an enabled scope challenges any
 request with no session context by default**, with no rule to write.
 That is usually what you want on a login or registration path, where the
 check is invisible and a real browser clears it in one auto-submitted

@@ -99,13 +99,13 @@ static const bs_heuristic_def bs_heuristic_defs[] = {
       bs_pred_missing_al },
     { { "scraper-ua",      BS_H_SCRAPER_UA,      BS_HP_HEADER, BS_PENALTY_SCRAPER_UA },
       bs_pred_scraper_ua },
-    /* 20 == BS_DEFAULT_SCORE_SILENT, deliberately. Both post-cookie
+    /* 20 == BS_DEFAULT_SCORE_NON_INTERACTIVE, deliberately. Both post-cookie
      * heuristics fire only when the request carries no usable cookie,
      * so together they mean "no session context". dropped-cookie (known
      * IP) was already 25 and acted on; first-sight-ip (new IP) sat at 5
      * and did not, which left exactly one hole: a crawler spreading one
      * request across many addresses is first-sight every time and was
-     * never challenged on score alone. Setting it to the silent
+     * never challenged on score alone. Setting it to the non-interactive
      * threshold closes that without an operator having to write a rule
      * -- an enabled scope now challenges any request with no session
      * context, invisibly, and a real browser clears it in one
@@ -189,7 +189,8 @@ void bs_run_builtin_heuristics(request_rec *r)
 
     /* Pre-compute predicate results for every HEADER-phase heuristic
      * once. Multiple operator entries can bind to the same heuristic
-     * (e.g. score add=20 + tier_floor min=silent), so caching the
+     * (e.g. score add=20 + tier_floor min=non-interactive), so
+     * caching the
      * evaluation avoids re-running the predicate per entry. */
     const char *match_reason[BS_H_COUNT];
     int evaluated[BS_H_COUNT] = { 0 };
@@ -240,7 +241,8 @@ void bs_apply_heuristic(request_rec *r, bs_heuristic_id id)
  *   BotShieldHeuristicTrigger missing-ua reset
  *   BotShieldHeuristicTrigger missing-ua reset action=score add=20
  *   BotShieldHeuristicTrigger scraper-ua action=score add=80
- *   BotShieldHeuristicTrigger first-sight-ip action=tier_floor min=silent
+ *   BotShieldHeuristicTrigger first-sight-ip action=tier_floor
+ *     min=non-interactive
  *
  * `all reset` is consumed at post_config time and clears every
  * compiled-in default + every prior operator entry, giving the
@@ -367,13 +369,15 @@ const char *bs_set_heuristic_trigger(cmd_parms *cmd, void *dconf,
             if (strncasecmp(arg, "min=", 4) == 0) {
                 const char *t = arg + 4;
                 if      (strcasecmp(t, "pass")    == 0) e->tier_min = BS_TIER_PASS;
-                else if (strcasecmp(t, "silent")  == 0) e->tier_min = BS_TIER_SILENT;
-                else if (strcasecmp(t, "form")    == 0) e->tier_min = BS_TIER_HARD;
+                else if (strcasecmp(t, "non-interactive") == 0)
+                    e->tier_min = BS_TIER_NONINTERACTIVE;
+                else if (strcasecmp(t, "interactive") == 0)
+                    e->tier_min = BS_TIER_INTERACTIVE;
                 else if (strcasecmp(t, "captcha") == 0) e->tier_min = BS_TIER_CAPTCHA;
                 else {
                     return apr_psprintf(cmd->pool,
                         "BotShieldHeuristicTrigger '%s' action=tier_floor: "
-                        "min='%s' must be one of pass/silent/form/captcha",
+                        "min='%s' must be one of pass/non-interactive/interactive/captcha",
                         name, t);
                 }
                 saw_min = 1;

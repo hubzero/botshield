@@ -1,6 +1,6 @@
-/* silent.h — E17 silent-tier verification handlers.
+/* non_interactive.h — E17 non-interactive tier verification handlers.
  *
- * The silent tier (BS_TIER_SILENT) hands the proof-of-work off to a
+ * The non-interactive tier (BS_TIER_NONINTERACTIVE) hands the proof-of-work off to a
  * Web Worker on the page rather than serving an interstitial. Three
  * endpoints make up the round-trip:
  *
@@ -25,8 +25,8 @@
  * bs_compute_bootstrap_sig) used by both /embedded-bootstrap and
  * /embedded-verify live in challenge.h alongside the rest of the
  * challenge-minting code. */
-#ifndef BOTSHIELD_SILENT_H
-#define BOTSHIELD_SILENT_H
+#ifndef BOTSHIELD_NON_INTERACTIVE_H
+#define BOTSHIELD_NON_INTERACTIVE_H
 
 #include <httpd.h>
 #include <http_config.h>
@@ -48,13 +48,13 @@ int bs_form_widget_handler(request_rec *r);
 int bs_embedded_bootstrap_handler(request_rec *r, bs_dir_cfg *cfg);
 int bs_embedded_verify_handler(request_rec *r, bs_dir_cfg *cfg);
 
-/* E17 — BotShieldSilentMode <interstitial|embedded>. Per-scope picker
- * for the silent-tier challenge flavor. */
-const char *bs_set_silent_mode(cmd_parms *cmd, void *cfg_v,
+/* E17 — BotShieldNonInteractiveMode <interstitial|embedded>. Per-scope picker
+ * for the non-interactive tier challenge flavor. */
+const char *bs_set_non_interactive_mode(cmd_parms *cmd, void *cfg_v,
                                const char *arg);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* BOTSHIELD_SILENT_H */
+#endif /* BOTSHIELD_NON_INTERACTIVE_H */

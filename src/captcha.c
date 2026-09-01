@@ -973,7 +973,7 @@ static const char *bs_log_suppress_suffix(apr_pool_t *p, apr_uint32_t n)
 }
 
 /* See captcha.h for the contract. The wrapper exists so embedded-
- * verify (silent.c) and form-captcha (formcaptcha.c) get the same
+ * verify (non_interactive.c) and form-captcha (formcaptcha.c) get the same
  * provider-quota / worker-occupancy DoS protection that the
  * /captcha-verify handler had inline — without this, those two
  * paths reach bs_captcha_siteverify with no rate cap and no
@@ -1417,7 +1417,7 @@ const char *bs_captcha_carry_and_mint(
                                forgive_amount);
         }
         if (passes_kind == BS_CAPTCHA_PASSES_SILENT) {
-            next_rep.passes_silent = 1;   /* clamp */
+            next_rep.passes_non_interactive = 1;   /* clamp */
         } else {
             next_rep.passes_captcha = 1;  /* clamp */
         }
@@ -1862,7 +1862,7 @@ const char *bs_set_captcha_site_key(cmd_parms *cmd, void *cfg_v,
      * plus `_`, `-`, `.` (Turnstile, hCaptcha, reCAPTCHA, Friendly,
      * GeeTest all conform). The value gets embedded into JS string
      * literals, HTML attributes, and JSON in the interstitial render
-     * paths (templates.c, silent.c). Charset-restricting it at
+     * paths (templates.c, non_interactive.c). Charset-restricting it at
      * config time makes the embed sites trivially safe even though
      * the value is operator-controlled. */
     for (const char *p = arg; *p; p++) {

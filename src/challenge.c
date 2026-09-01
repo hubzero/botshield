@@ -1,6 +1,6 @@
 /* challenge.c — challenge issuance, PoW algorithm registry, and the
  *  bootstrap-binding helpers shared by the M7 (interstitial)
- * and E17 (silent-tier) paths.
+ * and E17 (non-interactive tier) paths.
  *
  * Two abstractions live here:
  *
@@ -18,7 +18,7 @@
  *
  * Plus the bootstrap-sig pair (bs_format_bound_ip_hex /
  * bs_compute_bootstrap_sig). They originally lived next to the
- * silent-tier verify handler, but they're computed at challenge-
+ * non-interactive tier verify handler, but they're computed at challenge-
  * issuance time too — so they belong with the rest of the challenge
  * minting code, not the verifier.
  *
@@ -65,7 +65,7 @@ const char *bs_challenge_canonical(apr_pool_t *p,
         ch->version, ch->alg_name, salt_hex, nonce_hex,
         ch->difficulty, ch->expires_at,
         ch->rep.score, (unsigned)ch->rep.flags_excused,
-        ch->rep.passes_silent, ch->rep.passes_form, ch->rep.passes_captcha,
+        ch->rep.passes_non_interactive, ch->rep.passes_interactive, ch->rep.passes_captcha,
         ch->rep.challenged_at,
         ch->auto_tier ? 1 : 0,
         (unsigned)ch->rep.forgive_window_start,
@@ -155,7 +155,7 @@ static const char *bs_captcha_verify_noop(const bs_challenge *ch,
  * Used by the always-mint path that issues a presence-only session
  * cookie when a request arrives without a valid one. The cookie's
  * envelope carries the same canonical fields as a solve-issued
- * cookie, but with passes_silent=passes_form=passes_captcha=0 — no
+ * cookie, but with passes_non_interactive=passes_interactive=passes_captcha=0 — no
  * trust is claimed, so there is no PoW solution to verify. The HMAC
  * (GCM tag) on the envelope authenticates every field against
  * tampering, which is the only integrity check that's meaningful for
@@ -217,7 +217,7 @@ const bs_pow_algorithm *bs_find_algorithm(const char *name)
  *
  * Emits the small JSON object the M7 splash page consumes inline:
  * salt/nonce/difficulty/expires/auto + the encrypted cookie_prefix the
- * JS appends a counter to. For silent-tier embedded mode the
+ * JS appends a counter to. For non-interactive tier embedded mode the
  *  IP-binding pair (bound_ip + bootstrap_sig) is included so
  * the round-trip /embedded-verify can match the issuing IP.
  *
@@ -282,8 +282,8 @@ const char *bs_challenge_json(request_rec *r, apr_pool_t *p,
  * into the issued challenge verbatim — the handler has already applied
  * whatever forgiveness / increments are appropriate for the tier being
  * issued. If `rep_in` is NULL, rep starts at zero (first-ever challenge).
- * `auto_tier` controls the M7 silent-tier variant: 1 renders the interstitial
- * as an auto-submitting splash, 0 renders the form-PoW checkbox.
+ * `auto_tier` controls the M7 non-interactive tier variant: 1 renders the interstitial
+ * as an auto-submitting splash, 0 renders the interactive PoW checkbox.
  * `alg_override` lets callers issue cookies under a non-default algorithm
  * (M8 uses this for captcha-turnstile). NULL = use cfg->algorithm. */
 const char *bs_issue_challenge(apr_pool_t *p, const bs_dir_cfg *cfg,
@@ -311,8 +311,8 @@ const char *bs_issue_challenge(apr_pool_t *p, const bs_dir_cfg *cfg,
     } else {
         out->rep.score          = 0;
         out->rep.flags_excused  = 0;
-        out->rep.passes_silent  = 0;
-        out->rep.passes_form    = 0;
+        out->rep.passes_non_interactive  = 0;
+        out->rep.passes_interactive    = 0;
         out->rep.passes_captcha = 0;
         out->rep.challenged_at  = 0;
     }

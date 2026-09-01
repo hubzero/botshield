@@ -203,7 +203,7 @@ pow_fail_streak    tier_floor  silent   enforce   compiled default
 The source column is the point. "Not in the config file" and "not in
 effect" are different things, and two production lockouts came from
 confusing them: a flag was configured to score 50 against a
-`BotShieldScoreSilent` of 20 that was a compiled-in default and
+`BotShieldScoreNonInteractive` of 20 that was a compiled-in default and
 appeared nowhere an operator could read. The config said `add=50` and
 nothing on the system said what 50 meant.
 

@@ -8,7 +8,7 @@ in the session rides through without re-challenge.
 These tests use a Bloom-fresh IP shaped to land at silent tier (no
 Accept-Language, no Mozilla UA boost) and visit /embedded-test.html
 (a tiny static page that includes the wrapper). With
-BotShieldSilentMode embedded scoped to that path, the response is
+BotShieldNonInteractiveMode embedded scoped to that path, the response is
 DECLINED (real page) instead of the M7 splash; the wrapper does the
 verification work in the background.
 
@@ -43,7 +43,7 @@ def test_embedded_serves_real_page_immediately(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    <Location /embedded-test.html>\n'
-        '        BotShieldSilentMode embedded\n'
+        '        BotShieldNonInteractiveMode embedded\n'
         '    </Location>',
         count=1,
     ):
@@ -72,7 +72,7 @@ def test_embedded_wrapper_mints_verified_cookie(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    <Location /embedded-test.html>\n'
-        '        BotShieldSilentMode embedded\n'
+        '        BotShieldNonInteractiveMode embedded\n'
         '    </Location>',
         count=1,
     ):
@@ -116,7 +116,7 @@ def test_embedded_turnstile_mints_verified_cookie(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    <Location /embedded-test.html>\n'
-        '        BotShieldSilentMode embedded\n'
+        '        BotShieldNonInteractiveMode embedded\n'
         '        BotShieldCaptchaProvider turnstile\n'
         '        BotShieldCaptchaSiteKey 2x00000000000000000000AB\n'
         '        BotShieldCaptchaSecretFile /etc/botshield/turnstile-secret\n'
@@ -164,7 +164,7 @@ def test_embedded_hcaptcha_mints_verified_cookie(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    <Location /embedded-test.html>\n'
-        '        BotShieldSilentMode embedded\n'
+        '        BotShieldNonInteractiveMode embedded\n'
         '        BotShieldCaptchaProvider hcaptcha\n'
         '        BotShieldCaptchaSiteKey '
             '10000000-ffff-ffff-ffff-000000000001\n'
@@ -221,9 +221,9 @@ def test_embedded_falls_back_to_m7_when_wrapper_blocked(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    <Location /embedded-test.html>\n'
-        '        BotShieldSilentMode embedded\n'
-        '        BotShieldScoreSilent 1\n'
-        '        BotShieldScoreHard 1000\n'
+        '        BotShieldNonInteractiveMode embedded\n'
+        '        BotShieldScoreNonInteractive 1\n'
+        '        BotShieldScoreInteractive 1000\n'
         '        BotShieldScoreCaptcha 2000\n'
         '    </Location>',
         count=1,
@@ -349,7 +349,7 @@ def test_embedded_subsequent_request_declined_through(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    <Location /embedded-test.html>\n'
-        '        BotShieldSilentMode embedded\n'
+        '        BotShieldNonInteractiveMode embedded\n'
         '    </Location>',
         count=1,
     ):
