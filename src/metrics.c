@@ -4852,7 +4852,7 @@ int bs_metrics_handler(request_rec *r)
         "Decisions at tier=non-interactive (self-solving widget served).",
         bs_mload(&m->tier[BS_M_TIER_NONINTERACTIVE]));
     bs_m_emit_counter(r, "tier_interactive_total",
-        "Decisions at tier=form (checkbox PoW interstitial served).",
+        "Decisions at tier=interactive (checkbox PoW interstitial served).",
         bs_mload(&m->tier[BS_M_TIER_INTERACTIVE]));
     bs_m_emit_counter(r, "tier_captcha_total",
         "Decisions at tier=captcha (third-party provider widget served or verified).",
