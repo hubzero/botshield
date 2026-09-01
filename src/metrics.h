@@ -281,6 +281,10 @@ int bs_dashboard_app_users_handler(request_rec *r);
  * for /server-status. */
 int bs_status_hook(request_rec *r, int flags);
 
+/* Site-wide automated share over the last hour, whole percent, or -1
+ * when there is not enough traffic for it to mean anything. */
+int bs_bot_share_pct(void);
+
 #ifdef __cplusplus
 }
 #endif

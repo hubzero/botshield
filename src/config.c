@@ -182,6 +182,9 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
     /* E10 — safeguard merge. Only the main server's values steer
      * SHM sizing; merged-in overrides are harmless at per-vhost
      * scope because the table is module-global. */
+    out->scoring_enabled    = (add->scoring_enabled != -1)
+                            ? add->scoring_enabled
+                            : base->scoring_enabled;
     out->safeguard_enabled  = (add->safeguard_enabled != -1)
                             ? add->safeguard_enabled
                             : base->safeguard_enabled;
@@ -358,6 +361,7 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
      * the merge can pick the right scope's value; numeric fields
      * default to 0 which the post_config sizing + request-time
      * check treat as "use the compiled-in default." */
+    scfg->scoring_enabled     = -1;   /* unset -> OFF */
     scfg->safeguard_enabled   = -1;
     scfg->safeguard_threshold = 0;
     scfg->safeguard_window    = 0;
@@ -3599,6 +3603,15 @@ const char *bs_set_rate_escalate_capacity(cmd_parms *cmd,
  * pass-through, which some operators will consider too soft
  * regardless of the narrow conditions. Operators who've seen
  * the stuck-loop failure mode in practice enable it. */
+const char *bs_set_scoring(cmd_parms *cmd, void *dconf, int flag)
+{
+    (void)dconf;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->scoring_enabled = flag ? 1 : 0;
+    return NULL;
+}
+
 const char *bs_set_safeguard(cmd_parms *cmd, void *dconf, int flag)
 {
     (void)dconf;

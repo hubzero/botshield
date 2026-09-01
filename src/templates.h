@@ -67,6 +67,15 @@ int bs_render_challenge_page(request_rec *r,
  * is a pure render. GET only. */
 int bs_safeguard_info_handler(request_rec *r);
 
+/* <prefix>/preview/{silent,form}. Renders the real interstitial with a
+ * deliberately unsolvable payload so the page can be looked at in its
+ * working state. Mints nothing and changes no state. */
+int bs_preview_handler(request_rec *r, int want_auto);
+
+/* <prefix>/preview -- index of the client-facing pages, so they are
+ * discoverable without reading the source. */
+int bs_preview_index_handler(request_rec *r);
+
 #ifdef __cplusplus
 }
 #endif

@@ -781,6 +781,38 @@ static void bs_m_sum_ring(const bs_metrics_slot *ring, int nslots,
     }
 }
 
+/* Share of site traffic that is automated, as a whole percent over the
+ * last hour, or -1 when the sample is too thin for the number to say
+ * anything. Counted at log_transaction, so the denominator is every
+ * request on every vhost rather than only the ones BotShield decided
+ * on -- which is the honest denominator for "how much of what arrives
+ * here is a bot".
+ *
+ * Rendered on the silent interstitial. Only the percentage leaves the
+ * module: absolute volumes are operational data, and a public page
+ * reachable by anyone who trips a challenge is not where they belong.
+ */
+int bs_bot_share_pct(void)
+{
+    bs_metrics_window w;
+    bs_metrics_read_window(60, -1, &w);
+
+    apr_uint64_t total = 0;
+    for (int i = 0; i < BS_M_CLASS_COUNT; i++) {
+        total += w.req_class[i];
+    }
+    /* Below this the figure is an artefact of a restart, not a
+     * property of the site, and a wrong number on a page a stranger is
+     * reading is worse than no number. */
+    if (total < 500) return -1;
+
+    apr_uint64_t bots = w.req_class[BS_M_CLASS_VERIFIED_BOT]
+                      + w.req_class[BS_M_CLASS_KNOWN_BOT]
+                      + w.req_class[BS_M_CLASS_UNKNOWN_BOT]
+                      + w.req_class[BS_M_CLASS_FAKE_BOT];
+    return (int)((bots * 100 + total / 2) / total);
+}
+
 void bs_metrics_read_window(int span_minutes, int vhost_idx,
                             bs_metrics_window *out)
 {
@@ -3631,6 +3663,25 @@ int bs_dashboard_internals_handler(request_rec *r)
                      (apr_uint64_t)bs_shm.safeguard_capacity,
                      sizeof(bs_safeguard_slot),
                      "evicts; loop detection misses a looping client");
+        /* Occupancy answers "how many clients are being watched".
+         * The number an operator actually needs is how many TRIPPED
+         * it, because an abused safeguard and an idle one look
+         * identical in the gauge above. */
+        {
+            apr_uint64_t fired = bs_shm.metrics
+                ? bs_mload(&bs_shm.metrics->safeguard_fired_total) : 0;
+            ap_rprintf(r,
+                "<tr><td><span class='tip' data-tip='Each firing is one "
+                "redirect to the explainer, after which the counter is "
+                "cleared and the client is challenged normally again. "
+                "It grants no pass window, so a rising number is cost "
+                "rather than bypass -- roughly one 302 in place of one "
+                "interstitial.'>Safeguard fired</span></td>"
+                "<td class='n'>%" APR_UINT64_T_FMT "</td>"
+                "<td class='n'>&mdash;</td><td class='n'>&mdash;</td>"
+                "<td>&nbsp;</td><td class='n'>&mdash;</td></tr>",
+                fired);
+        }
         bs_d_cap_row(r, "Nonces", 0,
                      (apr_uint64_t)bs_shm.nonce_capacity,
                      (apr_uint64_t)bs_shm.nonce_capacity,
@@ -5031,6 +5082,12 @@ int bs_metrics_handler(request_rec *r)
         "Requests that tripped a BotShieldRateLimit cohort budget "
         "(response was 429 + Retry-After).",
         bs_mload(&m->rate_limit_exceeded_total));
+    bs_m_emit_counter(r, "safeguard_fired_total",
+        "Times the anti-loop safeguard redirected a client to the "
+        "explainer after N unsolved challenges. Distinct from "
+        "shm_safeguard_used, which counts clients being watched rather "
+        "than clients that tripped it.",
+        bs_mload(&m->safeguard_fired_total));
 
     /* --- On-demand gauges (may refresh a 1-second cache) --- */
 

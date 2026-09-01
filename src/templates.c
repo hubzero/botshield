@@ -22,10 +22,12 @@
 #include <httpd.h>
 #include <http_log.h>
 #include <http_protocol.h>
+#include <http_core.h>   /* ap_get_server_name */
 #include <apr_strings.h>
 
 #include "botshield.h"
 #include "captcha.h"     /* bs_mint_pending_cookie */
+#include "metrics.h"    /* bs_bot_share_pct */
 #include "templates.h"
 
 /* Default help panel content. HTML allowed because the string is emitted
@@ -35,6 +37,17 @@ static const char BS_DEFAULT_HELP_HTML[] =
 "a small math puzzle in the background \xe2\x80\x94 no pictures to "
 "identify, and nothing personal is sent. It usually takes a second "
 "or two.</p>";
+
+/* Shown on the silent tier only, and only once the solve has run
+ * longer than a person is willing to watch a spinner. Deliberately
+ * short and free of instruction: there is nothing for them to do. */
+/* The silent tier's widget label. Cloudflare's page-level line here is
+ * "Checking if the site connection is secure", which describes
+ * something that is not happening: TLS was negotiated before this
+ * response was built and nothing about the connection is being
+ * examined. What the page does is hand the client a proof-of-work and
+ * see whether a real browser engine solves it. */
+static const char BS_SILENT_PROMPT[] = "Verifying you are human\xe2\x80\xa6";
 
 /* Embedded Guardian shield — used when BotShieldLogoFile isn't set. */
 static const char BS_DEFAULT_LOGO_SVG[] =
@@ -85,21 +98,21 @@ static const char BS_WIDGET_TEMPLATE[] =
 ".bs-widget.bs-bare{background:transparent;border:0;box-shadow:none;\n"
 " min-width:0;padding:0}\n"
 ".bs-widget.bs-bare .bs-btn{padding:0;border-radius:4px}\n"
-".bs-widget.bs-auto{background:transparent;border:0;box-shadow:none;\n"
-" min-width:0;padding:0}\n"
-".bs-widget.bs-auto .bs-btn{padding:.6rem 0;cursor:default;\n"
-" pointer-events:none;justify-content:center}\n"
-/* Silent-tier visual cleanup: the brand column is purely decorative
- * so display:none-ing it is fine, but the label carries the button's
- * accessible name — visually hide it via the screen-reader-only
- * technique so the a11y tree still exposes "Verify you are human"
- * to axe/screen readers. An earlier revision display:none'd the
- * label too, which made axe-core's button-name check fail
- * critical (caught by tests/pytests/test_browser_a11y.py). */
-".bs-widget.bs-auto .bs-brand{display:none}\n"
-".bs-widget.bs-auto .bs-label{position:absolute;width:1px;height:1px;\n"
-" padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);\n"
-" white-space:nowrap;border:0}\n"
+/* The silent tier is the same bordered widget as the form tier,
+ * differing only in that there is nothing to click: same box,
+ * same label column, same brand column. Turnstile's widget looks
+ * the same whether it is waiting on the user or working by
+ * itself, and that is the right call -- a borderless spinner on
+ * an empty page reads as a stall, while a widget reads as a
+ * widget. */
+".bs-widget.bs-auto .bs-btn{cursor:default;pointer-events:none}\n"
+/* No help affordance on the silent tier: it is a control the
+ * client cannot use on a page they will not be on long enough to
+ * read it. The label stays visible here, unlike an earlier
+ * revision that hid it -- axe-core's button-name check goes
+ * critical when the button has no accessible name (caught by
+ * tests/pytests/test_browser_a11y.py, which needs `playwright
+ * install` on this host to actually run). */
 ".bs-widget.bs-auto ~ .bs-help-toggle,\n"
 ".bs-widget.bs-auto ~ .bs-help{display:none}\n"
 ".bs-btn{display:inline-flex;align-items:center;gap:.85rem;\n"
@@ -127,7 +140,7 @@ static const char BS_WIDGET_TEMPLATE[] =
 " border-width:0 2.5px 2.5px 0;transform:rotate(45deg)}\n"
 ".bs-working .bs-btn,.bs-done .bs-btn{pointer-events:none}\n"
 ".bs-msg{font-size:12px;color:#55605e;min-height:1.3em;\n"
-" text-align:center;word-break:break-word;max-width:320px;margin:0}\n"
+" text-align:center;word-break:break-word;max-width:400px;margin:0}\n"
 ".bs-help-toggle{display:inline-flex;align-items:center;gap:.4rem;\n"
 " background:transparent;border:0;padding:.25rem .5rem;font:inherit;\n"
 " font-size:12px;color:#55605e;cursor:pointer;border-radius:3px}\n"
@@ -145,15 +158,49 @@ static const char BS_WIDGET_TEMPLATE[] =
 ".bs-help a{color:#2f5d50}\n"
 ".bs-noscript{padding:.9rem 1rem;color:#b02a37;background:#fdf4f4;\n"
 " border:1px solid #f3c8c8;border-radius:4px}\n"
+/* Silent-tier context block. A spinner alone on an unbranded grey
+ * field is indistinguishable from a site that has hung, and the
+ * silent tier is exactly the one the client never asked for and
+ * cannot act on. .bs-host names what they are waiting for -- the
+ * first thing Cloudflare's interstitial shows, for the same
+ * reason: it also says the page belongs to the site and not to an
+ * ISP or an extension. .bs-late carries the reassurance, revealed
+ * on a timer, because most solves finish well inside 1.5s and
+ * paying a paragraph of explanation on a page that flashes past
+ * makes the fast case feel heavier than it is. */
+".bs-host{font-size:19px;font-weight:600;color:#1f2530;margin:0;\n"
+" text-align:center;letter-spacing:-.01em;word-break:break-word}\n"
+/* The visible heading on the silent tier. Cloudflare puts
+ * "Checking if the site connection is secure" here, which is not
+ * what is happening -- TLS was established before this page was
+ * built, and nothing about the connection is under examination.
+ * What is actually checked is whether the client runs a real
+ * browser engine, so that is what it says. */
+".bs-late{max-width:400px;margin:0;font-size:12px;color:#7a8487;\n"
+" text-align:center;opacity:0;transition:opacity .35s ease}\n"
+".bs-late b{font-weight:600;color:#55605e}\n"
+".bs-late.on{opacity:1}\n"
+/* The footer's two lines belong together and closer than the stack's
+ * own .75rem rhythm, which is spacing between unrelated blocks. */
+".bs-foot{display:flex;flex-direction:column;align-items:center;\n"
+" gap:.2rem;margin:0}\n"
+/* The reference id is the only thing on this page an operator can
+ * search for. Without it a stranded user reports \"it hung on a
+ * grey page\", which is unfindable in a 100M decision log. */
+".bs-ref{font-size:11px;color:#7a8487;margin:0;text-align:center;\n"
+" font-family:ui-monospace,SFMono-Regular,Menlo,monospace;\n"
+" word-break:break-all}\n"
 "@keyframes bs-spin{to{transform:rotate(360deg)}}\n"
 "@media (prefers-reduced-motion: reduce){\n"
 " .bs-working .bs-check{animation:none;border-top-color:#7a8487}\n"
+" .bs-late{transition:none}\n"
 "}\n"
 "</style>\n"
 "<div class=\"bs-stack\">\n"
-"<h1 class=\"bs-sr\">Verify you are human</h1>\n"
+"%s"
 "<noscript><div class=\"bs-noscript\">JavaScript is required to continue."
 "</div></noscript>\n"
+"%s"
 "<div class=\"bs-widget%s\" id=\"c\">\n"
 " <button type=\"button\" class=\"bs-btn\" id=\"btn\""
 " aria-describedby=\"msg\"%s>\n"
@@ -164,6 +211,8 @@ static const char BS_WIDGET_TEMPLATE[] =
 "</div>\n"
 "%s"
 "<p class=\"bs-msg\" id=\"msg\" role=\"status\" aria-live=\"polite\"></p>\n"
+"%s"
+"%s"
 "</div>\n"
 "<script>window.__bsChallenge=%s;</script>\n"
 "<script>\n"
@@ -174,6 +223,11 @@ static const char BS_WIDGET_TEMPLATE[] =
 "    so the JS never references the name (, #2). */\n"
 " var box = document.getElementById('c');\n"
 " var msg = document.getElementById('msg');\n"
+" /* The silent widget states its progress in its label, the way\n"
+"    Turnstile does, so the status line under the box carries only\n"
+"    the counter -- printing the phrase in both places is the same\n"
+"    sentence twice, two lines apart. */\n"
+" var lbl = document.querySelector('.bs-label');\n"
 " var btn = document.getElementById('btn');\n"
 " function hexToBytes(h){\n"
 "  var b = new Uint8Array(h.length/2);\n"
@@ -192,7 +246,11 @@ static const char BS_WIDGET_TEMPLATE[] =
 "  startChallenge();\n"
 " }\n"
 " if (CH.auto){\n"
-"  msg.textContent = 'Checking your browser\\u2026';\n"
+"  msg.textContent = '';\n"
+"  /* Reveal the explanation only if the solve outlasts it. */\n"
+"  var late = document.getElementById('late');\n"
+"  if (late) setTimeout(function(){ late.classList.add('on'); },\n"
+"                       1500);\n"
 "  if (document.readyState === 'loading') {\n"
 "   document.addEventListener('DOMContentLoaded', begin, {once:true});\n"
 "  } else {\n"
@@ -211,7 +269,7 @@ static const char BS_WIDGET_TEMPLATE[] =
 "  var counter = 0;\n"
 "  var BATCH = 2048;\n"
 "  var t0 = Date.now();\n"
-"  msg.textContent = 'Verifying\\u2026';\n"
+"  if (!CH.auto) msg.textContent = 'Verifying you are human\\u2026';\n"
 "  function doBatch(){\n"
 "   var promises = [];\n"
 "   var start = counter;\n"
@@ -231,8 +289,10 @@ static const char BS_WIDGET_TEMPLATE[] =
 "    }\n"
 "    counter = start + BATCH;\n"
 "    var elapsed = ((Date.now()-t0)/1000).toFixed(1);\n"
-"    msg.textContent = 'Verifying\\u2026 (' + counter.toLocaleString() +\n"
-"                      ' hashes, ' + elapsed + 's)';\n"
+"    msg.textContent = CH.auto\n"
+"      ? counter.toLocaleString() + ' hashes, ' + elapsed + 's'\n"
+"      : 'Verifying you are human\\u2026 (' +\n"
+"        counter.toLocaleString() + ' hashes, ' + elapsed + 's)';\n"
 "    setTimeout(doBatch, 0);\n"
 "   }).catch(function(err){\n"
 "    msg.textContent = 'Verification failed: ' + (err && err.message || err);\n"
@@ -241,7 +301,9 @@ static const char BS_WIDGET_TEMPLATE[] =
 "  function finish(counterVal){\n"
 "   box.classList.remove('bs-working');\n"
 "   box.classList.add('bs-done');\n"
-"   msg.textContent = 'Verified \\u2014 reloading\\u2026';\n"
+"   if (CH.auto && lbl) lbl.textContent = 'Success!';\n"
+"   msg.textContent = CH.auto ? 'Reloading\\u2026'\n"
+"                             : 'Verified \\u2014 reloading\\u2026';\n"
 "   /*  POST the solution to the server\n"
 "      and let it mint the cookie via Set-Cookie + HttpOnly,\n"
 "      instead of setting document.cookie locally. JS can't read\n"
@@ -306,7 +368,7 @@ static const char BS_CAPTCHA_WIDGET_TEMPLATE[] =
 ".bs-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;\n"
 " overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}\n"
 ".bs-msg{font-size:12px;color:#55605e;min-height:1.3em;\n"
-" text-align:center;word-break:break-word;max-width:320px;margin:0}\n"
+" text-align:center;word-break:break-word;max-width:400px;margin:0}\n"
 ".bs-noscript{padding:.9rem 1rem;color:#b02a37;background:#fdf4f4;\n"
 " border:1px solid #f3c8c8;border-radius:4px}\n"
 "</style>\n"
@@ -352,7 +414,7 @@ static const char BS_RECAPTCHA_V3_WIDGET_TEMPLATE[] =
 ".bs-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;\n"
 " overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}\n"
 ".bs-msg{font-size:12px;color:#55605e;min-height:1.3em;\n"
-" text-align:center;word-break:break-word;max-width:320px;margin:0}\n"
+" text-align:center;word-break:break-word;max-width:400px;margin:0}\n"
 ".bs-noscript{padding:.9rem 1rem;color:#b02a37;background:#fdf4f4;\n"
 " border:1px solid #f3c8c8;border-radius:4px}\n"
 ".bs-spin{width:32px;height:32px;border:3px solid #e4e7ea;\n"
@@ -429,7 +491,7 @@ static const char BS_GEETEST_WIDGET_TEMPLATE[] =
 ".bs-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;\n"
 " overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}\n"
 ".bs-msg{font-size:12px;color:#55605e;min-height:1.3em;\n"
-" text-align:center;word-break:break-word;max-width:320px;margin:0}\n"
+" text-align:center;word-break:break-word;max-width:400px;margin:0}\n"
 ".bs-noscript{padding:.9rem 1rem;color:#b02a37;background:#fdf4f4;\n"
 " border:1px solid #f3c8c8;border-radius:4px}\n"
 "#bs-gt{min-height:60px;display:flex;justify-content:center}\n"
@@ -500,13 +562,147 @@ BS_WIDGET_MARKER "\n"
 
 /* Render the challenge interstitial. Picks PoW or captcha widget,
  * splices into the page shell, writes the response. */
+/* ----------------------------------------------------------------------
+ * <prefix>/preview/{silent,form} -- render the interstitials as a
+ * client sees them, for design work.
+ *
+ * Uses the real bs_render_challenge_page with the real template, CSS
+ * and script. A mock would drift from the thing being designed within
+ * a release, which is the whole reason this is not a static file.
+ *
+ * The payload is synthetic and deliberately unsolvable: difficulty 24
+ * is ~2^24 hashes, so the widget sits in its working state instead of
+ * completing and redirecting away before it can be looked at. That is
+ * also exactly the state an operator wants to see -- the page as it
+ * appears when the proof-of-work is NOT succeeding.
+ *
+ * No challenge is minted: no nonce slot consumed, no cookie set, no
+ * counter moved. A preview that altered state would be a preview you
+ * could not leave open.
+ *
+ * silent -> auto=1, the self-solving tier (BS_TIER_SILENT).
+ * form   -> auto=0, the click-to-verify tier. Internally BS_TIER_HARD;
+ *           the decision log and metrics call it "form" and
+ *           BotShieldScoreHard sets its threshold. Same page, the
+ *           checkbox is live rather than decorative.
+ * -------------------------------------------------------------------- */
+/* <prefix>/preview -- index of the pages a client can be shown.
+ *
+ * Exists because the three previews are otherwise only discoverable by
+ * reading the source or the commit that added them, which is a poor
+ * way to find the thing you want to redesign. Each entry says what
+ * state the page is in, since two of them are the same template
+ * differing by one flag and the difference is not obvious from a
+ * screenshot. */
+int bs_preview_index_handler(request_rec *r)
+{
+    if (r->method_number != M_GET) return HTTP_METHOD_NOT_ALLOWED;
+    bs_dir_cfg *cfg = ap_get_module_config(r->per_dir_config,
+                                           &botshield_module);
+    const char *px = (cfg && cfg->endpoint_prefix)
+                   ? cfg->endpoint_prefix : BS_DEFAULT_ENDPOINT_PREFIX;
+    ap_set_content_type(r, "text/html; charset=utf-8");
+    apr_table_setn(r->headers_out, "Cache-Control", "no-store");
+    apr_table_setn(r->headers_out, "X-Robots-Tag", "noindex, nofollow");
+    ap_rprintf(r,
+      "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+      "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+      "<title>BotShield page previews</title><style>"
+      "html,body{margin:0;padding:0}"
+      "body{background:#f5f5f2;color:#222;padding:2rem 1rem;"
+      "font:14px/1.5 system-ui,-apple-system,'Segoe UI',sans-serif}"
+      "main{max-width:640px;margin:0 auto;background:#fff;"
+      "border:1px solid #ddd;border-radius:8px;padding:1.5rem 1.75rem;"
+      "box-shadow:0 1px 3px rgba(0,0,0,.05)}"
+      "h1{margin:0 0 .25rem;font-size:1.25rem;color:#2f5d50}"
+      ".sub{color:#666;margin:0 0 1.25rem}"
+      "ul{list-style:none;margin:0;padding:0}"
+      "li{padding:.85rem 0;border-top:1px solid #eee}"
+      "a{color:#2f5d50;font-weight:600;text-decoration:none}"
+      "a:hover{text-decoration:underline}"
+      "code{background:#f2f2ef;padding:.1rem .3rem;border-radius:3px;"
+      "font-size:.9em}"
+      ".d{color:#555;margin:.25rem 0 0}"
+      ".n{color:#777;font-size:.875rem;margin-top:1.5rem;"
+      "border-top:1px solid #eee;padding-top:1rem}"
+      "</style></head><body><main>"
+      "<h1>Page previews</h1>"
+      "<p class=\"sub\">What a client is shown, rendered from the live "
+      "templates rather than copies.</p><ul>");
+    ap_rprintf(r,
+      "<li><a href=\"%s/preview/silent\">%s/preview/silent</a>"
+      "<p class=\"d\">Silent tier. The check runs by itself and the "
+      "widget is decorative &mdash; most visitors never see this "
+      "resolve. Shown here mid-check, because the proof-of-work is set "
+      "unsolvable so it cannot complete and navigate away.</p></li>",
+      px, px);
+    ap_rprintf(r,
+      "<li><a href=\"%s/preview/form\">%s/preview/form</a>"
+      "<p class=\"d\">Form tier &mdash; <code>BS_TIER_HARD</code> in the "
+      "source, <code>form</code> in the decision log, threshold set by "
+      "<code>BotShieldScoreHard</code>. Same template as silent; the "
+      "checkbox is live and waits for a click.</p></li>", px, px);
+    ap_rprintf(r,
+      "<li><a href=\"%s/preview/safeguard\">%s/preview/safeguard</a>"
+      "<p class=\"d\">The anti-loop explainer, shown once after five "
+      "unsolved challenges in ten minutes. Also served at "
+      "<code>%s/safeguard-info</code>, which is the URL clients "
+      "actually reach.</p></li>", px, px, px);
+    ap_rputs("</ul><p class=\"n\">These render the real templates and "
+             "change no state: nothing is minted, no counter moves, no "
+             "cookie is set. Safe to leave open.</p>"
+             "</main></body></html>", r);
+    return OK;
+}
+
+int bs_preview_handler(request_rec *r, int want_auto)
+{
+    if (r->method_number != M_GET) {
+        return HTTP_METHOD_NOT_ALLOWED;
+    }
+    bs_dir_cfg *cfg = ap_get_module_config(r->per_dir_config,
+                                           &botshield_module);
+    apr_table_setn(r->headers_out, "Cache-Control", "no-store");
+    apr_table_setn(r->headers_out, "X-Robots-Tag", "noindex, nofollow");
+
+    const char *js = apr_psprintf(r->pool,
+        "{\"salt\":\"%s\",\"nonce\":\"%s\",\"difficulty\":24,"
+        "\"expires_at\":%" APR_TIME_T_FMT ",\"cookie_prefix\":\"preview\","
+        "\"bound_ip\":\"00000000000000000000ffff7f000001\","
+        "\"bootstrap_sig\":\"%s\",\"auto\":%d}",
+        "00000000000000000000000000000000",
+        "0000000000000000",
+        (apr_time_t)(apr_time_sec(apr_time_now()) + 300),
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        want_auto ? 1 : 0);
+
+    (void)bs_render_challenge_page(r, cfg,
+                                   want_auto ? BS_TIER_SILENT : BS_TIER_HARD,
+                                   js, want_auto);
+    /* Serves 403, same as a real interstitial. Tried resetting to 200
+     * after the render and it does not take -- ap_rputs commits the
+     * headers with whatever status is set at the time, so the only way
+     * to change it would be threading a status through
+     * bs_render_challenge_page, which is not worth altering a shared
+     * signature for. It is arguably right anyway: this is a preview OF
+     * a refusal page, and it renders identically in a browser. */
+    return OK;
+}
+
 int bs_render_challenge_page(request_rec *r,
                              const bs_dir_cfg *cfg,
                              bs_tier tier,
                              const char *challenge_js,
                              int issue_auto)
 {
-    const char *prompt     = cfg->prompt     ? cfg->prompt     : BS_DEFAULT_PROMPT;
+    /* The silent tier's label is a status, not an invitation: there is
+     * no checkbox to tick. Turnstile makes the same split -- "Verify
+     * you are human" when it wants a click, "Verifying..." when it is
+     * working on its own. An operator's BotShieldPrompt still wins,
+     * since it is the string they chose to put in front of clients. */
+    const char *prompt     = cfg->prompt ? cfg->prompt
+                           : (issue_auto ? BS_SILENT_PROMPT
+                                         : BS_DEFAULT_PROMPT);
     const char *logo_svg   = cfg->logo_svg   ? cfg->logo_svg   : BS_DEFAULT_LOGO_SVG;
     const char *logo_label = cfg->logo_label ? cfg->logo_label : BS_DEFAULT_LOGO_LABEL;
     int help_mode  = bs_effective_int(cfg->help_mode,  BS_DEFAULT_HELP_MODE);
@@ -549,6 +745,71 @@ int bs_render_challenge_page(request_rec *r,
               "<div class=\"bs-brand\" aria-hidden=\"true\">%s"
               "<span class=\"nm\">%s</span></div>\n",
               logo_svg, ap_escape_html(r->pool, logo_label))
+        : "";
+
+    /* Silent-tier context. issue_auto is the tier where the client is
+     * given nothing to do and no reason for the wait, so it is the one
+     * that needs saying what site it is and that the wait ends by
+     * itself. The form tier already shows a prompt, a logo and a help
+     * toggle; repeating the hostname above them is clutter.
+     *
+     * ap_get_server_name honours UseCanonicalName, so this shows the
+     * configured ServerName rather than whatever Host: the client sent
+     * when the operator has asked for that. Escaped either way -- with
+     * UseCanonicalName Off it is client-supplied text. */
+    const char *host_esc = ap_escape_html(r->pool, ap_get_server_name(r));
+
+    /* The document heading. On the silent tier it is visible and
+     * descriptive, under the hostname, which is the order Cloudflare
+     * uses -- what site, then what is happening. On the form tier the
+     * widget's own prompt is the visible instruction, so the heading
+     * stays screen-reader-only and there is exactly one h1 either
+     * way. */
+    const char *h1_html = issue_auto
+        ? ""   /* the hostname block below is the h1 on this tier */
+        : "<h1 class=\"bs-sr\">Verify you are human</h1>\n";
+
+    const char *host_html = "";
+    const char *late_html = "";
+    if (issue_auto) {
+        host_html = apr_psprintf(r->pool,
+            "<h1 class=\"bs-host\">%s</h1>\n", host_esc);
+
+        /* One line, revealed late. The earlier version explained the
+         * check in a paragraph and then footnoted it with a second --
+         * on a page whose entire job is to be over quickly, that is
+         * more to read than the wait it was covering for. What a
+         * stalled visitor needs is that the wait ends by itself, which
+         * the heading now carries, and something to look at that is
+         * not a spinner, which this is.
+         *
+         * Omitted rather than guessed at when the hour has not carried
+         * enough requests to have an answer. */
+        int share = bs_bot_share_pct();
+        if (share >= 0) {
+            late_html = apr_psprintf(r->pool,
+                "<p class=\"bs-late\" id=\"late\">Bots were <b>%d%%</b> "
+                "of traffic here in the last hour.</p>\n",
+                share);
+        }
+    }
+
+    /* Reference id, on both tiers: the form tier is if anything more
+     * likely to strand someone, since it needs a click that can fail.
+     * Sourced from mod_unique_id, which is not a dependency -- when it
+     * is not loaded the line is simply absent rather than showing an
+     * id the operator cannot look up. */
+    const char *ref_html = "";
+    { const char *uid = apr_table_get(r->subprocess_env, "UNIQUE_ID");
+      if (uid && *uid) {
+          ref_html = apr_psprintf(r->pool,
+              "<p class=\"bs-ref\">Ref: %s</p>\n",
+              ap_escape_html(r->pool, uid));
+      } }
+
+    const char *foot_html = *ref_html
+        ? apr_pstrcat(r->pool, "<div class=\"bs-foot\">\n", ref_html,
+                      "</div>\n", NULL)
         : "";
 
     /* Captcha tier (M8): if we're at captcha tier AND a provider is fully
@@ -620,11 +881,15 @@ int bs_render_challenge_page(request_rec *r,
         }
     } else {
         widget = apr_psprintf(r->pool, BS_WIDGET_TEMPLATE,
+                              h1_html,
+                              host_html,
                               widget_mod,
                               aria_attr,
                               prompt_span,
                               brand_div,
                               help_html,
+                              late_html,
+                              foot_html,
                               challenge_js);
     }
 
@@ -725,8 +990,11 @@ static const char BS_SAFEGUARD_INFO_TEMPLATE[] =
 "keeps happening, try a different browser or contact the site\n"
 "administrator.</p>\n"
 "<p><a class=\"continue\" href=\"%s\">Continue to %s</a></p>\n"
-"<p class=\"small\">Your auto-verification counter has been reset.\n"
-"Following this link will start a fresh check.</p>\n"
+/* One line at the 520px container width. The previous wording ran to
+ * 93 characters and wrapped, which made a reassurance read like a
+ * warning -- two muted lines under a button look like small print
+ * about a problem rather than a note that the problem is cleared. */
+"<p class=\"small\">Counter reset &mdash; this link starts a fresh check.</p>\n"
 "</main>\n"
 "</body>\n"
 "</html>\n";

@@ -181,7 +181,7 @@ extern "C" {
 /* v13 adds g_resp[]: responder crossed with audience. */
 /* v18 appends per-status-code counters (req_code) alongside the
  * existing status-class ones. */
-#define BS_STATE_FORMAT_VERSION   18
+#define BS_STATE_FORMAT_VERSION   19
 #define BS_STATE_MAX_AGE_SECS     (14 * 86400)
 #define BS_FNV64_SEED             0xcbf29ce484222325ULL
 
@@ -782,6 +782,16 @@ typedef struct {
     apr_uint64_t bot_unverified_total;
     /* E2.1 — enforcement counters. */
     apr_uint64_t rate_limit_exceeded_total;
+    /* Times the anti-loop safeguard fired -- a client redirected to the
+     * explainer after N unsolved challenges, with its counter cleared.
+     *
+     * Separate from shm_safeguard_used, which is the only safeguard
+     * number that existed before and answers a different question:
+     * occupancy counts clients being WATCHED, not clients that TRIPPED
+     * it. A safeguard being abused looks identical to one that is idle
+     * in the occupancy gauge, which is why this exists. Cumulative and
+     * persisted, same as rate_limit_exceeded_total beside it. */
+    apr_uint64_t safeguard_fired_total;
     /* E12 — log-only / observe-mode counters. */
     apr_uint64_t rate_limit_observed_total;
     apr_uint64_t trigger_observed_total;

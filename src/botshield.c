@@ -570,14 +570,29 @@ static const command_rec bs_cmds[] = {
                  "IP table when the probe window saturates. Read at "
                  "post_config from the main server's value."),
     /* E10 — challenge safeguard / anti-loop hysteresis. */
+    AP_INIT_FLAG("BotShieldScoring",
+                 bs_set_scoring, NULL, RSRC_CONF,
+                 "Implicit scoring. Default OFF. When on, built-in "
+                 "heuristics and flag triggers accumulate a score and "
+                 "BotShieldScoreSilent/Hard/Captcha turn it into a "
+                 "tier. When off, none of that runs and a tier comes "
+                 "only from an explicit tier= on a rule. Off does NOT "
+                 "disable challenging, rate limiting, classification or "
+                 "safeguard -- it disables the module deciding on its "
+                 "own. Off is the default because an implicit weight "
+                 "nobody wrote down is the mechanism behind every "
+                 "lockout this module has caused."),
     AP_INIT_FLAG("BotShieldSafeguard",
                  bs_set_safeguard, NULL, RSRC_CONF,
                  "Anti-loop hysteresis. Default ON - only an explicit Off "
-                 "disables it. When on, "
-                 "a client that gets challenged N times within W "
-                 "seconds without solving any challenge is passed "
-                 "through for a TTL window instead of being re-"
-                 "challenged. Decision log shows reason "
+                 "disables it. When on, a client challenged N times "
+                 "within W seconds without solving any of them is "
+                 "redirected ONCE to the explainer page and its "
+                 "counter is cleared; the next request is challenged "
+                 "again normally. It does NOT grant a pass window -- "
+                 "an earlier version of this text said it did, which "
+                 "would describe a bot buying access by failing on "
+                 "purpose. Decision log shows reason "
                  "challenge-safeguard. Doesn't mint _bs_session; "
                  "doesn't override 403/429 blocks. Default-on because a client that cannot solve the challenge - JS disabled, a "
                  "privacy extension, an old browser - would otherwise be re-challenged forever with no way out, and nothing in the "
@@ -1182,6 +1197,10 @@ static int bs_apply_safeguard(request_rec *r, int have_client_ip,
             "mod_botshield: challenge-safeguard tripped for "
             "%s; redirecting to %s", r->useragent_ip, location);
         bs_score_add(r, 0, 0, "challenge-safeguard");
+        if (bs_shm.metrics) {
+            __atomic_fetch_add(&bs_shm.metrics->safeguard_fired_total,
+                               1, __ATOMIC_RELAXED);
+        }
         bs_decision_log(r, "safeguard", "redirect",
                         cookie_status, "-", "-",
                         bs_decision_reason_names(r->pool, score),
@@ -1267,6 +1286,26 @@ static int bs_route_module_endpoint(request_rec *r, bs_dir_cfg *cfg)
     }
     if (strcmp(sub, "/dashboard/internals") == 0) {
         return bs_dashboard_internals_handler(r);
+    }
+    /* Interstitial previews. Reveal nothing a challenged visitor does
+     * not already see, so they are not gated with the dashboard -- but
+     * an operator who wants them behind the same ACL just adds
+     * |preview to that LocationMatch. */
+    if (strcmp(sub, "/preview") == 0 || strcmp(sub, "/preview/") == 0) {
+        return bs_preview_index_handler(r);
+    }
+    if (strcmp(sub, "/preview/silent") == 0) {
+        return bs_preview_handler(r, 1);
+    }
+    if (strcmp(sub, "/preview/form") == 0) {
+        return bs_preview_handler(r, 0);
+    }
+    /* The explainer is already served at /safeguard-info, but it lives
+     * here too so all three pages an operator might want to look at
+     * are under one prefix. Same handler, so there is one page and not
+     * a copy that drifts. */
+    if (strcmp(sub, "/preview/safeguard") == 0) {
+        return bs_safeguard_info_handler(r);
     }
     if (strcmp(sub, "/dashboard/app-bots") == 0) {
         return bs_dashboard_app_bots_handler(r);
@@ -1638,7 +1677,19 @@ static int bs_handler(request_rec *r)
     /* Score the request. Heuristics always run — a fully-valid cookie
      * doesn't exempt you from fresh request-level signals that might
      * have pushed you into a tier that requires a re-challenge. */
-    bs_run_builtin_heuristics(r);
+    /* BotShieldScoring: -1 (unset) means OFF. Resolved once and reused
+     * for the flag walker and the tier decision below, so the three
+     * implicit paths can never disagree about whether scoring is on. */
+    int scoring_on;
+    {
+        bs_server_cfg *sc_score = ap_get_module_config(
+            r->server->module_config, &botshield_module);
+        scoring_on = (sc_score && sc_score->scoring_enabled == 1);
+    }
+
+    if (scoring_on) {
+        bs_run_builtin_heuristics(r);
+    }
 
     /* Flagged-IP table (M5.1): look up the client IP. Hits add the
      * serious-event bitmap's penalty to effective_score, rollback-proof
@@ -1786,7 +1837,13 @@ static int bs_handler(request_rec *r)
                          (unsigned)(all_flags & excused)));
     }
     bs_tier tier_floor_from_flags = BS_TIER_PASS;
-    bs_apply_flag_triggers(r, scfg_h, firing_flags, &tier_floor_from_flags);
+    /* Flag score AND tier_floor actions are both implicit, so both are
+     * gated. Leaving tier_floor on with scoring off would keep the
+     * exact hazard this directive exists to remove: a floor that
+     * ignores the verified-bot credit. */
+    if (scoring_on) {
+        bs_apply_flag_triggers(r, scfg_h, firing_flags, &tier_floor_from_flags);
+    }
 
     /* Fetch the score struct *after* all per-request adds. Using create=1
      * so a request with zero hits still gets a valid (empty) pointer and
@@ -1800,7 +1857,12 @@ static int bs_handler(request_rec *r)
      * in the README "Understanding scoring" section. */
     int cookie_score = have_prior_rep ? prior_ch.rep.score : 0;
     int effective    = heuristic_total + cookie_score;
-    bs_tier score_tier = bs_decide_tier(cfg, effective);
+    /* With scoring off the score is still computed and logged -- an
+     * operator turning it back on wants to see what it would have said
+     * -- but it decides nothing. Only an explicit tier= reaches `tier`
+     * below, via trig_floor. */
+    bs_tier score_tier = scoring_on ? bs_decide_tier(cfg, effective)
+                                    : BS_TIER_PASS;
 
     /* Apply the tier floor accumulated by the flag-trigger walker
      * (MAX of any TIER_FLOOR actions across the union of flags).

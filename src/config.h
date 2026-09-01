@@ -116,6 +116,7 @@ const char *bs_set_rate_limit_escalate   (cmd_parms *cmd, void *dconf,
                                           int argc, char *const argv[]);
 const char *bs_set_rate_escalate_capacity(cmd_parms *cmd, void *dconf,
                                           const char *arg);
+const char *bs_set_scoring            (cmd_parms *cmd, void *dconf, int flag);
 const char *bs_set_safeguard          (cmd_parms *cmd, void *dconf, int flag);
 const char *bs_set_safeguard_threshold(cmd_parms *cmd, void *dconf, const char *arg);
 const char *bs_set_safeguard_window   (cmd_parms *cmd, void *dconf, const char *arg);
