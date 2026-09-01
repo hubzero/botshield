@@ -678,6 +678,8 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
     e->cookie_pred = -1;              /* no cookie condition */
     e->exists_pred = -1;              /* no filesystem condition */
     e->solved_pred = -1;              /* no solve-proof condition */
+    e->bscookie_pred = -1;            /* no bs-cookie condition */
+    e->crawler_pred  = -1;            /* no crawler condition */
     e->minload     = -1;              /* no load condition */
     bs_trigger_action_init(BS_TFAMILY_REQUEST, &e->action);
 
@@ -689,16 +691,60 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
             apr_size_t klen = (apr_size_t)(eq - arg);
             const char *val = bs_unquote(cmd->pool, eq + 1);
             if (klen == 4 && strncasecmp(arg, "path", 4) == 0) {
-                if (!*val || val[0] != '/') {
+                /* Comma-separated list. Each element is validated on
+                 * its own so the error names the offending path rather
+                 * than the whole string. */
+                if (!*val) {
                     return apr_psprintf(cmd->pool,
-                        "%s: path= must start with '/'", D);
+                        "%s: path= requires at least one path", D);
                 }
-                if (strlen(val) > 256) {
+                if (strlen(val) > 1024) {
                     return apr_psprintf(cmd->pool,
-                        "%s: path= longer than 256 chars", D);
+                        "%s: path= list longer than 1024 chars", D);
                 }
-                bs_path_pattern_warn_middle_star(cmd, D, name, val);
-                e->path_pattern = apr_pstrdup(cmd->pool, val);
+                e->path_patterns = apr_array_make(cmd->pool, 4,
+                                                  sizeof(const char *));
+                char *dup = apr_pstrdup(cmd->pool, val), *last = NULL;
+                for (char *tok = apr_strtok(dup, ",", &last); tok;
+                     tok = apr_strtok(NULL, ",", &last)) {
+                    while (*tok == ' ' || *tok == '\t') tok++;
+                    apr_size_t tl = strlen(tok);
+                    while (tl && (tok[tl-1] == ' ' || tok[tl-1] == '\t')) {
+                        tok[--tl] = '\0';
+                    }
+                    if (!*tok) continue;          /* trailing comma */
+                    if (tok[0] == '"' || strchr(tok, '"')) {
+                        /* Apache splits argv on whitespace before we
+                         * see it, so a space inside the list arrives
+                         * as separate arguments with the quotes still
+                         * attached. Say that, rather than leaving the
+                         * operator staring at a stray quote in a
+                         * "must start with /" message. */
+                        return apr_psprintf(cmd->pool,
+                            "%s: path= list must not contain spaces "
+                            "(got '%s'). Apache splits the directive on "
+                            "whitespace before the module sees it, so "
+                            "write path=\"/a,/b\" not path=\"/a, /b\".",
+                            D, tok);
+                    }
+                    if (tok[0] != '/') {
+                        return apr_psprintf(cmd->pool,
+                            "%s: path= element '%s' must start with '/'",
+                            D, tok);
+                    }
+                    if (tl > 256) {
+                        return apr_psprintf(cmd->pool,
+                            "%s: path= element '%s' longer than 256 chars",
+                            D, tok);
+                    }
+                    bs_path_pattern_warn_middle_star(cmd, D, name, tok);
+                    *(const char **)apr_array_push(e->path_patterns) =
+                        apr_pstrdup(cmd->pool, tok);
+                }
+                if (e->path_patterns->nelts == 0) {
+                    return apr_psprintf(cmd->pool,
+                        "%s: path= contained no usable path", D);
+                }
                 continue;
             }
             if (klen == 5 && strncasecmp(arg, "query", 5) == 0) {
@@ -739,6 +785,28 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                 else {
                     return apr_psprintf(cmd->pool,
                         "%s: exists='%s' not one of yes|no", D, val);
+                }
+                continue;
+            }
+            if (klen == 7 && strncasecmp(arg, "crawler", 7) == 0) {
+                if      (!strcasecmp(val, "yes")) e->crawler_pred = 1;
+                else if (!strcasecmp(val, "no"))  e->crawler_pred = 0;
+                else {
+                    return apr_psprintf(cmd->pool,
+                        "%s: crawler='%s' not one of yes|no", D, val);
+                }
+                continue;
+            }
+            if (klen == 8 && strncasecmp(arg, "bscookie", 8) == 0) {
+                if      (!strcasecmp(val, "verified")) e->bscookie_pred = BS_BSC_VERIFIED;
+                else if (!strcasecmp(val, "missing"))  e->bscookie_pred = BS_BSC_MISSING;
+                else if (!strcasecmp(val, "invalid"))  e->bscookie_pred = BS_BSC_INVALID;
+                else if (!strcasecmp(val, "unproven")) e->bscookie_pred = BS_BSC_ANY_BAD;
+                else {
+                    return apr_psprintf(cmd->pool,
+                        "%s: bscookie='%s' must be one of verified, "
+                        "missing, invalid, unproven (= missing or "
+                        "invalid)", D, val);
                 }
                 continue;
             }
@@ -796,12 +864,14 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
         e->has_cohort = 1;
     }
 
-    if (!e->path_pattern && !e->query_pattern
+    if (!e->path_patterns && !e->query_pattern
+        && e->bscookie_pred < 0 && e->crawler_pred < 0
         && e->cookie_pred < 0 && e->exists_pred < 0
         && e->solved_pred < 0 && e->minload < 0 && !e->has_cohort) {
         return apr_psprintf(cmd->pool,
             "%s '%s': needs at least one match key (path=, query=, "
-            "cookies=, exists=, solved=, minload=, ua=, ipspec=). A rule "
+            "cookies=, bscookie=, crawler=, exists=, solved=, minload=, ua=, "
+            "ipspec=). A rule "
             "with no condition "
             "matches every request - use BotShieldTrigger in the scope "
             "you mean instead", D, name);

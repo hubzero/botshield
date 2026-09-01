@@ -89,6 +89,20 @@ typedef struct bs_ua_class {
     int          is_no_ua;
 } bs_ua_class;
 
+/* Is this a crawler that declares itself and can be taken at its word?
+ *
+ * A known-directory bot, not one caught lying about it, and not an HTTP
+ * library. curl and python-requests are "known" in the directory but
+ * are whatever their operator points them at, so they get no crawler
+ * waiver.
+ *
+ * One definition, two callers: bs_handler uses it to skip the
+ * unproven-client heuristics, and the crawler= trigger predicate uses
+ * it to let an operator write that same exemption in the config. They
+ * must not drift -- a rule that says "crawlers pass" has to mean the
+ * same set the scoring path means, or the config lies. */
+int bs_ua_is_declared_crawler(const bs_ua_class *cls);
+
 /* Idempotent — first call computes + caches on r->pool, subsequent
  * calls return the same pointer. Always non-NULL. UAs that are
  * A missing or empty User-Agent produces label=UNKNOWN_BOT with

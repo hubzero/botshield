@@ -1721,10 +1721,7 @@ static int bs_handler(request_rec *r)
      * admitted, where the same request from an unknown UA scored 20
      * and was challenged. A library string is evidence about the
      * transport, not about who is driving it. */
-    int lib_or_tool = uac_h && uac_h->known_category
-                   && strcmp(uac_h->known_category, "LIBRARY_OR_TOOL") == 0;
-    int declared_crawler = uac_h && uac_h->is_known_bot
-                        && !uac_h->is_fake_bot && !lib_or_tool;
+    int declared_crawler = bs_ua_is_declared_crawler(uac_h);
     if (declared_crawler) {
         bs_score_add(r, 0, 0, "known-bot-stateless-ok");
     }

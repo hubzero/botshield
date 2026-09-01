@@ -163,7 +163,32 @@ typedef struct {
  * restrict". */
 typedef struct {
     const char        *name;
-    const char        *path_pattern;   /* path=  glob vs r->uri;  NULL = any */
+    /* path= globs matched against r->uri; NULL = any path. A list
+     * rather than one glob because the alternative is one rule per
+     * path, and the paths that share an action usually share it
+     * exactly -- seven near-identical probe rules differing only in a
+     * string is the shape this avoids. Any element matching is a
+     * match; order within the list is irrelevant. */
+    apr_array_header_t *path_patterns;   /* const char * */
+    /* bscookie= : the module's own session-cookie verdict, as published
+     * to r->notes before the policy walk. -1 = unset.
+     *
+     * Exists because the two heuristics that gate almost all traffic --
+     * first-sight-ip and dropped-cookie -- are internal state, not
+     * request properties, so a path= rule could not express what the
+     * enclosing <Location> scope turned on. This is the larger of the
+     * two: "no usable cookie" accounts for ~82% of challenges. The
+     * bloom half (firstsight=) is not available here, because the bloom
+     * lookup runs after bs_check_policy. */
+    int                 bscookie_pred;   /* enum bs_bscookie_pred */
+    /* crawler= : matches bs_ua_is_declared_crawler. -1 = unset.
+     *
+     * The exemption that keeps a tier= rule from challenging Googlebot.
+     * It exists in the scoring path already, as !declared_crawler
+     * guarding the unproven-client heuristics; this makes the same
+     * exemption writable, so "crawlers pass" is a line in the config
+     * instead of a conditional in C. */
+    int                 crawler_pred;    /* 1 = yes, 0 = no, -1 = unset */
     const char        *query_pattern;  /* query= glob vs r->args; NULL = any */
     /* cookies= bulk predicate: one of BS_CP_BULK_NONE / _ANY / _SESSION,
      * or -1 for no cookie condition. Named-cookie predicates stay with
@@ -204,6 +229,16 @@ typedef struct {
  * specific cookie name; bulk variants (BULK_*) examine the cookie
  * map as a whole; BS_VERIFIED/MISSING/INVALID consume the
  * BS_CK_STATE_* note set by bs_handler. */
+/* bscookie= values. ANY_BAD is the useful one -- missing and invalid
+ * are the same thing to a policy that just wants proof, and making an
+ * operator write two rules to say "unproven" would defeat the point. */
+enum bs_bscookie_pred {
+    BS_BSC_VERIFIED = 0,
+    BS_BSC_MISSING,
+    BS_BSC_INVALID,
+    BS_BSC_ANY_BAD          /* missing OR invalid */
+};
+
 enum bs_cookie_pred_kind {
     BS_CP_NAMED_PRESENT = 0,
     BS_CP_NAMED_ABSENT,

@@ -373,8 +373,44 @@ int bs_check_policy(request_rec *r)
             /* Every dimension is optional; absent means "no restriction".
              * Ordered cheapest-first: path and query are byte globs, the
              * cohort may hit the UA classifier / CIDR ranges. */
-            if (t->path_pattern
-                && !bs_path_match(t->path_pattern, r->uri)) continue;
+            /* bscookie= : read the verdict bs_handler published to
+             * r->notes before this walk. Absent note means the cookie
+             * stage has not run for this request, which is not the same
+             * as "verified" -- treat it as no match rather than
+             * silently passing a rule that asked about proof. */
+            if (t->crawler_pred >= 0) {
+                const bs_ua_class *uc = bs_classify_request_ua(r);
+                if (bs_ua_is_declared_crawler(uc) != t->crawler_pred) {
+                    continue;
+                }
+            }
+            if (t->bscookie_pred >= 0) {
+                const char *st = apr_table_get(r->notes, BS_CK_STATE_NOTE);
+                if (!st) continue;
+                int ok;
+                switch (t->bscookie_pred) {
+                case BS_BSC_VERIFIED:
+                    ok = !strcmp(st, BS_CK_STATE_VERIFIED); break;
+                case BS_BSC_MISSING:
+                    ok = !strcmp(st, BS_CK_STATE_MISSING);  break;
+                case BS_BSC_INVALID:
+                    ok = !strcmp(st, BS_CK_STATE_INVALID);  break;
+                case BS_BSC_ANY_BAD:
+                    ok = strcmp(st, BS_CK_STATE_VERIFIED) != 0; break;
+                default: ok = 0; break;
+                }
+                if (!ok) continue;
+            }
+            if (t->path_patterns) {
+                int hit = 0;
+                for (int pi = 0; pi < t->path_patterns->nelts; pi++) {
+                    if (bs_path_match(APR_ARRAY_IDX(t->path_patterns, pi,
+                                                    const char *), r->uri)) {
+                        hit = 1; break;
+                    }
+                }
+                if (!hit) continue;
+            }
             if (t->query_pattern
                 && !bs_path_match(t->query_pattern, r->args ? r->args : ""))
                 continue;

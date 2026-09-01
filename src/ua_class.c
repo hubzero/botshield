@@ -425,3 +425,13 @@ const char *bs_set_classify(cmd_parms *cmd, void *dconf,
     scfg->classify = state;
     return NULL;
 }
+
+int bs_ua_is_declared_crawler(const bs_ua_class *cls)
+{
+    if (!cls || !cls->is_known_bot || cls->is_fake_bot) return 0;
+    if (cls->known_category
+        && strcmp(cls->known_category, "LIBRARY_OR_TOOL") == 0) {
+        return 0;
+    }
+    return 1;
+}
