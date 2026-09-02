@@ -352,10 +352,12 @@ spoofing attempt is dropped before the app sees it.</p>
 <ul>
 <li><code>v=1</code> — wire-format version. Locked to <code>1</code> today.</li>
 <li><code>score=N</code> — running score the request decision used.</li>
-<li><code>tier=&lt;t&gt;</code> — <code>pass</code> / <code>silent</code> / <code>form</code> / <code>captcha</code> / <code>safeguard</code>
+<li><code>tier=&lt;t&gt;</code> — <code>pass</code> / <code>non-interactive</code> / <code>interactive</code> / <code>captcha</code> / <code>safeguard</code>
 (matches the decision-log <code>tier</code> enum).</li>
-<li><code>cookie=&lt;c&gt;</code> — <code>ok</code> / <code>expired</code> / <code>bad_sig</code> / <code>bad_format</code> /
-<code>absent</code> (matches the <code>cookie</code> enum).</li>
+<li><code>cookie=&lt;c&gt;</code> — <code>solved</code> / <code>ok</code> / <code>expired</code> / <code>bad_sig</code> /
+<code>bad_format</code> / <code>absent</code> (matches the <code>cookie</code> enum). <code>solved</code> is a
+verified cookie carrying challenge-solve proof; <code>ok</code> is verified
+without it.</li>
 <li><code>flags=&lt;list&gt;</code> — comma-joined flag-bit names
 (<code>honeypot_hit,app_verified_human</code>, etc.). Empty value when
 no flags set.</li>

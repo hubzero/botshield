@@ -215,7 +215,7 @@ challenge switch rather than a contributing signal. Bounded by
 `flags_excused` (one solve clears it for that cookie), so the residual
 risk is a client that *cannot* solve.
 
-`!!` — a `tier_floor` at or above `form` while the hard threshold is
+`!!` — a `tier_floor` at or above `interactive` while that threshold is
 parked. The floor is MAX'd in after the score-to-tier decision and
 ignores thresholds entirely, so parking them does not contain it.
 
@@ -395,7 +395,7 @@ Two action verbs:
   request's score (positive penalty / negative credit). SUM
   accumulates across triggers.
 - **`action=tier_floor min=<tier>`** — set a minimum tier; `<tier>`
-  is `pass` / `silent` / `form` / `captcha`. MAX accumulates
+  is `pass` / `non-interactive` / `interactive` / `captcha`. MAX accumulates
   (strictest wins).
 
 The `reset` keyword is directive-level (not an action verb): a

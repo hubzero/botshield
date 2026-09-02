@@ -125,12 +125,68 @@ awk-validator.sh`).
 
 | Field | Values |
 |---|---|
-| `tier` | `none`, `pass`, `silent`, `form`, `captcha`, `safeguard` |
+| `tier` | `none`, `pass`, `non-interactive`, `interactive`, `captcha`, `safeguard` |
 | `outcome` | `allow`, `challenged`, `verified`, `block`, `redirect`, `failopen`, `rate_limited`, `inflight_capped`, `pending_missing`, `misconfigured`, `debug` (plus tilde-prefixed counterfactuals: `~challenge`, `~block`, `~rate_limited` under `BotShieldEnabled LogOnly`) |
 | `cookie` | `solved`, `ok`, `expired`, `bad_sig`, `bad_format`, `absent`, `minted`, `-` |
 | `provider` | `-`, `turnstile`, `hcaptcha`, `recaptcha-v2`, `recaptcha-v3`, `friendly`, `geetest` |
 | `alg` | `-`, `sha256-zeros`, `captcha-<provider>` |
 | `reason` | quoted short string (comma-joined reason names) or `-` |
+
+### Reason terms carried on a solve
+
+A successful solve carries timings and, when probes failed, an
+attestation list:
+
+```
+reason="pow_ok,ms:770,pow_ms:717,react_ms:-1,attest:webdriver"
+```
+
+| Term | Meaning |
+|---|---|
+| `ms:<n>` | Server-measured issue → submit, ms. The issue stamp is covered by the bootstrap HMAC, so the client cannot influence it. Includes two network legs and both machines' CPU. |
+| `pow_ms:<n>` | Client-measured proof-of-work duration. `-1` if absent. |
+| `react_ms:<n>` | Client-measured reveal → click, ms. `-1` on the non-interactive tier, which has no click. |
+| `attest:<a>+<b>` | Failed attestation probes, `+`-joined. Absent when all probes passed. |
+
+The client pair is forgeable on its own — the JS is readable — but both
+are bounded above by `ms`, which the client cannot influence.
+Overstating one costs real wall time; understating it gains nothing. A
+claim exceeding the server's own total is a lie the server can prove,
+and is reported as `attest:impossible-timing`.
+
+Their value is excluding the network: `react_ms` is a human reaction
+with no RTT in it, which the server figure can never isolate.
+
+### Attestation probes
+
+Attestation, not fingerprinting. Every probe asks whether the
+environment *behaves* like a browser; none derives a stable device
+identifier — no canvas, no WebGL, no font or audio measurement. The
+interactive tier shows a help panel promising nothing personal is sent,
+and that promise has to survive contact with this code.
+
+| Probe | Fires when |
+|---|---|
+| `webdriver` | `navigator.webdriver === true` (set by the WebDriver spec) |
+| `automation-global` | A known automation harness left a global behind |
+| `chrome-ua-no-chrome` | UA claims Chrome but `window.chrome` is absent |
+| `no-languages` | `navigator.languages` is empty |
+| `no-screen` | Screen dimensions are zero |
+| `patched-native` | A native function no longer reports as native |
+| `click-on-arm` | Click landed under 150ms after the checkbox appeared |
+| `impossible-timing` | Client-reported timing exceeds the server's own total |
+
+**Reported, not enforced.** Several probes have real false positives
+(privacy browsers, extensions that patch natives), and a wrong answer
+should cost a log line rather than someone's access. Results land in
+the reason chain and in `botshield_attestation_fail_total`.
+
+Absence proves nothing: a bot simply omits the field, and one that
+reads the JS reports an empty array. More importantly, attestation only
+rides along with a **solve** — traffic that never executes the
+challenge is absent from these numbers rather than counted as clean.
+On one production sample, 905 solves carried 2 failed probes, because
+the automation hitting that site never ran the JS at all.
 
 ### The decision log
 
@@ -712,9 +768,12 @@ $ curl -s http://localhost/botshield/metrics | head -20
 # HELP botshield_tier_pass_total Decisions where the request passed.
 # TYPE botshield_tier_pass_total counter
 botshield_tier_pass_total 1428931
-# HELP botshield_tier_silent_total Decisions where the silent challenge tier was issued.
-# TYPE botshield_tier_silent_total counter
-botshield_tier_silent_total 84217
+# HELP botshield_tier_non_interactive_total Decisions where the non-interactive tier was issued.
+# TYPE botshield_tier_non_interactive_total counter
+botshield_tier_non_interactive_total 84217
+# HELP botshield_attestation_fail_total Solves arriving with at least one failed attestation probe.
+# TYPE botshield_attestation_fail_total counter
+botshield_attestation_fail_total 2
 ...
 ```
 

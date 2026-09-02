@@ -14,9 +14,9 @@ mod_botshield supports four user-facing tiers plus a passive
 | Tier | What the user sees | When it fires |
 |---|---|---|
 | `pass` | Real content | `effective < BotShieldScoreNonInteractive` (default `< 20`) |
-| `silent` | "Checking your browser…" splash; auto-submits a SHA-256 PoW | `BotShieldScoreNonInteractive ≤ effective < BotShieldScoreInteractive` (default `20..49`) |
-| `form` | reCAPTCHA-shaped checkbox interstitial; user clicks once, PoW runs | `BotShieldScoreInteractive ≤ effective < BotShieldScoreCaptcha` (default `50..79`) |
-| `captcha` | Third-party provider widget (Turnstile / hCaptcha / reCAPTCHA / Friendly / GeeTest) | `effective ≥ BotShieldScoreCaptcha` (default `≥ 80`). Falls back to `form` if no provider configured on the scope |
+| `non-interactive` | "Checking your browser…" splash; auto-submits a SHA-256 PoW | `BotShieldScoreNonInteractive ≤ effective < BotShieldScoreInteractive` (default `20..49`) |
+| `interactive` | reCAPTCHA-shaped checkbox interstitial; user clicks once, PoW runs | `BotShieldScoreInteractive ≤ effective < BotShieldScoreCaptcha` (default `50..79`) |
+| `captcha` | Third-party provider widget (Turnstile / hCaptcha / reCAPTCHA / Friendly / GeeTest) | `effective ≥ BotShieldScoreCaptcha` (default `≥ 80`). Falls back to `interactive` if no provider configured on the scope |
 
 A fifth value, `safeguard`, can appear in decision logs. It marks
 challenge-loop suppression: a client that has been issued
@@ -158,8 +158,8 @@ get re-challenged on the next request:
 
 | Tier | Default credit | Directive |
 |---|---|---|
-| `silent` | -10 | `BotShieldForgivenessNonInteractive` |
-| `form` | -25 | `BotShieldForgivenessInteractive` |
+| `non-interactive` | -10 | `BotShieldForgivenessNonInteractive` |
+| `interactive` | -25 | `BotShieldForgivenessInteractive` |
 | `captcha` | -50 | `BotShieldForgivenessCaptcha` |
 
 ### Forgiveness cap
@@ -261,11 +261,11 @@ reachable; the common ones:
 |---|---|---|
 | `pass` | `allow` | Score below silent threshold; real handler ran |
 | `pass` | `verified` | Valid cookie; allowed to real handler |
-| `silent` | `challenged` | Interstitial served; client is solving PoW |
-| `silent` | `verified` | Client solved PoW; cookie minted |
-| `silent` | `~challenge` | LogOnly: would have served interstitial |
-| `form` | `challenged` | Form-PoW interstitial served (HTTP 403) |
-| `form` | `verified` | Client solved form PoW; cookie minted |
+| `non-interactive` | `challenged` | Interstitial served; client is solving PoW |
+| `non-interactive` | `verified` | Client solved PoW; cookie minted |
+| `non-interactive` | `~challenge` | LogOnly: would have served interstitial |
+| `interactive` | `challenged` | Form-PoW interstitial served (HTTP 403) |
+| `interactive` | `verified` | Client solved form PoW; cookie minted |
 | `captcha` | `challenged` | Captcha widget served (HTTP 403) |
 | `captcha` | `verified` | Provider siteverify accepted; cookie minted |
 | `captcha` | `failopen` | Provider siteverify timed out; treated as pass to avoid blocking on a third-party outage |

@@ -124,22 +124,22 @@ with the heuristics, and the day-to-day tuning workflow.</p>
 <tr>
 <td><code>pass</code></td>
 <td>Real content</td>
-<td><code>effective &lt; BotShieldScoreSilent</code> (default <code>&lt; 20</code>)</td>
+<td><code>effective &lt; BotShieldScoreNonInteractive</code> (default <code>&lt; 20</code>)</td>
 </tr>
 <tr>
-<td><code>silent</code></td>
+<td><code>non-interactive</code></td>
 <td>&quot;Checking your browser…&quot; splash; auto-submits a SHA-256 PoW</td>
-<td><code>BotShieldScoreSilent ≤ effective &lt; BotShieldScoreHard</code> (default <code>20..49</code>)</td>
+<td><code>BotShieldScoreNonInteractive ≤ effective &lt; BotShieldScoreInteractive</code> (default <code>20..49</code>)</td>
 </tr>
 <tr>
-<td><code>form</code></td>
+<td><code>interactive</code></td>
 <td>reCAPTCHA-shaped checkbox interstitial; user clicks once, PoW runs</td>
-<td><code>BotShieldScoreHard ≤ effective &lt; BotShieldScoreCaptcha</code> (default <code>50..79</code>)</td>
+<td><code>BotShieldScoreInteractive ≤ effective &lt; BotShieldScoreCaptcha</code> (default <code>50..79</code>)</td>
 </tr>
 <tr>
 <td><code>captcha</code></td>
 <td>Third-party provider widget (Turnstile / hCaptcha / reCAPTCHA / Friendly / GeeTest)</td>
-<td><code>effective ≥ BotShieldScoreCaptcha</code> (default <code>≥ 80</code>). Falls back to <code>form</code> if no provider configured on the scope</td>
+<td><code>effective ≥ BotShieldScoreCaptcha</code> (default <code>≥ 80</code>). Falls back to <code>interactive</code> if no provider configured on the scope</td>
 </tr>
 </tbody>
 </table>
@@ -154,7 +154,7 @@ explainer covers common reasons the auto-check failed (JS disabled,
 privacy extension, browser version) and offers a Continue link
 back to the original URL. The flagged-IP entry is preserved so the
 suspicious behavior is still recorded for downstream signals.</p>
-<p>Below <code>BotShieldScoreSilent</code> the module returns <code>DECLINED</code> to
+<p>Below <code>BotShieldScoreNonInteractive</code> the module returns <code>DECLINED</code> to
 Apache; the content handler runs as if mod_botshield weren't loaded.
 <strong>Legitimate visitors never see us and never receive a cookie.</strong></p>
 <h2 id="score-composition">Score composition</h2>
@@ -294,11 +294,22 @@ rejected on verify.</p>
 accumulates negative <code>cookie_score</code> (forgiveness credit applied at
 challenge-issue time); repeated suspicious behavior accumulates
 positive.</p>
-<p>The decision log's <code>cookie=</code> field reports one of <code>ok</code> (verified
-cookie carried forward), <code>expired</code>, <code>bad_sig</code>, <code>bad_format</code>,
-<code>absent</code>, or <code>minted</code> (no incoming cookie; this response set a
-fresh one). The <code>cookie_minted_total</code> Prometheus counter tracks
-the always-mint volume separately from <code>cookie_ok_total</code>.</p>
+<p>The decision log's <code>cookie=</code> field reports one of <code>solved</code> (verified
+<strong>and</strong> carrying challenge-solve proof), <code>ok</code> (verified, no such proof
+— a presence cookie), <code>expired</code>, <code>bad_sig</code>, <code>bad_format</code>, <code>absent</code>, or
+<code>minted</code> (no incoming cookie; this response set a fresh one).</p>
+<p><code>solved</code> and <code>ok</code> are disjoint and the distinction matters: under
+always-mint every client holds a valid cookie after one request, so
+<code>ok</code> says only that the client keeps a cookie jar. <code>solved</code> is the
+only state that waives <code>first-sight-ip</code> / <code>dropped-cookie</code>. The
+<code>cookie_solved_total</code> and <code>cookie_ok_total</code> Prometheus counters track
+the two separately, alongside <code>cookie_minted_total</code> for always-mint
+volume, and the dashboard's cookie-state bar shows them as separate
+slices.</p>
+<p>Expect few <code>cookie=solved</code> lines in the decision log itself: a client
+holding solve proof usually passes, and passes are not actionable
+outcomes, so they are counted but not written. Read the counters, not
+the log, for this ratio.</p>
 <p>The reputation persists across requests but expires with the cookie
 TTL (<code>BotShieldCookieTTL</code>, default 1 hour). After expiry users
 start fresh.</p>
@@ -316,14 +327,14 @@ get re-challenged on the next request:</p>
 </thead>
 <tbody>
 <tr>
-<td><code>silent</code></td>
+<td><code>non-interactive</code></td>
 <td>-10</td>
-<td><code>BotShieldForgivenessSilent</code></td>
+<td><code>BotShieldForgivenessNonInteractive</code></td>
 </tr>
 <tr>
-<td><code>form</code></td>
+<td><code>interactive</code></td>
 <td>-25</td>
-<td><code>BotShieldForgivenessForm</code></td>
+<td><code>BotShieldForgivenessInteractive</code></td>
 </tr>
 <tr>
 <td><code>captcha</code></td>
@@ -361,7 +372,7 @@ counter.</li>
 <p>Every decision emits two log lines: a human-readable prose line and
 a stable <code>key=value</code> structured line. The structured line is what
 you query when tuning:</p>
-<pre><code>mod_botshield: decision tier=silent outcome=challenged ip=192.0.2.42
+<pre><code>mod_botshield: decision tier=non-interactive outcome=challenged ip=192.0.2.42
     score=37 cookie=absent provider=- alg=sha256-zeros
     reason=&quot;first-sight-ip,missing-accept-language&quot; path=&quot;/login&quot;
 </code></pre>
@@ -376,7 +387,7 @@ vocabulary.</p>
 <p>For verbose debugging — the per-reason penalty values, not just the
 names — the prose log line at <code>info</code> level carries the full
 breakdown:</p>
-<pre><code>mod_botshield: &lt;action&gt; effective=37 tier=silent heuristic=37
+<pre><code>mod_botshield: &lt;action&gt; effective=37 tier=non-interactive heuristic=37
     cookie_score=0 reasons=[first-sight-ip:5,missing-accept-language:15,scraper-ua:python-requests:50]
 </code></pre>
 <p>Grep the log for the request, read the reasons array, see exactly
@@ -394,7 +405,7 @@ contributions. The <code>botshield_tier_&lt;t&gt;_total</code> and
 distributions:
 <ul>
 <li>Too many challenges on legitimate traffic → raise
-<code>BotShieldScoreSilent</code> / <code>BotShieldScoreHard</code> /
+<code>BotShieldScoreNonInteractive</code> / <code>BotShieldScoreInteractive</code> /
 <code>BotShieldScoreCaptcha</code>, or lower the offending heuristic's
 penalty.</li>
 <li>Bots slipping through → lower thresholds, raise scraper-UA
@@ -429,27 +440,27 @@ reachable; the common ones:</p>
 <td>Valid cookie; allowed to real handler</td>
 </tr>
 <tr>
-<td><code>silent</code></td>
+<td><code>non-interactive</code></td>
 <td><code>challenged</code></td>
 <td>Interstitial served; client is solving PoW</td>
 </tr>
 <tr>
-<td><code>silent</code></td>
+<td><code>non-interactive</code></td>
 <td><code>verified</code></td>
 <td>Client solved PoW; cookie minted</td>
 </tr>
 <tr>
-<td><code>silent</code></td>
+<td><code>non-interactive</code></td>
 <td><code>~challenge</code></td>
 <td>LogOnly: would have served interstitial</td>
 </tr>
 <tr>
-<td><code>form</code></td>
+<td><code>interactive</code></td>
 <td><code>challenged</code></td>
 <td>Form-PoW interstitial served (HTTP 403)</td>
 </tr>
 <tr>
-<td><code>form</code></td>
+<td><code>interactive</code></td>
 <td><code>verified</code></td>
 <td>Client solved form PoW; cookie minted</td>
 </tr>

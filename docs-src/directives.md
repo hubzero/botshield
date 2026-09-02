@@ -41,8 +41,11 @@ into a running server.
 | `BotShieldAlgorithm` | `<name>` | unset (required) |
 | `BotShieldCookieTTL` | `N` (sec) | `3600` (range 1..86400) |
 | `BotShieldCookieDomain` | `".example.com"` | unset (host-only) |
-| `BotShieldDifficulty` | `N` | `4` (range 1..16) |
+| `BotShieldDifficulty` | `N` | `3` (range 1..16) |
 | `BotShieldEndpointPrefix` | `/path` | `/botshield` |
+| `BotShieldScoring` | `on`/`off` | `off` |
+| `BotShieldInteractiveArmMs` | `N` (ms) | `300` (range 0..2000) |
+| `BotShieldInteractiveMinSolveMs` | `N` (ms) | `400` (range 0..5000) |
 
 `BotShieldEnabled` is the master gate. It is tri-state:
 
@@ -73,7 +76,7 @@ form or captcha is ever rendered — any selected tier collapses back to
 `challenge-off:<tier>`.
 
 Use it where an explicit `status=4xx` trigger is meant to be the only
-action. Parking `BotShieldScoreNonInteractive`/`Hard`/`Captcha` at `10000` is
+action. Parking `BotShieldScoreNonInteractive`/`Interactive`/`Captcha` at `10000` is
 **not** equivalent, which is easy to get wrong: a flag `tier_floor` is
 MAX'd in *after* the score-to-tier decision and ignores thresholds
 entirely, so an IP carrying `honeypot_hit`, `fake_bot`, `scanner_probe`
@@ -109,7 +112,7 @@ BotShieldFlagTrigger scanner_probe reset action=score add=50
 `reset` is required rather than stylistic: **tier floors MAX across
 triggers**, so adding a lower floor beside the compiled-in one is
 silently useless — it MAXes straight back up. `pow_fail_streak` needs
-no reset; its floor is already `silent`.
+no reset; its floor is already `non-interactive`.
 
 `BotShieldDebug` returns `403 "Hello World"` for every request in
 scope — useful as a smoke test that the hook is firing.
@@ -131,13 +134,86 @@ HTTPS is in use AND no domain is set, the module emits the
 `__Host-bs_session` cookie name; otherwise the legacy
 `_bs_session`. Verify path checks both.
 
-`BotShieldDifficulty` is the leading-hex-zeros count for the PoW.
-Higher = more client work. 4 is ~100ms on a modern phone; 6 is
-~3s; 8 is ~50s — don't go above 6 without a reason.
+`BotShieldDifficulty` is the leading-hex-zeros count for the PoW, so
+expected work is `2^(4*d)` hashes: `3` is 4,096, `4` is 65,536. Each
+step up multiplies client cost by **16**, not by a little.
+
+Measured on live traffic rather than estimated. At `4`, 905 real solves
+cost a median 329ms of client CPU, p90 1019ms, p99 5188ms, and 34% of
+visitors spent over half a second; Android was worst at a 733ms median.
+At `3` the same population runs a ~50ms median. The default is `3`.
+
+Raising it is rarely worth it. Proof-of-work here is a *capability*
+test — it proves a real JS engine ran — not an economic barrier. A
+native solver is 15–43× faster than a browser at the same difficulty,
+so cost falls on your visitors far harder than on a competent bot, and
+a cookie amortises the bot's one solve across the whole
+`BotShieldCookieTTL` window. Of those 905 solves, 2 carried any failed
+attestation probe: the population that runs the JS is already clean.
+
+`BotShieldScoring` decides whether the **implicit** path runs at all.
+Off by default, which is the point of the directive rather than an
+incident of it: every lockout this module has caused came from an
+implicit weight or tier floor nobody had written down summing past a
+threshold nobody had read. An explicit rule states what it does; a
+score states it only once you reconstruct the arithmetic.
+
+Off suppresses exactly three things — built-in heuristics contributing
+score, flag triggers contributing score or `tier_floor`, and the
+score-to-tier threshold evaluation. It does **not** touch an explicit
+`tier=` or `status=` on a rule. That boundary is the whole risk here:
+get it wrong in the "off means no tiers at all" direction and the site
+silently stops challenging anyone.
+
+`BotShieldInteractiveArmMs` withholds the interactive tier's checkbox
+for this many milliseconds after load (0 shows it immediately). The
+widget renders at full size with a spinner meanwhile, so nothing shifts
+and there is no dead control to click — a visible control that swallows
+clicks teaches people the page is broken, and it is the confident fast
+clickers who hit it.
+
+The delay is not the point; the fact that the delay is *ours* is. A
+bare time floor is a guess about how fast people are and it charges the
+quick ones. Withholding the control makes "window + reaction" a fact,
+so the server can floor at least the window for free. It also yields a
+sharper signal: a person clicks hundreds of ms after the reveal, a
+poller within a few, and that gap is reported as an `attest:` failure.
+`100` is a good production value — below the threshold where a delay
+registers at all, while the gap signal is unaffected by the shrink.
+
+`BotShieldInteractiveMinSolveMs` refuses an interactive-tier solve that
+returns sooner than this after the challenge was issued (0 disables).
+The clock is entirely the server's — the issue stamp rides in the
+bootstrap HMAC — so a client cannot shorten it.
+
+Measured, not guessed. A warmed headless browser needed 177ms to load,
+render and land a trusted click, and 239ms cold; the first version of
+this floor was 150ms, which sat under both and therefore cost an
+attacker nothing. Note what it does and does not do: it will not stop a
+bot that sleeps, and a *cold* browser is slow enough to clear any
+sane floor on its own. What it does is make waiting mandatory and
+server-observed, so the delay is real wall time per request rather than
+a field the client fills in. Watch `reason=solve_too_fast` for false
+positives.
 
 `BotShieldEndpointPrefix` is the URL prefix for module-owned
 handlers (`/botshield/captcha-verify`, `/botshield/metrics`,
 `/botshield/embedded.js`, `/botshield/safeguard-info` etc.).
+
+Under that prefix, `<prefix>/preview` is an index of the pages a client
+can be shown, rendered from the live templates rather than from copies
+that drift:
+
+| Route | Shows |
+|---|---|
+| `<prefix>/preview/non-interactive` | The self-solving widget, pinned mid-check (the preview's proof-of-work is set unsolvable so it cannot complete and navigate away) |
+| `<prefix>/preview/interactive` | The same widget with a live checkbox waiting for a click |
+| `<prefix>/preview/safeguard` | The anti-loop explainer, also served at `<prefix>/safeguard-info`, which is the URL clients actually reach |
+
+They mint nothing and are useful for design review and for seeing what
+a visitor sees without having to trip a challenge yourself. They serve
+`403`, like the real interstitials, because the same code path renders
+them.
 Change it if it collides with real app routes.
 
 ## Tier thresholds and forgiveness
@@ -544,7 +620,7 @@ compress into one key.
 
 `tier=` and `penalty=` both require `status=pass`, because a concrete
 status short-circuits the request before any tier is chosen. `tier=`
-accepts `pass`, `silent`, `form` (alias `hard`) and `captcha`, and
+accepts `pass`, `non-interactive`, `interactive` and `captcha`, and
 composes by MAX with the score-derived tier and any flag tier floor —
 it raises the floor, it never downgrades.
 
@@ -588,7 +664,7 @@ reaches PHP.
 probing `/.env` and per-IP memory was worth having. It is the wrong
 default for high-cardinality traffic: at roughly one request per IP the
 flag is never read again, it churns the 50,000-slot flagged-IP table,
-and `scanner_probe` carries a compiled-in `tier_floor` of `form` that
+and `scanner_probe` carries a compiled-in `tier_floor` of `interactive` that
 **overrides parked score thresholds** and turns a block-only scope into
 one that renders interstitials. Write `ttl=0` on rules that match
 one-shot traffic:
@@ -647,13 +723,13 @@ This is the directive that replaces the legacy `BotShieldFlagIP`
 
 Action verbs: `action=score add=N` (signed N -1000..1000),
 `action=tier_floor min=<tier>` (raise effective tier; tier is one
-of `pass`/`silent`/`form`/`captcha`). The `reset` keyword clears
+of `pass`/`non-interactive`/`interactive`/`captcha`). The `reset` keyword clears
 all earlier triggers (compiled-in defaults + prior
 declarations) for the named flag at post-config time.
 
 **A `tier_floor` bypasses your score thresholds.** It is MAX'd in
 *after* the score-to-tier decision, so it does not consult
-`BotShieldScoreNonInteractive`/`Hard`/`Captcha` at all. Four of the compiled-in
+`BotShieldScoreNonInteractive`/`Interactive`/`Captcha` at all. Four of the compiled-in
 defaults carry one — `honeypot_hit` and `fake_bot` (captcha),
 `scanner_probe` (form), `pow_fail_streak` (silent) — so an IP carrying
 any of them is challenged even in a scope whose thresholds are parked to

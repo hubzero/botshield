@@ -94,6 +94,8 @@
 <li class="toc__item toc__item--level-3"><a href="#where-the-decision-line-goes">Where the decision line goes</a></li>
 <li class="toc__item toc__item--level-3"><a href="#trimming-access-log-volume-without-losing-decisions">Trimming access-log volume without losing decisions</a></li>
 <li class="toc__item toc__item--level-3"><a href="#field-vocabulary">Field vocabulary</a></li>
+<li class="toc__item toc__item--level-3"><a href="#reason-terms-carried-on-a-solve">Reason terms carried on a solve</a></li>
+<li class="toc__item toc__item--level-3"><a href="#attestation-probes">Attestation probes</a></li>
 <li class="toc__item toc__item--level-3"><a href="#the-decision-log">The decision log</a></li>
 <li class="toc__item toc__item--level-3"><a href="#controlling-decision-log-volume">Controlling decision-log volume</a></li>
 <li class="toc__item toc__item--level-3"><a href="#controlling-the-access-log">Controlling the access log</a></li>
@@ -108,6 +110,7 @@
 <li class="toc__item toc__item--level-2"><a href="#prometheus-metrics">Prometheus metrics</a></li>
 <li class="toc__item toc__item--level-3"><a href="#access-control">Access control</a></li>
 <li class="toc__item toc__item--level-3"><a href="#counter-inventory">Counter inventory</a></li>
+<li class="toc__item toc__item--level-3"><a href="#invariant-check">Invariant check</a></li>
 <li class="toc__item toc__item--level-3"><a href="#sample-scrape">Sample scrape</a></li>
 <li class="toc__item toc__item--level-3"><a href="#validating-the-format">Validating the format</a></li>
 <li class="toc__item toc__item--level-2"><a href="#mod-status-contribution">mod_status contribution</a></li>
@@ -154,8 +157,12 @@ with every other message, and boring passes demoted to <code>debug</code>.</p>
 <p><strong>2. <code>BotShieldDecisionLog</code> (recommended for a dedicated file).</strong> A
 module-owned file, written at decision time:</p>
 <pre><code class="language-apache">BotShieldDecisionLog logs/botshield.log
-# or hand rotation to Apache's helper:
-BotShieldDecisionLog &quot;|/usr/bin/rotatelogs /var/log/httpd/bs.%Y%m%d 86400&quot;
+# or hand rotation to Apache's helper. -L pins a stable path for
+# monitoring; without it, -n rotation moves the live file out from
+# under anything reading the base name.
+BotShieldDecisionLog &quot;|/usr/sbin/rotatelogs -n 7 \
+    -L /var/log/httpd/botshield.log.current \
+    /var/log/httpd/botshield.log 100M&quot;
 </code></pre>
 <p>Line shape — the same <code>key=value</code> payload as the error-log line, with an
 ISO-8601 UTC timestamp in front and the User-Agent appended:</p>
@@ -214,7 +221,7 @@ commit time by a small awk validator (<code>tests/scripts/decision-log- awk-vali
 <tbody>
 <tr>
 <td><code>tier</code></td>
-<td><code>none</code>, <code>pass</code>, <code>silent</code>, <code>form</code>, <code>captcha</code>, <code>safeguard</code></td>
+<td><code>none</code>, <code>pass</code>, <code>non-interactive</code>, <code>interactive</code>, <code>captcha</code>, <code>safeguard</code></td>
 </tr>
 <tr>
 <td><code>outcome</code></td>
@@ -222,7 +229,7 @@ commit time by a small awk validator (<code>tests/scripts/decision-log- awk-vali
 </tr>
 <tr>
 <td><code>cookie</code></td>
-<td><code>ok</code>, <code>expired</code>, <code>bad_sig</code>, <code>bad_format</code>, <code>absent</code>, <code>minted</code>, <code>-</code></td>
+<td><code>solved</code>, <code>ok</code>, <code>expired</code>, <code>bad_sig</code>, <code>bad_format</code>, <code>absent</code>, <code>minted</code>, <code>-</code></td>
 </tr>
 <tr>
 <td><code>provider</code></td>
@@ -238,6 +245,102 @@ commit time by a small awk validator (<code>tests/scripts/decision-log- awk-vali
 </tr>
 </tbody>
 </table>
+<h3 id="reason-terms-carried-on-a-solve">Reason terms carried on a solve</h3>
+<p>A successful solve carries timings and, when probes failed, an
+attestation list:</p>
+<pre><code>reason=&quot;pow_ok,ms:770,pow_ms:717,react_ms:-1,attest:webdriver&quot;
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ms:&lt;n&gt;</code></td>
+<td>Server-measured issue → submit, ms. The issue stamp is covered by the bootstrap HMAC, so the client cannot influence it. Includes two network legs and both machines' CPU.</td>
+</tr>
+<tr>
+<td><code>pow_ms:&lt;n&gt;</code></td>
+<td>Client-measured proof-of-work duration. <code>-1</code> if absent.</td>
+</tr>
+<tr>
+<td><code>react_ms:&lt;n&gt;</code></td>
+<td>Client-measured reveal → click, ms. <code>-1</code> on the non-interactive tier, which has no click.</td>
+</tr>
+<tr>
+<td><code>attest:&lt;a&gt;+&lt;b&gt;</code></td>
+<td>Failed attestation probes, <code>+</code>-joined. Absent when all probes passed.</td>
+</tr>
+</tbody>
+</table>
+<p>The client pair is forgeable on its own — the JS is readable — but both
+are bounded above by <code>ms</code>, which the client cannot influence.
+Overstating one costs real wall time; understating it gains nothing. A
+claim exceeding the server's own total is a lie the server can prove,
+and is reported as <code>attest:impossible-timing</code>.</p>
+<p>Their value is excluding the network: <code>react_ms</code> is a human reaction
+with no RTT in it, which the server figure can never isolate.</p>
+<h3 id="attestation-probes">Attestation probes</h3>
+<p>Attestation, not fingerprinting. Every probe asks whether the
+environment <em>behaves</em> like a browser; none derives a stable device
+identifier — no canvas, no WebGL, no font or audio measurement. The
+interactive tier shows a help panel promising nothing personal is sent,
+and that promise has to survive contact with this code.</p>
+<table>
+<thead>
+<tr>
+<th>Probe</th>
+<th>Fires when</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>webdriver</code></td>
+<td><code>navigator.webdriver === true</code> (set by the WebDriver spec)</td>
+</tr>
+<tr>
+<td><code>automation-global</code></td>
+<td>A known automation harness left a global behind</td>
+</tr>
+<tr>
+<td><code>chrome-ua-no-chrome</code></td>
+<td>UA claims Chrome but <code>window.chrome</code> is absent</td>
+</tr>
+<tr>
+<td><code>no-languages</code></td>
+<td><code>navigator.languages</code> is empty</td>
+</tr>
+<tr>
+<td><code>no-screen</code></td>
+<td>Screen dimensions are zero</td>
+</tr>
+<tr>
+<td><code>patched-native</code></td>
+<td>A native function no longer reports as native</td>
+</tr>
+<tr>
+<td><code>click-on-arm</code></td>
+<td>Click landed under 150ms after the checkbox appeared</td>
+</tr>
+<tr>
+<td><code>impossible-timing</code></td>
+<td>Client-reported timing exceeds the server's own total</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Reported, not enforced.</strong> Several probes have real false positives
+(privacy browsers, extensions that patch natives), and a wrong answer
+should cost a log line rather than someone's access. Results land in
+the reason chain and in <code>botshield_attestation_fail_total</code>.</p>
+<p>Absence proves nothing: a bot simply omits the field, and one that
+reads the JS reports an empty array. More importantly, attestation only
+rides along with a <strong>solve</strong> — traffic that never executes the
+challenge is absent from these numbers rather than counted as clean.
+On one production sample, 905 solves carried 2 failed probes, because
+the automation hitting that site never ran the JS at all.</p>
 <h3 id="the-decision-log">The decision log</h3>
 <p><code>BotShieldDecisionLog</code> defaults to <strong><code>logs/botshield.log</code></strong> (server-root
 relative, like Apache's own <code>ErrorLog</code>) for any server with
@@ -468,7 +571,7 @@ dashboard as <strong>Client classification</strong> and in Prometheus as
 </tr>
 <tr>
 <td><code>unknown-bot</code></td>
-<td>UA has bot-shaped tokens with no directory entry.</td>
+<td>UA has bot-shaped tokens with no directory entry, <strong>or no User-Agent at all</strong>.</td>
 </tr>
 <tr>
 <td><code>fake-bot</code></td>
@@ -480,6 +583,19 @@ dashboard as <strong>Client classification</strong> and in Prometheus as
 </tr>
 </tbody>
 </table>
+<p>A request with no <code>User-Agent</code> header counts as <code>unknown-bot</code>, not
+<code>unknown</code>. Absence of the header is not ambiguity: every real browser
+sends one, so we positively know the client is not a browser, and
+filing it under <code>unknown</code> overstated our uncertainty. It also dominated
+that bucket — 84% of <code>unknown</code> on this deployment — which made 41% of
+all traffic look like a classifier gap when it was a well-understood
+scanner population already being challenged.</p>
+<p>The reason chain still separates the two cases: <code>unknown-bot:no-ua</code>
+versus <code>unknown-bot:&lt;token&gt;</code> for a UA that named itself bot-shaped.</p>
+<p>Rate limiting meters absent-UA traffic in its <strong>own</strong> aggregate rather
+than the shared <code>unknown-bot</code> one. At ~39k requests/day against ~2k for
+the rest of that bucket, sharing would hold the budget permanently
+exhausted and 429 every genuine unknown bot as collateral.</p>
 <p>The distinction that matters operationally is <code>verified-bot</code> vs
 <code>fake-bot</code>: both send the same User-Agent, and only the IP cross-check
 separates them. A rising <code>fake-bot</code> count is someone impersonating a
@@ -505,7 +621,19 @@ application 403. <code>botshield_responses_*</code> splits them:</p>
 <tbody>
 <tr>
 <td><code>botshield_responses_origin_total</code></td>
-<td>The application answered. BotShield did not respond.</td>
+<td>The <strong>application</strong> answered. Excludes static files since 2026-08-10.</td>
+</tr>
+<tr>
+<td><code>botshield_responses_static_total</code></td>
+<td>Apache served a file off disk: CSS, JS, images, uploads.</td>
+</tr>
+<tr>
+<td><code>botshield_responses_app_bot_total</code></td>
+<td>Application responses served to a classified bot — crawl budget.</td>
+</tr>
+<tr>
+<td><code>botshield_responses_app_user_total</code></td>
+<td>Application responses served to everything else.</td>
 </tr>
 <tr>
 <td><code>botshield_responses_challenge_total</code></td>
@@ -685,11 +813,18 @@ verify endpoints, so they stay at zero unless a captcha provider or the
 embedded silent mode is in use.</p>
 <p><strong><code>verified</code> counts solves, not requests.</strong> A client that completes a
 silent/form PoW returns on a <em>fresh</em> request carrying its new cookie,
-which logs <code>outcome=allow cookie=ok</code>. Do not compute a solve rate from
-<code>cookie=ok</code> — that counts every request bearing a valid cookie, so one
-human browsing 50 pages would read as 50 solves. Before 2026-08-01 the
+which logs <code>outcome=allow cookie=solved</code>. Do not compute a solve rate
+from either cookie state — both count every request bearing a cookie,
+so one human browsing 50 pages would read as 50 solves.</p>
+<p><code>cookie=solved</code> vs <code>cookie=ok</code> is nonetheless the ratio to watch for
+cookie harvesting. Both verify identically; only <code>solved</code> carries proof
+that a challenge was passed. A large <code>ok</code> share means clients are
+holding cookies they never earned — on one production hub 70% of
+valid-cookie traffic sent no User-Agent at all, replaying minted
+cookies to suppress the <code>dropped-cookie</code> penalty. <code>cookie_ok_total</code>
+rising while <code>cookie_solved_total</code> stays flat is that signature. Before 2026-08-01 the
 PoW path emitted nothing at all, so a deployment running the silent or
-form tier with no captcha provider reported a permanent 0% solve rate
+interactive tier with no captcha provider reported a permanent 0% solve rate
 while challenges were in fact being solved.</p>
 <p><code>tier=safeguard</code> is emitted for challenge-loop suppression: the
 client gets a 302 redirect to a configured
@@ -764,7 +899,7 @@ takes the shape <code>&lt;family&gt;:&lt;name&gt;</code> so the source family is
 <h3 id="verbose-prose-line">Verbose prose line</h3>
 <p>Alongside the structured line, the prose line carries the per-
 reason penalty values (not just the names) for forensic debugging:</p>
-<pre><code>mod_botshield: &lt;action&gt; effective=37 tier=silent heuristic=37
+<pre><code>mod_botshield: &lt;action&gt; effective=37 tier=non-interactive heuristic=37
     cookie_score=0 reasons=[first-sight-ip:5,missing-accept-language:15,scraper-ua:python-requests:50]
 </code></pre>
 <p>Grep the log for the request, read the reasons array, see exactly
@@ -906,6 +1041,11 @@ WARNING). Drift is loud, not silent.</p>
 <td>counter</td>
 <td>Observe-mode trigger matches across families (path/cookie/env/load/scope)</td>
 </tr>
+<tr>
+<td><code>botshield_resp_status_mismatch_total</code></td>
+<td>counter</td>
+<td><strong>Should always be 0 — alert on any non-zero value.</strong> Requests recorded as answered by BotShield (challenge / block / rate-limit / safeguard redirect) where the client nevertheless received a 2xx, meaning the application answered. See <a href="#invariant-check">Invariant check</a> below.</td>
+</tr>
 </tbody>
 </table>
 <p>Plus SHM utilization gauges (computed at scrape time, cached 1 s
@@ -966,14 +1106,53 @@ per worker):</p>
 </tr>
 </tbody>
 </table>
+<h3 id="invariant-check">Invariant check</h3>
+<p><code>botshield_resp_status_mismatch_total</code> is not a workload metric. It
+counts violations of a claim the module makes about itself, and the only
+correct value is <strong>0</strong>.</p>
+<p>When BotShield records <code>outcome=challenged</code>, <code>block</code>, <code>rate_limited</code> or a
+safeguard <code>redirect</code>, it is asserting that <em>it</em> produced the response and
+the application never ran. The interstitial sets <code>403</code>, a block sets
+<code>403</code>, rate-limiting sets <code>429</code>, the safeguard sets <code>302</code> — so a client
+receiving a <strong>2xx</strong> on such a request means the application answered
+after all, and the decision log is overstating enforcement.</p>
+<p>Both halves of that comparison were already being computed side by side
+at <code>log_transaction</code> — the response kind from the origin request, the
+final status from the end of the internal-redirect chain — and then filed
+into two separate marginal tallies (<code>req_resp[]</code> and <code>req_status[]</code>).
+Marginals cannot express &quot;these two happened on the <em>same</em> request&quot;: you
+could read 500 challenges and 40,000 2xx off a scrape and never learn
+whether any single request was both. This counter closes that gap.</p>
+<p>Excluded by design, because a 2xx is their correct outcome: <code>origin</code>
+(the application answering), the module's own endpoints (<code>verify</code>,
+<code>embedded.js</code>, assets), and the observability endpoints. <code>~</code>-prefixed
+counterfactuals and <code>allow</code>/<code>verified</code> already bin as <code>origin</code>, so
+LogOnly and shadow mode never trip it.</p>
+<p>A non-zero value almost always means something downstream overrode
+BotShield's response — an <code>ErrorDocument</code>, or a rewrite re-dispatching to
+the application after the handler ran. That is the silent-failure shape
+worth alerting on: green configtest, running httpd, nothing else
+complaining, and traffic quietly less protected than the logs claim.</p>
+<p>The module also emits one <code>WARNING</code> to the error log naming the outcome,
+the status and the URI, <strong>throttled to one line per minute</strong> across all
+workers — this check runs on every request, so an unthrottled line would
+mean one log entry per request exactly when the fault is systematic. The
+counter is the signal to alert on; the log line only tells you where to
+look.</p>
+<pre><code># Alert if this is ever above zero.
+botshield_resp_status_mismatch_total &gt; 0
+</code></pre>
 <h3 id="sample-scrape">Sample scrape</h3>
 <pre><code>$ curl -s http://localhost/botshield/metrics | head -20
 # HELP botshield_tier_pass_total Decisions where the request passed.
 # TYPE botshield_tier_pass_total counter
 botshield_tier_pass_total 1428931
-# HELP botshield_tier_silent_total Decisions where the silent challenge tier was issued.
-# TYPE botshield_tier_silent_total counter
-botshield_tier_silent_total 84217
+# HELP botshield_tier_non_interactive_total Decisions where the non-interactive tier was issued.
+# TYPE botshield_tier_non_interactive_total counter
+botshield_tier_non_interactive_total 84217
+# HELP botshield_attestation_fail_total Solves arriving with at least one failed attestation probe.
+# TYPE botshield_attestation_fail_total counter
+botshield_attestation_fail_total 2
 ...
 </code></pre>
 <h3 id="validating-the-format">Validating the format</h3>

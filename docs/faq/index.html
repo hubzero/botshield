@@ -265,18 +265,18 @@ fail2ban is fine. For &quot;this request is suspicious, make the client
 prove they're human&quot; you want mod_botshield (or Cloudflare).</p>
 <h2 id="detection-and-accuracy">Detection and accuracy</h2>
 <h3 id="will-it-block-real-users">Will it block real users?</h3>
-<p>Below <code>BotShieldScoreSilent</code> (default 20) the module returns
+<p>Below <code>BotShieldScoreNonInteractive</code> (default 20) the module returns
 DECLINED to Apache; the user's request flows through normally and
 they never see mod_botshield at all. The default heuristics are
 tuned to keep typical browser traffic below that threshold, but
 the line is closer than it looks: a request with no
 <code>Accept-Language</code> header (15 points) plus a first-time IP not in
 the Bloom filter (5 points) lands at exactly 20, which trips the
-silent tier. Browsers in some configurations (privacy modes that
+non-interactive tier. Browsers in some configurations (privacy modes that
 strip headers, certain mobile webviews, intranet apps with
 non-default settings) can reach the threshold on a clean first
 request. The captcha-tier fail-open story is on the captcha side;
-the silent / form tiers themselves are real friction even for a
+the non-interactive / interactive tiers themselves are real friction even for a
 legitimate first-time visitor.</p>
 <p>If real users <em>are</em> hitting challenges, the likely causes are:</p>
 <ul>
@@ -294,7 +294,7 @@ before they hit users.</p>
 <ul>
 <li><strong>Cheap scrapers</strong> (Python <code>requests</code>, <code>curl</code>, <code>wget</code>,
 HTTP-library clients with no JS engine) cannot solve PoW. They
-fail at the silent and form tiers. This is the bulk of scraper
+fail at the non-interactive and interactive tiers. This is the bulk of scraper
 traffic.</li>
 <li><strong>Headless browsers</strong> (Puppeteer, Playwright, Selenium) <em>can</em>
 solve PoW because they execute JavaScript. They can also solve
@@ -346,7 +346,7 @@ clients can carry reputation across requests without
 needing to solve PoW. See
 <a href="../captcha/index.html#app-bridge">captcha</a>.</li>
 </ol>
-<p>A fourth option for IoT-style clients: implement the silent-tier
+<p>A fourth option for IoT-style clients: implement the non-interactive-tier
 PoW protocol in your client. The wire format is documented;
 nothing forces you to use a browser to satisfy it.</p>
 <h2 id="operations-and-overhead">Operations and overhead</h2>
@@ -444,7 +444,7 @@ configured, mod_botshield makes one HTTPS POST per verify
 attempt to the configured provider's siteverify URL with the
 client's captcha token (and the client IP as the <code>remoteip</code>
 field). This fires from three paths: the <code>/captcha-verify</code>
-endpoint, the silent-tier embedded-verify endpoint when an
+endpoint, the non-interactive-tier embedded-verify endpoint when an
 site pairs silent with a captcha provider, and the
 form-captcha fixup. No siteverify call ever happens without
 a captcha provider explicitly configured on the scope.</p>

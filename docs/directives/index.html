@@ -100,6 +100,7 @@
 <li class="toc__item toc__item--level-2"><a href="#shm-sizing-and-persistence">SHM sizing and persistence</a></li>
 <li class="toc__item toc__item--level-2"><a href="#ua-classification-and-allow-list">UA classification and allow list</a></li>
 <li class="toc__item toc__item--level-2"><a href="#rate-limit">Rate limit</a></li>
+<li class="toc__item toc__item--level-3"><a href="#alternation-on-ua">Alternation on `ua=`</a></li>
 <li class="toc__item toc__item--level-2"><a href="#robots-txt-enforcement">Robots.txt enforcement</a></li>
 <li class="toc__item toc__item--level-2"><a href="#triggers">Triggers</a></li>
 <li class="toc__item toc__item--level-3"><a href="#accesslog-off-keep-a-request-out-of-the-access-log">`accesslog=off` — keep a request out of the access log</a></li>
@@ -109,17 +110,17 @@
 <li class="toc__item toc__item--level-2"><a href="#heuristic-triggers">Heuristic triggers</a></li>
 <li class="toc__item toc__item--level-2"><a href="#safeguard">Safeguard</a></li>
 <li class="toc__item toc__item--level-2"><a href="#load-aware-throttling">Load-aware throttling</a></li>
+<li class="toc__item toc__item--level-3"><a href="#why-the-busy-worker-ratio-is-often-the-wrong-signal">Why the busy-worker ratio is often the wrong signal</a></li>
 <li class="toc__item toc__item--level-2"><a href="#multi-vhost-reputation">Multi-vhost reputation</a></li>
 <li class="toc__item toc__item--level-2"><a href="#decision-log">Decision log</a></li>
+<li class="toc__item toc__item--level-3"><a href="#rotation-and-the-path-your-monitoring-reads">Rotation and the path your monitoring reads</a></li>
 <li class="toc__item toc__item--level-2"><a href="#log-only-staging-mode">Log-only / staging mode</a></li>
 <li class="toc__item toc__item--level-2"><a href="#app-bridge">App bridge</a></li>
 <li class="toc__item toc__item--level-2"><a href="#where-to-next">Where to next</a></li>
   </ul>
 </section>
         <div class="prose">
-<p>mod_botshield registers 86 usable directives at config time (plus one
-retired name, <code>BotShieldPathTrigger</code>, kept registered only to emit a
-migration error). This page is
+<p>mod_botshield registers 86 directives at config time. This page is
 the canonical reference, grouped by family. The
 underlying source-of-truth is <code>bs_cmds[]</code> in <code>src/botshield.c:142</code> —
 when tuning behavior, treat the source as authoritative
@@ -195,12 +196,27 @@ into a running server.</p>
 <tr>
 <td><code>BotShieldDifficulty</code></td>
 <td><code>N</code></td>
-<td><code>4</code> (range 1..16)</td>
+<td><code>3</code> (range 1..16)</td>
 </tr>
 <tr>
 <td><code>BotShieldEndpointPrefix</code></td>
 <td><code>/path</code></td>
 <td><code>/botshield</code></td>
+</tr>
+<tr>
+<td><code>BotShieldScoring</code></td>
+<td><code>on</code>/<code>off</code></td>
+<td><code>off</code></td>
+</tr>
+<tr>
+<td><code>BotShieldInteractiveArmMs</code></td>
+<td><code>N</code> (ms)</td>
+<td><code>300</code> (range 0..2000)</td>
+</tr>
+<tr>
+<td><code>BotShieldInteractiveMinSolveMs</code></td>
+<td><code>N</code> (ms)</td>
+<td><code>400</code> (range 0..5000)</td>
 </tr>
 </tbody>
 </table>
@@ -231,12 +247,61 @@ form or captcha is ever rendered — any selected tier collapses back to
 <code>pass</code>, and the suppression appears in the decision log as
 <code>challenge-off:&lt;tier&gt;</code>.</p>
 <p>Use it where an explicit <code>status=4xx</code> trigger is meant to be the only
-action. Parking <code>BotShieldScoreSilent</code>/<code>Hard</code>/<code>Captcha</code> at <code>10000</code> is
+action. Parking <code>BotShieldScoreNonInteractive</code>/<code>Interactive</code>/<code>Captcha</code> at <code>10000</code> is
 <strong>not</strong> equivalent, which is easy to get wrong: a flag <code>tier_floor</code> is
 MAX'd in <em>after</em> the score-to-tier decision and ignores thresholds
 entirely, so an IP carrying <code>honeypot_hit</code>, <code>fake_bot</code>, <code>scanner_probe</code>
 or <code>pow_fail_streak</code> is still challenged. <code>BotShieldChallenge Off</code> is
 applied after the floor, so it holds.</p>
+<p><strong>This has bitten a production deployment, so it is worth spelling out
+what the ceiling does and does not buy.</strong> A hub running only the silent
+tier parked <code>Hard</code> and <code>Captcha</code> at <code>10000</code>, believing form and captcha
+were unreachable. They were not: the compiled-in flag defaults force a
+tier directly.</p>
+<table>
+<thead>
+<tr>
+<th>flag</th>
+<th>forced tier</th>
+<th>score</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>honeypot_hit</code></td>
+<td>captcha</td>
+<td>60</td>
+</tr>
+<tr>
+<td><code>fake_bot</code></td>
+<td>captcha</td>
+<td>80</td>
+</tr>
+<tr>
+<td><code>scanner_probe</code></td>
+<td><strong>form</strong></td>
+<td>50</td>
+</tr>
+<tr>
+<td><code>pow_fail_streak</code></td>
+<td>silent</td>
+<td>30</td>
+</tr>
+</tbody>
+</table>
+<p>A residential visitor who had already solved a silent challenge —
+<code>cookie=solved</code> — was pushed into the untested form widget six seconds
+later because their IP carried <code>scanner_probe</code>. 124 of the 132
+interactive-tier decisions in that window carried solve proof.</p>
+<p>To genuinely cap the tier, reset each floor and re-add only the score:</p>
+<pre><code class="language-apache">BotShieldFlagTrigger honeypot_hit  reset action=score add=60
+BotShieldFlagTrigger fake_bot      reset action=score add=80
+BotShieldFlagTrigger scanner_probe reset action=score add=50
+</code></pre>
+<p><code>reset</code> is required rather than stylistic: <strong>tier floors MAX across
+triggers</strong>, so adding a lower floor beside the compiled-in one is
+silently useless — it MAXes straight back up. <code>pow_fail_streak</code> needs
+no reset; its floor is already <code>non-interactive</code>.</p>
 <p><code>BotShieldDebug</code> returns <code>403 &quot;Hello World&quot;</code> for every request in
 scope — useful as a smoke test that the hook is firing.</p>
 <p><code>BotShieldSecretFile</code> and <code>BotShieldAlgorithm</code> are required. The
@@ -253,12 +318,91 @@ reputation follows across subdomains. Default is host-only. When
 HTTPS is in use AND no domain is set, the module emits the
 <code>__Host-bs_session</code> cookie name; otherwise the legacy
 <code>_bs_session</code>. Verify path checks both.</p>
-<p><code>BotShieldDifficulty</code> is the leading-hex-zeros count for the PoW.
-Higher = more client work. 4 is ~100ms on a modern phone; 6 is
-~3s; 8 is ~50s — don't go above 6 without a reason.</p>
+<p><code>BotShieldDifficulty</code> is the leading-hex-zeros count for the PoW, so
+expected work is <code>2^(4*d)</code> hashes: <code>3</code> is 4,096, <code>4</code> is 65,536. Each
+step up multiplies client cost by <strong>16</strong>, not by a little.</p>
+<p>Measured on live traffic rather than estimated. At <code>4</code>, 905 real solves
+cost a median 329ms of client CPU, p90 1019ms, p99 5188ms, and 34% of
+visitors spent over half a second; Android was worst at a 733ms median.
+At <code>3</code> the same population runs a ~50ms median. The default is <code>3</code>.</p>
+<p>Raising it is rarely worth it. Proof-of-work here is a <em>capability</em>
+test — it proves a real JS engine ran — not an economic barrier. A
+native solver is 15–43× faster than a browser at the same difficulty,
+so cost falls on your visitors far harder than on a competent bot, and
+a cookie amortises the bot's one solve across the whole
+<code>BotShieldCookieTTL</code> window. Of those 905 solves, 2 carried any failed
+attestation probe: the population that runs the JS is already clean.</p>
+<p><code>BotShieldScoring</code> decides whether the <strong>implicit</strong> path runs at all.
+Off by default, which is the point of the directive rather than an
+incident of it: every lockout this module has caused came from an
+implicit weight or tier floor nobody had written down summing past a
+threshold nobody had read. An explicit rule states what it does; a
+score states it only once you reconstruct the arithmetic.</p>
+<p>Off suppresses exactly three things — built-in heuristics contributing
+score, flag triggers contributing score or <code>tier_floor</code>, and the
+score-to-tier threshold evaluation. It does <strong>not</strong> touch an explicit
+<code>tier=</code> or <code>status=</code> on a rule. That boundary is the whole risk here:
+get it wrong in the &quot;off means no tiers at all&quot; direction and the site
+silently stops challenging anyone.</p>
+<p><code>BotShieldInteractiveArmMs</code> withholds the interactive tier's checkbox
+for this many milliseconds after load (0 shows it immediately). The
+widget renders at full size with a spinner meanwhile, so nothing shifts
+and there is no dead control to click — a visible control that swallows
+clicks teaches people the page is broken, and it is the confident fast
+clickers who hit it.</p>
+<p>The delay is not the point; the fact that the delay is <em>ours</em> is. A
+bare time floor is a guess about how fast people are and it charges the
+quick ones. Withholding the control makes &quot;window + reaction&quot; a fact,
+so the server can floor at least the window for free. It also yields a
+sharper signal: a person clicks hundreds of ms after the reveal, a
+poller within a few, and that gap is reported as an <code>attest:</code> failure.
+<code>100</code> is a good production value — below the threshold where a delay
+registers at all, while the gap signal is unaffected by the shrink.</p>
+<p><code>BotShieldInteractiveMinSolveMs</code> refuses an interactive-tier solve that
+returns sooner than this after the challenge was issued (0 disables).
+The clock is entirely the server's — the issue stamp rides in the
+bootstrap HMAC — so a client cannot shorten it.</p>
+<p>Measured, not guessed. A warmed headless browser needed 177ms to load,
+render and land a trusted click, and 239ms cold; the first version of
+this floor was 150ms, which sat under both and therefore cost an
+attacker nothing. Note what it does and does not do: it will not stop a
+bot that sleeps, and a <em>cold</em> browser is slow enough to clear any
+sane floor on its own. What it does is make waiting mandatory and
+server-observed, so the delay is real wall time per request rather than
+a field the client fills in. Watch <code>reason=solve_too_fast</code> for false
+positives.</p>
 <p><code>BotShieldEndpointPrefix</code> is the URL prefix for module-owned
 handlers (<code>/botshield/captcha-verify</code>, <code>/botshield/metrics</code>,
-<code>/botshield/embedded.js</code>, <code>/botshield/safeguard-info</code> etc.).
+<code>/botshield/embedded.js</code>, <code>/botshield/safeguard-info</code> etc.).</p>
+<p>Under that prefix, <code>&lt;prefix&gt;/preview</code> is an index of the pages a client
+can be shown, rendered from the live templates rather than from copies
+that drift:</p>
+<table>
+<thead>
+<tr>
+<th>Route</th>
+<th>Shows</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>&lt;prefix&gt;/preview/non-interactive</code></td>
+<td>The self-solving widget, pinned mid-check (the preview's proof-of-work is set unsolvable so it cannot complete and navigate away)</td>
+</tr>
+<tr>
+<td><code>&lt;prefix&gt;/preview/interactive</code></td>
+<td>The same widget with a live checkbox waiting for a click</td>
+</tr>
+<tr>
+<td><code>&lt;prefix&gt;/preview/safeguard</code></td>
+<td>The anti-loop explainer, also served at <code>&lt;prefix&gt;/safeguard-info</code>, which is the URL clients actually reach</td>
+</tr>
+</tbody>
+</table>
+<p>They mint nothing and are useful for design review and for seeing what
+a visitor sees without having to trip a challenge yourself. They serve
+<code>403</code>, like the real interstitials, because the same code path renders
+them.
 Change it if it collides with real app routes.</p>
 <h2 id="tier-thresholds-and-forgiveness">Tier thresholds and forgiveness</h2>
 <table>
@@ -271,12 +415,12 @@ Change it if it collides with real app routes.</p>
 </thead>
 <tbody>
 <tr>
-<td><code>BotShieldScoreSilent</code></td>
+<td><code>BotShieldScoreNonInteractive</code></td>
 <td><code>N</code></td>
 <td><code>20</code></td>
 </tr>
 <tr>
-<td><code>BotShieldScoreHard</code></td>
+<td><code>BotShieldScoreInteractive</code></td>
 <td><code>N</code></td>
 <td><code>50</code></td>
 </tr>
@@ -286,12 +430,12 @@ Change it if it collides with real app routes.</p>
 <td><code>80</code></td>
 </tr>
 <tr>
-<td><code>BotShieldForgivenessSilent</code></td>
+<td><code>BotShieldForgivenessNonInteractive</code></td>
 <td><code>N</code></td>
 <td><code>10</code></td>
 </tr>
 <tr>
-<td><code>BotShieldForgivenessForm</code></td>
+<td><code>BotShieldForgivenessInteractive</code></td>
 <td><code>N</code></td>
 <td><code>25</code></td>
 </tr>
@@ -309,9 +453,9 @@ Change it if it collides with real app routes.</p>
 </table>
 <p>Tier dispatch ladder:</p>
 <ul>
-<li><code>score &lt; BotShieldScoreSilent</code> → pass</li>
-<li><code>BotShieldScoreSilent ≤ score &lt; BotShieldScoreHard</code> → silent</li>
-<li><code>BotShieldScoreHard ≤ score &lt; BotShieldScoreCaptcha</code> → form</li>
+<li><code>score &lt; BotShieldScoreNonInteractive</code> → pass</li>
+<li><code>BotShieldScoreNonInteractive ≤ score &lt; BotShieldScoreInteractive</code> → silent</li>
+<li><code>BotShieldScoreInteractive ≤ score &lt; BotShieldScoreCaptcha</code> → form</li>
 <li><code>BotShieldScoreCaptcha ≤ score</code> → captcha (or form if no provider)</li>
 </ul>
 <p>See <a href="../site-model/index.html">site model</a> for the full scoring
@@ -331,14 +475,14 @@ resistance; 0 disables (legacy behavior).</p>
 </thead>
 <tbody>
 <tr>
-<td><code>BotShieldSilentMode</code></td>
+<td><code>BotShieldNonInteractiveMode</code></td>
 <td><code>interstitial|embedded</code></td>
 <td><code>interstitial</code></td>
 </tr>
 </tbody>
 </table>
 <p><code>interstitial</code> (the default) serves a no-click splash page that
-auto-submits a SHA-256 PoW on load — the legacy silent-tier
+auto-submits a SHA-256 PoW on load — the legacy non-interactive-tier
 behavior. <code>embedded</code> instead hands off to the site-included
 <code>/botshield/embedded.js</code> wrapper: the page serves DECLINED (real
 content) and the wrapper does the PoW in a Web Worker, then POSTs
@@ -728,7 +872,26 @@ template per line (runs of <code>[0-9._]+</code> replaced by <code>X</code>).</p
 </tr>
 </tbody>
 </table>
-<p>Match keys: <code>ua=&lt;substring&gt;</code> or <code>ua=@&lt;botgroup&gt;</code> for the UA gate
+<h3 id="alternation-on-ua">Alternation on <code>ua=</code></h3>
+<p><code>ua=</code> accepts a comma-separated list of <code>@selectors</code>, matching if any
+one does:</p>
+<pre><code class="language-apache">BotShieldRule api-bot path=&quot;/api/*&quot; \
+    ua=@search,@ai-input,@ai-train,@monitor \
+    status=403 ttl=0 log=api-bot
+</code></pre>
+<p>That replaces four rules identical but for a single token. Expanded at
+parse time into one entry per alternative — this family is strict
+first-match-wins, so N adjacent entries differing only on the UA axis
+and carrying identical actions are exactly equivalent to one entry with
+an OR. Copies take a <code>#N</code> name internally; the decision log is
+unaffected, since it reports the action's <code>log=</code> tag, which every copy
+shares.</p>
+<p><strong>Only <code>@selectors</code> split.</strong> A bare substring pattern is passed through
+untouched, because a User-Agent legitimately contains commas —
+<code>Mozilla/5.0 (X11; Linux x86_64)</code> is full of them — and splitting those
+would silently change what an existing rule matches.</p>
+<p>Match keys: <code>ua=&lt;substring&gt;</code>, <code>ua=@&lt;botgroup&gt;</code>, or <code>ua=&quot;&quot;</code> (no/empty
+User-Agent) for the UA gate
 (<code>*</code> or omit for any UA); <code>ipspec=&lt;spec&gt;</code> for the IP gate (CIDR file
 path, comma-separated inline CIDRs, <code>*</code> or omit for any IP). Both
 axes can't be wildcard — that's rejected at config time.</p>
@@ -800,7 +963,7 @@ semantics and refresh model.</p>
 <tbody>
 <tr>
 <td><code>BotShieldRequestTrigger</code></td>
-<td><code>&lt;name&gt;</code> + any of <code>path=&lt;glob&gt;</code> <code>query=&lt;glob&gt;</code> <code>cookies=none|any|session</code> <code>ua=&lt;substring&gt;|@&lt;botgroup&gt;</code> <code>ipspec=&lt;spec&gt;</code> — ANDed, at least one required</td>
+<td><code>&lt;name&gt;</code> + any of <code>path=&lt;glob&gt;</code> <code>query=&lt;glob&gt;</code> <code>cookies=none|any|session</code> <code>ua=&lt;substring&gt;|@&lt;botgroup&gt;|&quot;&quot;</code> <code>ipspec=&lt;spec&gt;</code> — ANDed, at least one required</td>
 <td><code>status=</code>, <code>redirect=</code>, <code>log=</code>, <code>accesslog=</code>, <code>flag=</code>, <code>ttl=</code>, <code>penalty=</code>, <code>mode=</code> (no <code>credit=</code>)</td>
 </tr>
 <tr>
@@ -904,9 +1067,9 @@ it.</p>
 <td>bulk forms only</td>
 </tr>
 <tr>
-<td><code>ua=&lt;substring&gt;|@&lt;botgroup&gt;</code></td>
+<td><code>ua=&lt;substring&gt;|@&lt;botgroup&gt;[,@&lt;botgroup&gt;...]|&quot;&quot;</code></td>
 <td>User-Agent</td>
-<td><code>*</code> means &quot;any&quot;, same as omitting</td>
+<td><code>*</code> means &quot;any&quot;, same as omitting. <code>ua=&quot;&quot;</code> matches a request with <strong>no</strong> User-Agent header, or one present but empty — absence is not a substring, so it needs its own spelling. A <strong>comma list of <code>@selectors</code></strong> matches if any of them does.</td>
 </tr>
 <tr>
 <td><code>ipspec=&lt;spec&gt;</code></td>
@@ -936,8 +1099,8 @@ compress into one key.</p>
 </tr>
 <tr>
 <td>Challenge</td>
-<td><code>status=pass tier=silent</code></td>
-<td>Invisible auto-submitting check. <code>tier=form</code> for the visible one.</td>
+<td><code>status=pass tier=non-interactive</code></td>
+<td>Invisible auto-submitting check. <code>tier=interactive</code> for the visible one.</td>
 </tr>
 <tr>
 <td>Captcha</td>
@@ -953,7 +1116,7 @@ compress into one key.</p>
 </table>
 <p><code>tier=</code> and <code>penalty=</code> both require <code>status=pass</code>, because a concrete
 status short-circuits the request before any tier is chosen. <code>tier=</code>
-accepts <code>pass</code>, <code>silent</code>, <code>form</code> (alias <code>hard</code>) and <code>captcha</code>, and
+accepts <code>pass</code>, <code>non-interactive</code>, <code>interactive</code> and <code>captcha</code>, and
 composes by MAX with the score-derived tier and any flag tier floor —
 it raises the floor, it never downgrades.</p>
 <p><code>tier=</code> sets that floor on <strong>this request only</strong>. That is the
@@ -977,6 +1140,12 @@ BotShieldRequestTrigger login-trap path=&quot;/login*&quot; query=&quot;*return=
 
 # no path condition at all — any URL carrying ?debug=1
 BotShieldRequestTrigger debugparam query=&quot;*debug=1*&quot; penalty=20
+
+# no User-Agent at all. Absence is not a substring, so this is the one
+# UA form the pattern match cannot express. Note ua=&quot;&quot; is a restriction
+# and ua=* is not: &quot;*&quot; (or omitting the key) means &quot;any&quot;, which is why a
+# rule carrying only ua=* is rejected as having no condition.
+BotShieldRequestTrigger no-ua ua=&quot;&quot; status=pass tier=non-interactive ttl=0 log=no-ua
 </code></pre>
 <p>Because it fires from the policy walk it short-circuits <strong>before</strong>
 scoring, so a <code>status=4xx</code> rule never renders a challenge and never
@@ -987,21 +1156,22 @@ reaches PHP.</p>
 probing <code>/.env</code> and per-IP memory was worth having. It is the wrong
 default for high-cardinality traffic: at roughly one request per IP the
 flag is never read again, it churns the 50,000-slot flagged-IP table,
-and <code>scanner_probe</code> carries a compiled-in <code>tier_floor</code> of <code>form</code> that
+and <code>scanner_probe</code> carries a compiled-in <code>tier_floor</code> of <code>interactive</code> that
 <strong>overrides parked score thresholds</strong> and turns a block-only scope into
 one that renders interstitials. Write <code>ttl=0</code> on rules that match
 one-shot traffic:</p>
 <pre><code class="language-apache">BotShieldRequestTrigger login-trap path=&quot;/login*&quot; query=&quot;*return=*&quot; \
     cookies=none status=403 ttl=0 log=login-trap accesslog=off
 </code></pre>
-<h4 id="renamed-from-botshieldpathtrigger">Renamed from <code>BotShieldPathTrigger</code></h4>
+<h4 id="migrating-from-botshieldpathtrigger">Migrating from <code>BotShieldPathTrigger</code></h4>
 <p><code>BotShieldPathTrigger</code> was renamed on 2026-08-01 and its path glob moved
 from a positional argument to the <code>path=</code> key. The old name had stopped
-being accurate when the family gained <code>ua=</code>/<code>ipspec=</code>; <code>query=</code> and
-<code>cookies=</code> made &quot;path&quot; one dimension out of five. Making path a key is
-also what allows a rule with no path condition at all.</p>
-<p>The old name is still registered, purely so an old config fails with a
-migration note rather than &quot;unknown directive&quot;:</p>
+being accurate when the family gained <code>ua=</code>/<code>ipspec=</code>; <code>query=</code>,
+<code>cookies=</code> and <code>exists=</code> made &quot;path&quot; one dimension out of six. Making
+path a key is also what allows a rule with no path condition at all.</p>
+<p><strong>The old name was removed on 2026-08-10</strong> and now fails with Apache's
+<code>Invalid command</code> at config time — loudly, at startup, not silently at
+runtime:</p>
 <pre><code class="language-apache"># before
 BotShieldPathTrigger blocked &quot;/wp-admin/*&quot; status=403
 # after
@@ -1054,12 +1224,12 @@ entries.</p>
 </table>
 <p>Action verbs: <code>action=score add=N</code> (signed N -1000..1000),
 <code>action=tier_floor min=&lt;tier&gt;</code> (raise effective tier; tier is one
-of <code>pass</code>/<code>silent</code>/<code>form</code>/<code>captcha</code>). The <code>reset</code> keyword clears
+of <code>pass</code>/<code>non-interactive</code>/<code>interactive</code>/<code>captcha</code>). The <code>reset</code> keyword clears
 all earlier triggers (compiled-in defaults + prior
 declarations) for the named flag at post-config time.</p>
 <p><strong>A <code>tier_floor</code> bypasses your score thresholds.</strong> It is MAX'd in
 <em>after</em> the score-to-tier decision, so it does not consult
-<code>BotShieldScoreSilent</code>/<code>Hard</code>/<code>Captcha</code> at all. Four of the compiled-in
+<code>BotShieldScoreNonInteractive</code>/<code>Interactive</code>/<code>Captcha</code> at all. Four of the compiled-in
 defaults carry one — <code>honeypot_hit</code> and <code>fake_bot</code> (captcha),
 <code>scanner_probe</code> (form), <code>pow_fail_streak</code> (silent) — so an IP carrying
 any of them is challenged even in a scope whose thresholds are parked to
@@ -1070,6 +1240,37 @@ BotShieldFlagTrigger fake_bot        reset action=score add=80
 BotShieldFlagTrigger scanner_probe   reset action=score add=50
 BotShieldFlagTrigger pow_fail_streak reset action=score add=30
 </code></pre>
+<p><strong>A flag score at or above <code>BotShieldScoreNonInteractive</code> is an unbreakable
+loop, not a challenge.</strong> The replacement scores above fix the
+<code>tier_floor</code> bypass but leave a second trap, and <code>add=50</code> against the
+default silent threshold of <code>20</code> walks straight into it. Solving does
+not clear a flag. Forgiveness reduces the score carried <em>in the
+cookie</em>, and then <code>bs_apply_flag_triggers</code> re-adds the flag's score on
+the very next request — <code>botshield.c</code> says so at the forgiveness site:</p>
+<blockquote>
+<p>No floor on the forgiven score even on flagged cookies. Flag effects
+are re-applied at request time [...] so a forgiven-to-zero score on a
+flagged cookie is simply re-raised on the next request.</p>
+</blockquote>
+<p>So a flagged client is re-challenged forever however many times it
+solves. In production this looked like <code>pow_ok</code> succeeding roughly once
+a second, each success followed immediately by another
+<code>outcome=challenged</code> carrying <code>cookie=solved</code> and
+<code>forgive-capped:0/10</code> — the hourly forgiveness cap exhausted by the
+loop it could not escape. The affected user had tripped
+<code>scanner_probe</code> while filing a support ticket about being blocked: the
+attachment upload posts a negative ticket id, which reads as probing.</p>
+<p>Keep flag scores <strong>below</strong> <code>BotShieldScoreNonInteractive</code> unless you intend the
+flag alone to challenge indefinitely. A flag worth less than the
+threshold still contributes toward a challenge in combination with
+other signals, which is usually what was meant:</p>
+<pre><code class="language-apache"># with the default BotShieldScoreNonInteractive of 20
+BotShieldFlagTrigger scanner_probe   reset action=score add=10
+</code></pre>
+<p>Setting <code>add=0</code> is worse than a low value: it discards the evidence
+rather than de-weighting it. And note this trap is invisible in
+testing that solves once — it only appears on the <em>second</em> request
+after a solve.</p>
 <p>Flag bits: <code>honeypot_hit</code>, <code>scanner_probe</code>, <code>fake_bot</code>,
 <code>pow_fail_streak</code>, <code>app_verified_human</code>, <code>app_verified_session</code>,
 <code>app_trust_signal</code>. See
@@ -1140,9 +1341,18 @@ limit, which is what the published policy actually promises.
 <code>missing-al</code> is 5 for the same reason: almost nothing scripted sends
 <code>Accept-Language</code>.</p>
 <p><code>first-sight-ip</code> and <code>dropped-cookie</code> are the two halves of one signal —
-both fire only when the request carries no usable cookie, differing on
-whether the IP is already in the Bloom filter. <code>first-sight-ip</code> sits at
-exactly <code>BotShieldScoreSilent</code>, so <strong>an enabled scope challenges any
+both fire unless the request carries a cookie that <strong>proves a challenge
+was solved</strong>, differing on whether the IP is already in the Bloom filter.</p>
+<p>A merely valid cookie is not enough. Under always-mint every client
+receives a signature-valid cookie on its first request, so waiving these
+two on validity alone would let a bot mint one, keep it, and permanently
+suppress a penalty it never earned. The waiver requires solve evidence
+(<code>passes_silent</code>, <code>passes_form</code>, or <code>passes_captcha</code>) in the
+authenticated rep block — the same evidence the safeguard-clear path
+requires. A real browser pays for this exactly once: it arrives with no
+proof, scores <code>dropped-cookie</code> into the non-interactive tier, clears it in one
+auto-submitted round trip, and every later request carries proof. <code>first-sight-ip</code> sits at
+exactly <code>BotShieldScoreNonInteractive</code>, so <strong>an enabled scope challenges any
 request with no session context by default</strong>, with no rule to write.
 That is usually what you want on a login or registration path, where the
 check is invisible and a real browser clears it in one auto-submitted
@@ -1266,6 +1476,24 @@ behavior arc.</p>
 <td><code>85</code></td>
 <td>server only</td>
 </tr>
+<tr>
+<td><code>BotShieldLatencyWarm</code></td>
+<td><code>N</code> (ms)</td>
+<td><code>250</code></td>
+<td>server only</td>
+</tr>
+<tr>
+<td><code>BotShieldLatencyHot</code></td>
+<td><code>N</code> (ms)</td>
+<td><code>1000</code></td>
+<td>server only</td>
+</tr>
+<tr>
+<td><code>BotShieldDbStatsFile</code></td>
+<td><code>/path</code></td>
+<td>unset</td>
+<td>server only</td>
+</tr>
 </tbody>
 </table>
 <p><code>BotShieldLoadStateFile</code> points at an external single-word state
@@ -1273,6 +1501,39 @@ file (managed by an out-of-band collector) that overrides the
 scoreboard sample. Useful when load decisions should key on a
 metric Apache itself doesn't see (queue depth, downstream
 saturation, etc.).</p>
+<h3 id="why-the-busy-worker-ratio-is-often-the-wrong-signal">Why the busy-worker ratio is often the wrong signal</h3>
+<p><code>BotShieldLoadWarmThreshold</code> and <code>BotShieldLoadHotThreshold</code> are a
+percentage of <code>MaxRequestWorkers</code>, which is only meaningful if that
+setting reflects what the machine can actually serve. It frequently
+does not. On a host running <code>MaxRequestWorkers 1024</code> against 6 cores,
+four separate outages ran at 25-30 busy workers — the site returning
+500s and taking half a minute per request — which is <strong>2-3%</strong>
+utilisation. No threshold on that ratio can distinguish those outages
+from an idle server.</p>
+<p><code>BotShieldLatencyWarm</code> / <code>BotShieldLatencyHot</code> exist for that case.
+They compare the <strong>mean request latency</strong>, measured as a delta between
+watchdog ticks, against a duration you choose. On the host above the
+same outages moved this number from ~31ms to 29,000-36,000ms — roughly
+a thousandfold, on the same data the worker ratio read as flat.</p>
+<p>It is derived from Apache's own per-worker counters, the same ones
+<code>mod_status</code> sums for <code>Total Duration</code> and <code>Total Accesses</code>, read
+straight out of the scoreboard the watchdog already walks. No extra
+sampling cost and no external process. Two consequences worth knowing:</p>
+<ul>
+<li>It requires <code>ExtendedStatus On</code>. Without it Apache never maintains
+those counters and the metric reports <em>unavailable</em> rather than
+zero — zero would mean &quot;answering instantly&quot;, which is the opposite
+of what a missing measurement means.</li>
+<li>It averages over <strong>all</strong> requests, static files included, so a flood
+of cheap static hits dilutes it. It answers &quot;is the server slow right
+now&quot;, not &quot;is this endpoint slow&quot;.</li>
+</ul>
+<p><code>BotShieldDbStatsFile</code> reads key=value telemetry from an external
+database monitor for the dashboard's graph. Database load reaches
+policy through <code>BotShieldLoadStateFile</code>, not through this — the module
+never links a database client, because blocking I/O has no place in
+the watchdog and a database too sick to answer must not be able to
+stall the code whose job is to shed load because the database is sick.</p>
 <p>The trigger family that consumes the state lives under
 <code>BotShieldLoadTrigger</code> (above). See
 <a href="../policy/index.html#load-triggers-e112">policy</a>.</p>
@@ -1323,6 +1584,26 @@ BotShieldDecisionLog &quot;|/usr/bin/rotatelogs /var/log/httpd/bs.%Y%m%d 86400&q
 A value beginning with <code>|</code> is a piped-log spec handed to Apache's own
 <code>ap_open_piped_log</code>, so <code>rotatelogs</code> and friends work as they do for any
 other Apache log.</p>
+<h3 id="rotation-and-the-path-your-monitoring-reads">Rotation and the path your monitoring reads</h3>
+<p><code>rotatelogs -n N</code> cycles round-robin through <code>logfile</code>, <code>logfile.1</code> …
+<code>logfile.N-1</code>. <strong>Which file is current changes over the day</strong>, and the
+base name is the live one only until the first rotation. Anything that
+reads the base name directly is a bug that hides itself: it returns
+real, correctly formatted, <em>stale</em> data, which reads as a traffic
+collapse rather than as a mistake.</p>
+<p>Pass <code>-L</code> so a fixed path always hard-links to whichever file is open:</p>
+<pre><code class="language-apache">BotShieldDecisionLog &quot;|/usr/sbin/rotatelogs -n 7 \
+    -L /var/log/httpd/botshield.log.current \
+    /var/log/httpd/botshield.log 100M&quot;
+</code></pre>
+<p>Monitoring then reads <code>botshield.log.current</code> and never has to know
+about the rotation. The link is re-pointed on each rotation, so a
+reader that opens by path each time always lands on the live file.
+Use <code>tail -F</code> (follow by name), not <code>tail -f</code>, which holds the old
+inode across a rotation.</p>
+<p>Timestamped names (<code>bs.%Y%m%d</code>) do not have this problem, because the
+current name is derivable — but they also grow without bound, which is
+what <code>-n</code> is for. <code>-L</code> is what makes <code>-n</code> safe to monitor.</p>
 <p>Why it exists: a <code>CustomLog</code> cannot survive <code>accesslog=off</code>, because
 mod_log_config serves every <code>CustomLog</code> from the single
 <code>log_transaction</code> hook that <code>accesslog=off</code> breaks. An owned log is

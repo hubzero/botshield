@@ -90,6 +90,13 @@
 <section class="toc">
   <h2 class="toc__heading">On this page</h2>
   <ul class="toc__list">
+<li class="toc__item toc__item--level-2"><a href="#2026-08-10b-proxied-paths-were-invisible-to-the-module">2026-08-10b (proxied paths were invisible to the module)</a></li>
+<li class="toc__item toc__item--level-3"><a href="#mod-proxy-was-answering-before-mod-botshield-ran">mod_proxy was answering before mod_botshield ran</a></li>
+<li class="toc__item toc__item--level-2"><a href="#2026-08-10-a-cookie-earns-the-dropped-cookie-waiver-only-by-solving">2026-08-10 (a cookie earns the dropped-cookie waiver only by solving)</a></li>
+<li class="toc__item toc__item--level-3"><a href="#holding-a-cookie-is-not-evidence-of-anything">Holding a cookie is not evidence of anything</a></li>
+<li class="toc__item toc__item--level-2"><a href="#2026-08-09-ua-match-safeguard-strike-slot-reclamation">2026-08-09 (ua=&quot;&quot; match; safeguard/strike slot reclamation)</a></li>
+<li class="toc__item toc__item--level-3"><a href="#ua-match-a-request-with-no-user-agent">`ua=&quot;&quot;` — match a request with no User-Agent</a></li>
+<li class="toc__item toc__item--level-3"><a href="#reclaim-dead-safeguard-and-strike-slots">Reclaim dead safeguard and strike slots</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-08-02-bot-directory-refresh-retired-agents-quieter-observability">2026-08-02 (bot directory refresh; retired agents; quieter observability)</a></li>
 <li class="toc__item toc__item--level-3"><a href="#added-retired-and-non-existent-agent-identities-classify-as-fake-bot">Added — retired and non-existent agent identities classify as `fake-bot`</a></li>
 <li class="toc__item toc__item--level-3"><a href="#changed-bot-directory-refreshed-587-688-upstream-entries">Changed — bot directory refreshed, 587 -&gt; 688 upstream entries</a></li>
@@ -222,6 +229,99 @@
   </ul>
 </section>
         <div class="prose">
+<h2 id="2026-08-10b-proxied-paths-were-invisible-to-the-module">2026-08-10b (proxied paths were invisible to the module)</h2>
+<h3 id="mod-proxy-was-answering-before-mod-botshield-ran">mod_proxy was answering before mod_botshield ran</h3>
+<p>Any path with a <code>ProxyPass</code> inside a <code>&lt;Location&gt;</code> was never evaluated.
+No policy could reach it -- not a scope, not a server-level path
+trigger, not <code>BotShieldEnabled On</code> written directly on that Location.
+On a production hub that silently exempted the three most sensitive
+entry points on the site: <code>/index.php</code> (both the homepage target and
+the CILogon OAuth callback), <code>/administrator/index.php</code>, and
+<code>/api/index.php</code>.</p>
+<p>The cause was handler precedence, not request phases. Both modules
+registered their content handler at <code>APR_HOOK_FIRST</code>; ties break on
+module load order and mod_proxy loads first, so it claimed the request
+before this module got a turn. Diagnosed with a temporary fixups probe:
+the request arrived with <code>proxyreq=2</code>, <code>handler=proxy-server</code> and
+<code>enabled=2</code> (LogOnly) -- the phases ran and the per-directory config had
+merged correctly, and only this module's handler never fired.</p>
+<p><code>bs_handler</code> now registers at <code>APR_HOOK_REALLY_FIRST</code>. Declining still
+hands the request straight back to mod_proxy, so a proxied path is
+evaluated like any other and proxied exactly as before.</p>
+<p>Operators who worked around this with <code>&lt;Location&gt; ProxyPass !</code> plus
+<code>SetHandler &quot;proxy:...&quot;</code> can drop it. That workaround also had a trap:
+releasing a path whose file exists puts it back under the directory
+walk, so a <code>&lt;FilesMatch \.php$&gt; Require all denied</code> -- common in
+php-fpm vhosts, since ProxyPass previously made it unreachable -- starts
+answering, and the homepage 403s.</p>
+<h2 id="2026-08-10-a-cookie-earns-the-dropped-cookie-waiver-only-by-solving">2026-08-10 (a cookie earns the dropped-cookie waiver only by solving)</h2>
+<h3 id="holding-a-cookie-is-not-evidence-of-anything">Holding a cookie is not evidence of anything</h3>
+<p><code>first-sight-ip</code> and <code>dropped-cookie</code> were waived for any request
+presenting a signature-valid, unexpired cookie (<code>have_prior_rep</code>).
+Under always-mint that is every client that has made one prior request,
+so the waiver was granted for keeping a cookie jar rather than for
+passing a check.</p>
+<p>Measured on a production hub: no-UA scanners on Azure that stored and
+replayed their minted cookie sat at score 45 (silent tier); the same
+clients when they dropped the cookie scored 65-70 (form tier). They
+were using cookie persistence to hold themselves in the cheaper tier —
+4,069 requests in that state against 94 that were not, and 70% of all
+valid-cookie traffic on the hub sent no User-Agent at all.</p>
+<p>Both heuristics now gate on <code>have_solve_proof</code> — <code>passes_silent</code>,
+<code>passes_form</code>, or <code>passes_captcha</code> in the authenticated rep block —
+instead of on cookie validity. This is the rule the safeguard-clear
+path at the top of the same function already applied, with a comment
+making exactly this argument; the two call sites had drifted apart and
+are now consistent.</p>
+<p>Solve proof is read under <code>have_prior_rep</code>, not under full cookie
+validity: a cookie failing only a post-tag check still carries
+trustworthy pass counters, while a signature-mismatched or expired one
+carries none we may believe.</p>
+<p>Cost to a real browser is one silent challenge. It arrives without
+proof, scores <code>dropped-cookie</code> into the silent tier, clears it in one
+auto-submitted round trip, and every later request carries
+<code>passes_silent</code> and lands clean.</p>
+<p>Operators running with the default <code>BotShieldScoreHard 50</code> should know
+this can push a persistent no-session client from silent into form. If
+the form and captcha tiers have not been exercised on your deployment,
+raise <code>BotShieldScoreHard</code> / <code>BotShieldScoreCaptcha</code> before taking this
+change, so escalation stays where you have tested it.</p>
+<h2 id="2026-08-09-ua-match-safeguard-strike-slot-reclamation">2026-08-09 (ua=&quot;&quot; match; safeguard/strike slot reclamation)</h2>
+<h3 id="ua-match-a-request-with-no-user-agent"><code>ua=&quot;&quot;</code> — match a request with no User-Agent</h3>
+<p><code>ua=</code> is a substring test, and absence is not a substring of anything,
+so there was no way to write &quot;challenge requests that send no
+User-Agent&quot;. The only expression available was wrapping a scope in an
+Apache <code>&lt;If &quot;-z %{HTTP_USER_AGENT}&quot;&gt;</code>, which works but puts half the
+policy outside the module, where the decision log cannot see it.</p>
+<p><code>ua=&quot;&quot;</code> now matches a request with no <code>User-Agent</code> header, or one
+present but empty. Both spellings occur in the wild and mean the same
+thing to a policy author. It works anywhere the cohort keys do —
+<code>BotShieldRequestTrigger</code> and <code>BotShieldRateLimit</code>.</p>
+<pre><code class="language-apache">BotShieldRequestTrigger no-ua ua=&quot;&quot; status=pass tier=silent ttl=0 log=no-ua
+</code></pre>
+<p><strong>Meaning change.</strong> An empty <code>ua=</code> value previously folded into &quot;any&quot;,
+redundantly with <code>*</code> and with omitting the key. Nothing shipped used it,
+so the slot now carries the meaning it reads as. <code>ua=*</code> is unchanged and
+remains the spelling for &quot;any&quot; — the legacy positional
+<code>BotShieldRateLimit</code> form cannot omit its UA argument, so it still needs
+a placeholder. A rule carrying only <code>ua=*</code> is still rejected as having
+no condition; a rule carrying <code>ua=&quot;&quot;</code> is a real restriction and is
+accepted.</p>
+<h3 id="reclaim-dead-safeguard-and-strike-slots">Reclaim dead safeguard and strike slots</h3>
+<p>Both tables filled monotonically and only emptied on restart: slots were
+freed on success (a solved challenge, in the safeguard case) but never
+on expiry. The flagged-IP table has always reclaimed expired entries
+during its probe walk; these two were built from the same template and
+never got that branch, so at saturation they degraded to overwriting a
+fixed bucket and unrelated clients began clobbering each other.</p>
+<p>A safeguard entry is dead once its counting window has rolled <em>and</em> its
+pass-through grant has expired — both required, or a client mid-safeguard
+would be re-challenged instead of redirected. The strike table uses the
+equivalent predicate on <code>strike_window_start</code> / <code>escalation_until</code>.</p>
+<p>The capacity-headroom watchdog additionally sweeps the safeguard table,
+reclaiming in bounded chunks under <code>trylock</code> so housekeeping can never
+stall the request path. It already walked every slot to build the
+utilisation gauge; it now acts on what it finds.</p>
 <h2 id="2026-08-02-bot-directory-refresh-retired-agents-quieter-observability">2026-08-02 (bot directory refresh; retired agents; quieter observability)</h2>
 <h3 id="added-retired-and-non-existent-agent-identities-classify-as-fake-bot">Added — retired and non-existent agent identities classify as <code>fake-bot</code></h3>
 <p><code>Google-Extended</code>, <code>Claude-Web</code> and <code>anthropic-ai</code>. The first was never

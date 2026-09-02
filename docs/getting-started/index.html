@@ -213,7 +213,7 @@ The default <code>LogLevel warn</code> hides them. Bump just this module:</p>
 inspected the request, decided it didn't warrant friction, and
 declined so Apache served the real content.</p>
 <p><strong>4. The challenge widget renders.</strong> Force a challenge by spoofing a
-scraper UA so the heuristic score crosses <code>BotShieldScoreSilent</code>
+scraper UA so the heuristic score crosses <code>BotShieldScoreNonInteractive</code>
 (default 20):</p>
 <pre><code class="language-sh">curl -sk -A &quot;python-requests/2.31&quot; https://example.test/ | grep -c BOTSHIELD
 # expected: 1 (the widget marker is present in the rendered page)
@@ -225,7 +225,7 @@ tuning workflow and <a href="../observability/index.html">observability</a> for 
 to inspect what each request scored.</p>
 <h2 id="test-that-pow-completes">Test that PoW completes</h2>
 <p>Open the gated URL in a real browser. The interstitial should
-auto-submit (silent tier) or render the checkbox widget (form tier),
+auto-submit (non-interactive tier) or render the checkbox widget (interactive tier),
 solve a few seconds of SHA-256 PoW, and bounce back to the real page.
 Reload — you should see the real content immediately. The browser
 now holds a <code>_bs_session</code> cookie carrying the signed envelope and

@@ -242,7 +242,7 @@ Claims fields (semicolon-separated, in this order):
 
 - `v=1` — wire-format version. Locked to `1` today.
 - `score=N` — running score the request decision used.
-- `tier=<t>` — `pass` / `silent` / `form` / `captcha` / `safeguard`
+- `tier=<t>` — `pass` / `non-interactive` / `interactive` / `captcha` / `safeguard`
   (matches the decision-log `tier` enum).
 - `cookie=<c>` — `solved` / `ok` / `expired` / `bad_sig` /
   `bad_format` / `absent` (matches the `cookie` enum). `solved` is a

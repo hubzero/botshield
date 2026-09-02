@@ -13,7 +13,7 @@ what the failures had in common while it is still fresh.
 **#1 — `tier_floor` bypasses the score ceiling.** The operator parked
 `BotShieldScoreInteractive` and `BotShieldScoreCaptcha` at 10000 to make a scope
 effectively challenge-free. A `scanner_probe` flag carries a compiled-in
-`tier_floor` of `form`, which is MAX'd in *after* the score-to-tier
+`tier_floor` of `interactive`, which is MAX'd in *after* the score-to-tier
 decision and never consults the thresholds. Users hit a form challenge in
 a scope configured to have none.
 
