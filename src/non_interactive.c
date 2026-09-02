@@ -823,6 +823,10 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
      * a challenge issued from one IP cannot be redeemed from
      * another (closes Attack 3). nonce_hex is rebuilt from ch.nonce
      * since this code path doesn't extract it from top-level JSON. */
+    /* Hoisted out of the IP-binding block: the decision log below
+     * reports issue -> submit wall time, which is the only timing
+     * number in this system the client cannot influence. */
+    apr_int64_t issued_ms = 0;
     {
         char nonce_hex_buf[BS_NONCE_BYTES * 2 + 1];
         bs_to_hex(ch.nonce, BS_NONCE_BYTES, nonce_hex_buf);
@@ -834,7 +838,6 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
         /* Bounded to a plausible epoch-ms range so a garbage value is
          * rejected as input rather than reaching the signature check
          * or the subtraction below. */
-        apr_int64_t issued_ms = 0;
         {
             json_object *v = NULL;
             if (json_object_object_get_ex(root, "issued_ms", &v) &&
@@ -967,15 +970,66 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
         const char *att = bs_read_attestation(r, root);
         const char *tier_name = ch.auto_tier ? "non-interactive"
                                              : "interactive";
+        /* Issue -> submit, server clock both ends. Rides in the reason
+         * chain rather than as a new log field so existing parsers
+         * keep working; the chain already carries colon-qualified
+         * terms like known-bot:foo and attest:bar.
+         *
+         * Logged on every solve, not just refused ones: a floor can
+         * only be set from a distribution, and without this the only
+         * way to learn one is to guess a value and watch what breaks.
+         * It also makes automation visible that the floor misses --
+         * a cold browser is SLOW, so it clears any floor while still
+         * sitting nowhere near a human's timing. */
+        apr_int64_t solve_ms = issued_ms
+            ? ((apr_int64_t)(apr_time_now() / 1000) - issued_ms) : -1;
+
+        /* Client-measured companions to solve_ms. The server number
+         * carries two network legs and both machines' CPU, so it can
+         * never isolate the human; react_ms can, because it is
+         * measured entirely inside one page.
+         *
+         * Trust model: these are bounded above by solve_ms, which the
+         * client cannot influence. Claiming a reaction longer than
+         * the whole exchange took is not possible without actually
+         * waiting, and claiming a shorter one gains nothing. A claim
+         * that exceeds the server's own total is a lie the server can
+         * prove, so it is recorded as one. */
+        apr_int64_t pow_ms = -1, react_ms = -1;
+        { json_object *v = NULL;
+          if (json_object_object_get_ex(root, "pow_ms", &v) &&
+              json_object_is_type(v, json_type_int)) {
+              pow_ms = (apr_int64_t)json_object_get_int64(v);
+              if (pow_ms < -1 || pow_ms > 3600000) pow_ms = -1;
+          }
+          if (json_object_object_get_ex(root, "react_ms", &v) &&
+              json_object_is_type(v, json_type_int)) {
+              react_ms = (apr_int64_t)json_object_get_int64(v);
+              if (react_ms < -1 || react_ms > 3600000) react_ms = -1;
+          } }
+        /* 250ms of slack: solve_ms is sampled after the request has
+         * crossed the network, so a truthful client can legitimately
+         * report a hair more than a naive comparison allows. */
+        int timing_impossible =
+            (solve_ms >= 0 &&
+             ((react_ms > solve_ms + 250) || (pow_ms > solve_ms + 250)));
+
+        const char *reason = apr_psprintf(r->pool,
+            "pow_ok,ms:%" APR_INT64_T_FMT
+            ",pow_ms:%" APR_INT64_T_FMT
+            ",react_ms:%" APR_INT64_T_FMT,
+            solve_ms, pow_ms, react_ms);
+        if (timing_impossible) {
+            att = *att ? apr_pstrcat(r->pool, att, "+impossible-timing",
+                                     NULL)
+                       : "impossible-timing";
+        }
         if (*att) {
             bs_metrics_note_attestation_fail();
-            bs_decision_log(r, tier_name, "verified", "minted", "-", "-",
-                            apr_pstrcat(r->pool, "pow_ok,attest:", att,
-                                        NULL), 0);
-        } else {
-            bs_decision_log(r, tier_name, "verified", "minted", "-", "-",
-                            "pow_ok", 0);
+            reason = apr_pstrcat(r->pool, reason, ",attest:", att, NULL);
         }
+        bs_decision_log(r, tier_name, "verified", "minted", "-", "-",
+                        reason, 0);
     }
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
         "mod_botshield: embedded-verify(pow-gcm): cookie minted "
