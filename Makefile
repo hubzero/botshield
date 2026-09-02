@@ -24,7 +24,15 @@ MOD_NAME ?= botshield
 # back to a version check when none can (so the build still reaches
 # build_site.py's own install hint instead of dying on a
 # SyntaxError). Override DOCS_PYTHON to force one.
-DOCS_PY_CANDIDATES := python3 python3.12 python3.11 python3.10 \
+# The repo's own test venv comes first: it is the one interpreter in
+# this tree whose dependencies are managed, and `make docs` had simply
+# been failing on hosts where no system python carries markdown-it-py
+# (the whole target was dead here until someone tried to run it). Look
+# there before the system interpreters so a developer who has set up
+# the test venv gets a working docs build without a second install
+# step. `make docs-deps` populates it.
+DOCS_PY_CANDIDATES := tests/.venv/bin/python \
+	python3 python3.12 python3.11 python3.10 \
 	python3.9 python3.8
 DOCS_PYTHON ?= $(shell \
 	for py in $(DOCS_PY_CANDIDATES); do \
@@ -126,7 +134,8 @@ CFLAGS_SAN := \
 # response. apxs forwards trailing -l args to the linker.
 LIBS := -lcrypto -lcurl -ljson-c
 
-.PHONY: all build install enable disable reload clean test-clean docs \
+.PHONY: all build install enable disable reload clean test-clean docs docs-deps \
+        toolchain-fix \
         sanitize install-sanitize \
         fuzz fuzz-run fuzz-clean \
         fuzz-robots fuzz-robots-run
@@ -197,6 +206,36 @@ test-clean:
 
 docs:
 	$(DOCS_PYTHON) $(DOCS_BUILD)
+
+# Install the docs toolchain into the test venv, which is where
+# DOCS_PY_CANDIDATES looks first. Separate target rather than a
+# prerequisite of `docs` so a build never reaches out to the network
+# on its own.
+# Host hardening on this box periodically resets the compiler and
+# assembler to mode 754, which breaks the build with a bare
+# "/usr/bin/gcc: Permission denied" from libtool -- a message that
+# points at the toolchain rather than at the policy that changed it.
+# This restores the mode so the next build works.
+#
+# Note /usr/bin/ld needs nothing: it is a symlink, and symlink bits are
+# always lrwxrwxrwx on Linux and ignored by the kernel. Access is
+# governed by the target (/usr/bin/ld.bfd, 755). Reading the link's
+# bits as the binary's is an easy way to invent a finding that is not
+# there.
+toolchain-fix:
+	@for t in /usr/bin/gcc /usr/bin/as; do \
+		m=$$(stat -c '%a' $$t); \
+		if [ "$$m" != "755" ]; then \
+			echo "$$t is $$m -> restoring 755"; \
+			sudo chmod 755 $$t; \
+		else echo "$$t already 755"; fi; \
+	done
+
+docs-deps:
+	@test -x tests/.venv/bin/pip || { \
+		echo "tests/.venv not found - create it first (see tests/README)"; \
+		exit 1; }
+	tests/.venv/bin/pip install -r tools/requirements-docs.txt
 
 # --- M10.1 ---
 
