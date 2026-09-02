@@ -511,15 +511,33 @@ int bs_embedded_bootstrap_handler(request_rec *r,
     ap_set_content_type(r, "application/json; charset=utf-8");
     apr_table_setn(r->headers_out, "Cache-Control", "no-store");
 
-    /* If the client already has a valid _bs_session, no point in
-     * burning Worker cycles or loading provider scripts. The wrapper
-     * short-circuits on its end too, but a redundant check here
-     * costs almost nothing and keeps the bootstrap honest. */
+    /* If the client has already SOLVED, no point in burning Worker
+     * cycles or loading provider scripts.
+     *
+     * Solve proof, not cookie validity. Under always-mint every
+     * client that has ever been challenged carries a valid cookie --
+     * the challenge response mints one -- so validity alone says
+     * nothing about whether the client did any work. This check used
+     * to test validity, which put the bootstrap in direct
+     * disagreement with every solved= rule in the config:
+     *
+     *   request 1  gated path -> 403, cookie minted (unsolved)
+     *   request 2  bootstrap  -> {"mode":"off"}   "nothing to do"
+     *   request 3  gated path -> 403              still challenged
+     *
+     * A client on the embedded path is told there is nothing to
+     * solve while the gate keeps refusing it, and loops until the
+     * safeguard breaks it out. The predicate below is the same one
+     * bs_handler publishes as BS_CK_SOLVED_NOTE and solved= reads,
+     * so the two cannot drift apart again. */
     const char *cookie_val = bs_get_verified_cookie_value(r);
     if (cookie_val && *cookie_val) {
         bs_challenge tmp;
+        memset(&tmp, 0, sizeof(tmp));
         const char *err = bs_verify_cookie(r, cfg, cookie_val, &tmp);
-        if (!err) {
+        if (!err && (tmp.rep.passes_non_interactive
+                     || tmp.rep.passes_interactive
+                     || tmp.rep.passes_captcha)) {
             ap_rputs("{\"mode\":\"off\"}\n", r);
             return OK;
         }
