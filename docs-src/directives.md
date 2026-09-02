@@ -903,6 +903,34 @@ A value beginning with `|` is a piped-log spec handed to Apache's own
 `ap_open_piped_log`, so `rotatelogs` and friends work as they do for any
 other Apache log.
 
+### Rotation and the path your monitoring reads
+
+`rotatelogs -n N` cycles round-robin through `logfile`, `logfile.1` …
+`logfile.N-1`. **Which file is current changes over the day**, and the
+base name is the live one only until the first rotation. Anything that
+reads the base name directly is a bug that hides itself: it returns
+real, correctly formatted, *stale* data, which reads as a traffic
+collapse rather than as a mistake.
+
+Pass `-L` so a fixed path always hard-links to whichever file is open:
+
+```apache
+BotShieldDecisionLog "|/usr/sbin/rotatelogs -n 7 \
+    -L /var/log/httpd/botshield.log.current \
+    /var/log/httpd/botshield.log 100M"
+```
+
+Monitoring then reads `botshield.log.current` and never has to know
+about the rotation. The link is re-pointed on each rotation, so a
+reader that opens by path each time always lands on the live file.
+Use `tail -F` (follow by name), not `tail -f`, which holds the old
+inode across a rotation.
+
+Timestamped names (`bs.%Y%m%d`) do not have this problem, because the
+current name is derivable — but they also grow without bound, which is
+what `-n` is for. `-L` is what makes `-n` safe to monitor.
+
+
 Why it exists: a `CustomLog` cannot survive `accesslog=off`, because
 mod_log_config serves every `CustomLog` from the single
 `log_transaction` hook that `accesslog=off` breaks. An owned log is

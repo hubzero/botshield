@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import pytest
 
+from botshield_test import config
+
 
 pytestmark = [pytest.mark.acceptance, pytest.mark.browser]
 
@@ -43,7 +45,7 @@ def test_verified_cookie_attributes_on_silent_solve(bs_browser_context):
     ctx = bs_browser_context
     page = ctx.new_page()
 
-    page.goto("https://localhost/")
+    page.goto(config.BASE_URL + "/")
     page.wait_for_function(
         "() => document.title !== 'Verify you are human'",
         timeout=20_000,
@@ -88,7 +90,7 @@ def test_pending_cookie_path_scoped(bs_browser_context):
     page = ctx.new_page()
 
     # Loading /captcha-demo mints the pending cookie.
-    page.goto("https://localhost/captcha-demo",
+    page.goto(config.BASE_URL + "/captcha-demo",
               wait_until="domcontentloaded", timeout=15_000)
 
     pending = [c for c in ctx.cookies() if c["name"] == "_bs_captcha_pending"]
@@ -115,9 +117,9 @@ def test_pending_cookie_path_scoped(bs_browser_context):
     # (document.cookie wouldn't work here — the pending cookie is
     # HttpOnly, so JS never sees it regardless of Path. An assertion
     # built on document.cookie would pass even if the Path leaked.)
-    cookies_for_root = ctx.cookies(urls="https://localhost/")
+    cookies_for_root = ctx.cookies(urls=config.BASE_URL + "/")
     cookies_for_verify = ctx.cookies(
-        urls="https://localhost/botshield/captcha-verify/turnstile"
+        urls=config.BASE_URL + "/botshield/captcha-verify/turnstile"
     )
 
     names_root = {c["name"] for c in cookies_for_root}

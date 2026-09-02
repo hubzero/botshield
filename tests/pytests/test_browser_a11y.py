@@ -25,6 +25,8 @@ from pathlib import Path
 
 import pytest
 
+from botshield_test import config
+
 
 pytestmark = [pytest.mark.acceptance, pytest.mark.browser]
 
@@ -87,7 +89,7 @@ def test_interstitial_no_critical_a11y_violations(bs_browser_context):
     ctx.add_init_script(_HOLD_INTERSTITIAL_JS)
     page = ctx.new_page()
 
-    resp = page.goto("https://localhost/")
+    resp = page.goto(config.BASE_URL + "/")
     assert resp.headers.get("x-botshield") == "challenge", (
         "fixture didn't land at the interstitial — a11y scan needs "
         "the challenge DOM, not the origin page"
@@ -126,7 +128,7 @@ def test_interstitial_submit_button_keyboard_reachable(
     ctx.add_init_script(_HOLD_INTERSTITIAL_JS)
     page = ctx.new_page()
 
-    page.goto("https://localhost/")
+    page.goto(config.BASE_URL + "/")
     assert "Verify you are human" in page.title()
 
     # Walk forward with Tab, asserting we eventually focus the
@@ -157,7 +159,7 @@ def test_interstitial_has_lang_attribute(bs_browser_context):
     ctx.add_init_script(_HOLD_INTERSTITIAL_JS)
     page = ctx.new_page()
 
-    page.goto("https://localhost/")
+    page.goto(config.BASE_URL + "/")
     assert "Verify you are human" in page.title()
 
     lang = page.evaluate("() => document.documentElement.lang || null")

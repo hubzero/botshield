@@ -178,7 +178,63 @@ void bs_compute_bootstrap_sig(apr_pool_t *p,
                               const char *nonce_hex,
                               const char *bound_ip_hex,
                               apr_time_t expires_at,
+                              apr_int64_t issued_ms,
                               char out_sig_hex[BS_SIG_BYTES * 2 + 1]);
+
+/* Floor on issue -> verify wall time for the interactive tier, in
+ * milliseconds.
+ *
+ * rep.challenged_at cannot serve here: it is unix SECONDS, so the
+ * finest floor it could express is a whole second, which is longer
+ * than a real click. issued_ms rides in the bootstrap signature
+ * instead -- the same HMAC that already binds nonce and IP -- so the
+ * client cannot move it, and the clock is entirely the server's.
+ *
+ * The 400ms default comes from measurement, not from reaction-time
+ * literature. Driving this page with Playwright, the fastest a warmed
+ * browser could load, render and land a trusted click was 177ms; cold
+ * it was 239ms. The first cut of this floor was 150ms, which sat under
+ * both -- it cost an attacker nothing, because rendering already
+ * exceeds it. 400ms refuses every run of that harness while staying
+ * well under a person noticing the widget and moving a mouse to it.
+ *
+ * Only the interactive tier is bounded: the non-interactive tier has
+ * no human in the loop and its solve starts at DOMContentLoaded.
+ *
+ * This does not stop a bot that sleeps. It makes sleeping mandatory,
+ * and because the clock is the server's the delay is real wall time
+ * per request rather than a field the client can fill in.
+ *
+ * BotShieldInteractiveMinSolveMs overrides it, and 0 disables it. The
+ * right value is deployment-specific -- a heavier page pushes humans
+ * and bots alike later -- and an operator hitting false positives
+ * needs an off switch that is not a recompile. */
+#define BS_DEFAULT_INTERACTIVE_MIN_MS 400
+
+/* How long the interactive widget withholds its checkbox.
+ *
+ * The point is not the delay, it is that the delay is OURS. A bare
+ * floor is a guess about how fast people are, and it charges the
+ * quick ones. Withholding the control makes the earliest legitimate
+ * submit (window + reaction) a fact instead, and the server can floor
+ * at least the window for free -- no legitimate client can beat it.
+ *
+ * The checkbox is absent during the window, not present-but-inert: a
+ * visible control that swallows clicks trains people to think the
+ * page is broken, and it is the confident fast clickers who hit it.
+ *
+ * 300 is a testing value. 100 is the better production one -- below
+ * the threshold where a delay reads as a delay at all, so nobody
+ * waits, while the sharper signal survives the shrink. That signal is
+ * the GAP: a person clicks hundreds of ms after the reveal, a poller
+ * within a few, and the gap does not care how long the window was. */
+#define BS_DEFAULT_INTERACTIVE_ARM_MS 300
+
+/* Bounds on the client's attestation array. Attacker-controlled
+ * input reaching the decision log, so cap the count and the length
+ * of each label; the alphabet is checked separately. */
+#define BS_ATT_MAX_ITEMS     8
+#define BS_ATT_MAX_ITEM_LEN 24
 
 /* `BotShieldAlgorithm <name>` — pin the PoW algorithm for cookie
  * minting from this scope. Validates against the registry and the

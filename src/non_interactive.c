@@ -2,6 +2,7 @@
  * verification handlers + their bootstrap-sig helpers. */
 
 #include "non_interactive.h"
+#include "metrics.h"   /* bs_metrics_note_attestation_fail */
 
 #include <string.h>
 #include <limits.h>
@@ -609,9 +610,11 @@ int bs_embedded_bootstrap_handler(request_rec *r,
         return OK;
     }
     char bootstrap_sig_hex[BS_SIG_BYTES * 2 + 1];
+    apr_int64_t issued_ms = (apr_int64_t)(apr_time_now() / 1000);
     bs_compute_bootstrap_sig(r->pool, cfg->derived_hmac_bootstrap,
                               nonce_hex, bound_ip_hex,
-                              ch.expires_at, bootstrap_sig_hex);
+                              ch.expires_at, issued_ms,
+                              bootstrap_sig_hex);
 
     /* Encrypt the canonical form into the cookie_prefix. The wrapper
      * round-trips this opaque blob to /embedded-verify; the GCM tag
@@ -635,12 +638,13 @@ int bs_embedded_bootstrap_handler(request_rec *r,
         "\"salt\":\"%s\",\"nonce\":\"%s\","
         "\"difficulty\":%d,\"expires_at\":%" APR_TIME_T_FMT ","
         "\"auto\":%d,\"cookie_prefix\":\"%s\","
-        "\"bound_ip\":\"%s\",\"bootstrap_sig\":\"%s\""
+        "\"bound_ip\":\"%s\",\"bootstrap_sig\":\"%s\","
+        "\"issued_ms\":%" APR_INT64_T_FMT
         "}}\n",
         salt_hex, nonce_hex,
         ch.difficulty, ch.expires_at,
         ch.auto_tier, prefix_b64,
-        bound_ip_hex, bootstrap_sig_hex);
+        bound_ip_hex, bootstrap_sig_hex, issued_ms);
     return OK;
 }
 
@@ -657,6 +661,7 @@ static int bs_verify_bootstrap_sig(apr_pool_t *p,
                                    const char *nonce_hex,
                                    const char *bound_ip_hex,
                                    apr_time_t expires_at,
+                                   apr_int64_t issued_ms,
                                    const char *sig_hex_in)
 {
     if (!cfg->derived_keys_set) return 0;
@@ -668,7 +673,7 @@ static int bs_verify_bootstrap_sig(apr_pool_t *p,
     char expected_hex[BS_SIG_BYTES * 2 + 1];
     bs_compute_bootstrap_sig(p, cfg->derived_hmac_bootstrap,
                               nonce_hex, bound_ip_hex,
-                              expires_at, expected_hex);
+                              expires_at, issued_ms, expected_hex);
     unsigned char expected[BS_SIG_BYTES];
     /* expected_hex is bs_to_hex output: 2*BS_SIG_BYTES chars + NUL,
      * so the length is fixed and known by construction. */
@@ -679,7 +684,7 @@ static int bs_verify_bootstrap_sig(apr_pool_t *p,
     if (cfg->derived_keys_set_2) {
         bs_compute_bootstrap_sig(p, cfg->derived_hmac_bootstrap_2,
                                   nonce_hex, bound_ip_hex,
-                                  expires_at, expected_hex);
+                                  expires_at, issued_ms, expected_hex);
         bs_from_hex(expected_hex, BS_SIG_BYTES * 2,
                     BS_SIG_BYTES, expected);
         if (bs_ct_equal(sig_in, expected, BS_SIG_BYTES)) return 1;
@@ -729,6 +734,51 @@ static int bs_json_get_int(json_object *root, const char *key,
  * to set the cookie via document.cookie because the PoW solution
  * WAS assembled client-side. Routing through this endpoint lets the
  * server emit Set-Cookie with HttpOnly, closing XSS-token-theft. */
+/* Read the client's attestation array into a short, sanitised,
+ * comma-joined label for the decision log. Returns "" when the array
+ * is absent or empty, which is the expected case for a real browser.
+ *
+ * Everything here is attacker-controlled, so it is bounded on every
+ * axis -- element count, element length, and alphabet -- and the
+ * alphabet is restricted to what our own probe names use. A client
+ * that sends anything else gets that element dropped rather than
+ * having it reach the log, because the decision log is parsed by
+ * tooling that should not have to defend against injected commas or
+ * quotes.
+ *
+ * Absence proves nothing: a bot simply omits the field, and one that
+ * reads our JS reports an empty array. This measures the automation
+ * that has not bothered, which today is most of it. */
+static const char *bs_read_attestation(request_rec *r, json_object *root)
+{
+    json_object *arr = NULL;
+    if (!json_object_object_get_ex(root, "att", &arr) ||
+        !json_object_is_type(arr, json_type_array)) {
+        return "";
+    }
+    int n = (int)json_object_array_length(arr);
+    if (n > BS_ATT_MAX_ITEMS) n = BS_ATT_MAX_ITEMS;
+
+    const char *out = "";
+    for (int i = 0; i < n; i++) {
+        json_object *e = json_object_array_get_idx(arr, i);
+        if (!e || !json_object_is_type(e, json_type_string)) continue;
+        const char *s = json_object_get_string(e);
+        if (!s || !*s) continue;
+        apr_size_t len = strlen(s);
+        if (len > BS_ATT_MAX_ITEM_LEN) continue;
+        int ok = 1;
+        for (apr_size_t k = 0; k < len; k++) {
+            char c = s[k];
+            if (!((c >= 'a' && c <= 'z') || c == '-')) { ok = 0; break; }
+        }
+        if (!ok) continue;
+        out = *out ? apr_pstrcat(r->pool, out, "+", s, NULL)
+                   : apr_pstrdup(r->pool, s);
+    }
+    return out;
+}
+
 static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
                                        json_object *root)
 {
@@ -781,7 +831,18 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
         const char *bootstrap_sig_hex = bs_json_get_str(r->pool, root,
                                                     "bootstrap_sig",
                                                     BS_SIG_BYTES * 2);
-        if (!bound_ip_hex || !bootstrap_sig_hex ||
+        /* Bounded to a plausible epoch-ms range so a garbage value is
+         * rejected as input rather than reaching the signature check
+         * or the subtraction below. */
+        apr_int64_t issued_ms = 0;
+        {
+            json_object *v = NULL;
+            if (json_object_object_get_ex(root, "issued_ms", &v) &&
+                json_object_is_type(v, json_type_int)) {
+                issued_ms = (apr_int64_t)json_object_get_int64(v);
+            }
+        }
+        if (!bound_ip_hex || !bootstrap_sig_hex || issued_ms <= 0 ||
             strlen(bound_ip_hex) != 32) {
             r->status = HTTP_BAD_REQUEST;
             ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
@@ -791,7 +852,7 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
         }
         if (!bs_verify_bootstrap_sig(r->pool, cfg, nonce_hex_buf,
                                       bound_ip_hex, ch.expires_at,
-                                      bootstrap_sig_hex)) {
+                                      issued_ms, bootstrap_sig_hex)) {
             r->status = HTTP_FORBIDDEN;
             ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
                 "mod_botshield: embedded-verify(pow-gcm): bad "
@@ -810,6 +871,38 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
                 "mismatch (issued for %s, redeemed from %s)",
                 bound_ip_hex, observed_ip_hex);
             return OK;
+        }
+
+        /* issued_ms is authentic from here: it was covered by the
+         * signature just checked. The interactive tier requires a
+         * human click before the solve is submitted, so a submit
+         * arriving faster than a person can react did not come from
+         * one. The non-interactive tier is deliberately exempt --
+         * nothing waits on a human there. */
+        /* Floor at least the arming window. No legitimate client can
+         * submit before it elapses -- the checkbox does not exist yet
+         * -- so enforcing it costs nothing and does not rest on any
+         * estimate of human speed. The configured floor adds reaction
+         * time on top when it is set higher. */
+        int min_ms = bs_effective_int(cfg->interactive_min_ms,
+                                     BS_DEFAULT_INTERACTIVE_MIN_MS);
+        int arm_ms = bs_effective_int(cfg->interactive_arm_ms,
+                                     BS_DEFAULT_INTERACTIVE_ARM_MS);
+        if (arm_ms > min_ms) min_ms = arm_ms;
+        if (!ch.auto_tier && min_ms > 0) {
+            apr_int64_t now_ms = (apr_int64_t)(apr_time_now() / 1000);
+            apr_int64_t elapsed_ms = now_ms - issued_ms;
+            if (elapsed_ms < min_ms) {
+                r->status = HTTP_FORBIDDEN;
+                bs_decision_log(r, "interactive", "block", "-", "-", "-",
+                                "solve_too_fast", 0);
+                ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
+                    "mod_botshield: embedded-verify(pow-gcm): solve "
+                    "returned in %" APR_INT64_T_FMT "ms, under the "
+                    "%dms interactive floor",
+                    elapsed_ms, min_ms);
+                return OK;
+            }
         }
     }
 
@@ -870,8 +963,20 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
      * returns on a fresh request that reads cookie=ok, but that counts
      * requests-with-a-cookie, not solves — one human browsing 50 pages
      * logs 50 of them. The mint is the one-per-solve event. */
-    bs_decision_log(r, "non-interactive", "verified", "minted", "-", "-",
-                    "pow_ok", 0);
+    {
+        const char *att = bs_read_attestation(r, root);
+        const char *tier_name = ch.auto_tier ? "non-interactive"
+                                             : "interactive";
+        if (*att) {
+            bs_metrics_note_attestation_fail();
+            bs_decision_log(r, tier_name, "verified", "minted", "-", "-",
+                            apr_pstrcat(r->pool, "pow_ok,attest:", att,
+                                        NULL), 0);
+        } else {
+            bs_decision_log(r, tier_name, "verified", "minted", "-", "-",
+                            "pow_ok", 0);
+        }
+    }
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
         "mod_botshield: embedded-verify(pow-gcm): cookie minted "
         "(counter=%d)", counter);

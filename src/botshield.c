@@ -171,6 +171,37 @@ static const command_rec bs_cmds[] = {
     AP_INIT_TAKE1("BotShieldDifficulty",bs_set_difficulty, NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "Number of leading hex zeros the PoW must produce (default: 4)"),
+    AP_INIT_TAKE1("BotShieldInteractiveArmMs",
+                 bs_set_interactive_arm_ms, NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "Withhold the interactive tier's checkbox for this "
+                 "many milliseconds after the page loads (default: "
+                 "300; 0 shows it immediately). The widget renders at "
+                 "full size with a spinner meanwhile, so nothing "
+                 "shifts and there is no dead control to click. Two "
+                 "effects: the earliest legitimate submit becomes "
+                 "window+reaction as a fact rather than a guess, and a "
+                 "click landing within a few ms of the reveal is "
+                 "reported as an attestation failure -- a person's "
+                 "click scatters, a poller's does not. 100 is a good "
+                 "production value: below the threshold where a delay "
+                 "is perceived, while the gap signal is unaffected."),
+    AP_INIT_TAKE1("BotShieldInteractiveMinSolveMs",
+                 bs_set_interactive_min_ms, NULL,
+                 RSRC_CONF | ACCESS_CONF,
+                 "Reject an interactive-tier solve that returns sooner "
+                 "than this many milliseconds after the challenge was "
+                 "issued (default: 400; 0 disables). The clock is the "
+                 "server's -- the issue stamp is covered by the "
+                 "bootstrap HMAC -- so a client cannot shorten it. "
+                 "Measured, not guessed: a warmed headless browser "
+                 "needed 177ms to load, render and land a trusted "
+                 "click, and a person needs several hundred more to "
+                 "notice the widget and reach it. Does not stop a bot "
+                 "that sleeps; makes sleeping cost real wall time per "
+                 "request. Raise it if your pages are heavy, lower or "
+                 "disable it if legitimate clients are being refused "
+                 "(look for reason=solve_too_fast)."),
     AP_INIT_TAKE1("BotShieldPromptText", bs_set_prompt,    NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "Label shown next to the checkbox (default: \"I'm not a robot\"). "
@@ -892,6 +923,10 @@ static const command_rec bs_cmds[] = {
                  "server-root-relative path, an "
                  "absolute path, or a piped-log spec "
                  "(\"|/usr/bin/rotatelogs /var/log/bs.%Y%m%d 86400\"). "
+                 "With rotatelogs -n, add -L so a fixed path always "
+                 "links to the file currently open -- -n cycles the "
+                 "live file between logfile and logfile.N, and anything "
+                 "reading the base name silently goes stale. "
                  "Written directly from the decision path rather than "
                  "through mod_log_config, so it is independent of the "
                  "access log: `accesslog=off` can suppress access logging "

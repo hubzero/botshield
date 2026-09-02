@@ -25,6 +25,8 @@ import time
 
 import pytest
 
+from botshield_test import config
+
 
 pytestmark = [pytest.mark.acceptance, pytest.mark.browser,
               pytest.mark.serial]
@@ -48,7 +50,7 @@ def test_embedded_serves_real_page_immediately(
         count=1,
     ):
         page = bs_browser_context.new_page()
-        resp = page.goto(f"https://localhost{EMBEDDED_PATH}")
+        resp = page.goto(f"{config.BASE_URL}{EMBEDDED_PATH}")
         assert resp.status == 200, (
             f"embedded mode should serve the real page; "
             f"status={resp.status}"
@@ -77,7 +79,7 @@ def test_embedded_wrapper_mints_verified_cookie(
         count=1,
     ):
         page = bs_browser_context.new_page()
-        page.goto(f"https://localhost{EMBEDDED_PATH}")
+        page.goto(f"{config.BASE_URL}{EMBEDDED_PATH}")
 
         # Poll for the cookie up to 8s. PoW at default difficulty=4
         # is a few thousand hashes — Worker should finish in well
@@ -124,7 +126,7 @@ def test_embedded_turnstile_mints_verified_cookie(
         count=1,
     ):
         page = bs_browser_context.new_page()
-        page.goto(f"https://localhost{EMBEDDED_PATH}")
+        page.goto(f"{config.BASE_URL}{EMBEDDED_PATH}")
 
         # Real Cloudflare round trip — give it more time than PoW.
         # Local network + CF latency + invisible-widget readiness
@@ -174,7 +176,7 @@ def test_embedded_hcaptcha_mints_verified_cookie(
         count=1,
     ):
         page = bs_browser_context.new_page()
-        page.goto(f"https://localhost{EMBEDDED_PATH}")
+        page.goto(f"{config.BASE_URL}{EMBEDDED_PATH}")
 
         # Real hCaptcha round trip — comparable latency to Turnstile.
         deadline = time.monotonic() + 15.0
@@ -237,7 +239,7 @@ def test_embedded_falls_back_to_m7_when_wrapper_blocked(
         # short-circuit fires; real page served; always-mint cookie
         # is trust=0 and doesn't clear the safeguard counter).
         for _ in range(2):
-            resp = page.goto(f"https://localhost{EMBEDDED_PATH}")
+            resp = page.goto(f"{config.BASE_URL}{EMBEDDED_PATH}")
             assert resp.status == 200, (
                 f"unexpected status during embedded attempt; "
                 f"status={resp.status}"
@@ -247,7 +249,7 @@ def test_embedded_falls_back_to_m7_when_wrapper_blocked(
         # bs_apply_safeguard, the embedded short-circuit's read sees
         # 3 ≥ 3, and M7 form-PoW fallback fires instead. The
         # interstitial template title is "Verify you are human".
-        resp = page.goto(f"https://localhost{EMBEDDED_PATH}")
+        resp = page.goto(f"{config.BASE_URL}{EMBEDDED_PATH}")
         title = page.title()
         assert "Verify you are human" in title, (
             f"after 2 embedded attempts without verify, M7 fallback "
@@ -320,7 +322,7 @@ def test_form_widget_injects_per_provider_markup(bs_browser_context):
     page.route("**/hcaptcha.com/**", lambda r: r.abort())
     page.route("**/recaptcha/api.js**", lambda r: r.abort())
 
-    page.goto("https://localhost/form-widget-test.html")
+    page.goto(config.BASE_URL + "/form-widget-test.html")
     # Give the deferred script time to execute.
     page.wait_for_function(
         "document.querySelector('#captcha-slot .cf-turnstile') !== null",
@@ -355,7 +357,7 @@ def test_embedded_subsequent_request_declined_through(
     ):
         page = bs_browser_context.new_page()
         # First visit — wait for the wrapper to mint the cookie.
-        page.goto(f"https://localhost{EMBEDDED_PATH}")
+        page.goto(f"{config.BASE_URL}{EMBEDDED_PATH}")
         deadline = time.monotonic() + 8.0
         while time.monotonic() < deadline:
             if "__Host-bs_session" in {c["name"] for c in bs_browser_context.cookies()}:
@@ -365,7 +367,7 @@ def test_embedded_subsequent_request_declined_through(
         # Second visit on the same context — cookie should ride along
         # and the response should be the real page with no challenge
         # marker.
-        resp = page.goto(f"https://localhost{EMBEDDED_PATH}")
+        resp = page.goto(f"{config.BASE_URL}{EMBEDDED_PATH}")
         assert resp.status == 200
         assert resp.headers.get("x-botshield") != "challenge", (
             f"second request to embedded scope got a challenge "

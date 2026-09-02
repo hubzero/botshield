@@ -17,13 +17,15 @@ from __future__ import annotations
 
 import pytest
 
+from botshield_test import config
+
 
 pytestmark = [pytest.mark.acceptance, pytest.mark.browser]
 
 
 def test_pass_tier_no_challenge(bs_browser_context_pass):
     page = bs_browser_context_pass.new_page()
-    resp = page.goto("https://localhost/")
+    resp = page.goto(config.BASE_URL + "/")
 
     assert resp.status == 200
     assert resp.headers.get("x-botshield") != "challenge", (

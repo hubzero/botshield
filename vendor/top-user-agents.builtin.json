@@ -64,15 +64,7 @@
     "slug": "firefox-ios"
   },
   {
-    "ua": "Mozilla/5.0 (iPad; CPU OS 17_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) FxiOS/124.0 Mobile/15E148 Safari/605.1.15",
-    "slug": "firefox-ios"
-  },
-  {
     "ua": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) EdgiOS/122.0.2365.99 Version/17.0 Mobile/15E148 Safari/604.1",
-    "slug": "edge-ios"
-  },
-  {
-    "ua": "Mozilla/5.0 (iPad; CPU OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) EdgiOS/122.0.2365.99 Version/17.0 Mobile/15E148 Safari/604.1",
     "slug": "edge-ios"
   }
 ]

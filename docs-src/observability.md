@@ -51,8 +51,12 @@ module-owned file, written at decision time:
 
 ```apache
 BotShieldDecisionLog logs/botshield.log
-# or hand rotation to Apache's helper:
-BotShieldDecisionLog "|/usr/bin/rotatelogs /var/log/httpd/bs.%Y%m%d 86400"
+# or hand rotation to Apache's helper. -L pins a stable path for
+# monitoring; without it, -n rotation moves the live file out from
+# under anything reading the base name.
+BotShieldDecisionLog "|/usr/sbin/rotatelogs -n 7 \
+    -L /var/log/httpd/botshield.log.current \
+    /var/log/httpd/botshield.log 100M"
 ```
 
 Line shape — the same `key=value` payload as the error-log line, with an

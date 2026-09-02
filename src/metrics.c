@@ -792,6 +792,13 @@ static void bs_m_sum_ring(const bs_metrics_slot *ring, int nslots,
  * module: absolute volumes are operational data, and a public page
  * reachable by anyone who trips a challenge is not where they belong.
  */
+void bs_metrics_note_attestation_fail(void)
+{
+    if (!bs_shm.metrics) return;
+    __atomic_fetch_add(&bs_shm.metrics->attestation_fail_total, 1,
+                       __ATOMIC_RELAXED);
+}
+
 int bs_bot_share_pct(void)
 {
     bs_metrics_window w;
@@ -5084,6 +5091,11 @@ int bs_metrics_handler(request_rec *r)
         "Requests that tripped a BotShieldRateLimit cohort budget "
         "(response was 429 + Retry-After).",
         bs_mload(&m->rate_limit_exceeded_total));
+    bs_m_emit_counter(r, "attestation_fail_total",
+        "Solves arriving with at least one failed attestation probe. "
+        "Counted per solve, so a client that never runs the JS is "
+        "absent rather than zero.",
+        bs_mload(&m->attestation_fail_total));
     bs_m_emit_counter(r, "safeguard_fired_total",
         "Times the anti-loop safeguard redirected a client to the "
         "explainer after N unsolved challenges. Distinct from "

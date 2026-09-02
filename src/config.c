@@ -67,6 +67,8 @@ void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->debug      = BS_UNSET;
     cfg->cookie_ttl = BS_UNSET;
     cfg->difficulty = BS_UNSET;
+    cfg->interactive_min_ms = BS_UNSET;
+    cfg->interactive_arm_ms = BS_UNSET;
     cfg->help_mode  = BS_UNSET;
     cfg->show_logo  = BS_UNSET;
     cfg->show_label = BS_UNSET;
@@ -466,6 +468,10 @@ void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     out->debug      = (add->debug      == BS_UNSET) ? base->debug      : add->debug;
     out->cookie_ttl = (add->cookie_ttl == BS_UNSET) ? base->cookie_ttl : add->cookie_ttl;
     out->difficulty = (add->difficulty == BS_UNSET) ? base->difficulty : add->difficulty;
+    out->interactive_min_ms = (add->interactive_min_ms == BS_UNSET)
+        ? base->interactive_min_ms : add->interactive_min_ms;
+    out->interactive_arm_ms = (add->interactive_arm_ms == BS_UNSET)
+        ? base->interactive_arm_ms : add->interactive_arm_ms;
     out->help_mode  = (add->help_mode  == BS_UNSET) ? base->help_mode  : add->help_mode;
     out->show_logo  = (add->show_logo  == BS_UNSET) ? base->show_logo  : add->show_logo;
     out->show_label = (add->show_label == BS_UNSET) ? base->show_label : add->show_label;
@@ -2715,6 +2721,37 @@ const char *bs_set_cookie_ttl(cmd_parms *cmd, void *cfg_v, const char *arg)
         return "BotShieldCookieTTL: must be an integer 1..86400 (seconds)";
     }
     ((bs_dir_cfg *)cfg_v)->cookie_ttl = (int)n;
+    return NULL;
+}
+
+const char *bs_set_interactive_min_ms(cmd_parms *cmd, void *cfg_v,
+                                      const char *arg)
+{
+    (void)cmd;
+    long n;
+    /* Upper bound is a usability guard, not a security one: past a few
+     * seconds the floor stops rejecting bots and starts rejecting
+     * people who clicked promptly. */
+    if (!bs_parse_int_bounded(arg, 0, 5000, 4, &n)) {
+        return "BotShieldInteractiveMinSolveMs: must be an integer "
+               "0..5000 (0 disables the floor)";
+    }
+    ((bs_dir_cfg *)cfg_v)->interactive_min_ms = (int)n;
+    return NULL;
+}
+
+const char *bs_set_interactive_arm_ms(cmd_parms *cmd, void *cfg_v,
+                                      const char *arg)
+{
+    (void)cmd;
+    long n;
+    /* Capped at 2000: past that the widget is visibly broken to the
+     * person waiting on it, and the signal it buys stops improving. */
+    if (!bs_parse_int_bounded(arg, 0, 2000, 4, &n)) {
+        return "BotShieldInteractiveArmMs: must be an integer 0..2000 "
+               "(0 shows the checkbox immediately)";
+    }
+    ((bs_dir_cfg *)cfg_v)->interactive_arm_ms = (int)n;
     return NULL;
 }
 

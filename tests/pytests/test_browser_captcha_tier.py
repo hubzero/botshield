@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import pytest
 
+from botshield_test import config
+
 
 # live_network picks up rerun-on-flake via the conftest hook (M11.7):
 # Turnstile's always-pass sitekey occasionally flakes under parallel
@@ -49,7 +51,7 @@ def test_captcha_tier_end_to_end(bs_browser_context):
     page = ctx.new_page()
 
     # 1. Cookieless hit on /captcha-demo → interstitial with Turnstile widget
-    resp = page.goto("https://localhost/captcha-demo",
+    resp = page.goto(config.BASE_URL + "/captcha-demo",
                      wait_until="domcontentloaded", timeout=15_000)
     assert resp.headers.get("x-botshield") == "challenge"
     assert "Verify you are human" in page.title()
@@ -98,7 +100,7 @@ def test_captcha_cookie_clears_subsequent_challenge(bs_browser_context):
     page = ctx.new_page()
 
     # Complete the captcha flow (setup).
-    page.goto("https://localhost/captcha-demo", wait_until="domcontentloaded")
+    page.goto(config.BASE_URL + "/captcha-demo", wait_until="domcontentloaded")
     page.evaluate("""() => {
         const f = document.getElementById('bscf');
         f.querySelector('input[name=return_to]').value = '/';
@@ -114,7 +116,7 @@ def test_captcha_cookie_clears_subsequent_challenge(bs_browser_context):
     # existing XFF so the only remaining tier-deciding signal is the
     # verified cookie.
     ctx.set_extra_http_headers({"Accept-Language": "en-US"})
-    resp = page.goto("https://localhost/")
+    resp = page.goto(config.BASE_URL + "/")
     assert resp.status == 200
     assert resp.headers.get("x-botshield") != "challenge", (
         f"verified visitor got re-challenged on /; "

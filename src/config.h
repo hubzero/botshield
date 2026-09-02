@@ -74,6 +74,10 @@ const char *bs_set_show_label    (cmd_parms *cmd, void *cfg_v, int flag);
 const char *bs_set_show_box      (cmd_parms *cmd, void *cfg_v, int flag);
 const char *bs_set_cookie_ttl    (cmd_parms *cmd, void *cfg_v, const char *arg);
 const char *bs_set_difficulty    (cmd_parms *cmd, void *cfg_v, const char *arg);
+const char *bs_set_interactive_min_ms(cmd_parms *cmd, void *cfg_v,
+                                      const char *arg);
+const char *bs_set_interactive_arm_ms(cmd_parms *cmd, void *cfg_v,
+                                      const char *arg);
 const char *bs_set_form_captcha  (cmd_parms *cmd, void *cfg_v, int flag);
 const char *bs_set_cookie_domain (cmd_parms *cmd, void *cfg_v, const char *arg);
 const char *bs_set_prompt        (cmd_parms *cmd, void *cfg_v, const char *arg);

@@ -245,17 +245,23 @@ const char *bs_challenge_json(request_rec *r, apr_pool_t *p,
      * for the JS to round-trip back to /embedded-verify. */
     char bound_ip_hex[33];
     char bootstrap_sig_hex[BS_SIG_BYTES * 2 + 1];
+    /* Millisecond issue stamp, signed alongside the IP binding so the
+     * verify side can measure issue -> solve without trusting the
+     * client's clock. See BS_MIN_INTERACTIVE_SOLVE_MS. */
+    apr_int64_t issued_ms = (apr_int64_t)(apr_time_now() / 1000);
     int have_bound_ip = bs_format_bound_ip_hex(
         r ? r->useragent_ip : NULL, bound_ip_hex);
     if (have_bound_ip) {
         bs_compute_bootstrap_sig(p, cfg->derived_hmac_bootstrap,
                                   nonce_hex, bound_ip_hex,
-                                  ch->expires_at, bootstrap_sig_hex);
+                                  ch->expires_at, issued_ms,
+                                  bootstrap_sig_hex);
     }
     const char *bind_json = have_bound_ip
         ? apr_psprintf(p,
-            ",\"bound_ip\":\"%s\",\"bootstrap_sig\":\"%s\"",
-            bound_ip_hex, bootstrap_sig_hex)
+            ",\"bound_ip\":\"%s\",\"bootstrap_sig\":\"%s\","
+            "\"issued_ms\":%" APR_INT64_T_FMT,
+            bound_ip_hex, bootstrap_sig_hex, issued_ms)
         : "";
     const char *prefix_b64 = NULL;
     const char *err = bs_build_cookie_prefix_gcm(p, cfg, ch, &prefix_b64);
@@ -263,9 +269,14 @@ const char *bs_challenge_json(request_rec *r, apr_pool_t *p,
     return apr_psprintf(p,
         "{\"salt\":\"%s\",\"nonce\":\"%s\",\"difficulty\":%d,"
         "\"expires_at\":%" APR_TIME_T_FMT ",\"auto\":%d,"
+        "\"arm_ms\":%d,"
         "\"cookie_prefix\":\"%s\"%s%s}",
         salt_hex, nonce_hex, ch->difficulty, ch->expires_at,
-        ch->auto_tier ? 1 : 0, prefix_b64, domain_json,
+        ch->auto_tier ? 1 : 0,
+        ch->auto_tier ? 0
+                      : bs_effective_int(cfg->interactive_arm_ms,
+                                         BS_DEFAULT_INTERACTIVE_ARM_MS),
+        prefix_b64, domain_json,
         bind_json);
 }
 
@@ -355,20 +366,27 @@ int bs_format_bound_ip_hex(const char *useragent_ip, char out_hex[33])
 }
 
 /* Compute the bootstrap-binding HMAC over
- *   "bs:bootstrap:v1:" || nonce_hex || ":" || bound_ip_hex || ":"
- *   || expires_at (decimal ASCII)
+ *   "bs:bootstrap:v2:" || nonce_hex || ":" || bound_ip_hex || ":"
+ *   || expires_at || ":" || issued_ms   (both decimal ASCII)
  * using the dir_cfg's derived bootstrap key. Output is hex-encoded
- * into out_sig_hex (65 bytes). */
+ * into out_sig_hex (65 bytes).
+ *
+ * v2 adds issued_ms so the verify side has a millisecond issue stamp
+ * it can trust. Bumping the version invalidates only signatures for
+ * challenges still in flight -- a bootstrap sig lives for one page
+ * load, unlike the session cookie -- so the cost is that clients
+ * mid-solve at the moment of a deploy solve once more. */
 void bs_compute_bootstrap_sig(apr_pool_t *p,
                               const unsigned char key[32],
                               const char *nonce_hex,
                               const char *bound_ip_hex,
                               apr_time_t expires_at,
+                              apr_int64_t issued_ms,
                               char out_sig_hex[BS_SIG_BYTES * 2 + 1])
 {
     const char *canon = apr_psprintf(p,
-        "bs:bootstrap:v1:%s:%s:%" APR_TIME_T_FMT,
-        nonce_hex, bound_ip_hex, expires_at);
+        "bs:bootstrap:v2:%s:%s:%" APR_TIME_T_FMT ":%" APR_INT64_T_FMT,
+        nonce_hex, bound_ip_hex, expires_at, issued_ms);
     unsigned char mac[BS_SIG_BYTES];
     bs_hmac_sha256(key, 32, (const unsigned char *)canon,
                    strlen(canon), mac);

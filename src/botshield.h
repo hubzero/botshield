@@ -191,6 +191,8 @@ struct bs_dir_cfg {
     int debug;
     int cookie_ttl;
     int difficulty;
+    int interactive_min_ms;  /* solve-time floor, ms; 0 = off */
+    int interactive_arm_ms;  /* checkbox withheld this long, ms */
     int help_mode;              /* BS_HELP_* or BS_UNSET */
     int show_logo;              /* 0 = hide, 1 = show, -1 = inherit */
     int show_label;             /* 0 = hide prompt, 1 = show, -1 = inherit */

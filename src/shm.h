@@ -181,7 +181,10 @@ extern "C" {
 /* v13 adds g_resp[]: responder crossed with audience. */
 /* v18 appends per-status-code counters (req_code) alongside the
  * existing status-class ones. */
-#define BS_STATE_FORMAT_VERSION   19
+/* v20 appends attestation_fail_total. bs_metrics is persisted whole,
+ * so a new counter changes the on-disk layout and an unbumped version
+ * would misparse every field after it. */
+#define BS_STATE_FORMAT_VERSION   20
 #define BS_STATE_MAX_AGE_SECS     (14 * 86400)
 #define BS_FNV64_SEED             0xcbf29ce484222325ULL
 
@@ -792,6 +795,11 @@ typedef struct {
      * in the occupancy gauge, which is why this exists. Cumulative and
      * persisted, same as rate_limit_exceeded_total beside it. */
     apr_uint64_t safeguard_fired_total;
+    /* Solves that arrived carrying at least one failed attestation
+     * probe. Counted at verify, so the denominator is solves, not
+     * requests -- a client that never runs the JS never appears
+     * here at all. */
+    apr_uint64_t attestation_fail_total;
     /* E12 — log-only / observe-mode counters. */
     apr_uint64_t rate_limit_observed_total;
     apr_uint64_t trigger_observed_total;

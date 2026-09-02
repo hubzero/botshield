@@ -285,6 +285,10 @@ int bs_status_hook(request_rec *r, int flags);
  * when there is not enough traffic for it to mean anything. */
 int bs_bot_share_pct(void);
 
+/* Bump attestation_fail_total. Called from the verify path when a
+ * solve reports one or more failed probes. */
+void bs_metrics_note_attestation_fail(void);
+
 #ifdef __cplusplus
 }
 #endif
