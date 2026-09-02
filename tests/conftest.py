@@ -153,6 +153,21 @@ def bs_browser_context(browser, fresh_ip):
     """
     ctx = browser.new_context(
         ignore_https_errors=True,
+        # Present as ordinary Chrome, not HeadlessChrome. Playwright's
+        # default UA carries "HeadlessChrome", which the bot directory
+        # knows -- so the request is classified a known bot, credited
+        # past the score threshold, and PASSES. The tests then see the
+        # origin page and fail asserting on an interstitial that was
+        # never going to be served.
+        #
+        # These tests are about the interstitial's JS running in a real
+        # browser engine, not about how HeadlessChrome is classified,
+        # so the UA has to be the one the scenario describes. The
+        # engine underneath is unchanged, which is the part under test.
+        user_agent=(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+        ),
         extra_http_headers={
             "X-Forwarded-For": fresh_ip,
             "Accept-Language": "",

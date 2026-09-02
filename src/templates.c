@@ -193,7 +193,7 @@ static const char BS_WIDGET_TEMPLATE[] =
  * built, and nothing about the connection is under examination.
  * What is actually checked is whether the client runs a real
  * browser engine, so that is what it says. */
-".bs-late{max-width:400px;margin:0;font-size:12px;color:#7a8487;\n"
+".bs-late{max-width:400px;margin:0;font-size:12px;color:#55605e;\n"
 " text-align:center;opacity:0;transition:opacity .35s ease}\n"
 ".bs-late b{font-weight:600;color:#55605e}\n"
 ".bs-late.on{opacity:1}\n"
@@ -204,7 +204,7 @@ static const char BS_WIDGET_TEMPLATE[] =
 /* The reference id is the only thing on this page an operator can
  * search for. Without it a stranded user reports \"it hung on a
  * grey page\", which is unfindable in a 100M decision log. */
-".bs-ref{font-size:11px;color:#7a8487;margin:0;text-align:center;\n"
+".bs-ref{font-size:11px;color:#55605e;margin:0;text-align:center;\n"
 " font-family:ui-monospace,SFMono-Regular,Menlo,monospace;\n"
 " word-break:break-all}\n"
 "@keyframes bs-spin{to{transform:rotate(360deg)}}\n"

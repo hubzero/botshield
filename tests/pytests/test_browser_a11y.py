@@ -30,6 +30,25 @@ from botshield_test import config
 
 pytestmark = [pytest.mark.acceptance, pytest.mark.browser]
 
+# Challenged while unsolved, served once solved -- the round trip these
+# tests need. "/" no longer challenges a recognised browser UA (see the
+# browser-gate comment in apache/botshield-dev.conf), and /silent-demo
+# re-challenges even a solved client, so neither can carry these.
+CHALLENGE_PATH = "/browser-gate.html"
+
+
+def _pin_interstitial(page):
+    """Keep the interstitial on screen for the duration of the scan.
+
+    The silent tier solves its proof-of-work and reloads on its own --
+    ~400ms on this hardware. Every assertion here is about the
+    challenge DOM, so without this the page under test navigates away
+    mid-scan and the test asserts against the origin page instead.
+    Aborting the verify POST stops the reload without touching the
+    markup being scanned.
+    """
+    page.route("**/botshield/embedded-verify", lambda r: r.abort())
+
 
 _AXE_PATH = Path(__file__).resolve().parent / "assets" / "axe.min.js"
 assert _AXE_PATH.is_file(), f"axe-core missing at {_AXE_PATH}"
@@ -89,7 +108,8 @@ def test_interstitial_no_critical_a11y_violations(bs_browser_context):
     ctx.add_init_script(_HOLD_INTERSTITIAL_JS)
     page = ctx.new_page()
 
-    resp = page.goto(config.BASE_URL + "/")
+    _pin_interstitial(page)
+    resp = page.goto(config.BASE_URL + CHALLENGE_PATH)
     assert resp.headers.get("x-botshield") == "challenge", (
         "fixture didn't land at the interstitial — a11y scan needs "
         "the challenge DOM, not the origin page"
@@ -128,7 +148,8 @@ def test_interstitial_submit_button_keyboard_reachable(
     ctx.add_init_script(_HOLD_INTERSTITIAL_JS)
     page = ctx.new_page()
 
-    page.goto(config.BASE_URL + "/")
+    _pin_interstitial(page)
+    page.goto(config.BASE_URL + CHALLENGE_PATH)
     assert "Verify you are human" in page.title()
 
     # Walk forward with Tab, asserting we eventually focus the
@@ -159,7 +180,8 @@ def test_interstitial_has_lang_attribute(bs_browser_context):
     ctx.add_init_script(_HOLD_INTERSTITIAL_JS)
     page = ctx.new_page()
 
-    page.goto(config.BASE_URL + "/")
+    _pin_interstitial(page)
+    page.goto(config.BASE_URL + CHALLENGE_PATH)
     assert "Verify you are human" in page.title()
 
     lang = page.evaluate("() => document.documentElement.lang || null")

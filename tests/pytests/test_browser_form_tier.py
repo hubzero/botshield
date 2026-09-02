@@ -24,6 +24,12 @@ from botshield_test import config
 
 pytestmark = [pytest.mark.acceptance, pytest.mark.browser]
 
+# Challenged while unsolved, served once solved -- the round trip these
+# tests need. "/" no longer challenges a recognised browser UA (see the
+# browser-gate comment in apache/botshield-dev.conf), and /silent-demo
+# re-challenges even a solved client, so neither can carry these.
+CHALLENGE_PATH = "/browser-gate.html"
+
 
 def _has_verified_cookie(ctx) -> bool:
     return any(c["name"] == "__Host-bs_session" for c in ctx.cookies())
@@ -36,7 +42,7 @@ def test_silent_tier_js_pow_round_trip(bs_browser_context):
     page = ctx.new_page()
 
     # 1. Cookieless request. Module returns the interstitial.
-    resp = page.goto(config.BASE_URL + "/")
+    resp = page.goto(config.BASE_URL + CHALLENGE_PATH)
     assert resp.headers.get("x-botshield") == "challenge", (
         f"expected silent-tier challenge, got "
         f"X-Botshield={resp.headers.get('x-botshield')!r} "
@@ -69,7 +75,7 @@ def test_verified_cookie_clears_subsequent_challenge(bs_browser_context):
     page = ctx.new_page()
 
     # Trigger + complete the silent-tier flow first.
-    page.goto(config.BASE_URL + "/")
+    page.goto(config.BASE_URL + CHALLENGE_PATH)
     page.wait_for_function(
         "() => document.title !== 'Verify you are human'",
         timeout=20_000,
@@ -77,7 +83,7 @@ def test_verified_cookie_clears_subsequent_challenge(bs_browser_context):
     assert _has_verified_cookie(ctx), "setup: cookie didn't land"
 
     # Fresh navigation with the cookie already in the jar.
-    resp = page.goto(config.BASE_URL + "/")
+    resp = page.goto(config.BASE_URL + CHALLENGE_PATH)
     assert resp.status == 200
     assert resp.headers.get("x-botshield") != "challenge", (
         f"verified visitor got re-challenged; "
