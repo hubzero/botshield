@@ -56,7 +56,22 @@ extern "C" {
 
 #define BS_UNSET              (-1)
 #define BS_DEFAULT_COOKIE_TTL 3600  /* seconds a verified cookie is good for */
-#define BS_DEFAULT_DIFFICULTY 4     /* leading hex zeros */
+/* Leading hex zeros, so expected work is 2^(4*d) hashes: d=4 is
+ * 65,536, d=3 is 4,096. Lowered 4 -> 3 on measurement, not taste.
+ *
+ * 905 real solves overnight at d=4 cost a median 329ms of client CPU,
+ * p90 1019ms, p99 5188ms, and 34% of solvers spent over half a
+ * second. Android solvers were worst: median 733ms and 22% over two
+ * seconds, against 2.8% on Windows.
+ *
+ * That cost buys nothing defensively. Of those 905 solves only 2
+ * carried any failed attestation probe -- the population that runs
+ * this JS at all is already clean, because the automation hitting
+ * this site does not execute the challenge. The proof-of-work is a
+ * capability test (did a real engine run?), not an economic barrier;
+ * a bot farm that can afford 4,096 hashes can afford 65,536. So the
+ * right value is the smallest that still proves capability. */
+#define BS_DEFAULT_DIFFICULTY 3
 #define BS_CLOCK_SKEW_AHEAD   60    /* grace if client clock runs ahead */
 #define BS_DEFAULT_FORGIVE_NON_INTERACTIVE   10
 #define BS_DEFAULT_FORGIVE_INTERACTIVE     25
