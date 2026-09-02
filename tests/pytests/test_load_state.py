@@ -28,15 +28,16 @@ import time
 
 import pytest
 
-from botshield_test import client
+from botshield_test import client, config
 
 
 pytestmark = pytest.mark.serial
 
 
-LOAD_FILE_PATH = "/etc/botshield/load.state.test"
-
-
+# Per-worker: BotShieldLoadStateFile is server scope and each
+# xdist worker runs its own httpd, so a shared path would let
+# one worker's "hot" satisfy or break another's expectations.
+LOAD_FILE_PATH = config.LOAD_STATE_FILE
 def _read_metrics() -> dict[str, str]:
     """Return a dict of metric-name → value from /botshield/metrics."""
     resp = client.get("/botshield/metrics")

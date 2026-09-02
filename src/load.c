@@ -660,6 +660,26 @@ const char *bs_set_load_state_file(cmd_parms *cmd, void *dconf,
     if (arg[0] != '/') {
         return "BotShieldLoadStateFile: path must be absolute";
     }
+    /* Server scope only, and say so rather than accepting it quietly.
+     *
+     * The load watchdog is registered once, against the MAIN
+     * server_rec (see the fn_reg call in config.c), so it only ever
+     * reads the main server's config. A path set inside <VirtualHost>
+     * lands on that vhost's server_rec and is never looked at: the
+     * config parses, httpd starts, and the external load state simply
+     * never moves. That is indistinguishable from "monitoring has not
+     * written the file yet", which is the worst possible failure shape
+     * for a directive whose entire job is to let an operator push a
+     * state in.
+     *
+     * RSRC_CONF permits vhost context, so Apache will not catch this
+     * for us; the check has to live here. */
+    if (cmd->server->is_virtual) {
+        return "BotShieldLoadStateFile: server scope only -- the load "
+               "watchdog runs once against the main server, so a path "
+               "set inside <VirtualHost> would be parsed and then "
+               "silently ignored. Move it outside the vhost.";
+    }
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
     scfg->load_state_file = apr_pstrdup(cmd->pool, arg);

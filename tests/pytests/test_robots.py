@@ -33,7 +33,15 @@ from botshield_test import client
 
 
 GPTBOT_UA  = "Mozilla/5.0 (compatible; GPTBot/1.0; +https://openai.com/gptbot)"
-REAL_UA    = "Mozilla/5.0 (X11; Linux x86_64) Firefox/130.0"
+# A real Firefox string. The previous value here omitted the rv:
+# and Gecko/ tokens, which no Firefox actually does -- so it
+# matched no browser template, classified as `unclassified`, and
+# the robots heuristic correctly declined to treat it as a
+# browser. The test then read that as the module failing to skip
+# real browsers. A UA literal in a test has to be a string some
+# browser really emits, or it tests the wrong thing.
+REAL_UA    = ("Mozilla/5.0 (X11; Linux x86_64; rv:130.0) "
+              "Gecko/20100101 Firefox/130.0")
 CURL_UA    = "curl/8.6.0"
 
 

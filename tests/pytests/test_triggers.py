@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import pytest
 
-from botshield_test import client
+from botshield_test import client, ips
 
 
 # No longer serial. The marker meant "mutates Apache config or SHM",
@@ -94,41 +94,70 @@ def test_trigger_status_pass_lets_request_through(
     )
 
 
-def test_trigger_status_pass_does_not_apply_current_request_penalty(
+def test_trigger_status_pass_penalty_scores_the_current_request(
     config_override, log_slice, fresh_ip,
 ):
-    """Path-family divergence from cookie/env: status=pass means
-    'don't enforce anything on this request.' Even if the operator
-    wrote penalty=N, that penalty must NOT bump the current
-    request's score — it's purely future-request bookkeeping
-    via flag=/ttl=. Pinned here so E7.2's shared action engine
-    can't silently homogenize this with cookie/env semantics."""
-    with config_override(
-        r"BotShieldEnabled\s+On",
-        'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldRequestTrigger passpen path="/honey-pass" '
-        'status=pass penalty=90 flag=honeypot_hit ttl=3600',
-        count=1,
-    ):
-        with log_slice as slc:
-            client.get("/honey-pass", xff=fresh_ip)
-            lines = slc.decision_lines(ip=fresh_ip)
-    assert lines, f"no decision line for the passpen match; lines={lines}"
-    d = lines[-1]
-    # Reason trace records the match with the :pass suffix so
-    # operators can correlate, but the score delta is 0 — not 90.
-    assert "request-trigger:passpen:pass" in d["reason"], (
-        f"request-trigger:passpen:pass missing from reason; d={d}"
+    """`status=pass penalty=N` adds N to THIS request's score.
+
+    This test used to pin the opposite -- that the penalty was purely
+    future-request bookkeeping via flag=/ttl= and must never touch the
+    current score. That contract was deliberately revised in 14ec15a
+    ("Let request triggers challenge"), which routes status=pass with
+    score-shaping through the scoring pipeline rather than declining
+    out of the handler, and directives.md documents the current
+    behaviour: "Score only | status=pass penalty=<n> | Adds to the
+    score and lets normal thresholds decide."
+
+    The old assertion outlived the change and sat in the failing set
+    long enough to be treated as background noise, which is the real
+    hazard: a stale pin and a genuine regression look identical from
+    the summary line.
+
+    Measured as a difference between two penalties rather than
+    against an absolute, because the ambient dev config contributes
+    its own signals and a fixed number would be brittle.
+
+    Both arms carry a penalty on purpose. Comparing "penalty" against
+    "no penalty" measures the wrong thing entirely: a bare status=pass
+    declines out of the handler before the scoring pipeline runs, so
+    its reason chain comes back bracketed and zeroed
+    ([known-bot:...:0,request-trigger:passpen:pass:0]) while the
+    penalty arm additionally picks up missing-accept-language,
+    scraper-ua-python, first-sight-ip and any flag triggers. The
+    difference there is the whole pipeline, not the penalty.
+    """
+    RULE = ('    BotShieldRequestTrigger passpen path="/honey-pass" '
+            'status=pass %s ttl=3600')
+
+    def score_for(extra, ip):
+        with config_override(
+            r"BotShieldEnabled\s+On",
+            'BotShieldEnabled On\n'
+            '    BotShieldScoreNonInteractive 500\n'
+            '    BotShieldScoreInteractive 600\n'
+            '    BotShieldScoreCaptcha 700\n'
+            + (RULE % extra),
+            count=1,
+        ):
+            with log_slice as slc:
+                client.get("/honey-pass", xff=ip)
+                lines = slc.decision_lines(ip=ip)
+        assert lines, f"no decision line for the passpen match; extra={extra!r}"
+        return lines[-1]
+
+    low  = score_for("penalty=10", fresh_ip)
+    high = score_for("penalty=90", ips.fresh_ip())
+
+    assert "request-trigger:passpen" in high["reason"], (
+        f"the match must be traceable in the reason chain; d={high}"
     )
-    # Score the decision logs should only carry first-sight-ip (+5)
-    # and whatever clean-UA signals pile up — NEVER the +90 penalty.
-    score = int(d["score"])
-    assert score < 60, (
-        f"request-trigger status=pass leaked the penalty=90 bump into "
-        f"the current request's score; reason={d['reason']} score={score}"
+    delta = int(high["score"]) - int(low["score"])
+    assert delta == 80, (
+        f"raising penalty 10 -> 90 must move the current request's "
+        f"score by exactly 80; got {delta} "
+        f"({low['score']} -> {high['score']})\n"
+        f"  low:  {low['reason']!r}\n"
+        f"  high: {high['reason']!r}"
     )
 
 

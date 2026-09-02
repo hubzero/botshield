@@ -75,7 +75,13 @@ def test_bot_rate_specific_slug_trips(config_override, log_slice, fresh_ip):
     assert r3.headers.get("Retry-After"), (
         "429 must include Retry-After header"
     )
-    tripped = [d for d in lines if "bot-rate:googlebot" in d["reason"]]
+    # The reason names the DIRECTORY SLUG, not the string the operator
+    # typed: "Googlebot/" resolves to slug "google" (see
+    # generated_bot_directory.c), and the slug is the rate counter's
+    # key. Reporting the key is what lets an operator find the counter
+    # they need to tune -- test_bot_rate_tiers pins the same convention
+    # for the per-slug and @botgroup cases.
+    tripped = [d for d in lines if "bot-rate:google" in d["reason"]]
     assert tripped, (
         f"no decision line carried bot-rate:googlebot; lines={lines}"
     )

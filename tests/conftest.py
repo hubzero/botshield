@@ -77,8 +77,22 @@ def log_slice():
                 # drive traffic
                 lines = slc.decision_lines(outcome="block")
                 assert lines
+
+    Re-enterable: a test may take more than one slice. _logs.log_slice()
+    is a @contextmanager, so its object is single-use -- entering the
+    same one twice raises AttributeError from contextlib, which reads
+    as a confusing test-framework error rather than "you used this
+    twice". A test comparing a baseline against an after-state wants
+    two slices, so the fixture hands out a wrapper that binds a fresh
+    offset on each __enter__.
     """
-    return _logs.log_slice()
+    class _ReenterableSlice:
+        def __enter__(self):
+            self._cm = _logs.log_slice()
+            return self._cm.__enter__()
+        def __exit__(self, *exc):
+            return self._cm.__exit__(*exc)
+    return _ReenterableSlice()
 
 
 @pytest.fixture

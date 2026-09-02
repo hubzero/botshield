@@ -50,6 +50,15 @@ DEV_VHOST_CONF = _pick("BS_DEV_VHOST_CONF",
                        "/etc/httpd/bstest/w%d/dev-vhost.conf" % (WORKER_N or 0))
 APACHE_SERVICE = _pick("BS_APACHE_SERVICE", "apache2",
                        "httpd-bstest@%d" % (WORKER_N or 0))
+
+# External load-state file the module watches. Per worker, because
+# BotShieldLoadStateFile is server scope: every worker runs its own
+# httpd, so a shared path would let one worker's "hot" leak into
+# another's expectation of "normal" -- the same interference the
+# per-worker instances exist to prevent.
+LOAD_STATE_FILE = _pick("BS_LOAD_STATE_FILE",
+                        "/etc/botshield/load.state.test",
+                        "/etc/botshield/load.state.w%d.test" % (WORKER_N or 0))
 # The instance's own httpd.conf, for `httpd -f ... -C <directive> -t`
 # config-rejection checks. These MUST NOT run against the production
 # config: it loads the deployed module, so a test for a directive the
