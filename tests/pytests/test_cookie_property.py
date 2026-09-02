@@ -28,6 +28,8 @@ from botshield_test import client, cookies
 pytestmark = [pytest.mark.serial]
 
 BROWSER_UA = "Mozilla/5.0 (X11) Chrome/145"
+# Gated by an explicit solved=no rule rather than by ambient score.
+CHALLENGE_PATH = "/browser-gate.html"
 
 
 @pytest.fixture(scope="module")
@@ -44,7 +46,14 @@ def valid_cookie(request):
     from botshield_test import ips
     ip = ips.fresh_ip()
 
-    resp = client.get("/", xff=ip, ua=BROWSER_UA)
+    # "/" no longer challenges a recognised browser UA -- it is
+    # credited past the score threshold and passes, so this used to
+    # fetch the docroot index and fail extracting a challenge from it.
+    # CHALLENGE_PATH carries an explicit solved=no gate: challenged
+    # while unsolved, served once solved, which is exactly the
+    # challenge -> solve -> sanity-check-passes shape this fixture
+    # needs. See the browser-gate rule in apache/botshield-dev.conf.
+    resp = client.get(CHALLENGE_PATH, xff=ip, ua=BROWSER_UA)
     challenge = cookies.extract_challenge(resp.text)
     counter = cookies.solve_pow(challenge)
     cookie = cookies.build_cookie(challenge, counter)
@@ -53,7 +62,7 @@ def valid_cookie(request):
     # round-trips before we start tampering. Otherwise every
     # "block" outcome below is meaningless.
     sanity = client.get(
-        "/", xff=ip, ua=BROWSER_UA, accept_language="en-US",
+        CHALLENGE_PATH, xff=ip, ua=BROWSER_UA, accept_language="en-US",
         cookies={"__Host-bs_session": cookie},
     )
     assert sanity.headers.get("X-Botshield") != "challenge", (
@@ -78,12 +87,15 @@ def test_single_byte_tamper_always_rejected(valid_cookie, index, bitmask):
     a challenge header, OR the module must not issue a fresh
     verified cookie)."""
     cookie_bytes = valid_cookie["cookie"].encode("ascii")
-    if index >= len(cookie_bytes):
-        # Out-of-range index is a no-op tamper — hypothesis' tuple
-        # range is a coarse overshoot of the actual cookie length;
-        # we just filter these out rather than tightening the
-        # strategy, so shrinking still works cleanly.
-        return
+    # Fold the index into range rather than discarding out-of-range
+    # draws. The strategy's 0..1000 is a coarse overshoot of the real
+    # cookie length (~200 bytes), so filtering threw away roughly four
+    # examples in five: max_examples=50 was buying about ten actual
+    # tampers, and the run finished in 0.15s because most of it did
+    # nothing. Modulo keeps shrinking well behaved (a smaller draw
+    # still maps to a smaller index) and every example now exercises
+    # the parser.
+    index %= len(cookie_bytes)
 
     tampered_bytes = bytearray(cookie_bytes)
     tampered_bytes[index] ^= bitmask
@@ -97,8 +109,14 @@ def test_single_byte_tamper_always_rejected(valid_cookie, index, bitmask):
         return
 
     try:
+        # CHALLENGE_PATH, not "/": on an ungated path the rejection
+        # branch below can never fire, because nothing challenges a
+        # recognised browser UA there. The fuzz would still exercise
+        # the cookie parser, but the "was it rejected?" half of the
+        # claim would go unobserved -- the test would only ever be
+        # asserting "no 5xx".
         resp = client.get(
-            "/", xff=valid_cookie["ip"],
+            CHALLENGE_PATH, xff=valid_cookie["ip"],
             ua=BROWSER_UA, accept_language="en-US",
             cookies={"__Host-bs_session": tampered},
         )
