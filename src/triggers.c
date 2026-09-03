@@ -665,10 +665,10 @@ static int bs_ua_is_selector_list(const char *ua)
  *
  * Warned from the setter rather than post_config so `httpd -t` shows
  * it -- a warning an operator only sees after deploying is most of the
- * way to no warning. (Note post_config DOES run under -t; what would
- * have hidden this is our own first-pass guard, which skips the single
- * pass a -t run makes. Apache's DUMP_VHOSTS works under -t for exactly
- * that reason: core has no such guard.)
+ * way to no warning. Apache does not run post_config on a -t
+ * invocation at all (verified by probe; the first-pass guard is not
+ * the mechanism). The hook -t does run is test_config, which is where
+ * -D DUMP_BOTSHIELD_POLICY lives.
  *
  * A warning, not an error: challenging every time is legitimate for a
  * honeypot or a path no real client should reach. But it should be a
