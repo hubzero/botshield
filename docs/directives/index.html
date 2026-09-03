@@ -125,7 +125,7 @@
   </ul>
 </section>
         <div class="prose">
-<p>mod_botshield registers 86 directives at config time. This page is
+<p>mod_botshield registers 100 directives at config time. This page is
 the canonical reference, grouped by family. The
 underlying source-of-truth is <code>bs_cmds[]</code> in <code>src/botshield.c:142</code> —
 when tuning behavior, treat the source as authoritative
@@ -207,11 +207,6 @@ into a running server.</p>
 <td><code>BotShieldEndpointPrefix</code></td>
 <td><code>/path</code></td>
 <td><code>/botshield</code></td>
-</tr>
-<tr>
-<td><code>BotShieldScoring</code></td>
-<td><code>on</code>/<code>off</code></td>
-<td><code>off</code></td>
 </tr>
 <tr>
 <td><code>BotShieldInteractiveArmMs</code></td>
@@ -337,18 +332,18 @@ so cost falls on your visitors far harder than on a competent bot, and
 a cookie amortises the bot's one solve across the whole
 <code>BotShieldCookieTTL</code> window. Of those 905 solves, 2 carried any failed
 attestation probe: the population that runs the JS is already clean.</p>
-<p><code>BotShieldScoring</code> decides whether the <strong>implicit</strong> path runs at all.
-Off by default, which is the point of the directive rather than an
-incident of it: every lockout this module has caused came from an
-implicit weight or tier floor nobody had written down summing past a
-threshold nobody had read. An explicit rule states what it does; a
-score states it only once you reconstruct the arithmetic.</p>
-<p>Off suppresses exactly three things — built-in heuristics contributing
-score, flag triggers contributing score or <code>tier_floor</code>, and the
-score-to-tier threshold evaluation. It does <strong>not</strong> touch an explicit
-<code>tier=</code> or <code>status=</code> on a rule. That boundary is the whole risk here:
-get it wrong in the &quot;off means no tiers at all&quot; direction and the site
-silently stops challenging anyone.</p>
+<p>There is no master switch for the implicit path. <code>BotShieldScoring</code>
+used to be one, and it was removed: the module now ships <strong>no default
+rules at all</strong>, and an unset score threshold never fires, so nothing
+scores and score never decides a tier until an operator writes both a
+heuristic or flag trigger and a threshold.</p>
+<p>That removal is the same lesson the directive was a workaround for.
+Every lockout this module has caused came from an implicit weight or
+tier floor nobody had written down summing past a threshold nobody had
+read. A switch to turn that off is worse than not inventing it: a
+default every deployment has to disable was not a default. An explicit
+rule states what it does; a score states it only once you reconstruct
+the arithmetic.</p>
 <p><code>BotShieldInteractiveArmMs</code> withholds the interactive tier's checkbox
 for this many milliseconds after load (0 shows it immediately). The
 widget renders at full size with a spinner meanwhile, so nothing shifts
@@ -1040,8 +1035,16 @@ client to a stickier status code — see
 <td><code>heuristic|strict|off</code></td>
 <td><code>heuristic</code></td>
 </tr>
+<tr>
+<td><code>BotShieldRobotsMode</code></td>
+<td><code>enforce|observe</code></td>
+<td><code>enforce</code></td>
+</tr>
 </tbody>
 </table>
+<p><code>BotShieldRobotsMode observe</code> records what a <code>Disallow</code> would have done
+without returning 403 — the way to see what enforcing a robots.txt you
+did not write would cost before you enforce it.</p>
 <p>See <a href="../policy/index.html#robotstxt-enforcement-e22">policy</a> for the matcher
 semantics and refresh model.</p>
 <h2 id="triggers">Triggers</h2>
@@ -1582,9 +1585,27 @@ behavior arc.</p>
 <td>server only</td>
 </tr>
 <tr>
+<td><code>BotShieldLoadAvgWarm</code></td>
+<td><code>N</code> (per-CPU ratio)</td>
+<td><code>1.0</code></td>
+<td>server only</td>
+</tr>
+<tr>
+<td><code>BotShieldLoadAvgHot</code></td>
+<td><code>N</code> (per-CPU ratio)</td>
+<td><code>1.5</code></td>
+<td>server only</td>
+</tr>
+<tr>
 <td><code>BotShieldDbStatsFile</code></td>
 <td><code>/path</code></td>
-<td>unset</td>
+<td><code>/run/botshield/db-load.stats</code></td>
+<td>server only</td>
+</tr>
+<tr>
+<td><code>BotShieldFpmStatsFile</code></td>
+<td><code>/path</code></td>
+<td><code>/run/botshield/fpm-load.stats</code></td>
 <td>server only</td>
 </tr>
 </tbody>
@@ -1756,8 +1777,18 @@ so that line is the only trace a probe leaves.</p>
 <td>rotating log beside <code>ErrorLog</code></td>
 <td>server / vhost</td>
 </tr>
+<tr>
+<td><code>BotShieldAccessLog</code></td>
+<td><code>on</code>, <code>off</code>, <code>suppress=&lt;outcome,...&gt;</code></td>
+<td><code>on</code></td>
+<td>server / vhost / dir</td>
+</tr>
 </tbody>
 </table>
+<p><code>BotShieldAccessLog</code> controls the <em>Apache</em> access-log line for requests
+BotShield decided on, not this log. See
+<a href="../observability/index.html">observability</a> for which outcomes are
+suppressed by default and why.</p>
 <p>A module-owned decision log, written directly from the decision path
 instead of through mod_log_config:</p>
 <pre><code class="language-apache">BotShieldDecisionLog logs/botshield.log

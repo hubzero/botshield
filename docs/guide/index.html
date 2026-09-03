@@ -157,8 +157,9 @@ rate limit + global in-flight semaphore on <code>/captcha-verify</code>.
 One-time-use nonces + IP-bound bootstrap on the embedded silent
 path.</li>
 <li><strong>Observability.</strong> Structured <code>key=value</code> decision-log line per
-request, 42 Prometheus metrics at <code>&lt;prefix&gt;/metrics</code>, <code>mod_status</code>
-contribution hook.</li>
+request, 96 Prometheus metrics at <code>&lt;prefix&gt;/metrics</code>, <code>mod_status</code>
+contribution hook. Both the metrics endpoint and the dashboard are
+closed until a directive names who may read them.</li>
 <li><strong>Multi-vhost isolation.</strong> Default-isolate per <code>ServerName</code>; opt
 into shared reputation via <code>BotShieldShareScope</code>.</li>
 <li><strong>Log-only / shadow mode.</strong> Scope-level <code>BotShieldEnabled LogOnly</code>
@@ -278,9 +279,34 @@ framework.</li>
 <td>Prometheus 0.0.4 text exposition. Closed unless <code>BotShieldMetricsAccess</code> names the caller</td>
 </tr>
 <tr>
+<td><code>&lt;prefix&gt;/dashboard</code></td>
+<td>GET</td>
+<td>Operator dashboard, plus <code>/bots</code>, <code>/responses</code>, <code>/internals</code>, <code>/app-bots</code>, <code>/app-users</code>. Closed unless <code>BotShieldDashboardAccess</code> names the caller</td>
+</tr>
+<tr>
+<td><code>&lt;prefix&gt;/preview</code></td>
+<td>GET</td>
+<td>Renders each challenge tier as a visitor sees it, plus <code>/safeguard</code>. Public</td>
+</tr>
+<tr>
 <td><code>&lt;prefix&gt;/embedded.js</code></td>
 <td>GET</td>
-<td>Embedded silent-verify wrapper</td>
+<td>Embedded non-interactive verify wrapper</td>
+</tr>
+<tr>
+<td><code>&lt;prefix&gt;/embedded-worker.js</code></td>
+<td>GET</td>
+<td>Web Worker that runs the proof-of-work off the main thread</td>
+</tr>
+<tr>
+<td><code>&lt;prefix&gt;/embedded-bootstrap</code></td>
+<td>GET</td>
+<td>Issues a challenge to an embedded client</td>
+</tr>
+<tr>
+<td><code>&lt;prefix&gt;/embedded-verify</code></td>
+<td>POST</td>
+<td>Accepts an embedded client's solution</td>
 </tr>
 <tr>
 <td><code>&lt;prefix&gt;/form-widget.js</code></td>

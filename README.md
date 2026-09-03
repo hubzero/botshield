@@ -62,8 +62,9 @@ below.
   One-time-use nonces + IP-bound bootstrap on the embedded silent
   path.
 - **Observability.** Structured `key=value` decision-log line per
-  request, 42 Prometheus metrics at `<prefix>/metrics`, `mod_status`
-  contribution hook.
+  request, 96 Prometheus metrics at `<prefix>/metrics`, `mod_status`
+  contribution hook. Both the metrics endpoint and the dashboard are
+  closed until a directive names who may read them.
 - **Multi-vhost isolation.** Default-isolate per `ServerName`; opt
   into shared reputation via `BotShieldShareScope`.
 - **Log-only / shadow mode.** Scope-level `BotShieldEnabled LogOnly`
@@ -141,7 +142,12 @@ Under `BotShieldEndpointPrefix` (default `/botshield`):
 | `<prefix>/captcha-verify` | POST | Bare verify URL (single-provider vhosts) |
 | `<prefix>/captcha-verify/<provider>` | POST | Per-provider verify URL |
 | `<prefix>/metrics` | GET | Prometheus 0.0.4 text exposition. Closed unless `BotShieldMetricsAccess` names the caller |
-| `<prefix>/embedded.js` | GET | Embedded silent-verify wrapper |
+| `<prefix>/dashboard` | GET | Operator dashboard, plus `/bots`, `/responses`, `/internals`, `/app-bots`, `/app-users`. Closed unless `BotShieldDashboardAccess` names the caller |
+| `<prefix>/preview` | GET | Renders each challenge tier as a visitor sees it, plus `/safeguard`. Public |
+| `<prefix>/embedded.js` | GET | Embedded non-interactive verify wrapper |
+| `<prefix>/embedded-worker.js` | GET | Web Worker that runs the proof-of-work off the main thread |
+| `<prefix>/embedded-bootstrap` | GET | Issues a challenge to an embedded client |
+| `<prefix>/embedded-verify` | POST | Accepts an embedded client's solution |
 | `<prefix>/form-widget.js` | GET | Inline form-captcha widget shell |
 | `<prefix>/safeguard-info` | GET | Built-in explainer page rendered when challenge-safeguard trips (and no `BotShieldSafeguardRedirectURL` is set). Accepts `?return=<urlencoded path>` |
 
