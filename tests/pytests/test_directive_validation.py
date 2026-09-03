@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from botshield_test import apache
+
 
 # No longer serial. The marker meant "mutates Apache config or SHM",
 # and both were only a problem because every test shared one server.
@@ -98,4 +100,60 @@ def test_valid_directive_accepted():
     assert rc == 0, (
         f"bounded parser false-rejected a valid 'BotShieldCookieTTL 3600'; "
         f"stderr: {err}"
+    )
+
+# Directives the module resolves once from the main server: the SHM
+# segment is sized and attached before vhosts merge, and the load
+# watchdog is registered against the main server_rec. RSRC_CONF lets
+# Apache accept them inside <VirtualHost>, where the module then never
+# reads them -- so the module has to refuse them itself.
+SERVER_ONLY = [
+    ("BotShieldShmSize", "8M"),
+    ("BotShieldFlaggedIPCapacity", "2048"),
+    ("BotShieldBloomIPs", "10000"),
+    ("BotShieldBloomWindow", "3600"),
+    ("BotShieldStateFile", "/tmp/bs-scope-test.bin"),
+    ("BotShieldStateSaveInterval", "60"),
+    ("BotShieldRateLimitEscalateCapacity", "2048"),
+    ("BotShieldSafeguardCapacity", "2048"),
+    ("BotShieldEmbeddedNonceCapacity", "2048"),
+    ("BotShieldDbStatsFile", "/tmp/bs-db.stats"),
+    ("BotShieldFpmStatsFile", "/tmp/bs-fpm.stats"),
+]
+
+
+@pytest.mark.parametrize("name,value", SERVER_ONLY,
+                         ids=[n for n, _ in SERVER_ONLY])
+def test_server_only_directive_rejected_in_vhost(name, value):
+    """Inside <VirtualHost> these must be a config error naming the
+    directive.
+
+    This was a startup NOTICE and that was not enough: the config
+    parses, configtest is green, httpd starts, and the directive does
+    nothing. BotShieldDbStatsFile in a vhost left the dashboard
+    reporting "no monitor" behind a clean configtest, which is the
+    worst failure shape available -- it looks like the feature is
+    broken rather than like the config is."""
+    rc, err = apache.configtest(
+        "<VirtualHost 127.0.0.1:19999>", f"{name} {value}", "</VirtualHost>",
+    )
+    assert rc != 0, (
+        f"{name} accepted inside <VirtualHost>; it would be parsed and "
+        f"then silently ignored"
+    )
+    assert name in err, (
+        f"rejection does not name {name}, so an operator cannot tell "
+        f"which line to move. stderr:\n{err[-400:]}"
+    )
+
+
+@pytest.mark.parametrize("name,value", SERVER_ONLY,
+                         ids=[n for n, _ in SERVER_ONLY])
+def test_server_only_directive_accepted_at_server_scope(name, value):
+    """The other half: they must still work where they belong. A guard
+    that rejects everywhere would pass the test above."""
+    rc, err = apache.configtest(f"{name} {value}")
+    assert rc == 0, (
+        f"{name} rejected at server scope, where it is required to "
+        f"work. stderr:\n{err[-400:]}"
     )

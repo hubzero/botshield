@@ -91,6 +91,7 @@
   <h2 class="toc__heading">On this page</h2>
   <ul class="toc__list">
 <li class="toc__item toc__item--level-2"><a href="#2026-09-03-policy-readback-becomes-a-config-test-flag">2026-09-03 (policy readback becomes a config-test flag)</a></li>
+<li class="toc__item toc__item--level-3"><a href="#server-scope-directives-are-now-rejected-in-a-vhost-and-the-state-file-defaults">Server-scope directives are now rejected in a vhost, and the state file defaults</a></li>
 <li class="toc__item toc__item--level-3"><a href="#the-dashboard-and-metrics-are-closed-by-default">The dashboard and metrics are closed by default</a></li>
 <li class="toc__item toc__item--level-3"><a href="#botshield-policy-status-is-now-httpd-t-d-dump-botshield-policy">`/botshield/policy-status` is now `httpd -t -D DUMP_BOTSHIELD_POLICY`</a></li>
 <li class="toc__item toc__item--level-3"><a href="#one-decision-log-writer-per-spec-not-one-per-vhost">One decision-log writer per spec, not one per vhost</a></li>
@@ -235,6 +236,72 @@
 </section>
         <div class="prose">
 <h2 id="2026-09-03-policy-readback-becomes-a-config-test-flag">2026-09-03 (policy readback becomes a config-test flag)</h2>
+<h3 id="server-scope-directives-are-now-rejected-in-a-vhost-and-the-state-file-defaults">Server-scope directives are now rejected in a vhost, and the state file defaults</h3>
+<p>Eleven directives configure things the module resolves exactly once
+from the main server: the SHM segment is sized and attached before
+vhosts merge, and the load watchdog is registered against the main
+<code>server_rec</code>. <code>RSRC_CONF</code> permits vhost context, so Apache accepts a
+copy inside <code>&lt;VirtualHost&gt;</code> and the module then never reads it.</p>
+<p>Nine of them logged a startup NOTICE about this. <code>BotShieldDbStatsFile</code>
+and <code>BotShieldFpmStatsFile</code> said nothing at all. A NOTICE was the wrong
+instrument either way: the failure is invisible in the shape operators
+check, because the config parses, configtest is green, httpd starts,
+and the directive does nothing. <code>BotShieldDbStatsFile</code> in a vhost left
+the dashboard reporting &quot;no monitor&quot; behind a clean configtest.</p>
+<p>All eleven now return a config error naming the directive:
+<code>BotShieldShmSize</code>, <code>BotShieldFlaggedIPCapacity</code>, <code>BotShieldBloomIPs</code>,
+<code>BotShieldBloomWindow</code>, <code>BotShieldStateFile</code>,
+<code>BotShieldStateSaveInterval</code>, <code>BotShieldRateLimitEscalateCapacity</code>,
+<code>BotShieldSafeguardCapacity</code>, <code>BotShieldEmbeddedNonceCapacity</code>,
+<code>BotShieldDbStatsFile</code>, <code>BotShieldFpmStatsFile</code>.</p>
+<p><strong><code>BotShieldStateFile</code> now defaults</strong> to <code>&lt;BotShieldDataDir&gt;/state.bin</code>
+wherever the module is enabled on any vhost. Without a state file every
+restart — including one triggered by logrotate — silently empties the
+flagged-IP table, the Bloom filters and every dashboard counter. Unlike
+the synthesised bot rate limit, this default enables no enforcement and
+changes no decision; it only stops the module forgetting what it
+already learned.</p>
+<p><strong><code>BotShieldDbStatsFile</code> and <code>BotShieldFpmStatsFile</code> now default</strong> to
+<code>/run/botshield/db-load.stats</code> and <code>/run/botshield/fpm-load.stats</code>.
+Those are not guesses: <code>botshield-dbmon.service</code> passes
+<code>--state-file /run/botshield/db-load.state</code> and the monitor derives its
+<code>.stats</code> companion from that name, so the two halves are one shipped
+convention. Installing the sidecar units is now enough to light up the
+dashboard's load graph. A missing file is the normal case without them
+and costs one failed open per watchdog tick.</p>
+<p>Together with the state-file default this empties the server-scope
+config file of everything but <code>LoadModule</code> and whatever rotation the
+operator wants on the decision log. On this deployment
+<code>conf.modules.d/30-botshield.conf</code> lost four directives that were all
+either already the default (<code>BotShieldStateSaveInterval 300</code>) or now
+are.</p>
+<p><strong>New directive <code>BotShieldDataDir</code></strong>, default <code>/var/lib/botshield</code>. It
+is the one directive a second httpd instance on the same host has to
+set. Everything the module owns on disk lives in it: the
+auto-generated cookie secret and the state file. Both already defaulted
+into that directory — the secret via a hardcoded path — so two
+instances shared them before this existed. Losing the state file costs
+reputation data; sharing the secret is worse, because whichever
+instance writes it last invalidates every cookie the other has issued.</p>
+<pre><code class="language-apache">BotShieldDataDir /var/lib/botshield/instance2
+</code></pre>
+<p>Deriving a per-instance name automatically was tried and rejected.
+<code>ServerRoot</code> and <code>DefaultRuntimeDir</code> are both unusable: instances
+routinely share a <code>ServerRoot</code>, and the runtime dir is ephemeral and
+reset at boot. The listen set does work, being the one thing the OS
+forces two instances to differ on, but it changes whenever an operator
+edits <code>Listen</code>, which would rename the files and start that instance
+cold. A default that quietly moves is worse than one you declare.</p>
+<p>The directory is created during post-config, the one moment the module
+runs as root, and chowned to the Apache user. Created recursively, so
+nesting under the default works with the parent absent. That is required
+rather than tidy: the periodic save runs in a child after the privilege
+drop, while the shutdown save runs in the root parent. Verified by pointing a live instance at
+<code>/var/lib/botshield/instance2</code> with the parent absent: it came up
+<code>apache:apache</code> mode 700 holding both <code>secret</code> and a 4.6 MB
+<code>state.bin</code>, the latter written by a child. If the directory cannot be created the module logs a NOTICE and
+starts cold; a convenience default is never a reason to refuse to
+start.</p>
 <h3 id="the-dashboard-and-metrics-are-closed-by-default">The dashboard and metrics are closed by default</h3>
 <p>Two new directives, <code>BotShieldDashboardAccess</code> and
 <code>BotShieldMetricsAccess</code>. Each observability endpoint is now served only

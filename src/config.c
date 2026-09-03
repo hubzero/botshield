@@ -25,7 +25,8 @@
 
 #include <httpd.h>
 #include <http_config.h>
-#include <http_core.h>   /* ap_exists_config_define */
+#include <http_core.h>
+#include <ap_listen.h>   /* ap_listeners, for the instance slug */   /* ap_exists_config_define */
 #include <http_log.h>
 #include <ap_config.h>
 #include <ap_mpm.h>
@@ -351,6 +352,7 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->bloom_ips             = BS_DEFAULT_BLOOM_IPS;
     scfg->bloom_window_secs     = BS_DEFAULT_BLOOM_WINDOW;
     scfg->state_file            = NULL;
+    scfg->data_dir              = NULL;
     scfg->state_save_interval   = 300;   /* 5 min default when state file set */
     scfg->captcha_max_inflight  = BS_DEFAULT_CAPTCHA_MAX_INFLIGHT;
     /* E1 Allow-family defaults. bot_classifier / bot_ranges are
@@ -1433,6 +1435,91 @@ static int bs_init_shm_layout(apr_pool_t *pconf, apr_pool_t *ptemp,
     return OK;
 }
 
+/* BotShieldDataDir <absolute path>
+ *
+ * One directive for everything the module owns on disk for this
+ * instance: the auto-secret and the state file. Two httpd instances on
+ * one host give each its own directory and are then fully separated;
+ * without that they share both files, and sharing the secret is the
+ * dangerous half -- whichever instance writes it last invalidates
+ * every cookie the other has issued.
+ *
+ * A directory rather than a per-file directive, and rather than an
+ * instance name folded into filenames, because it is one thing to
+ * remember and it keeps working as the module grows another file. */
+const char *bs_set_data_dir(cmd_parms *cmd, void *dconf, const char *arg)
+{
+    (void)dconf;
+    const char *scope_err = bs_require_server_scope(cmd, "BotShieldDataDir");
+    if (scope_err) return scope_err;
+    if (!arg || !*arg) return "BotShieldDataDir: path required";
+    /* Absolute for the same reason BotShieldStateFile is: Apache's CWD
+     * is undefined, and this directory holds the cookie-signing key. */
+    if (arg[0] != '/') {
+        return apr_psprintf(cmd->pool,
+            "BotShieldDataDir: '%s' must be an absolute path. It holds "
+            "the cookie-signing secret and the reputation state, so it "
+            "must not depend on the directory Apache happened to be "
+            "started from.", arg);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    if (!scfg) return "BotShieldDataDir: no server config";
+    apr_size_t n = strlen(arg);
+    while (n > 1 && arg[n - 1] == '/') n--;         /* tolerate a slash */
+    scfg->data_dir = apr_pstrndup(cmd->pool, arg, n);
+    return NULL;
+}
+
+const char *bs_data_path(apr_pool_t *p, bs_server_cfg *scfg,
+                         const char *name)
+{
+    const char *dir = (scfg && scfg->data_dir) ? scfg->data_dir
+                                               : BS_DEFAULT_DATA_DIR;
+    return apr_psprintf(p, "%s/%s", dir, name);
+}
+
+/* Create the parent directory of a defaulted state file.
+ *
+ * post_config runs as root, before the privilege drop, so this is the
+ * only place the module can make the directory at all. The periodic
+ * save runs in a CHILD (the watchdog is registered non-parent-only), so
+ * the directory has to end up owned by the Apache user; the
+ * shutdown save runs in the root parent and is unaffected either way.
+ *
+ * Best-effort throughout. An operator who configured their own path
+ * never reaches here, and a default path we cannot create just means
+ * bs_state_load logs a notice and the module starts cold. Refusing to
+ * start because a convenience default was unwritable would be a much
+ * worse trade. */
+static void bs_init_state_dir(server_rec *s, const char *path)
+{
+    const char *slash = strrchr(path, '/');
+    if (!slash || slash == path) return;
+    char *dir = apr_pstrndup(s->process->pool, path,
+                             (apr_size_t)(slash - path));
+
+    /* Recursive: the documented way to separate two instances is to
+     * nest, e.g. BotShieldDataDir /var/lib/botshield/instance2, and a
+     * plain mkdir cannot create that when the parent is absent. */
+    apr_status_t rv = apr_dir_make_recursive(dir,
+        APR_FPROT_UREAD | APR_FPROT_UWRITE | APR_FPROT_UEXECUTE,
+        s->process->pool);
+    if (rv != APR_SUCCESS && !APR_STATUS_IS_EEXIST(rv)) {
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, rv, s,
+            "mod_botshield: could not create %s; reputation state will "
+            "not persist across restarts. Create it owned by the Apache "
+            "user, or point BotShieldDataDir somewhere writable.", dir);
+        return;
+    }
+    if (chown(dir, ap_unixd_config.user_id, ap_unixd_config.group_id) != 0) {
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, errno, s,
+            "mod_botshield: chown(%s) failed; the periodic state save "
+            "runs as the Apache user and may not be able to write "
+            "there.", dir);
+    }
+}
+
 /* State persistence: load the previous generation's snapshot if
  * the operator pointed BotShieldStateFile at one, register the
  * graceful-shutdown save, and (if mod_watchdog is loaded and an
@@ -2386,7 +2473,7 @@ static void bs_register_headroom_watchdog(apr_pool_t *pconf,
 
 /* Auto-managed master secret. If no BotShieldSecretFile is configured at
  * vhost scope, populate the server's lookup_defaults dir_cfg with a
- * 32-byte secret loaded from BS_DEFAULT_SECRET_PATH (generating the
+ * 32-byte secret loaded from <BotShieldDataDir>/secret (generating the
  * file on first run). The existing dir_cfg merge logic propagates
  * the master + derived keys down to every <Location> that didn't
  * override.
@@ -2404,8 +2491,14 @@ static apr_status_t bs_load_or_generate_default_secret(
     apr_pool_t *p, apr_pool_t *ptemp, server_rec *s,
     unsigned char out[BS_AUTO_SECRET_BYTES])
 {
-    const char *path = BS_DEFAULT_SECRET_PATH;
-    const char *dir  = "/var/lib/botshield";
+    /* Under BotShieldDataDir, so one directive separates two
+     * instances completely. This used to be a hardcoded path, which
+     * meant two instances silently shared a cookie-signing key. */
+    bs_server_cfg *sc0 = ap_get_module_config(s->module_config,
+                                              &botshield_module);
+    const char *path = bs_data_path(p, sc0, BS_DATA_SECRET_NAME);
+    const char *dir  = (sc0 && sc0->data_dir) ? sc0->data_dir
+                                              : BS_DEFAULT_DATA_DIR;
 
     apr_file_t *f = NULL;
     apr_status_t rv = apr_file_open(&f, path,
@@ -2697,6 +2790,36 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     }
     if (rv != OK) return rv;
 
+    /* Default the state file where the module is actually in use.
+     *
+     * Gated on any_enabled anywhere in the server list, not on the main
+     * server's own flag: a deployment that writes BotShieldEnabled only
+     * inside its one real vhost still wants its reputation state to
+     * survive a restart. Servers with the module off get no file and no
+     * directory. */
+    if (!scfg->state_file) {
+        int used = 0;
+        for (server_rec *sv = s; sv && !used; sv = sv->next) {
+            bs_server_cfg *vc = ap_get_module_config(sv->module_config,
+                                                     &botshield_module);
+            if (vc && vc->any_enabled) used = 1;
+        }
+        if (used) {
+            scfg->state_file = bs_data_path(pconf, scfg, BS_DATA_STATE_NAME);
+            bs_init_state_dir(s, scfg->state_file);
+            ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+                "mod_botshield: BotShieldStateFile defaulted to %s. "
+                "Without a state file the flagged-IP table, Bloom "
+                "filters and dashboard counters reset on every "
+                "restart.%s",
+                scfg->state_file,
+                scfg->data_dir ? "" :
+                    " If you run a second httpd instance on this host, "
+                    "give each its own BotShieldDataDir -- otherwise "
+                    "they share this file and the cookie-signing secret "
+                    "beside it.");
+        }
+    }
     bs_init_state_persistence(pconf, s, scfg);
     bs_populate_auto_secret(pconf, ptemp, s);
     bs_populate_default_algorithm(s);
@@ -2740,7 +2863,7 @@ void bs_child_init(apr_pool_t *p, server_rec *s)
  * level / UI, score thresholds, SHM sizing, rate-limit family,
  * state-save, endpoint-prefix, plus the four config-time helpers
  * (bs_load_config_file / bs_validate_secret_key / bs_cohort_resolve
- * / bs_warn_if_virtual_scope) reused by feature-file setters via
+ * / bs_require_server_scope) reused by feature-file setters via
  * cross-file decls in botshield.h. */
 
 /* --- Directive setters --- */
@@ -3139,23 +3262,39 @@ const char *bs_set_form_captcha(cmd_parms *cmd, void *cfg_v, int flag)
  * are silently ignored. The footgun was hard to spot in operator
  * configs — surface it explicitly so they don't think their override
  * took effect. */
-void bs_warn_if_virtual_scope(cmd_parms *cmd, const char *name)
+/* Refuse a server-scope directive written inside <VirtualHost>.
+ *
+ * These configure things the module resolves exactly once from the main
+ * server: the SHM segment is sized and attached before vhosts merge,
+ * and the load watchdog is registered against the main server_rec. A
+ * copy on a vhost's server_rec is parsed and then never read.
+ *
+ * This was a NOTICE for a while, which was not enough. The failure it
+ * produces is invisible in the shape operators actually check: the
+ * config parses, configtest is green, httpd starts, and the directive
+ * simply does nothing -- BotShieldDbStatsFile in a vhost left the
+ * dashboard reporting "no monitor" behind a clean configtest. A notice
+ * in the error log at startup is not where anyone looks when the thing
+ * they configured appears to be off.
+ *
+ * RSRC_CONF permits vhost context, so Apache will not catch this for
+ * us; the check has to live here. */
+const char *bs_require_server_scope(cmd_parms *cmd, const char *name)
 {
     if (cmd->server && cmd->server->is_virtual) {
-        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, cmd->server,
-            "mod_botshield: %s placed inside <VirtualHost> at %s:%d "
-            "is ignored - SHM is sized once from the main server "
-            "scope. Move this directive outside <VirtualHost>.",
-            name,
-            cmd->directive && cmd->directive->filename
-                ? cmd->directive->filename : "(unknown)",
-            cmd->directive ? cmd->directive->line_num : 0);
+        return apr_psprintf(cmd->pool,
+            "%s: server scope only. It is resolved once from the main "
+            "server -- before vhosts merge -- so a copy inside "
+            "<VirtualHost> would be parsed and then silently ignored. "
+            "Move it outside the vhost.", name);
     }
+    return NULL;
 }
 
 const char *bs_set_shm_size(cmd_parms *cmd, void *dconf, const char *arg)
 {
-    bs_warn_if_virtual_scope(cmd, "BotShieldShmSize");
+    { const char *scope_err = bs_require_server_scope(cmd, "BotShieldShmSize");
+      if (scope_err) return scope_err; }
     (void)dconf;
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
@@ -3194,7 +3333,8 @@ const char *bs_set_flagged_capacity(cmd_parms *cmd, void *dconf,
                                            const char *arg)
 {
     (void)dconf;
-    bs_warn_if_virtual_scope(cmd, "BotShieldFlaggedIPCapacity");
+    { const char *scope_err = bs_require_server_scope(cmd, "BotShieldFlaggedIPCapacity");
+      if (scope_err) return scope_err; }
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
     long n;
@@ -3453,7 +3593,8 @@ const char *bs_set_bloom_ips(cmd_parms *cmd, void *dconf,
                                     const char *arg)
 {
     (void)dconf;
-    bs_warn_if_virtual_scope(cmd, "BotShieldBloomIPs");
+    { const char *scope_err = bs_require_server_scope(cmd, "BotShieldBloomIPs");
+      if (scope_err) return scope_err; }
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
     long n;
@@ -3471,7 +3612,8 @@ const char *bs_set_bloom_window(cmd_parms *cmd, void *dconf,
                                        const char *arg)
 {
     (void)dconf;
-    bs_warn_if_virtual_scope(cmd, "BotShieldBloomWindow");
+    { const char *scope_err = bs_require_server_scope(cmd, "BotShieldBloomWindow");
+      if (scope_err) return scope_err; }
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
     long n;
@@ -3505,7 +3647,8 @@ const char *bs_set_state_file(cmd_parms *cmd, void *dconf,
                                      const char *arg)
 {
     (void)dconf;
-    bs_warn_if_virtual_scope(cmd, "BotShieldStateFile");
+    { const char *scope_err = bs_require_server_scope(cmd, "BotShieldStateFile");
+      if (scope_err) return scope_err; }
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
     if (!arg || !*arg) return "BotShieldStateFile requires a path";
@@ -3532,7 +3675,8 @@ const char *bs_set_state_save_interval(cmd_parms *cmd, void *dconf,
                                               const char *arg)
 {
     (void)dconf;
-    bs_warn_if_virtual_scope(cmd, "BotShieldStateSaveInterval");
+    { const char *scope_err = bs_require_server_scope(cmd, "BotShieldStateSaveInterval");
+      if (scope_err) return scope_err; }
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
     /* 0 = shutdown-only. Otherwise must be in a sane operational
@@ -3842,7 +3986,8 @@ const char *bs_set_rate_escalate_capacity(cmd_parms *cmd,
                                                  const char *arg)
 {
     (void)dconf;
-    bs_warn_if_virtual_scope(cmd, "BotShieldRateLimitEscalateCapacity");
+    { const char *scope_err = bs_require_server_scope(cmd, "BotShieldRateLimitEscalateCapacity");
+      if (scope_err) return scope_err; }
     char *end = NULL;
     long n = strtol(arg, &end, 10);
     if (!end || *end
@@ -3975,7 +4120,8 @@ const char *bs_set_safeguard_capacity(cmd_parms *cmd,
                                              const char *arg)
 {
     (void)dconf;
-    bs_warn_if_virtual_scope(cmd, "BotShieldSafeguardCapacity");
+    { const char *scope_err = bs_require_server_scope(cmd, "BotShieldSafeguardCapacity");
+      if (scope_err) return scope_err; }
     char *end = NULL;
     long n = strtol(arg, &end, 10);
     if (!end || *end
@@ -4000,7 +4146,8 @@ const char *bs_set_nonce_capacity(cmd_parms *cmd,
                                          const char *arg)
 {
     (void)dconf;
-    bs_warn_if_virtual_scope(cmd, "BotShieldEmbeddedNonceCapacity");
+    { const char *scope_err = bs_require_server_scope(cmd, "BotShieldEmbeddedNonceCapacity");
+      if (scope_err) return scope_err; }
     char *end = NULL;
     long n = strtol(arg, &end, 10);
     if (!end || *end ||

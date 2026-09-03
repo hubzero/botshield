@@ -262,7 +262,12 @@ static void bs_load_read_db_stats(server_rec *sv, bs_server_cfg *scfg)
 {
     if (!bs_shm.header) return;
     char buf[512];
-    if (!bs_load_read_stats_line(sv, scfg->db_stats_file,
+    /* Defaulted rather than required: installing the shipped
+     * botshield-dbmon.service is then enough to light up the
+     * dashboard's load graph. A missing file no-ops below. */
+    const char *db_path = scfg->db_stats_file ? scfg->db_stats_file
+                                              : BS_DEFAULT_DB_STATS_FILE;
+    if (!bs_load_read_stats_line(sv, db_path,
                                  &scfg->db_stats_mtime, buf, sizeof(buf))) {
         return;
     }
@@ -321,7 +326,9 @@ static void bs_load_read_fpm_stats(server_rec *sv, bs_server_cfg *scfg)
 {
     if (!bs_shm.metrics) return;
     char buf[512];
-    if (!bs_load_read_stats_line(sv, scfg->fpm_stats_file,
+    const char *fpm_path = scfg->fpm_stats_file ? scfg->fpm_stats_file
+                                                : BS_DEFAULT_FPM_STATS_FILE;
+    if (!bs_load_read_stats_line(sv, fpm_path,
                                  &scfg->fpm_stats_mtime, buf, sizeof(buf))) {
         return;
     }
@@ -690,6 +697,8 @@ const char *bs_set_load_state_file(cmd_parms *cmd, void *dconf,
 const char *bs_set_fpm_stats_file(cmd_parms *cmd, void *dconf,
                                   const char *arg)
 {
+    { const char *scope_err = bs_require_server_scope(cmd, "BotShieldFpmStatsFile");
+      if (scope_err) return scope_err; }
     (void)dconf;
     if (!arg || !*arg) return "BotShieldFpmStatsFile: path required";
     if (arg[0] != '/') return "BotShieldFpmStatsFile: path must be absolute";
@@ -762,6 +771,8 @@ apr_uint32_t bs_latency_current_us(void)
 const char *bs_set_db_stats_file(cmd_parms *cmd, void *dconf,
                                  const char *arg)
 {
+    { const char *scope_err = bs_require_server_scope(cmd, "BotShieldDbStatsFile");
+      if (scope_err) return scope_err; }
     (void)dconf;
     if (!arg || !*arg) return "BotShieldDbStatsFile: path required";
     if (arg[0] != '/') return "BotShieldDbStatsFile: path must be absolute";

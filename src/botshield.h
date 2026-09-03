@@ -95,7 +95,9 @@ extern "C" {
 /* Auto-generated when no BotShieldSecretFile is configured;
  * see bs_ensure_default_secret. Distribute across hosts for shared
  * cookie validation, or override with BotShieldSecretFile. */
-#define BS_DEFAULT_SECRET_PATH "/var/lib/botshield/secret"
+/* Basenames inside BotShieldDataDir. */
+#define BS_DATA_SECRET_NAME "secret"
+#define BS_DATA_STATE_NAME  "state.bin"
 #define BS_AUTO_SECRET_BYTES   32
 #define BS_WIDGET_MARKER      "<!-- BOTSHIELD -->"
 
@@ -350,6 +352,9 @@ typedef struct bs_server_cfg {
     int         bloom_ips;          /* expected working-set size */
     int         bloom_window_secs;  /* full window; rotation at window/2 */
     const char *state_file;         /* NULL = persistence off */
+    /* BotShieldDataDir: where this instance's own files live -- the
+     * auto-secret and the state file. NULL means BS_DEFAULT_DATA_DIR. */
+    const char *data_dir;
     int         state_save_interval;/* seconds; 0 = shutdown-only */
     int         captcha_max_inflight;  /* M8.1: cap on outstanding siteverifies */
     /* E1 — verified legit-crawler allow-list. State loaded in
@@ -636,7 +641,68 @@ int bs_bot_name_valid(const char *s);
 /* Log a NOTICE if the directive is being set inside a <VirtualHost>
  * scope — used for SHM-sizing directives that the post_config hook
  * only reads off the main server's scfg. */
-void bs_warn_if_virtual_scope(cmd_parms *cmd, const char *name);
+/* Default BotShieldStateFile: <dir>/<instance>.state.bin
+ *
+ * Absolute, not ServerRoot-relative like BS_DEFAULT_DECISION_LOG: the
+ * file carries mutable reputation state and the keyed-hash collision
+ * keys, so it belongs under /var/lib rather than beside the logs, and
+ * the setter refuses relative paths for that reason.
+ *
+ * Defaulted at all because without it every restart -- including a
+ * logrotate one -- silently empties the flagged-IP table, the Bloom
+ * filters and every dashboard counter. That is a policy-free default:
+ * it enables no enforcement and changes no decision, it only stops the
+ * module forgetting what it already learned. Contrast the synthesised
+ * rate limit, which invents enforcement nobody asked for.
+ *
+ * Everything the module owns per instance lives in one directory, so
+ * a second httpd on the same host needs one directive rather than one
+ * per file. The directory already held two colliding files before this
+ * was a directive at all: the state file and the auto-secret. The
+ * secret is the worse of the two -- two instances sharing a cookie
+ * HMAC key means whichever wrote last invalidates the other's issued
+ * cookies.
+ *
+ * Deriving a per-instance name instead was tried and rejected.
+ * ServerRoot and DefaultRuntimeDir are both unusable: instances
+ * routinely share a ServerRoot, and the runtime dir is ephemeral and
+ * reset at boot. The listen set does work, being the one thing the OS
+ * forces to differ, but it changes whenever an operator edits Listen,
+ * which would rename the files and start that instance cold. A default
+ * that quietly moves is worse than one you have to declare.
+ *
+ * bs_init_state_dir creates the parent as root during post_config and
+ * hands it to the Apache user, because the periodic save runs in a
+ * child. Everything about it is best-effort: a state file that cannot
+ * be written degrades to "starts cold", never to a failed start. */
+#define BS_DEFAULT_DATA_DIR "/var/lib/botshield"
+
+/* Load telemetry published by the sidecars in tools/. The paths are
+ * not a guess: botshield-dbmon.service passes
+ * --state-file /run/botshield/db-load.state, and the monitor derives
+ * its .stats companion from that name, so these are the two halves of
+ * one shipped convention. Defaulted so installing the units is enough
+ * to light up the dashboard's load graph.
+ *
+ * A missing file is the normal case and costs one failed open per
+ * watchdog tick -- the reader no-ops and the graph stays empty, which
+ * is what a deployment without the sidecars should see. Unlike the
+ * data dir these are read-only and operator-published, so two
+ * instances sharing them is fine: they are reading the same host's
+ * telemetry. */
+#define BS_DEFAULT_DB_STATS_FILE  "/run/botshield/db-load.stats"
+#define BS_DEFAULT_FPM_STATS_FILE "/run/botshield/fpm-load.stats"
+
+/* Refuse a server-scope-only directive written inside <VirtualHost>.
+ * Returns an error string for the setter to return, or NULL. */
+const char *bs_require_server_scope(cmd_parms *cmd, const char *name);
+
+/* BotShieldDataDir: the directory holding this instance's own files. */
+const char *bs_set_data_dir(cmd_parms *cmd, void *dconf, const char *arg);
+
+/* <data dir>/<name>, using the configured dir or the default. */
+const char *bs_data_path(apr_pool_t *p, struct bs_server_cfg *scfg,
+                         const char *name);
 
 /* Slurp a file into pool memory with a max-size cap. Used for the
  * secret/secondary-secret/captcha-secret keys and for the operator-

@@ -98,6 +98,8 @@
 <li class="toc__item toc__item--level-2"><a href="#captcha-tier">Captcha tier</a></li>
 <li class="toc__item toc__item--level-2"><a href="#captcha-verify-endpoint-hardening">Captcha-verify endpoint hardening</a></li>
 <li class="toc__item toc__item--level-2"><a href="#shm-sizing-and-persistence">SHM sizing and persistence</a></li>
+<li class="toc__item toc__item--level-3"><a href="#botshielddatadir-and-running-two-instances">`BotShieldDataDir` and running two instances</a></li>
+<li class="toc__item toc__item--level-3"><a href="#these-are-all-server-scope-and-enforced">These are all server scope, and enforced</a></li>
 <li class="toc__item toc__item--level-2"><a href="#ua-classification-and-allow-list">UA classification and allow list</a></li>
 <li class="toc__item toc__item--level-2"><a href="#rate-limit">Rate limit</a></li>
 <li class="toc__item toc__item--level-3"><a href="#alternation-on-ua">Alternation on `ua=`</a></li>
@@ -707,9 +709,24 @@ Retry-After; <code>MaxInFlight</code> returns 503. 0 on <code>RateLimit</code> d
 <td><code>604800</code> (3600..2592000)</td>
 </tr>
 <tr>
+<td><code>BotShieldDataDir</code></td>
+<td><code>/path</code></td>
+<td><code>/var/lib/botshield</code></td>
+</tr>
+<tr>
+<td><code>BotShieldDbStatsFile</code></td>
+<td><code>/path</code></td>
+<td><code>/run/botshield/db-load.stats</code></td>
+</tr>
+<tr>
+<td><code>BotShieldFpmStatsFile</code></td>
+<td><code>/path</code></td>
+<td><code>/run/botshield/fpm-load.stats</code></td>
+</tr>
+<tr>
 <td><code>BotShieldStateFile</code></td>
 <td><code>/path</code></td>
-<td>unset (persistence off)</td>
+<td><code>&lt;datadir&gt;/state.bin</code></td>
 </tr>
 <tr>
 <td><code>BotShieldStateSaveInterval</code></td>
@@ -742,13 +759,86 @@ underprovisioned.</p>
 SHM tables. Default <code>/64</code> is per-subscriber for typical ISP
 allocations; tighter values (<code>/56</code>, <code>/48</code>) flag larger blocks of
 addresses sharing reputation.</p>
-<p><code>BotShieldStateFile</code> enables crash-durable persistence for the
-flagged-IP table, the Bloom filters, and the metrics counters and
-dashboard bucket rings. Rate-limit counters are deliberately
-excluded — see <a href="deployment.md">Deployment</a>. The periodic save
-requires <code>mod_watchdog</code>, the graceful-shutdown save runs regardless.
-State format mismatches on load reject the file with a NOTICE and
-start fresh — never a startup failure.</p>
+<p><code>BotShieldStateFile</code> gives crash-durable persistence to the flagged-IP
+table, the Bloom filters, and the metrics counters and dashboard bucket
+rings. Rate-limit counters are deliberately excluded — see
+<a href="deployment.md">Deployment</a>. The periodic save requires <code>mod_watchdog</code>;
+the graceful-shutdown save runs regardless. State format mismatches on
+load reject the file with a NOTICE and start fresh — never a startup
+failure.</p>
+<p><strong>It defaults</strong> to <code>&lt;BotShieldDataDir&gt;/state.bin</code> wherever the module is
+enabled on any vhost. Without a state file every restart — including
+one triggered by logrotate — silently empties the flagged-IP table, the
+Bloom filters and every dashboard counter, and nothing in the output
+says so. That is a default that enables no enforcement and changes no
+decision; it only stops the module forgetting what it already learned.</p>
+<h3 id="botshielddatadir-and-running-two-instances"><code>BotShieldDataDir</code> and running two instances</h3>
+<p><code>BotShieldDataDir</code> is the one directive a second httpd instance on the
+same host has to set. Everything the module owns on disk lives in it:</p>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>What it is</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>secret</code></td>
+<td>the auto-generated cookie-signing key</td>
+</tr>
+<tr>
+<td><code>state.bin</code></td>
+<td>flagged-IP table, Bloom filters, counters</td>
+</tr>
+</tbody>
+</table>
+<p>Both default into <code>/var/lib/botshield</code>, so two instances that leave it
+alone share both. Sharing the state file loses reputation data;
+<strong>sharing the secret is worse</strong>, because whichever instance writes it
+last invalidates every cookie the other has issued. Give the second one
+its own:</p>
+<pre><code class="language-apache">BotShieldDataDir /var/lib/botshield/instance2
+</code></pre>
+<p>The directory is created at startup — during post-config, the one
+moment the module runs as root — and chowned to the Apache user, which
+is required rather than tidy: the periodic state save runs in a child
+after the privilege drop, while the shutdown save runs in the root
+parent. It is created recursively, so nesting under the default works
+with the parent absent. If it cannot be created the module logs a
+NOTICE and starts cold; a convenience default is never a reason to
+refuse to start.</p>
+<p>Deriving a per-instance name automatically was tried and rejected.
+<code>ServerRoot</code> and <code>DefaultRuntimeDir</code> are both unusable: instances
+routinely share a <code>ServerRoot</code>, and the runtime dir is ephemeral and
+reset at boot. The listen set does work, being the one thing the OS
+forces two instances to differ on, but it changes whenever an operator
+edits <code>Listen</code>, which would rename the files and start that instance
+cold. A default that quietly moves is worse than one you declare.</p>
+<p>The two stats paths default to what the sidecars in <code>tools/</code> publish:
+<code>botshield-dbmon.service</code> passes
+<code>--state-file /run/botshield/db-load.state</code> and the monitor derives its
+<code>.stats</code> companion from that name, so the two halves are one shipped
+convention. Installing the units is therefore enough to light up the
+dashboard's load graph, with no directive. A missing file is the normal
+case for a deployment without the sidecars and costs one failed open
+per watchdog tick; the graph simply stays empty.</p>
+<p>Unlike <code>BotShieldDataDir</code> these are read-only and operator-published,
+so two instances sharing them is correct — they are reading the same
+host's telemetry.</p>
+<h3 id="these-are-all-server-scope-and-enforced">These are all server scope, and enforced</h3>
+<p>Every directive in the table above is <strong>rejected inside
+<code>&lt;VirtualHost&gt;</code></strong>, with an error naming the directive. They are
+resolved once from the main server: the SHM segment is sized and
+attached before vhosts merge, and the load watchdog is registered
+against the main <code>server_rec</code>. A copy on a vhost is parsed and then
+never read.</p>
+<p>This used to be a startup NOTICE, which was not enough. The failure it
+produces is invisible in the shape operators actually check — the
+config parses, configtest is green, httpd starts, and the directive
+simply does nothing. <code>BotShieldDbStatsFile</code> in a vhost left the
+dashboard reporting &quot;no monitor&quot; behind a clean configtest. <code>RSRC_CONF</code>
+permits vhost context, so Apache will not catch it; the module has to.</p>
 <h2 id="ua-classification-and-allow-list">UA classification and allow list</h2>
 <p>Each request gets one User-Agent classification, computed once and
 cached for every downstream consumer. It composes four passes:
@@ -1618,6 +1708,11 @@ That happened on geodynamics.org on 2026-08-08.</p>
 log, so there is nothing for a jail to count. Verified by probe: eight
 refused dashboard requests produced zero error-log lines from the
 module.</p>
+<p>No <code>&lt;Location&gt;</code> block is needed to make these endpoints reachable. They
+sit under the vhost's DocumentRoot as far as the directory walk is
+concerned, so whatever grants the document root grants them, and the
+module applies the ACL after that. A <code>Require all granted</code> written
+specifically for them does nothing.</p>
 <p>They deliberately stop at an IP list. Apache already has authentication
 and authorization, they compose by wrapping the path in a <code>&lt;Location&gt;</code>,
 and a second half-implementation inside this module would be the worse

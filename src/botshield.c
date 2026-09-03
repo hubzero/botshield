@@ -467,6 +467,15 @@ static const command_rec bs_cmds[] = {
                  "Rotation happens at half-window. Default 604800 (1 week) "
                  "→ 3.5 day guaranteed minimum lifetime, 7 day max. "
                  "Range 3600..2592000."),
+    AP_INIT_TAKE1("BotShieldDataDir", bs_set_data_dir, NULL,
+                 RSRC_CONF,
+                 "Directory holding this instance's own files: the "
+                 "auto-generated cookie secret and the persistent "
+                 "state. Absolute path; default /var/lib/botshield. "
+                 "Created at startup and owned by the Apache user. Give "
+                 "each httpd instance on a host its own, or they share "
+                 "both files -- and a shared cookie secret means one "
+                 "instance invalidates the other's cookies."),
     AP_INIT_TAKE1("BotShieldStateFile", bs_set_state_file, NULL,
                  RSRC_CONF,
                  "Path to a binary file used to persist flagged-IP and "

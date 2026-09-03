@@ -350,7 +350,10 @@ All directives in this section are **server scope only**. Inside
 | `BotShieldIPv6PrefixLen` | `N` (0..128) | `64` |
 | `BotShieldBloomIPs` | `N` | `1000000` (1000..10000000) |
 | `BotShieldBloomWindow` | `N` (sec) | `604800` (3600..2592000) |
-| `BotShieldStateFile` | `/path` | unset (persistence off) |
+| `BotShieldDataDir` | `/path` | `/var/lib/botshield` |
+| `BotShieldDbStatsFile` | `/path` | `/run/botshield/db-load.stats` |
+| `BotShieldFpmStatsFile` | `/path` | `/run/botshield/fpm-load.stats` |
+| `BotShieldStateFile` | `/path` | `<datadir>/state.bin` |
 | `BotShieldStateSaveInterval` | `N` (sec) | `300` (0=shutdown-only) |
 | `BotShieldRateLimitEscalateCapacity` | `N` | `50000` |
 | `BotShieldSafeguardCapacity` | `N` | `50000` |
@@ -367,13 +370,86 @@ SHM tables. Default `/64` is per-subscriber for typical ISP
 allocations; tighter values (`/56`, `/48`) flag larger blocks of
 addresses sharing reputation.
 
-`BotShieldStateFile` enables crash-durable persistence for the
-flagged-IP table, the Bloom filters, and the metrics counters and
-dashboard bucket rings. Rate-limit counters are deliberately
-excluded — see [Deployment](deployment.md). The periodic save
-requires `mod_watchdog`, the graceful-shutdown save runs regardless.
-State format mismatches on load reject the file with a NOTICE and
-start fresh — never a startup failure.
+`BotShieldStateFile` gives crash-durable persistence to the flagged-IP
+table, the Bloom filters, and the metrics counters and dashboard bucket
+rings. Rate-limit counters are deliberately excluded — see
+[Deployment](deployment.md). The periodic save requires `mod_watchdog`;
+the graceful-shutdown save runs regardless. State format mismatches on
+load reject the file with a NOTICE and start fresh — never a startup
+failure.
+
+**It defaults** to `<BotShieldDataDir>/state.bin` wherever the module is
+enabled on any vhost. Without a state file every restart — including
+one triggered by logrotate — silently empties the flagged-IP table, the
+Bloom filters and every dashboard counter, and nothing in the output
+says so. That is a default that enables no enforcement and changes no
+decision; it only stops the module forgetting what it already learned.
+
+### `BotShieldDataDir` and running two instances
+
+`BotShieldDataDir` is the one directive a second httpd instance on the
+same host has to set. Everything the module owns on disk lives in it:
+
+| File | What it is |
+|---|---|
+| `secret` | the auto-generated cookie-signing key |
+| `state.bin` | flagged-IP table, Bloom filters, counters |
+
+Both default into `/var/lib/botshield`, so two instances that leave it
+alone share both. Sharing the state file loses reputation data;
+**sharing the secret is worse**, because whichever instance writes it
+last invalidates every cookie the other has issued. Give the second one
+its own:
+
+```apache
+BotShieldDataDir /var/lib/botshield/instance2
+```
+
+The directory is created at startup — during post-config, the one
+moment the module runs as root — and chowned to the Apache user, which
+is required rather than tidy: the periodic state save runs in a child
+after the privilege drop, while the shutdown save runs in the root
+parent. It is created recursively, so nesting under the default works
+with the parent absent. If it cannot be created the module logs a
+NOTICE and starts cold; a convenience default is never a reason to
+refuse to start.
+
+Deriving a per-instance name automatically was tried and rejected.
+`ServerRoot` and `DefaultRuntimeDir` are both unusable: instances
+routinely share a `ServerRoot`, and the runtime dir is ephemeral and
+reset at boot. The listen set does work, being the one thing the OS
+forces two instances to differ on, but it changes whenever an operator
+edits `Listen`, which would rename the files and start that instance
+cold. A default that quietly moves is worse than one you declare.
+
+The two stats paths default to what the sidecars in `tools/` publish:
+`botshield-dbmon.service` passes
+`--state-file /run/botshield/db-load.state` and the monitor derives its
+`.stats` companion from that name, so the two halves are one shipped
+convention. Installing the units is therefore enough to light up the
+dashboard's load graph, with no directive. A missing file is the normal
+case for a deployment without the sidecars and costs one failed open
+per watchdog tick; the graph simply stays empty.
+
+Unlike `BotShieldDataDir` these are read-only and operator-published,
+so two instances sharing them is correct — they are reading the same
+host's telemetry.
+
+### These are all server scope, and enforced
+
+Every directive in the table above is **rejected inside
+`<VirtualHost>`**, with an error naming the directive. They are
+resolved once from the main server: the SHM segment is sized and
+attached before vhosts merge, and the load watchdog is registered
+against the main `server_rec`. A copy on a vhost is parsed and then
+never read.
+
+This used to be a startup NOTICE, which was not enough. The failure it
+produces is invisible in the shape operators actually check — the
+config parses, configtest is green, httpd starts, and the directive
+simply does nothing. `BotShieldDbStatsFile` in a vhost left the
+dashboard reporting "no monitor" behind a clean configtest. `RSRC_CONF`
+permits vhost context, so Apache will not catch it; the module has to.
 
 ## UA classification and allow list
 
@@ -1013,6 +1089,12 @@ These directives refuse inside the module and write nothing to the error
 log, so there is nothing for a jail to count. Verified by probe: eight
 refused dashboard requests produced zero error-log lines from the
 module.
+
+No `<Location>` block is needed to make these endpoints reachable. They
+sit under the vhost's DocumentRoot as far as the directory walk is
+concerned, so whatever grants the document root grants them, and the
+module applies the ACL after that. A `Require all granted` written
+specifically for them does nothing.
 
 They deliberately stop at an IP list. Apache already has authentication
 and authorization, they compose by wrapping the path in a `<Location>`,
