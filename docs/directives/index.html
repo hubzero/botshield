@@ -117,6 +117,7 @@
 <li class="toc__item toc__item--level-2"><a href="#observability-endpoint-access">Observability endpoint access</a></li>
 <li class="toc__item toc__item--level-3"><a href="#why-this-is-not-a-location">Why this is not a `&lt;Location&gt;`</a></li>
 <li class="toc__item toc__item--level-2"><a href="#decision-log">Decision log</a></li>
+<li class="toc__item toc__item--level-3"><a href="#the-default-is-already-rotated">The default is already rotated</a></li>
 <li class="toc__item toc__item--level-3"><a href="#rotation-and-the-path-your-monitoring-reads">Rotation and the path your monitoring reads</a></li>
 <li class="toc__item toc__item--level-2"><a href="#log-only-staging-mode">Log-only / staging mode</a></li>
 <li class="toc__item toc__item--level-2"><a href="#app-bridge">App bridge</a></li>
@@ -1752,7 +1753,7 @@ so that line is the only trace a probe leaves.</p>
 <tr>
 <td><code>BotShieldDecisionLog</code></td>
 <td><code>/path</code>, <code>logs/path</code>, or <code>&quot;|program&quot;</code></td>
-<td>unset</td>
+<td>rotating log beside <code>ErrorLog</code></td>
 <td>server / vhost</td>
 </tr>
 </tbody>
@@ -1766,6 +1767,34 @@ BotShieldDecisionLog &quot;|/usr/bin/rotatelogs /var/log/httpd/bs.%Y%m%d 86400&q
 A value beginning with <code>|</code> is a piped-log spec handed to Apache's own
 <code>ap_open_piped_log</code>, so <code>rotatelogs</code> and friends work as they do for any
 other Apache log.</p>
+<h3 id="the-default-is-already-rotated">The default is already rotated</h3>
+<p>With no directive the module builds this itself:</p>
+<pre><code>|&lt;sbindir&gt;/rotatelogs -n 7 -L &lt;dir&gt;/botshield.log.current &lt;dir&gt;/botshield.log 100M
+</code></pre>
+<p>Both halves are deduced rather than hardcoded. <code>&lt;sbindir&gt;</code> comes from
+<code>apxs -q SBINDIR</code> at build time, the same apxs that compiled the
+module. <code>&lt;dir&gt;</code> is the directory holding the main server's <code>ErrorLog</code>,
+so the decision log lands beside it.</p>
+<p>Rotation is the default rather than a plain file because the fallback
+is a file that grows without bound, and this log records every request
+the access log suppresses. On this deployment that is 100 MB about
+every 38 hours. An unbounded default is a disk-full incident with a
+long fuse.</p>
+<p><code>ErrorLog</code> is the anchor for a reason found in testing. A fixed
+<code>logs/botshield.log</code> resolves through <code>ServerRoot</code>, and two instances
+sharing a <code>ServerRoot</code> then default to the <em>same file</em> — a test
+instance's rotator opened production's decision log. Two <code>rotatelogs</code>
+on one <code>-n</code> slot set truncate each other's slots, which is the exact
+failure that ate a day of this log. Anchoring to <code>ErrorLog</code> means
+instances that already log separately get separate decision logs; two
+instances sharing an <code>ErrorLog</code> path would still collide, but their
+error logs already do.</p>
+<p>If <code>rotatelogs</code> is not present the default degrades to an unrotated
+file and says so with a NOTICE. If it is present but fails to spawn,
+the module warns and falls back to the same file rather than refusing
+to start — a convenience default must never be why httpd will not come
+up. A pipe <em>you</em> configured failing is still a hard error, because you
+asked for it.</p>
 <h3 id="rotation-and-the-path-your-monitoring-reads">Rotation and the path your monitoring reads</h3>
 <p><code>rotatelogs -n N</code> cycles round-robin through <code>logfile</code>, <code>logfile.1</code> …
 <code>logfile.N-1</code>. <strong>Which file is current changes over the day</strong>, and the

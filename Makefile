@@ -102,6 +102,13 @@ $(GEN_VBOTS_C): $(GEN_VBOTS_JSON) $(GEN_VBOTS_OVERLAYS) $(GEN_VBOTS_TOOL)
 # Pass warnings through apxs to the underlying compiler.
 CFLAGS_WARN := -Wc,-Wall -Wc,-Wextra -Wc,-Wno-unused-parameter
 
+# Where rotatelogs lives, asked of the same apxs that builds us rather
+# than hardcoded. The module uses it to build a rotating decision-log
+# default; if the binary is absent at runtime the default falls back to
+# a plain file, so a wrong answer here degrades rather than breaks.
+APXS_SBINDIR := $(shell $(APXS) -q SBINDIR 2>/dev/null)
+CFLAGS_ROTATELOGS := -Wc,-DBS_ROTATELOGS_PATH='\"$(APXS_SBINDIR)/rotatelogs\"'
+
 # Hide cross-file bs_* symbols from the dynamic-linker symbol table.
 # Apache modules share the parent httpd's dynamic symbol space; without
 # this, two modules with same-named non-static functions could resolve
@@ -143,7 +150,7 @@ LIBS := -lcrypto -lcurl -ljson-c
 all: build
 
 build: $(GEN_BOT_DIR_C) $(GEN_BROWSER_C) $(GEN_VBOTS_C)
-	$(APXS) -c $(CFLAGS_WARN) $(CFLAGS_VIS) $(SRC) $(LIBS)
+	$(APXS) -c $(CFLAGS_WARN) $(CFLAGS_ROTATELOGS) $(CFLAGS_VIS) $(SRC) $(LIBS)
 
 install: build
 	@# apxs -i derives the installed .so name from the .la basename,
@@ -240,7 +247,7 @@ docs-deps:
 # --- M10.1 ---
 
 sanitize: clean
-	$(APXS) -c $(CFLAGS_WARN) $(CFLAGS_VIS) $(CFLAGS_SAN) $(SRC) $(LIBS)
+	$(APXS) -c $(CFLAGS_WARN) $(CFLAGS_ROTATELOGS) $(CFLAGS_VIS) $(CFLAGS_SAN) $(SRC) $(LIBS)
 
 install-sanitize: sanitize
 	sudo install -m 644 src/.libs/$(MOD_NAME).so \

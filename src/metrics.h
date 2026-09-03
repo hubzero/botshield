@@ -176,7 +176,27 @@ void bs_suppress_access_log(request_rec *r);
  * reasoning as the shipped drop-in not carrying a CustomLog, which
  * would otherwise leave an empty file on every host that installed the
  * RPM. */
+/* Plain-file fallback, ServerRoot-relative like ErrorLog. Used when
+ * rotatelogs is missing. */
 #define BS_DEFAULT_DECISION_LOG "logs/botshield.log"
+
+/* Where rotatelogs lives, from `apxs -q SBINDIR` at build time. The
+ * fallback matters only for a build whose apxs could not answer. */
+#ifndef BS_ROTATELOGS_PATH
+#define BS_ROTATELOGS_PATH "/usr/sbin/rotatelogs"
+#endif
+
+/* Rotation shape for the default decision log: seven round-robin
+ * slots of 100M, so retention is capped near 700MB. Measured against
+ * this deployment, 100M is about 38 hours, giving roughly 11 days.
+ *
+ * Rotation is defaulted rather than left to the operator because the
+ * alternative default is a file that grows without bound, and the
+ * decision log is high-volume by design -- it records every request
+ * the access log suppresses. An unbounded default is a disk-full
+ * incident with a long fuse. */
+#define BS_DEFAULT_DECISION_SLOTS "7"
+#define BS_DEFAULT_DECISION_SIZE  "100M"
 
 int bs_outcome_index(const char *name);
 

@@ -1130,7 +1130,7 @@ so that line is the only trace a probe leaves.
 
 | Directive | Syntax | Default | Scope |
 |---|---|---|---|
-| `BotShieldDecisionLog` | `/path`, `logs/path`, or `"\|program"` | unset | server / vhost |
+| `BotShieldDecisionLog` | `/path`, `logs/path`, or `"\|program"` | rotating log beside `ErrorLog` | server / vhost |
 
 A module-owned decision log, written directly from the decision path
 instead of through mod_log_config:
@@ -1144,6 +1144,42 @@ Relative paths resolve against `ServerRoot`, exactly like `ErrorLog`.
 A value beginning with `|` is a piped-log spec handed to Apache's own
 `ap_open_piped_log`, so `rotatelogs` and friends work as they do for any
 other Apache log.
+
+### The default is already rotated
+
+With no directive the module builds this itself:
+
+```
+|<sbindir>/rotatelogs -n 7 -L <dir>/botshield.log.current <dir>/botshield.log 100M
+```
+
+Both halves are deduced rather than hardcoded. `<sbindir>` comes from
+`apxs -q SBINDIR` at build time, the same apxs that compiled the
+module. `<dir>` is the directory holding the main server's `ErrorLog`,
+so the decision log lands beside it.
+
+Rotation is the default rather than a plain file because the fallback
+is a file that grows without bound, and this log records every request
+the access log suppresses. On this deployment that is 100 MB about
+every 38 hours. An unbounded default is a disk-full incident with a
+long fuse.
+
+`ErrorLog` is the anchor for a reason found in testing. A fixed
+`logs/botshield.log` resolves through `ServerRoot`, and two instances
+sharing a `ServerRoot` then default to the *same file* — a test
+instance's rotator opened production's decision log. Two `rotatelogs`
+on one `-n` slot set truncate each other's slots, which is the exact
+failure that ate a day of this log. Anchoring to `ErrorLog` means
+instances that already log separately get separate decision logs; two
+instances sharing an `ErrorLog` path would still collide, but their
+error logs already do.
+
+If `rotatelogs` is not present the default degrades to an unrotated
+file and says so with a NOTICE. If it is present but fails to spawn,
+the module warns and falls back to the same file rather than refusing
+to start — a convenience default must never be why httpd will not come
+up. A pipe *you* configured failing is still a hard error, because you
+asked for it.
 
 ### Rotation and the path your monitoring reads
 

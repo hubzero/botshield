@@ -909,6 +909,72 @@ int bs_outcome_index(const char *name)
     return bs_m_outcome_idx(name);
 }
 
+/* The default decision-log spec for this server.
+ *
+ * Prefers a rotating piped log, because the fallback is a file that
+ * grows without bound and this log records every request the access
+ * log suppresses. Both halves are deduced rather than hardcoded: the
+ * log path from ServerRoot via ap_server_root_relative (on a stock
+ * RHEL layout `logs` is a symlink to /var/log/httpd, so it lands
+ * there), and the rotatelogs binary from the same apxs that built the
+ * module.
+ *
+ * Falls back to the plain file when rotatelogs is not executable,
+ * checked here rather than discovered by a failed spawn: a convenience
+ * default must never be the reason httpd will not start. The operator
+ * writing BotShieldDecisionLog themselves overrides all of this, and
+ * their piped program failing IS a hard error -- they asked for it. */
+static const char *bs_default_decision_log(apr_pool_t *p, server_rec *s)
+{
+    /* Beside the main server's ErrorLog, not at a fixed path.
+     *
+     * A fixed `logs/botshield.log` resolves through ServerRoot, and two
+     * instances sharing a ServerRoot then default to the SAME file --
+     * caught in testing, where a test instance's rotator opened
+     * production's decision log. Two rotatelogs on one -n slot set
+     * truncate each other's slots, which is the exact failure that ate
+     * a day of this log already.
+     *
+     * ErrorLog is the right anchor because instances that log
+     * separately already point it somewhere separate, and a decision
+     * log belongs beside the error log anyway. Falls back to the fixed
+     * path when ErrorLog is piped or syslog, where there is no
+     * directory to sit in. */
+    const char *file = NULL;
+    const char *elog = s->error_fname;
+    if (elog && *elog && *elog != '|' && strncmp(elog, "syslog:", 7) != 0) {
+        const char *abs = ap_server_root_relative(p, elog);
+        const char *slash = abs ? strrchr(abs, '/') : NULL;
+        if (slash && slash != abs) {
+            file = apr_psprintf(p, "%.*s/botshield.log",
+                                (int)(slash - abs), abs);
+        }
+    }
+    if (!file) file = ap_server_root_relative(p, BS_DEFAULT_DECISION_LOG);
+    if (!file) return BS_DEFAULT_DECISION_LOG;
+
+    apr_finfo_t fi;
+    if (apr_stat(&fi, BS_ROTATELOGS_PATH, APR_FINFO_TYPE | APR_FINFO_PROT,
+                 p) != APR_SUCCESS
+        || fi.filetype != APR_REG) {
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+            "mod_botshield: %s not found; the default decision log is "
+            "an unrotated file at %s. Set BotShieldDecisionLog to a "
+            "piped rotator if that will grow too large.",
+            BS_ROTATELOGS_PATH, file);
+        return file;
+    }
+
+    /* -L gives a stable path that always hard-links to whichever slot
+     * is live. Without it, anything reading the base name gets
+     * correctly formatted STALE data after the first rotation, which
+     * reads as a traffic collapse rather than as a mistake. */
+    return apr_psprintf(p,
+        "|%s -n " BS_DEFAULT_DECISION_SLOTS " -L %s.current %s "
+        BS_DEFAULT_DECISION_SIZE,
+        BS_ROTATELOGS_PATH, file, file);
+}
+
 /* ======================================================================
  * Module-owned decision log (BotShieldDecisionLog)
  *
@@ -1016,9 +1082,11 @@ int bs_open_decision_logs(apr_pool_t *pconf, server_rec *s)
          * record of a suppressed request, so defaulting it on is what
          * makes "recorded somewhere" hold without configuration --
          * see BS_DEFAULT_ACCESSLOG_SUPPRESS. */
+        int defaulted = 0;
         if (!scfg->decision_log_path) {
             if (!scfg->any_enabled) continue;
-            scfg->decision_log_path = BS_DEFAULT_DECISION_LOG;
+            scfg->decision_log_path = bs_default_decision_log(pconf, sv);
+            defaulted = 1;
         }
 
         const char *spec = scfg->decision_log_path;
@@ -1043,6 +1111,23 @@ int bs_open_decision_logs(apr_pool_t *pconf, server_rec *s)
                 return HTTP_INTERNAL_SERVER_ERROR;
             }
             piped_log *pl = ap_open_piped_log(pconf, program);
+            if (!pl && defaulted) {
+                /* Our own default failed to spawn. Degrade to the plain
+                 * file rather than refuse to start -- the operator did
+                 * not ask for this pipe, so it must not be able to take
+                 * the server down. */
+                const char *file =
+                    ap_server_root_relative(pconf, BS_DEFAULT_DECISION_LOG);
+                ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
+                    "mod_botshield: could not start the default "
+                    "decision-log rotator '%s'; falling back to an "
+                    "unrotated file at %s", program,
+                    file ? file : BS_DEFAULT_DECISION_LOG);
+                scfg->decision_log_path = file ? file
+                                              : BS_DEFAULT_DECISION_LOG;
+                spec = scfg->decision_log_path;
+                goto open_as_file;
+            }
             if (!pl) {
                 ap_log_error(APLOG_MARK, APLOG_ERR, 0, sv,
                     "mod_botshield: BotShieldDecisionLog could not start "
@@ -1052,6 +1137,8 @@ int bs_open_decision_logs(apr_pool_t *pconf, server_rec *s)
             scfg->decision_log_fd = ap_piped_log_write_fd(pl);
         }
         else {
+open_as_file:
+            ;
             const char *path = ap_server_root_relative(pconf, spec);
             if (!path) {
                 ap_log_error(APLOG_MARK, APLOG_ERR, 0, sv,

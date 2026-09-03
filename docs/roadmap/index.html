@@ -261,6 +261,28 @@ flagged-IP table, the Bloom filters and every dashboard counter. Unlike
 the synthesised bot rate limit, this default enables no enforcement and
 changes no decision; it only stops the module forgetting what it
 already learned.</p>
+<p><strong><code>BotShieldDecisionLog</code> now defaults to a rotated log</strong>, built by the
+module rather than written by the operator:</p>
+<pre><code>|&lt;sbindir&gt;/rotatelogs -n 7 -L &lt;dir&gt;/botshield.log.current &lt;dir&gt;/botshield.log 100M
+</code></pre>
+<p>Both halves are deduced. <code>&lt;sbindir&gt;</code> comes from <code>apxs -q SBINDIR</code> at
+build time, the same apxs that compiles the module. <code>&lt;dir&gt;</code> is the
+directory holding the main server's <code>ErrorLog</code>.</p>
+<p>Rotation rather than a plain file because the alternative default grows
+without bound, and this log records every request the access log
+suppresses — 100 MB about every 38 hours here.</p>
+<p><code>ErrorLog</code> is the anchor because of a collision found while testing
+this: a fixed <code>logs/botshield.log</code> resolves through <code>ServerRoot</code>, two
+instances sharing a <code>ServerRoot</code> default to the same file, and a test
+instance's rotator opened production's decision log. Two <code>rotatelogs</code>
+on one <code>-n</code> slot set truncate each other's slots — the exact failure
+that ate a day of this log. Anchoring to <code>ErrorLog</code> gives instances
+that already log separately separate decision logs.</p>
+<p>Fails soft in both directions: no <code>rotatelogs</code> on the box means an
+unrotated file and a NOTICE, and a rotator that fails to spawn means a
+warning and the same fallback. A convenience default must never be why
+httpd will not start. A pipe the operator configured failing is still a
+hard error.</p>
 <p><strong><code>BotShieldDbStatsFile</code> and <code>BotShieldFpmStatsFile</code> now default</strong> to
 <code>/run/botshield/db-load.stats</code> and <code>/run/botshield/fpm-load.stats</code>.
 Those are not guesses: <code>botshield-dbmon.service</code> passes
