@@ -198,7 +198,6 @@ def test_load_short_circuit_blocks_path(
         with config_override(
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
-            f'    BotShieldLoadStateFile {LOAD_FILE_PATH}\n'
             '    BotShieldLoadTrigger l-block state=hot status=503\n'
             '    BotShieldRequestTrigger p-block path="/*" status=451',
             count=1,
@@ -235,7 +234,6 @@ def test_env_pass_then_load_blocks_path(
         with config_override(
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
-            f'    BotShieldLoadStateFile {LOAD_FILE_PATH}\n'
             '    SetEnvIfExpr "true" BS_CROSS=1\n'
             '    BotShieldEnvTrigger e-pass env=BS_CROSS '
             'status=pass penalty=4\n'

@@ -155,7 +155,7 @@ def test_invalid_state_file_value_treated_as_normal(config_override):
         with config_override(
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
-            f'    BotShieldLoadStateFile {LOAD_FILE_PATH}',
+            '',
             count=1,
         ):
             # 4 watchdog ticks > warm-rise threshold (3). If parse
@@ -181,7 +181,7 @@ def test_external_hot_promotes_through_hysteresis(config_override):
         with config_override(
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
-            f'    BotShieldLoadStateFile {LOAD_FILE_PATH}',
+            '',
             count=1,
         ):
             # Watch the gauge climb. 1=warm, 2=hot. We assert

@@ -114,7 +114,6 @@ def test_load_trigger_inert_under_normal(config_override, fresh_ip,
         with config_override(
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
-            f'    BotShieldLoadStateFile {LOAD_FILE_PATH}\n'
             '    BotShieldLoadTrigger be-strict state>=warm '
             'penalty=20',
             count=1,
@@ -145,7 +144,6 @@ def test_load_trigger_fires_under_hot(config_override, fresh_ip,
         with config_override(
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
-            f'    BotShieldLoadStateFile {LOAD_FILE_PATH}\n'
             '    BotShieldLoadTrigger be-strict state>=warm '
             'penalty=20 log=brownout',
             count=1,
@@ -183,7 +181,6 @@ def test_load_trigger_status_blocks_under_hot(
         with config_override(
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
-            f'    BotShieldLoadStateFile {LOAD_FILE_PATH}\n'
             '    BotShieldLoadTrigger drop-noise state=hot '
             'status=503',
             count=1,
@@ -214,7 +211,6 @@ def test_load_trigger_first_match_wins_specific_first(
         with config_override(
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
-            f'    BotShieldLoadStateFile {LOAD_FILE_PATH}\n'
             '    BotShieldLoadTrigger only-hot state=hot penalty=80\n'
             '    BotShieldLoadTrigger any-warm state>=warm penalty=20',
             count=1,

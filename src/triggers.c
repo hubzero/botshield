@@ -651,6 +651,38 @@ static int bs_ua_is_selector_list(const char *ua)
     return 1;
 }
 
+/* A rule that demands a tier but never asks whether the client already
+ * solved will challenge the same visitor on every request, forever.
+ * Solving does not clear it, because nothing in the rule looks at the
+ * solve proof.
+ *
+ * Diagnosed three times before this warning existed: /silent-demo and
+ * /form-demo in the test config (which is why the browser suite could
+ * not complete a challenge -> solve -> served round trip), and
+ * admin-user on production, where 599 of 601 challenges in one day
+ * went to clients already carrying cookie=solved -- an admin could not
+ * reach the login page at all.
+ *
+ * Warned from the setter rather than post_config because `httpd -t`
+ * does not run post_config, and a warning an operator only sees after
+ * deploying is most of the way to no warning.
+ *
+ * A warning, not an error: challenging every time is legitimate for a
+ * honeypot or a path no real client should reach. But it should be a
+ * decision, and `tier=` reads like "challenge this" rather than
+ * "challenge this forever", so the default reading is the wrong one. */
+static void bs_warn_tier_without_solved(cmd_parms *cmd,
+                                        const bs_request_trigger_entry *e)
+{
+    if (e->action.tier_floor < 0 || e->solved_pred >= 0) return;
+    ap_log_error(APLOG_MARK, APLOG_WARNING, 0, cmd->server,
+        "mod_botshield: BotShieldRequestTrigger '%s' sets tier= but has "
+        "no solved= condition, so it re-challenges clients that have "
+        "already solved -- an endless loop for real visitors. Add "
+        "solved=no to challenge once; ignore this if the path is meant "
+        "to challenge every time.", e->name);
+}
+
 const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                                        int argc, char *const argv[])
 {
@@ -931,6 +963,7 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
         }
     }
     *(bs_request_trigger_entry **)apr_array_push(scfg->request_triggers) = e;
+    bs_warn_tier_without_solved(cmd, e);
     return NULL;
 }
 
