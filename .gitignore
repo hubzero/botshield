@@ -75,3 +75,7 @@ vendor/top-user-agents.json.prev
 vendor/bot-directory.local.json
 vendor/top-user-agents.local.json
 vendor/verified-bots.local.json
+
+# Site-specific deployment runbook. Purged from history 2026-09-03;
+# kept locally so the operational detail is not lost.
+deploy.md
