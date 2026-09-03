@@ -6,19 +6,19 @@
 
 # M11.4: framework foundation
 httpx==0.28.1
-pytest==9.0.3
-pytest-xdist==3.6.1
-pytest-timeout==2.3.1
+pytest==9.1.0
+pytest-xdist==3.8.0
+pytest-timeout==2.4.0
 
 # M11.6: real-browser acceptance layer. The chromium binary itself
 # lives under ~/.cache/ms-playwright/ and is installed separately via
 # `playwright install chromium` in tests/setup/provision.sh.
-pytest-playwright==0.7.2
-playwright==1.58.0
+pytest-playwright==0.8.0
+playwright==1.60.0
 
 # M11.7: rerun-on-flake for @live_network (third-party siteverify
 # blips) + HTML reports for CI triage.
-pytest-rerunfailures==16.1
+pytest-rerunfailures==16.3
 pytest-html==4.2.0
 
 # M11.8: property + format testing.
@@ -26,5 +26,5 @@ pytest-html==4.2.0
 # pytest-hypothesis integration.
 # prometheus_client — the official Prometheus Python lib; its parser
 # is the ground-truth for Prometheus exposition-format validation.
-hypothesis==6.152.1
+hypothesis==6.155.2
 prometheus_client==0.25.0

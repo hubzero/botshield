@@ -62,7 +62,7 @@ jobs:
       BS_FRIENDLY_SOLUTION:  ${{ secrets.BS_FRIENDLY_SOLUTION }}
       BS_GEETEST_TOKEN:      ${{ secrets.BS_GEETEST_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Provision
         run: sudo tests/setup/provision.sh
@@ -85,7 +85,7 @@ jobs:
 
       - name: Upload reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: reports-fast
           path: tests/reports/
@@ -93,7 +93,7 @@ jobs:
 
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: apache-logs-fast
           path: |
@@ -108,14 +108,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Cache the Chromium binary across runs. provision.sh will
       # `playwright install chromium` but it becomes a no-op when
       # the cache hit populates ~/.cache/ms-playwright.
       - name: Restore Playwright cache
         id: pw-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-v1-${{ hashFiles('tests/requirements-test.txt') }}
@@ -133,7 +133,7 @@ jobs:
 
       - name: Upload reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: reports-browser
           path: |
@@ -143,7 +143,7 @@ jobs:
 
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: apache-logs-browser
           path: |
@@ -162,10 +162,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.x"
 
@@ -195,7 +195,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 540  # 9h: 8h soak + provision overhead
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Provision
         run: sudo tests/setup/provision.sh
@@ -214,7 +214,7 @@ jobs:
 
       - name: Upload soak report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: soak-nightly-report
           path: |
@@ -224,7 +224,7 @@ jobs:
 
       - name: Upload Apache logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: apache-logs-nightly
           path: |
@@ -250,7 +250,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install clang + libfuzzer
         run: |
@@ -271,7 +271,7 @@ jobs:
 
       - name: Upload corpus + reproducers
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-nightly-artifacts
           path: |
