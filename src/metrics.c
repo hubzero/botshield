@@ -2269,7 +2269,7 @@ static void bs_d_meter(request_rec *r, const char *label,
  * dashboard as a decision, inflating the very numbers the page shows.
  * The counters already track these separately as
  * botshield_responses_observe_total. */
-void bs_log_observability_request(request_rec *r)
+static void bs_log_observability_line(request_rec *r, const char *reason)
 {
     bs_server_cfg *scfg = ap_get_module_config(r->server->module_config,
                                                &botshield_module);
@@ -2291,13 +2291,34 @@ void bs_log_observability_request(request_rec *r)
         tm.tm_hour, tm.tm_min, tm.tm_sec, tm.tm_usec / 1000);
     const char *line = apr_psprintf(r->pool,
         "%s tier=none outcome=observe ip=%s score=0 cookie=- provider=- "
-        "alg=- reason=\"observability-endpoint\" path=\"%s\" ua=\"%s\"\n",
+        "alg=- reason=\"%s\" path=\"%s\" ua=\"%s\"\n",
         ts,
         (r->useragent_ip && *r->useragent_ip) ? r->useragent_ip : "-",
+        reason,
         bs_log_quote(r->pool, path),
         ua ? bs_log_quote(r->pool, ua) : "-");
     apr_size_t len = strlen(line);
     apr_file_write(scfg->decision_log_fd, line, &len);
+}
+
+void bs_log_observability_request(request_rec *r)
+{
+    bs_log_observability_line(r, "observability-endpoint");
+}
+
+/* An attempt on a surface the client is not permitted to read.
+ *
+ * Recorded because it is the only trace: the response is a 404 and the
+ * access-log line is suppressed like every other hit on these surfaces,
+ * so without this a scan for the dashboard would leave nothing behind.
+ * The surface name is included because "who is probing for /metrics" and
+ * "who is probing for the dashboard" are different questions -- the
+ * first is often a misconfigured scraper, the second rarely is. */
+void bs_log_observability_denied(request_rec *r, const char *surface)
+{
+    bs_log_observability_line(r,
+        apr_psprintf(r->pool, "observe-denied:%s",
+                     surface ? surface : "?"));
 }
 
 /* The <meta refresh> that makes a left-open page keep itself current.

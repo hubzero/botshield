@@ -31,6 +31,21 @@ from botshield_test import cookies as _cookies
 # ---------------------------------------------------------------------------
 
 
+def pytest_sessionstart(session):
+    """Undo a previous run's interrupted config_override.
+
+    config_override reverts in a finally, which covers exceptions but
+    not the process being killed. When that happens the injected rules
+    stay in the shared dev vhost and apply to every later run, so the
+    next session fails in ways that look like product bugs rather than
+    like leftover config. Checked here, before any test runs.
+    """
+    msg = _apache.restore_pristine_config()
+    if msg:
+        session.config.pluginmanager.get_plugin("terminalreporter").write_line(
+            f"botshield: {msg}", yellow=True)
+
+
 def pytest_collection_modifyitems(config, items):
     for item in items:
         if item.get_closest_marker("live_network") is not None:

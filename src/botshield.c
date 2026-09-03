@@ -270,6 +270,27 @@ static const command_rec bs_cmds[] = {
                  "into this module today; 'sha384-zeros' / 'sha512-zeros' / "
                  "'pbkdf2-sha256' / 'argon2id' are registry slots reserved "
                  "for future opt-in builds."),
+    /* One directive per observability endpoint. The directive name
+     * says which endpoint it opens, so there is no first-token-is-
+     * sometimes-a-surface rule to learn, and a new surface added later
+     * cannot inherit a grant written before it existed. */
+    AP_INIT_TAKE_ARGV("BotShieldDashboardAccess", bs_set_dashboard_access,
+                 NULL, RSRC_CONF,
+                 "Who may read the dashboard pages. Closed until this "
+                 "names someone; refused requests get 404. Arguments are "
+                 "IPv4/IPv6 addresses or CIDR blocks, or the single "
+                 "keyword 'all' (serve to everyone) or 'none' (close, "
+                 "and refuse a grant inherited from server scope). "
+                 "Directives accumulate. Matches the same client address "
+                 "the module scores, so mod_remoteip applies. For "
+                 "passwords or anything richer, wrap the path in a "
+                 "<Location> as well -- this only decides whether the "
+                 "endpoint is served at all."),
+    AP_INIT_TAKE_ARGV("BotShieldMetricsAccess", bs_set_metrics_access,
+                 NULL, RSRC_CONF,
+                 "Who may read /metrics. Closed until this names "
+                 "someone; refused requests get 404. Same argument form "
+                 "as BotShieldDashboardAccess."),
     AP_INIT_TAKE_ARGV("BotShieldAccessLog", bs_set_access_log, NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "Control the Apache access-log line for requests "
@@ -1258,6 +1279,43 @@ static int bs_apply_safeguard(request_rec *r, int have_client_ip,
     return OK;
 }
 
+/* Is this client allowed to read this observability surface?
+ *
+ * Matches r->useragent_ip via bs_allow_ip_in_ranges, the same address
+ * the module scores on, so mod_remoteip applies exactly as it does to
+ * Apache's own `Require ip`. An operator who has already reasoned about
+ * their proxy chain for one gets the same answer from the other, which
+ * matters more here than picking the connection peer would: behind a
+ * reverse proxy the peer is the proxy, and an admin-IP list matched
+ * against it would never match anybody. */
+static int bs_observe_permitted(request_rec *r, const bs_observe_acl *acl)
+{
+    if (!acl) return 0;
+    if (acl->allow_all) return 1;
+    return bs_allow_ip_in_ranges(acl->ranges, r);
+}
+
+/* 404, not 403.
+ *
+ * 403 confirms the surface exists and that this module is installed,
+ * which is a free hint to anyone scanning for a dashboard to come back
+ * to from a better address. 404 is also what the operator sees if they
+ * forget the directive, and "the page is not there" sends them to the
+ * documentation, where a 403 sends them to their own <Location> hunting
+ * for a Require they never wrote.
+ *
+ * Logged to the decision log as outcome=observe with a reason that says
+ * it was refused, rather than as a new outcome: a grep for
+ * outcome=observe should still find every request that reached these
+ * surfaces, served or not. Like the served case, this deliberately
+ * bypasses the decision counters -- traffic to the measuring instrument
+ * is not a decision about site traffic. */
+static int bs_observe_denied(request_rec *r, const char *surface)
+{
+    bs_log_observability_denied(r, surface);
+    return HTTP_NOT_FOUND;
+}
+
 /* Module-owned endpoint routing. URLs under BotShieldEndpointPrefix
  * (default /botshield) are served by this module's own handlers, not
  * the tier dispatch. Today:
@@ -1288,6 +1346,32 @@ static int bs_route_module_endpoint(request_rec *r, bs_dir_cfg *cfg)
     }
 
     const char *sub = r->uri + prefix_len;
+
+    /* Observability ACL, checked before dispatch.
+     *
+     * Prefix-matched on /dashboard/ rather than enumerated so a
+     * dashboard page added later is gated by existing config instead of
+     * shipping open until someone remembers to add it to a list. The
+     * preview pages are deliberately outside this: they reveal nothing
+     * a challenged visitor does not already see. */
+    {
+        int is_metrics = (strcmp(sub, "/metrics") == 0);
+        int is_dash    = (strcmp(sub, "/dashboard") == 0
+                          || strncmp(sub, "/dashboard/", 11) == 0);
+        if (is_metrics || is_dash) {
+            bs_server_cfg *scfg =
+                ap_get_module_config(r->server->module_config,
+                                     &botshield_module);
+            const bs_observe_acl *acl = !scfg ? NULL
+                : (is_metrics ? &scfg->observe_metrics
+                              : &scfg->observe_dashboard);
+            if (!bs_observe_permitted(r, acl)) {
+                return bs_observe_denied(r,
+                    is_metrics ? "metrics" : "dashboard");
+            }
+        }
+    }
+
     if (strcmp(sub, "/captcha-verify") == 0 ||
         strncmp(sub, "/captcha-verify/", 16) == 0) {
         return bs_captcha_verify_handler(r, cfg);

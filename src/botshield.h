@@ -316,6 +316,32 @@ typedef struct bs_classify_flags {
 
 #define BS_CLASSIFY_FLAGS_ALL  ((bs_classify_flags){1, 1, 1, 1})
 #define BS_CLASSIFY_FLAGS_NONE ((bs_classify_flags){0, 0, 0, 0})
+/* Access control for the observability surfaces (the /dashboard family
+ * and /metrics). One of these per surface per vhost.
+ *
+ * Deny by default: an unconfigured surface is not served at all. These
+ * pages reveal internal vhost names, traffic volumes, challenge and
+ * solve rates and SHM capacities, and the module used to serve them to
+ * anyone who asked, relying on the operator to write a <Location> the
+ * shipped config could only recommend. A default that is safe only if
+ * you read the comment is not a default.
+ *
+ * `allow_all` is the explicit opt-in to the old behaviour. `ranges`
+ * holds apr_ipsubnet_t * and is NULL while the surface is unconfigured
+ * in this scope, which is what the merge reads to decide whether to
+ * inherit. A configured-but-empty array means "explicitly denied here"
+ * and blocks inheritance. */
+typedef struct {
+    apr_array_header_t *ranges;
+    /* The literal tokens as written, const char *. apr_ipsubnet_t does
+     * not retain the text it was parsed from, and "3 ranges" is not an
+     * answer to "did my allowlist come out the way I meant" -- which is
+     * the question an operator asks right before a wrong list locks
+     * them out of their own dashboard. */
+    apr_array_header_t *specs;
+    int                 allow_all;
+} bs_observe_acl;
+
 
 typedef struct bs_server_cfg {
     apr_size_t  shm_size;
@@ -524,6 +550,13 @@ typedef struct bs_server_cfg {
      * captcha and embedded tiers outright, and leaves the safeguard
      * redirect pointing at a 404. */
     int                 any_enabled;
+
+    /* Who may read the dashboard pages and /metrics. Separate
+     * per surface: a
+     * Prometheus scraper and an admin browser are rarely the same
+     * host, and unioning them grants the scraper the dashboard. */
+    bs_observe_acl      observe_dashboard;
+    bs_observe_acl      observe_metrics;
 } bs_server_cfg;
 
 /* Trigger and policy family types (bs_trigger_*, bs_*_trigger_entry,

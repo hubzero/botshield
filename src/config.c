@@ -306,10 +306,11 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
     if (!add->app_feedback_header && base->app_feedback_header) {
         out->app_feedback_header = base->app_feedback_header;
     }
-    /* Inherit the decision-log path, but never the open fd: each vhost
-     * that resolves to a path gets its own descriptor at post_config,
-     * so two vhosts sharing a path still each hold an O_APPEND fd
-     * rather than aliasing one struct. */
+    /* Inherit the decision-log path, but never the open fd: the fd is
+     * resolved at post_config, where bs_open_decision_logs shares one
+     * writer per distinct log spec. Copying a stale fd here would
+     * defeat that, and on a piped log two writers on one rotatelogs
+     * slot set destroy each other's records. */
     if (!add->decision_log_path && base->decision_log_path) {
         out->decision_log_path = base->decision_log_path;
         out->decision_log_outcomes = base->decision_log_outcomes;
@@ -317,6 +318,17 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
     /* Sticky: enabling anywhere in the tree makes the vhost endpoint-
      * serving, so a vhost inherits a server-level enable. */
     out->any_enabled = base->any_enabled | add->any_enabled;
+    /* Observe ACLs inherit whole, per surface, and only where this scope
+     * said nothing at all. NOT unioned: a vhost that names its own
+     * readers is narrowing, and quietly adding the global list back
+     * would make the narrower directive read as if it worked. A vhost
+     * that wants both writes both, and one that wants none writes
+     * 'none'. ranges==NULL is the "said nothing" marker, which is why
+     * the setter allocates an empty array even for 'all' and 'none'. */
+    if (!add->observe_dashboard.ranges)
+        out->observe_dashboard = base->observe_dashboard;
+    if (!add->observe_metrics.ranges)
+        out->observe_metrics = base->observe_metrics;
     if (add->app_claims_enabled == BS_APP_FEEDBACK_UNSET) {
         out->app_claims_enabled = base->app_claims_enabled;
     }
@@ -447,6 +459,16 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     /* Module-owned decision log — opened in post_config, not here. */
     scfg->decision_log_path           = NULL;
     scfg->decision_log_fd             = NULL;
+    /* Deny by default. NULL ranges means "not configured in this
+     * scope", which the merge reads; nothing is served until a
+     * BotShieldDashboardAccess / BotShieldMetricsAccess directive
+     * says who may read that endpoint. */
+    scfg->observe_dashboard.ranges    = NULL;
+    scfg->observe_dashboard.specs     = NULL;
+    scfg->observe_dashboard.allow_all = 0;
+    scfg->observe_metrics.ranges      = NULL;
+    scfg->observe_metrics.specs       = NULL;
+    scfg->observe_metrics.allow_all   = 0;
     scfg->decision_log_outcomes       = -1;   /* all */
     scfg->any_enabled                 = 0;
     return scfg;
@@ -2854,6 +2876,135 @@ static const char *bs_set_score_int(const char *directive, int *slot,
     }
     *slot = (int)n;
     return NULL;
+}
+
+/* BotShieldDashboardAccess / BotShieldMetricsAccess
+ *     <addr|cidr>... | all | none
+ *
+ * Built-in access control for the observability surfaces, so that
+ * protecting them does not depend on the operator remembering to write
+ * a <Location>. Each surface is denied until its own directive names
+ * someone, and the directive that names them is the enable.
+ *
+ * One directive per endpoint rather than one directive with a surface
+ * argument. A Prometheus scraper and an admin browser are rarely the
+ * same host, so the lists differ in practice; and with the surface as
+ * an argument, a reader has to know that the first token is sometimes a
+ * surface and sometimes an address. The directive name saying which
+ * endpoint it opens is the whole of the explanation. It also means a
+ * new observability surface has to be opened deliberately instead of
+ * inheriting a grant written before it existed.
+ *
+ * Directives accumulate, so an operator can add a network per line and
+ * keep the comment next to it. "none" is not additive: it clears what
+ * this scope has collected and marks the surface explicitly closed,
+ * which is how a vhost refuses a grant it would otherwise inherit.
+ *
+ * Deliberately does NOT take a password, a user, or a Require-style
+ * expression. Apache already has all of that, it composes by wrapping
+ * the path in a <Location>, and a second half-implementation of
+ * authn/authz inside this module would be the worse of the two. An IP
+ * list is the part Apache cannot supply on our behalf, because the
+ * module has to decide whether to serve the surface at all before any
+ * of it exists. */
+static const char *bs_set_observe_acl(cmd_parms *cmd, bs_observe_acl *acl,
+                                      const char *dname,
+                                      int argc, char *const argv[])
+{
+    if (argc < 1) {
+        return apr_psprintf(cmd->pool,
+            "%s: needs at least one address, CIDR, 'all', or 'none' -- "
+            "e.g. \"%s 127.0.0.1 ::1 10.1.0.0/16\". With no address the "
+            "endpoint stays closed, which is already the default.",
+            dname, dname);
+    }
+
+    /* Keyword pass first: "all" and "none" are whole-list verdicts, so
+     * mixing them with addresses is a contradiction worth rejecting at
+     * config time rather than silently resolving. Operators write these
+     * lists by commenting lines in and out, which is exactly how a
+     * leftover "all" ends up above a careful CIDR list. */
+    int saw_all = 0, saw_none = 0, saw_addr = 0;
+    for (int a = 0; a < argc; a++) {
+        if (!strcasecmp(argv[a], "all"))       saw_all = 1;
+        else if (!strcasecmp(argv[a], "none")) saw_none = 1;
+        else                                   saw_addr = 1;
+    }
+    if (saw_all && saw_none) {
+        return apr_psprintf(cmd->pool,
+            "%s: 'all' and 'none' in one directive contradict each "
+            "other; say one of them", dname);
+    }
+    if ((saw_all || saw_none) && saw_addr) {
+        return apr_psprintf(cmd->pool,
+            "%s: 'all' and 'none' are whole-list verdicts and cannot be "
+            "combined with addresses. Either list the addresses, or say "
+            "'all' to open the endpoint to everyone, or 'none' to close "
+            "it.", dname);
+    }
+
+    if (saw_none) {
+        acl->allow_all = 0;
+        /* Empty-but-allocated: closed HERE, and not open to inheritance
+         * from an enclosing scope. */
+        acl->ranges = apr_array_make(cmd->pool, 1, sizeof(apr_ipsubnet_t *));
+        acl->specs  = apr_array_make(cmd->pool, 1, sizeof(const char *));
+        return NULL;
+    }
+    if (!acl->ranges) {
+        acl->ranges = apr_array_make(cmd->pool, 4, sizeof(apr_ipsubnet_t *));
+        acl->specs  = apr_array_make(cmd->pool, 4, sizeof(const char *));
+    }
+    if (saw_all) {
+        acl->allow_all = 1;
+        APR_ARRAY_PUSH(acl->specs, const char *) = "all";
+        return NULL;
+    }
+
+    const char *csv = NULL;
+    for (int a = 0; a < argc; a++) {
+        csv = csv ? apr_pstrcat(cmd->pool, csv, ",", argv[a], NULL)
+                  : argv[a];
+    }
+    apr_array_header_t *parsed = NULL;
+    const char *err = NULL;
+    if (bs_allow_load_ranges_from_string(cmd->pool, csv, &parsed, &err)
+            != APR_SUCCESS) {
+        return apr_psprintf(cmd->pool,
+            "%s: %s. Each argument must be an IPv4 or IPv6 address or "
+            "CIDR block (127.0.0.1, ::1, 10.1.0.0/16), or the keyword "
+            "'all' or 'none'.",
+            dname, err ? err : "unparseable address list");
+    }
+    for (int a = 0; a < parsed->nelts; a++) {
+        APR_ARRAY_PUSH(acl->ranges, apr_ipsubnet_t *) =
+            APR_ARRAY_IDX(parsed, a, apr_ipsubnet_t *);
+    }
+    for (int a = 0; a < argc; a++) {
+        APR_ARRAY_PUSH(acl->specs, const char *) =
+            apr_pstrdup(cmd->pool, argv[a]);
+    }
+    return NULL;
+}
+
+const char *bs_set_dashboard_access(cmd_parms *cmd, void *dummy,
+                                    int argc, char *const argv[])
+{
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    if (!scfg) return "BotShieldDashboardAccess: no server config";
+    return bs_set_observe_acl(cmd, &scfg->observe_dashboard,
+                              "BotShieldDashboardAccess", argc, argv);
+}
+
+const char *bs_set_metrics_access(cmd_parms *cmd, void *dummy,
+                                  int argc, char *const argv[])
+{
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    if (!scfg) return "BotShieldMetricsAccess: no server config";
+    return bs_set_observe_acl(cmd, &scfg->observe_metrics,
+                              "BotShieldMetricsAccess", argc, argv);
 }
 
 /* BotShieldAccessLog on|off|suppress=<outcome[,outcome...]>

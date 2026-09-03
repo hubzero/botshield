@@ -96,6 +96,12 @@ const char *bs_set_endpoint_prefix(cmd_parms *cmd, void *cfg_v, const char *arg)
 const char *bs_set_robots_mode   (cmd_parms *cmd, void *cfg_v, const char *arg);
 const char *bs_set_access_log    (cmd_parms *cmd, void *cfg_v, int argc,
                                   char *const argv[]);
+/* Who may read each observability endpoint. Each is denied until its
+ * own directive names someone. */
+const char *bs_set_dashboard_access(cmd_parms *cmd, void *dummy, int argc,
+                                    char *const argv[]);
+const char *bs_set_metrics_access  (cmd_parms *cmd, void *dummy, int argc,
+                                    char *const argv[]);
 const char *bs_set_score_non_interactive  (cmd_parms *cmd, void *cfg_v, const char *arg);
 const char *bs_set_score_interactive    (cmd_parms *cmd, void *cfg_v, const char *arg);
 const char *bs_set_score_captcha (cmd_parms *cmd, void *cfg_v, const char *arg);

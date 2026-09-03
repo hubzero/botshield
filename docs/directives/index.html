@@ -112,6 +112,8 @@
 <li class="toc__item toc__item--level-2"><a href="#load-aware-throttling">Load-aware throttling</a></li>
 <li class="toc__item toc__item--level-3"><a href="#why-the-busy-worker-ratio-is-often-the-wrong-signal">Why the busy-worker ratio is often the wrong signal</a></li>
 <li class="toc__item toc__item--level-2"><a href="#multi-vhost-reputation">Multi-vhost reputation</a></li>
+<li class="toc__item toc__item--level-2"><a href="#observability-endpoint-access">Observability endpoint access</a></li>
+<li class="toc__item toc__item--level-3"><a href="#why-this-is-not-a-location">Why this is not a `&lt;Location&gt;`</a></li>
 <li class="toc__item toc__item--level-2"><a href="#decision-log">Decision log</a></li>
 <li class="toc__item toc__item--level-3"><a href="#rotation-and-the-path-your-monitoring-reads">Rotation and the path your monitoring reads</a></li>
 <li class="toc__item toc__item--level-2"><a href="#log-only-staging-mode">Log-only / staging mode</a></li>
@@ -1556,6 +1558,91 @@ stall the code whose job is to shed load because the database is sick.</p>
 </table>
 <p>Vhosts with the same token share one reputation namespace. See
 <a href="../deployment/index.html#multi-vhost-reputation">deployment</a>.</p>
+<h2 id="observability-endpoint-access">Observability endpoint access</h2>
+<table>
+<thead>
+<tr>
+<th>Directive</th>
+<th>Syntax</th>
+<th>Default</th>
+<th>Scope</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BotShieldDashboardAccess</code></td>
+<td><code>&lt;addr|cidr&gt;...</code> | <code>all</code> | <code>none</code></td>
+<td>closed</td>
+<td>server / vhost</td>
+</tr>
+<tr>
+<td><code>BotShieldMetricsAccess</code></td>
+<td><code>&lt;addr|cidr&gt;...</code> | <code>all</code> | <code>none</code></td>
+<td>closed</td>
+<td>server / vhost</td>
+</tr>
+</tbody>
+</table>
+<p>Who may read each observability endpoint. <strong>Each is closed until its own
+directive names someone</strong>, and a refused request gets 404, not 403, so a
+scan cannot tell the endpoint exists.</p>
+<pre><code class="language-apache">BotShieldDashboardAccess 127.0.0.1 ::1
+BotShieldMetricsAccess   127.0.0.1 ::1
+</code></pre>
+<p>One directive per endpoint, so opening one never opens the other. A
+Prometheus scraper and an admin browser are rarely the same host:</p>
+<pre><code class="language-apache">BotShieldMetricsAccess   10.9.0.5
+BotShieldDashboardAccess 10.1.0.0/16
+</code></pre>
+<p>The dashboard grant covers every page under <code>/dashboard/</code>. The router
+matches the prefix rather than a list of pages, so a page added in a
+later release is covered by config that already exists.</p>
+<p>Directives accumulate, so keep one network per line with its reason next
+to it. Two keywords stand in place of the whole list: <code>all</code> serves the
+endpoint to everyone, and <code>none</code> closes it and refuses a grant inherited
+from server scope. Neither can be combined with addresses; that is a
+config-time error rather than a silent resolution, because these lists
+get edited by commenting lines in and out and a leftover <code>all</code> above a
+careful CIDR list should not quietly win.</p>
+<p>Matching is on the same client address the module scores, so
+<code>mod_remoteip</code> applies exactly as it does to Apache's own <code>Require ip</code>.</p>
+<h3 id="why-this-is-not-a-location">Why this is not a <code>&lt;Location&gt;</code></h3>
+<p><code>Require ip</code> on these paths has a failure mode worth knowing. Each authz
+denial writes an <code>AH01630</code> line to the error log, the dashboard
+auto-refreshes every 30 seconds, and a fail2ban jail watching that log
+counts five denials in two minutes as an attack. On a HubZero host the
+shipped <code>apache-hz_access_denied</code> jail then bans the viewer at the
+firewall for ten hours — off the whole site, not just the dashboard.
+That happened on geodynamics.org on 2026-08-08.</p>
+<p>These directives refuse inside the module and write nothing to the error
+log, so there is nothing for a jail to count. Verified by probe: eight
+refused dashboard requests produced zero error-log lines from the
+module.</p>
+<p>They deliberately stop at an IP list. Apache already has authentication
+and authorization, they compose by wrapping the path in a <code>&lt;Location&gt;</code>,
+and a second half-implementation inside this module would be the worse
+of the two. The IP list is the part Apache cannot supply on the module's
+behalf, because the module has to decide whether to serve the endpoint
+at all. To add a password, compound the two — Apache decides whether the
+request reaches the module, the module decides whether the endpoint is
+served:</p>
+<pre><code class="language-apache">BotShieldDashboardAccess 10.1.0.0/16
+
+&lt;LocationMatch &quot;^/botshield/dashboard&quot;&gt;
+    AuthType Basic
+    AuthName &quot;BotShield&quot;
+    AuthUserFile /etc/httpd/botshield.htpasswd
+    Require valid-user
+&lt;/LocationMatch&gt;
+</code></pre>
+<p>Read the resolved lists back with <code>httpd -t -D DUMP_BOTSHIELD_POLICY</code>,
+which prints one line per endpoint. A wrong allowlist is otherwise
+discovered by being locked out of the page you would have used to
+diagnose it.</p>
+<p>Refused requests are recorded in the decision log as <code>outcome=observe</code>
+with <code>reason=&quot;observe-denied:&lt;surface&gt;&quot;</code>. The response is a 404 and the
+access-log line is suppressed like every other hit on these endpoints,
+so that line is the only trace a probe leaves.</p>
 <h2 id="decision-log">Decision log</h2>
 <table>
 <thead>

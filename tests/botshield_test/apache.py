@@ -144,6 +144,43 @@ def reset_state() -> None:
     restart()
 
 
+def _pristine_paths(conf_path: Path):
+    return (Path(str(conf_path) + ".pristine"),
+            Path(str(conf_path) + ".dirty"))
+
+
+def _stash_pristine(conf_path: Path, original: str) -> None:
+    """Record the pre-override content and mark the file as mutated."""
+    pristine, dirty = _pristine_paths(conf_path)
+    _atomic_write(pristine, original)
+    _atomic_write(dirty, "")
+
+
+def _clear_pristine(conf_path: Path) -> None:
+    """Drop the marker; the override reverted cleanly."""
+    _, dirty = _pristine_paths(conf_path)
+    subprocess.run(["sudo", "rm", "-f", str(dirty)],
+                   check=False, stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL)
+
+
+def restore_pristine_config(conf: str = DEV_VHOST_CONF) -> str | None:
+    """If a previous run died inside config_override, put the vhost back.
+
+    Called at session start. Returns a message if it restored anything,
+    None if the config was already clean. Restoring at session START
+    rather than end is deliberate: the run that made the mess is by
+    definition not around to clean up after itself.
+    """
+    conf_path = Path(conf)
+    pristine, dirty = _pristine_paths(conf_path)
+    if not dirty.exists() or not pristine.exists():
+        return None
+    _atomic_write(conf_path, pristine.read_text())
+    _clear_pristine(conf_path)
+    reload()
+    return f"restored {conf} from a previous run's interrupted override"
+
 @contextmanager
 def config_override(
     pattern: str, replacement: str, *,
@@ -195,12 +232,23 @@ def config_override(
 
     # Stage the mutated file via a root-owned temp path. sudo mv is
     # atomic; a partial write can't leave the vhost in a broken state.
+    #
+    # The finally below reverts on any exception, but not on the pytest
+    # process being killed -- a `timeout`, a Ctrl-C that lands wrong, a
+    # CI step cancelled. That leaves this test's injected rules in the
+    # shared vhost, where they apply to every later run: a leftover
+    # `BotShieldRequestTrigger p-block path="/*" status=451` turned 30
+    # unrelated tests red and read as a product bug for two full suite
+    # runs. So stash the original and drop a marker first, and let
+    # session start put it back.
+    _stash_pristine(conf_path, original)
     _atomic_write(conf_path, mutated)
     try:
         reload()
         yield
     finally:
         _atomic_write(conf_path, original)
+        _clear_pristine(conf_path)
         reload()
 
 

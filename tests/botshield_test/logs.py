@@ -17,7 +17,7 @@ import re
 import subprocess
 from contextlib import contextmanager
 
-from .config import ERROR_LOG
+from .config import DECISION_LOG, ERROR_LOG
 from .enums import (COOKIES, OUTCOMES, PROVIDERS, TIERS, provider_log,
                     tier_log)
 
@@ -127,6 +127,50 @@ class _LogSlice:
             if all(d.get(k) == v for k, v in filters.items()):
                 out.append(d)
         return out
+
+
+@contextmanager
+def decision_log_slice():
+    """Like log_slice, but over the standalone decision log.
+
+    Needed for lines the module writes only there. Observability-endpoint
+    hits are the case in point: bs_log_observability_line writes straight
+    to the decision-log fd and deliberately does not go through
+    bs_decision_log, so it never reaches the error log and
+    log_slice/decision_lines cannot see it.
+
+    Yields an object with .text() and .grep(), not .decision_lines():
+    lines in this file have no "mod_botshield: decision " prefix, which
+    is what _parse_decision keys on.
+    """
+    start = _file_size(DECISION_LOG)
+
+    class _Slice:
+        def text(self) -> str:
+            result = subprocess.run(
+                ["sudo", "tail", "-c", f"+{start + 1}", DECISION_LOG],
+                check=True, capture_output=True, text=True,
+            )
+            return result.stdout
+
+        def grep(self, pattern: str) -> list[str]:
+            rx = re.compile(pattern)
+            return [ln for ln in self.text().splitlines() if rx.search(ln)]
+
+    yield _Slice()
+
+
+def _file_size(path: str) -> int:
+    """Byte-size of `path`. sudo because the logs are root-only. Returns
+    0 for a file that does not exist yet, so a slice taken before the
+    first write still works."""
+    result = subprocess.run(
+        ["sudo", "stat", "-c", "%s", path],
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode != 0:
+        return 0
+    return int(result.stdout.strip())
 
 
 def _log_size() -> int:

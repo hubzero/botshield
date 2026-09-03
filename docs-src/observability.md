@@ -807,6 +807,30 @@ BotShieldFlaggedIpCapacity: 50000
 mod_status is a recommended-but-optional dependency. Without it the
 metrics endpoint and decision log still cover everything.
 
+## Who may read the dashboard and metrics
+
+Each endpoint is closed until its own directive names someone. See
+[the directive reference](../directives/index.html#observability-endpoint-access)
+for the full syntax; the short version is a list of addresses or CIDR
+blocks, one directive per endpoint:
+
+```apache
+BotShieldDashboardAccess 127.0.0.1 ::1
+BotShieldMetricsAccess   10.9.0.5
+```
+
+This is not paranoia about an obscure page. On one deployment the
+dashboard had been served 7,381 times to five addresses with no reverse
+DNS, on foreign hosting and VPN ranges, over the life of the retained
+decision log. It was world-readable because the shipped config could
+only *recommend* a `<Location>`, and a default that is safe only if you
+read the comment is not a default.
+
+A refused request gets 404 rather than 403, so a scan learns nothing,
+and it is recorded in the decision log as `outcome=observe` with
+`reason="observe-denied:<surface>"` — the response is a 404 and the
+access-log line is suppressed, so that line is the only trace.
+
 ## Policy dump
 
 `httpd -t -D DUMP_BOTSHIELD_POLICY` prints the rules each vhost will

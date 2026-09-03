@@ -734,6 +734,37 @@ void bs_policy_dump(server_rec *s, apr_pool_t *p, bs_dir_cfg *cfg)
         s->defn_name ? s->defn_name : "-",
         (unsigned) s->defn_line_number);
 
+    /* --- observability ACL ---
+     *
+     * Printed first because it is the setting most likely to be wrong
+     * in a way the operator only discovers by being locked out of the
+     * page they would have used to diagnose it. */
+    fputs("## Observability endpoint access\n", stdout);
+    {
+        const bs_observe_acl *acls[2] = { &scfg->observe_dashboard,
+                                          &scfg->observe_metrics };
+        const char *names[2] = { "BotShieldDashboardAccess",
+                                 "BotShieldMetricsAccess" };
+        for (int k = 0; k < 2; k++) {
+            const bs_observe_acl *a = acls[k];
+            if (a->allow_all) {
+                printf("%-26s ALL - served to everyone\n", names[k]);
+                continue;
+            }
+            if (!a->specs || a->specs->nelts == 0) {
+                printf("%-26s closed - no directive, requests get 404\n",
+                       names[k]);
+                continue;
+            }
+            printf("%-26s", names[k]);
+            for (int n = 0; n < a->specs->nelts; n++) {
+                printf(" %s", APR_ARRAY_IDX(a->specs, n, const char *));
+            }
+            fputs("\n", stdout);
+        }
+    }
+    fputs("\n", stdout);
+
     /* --- directive rate limits --- */
     fputs("## BotShieldRateLimit (directive)\n", stdout);
     if (!scfg->rate_limits || scfg->rate_limits->nelts == 0) {

@@ -66,6 +66,14 @@ LOAD_STATE_FILE = _pick("BS_LOAD_STATE_FILE",
 # report a parser error that says nothing about the new code.
 HTTPD_CONF = _pick("BS_HTTPD_CONF", "/etc/apache2/apache2.conf",
                    "/etc/httpd/bstest/w%d/httpd.conf" % (WORKER_N or 0))
+# The standalone decision log (BotShieldDecisionLog). Distinct from
+# ERROR_LOG: decision lines appear in BOTH, but only in the error log
+# with the "mod_botshield: decision " prefix that _parse_decision keys
+# on. Lines the module writes straight to this file and nowhere else --
+# observability-endpoint hits, for one -- are only visible here.
+DECISION_LOG = _pick("BS_DECISION_LOG",
+                     "/var/log/apache2/botshield.log",
+                     "/var/log/httpd/bstest/w%d/botshield.log" % (WORKER_N or 0))
 STATE_FILE = _pick("BS_STATE_FILE", "/var/lib/botshield/state.bin",
                    "/var/lib/botshield-test/state-w%d.bin" % (WORKER_N or 0))
 # The external load-state file BotShieldLoadStateFile points at. Tests

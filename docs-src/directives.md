@@ -960,6 +960,90 @@ The trigger family that consumes the state lives under
 Vhosts with the same token share one reputation namespace. See
 [deployment](../deployment/index.html#multi-vhost-reputation).
 
+## Observability endpoint access
+
+| Directive | Syntax | Default | Scope |
+|---|---|---|---|
+| `BotShieldDashboardAccess` | `<addr\|cidr>...` \| `all` \| `none` | closed | server / vhost |
+| `BotShieldMetricsAccess` | `<addr\|cidr>...` \| `all` \| `none` | closed | server / vhost |
+
+Who may read each observability endpoint. **Each is closed until its own
+directive names someone**, and a refused request gets 404, not 403, so a
+scan cannot tell the endpoint exists.
+
+```apache
+BotShieldDashboardAccess 127.0.0.1 ::1
+BotShieldMetricsAccess   127.0.0.1 ::1
+```
+
+One directive per endpoint, so opening one never opens the other. A
+Prometheus scraper and an admin browser are rarely the same host:
+
+```apache
+BotShieldMetricsAccess   10.9.0.5
+BotShieldDashboardAccess 10.1.0.0/16
+```
+
+The dashboard grant covers every page under `/dashboard/`. The router
+matches the prefix rather than a list of pages, so a page added in a
+later release is covered by config that already exists.
+
+Directives accumulate, so keep one network per line with its reason next
+to it. Two keywords stand in place of the whole list: `all` serves the
+endpoint to everyone, and `none` closes it and refuses a grant inherited
+from server scope. Neither can be combined with addresses; that is a
+config-time error rather than a silent resolution, because these lists
+get edited by commenting lines in and out and a leftover `all` above a
+careful CIDR list should not quietly win.
+
+Matching is on the same client address the module scores, so
+`mod_remoteip` applies exactly as it does to Apache's own `Require ip`.
+
+### Why this is not a `<Location>`
+
+`Require ip` on these paths has a failure mode worth knowing. Each authz
+denial writes an `AH01630` line to the error log, the dashboard
+auto-refreshes every 30 seconds, and a fail2ban jail watching that log
+counts five denials in two minutes as an attack. On a HubZero host the
+shipped `apache-hz_access_denied` jail then bans the viewer at the
+firewall for ten hours — off the whole site, not just the dashboard.
+That happened on geodynamics.org on 2026-08-08.
+
+These directives refuse inside the module and write nothing to the error
+log, so there is nothing for a jail to count. Verified by probe: eight
+refused dashboard requests produced zero error-log lines from the
+module.
+
+They deliberately stop at an IP list. Apache already has authentication
+and authorization, they compose by wrapping the path in a `<Location>`,
+and a second half-implementation inside this module would be the worse
+of the two. The IP list is the part Apache cannot supply on the module's
+behalf, because the module has to decide whether to serve the endpoint
+at all. To add a password, compound the two — Apache decides whether the
+request reaches the module, the module decides whether the endpoint is
+served:
+
+```apache
+BotShieldDashboardAccess 10.1.0.0/16
+
+<LocationMatch "^/botshield/dashboard">
+    AuthType Basic
+    AuthName "BotShield"
+    AuthUserFile /etc/httpd/botshield.htpasswd
+    Require valid-user
+</LocationMatch>
+```
+
+Read the resolved lists back with `httpd -t -D DUMP_BOTSHIELD_POLICY`,
+which prints one line per endpoint. A wrong allowlist is otherwise
+discovered by being locked out of the page you would have used to
+diagnose it.
+
+Refused requests are recorded in the decision log as `outcome=observe`
+with `reason="observe-denied:<surface>"`. The response is a 404 and the
+access-log line is suppressed like every other hit on these endpoints,
+so that line is the only trace a probe leaves.
+
 ## Decision log
 
 | Directive | Syntax | Default | Scope |

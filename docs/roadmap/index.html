@@ -91,6 +91,7 @@
   <h2 class="toc__heading">On this page</h2>
   <ul class="toc__list">
 <li class="toc__item toc__item--level-2"><a href="#2026-09-03-policy-readback-becomes-a-config-test-flag">2026-09-03 (policy readback becomes a config-test flag)</a></li>
+<li class="toc__item toc__item--level-3"><a href="#the-dashboard-and-metrics-are-closed-by-default">The dashboard and metrics are closed by default</a></li>
 <li class="toc__item toc__item--level-3"><a href="#botshield-policy-status-is-now-httpd-t-d-dump-botshield-policy">`/botshield/policy-status` is now `httpd -t -D DUMP_BOTSHIELD_POLICY`</a></li>
 <li class="toc__item toc__item--level-3"><a href="#one-decision-log-writer-per-spec-not-one-per-vhost">One decision-log writer per spec, not one per vhost</a></li>
 <li class="toc__item toc__item--level-3"><a href="#two-rate-limit-tests-that-could-not-fail">Two rate-limit tests that could not fail</a></li>
@@ -234,6 +235,54 @@
 </section>
         <div class="prose">
 <h2 id="2026-09-03-policy-readback-becomes-a-config-test-flag">2026-09-03 (policy readback becomes a config-test flag)</h2>
+<h3 id="the-dashboard-and-metrics-are-closed-by-default">The dashboard and metrics are closed by default</h3>
+<p>Two new directives, <code>BotShieldDashboardAccess</code> and
+<code>BotShieldMetricsAccess</code>. Each observability endpoint is now served only
+to the addresses its own directive names; everything else gets 404.</p>
+<p>The old arrangement was a <code>&lt;LocationMatch&gt;</code> in the shipped config with
+<code>Require all granted</code> and a long comment explaining the exposure. A
+default that is safe only if you read the comment is not a default. On
+this deployment the decision log showed the dashboard had been served
+<strong>7,381 times to five addresses with no reverse DNS</strong>, on foreign
+hosting and VPN ranges, alongside 233 hits from the operator's own host
+and Purdue VPN.</p>
+<pre><code class="language-apache">BotShieldDashboardAccess 127.0.0.1 ::1
+BotShieldMetricsAccess   127.0.0.1 ::1
+
+BotShieldMetricsAccess   10.9.0.5
+BotShieldDashboardAccess 10.1.0.0/16
+</code></pre>
+<p>One directive per endpoint rather than one directive with a surface
+argument: a Prometheus scraper and an admin browser are rarely the same
+host, so the lists differ in practice, and the directive name saying
+which endpoint it opens is the whole of the explanation. It also means a
+new observability surface has to be opened deliberately instead of
+inheriting a grant written before it existed. Directives accumulate. <code>all</code> restores the old
+world-readable behaviour explicitly; <code>none</code> closes an endpoint and
+refuses a grant inherited from server scope. Neither combines with addresses —
+that is a config-time error, because these lists get edited by
+commenting lines in and out and a leftover <code>all</code> above a careful CIDR
+list should not quietly win.</p>
+<p>Refusal is 404, not 403, so a scan cannot confirm the endpoint exists,
+and it is recorded in the decision log as <code>outcome=observe</code> with
+<code>reason=&quot;observe-denied:&lt;surface&gt;&quot;</code>. That line is the only trace: the
+response is a 404 and the access-log line is suppressed like every other
+hit on these surfaces.</p>
+<p><strong>Why this is not <code>Require ip</code>.</strong> Each authz denial writes <code>AH01630</code> to
+the error log; the dashboard auto-refreshes every 30s; the
+<code>apache-hz_access_denied</code> jail bans at five denials in two minutes for
+ten hours — off the whole site. A module refusal writes nothing to the
+error log, so there is nothing to count. Verified: eight refused
+requests produced zero error-log lines from the module.</p>
+<p>The directive stops at an IP list on purpose. Apache already has authn
+and authz and they compose by wrapping the path in a <code>&lt;Location&gt;</code>;
+Apache decides whether the request reaches the module, the module
+decides whether the surface is served. The IP list is the part Apache
+cannot supply on the module's behalf.</p>
+<p>The policy dump prints one resolved list per endpoint, since a wrong
+allowlist is
+otherwise discovered by being locked out of the page you would have used
+to diagnose it.</p>
 <h3 id="botshield-policy-status-is-now-httpd-t-d-dump-botshield-policy"><code>/botshield/policy-status</code> is now <code>httpd -t -D DUMP_BOTSHIELD_POLICY</code></h3>
 <p>The endpoint is gone. It was the wrong shape for what it did.</p>
 <p>The dashboard and the metrics endpoint are URLs because they report

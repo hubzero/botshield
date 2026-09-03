@@ -190,6 +190,10 @@ const char *bs_m_class_name(int idx);
  * its access-log line. Does not touch the decision counters. */
 void bs_log_observability_request(request_rec *r);
 
+/* Same, for a request refused by the endpoint ACL. `surface` is
+ * "dashboard" or "metrics" and appears in the logged reason. */
+void bs_log_observability_denied(request_rec *r, const char *surface);
+
 
 /* ----------------------------------------------------------------------
  * Windowed counter reads (dashboard)
