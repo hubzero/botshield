@@ -141,7 +141,6 @@ Under `BotShieldEndpointPrefix` (default `/botshield`):
 | `<prefix>/captcha-verify` | POST | Bare verify URL (single-provider vhosts) |
 | `<prefix>/captcha-verify/<provider>` | POST | Per-provider verify URL |
 | `<prefix>/metrics` | GET | Prometheus 0.0.4 text exposition |
-| `<prefix>/policy-status` | GET | Active policy readback (rate limits, block paths, robots.txt) |
 | `<prefix>/embedded.js` | GET | Embedded silent-verify wrapper |
 | `<prefix>/form-widget.js` | GET | Inline form-captcha widget shell |
 | `<prefix>/safeguard-info` | GET | Built-in explainer page rendered when challenge-safeguard trips (and no `BotShieldSafeguardRedirectURL` is set). Accepts `?return=<urlencoded path>` |

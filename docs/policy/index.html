@@ -269,20 +269,21 @@ apply.</li>
 </ul>
 </li>
 </ul>
-<p>Group iteration is exposed at <code>&lt;prefix&gt;/policy-status</code> for
-inspection (see <a href="../observability/index.html">observability</a>).</p>
+<p>Group iteration is exposed by <code>httpd -t -D DUMP_BOTSHIELD_POLICY</code>
+for inspection (see <a href="../observability/index.html">observability</a>).</p>
 <h3 id="reading-the-effective-policy">Reading the effective policy</h3>
-<p><code>&lt;prefix&gt;/policy-status</code> also prints the tier thresholds and every flag
-trigger <strong>after</strong> <code>reset</code> processing, each with the source it came
-from:</p>
+<p><code>httpd -t -D DUMP_BOTSHIELD_POLICY</code> also prints the tier thresholds
+and every flag trigger <strong>after</strong> <code>reset</code> processing, each with the
+source it came from:</p>
 <pre><code>## Tier thresholds (effective)
-silent       20   compiled default
-hard      10000   configured
+non-interactive      20   configured
+interactive          50   configured
+captcha               -   unset - never fires (suggested: 80)
 
 ## Flag triggers (effective, after reset)
 # flag              action      value    mode      source
 honeypot_hit       score       +60      enforce   configured
-pow_fail_streak    tier_floor  silent   enforce   compiled default
+pow_fail_streak    tier_floor  interactive  enforce   configured
 </code></pre>
 <p>The source column is the point. &quot;Not in the config file&quot; and &quot;not in
 effect&quot; are different things, and two production lockouts came from
@@ -290,10 +291,13 @@ confusing them: a flag was configured to score 50 against a
 <code>BotShieldScoreNonInteractive</code> of 20 that was a compiled-in default and
 appeared nowhere an operator could read. The config said <code>add=50</code> and
 nothing on the system said what 50 meant.</p>
+<p>There are no compiled-in thresholds any more, for that reason. A tier
+with no threshold configured never fires, and the dump says so along
+with a suggested starting value.</p>
 <p>Two interactions are called out inline rather than left to
 documentation nobody consults at the moment it matters:</p>
-<p><code>~</code> — a flag scoring at or above the silent threshold. Such a flag is a
-challenge switch rather than a contributing signal. Bounded by
+<p><code>~</code> — a flag scoring at or above the non-interactive threshold. Such a
+flag is a challenge switch rather than a contributing signal. Bounded by
 <code>flags_excused</code> (one solve clears it for that cookie), so the residual
 risk is a client that <em>cannot</em> solve.</p>
 <p><code>!!</code> — a <code>tier_floor</code> at or above <code>interactive</code> while that threshold is

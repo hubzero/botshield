@@ -129,7 +129,7 @@ void robots_query(const robots_doc *doc,
 
 /* Group iteration — used at post_config time to allocate one SHM
  * rate-counter slot per group that carries a Crawl-delay, and by
- * the /botshield/policy-status handler to render the parsed doc. */
+ * the -D DUMP_BOTSHIELD_POLICY dump to render the parsed doc. */
 int         robots_group_count(const robots_doc *doc);
 /* Number of lines that exceeded BOTSHIELD_ROBOTS_MAX_LINE and got
  * truncated during the parse. Caller emits a NOTICE if non-zero so

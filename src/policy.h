@@ -64,14 +64,10 @@ extern "C" {
  *   any other HTTP_* code  short-circuit with that status. */
 int bs_check_policy(request_rec *r);
 
-/* /botshield/policy-status admin endpoint (E2.2.3). Plain-text
- * dump of the rules currently being enforced — directive
- * rate_limits and robots.txt-derived groups. Reads the same scfg
- * fields bs_check_policy walks at request time. Operators wrap the
- * URL in a <Location> with their own ACL; the page reveals operator
- * config (already on disk in /etc/apache2/) but no cookie secrets
- * or client IPs. */
-int bs_policy_status_handler(request_rec *r, bs_dir_cfg *cfg);
+/* Dump one vhost's effective policy to stdout for
+ * `httpd -t -D DUMP_BOTSHIELD_POLICY`. Was an HTTP endpoint; config
+ * introspection belongs behind shell access, not a URL. */
+void bs_policy_dump(server_rec *s, apr_pool_t *p, bs_dir_cfg *cfg);
 
 /* Atomic fixed-window admission test against a SHM rate-counter
  * slot. Returns 1 if the request fits under budget (count was

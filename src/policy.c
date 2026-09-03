@@ -664,7 +664,7 @@ int bs_check_policy(request_rec *r)
 }
 
 /* ======================================================================
- * E2.2.3 — /botshield/policy-status
+ * E2.2.3 — the policy dump (-D DUMP_BOTSHIELD_POLICY)
  *
  * Plain-text dump of the rules currently being enforced:
  *   - BotShieldRateLimit directives (directive rate_limits array).
@@ -687,86 +687,75 @@ int bs_check_policy(request_rec *r)
  * by humans over curl; structured consumers use /botshield/metrics.
  * ====================================================================== */
 
-static void bs_psh_cohort_ipspec(request_rec *r, const bs_cohort *c)
+static void bs_psh_cohort_ipspec(const bs_cohort *c)
 {
-    if (c->ip_any) { ap_rputs("*", r); return; }
+    if (c->ip_any) { fputs("*", stdout); return; }
     if (c->inline_cidrs) {
-        ap_rprintf(r, "inline(%s)", c->inline_cidrs);
+        printf("inline(%s)", c->inline_cidrs);
         return;
     }
     if (c->path) {
-        ap_rprintf(r, "file(%s)", c->path);
+        printf("file(%s)", c->path);
         return;
     }
-    ap_rprintf(r, "<%d ranges>", c->ranges ? c->ranges->nelts : 0);
+    printf("<%d ranges>", c->ranges ? c->ranges->nelts : 0);
 }
 
-static void bs_psh_render_counter(request_rec *r, int slot_idx,
-                                  apr_uint32_t budget)
+/* Dump the effective policy for one vhost to stdout, for
+ * `httpd -t -D DUMP_BOTSHIELD_POLICY`.
+ *
+ * This was an HTTP endpoint (<prefix>/policy-status). It should not
+ * have been: dashboard and metrics are runtime state, which is why
+ * mod_status is a URL, but this is resolved CONFIGURATION -- static
+ * between reloads, and Apache already has an idiom for that in the
+ * -D DUMP_VHOSTS / DUMP_MODULES / DUMP_CONFIG family. Those need
+ * shell access, which is the right bar for config introspection and
+ * cannot be forgotten into being world-readable -- the endpoint was
+ * served to anyone, and of the three it was the worst to expose:
+ * counters tell an attacker how much noise they are making, a
+ * policy dump tells them which rules exist and what to avoid. */
+void bs_policy_dump(server_rec *s, apr_pool_t *p, bs_dir_cfg *cfg)
 {
-    bs_rate_counter *counters = (bs_rate_counter *)bs_shm.rate_counters;
-    if (slot_idx < 0 || !counters) {
-        ap_rputs("-/-", r);
-        return;
-    }
-    apr_uint32_t cnt = __atomic_load_n(&counters[slot_idx].count,
-                                       __ATOMIC_RELAXED);
-    ap_rprintf(r, "%u/%u", cnt, budget);
-}
-
-int bs_policy_status_handler(request_rec *r, bs_dir_cfg *cfg)
-{
-    apr_table_setn(r->subprocess_env, "BS_ENDPOINT", "obs");
-    bs_log_observability_request(r);
-    if (r->method_number != M_GET && r->method_number != M_OPTIONS) {
-        r->status = HTTP_METHOD_NOT_ALLOWED;
-        apr_table_setn(r->headers_out, "Allow", "GET, OPTIONS");
-        ap_set_content_type(r, "text/plain; charset=utf-8");
-        ap_rputs("GET required.\n", r);
-        return OK;
-    }
-    ap_set_content_type(r, "text/plain; charset=utf-8");
-    apr_table_setn(r->headers_out, "Cache-Control", "no-store");
 
     bs_server_cfg *scfg =
-        ap_get_module_config(r->server->module_config, &botshield_module);
+        ap_get_module_config(s->module_config, &botshield_module);
     if (!scfg) {
-        ap_rputs("# scfg unavailable\n", r);
-        return OK;
+        fputs("# scfg unavailable\n", stdout);
+        return;
     }
 
-    char tbuf[APR_RFC822_DATE_LEN + 1] = { 0 };
-    apr_rfc822_date(tbuf, apr_time_now());
-    ap_rprintf(r, "# mod_botshield policy status\n"
-                  "# vhost:       %s\n"
-                  "# server_time: %s\n\n",
-        r->server->server_hostname ? r->server->server_hostname : "-",
-        tbuf);
+    /* Identified the way `httpd -S` identifies a vhost: name, port, and
+     * the config file and line that defined it. Two vhosts on one name
+     * and different ports are otherwise indistinguishable in the dump. */
+    printf("# mod_botshield policy dump\n"
+                  "# vhost: %s:%u (%s:%u)\n\n",
+        s->server_hostname ? s->server_hostname : "-",
+        (unsigned) (s->addrs ? s->addrs->host_port : s->port),
+        s->defn_name ? s->defn_name : "-",
+        (unsigned) s->defn_line_number);
 
     /* --- directive rate limits --- */
-    ap_rputs("## BotShieldRateLimit (directive)\n", r);
+    fputs("## BotShieldRateLimit (directive)\n", stdout);
     if (!scfg->rate_limits || scfg->rate_limits->nelts == 0) {
-        ap_rputs("# (none)\n\n", r);
+        fputs("# (none)\n\n", stdout);
     } else {
-        ap_rputs("# name               budget  window  ua                          "
-                 "ipspec                slot  count/budget\n", r);
+        /* No live counter column. A configtest process never attaches
+         * the scoreboard SHM, so the count could only ever print as
+         * "-/-"; live consumption belongs to the dashboard and the
+         * metrics endpoint, which run inside a serving child. */
+        fputs("# name               budget  window  ua                          "
+                 "ipspec\n", stdout);
         for (int i = 0; i < scfg->rate_limits->nelts; i++) {
             bs_rate_limit_entry *e = APR_ARRAY_IDX(
                 scfg->rate_limits, i, bs_rate_limit_entry *);
-            ap_rprintf(r, "%-18s  %6u  %4us   %-26s  ",
+            printf("%-18s  %6u  %4us   %-26s  ",
                 e->name, e->budget, e->window_sec,
                 e->cohort.ua_any ? "*"
-                    : apr_psprintf(r->pool, "\"%s\"", e->cohort.ua_pattern));
-            bs_psh_cohort_ipspec(r, &e->cohort);
-            ap_rprintf(r, "%*s  %4d  ",
-                       (int)(22 - (e->cohort.ip_any ? 1
-                          : (int)(strlen("file()") + (e->cohort.path ? strlen(e->cohort.path) : 0)
-                                  + (e->cohort.inline_cidrs ? strlen(e->cohort.inline_cidrs) : 0)))),
-                       "", e->shm_slot);
-            bs_psh_render_counter(r, e->shm_slot, e->budget);
-            ap_rputs("\n", r);
+                    : apr_psprintf(p, "\"%s\"", e->cohort.ua_pattern));
+            bs_psh_cohort_ipspec(&e->cohort);
+            fputs("\n", stdout);
         }
-        ap_rputs("\n", r);
+        fputs("\n", stdout);
     }
 
     /* --- robots.txt --- */
@@ -778,30 +767,48 @@ int bs_policy_status_handler(request_rec *r, bs_dir_cfg *cfg)
      * it had to clear was a compiled-in default that appeared nowhere
      * an operator could read. */
     {
-        int sil = bs_effective_int(cfg ? cfg->score_non_interactive : 0,
-                                   BS_DEFAULT_SCORE_NON_INTERACTIVE);
-        int hrd = bs_effective_int(cfg ? cfg->score_interactive : 0,
-                                   BS_DEFAULT_SCORE_INTERACTIVE);
-        int cap = bs_effective_int(cfg ? cfg->score_captcha : 0,
-                                   BS_DEFAULT_SCORE_CAPTCHA);
-        ap_rputs("## Tier thresholds (effective)\n", r);
-        ap_rprintf(r, "non-interactive %6d   %s\n", sil,
-                   (cfg && cfg->score_non_interactive > 0) ? "configured"
-                                                  : "compiled default");
-        ap_rprintf(r, "hard     %6d   %s\n", hrd,
-                   (cfg && cfg->score_interactive > 0) ? "configured"
-                                                : "compiled default");
-        ap_rprintf(r, "captcha  %6d   %s\n\n", cap,
-                   (cfg && cfg->score_captcha > 0) ? "configured"
-                                                   : "compiled default");
+        /* Configured values, not resolved defaults: unset means never,
+         * so the advisories below must not fire against a threshold
+         * that does not exist. */
+        int sil = cfg ? cfg->score_non_interactive : BS_UNSET;
+        int hrd = cfg ? cfg->score_interactive     : BS_UNSET;
+
+        /* Report what is EFFECTIVE, which since the no-default-rules
+         * change means: an unset threshold never fires. Printing the
+         * compiled default as though it applied made this page state
+         * the opposite of the truth on the one endpoint whose job is
+         * saying what is in force -- a reader would conclude
+         * cumulative scoring was live at 20 when score decides
+         * nothing. The compiled values are still shown, marked as the
+         * suggested starting point they now are. */
+        fputs("## Tier thresholds (effective)\n", stdout);
+        struct { const char *name; int cfgval; int dflt; } th[] = {
+            { "non-interactive", cfg ? cfg->score_non_interactive : BS_UNSET,
+              BS_DEFAULT_SCORE_NON_INTERACTIVE },
+            { "interactive",     cfg ? cfg->score_interactive     : BS_UNSET,
+              BS_DEFAULT_SCORE_INTERACTIVE },
+            { "captcha",         cfg ? cfg->score_captcha         : BS_UNSET,
+              BS_DEFAULT_SCORE_CAPTCHA },
+        };
+        for (int t = 0; t < 3; t++) {
+            if (th[t].cfgval == BS_UNSET) {
+                printf("%-16s %6s   unset - never fires "
+                              "(suggested: %d)\n",
+                           th[t].name, "-", th[t].dflt);
+            } else {
+                printf("%-16s %6d   configured\n",
+                           th[t].name, th[t].cfgval);
+            }
+        }
+        fputs("\n", stdout);
 
         /* --- effective flag triggers, after reset processing --- */
-        ap_rputs("## Flag triggers (effective, after reset)\n", r);
+        fputs("## Flag triggers (effective, after reset)\n", stdout);
         if (!scfg->flag_triggers || scfg->flag_triggers->nelts == 0) {
-            ap_rputs("# (none)\n\n", r);
+            fputs("# (none)\n\n", stdout);
         } else {
-            ap_rputs("# flag              action      value    mode      "
-                     "source\n", r);
+            fputs("# flag              action      value    mode      "
+                     "source\n", stdout);
             int warned = 0;
             for (int i = 0; i < scfg->flag_triggers->nelts; i++) {
                 bs_flag_trigger_entry *e = APR_ARRAY_IDX(
@@ -818,7 +825,7 @@ int bs_policy_status_handler(request_rec *r, bs_dir_cfg *cfg)
                 } else {
                     apr_snprintf(val, sizeof(val), "-");
                 }
-                ap_rprintf(r, "%-18s %-11s %-8s %-9s %s\n",
+                printf("%-18s %-11s %-8s %-9s %s\n",
                            e->flag_name, act, val,
                            e->mode == BS_TMODE_OBSERVE ? "observe" : "enforce",
                            e->from_default ? "compiled default" : "configured");
@@ -836,8 +843,8 @@ int bs_policy_status_handler(request_rec *r, bs_dir_cfg *cfg)
                  * lowering scores that no longer need lowering. */
                 if (e->action == BS_FLAG_ACT_SCORE
                     && e->mode != BS_TMODE_OBSERVE
-                    && e->score_add >= sil) {
-                    ap_rprintf(r, "  ~  %s scores %+d on its own, at or above "
+                    && sil != BS_UNSET && e->score_add >= sil) {
+                    printf("  ~  %s scores %+d on its own, at or above "
                                   "the non-interactive threshold of %d: this flag is a "
                                   "challenge switch, not a contributing "
                                   "signal. Bounded by flags_excused -- one "
@@ -849,56 +856,61 @@ int bs_policy_status_handler(request_rec *r, bs_dir_cfg *cfg)
                 }
                 if (e->action == BS_FLAG_ACT_TIER_FLOOR
                     && e->mode != BS_TMODE_OBSERVE
-                    && e->tier_min >= BS_TIER_INTERACTIVE && hrd >= 10000) {
-                    ap_rprintf(r, "  !! %s forces tier %s, which is MAXed in "
+                    && e->tier_min >= BS_TIER_INTERACTIVE
+                      && hrd == BS_UNSET) {
+                    printf("  !! %s forces tier %s, which is MAXed in "
                                   "after the score decision and ignores the "
                                   "parked hard threshold of %d.\n",
                                e->flag_name, bs_tier_name(e->tier_min), hrd);
                     warned++;
                 }
             }
-            ap_rprintf(r, "# %d note(s). '!!' is a fault; '~' is a design\n"
+            printf("# %d note(s). '!!' is a fault; '~' is a design\n"
                           "# consequence worth knowing.\n\n", warned);
         }
     }
 
-    ap_rputs("## robots.txt (BotShieldRobotsTxt)\n", r);
+    fputs("## robots.txt (BotShieldRobotsTxt)\n", stdout);
     if (!scfg->robots_txt_path) {
-        ap_rputs("# (not configured)\n", r);
-        return OK;
+        fputs("# (not configured)\n", stdout);
+        return;
     }
     bs_robots_state *rs =
         __atomic_load_n(&scfg->robots, __ATOMIC_ACQUIRE);
-    ap_rprintf(r, "# path:                %s\n", scfg->robots_txt_path);
+    printf("# path:                %s\n", scfg->robots_txt_path);
     if (!rs) {
-        ap_rputs("# status:              not loaded (parse failed or "
-                 "file missing at post_config)\n", r);
-        return OK;
+        fputs("# status:              NOT LOADED - parse failed or file "
+                 "missing (see the error log above)\n", stdout);
+        return;
     }
     char mbuf[APR_RFC822_DATE_LEN + 1] = { 0 };
     apr_rfc822_date(mbuf, rs->mtime);
-    ap_rprintf(r, "# mtime:               %s\n"
+    /* No slot-pool line: like the per-group slot numbers, pool usage is
+     * SHM bookkeeping, and the figure this process computes is nominal
+     * anyway. */
+    printf("# mtime:               %s\n"
                   "# groups:              %d\n"
-                  "# slot pool:           %d/%d used\n"
-                  "# wildcard scope:      %s\n"
-                  "# refresh interval:    %d s%s\n",
+                  "# wildcard scope:      %s\n",
         mbuf,
         robots_group_count(rs->doc),
-        scfg->robots_slot_pool_used, scfg->robots_slot_pool_size,
         scfg->robots_wildcard_scope == BS_ROBOTS_WILDCARD_STRICT ? "strict"
           : scfg->robots_wildcard_scope == BS_ROBOTS_WILDCARD_OFF ? "off"
-          : "heuristic",
-        scfg->robots_refresh_interval,
-        scfg->robots_refresh_interval == 0 ? " (live-refresh disabled)" : "");
+          : "heuristic");
+    if (scfg->robots_refresh_interval > 0)
+        printf("# refresh interval:    %d s\n",
+               scfg->robots_refresh_interval);
+    else
+        fputs("# refresh interval:    off - reload to pick up edits\n",
+              stdout);
 
     int n = robots_group_count(rs->doc);
     for (int i = 0; i < n; i++) {
-        ap_rprintf(r, "\n### group[%d] \"%s\"  wildcard=%s\n", i,
+        printf("\n### group[%d] \"%s\"  wildcard=%s\n", i,
             robots_group_name_at(rs->doc, i),
             robots_group_is_wildcard_at(rs->doc, i) ? "yes" : "no");
         int n_ua = robots_group_ua_count_at(rs->doc, i);
         for (int u = 0; u < n_ua; u++) {
-            ap_rprintf(r, "  user-agent: %s\n",
+            printf("  user-agent: %s\n",
                 robots_group_ua_at(rs->doc, i, u));
         }
         int n_rules = robots_group_rule_count_at(rs->doc, i);
@@ -906,18 +918,18 @@ int bs_policy_status_handler(request_rec *r, bs_dir_cfg *cfg)
             const char *pat = NULL;
             int allow = 0;
             if (robots_group_rule_at(rs->doc, i, k, &pat, &allow)) {
-                ap_rprintf(r, "  %-9s %s\n",
+                printf("  %-9s %s\n",
                     allow ? "Allow:" : "Disallow:", pat ? pat : "");
             }
         }
         int cd = robots_group_crawl_delay_at(rs->doc, i);
         if (cd > 0) {
-            int slot = (rs->slot_by_group_idx && i < n)
-                     ? rs->slot_by_group_idx[i] : -1;
-            ap_rprintf(r, "  Crawl-delay: %ds  slot=%d  ", cd, slot);
-            bs_psh_render_counter(r, slot, 1);
-            ap_rputs("\n", r);
+            /* No slot number: which SHM counter slot a group landed
+             * in is bookkeeping, not policy, and it differs between
+             * this configtest and the server being tested. */
+            printf("  Crawl-delay: %ds", cd);
+            fputs("\n", stdout);
         }
     }
-    return OK;
+    return;
 }

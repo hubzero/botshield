@@ -180,24 +180,25 @@ Args:
   - `off`: ignore wildcard groups entirely. Only named-group rules
     apply.
 
-Group iteration is exposed at `<prefix>/policy-status` for
-inspection (see [observability](../observability/index.html)).
+Group iteration is exposed by `httpd -t -D DUMP_BOTSHIELD_POLICY`
+for inspection (see [observability](../observability/index.html)).
 
 ### Reading the effective policy
 
-`<prefix>/policy-status` also prints the tier thresholds and every flag
-trigger **after** `reset` processing, each with the source it came
-from:
+`httpd -t -D DUMP_BOTSHIELD_POLICY` also prints the tier thresholds
+and every flag trigger **after** `reset` processing, each with the
+source it came from:
 
 ```
 ## Tier thresholds (effective)
-silent       20   compiled default
-hard      10000   configured
+non-interactive      20   configured
+interactive          50   configured
+captcha               -   unset - never fires (suggested: 80)
 
 ## Flag triggers (effective, after reset)
 # flag              action      value    mode      source
 honeypot_hit       score       +60      enforce   configured
-pow_fail_streak    tier_floor  silent   enforce   compiled default
+pow_fail_streak    tier_floor  interactive  enforce   configured
 ```
 
 The source column is the point. "Not in the config file" and "not in
@@ -207,11 +208,15 @@ confusing them: a flag was configured to score 50 against a
 appeared nowhere an operator could read. The config said `add=50` and
 nothing on the system said what 50 meant.
 
+There are no compiled-in thresholds any more, for that reason. A tier
+with no threshold configured never fires, and the dump says so along
+with a suggested starting value.
+
 Two interactions are called out inline rather than left to
 documentation nobody consults at the moment it matters:
 
-`~` — a flag scoring at or above the silent threshold. Such a flag is a
-challenge switch rather than a contributing signal. Bounded by
+`~` — a flag scoring at or above the non-interactive threshold. Such a
+flag is a challenge switch rather than a contributing signal. Bounded by
 `flags_excused` (one solve clears it for that cookie), so the residual
 risk is a client that *cannot* solve.
 

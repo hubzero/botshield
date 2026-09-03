@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import pytest
 
-from botshield_test import client
+from botshield_test import apache, client
 
 
 # No longer serial. The marker meant "mutates Apache config or SHM",
@@ -305,16 +305,20 @@ def test_bot_rate_botgroup_specific_overrides(config_override, fresh_ip):
     )
 
 
-def test_bot_rate_botgroup_unknown_rejected(
-    config_override, fresh_ip,
-):
-    """An @botgroup selector that doesn't match any directory entry
-    is a config-time error. Apache reload would fail; we observe via
-    test harness that the module is still serving (didn't load the
-    bad config) or via apachectl -t complaint."""
-    # Just guard that the directive name is registered.
-    resp = client.get("/botshield/policy-status")
-    assert resp.status_code in (200, 401, 403, 404)
+def test_bot_rate_botgroup_unknown_rejected():
+    """An @botgroup selector that doesn't match any directory entry is
+    a config-time error. Checked with configtest rather than a reload:
+    a reload with a config the module rejects would take this worker's
+    instance down for the rest of the session."""
+    rc, err = apache.configtest("BotShieldBotRateLimit @nosuchgroup 60")
+    assert rc != 0, (
+        "an unresolvable @botgroup selector was accepted; the operator "
+        "gets a rule that silently matches nothing"
+    )
+    assert "nosuchgroup" in err or "BotShieldBotRateLimit" in err, (
+        f"rejection doesn't name the selector or the directive, so an "
+        f"operator can't tell what to fix. stderr:\n{err[-500:]}"
+    )
 
 
 def test_bot_rate_off_with_specific_entry(config_override, fresh_ip):
@@ -344,20 +348,25 @@ def test_bot_rate_off_with_specific_entry(config_override, fresh_ip):
     )
 
 
-def test_bot_rate_bad_directive_args():
-    """Config-time validation: bad budget, bad period, unresolvable
-    pattern. These would fail the apachectl -t syntax check; we test
-    via the directive-validation harness used elsewhere in the suite."""
-    # The apache config-test framework exercises this; if the parsed
-    # directive is invalid, post_config aborts and reload fails.
-    # Here we just guard that the directive name is registered —
-    # full bad-arg coverage lives in test_directive_validation.py.
-    resp = client.get("/botshield/policy-status")
-    # 200 if the module loaded with our directive registered;
-    # 500/404 if registration broke. Either way Apache loaded
-    # cleanly with the test conf_override harness already exercised
-    # by the earlier tests in this file.
-    assert resp.status_code in (200, 401, 403, 404), (
-        f"policy-status unreachable; module may not have loaded "
-        f"cleanly: status={resp.status_code}"
+BAD_BOT_RATE_ARGS = [
+    ("BotShieldBotRateLimit gptbot notanumber", "budget"),
+    ("BotShieldBotRateLimit gptbot 60 fortnight", "period"),
+    ("BotShieldBotRateLimit gptbot -5", "negative budget"),
+    ("BotShieldBotRateLimit", "no args at all"),
+]
+
+
+@pytest.mark.parametrize("snippet,what", BAD_BOT_RATE_ARGS,
+                         ids=[w.replace(" ", "_") for _, w in
+                              BAD_BOT_RATE_ARGS])
+def test_bot_rate_bad_directive_args(snippet, what):
+    """Malformed BotShieldBotRateLimit args are a config-time error.
+    Silent acceptance is the failure that matters here: a budget that
+    parses as 0 or INT_MAX is a rate limit the operator believes is in
+    force and isn't."""
+    rc, err = apache.configtest(snippet)
+    assert rc != 0, f"configtest accepted {what}: {snippet!r}"
+    assert "BotShieldBotRateLimit" in err, (
+        f"error for {snippet!r} doesn't name the directive. "
+        f"stderr:\n{err[-500:]}"
     )

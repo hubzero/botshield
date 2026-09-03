@@ -48,6 +48,9 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v);
  * fatal init failure. Apache 2.4 invokes this twice on cold boot
  * — the first invocation is the syntax-check pass and is skipped
  * here. */
+/* test_config hook: implements -D DUMP_BOTSHIELD_POLICY. */
+void bs_test_config(apr_pool_t *pconf, server_rec *s);
+
 int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                    apr_pool_t *ptemp, server_rec *s);
 
@@ -120,7 +123,6 @@ const char *bs_set_rate_limit_escalate   (cmd_parms *cmd, void *dconf,
                                           int argc, char *const argv[]);
 const char *bs_set_rate_escalate_capacity(cmd_parms *cmd, void *dconf,
                                           const char *arg);
-const char *bs_set_scoring            (cmd_parms *cmd, void *dconf, int flag);
 const char *bs_set_safeguard          (cmd_parms *cmd, void *dconf, int flag);
 const char *bs_set_safeguard_threshold(cmd_parms *cmd, void *dconf, const char *arg);
 const char *bs_set_safeguard_window   (cmd_parms *cmd, void *dconf, const char *arg);

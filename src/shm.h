@@ -242,7 +242,7 @@ typedef enum {
     BS_M_RESP_RATE_LIMITED,    /* 429 */
     BS_M_RESP_REDIRECT,        /* safeguard 302 */
     BS_M_RESP_ENDPOINT,        /* module endpoint: verify, assets */
-    BS_M_RESP_OBSERVE,         /* dashboard / metrics / policy-status */
+    BS_M_RESP_OBSERVE,         /* dashboard / metrics */
     /* Served off disk by the core handler: CSS, JS, images, uploads.
      * Split out of ORIGIN because lumping them together made the
      * "how much are we actually answering" ratio meaningless -- a page

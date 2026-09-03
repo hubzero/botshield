@@ -663,9 +663,12 @@ static int bs_ua_is_selector_list(const char *ua)
  * went to clients already carrying cookie=solved -- an admin could not
  * reach the login page at all.
  *
- * Warned from the setter rather than post_config because `httpd -t`
- * does not run post_config, and a warning an operator only sees after
- * deploying is most of the way to no warning.
+ * Warned from the setter rather than post_config so `httpd -t` shows
+ * it -- a warning an operator only sees after deploying is most of the
+ * way to no warning. (Note post_config DOES run under -t; what would
+ * have hidden this is our own first-pass guard, which skips the single
+ * pass a -t run makes. Apache's DUMP_VHOSTS works under -t for exactly
+ * that reason: core has no such guard.)
  *
  * A warning, not an error: challenging every time is legitimate for a
  * honeypot or a path no real client should reach. But it should be a

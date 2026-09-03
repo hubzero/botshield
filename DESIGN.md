@@ -114,7 +114,7 @@ deliver an incremental-rebuild win — punted as a follow-up.
 | `cookie.{c,h}` | AES-GCM cookie envelope: `bs_build_cookie_prefix_gcm`, `bs_build_cookie_payload`, `bs_build_set_cookie`, `bs_install_verified_cookie`, `bs_verify_cookie_gcm`, `bs_verify_cookie`. Cookie-header tokenizer (`bs_parse_cookies_once`, `bs_get_cookie_value`, `bs_get_verified_cookie_value`). Carry-forward predicate + math (`bs_should_carry_prior_rep`, `bs_carry_forward_eligible`, `bs_apply_rep_carry`). Cookie wire-format constant (`BS_GCM_COUNTER_SEP`) |
 | `challenge.{c,h}` | Challenge issuance (`bs_issue_challenge`), PoW algorithm registry + lookup (`bs_find_algorithm`), canonical pipe-delimited HMAC input (`bs_challenge_canonical`), inline-JSON renderer (`bs_challenge_json`), bootstrap-binding helpers (`bs_format_bound_ip_hex`, `bs_compute_bootstrap_sig`). `BotShieldAlgorithm` setter. Hosts `bs_challenge` envelope, `bs_rep_state` reputation block, `bs_pow_algorithm` registry types, and challenge wire constants (`BS_PROTOCOL_VERSION`, `BS_SALT_BYTES`, `BS_NONCE_BYTES`) |
 | `score.{c,h}` | Per-request score struct on `r->request_config`, `bs_score_add` accumulator, reason renderers (`bs_decision_reason_names`, `bs_score_reasons_joined`), `bs_apply_flag_triggers` walker, `bs_decide_tier` score → tier picker, `bs_tier_name`. Hosts `bs_tier` and `bs_silent_mode` enums, `bs_score_entry` / `bs_request_score` types, score thresholds (`BS_DEFAULT_SCORE_*`) and heuristic penalties (`BS_PENALTY_*`) |
-| `policy.{c,h}` | `bs_check_policy` request-time policy walker (cookie / env / load / path triggers, robots, rate-limit, robots Crawl-delay). `/policy-status` admin handler |
+| `policy.{c,h}` | `bs_check_policy` request-time policy walker (cookie / env / load / path triggers, robots, rate-limit, robots Crawl-delay). `bs_policy_dump` for `-D DUMP_BOTSHIELD_POLICY` |
 | `triggers.{c,h}` | Per-family trigger setters (`bs_set_request_trigger`, `bs_set_cookie_trigger`, `bs_set_env_trigger`, `bs_set_feedback_trigger`, `bs_set_load_trigger`), shared action-key parser, `bs_apply_trigger_action` executor. `bs_set_flag_ip` and `bs_set_flag_trigger` setters for the E14 flag-trigger family. `bs_cookie_pred_match` predicate evaluator. Hosts the shared action engine (`bs_trigger_action`, `bs_trigger_family`, `BS_T*` enums), per-family entry types (`bs_request_trigger_entry` et al.), the E2.1 cohort + rate-limit types (`bs_cohort`, `bs_rate_limit_entry`, `bs_rate_escalate_entry`, `bs_rate_counter`), and the E14 flag-trigger entry type (`bs_flag_trigger_entry`, `bs_flag_action_kind`) |
 | `captcha.{c,h}` | M8 provider registry (`bs_find_provider`), libcurl-backed `bs_captcha_siteverify` shared shim, `bs_geetest_siteverify` provider-specific verifier, M8.1 pending cookie (`bs_mint_pending_cookie`, `bs_clear_pending_cookie`), `bs_captcha_verify_handler`, URL-encoded form lookup helper (`bs_form_get`). All eleven captcha directive setters. Hosts `bs_captcha_provider` registry struct, `bs_captcha_result` enum, `bs_captcha_siteverify_fn` typedef |
 | `silent.{c,h}` | E17 embedded handlers: `bs_embedded_js_handler`, `bs_embedded_worker_handler`, `bs_embedded_bootstrap_handler`, `bs_embedded_verify_handler`, `bs_form_widget_handler`. `BotShieldSilentMode` setter |
@@ -210,7 +210,6 @@ default static-file handler. Its walk:
    - `/botshield/captcha-verify` and `/botshield/captcha-verify/<name>`
      → `bs_captcha_verify_handler`
    - `/botshield/metrics` → `bs_metrics_handler`
-   - `/botshield/policy-status` → `bs_policy_status_handler`
    - `/botshield/embedded.js` → `bs_embedded_js_handler`
    - `/botshield/embedded-worker.js` → `bs_embedded_worker_handler`
    - `/botshield/embedded-bootstrap` → `bs_embedded_bootstrap_handler`
@@ -1125,15 +1124,39 @@ preserves rate-counter state for groups whose name didn't change —
 operators don't lose the in-flight Crawl-delay window when they edit
 the file.
 
-### `/policy-status` admin endpoint (E2.2.3)
+### The policy dump (E2.2.3)
 
-`bs_policy_status_handler` dumps every active rule with its source —
-directive `rate_limits` (name, cohort, SHM slot, live counter state)
-and robots.txt-derived groups (source path, mtime, wildcard-scope
-mode, refresh interval, slot-pool usage, per-group UA tokens, each
-Allow/Disallow rule, Crawl-delay + slot + counter). No built-in
-auth; operators wrap it in `<Location>` the way they protect
-`/server-status`.
+`httpd -t -D DUMP_BOTSHIELD_POLICY` prints every active rule with its
+source, for each vhost that enables the module: directive
+`rate_limits` (name, budget, window, cohort), the effective tier
+thresholds, the flag triggers after `reset` resolution, and
+robots.txt-derived groups (source path, mtime, wildcard-scope mode,
+refresh interval, slot-pool usage, per-group UA tokens, each
+Allow/Disallow rule, Crawl-delay + slot).
+
+`bs_policy_dump` runs from the `test_config` hook, the same hook core
+uses for `DUMP_VHOSTS` and `DUMP_MODULES`, so the flag composes with
+those. Two consequences follow from being a configtest rather than a
+request:
+
+- **It reads the config on disk, not the running config.** That is the
+  point: it answers "what will this config do?" before a reload, which
+  is when an operator can still change their mind.
+- **No live counters.** A configtest process never attaches the
+  rate-counter SHM, so consumption is not reportable here; the
+  dashboard and the metrics endpoint cover that. robots.txt is parsed
+  by the dump itself (the parse is pure), so parse errors do surface,
+  but Crawl-delay groups all report `slot=-1` because slot assignment
+  happens at startup.
+
+This was an HTTP endpoint (`<prefix>/policy-status`). It should not
+have been. The dashboard and metrics are runtime state, which is why
+`mod_status` is a URL; this is resolved *configuration*, static
+between reloads, and Apache already had an idiom for that. Config
+introspection behind shell access cannot be forgotten into being
+world-readable, and of the three surfaces this was the worst to
+expose: counters tell an attacker how much noise they are making, a
+policy dump tells them which rules exist and what to avoid.
 
 ### Triggers
 

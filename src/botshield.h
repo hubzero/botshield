@@ -357,22 +357,6 @@ typedef struct bs_server_cfg {
     apr_array_header_t *rate_escalates;
     int                 strike_capacity;
     /* E10 — safeguard config. -1 unset sentinel. */
-    /* BotShieldScoring. -1 = unset (defaults OFF), 0 = off, 1 = on.
-     *
-     * Off by default, unlike every other subsystem flag here, and that
-     * is the point. Implicit scoring is what produced two user lockouts
-     * and a ten-hour Googlebot outage on this deployment, in every case
-     * because weights and tier floors that nobody wrote down summed
-     * past a threshold nobody had read. Explicit rules say what they
-     * do; a score says it only after you reconstruct the arithmetic.
-     *
-     * Off suppresses the IMPLICIT paths only: built-in heuristics,
-     * flag-trigger score and tier_floor actions, and the score-to-tier
-     * threshold evaluation. It does NOT touch an explicit tier= or
-     * status= on a rule, rate limiting, classification or safeguard --
-     * turning it off must never mean "stops challenging", only "stops
-     * deciding on its own". */
-    int                 scoring_enabled;
     int                 safeguard_enabled;
     int                 safeguard_threshold;
     int                 safeguard_window;
@@ -536,7 +520,7 @@ typedef struct bs_server_cfg {
      * whichever <Location> happens to enable scoring. Without that,
      * scoping `BotShieldEnabled On` to a <Location> silently 404s
      * captcha-verify, embedded-verify, embedded.js, form-widget.js,
-     * safeguard-info, metrics and policy-status — which breaks the
+     * safeguard-info and metrics — which breaks the
      * captcha and embedded tiers outright, and leaves the safeguard
      * redirect pointing at a 404. */
     int                 any_enabled;

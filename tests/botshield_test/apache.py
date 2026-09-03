@@ -15,7 +15,46 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from .config import APACHE_SERVICE, DEV_VHOST_CONF, STATE_FILE
+from .config import (APACHE_SERVICE, DEV_VHOST_CONF, HTTPD_CONF,
+                     STATE_FILE)
+
+
+def configtest(*directives):
+    """Run `httpd -t` against this worker's instance config with each
+    of `directives` prepended via -C. Return (returncode, stderr).
+
+    Used for directives whose only correct behaviour is to be
+    rejected at config time: a live reload with a broken config would
+    take the instance down for the rest of the session, and configtest
+    does the same parse pass without swapping anything in."""
+    cmd = ["sudo", "httpd", "-f", HTTPD_CONF]
+    for d in directives:
+        cmd += ["-C", d]
+    cmd += ["-t"]
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                            check=False)
+    return result.returncode, result.stderr
+
+
+def policy_dump() -> str:
+    """Run `httpd -t -D DUMP_BOTSHIELD_POLICY` against this worker's
+    own instance config and return the dump on stdout.
+
+    This is a config-test invocation, so it neither reloads nor
+    disturbs the running instance -- it re-parses the config files as
+    they are on disk right now. That means a `config_override` block
+    takes effect for the dump without a reload, but also that the dump
+    must be taken *inside* the block, before the file is reverted."""
+    result = subprocess.run(
+        ["sudo", "httpd", "-f", HTTPD_CONF, "-t",
+         "-D", "DUMP_BOTSHIELD_POLICY"],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, (
+        f"config test failed, so there is no dump to assert on:\n"
+        f"{result.stderr[-800:]}"
+    )
+    return result.stdout
 
 
 def reload() -> None:

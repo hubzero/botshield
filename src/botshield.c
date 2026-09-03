@@ -10,7 +10,7 @@
  *                               resolves via dlsym at LoadModule time)
  *   - bs_robots_load          : the robots.txt loader called both from
  *                               post_config and the mod_watchdog tick
- *   - policy-status handler   : the admin-visible /botshield/policy-status
+ *   - policy dump             : httpd -t -D DUMP_BOTSHIELD_POLICY
  *                               text dump
  *   - bs_decide_tier          : score → (pass | non-interactive | interactive | captcha)
  *
@@ -601,18 +601,6 @@ static const command_rec bs_cmds[] = {
                  "IP table when the probe window saturates. Read at "
                  "post_config from the main server's value."),
     /* E10 — challenge safeguard / anti-loop hysteresis. */
-    AP_INIT_FLAG("BotShieldScoring",
-                 bs_set_scoring, NULL, RSRC_CONF,
-                 "Implicit scoring. Default OFF. When on, built-in "
-                 "heuristics and flag triggers accumulate a score and "
-                 "BotShieldScoreNonInteractive/Hard/Captcha turn it into a "
-                 "tier. When off, none of that runs and a tier comes "
-                 "only from an explicit tier= on a rule. Off does NOT "
-                 "disable challenging, rate limiting, classification or "
-                 "safeguard -- it disables the module deciding on its "
-                 "own. Off is the default because an implicit weight "
-                 "nobody wrote down is the mechanism behind every "
-                 "lockout this module has caused."),
     AP_INIT_FLAG("BotShieldSafeguard",
                  bs_set_safeguard, NULL, RSRC_CONF,
                  "Anti-loop hysteresis. Default ON - only an explicit Off "
@@ -1276,7 +1264,6 @@ static int bs_apply_safeguard(request_rec *r, int have_client_ip,
  *   <prefix>/captcha-verify             — single-provider vhost
  *   <prefix>/captcha-verify/<name>      — per-provider cohabitation
  *   <prefix>/metrics                    — mod_status-style export
- *   <prefix>/policy-status              — operator readback
  *   <prefix>/embedded{.js,-worker.js,-bootstrap,-verify}
  *                                       — non-interactive tier embedded path
  *   <prefix>/form-widget.js             — interactive PoW widget shell
@@ -1349,9 +1336,6 @@ static int bs_route_module_endpoint(request_rec *r, bs_dir_cfg *cfg)
     if (strcmp(sub, "/dashboard/app-users") == 0) {
         return bs_dashboard_app_users_handler(r);
     }
-    if (strcmp(sub, "/policy-status") == 0) {
-        return bs_policy_status_handler(r, cfg);
-    }
     if (strcmp(sub, "/embedded.js") == 0) {
         return bs_embedded_js_handler(r);
     }
@@ -1395,7 +1379,7 @@ static int bs_route_module_endpoint(request_rec *r, bs_dir_cfg *cfg)
  *
  *   1. Module-config / initial-req gate (cheap drops).
  *   2. Module-owned endpoint dispatch — /captcha-verify, /metrics,
- *      /embedded*, /form-widget.js, /policy-status. Returns Apache
+ *      /embedded*, /form-widget.js. Returns Apache
  *      rv directly; never reaches the tier dispatch below.
  *   3. Debug + asset short-circuits + secret-presence sanity.
  *   4. Cookie verify — bs_verify_cookie + safeguard-clear-on-solve
@@ -1713,19 +1697,23 @@ static int bs_handler(request_rec *r)
     /* Score the request. Heuristics always run — a fully-valid cookie
      * doesn't exempt you from fresh request-level signals that might
      * have pushed you into a tier that requires a re-challenge. */
-    /* BotShieldScoring: -1 (unset) means OFF. Resolved once and reused
-     * for the flag walker and the tier decision below, so the three
-     * implicit paths can never disagree about whether scoring is on. */
-    int scoring_on;
-    {
-        bs_server_cfg *sc_score = ap_get_module_config(
-            r->server->module_config, &botshield_module);
-        scoring_on = (sc_score && sc_score->scoring_enabled == 1);
-    }
-
-    if (scoring_on) {
-        bs_run_builtin_heuristics(r);
-    }
+    /* Scoring always runs, and BotShieldScoring is gone.
+     *
+     * It existed to stop the module acting on rules nobody wrote. That
+     * is now handled where the rules are: the default flag and
+     * heuristic slates ship empty, and an unset score threshold means
+     * never. With nothing implicit left to gate, the switch could only
+     * do harm -- an operator who writes a BotShieldHeuristicTrigger and
+     * sees it silently ignored because a second control is off is
+     * exactly the silent-misconfiguration shape it was added to
+     * prevent.
+     *
+     * So scores are always computed and always logged. With no rules
+     * declared the slates are empty, the score is 0, and it costs a
+     * walk over two empty arrays. What it buys is that `score=` in the
+     * decision log means something before you have configured anything
+     * to act on it. */
+    bs_run_builtin_heuristics(r);
 
     /* Flagged-IP table (M5.1): look up the client IP. Hits add the
      * serious-event bitmap's penalty to effective_score, rollback-proof
@@ -1877,9 +1865,7 @@ static int bs_handler(request_rec *r)
      * gated. Leaving tier_floor on with scoring off would keep the
      * exact hazard this directive exists to remove: a floor that
      * ignores the verified-bot credit. */
-    if (scoring_on) {
-        bs_apply_flag_triggers(r, scfg_h, firing_flags, &tier_floor_from_flags);
-    }
+    bs_apply_flag_triggers(r, scfg_h, firing_flags, &tier_floor_from_flags);
 
     /* Fetch the score struct *after* all per-request adds. Using create=1
      * so a request with zero hits still gets a valid (empty) pointer and
@@ -1893,12 +1879,10 @@ static int bs_handler(request_rec *r)
      * in the README "Understanding scoring" section. */
     int cookie_score = have_prior_rep ? prior_ch.rep.score : 0;
     int effective    = heuristic_total + cookie_score;
-    /* With scoring off the score is still computed and logged -- an
-     * operator turning it back on wants to see what it would have said
-     * -- but it decides nothing. Only an explicit tier= reaches `tier`
-     * below, via trig_floor. */
-    bs_tier score_tier = scoring_on ? bs_decide_tier(cfg, effective)
-                                    : BS_TIER_PASS;
+    /* Returns PASS unless an operator set a threshold: unset means
+     * never, so with no thresholds written the score decides nothing
+     * and only an explicit tier= reaches `tier` below via trig_floor. */
+    bs_tier score_tier = bs_decide_tier(cfg, effective);
 
     /* Apply the tier floor accumulated by the flag-trigger walker
      * (MAX of any TIER_FLOOR actions across the union of flags).
@@ -2224,6 +2208,7 @@ static void bs_register_hooks(apr_pool_t *p)
 {
     (void)p;
     ap_hook_post_config (bs_post_config, NULL, NULL, APR_HOOK_MIDDLE);
+    ap_hook_test_config (bs_test_config, NULL, NULL, APR_HOOK_MIDDLE);
     ap_hook_child_init  (bs_child_init,  NULL, NULL, APR_HOOK_MIDDLE);
     /* REALLY_FIRST, not FIRST. mod_proxy also registers its content
      * handler at APR_HOOK_FIRST; ties there break on module load order,

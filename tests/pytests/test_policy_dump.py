@@ -1,11 +1,12 @@
-"""E2.2.3 — /botshield/policy-status page.
+"""`httpd -t -D DUMP_BOTSHIELD_POLICY` policy dump.
 
-Operator-visibility surface. Not authenticated / not rate limited —
-operators protect the endpoint via <Location> the same way they
-protect /server-status. These tests only confirm that the page
-surfaces the configured rules with their source tags and a couple
-of recognizable bits of state; format drift that preserves the
-substrings here is fine.
+Operator-visibility surface. This was an HTTP endpoint; it is now a
+config-test dump, which needs no access control and answers the
+question operators actually asked ("what will this config do?")
+before the config is live rather than after. These tests only
+confirm the dump surfaces the configured rules with their source
+tags and a couple of recognizable bits of state; format drift that
+preserves the substrings here is fine.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import uuid
 
 import pytest
 
-from botshield_test import client
+from botshield_test import apache
 
 
 # No longer serial. The marker meant "mutates Apache config or SHM",
@@ -38,14 +39,12 @@ def robots_path():
         pass
 
 
-def test_policy_status_without_config_shows_none(config_override):
+def test_policy_dump_without_config_shows_none(config_override):
     """With a vanilla vhost (no rate limits or robots.txt configured)
     the page loads and marks each section as empty / not configured
     — the handler doesn't crash on a scfg with nothing in it."""
-    resp = client.get("/botshield/policy-status")
-    assert resp.status_code == 200
-    body = resp.text
-    assert "# mod_botshield policy status" in body
+    body = apache.policy_dump()
+    assert "# mod_botshield policy dump" in body
     assert "## BotShieldRateLimit" in body
     assert "## robots.txt" in body
     # Dev vhost doesn't declare any of these by default.
@@ -53,7 +52,7 @@ def test_policy_status_without_config_shows_none(config_override):
     assert "# (not configured)" in body
 
 
-def test_policy_status_surfaces_rate_limit(config_override):
+def test_policy_dump_surfaces_rate_limit(config_override):
     """A BotShieldRateLimit directive appears in the directive
     section with its cohort + live counter state."""
     with config_override(
@@ -62,19 +61,19 @@ def test_policy_status_surfaces_rate_limit(config_override):
         '    BotShieldRateLimit gptbot 60 min "GPTBot" *',
         count=1,
     ):
-        resp = client.get("/botshield/policy-status")
+        body = apache.policy_dump()
 
-    assert resp.status_code == 200
-    body = resp.text
     assert "BotShieldRateLimit" in body
     assert "gptbot" in body
     assert '"GPTBot"' in body
-    # The counter column — format is "count/budget"; we don't care
-    # about the count but the /60 is the budget we configured.
-    assert "/60" in body
+    # Budget and window as configured. There is deliberately no live
+    # counter column: a configtest process has no SHM to read.
+    assert "60" in body
+    assert "60s" in body
+    assert "count/budget" not in body
 
 
-def test_policy_status_surfaces_robots(robots_path, config_override):
+def test_policy_dump_surfaces_robots(robots_path, config_override):
     """Robots.txt section shows the path, mtime line, each group, its
     UA tokens, and its rules."""
     with open(robots_path, "w") as f:
@@ -93,10 +92,8 @@ def test_policy_status_surfaces_robots(robots_path, config_override):
         f'    BotShieldRobotsTxt {robots_path}',
         count=1,
     ):
-        resp = client.get("/botshield/policy-status")
+        body = apache.policy_dump()
 
-    assert resp.status_code == 200
-    body = resp.text
     assert f"# path:                {robots_path}" in body
     # At least one of the RFC822 date tokens — exact value varies.
     assert "# mtime:" in body

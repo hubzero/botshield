@@ -392,8 +392,8 @@ that would otherwise classify `Claude-Web` as a trusted known bot.
 
 ### Observability endpoints stay out of the access log
 
-`/botshield/dashboard`, `/botshield/metrics` and
-`/botshield/policy-status` are suppressed from the access log by default
+`/botshield/dashboard` and `/botshield/metrics` are suppressed from the
+access log by default
 and recorded in the decision log as `outcome=observe`. They are the
 measuring instrument, not traffic: a dashboard left open on a 10s
 refresh measured 8.1% of all requests on one deployment, distorting
@@ -467,7 +467,7 @@ application 403. `botshield_responses_*` splits them:
 | `botshield_responses_rate_limited_total` | BotShield rate-limited or shed the request. |
 | `botshield_responses_redirect_total` | BotShield issued a safeguard redirect. |
 | `botshield_responses_endpoint_total` | A functional BotShield endpoint answered (verify, bootstrap, assets). |
-| `botshield_responses_observe_total` | An observability endpoint answered (dashboard, metrics, policy-status). |
+| `botshield_responses_observe_total` | An observability endpoint answered (dashboard, metrics). |
 
 Classification reads the env the decision path already stashes, so it
 costs two table lookups. Three cases bin as **origin** even though a
@@ -807,35 +807,73 @@ BotShieldFlaggedIpCapacity: 50000
 mod_status is a recommended-but-optional dependency. Without it the
 metrics endpoint and decision log still cover everything.
 
-## Policy-status admin page
+## Policy dump
 
-`<prefix>/policy-status` (default `/botshield/policy-status`) is a
-plain-text dump of the rules currently being enforced — directive
-rate-limits and robots.txt-derived groups. Reads the same scfg
-fields `bs_check_policy` walks at request time, so it's
-authoritative.
+`httpd -t -D DUMP_BOTSHIELD_POLICY` prints the rules each vhost will
+enforce: directive rate limits, the effective tier thresholds, the
+flag triggers after `reset` resolution, and robots.txt-derived groups.
+It reads the same `scfg` fields `bs_check_policy` walks at request
+time, so it is authoritative.
+
+Because it is a config test, it reports the config **on disk**, not
+the config the running server loaded. That is the point: it answers
+"what will this do?" while you can still change your mind. It also
+composes with Apache's own dump flags, so `-D DUMP_VHOSTS` alongside
+it is a normal thing to do.
 
 ```
-$ curl -s http://localhost/botshield/policy-status
-mod_botshield policy at request time
-====================================
+$ sudo httpd -t -D DUMP_BOTSHIELD_POLICY
+# mod_botshield policy dump
+# vhost: www.example.org:443 (/etc/httpd/sites.d/example-ssl.conf:12)
 
-Rate limits:
-  api-burst    budget=60   window=60s  cohort=(*, 10.0.0.0/8)  shm_slot=0
-  scrapers     budget=10   window=60s  cohort=(wget|curl|python, *)  shm_slot=1
+## BotShieldRateLimit (directive)
+# name               budget  window  ua                          ipspec
+scrapers                10    60s   "wget|curl|python"          *
 
-Block paths:
-  legacy-admin "/wp-admin/*"  cohort=(*, *)
-  ...
+## Tier thresholds (effective)
+non-interactive      20   configured
+interactive          50   configured
+captcha              80   configured
 
-robots.txt groups:
-  user-agent=googlebot  rules=14  crawl_delay=0
-  user-agent=*          rules=8   crawl_delay=10
+## Flag triggers (effective, after reset)
+# flag              action      value    mode      source
+honeypot_hit       score       +60      enforce   configured
+app_verified_human score       -80      enforce   configured
+
+## robots.txt (BotShieldRobotsTxt)
+# path:                /var/www/html/robots.txt
+# mtime:               Thu, 03 Sep 2026 16:16:19 GMT
+# groups:              2
+# wildcard scope:      heuristic
+# refresh interval:    300 s
+
+### group[0] "gptbot"  wildcard=no
+  user-agent: gptbot
+  Disallow: /admin
+  Crawl-delay: 30s
+
+### group[1] "wildcard"  wildcard=yes
+  user-agent: *
+  Disallow: /private
+Syntax OK
 ```
 
-Wrap the path in a `<Location>` with your own ACL — the page
-reveals site config (already on disk in `/etc/apache2/`) but no
-cookie secrets or client IPs.
+The dump parses robots.txt itself, so a robots.txt that fails to parse
+shows as `# status: NOT LOADED` here rather than surprising you after
+a reload.
+
+Two things it deliberately does not report. **Live counters**: a
+config-test process attaches no shared memory, so rate-limit
+consumption and Crawl-delay slot state are unavailable — the dashboard
+and the metrics endpoint cover those. **Unreachable thresholds** are
+flagged rather than silently printed: a tier with no threshold
+configured reports `unset - never fires`, with a suggested value.
+
+This was an HTTP endpoint, `<prefix>/policy-status`. Resolved
+configuration is not runtime state, Apache already had the
+`-D DUMP_VHOSTS` idiom for it, and shell access is both the right bar
+for config introspection and impossible to leave world-readable by
+forgetting a `<Location>`.
 
 ## Capacity headroom watchdog
 

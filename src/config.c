@@ -25,6 +25,7 @@
 
 #include <httpd.h>
 #include <http_config.h>
+#include <http_core.h>   /* ap_exists_config_define */
 #include <http_log.h>
 #include <ap_config.h>
 #include <ap_mpm.h>
@@ -42,6 +43,7 @@
 #include <curl/curl.h>
 #include <openssl/rand.h>
 
+#include "policy.h"   /* bs_policy_dump */
 #include "botshield.h"
 #include "config.h"
 #include "allowlist.h"
@@ -184,9 +186,6 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
     /* E10 — safeguard merge. Only the main server's values steer
      * SHM sizing; merged-in overrides are harmless at per-vhost
      * scope because the table is module-global. */
-    out->scoring_enabled    = (add->scoring_enabled != -1)
-                            ? add->scoring_enabled
-                            : base->scoring_enabled;
     out->safeguard_enabled  = (add->safeguard_enabled != -1)
                             ? add->safeguard_enabled
                             : base->safeguard_enabled;
@@ -363,7 +362,6 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
      * the merge can pick the right scope's value; numeric fields
      * default to 0 which the post_config sizing + request-time
      * check treat as "use the compiled-in default." */
-    scfg->scoring_enabled     = -1;   /* unset -> OFF */
     scfg->safeguard_enabled   = -1;
     scfg->safeguard_threshold = 0;
     scfg->safeguard_window    = 0;
@@ -622,6 +620,33 @@ void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
  * BotShieldFlag directive — which Hubzero's 10 deployments never
  * did. Now the definitive signals (honeypot, fake-bot) escalate
  * to captcha automatically. */
+/* Default rule sets ship EMPTY.
+ *
+ * The tables below are kept as documentation of a sensible starter
+ * slate, not as behaviour. Nothing is seeded, so BotShieldEnabled On
+ * with no rules does nothing at all: the module acts only where an
+ * operator wrote a rule saying so.
+ *
+ * This reverses the E14 decision recorded above ("flag-driven tier
+ * escalation only fired if an operator wrote a BotShieldFlag directive
+ * -- which Hubzero's 10 deployments never did. Now the definitive
+ * signals escalate to captcha automatically"). That automatic
+ * escalation is what caused the harm it was meant to prevent: the
+ * scanner_probe tier_floor behind incident #1, and honeypot_hit's
+ * captcha floor overriding the -985 verified-bot credit, which
+ * challenged Googlebot 248 times over ten hours on 2026-09-01. A
+ * tier_floor is defined as "at least this intense regardless of
+ * cumulative score", and regardless of score includes regardless of
+ * every credit that says this client is fine.
+ *
+ * The evidence that these were never wanted is in the deployments
+ * themselves: qubeshub's config carried four lines whose only purpose
+ * was to switch them back off. A default every real deployment has to
+ * disable is not a default.
+ *
+ * Set to 1 to restore the historical slate. */
+#define BS_SEED_DEFAULT_RULES 0
+
 static const struct {
     const char         *flag_name;
     apr_uint32_t        flag_bit;
@@ -786,8 +811,10 @@ static void bs_resolve_flag_triggers(apr_pool_t *pconf, server_rec *s)
             BS_DEFAULT_FLAG_TRIGGER_COUNT
               + (operator_decls ? operator_decls->nelts : 0),
             sizeof(void *));
-        /* Defaults first. */
-        for (size_t i = 0; i < BS_DEFAULT_FLAG_TRIGGER_COUNT; i++) {
+        /* Defaults first -- none, unless BS_SEED_DEFAULT_RULES. */
+        for (size_t i = 0;
+             BS_SEED_DEFAULT_RULES && i < BS_DEFAULT_FLAG_TRIGGER_COUNT;
+             i++) {
             const typeof(bs_default_flag_triggers[0]) *d =
                 &bs_default_flag_triggers[i];
             bs_flag_trigger_entry *e = apr_pcalloc(pconf, sizeof(*e));
@@ -895,7 +922,9 @@ static void bs_resolve_heuristic_triggers(apr_pool_t *pconf,
             BS_DEFAULT_HEURISTIC_TRIGGER_COUNT
               + (operator_decls ? operator_decls->nelts : 0),
             sizeof(void *));
-        for (size_t i = 0; i < BS_DEFAULT_HEURISTIC_TRIGGER_COUNT; i++) {
+        for (size_t i = 0;
+             BS_SEED_DEFAULT_RULES && i < BS_DEFAULT_HEURISTIC_TRIGGER_COUNT;
+             i++) {
             const typeof(bs_default_heuristic_triggers[0]) *d =
                 &bs_default_heuristic_triggers[i];
             bs_heuristic_trigger_entry *e = apr_pcalloc(pconf,
@@ -1773,6 +1802,8 @@ static void bs_assign_namespace_ids(server_rec *s)
     }
 }
 
+#define BS_E22_ROBOTS_SLOT_POOL 16
+
 /* Reserve an SHM rate-counter slot pool for each vhost's
  * robots.txt, then do the initial parse and register a per-vhost
  * watchdog for live refresh. The SHM slot pool is sized once at
@@ -1787,7 +1818,6 @@ static void bs_assign_namespace_ids(server_rec *s)
 static void bs_init_robots(apr_pool_t *pconf, server_rec *s,
                            int *next_slot)
 {
-    #define BS_E22_ROBOTS_SLOT_POOL 16
     for (server_rec *sv = s; sv; sv = sv->next) {
         bs_server_cfg *vcfg = ap_get_module_config(sv->module_config,
                                                    &botshield_module);
@@ -2542,6 +2572,53 @@ static void bs_populate_default_algorithm(server_rec *s)
             dcfg->algorithm = alg;
         }
     }
+}
+
+/* --- config-test dump -------------------------------------------------
+ *
+ * `httpd -t -D DUMP_BOTSHIELD_POLICY` prints the effective policy for
+ * every enabled vhost, the way -S prints vhosts. This lives in the
+ * test_config hook rather than post_config for two reasons: post_config
+ * is not called at all on a -t run, and test_config is the hook core
+ * itself uses for DUMP_VHOSTS / DUMP_MODULES, so the flag composes with
+ * those. The trigger resolvers run first because the dump reports
+ * resolved triggers, and on a -t run nothing else has resolved them. */
+void bs_test_config(apr_pool_t *pconf, server_rec *s)
+{
+    if (!ap_exists_config_define("DUMP_BOTSHIELD_POLICY")) return;
+
+    bs_resolve_flag_triggers(pconf, s);
+    bs_resolve_heuristic_triggers(pconf, s);
+
+    for (server_rec *sv = s; sv; sv = sv->next) {
+        if (!bs_vhost_runs_botshield(sv, s)) continue;
+
+        /* Parse robots.txt here too. bs_init_robots does this in
+         * post_config, so on a -t run the dump would otherwise report
+         * every configured robots.txt as "not loaded" -- and "does my
+         * robots.txt parse?" is one of the questions a config-test
+         * dump is most useful for answering, before deploying rather
+         * than after. The parse is pure: file in, struct out.
+         *
+         * The nominal slot pool is reserved so the parse does not warn
+         * that Crawl-delay groups will not enforce -- true of this
+         * configtest process, which attaches no SHM, and false of the
+         * server it is testing the config for. The slot numbers
+         * themselves are SHM bookkeeping and the dump does not print
+         * them. */
+        bs_server_cfg *vcfg = ap_get_module_config(sv->module_config,
+                                                   &botshield_module);
+        if (vcfg && vcfg->robots_txt_path && !vcfg->robots) {
+            vcfg->robots_slot_pool_base = 0;
+            vcfg->robots_slot_pool_size = BS_E22_ROBOTS_SLOT_POOL;
+            vcfg->robots_slot_pool_used = 0;
+            bs_robots_load(sv, vcfg, pconf);
+        }
+        bs_dir_cfg *dcfg = ap_get_module_config(sv->lookup_defaults,
+                                                &botshield_module);
+        bs_policy_dump(sv, pconf, dcfg);
+    }
+    fflush(stdout);
 }
 
 /* --- post_config orchestrator ---
@@ -3640,15 +3717,6 @@ const char *bs_set_rate_escalate_capacity(cmd_parms *cmd,
  * pass-through, which some operators will consider too soft
  * regardless of the narrow conditions. Operators who've seen
  * the stuck-loop failure mode in practice enable it. */
-const char *bs_set_scoring(cmd_parms *cmd, void *dconf, int flag)
-{
-    (void)dconf;
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    scfg->scoring_enabled = flag ? 1 : 0;
-    return NULL;
-}
-
 const char *bs_set_safeguard(cmd_parms *cmd, void *dconf, int flag)
 {
     (void)dconf;

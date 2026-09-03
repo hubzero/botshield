@@ -226,13 +226,26 @@ apr_uint32_t bs_parse_flag_names(apr_pool_t *p, const char *s,
  * rendering. */
 bs_tier bs_decide_tier(const bs_dir_cfg *cfg, int score)
 {
-    int noninter = bs_effective_int(cfg->score_non_interactive,
-                                   BS_DEFAULT_SCORE_NON_INTERACTIVE);
-    int hard    = bs_effective_int(cfg->score_interactive,    BS_DEFAULT_SCORE_INTERACTIVE);
-    int captcha = bs_effective_int(cfg->score_captcha, BS_DEFAULT_SCORE_CAPTCHA);
-    if (score >= captcha) return BS_TIER_CAPTCHA;
-    if (score >= hard)    return BS_TIER_INTERACTIVE;
-    if (score >= noninter) return BS_TIER_NONINTERACTIVE;
+    /* UNSET means never, not "use the compiled-in default".
+     *
+     * A threshold left unwritten used to mean score >= 20 challenges --
+     * a rule nobody wrote, applied to everyone. Setting the directive
+     * is now itself the opt-in: cumulative score acts only on the
+     * tiers an operator has actually asked for. This is also what
+     * retires the practice of parking a threshold at some value chosen
+     * to be out of reach (qubeshub used 10000, against a highest
+     * observed score of 50) -- unset already means never, so the
+     * sentinel has nothing left to express.
+     *
+     * BS_DEFAULT_SCORE_* survive as the documented starter values, and
+     * the heuristic weights in score.h are still calibrated against
+     * them; they are a suggested configuration now, not behaviour. */
+    int noninter = cfg->score_non_interactive;
+    int hard     = cfg->score_interactive;
+    int captcha  = cfg->score_captcha;
+    if (captcha  != BS_UNSET && score >= captcha)  return BS_TIER_CAPTCHA;
+    if (hard     != BS_UNSET && score >= hard)     return BS_TIER_INTERACTIVE;
+    if (noninter != BS_UNSET && score >= noninter) return BS_TIER_NONINTERACTIVE;
     return BS_TIER_PASS;
 }
 

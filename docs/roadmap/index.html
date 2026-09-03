@@ -90,6 +90,9 @@
 <section class="toc">
   <h2 class="toc__heading">On this page</h2>
   <ul class="toc__list">
+<li class="toc__item toc__item--level-2"><a href="#2026-09-03-policy-readback-becomes-a-config-test-flag">2026-09-03 (policy readback becomes a config-test flag)</a></li>
+<li class="toc__item toc__item--level-3"><a href="#botshield-policy-status-is-now-httpd-t-d-dump-botshield-policy">`/botshield/policy-status` is now `httpd -t -D DUMP_BOTSHIELD_POLICY`</a></li>
+<li class="toc__item toc__item--level-3"><a href="#two-rate-limit-tests-that-could-not-fail">Two rate-limit tests that could not fail</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-08-10b-proxied-paths-were-invisible-to-the-module">2026-08-10b (proxied paths were invisible to the module)</a></li>
 <li class="toc__item toc__item--level-3"><a href="#mod-proxy-was-answering-before-mod-botshield-ran">mod_proxy was answering before mod_botshield ran</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-08-10-a-cookie-earns-the-dropped-cookie-waiver-only-by-solving">2026-08-10 (a cookie earns the dropped-cookie waiver only by solving)</a></li>
@@ -229,6 +232,54 @@
   </ul>
 </section>
         <div class="prose">
+<h2 id="2026-09-03-policy-readback-becomes-a-config-test-flag">2026-09-03 (policy readback becomes a config-test flag)</h2>
+<h3 id="botshield-policy-status-is-now-httpd-t-d-dump-botshield-policy"><code>/botshield/policy-status</code> is now <code>httpd -t -D DUMP_BOTSHIELD_POLICY</code></h3>
+<p>The endpoint is gone. It was the wrong shape for what it did.</p>
+<p>The dashboard and the metrics endpoint are URLs because they report
+runtime state, the same reason <code>mod_status</code> is a URL. The policy
+readback reports resolved <em>configuration</em>, which is static between
+reloads, and Apache already had an idiom for that in the
+<code>-D DUMP_VHOSTS</code> / <code>DUMP_MODULES</code> / <code>DUMP_CONFIG</code> family. Two things
+follow from using it:</p>
+<ul>
+<li><strong>It answers the question before the reload, not after.</strong> A URL can
+only tell you what the running server already loaded. The flag reads
+the config on disk, which is when an operator can still change their
+mind. It parses robots.txt itself for the same reason -- a
+robots.txt that fails to parse now shows up as <code>NOT LOADED</code> in a
+config test rather than as silently absent enforcement after a
+reload.</li>
+<li><strong>It cannot be left exposed.</strong> The endpoint was unauthenticated and
+needed an operator-written <code>&lt;Location&gt;</code> to contain it, and of the
+three surfaces it was the worst one to forget: counters tell an
+attacker how much noise they are making, a policy dump tells them
+which rules exist and what to avoid. Shell access is the right bar
+for config introspection and there is nothing to forget.</li>
+</ul>
+<p>It composes with core's dump flags, and skips vhosts that do not
+enable the module.</p>
+<p>Dropped from the output: live rate-limit counters, SHM slot numbers,
+and slot-pool usage. A config-test process attaches no shared memory,
+so the counters could only ever have printed <code>-/-</code>, and the slot
+numbers it computes are not the ones the running server assigns.
+Consumption belongs to the dashboard and the metrics endpoint.</p>
+<p>Operators with the recommended <code>&lt;LocationMatch&gt;</code> around the
+observability endpoints should drop <code>policy-status</code> from the
+alternation; leaving it in matches a path that no longer exists.</p>
+<h3 id="two-rate-limit-tests-that-could-not-fail">Two rate-limit tests that could not fail</h3>
+<p><code>test_bot_rate_botgroup_unknown_rejected</code> and
+<code>test_bot_rate_bad_directive_args</code> both asserted
+<code>status_code in (200, 401, 403, 404)</code> against <code>/botshield/policy-status</code>.
+That passes on a 404, so it passed for any reason at all, including
+the module not loading. Both docstrings said as much.</p>
+<p>Both now assert what they were named for, via a new
+<code>apache.configtest()</code> helper that runs <code>httpd -t</code> with <code>-C</code> directives
+against the worker's own instance: an unresolvable <code>@botgroup</code>
+selector must be rejected and must be named in the error, and four
+shapes of malformed <code>BotShieldBotRateLimit</code> argument must each be
+rejected. Configtest rather than a reload because a config the module
+rejects would take the worker's instance down for the rest of the
+session.</p>
 <h2 id="2026-08-10b-proxied-paths-were-invisible-to-the-module">2026-08-10b (proxied paths were invisible to the module)</h2>
 <h3 id="mod-proxy-was-answering-before-mod-botshield-ran">mod_proxy was answering before mod_botshield ran</h3>
 <p>Any path with a <code>ProxyPass</code> inside a <code>&lt;Location&gt;</code> was never evaluated.

@@ -1248,7 +1248,7 @@ static int bs_resp_kind_idx(request_rec *r)
  * The exclusions are not oversights:
  *   ORIGIN    — the application answering is the correct outcome.
  *   ENDPOINT  — verify, embedded.js, assets: 200 is their success case.
- *   OBSERVE   — dashboard / metrics / policy-status, likewise.
+ *   OBSERVE   — dashboard / metrics, likewise.
  * `~`-prefixed counterfactuals and allow/verified already bin as ORIGIN
  * inside bs_resp_kind_idx, so LogOnly never trips this.
  *
@@ -4940,7 +4940,7 @@ int bs_metrics_handler(request_rec *r)
         bs_mload(&m->req_resp[BS_M_RESP_ENDPOINT]));
     bs_m_emit_counter(r, "responses_observe_total",
         "Responses served by an observability endpoint (dashboard, "
-        "metrics, policy-status) -- the measuring instrument, counted "
+        "metrics) -- the measuring instrument, counted "
         "so it can be discounted.",
         bs_mload(&m->req_resp[BS_M_RESP_OBSERVE]));
 
