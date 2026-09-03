@@ -985,6 +985,28 @@ const char *bs_set_decision_log(cmd_parms *cmd, void *cfg_v,
 
 int bs_open_decision_logs(apr_pool_t *pconf, server_rec *s)
 {
+    /* One writer per distinct log spec, not one per server_rec.
+     *
+     * BotShieldDecisionLog is almost always written once at global
+     * scope, and bs_merge_server_cfg inherits the *path* into every
+     * vhost while decision_log_fd stays per-server_rec. Without this
+     * table, one directive opened one writer per enabled vhost.
+     *
+     * For a piped log that is data loss, not just waste. Production
+     * ran `|rotatelogs -n 7 ... 100M`, which round-robins a fixed set
+     * of slot files and TRUNCATES a slot when it reaches it again.
+     * Two rotatelogs processes sharing one slot set keep independent
+     * slot indexes, so each one periodically truncates a file the
+     * other is still filling, and whole windows of decisions vanish.
+     * That is what ate a day of the decision log: two writers, one
+     * file set, no way to tell from either process that the other
+     * existed.
+     *
+     * Keyed on the spec string rather than the resolved path so a
+     * piped program and a file are never conflated, and so two vhosts
+     * that genuinely name different logs still get their own. */
+    apr_hash_t *by_spec = apr_hash_make(pconf);
+
     for (server_rec *sv = s; sv; sv = sv->next) {
         bs_server_cfg *scfg = ap_get_module_config(sv->module_config,
                                                    &botshield_module);
@@ -1000,6 +1022,13 @@ int bs_open_decision_logs(apr_pool_t *pconf, server_rec *s)
         }
 
         const char *spec = scfg->decision_log_path;
+
+        apr_file_t *shared = apr_hash_get(by_spec, spec,
+                                          APR_HASH_KEY_STRING);
+        if (shared) {
+            scfg->decision_log_fd = shared;
+            continue;
+        }
 
         if (*spec == '|') {
             /* Piped log. Skip the '|' and any leading space, then hand
@@ -1047,6 +1076,9 @@ int bs_open_decision_logs(apr_pool_t *pconf, server_rec *s)
             }
             scfg->decision_log_fd = fd;
         }
+
+        apr_hash_set(by_spec, spec, APR_HASH_KEY_STRING,
+                     scfg->decision_log_fd);
 
         /* Say what is being recorded, not just that recording is on.
          * A filtered log looks identical to a complete one from the

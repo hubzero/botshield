@@ -92,6 +92,7 @@
   <ul class="toc__list">
 <li class="toc__item toc__item--level-2"><a href="#2026-09-03-policy-readback-becomes-a-config-test-flag">2026-09-03 (policy readback becomes a config-test flag)</a></li>
 <li class="toc__item toc__item--level-3"><a href="#botshield-policy-status-is-now-httpd-t-d-dump-botshield-policy">`/botshield/policy-status` is now `httpd -t -D DUMP_BOTSHIELD_POLICY`</a></li>
+<li class="toc__item toc__item--level-3"><a href="#one-decision-log-writer-per-spec-not-one-per-vhost">One decision-log writer per spec, not one per vhost</a></li>
 <li class="toc__item toc__item--level-3"><a href="#two-rate-limit-tests-that-could-not-fail">Two rate-limit tests that could not fail</a></li>
 <li class="toc__item toc__item--level-2"><a href="#2026-08-10b-proxied-paths-were-invisible-to-the-module">2026-08-10b (proxied paths were invisible to the module)</a></li>
 <li class="toc__item toc__item--level-3"><a href="#mod-proxy-was-answering-before-mod-botshield-ran">mod_proxy was answering before mod_botshield ran</a></li>
@@ -266,6 +267,24 @@ Consumption belongs to the dashboard and the metrics endpoint.</p>
 <p>Operators with the recommended <code>&lt;LocationMatch&gt;</code> around the
 observability endpoints should drop <code>policy-status</code> from the
 alternation; leaving it in matches a path that no longer exists.</p>
+<h3 id="one-decision-log-writer-per-spec-not-one-per-vhost">One decision-log writer per spec, not one per vhost</h3>
+<p>Root cause of the day of decision log that went missing.
+<code>BotShieldDecisionLog</code> is written once at global scope;
+<code>bs_merge_server_cfg</code> inherits the path into every vhost, but
+<code>decision_log_fd</code> is per <code>server_rec</code> and starts NULL, so
+<code>bs_open_decision_logs</code> opened a writer for the main server and
+another for each enabled vhost. Production had two.</p>
+<p>For a file that is waste. For a piped log it is data loss. Production
+ran <code>|rotatelogs -n 7 ... 100M</code>, which round-robins seven slot files
+and truncates a slot when it comes around to it again. Two rotatelogs
+processes sharing one slot set keep independent slot indexes, so each
+periodically truncated a file the other was still filling. Neither can
+detect the other, and nothing in either one's output says a window is
+gone.</p>
+<p>Writers are now keyed on the spec string in a <code>pconf</code>-scoped table and
+the fd is shared. Keyed on the spec rather than the resolved path so a
+piped program is never conflated with a file, and so two vhosts naming
+genuinely different logs still get their own.</p>
 <h3 id="two-rate-limit-tests-that-could-not-fail">Two rate-limit tests that could not fail</h3>
 <p><code>test_bot_rate_botgroup_unknown_rejected</code> and
 <code>test_bot_rate_bad_directive_args</code> both asserted
