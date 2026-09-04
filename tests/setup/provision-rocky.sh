@@ -117,13 +117,19 @@ for secret in secret app-integration-secret; do
 done
 
 # --- a self-signed certificate -----------------------------------------
-if [[ ! -s "$PREFIX/server.crt" ]]; then
+# At the path the vhost names. That path is one of the few things in
+# apache/botshield-dev.conf that is not a Define, and it does not need to
+# be: a throwaway localhost certificate is the same everywhere.
+CERTDIR=/etc/ssl/botshield-dev
+install -d -m 755 "$CERTDIR"
+if [[ ! -s "$CERTDIR/server.crt" ]]; then
   say "generating a self-signed certificate"
   openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
-    -keyout "$PREFIX/server.key" -out "$PREFIX/server.crt" \
+    -keyout "$CERTDIR/server.key" -out "$CERTDIR/server.crt" \
     -subj "/CN=localhost" >/dev/null 2>&1
-  chmod 640 "$PREFIX/server.key"; chown root:apache "$PREFIX/server.key"
 fi
+chmod 644 "$CERTDIR/server.crt"; chmod 640 "$CERTDIR/server.key"
+chown root:apache "$CERTDIR/server.key"
 
 # --- the instance config ------------------------------------------------
 # Every environment-specific value is a Define, so the vhost below is the
@@ -169,10 +175,6 @@ ExtendedStatus On
     SetHandler server-status
     Require ip 127.0.0.1
 </Location>
-
-SSLEngine off
-SSLCertificateFile $PREFIX/server.crt
-SSLCertificateKeyFile $PREFIX/server.key
 
 # Server scope on purpose. The load watchdog and the state file are read
 # once against the main server_rec; inside a vhost the module rejects
