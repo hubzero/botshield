@@ -24,6 +24,7 @@ except ImportError as exc:  # pragma: no cover - exercised by humans
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE_DIR = ROOT / "gh-pages"
 OUTPUT_DIR = ROOT / "gh-pages" / "public"
+ASSET_SOURCE_PREFIX = "gh-pages/assets/"
 HEADER_LOGO = "assets/logo-botshield-icon.svg"
 HERO_LOGO = "assets/logo-botshield-header.svg"
 
@@ -51,17 +52,40 @@ def relative_href(from_file: Path, to_file: Path) -> str:
     return os.path.relpath(to_file, from_file.parent).replace(os.sep, "/")
 
 
-_HTML_HREF_RE = re.compile(r"""(?P<attr>\b(?:href|src)\s*=\s*)(?P<q>["'])(?P<url>[^"']*)(?P=q)""")
+_HTML_HREF_RE = re.compile(
+    r"""(?P<attr>\b(?:href|src|srcset)\s*=\s*)(?P<q>["'])(?P<url>[^"']*)(?P=q)"""
+)
+
+
+def _resolve_attr_value(attr: str, value: str, resolve: "Callable[[str], str]") -> str:
+    """Resolve one HTML attribute value.
+
+    srcset is a comma-separated candidate list, each optionally carrying a
+    width or density descriptor ("logo.svg 2x"), so it cannot be handed to
+    the resolver whole. Everything else is a single URL.
+    """
+    if "srcset" not in attr.lower():
+        return resolve(value)
+
+    candidates = []
+    for candidate in value.split(","):
+        stripped = candidate.strip()
+        if not stripped:
+            continue
+        url, _, descriptor = stripped.partition(" ")
+        resolved = resolve(url)
+        candidates.append(f"{resolved} {descriptor.strip()}".strip())
+    return ", ".join(candidates)
 
 
 def rewrite_links(tokens: list, resolve: "Callable[[str], str]") -> None:
     """Walk every link in the token stream and hand its href to `resolve`.
 
     Markdown links arrive as link_open tokens. Raw HTML blocks do not --
-    markdown-it passes those through as opaque text -- so their href and
-    src attributes are rewritten with a regex instead. The README's badge
-    row is raw HTML, and its link to LICENSE needs the same treatment as
-    any other repo-relative link.
+    markdown-it passes those through as opaque text -- so their href, src,
+    and srcset attributes are rewritten with a regex instead. The README's
+    badge row and its logo <picture> are both raw HTML, and their links
+    need the same treatment as any other repo-relative link.
     """
     for token in tokens:
         if token.type == "inline" and token.children:
@@ -71,7 +95,8 @@ def rewrite_links(tokens: list, resolve: "Callable[[str], str]") -> None:
         if token.type in ("html_block", "html_inline"):
             token.content = _HTML_HREF_RE.sub(
                 lambda m: f"{m.group('attr')}{m.group('q')}"
-                f"{resolve(m.group('url'))}{m.group('q')}",
+                f"{_resolve_attr_value(m.group('attr'), m.group('url'), resolve)}"
+                f"{m.group('q')}",
                 token.content,
             )
             continue
@@ -121,6 +146,17 @@ def make_link_resolver(
         if target in source_to_output:
             rebased = relative_href(
                 Path("/site") / output, Path("/site") / source_to_output[target]
+            )
+            return rebased + sep + fragment
+
+        # gh-pages/assets/ is copied into the site as assets/, so a link
+        # to a logo or diagram resolves inside the built output rather
+        # than bouncing out to GitHub. A blob URL would render the SVG's
+        # source page, which is useless as an <img src>.
+        if target.startswith(ASSET_SOURCE_PREFIX):
+            rebased = relative_href(
+                Path("/site") / output,
+                Path("/site") / "assets" / target[len(ASSET_SOURCE_PREFIX):],
             )
             return rebased + sep + fragment
 

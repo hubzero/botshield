@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Background jobs | BotShield</title>
+  <meta name="description" content="The database and PHP-FPM load monitors and the verified-bot range refresh timer: what they do, how to install them, and why none of them can take httpd down.">
+  <link rel="stylesheet" href="../assets/site.css">
+</head>
+<body class="site-doc">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <div class="page-shell">
+    <header class="site-header site-header--compact">
+      <a class="brand" href="../index.html">
+        <img class="brand__icon" src="../assets/logo-botshield-icon.svg" alt="" aria-hidden="true">
+        <span class="brand__wordmark" aria-label="BotShield">
+          <span class="brand__wordmark-soft">Bot</span><span class="brand__wordmark-strong">Shield</span>
+        </span>
+      </a>
+      <span class="site-header__beta" aria-label="Beta release">Beta</span>
+      <nav class="top-nav" aria-label="Primary">
+        <a class="top-nav__link" href="https://github.com/hubzero/botshield">GitHub</a>
+        <a class="top-nav__link" href="../getting-started/index.html">Docs</a>
+        <a class="top-nav__link" href="https://github.com/hubzero/botshield/releases">Download</a>
+      </nav>
+    </header>
+
+    <main id="main-content" class="docs-layout" tabindex="-1">
+      <aside class="docs-sidebar">
+        <p class="docs-sidebar__eyebrow">Docs</p>
+        <nav class="docs-nav" aria-label="Documentation">
+<a class="docs-nav__item" href="../getting-started/index.html">
+  <span class="docs-nav__title">Getting started</span>
+  <span class="docs-nav__summary">Install, build, minimal configuration, and verifying a first request.</span>
+</a>
+<a class="docs-nav__item" href="../deployment/index.html">
+  <span class="docs-nav__title">Deployment</span>
+  <span class="docs-nav__summary">Reverse proxies, slow-client defense, multi-vhost reputation, secret rotation, capacity sizing.</span>
+</a>
+<a class="docs-nav__item" href="../site-model/index.html">
+  <span class="docs-nav__title">Site model</span>
+  <span class="docs-nav__summary">Tiers, scoring, cookie-carried reputation, decision log, tuning workflow.</span>
+</a>
+<a class="docs-nav__item" href="../policy/index.html">
+  <span class="docs-nav__title">Policy</span>
+  <span class="docs-nav__summary">UA classification, rate limits, path triggers, robots.txt, the trigger families, and flag triggers.</span>
+</a>
+<a class="docs-nav__item" href="../captcha/index.html">
+  <span class="docs-nav__title">Captcha and app-bridge</span>
+  <span class="docs-nav__summary">Third-party captcha providers, verify-endpoint hardening, and the signed app-bridge protocols.</span>
+</a>
+<a class="docs-nav__item" href="../staging/index.html">
+  <span class="docs-nav__title">Staging</span>
+  <span class="docs-nav__summary">Per-rule observe and global shadow mode for safe rule rollout.</span>
+</a>
+<a class="docs-nav__item" href="../observability/index.html">
+  <span class="docs-nav__title">Observability</span>
+  <span class="docs-nav__summary">Decision log, Prometheus metrics, mod_status contribution, and the policy-status admin page.</span>
+</a>
+<a class="docs-nav__item is-active" href="index.html">
+  <span class="docs-nav__title">Background jobs</span>
+  <span class="docs-nav__summary">The database and PHP-FPM load monitors and the verified-bot range refresh timer: what they do, how to install them, and why none of them can take httpd down.</span>
+</a>
+<a class="docs-nav__item" href="../directives/index.html">
+  <span class="docs-nav__title">Directive reference</span>
+  <span class="docs-nav__summary">Canonical reference for all 100 directives, grouped by family.</span>
+</a>
+<a class="docs-nav__item" href="../examples/index.html">
+  <span class="docs-nav__title">Example configs</span>
+  <span class="docs-nav__summary">The starter flag- and heuristic-trigger slate the module used to seed automatically, kept as an annotated starting point.</span>
+</a>
+<a class="docs-nav__item" href="../troubleshooting/index.html">
+  <span class="docs-nav__title">Troubleshooting</span>
+  <span class="docs-nav__summary">Common issues, diagnostics, and fixes.</span>
+</a>
+<a class="docs-nav__item" href="../location-authz-hazard/index.html">
+  <span class="docs-nav__title">Location authz hazard</span>
+  <span class="docs-nav__summary">Why a broad &lt;Location&gt; block silently voids &lt;Files&gt; access control, and the rule that prevents it.</span>
+</a>
+<a class="docs-nav__item" href="../faq/index.html">
+  <span class="docs-nav__title">FAQ</span>
+  <span class="docs-nav__summary">Honest answers to questions teams ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
+</a>
+<a class="docs-nav__item" href="../config-design-notes/index.html">
+  <span class="docs-nav__title">Config design notes</span>
+  <span class="docs-nav__summary">The two production lockouts behind the no-defaults design, and what shipped in response.</span>
+</a>
+<a class="docs-nav__item" href="../guide/index.html">
+  <span class="docs-nav__title">Project README</span>
+  <span class="docs-nav__summary">Repository README — project overview, build instructions, and dev configuration.</span>
+</a>
+        </nav>
+      </aside>
+
+      <article class="docs-article">
+        <header class="docs-article__header">
+          <p class="eyebrow">Documentation</p>
+          <h1>Background jobs</h1>
+          <p class="docs-article__summary">The database and PHP-FPM load monitors and the verified-bot range refresh timer: what they do, how to install them, and why none of them can take httpd down.</p>
+          <p class="docs-article__source">Background jobs</p>
+        </header>
+<section class="toc">
+  <h2 class="toc__heading">On this page</h2>
+  <ul class="toc__list">
+<li class="toc__item toc__item--level-2"><a href="#why-the-monitors-are-separate-processes">Why the monitors are separate processes</a></li>
+<li class="toc__item toc__item--level-3"><a href="#the-stop-reset-matters">The stop reset matters</a></li>
+<li class="toc__item toc__item--level-2"><a href="#database-monitor">Database monitor</a></li>
+<li class="toc__item toc__item--level-2"><a href="#php-fpm-monitor">PHP-FPM monitor</a></li>
+<li class="toc__item toc__item--level-2"><a href="#verifying-a-monitor">Verifying a monitor</a></li>
+<li class="toc__item toc__item--level-2"><a href="#bot-range-refresh">Bot range refresh</a></li>
+<li class="toc__item toc__item--level-2"><a href="#where-to-next">Where to next</a></li>
+  </ul>
+</section>
+        <div class="prose">
+<p>Three units ship with the module and none of them is installed by
+<code>make install</code>. They run outside httpd on purpose, and httpd does not
+depend on any of them.</p>
+<table>
+<thead>
+<tr>
+<th>Unit</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>botshield-dbmon.service</code></td>
+<td>Samples MariaDB saturation</td>
+</tr>
+<tr>
+<td><code>botshield-fpmmon.service</code></td>
+<td>Samples PHP-FPM saturation</td>
+</tr>
+<tr>
+<td><code>botshield-bot-refresh.timer</code></td>
+<td>Refreshes verified-crawler IP ranges</td>
+</tr>
+</tbody>
+</table>
+<p>Install all four unit files and their scripts:</p>
+<pre><code class="language-sh">make install-monitors
+</code></pre>
+<p>That creates an unprivileged <code>botshield-mon</code> account, copies the
+scripts to <code>/usr/local/share/botshield</code>, installs the units, and
+reloads systemd. It deliberately enables nothing: each monitor needs a
+prerequisite set up first, described below.</p>
+<h2 id="why-the-monitors-are-separate-processes">Why the monitors are separate processes</h2>
+<p>The module never opens a database or FastCGI connection. Blocking
+network calls have no place in the watchdog, and a backend too sick to
+answer must not be able to stall the code whose job is to shed load
+<em>because</em> that backend is sick. So the monitors sample, write files,
+and the module reads those files on its next tick. Nothing the monitors
+do can block a request.</p>
+<p>That separation is also why they are not dependencies of httpd. If a
+monitor dies, the module keeps serving on its remaining load signals.
+Monitoring must not be able to take the web server down with it.</p>
+<p>Each monitor writes two files, because they have different readers:</p>
+<ul>
+<li><strong><code>&lt;name&gt;.state</code></strong> holds one word, <code>normal</code>, <code>warm</code>, or <code>hot</code>, for
+<code>BotShieldLoadStateFile</code>. Written only when the state changes, since
+the module gates its read on mtime.</li>
+<li><strong><code>&lt;name&gt;.stats</code></strong> holds key-value telemetry for the dashboard graph,
+written every pass. A gap in a time series is indistinguishable from
+a gap in the data, so this one is unconditional.</li>
+</ul>
+<p>You give the monitor the <code>.state</code> path and it derives the other.</p>
+<h3 id="the-stop-reset-matters">The stop reset matters</h3>
+<p>Both units carry an <code>ExecStopPost</code> that writes <code>normal</code> back to the
+state file, and it runs on crash as well as on clean stop. The module
+caches the last value it read and has no staleness timeout, so without
+that reset, a monitor that dies while the backend is hot would leave
+<code>hot</code> latched. The module would then shed traffic indefinitely against
+a backend that had already recovered.</p>
+<p>This is also why both units set <code>RuntimeDirectoryPreserve=yes</code>. Without
+it, systemd removes the runtime directory on stop, deletes the reset
+that <code>ExecStopPost</code> just wrote, and leaves the module with a missing
+file, which it treats as &quot;keep the value I cached&quot;. That is exactly the
+latched-hot case the reset exists to prevent.</p>
+<h2 id="database-monitor">Database monitor</h2>
+<p>The account needs <code>USAGE</code>, which covers <code>SHOW GLOBAL STATUS</code>, plus
+<code>SELECT</code> on <code>performance_schema</code> for the per-table breakdown. It is
+refused site data outright:</p>
+<pre><code class="language-sql">CREATE USER 'botshield-mon'@'localhost' IDENTIFIED VIA unix_socket;
+GRANT USAGE ON *.* TO 'botshield-mon'@'localhost';
+GRANT SELECT ON performance_schema.* TO 'botshield-mon'@'localhost';
+</code></pre>
+<p>Authentication is <code>unix_socket</code>: the kernel vouches for the process
+uid, so there is no password stored anywhere and nothing to rotate or
+leak. The system account existing is the credential. On a host without
+socket authentication available, the script accepts a
+<code>--defaults-file</code> instead.</p>
+<pre><code class="language-sh">sudo systemctl enable --now botshield-dbmon.service
+</code></pre>
+<h2 id="php-fpm-monitor">PHP-FPM monitor</h2>
+<p>This one speaks FastCGI directly to the pool socket rather than
+fetching a status URL through Apache. A proxied scrape queues behind
+the same worker shortage it is trying to measure, so it fails precisely
+when the number matters most. Talking to the pool directly also means
+the status path never has to be routable from the web.</p>
+<p>Enable the status path in the pool config:</p>
+<pre><code class="language-ini">pm.status_path = /status
+</code></pre>
+<p>The shipped unit assumes a pool on <code>127.0.0.1:9000</code>. For a pool on a
+unix socket, change <code>--address</code> and narrow
+<code>RestrictAddressFamilies</code> to <code>AF_UNIX</code>.</p>
+<p>PHP-FPM is worth its own signal because <code>pm.max_children</code> is a real
+hard ceiling, unlike <code>MaxRequestWorkers</code>, which is routinely set to a
+number the machine cannot actually serve. When every child is busy,
+requests sit in the pool's listen queue and the site stalls while
+Apache still reports idle workers.</p>
+<pre><code class="language-sh">sudo systemctl enable --now botshield-fpmmon.service
+</code></pre>
+<p>One caveat worth knowing: the unit sets <code>IPAddressAllow=localhost</code> as
+defence in depth, and on kernels without BPF cgroup firewalling systemd
+logs that it is proceeding without it. The setting degrades to nothing
+rather than failing, so treat it as a bonus and not as the reason the
+scrape is confined.</p>
+<h2 id="verifying-a-monitor">Verifying a monitor</h2>
+<p>Read the files rather than trusting the unit is green:</p>
+<pre><code class="language-sh">cat /run/botshield/db-load.state          # normal | warm | hot
+cat /run/botshield/db-load.stats          # key=value telemetry
+</code></pre>
+<p>Then point the module at them and confirm it agrees:</p>
+<pre><code class="language-apache">BotShieldLoadStateFile /run/botshield/db-load.state
+BotShieldDbStatsFile   /run/botshield/db-load.stats
+BotShieldFpmStatsFile  /run/botshield/fpm-load.stats
+</code></pre>
+<p>All three are server scope. Inside a <code>&lt;VirtualHost&gt;</code> they are a
+config-parse error rather than a silent discard, but the rule is easier
+to follow than to debug. The load state drives
+<code>BotShieldLoadTrigger</code>, covered in <a href="../policy/index.html#load-triggers">Policy</a>.</p>
+<h2 id="bot-range-refresh">Bot range refresh</h2>
+<p><code>refresh-bot-ranges.sh</code> pulls the current published IP ranges for the
+crawlers that publish clean ones, and rewrites the files the allow list
+reads at startup. The timer runs it daily, with an hour of randomised
+delay so every host running this does not hit the same four providers
+at the same instant.</p>
+<pre><code class="language-sh">sudo systemctl enable --now botshield-bot-refresh.timer
+systemctl list-timers botshield-bot-refresh.timer
+</code></pre>
+<p>A failed refresh leaves the previous ranges in place, which is the
+outcome you want: stale published ranges beat none, and a provider
+having a bad day should not cost this host its allow list. The unit
+treats a partial refresh as success for the same reason, since every
+provider that did answer has already been written.</p>
+<p>The module reads these files once at startup, so new ranges take effect
+on the next graceful restart. If the operational tempo here is a daily
+reload, schedule the timer a little before it.</p>
+<p><strong>This is a different job from <code>refresh-bot-directory.py</code></strong>, which
+updates the bot directory compiled into the module. That one is a
+development-time task that changes a source file and requires a
+rebuild. Do not put it on a timer.</p>
+<h2 id="where-to-next">Where to next</h2>
+<ul>
+<li>Load shedding and what the tiers do with a hot backend:
+<a href="../site-model/index.html">site model</a>.</li>
+<li>The directives these files feed:
+<a href="../directives/index.html">directive reference</a>.</li>
+<li>Reading the resulting decisions: <a href="../observability/index.html">observability</a>.</li>
+</ul>
+
+        </div>
+      </article>
+    </main>
+  </div>
+</body>
+</html>

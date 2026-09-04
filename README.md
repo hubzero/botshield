@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-botshield-header.svg">
-    <img src="docs/assets/logo-botshield-header-light.svg" alt="mod_botshield" width="600">
+    <source media="(prefers-color-scheme: dark)" srcset="gh-pages/assets/logo-botshield-header.svg">
+    <img src="gh-pages/assets/logo-botshield-header-light.svg" alt="mod_botshield" width="600">
   </picture>
 </p>
 
@@ -119,6 +119,7 @@ from these sources):
 | Deployment — reverse proxy, slowloris, capacity sizing, secret rotation | [`docs/deployment.md`](docs/deployment.md) |
 | Staging policy changes — shadow mode + per-rule observe | [`docs/staging.md`](docs/staging.md) |
 | Observability — decision log, metrics, mod_status | [`docs/observability.md`](docs/observability.md) |
+| Background jobs — load monitors, bot-range refresh timer | [`docs/monitoring.md`](docs/monitoring.md) |
 | Troubleshooting | [`docs/troubleshooting.md`](docs/troubleshooting.md) |
 | FAQ | [`docs/faq.md`](docs/faq.md) |
 

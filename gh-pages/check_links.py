@@ -4,8 +4,10 @@
 A dead docs link is invisible until a reader follows it, and the docs
 cross-reference each other heavily, so a rename quietly breaks pages
 that were never touched. This walks the built output and checks every
-internal href resolves -- both the file and, when the link carries a
-fragment, the anchor it points at.
+internal href, src, and srcset resolves -- both the file and, when the
+link carries a fragment, the anchor it points at. Images count: a logo
+pointed at a directory that no longer exists is exactly the kind of
+break nobody notices from a diff.
 
 External URLs are not fetched; this is an offline structural check.
 
@@ -19,7 +21,7 @@ import re
 import sys
 from pathlib import Path
 
-HREF_RE = re.compile(r'href="([^"]+)"')
+HREF_RE = re.compile(r'(?:href|src|srcset)="([^"]+)"')
 ID_RE = re.compile(r'id="([^"]+)"')
 EXTERNAL_PREFIXES = ("http://", "https://", "mailto:", "//", "data:")
 

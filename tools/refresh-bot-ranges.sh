@@ -23,11 +23,27 @@
 # is reasonable, with a sanity threshold to catch silent breakage).
 # Providers that only publish via PTR + forward-confirm (Yandex,
 # DuckDuck, Facebook, LinkedIn, Twitter) are out of scope by
-# design — see CHANGELOG.md E1 for the reasoning.
+# design: there is no range list to fetch, and confirming one of
+# those requires a reverse lookup per request, which belongs in the
+# module rather than in a refresh job. See docs/policy.md on the
+# allow list.
 
 set -u
 
 DEST="${1:-/var/lib/botshield/bots}"
+
+# The web server account differs by distribution: apache on RHEL-family,
+# www-data on Debian-family. Hand ownership to whichever exists. These
+# files only ever need to be readable, so a miss is not fatal -- the
+# 0644 below already covers the module, which reads them at startup.
+chown_web() {
+  for _user in apache www-data; do
+    if id -u "$_user" >/dev/null 2>&1; then
+      chown "$_user:$_user" "$1" 2>/dev/null || true
+      return
+    fi
+  done
+}
 TMP="$(mktemp -d /tmp/bs_bot_refresh.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -94,7 +110,7 @@ print('\n'.join(prefixes))
 
   # Atomic-ish rename — mv is atomic on the same filesystem.
   mv "$out.new" "$out"
-  chown www-data:www-data "$out" 2>/dev/null || true
+  chown_web "$out"
   chmod 644 "$out"
   printf "OK:   %-12s  %4d CIDRs  →  %s\n" "$name" \
     "$(grep -vc '^#' "$out")" "$out"
@@ -194,7 +210,7 @@ for ip in sorted(ips, key=lambda s: ipaddress.ip_network(s, strict=False)
 PY
   then
     mv "$SI_OUT.new" "$SI_OUT"
-    chown www-data:www-data "$SI_OUT" 2>/dev/null || true
+    chown_web "$SI_OUT"
     chmod 644 "$SI_OUT"
     printf "OK:   %-12s  %4d CIDRs  →  %s\n" "siteimprove" \
       "$(grep -vc '^#' "$SI_OUT")" "$SI_OUT"

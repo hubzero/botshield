@@ -149,6 +149,7 @@ LIBS := -lcrypto -lcurl -ljson-c
 
 .PHONY: all build install enable disable reload clean test-clean docs docs-deps \
         toolchain-fix \
+        install-monitors monitors-user \
         sanitize install-sanitize \
         fuzz fuzz-run fuzz-clean \
         fuzz-robots fuzz-robots-run
@@ -251,6 +252,46 @@ docs-deps:
 	tests/.venv/bin/pip install -r gh-pages/requirements.txt
 
 # --- M10.1 ---
+
+# --- background jobs: load monitors and the bot-range refresh ---
+#
+# Three units, none of which httpd depends on. The load monitors sample
+# MariaDB and PHP-FPM saturation and publish it to files the module
+# reads; the refresh timer pulls verified-crawler IP ranges. All three
+# are designed to fail without taking the web server with them, so
+# none is installed by `make install`.
+#
+# Documented in docs/monitoring.md, including the database grant and
+# the PHP-FPM status path each monitor needs.
+
+MON_SHAREDIR ?= /usr/local/share/botshield
+MON_UNITDIR  ?= /etc/systemd/system
+MON_USER     ?= botshield-mon
+
+monitors-user:
+	@# Unprivileged, no login, no home. The database monitor
+	@# authenticates as this user over a unix socket, so the account
+	@# existing IS the credential -- there is no password to store.
+	id -u $(MON_USER) >/dev/null 2>&1 || \
+	    sudo useradd --system --no-create-home --shell /sbin/nologin $(MON_USER)
+
+install-monitors: monitors-user
+	sudo install -d -m 755 $(MON_SHAREDIR)
+	sudo install -m 755 tools/botshield-dbmon.py $(MON_SHAREDIR)/
+	sudo install -m 755 tools/botshield-fpmmon.py $(MON_SHAREDIR)/
+	sudo install -m 755 tools/refresh-bot-ranges.sh $(MON_SHAREDIR)/
+	sudo install -m 644 tools/botshield-dbmon.service $(MON_UNITDIR)/
+	sudo install -m 644 tools/botshield-fpmmon.service $(MON_UNITDIR)/
+	sudo install -m 644 tools/botshield-bot-refresh.service $(MON_UNITDIR)/
+	sudo install -m 644 tools/botshield-bot-refresh.timer $(MON_UNITDIR)/
+	sudo systemctl daemon-reload
+	@echo
+	@echo "Installed. Nothing is enabled yet -- each unit needs its own"
+	@echo "prerequisite first (database grant, FPM status path). See"
+	@echo "docs/monitoring.md, then:"
+	@echo "    sudo systemctl enable --now botshield-dbmon.service"
+	@echo "    sudo systemctl enable --now botshield-fpmmon.service"
+	@echo "    sudo systemctl enable --now botshield-bot-refresh.timer"
 
 sanitize: clean
 	$(APXS) -c $(CFLAGS_WARN) $(CFLAGS_ROTATELOGS) $(CFLAGS_VIS) $(CFLAGS_SAN) $(SRC) $(LIBS)

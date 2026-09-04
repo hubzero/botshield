@@ -19,7 +19,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from build_site import make_link_resolver, rewrite_links, slugify  # noqa: E402
+from build_site import (  # noqa: E402
+    _resolve_attr_value,
+    make_link_resolver,
+    rewrite_links,
+    slugify,
+)
 
 SOURCE_TO_OUTPUT = {
     "docs/policy.md": "policy/index.html",
@@ -132,3 +137,38 @@ def test_slugify_matches_the_anchors_headings_generate():
     assert slugify("Tier thresholds (effective)") == "tier-thresholds-effective"
     assert slugify("What's shipped") == "what-s-shipped"
     assert slugify("") == "section"
+
+
+def test_site_assets_resolve_inside_the_build_not_to_github():
+    """A logo must stay an image. A blob URL would render GitHub's
+    source-view page, which is useless as an <img src>."""
+    resolve = resolver(source="README.md", output="guide/index.html")
+    assert resolve("gh-pages/assets/logo.svg") == "../assets/logo.svg"
+
+
+def test_srcset_candidates_are_each_resolved():
+    resolve = resolver(source="README.md", output="guide/index.html")
+    out = _resolve_attr_value(
+        "srcset", "gh-pages/assets/a.svg 1x, gh-pages/assets/b.svg 2x", resolve
+    )
+    assert out == "../assets/a.svg 1x, ../assets/b.svg 2x"
+
+
+def test_srcset_without_descriptors_still_resolves():
+    resolve = resolver(source="README.md", output="guide/index.html")
+    assert _resolve_attr_value("srcset", "gh-pages/assets/a.svg", resolve) == "../assets/a.svg"
+
+
+def test_non_srcset_attribute_is_resolved_whole():
+    resolve = resolver(source="README.md", output="guide/index.html")
+    assert _resolve_attr_value("src", "gh-pages/assets/a.svg", resolve) == "../assets/a.svg"
+
+
+def test_picture_element_srcset_is_rewritten():
+    token = FakeToken(
+        "html_block",
+        content='<source srcset="gh-pages/assets/logo.svg"><img src="gh-pages/assets/l.svg">',
+    )
+    rewrite_links([token], resolver(source="README.md", output="guide/index.html"))
+    assert 'srcset="../assets/logo.svg"' in token.content
+    assert 'src="../assets/l.svg"' in token.content

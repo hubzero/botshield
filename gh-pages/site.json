@@ -54,6 +54,12 @@
       "summary": "Decision log, Prometheus metrics, mod_status contribution, and the policy-status admin page."
     },
     {
+      "slug": "monitoring",
+      "title": "Background jobs",
+      "source": "docs/monitoring.md",
+      "summary": "The database and PHP-FPM load monitors and the verified-bot range refresh timer: what they do, how to install them, and why none of them can take httpd down."
+    },
+    {
       "slug": "directives",
       "title": "Directive reference",
       "source": "docs/directives.md",
