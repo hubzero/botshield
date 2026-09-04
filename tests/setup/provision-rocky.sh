@@ -177,13 +177,14 @@ ServerName localhost
 PidFile $RUNDIR/httpd.pid
 DefaultRuntimeDir $RUNDIR
 
-# Both families. A container resolves localhost to ::1 first, and an
-# instance listening only on IPv4 then refuses every connection made by
-# name while accepting every one made by address.
+# IPv4 only, deliberately. Adding a ::1 listener made things worse
+# rather than better: the vhost matches on the IPv4 address, so a
+# connection arriving on ::1 fell through to the default server with no
+# SSL configured and failed the handshake. Without the listener, a
+# client resolving localhost to ::1 is refused immediately and falls
+# back to IPv4, which works. CI pins BS_BASE to the address anyway.
 Listen 127.0.0.1:$HTTP_PORT
 Listen 127.0.0.1:$HTTPS_PORT https
-Listen [::1]:$HTTP_PORT
-Listen [::1]:$HTTPS_PORT https
 
 # The base module set, but NOT conf.modules.d/30-botshield.conf: that
 # loads the production build, and a test for a directive the working

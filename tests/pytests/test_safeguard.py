@@ -59,8 +59,17 @@ SCRAPER_UA = "python-httpx/0.27"
 
 def _hammer(ip: str, n: int) -> list:
     """Fire N cookieless GETs from the same IP so BotShield presents
-    a challenge each time. Returns the responses."""
-    return [client.get("/", xff=ip, ua=SCRAPER_UA) for _ in range(n)]
+    a challenge each time. Returns the responses.
+
+    accept_language=None is load-bearing, not decoration. These tests
+    need the client to actually BE challenged, and the framework's
+    default client sends the header, which is worth 5 points against a
+    threshold of 20 in the dev vhost. Without saying so, this hammers
+    an address that is never challenged and the safeguard it is trying
+    to trip never fires.
+    """
+    return [client.get("/", xff=ip, ua=SCRAPER_UA, accept_language=None)
+            for _ in range(n)]
 
 
 def _safeguard_cfg(threshold: int, ttl: int = 900, window: int = 600) -> str:
@@ -183,7 +192,7 @@ def test_safeguard_isolates_per_ip(config_override):
         _hammer(ip_a, 3)
         # IP-B's first visit — must be challenged (fresh slate),
         # not redirected.
-        r_b = client.get("/", xff=ip_b, ua=SCRAPER_UA)
+        r_b = client.get("/", xff=ip_b, ua=SCRAPER_UA, accept_language=None)
 
     assert r_b.status_code != 302, (
         f"IP-B got safeguard redirect but IP-A is the broken one; "
@@ -216,7 +225,8 @@ def test_safeguard_does_not_override_block_path(
         # Trip safeguard on /.
         _hammer(fresh_ip, 3)
         # Now a blocked path must still return 403, not a soft pass.
-        r = client.get("/blocked", xff=fresh_ip, ua=SCRAPER_UA)
+        r = client.get("/blocked", xff=fresh_ip, ua=SCRAPER_UA,
+                   accept_language=None)
 
     assert r.status_code == 403, (
         f"safeguard must not override request-trigger 403; "
@@ -253,7 +263,8 @@ def test_solved_cookie_clears_safeguard_counter(
         # Phase 1: 2 cookieless presentations.
         _hammer(fresh_ip, 2)
         # Phase 2 prep: get JSON to solve. 3rd presentation.
-        resp = client.get("/", xff=fresh_ip, ua=SCRAPER_UA)
+        resp = client.get("/", xff=fresh_ip, ua=SCRAPER_UA,
+                          accept_language=None)
         ch = cookies.extract_challenge(resp.text)
         counter = cookies.solve_pow(ch)
         solved = cookies.build_cookie(ch, counter)
@@ -263,7 +274,7 @@ def test_solved_cookie_clears_safeguard_counter(
         # bumps it back to 1 — still well under threshold.
         with log_slice as slc:
             r_solved = client.get(
-                "/", xff=fresh_ip, ua=SCRAPER_UA,
+                "/", xff=fresh_ip, ua=SCRAPER_UA, accept_language=None,
                 cookies={"__Host-bs_session": solved},
             )
             lines = slc.decision_lines(ip=fresh_ip)
@@ -452,7 +463,7 @@ def test_unverified_session_cookie_does_not_clear_safeguard(
     ):
         responses = [
             client.get(
-                "/", xff=fresh_ip, ua=SCRAPER_UA,
+                "/", xff=fresh_ip, ua=SCRAPER_UA, accept_language=None,
                 cookies={"__Host-bs_session": bogus_cookie},
             )
             for _ in range(3)

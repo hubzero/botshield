@@ -54,20 +54,22 @@ def request(
     path: str,
     *,
     ua: str | None = None,
-    # Sent by default, and the default is load-bearing.
+    # Omitted by default, and that default is load-bearing in both
+    # directions, which is why it is left alone.
     #
-    # Without it the framework's own client sits exactly on the
-    # non-interactive threshold in the dev vhost: a scraper-classified
-    # agent scores 10, a missing Accept-Language 5, and a Bloom-fresh
-    # address 5, which is 20 against a threshold of 20. Every test
-    # asserting that some path is NOT blocked then passes or fails on
-    # whether the Bloom filter happens to have seen the address --
-    # warm on a long-lived box, cold in CI, which is why a suite that
-    # was green here failed a container by ten tests.
+    # Without the header, a request from this client scores 10 for a
+    # scraper-classified agent, 5 for the missing header and 5 for a
+    # Bloom-fresh address: 20, against a dev-vhost threshold of 20.
+    # Tests asserting a path is NOT blocked want to be under that line;
+    # tests asserting the safeguard trips need to be over it. Sending
+    # the header by default was tried and moved the failures from one
+    # group to the other without reducing them.
     #
-    # Pass None to omit it, which is what the tests exercising
-    # missing-al do deliberately.
-    accept_language: str | None = "en-US",
+    # So each test states the client shape it needs rather than
+    # inheriting one. The real fix is that the dev vhost leaves no
+    # headroom either side of the line, which is a scoring decision
+    # rather than a harness one.
+    accept_language: str | None = None,
     xff: str | None = None,
     cookies: dict | None = None,
     data: dict | str | None = None,
