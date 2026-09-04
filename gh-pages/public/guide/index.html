@@ -95,6 +95,7 @@
 <li class="toc__item toc__item--level-2"><a href="#documentation">Documentation</a></li>
 <li class="toc__item toc__item--level-2"><a href="#module-owned-endpoints">Module-owned endpoints</a></li>
 <li class="toc__item toc__item--level-2"><a href="#local-development">Local development</a></li>
+<li class="toc__item toc__item--level-2"><a href="#contributing">Contributing</a></li>
 <li class="toc__item toc__item--level-2"><a href="#license">License</a></li>
   </ul>
 </section>
@@ -110,7 +111,7 @@
 </p>
 <p align="center">
   <a href="https://github.com/hubzero/botshield/actions/workflows/ci.yml"><img src="https://github.com/hubzero/botshield/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-yellow.svg" alt="License: MIT"></a>
+  <a href="https://github.com/hubzero/botshield/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-yellow.svg" alt="License: MIT"></a>
   <a href="https://hubzero.github.io/botshield/"><img src="https://img.shields.io/badge/docs-Pages-blue" alt="docs"></a>
   <a href="https://httpd.apache.org/"><img src="https://img.shields.io/badge/Apache-2.4-D22128?logo=apache&logoColor=white" alt="Apache 2.4 module"></a>
   <a href="https://en.cppreference.com/w/c"><img src="https://img.shields.io/badge/language-C99-blue" alt="C99"></a>
@@ -130,7 +131,7 @@ in advance.</p>
 Newer surfaces — the interactive/captcha tiers, the load-shedding
 ladder — are earlier in that same real-traffic exercise and change
 faster. Architecture, threat model, and per-extension design notes
-live in <a href="DESIGN.md">DESIGN.md</a>. Site handbook lives in <code>docs/</code> and
+live in <a href="https://github.com/hubzero/botshield/blob/main/DESIGN.md">DESIGN.md</a>. Site handbook lives in <code>docs/</code> and
 renders to GitHub Pages via <code>gh-pages/</code>; see the
 <a href="#documentation">documentation index</a> below.</p>
 <h2 id="what-ships">What ships</h2>
@@ -161,7 +162,7 @@ by default; opt into sharing across vhosts explicitly.</li>
 <li><strong>Accessibility.</strong> The default interstitial passes WCAG 2.1 AA on
 every variant.</li>
 </ul>
-<p>See <a href="DESIGN.md">DESIGN.md</a> for the cryptographic envelope, the SHM
+<p>See <a href="https://github.com/hubzero/botshield/blob/main/DESIGN.md">DESIGN.md</a> for the cryptographic envelope, the SHM
 layout, and the rest of the implementation detail this list leaves out
 on purpose.</p>
 <h2 id="quick-start">Quick start</h2>
@@ -184,7 +185,7 @@ deleting the <code>.so</code>.</p>
 &lt;/VirtualHost&gt;
 </code></pre>
 <p>Generate the secret with <code>openssl rand -hex 32 &gt; /etc/botshield/secret; chmod 600 /etc/botshield/secret</code>. Full setup walkthrough in
-<a href="docs/getting-started.md"><code>docs/getting-started.md</code></a>.</p>
+<a href="../getting-started/index.html"><code>docs/getting-started.md</code></a>.</p>
 <h2 id="documentation">Documentation</h2>
 <p>Site handbook (rendered to
 <a href="https://hubzero.github.io/botshield/">hubzero.github.io/botshield</a>
@@ -199,54 +200,54 @@ from these sources):</p>
 <tbody>
 <tr>
 <td>Getting started — install, first vhost, smoke test</td>
-<td><a href="docs/getting-started.md"><code>docs/getting-started.md</code></a></td>
+<td><a href="../getting-started/index.html"><code>docs/getting-started.md</code></a></td>
 </tr>
 <tr>
 <td>Site model — scoring, tiers, cookie reputation, multi-vhost</td>
-<td><a href="docs/site-model.md"><code>docs/site-model.md</code></a></td>
+<td><a href="../site-model/index.html"><code>docs/site-model.md</code></a></td>
 </tr>
 <tr>
 <td>Directives reference</td>
-<td><a href="docs/directives.md"><code>docs/directives.md</code></a></td>
+<td><a href="../directives/index.html"><code>docs/directives.md</code></a></td>
 </tr>
 <tr>
 <td>Example configs — the starter flag/heuristic-trigger slate</td>
-<td><a href="docs/examples.md"><code>docs/examples.md</code></a></td>
+<td><a href="../examples/index.html"><code>docs/examples.md</code></a></td>
 </tr>
 <tr>
 <td>Policy — triggers, rate limits, robots.txt</td>
-<td><a href="docs/policy.md"><code>docs/policy.md</code></a></td>
+<td><a href="../policy/index.html"><code>docs/policy.md</code></a></td>
 </tr>
 <tr>
 <td>Captcha tier — providers, hardening, configuration</td>
-<td><a href="docs/captcha.md"><code>docs/captcha.md</code></a></td>
+<td><a href="../captcha/index.html"><code>docs/captcha.md</code></a></td>
 </tr>
 <tr>
 <td>Deployment — reverse proxy, slowloris, capacity sizing, secret rotation</td>
-<td><a href="docs/deployment.md"><code>docs/deployment.md</code></a></td>
+<td><a href="../deployment/index.html"><code>docs/deployment.md</code></a></td>
 </tr>
 <tr>
 <td>Staging policy changes — shadow mode + per-rule observe</td>
-<td><a href="docs/staging.md"><code>docs/staging.md</code></a></td>
+<td><a href="../staging/index.html"><code>docs/staging.md</code></a></td>
 </tr>
 <tr>
 <td>Observability — decision log, metrics, mod_status</td>
-<td><a href="docs/observability.md"><code>docs/observability.md</code></a></td>
+<td><a href="../observability/index.html"><code>docs/observability.md</code></a></td>
 </tr>
 <tr>
 <td>Troubleshooting</td>
-<td><a href="docs/troubleshooting.md"><code>docs/troubleshooting.md</code></a></td>
+<td><a href="../troubleshooting/index.html"><code>docs/troubleshooting.md</code></a></td>
 </tr>
 <tr>
 <td>FAQ</td>
-<td><a href="docs/faq.md"><code>docs/faq.md</code></a></td>
+<td><a href="../faq/index.html"><code>docs/faq.md</code></a></td>
 </tr>
 </tbody>
 </table>
 <p>Internal references:</p>
 <ul>
-<li><a href="DESIGN.md">DESIGN.md</a> — current-state design specification.</li>
-<li><a href="tests/README.md">tests/README.md</a> — test, fuzz, and benchmark
+<li><a href="https://github.com/hubzero/botshield/blob/main/DESIGN.md">DESIGN.md</a> — current-state design specification.</li>
+<li><a href="https://github.com/hubzero/botshield/blob/main/tests/README.md">tests/README.md</a> — test, fuzz, and benchmark
 framework.</li>
 </ul>
 <h2 id="module-owned-endpoints">Module-owned endpoints</h2>
@@ -322,7 +323,7 @@ framework.</li>
 a 403. <strong>Do not use <code>Require ip</code> here</strong> — an Apache-level denial writes
 <code>AH01630</code> on every refusal, and the dashboard's own auto-refresh can
 trip a fail2ban jail watching for that pattern and ban the very address
-you meant to allow. See <a href="docs/directives.md"><code>docs/directives.md</code></a> for
+you meant to allow. See <a href="../directives/index.html"><code>docs/directives.md</code></a> for
 the full rationale and syntax:</p>
 <pre><code class="language-apache">BotShieldDashboardAccess 127.0.0.1 ::1
 BotShieldMetricsAccess   10.9.0.5
@@ -348,9 +349,16 @@ the committed <code>tests/site/</code> docroot. Bring it up:</p>
 <p>Idempotent — safe to re-run. After it completes, the dev vhost
 listens on <code>https://localhost/</code>. Test infrastructure (pytest harness,
 fuzz, benchmarks) is documented in
-<a href="tests/README.md"><code>tests/README.md</code></a>.</p>
+<a href="https://github.com/hubzero/botshield/blob/main/tests/README.md"><code>tests/README.md</code></a>.</p>
+<h2 id="contributing">Contributing</h2>
+<p>Patches, bug reports, and questions are all welcome — see
+<a href="https://github.com/hubzero/botshield/blob/main/.github/CONTRIBUTING.md">CONTRIBUTING.md</a> for how the project is
+built, tested, and reviewed.</p>
+<p>Security bugs are the exception: please don't open a public issue.
+<a href="https://github.com/hubzero/botshield/blob/main/.github/SECURITY.md">SECURITY.md</a> has the disclosure process and what
+to expect after you report.</p>
 <h2 id="license">License</h2>
-<p>MIT. See <a href="LICENSE">LICENSE</a>.</p>
+<p>MIT. See <a href="https://github.com/hubzero/botshield/blob/main/LICENSE">LICENSE</a>.</p>
 
         </div>
       </article>

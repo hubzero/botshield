@@ -25,9 +25,9 @@ Optional but recommended:
   still runs at clean shutdown, the headroom log lines disappear).
 - `mod_status` for the `/server-status` contribution hook.
 - `mod_remoteip` if Apache sits behind a reverse proxy or load
-  balancer. See [deployment](../deployment/index.html) for why this is critical.
+  balancer. See [deployment](deployment.md) for why this is critical.
 - `mod_reqtimeout` for slow-client / slowloris defense. See
-  [deployment](../deployment/index.html) for the recommended settings.
+  [deployment](deployment.md) for the recommended settings.
 
 ## Build and install
 
@@ -74,7 +74,7 @@ sudo openssl rand -hex 32 | sudo tee /etc/botshield/secret >/dev/null
 
 Keep this file off your repo and out of any backup that gets shared.
 Rotation is supported via `BotShieldSecondarySecretFile` — see the
-[deployment](../deployment/index.html) page.
+[deployment](deployment.md) page.
 
 ## Minimal configuration
 
@@ -94,8 +94,8 @@ Drop a single block into the vhost you want gated:
 
 That's the floor. Everything else (tier thresholds, forgiveness,
 allow lists, captcha providers, triggers) ships with reasonable
-defaults documented on the [site model](../site-model/index.html) and
-[directives](../directives/index.html) pages.
+defaults documented on the [site model](site-model.md) and
+[directives](directives.md) pages.
 
 `BotShieldAlgorithm sha256-zeros` is currently the only built-in PoW
 algorithm. Other names (`sha384-zeros`, `pbkdf2-sha256`, `argon2id`)
@@ -161,8 +161,8 @@ curl -sk -A "python-requests/2.31" https://example.test/ | grep -c BOTSHIELD
 
 If you don't see the widget, the heuristic configuration on your
 scope likely diverges from the defaults — see
-[site model](../site-model/index.html#tuning-workflow) for the
-tuning workflow and [observability](../observability/index.html) for how
+[site model](site-model.md#tuning-workflow) for the
+tuning workflow and [observability](observability.md) for how
 to inspect what each request scored.
 
 ## Test that PoW completes
@@ -187,12 +187,12 @@ sudo make disable && sudo systemctl reload apache2
 the `.so`. Any directives in your vhost configs become unrecognized
 on the next reload, so this is a "stop everything" switch — for
 gradual rollback prefer `BotShieldEnabled LogOnly` (see
-[staging](../staging/index.html)).
+[staging](staging.md)).
 
 ## Where to next
 
-- Real-world deployments behind a proxy: [deployment](../deployment/index.html).
-- Tier model, scoring, and tuning: [site model](../site-model/index.html).
-- Allow lists, rate limits, and triggers: [policy](../policy/index.html).
-- Third-party captcha integration: [captcha](../captcha/index.html).
-- Metrics, decision log, mod_status: [observability](../observability/index.html).
+- Real-world deployments behind a proxy: [deployment](deployment.md).
+- Tier model, scoring, and tuning: [site model](site-model.md).
+- Allow lists, rate limits, and triggers: [policy](policy.md).
+- Third-party captcha integration: [captcha](captcha.md).
+- Metrics, decision log, mod_status: [observability](observability.md).

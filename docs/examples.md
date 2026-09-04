@@ -3,7 +3,7 @@
 The module ships no default rules. An unset score threshold never
 fires, so a fresh deployment scores nothing and challenges nothing
 until you declare both a trigger and a threshold — see
-[Policy](../policy/index.html#no-compiled-in-defaults) for why. These two files
+[Policy](policy.md#no-compiled-in-defaults) for why. These two files
 are what the module used to seed automatically before that changed.
 They are kept as a documented starting point for anyone who wants that
 shape, not because the module needs them.
@@ -43,7 +43,7 @@ something rather than just reading its comments.
 
 1. Pick a threshold. Nothing fires without
    `BotShieldScoreNonInteractive`, `BotShieldScoreInteractive`, and
-   `BotShieldScoreCaptcha` set — the [Directive reference](../directives/index.html)
+   `BotShieldScoreCaptcha` set — the [Directive reference](directives.md)
    has the syntax, and `httpd -t -D DUMP_BOTSHIELD_POLICY` will tell
    you which of the three you've left unset.
 2. Copy the lines you want from either file into your vhost or server
@@ -51,7 +51,7 @@ something rather than just reading its comments.
 3. Reload, then read the results back with the same dump flag — it
    prints every effective flag trigger and heuristic with its source,
    so "is this rule actually in effect" never has to be a guess. See
-   [Policy](../policy/index.html#reading-the-effective-policy) for what that
+   [Policy](policy.md#reading-the-effective-policy) for what that
    output looks like.
 
 The values in both files match this project's own `src/score.h` at the

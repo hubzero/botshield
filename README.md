@@ -190,6 +190,16 @@ listens on `https://localhost/`. Test infrastructure (pytest harness,
 fuzz, benchmarks) is documented in
 [`tests/README.md`](tests/README.md).
 
+## Contributing
+
+Patches, bug reports, and questions are all welcome — see
+[CONTRIBUTING.md](.github/CONTRIBUTING.md) for how the project is
+built, tested, and reviewed.
+
+Security bugs are the exception: please don't open a public issue.
+[SECURITY.md](.github/SECURITY.md) has the disclosure process and what
+to expect after you report.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

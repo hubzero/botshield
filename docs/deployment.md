@@ -294,8 +294,8 @@ file.
 
 ## Where to next
 
-- Tier model, scoring, decision log: [site model](../site-model/index.html).
-- Allow lists, rate limits, triggers: [policy](../policy/index.html).
-- Captcha and app-bridge integration: [captcha](../captcha/index.html).
-- Staging policy changes safely: [staging](../staging/index.html).
-- Metrics + decision log + mod_status: [observability](../observability/index.html).
+- Tier model, scoring, decision log: [site model](site-model.md).
+- Allow lists, rate limits, triggers: [policy](policy.md).
+- Captcha and app-bridge integration: [captcha](captcha.md).
+- Staging policy changes safely: [staging](staging.md).
+- Metrics + decision log + mod_status: [observability](observability.md).

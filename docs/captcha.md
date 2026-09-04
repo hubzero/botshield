@@ -266,7 +266,7 @@ parser shape, not by key separation.
 
 ## Where to next
 
-- Real-world deployment topology: [deployment](../deployment/index.html).
-- Tier model and scoring: [site model](../site-model/index.html).
-- Triggers, allow lists, robots: [policy](../policy/index.html).
-- Decision log + metrics: [observability](../observability/index.html).
+- Real-world deployment topology: [deployment](deployment.md).
+- Tier model and scoring: [site model](site-model.md).
+- Triggers, allow lists, robots: [policy](policy.md).
+- Decision log + metrics: [observability](observability.md).

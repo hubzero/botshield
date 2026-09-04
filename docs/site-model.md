@@ -83,7 +83,7 @@ or cohort. Signs are absolute; the score either rises or stays put.
 Default thresholds and penalty values appear here for orientation.
 Treat the source (`src/score.h`, `src/heuristics.c`,
 `src/triggers.c`, defaults registered in `bs_default_flag_triggers`)
-as authoritative — see the [directives](../directives/index.html) page for
+as authoritative — see the [directives](directives.md) page for
 how to override every value.
 
 The number of distinct reason entries recorded per request is
@@ -215,7 +215,7 @@ LogLevel botshield_module:info
 The `reason` field is the comma-joined reason names captured by
 `bs_score_add`. The `tag` field (when present) is the
 configured `log=<tag>` value from the matching trigger. See
-[observability](../observability/index.html) for the full decision-log
+[observability](observability.md) for the full decision-log
 vocabulary.
 
 For verbose debugging — the per-reason penalty values, not just the
@@ -233,7 +233,7 @@ which signals contributed and how much.
 ## Tuning workflow
 
 1. Start with `BotShieldEnabled LogOnly` to dry-run all rules without
-   enforcement (see [staging](../staging/index.html)).
+   enforcement (see [staging](staging.md)).
 2. Watch the decision log for several days under real traffic.
 3. Inspect the distribution of `effective` and per-reason
    contributions. The `botshield_tier_<t>_total` and
@@ -273,12 +273,12 @@ reachable; the common ones:
 | `captcha` | `inflight_capped` | Global captcha-verify in-flight cap exceeded |
 | `safeguard` | `redirect` | challenge-loop suppression; 302 to the explainer (or operator-configured URL) with `?return=<original URI>` |
 
-See [observability](../observability/index.html) for the complete enum
+See [observability](observability.md) for the complete enum
 vocabulary and how it maps to counters.
 
 ## Where to next
 
-- Allow lists, rate limits, robots, triggers: [policy](../policy/index.html).
-- Captcha integration: [captcha](../captcha/index.html).
-- Safe rule rollout: [staging](../staging/index.html).
-- Metrics and dashboards: [observability](../observability/index.html).
+- Allow lists, rate limits, robots, triggers: [policy](policy.md).
+- Captcha integration: [captcha](captcha.md).
+- Safe rule rollout: [staging](staging.md).
+- Metrics and dashboards: [observability](observability.md).

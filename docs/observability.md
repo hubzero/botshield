@@ -625,7 +625,7 @@ takes the shape `<family>:<name>` so the source family is visible:
 | `flag-trigger:<flag>` | flag-trigger score action |
 | `flag-tier-floor:<tier>` | flag-trigger tier-floor action |
 | `path-trigger:<name>`, `cookie-trigger:<name>`, `env-trigger:<name>`, `load-trigger:<name>`, `feedback-trigger:<event>` | trigger families |
-| `<reason>:observe` | Any of the above with `mode=observe` or under `BotShieldEnabled LogOnly` (see [staging](../staging/index.html)) |
+| `<reason>:observe` | Any of the above with `mode=observe` or under `BotShieldEnabled LogOnly` (see [staging](staging.md)) |
 | `would-flag-trigger:<flag>:observe`, `would-block:<name>`, `would-rate-limit:<name>` | Observe-mode "would have done" reasons |
 | `challenge-safeguard` | safeguard redirect |
 
@@ -810,7 +810,7 @@ metrics endpoint and decision log still cover everything.
 ## Who may read the dashboard and metrics
 
 Each endpoint is closed until its own directive names someone. See
-[the directive reference](../directives/index.html#observability-endpoint-access)
+[the directive reference](directives.md#observability-endpoint-access)
 for the full syntax; the short version is a list of addresses or CIDR
 blocks, one directive per endpoint:
 
@@ -912,7 +912,7 @@ mod_botshield: capacity headroom: bloom_a 73% filled (rotation
 ```
 
 Use these as the cue to raise capacity directives
-and reload — see [deployment](../deployment/index.html) for sizing guidance.
+and reload — see [deployment](deployment.md) for sizing guidance.
 
 ## Debug mode
 
@@ -940,8 +940,8 @@ expensive at scale.
 
 ## Where to next
 
-- Tier model and scoring: [site model](../site-model/index.html).
-- Policy families: [policy](../policy/index.html).
-- Captcha and app-bridge: [captcha](../captcha/index.html).
-- Safe rule rollout: [staging](../staging/index.html).
-- Common issues: [troubleshooting](../troubleshooting/index.html).
+- Tier model and scoring: [site model](site-model.md).
+- Policy families: [policy](policy.md).
+- Captcha and app-bridge: [captcha](captcha.md).
+- Safe rule rollout: [staging](staging.md).
+- Common issues: [troubleshooting](troubleshooting.md).

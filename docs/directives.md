@@ -58,7 +58,7 @@ into a running server.
   serving the interstitial; trigger / rate-limit matches log
   `:observe` and skip side effects. Use this to stage
   a whole policy revision before flipping enforcement on. See
-  [staging](../staging/index.html).
+  [staging](staging.md).
 
 Because `BotShieldEnabled` is per-`<Directory>` / `<Location>`,
 operators can carve out exceptions:
@@ -120,7 +120,7 @@ scope — useful as a smoke test that the hook is firing.
 module emits `503 X-Botshield: misconfigured` for any request
 where both are not resolved on the scope. `BotShieldSecondarySecretFile`
 is the verify-only secondary key for graceful rotation — see
-[deployment](../deployment/index.html#secret-rotation).
+[deployment](deployment.md#secret-rotation).
 
 `BotShieldAlgorithm` only `sha256-zeros` is built-in today;
 `sha384-zeros`, `sha512-zeros`, `pbkdf2-sha256`, `argon2id` are
@@ -234,7 +234,7 @@ Tier dispatch ladder:
 - `BotShieldScoreInteractive ≤ score < BotShieldScoreCaptcha` → form
 - `BotShieldScoreCaptcha ≤ score` → captcha (or form if no provider)
 
-See [site model](../site-model/index.html) for the full scoring
+See [site model](site-model.md) for the full scoring
 discussion.
 
 `BotShieldForgivenessCapPerHour` caps total cookie-side
@@ -307,7 +307,7 @@ preserved.
 
 Provider names: `turnstile`, `hcaptcha`, `recaptcha-v2`,
 `recaptcha-v3`, `friendly`, `geetest`. See
-[captcha](../captcha/index.html) for the wire-protocol details.
+[captcha](captcha.md) for the wire-protocol details.
 
 `BotShieldCaptchaTimeout` is the total siteverify HTTP budget; on
 timeout the verify path fails open. `BotShieldCaptchaConnectTimeout`
@@ -372,7 +372,7 @@ addresses sharing reputation.
 `BotShieldStateFile` gives crash-durable persistence to the flagged-IP
 table, the Bloom filters, and the metrics counters and dashboard bucket
 rings. Rate-limit counters are deliberately excluded — see
-[Deployment](../deployment/index.html). The periodic save requires `mod_watchdog`;
+[Deployment](deployment.md). The periodic save requires `mod_watchdog`;
 the graceful-shutdown save runs regardless. State format mismatches on
 load reject the file with a NOTICE and start fresh — never a startup
 failure.
@@ -493,7 +493,7 @@ CIDRs, or `*` alone for UA-only matching (logged as
 `/var/lib/botshield/bots/<name>.txt`. A `<name>` matching a bundled
 built-in (`googlebot`, `bingbot`, `applebot`, `googleother`,
 `siteimprove`) replaces that built-in. See
-[policy](../policy/index.html#allow-list-verified-crawlers) for the
+[policy](policy.md#allow-list-verified-crawlers) for the
 verified / fake / unverified outcomes.
 
 `BotShieldAllowRangesRefreshInterval` re-stats the verified-bot CIDR
@@ -583,7 +583,7 @@ plus optional `ua=` / `ipspec=` match keys — see the [Triggers](
 
 `BotShieldRateLimitEscalate` upgrades repeated 429s on the same
 client to a stickier status code — see
-[policy](../policy/index.html#repeated-429-escalation).
+[policy](policy.md#repeated-429-escalation).
 
 ## Robots.txt enforcement
 
@@ -598,7 +598,7 @@ client to a stickier status code — see
 without returning 403 — the way to see what enforcing a robots.txt you
 did not write would cost before you enforce it.
 
-See [policy](../policy/index.html#robots-txt-enforcement) for the matcher
+See [policy](policy.md#robots-txt-enforcement) for the matcher
 semantics and refresh model.
 
 ## Triggers
@@ -612,7 +612,7 @@ semantics and refresh model.
 | `BotShieldLoadTrigger` | `<name> state=<n>\|state>=<n>` | `status=`, `log=`, `accesslog=`, `penalty=`, `mode=` (no `redirect=`, `flag=`, `ttl=`) |
 | `BotShieldSessionCookieName` | `<name>` (single arg, repeatable) | n/a (feeds cookies=session predicate) |
 
-See [policy](../policy/index.html#triggers-predicate-action-engine)
+See [policy](policy.md#triggers-predicate-action-engine)
 for full predicate vocabulary and family-by-family semantics.
 
 `BotShieldSessionCookieName` registers a name that the
@@ -862,7 +862,7 @@ after a solve.
 Flag bits: `honeypot_hit`, `scanner_probe`, `fake_bot`,
 `pow_fail_streak`, `app_verified_human`, `app_verified_session`,
 `app_trust_signal`. See
-[policy](../policy/index.html#flag-trigger-family) for the starter
+[policy](policy.md#flag-trigger-family) for the starter
 slate and override semantics.
 
 ## Heuristic triggers
@@ -966,8 +966,8 @@ browser version) and offers a Continue link back to the original
 URL. It is auto-routed by the module — no `<Location>` carve-out
 needed.
 
-See [policy](../policy/index.html#safeguard) and
-[site model](../site-model/index.html#tier-ladder) for the
+See [policy](policy.md#safeguard) and
+[site model](site-model.md#tier-ladder) for the
 behavior arc.
 
 ## Load-aware throttling
@@ -1032,7 +1032,7 @@ stall the code whose job is to shed load because the database is sick.
 
 The trigger family that consumes the state lives under
 `BotShieldLoadTrigger` (above). See
-[policy](../policy/index.html#load-triggers).
+[policy](policy.md#load-triggers).
 
 ## Multi-vhost reputation
 
@@ -1041,7 +1041,7 @@ The trigger family that consumes the state lives under
 | `BotShieldShareScope` | `<token>` | derived from ServerName |
 
 Vhosts with the same token share one reputation namespace. See
-[deployment](../deployment/index.html#multi-vhost-reputation).
+[deployment](deployment.md#multi-vhost-reputation).
 
 ## Observability endpoint access
 
@@ -1142,7 +1142,7 @@ so that line is the only trace a probe leaves.
 
 `BotShieldAccessLog` controls the *Apache* access-log line for requests
 BotShield decided on, not this log. See
-[observability](../observability/index.html) for which outcomes are
+[observability](observability.md) for which outcomes are
 suppressed by default and why.
 
 A module-owned decision log, written directly from the decision path
@@ -1236,14 +1236,14 @@ get is a silent blind spot.
 
 Optional. Without it the authoritative record remains the error-log
 `mod_botshield: decision ...` line, plus whatever `CustomLog` you wire
-up. See [observability](../observability/index.html#where-the-decision-line-goes)
+up. See [observability](observability.md#where-the-decision-line-goes)
 for the line format and the trade-offs between all three routes.
 
 ## Log-only / staging mode
 
 Folded into `BotShieldEnabled` (tri-state `on` / `off` /
 `logonly`). See the [Core](#core) section above and the
-[staging](../staging/index.html) guide.
+[staging](staging.md) guide.
 
 ## App bridge
 
@@ -1254,13 +1254,13 @@ Folded into `BotShieldEnabled` (tri-state `on` / `off` /
 | `BotShieldAppClaims` | `on\|off` | `off` |
 | `BotShieldAppIntegrationSecretFile` | `/path` | unset (required for either above) |
 
-See [captcha](../captcha/index.html#app-bridge) for the wire format
+See [captcha](captcha.md#app-bridge) for the wire format
 and security model.
 
 ## Where to next
 
-- Conceptual model and scoring: [site model](../site-model/index.html).
-- Deployment topology and capacity: [deployment](../deployment/index.html).
-- Per-family policy semantics: [policy](../policy/index.html).
-- Captcha and app-bridge integration: [captcha](../captcha/index.html).
-- Decision log and metrics: [observability](../observability/index.html).
+- Conceptual model and scoring: [site model](site-model.md).
+- Deployment topology and capacity: [deployment](deployment.md).
+- Per-family policy semantics: [policy](policy.md).
+- Captcha and app-bridge integration: [captcha](captcha.md).
+- Decision log and metrics: [observability](observability.md).

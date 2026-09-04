@@ -52,9 +52,13 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install docs deps
-        run: pip install -r gh-pages/requirements.txt
+        run: pip install -r gh-pages/requirements.txt pytest
+      - name: Builder unit tests
+        run: python3 -m pytest gh-pages/test_build_site.py -q
       - name: Build site
         run: python3 gh-pages/build_site.py
+      - name: No broken links in the built site
+        run: python3 gh-pages/check_links.py gh-pages/public
       - name: Committed site must match the sources
         run: |
           if ! git diff --quiet -- gh-pages/public; then

@@ -169,6 +169,6 @@ forensics.
 
 ## Where to next
 
-- Tier model and scoring: [site model](../site-model/index.html).
-- Per-family rule semantics: [policy](../policy/index.html).
-- Metrics + decision log surface: [observability](../observability/index.html).
+- Tier model and scoring: [site model](site-model.md).
+- Per-family rule semantics: [policy](policy.md).
+- Metrics + decision log surface: [observability](observability.md).

@@ -8,8 +8,9 @@ import re
 import shutil
 import sys
 import unicodedata
+from collections.abc import Callable
 from html import escape
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 try:
     from markdown_it import MarkdownIt
@@ -50,14 +51,105 @@ def relative_href(from_file: Path, to_file: Path) -> str:
     return os.path.relpath(to_file, from_file.parent).replace(os.sep, "/")
 
 
+_HTML_HREF_RE = re.compile(r"""(?P<attr>\b(?:href|src)\s*=\s*)(?P<q>["'])(?P<url>[^"']*)(?P=q)""")
+
+
+def rewrite_links(tokens: list, resolve: "Callable[[str], str]") -> None:
+    """Walk every link in the token stream and hand its href to `resolve`.
+
+    Markdown links arrive as link_open tokens. Raw HTML blocks do not --
+    markdown-it passes those through as opaque text -- so their href and
+    src attributes are rewritten with a regex instead. The README's badge
+    row is raw HTML, and its link to LICENSE needs the same treatment as
+    any other repo-relative link.
+    """
+    for token in tokens:
+        if token.type == "inline" and token.children:
+            rewrite_links(token.children, resolve)
+            continue
+
+        if token.type in ("html_block", "html_inline"):
+            token.content = _HTML_HREF_RE.sub(
+                lambda m: f"{m.group('attr')}{m.group('q')}"
+                f"{resolve(m.group('url'))}{m.group('q')}",
+                token.content,
+            )
+            continue
+
+        if token.type != "link_open":
+            continue
+        href = token.attrGet("href")
+        if href:
+            token.attrSet("href", resolve(href))
+
+
+def make_link_resolver(
+    source: str,
+    output: str,
+    source_to_output: dict[str, str],
+    blob_base: str,
+    warn: "Callable[[str], None]",
+) -> "Callable[[str], str]":
+    """Rewrite a repo-relative Markdown link so it works in the built site.
+
+    Docs are written to be read two ways: as Markdown on GitHub, and as
+    pages on the site. A link like `docs/policy.md` is correct on GitHub
+    and meaningless in the built output, where that page lives at
+    `policy/index.html`. This maps one to the other:
+
+      * a link to a file that IS a page in the site  -> that page, relative
+      * a link to any other file tracked in the repo -> its GitHub blob URL
+      * anything else (absolute URL, bare #fragment, already-built path)
+        is left exactly as written
+    """
+    source_dir = PurePosixPath(source).parent
+
+    def resolve(href: str) -> str:
+        if not href or href.startswith(("#", "//")):
+            return href
+        if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", href):  # http:, mailto:, ...
+            return href
+
+        path_part, sep, fragment = href.partition("#")
+        if not path_part:
+            return href
+
+        target = os.path.normpath(str(source_dir / path_part)).replace(os.sep, "/")
+        if target.startswith(".."):  # escapes the repo; not ours to touch
+            return href
+
+        if target in source_to_output:
+            rebased = relative_href(
+                Path("/site") / output, Path("/site") / source_to_output[target]
+            )
+            return rebased + sep + fragment
+
+        if (ROOT / target).is_file():
+            return f"{blob_base}/{target}" + sep + fragment
+
+        # Not a repo file. Either an already-built path like
+        # ../policy/index.html, or a genuinely dead link.
+        if path_part.endswith(".md") or "/" not in path_part:
+            warn(f"{source}: link to missing file {path_part!r}")
+        return href
+
+    return resolve
+
+
 class MarkdownRenderer:
     def __init__(self) -> None:
         self.md = MarkdownIt("commonmark", {"html": True, "typographer": True})
         self.md.enable("table")
         self.md.enable("strikethrough")
 
-    def render(self, text: str) -> dict[str, object]:
+    def render(
+        self,
+        text: str,
+        link_resolver: "Callable[[str], str] | None" = None,
+    ) -> dict[str, object]:
         tokens = self.md.parse(text)
+        if link_resolver is not None:
+            rewrite_links(tokens, link_resolver)
         slug_counts: dict[str, int] = {}
         toc: list[dict[str, object]] = []
         title = None
@@ -230,9 +322,22 @@ def main() -> int:
     )
     write_text(output_dir / "index.html", home_html)
 
+    source_to_output = {
+        page["source"]: page["output"].replace(os.sep, "/") for page in docs_pages
+    }
+    blob_base = f"{github_href.rstrip('/')}/blob/{config.get('blob_ref', 'main')}"
+    link_warnings: list[str] = []
+
     for page in docs_pages:
         source_path = ROOT / page["source"]
-        rendered = renderer.render(source_path.read_text(encoding="utf-8"))
+        resolver = make_link_resolver(
+            page["source"],
+            page["output"].replace(os.sep, "/"),
+            source_to_output,
+            blob_base,
+            link_warnings.append,
+        )
+        rendered = renderer.render(source_path.read_text(encoding="utf-8"), resolver)
         output_path = output_dir / page["output"]
         nav_html = build_docs_nav(docs_pages, page["slug"], output_path, output_dir)
         toc_html = build_toc(rendered["toc"])  # type: ignore[arg-type]
@@ -263,6 +368,9 @@ def main() -> int:
             },
         )
         write_text(output_path, doc_html)
+
+    for warning in link_warnings:
+        print(f"warning: {warning}", file=sys.stderr)
 
     print(f"Built site into {output_dir}")
     return 0

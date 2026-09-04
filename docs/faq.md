@@ -172,11 +172,11 @@ If real users *are* hitting challenges, the likely causes are:
 
 - Apache is behind a proxy and `mod_remoteip` isn't configured —
   every request looks like it comes from the edge LB. See
-  [troubleshooting](../troubleshooting/index.html).
+  [troubleshooting](troubleshooting.md).
 - The score thresholds are too low for the site's traffic mix.
 - A path-trigger is matching legitimate routes.
 
-[Staging](../staging/index.html) describes the
+[Staging](staging.md) describes the
 `BotShieldEnabled LogOnly` workflow for catching false positives
 before they hit users.
 
@@ -219,7 +219,7 @@ the CIDR files.
 Importantly, the allow-list also catches *fakes*: a request whose
 UA matches "Googlebot/" but whose IP isn't Googlebot's gets a
 strong penalty (`fake-googlebot`) — bot operators love claiming
-to be search engines. See [policy](../policy/index.html#allow-list-verified-crawlers).
+to be search engines. See [policy](policy.md#allow-list-verified-crawlers).
 
 For LLM crawlers (GPTBot, ClaudeBot, anthropic-ai, Google-
 Extended) — sites that want to block them by default can pair
@@ -243,7 +243,7 @@ Three tools for this case:
    verdict back into mod_botshield's reputation. JWT-authenticated
    clients can carry reputation across requests without
    needing to solve PoW. See
-   [captcha](../captcha/index.html#app-bridge).
+   [captcha](captcha.md#app-bridge).
 
 A fourth option for IoT-style clients: implement the non-interactive-tier
 PoW protocol in your client. The wire format is documented;
@@ -274,7 +274,7 @@ growth only in the kitchen-sink configuration. The saturation test
 still shows roughly 20% lower static-file RPS for heavy policies,
 but that is a capacity-ceiling measurement, not normal request
 latency. See
-[deployment](../deployment/index.html#performance-characteristics)
+[deployment](deployment.md#performance-characteristics)
 for the measurement summary.
 
 For challenged requests: there's a one-time PoW cost paid by the
@@ -304,7 +304,7 @@ For challenged requests, yes, the user experiences friction
 of clicked PoW; captcha for as long as the provider takes). That's
 the entire point: *make scraping expensive without making real use
 expensive*. The threshold tuning workflow in
-[staging](../staging/index.html) is your handle on where
+[staging](staging.md) is your handle on where
 that line falls.
 
 ### Does it work with PHP / FastCGI / mod_php / mod_proxy / nginx upstream?
@@ -320,8 +320,8 @@ forward.
 `mod_proxy_balancer`, `mod_rewrite`, `mod_alias`, `mod_dir` —
 none of them interact with mod_botshield in surprising ways. The
 hook ordering is documented in
-[deployment](../deployment/index.html) and
-[observability](../observability/index.html).
+[deployment](deployment.md) and
+[observability](observability.md).
 
 ### Does it work in containers / Kubernetes?
 
@@ -337,7 +337,7 @@ Yes — it's just an Apache module. The constraints are:
   flagged-IP table.
 - `mod_remoteip` configuration is critical when traffic comes from
   an ingress controller (nginx-ingress, AWS ALB Ingress, Traefik).
-  See [deployment](../deployment/index.html).
+  See [deployment](deployment.md).
 
 ### How much memory does it use?
 
@@ -348,7 +348,7 @@ allocation outside of Apache's `r->pool` which is freed at request
 end).
 
 The 8-hour soak (1.4M requests) showed +4 MB RSS growth. SHM
-sizing is documented in [deployment](../deployment/index.html#capacity-sizing).
+sizing is documented in [deployment](deployment.md#capacity-sizing).
 
 ## Privacy and compliance
 
@@ -491,7 +491,7 @@ file is loaded if configured.
 
 Cookies signed before the restart still verify if the master
 secret is unchanged. For zero-disruption secret rotation, see the
-secondary-secret flow in [deployment](../deployment/index.html#secret-rotation).
+secondary-secret flow in [deployment](deployment.md#secret-rotation).
 
 ### Does it cache anything that could go stale?
 
@@ -577,9 +577,9 @@ permanent denial better than mod_botshield does.
 
 ## Where to next
 
-- Install + minimal config: [getting-started](../getting-started/index.html).
-- Tier model and scoring: [site model](../site-model/index.html).
-- Allow lists, triggers, robots: [policy](../policy/index.html).
-- Captcha + app-bridge: [captcha](../captcha/index.html).
-- Common operational issues: [troubleshooting](../troubleshooting/index.html).
-- Full directive reference: [directives](../directives/index.html).
+- Install + minimal config: [getting-started](getting-started.md).
+- Tier model and scoring: [site model](site-model.md).
+- Allow lists, triggers, robots: [policy](policy.md).
+- Captcha + app-bridge: [captcha](captcha.md).
+- Common operational issues: [troubleshooting](troubleshooting.md).
+- Full directive reference: [directives](directives.md).

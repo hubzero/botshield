@@ -181,7 +181,7 @@ Args:
     apply.
 
 Group iteration is exposed by `httpd -t -D DUMP_BOTSHIELD_POLICY`
-for inspection (see [observability](../observability/index.html)).
+for inspection (see [observability](observability.md)).
 
 ### Reading the effective policy
 
@@ -253,7 +253,7 @@ action keys are:
 | `ttl=<sec>` | TTL on the flag-IP entry. Required when `flag=` is set |
 | `penalty=N` | Add N to the request score |
 | `credit=N` | Subtract N from the request score (rejected on the path family — paths can't credit) |
-| `mode=observe` | Per-rule observe mode: predicate evaluates, side-effects suppressed. See [staging](../staging/index.html) |
+| `mode=observe` | Per-rule observe mode: predicate evaluates, side-effects suppressed. See [staging](staging.md) |
 
 ### Path triggers
 
@@ -342,14 +342,14 @@ BotShieldFeedbackTrigger human-pass   flag=app_verified_human ttl=3600
 The event-name → action indirection is the security property: a
 compromised app can emit any event name, but only configured
 mappings reach module memory. Wire format details and signing are
-covered in [captcha](../captcha/index.html).
+covered in [captcha](captcha.md).
 
 Feedback runs on the response path but its side effect is
 future-request state (the flagged-IP write). Both
 `BotShieldEnabled LogOnly` and per-trigger `mode=observe` apply —
 either gates the filter into logging `feedback-trigger:<event>:
 observe` and skipping the SHM mutation. See
-[staging](../staging/index.html).
+[staging](staging.md).
 
 ### Load triggers
 
@@ -428,7 +428,7 @@ every lockout this module has caused traced back to an implicit
 weight nobody had written down.
 
 The slate it used to seed is kept as a documented starting point
-rather than deleted outright — [the flag-triggers example](../examples/index.html)
+rather than deleted outright — [the flag-triggers example](examples.md)
 and its heuristic-trigger counterpart, with the same values these
 paired score + tier_floor rows used to carry:
 
@@ -548,7 +548,7 @@ filter).
 
 ## Where to next
 
-- Captcha and app-bridge protocols: [captcha](../captcha/index.html).
-- Safe rule rollout: [staging](../staging/index.html).
-- Metrics and dashboards: [observability](../observability/index.html).
-- Full directive reference: [directives](../directives/index.html).
+- Captcha and app-bridge protocols: [captcha](captcha.md).
+- Safe rule rollout: [staging](staging.md).
+- Metrics and dashboards: [observability](observability.md).
+- Full directive reference: [directives](directives.md).

@@ -57,7 +57,7 @@ signals on your edge load balancer, not the real client.
 
 **Diagnostic**: look at the `ip=` field in the decision log. If it
 matches your edge's IP, that's the issue. Configure
-`mod_remoteip` per [deployment](../deployment/index.html).
+`mod_remoteip` per [deployment](deployment.md).
 
 **Second-most common cause**: the defaults are challenging more than
 you expected. `first-sight-ip` scores 20, which *is*
@@ -84,7 +84,7 @@ over-firing.
 4. Raise thresholds or lower individual heuristic penalties to
    match.
 
-See [site model](../site-model/index.html) for the full tuning
+See [site model](site-model.md) for the full tuning
 discussion.
 
 ## Bots passing through unchallenged
@@ -108,7 +108,7 @@ access logs aren't being gated. Decision log shows `tier=pass`.
   `BotShieldTrigger flag=honeypot_hit ttl=3600`. The bot trips
   the honeypot, the IP is flagged, future requests get the
   flag-trigger penalty + tier_floor=captcha. See
-  [policy](../policy/index.html).
+  [policy](policy.md).
 - **Path triggers**: for paths that bots target but legitimate
   users don't, add `BotShieldRequestTrigger` rules with a penalty,
   status=403, or both. UA / IP cohort gating goes inline as
@@ -217,7 +217,7 @@ a spike right after a graceful, the secret is mismatched. Check
 `BotShieldSecretFile` content didn't change inadvertently.
 
 For zero-disruption secret rotation use `BotShieldSecondarySecretFile`
-— see [deployment](../deployment/index.html#secret-rotation).
+— see [deployment](deployment.md#secret-rotation).
 
 ## Multi-vhost: bot flagged on one site appears on another
 
@@ -255,8 +255,8 @@ contribution hook is purely additive.
 
 ## Where to next
 
-- Real-world deployment topology: [deployment](../deployment/index.html).
-- Tier model, scoring, decision log: [site model](../site-model/index.html).
-- Policy and rule families: [policy](../policy/index.html).
-- Captcha + app-bridge integration: [captcha](../captcha/index.html).
-- Metrics and dashboards: [observability](../observability/index.html).
+- Real-world deployment topology: [deployment](deployment.md).
+- Tier model, scoring, decision log: [site model](site-model.md).
+- Policy and rule families: [policy](policy.md).
+- Captcha + app-bridge integration: [captcha](captcha.md).
+- Metrics and dashboards: [observability](observability.md).
