@@ -142,17 +142,26 @@ install_secret /etc/botshield/recaptcha-v2-badsecret "this-is-not-a-real-recaptc
 install_secret /etc/botshield/app-integration-secret \
   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
-# Verified-crawler ranges for the allow list. Seeded from the committed
-# copies and never overwritten: once the refresh timer is running, its
-# files take over and this becomes a no-op. Without them the allow list
-# has nothing to verify against, and the failure is not an error but a
-# silence -- requests that should be labelled verified-bot are simply
-# labelled bot, which reads as a classification bug.
-install -d -m 755 /var/lib/botshield/bots
-chown apache:apache /var/lib/botshield/bots
+# Verified-crawler ranges for the allow list, under the instance's OWN
+# data directory.
+#
+# Not /var/lib/botshield: on a host that also serves a real site that is
+# production's data directory, holding its signing secret and its state.
+# A test provisioner has no business writing there, and the default
+# BotShieldDataDir would have pointed the test instance at production's
+# ranges besides. The instance config sets BotShieldDataDir to this path
+# so the two never meet.
+#
+# Seeded from the committed copies and never overwritten, so the refresh
+# timer's files take over once it runs. Without them the allow list has
+# nothing to verify against, and the failure is a silence rather than an
+# error: a request that should be labelled verified-bot is labelled bot,
+# which reads as a classification bug.
+install -d -m 755 "$STATEDIR/bots"
+chown apache:apache "$STATEDIR/bots"
 for f in "$REPO"/data/bots/*.txt; do
   [[ -f "$f" ]] || continue
-  dest="/var/lib/botshield/bots/$(basename "$f")"
+  dest="$STATEDIR/bots/$(basename "$f")"
   [[ -s "$dest" ]] || install -m 644 -o apache -g apache "$f" "$dest"
 done
 
@@ -232,6 +241,10 @@ ExtendedStatus On
 # Server scope on purpose. The load watchdog and the state file are read
 # once against the main server_rec; inside a vhost the module rejects
 # them outright now, but the rule is easier to follow than to debug.
+# The instance's own data directory. Without this the module falls back
+# to /var/lib/botshield, which on a host serving a real site is that
+# site's secret, state and crawler ranges.
+BotShieldDataDir $STATEDIR
 BotShieldDecisionLog $LOGDIR/botshield.log
 BotShieldLoadStateFile $LOADSTATE
 BotShieldLoadRefreshInterval 1
