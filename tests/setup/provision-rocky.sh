@@ -142,6 +142,13 @@ install_secret /etc/botshield/recaptcha-v2-badsecret "this-is-not-a-real-recaptc
 install_secret /etc/botshield/app-integration-secret \
   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
+# Staging directory for the robots.txt tests: they write a fixture here
+# and point the module at it, so it has to be writable by whoever runs
+# pytest and readable by apache.
+install -d -m 775 /etc/botshield/test-robots
+chgrp apache /etc/botshield/test-robots
+[[ -n "${SUDO_USER:-}" ]] && chown "$SUDO_USER" /etc/botshield/test-robots
+
 # --- a self-signed certificate -----------------------------------------
 # At the path the vhost names. That path is one of the few things in
 # apache/botshield-dev.conf that is not a Define, and it does not need to
