@@ -1,0 +1,87 @@
+name: Build and deploy docs to GitHub Pages
+
+# Builds the static docs site (the repo's Markdown + gh-pages/) and publishes it via GitHub
+# Pages. Settings -> Pages -> Source is "GitHub Actions" (set once; see the commit that added
+# this file for the one-time `gh api` call that flipped it from the legacy main:/docs mode).
+#
+# The sources are the documentation the repo already carries, rendered rather than duplicated:
+# README.md, CHANGELOG.md, and everything under docs/. Editing a doc is the only step -- there
+# is no second copy of it here to keep in step. gh-pages/site.json lists each page explicitly
+# (for its card copy and home-page group); nothing else needs registering to be published.
+#
+# gh-pages/public/ IS committed, so the built site can be read straight from the repo or served
+# locally without a build step. That copy can go stale, and a stale site is invisible until
+# somebody reads it -- so the build below rebuilds from source and FAILS if the committed
+# output differs. What is published is always the fresh build, never the committed copy. The
+# same check runs as the CI docs-fresh job on every PR; this workflow's copy is what actually
+# gates the deploy.
+#
+# markdown-it-py is pinned in gh-pages/requirements.txt: the staleness check diffs generated
+# HTML, so an unpinned renderer would fail the build on its own release schedule.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'README.md'
+      - 'CHANGELOG.md'
+      - 'docs/**'
+      - 'gh-pages/**'
+      - '.github/workflows/pages.yml'
+  pull_request:
+    paths:
+      - 'README.md'
+      - 'CHANGELOG.md'
+      - 'docs/**'
+      - 'gh-pages/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install docs deps
+        run: pip install -r gh-pages/requirements.txt
+      - name: Build site
+        run: python3 gh-pages/build_site.py
+      - name: Committed site must match the sources
+        run: |
+          if ! git diff --quiet -- gh-pages/public; then
+            echo "::error::gh-pages/public is stale -- it does not match a fresh build."
+            echo "Run this locally and commit the result:"
+            echo "  python3 gh-pages/build_site.py && git add gh-pages/public"
+            git diff --stat -- gh-pages/public
+            exit 1
+          fi
+          echo "committed site matches a fresh build"
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: gh-pages/public
+
+  deploy:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

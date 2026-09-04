@@ -149,40 +149,6 @@ jobs:
             /var/log/apache2/error.log
           retention-days: 7
 
-  # -------- Per-PR gate: gh-pages/public/ is in sync with sources. --------
-  # GitHub Pages publishes from gh-pages/public/, so it has to be
-  # committed and rebuilt whenever docs/ or gh-pages/{site.json,
-  # assets,templates} changes. This job rebuilds the site and fails
-  # if the working tree shows any diff vs the committed
-  # gh-pages/public/ — i.e., the author forgot to rebuild before
-  # pushing.
-  docs-fresh:
-    name: gh-pages/public/ is up to date with sources
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.x"
-
-      - name: Install docs build deps
-        run: pip install -r gh-pages/requirements.txt
-
-      - name: Rebuild gh-pages/public/
-        run: make docs
-
-      - name: Fail if rebuild produced changes
-        run: |
-          if ! git diff --quiet gh-pages/public/; then
-            echo "::error::gh-pages/public/ is out of sync with docs/ or gh-pages/."
-            echo "Run 'make docs' locally and commit the result before pushing."
-            git --no-pager diff --stat gh-pages/public/
-            exit 1
-          fi
-
   # -------- Manual: 8h soak. --------
   # Available via the "Run workflow" button in GitHub Actions; not
   # wired to any automatic trigger. 8 h × every-day burns runner

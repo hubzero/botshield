@@ -49,7 +49,7 @@ documented in [`tests/README.md`](tests/README.md).
    make docs
    git add gh-pages/public/
    ```
-   The CI `docs-fresh` job will fail your PR if you forget.
+   The `pages.yml` workflow's build job will fail your PR if you forget.
 5. **Commit messages**: imperative, focused on the *why* when it
    isn't obvious from the diff. The git log shows the style; copy
    what you see. No "fix typo" PRs are too small to be welcome.
