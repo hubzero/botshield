@@ -3,13 +3,13 @@
 The module ships no default rules. An unset score threshold never
 fires, so a fresh deployment scores nothing and challenges nothing
 until you declare both a trigger and a threshold — see
-[Policy](policy.md#no-compiled-in-defaults) for why. These two files
-are what the module used to seed automatically before that changed.
-They are kept as a documented starting point for anyone who wants that
-shape, not because the module needs them.
+[Policy](policy.md#no-compiled-in-defaults) for why. The first two
+files here are what the module used to seed automatically before that
+changed, kept as a documented starting point for anyone who wants that
+shape. The third shows how a whole deployment fits together.
 
-Neither is a required include. Copy what you want into your own
-config; the module never reads either file.
+None of them is a required include. Copy what you want into your own
+config; the module never reads any of these files.
 
 ## What's here
 
@@ -24,11 +24,16 @@ config; the module never reads either file.
   a missing User-Agent, a missing Accept-Language, a known
   HTTP-library UA token, an IP never seen before, and a cookie held
   without ever passing a challenge.
+- **[`full-site.conf.example`](https://github.com/hubzero/botshield/blob/main/docs/examples/full-site.conf.example)**
+  — a whole deployment rather than one directive family: where the
+  configuration gets included and why that location is a safety
+  decision, what order the layers go in, and which scopes to enforce in
+  what sequence. It enforces nothing as written, because the rollout
+  order is the part worth copying.
 
-Both files are annotated in full — syntax, every match key, the
-`reset` keyword, `mode=observe` staging — so they double as a
-directive-family reference you can read next to real values instead of
-in the abstract.
+All three are annotated in full — syntax, every match key, the
+`reset` keyword, `mode=observe` staging — so they double as a reference
+you can read next to real values instead of in the abstract.
 
 ## Seeing it running rather than reading about it
 

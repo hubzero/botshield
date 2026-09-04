@@ -570,11 +570,37 @@ than sharing one; three reserved aggregate slots at the same budget
 cover unknown-bot, fake-bot, and slugs a mid-run directory refresh
 added after startup. Because the slug universe is bounded by the
 directory, every slot is allocated at config time — request time is a
-single hash probe. With no `BotShieldBotRateLimit` configured the
-module synthesizes `* 1 sec`; `off` suppresses that synthesis while
-leaving explicit entries in force. Over-budget returns 429 +
-`Retry-After` with reason `bot-rate:<slug>`. Robots.txt `Crawl-delay`
-groups feed the same machinery.
+single hash probe. Over-budget returns 429 + `Retry-After` with reason
+`bot-rate:<slug>`. Robots.txt `Crawl-delay` groups feed the same
+machinery.
+
+### The synthesized default enforces
+
+This is the one place in the module where something fires without an
+operator declaring it, and it is worth knowing about before it
+surprises you.
+
+When the module is enabled at vhost scope and **no**
+`BotShieldBotRateLimit` directive exists anywhere, `post_config`
+installs a wildcard entry of one request per second per directory
+slug. The synthesized entry carries no mode, and the absence of a mode
+means enforce — so it returns real 429s to traffic nobody chose to
+throttle. It logs a `NOTICE` naming itself when it is applied, so the
+error log will tell you which state a given deployment is in.
+
+Two ways to take control of it:
+
+```apache
+BotShieldBotRateLimit * 1 sec mode=observe   # record, refuse nobody
+BotShieldBotRateLimit off                    # no synthesis, no limiter
+```
+
+`off` suppresses the synthesis while leaving any explicit entries in
+force. Writing any explicit entry also suppresses it.
+
+This behavior sits at odds with the rest of the module, where nothing
+is enforced until it is declared and an unset threshold never fires.
+It predates that principle rather than exempting itself from it.
 
 For path-conditional 403s (the former `BotShieldBlockPath`
 directive, retired), use `BotShieldRequestTrigger` with `status=403`

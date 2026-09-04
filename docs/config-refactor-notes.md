@@ -8,6 +8,18 @@ documented, and the combination locked a real user out of the site.
 These are notes on the *condition*, not a design. The point is to record
 what the failures had in common while it is still fresh.
 
+> **Status, 2026-09-03.** Most of what this document asked for has since
+> shipped, and it is kept as the reasoning behind those changes rather
+> than as a live proposal. The effective-policy dump exists as
+> `httpd -t -D DUMP_BOTSHIELD_POLICY`, and it names the source of every
+> value and flags the two interactions described below inline.
+> Compiled-in defaults are gone: no flag trigger, heuristic, or tier
+> threshold is seeded, so a declaration is the only thing that exists
+> and an unset threshold never fires. A server-scope directive written
+> inside a vhost is now a config-parse error instead of being silently
+> discarded. Lifecycle wording and first-class loop detection are the
+> parts still outstanding.
+
 ## The two incidents
 
 **#1 — `tier_floor` bypasses the score ceiling.** The operator parked

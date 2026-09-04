@@ -69,9 +69,17 @@
   <span class="docs-nav__title">Troubleshooting</span>
   <span class="docs-nav__summary">Common issues, diagnostics, and fixes.</span>
 </a>
+<a class="docs-nav__item" href="../location-authz-hazard/index.html">
+  <span class="docs-nav__title">Location authz hazard</span>
+  <span class="docs-nav__summary">Why a broad &lt;Location&gt; block silently voids &lt;Files&gt; access control, and the rule that prevents it.</span>
+</a>
 <a class="docs-nav__item" href="../faq/index.html">
   <span class="docs-nav__title">FAQ</span>
   <span class="docs-nav__summary">Honest answers to questions teams ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
+</a>
+<a class="docs-nav__item" href="../config-design-notes/index.html">
+  <span class="docs-nav__title">Config design notes</span>
+  <span class="docs-nav__summary">The two production lockouts behind the no-defaults design, and what shipped in response.</span>
 </a>
 <a class="docs-nav__item" href="../guide/index.html">
   <span class="docs-nav__title">Project README</span>
@@ -99,12 +107,12 @@
 <p>The module ships no default rules. An unset score threshold never
 fires, so a fresh deployment scores nothing and challenges nothing
 until you declare both a trigger and a threshold — see
-<a href="../policy/index.html#no-compiled-in-defaults">Policy</a> for why. These two files
-are what the module used to seed automatically before that changed.
-They are kept as a documented starting point for anyone who wants that
-shape, not because the module needs them.</p>
-<p>Neither is a required include. Copy what you want into your own
-config; the module never reads either file.</p>
+<a href="../policy/index.html#no-compiled-in-defaults">Policy</a> for why. The first two
+files here are what the module used to seed automatically before that
+changed, kept as a documented starting point for anyone who wants that
+shape. The third shows how a whole deployment fits together.</p>
+<p>None of them is a required include. Copy what you want into your own
+config; the module never reads any of these files.</p>
 <h2 id="what-s-here">What's here</h2>
 <ul>
 <li><strong><a href="https://github.com/hubzero/botshield/blob/main/docs/examples/flag-triggers.conf.example"><code>flag-triggers.conf.example</code></a></strong>
@@ -118,11 +126,16 @@ that subtract score without ever raising tier.</li>
 a missing User-Agent, a missing Accept-Language, a known
 HTTP-library UA token, an IP never seen before, and a cookie held
 without ever passing a challenge.</li>
+<li><strong><a href="https://github.com/hubzero/botshield/blob/main/docs/examples/full-site.conf.example"><code>full-site.conf.example</code></a></strong>
+— a whole deployment rather than one directive family: where the
+configuration gets included and why that location is a safety
+decision, what order the layers go in, and which scopes to enforce in
+what sequence. It enforces nothing as written, because the rollout
+order is the part worth copying.</li>
 </ul>
-<p>Both files are annotated in full — syntax, every match key, the
-<code>reset</code> keyword, <code>mode=observe</code> staging — so they double as a
-directive-family reference you can read next to real values instead of
-in the abstract.</p>
+<p>All three are annotated in full — syntax, every match key, the
+<code>reset</code> keyword, <code>mode=observe</code> staging — so they double as a reference
+you can read next to real values instead of in the abstract.</p>
 <h2 id="seeing-it-running-rather-than-reading-about-it">Seeing it running rather than reading about it</h2>
 <p><code>apache/botshield-dev.conf</code> in the repository wires the same slate
 into a live vhost, alongside the score thresholds that make it act

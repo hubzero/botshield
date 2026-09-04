@@ -1,8 +1,82 @@
 # Deployment
 
-This page covers real-world deployment topology: reverse proxies and
-load balancers, slowloris defense, multi-vhost reputation isolation,
-secret rotation, and capacity sizing.
+This page covers real-world deployment topology: where the
+configuration lives, reverse proxies and load balancers, slowloris
+defense, multi-vhost reputation isolation, secret rotation, and
+capacity sizing.
+
+## Where the configuration lives
+
+Two decisions here are load-bearing, and both fail quietly when you get
+them wrong.
+
+**Include it from somewhere your configuration management does not
+regenerate.** If vhosts on this host are generated from templates by
+Ansible, Puppet, or a CMS that writes Apache config, then the module's
+configuration must not live in a generated file, and neither must the
+`Include` line that pulls it in. Put the configuration in its own file
+and include it from a directory the generator leaves alone:
+
+```sh
+echo 'Include conf/botshield.conf' \
+  | sudo tee /etc/httpd/conf.d/25-botshield.conf
+```
+
+A deployment that put this in the vhost instead lost every enforcing
+scope the next time the vhost was regenerated. The site ran unprotected
+for two days, and the config test stayed green throughout, because
+nothing was syntactically wrong. There was nothing left to be wrong.
+
+**Include it at main server scope, not inside a `<VirtualHost>`.** The
+data-directory and state directives are server scope only. They are
+read once, before vhosts merge. A directive of that class inside a
+vhost is now rejected at config-parse time rather than accepted and
+ignored, which is a recent change: an earlier version accepted
+`BotShieldDbStatsFile` inside a vhost, discarded it, reported `Syntax
+OK`, and left the dashboard saying no monitor was configured, which
+reads as a missing directive rather than a discarded one. Everything at
+main scope is inherited by every vhost on the host. To confine it to
+one hostname, wrap it:
+
+```apache
+<If "%{HTTP_HOST} == 'www.example.org'">
+    BotShieldEnabled On
+</If>
+```
+
+`docs/examples/full-site.conf.example` is a complete configuration
+built around both rules, with the enforcing scopes commented out in the
+order worth enabling them.
+
+### A green config test is not a rehearsal
+
+`apachectl configtest` parses the configuration. It does not run
+`post_config`, which is where shared memory is sized, the watchdog is
+registered, and the bot-rate-limit default is synthesised. A
+configuration can test clean and still change behaviour on reload.
+
+Gate the reload on the test's **exit code**, not on reading its output:
+
+```sh
+sudo apachectl configtest && sudo systemctl reload httpd
+```
+
+Piping the test to `tail` and restarting in the same command regardless
+took a production site down for thirty seconds. Before each reload of a
+newly enforcing scope, check there is headroom in the scoreboard:
+
+```sh
+curl -s http://127.0.0.1/server-status?auto \
+  | grep '^Scoreboard' | tr -cd '.' | wc -c        # want > 100 free
+```
+
+To see what the configuration actually resolves to, including which
+thresholds are unset and which rules are in effect, ask the module
+rather than reading the file:
+
+```sh
+httpd -t -D DUMP_BOTSHIELD_POLICY
+```
 
 ## Behind a reverse proxy or load balancer
 

@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Config design notes | BotShield</title>
+  <meta name="description" content="The two production lockouts behind the no-defaults design, and what shipped in response.">
+  <link rel="stylesheet" href="../assets/site.css">
+</head>
+<body class="site-doc">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <div class="page-shell">
+    <header class="site-header site-header--compact">
+      <a class="brand" href="../index.html">
+        <img class="brand__icon" src="../assets/logo-botshield-icon.svg" alt="" aria-hidden="true">
+        <span class="brand__wordmark" aria-label="BotShield">
+          <span class="brand__wordmark-soft">Bot</span><span class="brand__wordmark-strong">Shield</span>
+        </span>
+      </a>
+      <span class="site-header__beta" aria-label="Beta release">Beta</span>
+      <nav class="top-nav" aria-label="Primary">
+        <a class="top-nav__link" href="https://github.com/hubzero/botshield">GitHub</a>
+        <a class="top-nav__link" href="../getting-started/index.html">Docs</a>
+        <a class="top-nav__link" href="https://github.com/hubzero/botshield/releases">Download</a>
+      </nav>
+    </header>
+
+    <main id="main-content" class="docs-layout" tabindex="-1">
+      <aside class="docs-sidebar">
+        <p class="docs-sidebar__eyebrow">Docs</p>
+        <nav class="docs-nav" aria-label="Documentation">
+<a class="docs-nav__item" href="../getting-started/index.html">
+  <span class="docs-nav__title">Getting started</span>
+  <span class="docs-nav__summary">Install, build, minimal configuration, and verifying a first request.</span>
+</a>
+<a class="docs-nav__item" href="../deployment/index.html">
+  <span class="docs-nav__title">Deployment</span>
+  <span class="docs-nav__summary">Reverse proxies, slow-client defense, multi-vhost reputation, secret rotation, capacity sizing.</span>
+</a>
+<a class="docs-nav__item" href="../site-model/index.html">
+  <span class="docs-nav__title">Site model</span>
+  <span class="docs-nav__summary">Tiers, scoring, cookie-carried reputation, decision log, tuning workflow.</span>
+</a>
+<a class="docs-nav__item" href="../policy/index.html">
+  <span class="docs-nav__title">Policy</span>
+  <span class="docs-nav__summary">UA classification, rate limits, path triggers, robots.txt, the trigger families, and flag triggers.</span>
+</a>
+<a class="docs-nav__item" href="../captcha/index.html">
+  <span class="docs-nav__title">Captcha and app-bridge</span>
+  <span class="docs-nav__summary">Third-party captcha providers, verify-endpoint hardening, and the signed app-bridge protocols.</span>
+</a>
+<a class="docs-nav__item" href="../staging/index.html">
+  <span class="docs-nav__title">Staging</span>
+  <span class="docs-nav__summary">Per-rule observe and global shadow mode for safe rule rollout.</span>
+</a>
+<a class="docs-nav__item" href="../observability/index.html">
+  <span class="docs-nav__title">Observability</span>
+  <span class="docs-nav__summary">Decision log, Prometheus metrics, mod_status contribution, and the policy-status admin page.</span>
+</a>
+<a class="docs-nav__item" href="../directives/index.html">
+  <span class="docs-nav__title">Directive reference</span>
+  <span class="docs-nav__summary">Canonical reference for all 100 directives, grouped by family.</span>
+</a>
+<a class="docs-nav__item" href="../examples/index.html">
+  <span class="docs-nav__title">Example configs</span>
+  <span class="docs-nav__summary">The starter flag- and heuristic-trigger slate the module used to seed automatically, kept as an annotated starting point.</span>
+</a>
+<a class="docs-nav__item" href="../troubleshooting/index.html">
+  <span class="docs-nav__title">Troubleshooting</span>
+  <span class="docs-nav__summary">Common issues, diagnostics, and fixes.</span>
+</a>
+<a class="docs-nav__item" href="../location-authz-hazard/index.html">
+  <span class="docs-nav__title">Location authz hazard</span>
+  <span class="docs-nav__summary">Why a broad &lt;Location&gt; block silently voids &lt;Files&gt; access control, and the rule that prevents it.</span>
+</a>
+<a class="docs-nav__item" href="../faq/index.html">
+  <span class="docs-nav__title">FAQ</span>
+  <span class="docs-nav__summary">Honest answers to questions teams ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
+</a>
+<a class="docs-nav__item is-active" href="index.html">
+  <span class="docs-nav__title">Config design notes</span>
+  <span class="docs-nav__summary">The two production lockouts behind the no-defaults design, and what shipped in response.</span>
+</a>
+<a class="docs-nav__item" href="../guide/index.html">
+  <span class="docs-nav__title">Project README</span>
+  <span class="docs-nav__summary">Repository README — project overview, build instructions, and dev configuration.</span>
+</a>
+        </nav>
+      </aside>
+
+      <article class="docs-article">
+        <header class="docs-article__header">
+          <p class="eyebrow">Documentation</p>
+          <h1>Config design notes</h1>
+          <p class="docs-article__summary">The two production lockouts behind the no-defaults design, and what shipped in response.</p>
+          <p class="docs-article__source">Notes toward a config refactor</p>
+        </header>
+<section class="toc">
+  <h2 class="toc__heading">On this page</h2>
+  <ul class="toc__list">
+<li class="toc__item toc__item--level-2"><a href="#the-two-incidents">The two incidents</a></li>
+<li class="toc__item toc__item--level-2"><a href="#what-the-two-have-in-common">What the two have in common</a></li>
+<li class="toc__item toc__item--level-2"><a href="#a-third-instance-found-while-writing-this-down">A third instance, found while writing this down</a></li>
+<li class="toc__item toc__item--level-2"><a href="#what-a-refactor-should-probably-provide">What a refactor should probably provide</a></li>
+<li class="toc__item toc__item--level-2"><a href="#caveat">Caveat</a></li>
+  </ul>
+</section>
+        <div class="prose">
+<p>Written 2026-08-28, after the second production lockout in three days.
+Both were caused by the same shape of problem, and neither was a coding
+error: in both cases every individual directive did exactly what it
+documented, and the combination locked a real user out of the site.</p>
+<p>These are notes on the <em>condition</em>, not a design. The point is to record
+what the failures had in common while it is still fresh.</p>
+<blockquote>
+<p><strong>Status, 2026-09-03.</strong> Most of what this document asked for has since
+shipped, and it is kept as the reasoning behind those changes rather
+than as a live proposal. The effective-policy dump exists as
+<code>httpd -t -D DUMP_BOTSHIELD_POLICY</code>, and it names the source of every
+value and flags the two interactions described below inline.
+Compiled-in defaults are gone: no flag trigger, heuristic, or tier
+threshold is seeded, so a declaration is the only thing that exists
+and an unset threshold never fires. A server-scope directive written
+inside a vhost is now a config-parse error instead of being silently
+discarded. Lifecycle wording and first-class loop detection are the
+parts still outstanding.</p>
+</blockquote>
+<h2 id="the-two-incidents">The two incidents</h2>
+<p><strong>#1 — <code>tier_floor</code> bypasses the score ceiling.</strong> The operator parked
+<code>BotShieldScoreInteractive</code> and <code>BotShieldScoreCaptcha</code> at 10000 to make a scope
+effectively challenge-free. A <code>scanner_probe</code> flag carries a compiled-in
+<code>tier_floor</code> of <code>interactive</code>, which is MAX'd in <em>after</em> the score-to-tier
+decision and never consults the thresholds. Users hit a form challenge in
+a scope configured to have none.</p>
+<p><strong>#2 — a flag score at or above the silent threshold is a permanent
+loop.</strong> The documented fix for #1 is to reset the floors and keep
+<code>action=score add=50</code>. But solving a challenge does not clear a flag, and
+flag scores re-apply on every request, so a score of 50 against the
+default silent threshold of 20 re-challenges forever. The reporter solved
+the challenge roughly once per second for four minutes.</p>
+<p>The second incident was caused by following this repository's own
+documented remedy for the first.</p>
+<h2 id="what-the-two-have-in-common">What the two have in common</h2>
+<p><strong>1. Composition is invisible at the point of configuration.</strong></p>
+<p>Each directive is locally sensible. The hazard only exists in the
+interaction between a flag's compiled-in action, a threshold set
+somewhere else in the file, and a lifecycle rule (flags outlive solves)
+that is not written down near either. Nothing an operator can read in one
+place tells them the combination is dangerous.</p>
+<p><strong>2. Compiled-in defaults are invisible state.</strong></p>
+<p><code>scanner_probe</code> had two actions before anyone configured anything. The
+config file that &quot;sets&quot; the flag's behaviour was in fact <em>adding to</em>
+behaviour that already existed, and <code>reset</code> — the keyword that makes the
+declaration authoritative — is optional and easy to omit. An operator
+reading the deployed config cannot see the effective policy. There is no
+way to ask the module what it will actually do.</p>
+<p><strong>3. Units are unmarked and thresholds are action-at-a-distance.</strong></p>
+<p><code>add=50</code> is meaningless without knowing <code>BotShieldScoreNonInteractive</code> is 20, and
+that directive was not present in the deployed file at all — it was the
+compiled default. The number that made 50 dangerous was in neither the
+config nor the docs page being followed.</p>
+<p><strong>4. The dangerous states are unreachable to testing.</strong></p>
+<p>The loop only appears on the <em>second</em> request after a solve. Any test
+that solves once and asserts success passes. Both incidents were found by
+a user filing a ticket, and neither would have been caught by adding more
+of the tests we already write.</p>
+<p><strong>5. Failure is silent and asymmetric.</strong></p>
+<p>Every one of these misconfigurations fails <em>closed</em> — toward challenging
+more people. There is no warning at startup, nothing in the error log,
+and the decision log records each individual challenge as a normal event.
+A thousand identical challenges to one IP looks like a thousand rows,
+not like one bug.</p>
+<h2 id="a-third-instance-found-while-writing-this-down">A third instance, found while writing this down</h2>
+<p>Adding <code>BotShieldDbStatsFile</code> to <code>conf/botshield.conf</code> did nothing. The
+directive is <code>RSRC_CONF</code>, that file is included at vhost scope, and an
+<code>RSRC_CONF</code> directive inside a <code>&lt;VirtualHost&gt;</code> parses cleanly and is
+then ignored. <code>apachectl configtest</code> said <code>Syntax OK</code>, the reload
+succeeded, and the dashboard reported &quot;no monitor configured&quot; — which
+reads as <em>the operator forgot the directive</em> rather than <em>the directive
+is present and being discarded</em>.</p>
+<p>This is the same five properties again, with a different mechanism.
+That file's own header documents the trap for <code>BotShieldStateFile</code>,
+which is how it was diagnosed in under a minute — but documentation in
+one file cannot protect a directive added later, and nothing in the
+system said a word. Scope errors are mechanically detectable: the
+module knows a directive's required scope and knows where it was found.</p>
+<p>It is worth noting that the same class of bug has now produced two user
+lockouts and one silently dead feature within one week, which is
+evidence about the configuration system rather than about the people
+using it.</p>
+<h2 id="what-a-refactor-should-probably-provide">What a refactor should probably provide</h2>
+<p>Roughly in order of how much each would have helped:</p>
+<ul>
+<li>
+<p><strong>An effective-policy dump.</strong> <code>apachectl -M</code>-style: ask the module to
+print the resolved policy — every flag, every trigger, compiled-in and
+configured, after <code>reset</code> processing, with thresholds inlined and the
+source of each value named. Both incidents were diagnosable in seconds
+once the effective values were in front of us, and invisible before.</p>
+</li>
+<li>
+<p><strong>Cross-directive validation at startup.</strong> A flag score at or above
+the silent threshold is almost certainly a mistake; so is a
+<code>tier_floor</code> above a parked ceiling. These are checkable at
+post-config, where a warning costs nothing and reaches the operator
+before the users do.</p>
+</li>
+<li>
+<p><strong>Warn on a directive accepted into a scope where it does nothing.</strong>
+Silently discarding an <code>RSRC_CONF</code> directive found inside a vhost is
+the single cheapest thing on this list to fix and has already cost
+one debugging session.</p>
+</li>
+<li>
+<p><strong>Make lifecycle explicit in the directive surface.</strong> The real bug in
+#2 is that &quot;score&quot; and &quot;flag&quot; have different lifetimes — one is
+forgiven, one is not — and the syntax makes them look alike. Whatever
+replaces this should say how long an effect lasts and what clears it,
+at the point where the effect is declared.</p>
+</li>
+<li>
+<p><strong>Loop detection as a first-class signal.</strong> The safeguard counter
+already exists and already fired here; it trips per-IP and stays
+invisible. Repeated solve→challenge cycles for one client are a
+distinct, nameable condition and should be surfaced as one, not left
+as a pattern someone has to notice in a log.</p>
+</li>
+<li>
+<p><strong>Defaults that cannot silently compose.</strong> Either compiled-in triggers
+are absent unless declared, or a declaration is always authoritative.
+The current middle ground — defaults exist, declarations append,
+<code>reset</code> is opt-in — is the mechanism behind both incidents.</p>
+</li>
+</ul>
+<h2 id="caveat">Caveat</h2>
+<p>Nothing above argues the current behaviour is wrong on its own terms.
+Flags outliving solves is defensible; a tier floor that ignores
+thresholds is defensible. The problem is that the system gives an
+operator no way to see what those choices add up to, and the failure mode
+of guessing wrong is locking real users out of a production site.</p>
+
+        </div>
+      </article>
+    </main>
+  </div>
+</body>
+</html>

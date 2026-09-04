@@ -72,11 +72,23 @@
       "summary": "Common issues, diagnostics, and fixes."
     },
     {
+      "slug": "location-authz-hazard",
+      "title": "Location authz hazard",
+      "source": "docs/apache-location-authz-hazard.md",
+      "summary": "Why a broad <Location> block silently voids <Files> access control, and the rule that prevents it."
+    },
+    {
       "slug": "faq",
       "title": "FAQ",
       "source": "docs/faq.md",
       "summary": "Honest answers to questions teams ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.",
       "featured": true
+    },
+    {
+      "slug": "config-design-notes",
+      "title": "Config design notes",
+      "source": "docs/config-refactor-notes.md",
+      "summary": "The two production lockouts behind the no-defaults design, and what shipped in response."
     },
     {
       "slug": "guide",

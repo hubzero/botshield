@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Location authz hazard | BotShield</title>
+  <meta name="description" content="Why a broad &lt;Location&gt; block silently voids &lt;Files&gt; access control, and the rule that prevents it.">
+  <link rel="stylesheet" href="../assets/site.css">
+</head>
+<body class="site-doc">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <div class="page-shell">
+    <header class="site-header site-header--compact">
+      <a class="brand" href="../index.html">
+        <img class="brand__icon" src="../assets/logo-botshield-icon.svg" alt="" aria-hidden="true">
+        <span class="brand__wordmark" aria-label="BotShield">
+          <span class="brand__wordmark-soft">Bot</span><span class="brand__wordmark-strong">Shield</span>
+        </span>
+      </a>
+      <span class="site-header__beta" aria-label="Beta release">Beta</span>
+      <nav class="top-nav" aria-label="Primary">
+        <a class="top-nav__link" href="https://github.com/hubzero/botshield">GitHub</a>
+        <a class="top-nav__link" href="../getting-started/index.html">Docs</a>
+        <a class="top-nav__link" href="https://github.com/hubzero/botshield/releases">Download</a>
+      </nav>
+    </header>
+
+    <main id="main-content" class="docs-layout" tabindex="-1">
+      <aside class="docs-sidebar">
+        <p class="docs-sidebar__eyebrow">Docs</p>
+        <nav class="docs-nav" aria-label="Documentation">
+<a class="docs-nav__item" href="../getting-started/index.html">
+  <span class="docs-nav__title">Getting started</span>
+  <span class="docs-nav__summary">Install, build, minimal configuration, and verifying a first request.</span>
+</a>
+<a class="docs-nav__item" href="../deployment/index.html">
+  <span class="docs-nav__title">Deployment</span>
+  <span class="docs-nav__summary">Reverse proxies, slow-client defense, multi-vhost reputation, secret rotation, capacity sizing.</span>
+</a>
+<a class="docs-nav__item" href="../site-model/index.html">
+  <span class="docs-nav__title">Site model</span>
+  <span class="docs-nav__summary">Tiers, scoring, cookie-carried reputation, decision log, tuning workflow.</span>
+</a>
+<a class="docs-nav__item" href="../policy/index.html">
+  <span class="docs-nav__title">Policy</span>
+  <span class="docs-nav__summary">UA classification, rate limits, path triggers, robots.txt, the trigger families, and flag triggers.</span>
+</a>
+<a class="docs-nav__item" href="../captcha/index.html">
+  <span class="docs-nav__title">Captcha and app-bridge</span>
+  <span class="docs-nav__summary">Third-party captcha providers, verify-endpoint hardening, and the signed app-bridge protocols.</span>
+</a>
+<a class="docs-nav__item" href="../staging/index.html">
+  <span class="docs-nav__title">Staging</span>
+  <span class="docs-nav__summary">Per-rule observe and global shadow mode for safe rule rollout.</span>
+</a>
+<a class="docs-nav__item" href="../observability/index.html">
+  <span class="docs-nav__title">Observability</span>
+  <span class="docs-nav__summary">Decision log, Prometheus metrics, mod_status contribution, and the policy-status admin page.</span>
+</a>
+<a class="docs-nav__item" href="../directives/index.html">
+  <span class="docs-nav__title">Directive reference</span>
+  <span class="docs-nav__summary">Canonical reference for all 100 directives, grouped by family.</span>
+</a>
+<a class="docs-nav__item" href="../examples/index.html">
+  <span class="docs-nav__title">Example configs</span>
+  <span class="docs-nav__summary">The starter flag- and heuristic-trigger slate the module used to seed automatically, kept as an annotated starting point.</span>
+</a>
+<a class="docs-nav__item" href="../troubleshooting/index.html">
+  <span class="docs-nav__title">Troubleshooting</span>
+  <span class="docs-nav__summary">Common issues, diagnostics, and fixes.</span>
+</a>
+<a class="docs-nav__item is-active" href="index.html">
+  <span class="docs-nav__title">Location authz hazard</span>
+  <span class="docs-nav__summary">Why a broad &lt;Location&gt; block silently voids &lt;Files&gt; access control, and the rule that prevents it.</span>
+</a>
+<a class="docs-nav__item" href="../faq/index.html">
+  <span class="docs-nav__title">FAQ</span>
+  <span class="docs-nav__summary">Honest answers to questions teams ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
+</a>
+<a class="docs-nav__item" href="../config-design-notes/index.html">
+  <span class="docs-nav__title">Config design notes</span>
+  <span class="docs-nav__summary">The two production lockouts behind the no-defaults design, and what shipped in response.</span>
+</a>
+<a class="docs-nav__item" href="../guide/index.html">
+  <span class="docs-nav__title">Project README</span>
+  <span class="docs-nav__summary">Repository README — project overview, build instructions, and dev configuration.</span>
+</a>
+        </nav>
+      </aside>
+
+      <article class="docs-article">
+        <header class="docs-article__header">
+          <p class="eyebrow">Documentation</p>
+          <h1>Location authz hazard</h1>
+          <p class="docs-article__summary">Why a broad &lt;Location&gt; block silently voids &lt;Files&gt; access control, and the rule that prevents it.</p>
+          <p class="docs-article__source">`&lt;Location&gt;` silently voids `&lt;Files&gt;` access control</p>
+        </header>
+<section class="toc">
+  <h2 class="toc__heading">On this page</h2>
+  <ul class="toc__list">
+<li class="toc__item toc__item--level-2"><a href="#the-rule">The rule</a></li>
+<li class="toc__item toc__item--level-2"><a href="#why-it-happens">Why it happens</a></li>
+<li class="toc__item toc__item--level-2"><a href="#why-it-is-dangerous-specifically">Why it is dangerous specifically</a></li>
+<li class="toc__item toc__item--level-2"><a href="#the-incident">The incident</a></li>
+<li class="toc__item toc__item--level-2"><a href="#the-fix">The fix</a></li>
+<li class="toc__item toc__item--level-2"><a href="#for-ansible-specifically">For Ansible specifically</a></li>
+<li class="toc__item toc__item--level-2"><a href="#the-general-lesson">The general lesson</a></li>
+  </ul>
+</section>
+        <div class="prose">
+<p>Written for an Ansible CLAUDE.md. The incident behind it exposed a
+production database password to the public internet for five days.</p>
+<h2 id="the-rule">The rule</h2>
+<p><strong>Never write a broad <code>&lt;Location&gt;</code> or <code>&lt;LocationMatch&gt;</code> containing
+<code>Require</code> directives into a vhost that protects files with <code>&lt;Files&gt;</code> or
+<code>&lt;FilesMatch&gt;</code>.</strong> The <code>&lt;Location&gt;</code> wins, and the file rules stop
+applying. Nothing warns you: <code>apachectl configtest</code> says <code>Syntax OK</code>,
+the reload succeeds, and every protected file becomes readable.</p>
+<h2 id="why-it-happens">Why it happens</h2>
+<p>Apache 2.4 merges configuration sections in a fixed order, regardless of
+where they appear in the file:</p>
+<pre><code>&lt;Directory&gt;  →  &lt;Files&gt; / &lt;FilesMatch&gt;  →  &lt;Location&gt; / &lt;LocationMatch&gt;
+</code></pre>
+<p><code>&lt;Location&gt;</code> merges <strong>last</strong>. And the authorization block of the
+later-merged section <strong>replaces</strong> the earlier one rather than combining
+with it — so whatever a <code>&lt;Location&gt;</code> says about <code>Require</code> is the final
+word, and the <code>&lt;FilesMatch&gt;</code> deny that came before it is discarded
+unevaluated.</p>
+<p>Verified on Apache 2.4.37 (Rocky 8) with a four-line config:</p>
+<pre><code class="language-apache">DocumentRoot /srv/htdocs
+&lt;Directory /srv/htdocs&gt;
+    Require all granted
+&lt;/Directory&gt;
+&lt;FilesMatch &quot;\.php$&quot;&gt;
+    Require all denied
+&lt;/FilesMatch&gt;
+</code></pre>
+<p><code>GET /configuration.php</code> → <strong>403</strong>. Add this and change nothing else:</p>
+<pre><code class="language-apache">&lt;Location &quot;/&quot;&gt;
+    Require all granted
+&lt;/Location&gt;
+</code></pre>
+<p><code>GET /configuration.php</code> → <strong>200</strong>, serving the file's contents.</p>
+<p>It replaces in both directions, which is the proof that this is
+replacement and not a permissive merge. With <code>&lt;FilesMatch&gt;</code> granting and
+<code>&lt;Location &quot;/&quot;&gt;</code> denying, the result is 403 — the <code>&lt;Location&gt;</code> wins
+again, this time by being stricter. The direction of the override
+follows the merge order, not the strictness.</p>
+<h2 id="why-it-is-dangerous-specifically">Why it is dangerous specifically</h2>
+<p>Three properties combine badly:</p>
+<ol>
+<li><strong>It fails open.</strong> The mistake grants access rather than removing it,
+so no user reports a problem.</li>
+<li><strong>It is invisible to every check.</strong> <code>configtest</code> passes — the syntax
+is valid and both sections are legal. Nothing is logged. The only way
+to see it is <code>LogLevel authz_core:trace8</code>, which shows the
+<code>&lt;FilesMatch&gt;</code> rule never being evaluated for the request.</li>
+<li><strong>The two directives are usually far apart</strong> — often in different
+files, one hand-written and one generated — so nobody reads them
+together.</li>
+</ol>
+<h2 id="the-incident">The incident</h2>
+<p>A hand-maintained <code>conf.d</code> drop-in blocked a credential-scanning /24:</p>
+<pre><code class="language-apache">&lt;Location &quot;/&quot;&gt;
+    &lt;RequireAll&gt;
+        Require all granted
+        Require not ip 185.177.72.0/24
+    &lt;/RequireAll&gt;
+&lt;/Location&gt;
+</code></pre>
+<p>Locally correct, and it did block the scanner. But it voided the vhost's
+own file rules, including:</p>
+<pre><code class="language-apache">&lt;FilesMatch (.*\.php$)&gt;
+    Require all denied
+&lt;/FilesMatch&gt;
+</code></pre>
+<p>That deny is the only thing stopping Apache from serving PHP <strong>source</strong>
+for any path that is not one of the handful of proxied entry points.
+With it gone, <code>https://&lt;site&gt;/configuration.php</code> returned 200 with the
+Joomla configuration in plaintext — database host, user, and password —
+to anyone who asked. Five IPs fetched it 39 times over five days before
+it was noticed. The credential was rotated.</p>
+<p>Note what the blast radius was <em>not</em> limited to. The <code>&lt;Location&gt;</code> was
+written to solve a narrow problem (one scanner, one /24) but its match
+was <code>/</code>, so its effect was every file rule in the vhost.</p>
+<h2 id="the-fix">The fix</h2>
+<p><code>AuthzMergeRules Off</code> is the directive that would express &quot;do not let
+this section replace what came before&quot;. <strong>It does not exist in Apache
+2.4.37</strong> — it is absent from <code>mod_authz_core.so</code> in that build
+(<code>httpd-2.4.37-65.module+el8.10</code>), and using it is a hard configtest
+failure: <code>Invalid command 'AuthzMergeRules'</code>. Do not reach for it on
+RHEL 8 / Rocky 8.</p>
+<p>So the match itself has to be narrowed to exclude every path the file
+rules protect:</p>
+<pre><code class="language-apache">&lt;LocationMatch &quot;^(?!.*\.php$)(?!.*/composer\.json$)(?!.*/installed\.json$).*$&quot;&gt;
+    &lt;RequireAll&gt;
+        Require all granted
+        Require not ip 185.177.72.0/24
+    &lt;/RequireAll&gt;
+&lt;/LocationMatch&gt;
+</code></pre>
+<p>Confirmed: with this form the <code>&lt;FilesMatch&gt;</code> deny survives and
+<code>configuration.php</code> returns 403 again.</p>
+<p><strong>The exclusion list must name every file rule the vhost relies on, not
+just the one you remember.</strong> Anything the <code>&lt;Location&gt;</code> still matches
+gets its <code>&lt;Files&gt;</code> deny replaced. Missing one is the same bug again,
+narrower.</p>
+<p>Better still, when it fits the requirement: put the block somewhere that
+does not merge over file rules at all — <code>&lt;Directory&gt;</code>, or a
+<code>RewriteRule</code> / mod_authz at server scope, or the firewall. An IP block
+in particular does not belong in <code>&lt;Location&gt;</code>; it has nothing to do with
+URL space.</p>
+<h2 id="for-ansible-specifically">For Ansible specifically</h2>
+<ul>
+<li>
+<p><strong>Treat <code>&lt;Location</code>/<code>&lt;LocationMatch</code> with <code>Require</code> inside as a
+reviewed construct.</strong> If a template or task emits one, the play should
+state which <code>&lt;Files&gt;</code>/<code>&lt;FilesMatch&gt;</code> rules exist in that vhost and why
+they are unaffected.</p>
+</li>
+<li>
+<p><strong>Drop-ins are the high-risk shape.</strong> A <code>conf.d/*.conf</code> file authored
+independently of the vhost is exactly the case where the author cannot
+see the file rules they are about to void. Ordering by filename does
+not help — section merge order ignores file order.</p>
+</li>
+<li>
+<p><strong><code>configtest</code> is not a sufficient gate for this class of change.</strong>
+Add an assertion to the play instead: after reload, fetch a known
+protected path and assert the status code.</p>
+<pre><code class="language-yaml">- name: Protected files must stay protected after any vhost change
+  ansible.builtin.uri:
+    url: &quot;https://{{ site_fqdn }}/{{ item }}&quot;
+    status_code: [403, 404]
+    validate_certs: yes
+  loop:
+    - configuration.php
+    - composer.json
+    - installed.json
+</code></pre>
+<p>This is worth having regardless of the cause. It is a direct test of
+the property that actually matters, and it would have caught this
+within one play run instead of five days.</p>
+</li>
+<li>
+<p><strong>Prefer generating the whole vhost over layering drop-ins onto a
+vhost you do not own.</strong> The failure mode here is specifically about
+two authors who never read each other's rules.</p>
+</li>
+</ul>
+<h2 id="the-general-lesson">The general lesson</h2>
+<p>The narrow bug is an Apache merge-order rule. The general one is that a
+config change scoped to <code>/</code> has a blast radius of <code>/</code>, whatever it was
+written for — and that access-control regressions fail open, so they are
+found by whoever is scanning you rather than by your monitoring. Any
+change touching authorization deserves a positive test that a protected
+thing is still protected, not just a test that the intended block works.</p>
+
+        </div>
+      </article>
+    </main>
+  </div>
+</body>
+</html>

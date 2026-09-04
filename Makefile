@@ -10,9 +10,15 @@
 #
 # M10.1 sanitizer targets:
 #   make sanitize        build with ASan + UBSan + frame pointers + -g
-#   make install-sanitize  install the sanitized .so (requires Apache
-#                          started under LD_PRELOAD; see
-#                          apache/botshield-sanitize.env)
+#   make install-sanitize  install the sanitized .so. The module is
+#                          dlopen'd into an uninstrumented httpd, so the
+#                          ASan runtime has to be preloaded before httpd
+#                          starts, via a systemd drop-in:
+#                            Environment=LD_PRELOAD=<libasan path>
+#                          Find the path with:
+#                            gcc -print-file-name=libasan.so.5
+#                          An empty answer means the runtime package
+#                          (libasan / libasan5) is not installed.
 
 APXS     ?= apxs
 MOD_NAME ?= botshield

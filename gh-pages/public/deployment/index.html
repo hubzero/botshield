@@ -69,9 +69,17 @@
   <span class="docs-nav__title">Troubleshooting</span>
   <span class="docs-nav__summary">Common issues, diagnostics, and fixes.</span>
 </a>
+<a class="docs-nav__item" href="../location-authz-hazard/index.html">
+  <span class="docs-nav__title">Location authz hazard</span>
+  <span class="docs-nav__summary">Why a broad &lt;Location&gt; block silently voids &lt;Files&gt; access control, and the rule that prevents it.</span>
+</a>
 <a class="docs-nav__item" href="../faq/index.html">
   <span class="docs-nav__title">FAQ</span>
   <span class="docs-nav__summary">Honest answers to questions teams ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
+</a>
+<a class="docs-nav__item" href="../config-design-notes/index.html">
+  <span class="docs-nav__title">Config design notes</span>
+  <span class="docs-nav__summary">The two production lockouts behind the no-defaults design, and what shipped in response.</span>
 </a>
 <a class="docs-nav__item" href="../guide/index.html">
   <span class="docs-nav__title">Project README</span>
@@ -90,6 +98,8 @@
 <section class="toc">
   <h2 class="toc__heading">On this page</h2>
   <ul class="toc__list">
+<li class="toc__item toc__item--level-2"><a href="#where-the-configuration-lives">Where the configuration lives</a></li>
+<li class="toc__item toc__item--level-3"><a href="#a-green-config-test-is-not-a-rehearsal">A green config test is not a rehearsal</a></li>
 <li class="toc__item toc__item--level-2"><a href="#behind-a-reverse-proxy-or-load-balancer">Behind a reverse proxy or load balancer</a></li>
 <li class="toc__item toc__item--level-2"><a href="#slow-client-slowloris-defense">Slow-client / slowloris defense</a></li>
 <li class="toc__item toc__item--level-2"><a href="#https-host-cookie-prefix">HTTPS / `__Host-` cookie prefix</a></li>
@@ -106,9 +116,61 @@
   </ul>
 </section>
         <div class="prose">
-<p>This page covers real-world deployment topology: reverse proxies and
-load balancers, slowloris defense, multi-vhost reputation isolation,
-secret rotation, and capacity sizing.</p>
+<p>This page covers real-world deployment topology: where the
+configuration lives, reverse proxies and load balancers, slowloris
+defense, multi-vhost reputation isolation, secret rotation, and
+capacity sizing.</p>
+<h2 id="where-the-configuration-lives">Where the configuration lives</h2>
+<p>Two decisions here are load-bearing, and both fail quietly when you get
+them wrong.</p>
+<p><strong>Include it from somewhere your configuration management does not
+regenerate.</strong> If vhosts on this host are generated from templates by
+Ansible, Puppet, or a CMS that writes Apache config, then the module's
+configuration must not live in a generated file, and neither must the
+<code>Include</code> line that pulls it in. Put the configuration in its own file
+and include it from a directory the generator leaves alone:</p>
+<pre><code class="language-sh">echo 'Include conf/botshield.conf' \
+  | sudo tee /etc/httpd/conf.d/25-botshield.conf
+</code></pre>
+<p>A deployment that put this in the vhost instead lost every enforcing
+scope the next time the vhost was regenerated. The site ran unprotected
+for two days, and the config test stayed green throughout, because
+nothing was syntactically wrong. There was nothing left to be wrong.</p>
+<p><strong>Include it at main server scope, not inside a <code>&lt;VirtualHost&gt;</code>.</strong> The
+data-directory and state directives are server scope only. They are
+read once, before vhosts merge. A directive of that class inside a
+vhost is now rejected at config-parse time rather than accepted and
+ignored, which is a recent change: an earlier version accepted
+<code>BotShieldDbStatsFile</code> inside a vhost, discarded it, reported <code>Syntax OK</code>, and left the dashboard saying no monitor was configured, which
+reads as a missing directive rather than a discarded one. Everything at
+main scope is inherited by every vhost on the host. To confine it to
+one hostname, wrap it:</p>
+<pre><code class="language-apache">&lt;If &quot;%{HTTP_HOST} == 'www.example.org'&quot;&gt;
+    BotShieldEnabled On
+&lt;/If&gt;
+</code></pre>
+<p><code>docs/examples/full-site.conf.example</code> is a complete configuration
+built around both rules, with the enforcing scopes commented out in the
+order worth enabling them.</p>
+<h3 id="a-green-config-test-is-not-a-rehearsal">A green config test is not a rehearsal</h3>
+<p><code>apachectl configtest</code> parses the configuration. It does not run
+<code>post_config</code>, which is where shared memory is sized, the watchdog is
+registered, and the bot-rate-limit default is synthesised. A
+configuration can test clean and still change behaviour on reload.</p>
+<p>Gate the reload on the test's <strong>exit code</strong>, not on reading its output:</p>
+<pre><code class="language-sh">sudo apachectl configtest &amp;&amp; sudo systemctl reload httpd
+</code></pre>
+<p>Piping the test to <code>tail</code> and restarting in the same command regardless
+took a production site down for thirty seconds. Before each reload of a
+newly enforcing scope, check there is headroom in the scoreboard:</p>
+<pre><code class="language-sh">curl -s http://127.0.0.1/server-status?auto \
+  | grep '^Scoreboard' | tr -cd '.' | wc -c        # want &gt; 100 free
+</code></pre>
+<p>To see what the configuration actually resolves to, including which
+thresholds are unset and which rules are in effect, ask the module
+rather than reading the file:</p>
+<pre><code class="language-sh">httpd -t -D DUMP_BOTSHIELD_POLICY
+</code></pre>
 <h2 id="behind-a-reverse-proxy-or-load-balancer">Behind a reverse proxy or load balancer</h2>
 <p>mod_botshield keys every IP-based signal (flagged-IP table, Bloom
 filter, rate limiters, score) on <code>r-&gt;useragent_ip</code> — the TCP peer

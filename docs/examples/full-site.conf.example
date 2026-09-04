@@ -1,0 +1,249 @@
+# ============================================================================
+# mod_botshield — a complete, layered site configuration.
+#
+# The two other files in this directory show one directive family each.
+# This one shows a whole deployment: where it gets included, what order
+# the layers go in, and what to turn on in what sequence. It enforces
+# nothing as written. Every enforcing scope is commented out, because the
+# rollout order below is the part that matters.
+#
+# Install:   /etc/httpd/conf/botshield.conf   (or your distribution's
+#            equivalent; Debian-family paths differ)
+# Activate:  one Include line, in a file your configuration management
+#            does NOT regenerate:
+#
+#              echo 'Include conf/botshield.conf' \
+#                | sudo tee /etc/httpd/conf.d/25-botshield.conf
+#
+# WHERE YOU PUT THAT INCLUDE IS A SAFETY DECISION. If your site configs
+# are generated from templates -- Ansible, Puppet, a CMS that writes
+# vhosts, anything -- do not put this configuration, or the Include that
+# pulls it in, anywhere that regeneration touches. A deployment that put
+# it in the vhost lost every enforcing scope the next time the vhost was
+# regenerated. The site ran unprotected for two days, and the config test
+# stayed green the whole time, because nothing was syntactically wrong.
+# There was simply nothing left to be wrong.
+#
+# SCOPE: include this at MAIN SERVER scope, not inside a <VirtualHost>.
+# The state and data directives are server-scope only. They are read once,
+# before vhosts merge. Inside a vhost the module now rejects them at
+# config-parse time rather than accepting and ignoring them, but the rule
+# is easier to follow than to debug.
+#
+# LoadModule is NOT here. It belongs in its own file under
+# conf.modules.d/, holding that one line and nothing else.
+# ============================================================================
+
+<IfModule botshield_module>
+
+# ---------------------------------------------------------------------------
+# 1. Identity and persistent state                        (main scope only)
+# ---------------------------------------------------------------------------
+# One directory per httpd instance. Everything the module persists lives
+# under it: the signing secret, the state file, the bot CIDR lists. A
+# second instance on the same host MUST set this to somewhere else, or the
+# two will write over each other's state.
+BotShieldDataDir /var/lib/botshield
+
+# Generate the secret before first start, and keep it off the world:
+#   openssl rand -hex 32 > /var/lib/botshield/secret
+#   chmod 600 /var/lib/botshield/secret
+# The cookie is signed with it, so replacing it invalidates every
+# outstanding session at once. See the deployment doc on rotation.
+
+# How often the flagged-IP table, Bloom filters, and dashboard counters
+# are written to disk. Without persistence they reset on every restart,
+# including the nightly log-rotation restart, which would quietly wipe
+# the 24-hour and all-time windows once a day.
+BotShieldStateSaveInterval 300
+
+# ---------------------------------------------------------------------------
+# 2. Crawler rate limiting — state this explicitly
+# ---------------------------------------------------------------------------
+# This line looks redundant. It is not, and leaving it out is a live
+# hazard. Unlike every other policy layer in this module, the bot rate
+# limiter synthesises a default: when the module is enabled at vhost scope
+# and no BotShieldBotRateLimit directive exists at all, post_config
+# installs a wildcard entry of one request per second per directory slug.
+# The synthetic entry carries no mode, which means it ENFORCES, returning
+# real 429s to traffic nobody decided to throttle. It announces itself
+# with a NOTICE at startup, so check your error log if you are unsure
+# which state you are in.
+#
+# Writing it explicitly with mode=observe suppresses the synthesis and
+# records what it would have done instead. `BotShieldBotRateLimit Off`
+# turns the subsystem off entirely, which is also a fine answer.
+BotShieldBotRateLimit * 1 sec mode=observe
+
+# ---------------------------------------------------------------------------
+# 3. robots.txt — parsed and recorded, enforcing nothing
+# ---------------------------------------------------------------------------
+# Point at the file this site actually serves.
+#BotShieldRobotsTxt /var/www/html/robots.txt
+
+# observe = record violations, refuse nobody. Turning robots.txt straight
+# to enforce is how a deployment 403'd two well-behaved AI crawlers within
+# minutes of a reload, before anyone had decided that was the policy.
+# Read the observe data first, then decide.
+BotShieldRobotsMode observe
+
+# off = do NOT apply the `User-agent: *` group to unrecognised agents.
+# The default, `heuristic`, treats any non-browser agent as a crawler
+# candidate, and the browser test is a negation: anything the browser
+# templates fail to recognise counts as a crawler. One deployment's
+# templates missed mobile Chrome, so real phones took a `Disallow:`
+# rule as a hard 403 with no challenge to solve. Leave this off until
+# mobile traffic is verified on THIS host. Values: off | heuristic | strict.
+BotShieldRobotsWildcardScope off
+
+# ---------------------------------------------------------------------------
+# 4. Scoring thresholds
+# ---------------------------------------------------------------------------
+# NOTHING SCORES UNTIL YOU SET THESE. There are no compiled-in
+# thresholds: an unset tier never fires, whatever the heuristics add up
+# to. That is deliberate, and it is why a fresh install is inert.
+#
+# Start by leaving them unset and running the site in LogOnly (§5). The
+# decision log will tell you what scores real traffic actually produces
+# on this site, and you set thresholds against that rather than against
+# a number from somebody else's deployment.
+#
+# `httpd -t -D DUMP_BOTSHIELD_POLICY` prints which of the three are set,
+# with a suggested starting value for the ones that are not.
+#BotShieldScoreNonInteractive 20
+#BotShieldScoreInteractive    50
+#BotShieldScoreCaptcha        80
+
+# The heuristic slate is also empty by default. See
+# heuristic-triggers.conf.example in this directory for a starting set.
+
+# ---------------------------------------------------------------------------
+# 5. Site-wide observation — the baseline
+# ---------------------------------------------------------------------------
+# LogOnly runs the whole pipeline, classification, scoring and triggers,
+# and records the decision without acting on it. This is how you find out
+# what enforcement would do to real traffic before it does it. Stay here
+# longer than feels necessary.
+#
+# A main-scope directive is inherited by EVERY vhost on the host,
+# including any proxy, WebDAV, or console endpoints. That is harmless
+# for LogOnly. To confine it to one hostname:
+#   <If "%{HTTP_HOST} == 'www.example.org'"> ... </If>
+BotShieldEnabled LogOnly
+
+# ---------------------------------------------------------------------------
+# 6. Decision log
+# ---------------------------------------------------------------------------
+# The defaults need no directive: the log is written next to the error
+# log, and any decision suppressed from the access log is guaranteed to
+# appear here. Nothing is dropped silently.
+#
+# Rotation is NOT optional. This log has been measured at 258 MB/hour
+# under flood. Either rotate it externally, or hand the module a pipe:
+#BotShieldDecisionLog "|/usr/sbin/rotatelogs -n 24 /var/log/httpd/botshield.log 3600"
+
+# ---------------------------------------------------------------------------
+# 7. Enforcing scopes — COMMENTED OUT. Enable one at a time.
+# ---------------------------------------------------------------------------
+# Before each reload:
+#   curl -s http://127.0.0.1/server-status?auto \
+#     | grep '^Scoreboard' | tr -cd '.' | wc -c        # want > 100 free
+#   sudo apachectl configtest && sudo systemctl reload httpd
+#
+# Gate the reload on the config test's EXIT CODE, as above. Reading its
+# output is not enough: piping the test to `tail` and restarting in the
+# same command regardless took a production site down for thirty seconds.
+#
+# A green config test is not a rehearsal for a reload. It does not
+# exercise post_config, which is where shared memory is sized, the
+# watchdog is registered, and the rate-limit synthesis in §2 happens.
+#
+# Authentication paths are usually the highest-value scope and the one
+# to enable first: an unbounded login-return URL space is a common
+# reason a site gets flooded in the first place.
+#<LocationMatch "^/(login|register)(/|$)">
+#    BotShieldEnabled On
+#</LocationMatch>
+
+# Faceted browse and search paths are the next most valuable: they
+# generate effectively unbounded URL spaces out of a finite catalogue,
+# and every one of them costs a database query.
+#<LocationMatch "^/(browse|search|publications)">
+#    BotShieldEnabled On
+#</LocationMatch>
+
+# Calendars are worth thinking about rather than pattern-matching. A
+# month or day view walked by a crawler is unbounded; the year view is
+# often the only way the content is discoverable at all. Confine the
+# scope to the deep views and leave the shallow one crawlable.
+#
+# Check the prefix on YOUR site before trusting a pattern -- a scope that
+# never matches fails silently, and mount points differ between sites:
+#   awk -F'"' '{split($2,r," "); print r[2]}' <access_log> \
+#     | grep -o '^/[a-z/]*events' | sort | uniq -c | sort -rn
+#<LocationMatch "^/events/[0-9]{4}/">
+#    BotShieldEnabled On
+#</LocationMatch>
+
+# Single-sign-on callbacks must never be challenged. If this site uses
+# SAML or OIDC, exempt the callback path explicitly.
+#<LocationMatch "^/login/callback">
+#    BotShieldEnabled Off
+#</LocationMatch>
+
+# ---------------------------------------------------------------------------
+# 8. Who may read the dashboard and metrics
+# ---------------------------------------------------------------------------
+# Each endpoint is CLOSED until its own directive names someone. They
+# expose internal vhost names, traffic volumes, challenge and solve
+# rates, and shared-memory capacities. A refusal is a 404, not a 403, so
+# a scanner cannot tell the endpoint exists.
+#
+# Localhost only is the useful default, because it pairs with a tunnel:
+#   ssh -L 8443:<vhost-ip>:443 <host>
+#   then browse https://localhost:8443/botshield/dashboard
+#BotShieldDashboardAccess 127.0.0.1 ::1
+#BotShieldMetricsAccess   127.0.0.1 ::1
+
+# One directive per endpoint, so opening one does not open the other. A
+# metrics scraper and an admin browser are rarely the same host:
+#BotShieldMetricsAccess   10.9.0.5
+#BotShieldDashboardAccess 10.1.0.0/16
+
+# DO NOT USE `Require ip` FOR THIS. It can lock you out of the entire
+# site, not just the dashboard. An Apache-level authorisation denial
+# writes an AH01630 line to the error log on every refusal, and the
+# dashboard refreshes itself every 30 seconds. If any fail2ban jail on
+# the host watches the error log for that pattern -- and the stock jails
+# on several distributions do -- a denied dashboard bans the viewer's own
+# address at the firewall. That has happened, and it cost the operator
+# access to the whole site for ten hours.
+#
+# These directives do not have that failure mode. A refusal is handled
+# inside the module and writes nothing to the error log, so there is no
+# line for a jail to count. Verified by probe: eight refused dashboard
+# requests produced zero error-log lines from this module.
+#
+# No <Location> is needed to make these endpoints reachable. They sit
+# under the vhost document root as far as the directory walk is
+# concerned, so whatever grants the document root grants them. A
+# `Require all granted` written just for them does nothing.
+#
+# Compounding with <Location> still works, and is the right way to add a
+# password: Apache decides whether the request reaches the module, and
+# the module decides whether the surface is served. Check any auth
+# scheme's failure mode against your log-watching jails first. Repeated
+# auth failures on a self-refreshing page are the same shape of problem
+# as the ban above.
+#<LocationMatch "^/botshield/dashboard">
+#    AuthType Basic
+#    AuthName "BotShield"
+#    AuthUserFile /etc/httpd/botshield.htpasswd
+#    Require valid-user
+#</LocationMatch>
+
+# The challenge endpoints themselves -- embedded-verify, embedded.js,
+# embedded-bootstrap, safeguard-info -- MUST stay public. They are the
+# challenge flow. Do not fold them into the block above.
+
+</IfModule>
