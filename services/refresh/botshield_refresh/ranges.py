@@ -282,12 +282,26 @@ def refresh_siteimprove(dest: Path, prefer_project: bool) -> bool:
     return True
 
 
+# The curated copies, committed to the repository. A checkout writes
+# here, which is what makes a host's project-first fetch worth doing.
+CURATED_DEST = Path(__file__).resolve().parents[3] / "data" / "bots"
+
+
 def main(prefer_project: bool | None = None, dest: Path | None = None) -> int:
     """Refresh every provider. Returns 0 if all refreshed, 1 if any did
-    not -- and any that did not kept the file it already had."""
+    not -- and any that did not kept the file it already had.
+
+    In a checkout the destination is data/bots/, the curated copies to
+    be reviewed and committed, matching what the other two refreshers
+    do with their JSON. On a host it is the directory the module reads.
+    """
+    in_checkout = CURATED_DEST.parent.exists()
     if prefer_project is None:
-        prefer_project = not (Path(__file__).resolve().parents[3] / "data").exists()
-    dest = dest or DEFAULT_DEST
+        prefer_project = not in_checkout
+    if dest is None:
+        dest = CURATED_DEST if in_checkout and not prefer_project else DEFAULT_DEST
+        if dest is CURATED_DEST:
+            print(f"  curating into {dest}")
     try:
         dest.mkdir(parents=True, exist_ok=True)
     except OSError as exc:

@@ -217,8 +217,9 @@ dependent on anyone continuing to maintain it.
 **In a checkout**, the order reverses. Refreshing there means fetching
 upstream, validating, and committing the result, which is the act of
 curating the data every host then prefers. Pulling this project's own
-committed copy back down would be circular. The same run writes the
-`data/` JSON for review and the runtime files.
+committed copy back down would be circular. A checkout writes into
+`data/` for review rather than into the directory the module reads,
+which is what keeps the curated copies worth preferring.
 
 Either order can be forced:
 

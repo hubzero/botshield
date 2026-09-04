@@ -315,8 +315,9 @@ dependent on anyone continuing to maintain it.</p>
 <p><strong>In a checkout</strong>, the order reverses. Refreshing there means fetching
 upstream, validating, and committing the result, which is the act of
 curating the data every host then prefers. Pulling this project's own
-committed copy back down would be circular. The same run writes the
-<code>data/</code> JSON for review and the runtime files.</p>
+committed copy back down would be circular. A checkout writes into
+<code>data/</code> for review rather than into the directory the module reads,
+which is what keeps the curated copies worth preferring.</p>
 <p>Either order can be forced:</p>
 <pre><code class="language-sh">botshield-refresh.py --prefer-project     # as a host would
 botshield-refresh.py --upstream           # as a maintainer would
