@@ -75,9 +75,10 @@ documented in [`tests/README.md`](tests/README.md).
 - `tools/` — `build_site.py` (docs renderer) +
   `refresh-bot-ranges.sh` (operator cron tool).
 
-`CHANGELOG.md` is date-organized and gets an entry per
-notable PR. `DESIGN.md` is current-state architecture; update it
-when you change behavior, not just when you ship a feature.
+`DESIGN.md` is current-state architecture; update it when you change
+behavior, not just when you ship a feature. There is no separate
+changelog — the git log is the narrative record, and commit messages
+are written to be read that way.
 
 ## Code style
 

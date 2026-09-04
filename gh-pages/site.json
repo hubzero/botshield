@@ -77,12 +77,6 @@
       "title": "Project README",
       "source": "README.md",
       "summary": "Repository README — project overview, build instructions, and dev configuration."
-    },
-    {
-      "slug": "roadmap",
-      "title": "Roadmap and changelog",
-      "source": "CHANGELOG.md",
-      "summary": "Shipped milestones, extension design notes, and the development backlog."
     }
   ]
 }

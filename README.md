@@ -124,7 +124,6 @@ from these sources):
 Internal references:
 
 - [DESIGN.md](DESIGN.md) — current-state design specification.
-- [CHANGELOG.md](CHANGELOG.md) — date-organized log of changes.
 - [tests/README.md](tests/README.md) — test, fuzz, and benchmark
   framework.
 

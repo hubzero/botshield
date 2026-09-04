@@ -5,16 +5,15 @@ name: Build and deploy docs to GitHub Pages
 # this file for the one-time `gh api` call that flipped it from the legacy main:/docs mode).
 #
 # The sources are the documentation the repo already carries, rendered rather than duplicated:
-# README.md, CHANGELOG.md, and everything under docs/. Editing a doc is the only step -- there
-# is no second copy of it here to keep in step. gh-pages/site.json lists each page explicitly
-# (for its card copy and home-page group); nothing else needs registering to be published.
+# README.md and everything under docs/. Editing a doc is the only step -- there is no second
+# copy of it here to keep in step. gh-pages/site.json lists each page explicitly (for its card
+# copy and home-page group); nothing else needs registering to be published.
 #
 # gh-pages/public/ IS committed, so the built site can be read straight from the repo or served
 # locally without a build step. That copy can go stale, and a stale site is invisible until
 # somebody reads it -- so the build below rebuilds from source and FAILS if the committed
-# output differs. What is published is always the fresh build, never the committed copy. The
-# same check runs as the CI docs-fresh job on every PR; this workflow's copy is what actually
-# gates the deploy.
+# output differs. What is published is always the fresh build, never the committed copy. This
+# is the only place that check runs -- on push it gates the deploy, on a PR it gates the merge.
 #
 # markdown-it-py is pinned in gh-pages/requirements.txt: the staleness check diffs generated
 # HTML, so an unpinned renderer would fail the build on its own release schedule.
@@ -24,14 +23,12 @@ on:
     branches: [main]
     paths:
       - 'README.md'
-      - 'CHANGELOG.md'
       - 'docs/**'
       - 'gh-pages/**'
       - '.github/workflows/pages.yml'
   pull_request:
     paths:
       - 'README.md'
-      - 'CHANGELOG.md'
       - 'docs/**'
       - 'gh-pages/**'
       - '.github/workflows/pages.yml'
