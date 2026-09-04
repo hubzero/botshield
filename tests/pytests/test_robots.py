@@ -361,15 +361,15 @@ def test_robots_main_scope_path_inherits_into_vhost(
     """BotShieldRobotsTxt declared at the main server (outside
     <VirtualHost>) must flow into the vhost's effective scfg via the
     server-config merge hook — same guarantee E1/E2.1 already
-    provide. Anchor off the main-scope BotShieldStateFile line."""
+    provide. Anchor off the main-scope BotShieldStateSaveInterval line."""
     _write_robots(robots_path, """
         User-agent: GPTBot
         Disallow: /admin
     """)
     with config_override(
-        r"BotShieldStateFile\s+\S+",
+        r"BotShieldStateSaveInterval\s+\d+",
         f'BotShieldRobotsTxt {robots_path}\n'
-        r'BotShieldStateFile /var/lib/botshield/state.bin',
+        r'BotShieldStateSaveInterval 30',
         count=1,
     ):
         r = client.get("/admin", xff=fresh_ip, ua=GPTBOT_UA)

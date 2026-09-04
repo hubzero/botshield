@@ -183,12 +183,12 @@ def test_allow_bot_main_scope_inherits_to_vhost(
     matching — a structural mismatch for the common "declare globally,
     enable per-vhost" shape.
 
-    Anchor off the main-scope BotShieldStateFile line (outside any
+    Anchor off the main-scope BotShieldStateSaveInterval line (outside any
     vhost block) to inject the main-scope directive."""
     with config_override(
-        r"BotShieldStateFile\s+\S+",
+        r"BotShieldStateSaveInterval\s+\d+",
         'BotShieldAllowBot globalbot "GlobalBot/" *\n'
-        r'BotShieldStateFile /var/lib/botshield/state.bin',
+        r'BotShieldStateSaveInterval 30',
         count=1,
     ):
         with log_slice as slc:

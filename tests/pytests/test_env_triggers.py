@@ -229,9 +229,9 @@ def test_env_trigger_main_scope_inherits(config_override, fresh_ip):
     """BotShieldEnvTrigger at main scope flows into the vhost via
     the server-config merge (same guarantee E3/E4 get)."""
     with config_override(
-        r"BotShieldStateFile\s+\S+",
+        r"BotShieldStateSaveInterval\s+\d+",
         'BotShieldEnvTrigger ms-env !env=BS_NEVER_SET status=403\n'
-        'BotShieldStateFile /var/lib/botshield/state.bin',
+        'BotShieldStateSaveInterval 30',
         count=1,
     ):
         r = _g("/", xff=fresh_ip)

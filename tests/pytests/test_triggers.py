@@ -246,10 +246,10 @@ def test_trigger_main_scope_inherits_into_vhost(
     into the vhost via bs_merge_server_cfg — same guarantee the
     other E2.x directives got."""
     with config_override(
-        r"BotShieldStateFile\s+\S+",
+        r"BotShieldStateSaveInterval\s+\d+",
         'BotShieldRequestTrigger main-scope-trap path="/main-scope-env" '
         'status=403 log="MAIN"\n'
-        'BotShieldStateFile /var/lib/botshield/state.bin',
+        'BotShieldStateSaveInterval 30',
         count=1,
     ):
         resp = client.get("/main-scope-env", xff=fresh_ip)

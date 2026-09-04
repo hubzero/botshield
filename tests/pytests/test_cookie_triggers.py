@@ -415,10 +415,10 @@ def test_cookie_trigger_main_scope_inherits_into_vhost(
     """Directive at main scope must flow into the vhost via the
     merge hook (same guarantee E2.1, E3 get)."""
     with config_override(
-        r"BotShieldStateFile\s+\S+",
+        r"BotShieldStateSaveInterval\s+\d+",
         'BotShieldCookieTrigger ms-scope '
         'cookies=none status=403\n'
-        'BotShieldStateFile /var/lib/botshield/state.bin',
+        'BotShieldStateSaveInterval 30',
         count=1,
     ):
         r = client.get("/", xff=fresh_ip)

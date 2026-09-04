@@ -10,6 +10,7 @@ revert, so a blown test can't cascade.
 from __future__ import annotations
 
 import re
+import os
 import subprocess
 import time
 from contextlib import contextmanager
@@ -67,6 +68,24 @@ def policy_dump() -> str:
     return result.stdout
 
 
+def _pid_file_path() -> str | None:
+    """The instance's PidFile, read from its own config.
+
+    Parsed rather than assumed: the whole point of the instance config
+    is that its paths are its own, and a hardcoded guess here would be
+    one more thing that works on one box and not the next.
+    """
+    try:
+        with open(HTTPD_CONF, "r", encoding="utf-8") as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) >= 2 and parts[0].lower() == "pidfile":
+                    return parts[1]
+    except OSError:
+        pass
+    return None
+
+
 def _service(verb: str) -> None:
     """Ask the instance to reload, restart or start.
 
@@ -85,18 +104,29 @@ def _service(verb: str) -> None:
                        check=True, stdout=subprocess.DEVNULL)
 
     if verb == "restart":
-        # Stop then start, not `-k restart`.
+        # Stop, wait for it to actually be gone, then start.
         #
-        # `-k restart` keeps the parent process alive and re-reads the
-        # config in place, where `systemctl restart` genuinely stops the
-        # server and starts a new one. That difference is visible to
-        # these tests: the module writes its state file on shutdown and
-        # reads it on boot, so three tests asserting that a flag
-        # survives a restart passed under systemd and failed in a
-        # container, because the server they "restarted" had never shut
-        # down and never re-read anything from disk.
+        # `-k restart` keeps the parent alive and re-reads the config in
+        # place, where `systemctl restart` genuinely stops and starts.
+        # The module writes its state file on shutdown and reads it on
+        # boot, so a server that never stopped never wrote it.
+        #
+        # The wait is not politeness. A fixed sleep raced the listening
+        # socket's release: `-k start` came back non-zero with the port
+        # still held, and five tests that restart the instance to check
+        # main-scope inheritance died on the subprocess rather than on
+        # an assertion. Poll for the pid file instead, which is the
+        # thing that actually says the old parent is gone.
         signal("stop")
-        time.sleep(1)
+        pid_file = _pid_file_path()
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            if not pid_file or not os.path.exists(pid_file):
+                break
+            time.sleep(0.2)
+        else:
+            time.sleep(1)   # no pid file to watch; fall back to waiting
+        time.sleep(0.3)     # the socket closes just after the pid file
         signal("start")
         return
 
@@ -219,6 +249,41 @@ def restore_pristine_config(conf: str = DEV_VHOST_CONF) -> str | None:
     reload()
     return f"restored {conf} from a previous run's interrupted override"
 
+
+def _sub_uncommented(pattern: str, replacement: str, text: str):
+    r"""re.sub, but blind to comment lines. Returns (matches, result).
+
+    Prose about a directive is not a declaration of it, and the two are
+    trivially confused by a regex. A comment reading "No
+    BotShieldStateFile here, deliberately" matched an anchor of
+    `BotShieldStateFile\s+\S+`, so five tests spliced their directive
+    into the middle of that sentence: the injected line stayed commented
+    out and the sentence's remaining words became arguments to a real
+    directive. Apache rejected the file and the reload failed, which is
+    a confusing way to learn that your anchor was a comment.
+
+    Comment lines are masked to NUL rather than skipped, because some
+    anchors deliberately span two adjacent directives and matching a
+    line at a time cannot see them. Masking preserves every offset, so
+    spans found in the masked copy address the same characters in the
+    original. NUL matches neither a literal nor `\s`, so no match can
+    reach across a comment into the directive beyond it.
+    """
+    masked = "".join(
+        ("\0" * (len(line.rstrip("\n"))) + line[len(line.rstrip("\n")):])
+        if line.lstrip().startswith("#") else line
+        for line in text.splitlines(keepends=True)
+    )
+    out, last, found = [], 0, 0
+    for m in re.finditer(pattern, masked):
+        found += 1
+        out.append(text[last:m.start()])
+        out.append(m.expand(replacement))
+        last = m.end()
+    out.append(text[last:])
+    return found, "".join(out)
+
+
 @contextmanager
 def config_override(
     pattern: str, replacement: str, *,
@@ -255,18 +320,17 @@ def config_override(
     conf_path = Path(conf)
     original = conf_path.read_text()
 
-    found = len(re.findall(pattern, original))
+    found, mutated = _sub_uncommented(pattern, replacement, original)
     if found == 0:
         raise ValueError(
-            f"config_override: pattern {pattern!r} matched zero lines in {conf}"
+            f"config_override: pattern {pattern!r} matched zero "
+            f"uncommented lines in {conf}"
         )
     if count is not None and found != count:
         raise ValueError(
-            f"config_override: pattern {pattern!r} matched {found} lines "
-            f"in {conf}, expected {count}"
+            f"config_override: pattern {pattern!r} matched {found} "
+            f"uncommented lines in {conf}, expected {count}"
         )
-
-    mutated = re.sub(pattern, replacement, original)
 
     # Stage the mutated file via a root-owned temp path. sudo mv is
     # atomic; a partial write can't leave the vhost in a broken state.
