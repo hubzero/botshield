@@ -26,9 +26,9 @@ code has to absorb the traffic.
 
 **Status: beta.** Stable shape, exercising in dev; not yet a production
 deployment. Architecture, threat model, and per-extension design notes
-live in [DESIGN.md](DESIGN.md). Site handbook is rendered to
-GitHub Pages from `docs-src/`; see the [documentation index](#documentation)
-below.
+live in [DESIGN.md](DESIGN.md). Site handbook lives in `docs/` and
+renders to GitHub Pages via `gh-pages/`; see the
+[documentation index](#documentation) below.
 
 ## What's shipped
 
@@ -105,7 +105,7 @@ Minimal vhost configuration:
 
 Generate the secret with `openssl rand -hex 32 > /etc/botshield/secret;
 chmod 600 /etc/botshield/secret`. Full setup walkthrough in
-[`docs-src/getting-started.md`](docs-src/getting-started.md).
+[`docs/getting-started.md`](docs/getting-started.md).
 
 ## Documentation
 
@@ -115,16 +115,16 @@ from these sources):
 
 | Topic | Source |
 |---|---|
-| Getting started — install, first vhost, smoke test | [`docs-src/getting-started.md`](docs-src/getting-started.md) |
-| Site model — scoring, tiers, cookie reputation, multi-vhost | [`docs-src/site-model.md`](docs-src/site-model.md) |
-| Directives reference | [`docs-src/directives.md`](docs-src/directives.md) |
-| Policy — triggers, rate limits, robots.txt | [`docs-src/policy.md`](docs-src/policy.md) |
-| Captcha tier — providers, hardening, configuration | [`docs-src/captcha.md`](docs-src/captcha.md) |
-| Deployment — reverse proxy, slowloris, capacity sizing, secret rotation | [`docs-src/deployment.md`](docs-src/deployment.md) |
-| Staging policy changes — shadow mode + per-rule observe | [`docs-src/staging.md`](docs-src/staging.md) |
-| Observability — decision log, metrics, mod_status | [`docs-src/observability.md`](docs-src/observability.md) |
-| Troubleshooting | [`docs-src/troubleshooting.md`](docs-src/troubleshooting.md) |
-| FAQ | [`docs-src/faq.md`](docs-src/faq.md) |
+| Getting started — install, first vhost, smoke test | [`docs/getting-started.md`](docs/getting-started.md) |
+| Site model — scoring, tiers, cookie reputation, multi-vhost | [`docs/site-model.md`](docs/site-model.md) |
+| Directives reference | [`docs/directives.md`](docs/directives.md) |
+| Policy — triggers, rate limits, robots.txt | [`docs/policy.md`](docs/policy.md) |
+| Captcha tier — providers, hardening, configuration | [`docs/captcha.md`](docs/captcha.md) |
+| Deployment — reverse proxy, slowloris, capacity sizing, secret rotation | [`docs/deployment.md`](docs/deployment.md) |
+| Staging policy changes — shadow mode + per-rule observe | [`docs/staging.md`](docs/staging.md) |
+| Observability — decision log, metrics, mod_status | [`docs/observability.md`](docs/observability.md) |
+| Troubleshooting | [`docs/troubleshooting.md`](docs/troubleshooting.md) |
+| FAQ | [`docs/faq.md`](docs/faq.md) |
 
 Internal references:
 

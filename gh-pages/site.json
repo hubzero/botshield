@@ -9,66 +9,66 @@
     {
       "slug": "getting-started",
       "title": "Getting started",
-      "source": "docs-src/getting-started.md",
+      "source": "docs/getting-started.md",
       "summary": "Install, build, minimal configuration, and verifying a first request.",
       "featured": true
     },
     {
       "slug": "deployment",
       "title": "Deployment",
-      "source": "docs-src/deployment.md",
+      "source": "docs/deployment.md",
       "summary": "Reverse proxies, slow-client defense, multi-vhost reputation, secret rotation, capacity sizing.",
       "featured": true
     },
     {
       "slug": "site-model",
       "title": "Site model",
-      "source": "docs-src/site-model.md",
+      "source": "docs/site-model.md",
       "summary": "Tiers, scoring, cookie-carried reputation, decision log, tuning workflow.",
       "featured": true
     },
     {
       "slug": "policy",
       "title": "Policy",
-      "source": "docs-src/policy.md",
+      "source": "docs/policy.md",
       "summary": "UA classification, rate limits, path triggers, robots.txt, the trigger families, and flag triggers.",
       "featured": true
     },
     {
       "slug": "captcha",
       "title": "Captcha and app-bridge",
-      "source": "docs-src/captcha.md",
+      "source": "docs/captcha.md",
       "summary": "Third-party captcha providers, verify-endpoint hardening, and the signed app-bridge protocols.",
       "featured": true
     },
     {
       "slug": "staging",
       "title": "Staging",
-      "source": "docs-src/staging.md",
+      "source": "docs/staging.md",
       "summary": "Per-rule observe and global shadow mode for safe rule rollout."
     },
     {
       "slug": "observability",
       "title": "Observability",
-      "source": "docs-src/observability.md",
+      "source": "docs/observability.md",
       "summary": "Decision log, Prometheus metrics, mod_status contribution, and the policy-status admin page."
     },
     {
       "slug": "directives",
       "title": "Directive reference",
-      "source": "docs-src/directives.md",
+      "source": "docs/directives.md",
       "summary": "Canonical reference for all 85 directives, grouped by family."
     },
     {
       "slug": "troubleshooting",
       "title": "Troubleshooting",
-      "source": "docs-src/troubleshooting.md",
+      "source": "docs/troubleshooting.md",
       "summary": "Common issues, diagnostics, and fixes."
     },
     {
       "slug": "faq",
       "title": "FAQ",
-      "source": "docs-src/faq.md",
+      "source": "docs/faq.md",
       "summary": "Honest answers to questions teams ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.",
       "featured": true
     },

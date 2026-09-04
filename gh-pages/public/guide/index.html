@@ -122,9 +122,9 @@ whether to pass, challenge, slow down, or block before application
 code has to absorb the traffic.</p>
 <p><strong>Status: beta.</strong> Stable shape, exercising in dev; not yet a production
 deployment. Architecture, threat model, and per-extension design notes
-live in <a href="DESIGN.md">DESIGN.md</a>. Site handbook is rendered to
-GitHub Pages from <code>docs-src/</code>; see the <a href="#documentation">documentation index</a>
-below.</p>
+live in <a href="DESIGN.md">DESIGN.md</a>. Site handbook lives in <code>docs/</code> and
+renders to GitHub Pages via <code>gh-pages/</code>; see the
+<a href="#documentation">documentation index</a> below.</p>
 <h2 id="what-s-shipped">What's shipped</h2>
 <ul>
 <li><strong>Tiered challenges.</strong> Pass / silent (no-click auto-submit) / form
@@ -190,7 +190,7 @@ deleting the <code>.so</code>.</p>
 &lt;/VirtualHost&gt;
 </code></pre>
 <p>Generate the secret with <code>openssl rand -hex 32 &gt; /etc/botshield/secret; chmod 600 /etc/botshield/secret</code>. Full setup walkthrough in
-<a href="docs-src/getting-started.md"><code>docs-src/getting-started.md</code></a>.</p>
+<a href="docs/getting-started.md"><code>docs/getting-started.md</code></a>.</p>
 <h2 id="documentation">Documentation</h2>
 <p>Site handbook (rendered to
 <a href="https://hubzero.github.io/botshield/">hubzero.github.io/botshield</a>
@@ -205,43 +205,43 @@ from these sources):</p>
 <tbody>
 <tr>
 <td>Getting started — install, first vhost, smoke test</td>
-<td><a href="docs-src/getting-started.md"><code>docs-src/getting-started.md</code></a></td>
+<td><a href="docs/getting-started.md"><code>docs/getting-started.md</code></a></td>
 </tr>
 <tr>
 <td>Site model — scoring, tiers, cookie reputation, multi-vhost</td>
-<td><a href="docs-src/site-model.md"><code>docs-src/site-model.md</code></a></td>
+<td><a href="docs/site-model.md"><code>docs/site-model.md</code></a></td>
 </tr>
 <tr>
 <td>Directives reference</td>
-<td><a href="docs-src/directives.md"><code>docs-src/directives.md</code></a></td>
+<td><a href="docs/directives.md"><code>docs/directives.md</code></a></td>
 </tr>
 <tr>
 <td>Policy — triggers, rate limits, robots.txt</td>
-<td><a href="docs-src/policy.md"><code>docs-src/policy.md</code></a></td>
+<td><a href="docs/policy.md"><code>docs/policy.md</code></a></td>
 </tr>
 <tr>
 <td>Captcha tier — providers, hardening, configuration</td>
-<td><a href="docs-src/captcha.md"><code>docs-src/captcha.md</code></a></td>
+<td><a href="docs/captcha.md"><code>docs/captcha.md</code></a></td>
 </tr>
 <tr>
 <td>Deployment — reverse proxy, slowloris, capacity sizing, secret rotation</td>
-<td><a href="docs-src/deployment.md"><code>docs-src/deployment.md</code></a></td>
+<td><a href="docs/deployment.md"><code>docs/deployment.md</code></a></td>
 </tr>
 <tr>
 <td>Staging policy changes — shadow mode + per-rule observe</td>
-<td><a href="docs-src/staging.md"><code>docs-src/staging.md</code></a></td>
+<td><a href="docs/staging.md"><code>docs/staging.md</code></a></td>
 </tr>
 <tr>
 <td>Observability — decision log, metrics, mod_status</td>
-<td><a href="docs-src/observability.md"><code>docs-src/observability.md</code></a></td>
+<td><a href="docs/observability.md"><code>docs/observability.md</code></a></td>
 </tr>
 <tr>
 <td>Troubleshooting</td>
-<td><a href="docs-src/troubleshooting.md"><code>docs-src/troubleshooting.md</code></a></td>
+<td><a href="docs/troubleshooting.md"><code>docs/troubleshooting.md</code></a></td>
 </tr>
 <tr>
 <td>FAQ</td>
-<td><a href="docs-src/faq.md"><code>docs-src/faq.md</code></a></td>
+<td><a href="docs/faq.md"><code>docs/faq.md</code></a></td>
 </tr>
 </tbody>
 </table>

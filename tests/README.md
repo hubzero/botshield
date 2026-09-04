@@ -337,7 +337,7 @@ real-world cost. Both write JSON results under
 and growing — wipe periodically with `rm -rf tests/bench/results/`
 if it gets unwieldy.
 
-See `docs-src/deployment.md` "Performance characteristics" for the
+See `docs/deployment.md` "Performance characteristics" for the
 canonical numbers.
 
 ## What tests must not assume

@@ -43,11 +43,11 @@ documented in [`tests/README.md`](tests/README.md).
    PRs are gated on CI. Locally-green tests + clean CI is the
    baseline; flake-on-CI-only happens occasionally and is a
    conversation, not an automatic block.
-4. **Rebuild the docs** if you touched `docs-src/*.md` or
-   `site-src/*`:
+4. **Rebuild the docs** if you touched `docs/*.md` or
+   `gh-pages/{site.json,assets,templates}`:
    ```sh
    make docs
-   git add docs/
+   git add gh-pages/public/
    ```
    The CI `docs-fresh` job will fail your PR if you forget.
 5. **Commit messages**: imperative, focused on the *why* when it
@@ -62,8 +62,11 @@ documented in [`tests/README.md`](tests/README.md).
   `DESIGN.md` explains the module split.
 - `apache/botshield-dev.conf` — the dev vhost. Path-templated
   through `${BS_REPO}` so it works on any developer's checkout.
-- `docs-src/` — markdown source for the operator handbook
-  (rendered to `docs/` by `make docs`).
+- `docs/` — markdown source for the operator handbook
+  (rendered to `gh-pages/public/` by `make docs`).
+- `gh-pages/` — the site builder: `site.json` (nav + card copy),
+  `templates/`, `assets/`, and `public/` (the built site, committed
+  and served by GitHub Pages).
 - `tests/pytests/` — pytest cases. Reusable framework helpers
   in `tests/botshield_test/`.
 - `tests/fuzz/` — LibFuzzer harnesses for the cookie + robots

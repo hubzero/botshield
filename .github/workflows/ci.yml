@@ -22,16 +22,14 @@ on:
     branches: [ main ]
     paths-ignore:
       - 'docs/**'
-      - 'docs-src/**'
-      - 'site-src/**'
+      - 'gh-pages/**'
       - '**/*.md'
       - 'LICENSE'
   push:
     branches: [ main ]
     paths-ignore:
       - 'docs/**'
-      - 'docs-src/**'
-      - 'site-src/**'
+      - 'gh-pages/**'
       - '**/*.md'
       - 'LICENSE'
   # Manual trigger only — used to fire the 8h soak and the fuzz
@@ -151,14 +149,15 @@ jobs:
             /var/log/apache2/error.log
           retention-days: 7
 
-  # -------- Per-PR gate: docs/ is in sync with sources. --------
-  # GitHub Pages publishes from main:/docs, so docs/ has to be
-  # committed and rebuilt whenever docs-src/ or site-src/ changes.
-  # This job rebuilds the site and fails if the working tree shows
-  # any diff vs the committed docs/ — i.e., the author forgot to
-  # rebuild before pushing.
+  # -------- Per-PR gate: gh-pages/public/ is in sync with sources. --------
+  # GitHub Pages publishes from gh-pages/public/, so it has to be
+  # committed and rebuilt whenever docs/ or gh-pages/{site.json,
+  # assets,templates} changes. This job rebuilds the site and fails
+  # if the working tree shows any diff vs the committed
+  # gh-pages/public/ — i.e., the author forgot to rebuild before
+  # pushing.
   docs-fresh:
-    name: docs/ is up to date with sources
+    name: gh-pages/public/ is up to date with sources
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -170,17 +169,17 @@ jobs:
           python-version: "3.x"
 
       - name: Install docs build deps
-        run: pip install -r tools/requirements-docs.txt
+        run: pip install -r gh-pages/requirements.txt
 
-      - name: Rebuild docs/
+      - name: Rebuild gh-pages/public/
         run: make docs
 
       - name: Fail if rebuild produced changes
         run: |
-          if ! git diff --quiet docs/; then
-            echo "::error::docs/ is out of sync with docs-src/ or site-src/."
+          if ! git diff --quiet gh-pages/public/; then
+            echo "::error::gh-pages/public/ is out of sync with docs/ or gh-pages/."
             echo "Run 'make docs' locally and commit the result before pushing."
-            git --no-pager diff --stat docs/
+            git --no-pager diff --stat gh-pages/public/
             exit 1
           fi
 

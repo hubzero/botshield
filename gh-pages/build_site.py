@@ -16,13 +16,13 @@ try:
 except ImportError as exc:  # pragma: no cover - exercised by humans
     raise SystemExit(
         "markdown-it-py is required to build the docs site.\n"
-        "Install it with: python3 -m pip install -r tools/requirements-docs.txt"
+        "Install it with: python3 -m pip install -r gh-pages/requirements.txt"
     ) from exc
 
 
 ROOT = Path(__file__).resolve().parent.parent
-SOURCE_DIR = ROOT / "site-src"
-OUTPUT_DIR = ROOT / "docs"
+SOURCE_DIR = ROOT / "gh-pages"
+OUTPUT_DIR = ROOT / "gh-pages" / "public"
 HEADER_LOGO = "assets/logo-botshield-icon.svg"
 HERO_LOGO = "assets/logo-botshield-header.svg"
 

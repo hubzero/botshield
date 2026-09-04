@@ -45,7 +45,7 @@ DOCS_PYTHON ?= $(shell \
 		if $$py -c 'import sys; sys.exit(sys.version_info < (3,7))' \
 		   2>/dev/null; then echo $$py; exit 0; fi; \
 	done; echo python3)
-DOCS_BUILD  := tools/build_site.py
+DOCS_BUILD  := gh-pages/build_site.py
 # Keep botshield.c first — apxs derives the .la/.so name from the
 # first source. Extra .c files are compiled into the same shared
 # object and share the module's pool/APR linkage. The installed .so
@@ -242,7 +242,7 @@ docs-deps:
 	@test -x tests/.venv/bin/pip || { \
 		echo "tests/.venv not found - create it first (see tests/README)"; \
 		exit 1; }
-	tests/.venv/bin/pip install -r tools/requirements-docs.txt
+	tests/.venv/bin/pip install -r gh-pages/requirements.txt
 
 # --- M10.1 ---
 
