@@ -176,6 +176,11 @@ cat > /etc/apache2/conf-available/botshield-repo.conf <<EOF
 # at this checkout. Override by editing this file or by setting
 # BS_REPO via /etc/apache2/envvars before re-running provision.sh.
 Define BS_REPO $REPO
+# The vhost's listen addresses are Defines too, so one file serves both
+# this box and the Rocky container. Debian keeps the wildcard ports it
+# always used.
+Define BS_HTTP *:80
+Define BS_HTTPS *:443
 EOF
 a2enconf botshield-repo >/dev/null
 cp "$REPO/apache/botshield-dev.conf" /etc/apache2/sites-available/

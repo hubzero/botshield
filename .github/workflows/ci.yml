@@ -82,7 +82,7 @@ jobs:
           dnf install -y --setopt=install_weak_deps=False \
             git make gcc httpd httpd-devel openssl openssl-devel \
             libcurl-devel json-c-devel python3 python3-pip diffutils \
-            procps-ng iproute >/dev/null
+            procps-ng iproute redhat-rpm-config >/dev/null
           printf '#!/bin/sh\nexec "$@"\n' > /usr/bin/sudo
           chmod 755 /usr/bin/sudo
 

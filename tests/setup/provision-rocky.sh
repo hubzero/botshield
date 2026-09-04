@@ -55,6 +55,11 @@ command -v make   >/dev/null || need+=(make)
 [[ -e /usr/include/curl/curl.h ]]   || need+=(libcurl-devel)
 [[ -e /usr/include/json-c/json.h ]] || need+=(json-c-devel)
 command -v python3 >/dev/null || need+=(python3)
+# apxs compiles with the flags httpd itself was built with, and those
+# name /usr/lib/rpm/redhat/redhat-hardened-cc1. A minimal image has gcc
+# but not that spec file, and the build fails on a path rather than on
+# anything to do with the code.
+[[ -e /usr/lib/rpm/redhat/redhat-hardened-cc1 ]] || need+=(redhat-rpm-config)
 if [[ ${#need[@]} -gt 0 ]]; then
   say "installing: ${need[*]}"
   dnf install -y "${need[@]}" >/dev/null
