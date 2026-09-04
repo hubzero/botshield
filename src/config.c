@@ -164,6 +164,20 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
     bs_server_cfg *add  = add_v;
     bs_server_cfg *out  = apr_pmemdup(p, add, sizeof(*add));
 
+    /* BotShieldDataDir is server scope and inherits, which it was not
+     * doing. The merge starts from `add` -- the vhost -- and a vhost
+     * that never named a data directory has NULL here, so every
+     * consumer resolving through bs_data_path fell back to the
+     * compiled-in default no matter what the main server declared.
+     *
+     * The visible symptom was the allow list: its ranges resolve
+     * per-vhost, so a second instance pointed at its own directory
+     * still read the first one's crawler ranges, and a test instance on
+     * a host serving a live site read the live site's. The secret and
+     * the state file hid it, being resolved once against the main
+     * server where the value is present. */
+    if (!out->data_dir) out->data_dir = base->data_dir;
+
     if (base->allow_bots && apr_hash_count(base->allow_bots) > 0
         && add->allow_bots) {
         out->allow_bots = apr_hash_overlay(p, add->allow_bots,
@@ -1685,10 +1699,20 @@ static void bs_wire_allowlist(apr_pool_t *pconf, server_rec *s)
                 continue;
             }
 
+            /* Under BotShieldDataDir, not beside it.
+             *
+             * This was hardcoded to /var/lib/botshield/bots while the
+             * secret and the state file went through bs_data_path, so
+             * BotShieldDataDir moved two of the three things it is
+             * documented to govern. A second instance pointed at its own
+             * directory still read the first one's crawler ranges, which
+             * is the sharing that directive exists to prevent, and a
+             * test instance on a host serving a live site read the live
+             * site's. */
             const char *path = e->path
                 ? e->path
-                : apr_psprintf(pconf,
-                    "/var/lib/botshield/bots/%s.txt", e->name);
+                : bs_data_path(pconf, vcfg,
+                               apr_psprintf(pconf, "bots/%s.txt", e->name));
 
             bs_bot_file_manifest_entry *me =
                 apr_array_push(manifest->file_bots);
