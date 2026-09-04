@@ -1,8 +1,21 @@
 # Running the suite on RHEL / Rocky (isolated instance)
 
-`tests/setup/provision.sh` is Debian-only (apt, apache2, a2enmod). On a
-RHEL-family host — including one already running a production site —
-use a second httpd instance instead. Nothing below touches the live
+    sudo tests/setup/provision-rocky.sh
+
+That is the whole procedure now. It builds the module under a test-only
+name, generates the instance config, creates the directories, secrets
+and certificate, and builds the pytest virtualenv. It is idempotent, so
+re-running it after a source change is the normal way to refresh.
+
+The rest of this document is why it does what it does, which is worth
+keeping: everything below was learned by getting it wrong, and the
+script encodes it rather than replacing the explanation. This used to
+be a list of steps to follow by hand, and the suite worked only if you
+followed them correctly.
+
+`tests/setup/provision.sh` remains for Debian (apt, apache2, a2enmod).
+On a RHEL-family host — including one already running a production site
+— the isolated instance is what you want. Nothing here touches the live
 server's config, logs, state, or module binary.
 
 ## Why a second instance and not `BS_APACHE_SERVICE=httpd`

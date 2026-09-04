@@ -225,6 +225,17 @@ the `BS_*` environment variables: honouring an env var under xdist would
 send every worker back to one server. Outside xdist the `BS_*` variables
 win, and below them sit platform defaults.
 
+### Provisioning
+
+    sudo tests/setup/provision-rocky.sh     # RHEL family, and what CI runs
+    sudo tests/setup/provision.sh           # Debian family
+
+Both are idempotent and both end with a config check, so a failure
+points at the thing that is actually wrong rather than surfacing later
+as a test that cannot connect. The Rocky one is also what the CI
+container runs, which is deliberate: a provisioning path that only CI
+exercises is a path that breaks without anyone noticing.
+
 ### Platform
 
 `config.py` detects which Apache is installed and derives every default
