@@ -54,7 +54,15 @@ command -v make   >/dev/null || need+=(make)
 [[ -e /usr/include/openssl/evp.h ]] || need+=(openssl-devel)
 [[ -e /usr/include/curl/curl.h ]]   || need+=(libcurl-devel)
 [[ -e /usr/include/json-c/json.h ]] || need+=(json-c-devel)
-command -v python3 >/dev/null || need+=(python3)
+# Not bare python3: RHEL 8 ships 3.6 under that name and the pinned
+# test dependencies need 3.9 or newer, so a bare `python3 -m venv` gets
+# as far as resolving httpx before failing. Pick the newest interpreter
+# present and install one only if there is nothing usable.
+PYBIN=""
+for candidate in python3.12 python3.11 python3.10 python3.9; do
+  command -v "$candidate" >/dev/null && { PYBIN="$candidate"; break; }
+done
+[[ -n "$PYBIN" ]] || need+=(python3.11)
 # apxs compiles with the flags httpd itself was built with, and those
 # name /usr/lib/rpm/redhat/redhat-hardened-cc1. A minimal image has gcc
 # but not that spec file, and the build fails on a path rather than on
@@ -64,6 +72,8 @@ if [[ ${#need[@]} -gt 0 ]]; then
   say "installing: ${need[*]}"
   dnf install -y "${need[@]}" >/dev/null
 fi
+[[ -n "$PYBIN" ]] || PYBIN=python3.11
+say "python: $($PYBIN --version)"
 
 # The apache account owns the runtime dirs and reads the state files.
 id apache >/dev/null 2>&1 || useradd --system --no-create-home --shell /sbin/nologin apache
@@ -186,7 +196,7 @@ chmod 644 "$PREFIX/httpd.conf" "$PREFIX/dev-vhost.conf"
 VENV="$REPO/tests/.venv"
 if [[ ! -x "$VENV/bin/pytest" ]]; then
   say "creating the pytest venv"
-  python3 -m venv "$VENV"
+  "$PYBIN" -m venv "$VENV"
 fi
 "$VENV/bin/pip" install --quiet --upgrade pip >/dev/null
 "$VENV/bin/pip" install --quiet -r "$REPO/tests/requirements-test.txt" >/dev/null
