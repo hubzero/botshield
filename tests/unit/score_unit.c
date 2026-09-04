@@ -321,6 +321,39 @@ static int run_reset_cases(server_rec *s, bs_server_cfg *scfg)
     return failures;
 }
 
+/* --- config inheritance ---------------------------------------------
+ *
+ * BotShieldDataDir is server scope and inherits. It was not doing so:
+ * bs_merge_server_cfg starts from the vhost config, and a vhost that
+ * never named a directory carried NULL, so everything resolving through
+ * bs_data_path fell back to the compiled-in default however the main
+ * server was configured. Nothing tested it, which is how a directive
+ * documented as THE per-instance path came to govern the secret and
+ * the state file and quietly share the crawler ranges.
+ */
+
+typedef struct {
+    const char *name;
+    const char *base_dir;   /* main server, NULL for unset */
+    const char *add_dir;    /* vhost, NULL for unset */
+    const char *expect;     /* what bs_data_path should produce */
+} inherit_case;
+
+static int run_inherit_case(const inherit_case *c)
+{
+    bs_server_cfg *base = apr_pcalloc(g_pool, sizeof(*base));
+    bs_server_cfg *add  = apr_pcalloc(g_pool, sizeof(*add));
+    base->data_dir = c->base_dir;
+    add->data_dir  = c->add_dir;
+
+    bs_server_cfg *merged = bs_merge_server_cfg(g_pool, base, add);
+    const char *got = bs_data_path(g_pool, merged, "bots/googlebot.txt");
+
+    int ok = (strcmp(got, c->expect) == 0);
+    printf("  %-4s %-34s %s\n", ok ? "ok" : "FAIL", c->name, got);
+    return ok;
+}
+
 int main(void)
 {
     apr_initialize();
@@ -390,6 +423,22 @@ int main(void)
 
     printf("\nflag-trigger reset ordering, 4 cases\n");
     failures += run_reset_cases(s, scfg);
+
+    static const inherit_case inherits[] = {
+        { "vhost inherits the main dir", "/var/lib/bs-test", NULL,
+          "/var/lib/bs-test/bots/googlebot.txt" },
+        { "vhost overrides the main dir", "/var/lib/bs-test", "/srv/vhost",
+          "/srv/vhost/bots/googlebot.txt" },
+        { "neither set falls back",       NULL, NULL,
+          BS_DEFAULT_DATA_DIR "/bots/googlebot.txt" },
+        { "vhost only, main unset",       NULL, "/srv/vhost",
+          "/srv/vhost/bots/googlebot.txt" },
+    };
+    printf("\nBotShieldDataDir inheritance, %zu cases\n",
+           sizeof(inherits) / sizeof(inherits[0]));
+    for (unsigned i = 0; i < sizeof(inherits) / sizeof(inherits[0]); i++) {
+        if (!run_inherit_case(&inherits[i])) failures++;
+    }
 
     printf("\n%s: %d failed\n", failures ? "FAIL" : "ok", failures);
     apr_pool_destroy(g_pool);
