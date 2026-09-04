@@ -1,0 +1,100 @@
+# BotShieldHeuristicTrigger — a starting slate, not a compiled-in default.
+#
+# Nothing here is enforced automatically. The module ships no default
+# rules: an unset score threshold never fires, so a fresh deployment
+# scores nothing and challenges nothing until you declare both a
+# heuristic (or trigger) and a threshold. That is deliberate — a
+# default every deployment has to disable was not a default, and every
+# lockout this module has caused traced back to an implicit weight
+# nobody had written down. This file is what the module used to seed
+# automatically, kept as a documented starting point for anyone who
+# wants that shape rather than building it from a blank slate. It is
+# NOT a required include, and it does nothing until you paste some or
+# all of it into your own config. apache/botshield-dev.conf carries the
+# same slate wired into a live vhost, if you want to see it running
+# rather than read about it.
+#
+# Heuristics are the cheap built-in score signals — UA / header
+# patterns and first-sight Bloom-filter checks — that fire before any
+# operator-configured trigger or rate-limit rule. Promoting them to a
+# directive family means an operator can tune individual penalties,
+# disable a single heuristic, or wipe the whole slate and build it back
+# up from zero, all without recompiling the module.
+#
+# Syntax:
+#   BotShieldHeuristicTrigger <name>|all [reset] [action=<verb> args...]
+#
+# Names:
+#   missing-ua       UA header absent or empty.
+#   missing-al       Accept-Language header absent or empty.
+#   scraper-ua       UA contains a known HTTP-library token (curl,
+#                    Wget, python-requests, urllib, httpx, aiohttp,
+#                    Go-http-client, okhttp, axios, scrapy, java,
+#                    libwww, lwp-request, ...).
+#   first-sight-ip   Client IP not seen in the rotating Bloom filter
+#                    (cookieless / signature-mismatched requests
+#                    only — sig-verified clients skip this signal).
+#   dropped-cookie   Client IP IS in the Bloom filter (it has been
+#                    seen before) but the request carries no cookie
+#                    holding solve proof. Gated on solve proof rather
+#                    than mere cookie validity — a client that merely
+#                    kept an old cookie without ever passing a
+#                    challenge does not earn the waiver.
+#
+# Action verbs (same as BotShieldFlagTrigger):
+#   action=score add=N             (signed; SUM across matching entries)
+#   action=tier_floor min=<tier>   (pass|non-interactive|interactive|captcha; MAX)
+#
+# Reset:
+#   BotShieldHeuristicTrigger <name> reset           # clear that name
+#   BotShieldHeuristicTrigger <name> reset action=...  # clear + redeclare
+#   BotShieldHeuristicTrigger all reset              # wipe every entry
+#                                                    # this scope declared
+#
+# Observe-mode (logs `<reason>:observe` instead of applying):
+#   BotShieldHeuristicTrigger missing-ua action=score add=40 mode=observe
+
+# --- The starter slate -------------------------------------------------
+# Conservative score adds — none alone is enough to cross a
+# non-interactive threshold of 20 (a value you would set yourself; see
+# BotShieldScoreNonInteractive in docs/directives.md). Two together (a
+# curl with no Accept-Language: 40 + 5 + 20 first-sight = 65) clears an
+# interactive threshold of 50. The shape rewards "looks like a real
+# browser" and costs "looks like a script." Values match the
+# BS_PENALTY_* constants in src/score.h at the time this file was
+# written; the module never reads this file, so it cannot drift from
+# those constants on its own — if you copy these lines, they are yours
+# to keep in sync.
+BotShieldHeuristicTrigger missing-ua       action=score add=40
+BotShieldHeuristicTrigger missing-al       action=score add=5
+BotShieldHeuristicTrigger scraper-ua       action=score add=10
+BotShieldHeuristicTrigger first-sight-ip   action=score add=20
+BotShieldHeuristicTrigger dropped-cookie   action=score add=25
+
+# --- Common overrides ------------------------------------------------
+#
+# Soften the missing-UA penalty (keep it as a signal but don't bump
+# tier on its own):
+#   BotShieldHeuristicTrigger missing-ua reset action=score add=10
+#
+# Disable scraper-UA matching entirely (e.g., when a legitimate API
+# integration uses a Go-http-client UA):
+#   BotShieldHeuristicTrigger scraper-ua reset
+#
+# Promote first-sight-ip from a small score nudge to a tier_floor.
+# Every never-before-seen client lands in the non-interactive tier
+# regardless of their other signals; a verified pass graduates them out:
+#   BotShieldHeuristicTrigger first-sight-ip reset
+#   BotShieldHeuristicTrigger first-sight-ip action=tier_floor min=non-interactive
+#
+# Stage a tighter scraper-UA penalty in observe mode for one release
+# before enforcing:
+#   BotShieldHeuristicTrigger scraper-ua action=score add=80 mode=observe
+#   # logs `scraper-ua-<token>:observe` on every fire; drop
+#   # mode=observe once the rate looks right.
+#
+# Multiple actions on the same heuristic accumulate (SUM for score,
+# MAX for tier_floor). Example: keep the +10 score above AND add a
+# tier_floor for an extra-strict deployment:
+#   BotShieldHeuristicTrigger scraper-ua action=tier_floor min=interactive
+#   # combined effect: +10 score AND a tier floor at interactive

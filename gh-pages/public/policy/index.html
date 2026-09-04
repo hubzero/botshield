@@ -59,7 +59,11 @@
 </a>
 <a class="docs-nav__item" href="../directives/index.html">
   <span class="docs-nav__title">Directive reference</span>
-  <span class="docs-nav__summary">Canonical reference for all 85 directives, grouped by family.</span>
+  <span class="docs-nav__summary">Canonical reference for all 100 directives, grouped by family.</span>
+</a>
+<a class="docs-nav__item" href="../examples/index.html">
+  <span class="docs-nav__title">Example configs</span>
+  <span class="docs-nav__summary">The starter flag- and heuristic-trigger slate the module used to seed automatically, kept as an annotated starting point.</span>
 </a>
 <a class="docs-nav__item" href="../troubleshooting/index.html">
   <span class="docs-nav__title">Troubleshooting</span>
@@ -101,7 +105,7 @@
 <li class="toc__item toc__item--level-3"><a href="#feedback-triggers">Feedback triggers</a></li>
 <li class="toc__item toc__item--level-3"><a href="#load-triggers">Load triggers</a></li>
 <li class="toc__item toc__item--level-2"><a href="#flag-trigger-family">Flag-trigger family</a></li>
-<li class="toc__item toc__item--level-3"><a href="#compiled-in-defaults">Compiled-in defaults</a></li>
+<li class="toc__item toc__item--level-3"><a href="#no-compiled-in-defaults">No compiled-in defaults</a></li>
 <li class="toc__item toc__item--level-3"><a href="#per-apache-scope-triggers-botshieldtrigger">Per-Apache-scope triggers — `BotShieldTrigger`</a></li>
 <li class="toc__item toc__item--level-2"><a href="#safeguard">Safeguard</a></li>
 <li class="toc__item toc__item--level-2"><a href="#where-to-next">Where to next</a></li>
@@ -505,25 +509,32 @@ is <code>pass</code> / <code>non-interactive</code> / <code>interactive</code> /
 </ul>
 <p>The <code>reset</code> keyword is directive-level (not an action verb): a
 line of the form <code>BotShieldFlagTrigger &lt;flag&gt; reset</code> clears every
-prior trigger (compiled-in default + earlier declarations)
-for that flag at post-config time. <code>reset</code> may appear with or
-without a trailing <code>action=...</code>:</p>
-<pre><code class="language-apache"># Wipe defaults, install only one tier-floor rule:
-BotShieldFlagTrigger honeypot_hit reset action=tier_floor min=form
+prior declaration for that flag from this scope at post-config
+time. <code>reset</code> may appear with or without a trailing <code>action=...</code>:</p>
+<pre><code class="language-apache"># Clear whatever this scope already declared for honeypot_hit,
+# install only one tier-floor rule:
+BotShieldFlagTrigger honeypot_hit reset action=tier_floor min=interactive
 
 # Disarm a flag entirely:
 BotShieldFlagTrigger pow_fail_streak reset
 </code></pre>
-<h3 id="compiled-in-defaults">Compiled-in defaults</h3>
-<p>mod_botshield seeds the flag-trigger table at config-parse time
-with sensible defaults so a fresh install gets honeypot / fake-bot
-detection without any additional config. Each detection-signal
-flag is seeded as paired score + tier_floor rows:</p>
+<h3 id="no-compiled-in-defaults">No compiled-in defaults</h3>
+<p>The module seeds nothing at config-parse time. A fresh install
+scores nothing and challenges nothing until you declare both a
+flag trigger and a tier threshold — the module used to seed a
+sensible-looking slate automatically, and that was removed: a
+default every deployment has to disable was not a default, and
+every lockout this module has caused traced back to an implicit
+weight nobody had written down.</p>
+<p>The slate it used to seed is kept as a documented starting point
+rather than deleted outright — <a href="../examples/index.html">the flag-triggers example</a>
+and its heuristic-trigger counterpart, with the same values these
+paired score + tier_floor rows used to carry:</p>
 <table>
 <thead>
 <tr>
 <th>Flag</th>
-<th>Default action</th>
+<th>Starter action</th>
 </tr>
 </thead>
 <tbody>
@@ -537,11 +548,11 @@ flag is seeded as paired score + tier_floor rows:</p>
 </tr>
 <tr>
 <td><code>scanner_probe</code></td>
-<td><code>score add=+50</code>, <code>tier_floor min=form</code></td>
+<td><code>score add=+50</code>, <code>tier_floor min=interactive</code></td>
 </tr>
 <tr>
 <td><code>pow_fail_streak</code></td>
-<td><code>score add=+30</code>, <code>tier_floor min=silent</code></td>
+<td><code>score add=+30</code>, <code>tier_floor min=non-interactive</code></td>
 </tr>
 <tr>
 <td><code>app_verified_human</code></td>
@@ -560,9 +571,11 @@ flag is seeded as paired score + tier_floor rows:</p>
 <p>Trust signals (credits) are score-only by design; no credit ever
 forces tier <em>down</em>. A verified-human flag can't unlock a request
 that already tripped a different tier_floor.</p>
-<p>Configured <code>BotShieldFlagTrigger</code> directives override the
-defaults for the matching flag bit + action verb pair (later
-declarations win, same as every other trigger family).</p>
+<p>None of this is active unless you paste it into your own config.
+Once you have, a later <code>BotShieldFlagTrigger</code> line for the same
+flag bit and action verb adds to it (SUM for score, MAX for
+tier_floor) — use <code>reset</code> first if you want to replace rather than
+accumulate.</p>
 <h3 id="per-apache-scope-triggers-botshieldtrigger">Per-Apache-scope triggers — <code>BotShieldTrigger</code></h3>
 <p>For everything else you want to do at a specific Apache
 scope — flag the IP, add a penalty, return a status, observe in

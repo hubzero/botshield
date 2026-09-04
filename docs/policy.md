@@ -405,31 +405,39 @@ Two action verbs:
 
 The `reset` keyword is directive-level (not an action verb): a
 line of the form `BotShieldFlagTrigger <flag> reset` clears every
-prior trigger (compiled-in default + earlier declarations)
-for that flag at post-config time. `reset` may appear with or
-without a trailing `action=...`:
+prior declaration for that flag from this scope at post-config
+time. `reset` may appear with or without a trailing `action=...`:
 
 ```apache
-# Wipe defaults, install only one tier-floor rule:
-BotShieldFlagTrigger honeypot_hit reset action=tier_floor min=form
+# Clear whatever this scope already declared for honeypot_hit,
+# install only one tier-floor rule:
+BotShieldFlagTrigger honeypot_hit reset action=tier_floor min=interactive
 
 # Disarm a flag entirely:
 BotShieldFlagTrigger pow_fail_streak reset
 ```
 
-### Compiled-in defaults
+### No compiled-in defaults
 
-mod_botshield seeds the flag-trigger table at config-parse time
-with sensible defaults so a fresh install gets honeypot / fake-bot
-detection without any additional config. Each detection-signal
-flag is seeded as paired score + tier_floor rows:
+The module seeds nothing at config-parse time. A fresh install
+scores nothing and challenges nothing until you declare both a
+flag trigger and a tier threshold — the module used to seed a
+sensible-looking slate automatically, and that was removed: a
+default every deployment has to disable was not a default, and
+every lockout this module has caused traced back to an implicit
+weight nobody had written down.
 
-| Flag | Default action |
+The slate it used to seed is kept as a documented starting point
+rather than deleted outright — [the flag-triggers example](../examples/index.html)
+and its heuristic-trigger counterpart, with the same values these
+paired score + tier_floor rows used to carry:
+
+| Flag | Starter action |
 |---|---|
 | `honeypot_hit` | `score add=+60`, `tier_floor min=captcha` |
 | `fake_bot` | `score add=+80`, `tier_floor min=captcha` |
-| `scanner_probe` | `score add=+50`, `tier_floor min=form` |
-| `pow_fail_streak` | `score add=+30`, `tier_floor min=silent` |
+| `scanner_probe` | `score add=+50`, `tier_floor min=interactive` |
+| `pow_fail_streak` | `score add=+30`, `tier_floor min=non-interactive` |
 | `app_verified_human` | `score add=-80` |
 | `app_verified_session` | `score add=-40` |
 | `app_trust_signal` | `score add=-20` |
@@ -438,9 +446,11 @@ Trust signals (credits) are score-only by design; no credit ever
 forces tier *down*. A verified-human flag can't unlock a request
 that already tripped a different tier_floor.
 
-Configured `BotShieldFlagTrigger` directives override the
-defaults for the matching flag bit + action verb pair (later
-declarations win, same as every other trigger family).
+None of this is active unless you paste it into your own config.
+Once you have, a later `BotShieldFlagTrigger` line for the same
+flag bit and action verb adds to it (SUM for score, MAX for
+tier_floor) — use `reset` first if you want to replace rather than
+accumulate.
 
 ### Per-Apache-scope triggers — `BotShieldTrigger`
 

@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Example configs | BotShield</title>
+  <meta name="description" content="The starter flag- and heuristic-trigger slate the module used to seed automatically, kept as an annotated starting point.">
+  <link rel="stylesheet" href="../assets/site.css">
+</head>
+<body class="site-doc">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <div class="page-shell">
+    <header class="site-header site-header--compact">
+      <a class="brand" href="../index.html">
+        <img class="brand__icon" src="../assets/logo-botshield-icon.svg" alt="" aria-hidden="true">
+        <span class="brand__wordmark" aria-label="BotShield">
+          <span class="brand__wordmark-soft">Bot</span><span class="brand__wordmark-strong">Shield</span>
+        </span>
+      </a>
+      <span class="site-header__beta" aria-label="Beta release">Beta</span>
+      <nav class="top-nav" aria-label="Primary">
+        <a class="top-nav__link" href="https://github.com/hubzero/botshield">GitHub</a>
+        <a class="top-nav__link" href="../getting-started/index.html">Docs</a>
+        <a class="top-nav__link" href="https://github.com/hubzero/botshield/releases">Download</a>
+      </nav>
+    </header>
+
+    <main id="main-content" class="docs-layout" tabindex="-1">
+      <aside class="docs-sidebar">
+        <p class="docs-sidebar__eyebrow">Docs</p>
+        <nav class="docs-nav" aria-label="Documentation">
+<a class="docs-nav__item" href="../getting-started/index.html">
+  <span class="docs-nav__title">Getting started</span>
+  <span class="docs-nav__summary">Install, build, minimal configuration, and verifying a first request.</span>
+</a>
+<a class="docs-nav__item" href="../deployment/index.html">
+  <span class="docs-nav__title">Deployment</span>
+  <span class="docs-nav__summary">Reverse proxies, slow-client defense, multi-vhost reputation, secret rotation, capacity sizing.</span>
+</a>
+<a class="docs-nav__item" href="../site-model/index.html">
+  <span class="docs-nav__title">Site model</span>
+  <span class="docs-nav__summary">Tiers, scoring, cookie-carried reputation, decision log, tuning workflow.</span>
+</a>
+<a class="docs-nav__item" href="../policy/index.html">
+  <span class="docs-nav__title">Policy</span>
+  <span class="docs-nav__summary">UA classification, rate limits, path triggers, robots.txt, the trigger families, and flag triggers.</span>
+</a>
+<a class="docs-nav__item" href="../captcha/index.html">
+  <span class="docs-nav__title">Captcha and app-bridge</span>
+  <span class="docs-nav__summary">Third-party captcha providers, verify-endpoint hardening, and the signed app-bridge protocols.</span>
+</a>
+<a class="docs-nav__item" href="../staging/index.html">
+  <span class="docs-nav__title">Staging</span>
+  <span class="docs-nav__summary">Per-rule observe and global shadow mode for safe rule rollout.</span>
+</a>
+<a class="docs-nav__item" href="../observability/index.html">
+  <span class="docs-nav__title">Observability</span>
+  <span class="docs-nav__summary">Decision log, Prometheus metrics, mod_status contribution, and the policy-status admin page.</span>
+</a>
+<a class="docs-nav__item" href="../directives/index.html">
+  <span class="docs-nav__title">Directive reference</span>
+  <span class="docs-nav__summary">Canonical reference for all 100 directives, grouped by family.</span>
+</a>
+<a class="docs-nav__item is-active" href="index.html">
+  <span class="docs-nav__title">Example configs</span>
+  <span class="docs-nav__summary">The starter flag- and heuristic-trigger slate the module used to seed automatically, kept as an annotated starting point.</span>
+</a>
+<a class="docs-nav__item" href="../troubleshooting/index.html">
+  <span class="docs-nav__title">Troubleshooting</span>
+  <span class="docs-nav__summary">Common issues, diagnostics, and fixes.</span>
+</a>
+<a class="docs-nav__item" href="../faq/index.html">
+  <span class="docs-nav__title">FAQ</span>
+  <span class="docs-nav__summary">Honest answers to questions teams ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
+</a>
+<a class="docs-nav__item" href="../guide/index.html">
+  <span class="docs-nav__title">Project README</span>
+  <span class="docs-nav__summary">Repository README — project overview, build instructions, and dev configuration.</span>
+</a>
+        </nav>
+      </aside>
+
+      <article class="docs-article">
+        <header class="docs-article__header">
+          <p class="eyebrow">Documentation</p>
+          <h1>Example configs</h1>
+          <p class="docs-article__summary">The starter flag- and heuristic-trigger slate the module used to seed automatically, kept as an annotated starting point.</p>
+          <p class="docs-article__source">Example configs</p>
+        </header>
+<section class="toc">
+  <h2 class="toc__heading">On this page</h2>
+  <ul class="toc__list">
+<li class="toc__item toc__item--level-2"><a href="#what-s-here">What&#x27;s here</a></li>
+<li class="toc__item toc__item--level-2"><a href="#seeing-it-running-rather-than-reading-about-it">Seeing it running rather than reading about it</a></li>
+<li class="toc__item toc__item--level-2"><a href="#adopting-it">Adopting it</a></li>
+  </ul>
+</section>
+        <div class="prose">
+<p>The module ships no default rules. An unset score threshold never
+fires, so a fresh deployment scores nothing and challenges nothing
+until you declare both a trigger and a threshold — see
+<a href="../policy/index.html#no-compiled-in-defaults">Policy</a> for why. These two files
+are what the module used to seed automatically before that changed.
+They are kept as a documented starting point for anyone who wants that
+shape, not because the module needs them.</p>
+<p>Neither is a required include. Copy what you want into your own
+config; the module never reads either file.</p>
+<h2 id="what-s-here">What's here</h2>
+<ul>
+<li><strong><a href="https://github.com/hubzero/botshield/blob/main/docs/examples/flag-triggers.conf.example"><code>flag-triggers.conf.example</code></a></strong>
+— the <code>BotShieldFlagTrigger</code> slate: honeypot and fake-bot detection
+forced to captcha, scanner-probe and repeat-PoW-failure signals
+escalating tier, and the three application-issued trust credits
+(<code>app_verified_human</code>, <code>app_verified_session</code>, <code>app_trust_signal</code>)
+that subtract score without ever raising tier.</li>
+<li><strong><a href="https://github.com/hubzero/botshield/blob/main/docs/examples/heuristic-triggers.conf.example"><code>heuristic-triggers.conf.example</code></a></strong>
+— the <code>BotShieldHeuristicTrigger</code> slate: conservative score adds for
+a missing User-Agent, a missing Accept-Language, a known
+HTTP-library UA token, an IP never seen before, and a cookie held
+without ever passing a challenge.</li>
+</ul>
+<p>Both files are annotated in full — syntax, every match key, the
+<code>reset</code> keyword, <code>mode=observe</code> staging — so they double as a
+directive-family reference you can read next to real values instead of
+in the abstract.</p>
+<h2 id="seeing-it-running-rather-than-reading-about-it">Seeing it running rather than reading about it</h2>
+<p><code>apache/botshield-dev.conf</code> in the repository wires the same slate
+into a live vhost, alongside the score thresholds that make it act
+(<code>BotShieldScoreNonInteractive</code>, <code>BotShieldScoreInteractive</code>,
+<code>BotShieldScoreCaptcha</code> — themselves unset by default, for the same
+reason). That is the fastest way to see the starter slate doing
+something rather than just reading its comments.</p>
+<h2 id="adopting-it">Adopting it</h2>
+<ol>
+<li>Pick a threshold. Nothing fires without
+<code>BotShieldScoreNonInteractive</code>, <code>BotShieldScoreInteractive</code>, and
+<code>BotShieldScoreCaptcha</code> set — the <a href="../directives/index.html">Directive reference</a>
+has the syntax, and <code>httpd -t -D DUMP_BOTSHIELD_POLICY</code> will tell
+you which of the three you've left unset.</li>
+<li>Copy the lines you want from either file into your vhost or server
+config.</li>
+<li>Reload, then read the results back with the same dump flag — it
+prints every effective flag trigger and heuristic with its source,
+so &quot;is this rule actually in effect&quot; never has to be a guess. See
+<a href="../policy/index.html#reading-the-effective-policy">Policy</a> for what that
+output looks like.</li>
+</ol>
+<p>The values in both files match this project's own <code>src/score.h</code> at the
+time they were written. The module never reads either file, so nothing
+keeps them in sync with the header automatically — once you've copied
+a line into your own config, it's yours to keep current.</p>
+
+        </div>
+      </article>
+    </main>
+  </div>
+</body>
+</html>

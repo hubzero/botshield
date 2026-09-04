@@ -219,7 +219,7 @@ the CIDR files.
 Importantly, the allow-list also catches *fakes*: a request whose
 UA matches "Googlebot/" but whose IP isn't Googlebot's gets a
 strong penalty (`fake-googlebot`) — bot operators love claiming
-to be search engines. See [policy](../policy/index.html#allow-list-e1-verified-crawlers).
+to be search engines. See [policy](../policy/index.html#allow-list-verified-crawlers).
 
 For LLM crawlers (GPTBot, ClaudeBot, anthropic-ai, Google-
 Extended) — sites that want to block them by default can pair

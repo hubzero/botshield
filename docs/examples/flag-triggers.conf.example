@@ -1,28 +1,34 @@
-# BotShieldFlagTrigger — illustrative reference for the compiled-in
-# default rule set.
+# BotShieldFlagTrigger — a starting slate, not a compiled-in default.
 #
-# This file is NOT a required include. mod_botshield ships these
-# rules compiled into the module and seeds them into every server
-# scope at post_config time, so the module Just Works with zero
-# config. The file exists only so operators who want to see the
-# defaults can read them in a familiar httpd.conf shape, and so
-# operators tweaking behavior have a starting template.
+# Nothing here is enforced automatically. The module ships no default
+# rules: an unset score threshold never fires, so a fresh deployment
+# scores nothing and challenges nothing until you declare both a flag
+# (or heuristic) trigger and a threshold. That is deliberate — a
+# default every deployment has to disable was not a default, and every
+# lockout this module has caused traced back to an implicit weight
+# nobody had written down. This file is what the module used to seed
+# automatically, kept as a documented starting point for anyone who
+# wants that shape rather than building it from a blank slate. It is
+# NOT a required include, and it does nothing until you paste some or
+# all of it into your own config. apache/botshield-dev.conf carries the
+# same slate wired into a live vhost, if you want to see it running
+# rather than read about it.
 #
-# To extend: add `BotShieldFlagTrigger` lines to your vhost or
-# server config. Score actions accumulate (SUM); tier_floor actions
-# take MAX (strictest tier wins). Operator declarations append
-# after the defaults — they don't replace them unless you use the
-# `reset` keyword on a per-flag basis.
+# To extend: add `BotShieldFlagTrigger` lines to your vhost or server
+# config. Score actions accumulate (SUM); tier_floor actions take MAX
+# (strictest tier wins). A later declaration for the same flag adds to
+# an earlier one from this same file unless you use the `reset`
+# keyword to clear it first.
 #
 # Syntax:
 #   BotShieldFlagTrigger <flag_name> [reset] [action=<verb> args...]
 #
 # Action verbs:
 #   action=score add=N             (signed; SUM across matching triggers)
-#   action=tier_floor min=<tier>   (pass|silent|form|captcha; MAX)
+#   action=tier_floor min=<tier>   (pass|non-interactive|interactive|captcha; MAX)
 #
-# Reset keyword (clears earlier entries — defaults AND prior operator
-# lines — for the same flag, processed at config-load time):
+# Reset keyword (clears every prior declaration — from this file or
+# your own config — for the same flag, processed at config-load time):
 #   BotShieldFlagTrigger <flag> reset                              # bare
 #   BotShieldFlagTrigger <flag> reset action=<verb> ...            # +inline
 #   BotShieldFlagTrigger <flag> reset                              # multi-
@@ -44,45 +50,46 @@ BotShieldFlagTrigger fake_bot              action=tier_floor min=captcha
 
 # --- Detection signals — probable -----------------------------------
 # Scanner probes (vulnerability-scan path patterns) are usually bots
-# but occasionally legitimate research traffic. Push score and
-# require a form-PoW solve — strong friction without the captcha
+# but occasionally legitimate research traffic. Push score and require
+# an interactive-tier solve — strong friction without the captcha
 # accessibility cost.
 BotShieldFlagTrigger scanner_probe         action=score      add=50
-BotShieldFlagTrigger scanner_probe         action=tier_floor min=form
+BotShieldFlagTrigger scanner_probe         action=tier_floor min=interactive
 
 # --- Detection signals — accumulating -------------------------------
 # Repeat PoW failures from one cookie. Could be a broken client
 # (JS disabled, time-skewed, CSP-stripped) or a scripted attacker
-# trying to brute the challenge. Bump to silent — the next solve
-# proves human behavior cheaply, and the score addition primes
+# trying to brute the challenge. Bump to non-interactive — the next
+# solve proves human behavior cheaply, and the score addition primes
 # the request near the tier-bump threshold.
 BotShieldFlagTrigger pow_fail_streak       action=score      add=30
-BotShieldFlagTrigger pow_fail_streak       action=tier_floor min=silent
+BotShieldFlagTrigger pow_fail_streak       action=tier_floor min=non-interactive
 
 # --- Trust signals (credits) ----------------------------------------
-# Application-issued reputation. The app sees session-bound state
-# the module can't (logged-in user, prior good behavior, etc.) and
-# feeds back via the X-BotShield-Feedback header surface. Credits
-# subtract score; they never RAISE tier — a credit shouldn't force
-# a request UP. Multiple credits compose additively (SUM).
+# Application-issued reputation. The app sees session-bound state the
+# module can't (logged-in user, prior good behavior, etc.) and feeds
+# back via the X-BotShield-Feedback header surface. Credits subtract
+# score; they never RAISE tier — a credit shouldn't force a request UP.
+# Multiple credits compose additively (SUM).
 BotShieldFlagTrigger app_verified_human    action=score      add=-80
 BotShieldFlagTrigger app_verified_session  action=score      add=-40
 BotShieldFlagTrigger app_trust_signal      action=score      add=-20
 
 # --- Common overrides -----------------------------------------------
 #
-# Soften captcha to form on honeypot_hit (e.g., behind a CDN where
-# captcha is troublesome):
+# Soften captcha to interactive on honeypot_hit (e.g., behind a CDN
+# where captcha is troublesome):
 #   BotShieldFlagTrigger honeypot_hit reset action=score add=60
-#   BotShieldFlagTrigger honeypot_hit       action=tier_floor min=form
+#   BotShieldFlagTrigger honeypot_hit       action=tier_floor min=interactive
 #
 # Disable pow_fail_streak escalation entirely (e.g., when running
 # behind a JS-restricting client that legitimately fails the PoW):
 #   BotShieldFlagTrigger pow_fail_streak reset
 #
-# Stronger app credit (push score down 120 instead of 80):
+# Stronger app credit, on top of the -80 line above (push score down
+# 120 total instead of 80):
 #   BotShieldFlagTrigger app_verified_human action=score add=-40
-#   # combined effect: -80 (default) + -40 (operator) = -120
+#   # combined effect: -80 (this file) + -40 (your line) = -120
 #
 # Try a new rule in observe-mode for one release before enforcing:
 #   BotShieldFlagTrigger scanner_probe action=tier_floor min=captcha mode=observe

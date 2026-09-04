@@ -15,7 +15,7 @@
   <a href="https://hubzero.github.io/botshield/"><img src="https://img.shields.io/badge/docs-Pages-blue" alt="docs"></a>
   <a href="https://httpd.apache.org/"><img src="https://img.shields.io/badge/Apache-2.4-D22128?logo=apache&logoColor=white" alt="Apache 2.4 module"></a>
   <a href="https://en.cppreference.com/w/c"><img src="https://img.shields.io/badge/language-C99-blue" alt="C99"></a>
-  <a href="#whats-shipped"><img src="https://img.shields.io/badge/status-in%20production-green" alt="status: in production"></a>
+  <a href="#what-ships"><img src="https://img.shields.io/badge/status-in%20production-green" alt="status: in production"></a>
 </p>
 
 Adaptive bot mitigation for the Apache HTTP Server, running in
@@ -38,7 +38,7 @@ live in [DESIGN.md](DESIGN.md). Site handbook lives in `docs/` and
 renders to GitHub Pages via `gh-pages/`; see the
 [documentation index](#documentation) below.
 
-## What's shipped
+## What ships
 
 - **Tiered challenges.** Pass / non-interactive (auto-submitted proof
   of work) / interactive (checkbox widget) / captcha (third-party
@@ -113,6 +113,7 @@ from these sources):
 | Getting started — install, first vhost, smoke test | [`docs/getting-started.md`](docs/getting-started.md) |
 | Site model — scoring, tiers, cookie reputation, multi-vhost | [`docs/site-model.md`](docs/site-model.md) |
 | Directives reference | [`docs/directives.md`](docs/directives.md) |
+| Example configs — the starter flag/heuristic-trigger slate | [`docs/examples.md`](docs/examples.md) |
 | Policy — triggers, rate limits, robots.txt | [`docs/policy.md`](docs/policy.md) |
 | Captcha tier — providers, hardening, configuration | [`docs/captcha.md`](docs/captcha.md) |
 | Deployment — reverse proxy, slowloris, capacity sizing, secret rotation | [`docs/deployment.md`](docs/deployment.md) |

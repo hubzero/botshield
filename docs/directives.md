@@ -372,7 +372,7 @@ addresses sharing reputation.
 `BotShieldStateFile` gives crash-durable persistence to the flagged-IP
 table, the Bloom filters, and the metrics counters and dashboard bucket
 rings. Rate-limit counters are deliberately excluded — see
-[Deployment](deployment.md). The periodic save requires `mod_watchdog`;
+[Deployment](../deployment/index.html). The periodic save requires `mod_watchdog`;
 the graceful-shutdown save runs regardless. State format mismatches on
 load reject the file with a NOTICE and start fresh — never a startup
 failure.
@@ -493,7 +493,7 @@ CIDRs, or `*` alone for UA-only matching (logged as
 `/var/lib/botshield/bots/<name>.txt`. A `<name>` matching a bundled
 built-in (`googlebot`, `bingbot`, `applebot`, `googleother`,
 `siteimprove`) replaces that built-in. See
-[policy](../policy/index.html#allow-list-e1-verified-crawlers) for the
+[policy](../policy/index.html#allow-list-verified-crawlers) for the
 verified / fake / unverified outcomes.
 
 `BotShieldAllowRangesRefreshInterval` re-stats the verified-bot CIDR
@@ -583,7 +583,7 @@ plus optional `ua=` / `ipspec=` match keys — see the [Triggers](
 
 `BotShieldRateLimitEscalate` upgrades repeated 429s on the same
 client to a stickier status code — see
-[policy](../policy/index.html#repeated-429-escalation-e9).
+[policy](../policy/index.html#repeated-429-escalation).
 
 ## Robots.txt enforcement
 
@@ -598,7 +598,7 @@ client to a stickier status code — see
 without returning 403 — the way to see what enforcing a robots.txt you
 did not write would cost before you enforce it.
 
-See [policy](../policy/index.html#robotstxt-enforcement-e22) for the matcher
+See [policy](../policy/index.html#robots-txt-enforcement) for the matcher
 semantics and refresh model.
 
 ## Triggers
@@ -612,7 +612,7 @@ semantics and refresh model.
 | `BotShieldLoadTrigger` | `<name> state=<n>\|state>=<n>` | `status=`, `log=`, `accesslog=`, `penalty=`, `mode=` (no `redirect=`, `flag=`, `ttl=`) |
 | `BotShieldSessionCookieName` | `<name>` (single arg, repeatable) | n/a (feeds cookies=session predicate) |
 
-See [policy](../policy/index.html#triggers--predicate-action-engine-e3-e4-e6-e73-e112)
+See [policy](../policy/index.html#triggers-predicate-action-engine)
 for full predicate vocabulary and family-by-family semantics.
 
 `BotShieldSessionCookieName` registers a name that the
@@ -862,8 +862,8 @@ after a solve.
 Flag bits: `honeypot_hit`, `scanner_probe`, `fake_bot`,
 `pow_fail_streak`, `app_verified_human`, `app_verified_session`,
 `app_trust_signal`. See
-[policy](../policy/index.html#flag-trigger-family-e14) for compiled-in
-defaults and override semantics.
+[policy](../policy/index.html#flag-trigger-family) for the starter
+slate and override semantics.
 
 ## Heuristic triggers
 
@@ -966,7 +966,7 @@ browser version) and offers a Continue link back to the original
 URL. It is auto-routed by the module — no `<Location>` carve-out
 needed.
 
-See [policy](../policy/index.html#safeguard-e10) and
+See [policy](../policy/index.html#safeguard) and
 [site model](../site-model/index.html#tier-ladder) for the
 behavior arc.
 
@@ -1032,7 +1032,7 @@ stall the code whose job is to shed load because the database is sick.
 
 The trigger family that consumes the state lives under
 `BotShieldLoadTrigger` (above). See
-[policy](../policy/index.html#load-triggers-e112).
+[policy](../policy/index.html#load-triggers).
 
 ## Multi-vhost reputation
 

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Directive reference | BotShield</title>
-  <meta name="description" content="Canonical reference for all 85 directives, grouped by family.">
+  <meta name="description" content="Canonical reference for all 100 directives, grouped by family.">
   <link rel="stylesheet" href="../assets/site.css">
 </head>
 <body class="site-doc">
@@ -59,7 +59,11 @@
 </a>
 <a class="docs-nav__item is-active" href="index.html">
   <span class="docs-nav__title">Directive reference</span>
-  <span class="docs-nav__summary">Canonical reference for all 85 directives, grouped by family.</span>
+  <span class="docs-nav__summary">Canonical reference for all 100 directives, grouped by family.</span>
+</a>
+<a class="docs-nav__item" href="../examples/index.html">
+  <span class="docs-nav__title">Example configs</span>
+  <span class="docs-nav__summary">The starter flag- and heuristic-trigger slate the module used to seed automatically, kept as an annotated starting point.</span>
 </a>
 <a class="docs-nav__item" href="../troubleshooting/index.html">
   <span class="docs-nav__title">Troubleshooting</span>
@@ -80,7 +84,7 @@
         <header class="docs-article__header">
           <p class="eyebrow">Documentation</p>
           <h1>Directive reference</h1>
-          <p class="docs-article__summary">Canonical reference for all 85 directives, grouped by family.</p>
+          <p class="docs-article__summary">Canonical reference for all 100 directives, grouped by family.</p>
           <p class="docs-article__source">Directive reference</p>
         </header>
 <section class="toc">
@@ -754,7 +758,7 @@ addresses sharing reputation.</p>
 <p><code>BotShieldStateFile</code> gives crash-durable persistence to the flagged-IP
 table, the Bloom filters, and the metrics counters and dashboard bucket
 rings. Rate-limit counters are deliberately excluded — see
-<a href="deployment.md">Deployment</a>. The periodic save requires <code>mod_watchdog</code>;
+<a href="../deployment/index.html">Deployment</a>. The periodic save requires <code>mod_watchdog</code>;
 the graceful-shutdown save runs regardless. State format mismatches on
 load reject the file with a NOTICE and start fresh — never a startup
 failure.</p>
@@ -912,7 +916,7 @@ CIDRs, or <code>*</code> alone for UA-only matching (logged as
 <code>/var/lib/botshield/bots/&lt;name&gt;.txt</code>. A <code>&lt;name&gt;</code> matching a bundled
 built-in (<code>googlebot</code>, <code>bingbot</code>, <code>applebot</code>, <code>googleother</code>,
 <code>siteimprove</code>) replaces that built-in. See
-<a href="../policy/index.html#allow-list-e1-verified-crawlers">policy</a> for the
+<a href="../policy/index.html#allow-list-verified-crawlers">policy</a> for the
 verified / fake / unverified outcomes.</p>
 <p><code>BotShieldAllowRangesRefreshInterval</code> re-stats the verified-bot CIDR
 files (<code>&lt;name&gt;.txt</code> plus an operator sidecar <code>&lt;base&gt;.local.txt</code>) and
@@ -1005,7 +1009,7 @@ directive, retired), use <code>BotShieldRequestTrigger</code> with <code>status=
 plus optional <code>ua=</code> / <code>ipspec=</code> match keys — see the <a href="#triggers">Triggers</a> section below.</p>
 <p><code>BotShieldRateLimitEscalate</code> upgrades repeated 429s on the same
 client to a stickier status code — see
-<a href="../policy/index.html#repeated-429-escalation-e9">policy</a>.</p>
+<a href="../policy/index.html#repeated-429-escalation">policy</a>.</p>
 <h2 id="robots-txt-enforcement">Robots.txt enforcement</h2>
 <table>
 <thead>
@@ -1041,7 +1045,7 @@ client to a stickier status code — see
 <p><code>BotShieldRobotsMode observe</code> records what a <code>Disallow</code> would have done
 without returning 403 — the way to see what enforcing a robots.txt you
 did not write would cost before you enforce it.</p>
-<p>See <a href="../policy/index.html#robotstxt-enforcement-e22">policy</a> for the matcher
+<p>See <a href="../policy/index.html#robots-txt-enforcement">policy</a> for the matcher
 semantics and refresh model.</p>
 <h2 id="triggers">Triggers</h2>
 <table>
@@ -1085,7 +1089,7 @@ semantics and refresh model.</p>
 </tr>
 </tbody>
 </table>
-<p>See <a href="../policy/index.html#triggers--predicate-action-engine-e3-e4-e6-e73-e112">policy</a>
+<p>See <a href="../policy/index.html#triggers-predicate-action-engine">policy</a>
 for full predicate vocabulary and family-by-family semantics.</p>
 <p><code>BotShieldSessionCookieName</code> registers a name that the
 <code>cookies=session</code> cookie-trigger predicate considers a session
@@ -1366,8 +1370,8 @@ after a solve.</p>
 <p>Flag bits: <code>honeypot_hit</code>, <code>scanner_probe</code>, <code>fake_bot</code>,
 <code>pow_fail_streak</code>, <code>app_verified_human</code>, <code>app_verified_session</code>,
 <code>app_trust_signal</code>. See
-<a href="../policy/index.html#flag-trigger-family-e14">policy</a> for compiled-in
-defaults and override semantics.</p>
+<a href="../policy/index.html#flag-trigger-family">policy</a> for the starter
+slate and override semantics.</p>
 <h2 id="heuristic-triggers">Heuristic triggers</h2>
 <table>
 <thead>
@@ -1529,7 +1533,7 @@ auto-check failed (JavaScript disabled, privacy extension,
 browser version) and offers a Continue link back to the original
 URL. It is auto-routed by the module — no <code>&lt;Location&gt;</code> carve-out
 needed.</p>
-<p>See <a href="../policy/index.html#safeguard-e10">policy</a> and
+<p>See <a href="../policy/index.html#safeguard">policy</a> and
 <a href="../site-model/index.html#tier-ladder">site model</a> for the
 behavior arc.</p>
 <h2 id="load-aware-throttling">Load-aware throttling</h2>
@@ -1646,7 +1650,7 @@ the watchdog and a database too sick to answer must not be able to
 stall the code whose job is to shed load because the database is sick.</p>
 <p>The trigger family that consumes the state lives under
 <code>BotShieldLoadTrigger</code> (above). See
-<a href="../policy/index.html#load-triggers-e112">policy</a>.</p>
+<a href="../policy/index.html#load-triggers">policy</a>.</p>
 <h2 id="multi-vhost-reputation">Multi-vhost reputation</h2>
 <table>
 <thead>

@@ -57,7 +57,13 @@
       "slug": "directives",
       "title": "Directive reference",
       "source": "docs/directives.md",
-      "summary": "Canonical reference for all 85 directives, grouped by family."
+      "summary": "Canonical reference for all 100 directives, grouped by family."
+    },
+    {
+      "slug": "examples",
+      "title": "Example configs",
+      "source": "docs/examples.md",
+      "summary": "The starter flag- and heuristic-trigger slate the module used to seed automatically, kept as an annotated starting point."
     },
     {
       "slug": "troubleshooting",

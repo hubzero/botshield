@@ -59,7 +59,11 @@
 </a>
 <a class="docs-nav__item" href="../directives/index.html">
   <span class="docs-nav__title">Directive reference</span>
-  <span class="docs-nav__summary">Canonical reference for all 85 directives, grouped by family.</span>
+  <span class="docs-nav__summary">Canonical reference for all 100 directives, grouped by family.</span>
+</a>
+<a class="docs-nav__item" href="../examples/index.html">
+  <span class="docs-nav__title">Example configs</span>
+  <span class="docs-nav__summary">The starter flag- and heuristic-trigger slate the module used to seed automatically, kept as an annotated starting point.</span>
 </a>
 <a class="docs-nav__item" href="../troubleshooting/index.html">
   <span class="docs-nav__title">Troubleshooting</span>
@@ -319,7 +323,7 @@ the CIDR files.</p>
 <p>Importantly, the allow-list also catches <em>fakes</em>: a request whose
 UA matches &quot;Googlebot/&quot; but whose IP isn't Googlebot's gets a
 strong penalty (<code>fake-googlebot</code>) — bot operators love claiming
-to be search engines. See <a href="../policy/index.html#allow-list-e1-verified-crawlers">policy</a>.</p>
+to be search engines. See <a href="../policy/index.html#allow-list-verified-crawlers">policy</a>.</p>
 <p>For LLM crawlers (GPTBot, ClaudeBot, anthropic-ai, Google-
 Extended) — sites that want to block them by default can pair
 <code>BotShieldRobotsTxt</code> with a robots.txt carrying <code>Disallow: /</code> for
