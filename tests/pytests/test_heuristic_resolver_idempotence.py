@@ -86,7 +86,7 @@ def _assert_each_heuristic_at_most_once(decision: dict) -> None:
 
 def _decision_for(ip: str, log_slice) -> dict:
     with log_slice as slc:
-        client.get("/", xff=ip, ua=SCRAPER_UA)
+        client.get("/", xff=ip, ua=SCRAPER_UA, accept_language=None)
         lines = slc.decision_lines(ip=ip)
     assert lines, f"no decision line logged for ip={ip}"
     return lines[0]

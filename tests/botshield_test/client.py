@@ -54,7 +54,20 @@ def request(
     path: str,
     *,
     ua: str | None = None,
-    accept_language: str | None = None,
+    # Sent by default, and the default is load-bearing.
+    #
+    # Without it the framework's own client sits exactly on the
+    # non-interactive threshold in the dev vhost: a scraper-classified
+    # agent scores 10, a missing Accept-Language 5, and a Bloom-fresh
+    # address 5, which is 20 against a threshold of 20. Every test
+    # asserting that some path is NOT blocked then passes or fails on
+    # whether the Bloom filter happens to have seen the address --
+    # warm on a long-lived box, cold in CI, which is why a suite that
+    # was green here failed a container by ten tests.
+    #
+    # Pass None to omit it, which is what the tests exercising
+    # missing-al do deliberately.
+    accept_language: str | None = "en-US",
     xff: str | None = None,
     cookies: dict | None = None,
     data: dict | str | None = None,
