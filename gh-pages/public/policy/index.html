@@ -119,6 +119,7 @@
 <li class="toc__item toc__item--level-2"><a href="#flag-trigger-family">Flag-trigger family</a></li>
 <li class="toc__item toc__item--level-3"><a href="#no-compiled-in-defaults">No compiled-in defaults</a></li>
 <li class="toc__item toc__item--level-3"><a href="#per-apache-scope-triggers-botshieldtrigger">Per-Apache-scope triggers — `BotShieldTrigger`</a></li>
+<li class="toc__item toc__item--level-3"><a href="#challenge-pass-waives-the-challenge-not-the-policy">`challenge-pass` waives the challenge, not the policy</a></li>
 <li class="toc__item toc__item--level-2"><a href="#safeguard">Safeguard</a></li>
 <li class="toc__item toc__item--level-2"><a href="#where-to-next">Where to next</a></li>
   </ul>
@@ -408,11 +409,11 @@ BotShieldRequestTrigger api-burst-trap path=&quot;/api/*/burst&quot; \
     penalty=30 log=api-burst
 </code></pre>
 <p>First-match wins (declaration order). On match, the path family's
-<code>status=pass</code> short-circuits to <code>DECLINED</code> (real handler runs); any
+<code>status=challenge-pass</code> short-circuits to <code>DECLINED</code> (real handler runs); any
 other status is the response code.</p>
 <h3 id="cookie-triggers">Cookie triggers</h3>
 <pre><code class="language-apache">BotShieldCookieTrigger session-active cookie=sessionid \
-    status=pass credit=10
+    status=challenge-pass credit=10
 BotShieldCookieTrigger weak-session cookie=sessionid=guest \
     penalty=15 log=guest-session
 BotShieldCookieTrigger no-cookies cookies=none \
@@ -434,12 +435,12 @@ the BotShield-cookie-state note set by <code>bs_handler</code> (no double
 HMAC check). Predicates against the module's own <code>_bs_session</code>
 cookie name are rejected — use these instead.</li>
 </ul>
-<p>Cookie family accumulates: <code>status=pass</code> keeps walking and
+<p>Cookie family accumulates: <code>status=challenge-pass</code> keeps walking and
 collecting credits/penalties from later cookie triggers. First
 non-pass status short-circuits.</p>
 <h3 id="env-triggers">Env triggers</h3>
 <pre><code class="language-apache">SetEnvIfExpr &quot;%{HTTP:CF-Connecting-IP} =~ /:/&quot; BS_IPV6=1
-BotShieldEnvTrigger ipv6-hint env=BS_IPV6 status=pass credit=2
+BotShieldEnvTrigger ipv6-hint env=BS_IPV6 status=challenge-pass credit=2
 
 SetEnvIf User-Agent &quot;(?i)\bcurl\b&quot; BS_CLI=1
 BotShieldEnvTrigger curl-hint env=BS_CLI penalty=10 log=cli
@@ -631,12 +632,30 @@ declare <code>BotShieldTrigger reset</code> in the child:</p>
 
 &lt;Location &quot;/api/internal&quot;&gt;
     BotShieldTrigger reset
-    BotShieldTrigger status=pass log=internal-allow
+    BotShieldTrigger status=challenge-pass log=internal-allow
 &lt;/Location&gt;
 </code></pre>
 <p><code>reset</code> as the first arg drops triggers inherited from outer
 scopes (and clears any earlier <code>BotShieldTrigger</code> entries
 appended in the same scope before the reset).</p>
+<h3 id="challenge-pass-waives-the-challenge-not-the-policy"><code>challenge-pass</code> waives the challenge, not the policy</h3>
+<p><code>status=challenge-pass</code> means &quot;do not put an interstitial in front of
+this request&quot;. It does not mean &quot;exempt this request from everything&quot;.
+Rate limits and robots.txt Disallow still apply to a request that
+matched such a rule.</p>
+<p>That distinction used to not exist. A bare pass returned out of the
+policy walk immediately, which skipped robots.txt, the cohort rate
+limits and the per-slug bot rate limit along with the challenge. A rule
+written to let declared crawlers read content without an interstitial
+was therefore also making them unratelimitable across most of the site,
+and nothing in the config said so.</p>
+<p>The rule still shadows later rules on the same path: this family is
+first-match-wins and a <code>challenge-pass</code> declared first stops the walk,
+exactly as before. What changed is only that the walk continues into
+the enforcement stages rather than returning.</p>
+<p><code>pass</code> remains accepted as a synonym, so existing configs keep working.
+The longer spelling is the one to write, because the short one invited
+precisely the reading that was wrong.</p>
 <h2 id="safeguard">Safeguard</h2>
 <p>The safeguard suppresses a challenge loop: a client that has been
 issued challenges repeatedly within the safeguard window without

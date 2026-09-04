@@ -1232,22 +1232,22 @@ compress into one key.</p>
 </tr>
 <tr>
 <td>Challenge</td>
-<td><code>status=pass tier=non-interactive</code></td>
+<td><code>status=challenge-pass tier=non-interactive</code></td>
 <td>Invisible auto-submitting check. <code>tier=interactive</code> for the visible one.</td>
 </tr>
 <tr>
 <td>Captcha</td>
-<td><code>status=pass tier=captcha</code></td>
+<td><code>status=challenge-pass tier=captcha</code></td>
 <td>The configured provider's widget.</td>
 </tr>
 <tr>
 <td>Score only</td>
-<td><code>status=pass penalty=&lt;n&gt;</code></td>
+<td><code>status=challenge-pass penalty=&lt;n&gt;</code></td>
 <td>Adds to the score and lets normal thresholds decide.</td>
 </tr>
 </tbody>
 </table>
-<p><code>tier=</code> and <code>penalty=</code> both require <code>status=pass</code>, because a concrete
+<p><code>tier=</code> and <code>penalty=</code> both require <code>status=challenge-pass</code>, because a concrete
 status short-circuits the request before any tier is chosen. <code>tier=</code>
 accepts <code>pass</code>, <code>non-interactive</code>, <code>interactive</code> and <code>captcha</code>, and
 composes by MAX with the score-derived tier and any flag tier floor —
@@ -1259,7 +1259,7 @@ would keep being re-challenged for the life of a flag it has no way to
 clear. Use <code>flag=</code> when you want the reputation to persist, <code>tier=</code>
 when you want to challenge the request in front of you.</p>
 <blockquote>
-<p>A bare <code>status=pass</code> — with neither <code>tier=</code> nor <code>penalty=</code> — keeps its
+<p>A bare <code>status=challenge-pass</code> — with neither <code>tier=</code> nor <code>penalty=</code> — keeps its
 original meaning of &quot;record the match and decline out of the handler&quot;.
 That skips scoring entirely, so it will <em>disable</em> challenges the
 defaults would otherwise have raised on those requests. It is a
@@ -1278,7 +1278,7 @@ BotShieldRequestTrigger debugparam query=&quot;*debug=1*&quot; penalty=20
 # UA form the pattern match cannot express. Note ua=&quot;&quot; is a restriction
 # and ua=* is not: &quot;*&quot; (or omitting the key) means &quot;any&quot;, which is why a
 # rule carrying only ua=* is rejected as having no condition.
-BotShieldRequestTrigger no-ua ua=&quot;&quot; status=pass tier=non-interactive ttl=0 log=no-ua
+BotShieldRequestTrigger no-ua ua=&quot;&quot; status=challenge-pass tier=non-interactive ttl=0 log=no-ua
 </code></pre>
 <p>Because it fires from the policy walk it short-circuits <strong>before</strong>
 scoring, so a <code>status=4xx</code> rule never renders a challenge and never

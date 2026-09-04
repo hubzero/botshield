@@ -364,3 +364,36 @@ def test_bot_rate_bad_directive_args(snippet, what):
         f"error for {snippet!r} doesn't name the directive. "
         f"stderr:\n{err[-500:]}"
     )
+
+
+def test_challenge_pass_waives_the_challenge_not_the_rate_limit(
+    config_override, fresh_ip,
+):
+    """`status=challenge-pass` means "do not challenge", not "do not
+    enforce".
+
+    A bare pass used to return out of the policy walk immediately,
+    which skipped robots.txt and both rate limiters along with the
+    challenge. A rule written to let declared crawlers read content
+    without an interstitial was therefore also making them
+    unratelimitable. The pass still shadows later rules on the same
+    path; the walk just continues into the enforcement stages.
+    """
+    with config_override(
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
+        '    BotShieldBotRateLimit * 1 sec\n'
+        '    BotShieldRequestTrigger cp path="/*" status=challenge-pass log=cp',
+        count=1,
+    ):
+        results = [
+            client.get("/", xff=REAL_BINGBOT_IP, ua=BINGBOT_UA)
+            for _ in range(4)
+        ]
+
+    codes = [r.status_code for r in results]
+    assert codes[0] in (200, 302), f"first request should admit; got {codes}"
+    assert 429 in codes, (
+        f"a challenge-pass must not exempt the request from the rate "
+        f"limit; got {codes}"
+    )

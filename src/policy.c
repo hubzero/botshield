@@ -228,6 +228,11 @@ static int bs_ua_is_crawler_candidate(request_rec *r)
  *    the env-trigger loop without considering later entries. */
 int bs_check_policy(request_rec *r)
 {
+    /* Set when a bare status=pass fired. The walk continues so the
+     * enforcement stages still apply, and the function ends in DECLINED
+     * rather than OK so the handler skips scoring and the challenge. */
+    int pass_declined = 0;
+
     bs_server_cfg *scfg = ap_get_module_config(r->server->module_config,
                                                &botshield_module);
     if (!scfg) return OK;
@@ -452,11 +457,27 @@ int bs_check_policy(request_rec *r)
             bs_trigger_exec_outcome o = bs_apply_trigger_action(
                 r, scfg, BS_TFAMILY_REQUEST, &t->action,
                 "request-trigger", t->name);
-            /* Path family: PASS decays to DECLINED (handler lets
-             * the real Apache response through); STATUS emits
-             * Location/code short-circuit. CONTINUE/BREAK aren't
-             * produced for this family. */
-            if (o == BS_TEXEC_PASS_DECLINE) return DECLINED;
+            /* Path family: PASS means "do not challenge this", not
+             * "do not enforce anything on this". Those were the same
+             * thing while a pass returned here, which quietly exempted
+             * the request from robots.txt Disallow and from both rate
+             * limiters as well as from the challenge. On the deployment
+             * this was built for, a rule meant to let declared crawlers
+             * read content without an interstitial was also making them
+             * unratelimitable on most of the site, which is not what
+             * anybody wrote it to do and was invisible in the config.
+             *
+             * So record the pass and stop matching triggers -- this
+             * family is first-match-wins, and a pass has to keep
+             * shadowing the later rules it used to shadow -- but fall
+             * through to the enforcement stages below rather than
+             * returning. If none of them short-circuits, the walk ends
+             * in DECLINED and the request reaches the real handler
+             * unchallenged, as before.
+             *
+             * STATUS still emits its Location/code short-circuit
+             * immediately. CONTINUE isn't produced for this family. */
+            if (o == BS_TEXEC_PASS_DECLINE) { pass_declined = 1; break; }
             if (o == BS_TEXEC_STATUS)       return t->action.status_code;
             /* tier=: the rule asked for a challenge, so the request
              * must reach the scoring pipeline. Keep walking. */
@@ -660,7 +681,7 @@ int bs_check_policy(request_rec *r)
         if (botrate_rv != OK) return botrate_rv;
     }
 
-    return OK;
+    return pass_declined ? DECLINED : OK;
 }
 
 /* ======================================================================

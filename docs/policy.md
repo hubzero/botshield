@@ -265,14 +265,14 @@ BotShieldRequestTrigger api-burst-trap path="/api/*/burst" \
 ```
 
 First-match wins (declaration order). On match, the path family's
-`status=pass` short-circuits to `DECLINED` (real handler runs); any
+`status=challenge-pass` short-circuits to `DECLINED` (real handler runs); any
 other status is the response code.
 
 ### Cookie triggers
 
 ```apache
 BotShieldCookieTrigger session-active cookie=sessionid \
-    status=pass credit=10
+    status=challenge-pass credit=10
 BotShieldCookieTrigger weak-session cookie=sessionid=guest \
     penalty=15 log=guest-session
 BotShieldCookieTrigger no-cookies cookies=none \
@@ -295,7 +295,7 @@ Predicate shapes:
   HMAC check). Predicates against the module's own `_bs_session`
   cookie name are rejected — use these instead.
 
-Cookie family accumulates: `status=pass` keeps walking and
+Cookie family accumulates: `status=challenge-pass` keeps walking and
 collecting credits/penalties from later cookie triggers. First
 non-pass status short-circuits.
 
@@ -303,7 +303,7 @@ non-pass status short-circuits.
 
 ```apache
 SetEnvIfExpr "%{HTTP:CF-Connecting-IP} =~ /:/" BS_IPV6=1
-BotShieldEnvTrigger ipv6-hint env=BS_IPV6 status=pass credit=2
+BotShieldEnvTrigger ipv6-hint env=BS_IPV6 status=challenge-pass credit=2
 
 SetEnvIf User-Agent "(?i)\bcurl\b" BS_CLI=1
 BotShieldEnvTrigger curl-hint env=BS_CLI penalty=10 log=cli
@@ -504,13 +504,36 @@ declare `BotShieldTrigger reset` in the child:
 
 <Location "/api/internal">
     BotShieldTrigger reset
-    BotShieldTrigger status=pass log=internal-allow
+    BotShieldTrigger status=challenge-pass log=internal-allow
 </Location>
 ```
 
 `reset` as the first arg drops triggers inherited from outer
 scopes (and clears any earlier `BotShieldTrigger` entries
 appended in the same scope before the reset).
+
+### `challenge-pass` waives the challenge, not the policy
+
+`status=challenge-pass` means "do not put an interstitial in front of
+this request". It does not mean "exempt this request from everything".
+Rate limits and robots.txt Disallow still apply to a request that
+matched such a rule.
+
+That distinction used to not exist. A bare pass returned out of the
+policy walk immediately, which skipped robots.txt, the cohort rate
+limits and the per-slug bot rate limit along with the challenge. A rule
+written to let declared crawlers read content without an interstitial
+was therefore also making them unratelimitable across most of the site,
+and nothing in the config said so.
+
+The rule still shadows later rules on the same path: this family is
+first-match-wins and a `challenge-pass` declared first stops the walk,
+exactly as before. What changed is only that the walk continues into
+the enforcement stages rather than returning.
+
+`pass` remains accepted as a synonym, so existing configs keep working.
+The longer spelling is the one to write, because the short one invited
+precisely the reading that was wrong.
 
 ## Safeguard
 

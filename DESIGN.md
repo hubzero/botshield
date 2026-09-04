@@ -255,7 +255,7 @@ default static-file handler. Its walk:
    The verdict is published to `r->notes[BS_CK_STATE_NOTE]` for E4
    cookie-trigger predicates (`bs-cookie=verified|missing|invalid`).
 7. **Policy walk.** `bs_check_policy` runs the eight-family policy
-   walker. On `DECLINED` (status=pass trigger) → log + DECLINED. On
+   walker. On `DECLINED` (status=challenge-pass trigger) → log + DECLINED. On
    any other HTTP status → 403/429/etc. with the appropriate
    decision-log outcome.
 8. **Heuristics + flag-IP lookup.** `bs_run_builtin_heuristics`
@@ -482,7 +482,7 @@ void bs_score_add(request_rec *r, int penalty, int ttl_seconds,
 ```
 
 `penalty=0` records a reason without affecting the total — used for
-observe-mode entries, status=pass entries, and informational reasons
+observe-mode entries, status=challenge-pass entries, and informational reasons
 like `flagged-ip`. The `ttl_seconds` field is accepted for API
 stability but currently ignored by downstream consumers; the
 flagged-IP table carries its own TTL set at insert time.
@@ -961,7 +961,7 @@ family's matcher / action lives in its own feature file
 
 Returns from `bs_check_policy`:
 - `OK` — no rule fired; caller continues to heuristics.
-- `DECLINED` — a `status=pass` trigger fired; caller short-circuits
+- `DECLINED` — a `status=challenge-pass` trigger fired; caller short-circuits
   to DECLINED so the real handler runs.
 - Any other HTTP_* code — short-circuit with that status.
 
@@ -1249,7 +1249,7 @@ a path trigger with `ua=`/`ipspec=` keys, which is cohort-scoped).
 Default `status=403`, default `flag=scanner_probe`, default
 `ttl=3600`.
 
-Under `status=pass`: the request flows through to the real handler
+Under `status=challenge-pass`: the request flows through to the real handler
 with `DECLINED`; `penalty` is **ignored** (only flag-IP + log
 side-effects survive). This is the one family where pass means
 "don't score this request"; cookie/env/load triggers diverge.
@@ -1289,7 +1289,7 @@ cookie name are redirected at config-time to use `bs-cookie=<state>`
 (which exposes the verdict, not the raw bytes).
 
 Semantic divergence from path triggers:
-- **`credit=` / `penalty=` always apply**, even under `status=pass`,
+- **`credit=` / `penalty=` always apply**, even under `status=challenge-pass`,
   because the cookie signal exists on this request. (Path-family
   pass is "don't score"; cookie-family pass is "score this now,
   let the request through.")
@@ -1309,7 +1309,7 @@ no re-scanning the raw header per trigger.
 `env=<var>=<value>` (exact match, case-sensitive), `!env=<var>`
 (absent).
 
-Like E4, `credit/penalty` apply under `status=pass` (env signals
+Like E4, `credit/penalty` apply under `status=challenge-pass` (env signals
 exist on this request). No `redirect=` (env signals shape scoring,
 not response). Main requests only — `ap_is_initial_req(r)`.
 

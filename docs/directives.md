@@ -724,11 +724,11 @@ compress into one key.
 | Intent | Keys | Effect |
 |---|---|---|
 | Block | `status=403` (family default) | Refused from the policy walk. No scoring, no cookie mint, no render. |
-| Challenge | `status=pass tier=non-interactive` | Invisible auto-submitting check. `tier=interactive` for the visible one. |
-| Captcha | `status=pass tier=captcha` | The configured provider's widget. |
-| Score only | `status=pass penalty=<n>` | Adds to the score and lets normal thresholds decide. |
+| Challenge | `status=challenge-pass tier=non-interactive` | Invisible auto-submitting check. `tier=interactive` for the visible one. |
+| Captcha | `status=challenge-pass tier=captcha` | The configured provider's widget. |
+| Score only | `status=challenge-pass penalty=<n>` | Adds to the score and lets normal thresholds decide. |
 
-`tier=` and `penalty=` both require `status=pass`, because a concrete
+`tier=` and `penalty=` both require `status=challenge-pass`, because a concrete
 status short-circuits the request before any tier is chosen. `tier=`
 accepts `pass`, `non-interactive`, `interactive` and `captcha`, and
 composes by MAX with the score-derived tier and any flag tier floor —
@@ -741,7 +741,7 @@ would keep being re-challenged for the life of a flag it has no way to
 clear. Use `flag=` when you want the reputation to persist, `tier=`
 when you want to challenge the request in front of you.
 
-> A bare `status=pass` — with neither `tier=` nor `penalty=` — keeps its
+> A bare `status=challenge-pass` — with neither `tier=` nor `penalty=` — keeps its
 > original meaning of "record the match and decline out of the handler".
 > That skips scoring entirely, so it will *disable* challenges the
 > defaults would otherwise have raised on those requests. It is a
@@ -761,7 +761,7 @@ BotShieldRequestTrigger debugparam query="*debug=1*" penalty=20
 # UA form the pattern match cannot express. Note ua="" is a restriction
 # and ua=* is not: "*" (or omitting the key) means "any", which is why a
 # rule carrying only ua=* is rejected as having no condition.
-BotShieldRequestTrigger no-ua ua="" status=pass tier=non-interactive ttl=0 log=no-ua
+BotShieldRequestTrigger no-ua ua="" status=challenge-pass tier=non-interactive ttl=0 log=no-ua
 ```
 
 Because it fires from the policy walk it short-circuits **before**

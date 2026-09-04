@@ -293,7 +293,15 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
                       strncasecmp(arg, n, sizeof(n)-1) == 0)
 
     if (BS_AK("status")) {
-        if (!strcasecmp(val, "pass")) {
+        /* 'challenge-pass' is the name; 'pass' is the same thing spelled
+         * the way it was before the name said what it meant. It waives
+         * the challenge only -- rate limits and robots.txt still apply
+         * to a request that took this branch -- and the shorter spelling
+         * invited the opposite reading. Both are accepted: a config that
+         * says 'pass' is not wrong, and turning it into a parse error
+         * would take a running server down on its next reload for a
+         * change that is purely about wording. */
+        if (!strcasecmp(val, "challenge-pass") || !strcasecmp(val, "pass")) {
             a->status_code = BS_TRIGGER_STATUS_PASS;
         } else {
             char *end = NULL;
@@ -301,7 +309,8 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
             if (!end || *end || code < 100 || code > 599) {
                 return apr_psprintf(pool,
                     "%s: status='%s' must be an HTTP code 100..599 "
-                    "or the literal 'pass'", dname, val);
+                    "or 'challenge-pass' (also accepted as 'pass')",
+                    dname, val);
             }
             a->status_code = (int)code;
         }
