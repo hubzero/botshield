@@ -111,10 +111,36 @@ touch "$LOADSTATE"; chmod 644 "$LOADSTATE"; echo normal > "$LOADSTATE"
 # 0600 root-only, and the module enforces it: these are read as root at
 # config-parse time, so the apache user never needs them, and anything
 # looser is refused outright rather than warned about.
-for secret in secret app-integration-secret; do
-  [[ -s "/etc/botshield/$secret" ]] || openssl rand -hex 32 > "/etc/botshield/$secret"
-  chmod 600 "/etc/botshield/$secret"; chown root:root "/etc/botshield/$secret"
-done
+install_secret() {
+  local path="$1" content="$2"
+  [[ -s "$path" ]] && return 0
+  printf "%s" "$content" > "$path"
+  chmod 600 "$path"; chown root:root "$path"
+}
+
+# The signing key is the one value that can be anything, so it is
+# generated rather than fixed.
+[[ -s /etc/botshield/secret ]] || openssl rand -hex 32 > /etc/botshield/secret
+chmod 600 /etc/botshield/secret; chown root:root /etc/botshield/secret
+
+# Providers publish always-pass test keys. Tests needing real secrets
+# read them from env vars instead, and skip when those are unset.
+install_secret /etc/botshield/turnstile-secret    "1x0000000000000000000000000000000AA"
+install_secret /etc/botshield/hcaptcha-secret     "0x0000000000000000000000000000000000000000"
+install_secret /etc/botshield/recaptcha-v2-secret "6LeIxAcTAAAAAGG-vFI1TnRWxMZNFuojJ4WifJWe"
+install_secret /etc/botshield/recaptcha-v3-secret "6LeIxAcTAAAAAGG-vFI1TnRWxMZNFuojJ4WifJWe"
+install_secret /etc/botshield/friendly-secret     "FRIENDLYCAPTCHA_FREE_TIER_SECRET_REPLACE_ME_WITH_REAL"
+install_secret /etc/botshield/geetest-secret      "GEETEST_CAPTCHA_KEY_REPLACE_WITH_REAL_FROM_DASHBOARD"
+
+# Always-fail counterparts, for the tests that assert a rejected verify.
+install_secret /etc/botshield/turnstile-fail-secret  "2x0000000000000000000000000000000AA"
+install_secret /etc/botshield/recaptcha-v2-badsecret "this-is-not-a-real-recaptcha-secret-aaaaaa"
+
+# Fixed, not generated: pytest recomputes app-integration signatures
+# with these same bytes, so a random value here fails every app-claims
+# and app-feedback test with a signature mismatch.
+install_secret /etc/botshield/app-integration-secret \
+  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 # --- a self-signed certificate -----------------------------------------
 # At the path the vhost names. That path is one of the few things in
