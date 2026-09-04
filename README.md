@@ -15,65 +15,60 @@
   <a href="https://hubzero.github.io/botshield/"><img src="https://img.shields.io/badge/docs-Pages-blue" alt="docs"></a>
   <a href="https://httpd.apache.org/"><img src="https://img.shields.io/badge/Apache-2.4-D22128?logo=apache&logoColor=white" alt="Apache 2.4 module"></a>
   <a href="https://en.cppreference.com/w/c"><img src="https://img.shields.io/badge/language-C99-blue" alt="C99"></a>
-  <a href="#whats-shipped"><img src="https://img.shields.io/badge/status-beta-orange" alt="status: beta"></a>
+  <a href="#whats-shipped"><img src="https://img.shields.io/badge/status-in%20production-green" alt="status: in production"></a>
 </p>
 
-Adaptive bot mitigation for the Apache HTTP Server.
+Adaptive bot mitigation for the Apache HTTP Server, running in
+production.
 
 BotShield scores requests, tracks short-term reputation, and decides
 whether to pass, challenge, slow down, or block before application
-code has to absorb the traffic.
+code has to absorb the traffic. Development is driven by that
+deployment: most changes trace back to something measured on real
+traffic — a scanner swarm, a lockout, a metric that didn't answer the
+question an incident needed — rather than to a feature list decided
+in advance.
 
-**Status: beta.** Stable shape, exercising in dev; not yet a production
-deployment. Architecture, threat model, and per-extension design notes
+**Status: in production, still hardening.** The core pipeline
+(scoring, tiers, cookies, policy, observability) is stable and load-bearing.
+Newer surfaces — the interactive/captcha tiers, the load-shedding
+ladder — are earlier in that same real-traffic exercise and change
+faster. Architecture, threat model, and per-extension design notes
 live in [DESIGN.md](DESIGN.md). Site handbook lives in `docs/` and
 renders to GitHub Pages via `gh-pages/`; see the
 [documentation index](#documentation) below.
 
 ## What's shipped
 
-- **Tiered challenges.** Pass / silent (no-click auto-submit) / form
-  (checkbox interstitial) / captcha (third-party provider). Per-scope
-  configurable; multi-provider cohabitation on one vhost. Captcha
-  providers: Turnstile, hCaptcha, reCAPTCHA v2 + v3, Friendly Captcha,
-  GeeTest v4.
-- **Cookie envelope.** AES-256-GCM authenticated encryption,
-  per-purpose HKDF-derived keys, verify-only secondary key for
-  graceful rotation. Per-cookie hourly forgiveness cap closes the
-  rebuild-budget evasion. Cookies are session-scoped at the
-  browser layer (no `Expires=` / `Max-Age=`); the server-side
-  `expires_at` field is the hard cap. Every pass through the
-  handler mints `__Host-bs_session` so the next request from the
-  same browser carries an identifier (most cookies carry trust=0
-  — they're per-session markers, not trust receipts).
-- **Sparse server state.** SHM flagged-IP table with seqlock-guarded
-  lockless reads, rotating Bloom filter for first-sight IP signals,
-  crash-durable persistence via `mod_watchdog` snapshots + shutdown
-  save.
-- **Policy.** Path / cookie / env / load / scope / flag triggers
-  (path triggers carry optional UA / IP cohort gates), per-cohort
-  rate limits, in-module robots.txt parser
-  (RFC 9309 + Crawl-delay extension), repeated-429 escalation,
-  anti-loop safeguard (302 redirect to a built-in explainer or to
-  a configured `BotShieldSafeguardRedirectURL` after a client loops
-  on challenges without solving).
-- **Verify-endpoint hardening.** HMAC-signed pending cookie + per-IP
-  rate limit + global in-flight semaphore on `/captcha-verify`.
-  One-time-use nonces + IP-bound bootstrap on the embedded silent
-  path.
-- **Observability.** Structured `key=value` decision-log line per
-  request, 96 Prometheus metrics at `<prefix>/metrics`, `mod_status`
-  contribution hook. Both the metrics endpoint and the dashboard are
-  closed until a directive names who may read them.
-- **Multi-vhost isolation.** Default-isolate per `ServerName`; opt
-  into shared reputation via `BotShieldShareScope`.
-- **Log-only / shadow mode.** Scope-level `BotShieldEnabled LogOnly`
-  and per-rule `mode=observe` for staging policy changes without
-  enforcement. Counterfactual outcomes (`~challenge`, `~block`,
-  `~rate_limited`) surface in the decision log so you can see what
-  the rule would have done.
-- **Accessibility.** Default interstitial passes WCAG 2.1 AA on every
-  variant.
+- **Tiered challenges.** Pass / non-interactive (auto-submitted proof
+  of work) / interactive (checkbox widget) / captcha (third-party
+  provider) — Turnstile, hCaptcha, reCAPTCHA v2 + v3, Friendly
+  Captcha, GeeTest v4. Per-scope configurable.
+- **Signed cookie reputation.** An encrypted, tamper-evident cookie
+  carries score and pass history across requests. No scoring
+  threshold is defined out of the box — a fresh deployment enforces
+  nothing until an operator declares one, so what's live always
+  matches what's in the config.
+- **Sparse server state.** Shared-memory flagged-IP table and Bloom
+  filter for first-sight signals, both crash-durable across restarts.
+- **Policy.** Trigger families (path / cookie / env / load / scope /
+  flag) with a shared action grammar, per-cohort rate limits, a
+  built-in robots.txt parser, and an anti-loop safeguard that breaks a
+  client out of a challenge cycle it can't complete.
+- **Observability.** A structured decision log, 96 Prometheus metrics,
+  and an operator dashboard — all closed by default and opened only to
+  addresses a directive names.
+- **Multi-vhost isolation.** Reputation is isolated per `ServerName`
+  by default; opt into sharing across vhosts explicitly.
+- **Log-only / shadow mode.** Stage a policy change with
+  `mode=observe` or `BotShieldEnabled LogOnly` and watch what it
+  *would* have done in the decision log before it enforces anything.
+- **Accessibility.** The default interstitial passes WCAG 2.1 AA on
+  every variant.
+
+See [DESIGN.md](DESIGN.md) for the cryptographic envelope, the SHM
+layout, and the rest of the implementation detail this list leaves out
+on purpose.
 
 ## Quick start
 
@@ -151,15 +146,34 @@ Under `BotShieldEndpointPrefix` (default `/botshield`):
 | `<prefix>/form-widget.js` | GET | Inline form-captcha widget shell |
 | `<prefix>/safeguard-info` | GET | Built-in explainer page rendered when challenge-safeguard trips (and no `BotShieldSafeguardRedirectURL` is set). Accepts `?return=<urlencoded path>` |
 
-Access control is delegated to standard Apache mechanisms — wrap any
-of them in `<Location>` with `Require ip` / `AuthType Basic` to
-restrict, e.g.:
+The dashboard and metrics are closed until `BotShieldDashboardAccess` /
+`BotShieldMetricsAccess` name who may read them; a refusal is a 404, not
+a 403. **Do not use `Require ip` here** — an Apache-level denial writes
+`AH01630` on every refusal, and the dashboard's own auto-refresh can
+trip a fail2ban jail watching for that pattern and ban the very address
+you meant to allow. See [`docs/directives.md`](docs/directives.md) for
+the full rationale and syntax:
 
 ```apache
-<Location /botshield/metrics>
-    Require ip 10.0.0.0/8
+BotShieldDashboardAccess 127.0.0.1 ::1
+BotShieldMetricsAccess   10.9.0.5
+```
+
+`<Location>` still composes on top for something Apache has and the
+module doesn't, such as a password:
+
+```apache
+<Location /botshield/dashboard>
+    AuthType Basic
+    AuthName "BotShield"
+    AuthUserFile /etc/httpd/botshield.htpasswd
+    Require valid-user
 </Location>
 ```
+
+The remaining endpoints — `captcha-verify`, the `embedded-*` family,
+`safeguard-info`, `preview` — are the challenge flow itself and must
+stay public.
 
 ## Local development
 

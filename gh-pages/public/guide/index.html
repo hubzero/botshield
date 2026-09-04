@@ -114,62 +114,56 @@
   <a href="https://hubzero.github.io/botshield/"><img src="https://img.shields.io/badge/docs-Pages-blue" alt="docs"></a>
   <a href="https://httpd.apache.org/"><img src="https://img.shields.io/badge/Apache-2.4-D22128?logo=apache&logoColor=white" alt="Apache 2.4 module"></a>
   <a href="https://en.cppreference.com/w/c"><img src="https://img.shields.io/badge/language-C99-blue" alt="C99"></a>
-  <a href="#whats-shipped"><img src="https://img.shields.io/badge/status-beta-orange" alt="status: beta"></a>
+  <a href="#whats-shipped"><img src="https://img.shields.io/badge/status-in%20production-green" alt="status: in production"></a>
 </p>
-<p>Adaptive bot mitigation for the Apache HTTP Server.</p>
+<p>Adaptive bot mitigation for the Apache HTTP Server, running in
+production.</p>
 <p>BotShield scores requests, tracks short-term reputation, and decides
 whether to pass, challenge, slow down, or block before application
-code has to absorb the traffic.</p>
-<p><strong>Status: beta.</strong> Stable shape, exercising in dev; not yet a production
-deployment. Architecture, threat model, and per-extension design notes
+code has to absorb the traffic. Development is driven by that
+deployment: most changes trace back to something measured on real
+traffic — a scanner swarm, a lockout, a metric that didn't answer the
+question an incident needed — rather than to a feature list decided
+in advance.</p>
+<p><strong>Status: in production, still hardening.</strong> The core pipeline
+(scoring, tiers, cookies, policy, observability) is stable and load-bearing.
+Newer surfaces — the interactive/captcha tiers, the load-shedding
+ladder — are earlier in that same real-traffic exercise and change
+faster. Architecture, threat model, and per-extension design notes
 live in <a href="DESIGN.md">DESIGN.md</a>. Site handbook lives in <code>docs/</code> and
 renders to GitHub Pages via <code>gh-pages/</code>; see the
 <a href="#documentation">documentation index</a> below.</p>
 <h2 id="what-s-shipped">What's shipped</h2>
 <ul>
-<li><strong>Tiered challenges.</strong> Pass / silent (no-click auto-submit) / form
-(checkbox interstitial) / captcha (third-party provider). Per-scope
-configurable; multi-provider cohabitation on one vhost. Captcha
-providers: Turnstile, hCaptcha, reCAPTCHA v2 + v3, Friendly Captcha,
-GeeTest v4.</li>
-<li><strong>Cookie envelope.</strong> AES-256-GCM authenticated encryption,
-per-purpose HKDF-derived keys, verify-only secondary key for
-graceful rotation. Per-cookie hourly forgiveness cap closes the
-rebuild-budget evasion. Cookies are session-scoped at the
-browser layer (no <code>Expires=</code> / <code>Max-Age=</code>); the server-side
-<code>expires_at</code> field is the hard cap. Every pass through the
-handler mints <code>__Host-bs_session</code> so the next request from the
-same browser carries an identifier (most cookies carry trust=0
-— they're per-session markers, not trust receipts).</li>
-<li><strong>Sparse server state.</strong> SHM flagged-IP table with seqlock-guarded
-lockless reads, rotating Bloom filter for first-sight IP signals,
-crash-durable persistence via <code>mod_watchdog</code> snapshots + shutdown
-save.</li>
-<li><strong>Policy.</strong> Path / cookie / env / load / scope / flag triggers
-(path triggers carry optional UA / IP cohort gates), per-cohort
-rate limits, in-module robots.txt parser
-(RFC 9309 + Crawl-delay extension), repeated-429 escalation,
-anti-loop safeguard (302 redirect to a built-in explainer or to
-a configured <code>BotShieldSafeguardRedirectURL</code> after a client loops
-on challenges without solving).</li>
-<li><strong>Verify-endpoint hardening.</strong> HMAC-signed pending cookie + per-IP
-rate limit + global in-flight semaphore on <code>/captcha-verify</code>.
-One-time-use nonces + IP-bound bootstrap on the embedded silent
-path.</li>
-<li><strong>Observability.</strong> Structured <code>key=value</code> decision-log line per
-request, 96 Prometheus metrics at <code>&lt;prefix&gt;/metrics</code>, <code>mod_status</code>
-contribution hook. Both the metrics endpoint and the dashboard are
-closed until a directive names who may read them.</li>
-<li><strong>Multi-vhost isolation.</strong> Default-isolate per <code>ServerName</code>; opt
-into shared reputation via <code>BotShieldShareScope</code>.</li>
-<li><strong>Log-only / shadow mode.</strong> Scope-level <code>BotShieldEnabled LogOnly</code>
-and per-rule <code>mode=observe</code> for staging policy changes without
-enforcement. Counterfactual outcomes (<code>~challenge</code>, <code>~block</code>,
-<code>~rate_limited</code>) surface in the decision log so you can see what
-the rule would have done.</li>
-<li><strong>Accessibility.</strong> Default interstitial passes WCAG 2.1 AA on every
-variant.</li>
+<li><strong>Tiered challenges.</strong> Pass / non-interactive (auto-submitted proof
+of work) / interactive (checkbox widget) / captcha (third-party
+provider) — Turnstile, hCaptcha, reCAPTCHA v2 + v3, Friendly
+Captcha, GeeTest v4. Per-scope configurable.</li>
+<li><strong>Signed cookie reputation.</strong> An encrypted, tamper-evident cookie
+carries score and pass history across requests. No scoring
+threshold is defined out of the box — a fresh deployment enforces
+nothing until an operator declares one, so what's live always
+matches what's in the config.</li>
+<li><strong>Sparse server state.</strong> Shared-memory flagged-IP table and Bloom
+filter for first-sight signals, both crash-durable across restarts.</li>
+<li><strong>Policy.</strong> Trigger families (path / cookie / env / load / scope /
+flag) with a shared action grammar, per-cohort rate limits, a
+built-in robots.txt parser, and an anti-loop safeguard that breaks a
+client out of a challenge cycle it can't complete.</li>
+<li><strong>Observability.</strong> A structured decision log, 96 Prometheus metrics,
+and an operator dashboard — all closed by default and opened only to
+addresses a directive names.</li>
+<li><strong>Multi-vhost isolation.</strong> Reputation is isolated per <code>ServerName</code>
+by default; opt into sharing across vhosts explicitly.</li>
+<li><strong>Log-only / shadow mode.</strong> Stage a policy change with
+<code>mode=observe</code> or <code>BotShieldEnabled LogOnly</code> and watch what it
+<em>would</em> have done in the decision log before it enforces anything.</li>
+<li><strong>Accessibility.</strong> The default interstitial passes WCAG 2.1 AA on
+every variant.</li>
 </ul>
+<p>See <a href="DESIGN.md">DESIGN.md</a> for the cryptographic envelope, the SHM
+layout, and the rest of the implementation detail this list leaves out
+on purpose.</p>
 <h2 id="quick-start">Quick start</h2>
 <p>You need Apache 2.4 development headers — <code>apache2-dev</code> on
 Debian/Ubuntu, <code>httpd-devel</code> on RHEL-family.</p>
@@ -320,13 +314,28 @@ framework.</li>
 </tr>
 </tbody>
 </table>
-<p>Access control is delegated to standard Apache mechanisms — wrap any
-of them in <code>&lt;Location&gt;</code> with <code>Require ip</code> / <code>AuthType Basic</code> to
-restrict, e.g.:</p>
-<pre><code class="language-apache">&lt;Location /botshield/metrics&gt;
-    Require ip 10.0.0.0/8
+<p>The dashboard and metrics are closed until <code>BotShieldDashboardAccess</code> /
+<code>BotShieldMetricsAccess</code> name who may read them; a refusal is a 404, not
+a 403. <strong>Do not use <code>Require ip</code> here</strong> — an Apache-level denial writes
+<code>AH01630</code> on every refusal, and the dashboard's own auto-refresh can
+trip a fail2ban jail watching for that pattern and ban the very address
+you meant to allow. See <a href="docs/directives.md"><code>docs/directives.md</code></a> for
+the full rationale and syntax:</p>
+<pre><code class="language-apache">BotShieldDashboardAccess 127.0.0.1 ::1
+BotShieldMetricsAccess   10.9.0.5
+</code></pre>
+<p><code>&lt;Location&gt;</code> still composes on top for something Apache has and the
+module doesn't, such as a password:</p>
+<pre><code class="language-apache">&lt;Location /botshield/dashboard&gt;
+    AuthType Basic
+    AuthName &quot;BotShield&quot;
+    AuthUserFile /etc/httpd/botshield.htpasswd
+    Require valid-user
 &lt;/Location&gt;
 </code></pre>
+<p>The remaining endpoints — <code>captcha-verify</code>, the <code>embedded-*</code> family,
+<code>safeguard-info</code>, <code>preview</code> — are the challenge flow itself and must
+stay public.</p>
 <h2 id="local-development">Local development</h2>
 <p>The repo ships a working HTTPS dev vhost at
 <code>apache/botshield-dev.conf</code> that exercises every directive against
