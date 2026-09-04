@@ -277,13 +277,13 @@ monitors-user:
 
 install-monitors: monitors-user
 	sudo install -d -m 755 $(MON_SHAREDIR)
-	sudo install -m 755 tools/botshield-dbmon.py $(MON_SHAREDIR)/
-	sudo install -m 755 tools/botshield-fpmmon.py $(MON_SHAREDIR)/
-	sudo install -m 755 tools/refresh-bot-ranges.sh $(MON_SHAREDIR)/
-	sudo install -m 644 tools/botshield-dbmon.service $(MON_UNITDIR)/
-	sudo install -m 644 tools/botshield-fpmmon.service $(MON_UNITDIR)/
-	sudo install -m 644 tools/botshield-bot-refresh.service $(MON_UNITDIR)/
-	sudo install -m 644 tools/botshield-bot-refresh.timer $(MON_UNITDIR)/
+	sudo install -m 755 services/dbmon/botshield-dbmon.py $(MON_SHAREDIR)/
+	sudo install -m 755 services/fpmmon/botshield-fpmmon.py $(MON_SHAREDIR)/
+	sudo install -m 755 services/bot-refresh/refresh-bot-ranges.sh $(MON_SHAREDIR)/
+	sudo install -m 644 services/dbmon/botshield-dbmon.service $(MON_UNITDIR)/
+	sudo install -m 644 services/fpmmon/botshield-fpmmon.service $(MON_UNITDIR)/
+	sudo install -m 644 services/bot-refresh/botshield-bot-refresh.service $(MON_UNITDIR)/
+	sudo install -m 644 services/bot-refresh/botshield-bot-refresh.timer $(MON_UNITDIR)/
 	sudo systemctl daemon-reload
 	@echo
 	@echo "Installed. Nothing is enabled yet -- each unit needs its own"

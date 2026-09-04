@@ -1,5 +1,5 @@
 #!/bin/bash
-# tools/refresh-bot-ranges.sh — pull the latest verified-bot IP
+# services/bot-refresh/refresh-bot-ranges.sh — pull the latest verified-bot IP
 # ranges from each provider and rewrite the on-disk ranges files
 # that mod_botshield's Allow family (E1) reads at startup.
 #
@@ -9,8 +9,8 @@
 # reload.
 #
 # Usage:
-#     sudo tools/refresh-bot-ranges.sh              # default dest
-#     sudo tools/refresh-bot-ranges.sh /some/path   # override dest
+#     sudo services/bot-refresh/refresh-bot-ranges.sh              # default dest
+#     sudo services/bot-refresh/refresh-bot-ranges.sh /some/path   # override dest
 #
 # Exit code: 0 if ALL providers refreshed; 1 if any failed (others
 # still refreshed). Failure is fine operationally — BotShield keeps
@@ -98,7 +98,7 @@ prefixes = sorted({
 })
 if not prefixes:
     sys.exit('no prefixes in payload')
-print('# refreshed by tools/refresh-bot-ranges.sh')
+print('# refreshed by services/bot-refresh/refresh-bot-ranges.sh')
 print('# source: $url')
 print('\n'.join(prefixes))
 " > "$out.new"; then
@@ -201,7 +201,7 @@ if len(ips) < 30:
     sys.exit(f"only {len(ips)} crawler IPs parsed (threshold 30); "
              f"page structure likely changed - inspect manually")
 
-print("# refreshed by tools/refresh-bot-ranges.sh")
+print("# refreshed by services/bot-refresh/refresh-bot-ranges.sh")
 print(f"# source: {url}")
 print(f"# count:  {len(ips)} entries (parsed from 'Crawler' section)")
 for ip in sorted(ips, key=lambda s: ipaddress.ip_network(s, strict=False)

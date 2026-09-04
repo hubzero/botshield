@@ -2337,7 +2337,7 @@ static void bs_check_staleness(apr_pool_t *pconf, server_rec *s)
                 "verified-bot ranges (%s)", e->name);
             bs_check_one_file_staleness(sv,
                 e->canonical_path, which,
-                "Refresh via tools/refresh-bot-ranges.sh, or skip "
+                "Refresh via services/bot-refresh/refresh-bot-ranges.sh, or skip "
                 "the IP cross-check with "
                 "'BotShieldClassify -verified-bots' (degrades to "
                 "UA-only verify).");

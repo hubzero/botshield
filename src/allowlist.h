@@ -82,7 +82,7 @@ extern const bs_allow_bot_entry bs_builtin_bots[];
  * watchdog walks scfg->bot_ranges_manifest to know what to stat.
  *
  * Sidecar convention: each file-backed bot is loaded from
- *   <canonical>          (refreshed by tools/refresh-bot-ranges.sh)
+ *   <canonical>          (refreshed by services/bot-refresh/refresh-bot-ranges.sh)
  *   <canonical-without-.txt>.local.txt   (operator-managed extras)
  * The sidecar is optional. If both exist, their CIDR sets are
  * concatenated. The sidecar is the seam for adding custom enterprise
