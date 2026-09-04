@@ -150,6 +150,7 @@ LIBS := -lcrypto -lcurl -ljson-c
 .PHONY: all build install enable disable reload clean test-clean docs docs-deps \
         toolchain-fix \
         install-monitors monitors-user \
+        unit unit-clean \
         sanitize install-sanitize \
         fuzz fuzz-run fuzz-clean \
         fuzz-robots fuzz-robots-run
@@ -305,6 +306,36 @@ sanitize: clean
 install-sanitize: sanitize
 	sudo install -m 644 src/.libs/$(MOD_NAME).so \
 	    $(shell $(APXS) -q LIBEXECDIR)/mod_$(MOD_NAME).so
+
+# --- in-process unit tests ---
+#
+# Runs the module's real scoring code against synthetic requests with no
+# Apache, no ports and no provisioning. Same unity-build model as the
+# fuzz target: the stubs neuter logging and gate out module
+# registration, then the sources are included as one translation unit.
+#
+# The point is what gets asserted. The pytest suite asserts HTTP status
+# codes, which makes every scoring test depend on the Bloom filter's
+# contents -- a client scoring exactly at the threshold passed on a
+# long-lived box and failed in a cold container, and that took a day to
+# find. Here the score itself is the assertion.
+
+UNIT_BIN := tests/unit/score_unit
+UNIT_SRC := tests/unit/score_unit.c
+UNIT_CPPFLAGS := -I$(shell $(APXS) -q INCLUDEDIR) \
+                 $(shell pkg-config --cflags apr-1 apr-util-1)
+UNIT_LIBS := -lcrypto -lcurl -ljson-c \
+             $(shell pkg-config --libs apr-1 apr-util-1) -lpcre2-8
+UNIT_CFLAGS := -g -O1 -Wall -Wno-deprecated-declarations
+
+$(UNIT_BIN): $(UNIT_SRC) $(SRC) $(GEN_BOT_DIR_C) $(GEN_BROWSER_C) $(GEN_VBOTS_C)
+	$(CC) $(UNIT_CFLAGS) $(UNIT_CPPFLAGS) -o $@ $(UNIT_SRC) $(UNIT_LIBS)
+
+unit: $(UNIT_BIN)
+	./$(UNIT_BIN)
+
+unit-clean:
+	rm -f $(UNIT_BIN)
 
 # --- M11.8 fuzz ---
 #
