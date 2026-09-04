@@ -91,23 +91,30 @@ jobs:
       - name: Provision the test instance
         run: tests/setup/provision-rocky.sh
 
-      - name: Start Apache
+      - name: Run fast tests (pytest, not browser, not slow)
+        # httpd is started here rather than in its own step. A daemon
+        # backgrounded by one step does not survive into the next one in
+        # a container job, and the symptom is every test failing with
+        # connection refused after a start step that looked fine --
+        # its own curl check passed before the process went away.
+        #
+        # Serial: the per-worker parallel instances are a separate
+        # provisioning step, and one container is one instance.
         run: |
           httpd -f /etc/httpd/bstest/httpd.conf -k start
           sleep 2
           curl -sk --max-time 5 -o /dev/null https://127.0.0.1:8443/ \
             || (tail -50 /var/log/httpd/bstest/error.log && exit 1)
-
-      - name: Run fast tests (pytest, not browser, not slow)
-        # Serial: the per-worker parallel instances are a separate
-        # provisioning step and one container is one instance.
-        run: tests/run --mark "not browser" --verbose
+          tests/run --mark "not browser" --verbose
 
       - name: Soak smoke (60s at 25 rps)
         # The soak is a pytest test marked @slow + @serial. Running
         # it via tests/run with --slow --match soak keeps it in the
         # same framework + reports pipeline as every other test.
-        run: tests/run --slow --match soak --verbose
+        run: |
+          httpd -f /etc/httpd/bstest/httpd.conf -k start 2>/dev/null || true
+          sleep 2
+          tests/run --slow --match soak --verbose
 
       - name: Upload reports
         if: always()
