@@ -52,7 +52,7 @@ order worth enabling them.
 
 `apachectl configtest` parses the configuration. It does not run
 `post_config`, which is where shared memory is sized, the watchdog is
-registered, and the bot-rate-limit default is synthesised. A
+and the watchdog is registered. A
 configuration can test clean and still change behaviour on reload.
 
 Gate the reload on the test's **exit code**, not on reading its output:

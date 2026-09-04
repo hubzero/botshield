@@ -582,8 +582,8 @@ static const command_rec bs_cmds[] = {
     AP_INIT_TAKE_ARGV("BotShieldBotRateLimit",
                  bs_set_bot_rate_limit, NULL, RSRC_CONF,
                  "Per-bot-slug rate limit. Three forms:\n"
-                 "  Off                                    disable "
-                 "post_config default synthesis (specific entries "
+                 "  Off                                    decline "
+                 "robots.txt Crawl-delay groups (explicit entries "
                  "still apply)\n"
                  "  <slug-or-pattern-or-@bg-or-*> <delay-sec>    1 "
                  "req per <delay> seconds (Crawl-delay style); 0 "
@@ -605,8 +605,8 @@ static const command_rec bs_cmds[] = {
                  "is specific > @botgroup > * wildcard. Three "
                  "reserved aggregate slots back the wildcard "
                  "(unknown-bot, fake-bot, wildcard-fallback). "
-                 "Default when no BotShieldBotRateLimit directive is "
-                 "configured: synthesize '* 1 sec'. Over-budget "
+                 "No default: with no directive and no robots.txt "
+                 "Crawl-delay, nothing is rate limited. Over-budget "
                  "returns 429 + Retry-After + reason bot-rate:<slug>."),
     /* E9 — repeated-429 escalation. Sits on top of BotShieldRateLimit;
      * does not apply to robots.txt Crawl-delay 429s in v1 (no operator

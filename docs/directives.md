@@ -518,7 +518,7 @@ template per line (runs of `[0-9._]+` replaced by `X`).
 | Directive | Syntax | Default |
 |---|---|---|
 | `BotShieldRateLimit` | `<name> [budget=N] [per=U] [ua=...] [ipspec=...] [mode=...]` (or legacy `<name> <budget> <per> <ua-pattern> <ipspec> [mode=observe]`) | none |
-| `BotShieldBotRateLimit` | `off`, or `<target> <delay-sec>`, or `<target> <budget> <per>` | `* 1 sec` (synthesized) |
+| `BotShieldBotRateLimit` | `off`, or `<target> <delay-sec>`, or `<target> <budget> <per>` | none |
 | `BotShieldRateLimitEscalate` | `<rate-rule> <strikes> <per> [status=N] [ttl=N]` | none |
 
 ### Alternation on `ua=`
@@ -574,42 +574,46 @@ single hash probe. Over-budget returns 429 + `Retry-After` with reason
 `bot-rate:<slug>`. Robots.txt `Crawl-delay` groups feed the same
 machinery.
 
-### The synthesized default enforces
+### Nothing is rate limited until you say so
 
-This is the one place in the module where something fires without an
-operator declaring it, and it is worth knowing about before it
-surprises you.
+There is no default. An unset `BotShieldBotRateLimit` rate-limits
+nothing, the same as every other policy family in this module.
 
-When the module is enabled at vhost scope and **no**
-`BotShieldBotRateLimit` directive exists anywhere, `post_config`
-installs a wildcard entry of one request per second per directory
-slug. The synthesized entry carries no mode, and the absence of a mode
-means enforce — so it returns real 429s to traffic nobody chose to
-throttle. It logs a `NOTICE` naming itself when it is applied, so the
-error log will tell you which state a given deployment is in.
+It used to work the other way. Enabling the module with no
+`BotShieldBotRateLimit` anywhere synthesised a wildcard of one request
+per second per directory slug, and the synthesised entry carried no
+mode, which means enforce. The result was real 429s to traffic nobody
+had decided to throttle, including named crawlers arriving with a
+published identity. It was invisible twice over: absent from the config
+because nobody wrote it, and absent from the policy dump because the
+dump only knew about directives. On the deployment this was built for
+it was returning 429s to Applebot, GPTBot and Claude-User, and the way
+it came to light was reading a decision log, which is not how an
+operator should have to discover what their server is enforcing.
 
-Two ways to take control of it:
+Two sources now, both of which an operator can point at:
 
 ```apache
-BotShieldBotRateLimit * 1 sec mode=observe   # record, refuse nobody
-BotShieldBotRateLimit off                    # no synthesis, no limiter
+BotShieldBotRateLimit * 1 sec mode=observe   # count, refuse nobody
+BotShieldBotRateLimit @ai-train 10 min       # a real limit
+BotShieldBotRateLimit off                    # disable the subsystem
 ```
 
-`off` suppresses the synthesis while leaving any explicit entries in
-force. Writing any explicit entry also suppresses it.
+and a `Crawl-delay` in a configured robots.txt, which feeds the same
+machinery.
 
-This behavior sits at odds with the rest of the module, where nothing
-is enforced until it is declared and an unset threshold never fires.
-It predates that principle rather than exempting itself from it.
+`off` declines robots.txt `Crawl-delay` groups, which is the only
+implicit source left now that the default is gone. Rules written in the
+config still apply: `off` never meant "ignore what I explicitly asked
+for". It exists because a robots.txt is frequently maintained by
+somebody other than whoever configures this module, and an operator has
+to be able to refuse a `Crawl-delay` appearing in a file they do not
+own.
 
-For path-conditional 403s (the former `BotShieldBlockPath`
-directive, retired), use `BotShieldRequestTrigger` with `status=403`
-plus optional `ua=` / `ipspec=` match keys — see the [Triggers](
-#triggers) section below.
-
-`BotShieldRateLimitEscalate` upgrades repeated 429s on the same
-client to a stickier status code — see
-[policy](policy.md#repeated-429-escalation).
+`httpd -t -D DUMP_BOTSHIELD_POLICY` lists every directive-derived entry
+with its budget, window, scope, and whether it enforces or observes.
+Crawl-delay entries register after that dump runs, so they appear in
+its robots.txt section rather than this one.
 
 ## Robots.txt enforcement
 

@@ -527,15 +527,16 @@ scoring while robots.txt stays advisory. <code>BotShieldRobotsMode observe</code
 also suppresses the +100 score and the 1-hour flag, not just the status
 — otherwise the penalty follows the client into later requests and
 changes its tier, which is enforcement by another route.</p>
-<p><code>mode=enforce|observe</code> may follow any <code>BotShieldBotRateLimit</code> form. It
-matters most for the <strong>synthesised</strong> wildcard: when the module is
-enabled at vhost scope and no rule is written, a <code>* 1 sec</code> limit is
-created automatically. Nobody chose it, and it enforces wherever
-<code>BotShieldEnabled On</code> applies — on the deployment this was built for,
-that meant real 429s to verified Bingbot before anyone had decided to
-rate-limit it. Writing the rule out explicitly with <code>mode=observe</code>
-replaces the synthetic default and keeps the evidence without refusing
-anyone.</p>
+<p><code>mode=enforce|observe</code> may follow any <code>BotShieldBotRateLimit</code> form.
+Writing a wildcard out with <code>mode=observe</code> is the way to find out what
+a crawl-delay would cost before it refuses anyone:</p>
+<pre><code class="language-apache">BotShieldBotRateLimit * 1 sec mode=observe
+</code></pre>
+<p>Every request that would have been refused is recorded with reason
+<code>bot-rate:&lt;slug&gt;</code> and outcome <code>observe</code>, so the decision log answers
+&quot;who would this have throttled&quot; from real traffic rather than from a
+guess. There is no rate limiting at all until a rule like that exists,
+so starting in observe mode costs nothing.</p>
 <h3 id="client-classification-who-is-visiting">Client classification — who is visiting</h3>
 <p><strong>Retired and non-existent agent identities</strong> are classified <code>fake-bot</code>
 without any IP check. Three are recognised: <code>Google-Extended</code>, which was

@@ -366,15 +366,19 @@ also suppresses the +100 score and the 1-hour flag, not just the status
 — otherwise the penalty follows the client into later requests and
 changes its tier, which is enforcement by another route.
 
-`mode=enforce|observe` may follow any `BotShieldBotRateLimit` form. It
-matters most for the **synthesised** wildcard: when the module is
-enabled at vhost scope and no rule is written, a `* 1 sec` limit is
-created automatically. Nobody chose it, and it enforces wherever
-`BotShieldEnabled On` applies — on the deployment this was built for,
-that meant real 429s to verified Bingbot before anyone had decided to
-rate-limit it. Writing the rule out explicitly with `mode=observe`
-replaces the synthetic default and keeps the evidence without refusing
-anyone.
+`mode=enforce|observe` may follow any `BotShieldBotRateLimit` form.
+Writing a wildcard out with `mode=observe` is the way to find out what
+a crawl-delay would cost before it refuses anyone:
+
+```apache
+BotShieldBotRateLimit * 1 sec mode=observe
+```
+
+Every request that would have been refused is recorded with reason
+`bot-rate:<slug>` and outcome `observe`, so the decision log answers
+"who would this have throttled" from real traffic rather than from a
+guess. There is no rate limiting at all until a rule like that exists,
+so starting in observe mode costs nothing.
 
 ### Client classification — who is visiting
 

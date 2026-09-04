@@ -58,22 +58,24 @@ BotShieldDataDir /var/lib/botshield
 BotShieldStateSaveInterval 300
 
 # ---------------------------------------------------------------------------
-# 2. Crawler rate limiting — state this explicitly
+# 2. Crawler rate limiting — off unless you turn it on
 # ---------------------------------------------------------------------------
-# This line looks redundant. It is not, and leaving it out is a live
-# hazard. Unlike every other policy layer in this module, the bot rate
-# limiter synthesises a default: when the module is enabled at vhost scope
-# and no BotShieldBotRateLimit directive exists at all, post_config
-# installs a wildcard entry of one request per second per directory slug.
-# The synthetic entry carries no mode, which means it ENFORCES, returning
-# real 429s to traffic nobody decided to throttle. It announces itself
-# with a NOTICE at startup, so check your error log if you are unsure
-# which state you are in.
+# Nothing is rate limited by default. This section is commented out
+# because an unwritten rule limits nothing, which is the point.
 #
-# Writing it explicitly with mode=observe suppresses the synthesis and
-# records what it would have done instead. `BotShieldBotRateLimit Off`
-# turns the subsystem off entirely, which is also a fine answer.
-BotShieldBotRateLimit * 1 sec mode=observe
+# Start in observe mode. It records what a crawl-delay would have
+# refused, with reason bot-rate:<slug> in the decision log, without
+# refusing anyone, so the budget you eventually pick comes from this
+# site's real crawler traffic rather than from a number in an example
+# file:
+#BotShieldBotRateLimit * 1 sec mode=observe
+#
+# Then something real, once the observe data says what it should be:
+#BotShieldBotRateLimit @ai-train 10 min
+#
+# A Crawl-delay in a robots.txt configured below feeds the same
+# machinery, and `BotShieldBotRateLimit off` declines those while
+# leaving any rule written here in force.
 
 # ---------------------------------------------------------------------------
 # 3. robots.txt — parsed and recorded, enforcing nothing
@@ -156,7 +158,7 @@ BotShieldEnabled LogOnly
 #
 # A green config test is not a rehearsal for a reload. It does not
 # exercise post_config, which is where shared memory is sized, the
-# watchdog is registered, and the rate-limit synthesis in §2 happens.
+# watchdog is registered.
 #
 # Authentication paths are usually the highest-value scope and the one
 # to enable first: an unbounded login-return URL space is a common

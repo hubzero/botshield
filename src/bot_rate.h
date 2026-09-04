@@ -103,11 +103,9 @@ typedef struct bs_bot_rate_entry {
     bs_bot_rate_scope   scope;       /* each (default) | group | total */
     int                 shm_slot;    /* shared across this entry's slugs (specific only) */
     /* mode=observe: count and log, never 429. Mirrors the trigger and
-     * cohort rate-limit families. Needed because the wildcard default
-     * is synthesised, not written -- so enabling the module at vhost
-     * scope silently starts enforcing a crawl-delay nobody chose, and
-     * on this deployment that meant real 429s to verified Bingbot
-     * before anyone had decided to rate-limit it. */
+     * cohort rate-limit families. The way to find out what a crawl
+     * delay would cost before it refuses anyone: write the rule, run it
+     * in observe, and read bot-rate:<slug> out of the decision log. */
     int                 observe;
 } bs_bot_rate_entry;
 
@@ -150,7 +148,7 @@ typedef struct bs_bot_rate_state {
 /* BotShieldBotRateLimit. Three forms:
  *
  *   Off                              # disable the post_config
- *                                      default-synthesis step
+ *                                      robots.txt Crawl-delay
  *   <slug-or-pattern-or-*> <delay>   # 1 req per <delay> seconds
  *                                      (Crawl-delay style); 0 = admit all
  *   <slug-or-pattern-or-*> <budget> <per>

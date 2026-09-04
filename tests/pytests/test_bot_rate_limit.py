@@ -238,26 +238,20 @@ def test_bot_rate_zero_delay_admits_all(config_override, fresh_ip):
     )
 
 
-def test_bot_rate_off_disables_default_synthesis(
-    config_override, fresh_ip,
-):
-    """`BotShieldBotRateLimit Off` skips the post_config default-
-    synthesis step. Specific entries (if any) still apply, but no
-    automatic wildcard means unmatched bots aren't rate-limited."""
-    with config_override(
-        r"BotShieldEnabled\s+On",
-        'BotShieldEnabled On\n'
-        '    BotShieldBotRateLimit Off',
-        count=1,
-    ):
-        # Many rapid bingbot requests — should all admit because
-        # no wildcard exists and no specific bingbot entry.
-        results = [
-            client.get("/", xff=REAL_BINGBOT_IP, ua=BINGBOT_UA)
-            for _ in range(5)
-        ]
+def test_nothing_is_rate_limited_without_a_rule(config_override, fresh_ip):
+    """No rule, no rate limiting.
+
+    This used to be the opposite: enabling the module synthesised a
+    wildcard of 1 req/sec per slug, so a bot hitting the site twice in
+    a second got a 429 nobody had configured. The synthesis is gone,
+    and this pins that -- rapid repeated requests from a known bot all
+    admit when no rule mentions it."""
+    results = [
+        client.get("/", xff=REAL_BINGBOT_IP, ua=BINGBOT_UA)
+        for _ in range(5)
+    ]
     assert all(r.status_code != 429 for r in results), (
-        f"BotShieldBotRateLimit Off should disable rate limiting; "
+        f"nothing should be rate limited without a rule; "
         f"got {[r.status_code for r in results]}"
     )
 

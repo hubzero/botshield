@@ -789,6 +789,57 @@ void bs_policy_dump(server_rec *s, apr_pool_t *p, bs_dir_cfg *cfg)
         fputs("\n", stdout);
     }
 
+    /* --- BotShieldBotRateLimit ---
+     *
+     * Printed even when empty, and printed separately from the cohort
+     * rate limits above, because these are different subsystems with
+     * different sources. This one used to synthesise an enforcing
+     * wildcard nobody had written, and the dump not knowing about it
+     * meant the one tool that answers "what is actually in effect"
+     * stayed silent while it issued 429s. It no longer synthesises
+     * anything, and it says so here rather than leaving the reader to
+     * infer it from an empty section. */
+    fputs("## BotShieldBotRateLimit (per known-bot slug)\n", stdout);
+    if (!scfg->bot_rate_state || scfg->bot_rate_state->entries->nelts == 0) {
+        /* Only directive-derived entries can be listed here. The
+         * robots.txt-derived ones are registered in post_config, which
+         * a config test never runs, so claiming "none" outright would
+         * be wrong on a host with a Crawl-delay. Point at the section
+         * that does know. */
+        fputs("# (no directives) - nothing here is rate limited by an\n"
+              "#                   explicit BotShieldBotRateLimit.\n"
+              "#                   Crawl-delay limits come from robots.txt\n"
+              "#                   and are listed in its section below;\n"
+              "#                   they register after this dump runs.\n\n",
+              stdout);
+    } else {
+        fputs("# target             budget  window  scope   mode     source\n",
+              stdout);
+        for (int i = 0; i < scfg->bot_rate_state->entries->nelts; i++) {
+            bs_bot_rate_entry *e = APR_ARRAY_IDX(
+                scfg->bot_rate_state->entries, i, bs_bot_rate_entry *);
+
+            const char *target;
+            if (e->is_wildcard)        target = "*";
+            else if (e->is_botgroup)   target = apr_psprintf(p, "@%s",
+                                                   e->botgroup_name);
+            else if (e->slugs && e->slugs->nelts)
+                target = apr_array_pstrcat(p, e->slugs, ',');
+            else                       target = "(unnamed)";
+
+            const char *scope_name =
+                  e->scope == BS_BOT_RATE_GROUP ? "group"
+                : e->scope == BS_BOT_RATE_TOTAL ? "total"
+                : "each";
+
+            printf("%-18s  %6u  %4us   %-6s  %-7s  %s\n",
+                   target, e->budget, e->window_sec, scope_name,
+                   e->observe ? "observe" : "enforce",
+                   e->origin ? e->origin : "directive");
+        }
+        fputs("\n", stdout);
+    }
+
     /* --- robots.txt --- */
     /* --- effective tier thresholds ---
      *

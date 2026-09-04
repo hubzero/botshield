@@ -115,7 +115,7 @@
 <li class="toc__item toc__item--level-2"><a href="#ua-classification-and-allow-list">UA classification and allow list</a></li>
 <li class="toc__item toc__item--level-2"><a href="#rate-limit">Rate limit</a></li>
 <li class="toc__item toc__item--level-3"><a href="#alternation-on-ua">Alternation on `ua=`</a></li>
-<li class="toc__item toc__item--level-3"><a href="#the-synthesized-default-enforces">The synthesized default enforces</a></li>
+<li class="toc__item toc__item--level-3"><a href="#nothing-is-rate-limited-until-you-say-so">Nothing is rate limited until you say so</a></li>
 <li class="toc__item toc__item--level-2"><a href="#robots-txt-enforcement">Robots.txt enforcement</a></li>
 <li class="toc__item toc__item--level-2"><a href="#triggers">Triggers</a></li>
 <li class="toc__item toc__item--level-3"><a href="#accesslog-off-keep-a-request-out-of-the-access-log">`accesslog=off` — keep a request out of the access log</a></li>
@@ -964,7 +964,7 @@ template per line (runs of <code>[0-9._]+</code> replaced by <code>X</code>).</p
 <tr>
 <td><code>BotShieldBotRateLimit</code></td>
 <td><code>off</code>, or <code>&lt;target&gt; &lt;delay-sec&gt;</code>, or <code>&lt;target&gt; &lt;budget&gt; &lt;per&gt;</code></td>
-<td><code>* 1 sec</code> (synthesized)</td>
+<td>none</td>
 </tr>
 <tr>
 <td><code>BotShieldRateLimitEscalate</code></td>
@@ -1015,32 +1015,38 @@ directory, every slot is allocated at config time — request time is a
 single hash probe. Over-budget returns 429 + <code>Retry-After</code> with reason
 <code>bot-rate:&lt;slug&gt;</code>. Robots.txt <code>Crawl-delay</code> groups feed the same
 machinery.</p>
-<h3 id="the-synthesized-default-enforces">The synthesized default enforces</h3>
-<p>This is the one place in the module where something fires without an
-operator declaring it, and it is worth knowing about before it
-surprises you.</p>
-<p>When the module is enabled at vhost scope and <strong>no</strong>
-<code>BotShieldBotRateLimit</code> directive exists anywhere, <code>post_config</code>
-installs a wildcard entry of one request per second per directory
-slug. The synthesized entry carries no mode, and the absence of a mode
-means enforce — so it returns real 429s to traffic nobody chose to
-throttle. It logs a <code>NOTICE</code> naming itself when it is applied, so the
-error log will tell you which state a given deployment is in.</p>
-<p>Two ways to take control of it:</p>
-<pre><code class="language-apache">BotShieldBotRateLimit * 1 sec mode=observe   # record, refuse nobody
-BotShieldBotRateLimit off                    # no synthesis, no limiter
+<h3 id="nothing-is-rate-limited-until-you-say-so">Nothing is rate limited until you say so</h3>
+<p>There is no default. An unset <code>BotShieldBotRateLimit</code> rate-limits
+nothing, the same as every other policy family in this module.</p>
+<p>It used to work the other way. Enabling the module with no
+<code>BotShieldBotRateLimit</code> anywhere synthesised a wildcard of one request
+per second per directory slug, and the synthesised entry carried no
+mode, which means enforce. The result was real 429s to traffic nobody
+had decided to throttle, including named crawlers arriving with a
+published identity. It was invisible twice over: absent from the config
+because nobody wrote it, and absent from the policy dump because the
+dump only knew about directives. On the deployment this was built for
+it was returning 429s to Applebot, GPTBot and Claude-User, and the way
+it came to light was reading a decision log, which is not how an
+operator should have to discover what their server is enforcing.</p>
+<p>Two sources now, both of which an operator can point at:</p>
+<pre><code class="language-apache">BotShieldBotRateLimit * 1 sec mode=observe   # count, refuse nobody
+BotShieldBotRateLimit @ai-train 10 min       # a real limit
+BotShieldBotRateLimit off                    # disable the subsystem
 </code></pre>
-<p><code>off</code> suppresses the synthesis while leaving any explicit entries in
-force. Writing any explicit entry also suppresses it.</p>
-<p>This behavior sits at odds with the rest of the module, where nothing
-is enforced until it is declared and an unset threshold never fires.
-It predates that principle rather than exempting itself from it.</p>
-<p>For path-conditional 403s (the former <code>BotShieldBlockPath</code>
-directive, retired), use <code>BotShieldRequestTrigger</code> with <code>status=403</code>
-plus optional <code>ua=</code> / <code>ipspec=</code> match keys — see the <a href="#triggers">Triggers</a> section below.</p>
-<p><code>BotShieldRateLimitEscalate</code> upgrades repeated 429s on the same
-client to a stickier status code — see
-<a href="../policy/index.html#repeated-429-escalation">policy</a>.</p>
+<p>and a <code>Crawl-delay</code> in a configured robots.txt, which feeds the same
+machinery.</p>
+<p><code>off</code> declines robots.txt <code>Crawl-delay</code> groups, which is the only
+implicit source left now that the default is gone. Rules written in the
+config still apply: <code>off</code> never meant &quot;ignore what I explicitly asked
+for&quot;. It exists because a robots.txt is frequently maintained by
+somebody other than whoever configures this module, and an operator has
+to be able to refuse a <code>Crawl-delay</code> appearing in a file they do not
+own.</p>
+<p><code>httpd -t -D DUMP_BOTSHIELD_POLICY</code> lists every directive-derived entry
+with its budget, window, scope, and whether it enforces or observes.
+Crawl-delay entries register after that dump runs, so they appear in
+its robots.txt section rather than this one.</p>
 <h2 id="robots-txt-enforcement">Robots.txt enforcement</h2>
 <table>
 <thead>

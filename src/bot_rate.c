@@ -88,7 +88,12 @@ const char *bs_set_bot_rate_limit(cmd_parms *cmd, void *dconf,
     }
     bs_bot_rate_state *st = scfg->bot_rate_state;
 
-    /* 1-arg form: 'Off' — disable post_config default synthesis. */
+    /* 1-arg form: 'Off' — disable the subsystem for this vhost.
+     * There is no default left to suppress, so this now means what
+     * it says: no bot rate limiting here at all, including limits a
+     * robots.txt Crawl-delay would otherwise create. That matters
+     * because robots.txt is often managed by someone other than the
+     * person configuring this module. */
     if (argc == 1) {
         if (strcasecmp(argv[0], "off") != 0) {
             return apr_psprintf(cmd->pool,
@@ -173,7 +178,7 @@ const char *bs_set_bot_rate_limit(cmd_parms *cmd, void *dconf,
         /* Not the per-slug wildcard: this rule allocates exactly one
          * counter and never expands over the directory, so it must not
          * claim wildcard_entry -- doing so would suppress the per-slug
-         * default synthesis and leave individual bots uncapped. The
+         * robots.txt Crawl-delay and leave individual bots uncapped. The
          * two `*` rules are complementary and expected together. */
         if (st->global_entry) {
             return "BotShieldBotRateLimit: scope=total already defined; "
@@ -400,22 +405,23 @@ void bs_bot_rate_init(apr_pool_t *pconf, server_rec *s, int *next_slot)
                                                    &botshield_module);
         if (!scfg) continue;
 
-        /* Default synthesis condition: module is enabled at vhost
-         * scope (On or LogOnly), no operator BotShieldBotRateLimit
-         * directive was configured, and the operator didn't write
-         * `BotShieldBotRateLimit Off` to opt out. The default is
-         * `* 1 sec` — 1 req/sec per directory slug, Crawl-delay-style. */
-        bs_dir_cfg *dcfg = ap_get_module_config(sv->lookup_defaults,
-                                                &botshield_module);
-        int module_enabled = dcfg
-            && (dcfg->enabled == BS_ENABLED_ON
-             || dcfg->enabled == BS_ENABLED_LOGONLY);
-
-        /* Lazy-init state when there's robots.txt content or the
-         * module is enabled (so the default can fire). */
+        /* Nothing is rate-limited unless something says so. This used
+         * to synthesise a wildcard of 1 req/sec whenever the module was
+         * enabled and no directive existed, which meant enabling the
+         * module was itself the thing that turned rate limiting on. It
+         * returned real 429s -- the synthetic entry carried no mode, and
+         * no mode means enforce -- to traffic nobody had decided to
+         * throttle, including named crawlers arriving with a published
+         * identity. It was also invisible: absent from the config
+         * because nobody wrote it, and absent from the policy dump
+         * because the dump only knew about directives.
+         *
+         * Now the only sources are an explicit BotShieldBotRateLimit
+         * directive and a robots.txt Crawl-delay, both of which an
+         * operator can point at. */
         if (!scfg->bot_rate_state) {
-            int robots = robots_has_crawl_delay(scfg);
-            if (!robots && !module_enabled) continue;
+            /* No state at all unless there is something to put in it. */
+            if (!robots_has_crawl_delay(scfg)) continue;
             scfg->bot_rate_state = apr_pcalloc(pconf,
                 sizeof(*scfg->bot_rate_state));
             scfg->bot_rate_state->entries = apr_array_make(pconf, 8,
@@ -423,34 +429,31 @@ void bs_bot_rate_init(apr_pool_t *pconf, server_rec *s, int *next_slot)
         }
         bs_bot_rate_state *st = scfg->bot_rate_state;
 
-        /* Pre-init synthesis: if the operator wrote nothing, install
-         * a synthetic wildcard at 1 req/sec. The synthetic entry
-         * goes through the same pre-allocation path as a directive
-         * wildcard. */
-        if (module_enabled
-            && !st->wildcard_entry
-            && !st->default_disabled
-            && st->entries->nelts == 0) {
-            bs_bot_rate_entry *def = apr_pcalloc(pconf, sizeof(*def));
-            def->origin     = "default";
-            def->is_wildcard = 1;
-            def->budget     = 1;
-            def->window_sec = 1;
-            def->shm_slot   = -1;
-            st->wildcard_entry = def;
-            ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
-                "mod_botshield: BotShieldBotRateLimit default applied: "
-                "* 1 sec (1 req/sec per directory slug). Override with "
-                "explicit BotShieldBotRateLimit directives, or "
-                "'BotShieldBotRateLimit Off' to disable entirely.");
-        }
-
         st->by_slug = apr_hash_make(pconf);
 
         /* Pass 0 — robots.txt-derived entries. Processed first so the
-         * directive pass can overwrite (directive wins on conflict). */
-        int robots_count = register_robots_entries(pconf, sv, scfg, st,
+         * directive pass can overwrite (directive wins on conflict).
+         *
+         * 'Off' suppresses these. With the synthesised default gone,
+         * that is the only implicit source left, and suppressing it is
+         * what 'Off' is now for: robots.txt is frequently maintained by
+         * someone other than whoever configures this module, and an
+         * operator has to be able to decline a Crawl-delay appearing in
+         * it without editing a file they may not own. Rules written
+         * here still apply -- 'Off' never meant "ignore what I
+         * explicitly asked for". */
+        int robots_count = 0;
+        if (st->default_disabled) {
+            if (robots_has_crawl_delay(scfg)) {
+                ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+                    "mod_botshield: BotShieldBotRateLimit Off - robots.txt "
+                    "Crawl-delay groups are not registered; explicit "
+                    "BotShieldBotRateLimit rules still apply.");
+            }
+        } else {
+            robots_count = register_robots_entries(pconf, sv, scfg, st,
                                                    next_slot);
+        }
 
         int specific_count = 0;
         int botgroup_count = 0;
@@ -813,10 +816,8 @@ int bs_bot_rate_check(request_rec *r)
 
     /* Over budget. Observe when the scope is LogOnly, or when the rule
      * itself says mode=observe. The per-rule form matters because the
-     * wildcard default is synthesised rather than written: enabling the
-     * module at vhost scope starts enforcing a crawl-delay nobody
-     * chose, and there is otherwise no way to watch it first short of
-     * turning rate limiting off entirely and losing the evidence. */
+     * wildcard is written rather than synthesised now, so an operator
+     * who sees a bot-rate 429 can find the rule that caused it. */
     if (log_only || holder->observe) {
         /* Observation only — log a ~rate_limited would-outcome and
          * a :observe-suffixed reason, don't 429 the request.
