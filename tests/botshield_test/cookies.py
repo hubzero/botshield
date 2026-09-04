@@ -14,7 +14,8 @@ import re
 from . import client
 
 
-def fetch_pending_cookie(demo_path: str = "captcha-demo") -> str:
+def fetch_pending_cookie(demo_path: str = "captcha-demo",
+                         xff: str | None = None) -> str:
     """Visit a demo path cookieless and return the raw value of the
     `_bs_captcha_pending` cookie that the module mints.
 
@@ -22,8 +23,14 @@ def fetch_pending_cookie(demo_path: str = "captcha-demo") -> str:
     `captcha-demo`, `hcaptcha-demo`). The caller never adds the slash
     — that's the job of this function so it reads cleanly at call
     sites.
+
+    Pass `xff` to source the request from an address of the caller's
+    choosing. Worth doing: the module keeps per-address state -- score,
+    flags, the safeguard counter -- so a test sharing the default
+    address with the rest of the suite is not testing the module so
+    much as testing what its neighbours left behind.
     """
-    resp = client.get(f"/{demo_path}")
+    resp = client.get(f"/{demo_path}", **({"xff": xff} if xff else {}))
     cookie = resp.cookies.get("_bs_captcha_pending")
     if cookie is None:
         raise AssertionError(

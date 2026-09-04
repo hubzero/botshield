@@ -11,6 +11,9 @@ from __future__ import annotations
 from botshield_test import client, cookies
 
 
+IP_CAPTCHA = "203.0.113.222"
+
+
 def test_no_vocabulary_drift(log_slice):
     with log_slice as slc:
         # Browser-headers — pass
@@ -21,14 +24,16 @@ def test_no_vocabulary_drift(log_slice):
         client.get("/", ua="python-requests/2.31", xff="203.0.113.221")
 
         # Captcha interstitial render
-        client.get("/captcha-demo")
+        client.get("/captcha-demo", xff=IP_CAPTCHA)
 
         # Verify OK via always-pass Turnstile
-        pending = cookies.fetch_pending_cookie("captcha-demo")
+        pending = cookies.fetch_pending_cookie("captcha-demo",
+                                               xff=IP_CAPTCHA)
         client.post(
             "/botshield/captcha-verify/turnstile",
             cookies={"_bs_captcha_pending": pending},
             data={"cf-turnstile-response": "x", "return_to": "/"},
+            xff=IP_CAPTCHA,
         )
 
         # pending_missing
@@ -36,6 +41,7 @@ def test_no_vocabulary_drift(log_slice):
             "/botshield/captcha-verify/turnstile",
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             data={"cf-turnstile-response": "x"},
+            xff=IP_CAPTCHA,
         )
 
         drift = slc.grep(r"metrics: unknown")
