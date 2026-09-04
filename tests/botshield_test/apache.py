@@ -76,12 +76,31 @@ def _service(verb: str) -> None:
     through its own config, which is what `-k` is for.
     """
     if SERVICE_MODE == "systemd":
-        cmd = ["sudo", "systemctl", verb, APACHE_SERVICE]
-    else:
-        signal = {"reload": "graceful", "restart": "restart",
-                  "start": "start", "stop": "stop"}[verb]
-        cmd = ["sudo", HTTPD_BIN, "-f", HTTPD_CONF, "-k", signal]
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
+        subprocess.run(["sudo", "systemctl", verb, APACHE_SERVICE],
+                       check=True, stdout=subprocess.DEVNULL)
+        return
+
+    def signal(name):
+        subprocess.run(["sudo", HTTPD_BIN, "-f", HTTPD_CONF, "-k", name],
+                       check=True, stdout=subprocess.DEVNULL)
+
+    if verb == "restart":
+        # Stop then start, not `-k restart`.
+        #
+        # `-k restart` keeps the parent process alive and re-reads the
+        # config in place, where `systemctl restart` genuinely stops the
+        # server and starts a new one. That difference is visible to
+        # these tests: the module writes its state file on shutdown and
+        # reads it on boot, so three tests asserting that a flag
+        # survives a restart passed under systemd and failed in a
+        # container, because the server they "restarted" had never shut
+        # down and never re-read anything from disk.
+        signal("stop")
+        time.sleep(1)
+        signal("start")
+        return
+
+    signal({"reload": "graceful", "start": "start", "stop": "stop"}[verb])
 
 
 def reload() -> None:
