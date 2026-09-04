@@ -14,6 +14,12 @@ the same pytest run without giving up counter continuity.
 
 Opt in with:
   tests/run --slow --match mpm_matrix
+
+Debian-family only: switching MPMs goes through a2enmod, which has no
+RHEL equivalent -- there the MPM is a LoadModule line in
+conf.modules.d, so switching it means editing config rather than
+running a command. Skipped rather than failed elsewhere, so a RHEL run
+reports a skip instead of an error that reads like a module bug.
 """
 
 from __future__ import annotations
@@ -24,9 +30,18 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from botshield_test import apache, client, cookies, ips
+from botshield_test.config import PLATFORM
 
 
-pytestmark = [pytest.mark.slow, pytest.mark.serial]
+
+pytestmark = [
+    pytest.mark.slow,
+    pytest.mark.serial,
+    pytest.mark.skipif(
+        PLATFORM != "debian",
+        reason="MPM switching needs a2enmod (Debian-family only)",
+    ),
+]
 
 
 @pytest.fixture(scope="module", params=apache._MPMS)

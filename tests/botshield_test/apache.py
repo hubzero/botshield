@@ -15,7 +15,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from .config import (APACHE_SERVICE, DEV_VHOST_CONF, HTTPD_CONF,
+from .config import (APACHE_SERVICE, DEV_VHOST_CONF, HTTPD_BIN, HTTPD_CONF,
                      STATE_FILE)
 
 
@@ -27,7 +27,7 @@ def configtest(*directives):
     rejected at config time: a live reload with a broken config would
     take the instance down for the rest of the session, and configtest
     does the same parse pass without swapping anything in."""
-    cmd = ["sudo", "httpd", "-f", HTTPD_CONF]
+    cmd = ["sudo", HTTPD_BIN, "-f", HTTPD_CONF]
     for d in directives:
         cmd += ["-C", d]
     cmd += ["-t"]
@@ -46,7 +46,7 @@ def policy_dump() -> str:
     takes effect for the dump without a reload, but also that the dump
     must be taken *inside* the block, before the file is reverted."""
     result = subprocess.run(
-        ["sudo", "httpd", "-f", HTTPD_CONF, "-t",
+        ["sudo", HTTPD_BIN, "-f", HTTPD_CONF, "-t",
          "-D", "DUMP_BOTSHIELD_POLICY"],
         capture_output=True, text=True, check=False,
     )

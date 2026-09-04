@@ -31,24 +31,69 @@ WORKER_N = (int(_WORKER[2:])
 _PAR = WORKER_N is not None
 
 
+# Which Apache is this?
+#
+# One place decides, because the harness previously did not have one: it
+# shelled out to `httpd`, the RHEL binary name, while defaulting its
+# config paths to /etc/apache2, the Debian layout. That combination is
+# wrong on both platforms, and it failed differently on each -- on RHEL
+# the paths were wrong unless you remembered to source bstest.env, and
+# on Ubuntu CI the binary did not exist at all, so every config-parse
+# test failed with "httpd: command not found" and had done for months.
+#
+# Detection is by binary, not by /etc/os-release, because what matters
+# is the Apache that is installed rather than the distribution name.
+def _detect_platform():
+    if os.environ.get("BS_PLATFORM"):
+        return os.environ["BS_PLATFORM"]
+    if os.path.exists("/usr/sbin/httpd"):
+        return "rhel"
+    if os.path.exists("/usr/sbin/apache2"):
+        return "debian"
+    raise RuntimeError(
+        "cannot find an Apache: looked for /usr/sbin/httpd and "
+        "/usr/sbin/apache2. Set BS_PLATFORM=rhel|debian to override."
+    )
+
+
+PLATFORM = _detect_platform()
+_RHEL = PLATFORM == "rhel"
+
+# The binary the harness invokes for `-t` config checks and the policy
+# dump, and the service name it restarts.
+HTTPD_BIN = os.environ.get("BS_HTTPD_BIN", "httpd" if _RHEL else "apache2")
+CTL_BIN = os.environ.get("BS_CTL_BIN",
+                         "apachectl" if _RHEL else "apache2ctl")
+
+
+def _plat(rhel_value, debian_value):
+    """Pick the platform-appropriate default."""
+    return rhel_value if _RHEL else debian_value
+
+
 def _pick(env_key, default, worker_value):
     if _PAR:
         return worker_value
     return os.environ.get(env_key, default)
 
 
-BASE_URL = _pick("BS_BASE", "https://localhost",
+BASE_URL = _pick("BS_BASE",
+                 _plat("https://localhost:8443", "https://localhost"),
                  "https://localhost:%d" % (8543 + (WORKER_N or 0)))
 ERROR_LOG = _pick("BS_ERROR_LOG",
-                  "/var/log/apache2/botshield-dev-error.log",
+                  _plat("/var/log/httpd/bstest/botshield-dev-error.log",
+                        "/var/log/apache2/botshield-dev-error.log"),
                   "/var/log/httpd/bstest/w%d/botshield-dev-error.log" % (WORKER_N or 0))
 APACHE_ERROR_LOG = _pick("BS_APACHE_ERROR_LOG",
-                         "/var/log/apache2/error.log",
+                         _plat("/var/log/httpd/bstest/error.log",
+                               "/var/log/apache2/error.log"),
                          "/var/log/httpd/bstest/w%d/error.log" % (WORKER_N or 0))
 DEV_VHOST_CONF = _pick("BS_DEV_VHOST_CONF",
-                       "/etc/apache2/sites-available/botshield-dev.conf",
+                       _plat("/etc/httpd/bstest/dev-vhost.conf",
+                             "/etc/apache2/sites-available/botshield-dev.conf"),
                        "/etc/httpd/bstest/w%d/dev-vhost.conf" % (WORKER_N or 0))
-APACHE_SERVICE = _pick("BS_APACHE_SERVICE", "apache2",
+APACHE_SERVICE = _pick("BS_APACHE_SERVICE",
+                       _plat("httpd-bstest", "apache2"),
                        "httpd-bstest@%d" % (WORKER_N or 0))
 
 # External load-state file the module watches. Per worker, because
@@ -64,7 +109,9 @@ LOAD_STATE_FILE = _pick("BS_LOAD_STATE_FILE",
 # config: it loads the deployed module, so a test for a directive the
 # working tree has just added would assert against the old build and
 # report a parser error that says nothing about the new code.
-HTTPD_CONF = _pick("BS_HTTPD_CONF", "/etc/apache2/apache2.conf",
+HTTPD_CONF = _pick("BS_HTTPD_CONF",
+                   _plat("/etc/httpd/bstest/httpd.conf",
+                         "/etc/apache2/apache2.conf"),
                    "/etc/httpd/bstest/w%d/httpd.conf" % (WORKER_N or 0))
 # The standalone decision log (BotShieldDecisionLog). Distinct from
 # ERROR_LOG: decision lines appear in BOTH, but only in the error log
@@ -72,9 +119,12 @@ HTTPD_CONF = _pick("BS_HTTPD_CONF", "/etc/apache2/apache2.conf",
 # on. Lines the module writes straight to this file and nowhere else --
 # observability-endpoint hits, for one -- are only visible here.
 DECISION_LOG = _pick("BS_DECISION_LOG",
-                     "/var/log/apache2/botshield.log",
+                     _plat("/var/log/httpd/bstest/botshield.log",
+                           "/var/log/apache2/botshield.log"),
                      "/var/log/httpd/bstest/w%d/botshield.log" % (WORKER_N or 0))
-STATE_FILE = _pick("BS_STATE_FILE", "/var/lib/botshield/state.bin",
+STATE_FILE = _pick("BS_STATE_FILE",
+                   _plat("/var/lib/botshield-test/state.bin",
+                         "/var/lib/botshield/state.bin"),
                    "/var/lib/botshield-test/state-w%d.bin" % (WORKER_N or 0))
 # The external load-state file BotShieldLoadStateFile points at. Tests
 # write it and the request path reads it, so it has to follow the same

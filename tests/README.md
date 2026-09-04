@@ -221,10 +221,27 @@ tests/setup/make-instances.sh 6      # w0..w5
 Each gets its own port (8543+n), runtime dir, logs, SHM state file and
 external load-state file. `config.py` resolves all of it from
 `PYTEST_XDIST_WORKER`, and those per-worker values deliberately outrank
-the `BS_*` environment variables — `bstest.env` points at the single
-instance, and honouring it under xdist would send every worker back to
-one server. Outside xdist nothing changes, so a plain `pytest` run is
-unaffected.
+the `BS_*` environment variables: honouring an env var under xdist would
+send every worker back to one server. Outside xdist the `BS_*` variables
+win, and below them sit platform defaults.
+
+### Platform
+
+`config.py` detects which Apache is installed and derives every default
+from that: the binary to invoke, the service to restart, and where the
+config, logs and state live. RHEL-family means `httpd` and the
+`/etc/httpd/bstest` instance; Debian-family means `apache2` and
+`/etc/apache2`. `BS_PLATFORM=rhel|debian` overrides the detection and
+each individual `BS_*` variable still overrides its own default.
+
+Nothing needs sourcing before a run. There used to be a `bstest.env` for
+this, and it was a workaround for the harness having no platform notion
+at all: it shelled out to `httpd`, the RHEL binary, while defaulting its
+paths to `/etc/apache2`, the Debian layout. That is wrong on both
+platforms, and it failed differently on each — on RHEL the paths were
+wrong unless you remembered the env file, and in CI the binary did not
+exist, so every config-parse test failed with `httpd: command not found`
+and had done for months without anyone reading the log.
 
 `tests/run --parallel` derives `-n` from how many instances are
 actually running, never `auto`. `auto` picks one worker per core, and a

@@ -70,9 +70,9 @@ which is production's.
 
 ## Run
 
-    . tests/bstest.env
-    tests/.venv/bin/pytest tests/pytests -q \
-        --deselect tests/pytests/test_mpm_matrix.py -k "not browser"
+    tests/run --fast
 
-`test_mpm_matrix` and some robots tests shell out to `a2enmod`
-(Debian-only). Browser tests need `playwright install`.
+No environment file to source: `config.py` detects the platform and
+derives its own defaults. `test_mpm_matrix` skips itself on RHEL, where
+`a2enmod` does not exist, rather than needing a `--deselect`. Browser
+tests need `playwright install`.

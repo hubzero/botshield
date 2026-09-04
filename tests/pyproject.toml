@@ -51,7 +51,6 @@ timeout = 120
 markers = [
     "serial: test must not run in parallel (mutates Apache config or SHM)",
     "live_network: requires reachable third-party captcha siteverify",
-    "live_provider: requires a real provider secret/token via env var",
     "slow: multi-second test; opt-in in fast CI lanes",
     "heavy: several seconds, usually waiting on the 1s watchdog. In the\n        full gate, out of the --fast loop. Distinct from `slow`, which is\n        opt-in and therefore NOT in the default run: marking these `slow`\n        would have silently dropped load-state, trigger-dispatch and\n        namespace isolation from the default gate to make one lane quicker.",
     "acceptance: end-to-end user-journey test",
