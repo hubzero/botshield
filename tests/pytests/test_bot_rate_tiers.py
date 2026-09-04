@@ -23,7 +23,7 @@ import subprocess
 
 import pytest
 
-from botshield_test import client, config
+from botshield_test import apache, client, config
 
 
 # Three ai-train slugs with distinct UA patterns. Distinct slugs is the
@@ -203,11 +203,7 @@ def _configtest(directive: str) -> tuple[int, str]:
     deployed module, so a check for a directive the working tree just
     added would silently assert against the old build.
     """
-    result = subprocess.run(
-        ["sudo", "httpd", "-f", config.HTTPD_CONF, "-C", directive, "-t"],
-        capture_output=True, text=True, check=False,
-    )
-    return result.returncode, result.stderr
+    return apache.configtest(directive)
 
 
 @pytest.mark.parametrize(

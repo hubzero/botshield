@@ -27,7 +27,7 @@ import time
 
 import pytest
 
-from botshield_test import client, cookies
+from botshield_test import apache, client, cookies
 
 
 BROWSER_UA = "Mozilla/5.0 (X11) Chrome/145"
@@ -208,13 +208,7 @@ def _configtest(directive: str) -> tuple[int, str]:
     """Same pattern as test_bot_rate_tiers: check against THIS worker's
     instance so a directive the working tree just added is not tested
     against the deployed module."""
-    import subprocess
-    from botshield_test import config as _cfg
-    r = subprocess.run(
-        ["sudo", "httpd", "-f", _cfg.HTTPD_CONF, "-C", directive, "-t"],
-        capture_output=True, text=True, check=False,
-    )
-    return r.returncode, r.stderr
+    return apache.configtest(directive)
 
 
 @pytest.mark.parametrize("directive", [

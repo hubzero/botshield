@@ -60,10 +60,15 @@ PLATFORM = _detect_platform()
 _RHEL = PLATFORM == "rhel"
 
 # The binary the harness invokes for `-t` config checks and the policy
-# dump, and the service name it restarts.
-HTTPD_BIN = os.environ.get("BS_HTTPD_BIN", "httpd" if _RHEL else "apache2")
-CTL_BIN = os.environ.get("BS_CTL_BIN",
-                         "apachectl" if _RHEL else "apache2ctl")
+# dump.
+#
+# Debian gets apache2ctl rather than apache2, and that is not a
+# stylistic choice: apache2.conf refers to ${APACHE_RUN_DIR} and friends,
+# which are defined in /etc/apache2/envvars and sourced by the ctl
+# wrapper. Invoking apache2 directly makes every config test fail with
+# AH00111 "Config variable is not defined", which is what CI was doing.
+HTTPD_BIN = os.environ.get("BS_HTTPD_BIN",
+                           "httpd" if _RHEL else "apache2ctl")
 
 
 def _plat(rhel_value, debian_value):
@@ -96,14 +101,6 @@ APACHE_SERVICE = _pick("BS_APACHE_SERVICE",
                        _plat("httpd-bstest", "apache2"),
                        "httpd-bstest@%d" % (WORKER_N or 0))
 
-# External load-state file the module watches. Per worker, because
-# BotShieldLoadStateFile is server scope: every worker runs its own
-# httpd, so a shared path would let one worker's "hot" leak into
-# another's expectation of "normal" -- the same interference the
-# per-worker instances exist to prevent.
-LOAD_STATE_FILE = _pick("BS_LOAD_STATE_FILE",
-                        "/etc/botshield/load.state.test",
-                        "/etc/botshield/load.state.w%d.test" % (WORKER_N or 0))
 # The instance's own httpd.conf, for `httpd -f ... -C <directive> -t`
 # config-rejection checks. These MUST NOT run against the production
 # config: it loads the deployed module, so a test for a directive the
@@ -127,10 +124,12 @@ STATE_FILE = _pick("BS_STATE_FILE",
                          "/var/lib/botshield/state.bin"),
                    "/var/lib/botshield-test/state-w%d.bin" % (WORKER_N or 0))
 # The external load-state file BotShieldLoadStateFile points at. Tests
-# write it and the request path reads it, so it has to follow the same
-# per-worker split as everything else -- a test writing the shared path
-# while its instance reads a per-worker one just times out waiting for a
-# transition that will never arrive.
+# write it and the request path reads it, so it follows the same
+# per-worker split as everything else: BotShieldLoadStateFile is server
+# scope and every worker runs its own httpd, so a shared path would let
+# one worker's "hot" leak into another's expectation of "normal". A test
+# writing the shared path while its instance reads a per-worker one just
+# times out waiting for a transition that will never arrive.
 LOAD_STATE_FILE = _pick("BS_LOAD_STATE_FILE",
                         "/etc/botshield/load.state.test",
                         "/etc/botshield/load.state.w%d.test" % (WORKER_N or 0))
