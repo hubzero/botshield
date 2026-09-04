@@ -170,8 +170,13 @@ ServerName localhost
 PidFile $RUNDIR/httpd.pid
 DefaultRuntimeDir $RUNDIR
 
+# Both families. A container resolves localhost to ::1 first, and an
+# instance listening only on IPv4 then refuses every connection made by
+# name while accepting every one made by address.
 Listen 127.0.0.1:$HTTP_PORT
 Listen 127.0.0.1:$HTTPS_PORT https
+Listen [::1]:$HTTP_PORT
+Listen [::1]:$HTTPS_PORT https
 
 # The base module set, but NOT conf.modules.d/30-botshield.conf: that
 # loads the production build, and a test for a directive the working
