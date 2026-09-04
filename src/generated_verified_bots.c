@@ -1,6 +1,6 @@
 /* generated_verified_bots.c — auto-generated; do NOT edit by hand.
  *
- * Regenerated from vendor/verified-bots.json by
+ * Regenerated from data/verified-bots.json by
  * tools/gen-verified-bots.py. Edit the JSON or the generator,
  * then re-run via the Makefile rule.
  *

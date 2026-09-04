@@ -1,6 +1,6 @@
 /* generated_browser_templates.c — auto-generated; do NOT edit by hand.
  *
- * Regenerated from vendor/top-user-agents.json by
+ * Regenerated from data/top-user-agents.json by
  * tools/gen-browser-templates.py. Edit the JSON or the generator,
  * then re-run via the Makefile rule.
  *

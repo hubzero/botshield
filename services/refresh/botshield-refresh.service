@@ -1,0 +1,64 @@
+[Unit]
+# Refreshes the three external data sets the module can read at
+# runtime. Oneshot, driven by the paired .timer.
+#
+# All three are hot-reloaded: the module re-reads each file when its
+# mtime changes, so a refresh takes effect without a rebuild and
+# without an Apache reload. The compiled-in copies are baselines, not
+# the only source.
+#
+#   verified-crawler IP ranges -> /var/lib/botshield/bots/*.txt
+#   bot directory              -> /var/lib/botshield/bot-directory.tsv
+#   browser UA templates       -> /var/lib/botshield/browser-templates.txt
+#
+# The last two require BotShieldBotDirectory and
+# BotShieldBrowserTemplates to be set before the module reads them.
+# Without those directives the files are written and ignored.
+#
+# Nothing depends on this and httpd does not wait for it. A refresh
+# that fails leaves the previous data in place, which is the correct
+# outcome: stale published data beats none, and an upstream having a
+# bad day must not cost this host its allow list.
+Description=BotShield external data refresh
+Documentation=file:/usr/local/share/botshield/refresh-bot-ranges.sh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+
+# Each step is prefixed with "-" so one upstream being down does not
+# stop the other two from refreshing. Every script validates what it
+# fetched before replacing anything, and leaves the previous data
+# untouched if the check fails, so a partial run is always safe.
+ExecStart=-/usr/local/share/botshield/refresh-bot-ranges.sh
+ExecStart=-/usr/local/share/botshield/refresh-bot-directory.py
+ExecStart=-/usr/local/share/botshield/refresh-top-user-agents.py
+
+# The scripts rewrite files under the module's data directory and
+# nowhere else. With no repository checkout present they run in
+# runtime-only mode, writing just the files the module reads.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/botshield
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# refresh-bot-ranges.sh exits 1 when some providers refreshed and
+# others did not. That is a normal outcome worth seeing in the
+# journal, not a unit failure: every provider that answered has
+# already been written.
+SuccessExitStatus=0 1
+
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=600

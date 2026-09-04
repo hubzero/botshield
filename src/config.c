@@ -357,7 +357,7 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->captcha_max_inflight  = BS_DEFAULT_CAPTCHA_MAX_INFLIGHT;
     /* E1 Allow-family defaults. bot_classifier / bot_ranges are
      * built at post_config from the bundled bs_builtin_bots[] (set
-     * via vendor/verified-bots.json) plus any operator-declared
+     * via data/verified-bots.json) plus any operator-declared
      * BotShieldAllowBot entries. allow_bots collects directive-
      * declared entries keyed by name. */
     scfg->classify         = BS_CLASSIFY_FLAGS_ALL;
@@ -1189,7 +1189,7 @@ static int bs_init_shm_layout(apr_pool_t *pconf, apr_pool_t *ptemp,
      * counters + generous headroom for directory growth between
      * graceful-restarts. 2048 slots × 8 bytes = 16 KB SHM —
      * trivial cost; leaves ~1400 slots free above today's directory.
-     * Mid-run directory growth via watchdog refresh (vendor/bot-
+     * Mid-run directory growth via watchdog refresh (data/bot-
      * directory.json updates) currently does NOT allocate new rate-
      * limit slots — operators graceful-restart for major directory
      * drops. Dynamic watchdog-driven slot allocation is a future
@@ -1626,7 +1626,7 @@ static void bs_wire_allowlist(apr_pool_t *pconf, server_rec *s)
         vcfg->bot_classifier = bs_ua_classifier_create(pconf);
 
         /* Seed the Allow set with the bundled built-ins
-         * (vendor/verified-bots.json → bs_builtin_bots[]). Operator-
+         * (data/verified-bots.json → bs_builtin_bots[]). Operator-
          * declared entries are overlaid on top; same-name operator
          * entries replace the built-in (last-writer-wins). The
          * runtime BotShieldClassify -verified-bots flag controls

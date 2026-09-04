@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate src/generated_verified_bots.c from vendor/verified-bots.json.
+"""Generate src/generated_verified_bots.c from data/verified-bots.json.
 
 The verified-bot built-ins (the bundled set of well-known crawlers
 the module ships with — googlebot, bingbot, applebot, googleother,
@@ -9,9 +9,9 @@ Moving them into a vendor JSON file gives operators the same
 templates already have, without any new module directive.
 
 Layering:
-  vendor/verified-bots.json          # project-curated set (committed)
-  vendor/verified-bots.default.json  # frozen fallback (committed)
-  vendor/verified-bots.local.json    # operator overrides (gitignored)
+  data/verified-bots.json          # project-curated set (committed)
+  data/verified-bots.default.json  # frozen fallback (committed)
+  data/verified-bots.local.json    # operator overrides (gitignored)
 
 There is no .builtin layer here because there's no external
 upstream for verified-bots — we maintain the entries ourselves, so
@@ -32,11 +32,11 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT  = SCRIPT_DIR.parent
-VENDOR_JSON  = REPO_ROOT / "vendor" / "verified-bots.json"
-DEFAULT_JSON = REPO_ROOT / "vendor" / "verified-bots.default.json"
+VENDOR_JSON  = REPO_ROOT / "data" / "verified-bots.json"
+DEFAULT_JSON = REPO_ROOT / "data" / "verified-bots.default.json"
 # Operator overlay: gitignored, optional. Loaded after the curated
 # set so operator entries win on slug collision and new slugs append.
-LOCAL_JSON   = REPO_ROOT / "vendor" / "verified-bots.local.json"
+LOCAL_JSON   = REPO_ROOT / "data" / "verified-bots.local.json"
 OUTPUT_C     = REPO_ROOT / "src" / "generated_verified_bots.c"
 
 
@@ -59,7 +59,7 @@ def c_string_literal(s):
 
 
 def load_active():
-    """Load vendor/verified-bots.json, or fall back to the .default
+    """Load data/verified-bots.json, or fall back to the .default
     baseline if the active file is missing/unreadable."""
     for path in (VENDOR_JSON, DEFAULT_JSON):
         if path.exists():
@@ -144,7 +144,7 @@ def main():
     lines = [
         "/* generated_verified_bots.c — auto-generated; do NOT edit by hand.",
         " *",
-        " * Regenerated from vendor/verified-bots.json by",
+        " * Regenerated from data/verified-bots.json by",
         " * tools/gen-verified-bots.py. Edit the JSON or the generator,",
         " * then re-run via the Makefile rule.",
         " *",

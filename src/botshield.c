@@ -535,7 +535,7 @@ static const command_rec bs_cmds[] = {
                  "ranges-file basename; same-name as a bundled "
                  "built-in (googlebot, bingbot, applebot, "
                  "googleother, siteimprove from "
-                 "vendor/verified-bots.json) replaces the built-in. "
+                 "data/verified-bots.json) replaces the built-in. "
                  "UA-pattern is the case-insensitive substring "
                  "looked for in the User-Agent header. Optional "
                  "target: '*' opts out of IP verification (UA "
@@ -1000,7 +1000,7 @@ static const command_rec bs_cmds[] = {
                  "parses on mtime change so updates take effect "
                  "without Apache reload. Optional; if unset the "
                  "compiled-in baseline (~600 entries from the "
-                 "vendored Cloudflare directory at build time) "
+                 "bundled Cloudflare directory at build time) "
                  "stays active."),
     AP_INIT_TAKE1("BotShieldBotDirectoryRefreshInterval",
                  bs_set_bot_directory_refresh_interval, NULL, RSRC_CONF,
@@ -1017,7 +1017,7 @@ static const command_rec bs_cmds[] = {
                  "tools/refresh-top-user-agents.py; the watchdog "
                  "re-loads on mtime change. Optional; if unset the "
                  "compiled-in baseline (~23 templates from the "
-                 "build-time vendored top-100 list) stays active."),
+                 "build-time bundled top-100 list) stays active."),
     AP_INIT_TAKE1("BotShieldBrowserTemplatesRefreshInterval",
                  bs_set_browser_templates_refresh_interval, NULL,
                  RSRC_CONF,

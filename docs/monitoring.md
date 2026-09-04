@@ -8,7 +8,7 @@ depend on any of them.
 |---|---|
 | `botshield-dbmon.service` | Samples MariaDB saturation |
 | `botshield-fpmmon.service` | Samples PHP-FPM saturation |
-| `botshield-bot-refresh.timer` | Refreshes verified-crawler IP ranges |
+| `botshield-refresh.timer` | Refreshes three external data sets |
 
 Install all four unit files and their scripts:
 
@@ -138,33 +138,72 @@ config-parse error rather than a silent discard, but the rule is easier
 to follow than to debug. The load state drives
 `BotShieldLoadTrigger`, covered in [Policy](policy.md#load-triggers).
 
-## Bot range refresh
+## Data refresh
 
-`refresh-bot-ranges.sh` pulls the current published IP ranges for the
-crawlers that publish clean ones, and rewrites the files the allow list
-reads at startup. The timer runs it daily, with an hour of randomised
-delay so every host running this does not hit the same four providers
-at the same instant.
+One timer refreshes three external data sets, each of which the module
+re-reads when the file's mtime changes. That is the point of running
+them: a refresh lands without a rebuild and without an Apache reload.
+The copies compiled into the module are baselines, not the only source.
 
-```sh
-sudo systemctl enable --now botshield-bot-refresh.timer
-systemctl list-timers botshield-bot-refresh.timer
+| Data | Written to | Read when you set |
+|---|---|---|
+| Verified-crawler IP ranges | `/var/lib/botshield/bots/*.txt` | `BotShieldAllowBot` |
+| Bot directory | `/var/lib/botshield/bot-directory.tsv` | `BotShieldBotDirectory` |
+| Browser UA templates | `/var/lib/botshield/browser-templates.txt` | `BotShieldBrowserTemplates` |
+
+The last two are written whether or not their directive is set. Without
+the directive the module keeps using its compiled-in baseline and the
+file is simply ignored, so setting them is what turns the refresh into
+something that has an effect:
+
+```apache
+BotShieldBotDirectory     /var/lib/botshield/bot-directory.tsv
+BotShieldBrowserTemplates /var/lib/botshield/browser-templates.txt
 ```
 
-A failed refresh leaves the previous ranges in place, which is the
-outcome you want: stale published ranges beat none, and a provider
-having a bad day should not cost this host its allow list. The unit
-treats a partial refresh as success for the same reason, since every
-provider that did answer has already been written.
+Each has a companion `...RefreshInterval` directive controlling how
+often the watchdog re-checks mtime. Both default to 300 seconds.
 
-The module reads these files once at startup, so new ranges take effect
-on the next graceful restart. If the operational tempo here is a daily
-reload, schedule the timer a little before it.
+```sh
+sudo systemctl enable --now botshield-refresh.timer
+systemctl list-timers botshield-refresh.timer
+```
 
-**This is a different job from `refresh-bot-directory.py`**, which
-updates the bot directory compiled into the module. That one is a
-development-time task that changes a source file and requires a
-rebuild. Do not put it on a timer.
+Daily, with an hour of randomised delay so every host running this does
+not hit the same upstreams at the same instant, and persistent so a day
+is not skipped silently after downtime.
+
+### Failure is designed to be boring
+
+Each of the three scripts validates what it fetched before replacing
+anything, and leaves the previous data untouched if the check fails.
+The bot directory refuses an upstream that returns implausibly few
+entries or has lost one of a small set of sentinel bots, on the theory
+that a truncated or restructured feed should be reviewed by a person
+rather than adopted silently.
+
+The three steps are independent in the unit, so one upstream being down
+does not stop the other two. A partial refresh is a normal outcome
+worth seeing in the journal rather than a unit failure: stale published
+data beats none, and every source that answered has already been
+written.
+
+### The same scripts serve two purposes
+
+`refresh-bot-directory.py` and `refresh-top-user-agents.py` behave
+differently depending on whether a repository checkout is beside them.
+
+In a checkout they treat `data/` as the source of truth: the fetched
+JSON is validated and written there, to be reviewed, committed, and
+compiled into the module at build time. On a host with no checkout they
+run in runtime-only mode, skipping the JSON entirely and writing just
+the files the module reads. Each says which mode it chose on the first
+line of its output, so a surprising result is traceable to the mode
+rather than to the fetch.
+
+That is why `make install-monitors` copies them out of `tools/` rather
+than `services/`: they are genuinely both, and the mode is decided by
+where they find themselves.
 
 ## Where to next
 

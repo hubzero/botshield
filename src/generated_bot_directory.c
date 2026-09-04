@@ -1,6 +1,6 @@
 /* generated_bot_directory.c — auto-generated; do NOT edit by hand.
  *
- * Regenerated from vendor/bot-directory.json by
+ * Regenerated from data/bot-directory.json by
  * tools/gen-bot-directory.py. Edit the JSON or the generator,
  * then re-run via the Makefile rule. */
 

@@ -14,7 +14,7 @@
  *     refresh.
  *
  * Self-contained: links nothing from the module, parses the same
- * vendor/runtime data the module reads at startup. The
+ * data/runtime data the module reads at startup. The
  * classification logic mirrors src/ua_class.c (browser-first
  * short-circuit; bot directory + verified-bot only on miss).
  *
@@ -29,9 +29,9 @@
  * Options:
  *   --bot-directory PATH    pipe-delimited TSV (refresh-bot-directory.py
  *                           output). Default: /var/lib/botshield/bot-directory.tsv,
- *                           falls back to vendor/bot-directory.json.
+ *                           falls back to data/bot-directory.json.
  *   --browser-templates PATH JSON array of UA strings.
- *                           Default: vendor/top-user-agents.json.
+ *                           Default: data/top-user-agents.json.
  *   --bots-dir PATH         Directory holding <name>.txt + <name>.local.txt
  *                           for verified-bot CIDR ranges.
  *                           Default: /var/lib/botshield/bots.
@@ -67,13 +67,13 @@
 /* ============================================================== */
 
 static const char *DEFAULT_BOT_TSV          = "/var/lib/botshield/bot-directory.tsv";
-static const char *DEFAULT_BOT_JSON         = "vendor/bot-directory.json";
-static const char *DEFAULT_BOT_BUILTIN_JSON = "vendor/bot-directory.builtin.json";
-static const char *DEFAULT_BOT_LOCAL_JSON   = "vendor/bot-directory.local.json";
+static const char *DEFAULT_BOT_JSON         = "data/bot-directory.json";
+static const char *DEFAULT_BOT_BUILTIN_JSON = "data/bot-directory.builtin.json";
+static const char *DEFAULT_BOT_LOCAL_JSON   = "data/bot-directory.local.json";
 static const char *DEFAULT_BROWSER_RUNTIME  = "/var/lib/botshield/browser-templates.txt";
-static const char *DEFAULT_BROWSER_JSON     = "vendor/top-user-agents.json";
-static const char *DEFAULT_BROWSER_BUILTIN_JSON = "vendor/top-user-agents.builtin.json";
-static const char *DEFAULT_BROWSER_LOCAL_JSON   = "vendor/top-user-agents.local.json";
+static const char *DEFAULT_BROWSER_JSON     = "data/top-user-agents.json";
+static const char *DEFAULT_BROWSER_BUILTIN_JSON = "data/top-user-agents.builtin.json";
+static const char *DEFAULT_BROWSER_LOCAL_JSON   = "data/top-user-agents.local.json";
 static const char *DEFAULT_BOTS_DIR         = "/var/lib/botshield/bots";
 
 /* Mirrors src/allowlist.c bs_builtin_bots[]. Operator overrides

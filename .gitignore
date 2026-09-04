@@ -58,12 +58,12 @@ timeout-*
 slow-unit-*
 tests/bench/results/
 
-# Backup of the previous active vendor file produced by
+# Backup of the previous active data file produced by
 # tools/refresh-bot-directory.py and refresh-top-user-agents.py.
 # Operator-local rollback artifacts; the committed .json + .default.json
 # are the canonical sources.
-vendor/bot-directory.json.prev
-vendor/top-user-agents.json.prev
+data/bot-directory.json.prev
+data/top-user-agents.json.prev
 
 # Operator-managed overlay files. Loaded last (after upstream + the
 # committed .builtin overlay) by both the build-time codegen and the
@@ -72,9 +72,9 @@ vendor/top-user-agents.json.prev
 # entirely. NOT committed: this is for deployment-specific bots,
 # internal scrapers, custom monitoring tools, or named entries an
 # operator wants to override locally.
-vendor/bot-directory.local.json
-vendor/top-user-agents.local.json
-vendor/verified-bots.local.json
+data/bot-directory.local.json
+data/top-user-agents.local.json
+data/verified-bots.local.json
 
 # Site-specific deployment runbook. Purged from history 2026-09-03;
 # kept locally so the operational detail is not lost.

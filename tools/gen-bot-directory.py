@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate src/generated_bot_directory.c from the vendored
+"""Generate src/generated_bot_directory.c from the bundled
 bot-directory.json.
 
 The active vendor file is parsed at build time and emitted as a
@@ -21,17 +21,17 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
-VENDOR_JSON  = REPO_ROOT / "vendor" / "bot-directory.json"
-DEFAULT_JSON = REPO_ROOT / "vendor" / "bot-directory.default.json"
+VENDOR_JSON  = REPO_ROOT / "data" / "bot-directory.json"
+DEFAULT_JSON = REPO_ROOT / "data" / "bot-directory.default.json"
 # .builtin overlay: project-shipped additions, committed to source
 # control. Loaded after upstream so corrections we ship win on slug
 # collision.
-BUILTIN_JSON = REPO_ROOT / "vendor" / "bot-directory.builtin.json"
+BUILTIN_JSON = REPO_ROOT / "data" / "bot-directory.builtin.json"
 # .local overlay: operator-managed additions, NOT committed (see
-# vendor/.gitignore). Optional; loaded last so operator entries win
+# data/.gitignore). Optional; loaded last so operator entries win
 # even over our shipped builtin overrides. The seam for deployment-
 # specific bots, monitoring tools, internal scrapers, etc.
-LOCAL_JSON   = REPO_ROOT / "vendor" / "bot-directory.local.json"
+LOCAL_JSON   = REPO_ROOT / "data" / "bot-directory.local.json"
 OUTPUT_C     = REPO_ROOT / "src" / "generated_bot_directory.c"
 
 
@@ -63,7 +63,7 @@ def c_optional_string(s):
 
 
 # Category → botgroup mapping. Defaults computed at codegen time;
-# per-entry overrides via vendor/bot-directory.local.json (entries
+# per-entry overrides via data/bot-directory.local.json (entries
 # with an explicit "botgroup" field bypass this map).
 #
 # Botgroup values come from the IETF aipref content-signal vocabulary
@@ -201,7 +201,7 @@ def main():
     lines = [
         "/* generated_bot_directory.c — auto-generated; do NOT edit by hand.",
         " *",
-        " * Regenerated from vendor/bot-directory.json by",
+        " * Regenerated from data/bot-directory.json by",
         " * tools/gen-bot-directory.py. Edit the JSON or the generator,",
         " * then re-run via the Makefile rule. */",
         "",

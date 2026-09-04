@@ -26,10 +26,10 @@
 #include "ua_class.h"
 
 /* bs_builtin_bots[] is now defined in src/generated_verified_bots.c,
- * codegenned from vendor/verified-bots.json by
+ * codegenned from data/verified-bots.json by
  * tools/gen-verified-bots.py. The .json file is the source of
  * truth for the bundled set of verified-bot entries; an operator
- * overlay at vendor/verified-bots.local.json (gitignored) can add
+ * overlay at data/verified-bots.local.json (gitignored) can add
  * entries or override built-ins on slug collision. See
  * tools/gen-verified-bots.py for the layering details. */
 

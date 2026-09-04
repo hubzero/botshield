@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Refresh vendor/bot-directory.json from upstream.
+"""Refresh data/bot-directory.json from upstream.
 
 Fetches the current bot directory from the microlinkhq repo and
 replaces the active vendor file ONLY if the fetched data passes a
@@ -7,11 +7,11 @@ set of sanity checks. If any check fails, the active file is left
 untouched and the script exits non-zero with a clear description.
 
 Two-file model:
-  vendor/bot-directory.json
+  data/bot-directory.json
       The active version. What the build compiles into the module.
       Replaced (in place) on a successful refresh.
 
-  vendor/bot-directory.default.json
+  data/bot-directory.default.json
       Permanent committed baseline. NEVER modified by this script.
       If the active file is ever lost or corrupted, the build can
       always fall back to this. Originally a copy of the active
@@ -33,7 +33,7 @@ Validation checks (any failure aborts the refresh):
      red flag and refuse to replace
 
 On successful refresh, the previous active version is saved as
-vendor/bot-directory.json.prev so an operator can review
+data/bot-directory.json.prev so an operator can review
 the diff or revert by hand.
 
 Usage:
@@ -55,14 +55,14 @@ UPSTREAM_URL = (
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
-VENDOR_DIR = REPO_ROOT / "vendor"
-ACTIVE  = VENDOR_DIR / "bot-directory.json"
-DEFAULT = VENDOR_DIR / "bot-directory.default.json"
+DATA_DIR = REPO_ROOT / "data"
+ACTIVE  = DATA_DIR / "bot-directory.json"
+DEFAULT = DATA_DIR / "bot-directory.default.json"
 # .builtin overlay: project-shipped additions, committed.
-BUILTIN = VENDOR_DIR / "bot-directory.builtin.json"
+BUILTIN = DATA_DIR / "bot-directory.builtin.json"
 # .local overlay: operator-managed additions, gitignored, optional.
-LOCAL   = VENDOR_DIR / "bot-directory.local.json"
-PREV    = VENDOR_DIR / "bot-directory.json.prev"
+LOCAL   = DATA_DIR / "bot-directory.local.json"
+PREV    = DATA_DIR / "bot-directory.json.prev"
 
 # Runtime TSV emitted alongside the vendor JSON. The TSV is what the
 # module reads at request time when BotShieldBotDirectory is set.
@@ -311,10 +311,20 @@ def emit_runtime_tsv(data):
 
 
 def main():
-    if not VENDOR_DIR.exists():
-        print(f"ERROR: vendor directory does not exist: {VENDOR_DIR}",
-              file=sys.stderr)
-        return 2
+    # Two modes, chosen by whether the repo's data/ directory is here.
+    #
+    # In a checkout, data/ is the source of truth: the fetched JSON is
+    # validated, committed there, and compiled into the module at build
+    # time. On a production host there is no checkout, and the same
+    # fetch is still useful -- the module reads the runtime TSV through
+    # BotShieldBotDirectory and re-parses it on mtime change, so a
+    # refresh takes effect without a rebuild or even a reload. In that
+    # mode the JSON writes are skipped and only the runtime file is
+    # emitted. Say which mode this is, so a surprising result is
+    # traceable to the mode rather than to the fetch.
+    runtime_only = not DATA_DIR.exists()
+    if runtime_only:
+        print(f"runtime-only mode: no {DATA_DIR}, writing {RUNTIME_TSV} only")
 
     try:
         body = fetch_upstream()
@@ -345,6 +355,10 @@ def main():
             old_count = len(old_data) if isinstance(old_data, list) else 0
         except Exception:
             old_count = -1   # unreadable; treat as unknown
+
+    if runtime_only:
+        emit_runtime_tsv(data)
+        return 0
 
     # Backup current active to .prev (overwrites any earlier .prev)
     # so an operator can diff or revert without git.

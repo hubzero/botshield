@@ -1,11 +1,11 @@
-/* bot_directory.h — known-bot UA classifier backed by a vendored
+/* bot_directory.h — known-bot UA classifier backed by a bundled
  * snapshot of the Cloudflare bot directory, with optional runtime
  * override.
  *
  * Two-tier storage:
  *
  *   Compile-time baseline: src/generated_bot_directory.c (codegenned
- *     from vendor/bot-directory.json at build). The static
+ *     from data/bot-directory.json at build). The static
  *     bs_known_bots[] array is always available and compiled into the
  *     .so. If no runtime override is configured, this is what every
  *     lookup uses.
@@ -51,7 +51,7 @@ typedef struct {
      * content-signal vocabulary (search, ai-input, ai-train) plus a
      * mod_botshield extension "monitor" for operational categories.
      * Computed from `category` at codegen time; per-bot override via
-     * vendor/bot-directory.local.json with an explicit `botgroup`
+     * data/bot-directory.local.json with an explicit `botgroup`
      * field.
      *
      * Values: "search", "ai-input", "ai-train", "monitor", or NULL

@@ -1,8 +1,8 @@
 /* ua_class.h — unified User-Agent classifier for mod_botshield.
  *
  * Three signals consolidated into one cached per-request answer:
- *   - browser-templates  (vendor/top-user-agents.json — top-100 real UAs)
- *   - bot directory      (vendor/bot-directory.json — ~600 known crawlers)
+ *   - browser-templates  (data/top-user-agents.json — top-100 real UAs)
+ *   - bot directory      (data/bot-directory.json — ~600 known crawlers)
  *   - verified-bot       (operator/built-in UA pattern + IP cross-check)
  *
  * Browser-first ordering: real-user traffic is the dominant case, so

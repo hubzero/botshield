@@ -251,7 +251,7 @@ void bs_check_allow(request_rec *r, const bs_dir_cfg *cfg);
  *
  * BotShieldAllowBot <name> <ua-pattern> [<target>] — register a
  * verified-bot entry with optional UA-only/file/inline-CIDR target.
- * The bundled built-in set (vendor/verified-bots.json) loads
+ * The bundled built-in set (data/verified-bots.json) loads
  * automatically; operator-declared entries via this directive are
  * overlaid on top (same-name operator entries replace the built-in).
  * Whether the verified-bot pass actually runs at request time is

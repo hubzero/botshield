@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Generate src/generated_browser_templates.c from the vendored
+"""Generate src/generated_browser_templates.c from the bundled
 top-user-agents.json.
 
-Reads vendor/top-user-agents.json (or falls back to
+Reads data/top-user-agents.json (or falls back to
 top-user-agents.default.json if the active file is missing or
 unreadable). Each entry is an object with `ua` and `slug` fields:
 
@@ -36,12 +36,12 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
-VENDOR_JSON  = REPO_ROOT / "vendor" / "top-user-agents.json"
-DEFAULT_JSON = REPO_ROOT / "vendor" / "top-user-agents.default.json"
+VENDOR_JSON  = REPO_ROOT / "data" / "top-user-agents.json"
+DEFAULT_JSON = REPO_ROOT / "data" / "top-user-agents.default.json"
 # .builtin overlay: project-shipped additions, committed.
-BUILTIN_JSON = REPO_ROOT / "vendor" / "top-user-agents.builtin.json"
+BUILTIN_JSON = REPO_ROOT / "data" / "top-user-agents.builtin.json"
 # .local overlay: operator-managed additions, gitignored, optional.
-LOCAL_JSON   = REPO_ROOT / "vendor" / "top-user-agents.local.json"
+LOCAL_JSON   = REPO_ROOT / "data" / "top-user-agents.local.json"
 OUTPUT_C     = REPO_ROOT / "src" / "generated_browser_templates.c"
 
 VERSION_TOKEN_RE = re.compile(r"[\d._]+")
@@ -165,7 +165,7 @@ def main():
     lines = [
         "/* generated_browser_templates.c — auto-generated; do NOT edit by hand.",
         " *",
-        " * Regenerated from vendor/top-user-agents.json by",
+        " * Regenerated from data/top-user-agents.json by",
         " * tools/gen-browser-templates.py. Edit the JSON or the generator,",
         " * then re-run via the Makefile rule.",
         " *",

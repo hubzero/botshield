@@ -63,31 +63,31 @@ EXTRA_SRC := src/robots.c src/shm.c src/crypto.c src/allowlist.c src/generated_v
 SRC      := $(MAIN_SRC) $(EXTRA_SRC)
 LA       := $(MAIN_SRC:.c=.la)
 
-# generated_bot_directory.c is regenerated from the vendored JSON.
+# generated_bot_directory.c is regenerated from the bundled JSON.
 # Codegen runs whenever the JSON's mtime is newer than the .c.
 # Operators refresh the JSON via tools/refresh-bot-directory.py
 # (network fetch + validation + atomic replace); we never auto-run
 # refresh from the build, only codegen.
 GEN_BOT_DIR_C    := src/generated_bot_directory.c
-GEN_BOT_DIR_JSON := vendor/bot-directory.json
+GEN_BOT_DIR_JSON := data/bot-directory.json
 GEN_BOT_DIR_TOOL := tools/gen-bot-directory.py
 # The generator also reads the .builtin (committed) and .local
 # (gitignored) overlays. They have to be prerequisites too, or editing
 # one leaves a stale .c behind with no error and no output -- the
 # build succeeds and silently ships the previous data. wildcard so a
 # missing .local is simply no prerequisite rather than a hard failure.
-GEN_BOT_DIR_OVERLAYS := $(wildcard vendor/bot-directory.builtin.json \
-                                   vendor/bot-directory.local.json)
+GEN_BOT_DIR_OVERLAYS := $(wildcard data/bot-directory.builtin.json \
+                                   data/bot-directory.local.json)
 
 $(GEN_BOT_DIR_C): $(GEN_BOT_DIR_JSON) $(GEN_BOT_DIR_OVERLAYS) $(GEN_BOT_DIR_TOOL)
 	$(DOCS_PYTHON) $(GEN_BOT_DIR_TOOL)
 
 # Browser-templates codegen — same shape as bot-directory.
 GEN_BROWSER_C    := src/generated_browser_templates.c
-GEN_BROWSER_JSON := vendor/top-user-agents.json
+GEN_BROWSER_JSON := data/top-user-agents.json
 GEN_BROWSER_TOOL := tools/gen-browser-templates.py
-GEN_BROWSER_OVERLAYS := $(wildcard vendor/top-user-agents.builtin.json \
-                                   vendor/top-user-agents.local.json)
+GEN_BROWSER_OVERLAYS := $(wildcard data/top-user-agents.builtin.json \
+                                   data/top-user-agents.local.json)
 
 $(GEN_BROWSER_C): $(GEN_BROWSER_JSON) $(GEN_BROWSER_OVERLAYS) $(GEN_BROWSER_TOOL)
 	$(DOCS_PYTHON) $(GEN_BROWSER_TOOL)
@@ -96,11 +96,11 @@ $(GEN_BROWSER_C): $(GEN_BROWSER_JSON) $(GEN_BROWSER_OVERLAYS) $(GEN_BROWSER_TOOL
 # hardcoded C array; now codegenned from a vendor JSON for symmetry
 # with the other two data sources. No external upstream, so the
 # .json IS the project's curated set (no .builtin layer); operator
-# overlay at vendor/verified-bots.local.json (gitignored).
+# overlay at data/verified-bots.local.json (gitignored).
 GEN_VBOTS_C    := src/generated_verified_bots.c
-GEN_VBOTS_JSON := vendor/verified-bots.json
+GEN_VBOTS_JSON := data/verified-bots.json
 GEN_VBOTS_TOOL := tools/gen-verified-bots.py
-GEN_VBOTS_OVERLAYS := $(wildcard vendor/verified-bots.local.json)
+GEN_VBOTS_OVERLAYS := $(wildcard data/verified-bots.local.json)
 
 $(GEN_VBOTS_C): $(GEN_VBOTS_JSON) $(GEN_VBOTS_OVERLAYS) $(GEN_VBOTS_TOOL)
 	$(DOCS_PYTHON) $(GEN_VBOTS_TOOL)
@@ -279,11 +279,18 @@ install-monitors: monitors-user
 	sudo install -d -m 755 $(MON_SHAREDIR)
 	sudo install -m 755 services/dbmon/botshield-dbmon.py $(MON_SHAREDIR)/
 	sudo install -m 755 services/fpmmon/botshield-fpmmon.py $(MON_SHAREDIR)/
-	sudo install -m 755 services/bot-refresh/refresh-bot-ranges.sh $(MON_SHAREDIR)/
+	sudo install -m 755 services/refresh/refresh-bot-ranges.sh $(MON_SHAREDIR)/
+	@# The refresh service runs these two from the install prefix. With
+	@# no data/ directory beside them they run in runtime-only mode,
+	@# writing just the files the module reads. browser_family.py is
+	@# imported by the user-agent refresher, not run directly.
+	sudo install -m 755 tools/refresh-bot-directory.py $(MON_SHAREDIR)/
+	sudo install -m 755 tools/refresh-top-user-agents.py $(MON_SHAREDIR)/
+	sudo install -m 644 tools/browser_family.py $(MON_SHAREDIR)/
 	sudo install -m 644 services/dbmon/botshield-dbmon.service $(MON_UNITDIR)/
 	sudo install -m 644 services/fpmmon/botshield-fpmmon.service $(MON_UNITDIR)/
-	sudo install -m 644 services/bot-refresh/botshield-bot-refresh.service $(MON_UNITDIR)/
-	sudo install -m 644 services/bot-refresh/botshield-bot-refresh.timer $(MON_UNITDIR)/
+	sudo install -m 644 services/refresh/botshield-refresh.service $(MON_UNITDIR)/
+	sudo install -m 644 services/refresh/botshield-refresh.timer $(MON_UNITDIR)/
 	sudo systemctl daemon-reload
 	@echo
 	@echo "Installed. Nothing is enabled yet -- each unit needs its own"
@@ -291,7 +298,7 @@ install-monitors: monitors-user
 	@echo "docs/monitoring.md, then:"
 	@echo "    sudo systemctl enable --now botshield-dbmon.service"
 	@echo "    sudo systemctl enable --now botshield-fpmmon.service"
-	@echo "    sudo systemctl enable --now botshield-bot-refresh.timer"
+	@echo "    sudo systemctl enable --now botshield-refresh.timer"
 
 sanitize: clean
 	$(APXS) -c $(CFLAGS_WARN) $(CFLAGS_ROTATELOGS) $(CFLAGS_VIS) $(CFLAGS_SAN) $(SRC) $(LIBS)

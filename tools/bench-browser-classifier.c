@@ -11,7 +11,7 @@
  *               regexec() against each UA. Try templates
  *               sequentially.
  *
- * Both run against the same template set (from vendor/top-user-
+ * Both run against the same template set (from data/top-user-
  * agents.json, hardcoded here for self-containment) and the same
  * UA test mix (positive: top-100 examples; negative: scrapers,
  * Mozilla-prefix-with-tail, custom apps).

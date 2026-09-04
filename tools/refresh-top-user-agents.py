@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Refresh vendor/top-user-agents.json from upstream.
+"""Refresh data/top-user-agents.json from upstream.
 
 Fetches the current top-100 browser User-Agents list from the
 microlinkhq/top-user-agents repo, attaches a browser-family slug
@@ -15,11 +15,11 @@ The slug is the source of truth for the per-request decision-log tag
 and is preserved through every consumer (codegen, runtime override).
 
 Two-file model (matches the bot-directory pattern):
-  vendor/top-user-agents.json
+  data/top-user-agents.json
       The active version. What the build compiles into the module.
       Replaced (in place) on a successful refresh.
 
-  vendor/top-user-agents.default.json
+  data/top-user-agents.default.json
       Permanent committed baseline. NEVER modified by this script.
       If the active file is ever lost or corrupted, the build can
       always fall back to this. Updated only via an explicit human
@@ -40,7 +40,7 @@ Validation checks (any failure aborts the refresh):
      treat that as a red flag and refuse to replace
 
 On successful refresh:
-  - Active JSON written atomically to vendor/top-user-agents.json
+  - Active JSON written atomically to data/top-user-agents.json
   - Previous active backed up to .prev (operator-local rollback)
   - Distinct version-masked templates also written to
     /var/lib/botshield/browser-templates.txt (configurable via
@@ -70,14 +70,14 @@ UPSTREAM_URL = (
 )
 
 REPO_ROOT = SCRIPT_DIR.parent
-VENDOR_DIR = REPO_ROOT / "vendor"
-ACTIVE  = VENDOR_DIR / "top-user-agents.json"
-DEFAULT = VENDOR_DIR / "top-user-agents.default.json"
+DATA_DIR = REPO_ROOT / "data"
+ACTIVE  = DATA_DIR / "top-user-agents.json"
+DEFAULT = DATA_DIR / "top-user-agents.default.json"
 # .builtin overlay: project-shipped additions, committed.
-BUILTIN = VENDOR_DIR / "top-user-agents.builtin.json"
+BUILTIN = DATA_DIR / "top-user-agents.builtin.json"
 # .local overlay: operator-managed additions, gitignored, optional.
-LOCAL   = VENDOR_DIR / "top-user-agents.local.json"
-PREV    = VENDOR_DIR / "top-user-agents.json.prev"
+LOCAL   = DATA_DIR / "top-user-agents.local.json"
+PREV    = DATA_DIR / "top-user-agents.json.prev"
 
 # Runtime browser-templates file. Different name than the upstream
 # JSON because the runtime form is normalized (version-masked) and
@@ -281,10 +281,15 @@ def emit_runtime_templates(data):
 
 
 def main():
-    if not VENDOR_DIR.exists():
-        print(f"ERROR: vendor directory does not exist: {VENDOR_DIR}",
-              file=sys.stderr)
-        return 2
+    # Same two modes as tools/refresh-bot-directory.py. In a checkout,
+    # data/ is the source of truth and gets the validated JSON. On a
+    # production host there is no checkout, and the runtime templates
+    # file is still worth writing: the module reads it through
+    # BotShieldBrowserTemplates and reloads it on mtime change, so a
+    # refresh lands without a rebuild or a reload.
+    runtime_only = not DATA_DIR.exists()
+    if runtime_only:
+        print(f"runtime-only mode: no {DATA_DIR}, writing {RUNTIME_TXT} only")
 
     try:
         body = fetch_upstream()
@@ -318,6 +323,10 @@ def main():
             old_count = len(old_data) if isinstance(old_data, list) else 0
         except Exception:
             old_count = -1
+
+    if runtime_only:
+        emit_runtime_templates(entries)
+        return 0
 
     if ACTIVE.exists():
         ACTIVE.replace(PREV)

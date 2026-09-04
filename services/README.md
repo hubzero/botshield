@@ -7,7 +7,7 @@ directory each, holding the unit and whatever it launches.
 |---|---|---|
 | `dbmon/` | `botshield-dbmon.service` | Samples MariaDB saturation |
 | `fpmmon/` | `botshield-fpmmon.service` | Samples PHP-FPM saturation |
-| `bot-refresh/` | `botshield-bot-refresh.timer` | Refreshes verified-crawler IP ranges |
+| `refresh/` | `botshield-refresh.timer` | Refreshes crawler IP ranges, the bot directory, and browser UA templates |
 
 Install with `make install-monitors`, which copies the scripts to
 `/usr/local/share/botshield`, installs the units, and enables nothing.

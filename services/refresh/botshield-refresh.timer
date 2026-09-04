@@ -1,0 +1,17 @@
+[Unit]
+Description=Refresh BotShield external data daily
+Documentation=file:/usr/local/share/botshield/refresh-bot-ranges.sh
+
+[Timer]
+# Daily is well inside how often any of these upstreams actually
+# change, and the module picks changes up on its own watchdog tick, so
+# a tighter cadence buys nothing and costs the upstreams traffic.
+OnCalendar=daily
+# Spread the fetch across an hour. Every host running this would
+# otherwise hit the same handful of upstreams at the same instant.
+RandomizedDelaySec=1h
+# Catch up after downtime rather than skipping a day silently.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

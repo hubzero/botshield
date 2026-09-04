@@ -1,7 +1,7 @@
 /* browser_classifier.h — strict-template browser UA classifier.
  *
  * Returns 1 if a UA matches one of a curated set of "real browser"
- * templates (compiled-in baseline from vendor/top-user-agents.json,
+ * templates (compiled-in baseline from data/top-user-agents.json,
  * optionally overridden at runtime by an operator-managed text file).
  * Returns 0 otherwise — used to flag UAs that look browser-shaped
  * but have extra trailing/inserted content (Mozilla-prefixed
@@ -23,7 +23,7 @@
  * Two-tier storage (mirrors bot_directory):
  *
  *   Compile-time baseline: src/generated_browser_templates.c
- *     (codegenned from vendor/top-user-agents.json at build).
+ *     (codegenned from data/top-user-agents.json at build).
  *     Always available; used when no runtime override is loaded.
  *
  *   Runtime override: text file at the path given by

@@ -224,7 +224,7 @@ const char *bs_set_bot_rate_limit(cmd_parms *cmd, void *dconf,
             return apr_psprintf(cmd->pool,
                 "BotShieldBotRateLimit: '@%s' did not resolve to any "
                 "directory slug. Recognized botgroups: search, ai-input, "
-                "ai-train, monitor. Check spelling or update vendor/"
+                "ai-train, monitor. Check spelling or update data/"
                 "bot-directory*.json with explicit botgroup fields.",
                 bg_name);
         }
@@ -233,7 +233,7 @@ const char *bs_set_bot_rate_limit(cmd_parms *cmd, void *dconf,
         if (e->slugs->nelts == 0) {
             return apr_psprintf(cmd->pool,
                 "BotShieldBotRateLimit: '%s' did not resolve to any "
-                "directory slug; check spelling or update vendor/"
+                "directory slug; check spelling or update data/"
                 "bot-directory*.json", argv[0]);
         }
     }
@@ -298,7 +298,7 @@ static int robots_has_crawl_delay(bs_server_cfg *scfg)
  * on conflict; same rule as specific entries). Stanzas that don't
  * resolve to any directory slug are logged + skipped (the group has
  * no enforcement until the operator adds matching directory entries
- * to vendor/bot-directory.local.json).
+ * to data/bot-directory.local.json).
  *
  * Called from bs_bot_rate_init BEFORE the directive-entry pass — so
  * directives processed second naturally overwrite robots.txt entries
@@ -367,7 +367,7 @@ static int register_robots_entries(apr_pool_t *pconf, server_rec *sv,
                 "mod_botshield: robots.txt group '%s' has Crawl-delay: "
                 "%d but its User-agent stanza(s) don't resolve to any "
                 "directory slug; group has no rate-limit enforcement. "
-                "Add matching entries to vendor/bot-directory.local.json "
+                "Add matching entries to data/bot-directory.local.json "
                 "if you want this group enforced.",
                 gname ? gname : "?", crawl_delay);
             continue;
