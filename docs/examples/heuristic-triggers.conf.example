@@ -10,7 +10,7 @@
 # automatically, kept as a documented starting point for anyone who
 # wants that shape rather than building it from a blank slate. It is
 # NOT a required include, and it does nothing until you paste some or
-# all of it into your own config. apache/botshield-dev.conf carries the
+# all of it into your own config. tests/setup/botshield-dev.conf carries the
 # same slate wired into a live vhost, if you want to see it running
 # rather than read about it.
 #

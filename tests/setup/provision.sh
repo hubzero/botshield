@@ -183,7 +183,7 @@ Define BS_HTTP *:80
 Define BS_HTTPS *:443
 EOF
 a2enconf botshield-repo >/dev/null
-cp "$REPO/apache/botshield-dev.conf" /etc/apache2/sites-available/
+cp "$REPO/tests/setup/botshield-dev.conf" /etc/apache2/sites-available/
 a2dissite 000-default 2>/dev/null || true
 a2ensite botshield-dev >/dev/null
 

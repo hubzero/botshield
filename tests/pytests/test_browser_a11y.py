@@ -32,7 +32,7 @@ pytestmark = [pytest.mark.acceptance, pytest.mark.browser]
 
 # Challenged while unsolved, served once solved -- the round trip these
 # tests need. "/" no longer challenges a recognised browser UA (see the
-# browser-gate comment in apache/botshield-dev.conf), and /silent-demo
+# browser-gate comment in tests/setup/botshield-dev.conf), and /silent-demo
 # re-challenges even a solved client, so neither can carry these.
 CHALLENGE_PATH = "/browser-gate.html"
 

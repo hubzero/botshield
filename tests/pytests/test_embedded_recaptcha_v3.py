@@ -12,8 +12,8 @@ Coverage scope: dispatch only. End-to-end against Google's
 siteverify isn't tested because reCAPTCHA v3 has no published
 always-pass test keys (Google deliberately doesn't ship them — v3's
 whole point is "all real traffic" and you self-test against your
-own production keys). The dev-config comments (apache/botshield-
-dev.conf) call this out explicitly.
+own production keys). The dev-config comments in
+tests/setup/botshield-dev.conf call this out explicitly.
 
 These tests verify:
   - bootstrap returns provider=recaptcha-v3 + sitekey + action when

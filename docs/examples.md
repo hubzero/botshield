@@ -37,7 +37,7 @@ you can read next to real values instead of in the abstract.
 
 ## Seeing it running rather than reading about it
 
-`apache/botshield-dev.conf` in the repository wires the same slate
+`tests/setup/botshield-dev.conf` in the repository wires the same slate
 into a live vhost, alongside the score thresholds that make it act
 (`BotShieldScoreNonInteractive`, `BotShieldScoreInteractive`,
 `BotShieldScoreCaptcha` — themselves unset by default, for the same

@@ -179,7 +179,7 @@ stay public.
 ## Local development
 
 The repo ships a working HTTPS dev vhost at
-`apache/botshield-dev.conf` that exercises every directive against
+`tests/setup/botshield-dev.conf` that exercises every directive against
 the committed `tests/site/` docroot. Bring it up:
 
 ```sh

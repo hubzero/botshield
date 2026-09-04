@@ -28,7 +28,7 @@ In scope:
 - The `mod_botshield` C module and its directives.
 - The bundled tools under `tools/` and the test harness under
   `tests/setup/`.
-- The dev vhost at `apache/botshield-dev.conf` only insofar as it
+- The dev vhost at `tests/setup/botshield-dev.conf` only insofar as it
   exposes a real misconfiguration risk (e.g., a directive default
   that's unsafe).
 

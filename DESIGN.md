@@ -1376,7 +1376,7 @@ of IP-side and cookie-side flag bits. `mode=observe` entries log a
 the flag-trigger and heuristic-trigger seed loops, so a vhost that
 declares no triggers has none. The tables still exist in the source as
 `bs_default_flag_triggers` / `bs_default_heuristic_triggers`, and
-`apache/botshield-dev.conf` carries the same slate as ordinary
+`tests/setup/botshield-dev.conf` carries the same slate as ordinary
 directives for anyone who wants it.
 
 The slate that used to be seeded:

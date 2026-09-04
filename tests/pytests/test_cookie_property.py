@@ -52,7 +52,7 @@ def valid_cookie(request):
     # CHALLENGE_PATH carries an explicit solved=no gate: challenged
     # while unsolved, served once solved, which is exactly the
     # challenge -> solve -> sanity-check-passes shape this fixture
-    # needs. See the browser-gate rule in apache/botshield-dev.conf.
+    # needs. See the browser-gate rule in tests/setup/botshield-dev.conf.
     resp = client.get(CHALLENGE_PATH, xff=ip, ua=BROWSER_UA)
     challenge = cookies.extract_challenge(resp.text)
     counter = cookies.solve_pow(challenge)

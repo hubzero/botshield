@@ -60,20 +60,30 @@ documented in [`tests/README.md`](tests/README.md).
 
 - `src/` — the C source. 19 modules, each `.c` paired with `.h`.
   `DESIGN.md` explains the module split.
-- `apache/botshield-dev.conf` — the dev vhost. Path-templated
-  through `${BS_REPO}` so it works on any developer's checkout.
-- `docs/` — markdown source for the operator handbook
-  (rendered to `gh-pages/public/` by `make docs`).
-- `gh-pages/` — the site builder: `site.json` (nav + card copy),
-  `templates/`, `assets/`, and `public/` (the built site, committed
-  and served by GitHub Pages).
-- `tests/pytests/` — pytest cases. Reusable framework helpers
-  in `tests/botshield_test/`.
-- `tests/fuzz/` — LibFuzzer harnesses for the cookie + robots
-  parsers.
+- `conf/` — the one config artifact an installer places on a host:
+  the `LoadModule` line. Its comment names the destination on each
+  distribution.
+- `data/` — the bot directory, verified-bot ranges and user-agent
+  corpora the module loads at startup. Installed to `/etc/botshield`.
+- `services/` — systemd units and their scripts, one directory each:
+  `dbmon`, `fpmmon`, and `refresh` (which pulls new bot data).
+- `docs/` — markdown source for the operator handbook (rendered to
+  `gh-pages/public/`). `docs/examples/` holds annotated
+  `.conf.example` files to copy from, not to install as-is.
+- `gh-pages/` — the site builder: `build_site.py`, `check_links.py`,
+  `site.json` (nav + card copy), `templates/`, `assets/`, and
+  `public/` (the built site, committed and served by GitHub Pages).
+- `tools/` — developer utilities, not shipped: the generators that
+  rebuild `data/` from upstream sources, and two C benchmarks.
+- `tests/pytests/` — pytest cases against a running Apache. Reusable
+  framework helpers in `tests/botshield_test/`.
+- `tests/unit/` — in-process C tests that link the sources directly
+  and need no server. `make unit`.
+- `tests/setup/` — everything that builds a test instance, including
+  `provision.sh`, `provision-rocky.sh`, and the dev vhost
+  `botshield-dev.conf` those two install.
+- `tests/fuzz/` — LibFuzzer harnesses for the cookie + robots parsers.
 - `tests/bench/` — wrk + oha benchmark scripts.
-- `tools/` — `build_site.py` (docs renderer) +
-  `botshield-refresh.py` (operator cron tool).
 
 `DESIGN.md` is current-state architecture; update it when you change
 behavior, not just when you ship a feature. There is no separate

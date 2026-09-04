@@ -124,7 +124,7 @@ The script is **idempotent** — safe to re-run. On first run it:
   readable by Apache — works around `PrivateTmp=true` for E2.2 tests)
   and `/etc/botshield/load.state.test` (initial value `normal`, for
   E11.1 tests).
-- Installs `apache/botshield-dev.conf` as the enabled site, enables
+- Installs `tests/setup/botshield-dev.conf` as the enabled site, enables
   `mod_botshield`, `mod_status`, `mod_remoteip`, `mod_ssl`,
   `mod_headers`. Selects `mpm_event` as the default MPM.
 - `apachectl configtest` and reloads.

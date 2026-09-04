@@ -130,7 +130,7 @@ typedef struct {
 } score_case;
 
 /* The slate from docs/examples/heuristic-triggers.conf.example, which
- * is also what apache/botshield-dev.conf declares. Built directly
+ * is also what tests/setup/botshield-dev.conf declares. Built directly
  * rather than parsed, so a config-syntax change cannot quietly turn
  * these into a different test. */
 static void install_slate(bs_server_cfg *scfg)
