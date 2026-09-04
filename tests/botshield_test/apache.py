@@ -28,9 +28,18 @@ def configtest(*directives):
     rejected at config time: a live reload with a broken config would
     take the instance down for the rest of the session, and configtest
     does the same parse pass without swapping anything in."""
+    # -c, not -C. Both inject a directive, but -C is processed BEFORE
+    # the config files and -c after, which decides whether the module
+    # has been loaded by the time the directive is looked up. With -C
+    # the answer depends on the server build, and in a Rocky container
+    # it came back "Invalid command 'BotShieldCookieTTL', perhaps
+    # misspelled or defined by a module not included" -- a test for a
+    # valid directive failing because the module was not there yet.
+    # After the config files the module is always loaded, and an
+    # invalid value is still rejected, which is what these tests check.
     cmd = ["sudo", HTTPD_BIN, "-f", HTTPD_CONF]
     for d in directives:
-        cmd += ["-C", d]
+        cmd += ["-c", d]
     cmd += ["-t"]
     result = subprocess.run(cmd, capture_output=True, text=True,
                             check=False)

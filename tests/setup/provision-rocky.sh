@@ -142,6 +142,20 @@ install_secret /etc/botshield/recaptcha-v2-badsecret "this-is-not-a-real-recaptc
 install_secret /etc/botshield/app-integration-secret \
   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
+# Verified-crawler ranges for the allow list. Seeded from the committed
+# copies and never overwritten: once the refresh timer is running, its
+# files take over and this becomes a no-op. Without them the allow list
+# has nothing to verify against, and the failure is not an error but a
+# silence -- requests that should be labelled verified-bot are simply
+# labelled bot, which reads as a classification bug.
+install -d -m 755 /var/lib/botshield/bots
+chown apache:apache /var/lib/botshield/bots
+for f in "$REPO"/data/bots/*.txt; do
+  [[ -f "$f" ]] || continue
+  dest="/var/lib/botshield/bots/$(basename "$f")"
+  [[ -s "$dest" ]] || install -m 644 -o apache -g apache "$f" "$dest"
+done
+
 # Staging directory for the robots.txt tests: they write a fixture here
 # and point the module at it, so it has to be writable by whoever runs
 # pytest and readable by apache.
