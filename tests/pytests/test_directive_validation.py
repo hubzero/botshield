@@ -14,7 +14,6 @@ the running config, so failures here don't poison later tests.
 
 from __future__ import annotations
 
-import subprocess
 import tempfile
 from pathlib import Path
 
@@ -31,20 +30,19 @@ from botshield_test import apache
 
 
 def _configtest(snippet: str) -> tuple[int, str]:
-    """Write the given <VirtualHost>-ready snippet under
-    conf-available/ and run `apachectl -t`. Return (rc, stderr).
-    Cleans up the file no matter what."""
-    # Include file approach: Apache has `Include` but we need a
-    # whole mini-config. Easier: drop a temp file under
-    # /etc/apache2/conf-available and `-C Include` it at configtest
-    # time. Even easier: use apachectl's `-D` define + -C directive
-    # mechanism... actually simplest of all is to just feed a full
-    # config snippet via apachectl's -C option for one-shot dirs.
-    #
-    # apachectl -C "BotShieldCookieTTL garbage" -t
-    cmd = ["sudo", "apachectl", "-C", snippet, "-t"]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    return result.returncode, result.stderr
+    """Parse `snippet` against THIS instance and return (rc, stderr).
+
+    Delegates to the shared helper. It used to run `apachectl -C ... -t`
+    with no -f, which parses the default server config: on a box that
+    also serves a live site that is the production config, so these
+    tests asserted against the DEPLOYED module rather than the one just
+    built -- a check for a directive the working tree had added would
+    have failed on the old binary. In a container there is no botshield
+    in the default config at all, and every case came back "Invalid
+    command", including the one asserting a VALID directive is
+    accepted.
+    """
+    return apache.configtest(snippet)
 
 
 # Each case: (snippet, error_substring_we_expect)
