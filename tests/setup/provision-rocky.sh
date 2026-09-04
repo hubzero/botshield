@@ -54,6 +54,10 @@ command -v make   >/dev/null || need+=(make)
 [[ -e /usr/include/openssl/evp.h ]] || need+=(openssl-devel)
 [[ -e /usr/include/curl/curl.h ]]   || need+=(libcurl-devel)
 [[ -e /usr/include/json-c/json.h ]] || need+=(json-c-devel)
+# The suite talks HTTPS throughout, so mod_ssl is not optional. A
+# minimal image has httpd without it, and the failure is an "Invalid
+# command 'SSLEngine'" that reads like a config typo.
+[[ -e /etc/httpd/conf.modules.d/00-ssl.conf ]] || need+=(mod_ssl)
 # Not bare python3: RHEL 8 ships 3.6 under that name and the pinned
 # test dependencies need 3.9 or newer, so a bare `python3 -m venv` gets
 # as far as resolving httpx before failing. Pick the newest interpreter
