@@ -505,8 +505,8 @@ and needs a graceful restart to pick up edits.
 
 The two data-source pairs override their compiled-in baselines
 without a rebuild — refresh the files with
-`tools/refresh-bot-directory.py` and
-`tools/refresh-top-user-agents.py`, and the watchdog re-parses on
+`services/refresh/botshield-refresh.py directory` and
+`services/refresh/botshield-refresh.py user-agents`, and the watchdog re-parses on
 mtime change. If a file disappears or fails to parse, lookups fall
 back to the baseline codegenned into the `.so` at build time.
 `BotShieldBotDirectory` is TSV (`pattern|slug|category|followsRobotsTxt`,

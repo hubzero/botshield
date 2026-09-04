@@ -29,7 +29,7 @@
  *   Runtime override: text file at the path given by
  *     BotShieldBrowserTemplates. Re-parsed by a per-worker
  *     mod_watchdog tick on mtime change. Refresh via
- *     tools/refresh-top-user-agents.py without rebuilding the .so.
+ *     services/refresh/botshield-refresh.py user-agents without rebuilding the .so.
  */
 #ifndef BOTSHIELD_BROWSER_CLASSIFIER_H
 #define BOTSHIELD_BROWSER_CLASSIFIER_H

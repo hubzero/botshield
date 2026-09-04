@@ -154,7 +154,7 @@ configured CIDR ranges are loaded, verified crawlers (UA-and-IP
 match against the published ranges) bypass the score ladder
 entirely. The built-in seed list covers Googlebot, Bingbot,
 and Applebot; you add others via <code>BotShieldAllowBot</code> and
-refresh ranges out of band with <code>services/refresh/refresh-bot-ranges.py</code>.</li>
+refresh ranges out of band with <code>services/refresh/botshield-refresh.py</code>.</li>
 <li><strong>Robots.txt enforcement.</strong> A bot that ignores your <code>Disallow</code>
 rules gets enforced at the policy layer — robots.txt is no
 longer advisory text the bot can skip; it's enforced at your
@@ -330,7 +330,7 @@ friction setting.</p>
 a UA pattern and a published IP range; verified crawlers (UA
 matches AND IP is in the range) bypass the score ladder entirely.
 mod_botshield ships a built-in seed list for the major search-
-engine crawlers; <code>services/refresh/refresh-bot-ranges.py</code> fetches and updates
+engine crawlers; <code>services/refresh/botshield-refresh.py</code> fetches and updates
 the CIDR files.</p>
 <p>Importantly, the allow-list also catches <em>fakes</em>: a request whose
 UA matches &quot;Googlebot/&quot; but whose IP isn't Googlebot's gets a
@@ -467,7 +467,7 @@ provider, not from your Apache. It's still a side-channel
 that lets the provider see the client's IP.</p>
 </li>
 <li>
-<p><strong>Bot-range refresh script.</strong> <code>services/refresh/refresh-bot-ranges.py</code>
+<p><strong>Bot-range refresh script.</strong> <code>services/refresh/botshield-refresh.py</code>
 fetches published JSON from search-engine providers
 (Googlebot, Bingbot, etc.) and rewrites the CIDR files in
 <code>/var/lib/botshield/bots/</code>. This runs only when you

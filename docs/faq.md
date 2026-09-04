@@ -18,7 +18,7 @@ those terms:
   match against the published ranges) bypass the score ladder
   entirely. The built-in seed list covers Googlebot, Bingbot,
   and Applebot; you add others via `BotShieldAllowBot` and
-  refresh ranges out of band with `services/refresh/refresh-bot-ranges.py`.
+  refresh ranges out of band with `services/refresh/botshield-refresh.py`.
 - **Robots.txt enforcement.** A bot that ignores your `Disallow`
   rules gets enforced at the policy layer — robots.txt is no
   longer advisory text the bot can skip; it's enforced at your
@@ -213,7 +213,7 @@ The allow-list family handles this. `BotShieldAllowBot` registers
 a UA pattern and a published IP range; verified crawlers (UA
 matches AND IP is in the range) bypass the score ladder entirely.
 mod_botshield ships a built-in seed list for the major search-
-engine crawlers; `services/refresh/refresh-bot-ranges.py` fetches and updates
+engine crawlers; `services/refresh/botshield-refresh.py` fetches and updates
 the CIDR files.
 
 Importantly, the allow-list also catches *fakes*: a request whose
@@ -373,7 +373,7 @@ configured categories:
    provider, not from your Apache. It's still a side-channel
    that lets the provider see the client's IP.
 
-2. **Bot-range refresh script.** `services/refresh/refresh-bot-ranges.py`
+2. **Bot-range refresh script.** `services/refresh/botshield-refresh.py`
    fetches published JSON from search-engine providers
    (Googlebot, Bingbot, etc.) and rewrites the CIDR files in
    `/var/lib/botshield/bots/`. This runs only when you

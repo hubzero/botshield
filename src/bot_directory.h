@@ -13,7 +13,7 @@
  *   Runtime override: an operator-controlled TSV file at the path
  *     given by BotShieldBotDirectory. Re-parsed by a watchdog at
  *     BotShieldBotDirectoryRefreshInterval. Refreshed in-place via
- *     tools/refresh-bot-directory.py without rebuilding the module.
+ *     services/refresh/botshield-refresh.py directory without rebuilding the module.
  *     If the file disappears or fails to parse, the lookup falls back
  *     to the compiled-in baseline.
  *

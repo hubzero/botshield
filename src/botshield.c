@@ -996,7 +996,7 @@ static const command_rec bs_cmds[] = {
                  "bot-directory baseline. Format: pattern|slug|"
                  "category|followsRobotsTxt, one record per line, "
                  "comments with '#'. Refresh via "
-                 "tools/refresh-bot-directory.py; the watchdog re-"
+                 "services/refresh/botshield-refresh.py directory; the watchdog re-"
                  "parses on mtime change so updates take effect "
                  "without Apache reload. Optional; if unset the "
                  "compiled-in baseline (~600 entries from the "
@@ -1014,7 +1014,7 @@ static const command_rec bs_cmds[] = {
                  "browser-template baseline. Each non-comment line "
                  "is a normalized UA template (runs of [0-9._]+ "
                  "replaced by 'X'). Refresh via "
-                 "tools/refresh-top-user-agents.py; the watchdog "
+                 "services/refresh/botshield-refresh.py user-agents; the watchdog "
                  "re-loads on mtime change. Optional; if unset the "
                  "compiled-in baseline (~23 templates from the "
                  "build-time bundled top-100 list) stays active."),

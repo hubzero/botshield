@@ -65,7 +65,7 @@ LA       := $(MAIN_SRC:.c=.la)
 
 # generated_bot_directory.c is regenerated from the bundled JSON.
 # Codegen runs whenever the JSON's mtime is newer than the .c.
-# Operators refresh the JSON via tools/refresh-bot-directory.py
+# Operators refresh the JSON via services/refresh/botshield-refresh.py directory
 # (network fetch + validation + atomic replace); we never auto-run
 # refresh from the build, only codegen.
 GEN_BOT_DIR_C    := src/generated_bot_directory.c
@@ -279,14 +279,13 @@ install-monitors: monitors-user
 	sudo install -d -m 755 $(MON_SHAREDIR)
 	sudo install -m 755 services/dbmon/botshield-dbmon.py $(MON_SHAREDIR)/
 	sudo install -m 755 services/fpmmon/botshield-fpmmon.py $(MON_SHAREDIR)/
-	sudo install -m 755 services/refresh/refresh-bot-ranges.py $(MON_SHAREDIR)/
-	@# The refresh service runs these two from the install prefix. With
-	@# no data/ directory beside them they run in runtime-only mode,
-	@# writing just the files the module reads. browser_family.py is
-	@# imported by the user-agent refresher, not run directly.
-	sudo install -m 755 tools/refresh-bot-directory.py $(MON_SHAREDIR)/
-	sudo install -m 755 tools/refresh-top-user-agents.py $(MON_SHAREDIR)/
-	sudo install -m 644 tools/browser_family.py $(MON_SHAREDIR)/
+	@# One entry point plus the package it imports. With no data/
+	@# directory beside them they run in runtime-only mode, preferring
+	@# this project's committed data and falling back to upstream.
+	sudo install -m 755 services/refresh/botshield-refresh.py $(MON_SHAREDIR)/
+	sudo install -d -m 755 $(MON_SHAREDIR)/botshield_refresh
+	sudo install -m 644 services/refresh/botshield_refresh/*.py \
+	    $(MON_SHAREDIR)/botshield_refresh/
 	sudo install -m 644 services/dbmon/botshield-dbmon.service $(MON_UNITDIR)/
 	sudo install -m 644 services/fpmmon/botshield-fpmmon.service $(MON_UNITDIR)/
 	sudo install -m 644 services/refresh/botshield-refresh.service $(MON_UNITDIR)/

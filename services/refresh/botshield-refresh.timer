@@ -1,6 +1,6 @@
 [Unit]
 Description=Refresh BotShield external data daily
-Documentation=file:/usr/local/share/botshield/refresh-bot-ranges.py
+Documentation=file:/usr/local/share/botshield/botshield-refresh.py
 
 [Timer]
 # Daily is well inside how often any of these upstreams actually

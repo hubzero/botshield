@@ -118,7 +118,7 @@ The script is **idempotent** — safe to re-run. On first run it:
   friendly,geetest}-secret`) and the shared
   `app-integration-secret` for E5/E8.2.
 - Creates `/var/lib/botshield/` owned by `www-data` for the state
-  file, plus seeds `/var/lib/botshield/bots/` from `apache/bots/*.txt`
+  file, plus seeds `/var/lib/botshield/bots/` from `data/bots/*.txt`
   (Googlebot / Bingbot / Applebot CIDR ranges).
 - Stages `/etc/botshield/test-robots/` (writable by the test user,
   readable by Apache — works around `PrivateTmp=true` for E2.2 tests)

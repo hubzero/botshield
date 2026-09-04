@@ -60,10 +60,12 @@ def normalize(ua):
     return u
 
 
-# Family detection lives in browser_family.py — used at upstream-fetch
-# time only. The vendor JSON files carry the slug per-entry; this
-# codegen never re-detects. Imported for the legacy-format fallback
-# (string entries from a not-yet-converted file get auto-slugged here).
+# Family detection lives with the refreshers, which is where it is
+# normally used: they attach a slug at fetch time and the data/ JSON
+# carries it per entry, so this codegen never re-detects. It is
+# imported here only for the legacy-format fallback, where a string
+# entry from a not-yet-converted file gets auto-slugged.
+sys.path.insert(0, str(REPO_ROOT / "services" / "refresh" / "botshield_refresh"))
 from browser_family import family
 
 

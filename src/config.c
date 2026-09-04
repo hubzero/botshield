@@ -2305,7 +2305,7 @@ static void bs_check_staleness(apr_pool_t *pconf, server_rec *s)
         bs_check_one_file_staleness(s,
             main_scfg->bot_directory_path,
             "bot-directory",
-            "Refresh via tools/refresh-bot-directory.py, or skip the "
+            "Refresh via services/refresh/botshield-refresh.py directory, or skip the "
             "pass with 'BotShieldClassify -known-bots'.");
     }
 
@@ -2314,7 +2314,7 @@ static void bs_check_staleness(apr_pool_t *pconf, server_rec *s)
         bs_check_one_file_staleness(s,
             main_scfg->browser_templates_path,
             "browser-templates",
-            "Refresh via tools/refresh-top-user-agents.py, or skip "
+            "Refresh via services/refresh/botshield-refresh.py user-agents, or skip "
             "the pass with 'BotShieldClassify -browsers'.");
     }
 
@@ -2337,7 +2337,7 @@ static void bs_check_staleness(apr_pool_t *pconf, server_rec *s)
                 "verified-bot ranges (%s)", e->name);
             bs_check_one_file_staleness(sv,
                 e->canonical_path, which,
-                "Refresh via services/refresh/refresh-bot-ranges.py, or skip "
+                "Refresh via services/refresh/botshield-refresh.py, or skip "
                 "the IP cross-check with "
                 "'BotShieldClassify -verified-bots' (degrades to "
                 "UA-only verify).");

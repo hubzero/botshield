@@ -60,6 +60,13 @@ import sys
 import urllib.request
 from pathlib import Path
 
+from .common import (
+    fetch,
+    load_dataset,
+    write_atomic,
+    write_runtime_file,
+)
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 from browser_family import family
@@ -69,7 +76,7 @@ UPSTREAM_URL = (
     "top-user-agents/refs/heads/master/src/index.json"
 )
 
-REPO_ROOT = SCRIPT_DIR.parent
+REPO_ROOT = Path(__file__).resolve().parents[3]
 DATA_DIR = REPO_ROOT / "data"
 ACTIVE  = DATA_DIR / "top-user-agents.json"
 DEFAULT = DATA_DIR / "top-user-agents.default.json"
@@ -117,24 +124,23 @@ def normalize(ua):
 
 
 def fetch_upstream():
-    print(f"fetching {UPSTREAM_URL}")
-    req = urllib.request.Request(
-        UPSTREAM_URL,
-        headers={"User-Agent": "botshield-refresh-top-user-agents/1.0"},
-    )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        if resp.status != 200:
-            raise RuntimeError(f"upstream HTTP {resp.status}")
-        body = resp.read()
-        if not body:
-            raise RuntimeError("upstream returned empty body")
-        print(f"  fetched {len(body)} bytes")
-        return body
+    """Fetch and parse the upstream user-agent list."""
+    print(f"  fetching {UPSTREAM_URL}")
+    body = fetch(UPSTREAM_URL)
+    print(f"    {len(body)} bytes")
+    return json.loads(body.decode("utf-8"))
 
 
 def validate(data):
-    """Run sanity checks on parsed JSON data. Returns a list of
-    error strings; empty list means all checks passed."""
+    """Sanity-check a parsed payload. Returns a list of error strings;
+    empty means it passed.
+
+    Accepts either shape, because the two sources differ: upstream
+    publishes a list of User-Agent strings, and this project's
+    committed copy stores the coerced list of {ua, slug} objects. Both
+    have to pass the same checks, so entries are coerced first and the
+    checks run on what comes out.
+    """
     errs = []
 
     if not isinstance(data, list):
@@ -144,46 +150,34 @@ def validate(data):
     if len(data) < MIN_ENTRY_COUNT:
         errs.append(
             f"entry count {len(data)} is below floor {MIN_ENTRY_COUNT} "
-            "(upstream may have been truncated or restructured)"
+            "(source may have been truncated or restructured)"
         )
 
-    # Shape check — every entry must be a non-empty string
-    bad_shape = 0
-    for i, ua in enumerate(data):
-        if not isinstance(ua, str) or not ua:
-            bad_shape += 1
-            if bad_shape <= 3:
-                errs.append(
-                    f"entry {i} is not a non-empty string "
-                    f"(got {type(ua).__name__})"
-                )
-    if bad_shape > 3:
+    entries = coerce_entries(data)
+    unusable = len(data) - len(entries)
+    if unusable:
         errs.append(
-            f"... plus {bad_shape - 3} more entries with shape issues"
+            f"{unusable} of {len(data)} entries are neither a non-empty "
+            "string nor an object carrying a 'ua' field"
         )
 
-    # Family probes on the normalized templates
-    if isinstance(data, list) and not bad_shape:
-        templates = {normalize(ua) for ua in data}
-        missing = []
-        for family, probe in FAMILY_PROBES.items():
-            if not any(probe.search(t) for t in templates):
-                missing.append(family)
+    # Every engine family we expect to see must appear somewhere. A
+    # list that has lost one of them is a list worth looking at by hand
+    # before it becomes the thing every browser is compared against.
+    if entries:
+        templates = {normalize(entry["ua"]) for entry in entries}
+        missing = [
+            family_name
+            for family_name, probe in FAMILY_PROBES.items()
+            if not any(probe.search(template) for template in templates)
+        ]
         if missing:
             errs.append(
                 f"missing browser engine families: {sorted(missing)} "
-                "— upstream may be broken"
+                "- the source may be broken"
             )
 
     return errs
-
-
-def write_atomic(target, body):
-    """Write body to target via a temp file + rename, so a partial
-    write can never leave a corrupt active file."""
-    tmp = target.with_suffix(target.suffix + ".tmp")
-    tmp.write_bytes(body)
-    tmp.replace(target)
 
 
 def coerce_entries(raw):
@@ -272,48 +266,46 @@ def emit_runtime_templates(data):
     )
     body = (header + "\n".join(f"{t}\t{s}" for t, s in pairs) + "\n"
             ).encode("utf-8")
-    write_atomic(RUNTIME_TXT, body)
-    try:
-        os.chmod(str(RUNTIME_TXT), 0o644)
-    except OSError as e:
-        print(f"   warn: chmod 0644 {RUNTIME_TXT} failed: {e}")
+    write_runtime_file(RUNTIME_TXT, body)
     print(f"   wrote {RUNTIME_TXT} ({len(pairs)} templates)")
 
 
-def main():
-    # Same two modes as tools/refresh-bot-directory.py. In a checkout,
-    # data/ is the source of truth and gets the validated JSON. On a
-    # production host there is no checkout, and the runtime templates
-    # file is still worth writing: the module reads it through
-    # BotShieldBrowserTemplates and reloads it on mtime change, so a
-    # refresh lands without a rebuild or a reload.
+def main(prefer_project: bool | None = None) -> int:
+    """Refresh the browser templates. Returns 0 on success, non-zero if
+    nothing usable was found -- in which case every existing file is
+    left exactly as it was.
+
+    Same two orders as the bot directory: a checkout curates from
+    upstream, a host prefers this project's curated copy and falls back
+    to upstream when that has gone stale.
+    """
     runtime_only = not DATA_DIR.exists()
+    if prefer_project is None:
+        prefer_project = runtime_only
     if runtime_only:
-        print(f"runtime-only mode: no {DATA_DIR}, writing {RUNTIME_TXT} only")
+        print(f"browser templates: runtime-only, writing {RUNTIME_TXT}")
 
     try:
-        body = fetch_upstream()
-    except Exception as e:
-        print(f"ERROR: fetch failed: {e}", file=sys.stderr)
-        return 3
+        raw, source = load_dataset(
+            "browser templates",
+            "data/top-user-agents.json",
+            fetch_upstream,
+            validate,
+            prefer_project,
+        )
+    except RuntimeError as exc:
+        # Nothing usable, so nothing is written. The existing
+        # templates already passed these checks once; data that just
+        # failed them is not an improvement.
+        print(f"ERROR: {exc}", file=sys.stderr)
+        print("       existing files left unchanged", file=sys.stderr)
+        return 1
 
-    try:
-        data = json.loads(body.decode("utf-8"))
-    except Exception as e:
-        print(f"ERROR: JSON parse failed: {e}", file=sys.stderr)
-        return 4
+    entries = coerce_entries(raw)
 
-    errs = validate(data)
-    if errs:
-        print("VALIDATION FAILED — active file unchanged:",
-              file=sys.stderr)
-        for e in errs:
-            print(f"  - {e}", file=sys.stderr)
-        return 5
-
-    # Attach a family slug to each UA. Single source of truth for
-    # the build-time + runtime classifier; consumers never re-detect.
-    entries = [{"ua": ua, "slug": family(ua)} for ua in data]
+    if runtime_only:
+        emit_runtime_templates(entries)
+        return 0
 
     new_count = len(entries)
     old_count = 0
@@ -324,21 +316,17 @@ def main():
         except Exception:
             old_count = -1
 
-    if runtime_only:
-        emit_runtime_templates(entries)
-        return 0
-
     if ACTIVE.exists():
         ACTIVE.replace(PREV)
 
     pretty = json.dumps(entries, indent=2, ensure_ascii=False) + "\n"
     write_atomic(ACTIVE, pretty.encode("utf-8"))
 
-    delta = new_count - old_count if old_count > 0 else 0
-    print(f"OK refreshed {ACTIVE.name}: "
-          f"{old_count if old_count > 0 else '?'} -> {new_count} "
-          f"({delta:+d} entries)" if old_count > 0
-          else f"OK refreshed {ACTIVE.name}: {new_count} entries")
+    if old_count > 0:
+        print(f"OK refreshed {ACTIVE.name} from {source}: "
+              f"{old_count} -> {new_count} ({new_count - old_count:+d} entries)")
+    else:
+        print(f"OK refreshed {ACTIVE.name} from {source}: {new_count} entries")
     print(f"   baseline preserved at {DEFAULT.name}")
     if PREV.exists():
         print(f"   previous version backed up to {PREV.name}")

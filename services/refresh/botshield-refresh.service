@@ -20,20 +20,18 @@
 # outcome: stale published data beats none, and an upstream having a
 # bad day must not cost this host its allow list.
 Description=BotShield external data refresh
-Documentation=file:/usr/local/share/botshield/refresh-bot-ranges.py
+Documentation=file:/usr/local/share/botshield/botshield-refresh.py
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 
-# Each step is prefixed with "-" so one upstream being down does not
-# stop the other two from refreshing. Every script validates what it
-# fetched before replacing anything, and leaves the previous data
-# untouched if the check fails, so a partial run is always safe.
-ExecStart=-/usr/local/share/botshield/refresh-bot-ranges.py
-ExecStart=-/usr/local/share/botshield/refresh-bot-directory.py
-ExecStart=-/usr/local/share/botshield/refresh-top-user-agents.py
+# One entry point, which refreshes all three and keeps going past any
+# one of them failing. Every dataset is validated before it replaces
+# anything and the previous file is left untouched if that check
+# fails, so a partial run is always safe.
+ExecStart=/usr/local/share/botshield/botshield-refresh.py
 
 # The scripts rewrite files under the module's data directory and
 # nowhere else. With no repository checkout present they run in
@@ -53,7 +51,7 @@ SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 
-# refresh-bot-ranges.py exits 1 when some providers refreshed and
+# botshield-refresh.py exits 1 when some providers refreshed and
 # others did not. That is a normal outcome worth seeing in the
 # journal, not a unit failure: every provider that answered has
 # already been written.

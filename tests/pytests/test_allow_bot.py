@@ -15,7 +15,7 @@ Exercises the Allow paths in mod_botshield:
               → in-range matches verified, out-of-range matches are fake.
 
 The first three tests use the dev vhost's bundled config (Googlebot /
-Bingbot / Applebot seeded by provision.sh from apache/bots/*.txt). The
+Bingbot / Applebot seeded by provision.sh from data/bots/*.txt). The
 UA-only and inline-CIDR tests inject their own directives via
 config_override.
 """

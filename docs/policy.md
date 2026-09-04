@@ -58,7 +58,7 @@ cached on the per-server config. Refresh with a reload.
 
 A built-in seed list covers Googlebot, Bingbot, Applebot, Yandex,
 DuckDuckBot, and a handful of others — all installed under
-`/var/lib/botshield/bots/`. The `services/refresh/refresh-bot-ranges.py` script
+`/var/lib/botshield/bots/`. The `services/refresh/botshield-refresh.py` script
 fetches each provider's published JSON and rewrites the CIDR files
 in place.
 

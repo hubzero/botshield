@@ -9,6 +9,10 @@ directory each, holding the unit and whatever it launches.
 | `fpmmon/` | `botshield-fpmmon.service` | Samples PHP-FPM saturation |
 | `refresh/` | `botshield-refresh.timer` | Refreshes crawler IP ranges, the bot directory, and browser UA templates |
 
+The refresher is one entry point over a small package, `botshield-refresh.py`.
+Run it with no arguments for all three datasets, or name one:
+`ranges`, `directory`, `user-agents`.
+
 Install with `make install-monitors`, which copies the scripts to
 `/usr/local/share/botshield`, installs the units, and enables nothing.
 Each one needs a prerequisite first. Setup, verification, and the

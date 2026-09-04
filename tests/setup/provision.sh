@@ -245,11 +245,11 @@ install -d -m 775 -o "$SUDO_USER" -g www-data /etc/botshield/test-robots
 
 echo "== /var/lib/botshield/bots seed =="
 # E1 — Allow family (verified-bot). Seed /var/lib/... from the
-# bundled apache/bots/*.txt if nothing's there yet. Never stomps
-# existing files: once the operator wires services/refresh/refresh-bot-ranges.py
+# bundled data/bots/*.txt if nothing's there yet. Never stomps
+# existing files: once the operator wires services/refresh/botshield-refresh.py
 # into cron, the refreshed files take over and this step is a no-op.
 install -d -m 755 -o www-data -g www-data /var/lib/botshield/bots
-for f in "$REPO"/apache/bots/*.txt; do
+for f in "$REPO"/data/bots/*.txt; do
   [[ -f "$f" ]] || continue
   dest="/var/lib/botshield/bots/$(basename "$f")"
   if [[ ! -s "$dest" ]]; then

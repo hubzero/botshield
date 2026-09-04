@@ -920,7 +920,7 @@ that rebuilds it. That flag controls whether the IP cross-check runs at
 request time, not whether the list exists. Each bot has a default
 ranges file
 `/var/lib/botshield/bots/<name>.txt`. Operators refresh the files
-out-of-module via `services/refresh/refresh-bot-ranges.py` (cron); the module
+out-of-module via `services/refresh/botshield-refresh.py` (cron); the module
 reads them once at startup and serves stale ranges if a refresh
 fails.
 

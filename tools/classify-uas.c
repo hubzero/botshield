@@ -27,7 +27,7 @@
  *   sudo cat /var/log/httpd/access_log | /tmp/classify-uas
  *
  * Options:
- *   --bot-directory PATH    pipe-delimited TSV (refresh-bot-directory.py
+ *   --bot-directory PATH    pipe-delimited TSV (botshield-refresh.py directory
  *                           output). Default: /var/lib/botshield/bot-directory.tsv,
  *                           falls back to data/bot-directory.json.
  *   --browser-templates PATH JSON array of UA strings.
@@ -252,7 +252,7 @@ static int load_browser_templates_json(const char *path)
 }
 
 /* Load the runtime-flat-text browser templates file emitted by
- * tools/refresh-top-user-agents.py. One pre-normalized template per
+ * services/refresh/botshield-refresh.py user-agents. One pre-normalized template per
  * line, '#' comments. Already-merged with the local overlay, so
  * preferring this file over the JSON pair is the most faithful
  * mirror of what the live module reads. */
@@ -751,7 +751,7 @@ int main(int argc, char **argv)
     }
 
     /* Bot directory: prefer TSV (already-merged with builtin +
-     * local overlays by tools/refresh-bot-directory.py — matches
+     * local overlays by services/refresh/botshield-refresh.py directory — matches
      * what the live module reads at runtime). Fall back to vendor
      * JSON + the .builtin and .local overlays so the JSON path
      * also reflects the same augmentations. */
@@ -783,7 +783,7 @@ int main(int argc, char **argv)
 
     /* Browser templates: prefer the runtime flat-text file
      * (already-merged with builtin + local overlays by
-     * tools/refresh-top-user-agents.py and pre-normalized). Fall
+     * services/refresh/botshield-refresh.py user-agents and pre-normalized). Fall
      * back to vendor JSON + .builtin + .local overlays. */
     if (browser_path != DEFAULT_BROWSER_JSON) {
         /* operator passed an explicit path — use it directly */

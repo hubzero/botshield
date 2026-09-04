@@ -109,7 +109,8 @@
 <li class="toc__item toc__item--level-2"><a href="#verifying-a-monitor">Verifying a monitor</a></li>
 <li class="toc__item toc__item--level-2"><a href="#data-refresh">Data refresh</a></li>
 <li class="toc__item toc__item--level-3"><a href="#failure-is-designed-to-be-boring">Failure is designed to be boring</a></li>
-<li class="toc__item toc__item--level-3"><a href="#the-same-scripts-serve-two-purposes">The same scripts serve two purposes</a></li>
+<li class="toc__item toc__item--level-3"><a href="#two-sources-in-an-order-that-depends-on-where-it-runs">Two sources, in an order that depends on where it runs</a></li>
+<li class="toc__item toc__item--level-3"><a href="#nothing-good-is-ever-replaced-by-nothing">Nothing good is ever replaced by nothing</a></li>
 <li class="toc__item toc__item--level-2"><a href="#where-to-next">Where to next</a></li>
   </ul>
 </section>
@@ -232,7 +233,7 @@ config-parse error rather than a silent discard, but the rule is easier
 to follow than to debug. The load state drives
 <code>BotShieldLoadTrigger</code>, covered in <a href="../policy/index.html#load-triggers">Policy</a>.</p>
 <h2 id="data-refresh">Data refresh</h2>
-<p>One timer refreshes three external data sets, each of which the module
+<p>One timer, one entry point, three datasets, each of which the module
 re-reads when the file's mtime changes. That is the point of running
 them: a refresh lands without a rebuild and without an Apache reload.
 The copies compiled into the module are baselines, not the only source.</p>
@@ -299,19 +300,43 @@ Repairing it means working out the new page structure by hand, and
 guessing wrong is worse than being stale in either direction: too few
 addresses and a legitimate crawler starts getting challenged, too many
 and analytics or email infrastructure ends up in a crawler allow list.</p>
-<h3 id="the-same-scripts-serve-two-purposes">The same scripts serve two purposes</h3>
-<p><code>refresh-bot-directory.py</code> and <code>refresh-top-user-agents.py</code> behave
-differently depending on whether a repository checkout is beside them.</p>
-<p>In a checkout they treat <code>data/</code> as the source of truth: the fetched
-JSON is validated and written there, to be reviewed, committed, and
-compiled into the module at build time. On a host with no checkout they
-run in runtime-only mode, skipping the JSON entirely and writing just
-the files the module reads. Each says which mode it chose on the first
-line of its output, so a surprising result is traceable to the mode
-rather than to the fetch.</p>
-<p>That is why <code>make install-monitors</code> copies them out of <code>tools/</code> rather
-than <code>services/</code>: they are genuinely both, and the mode is decided by
-where they find themselves.</p>
+<h3 id="two-sources-in-an-order-that-depends-on-where-it-runs">Two sources, in an order that depends on where it runs</h3>
+<p>Each dataset can come from this project's committed copy or from the
+upstream that copy was built from, and which is tried first depends on
+whether a repository checkout is present.</p>
+<p><strong>On a host</strong>, the project's copy is preferred. It has already survived
+these same checks and a person looked at it before committing it, which
+is a stronger claim than whatever an upstream happens to be serving
+this minute, and it is one request to one host rather than several to
+several. If that copy has gone stale, past 45 days by default, the
+refresher falls back to the upstreams directly. A host therefore stays
+current even if this project goes quiet, and is never strictly
+dependent on anyone continuing to maintain it.</p>
+<p><strong>In a checkout</strong>, the order reverses. Refreshing there means fetching
+upstream, validating, and committing the result, which is the act of
+curating the data every host then prefers. Pulling this project's own
+committed copy back down would be circular. The same run writes the
+<code>data/</code> JSON for review and the runtime files.</p>
+<p>Either order can be forced:</p>
+<pre><code class="language-sh">botshield-refresh.py --prefer-project     # as a host would
+botshield-refresh.py --upstream           # as a maintainer would
+</code></pre>
+<p>Set <code>BOTSHIELD_MAX_DATA_AGE_DAYS</code> to change how long curated data is
+trusted, and <code>BOTSHIELD_PROJECT_REPO</code> to point at a fork.</p>
+<p>Each run says which source it used per dataset, so a surprising result
+is traceable to the source rather than guessed at.</p>
+<h3 id="nothing-good-is-ever-replaced-by-nothing">Nothing good is ever replaced by nothing</h3>
+<p>The rule throughout: <strong>a dataset that cannot be refreshed keeps the file
+it already has.</strong> Data is validated before it replaces anything, and
+written through a temporary file and a rename, so an interrupted or
+rejected refresh cannot leave a truncated file behind.</p>
+<p>Stale data that passed these checks once is better than data that just
+failed them, and far better than an empty allow list, which would not
+fail loudly. It would quietly stop recognising every crawler it used to
+allow. So a failed refresh is reported and nothing else happens.</p>
+<p>This is verified rather than asserted: with every network path broken,
+a full run exits non-zero, names each dataset it could not refresh, and
+leaves all six existing files byte-for-byte identical.</p>
 <h2 id="where-to-next">Where to next</h2>
 <ul>
 <li>Load shedding and what the tiers do with a hot backend:

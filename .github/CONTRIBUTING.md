@@ -73,7 +73,7 @@ documented in [`tests/README.md`](tests/README.md).
   parsers.
 - `tests/bench/` — wrk + oha benchmark scripts.
 - `tools/` — `build_site.py` (docs renderer) +
-  `refresh-bot-ranges.py` (operator cron tool).
+  `botshield-refresh.py` (operator cron tool).
 
 `DESIGN.md` is current-state architecture; update it when you change
 behavior, not just when you ship a feature. There is no separate

@@ -40,8 +40,13 @@ import urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
 
-USER_AGENT = "mod_botshield/refresh-bot-ranges"
-TIMEOUT = 30
+from .common import (
+    fetch,
+    fetch_project_data,
+    project_data_age_days,
+    write_runtime_file,
+    MAX_PROJECT_DATA_AGE_DAYS,
+)
 
 DEFAULT_DEST = Path(
     os.environ.get("BOTSHIELD_BOT_RANGES_DIR", "/var/lib/botshield/bots")
@@ -78,19 +83,7 @@ SITEIMPROVE_URL = (
 # nearly-empty allow list, which is what the floor is for.
 SITEIMPROVE_MIN_IPS = 30
 
-BANNER = "# refreshed by services/refresh/refresh-bot-ranges.py"
-
-
-def fetch(url: str) -> bytes:
-    """Fetch one URL. Raises on any transport or HTTP failure."""
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
-        if response.status != 200:
-            raise RuntimeError(f"HTTP {response.status}")
-        body = response.read()
-    if not body:
-        raise RuntimeError("empty response")
-    return body
+BANNER = "# refreshed by botshield-refresh.py"
 
 
 def parse_json_prefixes(body: bytes) -> list[str]:
@@ -189,60 +182,54 @@ def parse_siteimprove(body: bytes) -> list[str]:
     )
 
 
-def web_server_account() -> str | None:
-    """Return whichever web-server account this distribution uses.
-
-    apache on RHEL-family, www-data on Debian-family. A miss is not
-    fatal: the file is mode 0644 and the module only ever reads it.
-    """
-    import pwd
-
-    for name in ("apache", "www-data"):
-        try:
-            pwd.getpwnam(name)
-            return name
-        except KeyError:
-            continue
-    return None
-
-
 def write_ranges(path: Path, url: str, entries: list[str], note: str = "") -> None:
-    """Write one ranges file atomically.
-
-    Written to a temporary name in the destination directory and
-    renamed, which is atomic on one filesystem. A refresh interrupted
-    halfway therefore leaves the previous file intact rather than a
-    truncated one the module would read as a shrunken allow list.
-    """
+    """Write one ranges file, atomically and readable by the module."""
     lines = [BANNER, f"# source: {url}"]
     if note:
         lines.append(f"# {note}")
     lines.extend(entries)
-    body = "\n".join(lines) + "\n"
-
-    temporary = path.with_suffix(path.suffix + ".new")
-    temporary.write_text(body, encoding="utf-8")
-    os.chmod(temporary, 0o644)
-
-    account = web_server_account()
-    if account is not None:
-        import grp
-        import pwd
-
-        try:
-            os.chown(
-                temporary,
-                pwd.getpwnam(account).pw_uid,
-                grp.getgrnam(account).gr_gid,
-            )
-        except (KeyError, PermissionError, OSError):
-            pass   # mode 0644 already covers the module's read
-
-    temporary.replace(path)
+    write_runtime_file(path, ("\n".join(lines) + "\n").encode("utf-8"))
 
 
-def refresh_provider(name: str, url: str, dest: Path) -> bool:
-    """Refresh one JSON provider. Returns True if the file was replaced."""
+def project_ranges(name: str) -> list[str] | None:
+    """This project's committed copy of one provider's ranges.
+
+    Returns None when it cannot be had or looks unusable, which sends
+    the caller on to the provider itself.
+    """
+    try:
+        body = fetch_project_data(f"data/bots/{name}.txt").decode("utf-8")
+    except Exception:
+        return None
+    entries = [
+        line.strip()
+        for line in body.splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    return entries or None
+
+
+def refresh_provider(name: str, url: str, dest: Path, prefer_project: bool) -> bool:
+    """Refresh one provider. Returns True if its file was replaced.
+
+    On failure the provider's existing file is left exactly as it was.
+    Ranges that were published once make a far better allow list than
+    an empty one, so nothing is written unless something parsed.
+    """
+    if prefer_project:
+        age = project_data_age_days(f"data/bots/{name}.txt")
+        if age is not None and age <= MAX_PROJECT_DATA_AGE_DAYS:
+            entries = project_ranges(name)
+            if entries:
+                write_ranges(
+                    dest / f"{name}.txt",
+                    f"project data, {age:.0f} days old",
+                    entries,
+                )
+                print(f"OK:   {name:<12}  {len(entries):>4} CIDRs  ->  project data")
+                return True
+        # Unknown age, too old, or unusable: fall through to upstream.
+
     try:
         entries = parse_json_prefixes(fetch(url))
     except (urllib.error.URLError, OSError) as exc:
@@ -257,8 +244,26 @@ def refresh_provider(name: str, url: str, dest: Path) -> bool:
     return True
 
 
-def refresh_siteimprove(dest: Path) -> bool:
-    """Refresh Siteimprove. Returns True if the file was replaced."""
+def refresh_siteimprove(dest: Path, prefer_project: bool) -> bool:
+    """Refresh Siteimprove. Returns True if the file was replaced.
+
+    This is the one source with no published feed, so its addresses are
+    scraped from a help article and are the likeliest to break. That
+    makes the project's curated copy more valuable here, not less.
+    """
+    if prefer_project:
+        age = project_data_age_days("data/bots/siteimprove.txt")
+        if age is not None and age <= MAX_PROJECT_DATA_AGE_DAYS:
+            entries = project_ranges("siteimprove")
+            if entries and len(entries) >= SITEIMPROVE_MIN_IPS:
+                write_ranges(
+                    dest / "siteimprove.txt",
+                    f"project data, {age:.0f} days old",
+                    entries,
+                )
+                print(f"OK:   {'siteimprove':<12}  {len(entries):>4} CIDRs  ->  project data")
+                return True
+
     try:
         entries = parse_siteimprove(fetch(SITEIMPROVE_URL))
     except (urllib.error.URLError, OSError) as exc:
@@ -277,8 +282,12 @@ def refresh_siteimprove(dest: Path) -> bool:
     return True
 
 
-def main(argv: list[str]) -> int:
-    dest = Path(argv[1]) if len(argv) > 1 else DEFAULT_DEST
+def main(prefer_project: bool | None = None, dest: Path | None = None) -> int:
+    """Refresh every provider. Returns 0 if all refreshed, 1 if any did
+    not -- and any that did not kept the file it already had."""
+    if prefer_project is None:
+        prefer_project = not (Path(__file__).resolve().parents[3] / "data").exists()
+    dest = dest or DEFAULT_DEST
     try:
         dest.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -286,10 +295,10 @@ def main(argv: list[str]) -> int:
         return 2
 
     results = [
-        refresh_provider(name, url, dest)
+        refresh_provider(name, url, dest, prefer_project)
         for name, url in JSON_PROVIDERS.items()
     ]
-    results.append(refresh_siteimprove(dest))
+    results.append(refresh_siteimprove(dest, prefer_project))
 
     if not all(results):
         print(
@@ -302,4 +311,4 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv))
+    raise SystemExit(main())

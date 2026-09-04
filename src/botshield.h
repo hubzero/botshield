@@ -482,7 +482,7 @@ typedef struct bs_server_cfg {
      * BotShieldBotDirectory points at a TSV file, post_config parses
      * it into a fresh bs_known_bots_state and atomic-swaps the active
      * pointer. A periodic watchdog re-parses on file mtime change so
-     * operators can refresh the directory (via tools/refresh-bot-directory.py)
+     * operators can refresh the directory (via services/refresh/botshield-refresh.py directory)
      * without rebuilding the .so or reloading httpd.
      *
      * Path / refresh interval are server-scope; the active state

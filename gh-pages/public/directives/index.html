@@ -939,8 +939,8 @@ feed. Recommended 60-300 when enabled; <code>0</code> keeps the config-time load
 and needs a graceful restart to pick up edits.</p>
 <p>The two data-source pairs override their compiled-in baselines
 without a rebuild — refresh the files with
-<code>tools/refresh-bot-directory.py</code> and
-<code>tools/refresh-top-user-agents.py</code>, and the watchdog re-parses on
+<code>services/refresh/botshield-refresh.py directory</code> and
+<code>services/refresh/botshield-refresh.py user-agents</code>, and the watchdog re-parses on
 mtime change. If a file disappears or fails to parse, lookups fall
 back to the baseline codegenned into the <code>.so</code> at build time.
 <code>BotShieldBotDirectory</code> is TSV (<code>pattern|slug|category|followsRobotsTxt</code>,
