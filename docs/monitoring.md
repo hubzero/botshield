@@ -188,6 +188,17 @@ worth seeing in the journal rather than a unit failure: stale published
 data beats none, and every source that answered has already been
 written.
 
+**Siteimprove is currently failing this check**, as of September 2026.
+It is the one source with no published feed, so its addresses are
+scraped from a help article, and that article has been restructured:
+the section the parser anchors on now yields 13 addresses against a
+floor of 30. The floor is doing its job. The last good file, 44
+entries, stays in place, and the other sources are unaffected.
+Repairing it means working out the new page structure by hand, and
+guessing wrong is worse than being stale in either direction: too few
+addresses and a legitimate crawler starts getting challenged, too many
+and analytics or email infrastructure ends up in a crawler allow list.
+
 ### The same scripts serve two purposes
 
 `refresh-bot-directory.py` and `refresh-top-user-agents.py` behave

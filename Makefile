@@ -279,7 +279,7 @@ install-monitors: monitors-user
 	sudo install -d -m 755 $(MON_SHAREDIR)
 	sudo install -m 755 services/dbmon/botshield-dbmon.py $(MON_SHAREDIR)/
 	sudo install -m 755 services/fpmmon/botshield-fpmmon.py $(MON_SHAREDIR)/
-	sudo install -m 755 services/refresh/refresh-bot-ranges.sh $(MON_SHAREDIR)/
+	sudo install -m 755 services/refresh/refresh-bot-ranges.py $(MON_SHAREDIR)/
 	@# The refresh service runs these two from the install prefix. With
 	@# no data/ directory beside them they run in runtime-only mode,
 	@# writing just the files the module reads. browser_family.py is
