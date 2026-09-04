@@ -135,9 +135,16 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: apache-logs-fast
+          # Rocky paths: this job runs in a Rocky container and was
+          # still pointing at the Debian log directory, so the one step
+          # whose whole purpose is to explain a failure uploaded
+          # nothing and the artifact never appeared. The state file and
+          # decision log come too, since the failures worth debugging
+          # here are about what survived a restart.
           path: |
-            /var/log/apache2/botshield-dev-error.log
-            /var/log/apache2/error.log
+            /var/log/httpd/bstest/
+            /var/lib/botshield-test/
+          if-no-files-found: warn
           retention-days: 7
 
   # -------- Per-PR gate: browser tests in an isolated job so the
