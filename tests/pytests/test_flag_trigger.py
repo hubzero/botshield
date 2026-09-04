@@ -213,12 +213,19 @@ def test_reset_with_no_replacement_clears_default(
     config_override, fresh_ip, log_slice,
 ):
     """`BotShieldFlagTrigger honeypot_hit reset` with no follow-up
-    triggers clears the default entirely. The flag bit still gets
+    declarations clears the flag entirely. The flag bit still gets
     set (honeypot path is unchanged), but no flag-trigger:honeypot_hit
     reason or flag-tier-floor reason should appear."""
+    # Anchored on the declaration, not on BotShieldEnabled. reset drops
+    # entries that PRECEDE it, so a reset injected near the top of the
+    # vhost cancels nothing: the slate is declared further down and adds
+    # honeypot_hit straight back. That used to work because the
+    # compiled-in defaults were seeded ahead of every operator
+    # declaration, so a reset anywhere caught them. There are no
+    # defaults now, and the only honeypot_hit entry is the one below.
     with config_override(
-        r"BotShieldEnabled\s+On",
-        'BotShieldEnabled On\n'
+        r"BotShieldFlagTrigger honeypot_hit\s+action=score add=60",
+        'BotShieldFlagTrigger honeypot_hit action=score add=60\n'
         '    BotShieldFlagTrigger honeypot_hit reset',
         count=1,
     ):
@@ -245,10 +252,12 @@ def test_reset_inline_replacement(
 ):
     """`BotShieldFlagTrigger honeypot_hit reset action=score add=10`
     is the syntactic-sugar form: reset + one inline replacement on a
-    single line. Default score+60 is gone; only +10 contributes."""
+    single line. The declared score+60 is gone; only +10 contributes."""
+    # Anchored on the declaration for the same reason as the test
+    # above: a reset only clears what precedes it.
     with config_override(
-        r"BotShieldEnabled\s+On",
-        'BotShieldEnabled On\n'
+        r"BotShieldFlagTrigger honeypot_hit\s+action=score add=60",
+        'BotShieldFlagTrigger honeypot_hit action=score add=60\n'
         '    BotShieldFlagTrigger honeypot_hit reset action=score add=10',
         count=1,
     ):

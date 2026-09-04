@@ -205,6 +205,122 @@ static int run_case(const score_case *c, server_rec *s)
     return ok;
 }
 
+/* --- tier resolution ------------------------------------------------
+ *
+ * bs_decide_tier is a pure function of the three thresholds and a
+ * score, which makes it the cheapest thing in the module to test and,
+ * until now, one that was only ever exercised through an HTTP request.
+ */
+
+typedef struct {
+    const char *name;
+    int non_interactive, interactive, captcha;   /* -1 means unset */
+    int score;
+    bs_tier expect;
+} tier_case;
+
+static const char *tier_name(bs_tier t)
+{
+    switch (t) {
+    case BS_TIER_PASS:           return "pass";
+    case BS_TIER_NONINTERACTIVE: return "non-interactive";
+    case BS_TIER_INTERACTIVE:    return "interactive";
+    case BS_TIER_CAPTCHA:        return "captcha";
+    default:                     return "?";
+    }
+}
+
+static int run_tier_case(const tier_case *c)
+{
+    bs_dir_cfg *d = apr_pcalloc(g_pool, sizeof(*d));
+    d->score_non_interactive = c->non_interactive;
+    d->score_interactive     = c->interactive;
+    d->score_captcha         = c->captcha;
+
+    bs_tier got = bs_decide_tier(d, c->score);
+    int ok = (got == c->expect);
+    printf("  %-4s %-34s score=%-4d -> %-16s expected %s\n",
+           ok ? "ok" : "FAIL", c->name, c->score, tier_name(got),
+           tier_name(c->expect));
+    return ok;
+}
+
+/* --- flag triggers and reset ordering --------------------------------
+ *
+ * reset drops every EARLIER entry for the same flag, which makes
+ * declaration order load-bearing in a way nothing in the config syntax
+ * hints at. That used not to matter: compiled-in defaults were seeded
+ * ahead of every operator declaration, so a reset anywhere cleared
+ * them. With the defaults gone, a reset placed above the declaration it
+ * meant to cancel is a silent no-op -- which is exactly how two pytest
+ * tests started failing, and is worth pinning here where the ordering
+ * is visible in five lines rather than spread across a vhost file.
+ */
+
+static bs_flag_trigger_entry *flag_entry(const char *name, apr_uint32_t bit,
+                                         bs_flag_action_kind act, int add)
+{
+    bs_flag_trigger_entry *e = apr_pcalloc(g_pool, sizeof(*e));
+    e->flag_name = name;
+    e->flag_bit  = bit;
+    e->action    = act;
+    e->score_add = add;
+    e->tier_min  = BS_TIER_PASS;
+    e->mode      = BS_TMODE_ENFORCE;
+    return e;
+}
+
+/* Resolve a declaration list the way post_config does, then report how
+ * many entries survive for the honeypot bit. */
+static int resolve_and_count(server_rec *s, bs_server_cfg *scfg,
+                             bs_flag_trigger_entry **decls, int n)
+{
+    scfg->flag_triggers = apr_array_make(g_pool, n ? n : 1, sizeof(void *));
+    for (int i = 0; i < n; i++) {
+        APR_ARRAY_PUSH(scfg->flag_triggers, bs_flag_trigger_entry *) = decls[i];
+    }
+    scfg->flag_triggers_resolved = 0;
+    bs_resolve_flag_triggers(g_pool, s);
+
+    int live = 0;
+    for (int i = 0; i < scfg->flag_triggers->nelts; i++) {
+        bs_flag_trigger_entry *e = APR_ARRAY_IDX(
+            scfg->flag_triggers, i, bs_flag_trigger_entry *);
+        if (e->flag_bit == BS_FLAG_HONEYPOT_HIT) live++;
+    }
+    return live;
+}
+
+static int run_reset_cases(server_rec *s, bs_server_cfg *scfg)
+{
+    int failures = 0;
+
+    bs_flag_trigger_entry *decl =
+        flag_entry("honeypot_hit", BS_FLAG_HONEYPOT_HIT, BS_FLAG_ACT_SCORE, 60);
+    bs_flag_trigger_entry *reset =
+        flag_entry("honeypot_hit", BS_FLAG_HONEYPOT_HIT, BS_FLAG_ACT_RESET, 0);
+
+    struct { const char *name; bs_flag_trigger_entry *d[2]; int n; int expect; } cases[] = {
+        { "reset after declaration clears it",  { NULL, NULL }, 2, 0 },
+        { "reset before declaration is a no-op",{ NULL, NULL }, 2, 1 },
+        { "declaration alone survives",         { NULL, NULL }, 1, 1 },
+        { "reset alone clears nothing",         { NULL, NULL }, 1, 0 },
+    };
+    cases[0].d[0] = decl;  cases[0].d[1] = reset;
+    cases[1].d[0] = reset; cases[1].d[1] = decl;
+    cases[2].d[0] = decl;
+    cases[3].d[0] = reset;
+
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        int live = resolve_and_count(s, scfg, cases[i].d, cases[i].n);
+        int ok = (live == cases[i].expect);
+        if (!ok) failures++;
+        printf("  %-4s %-34s honeypot entries=%d expected=%d\n",
+               ok ? "ok" : "FAIL", cases[i].name, live, cases[i].expect);
+    }
+    return failures;
+}
+
 int main(void)
 {
     apr_initialize();
@@ -257,8 +373,25 @@ int main(void)
         if (!run_case(&cases[i], s)) failures++;
     }
 
-    printf("%s: %d failed of %zu\n", failures ? "FAIL" : "ok",
-           failures, sizeof(cases) / sizeof(cases[0]));
+    static const tier_case tiers[] = {
+        { "all unset never fires",        -1, -1, -1,  999, BS_TIER_PASS },
+        { "below the first cut",          20, 50, 80,   19, BS_TIER_PASS },
+        { "exactly the first cut",        20, 50, 80,   20, BS_TIER_NONINTERACTIVE },
+        { "between first and second",     20, 50, 80,   49, BS_TIER_NONINTERACTIVE },
+        { "exactly the second cut",       20, 50, 80,   50, BS_TIER_INTERACTIVE },
+        { "exactly the third cut",        20, 50, 80,   80, BS_TIER_CAPTCHA },
+        { "captcha unset stops at two",   20, 50, -1,  999, BS_TIER_INTERACTIVE },
+        { "negative score is a pass",     20, 50, 80, -100, BS_TIER_PASS },
+    };
+    printf("\ntier resolution, %zu cases\n", sizeof(tiers) / sizeof(tiers[0]));
+    for (unsigned i = 0; i < sizeof(tiers) / sizeof(tiers[0]); i++) {
+        if (!run_tier_case(&tiers[i])) failures++;
+    }
+
+    printf("\nflag-trigger reset ordering, 4 cases\n");
+    failures += run_reset_cases(s, scfg);
+
+    printf("\n%s: %d failed\n", failures ? "FAIL" : "ok", failures);
     apr_pool_destroy(g_pool);
     apr_terminate();
     return failures ? 1 : 0;
