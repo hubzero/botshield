@@ -23,6 +23,15 @@ import httpx
 from .config import BASE_URL, DEFAULT_TIMEOUT
 
 
+# The shape of an ordinary visitor. Kept current with the browser
+# templates the module compiles in, so it classifies as a browser rather
+# than as something the templates have never seen.
+BROWSER_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
+)
+
+
 def _headers(
     *,
     ua: str | None,
@@ -53,7 +62,21 @@ def request(
     method: str,
     path: str,
     *,
-    ua: str | None = None,
+    # A browser by default, because the alternative is a bot.
+    #
+    # With no User-Agent set here, httpx sends its own -- python-httpx/x.y
+    # -- which the module classifies as a scraper. That put the framework's
+    # own default client at 10 for the scraper UA, 5 for the missing
+    # Accept-Language and 5 for a Bloom-fresh address: 20, against a
+    # dev-vhost threshold of 20. Every test whose control request was
+    # supposed to sail through was instead sitting exactly on the line,
+    # passing only where a warm Bloom filter happened to suppress the
+    # first-sight term. Thirteen of them failed the moment the suite ran
+    # somewhere cold.
+    #
+    # Tests that want to be treated as a bot say so, and already did:
+    # thirty-five files pass an explicit ua=.
+    ua: str | None = BROWSER_UA,
     # Omitted by default, and that default is load-bearing in both
     # directions, which is why it is left alone.
     #
