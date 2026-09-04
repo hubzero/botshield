@@ -46,9 +46,22 @@ env:
 jobs:
   # -------- Per-PR gate: fast tests + short soak smoke. --------
   test-fast:
-    name: pytest (not browser) + short soak
+    name: pytest (not browser) + short soak — Rocky
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # Rocky, because that is what production runs. This suite spent
+    # months red on Ubuntu for reasons that were purely about the
+    # platform rather than the module: the harness invoked the RHEL
+    # binary name against Debian paths, and nobody read the log closely
+    # enough to notice. Testing on the deployment target removes the
+    # whole class.
+    #
+    # A container, not a self-hosted runner: free, disposable, and no
+    # machine to expose. It has no init, so the harness signals httpd
+    # directly rather than through systemd -- see BS_SERVICE_MODE.
+    container:
+      image: rockylinux/rockylinux:8
+      options: --privileged
+    timeout-minutes: 25
     # Live-provider tests need the secrets below. Without them the
     # tests SKIP (provision.sh installs the publicly-documented
     # always-pass keys for Turnstile / hCaptcha / reCAPTCHA v2, which
@@ -60,20 +73,35 @@ jobs:
       BS_FRIENDLY_SOLUTION:  ${{ secrets.BS_FRIENDLY_SOLUTION }}
       BS_GEETEST_TOKEN:      ${{ secrets.BS_GEETEST_TOKEN }}
     steps:
+      - name: Container prerequisites
+        # The image is minimal: no git for checkout, no sudo, and the
+        # harness shells out to sudo everywhere. Running as root, a sudo
+        # that just execs is the smallest change that keeps one code path
+        # for both container and developer box.
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            git make gcc httpd httpd-devel openssl openssl-devel \
+            libcurl-devel json-c-devel python3 python3-pip diffutils \
+            procps-ng iproute >/dev/null
+          printf '#!/bin/sh\nexec "$@"\n' > /usr/bin/sudo
+          chmod 755 /usr/bin/sudo
+
       - uses: actions/checkout@v7
 
-      - name: Provision
-        run: sudo tests/setup/provision.sh
+      - name: Provision the test instance
+        run: tests/setup/provision-rocky.sh
 
       - name: Start Apache
         run: |
-          sudo systemctl restart apache2
+          httpd -f /etc/httpd/bstest/httpd.conf -k start
           sleep 2
-          curl -sk --max-time 5 -o /dev/null https://localhost/ \
-            || (sudo journalctl -u apache2 --no-pager -n 50 && exit 1)
+          curl -sk --max-time 5 -o /dev/null https://127.0.0.1:8443/ \
+            || (tail -50 /var/log/httpd/bstest/error.log && exit 1)
 
       - name: Run fast tests (pytest, not browser, not slow)
-        run: tests/run --parallel --mark "not browser" --verbose
+        # Serial: the per-worker parallel instances are a separate
+        # provisioning step and one container is one instance.
+        run: tests/run --mark "not browser" --verbose
 
       - name: Soak smoke (60s at 25 rps)
         # The soak is a pytest test marked @slow + @serial. Running
