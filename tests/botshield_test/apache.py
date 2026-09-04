@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .config import (APACHE_SERVICE, DEV_VHOST_CONF, HTTPD_BIN, HTTPD_CONF,
+                     SERVICE_MODE,
                      STATE_FILE)
 
 
@@ -57,15 +58,28 @@ def policy_dump() -> str:
     return result.stdout
 
 
+def _service(verb: str) -> None:
+    """Ask the instance to reload, restart or start.
+
+    Two ways, because not every environment has an init system. Under
+    systemd the unit is addressed by name. Without one -- a container
+    job, where systemctl cannot work at all -- httpd signals itself
+    through its own config, which is what `-k` is for.
+    """
+    if SERVICE_MODE == "systemd":
+        cmd = ["sudo", "systemctl", verb, APACHE_SERVICE]
+    else:
+        signal = {"reload": "graceful", "restart": "restart",
+                  "start": "start", "stop": "stop"}[verb]
+        cmd = ["sudo", HTTPD_BIN, "-f", HTTPD_CONF, "-k", signal]
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
+
+
 def reload() -> None:
     """Graceful reload: config re-read, new workers spun, old workers
     drain. Faster than restart and the right choice for most config
     changes."""
-    subprocess.run(
-        ["sudo", "systemctl", "reload", APACHE_SERVICE],
-        check=True,
-        stdout=subprocess.DEVNULL,
-    )
+    _service("reload")
     # Brief settle so the new pool is up before the caller issues
     # their first request. Reloads are fast but not instantaneous.
     time.sleep(1)
@@ -73,11 +87,7 @@ def reload() -> None:
 
 def restart() -> None:
     """Hard restart. SHM counters reset, workers recreated from scratch."""
-    subprocess.run(
-        ["sudo", "systemctl", "restart", APACHE_SERVICE],
-        check=True,
-        stdout=subprocess.DEVNULL,
-    )
+    _service("restart")
     time.sleep(2)
 
 

@@ -71,6 +71,26 @@ HTTPD_BIN = os.environ.get("BS_HTTPD_BIN",
                            "httpd" if _RHEL else "apache2ctl")
 
 
+# How the instance is started and stopped.
+#
+# systemd where there is one, which is every real box and this project's
+# per-worker instances. Not in a container: GitHub's `container:` jobs
+# have no init, so `systemctl` is not merely absent, it cannot work. An
+# httpd knows how to signal itself, and `httpd -f <conf> -k graceful` is
+# both simpler and more direct than asking an init system to pass the
+# message along. Detected rather than configured, with BS_SERVICE_MODE
+# to force it.
+def _detect_service_mode():
+    if os.environ.get("BS_SERVICE_MODE"):
+        return os.environ["BS_SERVICE_MODE"]
+    if os.path.exists("/run/systemd/system"):
+        return "systemd"
+    return "direct"
+
+
+SERVICE_MODE = _detect_service_mode()
+
+
 def _plat(rhel_value, debian_value):
     """Pick the platform-appropriate default."""
     return rhel_value if _RHEL else debian_value
