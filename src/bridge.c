@@ -25,6 +25,7 @@
 #include "crypto.h"
 #include "shm.h"
 #include "metrics.h"
+#include "cookie.h"  /* bs_amend_session_flags */
 
 /* ======================================================================
  * E5 — App-to-module reputation feedback.
@@ -308,6 +309,21 @@ apr_status_t bs_app_feedback_filter(ap_filter_t *f,
             "mod_botshield: app feedback event=%s applied "
             "flag=0x%x ttl=%d", event,
             ft->action.flag_bit, ft->action.ttl_sec);
+    }
+
+    /* Session flags. Applied after the address write and outside the
+     * bs_parse_client_ip guard above, because a cookie session is
+     * identified by the cookie -- an unparseable client address says
+     * nothing about whether this browser can be marked.
+     *
+     * Feedback wins over any session flag a rule set earlier in the
+     * same request: the application asserting something about a
+     * visitor it authenticated outranks a pattern match on the URL. */
+    if (ft->action.flag_session || ft->action.flag_session_clear
+        || ft->action.flag_session_replace) {
+        bs_amend_session_flags(r, ft->action.flag_session,
+                               ft->action.flag_session_clear,
+                               ft->action.flag_session_replace);
     }
 
     return ap_pass_brigade(f->next, bb);

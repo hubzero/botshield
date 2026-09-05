@@ -796,8 +796,7 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
          * Set-Cookie headers for one name means the client keeps
          * whichever arrived last -- a coin toss deciding whether the
          * session was actually ended. */
-        apr_table_unset(r->err_headers_out, "Set-Cookie");
-        apr_table_unset(r->headers_out, "Set-Cookie");
+        bs_drop_our_set_cookie(r);
         /* The "session" algorithm, the same one the ordinary session
          * cookie uses. Its verify is a no-op, so the burned cookie
          * validates cleanly on the way back instead of failing a PoW

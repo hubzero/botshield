@@ -1734,6 +1734,16 @@ static int bs_handler(request_rec *r)
          * keeps the two predicates from drifting. */
         have_prior_rep = bs_should_carry_prior_rep(cookie_verify_reason,
                                                     &prior_ch);
+        /* Record the cookie the client already holds as the base an
+         * output filter would amend. A mint later in this request
+         * overwrites it; if none happens -- which is the ordinary case
+         * for a client whose cookie is still good -- this is what app
+         * feedback has to work with. Without it, trust asserted about
+         * a returning visitor would land nowhere, which is precisely
+         * the visitor it is usually asserted about. */
+        if (have_prior_rep) {
+            bs_record_outgoing_cookie(r, &prior_ch, cfg);
+        }
         /* A burned session is refused outright, before scoring.
          *
          * Read off the authenticated rep block for the same reason

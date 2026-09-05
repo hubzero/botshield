@@ -25,6 +25,7 @@
 
 #include <httpd.h>
 #include <http_protocol.h>
+#include <http_log.h>
 #include <apr_strings.h>
 #include <apr_lib.h>
 #include <apr_base64.h>
@@ -229,6 +230,58 @@ const char *bs_build_set_cookie(request_rec *r, const bs_dir_cfg *cfg,
  * funnel through here. apr_table_add (not setn) is required so we
  * append rather than clobber any prior Set-Cookie rows that other
  * modules (mod_session etc.) may have added earlier in the chain. */
+/* Remove this module's Set-Cookie lines and leave every other one
+ * standing.
+ *
+ * The obvious spelling, apr_table_unset(r->err_headers_out,
+ * "Set-Cookie"), removes them all -- including the application's. A
+ * rule that ends a bot's session was quietly deleting whatever session
+ * cookie PHP had just set on the same response, which is reachable
+ * whenever such a rule lets the request through to the handler.
+ *
+ * APR tables have no remove-by-value, so this reads the entries, drops
+ * the lot, and puts back the ones that are not ours. Both header tables
+ * are swept because a mint can land in either.
+ *
+ * Matching is on the cookie name at the start of the value, which is
+ * how a Set-Cookie line always begins. Both spellings are checked: the
+ * __Host- prefix is used only where its preconditions hold. */
+static int bs_set_cookie_is_ours(const char *v)
+{
+    if (!v) return 0;
+    apr_size_t n = sizeof(BS_COOKIE_NAME_HOST) - 1;
+    if (strncmp(v, BS_COOKIE_NAME_HOST, n) == 0 && v[n] == '=') return 1;
+    n = sizeof(BS_COOKIE_NAME) - 1;
+    if (strncmp(v, BS_COOKIE_NAME, n) == 0 && v[n] == '=') return 1;
+    return 0;
+}
+
+static void bs_drop_our_set_cookie_from(request_rec *r, apr_table_t *t)
+{
+    const apr_array_header_t *arr = apr_table_elts(t);
+    const apr_table_entry_t *e = (const apr_table_entry_t *)arr->elts;
+    apr_array_header_t *keep = apr_array_make(r->pool, 4, sizeof(char *));
+    int found_ours = 0;
+
+    for (int i = 0; i < arr->nelts; i++) {
+        if (strcasecmp(e[i].key, "Set-Cookie") != 0) continue;
+        if (bs_set_cookie_is_ours(e[i].val)) { found_ours = 1; continue; }
+        *(char **)apr_array_push(keep) = apr_pstrdup(r->pool, e[i].val);
+    }
+    if (!found_ours) return;   /* nothing of ours; leave the table alone */
+
+    apr_table_unset(t, "Set-Cookie");
+    for (int i = 0; i < keep->nelts; i++) {
+        apr_table_add(t, "Set-Cookie", ((char **)keep->elts)[i]);
+    }
+}
+
+void bs_drop_our_set_cookie(request_rec *r)
+{
+    bs_drop_our_set_cookie_from(r, r->err_headers_out);
+    bs_drop_our_set_cookie_from(r, r->headers_out);
+}
+
 const char *bs_install_verified_cookie(request_rec *r,
                                        const bs_dir_cfg *cfg,
                                        const bs_challenge *ch,
@@ -239,7 +292,57 @@ const char *bs_install_verified_cookie(request_rec *r,
     if (!payload) return "GCM cookie payload build failed";
     apr_table_add(r->err_headers_out, "Set-Cookie",
                   bs_build_set_cookie(r, cfg, payload, ch->expires_at));
+    bs_record_outgoing_cookie(r, ch, cfg);
     return NULL;
+}
+
+#define BS_OUTGOING_COOKIE_KEY "botshield-outgoing-cookie"
+
+void bs_record_outgoing_cookie(request_rec *r, const bs_challenge *ch,
+                               const bs_dir_cfg *cfg)
+{
+    bs_outgoing_cookie *out = apr_palloc(r->pool, sizeof(*out));
+    out->ch  = *ch;
+    out->cfg = cfg;
+    apr_pool_userdata_setn(out, BS_OUTGOING_COOKIE_KEY, NULL, r->pool);
+}
+
+void bs_amend_session_flags(request_rec *r, apr_uint32_t add,
+                            apr_uint32_t del, int replace)
+{
+    void *v = NULL;
+    apr_pool_userdata_get(&v, BS_OUTGOING_COOKIE_KEY, r->pool);
+    bs_outgoing_cookie *out = (bs_outgoing_cookie *)v;
+    if (!out || !out->cfg) {
+        /* No cookie on this response and none carried in: a client
+         * that holds no cookie has no session to mark. Minting one
+         * here purely to record trust would create a session the
+         * module had decided not to create, so say so and stop. */
+        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+            "mod_botshield: session flags not applied -- this response "
+            "carries no rep cookie to hold them");
+        return;
+    }
+
+    apr_uint32_t before = out->ch.rep.flags_active;
+    apr_uint32_t after  = replace ? add : ((before | add) & ~del);
+    if (after == before) return;
+
+    out->ch.rep.flags_active = after;
+    /* Drop ours specifically. The blunt spelling would take the
+     * application's cookies with it. */
+    bs_drop_our_set_cookie(r);
+    const char *ierr = bs_install_verified_cookie(r, out->cfg,
+                                                  &out->ch, "session");
+    if (ierr) {
+        ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+            "mod_botshield: could not reseal the cookie with session "
+            "flags (%s); the mark is not applied", ierr);
+        return;
+    }
+    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+        "mod_botshield: session flags 0x%x -> 0x%x on the outgoing cookie",
+        (unsigned)before, (unsigned)after);
 }
 
 /* --- Verify side: parse + decrypt + dispatch ----------------- */

@@ -84,6 +84,36 @@ const char *bs_build_set_cookie(request_rec *r, const bs_dir_cfg *cfg,
 /* Build the payload from `ch` + counter_str and add a Set-Cookie row
  * to r->err_headers_out (so it reaches the client even on non-2xx
  * responses). Returns NULL on success, error-string on failure. */
+/* Remove this module's Set-Cookie lines, leaving any the
+ * application set in place. */
+void bs_drop_our_set_cookie(request_rec *r);
+
+/* The cookie state this response is carrying, recorded so a later
+ * output filter can amend it instead of adding a second Set-Cookie.
+ *
+ * Written by bs_install_verified_cookie itself rather than by its
+ * callers: every install path records it automatically, and a fourth
+ * one added later cannot silently break the amend by forgetting. */
+typedef struct {
+    bs_challenge        ch;
+    const bs_dir_cfg   *cfg;
+} bs_outgoing_cookie;
+
+void bs_record_outgoing_cookie(request_rec *r, const bs_challenge *ch,
+                               const bs_dir_cfg *cfg);
+
+/* Fold session flags into the cookie this response will send.
+ *
+ * App feedback arrives in an output filter, long after the handler
+ * decided what the cookie says -- so the mark it carries has no cookie
+ * of its own to ride. Adding a second Set-Cookie for the same name
+ * leaves the browser to pick one, which is a coin toss. This reseals
+ * the one already queued: the payload is GCM-encrypted, so a field
+ * cannot be edited in place, but the header has not reached the wire
+ * yet and can be replaced wholesale. */
+void bs_amend_session_flags(request_rec *r, apr_uint32_t add,
+                            apr_uint32_t del, int replace);
+
 const char *bs_install_verified_cookie(request_rec *r,
                                        const bs_dir_cfg *cfg,
                                        const bs_challenge *ch,
