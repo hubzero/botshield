@@ -82,8 +82,15 @@ typedef struct {
     int           status_code;    /* HTTP code or BS_TRIGGER_STATUS_PASS */
     const char   *redirect_url;   /* NULL unless explicitly set */
     const char   *log_tag;
-    apr_uint32_t  flag_bit;       /* single BS_FLAG_* bit; 0 if ttl_sec==0 */
-    int           ttl_sec;        /* 0 = don't flag the IP */
+    apr_uint32_t  flag_bit;       /* DEPRECATED flag=; 0 if ttl_sec==0 */
+    int           ttl_sec;        /* DEPRECATED ttl=; 0 = don't flag the IP */
+    /* BotShieldFlagIP / BotShieldFlagSession. Separate from flag_bit
+     * because the deprecated pair carries its own per-rule TTL, while
+     * these use the server-scope window: the address slot holds one
+     * expires_at shared by every flag on it, so a per-rule duration
+     * promises resolution the storage cannot deliver. */
+    apr_uint32_t  flag_ip;        /* bits to set on the address */
+    apr_uint32_t  flag_session;   /* bits to set on the cookie session */
     int           burn_sec;       /* 0 = don't burn the cookie session */
     int           penalty;        /* 0..1000 */
     int           credit;         /* 0..1000 (rejected on path family) */

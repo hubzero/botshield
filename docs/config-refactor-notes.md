@@ -22,6 +22,11 @@ what the failures had in common while it is still fresh.
 
 ## The two incidents
 
+> Both incidents predate `36494af`, which stopped seeding the
+> compiled-in default flag triggers. The mechanism below is unchanged
+> and still fires for any `tier_floor` an operator declares; what is no
+> longer true is that `scanner_probe` carries one out of the box.
+
 **#1 — `tier_floor` bypasses the score ceiling.** The operator parked
 `BotShieldScoreInteractive` and `BotShieldScoreCaptcha` at 10000 to make a scope
 effectively challenge-free. A `scanner_probe` flag carries a compiled-in

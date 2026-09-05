@@ -844,11 +844,12 @@ either, so it costs nothing that was not already being paid.
 > of scanners probing `/.env` and per-IP memory was worth having. It was
 > the wrong default for high-cardinality traffic: at roughly one request
 > per address the flag is never read again and it churns the
-> 50,000-slot flagged-IP table. Worse, `scanner_probe` carries a
-> compiled-in `tier_floor` of `interactive` that **overrides parked
-> score thresholds**, so a rule written to block quietly began rendering
-> interstitials to whoever shared that address next — with nothing in
-> the config saying so.
+> 50,000-slot flagged-IP table. And a `scanner_probe` flag is not inert:
+> wherever a `BotShieldFlagTrigger` gives it a `tier_floor` — as the
+> compiled-in slate did before default rules were switched off — that
+> floor **overrides parked score thresholds**, so a rule written to
+> block quietly began rendering interstitials to whoever shared that
+> address next, with nothing in the config saying so.
 >
 > **Migrating:** a rule written before 2026-09-05 that relied on the
 > default now flags nothing. Add `BotShieldFlag scanner_probe` and

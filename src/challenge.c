@@ -57,12 +57,14 @@ const char *bs_challenge_canonical(apr_pool_t *p,
     bs_to_hex(ch->salt,  BS_SALT_BYTES,  salt_hex);
     bs_to_hex(ch->nonce, BS_NONCE_BYTES, nonce_hex);
     /* v2 canonical = v1 canonical + forgive_window_start +
-     * forgive_consumed (E15). v3 appends burned_until, for 16 fields;
-     * the HMAC cookie body adds 2 more (sig_hex, counter) for 18. A v2
-     * cookie is still accepted on the way in and reads as unburned. */
+     * forgive_consumed (E15). v3 appends burned_until for 16 fields;
+     * v4 appends flags_active for 17. The HMAC cookie body adds 2 more
+     * (sig_hex, counter), so 19 on the wire. Older bodies are still
+     * accepted on the way in: v2 reads as unburned, v2/v3 as carrying
+     * no session flags. */
     return apr_psprintf(p,
         "%d|%s|%s|%s|%d|%" APR_TIME_T_FMT
-        "|%d|%u|%d|%d|%d|%" APR_TIME_T_FMT "|%d|%u|%u|%u",
+        "|%d|%u|%d|%d|%d|%" APR_TIME_T_FMT "|%d|%u|%u|%u|%u",
         ch->version, ch->alg_name, salt_hex, nonce_hex,
         ch->difficulty, ch->expires_at,
         ch->rep.score, (unsigned)ch->rep.flags_excused,
@@ -71,7 +73,8 @@ const char *bs_challenge_canonical(apr_pool_t *p,
         ch->auto_tier ? 1 : 0,
         (unsigned)ch->rep.forgive_window_start,
         (unsigned)ch->rep.forgive_consumed,
-        (unsigned)ch->rep.burned_until);
+        (unsigned)ch->rep.burned_until,
+        (unsigned)ch->rep.flags_active);
 }
 
 /* --- Algorithm: sha256zeros ---

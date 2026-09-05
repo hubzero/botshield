@@ -130,6 +130,12 @@ discarded. Lifecycle wording and first-class loop detection are the
 parts still outstanding.</p>
 </blockquote>
 <h2 id="the-two-incidents">The two incidents</h2>
+<blockquote>
+<p>Both incidents predate <code>36494af</code>, which stopped seeding the
+compiled-in default flag triggers. The mechanism below is unchanged
+and still fires for any <code>tier_floor</code> an operator declares; what is no
+longer true is that <code>scanner_probe</code> carries one out of the box.</p>
+</blockquote>
 <p><strong>#1 — <code>tier_floor</code> bypasses the score ceiling.</strong> The operator parked
 <code>BotShieldScoreInteractive</code> and <code>BotShieldScoreCaptcha</code> at 10000 to make a scope
 effectively challenge-free. A <code>scanner_probe</code> flag carries a compiled-in

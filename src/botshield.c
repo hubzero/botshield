@@ -1239,12 +1239,22 @@ static int bs_maybe_mint_session(request_rec *r, bs_dir_cfg *cfg,
     int ttl = (cfg->cookie_ttl > 0) ? cfg->cookie_ttl : BS_DEFAULT_COOKIE_TTL;
     int difficulty = (cfg->difficulty > 0) ? cfg->difficulty
                                            : BS_DEFAULT_DIFFICULTY;
+    /* Session flags a rule asked for on this request. They ride a note
+     * to this single mint rather than each rule minting its own cookie
+     * -- which is what burn= did, and why it had to unset both
+     * Set-Cookie tables to stop the ordinary mint overwriting it. */
+    bs_rep_state seed;
+    memset(&seed, 0, sizeof(seed));
+    const char *pending = apr_table_get(r->notes, "bs-session-flags");
+    if (pending) {
+        seed.flags_active = (apr_uint32_t)strtoul(pending, NULL, 16);
+    }
     bs_challenge fresh = { 0 };
     const char *ierr = bs_issue_challenge(r->pool, cfg,
                                           difficulty, ttl,
                                           /*auto_tier*/0,
                                           /*alg_override*/session_alg,
-                                          /*rep_in*/NULL,
+                                          pending ? &seed : NULL,
                                           &fresh);
     if (ierr) {
         ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
@@ -2044,7 +2054,13 @@ static int bs_handler(request_rec *r)
      * score) and accumulating MAX into a tier_floor that we apply
      * after bs_decide_tier. Built-in defaults are seeded at
      * post_config; operators tune via BotShieldFlagTrigger. */
-    apr_uint32_t all_flags = ip_flags;
+    /* The union this walker has always advertised. cookie_flags is
+     * gated on have_prior_rep for the same reason the solve proof
+     * below is: the GCM tag is what makes the rep block trustworthy,
+     * and an unauthenticated cookie must not be able to assert a flag
+     * about its own bearer -- in either direction. */
+    apr_uint32_t cookie_flags = have_prior_rep ? prior_ch.rep.flags_active : 0;
+    apr_uint32_t all_flags = ip_flags | cookie_flags;
     /* Skip flags this client already answered for. Solving does not
      * clear a flag and flag scores re-apply every request, so without
      * this a flag worth more than BotShieldScoreNonInteractive is an unbreakable
@@ -2328,6 +2344,18 @@ static int bs_handler(request_rec *r)
      * OR'd so re-challenges accumulate rather than resetting what an
      * earlier solve already settled. */
     next_rep.flags_excused |= all_flags;
+
+    /* Same pending set as the session mint. A challenge response is
+     * still a response, and a rule that flagged this request must not
+     * lose its mark just because the request also happened to earn a
+     * challenge. */
+    {
+        const char *pending = apr_table_get(r->notes, "bs-session-flags");
+        if (pending) {
+            next_rep.flags_active |=
+                (apr_uint32_t)strtoul(pending, NULL, 16);
+        }
+    }
 
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
                   "mod_botshield: challenging %s (alg=%s, difficulty=%d, "

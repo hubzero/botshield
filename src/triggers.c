@@ -154,9 +154,11 @@ static void bs_trigger_action_init(bs_trigger_family fam,
          * scanners probing /.env -- and was actively wrong for a
          * high-cardinality flood, where at roughly one request per
          * address the flag is never read again and 50k slots of table
-         * churn buy nothing. Worse, scanner_probe carries a compiled-in
-         * tier floor, so a rule written to block quietly could start
-         * rendering interstitials to whoever shared that address next.
+         * churn buy nothing. And where an operator has declared a
+         * tier_floor for scanner_probe -- as the historical compiled-in
+         * slate did, before 36494af shipped no default rules -- a rule
+         * written to block quietly starts rendering interstitials to
+         * whoever shared that address next.
          *
          * A rule that remembers a client is a decision with a blast
          * radius, and a default is the wrong place for it: the operator
@@ -230,20 +232,24 @@ static const char *bs_trigger_known_keys(bs_trigger_family fam)
 {
     switch (fam) {
     case BS_TFAMILY_REQUEST:
-        return "status, redirect, log, accesslog, flag, ttl, penalty, mode";
+        return "respond, redirect, log, accesslog, flagip, flagsession, "
+               "burn, penalty, tier, mode";
     case BS_TFAMILY_COOKIE:
-        return "status, redirect, log, accesslog, flag, ttl, penalty, credit, mode";
+        return "respond, redirect, log, accesslog, flagip, flagsession, "
+               "burn, penalty, credit, mode";
     case BS_TFAMILY_ENV:
-        return "status, log, accesslog, flag, ttl, penalty, credit, mode";
+        return "respond, log, accesslog, flagip, flagsession, burn, "
+               "penalty, credit, mode";
     case BS_TFAMILY_FEEDBACK:
         /* mode=observe means "log :observe but skip the flagged-IP
          * write" — meaningful for staging a feedback rule before
          * mutating server state. */
-        return "flag, ttl, log, accesslog, mode";
+        return "flagip, flagsession, log, accesslog, mode";
     case BS_TFAMILY_LOAD:
         return "status, log, accesslog, penalty, credit, mode";
     case BS_TFAMILY_SCOPE:
-        return "status, redirect, log, accesslog, flag, ttl, penalty, credit, mode";
+        return "respond, redirect, log, accesslog, flagip, flagsession, "
+               "burn, penalty, credit, mode";
     case BS_TFAMILY_FLAG:
         /* Flag triggers use a separate parser. This entry exists
          * for switch-exhaustiveness; the flag setter prints its
@@ -270,6 +276,20 @@ static int bs_trigger_key_is_response_only(const char *arg,
     #undef BS_KMATCH
     return 0;
 }
+
+/* Flags that describe a session and must never be written to an
+ * address. Suspicion may be shared across an address -- a penalty on a
+ * NAT costs strangers a challenge, which is the trade this module
+ * already makes. A credit on an address is different in kind: it hands
+ * every stranger behind that NAT an exemption one client earned, and
+ * the shared sliding expiry means unrelated traffic keeps renewing it. */
+#define BS_FLAGS_SESSION_ONLY  (BS_FLAG_APP_VERIFIED_HUMAN   | \
+                                BS_FLAG_APP_VERIFIED_SESSION | \
+                                BS_FLAG_APP_TRUST_SIGNAL)
+
+/* Window an address stays flagged, counted from its LAST flagging
+ * rather than its first -- see BotShieldForgetIPAfter. */
+#define BS_DEFAULT_FORGET_IP_AFTER 3600
 
 static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
                                                bs_trigger_family fam,
@@ -427,6 +447,30 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
                 dname, val);
         }
         a->flag_bit = bits;
+    } else if (BS_AK("flagip") || BS_AK("flagsession")) {
+        int to_session = BS_AK("flagsession");
+        const char *perr = NULL;
+        apr_uint32_t bits = bs_parse_flag_names(pool, val, &perr);
+        if (perr) {
+            return apr_psprintf(pool, "%s: %s= %s", dname,
+                                to_session ? "BotShieldFlagSession"
+                                           : "BotShieldFlagIP", perr);
+        }
+        if (!bits) {
+            return apr_psprintf(pool, "%s: %s names no flag", dname,
+                                to_session ? "BotShieldFlagSession"
+                                           : "BotShieldFlagIP");
+        }
+        if (!to_session && (bits & BS_FLAGS_SESSION_ONLY)) {
+            return apr_psprintf(pool,
+                "%s: BotShieldFlagIP cannot set app_verified_human, "
+                "app_verified_session or app_trust_signal -- those "
+                "describe one session, and on an address every client "
+                "sharing it inherits the credit. Use "
+                "BotShieldFlagSession.", dname);
+        }
+        if (to_session) a->flag_session = bits;
+        else            a->flag_ip      = bits;
     } else if (BS_AK("burn")) {
         /* Refuse this client's cookie session for N seconds.
          *
@@ -526,11 +570,15 @@ static const char *bs_finalize_trigger_action(apr_pool_t *pool,
      * operators see it via configtest rather than as silent no-ops
      * at runtime. */
     if (fam == BS_TFAMILY_FEEDBACK) {
-        if (!a->flag_bit || a->ttl_sec <= 0) {
+        /* The deprecated pair still needs its own ttl; the new
+         * directives use the server-scope window, so naming a flag is
+         * enough. Either way an event with nowhere to land is dead
+         * config and is refused at parse time. */
+        if (!a->flag_bit && !a->flag_ip && !a->flag_session) {
             return apr_psprintf(pool,
-                "%s: feedback triggers must set flag=<bit> and "
-                "ttl=<sec>; the event mapping has no request-time "
-                "surface otherwise", dname);
+                "%s: feedback triggers must set BotShieldFlagIP or "
+                "BotShieldFlagSession; the event mapping has no "
+                "request-time surface otherwise", dname);
         }
         return NULL;   /* status/redirect checks don't apply here */
     }
@@ -600,13 +648,38 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
     /* Flag-IP (future-request memory). Applies to all families
      * uniformly — flag_bit is already 0 when ttl_sec==0, so the
      * guard below is belt-and-suspenders. */
-    if (a->flag_bit && a->ttl_sec > 0) {
-        unsigned char client_ip[16];
-        if (bs_parse_client_ip(r->useragent_ip, client_ip)) {
-            bs_mask_ipv6_prefix(client_ip, scfg->ipv6_prefix_bits);
-            bs_flagged_ip_add(r, client_ip, a->flag_bit, a->ttl_sec,
-                              scfg->ns_id);
+    {
+        /* Two spellings converge here. The deprecated flag=/ttl= pair
+         * carries its own duration; BotShieldFlagIP uses the
+         * server-scope window, because one address slot holds a single
+         * expires_at shared by all its flags. */
+        apr_uint32_t ip_bits = a->flag_ip;
+        int ip_ttl = BS_DEFAULT_FORGET_IP_AFTER;
+        if (a->flag_bit && a->ttl_sec > 0) {
+            ip_bits |= a->flag_bit;
+            ip_ttl   = a->ttl_sec;
         }
+        if (ip_bits) {
+            unsigned char client_ip[16];
+            if (bs_parse_client_ip(r->useragent_ip, client_ip)) {
+                bs_mask_ipv6_prefix(client_ip, scfg->ipv6_prefix_bits);
+                bs_flagged_ip_add(r, client_ip, ip_bits, ip_ttl,
+                                  scfg->ns_id);
+            }
+        }
+    }
+    /* Session flags ride to the single mint point rather than minting a
+     * cookie here. burn= mints its own and had to unset both Set-Cookie
+     * tables to stop the ordinary mint overwriting it; accumulating in
+     * a note means one cookie, no race, and several rules can
+     * contribute to it. */
+    if (a->flag_session) {
+        apr_uint32_t cur = 0;
+        const char *prev = apr_table_get(r->notes, "bs-session-flags");
+        if (prev) cur = (apr_uint32_t)strtoul(prev, NULL, 16);
+        cur |= a->flag_session;
+        apr_table_setn(r->notes, "bs-session-flags",
+                       apr_psprintf(r->pool, "%x", cur));
     }
     /* Burn the cookie session (this-browser memory).
      *

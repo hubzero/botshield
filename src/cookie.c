@@ -327,9 +327,10 @@ static const char *bs_parse_canonical_fields(char *const fields[], int nf,
     ch->version = (int)v;
     if (ch->version < BS_PROTOCOL_VERSION_MIN
      || ch->version > BS_PROTOCOL_VERSION) return "bad protocol version";
-    /* Field count is pinned per version, so a v2 body cannot smuggle a
-     * burn field and a v3 body cannot omit one. */
-    if (nf != (ch->version >= 3 ? 16 : 15)) return "wrong field count";
+    /* Field count is pinned per version, so an older body cannot
+     * smuggle a newer field and a newer body cannot omit one. */
+    int want = ch->version >= 4 ? 17 : (ch->version >= 3 ? 16 : 15);
+    if (nf != want) return "wrong field count";
 
     const bs_pow_algorithm *alg = bs_find_algorithm(fields[1]);
     if (!alg || !alg->implemented) return "unknown algorithm";
@@ -373,6 +374,16 @@ static const char *bs_parse_canonical_fields(char *const fields[], int nf,
             return "bad burned_until";
     } else {
         ch->rep.burned_until = 0;
+    }
+    /* v2 and v3 predate the session-flag bitmap and read as carrying
+     * none, which is what every cookie already in circulation means. */
+    if (ch->version >= 4) {
+        if (!bs_strict_int_form(fields[16], 0))
+            return "non-canonical integer surface form";
+        if (!bs_parse_uint32_bounded(fields[16], 10, &ch->rep.flags_active))
+            return "bad flags_active";
+    } else {
+        ch->rep.flags_active = 0;
     }
     return NULL;
 }
@@ -421,19 +432,19 @@ const char *bs_verify_cookie_gcm(request_rec *r,
     }
     pt[pt_len] = '\0';
 
-    /* pt is canonical form: 15 pipe-delimited fields for v2,
-     * 16 for v3, which appended burned_until. Both are accepted
-     * on the way in; the exact count is checked per version once
-     * the version field has been read. */
-    char *fields[16];
+    /* pt is canonical form: 15 pipe-delimited fields for v2, 16 for
+     * v3 (burned_until), 17 for v4 (flags_active). All are accepted on
+     * the way in; the exact count is checked per version once the
+     * version field has been read. */
+    char *fields[17];
     int nf = 0;
     char *p = (char *)pt;
     fields[nf++] = p;
-    while (*p && nf < 16) {
+    while (*p && nf < 17) {
         if (*p == '|') { *p = '\0'; fields[nf++] = p + 1; }
         p++;
     }
-    if (nf != 15 && nf != 16) return "wrong field count";
+    if (nf < 15 || nf > 17) return "wrong field count";
 
     bs_challenge ch;
     memset(&ch, 0, sizeof(ch));

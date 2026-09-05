@@ -60,8 +60,14 @@ typedef struct bs_dir_cfg bs_dir_cfg;
 /* Bumped to 3 for rep.burned_until. A v2 cookie still parses -- it has
  * one fewer field and reads as unburned -- because rejecting every
  * cookie in circulation would re-challenge an entire live site at once
- * to gain nothing. New cookies mint as v3. */
-#define BS_PROTOCOL_VERSION   3
+ * to gain nothing.
+ *
+ * Bumped to 4 for rep.flags_active, the cookie-side flag bitmap this
+ * module has claimed to read since M5.1 and never wrote. Same
+ * compatibility rule: a v2 or v3 body has no such field and reads as
+ * "no session flags", which is exactly what every cookie in
+ * circulation means. New cookies mint as v4. */
+#define BS_PROTOCOL_VERSION   4
 #define BS_PROTOCOL_VERSION_MIN 2
 #define BS_SALT_BYTES         16
 #define BS_NONCE_BYTES        8
@@ -122,6 +128,23 @@ typedef struct {
      * costs it nothing it was not already paying, and it catches the
      * large middle that keeps a cookie jar. */
     apr_uint32_t burned_until;
+
+    /* Flags this cookie session carries. The sibling of the flagged-IP
+     * table: that remembers an address, this remembers one browser.
+     *
+     * BotShieldFlagTrigger has always documented itself as firing on
+     * "the IP- or cookie-side bitmap of a request", and wire field 7
+     * was originally meant to be this. Nothing ever wrote it, it read
+     * zero forever, and it was eventually repurposed as
+     * flags_excused -- so the cookie-side half of the mechanism was
+     * specified, documented, and absent. burn= was then built beside
+     * it rather than into it. This is that half.
+     *
+     * Read only when the rep block authenticated: the GCM tag is what
+     * makes it trustworthy, and a client cannot clear a bit without
+     * discarding the whole cookie -- at which point it has no solve
+     * proof either and meets the full challenge gate. */
+    apr_uint32_t flags_active;
 } bs_rep_state;
 
 typedef struct {

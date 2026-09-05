@@ -240,7 +240,12 @@ void bs_flagged_ip_add(request_rec *r, const unsigned char ip[16],
 {
     if (!bs_shm.flagged_table || !bs_shm.mutex) return;
     if (!flag_bits) return;
-    if (ttl_seconds <= 0) ttl_seconds = 3600;
+    /* 0 means "do not flag" everywhere else -- bs_finalize_trigger_action
+     * clears the bit when ttl_sec is 0, and feedback triggers are
+     * refused outright without a positive ttl -- so this is
+     * unreachable. It substituted an hour, which read as a default the
+     * module does not have. Honour the documented meaning instead. */
+    if (ttl_seconds <= 0) return;
 
     apr_int64_t now = (apr_int64_t)apr_time_sec(apr_time_now());
     apr_int64_t expires_at = now + ttl_seconds;

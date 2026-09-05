@@ -1355,11 +1355,12 @@ inherited from <code>BotShieldPathTrigger</code> where the target was a handful
 of scanners probing <code>/.env</code> and per-IP memory was worth having. It was
 the wrong default for high-cardinality traffic: at roughly one request
 per address the flag is never read again and it churns the
-50,000-slot flagged-IP table. Worse, <code>scanner_probe</code> carries a
-compiled-in <code>tier_floor</code> of <code>interactive</code> that <strong>overrides parked
-score thresholds</strong>, so a rule written to block quietly began rendering
-interstitials to whoever shared that address next — with nothing in
-the config saying so.</p>
+50,000-slot flagged-IP table. And a <code>scanner_probe</code> flag is not inert:
+wherever a <code>BotShieldFlagTrigger</code> gives it a <code>tier_floor</code> — as the
+compiled-in slate did before default rules were switched off — that
+floor <strong>overrides parked score thresholds</strong>, so a rule written to
+block quietly began rendering interstitials to whoever shared that
+address next, with nothing in the config saying so.</p>
 <p><strong>Migrating:</strong> a rule written before 2026-09-05 that relied on the
 default now flags nothing. Add <code>BotShieldFlag scanner_probe</code> and
 <code>BotShieldTTL 3600</code> to keep the old behaviour. <code>BotShieldTTL 0</code>,
