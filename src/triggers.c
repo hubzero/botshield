@@ -287,9 +287,54 @@ static int bs_trigger_key_is_response_only(const char *arg,
                                 BS_FLAG_APP_VERIFIED_SESSION | \
                                 BS_FLAG_APP_TRUST_SIGNAL)
 
-/* Window an address stays flagged, counted from its LAST flagging
- * rather than its first -- see BotShieldForgetIPAfter. */
-#define BS_DEFAULT_FORGET_IP_AFTER 3600
+/* `+name` adds, `-name` removes, `=name` makes the named set the whole
+ * set. `+` is the default and may be omitted, so an unprefixed list
+ * behaves exactly as it did before prefixes existed.
+ *
+ * The grammar is not new here: BotShieldClassify already takes
+ * `[All|None] [+/-flag]...`, and states that mixing its reset token
+ * with deltas is a config-time error. Same rule, same reason -- "=a,+b"
+ * has no reading that is not a guess about what the operator meant. */
+static const char *bs_parse_flag_ops(apr_pool_t *p, const char *s,
+                                     apr_uint32_t *add, apr_uint32_t *del,
+                                     int *replace)
+{
+    *add = *del = 0;
+    *replace = 0;
+    int saw_delta = 0, saw_replace = 0, saw_any = 0;
+
+    char *copy = apr_pstrdup(p, s);
+    char *save = NULL;
+    for (char *tok = apr_strtok(copy, ",", &save); tok;
+         tok = apr_strtok(NULL, ",", &save)) {
+        while (*tok == ' ' || *tok == '\t') tok++;
+        char op = '+';
+        if (*tok == '+' || *tok == '-' || *tok == '=') { op = *tok; tok++; }
+        while (*tok == ' ' || *tok == '\t') tok++;
+        apr_size_t l = strlen(tok);
+        while (l && (tok[l-1] == ' ' || tok[l-1] == '\t')) tok[--l] = '\0';
+        if (!*tok) return "empty flag name";
+
+        /* One name at a time through the shared parser: it is
+         * case-insensitive, and its unknown-name error already lists
+         * the vocabulary split into penalty and credit bits. Also
+         * defined above this point, which the metadata table is not. */
+        const char *ferr = NULL;
+        apr_uint32_t bit = bs_parse_flag_names(p, tok, &ferr);
+        if (ferr) return ferr;
+        saw_any = 1;
+        if (op == '=')      { saw_replace = 1; *add |= bit; }
+        else if (op == '-') { saw_delta   = 1; *del |= bit; }
+        else                { saw_delta   = 1; *add |= bit; }
+    }
+    if (!saw_any) return "names no flag";
+    if (saw_replace && saw_delta) {
+        return "cannot mix '=' with '+' or '-' -- '=' names the whole "
+               "resulting set, so a delta alongside it has no meaning";
+    }
+    if (saw_replace) *replace = 1;
+    return NULL;
+}
 
 static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
                                                bs_trigger_family fam,
@@ -449,19 +494,30 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
         a->flag_bit = bits;
     } else if (BS_AK("flagip") || BS_AK("flagsession")) {
         int to_session = BS_AK("flagsession");
-        const char *perr = NULL;
-        apr_uint32_t bits = bs_parse_flag_names(pool, val, &perr);
+        const char *dirname = to_session ? "BotShieldFlagSession"
+                                         : "BotShieldFlagIP";
+        apr_uint32_t add = 0, del = 0;
+        int replace = 0;
+        const char *perr = bs_parse_flag_ops(pool, val, &add, &del, &replace);
         if (perr) {
-            return apr_psprintf(pool, "%s: %s= %s", dname,
-                                to_session ? "BotShieldFlagSession"
-                                           : "BotShieldFlagIP", perr);
+            return apr_psprintf(pool, "%s: %s %s", dname, dirname, perr);
         }
-        if (!bits) {
-            return apr_psprintf(pool, "%s: %s names no flag", dname,
-                                to_session ? "BotShieldFlagSession"
-                                           : "BotShieldFlagIP");
+        /* Clearing is available only where the assertion is
+         * authenticated. Every other family fires on request properties
+         * the client controls, so '-' or '=' there would be a
+         * reputation-laundering primitive: fetch the matching URL,
+         * shed your own record. Feedback fires on an app-signed header,
+         * where the application asserts it and the requester cannot. */
+        if ((del || replace) && fam != BS_TFAMILY_FEEDBACK) {
+            return apr_psprintf(pool,
+                "%s: %s: '-' and '=' are only allowed on "
+                "BotShieldFeedbackTrigger. A rule matches on request "
+                "properties the client controls, so clearing here would "
+                "let any client clear its own record by fetching the "
+                "matching URL.", dname, dirname);
         }
-        if (!to_session && (bits & BS_FLAGS_SESSION_ONLY)) {
+        apr_uint32_t bits = add;
+        if (!to_session && ((add | del) & BS_FLAGS_SESSION_ONLY)) {
             return apr_psprintf(pool,
                 "%s: BotShieldFlagIP cannot set app_verified_human, "
                 "app_verified_session or app_trust_signal -- those "
@@ -469,8 +525,16 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
                 "sharing it inherits the credit. Use "
                 "BotShieldFlagSession.", dname);
         }
-        if (to_session) a->flag_session = bits;
-        else            a->flag_ip      = bits;
+        if (to_session) {
+            a->flag_session         = add;
+            a->flag_session_clear   = del;
+            a->flag_session_replace = replace;
+        } else {
+            a->flag_ip         = add;
+            a->flag_ip_clear   = del;
+            a->flag_ip_replace = replace;
+        }
+        (void)bits;
     } else if (BS_AK("burn")) {
         /* Refuse this client's cookie session for N seconds.
          *
@@ -574,7 +638,9 @@ static const char *bs_finalize_trigger_action(apr_pool_t *pool,
          * directives use the server-scope window, so naming a flag is
          * enough. Either way an event with nowhere to land is dead
          * config and is refused at parse time. */
-        if (!a->flag_bit && !a->flag_ip && !a->flag_session) {
+        if (!a->flag_bit && !a->flag_ip && !a->flag_session
+            && !a->flag_ip_clear && !a->flag_session_clear
+            && !a->flag_ip_replace && !a->flag_session_replace) {
             return apr_psprintf(pool,
                 "%s: feedback triggers must set BotShieldFlagIP or "
                 "BotShieldFlagSession; the event mapping has no "
@@ -654,17 +720,24 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
          * server-scope window, because one address slot holds a single
          * expires_at shared by all its flags. */
         apr_uint32_t ip_bits = a->flag_ip;
-        int ip_ttl = BS_DEFAULT_FORGET_IP_AFTER;
+        int ip_ttl = scfg->forget_ip_after > 0
+                   ? scfg->forget_ip_after : BS_DEFAULT_FORGET_IP_AFTER;
         if (a->flag_bit && a->ttl_sec > 0) {
             ip_bits |= a->flag_bit;
             ip_ttl   = a->ttl_sec;
         }
-        if (ip_bits) {
+        if (ip_bits || a->flag_ip_clear || a->flag_ip_replace) {
             unsigned char client_ip[16];
             if (bs_parse_client_ip(r->useragent_ip, client_ip)) {
                 bs_mask_ipv6_prefix(client_ip, scfg->ipv6_prefix_bits);
-                bs_flagged_ip_add(r, client_ip, ip_bits, ip_ttl,
-                                  scfg->ns_id);
+                if (a->flag_ip_clear || a->flag_ip_replace) {
+                    bs_flagged_ip_clear(r, client_ip, a->flag_ip_clear,
+                                        a->flag_ip, a->flag_ip_replace,
+                                        scfg->ns_id);
+                } else {
+                    bs_flagged_ip_add(r, client_ip, ip_bits, ip_ttl,
+                                      scfg->ns_id);
+                }
             }
         }
     }
@@ -673,13 +746,32 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
      * tables to stop the ordinary mint overwriting it; accumulating in
      * a note means one cookie, no race, and several rules can
      * contribute to it. */
-    if (a->flag_session) {
-        apr_uint32_t cur = 0;
+    if (a->flag_session || a->flag_session_clear
+        || a->flag_session_replace) {
+        /* add:del:replace, accumulated across every rule that fires on
+         * this request and applied once at the mint. */
+        apr_uint32_t add = 0, del = 0;
+        int replace = 0;
         const char *prev = apr_table_get(r->notes, "bs-session-flags");
-        if (prev) cur = (apr_uint32_t)strtoul(prev, NULL, 16);
-        cur |= a->flag_session;
+        if (prev) {
+            unsigned a_, d_, rp_;
+            if (sscanf(prev, "%x:%x:%u", &a_, &d_, &rp_) == 3) {
+                add = a_; del = d_; replace = (int)rp_;
+            }
+        }
+        if (a->flag_session_replace) {
+            /* A later '=' is the whole set; earlier deltas are moot. */
+            add = a->flag_session;
+            del = 0;
+            replace = 1;
+        } else {
+            add |= a->flag_session;
+            del |= a->flag_session_clear;
+            add &= ~a->flag_session_clear;
+        }
         apr_table_setn(r->notes, "bs-session-flags",
-                       apr_psprintf(r->pool, "%x", cur));
+                       apr_psprintf(r->pool, "%x:%x:%u", add, del,
+                                    (unsigned)replace));
     }
     /* Burn the cookie session (this-browser memory).
      *

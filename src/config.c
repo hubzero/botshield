@@ -362,6 +362,7 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->shm_size          = BS_DEFAULT_SHM_SIZE;
     scfg->vhost_idx         = -1;   /* until post_config assigns */
     scfg->flagged_capacity  = BS_DEFAULT_FLAGGED_SLOTS;
+    scfg->forget_ip_after   = BS_DEFAULT_FORGET_IP_AFTER;
     scfg->ipv6_prefix_bits  = 64;   /* /64 aggregation by default */
     scfg->bloom_ips             = BS_DEFAULT_BLOOM_IPS;
     scfg->bloom_window_secs     = BS_DEFAULT_BLOOM_WINDOW;
@@ -3350,6 +3351,26 @@ const char *bs_set_shm_size(cmd_parms *cmd, void *dconf, const char *arg)
         return "BotShieldShmSize: must be between 128K and 256M";
     }
     scfg->shm_size = (apr_size_t)bytes;
+    return NULL;
+}
+
+const char *bs_set_forget_ip_after(cmd_parms *cmd, void *dconf,
+                                  const char *arg)
+{
+    (void)dconf;
+    { const char *scope_err = bs_require_server_scope(cmd,
+                                  "BotShieldForgetIPAfter");
+      if (scope_err) return scope_err; }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    long n;
+    if (!bs_parse_int_bounded(arg, BS_MIN_FORGET_IP_AFTER,
+                              BS_MAX_FORGET_IP_AFTER, 10, &n)) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldForgetIPAfter: must be an integer %d..%d seconds",
+            BS_MIN_FORGET_IP_AFTER, BS_MAX_FORGET_IP_AFTER);
+    }
+    scfg->forget_ip_after = (int)n;
     return NULL;
 }
 

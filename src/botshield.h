@@ -349,6 +349,16 @@ typedef struct bs_server_cfg {
     apr_size_t  shm_size;
     int         flagged_capacity;
     int         ipv6_prefix_bits;   /* 0..128; 64 = per-subscriber v6 key */
+    /* BotShieldForgetIPAfter: seconds an address stays flagged,
+     * counted from its LAST flagging rather than its first.
+     *
+     * Server scope rather than per rule because the address slot holds
+     * one expires_at shared by every flag on it. Two rules asking for
+     * 3600 and 86400 both get 86400 -- a per-rule knob would read like
+     * it worked and could not. Sliding, so "flag for an hour" means an
+     * hour after the client last gave a reason, which is also why a
+     * flag set early is not cut short by a later one. */
+    int         forget_ip_after;
     int         bloom_ips;          /* expected working-set size */
     int         bloom_window_secs;  /* full window; rotation at window/2 */
     const char *state_file;         /* NULL = persistence off */

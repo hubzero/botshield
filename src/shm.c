@@ -234,6 +234,67 @@ static void bs_flagged_write_slot(bs_flagged_ip_slot *slot,
     __atomic_store_n(&slot->version, (v | 1U) + 1U, __ATOMIC_RELEASE);
 }
 
+/* Clear or replace the flags on an address.
+ *
+ * The counterpart bs_flagged_ip_add never had: until now the only way
+ * a flag left the table was to expire, so a wrongly-flagged NAT waited
+ * out its window and an operator had no lever at all.
+ *
+ * Reachable only from an app-signed feedback trigger. A rule fires on
+ * request properties the client controls, so clearing address
+ * reputation from one would let anybody launder their own record by
+ * fetching the right URL; the parser refuses - and = on every
+ * family but feedback.
+ *
+ * Does not extend the expiry. Clearing is not evidence of activity,
+ * and the window slides on flagging, not on touching the slot.
+ *
+ * No-op when the address has no entry: there is nothing to clear, and
+ * inserting one to record an absence would be a lie the table then has
+ * to store. */
+void bs_flagged_ip_clear(request_rec *r, const unsigned char ip[16],
+                         apr_uint32_t del_bits, apr_uint32_t set_bits,
+                         int replace, apr_uint32_t ns_id)
+{
+    if (!bs_shm.flagged_table || !bs_shm.mutex) return;
+    if (!replace && !del_bits) return;
+
+    apr_uint32_t base = bs_flagged_bucket(ip, ns_id);
+
+    /* trylock and drop, exactly as the add path does: a blocking lock
+     * here would queue every worker behind one holder under load, and
+     * a missed clear is recoverable -- the next feedback event retries
+     * and the entry expires on its own regardless. */
+    apr_status_t rv = apr_global_mutex_trylock(bs_shm.mutex);
+    if (rv != APR_SUCCESS) return;
+
+    for (unsigned i = 0; i < BS_FLAGGED_PROBE_LIMIT; i++) {
+        apr_uint32_t idx = (base + i) % bs_shm.flagged_capacity;
+        bs_flagged_ip_slot *slot = &bs_shm.flagged_table[idx];
+
+        apr_uint32_t v = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
+        if (v & 1U) continue;   /* torn write; not identifiable */
+
+        if (slot->used && slot->ns_id == ns_id
+            && memcmp(slot->ip, ip, 16) == 0) {
+            apr_uint32_t now_flags = replace ? set_bits
+                                             : (slot->flags & ~del_bits);
+            if (now_flags == 0) {
+                /* Nothing left to remember. Release the slot rather
+                 * than leaving a zero-flag entry occupying probe space
+                 * until its window runs out. */
+                bs_flagged_write_slot(slot, ip, 0, 0, ns_id);
+                slot->used = 0;
+            } else {
+                bs_flagged_write_slot(slot, ip, now_flags,
+                                      slot->expires_at, ns_id);
+            }
+            break;
+        }
+    }
+    apr_global_mutex_unlock(bs_shm.mutex);
+}
+
 void bs_flagged_ip_add(request_rec *r, const unsigned char ip[16],
                        apr_uint32_t flag_bits, int ttl_seconds,
                        apr_uint32_t ns_id)

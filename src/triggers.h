@@ -89,8 +89,12 @@ typedef struct {
      * these use the server-scope window: the address slot holds one
      * expires_at shared by every flag on it, so a per-rule duration
      * promises resolution the storage cannot deliver. */
-    apr_uint32_t  flag_ip;        /* bits to set on the address */
-    apr_uint32_t  flag_session;   /* bits to set on the cookie session */
+    apr_uint32_t  flag_ip;            /* bits to set on the address */
+    apr_uint32_t  flag_ip_clear;      /* bits to remove */
+    int           flag_ip_replace;    /* 1 = flag_ip becomes the whole set */
+    apr_uint32_t  flag_session;       /* bits to set on the cookie session */
+    apr_uint32_t  flag_session_clear; /* bits to remove */
+    int           flag_session_replace;
     int           burn_sec;       /* 0 = don't burn the cookie session */
     int           penalty;        /* 0..1000 */
     int           credit;         /* 0..1000 (rejected on path family) */

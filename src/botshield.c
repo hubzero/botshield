@@ -518,6 +518,16 @@ static const command_rec bs_cmds[] = {
                  "Total shared-memory budget for the flagged-IP / strike "
                  "/ safeguard tables and the Bloom filter. Accepts "
                  "K/M/G suffixes. Default: 16M. Range: 128K..256M."),
+    AP_INIT_TAKE1("BotShieldForgetIPAfter", bs_set_forget_ip_after, NULL,
+                 RSRC_CONF,
+                 "Seconds an address stays flagged, counted from its "
+                 "LAST flagging rather than its first -- so an address "
+                 "that keeps tripping rules stays flagged, and one that "
+                 "stops is forgotten this long afterwards. Server scope "
+                 "because the address slot holds a single expiry shared "
+                 "by every flag on it. Flags are advisory: the table "
+                 "evicts under pressure, so one may lapse early. "
+                 "Default: 3600. Range: 1..2592000."),
     AP_INIT_TAKE1("BotShieldFlaggedIPCapacity", bs_set_flagged_capacity, NULL,
                  RSRC_CONF,
                  "Slot count in the flagged-IP hash table. Each slot is "
@@ -1247,7 +1257,13 @@ static int bs_maybe_mint_session(request_rec *r, bs_dir_cfg *cfg,
     memset(&seed, 0, sizeof(seed));
     const char *pending = apr_table_get(r->notes, "bs-session-flags");
     if (pending) {
-        seed.flags_active = (apr_uint32_t)strtoul(pending, NULL, 16);
+        unsigned padd = 0, pdel = 0, prep = 0;
+        if (sscanf(pending, "%x:%x:%u", &padd, &pdel, &prep) == 3) {
+            /* A fresh cookie carries nothing, so a removal has nothing
+             * to remove and "=" and "+" agree: the set is what was
+             * added. */
+            seed.flags_active = (apr_uint32_t)padd;
+        }
     }
     bs_challenge fresh = { 0 };
     const char *ierr = bs_issue_challenge(r->pool, cfg,
@@ -2352,8 +2368,13 @@ static int bs_handler(request_rec *r)
     {
         const char *pending = apr_table_get(r->notes, "bs-session-flags");
         if (pending) {
-            next_rep.flags_active |=
-                (apr_uint32_t)strtoul(pending, NULL, 16);
+            unsigned padd = 0, pdel = 0, prep = 0;
+            if (sscanf(pending, "%x:%x:%u", &padd, &pdel, &prep) == 3) {
+                next_rep.flags_active = prep
+                    ? (apr_uint32_t)padd
+                    : ((next_rep.flags_active | (apr_uint32_t)padd)
+                       & ~(apr_uint32_t)pdel);
+            }
         }
     }
 

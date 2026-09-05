@@ -113,6 +113,7 @@ const char *bs_set_forgive_cap   (cmd_parms *cmd, void *dconf,  const char *arg)
 /* SHM sizing + capacity + scoping */
 const char *bs_set_shm_size           (cmd_parms *cmd, void *dconf, const char *arg);
 const char *bs_set_flagged_capacity   (cmd_parms *cmd, void *dconf, const char *arg);
+const char *bs_set_forget_ip_after    (cmd_parms *cmd, void *dconf, const char *arg);
 const char *bs_set_bloom_ips          (cmd_parms *cmd, void *dconf, const char *arg);
 const char *bs_set_bloom_window       (cmd_parms *cmd, void *dconf, const char *arg);
 const char *bs_set_ipv6_prefix        (cmd_parms *cmd, void *dconf, const char *arg);

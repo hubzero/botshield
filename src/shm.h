@@ -82,6 +82,9 @@ extern "C" {
 #define BS_RATE_UA_MAX            192
 
 /* Flagged-IP table */
+#define BS_DEFAULT_FORGET_IP_AFTER 3600
+#define BS_MIN_FORGET_IP_AFTER     1
+#define BS_MAX_FORGET_IP_AFTER     (86400 * 30)
 #define BS_DEFAULT_FLAGGED_SLOTS  50000
 #define BS_FLAGGED_MIN_SLOTS      1024
 #define BS_FLAGGED_MAX_SLOTS      1000000
@@ -1011,6 +1014,9 @@ apr_uint64_t bs_popcount_buffer(const unsigned char *buf,
 void bs_flagged_ip_add(request_rec *r, const unsigned char ip[16],
                        apr_uint32_t flag_bits, int ttl_seconds,
                        apr_uint32_t ns_id);
+void bs_flagged_ip_clear(request_rec *r, const unsigned char ip[16],
+                         apr_uint32_t del_bits, apr_uint32_t set_bits,
+                         int replace, apr_uint32_t ns_id);
 int  bs_flagged_ip_lookup(const unsigned char ip[16],
                           apr_uint32_t *out_flags, apr_uint32_t ns_id);
 
