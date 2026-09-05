@@ -2109,11 +2109,37 @@ static int bs_handler(request_rec *r)
                          (unsigned)(all_flags & excused)));
     }
     bs_tier tier_floor_from_flags = BS_TIER_PASS;
+    int flag_block_status = 0;
+    const char *flag_block_name = NULL;
     /* Flag score AND tier_floor actions are both implicit, so both are
      * gated. Leaving tier_floor on with scoring off would keep the
      * exact hazard this directive exists to remove: a floor that
      * ignores the verified-bot credit. */
-    bs_apply_flag_triggers(r, scfg_h, firing_flags, &tier_floor_from_flags);
+    bs_apply_flag_triggers(r, scfg_h, firing_flags, all_flags,
+                           &tier_floor_from_flags,
+                           &flag_block_status, &flag_block_name);
+
+    /* A block ends the request here, before any tier is chosen.
+     *
+     * Read from the un-excused set on purpose: solving a challenge
+     * pays off the flags that were live at solve time, and a refusal
+     * is not a debt a client can work off. The inverse -- letting a
+     * solve clear a block -- would make "blocked" mean "solve a
+     * challenge to continue", which is what a challenge tier already
+     * says and not what an operator writing block asked for.
+     *
+     * Safe to leave un-excusable only because it terminates. A flag
+     * that forces a challenge and cannot be excused is the loop that
+     * reached production twice. */
+    if (flag_block_status) {
+        bs_score_add(r, 0, 0,
+            apr_psprintf(r->pool, "flagblock:%s", flag_block_name));
+        bs_decision_log(r, "nochallenge", "block", cookie_status,
+                        "-", "-",
+                        apr_psprintf(r->pool, "flagblock:%s",
+                                     flag_block_name), 0);
+        return flag_block_status;
+    }
 
     /* Fetch the score struct *after* all per-request adds. Using create=1
      * so a request with zero hits still gets a valid (empty) pointer and

@@ -198,6 +198,18 @@ apr_status_t bs_app_feedback_filter(ap_filter_t *f,
         return ap_pass_brigade(f->next, bb);
     }
 
+    /* Session flags a rule asked for, applied before anything below
+     * can return early.
+     *
+     * They cannot be applied where they are set. The ordinary mint
+     * runs at bs_handler's cookie stage and the policy walk that fires
+     * rules runs after it, so a rule's mark is decided after the
+     * cookie carrying it was built -- and a rule that short-circuits
+     * with a status never reaches a later mint at all. Here is the one
+     * point every response passes through whatever exit it took, and
+     * the headers have not been serialised yet. */
+    bs_apply_pending_session_flags(r);
+
     bs_server_cfg *scfg =
         ap_get_module_config(r->server->module_config, &botshield_module);
     if (!scfg) return ap_pass_brigade(f->next, bb);

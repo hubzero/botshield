@@ -114,6 +114,11 @@ void bs_record_outgoing_cookie(request_rec *r, const bs_challenge *ch,
 void bs_amend_session_flags(request_rec *r, apr_uint32_t add,
                             apr_uint32_t del, int replace);
 
+/* Apply whatever session flags the rules on this request asked for.
+ * Called from the output filter, which is the only point every
+ * response reaches regardless of which exit it took. */
+void bs_apply_pending_session_flags(request_rec *r);
+
 const char *bs_install_verified_cookie(request_rec *r,
                                        const bs_dir_cfg *cfg,
                                        const bs_challenge *ch,

@@ -133,16 +133,26 @@ const char *bs_score_reasons_joined(apr_pool_t *p,
  * *out_tier_floor). */
 int bs_apply_flag_triggers(request_rec *r,
                            const struct bs_server_cfg *scfg,
-                           apr_uint32_t all_flags,
-                           bs_tier *out_tier_floor)
+                           apr_uint32_t firing_flags,
+                           apr_uint32_t block_flags,
+                           bs_tier *out_tier_floor,
+                           int *out_block_status,
+                           const char **out_block_flag)
 {
     if (out_tier_floor) *out_tier_floor = BS_TIER_PASS;
-    if (!scfg || !scfg->flag_triggers || all_flags == 0) return 0;
+    if (out_block_status) *out_block_status = 0;
+    if (out_block_flag) *out_block_flag = NULL;
+    if (!scfg || !scfg->flag_triggers) return 0;
+    if (firing_flags == 0 && block_flags == 0) return 0;
     int fired = 0;
     for (int i = 0; i < scfg->flag_triggers->nelts; i++) {
         bs_flag_trigger_entry *e =
             APR_ARRAY_IDX(scfg->flag_triggers, i, bs_flag_trigger_entry *);
-        if (!(all_flags & e->flag_bit)) continue;
+        /* Block reads the un-excused set; everything else reads the
+         * excused-subtracted one. */
+        apr_uint32_t visible = (e->action == BS_FLAG_ACT_BLOCK)
+                             ? block_flags : firing_flags;
+        if (!(visible & e->flag_bit)) continue;
         fired++;
         if (e->mode == BS_TMODE_OBSERVE) {
             bs_score_add(r, 0, 0,
@@ -157,6 +167,16 @@ int bs_apply_flag_triggers(request_rec *r,
         } else if (e->action == BS_FLAG_ACT_TIER_FLOOR) {
             if (out_tier_floor && e->tier_min > *out_tier_floor) {
                 *out_tier_floor = e->tier_min;
+            }
+        } else if (e->action == BS_FLAG_ACT_BLOCK) {
+            /* Any block wins, and the first one seen decides the
+             * status. Competing blocks are a config the operator
+             * wrote; picking the earliest keeps it declaration-ordered
+             * like everything else here rather than silently choosing
+             * the harshest. */
+            if (out_block_status && *out_block_status == 0) {
+                *out_block_status = e->block_status;
+                if (out_block_flag) *out_block_flag = e->flag_name;
             }
         }
         /* BS_FLAG_ACT_RESET entries are consumed at post_config —
@@ -177,6 +197,7 @@ const struct bs_flag_name bs_flag_names[] = {
     { "app_verified_human",   BS_FLAG_APP_VERIFIED_HUMAN   },
     { "app_verified_session", BS_FLAG_APP_VERIFIED_SESSION },
     { "app_trust_signal",     BS_FLAG_APP_TRUST_SIGNAL     },
+    { "blocked",              BS_FLAG_BLOCKED              },
     { NULL, 0 }
 };
 

@@ -1829,6 +1829,7 @@ static const bs_flag_meta bs_flag_metadata[] = {
     { "app_verified_human",   BS_FLAG_APP_VERIFIED_HUMAN   },
     { "app_verified_session", BS_FLAG_APP_VERIFIED_SESSION },
     { "app_trust_signal",     BS_FLAG_APP_TRUST_SIGNAL     },
+    { "blocked",              BS_FLAG_BLOCKED              },
 };
 #define BS_FLAG_META_COUNT \
     (sizeof(bs_flag_metadata) / sizeof(bs_flag_metadata[0]))
@@ -1998,6 +1999,33 @@ const char *bs_set_flag_trigger(cmd_parms *cmd, void *dconf,
             return apr_psprintf(cmd->pool,
                 "BotShieldFlagTrigger '%s' action=tier_floor: missing "
                 "required 'min=<tier>'", flag_name);
+        }
+    } else if (strcasecmp(verb, "block") == 0) {
+        e->action = BS_FLAG_ACT_BLOCK;
+        e->block_status = HTTP_FORBIDDEN;
+        for (; idx < argc; idx++) {
+            const char *arg = argv[idx];
+            if (strncasecmp(arg, "status=", 7) == 0) {
+                char *e2 = NULL;
+                long code = strtol(arg + 7, &e2, 10);
+                if (!e2 || *e2 || code < 400 || code > 599) {
+                    return apr_psprintf(cmd->pool,
+                        "BotShieldFlagTrigger '%s' action=block: "
+                        "status='%s' must be 400..599 -- a block is a "
+                        "refusal, so a 2xx or 3xx has no meaning here",
+                        flag_name, arg + 7);
+                }
+                e->block_status = (int)code;
+            } else if (strcasecmp(arg, "mode=observe") == 0) {
+                e->mode = BS_TMODE_OBSERVE;
+            } else if (strcasecmp(arg, "mode=enforce") == 0) {
+                e->mode = BS_TMODE_ENFORCE;
+            } else {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldFlagTrigger '%s' action=block: unknown "
+                    "arg '%s' (want status=<4xx|5xx> or mode=observe)",
+                    flag_name, arg);
+            }
         }
     } else {
         return apr_psprintf(cmd->pool,

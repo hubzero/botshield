@@ -157,6 +157,11 @@ enum bs_enabled_state {
 #define BS_FLAG_APP_VERIFIED_HUMAN    (1U << 4)
 #define BS_FLAG_APP_VERIFIED_SESSION  (1U << 5)
 #define BS_FLAG_APP_TRUST_SIGNAL      (1U << 6)
+/* Carries no meaning of its own, like every other flag: what it does is
+ * whatever a BotShieldFlagTrigger says. It exists so an operator has a
+ * neutral name to hang `action=block` on, instead of overloading a
+ * detection signal like scanner_probe with a punishment. */
+#define BS_FLAG_BLOCKED               (1U << 7)
 
 /* Captcha tier (M8) defaults — small and boring: a 1 s HTTP verify
  * budget is enough for Cloudflare / hCaptcha / Google normally, and

@@ -307,6 +307,20 @@ void bs_record_outgoing_cookie(request_rec *r, const bs_challenge *ch,
     apr_pool_userdata_setn(out, BS_OUTGOING_COOKIE_KEY, NULL, r->pool);
 }
 
+/* Read the note the trigger path accumulates and fold it into the
+ * outgoing cookie. Separated from bs_amend_session_flags so the
+ * feedback path can pass its own ops directly without going through a
+ * string. */
+void bs_apply_pending_session_flags(request_rec *r)
+{
+    const char *pending = apr_table_get(r->notes, "bs-session-flags");
+    if (!pending) return;
+    unsigned add = 0, del = 0, rep = 0;
+    if (sscanf(pending, "%x:%x:%u", &add, &del, &rep) != 3) return;
+    bs_amend_session_flags(r, (apr_uint32_t)add, (apr_uint32_t)del,
+                           (int)rep);
+}
+
 void bs_amend_session_flags(request_rec *r, apr_uint32_t add,
                             apr_uint32_t del, int replace)
 {
