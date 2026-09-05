@@ -232,24 +232,24 @@ static const char *bs_trigger_known_keys(bs_trigger_family fam)
 {
     switch (fam) {
     case BS_TFAMILY_REQUEST:
-        return "respond, nochallenge, challenge, redirect, log, "
+        return "respond, nochallenge, challenge, redirect, logas, "
                "accesslog, flagip, flagsession, burn, penalty, mode";
     case BS_TFAMILY_COOKIE:
-        return "respond, nochallenge, challenge, redirect, log, "
+        return "respond, nochallenge, challenge, redirect, logas, "
                "accesslog, flagip, flagsession, burn, penalty, credit, "
                "mode";
     case BS_TFAMILY_ENV:
-        return "respond, nochallenge, challenge, log, accesslog, flagip, "
+        return "respond, nochallenge, challenge, logas, accesslog, flagip, "
                "flagsession, burn, penalty, credit, mode";
     case BS_TFAMILY_FEEDBACK:
         /* mode=observe means "log :observe but skip the flagged-IP
          * write" — meaningful for staging a feedback rule before
          * mutating server state. */
-        return "flagip, flagsession, log, accesslog, mode";
+        return "flagip, flagsession, logas, accesslog, mode";
     case BS_TFAMILY_LOAD:
-        return "status, log, accesslog, penalty, credit, mode";
+        return "respond, logas, accesslog, penalty, credit, mode";
     case BS_TFAMILY_SCOPE:
-        return "respond, nochallenge, challenge, redirect, log, "
+        return "respond, nochallenge, challenge, redirect, logas, "
                "accesslog, flagip, flagsession, burn, penalty, credit, "
                "mode";
     case BS_TFAMILY_FLAG:
@@ -491,10 +491,22 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
                 "%s: redirect= requires a URL", dname);
         }
         a->redirect_url = apr_pstrdup(pool, val);
-    } else if (BS_AK("log")) {
+    } else if (BS_AK("logas") || BS_AK("log")) {
+        /* BotShieldLogAs sets the tag embedded on the decision-log
+         * line this request was going to emit anyway. It does not
+         * cause logging, which is what the old name implied -- an
+         * operator could reasonably read BotShieldLog as the thing
+         * that produces the log entry, and removing it as a way to
+         * stop one. "As" says the value is a name. */
+        if (BS_AK("log")) {
+            ap_log_error(APLOG_MARK, APLOG_WARNING, 0, NULL,
+                "mod_botshield: %s: BotShieldLog is deprecated and will "
+                "be removed; write BotShieldLogAs. It labels the "
+                "decision line, it does not cause it.", dname);
+        }
         if (!*val) {
             return apr_psprintf(pool,
-                "%s: log= requires a tag", dname);
+                "%s: a log tag cannot be empty", dname);
         }
         /* Reject the shape that briefly meant "suppress" during
          * development. Silently treating it as a tag named "off" would

@@ -998,7 +998,7 @@ one does:</p>
     BotShieldUserAgent    @search,@ai-input,@ai-train,@monitor
     BotShieldRespond      403
     BotShieldTTL          0
-    BotShieldLog          api-bot
+    BotShieldLogAs          api-bot
 &lt;/BotShieldRule&gt;
 </code></pre>
 <p>That replaces four rules identical but for a single token. Expanded at
@@ -1006,7 +1006,7 @@ parse time into one entry per alternative — this family is strict
 first-match-wins, so N adjacent entries differing only on the UA axis
 and carrying identical actions are exactly equivalent to one entry with
 an OR. Copies take a <code>#N</code> name internally; the decision log is
-unaffected, since it reports the action's <code>log=</code> tag, which every copy
+unaffected, since it reports the action's <code>logas=</code> tag, which every copy
 shares.</p>
 <p><strong>Only <code>@selectors</code> split.</strong> A bare substring pattern is passed through
 untouched, because a User-Agent legitimately contains commas —
@@ -1118,27 +1118,27 @@ semantics and refresh model.</p>
 <tr>
 <td><code>BotShieldRule</code></td>
 <td><code>&lt;name&gt;</code> + any of <code>path=&lt;glob&gt;</code> <code>query=&lt;glob&gt;</code> <code>cookies=none|any|session</code> <code>ua=&lt;substring&gt;|@&lt;botgroup&gt;|&quot;&quot;</code> <code>ipspec=&lt;spec&gt;</code> — ANDed, at least one required</td>
-<td><code>respond=</code>, <code>redirect=</code>, <code>log=</code>, <code>accesslog=</code>, <code>flagip=</code>, <code>flagsession=</code>, <code>burn=</code>, <code>penalty=</code>, <code>mode=</code> (no <code>credit=</code>)</td>
+<td><code>respond=</code>, <code>redirect=</code>, <code>logas=</code>, <code>accesslog=</code>, <code>flagip=</code>, <code>flagsession=</code>, <code>burn=</code>, <code>penalty=</code>, <code>mode=</code> (no <code>credit=</code>)</td>
 </tr>
 <tr>
 <td><code>BotShieldCookieTrigger</code></td>
 <td><code>&lt;name&gt; &lt;pred&gt;</code> (see policy page)</td>
-<td><code>respond=</code>, <code>redirect=</code>, <code>log=</code>, <code>accesslog=</code>, <code>flagip=</code>, <code>flagsession=</code>, <code>burn=</code>, <code>penalty=</code>, <code>credit=</code>, <code>mode=</code></td>
+<td><code>respond=</code>, <code>redirect=</code>, <code>logas=</code>, <code>accesslog=</code>, <code>flagip=</code>, <code>flagsession=</code>, <code>burn=</code>, <code>penalty=</code>, <code>credit=</code>, <code>mode=</code></td>
 </tr>
 <tr>
 <td><code>BotShieldEnvTrigger</code></td>
 <td><code>&lt;name&gt; &lt;env-pred&gt;</code> (see policy page)</td>
-<td><code>respond=</code>, <code>log=</code>, <code>accesslog=</code>, <code>flagip=</code>, <code>flagsession=</code>, <code>burn=</code>, <code>penalty=</code>, <code>credit=</code>, <code>mode=</code> (no <code>redirect=</code>)</td>
+<td><code>respond=</code>, <code>logas=</code>, <code>accesslog=</code>, <code>flagip=</code>, <code>flagsession=</code>, <code>burn=</code>, <code>penalty=</code>, <code>credit=</code>, <code>mode=</code> (no <code>redirect=</code>)</td>
 </tr>
 <tr>
 <td><code>BotShieldFeedbackTrigger</code></td>
 <td><code>&lt;event&gt;</code></td>
-<td><code>flagip=</code>, <code>flagsession=</code> (both accept <code>+</code>/<code>-</code>/<code>=</code>), <code>log=</code>, <code>accesslog=</code>, <code>mode=</code></td>
+<td><code>flagip=</code>, <code>flagsession=</code> (both accept <code>+</code>/<code>-</code>/<code>=</code>), <code>logas=</code>, <code>accesslog=</code>, <code>mode=</code></td>
 </tr>
 <tr>
 <td><code>BotShieldLoadTrigger</code></td>
 <td><code>&lt;name&gt; state=&lt;n&gt;|state&gt;=&lt;n&gt;</code></td>
-<td><code>respond=</code>, <code>log=</code>, <code>accesslog=</code>, <code>penalty=</code>, <code>mode=</code> (no <code>redirect=</code>, <code>flag=</code>, <code>ttl=</code>, <code>burn=</code>)</td>
+<td><code>respond=</code>, <code>logas=</code>, <code>accesslog=</code>, <code>penalty=</code>, <code>mode=</code> (no <code>redirect=</code>, <code>flag=</code>, <code>ttl=</code>, <code>burn=</code>)</td>
 </tr>
 <tr>
 <td><code>BotShieldSessionCookieName</code></td>
@@ -1153,18 +1153,18 @@ for full predicate vocabulary and family-by-family semantics.</p>
 <code>cookies=session</code> cookietrigger predicate considers a session
 cookie. Repeatable; each call appends.</p>
 <h3 id="accesslog-off-keep-a-request-out-of-the-access-log"><code>accesslog=off</code> — keep a request out of the access log</h3>
-<p><code>log=&lt;tag&gt;</code> names a tag that rides the decision line as <code>tag=&quot;&lt;x&gt;&quot;</code>
+<p><code>logas=&lt;tag&gt;</code> names a tag that rides the decision line as <code>tag=&quot;&lt;x&gt;&quot;</code>
 for fail2ban handoff. <code>accesslog=off</code> is separate and independent: it
 suppresses the access-log line for a matching request.</p>
 <p>They compose, which is the point — a scanner probe usually wants both:</p>
 <pre><code class="language-apache">&lt;BotShieldRule env-probe&gt;
     BotShieldPath         /.env
     BotShieldRespond      403
-    BotShieldLog          scanner-probe
+    BotShieldLogAs          scanner-probe
     BotShieldAccessLog    off
 &lt;/BotShieldRule&gt;
 </code></pre>
-<p>(An earlier development build overloaded <code>log=off</code> for this. That form is
+<p>(An earlier development build overloaded <code>logas=off</code> for this. That form is
 now rejected at config time with a pointer here, rather than silently
 being treated as a tag named &quot;off&quot; and losing the suppression.)</p>
 <p>The mechanism is Apache's own. <code>log_transaction</code> is a <code>RUN_ALL</code> hook
@@ -1306,6 +1306,17 @@ switched off.</p>
     BotShieldNoChallenge
 &lt;/BotShieldRule&gt;
 </code></pre>
+<h4 id="deprecated-botshieldlog">Deprecated: <code>BotShieldLog</code></h4>
+<p><code>BotShieldLogAs &lt;tag&gt;</code> is the name now. The old one still parses and
+warns at config time.</p>
+<p>It never caused logging. The decision line is emitted whether or not a
+rule sets a tag, and the tag is embedded on that same line rather than
+producing a second entry — so <code>BotShieldLog</code> read as the thing that made
+the record happen, and as something you could delete to stop one.
+Neither is true. <code>As</code> says the value is a name for a line that was
+always going to exist.</p>
+<p>Distinct from <code>BotShieldAccessLog</code>, which is a genuine on/off switch for
+the Apache access-log line and is unaffected by this rename.</p>
 <h4 id="deprecated-botshieldtier-and-botshieldrespond-nochallenge">Deprecated: <code>BotShieldTier</code>, and <code>BotShieldRespond nochallenge</code></h4>
 <p>Both still parse and warn at config time.</p>
 <p><code>BotShieldTier</code> required <code>BotShieldRespond nochallenge</code> beside it,
@@ -1347,7 +1358,7 @@ was how you spelled &quot;decide nothing&quot;, by <em>omission</em>. That is no
     BotShieldQuery        *return=*
     BotShieldCookies      none
     BotShieldRespond      403
-    BotShieldLog          login-trap
+    BotShieldLogAs          login-trap
     BotShieldAccessLog    off
 &lt;/BotShieldRule&gt;
 
@@ -1365,7 +1376,7 @@ was how you spelled &quot;decide nothing&quot;, by <em>omission</em>. That is no
     BotShieldUserAgent    &quot;&quot;
     BotShieldRespond       nochallenge
     BotShieldTier         noninteractive
-    BotShieldLog          no-ua
+    BotShieldLogAs          no-ua
 &lt;/BotShieldRule&gt;
 </code></pre>
 <p>Because it fires from the policy walk it short-circuits <strong>before</strong>
@@ -1389,7 +1400,7 @@ either, so it costs nothing that was not already being paid.</p>
     BotShieldPath         /.env
     BotShieldRespond      404
     BotShieldFlagIP       scanner_probe
-    BotShieldLog          env-probe
+    BotShieldLogAs          env-probe
 &lt;/BotShieldRule&gt;
 
 # the browser: the probe gets its 404 and a cookie carrying the mark,
@@ -1398,7 +1409,7 @@ either, so it costs nothing that was not already being paid.</p>
     BotShieldPath         /wp-admin/*
     BotShieldRespond      404
     BotShieldFlagSession  scanner_probe
-    BotShieldLog          wp-probe
+    BotShieldLogAs          wp-probe
 &lt;/BotShieldRule&gt;
 </code></pre>
 <p>A flag does nothing on its own. What it <em>means</em> is declared once, by
@@ -1564,7 +1575,7 @@ match.</p>
 <tbody>
 <tr>
 <td><code>BotShieldTrigger</code></td>
-<td><code>[reset] [respond=N|pass] [redirect=URL] [log=tag] [accesslog=on|off] [flag=NAME] [ttl=N] [penalty=N] [credit=N] [mode=enforce|observe]</code></td>
+<td><code>[reset] [respond=N|pass] [redirect=URL] [logas=tag] [accesslog=on|off] [flag=NAME] [ttl=N] [penalty=N] [credit=N] [mode=enforce|observe]</code></td>
 <td>server / vhost / Directory / Location / LocationMatch / Files / If</td>
 </tr>
 </tbody>

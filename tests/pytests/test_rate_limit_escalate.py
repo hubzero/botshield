@@ -63,7 +63,7 @@ def test_repeated_429_escalates_to_403(config_override, fresh_ip,
         '    BotShieldScoreCaptcha 700\n'
         '    BotShieldRateLimit corpbot 2 sec "CorpBot" *\n'
         '    BotShieldRateLimitEscalate corpbot 3 min '
-        'respond=403 ttl=60 "log=BAN rate-abuse"',
+        'respond=403 ttl=60 "logas=BAN rate-abuse"',
         count=1,
     ):
         with log_slice as slc:

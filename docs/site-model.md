@@ -214,7 +214,7 @@ LogLevel botshield_module:info
 
 The `reason` field is the comma-joined reason names captured by
 `bs_score_add`. The `tag` field (when present) is the
-configured `log=<tag>` value from the matching trigger. See
+configured `logas=<tag>` value from the matching trigger. See
 [observability](observability.md) for the full decision-log
 vocabulary.
 

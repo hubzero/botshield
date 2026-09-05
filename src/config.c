@@ -4009,12 +4009,23 @@ const char *bs_set_rate_limit_escalate(cmd_parms *cmd, void *dconf,
                     "1..2592000 seconds", val);
             }
             e->ttl_sec = (int)t;
-        } else if (BS_REK("log")) {
+        } else if (BS_REK("logas") || BS_REK("log")) {
+            /* logas= is the name; log= is the deprecated spelling.
+             * Renamed here rather than later for the reason respond=
+             * was: this directive has its own key parser, and a rename
+             * that stops at the trigger families leaves one concept
+             * wearing two names in the same file. */
+            if (BS_REK("log")) {
+                ap_log_error(APLOG_MARK, APLOG_WARNING, 0, cmd->server,
+                    "mod_botshield: BotShieldRateLimitEscalate: log= is "
+                    "deprecated and will be removed; write logas=. It "
+                    "labels the decision line, it does not cause it.");
+            }
             e->log_tag = apr_pstrdup(cmd->pool, val);
         } else {
             return apr_psprintf(cmd->pool,
                 "BotShieldRateLimitEscalate: unknown key '%.*s' "
-                "(known: respond, ttl, log)", (int)klen, arg);
+                "(known: respond, ttl, logas)", (int)klen, arg);
         }
         #undef BS_REK
     }

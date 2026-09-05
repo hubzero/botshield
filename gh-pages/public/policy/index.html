@@ -238,7 +238,7 @@ former <code>BotShieldBlockPath</code> directive, retired):</p>
 comma-separated inline CIDRs, or omit/<code>*</code> for &quot;any IP&quot;)</li>
 </ul>
 <p>Action keys (any of): <code>respond=</code>, <code>redirect=</code>, <code>flag=</code>, <code>ttl=</code>,
-<code>penalty=</code>, <code>log=</code>, <code>mode=enforce|observe</code>. Convention is match
+<code>penalty=</code>, <code>logas=</code>, <code>mode=enforce|observe</code>. Convention is match
 keys first, action keys after — the parser doesn't enforce ordering
 but readability rewards consistency.</p>
 <h3 id="repeated-429-escalation">Repeated-429 escalation</h3>
@@ -384,7 +384,7 @@ action keys are:</p>
 <td>Send an HTTP redirect with the chosen status (default 302)</td>
 </tr>
 <tr>
-<td><code>log=&lt;tag&gt;</code></td>
+<td><code>logas=&lt;tag&gt;</code></td>
 <td>Stash a tag in <code>r-&gt;notes</code> for the access log (<code>%{BS-…}n</code>) and the decision-log line</td>
 </tr>
 <tr>
@@ -415,12 +415,12 @@ action keys are:</p>
     BotShieldRespond       403
     BotShieldFlag         honeypot_hit
     BotShieldTTL          3600
-    BotShieldLog          admin-trap
+    BotShieldLogAs          admin-trap
 &lt;/BotShieldRule&gt;
 &lt;BotShieldRule api-burst-trap&gt;
     BotShieldPath         /api/*/burst
     BotShieldPenalty      30
-    BotShieldLog          api-burst
+    BotShieldLogAs          api-burst
 &lt;/BotShieldRule&gt;
 </code></pre>
 <p>First-match wins (declaration order). On match, the path family's
@@ -435,12 +435,12 @@ other status is the response code.</p>
 &lt;BotShieldCookieTrigger weak-session&gt;
     BotShieldCookie       sessionid=guest
     BotShieldPenalty      15
-    BotShieldLog          guest-session
+    BotShieldLogAs          guest-session
 &lt;/BotShieldCookieTrigger&gt;
 &lt;BotShieldCookieTrigger no-cookies&gt;
     BotShieldCookies      none
     BotShieldPenalty      5
-    BotShieldLog          cookieless
+    BotShieldLogAs          cookieless
 &lt;/BotShieldCookieTrigger&gt;
 </code></pre>
 <p>Predicate shapes:</p>
@@ -474,7 +474,7 @@ SetEnvIf User-Agent &quot;(?i)\bcurl\b&quot; BS_CLI=1
 &lt;BotShieldEnvTrigger curl-hint&gt;
     BotShieldEnv          BS_CLI
     BotShieldPenalty      10
-    BotShieldLog          cli
+    BotShieldLogAs          cli
 &lt;/BotShieldEnvTrigger&gt;
 </code></pre>
 <p>Predicate shapes:</p>
@@ -501,7 +501,7 @@ BotShieldAppIntegrationSecretFile     /etc/botshield/app-integration-secret
 &lt;BotShieldFeedbackTrigger scanner-hit&gt;
     BotShieldFlag         honeypot_hit
     BotShieldTTL          3600
-    BotShieldLog          app-trap
+    BotShieldLogAs          app-trap
 &lt;/BotShieldFeedbackTrigger&gt;
 &lt;BotShieldFeedbackTrigger human-pass&gt;
     BotShieldFlag         app_verified_human
@@ -526,12 +526,12 @@ BotShieldLoadHotThreshold       85
 &lt;BotShieldLoadTrigger be-strict&gt;
     BotShieldState        &gt;=warm
     BotShieldPenalty      20
-    BotShieldLog          brownout
+    BotShieldLogAs          brownout
 &lt;/BotShieldLoadTrigger&gt;
 &lt;BotShieldLoadTrigger drop-noise&gt;
     BotShieldState        hot
     BotShieldRespond       503
-    BotShieldLog          hot-shed
+    BotShieldLogAs          hot-shed
 &lt;/BotShieldLoadTrigger&gt;
 </code></pre>
 <p>Predicates: <code>state=&lt;name&gt;</code> (exact match) or <code>state&gt;=&lt;name&gt;</code> (at
@@ -659,7 +659,7 @@ log-only mode — there's a single per-scope directive:</p>
     &lt;BotShieldTrigger&gt;
         BotShieldFlag         honeypot_hit
         BotShieldTTL          3600
-        BotShieldLog          admin-trap
+        BotShieldLogAs          admin-trap
     &lt;/BotShieldTrigger&gt;
 &lt;/Location&gt;
 
@@ -668,7 +668,7 @@ log-only mode — there's a single per-scope directive:</p>
         BotShieldFlag         scanner_probe
         BotShieldTTL          3600
         BotShieldPenalty      20
-        BotShieldLog          wp-trap
+        BotShieldLogAs          wp-trap
     &lt;/BotShieldTrigger&gt;
 &lt;/LocationMatch&gt;
 
@@ -676,7 +676,7 @@ log-only mode — there's a single per-scope directive:</p>
     &lt;If &quot;%{REQUEST_URI} =~ m#/uploads/#&quot;&gt;
         &lt;BotShieldTrigger&gt;
             BotShieldRespond       403
-            BotShieldLog          php-in-uploads
+            BotShieldLogAs          php-in-uploads
         &lt;/BotShieldTrigger&gt;
     &lt;/If&gt;
 &lt;/Files&gt;
@@ -699,7 +699,7 @@ declare <code>BotShieldTrigger reset</code> in the child:</p>
 <pre><code class="language-apache">&lt;Location &quot;/api&quot;&gt;
     &lt;BotShieldTrigger&gt;
         BotShieldPenalty      10
-        BotShieldLog          api-tax
+        BotShieldLogAs          api-tax
     &lt;/BotShieldTrigger&gt;
 &lt;/Location&gt;
 
@@ -715,7 +715,7 @@ declare <code>BotShieldTrigger reset</code> in the child:</p>
     &lt;/BotShieldTrigger&gt;
     &lt;BotShieldTrigger&gt;
         BotShieldRespond       nochallenge
-        BotShieldLog          internal-allow
+        BotShieldLogAs          internal-allow
     &lt;/BotShieldTrigger&gt;
 &lt;/Location&gt;
 </code></pre>

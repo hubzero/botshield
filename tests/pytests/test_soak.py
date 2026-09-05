@@ -207,7 +207,7 @@ def test_soak(request):
     )
     print(
         f"baseline: rss={baseline_rss_kb} kB, "
-        f"log={baseline_log_bytes} B"
+        f"logas={baseline_log_bytes} B"
     )
 
     # Sample series: list of dicts, one per sample.

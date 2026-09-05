@@ -186,7 +186,7 @@ corresponding action.
 BotShieldAppFeedback              on
 BotShieldAppIntegrationSecretFile /etc/botshield/app-integration-secret
 
-BotShieldFeedbackTrigger scanner-hit  flag=honeypot_hit ttl=3600 log=app-trap
+BotShieldFeedbackTrigger scanner-hit  flag=honeypot_hit ttl=3600 logas=app-trap
 BotShieldFeedbackTrigger human-pass   flag=app_verified_human ttl=3600
 BotShieldFeedbackTrigger session-ok   flag=app_verified_session ttl=3600
 ```

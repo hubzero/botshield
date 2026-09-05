@@ -127,7 +127,7 @@ Match keys (any of):
   comma-separated inline CIDRs, or omit/`*` for "any IP")
 
 Action keys (any of): `respond=`, `redirect=`, `flag=`, `ttl=`,
-`penalty=`, `log=`, `mode=enforce|observe`. Convention is match
+`penalty=`, `logas=`, `mode=enforce|observe`. Convention is match
 keys first, action keys after — the parser doesn't enforce ordering
 but readability rewards consistency.
 
@@ -255,7 +255,7 @@ action keys are:
 |---|---|
 | `respond=<code>` | HTTP status to return. `pass` lets the request continue (cookie/env families accumulate; path family declines to real handler) |
 | `redirect=<url>` | Send an HTTP redirect with the chosen status (default 302) |
-| `log=<tag>` | Stash a tag in `r->notes` for the access log (`%{BS-…}n`) and the decision-log line |
+| `logas=<tag>` | Stash a tag in `r->notes` for the access log (`%{BS-…}n`) and the decision-log line |
 | `flag=<name>` | Add a flag bit on the IP's flagged-IP entry (e.g. `flag=honeypot_hit`) |
 | `ttl=<sec>` | TTL on the flag-IP entry. Required when `flag=` is set |
 | `penalty=N` | Add N to the request score |
@@ -270,12 +270,12 @@ action keys are:
     BotShieldRespond       403
     BotShieldFlag         honeypot_hit
     BotShieldTTL          3600
-    BotShieldLog          admin-trap
+    BotShieldLogAs          admin-trap
 </BotShieldRule>
 <BotShieldRule api-burst-trap>
     BotShieldPath         /api/*/burst
     BotShieldPenalty      30
-    BotShieldLog          api-burst
+    BotShieldLogAs          api-burst
 </BotShieldRule>
 ```
 
@@ -294,12 +294,12 @@ other status is the response code.
 <BotShieldCookieTrigger weak-session>
     BotShieldCookie       sessionid=guest
     BotShieldPenalty      15
-    BotShieldLog          guest-session
+    BotShieldLogAs          guest-session
 </BotShieldCookieTrigger>
 <BotShieldCookieTrigger no-cookies>
     BotShieldCookies      none
     BotShieldPenalty      5
-    BotShieldLog          cookieless
+    BotShieldLogAs          cookieless
 </BotShieldCookieTrigger>
 ```
 
@@ -337,7 +337,7 @@ SetEnvIf User-Agent "(?i)\bcurl\b" BS_CLI=1
 <BotShieldEnvTrigger curl-hint>
     BotShieldEnv          BS_CLI
     BotShieldPenalty      10
-    BotShieldLog          cli
+    BotShieldLogAs          cli
 </BotShieldEnvTrigger>
 ```
 
@@ -370,7 +370,7 @@ BotShieldAppIntegrationSecretFile     /etc/botshield/app-integration-secret
 <BotShieldFeedbackTrigger scanner-hit>
     BotShieldFlag         honeypot_hit
     BotShieldTTL          3600
-    BotShieldLog          app-trap
+    BotShieldLogAs          app-trap
 </BotShieldFeedbackTrigger>
 <BotShieldFeedbackTrigger human-pass>
     BotShieldFlag         app_verified_human
@@ -401,12 +401,12 @@ BotShieldLoadHotThreshold       85
 <BotShieldLoadTrigger be-strict>
     BotShieldState        >=warm
     BotShieldPenalty      20
-    BotShieldLog          brownout
+    BotShieldLogAs          brownout
 </BotShieldLoadTrigger>
 <BotShieldLoadTrigger drop-noise>
     BotShieldState        hot
     BotShieldRespond       503
-    BotShieldLog          hot-shed
+    BotShieldLogAs          hot-shed
 </BotShieldLoadTrigger>
 ```
 
@@ -525,7 +525,7 @@ log-only mode — there's a single per-scope directive:
     <BotShieldTrigger>
         BotShieldFlag         honeypot_hit
         BotShieldTTL          3600
-        BotShieldLog          admin-trap
+        BotShieldLogAs          admin-trap
     </BotShieldTrigger>
 </Location>
 
@@ -534,7 +534,7 @@ log-only mode — there's a single per-scope directive:
         BotShieldFlag         scanner_probe
         BotShieldTTL          3600
         BotShieldPenalty      20
-        BotShieldLog          wp-trap
+        BotShieldLogAs          wp-trap
     </BotShieldTrigger>
 </LocationMatch>
 
@@ -542,7 +542,7 @@ log-only mode — there's a single per-scope directive:
     <If "%{REQUEST_URI} =~ m#/uploads/#">
         <BotShieldTrigger>
             BotShieldRespond       403
-            BotShieldLog          php-in-uploads
+            BotShieldLogAs          php-in-uploads
         </BotShieldTrigger>
     </If>
 </Files>
@@ -571,7 +571,7 @@ declare `BotShieldTrigger reset` in the child:
 <Location "/api">
     <BotShieldTrigger>
         BotShieldPenalty      10
-        BotShieldLog          api-tax
+        BotShieldLogAs          api-tax
     </BotShieldTrigger>
 </Location>
 
@@ -587,7 +587,7 @@ declare `BotShieldTrigger reset` in the child:
     </BotShieldTrigger>
     <BotShieldTrigger>
         BotShieldRespond       nochallenge
-        BotShieldLog          internal-allow
+        BotShieldLogAs          internal-allow
     </BotShieldTrigger>
 </Location>
 ```

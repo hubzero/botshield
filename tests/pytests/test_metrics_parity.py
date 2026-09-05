@@ -66,7 +66,7 @@ def test_counter_log_parity(log_slice):
             d = deltas.get(metric, 0.0)
             log_count = sum(1 for ln in lines if ln.get(prefix) == log_v)
             if int(d) != log_count:
-                drift.append(f"{metric}: metric Δ={d}, log={log_count}")
+                drift.append(f"{metric}: metric Δ={d}, logas={log_count}")
 
     # Provider: metric uses underscores, log uses hyphens.
     for p in enums.PROVIDERS:
@@ -75,7 +75,7 @@ def test_counter_log_parity(log_slice):
         d = deltas.get(metric, 0.0)
         log_count = sum(1 for ln in lines if ln.get("provider") == log_form)
         if int(d) != log_count:
-            drift.append(f"{metric}: metric Δ={d}, log={log_count}")
+            drift.append(f"{metric}: metric Δ={d}, logas={log_count}")
 
     assert not drift, (
         f"counter/log drift on {len(drift)} dimension(s):\n"

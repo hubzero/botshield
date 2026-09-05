@@ -26,7 +26,7 @@ COOKIE_NAME = "__Host-bs_session"
 RULE = (
     "BotShieldEnabled On\n"
     '    BotShieldRule wp-probe path="/wp-admin/*" respond=404 '
-    "flagsession=blocked log=wp-probe\n"
+    "flagsession=blocked logas=wp-probe\n"
     "    BotShieldFlagTrigger blocked action=block status=404\n"
 )
 

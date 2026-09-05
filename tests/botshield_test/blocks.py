@@ -31,7 +31,7 @@ _NAMELESS = frozenset({"BotShieldTrigger"})
 _SPELL = {
     "ua": "BotShieldUserAgent", "ipspec": "BotShieldIPSpec",
     "ttl": "BotShieldTTL", "minload": "BotShieldMinLoad",
-    "accesslog": "BotShieldAccessLog", "bscookie": "BotShieldBSCookie",
+    "logas": "BotShieldLogAs", "accesslog": "BotShieldAccessLog", "bscookie": "BotShieldBSCookie",
     "bs-cookie": "BotShieldBSCookie",
 }
 

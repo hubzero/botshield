@@ -46,7 +46,7 @@ def test_scope_trigger_status_blocks_inside_location_only(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    <Location "/trap">\n'
-        '        BotShieldTrigger respond=403 log=trap-block\n'
+        '        BotShieldTrigger respond=403 logas=trap-block\n'
         '    </Location>',
         count=1,
     ):
@@ -115,7 +115,7 @@ def test_scope_trigger_reset_drops_inherited(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    <Location "/api">\n'
-        '        BotShieldTrigger penalty=15 log=api-tax\n'
+        '        BotShieldTrigger penalty=15 logas=api-tax\n'
         '    </Location>\n'
         '    <Location "/api/health">\n'
         '        BotShieldTrigger reset\n'
@@ -153,7 +153,7 @@ def test_scope_trigger_observe_mode_does_not_enforce(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    <Location "/staging">\n'
-        '        BotShieldTrigger respond=403 log=staging-trial mode=observe\n'
+        '        BotShieldTrigger respond=403 logas=staging-trial mode=observe\n'
         '    </Location>',
         count=1,
     ):

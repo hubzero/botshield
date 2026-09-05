@@ -31,7 +31,7 @@ PROBE_PATH = "/wp-admin/setup-config.php"
 _RULE = (
     "BotShieldEnabled On\n"
     '    BotShieldRule wp-probe path="/wp-admin/*" '
-    "respond=404 {actions}log=wp-probe"
+    "respond=404 {actions}logas=wp-probe"
 )
 BURN_RULE = _RULE.format(actions="burn=3600 ")
 PLAIN_RULE = _RULE.format(actions="")

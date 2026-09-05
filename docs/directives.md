@@ -545,7 +545,7 @@ one does:
     BotShieldUserAgent    @search,@ai-input,@ai-train,@monitor
     BotShieldRespond      403
     BotShieldTTL          0
-    BotShieldLog          api-bot
+    BotShieldLogAs          api-bot
 </BotShieldRule>
 ```
 
@@ -554,7 +554,7 @@ parse time into one entry per alternative — this family is strict
 first-match-wins, so N adjacent entries differing only on the UA axis
 and carrying identical actions are exactly equivalent to one entry with
 an OR. Copies take a `#N` name internally; the decision log is
-unaffected, since it reports the action's `log=` tag, which every copy
+unaffected, since it reports the action's `logas=` tag, which every copy
 shares.
 
 **Only `@selectors` split.** A bare substring pattern is passed through
@@ -652,11 +652,11 @@ semantics and refresh model.
 
 | Directive | Predicate args | Action keys |
 |---|---|---|
-| `BotShieldRule` | `<name>` + any of `path=<glob>` `query=<glob>` `cookies=none\|any\|session` `ua=<substring>\|@<botgroup>\|""` `ipspec=<spec>` — ANDed, at least one required | `respond=`, `redirect=`, `log=`, `accesslog=`, `flagip=`, `flagsession=`, `burn=`, `penalty=`, `mode=` (no `credit=`) |
-| `BotShieldCookieTrigger` | `<name> <pred>` (see policy page) | `respond=`, `redirect=`, `log=`, `accesslog=`, `flagip=`, `flagsession=`, `burn=`, `penalty=`, `credit=`, `mode=` |
-| `BotShieldEnvTrigger` | `<name> <env-pred>` (see policy page) | `respond=`, `log=`, `accesslog=`, `flagip=`, `flagsession=`, `burn=`, `penalty=`, `credit=`, `mode=` (no `redirect=`) |
-| `BotShieldFeedbackTrigger` | `<event>` | `flagip=`, `flagsession=` (both accept `+`/`-`/`=`), `log=`, `accesslog=`, `mode=` |
-| `BotShieldLoadTrigger` | `<name> state=<n>\|state>=<n>` | `respond=`, `log=`, `accesslog=`, `penalty=`, `mode=` (no `redirect=`, `flag=`, `ttl=`, `burn=`) |
+| `BotShieldRule` | `<name>` + any of `path=<glob>` `query=<glob>` `cookies=none\|any\|session` `ua=<substring>\|@<botgroup>\|""` `ipspec=<spec>` — ANDed, at least one required | `respond=`, `redirect=`, `logas=`, `accesslog=`, `flagip=`, `flagsession=`, `burn=`, `penalty=`, `mode=` (no `credit=`) |
+| `BotShieldCookieTrigger` | `<name> <pred>` (see policy page) | `respond=`, `redirect=`, `logas=`, `accesslog=`, `flagip=`, `flagsession=`, `burn=`, `penalty=`, `credit=`, `mode=` |
+| `BotShieldEnvTrigger` | `<name> <env-pred>` (see policy page) | `respond=`, `logas=`, `accesslog=`, `flagip=`, `flagsession=`, `burn=`, `penalty=`, `credit=`, `mode=` (no `redirect=`) |
+| `BotShieldFeedbackTrigger` | `<event>` | `flagip=`, `flagsession=` (both accept `+`/`-`/`=`), `logas=`, `accesslog=`, `mode=` |
+| `BotShieldLoadTrigger` | `<name> state=<n>\|state>=<n>` | `respond=`, `logas=`, `accesslog=`, `penalty=`, `mode=` (no `redirect=`, `flag=`, `ttl=`, `burn=`) |
 | `BotShieldSessionCookieName` | `<name>` (single arg, repeatable) | n/a (feeds cookies=session predicate) |
 
 See [policy](policy.md#triggers-predicate-action-engine)
@@ -668,7 +668,7 @@ cookie. Repeatable; each call appends.
 
 ### `accesslog=off` — keep a request out of the access log
 
-`log=<tag>` names a tag that rides the decision line as `tag="<x>"`
+`logas=<tag>` names a tag that rides the decision line as `tag="<x>"`
 for fail2ban handoff. `accesslog=off` is separate and independent: it
 suppresses the access-log line for a matching request.
 
@@ -678,12 +678,12 @@ They compose, which is the point — a scanner probe usually wants both:
 <BotShieldRule env-probe>
     BotShieldPath         /.env
     BotShieldRespond      403
-    BotShieldLog          scanner-probe
+    BotShieldLogAs          scanner-probe
     BotShieldAccessLog    off
 </BotShieldRule>
 ```
 
-(An earlier development build overloaded `log=off` for this. That form is
+(An earlier development build overloaded `logas=off` for this. That form is
 now rejected at config time with a pointer here, rather than silently
 being treated as a tag named "off" and losing the suppression.)
 
@@ -788,6 +788,21 @@ switched off.
 </BotShieldRule>
 ```
 
+#### Deprecated: `BotShieldLog`
+
+`BotShieldLogAs <tag>` is the name now. The old one still parses and
+warns at config time.
+
+It never caused logging. The decision line is emitted whether or not a
+rule sets a tag, and the tag is embedded on that same line rather than
+producing a second entry — so `BotShieldLog` read as the thing that made
+the record happen, and as something you could delete to stop one.
+Neither is true. `As` says the value is a name for a line that was
+always going to exist.
+
+Distinct from `BotShieldAccessLog`, which is a genuine on/off switch for
+the Apache access-log line and is unaffected by this rename.
+
 #### Deprecated: `BotShieldTier`, and `BotShieldRespond nochallenge`
 
 Both still parse and warn at config time.
@@ -818,7 +833,7 @@ was how you spelled "decide nothing", by *omission*. That is now
     BotShieldQuery        *return=*
     BotShieldCookies      none
     BotShieldRespond      403
-    BotShieldLog          login-trap
+    BotShieldLogAs          login-trap
     BotShieldAccessLog    off
 </BotShieldRule>
 
@@ -836,7 +851,7 @@ was how you spelled "decide nothing", by *omission*. That is now
     BotShieldUserAgent    ""
     BotShieldRespond       nochallenge
     BotShieldTier         noninteractive
-    BotShieldLog          no-ua
+    BotShieldLogAs          no-ua
 </BotShieldRule>
 ```
 
@@ -866,7 +881,7 @@ either, so it costs nothing that was not already being paid.
     BotShieldPath         /.env
     BotShieldRespond      404
     BotShieldFlagIP       scanner_probe
-    BotShieldLog          env-probe
+    BotShieldLogAs          env-probe
 </BotShieldRule>
 
 # the browser: the probe gets its 404 and a cookie carrying the mark,
@@ -875,7 +890,7 @@ either, so it costs nothing that was not already being paid.
     BotShieldPath         /wp-admin/*
     BotShieldRespond      404
     BotShieldFlagSession  scanner_probe
-    BotShieldLog          wp-probe
+    BotShieldLogAs          wp-probe
 </BotShieldRule>
 ```
 
@@ -1057,7 +1072,7 @@ match.
 
 | Directive | Syntax | Scope |
 |---|---|---|
-| `BotShieldTrigger` | `[reset] [respond=N\|pass] [redirect=URL] [log=tag] [accesslog=on\|off] [flag=NAME] [ttl=N] [penalty=N] [credit=N] [mode=enforce\|observe]` | server / vhost / Directory / Location / LocationMatch / Files / If |
+| `BotShieldTrigger` | `[reset] [respond=N\|pass] [redirect=URL] [logas=tag] [accesslog=on\|off] [flag=NAME] [ttl=N] [penalty=N] [credit=N] [mode=enforce\|observe]` | server / vhost / Directory / Location / LocationMatch / Files / If |
 
 The Apache scope the directive lives in IS the predicate; no path
 glob argument. Multiple `BotShieldTrigger` lines in one scope

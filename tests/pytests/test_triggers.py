@@ -8,7 +8,7 @@ Exercises BotShieldRule directives:
                         no BotShield interstitial; flag-IP / log
                         effects still apply for future requests.
   redirect=<url>      → 302 (or operator-chosen 3xx) + Location.
-  log=<tag>           → embedded on the existing decision log line
+  logas=<tag>           → embedded on the existing decision log line
                         as tag="<string>" (no second emission).
   flag=<bit> ttl=<n>  → IP registered in the M5.1 flagged-IP table
                         so future requests inherit the bit's penalty.
@@ -37,9 +37,9 @@ from botshield_test import client, ips
 def test_trigger_status_code_blocks_and_tags_log(
     config_override, log_slice, fresh_ip,
 ):
-    """respond=403 short-circuits with that code. log=<tag> rides the
+    """respond=403 short-circuits with that code. logas=<tag> rides the
     existing decision log line as tag="<string>" — no second log line."""
-    # Apache's config parser splits on whitespace; a log= value with
+    # Apache's config parser splits on whitespace; a logas= value with
     # a space must have the WHOLE key=value quoted (not just the
     # value), otherwise the splitter hands us two separate argv
     # tokens.
@@ -50,7 +50,7 @@ def test_trigger_status_code_blocks_and_tags_log(
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
         '    BotShieldRule env-probe path="/.env" '
-        'respond=403 "log=BAN 2h" ttl=3600',
+        'respond=403 "logas=BAN 2h" ttl=3600',
         count=1,
     ):
         with log_slice as slc:
@@ -248,7 +248,7 @@ def test_trigger_main_scope_inherits_into_vhost(
     with config_override(
         r"BotShieldStateSaveInterval\s+\d+",
         'BotShieldRule main-scope-trap path="/main-scope-env" '
-        'respond=403 log="MAIN"\n'
+        'respond=403 logas="MAIN"\n'
         'BotShieldStateSaveInterval 30',
         count=1,
     ):

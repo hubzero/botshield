@@ -145,7 +145,7 @@ def test_load_trigger_fires_under_hot(config_override, fresh_ip,
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
             '    BotShieldLoadTrigger be-strict state>=warm '
-            'penalty=20 log=brownout',
+            'penalty=20 logas=brownout',
             count=1,
         ):
             # Wait for state machine to settle on hot (~5s).
@@ -160,7 +160,7 @@ def test_load_trigger_fires_under_hot(config_override, fresh_ip,
     assert "loadtrigger:be-strict" in reason, (
         f"load trigger should have fired; reason={reason}"
     )
-    # log= tag rides the decision line.
+    # logas= tag rides the decision line.
     assert lines[-1].get("tag") == "brownout", (
         f"expected tag=brownout; got {lines[-1].get('tag')!r}"
     )

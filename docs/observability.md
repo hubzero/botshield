@@ -648,7 +648,7 @@ and then a colon now yields whole names every time.
 
 Dashes that remain are not module vocabulary: a bot slug such as
 `claude-searchbot`, a botgroup selector such as `@ai-train`, and an
-operator's own `log=` label all keep whatever spelling they were
+operator's own `logas=` label all keep whatever spelling they were
 given, and all of them appear only after the first colon.
 
 ### Verbose prose line

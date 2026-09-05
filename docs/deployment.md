@@ -403,7 +403,7 @@ naming those needs the new name.
 
 What deliberately did not change: bot slugs such as
 `claude-searchbot`, the `@ai-train` and `@fake-bot` botgroup
-selectors, the `BotShieldClassify` pass names, your own `log=` labels,
+selectors, the `BotShieldClassify` pass names, your own `logas=` labels,
 and the challenge endpoint paths. Every one of those is either
 somebody else's identifier or a URL, and all of them appear in a
 `reason` token only after the first colon.

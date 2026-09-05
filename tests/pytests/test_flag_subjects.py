@@ -86,7 +86,7 @@ def test_flag_session_reaches_the_cookie(config_override, fresh_ip,
         r"BotShieldEnabled\s+On",
         "BotShieldEnabled On\n"
         '    BotShieldRule mark-session path="/mark-session-probe" '
-        "respond=404 flagsession=scanner_probe log=mark-session\n"
+        "respond=404 flagsession=scanner_probe logas=mark-session\n"
         "    BotShieldFlagTrigger scanner_probe action=tier_floor "
         "min=noninteractive\n",
         count=1,

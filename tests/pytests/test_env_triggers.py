@@ -50,7 +50,7 @@ def test_env_trigger_penalty_on_presence(config_override, log_slice):
         'BotShieldEnabled On\n'
         '    SetEnvIfNoCase User-Agent "curl" BS_SUSPECT_UA=1\n'
         '    BotShieldEnvTrigger suspect-ua env=BS_SUSPECT_UA '
-        'penalty=25 log=env-suspect',
+        'penalty=25 logas=env-suspect',
         count=1,
     ):
         with log_slice as slc:

@@ -62,7 +62,7 @@ def test_nochallenge_declines_the_decision(config_override, fresh_ip):
         "    <BotShieldRule quiet>\n"
         '        BotShieldQuery        *nochal=1*\n'
         "        BotShieldNoChallenge\n"
-        "        BotShieldLog          quiet\n"
+        "        BotShieldLogAs          quiet\n"
         "    </BotShieldRule>",
         render=False,
         count=1,
@@ -87,7 +87,7 @@ def test_challenge_needs_no_companion(config_override, fresh_ip):
         "    <BotShieldRule gate>\n"
         '        BotShieldQuery      *chal=1*\n'
         "        BotShieldChallenge  noninteractive\n"
-        "        BotShieldLog        gate\n"
+        "        BotShieldLogAs        gate\n"
         "    </BotShieldRule>",
         render=False,
         count=1,
