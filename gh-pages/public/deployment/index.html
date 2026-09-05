@@ -480,7 +480,7 @@ file.</p>
 <code>pass</code> spelling is gone. This breaks configs and dashboards that used
 the old ones, so read this before putting a newer module on a server
 that already runs an older config.</p>
-<p><strong>The module and its config must move together.</strong> <code>status=pass</code> is a
+<p><strong>The module and its config must move together.</strong> <code>respond=pass</code> is a
 configtest failure now, not a warning. A server whose module is
 upgraded while its config still says <code>pass</code> will pass its running
 state until something reloads it, and then fail to come back. Stage
@@ -496,8 +496,8 @@ reload.</p>
 </thead>
 <tbody>
 <tr>
-<td><code>status=pass</code>, <code>status=challenge-pass</code></td>
-<td><code>status=nochallenge</code></td>
+<td><code>respond=pass</code>, <code>respond=challenge-pass</code></td>
+<td><code>respond=nochallenge</code></td>
 </tr>
 <tr>
 <td><code>tier=pass</code></td>

@@ -226,7 +226,7 @@ static const command_rec bs_cmds[] = {
                  "Off collapses any selected tier back to pass: triggers, "
                  "rate limits and scoring all still run and still log, but "
                  "no interstitial, form or captcha is ever served. Use it "
-                 "for a block-only scope, where an explicit status=4xx "
+                 "for a block-only scope, where an explicit respond=4xx "
                  "trigger is meant to be the only action. Parking "
                  "BotShieldScoreNonInteractive/Hard/Captcha at 10000 is NOT "
                  "equivalent: a flag tier_floor is MAXed in after the "
@@ -607,7 +607,7 @@ static const command_rec bs_cmds[] = {
                  "<VirtualHost> / <Directory> / <Location> / "
                  "<LocationMatch> / <Files> / <If>) the directive "
                  "lives in IS the predicate. Action keys: "
-                 "status=<code|pass>, redirect=<url>, log=<tag>, "
+                 "respond=<code|nochallenge>, redirect=<url>, log=<tag>, "
                  "accesslog=on|off, "
                  "flag=<name>, ttl=<sec>, penalty=<N>, credit=<N>, "
                  "mode=enforce|observe. The literal 'reset' as the "
@@ -726,10 +726,10 @@ static const command_rec bs_cmds[] = {
                  bs_set_rate_limit_escalate, NULL, RSRC_CONF,
                  "Promote repeated 429s on a named BotShieldRateLimit "
                  "into a stricter status. Args: <rate-name> <strikes> "
-                 "<per> [status=<code>] [ttl=<sec>] [log=<tag>]. "
+                 "<per> [respond=<code>] [ttl=<sec>] [log=<tag>]. "
                  "Per accepts sec/min/hour. Once <strikes> rejected "
                  "requests accumulate within <per>, subsequent "
-                 "requests against the same rule return status= "
+                 "requests against the same rule return respond= "
                  "(default 403) for ttl= seconds (default 1800). The "
                  "ttl slides on each additional strike; log=<tag> "
                  "rides the decision line on threshold crossing for "
@@ -922,7 +922,7 @@ static const command_rec bs_cmds[] = {
                  "cookie=<n>, cookie=<n>=<v>, cookie=<n>~<substr>, "
                  "cookie=<n>!<v>, !cookie=<n>, cookies=<none|any|"
                  "session>, bs-cookie=<verified|missing|invalid>. "
-                 "Keys: status=<code|pass> (default pass; diverges "
+                 "Keys: respond=<code|nochallenge> (default pass; diverges "
                  "from E3 — credit/penalty here ALWAYS apply, even "
                  "under pass), redirect=<url>, log=<tag>, accesslog=on|off, "
                  "flag=<bit>, "
@@ -945,7 +945,7 @@ static const command_rec bs_cmds[] = {
                  "Args: <name> <env-match> [key=value ...]. "
                  "env-match is one of: env=<var> (present), "
                  "env=<var>=<value> (exact match, case-sensitive), "
-                 "!env=<var> (absent). Keys: status=<code|pass> "
+                 "!env=<var> (absent). Keys: respond=<code|nochallenge> "
                  "(default pass; credit/penalty apply under pass "
                  "like E4), log=<tag>, accesslog=on|off, flag=<bit>, ttl=<sec>, "
                  "penalty=<n>, credit=<n>. No redirect= (env "
@@ -970,7 +970,7 @@ static const command_rec bs_cmds[] = {
                  "(see BotShieldLoadStateFile / E11). Args: <name> "
                  "<load-match> [key=value ...]. load-match is one of "
                  "state=<level> or state>=<level> where <level> is "
-                 "normal|warm|hot. Keys: status=<code|pass>, "
+                 "normal|warm|hot. Keys: respond=<code|nochallenge>, "
                  "log=<tag>, accesslog=on|off, penalty=<n>, credit=<n>. flag/ttl/"
                  "redirect rejected — load is global state, not "
                  "per-IP behavior. First-match-wins."),
@@ -1005,44 +1005,19 @@ static const command_rec bs_cmds[] = {
                  "minload=normal|warm|hot (fires at that load state or "
                  "above), ua=<substring>|@<botgroup>|@bot|@fake-bot, "
                  "ipspec=*|<file>|<cidr[,cidr]>. Action keys: "
-                 "status=<code|pass>, redirect=<url>, tier=<t>, "
+                 "respond=<code|nochallenge>, redirect=<url>, tier=<t>, "
                  "penalty=<n>, log=<tag>, accesslog=on|off, flag=<bit>, "
                  "ttl=<sec>, mode=enforce|observe."),
     AP_INIT_TAKE_ARGV("BotShieldRequestTrigger",
                  bs_flat_trigger_retired, NULL, RSRC_CONF,
-                 "Match a request on any combination of its properties "
-                 "and act once. Args: <name> [key=value ...]. Match "
-                 "keys, all optional, ANDed together - at least one is "
-                 "required: path=<glob> (vs the URI path, no query "
-                 "string), query=<glob> (vs the query string alone), "
-                 "exists=yes|no (does the URI resolve to a file or "
-                 "directory on disk), "
-                 "cookies=none|any|session, "
-                 "ua=<substring>|@<botgroup>|@bot|@fake-bot, "
-                 "ipspec=*|<file>|<cidr[,cidr]>. Globs take '*' "
-                 "wildcards and a trailing '$' anchor. Action keys: "
-                 "status=<code|pass> (default 403; 'pass' means the "
-                 "real handler runs), redirect=<url> (implies 302 "
-                 "unless status=3xx explicit), log=<tag>, "
-                 "accesslog=on|off, flag=<bit> (default "
-                 "scanner_probe), ttl=<sec> (default 3600; 0 = don't "
-                 "flag), penalty=<n>, tier=pass|noninteractive|interactive|captcha, "
-                 "mode=enforce|observe. A rule can therefore block "
-                 "(status=4xx), challenge (status=pass "
-                 "tier=noninteractive "
-                 "for the invisible check, tier=form for the visible "
-                 "one), demand a captcha (status=pass tier=captcha), "
-                 "or only shape the score (status=pass penalty=N). "
-                 "tier= and penalty= both need status=pass, since a "
-                 "concrete status short-circuits before any tier is "
-                 "chosen; tier= floors THIS request only and writes "
-                 "no per-IP state, unlike flag=. "
-                 "Declaration order, first match wins; upsert-by-name. "
-                 "Named-cookie predicates (cookie=<n>, bs-cookie=...) "
-                 "live on BotShieldCookieTrigger, whose vocabulary is "
-                 "richer than one key. A rule with no match key is "
-                 "rejected - use BotShieldTrigger in the scope you "
-                 "mean."),
+                 "DEPRECATED spelling of BotShieldRule, and the flat "
+                 "one-line form is retired besides. Write "
+                 "<BotShieldRule name> ... </BotShieldRule>; see that "
+                 "directive for the match and action keys. This text "
+                 "used to restate them and drifted: it still advertised "
+                 "flag= and ttl= defaults that no longer exist, and "
+                 "tier= values that were renamed. One directive should "
+                 "document itself once."),
     AP_INIT_TAKE_ARGV("BotShieldDecisionLog", bs_set_decision_log,
                  NULL, RSRC_CONF,
                  "Module-owned decision log. Defaults to "
@@ -1903,7 +1878,7 @@ static int bs_handler(request_rec *r)
      * of bot-ness. */
     int policy_rv = bs_check_policy(r);
     if (policy_rv == DECLINED) {
-        /* E3 trigger with status=pass: log + let the real handler
+        /* E3 trigger with respond=nochallenge: log + let the real handler
          * respond. No score, no BotShield interstitial. Flag-IP +
          * tag side effects already applied in bs_check_policy. */
         bs_request_score *s = bs_get_score(r, 0);

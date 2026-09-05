@@ -262,7 +262,8 @@ static int bs_trigger_key_is_response_only(const char *arg,
 {
     #define BS_KMATCH(n) (klen == sizeof(n)-1 && \
                           strncasecmp(arg, n, sizeof(n)-1) == 0)
-    if (BS_KMATCH("status"))   return 1;
+    if (BS_KMATCH("respond"))  return 1;
+    if (BS_KMATCH("status"))   return 1;   /* deprecated spelling */
     if (BS_KMATCH("redirect")) return 1;
     if (BS_KMATCH("penalty"))  return 1;
     if (BS_KMATCH("credit"))   return 1;
@@ -300,7 +301,28 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
     #define BS_AK(n) (klen == sizeof(n)-1 && \
                       strncasecmp(arg, n, sizeof(n)-1) == 0)
 
-    if (BS_AK("status")) {
+    if (BS_AK("respond") || BS_AK("status")) {
+        /* BotShieldRespond is the name; BotShieldStatus is the old
+         * spelling and warns.
+         *
+         * "Status" is the word Apache already spends on mod_status and
+         * server-status, and this module ships a dashboard and a
+         * metrics endpoint of its own -- so in this config the old name
+         * read as a monitoring surface rather than as the response a
+         * rule produces. Nothing in Apache names a response code
+         * "Status": Redirect and ErrorDocument take one as an argument,
+         * and mod_rewrite spells it [R=404].
+         *
+         * Warns rather than fails, for the same reason the
+         * BotShieldRequestTrigger rename does: a config error is fatal
+         * to httpd and this spelling is in live configs. */
+        const char *kspell = BS_AK("status") ? "status" : "respond";
+        if (BS_AK("status")) {
+            ap_log_error(APLOG_MARK, APLOG_WARNING, 0, NULL,
+                "mod_botshield: %s: BotShieldStatus is deprecated and "
+                "will be removed; rename it to BotShieldRespond. Same "
+                "values, same behaviour.", dname);
+        }
         /* 'nochallenge' is the name; 'pass' is the same thing spelled
          * the way it was before the name said what it meant. It waives
          * the challenge only -- rate limits and robots.txt still apply
@@ -319,9 +341,9 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
             long code = strtol(val, &end, 10);
             if (!end || *end || code < 100 || code > 599) {
                 return apr_psprintf(pool,
-                    "%s: status='%s' must be an HTTP code 100..599 "
+                    "%s: %s='%s' must be an HTTP code 100..599 "
                     "or 'nochallenge'",
-                    dname, val);
+                    dname, kspell, val);
             }
             a->status_code = (int)code;
         }

@@ -570,7 +570,7 @@ Outcome meanings, grouped by where they originate:
 | `allow` | Request reached origin — `pass` tier, asset bypass, silent embedded pass-through, or safeguard pass. |
 | `challenged` | An interstitial was served. |
 | `verified` | A challenge was **completed**: captcha siteverify returned OK, or an embedded-verify PoW was accepted. One per solve. |
-| `block` | Refused outright — invalid cookie, a `status=` trigger, failed captcha verify. |
+| `block` | Refused outright — invalid cookie, a `respond=` trigger, failed captcha verify. |
 | `rate_limited` | Refused with 429 by a rate limit. Kept distinct from `block` so policy-refusal is separable from volume-refusal. |
 | `redirect` | A 302 was issued (safeguard explainer). |
 | `failopen` | Siteverify was unreachable (timeout, network error, provider 5xx) and the request was let through rather than blocking on a provider outage. |

@@ -106,18 +106,18 @@ request, rejected at config time. The legacy 5-arg positional form
 `<name> <budget> <per> <ua-pattern> <ipspec>` is still accepted.
 
 For path-conditional 403s, use `BotShieldRule` with
-`status=403` plus optional `ua=` / `ipspec=` match keys (the
+`respond=403` plus optional `ua=` / `ipspec=` match keys (the
 former `BotShieldBlockPath` directive, retired):
 
 ```apache
 <BotShieldRule legacy-admin>
     BotShieldPath         /wp-admin/*
-    BotShieldStatus       403
+    BotShieldRespond       403
 </BotShieldRule>
 <BotShieldRule aggressive-scraper>
     BotShieldPath         /
     BotShieldUserAgent    AhrefsBot
-    BotShieldStatus       403
+    BotShieldRespond       403
 </BotShieldRule>
 ```
 
@@ -126,7 +126,7 @@ Match keys (any of):
 - `ipspec=<spec>` — same shape as `BotShieldAllowBot` (CIDR file,
   comma-separated inline CIDRs, or omit/`*` for "any IP")
 
-Action keys (any of): `status=`, `redirect=`, `flag=`, `ttl=`,
+Action keys (any of): `respond=`, `redirect=`, `flag=`, `ttl=`,
 `penalty=`, `log=`, `mode=enforce|observe`. Convention is match
 keys first, action keys after — the parser doesn't enforce ordering
 but readability rewards consistency.
@@ -138,10 +138,10 @@ firing — repeated 429s on the same IP escalate to 403 (or any
 configurable status):
 
 ```apache
-BotShieldRateLimitEscalate api-burst 5 min status=403 ttl=3600
+BotShieldRateLimitEscalate api-burst 5 min respond=403 ttl=3600
 ```
 
-Args: `<rate-rule> <strikes> <per> [status=N] [ttl=N]`. `<per>`
+Args: `<rate-rule> <strikes> <per> [respond=N] [ttl=N]`. `<per>`
 accepts `sec`/`min`/`hour` (same as `BotShieldRateLimit`). If a
 rate-limited cohort triggers `<strikes>` 429s within the window,
 the IP is upgraded to the configured status for `ttl` seconds
@@ -253,7 +253,7 @@ action keys are:
 
 | Key | Effect |
 |---|---|
-| `status=<code>` | HTTP status to return. `pass` lets the request continue (cookie/env families accumulate; path family declines to real handler) |
+| `respond=<code>` | HTTP status to return. `pass` lets the request continue (cookie/env families accumulate; path family declines to real handler) |
 | `redirect=<url>` | Send an HTTP redirect with the chosen status (default 302) |
 | `log=<tag>` | Stash a tag in `r->notes` for the access log (`%{BS-…}n`) and the decision-log line |
 | `flag=<name>` | Add a flag bit on the IP's flagged-IP entry (e.g. `flag=honeypot_hit`) |
@@ -267,7 +267,7 @@ action keys are:
 ```apache
 <BotShieldRule admin-honeypot>
     BotShieldPath         /admin/.env
-    BotShieldStatus       403
+    BotShieldRespond       403
     BotShieldFlag         honeypot_hit
     BotShieldTTL          3600
     BotShieldLog          admin-trap
@@ -280,7 +280,7 @@ action keys are:
 ```
 
 First-match wins (declaration order). On match, the path family's
-`status=nochallenge` short-circuits to `DECLINED` (real handler runs); any
+`respond=nochallenge` short-circuits to `DECLINED` (real handler runs); any
 other status is the response code.
 
 ### Cookie triggers
@@ -288,7 +288,7 @@ other status is the response code.
 ```apache
 <BotShieldCookieTrigger session-active>
     BotShieldCookie       sessionid
-    BotShieldStatus       nochallenge
+    BotShieldRespond       nochallenge
     BotShieldCredit       10
 </BotShieldCookieTrigger>
 <BotShieldCookieTrigger weak-session>
@@ -319,7 +319,7 @@ Predicate shapes:
   HMAC check). Predicates against the module's own `_bs_session`
   cookie name are rejected — use these instead.
 
-Cookie family accumulates: `status=nochallenge` keeps walking and
+Cookie family accumulates: `respond=nochallenge` keeps walking and
 collecting credits/penalties from later cookie triggers. First
 non-pass status short-circuits.
 
@@ -329,7 +329,7 @@ non-pass status short-circuits.
 SetEnvIfExpr "%{HTTP:CF-Connecting-IP} =~ /:/" BS_IPV6=1
 <BotShieldEnvTrigger ipv6-hint>
     BotShieldEnv          BS_IPV6
-    BotShieldStatus       nochallenge
+    BotShieldRespond       nochallenge
     BotShieldCredit       2
 </BotShieldEnvTrigger>
 
@@ -405,7 +405,7 @@ BotShieldLoadHotThreshold       85
 </BotShieldLoadTrigger>
 <BotShieldLoadTrigger drop-noise>
     BotShieldState        hot
-    BotShieldStatus       503
+    BotShieldRespond       503
     BotShieldLog          hot-shed
 </BotShieldLoadTrigger>
 ```
@@ -541,7 +541,7 @@ log-only mode — there's a single per-scope directive:
 <Files "*.php">
     <If "%{REQUEST_URI} =~ m#/uploads/#">
         <BotShieldTrigger>
-            BotShieldStatus       403
+            BotShieldRespond       403
             BotShieldLog          php-in-uploads
         </BotShieldTrigger>
     </If>
@@ -586,7 +586,7 @@ declare `BotShieldTrigger reset` in the child:
         BotShieldReset
     </BotShieldTrigger>
     <BotShieldTrigger>
-        BotShieldStatus       nochallenge
+        BotShieldRespond       nochallenge
         BotShieldLog          internal-allow
     </BotShieldTrigger>
 </Location>
@@ -598,7 +598,7 @@ appended in the same scope before the reset).
 
 ### `nochallenge` waives the challenge, not the policy
 
-`status=nochallenge` means "do not put an interstitial in front of
+`respond=nochallenge` means "do not put an interstitial in front of
 this request". It does not mean "exempt this request from everything".
 Rate limits and robots.txt Disallow still apply to a request that
 matched such a rule.

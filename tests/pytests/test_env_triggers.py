@@ -134,7 +134,7 @@ def test_env_trigger_status_code_blocks(config_override, fresh_ip):
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    SetEnvIfExpr "%{REQUEST_URI} =~ /hostile/" BS_HOSTILE=1\n'
-        '    BotShieldEnvTrigger hostile env=BS_HOSTILE status=403',
+        '    BotShieldEnvTrigger hostile env=BS_HOSTILE respond=403',
         count=1,
     ):
         r_hit = _g("/hostile/path", xff=fresh_ip)
@@ -230,7 +230,7 @@ def test_env_trigger_main_scope_inherits(config_override, fresh_ip):
     the server-config merge (same guarantee E3/E4 get)."""
     with config_override(
         r"BotShieldStateSaveInterval\s+\d+",
-        'BotShieldEnvTrigger ms-env !env=BS_NEVER_SET status=403\n'
+        'BotShieldEnvTrigger ms-env !env=BS_NEVER_SET respond=403\n'
         'BotShieldStateSaveInterval 30',
         count=1,
     ):

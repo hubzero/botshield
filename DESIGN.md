@@ -255,7 +255,7 @@ default static-file handler. Its walk:
    The verdict is published to `r->notes[BS_CK_STATE_NOTE]` for E4
    cookietrigger predicates (`bs-cookie=verified|missing|invalid`).
 7. **Policy walk.** `bs_check_policy` runs the eight-family policy
-   walker. On `DECLINED` (status=nochallenge trigger) → log + DECLINED. On
+   walker. On `DECLINED` (respond=nochallenge trigger) → log + DECLINED. On
    any other HTTP status → 403/429/etc. with the appropriate
    decision-log outcome.
 8. **Heuristics + flag-IP lookup.** `bs_run_builtin_heuristics`
@@ -482,7 +482,7 @@ void bs_score_add(request_rec *r, int penalty, int ttl_seconds,
 ```
 
 `penalty=0` records a reason without affecting the total — used for
-observe-mode entries, status=nochallenge entries, and informational reasons
+observe-mode entries, respond=nochallenge entries, and informational reasons
 like `flaggedip`. The `ttl_seconds` field is accepted for API
 stability but currently ignored by downstream consumers; the
 flagged-IP table carries its own TTL set at insert time.
@@ -961,7 +961,7 @@ family's matcher / action lives in its own feature file
 
 Returns from `bs_check_policy`:
 - `OK` — no rule fired; caller continues to heuristics.
-- `DECLINED` — a `status=nochallenge` trigger fired; caller short-circuits
+- `DECLINED` — a `respond=nochallenge` trigger fired; caller short-circuits
   to DECLINED so the real handler runs.
 - Any other HTTP_* code — short-circuit with that status.
 
@@ -1015,7 +1015,7 @@ allocated in post_config. Atomic CAS on each `count` /
 ### Block-path (E2.1)
 
 Path-conditional 403s are expressed via the E3 path-trigger family
-with `status=403` + optional `ua=` / `ipspec=` match keys (the
+with `respond=403` + optional `ua=` / `ipspec=` match keys (the
 former E2.1 BotShieldBlockPath was retired in favor of this).
 Path-glob uses the same `bs_path_match` matcher as robots.txt
 (prefix + `*` anywhere + trailing `$` end-anchor).
@@ -1034,7 +1034,7 @@ typedef struct bs_rate_escalate_entry {
 ```
 
 Directive: `BotShieldRateLimitEscalate <rate-name> <strikes> <per>
-[status=<code>] [ttl=<sec>] [log=<tag>]`. Per-(client_ip, rate_rule_slot)
+[respond=<code>] [ttl=<sec>] [log=<tag>]`. Per-(client_ip, rate_rule_slot)
 strike accounting in the SHM strike table (see SHM segment); each 429
 on the named rule increments. Over the strike threshold within the
 window, subsequent requests against the same rule return the
@@ -1197,7 +1197,7 @@ typedef struct {
 } bs_trigger_action;
 ```
 
-Action key parsers: `status=<code|pass>`, `redirect=<url>` (only for
+Action key parsers: `respond=<code|pass>`, `redirect=<url>` (only for
 families that support it), `log=<tag>`, `accesslog=on|off`, `flag=<bit>`,
 `ttl=<sec>`, `penalty=<n>`, `credit=<n>`, `mode=enforce|observe`.
 
@@ -1246,10 +1246,10 @@ flag/ttl/optional-log subset.
 `BotShieldRule <name> <path-glob> [key=value ...]`. Anyone
 hitting the path triggers the action — unscoped (unlike E2.1
 a path trigger with `ua=`/`ipspec=` keys, which is cohort-scoped).
-Default `status=403`, default `flag=scanner_probe`, default
+Default `respond=403`, default `flag=scanner_probe`, default
 `ttl=3600`.
 
-Under `status=nochallenge`: the request flows through to the real handler
+Under `respond=nochallenge`: the request flows through to the real handler
 with `DECLINED`; `penalty` is **ignored** (only flag-IP + log
 side-effects survive). This is the one family where pass means
 "don't score this request"; cookie/env/load triggers diverge.
@@ -1289,7 +1289,7 @@ cookie name are redirected at config-time to use `bs-cookie=<state>`
 (which exposes the verdict, not the raw bytes).
 
 Semantic divergence from path triggers:
-- **`credit=` / `penalty=` always apply**, even under `status=nochallenge`,
+- **`credit=` / `penalty=` always apply**, even under `respond=nochallenge`,
   because the cookie signal exists on this request. (Path-family
   pass is "don't score"; cookie-family pass is "score this now,
   let the request through.")
@@ -1309,7 +1309,7 @@ no re-scanning the raw header per trigger.
 `env=<var>=<value>` (exact match, case-sensitive), `!env=<var>`
 (absent).
 
-Like E4, `credit/penalty` apply under `status=nochallenge` (env signals
+Like E4, `credit/penalty` apply under `respond=nochallenge` (env signals
 exist on this request). No `redirect=` (env signals shape scoring,
 not response). Main requests only — `ap_is_initial_req(r)`.
 
@@ -1326,7 +1326,7 @@ kinds: `state=normal|warm|hot` or `state>=normal|warm|hot`. The
 match consumes the cached load state via `bs_load_current()` (lockless
 atomic read on `bs_shm.header->load_state`).
 
-Action keys: `credit=`, `penalty=`, `status=<code|pass>`, `log=<tag>`.
+Action keys: `credit=`, `penalty=`, `respond=<code|pass>`, `log=<tag>`.
 **`flag=` / `ttl=` / `redirect=` are rejected** at config-time: load
 is global state, not per-IP behavior.
 

@@ -81,17 +81,17 @@ def _wait_for_metric_load_state(target: int, timeout: float = 12.0) -> int:
 def test_cookie_short_circuit_blocks_env_and_path(
     config_override, log_slice, fresh_ip,
 ):
-    """Cookie trigger with status=403 fires first. The env trigger
+    """Cookie trigger with respond=403 fires first. The env trigger
     and path trigger that would also match must not run — no env/
     path reason-tokens on the decision line, and the status is the
     cookie's 403 (not the path trigger's 451 or env's 429)."""
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldCookieTrigger c-block cookies=none status=403\n'
+        '    BotShieldCookieTrigger c-block cookies=none respond=403\n'
         '    SetEnvIfExpr "true" BS_CROSS=1\n'
-        '    BotShieldEnvTrigger e-block env=BS_CROSS status=429\n'
-        '    BotShieldRule p-block path="/*" status=451',
+        '    BotShieldEnvTrigger e-block env=BS_CROSS respond=429\n'
+        '    BotShieldRule p-block path="/*" respond=451',
         count=1,
     ):
         with log_slice as slc:
@@ -120,15 +120,15 @@ def test_cookie_short_circuit_blocks_env_and_path(
 def test_env_short_circuit_blocks_path(
     config_override, log_slice, fresh_ip,
 ):
-    """Env trigger with status=403 fires (cookie family has no
+    """Env trigger with respond=403 fires (cookie family has no
     matching trigger). The path trigger that would also match must
     not run."""
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    SetEnvIfExpr "true" BS_CROSS=1\n'
-        '    BotShieldEnvTrigger e-block env=BS_CROSS status=403\n'
-        '    BotShieldRule p-block path="/*" status=451',
+        '    BotShieldEnvTrigger e-block env=BS_CROSS respond=403\n'
+        '    BotShieldRule p-block path="/*" respond=451',
         count=1,
     ):
         with log_slice as slc:
@@ -161,11 +161,11 @@ def test_cookie_and_env_pass_then_path_runs(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldCookieTrigger c-pass cookies=none '
-        'status=nochallenge penalty=3\n'
+        'respond=nochallenge penalty=3\n'
         '    SetEnvIfExpr "true" BS_CROSS=1\n'
         '    BotShieldEnvTrigger e-pass env=BS_CROSS '
-        'status=nochallenge penalty=7\n'
-        '    BotShieldRule p-block path="/*" status=403',
+        'respond=nochallenge penalty=7\n'
+        '    BotShieldRule p-block path="/*" respond=403',
         count=1,
     ):
         with log_slice as slc:
@@ -191,15 +191,15 @@ def test_load_short_circuit_blocks_path(
     config_override, log_slice, fresh_ip,
 ):
     """E11.2 load trigger sits between env and path in the runtime
-    walk (policy.c:268). When load=hot fires status=503, the path
+    walk (policy.c:268). When load=hot fires respond=503, the path
     trigger that would also match must not run."""
     _set_load_file("hot")
     try:
         with config_override(
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
-            '    BotShieldLoadTrigger l-block state=hot status=503\n'
-            '    BotShieldRule p-block path="/*" status=451',
+            '    BotShieldLoadTrigger l-block state=hot respond=503\n'
+            '    BotShieldRule p-block path="/*" respond=451',
             count=1,
         ):
             _wait_for_metric_load_state(target=2, timeout=12.0)
@@ -227,7 +227,7 @@ def test_env_pass_then_load_blocks_path(
     config_override, log_slice, fresh_ip,
 ):
     """Env pass accumulates a penalty; load=hot then short-circuits
-    with status=503. The path trigger must not run. Both env-pass
+    with respond=503. The path trigger must not run. Both env-pass
     and load-block reasons should appear; path-block must not."""
     _set_load_file("hot")
     try:
@@ -236,9 +236,9 @@ def test_env_pass_then_load_blocks_path(
             'BotShieldEnabled On\n'
             '    SetEnvIfExpr "true" BS_CROSS=1\n'
             '    BotShieldEnvTrigger e-pass env=BS_CROSS '
-            'status=nochallenge penalty=4\n'
-            '    BotShieldLoadTrigger l-block state=hot status=503\n'
-            '    BotShieldRule p-block path="/*" status=451',
+            'respond=nochallenge penalty=4\n'
+            '    BotShieldLoadTrigger l-block state=hot respond=503\n'
+            '    BotShieldRule p-block path="/*" respond=451',
             count=1,
         ):
             _wait_for_metric_load_state(target=2, timeout=12.0)
@@ -274,7 +274,7 @@ def test_env_trigger_no_double_apply_on_internal_redirect(
     side effect applied twice — once on the original request, once
     on the ErrorDocument leg.
 
-    Setup: env=BS_CROSS on every request (status=nochallenge + penalty so
+    Setup: env=BS_CROSS on every request (respond=nochallenge + penalty so
     we can see whether it fired in the reason trace), requesttrigger
     on /start, ErrorDocument 403 → /error. Hit /start. The original
     leg's decision line should carry envtrigger; the /error leg's
@@ -284,8 +284,8 @@ def test_env_trigger_no_double_apply_on_internal_redirect(
         'BotShieldEnabled On\n'
         '    SetEnvIfExpr "true" BS_CROSS=1\n'
         '    BotShieldEnvTrigger e-pass env=BS_CROSS '
-        'status=nochallenge penalty=5\n'
-        '    BotShieldRule p-block path="/start" status=403\n'
+        'respond=nochallenge penalty=5\n'
+        '    BotShieldRule p-block path="/start" respond=403\n'
         '    ErrorDocument 403 /error',
         count=1,
     ):

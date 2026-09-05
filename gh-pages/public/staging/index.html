@@ -147,7 +147,7 @@ the policy walk — the next rule still gets its chance.</p>
 <h2 id="per-rule-observe-mode">Per-rule observe mode</h2>
 <p>Add <code>mode=observe</code> to any directive that supports it:</p>
 <pre><code class="language-apache">BotShieldRule    admin-trap   path=&quot;/admin/.env&quot;  flag=scanner_probe ttl=3600 log=admin-trap mode=observe
-BotShieldRule    legacy-admin path=&quot;/wp-admin/*&quot;  status=403 mode=observe
+BotShieldRule    legacy-admin path=&quot;/wp-admin/*&quot;  respond=403 mode=observe
 BotShieldRateLimit      api-burst    60 min &quot;&quot; * mode=observe
 BotShieldFlagTrigger    honeypot_hit action=tier_floor min=captcha mode=observe
 </code></pre>

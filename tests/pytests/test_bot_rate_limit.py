@@ -369,7 +369,7 @@ def test_bot_rate_bad_directive_args(snippet, what):
 def test_challenge_pass_waives_the_challenge_not_the_rate_limit(
     config_override, fresh_ip,
 ):
-    """`status=nochallenge` means "do not challenge", not "do not
+    """`respond=nochallenge` means "do not challenge", not "do not
     enforce".
 
     A bare pass used to return out of the policy walk immediately,
@@ -383,7 +383,7 @@ def test_challenge_pass_waives_the_challenge_not_the_rate_limit(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldBotRateLimit * 1 sec\n'
-        '    BotShieldRule cp path="/*" status=nochallenge log=cp',
+        '    BotShieldRule cp path="/*" respond=nochallenge log=cp',
         count=1,
     ):
         results = [

@@ -373,7 +373,7 @@ The module's own words are now dashless, on every surface, and the
 the old ones, so read this before putting a newer module on a server
 that already runs an older config.
 
-**The module and its config must move together.** `status=pass` is a
+**The module and its config must move together.** `respond=pass` is a
 configtest failure now, not a warning. A server whose module is
 upgraded while its config still says `pass` will pass its running
 state until something reloads it, and then fail to come back. Stage
@@ -384,7 +384,7 @@ What to change in a config:
 
 | Old | New |
 |---|---|
-| `status=pass`, `status=challenge-pass` | `status=nochallenge` |
+| `respond=pass`, `respond=challenge-pass` | `respond=nochallenge` |
 | `tier=pass` | `tier=nochallenge` |
 | `tier=non-interactive`, `min=non-interactive` | `noninteractive` |
 | `BotShieldHeuristicTrigger first-sight-ip` and the other dashed heuristic names | `firstsightip`, `missingua`, `missingal`, `scraperua`, `droppedcookie` |

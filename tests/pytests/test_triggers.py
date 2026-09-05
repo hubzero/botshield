@@ -4,7 +4,7 @@ Exercises BotShieldRule directives:
 
   status=<code>       → Apache returns that code; ErrorDocument
                         compatible (we don't write a body).
-  status=nochallenge         → request passes through to the real handler;
+  respond=nochallenge         → request passes through to the real handler;
                         no BotShield interstitial; flag-IP / log
                         effects still apply for future requests.
   redirect=<url>      → 302 (or operator-chosen 3xx) + Location.
@@ -37,7 +37,7 @@ from botshield_test import client, ips
 def test_trigger_status_code_blocks_and_tags_log(
     config_override, log_slice, fresh_ip,
 ):
-    """status=403 short-circuits with that code. log=<tag> rides the
+    """respond=403 short-circuits with that code. log=<tag> rides the
     existing decision log line as tag="<string>" — no second log line."""
     # Apache's config parser splits on whitespace; a log= value with
     # a space must have the WHOLE key=value quoted (not just the
@@ -50,7 +50,7 @@ def test_trigger_status_code_blocks_and_tags_log(
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
         '    BotShieldRule env-probe path="/.env" '
-        'status=403 "log=BAN 2h" ttl=3600',
+        'respond=403 "log=BAN 2h" ttl=3600',
         count=1,
     ):
         with log_slice as slc:
@@ -67,13 +67,13 @@ def test_trigger_status_code_blocks_and_tags_log(
     )
 
 
-# --- status=nochallenge -----------------------------------------------------
+# --- respond=nochallenge -----------------------------------------------------
 
 
 def test_trigger_status_pass_lets_request_through(
     config_override, log_slice, fresh_ip,
 ):
-    """status=nochallenge returns DECLINED from the handler — the real
+    """respond=nochallenge returns DECLINED from the handler — the real
     Apache server serves the response (probably a 404 for a non-
     existent path). No BotShield 403/captcha/etc."""
     with config_override(
@@ -83,29 +83,29 @@ def test_trigger_status_pass_lets_request_through(
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
         '    BotShieldRule pass-probe path="/definitely-nonexistent" '
-        'status=nochallenge',
+        'respond=nochallenge',
         count=1,
     ):
         resp = client.get("/definitely-nonexistent", xff=fresh_ip)
     # Real handler's response — not 403. Typically 404 (Apache's
     # default) or whatever the dev vhost serves.
     assert resp.status_code != 403, (
-        f"status=nochallenge must not 403; got {resp.status_code}"
+        f"respond=nochallenge must not 403; got {resp.status_code}"
     )
 
 
 def test_trigger_status_pass_penalty_scores_the_current_request(
     config_override, log_slice, fresh_ip,
 ):
-    """`status=nochallenge penalty=N` adds N to THIS request's score.
+    """`respond=nochallenge penalty=N` adds N to THIS request's score.
 
     This test used to pin the opposite -- that the penalty was purely
     future-request bookkeeping via flag=/ttl= and must never touch the
     current score. That contract was deliberately revised in 14ec15a
-    ("Let request triggers challenge"), which routes status=nochallenge with
+    ("Let request triggers challenge"), which routes respond=nochallenge with
     score-shaping through the scoring pipeline rather than declining
     out of the handler, and directives.md documents the current
-    behaviour: "Score only | status=nochallenge penalty=<n> | Adds to the
+    behaviour: "Score only | respond=nochallenge penalty=<n> | Adds to the
     score and lets normal thresholds decide."
 
     The old assertion outlived the change and sat in the failing set
@@ -118,7 +118,7 @@ def test_trigger_status_pass_penalty_scores_the_current_request(
     its own signals and a fixed number would be brittle.
 
     Both arms carry a penalty on purpose. Comparing "penalty" against
-    "no penalty" measures the wrong thing entirely: a bare status=nochallenge
+    "no penalty" measures the wrong thing entirely: a bare respond=nochallenge
     declines out of the handler before the scoring pipeline runs, so
     its reason chain comes back bracketed and zeroed
     ([knownbot:...:0,requesttrigger:passpen:pass:0]) while the
@@ -127,7 +127,7 @@ def test_trigger_status_pass_penalty_scores_the_current_request(
     difference there is the whole pipeline, not the penalty.
     """
     RULE = ('    BotShieldRule passpen path="/honey-pass" '
-            'status=nochallenge %s ttl=3600')
+            'respond=nochallenge %s ttl=3600')
 
     def score_for(extra, ip):
         with config_override(
@@ -190,7 +190,7 @@ def test_trigger_redirect_sets_location(
 def test_trigger_redirect_honors_explicit_status(
     config_override, log_slice, fresh_ip,
 ):
-    """Explicit status=301 sets a permanent redirect."""
+    """Explicit respond=301 sets a permanent redirect."""
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
@@ -198,7 +198,7 @@ def test_trigger_redirect_honors_explicit_status(
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
         '    BotShieldRule env-redirect path="/.env.perm" '
-        'redirect=https://example.org/gone status=301',
+        'redirect=https://example.org/gone respond=301',
         count=1,
     ):
         resp = client.get("/.env.perm", xff=fresh_ip,
@@ -221,8 +221,8 @@ def test_trigger_declaration_order_wins_on_overlap(
         '    BotShieldScoreNonInteractive 500\n'
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldRule wp-ajax path="/wp-admin/admin-ajax.php" status=nochallenge\n'
-        '    BotShieldRule wp-all  path="/wp-admin*"               status=403',
+        '    BotShieldRule wp-ajax path="/wp-admin/admin-ajax.php" respond=nochallenge\n'
+        '    BotShieldRule wp-all  path="/wp-admin*"               respond=403',
         count=1,
     ):
         r_ajax  = client.get("/wp-admin/admin-ajax.php", xff=fresh_ip)
@@ -248,7 +248,7 @@ def test_trigger_main_scope_inherits_into_vhost(
     with config_override(
         r"BotShieldStateSaveInterval\s+\d+",
         'BotShieldRule main-scope-trap path="/main-scope-env" '
-        'status=403 log="MAIN"\n'
+        'respond=403 log="MAIN"\n'
         'BotShieldStateSaveInterval 30',
         count=1,
     ):
@@ -279,7 +279,7 @@ def test_trigger_flag_ip_carries_to_next_request(
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
         '    BotShieldRule bait path="/honey-bait" '
-        'status=nochallenge flag=honeypot_hit ttl=3600',
+        'respond=nochallenge flag=honeypot_hit ttl=3600',
         count=1,
     ):
         # First request primes the flagged-IP table.
@@ -317,7 +317,7 @@ def test_path_trigger_middle_star_matches_segment(
         '    BotShieldScoreNonInteractive 500\n'
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldRule api-admin path="/api/*/admin" status=403',
+        '    BotShieldRule api-admin path="/api/*/admin" respond=403',
         count=1,
     ):
         with log_slice as slc:
@@ -354,7 +354,7 @@ def test_path_trigger_middle_star_anchored_excludes_suffix(
         '    BotShieldScoreNonInteractive 500\n'
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldRule api-admin-end path="/api/*/admin$" status=403',
+        '    BotShieldRule api-admin-end path="/api/*/admin$" respond=403',
         count=1,
     ):
         with log_slice as slc:
@@ -407,7 +407,7 @@ def test_path_trigger_middle_star_emits_notice_on_config_load(
         '    BotShieldScoreNonInteractive 500\n'
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldRule middle-warn path="/foo*bar" status=403',
+        '    BotShieldRule middle-warn path="/foo*bar" respond=403',
         count=1,
     ):
         pass
@@ -442,7 +442,7 @@ def test_flat_trigger_form_is_rejected(config_override):
         with config_override(
             r"BotShieldEnabled\s+On",
             "BotShieldEnabled On\n"
-            '    BotShieldRule oldform path="/retired" status=403',
+            '    BotShieldRule oldform path="/retired" respond=403',
             render=False,
         ):
             pass
@@ -476,7 +476,7 @@ def test_deprecated_requesttrigger_spelling_still_parses(
         "BotShieldEnabled On\n"
         "    <BotShieldRequestTrigger legacy-spelling>\n"
         "        BotShieldPath      /legacy-spelling-probe\n"
-        "        BotShieldStatus    404\n"
+        "        BotShieldRespond    404\n"
         "    </BotShieldRequestTrigger>",
         render=False,
         count=1,
@@ -485,4 +485,57 @@ def test_deprecated_requesttrigger_spelling_still_parses(
         assert resp.status_code == 404, (
             "the deprecated spelling must keep working until it is "
             f"removed; got {resp.status_code}"
+        )
+
+
+def test_deprecated_status_spelling_still_parses(config_override, fresh_ip):
+    """BotShieldStatus is the old spelling of BotShieldRespond.
+
+    Warns at config time and keeps working, on the same
+    deprecate-then-remove schedule as the directive rename: the name is
+    in live configs -- twenty-four times in the one on qubeshub.org --
+    and a config error is fatal to httpd.
+
+    render=False so the block reaches Apache exactly as written, which
+    is the only way the module rather than the harness is under test.
+    When the spelling is removed this inverts into its rejection test.
+    """
+    with config_override(
+        r"BotShieldEnabled\s+On",
+        "BotShieldEnabled On\n"
+        "    <BotShieldRule legacy-status>\n"
+        "        BotShieldPath      /legacy-status-probe\n"
+        "        BotShieldStatus    404\n"
+        "    </BotShieldRule>",
+        render=False,
+        count=1,
+    ):
+        resp = client.get("/legacy-status-probe", xff=fresh_ip)
+        assert resp.status_code == 404, (
+            "the deprecated spelling must keep working until it is "
+            f"removed; got {resp.status_code}"
+        )
+
+
+def test_respond_is_the_canonical_spelling(config_override, fresh_ip):
+    """BotShieldRespond does what BotShieldStatus did.
+
+    Written as a block rather than the compact form so this test proves
+    the directive name resolves through bs_section_key, which is the
+    part a rename can break.
+    """
+    with config_override(
+        r"BotShieldEnabled\s+On",
+        "BotShieldEnabled On\n"
+        "    <BotShieldRule respond-spelling>\n"
+        "        BotShieldPath      /respond-spelling-probe\n"
+        "        BotShieldRespond   404\n"
+        "    </BotShieldRule>",
+        render=False,
+        count=1,
+    ):
+        resp = client.get("/respond-spelling-probe", xff=fresh_ip)
+        assert resp.status_code == 404, (
+            f"BotShieldRespond should return the rule status; got "
+            f"{resp.status_code}"
         )

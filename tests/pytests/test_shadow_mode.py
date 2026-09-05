@@ -59,7 +59,7 @@ def _read_metric(name: str) -> int:
 def test_path_trigger_observe_does_not_enforce(
     config_override, fresh_ip, log_slice,
 ):
-    """status=403 mode=observe: rule matches the URL, the decision
+    """respond=403 mode=observe: rule matches the URL, the decision
     line shows :observe, but the response is NOT 403 (Apache's
     static handler serves the path's normal response — 404 here
     since the path doesn't exist)."""
@@ -67,7 +67,7 @@ def test_path_trigger_observe_does_not_enforce(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldRule trap path="/.envprobe" '
-        'status=403 mode=observe',
+        'respond=403 mode=observe',
         count=1,
     ):
         with log_slice as slc:
@@ -94,7 +94,7 @@ def test_path_trigger_observe_does_not_flag_ip(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldRule trap path="/.envprobe" '
-        'status=nochallenge flag=fake_bot ttl=3600 mode=observe',
+        'respond=nochallenge flag=fake_bot ttl=3600 mode=observe',
         count=1,
     ):
         # Match in observe mode.
@@ -169,7 +169,7 @@ def test_rate_limit_observe_increments_metric(
 
 def test_path_trigger_observe_does_not_403(config_override, fresh_ip):
     """A scraper-UA hit on /admin/* under observe-mode PathTrigger
-    (status=403 mode=observe) must not 403 from requesttrigger
+    (respond=403 mode=observe) must not 403 from requesttrigger
     enforcement. The challenge tier may still serve a 403
     interstitial (signaled by `X-Botshield: challenge`) — the test
     distinguishes the two by that header rather than status code
@@ -178,7 +178,7 @@ def test_path_trigger_observe_does_not_403(config_override, fresh_ip):
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldRule admin-block path="/admin/*" '
-        'ua="httpx" status=403 mode=observe',
+        'ua="httpx" respond=403 mode=observe',
         count=1,
     ):
         r = client.get("/admin/login.php", xff=fresh_ip,
@@ -203,7 +203,7 @@ def test_scope_log_only_overrides_per_rule_enforce(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldEnabled LogOnly\n'
-        '    BotShieldRule trap path="/.envprobe" status=403',
+        '    BotShieldRule trap path="/.envprobe" respond=403',
         count=1,
     ):
         r = _g("/.envprobe", xff=fresh_ip)
@@ -222,7 +222,7 @@ def test_scope_log_only_default_lets_per_rule_enforce(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldRule trap path="/.envprobe2" status=403',
+        '    BotShieldRule trap path="/.envprobe2" respond=403',
         count=1,
     ):
         r = _g("/.envprobe2", xff=fresh_ip)
@@ -247,9 +247,9 @@ def test_observe_does_not_shadow_subsequent_enforce_rule(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldRule staged path="/admin/*" ua="httpx" '
-        'status=403 mode=observe\n'
+        'respond=403 mode=observe\n'
         '    BotShieldRule active path="/admin/*" ua="httpx" '
-        'status=403',
+        'respond=403',
         count=1,
     ):
         r = client.get("/admin/login.php", xff=fresh_ip,
@@ -269,7 +269,7 @@ def test_directive_rejects_bad_mode_value(config_override):
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
             '    BotShieldRule trap path="/foo" '
-            'status=403 mode=monitor',
+            'respond=403 mode=monitor',
             count=1,
         ):
             pass
@@ -313,7 +313,7 @@ def test_log_only_emits_tilde_block_for_path_trigger(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldEnabled LogOnly\n'
-        '    BotShieldRule admin-block path="/admin/*" ua="httpx" status=403',
+        '    BotShieldRule admin-block path="/admin/*" ua="httpx" respond=403',
         count=1,
     ):
         with log_slice as slc:
@@ -398,7 +398,7 @@ def test_path_trigger_observe_increments_observed_total(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldRule admin-block path="/admin/*" ua="httpx" '
-        'status=403 mode=observe',
+        'respond=403 mode=observe',
         count=1,
     ):
         before_obs = _read_metric("botshield_trigger_observed_total")
@@ -425,7 +425,7 @@ def test_per_location_log_only_with_inner_enforce(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldEnabled LogOnly\n'
-        '    BotShieldRule everywhere path="/*" ua="httpx" status=403\n'
+        '    BotShieldRule everywhere path="/*" ua="httpx" respond=403\n'
         '    <Location "/enforce-here">\n'
         '        BotShieldEnabled On\n'
         '    </Location>',

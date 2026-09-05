@@ -166,14 +166,14 @@ def test_load_trigger_fires_under_hot(config_override, fresh_ip,
     )
 
 
-# --- status=403 short-circuits the request ----------------------
+# --- respond=403 short-circuits the request ----------------------
 
 
 @pytest.mark.heavy
 def test_load_trigger_status_blocks_under_hot(
     config_override, fresh_ip,
 ):
-    """state=hot with status=503 short-circuits the request. CHANGELOG's
+    """state=hot with respond=503 short-circuits the request. CHANGELOG's
     'optional short-circuiting of expensive anonymous paths' shape:
     operators can hard-stop traffic when the host is hot."""
     _set_load_file("hot")
@@ -182,7 +182,7 @@ def test_load_trigger_status_blocks_under_hot(
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
             '    BotShieldLoadTrigger drop-noise state=hot '
-            'status=503',
+            'respond=503',
             count=1,
         ):
             _wait_for_metric_load_state(target=2, timeout=12.0)

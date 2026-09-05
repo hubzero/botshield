@@ -6,7 +6,7 @@ absence / bulk state / bs-cookie state) and the action surface
 (credit / penalty / status / log / flag / ttl).
 
 Key semantic divergence from E3 that MUST be asserted explicitly:
-cookie triggers apply credit/penalty under `status=nochallenge`, because
+cookie triggers apply credit/penalty under `respond=nochallenge`, because
 cookies are ongoing-state signals the client carries on THIS
 request. Path triggers leave the score alone under pass.
 """
@@ -32,7 +32,7 @@ def test_cookie_trigger_named_present_applies_credit(
     config_override, log_slice, request,
 ):
     """cookie=<name> fires on presence; credit reduces this request's
-    score even though status=nochallenge (divergence from E3).
+    score even though respond=nochallenge (divergence from E3).
 
     log_slice is a one-shot context manager so we issue both
     requests inside a single slice and distinguish them by the
@@ -63,7 +63,7 @@ def test_cookie_trigger_named_present_applies_credit(
     base_score = int(baseline[-1]["score"])
     cookie_score = int(withcookie[-1]["score"])
     assert cookie_score == base_score - 15, (
-        f"credit=15 should reduce score by 15 under status=nochallenge; "
+        f"credit=15 should reduce score by 15 under respond=nochallenge; "
         f"baseline={base_score} cookie={cookie_score}"
     )
     # Reason string should tag the cookie trigger.
@@ -90,7 +90,7 @@ def test_cookie_trigger_named_eq_value_blocks(
         '    BotShieldScoreCaptcha 700\n'
         '    BotShieldCookieTrigger stale-token '
         'cookie=api_token=LEAKED_HEX '
-        'status=403 flag=honeypot_hit ttl=3600',
+        'respond=403 flag=honeypot_hit ttl=3600',
         count=1,
     ):
         r_hit  = client.get("/", xff=ip_hit,
@@ -114,7 +114,7 @@ def test_cookie_trigger_named_contains_substring(
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
         '    BotShieldCookieTrigger bait-signup '
-        'cookie=signup_tmp~BAIT-HEX status=403',
+        'cookie=signup_tmp~BAIT-HEX respond=403',
         count=1,
     ):
         r_hit = client.get("/", xff=fresh_ip,
@@ -137,7 +137,7 @@ def test_cookie_trigger_named_absent_fires(
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
         '    BotShieldCookieTrigger missing-csrf '
-        '!cookie=csrf_token status=403',
+        '!cookie=csrf_token respond=403',
         count=1,
     ):
         r_missing = client.get("/", xff=fresh_ip)  # no cookies
@@ -161,7 +161,7 @@ def test_cookie_trigger_cookies_none(
         '    BotShieldScoreNonInteractive 500\n'
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldCookieTrigger no-cookies cookies=none status=403',
+        '    BotShieldCookieTrigger no-cookies cookies=none respond=403',
         count=1,
     ):
         r_none = client.get("/", xff=fresh_ip)
@@ -183,7 +183,7 @@ def test_cookie_trigger_cookies_session_matches_curated_name(
         '    BotShieldScoreNonInteractive 500\n'
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldCookieTrigger any-session cookies=session status=403',
+        '    BotShieldCookieTrigger any-session cookies=session respond=403',
         count=1,
     ):
         r_php  = client.get("/", xff=fresh_ip,
@@ -211,7 +211,7 @@ def test_cookie_trigger_session_name_directive_extends_list(
         '    BotShieldScoreCaptcha 700\n'
         '    BotShieldSessionCookieName my_custom_session\n'
         '    BotShieldCookieTrigger any-session '
-        'cookies=session status=403',
+        'cookies=session respond=403',
         count=1,
     ):
         r_match = client.get("/", xff=fresh_ip,
@@ -233,7 +233,7 @@ def test_cookie_trigger_bs_cookie_missing(
         '    BotShieldScoreNonInteractive 500\n'
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldCookieTrigger fresh bs-cookie=missing status=403',
+        '    BotShieldCookieTrigger fresh bs-cookie=missing respond=403',
         count=1,
     ):
         r = client.get("/", xff=fresh_ip)
@@ -251,7 +251,7 @@ def test_cookie_trigger_bs_cookie_invalid(
         '    BotShieldScoreNonInteractive 500\n'
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldCookieTrigger bad-bs bs-cookie=invalid status=403',
+        '    BotShieldCookieTrigger bad-bs bs-cookie=invalid respond=403',
         count=1,
     ):
         # Send a garbage __Host-bs_session cookie — fails signature check.
@@ -260,13 +260,13 @@ def test_cookie_trigger_bs_cookie_invalid(
     assert r.status_code == 403
 
 
-# --- status=nochallenge divergence from E3 ----------------------------------
+# --- respond=nochallenge divergence from E3 ----------------------------------
 
 
 def test_cookie_trigger_status_pass_still_applies_credit(
     config_override, log_slice,
 ):
-    """DIVERGENCE FROM E3: cookie triggers under status=nochallenge still
+    """DIVERGENCE FROM E3: cookie triggers under respond=nochallenge still
     apply credit/penalty to THIS request (E3 path triggers ignore
     penalty under pass). This test guards that behavior — changing
     it silently would break the E4 reputation model.
@@ -284,7 +284,7 @@ def test_cookie_trigger_status_pass_still_applies_credit(
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
         '    BotShieldCookieTrigger ghost cookie=PHPSESSID '
-        'status=nochallenge credit=20',
+        'respond=nochallenge credit=20',
         count=1,
     ):
         with log_slice as slc:
@@ -300,7 +300,7 @@ def test_cookie_trigger_status_pass_still_applies_credit(
     with_score = int(with_lines[-1]["score"])
     assert with_score == base_score - 20, (
         f"credit=20 must shift the score by exactly -20 under "
-        f"status=nochallenge; baseline={base_score} with-cookie={with_score}"
+        f"respond=nochallenge; baseline={base_score} with-cookie={with_score}"
     )
 
 
@@ -310,7 +310,7 @@ def test_cookie_trigger_status_pass_still_applies_credit(
 def test_cookie_trigger_pass_triggers_stack_credits(
     config_override, log_slice,
 ):
-    """When two status=nochallenge triggers both match (e.g. a client
+    """When two respond=nochallenge triggers both match (e.g. a client
     carries both a session cookie and an auth cookie), their
     credits MUST stack — that's the whole point of the layered-
     reputation pattern. A "first match wins" reading would lose
@@ -362,7 +362,7 @@ def test_cookie_trigger_non_pass_shortcircuits_after_pass(
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
         '    BotShieldCookieTrigger app-session cookie=PHPSESSID credit=15\n'
-        '    BotShieldCookieTrigger kill       cookie=api_token=BAD status=403',
+        '    BotShieldCookieTrigger kill       cookie=api_token=BAD respond=403',
         count=1,
     ):
         with log_slice as slc:
@@ -396,8 +396,8 @@ def test_cookie_trigger_first_non_pass_wins_over_second(
         '    BotShieldScoreNonInteractive 500\n'
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldCookieTrigger first  cookie=foo status=403\n'
-        '    BotShieldCookieTrigger second cookie=foo status=451',
+        '    BotShieldCookieTrigger first  cookie=foo respond=403\n'
+        '    BotShieldCookieTrigger second cookie=foo respond=451',
         count=1,
     ):
         r = client.get("/", xff=fresh_ip, cookies={"foo": "x"})
@@ -417,7 +417,7 @@ def test_cookie_trigger_main_scope_inherits_into_vhost(
     with config_override(
         r"BotShieldStateSaveInterval\s+\d+",
         'BotShieldCookieTrigger ms-scope '
-        'cookies=none status=403\n'
+        'cookies=none respond=403\n'
         'BotShieldStateSaveInterval 30',
         count=1,
     ):

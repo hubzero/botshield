@@ -3952,7 +3952,17 @@ const char *bs_set_rate_limit_escalate(cmd_parms *cmd, void *dconf,
         const char *val = eq + 1;
         #define BS_REK(n) (klen == sizeof(n)-1 && \
                            strncasecmp(arg, n, sizeof(n)-1) == 0)
-        if (BS_REK("status")) {
+        if (BS_REK("respond") || BS_REK("status")) {
+            /* respond= is the name; status= is the deprecated spelling.
+             * Renamed alongside the trigger families rather than after
+             * them: one concept wearing two names in the same config is
+             * the drift this project has already spent commits undoing. */
+            if (BS_REK("status")) {
+                ap_log_error(APLOG_MARK, APLOG_WARNING, 0, cmd->server,
+                    "mod_botshield: BotShieldRateLimitEscalate: status= "
+                    "is deprecated and will be removed; write respond= "
+                    "instead. Same values, same behaviour.");
+            }
             char *e2 = NULL;
             long code = strtol(val, &e2, 10);
             if (!e2 || *e2 || code < 100 || code > 599) {
@@ -3983,7 +3993,7 @@ const char *bs_set_rate_limit_escalate(cmd_parms *cmd, void *dconf,
         } else {
             return apr_psprintf(cmd->pool,
                 "BotShieldRateLimitEscalate: unknown key '%.*s' "
-                "(known: status, ttl, log)", (int)klen, arg);
+                "(known: respond, ttl, log)", (int)klen, arg);
         }
         #undef BS_REK
     }

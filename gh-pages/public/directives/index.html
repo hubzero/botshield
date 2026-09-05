@@ -259,7 +259,7 @@ limits and scoring all still run and still log, but no interstitial,
 form or captcha is ever rendered — any selected tier collapses back to
 <code>pass</code>, and the suppression appears in the decision log as
 <code>challengeoff:&lt;tier&gt;</code>.</p>
-<p>Use it where an explicit <code>status=4xx</code> trigger is meant to be the only
+<p>Use it where an explicit <code>respond=4xx</code> trigger is meant to be the only
 action. Parking <code>BotShieldScoreNonInteractive</code>/<code>Interactive</code>/<code>Captcha</code> at <code>10000</code> is
 <strong>not</strong> equivalent, which is easy to get wrong: a flag <code>tier_floor</code> is
 MAX'd in <em>after</em> the score-to-tier decision and ignores thresholds
@@ -980,7 +980,7 @@ template per line (runs of <code>[0-9._]+</code> replaced by <code>X</code>).</p
 </tr>
 <tr>
 <td><code>BotShieldRateLimitEscalate</code></td>
-<td><code>&lt;rate-rule&gt; &lt;strikes&gt; &lt;per&gt; [status=N] [ttl=N]</code></td>
+<td><code>&lt;rate-rule&gt; &lt;strikes&gt; &lt;per&gt; [respond=N] [ttl=N]</code></td>
 <td>none</td>
 </tr>
 </tbody>
@@ -991,7 +991,7 @@ one does:</p>
 <pre><code class="language-apache">&lt;BotShieldRule api-bot&gt;
     BotShieldPath         /api/*
     BotShieldUserAgent    @search,@ai-input,@ai-train,@monitor
-    BotShieldStatus       403
+    BotShieldRespond      403
     BotShieldTTL          0
     BotShieldLog          api-bot
 &lt;/BotShieldRule&gt;
@@ -1113,17 +1113,17 @@ semantics and refresh model.</p>
 <tr>
 <td><code>BotShieldRule</code></td>
 <td><code>&lt;name&gt;</code> + any of <code>path=&lt;glob&gt;</code> <code>query=&lt;glob&gt;</code> <code>cookies=none|any|session</code> <code>ua=&lt;substring&gt;|@&lt;botgroup&gt;|&quot;&quot;</code> <code>ipspec=&lt;spec&gt;</code> — ANDed, at least one required</td>
-<td><code>status=</code>, <code>redirect=</code>, <code>log=</code>, <code>accesslog=</code>, <code>flag=</code>, <code>ttl=</code>, <code>burn=</code>, <code>penalty=</code>, <code>mode=</code> (no <code>credit=</code>)</td>
+<td><code>respond=</code>, <code>redirect=</code>, <code>log=</code>, <code>accesslog=</code>, <code>flag=</code>, <code>ttl=</code>, <code>burn=</code>, <code>penalty=</code>, <code>mode=</code> (no <code>credit=</code>)</td>
 </tr>
 <tr>
 <td><code>BotShieldCookieTrigger</code></td>
 <td><code>&lt;name&gt; &lt;pred&gt;</code> (see policy page)</td>
-<td><code>status=</code>, <code>redirect=</code>, <code>log=</code>, <code>accesslog=</code>, <code>flag=</code>, <code>ttl=</code>, <code>burn=</code>, <code>penalty=</code>, <code>credit=</code>, <code>mode=</code></td>
+<td><code>respond=</code>, <code>redirect=</code>, <code>log=</code>, <code>accesslog=</code>, <code>flag=</code>, <code>ttl=</code>, <code>burn=</code>, <code>penalty=</code>, <code>credit=</code>, <code>mode=</code></td>
 </tr>
 <tr>
 <td><code>BotShieldEnvTrigger</code></td>
 <td><code>&lt;name&gt; &lt;env-pred&gt;</code> (see policy page)</td>
-<td><code>status=</code>, <code>log=</code>, <code>accesslog=</code>, <code>flag=</code>, <code>ttl=</code>, <code>burn=</code>, <code>penalty=</code>, <code>credit=</code>, <code>mode=</code> (no <code>redirect=</code>)</td>
+<td><code>respond=</code>, <code>log=</code>, <code>accesslog=</code>, <code>flag=</code>, <code>ttl=</code>, <code>burn=</code>, <code>penalty=</code>, <code>credit=</code>, <code>mode=</code> (no <code>redirect=</code>)</td>
 </tr>
 <tr>
 <td><code>BotShieldFeedbackTrigger</code></td>
@@ -1133,7 +1133,7 @@ semantics and refresh model.</p>
 <tr>
 <td><code>BotShieldLoadTrigger</code></td>
 <td><code>&lt;name&gt; state=&lt;n&gt;|state&gt;=&lt;n&gt;</code></td>
-<td><code>status=</code>, <code>log=</code>, <code>accesslog=</code>, <code>penalty=</code>, <code>mode=</code> (no <code>redirect=</code>, <code>flag=</code>, <code>ttl=</code>, <code>burn=</code>)</td>
+<td><code>respond=</code>, <code>log=</code>, <code>accesslog=</code>, <code>penalty=</code>, <code>mode=</code> (no <code>redirect=</code>, <code>flag=</code>, <code>ttl=</code>, <code>burn=</code>)</td>
 </tr>
 <tr>
 <td><code>BotShieldSessionCookieName</code></td>
@@ -1154,7 +1154,7 @@ suppresses the access-log line for a matching request.</p>
 <p>They compose, which is the point — a scanner probe usually wants both:</p>
 <pre><code class="language-apache">&lt;BotShieldRule env-probe&gt;
     BotShieldPath         /.env
-    BotShieldStatus       403
+    BotShieldRespond      403
     BotShieldLog          scanner-probe
     BotShieldAccessLog    off
 &lt;/BotShieldRule&gt;
@@ -1247,27 +1247,27 @@ compress into one key.</p>
 <tbody>
 <tr>
 <td>Block</td>
-<td><code>status=403</code> (family default)</td>
+<td><code>respond=403</code> (family default)</td>
 <td>Refused from the policy walk. No scoring, no cookie mint, no render.</td>
 </tr>
 <tr>
 <td>Challenge</td>
-<td><code>status=nochallenge tier=noninteractive</code></td>
+<td><code>respond=nochallenge tier=noninteractive</code></td>
 <td>Invisible auto-submitting check. <code>tier=interactive</code> for the visible one.</td>
 </tr>
 <tr>
 <td>Captcha</td>
-<td><code>status=nochallenge tier=captcha</code></td>
+<td><code>respond=nochallenge tier=captcha</code></td>
 <td>The configured provider's widget.</td>
 </tr>
 <tr>
 <td>Score only</td>
-<td><code>status=nochallenge penalty=&lt;n&gt;</code></td>
+<td><code>respond=nochallenge penalty=&lt;n&gt;</code></td>
 <td>Adds to the score and lets normal thresholds decide.</td>
 </tr>
 </tbody>
 </table>
-<p><code>tier=</code> and <code>penalty=</code> both require <code>status=nochallenge</code>, because a concrete
+<p><code>tier=</code> and <code>penalty=</code> both require <code>respond=nochallenge</code>, because a concrete
 status short-circuits the request before any tier is chosen. <code>tier=</code>
 accepts <code>pass</code>, <code>noninteractive</code>, <code>interactive</code> and <code>captcha</code>, and
 composes by MAX with the score-derived tier and any flag tier floor —
@@ -1279,7 +1279,7 @@ would keep being re-challenged for the life of a flag it has no way to
 clear. Use <code>flag=</code> when you want the reputation to persist, <code>tier=</code>
 when you want to challenge the request in front of you.</p>
 <blockquote>
-<p>A bare <code>status=nochallenge</code> — with neither <code>tier=</code> nor <code>penalty=</code> — keeps its
+<p>A bare <code>respond=nochallenge</code> — with neither <code>tier=</code> nor <code>penalty=</code> — keeps its
 original meaning of &quot;record the match and decline out of the handler&quot;.
 That skips scoring entirely, so it will <em>disable</em> challenges the
 defaults would otherwise have raised on those requests. It is a
@@ -1292,7 +1292,7 @@ logging-and-flagging form, not a no-op.</p>
     BotShieldPath         /login*
     BotShieldQuery        *return=*
     BotShieldCookies      none
-    BotShieldStatus       403
+    BotShieldRespond      403
     BotShieldLog          login-trap
     BotShieldAccessLog    off
 &lt;/BotShieldRule&gt;
@@ -1309,13 +1309,13 @@ logging-and-flagging form, not a no-op.</p>
 # rule carrying only ua=* is rejected as having no condition.
 &lt;BotShieldRule no-ua&gt;
     BotShieldUserAgent    &quot;&quot;
-    BotShieldStatus       nochallenge
+    BotShieldRespond       nochallenge
     BotShieldTier         noninteractive
     BotShieldLog          no-ua
 &lt;/BotShieldRule&gt;
 </code></pre>
 <p>Because it fires from the policy walk it short-circuits <strong>before</strong>
-scoring, so a <code>status=4xx</code> rule never renders a challenge and never
+scoring, so a <code>respond=4xx</code> rule never renders a challenge and never
 reaches PHP.</p>
 <p><strong>Remembering a client is opt-in.</strong> A rule fires, returns its status,
 and forgets — unless you ask it to remember. There are two kinds of
@@ -1333,7 +1333,7 @@ either, so it costs nothing that was not already being paid.</p>
 # distrust; wrong when it is a NAT with real users behind it.
 &lt;BotShieldRule env-probe&gt;
     BotShieldPath    /.env
-    BotShieldStatus  404
+    BotShieldRespond  404
     BotShieldFlag    scanner_probe
     BotShieldTTL     3600
     BotShieldLog     env-probe
@@ -1344,7 +1344,7 @@ either, so it costs nothing that was not already being paid.</p>
 # the neighbours are untouched.
 &lt;BotShieldRule wp-probe&gt;
     BotShieldPath    /wp-admin/*
-    BotShieldStatus  404
+    BotShieldRespond  404
     BotShieldBurn    86400
     BotShieldLog     wp-probe
 &lt;/BotShieldRule&gt;
@@ -1383,11 +1383,28 @@ time. It <strong>will</strong> be removed, so rename the block and its closing t
 # after
 &lt;BotShieldRule blocked&gt;
     BotShieldPath         /wp-admin/*
-    BotShieldStatus       403
+    BotShieldRespond      403
 &lt;/BotShieldRule&gt;
 </code></pre>
 <p>Nothing else changes: same conditions, same actions, same parser, same
 resulting rule. Only the spelling differs.</p>
+<h4 id="renamed-from-botshieldstatus">Renamed from <code>BotShieldStatus</code></h4>
+<p><code>BotShieldStatus</code> is the old spelling of <code>BotShieldRespond</code>. Apache
+already spends the word &quot;status&quot; on <code>mod_status</code> and <code>server-status</code>,
+and this module ships a dashboard and a metrics endpoint of its own, so
+in a BotShield config the old name read as a monitoring surface rather
+than as the response a rule produces. Nothing in Apache names a
+response code <code>Status</code> either: <code>Redirect</code> and <code>ErrorDocument</code> take one
+as an argument, and <code>mod_rewrite</code> spells it <code>[R=404]</code>.</p>
+<p>The old name still parses and warns at config time. <code>respond=</code> is also
+accepted by <code>BotShieldRateLimitEscalate</code>, which had its own <code>status=</code>
+key -- one concept should not wear two names in the same file.</p>
+<pre><code class="language-apache">&lt;BotShieldRule blocked&gt;
+    BotShieldPath         /wp-admin/*
+    BotShieldRespond      404
+&lt;/BotShieldRule&gt;
+</code></pre>
+<p>Values are unchanged: an HTTP code <code>100..599</code>, or <code>nochallenge</code>.</p>
 <h4 id="migrating-from-botshieldpathtrigger">Migrating from <code>BotShieldPathTrigger</code></h4>
 <p><code>BotShieldPathTrigger</code> was renamed on 2026-08-01 and its path glob moved
 from a positional argument to the <code>path=</code> key. The old name had stopped
@@ -1402,7 +1419,7 @@ BotShieldPathTrigger blocked &quot;/wp-admin/*&quot; status=403
 # after
 &lt;BotShieldRule blocked&gt;
     BotShieldPath         /wp-admin/*
-    BotShieldStatus       403
+    BotShieldRespond      403
 &lt;/BotShieldRule&gt;
 </code></pre>
 <p>A note on quoting: values are unquoted by the module, so
@@ -1422,7 +1439,7 @@ match.</p>
 <tbody>
 <tr>
 <td><code>BotShieldTrigger</code></td>
-<td><code>[reset] [status=N|pass] [redirect=URL] [log=tag] [accesslog=on|off] [flag=NAME] [ttl=N] [penalty=N] [credit=N] [mode=enforce|observe]</code></td>
+<td><code>[reset] [respond=N|pass] [redirect=URL] [log=tag] [accesslog=on|off] [flag=NAME] [ttl=N] [penalty=N] [credit=N] [mode=enforce|observe]</code></td>
 <td>server / vhost / Directory / Location / LocationMatch / Files / If</td>
 </tr>
 </tbody>

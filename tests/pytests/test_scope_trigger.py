@@ -46,7 +46,7 @@ def test_scope_trigger_status_blocks_inside_location_only(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    <Location "/trap">\n'
-        '        BotShieldTrigger status=403 log=trap-block\n'
+        '        BotShieldTrigger respond=403 log=trap-block\n'
         '    </Location>',
         count=1,
     ):
@@ -153,7 +153,7 @@ def test_scope_trigger_observe_mode_does_not_enforce(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    <Location "/staging">\n'
-        '        BotShieldTrigger status=403 log=staging-trial mode=observe\n'
+        '        BotShieldTrigger respond=403 log=staging-trial mode=observe\n'
         '    </Location>',
         count=1,
     ):
@@ -162,7 +162,7 @@ def test_scope_trigger_observe_mode_does_not_enforce(
             lines = slc.decision_lines(ip=fresh_ip)
 
     assert r.status_code != 403, (
-        f"observe-mode trigger must not enforce status=403; got {r.status_code}"
+        f"observe-mode trigger must not enforce respond=403; got {r.status_code}"
     )
     assert lines
     reason = lines[-1]["reason"]

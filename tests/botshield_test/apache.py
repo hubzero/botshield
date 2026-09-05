@@ -353,7 +353,7 @@ def config_override(
     # process being killed -- a `timeout`, a Ctrl-C that lands wrong, a
     # CI step cancelled. That leaves this test's injected rules in the
     # shared vhost, where they apply to every later run: a leftover
-    # `BotShieldRule p-block path="/*" status=451` turned 30
+    # `BotShieldRule p-block path="/*" respond=451` turned 30
     # unrelated tests red and read as a product bug for two full suite
     # runs. So stash the original and drop a marker first, and let
     # session start put it back.

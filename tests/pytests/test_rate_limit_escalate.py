@@ -63,7 +63,7 @@ def test_repeated_429_escalates_to_403(config_override, fresh_ip,
         '    BotShieldScoreCaptcha 700\n'
         '    BotShieldRateLimit corpbot 2 sec "CorpBot" *\n'
         '    BotShieldRateLimitEscalate corpbot 3 min '
-        'status=403 ttl=60 "log=BAN rate-abuse"',
+        'respond=403 ttl=60 "log=BAN rate-abuse"',
         count=1,
     ):
         with log_slice as slc:
@@ -120,7 +120,7 @@ def test_below_strike_threshold_stays_at_429(
         '    BotShieldScoreCaptcha 700\n'
         '    BotShieldRateLimit corpbot 2 sec "CorpBot" *\n'
         '    BotShieldRateLimitEscalate corpbot 5 min '
-        'status=403 ttl=60',
+        'respond=403 ttl=60',
         count=1,
     ):
         with log_slice as slc:
@@ -162,7 +162,7 @@ def test_escalation_isolates_per_rule(
         # tight strike count to escalate quickly.
         '    BotShieldRateLimit corpbot 1 sec "CorpBot" *\n'
         '    BotShieldRateLimitEscalate corpbot 2 min '
-        'status=403 ttl=60\n'
+        'respond=403 ttl=60\n'
         # Rule-B matches "OtherUA" — no escalation. Different cohort
         # entirely, so even strict bursts stay at 429.
         '    BotShieldRateLimit otherbot 1 sec "OtherUA" *',
@@ -222,7 +222,7 @@ def test_escalation_isolates_per_ip(config_override):
         '    BotShieldScoreCaptcha 700\n'
         '    BotShieldRateLimit corpbot 1 sec "CorpBot" *\n'
         '    BotShieldRateLimitEscalate corpbot 3 min '
-        'status=403 ttl=60',
+        'respond=403 ttl=60',
         count=1,
     ):
         # Drive IP-A: 1 admit + ~11 strikes well past threshold(3).
@@ -268,7 +268,7 @@ def test_directive_rejects_bogus_status(config_override):
 
 
 def test_directive_rejects_status_429(config_override):
-    """status=429 is a no-op (same as the normal 429 response). The
+    """respond=429 is a no-op (same as the normal 429 response). The
     setter rejects it explicitly so operators don't write directives
     that have no effect."""
     with pytest.raises(Exception):
@@ -279,7 +279,7 @@ def test_directive_rejects_status_429(config_override):
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
             '    BotShieldRateLimit corpbot 1 sec "CorpBot" *\n'
-            '    BotShieldRateLimitEscalate corpbot 2 sec status=429',
+            '    BotShieldRateLimitEscalate corpbot 2 sec respond=429',
             count=1,
         ):
             pass

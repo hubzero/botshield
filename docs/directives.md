@@ -74,7 +74,7 @@ form or captcha is ever rendered — any selected tier collapses back to
 `pass`, and the suppression appears in the decision log as
 `challengeoff:<tier>`.
 
-Use it where an explicit `status=4xx` trigger is meant to be the only
+Use it where an explicit `respond=4xx` trigger is meant to be the only
 action. Parking `BotShieldScoreNonInteractive`/`Interactive`/`Captcha` at `10000` is
 **not** equivalent, which is easy to get wrong: a flag `tier_floor` is
 MAX'd in *after* the score-to-tier decision and ignores thresholds
@@ -531,7 +531,7 @@ template per line (runs of `[0-9._]+` replaced by `X`).
 |---|---|---|
 | `BotShieldRateLimit` | `<name> [budget=N] [per=U] [ua=...] [ipspec=...] [mode=...]` (or legacy `<name> <budget> <per> <ua-pattern> <ipspec> [mode=observe]`) | none |
 | `BotShieldBotRateLimit` | `off`, or `<target> <delay-sec>`, or `<target> <budget> <per>` | none |
-| `BotShieldRateLimitEscalate` | `<rate-rule> <strikes> <per> [status=N] [ttl=N]` | none |
+| `BotShieldRateLimitEscalate` | `<rate-rule> <strikes> <per> [respond=N] [ttl=N]` | none |
 
 ### Alternation on `ua=`
 
@@ -542,7 +542,7 @@ one does:
 <BotShieldRule api-bot>
     BotShieldPath         /api/*
     BotShieldUserAgent    @search,@ai-input,@ai-train,@monitor
-    BotShieldStatus       403
+    BotShieldRespond      403
     BotShieldTTL          0
     BotShieldLog          api-bot
 </BotShieldRule>
@@ -651,11 +651,11 @@ semantics and refresh model.
 
 | Directive | Predicate args | Action keys |
 |---|---|---|
-| `BotShieldRule` | `<name>` + any of `path=<glob>` `query=<glob>` `cookies=none\|any\|session` `ua=<substring>\|@<botgroup>\|""` `ipspec=<spec>` — ANDed, at least one required | `status=`, `redirect=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `burn=`, `penalty=`, `mode=` (no `credit=`) |
-| `BotShieldCookieTrigger` | `<name> <pred>` (see policy page) | `status=`, `redirect=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `burn=`, `penalty=`, `credit=`, `mode=` |
-| `BotShieldEnvTrigger` | `<name> <env-pred>` (see policy page) | `status=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `burn=`, `penalty=`, `credit=`, `mode=` (no `redirect=`) |
+| `BotShieldRule` | `<name>` + any of `path=<glob>` `query=<glob>` `cookies=none\|any\|session` `ua=<substring>\|@<botgroup>\|""` `ipspec=<spec>` — ANDed, at least one required | `respond=`, `redirect=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `burn=`, `penalty=`, `mode=` (no `credit=`) |
+| `BotShieldCookieTrigger` | `<name> <pred>` (see policy page) | `respond=`, `redirect=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `burn=`, `penalty=`, `credit=`, `mode=` |
+| `BotShieldEnvTrigger` | `<name> <env-pred>` (see policy page) | `respond=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `burn=`, `penalty=`, `credit=`, `mode=` (no `redirect=`) |
 | `BotShieldFeedbackTrigger` | `<event>` | `flag=`, `ttl=`, `log=`, `accesslog=`, `mode=` |
-| `BotShieldLoadTrigger` | `<name> state=<n>\|state>=<n>` | `status=`, `log=`, `accesslog=`, `penalty=`, `mode=` (no `redirect=`, `flag=`, `ttl=`, `burn=`) |
+| `BotShieldLoadTrigger` | `<name> state=<n>\|state>=<n>` | `respond=`, `log=`, `accesslog=`, `penalty=`, `mode=` (no `redirect=`, `flag=`, `ttl=`, `burn=`) |
 | `BotShieldSessionCookieName` | `<name>` (single arg, repeatable) | n/a (feeds cookies=session predicate) |
 
 See [policy](policy.md#triggers-predicate-action-engine)
@@ -676,7 +676,7 @@ They compose, which is the point — a scanner probe usually wants both:
 ```apache
 <BotShieldRule env-probe>
     BotShieldPath         /.env
-    BotShieldStatus       403
+    BotShieldRespond      403
     BotShieldLog          scanner-probe
     BotShieldAccessLog    off
 </BotShieldRule>
@@ -743,12 +743,12 @@ compress into one key.
 
 | Intent | Keys | Effect |
 |---|---|---|
-| Block | `status=403` (family default) | Refused from the policy walk. No scoring, no cookie mint, no render. |
-| Challenge | `status=nochallenge tier=noninteractive` | Invisible auto-submitting check. `tier=interactive` for the visible one. |
-| Captcha | `status=nochallenge tier=captcha` | The configured provider's widget. |
-| Score only | `status=nochallenge penalty=<n>` | Adds to the score and lets normal thresholds decide. |
+| Block | `respond=403` (family default) | Refused from the policy walk. No scoring, no cookie mint, no render. |
+| Challenge | `respond=nochallenge tier=noninteractive` | Invisible auto-submitting check. `tier=interactive` for the visible one. |
+| Captcha | `respond=nochallenge tier=captcha` | The configured provider's widget. |
+| Score only | `respond=nochallenge penalty=<n>` | Adds to the score and lets normal thresholds decide. |
 
-`tier=` and `penalty=` both require `status=nochallenge`, because a concrete
+`tier=` and `penalty=` both require `respond=nochallenge`, because a concrete
 status short-circuits the request before any tier is chosen. `tier=`
 accepts `pass`, `noninteractive`, `interactive` and `captcha`, and
 composes by MAX with the score-derived tier and any flag tier floor —
@@ -761,7 +761,7 @@ would keep being re-challenged for the life of a flag it has no way to
 clear. Use `flag=` when you want the reputation to persist, `tier=`
 when you want to challenge the request in front of you.
 
-> A bare `status=nochallenge` — with neither `tier=` nor `penalty=` — keeps its
+> A bare `respond=nochallenge` — with neither `tier=` nor `penalty=` — keeps its
 > original meaning of "record the match and decline out of the handler".
 > That skips scoring entirely, so it will *disable* challenges the
 > defaults would otherwise have raised on those requests. It is a
@@ -775,7 +775,7 @@ when you want to challenge the request in front of you.
     BotShieldPath         /login*
     BotShieldQuery        *return=*
     BotShieldCookies      none
-    BotShieldStatus       403
+    BotShieldRespond      403
     BotShieldLog          login-trap
     BotShieldAccessLog    off
 </BotShieldRule>
@@ -792,14 +792,14 @@ when you want to challenge the request in front of you.
 # rule carrying only ua=* is rejected as having no condition.
 <BotShieldRule no-ua>
     BotShieldUserAgent    ""
-    BotShieldStatus       nochallenge
+    BotShieldRespond       nochallenge
     BotShieldTier         noninteractive
     BotShieldLog          no-ua
 </BotShieldRule>
 ```
 
 Because it fires from the policy walk it short-circuits **before**
-scoring, so a `status=4xx` rule never renders a challenge and never
+scoring, so a `respond=4xx` rule never renders a challenge and never
 reaches PHP.
 
 **Remembering a client is opt-in.** A rule fires, returns its status,
@@ -822,7 +822,7 @@ either, so it costs nothing that was not already being paid.
 # distrust; wrong when it is a NAT with real users behind it.
 <BotShieldRule env-probe>
     BotShieldPath    /.env
-    BotShieldStatus  404
+    BotShieldRespond  404
     BotShieldFlag    scanner_probe
     BotShieldTTL     3600
     BotShieldLog     env-probe
@@ -833,7 +833,7 @@ either, so it costs nothing that was not already being paid.
 # the neighbours are untouched.
 <BotShieldRule wp-probe>
     BotShieldPath    /wp-admin/*
-    BotShieldStatus  404
+    BotShieldRespond  404
     BotShieldBurn    86400
     BotShieldLog     wp-probe
 </BotShieldRule>
@@ -877,12 +877,35 @@ time. It **will** be removed, so rename the block and its closing tag:
 # after
 <BotShieldRule blocked>
     BotShieldPath         /wp-admin/*
-    BotShieldStatus       403
+    BotShieldRespond      403
 </BotShieldRule>
 ```
 
 Nothing else changes: same conditions, same actions, same parser, same
 resulting rule. Only the spelling differs.
+
+#### Renamed from `BotShieldStatus`
+
+`BotShieldStatus` is the old spelling of `BotShieldRespond`. Apache
+already spends the word "status" on `mod_status` and `server-status`,
+and this module ships a dashboard and a metrics endpoint of its own, so
+in a BotShield config the old name read as a monitoring surface rather
+than as the response a rule produces. Nothing in Apache names a
+response code `Status` either: `Redirect` and `ErrorDocument` take one
+as an argument, and `mod_rewrite` spells it `[R=404]`.
+
+The old name still parses and warns at config time. `respond=` is also
+accepted by `BotShieldRateLimitEscalate`, which had its own `status=`
+key -- one concept should not wear two names in the same file.
+
+```apache
+<BotShieldRule blocked>
+    BotShieldPath         /wp-admin/*
+    BotShieldRespond      404
+</BotShieldRule>
+```
+
+Values are unchanged: an HTTP code `100..599`, or `nochallenge`.
 
 #### Migrating from `BotShieldPathTrigger`
 
@@ -902,7 +925,7 @@ BotShieldPathTrigger blocked "/wp-admin/*" status=403
 # after
 <BotShieldRule blocked>
     BotShieldPath         /wp-admin/*
-    BotShieldStatus       403
+    BotShieldRespond      403
 </BotShieldRule>
 ```
 
@@ -916,7 +939,7 @@ match.
 
 | Directive | Syntax | Scope |
 |---|---|---|
-| `BotShieldTrigger` | `[reset] [status=N\|pass] [redirect=URL] [log=tag] [accesslog=on\|off] [flag=NAME] [ttl=N] [penalty=N] [credit=N] [mode=enforce\|observe]` | server / vhost / Directory / Location / LocationMatch / Files / If |
+| `BotShieldTrigger` | `[reset] [respond=N\|pass] [redirect=URL] [log=tag] [accesslog=on\|off] [flag=NAME] [ttl=N] [penalty=N] [credit=N] [mode=enforce\|observe]` | server / vhost / Directory / Location / LocationMatch / Files / If |
 
 The Apache scope the directive lives in IS the predicate; no path
 glob argument. Multiple `BotShieldTrigger` lines in one scope
