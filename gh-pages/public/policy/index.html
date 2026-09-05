@@ -221,8 +221,15 @@ request, rejected at config time. The legacy 5-arg positional form
 <p>For path-conditional 403s, use <code>BotShieldRequestTrigger</code> with
 <code>status=403</code> plus optional <code>ua=</code> / <code>ipspec=</code> match keys (the
 former <code>BotShieldBlockPath</code> directive, retired):</p>
-<pre><code class="language-apache">BotShieldRequestTrigger legacy-admin path=&quot;/wp-admin/*&quot; status=403
-BotShieldRequestTrigger aggressive-scraper path=&quot;/&quot; ua=&quot;AhrefsBot&quot; status=403
+<pre><code class="language-apache">&lt;BotShieldRequestTrigger legacy-admin&gt;
+    BotShieldPath         /wp-admin/*
+    BotShieldStatus       403
+&lt;/BotShieldRequestTrigger&gt;
+&lt;BotShieldRequestTrigger aggressive-scraper&gt;
+    BotShieldPath         /
+    BotShieldUserAgent    AhrefsBot
+    BotShieldStatus       403
+&lt;/BotShieldRequestTrigger&gt;
 </code></pre>
 <p>Match keys (any of):</p>
 <ul>
@@ -403,21 +410,38 @@ action keys are:</p>
 </tbody>
 </table>
 <h3 id="path-triggers">Path triggers</h3>
-<pre><code class="language-apache">BotShieldRequestTrigger admin-honeypot path=&quot;/admin/.env&quot; \
-    status=403 flag=honeypot_hit ttl=3600 log=admin-trap
-BotShieldRequestTrigger api-burst-trap path=&quot;/api/*/burst&quot; \
-    penalty=30 log=api-burst
+<pre><code class="language-apache">&lt;BotShieldRequestTrigger admin-honeypot&gt;
+    BotShieldPath         /admin/.env
+    BotShieldStatus       403
+    BotShieldFlag         honeypot_hit
+    BotShieldTTL          3600
+    BotShieldLog          admin-trap
+&lt;/BotShieldRequestTrigger&gt;
+&lt;BotShieldRequestTrigger api-burst-trap&gt;
+    BotShieldPath         /api/*/burst
+    BotShieldPenalty      30
+    BotShieldLog          api-burst
+&lt;/BotShieldRequestTrigger&gt;
 </code></pre>
 <p>First-match wins (declaration order). On match, the path family's
 <code>status=nochallenge</code> short-circuits to <code>DECLINED</code> (real handler runs); any
 other status is the response code.</p>
 <h3 id="cookie-triggers">Cookie triggers</h3>
-<pre><code class="language-apache">BotShieldCookieTrigger session-active cookie=sessionid \
-    status=nochallenge credit=10
-BotShieldCookieTrigger weak-session cookie=sessionid=guest \
-    penalty=15 log=guest-session
-BotShieldCookieTrigger no-cookies cookies=none \
-    penalty=5 log=cookieless
+<pre><code class="language-apache">&lt;BotShieldCookieTrigger session-active&gt;
+    BotShieldCookie       sessionid
+    BotShieldStatus       nochallenge
+    BotShieldCredit       10
+&lt;/BotShieldCookieTrigger&gt;
+&lt;BotShieldCookieTrigger weak-session&gt;
+    BotShieldCookie       sessionid=guest
+    BotShieldPenalty      15
+    BotShieldLog          guest-session
+&lt;/BotShieldCookieTrigger&gt;
+&lt;BotShieldCookieTrigger no-cookies&gt;
+    BotShieldCookies      none
+    BotShieldPenalty      5
+    BotShieldLog          cookieless
+&lt;/BotShieldCookieTrigger&gt;
 </code></pre>
 <p>Predicate shapes:</p>
 <ul>
@@ -440,10 +464,18 @@ collecting credits/penalties from later cookie triggers. First
 non-pass status short-circuits.</p>
 <h3 id="env-triggers">Env triggers</h3>
 <pre><code class="language-apache">SetEnvIfExpr &quot;%{HTTP:CF-Connecting-IP} =~ /:/&quot; BS_IPV6=1
-BotShieldEnvTrigger ipv6-hint env=BS_IPV6 status=nochallenge credit=2
+&lt;BotShieldEnvTrigger ipv6-hint&gt;
+    BotShieldEnv          BS_IPV6
+    BotShieldStatus       nochallenge
+    BotShieldCredit       2
+&lt;/BotShieldEnvTrigger&gt;
 
 SetEnvIf User-Agent &quot;(?i)\bcurl\b&quot; BS_CLI=1
-BotShieldEnvTrigger curl-hint env=BS_CLI penalty=10 log=cli
+&lt;BotShieldEnvTrigger curl-hint&gt;
+    BotShieldEnv          BS_CLI
+    BotShieldPenalty      10
+    BotShieldLog          cli
+&lt;/BotShieldEnvTrigger&gt;
 </code></pre>
 <p>Predicate shapes:</p>
 <ul>
@@ -466,8 +498,15 @@ the module verifies the HMAC and looks up the event name in the
 configured feedback-trigger table:</p>
 <pre><code class="language-apache">BotShieldAppFeedback                  on
 BotShieldAppIntegrationSecretFile     /etc/botshield/app-integration-secret
-BotShieldFeedbackTrigger scanner-hit  flag=honeypot_hit ttl=3600 log=app-trap
-BotShieldFeedbackTrigger human-pass   flag=app_verified_human ttl=3600
+&lt;BotShieldFeedbackTrigger scanner-hit&gt;
+    BotShieldFlag         honeypot_hit
+    BotShieldTTL          3600
+    BotShieldLog          app-trap
+&lt;/BotShieldFeedbackTrigger&gt;
+&lt;BotShieldFeedbackTrigger human-pass&gt;
+    BotShieldFlag         app_verified_human
+    BotShieldTTL          3600
+&lt;/BotShieldFeedbackTrigger&gt;
 </code></pre>
 <p>The event-name → action indirection is the security property: a
 compromised app can emit any event name, but only configured
@@ -484,8 +523,16 @@ BotShieldLoadRefreshInterval    1
 BotShieldLoadWarmThreshold      65
 BotShieldLoadHotThreshold       85
 
-BotShieldLoadTrigger be-strict state&gt;=warm penalty=20 log=brownout
-BotShieldLoadTrigger drop-noise state=hot   status=503 log=hot-shed
+&lt;BotShieldLoadTrigger be-strict&gt;
+    BotShieldState        &gt;=warm
+    BotShieldPenalty      20
+    BotShieldLog          brownout
+&lt;/BotShieldLoadTrigger&gt;
+&lt;BotShieldLoadTrigger drop-noise&gt;
+    BotShieldState        hot
+    BotShieldStatus       503
+    BotShieldLog          hot-shed
+&lt;/BotShieldLoadTrigger&gt;
 </code></pre>
 <p>Predicates: <code>state=&lt;name&gt;</code> (exact match) or <code>state&gt;=&lt;name&gt;</code> (at
 least). State names: <code>normal</code>, <code>warm</code>, <code>hot</code>. Hysteresis settles
@@ -502,9 +549,18 @@ walk against the IP's accumulated flag bitmap (IP-side via
 flagged-IP table + cookie-side via prior <code>_bs_session</code>). They
 have a different action surface than the five trigger families
 above:</p>
-<pre><code class="language-apache">BotShieldFlagTrigger honeypot_hit       action=tier_floor min=captcha
-BotShieldFlagTrigger honeypot_hit       action=score add=60
-BotShieldFlagTrigger app_verified_human action=score add=-80
+<pre><code class="language-apache">&lt;BotShieldFlagTrigger honeypot_hit&gt;
+    BotShieldAction       tier_floor
+    BotShieldMin          captcha
+&lt;/BotShieldFlagTrigger&gt;
+&lt;BotShieldFlagTrigger honeypot_hit&gt;
+    BotShieldAction       score
+    BotShieldAdd          60
+&lt;/BotShieldFlagTrigger&gt;
+&lt;BotShieldFlagTrigger app_verified_human&gt;
+    BotShieldAction       score
+    BotShieldAdd          -80
+&lt;/BotShieldFlagTrigger&gt;
 </code></pre>
 <p>Args: <code>&lt;flag&gt; [reset] [action=&lt;verb&gt; args...]</code>. The first arg names
 a flag bit (<code>honeypot_hit</code>, <code>scanner_probe</code>, <code>fake_bot</code>,
@@ -526,10 +582,16 @@ prior declaration for that flag from this scope at post-config
 time. <code>reset</code> may appear with or without a trailing <code>action=...</code>:</p>
 <pre><code class="language-apache"># Clear whatever this scope already declared for honeypot_hit,
 # install only one tier-floor rule:
-BotShieldFlagTrigger honeypot_hit reset action=tier_floor min=interactive
+&lt;BotShieldFlagTrigger honeypot_hit&gt;
+    BotShieldReset
+    BotShieldAction       tier_floor
+    BotShieldMin          interactive
+&lt;/BotShieldFlagTrigger&gt;
 
 # Disarm a flag entirely:
-BotShieldFlagTrigger pow_fail_streak reset
+&lt;BotShieldFlagTrigger pow_fail_streak&gt;
+    BotShieldReset
+&lt;/BotShieldFlagTrigger&gt;
 </code></pre>
 <h3 id="no-compiled-in-defaults">No compiled-in defaults</h3>
 <p>The module seeds nothing at config-parse time. A fresh install
@@ -594,16 +656,28 @@ accumulate.</p>
 scope — flag the IP, add a penalty, return a status, observe in
 log-only mode — there's a single per-scope directive:</p>
 <pre><code class="language-apache">&lt;Location &quot;/admin/.env&quot;&gt;
-    BotShieldTrigger flag=honeypot_hit ttl=3600 log=admin-trap
+    &lt;BotShieldTrigger&gt;
+        BotShieldFlag         honeypot_hit
+        BotShieldTTL          3600
+        BotShieldLog          admin-trap
+    &lt;/BotShieldTrigger&gt;
 &lt;/Location&gt;
 
 &lt;LocationMatch &quot;(?i)/wp-(login|admin)&quot;&gt;
-    BotShieldTrigger flag=scanner_probe ttl=3600 penalty=20 log=wp-trap
+    &lt;BotShieldTrigger&gt;
+        BotShieldFlag         scanner_probe
+        BotShieldTTL          3600
+        BotShieldPenalty      20
+        BotShieldLog          wp-trap
+    &lt;/BotShieldTrigger&gt;
 &lt;/LocationMatch&gt;
 
 &lt;Files &quot;*.php&quot;&gt;
     &lt;If &quot;%{REQUEST_URI} =~ m#/uploads/#&quot;&gt;
-        BotShieldTrigger status=403 log=php-in-uploads
+        &lt;BotShieldTrigger&gt;
+            BotShieldStatus       403
+            BotShieldLog          php-in-uploads
+        &lt;/BotShieldTrigger&gt;
     &lt;/If&gt;
 &lt;/Files&gt;
 </code></pre>
@@ -623,16 +697,26 @@ recommended way to express anything <code>&lt;Location&gt;</code>-shaped.</p>
 list and concatenates its own. To drop the inherited list,
 declare <code>BotShieldTrigger reset</code> in the child:</p>
 <pre><code class="language-apache">&lt;Location &quot;/api&quot;&gt;
-    BotShieldTrigger penalty=10 log=api-tax
+    &lt;BotShieldTrigger&gt;
+        BotShieldPenalty      10
+        BotShieldLog          api-tax
+    &lt;/BotShieldTrigger&gt;
 &lt;/Location&gt;
 
 &lt;Location &quot;/api/health&quot;&gt;
-    BotShieldTrigger reset
+    &lt;BotShieldTrigger&gt;
+        BotShieldReset
+    &lt;/BotShieldTrigger&gt;
 &lt;/Location&gt;
 
 &lt;Location &quot;/api/internal&quot;&gt;
-    BotShieldTrigger reset
-    BotShieldTrigger status=nochallenge log=internal-allow
+    &lt;BotShieldTrigger&gt;
+        BotShieldReset
+    &lt;/BotShieldTrigger&gt;
+    &lt;BotShieldTrigger&gt;
+        BotShieldStatus       nochallenge
+        BotShieldLog          internal-allow
+    &lt;/BotShieldTrigger&gt;
 &lt;/Location&gt;
 </code></pre>
 <p><code>reset</code> as the first arg drops triggers inherited from outer

@@ -103,9 +103,21 @@ interactive-tier decisions in that window carried solve proof.
 To genuinely cap the tier, reset each floor and re-add only the score:
 
 ```apache
-BotShieldFlagTrigger honeypot_hit  reset action=score add=60
-BotShieldFlagTrigger fake_bot      reset action=score add=80
-BotShieldFlagTrigger scanner_probe reset action=score add=50
+<BotShieldFlagTrigger honeypot_hit>
+    BotShieldReset
+    BotShieldAction       score
+    BotShieldAdd          60
+</BotShieldFlagTrigger>
+<BotShieldFlagTrigger fake_bot>
+    BotShieldReset
+    BotShieldAction       score
+    BotShieldAdd          80
+</BotShieldFlagTrigger>
+<BotShieldFlagTrigger scanner_probe>
+    BotShieldReset
+    BotShieldAction       score
+    BotShieldAdd          50
+</BotShieldFlagTrigger>
 ```
 
 `reset` is required rather than stylistic: **tier floors MAX across
@@ -527,9 +539,13 @@ template per line (runs of `[0-9._]+` replaced by `X`).
 one does:
 
 ```apache
-BotShieldRule api-bot path="/api/*" \
-    ua=@search,@ai-input,@ai-train,@monitor \
-    status=403 ttl=0 log=api-bot
+<BotShieldRule api-bot>
+    BotShieldPath         /api/*
+    BotShieldUserAgent    @search,@ai-input,@ai-train,@monitor
+    BotShieldStatus       403
+    BotShieldTTL          0
+    BotShieldLog          api-bot
+</BotShieldRule>
 ```
 
 That replaces four rules identical but for a single token. Expanded at
@@ -658,8 +674,12 @@ suppresses the access-log line for a matching request.
 They compose, which is the point — a scanner probe usually wants both:
 
 ```apache
-BotShieldRequestTrigger env-probe path="/.env" status=403 \
-    log=scanner-probe accesslog=off
+<BotShieldRequestTrigger env-probe>
+    BotShieldPath         /.env
+    BotShieldStatus       403
+    BotShieldLog          scanner-probe
+    BotShieldAccessLog    off
+</BotShieldRequestTrigger>
 ```
 
 (An earlier development build overloaded `log=off` for this. That form is
@@ -751,17 +771,31 @@ when you want to challenge the request in front of you.
 # cookieless crawler walking a login redirect chain: path AND query AND
 # cookie-state, one cheap 403 from the policy walk, tagged for fail2ban
 # and kept out of the access log
-BotShieldRequestTrigger login-trap path="/login*" query="*return=*" \
-    cookies=none status=403 log=login-trap accesslog=off
+<BotShieldRequestTrigger login-trap>
+    BotShieldPath         /login*
+    BotShieldQuery        *return=*
+    BotShieldCookies      none
+    BotShieldStatus       403
+    BotShieldLog          login-trap
+    BotShieldAccessLog    off
+</BotShieldRequestTrigger>
 
 # no path condition at all — any URL carrying ?debug=1
-BotShieldRequestTrigger debugparam query="*debug=1*" penalty=20
+<BotShieldRequestTrigger debugparam>
+    BotShieldQuery        *debug=1*
+    BotShieldPenalty      20
+</BotShieldRequestTrigger>
 
 # no User-Agent at all. Absence is not a substring, so this is the one
 # UA form the pattern match cannot express. Note ua="" is a restriction
 # and ua=* is not: "*" (or omitting the key) means "any", which is why a
 # rule carrying only ua=* is rejected as having no condition.
-BotShieldRequestTrigger no-ua ua="" status=nochallenge tier=noninteractive log=no-ua
+<BotShieldRequestTrigger no-ua>
+    BotShieldUserAgent    ""
+    BotShieldStatus       nochallenge
+    BotShieldTier         noninteractive
+    BotShieldLog          no-ua
+</BotShieldRequestTrigger>
 ```
 
 Because it fires from the policy walk it short-circuits **before**
@@ -838,7 +872,10 @@ runtime:
 # before
 BotShieldPathTrigger blocked "/wp-admin/*" status=403
 # after
-BotShieldRequestTrigger blocked path="/wp-admin/*" status=403
+<BotShieldRequestTrigger blocked>
+    BotShieldPath         /wp-admin/*
+    BotShieldStatus       403
+</BotShieldRequestTrigger>
 ```
 
 A note on quoting: values are unquoted by the module, so
@@ -885,10 +922,26 @@ disable challenges entirely. To make a scope genuinely block-only, reset
 the floors and keep the scores:
 
 ```apache
-BotShieldFlagTrigger honeypot_hit    reset action=score add=60
-BotShieldFlagTrigger fake_bot        reset action=score add=80
-BotShieldFlagTrigger scanner_probe   reset action=score add=50
-BotShieldFlagTrigger pow_fail_streak reset action=score add=30
+<BotShieldFlagTrigger honeypot_hit>
+    BotShieldReset
+    BotShieldAction       score
+    BotShieldAdd          60
+</BotShieldFlagTrigger>
+<BotShieldFlagTrigger fake_bot>
+    BotShieldReset
+    BotShieldAction       score
+    BotShieldAdd          80
+</BotShieldFlagTrigger>
+<BotShieldFlagTrigger scanner_probe>
+    BotShieldReset
+    BotShieldAction       score
+    BotShieldAdd          50
+</BotShieldFlagTrigger>
+<BotShieldFlagTrigger pow_fail_streak>
+    BotShieldReset
+    BotShieldAction       score
+    BotShieldAdd          30
+</BotShieldFlagTrigger>
 ```
 
 **A flag score at or above `BotShieldScoreNonInteractive` is an unbreakable
@@ -919,7 +972,11 @@ other signals, which is usually what was meant:
 
 ```apache
 # with the default BotShieldScoreNonInteractive of 20
-BotShieldFlagTrigger scanner_probe   reset action=score add=10
+<BotShieldFlagTrigger scanner_probe>
+    BotShieldReset
+    BotShieldAction       score
+    BotShieldAdd          10
+</BotShieldFlagTrigger>
 ```
 
 Setting `add=0` is worse than a low value: it discards the evidence

@@ -307,9 +307,21 @@ tier directly.</p>
 later because their IP carried <code>scanner_probe</code>. 124 of the 132
 interactive-tier decisions in that window carried solve proof.</p>
 <p>To genuinely cap the tier, reset each floor and re-add only the score:</p>
-<pre><code class="language-apache">BotShieldFlagTrigger honeypot_hit  reset action=score add=60
-BotShieldFlagTrigger fake_bot      reset action=score add=80
-BotShieldFlagTrigger scanner_probe reset action=score add=50
+<pre><code class="language-apache">&lt;BotShieldFlagTrigger honeypot_hit&gt;
+    BotShieldReset
+    BotShieldAction       score
+    BotShieldAdd          60
+&lt;/BotShieldFlagTrigger&gt;
+&lt;BotShieldFlagTrigger fake_bot&gt;
+    BotShieldReset
+    BotShieldAction       score
+    BotShieldAdd          80
+&lt;/BotShieldFlagTrigger&gt;
+&lt;BotShieldFlagTrigger scanner_probe&gt;
+    BotShieldReset
+    BotShieldAction       score
+    BotShieldAdd          50
+&lt;/BotShieldFlagTrigger&gt;
 </code></pre>
 <p><code>reset</code> is required rather than stylistic: <strong>tier floors MAX across
 triggers</strong>, so adding a lower floor beside the compiled-in one is
@@ -976,9 +988,13 @@ template per line (runs of <code>[0-9._]+</code> replaced by <code>X</code>).</p
 <h3 id="alternation-on-ua">Alternation on <code>ua=</code></h3>
 <p><code>ua=</code> accepts a comma-separated list of <code>@selectors</code>, matching if any
 one does:</p>
-<pre><code class="language-apache">BotShieldRule api-bot path=&quot;/api/*&quot; \
-    ua=@search,@ai-input,@ai-train,@monitor \
-    status=403 ttl=0 log=api-bot
+<pre><code class="language-apache">&lt;BotShieldRule api-bot&gt;
+    BotShieldPath         /api/*
+    BotShieldUserAgent    @search,@ai-input,@ai-train,@monitor
+    BotShieldStatus       403
+    BotShieldTTL          0
+    BotShieldLog          api-bot
+&lt;/BotShieldRule&gt;
 </code></pre>
 <p>That replaces four rules identical but for a single token. Expanded at
 parse time into one entry per alternative — this family is strict
@@ -1097,17 +1113,17 @@ semantics and refresh model.</p>
 <tr>
 <td><code>BotShieldRequestTrigger</code></td>
 <td><code>&lt;name&gt;</code> + any of <code>path=&lt;glob&gt;</code> <code>query=&lt;glob&gt;</code> <code>cookies=none|any|session</code> <code>ua=&lt;substring&gt;|@&lt;botgroup&gt;|&quot;&quot;</code> <code>ipspec=&lt;spec&gt;</code> — ANDed, at least one required</td>
-<td><code>status=</code>, <code>redirect=</code>, <code>log=</code>, <code>accesslog=</code>, <code>flag=</code>, <code>ttl=</code>, <code>penalty=</code>, <code>mode=</code> (no <code>credit=</code>)</td>
+<td><code>status=</code>, <code>redirect=</code>, <code>log=</code>, <code>accesslog=</code>, <code>flag=</code>, <code>ttl=</code>, <code>burn=</code>, <code>penalty=</code>, <code>mode=</code> (no <code>credit=</code>)</td>
 </tr>
 <tr>
 <td><code>BotShieldCookieTrigger</code></td>
 <td><code>&lt;name&gt; &lt;pred&gt;</code> (see policy page)</td>
-<td><code>status=</code>, <code>redirect=</code>, <code>log=</code>, <code>accesslog=</code>, <code>flag=</code>, <code>ttl=</code>, <code>penalty=</code>, <code>credit=</code>, <code>mode=</code></td>
+<td><code>status=</code>, <code>redirect=</code>, <code>log=</code>, <code>accesslog=</code>, <code>flag=</code>, <code>ttl=</code>, <code>burn=</code>, <code>penalty=</code>, <code>credit=</code>, <code>mode=</code></td>
 </tr>
 <tr>
 <td><code>BotShieldEnvTrigger</code></td>
 <td><code>&lt;name&gt; &lt;env-pred&gt;</code> (see policy page)</td>
-<td><code>status=</code>, <code>log=</code>, <code>accesslog=</code>, <code>flag=</code>, <code>ttl=</code>, <code>penalty=</code>, <code>credit=</code>, <code>mode=</code> (no <code>redirect=</code>)</td>
+<td><code>status=</code>, <code>log=</code>, <code>accesslog=</code>, <code>flag=</code>, <code>ttl=</code>, <code>burn=</code>, <code>penalty=</code>, <code>credit=</code>, <code>mode=</code> (no <code>redirect=</code>)</td>
 </tr>
 <tr>
 <td><code>BotShieldFeedbackTrigger</code></td>
@@ -1117,7 +1133,7 @@ semantics and refresh model.</p>
 <tr>
 <td><code>BotShieldLoadTrigger</code></td>
 <td><code>&lt;name&gt; state=&lt;n&gt;|state&gt;=&lt;n&gt;</code></td>
-<td><code>status=</code>, <code>log=</code>, <code>accesslog=</code>, <code>penalty=</code>, <code>mode=</code> (no <code>redirect=</code>, <code>flag=</code>, <code>ttl=</code>)</td>
+<td><code>status=</code>, <code>log=</code>, <code>accesslog=</code>, <code>penalty=</code>, <code>mode=</code> (no <code>redirect=</code>, <code>flag=</code>, <code>ttl=</code>, <code>burn=</code>)</td>
 </tr>
 <tr>
 <td><code>BotShieldSessionCookieName</code></td>
@@ -1136,8 +1152,12 @@ cookie. Repeatable; each call appends.</p>
 for fail2ban handoff. <code>accesslog=off</code> is separate and independent: it
 suppresses the access-log line for a matching request.</p>
 <p>They compose, which is the point — a scanner probe usually wants both:</p>
-<pre><code class="language-apache">BotShieldRequestTrigger env-probe path=&quot;/.env&quot; status=403 \
-    log=scanner-probe accesslog=off
+<pre><code class="language-apache">&lt;BotShieldRequestTrigger env-probe&gt;
+    BotShieldPath         /.env
+    BotShieldStatus       403
+    BotShieldLog          scanner-probe
+    BotShieldAccessLog    off
+&lt;/BotShieldRequestTrigger&gt;
 </code></pre>
 <p>(An earlier development build overloaded <code>log=off</code> for this. That form is
 now rejected at config time with a pointer here, rather than silently
@@ -1268,34 +1288,84 @@ logging-and-flagging form, not a no-op.</p>
 <pre><code class="language-apache"># cookieless crawler walking a login redirect chain: path AND query AND
 # cookie-state, one cheap 403 from the policy walk, tagged for fail2ban
 # and kept out of the access log
-BotShieldRequestTrigger login-trap path=&quot;/login*&quot; query=&quot;*return=*&quot; \
-    cookies=none status=403 log=login-trap accesslog=off
+&lt;BotShieldRequestTrigger login-trap&gt;
+    BotShieldPath         /login*
+    BotShieldQuery        *return=*
+    BotShieldCookies      none
+    BotShieldStatus       403
+    BotShieldLog          login-trap
+    BotShieldAccessLog    off
+&lt;/BotShieldRequestTrigger&gt;
 
 # no path condition at all — any URL carrying ?debug=1
-BotShieldRequestTrigger debugparam query=&quot;*debug=1*&quot; penalty=20
+&lt;BotShieldRequestTrigger debugparam&gt;
+    BotShieldQuery        *debug=1*
+    BotShieldPenalty      20
+&lt;/BotShieldRequestTrigger&gt;
 
 # no User-Agent at all. Absence is not a substring, so this is the one
 # UA form the pattern match cannot express. Note ua=&quot;&quot; is a restriction
 # and ua=* is not: &quot;*&quot; (or omitting the key) means &quot;any&quot;, which is why a
 # rule carrying only ua=* is rejected as having no condition.
-BotShieldRequestTrigger no-ua ua=&quot;&quot; status=nochallenge tier=noninteractive ttl=0 log=no-ua
+&lt;BotShieldRequestTrigger no-ua&gt;
+    BotShieldUserAgent    &quot;&quot;
+    BotShieldStatus       nochallenge
+    BotShieldTier         noninteractive
+    BotShieldLog          no-ua
+&lt;/BotShieldRequestTrigger&gt;
 </code></pre>
 <p>Because it fires from the policy walk it short-circuits <strong>before</strong>
 scoring, so a <code>status=4xx</code> rule never renders a challenge and never
 reaches PHP.</p>
-<p><strong>Watch the flag default.</strong> This family flags the matching IP with
-<code>scanner_probe</code> for 3600 s unless you say otherwise — inherited from
-<code>BotShieldPathTrigger</code>, where the target was a handful of scanners
-probing <code>/.env</code> and per-IP memory was worth having. It is the wrong
-default for high-cardinality traffic: at roughly one request per IP the
-flag is never read again, it churns the 50,000-slot flagged-IP table,
-and <code>scanner_probe</code> carries a compiled-in <code>tier_floor</code> of <code>interactive</code> that
-<strong>overrides parked score thresholds</strong> and turns a block-only scope into
-one that renders interstitials. Write <code>ttl=0</code> on rules that match
-one-shot traffic:</p>
-<pre><code class="language-apache">BotShieldRequestTrigger login-trap path=&quot;/login*&quot; query=&quot;*return=*&quot; \
-    cookies=none status=403 ttl=0 log=login-trap accesslog=off
+<p><strong>Remembering a client is opt-in.</strong> A rule fires, returns its status,
+and forgets — unless you ask it to remember. There are two kinds of
+memory and both default to doing nothing.</p>
+<p><code>flag=&lt;name&gt;</code> with <code>ttl=&lt;seconds&gt;</code> marks the <strong>address</strong>. Everything
+sharing that address is marked with it, which is the point behind a
+hosting range and the problem behind a residential NAT.</p>
+<p><code>burn=&lt;seconds&gt;</code> marks the <strong>cookie session</strong>. The mark travels inside
+the cookie the client keeps handing back, so it catches the one browser
+that actually tripped the rule and no one else sharing its address. A
+client that throws cookies away escapes this entirely — and pays the
+full challenge gate regardless, because it can never hold a solve
+either, so it costs nothing that was not already being paid.</p>
+<pre><code class="language-apache"># the address, for an hour. Right when the source itself is what you
+# distrust; wrong when it is a NAT with real users behind it.
+&lt;BotShieldRule env-probe&gt;
+    BotShieldPath    /.env
+    BotShieldStatus  404
+    BotShieldFlag    scanner_probe
+    BotShieldTTL     3600
+    BotShieldLog     env-probe
+&lt;/BotShieldRule&gt;
+
+# the browser, for a day. The probe gets its 404 and a cookie carrying
+# the mark; that session is refused from its next request onward, and
+# the neighbours are untouched.
+&lt;BotShieldRule wp-probe&gt;
+    BotShieldPath    /wp-admin/*
+    BotShieldStatus  404
+    BotShieldBurn    86400
+    BotShieldLog     wp-probe
+&lt;/BotShieldRule&gt;
 </code></pre>
+<blockquote>
+<p><strong>This family used to flag by default</strong>, <code>scanner_probe</code> for 3600 s,
+inherited from <code>BotShieldPathTrigger</code> where the target was a handful
+of scanners probing <code>/.env</code> and per-IP memory was worth having. It was
+the wrong default for high-cardinality traffic: at roughly one request
+per address the flag is never read again and it churns the
+50,000-slot flagged-IP table. Worse, <code>scanner_probe</code> carries a
+compiled-in <code>tier_floor</code> of <code>interactive</code> that <strong>overrides parked
+score thresholds</strong>, so a rule written to block quietly began rendering
+interstitials to whoever shared that address next — with nothing in
+the config saying so.</p>
+<p><strong>Migrating:</strong> a rule written before 2026-09-05 that relied on the
+default now flags nothing. Add <code>BotShieldFlag scanner_probe</code> and
+<code>BotShieldTTL 3600</code> to keep the old behaviour. <code>BotShieldTTL 0</code>,
+which used to be how you switched the default off, is now what the
+default already is and can be deleted.</p>
+</blockquote>
 <h4 id="migrating-from-botshieldpathtrigger">Migrating from <code>BotShieldPathTrigger</code></h4>
 <p><code>BotShieldPathTrigger</code> was renamed on 2026-08-01 and its path glob moved
 from a positional argument to the <code>path=</code> key. The old name had stopped
@@ -1308,7 +1378,10 @@ runtime:</p>
 <pre><code class="language-apache"># before
 BotShieldPathTrigger blocked &quot;/wp-admin/*&quot; status=403
 # after
-BotShieldRequestTrigger blocked path=&quot;/wp-admin/*&quot; status=403
+&lt;BotShieldRequestTrigger blocked&gt;
+    BotShieldPath         /wp-admin/*
+    BotShieldStatus       403
+&lt;/BotShieldRequestTrigger&gt;
 </code></pre>
 <p>A note on quoting: values are unquoted by the module, so
 <code>path=&quot;/login*&quot;</code> and <code>path=/login*</code> behave identically. Apache's
@@ -1368,10 +1441,26 @@ defaults carry one — <code>honeypot_hit</code> and <code>fake_bot</code> (capt
 any of them is challenged even in a scope whose thresholds are parked to
 disable challenges entirely. To make a scope genuinely block-only, reset
 the floors and keep the scores:</p>
-<pre><code class="language-apache">BotShieldFlagTrigger honeypot_hit    reset action=score add=60
-BotShieldFlagTrigger fake_bot        reset action=score add=80
-BotShieldFlagTrigger scanner_probe   reset action=score add=50
-BotShieldFlagTrigger pow_fail_streak reset action=score add=30
+<pre><code class="language-apache">&lt;BotShieldFlagTrigger honeypot_hit&gt;
+    BotShieldReset
+    BotShieldAction       score
+    BotShieldAdd          60
+&lt;/BotShieldFlagTrigger&gt;
+&lt;BotShieldFlagTrigger fake_bot&gt;
+    BotShieldReset
+    BotShieldAction       score
+    BotShieldAdd          80
+&lt;/BotShieldFlagTrigger&gt;
+&lt;BotShieldFlagTrigger scanner_probe&gt;
+    BotShieldReset
+    BotShieldAction       score
+    BotShieldAdd          50
+&lt;/BotShieldFlagTrigger&gt;
+&lt;BotShieldFlagTrigger pow_fail_streak&gt;
+    BotShieldReset
+    BotShieldAction       score
+    BotShieldAdd          30
+&lt;/BotShieldFlagTrigger&gt;
 </code></pre>
 <p><strong>A flag score at or above <code>BotShieldScoreNonInteractive</code> is an unbreakable
 loop, not a challenge.</strong> The replacement scores above fix the
@@ -1398,7 +1487,11 @@ flag alone to challenge indefinitely. A flag worth less than the
 threshold still contributes toward a challenge in combination with
 other signals, which is usually what was meant:</p>
 <pre><code class="language-apache"># with the default BotShieldScoreNonInteractive of 20
-BotShieldFlagTrigger scanner_probe   reset action=score add=10
+&lt;BotShieldFlagTrigger scanner_probe&gt;
+    BotShieldReset
+    BotShieldAction       score
+    BotShieldAdd          10
+&lt;/BotShieldFlagTrigger&gt;
 </code></pre>
 <p>Setting <code>add=0</code> is worse than a low value: it discards the evidence
 rather than de-weighting it. And note this trap is invisible in
