@@ -744,29 +744,70 @@ compress into one key.
 
 | Intent | Keys | Effect |
 |---|---|---|
-| Block | `respond=403` (family default) | Refused from the policy walk. No scoring, no cookie mint, no render. |
-| Challenge | `respond=nochallenge tier=noninteractive` | Invisible auto-submitting check. `tier=interactive` for the visible one. |
-| Captcha | `respond=nochallenge tier=captcha` | The configured provider's widget. |
-| Score only | `respond=nochallenge penalty=<n>` | Adds to the score and lets normal thresholds decide. |
+| Block | `BotShieldRespond 403` (family default) | Refused from the policy walk. No scoring, no cookie mint, no render. |
+| Challenge | `BotShieldChallenge noninteractive` | Invisible auto-submitting check. `interactive` for the visible one. |
+| Captcha | `BotShieldChallenge captcha` | The configured provider's widget. |
+| Score only | `BotShieldPenalty <n>` | Adds to the score and lets normal thresholds decide. |
+| Decide nothing | `BotShieldNoChallenge` | Records the match, skips scoring, hands the request to the real handler. |
 
-`tier=` and `penalty=` both require `respond=nochallenge`, because a concrete
-status short-circuits the request before any tier is chosen. `tier=`
-accepts `pass`, `noninteractive`, `interactive` and `captcha`, and
-composes by MAX with the score-derived tier and any flag tier floor —
-it raises the floor, it never downgrades.
+`BotShieldChallenge` accepts `noninteractive`, `interactive` and
+`captcha`. It composes by MAX with the score-derived tier and any flag
+tier floor — it raises the floor, it never downgrades.
 
-`tier=` sets that floor on **this request only**. That is the
-difference from `flag=` plus a `BotShieldFlagTrigger` tier floor, which
-writes per-IP state with a TTL: a client that solves the challenge
-would keep being re-challenged for the life of a flag it has no way to
-clear. Use `flag=` when you want the reputation to persist, `tier=`
-when you want to challenge the request in front of you.
+It sets that floor on **this request only**. That is the difference from
+`BotShieldFlagIP` plus a `BotShieldFlagTrigger` tier floor, which writes
+per-address state with a window: a client that solves the challenge
+would keep being re-challenged for the life of a flag it cannot clear.
+Flag when you want the reputation to persist; challenge when you want to
+gate the request in front of you.
 
-> A bare `respond=nochallenge` — with neither `tier=` nor `penalty=` — keeps its
-> original meaning of "record the match and decline out of the handler".
-> That skips scoring entirely, so it will *disable* challenges the
-> defaults would otherwise have raised on those requests. It is a
-> logging-and-flagging form, not a no-op.
+#### `BotShieldNoChallenge`
+
+Takes no argument. The rule records its match, **skips scoring**, and
+declines out of the handler so the real site serves the request.
+
+It is named for what it waives. The request still meets rate limiting
+and robots.txt, and the rule's own flag writes still happen — so this is
+not an exemption from BotShield, only from the challenge decision. An
+earlier spelling, `pass`, was retired for inviting the opposite reading,
+and `Exempt` would have claimed more still.
+
+Skipping scoring is the part to be deliberate about: it *disables*
+challenges the defaults would otherwise have raised on those requests.
+It is a logging-and-flagging form, not a no-op, and `grep
+BotShieldNoChallenge` over a config lists every place protection is
+switched off.
+
+```apache
+# a real file under /administrator/ is served normally; the rest of the
+# ladder below only ever sees paths that do not exist.
+<BotShieldRule admin-exists>
+    BotShieldPath         /administrator/*
+    BotShieldExists       yes
+    BotShieldNoChallenge
+</BotShieldRule>
+```
+
+#### Deprecated: `BotShieldTier`, and `BotShieldRespond nochallenge`
+
+Both still parse and warn at config time.
+
+`BotShieldTier` required `BotShieldRespond nochallenge` beside it,
+because a concrete status short-circuits before any tier is chosen. That
+companion carried no meaning of its own — you wrote it to be allowed to
+write the line you wanted. `BotShieldChallenge` sets both, so it goes
+away. It also names an act rather than a taxonomy: "tier" is what the
+levels are called internally, "challenge" is what the rule does.
+
+A bare `BotShieldRespond nochallenge` — with no tier and no penalty —
+was how you spelled "decide nothing", by *omission*. That is now
+`BotShieldNoChallenge`, said outright.
+
+| Old | New |
+|---|---|
+| `BotShieldRespond nochallenge` + `BotShieldTier noninteractive` | `BotShieldChallenge noninteractive` |
+| `BotShieldRespond nochallenge` + `BotShieldPenalty 20` | `BotShieldPenalty 20` |
+| `BotShieldRespond nochallenge` (bare) | `BotShieldNoChallenge` |
 
 ```apache
 # cookieless crawler walking a login redirect chain: path AND query AND

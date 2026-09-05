@@ -232,14 +232,15 @@ static const char *bs_trigger_known_keys(bs_trigger_family fam)
 {
     switch (fam) {
     case BS_TFAMILY_REQUEST:
-        return "respond, redirect, log, accesslog, flagip, flagsession, "
-               "burn, penalty, tier, mode";
+        return "respond, nochallenge, challenge, redirect, log, "
+               "accesslog, flagip, flagsession, burn, penalty, mode";
     case BS_TFAMILY_COOKIE:
-        return "respond, redirect, log, accesslog, flagip, flagsession, "
-               "burn, penalty, credit, mode";
+        return "respond, nochallenge, challenge, redirect, log, "
+               "accesslog, flagip, flagsession, burn, penalty, credit, "
+               "mode";
     case BS_TFAMILY_ENV:
-        return "respond, log, accesslog, flagip, flagsession, burn, "
-               "penalty, credit, mode";
+        return "respond, nochallenge, challenge, log, accesslog, flagip, "
+               "flagsession, burn, penalty, credit, mode";
     case BS_TFAMILY_FEEDBACK:
         /* mode=observe means "log :observe but skip the flagged-IP
          * write" — meaningful for staging a feedback rule before
@@ -248,8 +249,9 @@ static const char *bs_trigger_known_keys(bs_trigger_family fam)
     case BS_TFAMILY_LOAD:
         return "status, log, accesslog, penalty, credit, mode";
     case BS_TFAMILY_SCOPE:
-        return "respond, redirect, log, accesslog, flagip, flagsession, "
-               "burn, penalty, credit, mode";
+        return "respond, nochallenge, challenge, redirect, log, "
+               "accesslog, flagip, flagsession, burn, penalty, credit, "
+               "mode";
     case BS_TFAMILY_FLAG:
         /* Flag triggers use a separate parser. This entry exists
          * for switch-exhaustiveness; the flag setter prints its
@@ -344,6 +346,24 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
     const char *dname = bs_trigger_family_dname(fam);
     const char *eq = strchr(arg, '=');
     if (!eq) {
+        /* BotShieldNoChallenge: this rule produces no response of its
+         * own and no challenge decision is made for the request.
+         *
+         * Named for what it waives rather than what it grants. The
+         * request still meets rate limiting and robots.txt, and the
+         * rule's own flag writes still happen -- so "exempt" would
+         * claim more than it does. `pass` was retired for precisely
+         * that overclaim; this is the name that replaced it, and the
+         * directive borrows it rather than inventing a third word.
+         *
+         * Valueless, the way BotShieldReset is: the block walker
+         * passes a directive with no argument through as a bare
+         * token. */
+        if (strcasecmp(arg, "nochallenge") == 0) {
+            a->status_code = BS_TRIGGER_STATUS_PASS;
+            a->status_explicit = 1;
+            return NULL;
+        }
         return apr_psprintf(pool,
             "%s: extra arg '%s' must be key=value", dname, arg);
     }
@@ -413,6 +433,34 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
             a->status_code = (int)code;
         }
         a->status_explicit = 1;
+    } else if (BS_AK("challenge")) {
+        /* BotShieldChallenge <tier> -- what BotShieldTier said, plus
+         * the thing it always needed alongside it.
+         *
+         * `tier=` required `status=nochallenge` as a companion, because
+         * a concrete status short-circuits before any tier is chosen.
+         * That companion carried no meaning of its own: you wrote it to
+         * be allowed to write the line you actually wanted. Issuing a
+         * challenge already implies producing no other response, so
+         * this sets both and the companion disappears.
+         *
+         * Also names an act rather than a taxonomy. "Tier" is what the
+         * levels are called internally; "challenge" is what the rule
+         * does. */
+        if      (!strcasecmp(val, "noninteractive"))
+            a->tier_floor = BS_TIER_NONINTERACTIVE;
+        else if (!strcasecmp(val, "interactive"))
+            a->tier_floor = BS_TIER_INTERACTIVE;
+        else if (!strcasecmp(val, "captcha"))
+            a->tier_floor = BS_TIER_CAPTCHA;
+        else return apr_psprintf(pool,
+            "%s: BotShieldChallenge '%s' must be noninteractive, "
+            "interactive or captcha. To make a rule decide nothing, "
+            "write BotShieldNoChallenge instead.", dname, val);
+        if (!a->status_explicit) {
+            a->status_code = BS_TRIGGER_STATUS_PASS;
+            a->status_explicit = 1;
+        }
     } else if (BS_AK("tier")) {
         if      (!strcasecmp(val, "nochallenge")) a->tier_floor = BS_TIER_PASS;
         else if (!strcasecmp(val, "noninteractive"))
@@ -427,6 +475,10 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
         else return apr_psprintf(pool,
             "%s: tier='%s' must be nochallenge/noninteractive/interactive/"
             "captcha", dname, val);
+        ap_log_error(APLOG_MARK, APLOG_WARNING, 0, NULL,
+            "mod_botshield: %s: BotShieldTier is deprecated and will be "
+            "removed; write BotShieldChallenge <tier>, which needs no "
+            "BotShieldRespond nochallenge alongside it.", dname);
     } else if (BS_AK("redirect")) {
         if (fam == BS_TFAMILY_ENV || fam == BS_TFAMILY_LOAD) {
             return apr_psprintf(pool,
@@ -2176,7 +2228,13 @@ const char *bs_section_trigger(cmd_parms *cmd, void *dconf, const char *arg,
          * through as a bare token, not as key=value, because that is
          * what those parsers read. */
         if (!*value && !quoted) {
-            if (strcmp(key, "reset") != 0) {
+            /* Valueless directives. `reset` clears inherited triggers;
+             * `nochallenge` is BotShieldNoChallenge, which takes no
+             * argument because there is nothing to parameterise -- the
+             * rule decides nothing. Both pass through as bare tokens
+             * for the family setters to read. */
+            if (strcmp(key, "reset") != 0
+                && strcmp(key, "nochallenge") != 0) {
                 return apr_psprintf(p,
                     "<%s %s>: %s needs a value", dname, name, directive);
             }

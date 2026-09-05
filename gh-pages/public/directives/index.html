@@ -1252,44 +1252,93 @@ compress into one key.</p>
 <tbody>
 <tr>
 <td>Block</td>
-<td><code>respond=403</code> (family default)</td>
+<td><code>BotShieldRespond 403</code> (family default)</td>
 <td>Refused from the policy walk. No scoring, no cookie mint, no render.</td>
 </tr>
 <tr>
 <td>Challenge</td>
-<td><code>respond=nochallenge tier=noninteractive</code></td>
-<td>Invisible auto-submitting check. <code>tier=interactive</code> for the visible one.</td>
+<td><code>BotShieldChallenge noninteractive</code></td>
+<td>Invisible auto-submitting check. <code>interactive</code> for the visible one.</td>
 </tr>
 <tr>
 <td>Captcha</td>
-<td><code>respond=nochallenge tier=captcha</code></td>
+<td><code>BotShieldChallenge captcha</code></td>
 <td>The configured provider's widget.</td>
 </tr>
 <tr>
 <td>Score only</td>
-<td><code>respond=nochallenge penalty=&lt;n&gt;</code></td>
+<td><code>BotShieldPenalty &lt;n&gt;</code></td>
 <td>Adds to the score and lets normal thresholds decide.</td>
+</tr>
+<tr>
+<td>Decide nothing</td>
+<td><code>BotShieldNoChallenge</code></td>
+<td>Records the match, skips scoring, hands the request to the real handler.</td>
 </tr>
 </tbody>
 </table>
-<p><code>tier=</code> and <code>penalty=</code> both require <code>respond=nochallenge</code>, because a concrete
-status short-circuits the request before any tier is chosen. <code>tier=</code>
-accepts <code>pass</code>, <code>noninteractive</code>, <code>interactive</code> and <code>captcha</code>, and
-composes by MAX with the score-derived tier and any flag tier floor —
-it raises the floor, it never downgrades.</p>
-<p><code>tier=</code> sets that floor on <strong>this request only</strong>. That is the
-difference from <code>flag=</code> plus a <code>BotShieldFlagTrigger</code> tier floor, which
-writes per-IP state with a TTL: a client that solves the challenge
-would keep being re-challenged for the life of a flag it has no way to
-clear. Use <code>flag=</code> when you want the reputation to persist, <code>tier=</code>
-when you want to challenge the request in front of you.</p>
-<blockquote>
-<p>A bare <code>respond=nochallenge</code> — with neither <code>tier=</code> nor <code>penalty=</code> — keeps its
-original meaning of &quot;record the match and decline out of the handler&quot;.
-That skips scoring entirely, so it will <em>disable</em> challenges the
-defaults would otherwise have raised on those requests. It is a
-logging-and-flagging form, not a no-op.</p>
-</blockquote>
+<p><code>BotShieldChallenge</code> accepts <code>noninteractive</code>, <code>interactive</code> and
+<code>captcha</code>. It composes by MAX with the score-derived tier and any flag
+tier floor — it raises the floor, it never downgrades.</p>
+<p>It sets that floor on <strong>this request only</strong>. That is the difference from
+<code>BotShieldFlagIP</code> plus a <code>BotShieldFlagTrigger</code> tier floor, which writes
+per-address state with a window: a client that solves the challenge
+would keep being re-challenged for the life of a flag it cannot clear.
+Flag when you want the reputation to persist; challenge when you want to
+gate the request in front of you.</p>
+<h4 id="botshieldnochallenge"><code>BotShieldNoChallenge</code></h4>
+<p>Takes no argument. The rule records its match, <strong>skips scoring</strong>, and
+declines out of the handler so the real site serves the request.</p>
+<p>It is named for what it waives. The request still meets rate limiting
+and robots.txt, and the rule's own flag writes still happen — so this is
+not an exemption from BotShield, only from the challenge decision. An
+earlier spelling, <code>pass</code>, was retired for inviting the opposite reading,
+and <code>Exempt</code> would have claimed more still.</p>
+<p>Skipping scoring is the part to be deliberate about: it <em>disables</em>
+challenges the defaults would otherwise have raised on those requests.
+It is a logging-and-flagging form, not a no-op, and <code>grep BotShieldNoChallenge</code> over a config lists every place protection is
+switched off.</p>
+<pre><code class="language-apache"># a real file under /administrator/ is served normally; the rest of the
+# ladder below only ever sees paths that do not exist.
+&lt;BotShieldRule admin-exists&gt;
+    BotShieldPath         /administrator/*
+    BotShieldExists       yes
+    BotShieldNoChallenge
+&lt;/BotShieldRule&gt;
+</code></pre>
+<h4 id="deprecated-botshieldtier-and-botshieldrespond-nochallenge">Deprecated: <code>BotShieldTier</code>, and <code>BotShieldRespond nochallenge</code></h4>
+<p>Both still parse and warn at config time.</p>
+<p><code>BotShieldTier</code> required <code>BotShieldRespond nochallenge</code> beside it,
+because a concrete status short-circuits before any tier is chosen. That
+companion carried no meaning of its own — you wrote it to be allowed to
+write the line you wanted. <code>BotShieldChallenge</code> sets both, so it goes
+away. It also names an act rather than a taxonomy: &quot;tier&quot; is what the
+levels are called internally, &quot;challenge&quot; is what the rule does.</p>
+<p>A bare <code>BotShieldRespond nochallenge</code> — with no tier and no penalty —
+was how you spelled &quot;decide nothing&quot;, by <em>omission</em>. That is now
+<code>BotShieldNoChallenge</code>, said outright.</p>
+<table>
+<thead>
+<tr>
+<th>Old</th>
+<th>New</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BotShieldRespond nochallenge</code> + <code>BotShieldTier noninteractive</code></td>
+<td><code>BotShieldChallenge noninteractive</code></td>
+</tr>
+<tr>
+<td><code>BotShieldRespond nochallenge</code> + <code>BotShieldPenalty 20</code></td>
+<td><code>BotShieldPenalty 20</code></td>
+</tr>
+<tr>
+<td><code>BotShieldRespond nochallenge</code> (bare)</td>
+<td><code>BotShieldNoChallenge</code></td>
+</tr>
+</tbody>
+</table>
 <pre><code class="language-apache"># cookieless crawler walking a login redirect chain: path AND query AND
 # cookie-state, one cheap 403 from the policy walk, tagged for fail2ban
 # and kept out of the access log
