@@ -434,13 +434,23 @@ def test_robots_live_refresh_picks_up_changes(
         os.utime(robots_path, (future, future))
 
         # Wait for the watchdog to tick and the refresh to run. Poll
-        # up to 20s — under load (full parallel suite) watchdog
-        # scheduling jitters far past the 1s interval would suggest,
-        # and after the parallel phase Apache may have non-trivial
-        # backlog. 20s is still cheap if the watchdog is responsive;
-        # generous enough to avoid flakes on busier runners. We still
-        # fail the test if the refresh never lands.
-        deadline = time.time() + 20
+        # until the deadline — under load, watchdog scheduling jitters
+        # far past what the 1s interval would suggest.
+        #
+        # Widened from 20s on 2026-09-05 after this failed two of about
+        # five CI runs in a day while passing 3/3 locally. CI runs the
+        # 60-second soak concurrently with this suite, so mod_watchdog
+        # competes for a thread in a way it never does on a developer
+        # box -- twenty missed 1s intervals is starvation, not a slow
+        # filesystem.
+        #
+        # The loop exits the moment the refresh lands, so a healthy run
+        # pays nothing for the larger number; only a genuine watchdog
+        # regression waits it out. That is the trade: slower to report
+        # a scheduling bug, incapable of hiding a wrong answer, which
+        # is the right way round for an async timing check.
+        started = time.time()
+        deadline = started + 45
         r_after = None
         while time.time() < deadline:
             r_after = client.get("/admin", xff=fresh_ip, ua=GPTBOT_UA)
@@ -450,7 +460,8 @@ def test_robots_live_refresh_picks_up_changes(
 
     assert r_after is not None and r_after.status_code != 403, (
         "robots.txt was rewritten to allow /admin, but the refresh "
-        "watchdog didn't swap in the new rules within 20s — request "
+        f"watchdog didn't swap in the new rules within "
+        f"{time.time() - started:.0f}s — request "
         "is still blocked. Check BotShieldRobotsRefreshInterval wiring "
         f"(last status={r_after.status_code if r_after else 'n/a'})."
     )
