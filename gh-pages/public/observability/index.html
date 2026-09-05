@@ -533,7 +533,7 @@ a crawl-delay would cost before it refuses anyone:</p>
 <pre><code class="language-apache">BotShieldBotRateLimit * 1 sec mode=observe
 </code></pre>
 <p>Every request that would have been refused is recorded with reason
-<code>bot-rate:&lt;slug&gt;</code> and outcome <code>observe</code>, so the decision log answers
+<code>botrate:&lt;slug&gt;</code> and outcome <code>observe</code>, so the decision log answers
 &quot;who would this have throttled&quot; from real traffic rather than from a
 guess. There is no rate limiting at all until a rule like that exists,
 so starting in observe mode costs nothing.</p>

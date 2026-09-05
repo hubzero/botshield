@@ -832,7 +832,7 @@ metrics endpoint and decision log still cover everything.
 ## Who may read the dashboard and metrics
 
 Each endpoint is closed until its own directive names someone. See
-[the directive reference](directives.md#observabilityendpoint-access)
+[the directive reference](directives.md#observability-endpoint-access)
 for the full syntax; the short version is a list of addresses or CIDR
 blocks, one directive per endpoint:
 

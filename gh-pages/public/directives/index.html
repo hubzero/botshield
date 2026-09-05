@@ -1013,7 +1013,7 @@ cover unknownbot, fake-bot, and slugs a mid-run directory refresh
 added after startup. Because the slug universe is bounded by the
 directory, every slot is allocated at config time — request time is a
 single hash probe. Over-budget returns 429 + <code>Retry-After</code> with reason
-<code>bot-rate:&lt;slug&gt;</code>. Robots.txt <code>Crawl-delay</code> groups feed the same
+<code>botrate:&lt;slug&gt;</code>. Robots.txt <code>Crawl-delay</code> groups feed the same
 machinery.</p>
 <h3 id="nothing-is-rate-limited-until-you-say-so">Nothing is rate limited until you say so</h3>
 <p>There is no default. An unset <code>BotShieldBotRateLimit</code> rate-limits

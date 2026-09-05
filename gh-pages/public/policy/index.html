@@ -476,7 +476,7 @@ covered in <a href="../captcha/index.html">captcha</a>.</p>
 <p>Feedback runs on the response path but its side effect is
 future-request state (the flagged-IP write). Both
 <code>BotShieldEnabled LogOnly</code> and per-trigger <code>mode=observe</code> apply —
-either gates the filter into logging <code>feedback-trigger:&lt;event&gt;: observe</code> and skipping the SHM mutation. See
+either gates the filter into logging <code>feedbacktrigger:&lt;event&gt;: observe</code> and skipping the SHM mutation. See
 <a href="../staging/index.html">staging</a>.</p>
 <h3 id="load-triggers">Load triggers</h3>
 <pre><code class="language-apache">BotShieldLoadStateFile          /run/botshield/load-state

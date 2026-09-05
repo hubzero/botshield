@@ -340,7 +340,7 @@ mappings reach module memory. Renaming, retiring, or muting an
 event is a config change with no app-side coordination.</p>
 <p>Feedback honors both <code>BotShieldEnabled LogOnly</code> and per-trigger
 <code>mode=observe</code> — under either gate the filter logs
-<code>feedback-trigger:&lt;event&gt;:observe</code> and skips the flagged-IP write.
+<code>feedbacktrigger:&lt;event&gt;:observe</code> and skips the flagged-IP write.
 The &quot;side effect&quot; of a feedback trigger is future-request state
 (the IP flag), so observe-mode is meaningful even though the
 response has already shipped.</p>
