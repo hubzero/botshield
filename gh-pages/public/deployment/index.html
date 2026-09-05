@@ -309,6 +309,11 @@ should size capacity directives to match.</p>
 <td>Open-addressed slot count for flagged IPs. Range 1024..1000000</td>
 </tr>
 <tr>
+<td><code>BotShieldForgetIPAfter</code></td>
+<td><code>3600</code></td>
+<td>Seconds an address stays flagged, counted from its last flagging. Range 1..2592000</td>
+</tr>
+<tr>
 <td><code>BotShieldBloomIPs</code></td>
 <td><code>1000000</code></td>
 <td>Expected unique-IPs working set. Drives Bloom filter dimensions</td>

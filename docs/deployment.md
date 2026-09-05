@@ -230,6 +230,7 @@ should size capacity directives to match.
 |---|---|---|
 | `BotShieldShmSize` | `16M` | Total SHM budget (header + tables + Bloom buffers). Range 128K..256M |
 | `BotShieldFlaggedIPCapacity` | `50000` | Open-addressed slot count for flagged IPs. Range 1024..1000000 |
+| `BotShieldForgetIPAfter` | `3600` | Seconds an address stays flagged, counted from its last flagging. Range 1..2592000 |
 | `BotShieldBloomIPs` | `1000000` | Expected unique-IPs working set. Drives Bloom filter dimensions |
 | `BotShieldBloomWindow` | `604800` | Bloom rotation window (seconds). Rotation at window/2 |
 | `BotShieldRateLimitEscalateCapacity` | `50000` | strike-table slots |

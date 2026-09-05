@@ -715,6 +715,11 @@ Retry-After; <code>MaxInFlight</code> returns 503. 0 on <code>RateLimit</code> d
 <td><code>50000</code> (1024..1000000)</td>
 </tr>
 <tr>
+<td><code>BotShieldForgetIPAfter</code></td>
+<td><code>N</code> (sec)</td>
+<td><code>3600</code> (1..2592000)</td>
+</tr>
+<tr>
 <td><code>BotShieldIPv6PrefixLen</code></td>
 <td><code>N</code> (0..128)</td>
 <td><code>64</code></td>
@@ -1113,22 +1118,22 @@ semantics and refresh model.</p>
 <tr>
 <td><code>BotShieldRule</code></td>
 <td><code>&lt;name&gt;</code> + any of <code>path=&lt;glob&gt;</code> <code>query=&lt;glob&gt;</code> <code>cookies=none|any|session</code> <code>ua=&lt;substring&gt;|@&lt;botgroup&gt;|&quot;&quot;</code> <code>ipspec=&lt;spec&gt;</code> — ANDed, at least one required</td>
-<td><code>respond=</code>, <code>redirect=</code>, <code>log=</code>, <code>accesslog=</code>, <code>flag=</code>, <code>ttl=</code>, <code>burn=</code>, <code>penalty=</code>, <code>mode=</code> (no <code>credit=</code>)</td>
+<td><code>respond=</code>, <code>redirect=</code>, <code>log=</code>, <code>accesslog=</code>, <code>flagip=</code>, <code>flagsession=</code>, <code>burn=</code>, <code>penalty=</code>, <code>mode=</code> (no <code>credit=</code>)</td>
 </tr>
 <tr>
 <td><code>BotShieldCookieTrigger</code></td>
 <td><code>&lt;name&gt; &lt;pred&gt;</code> (see policy page)</td>
-<td><code>respond=</code>, <code>redirect=</code>, <code>log=</code>, <code>accesslog=</code>, <code>flag=</code>, <code>ttl=</code>, <code>burn=</code>, <code>penalty=</code>, <code>credit=</code>, <code>mode=</code></td>
+<td><code>respond=</code>, <code>redirect=</code>, <code>log=</code>, <code>accesslog=</code>, <code>flagip=</code>, <code>flagsession=</code>, <code>burn=</code>, <code>penalty=</code>, <code>credit=</code>, <code>mode=</code></td>
 </tr>
 <tr>
 <td><code>BotShieldEnvTrigger</code></td>
 <td><code>&lt;name&gt; &lt;env-pred&gt;</code> (see policy page)</td>
-<td><code>respond=</code>, <code>log=</code>, <code>accesslog=</code>, <code>flag=</code>, <code>ttl=</code>, <code>burn=</code>, <code>penalty=</code>, <code>credit=</code>, <code>mode=</code> (no <code>redirect=</code>)</td>
+<td><code>respond=</code>, <code>log=</code>, <code>accesslog=</code>, <code>flagip=</code>, <code>flagsession=</code>, <code>burn=</code>, <code>penalty=</code>, <code>credit=</code>, <code>mode=</code> (no <code>redirect=</code>)</td>
 </tr>
 <tr>
 <td><code>BotShieldFeedbackTrigger</code></td>
 <td><code>&lt;event&gt;</code></td>
-<td><code>flag=</code>, <code>ttl=</code>, <code>log=</code>, <code>accesslog=</code>, <code>mode=</code></td>
+<td><code>flagip=</code>, <code>flagsession=</code> (both accept <code>+</code>/<code>-</code>/<code>=</code>), <code>log=</code>, <code>accesslog=</code>, <code>mode=</code></td>
 </tr>
 <tr>
 <td><code>BotShieldLoadTrigger</code></td>
@@ -1317,55 +1322,125 @@ logging-and-flagging form, not a no-op.</p>
 <p>Because it fires from the policy walk it short-circuits <strong>before</strong>
 scoring, so a <code>respond=4xx</code> rule never renders a challenge and never
 reaches PHP.</p>
-<p><strong>Remembering a client is opt-in.</strong> A rule fires, returns its status,
-and forgets — unless you ask it to remember. There are two kinds of
-memory and both default to doing nothing.</p>
-<p><code>flag=&lt;name&gt;</code> with <code>ttl=&lt;seconds&gt;</code> marks the <strong>address</strong>. Everything
-sharing that address is marked with it, which is the point behind a
-hosting range and the problem behind a residential NAT.</p>
-<p><code>burn=&lt;seconds&gt;</code> marks the <strong>cookie session</strong>. The mark travels inside
-the cookie the client keeps handing back, so it catches the one browser
-that actually tripped the rule and no one else sharing its address. A
-client that throws cookies away escapes this entirely — and pays the
+<p><strong>Remembering a client is opt-in.</strong> A rule fires, responds, and forgets
+— unless you ask it to remember. Two directives, two subjects, and
+neither happens unless the rule says so.</p>
+<p><code>BotShieldFlagIP &lt;flag&gt;</code> marks the <strong>address</strong>. Everything sharing that
+address is marked with it: the point behind a hosting range, the
+problem behind a residential NAT.</p>
+<p><code>BotShieldFlagSession &lt;flag&gt;</code> marks the <strong>cookie session</strong>. The mark
+travels inside the cookie the client keeps handing back, so it catches
+the one browser that tripped the rule and nobody else sharing its
+address. A client that throws cookies away escapes it — and meets the
 full challenge gate regardless, because it can never hold a solve
 either, so it costs nothing that was not already being paid.</p>
-<pre><code class="language-apache"># the address, for an hour. Right when the source itself is what you
-# distrust; wrong when it is a NAT with real users behind it.
+<pre><code class="language-apache"># the address: right when the source itself is what you distrust,
+# wrong when it is a NAT with real users behind it.
 &lt;BotShieldRule env-probe&gt;
-    BotShieldPath    /.env
-    BotShieldRespond  404
-    BotShieldFlag    scanner_probe
-    BotShieldTTL     3600
-    BotShieldLog     env-probe
+    BotShieldPath         /.env
+    BotShieldRespond      404
+    BotShieldFlagIP       scanner_probe
+    BotShieldLog          env-probe
 &lt;/BotShieldRule&gt;
 
-# the browser, for a day. The probe gets its 404 and a cookie carrying
-# the mark; that session is refused from its next request onward, and
-# the neighbours are untouched.
+# the browser: the probe gets its 404 and a cookie carrying the mark,
+# and the neighbours are untouched.
 &lt;BotShieldRule wp-probe&gt;
-    BotShieldPath    /wp-admin/*
-    BotShieldRespond  404
-    BotShieldBurn    86400
-    BotShieldLog     wp-probe
+    BotShieldPath         /wp-admin/*
+    BotShieldRespond      404
+    BotShieldFlagSession  scanner_probe
+    BotShieldLog          wp-probe
 &lt;/BotShieldRule&gt;
 </code></pre>
+<p>A flag does nothing on its own. What it <em>means</em> is declared once, by
+<code>BotShieldFlagTrigger</code>, and nothing is built in — see that directive.
+A rule that sets a flag no trigger defines is inert.</p>
+<h4 id="which-flags-may-go-where">Which flags may go where</h4>
+<p>Three of the seven describe a session and are <strong>refused on an address</strong>:</p>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Subjects</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>honeypot_hit</code>, <code>scanner_probe</code>, <code>fake_bot</code>, <code>pow_fail_streak</code></td>
+<td>address or session</td>
+</tr>
+<tr>
+<td><code>app_verified_human</code>, <code>app_verified_session</code>, <code>app_trust_signal</code></td>
+<td><strong>session only</strong></td>
+</tr>
+</tbody>
+</table>
+<p>Those three are credits. Suspicion shared across an address costs
+strangers a challenge, which is the trade this module already makes.
+A credit shared across an address hands strangers an exemption someone
+else earned — one person logging in would discount everyone behind that
+NAT, renewed by whatever traffic keeps the address flagged. Refused at
+config time, because at runtime it looks like a rule that works.</p>
+<h4 id="how-long-an-address-stays-flagged">How long an address stays flagged</h4>
+<p><code>BotShieldForgetIPAfter &lt;seconds&gt;</code> at server scope. Default 3600, range
+1..2592000.</p>
+<p>It is <strong>not</strong> per rule, and not per flag. One address slot holds one
+expiry shared by every flag on it, so two rules asking for 3600 and
+86400 both get 86400 — a per-rule duration reads like it works and
+cannot.</p>
+<p>It <strong>slides</strong>: the clock runs from the address's <em>last</em> flagging, not
+its first. So an address that keeps tripping rules stays flagged, and
+one that stops is forgotten a window later. A mark set early is
+therefore not cut short by a later one; it is carried while there is
+still reason to distrust the address.</p>
+<p>Sessions take no duration. A session mark lives exactly as long as the
+cookie does, which is what a session is.</p>
+<blockquote>
+<p><strong>Flags are advisory, not enforcement.</strong> The table holds 50,000
+entries and evicts live ones under pressure, so a flag can lapse
+before its window is up. It is a strong hint, not a guarantee.</p>
+</blockquote>
+<h4 id="adding-removing-replacing">Adding, removing, replacing</h4>
+<p><code>+name</code> adds, <code>-name</code> removes, <code>=name</code> makes the named set the whole
+set. <code>+</code> is the default and may be omitted, so an unprefixed list means
+what it always did. Mixing <code>=</code> with <code>+</code> or <code>-</code> is a config error —
+<code>=a,+b</code> has no reading that is not a guess. The same grammar and the
+same rule as <code>BotShieldClassify</code>.</p>
+<p><strong><code>-</code> and <code>=</code> are only allowed on <code>BotShieldFeedbackTrigger</code>.</strong> A rule
+matches on request properties the client controls, so clearing there
+would let anyone shed their own record by fetching the URL that
+matches. Feedback fires on a header your application signs: the
+application asserts it, the visitor cannot.</p>
+<pre><code class="language-apache">&lt;BotShieldFeedbackTrigger login-success&gt;
+    BotShieldFlagSession  +app_verified_human,-scanner_probe
+&lt;/BotShieldFeedbackTrigger&gt;
+</code></pre>
+<p>Feedback marks the cookie the response is already carrying rather than
+adding a second one. If the response carries no cookie at all, there is
+no session to mark and the module logs that the flag was not applied
+rather than creating one.</p>
+<h4 id="deprecated-botshieldflag-and-botshieldttl">Deprecated: <code>BotShieldFlag</code> and <code>BotShieldTTL</code></h4>
+<p>Both still parse and both warn at config time.</p>
+<p><code>BotShieldFlag</code> names no subject, and the subject is the whole
+question. Write <code>BotShieldFlagIP</code> or <code>BotShieldFlagSession</code>.</p>
+<p><code>BotShieldTTL</code> set a per-rule duration that was never honoured, for the
+reason above. The window is <code>BotShieldForgetIPAfter</code>, at server scope.</p>
 <blockquote>
 <p><strong>This family used to flag by default</strong>, <code>scanner_probe</code> for 3600 s,
 inherited from <code>BotShieldPathTrigger</code> where the target was a handful
-of scanners probing <code>/.env</code> and per-IP memory was worth having. It was
-the wrong default for high-cardinality traffic: at roughly one request
-per address the flag is never read again and it churns the
-50,000-slot flagged-IP table. And a <code>scanner_probe</code> flag is not inert:
-wherever a <code>BotShieldFlagTrigger</code> gives it a <code>tier_floor</code> — as the
-compiled-in slate did before default rules were switched off — that
-floor <strong>overrides parked score thresholds</strong>, so a rule written to
-block quietly began rendering interstitials to whoever shared that
-address next, with nothing in the config saying so.</p>
+of scanners probing <code>/.env</code>. It was the wrong default for
+high-cardinality traffic: at roughly one request per address the flag
+is never read again and it churns the 50,000-slot table. And a
+<code>scanner_probe</code> flag is not inert: wherever a <code>BotShieldFlagTrigger</code>
+gives it a <code>tier_floor</code> — as the compiled-in slate did before default
+rules were switched off — that floor <strong>overrides parked score
+thresholds</strong>, so a rule written to block quietly began rendering
+interstitials to whoever shared that address next, with nothing in the
+config saying so.</p>
 <p><strong>Migrating:</strong> a rule written before 2026-09-05 that relied on the
-default now flags nothing. Add <code>BotShieldFlag scanner_probe</code> and
-<code>BotShieldTTL 3600</code> to keep the old behaviour. <code>BotShieldTTL 0</code>,
-which used to be how you switched the default off, is now what the
-default already is and can be deleted.</p>
+default now flags nothing; add <code>BotShieldFlagIP scanner_probe</code> to keep
+it. <code>BotShieldTTL 0</code>, which used to be how you switched the default
+off, is what the default already is and can be deleted.</p>
 </blockquote>
 <h4 id="renamed-from-botshieldrequesttrigger">Renamed from <code>BotShieldRequestTrigger</code></h4>
 <p><code>BotShieldRequestTrigger</code> is the old spelling of this directive. The

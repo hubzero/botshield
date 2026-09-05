@@ -492,6 +492,15 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
                 dname, val);
         }
         a->flag_bit = bits;
+        /* BotShieldFlag names no subject, and the subject is the whole
+         * question: an address is shared and a cookie is not. It also
+         * cannot express the credit flags safely, since those describe
+         * a session. BotShieldFlagIP and BotShieldFlagSession say
+         * which, and refuse the combinations that do not make sense. */
+        ap_log_error(APLOG_MARK, APLOG_WARNING, 0, NULL,
+            "mod_botshield: %s: BotShieldFlag is deprecated and will be "
+            "removed; write BotShieldFlagIP or BotShieldFlagSession, "
+            "which name the subject the mark is written to.", dname);
     } else if (BS_AK("flagip") || BS_AK("flagsession")) {
         int to_session = BS_AK("flagsession");
         const char *dirname = to_session ? "BotShieldFlagSession"
@@ -570,6 +579,16 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
                 dname, val);
         }
         a->ttl_sec = (int)t;
+        /* A per-rule duration cannot be honoured: the address slot
+         * holds one expiry shared by every flag on it, extended to
+         * whichever rule wrote last. BotShieldForgetIPAfter is that
+         * one window, said once, at the scope where it is true. */
+        ap_log_error(APLOG_MARK, APLOG_WARNING, 0, NULL,
+            "mod_botshield: %s: BotShieldTTL is deprecated and will be "
+            "removed; the address window is BotShieldForgetIPAfter at "
+            "server scope. A per-rule duration was never honoured -- "
+            "one address slot holds one expiry for all its flags.",
+            dname);
     } else if (BS_AK("penalty")) {
         char *end = NULL;
         long pn = strtol(val, &end, 10);

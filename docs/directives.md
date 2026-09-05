@@ -358,6 +358,7 @@ All directives in this section are **server scope only**. Inside
 |---|---|---|
 | `BotShieldShmSize` | `<size>` (`128K..256M`) | `16M` |
 | `BotShieldFlaggedIPCapacity` | `N` | `50000` (1024..1000000) |
+| `BotShieldForgetIPAfter` | `N` (sec) | `3600` (1..2592000) |
 | `BotShieldIPv6PrefixLen` | `N` (0..128) | `64` |
 | `BotShieldBloomIPs` | `N` | `1000000` (1000..10000000) |
 | `BotShieldBloomWindow` | `N` (sec) | `604800` (3600..2592000) |
@@ -651,10 +652,10 @@ semantics and refresh model.
 
 | Directive | Predicate args | Action keys |
 |---|---|---|
-| `BotShieldRule` | `<name>` + any of `path=<glob>` `query=<glob>` `cookies=none\|any\|session` `ua=<substring>\|@<botgroup>\|""` `ipspec=<spec>` — ANDed, at least one required | `respond=`, `redirect=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `burn=`, `penalty=`, `mode=` (no `credit=`) |
-| `BotShieldCookieTrigger` | `<name> <pred>` (see policy page) | `respond=`, `redirect=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `burn=`, `penalty=`, `credit=`, `mode=` |
-| `BotShieldEnvTrigger` | `<name> <env-pred>` (see policy page) | `respond=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `burn=`, `penalty=`, `credit=`, `mode=` (no `redirect=`) |
-| `BotShieldFeedbackTrigger` | `<event>` | `flag=`, `ttl=`, `log=`, `accesslog=`, `mode=` |
+| `BotShieldRule` | `<name>` + any of `path=<glob>` `query=<glob>` `cookies=none\|any\|session` `ua=<substring>\|@<botgroup>\|""` `ipspec=<spec>` — ANDed, at least one required | `respond=`, `redirect=`, `log=`, `accesslog=`, `flagip=`, `flagsession=`, `burn=`, `penalty=`, `mode=` (no `credit=`) |
+| `BotShieldCookieTrigger` | `<name> <pred>` (see policy page) | `respond=`, `redirect=`, `log=`, `accesslog=`, `flagip=`, `flagsession=`, `burn=`, `penalty=`, `credit=`, `mode=` |
+| `BotShieldEnvTrigger` | `<name> <env-pred>` (see policy page) | `respond=`, `log=`, `accesslog=`, `flagip=`, `flagsession=`, `burn=`, `penalty=`, `credit=`, `mode=` (no `redirect=`) |
+| `BotShieldFeedbackTrigger` | `<event>` | `flagip=`, `flagsession=` (both accept `+`/`-`/`=`), `log=`, `accesslog=`, `mode=` |
 | `BotShieldLoadTrigger` | `<name> state=<n>\|state>=<n>` | `respond=`, `log=`, `accesslog=`, `penalty=`, `mode=` (no `redirect=`, `flag=`, `ttl=`, `burn=`) |
 | `BotShieldSessionCookieName` | `<name>` (single arg, repeatable) | n/a (feeds cookies=session predicate) |
 
@@ -802,60 +803,135 @@ Because it fires from the policy walk it short-circuits **before**
 scoring, so a `respond=4xx` rule never renders a challenge and never
 reaches PHP.
 
-**Remembering a client is opt-in.** A rule fires, returns its status,
-and forgets — unless you ask it to remember. There are two kinds of
-memory and both default to doing nothing.
+**Remembering a client is opt-in.** A rule fires, responds, and forgets
+— unless you ask it to remember. Two directives, two subjects, and
+neither happens unless the rule says so.
 
-`flag=<name>` with `ttl=<seconds>` marks the **address**. Everything
-sharing that address is marked with it, which is the point behind a
-hosting range and the problem behind a residential NAT.
+`BotShieldFlagIP <flag>` marks the **address**. Everything sharing that
+address is marked with it: the point behind a hosting range, the
+problem behind a residential NAT.
 
-`burn=<seconds>` marks the **cookie session**. The mark travels inside
-the cookie the client keeps handing back, so it catches the one browser
-that actually tripped the rule and no one else sharing its address. A
-client that throws cookies away escapes this entirely — and pays the
+`BotShieldFlagSession <flag>` marks the **cookie session**. The mark
+travels inside the cookie the client keeps handing back, so it catches
+the one browser that tripped the rule and nobody else sharing its
+address. A client that throws cookies away escapes it — and meets the
 full challenge gate regardless, because it can never hold a solve
 either, so it costs nothing that was not already being paid.
 
 ```apache
-# the address, for an hour. Right when the source itself is what you
-# distrust; wrong when it is a NAT with real users behind it.
+# the address: right when the source itself is what you distrust,
+# wrong when it is a NAT with real users behind it.
 <BotShieldRule env-probe>
-    BotShieldPath    /.env
-    BotShieldRespond  404
-    BotShieldFlag    scanner_probe
-    BotShieldTTL     3600
-    BotShieldLog     env-probe
+    BotShieldPath         /.env
+    BotShieldRespond      404
+    BotShieldFlagIP       scanner_probe
+    BotShieldLog          env-probe
 </BotShieldRule>
 
-# the browser, for a day. The probe gets its 404 and a cookie carrying
-# the mark; that session is refused from its next request onward, and
-# the neighbours are untouched.
+# the browser: the probe gets its 404 and a cookie carrying the mark,
+# and the neighbours are untouched.
 <BotShieldRule wp-probe>
-    BotShieldPath    /wp-admin/*
-    BotShieldRespond  404
-    BotShieldBurn    86400
-    BotShieldLog     wp-probe
+    BotShieldPath         /wp-admin/*
+    BotShieldRespond      404
+    BotShieldFlagSession  scanner_probe
+    BotShieldLog          wp-probe
 </BotShieldRule>
 ```
 
+A flag does nothing on its own. What it *means* is declared once, by
+`BotShieldFlagTrigger`, and nothing is built in — see that directive.
+A rule that sets a flag no trigger defines is inert.
+
+#### Which flags may go where
+
+Three of the seven describe a session and are **refused on an address**:
+
+| Flag | Subjects |
+|---|---|
+| `honeypot_hit`, `scanner_probe`, `fake_bot`, `pow_fail_streak` | address or session |
+| `app_verified_human`, `app_verified_session`, `app_trust_signal` | **session only** |
+
+Those three are credits. Suspicion shared across an address costs
+strangers a challenge, which is the trade this module already makes.
+A credit shared across an address hands strangers an exemption someone
+else earned — one person logging in would discount everyone behind that
+NAT, renewed by whatever traffic keeps the address flagged. Refused at
+config time, because at runtime it looks like a rule that works.
+
+#### How long an address stays flagged
+
+`BotShieldForgetIPAfter <seconds>` at server scope. Default 3600, range
+1..2592000.
+
+It is **not** per rule, and not per flag. One address slot holds one
+expiry shared by every flag on it, so two rules asking for 3600 and
+86400 both get 86400 — a per-rule duration reads like it works and
+cannot.
+
+It **slides**: the clock runs from the address's *last* flagging, not
+its first. So an address that keeps tripping rules stays flagged, and
+one that stops is forgotten a window later. A mark set early is
+therefore not cut short by a later one; it is carried while there is
+still reason to distrust the address.
+
+Sessions take no duration. A session mark lives exactly as long as the
+cookie does, which is what a session is.
+
+> **Flags are advisory, not enforcement.** The table holds 50,000
+> entries and evicts live ones under pressure, so a flag can lapse
+> before its window is up. It is a strong hint, not a guarantee.
+
+#### Adding, removing, replacing
+
+`+name` adds, `-name` removes, `=name` makes the named set the whole
+set. `+` is the default and may be omitted, so an unprefixed list means
+what it always did. Mixing `=` with `+` or `-` is a config error —
+`=a,+b` has no reading that is not a guess. The same grammar and the
+same rule as `BotShieldClassify`.
+
+**`-` and `=` are only allowed on `BotShieldFeedbackTrigger`.** A rule
+matches on request properties the client controls, so clearing there
+would let anyone shed their own record by fetching the URL that
+matches. Feedback fires on a header your application signs: the
+application asserts it, the visitor cannot.
+
+```apache
+<BotShieldFeedbackTrigger login-success>
+    BotShieldFlagSession  +app_verified_human,-scanner_probe
+</BotShieldFeedbackTrigger>
+```
+
+Feedback marks the cookie the response is already carrying rather than
+adding a second one. If the response carries no cookie at all, there is
+no session to mark and the module logs that the flag was not applied
+rather than creating one.
+
+#### Deprecated: `BotShieldFlag` and `BotShieldTTL`
+
+Both still parse and both warn at config time.
+
+`BotShieldFlag` names no subject, and the subject is the whole
+question. Write `BotShieldFlagIP` or `BotShieldFlagSession`.
+
+`BotShieldTTL` set a per-rule duration that was never honoured, for the
+reason above. The window is `BotShieldForgetIPAfter`, at server scope.
+
 > **This family used to flag by default**, `scanner_probe` for 3600 s,
 > inherited from `BotShieldPathTrigger` where the target was a handful
-> of scanners probing `/.env` and per-IP memory was worth having. It was
-> the wrong default for high-cardinality traffic: at roughly one request
-> per address the flag is never read again and it churns the
-> 50,000-slot flagged-IP table. And a `scanner_probe` flag is not inert:
-> wherever a `BotShieldFlagTrigger` gives it a `tier_floor` — as the
-> compiled-in slate did before default rules were switched off — that
-> floor **overrides parked score thresholds**, so a rule written to
-> block quietly began rendering interstitials to whoever shared that
-> address next, with nothing in the config saying so.
+> of scanners probing `/.env`. It was the wrong default for
+> high-cardinality traffic: at roughly one request per address the flag
+> is never read again and it churns the 50,000-slot table. And a
+> `scanner_probe` flag is not inert: wherever a `BotShieldFlagTrigger`
+> gives it a `tier_floor` — as the compiled-in slate did before default
+> rules were switched off — that floor **overrides parked score
+> thresholds**, so a rule written to block quietly began rendering
+> interstitials to whoever shared that address next, with nothing in the
+> config saying so.
 >
 > **Migrating:** a rule written before 2026-09-05 that relied on the
-> default now flags nothing. Add `BotShieldFlag scanner_probe` and
-> `BotShieldTTL 3600` to keep the old behaviour. `BotShieldTTL 0`,
-> which used to be how you switched the default off, is now what the
-> default already is and can be deleted.
+> default now flags nothing; add `BotShieldFlagIP scanner_probe` to keep
+> it. `BotShieldTTL 0`, which used to be how you switched the default
+> off, is what the default already is and can be deleted.
 
 #### Renamed from `BotShieldRequestTrigger`
 
