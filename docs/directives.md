@@ -1053,6 +1053,8 @@ path a key is also what allows a rule with no path condition at all.
 runtime:
 
 ```apache
+# configtest: skip -- the "before" half is a removed directive and is
+# meant to be refused; that refusal is the point of the example.
 # before
 BotShieldPathTrigger blocked "/wp-admin/*" status=403
 # after

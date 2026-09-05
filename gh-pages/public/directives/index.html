@@ -1550,7 +1550,9 @@ path a key is also what allows a rule with no path condition at all.</p>
 <p><strong>The old name was removed on 2026-08-10</strong> and now fails with Apache's
 <code>Invalid command</code> at config time — loudly, at startup, not silently at
 runtime:</p>
-<pre><code class="language-apache"># before
+<pre><code class="language-apache"># configtest: skip -- the &quot;before&quot; half is a removed directive and is
+# meant to be refused; that refusal is the point of the example.
+# before
 BotShieldPathTrigger blocked &quot;/wp-admin/*&quot; status=403
 # after
 &lt;BotShieldRule blocked&gt;
