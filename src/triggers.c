@@ -1094,17 +1094,27 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                     return apr_psprintf(cmd->pool,
                         "%s: path= list longer than 1024 chars", D);
                 }
-                e->path_patterns = apr_array_make(cmd->pool, 4,
-                                                  sizeof(const char *));
-                char *dup = apr_pstrdup(cmd->pool, val), *last = NULL;
-                for (char *tok = apr_strtok(dup, ",", &last); tok;
-                     tok = apr_strtok(NULL, ",", &last)) {
+                /* Accumulate: the block walker hands one token per
+                 * BotShieldPath line, and each token is a whole path.
+                 * It is not split on anything, because every delimiter
+                 * worth using is legal inside a path -- comma by RFC
+                 * 3986, and whitespace never survives Apache's own argv
+                 * split to reach here. */
+                if (!e->path_patterns) {
+                    e->path_patterns = apr_array_make(cmd->pool, 4,
+                                                      sizeof(const char *));
+                }
+                {
+                    char *tok = apr_pstrdup(cmd->pool, val);
                     while (*tok == ' ' || *tok == '\t') tok++;
                     apr_size_t tl = strlen(tok);
                     while (tl && (tok[tl-1] == ' ' || tok[tl-1] == '\t')) {
                         tok[--tl] = '\0';
                     }
-                    if (!*tok) continue;          /* trailing comma */
+                    if (!*tok) {
+                        return apr_psprintf(cmd->pool,
+                            "%s: path= is empty", D);
+                    }
                     if (tok[0] == '"' || strchr(tok, '"')) {
                         /* Apache splits argv on whitespace before we
                          * see it, so a space inside the list arrives
@@ -1113,10 +1123,12 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                          * operator staring at a stray quote in a
                          * "must start with /" message. */
                         return apr_psprintf(cmd->pool,
-                            "%s: path= list must not contain spaces "
-                            "(got '%s'). Apache splits the directive on "
-                            "whitespace before the module sees it, so "
-                            "write path=\"/a,/b\" not path=\"/a, /b\".",
+                            "%s: path must not contain spaces (got "
+                            "'%s'). Apache splits the directive on "
+                            "whitespace before the module sees it. Write "
+                            "one BotShieldPath per path; a comma is a "
+                            "legal path character and does not separate "
+                            "a list.",
                             D, tok);
                     }
                     if (tok[0] != '/') {
@@ -2254,6 +2266,22 @@ const char *bs_section_trigger(cmd_parms *cmd, void *dconf, const char *arg,
                     "<%s %s>: %s given twice. Only Path, UserAgent and "
                     "IPSpec accumulate; everything else would silently "
                     "keep one value.", dname, name, directive);
+            }
+            if (strcmp(key, "path") == 0) {
+                /* Paths get a token each rather than a comma-joined
+                 * list, because a comma is a legal character in a path
+                 * (RFC 3986 sub-delims) and cannot also be the
+                 * separator. Joining them here and splitting them apart
+                 * in the setter turned `BotShieldPath /a,/b` into two
+                 * patterns -- silently matching two prefixes instead of
+                 * the one literal path asked for.
+                 *
+                 * UserAgent and IPSpec keep the joined form: a comma
+                 * cannot appear in a CIDR, and @botgroup lists are
+                 * written comma-separated on purpose. */
+                *(const char **)apr_array_push(kvs) =
+                    apr_psprintf(p, "%s=%s", key, value);
+                continue;
             }
             /* Rewrite the token in place: the parser sees one list. */
             for (int i = 0; i < kvs->nelts; i++) {
