@@ -139,6 +139,65 @@ int bs_bot_name_valid(const char *s)
 
 
 
+
+/* Container entry points. Each is three lines because bs_open_trigger
+ * carries the work; what differs between families is only which setter
+ * receives the tokens it builds. */
+
+static const char *bs_open_trigger(cmd_parms *cmd, void *dconf,
+                                          const char *arg)
+{
+    return bs_section_trigger(cmd, dconf, arg, "BotShieldTrigger", bs_set_trigger);
+}
+
+static const char *bs_open_flagtrigger(cmd_parms *cmd, void *dconf,
+                                          const char *arg)
+{
+    return bs_section_trigger(cmd, dconf, arg, "BotShieldFlagTrigger", bs_set_flag_trigger);
+}
+
+static const char *bs_open_heuristictrigger(cmd_parms *cmd, void *dconf,
+                                          const char *arg)
+{
+    return bs_section_trigger(cmd, dconf, arg, "BotShieldHeuristicTrigger", bs_set_heuristic_trigger);
+}
+
+static const char *bs_open_cookietrigger(cmd_parms *cmd, void *dconf,
+                                          const char *arg)
+{
+    return bs_section_trigger(cmd, dconf, arg, "BotShieldCookieTrigger", bs_set_cookie_trigger);
+}
+
+static const char *bs_open_envtrigger(cmd_parms *cmd, void *dconf,
+                                          const char *arg)
+{
+    return bs_section_trigger(cmd, dconf, arg, "BotShieldEnvTrigger", bs_set_env_trigger);
+}
+
+static const char *bs_open_feedbacktrigger(cmd_parms *cmd, void *dconf,
+                                          const char *arg)
+{
+    return bs_section_trigger(cmd, dconf, arg, "BotShieldFeedbackTrigger", bs_set_feedback_trigger);
+}
+
+static const char *bs_open_loadtrigger(cmd_parms *cmd, void *dconf,
+                                          const char *arg)
+{
+    return bs_section_trigger(cmd, dconf, arg, "BotShieldLoadTrigger", bs_set_load_trigger);
+}
+
+static const char *bs_open_rule(cmd_parms *cmd, void *dconf,
+                                          const char *arg)
+{
+    return bs_section_trigger(cmd, dconf, arg, "BotShieldRule", bs_set_request_trigger);
+}
+
+static const char *bs_open_requesttrigger(cmd_parms *cmd, void *dconf,
+                                          const char *arg)
+{
+    return bs_section_trigger(cmd, dconf, arg, "BotShieldRequestTrigger", bs_set_request_trigger);
+}
+
 static const command_rec bs_cmds[] = {
     AP_INIT_TAKE1("BotShieldEnabled",   bs_set_enabled,    NULL,
                  RSRC_CONF | ACCESS_CONF,
@@ -490,7 +549,43 @@ static const command_rec bs_cmds[] = {
                  "graceful-shutdown save runs). Range when non-zero: "
                  "30..86400. Requires mod_watchdog to be loaded; otherwise "
                  "degrades to shutdown-only with a NOTICE."),
-    AP_INIT_TAKE_ARGV("BotShieldTrigger", bs_set_trigger, NULL,
+    AP_INIT_RAW_ARGS("<BotShieldTrigger", bs_open_trigger, NULL, RSRC_CONF | ACCESS_CONF,
+                 "Open a BotShieldTrigger block. Takes the rule name; every "
+                 "setting is a BotShield directive on its own line "
+                 "until </BotShieldTrigger>."),
+    AP_INIT_RAW_ARGS("<BotShieldFlagTrigger", bs_open_flagtrigger, NULL, RSRC_CONF,
+                 "Open a BotShieldFlagTrigger block. Takes the rule name; every "
+                 "setting is a BotShield directive on its own line "
+                 "until </BotShieldFlagTrigger>."),
+    AP_INIT_RAW_ARGS("<BotShieldHeuristicTrigger", bs_open_heuristictrigger, NULL, RSRC_CONF,
+                 "Open a BotShieldHeuristicTrigger block. Takes the rule name; every "
+                 "setting is a BotShield directive on its own line "
+                 "until </BotShieldHeuristicTrigger>."),
+    AP_INIT_RAW_ARGS("<BotShieldCookieTrigger", bs_open_cookietrigger, NULL, RSRC_CONF,
+                 "Open a BotShieldCookieTrigger block. Takes the rule name; every "
+                 "setting is a BotShield directive on its own line "
+                 "until </BotShieldCookieTrigger>."),
+    AP_INIT_RAW_ARGS("<BotShieldEnvTrigger", bs_open_envtrigger, NULL, RSRC_CONF,
+                 "Open a BotShieldEnvTrigger block. Takes the rule name; every "
+                 "setting is a BotShield directive on its own line "
+                 "until </BotShieldEnvTrigger>."),
+    AP_INIT_RAW_ARGS("<BotShieldFeedbackTrigger", bs_open_feedbacktrigger, NULL, RSRC_CONF,
+                 "Open a BotShieldFeedbackTrigger block. Takes the rule name; every "
+                 "setting is a BotShield directive on its own line "
+                 "until </BotShieldFeedbackTrigger>."),
+    AP_INIT_RAW_ARGS("<BotShieldLoadTrigger", bs_open_loadtrigger, NULL, RSRC_CONF,
+                 "Open a BotShieldLoadTrigger block. Takes the rule name; every "
+                 "setting is a BotShield directive on its own line "
+                 "until </BotShieldLoadTrigger>."),
+    AP_INIT_RAW_ARGS("<BotShieldRule", bs_open_rule, NULL, RSRC_CONF,
+                 "Open a BotShieldRule block. Takes the rule name; every "
+                 "setting is a BotShield directive on its own line "
+                 "until </BotShieldRule>."),
+    AP_INIT_RAW_ARGS("<BotShieldRequestTrigger", bs_open_requesttrigger, NULL, RSRC_CONF,
+                 "Open a BotShieldRequestTrigger block. Takes the rule name; every "
+                 "setting is a BotShield directive on its own line "
+                 "until </BotShieldRequestTrigger>."),
+    AP_INIT_TAKE_ARGV("BotShieldTrigger", bs_flat_trigger_retired, NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "Per-scope trigger: the Apache scope (server / "
                  "<VirtualHost> / <Directory> / <Location> / "
@@ -755,7 +850,7 @@ static const command_rec bs_cmds[] = {
                  "32-bit ns_id and stored in each SHM slot."),
     /* Flag-driven trigger family. */
     AP_INIT_TAKE_ARGV("BotShieldFlagTrigger",
-                 bs_set_flag_trigger, NULL, RSRC_CONF,
+                 bs_flat_trigger_retired, NULL, RSRC_CONF,
                  "Apply an action when a flag bit fires on the IP- "
                  "or cookie-side bitmap of a request. Args: <flag> "
                  "[reset] [action=<verb> args...]. Flag names: "
@@ -775,7 +870,7 @@ static const command_rec bs_cmds[] = {
      * but the predicate is a compile-time named heuristic on the
      * request itself rather than a flag bit. */
     AP_INIT_TAKE_ARGV("BotShieldHeuristicTrigger",
-                 bs_set_heuristic_trigger, NULL, RSRC_CONF,
+                 bs_flat_trigger_retired, NULL, RSRC_CONF,
                  "Bind an action to one of the built-in request "
                  "heuristics. Args: <name>|all [reset] [action=<verb> "
                  "args...]. Names: missingua (UA absent or empty), "
@@ -805,7 +900,7 @@ static const command_rec bs_cmds[] = {
                  "cap (legacy behavior). Range 0..1000."),
     /* E4 — cookie triggers */
     AP_INIT_TAKE_ARGV("BotShieldCookieTrigger",
-                 bs_set_cookie_trigger, NULL, RSRC_CONF,
+                 bs_flat_trigger_retired, NULL, RSRC_CONF,
                  "Cookie-based trigger. Args: <name> <cookie-match> "
                  "[key=value ...]. cookie-match is one of: "
                  "cookie=<n>, cookie=<n>=<v>, cookie=<n>~<substr>, "
@@ -829,7 +924,7 @@ static const command_rec bs_cmds[] = {
                  "invocation appends one name; case-insensitive."),
     /* E6 — env-var triggers */
     AP_INIT_TAKE_ARGV("BotShieldEnvTrigger",
-                 bs_set_env_trigger, NULL, RSRC_CONF,
+                 bs_flat_trigger_retired, NULL, RSRC_CONF,
                  "Env-var-based trigger, reads r->subprocess_env. "
                  "Args: <name> <env-match> [key=value ...]. "
                  "env-match is one of: env=<var> (present), "
@@ -843,7 +938,7 @@ static const command_rec bs_cmds[] = {
                  "requests only — subrequests are no-ops."),
     /* E7.3 — feedback triggers (response-path mapping for E5) */
     AP_INIT_TAKE_ARGV("BotShieldFeedbackTrigger",
-                 bs_set_feedback_trigger, NULL, RSRC_CONF,
+                 bs_flat_trigger_retired, NULL, RSRC_CONF,
                  "Map an app-signed event (via X-BotShield-Feedback "
                  "header) to module memory. Args: <event> "
                  "[key=value ...]. Required keys: flag=<bit>, "
@@ -854,7 +949,7 @@ static const command_rec bs_cmds[] = {
                  "already served)."),
     /* E11.2 — load-aware throttling triggers */
     AP_INIT_TAKE_ARGV("BotShieldLoadTrigger",
-                 bs_set_load_trigger, NULL, RSRC_CONF,
+                 bs_flat_trigger_retired, NULL, RSRC_CONF,
                  "Trigger that fires based on the cached load state "
                  "(see BotShieldLoadStateFile / E11). Args: <name> "
                  "<load-match> [key=value ...]. load-match is one of "
@@ -884,7 +979,7 @@ static const command_rec bs_cmds[] = {
      * ladder reads as one line per rung with no score to reason about.
      */
     AP_INIT_TAKE_ARGV("BotShieldRule",
-                 bs_set_request_trigger, NULL, RSRC_CONF,
+                 bs_flat_trigger_retired, NULL, RSRC_CONF,
                  "Match a request on any combination of its properties "
                  "and act once. Args: <name> [key=value ...]. Match "
                  "keys, all optional and ANDed, at least one required: "
@@ -898,7 +993,7 @@ static const command_rec bs_cmds[] = {
                  "penalty=<n>, log=<tag>, accesslog=on|off, flag=<bit>, "
                  "ttl=<sec>, mode=enforce|observe."),
     AP_INIT_TAKE_ARGV("BotShieldRequestTrigger",
-                 bs_set_request_trigger, NULL, RSRC_CONF,
+                 bs_flat_trigger_retired, NULL, RSRC_CONF,
                  "Match a request on any combination of its properties "
                  "and act once. Args: <name> [key=value ...]. Match "
                  "keys, all optional, ANDed together - at least one is "

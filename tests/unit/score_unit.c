@@ -74,6 +74,12 @@
                  "no longer server-free\n", name); abort(); } while (0)
 
 int ap_rprintf(request_rec *r, const char *fmt, ...) { (void)r; (void)fmt; BS_UNREACHED("ap_rprintf"); }
+/* Config-parse helper, reached only by the <BotShieldXxx> container
+ * handler. These tests build config structs directly and never parse
+ * a file, so arriving here means a test wandered somewhere it did not
+ * intend to go, and aborting says so louder than a NULL would. */
+char *ap_getword_conf(apr_pool_t *p, const char **line)
+{ (void)p; (void)line; BS_UNREACHED("ap_getword_conf"); }
 int ap_rwrite(const void *b, int n, request_rec *r) { (void)b; (void)n; (void)r; BS_UNREACHED("ap_rwrite"); }
 void ap_set_content_type(request_rec *r, const char *t) { (void)r; (void)t; }
 int ap_is_initial_req(request_rec *r) { (void)r; return 1; }

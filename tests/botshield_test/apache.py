@@ -10,6 +10,8 @@ revert, so a blown test can't cascade.
 from __future__ import annotations
 
 import re
+
+from . import blocks as _blocks
 import os
 import subprocess
 import time
@@ -289,6 +291,7 @@ def config_override(
     pattern: str, replacement: str, *,
     conf: str = DEV_VHOST_CONF,
     count: int | None = None,
+    render: bool = True,
 ):
     """Swap one or more lines in the dev vhost, reload, run the block,
     revert.
@@ -321,6 +324,17 @@ def config_override(
     original = conf_path.read_text()
 
     found, mutated = _sub_uncommented(pattern, replacement, original)
+    # Tests write the compact one-line spelling; the module only
+    # accepts blocks. Render here so the file Apache reads is the
+    # block form, and the container path is what the suite exercises.
+    #
+    # render=False writes the text through untouched, for the one test
+    # that needs to prove the flat form is actually refused. Without
+    # the escape hatch that test cannot exist: the renderer would
+    # convert its input and it would pass whether or not the module
+    # still accepted the retired spelling.
+    if render:
+        mutated = _blocks.to_blocks(mutated)
     if found == 0:
         raise ValueError(
             f"config_override: pattern {pattern!r} matched zero "

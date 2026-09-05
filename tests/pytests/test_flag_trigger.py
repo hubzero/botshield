@@ -23,6 +23,7 @@ import time
 
 import pytest
 
+from botshield_test import blocks as _blocks
 from botshield_test import client
 
 
@@ -224,7 +225,7 @@ def test_reset_with_no_replacement_clears_default(
     # declaration, so a reset anywhere caught them. There are no
     # defaults now, and the only honeypot_hit entry is the one below.
     with config_override(
-        r"BotShieldFlagTrigger honeypot_hit\s+action=score add=60",
+        _blocks.block_pattern("BotShieldFlagTrigger", "honeypot_hit"),
         'BotShieldFlagTrigger honeypot_hit action=score add=60\n'
         '    BotShieldFlagTrigger honeypot_hit reset',
         count=1,
@@ -256,7 +257,7 @@ def test_reset_inline_replacement(
     # Anchored on the declaration for the same reason as the test
     # above: a reset only clears what precedes it.
     with config_override(
-        r"BotShieldFlagTrigger honeypot_hit\s+action=score add=60",
+        _blocks.block_pattern("BotShieldFlagTrigger", "honeypot_hit"),
         'BotShieldFlagTrigger honeypot_hit action=score add=60\n'
         '    BotShieldFlagTrigger honeypot_hit reset action=score add=10',
         count=1,

@@ -422,3 +422,31 @@ def test_path_trigger_middle_star_emits_notice_on_config_load(
         "expected a NOTICE about non-trailing '*' on config load; "
         f"main-log tail: {tail!r}"
     )
+
+
+# --- Retired one-line form ------------------------------------------
+
+def test_flat_trigger_form_is_rejected(config_override):
+    """The `key=value` one-liner is retired; only blocks parse.
+
+    Worth its own test because the rest of the suite cannot notice.
+    Tests still *write* the compact spelling and the harness renders
+    it to a block before Apache sees it, so every other case here
+    would keep passing if the flat form quietly came back.
+
+    render=False is load-bearing: without it the harness would
+    convert this test's input to a block and the test would pass
+    whether or not the module still accepted the retired spelling.
+    """
+    with pytest.raises(Exception) as exc_info:
+        with config_override(
+            r"BotShieldEnabled\s+On",
+            "BotShieldEnabled On\n"
+            '    BotShieldRequestTrigger oldform path="/retired" status=403',
+            render=False,
+        ):
+            pass
+    msg = str(exc_info.value)
+    assert "returned non-zero exit status" in msg or "retired" in msg, (
+        f"expected the flat trigger form to be refused; got: {msg!r}"
+    )

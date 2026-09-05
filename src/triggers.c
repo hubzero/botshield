@@ -32,6 +32,7 @@
 #include <http_log.h>
 #include <apr_strings.h>
 #include <apr_tables.h>
+#include <apr_lib.h>    /* apr_isspace, apr_tolower */
 
 #include "botshield.h"
 #include "allowlist.h" /* bs_parse_client_ip, bs_mask_ipv6_prefix */
@@ -1143,13 +1144,20 @@ const char *bs_set_cookie_trigger(cmd_parms *cmd, void *dconf,
                 "BotShieldCookieTrigger: cookies='%s' not one of "
                 "none|any|session", state);
         }
-    } else if (!strncasecmp(m, "bs-cookie=", 10)) {
+    } else if (!strncasecmp(m, "bs-cookie=", 10)
+            || !strncasecmp(m, "bscookie=", 9)) {
+        /* Both spellings accepted. The request family already called
+         * this key `bscookie` while this family wanted `bs-cookie`.
+         * Two names for one concept was survivable while each was
+         * typed by hand; it stops being survivable once a block's
+         * BotShieldBSCookie has to lower-case to one of them. */
+        const int keylen = (m[2] == '-') ? 10 : 9;
         if (negated) {
             return "BotShieldCookieTrigger: '!' prefix cannot combine "
                    "with bs-cookie=<state> — use the complementary "
                    "state directly";
         }
-        const char *state = m + 10;
+        const char *state = m + keylen;
         if      (!strcasecmp(state, "verified")) e->pred_kind = BS_CP_BS_VERIFIED;
         else if (!strcasecmp(state, "missing"))  e->pred_kind = BS_CP_BS_MISSING;
         else if (!strcasecmp(state, "invalid"))  e->pred_kind = BS_CP_BS_INVALID;
@@ -1711,3 +1719,225 @@ const char *bs_set_flag_trigger(cmd_parms *cmd, void *dconf,
     return NULL;
 }
 
+
+/* ----------------------------------------------------------------------
+ * Container syntax: <BotShieldRequestTrigger name> ... </...>
+ *
+ * The flat `key=value` form is retired. It packed a rule's six match
+ * dimensions and eight action keys onto one logical line, which in
+ * practice meant backslash continuations, and a continuation cannot be
+ * commented, cannot be reordered, and cannot be diffed a line at a
+ * time. One live rule here carried a 400-character path list on a line
+ * that could not be broken at all, duplicated verbatim into a second
+ * rule, with nothing checking that the two copies still agreed.
+ *
+ * These handlers do not re-implement any parsing. They read the lines
+ * between the tags, turn each `BotShieldFoo value` into the `foo=value`
+ * token the existing setter already understands, and hand the whole
+ * thing to that setter. Semantics, validation and error text are the
+ * same by construction rather than by maintenance, and the policy dump
+ * needs no changes at all, because what lands in the config is the same
+ * structure the flat form built.
+ *
+ * The inner names are deliberately NOT registered as directives. They
+ * exist only inside a container, so `BotShieldPath` at top level is an
+ * unknown directive, which Apache already reports clearly, and the
+ * global directive table stays free of fifteen words like `Status` and
+ * `Mode` that would otherwise have to be rejected by hand everywhere
+ * else.
+ * -------------------------------------------------------------------- */
+
+/* Inner directive name -> the key the flat parser knows. The rule is
+ * mechanical: drop the BotShield prefix and lowercase the rest. Only
+ * one name does not survive that, because `ua` is not a word. */
+static const char *bs_section_key(apr_pool_t *p, const char *directive)
+{
+    const apr_size_t plen = sizeof("BotShield") - 1;
+    if (strncasecmp(directive, "BotShield", plen) != 0 || !directive[plen])
+        return NULL;
+    char *key = apr_pstrdup(p, directive + plen);
+    for (char *c = key; *c; c++) *c = (char)apr_tolower(*c);
+    if (strcmp(key, "useragent") == 0) return "ua";
+    return key;
+}
+
+/* Keys whose flat form is already a comma-separated list. Repeating
+ * one of these inside a container appends rather than replaces, so a
+ * long path list can be written a line per entry with a comment on
+ * each -- the thing the flat form made impossible. Repeating any other
+ * key is a config error, because silently keeping the last value is
+ * how you end up debugging a rule that does not do what it says. */
+static int bs_section_key_repeats(const char *key)
+{
+    return strcmp(key, "path") == 0
+        || strcmp(key, "ua") == 0
+        || strcmp(key, "ipspec") == 0;
+}
+
+const char *bs_section_trigger(cmd_parms *cmd, void *dconf, const char *arg,
+                              const char *dname, bs_trigger_setter setter)
+{
+    apr_pool_t *p = cmd->pool;
+
+    /* Apache hands us everything after the directive word, closing
+     * angle bracket included. */
+    char *spec = apr_pstrdup(p, arg);
+    apr_size_t slen = strlen(spec);
+    while (slen && apr_isspace(spec[slen - 1])) spec[--slen] = '\0';
+    if (!slen || spec[slen - 1] != '>') {
+        return apr_psprintf(p, "<%s> is missing its closing '>'", dname);
+    }
+    spec[--slen] = '\0';
+    while (slen && apr_isspace(spec[slen - 1])) spec[--slen] = '\0';
+
+    /* A name is optional because one family does not take one:
+     * BotShieldTrigger is scoped by its enclosing <Location> rather
+     * than identified by a name, so <BotShieldTrigger> is the whole
+     * opening tag. Families that do want a name still say so, from
+     * their own setter, which is where that error belongs. */
+    const char *name = ap_getword_conf(p, (const char **)&spec);
+    const int named = (name && *name);
+    if (*spec) {
+        return apr_psprintf(p,
+            "<%s %s>: unexpected '%s' after the name. Every other "
+            "setting is a directive on its own line inside the block.",
+            dname, named ? name : "", spec);
+    }
+    if (!named) name = "";
+
+    /* Two lists, joined at the end. The flat parsers read a bare
+     * positional flag at argv[1] specifically, so where the operator
+     * happened to write it inside the block must not matter -- a block
+     * whose meaning depends on line order would be the continuation
+     * problem again wearing a different hat. */
+    apr_array_header_t *flags = apr_array_make(p, 2, sizeof(char *));
+    apr_array_header_t *kvs   = apr_array_make(p, 12, sizeof(char *));
+
+    /* Remember where each key landed so a repeat can append to it. */
+    apr_table_t *seen = apr_table_make(p, 12);
+
+    /* The block body is already parsed. Apache builds a container's
+     * children before it calls the section handler, and hangs them off
+     * cmd->directive, so there is nothing to read here -- only a list
+     * to walk.
+     *
+     * Two wrong turns preceded this. Reading the lines with
+     * ap_cfg_getline consumed the closing tag out from under Apache's
+     * own container tracking, which then reported the block as never
+     * closed. Calling ap_build_cont_config asked for a body that had
+     * already been consumed, and read off the end of the file, which
+     * is a segfault rather than an error message. */
+    for (ap_directive_t *d = cmd->directive->first_child; d; d = d->next) {
+        const char *directive = d->directive;
+        const char *key = bs_section_key(p, directive);
+        if (!key) {
+            return apr_psprintf(p,
+                "<%s %s>: '%s' is not a BotShield setting", dname, name,
+                directive);
+        }
+
+        /* d->args is the rest of the line, already stripped by the
+         * config reader. Strip one layer of quoting so a value with
+         * spaces -- a UA substring, say -- survives either spelling. */
+        char *value = apr_pstrdup(p, d->args ? d->args : "");
+        apr_size_t vlen = strlen(value);
+        while (vlen && apr_isspace(value[vlen - 1])) value[--vlen] = '\0';
+        /* An explicitly quoted empty string is a value, not an absent
+         * one: ua="" matches a request whose User-Agent is missing or
+         * empty, which is a real rule here and not a typo. Only a line
+         * with nothing after the directive counts as valueless. */
+        int quoted = (vlen >= 2 && (value[0] == '"' || value[0] == '\'')
+                                && value[vlen - 1] == value[0]);
+        if (quoted) {
+            value[vlen - 1] = '\0';
+            value++;
+        }
+
+        /* A valueless directive is a positional flag in the flat
+         * form -- `reset` on the flag and heuristic families. It goes
+         * through as a bare token, not as key=value, because that is
+         * what those parsers read. */
+        if (!*value && !quoted) {
+            if (strcmp(key, "reset") != 0) {
+                return apr_psprintf(p,
+                    "<%s %s>: %s needs a value", dname, name, directive);
+            }
+            if (apr_table_get(seen, key)) {
+                return apr_psprintf(p, "<%s %s>: %s given twice",
+                                    dname, name, directive);
+            }
+            apr_table_set(seen, key, "1");
+            *(const char **)apr_array_push(flags) = key;
+            continue;
+        }
+
+        const char *prior = apr_table_get(seen, key);
+        if (prior) {
+            if (!bs_section_key_repeats(key)) {
+                return apr_psprintf(p,
+                    "<%s %s>: %s given twice. Only Path, UserAgent and "
+                    "IPSpec accumulate; everything else would silently "
+                    "keep one value.", dname, name, directive);
+            }
+            /* Rewrite the token in place: the parser sees one list. */
+            for (int i = 0; i < kvs->nelts; i++) {
+                char **slot = &((char **)kvs->elts)[i];
+                apr_size_t klen = strlen(key);
+                if (strncmp(*slot, key, klen) == 0 && (*slot)[klen] == '=') {
+                    *slot = apr_psprintf(p, "%s,%s", *slot, value);
+                    break;
+                }
+            }
+            continue;
+        }
+        apr_table_set(seen, key, "1");
+        /* A leading '!' on the value negates the match. The flat form
+         * put it on the key -- `!cookie=csrf_token` -- which cannot
+         * survive becoming a directive name, and reads better on the
+         * value anyway: BotShieldCookie !csrf_token. */
+        if (value[0] == '!') {
+            *(const char **)apr_array_push(kvs) =
+                apr_psprintf(p, "!%s=%s", key, value + 1);
+        } else if (value[0] == '>' || value[0] == '<') {
+            /* A comparison, not an assignment: BotShieldState >=warm
+             * is the load family's `state>=warm`. The operator rides
+             * on the value because a directive name cannot hold it. */
+            *(const char **)apr_array_push(kvs) =
+                apr_psprintf(p, "%s%s", key, value);
+        } else {
+            *(const char **)apr_array_push(kvs) =
+                apr_psprintf(p, "%s=%s", key, value);
+        }
+    }
+
+    if (flags->nelts == 0 && kvs->nelts == 0) {
+        return apr_psprintf(p, "<%s %s> is empty", dname, name);
+    }
+
+    apr_array_header_t *argv = apr_array_make(
+        p, flags->nelts + kvs->nelts + 1, sizeof(char *));
+    if (named) *(const char **)apr_array_push(argv) = name;
+    apr_array_cat(argv, flags);
+    apr_array_cat(argv, kvs);
+
+    return setter(cmd, dconf, argv->nelts, (char *const *)argv->elts);
+}
+
+/* The retired flat form. Kept registered so it fails with a sentence
+ * that says what to write, rather than "Invalid command", which sends
+ * the reader looking for a typo or a missing LoadModule. */
+const char *bs_flat_trigger_retired(cmd_parms *cmd, void *dconf,
+                                    int argc, char *const argv[])
+{
+    (void)dconf; (void)argc;
+    const char *dname = cmd->cmd->name;
+    const char *name = argc > 0 ? argv[0] : "myrule";
+    /* One line, because Apache prints a config error verbatim and a
+     * literal \n comes out as the two characters. */
+    return apr_psprintf(cmd->pool,
+        "%s: the one-line key=value form is retired -- write "
+        "<%s %s> ... </%s> with one BotShield directive per setting "
+        "inside it (BotShieldPath, BotShieldStatus, and so on). "
+        "See docs/directives.md.",
+        dname, dname, name, dname);
+}

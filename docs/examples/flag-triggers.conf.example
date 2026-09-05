@@ -43,18 +43,36 @@
 # crawler from a non-search-engine network, etc.) are essentially
 # never legitimate traffic. Push the score and force captcha so the
 # response stops short of any user content.
-BotShieldFlagTrigger honeypot_hit          action=score      add=60
-BotShieldFlagTrigger honeypot_hit          action=tier_floor min=captcha
-BotShieldFlagTrigger fake_bot              action=score      add=80
-BotShieldFlagTrigger fake_bot              action=tier_floor min=captcha
+<BotShieldFlagTrigger honeypot_hit>
+    BotShieldAction       score
+    BotShieldAdd          60
+</BotShieldFlagTrigger>
+<BotShieldFlagTrigger honeypot_hit>
+    BotShieldAction       tier_floor
+    BotShieldMin          captcha
+</BotShieldFlagTrigger>
+<BotShieldFlagTrigger fake_bot>
+    BotShieldAction       score
+    BotShieldAdd          80
+</BotShieldFlagTrigger>
+<BotShieldFlagTrigger fake_bot>
+    BotShieldAction       tier_floor
+    BotShieldMin          captcha
+</BotShieldFlagTrigger>
 
 # --- Detection signals — probable -----------------------------------
 # Scanner probes (vulnerability-scan path patterns) are usually bots
 # but occasionally legitimate research traffic. Push score and require
 # an interactive-tier solve — strong friction without the captcha
 # accessibility cost.
-BotShieldFlagTrigger scanner_probe         action=score      add=50
-BotShieldFlagTrigger scanner_probe         action=tier_floor min=interactive
+<BotShieldFlagTrigger scanner_probe>
+    BotShieldAction       score
+    BotShieldAdd          50
+</BotShieldFlagTrigger>
+<BotShieldFlagTrigger scanner_probe>
+    BotShieldAction       tier_floor
+    BotShieldMin          interactive
+</BotShieldFlagTrigger>
 
 # --- Detection signals — accumulating -------------------------------
 # Repeat PoW failures from one cookie. Could be a broken client
@@ -62,8 +80,14 @@ BotShieldFlagTrigger scanner_probe         action=tier_floor min=interactive
 # trying to brute the challenge. Bump to noninteractive — the next
 # solve proves human behavior cheaply, and the score addition primes
 # the request near the tier-bump threshold.
-BotShieldFlagTrigger pow_fail_streak       action=score      add=30
-BotShieldFlagTrigger pow_fail_streak       action=tier_floor min=noninteractive
+<BotShieldFlagTrigger pow_fail_streak>
+    BotShieldAction       score
+    BotShieldAdd          30
+</BotShieldFlagTrigger>
+<BotShieldFlagTrigger pow_fail_streak>
+    BotShieldAction       tier_floor
+    BotShieldMin          noninteractive
+</BotShieldFlagTrigger>
 
 # --- Trust signals (credits) ----------------------------------------
 # Application-issued reputation. The app sees session-bound state the
@@ -71,9 +95,18 @@ BotShieldFlagTrigger pow_fail_streak       action=tier_floor min=noninteractive
 # back via the X-BotShield-Feedback header surface. Credits subtract
 # score; they never RAISE tier — a credit shouldn't force a request UP.
 # Multiple credits compose additively (SUM).
-BotShieldFlagTrigger app_verified_human    action=score      add=-80
-BotShieldFlagTrigger app_verified_session  action=score      add=-40
-BotShieldFlagTrigger app_trust_signal      action=score      add=-20
+<BotShieldFlagTrigger app_verified_human>
+    BotShieldAction       score
+    BotShieldAdd          -80
+</BotShieldFlagTrigger>
+<BotShieldFlagTrigger app_verified_session>
+    BotShieldAction       score
+    BotShieldAdd          -40
+</BotShieldFlagTrigger>
+<BotShieldFlagTrigger app_trust_signal>
+    BotShieldAction       score
+    BotShieldAdd          -20
+</BotShieldFlagTrigger>
 
 # --- Common overrides -----------------------------------------------
 #

@@ -79,3 +79,6 @@ data/verified-bots.local.json
 # Site-specific deployment runbook. Purged from history 2026-09-03;
 # kept locally so the operational detail is not lost.
 deploy.md
+
+# Unit-test binary: built by `make unit`, not a source artifact.
+tests/unit/score_unit

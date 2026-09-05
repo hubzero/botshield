@@ -433,6 +433,23 @@ const char *bs_set_session_cookie_name(cmd_parms *cmd, void *dconf,
  * IP flagging that used to live in BotShieldFlagIP is now
  * expressed as `BotShieldTrigger flag=<name> ttl=<sec>` (see
  * below). */
+/* Every trigger family's flat setter has this shape, which is what
+ * lets one container implementation serve all of them. */
+typedef const char *(*bs_trigger_setter)(cmd_parms *cmd, void *dconf,
+                                         int argc, char *const argv[]);
+
+/* Reads the lines of a <BotShieldXxx name> block, rewrites each inner
+ * directive into the key=value token the flat parser already knows,
+ * and calls `setter` with the result. `dname` is the family name
+ * without the angle brackets. */
+const char *bs_section_trigger(cmd_parms *cmd, void *dconf, const char *arg,
+                               const char *dname, bs_trigger_setter setter);
+
+/* Registered for the retired one-line form: errors with the block
+ * spelling instead of Apache's bare "Invalid command". */
+const char *bs_flat_trigger_retired(cmd_parms *cmd, void *dconf,
+                                    int argc, char *const argv[]);
+
 const char *bs_set_flag_trigger(cmd_parms *cmd, void *dconf,
                                 int argc, char *const argv[]);
 
