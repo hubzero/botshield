@@ -1,6 +1,6 @@
 """E3 — path-based triggers.
 
-Exercises BotShieldRequestTrigger directives:
+Exercises BotShieldRule directives:
 
   status=<code>       → Apache returns that code; ErrorDocument
                         compatible (we don't write a body).
@@ -14,7 +14,7 @@ Exercises BotShieldRequestTrigger directives:
                         so future requests inherit the bit's penalty.
 
 Precedence: declaration order, first match wins. Main-scope
-BotShieldRequestTrigger inherits into vhosts.
+BotShieldRule inherits into vhosts.
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ def test_trigger_status_code_blocks_and_tags_log(
         '    BotShieldScoreNonInteractive 500\n'
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldRequestTrigger env-probe path="/.env" '
+        '    BotShieldRule env-probe path="/.env" '
         'status=403 "log=BAN 2h" ttl=3600',
         count=1,
     ):
@@ -82,7 +82,7 @@ def test_trigger_status_pass_lets_request_through(
         '    BotShieldScoreNonInteractive 500\n'
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldRequestTrigger pass-probe path="/definitely-nonexistent" '
+        '    BotShieldRule pass-probe path="/definitely-nonexistent" '
         'status=nochallenge',
         count=1,
     ):
@@ -126,7 +126,7 @@ def test_trigger_status_pass_penalty_scores_the_current_request(
     scraperua-python, firstsightip and any flag triggers. The
     difference there is the whole pipeline, not the penalty.
     """
-    RULE = ('    BotShieldRequestTrigger passpen path="/honey-pass" '
+    RULE = ('    BotShieldRule passpen path="/honey-pass" '
             'status=nochallenge %s ttl=3600')
 
     def score_for(extra, ip):
@@ -176,7 +176,7 @@ def test_trigger_redirect_sets_location(
         '    BotShieldScoreNonInteractive 500\n'
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldRequestTrigger env-redirect path="/.env.redir" '
+        '    BotShieldRule env-redirect path="/.env.redir" '
         'redirect=https://example.org/gone',
         count=1,
     ):
@@ -197,7 +197,7 @@ def test_trigger_redirect_honors_explicit_status(
         '    BotShieldScoreNonInteractive 500\n'
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldRequestTrigger env-redirect path="/.env.perm" '
+        '    BotShieldRule env-redirect path="/.env.perm" '
         'redirect=https://example.org/gone status=301',
         count=1,
     ):
@@ -221,8 +221,8 @@ def test_trigger_declaration_order_wins_on_overlap(
         '    BotShieldScoreNonInteractive 500\n'
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldRequestTrigger wp-ajax path="/wp-admin/admin-ajax.php" status=nochallenge\n'
-        '    BotShieldRequestTrigger wp-all  path="/wp-admin*"               status=403',
+        '    BotShieldRule wp-ajax path="/wp-admin/admin-ajax.php" status=nochallenge\n'
+        '    BotShieldRule wp-all  path="/wp-admin*"               status=403',
         count=1,
     ):
         r_ajax  = client.get("/wp-admin/admin-ajax.php", xff=fresh_ip)
@@ -242,19 +242,19 @@ def test_trigger_declaration_order_wins_on_overlap(
 def test_trigger_main_scope_inherits_into_vhost(
     config_override, log_slice, fresh_ip,
 ):
-    """BotShieldRequestTrigger declared outside <VirtualHost> must flow
+    """BotShieldRule declared outside <VirtualHost> must flow
     into the vhost via bs_merge_server_cfg — same guarantee the
     other E2.x directives got."""
     with config_override(
         r"BotShieldStateSaveInterval\s+\d+",
-        'BotShieldRequestTrigger main-scope-trap path="/main-scope-env" '
+        'BotShieldRule main-scope-trap path="/main-scope-env" '
         'status=403 log="MAIN"\n'
         'BotShieldStateSaveInterval 30',
         count=1,
     ):
         resp = client.get("/main-scope-env", xff=fresh_ip)
     assert resp.status_code == 403, (
-        "main-scope BotShieldRequestTrigger did not inherit into the vhost"
+        "main-scope BotShieldRule did not inherit into the vhost"
     )
 
 
@@ -278,7 +278,7 @@ def test_trigger_flag_ip_carries_to_next_request(
         '    BotShieldScoreNonInteractive 500\n'
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldRequestTrigger bait path="/honey-bait" '
+        '    BotShieldRule bait path="/honey-bait" '
         'status=nochallenge flag=honeypot_hit ttl=3600',
         count=1,
     ):
@@ -317,7 +317,7 @@ def test_path_trigger_middle_star_matches_segment(
         '    BotShieldScoreNonInteractive 500\n'
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldRequestTrigger api-admin path="/api/*/admin" status=403',
+        '    BotShieldRule api-admin path="/api/*/admin" status=403',
         count=1,
     ):
         with log_slice as slc:
@@ -354,7 +354,7 @@ def test_path_trigger_middle_star_anchored_excludes_suffix(
         '    BotShieldScoreNonInteractive 500\n'
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldRequestTrigger api-admin-end path="/api/*/admin$" status=403',
+        '    BotShieldRule api-admin-end path="/api/*/admin$" status=403',
         count=1,
     ):
         with log_slice as slc:
@@ -407,7 +407,7 @@ def test_path_trigger_middle_star_emits_notice_on_config_load(
         '    BotShieldScoreNonInteractive 500\n'
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldRequestTrigger middle-warn path="/foo*bar" status=403',
+        '    BotShieldRule middle-warn path="/foo*bar" status=403',
         count=1,
     ):
         pass
@@ -417,7 +417,7 @@ def test_path_trigger_middle_star_emits_notice_on_config_load(
         capture_output=True, text=True, check=True,
     ).stdout
 
-    assert "BotShieldRequestTrigger 'middle-warn'" in tail and \
+    assert "BotShieldRule 'middle-warn'" in tail and \
            "non-trailing '*'" in tail, (
         "expected a NOTICE about non-trailing '*' on config load; "
         f"main-log tail: {tail!r}"
@@ -442,7 +442,7 @@ def test_flat_trigger_form_is_rejected(config_override):
         with config_override(
             r"BotShieldEnabled\s+On",
             "BotShieldEnabled On\n"
-            '    BotShieldRequestTrigger oldform path="/retired" status=403',
+            '    BotShieldRule oldform path="/retired" status=403',
             render=False,
         ):
             pass
@@ -450,3 +450,39 @@ def test_flat_trigger_form_is_rejected(config_override):
     assert "returned non-zero exit status" in msg or "retired" in msg, (
         f"expected the flat trigger form to be refused; got: {msg!r}"
     )
+
+
+def test_deprecated_requesttrigger_spelling_still_parses(
+    config_override, fresh_ip,
+):
+    """<BotShieldRequestTrigger> is the old spelling of <BotShieldRule>.
+
+    It warns at config time and keeps working. A config error is fatal
+    to httpd and the name is still in live configs, so removing it
+    outright would take a site down at its next restart rather than
+    announce a rename. BotShieldPathTrigger was retired the same way --
+    renamed first, removed nine days later.
+
+    render=False is load-bearing for the same reason it is on the flat
+    -form test: the block is written out here exactly as an operator
+    would write it, so the module is what gets tested rather than the
+    harness renderer.
+
+    When the name is finally removed, this becomes its rejection test:
+    flip it to expect a failure naming BotShieldRule.
+    """
+    with config_override(
+        r"BotShieldEnabled\s+On",
+        "BotShieldEnabled On\n"
+        "    <BotShieldRequestTrigger legacy-spelling>\n"
+        "        BotShieldPath      /legacy-spelling-probe\n"
+        "        BotShieldStatus    404\n"
+        "    </BotShieldRequestTrigger>",
+        render=False,
+        count=1,
+    ):
+        resp = client.get("/legacy-spelling-probe", xff=fresh_ip)
+        assert resp.status_code == 404, (
+            "the deprecated spelling must keep working until it is "
+            f"removed; got {resp.status_code}"
+        )

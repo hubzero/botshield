@@ -211,14 +211,14 @@ def test_safeguard_does_not_override_block_path(
     config_override, fresh_ip,
 ):
     """CHANGELOG: 'safeguard should never override a clear hard block /
-    deny decision.' Configure a BotShieldRequestTrigger that 403s on
+    deny decision.' Configure a BotShieldRule that 403s on
     /blocked and trip safeguard on /. Then hit /blocked — must still
     return 403, not safeguard pass-through."""
     with config_override(
         r"BotShieldEnabled\s+On",
         _safeguard_cfg(threshold=2)
         # UA-narrowed cohort: 'httpx' substring matches SCRAPER_UA.
-        + '    BotShieldRequestTrigger badpath path="/blocked" '
+        + '    BotShieldRule badpath path="/blocked" '
           'ua="httpx" status=403',
         count=1,
     ):

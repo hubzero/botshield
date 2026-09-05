@@ -110,7 +110,7 @@ access logs aren't being gated. Decision log shows `tier=nochallenge`.
   flagtrigger penalty + tier_floor=captcha. See
   [policy](policy.md).
 - **Path triggers**: for paths that bots target but legitimate
-  users don't, add `BotShieldRequestTrigger` rules with a penalty,
+  users don't, add `BotShieldRule` rules with a penalty,
   status=403, or both. UA / IP cohort gating goes inline as
   `ua=...` / `ipspec=...` keys.
 - **Rate-limit**: if you see scraper UA patterns, add a

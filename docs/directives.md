@@ -651,7 +651,7 @@ semantics and refresh model.
 
 | Directive | Predicate args | Action keys |
 |---|---|---|
-| `BotShieldRequestTrigger` | `<name>` + any of `path=<glob>` `query=<glob>` `cookies=none\|any\|session` `ua=<substring>\|@<botgroup>\|""` `ipspec=<spec>` — ANDed, at least one required | `status=`, `redirect=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `burn=`, `penalty=`, `mode=` (no `credit=`) |
+| `BotShieldRule` | `<name>` + any of `path=<glob>` `query=<glob>` `cookies=none\|any\|session` `ua=<substring>\|@<botgroup>\|""` `ipspec=<spec>` — ANDed, at least one required | `status=`, `redirect=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `burn=`, `penalty=`, `mode=` (no `credit=`) |
 | `BotShieldCookieTrigger` | `<name> <pred>` (see policy page) | `status=`, `redirect=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `burn=`, `penalty=`, `credit=`, `mode=` |
 | `BotShieldEnvTrigger` | `<name> <env-pred>` (see policy page) | `status=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `burn=`, `penalty=`, `credit=`, `mode=` (no `redirect=`) |
 | `BotShieldFeedbackTrigger` | `<event>` | `flag=`, `ttl=`, `log=`, `accesslog=`, `mode=` |
@@ -674,12 +674,12 @@ suppresses the access-log line for a matching request.
 They compose, which is the point — a scanner probe usually wants both:
 
 ```apache
-<BotShieldRequestTrigger env-probe>
+<BotShieldRule env-probe>
     BotShieldPath         /.env
     BotShieldStatus       403
     BotShieldLog          scanner-probe
     BotShieldAccessLog    off
-</BotShieldRequestTrigger>
+</BotShieldRule>
 ```
 
 (An earlier development build overloaded `log=off` for this. That form is
@@ -719,7 +719,7 @@ CustomLog logs/access.log combined "expr=%{reqenv:BS_OUTCOME} != 'block'"
 
 That is the right tool when you only want to thin one log.
 
-### `BotShieldRequestTrigger` — match on any request property
+### `BotShieldRule` — match on any request property
 
 Every match key is optional and they **AND** together; at least one is
 required. A rule with no condition would match every request, which is
@@ -771,31 +771,31 @@ when you want to challenge the request in front of you.
 # cookieless crawler walking a login redirect chain: path AND query AND
 # cookie-state, one cheap 403 from the policy walk, tagged for fail2ban
 # and kept out of the access log
-<BotShieldRequestTrigger login-trap>
+<BotShieldRule login-trap>
     BotShieldPath         /login*
     BotShieldQuery        *return=*
     BotShieldCookies      none
     BotShieldStatus       403
     BotShieldLog          login-trap
     BotShieldAccessLog    off
-</BotShieldRequestTrigger>
+</BotShieldRule>
 
 # no path condition at all — any URL carrying ?debug=1
-<BotShieldRequestTrigger debugparam>
+<BotShieldRule debugparam>
     BotShieldQuery        *debug=1*
     BotShieldPenalty      20
-</BotShieldRequestTrigger>
+</BotShieldRule>
 
 # no User-Agent at all. Absence is not a substring, so this is the one
 # UA form the pattern match cannot express. Note ua="" is a restriction
 # and ua=* is not: "*" (or omitting the key) means "any", which is why a
 # rule carrying only ua=* is rejected as having no condition.
-<BotShieldRequestTrigger no-ua>
+<BotShieldRule no-ua>
     BotShieldUserAgent    ""
     BotShieldStatus       nochallenge
     BotShieldTier         noninteractive
     BotShieldLog          no-ua
-</BotShieldRequestTrigger>
+</BotShieldRule>
 ```
 
 Because it fires from the policy walk it short-circuits **before**
@@ -856,6 +856,34 @@ either, so it costs nothing that was not already being paid.
 > which used to be how you switched the default off, is now what the
 > default already is and can be deleted.
 
+#### Renamed from `BotShieldRequestTrigger`
+
+`BotShieldRequestTrigger` is the old spelling of this directive. The
+family stopped being about requests-versus-something-else once it grew
+`ua=`, `ipspec=`, `query=`, `cookies=`, `exists=`, `solved=` and
+`minload=`. What it actually does is match a request on any combination
+of its properties and act once, which is what a rule is.
+
+The old name still parses and logs a deprecation warning at config
+time. It **will** be removed, so rename the block and its closing tag:
+
+```apache
+# before
+<BotShieldRequestTrigger blocked>
+    BotShieldPath         /wp-admin/*
+    BotShieldStatus       403
+</BotShieldRequestTrigger>
+
+# after
+<BotShieldRule blocked>
+    BotShieldPath         /wp-admin/*
+    BotShieldStatus       403
+</BotShieldRule>
+```
+
+Nothing else changes: same conditions, same actions, same parser, same
+resulting rule. Only the spelling differs.
+
 #### Migrating from `BotShieldPathTrigger`
 
 `BotShieldPathTrigger` was renamed on 2026-08-01 and its path glob moved
@@ -872,10 +900,10 @@ runtime:
 # before
 BotShieldPathTrigger blocked "/wp-admin/*" status=403
 # after
-<BotShieldRequestTrigger blocked>
+<BotShieldRule blocked>
     BotShieldPath         /wp-admin/*
     BotShieldStatus       403
-</BotShieldRequestTrigger>
+</BotShieldRule>
 ```
 
 A note on quoting: values are unquoted by the module, so

@@ -3,7 +3,7 @@
 Exercises the two cohort-conditional surfaces:
 
   BotShieldRateLimit <name> <budget> <per> <ua> <ipspec>
-  BotShieldRequestTrigger <name> path=<glob> [ua=...] [ipspec=...] status=403
+  BotShieldRule <name> path=<glob> [ua=...] [ipspec=...] status=403
 
 The legacy `BotShieldBlockPath` directive was retired in favor of a
 A request trigger with `status=403` plus optional `ua=`/`ipspec=` match
@@ -151,7 +151,7 @@ def test_path_trigger_block_prefix_match(config_override, log_slice, fresh_ip):
         '    BotShieldScoreNonInteractive 500\n'
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldRequestTrigger lockdown path="/admin" ua="Scraper/" status=403 ttl=0',
+        '    BotShieldRule lockdown path="/admin" ua="Scraper/" status=403 ttl=0',
         count=1,
     ):
         with log_slice as slc:
@@ -176,7 +176,7 @@ def test_path_trigger_block_end_anchor(config_override, log_slice, fresh_ip):
         '    BotShieldScoreNonInteractive 500\n'
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldRequestTrigger exact path="/exact$" ua="Scraper/" status=403 ttl=0',
+        '    BotShieldRule exact path="/exact$" ua="Scraper/" status=403 ttl=0',
         count=1,
     ):
         r_exact = client.get("/exact",     xff=fresh_ip, ua="Scraper/1.0")
@@ -195,7 +195,7 @@ def test_path_trigger_cohort_narrowing(config_override, log_slice, fresh_ip):
         '    BotShieldScoreNonInteractive 500\n'
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldRequestTrigger scrapersonly path="/wp-admin" ua="Scraper/" status=403 ttl=0',
+        '    BotShieldRule scrapersonly path="/wp-admin" ua="Scraper/" status=403 ttl=0',
         count=1,
     ):
         r_scrap = client.get("/wp-admin", xff=fresh_ip, ua="Scraper/1.0")
@@ -245,7 +245,7 @@ def test_rate_limit_ua_match_is_case_insensitive(
 def test_path_trigger_precedence_is_declaration_order(
     config_override, log_slice, fresh_ip,
 ):
-    """Overlapping BotShieldRequestTrigger rules must resolve by declaration
+    """Overlapping BotShieldRule rules must resolve by declaration
     order, not by hash-iteration chance. A specific `/admin/secret`
     rule declared FIRST should win when both it and a generic
     `/admin*` rule match."""
@@ -255,8 +255,8 @@ def test_path_trigger_precedence_is_declaration_order(
         '    BotShieldScoreNonInteractive 500\n'
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldRequestTrigger specific path="/admin/secret" ua="Scraper/" status=403 ttl=0\n'
-        '    BotShieldRequestTrigger generic  path="/admin*"       ua="Scraper/" status=403 ttl=0',
+        '    BotShieldRule specific path="/admin/secret" ua="Scraper/" status=403 ttl=0\n'
+        '    BotShieldRule generic  path="/admin*"       ua="Scraper/" status=403 ttl=0',
         count=1,
     ):
         with log_slice as slc:

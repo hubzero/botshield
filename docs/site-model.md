@@ -246,7 +246,7 @@ which signals contributed and how much.
      `BotShieldScoreCaptcha`, or lower the offending heuristic's
      penalty.
    - Bots slipping through → lower thresholds, raise scraper-UA
-     penalty, add `BotShieldRequestTrigger` rules for known-bad paths.
+     penalty, add `BotShieldRule` rules for known-bad paths.
 5. Switch to `BotShieldEnabled On` when satisfied.
 6. Subsequent rule additions can be staged with per-rule
    `mode=observe` without affecting the rest.

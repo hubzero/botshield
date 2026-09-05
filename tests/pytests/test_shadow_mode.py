@@ -66,7 +66,7 @@ def test_path_trigger_observe_does_not_enforce(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldRequestTrigger trap path="/.envprobe" '
+        '    BotShieldRule trap path="/.envprobe" '
         'status=403 mode=observe',
         count=1,
     ):
@@ -93,7 +93,7 @@ def test_path_trigger_observe_does_not_flag_ip(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldRequestTrigger trap path="/.envprobe" '
+        '    BotShieldRule trap path="/.envprobe" '
         'status=nochallenge flag=fake_bot ttl=3600 mode=observe',
         count=1,
     ):
@@ -177,7 +177,7 @@ def test_path_trigger_observe_does_not_403(config_override, fresh_ip):
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldRequestTrigger admin-block path="/admin/*" '
+        '    BotShieldRule admin-block path="/admin/*" '
         'ua="httpx" status=403 mode=observe',
         count=1,
     ):
@@ -203,7 +203,7 @@ def test_scope_log_only_overrides_per_rule_enforce(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldEnabled LogOnly\n'
-        '    BotShieldRequestTrigger trap path="/.envprobe" status=403',
+        '    BotShieldRule trap path="/.envprobe" status=403',
         count=1,
     ):
         r = _g("/.envprobe", xff=fresh_ip)
@@ -222,7 +222,7 @@ def test_scope_log_only_default_lets_per_rule_enforce(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldRequestTrigger trap path="/.envprobe2" status=403',
+        '    BotShieldRule trap path="/.envprobe2" status=403',
         count=1,
     ):
         r = _g("/.envprobe2", xff=fresh_ip)
@@ -246,9 +246,9 @@ def test_observe_does_not_shadow_subsequent_enforce_rule(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldRequestTrigger staged path="/admin/*" ua="httpx" '
+        '    BotShieldRule staged path="/admin/*" ua="httpx" '
         'status=403 mode=observe\n'
-        '    BotShieldRequestTrigger active path="/admin/*" ua="httpx" '
+        '    BotShieldRule active path="/admin/*" ua="httpx" '
         'status=403',
         count=1,
     ):
@@ -268,7 +268,7 @@ def test_directive_rejects_bad_mode_value(config_override):
         with config_override(
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
-            '    BotShieldRequestTrigger trap path="/foo" '
+            '    BotShieldRule trap path="/foo" '
             'status=403 mode=monitor',
             count=1,
         ):
@@ -313,7 +313,7 @@ def test_log_only_emits_tilde_block_for_path_trigger(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldEnabled LogOnly\n'
-        '    BotShieldRequestTrigger admin-block path="/admin/*" ua="httpx" status=403',
+        '    BotShieldRule admin-block path="/admin/*" ua="httpx" status=403',
         count=1,
     ):
         with log_slice as slc:
@@ -397,7 +397,7 @@ def test_path_trigger_observe_increments_observed_total(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldRequestTrigger admin-block path="/admin/*" ua="httpx" '
+        '    BotShieldRule admin-block path="/admin/*" ua="httpx" '
         'status=403 mode=observe',
         count=1,
     ):
@@ -425,7 +425,7 @@ def test_per_location_log_only_with_inner_enforce(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldEnabled LogOnly\n'
-        '    BotShieldRequestTrigger everywhere path="/*" ua="httpx" status=403\n'
+        '    BotShieldRule everywhere path="/*" ua="httpx" status=403\n'
         '    <Location "/enforce-here">\n'
         '        BotShieldEnabled On\n'
         '    </Location>',

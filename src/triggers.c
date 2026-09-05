@@ -784,7 +784,11 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                                        int argc, char *const argv[])
 {
     (void)dconf;
-    static const char *D = "BotShieldRequestTrigger";
+    /* Names the family in every message this setter emits. The
+     * canonical spelling is BotShieldRule; <BotShieldRequestTrigger>
+     * still parses but is deprecated, and an operator using it is
+     * being pointed at the name to migrate to anyway. */
+    static const char *D = "BotShieldRule";
     if (argc < 1) {
         return "BotShieldRequestTrigger: expects <name> [key=value ...] "
                "with at least one of path= query= cookies= ua= ipspec=";

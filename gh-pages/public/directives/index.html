@@ -119,7 +119,7 @@
 <li class="toc__item toc__item--level-2"><a href="#robots-txt-enforcement">Robots.txt enforcement</a></li>
 <li class="toc__item toc__item--level-2"><a href="#triggers">Triggers</a></li>
 <li class="toc__item toc__item--level-3"><a href="#accesslog-off-keep-a-request-out-of-the-access-log">`accesslog=off` — keep a request out of the access log</a></li>
-<li class="toc__item toc__item--level-3"><a href="#botshieldrequesttrigger-match-on-any-request-property">`BotShieldRequestTrigger` — match on any request property</a></li>
+<li class="toc__item toc__item--level-3"><a href="#botshieldrule-match-on-any-request-property">`BotShieldRule` — match on any request property</a></li>
 <li class="toc__item toc__item--level-2"><a href="#per-scope-triggers">Per-scope triggers</a></li>
 <li class="toc__item toc__item--level-2"><a href="#flag-triggers">Flag triggers</a></li>
 <li class="toc__item toc__item--level-2"><a href="#heuristic-triggers">Heuristic triggers</a></li>
@@ -1111,7 +1111,7 @@ semantics and refresh model.</p>
 </thead>
 <tbody>
 <tr>
-<td><code>BotShieldRequestTrigger</code></td>
+<td><code>BotShieldRule</code></td>
 <td><code>&lt;name&gt;</code> + any of <code>path=&lt;glob&gt;</code> <code>query=&lt;glob&gt;</code> <code>cookies=none|any|session</code> <code>ua=&lt;substring&gt;|@&lt;botgroup&gt;|&quot;&quot;</code> <code>ipspec=&lt;spec&gt;</code> — ANDed, at least one required</td>
 <td><code>status=</code>, <code>redirect=</code>, <code>log=</code>, <code>accesslog=</code>, <code>flag=</code>, <code>ttl=</code>, <code>burn=</code>, <code>penalty=</code>, <code>mode=</code> (no <code>credit=</code>)</td>
 </tr>
@@ -1152,12 +1152,12 @@ cookie. Repeatable; each call appends.</p>
 for fail2ban handoff. <code>accesslog=off</code> is separate and independent: it
 suppresses the access-log line for a matching request.</p>
 <p>They compose, which is the point — a scanner probe usually wants both:</p>
-<pre><code class="language-apache">&lt;BotShieldRequestTrigger env-probe&gt;
+<pre><code class="language-apache">&lt;BotShieldRule env-probe&gt;
     BotShieldPath         /.env
     BotShieldStatus       403
     BotShieldLog          scanner-probe
     BotShieldAccessLog    off
-&lt;/BotShieldRequestTrigger&gt;
+&lt;/BotShieldRule&gt;
 </code></pre>
 <p>(An earlier development build overloaded <code>log=off</code> for this. That form is
 now rejected at config time with a pointer here, rather than silently
@@ -1190,7 +1190,7 @@ request environment:</p>
 <pre><code class="language-apache">CustomLog logs/access.log combined &quot;expr=%{reqenv:BS_OUTCOME} != 'block'&quot;
 </code></pre>
 <p>That is the right tool when you only want to thin one log.</p>
-<h3 id="botshieldrequesttrigger-match-on-any-request-property"><code>BotShieldRequestTrigger</code> — match on any request property</h3>
+<h3 id="botshieldrule-match-on-any-request-property"><code>BotShieldRule</code> — match on any request property</h3>
 <p>Every match key is optional and they <strong>AND</strong> together; at least one is
 required. A rule with no condition would match every request, which is
 what <code>BotShieldTrigger</code> in an Apache scope is for, so the parser rejects
@@ -1288,31 +1288,31 @@ logging-and-flagging form, not a no-op.</p>
 <pre><code class="language-apache"># cookieless crawler walking a login redirect chain: path AND query AND
 # cookie-state, one cheap 403 from the policy walk, tagged for fail2ban
 # and kept out of the access log
-&lt;BotShieldRequestTrigger login-trap&gt;
+&lt;BotShieldRule login-trap&gt;
     BotShieldPath         /login*
     BotShieldQuery        *return=*
     BotShieldCookies      none
     BotShieldStatus       403
     BotShieldLog          login-trap
     BotShieldAccessLog    off
-&lt;/BotShieldRequestTrigger&gt;
+&lt;/BotShieldRule&gt;
 
 # no path condition at all — any URL carrying ?debug=1
-&lt;BotShieldRequestTrigger debugparam&gt;
+&lt;BotShieldRule debugparam&gt;
     BotShieldQuery        *debug=1*
     BotShieldPenalty      20
-&lt;/BotShieldRequestTrigger&gt;
+&lt;/BotShieldRule&gt;
 
 # no User-Agent at all. Absence is not a substring, so this is the one
 # UA form the pattern match cannot express. Note ua=&quot;&quot; is a restriction
 # and ua=* is not: &quot;*&quot; (or omitting the key) means &quot;any&quot;, which is why a
 # rule carrying only ua=* is rejected as having no condition.
-&lt;BotShieldRequestTrigger no-ua&gt;
+&lt;BotShieldRule no-ua&gt;
     BotShieldUserAgent    &quot;&quot;
     BotShieldStatus       nochallenge
     BotShieldTier         noninteractive
     BotShieldLog          no-ua
-&lt;/BotShieldRequestTrigger&gt;
+&lt;/BotShieldRule&gt;
 </code></pre>
 <p>Because it fires from the policy walk it short-circuits <strong>before</strong>
 scoring, so a <code>status=4xx</code> rule never renders a challenge and never
@@ -1366,6 +1366,28 @@ default now flags nothing. Add <code>BotShieldFlag scanner_probe</code> and
 which used to be how you switched the default off, is now what the
 default already is and can be deleted.</p>
 </blockquote>
+<h4 id="renamed-from-botshieldrequesttrigger">Renamed from <code>BotShieldRequestTrigger</code></h4>
+<p><code>BotShieldRequestTrigger</code> is the old spelling of this directive. The
+family stopped being about requests-versus-something-else once it grew
+<code>ua=</code>, <code>ipspec=</code>, <code>query=</code>, <code>cookies=</code>, <code>exists=</code>, <code>solved=</code> and
+<code>minload=</code>. What it actually does is match a request on any combination
+of its properties and act once, which is what a rule is.</p>
+<p>The old name still parses and logs a deprecation warning at config
+time. It <strong>will</strong> be removed, so rename the block and its closing tag:</p>
+<pre><code class="language-apache"># before
+&lt;BotShieldRequestTrigger blocked&gt;
+    BotShieldPath         /wp-admin/*
+    BotShieldStatus       403
+&lt;/BotShieldRequestTrigger&gt;
+
+# after
+&lt;BotShieldRule blocked&gt;
+    BotShieldPath         /wp-admin/*
+    BotShieldStatus       403
+&lt;/BotShieldRule&gt;
+</code></pre>
+<p>Nothing else changes: same conditions, same actions, same parser, same
+resulting rule. Only the spelling differs.</p>
 <h4 id="migrating-from-botshieldpathtrigger">Migrating from <code>BotShieldPathTrigger</code></h4>
 <p><code>BotShieldPathTrigger</code> was renamed on 2026-08-01 and its path glob moved
 from a positional argument to the <code>path=</code> key. The old name had stopped
@@ -1378,10 +1400,10 @@ runtime:</p>
 <pre><code class="language-apache"># before
 BotShieldPathTrigger blocked &quot;/wp-admin/*&quot; status=403
 # after
-&lt;BotShieldRequestTrigger blocked&gt;
+&lt;BotShieldRule blocked&gt;
     BotShieldPath         /wp-admin/*
     BotShieldStatus       403
-&lt;/BotShieldRequestTrigger&gt;
+&lt;/BotShieldRule&gt;
 </code></pre>
 <p>A note on quoting: values are unquoted by the module, so
 <code>path=&quot;/login*&quot;</code> and <code>path=/login*</code> behave identically. Apache's

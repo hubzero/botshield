@@ -218,18 +218,18 @@ rejected.</li>
 <p>Both axes can't be <code>*</code>/omitted — that would rate-limit every
 request, rejected at config time. The legacy 5-arg positional form
 <code>&lt;name&gt; &lt;budget&gt; &lt;per&gt; &lt;ua-pattern&gt; &lt;ipspec&gt;</code> is still accepted.</p>
-<p>For path-conditional 403s, use <code>BotShieldRequestTrigger</code> with
+<p>For path-conditional 403s, use <code>BotShieldRule</code> with
 <code>status=403</code> plus optional <code>ua=</code> / <code>ipspec=</code> match keys (the
 former <code>BotShieldBlockPath</code> directive, retired):</p>
-<pre><code class="language-apache">&lt;BotShieldRequestTrigger legacy-admin&gt;
+<pre><code class="language-apache">&lt;BotShieldRule legacy-admin&gt;
     BotShieldPath         /wp-admin/*
     BotShieldStatus       403
-&lt;/BotShieldRequestTrigger&gt;
-&lt;BotShieldRequestTrigger aggressive-scraper&gt;
+&lt;/BotShieldRule&gt;
+&lt;BotShieldRule aggressive-scraper&gt;
     BotShieldPath         /
     BotShieldUserAgent    AhrefsBot
     BotShieldStatus       403
-&lt;/BotShieldRequestTrigger&gt;
+&lt;/BotShieldRule&gt;
 </code></pre>
 <p>Match keys (any of):</p>
 <ul>
@@ -339,7 +339,7 @@ the same shared action keys.</p>
 <tbody>
 <tr>
 <td>Path</td>
-<td><code>BotShieldRequestTrigger</code></td>
+<td><code>BotShieldRule</code></td>
 <td>URI glob</td>
 </tr>
 <tr>
@@ -410,18 +410,18 @@ action keys are:</p>
 </tbody>
 </table>
 <h3 id="path-triggers">Path triggers</h3>
-<pre><code class="language-apache">&lt;BotShieldRequestTrigger admin-honeypot&gt;
+<pre><code class="language-apache">&lt;BotShieldRule admin-honeypot&gt;
     BotShieldPath         /admin/.env
     BotShieldStatus       403
     BotShieldFlag         honeypot_hit
     BotShieldTTL          3600
     BotShieldLog          admin-trap
-&lt;/BotShieldRequestTrigger&gt;
-&lt;BotShieldRequestTrigger api-burst-trap&gt;
+&lt;/BotShieldRule&gt;
+&lt;BotShieldRule api-burst-trap&gt;
     BotShieldPath         /api/*/burst
     BotShieldPenalty      30
     BotShieldLog          api-burst
-&lt;/BotShieldRequestTrigger&gt;
+&lt;/BotShieldRule&gt;
 </code></pre>
 <p>First-match wins (declaration order). On match, the path family's
 <code>status=nochallenge</code> short-circuits to <code>DECLINED</code> (real handler runs); any
