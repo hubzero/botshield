@@ -8,7 +8,7 @@
  *
  * Per-tier interstitial mapping (driven by bs_decide_tier in
  * botshield.c):
- *   non-interactive → auto-submit splash (no user click)
+ *   noninteractive → auto-submit splash (no user click)
  *   form    → reCAPTCHA-shaped checkbox the JS solves
  *   captcha → configured third-party provider's widget
  *
@@ -46,9 +46,9 @@ extern "C" {
  *
  *   r            — request to write to
  *   cfg          — directory cfg with prompt/logo/help/captcha bits
- *   tier         — non-interactive/interactive/captcha (drives widget choice)
+ *   tier         — noninteractive/interactive/captcha (drives widget choice)
  *   challenge_js — the inline-challenge JSON from bs_challenge_json
- *   issue_auto   — 1 for the auto-submitting non-interactive splash, 0 for
+ *   issue_auto   — 1 for the auto-submitting noninteractive splash, 0 for
  *                  the visible-checkbox interactive PoW
  *
  * Returns 1 if served via a captcha provider widget (caller logs
@@ -67,7 +67,7 @@ int bs_render_challenge_page(request_rec *r,
  * is a pure render. GET only. */
 int bs_safeguard_info_handler(request_rec *r);
 
-/* <prefix>/preview/{non-interactive,interactive}. Renders the real interstitial with a
+/* <prefix>/preview/{noninteractive,interactive}. Renders the real interstitial with a
  * deliberately unsolvable payload so the page can be looked at in its
  * working state. Mints nothing and changes no state. */
 int bs_preview_handler(request_rec *r, int want_auto);

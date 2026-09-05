@@ -130,7 +130,7 @@ def test_claim_header_emitted_and_signed(config_override, fresh_ip):
     for k in ("v", "score", "tier", "cookie", "flags", "passes", "ts"):
         assert k in parsed, f"claim missing key '{k}'; parsed={parsed}"
     assert parsed["v"] == "1", parsed
-    assert parsed["tier"] == "pass", parsed
+    assert parsed["tier"] == "nochallenge", parsed
     # Cookieless first-sight visit → cookie state surfaces as
     # "minted" under the always-mint design (the response sets a
     # fresh trust=0 __Host-bs_session). The legacy "absent" /
@@ -158,7 +158,7 @@ def test_client_supplied_x_botshield_headers_are_stripped(
     ):
         r = _g("/", xff=fresh_ip, headers={
             "X-Botshield-Score": "0",
-            "X-Botshield-Tier":  "pass",
+            "X-Botshield-Tier":  "nochallenge",
             "X-Botshield-Forged": "yes",
         })
     # `Header echo "X-Botshield-.*"` copies all matching request

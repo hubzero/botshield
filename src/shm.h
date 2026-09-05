@@ -119,7 +119,7 @@ extern "C" {
 #define BS_NONCE_MIN_SLOTS         1024
 #define BS_NONCE_MAX_SLOTS         1048576
 /* E17 — embedded → M7 fallback threshold. After N consecutive
- * non-interactive-tier-embedded dispatches in the safeguard
+ * noninteractive-tier-embedded dispatches in the safeguard
  * window without _bs_session arriving, the embedded short-circuit is bypassed and
  * M7 issues. Set lower than safeguard threshold so M7 gets a chance
  * before pass-through fully kicks in. Reuses the safeguard table's
@@ -661,7 +661,7 @@ typedef struct {
     apr_uint64_t outcome[BS_M_OUTCOME_COUNT];
     /* Cookie state is in the ring because it carries the only solve
      * signal the PoW tiers produce. outcome=verified comes solely from
-     * captcha siteverify; a client that solves a non-interactive/interactive
+     * captcha siteverify; a client that solves a noninteractive/interactive
      * interstitial returns on a fresh request that reads cookie=ok, so
      * a windowed solve rate needs this dimension, not just outcome[]. */
     apr_uint64_t cookie [BS_M_COOKIE_COUNT];
@@ -899,7 +899,7 @@ typedef struct {
     bs_safeguard_slot   *safeguard_table;
     apr_size_t           safeguard_capacity;
     /* Embedded-bootstrap nonce table — one-time-use binding for
-     * non-interactive tier challenges; insert at issue, atomic-consume at
+     * noninteractive tier challenges; insert at issue, atomic-consume at
      * verify, second presentation rejected. */
     bs_nonce_slot       *nonce_table;
     apr_size_t           nonce_capacity;
@@ -921,7 +921,7 @@ typedef struct {
      * without this there is no way to show what actually arrived.
      *
      * It matters most for the slots that are not one bot: the
-     * unknown-bot, no-ua, fake-bot and wildcard-fallback aggregates
+     * unknownbot, no-ua, fake-bot and wildcard-fallback aggregates
      * are defined by what falls into them, and a sample UA is the only
      * view inside.
      *

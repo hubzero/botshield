@@ -223,7 +223,7 @@ static const char *tier_name(bs_tier t)
 {
     switch (t) {
     case BS_TIER_PASS:           return "pass";
-    case BS_TIER_NONINTERACTIVE: return "non-interactive";
+    case BS_TIER_NONINTERACTIVE: return "noninteractive";
     case BS_TIER_INTERACTIVE:    return "interactive";
     case BS_TIER_CAPTCHA:        return "captcha";
     default:                     return "?";
@@ -372,32 +372,32 @@ int main(void)
         /* The case that made the pytest suite depend on Bloom warmth.
          * A framework client with no browser UA and no Accept-Language,
          * arriving from an address the filter has not seen, scores
-         * exactly the dev vhost's non-interactive threshold of 20. */
+         * exactly the dev vhost's noninteractive threshold of 20. */
         { "framework client, cold filter", "python-httpx/0.28", NULL,
-          1, 0, 20, "scraper-ua" },
+          1, 0, 20, "scraperua" },
         /* The same client once the filter has seen it. Five points
          * lower, and on the other side of the line. Nothing about the
          * request changed. */
         { "framework client, warm filter", "python-httpx/0.28", NULL,
-          0, 0, 15, "scraper-ua" },
+          0, 0, 15, "scraperua" },
         /* An ordinary visitor, which is what the default test client
          * should look like. */
         { "browser, cold filter",
           "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
           "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 "
-          "Safari/537.36", "en-US", 1, 0, 5, "first-sight-ip" },
+          "Safari/537.36", "en-US", 1, 0, 5, "firstsightip" },
         { "browser, warm filter",
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
           "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
           "en-US", 0, 0, 0, NULL },
-        { "no user-agent at all", NULL, "en-US", 0, 0, 40, "missing-user-agent" },
-        { "no headers at all", NULL, NULL, 0, 0, 45, "missing-accept-language" },
+        { "no user-agent at all", NULL, "en-US", 0, 0, 40, "missinguseragent" },
+        { "no headers at all", NULL, NULL, 0, 0, 45, "missingacceptlanguage" },
         { "cookie dropped after being seen",
           "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
           "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
-          "en-US", 0, 1, 25, "dropped-cookie" },
+          "en-US", 0, 1, 25, "droppedcookie" },
         { "scraper, every signal at once", "curl/8.4.0", NULL,
-          1, 0, 20, "scraper-ua-curl" },
+          1, 0, 20, "scraperua-curl" },
     };
 
     printf("scoring path, %zu cases\n", sizeof(cases) / sizeof(cases[0]));
@@ -421,7 +421,7 @@ int main(void)
         if (!run_tier_case(&tiers[i])) failures++;
     }
 
-    printf("\nflag-trigger reset ordering, 4 cases\n");
+    printf("\nflagtrigger reset ordering, 4 cases\n");
     failures += run_reset_cases(s, scfg);
 
     static const inherit_case inherits[] = {

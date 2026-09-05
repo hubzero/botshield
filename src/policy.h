@@ -42,7 +42,7 @@
  *  - Path-trigger status=4xx → that status + score change per the
  *    trigger's penalty/credit/log keys.
  *  - Rate-limit exceeded → 429 + Retry-After: <seconds remaining in
- *    window> + bs_score_add(+50, "rate-limit-exceeded:<name>"). */
+ *    window> + bs_score_add(+50, "ratelimitexceeded:<name>"). */
 #ifndef BOTSHIELD_POLICY_H
 #define BOTSHIELD_POLICY_H
 

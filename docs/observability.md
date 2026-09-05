@@ -63,8 +63,8 @@ Line shape — the same `key=value` payload as the error-log line, with an
 ISO-8601 UTC timestamp in front and the User-Agent appended:
 
 ```
-2026-07-31T15:50:07.677Z tier=pass outcome=block ip=203.0.113.9 score=0
-    cookie=minted provider=- alg=- reason="env-trigger:login-trap:0"
+2026-07-31T15:50:07.677Z tier=nochallenge outcome=block ip=203.0.113.9 score=0
+    cookie=minted provider=- alg=- reason="envtrigger:login-trap:0"
     path="/login?return=..." ua="Mozilla/5.0 ..."
 ```
 
@@ -125,11 +125,11 @@ awk-validator.sh`).
 
 | Field | Values |
 |---|---|
-| `tier` | `none`, `pass`, `non-interactive`, `interactive`, `captcha`, `safeguard` |
+| `tier` | `none`, `pass`, `noninteractive`, `interactive`, `captcha`, `safeguard` |
 | `outcome` | `allow`, `challenged`, `verified`, `block`, `redirect`, `failopen`, `rate_limited`, `inflight_capped`, `pending_missing`, `misconfigured`, `debug` (plus tilde-prefixed counterfactuals: `~challenge`, `~block`, `~rate_limited` under `BotShieldEnabled LogOnly`) |
 | `cookie` | `solved`, `ok`, `expired`, `bad_sig`, `bad_format`, `absent`, `minted`, `-` |
 | `provider` | `-`, `turnstile`, `hcaptcha`, `recaptcha-v2`, `recaptcha-v3`, `friendly`, `geetest` |
-| `alg` | `-`, `sha256-zeros`, `captcha-<provider>` |
+| `alg` | `-`, `sha256zeros`, `captcha-<provider>` |
 | `reason` | quoted short string (comma-joined reason names) or `-` |
 
 ### Reason terms carried on a solve
@@ -145,14 +145,14 @@ reason="pow_ok,ms:770,pow_ms:717,react_ms:-1,attest:webdriver"
 |---|---|
 | `ms:<n>` | Server-measured issue → submit, ms. The issue stamp is covered by the bootstrap HMAC, so the client cannot influence it. Includes two network legs and both machines' CPU. |
 | `pow_ms:<n>` | Client-measured proof-of-work duration. `-1` if absent. |
-| `react_ms:<n>` | Client-measured reveal → click, ms. `-1` on the non-interactive tier, which has no click. |
+| `react_ms:<n>` | Client-measured reveal → click, ms. `-1` on the noninteractive tier, which has no click. |
 | `attest:<a>+<b>` | Failed attestation probes, `+`-joined. Absent when all probes passed. |
 
 The client pair is forgeable on its own — the JS is readable — but both
 are bounded above by `ms`, which the client cannot influence.
 Overstating one costs real wall time; understating it gains nothing. A
 claim exceeding the server's own total is a lie the server can prove,
-and is reported as `attest:impossible-timing`.
+and is reported as `attest:impossibletiming`.
 
 Their value is excluding the network: `react_ms` is a human reaction
 with no RTT in it, which the server figure can never isolate.
@@ -174,7 +174,7 @@ and that promise has to survive contact with this code.
 | `no-screen` | Screen dimensions are zero |
 | `patched-native` | A native function no longer reports as native |
 | `click-on-arm` | Click landed under 150ms after the checkbox appeared |
-| `impossible-timing` | Client-reported timing exceeds the server's own total |
+| `impossibletiming` | Client-reported timing exceeds the server's own total |
 
 **Reported, not enforced.** Several probes have real false positives
 (privacy browsers, extensions that patch natives), and a wrong answer
@@ -375,7 +375,7 @@ BotShieldBotRateLimit * 1 sec mode=observe
 ```
 
 Every request that would have been refused is recorded with reason
-`bot-rate:<slug>` and outcome `observe`, so the decision log answers
+`botrate:<slug>` and outcome `observe`, so the decision log answers
 "who would this have throttled" from real traffic rather than from a
 guess. There is no rate limiting at all until a rule like that exists,
 so starting in observe mode costs nothing.
@@ -419,12 +419,12 @@ dashboard as **Client classification** and in Prometheus as
 |---|---|
 | `browser` | UA matched a real-browser template. |
 | `verified-bot` | UA matched the allow list **and** the IP is in that crawler's published ranges. |
-| `known-bot` | UA is in the bot directory, but not IP-verified. |
-| `unknown-bot` | UA has bot-shaped tokens with no directory entry, **or no User-Agent at all**. |
+| `knownbot` | UA is in the bot directory, but not IP-verified. |
+| `unknownbot` | UA has bot-shaped tokens with no directory entry, **or no User-Agent at all**. |
 | `fake-bot` | UA claims a crawler, IP is outside its published ranges — spoofed. |
 | `unknown` | Matched no classifier. |
 
-A request with no `User-Agent` header counts as `unknown-bot`, not
+A request with no `User-Agent` header counts as `unknownbot`, not
 `unknown`. Absence of the header is not ambiguity: every real browser
 sends one, so we positively know the client is not a browser, and
 filing it under `unknown` overstated our uncertainty. It also dominated
@@ -432,18 +432,18 @@ that bucket — 84% of `unknown` on this deployment — which made 41% of
 all traffic look like a classifier gap when it was a well-understood
 scanner population already being challenged.
 
-The reason chain still separates the two cases: `unknown-bot:no-ua`
-versus `unknown-bot:<token>` for a UA that named itself bot-shaped.
+The reason chain still separates the two cases: `unknownbot:no-ua`
+versus `unknownbot:<token>` for a UA that named itself bot-shaped.
 
 Rate limiting meters absent-UA traffic in its **own** aggregate rather
-than the shared `unknown-bot` one. At ~39k requests/day against ~2k for
+than the shared `unknownbot` one. At ~39k requests/day against ~2k for
 the rest of that bucket, sharing would hold the budget permanently
 exhausted and 429 every genuine unknown bot as collateral.
 
 The distinction that matters operationally is `verified-bot` vs
 `fake-bot`: both send the same User-Agent, and only the IP cross-check
 separates them. A rising `fake-bot` count is someone impersonating a
-crawler; a rising `known-bot` count with `verified-bot` flat can mean a
+crawler; a rising `knownbot` count with `verified-bot` flat can mean a
 ranges file has gone stale rather than that traffic changed.
 
 The metrics index is a deliberate copy of `bs_ua_class_label` rather
@@ -594,7 +594,7 @@ cookie harvesting. Both verify identically; only `solved` carries proof
 that a challenge was passed. A large `ok` share means clients are
 holding cookies they never earned — on one production hub 70% of
 valid-cookie traffic sent no User-Agent at all, replaying minted
-cookies to suppress the `dropped-cookie` penalty. `cookie_ok_total`
+cookies to suppress the `droppedcookie` penalty. `cookie_ok_total`
 rising while `cookie_solved_total` stays flat is that signature. Before 2026-08-01 the
 PoW path emitted nothing at all, so a deployment running the silent or
 interactive tier with no captcha provider reported a permanent 0% solve rate
@@ -610,7 +610,7 @@ pass-through gave bots free access for the safeguard TTL, the
 redirect makes the failure visible to legitimate clients and
 gives bots a non-protected page to land on. The matching
 `outcome=redirect` increments `outcome_redirect_total`; tier
-counts go to `tier_pass_total` (safeguard bins into pass for the
+counts go to `tier_nochallenge_total` (safeguard bins into nochallenge for the
 tier counter).
 
 ### Reason-name vocabulary
@@ -621,17 +621,35 @@ takes the shape `<family>:<name>` so the source family is visible:
 
 | Token shape | Source |
 |---|---|
-| `missing-user-agent`, `missing-accept-language`, `scraper-ua:<pattern>` | Built-in heuristics |
-| `first-sight-ip` | Bloom filter |
-| `verified-<name>`, `fake-<name>`, `bot-unverified` | allow list |
-| `rate-limit-exceeded:<name>` | rate limit |
-| `robots-block:<group>` | robots.txt |
-| `flag-trigger:<flag>` | flag-trigger score action |
-| `flag-tier-floor:<tier>` | flag-trigger tier-floor action |
-| `path-trigger:<name>`, `cookie-trigger:<name>`, `env-trigger:<name>`, `load-trigger:<name>`, `feedback-trigger:<event>` | trigger families |
+| `missinguseragent`, `missingacceptlanguage`, `missingua`, `missingal`, `scraperua:<pattern>` | Built-in heuristics |
+| `firstsightip` | Bloom filter |
+| `droppedcookie` | cookie was offered and not returned |
+| `browser:<family>` | browser classifier |
+| `emptyua`, `unknownua` | User-Agent absent, or present but unclassified |
+| `knownbot:<slug>`, `unknownbot:<slug>` | bot directory |
+| `verifiedbot:<name>`, `fakebot:<name>` | allow list, after the reverse-DNS and CIDR check |
+| `flaggedip` | the flagged-IP table |
+| `botrate:<slug\|@botgroup>` | per-bot rate limit |
+| `ratelimitexceeded:<name>`, `ratelimitabuse:<name>` | rate limit |
+| `robotsblock:<group>` | robots.txt |
+| `flagtrigger:<flag>` | flag-trigger score action |
+| `flagtierfloor:<tier>` | flag-trigger tier-floor action |
+| `requesttrigger:<name>`, `cookietrigger:<name>`, `envtrigger:<name>`, `loadtrigger:<name>`, `scopetrigger:<name>`, `feedbacktrigger:<event>` | trigger families |
+| `challengesafeguard`, `safeguardredirect` | safeguard |
+| `observabilityendpoint` | a request to the dashboard or metrics endpoint |
 | `<reason>:observe` | Any of the above with `mode=observe` or under `BotShieldEnabled LogOnly` (see [staging](staging.md)) |
-| `would-flag-trigger:<flag>:observe`, `would-block:<name>`, `would-rate-limit:<name>` | Observe-mode "would have done" reasons |
-| `challenge-safeguard` | safeguard redirect |
+| `wouldflagtrigger:<flag>:observe` | Observe-mode "would have done" reason |
+
+Every token above is dashless, and deliberately so. The `reason`
+field joins tokens with commas and their parts with colons, and a
+token that also contained a dash left a reader guessing whether a
+given dash was a separator or part of a name. Splitting on a comma
+and then a colon now yields whole names every time.
+
+Dashes that remain are not module vocabulary: a bot slug such as
+`claude-searchbot`, a botgroup selector such as `@ai-train`, and an
+operator's own `log=` label all keep whatever spelling they were
+given, and all of them appear only after the first colon.
 
 ### Verbose prose line
 
@@ -639,8 +657,8 @@ Alongside the structured line, the prose line carries the per-
 reason penalty values (not just the names) for forensic debugging:
 
 ```
-mod_botshield: <action> effective=37 tier=non-interactive heuristic=37
-    cookie_score=0 reasons=[first-sight-ip:5,missing-accept-language:15,scraper-ua:python-requests:50]
+mod_botshield: <action> effective=37 tier=noninteractive heuristic=37
+    cookie_score=0 reasons=[firstsightip:5,missingacceptlanguage:15,scraperua:python-requests:50]
 ```
 
 Grep the log for the request, read the reasons array, see exactly
@@ -676,7 +694,7 @@ WARNING). Drift is loud, not silent.
 
 | Counter family | Count | Source field |
 |---|---|---|
-| `botshield_tier_<t>_total` | 5 | one per non-`safeguard` tier; `safeguard` bins into `pass` |
+| `botshield_tier_<t>_total` | 5 | one per non-`safeguard` tier; `safeguard` bins into `nochallenge` |
 | `botshield_outcome_<o>_total` | 11 | one per `outcome` enum (incl. `outcome_redirect_total` for safeguard) |
 | `botshield_cookie_<c>_total` | 6 | one per `cookie` enum (incl. `cookie_minted_total` for always-mint events) |
 | `botshield_provider_<p>_total` | 6 | one per built-in provider |
@@ -769,12 +787,12 @@ botshield_resp_status_mismatch_total > 0
 
 ```
 $ curl -s http://localhost/botshield/metrics | head -20
-# HELP botshield_tier_pass_total Decisions where the request passed.
-# TYPE botshield_tier_pass_total counter
-botshield_tier_pass_total 1428931
-# HELP botshield_tier_non_interactive_total Decisions where the non-interactive tier was issued.
-# TYPE botshield_tier_non_interactive_total counter
-botshield_tier_non_interactive_total 84217
+# HELP botshield_tier_nochallenge_total Decisions at tier=nochallenge (no challenge served, request DECLINED).
+# TYPE botshield_tier_nochallenge_total counter
+botshield_tier_nochallenge_total 1428931
+# HELP botshield_tier_noninteractive_total Decisions at tier=noninteractive (self-solving widget served).
+# TYPE botshield_tier_noninteractive_total counter
+botshield_tier_noninteractive_total 84217
 # HELP botshield_attestation_fail_total Solves arriving with at least one failed attestation probe.
 # TYPE botshield_attestation_fail_total counter
 botshield_attestation_fail_total 2
@@ -814,7 +832,7 @@ metrics endpoint and decision log still cover everything.
 ## Who may read the dashboard and metrics
 
 Each endpoint is closed until its own directive names someone. See
-[the directive reference](directives.md#observability-endpoint-access)
+[the directive reference](directives.md#observabilityendpoint-access)
 for the full syntax; the short version is a list of addresses or CIDR
 blocks, one directive per endpoint:
 
@@ -859,7 +877,7 @@ $ sudo httpd -t -D DUMP_BOTSHIELD_POLICY
 scrapers                10    60s   "wget|curl|python"          *
 
 ## Tier thresholds (effective)
-non-interactive      20   configured
+noninteractive      20   configured
 interactive          50   configured
 captcha              80   configured
 

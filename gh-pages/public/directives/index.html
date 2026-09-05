@@ -258,7 +258,7 @@ operators can carve out exceptions:</p>
 limits and scoring all still run and still log, but no interstitial,
 form or captcha is ever rendered — any selected tier collapses back to
 <code>pass</code>, and the suppression appears in the decision log as
-<code>challenge-off:&lt;tier&gt;</code>.</p>
+<code>challengeoff:&lt;tier&gt;</code>.</p>
 <p>Use it where an explicit <code>status=4xx</code> trigger is meant to be the only
 action. Parking <code>BotShieldScoreNonInteractive</code>/<code>Interactive</code>/<code>Captcha</code> at <code>10000</code> is
 <strong>not</strong> equivalent, which is easy to get wrong: a flag <code>tier_floor</code> is
@@ -314,7 +314,7 @@ BotShieldFlagTrigger scanner_probe reset action=score add=50
 <p><code>reset</code> is required rather than stylistic: <strong>tier floors MAX across
 triggers</strong>, so adding a lower floor beside the compiled-in one is
 silently useless — it MAXes straight back up. <code>pow_fail_streak</code> needs
-no reset; its floor is already <code>non-interactive</code>.</p>
+no reset; its floor is already <code>noninteractive</code>.</p>
 <p><code>BotShieldDebug</code> returns <code>403 &quot;Hello World&quot;</code> for every request in
 scope — useful as a smoke test that the hook is firing.</p>
 <p><code>BotShieldSecretFile</code> and <code>BotShieldAlgorithm</code> are required. The
@@ -322,7 +322,7 @@ module emits <code>503 X-Botshield: misconfigured</code> for any request
 where both are not resolved on the scope. <code>BotShieldSecondarySecretFile</code>
 is the verify-only secondary key for graceful rotation — see
 <a href="../deployment/index.html#secret-rotation">deployment</a>.</p>
-<p><code>BotShieldAlgorithm</code> only <code>sha256-zeros</code> is built-in today;
+<p><code>BotShieldAlgorithm</code> only <code>sha256zeros</code> is built-in today;
 <code>sha384-zeros</code>, <code>sha512-zeros</code>, <code>pbkdf2-sha256</code>, <code>argon2id</code> are
 reserved registry slots that fail with a clear &quot;not implemented&quot;
 diagnostic.</p>
@@ -399,7 +399,7 @@ that drift:</p>
 </thead>
 <tbody>
 <tr>
-<td><code>&lt;prefix&gt;/preview/non-interactive</code></td>
+<td><code>&lt;prefix&gt;/preview/noninteractive</code></td>
 <td>The self-solving widget, pinned mid-check (the preview's proof-of-work is set unsolvable so it cannot complete and navigate away)</td>
 </tr>
 <tr>
@@ -475,7 +475,7 @@ Change it if it collides with real app routes.</p>
 discussion.</p>
 <p><code>BotShieldForgivenessCapPerHour</code> caps total cookie-side
 forgiveness in any rolling 60-minute window. Default 200 ≈ 4–8
-challenge-passes worth of credit. Lower for stricter farming
+nochallenge outcomes worth of credit. Lower for stricter farming
 resistance; 0 disables (legacy behavior).</p>
 <h2 id="silent-tier-dispatch">Silent-tier dispatch</h2>
 <table>
@@ -495,7 +495,7 @@ resistance; 0 disables (legacy behavior).</p>
 </tbody>
 </table>
 <p><code>interstitial</code> (the default) serves a no-click splash page that
-auto-submits a SHA-256 PoW on load — the legacy non-interactive-tier
+auto-submits a SHA-256 PoW on load — the legacy noninteractive-tier
 behavior. <code>embedded</code> instead hands off to the site-included
 <code>/botshield/embedded.js</code> wrapper: the page serves DECLINED (real
 content) and the wrapper does the PoW in a Web Worker, then POSTs
@@ -851,7 +851,7 @@ permits vhost context, so Apache will not catch it; the module has to.</p>
 <h2 id="ua-classification-and-allow-list">UA classification and allow list</h2>
 <p>Each request gets one User-Agent classification, computed once and
 cached for every downstream consumer. It composes four passes:
-real-browser templates, the known-bot directory, verified-bot IP
+real-browser templates, the knownbot directory, verified-bot IP
 cross-check, and a heuristic scan for bot-shaped UAs matching
 nothing else.</p>
 <table>
@@ -919,13 +919,13 @@ BotShieldClassify None +browsers        # start from nothing, add back
 change: <code>-browsers</code> treats every UA as a browser for robots.txt
 wildcard purposes; <code>-known-bots</code> skips the directory walk, so no bot
 slug reaches the log; <code>-verified-bots</code> skips the IP cross-check and
-matched UAs degrade to known-bot, earning neither verified-bot credit
+matched UAs degrade to knownbot, earning neither verified-bot credit
 nor fake-bot penalty (the intended response to stale CIDR data);
 <code>-unknown-bots</code> skips the bot-token substring scan.</p>
 <p><code>BotShieldAllowBot</code> registers a UA pattern + IP-range pair. The third
 arg is a path to a CIDR file, a single CIDR, comma-separated inline
 CIDRs, or <code>*</code> alone for UA-only matching (logged as
-<code>known-bot:&lt;name&gt;</code>, score 0); omit it for
+<code>knownbot:&lt;name&gt;</code>, score 0); omit it for
 <code>/var/lib/botshield/bots/&lt;name&gt;.txt</code>. A <code>&lt;name&gt;</code> matching a bundled
 built-in (<code>googlebot</code>, <code>bingbot</code>, <code>applebot</code>, <code>googleother</code>,
 <code>siteimprove</code>) replaces that built-in. See
@@ -1000,7 +1000,7 @@ axes can't be wildcard — that's rejected at config time.</p>
 also accepts <code>s</code>/<code>m</code>/<code>h</code>). Plain integer for <code>per</code> is rejected.</p>
 <p>The legacy 5-arg positional form is still accepted (form is detected
 by sniffing for <code>=</code> in the args); no deprecation warning yet.</p>
-<p><code>BotShieldBotRateLimit</code> caps volume per known-bot slug rather than
+<p><code>BotShieldBotRateLimit</code> caps volume per knownbot slug rather than
 per cohort. <code>&lt;target&gt;</code> is a bot slug or UA substring resolved against
 the bot directory, <code>@&lt;botgroup&gt;</code> (<code>search</code>, <code>ai-input</code>, <code>ai-train</code>,
 <code>monitor</code>), or <code>*</code>. The two-arg form is Crawl-delay shaped — one
@@ -1009,7 +1009,7 @@ specific &gt; <code>@botgroup</code> &gt; <code>*</code>.</p>
 <p><code>*</code> pre-allocates one counter per directory slug not covered by a
 more specific rule, so each unmatched bot gets its own budget rather
 than sharing one; three reserved aggregate slots at the same budget
-cover unknown-bot, fake-bot, and slugs a mid-run directory refresh
+cover unknownbot, fake-bot, and slugs a mid-run directory refresh
 added after startup. Because the slug universe is bounded by the
 directory, every slot is allocated at config time — request time is a
 single hash probe. Over-budget returns 429 + <code>Retry-After</code> with reason
@@ -1129,7 +1129,7 @@ semantics and refresh model.</p>
 <p>See <a href="../policy/index.html#triggers-predicate-action-engine">policy</a>
 for full predicate vocabulary and family-by-family semantics.</p>
 <p><code>BotShieldSessionCookieName</code> registers a name that the
-<code>cookies=session</code> cookie-trigger predicate considers a session
+<code>cookies=session</code> cookietrigger predicate considers a session
 cookie. Repeatable; each call appends.</p>
 <h3 id="accesslog-off-keep-a-request-out-of-the-access-log"><code>accesslog=off</code> — keep a request out of the access log</h3>
 <p><code>log=&lt;tag&gt;</code> names a tag that rides the decision line as <code>tag=&quot;&lt;x&gt;&quot;</code>
@@ -1232,24 +1232,24 @@ compress into one key.</p>
 </tr>
 <tr>
 <td>Challenge</td>
-<td><code>status=challenge-pass tier=non-interactive</code></td>
+<td><code>status=nochallenge tier=noninteractive</code></td>
 <td>Invisible auto-submitting check. <code>tier=interactive</code> for the visible one.</td>
 </tr>
 <tr>
 <td>Captcha</td>
-<td><code>status=challenge-pass tier=captcha</code></td>
+<td><code>status=nochallenge tier=captcha</code></td>
 <td>The configured provider's widget.</td>
 </tr>
 <tr>
 <td>Score only</td>
-<td><code>status=challenge-pass penalty=&lt;n&gt;</code></td>
+<td><code>status=nochallenge penalty=&lt;n&gt;</code></td>
 <td>Adds to the score and lets normal thresholds decide.</td>
 </tr>
 </tbody>
 </table>
-<p><code>tier=</code> and <code>penalty=</code> both require <code>status=challenge-pass</code>, because a concrete
+<p><code>tier=</code> and <code>penalty=</code> both require <code>status=nochallenge</code>, because a concrete
 status short-circuits the request before any tier is chosen. <code>tier=</code>
-accepts <code>pass</code>, <code>non-interactive</code>, <code>interactive</code> and <code>captcha</code>, and
+accepts <code>pass</code>, <code>noninteractive</code>, <code>interactive</code> and <code>captcha</code>, and
 composes by MAX with the score-derived tier and any flag tier floor —
 it raises the floor, it never downgrades.</p>
 <p><code>tier=</code> sets that floor on <strong>this request only</strong>. That is the
@@ -1259,7 +1259,7 @@ would keep being re-challenged for the life of a flag it has no way to
 clear. Use <code>flag=</code> when you want the reputation to persist, <code>tier=</code>
 when you want to challenge the request in front of you.</p>
 <blockquote>
-<p>A bare <code>status=challenge-pass</code> — with neither <code>tier=</code> nor <code>penalty=</code> — keeps its
+<p>A bare <code>status=nochallenge</code> — with neither <code>tier=</code> nor <code>penalty=</code> — keeps its
 original meaning of &quot;record the match and decline out of the handler&quot;.
 That skips scoring entirely, so it will <em>disable</em> challenges the
 defaults would otherwise have raised on those requests. It is a
@@ -1278,7 +1278,7 @@ BotShieldRequestTrigger debugparam query=&quot;*debug=1*&quot; penalty=20
 # UA form the pattern match cannot express. Note ua=&quot;&quot; is a restriction
 # and ua=* is not: &quot;*&quot; (or omitting the key) means &quot;any&quot;, which is why a
 # rule carrying only ua=* is rejected as having no condition.
-BotShieldRequestTrigger no-ua ua=&quot;&quot; status=challenge-pass tier=non-interactive ttl=0 log=no-ua
+BotShieldRequestTrigger no-ua ua=&quot;&quot; status=nochallenge tier=noninteractive ttl=0 log=no-ua
 </code></pre>
 <p>Because it fires from the policy walk it short-circuits <strong>before</strong>
 scoring, so a <code>status=4xx</code> rule never renders a challenge and never
@@ -1357,7 +1357,7 @@ entries.</p>
 </table>
 <p>Action verbs: <code>action=score add=N</code> (signed N -1000..1000),
 <code>action=tier_floor min=&lt;tier&gt;</code> (raise effective tier; tier is one
-of <code>pass</code>/<code>non-interactive</code>/<code>interactive</code>/<code>captcha</code>). The <code>reset</code> keyword clears
+of <code>pass</code>/<code>noninteractive</code>/<code>interactive</code>/<code>captcha</code>). The <code>reset</code> keyword clears
 all earlier triggers (compiled-in defaults + prior
 declarations) for the named flag at post-config time.</p>
 <p><strong>A <code>tier_floor</code> bypasses your score thresholds.</strong> It is MAX'd in
@@ -1438,42 +1438,42 @@ not separate directives.</p>
 </thead>
 <tbody>
 <tr>
-<td><code>missing-ua</code></td>
+<td><code>missingua</code></td>
 <td>User-Agent absent or empty</td>
 <td><code>score add=40</code></td>
 </tr>
 <tr>
-<td><code>missing-al</code></td>
+<td><code>missingal</code></td>
 <td>Accept-Language absent</td>
 <td><code>score add=5</code></td>
 </tr>
 <tr>
-<td><code>scraper-ua</code></td>
+<td><code>scraperua</code></td>
 <td>UA contains a known HTTP-library token</td>
 <td><code>score add=10</code></td>
 </tr>
 <tr>
-<td><code>first-sight-ip</code></td>
+<td><code>firstsightip</code></td>
 <td>Bloom-filter miss — genuinely new IP, arriving with no usable cookie</td>
 <td><code>score add=20</code></td>
 </tr>
 <tr>
-<td><code>dropped-cookie</code></td>
+<td><code>droppedcookie</code></td>
 <td>Bloom-known IP arriving with no usable cookie</td>
 <td><code>score add=25</code></td>
 </tr>
 </tbody>
 </table>
-<p><code>scraper-ua</code> is deliberately low. robots.txt tells undeclared clients
+<p><code>scraperua</code> is deliberately low. robots.txt tells undeclared clients
 they may fetch anything outside the <code>Disallow</code> list at the published
 <code>Crawl-delay</code>; a weight of 50 put an unrenderable checkbox in front of
 <code>curl</code>, <code>wget</code> and <code>python-requests</code> instead — the module enforcing a
 policy the site never published. At 10 it composes with other signals
 rather than deciding on its own, and volume abuse is caught by the rate
 limit, which is what the published policy actually promises.
-<code>missing-al</code> is 5 for the same reason: almost nothing scripted sends
+<code>missingal</code> is 5 for the same reason: almost nothing scripted sends
 <code>Accept-Language</code>.</p>
-<p><code>first-sight-ip</code> and <code>dropped-cookie</code> are the two halves of one signal —
+<p><code>firstsightip</code> and <code>droppedcookie</code> are the two halves of one signal —
 both fire unless the request carries a cookie that <strong>proves a challenge
 was solved</strong>, differing on whether the IP is already in the Bloom filter.</p>
 <p>A merely valid cookie is not enough. Under always-mint every client
@@ -1483,8 +1483,8 @@ suppress a penalty it never earned. The waiver requires solve evidence
 (<code>passes_silent</code>, <code>passes_form</code>, or <code>passes_captcha</code>) in the
 authenticated rep block — the same evidence the safeguard-clear path
 requires. A real browser pays for this exactly once: it arrives with no
-proof, scores <code>dropped-cookie</code> into the non-interactive tier, clears it in one
-auto-submitted round trip, and every later request carries proof. <code>first-sight-ip</code> sits at
+proof, scores <code>droppedcookie</code> into the noninteractive tier, clears it in one
+auto-submitted round trip, and every later request carries proof. <code>firstsightip</code> sits at
 exactly <code>BotShieldScoreNonInteractive</code>, so <strong>an enabled scope challenges any
 request with no session context by default</strong>, with no rule to write.
 That is usually what you want on a login or registration path, where the
@@ -1497,7 +1497,7 @@ default plus prior declarations for that one heuristic; <code>all reset</code>
 wipes every entry so the slate can be rebuilt from zero.
 <code>mode=observe</code> logs the match with an <code>:observe</code> suffix instead of
 applying it.</p>
-<p>A <code>dropped-cookie</code> hit is ambiguous by design — private-browsing
+<p>A <code>droppedcookie</code> hit is ambiguous by design — private-browsing
 resets and manual cookie clears look the same as evasion — so the
 default penalty is deliberately mild.</p>
 <h2 id="safeguard">Safeguard</h2>

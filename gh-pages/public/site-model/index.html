@@ -139,7 +139,7 @@ with the heuristics, and the day-to-day tuning workflow.</p>
 <td><code>effective &lt; BotShieldScoreNonInteractive</code> (default <code>&lt; 20</code>)</td>
 </tr>
 <tr>
-<td><code>non-interactive</code></td>
+<td><code>noninteractive</code></td>
 <td>&quot;Checking your browser…&quot; splash; auto-submits a SHA-256 PoW</td>
 <td><code>BotShieldScoreNonInteractive ≤ effective &lt; BotShieldScoreInteractive</code> (default <code>20..49</code>)</td>
 </tr>
@@ -189,7 +189,7 @@ score: any <code>BotShieldFlagTrigger action=tier_floor min=&lt;tier&gt;</code> 
 fires on a set flag bit raises the chosen tier to AT LEAST that
 level. Score-derived tier wins when it's already above the floor —
 floors never silently downgrade. Floor lifts produce a
-<code>flag-tier-floor:&lt;tier&gt;</code> reason so the reasoning is visible in the
+<code>flagtierfloor:&lt;tier&gt;</code> reason so the reasoning is visible in the
 log.</p>
 <h2 id="built-in-heuristic-signals">Built-in heuristic signals</h2>
 <p>These run on every request before any configured trigger
@@ -206,22 +206,22 @@ or cohort. Signs are absolute; the score either rises or stays put.</p>
 <tr>
 <td>Missing <code>User-Agent</code></td>
 <td>+40</td>
-<td><code>missing-user-agent</code></td>
+<td><code>missinguseragent</code></td>
 </tr>
 <tr>
 <td>Missing <code>Accept-Language</code></td>
 <td>+15</td>
-<td><code>missing-accept-language</code></td>
+<td><code>missingacceptlanguage</code></td>
 </tr>
 <tr>
 <td>Scraper-pattern UA</td>
 <td>+50</td>
-<td><code>scraper-ua:&lt;pattern&gt;</code></td>
+<td><code>scraperua:&lt;pattern&gt;</code></td>
 </tr>
 <tr>
 <td>First-sight IP (not in Bloom filter)</td>
 <td>+5</td>
-<td><code>first-sight-ip</code></td>
+<td><code>firstsightip</code></td>
 </tr>
 <tr>
 <td>Path-trigger fire (status=4xx)</td>
@@ -231,22 +231,22 @@ or cohort. Signs are absolute; the score either rises or stays put.</p>
 <tr>
 <td>Rate-limit exceeded</td>
 <td>+50</td>
-<td><code>rate-limit-exceeded:&lt;name&gt;</code></td>
+<td><code>ratelimitexceeded:&lt;name&gt;</code></td>
 </tr>
 <tr>
 <td>Robots.txt Disallow</td>
 <td>+100</td>
-<td><code>robots-block:&lt;group&gt;</code></td>
+<td><code>robotsblock:&lt;group&gt;</code></td>
 </tr>
 <tr>
 <td>Honeypot hit (default flag trigger)</td>
 <td>+60</td>
-<td><code>flag-trigger:honeypot_hit</code></td>
+<td><code>flagtrigger:honeypot_hit</code></td>
 </tr>
 <tr>
 <td>Fake-bot detection (default flag trigger)</td>
 <td>+80</td>
-<td><code>flag-trigger:fake_bot</code></td>
+<td><code>flagtrigger:fake_bot</code></td>
 </tr>
 <tr>
 <td>Verified legit-crawler match</td>
@@ -254,9 +254,9 @@ or cohort. Signs are absolute; the score either rises or stays put.</p>
 <td><code>verified-&lt;name&gt;</code></td>
 </tr>
 <tr>
-<td><code>app_verified_human</code> cookie credit (default flag-trigger)</td>
+<td><code>app_verified_human</code> cookie credit (default flagtrigger)</td>
 <td>-80</td>
-<td><code>flag-trigger:app_verified_human</code></td>
+<td><code>flagtrigger:app_verified_human</code></td>
 </tr>
 <tr>
 <td>Configured path / load / cookie / env / flag triggers with <code>action=score add=N</code></td>
@@ -313,7 +313,7 @@ positive.</p>
 <p><code>solved</code> and <code>ok</code> are disjoint and the distinction matters: under
 always-mint every client holds a valid cookie after one request, so
 <code>ok</code> says only that the client keeps a cookie jar. <code>solved</code> is the
-only state that waives <code>first-sight-ip</code> / <code>dropped-cookie</code>. The
+only state that waives <code>firstsightip</code> / <code>droppedcookie</code>. The
 <code>cookie_solved_total</code> and <code>cookie_ok_total</code> Prometheus counters track
 the two separately, alongside <code>cookie_minted_total</code> for always-mint
 volume, and the dashboard's cookie-state bar shows them as separate
@@ -339,7 +339,7 @@ get re-challenged on the next request:</p>
 </thead>
 <tbody>
 <tr>
-<td><code>non-interactive</code></td>
+<td><code>noninteractive</code></td>
 <td>-10</td>
 <td><code>BotShieldForgivenessNonInteractive</code></td>
 </tr>
@@ -361,7 +361,7 @@ solving many cheap challenges then trading the score down — the
 cookie carries a per-client hourly cap on accumulated forgiveness:</p>
 <pre><code class="language-apache">BotShieldForgivenessCapPerHour 200
 </code></pre>
-<p>Default is 200 points per rolling hour, ≈ 4–8 challenge-passes
+<p>Default is 200 points per rolling hour, ≈ 4–8 nochallenge outcomes
 worth of credit. The cap state lives in the cookie itself, so
 forgiveness honors the cap across cookie re-issues without server-
 side bookkeeping.</p>
@@ -384,9 +384,9 @@ counter.</li>
 <p>Every decision emits two log lines: a human-readable prose line and
 a stable <code>key=value</code> structured line. The structured line is what
 you query when tuning:</p>
-<pre><code>mod_botshield: decision tier=non-interactive outcome=challenged ip=192.0.2.42
-    score=37 cookie=absent provider=- alg=sha256-zeros
-    reason=&quot;first-sight-ip,missing-accept-language&quot; path=&quot;/login&quot;
+<pre><code>mod_botshield: decision tier=noninteractive outcome=challenged ip=192.0.2.42
+    score=37 cookie=absent provider=- alg=sha256zeros
+    reason=&quot;firstsightip,missingacceptlanguage&quot; path=&quot;/login&quot;
 </code></pre>
 <p>Bump the module's log level to make these visible:</p>
 <pre><code class="language-apache">LogLevel botshield_module:info
@@ -399,8 +399,8 @@ vocabulary.</p>
 <p>For verbose debugging — the per-reason penalty values, not just the
 names — the prose log line at <code>info</code> level carries the full
 breakdown:</p>
-<pre><code>mod_botshield: &lt;action&gt; effective=37 tier=non-interactive heuristic=37
-    cookie_score=0 reasons=[first-sight-ip:5,missing-accept-language:15,scraper-ua:python-requests:50]
+<pre><code>mod_botshield: &lt;action&gt; effective=37 tier=noninteractive heuristic=37
+    cookie_score=0 reasons=[firstsightip:5,missingacceptlanguage:15,scraperua:python-requests:50]
 </code></pre>
 <p>Grep the log for the request, read the reasons array, see exactly
 which signals contributed and how much.</p>
@@ -452,17 +452,17 @@ reachable; the common ones:</p>
 <td>Valid cookie; allowed to real handler</td>
 </tr>
 <tr>
-<td><code>non-interactive</code></td>
+<td><code>noninteractive</code></td>
 <td><code>challenged</code></td>
 <td>Interstitial served; client is solving PoW</td>
 </tr>
 <tr>
-<td><code>non-interactive</code></td>
+<td><code>noninteractive</code></td>
 <td><code>verified</code></td>
 <td>Client solved PoW; cookie minted</td>
 </tr>
 <tr>
-<td><code>non-interactive</code></td>
+<td><code>noninteractive</code></td>
 <td><code>~challenge</code></td>
 <td>LogOnly: would have served interstitial</td>
 </tr>

@@ -1,11 +1,11 @@
 /* challenge.c — challenge issuance, PoW algorithm registry, and the
  *  bootstrap-binding helpers shared by the M7 (interstitial)
- * and E17 (non-interactive tier) paths.
+ * and E17 (noninteractive tier) paths.
  *
  * Two abstractions live here:
  *
  *   bs_pow_algorithm registry — a static dispatch table mapping
- *     algorithm names ("sha256-zeros", "captcha-turnstile", …) to
+ *     algorithm names ("sha256zeros", "captcha-turnstile", …) to
  *     issue/verify fn pointers. The verify fn is what runs at cookie-
  *     redemption time; the issue fn just fills salt+nonce on a fresh
  *     bs_challenge. Reserved-but-disabled rows (sha384-zeros, argon2id,
@@ -18,7 +18,7 @@
  *
  * Plus the bootstrap-sig pair (bs_format_bound_ip_hex /
  * bs_compute_bootstrap_sig). They originally lived next to the
- * non-interactive tier verify handler, but they're computed at challenge-
+ * noninteractive tier verify handler, but they're computed at challenge-
  * issuance time too — so they belong with the rest of the challenge
  * minting code, not the verifier.
  *
@@ -72,7 +72,7 @@ const char *bs_challenge_canonical(apr_pool_t *p,
         (unsigned)ch->rep.forgive_consumed);
 }
 
-/* --- Algorithm: sha256-zeros ---
+/* --- Algorithm: sha256zeros ---
  *
  * The PoW our M1 widget already uses, now wrapped in the registry.
  * issue: pick salt+nonce, record in the challenge. (HMAC signing is done
@@ -182,13 +182,13 @@ static const char *bs_session_verify_noop(const bs_challenge *ch,
 
 /* --- Algorithm registry ---
  *
- * Static dispatch table. sha256-zeros is the PoW tier; captcha-turnstile
+ * Static dispatch table. sha256zeros is the PoW tier; captcha-turnstile
  * is the captcha tier's cookie alg — same signed envelope, provider
  * already did the client-side work. Reserved slots flip from 0→1 by
  * providing the two callbacks; no changes to the protocol or verify
  * code path. */
 static const bs_pow_algorithm bs_algorithms[] = {
-    { "sha256-zeros",          1, bs_sha256_zeros_issue, bs_sha256_zeros_verify },
+    { "sha256zeros",          1, bs_sha256_zeros_issue, bs_sha256_zeros_verify },
     { "session",               1, bs_session_issue,      bs_session_verify_noop },
     { "captcha-turnstile",     1, bs_captcha_issue,      bs_captcha_verify_noop },
     { "captcha-hcaptcha",      1, bs_captcha_issue,      bs_captcha_verify_noop },
@@ -217,7 +217,7 @@ const bs_pow_algorithm *bs_find_algorithm(const char *name)
  *
  * Emits the small JSON object the M7 splash page consumes inline:
  * salt/nonce/difficulty/expires/auto + the encrypted cookie_prefix the
- * JS appends a counter to. For non-interactive tier embedded mode the
+ * JS appends a counter to. For noninteractive tier embedded mode the
  *  IP-binding pair (bound_ip + bootstrap_sig) is included so
  * the round-trip /embedded-verify can match the issuing IP.
  *
@@ -293,7 +293,7 @@ const char *bs_challenge_json(request_rec *r, apr_pool_t *p,
  * into the issued challenge verbatim — the handler has already applied
  * whatever forgiveness / increments are appropriate for the tier being
  * issued. If `rep_in` is NULL, rep starts at zero (first-ever challenge).
- * `auto_tier` controls the M7 non-interactive tier variant: 1 renders the interstitial
+ * `auto_tier` controls the M7 noninteractive tier variant: 1 renders the interstitial
  * as an auto-submitting splash, 0 renders the interactive PoW checkbox.
  * `alg_override` lets callers issue cookies under a non-default algorithm
  * (M8 uses this for captcha-turnstile). NULL = use cfg->algorithm. */

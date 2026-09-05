@@ -77,7 +77,7 @@ extern "C" {
 #define BS_DEFAULT_FORGIVE_INTERACTIVE     25
 #define BS_DEFAULT_FORGIVE_CAPTCHA  50
 /* E15 — per-cookie hourly cap on accumulated forgiveness. 200
- * points/hour ≈ 4-8 challenge-passes worth of credit. */
+ * points/hour ≈ 4-8 nochallenge outcomes worth of credit. */
 #define BS_DEFAULT_FORGIVE_CAP_PER_HOUR  200
 #define BS_FORGIVE_WINDOW_SEC            3600
 #define BS_COOKIE_NAME        "_bs_session"
@@ -102,7 +102,7 @@ extern "C" {
 #define BS_WIDGET_MARKER      "<!-- BOTSHIELD -->"
 
 /* E4 — BotShield-cookie-state note. Set by bs_handler after the
- * `_bs_session` verification pass so the cookie-trigger predicate
+ * `_bs_session` verification pass so the cookietrigger predicate
  * matcher (and other consumers) can surface the verdict without
  * re-running the HMAC check. Values: "verified" / "missing" /
  * "invalid". */
@@ -170,7 +170,7 @@ enum bs_enabled_state {
 #define BS_MAX_CAPTCHA_BODY         8192   /* siteverify response cap */
 #define BS_DEFAULT_RECAPTCHA_V3_MIN_SCORE 0.5  /* Google's suggested baseline */
 
-/* Tier + non-interactive-mode enums (bs_tier, bs_non_interactive_mode) and the per-
+/* Tier + noninteractive-mode enums (bs_tier, bs_non_interactive_mode) and the per-
  * request score system (bs_score_entry, bs_request_score) live in
  * score.h. */
 
@@ -242,15 +242,15 @@ struct bs_dir_cfg {
     unsigned char    derived_hmac_pending_2 [32];
     unsigned char    derived_hmac_bootstrap_2[32];
     int              derived_keys_set_2;
-    int score_non_interactive;           /* score >= this → non-interactive tier */
+    int score_non_interactive;           /* score >= this → noninteractive tier */
     int score_interactive;             /* score >= this → hard interactive PoW tier */
     int score_captcha;          /* score >= this → captcha tier */
-    /* E17 — non-interactive tier dispatch flavor, tri-state with UNSET so the
+    /* E17 — noninteractive tier dispatch flavor, tri-state with UNSET so the
      * merge picks the right scope's value. */
     int non_interactive_mode;            /* bs_non_interactive_mode; UNSET inherits */
     /* E18 — inline form captcha. -1 inherit, 0 off, 1 on. */
     int form_captcha;
-    int forgive_non_interactive;         /* score credit on non-interactive tier pass */
+    int forgive_non_interactive;         /* score credit on noninteractive tier pass */
     int forgive_interactive;           /* score credit on form-tier pass */
     int forgive_captcha;        /* score credit on captcha pass */
     const char *cookie_domain;  /* if set, Set-Cookie Domain= attribute */
@@ -301,14 +301,14 @@ struct bs_dir_cfg {
  *                   wildcard gating (no real users punished by
  *                   stale templates). Other passes still run.
  *   known_bots    → AC directory walk skipped; directory-only
- *                   matches won't surface known-bot:<slug> tags.
+ *                   matches won't surface knownbot:<slug> tags.
  *   verified_bots → UA-classifier match still happens; IP cross-
- *                   check skipped; matched UAs degrade to known-bot:
+ *                   check skipped; matched UAs degrade to knownbot:
  *                   <name> (score 0). Neither verified-bot credit nor
  *                   fake-bot penalty fires. The natural response to
  *                   stale CIDR data without losing the directory tag.
  *   unknown_bots  → heuristic substring scan skipped; would-be
- *                   unknown-bot UAs fall to unknown-ua. */
+ *                   unknownbot UAs fall to unknownua. */
 typedef struct bs_classify_flags {
     unsigned int browsers      : 1;
     unsigned int known_bots    : 1;
@@ -458,9 +458,9 @@ typedef struct bs_server_cfg {
      * included, as operator input and seeds the defaults again.
      *
      * Observed on a HubZero hub with 102 namevhosts and the config at
-     * main scope: every heuristic fired 107 times. first-sight-ip (20)
-     * scored 2140, dropped-cookie (25) scored 2675,
-     * missing-accept-language (5) scored 535 -- all exactly x107, which
+     * main scope: every heuristic fired 107 times. firstsightip (20)
+     * scored 2140, droppedcookie (25) scored 2675,
+     * missingacceptlanguage (5) scored 535 -- all exactly x107, which
      * pushed ordinary browsers into the captcha tier. */
     int                 flag_triggers_resolved;
     int                 heuristic_triggers_resolved;
@@ -611,7 +611,7 @@ extern const struct bs_flag_name { const char *name; apr_uint32_t bit; }
 
 /* Form-body reader — slurps a POST body up to `max_len` and writes
  * it as a NUL-terminated string. Returns APR_SUCCESS or an APR
- * error. Used by the verify handlers (non-interactive + M8). */
+ * error. Used by the verify handlers (noninteractive + M8). */
 apr_status_t bs_read_form_body(request_rec *r, apr_size_t max_len,
                                const char **out_body,
                                apr_size_t *out_len);

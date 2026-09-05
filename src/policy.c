@@ -59,7 +59,7 @@ static int bs_cohort_matches(const bs_cohort *c,
             if (ua && *ua) return 0;
         } else if (c->ua_class_bot) {
             /* @bot — the classifier says this IS a bot. Verified,
-             * known and unknown-bot; NOT fake-bot, which is a client
+             * known and unknownbot; NOT fake-bot, which is a client
              * lying about being one and must not inherit an exemption
              * written for real crawlers. Same three the dashboard's
              * Bots tab counts, so policy and reporting agree on who a
@@ -145,7 +145,7 @@ int bs_rate_counter_admit(bs_rate_counter *slot,
  *
  * Semantics: real-browser template match → not a candidate
  * (browsers don't read robots.txt and shouldn't be subject to
- * its restrictions); everything else (known-bot, fake-bot,
+ * its restrictions); everything else (knownbot, fake-bot,
  * verified-bot, unknown — including Mozilla-prefix scrapers
  * with custom appended tokens) defaults to candidate.
  *
@@ -177,7 +177,7 @@ static int bs_ua_is_crawler_candidate(request_rec *r)
 /* BS_CK_STATE_NOTE / _VERIFIED / _MISSING / _INVALID are now
  * declared cross-file in botshield.h — set by bs_handler after the
  * `_bs_session` verification pass; consumed by triggers.c's
- * cookie-trigger evaluator and by bs_check_policy below. */
+ * cookietrigger evaluator and by bs_check_policy below. */
 
 
 /* Request-time policy check (cookie / env / load / scope / path
@@ -225,7 +225,7 @@ static int bs_ua_is_crawler_candidate(request_rec *r)
  *    first non-pass trigger short-circuits the walk.
  *  - E6 env: credit/penalty always apply (E4-style), but the
  *    family uses strict first-match-wins — a pass match ends
- *    the env-trigger loop without considering later entries. */
+ *    the envtrigger loop without considering later entries. */
 int bs_check_policy(request_rec *r)
 {
     /* Set when a bare status=pass fired. The walk continues so the
@@ -265,7 +265,7 @@ int bs_check_policy(request_rec *r)
                                       bs_state)) continue;
             bs_trigger_exec_outcome o = bs_apply_trigger_action(
                 r, scfg, BS_TFAMILY_COOKIE, &c->action,
-                "cookie-trigger", c->name);
+                "cookietrigger", c->name);
             /* Cookie family: BS_TEXEC_PASS_CONTINUE keeps accumulating
              * credits; BS_TEXEC_STATUS short-circuits. PASS_BREAK /
              * PASS_DECLINE aren't produced for this family. */
@@ -309,7 +309,7 @@ int bs_check_policy(request_rec *r)
             if (!matched) continue;
             bs_trigger_exec_outcome o = bs_apply_trigger_action(
                 r, scfg, BS_TFAMILY_ENV, &t->action,
-                "env-trigger", t->name);
+                "envtrigger", t->name);
             /* Env family: BS_TEXEC_PASS_BREAK ends the loop (env
              * signals are discrete; no accumulation). STATUS
              * short-circuits. */
@@ -335,7 +335,7 @@ int bs_check_policy(request_rec *r)
             if (!matched) continue;
             bs_trigger_exec_outcome o = bs_apply_trigger_action(
                 r, scfg, BS_TFAMILY_LOAD, &t->action,
-                "load-trigger", t->name);
+                "loadtrigger", t->name);
             if (o == BS_TEXEC_STATUS) return t->action.status_code;
             if (o == BS_TEXEC_PASS_BREAK) break;
         }
@@ -355,7 +355,7 @@ int bs_check_policy(request_rec *r)
             const char *tag = a->log_tag ? a->log_tag : "scope";
             bs_trigger_exec_outcome o = bs_apply_trigger_action(
                 r, scfg, BS_TFAMILY_SCOPE, a,
-                "scope-trigger", tag);
+                "scopetrigger", tag);
             if (o == BS_TEXEC_STATUS) return a->status_code;
             /* PASS_CONTINUE / OBSERVE → keep walking */
         }
@@ -456,7 +456,7 @@ int bs_check_policy(request_rec *r)
                 continue;
             bs_trigger_exec_outcome o = bs_apply_trigger_action(
                 r, scfg, BS_TFAMILY_REQUEST, &t->action,
-                "request-trigger", t->name);
+                "requesttrigger", t->name);
             /* Path family: PASS means "do not challenge this", not
              * "do not enforce anything on this". Those were the same
              * thing while a pass returned here, which quietly exempted
@@ -542,7 +542,7 @@ int bs_check_policy(request_rec *r)
                                         == BS_ROBOTS_MODE_OBSERVE);
         if (robots_observe) {
             bs_score_add(r, 0, 0,
-                apr_pstrcat(r->pool, "robots-block:", rgroup,
+                apr_pstrcat(r->pool, "robotsblock:", rgroup,
                             ":observe", NULL));
             bs_set_would_outcome(r, "~block");
             if (bs_shm.metrics) {
@@ -554,7 +554,7 @@ int bs_check_policy(request_rec *r)
              * 1-hour flag, mirroring the deny weight an explicit
              * BotShieldRequestTrigger ... status=403 would carry. */
             bs_score_add(r, 100, 3600,
-                apr_pstrcat(r->pool, "robots-block:", rgroup, NULL));
+                apr_pstrcat(r->pool, "robotsblock:", rgroup, NULL));
             return HTTP_FORBIDDEN;
         }
     }
@@ -581,7 +581,7 @@ int bs_check_policy(request_rec *r)
              * The counter still ticks (so `would-rate-limit` volume
              * answers the operator's "what would this fire?"
              * question accurately), but over-budget hits log
-             * `rate-limit-exceeded:<name>:observe` instead of
+             * `ratelimitexceeded:<name>:observe` instead of
              * returning 429. E9 escalation is also fully suppressed
              * — we don't bump strikes, and any pre-existing
              * escalation state is ignored for this rule under
@@ -595,7 +595,7 @@ int bs_check_policy(request_rec *r)
                 /* E9 — escalation gate. Active only outside observe
                  * mode; observe must not enforce. */
                 bs_score_add(r, BS_PENALTY_RATE_LIMIT, 3600,
-                    apr_pstrcat(r->pool, "rate-limit-abuse:",
+                    apr_pstrcat(r->pool, "ratelimitabuse:",
                                 e->name, NULL));
                 if (bs_shm.metrics) {
                     __atomic_fetch_add(
@@ -612,7 +612,7 @@ int bs_check_policy(request_rec *r)
             /* Over budget. */
             if (observe) {
                 bs_score_add(r, 0, 0,
-                    apr_pstrcat(r->pool, "rate-limit-exceeded:",
+                    apr_pstrcat(r->pool, "ratelimitexceeded:",
                                 e->name, ":observe", NULL));
                 bs_set_would_outcome(r, "~rate_limited");
                 if (bs_shm.metrics) {
@@ -631,7 +631,7 @@ int bs_check_policy(request_rec *r)
             apr_table_setn(r->err_headers_out, "Retry-After",
                 apr_psprintf(r->pool, "%u", retry));
             bs_score_add(r, BS_PENALTY_RATE_LIMIT, 3600,
-                apr_pstrcat(r->pool, "rate-limit-exceeded:",
+                apr_pstrcat(r->pool, "ratelimitexceeded:",
                             e->name, NULL));
             if (bs_shm.metrics) {
                 __atomic_fetch_add(&bs_shm.metrics->rate_limit_exceeded_total,
@@ -651,7 +651,7 @@ int bs_check_policy(request_rec *r)
                     now_t, scfg->ns_id);
                 if (crossed) {
                     ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r,
-                        "mod_botshield: rate-limit-abuse threshold "
+                        "mod_botshield: ratelimitabuse threshold "
                         "crossed for '%s' from ip=%s; escalating to "
                         "status=%d for %ds%s%s%s",
                         e->name, r->useragent_ip,
@@ -672,7 +672,7 @@ int bs_check_policy(request_rec *r)
      * legacy group-index keyed Crawl-delay enforcement was retired
      * here when the rekey landed; bot_rate_check now covers both
      * sources via one slug→counter map. Lookup keys on
-     * cls->known_slug or cls->verified_name (then unknown-bot /
+     * cls->known_slug or cls->verified_name (then unknownbot /
      * fake-bot / wildcard-fallback aggregates). Composes with
      * BotShieldRateLimit directive cohorts above: whichever trips
      * first short-circuits the policy walk. */
@@ -820,7 +820,7 @@ void bs_policy_dump(server_rec *s, apr_pool_t *p, bs_dir_cfg *cfg)
      * stayed silent while it issued 429s. It no longer synthesises
      * anything, and it says so here rather than leaving the reader to
      * infer it from an empty section. */
-    fputs("## BotShieldBotRateLimit (per known-bot slug)\n", stdout);
+    fputs("## BotShieldBotRateLimit (per knownbot slug)\n", stdout);
     if (!scfg->bot_rate_state || scfg->bot_rate_state->entries->nelts == 0) {
         /* Only directive-derived entries can be listed here. The
          * robots.txt-derived ones are registered in post_config, which
@@ -886,7 +886,7 @@ void bs_policy_dump(server_rec *s, apr_pool_t *p, bs_dir_cfg *cfg)
          * suggested starting point they now are. */
         fputs("## Tier thresholds (effective)\n", stdout);
         struct { const char *name; int cfgval; int dflt; } th[] = {
-            { "non-interactive", cfg ? cfg->score_non_interactive : BS_UNSET,
+            { "noninteractive", cfg ? cfg->score_non_interactive : BS_UNSET,
               BS_DEFAULT_SCORE_NON_INTERACTIVE },
             { "interactive",     cfg ? cfg->score_interactive     : BS_UNSET,
               BS_DEFAULT_SCORE_INTERACTIVE },
@@ -948,7 +948,7 @@ void bs_policy_dump(server_rec *s, apr_pool_t *p, bs_dir_cfg *cfg)
                     && e->mode != BS_TMODE_OBSERVE
                     && sil != BS_UNSET && e->score_add >= sil) {
                     printf("  ~  %s scores %+d on its own, at or above "
-                                  "the non-interactive threshold of %d: this flag is a "
+                                  "the noninteractive threshold of %d: this flag is a "
                                   "challenge switch, not a contributing "
                                   "signal. Bounded by flags_excused -- one "
                                   "solve clears it for that cookie -- so a "

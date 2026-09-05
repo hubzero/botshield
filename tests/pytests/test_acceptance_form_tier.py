@@ -24,7 +24,7 @@ pytestmark = pytest.mark.acceptance
 SUSPICIOUS_UA = "Mozilla/5.0 (X11) Chrome/145"
 
 # Forced form tier. SUSPICIOUS_UA scores 10, which never reaches
-# BotShieldScoreInteractive (50) at any sane first-sight-ip value, so relying
+# BotShieldScoreInteractive (50) at any sane firstsightip value, so relying
 # on the ambient score to produce a form interstitial was never going
 # to hold. Same rationale as SILENT_PATH in test_cookie_gcm.
 FORM_PATH = "/form-demo"
@@ -62,9 +62,9 @@ def test_cookieless_recoverable_journey(fresh_ip, log_slice):
     )
     assert resp.status_code == 200
 
-    # Note: pre-2026 this test also asserted a `tier=pass cookie=ok`
+    # Note: pre-2026 this test also asserted a `tier=nochallenge cookie=ok`
     # decision line in the log slice. The source now demotes the
-    # "boring pass" decision (tier=pass, outcome=allow, score=0, no
+    # "boring pass" decision (tier=nochallenge, outcome=allow, score=0, no
     # reasons, no tag) to DEBUG level — so a verified-cookie replay
     # from a clean browser produces no INFO-level decision line. The
     # response-shape assertions above are the load-bearing check

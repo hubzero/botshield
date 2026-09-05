@@ -116,6 +116,7 @@
 <li class="toc__item toc__item--level-2"><a href="#performance-characteristics">Performance characteristics</a></li>
 <li class="toc__item toc__item--level-2"><a href="#state-persistence">State persistence</a></li>
 <li class="toc__item toc__item--level-2"><a href="#secret-rotation">Secret rotation</a></li>
+<li class="toc__item toc__item--level-2"><a href="#upgrading-through-the-vocabulary-change">Upgrading through the vocabulary change</a></li>
 <li class="toc__item toc__item--level-2"><a href="#where-to-next">Where to next</a></li>
   </ul>
 </section>
@@ -474,6 +475,60 @@ embedded-verify PoW path. App-bridge keys
 (<code>BotShieldAppIntegrationSecretFile</code>) and captcha provider secrets
 are out of rotation scope; rotate those by reloading with the new
 file.</p>
+<h2 id="upgrading-through-the-vocabulary-change">Upgrading through the vocabulary change</h2>
+<p>The module's own words are now dashless, on every surface, and the
+<code>pass</code> spelling is gone. This breaks configs and dashboards that used
+the old ones, so read this before putting a newer module on a server
+that already runs an older config.</p>
+<p><strong>The module and its config must move together.</strong> <code>status=pass</code> is a
+configtest failure now, not a warning. A server whose module is
+upgraded while its config still says <code>pass</code> will pass its running
+state until something reloads it, and then fail to come back. Stage
+both, run <code>apachectl configtest</code> against the pair, and only then
+reload.</p>
+<p>What to change in a config:</p>
+<table>
+<thead>
+<tr>
+<th>Old</th>
+<th>New</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>status=pass</code>, <code>status=challenge-pass</code></td>
+<td><code>status=nochallenge</code></td>
+</tr>
+<tr>
+<td><code>tier=pass</code></td>
+<td><code>tier=nochallenge</code></td>
+</tr>
+<tr>
+<td><code>tier=non-interactive</code>, <code>min=non-interactive</code></td>
+<td><code>noninteractive</code></td>
+</tr>
+<tr>
+<td><code>BotShieldHeuristicTrigger first-sight-ip</code> and the other dashed heuristic names</td>
+<td><code>firstsightip</code>, <code>missingua</code>, <code>missingal</code>, <code>scraperua</code>, <code>droppedcookie</code></td>
+</tr>
+</tbody>
+</table>
+<p>What to change outside the config. Decision-log tokens lost their
+dashes, so a grep or alert matching <code>request-trigger</code>, <code>known-bot</code>,
+<code>flag-tier-floor</code> or <code>first-sight-ip</code> now matches nothing; the
+<a href="../observability/index.html#reason-name-vocabulary">reason-name vocabulary</a>
+lists the current set. Two Prometheus counters were renamed to agree
+with the log, <code>botshield_tier_pass_total</code> to
+<code>botshield_tier_nochallenge_total</code> and
+<code>botshield_tier_non_interactive_total</code> to
+<code>botshield_tier_noninteractive_total</code>, so any panel or alerting rule
+naming those needs the new name.</p>
+<p>What deliberately did not change: bot slugs such as
+<code>claude-searchbot</code>, the <code>@ai-train</code> and <code>@fake-bot</code> botgroup
+selectors, the <code>BotShieldClassify</code> pass names, your own <code>log=</code> labels,
+and the challenge endpoint paths. Every one of those is either
+somebody else's identifier or a URL, and all of them appear in a
+<code>reason</code> token only after the first colon.</p>
 <h2 id="where-to-next">Where to next</h2>
 <ul>
 <li>Tier model, scoring, decision log: <a href="../site-model/index.html">site model</a>.</li>

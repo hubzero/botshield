@@ -12,7 +12,7 @@
  *           appends the counter; bs_build_set_cookie assembles the
  *           Set-Cookie header line; bs_install_verified_cookie ties
  *           those together for the four issuance call sites
- *           (non-interactive embedded-verify, M8 captcha-verify, form-captcha-
+ *           (noninteractive embedded-verify, M8 captcha-verify, form-captcha-
  *           replay, and the immediate post-PoW path). bs_verify_cookie
  *           is the inverse — base64-decode, GCM-decrypt, parse into a
  *           bs_challenge struct, dispatch to the alg's verify fn.
@@ -20,7 +20,7 @@
  * The wire format is documented in mod_botshield.md. Briefly:
  *     base64(alg_id || nonce || ciphertext || tag) "." counter_str
  * The counter is "captcha" for server-issued captcha cookies, the
- * decimal PoW counter for client-solved sha256-zeros cookies. */
+ * decimal PoW counter for client-solved sha256zeros cookies. */
 #ifndef BOTSHIELD_COOKIE_H
 #define BOTSHIELD_COOKIE_H
 
@@ -44,7 +44,7 @@ extern "C" {
  * pool-allocated apr_table_t (name → value, RFC 6265 in practice).
  * The result is memoized on r->notes so subsequent calls within the
  * same request return the same map. Used by bs_get_cookie_value and
- * by the cookie-trigger predicate evaluator. Never returns NULL —
+ * by the cookietrigger predicate evaluator. Never returns NULL —
  * an absent Cookie header yields an empty table. */
 apr_table_t *bs_parse_cookies_once(request_rec *r);
 
@@ -112,7 +112,7 @@ const char *bs_verify_cookie(request_rec *r, const bs_dir_cfg *cfg,
 
 /* --- Carry-forward: rep state across cookie generations ------- *
  *
- * Issuance call sites (non-interactive embedded-verify, M8 captcha-verify,
+ * Issuance call sites (noninteractive embedded-verify, M8 captcha-verify,
  * E18 form-captcha) read the prior cookie via bs_carry_forward_eligible,
  * then bs_apply_rep_carry computes the carried score with the
  * forgive-band the call site picks per tier policy. */

@@ -119,7 +119,7 @@
 <li class="toc__item toc__item--level-2"><a href="#flag-trigger-family">Flag-trigger family</a></li>
 <li class="toc__item toc__item--level-3"><a href="#no-compiled-in-defaults">No compiled-in defaults</a></li>
 <li class="toc__item toc__item--level-3"><a href="#per-apache-scope-triggers-botshieldtrigger">Per-Apache-scope triggers — `BotShieldTrigger`</a></li>
-<li class="toc__item toc__item--level-3"><a href="#challenge-pass-waives-the-challenge-not-the-policy">`challenge-pass` waives the challenge, not the policy</a></li>
+<li class="toc__item toc__item--level-3"><a href="#nochallenge-waives-the-challenge-not-the-policy">`nochallenge` waives the challenge, not the policy</a></li>
 <li class="toc__item toc__item--level-2"><a href="#safeguard">Safeguard</a></li>
 <li class="toc__item toc__item--level-2"><a href="#where-to-next">Where to next</a></li>
   </ul>
@@ -150,7 +150,7 @@ matching policy rule can short-circuit the request even when the
 client also has a valid <code>_bs_session</code> cookie. Allow-list checks
 and built-in heuristics (missing-UA, missing-Accept-Language,
 scraper-pattern UA) run after the policy walk if the walk
-returns OK; flag-trigger effects are applied last, against the
+returns OK; flagtrigger effects are applied last, against the
 IP's accumulated flag bitmap.</p>
 <h2 id="allow-list-verified-crawlers">Allow list — verified crawlers</h2>
 <p><code>BotShieldAllowBot</code> registers a UA pattern + IP-range pair that
@@ -255,7 +255,7 @@ greedy semantics. The NOTICE warns that intent may have
 shifted; existing configs aren't broken, just verified.</p>
 <h2 id="robots-txt-enforcement">Robots.txt enforcement</h2>
 <p><code>BotShieldRobotsTxt</code> plugs in a parsed RFC 9309 robots.txt file as
-a policy source. Disallow rules become <code>robots-block:&lt;group&gt;</code>
+a policy source. Disallow rules become <code>robotsblock:&lt;group&gt;</code>
 matches; Crawl-delay rules become per-group rate limits.</p>
 <pre><code class="language-apache">BotShieldRobotsTxt              /etc/botshield/robots.txt
 BotShieldRobotsRefreshInterval  60
@@ -289,7 +289,7 @@ for inspection (see <a href="../observability/index.html">observability</a>).</p
 and every flag trigger <strong>after</strong> <code>reset</code> processing, each with the
 source it came from:</p>
 <pre><code>## Tier thresholds (effective)
-non-interactive      20   configured
+noninteractive      20   configured
 interactive          50   configured
 captcha               -   unset - never fires (suggested: 80)
 
@@ -309,7 +309,7 @@ with no threshold configured never fires, and the dump says so along
 with a suggested starting value.</p>
 <p>Two interactions are called out inline rather than left to
 documentation nobody consults at the moment it matters:</p>
-<p><code>~</code> — a flag scoring at or above the non-interactive threshold. Such a
+<p><code>~</code> — a flag scoring at or above the noninteractive threshold. Such a
 flag is a challenge switch rather than a contributing signal. Bounded by
 <code>flags_excused</code> (one solve clears it for that cookie), so the residual
 risk is a client that <em>cannot</em> solve.</p>
@@ -409,11 +409,11 @@ BotShieldRequestTrigger api-burst-trap path=&quot;/api/*/burst&quot; \
     penalty=30 log=api-burst
 </code></pre>
 <p>First-match wins (declaration order). On match, the path family's
-<code>status=challenge-pass</code> short-circuits to <code>DECLINED</code> (real handler runs); any
+<code>status=nochallenge</code> short-circuits to <code>DECLINED</code> (real handler runs); any
 other status is the response code.</p>
 <h3 id="cookie-triggers">Cookie triggers</h3>
 <pre><code class="language-apache">BotShieldCookieTrigger session-active cookie=sessionid \
-    status=challenge-pass credit=10
+    status=nochallenge credit=10
 BotShieldCookieTrigger weak-session cookie=sessionid=guest \
     penalty=15 log=guest-session
 BotShieldCookieTrigger no-cookies cookies=none \
@@ -435,12 +435,12 @@ the BotShield-cookie-state note set by <code>bs_handler</code> (no double
 HMAC check). Predicates against the module's own <code>_bs_session</code>
 cookie name are rejected — use these instead.</li>
 </ul>
-<p>Cookie family accumulates: <code>status=challenge-pass</code> keeps walking and
+<p>Cookie family accumulates: <code>status=nochallenge</code> keeps walking and
 collecting credits/penalties from later cookie triggers. First
 non-pass status short-circuits.</p>
 <h3 id="env-triggers">Env triggers</h3>
 <pre><code class="language-apache">SetEnvIfExpr &quot;%{HTTP:CF-Connecting-IP} =~ /:/&quot; BS_IPV6=1
-BotShieldEnvTrigger ipv6-hint env=BS_IPV6 status=challenge-pass credit=2
+BotShieldEnvTrigger ipv6-hint env=BS_IPV6 status=nochallenge credit=2
 
 SetEnvIf User-Agent &quot;(?i)\bcurl\b&quot; BS_CLI=1
 BotShieldEnvTrigger curl-hint env=BS_CLI penalty=10 log=cli
@@ -517,7 +517,7 @@ that bit.</p>
 request's score (positive penalty / negative credit). SUM
 accumulates across triggers.</li>
 <li><strong><code>action=tier_floor min=&lt;tier&gt;</code></strong> — set a minimum tier; <code>&lt;tier&gt;</code>
-is <code>pass</code> / <code>non-interactive</code> / <code>interactive</code> / <code>captcha</code>. MAX accumulates
+is <code>pass</code> / <code>noninteractive</code> / <code>interactive</code> / <code>captcha</code>. MAX accumulates
 (strictest wins).</li>
 </ul>
 <p>The <code>reset</code> keyword is directive-level (not an action verb): a
@@ -565,7 +565,7 @@ paired score + tier_floor rows used to carry:</p>
 </tr>
 <tr>
 <td><code>pow_fail_streak</code></td>
-<td><code>score add=+30</code>, <code>tier_floor min=non-interactive</code></td>
+<td><code>score add=+30</code>, <code>tier_floor min=noninteractive</code></td>
 </tr>
 <tr>
 <td><code>app_verified_human</code></td>
@@ -632,14 +632,14 @@ declare <code>BotShieldTrigger reset</code> in the child:</p>
 
 &lt;Location &quot;/api/internal&quot;&gt;
     BotShieldTrigger reset
-    BotShieldTrigger status=challenge-pass log=internal-allow
+    BotShieldTrigger status=nochallenge log=internal-allow
 &lt;/Location&gt;
 </code></pre>
 <p><code>reset</code> as the first arg drops triggers inherited from outer
 scopes (and clears any earlier <code>BotShieldTrigger</code> entries
 appended in the same scope before the reset).</p>
-<h3 id="challenge-pass-waives-the-challenge-not-the-policy"><code>challenge-pass</code> waives the challenge, not the policy</h3>
-<p><code>status=challenge-pass</code> means &quot;do not put an interstitial in front of
+<h3 id="nochallenge-waives-the-challenge-not-the-policy"><code>nochallenge</code> waives the challenge, not the policy</h3>
+<p><code>status=nochallenge</code> means &quot;do not put an interstitial in front of
 this request&quot;. It does not mean &quot;exempt this request from everything&quot;.
 Rate limits and robots.txt Disallow still apply to a request that
 matched such a rule.</p>
@@ -650,12 +650,18 @@ written to let declared crawlers read content without an interstitial
 was therefore also making them unratelimitable across most of the site,
 and nothing in the config said so.</p>
 <p>The rule still shadows later rules on the same path: this family is
-first-match-wins and a <code>challenge-pass</code> declared first stops the walk,
+first-match-wins and a <code>nochallenge</code> declared first stops the walk,
 exactly as before. What changed is only that the walk continues into
 the enforcement stages rather than returning.</p>
-<p><code>pass</code> remains accepted as a synonym, so existing configs keep working.
-The longer spelling is the one to write, because the short one invited
-precisely the reading that was wrong.</p>
+<p><code>pass</code> is no longer accepted, and a config still using it fails
+configtest rather than reloading with a changed meaning. The word was
+ambiguous in practice and not just in principle: the decision log
+emitted <code>tier=pass</code> on 14,066 lines of a single day on one deployment,
+meaning &quot;no challenge was served&quot;, so an operator grepping for the
+rule spelling and the outcome spelling got each other's matches.</p>
+<p><code>nochallenge</code> is now the only spelling, on every surface. It says what
+happens rather than what the module declined to do, and it carries no
+dash, so it survives being split out of a <code>reason</code> token.</p>
 <h2 id="safeguard">Safeguard</h2>
 <p>The safeguard suppresses a challenge loop: a client that has been
 issued challenges repeatedly within the safeguard window without
@@ -680,9 +686,9 @@ suspicious behavior is still recorded for downstream signals; only
 the in-line challenge is suppressed.</p>
 <p>Sites staging a fresh deployment with aggressive thresholds
 are the most likely to trip this. Watch the
-<code>tier_pass_total</code> counter for an unusual climb under &quot;safeguard&quot;
+<code>tier_nochallenge_total</code> counter for an unusual climb under &quot;safeguard&quot;
 reasons in the decision log (safeguard rolls into pass for metric
-binning; the decision log reason <code>challenge-safeguard</code> is the
+binning; the decision log reason <code>challengesafeguard</code> is the
 filter).</p>
 <h2 id="where-to-next">Where to next</h2>
 <ul>

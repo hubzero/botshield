@@ -1,7 +1,7 @@
 """M8.1: pending-cookie guardrail on the verify endpoint.
 
 Without a valid `_bs_captcha_pending` cookie the module must
-short-circuit to 403 + X-Botshield: captcha-pending-missing,
+short-circuit to 403 + X-Botshield: captchapendingmissing,
 before constructing any libcurl handle. Catches regressions in the
 cheap-check-first ordering.
 
@@ -20,7 +20,7 @@ def test_no_cookie_returns_403():
         data={"cf-turnstile-response": "x", "return_to": "/"},
     )
     assert resp.status_code == 403
-    assert resp.headers.get("X-Botshield") == "captcha-pending-missing"
+    assert resp.headers.get("X-Botshield") == "captchapendingmissing"
 
 
 def test_tampered_cookie_returns_403():
@@ -37,7 +37,7 @@ def test_tampered_cookie_returns_403():
         data={"cf-turnstile-response": "x", "return_to": "/"},
     )
     assert resp.status_code == 403
-    assert resp.headers.get("X-Botshield") == "captcha-pending-missing"
+    assert resp.headers.get("X-Botshield") == "captchapendingmissing"
 
 
 def test_valid_cookie_passes_guard(pending_cookie):
@@ -51,6 +51,6 @@ def test_valid_cookie_passes_guard(pending_cookie):
     # Assert only that we got past the pending check. Final outcome
     # (303/403/failopen) depends on Turnstile and is tested elsewhere.
     xbs = resp.headers.get("X-Botshield", "")
-    assert xbs != "captcha-pending-missing", (
+    assert xbs != "captchapendingmissing", (
         f"valid pending cookie still tripped the guard: X-Botshield={xbs}"
     )

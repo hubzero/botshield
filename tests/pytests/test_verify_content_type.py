@@ -22,7 +22,7 @@ def test_json_content_type_rejected(pending_cookie):
         data='{"cf-turnstile-response":"x"}',
     )
     assert resp.status_code == 415
-    assert resp.headers.get("X-Botshield") == "captcha-bad-content-type"
+    assert resp.headers.get("X-Botshield") == "captchabadcontenttype"
 
 
 def test_missing_content_type_rejected(pending_cookie):

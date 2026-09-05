@@ -36,7 +36,7 @@ closed by design. Check that:
 
 ```apache
 BotShieldSecretFile /etc/botshield/secret
-BotShieldAlgorithm  sha256-zeros
+BotShieldAlgorithm  sha256zeros
 ```
 
 are present at server scope or inherited into the request scope.
@@ -49,7 +49,7 @@ key.
 ## Every legitimate request is being challenged
 
 **Symptom**: real users see the interstitial; the decision log
-shows everything as `tier=non-interactive` or higher.
+shows everything as `tier=noninteractive` or higher.
 
 **Most common cause**: Apache is behind a reverse proxy and
 `mod_remoteip` is not configured. mod_botshield is keying the IP
@@ -60,18 +60,18 @@ matches your edge's IP, that's the issue. Configure
 `mod_remoteip` per [deployment](deployment.md).
 
 **Second-most common cause**: the defaults are challenging more than
-you expected. `first-sight-ip` scores 20, which *is*
+you expected. `firstsightip` scores 20, which *is*
 `BotShieldScoreNonInteractive`, so any request arriving with no usable cookie
 gets the invisible check on its first visit — by design, but surprising
 if you enabled BotShield site-wide rather than on an auth path. Either
 scope the enable, or lower the heuristic:
 
 ```apache
-BotShieldHeuristicTrigger first-sight-ip reset action=score add=5
+BotShieldHeuristicTrigger firstsightip reset action=score add=5
 ```
 
 For sites where most visitors don't send `Accept-Language` (legitimate
-use cases exist), `missing-accept-language` adds another 5 on top;
+use cases exist), `missingacceptlanguage` adds another 5 on top;
 raise `BotShieldScoreNonInteractive` to 30 or 40 if that combination is
 over-firing.
 
@@ -90,7 +90,7 @@ discussion.
 ## Bots passing through unchallenged
 
 **Symptom**: scrapers / spammers / exploitation attempts visible in
-access logs aren't being gated. Decision log shows `tier=pass`.
+access logs aren't being gated. Decision log shows `tier=nochallenge`.
 
 **Diagnostics**:
 
@@ -107,7 +107,7 @@ access logs aren't being gated. Decision log shows `tier=pass`.
   bots scan (`/wp-admin/`, `/.env`, `/.git/`) with
   `BotShieldTrigger flag=honeypot_hit ttl=3600`. The bot trips
   the honeypot, the IP is flagged, future requests get the
-  flag-trigger penalty + tier_floor=captcha. See
+  flagtrigger penalty + tier_floor=captcha. See
   [policy](policy.md).
 - **Path triggers**: for paths that bots target but legitimate
   users don't, add `BotShieldRequestTrigger` rules with a penalty,

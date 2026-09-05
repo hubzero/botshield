@@ -14,7 +14,7 @@ mod_botshield supports four user-facing tiers plus a passive
 | Tier | What the user sees | When it fires |
 |---|---|---|
 | `pass` | Real content | `effective < BotShieldScoreNonInteractive` (default `< 20`) |
-| `non-interactive` | "Checking your browser…" splash; auto-submits a SHA-256 PoW | `BotShieldScoreNonInteractive ≤ effective < BotShieldScoreInteractive` (default `20..49`) |
+| `noninteractive` | "Checking your browser…" splash; auto-submits a SHA-256 PoW | `BotShieldScoreNonInteractive ≤ effective < BotShieldScoreInteractive` (default `20..49`) |
 | `interactive` | reCAPTCHA-shaped checkbox interstitial; user clicks once, PoW runs | `BotShieldScoreInteractive ≤ effective < BotShieldScoreCaptcha` (default `50..79`) |
 | `captcha` | Third-party provider widget (Turnstile / hCaptcha / reCAPTCHA / Friendly / GeeTest) | `effective ≥ BotShieldScoreCaptcha` (default `≥ 80`). Falls back to `interactive` if no provider configured on the scope |
 
@@ -57,7 +57,7 @@ score: any `BotShieldFlagTrigger action=tier_floor min=<tier>` that
 fires on a set flag bit raises the chosen tier to AT LEAST that
 level. Score-derived tier wins when it's already above the floor —
 floors never silently downgrade. Floor lifts produce a
-`flag-tier-floor:<tier>` reason so the reasoning is visible in the
+`flagtierfloor:<tier>` reason so the reasoning is visible in the
 log.
 
 ## Built-in heuristic signals
@@ -67,17 +67,17 @@ or cohort. Signs are absolute; the score either rises or stays put.
 
 | Signal | Penalty | Reason in log |
 |---|---|---|
-| Missing `User-Agent` | +40 | `missing-user-agent` |
-| Missing `Accept-Language` | +15 | `missing-accept-language` |
-| Scraper-pattern UA | +50 | `scraper-ua:<pattern>` |
-| First-sight IP (not in Bloom filter) | +5 | `first-sight-ip` |
+| Missing `User-Agent` | +40 | `missinguseragent` |
+| Missing `Accept-Language` | +15 | `missingacceptlanguage` |
+| Scraper-pattern UA | +50 | `scraperua:<pattern>` |
+| First-sight IP (not in Bloom filter) | +5 | `firstsightip` |
 | Path-trigger fire (status=4xx) | per-rule `penalty=` | `path-trigger:<name>` |
-| Rate-limit exceeded | +50 | `rate-limit-exceeded:<name>` |
-| Robots.txt Disallow | +100 | `robots-block:<group>` |
-| Honeypot hit (default flag trigger) | +60 | `flag-trigger:honeypot_hit` |
-| Fake-bot detection (default flag trigger) | +80 | `flag-trigger:fake_bot` |
+| Rate-limit exceeded | +50 | `ratelimitexceeded:<name>` |
+| Robots.txt Disallow | +100 | `robotsblock:<group>` |
+| Honeypot hit (default flag trigger) | +60 | `flagtrigger:honeypot_hit` |
+| Fake-bot detection (default flag trigger) | +80 | `flagtrigger:fake_bot` |
 | Verified legit-crawler match | forces pass | `verified-<name>` |
-| `app_verified_human` cookie credit (default flag-trigger) | -80 | `flag-trigger:app_verified_human` |
+| `app_verified_human` cookie credit (default flagtrigger) | -80 | `flagtrigger:app_verified_human` |
 | Configured path / load / cookie / env / flag triggers with `action=score add=N` | configured | `<family>-trigger:<name>` |
 
 Default thresholds and penalty values appear here for orientation.
@@ -135,7 +135,7 @@ The decision log's `cookie=` field reports one of `solved` (verified
 `solved` and `ok` are disjoint and the distinction matters: under
 always-mint every client holds a valid cookie after one request, so
 `ok` says only that the client keeps a cookie jar. `solved` is the
-only state that waives `first-sight-ip` / `dropped-cookie`. The
+only state that waives `firstsightip` / `droppedcookie`. The
 `cookie_solved_total` and `cookie_ok_total` Prometheus counters track
 the two separately, alongside `cookie_minted_total` for always-mint
 volume, and the dashboard's cookie-state bar shows them as separate
@@ -158,7 +158,7 @@ get re-challenged on the next request:
 
 | Tier | Default credit | Directive |
 |---|---|---|
-| `non-interactive` | -10 | `BotShieldForgivenessNonInteractive` |
+| `noninteractive` | -10 | `BotShieldForgivenessNonInteractive` |
 | `interactive` | -25 | `BotShieldForgivenessInteractive` |
 | `captcha` | -50 | `BotShieldForgivenessCaptcha` |
 
@@ -172,7 +172,7 @@ cookie carries a per-client hourly cap on accumulated forgiveness:
 BotShieldForgivenessCapPerHour 200
 ```
 
-Default is 200 points per rolling hour, ≈ 4–8 challenge-passes
+Default is 200 points per rolling hour, ≈ 4–8 nochallenge outcomes
 worth of credit. The cap state lives in the cookie itself, so
 forgiveness honors the cap across cookie re-issues without server-
 side bookkeeping.
@@ -201,9 +201,9 @@ a stable `key=value` structured line. The structured line is what
 you query when tuning:
 
 ```
-mod_botshield: decision tier=non-interactive outcome=challenged ip=192.0.2.42
-    score=37 cookie=absent provider=- alg=sha256-zeros
-    reason="first-sight-ip,missing-accept-language" path="/login"
+mod_botshield: decision tier=noninteractive outcome=challenged ip=192.0.2.42
+    score=37 cookie=absent provider=- alg=sha256zeros
+    reason="firstsightip,missingacceptlanguage" path="/login"
 ```
 
 Bump the module's log level to make these visible:
@@ -223,8 +223,8 @@ names — the prose log line at `info` level carries the full
 breakdown:
 
 ```
-mod_botshield: <action> effective=37 tier=non-interactive heuristic=37
-    cookie_score=0 reasons=[first-sight-ip:5,missing-accept-language:15,scraper-ua:python-requests:50]
+mod_botshield: <action> effective=37 tier=noninteractive heuristic=37
+    cookie_score=0 reasons=[firstsightip:5,missingacceptlanguage:15,scraperua:python-requests:50]
 ```
 
 Grep the log for the request, read the reasons array, see exactly
@@ -261,9 +261,9 @@ reachable; the common ones:
 |---|---|---|
 | `pass` | `allow` | Score below silent threshold; real handler ran |
 | `pass` | `verified` | Valid cookie; allowed to real handler |
-| `non-interactive` | `challenged` | Interstitial served; client is solving PoW |
-| `non-interactive` | `verified` | Client solved PoW; cookie minted |
-| `non-interactive` | `~challenge` | LogOnly: would have served interstitial |
+| `noninteractive` | `challenged` | Interstitial served; client is solving PoW |
+| `noninteractive` | `verified` | Client solved PoW; cookie minted |
+| `noninteractive` | `~challenge` | LogOnly: would have served interstitial |
 | `interactive` | `challenged` | Form-PoW interstitial served (HTTP 403) |
 | `interactive` | `verified` | Client solved form PoW; cookie minted |
 | `captcha` | `challenged` | Captcha widget served (HTTP 403) |

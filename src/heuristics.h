@@ -4,14 +4,14 @@
  * Heuristics are named, compile-time predicates that an operator binds
  * actions to via BotShieldHeuristicTrigger. The five ship today:
  *
- *   - missing-ua      : UA header absent or empty
- *   - missing-al      : Accept-Language header absent or empty
- *   - scraper-ua      : UA contains a known HTTP-library token
+ *   - missingua      : UA header absent or empty
+ *   - missingal      : Accept-Language header absent or empty
+ *   - scraperua      : UA contains a known HTTP-library token
  *                       (curl/Wget/python-requests/...)
- *   - first-sight-ip  : never-seen-before client IP (Bloom-filter miss).
+ *   - firstsightip  : never-seen-before client IP (Bloom-filter miss).
  *                       Bloom is populated eagerly (every request) so
  *                       this fires only on truly first visits.
- *   - dropped-cookie  : Bloom-known IP that arrived without a usable
+ *   - droppedcookie  : Bloom-known IP that arrived without a usable
  *                       cookie (absent / bad-sig / bad-format). Stronger
  *                       signal than first-sight: we've transacted with
  *                       this IP before, so a missing cookie is anomalous
@@ -32,7 +32,7 @@
  *                  IP / cookie state is known. UA/header checks live
  *                  here.
  *   POST_COOKIE  — fire in bs_handler after cookie + IP are known.
- *                  first-sight-ip is the only one. */
+ *                  firstsightip is the only one. */
 #ifndef BOTSHIELD_HEURISTICS_H
 #define BOTSHIELD_HEURISTICS_H
 

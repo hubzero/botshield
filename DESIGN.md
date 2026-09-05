@@ -14,7 +14,7 @@ challenged requests.
 
 The module operates on two orthogonal axes:
 
-- **Challenge tier** — what the user experiences: `pass`, non-interactive
+- **Challenge tier** — what the user experiences: `pass`, noninteractive
   JavaScript (JS) Proof-of-Work (PoW), form-PoW interstitial, full
   third-party captcha.
 - **Verification protocol** — how the server trusts that a challenge
@@ -115,7 +115,7 @@ deliver an incremental-rebuild win — punted as a follow-up.
 | `challenge.{c,h}` | Challenge issuance (`bs_issue_challenge`), PoW algorithm registry + lookup (`bs_find_algorithm`), canonical pipe-delimited HMAC input (`bs_challenge_canonical`), inline-JSON renderer (`bs_challenge_json`), bootstrap-binding helpers (`bs_format_bound_ip_hex`, `bs_compute_bootstrap_sig`). `BotShieldAlgorithm` setter. Hosts `bs_challenge` envelope, `bs_rep_state` reputation block, `bs_pow_algorithm` registry types, and challenge wire constants (`BS_PROTOCOL_VERSION`, `BS_SALT_BYTES`, `BS_NONCE_BYTES`) |
 | `score.{c,h}` | Per-request score struct on `r->request_config`, `bs_score_add` accumulator, reason renderers (`bs_decision_reason_names`, `bs_score_reasons_joined`), `bs_apply_flag_triggers` walker, `bs_decide_tier` score → tier picker, `bs_tier_name`. Hosts `bs_tier` and `bs_non_interactive_mode` enums, `bs_score_entry` / `bs_request_score` types, score thresholds (`BS_DEFAULT_SCORE_*`) and heuristic penalties (`BS_PENALTY_*`) |
 | `policy.{c,h}` | `bs_check_policy` request-time policy walker (cookie / env / load / path triggers, robots, rate-limit, robots Crawl-delay). `bs_policy_dump` for `-D DUMP_BOTSHIELD_POLICY` |
-| `triggers.{c,h}` | Per-family trigger setters (`bs_set_request_trigger`, `bs_set_cookie_trigger`, `bs_set_env_trigger`, `bs_set_feedback_trigger`, `bs_set_load_trigger`), shared action-key parser, `bs_apply_trigger_action` executor. `bs_set_flag_ip` and `bs_set_flag_trigger` setters for the E14 flag-trigger family. `bs_cookie_pred_match` predicate evaluator. Hosts the shared action engine (`bs_trigger_action`, `bs_trigger_family`, `BS_T*` enums), per-family entry types (`bs_request_trigger_entry` et al.), the E2.1 cohort + rate-limit types (`bs_cohort`, `bs_rate_limit_entry`, `bs_rate_escalate_entry`, `bs_rate_counter`), and the E14 flag-trigger entry type (`bs_flag_trigger_entry`, `bs_flag_action_kind`) |
+| `triggers.{c,h}` | Per-family trigger setters (`bs_set_request_trigger`, `bs_set_cookie_trigger`, `bs_set_env_trigger`, `bs_set_feedback_trigger`, `bs_set_load_trigger`), shared action-key parser, `bs_apply_trigger_action` executor. `bs_set_flag_ip` and `bs_set_flag_trigger` setters for the E14 flagtrigger family. `bs_cookie_pred_match` predicate evaluator. Hosts the shared action engine (`bs_trigger_action`, `bs_trigger_family`, `BS_T*` enums), per-family entry types (`bs_request_trigger_entry` et al.), the E2.1 cohort + rate-limit types (`bs_cohort`, `bs_rate_limit_entry`, `bs_rate_escalate_entry`, `bs_rate_counter`), and the E14 flagtrigger entry type (`bs_flag_trigger_entry`, `bs_flag_action_kind`) |
 | `captcha.{c,h}` | M8 provider registry (`bs_find_provider`), libcurl-backed `bs_captcha_siteverify` shared shim, `bs_geetest_siteverify` provider-specific verifier, M8.1 pending cookie (`bs_mint_pending_cookie`, `bs_clear_pending_cookie`), `bs_captcha_verify_handler`, URL-encoded form lookup helper (`bs_form_get`). All eleven captcha directive setters. Hosts `bs_captcha_provider` registry struct, `bs_captcha_result` enum, `bs_captcha_siteverify_fn` typedef |
 | `non_interactive.{c,h}` | E17 embedded handlers: `bs_embedded_js_handler`, `bs_embedded_worker_handler`, `bs_embedded_bootstrap_handler`, `bs_embedded_verify_handler`, `bs_form_widget_handler`. `BotShieldNonInteractiveMode` setter |
 | `templates.{c,h}` | Static HTML/CSS/JS strings for the PoW widget, captcha-tier widgets, and the page shell. Two-step substitution renderer (`bs_render_challenge_page`) |
@@ -182,7 +182,7 @@ reputation:
 | Tier | Behavior |
 |------|----------|
 | `pass`    | Real handler runs; if there was no cookie, none is issued. Legitimate users experience the module as invisible |
-| `non-interactive` | Either the M7 auto-submit splash (default, `BotShieldNonInteractiveMode interstitial`) or E17's embedded mode where the real page is served and a wrapper script POSTs back to `/embedded-verify` (`BotShieldNonInteractiveMode embedded`) |
+| `noninteractive` | Either the M7 auto-submit splash (default, `BotShieldNonInteractiveMode interstitial`) or E17's embedded mode where the real page is served and a wrapper script POSTs back to `/embedded-verify` (`BotShieldNonInteractiveMode embedded`) |
 | `interactive` | Visible reCAPTCHA-shaped checkbox the user clicks; the page's JS Worker solves the PoW. The checkbox is withheld for `BotShieldInteractiveArmMs` after load, and a solve faster than `BotShieldInteractiveMinSolveMs` is rejected |
 | `captcha` | Configured third-party provider's widget (Turnstile, hCaptcha, reCAPTCHA v2/v3, Friendly, GeeTest). Falls through to form-PoW with `reason="captcha_fallback"` if no provider is configured on the scope |
 
@@ -198,7 +198,7 @@ Score crosses three configurable thresholds
 unset threshold never fires, so a deployment that configures no
 thresholds never reaches a tier by score at all. The policy dump prints
 each one as either its configured value or
-`unset - never fires (suggested: N)`. The E14 flag-trigger walker can also
+`unset - never fires (suggested: N)`. The E14 flagtrigger walker can also
 push a tier floor up (never down) regardless of score.
 
 ## Request lifecycle
@@ -219,7 +219,7 @@ default static-file handler. Its walk:
    - `/botshield/embedded-bootstrap` → `bs_embedded_bootstrap_handler`
    - `/botshield/embedded-verify` → `bs_embedded_verify_handler`
    - `/botshield/form-widget.js` → `bs_form_widget_handler`
-   - Any other `<prefix>/...` path → 404 with `X-Botshield: unknown-endpoint`
+   - Any other `<prefix>/...` path → 404 with `X-Botshield: unknownendpoint`
 3. **Debug short-circuit.** `BotShieldDebug On` → 403 "Hello World"
    regardless of any other state.
 4. **Asset pass-through.** `bs_is_asset_uri` (`src/botshield.c:728`)
@@ -253,19 +253,19 @@ default static-file handler. Its walk:
    On a fully-valid verify, E10 safeguard state for that IP is
    cleared (a successful solve proves the client *can* progress).
    The verdict is published to `r->notes[BS_CK_STATE_NOTE]` for E4
-   cookie-trigger predicates (`bs-cookie=verified|missing|invalid`).
+   cookietrigger predicates (`bs-cookie=verified|missing|invalid`).
 7. **Policy walk.** `bs_check_policy` runs the eight-family policy
-   walker. On `DECLINED` (status=challenge-pass trigger) → log + DECLINED. On
+   walker. On `DECLINED` (status=nochallenge trigger) → log + DECLINED. On
    any other HTTP status → 403/429/etc. with the appropriate
    decision-log outcome.
 8. **Heuristics + flag-IP lookup.** `bs_run_builtin_heuristics`
    scores missing-UA / missing-Accept-Language / scraper-UA-tokens
    plus the E1 allow-list dispatch. `bs_flagged_ip_lookup` reads the
-   masked client IP from SHM; presence emits a coarse `flagged-ip`
+   masked client IP from SHM; presence emits a coarse `flaggedip`
    reason.
 9. **First-sight Bloom check.** Only when the request is cookieless
    or signature-mismatched and the masked IP isn't in either Bloom
-   buffer, add a `+5 first-sight-ip` penalty. Never penalizes a
+   buffer, add a `+5 firstsightip` penalty. Never penalizes a
    client we've already transacted with.
 10. **Flag-trigger walk.** `bs_apply_flag_triggers` walks
     `scfg->flag_triggers` over the union of IP-side and
@@ -273,8 +273,8 @@ default static-file handler. Its walk:
     TIER_FLOOR via MAX.
 11. **Score → tier.** `bs_decide_tier(cfg, effective_score)` with
     `effective_score = heuristic_total + cookie_score`. The
-    flag-trigger floor is then MAX'd in.
-12. **Pass tier.** Below the non-interactive threshold → emit E8.2 X-Botshield-
+    flagtrigger floor is then MAX'd in.
+12. **Pass tier.** Below the noninteractive threshold → emit E8.2 X-Botshield-
     Claims (when enabled), log decision, return `DECLINED`. The real
     handler runs.
 13. **Bloom feed.** Once a challenge is committed-to, the IP is added
@@ -291,10 +291,10 @@ default static-file handler. Its walk:
 15. **E17 embedded short-circuit.** `tier == BS_TIER_NONINTERACTIVE &&
     cfg->non_interactive_mode == BS_NON_INTERACTIVE_MODE_EMBEDDED` and the safeguard
     presentation count is below `BS_DEFAULT_EMBEDDED_FALLBACK_THRESHOLD`
-    → log non-interactive/declined, `DECLINED`. The wrapper script handles
+    → log noninteractive/declined, `DECLINED`. The wrapper script handles
     verification. After threshold consecutive embedded dispatches
     without `_bs_session` arriving, fall through to M7 with a
-    `embedded-fallback-m7` reason.
+    `embeddedfallbackm7` reason.
 16. **Carry-forward + rep build.** `bs_apply_rep_carry` clamps
     forgiveness against the per-cookie hourly cap (E15), subtracts
     from prior score, bumps the appropriate `passes_*` counter (LOW
@@ -303,7 +303,7 @@ default static-file handler. Its walk:
     `bs_challenge` with version/alg/salt/nonce/difficulty/expiry/
     auto_tier/signature. `bs_challenge_json` produces the inline JSON
     (with E17 bound-IP HMAC for embedded mode).
-    `bs_render_challenge_page` picks the widget (PoW for non-interactive/interactive,
+    `bs_render_challenge_page` picks the widget (PoW for noninteractive/interactive,
     captcha provider widget for captcha tier when configured), splices
     into the page shell, writes the response.
 18. **Decision log.** `bs_decision_log` writes one structured line
@@ -357,7 +357,7 @@ v|alg|salthex|noncehex|difficulty|expires_at
 
 Pipe-delimited ASCII. The `forgive_*` fields were added in protocol
 version 2 (E15); v1 cookies fail the version check and trigger a
-fresh challenge. `auto` is the non-interactive-tier (M7) marker — 1 means the
+fresh challenge. `auto` is the noninteractive-tier (M7) marker — 1 means the
 challenge was served as the no-click splash, 0 means form-PoW. Knowing
 which tier was actually served is what lets the verify path pick
 `passes_non_interactive` vs `passes_interactive` and the matching forgiveness amount.
@@ -482,8 +482,8 @@ void bs_score_add(request_rec *r, int penalty, int ttl_seconds,
 ```
 
 `penalty=0` records a reason without affecting the total — used for
-observe-mode entries, status=challenge-pass entries, and informational reasons
-like `flagged-ip`. The `ttl_seconds` field is accepted for API
+observe-mode entries, status=nochallenge entries, and informational reasons
+like `flaggedip`. The `ttl_seconds` field is accepted for API
 stability but currently ignored by downstream consumers; the
 flagged-IP table carries its own TTL set at insert time.
 
@@ -505,7 +505,7 @@ three thresholds on `bs_dir_cfg`. **An unset threshold never fires**,
 so score decides nothing until the operator sets one;
 `BS_DEFAULT_SCORE_*` survive only as the suggested values the policy
 dump prints beside an unset tier. Tier names returned by
-`bs_tier_name`: `"pass"`, `"non-interactive"`, `"interactive"`, `"captcha"`, or `"?"`
+`bs_tier_name`: `"pass"`, `"noninteractive"`, `"interactive"`, `"captcha"`, or `"?"`
 for an unknown enum.
 
 Heuristic penalties. These are the weights a **declared**
@@ -514,11 +514,11 @@ declares it, since no rules are seeded:
 
 | Reason | Penalty | When |
 |--------|---------|------|
-| `missing-user-agent` | `BS_PENALTY_MISSING_UA` (40) | `r->headers_in["User-Agent"]` is absent or empty |
-| `missing-accept-language` | `BS_PENALTY_MISSING_AL` (5) | No Accept-Language header |
-| `scraper-ua` | `BS_PENALTY_SCRAPER_UA` (10) | UA contains a token from the curated scraper-token list (curl, wget, python-requests, …) |
-| `first-sight-ip` | `BS_PENALTY_FIRST_SIGHT_IP` (20) | Bloom filter has not seen this IP this window |
-| `dropped-cookie` | `BS_PENALTY_DROPPED_COOKIE` (25) | Client discarded a cookie it was issued |
+| `missinguseragent` | `BS_PENALTY_MISSING_UA` (40) | `r->headers_in["User-Agent"]` is absent or empty |
+| `missingacceptlanguage` | `BS_PENALTY_MISSING_AL` (5) | No Accept-Language header |
+| `scraperua` | `BS_PENALTY_SCRAPER_UA` (10) | UA contains a token from the curated scraper-token list (curl, wget, python-requests, …) |
+| `firstsightip` | `BS_PENALTY_FIRST_SIGHT_IP` (20) | Bloom filter has not seen this IP this window |
+| `droppedcookie` | `BS_PENALTY_DROPPED_COOKIE` (25) | Client discarded a cookie it was issued |
 | `allow-bot:<name>` | `BS_CREDIT_ALLOW` (-1000) | E1 verified-crawler hit; large negative credit dominates other signals |
 | `allow-bot-ua:<name>` | -1000 | E1 UA-only-trust match (`BotShieldAllowBot ... *`) |
 | `fake-<name>` | +100 | E1 UA matched but client IP not in published ranges |
@@ -961,7 +961,7 @@ family's matcher / action lives in its own feature file
 
 Returns from `bs_check_policy`:
 - `OK` — no rule fired; caller continues to heuristics.
-- `DECLINED` — a `status=challenge-pass` trigger fired; caller short-circuits
+- `DECLINED` — a `status=nochallenge` trigger fired; caller short-circuits
   to DECLINED so the real handler runs.
 - Any other HTTP_* code — short-circuit with that status.
 
@@ -1010,7 +1010,7 @@ Directive: `BotShieldRateLimit <name> <budget> <per> <ua> <ipspec>`,
 Storage: each entry's `shm_slot` indexes into `bs_shm.rate_counters[]`,
 allocated in post_config. Atomic CAS on each `count` /
 `window_start_sec` field separately. Over-budget → 429 + `Retry-After`
-+ `bs_score_add(+50, "rate-limit-exceeded:<name>")`.
++ `bs_score_add(+50, "ratelimitexceeded:<name>")`.
 
 ### Block-path (E2.1)
 
@@ -1041,7 +1041,7 @@ window, subsequent requests against the same rule return the
 escalated status (default 403) for `ttl_sec` (default 1800). The TTL
 slides on each fresh strike. `log=<tag>` rides the decision line on
 threshold crossing for fail2ban handoff, with reason
-`rate-limit-abuse:<name>`.
+`ratelimitabuse:<name>`.
 
 E9 escalation only applies to BotShield-generated 429s on a named
 `BotShieldRateLimit` rule. robots.txt Crawl-delay 429s are not
@@ -1077,7 +1077,7 @@ Semantics follow RFC 9309 plus the Crawl-delay de facto extension:
   `robots_doc_truncated_lines`.
 
 Reason strings:
-- `robots-block:<group>` — 403, `+100` score.
+- `robotsblock:<group>` — 403, `+100` score.
 - `robots-rate:<group>` — 429 + Retry-After, `+50` score.
 
 `<group>` is the normalized first-UA of the matching group
@@ -1249,7 +1249,7 @@ a path trigger with `ua=`/`ipspec=` keys, which is cohort-scoped).
 Default `status=403`, default `flag=scanner_probe`, default
 `ttl=3600`.
 
-Under `status=challenge-pass`: the request flows through to the real handler
+Under `status=nochallenge`: the request flows through to the real handler
 with `DECLINED`; `penalty` is **ignored** (only flag-IP + log
 side-effects survive). This is the one family where pass means
 "don't score this request"; cookie/env/load triggers diverge.
@@ -1289,7 +1289,7 @@ cookie name are redirected at config-time to use `bs-cookie=<state>`
 (which exposes the verdict, not the raw bytes).
 
 Semantic divergence from path triggers:
-- **`credit=` / `penalty=` always apply**, even under `status=challenge-pass`,
+- **`credit=` / `penalty=` always apply**, even under `status=nochallenge`,
   because the cookie signal exists on this request. (Path-family
   pass is "don't score"; cookie-family pass is "score this now,
   let the request through.")
@@ -1309,7 +1309,7 @@ no re-scanning the raw header per trigger.
 `env=<var>=<value>` (exact match, case-sensitive), `!env=<var>`
 (absent).
 
-Like E4, `credit/penalty` apply under `status=challenge-pass` (env signals
+Like E4, `credit/penalty` apply under `status=nochallenge` (env signals
 exist on this request). No `redirect=` (env signals shape scoring,
 not response). Main requests only — `ap_is_initial_req(r)`.
 
@@ -1358,7 +1358,7 @@ Two runtime action verbs:
 
 - `score add=N` — signed delta, range -1000..1000. SUMs across
   triggers. Applied via `bs_score_add` at request time.
-- `tier_floor min=<tier>` — `pass`/`non-interactive`/`interactive`/`captcha`. MAXes
+- `tier_floor min=<tier>` — `pass`/`noninteractive`/`interactive`/`captcha`. MAXes
   across triggers. Score-derived tier wins when it's already at-or-
   above the floor — never silently downgrades.
 
@@ -1370,10 +1370,10 @@ a vhost is narrowing something an enclosing scope declared.
 
 `bs_apply_flag_triggers` walks `scfg->flag_triggers` over the union
 of IP-side and cookie-side flag bits. `mode=observe` entries log a
-`would-flag-trigger:<flag>:observe` reason and skip the side effect.
+`wouldflagtrigger:<flag>:observe` reason and skip the side effect.
 
 **Nothing is seeded.** `BS_SEED_DEFAULT_RULES` is 0, and it gates both
-the flag-trigger and heuristic-trigger seed loops, so a vhost that
+the flagtrigger and heuristic-trigger seed loops, so a vhost that
 declares no triggers has none. The tables still exist in the source as
 `bs_default_flag_triggers` / `bs_default_heuristic_triggers`, and
 `tests/setup/botshield-dev.conf` carries the same slate as ordinary
@@ -1386,7 +1386,7 @@ The slate that used to be seeded:
 | `honeypot_hit`         | score add=+60, tier_floor min=captcha |
 | `fake_bot`             | score add=+80, tier_floor min=captcha |
 | `scanner_probe`        | score add=+50, tier_floor min=interactive |
-| `pow_fail_streak`      | score add=+30, tier_floor min=non-interactive |
+| `pow_fail_streak`      | score add=+30, tier_floor min=noninteractive |
 | `app_verified_human`   | score add=-80 |
 | `app_verified_session` | score add=-40 |
 | `app_trust_signal`     | score add=-20 |
@@ -1407,7 +1407,7 @@ a lower tier. Trust signals are score-only by design; no credit ever
 forces tier *down*, so a verified-human flag cannot unlock a request
 that already tripped a different tier_floor.
 
-A flag scoring at or above the non-interactive threshold is a challenge
+A flag scoring at or above the noninteractive threshold is a challenge
 switch rather than a contributing signal, and the policy dump flags
 that inline with `~`.
 
@@ -1424,12 +1424,12 @@ family rather than a bespoke directive for the flag case.
 ### Pass tier
 
 `tier == BS_TIER_PASS` after the flag-floor MAX → log decision
-`tier=pass outcome=declined`, set E8.2 X-Botshield-Claims when
+`tier=nochallenge outcome=declined`, set E8.2 X-Botshield-Claims when
 enabled, return `DECLINED`. Real handler runs.
 
 ### Non-interactive tier — interstitial mode (M7)
 
-`bs_render_challenge_page` with `tier=non-interactive` + `issue_auto=1` →
+`bs_render_challenge_page` with `tier=noninteractive` + `issue_auto=1` →
 auto-submit splash (no user click). The page's CSS variant renders
 the widget as a neutral "checking your browser…" splash. Inline JS
 keys off the `auto: true` field in the embedded challenge JSON
@@ -1604,10 +1604,10 @@ the surrounding decision-log entry.
 
 - **PoW widget** (M2/M7): inline JS, inline CSS, inline embedded
   challenge JSON. Two visual modes — visible checkbox (interactive tier) or
-  neutral "checking your browser" splash (non-interactive tier with
+  neutral "checking your browser" splash (noninteractive tier with
   `auto:true`). WCAG 2.1 AA; landmarks, `aria-live` status, focus
   order, reduced-motion, `<html lang>`, `.bs-sr` clip-offscreen
-  technique on the non-interactive-tier label so axe-core sees the accessible
+  technique on the noninteractive-tier label so axe-core sees the accessible
   name.
 - **Captcha widgets** (M8): three render templates keyed on provider
   - "render" pattern (Turnstile / hCaptcha / reCAPTCHA v2 /
@@ -1698,7 +1698,7 @@ sanctioned BotShield state without poking at the encrypted cookie.
 Wire format:
 
 ```
-v=1;score=<n>;tier=<pass|non-interactive|interactive|captcha>;cookie=<ok|expired|bad_sig|bad_format|absent|->;flags=<space-sep flag names>;passes=s=<n>,f=<n>,c=<n>;ts=<unix>;sig=<hex>
+v=1;score=<n>;tier=<pass|noninteractive|interactive|captcha>;cookie=<ok|expired|bad_sig|bad_format|absent|->;flags=<space-sep flag names>;passes=s=<n>,f=<n>,c=<n>;ts=<unix>;sig=<hex>
 ```
 
 HMAC-SHA-256 covers the body before `;sig=`. The strip-before-set is
@@ -1757,7 +1757,7 @@ hot path.
 
 ## Safeguard / anti-loop (E10)
 
-A borderline-real client gets stuck in repeated non-interactive / captcha
+A borderline-real client gets stuck in repeated noninteractive / captcha
 churn (CSP, blockers, broken JS, privacy tooling). Safeguard's job:
 stop the loop and pick a deterministic lower-churn behavior.
 
@@ -1784,7 +1784,7 @@ fully-valid cookie verifies — a successful solve proves the client
 
 When `BotShieldSafeguard On` and `bs_safeguard_check()` returns
 true, the request is short-circuited with reason
-`challenge-safeguard`, `tier=safeguard outcome=redirect`, and
+`challengesafeguard`, `tier=safeguard outcome=redirect`, and
 returns `DECLINED`. The real handler runs.
 
 Safeguard:
@@ -1796,7 +1796,7 @@ Safeguard:
 ### E17 embedded fallback
 
 The same SHM table is consumed by E17's embedded → M7 fallback. After
-`BS_DEFAULT_EMBEDDED_FALLBACK_THRESHOLD = 3` consecutive non-interactive-tier-
+`BS_DEFAULT_EMBEDDED_FALLBACK_THRESHOLD = 3` consecutive noninteractive-tier-
 embedded dispatches in the safeguard window without `_bs_session`
 arriving, the embedded short-circuit is bypassed and M7 issues a
 visible interstitial. M7's own safeguard threshold catches the case
@@ -1889,13 +1889,13 @@ Two layers:
 
 - **Per-rule `mode=observe`** on any trigger / rate-limit / block-
   path action. Observe-mode matches log a stable `would-X` reason
-  (`would-block`, `would-rate-limit`, `would-flag-trigger:<flag>:
+  (`would-block`, `would-rate-limit`, `wouldflagtrigger:<flag>:
   observe`) but skip the side effect.
 - **Scope-level `BotShieldEnabled LogOnly`**: tri-state directive
   on `bs_dir_cfg.enabled` (`On` / `Off` / `LogOnly`). When the
   effective dir-cfg is in `LogOnly`, every match (regardless of
   per-rule `mode=`) becomes observe-mode AND tier-decision dispatch
-  (non-interactive / interactive / captcha) short-circuits to an `outcome=~challenge`
+  (noninteractive / interactive / captcha) short-circuits to an `outcome=~challenge`
   decision log line. The leading tilde marks a suppressed
   counterfactual: the real outcome was always `allow` (request
   flowed through), and the tilde-prefixed value is what *would*
@@ -1934,11 +1934,11 @@ Enum vocabularies (validated at commit time by an awk script):
 
 | Field | Values |
 |-------|--------|
-| `tier` | `none`, `pass`, `non-interactive`, `interactive`, `captcha`, `safeguard` |
+| `tier` | `none`, `pass`, `noninteractive`, `interactive`, `captcha`, `safeguard` |
 | `outcome` | `declined`, `challenged`, `verified`, `rejected`, `failopen`, `rate_limited`, `inflight_capped`, `pending_missing`, `misconfigured`, `debug` |
 | `cookie` | `ok`, `expired`, `bad_sig`, `bad_format`, `absent`, `-` |
 | `provider` | `-` or registry name (`turnstile`, `hcaptcha`, `recaptcha-v2`, `recaptcha-v3`, `friendly`, `geetest`) |
-| `alg` | `-` or registry entry (`sha256-zeros` or `captcha-<provider>`) |
+| `alg` | `-` or registry entry (`sha256zeros` or `captcha-<provider>`) |
 | `reason` | quoted short string or `-` |
 
 `reason` and `path` are double-quoted for logfmt safety; everything
@@ -2119,7 +2119,7 @@ live_network + slow.
   `--screenshot=only-on-failure --video=retain-on-failure` so every
   invocation gets the artifacts.
 - `test_browser_a11y.py` runs axe-core (Deque's engine, bundled at
-  `tests/pytests/assets/axe.min.js`, MPL-2.0) against the non-interactive
+  `tests/pytests/assets/axe.min.js`, MPL-2.0) against the noninteractive
   interstitial, asserts zero critical + zero serious violations,
   plus targeted keyboard-tab-to-`#btn` checks against the interactive-tier
   variant and `<html lang>` assertion.

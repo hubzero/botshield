@@ -347,7 +347,7 @@ response has already shipped.</p>
 <h3 id="module-to-app-claims">Module-to-app claims</h3>
 <p>mod_botshield can emit a signed claims header on the request seen
 by the upstream application:</p>
-<pre><code>X-Botshield-Claims: v=1;score=12;tier=pass;cookie=ok;
+<pre><code>X-Botshield-Claims: v=1;score=12;tier=nochallenge;cookie=ok;
                     flags=app_verified_human;passes=s=0,f=0,c=1;
                     ts=1745870400;sig=&lt;hmac-sha256-hex&gt;
 </code></pre>
@@ -364,7 +364,7 @@ spoofing attempt is dropped before the app sees it.</p>
 <ul>
 <li><code>v=1</code> — wire-format version. Locked to <code>1</code> today.</li>
 <li><code>score=N</code> — running score the request decision used.</li>
-<li><code>tier=&lt;t&gt;</code> — <code>pass</code> / <code>non-interactive</code> / <code>interactive</code> / <code>captcha</code> / <code>safeguard</code>
+<li><code>tier=&lt;t&gt;</code> — <code>pass</code> / <code>noninteractive</code> / <code>interactive</code> / <code>captcha</code> / <code>safeguard</code>
 (matches the decision-log <code>tier</code> enum).</li>
 <li><code>cookie=&lt;c&gt;</code> — <code>solved</code> / <code>ok</code> / <code>expired</code> / <code>bad_sig</code> /
 <code>bad_format</code> / <code>absent</code> (matches the <code>cookie</code> enum). <code>solved</code> is a

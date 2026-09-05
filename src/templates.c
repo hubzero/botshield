@@ -38,10 +38,10 @@ static const char BS_DEFAULT_HELP_HTML[] =
 "identify, and nothing personal is sent. It usually takes a second "
 "or two.</p>";
 
-/* Shown on the non-interactive tier only, and only once the solve has run
+/* Shown on the noninteractive tier only, and only once the solve has run
  * longer than a person is willing to watch a spinner. Deliberately
  * short and free of instruction: there is nothing for them to do. */
-/* The non-interactive tier's widget label. Cloudflare's page-level line here is
+/* The noninteractive tier's widget label. Cloudflare's page-level line here is
  * "Checking if the site connection is secure", which describes
  * something that is not happening: TLS was negotiated before this
  * response was built and nothing about the connection is being
@@ -98,7 +98,7 @@ static const char BS_WIDGET_TEMPLATE[] =
 ".bs-widget.bs-bare{background:transparent;border:0;box-shadow:none;\n"
 " min-width:0;padding:0}\n"
 ".bs-widget.bs-bare .bs-btn{padding:0;border-radius:4px}\n"
-/* The non-interactive tier is the same bordered widget as the interactive tier,
+/* The noninteractive tier is the same bordered widget as the interactive tier,
  * differing only in that there is nothing to click: same box,
  * same label column, same brand column. Turnstile's widget looks
  * the same whether it is waiting on the user or working by
@@ -113,7 +113,7 @@ static const char BS_WIDGET_TEMPLATE[] =
  * checkbox does not shove the layout when it arrives -- a button
  * that appears under an already-moving cursor is its own bug.
  *
- * What shows meanwhile is the spinner the non-interactive tier
+ * What shows meanwhile is the spinner the noninteractive tier
  * uses, which is honest: the proof-of-work really is running. */
 ".bs-widget.bs-arming .bs-btn{cursor:default;pointer-events:none}\n"
 ".bs-widget.bs-arming .bs-check{border:3px solid #e4e7ea;\n"
@@ -123,7 +123,7 @@ static const char BS_WIDGET_TEMPLATE[] =
 "@media (prefers-reduced-motion: reduce){\n"
 " .bs-widget.bs-arming .bs-check{animation:none}\n"
 "}\n"
-/* No help affordance on the non-interactive tier: it is a control the
+/* No help affordance on the noninteractive tier: it is a control the
  * client cannot use on a page they will not be on long enough to
  * read it. The label stays visible here, unlike an earlier
  * revision that hid it -- axe-core's button-name check goes
@@ -177,7 +177,7 @@ static const char BS_WIDGET_TEMPLATE[] =
 " border:1px solid #f3c8c8;border-radius:4px}\n"
 /* Silent-tier context block. A spinner alone on an unbranded grey
  * field is indistinguishable from a site that has hung, and the
- * non-interactive tier is exactly the one the client never asked for and
+ * noninteractive tier is exactly the one the client never asked for and
  * cannot act on. .bs-host names what they are waiting for -- the
  * first thing Cloudflare's interstitial shows, for the same
  * reason: it also says the page belongs to the site and not to an
@@ -187,7 +187,7 @@ static const char BS_WIDGET_TEMPLATE[] =
  * makes the fast case feel heavier than it is. */
 ".bs-host{font-size:19px;font-weight:600;color:#1f2530;margin:0;\n"
 " text-align:center;letter-spacing:-.01em;word-break:break-word}\n"
-/* The visible heading on the non-interactive tier. Cloudflare puts
+/* The visible heading on the noninteractive tier. Cloudflare puts
  * "Checking if the site connection is secure" here, which is not
  * what is happening -- TLS was established before this page was
  * built, and nothing about the connection is under examination.
@@ -240,7 +240,7 @@ static const char BS_WIDGET_TEMPLATE[] =
 "    so the JS never references the name (, #2). */\n"
 " var box = document.getElementById('c');\n"
 " var msg = document.getElementById('msg');\n"
-" /* The non-interactive widget states its progress in its label, the way\n"
+" /* The noninteractive widget states its progress in its label, the way\n"
 "    Turnstile does, so the status line under the box carries only\n"
 "    the counter -- printing the phrase in both places is the same\n"
 "    sentence twice, two lines apart. */\n"
@@ -395,7 +395,7 @@ static const char BS_WIDGET_TEMPLATE[] =
 "     round-trip bound_ip + bootstrap_sig for\n"
 "     IP-binding. */\n"
 "  var body = JSON.stringify({\n"
-"   provider: 'pow-gcm',\n"
+"   provider: 'powgcm',\n"
 "   cookie_prefix: CH.cookie_prefix,\n"
 "   bound_ip: CH.bound_ip,\n"
 "   bootstrap_sig: CH.bootstrap_sig,\n"
@@ -703,7 +703,7 @@ BS_WIDGET_MARKER "\n"
 /* Render the challenge interstitial. Picks PoW or captcha widget,
  * splices into the page shell, writes the response. */
 /* ----------------------------------------------------------------------
- * <prefix>/preview/{non-interactive,interactive} -- render the interstitials as a
+ * <prefix>/preview/{noninteractive,interactive} -- render the interstitials as a
  * client sees them, for design work.
  *
  * Uses the real bs_render_challenge_page with the real template, CSS
@@ -720,7 +720,7 @@ BS_WIDGET_MARKER "\n"
  * counter moved. A preview that altered state would be a preview you
  * could not leave open.
  *
- * non-interactive -> auto=1, the self-solving tier (BS_TIER_NONINTERACTIVE).
+ * noninteractive -> auto=1, the self-solving tier (BS_TIER_NONINTERACTIVE).
  * form   -> auto=0, the click-to-verify tier. Internally BS_TIER_INTERACTIVE;
  *           the decision log and metrics call it "interactive" and
  *           BotShieldScoreInteractive sets its threshold. Same page, the
@@ -770,7 +770,7 @@ int bs_preview_index_handler(request_rec *r)
       "<p class=\"sub\">What a client is shown, rendered from the live "
       "templates rather than copies.</p><ul>");
     ap_rprintf(r,
-      "<li><a href=\"%s/preview/non-interactive\">%s/preview/non-interactive</a>"
+      "<li><a href=\"%s/preview/noninteractive\">%s/preview/noninteractive</a>"
       "<p class=\"d\">Non-interactive tier. The check runs by itself "
       "and the "
       "widget is decorative &mdash; most visitors never see this "
@@ -840,7 +840,7 @@ int bs_render_challenge_page(request_rec *r,
                              const char *challenge_js,
                              int issue_auto)
 {
-    /* The non-interactive tier's label is a status, not an invitation: there is
+    /* The noninteractive tier's label is a status, not an invitation: there is
      * no checkbox to tick. Turnstile makes the same split -- "Verify
      * you are human" when it wants a click, "Verifying..." when it is
      * working on its own. An operator's BotShieldPrompt still wins,
@@ -904,7 +904,7 @@ int bs_render_challenge_page(request_rec *r,
      * UseCanonicalName Off it is client-supplied text. */
     const char *host_esc = ap_escape_html(r->pool, ap_get_server_name(r));
 
-    /* The document heading. On the non-interactive tier it is visible and
+    /* The document heading. On the noninteractive tier it is visible and
      * descriptive, under the hostname, which is the order Cloudflare
      * uses -- what site, then what is happening. On the interactive tier the
      * widget's own prompt is the visible instruction, so the heading

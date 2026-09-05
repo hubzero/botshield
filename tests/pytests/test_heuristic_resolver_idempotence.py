@@ -14,9 +14,9 @@ seeds the defaults again.
 Found in production 2026-08-08 on a HubZero hub with 102 namevhosts and
 the policy at main server scope. Every heuristic fired 107 times:
 
-    first-sight-ip           20  ->  score 2140      (2140 / 20 == 107)
-    dropped-cookie           25  ->  score 2675      (2675 / 25 == 107)
-    missing-al                5  ->  score  535      ( 535 /  5 == 107)
+    firstsightip           20  ->  score 2140      (2140 / 20 == 107)
+    droppedcookie           25  ->  score 2675      (2675 / 25 == 107)
+    missingal                5  ->  score  535      ( 535 /  5 == 107)
 
 Ordinary Chrome and Firefox requests were scored into the captcha tier,
 and the 2048-slot rate-counter pool exhausted on startup, silently
@@ -45,11 +45,11 @@ from botshield_test import client, ips
 
 # Every compiled-in heuristic, from bs_heuristic_defs (src/heuristics.c).
 HEURISTICS = (
-    "missing-ua",
-    "missing-al",
-    "scraper-ua",
-    "first-sight-ip",
-    "dropped-cookie",
+    "missingua",
+    "missingal",
+    "scraperua",
+    "firstsightip",
+    "droppedcookie",
 )
 
 # BS_PENALTY_* (src/score.h). Their sum is the most any single request can
@@ -62,8 +62,8 @@ PENALTY_SUM = 40 + 5 + 10 + 20 + 25  # == 100
 # 2140 from a single heuristic.
 SCORE_CEILING = PENALTY_SUM + 150
 
-# Trips scraper-ua; sending no Accept-Language trips missing-al; a
-# Bloom-fresh IP with no cookie trips first-sight-ip.
+# Trips scraperua; sending no Accept-Language trips missingal; a
+# Bloom-fresh IP with no cookie trips firstsightip.
 SCRAPER_UA = "python-requests/2.31"
 
 EXTRA_VHOSTS = 30

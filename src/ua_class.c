@@ -28,8 +28,8 @@ const char *bs_ua_class_label_str(bs_ua_class_label l)
 {
     switch (l) {
     case BS_UA_CLASS_BROWSER:      return "browser";
-    case BS_UA_CLASS_UNKNOWN_BOT:  return "unknown-bot";
-    case BS_UA_CLASS_KNOWN_BOT:    return "known-bot";
+    case BS_UA_CLASS_UNKNOWN_BOT:  return "unknownbot";
+    case BS_UA_CLASS_KNOWN_BOT:    return "knownbot";
     case BS_UA_CLASS_FAKE_BOT:     return "fake-bot";
     case BS_UA_CLASS_VERIFIED_BOT: return "verified-bot";
     case BS_UA_CLASS_UNKNOWN:
@@ -90,10 +90,10 @@ static const bs_allow_bot_entry *find_allow_entry(bs_server_cfg *scfg,
  *
  * is_verified_bot is set ONLY when the IP cross-check ran AND the
  * client IP was confirmed. Without an actual IP check, the UA pattern
- * just contributes the bot's name to the known-bot pool — the
+ * just contributes the bot's name to the knownbot pool — the
  * verified-bot credit (BS_CREDIT_ALLOW) requires real verification.
  *
- * Three no-IP-check fall-throughs all land in the known-bot pool
+ * Three no-IP-check fall-throughs all land in the knownbot pool
  * downstream:
  *   - operator's `*` target           → verified_ua_only=1
  *   - BotShieldClassify -verified-bots → verified_unranged=1
@@ -114,14 +114,14 @@ static void classify_verified(request_rec *r, const char *ua,
     if (entry && entry->ua_only) {
         /* Operator's `*` target — they explicitly opted out of IP
          * verification for this bot. UA match alone doesn't qualify
-         * for verified-bot credit; bot lands in known-bot pool. */
+         * for verified-bot credit; bot lands in knownbot pool. */
         out->verified_ua_only = 1;
         return;
     }
 
     /* BotShieldClassify -verified-bots: subsystem-wide IP check
      * disabled. Same effect as ranges-not-loaded — bot lands in
-     * known-bot pool without credit. */
+     * knownbot pool without credit. */
     if (!scfg->classify.verified_bots) {
         out->verified_unranged = 1;
         return;
@@ -138,7 +138,7 @@ static void classify_verified(request_rec *r, const char *ua,
 
     if (!ranges) {
         /* UA matched but no ranges loaded — file missing, malformed,
-         * or fetch hasn't completed yet. Bot lands in known-bot pool;
+         * or fetch hasn't completed yet. Bot lands in knownbot pool;
          * bs_check_allow bumps bot_unverified_total so operators can
          * monitor the load-gap rate. */
         out->verified_unranged = 1;

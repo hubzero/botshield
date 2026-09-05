@@ -1,6 +1,6 @@
-/* non_interactive.h — E17 non-interactive tier verification handlers.
+/* non_interactive.h — E17 noninteractive tier verification handlers.
  *
- * The non-interactive tier (BS_TIER_NONINTERACTIVE) hands the proof-of-work off to a
+ * The noninteractive tier (BS_TIER_NONINTERACTIVE) hands the proof-of-work off to a
  * Web Worker on the page rather than serving an interstitial. Three
  * endpoints make up the round-trip:
  *
@@ -49,7 +49,7 @@ int bs_embedded_bootstrap_handler(request_rec *r, bs_dir_cfg *cfg);
 int bs_embedded_verify_handler(request_rec *r, bs_dir_cfg *cfg);
 
 /* E17 — BotShieldNonInteractiveMode <interstitial|embedded>. Per-scope picker
- * for the non-interactive tier challenge flavor. */
+ * for the noninteractive tier challenge flavor. */
 const char *bs_set_non_interactive_mode(cmd_parms *cmd, void *cfg_v,
                                const char *arg);
 

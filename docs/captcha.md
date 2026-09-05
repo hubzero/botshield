@@ -209,7 +209,7 @@ event is a config change with no app-side coordination.
 
 Feedback honors both `BotShieldEnabled LogOnly` and per-trigger
 `mode=observe` — under either gate the filter logs
-`feedback-trigger:<event>:observe` and skips the flagged-IP write.
+`feedbacktrigger:<event>:observe` and skips the flagged-IP write.
 The "side effect" of a feedback trigger is future-request state
 (the IP flag), so observe-mode is meaningful even though the
 response has already shipped.
@@ -220,7 +220,7 @@ mod_botshield can emit a signed claims header on the request seen
 by the upstream application:
 
 ```
-X-Botshield-Claims: v=1;score=12;tier=pass;cookie=ok;
+X-Botshield-Claims: v=1;score=12;tier=nochallenge;cookie=ok;
                     flags=app_verified_human;passes=s=0,f=0,c=1;
                     ts=1745870400;sig=<hmac-sha256-hex>
 ```
@@ -242,7 +242,7 @@ Claims fields (semicolon-separated, in this order):
 
 - `v=1` — wire-format version. Locked to `1` today.
 - `score=N` — running score the request decision used.
-- `tier=<t>` — `pass` / `non-interactive` / `interactive` / `captcha` / `safeguard`
+- `tier=<t>` — `pass` / `noninteractive` / `interactive` / `captcha` / `safeguard`
   (matches the decision-log `tier` enum).
 - `cookie=<c>` — `solved` / `ok` / `expired` / `bad_sig` /
   `bad_format` / `absent` (matches the `cookie` enum). `solved` is a

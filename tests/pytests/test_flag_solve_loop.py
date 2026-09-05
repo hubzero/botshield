@@ -137,7 +137,7 @@ def test_flag_acquired_after_solving_still_fires(
         with log_slice as slc:
             _get("/", fresh_ip, cookie)
         lines = slc.decision_lines(ip=fresh_ip)
-        assert any("flag-trigger:scanner_probe" in d["reason"] for d in lines), (
+        assert any("flagtrigger:scanner_probe" in d["reason"] for d in lines), (
             f"a flag earned after the solve must still fire; lines={lines}"
         )
 
@@ -170,7 +170,7 @@ def test_excusal_requires_real_solve_proof(
         with log_slice as slc:
             _get("/", fresh_ip, presence)
         lines = slc.decision_lines()
-        assert any("flag-trigger:honeypot_hit" in d["reason"] for d in lines), (
+        assert any("flagtrigger:honeypot_hit" in d["reason"] for d in lines), (
             f"an unsolved presence cookie must not excuse a flag; "
             f"lines={lines}"
         )

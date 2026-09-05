@@ -7,7 +7,7 @@ drive the per-provider spec in `botshield_test.providers`.
 Coverage:
   - test_captcha_ok: providers that ship with an always-pass test
     keypair (Turnstile, hCaptcha, reCAPTCHA v2). Asserts 303 +
-    X-Botshield: captcha-ok + __Host-bs_session cookie issued.
+    X-Botshield: captchaok + __Host-bs_session cookie issued.
   - test_captcha_plumbing_smoke: all six providers. Fire a bogus
     token through the verify endpoint and assert the decision log
     carries `provider=<name>`. Regression gate for body-field
@@ -15,7 +15,7 @@ Coverage:
     works without real keys.
   - test_captcha_rejected_via_bad_secret: Turnstile + v2 only. Uses
     config_override to swap in a known-bad secret, asserts 403 +
-    captcha-rejected. Serial (mutates vhost).
+    captcharejected. Serial (mutates vhost).
   - test_captcha_body_field_regression: Friendly + GeeTest. Posts
     the wrong field name, asserts 400 + 'missing token field' log.
     Catches any rename of the frc-captcha-solution / geetest-token
@@ -66,7 +66,7 @@ def test_captcha_ok(spec, pending_cookie):
         f"{spec.name}: expected 303, got {resp.status_code}; "
         f"headers={dict(resp.headers)}"
     )
-    assert resp.headers.get("X-Botshield") == "captcha-ok"
+    assert resp.headers.get("X-Botshield") == "captchaok"
     assert resp.cookies.get("__Host-bs_session"), (
         f"{spec.name}: no __Host-bs_session cookie issued"
     )
@@ -153,7 +153,7 @@ def test_captcha_rejected_via_bad_secret(
     assert resp.status_code == 403, (
         f"{spec.name}: expected 403 with bad secret, got {resp.status_code}"
     )
-    assert resp.headers.get("X-Botshield") == "captcha-rejected"
+    assert resp.headers.get("X-Botshield") == "captcharejected"
     assert matched, (
         f"{spec.name}: no 'outcome=block provider={spec.log_name}' line"
     )

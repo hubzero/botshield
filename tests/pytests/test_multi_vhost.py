@@ -98,10 +98,10 @@ def test_isolation_default_per_vhost(
 
     assert lines, f"no decision line for ip={rate_slot_ip}"
     flagged_lines = [d for d in lines
-                     if "flagged-ip" in d.get("reason", "")]
+                     if "flaggedip" in d.get("reason", "")]
     assert not flagged_lines, (
         f"per-vhost isolation broken: IP {rate_slot_ip} carried a "
-        f"flagged-ip reason into the second vhost. Operator-facing "
+        f"flaggedip reason into the second vhost. Operator-facing "
         f"docs claim this doesn't happen; lines={lines}"
     )
 
@@ -146,7 +146,7 @@ def test_sharing_via_share_scope(
             lines = slc.decision_lines(ip=rate_slot_ip)
 
     flagged_lines = [d for d in lines
-                     if "flagged-ip" in d.get("reason", "")]
+                     if "flaggedip" in d.get("reason", "")]
     assert flagged_lines, (
         f"opt-in sharing broken: IP {rate_slot_ip} flagged on the "
         f"first vhost did NOT carry to the second under the same "

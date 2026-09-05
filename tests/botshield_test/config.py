@@ -134,7 +134,7 @@ HTTPD_CONF = _pick("BS_HTTPD_CONF",
 # ERROR_LOG: decision lines appear in BOTH, but only in the error log
 # with the "mod_botshield: decision " prefix that _parse_decision keys
 # on. Lines the module writes straight to this file and nowhere else --
-# observability-endpoint hits, for one -- are only visible here.
+# observabilityendpoint hits, for one -- are only visible here.
 DECISION_LOG = _pick("BS_DECISION_LOG",
                      _plat("/var/log/httpd/bstest/botshield.log",
                            "/var/log/apache2/botshield.log"),

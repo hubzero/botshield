@@ -72,7 +72,7 @@ operators can carve out exceptions:
 limits and scoring all still run and still log, but no interstitial,
 form or captcha is ever rendered — any selected tier collapses back to
 `pass`, and the suppression appears in the decision log as
-`challenge-off:<tier>`.
+`challengeoff:<tier>`.
 
 Use it where an explicit `status=4xx` trigger is meant to be the only
 action. Parking `BotShieldScoreNonInteractive`/`Interactive`/`Captcha` at `10000` is
@@ -111,7 +111,7 @@ BotShieldFlagTrigger scanner_probe reset action=score add=50
 `reset` is required rather than stylistic: **tier floors MAX across
 triggers**, so adding a lower floor beside the compiled-in one is
 silently useless — it MAXes straight back up. `pow_fail_streak` needs
-no reset; its floor is already `non-interactive`.
+no reset; its floor is already `noninteractive`.
 
 `BotShieldDebug` returns `403 "Hello World"` for every request in
 scope — useful as a smoke test that the hook is firing.
@@ -122,7 +122,7 @@ where both are not resolved on the scope. `BotShieldSecondarySecretFile`
 is the verify-only secondary key for graceful rotation — see
 [deployment](deployment.md#secret-rotation).
 
-`BotShieldAlgorithm` only `sha256-zeros` is built-in today;
+`BotShieldAlgorithm` only `sha256zeros` is built-in today;
 `sha384-zeros`, `sha512-zeros`, `pbkdf2-sha256`, `argon2id` are
 reserved registry slots that fail with a clear "not implemented"
 diagnostic.
@@ -205,7 +205,7 @@ that drift:
 
 | Route | Shows |
 |---|---|
-| `<prefix>/preview/non-interactive` | The self-solving widget, pinned mid-check (the preview's proof-of-work is set unsolvable so it cannot complete and navigate away) |
+| `<prefix>/preview/noninteractive` | The self-solving widget, pinned mid-check (the preview's proof-of-work is set unsolvable so it cannot complete and navigate away) |
 | `<prefix>/preview/interactive` | The same widget with a live checkbox waiting for a click |
 | `<prefix>/preview/safeguard` | The anti-loop explainer, also served at `<prefix>/safeguard-info`, which is the URL clients actually reach |
 
@@ -239,7 +239,7 @@ discussion.
 
 `BotShieldForgivenessCapPerHour` caps total cookie-side
 forgiveness in any rolling 60-minute window. Default 200 ≈ 4–8
-challenge-passes worth of credit. Lower for stricter farming
+nochallenge outcomes worth of credit. Lower for stricter farming
 resistance; 0 disables (legacy behavior).
 
 ## Silent-tier dispatch
@@ -249,7 +249,7 @@ resistance; 0 disables (legacy behavior).
 | `BotShieldNonInteractiveMode` | `interstitial\|embedded` | `interstitial` |
 
 `interstitial` (the default) serves a no-click splash page that
-auto-submits a SHA-256 PoW on load — the legacy non-interactive-tier
+auto-submits a SHA-256 PoW on load — the legacy noninteractive-tier
 behavior. `embedded` instead hands off to the site-included
 `/botshield/embedded.js` wrapper: the page serves DECLINED (real
 content) and the wrapper does the PoW in a Web Worker, then POSTs
@@ -454,7 +454,7 @@ permits vhost context, so Apache will not catch it; the module has to.
 
 Each request gets one User-Agent classification, computed once and
 cached for every downstream consumer. It composes four passes:
-real-browser templates, the known-bot directory, verified-bot IP
+real-browser templates, the knownbot directory, verified-bot IP
 cross-check, and a heuristic scan for bot-shaped UAs matching
 nothing else.
 
@@ -482,14 +482,14 @@ Each disabled pass has a fail-safe rather than a silent behavior
 change: `-browsers` treats every UA as a browser for robots.txt
 wildcard purposes; `-known-bots` skips the directory walk, so no bot
 slug reaches the log; `-verified-bots` skips the IP cross-check and
-matched UAs degrade to known-bot, earning neither verified-bot credit
+matched UAs degrade to knownbot, earning neither verified-bot credit
 nor fake-bot penalty (the intended response to stale CIDR data);
 `-unknown-bots` skips the bot-token substring scan.
 
 `BotShieldAllowBot` registers a UA pattern + IP-range pair. The third
 arg is a path to a CIDR file, a single CIDR, comma-separated inline
 CIDRs, or `*` alone for UA-only matching (logged as
-`known-bot:<name>`, score 0); omit it for
+`knownbot:<name>`, score 0); omit it for
 `/var/lib/botshield/bots/<name>.txt`. A `<name>` matching a bundled
 built-in (`googlebot`, `bingbot`, `applebot`, `googleother`,
 `siteimprove`) replaces that built-in. See
@@ -557,7 +557,7 @@ also accepts `s`/`m`/`h`). Plain integer for `per` is rejected.
 The legacy 5-arg positional form is still accepted (form is detected
 by sniffing for `=` in the args); no deprecation warning yet.
 
-`BotShieldBotRateLimit` caps volume per known-bot slug rather than
+`BotShieldBotRateLimit` caps volume per knownbot slug rather than
 per cohort. `<target>` is a bot slug or UA substring resolved against
 the bot directory, `@<botgroup>` (`search`, `ai-input`, `ai-train`,
 `monitor`), or `*`. The two-arg form is Crawl-delay shaped — one
@@ -567,11 +567,11 @@ specific > `@botgroup` > `*`.
 `*` pre-allocates one counter per directory slug not covered by a
 more specific rule, so each unmatched bot gets its own budget rather
 than sharing one; three reserved aggregate slots at the same budget
-cover unknown-bot, fake-bot, and slugs a mid-run directory refresh
+cover unknownbot, fake-bot, and slugs a mid-run directory refresh
 added after startup. Because the slug universe is bounded by the
 directory, every slot is allocated at config time — request time is a
 single hash probe. Over-budget returns 429 + `Retry-After` with reason
-`bot-rate:<slug>`. Robots.txt `Crawl-delay` groups feed the same
+`botrate:<slug>`. Robots.txt `Crawl-delay` groups feed the same
 machinery.
 
 ### Nothing is rate limited until you say so
@@ -646,7 +646,7 @@ See [policy](policy.md#triggers-predicate-action-engine)
 for full predicate vocabulary and family-by-family semantics.
 
 `BotShieldSessionCookieName` registers a name that the
-`cookies=session` cookie-trigger predicate considers a session
+`cookies=session` cookietrigger predicate considers a session
 cookie. Repeatable; each call appends.
 
 ### `accesslog=off` — keep a request out of the access log
@@ -724,13 +724,13 @@ compress into one key.
 | Intent | Keys | Effect |
 |---|---|---|
 | Block | `status=403` (family default) | Refused from the policy walk. No scoring, no cookie mint, no render. |
-| Challenge | `status=challenge-pass tier=non-interactive` | Invisible auto-submitting check. `tier=interactive` for the visible one. |
-| Captcha | `status=challenge-pass tier=captcha` | The configured provider's widget. |
-| Score only | `status=challenge-pass penalty=<n>` | Adds to the score and lets normal thresholds decide. |
+| Challenge | `status=nochallenge tier=noninteractive` | Invisible auto-submitting check. `tier=interactive` for the visible one. |
+| Captcha | `status=nochallenge tier=captcha` | The configured provider's widget. |
+| Score only | `status=nochallenge penalty=<n>` | Adds to the score and lets normal thresholds decide. |
 
-`tier=` and `penalty=` both require `status=challenge-pass`, because a concrete
+`tier=` and `penalty=` both require `status=nochallenge`, because a concrete
 status short-circuits the request before any tier is chosen. `tier=`
-accepts `pass`, `non-interactive`, `interactive` and `captcha`, and
+accepts `pass`, `noninteractive`, `interactive` and `captcha`, and
 composes by MAX with the score-derived tier and any flag tier floor —
 it raises the floor, it never downgrades.
 
@@ -741,7 +741,7 @@ would keep being re-challenged for the life of a flag it has no way to
 clear. Use `flag=` when you want the reputation to persist, `tier=`
 when you want to challenge the request in front of you.
 
-> A bare `status=challenge-pass` — with neither `tier=` nor `penalty=` — keeps its
+> A bare `status=nochallenge` — with neither `tier=` nor `penalty=` — keeps its
 > original meaning of "record the match and decline out of the handler".
 > That skips scoring entirely, so it will *disable* challenges the
 > defaults would otherwise have raised on those requests. It is a
@@ -761,7 +761,7 @@ BotShieldRequestTrigger debugparam query="*debug=1*" penalty=20
 # UA form the pattern match cannot express. Note ua="" is a restriction
 # and ua=* is not: "*" (or omitting the key) means "any", which is why a
 # rule carrying only ua=* is rejected as having no condition.
-BotShieldRequestTrigger no-ua ua="" status=challenge-pass tier=non-interactive ttl=0 log=no-ua
+BotShieldRequestTrigger no-ua ua="" status=nochallenge tier=noninteractive ttl=0 log=no-ua
 ```
 
 Because it fires from the policy walk it short-circuits **before**
@@ -833,7 +833,7 @@ This is the directive that replaces the legacy `BotShieldFlagIP`
 
 Action verbs: `action=score add=N` (signed N -1000..1000),
 `action=tier_floor min=<tier>` (raise effective tier; tier is one
-of `pass`/`non-interactive`/`interactive`/`captcha`). The `reset` keyword clears
+of `pass`/`noninteractive`/`interactive`/`captcha`). The `reset` keyword clears
 all earlier triggers (compiled-in defaults + prior
 declarations) for the named flag at post-config time.
 
@@ -908,23 +908,23 @@ not separate directives.
 
 | Heuristic | Fires when | Default |
 |---|---|---|
-| `missing-ua` | User-Agent absent or empty | `score add=40` |
-| `missing-al` | Accept-Language absent | `score add=5` |
-| `scraper-ua` | UA contains a known HTTP-library token | `score add=10` |
-| `first-sight-ip` | Bloom-filter miss — genuinely new IP, arriving with no usable cookie | `score add=20` |
-| `dropped-cookie` | Bloom-known IP arriving with no usable cookie | `score add=25` |
+| `missingua` | User-Agent absent or empty | `score add=40` |
+| `missingal` | Accept-Language absent | `score add=5` |
+| `scraperua` | UA contains a known HTTP-library token | `score add=10` |
+| `firstsightip` | Bloom-filter miss — genuinely new IP, arriving with no usable cookie | `score add=20` |
+| `droppedcookie` | Bloom-known IP arriving with no usable cookie | `score add=25` |
 
-`scraper-ua` is deliberately low. robots.txt tells undeclared clients
+`scraperua` is deliberately low. robots.txt tells undeclared clients
 they may fetch anything outside the `Disallow` list at the published
 `Crawl-delay`; a weight of 50 put an unrenderable checkbox in front of
 `curl`, `wget` and `python-requests` instead — the module enforcing a
 policy the site never published. At 10 it composes with other signals
 rather than deciding on its own, and volume abuse is caught by the rate
 limit, which is what the published policy actually promises.
-`missing-al` is 5 for the same reason: almost nothing scripted sends
+`missingal` is 5 for the same reason: almost nothing scripted sends
 `Accept-Language`.
 
-`first-sight-ip` and `dropped-cookie` are the two halves of one signal —
+`firstsightip` and `droppedcookie` are the two halves of one signal —
 both fire unless the request carries a cookie that **proves a challenge
 was solved**, differing on whether the IP is already in the Bloom filter.
 
@@ -935,8 +935,8 @@ suppress a penalty it never earned. The waiver requires solve evidence
 (`passes_silent`, `passes_form`, or `passes_captcha`) in the
 authenticated rep block — the same evidence the safeguard-clear path
 requires. A real browser pays for this exactly once: it arrives with no
-proof, scores `dropped-cookie` into the non-interactive tier, clears it in one
-auto-submitted round trip, and every later request carries proof. `first-sight-ip` sits at
+proof, scores `droppedcookie` into the noninteractive tier, clears it in one
+auto-submitted round trip, and every later request carries proof. `firstsightip` sits at
 exactly `BotShieldScoreNonInteractive`, so **an enabled scope challenges any
 request with no session context by default**, with no rule to write.
 That is usually what you want on a login or registration path, where the
@@ -951,7 +951,7 @@ wipes every entry so the slate can be rebuilt from zero.
 `mode=observe` logs the match with an `:observe` suffix instead of
 applying it.
 
-A `dropped-cookie` hit is ambiguous by design — private-browsing
+A `droppedcookie` hit is ambiguous by design — private-browsing
 resets and manual cookie clears look the same as evasion — so the
 default penalty is deliberately mild.
 

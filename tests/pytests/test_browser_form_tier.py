@@ -36,7 +36,7 @@ def _has_verified_cookie(ctx) -> bool:
 
 
 def test_silent_tier_js_pow_round_trip(bs_browser_context):
-    """Silent tier: Mozilla UA + missing Accept-Language + first-sight-ip
+    """Silent tier: Mozilla UA + missing Accept-Language + firstsightip
     = score 20 → silent. Interstitial auto-submits on load."""
     ctx = bs_browser_context
     page = ctx.new_page()

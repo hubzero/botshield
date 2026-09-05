@@ -64,7 +64,7 @@ BotShieldStateSaveInterval 300
 # because an unwritten rule limits nothing, which is the point.
 #
 # Start in observe mode. It records what a crawl-delay would have
-# refused, with reason bot-rate:<slug> in the decision log, without
+# refused, with reason botrate:<slug> in the decision log, without
 # refusing anyone, so the budget you eventually pick comes from this
 # site's real crawler traffic rather than from a number in an example
 # file:

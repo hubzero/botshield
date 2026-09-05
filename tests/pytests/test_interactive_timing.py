@@ -58,7 +58,7 @@ def _interactive_challenge(ip):
 
 def _submit(ch, counter, ip, *, att=None, issued_ms=None):
     body = {
-        "provider": "pow-gcm",
+        "provider": "powgcm",
         "cookie_prefix": ch["cookie_prefix"],
         "bound_ip": ch["bound_ip"],
         "bootstrap_sig": ch["bootstrap_sig"],
@@ -124,7 +124,7 @@ def test_solve_after_human_delay_is_accepted(fresh_ip):
 
 
 def test_non_interactive_tier_has_no_floor(fresh_ip):
-    """The floor is about a human click. The non-interactive tier
+    """The floor is about a human click. The noninteractive tier
     starts solving at DOMContentLoaded with nobody in the loop, so
     applying a delay requirement there would refuse every real
     browser that happens to be fast."""
@@ -135,7 +135,7 @@ def test_non_interactive_tier_has_no_floor(fresh_ip):
     counter = cookies.solve_pow(ch)
     resp = _submit(ch, counter, fresh_ip)
     assert resp.status_code == 204, (
-        f"non-interactive solves must not be subject to the click "
+        f"noninteractive solves must not be subject to the click "
         f"floor; got {resp.status_code}"
     )
 
@@ -257,11 +257,11 @@ def test_arm_window_reaches_the_client(fresh_ip):
 
 def test_non_interactive_does_not_arm(fresh_ip):
     """Arming is a property of waiting on a human. The
-    non-interactive tier has nobody to wait for, and a window there
+    noninteractive tier has nobody to wait for, and a window there
     would be pure added latency for every visitor."""
     raw = client.get("/botshield/embedded-bootstrap", xff=fresh_ip,
                      ua=BROWSER_UA)
     ch = json.loads(raw.text)["challenge"]
     assert ch.get("arm_ms", 0) == 0, (
-        f"non-interactive challenge must not arm; got {ch.get('arm_ms')!r}"
+        f"noninteractive challenge must not arm; got {ch.get('arm_ms')!r}"
     )

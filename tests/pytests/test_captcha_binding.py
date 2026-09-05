@@ -51,7 +51,7 @@ def test_hostname_mismatch_rejects_valid_token(config_override, log_slice):
     assert resp.status_code == 403, (
         f"hostname mismatch should 403 a valid token; got {resp.status_code}"
     )
-    assert resp.headers.get("X-Botshield") == "captcha-rejected"
+    assert resp.headers.get("X-Botshield") == "captcharejected"
     assert rejected, "no outcome=block decision line for hostname mismatch"
     # Reason carries the mismatch detail so operators can diagnose.
     reasons = {line.get("reason") for line in rejected}
@@ -75,7 +75,7 @@ def test_hostname_match_accepts_valid_token(pending_cookie):
     assert resp.status_code == 303, (
         f"default (matching) hostname should accept; got {resp.status_code}"
     )
-    assert resp.headers.get("X-Botshield") == "captcha-ok"
+    assert resp.headers.get("X-Botshield") == "captchaok"
 
 
 def test_off_expected_hostname_disables_check(config_override, pending_cookie):
@@ -101,4 +101,4 @@ def test_off_expected_hostname_disables_check(config_override, pending_cookie):
         f"`off` expected-hostname should disable the check; "
         f"got {resp.status_code}"
     )
-    assert resp.headers.get("X-Botshield") == "captcha-ok"
+    assert resp.headers.get("X-Botshield") == "captchaok"

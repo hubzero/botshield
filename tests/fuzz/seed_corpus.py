@@ -49,7 +49,7 @@ malformed = {
     "b64_bad_padding": b"====",
     "valid_b64_short": b"MXwxfDF8MXwxfDF8MXwxfDF8MXwxfDF8MXwxfDE=",  # 15 ones
     "overlong":        b"A" * 1024,
-    "nul_embedded":    b"1|sha256-zeros|" + b"\x00" * 32,
+    "nul_embedded":    b"1|sha256zeros|" + b"\x00" * 32,
     "just_sig_bytes":  b"de" * 32,
 }
 for name, data in malformed.items():

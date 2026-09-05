@@ -50,7 +50,7 @@ The rule still evaluates against every matching request, but takes
 no action. Matches appear in the decision log:
 
 ```
-mod_botshield: decision tier=pass outcome=allow ip=192.0.2.42
+mod_botshield: decision tier=nochallenge outcome=allow ip=192.0.2.42
     score=0 cookie=absent provider=- alg=- reason="path-trigger:admin-trap:observe"
     path="/admin/.env"
 ```
@@ -99,13 +99,13 @@ Both observe signals reach every gating surface:
 | Family | Honors per-rule | Honors `LogOnly` | Reason format |
 |---|---|---|---|
 | Path triggers | yes | yes | `path-trigger:<name>:observe` |
-| Cookie triggers | yes | yes | `cookie-trigger:<name>:observe` |
-| Env triggers | yes | yes | `env-trigger:<name>:observe` |
-| Load triggers | yes | yes | `load-trigger:<name>:observe` |
-| Feedback triggers | yes | yes | `feedback-trigger:<event>:observe` |
-| Flag triggers | yes | yes | `flag-trigger:<flag>:observe` |
+| Cookie triggers | yes | yes | `cookietrigger:<name>:observe` |
+| Env triggers | yes | yes | `envtrigger:<name>:observe` |
+| Load triggers | yes | yes | `loadtrigger:<name>:observe` |
+| Feedback triggers | yes | yes | `feedbacktrigger:<event>:observe` |
+| Flag triggers | yes | yes | `flagtrigger:<flag>:observe` |
 | Rate-limit | yes | yes | `rate-limit:<name>:observe` |
-| Robots Disallow | n/a | yes | `robots-block:<group>:observe` |
+| Robots Disallow | n/a | yes | `robotsblock:<group>:observe` |
 | Form-captcha | n/a | yes | `form-captcha:<scope>:observe` |
 
 Transport-level errors (415 / 413 / 400 on form-captcha; 503 on

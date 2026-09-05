@@ -45,7 +45,7 @@ void bs_app_feedback_insert_filter(request_rec *r);
 
 /* E8.2 — strip any client-supplied X-Botshield-* and emit a fresh
  * signed X-Botshield-Claims request header. Called from the
- * request-handler "pass" decision after the score+tier are
+ * request-handler "nochallenge" decision after the score+tier are
  * resolved. Returns NULL on success or a pool-allocated diagnostic
  * string on failure (e.g. no key configured). */
 const char *bs_app_claims_set(request_rec *r,

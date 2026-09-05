@@ -108,7 +108,7 @@ def test_directive_rejects_flag_key(config_override):
 def test_load_trigger_inert_under_normal(config_override, fresh_ip,
                                          log_slice):
     """state>=warm trigger configured but state is normal: must NOT
-    fire. The reason trace should not contain load-trigger:..."""
+    fire. The reason trace should not contain loadtrigger:..."""
     _set_load_file("normal")
     try:
         with config_override(
@@ -124,7 +124,7 @@ def test_load_trigger_inert_under_normal(config_override, fresh_ip,
     finally:
         _set_load_file("normal")
     assert lines, "no decision line"
-    assert "load-trigger:be-strict" not in lines[-1]["reason"], (
+    assert "loadtrigger:be-strict" not in lines[-1]["reason"], (
         f"load trigger fired under normal state; reason="
         f"{lines[-1]['reason']}"
     )
@@ -138,7 +138,7 @@ def test_load_trigger_fires_under_hot(config_override, fresh_ip,
                                       log_slice):
     """state>=warm trigger fires when state has escalated to hot.
     Wait for the state to reach hot via the watchdog hysteresis,
-    then issue a request and observe the load-trigger reason."""
+    then issue a request and observe the loadtrigger reason."""
     _set_load_file("hot")
     try:
         with config_override(
@@ -157,7 +157,7 @@ def test_load_trigger_fires_under_hot(config_override, fresh_ip,
         _set_load_file("normal")
     assert lines, "no decision line for the hot-state request"
     reason = lines[-1]["reason"]
-    assert "load-trigger:be-strict" in reason, (
+    assert "loadtrigger:be-strict" in reason, (
         f"load trigger should have fired; reason={reason}"
     )
     # log= tag rides the decision line.
@@ -222,11 +222,11 @@ def test_load_trigger_first_match_wins_specific_first(
     finally:
         _set_load_file("normal")
     reason = lines[-1]["reason"]
-    assert "load-trigger:only-hot" in reason, (
+    assert "loadtrigger:only-hot" in reason, (
         f"specific-first declaration should win under hot; "
         f"reason={reason}"
     )
-    assert "load-trigger:any-warm" not in reason, (
+    assert "loadtrigger:any-warm" not in reason, (
         f"second load trigger should not have fired (first-match-wins); "
         f"reason={reason}"
     )

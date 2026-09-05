@@ -153,7 +153,7 @@ BotShieldFlagTrigger    honeypot_hit action=tier_floor min=captcha mode=observe
 </code></pre>
 <p>The rule still evaluates against every matching request, but takes
 no action. Matches appear in the decision log:</p>
-<pre><code>mod_botshield: decision tier=pass outcome=allow ip=192.0.2.42
+<pre><code>mod_botshield: decision tier=nochallenge outcome=allow ip=192.0.2.42
     score=0 cookie=absent provider=- alg=- reason=&quot;path-trigger:admin-trap:observe&quot;
     path=&quot;/admin/.env&quot;
 </code></pre>
@@ -206,19 +206,19 @@ inner scope inherits the outer.</p>
 <td>Cookie triggers</td>
 <td>yes</td>
 <td>yes</td>
-<td><code>cookie-trigger:&lt;name&gt;:observe</code></td>
+<td><code>cookietrigger:&lt;name&gt;:observe</code></td>
 </tr>
 <tr>
 <td>Env triggers</td>
 <td>yes</td>
 <td>yes</td>
-<td><code>env-trigger:&lt;name&gt;:observe</code></td>
+<td><code>envtrigger:&lt;name&gt;:observe</code></td>
 </tr>
 <tr>
 <td>Load triggers</td>
 <td>yes</td>
 <td>yes</td>
-<td><code>load-trigger:&lt;name&gt;:observe</code></td>
+<td><code>loadtrigger:&lt;name&gt;:observe</code></td>
 </tr>
 <tr>
 <td>Feedback triggers</td>
@@ -230,7 +230,7 @@ inner scope inherits the outer.</p>
 <td>Flag triggers</td>
 <td>yes</td>
 <td>yes</td>
-<td><code>flag-trigger:&lt;flag&gt;:observe</code></td>
+<td><code>flagtrigger:&lt;flag&gt;:observe</code></td>
 </tr>
 <tr>
 <td>Rate-limit</td>
@@ -242,7 +242,7 @@ inner scope inherits the outer.</p>
 <td>Robots Disallow</td>
 <td>n/a</td>
 <td>yes</td>
-<td><code>robots-block:&lt;group&gt;:observe</code></td>
+<td><code>robotsblock:&lt;group&gt;:observe</code></td>
 </tr>
 <tr>
 <td>Form-captcha</td>

@@ -51,7 +51,7 @@ typedef struct bs_ua_classifier bs_ua_classifier;
  *                 opted out of IP verification for this bot. UA match
  *                 alone doesn't qualify for verified-bot credit, so
  *                 the entry just contributes its UA pattern to the
- *                 known-bot pool (logged as "known-bot:<name>", score 0). */
+ *                 knownbot pool (logged as "knownbot:<name>", score 0). */
 typedef struct {
     const char *name;
     const char *pattern;
@@ -195,7 +195,7 @@ const char *bs_allow_sidecar_path(apr_pool_t *p, const char *canonical);
  * in `manifest` is loaded and its ranges populated into the new
  * state; missing file-backed bots are logged but don't fail the
  * whole rebuild (they just have no ranges this generation; the bot's
- * UA pattern still matches but lands in the known-bot pool with
+ * UA pattern still matches but lands in the knownbot pool with
  * score 0 instead of getting verified-bot credit). Returns NULL only
  * on subpool allocation failure. */
 bs_bot_ranges_state *bs_allow_ranges_build(
@@ -244,7 +244,7 @@ void bs_mask_ipv6_prefix(unsigned char ip[16], int prefix_bits);
  * with BS_CREDIT_ALLOW for IP-confirmed crawlers, or fake-bot:name
  * with BS_PENALTY_FAKE_BOT for fakes claiming a crawler UA from the
  * wrong IP). UA-only and ranges-not-loaded states emit nothing here;
- * bs_handler's known-bot block tags them as known-bot:<name>. */
+ * bs_handler's knownbot block tags them as knownbot:<name>. */
 void bs_check_allow(request_rec *r, const bs_dir_cfg *cfg);
 
 /* --- E1 directive setters --- *

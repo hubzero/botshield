@@ -3,14 +3,14 @@
 Exercises the Allow paths in mod_botshield:
 
   verified:   Googlebot UA from an IP in Googlebot's CIDR list
-              → tier=pass, reason carries verified-bot:googlebot.
+              → tier=nochallenge, reason carries verifiedbot:googlebot.
   fake:       Googlebot UA from an IP NOT in the list
-              → fake-bot:googlebot penalty routes the request to captcha/form.
+              → fakebot:googlebot penalty routes the request to captcha/form.
   non-bot:    Regular browser UA never touches the Allow path.
   UA-only:    BotShieldAllowBot with '*' as the 3rd arg opts out of IP
               verification. Without an IP check the bot doesn't qualify
               for verified-bot credit; the UA pattern just contributes to
-              the known-bot pool (logged as known-bot:<name>, score 0).
+              the knownbot pool (logged as knownbot:<name>, score 0).
   inline CIDR: BotShieldAllowBot with a comma-separated CIDR list inline
               → in-range matches verified, out-of-range matches are fake.
 
@@ -40,10 +40,10 @@ REAL_GOOGLEBOT_IP = "66.249.66.1"
 
 
 def test_allow_bot_cidr_verified(log_slice):
-    """Real Googlebot UA + real Googlebot IP must produce tier=pass
-    with the verified-bot:googlebot reason. The large negative credit
+    """Real Googlebot UA + real Googlebot IP must produce tier=nochallenge
+    with the verifiedbot:googlebot reason. The large negative credit
     from the Allow check dominates any other penalty (missing
-    Accept-Language, first-sight-ip, etc.) so the score stays well
+    Accept-Language, firstsightip, etc.) so the score stays well
     below even the silent threshold."""
     with log_slice as slc:
         resp = client.get(
@@ -56,27 +56,27 @@ def test_allow_bot_cidr_verified(log_slice):
         f"verified Googlebot got challenged; headers={dict(resp.headers)}"
     )
     assert lines, "no decision line for verified-bot request"
-    verified = [d for d in lines if "verified-bot:googlebot" in d["reason"]]
+    verified = [d for d in lines if "verifiedbot:googlebot" in d["reason"]]
     assert verified, (
-        f"no decision line carried verified-bot:googlebot — "
+        f"no decision line carried verifiedbot:googlebot — "
         f"E1 not wired correctly? lines={lines}"
     )
-    assert verified[0]["tier"] == "pass", (
+    assert verified[0]["tier"] == "nochallenge", (
         f"verified bot ended up at tier={verified[0]['tier']}"
     )
 
 
 def test_allow_bot_fake_routed_to_captcha(log_slice, fresh_ip):
     """UA claims Googlebot, IP is nowhere near a real Googlebot range.
-    fake-bot:googlebot penalty should fire and drive tier into captcha
+    fakebot:googlebot penalty should fire and drive tier into captcha
     (or form-PoW fallback if no provider is configured at /)."""
     with log_slice as slc:
         client.get("/", xff=fresh_ip, ua=GOOGLEBOT_UA)
         lines = slc.decision_lines(ip=fresh_ip)
 
-    fake = [d for d in lines if "fake-bot:googlebot" in d["reason"]]
+    fake = [d for d in lines if "fakebot:googlebot" in d["reason"]]
     assert fake, (
-        f"no decision line for fake-bot:googlebot on ip={fresh_ip}; "
+        f"no decision line for fakebot:googlebot on ip={fresh_ip}; "
         f"lines={lines}"
     )
     assert fake[0]["tier"] in ("interactive", "captcha"), (
@@ -98,10 +98,10 @@ def test_non_bot_ua_unaffected(log_slice, fresh_ip):
 
     assert lines, "no decision line at all — unexpected"
     for d in lines:
-        assert "verified-bot:" not in d["reason"], (
+        assert "verifiedbot:" not in d["reason"], (
             f"non-bot UA tagged with verified-bot reason: {d['reason']!r}"
         )
-        assert "fake-bot:" not in d["reason"], (
+        assert "fakebot:" not in d["reason"], (
             f"non-bot UA tagged with fake-bot reason: {d['reason']!r}"
         )
 
@@ -110,8 +110,8 @@ def test_allow_bot_ua_only_mode(config_override, log_slice, fresh_ip):
     """`BotShieldAllowBot <name> <ua-substr> *` opts out of IP
     verification — the operator's `*` target. Without an IP check
     the bot doesn't qualify for verified-bot credit; the UA pattern
-    just contributes to the known-bot pool. The decision log should
-    carry known-bot:<name> with score 0, and the request should pass
+    just contributes to the knownbot pool. The decision log should
+    carry knownbot:<name> with score 0, and the request should pass
     through without a challenge.
 
     Pick a UA and pattern that contain NONE of bot/crawl/spider/
@@ -135,9 +135,9 @@ def test_allow_bot_ua_only_mode(config_override, log_slice, fresh_ip):
     assert resp.headers.get("X-Botshield") != "challenge", (
         f"UA-only-allowed bot got challenged; headers={dict(resp.headers)}"
     )
-    ua_only = [d for d in lines if "known-bot:xenophon" in d["reason"]]
+    ua_only = [d for d in lines if "knownbot:xenophon" in d["reason"]]
     assert ua_only, (
-        f"no decision line carried known-bot:xenophon; "
+        f"no decision line carried knownbot:xenophon; "
         f"lines={lines}"
     )
 
@@ -163,11 +163,11 @@ def test_allow_bot_inline_cidr(config_override, log_slice, fresh_ip):
             in_lines = slc.decision_lines(ip=in_range_ip)
             out_lines = slc.decision_lines(ip=fresh_ip)
 
-    allowed = [d for d in in_lines if "verified-bot:corpbot" in d["reason"]]
+    allowed = [d for d in in_lines if "verifiedbot:corpbot" in d["reason"]]
     assert allowed, f"in-range CorpBot not allowed; lines={in_lines}"
-    assert allowed[0]["tier"] == "pass"
+    assert allowed[0]["tier"] == "nochallenge"
 
-    fake = [d for d in out_lines if "fake-bot:corpbot" in d["reason"]]
+    fake = [d for d in out_lines if "fakebot:corpbot" in d["reason"]]
     assert fake, f"out-of-range CorpBot not faked; lines={out_lines}"
     assert fake[0]["tier"] in ("interactive", "captcha")
 
@@ -199,7 +199,7 @@ def test_allow_bot_main_scope_inherits_to_vhost(
             lines = slc.decision_lines(ip=fresh_ip)
 
     assert resp.status_code == 200
-    inherited = [d for d in lines if "known-bot:globalbot" in d["reason"]]
+    inherited = [d for d in lines if "knownbot:globalbot" in d["reason"]]
     assert inherited, (
         f"main-scope BotShieldAllowBot did not inherit into vhost; "
         f"lines={lines}"
@@ -229,7 +229,7 @@ def test_allow_bot_longest_match_wins(
 
     assert resp.status_code == 200
     admin_lines = [
-        d for d in lines if "known-bot:corpbot-admin" in d["reason"]
+        d for d in lines if "knownbot:corpbot-admin" in d["reason"]
     ]
     assert admin_lines, (
         f"CorpBot/Admin UA was not classified as the longer-match "
@@ -238,8 +238,8 @@ def test_allow_bot_longest_match_wins(
     # Defensive: make sure the generic corpbot didn't also win a line
     # (shouldn't — classify returns a single name per request).
     assert not [
-        d for d in lines if "known-bot:corpbot," in d["reason"]
-        or d["reason"].endswith("known-bot:corpbot")
+        d for d in lines if "knownbot:corpbot," in d["reason"]
+        or d["reason"].endswith("knownbot:corpbot")
     ], f"generic corpbot shadowed the specific override; lines={lines}"
 
 

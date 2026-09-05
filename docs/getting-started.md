@@ -88,7 +88,7 @@ Drop a single block into the vhost you want gated:
 
     BotShieldEnabled    on
     BotShieldSecretFile /etc/botshield/secret
-    BotShieldAlgorithm  sha256-zeros
+    BotShieldAlgorithm  sha256zeros
 </VirtualHost>
 ```
 
@@ -97,7 +97,7 @@ allow lists, captcha providers, triggers) ships with reasonable
 defaults documented on the [site model](site-model.md) and
 [directives](directives.md) pages.
 
-`BotShieldAlgorithm sha256-zeros` is currently the only built-in PoW
+`BotShieldAlgorithm sha256zeros` is currently the only built-in PoW
 algorithm. Other names (`sha384-zeros`, `pbkdf2-sha256`, `argon2id`)
 are reserved registry slots that fail with a clear "not implemented"
 diagnostic if you set them — there's no silent fallback.
@@ -142,11 +142,11 @@ You should see one line per request:
 
 ```
 [Tue Apr 28 10:00:00 2026] [botshield:info] mod_botshield:
-  decision tier=pass outcome=allow ip=192.0.2.1 score=0
+  decision tier=nochallenge outcome=allow ip=192.0.2.1 score=0
   cookie=absent provider=- alg=- reason="-" path="/"
 ```
 
-`tier=pass outcome=allow` is the happy path — the module
+`tier=nochallenge outcome=allow` is the happy path — the module
 inspected the request, decided it didn't warrant friction, and
 declined so Apache served the real content.
 
@@ -168,7 +168,7 @@ to inspect what each request scored.
 ## Test that PoW completes
 
 Open the gated URL in a real browser. The interstitial should
-auto-submit (non-interactive tier) or render the checkbox widget (interactive tier),
+auto-submit (noninteractive tier) or render the checkbox widget (interactive tier),
 solve a few seconds of SHA-256 PoW, and bounce back to the real page.
 Reload — you should see the real content immediately. The browser
 now holds a `_bs_session` cookie carrying the signed envelope and

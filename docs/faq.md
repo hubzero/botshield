@@ -161,11 +161,11 @@ tuned to keep typical browser traffic below that threshold, but
 the line is closer than it looks: a request with no
 `Accept-Language` header (15 points) plus a first-time IP not in
 the Bloom filter (5 points) lands at exactly 20, which trips the
-non-interactive tier. Browsers in some configurations (privacy modes that
+noninteractive tier. Browsers in some configurations (privacy modes that
 strip headers, certain mobile webviews, intranet apps with
 non-default settings) can reach the threshold on a clean first
 request. The captcha-tier fail-open story is on the captcha side;
-the non-interactive / interactive tiers themselves are real friction even for a
+the noninteractive / interactive tiers themselves are real friction even for a
 legitimate first-time visitor.
 
 If real users *are* hitting challenges, the likely causes are:
@@ -186,7 +186,7 @@ Some of them. The reality is graduated:
 
 - **Cheap scrapers** (Python `requests`, `curl`, `wget`,
   HTTP-library clients with no JS engine) cannot solve PoW. They
-  fail at the non-interactive and interactive tiers. This is the bulk of scraper
+  fail at the noninteractive and interactive tiers. This is the bulk of scraper
   traffic.
 - **Headless browsers** (Puppeteer, Playwright, Selenium) *can*
   solve PoW because they execute JavaScript. They can also solve
@@ -245,7 +245,7 @@ Three tools for this case:
    needing to solve PoW. See
    [captcha](captcha.md#app-bridge).
 
-A fourth option for IoT-style clients: implement the non-interactive-tier
+A fourth option for IoT-style clients: implement the noninteractive-tier
 PoW protocol in your client. The wire format is documented;
 nothing forces you to use a browser to satisfy it.
 
@@ -362,7 +362,7 @@ configured categories:
    attempt to the configured provider's siteverify URL with the
    client's captcha token (and the client IP as the `remoteip`
    field). This fires from three paths: the `/captcha-verify`
-   endpoint, the non-interactive-tier embedded-verify endpoint when an
+   endpoint, the noninteractive-tier embedded-verify endpoint when an
    site pairs silent with a captcha provider, and the
    form-captcha fixup. No siteverify call ever happens without
    a captcha provider explicitly configured on the scope.

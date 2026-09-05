@@ -63,7 +63,7 @@ typedef struct bs_ua_class {
     /* Strict semantics: is_verified_bot means "IP cross-checked AND
      * confirmed." The no-IP-check fall-throughs (verified_ua_only,
      * verified_unranged) leave both is_verified_bot and is_fake_bot
-     * zero — those land in the known-bot pool downstream. */
+     * zero — those land in the knownbot pool downstream. */
     int          is_verified_bot;   /* allowlist UA pattern + IP confirmed */
     int          is_fake_bot;       /* allowlist UA pattern + IP cross-checked + IP missed */
     const char  *verified_name;     /* operator-declared name on UA pattern match */
@@ -84,7 +84,7 @@ typedef struct bs_ua_class {
      * flag means "the UA string identified itself as bot-shaped", this
      * one means "there was no UA to judge". Keeping them separate lets
      * the rate limiter meter absent-UA traffic in its own bucket
-     * instead of draining the shared unknown-bot aggregate, and keeps
+     * instead of draining the shared unknownbot aggregate, and keeps
      * the two findings distinguishable in diagnostics. */
     int          is_no_ua;
 } bs_ua_class;

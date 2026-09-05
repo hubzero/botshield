@@ -440,8 +440,8 @@ static const char *cls_str(class_t c)
 {
     switch (c) {
     case CLS_BROWSER:           return "browser";
-    case CLS_UNKNOWN_BOT:       return "unknown-bot";
-    case CLS_KNOWN_BOT:         return "known-bot";
+    case CLS_UNKNOWN_BOT:       return "unknownbot";
+    case CLS_KNOWN_BOT:         return "knownbot";
     case CLS_FAKE_BOT:          return "fake-bot";
     case CLS_VERIFIED_BOT:      return "verified-bot";
     case CLS_VERIFIED_UNRANGED: return "verified-unranged";
@@ -877,8 +877,8 @@ int main(int argc, char **argv)
         if (!summary_only) {
             if (verbose) {
                 /* slug field: known_slug normally, or the matched
-                 * heuristic token when cls=unknown-bot — gives
-                 * operators the "why" for an unknown-bot tag. */
+                 * heuristic token when cls=unknownbot — gives
+                 * operators the "why" for an unknownbot tag. */
                 const char *slug_or_token = r.known_slug
                     ? r.known_slug
                     : (r.unknown_bot_token ? r.unknown_bot_token : "-");

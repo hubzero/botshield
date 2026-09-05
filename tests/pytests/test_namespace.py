@@ -81,7 +81,7 @@ def test_share_scope_accepts_normal_token(config_override, fresh_ip):
         # Reload succeeded if we got here; sanity-poke the server.
         # fresh_ip, not the default client address: 127.0.0.1 is
         # Bloom-known after any earlier test, which adds
-        # dropped-cookie (25) and challenges this sanity poke.
+        # droppedcookie (25) and challenges this sanity poke.
         r = _g("/", xff=fresh_ip)
         assert r.status_code in (200, 304), (
             f"server unhealthy after share-scope reload; "
@@ -128,10 +128,10 @@ def test_flagged_ip_isolated_across_share_scopes(
             lines = slc.decision_lines(ip=rate_slot_ip)
 
     assert lines, f"no decision line captured for IP {rate_slot_ip}"
-    flagged = [d for d in lines if "flagged-ip" in d.get("reason", "")]
+    flagged = [d for d in lines if "flaggedip" in d.get("reason", "")]
     assert not flagged, (
         f"namespace isolation broken: IP {rate_slot_ip} picked up "
-        f"flagged-ip in beta namespace despite being flagged only in "
+        f"flaggedip in beta namespace despite being flagged only in "
         f"alpha; lines={lines}"
     )
 
@@ -170,7 +170,7 @@ def test_share_scope_revisit_sees_prior_flag(
             client.get("/", xff=rate_slot_ip)
             lines = slc.decision_lines(ip=rate_slot_ip)
 
-    flagged = [d for d in lines if "flagged-ip" in d.get("reason", "")]
+    flagged = [d for d in lines if "flaggedip" in d.get("reason", "")]
     assert flagged, (
         f"flag did not survive reload under same ShareScope token; "
         f"lines={lines}"

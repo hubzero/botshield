@@ -1,7 +1,7 @@
-/* score.c — per-request scoring + flag-trigger walker.
+/* score.c — per-request scoring + flagtrigger walker.
  *
  * Owns the tiny request-scoped score-aggregation surface plus the
- * E14 flag-trigger runtime walker that mutates the score from flag
+ * E14 flagtrigger runtime walker that mutates the score from flag
  * bits resolved earlier in the request path. See score.h for the
  * public API. */
 #include <string.h>
@@ -126,7 +126,7 @@ const char *bs_score_reasons_joined(apr_pool_t *p,
  *     bs_decide_tier returns.
  *
  * Observe-mode (mode=observe) entries log
- * `would-flag-trigger:<flag>:observe` and skip the side effect.
+ * `would-flagtrigger:<flag>:observe` and skip the side effect.
  *
  * Returns the count of triggers that fired (informational; the
  * walker's effects are applied via bs_score_add and
@@ -147,13 +147,13 @@ int bs_apply_flag_triggers(request_rec *r,
         if (e->mode == BS_TMODE_OBSERVE) {
             bs_score_add(r, 0, 0,
                 apr_psprintf(r->pool,
-                    "would-flag-trigger:%s:observe", e->flag_name));
+                    "wouldflagtrigger:%s:observe", e->flag_name));
             continue;
         }
         if (e->action == BS_FLAG_ACT_SCORE) {
             bs_score_add(r, e->score_add, 0,
                 apr_psprintf(r->pool,
-                    "flag-trigger:%s", e->flag_name));
+                    "flagtrigger:%s", e->flag_name));
         } else if (e->action == BS_FLAG_ACT_TIER_FLOOR) {
             if (out_tier_floor && e->tier_min > *out_tier_floor) {
                 *out_tier_floor = e->tier_min;
@@ -180,7 +180,7 @@ const struct bs_flag_name bs_flag_names[] = {
     { NULL, 0 }
 };
 
-/* The E14 flag-trigger walker (bs_apply_flag_triggers) lives in
+/* The E14 flagtrigger walker (bs_apply_flag_triggers) lives in
  * score.c. bs_flag_names[] is defined further up this file (the
  * NULL-terminated name+bit array bs_parse_flag_names iterates). */
 
@@ -252,8 +252,8 @@ bs_tier bs_decide_tier(const bs_dir_cfg *cfg, int score)
 const char *bs_tier_name(bs_tier t)
 {
     switch (t) {
-        case BS_TIER_PASS:    return "pass";
-        case BS_TIER_NONINTERACTIVE:  return "non-interactive";
+        case BS_TIER_PASS:    return "nochallenge";
+        case BS_TIER_NONINTERACTIVE:  return "noninteractive";
         case BS_TIER_INTERACTIVE:    return "interactive";
         case BS_TIER_CAPTCHA: return "captcha";
     }
@@ -264,7 +264,7 @@ const char *bs_tier_name(bs_tier t)
  * Per-request tier floor (trigger tier= action)
  * -------------------------------------------------------------------- */
 
-#define BS_TIER_FLOOR_NOTE "bs-tier-floor"
+#define BS_TIER_FLOOR_NOTE "bstierfloor"
 
 void bs_set_request_tier_floor(request_rec *r, int tier)
 {

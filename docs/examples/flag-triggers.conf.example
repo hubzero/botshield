@@ -25,7 +25,7 @@
 #
 # Action verbs:
 #   action=score add=N             (signed; SUM across matching triggers)
-#   action=tier_floor min=<tier>   (pass|non-interactive|interactive|captcha; MAX)
+#   action=tier_floor min=<tier>   (pass|noninteractive|interactive|captcha; MAX)
 #
 # Reset keyword (clears every prior declaration — from this file or
 # your own config — for the same flag, processed at config-load time):
@@ -34,7 +34,7 @@
 #   BotShieldFlagTrigger <flag> reset                              # multi-
 #   BotShieldFlagTrigger <flag> action=...                         # line
 #
-# Observe-mode (logs `would-flag-trigger:<flag>:observe` instead of
+# Observe-mode (logs `wouldflagtrigger:<flag>:observe` instead of
 # applying the side effect — useful for safe rollout of a new rule):
 #   BotShieldFlagTrigger <flag> action=score add=N mode=observe
 
@@ -59,11 +59,11 @@ BotShieldFlagTrigger scanner_probe         action=tier_floor min=interactive
 # --- Detection signals — accumulating -------------------------------
 # Repeat PoW failures from one cookie. Could be a broken client
 # (JS disabled, time-skewed, CSP-stripped) or a scripted attacker
-# trying to brute the challenge. Bump to non-interactive — the next
+# trying to brute the challenge. Bump to noninteractive — the next
 # solve proves human behavior cheaply, and the score addition primes
 # the request near the tier-bump threshold.
 BotShieldFlagTrigger pow_fail_streak       action=score      add=30
-BotShieldFlagTrigger pow_fail_streak       action=tier_floor min=non-interactive
+BotShieldFlagTrigger pow_fail_streak       action=tier_floor min=noninteractive
 
 # --- Trust signals (credits) ----------------------------------------
 # Application-issued reputation. The app sees session-bound state the
@@ -93,5 +93,5 @@ BotShieldFlagTrigger app_trust_signal      action=score      add=-20
 #
 # Try a new rule in observe-mode for one release before enforcing:
 #   BotShieldFlagTrigger scanner_probe action=tier_floor min=captcha mode=observe
-#   # logs `would-flag-trigger:scanner_probe:observe` on every fire;
+#   # logs `wouldflagtrigger:scanner_probe:observe` on every fire;
 #   # remove `mode=observe` once the rate looks right.

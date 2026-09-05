@@ -2,7 +2,7 @@
 
 The captcha-verify handler caps concurrent outbound siteverify
 calls at `BotShieldCaptchaMaxInFlight` (default 64). Beyond that,
-requests short-circuit to 503 + `X-Botshield: captcha-saturated`
+requests short-circuit to 503 + `X-Botshield: captchasaturated`
 and log outcome=inflight_capped without touching libcurl.
 
 This is the last reachable outcome that had no assertion in the
@@ -70,8 +70,8 @@ def test_inflight_cap_fires(config_override, log_slice):
     # Spot-check one of the 503 responses carries the saturation marker.
     saturated = [r for r in responses if r.status_code == 503]
     assert saturated, "no 503 responses captured (impossible — just asserted ≥1)"
-    assert saturated[0].headers.get("X-Botshield") == "captcha-saturated", (
-        f"503 without captcha-saturated marker: "
+    assert saturated[0].headers.get("X-Botshield") == "captchasaturated", (
+        f"503 without captchasaturated marker: "
         f"X-Botshield={saturated[0].headers.get('X-Botshield')!r}"
     )
 

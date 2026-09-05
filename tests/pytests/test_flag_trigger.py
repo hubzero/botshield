@@ -69,16 +69,16 @@ def test_default_honeypot_forces_captcha(fresh_ip, log_slice):
     last = lines[-1]
     reason = last["reason"]
     # The default `honeypot_hit -> tier_floor=captcha` may surface as
-    # either the explicit `flag-tier-floor:captcha` reason token (if
+    # either the explicit `flagtierfloor:captcha` reason token (if
     # the score-derived tier was below captcha and the floor lifted
-    # it) or implicitly via the `flag-trigger:honeypot_hit` score
+    # it) or implicitly via the `flagtrigger:honeypot_hit` score
     # action pushing the score past the captcha threshold on its own
-    # — the new dropped-cookie heuristic now adds +25 on cookieless
+    # — the new droppedcookie heuristic now adds +25 on cookieless
     # follow-ups, often crossing captcha threshold without needing
     # the explicit tier-floor lift. Either path lands the same
     # tier=captcha decision; we assert that.
-    assert "flag-trigger:honeypot_hit" in reason, (
-        f"expected flag-trigger:honeypot_hit (score action); "
+    assert "flagtrigger:honeypot_hit" in reason, (
+        f"expected flagtrigger:honeypot_hit (score action); "
         f"got {reason!r}"
     )
     # Tier landed at the floor or a captcha-fallback (form) — never
@@ -90,9 +90,9 @@ def test_default_honeypot_forces_captcha(fresh_ip, log_slice):
 
 
 def test_default_emits_score_reason_per_flag(fresh_ip, log_slice):
-    """Built-in defaults emit a `flag-trigger:<name>` reason for each
+    """Built-in defaults emit a `flagtrigger:<name>` reason for each
     SCORE action that fires. honeypot's +60 SCORE action surfaces
-    distinct from the flag-tier-floor reason."""
+    distinct from the flagtierfloor reason."""
     _trip_honeypot(fresh_ip)
     with log_slice as slc:
         _g("/", xff=fresh_ip)
@@ -100,9 +100,9 @@ def test_default_emits_score_reason_per_flag(fresh_ip, log_slice):
 
     reason = lines[-1]["reason"]
     # Coarse signal stays for log-reader compatibility.
-    assert "flagged-ip" in reason, reason
+    assert "flaggedip" in reason, reason
     # Per-flag walker emission.
-    assert "flag-trigger:honeypot_hit" in reason, reason
+    assert "flagtrigger:honeypot_hit" in reason, reason
 
 
 # --- Operator extends defaults -------------------------------------
@@ -113,7 +113,7 @@ def test_operator_extra_score_sums_with_default(
 ):
     """Operator adds `score add=20` on honeypot_hit on top of the
     default `score add=60`. Both fire — score effect is the SUM, +80.
-    Two `flag-trigger:honeypot_hit` reasons appear in the chain."""
+    Two `flagtrigger:honeypot_hit` reasons appear in the chain."""
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
@@ -126,8 +126,8 @@ def test_operator_extra_score_sums_with_default(
             lines = slc.decision_lines(ip=fresh_ip)
 
     reason = lines[-1]["reason"]
-    # Two emissions of flag-trigger:honeypot_hit (default + operator).
-    occurrences = reason.count("flag-trigger:honeypot_hit")
+    # Two emissions of flagtrigger:honeypot_hit (default + operator).
+    occurrences = reason.count("flagtrigger:honeypot_hit")
     assert occurrences >= 2, (
         f"expected >=2 honeypot_hit score emissions (default + operator), "
         f"got {occurrences} in reason={reason!r}"
@@ -159,14 +159,14 @@ def test_softer_tier_floor_does_not_relax_default(
     reason = last["reason"]
     # The softer `tier_floor=form` must not relax the default
     # `tier_floor=captcha`. The audit signal can land in two ways:
-    # (a) explicit `flag-tier-floor:captcha` in the reason chain
+    # (a) explicit `flagtierfloor:captcha` in the reason chain
     # when the floor lifted a sub-captcha score, or (b) the actual
     # tier landing at captcha (or its captcha_fallback shim) via
     # the score action itself crossing the threshold. The dropped-
     # cookie heuristic + flag score push routinely produce (b).
-    # In neither case may `flag-tier-floor:form` appear — that
+    # In neither case may `flagtierfloor:form` appear — that
     # would mean the softer floor won, which is the regression.
-    assert "flag-tier-floor:form" not in reason, (
+    assert "flagtierfloor:form" not in reason, (
         f"the softer form floor must NOT be the winning floor reason; "
         f"got {reason!r}"
     )
@@ -214,8 +214,8 @@ def test_reset_with_no_replacement_clears_default(
 ):
     """`BotShieldFlagTrigger honeypot_hit reset` with no follow-up
     declarations clears the flag entirely. The flag bit still gets
-    set (honeypot path is unchanged), but no flag-trigger:honeypot_hit
-    reason or flag-tier-floor reason should appear."""
+    set (honeypot path is unchanged), but no flagtrigger:honeypot_hit
+    reason or flagtierfloor reason should appear."""
     # Anchored on the declaration, not on BotShieldEnabled. reset drops
     # entries that PRECEDE it, so a reset injected near the top of the
     # vhost cancels nothing: the slate is declared further down and adds
@@ -235,16 +235,16 @@ def test_reset_with_no_replacement_clears_default(
             lines = slc.decision_lines(ip=fresh_ip)
 
     reason = lines[-1]["reason"]
-    assert "flag-trigger:honeypot_hit" not in reason, (
+    assert "flagtrigger:honeypot_hit" not in reason, (
         f"honeypot_hit triggers should be gone after reset; "
         f"got {reason!r}"
     )
-    assert "flag-tier-floor" not in reason, (
+    assert "flagtierfloor" not in reason, (
         f"no tier_floor should be applied after reset; got {reason!r}"
     )
-    # Coarse "flagged-ip" reason is emitted independently (the
+    # Coarse "flaggedip" reason is emitted independently (the
     # IP is still in the flagged-IP table) and stays.
-    assert "flagged-ip" in reason, reason
+    assert "flaggedip" in reason, reason
 
 
 def test_reset_inline_replacement(
@@ -267,9 +267,9 @@ def test_reset_inline_replacement(
             lines = slc.decision_lines(ip=fresh_ip)
 
     reason = lines[-1]["reason"]
-    # Exactly one flag-trigger:honeypot_hit (the +10 the operator
+    # Exactly one flagtrigger:honeypot_hit (the +10 the operator
     # declared after the reset).
-    assert reason.count("flag-trigger:honeypot_hit") == 1, (
+    assert reason.count("flagtrigger:honeypot_hit") == 1, (
         f"expected exactly one honeypot_hit emission after reset+inline; "
         f"got reason={reason!r}"
     )

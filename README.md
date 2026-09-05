@@ -40,7 +40,7 @@ renders to GitHub Pages via `gh-pages/`; see the
 
 ## What ships
 
-- **Tiered challenges.** Pass / non-interactive (auto-submitted proof
+- **Tiered challenges.** Pass / noninteractive (auto-submitted proof
   of work) / interactive (checkbox widget) / captcha (third-party
   provider) — Turnstile, hCaptcha, reCAPTCHA v2 + v3, Friendly
   Captcha, GeeTest v4. Per-scope configurable.
@@ -94,7 +94,7 @@ Minimal vhost configuration:
 
     BotShieldEnabled    On
     BotShieldSecretFile /etc/botshield/secret
-    BotShieldAlgorithm  sha256-zeros
+    BotShieldAlgorithm  sha256zeros
 </VirtualHost>
 ```
 
@@ -140,12 +140,12 @@ Under `BotShieldEndpointPrefix` (default `/botshield`):
 | `<prefix>/metrics` | GET | Prometheus 0.0.4 text exposition. Closed unless `BotShieldMetricsAccess` names the caller |
 | `<prefix>/dashboard` | GET | Operator dashboard, plus `/bots`, `/responses`, `/internals`, `/app-bots`, `/app-users`. Closed unless `BotShieldDashboardAccess` names the caller |
 | `<prefix>/preview` | GET | Renders each challenge tier as a visitor sees it, plus `/safeguard`. Public |
-| `<prefix>/embedded.js` | GET | Embedded non-interactive verify wrapper |
+| `<prefix>/embedded.js` | GET | Embedded noninteractive verify wrapper |
 | `<prefix>/embedded-worker.js` | GET | Web Worker that runs the proof-of-work off the main thread |
 | `<prefix>/embedded-bootstrap` | GET | Issues a challenge to an embedded client |
 | `<prefix>/embedded-verify` | POST | Accepts an embedded client's solution |
 | `<prefix>/form-widget.js` | GET | Inline form-captcha widget shell |
-| `<prefix>/safeguard-info` | GET | Built-in explainer page rendered when challenge-safeguard trips (and no `BotShieldSafeguardRedirectURL` is set). Accepts `?return=<urlencoded path>` |
+| `<prefix>/safeguard-info` | GET | Built-in explainer page rendered when challengesafeguard trips (and no `BotShieldSafeguardRedirectURL` is set). Accepts `?return=<urlencoded path>` |
 
 The dashboard and metrics are closed until `BotShieldDashboardAccess` /
 `BotShieldMetricsAccess` name who may read them; a refusal is a 404, not

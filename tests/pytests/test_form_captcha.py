@@ -36,7 +36,7 @@ from botshield_test import client
 SITEKEY = "1x00000000000000000000AA"
 SECRET_PATH = "/etc/botshield/turnstile-secret"
 # Browser-shaped headers so the request scores below the silent
-# threshold (otherwise missing-ua + missing-al + dropped-cookie
+# threshold (otherwise missingua + missingal + droppedcookie
 # push it into challenge tier and the form-captcha fixup never
 # gets a chance to run).
 BROWSER_UA = "Mozilla/5.0 (X11) Chrome/145"

@@ -58,7 +58,7 @@ def test_bootstrap_returns_recaptcha_v3_provider(config_override):
         r = client.get("/botshield/embedded-bootstrap")
         assert r.status_code == 200
         j = json.loads(r.text)
-        assert j.get("mode") == "non-interactive", f"mode={j.get('mode')!r}"
+        assert j.get("mode") == "noninteractive", f"mode={j.get('mode')!r}"
         assert j.get("provider") == "recaptcha-v3", (
             f"provider={j.get('provider')!r}"
         )

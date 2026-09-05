@@ -55,7 +55,7 @@ static int bs_is_session_cookie_name(const apr_array_header_t *names,
     return 0;
 }
 
-/* Evaluate a single cookie-trigger predicate against the parsed
+/* Evaluate a single cookietrigger predicate against the parsed
  * cookie map + BS-cookie state. Returns 1 on match, 0 on no match. */
 int bs_cookie_pred_match(const bs_cookie_trigger_entry *e,
                          apr_table_t *cmap,
@@ -293,15 +293,18 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
                       strncasecmp(arg, n, sizeof(n)-1) == 0)
 
     if (BS_AK("status")) {
-        /* 'challenge-pass' is the name; 'pass' is the same thing spelled
+        /* 'nochallenge' is the name; 'pass' is the same thing spelled
          * the way it was before the name said what it meant. It waives
          * the challenge only -- rate limits and robots.txt still apply
          * to a request that took this branch -- and the shorter spelling
-         * invited the opposite reading. Both are accepted: a config that
-         * says 'pass' is not wrong, and turning it into a parse error
-         * would take a running server down on its next reload for a
-         * change that is purely about wording. */
-        if (!strcasecmp(val, "challenge-pass") || !strcasecmp(val, "pass")) {
+         * invited the opposite reading.
+         *
+         * 'pass' is no longer accepted. It was measurably ambiguous
+         * rather than theoretically so: the decision log emitted
+         * tier=pass on 14,066 lines of a single day here, meaning the
+         * same thing, so an operator grepping for one sense got both
+         * and had no way to separate them. */
+        if (!strcasecmp(val, "nochallenge")) {
             a->status_code = BS_TRIGGER_STATUS_PASS;
         } else {
             char *end = NULL;
@@ -309,15 +312,15 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
             if (!end || *end || code < 100 || code > 599) {
                 return apr_psprintf(pool,
                     "%s: status='%s' must be an HTTP code 100..599 "
-                    "or 'challenge-pass' (also accepted as 'pass')",
+                    "or 'nochallenge'",
                     dname, val);
             }
             a->status_code = (int)code;
         }
         a->status_explicit = 1;
     } else if (BS_AK("tier")) {
-        if      (!strcasecmp(val, "pass"))    a->tier_floor = BS_TIER_PASS;
-        else if (!strcasecmp(val, "non-interactive"))
+        if      (!strcasecmp(val, "nochallenge")) a->tier_floor = BS_TIER_PASS;
+        else if (!strcasecmp(val, "noninteractive"))
             a->tier_floor = BS_TIER_NONINTERACTIVE;
         /* The form/hard alias this used to carry is gone. It existed
          * because the wire string said "form" while the threshold
@@ -327,7 +330,7 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
             a->tier_floor = BS_TIER_INTERACTIVE;
         else if (!strcasecmp(val, "captcha")) a->tier_floor = BS_TIER_CAPTCHA;
         else return apr_psprintf(pool,
-            "%s: tier='%s' must be pass/non-interactive/interactive/"
+            "%s: tier='%s' must be nochallenge/noninteractive/interactive/"
             "captcha", dname, val);
     } else if (BS_AK("redirect")) {
         if (fam == BS_TFAMILY_ENV || fam == BS_TFAMILY_LOAD) {
@@ -592,7 +595,7 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
                 return BS_TEXEC_PASS_CONTINUE;
             }
             /* Path pass: record the match for the decision-log
-             * reason trace but do NOT bump the score. "pass" here
+             * reason trace but do NOT bump the score. "nochallenge" here
              * means "don't enforce anything on this request" — the
              * flag-IP side-effect above is the trigger's only
              * future-request surface. */
@@ -1554,7 +1557,7 @@ static const bs_flag_meta *bs_flag_meta_for_name(const char *name)
  *                                  request score. SUM accumulates across
  *                                  triggers.
  *   action=tier_floor min=<tier> — set a minimum tier; <tier> is
- *                                  pass|non-interactive|interactive|captcha. MAX
+ *                                  pass|noninteractive|interactive|captcha. MAX
  *                                  accumulates (strictest wins).
  *
  * Reset keyword: `BotShieldFlagTrigger <flag> reset` clears all earlier
@@ -1669,8 +1672,8 @@ const char *bs_set_flag_trigger(cmd_parms *cmd, void *dconf,
             const char *arg = argv[idx];
             if (strncasecmp(arg, "min=", 4) == 0) {
                 const char *t = arg + 4;
-                if      (strcasecmp(t, "pass")    == 0) e->tier_min = BS_TIER_PASS;
-                else if (strcasecmp(t, "non-interactive") == 0)
+                if      (strcasecmp(t, "nochallenge") == 0) e->tier_min = BS_TIER_PASS;
+                else if (strcasecmp(t, "noninteractive") == 0)
                     e->tier_min = BS_TIER_NONINTERACTIVE;
                 else if (strcasecmp(t, "interactive") == 0)
                     e->tier_min = BS_TIER_INTERACTIVE;
@@ -1678,7 +1681,7 @@ const char *bs_set_flag_trigger(cmd_parms *cmd, void *dconf,
                 else {
                     return apr_psprintf(cmd->pool,
                         "BotShieldFlagTrigger '%s' action=tier_floor: "
-                        "min='%s' must be one of pass/non-interactive/interactive/captcha",
+                        "min='%s' must be one of nochallenge/noninteractive/interactive/captcha",
                         flag_name, t);
                 }
                 saw_min = 1;

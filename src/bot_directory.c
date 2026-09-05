@@ -1,4 +1,4 @@
-/* bot_directory.c — known-bot UA classifier with runtime override.
+/* bot_directory.c — knownbot UA classifier with runtime override.
  *
  * Two-tier storage:
  *

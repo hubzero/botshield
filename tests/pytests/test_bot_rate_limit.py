@@ -11,7 +11,7 @@ Each test injects a directive via config_override + reload. Cohorts:
               PER directory slug not covered by a specific rule. Each
               unmatched bot has its own counter capped at 1/min.
   unknown:    With wildcard configured, requests classified as
-              unknown-bot or fake-bot share aggregate slots (one each)
+              unknownbot or fake-bot share aggregate slots (one each)
               capped at the wildcard budget.
   no-match:   Browser UAs and unclassified UAs are not rate-limited.
   bad args:   Validation errors at config time.
@@ -81,9 +81,9 @@ def test_bot_rate_specific_slug_trips(config_override, log_slice, fresh_ip):
     # key. Reporting the key is what lets an operator find the counter
     # they need to tune -- test_bot_rate_tiers pins the same convention
     # for the per-slug and @botgroup cases.
-    tripped = [d for d in lines if "bot-rate:google" in d["reason"]]
+    tripped = [d for d in lines if "botrate:google" in d["reason"]]
     assert tripped, (
-        f"no decision line carried bot-rate:googlebot; lines={lines}"
+        f"no decision line carried botrate:googlebot; lines={lines}"
     )
 
 
@@ -148,7 +148,7 @@ def test_bot_rate_browser_unaffected(config_override, fresh_ip):
     """Browser-classified UAs bypass the bot rate limit entirely —
     even with a wildcard configured. The wildcard's `*` only catches
     classified-as-bot UAs (verified/known/unknown/fake bot), not
-    browsers, unknown-ua, or empty-ua."""
+    browsers, unknownua, or emptyua."""
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
@@ -369,7 +369,7 @@ def test_bot_rate_bad_directive_args(snippet, what):
 def test_challenge_pass_waives_the_challenge_not_the_rate_limit(
     config_override, fresh_ip,
 ):
-    """`status=challenge-pass` means "do not challenge", not "do not
+    """`status=nochallenge` means "do not challenge", not "do not
     enforce".
 
     A bare pass used to return out of the policy walk immediately,
@@ -383,7 +383,7 @@ def test_challenge_pass_waives_the_challenge_not_the_rate_limit(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldBotRateLimit * 1 sec\n'
-        '    BotShieldRequestTrigger cp path="/*" status=challenge-pass log=cp',
+        '    BotShieldRequestTrigger cp path="/*" status=nochallenge log=cp',
         count=1,
     ):
         results = [
@@ -394,6 +394,6 @@ def test_challenge_pass_waives_the_challenge_not_the_rate_limit(
     codes = [r.status_code for r in results]
     assert codes[0] in (200, 302), f"first request should admit; got {codes}"
     assert 429 in codes, (
-        f"a challenge-pass must not exempt the request from the rate "
+        f"a nochallenge must not exempt the request from the rate "
         f"limit; got {codes}"
     )

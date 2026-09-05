@@ -43,7 +43,7 @@
  * (matching `cookie=<name>` / `cookie=<name>=`). Duplicate names
  * take the first occurrence; subsequent ones are ignored. Cached on
  * r->notes as a hex-encoded pointer so the same map survives across
- * multiple cookie-trigger evaluations within the same request. */
+ * multiple cookietrigger evaluations within the same request. */
 #define BS_COOKIEMAP_NOTE  "botshield-parsed-cookies"
 apr_table_t *bs_parse_cookies_once(request_rec *r)
 {
@@ -224,7 +224,7 @@ const char *bs_build_set_cookie(request_rec *r, const bs_dir_cfg *cfg,
  * PoW-verify, etc. ch must already carry the rep state the caller
  * wants — call bs_apply_rep_carry first if doing carry-forward.
  *
- * The four issuance call sites (embedded-verify-pow-gcm, embedded-
+ * The four issuance call sites (embedded-verify-powgcm, embedded-
  * verify-provider, M8 captcha-verify, form-captcha-replay) all
  * funnel through here. apr_table_add (not setn) is required so we
  * append rather than clobber any prior Set-Cookie rows that other

@@ -79,7 +79,7 @@ def test_path_trigger_observe_does_not_enforce(
     )
     # Decision log shows the :observe suffix.
     reason = lines[-1]["reason"]
-    assert "request-trigger:trap:observe" in reason, (
+    assert "requesttrigger:trap:observe" in reason, (
         f"expected observe suffix in reason; got {reason!r}"
     )
 
@@ -94,17 +94,17 @@ def test_path_trigger_observe_does_not_flag_ip(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldRequestTrigger trap path="/.envprobe" '
-        'status=pass flag=fake_bot ttl=3600 mode=observe',
+        'status=nochallenge flag=fake_bot ttl=3600 mode=observe',
         count=1,
     ):
         # Match in observe mode.
         _g("/.envprobe", xff=fresh_ip)
-        # Subsequent request from same IP — should not see flagged-ip.
+        # Subsequent request from same IP — should not see flaggedip.
         with log_slice as slc:
             _g("/", xff=fresh_ip)
             lines = slc.decision_lines(ip=fresh_ip)
     reason = lines[-1]["reason"]
-    assert "flagged-ip" not in reason, (
+    assert "flaggedip" not in reason, (
         f"observe must not flag the IP; reason={reason!r}"
     )
 
@@ -169,7 +169,7 @@ def test_rate_limit_observe_increments_metric(
 
 def test_path_trigger_observe_does_not_403(config_override, fresh_ip):
     """A scraper-UA hit on /admin/* under observe-mode PathTrigger
-    (status=403 mode=observe) must not 403 from request-trigger
+    (status=403 mode=observe) must not 403 from requesttrigger
     enforcement. The challenge tier may still serve a 403
     interstitial (signaled by `X-Botshield: challenge`) — the test
     distinguishes the two by that header rather than status code
@@ -238,7 +238,7 @@ def test_scope_log_only_default_lets_per_rule_enforce(
 def test_observe_does_not_shadow_subsequent_enforce_rule(
     config_override, fresh_ip,
 ):
-    """Two request-trigger rules match the same URL. First is observe-
+    """Two requesttrigger rules match the same URL. First is observe-
     only; second is enforce. Without proper handling, the first
     match would either wrongly enforce or wrongly skip the second.
     With correct semantics: first observes (logs :observe), second
@@ -366,7 +366,7 @@ def test_log_only_emits_tilde_challenge_for_tier_dispatch(
 ):
     """Scope-level BotShieldEnabled LogOnly + a request whose score
     crosses BotShieldScoreNonInteractive. Without LogOnly the response would
-    be a tier=non-interactive interstitial; under LogOnly the module logs
+    be a tier=noninteractive interstitial; under LogOnly the module logs
     `outcome=~challenge` and declines so the real handler runs."""
     with config_override(
         r"BotShieldEnabled\s+On",
@@ -435,7 +435,7 @@ def test_per_location_log_only_with_inner_enforce(
         inside = client.get("/enforce-here", xff=fresh_ip,
                             ua=SCRAPER_UA)
     assert outside.status_code != 403, (
-        f"vhost-scope LogOnly should suppress request-trigger outside the "
+        f"vhost-scope LogOnly should suppress requesttrigger outside the "
         f"override Location; got {outside.status_code}"
     )
     assert inside.status_code == 403, (

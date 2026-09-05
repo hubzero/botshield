@@ -6,7 +6,7 @@ absence / bulk state / bs-cookie state) and the action surface
 (credit / penalty / status / log / flag / ttl).
 
 Key semantic divergence from E3 that MUST be asserted explicitly:
-cookie triggers apply credit/penalty under `status=pass`, because
+cookie triggers apply credit/penalty under `status=nochallenge`, because
 cookies are ongoing-state signals the client carries on THIS
 request. Path triggers leave the score alone under pass.
 """
@@ -32,7 +32,7 @@ def test_cookie_trigger_named_present_applies_credit(
     config_override, log_slice, request,
 ):
     """cookie=<name> fires on presence; credit reduces this request's
-    score even though status=pass (divergence from E3).
+    score even though status=nochallenge (divergence from E3).
 
     log_slice is a one-shot context manager so we issue both
     requests inside a single slice and distinguish them by the
@@ -63,11 +63,11 @@ def test_cookie_trigger_named_present_applies_credit(
     base_score = int(baseline[-1]["score"])
     cookie_score = int(withcookie[-1]["score"])
     assert cookie_score == base_score - 15, (
-        f"credit=15 should reduce score by 15 under status=pass; "
+        f"credit=15 should reduce score by 15 under status=nochallenge; "
         f"baseline={base_score} cookie={cookie_score}"
     )
     # Reason string should tag the cookie trigger.
-    assert any("cookie-trigger:app-session" in d["reason"]
+    assert any("cookietrigger:app-session" in d["reason"]
                for d in withcookie), f"lines={withcookie}"
 
 
@@ -260,13 +260,13 @@ def test_cookie_trigger_bs_cookie_invalid(
     assert r.status_code == 403
 
 
-# --- status=pass divergence from E3 ----------------------------------
+# --- status=nochallenge divergence from E3 ----------------------------------
 
 
 def test_cookie_trigger_status_pass_still_applies_credit(
     config_override, log_slice,
 ):
-    """DIVERGENCE FROM E3: cookie triggers under status=pass still
+    """DIVERGENCE FROM E3: cookie triggers under status=nochallenge still
     apply credit/penalty to THIS request (E3 path triggers ignore
     penalty under pass). This test guards that behavior — changing
     it silently would break the E4 reputation model.
@@ -284,7 +284,7 @@ def test_cookie_trigger_status_pass_still_applies_credit(
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
         '    BotShieldCookieTrigger ghost cookie=PHPSESSID '
-        'status=pass credit=20',
+        'status=nochallenge credit=20',
         count=1,
     ):
         with log_slice as slc:
@@ -294,13 +294,13 @@ def test_cookie_trigger_status_pass_still_applies_credit(
             with_lines = slc.decision_lines(ip=ip_with)
 
     assert base_lines and with_lines
-    hits = [d for d in with_lines if "cookie-trigger:ghost" in d["reason"]]
-    assert hits, f"no cookie-trigger:ghost decision line; lines={with_lines}"
+    hits = [d for d in with_lines if "cookietrigger:ghost" in d["reason"]]
+    assert hits, f"no cookietrigger:ghost decision line; lines={with_lines}"
     base_score = int(base_lines[-1]["score"])
     with_score = int(with_lines[-1]["score"])
     assert with_score == base_score - 20, (
         f"credit=20 must shift the score by exactly -20 under "
-        f"status=pass; baseline={base_score} with-cookie={with_score}"
+        f"status=nochallenge; baseline={base_score} with-cookie={with_score}"
     )
 
 
@@ -310,7 +310,7 @@ def test_cookie_trigger_status_pass_still_applies_credit(
 def test_cookie_trigger_pass_triggers_stack_credits(
     config_override, log_slice,
 ):
-    """When two status=pass triggers both match (e.g. a client
+    """When two status=nochallenge triggers both match (e.g. a client
     carries both a session cookie and an auth cookie), their
     credits MUST stack — that's the whole point of the layered-
     reputation pattern. A "first match wins" reading would lose
@@ -344,8 +344,8 @@ def test_cookie_trigger_pass_triggers_stack_credits(
     )
     # Both reasons should appear in the decision line.
     reason = both[-1]["reason"]
-    assert "cookie-trigger:app-session" in reason, reason
-    assert "cookie-trigger:app-auth"    in reason, reason
+    assert "cookietrigger:app-session" in reason, reason
+    assert "cookietrigger:app-auth"    in reason, reason
 
 
 def test_cookie_trigger_non_pass_shortcircuits_after_pass(
@@ -376,11 +376,11 @@ def test_cookie_trigger_non_pass_shortcircuits_after_pass(
     )
     # The pass trigger's reason should be on the log line too.
     reason = lines[-1]["reason"] if lines else ""
-    assert "cookie-trigger:app-session" in reason, (
+    assert "cookietrigger:app-session" in reason, (
         f"pass trigger's reason missing from decision log even "
         f"though non-pass short-circuited; reason={reason}"
     )
-    assert "cookie-trigger:kill" in reason, (
+    assert "cookietrigger:kill" in reason, (
         f"non-pass trigger's reason missing; reason={reason}"
     )
 

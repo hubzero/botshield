@@ -1,5 +1,5 @@
 /* bench-bot-directory.c — head-to-head benchmark of three
- * approaches to the known-bot UA classifier:
+ * approaches to the knownbot UA classifier:
  *
  *   1. SEQUENTIAL:   the production approach. strcasestr loop over
  *                    all ~557 patterns. First match wins; no match

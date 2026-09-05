@@ -141,7 +141,7 @@ the PoW algorithm (<code>BotShieldAlgorithm</code>) is unset on the active
 scope. mod_botshield refuses to mint cookies without both — fail-
 closed by design. Check that:</p>
 <pre><code class="language-apache">BotShieldSecretFile /etc/botshield/secret
-BotShieldAlgorithm  sha256-zeros
+BotShieldAlgorithm  sha256zeros
 </code></pre>
 <p>are present at server scope or inherited into the request scope.</p>
 <p>The secret file must be mode 0600 and at least 16 bytes. The
@@ -150,7 +150,7 @@ or too short, refusing to start rather than defaulting to a weak
 key.</p>
 <h2 id="every-legitimate-request-is-being-challenged">Every legitimate request is being challenged</h2>
 <p><strong>Symptom</strong>: real users see the interstitial; the decision log
-shows everything as <code>tier=non-interactive</code> or higher.</p>
+shows everything as <code>tier=noninteractive</code> or higher.</p>
 <p><strong>Most common cause</strong>: Apache is behind a reverse proxy and
 <code>mod_remoteip</code> is not configured. mod_botshield is keying the IP
 signals on your edge load balancer, not the real client.</p>
@@ -158,15 +158,15 @@ signals on your edge load balancer, not the real client.</p>
 matches your edge's IP, that's the issue. Configure
 <code>mod_remoteip</code> per <a href="../deployment/index.html">deployment</a>.</p>
 <p><strong>Second-most common cause</strong>: the defaults are challenging more than
-you expected. <code>first-sight-ip</code> scores 20, which <em>is</em>
+you expected. <code>firstsightip</code> scores 20, which <em>is</em>
 <code>BotShieldScoreNonInteractive</code>, so any request arriving with no usable cookie
 gets the invisible check on its first visit — by design, but surprising
 if you enabled BotShield site-wide rather than on an auth path. Either
 scope the enable, or lower the heuristic:</p>
-<pre><code class="language-apache">BotShieldHeuristicTrigger first-sight-ip reset action=score add=5
+<pre><code class="language-apache">BotShieldHeuristicTrigger firstsightip reset action=score add=5
 </code></pre>
 <p>For sites where most visitors don't send <code>Accept-Language</code> (legitimate
-use cases exist), <code>missing-accept-language</code> adds another 5 on top;
+use cases exist), <code>missingacceptlanguage</code> adds another 5 on top;
 raise <code>BotShieldScoreNonInteractive</code> to 30 or 40 if that combination is
 over-firing.</p>
 <p><strong>Tuning workflow</strong>:</p>
@@ -182,7 +182,7 @@ match.</li>
 discussion.</p>
 <h2 id="bots-passing-through-unchallenged">Bots passing through unchallenged</h2>
 <p><strong>Symptom</strong>: scrapers / spammers / exploitation attempts visible in
-access logs aren't being gated. Decision log shows <code>tier=pass</code>.</p>
+access logs aren't being gated. Decision log shows <code>tier=nochallenge</code>.</p>
 <p><strong>Diagnostics</strong>:</p>
 <ol>
 <li>Confirm the request actually reached mod_botshield. The
@@ -198,7 +198,7 @@ has been seen before) won't trigger anything.</li>
 bots scan (<code>/wp-admin/</code>, <code>/.env</code>, <code>/.git/</code>) with
 <code>BotShieldTrigger flag=honeypot_hit ttl=3600</code>. The bot trips
 the honeypot, the IP is flagged, future requests get the
-flag-trigger penalty + tier_floor=captcha. See
+flagtrigger penalty + tier_floor=captcha. See
 <a href="../policy/index.html">policy</a>.</li>
 <li><strong>Path triggers</strong>: for paths that bots target but legitimate
 users don't, add <code>BotShieldRequestTrigger</code> rules with a penalty,

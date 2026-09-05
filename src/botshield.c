@@ -12,14 +12,14 @@
  *                               post_config and the mod_watchdog tick
  *   - policy dump             : httpd -t -D DUMP_BOTSHIELD_POLICY
  *                               text dump
- *   - bs_decide_tier          : score → (pass | non-interactive | interactive | captcha)
+ *   - bs_decide_tier          : score → (pass | noninteractive | interactive | captcha)
  *
  * Everything else fans out through the per-feature .h includes below.
  * Each subsystem owns its runtime, its directive setters, and its tests.
  *
  * Operator model. Four tiers, decided per request from a running score:
  *   pass     no challenge, real handler runs
- *   non-interactive  embedded non-interactive tier verification (E17) or auto-submit splash
+ *   noninteractive  embedded noninteractive tier verification (E17) or auto-submit splash
  *   form     visible interactive PoW interstitial — a checkbox the JS solves
  *   captcha  third-party provider widget (Turnstile, hCaptcha, reCAPTCHA,
  *            Friendly, GeeTest) on the M8 verify endpoint
@@ -77,7 +77,7 @@
 #include "shm.h"       /* SHM tables, state save/load, headroom watchdog */
 #include "crypto.h"    /* SHA-256, HMAC, AES-256-GCM, HKDF, hex codec */
 #include "allowlist.h" /* E1 — UA classifier, CIDR list loader, builtin bots */
-#include "bot_directory.h" /* known-bot UA classifier (Cloudflare directory) */
+#include "bot_directory.h" /* knownbot UA classifier (Cloudflare directory) */
 #include "bot_rate.h" /* slug-keyed bot rate limit */
 #include "browser_classifier.h" /* strict-template browser UA classifier */
 #include "ua_class.h"     /* unified UA classifier (browser/known/verified/fake) */
@@ -88,12 +88,12 @@
 #include "challenge.h" /* M7 — challenge issuance, alg registry, bootstrap-sig */
 #include "load.h"      /* E11 — load-aware throttling watchdog + state read */
 #include "triggers.h"  /* E3/E4/E6/E7.3/E11.2 — trigger families */
-#include "non_interactive.h"    /* E17 — non-interactive tier embedded handlers */
+#include "non_interactive.h"    /* E17 — noninteractive tier embedded handlers */
 #include "captcha.h"   /* M8 — provider registry, siteverify, pending cookie */
 #include "bridge.h"    /* E5 + E8.2 — module ↔ app feedback / claims bridge */
 #include "templates.h" /* challenge page widget + shell rendering */
 #include "formcaptcha.h" /* E18 — inline form-captcha tier */
-#include "score.h"     /* per-request score + flag-trigger walker */
+#include "score.h"     /* per-request score + flagtrigger walker */
 #include "policy.h"    /* request-time policy walker */
 #include "heuristics.h" /* cheap built-in score signals */
 
@@ -159,7 +159,7 @@ static const command_rec bs_cmds[] = {
                  "so an IP carrying honeypot_hit, fake_bot, scanner_probe "
                  "or pow_fail_streak would still be challenged. This is "
                  "applied after the floor, so it holds. Suppression shows "
-                 "in the decision log as challenge-off:<tier>."),
+                 "in the decision log as challengeoff:<tier>."),
     AP_INIT_FLAG("BotShieldDebug",      bs_set_debug,      NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "If on, return 403 'Hello World' for every request in the "
@@ -266,7 +266,7 @@ static const command_rec bs_cmds[] = {
                  "key."),
     AP_INIT_TAKE1("BotShieldAlgorithm",  bs_set_algorithm,  NULL,
                  RSRC_CONF | ACCESS_CONF,
-                 "Proof-of-work algorithm name. Only 'sha256-zeros' is built "
+                 "Proof-of-work algorithm name. Only 'sha256zeros' is built "
                  "into this module today; 'sha384-zeros' / 'sha512-zeros' / "
                  "'pbkdf2-sha256' / 'argon2id' are registry slots reserved "
                  "for future opt-in builds."),
@@ -312,7 +312,7 @@ static const command_rec bs_cmds[] = {
                  "evaluated always log."),
     AP_INIT_TAKE1("BotShieldScoreNonInteractive",  bs_set_score_non_interactive,  NULL,
                  RSRC_CONF | ACCESS_CONF,
-                 "Score at or above which the non-interactive PoW tier is picked "
+                 "Score at or above which the noninteractive PoW tier is picked "
                  "(default: 20). Serves a no-click auto-submit splash."),
     AP_INIT_TAKE1("BotShieldScoreInteractive",    bs_set_score_interactive,    NULL,
                  RSRC_CONF | ACCESS_CONF,
@@ -340,7 +340,7 @@ static const command_rec bs_cmds[] = {
     /* Silent-tier dispatch flavor. */
     AP_INIT_TAKE1("BotShieldNonInteractiveMode", bs_set_non_interactive_mode, NULL,
                  RSRC_CONF | ACCESS_CONF,
-                 "How to dispatch non-interactive tier (low-friction) "
+                 "How to dispatch noninteractive tier (low-friction) "
                  "challenges. 'interstitial' (default) = legacy M7 "
                  "auto-submit splash. 'embedded' = serve real page "
                  "(DECLINED) and rely on the operator-included "
@@ -352,7 +352,7 @@ static const command_rec bs_cmds[] = {
                  "E17 for the timing model."),
     AP_INIT_TAKE1("BotShieldForgivenessNonInteractive", bs_set_forgive_non_interactive, NULL,
                  RSRC_CONF | ACCESS_CONF,
-                 "Score credit applied on a successful non-interactive PoW pass "
+                 "Score credit applied on a successful noninteractive PoW pass "
                  "(default: 10). Clamped at max(0, flag_penalty)."),
     AP_INIT_TAKE1("BotShieldForgivenessInteractive",   bs_set_forgive_interactive,   NULL,
                  RSRC_CONF | ACCESS_CONF,
@@ -523,7 +523,7 @@ static const command_rec bs_cmds[] = {
                  "for robots.txt wildcard purposes; -known-bots "
                  "skips the AC directory (no log slug); "
                  "-verified-bots skips the IP cross-check (matched "
-                 "UAs degrade to known-bot, neither verified-bot "
+                 "UAs degrade to knownbot, neither verified-bot "
                  "credit nor fake-bot penalty — the natural response "
                  "to stale CIDR data); -unknown-bots skips "
                  "the heuristic substring scan."),
@@ -539,7 +539,7 @@ static const command_rec bs_cmds[] = {
                  "UA-pattern is the case-insensitive substring "
                  "looked for in the User-Agent header. Optional "
                  "target: '*' opts out of IP verification (UA "
-                 "match alone, logged as known-bot:<name> with "
+                 "match alone, logged as knownbot:<name> with "
                  "score 0); an absolute file path; a single CIDR; "
                  "or a comma-separated CIDR list. Omit "
                  "the target to use the default file path "
@@ -578,7 +578,7 @@ static const command_rec bs_cmds[] = {
                  "both keys omitted in the key=value form) is "
                  "rejected. Over-budget requests return 429 + "
                  "Retry-After and get a +50 score penalty under "
-                 "reason rate-limit-exceeded:<name>."),
+                 "reason ratelimitexceeded:<name>."),
     AP_INIT_TAKE_ARGV("BotShieldBotRateLimit",
                  bs_set_bot_rate_limit, NULL, RSRC_CONF,
                  "Per-bot-slug rate limit. Three forms:\n"
@@ -604,7 +604,7 @@ static const command_rec bs_cmds[] = {
                  "with per-slug allocation — the precedence ladder "
                  "is specific > @botgroup > * wildcard. Three "
                  "reserved aggregate slots back the wildcard "
-                 "(unknown-bot, fake-bot, wildcard-fallback). "
+                 "(unknownbot, fake-bot, wildcard-fallback). "
                  "No default: with no directive and no robots.txt "
                  "Crawl-delay, nothing is rate limited. Over-budget "
                  "returns 429 + Retry-After + reason bot-rate:<slug>."),
@@ -622,7 +622,7 @@ static const command_rec bs_cmds[] = {
                  "(default 403) for ttl= seconds (default 1800). The "
                  "ttl slides on each additional strike; log=<tag> "
                  "rides the decision line on threshold crossing for "
-                 "fail2ban handoff. Reason rate-limit-abuse:<name>."),
+                 "fail2ban handoff. Reason ratelimitabuse:<name>."),
     AP_INIT_TAKE1("BotShieldRateLimitEscalateCapacity",
                  bs_set_rate_escalate_capacity, NULL, RSRC_CONF,
                  "SHM strike-table slot count (default 50000). Sized "
@@ -642,7 +642,7 @@ static const command_rec bs_cmds[] = {
                  "an earlier version of this text said it did, which "
                  "would describe a bot buying access by failing on "
                  "purpose. Decision log shows reason "
-                 "challenge-safeguard. Doesn't mint _bs_session; "
+                 "challengesafeguard. Doesn't mint _bs_session; "
                  "doesn't override 403/429 blocks. Default-on because a client that cannot solve the challenge - JS disabled, a "
                  "privacy extension, an old browser - would otherwise be re-challenged forever with no way out, and nothing in the "
                  "logs shouts about it. The tripped client is redirected to an explainer, NOT admitted: it never reaches protected "
@@ -764,11 +764,11 @@ static const command_rec bs_cmds[] = {
                  "app_verified_session, app_trust_signal. Action "
                  "verbs: 'score add=N' (signed, -1000..1000; SUMs "
                  "across triggers) or 'tier_floor min=<tier>' "
-                 "(pass|non-interactive|interactive|captcha; MAXes across triggers). "
+                 "(pass|noninteractive|interactive|captcha; MAXes across triggers). "
                  "'reset' clears compiled-in defaults + prior "
                  "operator declarations for the named flag before "
                  "this directive's effect is added. mode=observe "
-                 "logs would-flag-trigger:<flag>:observe instead of "
+                 "logs would-flagtrigger:<flag>:observe instead of "
                  "applying. Compiled-in defaults cover the common "
                  "cases — see example/flag-triggers.conf.example."),
     /* Heuristic-driven trigger family. Same shape as the flag family
@@ -778,11 +778,11 @@ static const command_rec bs_cmds[] = {
                  bs_set_heuristic_trigger, NULL, RSRC_CONF,
                  "Bind an action to one of the built-in request "
                  "heuristics. Args: <name>|all [reset] [action=<verb> "
-                 "args...]. Names: missing-ua (UA absent or empty), "
-                 "missing-al (Accept-Language absent), scraper-ua "
+                 "args...]. Names: missingua (UA absent or empty), "
+                 "missingal (Accept-Language absent), scraperua "
                  "(UA contains a known HTTP-library token), "
-                 "first-sight-ip (Bloom-filter miss - true new IP), "
-                 "dropped-cookie (Bloom-known IP arriving without a "
+                 "firstsightip (Bloom-filter miss - true new IP), "
+                 "droppedcookie (Bloom-known IP arriving without a "
                  "usable cookie - private-browsing reset, manual "
                  "cookie clear, or evasion). Action verbs: 'score "
                  "add=N' (signed, -1000..1000) or 'tier_floor "
@@ -791,8 +791,8 @@ static const command_rec bs_cmds[] = {
                  "every entry (defaults included) so the operator can "
                  "build the slate up from zero. mode=observe logs the "
                  "match with a :observe suffix instead of applying. "
-                 "Compiled-in defaults: missing-ua=40, missing-al=5, "
-                 "scraper-ua=10, first-sight-ip=20, dropped-cookie=25."),
+                 "Compiled-in defaults: missingua=40, missingal=5, "
+                 "scraperua=10, firstsightip=20, droppedcookie=25."),
     /* E15 — forgiveness farming defense. */
     AP_INIT_TAKE1("BotShieldForgivenessCapPerHour",
                  bs_set_forgive_cap, NULL, RSRC_CONF,
@@ -915,10 +915,10 @@ static const command_rec bs_cmds[] = {
                  "unless status=3xx explicit), log=<tag>, "
                  "accesslog=on|off, flag=<bit> (default "
                  "scanner_probe), ttl=<sec> (default 3600; 0 = don't "
-                 "flag), penalty=<n>, tier=pass|non-interactive|interactive|captcha, "
+                 "flag), penalty=<n>, tier=pass|noninteractive|interactive|captcha, "
                  "mode=enforce|observe. A rule can therefore block "
                  "(status=4xx), challenge (status=pass "
-                 "tier=non-interactive "
+                 "tier=noninteractive "
                  "for the invisible check, tier=form for the visible "
                  "one), demand a captcha (status=pass tier=captcha), "
                  "or only shape the score (status=pass penalty=N). "
@@ -967,15 +967,15 @@ static const command_rec bs_cmds[] = {
                  "server-side. Parsed at post_config; RFC 9309 "
                  "semantics (prefix + '*' + '$' wildcards, longest-"
                  "match-wins, case-insensitive UA prefix). Blocked "
-                 "paths return 403 (reason robots-block:<group>); "
+                 "paths return 403 (reason robotsblock:<group>); "
                  "Crawl-delay trips return 429 + Retry-After "
                  "(reason robots-rate:<group>)."),
     AP_INIT_TAKE1("BotShieldRobotsMode", bs_set_robots_mode,
                  NULL, RSRC_CONF,
                  "Whether robots.txt Disallow rules enforce or only "
                  "record. 'enforce' (default) returns 403 with reason "
-                 "robots-block:<group>; 'observe' logs "
-                 "robots-block:<group>:observe with outcome=~block and "
+                 "robotsblock:<group>; 'observe' logs "
+                 "robotsblock:<group>:observe with outcome=~block and "
                  "lets the request through, suppressing the score bump "
                  "and the flag as well so nothing leaks into later "
                  "requests. Use observe to find out who actually "
@@ -1192,7 +1192,7 @@ static int bs_maybe_mint_session(request_rec *r, bs_dir_cfg *cfg,
  *
  * Recording the presentation runs unconditionally on safeguard-
  * eligible paths (have_client_ip + scfg present), regardless of
- * safeguard_enabled — the embedded → M7 fallback in non-interactive tier
+ * safeguard_enabled — the embedded → M7 fallback in noninteractive tier
  * dispatch reads the same count to decide when to bypass the
  * embedded short-circuit. The write is cheap (one mutex + a few
  * SHM stores); the only side-effect when safeguard is "off" is
@@ -1248,9 +1248,9 @@ static int bs_apply_safeguard(request_rec *r, int have_client_ip,
         bs_safeguard_clear(r, client_ip, scfg_sg->ns_id);
 
         ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
-            "mod_botshield: challenge-safeguard tripped for "
+            "mod_botshield: challengesafeguard tripped for "
             "%s; redirecting to %s", r->useragent_ip, location);
-        bs_score_add(r, 0, 0, "challenge-safeguard");
+        bs_score_add(r, 0, 0, "challengesafeguard");
         if (bs_shm.metrics) {
             __atomic_fetch_add(&bs_shm.metrics->safeguard_fired_total,
                                1, __ATOMIC_RELAXED);
@@ -1272,7 +1272,7 @@ static int bs_apply_safeguard(request_rec *r, int have_client_ip,
          * is clearer. */
         apr_table_setn(r->err_headers_out, "Location", location);
         apr_table_setn(r->err_headers_out, "Cache-Control", "no-store");
-        apr_table_setn(r->err_headers_out, "X-Botshield", "safeguard-redirect");
+        apr_table_setn(r->err_headers_out, "X-Botshield", "safeguardredirect");
         return HTTP_MOVED_TEMPORARILY;
     }
 
@@ -1332,7 +1332,7 @@ static int bs_observe_denied(request_rec *r, const char *surface)
  *   <prefix>/captcha-verify/<name>      — per-provider cohabitation
  *   <prefix>/metrics                    — mod_status-style export
  *   <prefix>/embedded{.js,-worker.js,-bootstrap,-verify}
- *                                       — non-interactive tier embedded path
+ *                                       — noninteractive tier embedded path
  *   <prefix>/form-widget.js             — interactive PoW widget shell
  * The bare /captcha-verify form still works for the single-provider
  * case so the old dev config and the first-provider-on-a-vhost case
@@ -1341,7 +1341,7 @@ static int bs_observe_denied(request_rec *r, const char *surface)
  * scope.
  *
  * Returns the Apache return code if the URI matched a module
- * endpoint (including 404 OK for unknown-endpoint-under-prefix);
+ * endpoint (including 404 OK for unknownendpoint-under-prefix);
  * returns -1 if the URI is outside the prefix and the caller should
  * fall through to the tier dispatch. */
 static int bs_route_module_endpoint(request_rec *r, bs_dir_cfg *cfg)
@@ -1410,7 +1410,7 @@ static int bs_route_module_endpoint(request_rec *r, bs_dir_cfg *cfg)
     if (strcmp(sub, "/preview") == 0 || strcmp(sub, "/preview/") == 0) {
         return bs_preview_index_handler(r);
     }
-    if (strcmp(sub, "/preview/non-interactive") == 0) {
+    if (strcmp(sub, "/preview/noninteractive") == 0) {
         return bs_preview_handler(r, 1);
     }
     if (strcmp(sub, "/preview/interactive") == 0) {
@@ -1456,7 +1456,7 @@ static int bs_route_module_endpoint(request_rec *r, bs_dir_cfg *cfg)
      * to Apache and serving some unrelated file. */
     r->status = HTTP_NOT_FOUND;
     ap_set_content_type(r, "text/plain; charset=utf-8");
-    apr_table_setn(r->err_headers_out, "X-Botshield", "unknown-endpoint");
+    apr_table_setn(r->err_headers_out, "X-Botshield", "unknownendpoint");
     ap_rputs("Not found.\n", r);
     bs_decision_log(r, "none", "block", "-", "-", "-",
                     "unknown_endpoint", 0);
@@ -1476,18 +1476,18 @@ static int bs_route_module_endpoint(request_rec *r, bs_dir_cfg *cfg)
  *      rv directly; never reaches the tier dispatch below.
  *   3. Debug + asset short-circuits + secret-presence sanity.
  *   4. Cookie verify — bs_verify_cookie + safeguard-clear-on-solve
- *      + bs-cookie-state note for cookie-trigger predicates.
+ *      + bs-cookie-state note for cookietrigger predicates.
  *   5. Policy check — bs_check_policy (cookie/env/load/scope/path
  *      triggers + robots + rate_limits). DECLINED or
  *      HTTP_* short-circuits return here.
- *   6. Heuristics + flagged-IP + first-sight + flag-trigger walker
+ *   6. Heuristics + flagged-IP + first-sight + flagtrigger walker
  *      → effective score, score_tier, tier_floor.
  *   7. Pass-tier short-circuit + app_claims emission.
  *   8. Bloom-add + safeguard presentation accounting.
- *   9. Embedded non-interactive tier dispatch with embedded-→-interactive PoW
+ *   9. Embedded noninteractive tier dispatch with embedded-→-interactive PoW
  *      fallback when the wrapper has had its chances.
  *   10. Build next_rep (forgiveness + cap), issue challenge, render
- *       interstitial (non-interactive / interactive PoW / captcha widget). */
+ *       interstitial (noninteractive / interactive PoW / captcha widget). */
 static int bs_handler(request_rec *r)
 {
     bs_dir_cfg *cfg = ap_get_module_config(r->per_dir_config,
@@ -1549,7 +1549,7 @@ static int bs_handler(request_rec *r)
         r->status = HTTP_FORBIDDEN;
         ap_set_content_type(r, "text/plain; charset=utf-8");
         apr_table_setn(r->headers_out,    "Cache-Control", "no-store");
-        apr_table_setn(r->err_headers_out, "X-Botshield",  "debug-403");
+        apr_table_setn(r->err_headers_out, "X-Botshield",  "debug403");
         ap_rputs("Hello World\n", r);
         bs_decision_log(r, "none", "debug", "-", "-", "-", "-", 0);
         return OK;
@@ -1558,7 +1558,7 @@ static int bs_handler(request_rec *r)
     /* Static assets pass through — a cookieless first page load must still
      * render its CSS/images so the PoW page is usable. */
     if (bs_is_asset_uri(r->uri)) {
-        bs_decision_log(r, "pass", "allow", "-", "-", "-", "asset", 0);
+        bs_decision_log(r, "nochallenge", "allow", "-", "-", "-", "asset", 0);
         return DECLINED;
     }
 
@@ -1675,7 +1675,7 @@ static int bs_handler(request_rec *r)
     }
 
     /* E4 — publish the `_bs_session` verification verdict as a
-     * request note so bs_check_policy's cookie-trigger evaluator
+     * request note so bs_check_policy's cookietrigger evaluator
      * can surface it via bs-cookie=<state> predicates. Three-state
      * mapping matches the directive surface. */
     {
@@ -1719,11 +1719,11 @@ static int bs_handler(request_rec *r)
      * Every request gets exactly one UA-class tag:
      *   verified-bot:name  (UA + IP confirmed; emitted from allowlist.c)
      *   fake-bot:name      (UA + IP failed;    emitted from allowlist.c)
-     *   known-bot:name     (directory match OR allowlist UA pattern without IP check)
-     *   unknown-bot:token  (heuristic substring hit, no other signal)
+     *   knownbot:name     (directory match OR allowlist UA pattern without IP check)
+     *   unknownbot:token  (heuristic substring hit, no other signal)
      *   browser:slug       (top-100 real-browser template match)
-     *   unknown-ua         (UA present but didn't classify anywhere)
-     *   empty-ua           (no User-Agent header)
+     *   unknownua         (UA present but didn't classify anywhere)
+     *   emptyua           (no User-Agent header)
      *
      * Skip emission entirely when allowlist already speaks
      * (is_verified_bot/is_fake_bot) to avoid double-tagging. */
@@ -1737,23 +1737,23 @@ static int bs_handler(request_rec *r)
                     apr_pstrcat(r->pool, "browser:", slug, NULL));
             } else if (cls->known_slug && *cls->known_slug) {
                 bs_score_add(r, 0, 0,
-                    apr_pstrcat(r->pool, "known-bot:", cls->known_slug, NULL));
+                    apr_pstrcat(r->pool, "knownbot:", cls->known_slug, NULL));
             } else if (cls->verified_name && *cls->verified_name) {
                 /* Allowlist UA pattern matched but no IP check ran
                  * (UA-only target or ranges not loaded). The
-                 * operator-declared name lands in the known-bot pool. */
+                 * operator-declared name lands in the knownbot pool. */
                 bs_score_add(r, 0, 0,
-                    apr_pstrcat(r->pool, "known-bot:", cls->verified_name, NULL));
+                    apr_pstrcat(r->pool, "knownbot:", cls->verified_name, NULL));
             } else if (cls->is_unknown_bot && cls->unknown_bot_token) {
                 bs_score_add(r, 0, 0,
-                    apr_pstrcat(r->pool, "unknown-bot:", cls->unknown_bot_token, NULL));
+                    apr_pstrcat(r->pool, "unknownbot:", cls->unknown_bot_token, NULL));
             } else {
                 /* No classifier signal. Distinguish empty UA (header
                  * missing or empty) from unknown UA (header present
                  * but didn't match templates/directory/heuristic). */
                 const char *ua = apr_table_get(r->headers_in, "User-Agent");
                 bs_score_add(r, 0, 0,
-                    (!ua || !*ua) ? "empty-ua" : "unknown-ua");
+                    (!ua || !*ua) ? "emptyua" : "unknownua");
             }
         }
     }
@@ -1770,7 +1770,7 @@ static int bs_handler(request_rec *r)
          * tag side effects already applied in bs_check_policy. */
         bs_request_score *s = bs_get_score(r, 0);
         const char *reasons = bs_score_reasons_joined(r->pool, s);
-        bs_decision_log(r, "pass", "allow", cookie_status, "-",
+        bs_decision_log(r, "nochallenge", "allow", cookie_status, "-",
                         "-",
                         reasons, s ? s->total : 0);
         return DECLINED;
@@ -1781,7 +1781,7 @@ static int bs_handler(request_rec *r)
         const char *outcome;
         if (policy_rv == HTTP_TOO_MANY_REQUESTS)      outcome = "rate_limited";
         else                                          outcome = "block";
-        bs_decision_log(r, "pass", outcome, cookie_status, "-",
+        bs_decision_log(r, "nochallenge", outcome, cookie_status, "-",
                         "-",
                         reasons, s ? s->total : 0);
         return policy_rv;
@@ -1827,46 +1827,46 @@ static int bs_handler(request_rec *r)
     if (have_client_ip) {
         bs_flagged_ip_lookup(client_ip, &ip_flags, scfg_h->ns_id);
     }
-    /* Coarse 0-weight "flagged-ip" reason so operators (and tests)
+    /* Coarse 0-weight "flaggedip" reason so operators (and tests)
      * reading decision logs see at a glance that this IP is in the
      * flagged-IP table, without having to parse every trigger name.
      * The actual score adjustments flow through bs_apply_flag_triggers
      * below — that walker covers both IP-side and cookie-side flags
-     * via the union and emits per-flag `flag-trigger:<name>` reasons. */
+     * via the union and emits per-flag `flagtrigger:<name>` reasons. */
     if (ip_flags != 0) {
-        bs_score_add(r, 0, 0, "flagged-ip");
+        bs_score_add(r, 0, 0, "flaggedip");
     }
 
     /* Bloom-based reputation signals (M5.2). Only fire on cookieless
      * or signature-mismatched requests; sig-verified cookies (even if
      * expired) mean we've already transacted with this browser via
-     * cookie state, so neither first-sight nor dropped-cookie carry
+     * cookie state, so neither first-sight nor droppedcookie carry
      * useful signal there.
      *
      * Two heuristics, mutually exclusive based on Bloom membership:
-     *   - Bloom miss → first-sight-ip (truly first visit)
-     *   - Bloom hit  → dropped-cookie (we know this IP, but they
+     *   - Bloom miss → firstsightip (truly first visit)
+     *   - Bloom hit  → droppedcookie (we know this IP, but they
      *                  arrived without a usable cookie - reset,
      *                  cleared, or evasion)
      *
      * Bloom is populated EAGERLY below — every request with a
      * client IP gets added, regardless of tier outcome. Without
      * eager population, IPs that always pass-tier would never enter
-     * Bloom, and "first-sight-ip" would degrade into "this IP hasn't
+     * Bloom, and "firstsightip" would degrade into "this IP hasn't
      * been challenge-tier-bumped yet" — wrong semantics. */
     /* Not for declared crawlers. Both heuristics detect "no session
      * context", which is suspicious for a browser and simply normal for
      * a crawler -- they do not carry cookies, and penalising them for
-     * it made every known bot cross the non-interactive threshold on arrival
-     * (semrush-bl measured 40: missing-accept-language 15 +
-     * dropped-cookie 25). Known bots are meant to be admitted and
+     * it made every known bot cross the noninteractive threshold on arrival
+     * (semrush-bl measured 40: missingacceptlanguage 15 +
+     * droppedcookie 25). Known bots are meant to be admitted and
      * governed by robots.txt and rate limits, not challenged for being
      * stateless.
      *
      * Deliberately keyed on is_known_bot, so it does NOT cover
      * is_fake_bot: a UA claiming a crawler whose IP failed the ranges
      * cross-check keeps every penalty, including these. The other
-     * bot-shaped signals -- missing-ua, scraper-ua, the fake-bot
+     * bot-shaped signals -- missingua, scraperua, the fake-bot
      * penalty itself -- are untouched.
      *
      * UA-only trust is spoofable, and the answer to that is the rate
@@ -1877,21 +1877,21 @@ static int bs_handler(request_rec *r)
      * exists because a real crawler -- one with a published identity,
      * an operator, and verifiable IP ranges -- is legitimately
      * stateless, and penalising it for carrying no cookie made every
-     * known bot cross the non-interactive threshold on arrival.
+     * known bot cross the noninteractive threshold on arrival.
      *
      * None of that applies to a generic HTTP client library. The
      * directory lists python-requests, python-httpx, Go-http-client,
      * okhttp, GuzzleHttp, PycURL and Scrapy under this category --
      * Scrapy being a scraping framework by name. Granting them the
-     * stateless exemption waived first-sight-ip (20) and
-     * dropped-cookie (25), which put the most common scraper
+     * stateless exemption waived firstsightip (20) and
+     * droppedcookie (25), which put the most common scraper
      * transports BELOW an anonymous browser: measured at score 15 and
      * admitted, where the same request from an unknown UA scored 20
      * and was challenged. A library string is evidence about the
      * transport, not about who is driving it. */
     int declared_crawler = bs_ua_is_declared_crawler(uac_h);
     if (declared_crawler) {
-        bs_score_add(r, 0, 0, "known-bot-stateless-ok");
+        bs_score_add(r, 0, 0, "knownbotstatelessok");
     }
     /* Gated on have_solve_proof, NOT have_prior_rep. A cookie only
      * earns the waiver by proving a challenge was solved; merely
@@ -1902,13 +1902,13 @@ static int bs_handler(request_rec *r)
      * its first request. Waiving on validity alone let a bot mint one,
      * store it, and permanently suppress a 25-point penalty it had
      * never earned -- measured on this hub as no-UA scanners sitting
-     * at score 45 (non-interactive tier) instead of 70 (interactive tier), i.e. using
+     * at score 45 (noninteractive tier) instead of 70 (interactive tier), i.e. using
      * cookie persistence to hold themselves in the CHEAPER challenge
      * tier. Same reasoning the safeguard-clear path above already
      * applies; these two call sites had drifted apart.
      *
-     * Cost to real browsers is one non-interactive challenge: they arrive with
-     * no proof, get scored 25 (dropped-cookie) into the non-interactive tier,
+     * Cost to real browsers is one noninteractive challenge: they arrive with
+     * no proof, get scored 25 (droppedcookie) into the noninteractive tier,
      * solve it transparently, and every later request carries
      * passes_non_interactive and lands back here clean. */
     if (have_client_ip && !have_solve_proof && !declared_crawler) {
@@ -1920,7 +1920,7 @@ static int bs_handler(request_rec *r)
     }
     /* Eager Bloom population: every request with a client IP feeds
      * the Bloom filter, so subsequent visits without a cookie trip
-     * dropped-cookie instead of first-sight-ip. The previous
+     * droppedcookie instead of firstsightip. The previous
      * "populate only on challenge" optimization conflated never-
      * been-here-before with never-been-challenged-from-here. */
     if (have_client_ip) bs_bloom_add(client_ip, scfg_h->ns_id);
@@ -1967,7 +1967,7 @@ static int bs_handler(request_rec *r)
     int heuristic_total = score->total;
 
     /* effective_score = per-request heuristic total (already inclusive
-     * of any flag-trigger SCORE actions applied above) + the cookie's
+     * of any flagtrigger SCORE actions applied above) + the cookie's
      * accumulated rep score. Operator-facing tuning workflow lives
      * in the README "Understanding scoring" section. */
     int cookie_score = have_prior_rep ? prior_ch.rep.score : 0;
@@ -1977,7 +1977,7 @@ static int bs_handler(request_rec *r)
      * and only an explicit tier= reaches `tier` below via trig_floor. */
     bs_tier score_tier = bs_decide_tier(cfg, effective);
 
-    /* Apply the tier floor accumulated by the flag-trigger walker
+    /* Apply the tier floor accumulated by the flagtrigger walker
      * (MAX of any TIER_FLOOR actions across the union of flags).
      * The score-derived tier wins when it's already at-or-above the
      * floor — we never silently downgrade. */
@@ -1991,7 +1991,7 @@ static int bs_handler(request_rec *r)
                  ? tier_floor_from_flags : score_tier;
     if (tier_floor_from_flags > score_tier) {
         bs_score_add(r, 0, 0,
-            apr_psprintf(r->pool, "flag-tier-floor:%s",
+            apr_psprintf(r->pool, "flagtierfloor:%s",
                          bs_tier_name(tier_floor_from_flags)));
     }
 
@@ -2008,7 +2008,7 @@ static int bs_handler(request_rec *r)
      * ~counterfactual outcomes. */
     if (cfg->challenge_enabled == 0 && tier != BS_TIER_PASS) {
         bs_score_add(r, 0, 0,
-            apr_psprintf(r->pool, "challenge-off:%s", bs_tier_name(tier)));
+            apr_psprintf(r->pool, "challengeoff:%s", bs_tier_name(tier)));
         tier = BS_TIER_PASS;
     }
 
@@ -2017,7 +2017,7 @@ static int bs_handler(request_rec *r)
      * BotShieldFlagIP directive that used to live here was
      * superseded by `BotShieldTrigger flag=<name> ttl=<sec>`. */
 
-    /* Happy path: score below the non-interactive threshold → pass through.
+    /* Happy path: score below the noninteractive threshold → pass through.
      * If there's no cookie this means no cookie is ever issued —
      * legitimate users experience mod_botshield as invisible. */
     if (tier == BS_TIER_PASS) {
@@ -2052,7 +2052,7 @@ static int bs_handler(request_rec *r)
                     "mod_botshield: app claims not emitted: %s", cerr);
             }
         }
-        bs_decision_log(r, "pass", "allow", cookie_status,
+        bs_decision_log(r, "nochallenge", "allow", cookie_status,
                         "-",
                         "-",
                         bs_decision_reason_names(r->pool, score),
@@ -2079,22 +2079,22 @@ static int bs_handler(request_rec *r)
     }
 
     /* Bloom is populated eagerly above (right after first-sight /
-     * dropped-cookie dispatch), so by this point the IP is already
+     * droppedcookie dispatch), so by this point the IP is already
      * recorded for future requests regardless of tier. The pre-eager
      * implementation populated only here, which created the misleading
-     * first-sight-ip semantics this code path used to live with. */
+     * firstsightip semantics this code path used to live with. */
 
     int safeguard_rv = bs_apply_safeguard(r, have_client_ip, client_ip,
                                           cookie_status, score, effective);
     if (safeguard_rv != OK) return safeguard_rv;
 
-    /* E17 — non-interactive tier dispatch with embedded mode. Default behavior:
+    /* E17 — noninteractive tier dispatch with embedded mode. Default behavior:
      * skip the M7 interstitial, serve the real page (DECLINED), let
      * the wrapper handle verification in the background. Timing model:
      * "kicks in eventually" — see CHANGELOG.
      *
      * Embedded → interactive PoW fallback: if this client has had N
-     * consecutive non-interactive tier dispatches without _bs_session
+     * consecutive noninteractive tier dispatches without _bs_session
      * arriving (count tracked via bs_safeguard_present_count), the
      * wrapper isn't doing its job (CSP-blocked, no JS, no Worker
      * support, etc.). Bypass the embedded short-circuit so the
@@ -2113,7 +2113,7 @@ static int bs_handler(request_rec *r)
             }
         }
         if (!fall_back) {
-            bs_decision_log(r, "non-interactive", "allow", cookie_status,
+            bs_decision_log(r, "noninteractive", "allow", cookie_status,
                             "-",
                             "-",
                             bs_decision_reason_names(r->pool, score),
@@ -2123,11 +2123,11 @@ static int bs_handler(request_rec *r)
         /* Fall through to M7 — the embedded path has had its
          * chances. Surface the decision in the reason chain so
          * operators can spot clients stuck in this state. */
-        bs_score_add(r, 0, 0, "embedded-fallback-m7");
+        bs_score_add(r, 0, 0, "embeddedfallbackm7");
     }
 
     /* `issue_auto` picks the interactive PoW interstitial style: the
-     * non-interactive tier auto-submit splash (issue_auto=1) for low-friction
+     * noninteractive tier auto-submit splash (issue_auto=1) for low-friction
      * challenges, the visible form interstitial (issue_auto=0) for
      * the harder tier. Captcha tier is rendered separately by
      * bs_render_challenge_page when cfg->captcha_provider is set;
@@ -2220,7 +2220,7 @@ static int bs_handler(request_rec *r)
                   next_rep.passes_non_interactive, next_rep.passes_interactive,
                   next_rep.passes_captcha);
     /* Difficulty stays at the operator-configured BotShieldDifficulty.
-     * Tier (non-interactive / interactive / captcha) is the primary lever for "this
+     * Tier (noninteractive / interactive / captcha) is the primary lever for "this
      * signal needs harder verification" via BotShieldFlagTrigger
      * action=tier_floor. If a real future need for "harder PoW for
      * this signal" surfaces, add a difficulty action verb at that

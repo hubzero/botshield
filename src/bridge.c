@@ -279,7 +279,7 @@ apr_status_t bs_app_feedback_filter(ap_filter_t *f,
     int observe = global_log_only || (ft->action.mode == BS_TMODE_OBSERVE);
     if (observe) {
         bs_score_add(r, 0, 0,
-            apr_pstrcat(r->pool, "feedback-trigger:", event,
+            apr_pstrcat(r->pool, "feedbacktrigger:", event,
                         ":observe", NULL));
         if (bs_shm.metrics) {
             __atomic_fetch_add(&bs_shm.metrics->trigger_observed_total,

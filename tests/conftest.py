@@ -227,8 +227,8 @@ def bs_browser_context_form(browser, fresh_ip):
 
     Form tier requires score in [50, 80): strong enough to trip a
     challenge but under the captcha threshold. Scraper UA
-    ("python-requests") contributes +50 via scraper-ua-python;
-    missing Accept-Language contributes +15; first-sight-ip +5 —
+    ("python-requests") contributes +50 via scraperua-python;
+    missing Accept-Language contributes +15; firstsightip +5 —
     around 70, comfortably in the form band. Matches what the
     bash-era m8_1 tests used to provoke form tier.
 

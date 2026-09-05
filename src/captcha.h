@@ -56,7 +56,7 @@ typedef enum {
     /* Guard short-circuits emitted by bs_captcha_siteverify_guarded.
      * Caller maps to HTTP status (typically 429 / 503) and emits its
      * own decision_log line so the tier label matches the call site
-     * (captcha / non-interactive / interactive). */
+     * (captcha / noninteractive / interactive). */
     BS_CAPTCHA_RATE_LIMITED    = 4,
     BS_CAPTCHA_INFLIGHT_CAPPED = 5
 } bs_captcha_result;
@@ -183,10 +183,10 @@ const char *bs_clear_pending_cookie(request_rec *r,
  * exactly this section. One helper; one place to update.
  *
  * passes_kind picks which counter to bump: PASSES_CAPTCHA for the
- * captcha-tier callers, PASSES_NON_INTERACTIVE for the embedded non-interactive path.
+ * captcha-tier callers, PASSES_NON_INTERACTIVE for the embedded noninteractive path.
  * forgive_amount is the per-tier policy the caller picks
  * (cfg->forgive_captcha vs cfg->forgive_non_interactive). auto_tier is the
- * non-interactive tier marker the non_interactive.c caller sets to 1; the captcha-
+ * noninteractive tier marker the non_interactive.c caller sets to 1; the captcha-
  * tier callers leave it 0.
  *
  * Returns NULL on success with `*out_ch` populated and the

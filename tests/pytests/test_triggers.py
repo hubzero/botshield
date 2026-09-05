@@ -4,7 +4,7 @@ Exercises BotShieldRequestTrigger directives:
 
   status=<code>       → Apache returns that code; ErrorDocument
                         compatible (we don't write a body).
-  status=pass         → request passes through to the real handler;
+  status=nochallenge         → request passes through to the real handler;
                         no BotShield interstitial; flag-IP / log
                         effects still apply for future requests.
   redirect=<url>      → 302 (or operator-chosen 3xx) + Location.
@@ -58,8 +58,8 @@ def test_trigger_status_code_blocks_and_tags_log(
             lines = slc.decision_lines(ip=fresh_ip)
 
     assert resp.status_code == 403
-    hits = [d for d in lines if "request-trigger:env-probe" in d["reason"]]
-    assert hits, f"no request-trigger:env-probe decision line; lines={lines}"
+    hits = [d for d in lines if "requesttrigger:env-probe" in d["reason"]]
+    assert hits, f"no requesttrigger:env-probe decision line; lines={lines}"
     # The tag rides the existing decision log line — decision_lines
     # should pick it up as the "tag" field.
     assert any(d.get("tag") == "BAN 2h" for d in hits), (
@@ -67,13 +67,13 @@ def test_trigger_status_code_blocks_and_tags_log(
     )
 
 
-# --- status=pass -----------------------------------------------------
+# --- status=nochallenge -----------------------------------------------------
 
 
 def test_trigger_status_pass_lets_request_through(
     config_override, log_slice, fresh_ip,
 ):
-    """status=pass returns DECLINED from the handler — the real
+    """status=nochallenge returns DECLINED from the handler — the real
     Apache server serves the response (probably a 404 for a non-
     existent path). No BotShield 403/captcha/etc."""
     with config_override(
@@ -83,29 +83,29 @@ def test_trigger_status_pass_lets_request_through(
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
         '    BotShieldRequestTrigger pass-probe path="/definitely-nonexistent" '
-        'status=pass',
+        'status=nochallenge',
         count=1,
     ):
         resp = client.get("/definitely-nonexistent", xff=fresh_ip)
     # Real handler's response — not 403. Typically 404 (Apache's
     # default) or whatever the dev vhost serves.
     assert resp.status_code != 403, (
-        f"status=pass must not 403; got {resp.status_code}"
+        f"status=nochallenge must not 403; got {resp.status_code}"
     )
 
 
 def test_trigger_status_pass_penalty_scores_the_current_request(
     config_override, log_slice, fresh_ip,
 ):
-    """`status=pass penalty=N` adds N to THIS request's score.
+    """`status=nochallenge penalty=N` adds N to THIS request's score.
 
     This test used to pin the opposite -- that the penalty was purely
     future-request bookkeeping via flag=/ttl= and must never touch the
     current score. That contract was deliberately revised in 14ec15a
-    ("Let request triggers challenge"), which routes status=pass with
+    ("Let request triggers challenge"), which routes status=nochallenge with
     score-shaping through the scoring pipeline rather than declining
     out of the handler, and directives.md documents the current
-    behaviour: "Score only | status=pass penalty=<n> | Adds to the
+    behaviour: "Score only | status=nochallenge penalty=<n> | Adds to the
     score and lets normal thresholds decide."
 
     The old assertion outlived the change and sat in the failing set
@@ -118,16 +118,16 @@ def test_trigger_status_pass_penalty_scores_the_current_request(
     its own signals and a fixed number would be brittle.
 
     Both arms carry a penalty on purpose. Comparing "penalty" against
-    "no penalty" measures the wrong thing entirely: a bare status=pass
+    "no penalty" measures the wrong thing entirely: a bare status=nochallenge
     declines out of the handler before the scoring pipeline runs, so
     its reason chain comes back bracketed and zeroed
-    ([known-bot:...:0,request-trigger:passpen:pass:0]) while the
-    penalty arm additionally picks up missing-accept-language,
-    scraper-ua-python, first-sight-ip and any flag triggers. The
+    ([knownbot:...:0,requesttrigger:passpen:pass:0]) while the
+    penalty arm additionally picks up missingacceptlanguage,
+    scraperua-python, firstsightip and any flag triggers. The
     difference there is the whole pipeline, not the penalty.
     """
     RULE = ('    BotShieldRequestTrigger passpen path="/honey-pass" '
-            'status=pass %s ttl=3600')
+            'status=nochallenge %s ttl=3600')
 
     def score_for(extra, ip):
         with config_override(
@@ -148,7 +148,7 @@ def test_trigger_status_pass_penalty_scores_the_current_request(
     low  = score_for("penalty=10", fresh_ip)
     high = score_for("penalty=90", ips.fresh_ip())
 
-    assert "request-trigger:passpen" in high["reason"], (
+    assert "requesttrigger:passpen" in high["reason"], (
         f"the match must be traceable in the reason chain; d={high}"
     )
     delta = int(high["score"]) - int(low["score"])
@@ -221,7 +221,7 @@ def test_trigger_declaration_order_wins_on_overlap(
         '    BotShieldScoreNonInteractive 500\n'
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
-        '    BotShieldRequestTrigger wp-ajax path="/wp-admin/admin-ajax.php" status=pass\n'
+        '    BotShieldRequestTrigger wp-ajax path="/wp-admin/admin-ajax.php" status=nochallenge\n'
         '    BotShieldRequestTrigger wp-all  path="/wp-admin*"               status=403',
         count=1,
     ):
@@ -279,7 +279,7 @@ def test_trigger_flag_ip_carries_to_next_request(
         '    BotShieldScoreInteractive 600\n'
         '    BotShieldScoreCaptcha 700\n'
         '    BotShieldRequestTrigger bait path="/honey-bait" '
-        'status=pass flag=honeypot_hit ttl=3600',
+        'status=nochallenge flag=honeypot_hit ttl=3600',
         count=1,
     ):
         # First request primes the flagged-IP table.
@@ -290,12 +290,12 @@ def test_trigger_flag_ip_carries_to_next_request(
             lines = slc.decision_lines(ip=fresh_ip)
 
     # The flag-IP contribution shows up on the follow-up request as
-    # a `flagged-ip` reason token. honeypot_hit contributes +60 to
+    # a `flaggedip` reason token. honeypot_hit contributes +60 to
     # bs_flag_penalty, which surfaces in the request's reason trace.
     follow_up = [d for d in lines if d.get("path") == "/"]
     assert follow_up, f"no decision line for follow-up request; lines={lines}"
-    assert any("flagged-ip" in d["reason"] for d in follow_up), (
-        f"follow-up request didn't show flagged-ip in reason; "
+    assert any("flaggedip" in d["reason"] for d in follow_up), (
+        f"follow-up request didn't show flaggedip in reason; "
         f"follow_up={follow_up}"
     )
 
@@ -332,8 +332,8 @@ def test_path_trigger_middle_star_matches_segment(
         f"middle-* didn't match /api/internal/admin; got {r2.status_code}"
     )
     assert sum(1 for d in lines
-               if "request-trigger:api-admin" in d["reason"]) >= 2, (
-        f"expected two request-trigger:api-admin decisions; lines={lines}"
+               if "requesttrigger:api-admin" in d["reason"]) >= 2, (
+        f"expected two requesttrigger:api-admin decisions; lines={lines}"
     )
 
 
@@ -371,7 +371,7 @@ def test_path_trigger_middle_star_anchored_excludes_suffix(
         f"(suffix beyond anchor); got {r_after.status_code}"
     )
     triggered = [d for d in lines
-                 if "request-trigger:api-admin-end" in d["reason"]]
+                 if "requesttrigger:api-admin-end" in d["reason"]]
     assert len(triggered) == 1, (
         f"expected exactly one trigger fire (the /admin path); "
         f"lines={lines}"

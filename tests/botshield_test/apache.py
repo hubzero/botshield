@@ -200,7 +200,7 @@ def reset_state() -> None:
     """Wipe the state file + restart so SHM + flagged-IP start empty.
 
     Used by tests whose setup needs a guaranteed-clean slate (e.g.,
-    "first-sight-ip must fire for this IP" when prior runs may have
+    "firstsightip must fire for this IP" when prior runs may have
     seeded Bloom for it). Expensive — prefer a fresh IP when the test
     admits one.
     """

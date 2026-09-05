@@ -2,7 +2,7 @@
 
 Exercises BotShieldRobotsTxt + BotShieldRobotsWildcardScope:
 
-  Disallow      → 403, reason robots-block:<group-name>
+  Disallow      → 403, reason robotsblock:<group-name>
   Crawl-delay   → 429 + Retry-After, reason robots-rate:<group>
   Allow/Disallow longest-match-wins within a group
   User-agent: * gated by wildcard scope (heuristic / strict / off)
@@ -97,8 +97,8 @@ def test_robots_disallow_blocks_bot(
 
     assert r_blocked.status_code == 403
     assert r_ok.status_code != 403
-    hits = [d for d in lines if "robots-block:gptbot" in d["reason"]]
-    assert hits, f"no robots-block:gptbot line; lines={lines}"
+    hits = [d for d in lines if "robotsblock:gptbot" in d["reason"]]
+    assert hits, f"no robotsblock:gptbot line; lines={lines}"
 
 
 def test_robots_allow_longest_match_wins(
@@ -156,8 +156,8 @@ def test_robots_crawl_delay_rate_limits(
     )
     # Reason name changed when robots.txt Crawl-delay was rekeyed onto
     # the slug-keyed bot_rate machinery (formerly "robots-rate:<group>").
-    assert [d for d in lines if "bot-rate:gptbot" in d["reason"]], (
-        f"no bot-rate:gptbot decision line; lines={lines}"
+    assert [d for d in lines if "botrate:gptbot" in d["reason"]], (
+        f"no botrate:gptbot decision line; lines={lines}"
     )
 
 

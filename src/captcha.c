@@ -1493,7 +1493,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         r->status = HTTP_UNSUPPORTED_MEDIA_TYPE;
         ap_set_content_type(r, "text/plain; charset=utf-8");
         apr_table_setn(r->err_headers_out, "X-Botshield",
-                       "captcha-bad-content-type");
+                       "captchabadcontenttype");
         ap_rputs("application/x-www-form-urlencoded required.\n", r);
         bs_decision_log(r, "captcha", "block", "-",
                         prov_name, "-", "bad_content_type", 0);
@@ -1540,7 +1540,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         }
         r->status = HTTP_FORBIDDEN;
         apr_table_setn(r->err_headers_out, "X-Botshield",
-                       "captcha-pending-missing");
+                       "captchapendingmissing");
         ap_set_content_type(r, "text/plain; charset=utf-8");
         ap_rputs("Challenge session missing or expired.\n", r);
         bs_decision_log(r, "captcha", "pending_missing", "-",
@@ -1622,7 +1622,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         r->status = HTTP_TOO_MANY_REQUESTS;
         apr_table_setn(r->err_headers_out, "Retry-After", "60");
         apr_table_setn(r->err_headers_out, "X-Botshield",
-                       "captcha-rate-limited");
+                       "captcharatelimited");
         ap_set_content_type(r, "text/plain; charset=utf-8");
         ap_rputs("Too many captcha verification attempts.\n", r);
         bs_decision_log(r, "captcha", "rate_limited", "-",
@@ -1633,7 +1633,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         r->status = HTTP_SERVICE_UNAVAILABLE;
         apr_table_setn(r->err_headers_out, "Retry-After", "2");
         apr_table_setn(r->err_headers_out, "X-Botshield",
-                       "captcha-saturated");
+                       "captchasaturated");
         ap_set_content_type(r, "text/plain; charset=utf-8");
         ap_rputs("Captcha verification busy, try again shortly.\n", r);
         bs_decision_log(r, "captcha", "inflight_capped", "-",
@@ -1679,7 +1679,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         } else if (resp_action && *expected_action &&
                    strcmp(resp_action, expected_action) != 0) {
             details = apr_psprintf(r->pool,
-                "action-mismatch:got=%s,expected=%s",
+                "actionmismatch:got=%s,expected=%s",
                 resp_action, expected_action);
             result = BS_CAPTCHA_REJECTED;
         }
@@ -1722,7 +1722,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
                 score, min_score);
             r->status = HTTP_FORBIDDEN;
             ap_set_content_type(r, "text/plain; charset=utf-8");
-            apr_table_setn(r->err_headers_out, "X-Botshield", "captcha-rejected");
+            apr_table_setn(r->err_headers_out, "X-Botshield", "captcharejected");
             ap_rputs("Verification score too low. Go back and try again.\n", r);
             bs_decision_log(r, "captcha", "block", "-",
                             cfg->captcha_provider->name, "-",
@@ -1748,7 +1748,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
             details ? details : "");
         r->status = HTTP_FORBIDDEN;
         ap_set_content_type(r, "text/plain; charset=utf-8");
-        apr_table_setn(r->err_headers_out, "X-Botshield", "captcha-rejected");
+        apr_table_setn(r->err_headers_out, "X-Botshield", "captcharejected");
         ap_rputs("Captcha verification failed. Go back and try again.\n", r);
         bs_decision_log(r, "captcha", "block", "-",
                         cfg->captcha_provider->name, "-",
@@ -1807,7 +1807,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
     apr_table_add(r->err_headers_out, "Set-Cookie",
                   bs_clear_pending_cookie(r, cfg));
     apr_table_setn(r->headers_out, "Location",      safe_return);
-    apr_table_setn(r->headers_out, "X-Botshield",   "captcha-ok");
+    apr_table_setn(r->headers_out, "X-Botshield",   "captchaok");
     r->status = HTTP_SEE_OTHER;   /* 303 — POST→GET redirect */
     /* Decision log: verified = real OK, failopen = provider was
      * unavailable but we issued anyway. The v3 missing-score branch

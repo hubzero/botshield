@@ -1,11 +1,11 @@
 /* challenge.h — challenge issuance, PoW algorithm registry,
  * reputation state envelope, and the bootstrap-sig helpers shared
- * between M7 (interstitial) and E17 (non-interactive tier embedded mode).
+ * between M7 (interstitial) and E17 (noninteractive tier embedded mode).
  *
  * The "challenge" abstraction is a pre-shared opaque envelope the
  * server signs once and the client returns having proved possession
  * of a small bit of work (PoW counter) or a third-party attestation
- * (captcha siteverify response). Both interstitial and non-interactive paths
+ * (captcha siteverify response). Both interstitial and noninteractive paths
  * use the same bs_challenge struct + algorithm registry.
  *
  * Wire format (embedded inline in the interstitial, JSON):
@@ -21,7 +21,7 @@
  * — a single base64 blob the server can parse by splitting on '|',
  * no JSON parser required.
  *
- * `auto` is the non-interactive tier (M7) marker: 1 means the challenge was
+ * `auto` is the noninteractive tier (M7) marker: 1 means the challenge was
  * served as a no-click auto-submit splash, 0 means the interactive PoW
  * interstitial. HMAC-covered so an accepted cookie tells the server
  * which tier actually served it — used to pick passes_non_interactive vs
@@ -112,7 +112,7 @@ typedef struct {
     int           difficulty;
     apr_time_t    expires_at;            /* unix seconds */
     bs_rep_state  rep;                   /* carried forward across re-issues */
-    int           auto_tier;             /* 1 = non-interactive M7 auto-submit; 0 = form */
+    int           auto_tier;             /* 1 = noninteractive M7 auto-submit; 0 = form */
     unsigned char signature[BS_SIG_BYTES];
 } bs_challenge;
 
@@ -161,13 +161,13 @@ const char *bs_issue_challenge(apr_pool_t *p, const bs_dir_cfg *cfg,
 
 /* Render a challenge as the inline JSON the M7 interstitial JS
  * consumes. Includes the encrypted cookie prefix, salt/nonce/
- * difficulty/expires, and (for embedded non-interactive tier mode) the
+ * difficulty/expires, and (for embedded noninteractive tier mode) the
  * bound-IP HMAC pair. */
 const char *bs_challenge_json(request_rec *r, apr_pool_t *p,
                               const bs_dir_cfg *cfg,
                               const bs_challenge *ch);
 
-/* bootstrap-binding helpers — bind the non-interactive tier
+/* bootstrap-binding helpers — bind the noninteractive tier
  * embedded-bootstrap to the originating client IP via an HMAC over
  * (nonce, bound_ip_hex, expires_at). Issued at bootstrap time,
  * verified at /embedded-verify time. */
@@ -198,7 +198,7 @@ void bs_compute_bootstrap_sig(apr_pool_t *p,
  * exceeds it. 400ms refuses every run of that harness while staying
  * well under a person noticing the widget and moving a mouse to it.
  *
- * Only the interactive tier is bounded: the non-interactive tier has
+ * Only the interactive tier is bounded: the noninteractive tier has
  * no human in the loop and its solve starts at DOMContentLoaded.
  *
  * This does not stop a bot that sleeps. It makes sleeping mandatory,

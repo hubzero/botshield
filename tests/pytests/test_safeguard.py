@@ -49,7 +49,7 @@ from botshield_test import client, cookies
 
 
 # Suspicious-looking UA that consistently scores into challenge
-# tier (50 = scraper-ua-httpx) plus missing Accept-Language (+15).
+# tier (50 = scraperua-httpx) plus missing Accept-Language (+15).
 # Total stays >=50 across requests even after first-sight bloom
 # fades, so every cookieless request gets the form-PoW
 # interstitial. That's the steady-state "broken client" shape we
@@ -115,8 +115,8 @@ def test_safeguard_trips_after_threshold(config_override, fresh_ip,
         f"4th request should be 302 (safeguard redirect); "
         f"got {sg.status_code}"
     )
-    assert sg.headers.get("X-Botshield") == "safeguard-redirect", (
-        f"missing X-Botshield: safeguard-redirect; "
+    assert sg.headers.get("X-Botshield") == "safeguardredirect", (
+        f"missing X-Botshield: safeguardredirect; "
         f"headers={dict(sg.headers)}"
     )
     location = sg.headers.get("Location", "")
@@ -134,15 +134,15 @@ def test_safeguard_trips_after_threshold(config_override, fresh_ip,
     assert sg.headers.get("Cache-Control") == "no-store"
 
     # Decision log: tier=safeguard outcome=redirect with the
-    # challenge-safeguard reason.
+    # challengesafeguard reason.
     sg_lines = [d for d in lines if d["tier"] == "safeguard"]
     assert sg_lines, f"no tier=safeguard decision line; lines={lines}"
     assert sg_lines[0]["outcome"] == "redirect", (
         f"safeguard decision should have outcome=redirect; "
         f"got {sg_lines[0]}"
     )
-    assert "challenge-safeguard" in sg_lines[0]["reason"], (
-        f"safeguard line should carry reason=challenge-safeguard; "
+    assert "challengesafeguard" in sg_lines[0]["reason"], (
+        f"safeguard line should carry reason=challengesafeguard; "
         f"got {sg_lines[0]}"
     )
 
@@ -229,7 +229,7 @@ def test_safeguard_does_not_override_block_path(
                    accept_language=None)
 
     assert r.status_code == 403, (
-        f"safeguard must not override request-trigger 403; "
+        f"safeguard must not override requesttrigger 403; "
         f"got {r.status_code}"
     )
 
@@ -250,7 +250,7 @@ def test_solved_cookie_clears_safeguard_counter(
 
     Without clear-on-solve, the request would be the 4th
     presentation — exactly threshold — and safeguard would fire on
-    THIS request (decision-log reason=challenge-safeguard). With
+    THIS request (decision-log reason=challengesafeguard). With
     clear-on-solve, counter is at 1; safeguard does not fire.
 
     The decision log of the post-solve request is what
@@ -285,7 +285,7 @@ def test_solved_cookie_clears_safeguard_counter(
     # have tripped due to the solve clearing the counter.)
     assert lines, "no decision line for the post-solve request"
     safeguard_lines = [d for d in lines
-                       if "challenge-safeguard" in d["reason"]]
+                       if "challengesafeguard" in d["reason"]]
     assert not safeguard_lines, (
         f"clear-on-solve broken: safeguard fired on the post-solve "
         f"request even though the cookie verified. "

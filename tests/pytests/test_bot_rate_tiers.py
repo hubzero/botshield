@@ -88,7 +88,7 @@ def test_group_scope_aggregates_across_distinct_bots(
     assert got[3].headers.get("Retry-After"), (
         "a group trip must carry Retry-After"
     )
-    assert any("bot-rate:@ai-train" in d["reason"] for d in lines), (
+    assert any("botrate:@ai-train" in d["reason"] for d in lines), (
         f"the refusal must name the group, not a slug -- an operator "
         f"reading a slug name would go tune the wrong budget; "
         f"lines={lines}"
@@ -117,7 +117,7 @@ def test_group_trip_does_not_penalise_the_client(
             lines = slc.decision_lines(ip=fresh_ip)
 
     assert r2.status_code == 503
-    tripped = [d for d in lines if "bot-rate:@ai-train" in d["reason"]]
+    tripped = [d for d in lines if "botrate:@ai-train" in d["reason"]]
     assert tripped, f"no group trip logged; lines={lines}"
     assert all(int(d["score"]) == 0 for d in tripped), (
         f"a group trip must not add score; got "
@@ -148,7 +148,7 @@ def test_total_scope_is_a_ceiling_over_every_bot(
         f"is a different bot in a different group; got "
         f"{[r.status_code for r in got]}"
     )
-    assert any("bot-rate:*" in d["reason"] for d in lines), (
+    assert any("botrate:*" in d["reason"] for d in lines), (
         f"the refusal must name the total ceiling; lines={lines}"
     )
 
@@ -192,7 +192,7 @@ def test_slug_tier_still_returns_429_alongside_the_new_tiers(
         f"a slug trip is the client's own fault and stays 429; got "
         f"{r2.status_code}"
     )
-    assert any("bot-rate:datenbank" in d["reason"] for d in lines), (
+    assert any("botrate:datenbank" in d["reason"] for d in lines), (
         f"slug trips still name the slug; lines={lines}"
     )
 

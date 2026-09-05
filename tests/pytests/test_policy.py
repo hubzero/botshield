@@ -10,7 +10,7 @@ A request trigger with `status=403` plus optional `ua=`/`ipspec=` match
 keys. Cohort shape still reuses E1 (UA substring + polymorphic
 ipspec). '*' means "any" on either axis; both-'*' is rejected at
 config time. On trip, rate-limit → 429 + Retry-After +
-rate-limit-exceeded:<name>; request-trigger → status + request-trigger:<name>.
+ratelimitexceeded:<name>; requesttrigger → status + requesttrigger:<name>.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ CORP_UA = "CorpBot/2.0 (+https://corp.example/bot)"
 def test_rate_limit_ua_narrowing(config_override, log_slice, fresh_ip):
     """UA-matched cohort with '*' ipspec. Budget=3 / 60sec. The 4th
     request of the window should fire 429 + Retry-After + the
-    rate-limit-exceeded reason."""
+    ratelimitexceeded reason."""
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
@@ -62,8 +62,8 @@ def test_rate_limit_ua_narrowing(config_override, log_slice, fresh_ip):
         f"Retry-After missing or non-numeric: {ras}"
     )
 
-    tripped = [d for d in lines if "rate-limit-exceeded:corpbot" in d["reason"]]
-    assert tripped, f"no rate-limit-exceeded line; lines={lines}"
+    tripped = [d for d in lines if "ratelimitexceeded:corpbot" in d["reason"]]
+    assert tripped, f"no ratelimitexceeded line; lines={lines}"
 
 
 def test_rate_limit_inline_cidr_narrowing(config_override, log_slice, fresh_ip):
@@ -99,8 +99,8 @@ def test_rate_limit_inline_cidr_narrowing(config_override, log_slice, fresh_ip):
     assert codes[:2] == [200, 200], f"budget admits first 2; got {codes}"
     assert 429 in codes[2:], f"expected 429 after budget; got {codes}"
     assert [d for d in lines
-            if "rate-limit-exceeded:dcblock" in d["reason"]], (
-        f"no rate-limit-exceeded line for dcblock; lines={lines}"
+            if "ratelimitexceeded:dcblock" in d["reason"]], (
+        f"no ratelimitexceeded line for dcblock; lines={lines}"
     )
 
 
@@ -137,7 +137,7 @@ def test_rate_limit_ua_and_ip_and_ed(config_override, log_slice, fresh_ip):
     assert r1.status_code != 403, "first matching request admitted"
     assert r2.status_code == 429, "second matching request rate-limited"
     assert [d for d in lines
-            if "rate-limit-exceeded:pair" in d["reason"]]
+            if "ratelimitexceeded:pair" in d["reason"]]
 
 
 # --- PathTrigger as path-block (BlockPath replacement) --------------
@@ -163,8 +163,8 @@ def test_path_trigger_block_prefix_match(config_override, log_slice, fresh_ip):
     assert r_root.status_code == 403
     assert r_sub.status_code  == 403
     assert r_safe.status_code != 403, "non-matching path should not 403"
-    hits = [d for d in lines if "request-trigger:lockdown" in d["reason"]]
-    assert len(hits) == 2, f"expected 2 request-trigger hits; got {hits}"
+    hits = [d for d in lines if "requesttrigger:lockdown" in d["reason"]]
+    assert len(hits) == 2, f"expected 2 requesttrigger hits; got {hits}"
 
 
 def test_path_trigger_block_end_anchor(config_override, log_slice, fresh_ip):
@@ -187,7 +187,7 @@ def test_path_trigger_block_end_anchor(config_override, log_slice, fresh_ip):
 
 
 def test_path_trigger_cohort_narrowing(config_override, log_slice, fresh_ip):
-    """A request-trigger with a `ua=` predicate must NOT fire when the UA
+    """A requesttrigger with a `ua=` predicate must NOT fire when the UA
     doesn't match — cohort narrowing applies to path triggers too."""
     with config_override(
         r"BotShieldEnabled\s+On",
@@ -237,8 +237,8 @@ def test_rate_limit_ua_match_is_case_insensitive(
         "regression indicates strstr vs strcasestr bug"
     )
     assert [d for d in lines
-            if "rate-limit-exceeded:gptbot" in d["reason"]], (
-        f"no rate-limit-exceeded line; lines={lines}"
+            if "ratelimitexceeded:gptbot" in d["reason"]], (
+        f"no ratelimitexceeded line; lines={lines}"
     )
 
 
@@ -270,9 +270,9 @@ def test_path_trigger_precedence_is_declaration_order(
     assert r_other.status_code  == 403
 
     specific_hits = [d for d in lines
-                     if "request-trigger:specific" in d["reason"]]
+                     if "requesttrigger:specific" in d["reason"]]
     generic_hits  = [d for d in lines
-                     if "request-trigger:generic"  in d["reason"]]
+                     if "requesttrigger:generic"  in d["reason"]]
     assert len(specific_hits) == 1, (
         f"/admin/secret should hit the specific rule (declared first); "
         f"specific_hits={specific_hits}"

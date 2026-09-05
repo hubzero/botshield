@@ -424,8 +424,8 @@ int bs_allow_ip_in_ranges(const apr_array_header_t *ranges, request_rec *r)
  *                           an IP check the request can't qualify
  *                           for the verified-bot credit, so the
  *                           UA pattern just contributes to the
- *                           known-bot pool (logged as
- *                           known-bot:<name>, score 0).
+ *                           knownbot pool (logged as
+ *                           knownbot:<name>, score 0).
  *   anything else         → inline CIDR (single, or comma-separated
  *                           for multiple: "10.0.0.0/8,192.168.0.0/16").
  *
@@ -494,11 +494,11 @@ const char *bs_set_allow_bot(cmd_parms *cmd, void *dconf,
  *   4. IP failed    → emit fake-bot:<name>, BS_PENALTY_FAKE_BOT so
  *      the request sails into captcha tier with a loud reason.
  *   5. UA-only mode (operator's `*` target) or ranges not loaded →
- *      no emission here. The bs_handler known-bot block in
+ *      no emission here. The bs_handler knownbot block in
  *      botshield.c picks up cls->verified_name and tags
- *      known-bot:<name> with score 0. Verified-bot credit requires
+ *      knownbot:<name> with score 0. Verified-bot credit requires
  *      an actual IP check; without one, the UA pattern just
- *      contributes to the known-bot pool.
+ *      contributes to the knownbot pool.
  *
  * The UA classifier is a vanilla trie (no Aho-Corasick failure
  * links — simpler to read, indistinguishable on realistic UAs).
@@ -549,7 +549,7 @@ void bs_check_allow(request_rec *r,
                                1, __ATOMIC_RELAXED);
         }
         bs_score_add(r, BS_CREDIT_ALLOW, 0,
-            apr_pstrcat(r->pool, "verified-bot:", name, NULL));
+            apr_pstrcat(r->pool, "verifiedbot:", name, NULL));
         return;
     }
     if (c->is_fake_bot) {
@@ -560,14 +560,14 @@ void bs_check_allow(request_rec *r,
                                1, __ATOMIC_RELAXED);
         }
         bs_score_add(r, BS_PENALTY_FAKE_BOT, 3600,
-            apr_pstrcat(r->pool, "fake-bot:", name, NULL));
+            apr_pstrcat(r->pool, "fakebot:", name, NULL));
         return;
     }
     /* UA-only mode (operator's `*` target) and verified_unranged
      * (rangesPath declared but file not yet loaded) both fall through
-     * — no IP check ran, so no verified-bot credit. The known-bot
+     * — no IP check ran, so no verified-bot credit. The knownbot
      * block in bs_handler picks up cls->verified_name and tags
-     * known-bot:<name> with score 0. We still bump the unverified
+     * knownbot:<name> with score 0. We still bump the unverified
      * counter here so operators can monitor the load-gap rate via
      * the /metrics endpoint. */
     if (c->verified_unranged && bs_shm.metrics) {

@@ -1,7 +1,7 @@
-/* score.h — per-request scoring + flag-trigger walker.
+/* score.h — per-request scoring + flagtrigger walker.
  *
  * The score system aggregates penalty/credit signals across all the
- * heuristics, triggers, rate-limit decisions, and flag-trigger
+ * heuristics, triggers, rate-limit decisions, and flagtrigger
  * runtime. Each entry records (penalty, ttl_seconds, reason) so the
  * decision log can replay why a tier was chosen.
  *
@@ -10,7 +10,7 @@
  * score struct itself is request-scoped and lives on r->request_config
  * under the module's slot.
  *
- * The flag-trigger walker is on the request side too — it consumes
+ * The flagtrigger walker is on the request side too — it consumes
  * scfg->flag_triggers entries (configured at config time via
  * BotShieldFlagTrigger directives, with compiled-in defaults
  * seeded by bs_post_config). For each flag bit set on the request,
@@ -67,10 +67,10 @@ int  bs_get_request_tier_floor(request_rec *r);
  * request time, and heuristics.c's is the fallback metadata. Until
  * 2026-08-02 each table carried its own literal and these macros were
  * dead -- three declarations, no compiler able to notice when they
- * disagreed. They did: changing first-sight-ip in heuristics.c alone
+ * disagreed. They did: changing firstsightip in heuristics.c alone
  * compiled clean, deployed, and changed nothing.
  *
- * scraper-ua is 10, not the 50 it was through 2026-08-02. robots.txt
+ * scraperua is 10, not the 50 it was through 2026-08-02. robots.txt
  * tells undeclared clients they may fetch anything outside the
  * Disallow list at the published Crawl-delay; 50 put a checkbox they
  * cannot render in front of curl, wget and python-requests instead --
@@ -79,11 +79,11 @@ int  bs_get_request_tier_floor(request_rec *r);
  * abuse is caught by the rate limit, which is what the published
  * policy actually promises.
  *
- * missing-al is 5 rather than 15 for the same reason: almost nothing
+ * missingal is 5 rather than 15 for the same reason: almost nothing
  * scripted sends Accept-Language, so the old weight mostly taxed
  * legitimate automation.
  *
- * first-sight-ip is deliberately equal to BS_DEFAULT_SCORE_NON_INTERACTIVE --
+ * firstsightip is deliberately equal to BS_DEFAULT_SCORE_NON_INTERACTIVE --
  * see the note beside it in config.c. */
 #define BS_PENALTY_MISSING_UA       40
 #define BS_PENALTY_MISSING_AL        5
@@ -92,7 +92,7 @@ int  bs_get_request_tier_floor(request_rec *r);
 #define BS_PENALTY_DROPPED_COOKIE   25
 
 /* ======================================================================
- * Tier + non-interactive-mode enums (decision dispatch)
+ * Tier + noninteractive-mode enums (decision dispatch)
  * ====================================================================== */
 
 typedef enum {
@@ -102,7 +102,7 @@ typedef enum {
     BS_TIER_CAPTCHA = 3
 } bs_tier;
 
-/* E17 — what flavor of non-interactive tier dispatch to use. INTERSTITIAL is
+/* E17 — what flavor of noninteractive tier dispatch to use. INTERSTITIAL is
  * the legacy M7 splash that auto-submits the PoW. EMBEDDED hands off
  * to a wrapper script the operator has already included on the page;
  * the page serves DECLINED (real content) and the wrapper does the
@@ -169,11 +169,11 @@ const char *bs_decision_reason_names(apr_pool_t *p,
 const char *bs_score_reasons_joined(apr_pool_t *p,
                                     const bs_request_score *s);
 
-/* E14 flag-trigger walker. For each entry in scfg->flag_triggers
+/* E14 flagtrigger walker. For each entry in scfg->flag_triggers
  * whose flag_bit is set in all_flags:
  *   - SCORE actions accumulate via bs_score_add
  *   - TIER_FLOOR actions MAX into *out_tier_floor
- * mode=observe entries log a `would-flag-trigger:<flag>:observe`
+ * mode=observe entries log a `would-flagtrigger:<flag>:observe`
  * reason and skip the side effect. Returns the count of triggers
  * that fired (informational). */
 int bs_apply_flag_triggers(request_rec *r,
@@ -183,13 +183,13 @@ int bs_apply_flag_triggers(request_rec *r,
 
 /* Score-to-tier picker. Three configurable cut-points
  * (BotShieldScoreNonInteractive / Hard / Captcha) gate four tiers
- * (pass / non-interactive / interactive / captcha). The README "Understanding
+ * (pass / noninteractive / interactive / captcha). The README "Understanding
  * scoring" section covers operator tuning; templates.h documents
  * the per-tier interstitial rendering. */
 bs_tier bs_decide_tier(const bs_dir_cfg *cfg, int score);
 
 /* Tier-name string for the decision log + claims-bridge wire
- * format. Returns "pass" / "non-interactive" / "interactive" / "captcha", or "?"
+ * format. Returns "nochallenge" / "noninteractive" / "interactive" / "captcha", or "?"
  * for an unknown enum value. */
 const char *bs_tier_name(bs_tier t);
 

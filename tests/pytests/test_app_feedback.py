@@ -117,7 +117,7 @@ def test_app_feedback_penalty_flag_applies_to_next_request(
             _g("/index.html", xff=ip)
             lines = slc.decision_lines(ip=ip)
     assert lines, "no follow-up decision line"
-    assert "flagged-ip" in lines[-1]["reason"], (
+    assert "flaggedip" in lines[-1]["reason"], (
         f"follow-up request didn't pick up the flagged bit; "
         f"reason={lines[-1]['reason']}"
     )
@@ -136,7 +136,7 @@ def test_app_feedback_observed_under_log_only(
 
     Verify by minting feedback under LogOnly, then checking that
     a follow-up request from the same IP does NOT see the
-    flagged-ip reason."""
+    flaggedip reason."""
     val = _sign("scanner-hit")
     ip = _ips.fresh_ip()
     with config_override(
@@ -159,7 +159,7 @@ def test_app_feedback_observed_under_log_only(
 
     assert lines, "no decision lines emitted"
     follow_up = lines[-1]["reason"]
-    assert "flagged-ip" not in follow_up, (
+    assert "flaggedip" not in follow_up, (
         f"follow-up request picked up the flagged bit even though "
         f"BotShieldEnabled LogOnly was set; bridge.c bypassed the "
         f"observe gate. reason={follow_up}"
@@ -203,7 +203,7 @@ def test_app_feedback_per_trigger_observe_mode(
 
     assert lines, "no decision lines emitted"
     follow_up = lines[-1]["reason"]
-    assert "flagged-ip" not in follow_up, (
+    assert "flaggedip" not in follow_up, (
         f"follow-up request picked up the flagged bit even though "
         f"the feedback trigger was mode=observe. reason={follow_up}"
     )
@@ -244,7 +244,7 @@ def test_app_feedback_credit_flag_lowers_score(
     # The app_verified_human flag adds -80 to the score. The exact
     # diff depends on which heuristics fire on each IP at the time
     # of the follow-up — ip_cred was put in the Bloom filter by
-    # its earlier feedback request and now picks up dropped-cookie
+    # its earlier feedback request and now picks up droppedcookie
     # (+25) on the follow-up, while ip_base on its first request
     # does not. Assert the credit landed (cred materially below
     # baseline) rather than a fragile exact-diff equality.
@@ -335,7 +335,7 @@ def test_app_feedback_tampered_sig_rejected_and_stripped(
     assert "X-BotShield-Feedback" not in r1.headers, (
         "tampered header must still be stripped"
     )
-    assert lines and "flagged-ip" not in lines[-1]["reason"], (
+    assert lines and "flaggedip" not in lines[-1]["reason"], (
         f"tampered feedback shouldn't have flagged the IP; "
         f"reason={lines[-1]['reason']}"
     )
@@ -370,7 +370,7 @@ def test_app_feedback_unmapped_event_is_ignored(
             lines = slc.decision_lines(ip=ip)
 
     assert "X-BotShield-Feedback" not in r1.headers
-    assert lines and "flagged-ip" not in lines[-1]["reason"], (
+    assert lines and "flaggedip" not in lines[-1]["reason"], (
         f"unmapped event should not have flagged the IP; "
         f"reason={lines[-1]['reason']}"
     )
@@ -406,7 +406,7 @@ def test_app_feedback_legacy_wire_format_rejected(
             lines = slc.decision_lines(ip=ip)
 
     assert "X-BotShield-Feedback" not in r1.headers
-    assert lines and "flagged-ip" not in lines[-1]["reason"], (
+    assert lines and "flaggedip" not in lines[-1]["reason"], (
         f"legacy wire format must not flag; "
         f"reason={lines[-1]['reason']}"
     )
@@ -422,7 +422,7 @@ def test_app_feedback_credit_and_penalty_compose(
     should carry the composite flag penalty +60 + (-80) = -20 on
     future requests. We assert on the flag contribution directly
     rather than on the composed score (first-sight and other
-    heuristics can shift the absolute number but the `flagged-ip`
+    heuristics can shift the absolute number but the `flaggedip`
     reason token is where the flag-penalty math surfaces)."""
     penalty_val = _sign("scanner-hit")
     credit_val  = _sign("human-verified")
@@ -445,9 +445,9 @@ def test_app_feedback_credit_and_penalty_compose(
     ):
         _g(FEEDBACK_PATH_1, xff=ip_both)   # earn honeypot_hit  (+60)
         _g(FEEDBACK_PATH_2, xff=ip_both)   # earn app_verified_human (-80)
-        # A few subsequent requests so Bloom eats first-sight-ip and
+        # A few subsequent requests so Bloom eats firstsightip and
         # the follow-up's reason trace doesn't include it, leaving
-        # just flagged-ip as the visible flag contribution.
+        # just flaggedip as the visible flag contribution.
         _g("/index.html", xff=ip_both)
         _g("/index.html", xff=ip_both)
         _g("/index.html", xff=ip_both)
@@ -457,11 +457,11 @@ def test_app_feedback_credit_and_penalty_compose(
 
     assert lines
     # Score is dominated by flag-penalty composition: honeypot +60
-    # plus app_verified_human -80 = -20. The dropped-cookie
+    # plus app_verified_human -80 = -20. The droppedcookie
     # heuristic adds +25 on cookieless follow-ups whose IP is in the
     # Bloom filter, so the observed score on a typical run is +5.
     # We assert the composite landed roughly where it should (well
-    # below zero plus a small buffer for the dropped-cookie penalty)
+    # below zero plus a small buffer for the droppedcookie penalty)
     # rather than an exact value the heuristic stack can shift.
     score = int(lines[-1]["score"])
     assert score < 30, (
@@ -469,4 +469,4 @@ def test_app_feedback_credit_and_penalty_compose(
         f"app_verified_human credit may not have applied. "
         f"reason={lines[-1]['reason']} score={score}"
     )
-    assert "flagged-ip" in lines[-1]["reason"]
+    assert "flaggedip" in lines[-1]["reason"]

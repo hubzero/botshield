@@ -26,7 +26,7 @@ matching policy rule can short-circuit the request even when the
 client also has a valid `_bs_session` cookie. Allow-list checks
 and built-in heuristics (missing-UA, missing-Accept-Language,
 scraper-pattern UA) run after the policy walk if the walk
-returns OK; flag-trigger effects are applied last, against the
+returns OK; flagtrigger effects are applied last, against the
 IP's accumulated flag bitmap.
 
 ## Allow list — verified crawlers
@@ -153,7 +153,7 @@ shifted; existing configs aren't broken, just verified.
 ## Robots.txt enforcement
 
 `BotShieldRobotsTxt` plugs in a parsed RFC 9309 robots.txt file as
-a policy source. Disallow rules become `robots-block:<group>`
+a policy source. Disallow rules become `robotsblock:<group>`
 matches; Crawl-delay rules become per-group rate limits.
 
 ```apache
@@ -191,7 +191,7 @@ source it came from:
 
 ```
 ## Tier thresholds (effective)
-non-interactive      20   configured
+noninteractive      20   configured
 interactive          50   configured
 captcha               -   unset - never fires (suggested: 80)
 
@@ -215,7 +215,7 @@ with a suggested starting value.
 Two interactions are called out inline rather than left to
 documentation nobody consults at the moment it matters:
 
-`~` — a flag scoring at or above the non-interactive threshold. Such a
+`~` — a flag scoring at or above the noninteractive threshold. Such a
 flag is a challenge switch rather than a contributing signal. Bounded by
 `flags_excused` (one solve clears it for that cookie), so the residual
 risk is a client that *cannot* solve.
@@ -265,14 +265,14 @@ BotShieldRequestTrigger api-burst-trap path="/api/*/burst" \
 ```
 
 First-match wins (declaration order). On match, the path family's
-`status=challenge-pass` short-circuits to `DECLINED` (real handler runs); any
+`status=nochallenge` short-circuits to `DECLINED` (real handler runs); any
 other status is the response code.
 
 ### Cookie triggers
 
 ```apache
 BotShieldCookieTrigger session-active cookie=sessionid \
-    status=challenge-pass credit=10
+    status=nochallenge credit=10
 BotShieldCookieTrigger weak-session cookie=sessionid=guest \
     penalty=15 log=guest-session
 BotShieldCookieTrigger no-cookies cookies=none \
@@ -295,7 +295,7 @@ Predicate shapes:
   HMAC check). Predicates against the module's own `_bs_session`
   cookie name are rejected — use these instead.
 
-Cookie family accumulates: `status=challenge-pass` keeps walking and
+Cookie family accumulates: `status=nochallenge` keeps walking and
 collecting credits/penalties from later cookie triggers. First
 non-pass status short-circuits.
 
@@ -303,7 +303,7 @@ non-pass status short-circuits.
 
 ```apache
 SetEnvIfExpr "%{HTTP:CF-Connecting-IP} =~ /:/" BS_IPV6=1
-BotShieldEnvTrigger ipv6-hint env=BS_IPV6 status=challenge-pass credit=2
+BotShieldEnvTrigger ipv6-hint env=BS_IPV6 status=nochallenge credit=2
 
 SetEnvIf User-Agent "(?i)\bcurl\b" BS_CLI=1
 BotShieldEnvTrigger curl-hint env=BS_CLI penalty=10 log=cli
@@ -347,7 +347,7 @@ covered in [captcha](captcha.md).
 Feedback runs on the response path but its side effect is
 future-request state (the flagged-IP write). Both
 `BotShieldEnabled LogOnly` and per-trigger `mode=observe` apply —
-either gates the filter into logging `feedback-trigger:<event>:
+either gates the filter into logging `feedbacktrigger:<event>:
 observe` and skipping the SHM mutation. See
 [staging](staging.md).
 
@@ -400,7 +400,7 @@ Two action verbs:
   request's score (positive penalty / negative credit). SUM
   accumulates across triggers.
 - **`action=tier_floor min=<tier>`** — set a minimum tier; `<tier>`
-  is `pass` / `non-interactive` / `interactive` / `captcha`. MAX accumulates
+  is `pass` / `noninteractive` / `interactive` / `captcha`. MAX accumulates
   (strictest wins).
 
 The `reset` keyword is directive-level (not an action verb): a
@@ -437,7 +437,7 @@ paired score + tier_floor rows used to carry:
 | `honeypot_hit` | `score add=+60`, `tier_floor min=captcha` |
 | `fake_bot` | `score add=+80`, `tier_floor min=captcha` |
 | `scanner_probe` | `score add=+50`, `tier_floor min=interactive` |
-| `pow_fail_streak` | `score add=+30`, `tier_floor min=non-interactive` |
+| `pow_fail_streak` | `score add=+30`, `tier_floor min=noninteractive` |
 | `app_verified_human` | `score add=-80` |
 | `app_verified_session` | `score add=-40` |
 | `app_trust_signal` | `score add=-20` |
@@ -504,7 +504,7 @@ declare `BotShieldTrigger reset` in the child:
 
 <Location "/api/internal">
     BotShieldTrigger reset
-    BotShieldTrigger status=challenge-pass log=internal-allow
+    BotShieldTrigger status=nochallenge log=internal-allow
 </Location>
 ```
 
@@ -512,9 +512,9 @@ declare `BotShieldTrigger reset` in the child:
 scopes (and clears any earlier `BotShieldTrigger` entries
 appended in the same scope before the reset).
 
-### `challenge-pass` waives the challenge, not the policy
+### `nochallenge` waives the challenge, not the policy
 
-`status=challenge-pass` means "do not put an interstitial in front of
+`status=nochallenge` means "do not put an interstitial in front of
 this request". It does not mean "exempt this request from everything".
 Rate limits and robots.txt Disallow still apply to a request that
 matched such a rule.
@@ -527,13 +527,20 @@ was therefore also making them unratelimitable across most of the site,
 and nothing in the config said so.
 
 The rule still shadows later rules on the same path: this family is
-first-match-wins and a `challenge-pass` declared first stops the walk,
+first-match-wins and a `nochallenge` declared first stops the walk,
 exactly as before. What changed is only that the walk continues into
 the enforcement stages rather than returning.
 
-`pass` remains accepted as a synonym, so existing configs keep working.
-The longer spelling is the one to write, because the short one invited
-precisely the reading that was wrong.
+`pass` is no longer accepted, and a config still using it fails
+configtest rather than reloading with a changed meaning. The word was
+ambiguous in practice and not just in principle: the decision log
+emitted `tier=pass` on 14,066 lines of a single day on one deployment,
+meaning "no challenge was served", so an operator grepping for the
+rule spelling and the outcome spelling got each other's matches.
+
+`nochallenge` is now the only spelling, on every surface. It says what
+happens rather than what the module declined to do, and it carries no
+dash, so it survives being split out of a `reason` token.
 
 ## Safeguard
 
@@ -564,9 +571,9 @@ the in-line challenge is suppressed.
 
 Sites staging a fresh deployment with aggressive thresholds
 are the most likely to trip this. Watch the
-`tier_pass_total` counter for an unusual climb under "safeguard"
+`tier_nochallenge_total` counter for an unusual climb under "safeguard"
 reasons in the decision log (safeguard rolls into pass for metric
-binning; the decision log reason `challenge-safeguard` is the
+binning; the decision log reason `challengesafeguard` is the
 filter).
 
 ## Where to next

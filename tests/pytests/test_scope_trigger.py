@@ -63,9 +63,9 @@ def test_scope_trigger_status_blocks_inside_location_only(
         f"got {outside.status_code}"
     )
     assert any(
-        "scope-trigger" in l["reason"] and l.get("path", "").startswith("/trap")
+        "scopetrigger" in l["reason"] and l.get("path", "").startswith("/trap")
         for l in lines
-    ), f"expected scope-trigger reason on /trap; got {[l.get('reason') for l in lines]}"
+    ), f"expected scopetrigger reason on /trap; got {[l.get('reason') for l in lines]}"
 
 
 # --- flag= action replaces BotShieldFlagIP -------------------------
@@ -76,7 +76,7 @@ def test_scope_trigger_flag_persists_to_next_request(
 ):
     """A BotShieldTrigger flag=honeypot_hit in <Location> writes
     the flag into the SHM flagged-IP table; the next request from
-    the same IP hits the default flag-trigger reaction
+    the same IP hits the default flagtrigger reaction
     (tier_floor=captcha + +60 score) — same behavior the legacy
     BotShieldFlagIP directive provided."""
     with config_override(
@@ -97,7 +97,7 @@ def test_scope_trigger_flag_persists_to_next_request(
 
     assert lines, "no decision line for the follow-up request"
     reason = lines[-1]["reason"]
-    assert "flagged-ip" in reason, (
+    assert "flaggedip" in reason, (
         f"follow-up request didn't pick up the honeypot flag; "
         f"reason={reason}"
     )
@@ -131,11 +131,11 @@ def test_scope_trigger_reset_drops_inherited(
     assert "/api/users" in by_path, f"missing /api/users line; got paths={list(by_path)}"
     assert "/api/health" in by_path, f"missing /api/health line; got paths={list(by_path)}"
 
-    assert "scope-trigger:api-tax" in by_path["/api/users"]["reason"], (
+    assert "scopetrigger:api-tax" in by_path["/api/users"]["reason"], (
         f"taxed request should carry the inherited tax reason; "
         f"reason={by_path['/api/users']['reason']}"
     )
-    assert "scope-trigger" not in by_path["/api/health"]["reason"], (
+    assert "scopetrigger" not in by_path["/api/health"]["reason"], (
         f"reset scope should drop the inherited tax; "
         f"reason={by_path['/api/health']['reason']}"
     )
@@ -166,7 +166,7 @@ def test_scope_trigger_observe_mode_does_not_enforce(
     )
     assert lines
     reason = lines[-1]["reason"]
-    assert "scope-trigger:staging-trial:observe" in reason, (
+    assert "scopetrigger:staging-trial:observe" in reason, (
         f"observe match should appear in reason with :observe suffix; "
         f"reason={reason}"
     )

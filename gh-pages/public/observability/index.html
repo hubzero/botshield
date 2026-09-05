@@ -179,8 +179,8 @@ BotShieldDecisionLog &quot;|/usr/sbin/rotatelogs -n 7 \
 </code></pre>
 <p>Line shape — the same <code>key=value</code> payload as the error-log line, with an
 ISO-8601 UTC timestamp in front and the User-Agent appended:</p>
-<pre><code>2026-07-31T15:50:07.677Z tier=pass outcome=block ip=203.0.113.9 score=0
-    cookie=minted provider=- alg=- reason=&quot;env-trigger:login-trap:0&quot;
+<pre><code>2026-07-31T15:50:07.677Z tier=nochallenge outcome=block ip=203.0.113.9 score=0
+    cookie=minted provider=- alg=- reason=&quot;envtrigger:login-trap:0&quot;
     path=&quot;/login?return=...&quot; ua=&quot;Mozilla/5.0 ...&quot;
 </code></pre>
 <p>Because it is written by the module rather than mod_log_config, it is
@@ -234,7 +234,7 @@ commit time by a small awk validator (<code>tests/scripts/decision-log- awk-vali
 <tbody>
 <tr>
 <td><code>tier</code></td>
-<td><code>none</code>, <code>pass</code>, <code>non-interactive</code>, <code>interactive</code>, <code>captcha</code>, <code>safeguard</code></td>
+<td><code>none</code>, <code>pass</code>, <code>noninteractive</code>, <code>interactive</code>, <code>captcha</code>, <code>safeguard</code></td>
 </tr>
 <tr>
 <td><code>outcome</code></td>
@@ -250,7 +250,7 @@ commit time by a small awk validator (<code>tests/scripts/decision-log- awk-vali
 </tr>
 <tr>
 <td><code>alg</code></td>
-<td><code>-</code>, <code>sha256-zeros</code>, <code>captcha-&lt;provider&gt;</code></td>
+<td><code>-</code>, <code>sha256zeros</code>, <code>captcha-&lt;provider&gt;</code></td>
 </tr>
 <tr>
 <td><code>reason</code></td>
@@ -281,7 +281,7 @@ attestation list:</p>
 </tr>
 <tr>
 <td><code>react_ms:&lt;n&gt;</code></td>
-<td>Client-measured reveal → click, ms. <code>-1</code> on the non-interactive tier, which has no click.</td>
+<td>Client-measured reveal → click, ms. <code>-1</code> on the noninteractive tier, which has no click.</td>
 </tr>
 <tr>
 <td><code>attest:&lt;a&gt;+&lt;b&gt;</code></td>
@@ -293,7 +293,7 @@ attestation list:</p>
 are bounded above by <code>ms</code>, which the client cannot influence.
 Overstating one costs real wall time; understating it gains nothing. A
 claim exceeding the server's own total is a lie the server can prove,
-and is reported as <code>attest:impossible-timing</code>.</p>
+and is reported as <code>attest:impossibletiming</code>.</p>
 <p>Their value is excluding the network: <code>react_ms</code> is a human reaction
 with no RTT in it, which the server figure can never isolate.</p>
 <h3 id="attestation-probes">Attestation probes</h3>
@@ -339,7 +339,7 @@ and that promise has to survive contact with this code.</p>
 <td>Click landed under 150ms after the checkbox appeared</td>
 </tr>
 <tr>
-<td><code>impossible-timing</code></td>
+<td><code>impossibletiming</code></td>
 <td>Client-reported timing exceeds the server's own total</td>
 </tr>
 </tbody>
@@ -580,11 +580,11 @@ dashboard as <strong>Client classification</strong> and in Prometheus as
 <td>UA matched the allow list <strong>and</strong> the IP is in that crawler's published ranges.</td>
 </tr>
 <tr>
-<td><code>known-bot</code></td>
+<td><code>knownbot</code></td>
 <td>UA is in the bot directory, but not IP-verified.</td>
 </tr>
 <tr>
-<td><code>unknown-bot</code></td>
+<td><code>unknownbot</code></td>
 <td>UA has bot-shaped tokens with no directory entry, <strong>or no User-Agent at all</strong>.</td>
 </tr>
 <tr>
@@ -597,23 +597,23 @@ dashboard as <strong>Client classification</strong> and in Prometheus as
 </tr>
 </tbody>
 </table>
-<p>A request with no <code>User-Agent</code> header counts as <code>unknown-bot</code>, not
+<p>A request with no <code>User-Agent</code> header counts as <code>unknownbot</code>, not
 <code>unknown</code>. Absence of the header is not ambiguity: every real browser
 sends one, so we positively know the client is not a browser, and
 filing it under <code>unknown</code> overstated our uncertainty. It also dominated
 that bucket — 84% of <code>unknown</code> on this deployment — which made 41% of
 all traffic look like a classifier gap when it was a well-understood
 scanner population already being challenged.</p>
-<p>The reason chain still separates the two cases: <code>unknown-bot:no-ua</code>
-versus <code>unknown-bot:&lt;token&gt;</code> for a UA that named itself bot-shaped.</p>
+<p>The reason chain still separates the two cases: <code>unknownbot:no-ua</code>
+versus <code>unknownbot:&lt;token&gt;</code> for a UA that named itself bot-shaped.</p>
 <p>Rate limiting meters absent-UA traffic in its <strong>own</strong> aggregate rather
-than the shared <code>unknown-bot</code> one. At ~39k requests/day against ~2k for
+than the shared <code>unknownbot</code> one. At ~39k requests/day against ~2k for
 the rest of that bucket, sharing would hold the budget permanently
 exhausted and 429 every genuine unknown bot as collateral.</p>
 <p>The distinction that matters operationally is <code>verified-bot</code> vs
 <code>fake-bot</code>: both send the same User-Agent, and only the IP cross-check
 separates them. A rising <code>fake-bot</code> count is someone impersonating a
-crawler; a rising <code>known-bot</code> count with <code>verified-bot</code> flat can mean a
+crawler; a rising <code>knownbot</code> count with <code>verified-bot</code> flat can mean a
 ranges file has gone stale rather than that traffic changed.</p>
 <p>The metrics index is a deliberate copy of <code>bs_ua_class_label</code> rather
 than a cast of it. This one is persisted in the state file, so its
@@ -835,7 +835,7 @@ cookie harvesting. Both verify identically; only <code>solved</code> carries pro
 that a challenge was passed. A large <code>ok</code> share means clients are
 holding cookies they never earned — on one production hub 70% of
 valid-cookie traffic sent no User-Agent at all, replaying minted
-cookies to suppress the <code>dropped-cookie</code> penalty. <code>cookie_ok_total</code>
+cookies to suppress the <code>droppedcookie</code> penalty. <code>cookie_ok_total</code>
 rising while <code>cookie_solved_total</code> stays flat is that signature. Before 2026-08-01 the
 PoW path emitted nothing at all, so a deployment running the silent or
 interactive tier with no captcha provider reported a permanent 0% solve rate
@@ -850,7 +850,7 @@ pass-through gave bots free access for the safeguard TTL, the
 redirect makes the failure visible to legitimate clients and
 gives bots a non-protected page to land on. The matching
 <code>outcome=redirect</code> increments <code>outcome_redirect_total</code>; tier
-counts go to <code>tier_pass_total</code> (safeguard bins into pass for the
+counts go to <code>tier_nochallenge_total</code> (safeguard bins into nochallenge for the
 tier counter).</p>
 <h3 id="reason-name-vocabulary">Reason-name vocabulary</h3>
 <p>The <code>reason</code> field is a comma-joined list of reason tokens captured
@@ -865,56 +865,93 @@ takes the shape <code>&lt;family&gt;:&lt;name&gt;</code> so the source family is
 </thead>
 <tbody>
 <tr>
-<td><code>missing-user-agent</code>, <code>missing-accept-language</code>, <code>scraper-ua:&lt;pattern&gt;</code></td>
+<td><code>missinguseragent</code>, <code>missingacceptlanguage</code>, <code>missingua</code>, <code>missingal</code>, <code>scraperua:&lt;pattern&gt;</code></td>
 <td>Built-in heuristics</td>
 </tr>
 <tr>
-<td><code>first-sight-ip</code></td>
+<td><code>firstsightip</code></td>
 <td>Bloom filter</td>
 </tr>
 <tr>
-<td><code>verified-&lt;name&gt;</code>, <code>fake-&lt;name&gt;</code>, <code>bot-unverified</code></td>
-<td>allow list</td>
+<td><code>droppedcookie</code></td>
+<td>cookie was offered and not returned</td>
 </tr>
 <tr>
-<td><code>rate-limit-exceeded:&lt;name&gt;</code></td>
+<td><code>browser:&lt;family&gt;</code></td>
+<td>browser classifier</td>
+</tr>
+<tr>
+<td><code>emptyua</code>, <code>unknownua</code></td>
+<td>User-Agent absent, or present but unclassified</td>
+</tr>
+<tr>
+<td><code>knownbot:&lt;slug&gt;</code>, <code>unknownbot:&lt;slug&gt;</code></td>
+<td>bot directory</td>
+</tr>
+<tr>
+<td><code>verifiedbot:&lt;name&gt;</code>, <code>fakebot:&lt;name&gt;</code></td>
+<td>allow list, after the reverse-DNS and CIDR check</td>
+</tr>
+<tr>
+<td><code>flaggedip</code></td>
+<td>the flagged-IP table</td>
+</tr>
+<tr>
+<td><code>botrate:&lt;slug|@botgroup&gt;</code></td>
+<td>per-bot rate limit</td>
+</tr>
+<tr>
+<td><code>ratelimitexceeded:&lt;name&gt;</code>, <code>ratelimitabuse:&lt;name&gt;</code></td>
 <td>rate limit</td>
 </tr>
 <tr>
-<td><code>robots-block:&lt;group&gt;</code></td>
+<td><code>robotsblock:&lt;group&gt;</code></td>
 <td>robots.txt</td>
 </tr>
 <tr>
-<td><code>flag-trigger:&lt;flag&gt;</code></td>
+<td><code>flagtrigger:&lt;flag&gt;</code></td>
 <td>flag-trigger score action</td>
 </tr>
 <tr>
-<td><code>flag-tier-floor:&lt;tier&gt;</code></td>
+<td><code>flagtierfloor:&lt;tier&gt;</code></td>
 <td>flag-trigger tier-floor action</td>
 </tr>
 <tr>
-<td><code>path-trigger:&lt;name&gt;</code>, <code>cookie-trigger:&lt;name&gt;</code>, <code>env-trigger:&lt;name&gt;</code>, <code>load-trigger:&lt;name&gt;</code>, <code>feedback-trigger:&lt;event&gt;</code></td>
+<td><code>requesttrigger:&lt;name&gt;</code>, <code>cookietrigger:&lt;name&gt;</code>, <code>envtrigger:&lt;name&gt;</code>, <code>loadtrigger:&lt;name&gt;</code>, <code>scopetrigger:&lt;name&gt;</code>, <code>feedbacktrigger:&lt;event&gt;</code></td>
 <td>trigger families</td>
+</tr>
+<tr>
+<td><code>challengesafeguard</code>, <code>safeguardredirect</code></td>
+<td>safeguard</td>
+</tr>
+<tr>
+<td><code>observabilityendpoint</code></td>
+<td>a request to the dashboard or metrics endpoint</td>
 </tr>
 <tr>
 <td><code>&lt;reason&gt;:observe</code></td>
 <td>Any of the above with <code>mode=observe</code> or under <code>BotShieldEnabled LogOnly</code> (see <a href="../staging/index.html">staging</a>)</td>
 </tr>
 <tr>
-<td><code>would-flag-trigger:&lt;flag&gt;:observe</code>, <code>would-block:&lt;name&gt;</code>, <code>would-rate-limit:&lt;name&gt;</code></td>
-<td>Observe-mode &quot;would have done&quot; reasons</td>
-</tr>
-<tr>
-<td><code>challenge-safeguard</code></td>
-<td>safeguard redirect</td>
+<td><code>wouldflagtrigger:&lt;flag&gt;:observe</code></td>
+<td>Observe-mode &quot;would have done&quot; reason</td>
 </tr>
 </tbody>
 </table>
+<p>Every token above is dashless, and deliberately so. The <code>reason</code>
+field joins tokens with commas and their parts with colons, and a
+token that also contained a dash left a reader guessing whether a
+given dash was a separator or part of a name. Splitting on a comma
+and then a colon now yields whole names every time.</p>
+<p>Dashes that remain are not module vocabulary: a bot slug such as
+<code>claude-searchbot</code>, a botgroup selector such as <code>@ai-train</code>, and an
+operator's own <code>log=</code> label all keep whatever spelling they were
+given, and all of them appear only after the first colon.</p>
 <h3 id="verbose-prose-line">Verbose prose line</h3>
 <p>Alongside the structured line, the prose line carries the per-
 reason penalty values (not just the names) for forensic debugging:</p>
-<pre><code>mod_botshield: &lt;action&gt; effective=37 tier=non-interactive heuristic=37
-    cookie_score=0 reasons=[first-sight-ip:5,missing-accept-language:15,scraper-ua:python-requests:50]
+<pre><code>mod_botshield: &lt;action&gt; effective=37 tier=noninteractive heuristic=37
+    cookie_score=0 reasons=[firstsightip:5,missingacceptlanguage:15,scraperua:python-requests:50]
 </code></pre>
 <p>Grep the log for the request, read the reasons array, see exactly
 which signals contributed and how much.</p>
@@ -949,7 +986,7 @@ WARNING). Drift is loud, not silent.</p>
 <tr>
 <td><code>botshield_tier_&lt;t&gt;_total</code></td>
 <td>5</td>
-<td>one per non-<code>safeguard</code> tier; <code>safeguard</code> bins into <code>pass</code></td>
+<td>one per non-<code>safeguard</code> tier; <code>safeguard</code> bins into <code>nochallenge</code></td>
 </tr>
 <tr>
 <td><code>botshield_outcome_&lt;o&gt;_total</code></td>
@@ -1158,12 +1195,12 @@ botshield_resp_status_mismatch_total &gt; 0
 </code></pre>
 <h3 id="sample-scrape">Sample scrape</h3>
 <pre><code>$ curl -s http://localhost/botshield/metrics | head -20
-# HELP botshield_tier_pass_total Decisions where the request passed.
-# TYPE botshield_tier_pass_total counter
-botshield_tier_pass_total 1428931
-# HELP botshield_tier_non_interactive_total Decisions where the non-interactive tier was issued.
-# TYPE botshield_tier_non_interactive_total counter
-botshield_tier_non_interactive_total 84217
+# HELP botshield_tier_nochallenge_total Decisions at tier=nochallenge (no challenge served, request DECLINED).
+# TYPE botshield_tier_nochallenge_total counter
+botshield_tier_nochallenge_total 1428931
+# HELP botshield_tier_noninteractive_total Decisions at tier=noninteractive (self-solving widget served).
+# TYPE botshield_tier_noninteractive_total counter
+botshield_tier_noninteractive_total 84217
 # HELP botshield_attestation_fail_total Solves arriving with at least one failed attestation probe.
 # TYPE botshield_attestation_fail_total counter
 botshield_attestation_fail_total 2
@@ -1230,7 +1267,7 @@ it is a normal thing to do.</p>
 scrapers                10    60s   &quot;wget|curl|python&quot;          *
 
 ## Tier thresholds (effective)
-non-interactive      20   configured
+noninteractive      20   configured
 interactive          50   configured
 captcha              80   configured
 

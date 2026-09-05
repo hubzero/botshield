@@ -633,7 +633,7 @@ void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     return out;
 }
 
-/* Compiled-in default flag-trigger rule set.
+/* Compiled-in default flagtrigger rule set.
  *
  * Seeded into every server scope's scfg->flag_triggers at post_config
  * time so the module Just Works with zero config — operators don't
@@ -927,7 +927,7 @@ static const struct {
       BS_PENALTY_SCRAPER_UA,     BS_TIER_PASS },
     /* == BS_DEFAULT_SCORE_NON_INTERACTIVE. Both post-cookie heuristics fire only
      * when the request carries no usable cookie, so together they mean
-     * "no session context"; at the non-interactive threshold an enabled scope
+     * "no session context"; at the noninteractive threshold an enabled scope
      * challenges that by default, with no rule for the operator to
      * write. */
     { BS_H_FIRST_SIGHT_IP, BS_HEUR_ACT_SCORE,
@@ -1197,7 +1197,7 @@ static int bs_init_shm_layout(apr_pool_t *pconf, apr_pool_t *ptemp,
     apr_size_t vhost_bytes = sizeof(bs_vhost_dir)
                            + (apr_size_t)vhost_n * sizeof(bs_metrics);
     /* E2.1 — fixed-size table of rate-limit counter slots. Sized to
-     * fit the bot-directory (~640 known-bot slugs + verified-bots,
+     * fit the bot-directory (~640 knownbot slugs + verified-bots,
      * each pre-allocated one slot when BotShieldBotRateLimit is
      * configured) plus directive rate-limits + robots.txt group
      * counters + generous headroom for directory growth between
@@ -1208,7 +1208,7 @@ static int bs_init_shm_layout(apr_pool_t *pconf, apr_pool_t *ptemp,
      * limit slots — operators graceful-restart for major directory
      * drops. Dynamic watchdog-driven slot allocation is a future
      * enhancement; new slugs in the meantime fall through to the
-     * unknown-bot / fake-bot aggregate slots (graceful degradation,
+     * unknownbot / fake-bot aggregate slots (graceful degradation,
      * no request failures). */
     #define BS_E21_RATE_SLOTS 2048
     apr_size_t e21_rate_bytes = BS_E21_RATE_SLOTS * sizeof(bs_rate_counter);
@@ -1624,7 +1624,7 @@ static void bs_init_state_persistence(apr_pool_t *pconf, server_rec *s,
  *     parse time, because we need pconf's allocator for the
  *     resulting apr_ipsubnet_t objects:
  *       - ua_only==1 (operator said `*`): no ranges loaded;
- *         request-time match gives known-bot:<name> (score 0,
+ *         request-time match gives knownbot:<name> (score 0,
  *         no verified-bot credit since no IP check happened).
  *       - inline_cidrs set: parse via
  *         bs_allow_load_ranges_from_string.
@@ -2687,22 +2687,22 @@ static void bs_log_logonly_hint(server_rec *s)
     }
 }
 
-/* Default the PoW algorithm to sha256-zeros when no BotShieldAlgorithm
+/* Default the PoW algorithm to sha256zeros when no BotShieldAlgorithm
  * directive was provided. Same lookup_defaults mechanism as the
  * auto-secret: populate the server-scope dir_cfg, let the existing
  * merge fall through into every <Location> that didn't override.
  *
- * sha256-zeros is the only standalone-meaningful PoW algorithm; the
+ * sha256zeros is the only standalone-meaningful PoW algorithm; the
  * captcha-* slots in the registry require provider-specific directives
  * (BotShieldCaptchaProvider + SiteKey + SecretFile) before they're
  * useful, so they're never something an operator would land on
  * by accident. Defaulting here means "BotShieldEnabled On" suffices
- * for the common case (non-interactive + interactive PoW tiers); captcha tier still
+ * for the common case (noninteractive + interactive PoW tiers); captcha tier still
  * needs its provider config but the cookie-alg side is auto-populated
  * by bs_captcha_set_provider. */
 static void bs_populate_default_algorithm(server_rec *s)
 {
-    const bs_pow_algorithm *alg = bs_find_algorithm("sha256-zeros");
+    const bs_pow_algorithm *alg = bs_find_algorithm("sha256zeros");
     if (!alg) return;   /* registry slot unexpectedly missing */
     for (server_rec *sv = s; sv; sv = sv->next) {
         bs_dir_cfg *dcfg = ap_get_module_config(
@@ -4341,7 +4341,7 @@ const char *bs_cohort_resolve(cmd_parms *cmd, bs_cohort *out,
          * @bot and @fake-bot are class selectors rather than botgroups:
          * they match the classifier's verdict directly. A botgroup can
          * only name a bot the UA directory already knows, so before
-         * these existed class=unknown-bot could not be named in a rule
+         * these existed class=unknownbot could not be named in a rule
          * at all, and "act on every bot" had to be spelled as one rule
          * per botgroup -- which silently missed that class. */
         if (!ua[1]) {

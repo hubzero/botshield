@@ -468,7 +468,7 @@ int bs_strike_record_429(request_rec *r, const unsigned char ip[16],
 
     /* Load-shed under heavy contention — same rationale as
      * bs_flagged_ip_add. A dropped strike just means the attacker
-     * gets one extra 429 before the rate-limit-abuse escalation
+     * gets one extra 429 before the ratelimitabuse escalation
      * kicks in; retrying from the same IP will hit the lock when
      * it's free. */
     apr_status_t rv = apr_global_mutex_trylock(bs_shm.mutex);
@@ -653,7 +653,7 @@ int bs_safeguard_check(const unsigned char ip[16], apr_int64_t now,
 
 /* E17 — read present_count for this IP (lockless seqlock). Used by
  * the embedded → M7 fallback decision: after N consecutive
- * non-interactive-tier-embedded dispatches without _bs_session,
+ * noninteractive-tier-embedded dispatches without _bs_session,
  * the embedded short-circuit is bypassed and M7 issues. */
 apr_uint32_t bs_safeguard_present_count(const unsigned char ip[16],
                                         apr_int64_t now,

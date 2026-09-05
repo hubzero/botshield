@@ -45,10 +45,10 @@ def test_normal_user_passes_through(fresh_ip, log_slice):
     assert resp.status_code == 200
 
     assert any(
-        d["tier"] == "pass" and d["outcome"] == "allow"
+        d["tier"] == "nochallenge" and d["outcome"] == "allow"
         for d in lines
     ), (
-        f"expected tier=pass outcome=allow for ip={fresh_ip}; "
+        f"expected tier=nochallenge outcome=allow for ip={fresh_ip}; "
         f"got: {lines}"
     )
 
@@ -59,7 +59,7 @@ def test_normal_user_passes_through(fresh_ip, log_slice):
     # distinguish "no cookie at all" (cookie=absent) from "no cookie
     # in, fresh one going out".
     assert any(
-        d["tier"] == "pass" and d["cookie"] == "minted"
+        d["tier"] == "nochallenge" and d["cookie"] == "minted"
         for d in lines
     ), (
         f"expected cookie=minted on a fresh visitor's pass through; "

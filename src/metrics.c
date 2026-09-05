@@ -38,8 +38,8 @@ static int bs_m_tier_idx(const char *s)
 {
     if (!s) return -1;
     if (strcmp(s, "none")    == 0) return BS_M_TIER_NONE;
-    if (strcmp(s, "pass")    == 0) return BS_M_TIER_PASS;
-    if (strcmp(s, "non-interactive") == 0) return BS_M_TIER_NONINTERACTIVE;
+    if (strcmp(s, "nochallenge") == 0) return BS_M_TIER_PASS;
+    if (strcmp(s, "noninteractive") == 0) return BS_M_TIER_NONINTERACTIVE;
     if (strcmp(s, "interactive") == 0) return BS_M_TIER_INTERACTIVE;
     if (strcmp(s, "captcha") == 0) return BS_M_TIER_CAPTCHA;
     /* E10 — safeguard activations land in the decision log as
@@ -48,7 +48,7 @@ static int bs_m_tier_idx(const char *s)
      * bin them into the pass counter — they are functionally
      * pass-through (no challenge issued, request reaches origin).
      * Operators wanting to dashboard safeguard rate scrape the
-     * decision log for reason="challenge-safeguard". */
+     * decision log for reason="challengesafeguard". */
     if (strcmp(s, "safeguard") == 0) return BS_M_TIER_PASS;
     return -1;
 }
@@ -70,8 +70,8 @@ const char *bs_m_outcome_name(int idx)
 }
 
 static const char *const bs_m_class_names[BS_M_CLASS_COUNT] = {
-    "browser", "verified-bot", "known-bot",
-    "unknown-bot", "fake-bot", "unknown"
+    "browser", "verified-bot", "knownbot",
+    "unknownbot", "fake-bot", "unknown"
 };
 
 const char *bs_m_class_name(int idx)
@@ -788,7 +788,7 @@ static void bs_m_sum_ring(const bs_metrics_slot *ring, int nslots,
  * on -- which is the honest denominator for "how much of what arrives
  * here is a bot".
  *
- * Rendered on the non-interactive interstitial. Only the percentage leaves the
+ * Rendered on the noninteractive interstitial. Only the percentage leaves the
  * module: absolute volumes are operational data, and a public page
  * reachable by anyone who trips a challenge is not where they belong.
  */
@@ -1553,7 +1553,7 @@ void bs_decision_log(request_rec *r,
      * tier, and any tilde-prefixed counterfactual all stay at
      * INFO. */
     int level = APLOG_INFO;
-    int boring = (tier && strcmp(tier, "pass") == 0)
+    int boring = (tier && strcmp(tier, "nochallenge") == 0)
               && (outcome && strcmp(outcome, "allow") == 0)
               && score == 0
               && (!tag || !*tag)
@@ -1766,7 +1766,7 @@ static void bs_m_emit_gauge(request_rec *r, const char *name,
  * are exactly what a pie renders unreadable. Ratios against a limit are
  * meters. Eleven outcome classes are a table, because past ~7 classes a
  * chart stops adding anything. The tier ladder is an ORDINAL ramp (one
- * hue, light→dark) rather than categorical hues, because pass -> non-interactive
+ * hue, light→dark) rather than categorical hues, because pass -> noninteractive
  * → form → captcha is an ordered escalation, not four unrelated
  * identities.
  *
@@ -2301,7 +2301,7 @@ static void bs_d_audience_panel(request_rec *r, const bs_metrics_window *w,
                      "Reputation cookie state", labels, vals, fills, 7, tot);
     }
     {
-        const char *labels[] = { "pass", "non-interactive", "interactive",
+        const char *labels[] = { "nochallenge", "noninteractive", "interactive",
                                  "captcha" };
         const char *fills[]  = { "var(--t1)", "var(--t2)",
                                  "var(--t3)", "var(--t4)" };
@@ -2390,7 +2390,7 @@ static void bs_log_observability_line(request_rec *r, const char *reason)
 
 void bs_log_observability_request(request_rec *r)
 {
-    bs_log_observability_line(r, "observability-endpoint");
+    bs_log_observability_line(r, "observabilityendpoint");
 }
 
 /* An attempt on a surface the client is not permitted to read.
@@ -3203,7 +3203,7 @@ int bs_dashboard_bots_handler(request_rec *r)
         bs_bot_rate_state *st = scfg->bot_rate_state;
         struct { const char *name; bs_bot_rate_slot *h; const char *what; }
         agg[] = {
-            { "unknown-bot", st->unknown_bot_holder,
+            { "unknownbot", st->unknown_bot_holder,
               "bot-like UA that matches no directory entry" },
             { "no-ua", st->no_ua_holder,
               "no User-Agent header at all" },
@@ -4306,12 +4306,12 @@ int bs_dashboard_responses_handler(request_rec *r)
      * had to be done during two incidents. It is also the fastest
      * check that a threshold change did what was intended. */
     {
-        const char *tl[] = { "none", "pass", "non-interactive",
+        const char *tl[] = { "none", "nochallenge", "noninteractive",
                              "interactive", "captcha" };
         /* pass is the good outcome and wears it; the three challenge
          * tiers escalate through the categorical slots rather than the
          * status palette, because a captcha is not a "worse" outcome
-         * than a non-interactive challenge, it is a costlier one. */
+         * than a noninteractive challenge, it is a costlier one. */
         const char *tf[] = { "var(--neutral)", "var(--good)", "var(--c1)",
                              "var(--c4)", "var(--c2)" };
         apr_uint64_t tv[BS_M_TIER_COUNT], tt = 0;
@@ -4992,11 +4992,11 @@ int bs_metrics_handler(request_rec *r)
     bs_m_emit_counter(r, "tier_none_total",
         "Decisions reaching no tier (pre-tier terminations like debug/asset/misconfig).",
         bs_mload(&m->tier[BS_M_TIER_NONE]));
-    bs_m_emit_counter(r, "tier_pass_total",
-        "Decisions at tier=pass (no challenge served, request DECLINED).",
+    bs_m_emit_counter(r, "tier_nochallenge_total",
+        "Decisions at tier=nochallenge (no challenge served, request DECLINED).",
         bs_mload(&m->tier[BS_M_TIER_PASS]));
-    bs_m_emit_counter(r, "tier_non_interactive_total",
-        "Decisions at tier=non-interactive (self-solving widget served).",
+    bs_m_emit_counter(r, "tier_noninteractive_total",
+        "Decisions at tier=noninteractive (self-solving widget served).",
         bs_mload(&m->tier[BS_M_TIER_NONINTERACTIVE]));
     bs_m_emit_counter(r, "tier_interactive_total",
         "Decisions at tier=interactive (checkbox PoW interstitial served).",
@@ -5086,7 +5086,7 @@ int bs_metrics_handler(request_rec *r)
 
     bs_m_emit_counter(r, "outcome_allow_total",
         "Decisions that let the request through (pass tier, asset bypass, "
-        "non-interactive embedded pass-through, safeguard pass).",
+        "noninteractive embedded pass-through, safeguard pass).",
         bs_mload(&m->outcome[BS_M_OUTCOME_ALLOW]));
     bs_m_emit_counter(r, "outcome_challenged_total",
         "Decisions that served an interstitial.",
@@ -5097,7 +5097,7 @@ int bs_metrics_handler(request_rec *r)
         bs_mload(&m->outcome[BS_M_OUTCOME_VERIFIED]));
     bs_m_emit_counter(r, "outcome_block_total",
         "Requests blocked: invalid cookie, failed captcha verify, "
-        "rate-limit-exceeded, etc.",
+        "ratelimitexceeded, etc.",
         bs_mload(&m->outcome[BS_M_OUTCOME_BLOCK]));
     bs_m_emit_counter(r, "outcome_failopen_total",
         "Siteverify calls that failed open (timeout, network error, provider 5xx).",
@@ -5130,7 +5130,7 @@ int bs_metrics_handler(request_rec *r)
     bs_m_emit_counter(r, "cookie_solved_total",
         "Rep cookies that verified fully AND carry solve proof "
         "(passes_non_interactive/form/captcha). The only cookie state that "
-        "waives first-sight-ip / dropped-cookie.",
+        "waives firstsightip / droppedcookie.",
         bs_mload(&m->cookie[BS_M_COOKIE_SOLVED]));
     bs_m_emit_counter(r, "cookie_expired_total",
         "Rep cookies with valid signature but past expires_at.",
@@ -5419,8 +5419,8 @@ int bs_status_hook(request_rec *r, int flags)
     /* Two parallel columns: tier distribution on the left, outcome
      * highlights on the right. Keeps the row count tight. */
     const struct { const char *label; apr_uint64_t val; } rows[] = {
-        { "pass",    bs_mload(&m->tier[BS_M_TIER_PASS])    },
-        { "non-interactive", bs_mload(&m->tier[BS_M_TIER_NONINTERACTIVE]) },
+        { "nochallenge", bs_mload(&m->tier[BS_M_TIER_PASS]) },
+        { "noninteractive", bs_mload(&m->tier[BS_M_TIER_NONINTERACTIVE]) },
         { "interactive", bs_mload(&m->tier[BS_M_TIER_INTERACTIVE]) },
         { "captcha", bs_mload(&m->tier[BS_M_TIER_CAPTCHA]) },
         { "none",    bs_mload(&m->tier[BS_M_TIER_NONE])    },

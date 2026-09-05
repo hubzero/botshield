@@ -1,4 +1,4 @@
-/* bot_directory.h — known-bot UA classifier backed by a bundled
+/* bot_directory.h — knownbot UA classifier backed by a bundled
  * snapshot of the Cloudflare bot directory, with optional runtime
  * override.
  *
@@ -19,7 +19,7 @@
  *
  * Purpose: distinguish "this UA belongs to a known crawler/bot" from
  * "this UA looks like a real user." Used as the classifier feeding
- * BotShield's robots.txt wildcard-rule application — known-bot UAs
+ * BotShield's robots.txt wildcard-rule application — knownbot UAs
  * fall under wildcard policy; everything else (real browsers, custom
  * apps) bypasses it.
  *

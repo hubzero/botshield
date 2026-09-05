@@ -183,14 +183,14 @@ Rotation is supported via <code>BotShieldSecondarySecretFile</code> — see the
 
     BotShieldEnabled    on
     BotShieldSecretFile /etc/botshield/secret
-    BotShieldAlgorithm  sha256-zeros
+    BotShieldAlgorithm  sha256zeros
 &lt;/VirtualHost&gt;
 </code></pre>
 <p>That's the floor. Everything else (tier thresholds, forgiveness,
 allow lists, captcha providers, triggers) ships with reasonable
 defaults documented on the <a href="../site-model/index.html">site model</a> and
 <a href="../directives/index.html">directives</a> pages.</p>
-<p><code>BotShieldAlgorithm sha256-zeros</code> is currently the only built-in PoW
+<p><code>BotShieldAlgorithm sha256zeros</code> is currently the only built-in PoW
 algorithm. Other names (<code>sha384-zeros</code>, <code>pbkdf2-sha256</code>, <code>argon2id</code>)
 are reserved registry slots that fail with a clear &quot;not implemented&quot;
 diagnostic if you set them — there's no silent fallback.</p>
@@ -218,10 +218,10 @@ The default <code>LogLevel warn</code> hides them. Bump just this module:</p>
 </code></pre>
 <p>You should see one line per request:</p>
 <pre><code>[Tue Apr 28 10:00:00 2026] [botshield:info] mod_botshield:
-  decision tier=pass outcome=allow ip=192.0.2.1 score=0
+  decision tier=nochallenge outcome=allow ip=192.0.2.1 score=0
   cookie=absent provider=- alg=- reason=&quot;-&quot; path=&quot;/&quot;
 </code></pre>
-<p><code>tier=pass outcome=allow</code> is the happy path — the module
+<p><code>tier=nochallenge outcome=allow</code> is the happy path — the module
 inspected the request, decided it didn't warrant friction, and
 declined so Apache served the real content.</p>
 <p><strong>4. The challenge widget renders.</strong> Force a challenge by spoofing a
@@ -237,7 +237,7 @@ tuning workflow and <a href="../observability/index.html">observability</a> for 
 to inspect what each request scored.</p>
 <h2 id="test-that-pow-completes">Test that PoW completes</h2>
 <p>Open the gated URL in a real browser. The interstitial should
-auto-submit (non-interactive tier) or render the checkbox widget (interactive tier),
+auto-submit (noninteractive tier) or render the checkbox widget (interactive tier),
 solve a few seconds of SHA-256 PoW, and bounce back to the real page.
 Reload — you should see the real content immediately. The browser
 now holds a <code>_bs_session</code> cookie carrying the signed envelope and

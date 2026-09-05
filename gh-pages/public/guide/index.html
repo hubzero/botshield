@@ -148,7 +148,7 @@ renders to GitHub Pages via <code>gh-pages/</code>; see the
 <a href="#documentation">documentation index</a> below.</p>
 <h2 id="what-ships">What ships</h2>
 <ul>
-<li><strong>Tiered challenges.</strong> Pass / non-interactive (auto-submitted proof
+<li><strong>Tiered challenges.</strong> Pass / noninteractive (auto-submitted proof
 of work) / interactive (checkbox widget) / captcha (third-party
 provider) — Turnstile, hCaptcha, reCAPTCHA v2 + v3, Friendly
 Captcha, GeeTest v4. Per-scope configurable.</li>
@@ -193,7 +193,7 @@ deleting the <code>.so</code>.</p>
 
     BotShieldEnabled    On
     BotShieldSecretFile /etc/botshield/secret
-    BotShieldAlgorithm  sha256-zeros
+    BotShieldAlgorithm  sha256zeros
 &lt;/VirtualHost&gt;
 </code></pre>
 <p>Generate the secret with <code>openssl rand -hex 32 &gt; /etc/botshield/secret; chmod 600 /etc/botshield/secret</code>. Full setup walkthrough in
@@ -305,7 +305,7 @@ framework.</li>
 <tr>
 <td><code>&lt;prefix&gt;/embedded.js</code></td>
 <td>GET</td>
-<td>Embedded non-interactive verify wrapper</td>
+<td>Embedded noninteractive verify wrapper</td>
 </tr>
 <tr>
 <td><code>&lt;prefix&gt;/embedded-worker.js</code></td>
@@ -330,7 +330,7 @@ framework.</li>
 <tr>
 <td><code>&lt;prefix&gt;/safeguard-info</code></td>
 <td>GET</td>
-<td>Built-in explainer page rendered when challenge-safeguard trips (and no <code>BotShieldSafeguardRedirectURL</code> is set). Accepts <code>?return=&lt;urlencoded path&gt;</code></td>
+<td>Built-in explainer page rendered when challengesafeguard trips (and no <code>BotShieldSafeguardRedirectURL</code> is set). Accepts <code>?return=&lt;urlencoded path&gt;</code></td>
 </tr>
 </tbody>
 </table>

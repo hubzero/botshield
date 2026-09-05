@@ -1,8 +1,8 @@
 /* heuristics.c — built-in score signals exposed via
  * BotShieldHeuristicTrigger. See heuristics.h for the operator model.
  *
- * The four named heuristics (missing-ua / missing-al / scraper-ua /
- * first-sight-ip) live in a metadata registry below. Each has a
+ * The four named heuristics (missingua / missingal / scraperua /
+ * firstsightip) live in a metadata registry below. Each has a
  * predicate function (compiled in) and a phase tag. At post_config,
  * scfg->heuristic_triggers is seeded with default actions matching
  * the prior hardcoded behavior (40/15/50/5 score adds). At request
@@ -26,8 +26,8 @@
 
 /* Compile-time predicate signature. Returns a non-NULL reason string
  * on match (caller emits it through bs_score_add), NULL on no match.
- * For most heuristics the reason is the metadata name; scraper-ua
- * builds "scraper-ua-<token>" so the matched token shows in the
+ * For most heuristics the reason is the metadata name; scraperua
+ * builds "scraperua-<token>" so the matched token shows in the
  * decision log. The pool is r->pool; reason strings come from
  * apr_psprintf or string literals. */
 typedef const char *(*bs_heuristic_pred_fn)(request_rec *r);
@@ -35,13 +35,13 @@ typedef const char *(*bs_heuristic_pred_fn)(request_rec *r);
 static const char *bs_pred_missing_ua(request_rec *r)
 {
     const char *ua = apr_table_get(r->headers_in, "User-Agent");
-    return (!ua || !*ua) ? "missing-user-agent" : NULL;
+    return (!ua || !*ua) ? "missinguseragent" : NULL;
 }
 
 static const char *bs_pred_missing_al(request_rec *r)
 {
     const char *al = apr_table_get(r->headers_in, "Accept-Language");
-    return (!al || !*al) ? "missing-accept-language" : NULL;
+    return (!al || !*al) ? "missingacceptlanguage" : NULL;
 }
 
 static const char *bs_pred_scraper_ua(request_rec *r)
@@ -61,30 +61,30 @@ static const char *bs_pred_scraper_ua(request_rec *r)
     };
     for (int i = 0; scraper_tokens[i]; i++) {
         if (strstr(ua, scraper_tokens[i])) {
-            return apr_psprintf(r->pool, "scraper-ua-%s",
+            return apr_psprintf(r->pool, "scraperua-%s",
                                 scraper_tokens[i]);
         }
     }
     return NULL;
 }
 
-/* first-sight-ip's predicate is the bloom-miss check in bs_handler;
+/* firstsightip's predicate is the bloom-miss check in bs_handler;
  * by the time bs_apply_heuristic is called for it, the caller has
  * already established the match. The reason string is fixed. */
 static const char *bs_pred_first_sight_ip(request_rec *r)
 {
     (void)r;
-    return "first-sight-ip";
+    return "firstsightip";
 }
 
-/* Same dispatch shape as first-sight-ip: bs_handler establishes the
+/* Same dispatch shape as firstsightip: bs_handler establishes the
  * Bloom-hit + cookie-absent / bad-sig / bad-format combination
  * before calling bs_apply_heuristic; this predicate just returns the
  * fixed reason name. */
 static const char *bs_pred_dropped_cookie(request_rec *r)
 {
     (void)r;
-    return "dropped-cookie";
+    return "droppedcookie";
 }
 
 typedef struct {
@@ -93,26 +93,26 @@ typedef struct {
 } bs_heuristic_def;
 
 static const bs_heuristic_def bs_heuristic_defs[] = {
-    { { "missing-ua",      BS_H_MISSING_UA,      BS_HP_HEADER, BS_PENALTY_MISSING_UA },
+    { { "missingua",      BS_H_MISSING_UA,      BS_HP_HEADER, BS_PENALTY_MISSING_UA },
       bs_pred_missing_ua },
-    { { "missing-al",      BS_H_MISSING_AL,      BS_HP_HEADER, BS_PENALTY_MISSING_AL },
+    { { "missingal",      BS_H_MISSING_AL,      BS_HP_HEADER, BS_PENALTY_MISSING_AL },
       bs_pred_missing_al },
-    { { "scraper-ua",      BS_H_SCRAPER_UA,      BS_HP_HEADER, BS_PENALTY_SCRAPER_UA },
+    { { "scraperua",      BS_H_SCRAPER_UA,      BS_HP_HEADER, BS_PENALTY_SCRAPER_UA },
       bs_pred_scraper_ua },
     /* 20 == BS_DEFAULT_SCORE_NON_INTERACTIVE, deliberately. Both post-cookie
      * heuristics fire only when the request carries no usable cookie,
-     * so together they mean "no session context". dropped-cookie (known
-     * IP) was already 25 and acted on; first-sight-ip (new IP) sat at 5
+     * so together they mean "no session context". droppedcookie (known
+     * IP) was already 25 and acted on; firstsightip (new IP) sat at 5
      * and did not, which left exactly one hole: a crawler spreading one
      * request across many addresses is first-sight every time and was
-     * never challenged on score alone. Setting it to the non-interactive
+     * never challenged on score alone. Setting it to the noninteractive
      * threshold closes that without an operator having to write a rule
      * -- an enabled scope now challenges any request with no session
      * context, invisibly, and a real browser clears it in one
      * auto-submitted round trip. */
-    { { "first-sight-ip",  BS_H_FIRST_SIGHT_IP,  BS_HP_POST_COOKIE, BS_PENALTY_FIRST_SIGHT_IP },
+    { { "firstsightip",  BS_H_FIRST_SIGHT_IP,  BS_HP_POST_COOKIE, BS_PENALTY_FIRST_SIGHT_IP },
       bs_pred_first_sight_ip },
-    { { "dropped-cookie",  BS_H_DROPPED_COOKIE,  BS_HP_POST_COOKIE, BS_PENALTY_DROPPED_COOKIE },
+    { { "droppedcookie",  BS_H_DROPPED_COOKIE,  BS_HP_POST_COOKIE, BS_PENALTY_DROPPED_COOKIE },
       bs_pred_dropped_cookie },
 };
 #define BS_HEURISTIC_COUNT \
@@ -158,9 +158,9 @@ static void bs_apply_heuristic_entry(request_rec *r,
         bs_score_add(r, e->score_add, 3600, reason);
     } else if (e->action == BS_HEUR_ACT_TIER_FLOOR) {
         /* Tier-floor application currently flows through the
-         * flag-trigger walker's tier_floor accumulator; for now
+         * flagtrigger walker's tier_floor accumulator; for now
          * emit a reason so the decision log shows the matched
-         * heuristic, and let the flag-trigger walker handle the
+         * heuristic, and let the flagtrigger walker handle the
          * actual MAX-tier accumulation if the operator wires
          * tier-floor flags via flag triggers. */
         bs_score_add(r, 0, 0,
@@ -189,7 +189,7 @@ void bs_run_builtin_heuristics(request_rec *r)
 
     /* Pre-compute predicate results for every HEADER-phase heuristic
      * once. Multiple operator entries can bind to the same heuristic
-     * (e.g. score add=20 + tier_floor min=non-interactive), so
+     * (e.g. score add=20 + tier_floor min=noninteractive), so
      * caching the
      * evaluation avoids re-running the predicate per entry. */
     const char *match_reason[BS_H_COUNT];
@@ -238,11 +238,11 @@ void bs_apply_heuristic(request_rec *r, bs_heuristic_id id)
  * Same shape as BotShieldFlagTrigger. Five accepted forms:
  *
  *   BotShieldHeuristicTrigger all reset
- *   BotShieldHeuristicTrigger missing-ua reset
- *   BotShieldHeuristicTrigger missing-ua reset action=score add=20
- *   BotShieldHeuristicTrigger scraper-ua action=score add=80
- *   BotShieldHeuristicTrigger first-sight-ip action=tier_floor
- *     min=non-interactive
+ *   BotShieldHeuristicTrigger missingua reset
+ *   BotShieldHeuristicTrigger missingua reset action=score add=20
+ *   BotShieldHeuristicTrigger scraperua action=score add=80
+ *   BotShieldHeuristicTrigger firstsightip action=tier_floor
+ *     min=noninteractive
  *
  * `all reset` is consumed at post_config time and clears every
  * compiled-in default + every prior operator entry, giving the
@@ -288,8 +288,8 @@ const char *bs_set_heuristic_trigger(cmd_parms *cmd, void *dconf,
     if (!hm) {
         return apr_psprintf(cmd->pool,
             "BotShieldHeuristicTrigger: unknown heuristic '%s'. "
-            "Known names: missing-ua, missing-al, scraper-ua, "
-            "first-sight-ip; or 'all reset' to wipe.", name);
+            "Known names: missingua, missingal, scraperua, "
+            "firstsightip; or 'all reset' to wipe.", name);
     }
 
     int idx = 1;
@@ -368,8 +368,8 @@ const char *bs_set_heuristic_trigger(cmd_parms *cmd, void *dconf,
             const char *arg = argv[idx];
             if (strncasecmp(arg, "min=", 4) == 0) {
                 const char *t = arg + 4;
-                if      (strcasecmp(t, "pass")    == 0) e->tier_min = BS_TIER_PASS;
-                else if (strcasecmp(t, "non-interactive") == 0)
+                if      (strcasecmp(t, "nochallenge") == 0) e->tier_min = BS_TIER_PASS;
+                else if (strcasecmp(t, "noninteractive") == 0)
                     e->tier_min = BS_TIER_NONINTERACTIVE;
                 else if (strcasecmp(t, "interactive") == 0)
                     e->tier_min = BS_TIER_INTERACTIVE;
@@ -377,7 +377,7 @@ const char *bs_set_heuristic_trigger(cmd_parms *cmd, void *dconf,
                 else {
                     return apr_psprintf(cmd->pool,
                         "BotShieldHeuristicTrigger '%s' action=tier_floor: "
-                        "min='%s' must be one of pass/non-interactive/interactive/captcha",
+                        "min='%s' must be one of nochallenge/noninteractive/interactive/captcha",
                         name, t);
                 }
                 saw_min = 1;

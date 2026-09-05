@@ -69,7 +69,7 @@ def test_repeated_429_escalates_to_403(config_override, fresh_ip,
         with log_slice as slc:
             codes = _hammer(fresh_ip, CORP_UA, 6)
             tag_lines = slc.grep(
-                r"rate-limit-abuse threshold crossed for 'corpbot'"
+                r"ratelimitabuse threshold crossed for 'corpbot'"
             )
             decision_lines = slc.decision_lines(ip=fresh_ip)
 
@@ -95,11 +95,11 @@ def test_repeated_429_escalates_to_403(config_override, fresh_ip,
         f"log line missing operator tag: {tag_lines[0]}"
     )
     # The escalated request's decision line carries the
-    # rate-limit-abuse:<name> reason (not rate-limit-exceeded).
+    # ratelimitabuse:<name> reason (not ratelimitexceeded).
     abuse = [d for d in decision_lines
-             if "rate-limit-abuse:corpbot" in d["reason"]]
+             if "ratelimitabuse:corpbot" in d["reason"]]
     assert abuse, (
-        f"no rate-limit-abuse decision line; "
+        f"no ratelimitabuse decision line; "
         f"decision_lines={decision_lines}"
     )
 
@@ -126,7 +126,7 @@ def test_below_strike_threshold_stays_at_429(
         with log_slice as slc:
             codes = _hammer(fresh_ip, CORP_UA, 6)
             tag_lines = slc.grep(
-                r"rate-limit-abuse threshold crossed"
+                r"ratelimitabuse threshold crossed"
             )
 
     assert codes[:2] == [200, 200], f"first 2 must admit; got {codes}"

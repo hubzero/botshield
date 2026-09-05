@@ -366,6 +366,47 @@ embedded-verify PoW path. App-bridge keys
 are out of rotation scope; rotate those by reloading with the new
 file.
 
+## Upgrading through the vocabulary change
+
+The module's own words are now dashless, on every surface, and the
+`pass` spelling is gone. This breaks configs and dashboards that used
+the old ones, so read this before putting a newer module on a server
+that already runs an older config.
+
+**The module and its config must move together.** `status=pass` is a
+configtest failure now, not a warning. A server whose module is
+upgraded while its config still says `pass` will pass its running
+state until something reloads it, and then fail to come back. Stage
+both, run `apachectl configtest` against the pair, and only then
+reload.
+
+What to change in a config:
+
+| Old | New |
+|---|---|
+| `status=pass`, `status=challenge-pass` | `status=nochallenge` |
+| `tier=pass` | `tier=nochallenge` |
+| `tier=non-interactive`, `min=non-interactive` | `noninteractive` |
+| `BotShieldHeuristicTrigger first-sight-ip` and the other dashed heuristic names | `firstsightip`, `missingua`, `missingal`, `scraperua`, `droppedcookie` |
+
+What to change outside the config. Decision-log tokens lost their
+dashes, so a grep or alert matching `request-trigger`, `known-bot`,
+`flag-tier-floor` or `first-sight-ip` now matches nothing; the
+[reason-name vocabulary](observability.md#reason-name-vocabulary)
+lists the current set. Two Prometheus counters were renamed to agree
+with the log, `botshield_tier_pass_total` to
+`botshield_tier_nochallenge_total` and
+`botshield_tier_non_interactive_total` to
+`botshield_tier_noninteractive_total`, so any panel or alerting rule
+naming those needs the new name.
+
+What deliberately did not change: bot slugs such as
+`claude-searchbot`, the `@ai-train` and `@fake-bot` botgroup
+selectors, the `BotShieldClassify` pass names, your own `log=` labels,
+and the challenge endpoint paths. Every one of those is either
+somebody else's identifier or a URL, and all of them appear in a
+`reason` token only after the first colon.
+
 ## Where to next
 
 - Tier model, scoring, decision log: [site model](site-model.md).

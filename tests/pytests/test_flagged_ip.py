@@ -1,5 +1,5 @@
 """M5.1: honeypot hit writes the client IP into the SHM flagged-IP
-table; next request from the same IP picks up reason=flagged-ip.
+table; next request from the same IP picks up reason=flaggedip.
 
 Port of tests/integration/m5_1_flagged_ip.sh.
 """
@@ -29,8 +29,8 @@ def test_flagged_ip_propagates(rate_slot_ip, log_slice):
 
         lines = slc.decision_lines(ip=rate_slot_ip)
 
-    flagged = [d for d in lines if "flagged-ip" in d.get("reason", "")]
+    flagged = [d for d in lines if "flaggedip" in d.get("reason", "")]
     assert flagged, (
-        f"no decision for ip={rate_slot_ip} carried reason=flagged-ip; "
+        f"no decision for ip={rate_slot_ip} carried reason=flaggedip; "
         f"all lines for this IP: {lines}"
     )

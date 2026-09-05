@@ -47,7 +47,7 @@ _DEFAULT_MIX = (
     }),
     # /form-demo, not "/": this slice exists to drive FORM tier, and a
     # scraper UA on / scores 20 (first-sight 5 + missing-AL 5 +
-    # scraper-ua 10), which is silent tier. Form needs 50, so the
+    # scraperua 10), which is silent tier. Form needs 50, so the
     # botshield_tier_interactive_total assertion in test_soak could never
     # grow. /form-demo pins the tier instead of hoping the score
     # lands there.
@@ -133,7 +133,7 @@ class LoadGenerator:
         path, headers = random.choice(self._weighted)
         # Distinct client IP per request. Without this every request
         # arrives as 127.0.0.1, which is Bloom-known the moment the
-        # soak starts, so each one collects dropped-cookie (25) and is
+        # soak starts, so each one collects droppedcookie (25) and is
         # challenged -- outcome_allow_total never grows and the soak
         # reports "driver not landing traffic" while landing plenty.
         # 198.18.0.0/15 is the RFC 2544 benchmarking range, reserved

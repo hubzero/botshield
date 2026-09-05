@@ -104,14 +104,14 @@ def test_cookie_short_circuit_blocks_env_and_path(
     )
     assert lines
     reason = lines[-1]["reason"]
-    assert "cookie-trigger:c-block" in reason, (
+    assert "cookietrigger:c-block" in reason, (
         f"cookie match missing from decision reason; reason={reason}"
     )
-    assert "env-trigger:e-block" not in reason, (
+    assert "envtrigger:e-block" not in reason, (
         f"env trigger must not have run after cookie short-circuit; "
         f"reason={reason}"
     )
-    assert "request-trigger:p-block" not in reason, (
+    assert "requesttrigger:p-block" not in reason, (
         f"path trigger must not have run after cookie short-circuit; "
         f"reason={reason}"
     )
@@ -141,8 +141,8 @@ def test_env_short_circuit_blocks_path(
     )
     assert lines
     reason = lines[-1]["reason"]
-    assert "env-trigger:e-block" in reason
-    assert "request-trigger:p-block" not in reason, (
+    assert "envtrigger:e-block" in reason
+    assert "requesttrigger:p-block" not in reason, (
         f"path trigger must not have run after env short-circuit; "
         f"reason={reason}"
     )
@@ -161,10 +161,10 @@ def test_cookie_and_env_pass_then_path_runs(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldCookieTrigger c-pass cookies=none '
-        'status=pass penalty=3\n'
+        'status=nochallenge penalty=3\n'
         '    SetEnvIfExpr "true" BS_CROSS=1\n'
         '    BotShieldEnvTrigger e-pass env=BS_CROSS '
-        'status=pass penalty=7\n'
+        'status=nochallenge penalty=7\n'
         '    BotShieldRequestTrigger p-block path="/*" status=403',
         count=1,
     ):
@@ -178,9 +178,9 @@ def test_cookie_and_env_pass_then_path_runs(
     )
     assert lines
     reason = lines[-1]["reason"]
-    assert "cookie-trigger:c-pass" in reason, reason
-    assert "env-trigger:e-pass"    in reason, reason
-    assert "request-trigger:p-block"  in reason, reason
+    assert "cookietrigger:c-pass" in reason, reason
+    assert "envtrigger:e-pass"    in reason, reason
+    assert "requesttrigger:p-block"  in reason, reason
 
 
 # --- Load triggers in the shared family ----------------------------
@@ -215,8 +215,8 @@ def test_load_short_circuit_blocks_path(
     )
     assert lines
     reason = lines[-1]["reason"]
-    assert "load-trigger:l-block" in reason, reason
-    assert "request-trigger:p-block" not in reason, (
+    assert "loadtrigger:l-block" in reason, reason
+    assert "requesttrigger:p-block" not in reason, (
         f"path trigger must not have run after load short-circuit; "
         f"reason={reason}"
     )
@@ -236,7 +236,7 @@ def test_env_pass_then_load_blocks_path(
             'BotShieldEnabled On\n'
             '    SetEnvIfExpr "true" BS_CROSS=1\n'
             '    BotShieldEnvTrigger e-pass env=BS_CROSS '
-            'status=pass penalty=4\n'
+            'status=nochallenge penalty=4\n'
             '    BotShieldLoadTrigger l-block state=hot status=503\n'
             '    BotShieldRequestTrigger p-block path="/*" status=451',
             count=1,
@@ -253,9 +253,9 @@ def test_env_pass_then_load_blocks_path(
     )
     assert lines
     reason = lines[-1]["reason"]
-    assert "env-trigger:e-pass" in reason, reason
-    assert "load-trigger:l-block" in reason, reason
-    assert "request-trigger:p-block" not in reason, (
+    assert "envtrigger:e-pass" in reason, reason
+    assert "loadtrigger:l-block" in reason, reason
+    assert "requesttrigger:p-block" not in reason, (
         f"path trigger must not have run after load short-circuit; "
         f"reason={reason}"
     )
@@ -269,22 +269,22 @@ def test_env_trigger_no_double_apply_on_internal_redirect(
 ):
     """policy.c:223 — env triggers are gated on `ap_is_initial_req`
     so a 403 → ErrorDocument internal-redirect leg doesn't re-apply
-    the env-trigger side effect. Without the gate, a SetEnvIf-style
+    the envtrigger side effect. Without the gate, a SetEnvIf-style
     env that's set on both legs would have its penalty / flag-IP
     side effect applied twice — once on the original request, once
     on the ErrorDocument leg.
 
-    Setup: env=BS_CROSS on every request (status=pass + penalty so
-    we can see whether it fired in the reason trace), request-trigger
+    Setup: env=BS_CROSS on every request (status=nochallenge + penalty so
+    we can see whether it fired in the reason trace), requesttrigger
     on /start, ErrorDocument 403 → /error. Hit /start. The original
-    leg's decision line should carry env-trigger; the /error leg's
+    leg's decision line should carry envtrigger; the /error leg's
     decision line must NOT."""
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    SetEnvIfExpr "true" BS_CROSS=1\n'
         '    BotShieldEnvTrigger e-pass env=BS_CROSS '
-        'status=pass penalty=5\n'
+        'status=nochallenge penalty=5\n'
         '    BotShieldRequestTrigger p-block path="/start" status=403\n'
         '    ErrorDocument 403 /error',
         count=1,
@@ -304,14 +304,14 @@ def test_env_trigger_no_double_apply_on_internal_redirect(
     assert initial, (
         f"expected a decision line for /start; got paths={[l.get('path') for l in lines]}"
     )
-    assert "env-trigger:e-pass" in initial[-1]["reason"], (
-        f"env-trigger should fire on the initial /start leg; "
+    assert "envtrigger:e-pass" in initial[-1]["reason"], (
+        f"envtrigger should fire on the initial /start leg; "
         f"reason={initial[-1]['reason']}"
     )
 
     if redirect:
-        assert "env-trigger:e-pass" not in redirect[-1]["reason"], (
-            f"env-trigger must NOT re-fire on the ErrorDocument /error "
+        assert "envtrigger:e-pass" not in redirect[-1]["reason"], (
+            f"envtrigger must NOT re-fire on the ErrorDocument /error "
             f"internal-redirect leg (ap_is_initial_req gate); "
             f"reason={redirect[-1]['reason']}"
         )

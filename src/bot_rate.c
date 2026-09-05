@@ -524,7 +524,7 @@ void bs_bot_rate_init(apr_pool_t *pconf, server_rec *s, int *next_slot)
 
         /* Pass 3 — wildcard. For every directory slug not yet mapped,
          * allocate a separate slot at the wildcard's budget. Plus the
-         * four reserved aggregate slots (unknown-bot, no-ua, fake-bot,
+         * four reserved aggregate slots (unknownbot, no-ua, fake-bot,
          * wildcard-fallback). */
         if (st->wildcard_entry) {
             apr_uint32_t budget = st->wildcard_entry->budget;
@@ -542,8 +542,8 @@ void bs_bot_rate_init(apr_pool_t *pconf, server_rec *s, int *next_slot)
                 wildcard_count++;
             }
             st->unknown_bot_holder = allocate_holder(pconf, sv,
-                "unknown-bot aggregate", next_slot,
-                budget, window, "wildcard:unknown-bot", st->wildcard_entry->observe);
+                "unknownbot aggregate", next_slot,
+                budget, window, "wildcard:unknownbot", st->wildcard_entry->observe);
             st->no_ua_holder       = allocate_holder(pconf, sv,
                 "no-ua aggregate", next_slot,
                 budget, window, "wildcard:no-ua", st->wildcard_entry->observe);
@@ -566,7 +566,7 @@ void bs_bot_rate_init(apr_pool_t *pconf, server_rec *s, int *next_slot)
                 "%s%s%s%saggregate(s) (pool cursor at %d/%d)",
                 specific_count, robots_count, botgroup_count,
                 wildcard_count,
-                st->unknown_bot_holder        ? "unknown-bot "        : "",
+                st->unknown_bot_holder        ? "unknownbot "        : "",
                 st->no_ua_holder              ? "no-ua "              : "",
                 st->fake_bot_holder           ? "fake-bot "           : "",
                 st->wildcard_fallback_holder  ? "wildcard-fallback "  : "",
@@ -678,7 +678,7 @@ int bs_bot_rate_check(request_rec *r)
     bs_bot_rate_slot *holder = NULL;
     const char *slug_for_log = NULL;
 
-    /* Lookup order: known_slug → verified_name → unknown-bot
+    /* Lookup order: known_slug → verified_name → unknownbot
      * aggregate → fake-bot aggregate. */
     if (cls->known_slug && *cls->known_slug) {
         holder = apr_hash_get(st->by_slug, cls->known_slug,
@@ -690,7 +690,7 @@ int bs_bot_rate_check(request_rec *r)
                               APR_HASH_KEY_STRING);
         if (holder) slug_for_log = cls->verified_name;
     }
-    /* Before the unknown-bot check, because is_no_ua implies
+    /* Before the unknownbot check, because is_no_ua implies
      * is_unknown_bot and the more specific bucket must win. */
     if (!holder && cls->is_no_ua && st->no_ua_holder) {
         holder = st->no_ua_holder;
@@ -698,7 +698,7 @@ int bs_bot_rate_check(request_rec *r)
     }
     if (!holder && cls->is_unknown_bot && st->unknown_bot_holder) {
         holder = st->unknown_bot_holder;
-        slug_for_log = "unknown-bot";
+        slug_for_log = "unknownbot";
     }
     if (!holder && cls->is_fake_bot && st->fake_bot_holder) {
         holder = st->fake_bot_holder;
@@ -806,8 +806,8 @@ int bs_bot_rate_check(request_rec *r)
     if (!tripped) {
         return OK;
     }
-    /* Reported as whichever tier refused: "bot-rate:@ai-train" reads
-     * very differently from "bot-rate:claude-searchbot", and an
+    /* Reported as whichever tier refused: "botrate:@ai-train" reads
+     * very differently from "botrate:claude-searchbot", and an
      * operator seeing the latter would go tune the wrong budget. */
     const char *trip_label = tripped->label ? tripped->label
                            : (slug_for_log ? slug_for_log : "?");
@@ -823,7 +823,7 @@ int bs_bot_rate_check(request_rec *r)
          * a :observe-suffixed reason, don't 429 the request.
          * Mirrors the directive rate-limit cohort observe path. */
         bs_score_add(r, 0, 0,
-            apr_pstrcat(r->pool, "bot-rate:",
+            apr_pstrcat(r->pool, "botrate:",
                 slug_for_log ? slug_for_log : "?",
                 ":observe", NULL));
         bs_set_would_outcome(r, "~rate_limited");
@@ -843,7 +843,7 @@ int bs_bot_rate_check(request_rec *r)
      * spike. */
     bs_score_add(r, tripped_is_slug ? BS_PENALTY_RATE_LIMIT : 0,
                  tripped_is_slug ? 3600 : 0,
-                 apr_pstrcat(r->pool, "bot-rate:", trip_label, NULL));
+                 apr_pstrcat(r->pool, "botrate:", trip_label, NULL));
     if (bs_shm.metrics) {
         __atomic_fetch_add(&bs_shm.metrics->rate_limit_exceeded_total,
                            1, __ATOMIC_RELAXED);

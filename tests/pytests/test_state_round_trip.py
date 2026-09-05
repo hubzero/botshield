@@ -4,7 +4,7 @@ state file.
 1. Flag an IP by tripping the honeypot.
 2. Record baseline metrics.
 3. `systemctl restart apache2` (slow; why this test is @serial + @slow).
-4. Same IP request after restart still carries reason=flagged-ip.
+4. Same IP request after restart still carries reason=flaggedip.
 5. State-load log line says kept >= 1.
 6. shm_flagged_used gauge reflects the restored entries.
 
@@ -34,12 +34,12 @@ def test_state_file_survives_restart(rate_slot_ip, log_slice):
     # 3. Restart (pconf cleanup → state saved, new parent → state loaded).
     apache.restart()
 
-    # 4. Same IP post-restart: reason should still carry flagged-ip.
+    # 4. Same IP post-restart: reason should still carry flaggedip.
     with log_slice as slc:
         client.get("/", xff=rate_slot_ip)
         post_restart = slc.decision_lines(ip=rate_slot_ip)
 
-    flagged = [d for d in post_restart if "flagged-ip" in d.get("reason", "")]
+    flagged = [d for d in post_restart if "flaggedip" in d.get("reason", "")]
     assert flagged, (
         f"flag for ip={rate_slot_ip} didn't survive restart; "
         f"post-restart lines: {post_restart}"

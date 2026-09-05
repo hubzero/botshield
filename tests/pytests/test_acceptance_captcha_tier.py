@@ -72,7 +72,7 @@ def test_captcha_journey_end_to_end(pending_cookie, log_slice):
         lines = slc.decision_lines(outcome="verified", provider="turnstile")
 
     assert resp.status_code == 303
-    assert resp.headers.get("X-Botshield") == "captcha-ok"
+    assert resp.headers.get("X-Botshield") == "captchaok"
     verified = resp.cookies.get("__Host-bs_session")
     assert verified, "verify response didn't set __Host-bs_session"
     assert lines, (

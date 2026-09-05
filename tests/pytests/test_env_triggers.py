@@ -66,10 +66,10 @@ def test_env_trigger_penalty_on_presence(config_override, log_slice):
     assert base_lines and trig_lines
     base_reason = base_lines[-1]["reason"]
     trig_reason = trig_lines[-1]["reason"]
-    assert "env-trigger:suspect-ua" not in base_reason, (
+    assert "envtrigger:suspect-ua" not in base_reason, (
         f"non-curl UA should not trigger; reason={base_reason}"
     )
-    assert "env-trigger:suspect-ua" in trig_reason, (
+    assert "envtrigger:suspect-ua" in trig_reason, (
         f"curl UA should trigger; reason={trig_reason}"
     )
     # Tag rides the decision line.
@@ -91,7 +91,7 @@ def test_env_trigger_absent(config_override, log_slice, fresh_ip):
             lines = slc.decision_lines(ip=fresh_ip)
 
     assert lines
-    assert "env-trigger:no-marker" in lines[-1]["reason"], (
+    assert "envtrigger:no-marker" in lines[-1]["reason"], (
         f"!env=BS_MARKER should fire when no one sets BS_MARKER; "
         f"reason={lines[-1]['reason']}"
     )
@@ -121,8 +121,8 @@ def test_env_trigger_value_exact_match(config_override, log_slice):
             med_lines = slc.decision_lines(ip=ip_med)
 
     assert hi_lines and med_lines
-    assert "env-trigger:hi-match" in hi_lines[-1]["reason"]
-    assert "env-trigger:med-match" in med_lines[-1]["reason"]
+    assert "envtrigger:hi-match" in hi_lines[-1]["reason"]
+    assert "envtrigger:med-match" in med_lines[-1]["reason"]
 
 
 # --- status=<code> short-circuit ------------------------------------
@@ -164,7 +164,7 @@ def test_env_trigger_from_rewrite_producer(config_override, log_slice,
             lines = slc.decision_lines(ip=fresh_ip)
 
     assert lines
-    assert "env-trigger:rw-origin" in lines[-1]["reason"], (
+    assert "envtrigger:rw-origin" in lines[-1]["reason"], (
         f"RewriteRule [E=...] producer didn't light up the trigger; "
         f"reason={lines[-1]['reason']}"
     )
@@ -175,7 +175,7 @@ def test_env_trigger_from_rewrite_producer(config_override, log_slice,
 
 def test_env_trigger_flag_persists(config_override, log_slice):
     """Flag+ttl adds the IP to flagged-IP table; next request from
-    the same IP carries the bit's contribution as flagged-ip in the
+    the same IP carries the bit's contribution as flaggedip in the
     reason trace."""
     ip = _ips.fresh_ip()
     with config_override(
@@ -191,7 +191,7 @@ def test_env_trigger_flag_persists(config_override, log_slice):
             _g("/index.html", xff=ip)
             lines = slc.decision_lines(ip=ip)
     assert lines
-    assert "flagged-ip" in lines[-1]["reason"]
+    assert "flaggedip" in lines[-1]["reason"]
 
 
 # --- Precedence: first match wins (no accumulation) -----------------
@@ -215,8 +215,8 @@ def test_env_trigger_first_match_wins(config_override, log_slice,
             lines = slc.decision_lines(ip=fresh_ip)
     assert lines
     reason = lines[-1]["reason"]
-    assert "env-trigger:first" in reason, reason
-    assert "env-trigger:second" not in reason, (
+    assert "envtrigger:first" in reason, reason
+    assert "envtrigger:second" not in reason, (
         f"second trigger must NOT fire after first match wins; "
         f"reason={reason}"
     )

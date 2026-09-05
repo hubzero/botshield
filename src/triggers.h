@@ -12,7 +12,7 @@
  *   E7.3 BotShieldFeedbackTrigger event name      response-path
  *   E11.2 BotShieldLoadTrigger    load state      request-path
  *
- * The sixth (E14 flag-trigger) uses a separate action surface
+ * The sixth (E14 flagtrigger) uses a separate action surface
  * (score-add / tier_floor) whose entry type also lives here.
  *
  * The E2.1 rate-limit family and the E3 path-trigger family share
@@ -96,7 +96,7 @@ typedef struct {
      * bs_suppress_access_log in metrics.h for what it costs. */
     int           suppress_access_log;
     /* tier=<t>: route the match into a challenge tier instead of
-     * refusing it. -1 = unset. Distinct from flag= + a flag-trigger
+     * refusing it. -1 = unset. Distinct from flag= + a flagtrigger
      * tier_floor, which writes per-IP state with a TTL: this applies
      * to THIS request only, so a client that solves the challenge is
      * not re-challenged on its next request by a flag it cannot
@@ -138,11 +138,11 @@ typedef struct {
     const char         *ua_botgroup;
     /* @bot / @fake-bot — match on the classifier's verdict rather than
      * on a declared botgroup. @botgroup can only name a bot the UA
-     * directory already knows, which leaves class=unknown-bot (a
+     * directory already knows, which leaves class=unknownbot (a
      * bot-shaped UA with no directory entry) impossible to name in a
      * rule at all.
      *
-     * @bot deliberately means verified-bot + known-bot + unknown-bot,
+     * @bot deliberately means verified-bot + knownbot + unknownbot,
      * the same three the dashboard's Bots tab counts. A fake bot is a
      * UA claiming a crawler whose IP failed the cross-check -- it is
      * not a crawler, and folding it in here would put a spoofer inside
@@ -174,7 +174,7 @@ typedef struct {
      * to r->notes before the policy walk. -1 = unset.
      *
      * Exists because the two heuristics that gate almost all traffic --
-     * first-sight-ip and dropped-cookie -- are internal state, not
+     * firstsightip and droppedcookie -- are internal state, not
      * request properties, so a path= rule could not express what the
      * enclosing <Location> scope turned on. This is the larger of the
      * two: "no usable cookie" accounts for ~82% of challenges. The
@@ -339,7 +339,7 @@ typedef struct {
 } bs_rate_counter;
 
 /* ======================================================================
- * E14 flag-trigger family
+ * E14 flagtrigger family
  *
  * Predicate is "flag_bit is set on this request's IP-side or cookie-
  * side flag bitmap". Two runtime action verbs (SCORE / TIER_FLOOR);
@@ -388,8 +388,8 @@ int bs_cookie_pred_match(const bs_cookie_trigger_entry *e,
  *   BS_TEXEC_PASS_BREAK     — env/load-family pass; caller ends the loop
  *   BS_TEXEC_STATUS         — concrete status; caller returns a->status_code
  *
- * `family_tag` is the decision-log prefix ("cookie-trigger" /
- * "env-trigger" / "load-trigger" / "path-trigger"); `trigger_name`
+ * `family_tag` is the decision-log prefix ("cookietrigger" /
+ * "envtrigger" / "loadtrigger" / "path-trigger"); `trigger_name`
  * is the operator's per-rule label.
  * ====================================================================== */
 bs_trigger_exec_outcome bs_apply_trigger_action(

@@ -6,18 +6,21 @@ drift that M9.2 catches — this module lets every test import the
 same tuple instead of hand-rolling it.
 """
 
-# Tier names as the Prometheus counter metric suffix (underscore
-# form). The decision log's `tier=` field spells non-interactive with
-# a hyphen; `tier_log()` converts. Prometheus metric names may only
-# contain [a-zA-Z0-9_:], so the two spellings cannot be unified --
-# same split the providers below already have.
-TIERS = ("none", "pass", "non_interactive", "interactive", "captcha",
+# Tier names, spelled the one way. The metric suffix and the decision
+# log's `tier=` field used to disagree -- the log hyphenated and the
+# metric could not, because Prometheus names allow only [a-zA-Z0-9_:].
+# Running the words together satisfies both, so the split is gone and
+# `tier_log()` is now an identity kept for its call sites.
+TIERS = ("none", "nochallenge", "noninteractive", "interactive", "captcha",
          "safeguard")
 
 
 def tier_log(tier):
-    """Metric suffix -> decision-log spelling."""
-    return tier.replace("_", "-")
+    """Metric suffix -> decision-log spelling.
+
+    Identity now that both surfaces spell tiers the same way. Kept
+    so the call sites need not care whether they ever diverge again."""
+    return tier
 
 
 OUTCOMES = (

@@ -344,13 +344,13 @@ int bs_form_captcha_fixup(request_rec *r)
     if (res == BS_CAPTCHA_RATE_LIMITED) {
         apr_table_setn(r->err_headers_out, "Retry-After", "60");
         apr_table_setn(r->err_headers_out, "X-Botshield",
-                       "captcha-rate-limited");
+                       "captcharatelimited");
         return HTTP_TOO_MANY_REQUESTS;
     }
     if (res == BS_CAPTCHA_INFLIGHT_CAPPED) {
         apr_table_setn(r->err_headers_out, "Retry-After", "2");
         apr_table_setn(r->err_headers_out, "X-Botshield",
-                       "captcha-saturated");
+                       "captchasaturated");
         return HTTP_SERVICE_UNAVAILABLE;
     }
     if (res != BS_CAPTCHA_OK) {

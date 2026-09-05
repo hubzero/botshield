@@ -30,7 +30,7 @@ pytestmark = [pytest.mark.serial]
 BROWSER_UA = "Mozilla/5.0 (X11) Chrome/145"
 
 # These tests need an interstitial to parse, so they must force the
-# tier rather than rely on the ambient first-sight-ip default: the same
+# tier rather than rely on the ambient firstsightip default: the same
 # default that makes a fresh browser challenged here makes
 # test_acceptance_pass_tier fail, and vice versa. /silent-demo pins
 # silent tier in the dev vhost so neither test constrains the other.
@@ -49,8 +49,8 @@ def test_cookie_format_directive_unknown(config_override):
     # syntax check fails.
     with pytest.raises(Exception) as exc_info:
         with config_override(
-            r"BotShieldAlgorithm\s+sha256-zeros",
-            "BotShieldAlgorithm sha256-zeros\n"
+            r"BotShieldAlgorithm\s+sha256zeros",
+            "BotShieldAlgorithm sha256zeros\n"
             "    BotShieldCookieFormat gcm",
         ):
             pass

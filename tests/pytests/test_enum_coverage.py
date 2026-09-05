@@ -60,7 +60,7 @@ def _fire_verify(pending: str, ip: str):
 def test_all_reachable_outcomes_emitted(config_override, rate_slot_ip, log_slice):
     with log_slice as slc:
         # allow: must be a pass that CARRIES something. A plain
-        # browser-like request is the "boring pass" -- tier=pass,
+        # browser-like request is the "boring pass" -- tier=nochallenge,
         # outcome=allow, score=0, no reasons, no tag -- which
         # bs_decision_log deliberately demotes to DEBUG so operators
         # running at info see only decisions where something

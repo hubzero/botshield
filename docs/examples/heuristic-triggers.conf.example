@@ -25,16 +25,16 @@
 #   BotShieldHeuristicTrigger <name>|all [reset] [action=<verb> args...]
 #
 # Names:
-#   missing-ua       UA header absent or empty.
-#   missing-al       Accept-Language header absent or empty.
-#   scraper-ua       UA contains a known HTTP-library token (curl,
+#   missingua       UA header absent or empty.
+#   missingal       Accept-Language header absent or empty.
+#   scraperua       UA contains a known HTTP-library token (curl,
 #                    Wget, python-requests, urllib, httpx, aiohttp,
 #                    Go-http-client, okhttp, axios, scrapy, java,
 #                    libwww, lwp-request, ...).
-#   first-sight-ip   Client IP not seen in the rotating Bloom filter
+#   firstsightip   Client IP not seen in the rotating Bloom filter
 #                    (cookieless / signature-mismatched requests
 #                    only — sig-verified clients skip this signal).
-#   dropped-cookie   Client IP IS in the Bloom filter (it has been
+#   droppedcookie   Client IP IS in the Bloom filter (it has been
 #                    seen before) but the request carries no cookie
 #                    holding solve proof. Gated on solve proof rather
 #                    than mere cookie validity — a client that merely
@@ -43,7 +43,7 @@
 #
 # Action verbs (same as BotShieldFlagTrigger):
 #   action=score add=N             (signed; SUM across matching entries)
-#   action=tier_floor min=<tier>   (pass|non-interactive|interactive|captcha; MAX)
+#   action=tier_floor min=<tier>   (pass|noninteractive|interactive|captcha; MAX)
 #
 # Reset:
 #   BotShieldHeuristicTrigger <name> reset           # clear that name
@@ -52,11 +52,11 @@
 #                                                    # this scope declared
 #
 # Observe-mode (logs `<reason>:observe` instead of applying):
-#   BotShieldHeuristicTrigger missing-ua action=score add=40 mode=observe
+#   BotShieldHeuristicTrigger missingua action=score add=40 mode=observe
 
 # --- The starter slate -------------------------------------------------
 # Conservative score adds — none alone is enough to cross a
-# non-interactive threshold of 20 (a value you would set yourself; see
+# noninteractive threshold of 20 (a value you would set yourself; see
 # BotShieldScoreNonInteractive in docs/directives.md). Two together (a
 # curl with no Accept-Language: 40 + 5 + 20 first-sight = 65) clears an
 # interactive threshold of 50. The shape rewards "looks like a real
@@ -65,36 +65,36 @@
 # written; the module never reads this file, so it cannot drift from
 # those constants on its own — if you copy these lines, they are yours
 # to keep in sync.
-BotShieldHeuristicTrigger missing-ua       action=score add=40
-BotShieldHeuristicTrigger missing-al       action=score add=5
-BotShieldHeuristicTrigger scraper-ua       action=score add=10
-BotShieldHeuristicTrigger first-sight-ip   action=score add=20
-BotShieldHeuristicTrigger dropped-cookie   action=score add=25
+BotShieldHeuristicTrigger missingua       action=score add=40
+BotShieldHeuristicTrigger missingal       action=score add=5
+BotShieldHeuristicTrigger scraperua       action=score add=10
+BotShieldHeuristicTrigger firstsightip   action=score add=20
+BotShieldHeuristicTrigger droppedcookie   action=score add=25
 
 # --- Common overrides ------------------------------------------------
 #
 # Soften the missing-UA penalty (keep it as a signal but don't bump
 # tier on its own):
-#   BotShieldHeuristicTrigger missing-ua reset action=score add=10
+#   BotShieldHeuristicTrigger missingua reset action=score add=10
 #
 # Disable scraper-UA matching entirely (e.g., when a legitimate API
 # integration uses a Go-http-client UA):
-#   BotShieldHeuristicTrigger scraper-ua reset
+#   BotShieldHeuristicTrigger scraperua reset
 #
-# Promote first-sight-ip from a small score nudge to a tier_floor.
-# Every never-before-seen client lands in the non-interactive tier
+# Promote firstsightip from a small score nudge to a tier_floor.
+# Every never-before-seen client lands in the noninteractive tier
 # regardless of their other signals; a verified pass graduates them out:
-#   BotShieldHeuristicTrigger first-sight-ip reset
-#   BotShieldHeuristicTrigger first-sight-ip action=tier_floor min=non-interactive
+#   BotShieldHeuristicTrigger firstsightip reset
+#   BotShieldHeuristicTrigger firstsightip action=tier_floor min=noninteractive
 #
 # Stage a tighter scraper-UA penalty in observe mode for one release
 # before enforcing:
-#   BotShieldHeuristicTrigger scraper-ua action=score add=80 mode=observe
-#   # logs `scraper-ua-<token>:observe` on every fire; drop
+#   BotShieldHeuristicTrigger scraperua action=score add=80 mode=observe
+#   # logs `scraperua-<token>:observe` on every fire; drop
 #   # mode=observe once the rate looks right.
 #
 # Multiple actions on the same heuristic accumulate (SUM for score,
 # MAX for tier_floor). Example: keep the +10 score above AND add a
 # tier_floor for an extra-strict deployment:
-#   BotShieldHeuristicTrigger scraper-ua action=tier_floor min=interactive
+#   BotShieldHeuristicTrigger scraperua action=tier_floor min=interactive
 #   # combined effect: +10 score AND a tier floor at interactive

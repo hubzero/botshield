@@ -1,6 +1,6 @@
 /* bot_rate.h — slug-keyed bot rate limit.
  *
- * Cap aggregate request volume per known-bot slug (or per-pattern set
+ * Cap aggregate request volume per knownbot slug (or per-pattern set
  * resolved against the bot directory). The slug universe is bounded
  * by the directory size, so all slot allocation happens at
  * post_config — no dynamic SHM mutation, no per-request hash inserts.
@@ -15,14 +15,14 @@
  * own counter at the wildcard budget — matches robots.txt convention
  * (per-bot self-discipline) and bounds total slot use to the
  * directory size. Three reserved aggregate slots back the wildcard,
- * also at its budget: unknown-bot and fake-bot (labels with no
+ * also at its budget: unknownbot and fake-bot (labels with no
  * stable slug), plus wildcard-fallback for slugs a mid-run directory
  * refresh added after the post_config snapshot.
  *
  * Lookup at request time: O(1) hash probe.
  *   1. cls->known_slug    → slug-table lookup
  *   2. cls->verified_name → slug-table lookup
- *   3. cls->is_unknown_bot → unknown-bot aggregate slot
+ *   3. cls->is_unknown_bot → unknownbot aggregate slot
  *   4. cls->is_fake_bot    → fake-bot aggregate slot
  *   5. otherwise → no rate limit applies. */
 #ifndef BOTSHIELD_BOT_RATE_H
@@ -115,7 +115,7 @@ typedef struct bs_bot_rate_state {
     apr_hash_t          *by_slug;            /* slug → bs_bot_rate_slot* */
     bs_bot_rate_slot    *unknown_bot_holder; /* NULL if no wildcard */
     /* Absent-UA traffic gets its own aggregate rather than sharing the
-     * unknown-bot one. On this deployment that is ~39k requests/day
+     * unknownbot one. On this deployment that is ~39k requests/day
      * against ~2k for everything else in that bucket, so sharing would
      * hold the shared budget permanently exhausted and 429 every
      * genuine unknown bot as collateral. */

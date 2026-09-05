@@ -1,4 +1,4 @@
-/* non_interactive.c — implementations behind non_interactive.h. E17 non-interactive tier
+/* non_interactive.c — implementations behind non_interactive.h. E17 noninteractive tier
  * verification handlers + their bootstrap-sig helpers. */
 
 #include "non_interactive.h"
@@ -30,7 +30,7 @@
 #include "captcha.h"   /* bs_captcha_siteverify for embedded-verify-provider */
 
 /* ===========================================================
- * Embedded non-interactive verification handlers.
+ * Embedded noninteractive verification handlers.
  *
  * Three endpoints under <prefix>/embedded*:
  *   GET  /botshield/embedded.js         — static wrapper script
@@ -39,7 +39,7 @@
  *
  * Activation: scope opts in via `BotShieldNonInteractiveMode embedded`.
  * Operator adds <script src="/botshield/embedded.js" defer> to their
- * page. When the request lands at non-interactive tier, BotShield serves
+ * page. When the request lands at noninteractive tier, BotShield serves
  * DECLINED (real content) instead of the M7 splash; the wrapper runs
  * on page-load, fetches the bootstrap, solves PoW in a Web Worker,
  * and POSTs back. The verify endpoint mints _bs_session the same
@@ -122,13 +122,13 @@ static const char BS_EMBEDDED_JS[] =
 " fetch('/botshield/embedded-bootstrap', {credentials:'same-origin'})\n"
 "  .then(function(r){ return r.ok ? r.json() : null; })\n"
 "  .then(function(j){\n"
-"   if (!j || j.mode !== 'non-interactive') return;\n"
+"   if (!j || j.mode !== 'noninteractive') return;\n"
 "   if (j.provider === 'turnstile') { runTurnstile(j); return; }\n"
 "   if (j.provider === 'recaptcha-v3') { runRecaptchaV3(j); return; }\n"
 "   if (j.provider === 'recaptcha-v2') { runRecaptchaV2(j); return; }\n"
 "   if (j.provider === 'hcaptcha') { runHCaptcha(j); return; }\n"
 "   if (j.provider === 'friendly') { runFriendly(j); return; }\n"
-"   if (j.provider !== 'pow-gcm' || !j.challenge) return;\n"
+"   if (j.provider !== 'powgcm' || !j.challenge) return;\n"
 "   var ch = j.challenge;\n"
 "   var w;\n"
 "   try { w = new Worker('/botshield/embedded-worker.js'); }\n"
@@ -139,7 +139,7 @@ static const char BS_EMBEDDED_JS[] =
 "      method:'POST', credentials:'same-origin',\n"
 "      headers:{'Content-Type':'application/json'},\n"
 "      body: JSON.stringify({\n"
-"       provider: 'pow-gcm',\n"
+"       provider: 'powgcm',\n"
 "       cookie_prefix: ch.cookie_prefix,\n"
 "       /* IP-bind round-trip. */\n"
 "       bound_ip: ch.bound_ip, bootstrap_sig: ch.bootstrap_sig,\n"
@@ -493,7 +493,7 @@ int bs_form_widget_handler(request_rec *r)
  *
  * Returns one of:
  *   {"mode":"off"}                          — cookie already valid; wrapper exits
- *   {"mode":"non-interactive","provider":"pow-gcm",...}
+ *   {"mode":"noninteractive","provider":"powgcm",...}
  *
  * The challenge object carries an opaque `cookie_prefix` — the same
  * AES-256-GCM-encrypted canonical form that bs_challenge_json emits
@@ -560,7 +560,7 @@ int bs_embedded_bootstrap_handler(request_rec *r,
         const char *action = cfg->captcha_expected_action
             ? cfg->captcha_expected_action : "botshield";
         ap_rprintf(r,
-            "{\"mode\":\"non-interactive\",\"provider\":\"%s\","
+            "{\"mode\":\"noninteractive\",\"provider\":\"%s\","
             "\"sitekey\":\"%s\",\"action\":\"%s\"}\n",
             cfg->captcha_provider->name,
             cfg->captcha_site_key, action);
@@ -597,7 +597,7 @@ int bs_embedded_bootstrap_handler(request_rec *r,
     memset(&ch, 0, sizeof(ch));
     /* Issue a fresh challenge with default-zero rep state. The
      * verify path will mint a cookie carrying this same rep, which
-     * matches what a first-time non-interactive tier solver would receive. */
+     * matches what a first-time noninteractive tier solver would receive. */
     const char *ierr = bs_issue_challenge(r->pool, cfg, difficulty, ttl,
                                           /* auto_tier */ 1, NULL, NULL, &ch);
     if (ierr) {
@@ -651,7 +651,7 @@ int bs_embedded_bootstrap_handler(request_rec *r,
     }
 
     ap_rprintf(r,
-        "{\"mode\":\"non-interactive\",\"provider\":\"pow-gcm\","
+        "{\"mode\":\"noninteractive\",\"provider\":\"powgcm\","
         "\"challenge\":{"
         "\"salt\":\"%s\",\"nonce\":\"%s\","
         "\"difficulty\":%d,\"expires_at\":%" APR_TIME_T_FMT ","
@@ -742,7 +742,7 @@ static int bs_json_get_int(json_object *root, const char *key,
 /* PoW verify path. The M1 widget JS is given an opaque encrypted
  * envelope (the "cookie_prefix"). Client solves PoW against the
  * salt+nonce+difficulty in the challenge JSON, then sends
- * {provider:"pow-gcm", cookie_prefix, counter} here. We synthesize
+ * {provider:"powgcm", cookie_prefix, counter} here. We synthesize
  * the wire-format cookie value (envelope.counter), route it through
  * bs_verify_cookie_gcm — which handles GCM-decrypt with secondary-key
  * fallback (E16), canonical parse, and PoW verify all in one
@@ -830,7 +830,7 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
     if (err) {
         r->status = HTTP_FORBIDDEN;
         ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
-            "mod_botshield: embedded-verify(pow-gcm): %s", err);
+            "mod_botshield: embedded-verify(powgcm): %s", err);
         return OK;
     }
 
@@ -867,7 +867,7 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
             strlen(bound_ip_hex) != 32) {
             r->status = HTTP_BAD_REQUEST;
             ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
-                "mod_botshield: embedded-verify(pow-gcm): missing or "
+                "mod_botshield: embedded-verify(powgcm): missing or "
                 "malformed bound_ip / bootstrap_sig");
             return OK;
         }
@@ -876,7 +876,7 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
                                       issued_ms, bootstrap_sig_hex)) {
             r->status = HTTP_FORBIDDEN;
             ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
-                "mod_botshield: embedded-verify(pow-gcm): bad "
+                "mod_botshield: embedded-verify(powgcm): bad "
                 "bootstrap_sig");
             return OK;
         }
@@ -888,7 +888,7 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
         if (strcasecmp(observed_ip_hex, bound_ip_hex) != 0) {
             r->status = HTTP_FORBIDDEN;
             ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
-                "mod_botshield: embedded-verify(pow-gcm): IP-bind "
+                "mod_botshield: embedded-verify(powgcm): IP-bind "
                 "mismatch (issued for %s, redeemed from %s)",
                 bound_ip_hex, observed_ip_hex);
             return OK;
@@ -898,7 +898,7 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
          * signature just checked. The interactive tier requires a
          * human click before the solve is submitted, so a submit
          * arriving faster than a person can react did not come from
-         * one. The non-interactive tier is deliberately exempt --
+         * one. The noninteractive tier is deliberately exempt --
          * nothing waits on a human there. */
         /* Floor at least the arming window. No legitimate client can
          * submit before it elapses -- the checkbox does not exist yet
@@ -918,7 +918,7 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
                 bs_decision_log(r, "interactive", "block", "-", "-", "-",
                                 "solve_too_fast", 0);
                 ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
-                    "mod_botshield: embedded-verify(pow-gcm): solve "
+                    "mod_botshield: embedded-verify(powgcm): solve "
                     "returned in %" APR_INT64_T_FMT "ms, under the "
                     "%dms interactive floor",
                     elapsed_ms, min_ms);
@@ -939,7 +939,7 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
                                         (apr_int64_t)ch.expires_at, ns)) {
             r->status = HTTP_FORBIDDEN;
             ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
-                "mod_botshield: embedded-verify(pow-gcm): nonce "
+                "mod_botshield: embedded-verify(powgcm): nonce "
                 "already redeemed (replay or pool-farm) - rejected");
             return OK;
         }
@@ -976,7 +976,7 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
     }
     r->status = HTTP_NO_CONTENT;
     apr_table_setn(r->headers_out, "Cache-Control", "no-store");
-    /* Decision log + metrics: this is the only place a non-interactive/interactive PoW
+    /* Decision log + metrics: this is the only place a noninteractive/interactive PoW
      * solve becomes observable. Without it `outcome=verified` came
      * solely from captcha siteverify, so a deployment running the PoW
      * tiers with no captcha provider reported a permanent 0% solve
@@ -986,12 +986,12 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
      * logs 50 of them. The mint is the one-per-solve event. */
     {
         const char *att = bs_read_attestation(r, root);
-        const char *tier_name = ch.auto_tier ? "non-interactive"
+        const char *tier_name = ch.auto_tier ? "noninteractive"
                                              : "interactive";
         /* Issue -> submit, server clock both ends. Rides in the reason
          * chain rather than as a new log field so existing parsers
          * keep working; the chain already carries colon-qualified
-         * terms like known-bot:foo and attest:bar.
+         * terms like knownbot:foo and attest:bar.
          *
          * Logged on every solve, not just refused ones: a floor can
          * only be set from a distribution, and without this the only
@@ -1038,9 +1038,9 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
             ",react_ms:%" APR_INT64_T_FMT,
             solve_ms, pow_ms, react_ms);
         if (timing_impossible) {
-            att = *att ? apr_pstrcat(r->pool, att, "+impossible-timing",
+            att = *att ? apr_pstrcat(r->pool, att, "+impossibletiming",
                                      NULL)
-                       : "impossible-timing";
+                       : "impossibletiming";
         }
         if (*att) {
             bs_metrics_note_attestation_fail();
@@ -1050,7 +1050,7 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
                         reason, 0);
     }
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
-        "mod_botshield: embedded-verify(pow-gcm): cookie minted "
+        "mod_botshield: embedded-verify(powgcm): cookie minted "
         "(counter=%d)", counter);
     return OK;
 }
@@ -1114,14 +1114,14 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
         r->status = HTTP_TOO_MANY_REQUESTS;
         apr_table_setn(r->err_headers_out, "Retry-After", "60");
         apr_table_setn(r->err_headers_out, "X-Botshield",
-                       "captcha-rate-limited");
+                       "captcharatelimited");
         return OK;
     }
     if (res == BS_CAPTCHA_INFLIGHT_CAPPED) {
         r->status = HTTP_SERVICE_UNAVAILABLE;
         apr_table_setn(r->err_headers_out, "Retry-After", "2");
         apr_table_setn(r->err_headers_out, "X-Botshield",
-                       "captcha-saturated");
+                       "captchasaturated");
         return OK;
     }
     if (res != BS_CAPTCHA_OK) {
@@ -1190,7 +1190,7 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
 
     /* Mint a captcha-<provider> cookie just like the M8 interstitial
      * path does. The only rep delta is passes_non_interactive=1 vs
-     * passes_captcha=1 — this was a non-interactive tier dispatch that
+     * passes_captcha=1 — this was a noninteractive tier dispatch that
      * happened to use a captcha provider for the verification, not
      * a captcha-tier user-interactive solve.
      *
@@ -1225,7 +1225,7 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
  *
  * Body shape (JSON):
  *   PoW path:
- *     {"provider":"pow-gcm","cookie_prefix":"<b64>",
+ *     {"provider":"powgcm","cookie_prefix":"<b64>",
  *      "bound_ip":"<hex>","bootstrap_sig":"<hex>","counter":N}
  *   Provider path (turnstile et al.):
  *     {"provider":"turnstile","token":"<token>"}
@@ -1263,10 +1263,10 @@ int bs_embedded_verify_handler(request_rec *r, bs_dir_cfg *cfg)
     }
 
     const char *provider = bs_json_get_str(r->pool, root, "provider", 32);
-    if (!provider) provider = "pow-gcm";
+    if (!provider) provider = "powgcm";
 
     int rv;
-    if (strcmp(provider, "pow-gcm") == 0) {
+    if (strcmp(provider, "powgcm") == 0) {
         rv = bs_embedded_verify_pow_gcm(r, cfg, root);
     } else {
         rv = bs_embedded_verify_provider(r, cfg, root, provider);
@@ -1276,10 +1276,10 @@ int bs_embedded_verify_handler(request_rec *r, bs_dir_cfg *cfg)
 }
 /* end embedded handlers */
 
-/* --- non-interactive-mode directive setters --- */
+/* --- noninteractive-mode directive setters --- */
 
 /* `BotShieldNonInteractiveMode <interstitial|embedded>`. Per-scope picker
- * for what flavor of non-interactive tier challenge to issue. Default
+ * for what flavor of noninteractive tier challenge to issue. Default
  * `interstitial` matches the legacy splash. `embedded` opts the
  * scope into background verification: BotShield serves the real
  * page (DECLINED) and relies on the operator-included
