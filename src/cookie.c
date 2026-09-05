@@ -290,7 +290,7 @@ static int bs_strict_int_form(const char *s, int allow_negative)
     return 1;
 }
 
-static const char *bs_parse_canonical_fields(char *const fields[],
+static const char *bs_parse_canonical_fields(char *const fields[], int nf,
                                               bs_challenge *ch)
 {
     long v;
@@ -325,7 +325,11 @@ static const char *bs_parse_canonical_fields(char *const fields[],
     }
     if (!bs_parse_int_bounded(fields[0], 0, INT_MAX, 10, &v)) return "bad version";
     ch->version = (int)v;
-    if (ch->version != BS_PROTOCOL_VERSION) return "bad protocol version";
+    if (ch->version < BS_PROTOCOL_VERSION_MIN
+     || ch->version > BS_PROTOCOL_VERSION) return "bad protocol version";
+    /* Field count is pinned per version, so a v2 body cannot smuggle a
+     * burn field and a v3 body cannot omit one. */
+    if (nf != (ch->version >= 3 ? 16 : 15)) return "wrong field count";
 
     const bs_pow_algorithm *alg = bs_find_algorithm(fields[1]);
     if (!alg || !alg->implemented) return "unknown algorithm";
@@ -360,6 +364,16 @@ static const char *bs_parse_canonical_fields(char *const fields[],
         return "bad forgive_window_start";
     if (!bs_parse_uint32_bounded(fields[14], 10, &ch->rep.forgive_consumed))
         return "bad forgive_consumed";
+    /* v2 predates the burn field and reads as a live session, which is
+     * what every cookie in circulation was when this shipped. */
+    if (ch->version >= 3) {
+        if (!bs_strict_int_form(fields[15], 0))
+            return "non-canonical integer surface form";
+        if (!bs_parse_uint32_bounded(fields[15], 10, &ch->rep.burned_until))
+            return "bad burned_until";
+    } else {
+        ch->rep.burned_until = 0;
+    }
     return NULL;
 }
 
@@ -407,21 +421,23 @@ const char *bs_verify_cookie_gcm(request_rec *r,
     }
     pt[pt_len] = '\0';
 
-    /* pt is canonical form (15 pipe-delimited fields after E14 +
-     * E15 — the count grew with BS_PROTOCOL_VERSION 1->2). */
-    char *fields[15];
+    /* pt is canonical form: 15 pipe-delimited fields for v2,
+     * 16 for v3, which appended burned_until. Both are accepted
+     * on the way in; the exact count is checked per version once
+     * the version field has been read. */
+    char *fields[16];
     int nf = 0;
     char *p = (char *)pt;
     fields[nf++] = p;
-    while (*p && nf < 15) {
+    while (*p && nf < 16) {
         if (*p == '|') { *p = '\0'; fields[nf++] = p + 1; }
         p++;
     }
-    if (nf != 15) return "wrong field count";
+    if (nf != 15 && nf != 16) return "wrong field count";
 
     bs_challenge ch;
     memset(&ch, 0, sizeof(ch));
-    const char *perr = bs_parse_canonical_fields(fields, &ch);
+    const char *perr = bs_parse_canonical_fields(fields, nf, &ch);
     if (perr) return perr;
     /* The GCM tag above already authenticated every canonical byte.
      * Expose ch so callers can carry rep state forward. */

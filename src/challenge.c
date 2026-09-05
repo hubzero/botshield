@@ -57,11 +57,12 @@ const char *bs_challenge_canonical(apr_pool_t *p,
     bs_to_hex(ch->salt,  BS_SALT_BYTES,  salt_hex);
     bs_to_hex(ch->nonce, BS_NONCE_BYTES, nonce_hex);
     /* v2 canonical = v1 canonical + forgive_window_start +
-     * forgive_consumed (E15). 15 pipe-delimited fields
-     * total; HMAC cookie body adds 2 more (sig_hex, counter) for 17. */
+     * forgive_consumed (E15). v3 appends burned_until, for 16 fields;
+     * the HMAC cookie body adds 2 more (sig_hex, counter) for 18. A v2
+     * cookie is still accepted on the way in and reads as unburned. */
     return apr_psprintf(p,
         "%d|%s|%s|%s|%d|%" APR_TIME_T_FMT
-        "|%d|%u|%d|%d|%d|%" APR_TIME_T_FMT "|%d|%u|%u",
+        "|%d|%u|%d|%d|%d|%" APR_TIME_T_FMT "|%d|%u|%u|%u",
         ch->version, ch->alg_name, salt_hex, nonce_hex,
         ch->difficulty, ch->expires_at,
         ch->rep.score, (unsigned)ch->rep.flags_excused,
@@ -69,7 +70,8 @@ const char *bs_challenge_canonical(apr_pool_t *p,
         ch->rep.challenged_at,
         ch->auto_tier ? 1 : 0,
         (unsigned)ch->rep.forgive_window_start,
-        (unsigned)ch->rep.forgive_consumed);
+        (unsigned)ch->rep.forgive_consumed,
+        (unsigned)ch->rep.burned_until);
 }
 
 /* --- Algorithm: sha256zeros ---
@@ -320,12 +322,10 @@ const char *bs_issue_challenge(apr_pool_t *p, const bs_dir_cfg *cfg,
     if (rep_in) {
         out->rep = *rep_in;
     } else {
-        out->rep.score          = 0;
-        out->rep.flags_excused  = 0;
-        out->rep.passes_non_interactive  = 0;
-        out->rep.passes_interactive    = 0;
-        out->rep.passes_captcha = 0;
-        out->rep.challenged_at  = 0;
+        /* Whole-struct rather than field by field, for the same reason
+         * the caller memsets: the list form is complete only until rep
+         * gains a field, and nothing warns when it stops being so. */
+        memset(&out->rep, 0, sizeof(out->rep));
     }
     /* The challenged_at stamp records "when this cookie earned its
      * current PoW proof" — set unconditionally since an issued challenge

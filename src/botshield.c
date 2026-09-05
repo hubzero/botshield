@@ -1261,6 +1261,12 @@ static int bs_maybe_mint_session(request_rec *r, bs_dir_cfg *cfg,
                       ierr);
         return 0;
     }
+    /* A trigger already burned this session and installed the cookie
+     * that says so. Minting over it would hand the client a live
+     * cookie on the very response that was meant to end its session. */
+    if (apr_table_get(r->notes, "bs-burned")) {
+        return 0;
+    }
     /* counter slot is required by the wire format but its content
      * is ignored by the session passthrough verify. "session" reads
      * cleanly when anyone debugs the wire form. */
@@ -1711,6 +1717,27 @@ static int bs_handler(request_rec *r)
          * keeps the two predicates from drifting. */
         have_prior_rep = bs_should_carry_prior_rep(cookie_verify_reason,
                                                     &prior_ch);
+        /* A burned session is refused outright, before scoring.
+         *
+         * Read off the authenticated rep block for the same reason
+         * the solve proof below is: the GCM tag is what makes this
+         * trustworthy, and a client cannot clear the mark without
+         * discarding the whole cookie -- at which point it has no
+         * solve proof either and meets the full challenge gate.
+         *
+         * Gated on have_prior_rep so an expired or forged cookie
+         * cannot strand a client: those already fail every other way,
+         * and honouring a burn we cannot authenticate would let one
+         * client's crafted cookie be a denial of service on itself
+         * that we then blame on the rule. */
+        if (have_prior_rep && prior_ch.rep.burned_until
+            && (apr_uint32_t)apr_time_sec(apr_time_now())
+               < prior_ch.rep.burned_until) {
+            bs_score_add(r, 0, 0, "burnedcookie");
+            bs_decision_log(r, "nochallenge", "block", "burned", "-",
+                            "-", "burnedcookie", 0);
+            return HTTP_FORBIDDEN;
+        }
         /* Solve proof is read off the AUTHENTICATED rep block, so it
          * is gated on have_prior_rep rather than on full cookie
          * validity: a cookie that failed only a post-tag check (PoW
@@ -2238,6 +2265,16 @@ static int bs_handler(request_rec *r)
      * tier, so they increment whichever counter matches the tier we're
      * about to issue. */
     bs_rep_state next_rep;
+    /* Zeroed up front so a field added to bs_rep_state later cannot
+     * reach a client as stack garbage. The else branch below assigns
+     * every field it knows about, and that was a complete list right up
+     * until rep gained burned_until -- at which point a first-time
+     * client was handed a cookie carrying whatever the stack held, GCM
+     * -signed so it read back as authentic, and was refused with
+     * burnedcookie on its very next request. Nothing in the config
+     * said burn, and no amount of reading the trigger code would have
+     * shown why. */
+    memset(&next_rep, 0, sizeof(next_rep));
     if (have_prior_rep) {
         int forgive = prior_ch.auto_tier
             ? bs_effective_int(cfg->forgive_non_interactive, BS_DEFAULT_FORGIVE_NON_INTERACTIVE)

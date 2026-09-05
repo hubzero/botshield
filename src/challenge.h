@@ -57,7 +57,12 @@ typedef struct bs_dir_cfg bs_dir_cfg;
  * (forgive_window_start, forgive_consumed). Old (v1) cookies fail the
  * version check and trigger a fresh challenge — one-time disruption
  * per client on upgrade. */
-#define BS_PROTOCOL_VERSION   2
+/* Bumped to 3 for rep.burned_until. A v2 cookie still parses -- it has
+ * one fewer field and reads as unburned -- because rejecting every
+ * cookie in circulation would re-challenge an entire live site at once
+ * to gain nothing. New cookies mint as v3. */
+#define BS_PROTOCOL_VERSION   3
+#define BS_PROTOCOL_VERSION_MIN 2
 #define BS_SALT_BYTES         16
 #define BS_NONCE_BYTES        8
 
@@ -102,6 +107,21 @@ typedef struct {
     apr_time_t   challenged_at;        /* unix sec */
     apr_uint32_t forgive_window_start; /* unix sec; 0 = no window yet */
     apr_uint32_t forgive_consumed;     /* points used inside current window */
+
+    /* Unix seconds until which this cookie session is refused outright,
+     * or 0 for a live session. Set by a trigger's burn= action.
+     *
+     * Per-session rather than per-IP on purpose. Flagging the address
+     * catches everyone behind the same NAT, which is the wrong trade
+     * for a scanner that arrives with a cookie jar. The client carries
+     * the evidence against itself and hands it back on every request.
+     *
+     * A bot that discards cookies escapes this entirely, and that is
+     * fine: a client that discards cookies can never hold a solve
+     * either, so it faces the full challenge gate regardless. This
+     * costs it nothing it was not already paying, and it catches the
+     * large middle that keeps a cookie jar. */
+    apr_uint32_t burned_until;
 } bs_rep_state;
 
 typedef struct {

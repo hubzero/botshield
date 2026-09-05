@@ -635,11 +635,11 @@ semantics and refresh model.
 
 | Directive | Predicate args | Action keys |
 |---|---|---|
-| `BotShieldRequestTrigger` | `<name>` + any of `path=<glob>` `query=<glob>` `cookies=none\|any\|session` `ua=<substring>\|@<botgroup>\|""` `ipspec=<spec>` — ANDed, at least one required | `status=`, `redirect=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `penalty=`, `mode=` (no `credit=`) |
-| `BotShieldCookieTrigger` | `<name> <pred>` (see policy page) | `status=`, `redirect=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `penalty=`, `credit=`, `mode=` |
-| `BotShieldEnvTrigger` | `<name> <env-pred>` (see policy page) | `status=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `penalty=`, `credit=`, `mode=` (no `redirect=`) |
+| `BotShieldRequestTrigger` | `<name>` + any of `path=<glob>` `query=<glob>` `cookies=none\|any\|session` `ua=<substring>\|@<botgroup>\|""` `ipspec=<spec>` — ANDed, at least one required | `status=`, `redirect=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `burn=`, `penalty=`, `mode=` (no `credit=`) |
+| `BotShieldCookieTrigger` | `<name> <pred>` (see policy page) | `status=`, `redirect=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `burn=`, `penalty=`, `credit=`, `mode=` |
+| `BotShieldEnvTrigger` | `<name> <env-pred>` (see policy page) | `status=`, `log=`, `accesslog=`, `flag=`, `ttl=`, `burn=`, `penalty=`, `credit=`, `mode=` (no `redirect=`) |
 | `BotShieldFeedbackTrigger` | `<event>` | `flag=`, `ttl=`, `log=`, `accesslog=`, `mode=` |
-| `BotShieldLoadTrigger` | `<name> state=<n>\|state>=<n>` | `status=`, `log=`, `accesslog=`, `penalty=`, `mode=` (no `redirect=`, `flag=`, `ttl=`) |
+| `BotShieldLoadTrigger` | `<name> state=<n>\|state>=<n>` | `status=`, `log=`, `accesslog=`, `penalty=`, `mode=` (no `redirect=`, `flag=`, `ttl=`, `burn=`) |
 | `BotShieldSessionCookieName` | `<name>` (single arg, repeatable) | n/a (feeds cookies=session predicate) |
 
 See [policy](policy.md#triggers-predicate-action-engine)
@@ -761,28 +761,66 @@ BotShieldRequestTrigger debugparam query="*debug=1*" penalty=20
 # UA form the pattern match cannot express. Note ua="" is a restriction
 # and ua=* is not: "*" (or omitting the key) means "any", which is why a
 # rule carrying only ua=* is rejected as having no condition.
-BotShieldRequestTrigger no-ua ua="" status=nochallenge tier=noninteractive ttl=0 log=no-ua
+BotShieldRequestTrigger no-ua ua="" status=nochallenge tier=noninteractive log=no-ua
 ```
 
 Because it fires from the policy walk it short-circuits **before**
 scoring, so a `status=4xx` rule never renders a challenge and never
 reaches PHP.
 
-**Watch the flag default.** This family flags the matching IP with
-`scanner_probe` for 3600 s unless you say otherwise — inherited from
-`BotShieldPathTrigger`, where the target was a handful of scanners
-probing `/.env` and per-IP memory was worth having. It is the wrong
-default for high-cardinality traffic: at roughly one request per IP the
-flag is never read again, it churns the 50,000-slot flagged-IP table,
-and `scanner_probe` carries a compiled-in `tier_floor` of `interactive` that
-**overrides parked score thresholds** and turns a block-only scope into
-one that renders interstitials. Write `ttl=0` on rules that match
-one-shot traffic:
+**Remembering a client is opt-in.** A rule fires, returns its status,
+and forgets — unless you ask it to remember. There are two kinds of
+memory and both default to doing nothing.
+
+`flag=<name>` with `ttl=<seconds>` marks the **address**. Everything
+sharing that address is marked with it, which is the point behind a
+hosting range and the problem behind a residential NAT.
+
+`burn=<seconds>` marks the **cookie session**. The mark travels inside
+the cookie the client keeps handing back, so it catches the one browser
+that actually tripped the rule and no one else sharing its address. A
+client that throws cookies away escapes this entirely — and pays the
+full challenge gate regardless, because it can never hold a solve
+either, so it costs nothing that was not already being paid.
 
 ```apache
-BotShieldRequestTrigger login-trap path="/login*" query="*return=*" \
-    cookies=none status=403 ttl=0 log=login-trap accesslog=off
+# the address, for an hour. Right when the source itself is what you
+# distrust; wrong when it is a NAT with real users behind it.
+<BotShieldRule env-probe>
+    BotShieldPath    /.env
+    BotShieldStatus  404
+    BotShieldFlag    scanner_probe
+    BotShieldTTL     3600
+    BotShieldLog     env-probe
+</BotShieldRule>
+
+# the browser, for a day. The probe gets its 404 and a cookie carrying
+# the mark; that session is refused from its next request onward, and
+# the neighbours are untouched.
+<BotShieldRule wp-probe>
+    BotShieldPath    /wp-admin/*
+    BotShieldStatus  404
+    BotShieldBurn    86400
+    BotShieldLog     wp-probe
+</BotShieldRule>
 ```
+
+> **This family used to flag by default**, `scanner_probe` for 3600 s,
+> inherited from `BotShieldPathTrigger` where the target was a handful
+> of scanners probing `/.env` and per-IP memory was worth having. It was
+> the wrong default for high-cardinality traffic: at roughly one request
+> per address the flag is never read again and it churns the
+> 50,000-slot flagged-IP table. Worse, `scanner_probe` carries a
+> compiled-in `tier_floor` of `interactive` that **overrides parked
+> score thresholds**, so a rule written to block quietly began rendering
+> interstitials to whoever shared that address next — with nothing in
+> the config saying so.
+>
+> **Migrating:** a rule written before 2026-09-05 that relied on the
+> default now flags nothing. Add `BotShieldFlag scanner_probe` and
+> `BotShieldTTL 3600` to keep the old behaviour. `BotShieldTTL 0`,
+> which used to be how you switched the default off, is now what the
+> default already is and can be deleted.
 
 #### Migrating from `BotShieldPathTrigger`
 

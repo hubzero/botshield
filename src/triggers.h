@@ -84,6 +84,7 @@ typedef struct {
     const char   *log_tag;
     apr_uint32_t  flag_bit;       /* single BS_FLAG_* bit; 0 if ttl_sec==0 */
     int           ttl_sec;        /* 0 = don't flag the IP */
+    int           burn_sec;       /* 0 = don't burn the cookie session */
     int           penalty;        /* 0..1000 */
     int           credit;         /* 0..1000 (rejected on path family) */
     int           status_explicit; /* 1 if operator wrote status= */
