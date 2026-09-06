@@ -1236,10 +1236,13 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
     if (!e->path_patterns && !e->query_pattern
         && e->bscookie_pred < 0 && e->crawler_pred < 0
         && e->cookie_pred < 0 && e->exists_pred < 0
-        && e->solved_pred < 0 && e->minload < 0 && !e->has_cohort) {
+        && e->solved_pred < 0 && e->minload < 0
+        && e->firstsight_pred < 0 && e->acceptlang_pred < 0
+        && !e->has_cohort) {
         return apr_psprintf(cmd->pool,
             "%s '%s': needs at least one match key (path=, query=, "
-            "cookies=, bscookie=, crawler=, exists=, solved=, minload=, ua=, "
+            "cookies=, bscookie=, crawler=, exists=, solved=, firstsight=, "
+            "acceptlanguage=, minload=, ua=, "
             "ipspec=). A rule "
             "with no condition "
             "matches every request - use BotShieldTrigger in the scope "

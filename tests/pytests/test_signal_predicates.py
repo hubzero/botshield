@@ -125,3 +125,42 @@ def test_acceptlanguage_rejects_a_substring(config_override):
             pass
     msg = str(exc.value)
     assert "non-zero exit status" in msg or "acceptlanguage" in msg, msg
+
+
+def test_a_new_predicate_counts_as_a_condition_on_its_own(config_override,
+                                                          fresh_ip):
+    """A rule conditioned only on a signal is a legal rule.
+
+    The tests above all pair the new predicates with path=, so none of
+    them would notice that firstsight= and acceptlanguage= were missing
+    from the needs at least one match key check -- a rule with either
+    as its only condition was refused at config time. Converting the dev
+    vhost's heuristics into rules is what found it: h-missingal has
+    nothing but acceptlanguage.
+    """
+    only_al = (
+        "BotShieldEnabled On\n"
+        "    <BotShieldRule al-only>\n"
+        "        BotShieldAcceptLanguage  \"\"\n"
+        "        BotShieldNoChallenge\n"
+        "        BotShieldPenalty         3\n"
+        "    </BotShieldRule>\n"
+    )
+    with config_override(r"BotShieldEnabled\s+On", only_al,
+                         render=False, count=1):
+        # Parsing is the assertion; a refused config raises on entry.
+        assert client.get("/", xff=fresh_ip, ua=BROWSER_UA).status_code
+
+
+def test_firstsight_alone_is_also_a_condition(config_override, fresh_ip):
+    only_fs = (
+        "BotShieldEnabled On\n"
+        "    <BotShieldRule fs-only>\n"
+        "        BotShieldFirstSight  yes\n"
+        "        BotShieldNoChallenge\n"
+        "        BotShieldPenalty     3\n"
+        "    </BotShieldRule>\n"
+    )
+    with config_override(r"BotShieldEnabled\s+On", only_fs,
+                         render=False, count=1):
+        assert client.get("/", xff=fresh_ip, ua=BROWSER_UA).status_code
