@@ -1118,17 +1118,17 @@ semantics and refresh model.</p>
 <tr>
 <td><code>BotShieldRule</code></td>
 <td><code>&lt;name&gt;</code> + any of <code>path=&lt;glob&gt;</code> <code>query=&lt;glob&gt;</code> <code>cookies=none|any|session</code> <code>ua=&lt;substring&gt;|@&lt;botgroup&gt;|&quot;&quot;</code> <code>ipspec=&lt;spec&gt;</code> — ANDed, at least one required</td>
-<td><code>respond=</code>, <code>redirect=</code>, <code>logas=</code>, <code>accesslog=</code>, <code>flagip=</code>, <code>flagsession=</code>, <code>burn=</code>, <code>penalty=</code>, <code>mode=</code> (no <code>credit=</code>)</td>
+<td><code>respond=</code>, <code>redirect=</code>, <code>logas=</code>, <code>accesslog=</code>, <code>flagip=</code>, <code>flagsession=</code>, <code>penalty=</code>, <code>mode=</code> (no <code>credit=</code>)</td>
 </tr>
 <tr>
 <td><code>BotShieldCookieTrigger</code></td>
 <td><code>&lt;name&gt; &lt;pred&gt;</code> (see policy page)</td>
-<td><code>respond=</code>, <code>redirect=</code>, <code>logas=</code>, <code>accesslog=</code>, <code>flagip=</code>, <code>flagsession=</code>, <code>burn=</code>, <code>penalty=</code>, <code>credit=</code>, <code>mode=</code></td>
+<td><code>respond=</code>, <code>redirect=</code>, <code>logas=</code>, <code>accesslog=</code>, <code>flagip=</code>, <code>flagsession=</code>, <code>penalty=</code>, <code>credit=</code>, <code>mode=</code></td>
 </tr>
 <tr>
 <td><code>BotShieldEnvTrigger</code></td>
 <td><code>&lt;name&gt; &lt;env-pred&gt;</code> (see policy page)</td>
-<td><code>respond=</code>, <code>logas=</code>, <code>accesslog=</code>, <code>flagip=</code>, <code>flagsession=</code>, <code>burn=</code>, <code>penalty=</code>, <code>credit=</code>, <code>mode=</code> (no <code>redirect=</code>)</td>
+<td><code>respond=</code>, <code>logas=</code>, <code>accesslog=</code>, <code>flagip=</code>, <code>flagsession=</code>, <code>penalty=</code>, <code>credit=</code>, <code>mode=</code> (no <code>redirect=</code>)</td>
 </tr>
 <tr>
 <td><code>BotShieldFeedbackTrigger</code></td>
@@ -1138,7 +1138,7 @@ semantics and refresh model.</p>
 <tr>
 <td><code>BotShieldLoadTrigger</code></td>
 <td><code>&lt;name&gt; state=&lt;n&gt;|state&gt;=&lt;n&gt;</code></td>
-<td><code>respond=</code>, <code>logas=</code>, <code>accesslog=</code>, <code>penalty=</code>, <code>mode=</code> (no <code>redirect=</code>, <code>flag=</code>, <code>ttl=</code>, <code>burn=</code>)</td>
+<td><code>respond=</code>, <code>logas=</code>, <code>accesslog=</code>, <code>penalty=</code>, <code>mode=</code> (no <code>redirect=</code>, <code>flagip=</code>, <code>flagsession=</code>)</td>
 </tr>
 <tr>
 <td><code>BotShieldSessionCookieName</code></td>
