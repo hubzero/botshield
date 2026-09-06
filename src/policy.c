@@ -440,6 +440,35 @@ int bs_check_policy(request_rec *r)
                                           scfg->session_names, NULL))
                     continue;
             }
+            if (t->ck_pred >= 0) {
+                if (!rt_cmap) rt_cmap = bs_parse_cookies_once(r);
+                bs_cookie_trigger_entry probe;
+                memset(&probe, 0, sizeof(probe));
+                probe.pred_kind = t->ck_pred;
+                probe.cname     = t->ck_name;
+                probe.cvalue    = t->ck_value;
+                if (!bs_cookie_pred_match(&probe, rt_cmap,
+                                          scfg->session_names, NULL))
+                    continue;
+            }
+            if (t->env_pred >= 0) {
+                /* subprocess_env, which is where SetEnvIf, SetEnvIfExpr
+                 * and mod_rewrite put things. That is the composition
+                 * this condition exists for: the regex engines Apache
+                 * already ships feed a variable, and the rule reads it
+                 * alongside path=, ua= and the rest. */
+                const char *v = apr_table_get(r->subprocess_env,
+                                              t->env_name);
+                int ok;
+                switch (t->env_pred) {
+                case BS_EP_NAMED_PRESENT: ok = (v != NULL); break;
+                case BS_EP_NAMED_ABSENT:  ok = (v == NULL); break;
+                case BS_EP_NAMED_EQ:
+                    ok = v && strcmp(v, t->env_value) == 0; break;
+                default: ok = 0; break;
+                }
+                if (!ok) continue;
+            }
             if (t->exists_pred >= 0) {
                 /* map_to_storage has already stat()ed for us, so this
                  * is a struct read. filetype is APR_NOFILE when nothing

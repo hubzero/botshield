@@ -269,6 +269,23 @@ typedef struct {
      * escaping and case rules, and it is not what parity needs.
      * -1 = no condition. */
     int                acceptlang_pred;
+    /* cookie= / env= : the two open-set conditions.
+     *
+     * Every other condition here is an enumeration whose complement
+     * has a name -- solved=no, crawler=no, cookies=any. An arbitrary
+     * cookie or variable is an open set, so "not present" has no other
+     * spelling and needs the negation the rest of the language does
+     * without. It rides in the value (!NAME) because a block line's
+     * key is the directive name and cannot take a prefix.
+     *
+     * pred_kind is -1 when unset; otherwise the same enums the cookie
+     * and env families use, so one matcher serves both. */
+    int                ck_pred;         /* enum bs_cookie_pred_kind, -1 unset */
+    const char        *ck_name;
+    const char        *ck_value;        /* EQ / NE / CONTAINS only */
+    int                env_pred;        /* enum bs_env_pred_kind, -1 unset */
+    const char        *env_name;
+    const char        *env_value;       /* EQ only */
     /* scoreatleast=<name> <n> -- match when the named accumulator has
      * reached n by the time this rule is reached. Reads what earlier
      * rules put there; NULL name = no condition. */

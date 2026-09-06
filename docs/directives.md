@@ -971,6 +971,64 @@ all of policy, which is where the tier has always been chosen. Use
 gate *that rule's* match; use `BotShieldChallengeAtLeast` when you want
 it to choose a challenge tier.
 
+#### `cookie=` and `env=` — the two open-set conditions
+
+Every other condition here is an enumeration whose complement has a
+name: `solved=no`, `crawler=no`, `cookies=any`. These two are not — an
+arbitrary cookie or environment variable is an open set, and "not
+present" has no other spelling. So they are the only conditions that
+take a negation, written as a leading `!`:
+
+| Written | Matches |
+|---|---|
+| `BotShieldCookie NAME` | the cookie is present |
+| `BotShieldCookie !NAME` | it is absent |
+| `BotShieldCookie NAME=VAL` | present and equal |
+| `BotShieldCookie NAME!VAL` | present and **not** equal |
+| `BotShieldCookie NAME~SUB` | present and contains |
+
+`!NAME` and `NAME!VAL` are different questions and the parser keeps
+them apart: a client sending no cookie at all has not sent a different
+value. `!NAME=VAL` is refused rather than guessed at.
+
+The first operator after the name wins and the rest is the value
+verbatim, so `NAME=a~b` is an equality test against the literal `a~b`.
+
+`BotShieldEnv` takes the same forms minus `~`:
+
+```apache
+BotShieldEnv   BS_LEVEL          # set
+BotShieldEnv  !BS_LEVEL          # not set
+BotShieldEnv   BS_LEVEL=high     # set to exactly this
+```
+
+**This is also the answer to "why is there no regex".** The module has
+none anywhere — paths are globs, UA is substring or `@cohort` — and
+adding one would mean running an operator-supplied pattern against
+attacker-controlled input on every request, which is a denial-of-service
+surface pointed the wrong way. Apache already ships regex engines that
+are tuned and audited, and `env=` is how they compose:
+
+```apache
+SetEnvIfExpr "%{HTTP_USER_AGENT} =~ /bot|crawl|spider/i" BS_UA_SUSPECT=1
+
+<BotShieldRule ua-regex>
+    BotShieldEnv       BS_UA_SUSPECT
+    BotShieldPath      /search
+    BotShieldSolved    no
+    BotShieldChallenge noninteractive
+</BotShieldRule>
+```
+
+That composition is the reason these belong in the rule rather than in
+a family of their own. A `BotShieldCookieTrigger` matches a cookie and
+nothing else; a rule ANDs it with the path, the UA, the load state and
+whether the client has already solved.
+
+The module's own `__Host-bs_session` is refused here — use
+`BotShieldBSCookie`, which distinguishes `verified` from `missing` from
+`invalid`, a distinction a presence test would flatten.
+
 #### `@selectors` on `ua=`
 
 Four of them name a classification this module makes rather than a bot

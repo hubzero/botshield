@@ -1483,6 +1483,74 @@ all of policy, which is where the tier has always been chosen. Use
 <code>BotShieldScoreAtLeast</code> inside a rule when you want the accumulator to
 gate <em>that rule's</em> match; use <code>BotShieldChallengeAtLeast</code> when you want
 it to choose a challenge tier.</p>
+<h4 id="cookie-and-env-the-two-open-set-conditions"><code>cookie=</code> and <code>env=</code> — the two open-set conditions</h4>
+<p>Every other condition here is an enumeration whose complement has a
+name: <code>solved=no</code>, <code>crawler=no</code>, <code>cookies=any</code>. These two are not — an
+arbitrary cookie or environment variable is an open set, and &quot;not
+present&quot; has no other spelling. So they are the only conditions that
+take a negation, written as a leading <code>!</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Written</th>
+<th>Matches</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BotShieldCookie NAME</code></td>
+<td>the cookie is present</td>
+</tr>
+<tr>
+<td><code>BotShieldCookie !NAME</code></td>
+<td>it is absent</td>
+</tr>
+<tr>
+<td><code>BotShieldCookie NAME=VAL</code></td>
+<td>present and equal</td>
+</tr>
+<tr>
+<td><code>BotShieldCookie NAME!VAL</code></td>
+<td>present and <strong>not</strong> equal</td>
+</tr>
+<tr>
+<td><code>BotShieldCookie NAME~SUB</code></td>
+<td>present and contains</td>
+</tr>
+</tbody>
+</table>
+<p><code>!NAME</code> and <code>NAME!VAL</code> are different questions and the parser keeps
+them apart: a client sending no cookie at all has not sent a different
+value. <code>!NAME=VAL</code> is refused rather than guessed at.</p>
+<p>The first operator after the name wins and the rest is the value
+verbatim, so <code>NAME=a~b</code> is an equality test against the literal <code>a~b</code>.</p>
+<p><code>BotShieldEnv</code> takes the same forms minus <code>~</code>:</p>
+<pre><code class="language-apache">BotShieldEnv   BS_LEVEL          # set
+BotShieldEnv  !BS_LEVEL          # not set
+BotShieldEnv   BS_LEVEL=high     # set to exactly this
+</code></pre>
+<p><strong>This is also the answer to &quot;why is there no regex&quot;.</strong> The module has
+none anywhere — paths are globs, UA is substring or <code>@cohort</code> — and
+adding one would mean running an operator-supplied pattern against
+attacker-controlled input on every request, which is a denial-of-service
+surface pointed the wrong way. Apache already ships regex engines that
+are tuned and audited, and <code>env=</code> is how they compose:</p>
+<pre><code class="language-apache">SetEnvIfExpr &quot;%{HTTP_USER_AGENT} =~ /bot|crawl|spider/i&quot; BS_UA_SUSPECT=1
+
+&lt;BotShieldRule ua-regex&gt;
+    BotShieldEnv       BS_UA_SUSPECT
+    BotShieldPath      /search
+    BotShieldSolved    no
+    BotShieldChallenge noninteractive
+&lt;/BotShieldRule&gt;
+</code></pre>
+<p>That composition is the reason these belong in the rule rather than in
+a family of their own. A <code>BotShieldCookieTrigger</code> matches a cookie and
+nothing else; a rule ANDs it with the path, the UA, the load state and
+whether the client has already solved.</p>
+<p>The module's own <code>__Host-bs_session</code> is refused here — use
+<code>BotShieldBSCookie</code>, which distinguishes <code>verified</code> from <code>missing</code> from
+<code>invalid</code>, a distinction a presence test would flatten.</p>
 <h4 id="selectors-on-ua"><code>@selectors</code> on <code>ua=</code></h4>
 <p>Four of them name a classification this module makes rather than a bot
 the directory knows:</p>

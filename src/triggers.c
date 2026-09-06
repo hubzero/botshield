@@ -1028,6 +1028,112 @@ static int bs_ua_is_selector_list(const char *ua)
     return 1;
 }
 
+/* Parse a rule's cookie= value: [!]NAME[=|!|~ VALUE].
+ *
+ * `negated` comes from the caller: the block walker has already moved
+ * a leading '!' off the value and onto the key, which is the
+ * convention the flat form used (!cookie=NAME) and the one thing a
+ * directive name cannot carry itself.
+ *
+ * '!' as a prefix and '!' as an infix mean different things -- absent
+ * versus present-but-not-equal -- and conflating them is the mistake
+ * worth catching, so a prefixed name with any operator after it is
+ * refused by name.
+ */
+static const char *bs_rule_parse_cookie(apr_pool_t *p, const char *val,
+                                        int negated, int *kind,
+                                        const char **cname,
+                                        const char **cvalue)
+{
+    if (!*val) return "BotShieldCookie: needs a cookie name";
+
+    const char *op = val;
+    while (*op && *op != '=' && *op != '!' && *op != '~') {
+        unsigned char c = (unsigned char)*op;
+        int ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+              || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+        if (!ok) {
+            return apr_psprintf(p,
+                "BotShieldCookie: '%c' is not valid in a cookie name", *op);
+        }
+        op++;
+    }
+    apr_size_t nlen = (apr_size_t)(op - val);
+    if (nlen == 0 || nlen > 64) {
+        return "BotShieldCookie: cookie name must be 1..64 chars";
+    }
+    char *nm = apr_pstrmemdup(p, val, nlen);
+    if (!strcasecmp(nm, BS_COOKIE_NAME) || !strcasecmp(nm, BS_COOKIE_NAME_HOST)) {
+        return "BotShieldCookie: use BotShieldBSCookie for the module's "
+               "own cookie -- it has states (verified/missing/invalid) "
+               "that a presence test cannot express";
+    }
+    *cname = nm;
+
+    if (*op == '\0') {
+        *kind = negated ? BS_CP_NAMED_ABSENT : BS_CP_NAMED_PRESENT;
+        return NULL;
+    }
+    if (negated) {
+        return "BotShieldCookie: '!' before the name tests absence and "
+               "takes nothing after it. For \"present but not this "
+               "value\" write BotShieldCookie <name>!<value>";
+    }
+    *cvalue = apr_pstrdup(p, op + 1);
+    if (*op == '=') { *kind = BS_CP_NAMED_EQ;       return NULL; }
+    if (*op == '!') { *kind = BS_CP_NAMED_NE;       return NULL; }
+    if (!**cvalue) {
+        return "BotShieldCookie: <name>~<substring> needs a non-empty "
+               "substring";
+    }
+    *kind = BS_CP_NAMED_CONTAINS;
+    return NULL;
+}
+
+/* Parse a rule's env= value: [!]NAME[=VALUE].
+ *
+ * Narrower than cookie by the same deliberate choice the env family
+ * made: no contains. Rich matching belongs in whatever set the
+ * variable -- SetEnvIfExpr has a regex engine, and this composes with
+ * it rather than growing one.
+ */
+static const char *bs_rule_parse_env(apr_pool_t *p, const char *val,
+                                     int negated, int *kind,
+                                     const char **ename,
+                                     const char **evalue)
+{
+    if (!*val) return "BotShieldEnv: needs a variable name";
+
+    const char *op = val;
+    while (*op && *op != '=') {
+        unsigned char c = (unsigned char)*op;
+        int ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+              || (c >= '0' && c <= '9') || c == '_' || c == '-';
+        if (!ok) {
+            return apr_psprintf(p,
+                "BotShieldEnv: '%c' is not valid in a variable name", *op);
+        }
+        op++;
+    }
+    apr_size_t nlen = (apr_size_t)(op - val);
+    if (nlen == 0 || nlen > 64) {
+        return "BotShieldEnv: variable name must be 1..64 chars";
+    }
+    *ename = apr_pstrmemdup(p, val, nlen);
+
+    if (*op == '\0') {
+        *kind = negated ? BS_EP_NAMED_ABSENT : BS_EP_NAMED_PRESENT;
+        return NULL;
+    }
+    if (negated) {
+        return "BotShieldEnv: '!' before the name tests absence and "
+               "takes nothing after it";
+    }
+    *evalue = apr_pstrdup(p, op + 1);
+    *kind = BS_EP_NAMED_EQ;
+    return NULL;
+}
+
 /* A rule that demands a tier but never asks whether the client already
  * solved will challenge the same visitor on every request, forever.
  * Solving does not clear it, because nothing in the rule looks at the
@@ -1100,6 +1206,8 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
     e->solved_pred = -1;              /* no solve-proof condition */
     e->firstsight_pred = -1;          /* no Bloom-membership condition */
     e->acceptlang_pred = -1;          /* no Accept-Language condition */
+    e->ck_pred     = -1;              /* no cookie= condition */
+    e->env_pred    = -1;              /* no env= condition */
     e->score_pred_name = NULL;        /* no accumulator condition */
     e->score_pred_min  = 0;
     e->bscookie_pred = -1;            /* no bs-cookie condition */
@@ -1110,6 +1218,13 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
     const char *ua_arg = NULL, *ipspec_arg = NULL;
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
+        /* The walker moves a leading '!' from the value to the key, so
+         * `BotShieldCookie !NAME` arrives here as `!cookie=NAME`. Only
+         * the two open-set conditions accept it; every other condition
+         * is an enumeration whose complement has a name, and offering
+         * both spellings would be two ways to say solved=no. */
+        int neg = 0;
+        if (arg[0] == '!') { neg = 1; arg++; }
         const char *eq  = strchr(arg, '=');
         if (eq) {
             apr_size_t klen = (apr_size_t)(eq - arg);
@@ -1248,6 +1363,26 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                 }
                 continue;
             }
+            if (klen == 6 && strncasecmp(arg, "cookie", 6) == 0) {
+                const char *perr = bs_rule_parse_cookie(cmd->pool, val,
+                    neg, &e->ck_pred, &e->ck_name, &e->ck_value);
+                if (perr) return apr_pstrcat(cmd->pool, D, ": ", perr, NULL);
+                continue;
+            }
+            if (klen == 3 && strncasecmp(arg, "env", 3) == 0) {
+                const char *perr = bs_rule_parse_env(cmd->pool, val,
+                    neg, &e->env_pred, &e->env_name, &e->env_value);
+                if (perr) return apr_pstrcat(cmd->pool, D, ": ", perr, NULL);
+                continue;
+            }
+            if (neg) {
+                return apr_psprintf(cmd->pool,
+                    "%s: '!' is only accepted on cookie= and env=, the "
+                    "two conditions whose complement has no name. Every "
+                    "other condition here is an enumeration -- write "
+                    "%.*s=no, or the complementary value.",
+                    D, (int)klen, arg);
+            }
             if (klen == 7 && strncasecmp(arg, "minload", 7) == 0) {
                 if      (!strcasecmp(val, "normal")) e->minload = BS_LOAD_NORMAL;
                 else if (!strcasecmp(val, "warm"))   e->minload = BS_LOAD_WARM;
@@ -1348,12 +1483,13 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
         && e->cookie_pred < 0 && e->exists_pred < 0
         && e->solved_pred < 0 && e->minload < 0
         && e->firstsight_pred < 0 && e->acceptlang_pred < 0
+        && e->ck_pred < 0 && e->env_pred < 0
         && !e->score_pred_name
         && !e->has_cohort) {
         return apr_psprintf(cmd->pool,
             "%s '%s': needs at least one match key (path=, query=, "
-            "cookies=, bscookie=, crawler=, exists=, solved=, firstsight=, "
-            "acceptlanguage=, minload=, ua=, "
+            "cookies=, bscookie=, cookie=, env=, crawler=, exists=, "
+            "solved=, firstsight=, acceptlanguage=, minload=, ua=, "
             "ipspec=). A rule "
             "with no condition "
             "matches every request - use BotShieldTrigger in the scope "
