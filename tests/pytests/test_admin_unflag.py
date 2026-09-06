@@ -21,7 +21,7 @@ them; the status code cannot.
 
 from __future__ import annotations
 
-from botshield_test import client
+from botshield_test import client, ips as _ips
 
 
 BROWSER_UA = "Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/125.0"
@@ -232,14 +232,24 @@ def test_unflag_accepts_a_cidr_and_clears_every_member(config_override,
     """
     head = fresh_ip.rsplit(".", 1)[0]
     a, b = f"{head}.11", f"{head}.12"
+    # Outside the /24 being cleared, so it proves the walk stops where
+    # the prefix does rather than emptying the table.
+    outside = _ips.fresh_ip()
+    while outside.rsplit(".", 1)[0] == head:
+        outside = _ips.fresh_ip()
 
     with config_override(r"BotShieldEnabled\s+On", FLAGGING, count=1):
-        for ip in (a, b):
+        for ip in (a, b, outside):
             assert _get("/unflag-probe", ip).status_code == 404
 
         resp = _unflag(addr=f"{head}.0/24")
         assert resp.status_code == 200
-        assert "cleared 2" in resp.text, (
+        # At least mine. Not exactly mine: fresh_ip hands out addresses
+        # that share a /24 with other tests' fresh addresses, and a
+        # neighbour someone else flagged is cleared too -- correctly,
+        # and the count says so.
+        cleared = int(resp.text.split()[-1])
+        assert cleared >= 2, (
             f"both addresses in the /24 should go; got {resp.text!r}"
         )
 
@@ -249,3 +259,10 @@ def test_unflag_accepts_a_cidr_and_clears_every_member(config_override,
             assert not _blocked_by_flag(slc, ip), (
                 f"{ip} is still refused by the flag after the range clear"
             )
+
+        with log_slice as slc:
+            _get("/", outside)
+        assert _blocked_by_flag(slc, outside), (
+            f"{outside} is outside {head}.0/24 and should still be "
+            f"refused; the walk cleared more than the prefix"
+        )

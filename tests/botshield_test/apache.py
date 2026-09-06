@@ -13,12 +13,15 @@ import re
 
 from . import blocks as _blocks
 import os
+import socket
 import subprocess
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import urlparse
 
-from .config import (APACHE_SERVICE, DEV_VHOST_CONF, HTTPD_BIN, HTTPD_CONF,
+from .config import (APACHE_ERROR_LOG, APACHE_SERVICE, BASE_URL,
+                     DEV_VHOST_CONF, HTTPD_BIN, HTTPD_CONF,
                      SERVICE_MODE,
                      STATE_FILE)
 
@@ -135,14 +138,62 @@ def _service(verb: str) -> None:
     signal({"reload": "graceful", "start": "start", "stop": "stop"}[verb])
 
 
+# Apache writes this once per generation, at the end of startup and so
+# after post_config has run. Waiting for a new one is what says the
+# config we just installed is the config now being served.
+_UP_MARKER = b"resuming normal operations"
+
+
+def _error_log_size() -> int:
+    """Byte offset to start watching the error log from, or 0 if it
+    cannot be read (a container layout, a rotation mid-call)."""
+    try:
+        return os.path.getsize(APACHE_ERROR_LOG)
+    except OSError:
+        return 0
+
+
+def _wait_generation(since: int, timeout: float = 15.0) -> bool:
+    """Poll the error log from `since` for a new startup marker.
+
+    False on timeout rather than raising -- the caller's next request
+    will fail with a better message than anything this could produce.
+    A missing or unreadable log falls back to a fixed wait, so an
+    environment this cannot watch is slow rather than broken.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with open(APACHE_ERROR_LOG, "rb") as fh:
+                fh.seek(since)
+                if _UP_MARKER in fh.read():
+                    return True
+        except OSError:
+            time.sleep(1.0)
+            return False
+        time.sleep(0.02)
+    return False
+
+
 def reload() -> None:
     """Graceful reload: config re-read, new workers spun, old workers
     drain. Faster than restart and the right choice for most config
-    changes."""
+    changes.
+
+    No fixed sleep, and no polling the socket either -- the listener
+    stays open across a graceful, so it answers before the new
+    generation exists. Waits instead for the startup marker Apache
+    writes after post_config, from an offset recorded before the
+    signal, so it cannot be satisfied by the generation being
+    replaced.
+
+    This used to sleep a flat second. Two reloads per config_override
+    across 206 call sites made it most of the suite's runtime, and
+    nothing had ever measured it.
+    """
+    since = _error_log_size()
     _service("reload")
-    # Brief settle so the new pool is up before the caller issues
-    # their first request. Reloads are fast but not instantaneous.
-    time.sleep(1)
+    _wait_generation(since)
 
 
 def restart() -> None:
