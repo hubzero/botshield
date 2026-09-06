@@ -1453,10 +1453,33 @@ Two things about ranges are worth knowing before typing one:
   The reply reports the prefix acted on.
 
 Matching for this directive is on the same client address as the other
-two, so `mod_remoteip` applies here as well. That is worth a second look
-when granting a write: if a proxy in front of this server is trusted for
-`X-Forwarded-For` and does not overwrite it, the address this ACL
-compares is one the client can choose.
+two, so `mod_remoteip` applies here as well — the same way it applies to
+Apache's own `Require ip`, which compares the forwarded address rather
+than the address the connection came from.
+
+**What makes that safe is `RemoteIPTrustedProxy`.** `mod_remoteip`
+honours `X-Forwarded-For` only from proxies named there, so on a
+correctly configured server the address this ACL compares is not one the
+client can choose. Two things are worth checking before granting a
+write: that `RemoteIPHeader` is never set without naming the trusted
+proxies, and that each proxy named overwrites the header rather than
+appending to a value the client supplied. Get either wrong and the
+forwarded address becomes attacker-controlled — for this directive, for
+the two above it, and for `Require ip` alike.
+
+Comparing the connection address instead is not the safer alternative it
+sounds like. Behind a reverse proxy that address *is* the proxy's, and
+identical for every client, so such a list would either admit everyone
+who reaches through the proxy or nobody at all. It is only meaningful on
+a directly exposed server, and it would make this the one address list
+in the file that means something different from all the others.
+
+Where an IP list is not enough on its own — and for a surface that
+changes state it may well not be — the answer is a real credential
+rather than a different address: wrap the path in a `<Location>` and add
+`Require valid-user` or client certificates. That composes with this
+directive instead of replacing it, since this one decides whether the
+endpoint is served at all.
 
 ### Why this is not a `<Location>`
 

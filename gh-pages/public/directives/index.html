@@ -2089,10 +2089,30 @@ because that is the granularity flags are stored at. Asking for a
 The reply reports the prefix acted on.</li>
 </ul>
 <p>Matching for this directive is on the same client address as the other
-two, so <code>mod_remoteip</code> applies here as well. That is worth a second look
-when granting a write: if a proxy in front of this server is trusted for
-<code>X-Forwarded-For</code> and does not overwrite it, the address this ACL
-compares is one the client can choose.</p>
+two, so <code>mod_remoteip</code> applies here as well — the same way it applies to
+Apache's own <code>Require ip</code>, which compares the forwarded address rather
+than the address the connection came from.</p>
+<p><strong>What makes that safe is <code>RemoteIPTrustedProxy</code>.</strong> <code>mod_remoteip</code>
+honours <code>X-Forwarded-For</code> only from proxies named there, so on a
+correctly configured server the address this ACL compares is not one the
+client can choose. Two things are worth checking before granting a
+write: that <code>RemoteIPHeader</code> is never set without naming the trusted
+proxies, and that each proxy named overwrites the header rather than
+appending to a value the client supplied. Get either wrong and the
+forwarded address becomes attacker-controlled — for this directive, for
+the two above it, and for <code>Require ip</code> alike.</p>
+<p>Comparing the connection address instead is not the safer alternative it
+sounds like. Behind a reverse proxy that address <em>is</em> the proxy's, and
+identical for every client, so such a list would either admit everyone
+who reaches through the proxy or nobody at all. It is only meaningful on
+a directly exposed server, and it would make this the one address list
+in the file that means something different from all the others.</p>
+<p>Where an IP list is not enough on its own — and for a surface that
+changes state it may well not be — the answer is a real credential
+rather than a different address: wrap the path in a <code>&lt;Location&gt;</code> and add
+<code>Require valid-user</code> or client certificates. That composes with this
+directive instead of replacing it, since this one decides whether the
+endpoint is served at all.</p>
 <h3 id="why-this-is-not-a-location">Why this is not a <code>&lt;Location&gt;</code></h3>
 <p><code>Require ip</code> on these paths has a failure mode worth knowing. Each authz
 denial writes an <code>AH01630</code> line to the error log, the dashboard
