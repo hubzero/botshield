@@ -270,8 +270,13 @@ applied after the floor, so it holds.</p>
 <p><strong>This has bitten a production deployment, so it is worth spelling out
 what the ceiling does and does not buy.</strong> A hub running only the silent
 tier parked <code>Hard</code> and <code>Captcha</code> at <code>10000</code>, believing form and captcha
-were unreachable. They were not: the compiled-in flag defaults force a
-tier directly.</p>
+were unreachable. They were not: a flag trigger's <code>tier_floor</code> forces a
+tier directly, bypassing the thresholds entirely.</p>
+<p>At the time those floors were seeded in and the config said nothing
+about them, which is what made the surprise possible. Nothing is seeded
+now — a floor exists only where this config declares one — so the
+hazard survives only for floors you wrote. It is still worth knowing
+that writing one opts that flag out of your ceiling.</p>
 <table>
 <thead>
 <tr>
@@ -324,10 +329,11 @@ interactive-tier decisions in that window carried solve proof.</p>
     BotShieldAdd          50
 &lt;/BotShieldFlagTrigger&gt;
 </code></pre>
-<p><code>reset</code> is required rather than stylistic: <strong>tier floors MAX across
-triggers</strong>, so adding a lower floor beside the compiled-in one is
-silently useless — it MAXes straight back up. <code>pow_fail_streak</code> needs
-no reset; its floor is already <code>noninteractive</code>.</p>
+<p><code>reset</code> matters because <strong>tier floors MAX across triggers</strong>: a lower
+floor written beside a higher one already declared for the same flag is
+silently useless — it MAXes straight back up. With nothing seeded, that
+only happens between declarations in this config, so <code>reset</code> is for
+overriding a slate you included rather than one the module supplied.</p>
 <p><code>BotShieldDebug</code> returns <code>403 &quot;Hello World&quot;</code> for every request in
 scope — useful as a smoke test that the hook is firing.</p>
 <p><code>BotShieldSecretFile</code> and <code>BotShieldAlgorithm</code> are required. The
@@ -1493,11 +1499,11 @@ of scanners probing <code>/.env</code>. It was the wrong default for
 high-cardinality traffic: at roughly one request per address the flag
 is never read again and it churns the 50,000-slot table. And a
 <code>scanner_probe</code> flag is not inert: wherever a <code>BotShieldFlagTrigger</code>
-gives it a <code>tier_floor</code> — as the compiled-in slate did before default
-rules were switched off — that floor <strong>overrides parked score
-thresholds</strong>, so a rule written to block quietly began rendering
-interstitials to whoever shared that address next, with nothing in the
-config saying so.</p>
+gives it a <code>tier_floor</code> — as the seeded slate did before default rules
+were switched off — that floor <strong>overrides parked score thresholds</strong>,
+so a rule written to block quietly began rendering interstitials to
+whoever shared that address next, with nothing in the config saying
+so.</p>
 <p><strong>Migrating:</strong> a rule written before 2026-09-05 that relied on the
 default now flags nothing; add <code>BotShieldFlagIP scanner_probe</code> to keep
 it. <code>BotShieldTTL 0</code>, which used to be how you switched the default
@@ -1609,16 +1615,17 @@ entries.</p>
 <p>Action verbs: <code>action=score add=N</code> (signed N -1000..1000),
 <code>action=tier_floor min=&lt;tier&gt;</code> (raise effective tier; tier is one
 of <code>pass</code>/<code>noninteractive</code>/<code>interactive</code>/<code>captcha</code>). The <code>reset</code> keyword clears
-all earlier triggers (compiled-in defaults + prior
-declarations) for the named flag at post-config time.</p>
+all earlier declarations for the named flag at post-config time.</p>
 <p><strong>A <code>tier_floor</code> bypasses your score thresholds.</strong> It is MAX'd in
 <em>after</em> the score-to-tier decision, so it does not consult
-<code>BotShieldScoreNonInteractive</code>/<code>Interactive</code>/<code>Captcha</code> at all. Four of the compiled-in
-defaults carry one — <code>honeypot_hit</code> and <code>fake_bot</code> (captcha),
-<code>scanner_probe</code> (form), <code>pow_fail_streak</code> (silent) — so an IP carrying
-any of them is challenged even in a scope whose thresholds are parked to
-disable challenges entirely. To make a scope genuinely block-only, reset
-the floors and keep the scores:</p>
+<code>BotShieldScoreNonInteractive</code>/<code>Interactive</code>/<code>Captcha</code> at all — an
+address carrying a floored flag is challenged even where the thresholds
+are parked to disable challenges entirely, or left unset, which now
+means never. That is the property to reach for when scoring is off and
+the point to remember when it is not.</p>
+<p>Nothing carries a floor unless this config gives it one. To keep a
+flag's score while dropping a floor you declared earlier, reset it and
+re-add the score:</p>
 <pre><code class="language-apache">&lt;BotShieldFlagTrigger honeypot_hit&gt;
     BotShieldReset
     BotShieldAction       score
@@ -1697,14 +1704,19 @@ slate and override semantics.</p>
 </table>
 <p>Same action grammar as the flag family, but the predicate is a
 built-in heuristic on the request itself rather than a flag bit. This
-is the operator handle for retuning the built-in penalties — they are
-not separate directives.</p>
+is the operator handle for weighting those signals — they are not
+separate directives.</p>
+<p><strong>Nothing is seeded.</strong> A heuristic with no <code>BotShieldHeuristicTrigger</code>
+contributes 0, so a scope that declares none does no heuristic scoring
+whatever — every request scores 0 from this family and the reason field
+spells it out as <code>missingua:0</code>. The weights below are a starting point
+to copy, not a state the module is already in.</p>
 <table>
 <thead>
 <tr>
 <th>Heuristic</th>
 <th>Fires when</th>
-<th>Default</th>
+<th>Suggested</th>
 </tr>
 </thead>
 <tbody>
@@ -1754,18 +1766,20 @@ suppress a penalty it never earned. The waiver requires solve evidence
 (<code>passes_silent</code>, <code>passes_form</code>, or <code>passes_captcha</code>) in the
 authenticated rep block — the same evidence the safeguard-clear path
 requires. A real browser pays for this exactly once: it arrives with no
-proof, scores <code>droppedcookie</code> into the noninteractive tier, clears it in one
-auto-submitted round trip, and every later request carries proof. <code>firstsightip</code> sits at
-exactly <code>BotShieldScoreNonInteractive</code>, so <strong>an enabled scope challenges any
-request with no session context by default</strong>, with no rule to write.
-That is usually what you want on a login or registration path, where the
-check is invisible and a real browser clears it in one auto-submitted
-round trip. Lower it if you enable BotShield site-wide and would rather
-new visitors reach content without a check.</p>
+proof, scores <code>droppedcookie</code>, clears it in one auto-submitted round
+trip, and every later request carries proof.</p>
+<p>The suggested <code>firstsightip</code> weight is exactly the suggested
+<code>BotShieldScoreNonInteractive</code>, so writing both as given makes a scope
+challenge any request with no session context. That is usually what you
+want on a login or registration path, where the check is invisible and
+a real browser clears it in one round trip; it is usually not what you
+want site-wide. Neither line exists until you write it, so this is a
+configuration to choose rather than a default to undo.</p>
 <p>Action verbs are <code>action=score add=N</code> (signed, -1000..1000) and
-<code>action=tier_floor min=&lt;tier&gt;</code>. <code>&lt;name&gt; reset</code> clears the compiled-in
-default plus prior declarations for that one heuristic; <code>all reset</code>
-wipes every entry so the slate can be rebuilt from zero.
+<code>action=tier_floor min=&lt;tier&gt;</code>. <code>&lt;name&gt; reset</code> clears prior
+declarations for that one heuristic; <code>all reset</code> wipes every entry so
+the slate can be rebuilt from zero. With nothing seeded, both clear
+only what this config declared earlier.
 <code>mode=observe</code> logs the match with an <code>:observe</code> suffix instead of
 applying it.</p>
 <p>A <code>droppedcookie</code> hit is ambiguous by design — private-browsing

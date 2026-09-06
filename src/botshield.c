@@ -894,12 +894,15 @@ static const command_rec bs_cmds[] = {
                  "verbs: 'score add=N' (signed, -1000..1000; SUMs "
                  "across triggers) or 'tier_floor min=<tier>' "
                  "(pass|noninteractive|interactive|captcha; MAXes across triggers). "
-                 "'reset' clears compiled-in defaults + prior "
-                 "operator declarations for the named flag before "
-                 "this directive's effect is added. mode=observe "
-                 "logs would-flagtrigger:<flag>:observe instead of "
-                 "applying. Compiled-in defaults cover the common "
-                 "cases — see example/flag-triggers.conf.example."),
+                 "'reset' clears prior operator declarations for "
+                 "the named flag before this directive's effect is "
+                 "added. mode=observe logs "
+                 "would-flagtrigger:<flag>:observe instead of "
+                 "applying. NOTHING IS SEEDED: a flag with no "
+                 "BotShieldFlagTrigger is recorded and acts on "
+                 "nothing, so every consequence is a line in this "
+                 "config. See docs/examples/flag-triggers.conf.example "
+                 "for a slate to start from."),
     /* Heuristic-driven trigger family. Same shape as the flag family
      * but the predicate is a compile-time named heuristic on the
      * request itself rather than a flag bit. */
@@ -920,8 +923,13 @@ static const command_rec bs_cmds[] = {
                  "every entry (defaults included) so the operator can "
                  "build the slate up from zero. mode=observe logs the "
                  "match with a :observe suffix instead of applying. "
-                 "Compiled-in defaults: missingua=40, missingal=5, "
-                 "scraperua=10, firstsightip=20, droppedcookie=25."),
+                 "NOTHING IS SEEDED: a heuristic with no "
+                 "BotShieldHeuristicTrigger contributes 0, so a scope "
+                 "that declares none does no heuristic scoring at all. "
+                 "See docs/examples/heuristic-triggers.conf.example "
+                 "for a slate to start from; the weights in it are "
+                 "missingua=40, missingal=5, scraperua=10, "
+                 "firstsightip=20, droppedcookie=25."),
     /* E15 — forgiveness farming defense. */
     AP_INIT_TAKE1("BotShieldForgivenessCapPerHour",
                  bs_set_forgive_cap, NULL, RSRC_CONF,

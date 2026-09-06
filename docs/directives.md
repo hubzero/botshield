@@ -85,8 +85,14 @@ applied after the floor, so it holds.
 **This has bitten a production deployment, so it is worth spelling out
 what the ceiling does and does not buy.** A hub running only the silent
 tier parked `Hard` and `Captcha` at `10000`, believing form and captcha
-were unreachable. They were not: the compiled-in flag defaults force a
-tier directly.
+were unreachable. They were not: a flag trigger's `tier_floor` forces a
+tier directly, bypassing the thresholds entirely.
+
+At the time those floors were seeded in and the config said nothing
+about them, which is what made the surprise possible. Nothing is seeded
+now — a floor exists only where this config declares one — so the
+hazard survives only for floors you wrote. It is still worth knowing
+that writing one opts that flag out of your ceiling.
 
 | flag | forced tier | score |
 |---|---|---|
@@ -120,10 +126,11 @@ To genuinely cap the tier, reset each floor and re-add only the score:
 </BotShieldFlagTrigger>
 ```
 
-`reset` is required rather than stylistic: **tier floors MAX across
-triggers**, so adding a lower floor beside the compiled-in one is
-silently useless — it MAXes straight back up. `pow_fail_streak` needs
-no reset; its floor is already `noninteractive`.
+`reset` matters because **tier floors MAX across triggers**: a lower
+floor written beside a higher one already declared for the same flag is
+silently useless — it MAXes straight back up. With nothing seeded, that
+only happens between declarations in this config, so `reset` is for
+overriding a slate you included rather than one the module supplied.
 
 `BotShieldDebug` returns `403 "Hello World"` for every request in
 scope — useful as a smoke test that the hook is firing.
@@ -978,11 +985,11 @@ reason above. The window is `BotShieldForgetIPAfter`, at server scope.
 > high-cardinality traffic: at roughly one request per address the flag
 > is never read again and it churns the 50,000-slot table. And a
 > `scanner_probe` flag is not inert: wherever a `BotShieldFlagTrigger`
-> gives it a `tier_floor` — as the compiled-in slate did before default
-> rules were switched off — that floor **overrides parked score
-> thresholds**, so a rule written to block quietly began rendering
-> interstitials to whoever shared that address next, with nothing in the
-> config saying so.
+> gives it a `tier_floor` — as the seeded slate did before default rules
+> were switched off — that floor **overrides parked score thresholds**,
+> so a rule written to block quietly began rendering interstitials to
+> whoever shared that address next, with nothing in the config saying
+> so.
 >
 > **Migrating:** a rule written before 2026-09-05 that relied on the
 > default now flags nothing; add `BotShieldFlagIP scanner_probe` to keep
@@ -1095,17 +1102,19 @@ This is the directive that replaces the legacy `BotShieldFlagIP`
 Action verbs: `action=score add=N` (signed N -1000..1000),
 `action=tier_floor min=<tier>` (raise effective tier; tier is one
 of `pass`/`noninteractive`/`interactive`/`captcha`). The `reset` keyword clears
-all earlier triggers (compiled-in defaults + prior
-declarations) for the named flag at post-config time.
+all earlier declarations for the named flag at post-config time.
 
 **A `tier_floor` bypasses your score thresholds.** It is MAX'd in
 *after* the score-to-tier decision, so it does not consult
-`BotShieldScoreNonInteractive`/`Interactive`/`Captcha` at all. Four of the compiled-in
-defaults carry one — `honeypot_hit` and `fake_bot` (captcha),
-`scanner_probe` (form), `pow_fail_streak` (silent) — so an IP carrying
-any of them is challenged even in a scope whose thresholds are parked to
-disable challenges entirely. To make a scope genuinely block-only, reset
-the floors and keep the scores:
+`BotShieldScoreNonInteractive`/`Interactive`/`Captcha` at all — an
+address carrying a floored flag is challenged even where the thresholds
+are parked to disable challenges entirely, or left unset, which now
+means never. That is the property to reach for when scoring is off and
+the point to remember when it is not.
+
+Nothing carries a floor unless this config gives it one. To keep a
+flag's score while dropping a floor you declared earlier, reset it and
+re-add the score:
 
 ```apache
 <BotShieldFlagTrigger honeypot_hit>
@@ -1184,10 +1193,16 @@ slate and override semantics.
 
 Same action grammar as the flag family, but the predicate is a
 built-in heuristic on the request itself rather than a flag bit. This
-is the operator handle for retuning the built-in penalties — they are
-not separate directives.
+is the operator handle for weighting those signals — they are not
+separate directives.
 
-| Heuristic | Fires when | Default |
+**Nothing is seeded.** A heuristic with no `BotShieldHeuristicTrigger`
+contributes 0, so a scope that declares none does no heuristic scoring
+whatever — every request scores 0 from this family and the reason field
+spells it out as `missingua:0`. The weights below are a starting point
+to copy, not a state the module is already in.
+
+| Heuristic | Fires when | Suggested |
 |---|---|---|
 | `missingua` | User-Agent absent or empty | `score add=40` |
 | `missingal` | Accept-Language absent | `score add=5` |
@@ -1216,19 +1231,22 @@ suppress a penalty it never earned. The waiver requires solve evidence
 (`passes_silent`, `passes_form`, or `passes_captcha`) in the
 authenticated rep block — the same evidence the safeguard-clear path
 requires. A real browser pays for this exactly once: it arrives with no
-proof, scores `droppedcookie` into the noninteractive tier, clears it in one
-auto-submitted round trip, and every later request carries proof. `firstsightip` sits at
-exactly `BotShieldScoreNonInteractive`, so **an enabled scope challenges any
-request with no session context by default**, with no rule to write.
-That is usually what you want on a login or registration path, where the
-check is invisible and a real browser clears it in one auto-submitted
-round trip. Lower it if you enable BotShield site-wide and would rather
-new visitors reach content without a check.
+proof, scores `droppedcookie`, clears it in one auto-submitted round
+trip, and every later request carries proof.
+
+The suggested `firstsightip` weight is exactly the suggested
+`BotShieldScoreNonInteractive`, so writing both as given makes a scope
+challenge any request with no session context. That is usually what you
+want on a login or registration path, where the check is invisible and
+a real browser clears it in one round trip; it is usually not what you
+want site-wide. Neither line exists until you write it, so this is a
+configuration to choose rather than a default to undo.
 
 Action verbs are `action=score add=N` (signed, -1000..1000) and
-`action=tier_floor min=<tier>`. `<name> reset` clears the compiled-in
-default plus prior declarations for that one heuristic; `all reset`
-wipes every entry so the slate can be rebuilt from zero.
+`action=tier_floor min=<tier>`. `<name> reset` clears prior
+declarations for that one heuristic; `all reset` wipes every entry so
+the slate can be rebuilt from zero. With nothing seeded, both clear
+only what this config declared earlier.
 `mode=observe` logs the match with an `:observe` suffix instead of
 applying it.
 
