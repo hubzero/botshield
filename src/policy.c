@@ -249,87 +249,17 @@ int bs_check_policy(request_rec *r)
                                                &botshield_module);
     if (!scfg) return OK;
 
-    /* E4 — cookie triggers. Declaration order; **pass triggers
-     * accumulate, first non-pass trigger short-circuits the walk**.
-     * That split exists to make the canonical layered-reputation
-     * pattern work — `app-session credit=15` + `app-auth
-     * credit=40` should stack to a 55-point credit when both
-     * cookies are present, not lose the second credit to first-
-     * match-wins. Contrast E3 path triggers, which are strict
-     * first-match-wins with no accumulation: paths are one-off
-     * matches, cookies are ongoing-state signals that naturally
-     * compose.
+    /* The cookie and env family walks stood here, between the rate
+     * limiter and the load triggers. Their predicates are conditions on
+     * a rule now -- BotShieldCookie, BotShieldEnv -- matched through
+     * the same code these walks used.
      *
-     * Runs before E3 path triggers so reputation signals land on
-     * the decision log even when a later rule short-circuits.
-     *
-     * Divergences from E3 to keep straight while reading this loop:
-     *  1. credit/penalty apply regardless of status (even under
-     *     status=pass, because the cookie IS this request's state).
-     *  2. pass matches don't end the walk — they accumulate. */
-    if (scfg->cookie_triggers && scfg->cookie_triggers->nelts > 0) {
-        apr_table_t *cmap = bs_parse_cookies_once(r);
-        const char *bs_state = apr_table_get(r->notes, BS_CK_STATE_NOTE);
-        for (int i = 0; i < scfg->cookie_triggers->nelts; i++) {
-            bs_cookie_trigger_entry *c = APR_ARRAY_IDX(
-                scfg->cookie_triggers, i, bs_cookie_trigger_entry *);
-            if (!bs_cookie_pred_match(c, cmap, scfg->session_names,
-                                      bs_state)) continue;
-            bs_trigger_exec_outcome o = bs_apply_trigger_action(
-                r, scfg, BS_TFAMILY_COOKIE, &c->action,
-                "cookietrigger", c->name);
-            /* Cookie family: BS_TEXEC_PASS_CONTINUE keeps accumulating
-             * credits; BS_TEXEC_STATUS short-circuits. PASS_BREAK /
-             * PASS_DECLINE aren't produced for this family. */
-            if (o == BS_TEXEC_STATUS) return c->action.status_code;
-        }
-    }
-
-    /* E6 — env-var triggers. Declaration order, first match wins.
-     * Gate: once per client-visible request. `ap_is_initial_req` is
-     * (r->main == NULL && r->prev == NULL) per httpd's protocol.c,
-     * which both excludes subrequests (where producer env
-     * propagation differs) and blocks re-application on internal-
-     * redirect legs (ErrorDocument, RewriteRule-without-R) where
-     * the env producer would fire a second time and double-count
-     * score/flag. The header docs only advertise the main-vs-
-     * subrequest distinction, so we restate the full intent here.
-     * Reads r->subprocess_env, the table SetEnvIf / RewriteRule
-     * [E=...] / BrowserMatch / ModSecurity v2 setenv all populate
-     * at phases that run before the handler. */
-    if (ap_is_initial_req(r)
-        && scfg->env_triggers && scfg->env_triggers->nelts > 0) {
-        for (int i = 0; i < scfg->env_triggers->nelts; i++) {
-            bs_env_trigger_entry *t = APR_ARRAY_IDX(
-                scfg->env_triggers, i, bs_env_trigger_entry *);
-            const char *v = apr_table_get(r->subprocess_env,
-                                          t->env_name);
-            int matched = 0;
-            switch (t->pred_kind) {
-            case BS_EP_NAMED_PRESENT:
-                matched = (v != NULL);
-                break;
-            case BS_EP_NAMED_ABSENT:
-                matched = (v == NULL);
-                break;
-            case BS_EP_NAMED_EQ:
-                matched = (v != NULL
-                        && t->env_value != NULL
-                        && strcmp(v, t->env_value) == 0);
-                break;
-            }
-            if (!matched) continue;
-            bs_trigger_exec_outcome o = bs_apply_trigger_action(
-                r, scfg, BS_TFAMILY_ENV, &t->action,
-                "envtrigger", t->name);
-            /* Env family: BS_TEXEC_PASS_BREAK ends the loop (env
-             * signals are discrete; no accumulation). STATUS
-             * short-circuits. */
-            if (o == BS_TEXEC_STATUS) return t->action.status_code;
-            if (o == BS_TEXEC_PASS_BREAK) break;
-        }
-    }
-
+     * Two properties went with them rather than moving. A cookie
+     * trigger accumulated on a pass and only short-circuited on a
+     * non-pass, and an env trigger needed an ap_is_initial_req gate so
+     * an internal redirect did not apply its action twice. Both are
+     * properties of a walk that applies actions; a condition only
+     * reads, so neither has anything left to describe. */
     /* E11.2 — load triggers. Match on the global cached load state
      * (BS_LOAD_NORMAL/WARM/HOT). First-match-wins; alternative-
      * specificity rules (state>=warm vs state=hot) are stacked by

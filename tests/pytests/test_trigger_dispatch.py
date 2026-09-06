@@ -1,26 +1,26 @@
-"""E7.3 — cross-family trigger dispatch order.
+"""Order between trigger families in the bs_check_policy walk.
 
-Per-family precedence (declaration order) is covered by the family-
-specific test files. This file pins the ORDER between families:
+    1. load triggers   (E11.2 - global load_state)
+    2. rules           (one-off per-request intent)
+    3. feedback        (response-path; separate hook)
 
-    1. cookie triggers       (persistent state; accumulates on pass)
-    2. env triggers          (upstream-module / Apache-config state;
-                              ap_is_initial_req-gated to avoid double-
-                              application on internal-redirect legs)
-    3. load triggers         (E11.2 — global load_state; inserted into
-                              the shared family between env and path)
-    4. path triggers         (one-off per-path intent)
-    5. feedback triggers     (response-path; separate hook)
+This file used to pin five families in a row: cookie, then env, then
+load, then path, then feedback. The cookie and env families are gone --
+their predicates are BotShieldCookie and BotShieldEnv inside a rule
+now -- so four of the six tests here lost their subject rather than
+their answer. What is left is load before rule, which is still an
+order and can still be got wrong.
+
+One of the deleted tests is worth remembering. An env trigger applied
+an action, so it ran on both legs of an internal redirect and applied
+twice; the walk carried an ap_is_initial_req gate to stop that. A rule
+condition only reads a variable. The gate had nothing to guard once the
+action went, and the whole bug class went with the family.
 
 Gate from CHANGELOG.md E7.3:
   - ordering is deterministic
-  - later trigger families do not run after an earlier short-circuit
-  - decision logs show which family fired (already covered by reason-
-    prefix normalization in E7.1, so we assert the right prefix here)
-
-Feedback triggers are validated by `test_app_feedback.py` since they
-run on a separate hook and don't participate in the bs_check_policy
-walk.
+  - later families do not run after an earlier short-circuit
+  - decision logs show which family fired
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ from __future__ import annotations
 import time
 
 import pytest
+
 
 from botshield_test import client, ips as _ips
 
@@ -78,115 +79,6 @@ def _wait_for_metric_load_state(target: int, timeout: float = 12.0) -> int:
 # --- Short-circuit blocks later families ---------------------------
 
 
-def test_cookie_short_circuit_blocks_env_and_path(
-    config_override, log_slice, fresh_ip,
-):
-    """Cookie trigger with respond=403 fires first. The env trigger
-    and path trigger that would also match must not run — no env/
-    path reason-tokens on the decision line, and the status is the
-    cookie's 403 (not the path trigger's 451 or env's 429)."""
-    with config_override(
-        r"BotShieldEnabled\s+On",
-        'BotShieldEnabled On\n'
-        '    BotShieldCookieTrigger c-block cookies=none respond=403\n'
-        '    SetEnvIfExpr "true" BS_CROSS=1\n'
-        '    BotShieldEnvTrigger e-block env=BS_CROSS respond=429\n'
-        '    BotShieldRule p-block path="/*" respond=451',
-        count=1,
-    ):
-        with log_slice as slc:
-            r = _g("/no-cookie-path", xff=fresh_ip)
-            lines = slc.decision_lines(ip=fresh_ip)
-
-    assert r.status_code == 403, (
-        f"cookie short-circuit should return its 403, not defer to "
-        f"env (429) or path (451); got {r.status_code}"
-    )
-    assert lines
-    reason = lines[-1]["reason"]
-    assert "cookietrigger:c-block" in reason, (
-        f"cookie match missing from decision reason; reason={reason}"
-    )
-    assert "envtrigger:e-block" not in reason, (
-        f"env trigger must not have run after cookie short-circuit; "
-        f"reason={reason}"
-    )
-    assert "rule:p-block" not in reason, (
-        f"path trigger must not have run after cookie short-circuit; "
-        f"reason={reason}"
-    )
-
-
-def test_env_short_circuit_blocks_path(
-    config_override, log_slice, fresh_ip,
-):
-    """Env trigger with respond=403 fires (cookie family has no
-    matching trigger). The path trigger that would also match must
-    not run."""
-    with config_override(
-        r"BotShieldEnabled\s+On",
-        'BotShieldEnabled On\n'
-        '    SetEnvIfExpr "true" BS_CROSS=1\n'
-        '    BotShieldEnvTrigger e-block env=BS_CROSS respond=403\n'
-        '    BotShieldRule p-block path="/*" respond=451',
-        count=1,
-    ):
-        with log_slice as slc:
-            r = _g("/whatever", xff=fresh_ip)
-            lines = slc.decision_lines(ip=fresh_ip)
-
-    assert r.status_code == 403, (
-        f"env short-circuit should return its 403, not defer to path "
-        f"(451); got {r.status_code}"
-    )
-    assert lines
-    reason = lines[-1]["reason"]
-    assert "envtrigger:e-block" in reason
-    assert "rule:p-block" not in reason, (
-        f"path trigger must not have run after env short-circuit; "
-        f"reason={reason}"
-    )
-
-
-# --- Pass matches let later families run ---------------------------
-
-
-def test_cookie_and_env_pass_then_path_runs(
-    config_override, log_slice, fresh_ip,
-):
-    """Cookie pass accumulates a penalty; env pass accumulates
-    another; the path trigger then fires with its own status. All
-    three families should appear in the reason trace."""
-    with config_override(
-        r"BotShieldEnabled\s+On",
-        'BotShieldEnabled On\n'
-        '    BotShieldCookieTrigger c-pass cookies=none '
-        'respond=nochallenge score=\"probe +3\"\n'
-        '    SetEnvIfExpr "true" BS_CROSS=1\n'
-        '    BotShieldEnvTrigger e-pass env=BS_CROSS '
-        'respond=nochallenge score=\"probe +7\"\n'
-        '    BotShieldRule p-block path="/*" respond=403',
-        count=1,
-    ):
-        with log_slice as slc:
-            r = _g("/whatever", xff=fresh_ip)
-            lines = slc.decision_lines(ip=fresh_ip)
-
-    assert r.status_code == 403, (
-        f"path trigger should win after cookie/env pass; "
-        f"got {r.status_code}"
-    )
-    assert lines
-    reason = lines[-1]["reason"]
-    assert "cookietrigger:c-pass" in reason, reason
-    assert "envtrigger:e-pass"    in reason, reason
-    assert "rule:p-block"  in reason, reason
-
-
-# --- Load triggers in the shared family ----------------------------
-
-
-@pytest.mark.heavy
 def test_load_short_circuit_blocks_path(
     config_override, log_slice, fresh_ip,
 ):
@@ -220,98 +112,3 @@ def test_load_short_circuit_blocks_path(
         f"path trigger must not have run after load short-circuit; "
         f"reason={reason}"
     )
-
-
-@pytest.mark.heavy
-def test_env_pass_then_load_blocks_path(
-    config_override, log_slice, fresh_ip,
-):
-    """Env pass accumulates a penalty; load=hot then short-circuits
-    with respond=503. The path trigger must not run. Both env-pass
-    and load-block reasons should appear; path-block must not."""
-    _set_load_file("hot")
-    try:
-        with config_override(
-            r"BotShieldEnabled\s+On",
-            'BotShieldEnabled On\n'
-            '    SetEnvIfExpr "true" BS_CROSS=1\n'
-            '    BotShieldEnvTrigger e-pass env=BS_CROSS '
-            'respond=nochallenge score=\"probe +4\"\n'
-            '    BotShieldLoadTrigger l-block state=hot respond=503\n'
-            '    BotShieldRule p-block path="/*" respond=451',
-            count=1,
-        ):
-            _wait_for_metric_load_state(target=2, timeout=12.0)
-            with log_slice as slc:
-                r = _g("/whatever", xff=fresh_ip)
-                lines = slc.decision_lines(ip=fresh_ip)
-    finally:
-        _set_load_file("normal")
-
-    assert r.status_code == 503, (
-        f"load should win after env pass; got {r.status_code}"
-    )
-    assert lines
-    reason = lines[-1]["reason"]
-    assert "envtrigger:e-pass" in reason, reason
-    assert "loadtrigger:l-block" in reason, reason
-    assert "rule:p-block" not in reason, (
-        f"path trigger must not have run after load short-circuit; "
-        f"reason={reason}"
-    )
-
-
-# --- Env trigger initial-req gate (regression) ---------------------
-
-
-def test_env_trigger_no_double_apply_on_internal_redirect(
-    config_override, log_slice, fresh_ip,
-):
-    """policy.c:223 — env triggers are gated on `ap_is_initial_req`
-    so a 403 → ErrorDocument internal-redirect leg doesn't re-apply
-    the envtrigger side effect. Without the gate, a SetEnvIf-style
-    env that's set on both legs would have its penalty / flag-IP
-    side effect applied twice — once on the original request, once
-    on the ErrorDocument leg.
-
-    Setup: env=BS_CROSS on every request (respond=nochallenge + penalty so
-    we can see whether it fired in the reason trace), requesttrigger
-    on /start, ErrorDocument 403 → /error. Hit /start. The original
-    leg's decision line should carry envtrigger; the /error leg's
-    decision line must NOT."""
-    with config_override(
-        r"BotShieldEnabled\s+On",
-        'BotShieldEnabled On\n'
-        '    SetEnvIfExpr "true" BS_CROSS=1\n'
-        '    BotShieldEnvTrigger e-pass env=BS_CROSS '
-        'respond=nochallenge score=\"probe +5\"\n'
-        '    BotShieldRule p-block path="/start" respond=403\n'
-        '    ErrorDocument 403 /error',
-        count=1,
-    ):
-        with log_slice as slc:
-            r = _g("/start", xff=fresh_ip)
-            lines = slc.decision_lines(ip=fresh_ip)
-
-    assert r.status_code == 403, (
-        f"path trigger on /start should yield 403; got {r.status_code}"
-    )
-    assert lines, "no decision lines emitted"
-
-    initial = [l for l in lines if l.get("path", "").startswith("/start")]
-    redirect = [l for l in lines if l.get("path", "").startswith("/error")]
-
-    assert initial, (
-        f"expected a decision line for /start; got paths={[l.get('path') for l in lines]}"
-    )
-    assert "envtrigger:e-pass" in initial[-1]["reason"], (
-        f"envtrigger should fire on the initial /start leg; "
-        f"reason={initial[-1]['reason']}"
-    )
-
-    if redirect:
-        assert "envtrigger:e-pass" not in redirect[-1]["reason"], (
-            f"envtrigger must NOT re-fire on the ErrorDocument /error "
-            f"internal-redirect leg (ap_is_initial_req gate); "
-            f"reason={redirect[-1]['reason']}"
-        )

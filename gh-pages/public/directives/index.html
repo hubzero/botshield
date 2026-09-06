@@ -1089,16 +1089,6 @@ semantics and refresh model.</p>
 <td><code>respond=</code>, <code>redirect=</code>, <code>logas=</code>, <code>accesslog=</code>, <code>flagip=</code>, <code>flagsession=</code>, <code>score=</code>, <code>mode=</code></td>
 </tr>
 <tr>
-<td><code>BotShieldCookieTrigger</code></td>
-<td><code>&lt;name&gt; &lt;pred&gt;</code> (see policy page)</td>
-<td><code>respond=</code>, <code>redirect=</code>, <code>logas=</code>, <code>accesslog=</code>, <code>flagip=</code>, <code>flagsession=</code>, <code>score=</code>, <code>mode=</code></td>
-</tr>
-<tr>
-<td><code>BotShieldEnvTrigger</code></td>
-<td><code>&lt;name&gt; &lt;env-pred&gt;</code> (see policy page)</td>
-<td><code>respond=</code>, <code>logas=</code>, <code>accesslog=</code>, <code>flagip=</code>, <code>flagsession=</code>, <code>score=</code>, <code>mode=</code> (no <code>redirect=</code>)</td>
-</tr>
-<tr>
 <td><code>BotShieldFeedbackTrigger</code></td>
 <td><code>&lt;event&gt;</code></td>
 <td><code>flagip=</code>, <code>flagsession=</code> (both accept <code>+</code>/<code>-</code>/<code>=</code>), <code>logas=</code>, <code>accesslog=</code>, <code>mode=</code></td>
@@ -1311,7 +1301,7 @@ classifier, a cookie's authenticated contents, a load sampler. That is
 the family's actual shape: match a request on anything known about it.</p>
 <p>Globs take <code>*</code> wildcards and a trailing <code>$</code> anchor. Named-cookie
 predicates (<code>cookie=&lt;n&gt;</code>, <code>cookie=&lt;n&gt;~&lt;substr&gt;</code>, <code>bs-cookie=&lt;state&gt;</code>)
-stay on <a href="#triggers"><code>BotShieldCookieTrigger</code></a> — that vocabulary does not
+stay on the cookie conditions above — that vocabulary does not
 compress into one key.</p>
 <p><strong>What a matching rule can do.</strong> Four outcomes, set by the action keys:</p>
 <table>
@@ -1545,7 +1535,7 @@ are tuned and audited, and <code>env=</code> is how they compose:</p>
 &lt;/BotShieldRule&gt;
 </code></pre>
 <p>That composition is the reason these belong in the rule rather than in
-a family of their own. A <code>BotShieldCookieTrigger</code> matches a cookie and
+a family of their own. The family they replaced matched a cookie and
 nothing else; a rule ANDs it with the path, the UA, the load state and
 whether the client has already solved.</p>
 <p>The module's own <code>__Host-bs_session</code> is refused here — use

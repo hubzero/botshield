@@ -1278,7 +1278,9 @@ side-effects survive). This is the one family where pass means
 
 #### Cookie triggers (E4)
 
-`BotShieldCookieTrigger <name> <cookie-match> [key=value ...]`.
+`BotShieldCookie <name-match>` inside a `<BotShieldRule>`. It was a
+family of its own, `BotShieldCookieTrigger`, until the predicate
+moved into the rule where it could be ANDed with everything else.
 
 Predicate kinds (`enum bs_cookie_pred_kind`):
 
@@ -1326,7 +1328,9 @@ no re-scanning the raw header per trigger.
 
 #### Env triggers (E6)
 
-`BotShieldEnvTrigger <name> <env-match> [key=value ...]`. Reads
+`BotShieldEnv <name-match>` inside a `<BotShieldRule>`. It was the
+`BotShieldEnvTrigger` family until the predicate moved into the
+rule. Reads
 `r->subprocess_env`. Predicate kinds: `env=<var>` (present),
 `env=<var>=<value>` (exact match, case-sensitive), `!env=<var>`
 (absent).
@@ -2211,7 +2215,7 @@ the `bs_cmds[]` table at `src/botshield.c:142`.
 | UA classification (E1) | `BotShieldClassify`, `BotShieldAllowBot`, `BotShieldAllowRangesRefreshInterval`, `BotShieldBotDirectory`, `BotShieldBotDirectoryRefreshInterval`, `BotShieldBrowserTemplates`, `BotShieldBrowserTemplatesRefreshInterval` |
 | Policy (E2.1 / E9) | `BotShieldRateLimit`, `BotShieldBotRateLimit`, `BotShieldRateLimitEscalate` |
 | Robots (E2.2) | `BotShieldRobotsTxt`, `BotShieldRobotsRefreshInterval`, `BotShieldRobotsWildcardScope` |
-| Triggers | `BotShieldTrigger` (per-scope), `BotShieldRule` (E3, formerly BotShieldPathTrigger), `BotShieldCookieTrigger` (E4), `BotShieldEnvTrigger` (E6), `BotShieldFeedbackTrigger` (E7.3), `BotShieldLoadTrigger` (E11.2), `BotShieldFlagTrigger` (E14), `BotShieldSessionCookieName` (E4) |
+| Triggers | `BotShieldTrigger` (per-scope), `BotShieldRule` (E3, formerly BotShieldPathTrigger, and since 2026-09-06 also carrying the E4 cookie and E6 env predicates), `BotShieldFeedbackTrigger` (E7.3), `BotShieldLoadTrigger` (E11.2), `BotShieldFlagTrigger` (E14), `BotShieldSessionCookieName` (E4) |
 | Safeguard (E10) | `BotShieldSafeguard`, `BotShieldSafeguardThreshold`, `BotShieldSafeguardWindow`, `BotShieldSafeguardTTL`, `BotShieldSafeguardRedirectURL` |
 | Load (E11) | `BotShieldLoadStateFile`, `BotShieldLoadRefreshInterval`, `BotShieldLoadWarmThreshold`, `BotShieldLoadHotThreshold` |
 | Multi-vhost (E13) | `BotShieldShareScope` |

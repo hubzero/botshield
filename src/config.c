@@ -257,10 +257,6 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
     /* E15 — child-set value wins; 0 means "inherit". */
     out->request_triggers = bs_merge_rule_array(p, base->request_triggers,
                                              add->request_triggers);
-    out->cookie_triggers = bs_merge_rule_array(p, base->cookie_triggers,
-                                               add->cookie_triggers);
-    out->env_triggers    = bs_merge_rule_array(p, base->env_triggers,
-                                                add->env_triggers);
     out->feedback_triggers = bs_merge_rule_array(p, base->feedback_triggers,
                                                  add->feedback_triggers);
     out->load_triggers     = bs_merge_rule_array(p, base->load_triggers,
@@ -424,8 +420,6 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->share_scope_token     = NULL;
     /* E15 — 0 means "inherit / use default". */
     scfg->request_triggers         = apr_array_make(p, 4, sizeof(void *));
-    scfg->cookie_triggers  = apr_array_make(p, 4, sizeof(void *));
-    scfg->env_triggers     = apr_array_make(p, 4, sizeof(void *));
     scfg->feedback_triggers = apr_array_make(p, 4, sizeof(void *));
     scfg->load_triggers     = apr_array_make(p, 4, sizeof(void *));
     scfg->flag_triggers     = apr_array_make(p, 8, sizeof(void *));

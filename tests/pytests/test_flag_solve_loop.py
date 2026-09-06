@@ -111,9 +111,10 @@ def test_flag_acquired_after_solving_still_fires(
     with config_override(
         r"BotShieldEnabled\s+On",
         "BotShieldEnabled On\n"
-        '    SetEnvIf Request_URI "/flag-me" BS_FLAG_ME=1\n'
-        "    BotShieldEnvTrigger flagger env=BS_FLAG_ME "
-        "flag=scanner_probe ttl=3600\n"
+        "    <BotShieldRule flagger>\n"
+        "        BotShieldPath    /flag-me\n"
+        "        BotShieldFlagIP  scanner_probe\n"
+        "    </BotShieldRule>\n"
         f"    BotShieldFlagTrigger honeypot_hit reset "
         f"action=score accumulator=botsignals add={LOOPING_SCORE}\n"
         f"    BotShieldFlagTrigger scanner_probe reset "

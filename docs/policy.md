@@ -240,8 +240,8 @@ the same shared action keys.
 | Family | Directive | Predicate |
 |---|---|---|
 | Path | `BotShieldRule` | URI glob |
-| Cookie | `BotShieldCookieTrigger` | Cookie name + value (or bulk shape) |
-| Env | `BotShieldEnvTrigger` | Apache env var |
+| Cookie | `BotShieldCookie` / `BotShieldCookies` / `BotShieldBSCookie` inside a rule | Cookie name + value, or the bulk shape |
+| Env | `BotShieldEnv` inside a rule | Apache env var |
 | Feedback | `BotShieldFeedbackTrigger` | App-emitted event name (response path) |
 | Load | `BotShieldLoadTrigger` | Global load_state |
 
@@ -281,80 +281,66 @@ First-match wins (declaration order). On match, the path family's
 `respond=nochallenge` short-circuits to `DECLINED` (real handler runs); any
 other status is the response code.
 
-### Cookie triggers
+### Cookie conditions
+
+There is no cookie trigger family. A cookie is a condition on a rule,
+so it composes with everything else the rule asks:
 
 ```apache
-<BotShieldCookieTrigger session-active>
-    BotShieldCookie       sessionid
-    BotShieldRespond       nochallenge
-    BotShieldScore    botsignals -10
-</BotShieldCookieTrigger>
-<BotShieldCookieTrigger weak-session>
-    BotShieldCookie       sessionid=guest
-    BotShieldScore  botsignals +15
-    BotShieldLogAs          guest-session
-</BotShieldCookieTrigger>
-<BotShieldCookieTrigger no-cookies>
-    BotShieldCookies      none
-    BotShieldScore  botsignals +5
-    BotShieldLogAs          cookieless
-</BotShieldCookieTrigger>
+<BotShieldRule guest-session>
+    BotShieldCookie    sessionid=guest
+    BotShieldPath      /checkout
+    BotShieldScore     botsignals +15
+    BotShieldLogAs     guest-session
+</BotShieldRule>
+
+<BotShieldRule cookieless>
+    BotShieldCookies   none
+    BotShieldScore     botsignals +5
+    BotShieldLogAs     cookieless
+</BotShieldRule>
 ```
 
-Predicate shapes:
+`BotShieldCookie` names one cookie: bare for presence, `!name` for
+absence, `name=value` for equality, `name!value` for present-but-not,
+`name~substring` for contains. `BotShieldCookies` is the bulk question
+— `none`, `any`, `session` — and `BotShieldBSCookie` asks about the
+module's own cookie, which has states (`verified`, `missing`,
+`invalid`) rather than a presence bit.
 
-- `cookie=<name>` — named cookie present (any value).
-- `!cookie=<name>` — named cookie absent.
-- `cookie=<name>=<value>` — exact value match.
-- `cookie=<name>!<value>` — value mismatch.
-- `cookie=<name>~<substring>` — value contains substring.
-- `cookies=none` / `cookies=any` — bulk: empty cookie map / any
-  cookie set.
-- `cookies=session` — bulk: any of the names declared via
-  `BotShieldSessionCookieName` is set.
-- `bs-cookie=verified` / `bs-cookie=missing` / `bs-cookie=invalid` —
-  the BotShield-cookie-state note set by `bs_handler` (no double
-  HMAC check). Predicates against the module's own `_bs_session`
-  cookie name are rejected — use these instead.
+The family this replaced accumulated across matches and short-circuited
+on the first non-pass. A rule does neither: it matches or it does not,
+and it acts once. That difference is the point — the walk semantics
+were a second control flow to hold in your head, and the conditions
+were the part anybody wanted.
 
-Cookie family accumulates: `respond=nochallenge` keeps walking and
-collecting credits/penalties from later cookie triggers. First
-non-pass status short-circuits.
+### Environment conditions
 
-### Env triggers
+Also a rule condition, and the reason this module has no regex of its
+own. Apache already ships regex engines that are tuned and audited;
+running an operator-supplied pattern against attacker-controlled input
+on every request would be a denial-of-service surface pointed the wrong
+way. So the pattern matching happens where it already lives, and the
+rule reads the result:
 
 ```apache
 SetEnvIfExpr "%{HTTP:CF-Connecting-IP} =~ /:/" BS_IPV6=1
-<BotShieldEnvTrigger ipv6-hint>
-    BotShieldEnv          BS_IPV6
-    BotShieldRespond       nochallenge
-    BotShieldScore    botsignals -2
-</BotShieldEnvTrigger>
-
 SetEnvIf User-Agent "(?i)\bcurl\b" BS_CLI=1
-<BotShieldEnvTrigger curl-hint>
-    BotShieldEnv          BS_CLI
-    BotShieldScore  botsignals +10
-    BotShieldLogAs          cli
-</BotShieldEnvTrigger>
+
+<BotShieldRule cli-on-checkout>
+    BotShieldEnv       BS_CLI
+    BotShieldPath      /checkout
+    BotShieldScore     botsignals +10
+    BotShieldLogAs     cli
+</BotShieldRule>
 ```
 
-Predicate shapes:
+`BotShieldEnv` takes `NAME`, `!NAME` and `NAME=value`. No `contains`:
+richer matching belongs in whatever set the variable, which is the
+whole arrangement.
 
-- `env=<name>` — env var present (any value, including empty).
-- `!env=<name>` — env var absent.
-- `env=<name>=<value>` — exact value match.
-
-Narrower than cookie by design — no substring/contains shape and
-no bulk-state analog. If you need rich matching, set a
-coarse bucket upstream (`SetEnvIfExpr`, ModSecurity rule, etc.)
-and consume the bucket here. `redirect=` is not a valid action
-key on env or load triggers.
-
-Env triggers gate on `ap_is_initial_req(r)` to prevent double-
-application on internal redirect legs (ErrorDocument, RewriteRule
-without R). The env producer would otherwise fire a second time
-and double-count score/flag.
+`RewriteRule ... [E=VAR:VAL]` works as a producer too, and so does
+anything else that writes `r->subprocess_env` before the handler.
 
 ### Feedback triggers
 

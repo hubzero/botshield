@@ -657,8 +657,6 @@ semantics and refresh model.
 | Directive | Predicate args | Action keys |
 |---|---|---|
 | `BotShieldRule` | `<name>` + any of `path=<glob>` `query=<glob>` `cookies=none\|any\|session` `ua=<substring>\|@<botgroup>\|""` `ipspec=<spec>` — ANDed, at least one required | `respond=`, `redirect=`, `logas=`, `accesslog=`, `flagip=`, `flagsession=`, `score=`, `mode=` |
-| `BotShieldCookieTrigger` | `<name> <pred>` (see policy page) | `respond=`, `redirect=`, `logas=`, `accesslog=`, `flagip=`, `flagsession=`, `score=`, `mode=` |
-| `BotShieldEnvTrigger` | `<name> <env-pred>` (see policy page) | `respond=`, `logas=`, `accesslog=`, `flagip=`, `flagsession=`, `score=`, `mode=` (no `redirect=`) |
 | `BotShieldFeedbackTrigger` | `<event>` | `flagip=`, `flagsession=` (both accept `+`/`-`/`=`), `logas=`, `accesslog=`, `mode=` |
 | `BotShieldLoadTrigger` | `<name> state=<n>\|state>=<n>` | `respond=`, `logas=`, `accesslog=`, `score=`, `mode=` (no `redirect=`, `flagip=`, `flagsession=`) |
 | `BotShieldSessionCookieName` | `<name>` (single arg, repeatable) | n/a (feeds cookies=session predicate) |
@@ -812,7 +810,7 @@ the family's actual shape: match a request on anything known about it.
 
 Globs take `*` wildcards and a trailing `$` anchor. Named-cookie
 predicates (`cookie=<n>`, `cookie=<n>~<substr>`, `bs-cookie=<state>`)
-stay on [`BotShieldCookieTrigger`](#triggers) — that vocabulary does not
+stay on the cookie conditions above — that vocabulary does not
 compress into one key.
 
 **What a matching rule can do.** Four outcomes, set by the action keys:
@@ -1021,7 +1019,7 @@ SetEnvIfExpr "%{HTTP_USER_AGENT} =~ /bot|crawl|spider/i" BS_UA_SUSPECT=1
 ```
 
 That composition is the reason these belong in the rule rather than in
-a family of their own. A `BotShieldCookieTrigger` matches a cookie and
+a family of their own. The family they replaced matched a cookie and
 nothing else; a rule ANDs it with the path, the UA, the load state and
 whether the client has already solved.
 

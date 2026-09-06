@@ -155,18 +155,6 @@ static const char *bs_open_flagtrigger(cmd_parms *cmd, void *dconf,
     return bs_section_trigger(cmd, dconf, arg, "BotShieldFlagTrigger", bs_set_flag_trigger);
 }
 
-static const char *bs_open_cookietrigger(cmd_parms *cmd, void *dconf,
-                                          const char *arg)
-{
-    return bs_section_trigger(cmd, dconf, arg, "BotShieldCookieTrigger", bs_set_cookie_trigger);
-}
-
-static const char *bs_open_envtrigger(cmd_parms *cmd, void *dconf,
-                                          const char *arg)
-{
-    return bs_section_trigger(cmd, dconf, arg, "BotShieldEnvTrigger", bs_set_env_trigger);
-}
-
 static const char *bs_open_feedbacktrigger(cmd_parms *cmd, void *dconf,
                                           const char *arg)
 {
@@ -550,14 +538,6 @@ static const command_rec bs_cmds[] = {
                  "Open a BotShieldFlagTrigger block. Takes the rule name; every "
                  "setting is a BotShield directive on its own line "
                  "until </BotShieldFlagTrigger>."),
-    AP_INIT_RAW_ARGS("<BotShieldCookieTrigger", bs_open_cookietrigger, NULL, RSRC_CONF,
-                 "Open a BotShieldCookieTrigger block. Takes the rule name; every "
-                 "setting is a BotShield directive on its own line "
-                 "until </BotShieldCookieTrigger>."),
-    AP_INIT_RAW_ARGS("<BotShieldEnvTrigger", bs_open_envtrigger, NULL, RSRC_CONF,
-                 "Open a BotShieldEnvTrigger block. Takes the rule name; every "
-                 "setting is a BotShield directive on its own line "
-                 "until </BotShieldEnvTrigger>."),
     AP_INIT_RAW_ARGS("<BotShieldFeedbackTrigger", bs_open_feedbacktrigger, NULL, RSRC_CONF,
                  "Open a BotShieldFeedbackTrigger block. Takes the rule name; every "
                  "setting is a BotShield directive on its own line "
@@ -863,22 +843,6 @@ static const command_rec bs_cmds[] = {
                  "config. See docs/examples/flag-triggers.conf.example "
                  "for a slate to start from."),
     /* E4 — cookie triggers */
-    AP_INIT_TAKE_ARGV("BotShieldCookieTrigger",
-                 bs_flat_trigger_retired, NULL, RSRC_CONF,
-                 "Cookie-based trigger. Args: <name> <cookie-match> "
-                 "[key=value ...]. cookie-match is one of: "
-                 "cookie=<n>, cookie=<n>=<v>, cookie=<n>~<substr>, "
-                 "cookie=<n>!<v>, !cookie=<n>, cookies=<none|any|"
-                 "session>, bs-cookie=<verified|missing|invalid>. "
-                 "Keys: respond=<code|nochallenge> (default pass; diverges "
-                 "from E3 — credit/penalty here ALWAYS apply, even "
-                 "under pass), redirect=<url>, log=<tag>, accesslog=on|off, "
-                 "flag=<bit>, "
-                 "ttl=<sec>, penalty=<n>, credit=<n>. Declaration "
-                 "order; pass triggers accumulate credit/penalty "
-                 "(layered reputation signals), first non-pass "
-                 "trigger short-circuits the response. Upsert-by-"
-                 "name."),
     AP_INIT_TAKE1("BotShieldSessionCookieName",
                  bs_set_session_cookie_name, NULL, RSRC_CONF,
                  "Add a cookie name to the list matched by the "
@@ -886,32 +850,6 @@ static const command_rec bs_cmds[] = {
                  "PHPSESSID, JSESSIONID, ASP.NET_SessionId, "
                  "session_id, connect.sid, laravel_session. Each "
                  "invocation appends one name; case-insensitive."),
-    /* E6 — env-var triggers */
-    AP_INIT_TAKE_ARGV("BotShieldEnvTrigger",
-                 bs_flat_trigger_retired, NULL, RSRC_CONF,
-                 "Env-var-based trigger, reads r->subprocess_env. "
-                 "Args: <name> <env-match> [key=value ...]. "
-                 "env-match is one of: env=<var> (present), "
-                 "env=<var>=<value> (exact match, case-sensitive), "
-                 "!env=<var> (absent). Keys: respond=<code|nochallenge> "
-                 "(default pass; credit/penalty apply under pass "
-                 "like E4), log=<tag>, accesslog=on|off, flag=<bit>, ttl=<sec>, "
-                 "penalty=<n>, credit=<n>. No redirect= (env "
-                 "signals are scoring/flagging only). Declaration "
-                 "order, first match wins; upsert-by-name. Main "
-                 "requests only — subrequests are no-ops."),
-    /* E7.3 — feedback triggers (response-path mapping for E5) */
-    AP_INIT_TAKE_ARGV("BotShieldFeedbackTrigger",
-                 bs_flat_trigger_retired, NULL, RSRC_CONF,
-                 "Map an app-signed event (via X-BotShield-Feedback "
-                 "header) to module memory. Args: <event> "
-                 "[key=value ...]. Required keys: flag=<bit>, "
-                 "ttl=<sec>. Optional: log=<tag>, accesslog=on|off. The app signs "
-                 "event=<name>;sig=<hex>; the module looks up <name> "
-                 "here and applies flag+ttl to the flagged-IP table. "
-                 "No status/redirect/penalty/credit (response is "
-                 "already served)."),
-    /* E11.2 — load-aware throttling triggers */
     AP_INIT_TAKE_ARGV("BotShieldLoadTrigger",
                  bs_flat_trigger_retired, NULL, RSRC_CONF,
                  "Trigger that fires based on the cached load state "

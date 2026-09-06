@@ -131,8 +131,6 @@ static const char *bs_trigger_family_dname(bs_trigger_family fam)
 {
     switch (fam) {
     case BS_TFAMILY_REQUEST:  return "BotShieldRule";
-    case BS_TFAMILY_COOKIE:   return "BotShieldCookieTrigger";
-    case BS_TFAMILY_ENV:      return "BotShieldEnvTrigger";
     case BS_TFAMILY_FEEDBACK: return "BotShieldFeedbackTrigger";
     case BS_TFAMILY_LOAD:     return "BotShieldLoadTrigger";
     case BS_TFAMILY_FLAG:     return "BotShieldFlagTrigger";
@@ -168,14 +166,6 @@ static void bs_trigger_action_init(bs_trigger_family fam,
          * BotShieldFlagIP for the address, BotShieldFlagSession
          * for the cookie session. */
         a->status_code = 403;
-        a->flag_bit    = 0;
-        a->ttl_sec     = 0;
-        break;
-    case BS_TFAMILY_COOKIE:
-    case BS_TFAMILY_ENV:
-        /* Cookie/env default is pass-with-score-shaping. No flag
-         * unless operator asks; no short-circuit unless they do. */
-        a->status_code = BS_TRIGGER_STATUS_PASS;
         a->flag_bit    = 0;
         a->ttl_sec     = 0;
         break;
@@ -233,12 +223,6 @@ static const char *bs_trigger_known_keys(bs_trigger_family fam)
     case BS_TFAMILY_REQUEST:
         return "respond, nochallenge, challenge, redirect, logas, "
                "accesslog, flagip, flagsession, score, mode";
-    case BS_TFAMILY_COOKIE:
-        return "respond, nochallenge, challenge, redirect, logas, "
-               "accesslog, flagip, flagsession, score, mode";
-    case BS_TFAMILY_ENV:
-        return "respond, nochallenge, challenge, logas, accesslog, flagip, "
-               "flagsession, score, mode";
     case BS_TFAMILY_FEEDBACK:
         /* mode=observe means "log :observe but skip the flagged-IP
          * write" — meaningful for staging a feedback rule before
@@ -544,11 +528,12 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
             "removed; write BotShieldChallenge <tier>, which needs no "
             "BotShieldRespond nochallenge alongside it.", dname);
     } else if (BS_AK("redirect")) {
-        if (fam == BS_TFAMILY_ENV || fam == BS_TFAMILY_LOAD) {
+        if (fam == BS_TFAMILY_LOAD) {
             return apr_psprintf(pool,
                 "%s: redirect= is not supported on this family "
-                "(scoring/flagging only; use the path or cookie "
-                "family for response-shaping redirects)", dname);
+                "(load is global state; redirect a request from a "
+                "BotShieldRule, which knows which request it is)",
+                dname);
         }
         if (!*val) {
             return apr_psprintf(pool,
@@ -977,7 +962,6 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
          * applied above. */
         bs_score_add(r, 0,
             apr_pstrcat(r->pool, family_tag, ":", trigger_name, NULL));
-        if (fam == BS_TFAMILY_COOKIE) return BS_TEXEC_PASS_CONTINUE;
         /* Scope: multiple BotShieldTrigger directives in the same
          * scope are independent declarations, all should fire on
          * a pass — caller's loop continues to the next entry. */
@@ -1592,298 +1576,6 @@ const char *bs_set_session_cookie_name(cmd_parms *cmd, void *dconf,
         }
     }
     *(const char **)apr_array_push(scfg->session_names) = lower;
-    return NULL;
-}
-
-/* E4 — BotShieldCookieTrigger <name> <cookie-match> [key=value ...].
- *
- * Parses the cookie-match predicate (see CHANGELOG.md E4 for the full
- * predicate grammar) and the action keys, enforces cross-
- * validation (status=pass + redirect= is a config error;
- * _bs_session as cookie=name is redirected to bs-cookie=<state>),
- * and upserts by name. See bs_request_trigger_entry for the action-key
- * semantics shared with E3; the semantic divergences are:
- *
- *   - credit= always applies (even under status=pass), because a
- *     cookie is ongoing client state we want to shape this
- *     request's score for.
- *   - penalty= likewise always applies. Contrast E3 where it's
- *     ignored under pass.
- *   - status=pass is the DEFAULT; a credit trigger with no status
- *     set is pass-with-score-shaping. */
-static int bs_ishex_or_alnum(char c)
-{
-    unsigned char u = (unsigned char)c;
-    return (u >= 'A' && u <= 'Z') || (u >= 'a' && u <= 'z')
-        || (u >= '0' && u <= '9') || u == '-' || u == '_' || u == '.';
-}
-
-const char *bs_set_cookie_trigger(cmd_parms *cmd, void *dconf,
-                                         int argc, char *const argv[])
-{
-    (void)dconf;
-    if (argc < 2) {
-        return "BotShieldCookieTrigger: expects <name> <cookie-match> "
-               "[key=value ...]";
-    }
-    const char *name     = argv[0];
-    const char *match    = argv[1];
-    bs_server_cfg *scfg  = ap_get_module_config(cmd->server->module_config,
-                                                &botshield_module);
-    if (!bs_bot_name_valid(name)) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldCookieTrigger: name '%s' must be [a-z0-9-]{1,32}",
-            name);
-    }
-
-    bs_cookie_trigger_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
-    e->name = apr_pstrdup(cmd->pool, name);
-    bs_trigger_action_init(BS_TFAMILY_COOKIE, &e->action);
-
-    /* --- Parse the cookie-match predicate. --- */
-    const char *m = match;
-    int negated = 0;
-    if (m[0] == '!') { negated = 1; m++; }
-    if (!strncasecmp(m, "cookie=", 7)) {
-        const char *rest = m + 7;
-        if (!*rest) {
-            return "BotShieldCookieTrigger: cookie= needs a name";
-        }
-        /* Parse cookie name up to '=' / '~' / '!' / end. */
-        const char *op = rest;
-        while (*op && *op != '=' && *op != '~' && *op != '!') {
-            if (!bs_ishex_or_alnum(*op)) {
-                return apr_psprintf(cmd->pool,
-                    "BotShieldCookieTrigger: cookie name may only "
-                    "contain [A-Za-z0-9_-.] (got '%c')", *op);
-            }
-            op++;
-        }
-        apr_size_t nlen = (apr_size_t)(op - rest);
-        if (nlen == 0 || nlen > 64) {
-            return "BotShieldCookieTrigger: cookie name must be 1..64 chars";
-        }
-        char *cname = apr_pstrmemdup(cmd->pool, rest, nlen);
-        /* Reject the module's own cookie at this predicate level;
-         * redirect operators to bs-cookie=<state>. */
-        if (!strcasecmp(cname, BS_COOKIE_NAME) ||
-            !strcasecmp(cname, BS_COOKIE_NAME_HOST)) {
-            return "BotShieldCookieTrigger: declaring a predicate "
-                   "against the module's own " BS_COOKIE_NAME
-                   " (or " BS_COOKIE_NAME_HOST ") cookie is not "
-                   "supported — use bs-cookie=verified / "
-                   "bs-cookie=missing / bs-cookie=invalid instead";
-        }
-        e->cname = cname;
-        /* Dispatch on the operator chosen. */
-        if (*op == '\0') {
-            e->pred_kind = negated ? BS_CP_NAMED_ABSENT
-                                   : BS_CP_NAMED_PRESENT;
-        } else if (negated) {
-            return "BotShieldCookieTrigger: '!' prefix may only be "
-                   "combined with a bare cookie=<name> (absence "
-                   "test); use cookie=<name>!<value> for value "
-                   "mismatch";
-        } else if (*op == '=') {
-            e->pred_kind = BS_CP_NAMED_EQ;
-            e->cvalue    = apr_pstrdup(cmd->pool, op + 1);
-        } else if (*op == '~') {
-            e->pred_kind = BS_CP_NAMED_CONTAINS;
-            e->cvalue    = apr_pstrdup(cmd->pool, op + 1);
-            if (!*e->cvalue) {
-                return "BotShieldCookieTrigger: cookie=<name>~<substr> "
-                       "needs a non-empty substring";
-            }
-        } else if (*op == '!') {
-            e->pred_kind = BS_CP_NAMED_NE;
-            e->cvalue    = apr_pstrdup(cmd->pool, op + 1);
-        }
-    } else if (!strncasecmp(m, "cookies=", 8)) {
-        if (negated) {
-            return "BotShieldCookieTrigger: '!' prefix cannot combine "
-                   "with cookies=<state> — use the complementary "
-                   "state (cookies=any is the complement of cookies=none)";
-        }
-        const char *state = m + 8;
-        if      (!strcasecmp(state, "none"))    e->pred_kind = BS_CP_BULK_NONE;
-        else if (!strcasecmp(state, "any"))     e->pred_kind = BS_CP_BULK_ANY;
-        else if (!strcasecmp(state, "session")) e->pred_kind = BS_CP_BULK_SESSION;
-        else {
-            return apr_psprintf(cmd->pool,
-                "BotShieldCookieTrigger: cookies='%s' not one of "
-                "none|any|session", state);
-        }
-    } else if (!strncasecmp(m, "bs-cookie=", 10)
-            || !strncasecmp(m, "bscookie=", 9)) {
-        /* Both spellings accepted. The request family already called
-         * this key `bscookie` while this family wanted `bs-cookie`.
-         * Two names for one concept was survivable while each was
-         * typed by hand; it stops being survivable once a block's
-         * BotShieldBSCookie has to lower-case to one of them. */
-        const int keylen = (m[2] == '-') ? 10 : 9;
-        if (negated) {
-            return "BotShieldCookieTrigger: '!' prefix cannot combine "
-                   "with bs-cookie=<state> — use the complementary "
-                   "state directly";
-        }
-        const char *state = m + keylen;
-        if      (!strcasecmp(state, "verified")) e->pred_kind = BS_CP_BS_VERIFIED;
-        else if (!strcasecmp(state, "missing"))  e->pred_kind = BS_CP_BS_MISSING;
-        else if (!strcasecmp(state, "invalid"))  e->pred_kind = BS_CP_BS_INVALID;
-        else {
-            return apr_psprintf(cmd->pool,
-                "BotShieldCookieTrigger: bs-cookie='%s' not one of "
-                "verified|missing|invalid", state);
-        }
-    } else {
-        return apr_psprintf(cmd->pool,
-            "BotShieldCookieTrigger: unrecognized cookie-match '%s' "
-            "(expected cookie=... / !cookie=... / cookies=... / "
-            "bs-cookie=...)", match);
-    }
-
-    /* --- Parse action keys via shared engine (E7.2). --- */
-    for (int i = 2; i < argc; i++) {
-        const char *err = bs_parse_trigger_action_key(cmd->pool,
-            BS_TFAMILY_COOKIE, argv[i], &e->action);
-        if (err) return err;
-    }
-    {
-        const char *err = bs_finalize_trigger_action(cmd->pool,
-            BS_TFAMILY_COOKIE, &e->action);
-        if (err) return err;
-    }
-
-    /* Upsert-by-name. */
-    for (int i = 0; i < scfg->cookie_triggers->nelts; i++) {
-        bs_cookie_trigger_entry *ex = APR_ARRAY_IDX(
-            scfg->cookie_triggers, i, bs_cookie_trigger_entry *);
-        if (strcmp(ex->name, e->name) == 0) {
-            APR_ARRAY_IDX(scfg->cookie_triggers, i,
-                          bs_cookie_trigger_entry *) = e;
-            return NULL;
-        }
-    }
-    *(bs_cookie_trigger_entry **)apr_array_push(scfg->cookie_triggers) = e;
-    return NULL;
-}
-
-/* E6 — BotShieldEnvTrigger <name> <env-match> [key=value ...].
- *
- * env-match shapes:
- *   env=<var>           present (any value, including empty)
- *   env=<var>=<value>   exact value match
- *   !env=<var>          absent
- *
- * Keys mirror E4's, minus `redirect` (E6 doesn't do response
- * shaping; scoring/flagging only). Predicate matching reads
- * `r->subprocess_env` at request time.
- *
- * Narrower by design than E3/E4: no substring/contains shape, no
- * cookie-bulk-state analog. Operators who need rich matching set
- * a coarse bucket upstream (SetEnvIfExpr, ModSecurity rule, etc.)
- * and consume the bucket here. */
-const char *bs_set_env_trigger(cmd_parms *cmd, void *dconf,
-                                      int argc, char *const argv[])
-{
-    (void)dconf;
-    if (argc < 2) {
-        return "BotShieldEnvTrigger: expects <name> <env-match> "
-               "[key=value ...]";
-    }
-    const char *name  = argv[0];
-    const char *match = argv[1];
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    if (!bs_bot_name_valid(name)) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldEnvTrigger: name '%s' must be [a-z0-9-]{1,32}",
-            name);
-    }
-
-    bs_env_trigger_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
-    e->name = apr_pstrdup(cmd->pool, name);
-    bs_trigger_action_init(BS_TFAMILY_ENV, &e->action);
-
-    /* --- Parse env-match predicate. --- */
-    const char *m = match;
-    int negated = 0;
-    if (m[0] == '!') { negated = 1; m++; }
-    if (strncmp(m, "env=", 4) != 0) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldEnvTrigger: unrecognized env-match '%s' "
-            "(expected env=<var>, env=<var>=<value>, or "
-            "!env=<var>)", match);
-    }
-    const char *rest = m + 4;
-    if (!*rest) {
-        return "BotShieldEnvTrigger: env= needs a variable name";
-    }
-    /* Env var name: POSIX-ish [A-Za-z_][A-Za-z0-9_]* but Apache is
-     * liberal; we accept the same charset we allow on session-
-     * cookie names and cookie-match names. Stored verbatim, but the
-     * request-time lookup (`apr_table_get` on `r->subprocess_env`)
-     * is case-insensitive per APR table semantics — two triggers
-     * whose env names differ only in case will resolve to the same
-     * stored value at runtime and shadow each other under
-     * first-match-wins. */
-    const char *op = rest;
-    while (*op && *op != '=') {
-        unsigned char c = (unsigned char)*op;
-        int ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
-              || (c >= '0' && c <= '9') || c == '_' || c == '-';
-        if (!ok) {
-            return apr_psprintf(cmd->pool,
-                "BotShieldEnvTrigger: env var name contains "
-                "invalid char '%c' (expect [A-Za-z0-9_-])", (char)c);
-        }
-        op++;
-    }
-    apr_size_t nlen = (apr_size_t)(op - rest);
-    if (nlen == 0 || nlen > 128) {
-        return "BotShieldEnvTrigger: env var name must be 1..128 chars";
-    }
-    e->env_name = apr_pstrmemdup(cmd->pool, rest, nlen);
-
-    if (*op == '\0') {
-        e->pred_kind = negated ? BS_EP_NAMED_ABSENT
-                               : BS_EP_NAMED_PRESENT;
-    } else if (negated) {
-        return "BotShieldEnvTrigger: '!' prefix only combines with "
-               "bare env=<var> (absence test); use env=<var>=<value> "
-               "for value-mismatch semantics via a separate trigger";
-    } else {
-        /* *op == '=' */
-        e->pred_kind  = BS_EP_NAMED_EQ;
-        e->env_value  = apr_pstrdup(cmd->pool, op + 1);
-        /* Empty expected-value is legitimate: SetEnvIf with no value
-         * assigns "", so env=FOO= matches that case explicitly.
-         * Distinct from env=FOO (matches empty OR non-empty). */
-    }
-
-    /* --- Parse action keys via shared engine (E7.2). --- */
-    for (int i = 2; i < argc; i++) {
-        const char *err = bs_parse_trigger_action_key(cmd->pool,
-            BS_TFAMILY_ENV, argv[i], &e->action);
-        if (err) return err;
-    }
-    {
-        const char *err = bs_finalize_trigger_action(cmd->pool,
-            BS_TFAMILY_ENV, &e->action);
-        if (err) return err;
-    }
-
-    /* Upsert-by-name (same as E3/E4). */
-    for (int i = 0; i < scfg->env_triggers->nelts; i++) {
-        bs_env_trigger_entry *ex = APR_ARRAY_IDX(
-            scfg->env_triggers, i, bs_env_trigger_entry *);
-        if (strcmp(ex->name, e->name) == 0) {
-            APR_ARRAY_IDX(scfg->env_triggers, i,
-                          bs_env_trigger_entry *) = e;
-            return NULL;
-        }
-    }
-    *(bs_env_trigger_entry **)apr_array_push(scfg->env_triggers) = e;
     return NULL;
 }
 

@@ -57,8 +57,6 @@ struct bs_server_cfg;
 
 typedef enum {
     BS_TFAMILY_REQUEST = 0,
-    BS_TFAMILY_COOKIE,
-    BS_TFAMILY_ENV,
     BS_TFAMILY_FEEDBACK,
     BS_TFAMILY_LOAD,
     BS_TFAMILY_FLAG,
@@ -510,10 +508,6 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
  * ====================================================================== */
 
 const char *bs_set_request_trigger    (cmd_parms *cmd, void *dconf,
-                                    int argc, char *const argv[]);
-const char *bs_set_cookie_trigger  (cmd_parms *cmd, void *dconf,
-                                    int argc, char *const argv[]);
-const char *bs_set_env_trigger     (cmd_parms *cmd, void *dconf,
                                     int argc, char *const argv[]);
 const char *bs_set_feedback_trigger(cmd_parms *cmd, void *dconf,
                                     int argc, char *const argv[]);

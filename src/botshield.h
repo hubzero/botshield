@@ -457,10 +457,6 @@ typedef struct bs_server_cfg {
     const char         *share_scope_token; /* explicit override; NULL = default */
     /* E3 — path-based triggers. */
     apr_array_header_t *request_triggers;
-    /* E4 — cookie triggers. */
-    apr_array_header_t *cookie_triggers;
-    /* E6 — env-var triggers. */
-    apr_array_header_t *env_triggers;
     /* E7.3 — feedback triggers. */
     apr_array_header_t *feedback_triggers;
     /* E11.2 — load triggers. */

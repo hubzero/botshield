@@ -236,3 +236,120 @@ def test_cookie_ands_with_the_rest_of_the_rule(config_override, fresh_ip):
     assert both == 451, "all three conditions held; the rule must fire"
     assert wrong_cookie != 451, "cookie value differed; must not fire"
     assert wrong_path != 451, "path differed; must not fire"
+
+
+# --- ported from the cookie and env families -------------------------
+#
+# These were the only coverage of properties that outlive those
+# families: the bulk cookie predicates, the session-name directive that
+# feeds one of them, the module's own cookie states, and mod_rewrite as
+# an env producer.
+
+
+def _rule(body):
+    return (
+        "BotShieldEnabled On\n"
+        "    BotShieldChallengeAtLeast none\n"
+        + body
+    )
+
+
+def test_cookies_none_and_any(config_override, fresh_ip):
+    """cookies=none is the bulk predicate, distinct from !NAME.
+
+    !NAME asks about one cookie; cookies=none asks whether the request
+    carried any at all. Its complement is nameable (cookies=any), which
+    is why this one takes no '!'.
+    """
+    conf = _rule(
+        "    <BotShieldRule ce-bulk>\n"
+        "        BotShieldPath      " + PROBE + "\n"
+        "        BotShieldCookies   none\n"
+        "        BotShieldRespond   451\n"
+        "    </BotShieldRule>"
+    )
+    with config_override(r"BotShieldEnabled\s+On", conf,
+                         render=False, count=1):
+        assert client.get(PROBE, xff=fresh_ip).status_code == 451
+        assert client.get(PROBE, xff=fresh_ip,
+                          cookies={"foo": "bar"}).status_code != 451
+
+
+def test_cookies_session_and_the_name_directive(config_override, fresh_ip):
+    """cookies=session matches the curated list, and
+    BotShieldSessionCookieName extends it.
+
+    That directive had exactly one test anywhere, in the cookie family.
+    It outlives the family, so its coverage has to.
+    """
+    conf = _rule(
+        "    BotShieldSessionCookieName my_custom_session\n"
+        "    <BotShieldRule ce-sess>\n"
+        "        BotShieldPath      " + PROBE + "\n"
+        "        BotShieldCookies   session\n"
+        "        BotShieldRespond   451\n"
+        "    </BotShieldRule>"
+    )
+    with config_override(r"BotShieldEnabled\s+On", conf,
+                         render=False, count=1):
+        curated = client.get(PROBE, xff=fresh_ip,
+                             cookies={"PHPSESSID": "x"}).status_code
+        added = client.get(PROBE, xff=fresh_ip,
+                           cookies={"my_custom_session": "x"}).status_code
+        unrelated = client.get(PROBE, xff=fresh_ip,
+                               cookies={"my_token": "x"}).status_code
+    assert curated == 451, "PHPSESSID is on the curated list"
+    assert added == 451, "BotShieldSessionCookieName must extend the list"
+    assert unrelated != 451, "an unlisted name is not a session cookie"
+
+
+def test_bscookie_states(config_override, fresh_ip):
+    """The module's own cookie has three states, not a presence bit.
+
+    This is why cookie=__Host-bs_session is refused: missing and
+    invalid are different facts about a client, and the difference
+    decides whether it is challenged or refused.
+    """
+    def probe(state, cookies):
+        conf = _rule(
+            "    <BotShieldRule ce-bs>\n"
+            "        BotShieldPath      " + PROBE + "\n"
+            "        BotShieldBSCookie  " + state + "\n"
+            "        BotShieldRespond   451\n"
+            "    </BotShieldRule>"
+        )
+        with config_override(r"BotShieldEnabled\s+On", conf,
+                             render=False, count=1):
+            return client.get(PROBE, xff=fresh_ip,
+                              cookies=cookies).status_code
+
+    assert probe("missing", None) == 451
+    assert probe("invalid",
+                 {"__Host-bs_session": "obviously-bogus"}) == 451
+    assert probe("missing",
+                 {"__Host-bs_session": "obviously-bogus"}) != 451
+
+
+def test_env_from_a_rewrite_producer(config_override, fresh_ip):
+    """RewriteRule [E=VAR:VAL] sets the variable at fixups; the rule
+    reads it.
+
+    This is the composition the module leans on instead of owning a
+    regex engine, and it matters more as a rule condition than it did
+    as a family: the variable can be ANDed with the path and the UA in
+    one place now.
+    """
+    conf = _rule(
+        "    RewriteEngine On\n"
+        "    RewriteRule ^/rw-probe /index.html [E=BS_FROM_RW:1,L]\n"
+        "    <BotShieldRule ce-rw>\n"
+        "        BotShieldEnv       BS_FROM_RW\n"
+        "        BotShieldRespond   451\n"
+        "    </BotShieldRule>"
+    )
+    with config_override(r"BotShieldEnabled\s+On", conf,
+                         render=False, count=1):
+        hit = client.get("/rw-probe", xff=fresh_ip).status_code
+        miss = client.get("/index.html", xff=fresh_ip).status_code
+    assert hit == 451, "RewriteRule [E=...] must light up the condition"
+    assert miss != 451, "the variable is only set on the rewritten path"
