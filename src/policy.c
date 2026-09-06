@@ -463,6 +463,17 @@ int bs_check_policy(request_rec *r)
                 int present = (al && *al) ? 1 : 0;
                 if (present != t->acceptlang_pred) continue;
             }
+            if (t->score_pred_name) {
+                /* Reads what earlier rules in this walk accumulated.
+                 * Well-defined because the ladder has a fixed order:
+                 * the value at this position is whatever rules above
+                 * put there, which is what makes a score readable as a
+                 * predicate at all. */
+                if (bs_request_named_score(r, t->score_pred_name)
+                        < t->score_pred_min) {
+                    continue;
+                }
+            }
             if (t->firstsight_pred >= 0) {
                 /* -1 means no usable client address. A rule asking
                  * about the address does not match rather than

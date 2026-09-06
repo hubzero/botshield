@@ -78,6 +78,14 @@ typedef enum {
     BS_TEXEC_OBSERVE,
 } bs_trigger_exec_outcome;
 
+/* One BotShieldScore movement. '=' assigns, '+'/'-' accumulate.
+ * Bounded like every other integer surface here. */
+typedef struct {
+    const char *name;
+    char        op;      /* '+', '-' or '=' */
+    int         value;
+} bs_score_op;
+
 typedef struct {
     int           status_code;    /* HTTP code or BS_TRIGGER_STATUS_PASS */
     const char   *redirect_url;   /* NULL unless explicitly set */
@@ -95,6 +103,11 @@ typedef struct {
     apr_uint32_t  flag_session;       /* bits to set on the cookie session */
     apr_uint32_t  flag_session_clear; /* bits to remove */
     int           flag_session_replace;
+    /* BotShieldScore <name> +N|-N|=N -- named per-request
+     * accumulators. An array because one rule may move more than one,
+     * and because a rule that moves none is the common case and costs
+     * a NULL. */
+    apr_array_header_t *score_ops;   /* of bs_score_op * */
     int           penalty;        /* 0..1000 */
     int           credit;         /* 0..1000 (rejected on path family) */
     int           status_explicit; /* 1 if operator wrote status= */
@@ -250,6 +263,11 @@ typedef struct {
      * escaping and case rules, and it is not what parity needs.
      * -1 = no condition. */
     int                acceptlang_pred;
+    /* scoreatleast=<name> <n> -- match when the named accumulator has
+     * reached n by the time this rule is reached. Reads what earlier
+     * rules put there; NULL name = no condition. */
+    const char        *score_pred_name;
+    int                score_pred_min;
     /* minload=normal|warm|hot -- fires when the current load state is
      * AT OR ABOVE this level. Spelled as a minimum rather than an
      * operator so it parses as an ordinary key=value; "fires from warm

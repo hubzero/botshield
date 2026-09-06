@@ -801,6 +801,7 @@ it.
 | `cookies=none\|any\|session` | the parsed `Cookie` header | bulk forms only |
 | `ua=<substring>\|@<selector>[,@<selector>...]\|""` | User-Agent | `*` means "any", same as omitting. `ua=""` matches a request with **no** User-Agent header, or one present but empty — absence is not a substring, so it needs its own spelling. A **comma list of `@selectors`** matches if any of them does. |
 | `acceptlanguage=""\|*` | the `Accept-Language` header | `""` = absent or empty, `*` = present. The `missingal` signal as a condition; deliberately not a header matcher |
+| `scoreatleast=<name> <n>` | a named per-request accumulator | matches when rules **above this one** have moved `<name>` to at least `<n>` |
 | `ipspec=<spec>` | client IP | `*`, a CIDR list, or a file path |
 | `solved=yes\|no` | authenticated solve proof in the cookie | the strongest single predicate here: on a production hub 100% of challenges carried "no solve proof" |
 | `exists=yes\|no` | whether the request maps to a real file | a stat, so the rest of a ladder can see only paths that do not exist |
@@ -824,7 +825,8 @@ compress into one key.
 | Block | `BotShieldRespond 403` (family default) | Refused from the policy walk. No scoring, no cookie mint, no render. |
 | Challenge | `BotShieldChallenge noninteractive` | Invisible auto-submitting check. `interactive` for the visible one. |
 | Captcha | `BotShieldChallenge captcha` | The configured provider's widget. |
-| Score only | `BotShieldPenalty <n>` | Adds to the score and lets normal thresholds decide. |
+| Score only | `BotShieldPenalty <n>` | Adds to the ambient score and lets the thresholds decide. |
+| Move a named score | `BotShieldScore <name> +<n>` | Moves a per-request accumulator and lets the walk continue. |
 | Decide nothing | `BotShieldNoChallenge` | Records the match, skips scoring, hands the request to the real handler. |
 
 `BotShieldChallenge` accepts `noninteractive`, `interactive` and
@@ -837,6 +839,65 @@ per-address state with a window: a client that solves the challenge
 would keep being re-challenged for the life of a flag it cannot clear.
 Flag when you want the reputation to persist; challenge when you want to
 gate the request in front of you.
+
+#### `BotShieldScore` — combine weak signals within one request
+
+```apache
+<BotShieldRule bot-ish>
+    BotShieldUserAgent   @scraper
+    BotShieldScore       suspicion +10
+</BotShieldRule>
+
+<BotShieldRule newcomer>
+    BotShieldFirstSight  yes
+    BotShieldSolved      no
+    BotShieldScore       suspicion +5
+</BotShieldRule>
+
+<BotShieldRule act-on-suspicion>
+    BotShieldScoreAtLeast  suspicion 15
+    BotShieldChallenge     noninteractive
+</BotShieldRule>
+```
+
+`BotShieldScore <name> +N|-N|=N` moves an accumulator;
+`BotShieldScoreAtLeast <name> <N>` matches on one. Two spellings so a
+line is unambiguously an action or a condition.
+
+For the case where nothing is individually damning but the combination
+is: *three of these five and I want a challenge*. Writing that as rules
+alone costs ten rules; this costs four lines.
+
+**It lives for one request and then it is gone.** That is the whole
+design. Reputation that outlives a request is a flag —
+`BotShieldFlagIP` / `BotShieldFlagSession` — which is named, discrete,
+and visible in the decision log. A number that cannot outlive the
+request cannot quietly bill a client: a request refused at a rate
+ceiling for someone else's traffic spike leaves nothing behind.
+
+**Order decides what a reader sees.** A rule reads what rules *above*
+it have accumulated, so `BotShieldScoreAtLeast` placed above its
+contributors sees `0`. That is not a limitation to work around, it is
+what makes the value well defined at every point in the ladder — and it
+is why a score can be read as a condition here at all.
+
+**Names scope the coupling.** With a single anonymous total every
+contributor affects every reader, which is what made weights hard to
+tune: change one and every threshold moves. With names, `grep suspicion`
+finds every line that moves it and every line that reads it, and an
+unrelated accumulator cannot perturb this one.
+
+A rule that only moves a score does not respond — it passes and the
+walk continues, the same way `BotShieldChallenge` implies a pass.
+Without that a scoring rule would refuse with the family default of
+`403` and everything below it would be unreachable.
+
+Accumulators clamp at ±10000, so a long ladder cannot run away and a
+reader can bound the value without adding up the file.
+
+`=` assigns rather than accumulates. It is the sharp one: a later `=`
+discards everything earlier rules contributed, which is occasionally
+what you want and easy to write by accident.
 
 #### `@selectors` on `ua=`
 

@@ -248,6 +248,46 @@ apr_uint32_t bs_parse_flag_names(apr_pool_t *p, const char *s,
     return bits;
 }
 
+/* --- Named per-request accumulators (D/§6a) -------------------------
+ *
+ * Held in r->notes, so they are pool-scoped and vanish with the request.
+ * That is the whole point: the ambient score this replaces persisted
+ * into the cookie, which is what let a request refused for someone
+ * else's rate spike bill the client toward a future challenge. A number
+ * that cannot outlive the request cannot do that.
+ *
+ * Names are namespaced in the table so an accumulator cannot collide
+ * with the notes this module already keeps. */
+static const char *bs_score_note_key(apr_pool_t *p, const char *name)
+{
+    return apr_pstrcat(p, "bs-score:", name, NULL);
+}
+
+int bs_request_named_score(request_rec *r, const char *name)
+{
+    const char *v = apr_table_get(r->notes, bs_score_note_key(r->pool, name));
+    return v ? atoi(v) : 0;
+}
+
+void bs_request_named_score_apply(request_rec *r, const char *name,
+                                  char op, int value)
+{
+    int cur = bs_request_named_score(r, name);
+    int next;
+    switch (op) {
+    case '+': next = cur + value; break;
+    case '-': next = cur - value; break;
+    case '=': default: next = value; break;
+    }
+    /* Clamped to the same range the parser accepts on either side, so a
+     * long ladder of +N cannot run away and so a reader can bound the
+     * value without adding up the file. */
+    if (next >  BS_NAMED_SCORE_MAX) next =  BS_NAMED_SCORE_MAX;
+    if (next < -BS_NAMED_SCORE_MAX) next = -BS_NAMED_SCORE_MAX;
+    apr_table_setn(r->notes, bs_score_note_key(r->pool, name),
+                   apr_psprintf(r->pool, "%d", next));
+}
+
 /* Score → tier picker. Three configurable cut-points
  * (BotShieldScoreNonInteractive / Hard / Captcha) gate four tiers. The
  * README "Understanding scoring" section covers the operator-facing

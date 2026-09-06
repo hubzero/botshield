@@ -387,6 +387,75 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
     #define BS_AK(n) (klen == sizeof(n)-1 && \
                       strncasecmp(arg, n, sizeof(n)-1) == 0)
 
+    if (BS_AK("score")) {
+        /* BotShieldScore <name> +N|-N|=N
+         *
+         * A named accumulator that lives for this request only. The
+         * ambient score this replaces persisted into the cookie, which
+         * is what let a request refused for someone else's rate spike
+         * bill the client toward a future challenge. Reputation that
+         * must outlive a request is a flag.
+         *
+         * Names rather than one total so the coupling is scoped: every
+         * contributor and reader of an accumulator is `grep <name>`,
+         * and an unrelated one cannot perturb it. */
+        const char *cur = val;
+        while (*cur == ' ' || *cur == '\t') cur++;
+        const char *nstart = cur;
+        while (*cur && *cur != ' ' && *cur != '\t') cur++;
+        apr_size_t nlen = (apr_size_t)(cur - nstart);
+        if (!nlen || nlen > 32) {
+            return apr_psprintf(pool,
+                "%s: BotShieldScore needs a name then a movement, e.g. "
+                "'BotShieldScore suspicion +10'", dname);
+        }
+        for (apr_size_t i = 0; i < nlen; i++) {
+            char c = nstart[i];
+            if (!apr_isalnum(c) && c != '_' && c != '-') {
+                return apr_psprintf(pool,
+                    "%s: BotShieldScore name '%.*s' -- letters, digits, "
+                    "_ and - only", dname, (int)nlen, nstart);
+            }
+        }
+        while (*cur == ' ' || *cur == '\t') cur++;
+        char op = *cur;
+        if (op != '+' && op != '-' && op != '=') {
+            return apr_psprintf(pool,
+                "%s: BotShieldScore %.*s -- the movement must start "
+                "with + - or =, e.g. '+10'", dname, (int)nlen, nstart);
+        }
+        cur++;
+        if (!*cur) {
+            return apr_psprintf(pool,
+                "%s: BotShieldScore %.*s %c -- no number after the "
+                "operator", dname, (int)nlen, nstart, op);
+        }
+        char *end = NULL;
+        long v = strtol(cur, &end, 10);
+        if (!end || *end || v < 0 || v > BS_NAMED_SCORE_MAX) {
+            return apr_psprintf(pool,
+                "%s: BotShieldScore %.*s %c%s -- expected an integer "
+                "in 0..%d", dname, (int)nlen, nstart, op, cur,
+                BS_NAMED_SCORE_MAX);
+        }
+        if (!a->score_ops) {
+            a->score_ops = apr_array_make(pool, 2, sizeof(bs_score_op *));
+        }
+        bs_score_op *sop = apr_pcalloc(pool, sizeof(*sop));
+        sop->name  = apr_pstrmemdup(pool, nstart, nlen);
+        sop->op    = op;
+        sop->value = (int)v;
+        *(bs_score_op **)apr_array_push(a->score_ops) = sop;
+        /* Same rule BotShieldChallenge follows: a rule that only moves
+         * a score has said nothing about a response, so it passes and
+         * the walk carries on. Without this it would refuse with the
+         * family default of 403, which is not what "score this" means. */
+        if (!a->status_explicit) {
+            a->status_code = BS_TRIGGER_STATUS_PASS;
+            a->status_explicit = 1;
+        }
+        return NULL;
+    }
     if (BS_AK("respond") || BS_AK("status")) {
         /* BotShieldRespond is the name; BotShieldStatus is the old
          * spelling and warns.
@@ -838,6 +907,18 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
                        apr_psprintf(r->pool, "%x:%x:%u", add, del,
                                     (unsigned)replace));
     }
+    /* Named accumulators move as soon as the rule matches, before
+     * any decision this rule makes -- a rule that scores and then
+     * refuses still leaves the movement behind for the log to show. */
+    if (a->score_ops) {
+        for (int i = 0; i < a->score_ops->nelts; i++) {
+            const bs_score_op *sop =
+                APR_ARRAY_IDX(a->score_ops, i, const bs_score_op *);
+            bs_request_named_score_apply(r, sop->name, sop->op,
+                                         sop->value);
+        }
+    }
+
     bs_set_trigger_tag(r, a->log_tag);
 
     /* accesslog=off. Deliberately placed after the observe short-circuit
@@ -850,7 +931,8 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
 
     if (is_pass) {
         if (fam == BS_TFAMILY_REQUEST) {
-            if (a->tier_floor >= 0 || a->penalty || a->credit) {
+            if (a->tier_floor >= 0 || a->penalty || a->credit
+             || a->score_ops) {
                 /* tier= turns the match into "challenge this", not
                  * "ignore this". Score contribution and the floor
                  * both apply, and we return CONTINUE so the caller
@@ -1013,6 +1095,8 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
     e->solved_pred = -1;              /* no solve-proof condition */
     e->firstsight_pred = -1;          /* no Bloom-membership condition */
     e->acceptlang_pred = -1;          /* no Accept-Language condition */
+    e->score_pred_name = NULL;        /* no accumulator condition */
+    e->score_pred_min  = 0;
     e->bscookie_pred = -1;            /* no bs-cookie condition */
     e->crawler_pred  = -1;            /* no crawler condition */
     e->minload     = -1;              /* no load condition */
@@ -1129,6 +1213,27 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                 }
                 continue;
             }
+            if (klen == 12
+             && strncasecmp(arg, "scoreatleast", 12) == 0) {
+                const char *cur = val;
+                while (*cur == ' ' || *cur == '\t') cur++;
+                const char *nstart = cur;
+                while (*cur && *cur != ' ' && *cur != '\t') cur++;
+                apr_size_t nlen = (apr_size_t)(cur - nstart);
+                while (*cur == ' ' || *cur == '\t') cur++;
+                char *end = NULL;
+                long v = strtol(cur, &end, 10);
+                if (!nlen || !*cur || !end || *end
+                 || v < -BS_NAMED_SCORE_MAX || v > BS_NAMED_SCORE_MAX) {
+                    return apr_psprintf(cmd->pool,
+                        "%s: BotShieldScoreAtLeast needs a name then a "
+                        "number, e.g. 'BotShieldScoreAtLeast suspicion "
+                        "15'", D);
+                }
+                e->score_pred_name = apr_pstrmemdup(cmd->pool, nstart, nlen);
+                e->score_pred_min  = (int)v;
+                continue;
+            }
             if (klen == 10 && strncasecmp(arg, "firstsight", 10) == 0) {
                 if      (!strcasecmp(val, "yes")) e->firstsight_pred = 1;
                 else if (!strcasecmp(val, "no"))  e->firstsight_pred = 0;
@@ -1238,6 +1343,7 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
         && e->cookie_pred < 0 && e->exists_pred < 0
         && e->solved_pred < 0 && e->minload < 0
         && e->firstsight_pred < 0 && e->acceptlang_pred < 0
+        && !e->score_pred_name
         && !e->has_cohort) {
         return apr_psprintf(cmd->pool,
             "%s '%s': needs at least one match key (path=, query=, "

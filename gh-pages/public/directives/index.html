@@ -1310,6 +1310,11 @@ it.</p>
 <td><code>&quot;&quot;</code> = absent or empty, <code>*</code> = present. The <code>missingal</code> signal as a condition; deliberately not a header matcher</td>
 </tr>
 <tr>
+<td><code>scoreatleast=&lt;name&gt; &lt;n&gt;</code></td>
+<td>a named per-request accumulator</td>
+<td>matches when rules <strong>above this one</strong> have moved <code>&lt;name&gt;</code> to at least <code>&lt;n&gt;</code></td>
+</tr>
+<tr>
 <td><code>ipspec=&lt;spec&gt;</code></td>
 <td>client IP</td>
 <td><code>*</code>, a CIDR list, or a file path</td>
@@ -1376,7 +1381,12 @@ compress into one key.</p>
 <tr>
 <td>Score only</td>
 <td><code>BotShieldPenalty &lt;n&gt;</code></td>
-<td>Adds to the score and lets normal thresholds decide.</td>
+<td>Adds to the ambient score and lets the thresholds decide.</td>
+</tr>
+<tr>
+<td>Move a named score</td>
+<td><code>BotShieldScore &lt;name&gt; +&lt;n&gt;</code></td>
+<td>Moves a per-request accumulator and lets the walk continue.</td>
 </tr>
 <tr>
 <td>Decide nothing</td>
@@ -1394,6 +1404,54 @@ per-address state with a window: a client that solves the challenge
 would keep being re-challenged for the life of a flag it cannot clear.
 Flag when you want the reputation to persist; challenge when you want to
 gate the request in front of you.</p>
+<h4 id="botshieldscore-combine-weak-signals-within-one-request"><code>BotShieldScore</code> — combine weak signals within one request</h4>
+<pre><code class="language-apache">&lt;BotShieldRule bot-ish&gt;
+    BotShieldUserAgent   @scraper
+    BotShieldScore       suspicion +10
+&lt;/BotShieldRule&gt;
+
+&lt;BotShieldRule newcomer&gt;
+    BotShieldFirstSight  yes
+    BotShieldSolved      no
+    BotShieldScore       suspicion +5
+&lt;/BotShieldRule&gt;
+
+&lt;BotShieldRule act-on-suspicion&gt;
+    BotShieldScoreAtLeast  suspicion 15
+    BotShieldChallenge     noninteractive
+&lt;/BotShieldRule&gt;
+</code></pre>
+<p><code>BotShieldScore &lt;name&gt; +N|-N|=N</code> moves an accumulator;
+<code>BotShieldScoreAtLeast &lt;name&gt; &lt;N&gt;</code> matches on one. Two spellings so a
+line is unambiguously an action or a condition.</p>
+<p>For the case where nothing is individually damning but the combination
+is: <em>three of these five and I want a challenge</em>. Writing that as rules
+alone costs ten rules; this costs four lines.</p>
+<p><strong>It lives for one request and then it is gone.</strong> That is the whole
+design. Reputation that outlives a request is a flag —
+<code>BotShieldFlagIP</code> / <code>BotShieldFlagSession</code> — which is named, discrete,
+and visible in the decision log. A number that cannot outlive the
+request cannot quietly bill a client: a request refused at a rate
+ceiling for someone else's traffic spike leaves nothing behind.</p>
+<p><strong>Order decides what a reader sees.</strong> A rule reads what rules <em>above</em>
+it have accumulated, so <code>BotShieldScoreAtLeast</code> placed above its
+contributors sees <code>0</code>. That is not a limitation to work around, it is
+what makes the value well defined at every point in the ladder — and it
+is why a score can be read as a condition here at all.</p>
+<p><strong>Names scope the coupling.</strong> With a single anonymous total every
+contributor affects every reader, which is what made weights hard to
+tune: change one and every threshold moves. With names, <code>grep suspicion</code>
+finds every line that moves it and every line that reads it, and an
+unrelated accumulator cannot perturb this one.</p>
+<p>A rule that only moves a score does not respond — it passes and the
+walk continues, the same way <code>BotShieldChallenge</code> implies a pass.
+Without that a scoring rule would refuse with the family default of
+<code>403</code> and everything below it would be unreachable.</p>
+<p>Accumulators clamp at ±10000, so a long ladder cannot run away and a
+reader can bound the value without adding up the file.</p>
+<p><code>=</code> assigns rather than accumulates. It is the sharp one: a later <code>=</code>
+discards everything earlier rules contributed, which is occasionally
+what you want and easy to write by accident.</p>
 <h4 id="selectors-on-ua"><code>@selectors</code> on <code>ua=</code></h4>
 <p>Three of them name a classification this module makes rather than a bot
 the directory knows:</p>

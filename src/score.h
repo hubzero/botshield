@@ -202,6 +202,14 @@ bs_tier bs_decide_tier(const bs_dir_cfg *cfg, int score);
  * for an unknown enum value. */
 const char *bs_tier_name(bs_tier t);
 
+/* Named per-request accumulators (D/§6a). Live in r->notes and die
+ * with the request; reputation that must outlive a request is a flag,
+ * not a score. */
+#define BS_NAMED_SCORE_MAX 10000
+int  bs_request_named_score(request_rec *r, const char *name);
+void bs_request_named_score_apply(request_rec *r, const char *name,
+                                  char op, int value);
+
 #ifdef __cplusplus
 }
 #endif
