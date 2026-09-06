@@ -2121,6 +2121,80 @@ static int bs_section_key_repeats(const char *key)
         || strcmp(key, "ipspec") == 0;
 }
 
+/* <BotShieldMatch name> -- store the block's conditions under a name.
+ *
+ * Refuses action keys. A set is the predicate half of a rule, and a set
+ * that could carry respond= would add an action to every rule naming
+ * it, from a block whose name says only what it matches. Rules stay the
+ * only place an action is written.
+ *
+ * Refuses a redefinition rather than letting the last one win. Two
+ * blocks with one name is a copy-paste, and silently keeping one of
+ * them is how the crawler-pass / content-gate divergence would come
+ * back wearing a name. */
+const char *bs_set_match_set(cmd_parms *cmd, void *dconf,
+                             int argc, char *const argv[])
+{
+    (void)dconf;
+    apr_pool_t *p = cmd->pool;
+    if (argc < 1 || !argv[0] || !*argv[0]) {
+        return "<BotShieldMatch> needs a name: <BotShieldMatch gated>";
+    }
+    const char *name = argv[0];
+    if (argc < 2) {
+        return apr_psprintf(p,
+            "<BotShieldMatch %s> is empty -- a set with no conditions "
+            "matches nothing and reads as if it matched everything",
+            name);
+    }
+
+    static const char *const action_keys[] = {
+        "respond=", "status=", "challenge=", "tier=", "redirect=",
+        "logas=", "log=", "accesslog=", "flagip=", "flagsession=",
+        "flag=", "ttl=", "penalty=", "credit=", "mode=", NULL
+    };
+
+    bs_server_cfg *scfg = ap_get_module_config(
+        cmd->server->module_config, &botshield_module);
+    if (!scfg) return "<BotShieldMatch>: no server config";
+
+    apr_array_header_t *kvs =
+        apr_array_make(p, argc - 1, sizeof(char *));
+    for (int i = 1; i < argc; i++) {
+        const char *kv = argv[i];
+        for (int a = 0; action_keys[a]; a++) {
+            apr_size_t alen = strlen(action_keys[a]);
+            if (strncasecmp(kv, action_keys[a], alen) == 0) {
+                return apr_psprintf(p,
+                    "<BotShieldMatch %s>: '%.*s' is an action, and a "
+                    "match set holds conditions only. Put it on the "
+                    "rules that use this set -- otherwise a block named "
+                    "for what it matches would also decide what "
+                    "happens.", name, (int)(alen - 1), action_keys[a]);
+            }
+        }
+        if (strcasecmp(kv, "nochallenge") == 0) {
+            return apr_psprintf(p,
+                "<BotShieldMatch %s>: 'nochallenge' is an action, and a "
+                "match set holds conditions only.", name);
+        }
+        *(const char **)apr_array_push(kvs) = apr_pstrdup(p, kv);
+    }
+
+    if (!scfg->match_sets) {
+        scfg->match_sets = apr_hash_make(cmd->pool);
+    }
+    if (apr_hash_get(scfg->match_sets, name, APR_HASH_KEY_STRING)) {
+        return apr_psprintf(p,
+            "<BotShieldMatch %s> is defined twice in this scope. The "
+            "second would silently replace the first, which is how two "
+            "rules meant to share a set drift apart.", name);
+    }
+    apr_hash_set(scfg->match_sets, apr_pstrdup(cmd->pool, name),
+                 APR_HASH_KEY_STRING, kvs);
+    return NULL;
+}
+
 const char *bs_section_trigger(cmd_parms *cmd, void *dconf, const char *arg,
                               const char *dname, bs_trigger_setter setter)
 {
@@ -2281,6 +2355,45 @@ const char *bs_section_trigger(cmd_parms *cmd, void *dconf, const char *arg,
 
     if (flags->nelts == 0 && kvs->nelts == 0) {
         return apr_psprintf(p, "<%s %s> is empty", dname, name);
+    }
+
+    /* Expand matches=<name> before the setter sees the block.
+     *
+     * Textual on purpose: the result is exactly the block the operator
+     * would have written by hand, so no parser, evaluator or family
+     * downstream learns that named sets exist. A set is read where it
+     * is written -- resolution happens here, in definition order, which
+     * is also why a set may name a set defined above it and why a cycle
+     * cannot be built. */
+    if (kvs->nelts) {
+        bs_server_cfg *mscfg = ap_get_module_config(
+            cmd->server->module_config, &botshield_module);
+        apr_array_header_t *expanded =
+            apr_array_make(p, kvs->nelts + 8, sizeof(char *));
+        int any = 0;
+        for (int i = 0; i < kvs->nelts; i++) {
+            const char *kv = APR_ARRAY_IDX(kvs, i, const char *);
+            if (strncasecmp(kv, "matches=", 8) != 0) {
+                *(const char **)apr_array_push(expanded) = kv;
+                continue;
+            }
+            any = 1;
+            const char *sname = kv + 8;
+            apr_array_header_t *set =
+                (mscfg && mscfg->match_sets)
+                ? apr_hash_get(mscfg->match_sets, sname,
+                               APR_HASH_KEY_STRING)
+                : NULL;
+            if (!set) {
+                return apr_psprintf(p,
+                    "<%s %s>: BotShieldMatches '%s' names no "
+                    "<BotShieldMatch> block in this scope. Define the "
+                    "set above the rules that use it.",
+                    dname, named ? name : "", sname);
+            }
+            apr_array_cat(expanded, set);
+        }
+        if (any) kvs = expanded;
     }
 
     apr_array_header_t *argv = apr_array_make(

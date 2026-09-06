@@ -119,6 +119,7 @@
 <li class="toc__item toc__item--level-2"><a href="#robots-txt-enforcement">Robots.txt enforcement</a></li>
 <li class="toc__item toc__item--level-2"><a href="#triggers">Triggers</a></li>
 <li class="toc__item toc__item--level-3"><a href="#accesslog-off-keep-a-request-out-of-the-access-log">`accesslog=off` — keep a request out of the access log</a></li>
+<li class="toc__item toc__item--level-3"><a href="#botshieldmatch-name-a-set-of-conditions-and-reuse-it">`BotShieldMatch` — name a set of conditions and reuse it</a></li>
 <li class="toc__item toc__item--level-3"><a href="#botshieldrule-match-on-any-request-property">`BotShieldRule` — match on any request property</a></li>
 <li class="toc__item toc__item--level-2"><a href="#per-scope-triggers">Per-scope triggers</a></li>
 <li class="toc__item toc__item--level-2"><a href="#flag-triggers">Flag triggers</a></li>
@@ -1202,6 +1203,73 @@ request environment:</p>
 <pre><code class="language-apache">CustomLog logs/access.log combined &quot;expr=%{reqenv:BS_OUTCOME} != 'block'&quot;
 </code></pre>
 <p>That is the right tool when you only want to thin one log.</p>
+<h3 id="botshieldmatch-name-a-set-of-conditions-and-reuse-it"><code>BotShieldMatch</code> — name a set of conditions and reuse it</h3>
+<table>
+<thead>
+<tr>
+<th>Directive</th>
+<th>Syntax</th>
+<th>Scope</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>&lt;BotShieldMatch &lt;name&gt;&gt;</code></td>
+<td>conditions, one per line, until <code>&lt;/BotShieldMatch&gt;</code></td>
+<td>server / vhost</td>
+</tr>
+<tr>
+<td><code>BotShieldMatches &lt;name&gt;</code></td>
+<td>inside a rule — splices that set's conditions in</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>A set holds the <em>predicate half</em> of a rule, lifted out so more than one
+rule can share it. It is expanded textually at config time, so a rule
+naming a set is exactly the rule you would have written by hand: no
+family, parser or evaluator downstream knows that sets exist.</p>
+<pre><code class="language-apache">&lt;BotShieldMatch gated-content&gt;
+    BotShieldPath  /$
+    BotShieldPath  /search/
+    BotShieldPath  /publications
+&lt;/BotShieldMatch&gt;
+
+&lt;BotShieldRule crawler-pass&gt;
+    BotShieldMatches   gated-content
+    BotShieldCrawler   yes
+    BotShieldNoChallenge
+&lt;/BotShieldRule&gt;
+
+&lt;BotShieldRule content-gate&gt;
+    BotShieldMatches   gated-content
+    BotShieldSolved    no
+    BotShieldChallenge noninteractive
+&lt;/BotShieldRule&gt;
+</code></pre>
+<p><strong>The case this is for.</strong> Those two rules are a matched pair — one
+exempts declared crawlers from the gate, the other gates everyone else —
+and written out longhand they repeat the same path list twice with
+nothing saying they belong together. Add a path to one and forget the
+other and verified crawlers start being challenged on it, which is the
+failure the <code>tier_floor</code> warning above describes from the other
+direction. A name is how the config says these two are about the same
+thing.</p>
+<p><strong>Conditions only.</strong> Action keys are refused inside a set: a block named
+for what it matches must not also decide what happens, or every rule
+naming it inherits an action from somewhere else in the file. Put the
+action on the rules.</p>
+<p><strong>Defined before used, and only once.</strong> Resolution happens where the
+<code>BotShieldMatches</code> line is read, so a set must appear above the rules
+that name it; naming an undefined set is a config error rather than a
+rule that quietly matches nothing. Defining the same name twice is also
+refused — last-one-wins is precisely how a shared set stops being
+shared.</p>
+<p>Two things follow from resolving in definition order: a set may name a
+set defined above it, and a cycle cannot be built, because a name that
+is not yet defined does not resolve.</p>
+<p>A vhost inherits sets from server scope and may shadow one by name, the
+same rule <code>BotShieldAllowBot</code> follows.</p>
 <h3 id="botshieldrule-match-on-any-request-property"><code>BotShieldRule</code> — match on any request property</h3>
 <p>Every match key is optional and they <strong>AND</strong> together; at least one is
 required. A rule with no condition would match every request, which is

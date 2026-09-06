@@ -727,6 +727,66 @@ CustomLog logs/access.log combined "expr=%{reqenv:BS_OUTCOME} != 'block'"
 
 That is the right tool when you only want to thin one log.
 
+### `BotShieldMatch` — name a set of conditions and reuse it
+
+| Directive | Syntax | Scope |
+|---|---|---|
+| `<BotShieldMatch <name>>` | conditions, one per line, until `</BotShieldMatch>` | server / vhost |
+| `BotShieldMatches <name>` | inside a rule — splices that set's conditions in | |
+
+A set holds the *predicate half* of a rule, lifted out so more than one
+rule can share it. It is expanded textually at config time, so a rule
+naming a set is exactly the rule you would have written by hand: no
+family, parser or evaluator downstream knows that sets exist.
+
+```apache
+<BotShieldMatch gated-content>
+    BotShieldPath  /$
+    BotShieldPath  /search/
+    BotShieldPath  /publications
+</BotShieldMatch>
+
+<BotShieldRule crawler-pass>
+    BotShieldMatches   gated-content
+    BotShieldCrawler   yes
+    BotShieldNoChallenge
+</BotShieldRule>
+
+<BotShieldRule content-gate>
+    BotShieldMatches   gated-content
+    BotShieldSolved    no
+    BotShieldChallenge noninteractive
+</BotShieldRule>
+```
+
+**The case this is for.** Those two rules are a matched pair — one
+exempts declared crawlers from the gate, the other gates everyone else —
+and written out longhand they repeat the same path list twice with
+nothing saying they belong together. Add a path to one and forget the
+other and verified crawlers start being challenged on it, which is the
+failure the `tier_floor` warning above describes from the other
+direction. A name is how the config says these two are about the same
+thing.
+
+**Conditions only.** Action keys are refused inside a set: a block named
+for what it matches must not also decide what happens, or every rule
+naming it inherits an action from somewhere else in the file. Put the
+action on the rules.
+
+**Defined before used, and only once.** Resolution happens where the
+`BotShieldMatches` line is read, so a set must appear above the rules
+that name it; naming an undefined set is a config error rather than a
+rule that quietly matches nothing. Defining the same name twice is also
+refused — last-one-wins is precisely how a shared set stops being
+shared.
+
+Two things follow from resolving in definition order: a set may name a
+set defined above it, and a cycle cannot be built, because a name that
+is not yet defined does not resolve.
+
+A vhost inherits sets from server scope and may shadow one by name, the
+same rule `BotShieldAllowBot` follows.
+
 ### `BotShieldRule` — match on any request property
 
 Every match key is optional and they **AND** together; at least one is

@@ -178,6 +178,17 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
      * server where the value is present. */
     if (!out->data_dir) out->data_dir = base->data_dir;
 
+    /* Same rule as allow_bots: a vhost inherits the sets defined at
+     * server scope and may shadow one by name. A set is config
+     * vocabulary, so inheriting it is what an operator expects from
+     * having written it once. */
+    if (base->match_sets && apr_hash_count(base->match_sets) > 0
+        && add->match_sets) {
+        out->match_sets = apr_hash_overlay(p, add->match_sets,
+                                           base->match_sets);
+    } else if (base->match_sets && !add->match_sets) {
+        out->match_sets = base->match_sets;
+    }
     if (base->allow_bots && apr_hash_count(base->allow_bots) > 0
         && add->allow_bots) {
         out->allow_bots = apr_hash_overlay(p, add->allow_bots,

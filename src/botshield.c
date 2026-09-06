@@ -186,6 +186,12 @@ static const char *bs_open_loadtrigger(cmd_parms *cmd, void *dconf,
     return bs_section_trigger(cmd, dconf, arg, "BotShieldLoadTrigger", bs_set_load_trigger);
 }
 
+static const char *bs_open_match(cmd_parms *cmd, void *dconf,
+                                          const char *arg)
+{
+    return bs_section_trigger(cmd, dconf, arg, "BotShieldMatch", bs_set_match_set);
+}
+
 static const char *bs_open_rule(cmd_parms *cmd, void *dconf,
                                           const char *arg)
 {
@@ -615,6 +621,14 @@ static const command_rec bs_cmds[] = {
                  "Open a BotShieldRule block. Takes the rule name; every "
                  "setting is a BotShield directive on its own line "
                  "until </BotShieldRule>."),
+    AP_INIT_RAW_ARGS("<BotShieldMatch", bs_open_match, NULL, RSRC_CONF,
+                 "Open a BotShieldMatch block: a named set of match "
+                 "conditions that rules reuse with 'BotShieldMatches "
+                 "<name>'. Takes the set's name; every condition is a "
+                 "BotShield directive on its own line inside, until "
+                 "</BotShieldMatch>. Conditions only -- actions belong "
+                 "on the rules that name the set. Define a set above "
+                 "the rules that use it."),
     AP_INIT_RAW_ARGS("<BotShieldRequestTrigger", bs_open_requesttrigger, NULL, RSRC_CONF,
                  "DEPRECATED spelling of <BotShieldRule>; warns at config "
                  "time and will be removed. Identical behaviour -- rename "

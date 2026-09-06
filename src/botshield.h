@@ -485,6 +485,12 @@ typedef struct bs_server_cfg {
     int                 robots_wildcard_scope;
     bs_robots_state    *robots;                      /* active bundle, atomic */
     bs_robots_state    *robots_pending;              /* awaits destruction */
+    /* name -> apr_array_header_t * of "key=value" strings: the
+     * conditions a <BotShieldMatch> block stands for. Held as the raw
+     * tokens rather than a parsed predicate because expansion is
+     * textual -- a set is spliced into a rule's own argument list and
+     * parsed as if it had been written there. */
+    apr_hash_t         *match_sets;
     apr_hash_t         *robots_slot_by_name;
     int                 robots_slot_pool_base;
     int                 robots_slot_pool_size;

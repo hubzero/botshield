@@ -491,6 +491,12 @@ typedef const char *(*bs_trigger_setter)(cmd_parms *cmd, void *dconf,
  * directive into the key=value token the flat parser already knows,
  * and calls `setter` with the result. `dname` is the family name
  * without the angle brackets. */
+/* <BotShieldMatch name> -- store a named set of conditions that rules
+ * splice in with BotShieldMatches. Conditions only; actions are
+ * refused. */
+const char *bs_set_match_set(cmd_parms *cmd, void *dconf,
+                             int argc, char *const argv[]);
+
 const char *bs_section_trigger(cmd_parms *cmd, void *dconf, const char *arg,
                                const char *dname, bs_trigger_setter setter);
 
