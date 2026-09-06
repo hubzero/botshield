@@ -224,6 +224,16 @@ typedef struct {
      * this one key reproduces what the whole scoring ladder decided.
      * -1 = no condition. */
     int                solved_pred;
+    /* firstsight=yes|no -- was this address a Bloom miss?
+     *
+     * The address half of what the firstsightip / droppedcookie
+     * heuristics measure, available here so a rule can scope it.
+     * Globally those two fire everywhere or nowhere; as a predicate
+     * "challenge newcomers on /login only" becomes writable.
+     * Combined with solved=no it reproduces either heuristic exactly:
+     * firstsight=yes is firstsightip, firstsight=no is droppedcookie.
+     * -1 = no condition. */
+    int                firstsight_pred;
     /* minload=normal|warm|hot -- fires when the current load state is
      * AT OR ABOVE this level. Spelled as a minimum rather than an
      * operator so it parses as an ordinary key=value; "fires from warm

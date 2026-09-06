@@ -452,6 +452,14 @@ int bs_check_policy(request_rec *r)
                 int solved = (sv && *sv == '1');
                 if (solved != t->solved_pred) continue;
             }
+            if (t->firstsight_pred >= 0) {
+                /* -1 means no usable client address. A rule asking
+                 * about the address does not match rather than
+                 * guessing, which is the same call exists= makes when
+                 * it cannot stat. */
+                int fs = bs_request_first_sight(r);
+                if (fs < 0 || fs != t->firstsight_pred) continue;
+            }
             if (t->has_cohort && !bs_cohort_matches(&t->cohort, ua, r))
                 continue;
             bs_trigger_exec_outcome o = bs_apply_trigger_action(

@@ -1605,6 +1605,41 @@ static int bs_admin_unflag_handler(request_rec *r)
                                        (unsigned)cleared));
 }
 
+/* Bloom membership for this request, computed at most once.
+ *
+ * Hoisted out of the heuristic block below so a rule predicate can
+ * consult it: bs_check_policy walks the rules well before that block
+ * runs, and a predicate cannot read a value that has not been computed.
+ *
+ * Reading earlier is safe because the only writer for this address is
+ * the bs_bloom_add below, which still runs once and after everything
+ * that reads. Memoized for two reasons: two rules naming the predicate
+ * must not see different answers, and the lookup should stay one
+ * lookup.
+ *
+ * 1 = first sight (Bloom miss), 0 = seen before, -1 = no usable client
+ * address. The -1 is a real case -- a rule asking about an address that
+ * does not exist should not match either way. */
+int bs_request_first_sight(request_rec *r)
+{
+    const char *cached = apr_table_get(r->notes, "bs-first-sight");
+    if (cached) return atoi(cached);
+
+    int result = -1;
+    unsigned char ip[16];
+    if (bs_parse_client_ip(r->useragent_ip, ip)) {
+        bs_server_cfg *scfg = ap_get_module_config(
+            r->server->module_config, &botshield_module);
+        if (scfg) {
+            bs_mask_ipv6_prefix(ip, scfg->ipv6_prefix_bits);
+            result = bs_bloom_seen(ip, scfg->ns_id) ? 0 : 1;
+        }
+    }
+    apr_table_setn(r->notes, "bs-first-sight",
+                   apr_psprintf(r->pool, "%d", result));
+    return result;
+}
+
 /* Module-owned endpoint routing. URLs under BotShieldEndpointPrefix
  * (default /botshield) are served by this module's own handlers, not
  * the tier dispatch. Today:
@@ -2211,17 +2246,34 @@ static int bs_handler(request_rec *r)
      * solve it transparently, and every later request carries
      * passes_non_interactive and lands back here clean. */
     if (have_client_ip && !have_solve_proof && !declared_crawler) {
-        if (bs_bloom_seen(client_ip, scfg_h->ns_id)) {
+        /* Same lookup the BotShieldFirstSight predicate reads, so a
+         * rule and the heuristic can never disagree about whether this
+         * address was seen. */
+        if (bs_request_first_sight(r) == 0) {
             bs_apply_heuristic(r, BS_H_DROPPED_COOKIE);
         } else {
             bs_apply_heuristic(r, BS_H_FIRST_SIGHT_IP);
         }
     }
-    /* Eager Bloom population: every request with a client IP feeds
-     * the Bloom filter, so subsequent visits without a cookie trip
-     * droppedcookie instead of firstsightip. The previous
-     * "populate only on challenge" optimization conflated never-
-     * been-here-before with never-been-challenged-from-here. */
+    /* Population sits here, after policy, and that placement is
+     * load-bearing rather than incidental.
+     *
+     * A request a rule refused never reaches this line, so a refused
+     * address does not enter the filter. That reads like a bug against
+     * the old comment here -- which claimed every request with a client
+     * IP feeds the filter -- and moving it earlier was tried. Four
+     * tests caught why it is wrong: droppedcookie means "known address
+     * arriving without a usable cookie", and its suspicion is that the
+     * client was given a cookie and is not presenting it. A refused
+     * request never reached a mint, so that client has no cookie to
+     * present. Recording it turns droppedcookie into a 25-point penalty
+     * for having been blocked once, against a threshold of 20.
+     *
+     * So this filter answers "was this address given a chance to hold a
+     * cookie", not "has this address been seen". BotShieldFirstSight
+     * reads the same filter and inherits the same meaning, which is the
+     * consistency that matters: a rule and the heuristics must not
+     * disagree about the same address. */
     if (have_client_ip) bs_bloom_add(client_ip, scfg_h->ns_id);
 
     /* Flag-trigger walker. Walks scfg->flag_triggers over the union

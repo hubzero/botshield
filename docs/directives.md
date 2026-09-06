@@ -741,6 +741,15 @@ it.
 | `cookies=none\|any\|session` | the parsed `Cookie` header | bulk forms only |
 | `ua=<substring>\|@<botgroup>[,@<botgroup>...]\|""` | User-Agent | `*` means "any", same as omitting. `ua=""` matches a request with **no** User-Agent header, or one present but empty — absence is not a substring, so it needs its own spelling. A **comma list of `@selectors`** matches if any of them does. |
 | `ipspec=<spec>` | client IP | `*`, a CIDR list, or a file path |
+| `solved=yes\|no` | authenticated solve proof in the cookie | the strongest single predicate here: on a production hub 100% of challenges carried "no solve proof" |
+| `exists=yes\|no` | whether the request maps to a real file | a stat, so the rest of a ladder can see only paths that do not exist |
+| `crawler=yes\|no` | verified-bot classification | identity-checked, not UA text |
+| `firstsight=yes\|no` | Bloom-filter membership of the address | `yes` = never seen before |
+| `minload=normal\|warm\|hot` | current server load state | fires **at or above** the named level |
+
+Four of those consult module state rather than request text — a stat, a
+classifier, a cookie's authenticated contents, a load sampler. That is
+the family's actual shape: match a request on anything known about it.
 
 Globs take `*` wildcards and a trailing `$` anchor. Named-cookie
 predicates (`cookie=<n>`, `cookie=<n>~<substr>`, `bs-cookie=<state>`)
@@ -767,6 +776,52 @@ per-address state with a window: a client that solves the challenge
 would keep being re-challenged for the life of a flag it cannot clear.
 Flag when you want the reputation to persist; challenge when you want to
 gate the request in front of you.
+
+#### `BotShieldFirstSight` — has this address been seen before?
+
+`yes` matches an address the Bloom filter has no record of, `no` matches
+one it does. A request with no usable client address matches neither,
+the same call `exists=` makes when it cannot stat.
+
+Paired with `solved=` it is exactly what the two address heuristics
+measure: `firstsight=yes solved=no` is `firstsightip`, and
+`firstsight=no solved=no` is `droppedcookie`. They are two halves of one
+signal split on Bloom membership, and this is the half the rule family
+was missing.
+
+What it adds over the heuristic is **scope**. `firstsightip` applies to
+every path in a scope or to none, at one weight; the recommendation to
+use it "on a login or registration path" was not writable. Now it is:
+
+```apache
+<BotShieldRule newcomer-gate>
+    BotShieldPath        /login
+    BotShieldPath        /register
+    BotShieldFirstSight  yes
+    BotShieldSolved      no
+    BotShieldChallenge   noninteractive
+</BotShieldRule>
+```
+
+The read is resolved once per request and happens before that
+request's write, so two rules naming this key cannot disagree and the
+heuristics read the same answer.
+
+**What the filter actually holds is worth knowing before you use this.**
+An address is recorded only on requests that reach the cookie mint, so a
+request some rule refused does not register the client. That is
+deliberate rather than an oversight: `droppedcookie` means "known
+address arriving without a usable cookie", and the suspicion in it is
+that the client was given a cookie and is not presenting it. A refused
+request never reached a mint, so that client has nothing to present, and
+recording it would make `droppedcookie` a penalty for having been
+blocked once.
+
+So this filter answers *was this address given a chance to hold a
+cookie*, not *has this address been seen*. The practical consequence:
+a client that only ever hits refusing rules stays first-sight, and a
+rule combining `firstsight=yes` with a refusal will match that client
+every time rather than once.
 
 #### `BotShieldNoChallenge`
 

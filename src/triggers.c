@@ -1011,6 +1011,7 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
     e->cookie_pred = -1;              /* no cookie condition */
     e->exists_pred = -1;              /* no filesystem condition */
     e->solved_pred = -1;              /* no solve-proof condition */
+    e->firstsight_pred = -1;          /* no Bloom-membership condition */
     e->bscookie_pred = -1;            /* no bs-cookie condition */
     e->crawler_pred  = -1;            /* no crawler condition */
     e->minload     = -1;              /* no load condition */
@@ -1111,6 +1112,15 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                 else {
                     return apr_psprintf(cmd->pool,
                         "%s: solved='%s' not one of yes|no", D, val);
+                }
+                continue;
+            }
+            if (klen == 10 && strncasecmp(arg, "firstsight", 10) == 0) {
+                if      (!strcasecmp(val, "yes")) e->firstsight_pred = 1;
+                else if (!strcasecmp(val, "no"))  e->firstsight_pred = 0;
+                else {
+                    return apr_psprintf(cmd->pool,
+                        "%s: firstsight='%s' not one of yes|no", D, val);
                 }
                 continue;
             }

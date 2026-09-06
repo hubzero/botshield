@@ -617,6 +617,12 @@ static inline int bs_effective_int(int value, int fallback)
     return (value == BS_UNSET) ? fallback : value;
 }
 
+/* Bloom membership for this request, memoized: 1 = first sight,
+ * 0 = seen before, -1 = no usable client address. Read by the
+ * BotShieldFirstSight rule predicate and by the firstsightip /
+ * droppedcookie heuristics, so the two cannot disagree. */
+int bs_request_first_sight(request_rec *r);
+
 /* IP parsing (bs_parse_client_ip) and IPv6-prefix masking
  * (bs_mask_ipv6_prefix) live in allowlist.h. Bounded integer parsers
  * (bs_parse_int_bounded, bs_parse_uint32_bounded, bs_parse_int64_bounded)

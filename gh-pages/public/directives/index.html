@@ -1241,8 +1241,36 @@ it.</p>
 <td>client IP</td>
 <td><code>*</code>, a CIDR list, or a file path</td>
 </tr>
+<tr>
+<td><code>solved=yes|no</code></td>
+<td>authenticated solve proof in the cookie</td>
+<td>the strongest single predicate here: on a production hub 100% of challenges carried &quot;no solve proof&quot;</td>
+</tr>
+<tr>
+<td><code>exists=yes|no</code></td>
+<td>whether the request maps to a real file</td>
+<td>a stat, so the rest of a ladder can see only paths that do not exist</td>
+</tr>
+<tr>
+<td><code>crawler=yes|no</code></td>
+<td>verified-bot classification</td>
+<td>identity-checked, not UA text</td>
+</tr>
+<tr>
+<td><code>firstsight=yes|no</code></td>
+<td>Bloom-filter membership of the address</td>
+<td><code>yes</code> = never seen before</td>
+</tr>
+<tr>
+<td><code>minload=normal|warm|hot</code></td>
+<td>current server load state</td>
+<td>fires <strong>at or above</strong> the named level</td>
+</tr>
 </tbody>
 </table>
+<p>Four of those consult module state rather than request text — a stat, a
+classifier, a cookie's authenticated contents, a load sampler. That is
+the family's actual shape: match a request on anything known about it.</p>
 <p>Globs take <code>*</code> wildcards and a trailing <code>$</code> anchor. Named-cookie
 predicates (<code>cookie=&lt;n&gt;</code>, <code>cookie=&lt;n&gt;~&lt;substr&gt;</code>, <code>bs-cookie=&lt;state&gt;</code>)
 stay on <a href="#triggers"><code>BotShieldCookieTrigger</code></a> — that vocabulary does not
@@ -1293,6 +1321,43 @@ per-address state with a window: a client that solves the challenge
 would keep being re-challenged for the life of a flag it cannot clear.
 Flag when you want the reputation to persist; challenge when you want to
 gate the request in front of you.</p>
+<h4 id="botshieldfirstsight-has-this-address-been-seen-before"><code>BotShieldFirstSight</code> — has this address been seen before?</h4>
+<p><code>yes</code> matches an address the Bloom filter has no record of, <code>no</code> matches
+one it does. A request with no usable client address matches neither,
+the same call <code>exists=</code> makes when it cannot stat.</p>
+<p>Paired with <code>solved=</code> it is exactly what the two address heuristics
+measure: <code>firstsight=yes solved=no</code> is <code>firstsightip</code>, and
+<code>firstsight=no solved=no</code> is <code>droppedcookie</code>. They are two halves of one
+signal split on Bloom membership, and this is the half the rule family
+was missing.</p>
+<p>What it adds over the heuristic is <strong>scope</strong>. <code>firstsightip</code> applies to
+every path in a scope or to none, at one weight; the recommendation to
+use it &quot;on a login or registration path&quot; was not writable. Now it is:</p>
+<pre><code class="language-apache">&lt;BotShieldRule newcomer-gate&gt;
+    BotShieldPath        /login
+    BotShieldPath        /register
+    BotShieldFirstSight  yes
+    BotShieldSolved      no
+    BotShieldChallenge   noninteractive
+&lt;/BotShieldRule&gt;
+</code></pre>
+<p>The read is resolved once per request and happens before that
+request's write, so two rules naming this key cannot disagree and the
+heuristics read the same answer.</p>
+<p><strong>What the filter actually holds is worth knowing before you use this.</strong>
+An address is recorded only on requests that reach the cookie mint, so a
+request some rule refused does not register the client. That is
+deliberate rather than an oversight: <code>droppedcookie</code> means &quot;known
+address arriving without a usable cookie&quot;, and the suspicion in it is
+that the client was given a cookie and is not presenting it. A refused
+request never reached a mint, so that client has nothing to present, and
+recording it would make <code>droppedcookie</code> a penalty for having been
+blocked once.</p>
+<p>So this filter answers <em>was this address given a chance to hold a
+cookie</em>, not <em>has this address been seen</em>. The practical consequence:
+a client that only ever hits refusing rules stays first-sight, and a
+rule combining <code>firstsight=yes</code> with a refusal will match that client
+every time rather than once.</p>
 <h4 id="botshieldnochallenge"><code>BotShieldNoChallenge</code></h4>
 <p>Takes no argument. The rule records its match, <strong>skips scoring</strong>, and
 declines out of the handler so the real site serves the request.</p>
