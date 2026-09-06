@@ -3231,8 +3231,11 @@ const char *bs_set_challenge_at_least(cmd_parms *cmd, void *cfg_v,
             return "BotShieldChallengeAtLeast none takes no other "
                    "arguments";
         }
-        cfg->challenge_at_least =
-            apr_array_make(cmd->pool, 1, sizeof(bs_challenge_min *));
+        /* A property of the scope, not an operation at this line.
+         * Clearing the list here would leave rows declared further down
+         * the same scope standing, which is exactly what it needs to
+         * silence -- and anything inserting config at a fixed anchor
+         * cannot get above them. */
         cfg->challenge_at_least_reset = 1;
         return NULL;
     }
@@ -4542,12 +4545,14 @@ const char *bs_cohort_resolve(cmd_parms *cmd, bs_cohort *out,
         if (!ua[1]) {
             return "UA selector '@' must be followed by a botgroup "
                    "name (search, ai-input, ai-train, monitor) or a "
-                   "class (bot, fake-bot, scraper)";
+                   "class (bot, verified-bot, fake-bot, scraper)";
         }
         if (strcasecmp(ua + 1, "bot") == 0) {
             out->ua_class_bot = 1;
         } else if (strcasecmp(ua + 1, "fake-bot") == 0) {
             out->ua_class_fake = 1;
+        } else if (strcasecmp(ua + 1, "verified-bot") == 0) {
+            out->ua_class_verified = 1;
         } else if (strcasecmp(ua + 1, "scraper") == 0) {
             out->ua_class_scraper = 1;
         } else {

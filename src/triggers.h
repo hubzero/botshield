@@ -174,6 +174,14 @@ typedef struct {
      * selector so it stays nameable. 0 = axis unused. */
     int                 ua_class_bot;
     int                 ua_class_fake;
+    /* @verified-bot -- the narrow half of @bot: the UA matched a
+     * crawler pattern AND the client address checked out against that
+     * crawler's published ranges. @bot is deliberately wide, which is
+     * what "act on every bot" wants and the opposite of what "this one
+     * is proven, leave it alone" wants. Before this the proven set had
+     * no name in a rule, and the only way to say it was a credit large
+     * enough to swamp every other term. 0 = axis unused. */
+    int                 ua_class_verified;
     /* @scraper -- the UA carries a known HTTP-library token. Its own
      * selector rather than a botgroup because it is a classification
      * this module makes, not a bot the directory knows: curl and

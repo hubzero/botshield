@@ -875,6 +875,20 @@ and visible in the decision log. A number that cannot outlive the
 request cannot quietly bill a client: a request refused at a rate
 ceiling for someone else's traffic spike leaves nothing behind.
 
+**It still moves under `BotShieldEnabled LogOnly`, and not under
+`mode=observe`.** The two suppress different things. `mode=observe` is
+one rule its author asked to contribute nothing, so it contributes
+nothing. `LogOnly` is *do not act, and tell me what you would have
+done* — and a decision computed without its inputs is not the decision
+that would have been made, it is a quieter one reported as if it were
+the same. A scope in `LogOnly` whose scores were suppressed would
+under-report every challenge it was about to start raising, which is
+the one thing you turned it on to see.
+
+The line is per-request evidence against effects that outlive the
+request. A named score is the former and still moves; a `flagip=` write
+is the latter and stays suppressed.
+
 **Order decides what a reader sees.** A rule reads what rules *above*
 it have accumulated, so `BotShieldScoreAtLeast` placed above its
 contributors sees `0`. That is not a limitation to work around, it is
@@ -911,10 +925,21 @@ floors, so several may match and the highest wins; order is irrelevant.
 
 Rows accumulate through nested scopes: a scope adds to what it
 inherited rather than replacing it. `BotShieldChallengeAtLeast none`,
-alone on a line, drops everything inherited. That is the off switch a
-list needs and a single-valued threshold did not — overriding
-`BotShieldScoreNonInteractive` was enough to silence it, and there is
-no equivalent for a row you cannot see.
+alone on a line, switches the whole thing off for that scope — no
+score-driven challenge is raised there, whatever rows the scope
+declares or inherits, and **wherever the line appears relative to
+them**.
+
+Position-independence is the point rather than an implementation
+detail. A reset that only cleared what preceded it would be unusable to
+anything that cannot choose where its configuration lands — a generated
+vhost, an included fragment, a test harness inserting at a fixed
+anchor. The cost is that "switch off, then add my own" cannot be said
+in one scope; use a nested one, which is what scopes are for.
+
+This is the off switch a list needs and a single-valued threshold never
+did: overriding `BotShieldScoreNonInteractive` silenced it, and there
+is no equivalent for a row you inherited and cannot see.
 
 ```apache
 <BotShieldRule sig-scraper>
@@ -952,14 +977,28 @@ it to choose a challenge tier.
 
 #### `@selectors` on `ua=`
 
-Three of them name a classification this module makes rather than a bot
+Four of them name a classification this module makes rather than a bot
 the directory knows:
 
 | Selector | Matches |
 |---|---|
 | `@bot` | verified, known and unknown bots — the same three the dashboard's Bots tab counts. **Not** `fake-bot`: a client lying about being a crawler must not inherit an exemption written for real ones |
+| `@verified-bot` | the narrow half of `@bot`: the UA matched a crawler pattern **and** the address checked out against that crawler's published ranges |
 | `@fake-bot` | a UA claiming a crawler whose address failed the cross-check |
 | `@scraper` | the UA carries a known HTTP-library token — `curl`, `wget`, `python-requests`, `Go-http-client`, `okhttp`, `scrapy` and similar |
+
+`@bot` and `@verified-bot` answer different questions and the width is
+the point. `@bot` is for acting on bots — rate limits, robots policy,
+anything where a bot-shaped client should be treated as one whether or
+not it has proven who it is. `@verified-bot` is for exempting a crawler
+you have actually confirmed, and admitting `unknownbot` to that would
+hand the exemption to any client with a bot-shaped UA.
+
+`@verified-bot` is also the one selector that cannot be approximated by
+`crawler=yes`. That predicate reads the UA's *claim* and requires a
+directory entry, so a crawler you added yourself with
+`BotShieldAllowBot` answers `crawler=no` however thoroughly its address
+was verified.
 
 Anything else after `@` is read as a botgroup name from the bot
 directory (`search`, `ai-input`, `ai-train`, `monitor`).

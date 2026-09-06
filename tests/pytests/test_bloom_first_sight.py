@@ -30,11 +30,11 @@ def test_first_sight_fires_once(fresh_ip, log_slice):
 
     first, second = lines[0], lines[1]
 
-    assert "firstsightip" in first["reason"], (
+    assert "sig-firstsight" in first["reason"], (
         f"first hit should carry firstsightip; reason={first['reason']!r}"
     )
 
-    assert "firstsightip" not in second["reason"], (
+    assert "sig-firstsight" not in second["reason"], (
         f"second hit should NOT carry firstsightip (Bloom already has it); "
         f"reason={second['reason']!r}"
     )

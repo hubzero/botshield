@@ -837,6 +837,32 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
         } else if (a->status_code >= 400) {
             bs_set_would_outcome(r, "~block");
         }
+        /* Named accumulators still move, but only when the
+         * suppression is scope-wide LogOnly rather than this rule's
+         * own mode=observe.
+         *
+         * The two are different requests. mode=observe is one rule its
+         * author asked to contribute nothing, so it contributes
+         * nothing. LogOnly is "do not act, and tell me what you would
+         * have done" -- and a decision computed without its inputs is
+         * not the decision that would have been made. It is a
+         * different, quieter one, reported as if it were the same.
+         *
+         * The line this splits on is per-request evidence against
+         * side effects that outlive the request. A named score lives
+         * for one request and feeds only this request's decision. The
+         * flag-IP write above is the other kind: it is state for
+         * future requests, LogOnly must not write it, and it stays
+         * above this point deliberately. */
+        if (global_log_only && a->mode != BS_TMODE_OBSERVE
+         && a->score_ops) {
+            for (int i = 0; i < a->score_ops->nelts; i++) {
+                const bs_score_op *sop =
+                    APR_ARRAY_IDX(a->score_ops, i, const bs_score_op *);
+                bs_request_named_score_apply(r, sop->name, sop->op,
+                                             sop->value);
+            }
+        }
         if (bs_shm.metrics) {
             __atomic_fetch_add(&bs_shm.metrics->trigger_observed_total,
                                1, __ATOMIC_RELAXED);

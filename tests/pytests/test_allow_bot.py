@@ -66,11 +66,23 @@ def test_allow_bot_cidr_verified(log_slice):
     )
 
 
-def test_allow_bot_fake_routed_to_captcha(log_slice, fresh_ip):
+def test_allow_bot_fake_routed_to_captcha(
+    config_override, log_slice, fresh_ip,
+):
     """UA claims Googlebot, IP is nowhere near a real Googlebot range.
     fakebot:googlebot penalty should fire and drive tier into captcha
     (or form-PoW fallback if no provider is configured at /)."""
-    with log_slice as slc:
+    # The penalty is a number on the ambient total; it reaches a tier
+    # only through the BotShieldScore* cut-points. The dev vhost scores
+    # by name now and declares none, so the test declares its own.
+    with config_override(
+        r"BotShieldEnabled\s+On",
+        "BotShieldEnabled On\n"
+        "    BotShieldScoreNonInteractive 20\n"
+        "    BotShieldScoreInteractive 50\n"
+        "    BotShieldScoreCaptcha 80",
+        count=1,
+    ), log_slice as slc:
         client.get("/", xff=fresh_ip, ua=GOOGLEBOT_UA)
         lines = slc.decision_lines(ip=fresh_ip)
 
@@ -150,7 +162,13 @@ def test_allow_bot_inline_cidr(config_override, log_slice, fresh_ip):
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldAllowBot corpbot "CorpBot/" '
-        '"198.51.100.0/24,203.0.113.0/24"',
+        '"198.51.100.0/24,203.0.113.0/24"\n'
+        # Same reason as the fake-bot test above: the out-of-range
+        # assertion rides the built-in penalty through the ambient
+        # cut-points, which the dev vhost no longer declares.
+        '    BotShieldScoreNonInteractive 20\n'
+        '    BotShieldScoreInteractive 50\n'
+        '    BotShieldScoreCaptcha 80',
         count=1,
     ):
         in_range_ip = "198.51.100.42"

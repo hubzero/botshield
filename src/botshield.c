@@ -2392,13 +2392,18 @@ static int bs_handler(request_rec *r)
      * bs_decide_tier, because this is after robots and the rate
      * limiter: a request those refused never reaches this line, and so
      * is never challenged in place of being refused. */
-    if (cfg->challenge_at_least) {
+    if (cfg->challenge_at_least && !cfg->challenge_at_least_reset) {
         for (int i = 0; i < cfg->challenge_at_least->nelts; i++) {
             const bs_challenge_min *row = APR_ARRAY_IDX(
                 cfg->challenge_at_least, i, const bs_challenge_min *);
             if (bs_request_named_score(r, row->name) < row->min) continue;
-            if ((bs_tier)row->tier > tier_floor_from_flags) {
-                tier_floor_from_flags = (bs_tier)row->tier;
+            /* Into score_tier, not the flag floor. This IS the
+             * score-to-tier mapping -- reading a named accumulator
+             * rather than the ambient total -- and attributing it to
+             * flags would put flagtierfloor: in the reason trace for a
+             * tier no flag chose. */
+            if ((bs_tier)row->tier > score_tier) {
+                score_tier = (bs_tier)row->tier;
             }
             bs_score_add(r, 0, 0,
                 apr_psprintf(r->pool, "score:%s>=%d:%s",

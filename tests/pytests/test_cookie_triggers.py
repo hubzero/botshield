@@ -45,9 +45,7 @@ def test_cookie_trigger_named_present_applies_credit(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldCookieTrigger app-session cookie=PHPSESSID credit=15',
         count=1,
     ):
@@ -85,9 +83,7 @@ def test_cookie_trigger_named_eq_value_blocks(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldCookieTrigger stale-token '
         'cookie=api_token=LEAKED_HEX '
         'respond=403 flag=honeypot_hit ttl=3600',
@@ -110,9 +106,7 @@ def test_cookie_trigger_named_contains_substring(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldCookieTrigger bait-signup '
         'cookie=signup_tmp~BAIT-HEX respond=403',
         count=1,
@@ -133,9 +127,7 @@ def test_cookie_trigger_named_absent_fires(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldCookieTrigger missing-csrf '
         '!cookie=csrf_token respond=403',
         count=1,
@@ -158,9 +150,7 @@ def test_cookie_trigger_cookies_none(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldCookieTrigger no-cookies cookies=none respond=403',
         count=1,
     ):
@@ -180,9 +170,7 @@ def test_cookie_trigger_cookies_session_matches_curated_name(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldCookieTrigger any-session cookies=session respond=403',
         count=1,
     ):
@@ -206,9 +194,7 @@ def test_cookie_trigger_session_name_directive_extends_list(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldSessionCookieName my_custom_session\n'
         '    BotShieldCookieTrigger any-session '
         'cookies=session respond=403',
@@ -230,9 +216,7 @@ def test_cookie_trigger_bs_cookie_missing(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldCookieTrigger fresh bs-cookie=missing respond=403',
         count=1,
     ):
@@ -248,9 +232,7 @@ def test_cookie_trigger_bs_cookie_invalid(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldCookieTrigger bad-bs bs-cookie=invalid respond=403',
         count=1,
     ):
@@ -280,9 +262,7 @@ def test_cookie_trigger_status_pass_still_applies_credit(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldCookieTrigger ghost cookie=PHPSESSID '
         'respond=nochallenge credit=20',
         count=1,
@@ -321,9 +301,7 @@ def test_cookie_trigger_pass_triggers_stack_credits(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldCookieTrigger app-session cookie=PHPSESSID credit=15\n'
         '    BotShieldCookieTrigger app-auth    cookie=auth_token credit=40',
         count=1,
@@ -358,9 +336,7 @@ def test_cookie_trigger_non_pass_shortcircuits_after_pass(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldCookieTrigger app-session cookie=PHPSESSID credit=15\n'
         '    BotShieldCookieTrigger kill       cookie=api_token=BAD respond=403',
         count=1,
@@ -393,9 +369,7 @@ def test_cookie_trigger_first_non_pass_wins_over_second(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldCookieTrigger first  cookie=foo respond=403\n'
         '    BotShieldCookieTrigger second cookie=foo respond=451',
         count=1,
@@ -437,9 +411,7 @@ def test_cookie_trigger_bs_session_raw_name_rejected(
         with config_override(
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
             '    BotShieldCookieTrigger bad cookie=__Host-bs_session=foo',
             count=1,
         ):

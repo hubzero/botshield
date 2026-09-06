@@ -46,9 +46,7 @@ def test_trigger_status_code_blocks_and_tags_log(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldRule env-probe path="/.env" '
         'respond=403 "logas=BAN 2h" ttl=3600',
         count=1,
@@ -79,9 +77,7 @@ def test_trigger_status_pass_lets_request_through(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldRule pass-probe path="/definitely-nonexistent" '
         'respond=nochallenge',
         count=1,
@@ -133,9 +129,7 @@ def test_trigger_status_pass_penalty_scores_the_current_request(
         with config_override(
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
-            '    BotShieldScoreNonInteractive 500\n'
-            '    BotShieldScoreInteractive 600\n'
-            '    BotShieldScoreCaptcha 700\n'
+            '    BotShieldChallengeAtLeast none\n'
             + (RULE % extra),
             count=1,
         ):
@@ -173,9 +167,7 @@ def test_trigger_redirect_sets_location(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldRule env-redirect path="/.env.redir" '
         'redirect=https://example.org/gone',
         count=1,
@@ -194,9 +186,7 @@ def test_trigger_redirect_honors_explicit_status(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldRule env-redirect path="/.env.perm" '
         'redirect=https://example.org/gone respond=301',
         count=1,
@@ -218,9 +208,7 @@ def test_trigger_declaration_order_wins_on_overlap(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldRule wp-ajax path="/wp-admin/admin-ajax.php" respond=nochallenge\n'
         '    BotShieldRule wp-all  path="/wp-admin*"               respond=403',
         count=1,
@@ -275,9 +263,7 @@ def test_trigger_flag_ip_carries_to_next_request(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldRule bait path="/honey-bait" '
         'respond=nochallenge flag=honeypot_hit ttl=3600',
         count=1,
@@ -314,9 +300,7 @@ def test_path_trigger_middle_star_matches_segment(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldRule api-admin path="/api/*/admin" respond=403',
         count=1,
     ):
@@ -351,9 +335,7 @@ def test_path_trigger_middle_star_anchored_excludes_suffix(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldRule api-admin-end path="/api/*/admin$" respond=403',
         count=1,
     ):
@@ -404,9 +386,7 @@ def test_path_trigger_middle_star_emits_notice_on_config_load(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldRule middle-warn path="/foo*bar" respond=403',
         count=1,
     ):

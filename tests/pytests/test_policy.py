@@ -40,9 +40,7 @@ def test_rate_limit_ua_narrowing(config_override, log_slice, fresh_ip):
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldRateLimit corpbot 3 sec "CorpBot" *',
         count=1,
     ):
@@ -75,9 +73,7 @@ def test_rate_limit_inline_cidr_narrowing(config_override, log_slice, fresh_ip):
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldRateLimit dcblock 2 sec * "198.51.100.0/24"',
         count=1,
     ):
@@ -114,9 +110,7 @@ def test_rate_limit_ua_and_ip_and_ed(config_override, log_slice, fresh_ip):
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldRateLimit pair 1 sec "Scraper/" "203.0.113.0/24"',
         count=1,
     ):
@@ -148,9 +142,7 @@ def test_path_trigger_block_prefix_match(config_override, log_slice, fresh_ip):
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldRule lockdown path="/admin" ua="Scraper/" respond=403 ttl=0',
         count=1,
     ):
@@ -173,9 +165,7 @@ def test_path_trigger_block_end_anchor(config_override, log_slice, fresh_ip):
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldRule exact path="/exact$" ua="Scraper/" respond=403 ttl=0',
         count=1,
     ):
@@ -192,9 +182,7 @@ def test_path_trigger_cohort_narrowing(config_override, log_slice, fresh_ip):
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldRule scrapersonly path="/wp-admin" ua="Scraper/" respond=403 ttl=0',
         count=1,
     ):
@@ -220,9 +208,7 @@ def test_rate_limit_ua_match_is_case_insensitive(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldRateLimit gptbot 1 sec "gptbot" *',
         count=1,
     ):
@@ -252,9 +238,7 @@ def test_path_trigger_precedence_is_declaration_order(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldScoreNonInteractive 500\n'
-        '    BotShieldScoreInteractive 600\n'
-        '    BotShieldScoreCaptcha 700\n'
+        '    BotShieldChallengeAtLeast none\n'
         '    BotShieldRule specific path="/admin/secret" ua="Scraper/" respond=403 ttl=0\n'
         '    BotShieldRule generic  path="/admin*"       ua="Scraper/" respond=403 ttl=0',
         count=1,

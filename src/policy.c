@@ -44,6 +44,7 @@
  *   ua_none=1             absent or empty UA only   (ua="")
  *   ua_class_bot=1        any real bot   (ua=@bot)
  *   ua_class_fake=1       spoofed bot    (ua=@fake-bot)
+ *   ua_class_verified=1   proven bot     (ua=@verified-bot)
  *   ua_botgroup != NULL   matches by classified botgroup
  *                         (search/ai-input/ai-train/monitor)
  *   ua_pattern != NULL    matches by UA-substring (case-insensitive)
@@ -73,6 +74,12 @@ static int bs_cohort_matches(const bs_cohort *c,
         } else if (c->ua_class_fake) {
             const bs_ua_class *cls = bs_classify_request_ua(r);
             if (!cls || cls->label != BS_UA_CLASS_FAKE_BOT) return 0;
+        } else if (c->ua_class_verified) {
+            /* @verified-bot -- UA pattern matched and the address
+             * confirmed. Strictly narrower than @bot above, which also
+             * admits knownbot and unknownbot. */
+            const bs_ua_class *cls = bs_classify_request_ua(r);
+            if (!cls || cls->label != BS_UA_CLASS_VERIFIED_BOT) return 0;
         } else if (c->ua_class_scraper) {
             /* Same list the scraperua heuristic scores, so a rule and
              * a score cannot disagree about one request. */
