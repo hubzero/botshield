@@ -159,7 +159,6 @@ static int bs_m_cookie_idx(const char *s)
     if (strcmp(s, "absent")     == 0) return BS_M_COOKIE_ABSENT;
     if (strcmp(s, "minted")     == 0) return BS_M_COOKIE_MINTED;
     if (strcmp(s, "solved")     == 0) return BS_M_COOKIE_SOLVED;
-    if (strcmp(s, "burned")     == 0) return BS_M_COOKIE_BURNED;
     return -1;
 }
 
@@ -2285,18 +2284,17 @@ static void bs_d_audience_panel(request_rec *r, const bs_metrics_window *w,
     {
         const char *labels[] = { "solved", "ok (no solve)", "minted",
                                  "absent", "expired", "bad sig",
-                                 "bad format", "burned" };
+                                 "bad format" };
         const char *fills[]  = { "var(--c7)", "var(--c1)", "var(--c2)",
                                  "var(--c3)", "var(--c4)", "var(--c5)",
-                                 "var(--c6)", "var(--crit)" };
+                                 "var(--c6)" };
         apr_uint64_t vals[]  = { w->g_cookie[g][BS_M_COOKIE_SOLVED],
                                  w->g_cookie[g][BS_M_COOKIE_OK],
                                  w->g_cookie[g][BS_M_COOKIE_MINTED],
                                  w->g_cookie[g][BS_M_COOKIE_ABSENT],
                                  w->g_cookie[g][BS_M_COOKIE_EXPIRED],
                                  w->g_cookie[g][BS_M_COOKIE_BAD_SIG],
-                                 w->g_cookie[g][BS_M_COOKIE_BAD_FORMAT],
-                                 w->g_cookie[g][BS_M_COOKIE_BURNED] };
+                                 w->g_cookie[g][BS_M_COOKIE_BAD_FORMAT] };
         /* Derived, not a literal. This block spelled the arity 7 twice
          * and adding an eighth state meant finding both; the compiler
          * cannot warn when one is missed. */
@@ -4349,10 +4347,10 @@ int bs_dashboard_responses_handler(request_rec *r)
         /* Enum order, and indexed by it below -- an entry missing here
          * is an out-of-bounds read, not a mislabelled bar. */
         const char *cl[] = { "ok", "expired", "bad sig", "bad format",
-                             "absent", "minted", "solved", "burned" };
+                             "absent", "minted", "solved" };
         const char *cf[] = { "var(--c1)", "var(--c4)", "var(--crit)",
                              "var(--c2)", "var(--neutral)", "var(--c5)",
-                             "var(--good)", "var(--warn)" };
+                             "var(--good)" };
         _Static_assert(sizeof(cl) / sizeof(cl[0]) == BS_M_COOKIE_COUNT,
                        "cookie chart labels must cover every cookie state");
         apr_uint64_t cv[BS_M_COOKIE_COUNT], ct = 0;
@@ -5151,12 +5149,6 @@ int bs_metrics_handler(request_rec *r)
     bs_m_emit_counter(r, "cookie_bad_format_total",
         "Rep cookies that failed structural parsing (field count, hex, etc).",
         bs_mload(&m->cookie[BS_M_COOKIE_BAD_FORMAT]));
-    bs_m_emit_counter(r, "cookie_burned_total",
-        "Rep cookies that verified fully but were refused because a "
-        "trigger's burn= had marked the session. Rises only where a "
-        "rule says burn=, and each one is a client that came back "
-        "after tripping that rule.",
-        bs_mload(&m->cookie[BS_M_COOKIE_BURNED]));
     bs_m_emit_counter(r, "cookie_absent_total",
         "Requests with no rep cookie.",
         bs_mload(&m->cookie[BS_M_COOKIE_ABSENT]));

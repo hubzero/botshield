@@ -165,7 +165,8 @@ static void bs_trigger_action_init(bs_trigger_family fam,
          * who wanted a plain 404 on /wp-admin got an hour of forced
          * challenges for every NAT behind it, and nothing in the config
          * said so. Both kinds of memory are opt-in now -- flag= plus
-         * ttl= for the address, burn= for the cookie session. */
+         * BotShieldFlagIP for the address, BotShieldFlagSession
+         * for the cookie session. */
         a->status_code = 403;
         a->flag_bit    = 0;
         a->ttl_sec     = 0;
@@ -233,14 +234,14 @@ static const char *bs_trigger_known_keys(bs_trigger_family fam)
     switch (fam) {
     case BS_TFAMILY_REQUEST:
         return "respond, nochallenge, challenge, redirect, logas, "
-               "accesslog, flagip, flagsession, burn, penalty, mode";
+               "accesslog, flagip, flagsession, penalty, mode";
     case BS_TFAMILY_COOKIE:
         return "respond, nochallenge, challenge, redirect, logas, "
-               "accesslog, flagip, flagsession, burn, penalty, credit, "
+               "accesslog, flagip, flagsession, penalty, credit, "
                "mode";
     case BS_TFAMILY_ENV:
         return "respond, nochallenge, challenge, logas, accesslog, flagip, "
-               "flagsession, burn, penalty, credit, mode";
+               "flagsession, penalty, credit, mode";
     case BS_TFAMILY_FEEDBACK:
         /* mode=observe means "log :observe but skip the flagged-IP
          * write" — meaningful for staging a feedback rule before
@@ -250,7 +251,7 @@ static const char *bs_trigger_known_keys(bs_trigger_family fam)
         return "respond, logas, accesslog, penalty, credit, mode";
     case BS_TFAMILY_SCOPE:
         return "respond, nochallenge, challenge, redirect, logas, "
-               "accesslog, flagip, flagsession, burn, penalty, credit, "
+               "accesslog, flagip, flagsession, penalty, credit, "
                "mode";
     case BS_TFAMILY_FLAG:
         /* Flag triggers use a separate parser. This entry exists
@@ -608,26 +609,6 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
             a->flag_ip_replace = replace;
         }
         (void)bits;
-    } else if (BS_AK("burn")) {
-        /* Refuse this client's cookie session for N seconds.
-         *
-         * The sibling of flag=/ttl=, and the one to reach for when the
-         * address is shared. Flagging catches every client behind a
-         * NAT; burning catches the one browser that actually probed,
-         * because the mark travels in the cookie it keeps sending
-         * back. Neither happens unless the rule says so. */
-        if (fam == BS_TFAMILY_LOAD || fam == BS_TFAMILY_FEEDBACK) {
-            return apr_psprintf(pool,
-                "%s: burn= is not supported on this family", dname);
-        }
-        char *bend = NULL;
-        long b = strtol(val, &bend, 10);
-        if (!bend || *bend || b < 0 || b > 86400 * 30) {
-            return apr_psprintf(pool,
-                "%s: burn='%s' must be 0..%d seconds", dname, val,
-                86400 * 30);
-        }
-        a->burn_sec = (int)b;
     } else if (BS_AK("ttl")) {
         if (fam == BS_TFAMILY_LOAD) {
             return apr_psprintf(pool,
@@ -825,7 +806,8 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
         }
     }
     /* Session flags ride to the single mint point rather than minting a
-     * cookie here. burn= mints its own and had to unset both Set-Cookie
+     * cookie here. The removed burn= minted its own and had to unset
+     * both Set-Cookie
      * tables to stop the ordinary mint overwriting it; accumulating in
      * a note means one cookie, no race, and several rules can
      * contribute to it. */
@@ -856,59 +838,6 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
                        apr_psprintf(r->pool, "%x:%x:%u", add, del,
                                     (unsigned)replace));
     }
-    /* Burn the cookie session (this-browser memory).
-     *
-     * Sibling of the flag above and deliberately separate: flagging
-     * marks an address, which is every client behind that NAT, while
-     * burning marks the one browser that actually tripped the rule.
-     *
-     * A fresh challenge is minted rather than the client's own state
-     * carried forward, because the session is over -- there is nothing
-     * in the old reputation worth preserving, and starting clean means
-     * this works identically for a client that arrived with no cookie
-     * at all. It installs into err_headers_out, so it reaches the
-     * client on the 404 this rule is probably returning. */
-    if (a->burn_sec > 0 && dcfg) {
-        bs_challenge burned;
-        bs_rep_state rep;
-        memset(&rep, 0, sizeof(rep));
-        rep.burned_until = (apr_uint32_t)(apr_time_sec(apr_time_now())
-                                          + a->burn_sec);
-        /* Drop any Set-Cookie already queued. The ordinary session
-         * mint can run before this point in the same response, and two
-         * Set-Cookie headers for one name means the client keeps
-         * whichever arrived last -- a coin toss deciding whether the
-         * session was actually ended. */
-        bs_drop_our_set_cookie(r);
-        /* The "session" algorithm, the same one the ordinary session
-         * cookie uses. Its verify is a no-op, so the burned cookie
-         * validates cleanly on the way back instead of failing a PoW
-         * counter check -- which would leave the mark unreadable and
-         * the burn silently inert. */
-        const bs_pow_algorithm *session_alg = bs_find_algorithm("session");
-        const char *cerr = session_alg
-            ? bs_issue_challenge(r->pool, dcfg,
-                                 dcfg->difficulty > 0 ? dcfg->difficulty
-                                                      : BS_DEFAULT_DIFFICULTY,
-                                 a->burn_sec, 0, session_alg, &rep, &burned)
-            : "session algorithm not registered";
-        if (!cerr) cerr = bs_install_verified_cookie(r, dcfg, &burned, "session");
-        /* Claim the Set-Cookie slot. Without this the ordinary session
-         * mint runs later in the same response and its header wins, so
-         * the client stores a live cookie and the burn evaporates --
-         * which looks exactly like the rule not firing. */
-        if (!cerr) apr_table_setn(r->notes, "bs-burned", "1");
-        if (cerr) {
-            /* Not fatal: the status below still applies, the client
-             * just does not carry the mark. Worth a line because a
-             * silent failure here looks like the rule not firing. */
-            ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
-                "mod_botshield: %s '%s': could not burn the cookie "
-                "session (%s); the rule's status still applies",
-                family_tag, trigger_name, cerr);
-        }
-    }
-
     bs_set_trigger_tag(r, a->log_tag);
 
     /* accesslog=off. Deliberately placed after the observe short-circuit

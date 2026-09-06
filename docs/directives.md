@@ -652,11 +652,11 @@ semantics and refresh model.
 
 | Directive | Predicate args | Action keys |
 |---|---|---|
-| `BotShieldRule` | `<name>` + any of `path=<glob>` `query=<glob>` `cookies=none\|any\|session` `ua=<substring>\|@<botgroup>\|""` `ipspec=<spec>` — ANDed, at least one required | `respond=`, `redirect=`, `logas=`, `accesslog=`, `flagip=`, `flagsession=`, `burn=`, `penalty=`, `mode=` (no `credit=`) |
-| `BotShieldCookieTrigger` | `<name> <pred>` (see policy page) | `respond=`, `redirect=`, `logas=`, `accesslog=`, `flagip=`, `flagsession=`, `burn=`, `penalty=`, `credit=`, `mode=` |
-| `BotShieldEnvTrigger` | `<name> <env-pred>` (see policy page) | `respond=`, `logas=`, `accesslog=`, `flagip=`, `flagsession=`, `burn=`, `penalty=`, `credit=`, `mode=` (no `redirect=`) |
+| `BotShieldRule` | `<name>` + any of `path=<glob>` `query=<glob>` `cookies=none\|any\|session` `ua=<substring>\|@<botgroup>\|""` `ipspec=<spec>` — ANDed, at least one required | `respond=`, `redirect=`, `logas=`, `accesslog=`, `flagip=`, `flagsession=`, `penalty=`, `mode=` (no `credit=`) |
+| `BotShieldCookieTrigger` | `<name> <pred>` (see policy page) | `respond=`, `redirect=`, `logas=`, `accesslog=`, `flagip=`, `flagsession=`, `penalty=`, `credit=`, `mode=` |
+| `BotShieldEnvTrigger` | `<name> <env-pred>` (see policy page) | `respond=`, `logas=`, `accesslog=`, `flagip=`, `flagsession=`, `penalty=`, `credit=`, `mode=` (no `redirect=`) |
 | `BotShieldFeedbackTrigger` | `<event>` | `flagip=`, `flagsession=` (both accept `+`/`-`/`=`), `logas=`, `accesslog=`, `mode=` |
-| `BotShieldLoadTrigger` | `<name> state=<n>\|state>=<n>` | `respond=`, `logas=`, `accesslog=`, `penalty=`, `mode=` (no `redirect=`, `flag=`, `ttl=`, `burn=`) |
+| `BotShieldLoadTrigger` | `<name> state=<n>\|state>=<n>` | `respond=`, `logas=`, `accesslog=`, `penalty=`, `mode=` (no `redirect=`, `flagip=`, `flagsession=`) |
 | `BotShieldSessionCookieName` | `<name>` (single arg, repeatable) | n/a (feeds cookies=session predicate) |
 
 See [policy](policy.md#triggers-predicate-action-engine)

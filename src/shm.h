@@ -188,10 +188,13 @@ extern "C" {
  * so a new counter changes the on-disk layout and an unbumped version
  * would misparse every field after it.
  *
- * v21 adds the `burned` cookie state, widening both cookie[] arrays
- * exactly as v10 did for `solved`. Same rejection path, same cost of
- * one restart's worth of dashboard history. */
-#define BS_STATE_FORMAT_VERSION   21
+ * v21 added the `burned` cookie state; v22 removes it again with the
+ * mechanism that produced it. Nothing emitted it after burn= was
+ * deleted, so the dashboard carried an always-empty bar and the
+ * counter never left zero -- worse than absent, because an operator
+ * reading a metric named for a thing that cannot happen has to go find
+ * out why. v21 was never deployed anywhere. */
+#define BS_STATE_FORMAT_VERSION   22
 #define BS_STATE_MAX_AGE_SECS     (14 * 86400)
 #define BS_FNV64_SEED             0xcbf29ce484222325ULL
 
@@ -345,14 +348,6 @@ typedef enum {
     BS_M_COOKIE_ABSENT,
     BS_M_COOKIE_MINTED,
     BS_M_COOKIE_SOLVED,
-    /* Refused on arrival: the cookie carries a burned_until still in
-     * the future, set by a trigger's burn=. Its own state rather than
-     * folded into bad_sig or expired, because the cookie verified
-     * perfectly -- the refusal is a policy decision this module made
-     * earlier, and a dashboard that hid it in a parse-failure bucket
-     * would send an operator hunting a crypto problem that is not
-     * there. */
-    BS_M_COOKIE_BURNED,
     BS_M_COOKIE_COUNT
 } bs_m_cookie;
 

@@ -310,7 +310,8 @@ default static-file handler. Its walk:
     and bumps M9.2 counters.
 
 Flag-IP writes are not a separate lifecycle step: a scope that wants
-to flag the client writes `BotShieldTrigger flag=<name> ttl=<sec>`,
+to flag the client writes `BotShieldTrigger` with
+`BotShieldFlagIP <name>`,
 and the flag lands inside the policy walk at step 7 via
 `bs_apply_trigger_action` like any other trigger action.
 
@@ -1197,9 +1198,24 @@ typedef struct {
 } bs_trigger_action;
 ```
 
-Action key parsers: `respond=<code|pass>`, `redirect=<url>` (only for
-families that support it), `logas=<tag>`, `accesslog=on|off`, `flag=<bit>`,
-`ttl=<sec>`, `penalty=<n>`, `credit=<n>`, `mode=enforce|observe`.
+Action key parsers: `respond=<code>`, `nochallenge` (valueless),
+`challenge=<tier>`, `redirect=<url>` (only for families that support
+it), `logas=<tag>`, `accesslog=on|off`, `flagip=<bit>`,
+`flagsession=<bit>`, `penalty=<n>`, `credit=<n>`,
+`mode=enforce|observe`.
+
+`flagip=` and `flagsession=` name the subject the mark is written to,
+which is the whole question: an address is shared and a cookie is not.
+They take `+`/`-`/`=` prefixes, and `-`/`=` are refused outside
+`BotShieldFeedbackTrigger` -- a rule matches on request properties the
+client controls, so clearing there would let a client shed its own
+record by fetching the matching URL.
+
+How long an address stays flagged is `BotShieldForgetIPAfter` at server
+scope, not a per-rule key: one address slot holds one expiry shared by
+every flag on it, so a per-rule duration reads like it works and
+cannot. A session mark takes no duration at all -- it lives exactly as
+long as the cookie carrying it.
 
 `logas=<tag>` and `accesslog=on|off` are separate keys on purpose. An
 earlier development build overloaded `logas=off` for suppression, which
@@ -1333,7 +1349,11 @@ is global state, not per-IP behavior.
 #### Feedback triggers (E7.3)
 
 `BotShieldFeedbackTrigger <event> [key=value ...]`. Required:
-`flag=<bit>`, `ttl=<sec>`. Optional: `logas=<tag>`. Maps an app-signed
+`flagip=<bit>` or `flagsession=<bit>` -- an event with nowhere to land
+is dead config and is refused at parse time. Optional: `logas=<tag>`.
+This is the only family where `-` and `=` are accepted, because it
+fires on a header the application signs rather than on anything the
+requester controls. Maps an app-signed
 event name (E5 wire format) to module memory. **No** status,
 redirect, penalty, or credit — the response has already been served.
 
@@ -1411,13 +1431,21 @@ A flag scoring at or above the noninteractive threshold is a challenge
 switch rather than a contributing signal, and the policy dump flags
 that inline with `~`.
 
-`BotShieldTrigger flag=<name> [ttl=<sec>]` is the operator handle for
-honeypot / scanner-bait `<Location>` blocks: the enclosing Apache
-scope is the predicate, so any request reaching it adds the named bit
-to the IP's flagged-IP entry (`bs_flagged_ip_add`, `src/triggers.c:470`)
-with the configured TTL (default 3600). This replaced the standalone
-`BotShieldFlagIP` directive — one action grammar for every trigger
-family rather than a bespoke directive for the flag case.
+`BotShieldTrigger` with `BotShieldFlagIP <name>` is the operator
+handle for honeypot / scanner-bait `<Location>` blocks: the enclosing
+Apache scope is the predicate, so any request reaching it adds the
+named bit to the address's flagged-IP entry (`bs_flagged_ip_add`), for
+`BotShieldForgetIPAfter` seconds counted from the last flagging.
+
+The name has been round the houses. A standalone `BotShieldFlagIP`
+directive existed first; it was folded into the shared action grammar
+as `flag=`/`ttl=` so every family used one vocabulary; and the name is
+back, because `flag=` did not say *what* it marked. Once a rule could
+mark a cookie session as well as an address, the subject stopped being
+something a reader could infer and became the thing the line has to
+say. The grammar is still shared — `BotShieldFlagIP` and
+`BotShieldFlagSession` are action keys on every family that has one,
+not a bespoke directive for the flag case.
 
 ## Tier renderers
 

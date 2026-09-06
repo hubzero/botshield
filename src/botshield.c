@@ -1251,8 +1251,9 @@ static int bs_maybe_mint_session(request_rec *r, bs_dir_cfg *cfg,
                                            : BS_DEFAULT_DIFFICULTY;
     /* Session flags a rule asked for on this request. They ride a note
      * to this single mint rather than each rule minting its own cookie
-     * -- which is what burn= did, and why it had to unset both
-     * Set-Cookie tables to stop the ordinary mint overwriting it. */
+     * -- which is what the removed burn= did, and why it had to unset
+     * both Set-Cookie tables to stop the ordinary mint overwriting
+     * it. */
     bs_rep_state seed;
     memset(&seed, 0, sizeof(seed));
     const char *pending = apr_table_get(r->notes, "bs-session-flags");
@@ -1276,12 +1277,6 @@ static int bs_maybe_mint_session(request_rec *r, bs_dir_cfg *cfg,
         ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
                       "mod_botshield: session mint deferred: %s",
                       ierr);
-        return 0;
-    }
-    /* A trigger already burned this session and installed the cookie
-     * that says so. Minting over it would hand the client a live
-     * cookie on the very response that was meant to end its session. */
-    if (apr_table_get(r->notes, "bs-burned")) {
         return 0;
     }
     /* counter slot is required by the wire format but its content
@@ -1743,27 +1738,6 @@ static int bs_handler(request_rec *r)
          * the visitor it is usually asserted about. */
         if (have_prior_rep) {
             bs_record_outgoing_cookie(r, &prior_ch, cfg);
-        }
-        /* A burned session is refused outright, before scoring.
-         *
-         * Read off the authenticated rep block for the same reason
-         * the solve proof below is: the GCM tag is what makes this
-         * trustworthy, and a client cannot clear the mark without
-         * discarding the whole cookie -- at which point it has no
-         * solve proof either and meets the full challenge gate.
-         *
-         * Gated on have_prior_rep so an expired or forged cookie
-         * cannot strand a client: those already fail every other way,
-         * and honouring a burn we cannot authenticate would let one
-         * client's crafted cookie be a denial of service on itself
-         * that we then blame on the rule. */
-        if (have_prior_rep && prior_ch.rep.burned_until
-            && (apr_uint32_t)apr_time_sec(apr_time_now())
-               < prior_ch.rep.burned_until) {
-            bs_score_add(r, 0, 0, "burnedcookie");
-            bs_decision_log(r, "nochallenge", "block", "burned", "-",
-                            "-", "burnedcookie", 0);
-            return HTTP_FORBIDDEN;
         }
         /* Solve proof is read off the AUTHENTICATED rep block, so it
          * is gated on have_prior_rep rather than on full cookie
@@ -2327,12 +2301,13 @@ static int bs_handler(request_rec *r)
     /* Zeroed up front so a field added to bs_rep_state later cannot
      * reach a client as stack garbage. The else branch below assigns
      * every field it knows about, and that was a complete list right up
-     * until rep gained burned_until -- at which point a first-time
-     * client was handed a cookie carrying whatever the stack held, GCM
-     * -signed so it read back as authentic, and was refused with
-     * burnedcookie on its very next request. Nothing in the config
-     * said burn, and no amount of reading the trigger code would have
-     * shown why. */
+     * until rep gained burned_until (since removed) -- at which point
+     * a first-time client was handed a cookie carrying whatever the
+     * stack held, GCM-signed so it read back as authentic, and was
+     * refused with burnedcookie on its very next request. Nothing in
+     * the config said burn, and no amount of reading the trigger code
+     * would have shown why. The field is gone; the next one added
+     * would land the same way, which is what this memset is for. */
     memset(&next_rep, 0, sizeof(next_rep));
     if (have_prior_rep) {
         int forgive = prior_ch.auto_tier

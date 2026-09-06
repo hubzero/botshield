@@ -57,17 +57,23 @@ typedef struct bs_dir_cfg bs_dir_cfg;
  * (forgive_window_start, forgive_consumed). Old (v1) cookies fail the
  * version check and trigger a fresh challenge — one-time disruption
  * per client on upgrade. */
-/* Bumped to 3 for rep.burned_until. A v2 cookie still parses -- it has
- * one fewer field and reads as unburned -- because rejecting every
- * cookie in circulation would re-challenge an entire live site at once
- * to gain nothing.
+/* 3 added rep.burned_until; 4 added rep.flags_active, the cookie-side
+ * flag bitmap this module had claimed to read since M5.1 and never
+ * wrote. Neither is accepted any more: both were minted only between
+ * two commits on 2026-09-05 and deployed nowhere, so there is no
+ * population to carry. A body claiming either is refused on the
+ * version rather than on a field miscount, so the log line says which
+ * of the two things went wrong, and the client is re-challenged once.
  *
- * Bumped to 4 for rep.flags_active, the cookie-side flag bitmap this
- * module has claimed to read since M5.1 and never wrote. Same
- * compatibility rule: a v2 or v3 body has no such field and reads as
- * "no session flags", which is exactly what every cookie in
- * circulation means. New cookies mint as v4. */
-#define BS_PROTOCOL_VERSION   4
+ * 5 removes burned_until along with the burn= mechanism that was its
+ * only writer, and puts flags_active in the slot it vacated: the v2
+ * fifteen plus one field, rather than three more.
+ *
+ * v2 is still read, because it is what production mints today and
+ * rejecting every cookie in circulation would re-challenge an entire
+ * live site at once to gain nothing. It carries no session flags,
+ * which is exactly what a v2 cookie means. */
+#define BS_PROTOCOL_VERSION   5
 #define BS_PROTOCOL_VERSION_MIN 2
 #define BS_SALT_BYTES         16
 #define BS_NONCE_BYTES        8
@@ -113,21 +119,6 @@ typedef struct {
     apr_time_t   challenged_at;        /* unix sec */
     apr_uint32_t forgive_window_start; /* unix sec; 0 = no window yet */
     apr_uint32_t forgive_consumed;     /* points used inside current window */
-
-    /* Unix seconds until which this cookie session is refused outright,
-     * or 0 for a live session. Set by a trigger's burn= action.
-     *
-     * Per-session rather than per-IP on purpose. Flagging the address
-     * catches everyone behind the same NAT, which is the wrong trade
-     * for a scanner that arrives with a cookie jar. The client carries
-     * the evidence against itself and hands it back on every request.
-     *
-     * A bot that discards cookies escapes this entirely, and that is
-     * fine: a client that discards cookies can never hold a solve
-     * either, so it faces the full challenge gate regardless. This
-     * costs it nothing it was not already paying, and it catches the
-     * large middle that keeps a cookie jar. */
-    apr_uint32_t burned_until;
 
     /* Flags this cookie session carries. The sibling of the flagged-IP
      * table: that remembers an address, this remembers one browser.

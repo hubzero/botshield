@@ -45,8 +45,7 @@ OUTCOMES = (
     "~rate_limited",
 )
 
-COOKIES = ("ok", "expired", "bad_sig", "bad_format", "absent", "minted",
-           "burned")
+COOKIES = ("ok", "expired", "bad_sig", "bad_format", "absent", "minted")
 
 # Provider names as the Prometheus counter metric suffix (underscore
 # form). The decision log's `provider=` field uses the hyphenated

@@ -95,7 +95,6 @@ typedef struct {
     apr_uint32_t  flag_session;       /* bits to set on the cookie session */
     apr_uint32_t  flag_session_clear; /* bits to remove */
     int           flag_session_replace;
-    int           burn_sec;       /* 0 = don't burn the cookie session */
     int           penalty;        /* 0..1000 */
     int           credit;         /* 0..1000 (rejected on path family) */
     int           status_explicit; /* 1 if operator wrote status= */
