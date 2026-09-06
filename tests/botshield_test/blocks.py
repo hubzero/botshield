@@ -18,7 +18,7 @@ import re
 
 FAMILIES = (
     "BotShieldRequestTrigger", "BotShieldRule", "BotShieldFlagTrigger",
-    "BotShieldHeuristicTrigger", "BotShieldCookieTrigger",
+    "BotShieldCookieTrigger",
     "BotShieldEnvTrigger", "BotShieldFeedbackTrigger",
     "BotShieldLoadTrigger", "BotShieldTrigger",
 )

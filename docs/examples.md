@@ -19,11 +19,6 @@ config; the module never reads any of these files.
   escalating tier, and the three application-issued trust credits
   (`app_verified_human`, `app_verified_session`, `app_trust_signal`)
   that subtract score without ever raising tier.
-- **[`heuristic-triggers.conf.example`](https://github.com/hubzero/botshield/blob/main/docs/examples/heuristic-triggers.conf.example)**
-  — the `BotShieldHeuristicTrigger` slate: conservative score adds for
-  a missing User-Agent, a missing Accept-Language, a known
-  HTTP-library UA token, an IP never seen before, and a cookie held
-  without ever passing a challenge.
 - **[`full-site.conf.example`](https://github.com/hubzero/botshield/blob/main/docs/examples/full-site.conf.example)**
   — a whole deployment rather than one directive family: where the
   configuration gets included and why that location is a safety

@@ -522,7 +522,7 @@ const char *bs_set_allow_bot(cmd_parms *cmd, void *dconf,
 
 /* --- Request-time entry point ---
  *
- * Called from bs_run_builtin_heuristics. Reads the unified
+ * Called from bs_handler. Reads the unified
  * classification cached on r->pool by bs_classify_request_hook
  * (post_read_request) — the UA classifier walk + IP cross-check
  * have already run there. This function is now just the score-

@@ -239,12 +239,14 @@ int bs_parse_client_ip(const char *ip_str, unsigned char out[16]);
  * are left untouched. */
 void bs_mask_ipv6_prefix(unsigned char ip[16], int prefix_bits);
 
-/* E1 request-time entry. Called from bs_run_builtin_heuristics.
- * Emits at most one bs_score_add call per request (verified-bot:name
- * with BS_CREDIT_ALLOW for IP-confirmed crawlers, or fake-bot:name
- * with BS_PENALTY_FAKE_BOT for fakes claiming a crawler UA from the
- * wrong IP). UA-only and ranges-not-loaded states emit nothing here;
- * bs_handler's knownbot block tags them as knownbot:<name>. */
+/* E1 request-time entry, called from bs_handler.
+ *
+ * Emits at most one reason per request -- verifiedbot:<name> for an
+ * IP-confirmed crawler, fakebot:<name> for one claiming a crawler UA
+ * from outside its ranges -- and no score with either. What each means
+ * is a rule: ua=@verified-bot, ua=@fake-bot. UA-only and
+ * ranges-not-loaded states emit nothing here; bs_handler's knownbot
+ * block tags them as knownbot:<name>. */
 void bs_check_allow(request_rec *r, const bs_dir_cfg *cfg);
 
 /* --- E1 directive setters --- *

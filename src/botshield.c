@@ -155,12 +155,6 @@ static const char *bs_open_flagtrigger(cmd_parms *cmd, void *dconf,
     return bs_section_trigger(cmd, dconf, arg, "BotShieldFlagTrigger", bs_set_flag_trigger);
 }
 
-static const char *bs_open_heuristictrigger(cmd_parms *cmd, void *dconf,
-                                          const char *arg)
-{
-    return bs_section_trigger(cmd, dconf, arg, "BotShieldHeuristicTrigger", bs_set_heuristic_trigger);
-}
-
 static const char *bs_open_cookietrigger(cmd_parms *cmd, void *dconf,
                                           const char *arg)
 {
@@ -590,10 +584,6 @@ static const command_rec bs_cmds[] = {
                  "Open a BotShieldFlagTrigger block. Takes the rule name; every "
                  "setting is a BotShield directive on its own line "
                  "until </BotShieldFlagTrigger>."),
-    AP_INIT_RAW_ARGS("<BotShieldHeuristicTrigger", bs_open_heuristictrigger, NULL, RSRC_CONF,
-                 "Open a BotShieldHeuristicTrigger block. Takes the rule name; every "
-                 "setting is a BotShield directive on its own line "
-                 "until </BotShieldHeuristicTrigger>."),
     AP_INIT_RAW_ARGS("<BotShieldCookieTrigger", bs_open_cookietrigger, NULL, RSRC_CONF,
                  "Open a BotShieldCookieTrigger block. Takes the rule name; every "
                  "setting is a BotShield directive on its own line "
@@ -910,33 +900,6 @@ static const command_rec bs_cmds[] = {
                  "nothing, so every consequence is a line in this "
                  "config. See docs/examples/flag-triggers.conf.example "
                  "for a slate to start from."),
-    /* Heuristic-driven trigger family. Same shape as the flag family
-     * but the predicate is a compile-time named heuristic on the
-     * request itself rather than a flag bit. */
-    AP_INIT_TAKE_ARGV("BotShieldHeuristicTrigger",
-                 bs_flat_trigger_retired, NULL, RSRC_CONF,
-                 "Bind an action to one of the built-in request "
-                 "heuristics. Args: <name>|all [reset] [action=<verb> "
-                 "args...]. Names: missingua (UA absent or empty), "
-                 "missingal (Accept-Language absent), scraperua "
-                 "(UA contains a known HTTP-library token), "
-                 "firstsightip (Bloom-filter miss - true new IP), "
-                 "droppedcookie (Bloom-known IP arriving without a "
-                 "usable cookie - private-browsing reset, manual "
-                 "cookie clear, or evasion). Action verbs: 'score "
-                 "add=N' (signed, -1000..1000) or 'tier_floor "
-                 "min=<tier>'. '<name> reset' clears defaults + "
-                 "prior declarations for that name; 'all reset' wipes "
-                 "every entry (defaults included) so the operator can "
-                 "build the slate up from zero. mode=observe logs the "
-                 "match with a :observe suffix instead of applying. "
-                 "NOTHING IS SEEDED: a heuristic with no "
-                 "BotShieldHeuristicTrigger contributes 0, so a scope "
-                 "that declares none does no heuristic scoring at all. "
-                 "See docs/examples/heuristic-triggers.conf.example "
-                 "for a slate to start from; the weights in it are "
-                 "missingua=40, missingal=5, scraperua=10, "
-                 "firstsightip=20, droppedcookie=25."),
     /* E15 — forgiveness farming defense. */
     AP_INIT_TAKE1("BotShieldForgivenessCapPerHour",
                  bs_set_forgive_cap, NULL, RSRC_CONF,
@@ -2134,20 +2097,22 @@ static int bs_handler(request_rec *r)
     /* Scoring always runs, and BotShieldScoring is gone.
      *
      * It existed to stop the module acting on rules nobody wrote. That
-     * is now handled where the rules are: the default flag and
-     * heuristic slates ship empty, and an unset score threshold means
-     * never. With nothing implicit left to gate, the switch could only
-     * do harm -- an operator who writes a BotShieldHeuristicTrigger and
-     * sees it silently ignored because a second control is off is
-     * exactly the silent-misconfiguration shape it was added to
-     * prevent.
+     * is now handled where the rules are: the default flag slate ships
+     * empty, and there are no score thresholds to leave unset. With
+     * nothing implicit left to gate, the switch could only do harm --
+     * an operator who writes a rule and sees it silently ignored
+     * because a second control is off is exactly the
+     * silent-misconfiguration shape it was added to prevent. */
+
+    /* Crawler classification: verified against the published ranges,
+     * or claiming a crawler from outside them. Tags the decision with
+     * verifiedbot:/fakebot: and decides nothing -- ua=@verified-bot
+     * and ua=@fake-bot are how a config acts on it.
      *
-     * So scores are always computed and always logged. With no rules
-     * declared the slates are empty, the score is 0, and it costs a
-     * walk over two empty arrays. What it buys is that `score=` in the
-     * decision log means something before you have configured anything
-     * to act on it. */
-    bs_run_builtin_heuristics(r);
+     * This used to be the first thing bs_run_builtin_heuristics did,
+     * which is where it ended up rather than where it belongs: it is
+     * not a heuristic, and that function is gone. */
+    bs_check_allow(r, cfg);
 
     /* Flagged-IP table (M5.1): look up the client IP. Hits add the
      * serious-event bitmap's penalty to effective_score, rollback-proof
@@ -2252,16 +2217,10 @@ static int bs_handler(request_rec *r)
      * no proof, get scored 25 (droppedcookie) into the noninteractive tier,
      * solve it transparently, and every later request carries
      * passes_non_interactive and lands back here clean. */
-    if (have_client_ip && !have_solve_proof && !declared_crawler) {
-        /* Same lookup the BotShieldFirstSight predicate reads, so a
-         * rule and the heuristic can never disagree about whether this
-         * address was seen. */
-        if (bs_request_first_sight(r) == 0) {
-            bs_apply_heuristic(r, BS_H_DROPPED_COOKIE);
-        } else {
-            bs_apply_heuristic(r, BS_H_FIRST_SIGHT_IP);
-        }
-    }
+    /* The firstsightip / droppedcookie scores were applied here, under
+     * this same guard. They are rules now -- firstsight=yes solved=no
+     * crawler=no, and its negation -- and the guard reads as those
+     * three conditions because that is what it always was. */
     /* Population sits here, after policy, and that placement is
      * load-bearing rather than incidental.
      *

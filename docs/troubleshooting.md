@@ -59,21 +59,25 @@ signals on your edge load balancer, not the real client.
 matches your edge's IP, that's the issue. Configure
 `mod_remoteip` per [deployment](deployment.md).
 
-**Second-most common cause**: the defaults are challenging more than
-you expected. `firstsightip` scores 20, which *is*
-the lowest `BotShieldChallengeAtLeast` row, so any request arriving with no usable cookie
-gets the invisible check on its first visit — by design, but surprising
-if you enabled BotShield site-wide rather than on an auth path. Either
-scope the enable, or lower the heuristic:
+**Second-most common cause**: your signal rules are challenging more
+than you expected. If a first-sight or dropped-cookie rule scores at or
+above your lowest `BotShieldChallengeAtLeast` row, any request arriving
+with no usable cookie gets the invisible check on its first visit —
+which is by design on an auth path and surprising if you enabled
+BotShield site-wide. Either scope the enable, or lower the rule:
 
 ```apache
-BotShieldHeuristicTrigger firstsightip reset action=score add=5
+<BotShieldRule sig-firstsight>
+    BotShieldFirstSight  yes
+    BotShieldSolved      no
+    BotShieldCrawler     no
+    BotShieldScore       botsignals +5
+</BotShieldRule>
 ```
 
 For sites where most visitors don't send `Accept-Language` (legitimate
-use cases exist), `missingacceptlanguage` adds another 5 on top;
-raise that row to 30 or 40 if the combination is
-over-firing.
+use cases exist), a missing-AL rule adds its weight on top; raise the
+row to 30 or 40 if the combination is over-firing.
 
 **Tuning workflow**:
 

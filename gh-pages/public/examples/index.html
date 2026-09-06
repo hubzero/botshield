@@ -125,11 +125,6 @@ forced to captcha, scanner-probe and repeat-PoW-failure signals
 escalating tier, and the three application-issued trust credits
 (<code>app_verified_human</code>, <code>app_verified_session</code>, <code>app_trust_signal</code>)
 that subtract score without ever raising tier.</li>
-<li><strong><a href="https://github.com/hubzero/botshield/blob/main/docs/examples/heuristic-triggers.conf.example"><code>heuristic-triggers.conf.example</code></a></strong>
-— the <code>BotShieldHeuristicTrigger</code> slate: conservative score adds for
-a missing User-Agent, a missing Accept-Language, a known
-HTTP-library UA token, an IP never seen before, and a cookie held
-without ever passing a challenge.</li>
 <li><strong><a href="https://github.com/hubzero/botshield/blob/main/docs/examples/full-site.conf.example"><code>full-site.conf.example</code></a></strong>
 — a whole deployment rather than one directive family: where the
 configuration gets included and why that location is a safety

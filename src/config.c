@@ -272,9 +272,6 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
                                                  add->load_triggers);
     out->flag_triggers     = bs_merge_rule_array(p, base->flag_triggers,
                                                  add->flag_triggers);
-    out->heuristic_triggers = bs_merge_rule_array(p,
-                                                  base->heuristic_triggers,
-                                                  add->heuristic_triggers);
     /* session_names: concatenate base + add, drop dups. Small lists,
      * O(n*m) is fine; happens once at config load. */
     if (base->session_names && add->session_names) {
@@ -438,7 +435,6 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->feedback_triggers = apr_array_make(p, 4, sizeof(void *));
     scfg->load_triggers     = apr_array_make(p, 4, sizeof(void *));
     scfg->flag_triggers     = apr_array_make(p, 8, sizeof(void *));
-    scfg->heuristic_triggers = apr_array_make(p, 4, sizeof(void *));
     /* Curated session-cookie-name defaults. Kept deliberately
      * short; long auto-lists turn `cookies=session` into a loose
      * matcher and undermine the bonus. Operators add their own
@@ -953,117 +949,6 @@ static void bs_resolve_flag_triggers(apr_pool_t *pconf, server_rec *s)
     }
 }
 
-/* Compiled-in default heuristic-trigger rule set. Same shape as
- * bs_default_flag_triggers: each entry is one (id, action) row, and
- * post_config seeds these into scfg->heuristic_triggers ahead of any
- * operator declarations. Score values match the prior hardcoded
- * BS_PENALTY_* defines so behavior is unchanged from a fresh install
- * with no BotShieldHeuristicTrigger directives.
- *
- * Operators tune via additional BotShieldHeuristicTrigger directives
- * (which append after these defaults), or wipe via `<name> reset` for
- * a single heuristic, or `all reset` for the whole slate. */
-static const struct {
-    bs_heuristic_id           id;
-    bs_heuristic_action_kind  action;
-    int                       score_add;
-    bs_tier                   tier_min;
-} bs_default_heuristic_triggers[] = {
-    { BS_H_MISSING_UA,     BS_HEUR_ACT_SCORE,
-      BS_PENALTY_MISSING_UA,     BS_TIER_PASS },
-    { BS_H_MISSING_AL,     BS_HEUR_ACT_SCORE,
-      BS_PENALTY_MISSING_AL,     BS_TIER_PASS },
-    { BS_H_SCRAPER_UA,     BS_HEUR_ACT_SCORE,
-      BS_PENALTY_SCRAPER_UA,     BS_TIER_PASS },
-    /* == BS_DEFAULT_SCORE_NON_INTERACTIVE. Both post-cookie heuristics fire only
-     * when the request carries no usable cookie, so together they mean
-     * "no session context"; at the noninteractive threshold an enabled scope
-     * challenges that by default, with no rule for the operator to
-     * write. */
-    { BS_H_FIRST_SIGHT_IP, BS_HEUR_ACT_SCORE,
-      BS_PENALTY_FIRST_SIGHT_IP, BS_TIER_PASS },
-    { BS_H_DROPPED_COOKIE, BS_HEUR_ACT_SCORE,
-      BS_PENALTY_DROPPED_COOKIE, BS_TIER_PASS },
-};
-#define BS_DEFAULT_HEURISTIC_TRIGGER_COUNT \
-    (sizeof(bs_default_heuristic_triggers) / \
-     sizeof(bs_default_heuristic_triggers[0]))
-
-/* Seed defaults, append operator decls, then walk consuming reset
- * sentinels. Mirror of bs_resolve_flag_triggers with one extra
- * sentinel kind: BS_HEUR_ACT_RESET_ALL clears every prior entry
- * (defaults included) before continuing — operator's clean-slate
- * starting point. */
-static void bs_resolve_heuristic_triggers(apr_pool_t *pconf,
-                                          server_rec *s)
-{
-    for (server_rec *sv = s; sv; sv = sv->next) {
-        bs_server_cfg *vcfg = ap_get_module_config(sv->module_config,
-                                                   &botshield_module);
-        if (!vcfg) continue;
-        /* Aliased server configs are reachable more than once in
-         * this walk; resolving twice would re-seed the defaults on
-         * top of the previous result. See bs_server_cfg. */
-        if (vcfg->heuristic_triggers_resolved) continue;
-        apr_array_header_t *operator_decls = vcfg->heuristic_triggers;
-        apr_array_header_t *combined = apr_array_make(pconf,
-            BS_DEFAULT_HEURISTIC_TRIGGER_COUNT
-              + (operator_decls ? operator_decls->nelts : 0),
-            sizeof(void *));
-        for (size_t i = 0;
-             BS_SEED_DEFAULT_RULES && i < BS_DEFAULT_HEURISTIC_TRIGGER_COUNT;
-             i++) {
-            const typeof(bs_default_heuristic_triggers[0]) *d =
-                &bs_default_heuristic_triggers[i];
-            bs_heuristic_trigger_entry *e = apr_pcalloc(pconf,
-                sizeof(*e));
-            e->id           = d->id;
-            e->action       = d->action;
-            e->score_add    = d->score_add;
-            e->tier_min     = d->tier_min;
-            e->mode         = BS_TMODE_ENFORCE;
-            e->from_default = 1;
-            *(bs_heuristic_trigger_entry **)apr_array_push(combined) = e;
-        }
-        if (operator_decls) {
-            for (int i = 0; i < operator_decls->nelts; i++) {
-                bs_heuristic_trigger_entry *e = APR_ARRAY_IDX(
-                    operator_decls, i, bs_heuristic_trigger_entry *);
-                *(bs_heuristic_trigger_entry **)apr_array_push(combined)
-                    = e;
-            }
-        }
-        apr_array_header_t *resolved = apr_array_make(pconf,
-            combined->nelts, sizeof(void *));
-        for (int i = 0; i < combined->nelts; i++) {
-            bs_heuristic_trigger_entry *e = APR_ARRAY_IDX(
-                combined, i, bs_heuristic_trigger_entry *);
-            if (e->action == BS_HEUR_ACT_RESET_ALL) {
-                /* Wipe everything accumulated so far. */
-                resolved->nelts = 0;
-                continue;
-            }
-            if (e->action == BS_HEUR_ACT_RESET) {
-                /* Drop earlier entries with this id. */
-                int w = 0;
-                for (int j = 0; j < resolved->nelts; j++) {
-                    bs_heuristic_trigger_entry *k = APR_ARRAY_IDX(
-                        resolved, j, bs_heuristic_trigger_entry *);
-                    if (k->id != e->id) {
-                        APR_ARRAY_IDX(resolved, w,
-                            bs_heuristic_trigger_entry *) = k;
-                        w++;
-                    }
-                }
-                resolved->nelts = w;
-                continue;
-            }
-            *(bs_heuristic_trigger_entry **)apr_array_push(resolved) = e;
-        }
-        vcfg->heuristic_triggers = resolved;
-        vcfg->heuristic_triggers_resolved = 1;
-    }
-}
 
 /* Normalise a server_rec into a vhost directory key.
  *
@@ -2777,7 +2662,6 @@ void bs_test_config(apr_pool_t *pconf, server_rec *s)
     if (!ap_exists_config_define("DUMP_BOTSHIELD_POLICY")) return;
 
     bs_resolve_flag_triggers(pconf, s);
-    bs_resolve_heuristic_triggers(pconf, s);
 
     for (server_rec *sv = s; sv; sv = sv->next) {
         if (!bs_vhost_runs_botshield(sv, s)) continue;
@@ -2828,7 +2712,6 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
 
     bs_warn_app_integration_secrets(s);
     bs_resolve_flag_triggers(pconf, s);
-    bs_resolve_heuristic_triggers(pconf, s);
 
     bs_server_cfg *scfg = ap_get_module_config(s->module_config,
                                                &botshield_module);

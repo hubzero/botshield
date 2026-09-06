@@ -157,18 +157,22 @@ signals on your edge load balancer, not the real client.</p>
 <p><strong>Diagnostic</strong>: look at the <code>ip=</code> field in the decision log. If it
 matches your edge's IP, that's the issue. Configure
 <code>mod_remoteip</code> per <a href="../deployment/index.html">deployment</a>.</p>
-<p><strong>Second-most common cause</strong>: the defaults are challenging more than
-you expected. <code>firstsightip</code> scores 20, which <em>is</em>
-the lowest <code>BotShieldChallengeAtLeast</code> row, so any request arriving with no usable cookie
-gets the invisible check on its first visit — by design, but surprising
-if you enabled BotShield site-wide rather than on an auth path. Either
-scope the enable, or lower the heuristic:</p>
-<pre><code class="language-apache">BotShieldHeuristicTrigger firstsightip reset action=score add=5
+<p><strong>Second-most common cause</strong>: your signal rules are challenging more
+than you expected. If a first-sight or dropped-cookie rule scores at or
+above your lowest <code>BotShieldChallengeAtLeast</code> row, any request arriving
+with no usable cookie gets the invisible check on its first visit —
+which is by design on an auth path and surprising if you enabled
+BotShield site-wide. Either scope the enable, or lower the rule:</p>
+<pre><code class="language-apache">&lt;BotShieldRule sig-firstsight&gt;
+    BotShieldFirstSight  yes
+    BotShieldSolved      no
+    BotShieldCrawler     no
+    BotShieldScore       botsignals +5
+&lt;/BotShieldRule&gt;
 </code></pre>
 <p>For sites where most visitors don't send <code>Accept-Language</code> (legitimate
-use cases exist), <code>missingacceptlanguage</code> adds another 5 on top;
-raise that row to 30 or 40 if the combination is
-over-firing.</p>
+use cases exist), a missing-AL rule adds its weight on top; raise the
+row to 30 or 40 if the combination is over-firing.</p>
 <p><strong>Tuning workflow</strong>:</p>
 <ol>
 <li>Set <code>BotShieldEnabled LogOnly</code> to dry-run all rules.</li>

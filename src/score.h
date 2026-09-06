@@ -61,37 +61,27 @@ int  bs_get_request_tier_floor(request_rec *r);
  * dropped; the score total still accumulates. */
 #define BS_SCORE_MAX_REASONS      16
 
-/* Built-in heuristic penalties.
+/* The built-in heuristic weights were here: 40 for a missing UA, 5
+ * for a missing Accept-Language, 10 for a scraper token, 20 for a
+ * first-sight address, 25 for a dropped cookie. They are the sig-*
+ * rules in the dev vhost now, carried across at the same values.
  *
- * THE single source for these numbers. Both the metadata registry in
- * heuristics.c and the seeded default-trigger table in config.c refer
- * to these macros; config.c's table is what actually applies at
- * request time, and heuristics.c's is the fallback metadata. Until
- * 2026-08-02 each table carried its own literal and these macros were
- * dead -- three declarations, no compiler able to notice when they
- * disagreed. They did: changing firstsightip in heuristics.c alone
- * compiled clean, deployed, and changed nothing.
+ * Two things they taught, which the rules inherit rather than repeat.
  *
- * scraperua is 10, not the 50 it was through 2026-08-02. robots.txt
- * tells undeclared clients they may fetch anything outside the
- * Disallow list at the published Crawl-delay; 50 put a checkbox they
- * cannot render in front of curl, wget and python-requests instead --
- * the module enforcing a policy the site never published. At 10 it is
- * a signal that composes rather than a verdict on its own, and volume
- * abuse is caught by the rate limit, which is what the published
- * policy actually promises.
+ * scraperua was 50 until 2026-08-02. robots.txt tells undeclared
+ * clients they may fetch anything outside the Disallow list at the
+ * published Crawl-delay; 50 put a checkbox they cannot render in front
+ * of curl, wget and python-requests instead -- the module enforcing a
+ * policy the site never published. At 10 it composes rather than
+ * deciding on its own, and volume abuse is the rate limiter's job,
+ * which is what the published policy actually promises. missingal fell
+ * from 15 to 5 for the same reason: almost nothing scripted sends
+ * Accept-Language, so the weight mostly taxed legitimate automation.
  *
- * missingal is 5 rather than 15 for the same reason: almost nothing
- * scripted sends Accept-Language, so the old weight mostly taxed
- * legitimate automation.
- *
- * firstsightip is deliberately equal to BS_DEFAULT_SCORE_NON_INTERACTIVE --
- * see the note beside it in config.c. */
-#define BS_PENALTY_MISSING_UA       40
-#define BS_PENALTY_MISSING_AL        5
-#define BS_PENALTY_SCRAPER_UA       10
-#define BS_PENALTY_FIRST_SIGHT_IP   20
-#define BS_PENALTY_DROPPED_COOKIE   25
+ * And: these macros were dead for months while two tables carried
+ * their own literals, so changing firstsightip in one place compiled
+ * clean, deployed, and changed nothing. One declaration of a number is
+ * worth more than three that agree today. */
 
 /* ======================================================================
  * Tier + noninteractive-mode enums (decision dispatch)

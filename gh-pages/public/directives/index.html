@@ -123,7 +123,7 @@
 <li class="toc__item toc__item--level-3"><a href="#botshieldrule-match-on-any-request-property">`BotShieldRule` — match on any request property</a></li>
 <li class="toc__item toc__item--level-2"><a href="#per-scope-triggers">Per-scope triggers</a></li>
 <li class="toc__item toc__item--level-2"><a href="#flag-triggers">Flag triggers</a></li>
-<li class="toc__item toc__item--level-2"><a href="#heuristic-triggers">Heuristic triggers</a></li>
+<li class="toc__item toc__item--level-2"><a href="#request-signals">Request signals</a></li>
 <li class="toc__item toc__item--level-2"><a href="#safeguard">Safeguard</a></li>
 <li class="toc__item toc__item--level-2"><a href="#load-aware-throttling">Load-aware throttling</a></li>
 <li class="toc__item toc__item--level-3"><a href="#why-the-busy-worker-ratio-is-often-the-wrong-signal">Why the busy-worker ratio is often the wrong signal</a></li>
@@ -2016,66 +2016,64 @@ after a solve.</p>
 <code>app_trust_signal</code>. See
 <a href="../policy/index.html#flag-trigger-family">policy</a> for the starter
 slate and override semantics.</p>
-<h2 id="heuristic-triggers">Heuristic triggers</h2>
+<h2 id="request-signals">Request signals</h2>
+<p>There is no directive family for these. Each was a named heuristic an
+operator bound a score action to; each is a rule condition now, and the
+weight is a <code>BotShieldScore</code> line inside the rule.</p>
 <table>
 <thead>
 <tr>
-<th>Directive</th>
-<th>Syntax</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>BotShieldHeuristicTrigger</code></td>
-<td><code>&lt;name&gt;|all [reset] [action=&lt;verb&gt; args...] [mode=observe]</code></td>
-</tr>
-</tbody>
-</table>
-<p>Same action grammar as the flag family, but the predicate is a
-built-in heuristic on the request itself rather than a flag bit. This
-is the operator handle for weighting those signals — they are not
-separate directives.</p>
-<p><strong>Nothing is seeded.</strong> A heuristic with no <code>BotShieldHeuristicTrigger</code>
-contributes 0, so a scope that declares none does no heuristic scoring
-whatever — every request scores 0 from this family and the reason field
-spells it out as <code>missingua:0</code>. The weights below are a starting point
-to copy, not a state the module is already in.</p>
-<table>
-<thead>
-<tr>
-<th>Heuristic</th>
+<th>Signal</th>
 <th>Fires when</th>
+<th>Written as</th>
 <th>Suggested</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td><code>missingua</code></td>
+<td>missing UA</td>
 <td>User-Agent absent or empty</td>
-<td><code>score add=40</code></td>
+<td><code>BotShieldUserAgent &quot;&quot;</code></td>
+<td><code>+40</code></td>
 </tr>
 <tr>
-<td><code>missingal</code></td>
+<td>missing AL</td>
 <td>Accept-Language absent</td>
-<td><code>score add=5</code></td>
+<td><code>BotShieldAcceptLanguage &quot;&quot;</code></td>
+<td><code>+5</code></td>
 </tr>
 <tr>
-<td><code>scraperua</code></td>
+<td>scraper UA</td>
 <td>UA contains a known HTTP-library token</td>
-<td><code>score add=10</code></td>
+<td><code>BotShieldUserAgent @scraper</code></td>
+<td><code>+10</code></td>
 </tr>
 <tr>
-<td><code>firstsightip</code></td>
-<td>Bloom-filter miss — genuinely new IP, arriving with no usable cookie</td>
-<td><code>score add=20</code></td>
+<td>first sight</td>
+<td>Bloom-filter miss — genuinely new address</td>
+<td><code>BotShieldFirstSight yes</code></td>
+<td><code>+5</code></td>
 </tr>
 <tr>
-<td><code>droppedcookie</code></td>
-<td>Bloom-known IP arriving with no usable cookie</td>
-<td><code>score add=25</code></td>
+<td>dropped cookie</td>
+<td>Bloom-known address arriving with no usable cookie</td>
+<td><code>BotShieldFirstSight no</code></td>
+<td><code>+25</code></td>
 </tr>
 </tbody>
 </table>
+<pre><code class="language-apache">&lt;BotShieldRule sig-scraperua&gt;
+    BotShieldUserAgent  @scraper
+    BotShieldScore      botsignals +10
+&lt;/BotShieldRule&gt;
+</code></pre>
+<p>The family bought one thing a rule does not: a scope could re-weight a
+signal without restating its condition. What it cost was a second
+vocabulary for conditions the rule language already had, five predicates
+compiled in where an operator could not read them, and a <code>reset</code> verb
+per name to undo defaults that should not have been there. See
+<code>tests/setup/botshield-dev.conf</code> for the five written out.</p>
+<p><strong>Nothing is seeded.</strong> A signal with no rule contributes nothing.</p>
 <p><code>scraperua</code> is deliberately low. robots.txt tells undeclared clients
 they may fetch anything outside the <code>Disallow</code> list at the published
 <code>Crawl-delay</code>; a weight of 50 put an unrenderable checkbox in front of
@@ -2097,23 +2095,14 @@ authenticated rep block — the same evidence the safeguard-clear path
 requires. A real browser pays for this exactly once: it arrives with no
 proof, scores <code>droppedcookie</code>, clears it in one auto-submitted round
 trip, and every later request carries proof.</p>
-<p>The suggested <code>firstsightip</code> weight is exactly the lowest suggested
-<code>BotShieldChallengeAtLeast</code> row, so writing both as given makes a scope
+<p>A dropped cookie is ambiguous by design — private-browsing resets and
+manual cookie clears look the same as evasion — so its weight is
+deliberately mild, and first sight milder still. Setting either at or
+above your lowest <code>BotShieldChallengeAtLeast</code> row makes that scope
 challenge any request with no session context. That is usually what you
 want on a login or registration path, where the check is invisible and
 a real browser clears it in one round trip; it is usually not what you
-want site-wide. Neither line exists until you write it, so this is a
-configuration to choose rather than a default to undo.</p>
-<p>Action verbs are <code>action=score add=N [accumulator=&lt;name&gt;]</code> (signed,
--1000..1000) and <code>action=tier_floor min=&lt;tier&gt;</code>. <code>&lt;name&gt; reset</code> clears prior
-declarations for that one heuristic; <code>all reset</code> wipes every entry so
-the slate can be rebuilt from zero. With nothing seeded, both clear
-only what this config declared earlier.
-<code>mode=observe</code> logs the match with an <code>:observe</code> suffix instead of
-applying it.</p>
-<p>A <code>droppedcookie</code> hit is ambiguous by design — private-browsing
-resets and manual cookie clears look the same as evasion — so the
-default penalty is deliberately mild.</p>
+want site-wide.</p>
 <h2 id="safeguard">Safeguard</h2>
 <table>
 <thead>

@@ -509,9 +509,9 @@ dump prints beside an unset tier. Tier names returned by
 `bs_tier_name`: `"pass"`, `"noninteractive"`, `"interactive"`, `"captcha"`, or `"?"`
 for an unknown enum.
 
-Heuristic penalties. These are the weights a **declared**
-`BotShieldHeuristicTrigger` uses; none is applied unless the operator
-declares it, since no rules are seeded:
+Signal weights. These are what the sig-* rules in the dev vhost
+score; none is applied unless an operator writes the rule, since
+nothing is seeded:
 
 | Reason | Penalty | When |
 |--------|---------|------|
@@ -2205,7 +2205,7 @@ the `bs_cmds[]` table at `src/botshield.c:142`.
 | UA classification (E1) | `BotShieldClassify`, `BotShieldAllowBot`, `BotShieldAllowRangesRefreshInterval`, `BotShieldBotDirectory`, `BotShieldBotDirectoryRefreshInterval`, `BotShieldBrowserTemplates`, `BotShieldBrowserTemplatesRefreshInterval` |
 | Policy (E2.1 / E9) | `BotShieldRateLimit`, `BotShieldBotRateLimit`, `BotShieldRateLimitEscalate` |
 | Robots (E2.2) | `BotShieldRobotsTxt`, `BotShieldRobotsRefreshInterval`, `BotShieldRobotsWildcardScope` |
-| Triggers | `BotShieldTrigger` (per-scope), `BotShieldRule` (E3, formerly BotShieldPathTrigger), `BotShieldCookieTrigger` (E4), `BotShieldEnvTrigger` (E6), `BotShieldFeedbackTrigger` (E7.3), `BotShieldLoadTrigger` (E11.2), `BotShieldFlagTrigger` (E14), `BotShieldHeuristicTrigger`, `BotShieldSessionCookieName` (E4) |
+| Triggers | `BotShieldTrigger` (per-scope), `BotShieldRule` (E3, formerly BotShieldPathTrigger), `BotShieldCookieTrigger` (E4), `BotShieldEnvTrigger` (E6), `BotShieldFeedbackTrigger` (E7.3), `BotShieldLoadTrigger` (E11.2), `BotShieldFlagTrigger` (E14), `BotShieldSessionCookieName` (E4) |
 | Safeguard (E10) | `BotShieldSafeguard`, `BotShieldSafeguardThreshold`, `BotShieldSafeguardWindow`, `BotShieldSafeguardTTL`, `BotShieldSafeguardRedirectURL` |
 | Load (E11) | `BotShieldLoadStateFile`, `BotShieldLoadRefreshInterval`, `BotShieldLoadWarmThreshold`, `BotShieldLoadHotThreshold` |
 | Multi-vhost (E13) | `BotShieldShareScope` |
@@ -2220,7 +2220,7 @@ directives use `RSRC_CONF` only and emit a NOTICE if placed inside
 The module is not valid in `.htaccess` — `OR_ALL` is never used.
 
 `AP_INIT_TAKE_ARGV` is used for the trigger families (including
-`BotShieldFlagTrigger` and `BotShieldHeuristicTrigger`), the two
+`BotShieldFlagTrigger`), the two
 rate-limit setters, and `BotShieldClassify` because Apache has no
 TAKE4/5 macros and because those directives take a variable-length
 key=value tail; setters enforce argc themselves.

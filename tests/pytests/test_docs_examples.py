@@ -34,7 +34,7 @@ DOCS = ["docs/directives.md", "docs/policy.md"]
 FENCE = re.compile(r"```apache\n(.*?)```", re.DOTALL)
 TRIGGER = re.compile(
     r"BotShield(Rule|RequestTrigger|CookieTrigger|EnvTrigger|LoadTrigger|"
-    r"FlagTrigger|Trigger|HeuristicTrigger|FeedbackTrigger)"
+    r"FlagTrigger|Trigger|FeedbackTrigger)"
 )
 SKIP_MARK = "# configtest: skip"
 

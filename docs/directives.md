@@ -1502,30 +1502,35 @@ Flag bits: `honeypot_hit`, `scanner_probe`, `fake_bot`,
 [policy](policy.md#flag-trigger-family) for the starter
 slate and override semantics.
 
-## Heuristic triggers
+## Request signals
 
-| Directive | Syntax |
-|---|---|
-| `BotShieldHeuristicTrigger` | `<name>\|all [reset] [action=<verb> args...] [mode=observe]` |
+There is no directive family for these. Each was a named heuristic an
+operator bound a score action to; each is a rule condition now, and the
+weight is a `BotShieldScore` line inside the rule.
 
-Same action grammar as the flag family, but the predicate is a
-built-in heuristic on the request itself rather than a flag bit. This
-is the operator handle for weighting those signals — they are not
-separate directives.
+| Signal | Fires when | Written as | Suggested |
+|---|---|---|---|
+| missing UA | User-Agent absent or empty | `BotShieldUserAgent ""` | `+40` |
+| missing AL | Accept-Language absent | `BotShieldAcceptLanguage ""` | `+5` |
+| scraper UA | UA contains a known HTTP-library token | `BotShieldUserAgent @scraper` | `+10` |
+| first sight | Bloom-filter miss — genuinely new address | `BotShieldFirstSight yes` | `+5` |
+| dropped cookie | Bloom-known address arriving with no usable cookie | `BotShieldFirstSight no` | `+25` |
 
-**Nothing is seeded.** A heuristic with no `BotShieldHeuristicTrigger`
-contributes 0, so a scope that declares none does no heuristic scoring
-whatever — every request scores 0 from this family and the reason field
-spells it out as `missingua:0`. The weights below are a starting point
-to copy, not a state the module is already in.
+```apache
+<BotShieldRule sig-scraperua>
+    BotShieldUserAgent  @scraper
+    BotShieldScore      botsignals +10
+</BotShieldRule>
+```
 
-| Heuristic | Fires when | Suggested |
-|---|---|---|
-| `missingua` | User-Agent absent or empty | `score add=40` |
-| `missingal` | Accept-Language absent | `score add=5` |
-| `scraperua` | UA contains a known HTTP-library token | `score add=10` |
-| `firstsightip` | Bloom-filter miss — genuinely new IP, arriving with no usable cookie | `score add=20` |
-| `droppedcookie` | Bloom-known IP arriving with no usable cookie | `score add=25` |
+The family bought one thing a rule does not: a scope could re-weight a
+signal without restating its condition. What it cost was a second
+vocabulary for conditions the rule language already had, five predicates
+compiled in where an operator could not read them, and a `reset` verb
+per name to undo defaults that should not have been there. See
+`tests/setup/botshield-dev.conf` for the five written out.
+
+**Nothing is seeded.** A signal with no rule contributes nothing.
 
 `scraperua` is deliberately low. robots.txt tells undeclared clients
 they may fetch anything outside the `Disallow` list at the published
@@ -1551,25 +1556,14 @@ requires. A real browser pays for this exactly once: it arrives with no
 proof, scores `droppedcookie`, clears it in one auto-submitted round
 trip, and every later request carries proof.
 
-The suggested `firstsightip` weight is exactly the lowest suggested
-`BotShieldChallengeAtLeast` row, so writing both as given makes a scope
+A dropped cookie is ambiguous by design — private-browsing resets and
+manual cookie clears look the same as evasion — so its weight is
+deliberately mild, and first sight milder still. Setting either at or
+above your lowest `BotShieldChallengeAtLeast` row makes that scope
 challenge any request with no session context. That is usually what you
 want on a login or registration path, where the check is invisible and
 a real browser clears it in one round trip; it is usually not what you
-want site-wide. Neither line exists until you write it, so this is a
-configuration to choose rather than a default to undo.
-
-Action verbs are `action=score add=N [accumulator=<name>]` (signed,
--1000..1000) and `action=tier_floor min=<tier>`. `<name> reset` clears prior
-declarations for that one heuristic; `all reset` wipes every entry so
-the slate can be rebuilt from zero. With nothing seeded, both clear
-only what this config declared earlier.
-`mode=observe` logs the match with an `:observe` suffix instead of
-applying it.
-
-A `droppedcookie` hit is ambiguous by design — private-browsing
-resets and manual cookie clears look the same as evasion — so the
-default penalty is deliberately mild.
+want site-wide.
 
 ## Safeguard
 

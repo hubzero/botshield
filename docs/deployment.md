@@ -388,7 +388,7 @@ What to change in a config:
 | `respond=pass`, `respond=challenge-pass` | `respond=nochallenge` |
 | `tier=pass` | `tier=nochallenge` |
 | `tier=non-interactive`, `min=non-interactive` | `noninteractive` |
-| `BotShieldHeuristicTrigger first-sight-ip` and the other dashed heuristic names | `firstsightip`, `missingua`, `missingal`, `scraperua`, `droppedcookie` |
+| `BotShieldHeuristicTrigger <name>` in any spelling | a `BotShieldRule` with the matching condition and a `BotShieldScore` line — see [request signals](directives.md#request-signals) |
 
 What to change outside the config. Decision-log tokens lost their
 dashes, so a grep or alert matching `request-trigger`, `known-bot`,
