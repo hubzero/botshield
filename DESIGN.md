@@ -108,7 +108,7 @@ deliver an incremental-rebuild win — punted as a follow-up.
 | File | Responsibility |
 |------|---------------|
 | `botshield.{c,h}` | Module entry point: `bs_handler` request dispatch, `cmds[]` directive table, hook registration, `botshield_module` struct. Hosts the central `bs_dir_cfg` / `bs_server_cfg` config types and operator-tunable defaults. Also: bot-name token validation, asset-extension skip list |
-| `config.{c,h}` | Config lifecycle: `create_dir_cfg` / `merge_dir_cfg` / `create_server_cfg` / `merge_server_cfg` / `post_config` / `child_init`. Setters for top-level / UI / score-threshold / forgiveness / SHM-sizing / state-file / rate-limit / safeguard directives |
+| `config.{c,h}` | Config lifecycle: `create_dir_cfg` / `merge_dir_cfg` / `create_server_cfg` / `merge_server_cfg` / `post_config` / `child_init`. Setters for top-level / UI / SHM-sizing / state-file / rate-limit / safeguard directives |
 | `crypto.{c,h}` | OpenSSL wrappers: `bs_sha256`, `bs_hmac_sha256`, `bs_ct_equal`, `bs_hkdf_derive_key`, `bs_gcm_encrypt`, `bs_gcm_decrypt`, hex codec. Plus `BotShieldSecretFile` / `BotShieldSecondarySecretFile` setters and the bounded integer parsers (`bs_parse_int_bounded`, `bs_parse_uint32_bounded`, `bs_parse_int64_bounded`) used at config-time and on the cookie parse path |
 | `shm.{c,h}` | Single-segment SHM layout: header, flagged-IP / strike / safeguard / nonce tables, two Bloom buffers, captcha-verify rate + log slots, fixed-window rate-counter pool, M9.2 metrics block. Open-addressing seqlock helpers, SipHash-2-4, popcount, `bs_state_save` / `bs_state_load`, `bs_headroom_watchdog_cb` |
 | `cookie.{c,h}` | AES-GCM cookie envelope: `bs_build_cookie_prefix_gcm`, `bs_build_cookie_payload`, `bs_build_set_cookie`, `bs_install_verified_cookie`, `bs_verify_cookie_gcm`, `bs_verify_cookie`. Cookie-header tokenizer (`bs_parse_cookies_once`, `bs_get_cookie_value`, `bs_get_verified_cookie_value`). Carry-forward predicate + math (`bs_should_carry_prior_rep`, `bs_carry_forward_eligible`, `bs_apply_rep_carry`). Cookie wire-format constant (`BS_GCM_COUNTER_SEP`) |
@@ -187,10 +187,11 @@ reputation:
 | `captcha` | Configured third-party provider's widget (Turnstile, hCaptcha, reCAPTCHA v2/v3, Friendly, GeeTest). Falls through to form-PoW with `reason="captcha_fallback"` if no provider is configured on the scope |
 
 A successful challenge at any tier mints (or re-issues) the
-`_bs_session` cookie with the prior reputation carried forward, less
-a tier-dependent forgiveness amount on the score (subject to the
-hourly cap). Flags survive forgiveness — score can decay to zero, but
-flag bits do not clear within cookie TTL.
+`_bs_session` cookie with the prior reputation carried forward, plus
+the matching `passes_*` marker and the flags this client was carrying
+at that moment recorded as excused. Flags themselves do not clear
+within cookie TTL; being excused is what stops them re-challenging the
+client that answered for them.
 
 Score crosses three configurable thresholds
 (`BotShieldScoreNonInteractive`, `BotShieldScoreInteractive`,
@@ -295,10 +296,9 @@ default static-file handler. Its walk:
     verification. After threshold consecutive embedded dispatches
     without `_bs_session` arriving, fall through to M7 with a
     `embeddedfallbackm7` reason.
-16. **Carry-forward + rep build.** `bs_apply_rep_carry` clamps
-    forgiveness against the per-cookie hourly cap (E15), subtracts
-    from prior score, bumps the appropriate `passes_*` counter (LOW
-    #7 clamp). First-time challenges start with zero rep.
+16. **Carry-forward + rep build.** The prior rep block is copied
+    forward and the appropriate `passes_*` counter is bumped (LOW #7
+    clamp). First-time challenges start with zero rep.
 17. **Issue + render.** `bs_issue_challenge` fills a fresh
     `bs_challenge` with version/alg/salt/nonce/difficulty/expiry/
     auto_tier/signature. `bs_challenge_json` produces the inline JSON
@@ -352,16 +352,26 @@ exact same canonical bytes for a given `bs_challenge`:
 
 ```
 v|alg|salthex|noncehex|difficulty|expires_at
- |score|flags|pass_s|pass_f|pass_c|challenged_at|auto
- |forgive_window_start|forgive_consumed
+ |flags|pass_s|pass_f|pass_c|challenged_at|auto|flags_active
 ```
 
-Pipe-delimited ASCII. The `forgive_*` fields were added in protocol
-version 2 (E15); v1 cookies fail the version check and trigger a
-fresh challenge. `auto` is the noninteractive-tier (M7) marker — 1 means the
-challenge was served as the no-click splash, 0 means form-PoW. Knowing
-which tier was actually served is what lets the verify path pick
-`passes_non_interactive` vs `passes_interactive` and the matching forgiveness amount.
+Pipe-delimited ASCII, `BS_CANONICAL_FIELDS` (13) of them. Protocol 6
+removed three: `score` at index 6 and the `forgive_window_start` /
+`forgive_consumed` pair that followed `auto`. Older cookies fail the
+version check and trigger one fresh challenge -- they are not parsed
+and ignored, because the canonical string is what the signature covers,
+so accepting one would mean keeping the removed fields in the struct to
+rebuild its canonical form.
+
+The field count is a single constant read by both the splitter and the
+parser. They carried separate literals once, disagreed after a format
+change, and the module minted cookies it then rejected as "wrong field
+count".
+
+`auto` is the noninteractive-tier (M7) marker — 1 means the challenge
+was served as the no-click splash, 0 means form-PoW. Knowing which tier
+was actually served is what lets the verify path pick
+`passes_non_interactive` vs `passes_interactive`.
 
 ### Cookie payload over the wire
 
@@ -524,20 +534,17 @@ nothing is seeded:
 | `allow-bot-ua:<name>` | -1000 | E1 UA-only-trust match (`BotShieldAllowBot ... *`) |
 | `fake-<name>` | +100 | E1 UA matched but client IP not in published ranges |
 
-## Reputation state and forgiveness
+## Reputation state
 
 `bs_rep_state` is the cookie-carried reputation block:
 
 ```c
 typedef struct {
-    int          score;
     apr_uint32_t flags;
     int          passes_non_interactive;
     int          passes_form;
     int          passes_captcha;
     apr_time_t   challenged_at;
-    apr_uint32_t forgive_window_start;
-    apr_uint32_t forgive_consumed;
 } bs_rep_state;
 ```
 
@@ -545,6 +552,12 @@ typedef struct {
 accumulated (see Flag registry below). `passes_non_interactive` / `_form` /
 `_captcha` are operator-visible counters bumped on each successful
 challenge of that tier.
+
+Everything here is discrete and named. It carried an `int score` and a
+`forgive_window_start`/`forgive_consumed` pair until protocol 6, and
+what that bought was the ability to say "this client is worth 47",
+which no longer meant anything once the cut-points that read 47 were
+gone.
 
 ### Carry-forward gate
 
@@ -566,32 +579,25 @@ interstitial-render path (the `next_rep` is baked into the challenge
 envelope and round-tripped through the JS, arriving at /embedded-
 verify before issuance-side carry-forward sees it).
 
-### Forgiveness math
+### What a solve buys (formerly forgiveness)
 
-On a successful challenge pass, `bs_apply_rep_carry` adjusts the
-prior score by the per-tier forgiveness amount:
+A pass used to subtract a per-tier amount (10 / 25 / 50) from the
+carried score, clamped at zero, clamped again by an hourly cap
+(`BotShieldForgivenessCapPerHour`, default 200) whose window state rode
+in the cookie so dropping the cookie reset the counter and the debt
+together.
 
-| Tier passed | `BotShieldForgiveness*` default |
-|-------------|--------------------------------|
-| Non-interactive PoW |  10 |
-| Form PoW    |  25 |
-| Captcha     |  50 |
+All of it went with the score in protocol 6. What a solve buys now is
+the matching `passes_*` marker and `flags_excused`: the flags the
+client was carrying at the instant it solved are answered for, for the
+life of that cookie.
 
-Score is clamped at zero (never negative). Flag bits do not clear via
-forgiveness; they decay only via flagged-IP TTL.
-
-### Hourly forgiveness cap (E15)
-
-`bs_forgiveness_apply_cap` clamps the requested forgiveness against
-`BotShieldForgivenessCapPerHour` (default 200, 0 disables). The
-window is rolling: `forgive_window_start` rolls when more than
-`BS_FORGIVE_WINDOW_SEC` (3600) have elapsed since the prior window
-started. When the cap kicks in, the request's reason chain carries
-`forgive-capped:<granted>/<requested>` for operator visibility.
-
-Tracking lives **per-cookie** (not per-IP-SHM): bot drops cookie →
-counter resets but ALSO drops the score-debt forgiveness was meant
-to whittle down, so cookie-rotation is no escape.
+That was always the part that worked. Forgiveness could not break a
+challenge loop even in principle -- flag effects re-apply on every
+request, so a forgiven-to-zero score was re-raised before the next
+decision, which is exactly the production loop `flags_excused` was
+added to fix. The arithmetic was decorating a mechanism that had
+already been replaced.
 
 ###  "ever-passed" clamp
 
@@ -2197,7 +2203,7 @@ the `bs_cmds[]` table at `src/botshield.c:142`.
 |--------|-----------|
 | Top-level / UI | `BotShieldEnabled`, `BotShieldChallenge`, `BotShieldDebug`, `BotShieldCookieTTL`, `BotShieldDifficulty`, `BotShieldPromptText`, `BotShieldLogoFile`, `BotShieldLogoLabel`, `BotShieldShowLogo`, `BotShieldShowLabel`, `BotShieldShowBox`, `BotShieldHelp`, `BotShieldHelpFile`, `BotShieldChallengeFile`, `BotShieldEndpointPrefix` |
 | Crypto | `BotShieldSecretFile`, `BotShieldSecondarySecretFile`, `BotShieldAlgorithm` |
-| Score / forgiveness | `BotShieldScoreNonInteractive`, `BotShieldScoreInteractive`, `BotShieldScoreCaptcha`, `BotShieldForgivenessNonInteractive`, `BotShieldForgivenessInteractive`, `BotShieldForgivenessCaptcha`, `BotShieldForgivenessCapPerHour` |
+| Scoring | `BotShieldScore` (in a rule), `BotShieldScoreAtLeast`, `BotShieldChallengeAtLeast`. The `BotShieldScore*` cut-points and the `BotShieldForgiveness*` family were removed with the cumulative score |
 | Cookie | `BotShieldCookieDomain` |
 | Captcha (M8 + E18) | `BotShieldCaptchaProvider`, `BotShieldCaptchaSiteKey`, `BotShieldCaptchaSecretFile`, `BotShieldCaptchaTimeout`, `BotShieldCaptchaConnectTimeout`, `BotShieldRecaptchaV3MinScore`, `BotShieldCaptchaExpectedHostname`, `BotShieldCaptchaExpectedAction`, `BotShieldCaptchaCABundle`, `BotShieldCaptchaRateLimit`, `BotShieldCaptchaMaxInFlight`, `BotShieldFormCaptcha` |
 | Non-interactive (E17) | `BotShieldNonInteractiveMode` |

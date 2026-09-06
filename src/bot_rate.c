@@ -822,7 +822,7 @@ int bs_bot_rate_check(request_rec *r)
         /* Observation only — log a ~rate_limited would-outcome and
          * a :observe-suffixed reason, don't 429 the request.
          * Mirrors the directive rate-limit cohort observe path. */
-        bs_score_add(r, 0, 0,
+        bs_score_add(r, 0,
             apr_pstrcat(r->pool, "botrate:",
                 slug_for_log ? slug_for_log : "?",
                 ":observe", NULL));
@@ -842,7 +842,6 @@ int bs_bot_rate_check(request_rec *r)
      * toward a challenge for being present during someone else's
      * spike. */
     bs_score_add(r, tripped_is_slug ? BS_PENALTY_RATE_LIMIT : 0,
-                 tripped_is_slug ? 3600 : 0,
                  apr_pstrcat(r->pool, "botrate:", trip_label, NULL));
     if (bs_shm.metrics) {
         __atomic_fetch_add(&bs_shm.metrics->rate_limit_exceeded_total,

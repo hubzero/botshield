@@ -111,12 +111,9 @@ solve carry the accumulated reputation block.
 The wire format is an authenticated AES-256-GCM envelope; the
 plaintext fields include:
 
-- `score` — running total
 - `flags` — credit/penalty bits accumulated across challenges
 - `passes_silent` / `passes_form` / `passes_captcha` — counters of
   successful challenges at each tier
-- `forgive_window_start` / `forgive_consumed` — forgiveness-cap
-  state (see below)
 - `expires_at` — unix timestamp; cookies past expiry fail verify
 
 The `Set-Cookie` line carries no `Expires` or `Max-Age` attribute
@@ -126,11 +123,12 @@ envelope still acts as a server-side hard cap, so a stale cookie
 that survives via a long-lived browser session still gets
 rejected on verify.
 
-On subsequent requests that cookie's `score` field becomes the
-`cookie_score` term in the composition. Repeated good behavior
-accumulates negative `cookie_score` (forgiveness credit applied at
-challenge-issue time); repeated suspicious behavior accumulates
-positive.
+The cookie carried a `score` field until protocol 6, and a request's
+total was that plus what the request itself scored. Nothing read it for
+a decision after the tier cut-points went, so it was signed and carried
+and consulted by nobody. What the cookie carries about the past now is
+discrete and named: which challenges this client has passed, and which
+flags were excused when it passed them.
 
 The decision log's `cookie=` field reports one of `solved` (verified
 **and** carrying challenge-solve proof), `ok` (verified, no such proof
@@ -155,35 +153,23 @@ The reputation persists across requests but expires with the cookie
 TTL (`BotShieldCookieTTL`, default 1 hour). After expiry users
 start fresh.
 
-### Forgiveness
+### What a solve buys
 
-Each successful challenge applies a negative score credit
-("forgiveness") so a client that has just proven itself doesn't
-get re-challenged on the next request:
+A successful challenge used to apply a negative score credit
+("forgiveness") against the running total in the cookie, with an hourly
+cap so a bot could not stockpile credit by solving cheap challenges.
+Both went with the total in protocol 6.
 
-| Tier | Default credit | Directive |
-|---|---|---|
-| `noninteractive` | -10 | `BotShieldForgivenessNonInteractive` |
-| `interactive` | -25 | `BotShieldForgivenessInteractive` |
-| `captcha` | -50 | `BotShieldForgivenessCaptcha` |
+What a solve buys now is discrete: the matching `passes_*` marker, and
+`flags_excused` — the flags this client was carrying at the moment it
+solved are answered for, for the life of the cookie. That is what stops
+a flagged client being re-challenged forever, and it is what was doing
+that work all along. Forgiveness never could: flag effects re-apply
+every request, so a forgiven-to-zero score came back before the next
+decision.
 
-### Forgiveness cap
-
-To prevent farming — bot operators stockpiling forgiveness credit by
-solving many cheap challenges then trading the score down — the
-cookie carries a per-client hourly cap on accumulated forgiveness:
-
-```apache
-BotShieldForgivenessCapPerHour 200
-```
-
-Default is 200 points per rolling hour, ≈ 4–8 nochallenge outcomes
-worth of credit. The cap state lives in the cookie itself, so
-forgiveness honors the cap across cookie re-issues without server-
-side bookkeeping.
-
-Set to 0 to disable the cap (legacy behavior). Set to a smaller
-value for stricter farming resistance.
+Anything flagged *after* the solve is new evidence and still fires, so
+a solve settles the debt it was challenged for without buying immunity.
 
 ### Carry-forward gate
 
@@ -195,9 +181,8 @@ prior cookie's reputation block forward. Carry-forward is gated:
 - `expired` → reject; indefinite reputation transfer is exactly the
   evasion this gate prevents.
 - pre-auth errors with no rep struct populated → reject.
-- everything else → carry forward, apply the per-tier forgiveness
-  credit through the cap, increment the matching `passes_*`
-  counter.
+- everything else → carry forward and increment the matching
+  `passes_*` counter.
 
 ## Inspecting decisions
 

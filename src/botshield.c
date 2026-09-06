@@ -426,18 +426,6 @@ static const command_rec bs_cmds[] = {
                  "may not arrive in time for the very first request, "
                  "but it lands within a few page-views — see CHANGELOG "
                  "E17 for the timing model."),
-    AP_INIT_TAKE1("BotShieldForgivenessNonInteractive", bs_set_forgive_non_interactive, NULL,
-                 RSRC_CONF | ACCESS_CONF,
-                 "Score credit applied on a successful noninteractive PoW pass "
-                 "(default: 10). Clamped at max(0, flag_penalty)."),
-    AP_INIT_TAKE1("BotShieldForgivenessInteractive",   bs_set_forgive_interactive,   NULL,
-                 RSRC_CONF | ACCESS_CONF,
-                 "Score credit applied on a successful interactive PoW pass "
-                 "(default: 25). Clamped at max(0, flag_penalty)."),
-    AP_INIT_TAKE1("BotShieldForgivenessCaptcha",bs_set_forgive_captcha,NULL,
-                 RSRC_CONF | ACCESS_CONF,
-                 "Score credit applied on a successful captcha pass "
-                 "(default: 50). Clamped at max(0, flag_penalty)."),
     AP_INIT_TAKE1("BotShieldCookieDomain", bs_set_cookie_domain, NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "If set, Set-Cookie for _bs_session includes a Domain= "
@@ -900,16 +888,6 @@ static const command_rec bs_cmds[] = {
                  "nothing, so every consequence is a line in this "
                  "config. See docs/examples/flag-triggers.conf.example "
                  "for a slate to start from."),
-    /* E15 — forgiveness farming defense. */
-    AP_INIT_TAKE1("BotShieldForgivenessCapPerHour",
-                 bs_set_forgive_cap, NULL, RSRC_CONF,
-                 "Per-cookie cap on accumulated forgiveness points "
-                 "inside a rolling 1-hour window. Default 200 — "
-                 "enough for a real user pinned at borderline-"
-                 "suspicious to keep transacting; tight enough that "
-                 "a patient bot solving every few minutes stops "
-                 "earning forgiveness past the cap. 0 disables the "
-                 "cap (legacy behavior). Range 0..1000."),
     /* E4 — cookie triggers */
     AP_INIT_TAKE_ARGV("BotShieldCookieTrigger",
                  bs_flat_trigger_retired, NULL, RSRC_CONF,
@@ -1349,7 +1327,7 @@ static int bs_apply_safeguard(request_rec *r, int have_client_ip,
         ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
             "mod_botshield: challengesafeguard tripped for "
             "%s; redirecting to %s", r->useragent_ip, location);
-        bs_score_add(r, 0, 0, "challengesafeguard");
+        bs_score_add(r, 0, "challengesafeguard");
         if (bs_shm.metrics) {
             __atomic_fetch_add(&bs_shm.metrics->safeguard_fired_total,
                                1, __ATOMIC_RELAXED);
@@ -2037,26 +2015,26 @@ static int bs_handler(request_rec *r)
             if (cls->is_browser) {
                 const char *slug = cls->browser_slug
                                  ? cls->browser_slug : "browser";
-                bs_score_add(r, 0, 0,
+                bs_score_add(r, 0,
                     apr_pstrcat(r->pool, "browser:", slug, NULL));
             } else if (cls->known_slug && *cls->known_slug) {
-                bs_score_add(r, 0, 0,
+                bs_score_add(r, 0,
                     apr_pstrcat(r->pool, "knownbot:", cls->known_slug, NULL));
             } else if (cls->verified_name && *cls->verified_name) {
                 /* Allowlist UA pattern matched but no IP check ran
                  * (UA-only target or ranges not loaded). The
                  * operator-declared name lands in the knownbot pool. */
-                bs_score_add(r, 0, 0,
+                bs_score_add(r, 0,
                     apr_pstrcat(r->pool, "knownbot:", cls->verified_name, NULL));
             } else if (cls->is_unknown_bot && cls->unknown_bot_token) {
-                bs_score_add(r, 0, 0,
+                bs_score_add(r, 0,
                     apr_pstrcat(r->pool, "unknownbot:", cls->unknown_bot_token, NULL));
             } else {
                 /* No classifier signal. Distinguish empty UA (header
                  * missing or empty) from unknown UA (header present
                  * but didn't match templates/directory/heuristic). */
                 const char *ua = apr_table_get(r->headers_in, "User-Agent");
-                bs_score_add(r, 0, 0,
+                bs_score_add(r, 0,
                     (!ua || !*ua) ? "emptyua" : "unknownua");
             }
         }
@@ -2140,7 +2118,7 @@ static int bs_handler(request_rec *r)
      * below — that walker covers both IP-side and cookie-side flags
      * via the union and emits per-flag `flagtrigger:<name>` reasons. */
     if (ip_flags != 0) {
-        bs_score_add(r, 0, 0, "flaggedip");
+        bs_score_add(r, 0, "flaggedip");
     }
 
     /* Bloom-based reputation signals (M5.2). Only fire on cookieless
@@ -2197,7 +2175,7 @@ static int bs_handler(request_rec *r)
      * transport, not about who is driving it. */
     int declared_crawler = bs_ua_is_declared_crawler(uac_h);
     if (declared_crawler) {
-        bs_score_add(r, 0, 0, "knownbotstatelessok");
+        bs_score_add(r, 0, "knownbotstatelessok");
     }
     /* Gated on have_solve_proof, NOT have_prior_rep. A cookie only
      * earns the waiver by proving a challenge was solved; merely
@@ -2271,7 +2249,7 @@ static int bs_handler(request_rec *r)
                          ? prior_ch.rep.flags_excused : 0;
     apr_uint32_t firing_flags = all_flags & ~excused;
     if (all_flags & excused) {
-        bs_score_add(r, 0, 0,
+        bs_score_add(r, 0,
             apr_psprintf(r->pool, "flags-excused:0x%x",
                          (unsigned)(all_flags & excused)));
     }
@@ -2299,7 +2277,7 @@ static int bs_handler(request_rec *r)
      * that forces a challenge and cannot be excused is the loop that
      * reached production twice. */
     if (flag_block_status) {
-        bs_score_add(r, 0, 0,
+        bs_score_add(r, 0,
             apr_psprintf(r->pool, "flagblock:%s", flag_block_name));
         bs_decision_log(r, "nochallenge", "block", cookie_status,
                         "-", "-",
@@ -2318,8 +2296,11 @@ static int bs_handler(request_rec *r)
      * of any flagtrigger SCORE actions applied above) + the cookie's
      * accumulated rep score. Operator-facing tuning workflow lives
      * in the README "Understanding scoring" section. */
-    int cookie_score = have_prior_rep ? prior_ch.rep.score : 0;
-    int effective    = heuristic_total + cookie_score;
+    /* The cookie carried a score, and the request total was the two
+     * added together. Neither reaches a decision now: what is left is
+     * the per-request total, kept for the log because what a request
+     * tripped is worth reading. */
+    int effective    = heuristic_total;
     /* The cumulative score decides nothing. It is still computed and
      * still logged -- what it cost and what it caught are worth
      * reading -- but the three cut-points that turned it into a tier
@@ -2351,7 +2332,7 @@ static int bs_handler(request_rec *r)
             if ((bs_tier)row->tier > score_tier) {
                 score_tier = (bs_tier)row->tier;
             }
-            bs_score_add(r, 0, 0,
+            bs_score_add(r, 0,
                 apr_psprintf(r->pool, "score:%s>=%d:%s",
                              row->name, row->min,
                              bs_tier_name((bs_tier)row->tier)));
@@ -2365,7 +2346,7 @@ static int bs_handler(request_rec *r)
     bs_tier tier = (tier_floor_from_flags > score_tier)
                  ? tier_floor_from_flags : score_tier;
     if (tier_floor_from_flags > score_tier) {
-        bs_score_add(r, 0, 0,
+        bs_score_add(r, 0,
             apr_psprintf(r->pool, "flagtierfloor:%s",
                          bs_tier_name(tier_floor_from_flags)));
     }
@@ -2382,7 +2363,7 @@ static int bs_handler(request_rec *r)
      * rather than quietly, in the same spirit as :observe and the
      * ~counterfactual outcomes. */
     if (cfg->challenge_enabled == 0 && tier != BS_TIER_PASS) {
-        bs_score_add(r, 0, 0,
+        bs_score_add(r, 0,
             apr_psprintf(r->pool, "challengeoff:%s", bs_tier_name(tier)));
         tier = BS_TIER_PASS;
     }
@@ -2392,15 +2373,14 @@ static int bs_handler(request_rec *r)
      * BotShieldFlagIP directive that used to live here was
      * superseded by `BotShieldTrigger flag=<name> ttl=<sec>`. */
 
-    /* Happy path: score below the noninteractive threshold → pass through.
-     * If there's no cookie this means no cookie is ever issued —
+    /* Happy path: nothing asked for a tier, so pass through. If
+     * there's no cookie this means no cookie is ever issued --
      * legitimate users experience mod_botshield as invisible. */
     if (tier == BS_TIER_PASS) {
         ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
-                      "mod_botshield: pass %s effective=%d "
-                      "(heuristic=%d cookie_score=%d "
-                      "ip_flags=0x%x excused=0x%x) cookie_ok=%d",
-                      r->uri, effective, heuristic_total, cookie_score,
+                      "mod_botshield: pass %s score=%d "
+                      "(ip_flags=0x%x excused=0x%x) cookie_ok=%d",
+                      r->uri, effective,
                       (unsigned)ip_flags,
                       have_prior_rep ? (unsigned)prior_ch.rep.flags_excused : 0,
                       cookie_fully_ok);
@@ -2498,7 +2478,7 @@ static int bs_handler(request_rec *r)
         /* Fall through to M7 — the embedded path has had its
          * chances. Surface the decision in the reason chain so
          * operators can spot clients stuck in this state. */
-        bs_score_add(r, 0, 0, "embeddedfallbackm7");
+        bs_score_add(r, 0, "embeddedfallbackm7");
     }
 
     /* `issue_auto` picks the interactive PoW interstitial style: the
@@ -2530,48 +2510,30 @@ static int bs_handler(request_rec *r)
      * would land the same way, which is what this memset is for. */
     memset(&next_rep, 0, sizeof(next_rep));
     if (have_prior_rep) {
-        int forgive = prior_ch.auto_tier
-            ? bs_effective_int(cfg->forgive_non_interactive, BS_DEFAULT_FORGIVE_NON_INTERACTIVE)
-            : bs_effective_int(cfg->forgive_interactive,   BS_DEFAULT_FORGIVE_INTERACTIVE);
-        /* E15 — clamp against the per-cookie hourly cap
-         * and surface the granted vs requested via reason chain when
-         * the cap kicks in. */
-        int cap = scfg_h && scfg_h->forgive_cap_per_hour > 0
-                ? scfg_h->forgive_cap_per_hour
-                : BS_DEFAULT_FORGIVE_CAP_PER_HOUR;
-        apr_uint32_t now_sec = (apr_uint32_t)apr_time_sec(apr_time_now());
+        /* Forgiveness lived here: a per-tier amount subtracted from
+         * the carried score, clamped by an hourly cap so a client
+         * could not farm passes for credit. It had nothing left to
+         * subtract from once the score left the cookie.
+         *
+         * What it was really protecting against is still handled, by
+         * the thing that always did the work: flags_excused below. A
+         * client that solves has the flags it carried at that moment
+         * excused for the life of the cookie, which is what breaks the
+         * challenge loop. Forgiveness never could -- flag effects
+         * re-apply every request, so a forgiven-to-zero score was
+         * re-raised on the next one. */
         next_rep = prior_ch.rep;
-        int requested = forgive;
-        forgive = bs_forgiveness_apply_cap(forgive, cap, now_sec,
-                    &next_rep.forgive_window_start,
-                    &next_rep.forgive_consumed);
-        if (forgive < requested) {
-            bs_score_add(r, 0, 0,
-                apr_psprintf(r->pool,
-                    "forgive-capped:%d/%d",
-                    forgive, requested));
-        }
-        /* The forgiven score has no flag-derived floor. Flag effects
-         * re-apply at request time, so forgiveness alone never breaks
-         * a flagged client out of a challenge loop -- that is what
-         * flags_excused below is for. */
-        int new_score = prior_ch.rep.score - forgive;
-        if (new_score < 0) new_score = 0;
-        next_rep.score = new_score;
         if (prior_ch.auto_tier) {
             next_rep.passes_non_interactive = 1;  /* clamp */
         } else {
             next_rep.passes_interactive = 1;  /* clamp */
         }
     } else {
-        next_rep.score          = 0;
         next_rep.flags_excused  = 0;
         next_rep.passes_non_interactive  = issue_auto ? 1 : 0;
         next_rep.passes_interactive    = issue_auto ? 0 : 1;
         next_rep.passes_captcha = 0;
         next_rep.challenged_at  = 0;   /* overwritten by issue() */
-        next_rep.forgive_window_start = 0;
-        next_rep.forgive_consumed     = 0;
     }
 
     /* Stamp the flags this client is being challenged over into the
@@ -2611,13 +2573,12 @@ static int bs_handler(request_rec *r)
 
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
                   "mod_botshield: challenging %s (alg=%s, difficulty=%d, "
-                  "ttl=%d) effective=%d tier=%s heuristic=%d reasons=%s "
-                  "cookie_score=%d cookie_flags=0x%x cookie_ok=%d "
+                  "ttl=%d) score=%d tier=%s reasons=%s "
+                  "cookie_flags=0x%x cookie_ok=%d "
                   "passes=[s:%d f:%d c:%d]",
                   r->unparsed_uri, cfg->algorithm->name, difficulty, ttl,
-                  effective, bs_tier_name(tier), heuristic_total,
+                  effective, bs_tier_name(tier),
                   bs_score_reasons_joined(r->pool, score),
-                  have_prior_rep ? cookie_score : -1,
                   have_prior_rep ? (unsigned)prior_ch.rep.flags_excused : 0,
                   cookie_fully_ok,
                   next_rep.passes_non_interactive, next_rep.passes_interactive,
@@ -2629,9 +2590,9 @@ static int bs_handler(request_rec *r)
      * this signal" surfaces, add a difficulty action verb at that
      * time; don't pre-emptively reintroduce one. */
 
-    /* Issue a fresh signed challenge; the worker reads it from the page.
-     * The next_rep struct carries forgiveness-adjusted rep from any
-     * sig-verified prior cookie. */
+    /* Issue a fresh signed challenge; the worker reads it from the
+     * page. next_rep carries the solve record from any sig-verified
+     * prior cookie. */
     bs_challenge challenge;
     const char *ierr = bs_issue_challenge(r->pool, cfg, difficulty, ttl,
                                           issue_auto, NULL,

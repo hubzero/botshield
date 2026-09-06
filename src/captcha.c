@@ -1394,7 +1394,6 @@ const char *bs_captcha_carry_and_mint(
     request_rec *r,
     const bs_dir_cfg *cfg,
     bs_captcha_passes_kind passes_kind,
-    int forgive_amount,
     int auto_tier,
     bs_challenge *out_ch,
     const char **out_alg_name)
@@ -1413,8 +1412,6 @@ const char *bs_captcha_carry_and_mint(
         bs_challenge prior_ch = { 0 };
         if (bs_carry_forward_eligible(r, cfg, &prior_ch)) {
             next_rep = prior_ch.rep;
-            bs_apply_rep_carry(r, cfg, &prior_ch, &next_rep,
-                               forgive_amount);
         }
         if (passes_kind == BS_CAPTCHA_PASSES_SILENT) {
             next_rep.passes_non_interactive = 1;   /* clamp */
@@ -1785,7 +1782,6 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
     const char *cookie_alg_name = NULL;
     const char *merr = bs_captcha_carry_and_mint(r, cfg,
         BS_CAPTCHA_PASSES_CAPTCHA,
-        bs_effective_int(cfg->forgive_captcha, BS_DEFAULT_FORGIVE_CAPTCHA),
         /* auto_tier */ 0,
         &ch, &cookie_alg_name);
     if (merr) {

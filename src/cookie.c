@@ -412,8 +412,8 @@ static const char *bs_parse_canonical_fields(char *const fields[], int nf,
 {
     long v;
     apr_int64_t v64;
-    /* Strict surface-form gate. Score is the only signed
-     * field; everything else is non-negative. */
+    /* Strict surface-form gate. Every field is non-negative now --
+     * score was the only signed one and it is gone. */
     static const struct {
         int idx;
         int allow_neg;
@@ -421,15 +421,12 @@ static const char *bs_parse_canonical_fields(char *const fields[], int nf,
         { 0,  0 },   /* version */
         { 4,  0 },   /* difficulty */
         { 5,  0 },   /* expires_at */
-        { 6,  1 },   /* score (signed) */
-        { 7,  0 },   /* flags */
-        { 8,  0 },   /* passes_non_interactive */
-        { 9,  0 },   /* passes_interactive */
-        { 10, 0 },   /* passes_captcha */
-        { 11, 0 },   /* challenged_at */
-        { 12, 0 },   /* auto */
-        { 13, 0 },   /* forgive_window_start */
-        { 14, 0 },   /* forgive_consumed */
+        { 6,  0 },   /* flags */
+        { 7,  0 },   /* passes_non_interactive */
+        { 8,  0 },   /* passes_interactive */
+        { 9,  0 },   /* passes_captcha */
+        { 10, 0 },   /* challenged_at */
+        { 11, 0 },   /* auto */
     };
     for (size_t i = 0;
          i < sizeof(strict_int_fields)/sizeof(strict_int_fields[0]);
@@ -442,16 +439,18 @@ static const char *bs_parse_canonical_fields(char *const fields[], int nf,
     }
     if (!bs_parse_int_bounded(fields[0], 0, INT_MAX, 10, &v)) return "bad version";
     ch->version = (int)v;
-    /* Only 2 and 5 exist as populations. 3 and 4 were minted between
-     * two commits on one afternoon and never deployed, so they are
-     * refused by version rather than falling through to a field-count
-     * error that would not say why. */
-    if (ch->version != 2 && ch->version != BS_PROTOCOL_VERSION)
+    /* One version is accepted. v2 and v5 were real populations and
+     * are refused here rather than parsed and ignored: the canonical
+     * string is what the signature covers, so verifying either would
+     * mean keeping score and the forgiveness pair in the struct to
+     * rebuild their canonical form -- the fields this version exists
+     * to remove. Their clients read as carrying no usable cookie and
+     * are challenged once. */
+    if (ch->version != BS_PROTOCOL_VERSION)
         return "bad protocol version";
-    /* Field count is pinned per version, so an older body cannot
+    /* Field count is pinned to the version, so an older body cannot
      * smuggle a newer field and a newer body cannot omit one. */
-    int want = ch->version >= 5 ? 16 : 15;
-    if (nf != want) return "wrong field count";
+    if (nf != BS_CANONICAL_FIELDS) return "wrong field count";
 
     const bs_pow_algorithm *alg = bs_find_algorithm(fields[1]);
     if (!alg || !alg->implemented) return "unknown algorithm";
@@ -468,34 +467,22 @@ static const char *bs_parse_canonical_fields(char *const fields[], int nf,
     if (!bs_parse_int64_bounded(fields[5], 0, APR_INT64_MAX, &v64)) return "bad expires_at";
     ch->expires_at = (apr_time_t)v64;
 
-    if (!bs_parse_int_bounded(fields[6], INT_MIN, INT_MAX, 11, &v)) return "bad score";
-    ch->rep.score = (int)v;
-    if (!bs_parse_uint32_bounded(fields[7], 10, &ch->rep.flags_excused))
+    if (!bs_parse_uint32_bounded(fields[6], 10, &ch->rep.flags_excused))
         return "bad flags";
-    if (!bs_parse_int_bounded(fields[8],  0, 1, 1, &v)) return "bad passes_non_interactive";
+    if (!bs_parse_int_bounded(fields[7],  0, 1, 1, &v)) return "bad passes_non_interactive";
     ch->rep.passes_non_interactive  = (int)v;
-    if (!bs_parse_int_bounded(fields[9],  0, 1, 1, &v)) return "bad passes_interactive";
+    if (!bs_parse_int_bounded(fields[8],  0, 1, 1, &v)) return "bad passes_interactive";
     ch->rep.passes_interactive    = (int)v;
-    if (!bs_parse_int_bounded(fields[10], 0, 1, 1, &v)) return "bad passes_captcha";
+    if (!bs_parse_int_bounded(fields[9], 0, 1, 1, &v)) return "bad passes_captcha";
     ch->rep.passes_captcha = (int)v;
-    if (!bs_parse_int64_bounded(fields[11], 0, APR_INT64_MAX, &v64)) return "bad challenged_at";
+    if (!bs_parse_int64_bounded(fields[10], 0, APR_INT64_MAX, &v64)) return "bad challenged_at";
     ch->rep.challenged_at  = (apr_time_t)v64;
-    if (!bs_parse_int_bounded(fields[12], 0, 1, 1, &v)) return "bad auto";
+    if (!bs_parse_int_bounded(fields[11], 0, 1, 1, &v)) return "bad auto";
     ch->auto_tier = (int)v;
-    if (!bs_parse_uint32_bounded(fields[13], 10, &ch->rep.forgive_window_start))
-        return "bad forgive_window_start";
-    if (!bs_parse_uint32_bounded(fields[14], 10, &ch->rep.forgive_consumed))
-        return "bad forgive_consumed";
-    /* v2 predates the session-flag bitmap and reads as carrying none,
-     * which is what every cookie production has minted means. */
-    if (ch->version >= 5) {
-        if (!bs_strict_int_form(fields[15], 0))
-            return "non-canonical integer surface form";
-        if (!bs_parse_uint32_bounded(fields[15], 10, &ch->rep.flags_active))
-            return "bad flags_active";
-    } else {
-        ch->rep.flags_active = 0;
-    }
+    if (!bs_strict_int_form(fields[12], 0))
+        return "non-canonical integer surface form";
+    if (!bs_parse_uint32_bounded(fields[12], 10, &ch->rep.flags_active))
+        return "bad flags_active";
     return NULL;
 }
 
@@ -543,19 +530,23 @@ const char *bs_verify_cookie_gcm(request_rec *r,
     }
     pt[pt_len] = '\0';
 
-    /* pt is canonical form: 15 pipe-delimited fields for v2, 16 for
-     * v5 (flags_active). Both are accepted on the way in; the exact
-     * count is checked per version once the version field has been
-     * read. */
-    char *fields[16];
+    /* pt is canonical form: BS_CANONICAL_FIELDS pipe-delimited
+     * fields. The exact count is re-checked in
+     * bs_parse_canonical_fields once the version has been read; this
+     * bound only stops the split running off the array.
+     *
+     * These two counts disagreed once -- the parser wanted 13 and the
+     * splitter refused anything under 15 -- and the module minted
+     * cookies it then rejected as "wrong field count". One constant
+     * now, so a format change cannot move one without the other. */
+    char *fields[BS_CANONICAL_FIELDS];
     int nf = 0;
     char *p = (char *)pt;
     fields[nf++] = p;
-    while (*p && nf < 16) {
+    while (*p && nf < BS_CANONICAL_FIELDS) {
         if (*p == '|') { *p = '\0'; fields[nf++] = p + 1; }
         p++;
     }
-    if (nf < 15 || nf > 16) return "wrong field count";
 
     bs_challenge ch;
     memset(&ch, 0, sizeof(ch));
@@ -696,27 +687,7 @@ void bs_rep_excuse_current_flags(request_rec *r, bs_rep_state *rep)
     rep->flags_excused |= flags;
 }
 
-void bs_apply_rep_carry(request_rec *r,
-                                const bs_dir_cfg *cfg,
-                                const bs_challenge *prior_ch,
-                                bs_rep_state *target,
-                                int forgive_amount)
-{
-    bs_server_cfg *scfg = ap_get_module_config(r->server->module_config,
-                                               &botshield_module);
-    int cap = (scfg && scfg->forgive_cap_per_hour > 0)
-            ? scfg->forgive_cap_per_hour
-            : BS_DEFAULT_FORGIVE_CAP_PER_HOUR;
-    apr_uint32_t now_sec = (apr_uint32_t)apr_time_sec(apr_time_now());
-    int forgive = bs_forgiveness_apply_cap(forgive_amount, cap, now_sec,
-                                           &target->forgive_window_start,
-                                           &target->forgive_consumed);
-    /* Carry-forward clamps only at zero — no flag-derived floor.
-     * Flag effects are re-applied at request time by
-     * bs_apply_flag_triggers, so a forgiven-to-zero score on a
-     * flagged cookie is simply re-raised on the next request when
-     * the trigger fires. */
-    int new_score = prior_ch->rep.score - forgive;
-    if (new_score < 0) new_score = 0;
-    target->score = new_score;
-}
+/* bs_apply_rep_carry lived here. Both callers already did the carry
+ * themselves -- next_rep = prior_ch.rep -- and called this only to run
+ * the forgiveness arithmetic on the score afterwards. With no score to
+ * subtract from, the carry is the assignment and nothing else. */

@@ -40,7 +40,7 @@ bs_request_score *bs_get_score(request_rec *r, int create)
  * (rendered into docs/guide/index.html) explains the score
  * composition, threshold ladder, and tuning workflow. */
 void bs_score_add(request_rec *r, int penalty,
-                  int ttl_seconds, const char *reason)
+                  const char *reason)
 {
     bs_request_score *s = bs_get_score(r, 1);
 
@@ -67,7 +67,6 @@ void bs_score_add(request_rec *r, int penalty,
     }
     bs_score_entry *e = apr_array_push(s->entries);
     e->penalty     = penalty;
-    e->ttl_seconds = ttl_seconds;
     e->reason      = reason;
 }
 
@@ -155,7 +154,7 @@ int bs_apply_flag_triggers(request_rec *r,
         if (!(visible & e->flag_bit)) continue;
         fired++;
         if (e->mode == BS_TMODE_OBSERVE) {
-            bs_score_add(r, 0, 0,
+            bs_score_add(r, 0,
                 apr_psprintf(r->pool,
                     "wouldflagtrigger:%s:observe", e->flag_name));
             continue;
@@ -168,7 +167,7 @@ int bs_apply_flag_triggers(request_rec *r,
                 r, e->score_name,
                 e->score_add < 0 ? '-' : '+',
                 e->score_add < 0 ? -e->score_add : e->score_add);
-            bs_score_add(r, 0, 0,
+            bs_score_add(r, 0,
                 apr_psprintf(r->pool, "flagtrigger:%s:%s",
                              e->flag_name, e->score_name));
         } else if (e->action == BS_FLAG_ACT_TIER_FLOOR) {

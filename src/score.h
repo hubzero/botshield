@@ -112,15 +112,6 @@ typedef enum {
 
 typedef struct {
     int         penalty;
-    int         ttl_seconds;   /* accepted for API stability; unused
-                                * today (bs_score_add stores it but
-                                * downstream consumers haven't
-                                * materialized — the flagged-IP table
-                                * carries its own TTL set at insert).
-                                * Kept so callers can annotate "this
-                                * penalty represents an N-second-worth
-                                * signal" without the API churning if
-                                * we ever wire it up. */
     const char *reason;        /* static string or r->pool-allocated */
 } bs_score_entry;
 
@@ -147,7 +138,7 @@ bs_request_score *bs_get_score(request_rec *r, int create);
  * (used for observe-mode + status=pass entries). reason must
  * outlive the request. The reason cap (BS_SCORE_MAX_REASONS = 16)
  * silently drops overflow entries; the total still accumulates. */
-void bs_score_add(request_rec *r, int penalty, int ttl_seconds,
+void bs_score_add(request_rec *r, int penalty,
                   const char *reason);
 
 /* Comma-joined reason names for the decision log's reason field.

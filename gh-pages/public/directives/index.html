@@ -104,7 +104,7 @@
   <ul class="toc__list">
 <li class="toc__item toc__item--level-2"><a href="#scope-and-validity">Scope and validity</a></li>
 <li class="toc__item toc__item--level-2"><a href="#core">Core</a></li>
-<li class="toc__item toc__item--level-2"><a href="#forgiveness">Forgiveness</a></li>
+<li class="toc__item toc__item--level-2"><a href="#what-used-to-be-here">What used to be here</a></li>
 <li class="toc__item toc__item--level-2"><a href="#silent-tier-dispatch">Silent-tier dispatch</a></li>
 <li class="toc__item toc__item--level-2"><a href="#widget-customization">Widget customization</a></li>
 <li class="toc__item toc__item--level-2"><a href="#captcha-tier">Captcha tier</a></li>
@@ -439,48 +439,23 @@ a visitor sees without having to trip a challenge yourself. They serve
 <code>403</code>, like the real interstitials, because the same code path renders
 them.
 Change it if it collides with real app routes.</p>
-<h2 id="forgiveness">Forgiveness</h2>
-<p>The three <code>BotShieldScore*</code> cut-points that used to head this section
-are gone. A tier is chosen by a rule that asks for one, or by a
+<h2 id="what-used-to-be-here">What used to be here</h2>
+<p>The three <code>BotShieldScore*</code> cut-points and the four
+<code>BotShieldForgiveness*</code> directives. The cut-points turned one running
+total into a tier; forgiveness subtracted from that total when a client
+solved, with an hourly cap so a patient bot could not farm credit by
+solving cheap challenges.</p>
+<p>Both are gone, and the total they operated on is no longer carried in
+the cookie. A tier is chosen by a rule that asks for one, or by a
 <code>BotShieldChallengeAtLeast</code> row reading a named accumulator — both of
 which name the signal that paid for the challenge, which a single
 running total never could.</p>
-<table>
-<thead>
-<tr>
-<th>Directive</th>
-<th>Syntax</th>
-<th>Default</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>BotShieldForgivenessNonInteractive</code></td>
-<td><code>N</code></td>
-<td><code>10</code></td>
-</tr>
-<tr>
-<td><code>BotShieldForgivenessInteractive</code></td>
-<td><code>N</code></td>
-<td><code>25</code></td>
-</tr>
-<tr>
-<td><code>BotShieldForgivenessCaptcha</code></td>
-<td><code>N</code></td>
-<td><code>50</code></td>
-</tr>
-<tr>
-<td><code>BotShieldForgivenessCapPerHour</code></td>
-<td><code>N</code></td>
-<td><code>200</code> (0 disables)</td>
-</tr>
-</tbody>
-</table>
-<p>See <a href="../site-model/index.html">site model</a> for how a tier is chosen.</p>
-<p><code>BotShieldForgivenessCapPerHour</code> caps total cookie-side
-forgiveness in any rolling 60-minute window. Default 200 ≈ 4–8
-nochallenge outcomes worth of credit. Lower for stricter farming
-resistance; 0 disables (legacy behavior).</p>
+<p>What forgiveness was protecting is still protected, by the thing that
+was always doing the work: a client that solves has the flags it was
+carrying at that moment excused for the life of its cookie. Forgiveness
+could never break a challenge loop on its own, because flag effects
+re-apply every request — a forgiven-to-zero score was re-raised on the
+next one. See <a href="../site-model/index.html#carry-forward-gate">site model</a>.</p>
 <h2 id="silent-tier-dispatch">Silent-tier dispatch</h2>
 <table>
 <thead>
@@ -1980,14 +1955,12 @@ loop, not a challenge.</strong> The replacement scores above fix the
 <code>tier_floor</code> bypass but leave a second trap: any flag whose <code>add=</code>
 clears a <code>BotShieldChallengeAtLeast</code> row by itself walks into
 it. Solving does
-not clear a flag. Forgiveness reduces the score carried <em>in the
-cookie</em>, and then <code>bs_apply_flag_triggers</code> re-adds the flag's score on
-the very next request — <code>botshield.c</code> says so at the forgiveness site:</p>
-<blockquote>
-<p>No floor on the forgiven score even on flagged cookies. Flag effects
-are re-applied at request time [...] so a forgiven-to-zero score on a
-flagged cookie is simply re-raised on the next request.</p>
-</blockquote>
+not clear a flag, and a flag's score re-applies on the very next
+request. Forgiveness used to reduce a score carried in the cookie and
+could not help: <code>bs_apply_flag_triggers</code> re-added the flag's
+contribution immediately, so a forgiven-to-zero score was raised again
+before it could matter. Both the carried score and forgiveness are gone
+now; what breaks the loop is <code>flags_excused</code>.</p>
 <p>So a flagged client is re-challenged forever however many times it
 solves. In production this looked like <code>pow_ok</code> succeeding roughly once
 a second, each success followed immediately by another

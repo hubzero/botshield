@@ -73,12 +73,6 @@ extern "C" {
  * right value is the smallest that still proves capability. */
 #define BS_DEFAULT_DIFFICULTY 3
 #define BS_CLOCK_SKEW_AHEAD   60    /* grace if client clock runs ahead */
-#define BS_DEFAULT_FORGIVE_NON_INTERACTIVE   10
-#define BS_DEFAULT_FORGIVE_INTERACTIVE     25
-#define BS_DEFAULT_FORGIVE_CAPTCHA  50
-/* E15 — per-cookie hourly cap on accumulated forgiveness. 200
- * points/hour ≈ 4-8 nochallenge outcomes worth of credit. */
-#define BS_DEFAULT_FORGIVE_CAP_PER_HOUR  200
 #define BS_FORGIVE_WINDOW_SEC            3600
 #define BS_COOKIE_NAME        "_bs_session"
 /*  `__Host-` prefix variant. We emit
@@ -263,9 +257,6 @@ struct bs_dir_cfg {
     int non_interactive_mode;            /* bs_non_interactive_mode; UNSET inherits */
     /* E18 — inline form captcha. -1 inherit, 0 off, 1 on. */
     int form_captcha;
-    int forgive_non_interactive;         /* score credit on noninteractive tier pass */
-    int forgive_interactive;           /* score credit on form-tier pass */
-    int forgive_captcha;        /* score credit on captcha pass */
     const char *cookie_domain;  /* if set, Set-Cookie Domain= attribute */
     /* BotShieldTrigger — per-Apache-scope trigger list. Each entry
      * is a bs_trigger_action *; the request-time walker iterates
@@ -464,8 +455,6 @@ typedef struct bs_server_cfg {
     /* E13 — reputation namespace for SHM-backed state. */
     apr_uint32_t        ns_id;            /* effective; resolved post_config */
     const char         *share_scope_token; /* explicit override; NULL = default */
-    /* E15 — per-cookie hourly forgiveness cap. */
-    int                 forgive_cap_per_hour;
     /* E3 — path-based triggers. */
     apr_array_header_t *request_triggers;
     /* E4 — cookie triggers. */
@@ -808,14 +797,6 @@ void bs_path_pattern_warn_middle_star(cmd_parms *cmd,
 /* Score system (bs_get_score, bs_score_add, bs_decision_reason_names,
  * bs_score_reasons_joined, bs_apply_flag_triggers) lives in score.h. */
 
-/* Apply the per-cookie forgiveness cap. Modifies *consumed and
- * *window_start in place; returns the points actually granted.
- * Window rolls if more than BS_FORGIVE_WINDOW_SEC has passed since
- * window_start. Defined in config.c next to bs_set_forgive_cap. */
-int bs_forgiveness_apply_cap(int requested, int cap,
-                             apr_uint32_t now_sec,
-                             apr_uint32_t *window_start,
-                             apr_uint32_t *consumed);
 
 /* Parse a comma-separated list of flag-bit names ("honeypot_hit,
  * scanner_probe") into a bit mask. Sets *err to a pool-allocated

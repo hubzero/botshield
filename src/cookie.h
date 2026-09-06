@@ -169,16 +169,6 @@ int bs_should_carry_prior_rep(const char *cverr,
 int bs_carry_forward_eligible(request_rec *r, const bs_dir_cfg *cfg,
                               bs_challenge *out_prior_ch);
 
-/* Apply rep-carry math: clamp forgive_amount against the per-cookie
- * hourly cap, compute new score = prior.score - forgive, clamp at
- * zero. forgive_amount is per-tier policy, picked by the caller
- * (cfg->forgive_non_interactive / forgive_interactive / forgive_captcha). The
- * caller bumps target->passes_X afterward (the "ever
- * passed" clamp). */
-void bs_apply_rep_carry(request_rec *r, const bs_dir_cfg *cfg,
-                        const bs_challenge *prior_ch,
-                        bs_rep_state *target,
-                        int forgive_amount);
 
 #ifdef __cplusplus
 }

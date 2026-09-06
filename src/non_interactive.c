@@ -960,9 +960,6 @@ static int bs_embedded_verify_pow_gcm(request_rec *r, bs_dir_cfg *cfg,
             apr_time_t challenged_at = ch.rep.challenged_at;
             ch.rep = prior_ch.rep;
             ch.rep.challenged_at = challenged_at;
-            bs_apply_rep_carry(r, cfg, &prior_ch, &ch.rep,
-                               bs_effective_int(cfg->forgive_non_interactive,
-                                                BS_DEFAULT_FORGIVE_NON_INTERACTIVE));
         }
         ch.rep.passes_non_interactive = 1;
     }
@@ -1203,7 +1200,6 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
     const char *cookie_alg_name = NULL;
     const char *merr = bs_captcha_carry_and_mint(r, cfg,
         BS_CAPTCHA_PASSES_SILENT,
-        bs_effective_int(cfg->forgive_non_interactive, BS_DEFAULT_FORGIVE_NON_INTERACTIVE),
         /* auto_tier */ 1,
         &ch, &cookie_alg_name);
     if (merr) {

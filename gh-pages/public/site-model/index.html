@@ -106,8 +106,7 @@
 <li class="toc__item toc__item--level-2"><a href="#score-composition">Score composition</a></li>
 <li class="toc__item toc__item--level-2"><a href="#built-in-heuristic-signals">Built-in heuristic signals</a></li>
 <li class="toc__item toc__item--level-2"><a href="#cookie-carried-reputation">Cookie-carried reputation</a></li>
-<li class="toc__item toc__item--level-3"><a href="#forgiveness">Forgiveness</a></li>
-<li class="toc__item toc__item--level-3"><a href="#forgiveness-cap">Forgiveness cap</a></li>
+<li class="toc__item toc__item--level-3"><a href="#what-a-solve-buys">What a solve buys</a></li>
 <li class="toc__item toc__item--level-3"><a href="#carry-forward-gate">Carry-forward gate</a></li>
 <li class="toc__item toc__item--level-2"><a href="#inspecting-decisions">Inspecting decisions</a></li>
 <li class="toc__item toc__item--level-2"><a href="#tuning-workflow">Tuning workflow</a></li>
@@ -291,12 +290,9 @@ solve carry the accumulated reputation block.</p>
 <p>The wire format is an authenticated AES-256-GCM envelope; the
 plaintext fields include:</p>
 <ul>
-<li><code>score</code> — running total</li>
 <li><code>flags</code> — credit/penalty bits accumulated across challenges</li>
 <li><code>passes_silent</code> / <code>passes_form</code> / <code>passes_captcha</code> — counters of
 successful challenges at each tier</li>
-<li><code>forgive_window_start</code> / <code>forgive_consumed</code> — forgiveness-cap
-state (see below)</li>
 <li><code>expires_at</code> — unix timestamp; cookies past expiry fail verify</li>
 </ul>
 <p>The <code>Set-Cookie</code> line carries no <code>Expires</code> or <code>Max-Age</code> attribute
@@ -305,11 +301,12 @@ when the browsing session ends. The <code>expires_at</code> field inside the
 envelope still acts as a server-side hard cap, so a stale cookie
 that survives via a long-lived browser session still gets
 rejected on verify.</p>
-<p>On subsequent requests that cookie's <code>score</code> field becomes the
-<code>cookie_score</code> term in the composition. Repeated good behavior
-accumulates negative <code>cookie_score</code> (forgiveness credit applied at
-challenge-issue time); repeated suspicious behavior accumulates
-positive.</p>
+<p>The cookie carried a <code>score</code> field until protocol 6, and a request's
+total was that plus what the request itself scored. Nothing read it for
+a decision after the tier cut-points went, so it was signed and carried
+and consulted by nobody. What the cookie carries about the past now is
+discrete and named: which challenges this client has passed, and which
+flags were excused when it passed them.</p>
 <p>The decision log's <code>cookie=</code> field reports one of <code>solved</code> (verified
 <strong>and</strong> carrying challenge-solve proof), <code>ok</code> (verified, no such proof
 — a presence cookie), <code>expired</code>, <code>bad_sig</code>, <code>bad_format</code>, <code>absent</code>, or
@@ -329,48 +326,20 @@ the log, for this ratio.</p>
 <p>The reputation persists across requests but expires with the cookie
 TTL (<code>BotShieldCookieTTL</code>, default 1 hour). After expiry users
 start fresh.</p>
-<h3 id="forgiveness">Forgiveness</h3>
-<p>Each successful challenge applies a negative score credit
-(&quot;forgiveness&quot;) so a client that has just proven itself doesn't
-get re-challenged on the next request:</p>
-<table>
-<thead>
-<tr>
-<th>Tier</th>
-<th>Default credit</th>
-<th>Directive</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>noninteractive</code></td>
-<td>-10</td>
-<td><code>BotShieldForgivenessNonInteractive</code></td>
-</tr>
-<tr>
-<td><code>interactive</code></td>
-<td>-25</td>
-<td><code>BotShieldForgivenessInteractive</code></td>
-</tr>
-<tr>
-<td><code>captcha</code></td>
-<td>-50</td>
-<td><code>BotShieldForgivenessCaptcha</code></td>
-</tr>
-</tbody>
-</table>
-<h3 id="forgiveness-cap">Forgiveness cap</h3>
-<p>To prevent farming — bot operators stockpiling forgiveness credit by
-solving many cheap challenges then trading the score down — the
-cookie carries a per-client hourly cap on accumulated forgiveness:</p>
-<pre><code class="language-apache">BotShieldForgivenessCapPerHour 200
-</code></pre>
-<p>Default is 200 points per rolling hour, ≈ 4–8 nochallenge outcomes
-worth of credit. The cap state lives in the cookie itself, so
-forgiveness honors the cap across cookie re-issues without server-
-side bookkeeping.</p>
-<p>Set to 0 to disable the cap (legacy behavior). Set to a smaller
-value for stricter farming resistance.</p>
+<h3 id="what-a-solve-buys">What a solve buys</h3>
+<p>A successful challenge used to apply a negative score credit
+(&quot;forgiveness&quot;) against the running total in the cookie, with an hourly
+cap so a bot could not stockpile credit by solving cheap challenges.
+Both went with the total in protocol 6.</p>
+<p>What a solve buys now is discrete: the matching <code>passes_*</code> marker, and
+<code>flags_excused</code> — the flags this client was carrying at the moment it
+solved are answered for, for the life of the cookie. That is what stops
+a flagged client being re-challenged forever, and it is what was doing
+that work all along. Forgiveness never could: flag effects re-apply
+every request, so a forgiven-to-zero score came back before the next
+decision.</p>
+<p>Anything flagged <em>after</em> the solve is new evidence and still fires, so
+a solve settles the debt it was challenged for without buying immunity.</p>
 <h3 id="carry-forward-gate">Carry-forward gate</h3>
 <p>When the module mints a fresh cookie (silent verify, form-captcha
 verify, captcha-verify, embedded-verify), it tries to carry the
@@ -380,9 +349,8 @@ prior cookie's reputation block forward. Carry-forward is gated:</p>
 <li><code>expired</code> → reject; indefinite reputation transfer is exactly the
 evasion this gate prevents.</li>
 <li>pre-auth errors with no rep struct populated → reject.</li>
-<li>everything else → carry forward, apply the per-tier forgiveness
-credit through the cap, increment the matching <code>passes_*</code>
-counter.</li>
+<li>everything else → carry forward and increment the matching
+<code>passes_*</code> counter.</li>
 </ul>
 <h2 id="inspecting-decisions">Inspecting decisions</h2>
 <p>Every decision emits two log lines: a human-readable prose line and

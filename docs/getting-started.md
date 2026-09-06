@@ -92,7 +92,7 @@ Drop a single block into the vhost you want gated:
 </VirtualHost>
 ```
 
-That's the floor. Everything else (tier thresholds, forgiveness,
+That's the floor. Everything else (challenge rows, signal rules,
 allow lists, captcha providers, triggers) ships with reasonable
 defaults documented on the [site model](site-model.md) and
 [directives](directives.md) pages.

@@ -410,7 +410,6 @@ int bs_form_captcha_fixup(request_rec *r)
     const char *cookie_alg_name = NULL;
     const char *merr = bs_captcha_carry_and_mint(r, cfg,
         BS_CAPTCHA_PASSES_CAPTCHA,
-        bs_effective_int(cfg->forgive_captcha, BS_DEFAULT_FORGIVE_CAPTCHA),
         /* auto_tier */ 0,
         &ch, &cookie_alg_name);
     if (merr) {

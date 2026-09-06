@@ -202,7 +202,6 @@ const char *bs_captcha_carry_and_mint(
     request_rec *r,
     const bs_dir_cfg *cfg,
     bs_captcha_passes_kind passes_kind,
-    int forgive_amount,
     int auto_tier,
     bs_challenge *out_ch,
     const char **out_alg_name);

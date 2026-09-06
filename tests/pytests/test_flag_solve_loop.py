@@ -11,7 +11,7 @@ The shape of the bug is why it survived a test suite that already
 covered flags and already covered solving. A test that solves once and
 asserts the next request passes is not enough, because the first
 post-solve request is not where this fails -- the cookie is fresh and
-carries a just-forgiven score. The loop shows up on the request AFTER
+carries proof of the solve. The loop shows up on the request AFTER
 that, when the flag has been re-applied. Every test here therefore
 makes at least two post-solve requests.
 """

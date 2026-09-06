@@ -578,7 +578,7 @@ int bs_check_policy(request_rec *r)
                           || (scfg && scfg->robots_mode
                                         == BS_ROBOTS_MODE_OBSERVE);
         if (robots_observe) {
-            bs_score_add(r, 0, 0,
+            bs_score_add(r, 0,
                 apr_pstrcat(r->pool, "robotsblock:", rgroup,
                             ":observe", NULL));
             bs_set_would_outcome(r, "~block");
@@ -590,7 +590,7 @@ int bs_check_policy(request_rec *r)
             /* Robots.txt Disallow → 403 with a +100 score hit and a
              * 1-hour flag, mirroring the deny weight an explicit
              * BotShieldRequestTrigger ... status=403 would carry. */
-            bs_score_add(r, 100, 3600,
+            bs_score_add(r, 100,
                 apr_pstrcat(r->pool, "robotsblock:", rgroup, NULL));
             return HTTP_FORBIDDEN;
         }
@@ -631,7 +631,7 @@ int bs_check_policy(request_rec *r)
                                              now_t, scfg->ns_id)) {
                 /* E9 — escalation gate. Active only outside observe
                  * mode; observe must not enforce. */
-                bs_score_add(r, BS_PENALTY_RATE_LIMIT, 3600,
+                bs_score_add(r, BS_PENALTY_RATE_LIMIT,
                     apr_pstrcat(r->pool, "ratelimitabuse:",
                                 e->name, NULL));
                 if (bs_shm.metrics) {
@@ -648,7 +648,7 @@ int bs_check_policy(request_rec *r)
             }
             /* Over budget. */
             if (observe) {
-                bs_score_add(r, 0, 0,
+                bs_score_add(r, 0,
                     apr_pstrcat(r->pool, "ratelimitexceeded:",
                                 e->name, ":observe", NULL));
                 bs_set_would_outcome(r, "~rate_limited");
@@ -667,7 +667,7 @@ int bs_check_policy(request_rec *r)
                                   ? e->window_sec - (now - win) : 1;
             apr_table_setn(r->err_headers_out, "Retry-After",
                 apr_psprintf(r->pool, "%u", retry));
-            bs_score_add(r, BS_PENALTY_RATE_LIMIT, 3600,
+            bs_score_add(r, BS_PENALTY_RATE_LIMIT,
                 apr_pstrcat(r->pool, "ratelimitexceeded:",
                             e->name, NULL));
             if (bs_shm.metrics) {

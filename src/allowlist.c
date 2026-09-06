@@ -560,7 +560,7 @@ void bs_check_allow(request_rec *r,
             __atomic_fetch_add(&bs_shm.metrics->bot_allow_total,
                                1, __ATOMIC_RELAXED);
         }
-        bs_score_add(r, 0, 0,
+        bs_score_add(r, 0,
             apr_pstrcat(r->pool, "verifiedbot:", name, NULL));
         return;
     }
@@ -580,7 +580,7 @@ void bs_check_allow(request_rec *r,
             __atomic_fetch_add(&bs_shm.metrics->bot_fake_total,
                                1, __ATOMIC_RELAXED);
         }
-        bs_score_add(r, 0, 0,
+        bs_score_add(r, 0,
             apr_pstrcat(r->pool, "fakebot:", name, NULL));
         return;
     }

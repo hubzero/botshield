@@ -84,9 +84,6 @@ void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->secret_secondary_len = 0;
     cfg->non_interactive_mode   = BS_NON_INTERACTIVE_MODE_UNSET;
     cfg->form_captcha  = BS_UNSET;
-    cfg->forgive_non_interactive  = BS_UNSET;
-    cfg->forgive_interactive    = BS_UNSET;
-    cfg->forgive_captcha = BS_UNSET;
     cfg->cookie_domain   = NULL;
     cfg->scope_triggers       = NULL;
     cfg->scope_triggers_reset = 0;
@@ -258,8 +255,6 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
         ? add->share_scope_token : base->share_scope_token;
     out->ns_id = add->ns_id;
     /* E15 — child-set value wins; 0 means "inherit". */
-    out->forgive_cap_per_hour = (add->forgive_cap_per_hour > 0)
-        ? add->forgive_cap_per_hour : base->forgive_cap_per_hour;
     out->request_triggers = bs_merge_rule_array(p, base->request_triggers,
                                              add->request_triggers);
     out->cookie_triggers = bs_merge_rule_array(p, base->cookie_triggers,
@@ -428,7 +423,6 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->ns_id                 = 0;
     scfg->share_scope_token     = NULL;
     /* E15 — 0 means "inherit / use default". */
-    scfg->forgive_cap_per_hour  = 0;
     scfg->request_triggers         = apr_array_make(p, 4, sizeof(void *));
     scfg->cookie_triggers  = apr_array_make(p, 4, sizeof(void *));
     scfg->env_triggers     = apr_array_make(p, 4, sizeof(void *));
@@ -584,9 +578,6 @@ void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
                        ? base->non_interactive_mode : add->non_interactive_mode;
     out->form_captcha  = (add->form_captcha  == BS_UNSET)
                        ? base->form_captcha : add->form_captcha;
-    out->forgive_non_interactive  = (add->forgive_non_interactive  == BS_UNSET) ? base->forgive_non_interactive  : add->forgive_non_interactive;
-    out->forgive_interactive    = (add->forgive_interactive    == BS_UNSET) ? base->forgive_interactive    : add->forgive_interactive;
-    out->forgive_captcha = (add->forgive_captcha == BS_UNSET) ? base->forgive_captcha : add->forgive_captcha;
     out->cookie_domain   = add->cookie_domain ? add->cookie_domain : base->cookie_domain;
     /* Flag-on-match is additive: a more-specific scope that adds a flag
      * is merged with any broader-scope flag, so an inner <Location> adds
@@ -2945,19 +2936,6 @@ const char *bs_set_difficulty(cmd_parms *cmd, void *cfg_v, const char *arg)
     return NULL;
 }
 
-static const char *bs_set_score_int(const char *directive, int *slot,
-                                    const char *arg, apr_pool_t *p)
-{
-    char *end = NULL;
-    long n = strtol(arg, &end, 10);
-    if (end == arg || *end != '\0' || n < 0 || n > 10000) {
-        return apr_psprintf(p,
-            "%s: expected an integer in 0..10000, got '%s'", directive, arg);
-    }
-    *slot = (int)n;
-    return NULL;
-}
-
 /* BotShieldDashboardAccess / BotShieldMetricsAccess
  *     <addr|cidr>... | all | none
  *
@@ -3275,25 +3253,6 @@ const char *bs_set_access_log(cmd_parms *cmd, void *cfg_v, int argc,
     cfg->accesslog_suppress = (int)mask;
     return NULL;
 }
-
-const char *bs_set_forgive_non_interactive(cmd_parms *cmd, void *cfg_v, const char *arg)
-{
-    return bs_set_score_int("BotShieldForgivenessNonInteractive",
-        &((bs_dir_cfg *)cfg_v)->forgive_non_interactive, arg, cmd->pool);
-}
-
-const char *bs_set_forgive_interactive(cmd_parms *cmd, void *cfg_v, const char *arg)
-{
-    return bs_set_score_int("BotShieldForgivenessInteractive",
-        &((bs_dir_cfg *)cfg_v)->forgive_interactive, arg, cmd->pool);
-}
-
-const char *bs_set_forgive_captcha(cmd_parms *cmd, void *cfg_v, const char *arg)
-{
-    return bs_set_score_int("BotShieldForgivenessCaptcha",
-        &((bs_dir_cfg *)cfg_v)->forgive_captcha, arg, cmd->pool);
-}
-
 
 /* E18 — `BotShieldFormCaptcha on|off`. Per-scope opt-in for inline
  * form captcha verification on POST submit. When on, BotShield
@@ -4296,63 +4255,7 @@ const char *bs_set_share_scope(cmd_parms *cmd, void *dconf,
  * inside a rolling 1-hour window. 0 disables the cap (legacy
  * behavior). Range 1..1000 — beyond that the cap is effectively
  * absent anyway. */
-const char *bs_set_forgive_cap(cmd_parms *cmd, void *dconf,
-                                      const char *arg)
-{
-    (void)dconf;
-    char *end = NULL;
-    long n = strtol(arg, &end, 10);
-    if (!end || *end || n < 0 || n > 1000) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldForgivenessCapPerHour: '%s' must be an integer "
-            "0..1000 (0 disables)", arg);
-    }
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    /* Use 1 as a sentinel for "explicit 0 = disabled" so the merge's
-     * "> 0 wins" doesn't lose an explicit-zero override; map 0 input
-     * to a special sentinel that the apply helper treats as disabled.
-     * Simplest: use INT_MAX as "uncapped" and let merge work normally. */
-    scfg->forgive_cap_per_hour = (n == 0) ? INT_MAX : (int)n;
-    return NULL;
-}
 
-/* Apply the per-cookie forgiveness cap. Modifies *consumed and
- * *window_start in place (reflecting the cookie state we'll write
- * out) and returns the number of points actually granted, which may
- * be less than `requested` if the cap kicks in. Window rolls if more
- * than BS_FORGIVE_WINDOW_SEC has passed since window_start. */
-int bs_forgiveness_apply_cap(int requested,
-                             int cap,
-                             apr_uint32_t now_sec,
-                                    apr_uint32_t *window_start,
-                                    apr_uint32_t *consumed)
-{
-    if (requested <= 0) return requested;
-    if (cap <= 0 || cap == INT_MAX) {
-        /* Uncapped: still update the window state for observability. */
-        if (*window_start == 0 ||
-            now_sec - *window_start >= BS_FORGIVE_WINDOW_SEC) {
-            *window_start = now_sec;
-            *consumed = 0;
-        }
-        *consumed = (apr_uint32_t)((apr_uint64_t)*consumed + requested
-                                    > APR_UINT32_MAX
-                                    ? APR_UINT32_MAX
-                                    : *consumed + requested);
-        return requested;
-    }
-    if (*window_start == 0 ||
-        now_sec - *window_start >= BS_FORGIVE_WINDOW_SEC) {
-        *window_start = now_sec;
-        *consumed = 0;
-    }
-    int remaining = cap - (int)*consumed;
-    if (remaining < 0) remaining = 0;
-    int granted = (requested < remaining) ? requested : remaining;
-    *consumed = (apr_uint32_t)(*consumed + granted);
-    return granted;
-}
 
 const char *bs_set_endpoint_prefix(cmd_parms *cmd, void *cfg_v,
                                           const char *arg)

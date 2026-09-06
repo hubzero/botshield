@@ -73,8 +73,20 @@ typedef struct bs_dir_cfg bs_dir_cfg;
  * rejecting every cookie in circulation would re-challenge an entire
  * live site at once to gain nothing. It carries no session flags,
  * which is exactly what a v2 cookie means. */
-#define BS_PROTOCOL_VERSION   5
-#define BS_PROTOCOL_VERSION_MIN 2
+/* v6 drops score and the forgiveness pair: 13 fields, down from 16.
+ *
+ * No older version is accepted. The canonical string is what the
+ * signature covers, so verifying a v5 body would mean keeping the
+ * three removed fields in the struct purely to rebuild its canonical
+ * form -- which is the thing being removed. Live cookies fail the
+ * version check, read as no usable cookie, and their clients are
+ * challenged once. */
+/* Canonical field count for BS_PROTOCOL_VERSION. The splitter
+ * and the parser both read this; they used to carry separate
+ * literals, and disagreed. */
+#define BS_CANONICAL_FIELDS   13
+#define BS_PROTOCOL_VERSION   6
+#define BS_PROTOCOL_VERSION_MIN 6
 #define BS_SALT_BYTES         16
 #define BS_NONCE_BYTES        8
 
@@ -92,7 +104,7 @@ typedef struct bs_dir_cfg bs_dir_cfg;
  * old, or clamp the new forgiveness so the running consumed total
  * stays at or below BotShieldForgivenessCapPerHour. */
 typedef struct {
-    int          score;
+
     /* Flags the holder has already answered for.
      *
      * Wire field 7. It was originally "cookie-side flags", OR'd into the
@@ -117,8 +129,6 @@ typedef struct {
     int          passes_interactive;
     int          passes_captcha;
     apr_time_t   challenged_at;        /* unix sec */
-    apr_uint32_t forgive_window_start; /* unix sec; 0 = no window yet */
-    apr_uint32_t forgive_consumed;     /* points used inside current window */
 
     /* Flags this cookie session carries. The sibling of the flagged-IP
      * table: that remembers an address, this remembers one browser.

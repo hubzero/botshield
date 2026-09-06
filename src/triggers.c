@@ -805,7 +805,7 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
     int global_log_only = (dcfg && dcfg->enabled == BS_ENABLED_LOGONLY);
     int observe = global_log_only || (a->mode == BS_TMODE_OBSERVE);
     if (observe) {
-        bs_score_add(r, 0, 0,
+        bs_score_add(r, 0,
             apr_pstrcat(r->pool, family_tag, ":", trigger_name,
                         ":observe", NULL));
         /* If the rule's action carried a client-visible status
@@ -954,7 +954,7 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
                                   NULL)
                     : apr_pstrcat(r->pool, family_tag, ":", trigger_name,
                                   NULL);
-                bs_score_add(r, 0, 0, why);
+                bs_score_add(r, 0, why);
                 if (a->tier_floor >= 0) {
                     bs_set_request_tier_floor(r, a->tier_floor);
                 }
@@ -965,7 +965,7 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
              * means "don't enforce anything on this request" — the
              * flag-IP side-effect above is the trigger's only
              * future-request surface. */
-            bs_score_add(r, 0, 0,
+            bs_score_add(r, 0,
                 apr_pstrcat(r->pool, family_tag, ":", trigger_name,
                             ":pass", NULL));
             return BS_TEXEC_PASS_DECLINE;
@@ -975,7 +975,7 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
          * onto the cumulative score; a rule that wants to move
          * something says BotShieldScore <name>, which has already been
          * applied above. */
-        bs_score_add(r, 0, 0,
+        bs_score_add(r, 0,
             apr_pstrcat(r->pool, family_tag, ":", trigger_name, NULL));
         if (fam == BS_TFAMILY_COOKIE) return BS_TEXEC_PASS_CONTINUE;
         /* Scope: multiple BotShieldTrigger directives in the same
@@ -993,7 +993,7 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
      * penalty - credit, onto the cumulative score. Both keys are gone;
      * a rule that wants to move something says BotShieldScore <name>,
      * applied above. */
-    bs_score_add(r, 0, 0,
+    bs_score_add(r, 0,
         apr_pstrcat(r->pool, family_tag, ":", trigger_name, NULL));
 
     if (a->redirect_url) {

@@ -56,22 +56,24 @@ const char *bs_challenge_canonical(apr_pool_t *p,
     char nonce_hex[BS_NONCE_BYTES * 2 + 1];
     bs_to_hex(ch->salt,  BS_SALT_BYTES,  salt_hex);
     bs_to_hex(ch->nonce, BS_NONCE_BYTES, nonce_hex);
-    /* v2 canonical = v1 canonical + forgive_window_start +
-     * forgive_consumed (E15). v5 appends flags_active, for 16 fields;
-     * the HMAC cookie body adds 2 more (sig_hex, counter), so 18 on the
-     * wire. A v2 body is still accepted on the way in and reads as
-     * carrying no session flags. */
+    /* v6: 13 fields. v5 had 16 -- score at index 6 and the
+     * forgiveness window pair at 13..14 -- and all three described a
+     * cumulative score that no longer exists. The HMAC cookie body
+     * adds 2 more (sig_hex, counter), so 15 on the wire.
+     *
+     * Field order and count are the signature's subject. Adding one
+     * without bumping the version silently invalidates every cookie in
+     * circulation; removing one silently validates a forgery. */
     return apr_psprintf(p,
         "%d|%s|%s|%s|%d|%" APR_TIME_T_FMT
-        "|%d|%u|%d|%d|%d|%" APR_TIME_T_FMT "|%d|%u|%u|%u",
+        "|%u|%d|%d|%d|%" APR_TIME_T_FMT "|%d|%u",
         ch->version, ch->alg_name, salt_hex, nonce_hex,
         ch->difficulty, ch->expires_at,
-        ch->rep.score, (unsigned)ch->rep.flags_excused,
-        ch->rep.passes_non_interactive, ch->rep.passes_interactive, ch->rep.passes_captcha,
+        (unsigned)ch->rep.flags_excused,
+        ch->rep.passes_non_interactive, ch->rep.passes_interactive,
+        ch->rep.passes_captcha,
         ch->rep.challenged_at,
         ch->auto_tier ? 1 : 0,
-        (unsigned)ch->rep.forgive_window_start,
-        (unsigned)ch->rep.forgive_consumed,
         (unsigned)ch->rep.flags_active);
 }
 

@@ -291,7 +291,7 @@ apr_status_t bs_app_feedback_filter(ap_filter_t *f,
     int global_log_only = (dcfg && dcfg->enabled == BS_ENABLED_LOGONLY);
     int observe = global_log_only || (ft->action.mode == BS_TMODE_OBSERVE);
     if (observe) {
-        bs_score_add(r, 0, 0,
+        bs_score_add(r, 0,
             apr_pstrcat(r->pool, "feedbacktrigger:", event,
                         ":observe", NULL));
         if (bs_shm.metrics) {
