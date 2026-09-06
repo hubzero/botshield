@@ -370,6 +370,19 @@ int bs_check_policy(request_rec *r)
                                           scfg->session_names, NULL))
                     continue;
             }
+            if (t->flagged_bit) {
+                /* A fresh probe rather than a value captured before
+                 * the walk. Rules above this one may have written to
+                 * the table, and this reads what they did -- the same
+                 * contract BotShieldScoreAtLeast has for accumulators.
+                 * The cost is one hash probe per rule that asks. */
+                unsigned char fip[16];
+                apr_uint32_t  fbits = 0;
+                if (!bs_parse_client_ip(r->useragent_ip, fip)) continue;
+                bs_mask_ipv6_prefix(fip, scfg->ipv6_prefix_bits);
+                bs_flagged_ip_lookup(fip, &fbits, scfg->ns_id);
+                if (!(fbits & t->flagged_bit)) continue;
+            }
             if (t->ck_pred >= 0) {
                 if (!rt_cmap) rt_cmap = bs_parse_cookies_once(r);
                 bs_cookie_trigger_entry probe;

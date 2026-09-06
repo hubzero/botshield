@@ -969,6 +969,86 @@ all of policy, which is where the tier has always been chosen. Use
 gate *that rule's* match; use `BotShieldChallengeAtLeast` when you want
 it to choose a challenge tier.
 
+#### `flagged=` — does this address already carry a flag
+
+```apache
+<BotShieldRule escalate>
+    BotShieldFlagged   scanner_probe
+    BotShieldPath      /admin/*
+    BotShieldChallenge captcha
+</BotShieldRule>
+```
+
+Flag names are the registered set: `honeypot_hit`, `scanner_probe`,
+`fake_bot`, `pow_fail_streak`, `app_verified_human`,
+`app_verified_session`, `app_trust_signal`, `blocked`.
+
+**The read is live.** A rule sees flags written by rules *above* it in
+the same walk, the same contract `BotShieldScoreAtLeast` has for
+accumulators — a rule reads what rules above it have done. So a trap
+and its response can be one request rather than two:
+
+```apache
+<BotShieldRule trap>
+    BotShieldPath      /.env
+    BotShieldFlagIP    scanner_probe
+    BotShieldScore     probes +10
+</BotShieldRule>
+
+<BotShieldRule act>
+    BotShieldFlagged   scanner_probe
+    BotShieldRespond   404
+</BotShieldRule>
+```
+
+The `BotShieldScore` line in the trap is load-bearing and easy to miss.
+A rule whose only action is a flag write ends the walk, so without
+something that keeps it going — a score movement or a tier — nothing
+below it runs and the reader never fires. That is ordinary rule
+behaviour rather than anything `flagged=` introduced, but it is the
+difference between the pattern above working and silently not.
+
+The cost of a live read is that **rule order is load-bearing**. Put the
+reader above the writer and it fires from the *next* request instead of
+this one. That is the same trade `BotShieldScoreAtLeast` makes, and it
+is why both read the same way rather than each choosing.
+
+**A rule may not match a flag and write the same flag.** It is a config
+error:
+
+```apache
+# configtest: skip -- this block is the example of what is refused;
+# httpd rejecting it is the documented behaviour.
+# refused
+<BotShieldRule selffeed>
+    BotShieldFlagged   scanner_probe
+    BotShieldFlagIP    scanner_probe
+</BotShieldRule>
+```
+
+Such a rule refreshes the flag's expiry on every request it matches, so
+the address never ages out of it — and expiry is the only recovery for
+a client that *cannot* solve a challenge. (`flags_excused` covers the
+client that can.) The match earns nothing there either: if the rule's
+other conditions justify the write, they justify it whether or not the
+flag is already set. Write the flag from the rule that detects the
+behaviour.
+
+Matching one flag and writing a *different* one is allowed, and is the
+escalation shape: `scanner_probe` on a sensitive path becomes
+`honeypot_hit`.
+
+This check is per-rule. Rule A writing a flag while rule B matches it
+and writes it again is the same hazard spread across two rules, and
+catching that would mean reading the config as a graph — so the check
+is honestly partial rather than pretending otherwise.
+
+There is no `!flagged=`. An address *not* carrying a flag is the
+ordinary case, and a rule conditioned on it fires on nearly every
+request; say what you mean with the other conditions. Negation is
+accepted only on `cookie=` and `env=`, where the complement of "this
+named thing is present" has no name.
+
 #### `cookie=` and `env=` — the two open-set conditions
 
 Every other condition here is an enumeration whose complement has a

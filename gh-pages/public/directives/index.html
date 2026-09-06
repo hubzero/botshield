@@ -1473,6 +1473,70 @@ all of policy, which is where the tier has always been chosen. Use
 <code>BotShieldScoreAtLeast</code> inside a rule when you want the accumulator to
 gate <em>that rule's</em> match; use <code>BotShieldChallengeAtLeast</code> when you want
 it to choose a challenge tier.</p>
+<h4 id="flagged-does-this-address-already-carry-a-flag"><code>flagged=</code> — does this address already carry a flag</h4>
+<pre><code class="language-apache">&lt;BotShieldRule escalate&gt;
+    BotShieldFlagged   scanner_probe
+    BotShieldPath      /admin/*
+    BotShieldChallenge captcha
+&lt;/BotShieldRule&gt;
+</code></pre>
+<p>Flag names are the registered set: <code>honeypot_hit</code>, <code>scanner_probe</code>,
+<code>fake_bot</code>, <code>pow_fail_streak</code>, <code>app_verified_human</code>,
+<code>app_verified_session</code>, <code>app_trust_signal</code>, <code>blocked</code>.</p>
+<p><strong>The read is live.</strong> A rule sees flags written by rules <em>above</em> it in
+the same walk, the same contract <code>BotShieldScoreAtLeast</code> has for
+accumulators — a rule reads what rules above it have done. So a trap
+and its response can be one request rather than two:</p>
+<pre><code class="language-apache">&lt;BotShieldRule trap&gt;
+    BotShieldPath      /.env
+    BotShieldFlagIP    scanner_probe
+    BotShieldScore     probes +10
+&lt;/BotShieldRule&gt;
+
+&lt;BotShieldRule act&gt;
+    BotShieldFlagged   scanner_probe
+    BotShieldRespond   404
+&lt;/BotShieldRule&gt;
+</code></pre>
+<p>The <code>BotShieldScore</code> line in the trap is load-bearing and easy to miss.
+A rule whose only action is a flag write ends the walk, so without
+something that keeps it going — a score movement or a tier — nothing
+below it runs and the reader never fires. That is ordinary rule
+behaviour rather than anything <code>flagged=</code> introduced, but it is the
+difference between the pattern above working and silently not.</p>
+<p>The cost of a live read is that <strong>rule order is load-bearing</strong>. Put the
+reader above the writer and it fires from the <em>next</em> request instead of
+this one. That is the same trade <code>BotShieldScoreAtLeast</code> makes, and it
+is why both read the same way rather than each choosing.</p>
+<p><strong>A rule may not match a flag and write the same flag.</strong> It is a config
+error:</p>
+<pre><code class="language-apache"># configtest: skip -- this block is the example of what is refused;
+# httpd rejecting it is the documented behaviour.
+# refused
+&lt;BotShieldRule selffeed&gt;
+    BotShieldFlagged   scanner_probe
+    BotShieldFlagIP    scanner_probe
+&lt;/BotShieldRule&gt;
+</code></pre>
+<p>Such a rule refreshes the flag's expiry on every request it matches, so
+the address never ages out of it — and expiry is the only recovery for
+a client that <em>cannot</em> solve a challenge. (<code>flags_excused</code> covers the
+client that can.) The match earns nothing there either: if the rule's
+other conditions justify the write, they justify it whether or not the
+flag is already set. Write the flag from the rule that detects the
+behaviour.</p>
+<p>Matching one flag and writing a <em>different</em> one is allowed, and is the
+escalation shape: <code>scanner_probe</code> on a sensitive path becomes
+<code>honeypot_hit</code>.</p>
+<p>This check is per-rule. Rule A writing a flag while rule B matches it
+and writes it again is the same hazard spread across two rules, and
+catching that would mean reading the config as a graph — so the check
+is honestly partial rather than pretending otherwise.</p>
+<p>There is no <code>!flagged=</code>. An address <em>not</em> carrying a flag is the
+ordinary case, and a rule conditioned on it fires on nearly every
+request; say what you mean with the other conditions. Negation is
+accepted only on <code>cookie=</code> and <code>env=</code>, where the complement of &quot;this
+named thing is present&quot; has no name.</p>
 <h4 id="cookie-and-env-the-two-open-set-conditions"><code>cookie=</code> and <code>env=</code> — the two open-set conditions</h4>
 <p>Every other condition here is an enumeration whose complement has a
 name: <code>solved=no</code>, <code>crawler=no</code>, <code>cookies=any</code>. These two are not — an

@@ -278,6 +278,15 @@ typedef struct {
      *
      * pred_kind is -1 when unset; otherwise the same enums the cookie
      * and env families use, so one matcher serves both. */
+    /* flagged= : does the address already carry this flag.
+     *
+     * Read live -- a fresh table probe at evaluation time, so a rule
+     * sees flags written by rules above it in the same walk. That
+     * matches how scoreatleast reads accumulators, and it is what
+     * makes trap-then-act work in one request rather than two.
+     *
+     * 0 = no condition. */
+    apr_uint32_t       flagged_bit;
     int                ck_pred;         /* enum bs_cookie_pred_kind, -1 unset */
     const char        *ck_name;
     const char        *ck_value;        /* EQ / NE / CONTAINS only */

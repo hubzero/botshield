@@ -1012,6 +1012,34 @@ static int bs_ua_is_selector_list(const char *ua)
     return 1;
 }
 
+typedef struct {
+    const char     *name;
+    apr_uint32_t    bit;
+} bs_flag_meta;
+
+static const bs_flag_meta bs_flag_metadata[] = {
+    { "honeypot_hit",         BS_FLAG_HONEYPOT_HIT         },
+    { "scanner_probe",        BS_FLAG_SCANNER_PROBE        },
+    { "fake_bot",             BS_FLAG_FAKE_BOT             },
+    { "pow_fail_streak",      BS_FLAG_POW_FAIL_STREAK      },
+    { "app_verified_human",   BS_FLAG_APP_VERIFIED_HUMAN   },
+    { "app_verified_session", BS_FLAG_APP_VERIFIED_SESSION },
+    { "app_trust_signal",     BS_FLAG_APP_TRUST_SIGNAL     },
+    { "blocked",              BS_FLAG_BLOCKED              },
+};
+#define BS_FLAG_META_COUNT \
+    (sizeof(bs_flag_metadata) / sizeof(bs_flag_metadata[0]))
+
+static const bs_flag_meta *bs_flag_meta_for_name(const char *name)
+{
+    for (size_t i = 0; i < BS_FLAG_META_COUNT; i++) {
+        if (strcmp(bs_flag_metadata[i].name, name) == 0) {
+            return &bs_flag_metadata[i];
+        }
+    }
+    return NULL;
+}
+
 /* Parse a rule's cookie= value: [!]NAME[=|!|~ VALUE].
  *
  * `negated` comes from the caller: the block walker has already moved
@@ -1190,6 +1218,7 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
     e->solved_pred = -1;              /* no solve-proof condition */
     e->firstsight_pred = -1;          /* no Bloom-membership condition */
     e->acceptlang_pred = -1;          /* no Accept-Language condition */
+    e->flagged_bit = 0;               /* no flagged= condition */
     e->ck_pred     = -1;              /* no cookie= condition */
     e->env_pred    = -1;              /* no env= condition */
     e->score_pred_name = NULL;        /* no accumulator condition */
@@ -1347,6 +1376,23 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                 }
                 continue;
             }
+            if (klen == 7 && strncasecmp(arg, "flagged", 7) == 0) {
+                const bs_flag_meta *fm = bs_flag_meta_for_name(val);
+                if (!fm) {
+                    return apr_psprintf(cmd->pool,
+                        "%s: flagged='%s' is not a known flag", D, val);
+                }
+                if (neg) {
+                    return apr_psprintf(cmd->pool,
+                        "%s: '!' is not accepted on flagged=. An address "
+                        "not carrying a flag is the ordinary case, and a "
+                        "rule that fires on it fires on nearly every "
+                        "request -- say what you mean with the other "
+                        "conditions instead.", D);
+                }
+                e->flagged_bit = fm->bit;
+                continue;
+            }
             if (klen == 6 && strncasecmp(arg, "cookie", 6) == 0) {
                 const char *perr = bs_rule_parse_cookie(cmd->pool, val,
                     neg, &e->ck_pred, &e->ck_name, &e->ck_value);
@@ -1462,19 +1508,39 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
         e->has_cohort = 1;
     }
 
+    /* Matching a flag and writing the same flag makes it
+     * unexpirable: the rule refreshes its TTL on every request it
+     * matches, and TTL is the only way out for a client that cannot
+     * solve a challenge. The match earns nothing here either -- if the
+     * other conditions justify the write, they justify it whether or
+     * not the flag is already set.
+     *
+     * Same-rule only. The same hazard across two rules needs the
+     * config read as a graph, and claiming a complete check would be
+     * worse than this one being honestly partial. */
+    if (e->flagged_bit && (e->action.flag_ip & e->flagged_bit)) {
+        return apr_psprintf(cmd->pool,
+            "%s '%s': matches flagged= and writes the same flag, which "
+            "refreshes its expiry on every matching request -- the "
+            "address never ages out of it, and expiry is the only "
+            "recovery for a client that cannot solve. Write the flag "
+            "from the rule that detects the behaviour; this one does "
+            "not need to see it already set.", D, name);
+    }
+
     if (!e->path_patterns && !e->query_pattern
         && e->bscookie_pred < 0 && e->crawler_pred < 0
         && e->cookie_pred < 0 && e->exists_pred < 0
         && e->solved_pred < 0 && e->minload < 0
         && e->firstsight_pred < 0 && e->acceptlang_pred < 0
-        && e->ck_pred < 0 && e->env_pred < 0
+        && e->ck_pred < 0 && e->env_pred < 0 && !e->flagged_bit
         && !e->score_pred_name
         && !e->has_cohort) {
         return apr_psprintf(cmd->pool,
             "%s '%s': needs at least one match key (path=, query=, "
-            "cookies=, bscookie=, cookie=, env=, crawler=, exists=, "
-            "solved=, firstsight=, acceptlanguage=, minload=, ua=, "
-            "ipspec=). A rule "
+            "cookies=, bscookie=, cookie=, env=, flagged=, crawler=, "
+            "exists=, solved=, firstsight=, acceptlanguage=, minload=, "
+            "ua=, ipspec=). A rule "
             "with no condition "
             "matches every request - use BotShieldTrigger in the scope "
             "you mean instead", D, name);
@@ -1787,33 +1853,6 @@ const char *bs_set_trigger(cmd_parms *cmd, void *cfg_v,
  * difficulty delta, tier floor) lives in BotShieldFlagTrigger
  * entries instead, including the compiled-in defaults seeded by
  * bs_default_flag_triggers. */
-typedef struct {
-    const char     *name;
-    apr_uint32_t    bit;
-} bs_flag_meta;
-
-static const bs_flag_meta bs_flag_metadata[] = {
-    { "honeypot_hit",         BS_FLAG_HONEYPOT_HIT         },
-    { "scanner_probe",        BS_FLAG_SCANNER_PROBE        },
-    { "fake_bot",             BS_FLAG_FAKE_BOT             },
-    { "pow_fail_streak",      BS_FLAG_POW_FAIL_STREAK      },
-    { "app_verified_human",   BS_FLAG_APP_VERIFIED_HUMAN   },
-    { "app_verified_session", BS_FLAG_APP_VERIFIED_SESSION },
-    { "app_trust_signal",     BS_FLAG_APP_TRUST_SIGNAL     },
-    { "blocked",              BS_FLAG_BLOCKED              },
-};
-#define BS_FLAG_META_COUNT \
-    (sizeof(bs_flag_metadata) / sizeof(bs_flag_metadata[0]))
-
-static const bs_flag_meta *bs_flag_meta_for_name(const char *name)
-{
-    for (size_t i = 0; i < BS_FLAG_META_COUNT; i++) {
-        if (strcmp(bs_flag_metadata[i].name, name) == 0) {
-            return &bs_flag_metadata[i];
-        }
-    }
-    return NULL;
-}
 /* BotShieldFlagTrigger <flag> [reset] [action=<verb> args...]
  *
  * One unified config language for "when this flag fires, do X." Replaces
