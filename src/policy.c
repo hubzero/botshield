@@ -901,49 +901,7 @@ void bs_policy_dump(server_rec *s, apr_pool_t *p, bs_dir_cfg *cfg)
     }
 
     /* --- robots.txt --- */
-    /* --- effective tier thresholds ---
-     *
-     * Printed with their source because "not in the config file" and
-     * "not in effect" are different things, and confusing them is what
-     * made a flag worth 50 points a permanent challenge loop: the 20
-     * it had to clear was a compiled-in default that appeared nowhere
-     * an operator could read. */
     {
-        /* Configured values, not resolved defaults: unset means never,
-         * so the advisories below must not fire against a threshold
-         * that does not exist. */
-        int sil = cfg ? cfg->score_non_interactive : BS_UNSET;
-        int hrd = cfg ? cfg->score_interactive     : BS_UNSET;
-
-        /* Report what is EFFECTIVE, which since the no-default-rules
-         * change means: an unset threshold never fires. Printing the
-         * compiled default as though it applied made this page state
-         * the opposite of the truth on the one endpoint whose job is
-         * saying what is in force -- a reader would conclude
-         * cumulative scoring was live at 20 when score decides
-         * nothing. The compiled values are still shown, marked as the
-         * suggested starting point they now are. */
-        fputs("## Tier thresholds (effective)\n", stdout);
-        struct { const char *name; int cfgval; int dflt; } th[] = {
-            { "noninteractive", cfg ? cfg->score_non_interactive : BS_UNSET,
-              BS_DEFAULT_SCORE_NON_INTERACTIVE },
-            { "interactive",     cfg ? cfg->score_interactive     : BS_UNSET,
-              BS_DEFAULT_SCORE_INTERACTIVE },
-            { "captcha",         cfg ? cfg->score_captcha         : BS_UNSET,
-              BS_DEFAULT_SCORE_CAPTCHA },
-        };
-        for (int t = 0; t < 3; t++) {
-            if (th[t].cfgval == BS_UNSET) {
-                printf("%-16s %6s   unset - never fires "
-                              "(suggested: %d)\n",
-                           th[t].name, "-", th[t].dflt);
-            } else {
-                printf("%-16s %6d   configured\n",
-                           th[t].name, th[t].cfgval);
-            }
-        }
-        fputs("\n", stdout);
-
         /* --- effective flag triggers, after reset processing --- */
         fputs("## Flag triggers (effective, after reset)\n", stdout);
         if (!scfg->flag_triggers || scfg->flag_triggers->nelts == 0) {
@@ -959,7 +917,10 @@ void bs_policy_dump(server_rec *s, apr_pool_t *p, bs_dir_cfg *cfg)
                                 : e->action == BS_FLAG_ACT_TIER_FLOOR
                                   ? "tier_floor" : "reset";
                 char val[32];
-                if (e->action == BS_FLAG_ACT_SCORE) {
+                if (e->action == BS_FLAG_ACT_SCORE && e->score_name) {
+                    apr_snprintf(val, sizeof(val), "%s%+d",
+                                 e->score_name, e->score_add);
+                } else if (e->action == BS_FLAG_ACT_SCORE) {
                     apr_snprintf(val, sizeof(val), "%+d", e->score_add);
                 } else if (e->action == BS_FLAG_ACT_TIER_FLOOR) {
                     apr_snprintf(val, sizeof(val), "%s",
@@ -983,27 +944,21 @@ void bs_policy_dump(server_rec *s, apr_pool_t *p, bs_dir_cfg *cfg)
                  * excused for the life of the cookie -- and leaving the
                  * stronger wording in would push operators into
                  * lowering scores that no longer need lowering. */
+                /* Both advisories here compared a flag's number
+                 * against a score threshold, and there are no score
+                 * thresholds. An ambient action=score reaches nothing
+                 * at all now, which is worth saying plainly -- it is
+                 * the one config that looks like it does something and
+                 * does not. */
                 if (e->action == BS_FLAG_ACT_SCORE
-                    && e->mode != BS_TMODE_OBSERVE
-                    && sil != BS_UNSET && e->score_add >= sil) {
-                    printf("  ~  %s scores %+d on its own, at or above "
-                                  "the noninteractive threshold of %d: this flag is a "
-                                  "challenge switch, not a contributing "
-                                  "signal. Bounded by flags_excused -- one "
-                                  "solve clears it for that cookie -- so a "
-                                  "client that CANNOT solve stays "
-                                  "challenged.\n",
-                               e->flag_name, e->score_add, sil);
-                    warned++;
-                }
-                if (e->action == BS_FLAG_ACT_TIER_FLOOR
-                    && e->mode != BS_TMODE_OBSERVE
-                    && e->tier_min >= BS_TIER_INTERACTIVE
-                      && hrd == BS_UNSET) {
-                    printf("  !! %s forces tier %s, which is MAXed in "
-                                  "after the score decision and ignores the "
-                                  "parked hard threshold of %d.\n",
-                               e->flag_name, bs_tier_name(e->tier_min), hrd);
+                    && !e->score_name
+                    && e->mode != BS_TMODE_OBSERVE) {
+                    printf("  !! %s scores %+d on the cumulative "
+                                  "total, which no longer decides a tier. "
+                                  "Add accumulator=<name> and a matching "
+                                  "BotShieldChallengeAtLeast row, or this "
+                                  "flag reaches nothing but the log.\n",
+                               e->flag_name, e->score_add);
                     warned++;
                 }
             }

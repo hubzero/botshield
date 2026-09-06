@@ -876,15 +876,10 @@ $ sudo httpd -t -D DUMP_BOTSHIELD_POLICY
 # name               budget  window  ua                          ipspec
 scrapers                10    60s   "wget|curl|python"          *
 
-## Tier thresholds (effective)
-noninteractive      20   configured
-interactive          50   configured
-captcha              80   configured
-
 ## Flag triggers (effective, after reset)
-# flag              action      value    mode      source
-honeypot_hit       score       +60      enforce   configured
-app_verified_human score       -80      enforce   configured
+# flag              action      value          mode      source
+honeypot_hit       score       botsignals+60  enforce   configured
+app_verified_human score       botsignals-80  enforce   configured
 
 ## robots.txt (BotShieldRobotsTxt)
 # path:                /var/www/html/robots.txt

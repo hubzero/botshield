@@ -197,27 +197,26 @@ and every flag trigger **after** `reset` processing, each with the
 source it came from:
 
 ```
-## Tier thresholds (effective)
-noninteractive      20   configured
-interactive          50   configured
-captcha               -   unset - never fires (suggested: 80)
-
 ## Flag triggers (effective, after reset)
-# flag              action      value    mode      source
-honeypot_hit       score       +60      enforce   configured
-pow_fail_streak    tier_floor  interactive  enforce   configured
+# flag              action      value          mode      source
+honeypot_hit       score       botsignals+60  enforce   configured
+pow_fail_streak    tier_floor  interactive    enforce   configured
 ```
 
 The source column is the point. "Not in the config file" and "not in
 effect" are different things, and two production lockouts came from
 confusing them: a flag was configured to score 50 against a
-`BotShieldScoreNonInteractive` of 20 that was a compiled-in default and
+noninteractive cut-point of 20 that was a compiled-in default and
 appeared nowhere an operator could read. The config said `add=50` and
 nothing on the system said what 50 meant.
 
-There are no compiled-in thresholds any more, for that reason. A tier
-with no threshold configured never fires, and the dump says so along
-with a suggested starting value.
+That cut-point does not exist any more, and neither do the other two.
+A number can only reach a tier through a `BotShieldChallengeAtLeast`
+row that names the accumulator it lands in, which is a line in the
+config rather than a constant in the binary. A flag still scoring onto
+the cumulative total reaches nothing at all, and the dump flags that
+with `!!` — it is the one configuration that looks like it does
+something and does not.
 
 Two interactions are called out inline rather than left to
 documentation nobody consults at the moment it matters:

@@ -511,8 +511,13 @@ const char *bs_set_allow_bot(cmd_parms *cmd, void *dconf,
  * operators refresh out-of-band via tools/refresh-crawler-ranges.sh.
  * ====================================================================== */
 
-#define BS_PENALTY_FAKE_BOT  100   /* enough to force captcha tier */
-#define BS_CREDIT_ALLOW       (-1000) /* dominates any other penalty */
+/* Both were tier decisions written as arithmetic and are rules now
+ * (ua=@verified-bot, ua=@fake-bot). Kept as a record of the sizes,
+ * because "enough to force captcha" and "dominates any other penalty"
+ * are only true relative to thresholds an operator can move -- which
+ * is the argument against saying it this way at all. */
+#define BS_PENALTY_FAKE_BOT  100   /* unused: see the rules */
+#define BS_CREDIT_ALLOW       (-1000) /* unused: see the rules */
 
 
 /* --- Request-time entry point ---
@@ -542,24 +547,40 @@ void bs_check_allow(request_rec *r,
 
     if (c->is_verified_bot) {
         /* UA pattern matched + client IP confirmed against the
-         * crawler's published ranges. Large negative credit dominates
-         * the tier decision and drives to pass. */
+         * crawler's published ranges. The reason is recorded; what it
+         * should MEAN is a rule -- ua=@verified-bot -- rather than a
+         * credit here. This used to be -1000, a number chosen to be
+         * larger than every other term, which is what "do not
+         * challenge this" looks like when the only verb is addition
+         * and which stops meaning that as soon as a term over 1000
+         * exists. A tier_floor was such a term, and that is how
+         * honeypot_hit's captcha floor challenged Googlebot 248 times
+         * over ten hours. */
         if (bs_shm.metrics) {
             __atomic_fetch_add(&bs_shm.metrics->bot_allow_total,
                                1, __ATOMIC_RELAXED);
         }
-        bs_score_add(r, BS_CREDIT_ALLOW, 0,
+        bs_score_add(r, 0, 0,
             apr_pstrcat(r->pool, "verifiedbot:", name, NULL));
         return;
     }
     if (c->is_fake_bot) {
-        /* UA claims a verified-bot identity but client IP isn't in
-         * the published ranges. Large penalty drives to captcha tier. */
+        /* UA claims a verified-bot identity but client IP isn't in the
+         * published ranges. The consequence is a rule -- ua=@fake-bot
+         * -- not a penalty sized to clear a threshold from here.
+         *
+         * The 3600-second TTL that used to ride along is gone with it,
+         * and nothing replaces it. It persisted the penalty into the
+         * cookie so a fake bot stayed expensive for an hour, but the
+         * condition is re-evaluated on every request and answers the
+         * same way every time: the UA still claims the crawler and the
+         * address is still outside its ranges. A rule does not need
+         * memory to keep agreeing with itself. */
         if (bs_shm.metrics) {
             __atomic_fetch_add(&bs_shm.metrics->bot_fake_total,
                                1, __ATOMIC_RELAXED);
         }
-        bs_score_add(r, BS_PENALTY_FAKE_BOT, 3600,
+        bs_score_add(r, 0, 0,
             apr_pstrcat(r->pool, "fakebot:", name, NULL));
         return;
     }

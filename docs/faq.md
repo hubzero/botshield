@@ -154,7 +154,7 @@ prove they're human" you want mod_botshield (or Cloudflare).
 
 ### Will it block real users?
 
-Below `BotShieldScoreNonInteractive` (default 20) the module returns
+With no rule, row or flag asking for a tier, the module returns
 DECLINED to Apache; the user's request flows through normally and
 they never see mod_botshield at all. The default heuristics are
 tuned to keep typical browser traffic below that threshold, but

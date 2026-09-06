@@ -75,12 +75,11 @@ form or captcha is ever rendered — any selected tier collapses back to
 `challengeoff:<tier>`.
 
 Use it where an explicit `respond=4xx` trigger is meant to be the only
-action. Parking `BotShieldScoreNonInteractive`/`Interactive`/`Captcha` at `10000` is
-**not** equivalent, which is easy to get wrong: a flag `tier_floor` is
-MAX'd in *after* the score-to-tier decision and ignores thresholds
-entirely, so an IP carrying `honeypot_hit`, `fake_bot`, `scanner_probe`
-or `pow_fail_streak` is still challenged. `BotShieldChallenge Off` is
-applied after the floor, so it holds.
+action. It is the only thing that holds: a flag `tier_floor` and a
+`BotShieldChallengeAtLeast` row are both MAX'd in at the tier decision,
+so silencing the things that feed them is not the same as silencing
+them. `BotShieldChallenge Off` is applied after the floor, so it does
+what the others only appear to.
 
 **This has bitten a production deployment, so it is worth spelling out
 what the ceiling does and does not buy.** A hub running only the silent
@@ -234,27 +233,22 @@ a visitor sees without having to trip a challenge yourself. They serve
 them.
 Change it if it collides with real app routes.
 
-## Tier thresholds and forgiveness
+## Forgiveness
+
+The three `BotShieldScore*` cut-points that used to head this section
+are gone. A tier is chosen by a rule that asks for one, or by a
+`BotShieldChallengeAtLeast` row reading a named accumulator — both of
+which name the signal that paid for the challenge, which a single
+running total never could.
 
 | Directive | Syntax | Default |
 |---|---|---|
-| `BotShieldScoreNonInteractive` | `N` | `20` |
-| `BotShieldScoreInteractive` | `N` | `50` |
-| `BotShieldScoreCaptcha` | `N` | `80` |
 | `BotShieldForgivenessNonInteractive` | `N` | `10` |
 | `BotShieldForgivenessInteractive` | `N` | `25` |
 | `BotShieldForgivenessCaptcha` | `N` | `50` |
 | `BotShieldForgivenessCapPerHour` | `N` | `200` (0 disables) |
 
-Tier dispatch ladder:
-
-- `score < BotShieldScoreNonInteractive` → pass
-- `BotShieldScoreNonInteractive ≤ score < BotShieldScoreInteractive` → silent
-- `BotShieldScoreInteractive ≤ score < BotShieldScoreCaptcha` → form
-- `BotShieldScoreCaptcha ≤ score` → captcha (or form if no provider)
-
-See [site model](site-model.md) for the full scoring
-discussion.
+See [site model](site-model.md) for how a tier is chosen.
 
 `BotShieldForgivenessCapPerHour` caps total cookie-side
 forgiveness in any rolling 60-minute window. Default 200 ≈ 4–8
@@ -502,8 +496,9 @@ Each disabled pass has a fail-safe rather than a silent behavior
 change: `-browsers` treats every UA as a browser for robots.txt
 wildcard purposes; `-known-bots` skips the directory walk, so no bot
 slug reaches the log; `-verified-bots` skips the IP cross-check and
-matched UAs degrade to knownbot, earning neither verified-bot credit
-nor fake-bot penalty (the intended response to stale CIDR data);
+matched UAs degrade to knownbot, so they answer neither
+`ua=@verified-bot` nor `ua=@fake-bot` and any rule written on those
+stops applying to them (the intended response to stale CIDR data);
 `-unknown-bots` skips the bot-token substring scan.
 
 `BotShieldAllowBot` registers a UA pattern + IP-range pair. The third
@@ -938,8 +933,8 @@ anchor. The cost is that "switch off, then add my own" cannot be said
 in one scope; use a nested one, which is what scopes are for.
 
 This is the off switch a list needs and a single-valued threshold never
-did: overriding `BotShieldScoreNonInteractive` silenced it, and there
-is no equivalent for a row you inherited and cannot see.
+did: overriding the single noninteractive cut-point silenced it, and
+there is no equivalent for a row you inherited and cannot see.
 
 ```apache
 <BotShieldRule sig-scraper>
@@ -1398,18 +1393,38 @@ This is the directive that replaces the legacy `BotShieldFlagIP`
 |---|---|
 | `BotShieldFlagTrigger` | `<flag> [reset] [action=<verb> args...] [mode=observe]` |
 
-Action verbs: `action=score add=N` (signed N -1000..1000),
-`action=tier_floor min=<tier>` (raise effective tier; tier is one
-of `pass`/`noninteractive`/`interactive`/`captcha`). The `reset` keyword clears
-all earlier declarations for the named flag at post-config time.
+Action verbs: `action=score add=N [accumulator=<name>]` (signed N
+-1000..1000), `action=tier_floor min=<tier>` (raise effective tier;
+tier is one of `pass`/`noninteractive`/`interactive`/`captcha`). The
+`reset` keyword clears all earlier declarations for the named flag at
+post-config time.
 
-**A `tier_floor` bypasses your score thresholds.** It is MAX'd in
-*after* the score-to-tier decision, so it does not consult
-`BotShieldScoreNonInteractive`/`Interactive`/`Captcha` at all — an
-address carrying a floored flag is challenged even where the thresholds
-are parked to disable challenges entirely, or left unset, which now
-means never. That is the property to reach for when scoring is off and
-the point to remember when it is not.
+**Prefer `accumulator=`.** Without it the number goes onto the ambient
+score, which persists into the cookie — so a flag's penalty can still
+be charged to a client on a later request that was refused for
+something else entirely. A named accumulator dies with the request that
+raised it, and is read by whichever `BotShieldChallengeAtLeast` rows
+name it:
+
+```apache
+<BotShieldFlagTrigger honeypot_hit>
+    BotShieldAction       score
+    BotShieldAccumulator  botsignals
+    BotShieldAdd          60
+</BotShieldFlagTrigger>
+```
+
+This is the same accumulator a `BotShieldScore` line in a rule moves,
+so a flag and a rule can contribute to one judgement without either
+knowing about the other.
+
+**A `tier_floor` answers to nothing but itself.** It is MAX'd in at
+the tier decision alongside every other claim on the tier, so an
+address carrying a floored flag is challenged whatever else the request
+did or did not trip. That is the property to reach for when a signal
+really is definitive, and the reason to reach for it rarely: a floor
+ignores the credits too, and a floor ignoring a credit is how
+`honeypot_hit` challenged Googlebot 248 times over ten hours.
 
 Nothing carries a floor unless this config gives it one. To keep a
 flag's score while dropping a floor you declared earlier, reset it and
@@ -1438,10 +1453,11 @@ re-add the score:
 </BotShieldFlagTrigger>
 ```
 
-**A flag score at or above `BotShieldScoreNonInteractive` is an unbreakable
+**A flag score large enough to challenge on its own is an unbreakable
 loop, not a challenge.** The replacement scores above fix the
-`tier_floor` bypass but leave a second trap, and `add=50` against the
-default silent threshold of `20` walks straight into it. Solving does
+`tier_floor` bypass but leave a second trap: any flag whose `add=`
+clears a `BotShieldChallengeAtLeast` row by itself walks into
+it. Solving does
 not clear a flag. Forgiveness reduces the score carried *in the
 cookie*, and then `bs_apply_flag_triggers` re-adds the flag's score on
 the very next request — `botshield.c` says so at the forgiveness site:
@@ -1459,16 +1475,18 @@ loop it could not escape. The affected user had tripped
 `scanner_probe` while filing a support ticket about being blocked: the
 attachment upload posts a negative ticket id, which reads as probing.
 
-Keep flag scores **below** `BotShieldScoreNonInteractive` unless you intend the
-flag alone to challenge indefinitely. A flag worth less than the
-threshold still contributes toward a challenge in combination with
-other signals, which is usually what was meant:
+Keep a flag's `add=` **below** the lowest row that reads its
+accumulator, unless you intend the flag alone to challenge
+indefinitely. A flag worth less than the row still contributes toward a
+challenge in combination with other signals, which is usually what was
+meant:
 
 ```apache
-# with the default BotShieldScoreNonInteractive of 20
+# against a BotShieldChallengeAtLeast botsignals 20 row
 <BotShieldFlagTrigger scanner_probe>
     BotShieldReset
     BotShieldAction       score
+    BotShieldAccumulator  botsignals
     BotShieldAdd          10
 </BotShieldFlagTrigger>
 ```
@@ -1533,16 +1551,16 @@ requires. A real browser pays for this exactly once: it arrives with no
 proof, scores `droppedcookie`, clears it in one auto-submitted round
 trip, and every later request carries proof.
 
-The suggested `firstsightip` weight is exactly the suggested
-`BotShieldScoreNonInteractive`, so writing both as given makes a scope
+The suggested `firstsightip` weight is exactly the lowest suggested
+`BotShieldChallengeAtLeast` row, so writing both as given makes a scope
 challenge any request with no session context. That is usually what you
 want on a login or registration path, where the check is invisible and
 a real browser clears it in one round trip; it is usually not what you
 want site-wide. Neither line exists until you write it, so this is a
 configuration to choose rather than a default to undo.
 
-Action verbs are `action=score add=N` (signed, -1000..1000) and
-`action=tier_floor min=<tier>`. `<name> reset` clears prior
+Action verbs are `action=score add=N [accumulator=<name>]` (signed,
+-1000..1000) and `action=tier_floor min=<tier>`. `<name> reset` clears prior
 declarations for that one heuristic; `all reset` wipes every entry so
 the slate can be rebuilt from zero. With nothing seeded, both clear
 only what this config declared earlier.

@@ -142,18 +142,17 @@ order is the part worth copying.</li>
 you can read next to real values instead of in the abstract.</p>
 <h2 id="seeing-it-running-rather-than-reading-about-it">Seeing it running rather than reading about it</h2>
 <p><code>tests/setup/botshield-dev.conf</code> in the repository wires the same slate
-into a live vhost, alongside the score thresholds that make it act
-(<code>BotShieldScoreNonInteractive</code>, <code>BotShieldScoreInteractive</code>,
-<code>BotShieldScoreCaptcha</code> — themselves unset by default, for the same
-reason). That is the fastest way to see the starter slate doing
+into a live vhost, alongside the <code>BotShieldChallengeAtLeast</code> rows that
+make it act. That is the fastest way to see the starter slate doing
 something rather than just reading its comments.</p>
 <h2 id="adopting-it">Adopting it</h2>
 <ol>
-<li>Pick a threshold. Nothing fires without
-<code>BotShieldScoreNonInteractive</code>, <code>BotShieldScoreInteractive</code>, and
-<code>BotShieldScoreCaptcha</code> set — the <a href="../directives/index.html">Directive reference</a>
-has the syntax, and <code>httpd -t -D DUMP_BOTSHIELD_POLICY</code> will tell
-you which of the three you've left unset.</li>
+<li>Decide what should challenge. Nothing fires until something asks
+for a tier — a rule with <code>BotShieldChallenge</code>, or a
+<code>BotShieldChallengeAtLeast</code> row over an accumulator your rules
+move. The <a href="../directives/index.html">Directive reference</a> has the syntax, and
+<code>httpd -t -D DUMP_BOTSHIELD_POLICY</code> will tell you what is actually
+in force.</li>
 <li>Copy the lines you want from either file into your vhost or server
 config.</li>
 <li>Reload, then read the results back with the same dump flag — it

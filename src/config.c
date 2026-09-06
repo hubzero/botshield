@@ -82,9 +82,6 @@ void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->secret_len = 0;
     cfg->secret_secondary     = NULL;
     cfg->secret_secondary_len = 0;
-    cfg->score_non_interactive  = BS_UNSET;
-    cfg->score_interactive    = BS_UNSET;
-    cfg->score_captcha = BS_UNSET;
     cfg->non_interactive_mode   = BS_NON_INTERACTIVE_MODE_UNSET;
     cfg->form_captcha  = BS_UNSET;
     cfg->forgive_non_interactive  = BS_UNSET;
@@ -587,9 +584,6 @@ void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
                base->derived_hmac_bootstrap_2, 32);
         out->derived_keys_set_2 = base->derived_keys_set_2;
     }
-    out->score_non_interactive  = (add->score_non_interactive  == BS_UNSET) ? base->score_non_interactive  : add->score_non_interactive;
-    out->score_interactive    = (add->score_interactive    == BS_UNSET) ? base->score_interactive    : add->score_interactive;
-    out->score_captcha = (add->score_captcha == BS_UNSET) ? base->score_captcha : add->score_captcha;
     out->non_interactive_mode   = (add->non_interactive_mode   == BS_NON_INTERACTIVE_MODE_UNSET)
                        ? base->non_interactive_mode : add->non_interactive_mode;
     out->form_captcha  = (add->form_captcha  == BS_UNSET)
@@ -3397,24 +3391,6 @@ const char *bs_set_access_log(cmd_parms *cmd, void *cfg_v, int argc,
     }
     cfg->accesslog_suppress = (int)mask;
     return NULL;
-}
-
-const char *bs_set_score_non_interactive(cmd_parms *cmd, void *cfg_v, const char *arg)
-{
-    return bs_set_score_int("BotShieldScoreNonInteractive",
-        &((bs_dir_cfg *)cfg_v)->score_non_interactive, arg, cmd->pool);
-}
-
-const char *bs_set_score_interactive(cmd_parms *cmd, void *cfg_v, const char *arg)
-{
-    return bs_set_score_int("BotShieldScoreInteractive",
-        &((bs_dir_cfg *)cfg_v)->score_interactive, arg, cmd->pool);
-}
-
-const char *bs_set_score_captcha(cmd_parms *cmd, void *cfg_v, const char *arg)
-{
-    return bs_set_score_int("BotShieldScoreCaptcha",
-        &((bs_dir_cfg *)cfg_v)->score_captcha, arg, cmd->pool);
 }
 
 const char *bs_set_forgive_non_interactive(cmd_parms *cmd, void *cfg_v, const char *arg)

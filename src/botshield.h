@@ -194,7 +194,7 @@ enum bs_enabled_state {
  * ====================================================================== */
 
 /* One BotShieldChallengeAtLeast row: a named per-request accumulator
- * mapped to a tier floor. Evaluated beside bs_decide_tier, not in the
+ * mapped to a tier floor. Evaluated at the tier decision, not in the
  * rule ladder -- deciding in the ladder fires before robots and the
  * rate limiter, so a client both suspicious and rate-limited would be
  * challenged instead of refused. */
@@ -258,9 +258,6 @@ struct bs_dir_cfg {
     unsigned char    derived_hmac_pending_2 [32];
     unsigned char    derived_hmac_bootstrap_2[32];
     int              derived_keys_set_2;
-    int score_non_interactive;           /* score >= this → noninteractive tier */
-    int score_interactive;             /* score >= this → hard interactive PoW tier */
-    int score_captcha;          /* score >= this → captcha tier */
     /* E17 — noninteractive tier dispatch flavor, tri-state with UNSET so the
      * merge picks the right scope's value. */
     int non_interactive_mode;            /* bs_non_interactive_mode; UNSET inherits */
@@ -278,8 +275,8 @@ struct bs_dir_cfg {
     apr_array_header_t *scope_triggers;
     int                 scope_triggers_reset;
     /* BotShieldChallengeAtLeast <name> <n> <tier>: named per-request
-     * accumulators mapped to a tier floor, evaluated beside
-     * bs_decide_tier rather than in the rule ladder.
+     * accumulators mapped to a tier floor, evaluated at the tier
+     * decision rather than in the rule ladder.
      *
      * Position is the point. A tier decision taken in the ladder fires
      * at stage 1 and short-circuits before robots and the rate limiter,
@@ -829,8 +826,10 @@ int bs_forgiveness_apply_cap(int requested, int cap,
 apr_uint32_t bs_parse_flag_names(apr_pool_t *p, const char *s,
                                  const char **err);
 
-/* bs_tier_name and bs_decide_tier (the score-to-tier picker) live
- * in score.h alongside the score system they consume. */
+/* bs_tier_name lives in score.h alongside the score system. The
+ * score-to-tier picker that used to sit beside it is gone: a tier is
+ * chosen by a rule, or by a BotShieldChallengeAtLeast row reading a
+ * named accumulator. */
 
 /* E7.3 feedback-trigger lookup. */
 const bs_feedback_trigger_entry *bs_feedback_trigger_find(

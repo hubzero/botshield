@@ -2112,6 +2112,22 @@ const char *bs_set_flag_trigger(cmd_parms *cmd, void *dconf,
                 }
                 e->score_add = (int)n;
                 saw_add = 1;
+            } else if (strncasecmp(arg, "accumulator=", 12) == 0) {
+                const char *nm = arg + 12;
+                if (!*nm) {
+                    return apr_psprintf(cmd->pool,
+                        "BotShieldFlagTrigger '%s' action=score: "
+                        "accumulator= needs a name", flag_name);
+                }
+                for (const char *p = nm; *p; p++) {
+                    if (!apr_isalnum(*p) && *p != '_' && *p != '-') {
+                        return apr_psprintf(cmd->pool,
+                            "BotShieldFlagTrigger '%s' action=score: "
+                            "accumulator='%s' -- letters, digits, '_' "
+                            "and '-' only", flag_name, nm);
+                    }
+                }
+                e->score_name = apr_pstrdup(cmd->pool, nm);
             } else if (strcasecmp(arg, "mode=observe") == 0) {
                 e->mode = BS_TMODE_OBSERVE;
             } else if (strcasecmp(arg, "mode=enforce") == 0) {
@@ -2119,7 +2135,8 @@ const char *bs_set_flag_trigger(cmd_parms *cmd, void *dconf,
             } else {
                 return apr_psprintf(cmd->pool,
                     "BotShieldFlagTrigger '%s' action=score: "
-                    "unknown arg '%s' (want add=N or mode=observe)",
+                    "unknown arg '%s' (want add=N, accumulator=<name> "
+                    "or mode=observe)",
                     flag_name, arg);
             }
         }

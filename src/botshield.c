@@ -12,7 +12,6 @@
  *                               post_config and the mod_watchdog tick
  *   - policy dump             : httpd -t -D DUMP_BOTSHIELD_POLICY
  *                               text dump
- *   - bs_decide_tier          : score → (pass | noninteractive | interactive | captcha)
  *
  * Everything else fans out through the per-feature .h includes below.
  * Each subsystem owns its runtime, its directive setters, and its tests.
@@ -100,7 +99,7 @@
 /* This file is the module's hooks-table spine: bs_handler (the
  * request entry hook), the cmds[] directive table, bs_register_hooks,
  * and the botshield_module struct. Plus a few thin helpers that
- * bs_handler calls directly (bs_decide_tier, bs_tier_name, the
+ * bs_handler calls directly (bs_tier_name, the
  * bounded numeric parsers). Every other concern fans out through the
  * per-feature includes above. */
 
@@ -407,20 +406,6 @@ static const command_rec bs_cmds[] = {
                  "nothing was enforced and the origin answered, so it "
                  "is ordinary traffic. Requests BotShield never "
                  "evaluated always log."),
-    AP_INIT_TAKE1("BotShieldScoreNonInteractive",  bs_set_score_non_interactive,  NULL,
-                 RSRC_CONF | ACCESS_CONF,
-                 "Score at or above which the noninteractive PoW tier is picked "
-                 "(default: 20). Serves a no-click auto-submit splash."),
-    AP_INIT_TAKE1("BotShieldScoreInteractive",    bs_set_score_interactive,    NULL,
-                 RSRC_CONF | ACCESS_CONF,
-                 "Score at or above which the interactive PoW tier is picked "
-                 "(default: 50). Serves the checkbox interstitial."),
-    AP_INIT_TAKE1("BotShieldScoreCaptcha", bs_set_score_captcha, NULL,
-                 RSRC_CONF | ACCESS_CONF,
-                 "Score at or above which the captcha tier is picked "
-                 "(default: 80). Serves the configured third-party "
-                 "provider's widget; falls through to interactive PoW if no "
-                 "BotShieldCaptchaProvider is set on the scope."),
     /* E18 — inline form captcha. */
     AP_INIT_FLAG("BotShieldFormCaptcha", bs_set_form_captcha, NULL,
                  RSRC_CONF | ACCESS_CONF,
@@ -2300,10 +2285,9 @@ static int bs_handler(request_rec *r)
 
     /* Flag-trigger walker. Walks scfg->flag_triggers over the union
      * of IP-side and cookie-side flag bits, applying `score add=N`
-     * actions via bs_score_add (which SUMs into the per-request
-     * score) and accumulating MAX into a tier_floor that we apply
-     * after bs_decide_tier. Built-in defaults are seeded at
-     * post_config; operators tune via BotShieldFlagTrigger. */
+     * actions via bs_score_add or a named accumulator, and
+     * accumulating MAX into a tier_floor. Nothing is seeded; operators
+     * declare what they want via BotShieldFlagTrigger. */
     /* The union this walker has always advertised. cookie_flags is
      * gated on have_prior_rep for the same reason the solve proof
      * below is: the GCM tag is what makes the rep block trustworthy,
@@ -2377,10 +2361,13 @@ static int bs_handler(request_rec *r)
      * in the README "Understanding scoring" section. */
     int cookie_score = have_prior_rep ? prior_ch.rep.score : 0;
     int effective    = heuristic_total + cookie_score;
-    /* Returns PASS unless an operator set a threshold: unset means
-     * never, so with no thresholds written the score decides nothing
-     * and only an explicit tier= reaches `tier` below via trig_floor. */
-    bs_tier score_tier = bs_decide_tier(cfg, effective);
+    /* The cumulative score decides nothing. It is still computed and
+     * still logged -- what it cost and what it caught are worth
+     * reading -- but the three cut-points that turned it into a tier
+     * are gone, and a named accumulator plus BotShieldChallengeAtLeast
+     * says the same thing where an operator can see which signal paid
+     * for which challenge. */
+    bs_tier score_tier = BS_TIER_PASS;
 
     /* Apply the tier floor accumulated by the flagtrigger walker
      * (MAX of any TIER_FLOOR actions across the union of flags).
@@ -2389,7 +2376,7 @@ static int bs_handler(request_rec *r)
     /* A trigger tier= floor composes with the flag floor and the
      * score-derived tier by MAX, same as everything else here. */
     /* Named accumulators -> tier floor. Evaluated here, beside
-     * bs_decide_tier, because this is after robots and the rate
+     * the tier decision, because this is after robots and the rate
      * limiter: a request those refused never reaches this line, and so
      * is never challenged in place of being refused. */
     if (cfg->challenge_at_least && !cfg->challenge_at_least_reset) {

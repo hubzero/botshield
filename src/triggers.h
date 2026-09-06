@@ -432,6 +432,15 @@ typedef struct {
     apr_uint32_t        flag_bit;
     bs_flag_action_kind action;
     int                 score_add;
+    /* action=score accumulator=<name>. NULL means the ambient total,
+     * which is what every flag trigger did before named accumulators
+     * existed and what the compiled-in default slate still describes.
+     *
+     * A named movement dies with the request. That is the whole reason
+     * to prefer it: the ambient total persists into the cookie, so a
+     * flag's penalty could be billed to a client on a request that was
+     * refused for something else entirely. */
+    const char         *score_name;
     bs_tier             tier_min;
     int                 mode;
     int                 from_default;

@@ -6,7 +6,7 @@
  * shell that hosts them. Plus the render function that fills in
  * the per-request substitutions and emits the response body.
  *
- * Per-tier interstitial mapping (driven by bs_decide_tier in
+ * Per-tier interstitial mapping (the tier is decided in
  * botshield.c):
  *   noninteractive → auto-submit splash (no user click)
  *   form    → reCAPTCHA-shaped checkbox the JS solves

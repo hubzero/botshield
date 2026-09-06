@@ -159,7 +159,7 @@ matches your edge's IP, that's the issue. Configure
 <code>mod_remoteip</code> per <a href="../deployment/index.html">deployment</a>.</p>
 <p><strong>Second-most common cause</strong>: the defaults are challenging more than
 you expected. <code>firstsightip</code> scores 20, which <em>is</em>
-<code>BotShieldScoreNonInteractive</code>, so any request arriving with no usable cookie
+the lowest <code>BotShieldChallengeAtLeast</code> row, so any request arriving with no usable cookie
 gets the invisible check on its first visit — by design, but surprising
 if you enabled BotShield site-wide rather than on an auth path. Either
 scope the enable, or lower the heuristic:</p>
@@ -167,7 +167,7 @@ scope the enable, or lower the heuristic:</p>
 </code></pre>
 <p>For sites where most visitors don't send <code>Accept-Language</code> (legitimate
 use cases exist), <code>missingacceptlanguage</code> adds another 5 on top;
-raise <code>BotShieldScoreNonInteractive</code> to 30 or 40 if that combination is
+raise that row to 30 or 40 if the combination is
 over-firing.</p>
 <p><strong>Tuning workflow</strong>:</p>
 <ol>

@@ -13,10 +13,15 @@ mod_botshield supports four user-facing tiers plus a passive
 
 | Tier | What the user sees | When it fires |
 |---|---|---|
-| `pass` | Real content | `effective < BotShieldScoreNonInteractive` (default `< 20`) |
-| `noninteractive` | "Checking your browser…" splash; auto-submits a SHA-256 PoW | `BotShieldScoreNonInteractive ≤ effective < BotShieldScoreInteractive` (default `20..49`) |
-| `interactive` | reCAPTCHA-shaped checkbox interstitial; user clicks once, PoW runs | `BotShieldScoreInteractive ≤ effective < BotShieldScoreCaptcha` (default `50..79`) |
-| `captcha` | Third-party provider widget (Turnstile / hCaptcha / reCAPTCHA / Friendly / GeeTest) | `effective ≥ BotShieldScoreCaptcha` (default `≥ 80`). Falls back to `interactive` if no provider configured on the scope |
+| `pass` | Real content | Nothing asked for a tier |
+| `noninteractive` | "Checking your browser…" splash; auto-submits a SHA-256 PoW | A rule says `BotShieldChallenge noninteractive`, a `BotShieldChallengeAtLeast` row for that tier is reached, or a flag floors it there |
+| `interactive` | reCAPTCHA-shaped checkbox interstitial; user clicks once, PoW runs | The same three, for `interactive` |
+| `captcha` | Third-party provider widget (Turnstile / hCaptcha / reCAPTCHA / Friendly / GeeTest) | The same three, for `captcha`. Falls back to `interactive` if no provider configured on the scope |
+
+Every claim on the tier composes by MAX, so the most intense one wins
+and nothing is silently downgraded. There is no longer a single running
+total deciding this: a challenge can always be traced to the rule, row
+or flag that asked for it.
 
 A fifth value, `safeguard`, can appear in decision logs. It marks
 challenge-loop suppression: a client that has been issued
@@ -30,7 +35,7 @@ privacy extension, browser version) and offers a Continue link
 back to the original URL. The flagged-IP entry is preserved so the
 suspicious behavior is still recorded for downstream signals.
 
-Below `BotShieldScoreNonInteractive` the module returns `DECLINED` to
+With no tier asked for, the module returns `DECLINED` to
 Apache; the content handler runs as if mod_botshield weren't loaded.
 **Legitimate visitors never see us and never receive a cookie.**
 
@@ -239,14 +244,12 @@ which signals contributed and how much.
    contributions. The `botshield_tier_<t>_total` and
    `botshield_outcome_<o>_total` Prometheus counters at
    `<prefix>/metrics` give the same data without grep.
-4. Adjust thresholds and per-rule penalties based on observed
-   distributions:
-   - Too many challenges on legitimate traffic → raise
-     `BotShieldScoreNonInteractive` / `BotShieldScoreInteractive` /
-     `BotShieldScoreCaptcha`, or lower the offending heuristic's
-     penalty.
-   - Bots slipping through → lower thresholds, raise scraper-UA
-     penalty, add `BotShieldRule` rules for known-bad paths.
+4. Adjust based on observed distributions:
+   - Too many challenges on legitimate traffic → raise the
+     `BotShieldChallengeAtLeast` row that fired, or lower what feeds
+     it. The decision log names both.
+   - Bots slipping through → lower the row, add a signal rule, or add
+     `BotShieldRule` rules for known-bad paths.
 5. Switch to `BotShieldEnabled On` when satisfied.
 6. Subsequent rule additions can be staged with per-rule
    `mode=observe` without affecting the rest.

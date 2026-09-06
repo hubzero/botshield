@@ -53,9 +53,7 @@ def _trip_honeypot(ip: str) -> None:
 # --- Defaults: zero-config behavior --------------------------------
 
 
-def test_default_honeypot_forces_captcha(
-    config_override, fresh_ip, log_slice,
-):
+def test_default_honeypot_forces_captcha(fresh_ip, log_slice):
     """No operator config — built-in default
     `honeypot_hit -> tier_floor=captcha` lifts the request to the
     captcha floor. The dev rig may transparently downgrade captcha
@@ -63,24 +61,13 @@ def test_default_honeypot_forces_captcha(
     we assert the floor was *applied* via the reason chain rather
     than the final landed tier so the test stays valid both with
     and without a real provider key."""
-    # honeypot_hit's +60 is a flag-trigger score action, which is
-    # ambient: a number on the running total, reaching a tier only
-    # through the BotShieldScore* cut-points. <BotShieldFlagTrigger>
-    # has its own parser and cannot score by name, so unlike the
-    # heuristics it was not converted, and the dev vhost no longer
-    # declares the thresholds it needs.
-    with config_override(
-        r"BotShieldEnabled\s+On",
-        "BotShieldEnabled On\n"
-        "    BotShieldScoreNonInteractive 20\n"
-        "    BotShieldScoreInteractive 50\n"
-        "    BotShieldScoreCaptcha 80",
-        count=1,
-    ):
-        _trip_honeypot(fresh_ip)
-        with log_slice as slc:
-            _g("/", xff=fresh_ip)
-            lines = slc.decision_lines(ip=fresh_ip)
+    # honeypot_hit's +60 lands on botsignals, which the vhost's rows
+    # read at 20/50/80. With droppedcookie's 25 on the second request
+    # that is 85, and 85 is captcha.
+    _trip_honeypot(fresh_ip)
+    with log_slice as slc:
+        _g("/", xff=fresh_ip)
+        lines = slc.decision_lines(ip=fresh_ip)
 
     assert lines, f"no decision line for ip={fresh_ip}"
     last = lines[-1]

@@ -136,25 +136,29 @@ with the heuristics, and the day-to-day tuning workflow.</p>
 <tr>
 <td><code>pass</code></td>
 <td>Real content</td>
-<td><code>effective &lt; BotShieldScoreNonInteractive</code> (default <code>&lt; 20</code>)</td>
+<td>Nothing asked for a tier</td>
 </tr>
 <tr>
 <td><code>noninteractive</code></td>
 <td>&quot;Checking your browser…&quot; splash; auto-submits a SHA-256 PoW</td>
-<td><code>BotShieldScoreNonInteractive ≤ effective &lt; BotShieldScoreInteractive</code> (default <code>20..49</code>)</td>
+<td>A rule says <code>BotShieldChallenge noninteractive</code>, a <code>BotShieldChallengeAtLeast</code> row for that tier is reached, or a flag floors it there</td>
 </tr>
 <tr>
 <td><code>interactive</code></td>
 <td>reCAPTCHA-shaped checkbox interstitial; user clicks once, PoW runs</td>
-<td><code>BotShieldScoreInteractive ≤ effective &lt; BotShieldScoreCaptcha</code> (default <code>50..79</code>)</td>
+<td>The same three, for <code>interactive</code></td>
 </tr>
 <tr>
 <td><code>captcha</code></td>
 <td>Third-party provider widget (Turnstile / hCaptcha / reCAPTCHA / Friendly / GeeTest)</td>
-<td><code>effective ≥ BotShieldScoreCaptcha</code> (default <code>≥ 80</code>). Falls back to <code>interactive</code> if no provider configured on the scope</td>
+<td>The same three, for <code>captcha</code>. Falls back to <code>interactive</code> if no provider configured on the scope</td>
 </tr>
 </tbody>
 </table>
+<p>Every claim on the tier composes by MAX, so the most intense one wins
+and nothing is silently downgraded. There is no longer a single running
+total deciding this: a challenge can always be traced to the rule, row
+or flag that asked for it.</p>
 <p>A fifth value, <code>safeguard</code>, can appear in decision logs. It marks
 challenge-loop suppression: a client that has been issued
 challenges repeatedly within the safeguard window without ever
@@ -166,7 +170,7 @@ explainer covers common reasons the auto-check failed (JS disabled,
 privacy extension, browser version) and offers a Continue link
 back to the original URL. The flagged-IP entry is preserved so the
 suspicious behavior is still recorded for downstream signals.</p>
-<p>Below <code>BotShieldScoreNonInteractive</code> the module returns <code>DECLINED</code> to
+<p>With no tier asked for, the module returns <code>DECLINED</code> to
 Apache; the content handler runs as if mod_botshield weren't loaded.
 <strong>Legitimate visitors never see us and never receive a cookie.</strong></p>
 <h2 id="score-composition">Score composition</h2>
@@ -413,15 +417,13 @@ enforcement (see <a href="../staging/index.html">staging</a>).</li>
 contributions. The <code>botshield_tier_&lt;t&gt;_total</code> and
 <code>botshield_outcome_&lt;o&gt;_total</code> Prometheus counters at
 <code>&lt;prefix&gt;/metrics</code> give the same data without grep.</li>
-<li>Adjust thresholds and per-rule penalties based on observed
-distributions:
+<li>Adjust based on observed distributions:
 <ul>
-<li>Too many challenges on legitimate traffic → raise
-<code>BotShieldScoreNonInteractive</code> / <code>BotShieldScoreInteractive</code> /
-<code>BotShieldScoreCaptcha</code>, or lower the offending heuristic's
-penalty.</li>
-<li>Bots slipping through → lower thresholds, raise scraper-UA
-penalty, add <code>BotShieldRule</code> rules for known-bad paths.</li>
+<li>Too many challenges on legitimate traffic → raise the
+<code>BotShieldChallengeAtLeast</code> row that fired, or lower what feeds
+it. The decision log names both.</li>
+<li>Bots slipping through → lower the row, add a signal rule, or add
+<code>BotShieldRule</code> rules for known-bad paths.</li>
 </ul>
 </li>
 <li>Switch to <code>BotShieldEnabled On</code> when satisfied.</li>

@@ -38,19 +38,18 @@ you can read next to real values instead of in the abstract.
 ## Seeing it running rather than reading about it
 
 `tests/setup/botshield-dev.conf` in the repository wires the same slate
-into a live vhost, alongside the score thresholds that make it act
-(`BotShieldScoreNonInteractive`, `BotShieldScoreInteractive`,
-`BotShieldScoreCaptcha` — themselves unset by default, for the same
-reason). That is the fastest way to see the starter slate doing
+into a live vhost, alongside the `BotShieldChallengeAtLeast` rows that
+make it act. That is the fastest way to see the starter slate doing
 something rather than just reading its comments.
 
 ## Adopting it
 
-1. Pick a threshold. Nothing fires without
-   `BotShieldScoreNonInteractive`, `BotShieldScoreInteractive`, and
-   `BotShieldScoreCaptcha` set — the [Directive reference](directives.md)
-   has the syntax, and `httpd -t -D DUMP_BOTSHIELD_POLICY` will tell
-   you which of the three you've left unset.
+1. Decide what should challenge. Nothing fires until something asks
+   for a tier — a rule with `BotShieldChallenge`, or a
+   `BotShieldChallengeAtLeast` row over an accumulator your rules
+   move. The [Directive reference](directives.md) has the syntax, and
+   `httpd -t -D DUMP_BOTSHIELD_POLICY` will tell you what is actually
+   in force.
 2. Copy the lines you want from either file into your vhost or server
    config.
 3. Reload, then read the results back with the same dump flag — it

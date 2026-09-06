@@ -122,8 +122,8 @@ const char *bs_score_reasons_joined(apr_pool_t *p,
  *   - SCORE actions accumulate via bs_score_add (which already
  *     SUMs into the per-request score struct)
  *   - TIER_FLOOR actions MAX into *out_tier_floor; the caller
- *     applies the MAX(score_tier, *out_tier_floor) after
- *     bs_decide_tier returns.
+ *     applies the MAX(score_tier, *out_tier_floor), where score_tier
+ *     is whatever BotShieldChallengeAtLeast rows decided.
  *
  * Observe-mode (mode=observe) entries log
  * `would-flagtrigger:<flag>:observe` and skip the side effect.
@@ -161,9 +161,22 @@ int bs_apply_flag_triggers(request_rec *r,
             continue;
         }
         if (e->action == BS_FLAG_ACT_SCORE) {
-            bs_score_add(r, e->score_add, 0,
-                apr_psprintf(r->pool,
-                    "flagtrigger:%s", e->flag_name));
+            if (e->score_name) {
+                /* Into the named accumulator, and 0 into the ambient
+                 * total -- the reason token still lands so the
+                 * decision log reads the same either way. */
+                bs_request_named_score_apply(
+                    r, e->score_name,
+                    e->score_add < 0 ? '-' : '+',
+                    e->score_add < 0 ? -e->score_add : e->score_add);
+                bs_score_add(r, 0, 0,
+                    apr_psprintf(r->pool, "flagtrigger:%s:%s",
+                                 e->flag_name, e->score_name));
+            } else {
+                bs_score_add(r, e->score_add, 0,
+                    apr_psprintf(r->pool,
+                        "flagtrigger:%s", e->flag_name));
+            }
         } else if (e->action == BS_FLAG_ACT_TIER_FLOOR) {
             if (out_tier_floor && e->tier_min > *out_tier_floor) {
                 *out_tier_floor = e->tier_min;
@@ -288,35 +301,15 @@ void bs_request_named_score_apply(request_rec *r, const char *name,
                    apr_psprintf(r->pool, "%d", next));
 }
 
-/* Score → tier picker. Three configurable cut-points
- * (BotShieldScoreNonInteractive / Hard / Captcha) gate four tiers. The
- * README "Understanding scoring" section covers the operator-facing
- * tuning workflow; templates.h documents the per-tier interstitial
- * rendering. */
-bs_tier bs_decide_tier(const bs_dir_cfg *cfg, int score)
-{
-    /* UNSET means never, not "use the compiled-in default".
-     *
-     * A threshold left unwritten used to mean score >= 20 challenges --
-     * a rule nobody wrote, applied to everyone. Setting the directive
-     * is now itself the opt-in: cumulative score acts only on the
-     * tiers an operator has actually asked for. This is also what
-     * retires the practice of parking a threshold at some value chosen
-     * to be out of reach (qubeshub used 10000, against a highest
-     * observed score of 50) -- unset already means never, so the
-     * sentinel has nothing left to express.
-     *
-     * BS_DEFAULT_SCORE_* survive as the documented starter values, and
-     * the heuristic weights in score.h are still calibrated against
-     * them; they are a suggested configuration now, not behaviour. */
-    int noninter = cfg->score_non_interactive;
-    int hard     = cfg->score_interactive;
-    int captcha  = cfg->score_captcha;
-    if (captcha  != BS_UNSET && score >= captcha)  return BS_TIER_CAPTCHA;
-    if (hard     != BS_UNSET && score >= hard)     return BS_TIER_INTERACTIVE;
-    if (noninter != BS_UNSET && score >= noninter) return BS_TIER_NONINTERACTIVE;
-    return BS_TIER_PASS;
-}
+/* bs_decide_tier lived here: three configurable cut-points against
+ * one running total. It went out with the cut-points.
+ *
+ * The last thing it learned is worth keeping. Its final form treated
+ * an unset threshold as "never" rather than as "use the compiled-in
+ * 20", because the compiled-in 20 was a rule nobody had written being
+ * applied to everyone, and it appeared nowhere an operator could read.
+ * A number that decides whether to challenge a visitor has to be
+ * somewhere a person can find it, and this one never was. */
 
 const char *bs_tier_name(bs_tier t)
 {

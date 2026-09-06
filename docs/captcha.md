@@ -3,7 +3,7 @@
 mod_botshield ships two integration surfaces with third parties:
 
 1. **Captcha tier** — when the score crosses
-   `BotShieldScoreCaptcha`, the module renders a third-party
+   the captcha tier, the module renders a third-party
    captcha widget (Turnstile / hCaptcha / reCAPTCHA / Friendly /
    GeeTest) and verifies the token via libcurl on POST.
 2. **App bridge** — a signed two-way protocol between

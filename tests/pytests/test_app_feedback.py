@@ -216,10 +216,19 @@ def test_app_feedback_credit_flag_lowers_score(
     config_override, log_slice,
 ):
     """Credit bits land the same way penalty bits do; the event →
-    flag mapping is the only surface the app controls."""
+    flag mapping is the only surface the app controls.
+
+    Asserted as a challenge that does not happen rather than as a
+    number in the log. The dev vhost's app_verified_human trigger
+    scores -80 onto botsignals, and a scraper UA without it reaches the
+    noninteractive row at 20 -- so the credit is visible as the
+    difference between two tiers, which is the thing an operator
+    actually cares about and does not depend on how the number is
+    carried."""
     val = _sign("human-verified")
     ip_base = _ips.fresh_ip()
     ip_cred = _ips.fresh_ip()
+    scraper = "python-requests/2.31"
     with config_override(
         r"BotShieldEnabled\s+On",
         _cfg(
@@ -233,25 +242,25 @@ def test_app_feedback_credit_flag_lowers_score(
     ):
         _g(FEEDBACK_PATH_1, xff=ip_cred)
         with log_slice as slc:
-            _g("/index.html", xff=ip_base)
-            _g("/index.html", xff=ip_cred)
+            client.get("/index.html", xff=ip_base, ua=scraper)
+            client.get("/index.html", xff=ip_cred, ua=scraper)
             base_lines = slc.decision_lines(ip=ip_base)
             cred_lines = slc.decision_lines(ip=ip_cred)
 
     assert base_lines and cred_lines
-    base_score = int(base_lines[-1]["score"])
-    cred_score = int(cred_lines[-1]["score"])
-    # The app_verified_human flag adds -80 to the score. The exact
-    # diff depends on which heuristics fire on each IP at the time
-    # of the follow-up — ip_cred was put in the Bloom filter by
-    # its earlier feedback request and now picks up droppedcookie
-    # (+25) on the follow-up, while ip_base on its first request
-    # does not. Assert the credit landed (cred materially below
-    # baseline) rather than a fragile exact-diff equality.
-    assert cred_score <= base_score - 50, (
-        f"app_verified_human credit didn't land meaningfully; "
-        f"baseline={base_score} credited={cred_score} "
-        f"(expected cred at least 50 below baseline)"
+    base_tier = base_lines[-1]["tier"]
+    cred = cred_lines[-1]
+    assert base_tier != "nochallenge", (
+        f"the control needs to be challenged for this test to mean "
+        f"anything; tier={base_tier} reason={base_lines[-1]['reason']!r}"
+    )
+    assert "flagtrigger:app_verified_human" in cred["reason"], (
+        f"the credit flag never fired; reason={cred['reason']!r}"
+    )
+    assert cred["tier"] == "nochallenge", (
+        f"app_verified_human should have kept this under the "
+        f"noninteractive row; tier={cred['tier']} "
+        f"reason={cred['reason']!r}"
     )
 
 

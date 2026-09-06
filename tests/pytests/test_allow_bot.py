@@ -66,23 +66,15 @@ def test_allow_bot_cidr_verified(log_slice):
     )
 
 
-def test_allow_bot_fake_routed_to_captcha(
-    config_override, log_slice, fresh_ip,
-):
+def test_allow_bot_fake_routed_to_captcha(log_slice, fresh_ip):
     """UA claims Googlebot, IP is nowhere near a real Googlebot range.
-    fakebot:googlebot penalty should fire and drive tier into captcha
-    (or form-PoW fallback if no provider is configured at /)."""
-    # The penalty is a number on the ambient total; it reaches a tier
-    # only through the BotShieldScore* cut-points. The dev vhost scores
-    # by name now and declares none, so the test declares its own.
-    with config_override(
-        r"BotShieldEnabled\s+On",
-        "BotShieldEnabled On\n"
-        "    BotShieldScoreNonInteractive 20\n"
-        "    BotShieldScoreInteractive 50\n"
-        "    BotShieldScoreCaptcha 80",
-        count=1,
-    ), log_slice as slc:
+    fakebot:googlebot is recorded and the sig-fake-bot rule takes it to
+    captcha (or form-PoW fallback if no provider is configured at /).
+
+    The reason token comes from allowlist.c and the tier comes from the
+    rule. It used to be one thing: a 100-point penalty sized to clear a
+    threshold."""
+    with log_slice as slc:
         client.get("/", xff=fresh_ip, ua=GOOGLEBOT_UA)
         lines = slc.decision_lines(ip=fresh_ip)
 
@@ -154,7 +146,8 @@ def test_allow_bot_ua_only_mode(config_override, log_slice, fresh_ip):
     )
 
 
-def test_allow_bot_inline_cidr(config_override, log_slice, fresh_ip):
+def test_allow_bot_inline_cidr(config_override, log_slice, fresh_ip,
+                               rate_slot_ip):
     """`BotShieldAllowBot <name> <ua-substr> <cidr,cidr,...>` accepts a
     comma-separated CIDR list inline (no file). In-range IPs allow,
     out-of-range IPs fake."""
@@ -163,15 +156,19 @@ def test_allow_bot_inline_cidr(config_override, log_slice, fresh_ip):
         'BotShieldEnabled On\n'
         '    BotShieldAllowBot corpbot "CorpBot/" '
         '"198.51.100.0/24,203.0.113.0/24"\n'
-        # Same reason as the fake-bot test above: the out-of-range
-        # assertion rides the built-in penalty through the ambient
-        # cut-points, which the dev vhost no longer declares.
-        '    BotShieldScoreNonInteractive 20\n'
-        '    BotShieldScoreInteractive 50\n'
-        '    BotShieldScoreCaptcha 80',
+        # This is a classification test. Any flag an earlier test left
+        # on the address scores onto botsignals and would take the
+        # in-range tier away for reasons that have nothing to do with
+        # allow-bot matching. sig-fake-bot asks for its tier directly,
+        # so the out-of-range half is unaffected.
+        '    BotShieldChallengeAtLeast none',
         count=1,
     ):
-        in_range_ip = "198.51.100.42"
+        # Fresh, and inside the declared /24. A literal address
+        # carries whatever flags earlier tests left on it, and a
+        # verified crawler is only unscored by sig-verified-unscored
+        # until a flag trigger adds to botsignals after the rule walk.
+        in_range_ip = rate_slot_ip
         ua = "CorpBot/2.0 (+https://corp.example/bot)"
         # Fire both requests inside a single log slice (the fixture is
         # a one-shot CM) and filter the lines by IP for each assertion.

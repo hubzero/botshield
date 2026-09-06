@@ -225,7 +225,7 @@ The default <code>LogLevel warn</code> hides them. Bump just this module:</p>
 inspected the request, decided it didn't warrant friction, and
 declined so Apache served the real content.</p>
 <p><strong>4. The challenge widget renders.</strong> Force a challenge by spoofing a
-scraper UA so the heuristic score crosses <code>BotShieldScoreNonInteractive</code>
+scraper UA so the signal rules cross a <code>BotShieldChallengeAtLeast</code> row
 (default 20):</p>
 <pre><code class="language-sh">curl -sk -A &quot;python-requests/2.31&quot; https://example.test/ | grep -c BOTSHIELD
 # expected: 1 (the widget marker is present in the rendered page)

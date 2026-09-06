@@ -151,7 +151,7 @@ inspected the request, decided it didn't warrant friction, and
 declined so Apache served the real content.
 
 **4. The challenge widget renders.** Force a challenge by spoofing a
-scraper UA so the heuristic score crosses `BotShieldScoreNonInteractive`
+scraper UA so the signal rules cross a `BotShieldChallengeAtLeast` row
 (default 20):
 
 ```sh

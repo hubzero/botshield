@@ -5,10 +5,12 @@
  * runtime. Each entry records (penalty, ttl_seconds, reason) so the
  * decision log can replay why a tier was chosen.
  *
- * Score → tier mapping happens via bs_decide_tier (compares total to
- * bs_dir_cfg->score_non_interactive / _hard / _captcha thresholds), but the
- * score struct itself is request-scoped and lives on r->request_config
- * under the module's slot.
+ * Nothing maps this total to a tier any more. It is computed and
+ * logged, because what a request cost and what it tripped is worth
+ * reading, and a tier comes from a rule or from a
+ * BotShieldChallengeAtLeast row over a named accumulator. The score
+ * struct is request-scoped and lives on r->request_config under the
+ * module's slot.
  *
  * The flagtrigger walker is on the request side too — it consumes
  * scfg->flag_triggers entries (configured at config time via
@@ -195,7 +197,6 @@ int bs_apply_flag_triggers(request_rec *r,
  * (pass / noninteractive / interactive / captcha). The README "Understanding
  * scoring" section covers operator tuning; templates.h documents
  * the per-tier interstitial rendering. */
-bs_tier bs_decide_tier(const bs_dir_cfg *cfg, int score);
 
 /* Tier-name string for the decision log + claims-bridge wire
  * format. Returns "nochallenge" / "noninteractive" / "interactive" / "captcha", or "?"

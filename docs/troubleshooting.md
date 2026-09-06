@@ -61,7 +61,7 @@ matches your edge's IP, that's the issue. Configure
 
 **Second-most common cause**: the defaults are challenging more than
 you expected. `firstsightip` scores 20, which *is*
-`BotShieldScoreNonInteractive`, so any request arriving with no usable cookie
+the lowest `BotShieldChallengeAtLeast` row, so any request arriving with no usable cookie
 gets the invisible check on its first visit — by design, but surprising
 if you enabled BotShield site-wide rather than on an auth path. Either
 scope the enable, or lower the heuristic:
@@ -72,7 +72,7 @@ BotShieldHeuristicTrigger firstsightip reset action=score add=5
 
 For sites where most visitors don't send `Accept-Language` (legitimate
 use cases exist), `missingacceptlanguage` adds another 5 on top;
-raise `BotShieldScoreNonInteractive` to 30 or 40 if that combination is
+raise that row to 30 or 40 if the combination is
 over-firing.
 
 **Tuning workflow**:

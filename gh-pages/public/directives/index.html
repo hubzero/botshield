@@ -104,7 +104,7 @@
   <ul class="toc__list">
 <li class="toc__item toc__item--level-2"><a href="#scope-and-validity">Scope and validity</a></li>
 <li class="toc__item toc__item--level-2"><a href="#core">Core</a></li>
-<li class="toc__item toc__item--level-2"><a href="#tier-thresholds-and-forgiveness">Tier thresholds and forgiveness</a></li>
+<li class="toc__item toc__item--level-2"><a href="#forgiveness">Forgiveness</a></li>
 <li class="toc__item toc__item--level-2"><a href="#silent-tier-dispatch">Silent-tier dispatch</a></li>
 <li class="toc__item toc__item--level-2"><a href="#widget-customization">Widget customization</a></li>
 <li class="toc__item toc__item--level-2"><a href="#captcha-tier">Captcha tier</a></li>
@@ -262,12 +262,11 @@ form or captcha is ever rendered — any selected tier collapses back to
 <code>pass</code>, and the suppression appears in the decision log as
 <code>challengeoff:&lt;tier&gt;</code>.</p>
 <p>Use it where an explicit <code>respond=4xx</code> trigger is meant to be the only
-action. Parking <code>BotShieldScoreNonInteractive</code>/<code>Interactive</code>/<code>Captcha</code> at <code>10000</code> is
-<strong>not</strong> equivalent, which is easy to get wrong: a flag <code>tier_floor</code> is
-MAX'd in <em>after</em> the score-to-tier decision and ignores thresholds
-entirely, so an IP carrying <code>honeypot_hit</code>, <code>fake_bot</code>, <code>scanner_probe</code>
-or <code>pow_fail_streak</code> is still challenged. <code>BotShieldChallenge Off</code> is
-applied after the floor, so it holds.</p>
+action. It is the only thing that holds: a flag <code>tier_floor</code> and a
+<code>BotShieldChallengeAtLeast</code> row are both MAX'd in at the tier decision,
+so silencing the things that feed them is not the same as silencing
+them. <code>BotShieldChallenge Off</code> is applied after the floor, so it does
+what the others only appear to.</p>
 <p><strong>This has bitten a production deployment, so it is worth spelling out
 what the ceiling does and does not buy.</strong> A hub running only the silent
 tier parked <code>Hard</code> and <code>Captcha</code> at <code>10000</code>, believing form and captcha
@@ -437,7 +436,12 @@ a visitor sees without having to trip a challenge yourself. They serve
 <code>403</code>, like the real interstitials, because the same code path renders
 them.
 Change it if it collides with real app routes.</p>
-<h2 id="tier-thresholds-and-forgiveness">Tier thresholds and forgiveness</h2>
+<h2 id="forgiveness">Forgiveness</h2>
+<p>The three <code>BotShieldScore*</code> cut-points that used to head this section
+are gone. A tier is chosen by a rule that asks for one, or by a
+<code>BotShieldChallengeAtLeast</code> row reading a named accumulator — both of
+which name the signal that paid for the challenge, which a single
+running total never could.</p>
 <table>
 <thead>
 <tr>
@@ -447,21 +451,6 @@ Change it if it collides with real app routes.</p>
 </tr>
 </thead>
 <tbody>
-<tr>
-<td><code>BotShieldScoreNonInteractive</code></td>
-<td><code>N</code></td>
-<td><code>20</code></td>
-</tr>
-<tr>
-<td><code>BotShieldScoreInteractive</code></td>
-<td><code>N</code></td>
-<td><code>50</code></td>
-</tr>
-<tr>
-<td><code>BotShieldScoreCaptcha</code></td>
-<td><code>N</code></td>
-<td><code>80</code></td>
-</tr>
 <tr>
 <td><code>BotShieldForgivenessNonInteractive</code></td>
 <td><code>N</code></td>
@@ -484,15 +473,7 @@ Change it if it collides with real app routes.</p>
 </tr>
 </tbody>
 </table>
-<p>Tier dispatch ladder:</p>
-<ul>
-<li><code>score &lt; BotShieldScoreNonInteractive</code> → pass</li>
-<li><code>BotShieldScoreNonInteractive ≤ score &lt; BotShieldScoreInteractive</code> → silent</li>
-<li><code>BotShieldScoreInteractive ≤ score &lt; BotShieldScoreCaptcha</code> → form</li>
-<li><code>BotShieldScoreCaptcha ≤ score</code> → captcha (or form if no provider)</li>
-</ul>
-<p>See <a href="../site-model/index.html">site model</a> for the full scoring
-discussion.</p>
+<p>See <a href="../site-model/index.html">site model</a> for how a tier is chosen.</p>
 <p><code>BotShieldForgivenessCapPerHour</code> caps total cookie-side
 forgiveness in any rolling 60-minute window. Default 200 ≈ 4–8
 nochallenge outcomes worth of credit. Lower for stricter farming
@@ -944,8 +925,9 @@ BotShieldClassify None +browsers        # start from nothing, add back
 change: <code>-browsers</code> treats every UA as a browser for robots.txt
 wildcard purposes; <code>-known-bots</code> skips the directory walk, so no bot
 slug reaches the log; <code>-verified-bots</code> skips the IP cross-check and
-matched UAs degrade to knownbot, earning neither verified-bot credit
-nor fake-bot penalty (the intended response to stale CIDR data);
+matched UAs degrade to knownbot, so they answer neither
+<code>ua=@verified-bot</code> nor <code>ua=@fake-bot</code> and any rule written on those
+stops applying to them (the intended response to stale CIDR data);
 <code>-unknown-bots</code> skips the bot-token substring scan.</p>
 <p><code>BotShieldAllowBot</code> registers a UA pattern + IP-range pair. The third
 arg is a path to a CIDR file, a single CIDR, comma-separated inline
@@ -1497,8 +1479,8 @@ vhost, an included fragment, a test harness inserting at a fixed
 anchor. The cost is that &quot;switch off, then add my own&quot; cannot be said
 in one scope; use a nested one, which is what scopes are for.</p>
 <p>This is the off switch a list needs and a single-valued threshold never
-did: overriding <code>BotShieldScoreNonInteractive</code> silenced it, and there
-is no equivalent for a row you inherited and cannot see.</p>
+did: overriding the single noninteractive cut-point silenced it, and
+there is no equivalent for a row you inherited and cannot see.</p>
 <pre><code class="language-apache">&lt;BotShieldRule sig-scraper&gt;
     BotShieldUserAgent  @scraper
     BotShieldScore      botsignals +10
@@ -1940,17 +1922,33 @@ entries.</p>
 </tr>
 </tbody>
 </table>
-<p>Action verbs: <code>action=score add=N</code> (signed N -1000..1000),
-<code>action=tier_floor min=&lt;tier&gt;</code> (raise effective tier; tier is one
-of <code>pass</code>/<code>noninteractive</code>/<code>interactive</code>/<code>captcha</code>). The <code>reset</code> keyword clears
-all earlier declarations for the named flag at post-config time.</p>
-<p><strong>A <code>tier_floor</code> bypasses your score thresholds.</strong> It is MAX'd in
-<em>after</em> the score-to-tier decision, so it does not consult
-<code>BotShieldScoreNonInteractive</code>/<code>Interactive</code>/<code>Captcha</code> at all — an
-address carrying a floored flag is challenged even where the thresholds
-are parked to disable challenges entirely, or left unset, which now
-means never. That is the property to reach for when scoring is off and
-the point to remember when it is not.</p>
+<p>Action verbs: <code>action=score add=N [accumulator=&lt;name&gt;]</code> (signed N
+-1000..1000), <code>action=tier_floor min=&lt;tier&gt;</code> (raise effective tier;
+tier is one of <code>pass</code>/<code>noninteractive</code>/<code>interactive</code>/<code>captcha</code>). The
+<code>reset</code> keyword clears all earlier declarations for the named flag at
+post-config time.</p>
+<p><strong>Prefer <code>accumulator=</code>.</strong> Without it the number goes onto the ambient
+score, which persists into the cookie — so a flag's penalty can still
+be charged to a client on a later request that was refused for
+something else entirely. A named accumulator dies with the request that
+raised it, and is read by whichever <code>BotShieldChallengeAtLeast</code> rows
+name it:</p>
+<pre><code class="language-apache">&lt;BotShieldFlagTrigger honeypot_hit&gt;
+    BotShieldAction       score
+    BotShieldAccumulator  botsignals
+    BotShieldAdd          60
+&lt;/BotShieldFlagTrigger&gt;
+</code></pre>
+<p>This is the same accumulator a <code>BotShieldScore</code> line in a rule moves,
+so a flag and a rule can contribute to one judgement without either
+knowing about the other.</p>
+<p><strong>A <code>tier_floor</code> answers to nothing but itself.</strong> It is MAX'd in at
+the tier decision alongside every other claim on the tier, so an
+address carrying a floored flag is challenged whatever else the request
+did or did not trip. That is the property to reach for when a signal
+really is definitive, and the reason to reach for it rarely: a floor
+ignores the credits too, and a floor ignoring a credit is how
+<code>honeypot_hit</code> challenged Googlebot 248 times over ten hours.</p>
 <p>Nothing carries a floor unless this config gives it one. To keep a
 flag's score while dropping a floor you declared earlier, reset it and
 re-add the score:</p>
@@ -1975,10 +1973,11 @@ re-add the score:</p>
     BotShieldAdd          30
 &lt;/BotShieldFlagTrigger&gt;
 </code></pre>
-<p><strong>A flag score at or above <code>BotShieldScoreNonInteractive</code> is an unbreakable
+<p><strong>A flag score large enough to challenge on its own is an unbreakable
 loop, not a challenge.</strong> The replacement scores above fix the
-<code>tier_floor</code> bypass but leave a second trap, and <code>add=50</code> against the
-default silent threshold of <code>20</code> walks straight into it. Solving does
+<code>tier_floor</code> bypass but leave a second trap: any flag whose <code>add=</code>
+clears a <code>BotShieldChallengeAtLeast</code> row by itself walks into
+it. Solving does
 not clear a flag. Forgiveness reduces the score carried <em>in the
 cookie</em>, and then <code>bs_apply_flag_triggers</code> re-adds the flag's score on
 the very next request — <code>botshield.c</code> says so at the forgiveness site:</p>
@@ -1995,14 +1994,16 @@ a second, each success followed immediately by another
 loop it could not escape. The affected user had tripped
 <code>scanner_probe</code> while filing a support ticket about being blocked: the
 attachment upload posts a negative ticket id, which reads as probing.</p>
-<p>Keep flag scores <strong>below</strong> <code>BotShieldScoreNonInteractive</code> unless you intend the
-flag alone to challenge indefinitely. A flag worth less than the
-threshold still contributes toward a challenge in combination with
-other signals, which is usually what was meant:</p>
-<pre><code class="language-apache"># with the default BotShieldScoreNonInteractive of 20
+<p>Keep a flag's <code>add=</code> <strong>below</strong> the lowest row that reads its
+accumulator, unless you intend the flag alone to challenge
+indefinitely. A flag worth less than the row still contributes toward a
+challenge in combination with other signals, which is usually what was
+meant:</p>
+<pre><code class="language-apache"># against a BotShieldChallengeAtLeast botsignals 20 row
 &lt;BotShieldFlagTrigger scanner_probe&gt;
     BotShieldReset
     BotShieldAction       score
+    BotShieldAccumulator  botsignals
     BotShieldAdd          10
 &lt;/BotShieldFlagTrigger&gt;
 </code></pre>
@@ -2096,15 +2097,15 @@ authenticated rep block — the same evidence the safeguard-clear path
 requires. A real browser pays for this exactly once: it arrives with no
 proof, scores <code>droppedcookie</code>, clears it in one auto-submitted round
 trip, and every later request carries proof.</p>
-<p>The suggested <code>firstsightip</code> weight is exactly the suggested
-<code>BotShieldScoreNonInteractive</code>, so writing both as given makes a scope
+<p>The suggested <code>firstsightip</code> weight is exactly the lowest suggested
+<code>BotShieldChallengeAtLeast</code> row, so writing both as given makes a scope
 challenge any request with no session context. That is usually what you
 want on a login or registration path, where the check is invisible and
 a real browser clears it in one round trip; it is usually not what you
 want site-wide. Neither line exists until you write it, so this is a
 configuration to choose rather than a default to undo.</p>
-<p>Action verbs are <code>action=score add=N</code> (signed, -1000..1000) and
-<code>action=tier_floor min=&lt;tier&gt;</code>. <code>&lt;name&gt; reset</code> clears prior
+<p>Action verbs are <code>action=score add=N [accumulator=&lt;name&gt;]</code> (signed,
+-1000..1000) and <code>action=tier_floor min=&lt;tier&gt;</code>. <code>&lt;name&gt; reset</code> clears prior
 declarations for that one heuristic; <code>all reset</code> wipes every entry so
 the slate can be rebuilt from zero. With nothing seeded, both clear
 only what this config declared earlier.

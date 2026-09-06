@@ -277,7 +277,7 @@ fail2ban is fine. For &quot;this request is suspicious, make the client
 prove they're human&quot; you want mod_botshield (or Cloudflare).</p>
 <h2 id="detection-and-accuracy">Detection and accuracy</h2>
 <h3 id="will-it-block-real-users">Will it block real users?</h3>
-<p>Below <code>BotShieldScoreNonInteractive</code> (default 20) the module returns
+<p>With no rule, row or flag asking for a tier, the module returns
 DECLINED to Apache; the user's request flows through normally and
 they never see mod_botshield at all. The default heuristics are
 tuned to keep typical browser traffic below that threshold, but
