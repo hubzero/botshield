@@ -762,11 +762,13 @@ void bs_policy_dump(server_rec *s, apr_pool_t *p, bs_dir_cfg *cfg)
      * page they would have used to diagnose it. */
     fputs("## Observability endpoint access\n", stdout);
     {
-        const bs_observe_acl *acls[2] = { &scfg->observe_dashboard,
-                                          &scfg->observe_metrics };
-        const char *names[2] = { "BotShieldDashboardAccess",
-                                 "BotShieldMetricsAccess" };
-        for (int k = 0; k < 2; k++) {
+        const bs_observe_acl *acls[3] = { &scfg->observe_dashboard,
+                                          &scfg->observe_metrics,
+                                          &scfg->observe_admin };
+        const char *names[3] = { "BotShieldDashboardAccess",
+                                 "BotShieldMetricsAccess",
+                                 "BotShieldAdminAccess" };
+        for (int k = 0; k < 3; k++) {
             const bs_observe_acl *a = acls[k];
             if (a->allow_all) {
                 printf("%-26s ALL - served to everyone\n", names[k]);

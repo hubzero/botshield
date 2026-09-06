@@ -577,6 +577,13 @@ typedef struct bs_server_cfg {
      * host, and unioning them grants the scraper the dashboard. */
     bs_observe_acl      observe_dashboard;
     bs_observe_acl      observe_metrics;
+    /* Who may clear a flagged address. Held beside the two read
+     * surfaces because it is the same kind of gate over the same kind
+     * of address list, but it is not an observability grant: this one
+     * changes state. Kept separate for exactly that reason -- an
+     * operator opening the dashboard to a monitoring host should not
+     * discover they also handed it the ability to unflag. */
+    bs_observe_acl      observe_admin;
 } bs_server_cfg;
 
 /* Trigger and policy family types (bs_trigger_*, bs_*_trigger_entry,

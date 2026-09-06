@@ -366,6 +366,14 @@ static const command_rec bs_cmds[] = {
                  "Who may read /metrics. Closed until this names "
                  "someone; refused requests get 404. Same argument form "
                  "as BotShieldDashboardAccess."),
+    AP_INIT_TAKE_ARGV("BotShieldAdminAccess", bs_set_admin_access,
+                 NULL, RSRC_CONF,
+                 "Who may clear flagged addresses via POST to "
+                 "<prefix>/admin/unflag. Closed until this names "
+                 "someone; refused requests get 404. Same argument form "
+                 "as BotShieldDashboardAccess. Unlike the other two "
+                 "this grants a write, so it is deliberately not "
+                 "covered by either read grant."),
     AP_INIT_TAKE_ARGV("BotShieldAccessLog", bs_set_access_log, NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "Control the Apache access-log line for requests "
@@ -1438,6 +1446,157 @@ static int bs_observe_denied(request_rec *r, const char *surface)
     return HTTP_NOT_FOUND;
 }
 
+/* POST <prefix>/admin/unflag -- clear flags from an address or range.
+ *
+ * Form body:
+ *   addr=<ip|cidr>          required
+ *   flags=<name[,name...]>  optional; omitted means drop the entry
+ *                           whatever it holds
+ *
+ * Deliberately POST. A GET would be fetched by a link checker, a
+ * browser prefetch, or an operator's own history, and this changes
+ * state.
+ *
+ * Deliberately requires an X-BotShield-Unflag header, whose value is
+ * ignored. The ACL matches on address, and an operator's browser sits
+ * at an allowed address: without this, any page that browser visits
+ * could POST a form here and have it accepted. A cross-origin form
+ * cannot set a header, so requiring one that no form can produce means
+ * the request had to come from something deliberately constructed --
+ * curl, a script, the operator's own tooling.
+ *
+ * There is no `ns` parameter, though the plan proposed one. The ACL is
+ * per-server and namespaces are per-vhost, so honouring a
+ * client-supplied namespace would let a host granted admin on one
+ * vhost clear another vhost's reputation -- a grant the operator never
+ * wrote. The namespace is the one this request arrived in. */
+/* Reply with our own text and our own status.
+ *
+ * Returning the status code from a handler lets Apache substitute its
+ * error document, so a caller asking why their request was refused got
+ * "Your browser sent a request that this server could not understand"
+ * instead of the flag name they mistyped. Setting r->status and
+ * returning OK keeps the body we wrote. */
+static int bs_admin_reply(request_rec *r, int status, const char *msg)
+{
+    r->status = status;
+    ap_set_content_type(r, "text/plain; charset=utf-8");
+    ap_rprintf(r, "%s\n", msg);
+    return OK;
+}
+
+static int bs_admin_unflag_handler(request_rec *r)
+{
+    if (r->method_number != M_POST) {
+        ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r,
+                      "botshield: admin/unflag refused: %s, want POST",
+                      r->method ? r->method : "-");
+        return bs_admin_reply(r, HTTP_METHOD_NOT_ALLOWED,
+                              "POST only: this clears state");
+    }
+    if (!apr_table_get(r->headers_in, "X-BotShield-Unflag")) {
+        ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r,
+                      "botshield: admin/unflag refused: no "
+                      "X-BotShield-Unflag header");
+        return bs_admin_reply(r, HTTP_BAD_REQUEST,
+                              "missing X-BotShield-Unflag header");
+    }
+
+    const char *body = NULL;
+    apr_size_t body_len = 0;
+    apr_status_t bsr = bs_read_form_body(r, 4 * 1024, &body, &body_len);
+    if (bsr == APR_ENOSPC)
+        return bs_admin_reply(r, HTTP_REQUEST_ENTITY_TOO_LARGE,
+                              "body too large");
+    if (bsr != APR_SUCCESS)
+        return bs_admin_reply(r, HTTP_BAD_REQUEST, "unreadable body");
+
+    char *addr_spec = bs_form_get(r->pool, body, "addr");
+    if (!addr_spec || !*addr_spec)
+        return bs_admin_reply(r, HTTP_BAD_REQUEST, "addr is required");
+
+    bs_server_cfg *scfg = ap_get_module_config(r->server->module_config,
+                                               &botshield_module);
+    if (!scfg) return HTTP_INTERNAL_SERVER_ERROR;
+
+    /* Split the optional prefix length off before parsing the
+     * address: bs_parse_client_ip wants a bare address. */
+    int want_bits = -1;
+    char *slash = strchr(addr_spec, '/');
+    if (slash) {
+        *slash = '\0';
+        const char *lenstr = slash + 1;
+        if (!*lenstr)
+            return bs_admin_reply(r, HTTP_BAD_REQUEST,
+                                  "empty prefix length");
+        char *end = NULL;
+        long v = strtol(lenstr, &end, 10);
+        if (!end || *end || v < 0 || v > 128)
+            return bs_admin_reply(r, HTTP_BAD_REQUEST,
+                                  "bad prefix length");
+        want_bits = (int)v;
+    }
+
+    unsigned char net[16];
+    if (!bs_parse_client_ip(addr_spec, net))
+        return bs_admin_reply(r, HTTP_BAD_REQUEST, "bad address");
+
+    /* v4 arrives v4-mapped, so a v4 /24 is 120 bits of the 16-byte
+     * key. Detect the mapping rather than re-reading the string: that
+     * is the form the table stores and the form we have to match. */
+    static const unsigned char V4MAP[12] = {
+        0,0,0,0, 0,0,0,0, 0,0,0xFF,0xFF
+    };
+    int is_v4 = (memcmp(net, V4MAP, sizeof(V4MAP)) == 0);
+
+    int bits;
+    if (is_v4) {
+        if (want_bits < 0) want_bits = 32;
+        if (want_bits > 32)
+            return bs_admin_reply(r, HTTP_BAD_REQUEST,
+                "prefix length above /32 for an IPv4 address");
+        bits = 96 + want_bits;
+    } else {
+        /* v6 entries are stored masked to ipv6_prefix_bits, so a /128
+         * would match nothing that granularity coarser than /128 ever
+         * wrote. Clamp to the storage granularity and report the
+         * prefix actually acted on, because it is wider than what was
+         * asked for and the operator has to see that. */
+        int gran = scfg->ipv6_prefix_bits > 0 ? scfg->ipv6_prefix_bits : 128;
+        if (want_bits < 0) want_bits = 128;
+        bits = want_bits > gran ? gran : want_bits;
+        bs_mask_ipv6_prefix(net, gran);
+    }
+
+    apr_uint32_t del_bits = 0;
+    char *flags_spec = bs_form_get(r->pool, body, "flags");
+    if (flags_spec && *flags_spec) {
+        const char *ferr = NULL;
+        del_bits = bs_parse_flag_names(r->pool, flags_spec, &ferr);
+        if (ferr) return bs_admin_reply(r, HTTP_BAD_REQUEST, ferr);
+    }
+
+    apr_uint32_t cleared = 0;
+    bs_flagged_ip_clear_range(r, net, bits, del_bits, scfg->ns_id, &cleared);
+
+    /* NOTICE, not INFO: clearing reputation state is the kind of thing
+     * someone asks about afterwards, and it should be in the log of a
+     * server that is not running at debug level. Names who asked as
+     * well as what changed -- the ACL is the gate, but the log is the
+     * record of who walked through it. */
+    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r,
+                  "botshield: admin/unflag by %s: addr=%s bits=%d "
+                  "flags=%s ns=%u slots=%u",
+                  r->useragent_ip ? r->useragent_ip : "-",
+                  addr_spec, bits,
+                  (flags_spec && *flags_spec) ? flags_spec : "(all)",
+                  (unsigned)scfg->ns_id, (unsigned)cleared);
+
+    return bs_admin_reply(r, HTTP_OK,
+                          apr_psprintf(r->pool, "cleared %u",
+                                       (unsigned)cleared));
+}
+
 /* Module-owned endpoint routing. URLs under BotShieldEndpointPrefix
  * (default /botshield) are served by this module's own handlers, not
  * the tier dispatch. Today:
@@ -1480,16 +1639,22 @@ static int bs_route_module_endpoint(request_rec *r, bs_dir_cfg *cfg)
         int is_metrics = (strcmp(sub, "/metrics") == 0);
         int is_dash    = (strcmp(sub, "/dashboard") == 0
                           || strncmp(sub, "/dashboard/", 11) == 0);
-        if (is_metrics || is_dash) {
+        /* Prefix-matched like /dashboard/, so a second admin action
+         * added later is gated by the directive that already exists
+         * rather than shipping open until someone lists it. */
+        int is_admin   = (strncmp(sub, "/admin/", 7) == 0);
+        if (is_metrics || is_dash || is_admin) {
             bs_server_cfg *scfg =
                 ap_get_module_config(r->server->module_config,
                                      &botshield_module);
             const bs_observe_acl *acl = !scfg ? NULL
-                : (is_metrics ? &scfg->observe_metrics
+                : (is_admin   ? &scfg->observe_admin
+                 : is_metrics ? &scfg->observe_metrics
                               : &scfg->observe_dashboard);
             if (!bs_observe_permitted(r, acl)) {
                 return bs_observe_denied(r,
-                    is_metrics ? "metrics" : "dashboard");
+                    is_admin ? "admin" : is_metrics ? "metrics"
+                                                    : "dashboard");
             }
         }
     }
@@ -1500,6 +1665,9 @@ static int bs_route_module_endpoint(request_rec *r, bs_dir_cfg *cfg)
     }
     if (strcmp(sub, "/metrics") == 0) {
         return bs_metrics_handler(r);
+    }
+    if (strcmp(sub, "/admin/unflag") == 0) {
+        return bs_admin_unflag_handler(r);
     }
     if (strcmp(sub, "/dashboard") == 0) {
         return bs_dashboard_handler(r);

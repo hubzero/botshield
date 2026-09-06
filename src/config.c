@@ -344,6 +344,8 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
         out->observe_dashboard = base->observe_dashboard;
     if (!add->observe_metrics.ranges)
         out->observe_metrics = base->observe_metrics;
+    if (!add->observe_admin.ranges)
+        out->observe_admin = base->observe_admin;
     if (add->app_claims_enabled == BS_APP_FEEDBACK_UNSET) {
         out->app_claims_enabled = base->app_claims_enabled;
     }
@@ -486,6 +488,9 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->observe_metrics.ranges      = NULL;
     scfg->observe_metrics.specs       = NULL;
     scfg->observe_metrics.allow_all   = 0;
+    scfg->observe_admin.ranges        = NULL;
+    scfg->observe_admin.specs         = NULL;
+    scfg->observe_admin.allow_all     = 0;
     scfg->decision_log_outcomes       = -1;   /* all */
     scfg->any_enabled                 = 0;
     return scfg;
@@ -3153,6 +3158,38 @@ const char *bs_set_metrics_access(cmd_parms *cmd, void *dummy,
     if (!scfg) return "BotShieldMetricsAccess: no server config";
     return bs_set_observe_acl(cmd, &scfg->observe_metrics,
                               "BotShieldMetricsAccess", argc, argv);
+}
+
+/* BotShieldAdminAccess
+ *
+ * Same grammar and the same closed-by-default rule as the two
+ * observability ACLs, and deliberately a third directive rather than a
+ * value on either. The dashboard is a page you read; this clears
+ * reputation state. An operator who opens the dashboard to a NOC
+ * jumphost has said nothing about who may unflag, and a single
+ * directive covering both would read as though they had.
+ *
+ * `all` is accepted because the grammar is shared, and it is the wrong
+ * answer here in a way it is not for a read-only page -- so it warns
+ * at startup rather than being silently honoured. */
+const char *bs_set_admin_access(cmd_parms *cmd, void *dummy,
+                                int argc, char *const argv[])
+{
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    if (!scfg) return "BotShieldAdminAccess: no server config";
+    for (int i = 0; i < argc; i++) {
+        if (strcasecmp(argv[i], "all") == 0) {
+            ap_log_error(APLOG_MARK, APLOG_WARNING, 0, cmd->server,
+                         "BotShieldAdminAccess all: every client that can "
+                         "reach this server may clear flagged addresses. "
+                         "This surface changes state; name the operator "
+                         "hosts instead.");
+            break;
+        }
+    }
+    return bs_set_observe_acl(cmd, &scfg->observe_admin,
+                              "BotShieldAdminAccess", argc, argv);
 }
 
 /* BotShieldAccessLog on|off|suppress=<outcome[,outcome...]>

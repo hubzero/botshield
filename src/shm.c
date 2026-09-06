@@ -295,6 +295,66 @@ void bs_flagged_ip_clear(request_rec *r, const unsigned char ip[16],
     apr_global_mutex_unlock(bs_shm.mutex);
 }
 
+/* Prefix compare over the 16-byte key. */
+static int bs_ip_in_prefix(const unsigned char ip[16],
+                           const unsigned char net[16], int bits)
+{
+    int whole = bits / 8;
+    int rem   = bits % 8;
+    if (whole && memcmp(ip, net, (size_t)whole) != 0) return 0;
+    if (rem) {
+        unsigned char mask = (unsigned char)(0xFFu << (8 - rem));
+        if (((ip[whole] ^ net[whole]) & mask) != 0) return 0;
+    }
+    return 1;
+}
+
+void bs_flagged_ip_clear_range(request_rec *r, const unsigned char net[16],
+                               int bits, apr_uint32_t del_bits,
+                               apr_uint32_t ns_id, apr_uint32_t *out_slots)
+{
+    if (out_slots) *out_slots = 0;
+    if (!bs_shm.flagged_table || !bs_shm.mutex) return;
+    if (bits < 0 || bits > 128) return;
+
+    /* Blocking, and over the whole table. Both are affordable only
+     * because this runs when an operator asks and never on a request
+     * path: one scan of the capacity is bounded work, where the add
+     * path's ten-slot probe is what has to stay cheap. */
+    if (apr_global_mutex_lock(bs_shm.mutex) != APR_SUCCESS) return;
+
+    apr_uint32_t changed = 0;
+    for (apr_uint32_t idx = 0; idx < bs_shm.flagged_capacity; idx++) {
+        bs_flagged_ip_slot *slot = &bs_shm.flagged_table[idx];
+
+        apr_uint32_t v = __atomic_load_n(&slot->version, __ATOMIC_ACQUIRE);
+        if (v & 1U) continue;   /* torn write; not identifiable */
+
+        if (!slot->used || slot->ns_id != ns_id) continue;
+        if (!bs_ip_in_prefix(slot->ip, net, bits)) continue;
+
+        apr_uint32_t now_flags = del_bits ? (slot->flags & ~del_bits) : 0;
+        if (now_flags == slot->flags) continue;  /* held none of them */
+
+        /* Copy the key out before rewriting the slot: the writer
+         * memcpys into slot->ip, and passing slot->ip as its own
+         * source is an overlapping copy. */
+        unsigned char keep[16];
+        memcpy(keep, slot->ip, sizeof(keep));
+
+        if (now_flags == 0) {
+            bs_flagged_write_slot(slot, keep, 0, 0, ns_id);
+            slot->used = 0;
+        } else {
+            bs_flagged_write_slot(slot, keep, now_flags,
+                                  slot->expires_at, ns_id);
+        }
+        changed++;
+    }
+    apr_global_mutex_unlock(bs_shm.mutex);
+    if (out_slots) *out_slots = changed;
+}
+
 void bs_flagged_ip_add(request_rec *r, const unsigned char ip[16],
                        apr_uint32_t flag_bits, int ttl_seconds,
                        apr_uint32_t ns_id)

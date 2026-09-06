@@ -1393,6 +1393,71 @@ careful CIDR list should not quietly win.
 Matching is on the same client address the module scores, so
 `mod_remoteip` applies exactly as it does to Apache's own `Require ip`.
 
+## Clearing a flagged address
+
+| Directive | Syntax | Default | Scope |
+|---|---|---|---|
+| `BotShieldAdminAccess` | `<addr\|cidr>...` \| `all` \| `none` | closed | server / vhost |
+
+Who may clear flags from an address. Same grammar and the same
+closed-until-named rule as the two above, and deliberately a third
+directive rather than a share of either: the dashboard is a page you
+read, this changes state. An operator who opens the dashboard to a
+monitoring host has said nothing about who may unflag.
+
+```apache
+BotShieldAdminAccess 10.1.0.7
+```
+
+```
+POST <prefix>/admin/unflag
+  addr=<ip|cidr>          required
+  flags=<name[,name...]>  optional; omitted drops the entry entirely
+```
+
+Requires an `X-BotShield-Unflag` header, whose value is ignored. The ACL
+matches an address, an operator's browser sits at an allowed address,
+and a browser visits pages -- without the header, any page that browser
+loaded could POST here and be obeyed. No cross-origin form can set a
+header, so requiring one that no form produces means the request was
+built deliberately.
+
+```console
+$ curl -sS -H 'X-BotShield-Unflag: 1' \
+    --data 'addr=203.0.113.0/24' \
+    https://example.org/botshield/admin/unflag
+cleared 2
+```
+
+Replies `cleared <n>` in plain text and logs a NOTICE naming the caller,
+the target, the flags and the count. `cleared 0` is a real answer -- the
+address was not flagged -- and is worth printing rather than treating as
+an error, because believing an address is flagged is the usual reason
+for being here.
+
+There is **no `ns=` parameter**, though the surface is otherwise
+per-vhost. The ACL is per-server and namespaces are per-vhost, so
+honouring a caller-supplied namespace would let a host granted admin on
+one vhost clear another vhost's reputation. The namespace acted on is
+the one the request arrived in.
+
+Two things about ranges are worth knowing before typing one:
+
+- An IPv4 `/24` clears every flagged address inside it, found by walking
+  the table. The table is hashed on the whole address, so a prefix has
+  no bucket to probe and neighbouring addresses land nowhere near each
+  other. The walk is bounded by table capacity and runs only when asked.
+- An IPv6 target is masked to `BotShieldIPv6Prefix` before matching,
+  because that is the granularity flags are stored at. Asking for a
+  `/128` when storage is `/64` acts on the `/64` -- wider than asked.
+  The reply reports the prefix acted on.
+
+Matching for this directive is on the same client address as the other
+two, so `mod_remoteip` applies here as well. That is worth a second look
+when granting a write: if a proxy in front of this server is trusted for
+`X-Forwarded-For` and does not overwrite it, the address this ACL
+compares is one the client can choose.
+
 ### Why this is not a `<Location>`
 
 `Require ip` on these paths has a failure mode worth knowing. Each authz

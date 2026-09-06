@@ -228,11 +228,19 @@ apr_uint32_t bs_parse_flag_names(apr_pool_t *p, const char *s,
             }
         }
         if (!matched) {
-            *err = apr_psprintf(p, "unknown flag name '%.*s' "
-                "(known penalty bits: honeypot_hit, scanner_probe, "
-                "fake_bot, pow_fail_streak; credit bits: "
-                "app_verified_human, app_verified_session, "
-                "app_trust_signal)", (int)len, cur);
+            /* Built from the table rather than typed out. The typed
+             * version had already gone stale -- it still listed seven
+             * names after `blocked` became the eighth -- and the only
+             * place anyone reads this message is while typing a flag
+             * name, which is exactly when a wrong list costs the most. */
+            char *known = NULL;
+            for (int i = 0; bs_flag_names[i].name; i++) {
+                known = known
+                    ? apr_pstrcat(p, known, ", ", bs_flag_names[i].name, NULL)
+                    : apr_pstrdup(p, bs_flag_names[i].name);
+            }
+            *err = apr_psprintf(p, "unknown flag name '%.*s' (known: %s)",
+                                (int)len, cur, known ? known : "-");
             return 0;
         }
         cur = comma ? comma + 1 : NULL;

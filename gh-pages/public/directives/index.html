@@ -128,6 +128,7 @@
 <li class="toc__item toc__item--level-3"><a href="#why-the-busy-worker-ratio-is-often-the-wrong-signal">Why the busy-worker ratio is often the wrong signal</a></li>
 <li class="toc__item toc__item--level-2"><a href="#multi-vhost-reputation">Multi-vhost reputation</a></li>
 <li class="toc__item toc__item--level-2"><a href="#observability-endpoint-access">Observability endpoint access</a></li>
+<li class="toc__item toc__item--level-2"><a href="#clearing-a-flagged-address">Clearing a flagged address</a></li>
 <li class="toc__item toc__item--level-3"><a href="#why-this-is-not-a-location">Why this is not a `&lt;Location&gt;`</a></li>
 <li class="toc__item toc__item--level-2"><a href="#decision-log">Decision log</a></li>
 <li class="toc__item toc__item--level-3"><a href="#the-default-is-already-rotated">The default is already rotated</a></li>
@@ -2025,6 +2026,73 @@ get edited by commenting lines in and out and a leftover <code>all</code> above 
 careful CIDR list should not quietly win.</p>
 <p>Matching is on the same client address the module scores, so
 <code>mod_remoteip</code> applies exactly as it does to Apache's own <code>Require ip</code>.</p>
+<h2 id="clearing-a-flagged-address">Clearing a flagged address</h2>
+<table>
+<thead>
+<tr>
+<th>Directive</th>
+<th>Syntax</th>
+<th>Default</th>
+<th>Scope</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BotShieldAdminAccess</code></td>
+<td><code>&lt;addr|cidr&gt;...</code> | <code>all</code> | <code>none</code></td>
+<td>closed</td>
+<td>server / vhost</td>
+</tr>
+</tbody>
+</table>
+<p>Who may clear flags from an address. Same grammar and the same
+closed-until-named rule as the two above, and deliberately a third
+directive rather than a share of either: the dashboard is a page you
+read, this changes state. An operator who opens the dashboard to a
+monitoring host has said nothing about who may unflag.</p>
+<pre><code class="language-apache">BotShieldAdminAccess 10.1.0.7
+</code></pre>
+<pre><code>POST &lt;prefix&gt;/admin/unflag
+  addr=&lt;ip|cidr&gt;          required
+  flags=&lt;name[,name...]&gt;  optional; omitted drops the entry entirely
+</code></pre>
+<p>Requires an <code>X-BotShield-Unflag</code> header, whose value is ignored. The ACL
+matches an address, an operator's browser sits at an allowed address,
+and a browser visits pages -- without the header, any page that browser
+loaded could POST here and be obeyed. No cross-origin form can set a
+header, so requiring one that no form produces means the request was
+built deliberately.</p>
+<pre><code class="language-console">$ curl -sS -H 'X-BotShield-Unflag: 1' \
+    --data 'addr=203.0.113.0/24' \
+    https://example.org/botshield/admin/unflag
+cleared 2
+</code></pre>
+<p>Replies <code>cleared &lt;n&gt;</code> in plain text and logs a NOTICE naming the caller,
+the target, the flags and the count. <code>cleared 0</code> is a real answer -- the
+address was not flagged -- and is worth printing rather than treating as
+an error, because believing an address is flagged is the usual reason
+for being here.</p>
+<p>There is <strong>no <code>ns=</code> parameter</strong>, though the surface is otherwise
+per-vhost. The ACL is per-server and namespaces are per-vhost, so
+honouring a caller-supplied namespace would let a host granted admin on
+one vhost clear another vhost's reputation. The namespace acted on is
+the one the request arrived in.</p>
+<p>Two things about ranges are worth knowing before typing one:</p>
+<ul>
+<li>An IPv4 <code>/24</code> clears every flagged address inside it, found by walking
+the table. The table is hashed on the whole address, so a prefix has
+no bucket to probe and neighbouring addresses land nowhere near each
+other. The walk is bounded by table capacity and runs only when asked.</li>
+<li>An IPv6 target is masked to <code>BotShieldIPv6Prefix</code> before matching,
+because that is the granularity flags are stored at. Asking for a
+<code>/128</code> when storage is <code>/64</code> acts on the <code>/64</code> -- wider than asked.
+The reply reports the prefix acted on.</li>
+</ul>
+<p>Matching for this directive is on the same client address as the other
+two, so <code>mod_remoteip</code> applies here as well. That is worth a second look
+when granting a write: if a proxy in front of this server is trusted for
+<code>X-Forwarded-For</code> and does not overwrite it, the address this ACL
+compares is one the client can choose.</p>
 <h3 id="why-this-is-not-a-location">Why this is not a <code>&lt;Location&gt;</code></h3>
 <p><code>Require ip</code> on these paths has a failure mode worth knowing. Each authz
 denial writes an <code>AH01630</code> line to the error log, the dashboard

@@ -1015,6 +1015,40 @@ void bs_flagged_ip_clear(request_rec *r, const unsigned char ip[16],
 int  bs_flagged_ip_lookup(const unsigned char ip[16],
                           apr_uint32_t *out_flags, apr_uint32_t ns_id);
 
+/* Operator-initiated clear over an address prefix.
+ *
+ * bs_flagged_ip_clear finds one exact key by hash probe. A prefix has
+ * no bucket -- the hash is over the whole address, so two neighbouring
+ * addresses land nowhere near each other -- and the only way to find
+ * every member of a prefix is to walk the table. That is why this is a
+ * separate function rather than a flag on the other one: same effect,
+ * completely different access pattern.
+ *
+ * Two deliberate differences from the trigger-side clear:
+ *
+ *   - It takes the mutex blocking, where that one uses trylock and
+ *     gives up. A missed feedback-driven clear is recoverable, because
+ *     the next event retries and the entry expires regardless. An
+ *     operator gets one attempt and has to be told what happened, so
+ *     silently doing nothing is the one outcome worse than waiting.
+ *
+ *   - It reports. *out_slots receives the number of entries changed,
+ *     which is what the caller logs and hands back to the operator.
+ *     Zero is a real answer -- it means the address was not flagged --
+ *     and is worth seeing, because the usual reason an operator is
+ *     here at all is that they believe it is.
+ *
+ * `bits` is a prefix length over the 16-byte key, so an IPv4 /24 is
+ * 120, not 24. Addresses must arrive in the table's own form: v4
+ * normalized to v4-mapped, and v6 already masked per ipv6_prefix_bits,
+ * exactly as the add path stores them.
+ *
+ * del_bits selects which flags to remove. 0 means remove the entry
+ * outright whatever it holds. */
+void bs_flagged_ip_clear_range(request_rec *r, const unsigned char net[16],
+                               int bits, apr_uint32_t del_bits,
+                               apr_uint32_t ns_id, apr_uint32_t *out_slots);
+
 /* --- Strike table (E9) --------------------------------------------- *
  *
  * bs_strike_record_429 takes the three rate-escalate policy ints

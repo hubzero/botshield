@@ -102,6 +102,11 @@ const char *bs_set_dashboard_access(cmd_parms *cmd, void *dummy, int argc,
                                     char *const argv[]);
 const char *bs_set_metrics_access  (cmd_parms *cmd, void *dummy, int argc,
                                     char *const argv[]);
+/* Who may clear a flagged address. Same grammar, but this one grants a
+ * write, so it is its own directive rather than a share of either
+ * read grant. */
+const char *bs_set_admin_access    (cmd_parms *cmd, void *dummy, int argc,
+                                    char *const argv[]);
 const char *bs_set_score_non_interactive  (cmd_parms *cmd, void *cfg_v, const char *arg);
 const char *bs_set_score_interactive    (cmd_parms *cmd, void *cfg_v, const char *arg);
 const char *bs_set_score_captcha (cmd_parms *cmd, void *cfg_v, const char *arg);
