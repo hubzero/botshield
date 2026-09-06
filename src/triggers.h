@@ -161,6 +161,12 @@ typedef struct {
      * selector so it stays nameable. 0 = axis unused. */
     int                 ua_class_bot;
     int                 ua_class_fake;
+    /* @scraper -- the UA carries a known HTTP-library token. Its own
+     * selector rather than a botgroup because it is a classification
+     * this module makes, not a bot the directory knows: curl and
+     * python-requests are not crawlers with names, they are clients
+     * that did not bother to claim one. */
+    int                 ua_class_scraper;
     int                 ip_any;
     const char         *path;
     const char         *inline_cidrs;
@@ -234,6 +240,16 @@ typedef struct {
      * firstsight=yes is firstsightip, firstsight=no is droppedcookie.
      * -1 = no condition. */
     int                firstsight_pred;
+    /* acceptlanguage="" | * -- absent-or-empty, or present.
+     *
+     * The missingal heuristic as a condition, spelled the way
+     * BotShieldUserAgent already spells the same question: a quoted
+     * empty string means the header is absent or empty, since absence
+     * is not a substring and needs its own token. Deliberately not a
+     * general header matcher -- that is a bigger surface with its own
+     * escaping and case rules, and it is not what parity needs.
+     * -1 = no condition. */
+    int                acceptlang_pred;
     /* minload=normal|warm|hot -- fires when the current load state is
      * AT OR ABOVE this level. Spelled as a minimum rather than an
      * operator so it parses as an ordinary key=value; "fires from warm

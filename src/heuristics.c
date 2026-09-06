@@ -44,11 +44,19 @@ static const char *bs_pred_missing_al(request_rec *r)
     return (!al || !*al) ? "missingacceptlanguage" : NULL;
 }
 
-static const char *bs_pred_scraper_ua(request_rec *r)
+/* Which HTTP-library token, if any, this User-Agent carries.
+ *
+ * Shared with the ua=@scraper cohort selector so a rule and the
+ * scraperua score ask the same question of the same list. Two copies
+ * of this list would drift, and a rule and a score disagreeing about
+ * what a scraper is is the kind of split this vocabulary is meant to
+ * remove.
+ *
+ * Case-sensitive on purpose — both casings appear in the wild and are
+ * listed. This flags rather than blocks, so a false positive costs a
+ * tier bump. */
+const char *bs_ua_scraper_token(request_rec *r)
 {
-    /* Obvious scraper / HTTP-library UA fragments. Case-sensitive on
-     * purpose — both casings where both actually appear in the wild.
-     * Matches flag, not block, so false positives only cost a tier bump. */
     const char *ua = apr_table_get(r->headers_in, "User-Agent");
     if (!ua || !*ua) return NULL;
     static const char *const scraper_tokens[] = {
@@ -60,12 +68,15 @@ static const char *bs_pred_scraper_ua(request_rec *r)
         NULL
     };
     for (int i = 0; scraper_tokens[i]; i++) {
-        if (strstr(ua, scraper_tokens[i])) {
-            return apr_psprintf(r->pool, "scraperua-%s",
-                                scraper_tokens[i]);
-        }
+        if (strstr(ua, scraper_tokens[i])) return scraper_tokens[i];
     }
     return NULL;
+}
+
+static const char *bs_pred_scraper_ua(request_rec *r)
+{
+    const char *tok = bs_ua_scraper_token(r);
+    return tok ? apr_psprintf(r->pool, "scraperua-%s", tok) : NULL;
 }
 
 /* firstsightip's predicate is the bloom-miss check in bs_handler;

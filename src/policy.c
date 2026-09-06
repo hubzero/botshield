@@ -25,6 +25,7 @@
 #include "botshield.h"
 #include "allowlist.h"     /* bs_allow_ip_in_ranges (cohort match) */
 #include "bot_rate.h"      /* bs_bot_rate_check */
+#include "heuristics.h"    /* bs_ua_scraper_token (ua=@scraper) */
 #include "bot_directory.h" /* bs_ua_is_known_bot (Cloudflare directory) */
 #include "browser_classifier.h" /* bs_ua_is_browser (top-100 templates) */
 #include "ua_class.h"     /* unified per-request classification */
@@ -72,6 +73,10 @@ static int bs_cohort_matches(const bs_cohort *c,
         } else if (c->ua_class_fake) {
             const bs_ua_class *cls = bs_classify_request_ua(r);
             if (!cls || cls->label != BS_UA_CLASS_FAKE_BOT) return 0;
+        } else if (c->ua_class_scraper) {
+            /* Same list the scraperua heuristic scores, so a rule and
+             * a score cannot disagree about one request. */
+            if (!bs_ua_scraper_token(r)) return 0;
         } else if (c->ua_botgroup) {
             const bs_ua_class *cls = bs_classify_request_ua(r);
             if (!cls || !cls->known_botgroup) return 0;
@@ -451,6 +456,12 @@ int bs_check_policy(request_rec *r)
                 const char *sv = apr_table_get(r->notes, BS_CK_SOLVED_NOTE);
                 int solved = (sv && *sv == '1');
                 if (solved != t->solved_pred) continue;
+            }
+            if (t->acceptlang_pred >= 0) {
+                const char *al =
+                    apr_table_get(r->headers_in, "Accept-Language");
+                int present = (al && *al) ? 1 : 0;
+                if (present != t->acceptlang_pred) continue;
             }
             if (t->firstsight_pred >= 0) {
                 /* -1 means no usable client address. A rule asking

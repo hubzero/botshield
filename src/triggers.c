@@ -1012,6 +1012,7 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
     e->exists_pred = -1;              /* no filesystem condition */
     e->solved_pred = -1;              /* no solve-proof condition */
     e->firstsight_pred = -1;          /* no Bloom-membership condition */
+    e->acceptlang_pred = -1;          /* no Accept-Language condition */
     e->bscookie_pred = -1;            /* no bs-cookie condition */
     e->crawler_pred  = -1;            /* no crawler condition */
     e->minload     = -1;              /* no load condition */
@@ -1112,6 +1113,19 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                 else {
                     return apr_psprintf(cmd->pool,
                         "%s: solved='%s' not one of yes|no", D, val);
+                }
+                continue;
+            }
+            if (klen == 14
+             && strncasecmp(arg, "acceptlanguage", 14) == 0) {
+                if      (!*val)                 e->acceptlang_pred = 0;
+                else if (!strcmp(val, "*"))     e->acceptlang_pred = 1;
+                else {
+                    return apr_psprintf(cmd->pool,
+                        "%s: acceptlanguage='%s' -- only \"\" (absent "
+                        "or empty) and * (present) are accepted; this "
+                        "is the missingal signal as a condition, not a "
+                        "header matcher", D, val);
                 }
                 continue;
             }

@@ -114,3 +114,8 @@ const char *bs_set_heuristic_trigger(cmd_parms *cmd, void *dconf,
 #endif
 
 #endif /* BOTSHIELD_HEURISTICS_H */
+
+/* The HTTP-library token this User-Agent carries, or NULL.
+ * Backs both the scraperua heuristic and the ua=@scraper rule
+ * selector, so the two cannot disagree. */
+const char *bs_ua_scraper_token(request_rec *r);

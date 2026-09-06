@@ -1232,9 +1232,14 @@ it.</p>
 <td>bulk forms only</td>
 </tr>
 <tr>
-<td><code>ua=&lt;substring&gt;|@&lt;botgroup&gt;[,@&lt;botgroup&gt;...]|&quot;&quot;</code></td>
+<td><code>ua=&lt;substring&gt;|@&lt;selector&gt;[,@&lt;selector&gt;...]|&quot;&quot;</code></td>
 <td>User-Agent</td>
 <td><code>*</code> means &quot;any&quot;, same as omitting. <code>ua=&quot;&quot;</code> matches a request with <strong>no</strong> User-Agent header, or one present but empty — absence is not a substring, so it needs its own spelling. A <strong>comma list of <code>@selectors</code></strong> matches if any of them does.</td>
+</tr>
+<tr>
+<td><code>acceptlanguage=&quot;&quot;|*</code></td>
+<td>the <code>Accept-Language</code> header</td>
+<td><code>&quot;&quot;</code> = absent or empty, <code>*</code> = present. The <code>missingal</code> signal as a condition; deliberately not a header matcher</td>
 </tr>
 <tr>
 <td><code>ipspec=&lt;spec&gt;</code></td>
@@ -1321,6 +1326,47 @@ per-address state with a window: a client that solves the challenge
 would keep being re-challenged for the life of a flag it cannot clear.
 Flag when you want the reputation to persist; challenge when you want to
 gate the request in front of you.</p>
+<h4 id="selectors-on-ua"><code>@selectors</code> on <code>ua=</code></h4>
+<p>Three of them name a classification this module makes rather than a bot
+the directory knows:</p>
+<table>
+<thead>
+<tr>
+<th>Selector</th>
+<th>Matches</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>@bot</code></td>
+<td>verified, known and unknown bots — the same three the dashboard's Bots tab counts. <strong>Not</strong> <code>fake-bot</code>: a client lying about being a crawler must not inherit an exemption written for real ones</td>
+</tr>
+<tr>
+<td><code>@fake-bot</code></td>
+<td>a UA claiming a crawler whose address failed the cross-check</td>
+</tr>
+<tr>
+<td><code>@scraper</code></td>
+<td>the UA carries a known HTTP-library token — <code>curl</code>, <code>wget</code>, <code>python-requests</code>, <code>Go-http-client</code>, <code>okhttp</code>, <code>scrapy</code> and similar</td>
+</tr>
+</tbody>
+</table>
+<p>Anything else after <code>@</code> is read as a botgroup name from the bot
+directory (<code>search</code>, <code>ai-input</code>, <code>ai-train</code>, <code>monitor</code>).</p>
+<p><code>@scraper</code> is the <code>scraperua</code> signal as a condition, and it reads the
+same token list the heuristic scores — one list, so a rule and a score
+cannot disagree about what a scraper is. It is a class rather than a
+botgroup because <code>curl</code> and <code>python-requests</code> are not crawlers with
+names; they are clients that did not claim one.</p>
+<h4 id="botshieldacceptlanguage-absent-or-present"><code>BotShieldAcceptLanguage</code> — absent, or present</h4>
+<p><code>&quot;&quot;</code> matches a request with no <code>Accept-Language</code> header or an empty one,
+<code>*</code> matches a request that carries it. It is spelled like
+<code>BotShieldUserAgent &quot;&quot;</code> because it asks the same kind of question, and
+absence is not a substring.</p>
+<p>Substrings are refused at config time. This is the <code>missingal</code> signal as
+a condition, not a general header matcher — that is a larger surface
+with its own escaping and case rules, and it wants deciding on its own
+merits rather than arriving by way of a value slipping through.</p>
 <h4 id="botshieldfirstsight-has-this-address-been-seen-before"><code>BotShieldFirstSight</code> — has this address been seen before?</h4>
 <p><code>yes</code> matches an address the Bloom filter has no record of, <code>no</code> matches
 one it does. A request with no usable client address matches neither,

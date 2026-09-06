@@ -739,7 +739,8 @@ it.
 | `path=<glob>` | `r->uri` — path only, **no** query string | must start with `/`, ≤256 chars |
 | `query=<glob>` | the query string alone | e.g. `query="*return=*"` |
 | `cookies=none\|any\|session` | the parsed `Cookie` header | bulk forms only |
-| `ua=<substring>\|@<botgroup>[,@<botgroup>...]\|""` | User-Agent | `*` means "any", same as omitting. `ua=""` matches a request with **no** User-Agent header, or one present but empty — absence is not a substring, so it needs its own spelling. A **comma list of `@selectors`** matches if any of them does. |
+| `ua=<substring>\|@<selector>[,@<selector>...]\|""` | User-Agent | `*` means "any", same as omitting. `ua=""` matches a request with **no** User-Agent header, or one present but empty — absence is not a substring, so it needs its own spelling. A **comma list of `@selectors`** matches if any of them does. |
+| `acceptlanguage=""\|*` | the `Accept-Language` header | `""` = absent or empty, `*` = present. The `missingal` signal as a condition; deliberately not a header matcher |
 | `ipspec=<spec>` | client IP | `*`, a CIDR list, or a file path |
 | `solved=yes\|no` | authenticated solve proof in the cookie | the strongest single predicate here: on a production hub 100% of challenges carried "no solve proof" |
 | `exists=yes\|no` | whether the request maps to a real file | a stat, so the rest of a ladder can see only paths that do not exist |
@@ -776,6 +777,38 @@ per-address state with a window: a client that solves the challenge
 would keep being re-challenged for the life of a flag it cannot clear.
 Flag when you want the reputation to persist; challenge when you want to
 gate the request in front of you.
+
+#### `@selectors` on `ua=`
+
+Three of them name a classification this module makes rather than a bot
+the directory knows:
+
+| Selector | Matches |
+|---|---|
+| `@bot` | verified, known and unknown bots — the same three the dashboard's Bots tab counts. **Not** `fake-bot`: a client lying about being a crawler must not inherit an exemption written for real ones |
+| `@fake-bot` | a UA claiming a crawler whose address failed the cross-check |
+| `@scraper` | the UA carries a known HTTP-library token — `curl`, `wget`, `python-requests`, `Go-http-client`, `okhttp`, `scrapy` and similar |
+
+Anything else after `@` is read as a botgroup name from the bot
+directory (`search`, `ai-input`, `ai-train`, `monitor`).
+
+`@scraper` is the `scraperua` signal as a condition, and it reads the
+same token list the heuristic scores — one list, so a rule and a score
+cannot disagree about what a scraper is. It is a class rather than a
+botgroup because `curl` and `python-requests` are not crawlers with
+names; they are clients that did not claim one.
+
+#### `BotShieldAcceptLanguage` — absent, or present
+
+`""` matches a request with no `Accept-Language` header or an empty one,
+`*` matches a request that carries it. It is spelled like
+`BotShieldUserAgent ""` because it asks the same kind of question, and
+absence is not a substring.
+
+Substrings are refused at config time. This is the `missingal` signal as
+a condition, not a general header matcher — that is a larger surface
+with its own escaping and case rules, and it wants deciding on its own
+merits rather than arriving by way of a value slipping through.
 
 #### `BotShieldFirstSight` — has this address been seen before?
 

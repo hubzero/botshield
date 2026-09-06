@@ -4426,12 +4426,14 @@ const char *bs_cohort_resolve(cmd_parms *cmd, bs_cohort *out,
         if (!ua[1]) {
             return "UA selector '@' must be followed by a botgroup "
                    "name (search, ai-input, ai-train, monitor) or a "
-                   "class (bot, fake-bot)";
+                   "class (bot, fake-bot, scraper)";
         }
         if (strcasecmp(ua + 1, "bot") == 0) {
             out->ua_class_bot = 1;
         } else if (strcasecmp(ua + 1, "fake-bot") == 0) {
             out->ua_class_fake = 1;
+        } else if (strcasecmp(ua + 1, "scraper") == 0) {
+            out->ua_class_scraper = 1;
         } else {
             out->ua_botgroup = apr_pstrdup(cmd->pool, ua + 1);
         }
