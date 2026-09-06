@@ -1291,22 +1291,27 @@ reason above. The window is `BotShieldForgetIPAfter`, at server scope.
 > it. `BotShieldTTL 0`, which used to be how you switched the default
 > off, is what the default already is and can be deleted.
 
-#### Renamed from `BotShieldRequestTrigger`
+#### Removed: `BotShieldRequestTrigger`
 
-`BotShieldRequestTrigger` is the old spelling of this directive. The
+`BotShieldRequestTrigger` was the old spelling of this directive. The
 family stopped being about requests-versus-something-else once it grew
 `ua=`, `ipspec=`, `query=`, `cookies=`, `exists=`, `solved=` and
 `minload=`. What it actually does is match a request on any combination
 of its properties and act once, which is what a rule is.
 
-The old name still parses and logs a deprecation warning at config
-time. It **will** be removed, so rename the block and its closing tag:
+It was deprecated 2026-09-05 and **removed** 2026-09-06 — one day
+rather than the nine `BotShieldPathTrigger` got, because a census found
+no config anywhere using it. A block with the old tag now fails config
+parse, like any unknown directive. Rename the block and its closing
+tag:
 
 ```apache
+# configtest: skip -- the "before" half names a removed directive and
+# is here to be recognised, not run.
 # before
 <BotShieldRequestTrigger blocked>
     BotShieldPath         /wp-admin/*
-    BotShieldStatus       403
+    BotShieldRespond      403
 </BotShieldRequestTrigger>
 
 # after
@@ -1317,7 +1322,12 @@ time. It **will** be removed, so rename the block and its closing tag:
 ```
 
 Nothing else changes: same conditions, same actions, same parser, same
-resulting rule. Only the spelling differs.
+resulting rule.
+
+The decision log's reason prefix moved with it. A rule that fires now
+logs `rule:<name>` where it used to log `requesttrigger:<name>` — the
+old prefix was a separate literal and would otherwise have been the
+only surviving trace of a directive nobody can write.
 
 #### Renamed from `BotShieldStatus`
 

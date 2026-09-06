@@ -61,8 +61,8 @@ def _get(path, ip):
 
 def _fired(slc, ip, name):
     """Did the named rule match? A scoring rule names itself in the
-    reason trace as requesttrigger:<name>."""
-    return any(("requesttrigger:" + name) in (d.get("reason") or "")
+    reason trace as rule:<name>."""
+    return any(("rule:" + name) in (d.get("reason") or "")
                for d in slc.decision_lines(ip=ip))
 
 

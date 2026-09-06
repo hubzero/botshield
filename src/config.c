@@ -1771,7 +1771,7 @@ static void bs_wire_rate_and_block_cohorts(apr_pool_t *pconf,
                     vcfg->request_triggers, i, bs_request_trigger_entry *);
                 if (!e->has_cohort) continue;
                 BS_E21_RESOLVE_COHORT(&e->cohort,
-                    "BotShieldRequestTrigger", e->name);
+                    "BotShieldRule", e->name);
                 wired++;
             }
             if (wired > 0) {
@@ -3747,7 +3747,7 @@ static int bs_rate_unit_seconds(const char *u)
  * sniffing the args (every arg after <name> contains '=' → new
  * shape; any positional arg without '=' → legacy).
  *
- * Cohort semantics mirror BotShieldRequestTrigger ua=/ipspec= (UA
+ * Cohort semantics mirror BotShieldRule ua=/ipspec= (UA
  * substring, @botgroup, polymorphic ipspec, '*' for "any" on either
  * axis). Both-'*' (or both keys omitted in the new form) is rejected
  * because that would rate-limit every request on the server. Budget

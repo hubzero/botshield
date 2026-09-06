@@ -56,8 +56,8 @@ def test_trigger_status_code_blocks_and_tags_log(
             lines = slc.decision_lines(ip=fresh_ip)
 
     assert resp.status_code == 403
-    hits = [d for d in lines if "requesttrigger:env-probe" in d["reason"]]
-    assert hits, f"no requesttrigger:env-probe decision line; lines={lines}"
+    hits = [d for d in lines if "rule:env-probe" in d["reason"]]
+    assert hits, f"no rule:env-probe decision line; lines={lines}"
     # The tag rides the existing decision log line — decision_lines
     # should pick it up as the "tag" field.
     assert any(d.get("tag") == "BAN 2h" for d in hits), (
@@ -117,7 +117,7 @@ def test_trigger_status_pass_penalty_scores_the_current_request(
     "no penalty" measures the wrong thing entirely: a bare respond=nochallenge
     declines out of the handler before the scoring pipeline runs, so
     its reason chain comes back bracketed and zeroed
-    ([knownbot:...:0,requesttrigger:passpen:pass:0]) while the
+    ([knownbot:...:0,rule:passpen:pass:0]) while the
     penalty arm additionally picks up missingacceptlanguage,
     scraperua-python, firstsightip and any flag triggers. The
     difference there is the whole pipeline, not the penalty.
@@ -147,7 +147,7 @@ def test_trigger_status_pass_penalty_scores_the_current_request(
     low  = decision_for("score=\"probe +10\"", fresh_ip)
     high = decision_for("score=\"probe +90\"", ips.fresh_ip())
 
-    assert "requesttrigger:passpen" in high["reason"], (
+    assert "rule:passpen" in high["reason"], (
         f"the match must be traceable in the reason chain; d={high}"
     )
     assert low["tier"] == "nochallenge", (
@@ -323,8 +323,8 @@ def test_path_trigger_middle_star_matches_segment(
         f"middle-* didn't match /api/internal/admin; got {r2.status_code}"
     )
     assert sum(1 for d in lines
-               if "requesttrigger:api-admin" in d["reason"]) >= 2, (
-        f"expected two requesttrigger:api-admin decisions; lines={lines}"
+               if "rule:api-admin" in d["reason"]) >= 2, (
+        f"expected two rule:api-admin decisions; lines={lines}"
     )
 
 
@@ -360,7 +360,7 @@ def test_path_trigger_middle_star_anchored_excludes_suffix(
         f"(suffix beyond anchor); got {r_after.status_code}"
     )
     triggered = [d for d in lines
-                 if "requesttrigger:api-admin-end" in d["reason"]]
+                 if "rule:api-admin-end" in d["reason"]]
     assert len(triggered) == 1, (
         f"expected exactly one trigger fire (the /admin path); "
         f"lines={lines}"
@@ -439,40 +439,38 @@ def test_flat_trigger_form_is_rejected(config_override):
     )
 
 
-def test_deprecated_requesttrigger_spelling_still_parses(
+def test_removed_requesttrigger_spelling_is_refused(
     config_override, fresh_ip,
 ):
-    """<BotShieldRequestTrigger> is the old spelling of <BotShieldRule>.
+    """<BotShieldRequestTrigger> is gone; the block must not parse.
 
-    It warns at config time and keeps working. A config error is fatal
-    to httpd and the name is still in live configs, so removing it
-    outright would take a site down at its next restart rather than
-    announce a rename. BotShieldPathTrigger was retired the same way --
-    renamed first, removed nine days later.
+    This was the test asserting the deprecated spelling kept working,
+    and its docstring said what to do when the name went: flip it to
+    expect a failure. The name was deprecated 2026-09-05 and removed
+    2026-09-06, one day rather than the nine BotShieldPathTrigger got,
+    because it turned out no config anywhere used it -- zero in
+    production, zero in the dev vhost, three in this suite.
 
-    render=False is load-bearing for the same reason it is on the flat
-    -form test: the block is written out here exactly as an operator
-    would write it, so the module is what gets tested rather than the
-    harness renderer.
-
-    When the name is finally removed, this becomes its rejection test:
-    flip it to expect a failure naming BotShieldRule.
+    A removed section directive is an unknown one, so httpd refuses the
+    config outright rather than warning. That is the intended end
+    state: the rename is not advice any more.
     """
-    with config_override(
-        r"BotShieldEnabled\s+On",
-        "BotShieldEnabled On\n"
-        "    <BotShieldRequestTrigger legacy-spelling>\n"
-        "        BotShieldPath      /legacy-spelling-probe\n"
-        "        BotShieldRespond    404\n"
-        "    </BotShieldRequestTrigger>",
-        render=False,
-        count=1,
-    ):
-        resp = client.get("/legacy-spelling-probe", xff=fresh_ip)
-        assert resp.status_code == 404, (
-            "the deprecated spelling must keep working until it is "
-            f"removed; got {resp.status_code}"
-        )
+    with pytest.raises(Exception) as exc_info:
+        with config_override(
+            r"BotShieldEnabled\s+On",
+            "BotShieldEnabled On\n"
+            "    <BotShieldRequestTrigger legacy-spelling>\n"
+            "        BotShieldPath      /legacy-spelling-probe\n"
+            "        BotShieldRespond    404\n"
+            "    </BotShieldRequestTrigger>",
+            render=False,
+            count=1,
+        ):
+            pass
+    msg = str(exc_info.value)
+    assert "returned non-zero exit status" in msg or "BotShieldRequestTrigger" in msg, (
+        f"the removed spelling must be refused by httpd; got: {msg!r}"
+    )
 
 
 def test_deprecated_status_spelling_still_parses(config_override, fresh_ip):

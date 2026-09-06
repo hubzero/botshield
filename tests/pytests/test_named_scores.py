@@ -123,7 +123,7 @@ def test_a_score_does_not_survive_the_request(config_override, fresh_ip,
             with log_slice as slc:
                 _get(fresh_ip)
             fired = [d for d in slc.decision_lines(ip=fresh_ip)
-                     if "requesttrigger:carried" in (d.get("reason") or "")]
+                     if "rule:carried" in (d.get("reason") or "")]
             assert not fired, (
                 f"request {attempt}: the accumulator reached 15, so it "
                 f"carried across requests; lines={fired}"

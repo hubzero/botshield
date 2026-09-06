@@ -79,7 +79,7 @@ def test_path_trigger_observe_does_not_enforce(
     )
     # Decision log shows the :observe suffix.
     reason = lines[-1]["reason"]
-    assert "requesttrigger:trap:observe" in reason, (
+    assert "rule:trap:observe" in reason, (
         f"expected observe suffix in reason; got {reason!r}"
     )
 

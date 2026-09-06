@@ -1792,18 +1792,23 @@ default now flags nothing; add <code>BotShieldFlagIP scanner_probe</code> to kee
 it. <code>BotShieldTTL 0</code>, which used to be how you switched the default
 off, is what the default already is and can be deleted.</p>
 </blockquote>
-<h4 id="renamed-from-botshieldrequesttrigger">Renamed from <code>BotShieldRequestTrigger</code></h4>
-<p><code>BotShieldRequestTrigger</code> is the old spelling of this directive. The
+<h4 id="removed-botshieldrequesttrigger">Removed: <code>BotShieldRequestTrigger</code></h4>
+<p><code>BotShieldRequestTrigger</code> was the old spelling of this directive. The
 family stopped being about requests-versus-something-else once it grew
 <code>ua=</code>, <code>ipspec=</code>, <code>query=</code>, <code>cookies=</code>, <code>exists=</code>, <code>solved=</code> and
 <code>minload=</code>. What it actually does is match a request on any combination
 of its properties and act once, which is what a rule is.</p>
-<p>The old name still parses and logs a deprecation warning at config
-time. It <strong>will</strong> be removed, so rename the block and its closing tag:</p>
-<pre><code class="language-apache"># before
+<p>It was deprecated 2026-09-05 and <strong>removed</strong> 2026-09-06 — one day
+rather than the nine <code>BotShieldPathTrigger</code> got, because a census found
+no config anywhere using it. A block with the old tag now fails config
+parse, like any unknown directive. Rename the block and its closing
+tag:</p>
+<pre><code class="language-apache"># configtest: skip -- the &quot;before&quot; half names a removed directive and
+# is here to be recognised, not run.
+# before
 &lt;BotShieldRequestTrigger blocked&gt;
     BotShieldPath         /wp-admin/*
-    BotShieldStatus       403
+    BotShieldRespond      403
 &lt;/BotShieldRequestTrigger&gt;
 
 # after
@@ -1813,7 +1818,11 @@ time. It <strong>will</strong> be removed, so rename the block and its closing t
 &lt;/BotShieldRule&gt;
 </code></pre>
 <p>Nothing else changes: same conditions, same actions, same parser, same
-resulting rule. Only the spelling differs.</p>
+resulting rule.</p>
+<p>The decision log's reason prefix moved with it. A rule that fires now
+logs <code>rule:&lt;name&gt;</code> where it used to log <code>requesttrigger:&lt;name&gt;</code> — the
+old prefix was a separate literal and would otherwise have been the
+only surviving trace of a directive nobody can write.</p>
 <h4 id="renamed-from-botshieldstatus">Renamed from <code>BotShieldStatus</code></h4>
 <p><code>BotShieldStatus</code> is the old spelling of <code>BotShieldRespond</code>. Apache
 already spends the word &quot;status&quot; on <code>mod_status</code> and <code>server-status</code>,

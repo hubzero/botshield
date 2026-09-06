@@ -10,7 +10,7 @@ A request trigger with `respond=403` plus optional `ua=`/`ipspec=` match
 keys. Cohort shape still reuses E1 (UA substring + polymorphic
 ipspec). '*' means "any" on either axis; both-'*' is rejected at
 config time. On trip, rate-limit → 429 + Retry-After +
-ratelimitexceeded:<name>; requesttrigger → status + requesttrigger:<name>.
+ratelimitexceeded:<name>; rule → status + rule:<name>.
 """
 
 from __future__ import annotations
@@ -155,7 +155,7 @@ def test_path_trigger_block_prefix_match(config_override, log_slice, fresh_ip):
     assert r_root.status_code == 403
     assert r_sub.status_code  == 403
     assert r_safe.status_code != 403, "non-matching path should not 403"
-    hits = [d for d in lines if "requesttrigger:lockdown" in d["reason"]]
+    hits = [d for d in lines if "rule:lockdown" in d["reason"]]
     assert len(hits) == 2, f"expected 2 requesttrigger hits; got {hits}"
 
 
@@ -254,9 +254,9 @@ def test_path_trigger_precedence_is_declaration_order(
     assert r_other.status_code  == 403
 
     specific_hits = [d for d in lines
-                     if "requesttrigger:specific" in d["reason"]]
+                     if "rule:specific" in d["reason"]]
     generic_hits  = [d for d in lines
-                     if "requesttrigger:generic"  in d["reason"]]
+                     if "rule:generic"  in d["reason"]]
     assert len(specific_hits) == 1, (
         f"/admin/secret should hit the specific rule (declared first); "
         f"specific_hits={specific_hits}"

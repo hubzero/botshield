@@ -493,7 +493,7 @@ int bs_check_policy(request_rec *r)
                 continue;
             bs_trigger_exec_outcome o = bs_apply_trigger_action(
                 r, scfg, BS_TFAMILY_REQUEST, &t->action,
-                "requesttrigger", t->name);
+                "rule", t->name);
             /* Path family: PASS means "do not challenge this", not
              * "do not enforce anything on this". Those were the same
              * thing while a pass returned here, which quietly exempted
@@ -589,7 +589,7 @@ int bs_check_policy(request_rec *r)
         } else {
             /* Robots.txt Disallow → 403 with a +100 score hit and a
              * 1-hour flag, mirroring the deny weight an explicit
-             * BotShieldRequestTrigger ... status=403 would carry. */
+             * BotShieldRule ... status=403 would carry. */
             bs_score_add(r, 100,
                 apr_pstrcat(r->pool, "robotsblock:", rgroup, NULL));
             return HTTP_FORBIDDEN;

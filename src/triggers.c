@@ -3,7 +3,7 @@
  * Five trigger families share one config-time action engine and one
  * request-time executor:
  *
- *   E3   BotShieldRequestTrigger      path glob       request-path
+ *   E3   BotShieldRule      path glob       request-path
  *   E4   BotShieldCookieTrigger    cookie name/val request-path
  *   E6   BotShieldEnvTrigger       env var         request-path
  *   E7.3 BotShieldFeedbackTrigger  event name      response-path
@@ -130,7 +130,7 @@ static const char *bs_unquote(apr_pool_t *pool, const char *v)
 static const char *bs_trigger_family_dname(bs_trigger_family fam)
 {
     switch (fam) {
-    case BS_TFAMILY_REQUEST:  return "BotShieldRequestTrigger";
+    case BS_TFAMILY_REQUEST:  return "BotShieldRule";
     case BS_TFAMILY_COOKIE:   return "BotShieldCookieTrigger";
     case BS_TFAMILY_ENV:      return "BotShieldEnvTrigger";
     case BS_TFAMILY_FEEDBACK: return "BotShieldFeedbackTrigger";
@@ -1002,7 +1002,7 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
     return BS_TEXEC_STATUS;
 }
 
-/* BotShieldRequestTrigger <name> [key=value ...].
+/* BotShieldRule <name> [key=value ...].
  *
  * The family matches on up to six dimensions -- path, query, cookies,
  * exists, ua and ipspec -- so no single one of them belongs in the
@@ -1056,7 +1056,7 @@ static void bs_warn_tier_without_solved(cmd_parms *cmd,
 {
     if (e->action.tier_floor < 0 || e->solved_pred >= 0) return;
     ap_log_error(APLOG_MARK, APLOG_WARNING, 0, cmd->server,
-        "mod_botshield: BotShieldRequestTrigger '%s' sets tier= but has "
+        "mod_botshield: BotShieldRule '%s' sets tier= but has "
         "no solved= condition, so it re-challenges clients that have "
         "already solved -- an endless loop for real visitors. Add "
         "solved=no to challenge once; ignore this if the path is meant "
@@ -1067,13 +1067,15 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                                        int argc, char *const argv[])
 {
     (void)dconf;
-    /* Names the family in every message this setter emits. The
-     * canonical spelling is BotShieldRule; <BotShieldRequestTrigger>
-     * still parses but is deprecated, and an operator using it is
-     * being pointed at the name to migrate to anyway. */
+    /* Names the family in every message this setter emits. There is
+     * one spelling now -- BotShieldRequestTrigger was removed
+     * 2026-09-06 -- but the constant stays because the messages below
+     * should name the directive once, in one place, rather than each
+     * carrying its own literal. Three of them had drifted to the old
+     * name by the time it went. */
     static const char *D = "BotShieldRule";
     if (argc < 1) {
-        return "BotShieldRequestTrigger: expects <name> [key=value ...] "
+        return "BotShieldRule: expects <name> [key=value ...] "
                "with at least one of path= query= cookies= ua= ipspec=";
     }
     const char *name = argv[0];
@@ -1989,7 +1991,7 @@ static const bs_flag_meta *bs_flag_meta_for_name(const char *name)
  * One unified config language for "when this flag fires, do X." Replaces
  * the prior BotShieldFlag directive (which mutated bs_flag_meta entries
  * to attach penalty/next_difficulty/next_tier metadata) with the same
- * shape as the existing BotShieldRequestTrigger / BotShieldFeedbackTrigger /
+ * shape as the existing BotShieldRule / BotShieldFeedbackTrigger /
  * BotShieldLoadTrigger family.
  *
  * Two action verbs:
@@ -2206,7 +2208,7 @@ const char *bs_set_flag_trigger(cmd_parms *cmd, void *dconf,
 
 
 /* ----------------------------------------------------------------------
- * Container syntax: <BotShieldRequestTrigger name> ... </...>
+ * Container syntax: <BotShieldRule name> ... </...>
  *
  * The flat `key=value` form is retired. It packed a rule's six match
  * dimensions and eight action keys onto one logical line, which in

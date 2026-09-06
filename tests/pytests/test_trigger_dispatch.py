@@ -111,7 +111,7 @@ def test_cookie_short_circuit_blocks_env_and_path(
         f"env trigger must not have run after cookie short-circuit; "
         f"reason={reason}"
     )
-    assert "requesttrigger:p-block" not in reason, (
+    assert "rule:p-block" not in reason, (
         f"path trigger must not have run after cookie short-circuit; "
         f"reason={reason}"
     )
@@ -142,7 +142,7 @@ def test_env_short_circuit_blocks_path(
     assert lines
     reason = lines[-1]["reason"]
     assert "envtrigger:e-block" in reason
-    assert "requesttrigger:p-block" not in reason, (
+    assert "rule:p-block" not in reason, (
         f"path trigger must not have run after env short-circuit; "
         f"reason={reason}"
     )
@@ -180,7 +180,7 @@ def test_cookie_and_env_pass_then_path_runs(
     reason = lines[-1]["reason"]
     assert "cookietrigger:c-pass" in reason, reason
     assert "envtrigger:e-pass"    in reason, reason
-    assert "requesttrigger:p-block"  in reason, reason
+    assert "rule:p-block"  in reason, reason
 
 
 # --- Load triggers in the shared family ----------------------------
@@ -216,7 +216,7 @@ def test_load_short_circuit_blocks_path(
     assert lines
     reason = lines[-1]["reason"]
     assert "loadtrigger:l-block" in reason, reason
-    assert "requesttrigger:p-block" not in reason, (
+    assert "rule:p-block" not in reason, (
         f"path trigger must not have run after load short-circuit; "
         f"reason={reason}"
     )
@@ -255,7 +255,7 @@ def test_env_pass_then_load_blocks_path(
     reason = lines[-1]["reason"]
     assert "envtrigger:e-pass" in reason, reason
     assert "loadtrigger:l-block" in reason, reason
-    assert "requesttrigger:p-block" not in reason, (
+    assert "rule:p-block" not in reason, (
         f"path trigger must not have run after load short-circuit; "
         f"reason={reason}"
     )

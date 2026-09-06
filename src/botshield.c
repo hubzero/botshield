@@ -191,28 +191,6 @@ static const char *bs_open_rule(cmd_parms *cmd, void *dconf,
     return bs_section_trigger(cmd, dconf, arg, "BotShieldRule", bs_set_request_trigger);
 }
 
-static const char *bs_open_requesttrigger(cmd_parms *cmd, void *dconf,
-                                          const char *arg)
-{
-    /* Deprecated spelling of <BotShieldRule>. Same setter, same parser,
-     * same entry type -- the family stopped being about
-     * requests-versus-something-else once it grew ua=, ipspec=, query=,
-     * cookies=, exists=, solved= and minload=.
-     *
-     * Warns rather than fails, and will fail later. A config error is
-     * fatal to httpd, and this name is still in live configs; taking a
-     * site down at the next restart is not an acceptable way to
-     * announce a rename. BotShieldPathTrigger got the same treatment --
-     * renamed 2026-08-01, removed 2026-08-10 -- and that is the
-     * sequence being followed here. */
-    ap_log_error(APLOG_MARK, APLOG_WARNING, 0, cmd->server,
-        "mod_botshield: <BotShieldRequestTrigger> is deprecated and "
-        "will be removed; rename these blocks to <BotShieldRule>. "
-        "Same directive and same behaviour -- only the spelling "
-        "differs.");
-    return bs_section_trigger(cmd, dconf, arg, "BotShieldRequestTrigger", bs_set_request_trigger);
-}
-
 static const command_rec bs_cmds[] = {
     AP_INIT_TAKE1("BotShieldEnabled",   bs_set_enabled,    NULL,
                  RSRC_CONF | ACCESS_CONF,
@@ -600,10 +578,6 @@ static const command_rec bs_cmds[] = {
                  "</BotShieldMatch>. Conditions only -- actions belong "
                  "on the rules that name the set. Define a set above "
                  "the rules that use it."),
-    AP_INIT_RAW_ARGS("<BotShieldRequestTrigger", bs_open_requesttrigger, NULL, RSRC_CONF,
-                 "DEPRECATED spelling of <BotShieldRule>; warns at config "
-                 "time and will be removed. Identical behaviour -- rename "
-                 "the block and its closing tag."),
     AP_INIT_TAKE_ARGV("BotShieldTrigger", bs_flat_trigger_retired, NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "Per-scope trigger: the Apache scope (server / "
@@ -945,21 +919,20 @@ static const command_rec bs_cmds[] = {
                  "<load-match> [key=value ...]. load-match is one of "
                  "state=<level> or state>=<level> where <level> is "
                  "normal|warm|hot. Keys: respond=<code|nochallenge>, "
-                 "log=<tag>, accesslog=on|off, penalty=<n>, credit=<n>. flag/ttl/"
-                 "redirect rejected — load is global state, not "
+                 "log=<tag>, accesslog=on|off, score=\"<name> +n\". "
+                 "flag/ttl/redirect rejected — load is global state, not "
                  "per-IP behavior. First-match-wins."),
     /* E3 — path-based triggers */
-    /* BotShieldRule — the name this family should have had.
+    /* BotShieldRule — the name this family should have had, and now
+     * the only one it answers to.
      *
-     * Same setter, same parser, same entry type as
-     * BotShieldRequestTrigger; only the spelling differs. The family
-     * stopped being about requests-versus-something-else once it grew
-     * ua=, ipspec=, query=, cookies=, exists=, solved= and minload=:
-     * it is simply "match a request on any combination of its
-     * properties and act", which is what a rule is.
-     *
-     * Both names stay registered. An existing config keeps working,
-     * and the docs lead with BotShieldRule.
+     * It was BotShieldRequestTrigger until 2026-09-05, deprecated then
+     * and removed the next day once it turned out no config anywhere
+     * used the old spelling. The family stopped being about
+     * requests-versus-something-else once it grew ua=, ipspec=,
+     * query=, cookies=, exists=, solved= and minload=: it is simply
+     * "match a request on any combination of its properties and act",
+     * which is what a rule is.
      *
      * The two match keys that make a load-shed ladder expressible
      * without arithmetic:
@@ -979,19 +952,10 @@ static const command_rec bs_cmds[] = {
                  "minload=normal|warm|hot (fires at that load state or "
                  "above), ua=<substring>|@<botgroup>|@bot|@fake-bot, "
                  "ipspec=*|<file>|<cidr[,cidr]>. Action keys: "
-                 "respond=<code|nochallenge>, redirect=<url>, tier=<t>, "
-                 "penalty=<n>, log=<tag>, accesslog=on|off, flag=<bit>, "
-                 "ttl=<sec>, mode=enforce|observe."),
-    AP_INIT_TAKE_ARGV("BotShieldRequestTrigger",
-                 bs_flat_trigger_retired, NULL, RSRC_CONF,
-                 "DEPRECATED spelling of BotShieldRule, and the flat "
-                 "one-line form is retired besides. Write "
-                 "<BotShieldRule name> ... </BotShieldRule>; see that "
-                 "directive for the match and action keys. This text "
-                 "used to restate them and drifted: it still advertised "
-                 "flag= and ttl= defaults that no longer exist, and "
-                 "tier= values that were renamed. One directive should "
-                 "document itself once."),
+                 "respond=<code|nochallenge>, redirect=<url>, "
+                 "challenge=<tier>, score=\"<name> +n\", log=<tag>, "
+                 "accesslog=on|off, flagip=<bit>, flagsession=<bit>, "
+                 "mode=enforce|observe."),
     AP_INIT_TAKE_ARGV("BotShieldDecisionLog", bs_set_decision_log,
                  NULL, RSRC_CONF,
                  "Module-owned decision log. Defaults to "
