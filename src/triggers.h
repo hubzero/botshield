@@ -108,8 +108,6 @@ typedef struct {
      * and because a rule that moves none is the common case and costs
      * a NULL. */
     apr_array_header_t *score_ops;   /* of bs_score_op * */
-    int           penalty;        /* 0..1000 */
-    int           credit;         /* 0..1000 (rejected on path family) */
     int           status_explicit; /* 1 if operator wrote status= */
     int           mode;           /* bs_trigger_mode */
     /* accesslog=off — suppress the access-log line for a matching

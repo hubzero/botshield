@@ -38,7 +38,7 @@ NEWCOMER = (
     "    <BotShieldRule newcomer>\n"
     "        BotShieldPath        /firstsight-probe\n"
     "        BotShieldFirstSight  yes\n"
-    "        BotShieldNoChallenge\n        BotShieldPenalty     1\n"
+    "        BotShieldNoChallenge\n        BotShieldScore     probe +1\n"
     "        BotShieldLogAs       newcomer\n"
     "    </BotShieldRule>\n"
 )
@@ -48,7 +48,7 @@ RETURNING = (
     "    <BotShieldRule returning>\n"
     "        BotShieldPath        /firstsight-probe\n"
     "        BotShieldFirstSight  no\n"
-    "        BotShieldNoChallenge\n        BotShieldPenalty     1\n"
+    "        BotShieldNoChallenge\n        BotShieldScore     probe +1\n"
     "        BotShieldLogAs       returning\n"
     "    </BotShieldRule>\n"
 )
@@ -149,7 +149,7 @@ def test_a_refusing_rule_does_not_register_the_address(config_override,
         "    <BotShieldRule newcomer>\n"
         "        BotShieldPath        /firstsight-probe\n"
         "        BotShieldFirstSight  yes\n"
-        "        BotShieldNoChallenge\n        BotShieldPenalty     1\n"
+        "        BotShieldNoChallenge\n        BotShieldScore     probe +1\n"
         "        BotShieldLogAs       newcomer\n"
         "    </BotShieldRule>\n"
     )

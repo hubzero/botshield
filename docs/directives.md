@@ -111,16 +111,19 @@ To genuinely cap the tier, reset each floor and re-add only the score:
 <BotShieldFlagTrigger honeypot_hit>
     BotShieldReset
     BotShieldAction       score
+BotShieldAccumulator  botsignals
     BotShieldAdd          60
 </BotShieldFlagTrigger>
 <BotShieldFlagTrigger fake_bot>
     BotShieldReset
     BotShieldAction       score
+BotShieldAccumulator  botsignals
     BotShieldAdd          80
 </BotShieldFlagTrigger>
 <BotShieldFlagTrigger scanner_probe>
     BotShieldReset
     BotShieldAction       score
+BotShieldAccumulator  botsignals
     BotShieldAdd          50
 </BotShieldFlagTrigger>
 ```
@@ -654,11 +657,11 @@ semantics and refresh model.
 
 | Directive | Predicate args | Action keys |
 |---|---|---|
-| `BotShieldRule` | `<name>` + any of `path=<glob>` `query=<glob>` `cookies=none\|any\|session` `ua=<substring>\|@<botgroup>\|""` `ipspec=<spec>` — ANDed, at least one required | `respond=`, `redirect=`, `logas=`, `accesslog=`, `flagip=`, `flagsession=`, `penalty=`, `mode=` (no `credit=`) |
-| `BotShieldCookieTrigger` | `<name> <pred>` (see policy page) | `respond=`, `redirect=`, `logas=`, `accesslog=`, `flagip=`, `flagsession=`, `penalty=`, `credit=`, `mode=` |
-| `BotShieldEnvTrigger` | `<name> <env-pred>` (see policy page) | `respond=`, `logas=`, `accesslog=`, `flagip=`, `flagsession=`, `penalty=`, `credit=`, `mode=` (no `redirect=`) |
+| `BotShieldRule` | `<name>` + any of `path=<glob>` `query=<glob>` `cookies=none\|any\|session` `ua=<substring>\|@<botgroup>\|""` `ipspec=<spec>` — ANDed, at least one required | `respond=`, `redirect=`, `logas=`, `accesslog=`, `flagip=`, `flagsession=`, `score=`, `mode=` |
+| `BotShieldCookieTrigger` | `<name> <pred>` (see policy page) | `respond=`, `redirect=`, `logas=`, `accesslog=`, `flagip=`, `flagsession=`, `score=`, `mode=` |
+| `BotShieldEnvTrigger` | `<name> <env-pred>` (see policy page) | `respond=`, `logas=`, `accesslog=`, `flagip=`, `flagsession=`, `score=`, `mode=` (no `redirect=`) |
 | `BotShieldFeedbackTrigger` | `<event>` | `flagip=`, `flagsession=` (both accept `+`/`-`/`=`), `logas=`, `accesslog=`, `mode=` |
-| `BotShieldLoadTrigger` | `<name> state=<n>\|state>=<n>` | `respond=`, `logas=`, `accesslog=`, `penalty=`, `mode=` (no `redirect=`, `flagip=`, `flagsession=`) |
+| `BotShieldLoadTrigger` | `<name> state=<n>\|state>=<n>` | `respond=`, `logas=`, `accesslog=`, `score=`, `mode=` (no `redirect=`, `flagip=`, `flagsession=`) |
 | `BotShieldSessionCookieName` | `<name>` (single arg, repeatable) | n/a (feeds cookies=session predicate) |
 
 See [policy](policy.md#triggers-predicate-action-engine)
@@ -820,7 +823,6 @@ compress into one key.
 | Block | `BotShieldRespond 403` (family default) | Refused from the policy walk. No scoring, no cookie mint, no render. |
 | Challenge | `BotShieldChallenge noninteractive` | Invisible auto-submitting check. `interactive` for the visible one. |
 | Captcha | `BotShieldChallenge captcha` | The configured provider's widget. |
-| Score only | `BotShieldPenalty <n>` | Adds to the ambient score and lets the thresholds decide. |
 | Move a named score | `BotShieldScore <name> +<n>` | Moves a per-request accumulator and lets the walk continue. |
 | Decide nothing | `BotShieldNoChallenge` | Records the match, skips scoring, hands the request to the real handler. |
 
@@ -1122,7 +1124,7 @@ was how you spelled "decide nothing", by *omission*. That is now
 | Old | New |
 |---|---|
 | `BotShieldRespond nochallenge` + `BotShieldTier noninteractive` | `BotShieldChallenge noninteractive` |
-| `BotShieldRespond nochallenge` + `BotShieldPenalty 20` | `BotShieldPenalty 20` |
+| `BotShieldRespond nochallenge` + `BotShieldScore botsignals +20` | `BotShieldScore botsignals +20` |
 | `BotShieldRespond nochallenge` (bare) | `BotShieldNoChallenge` |
 
 ```apache
@@ -1141,7 +1143,7 @@ was how you spelled "decide nothing", by *omission*. That is now
 # no path condition at all — any URL carrying ?debug=1
 <BotShieldRule debugparam>
     BotShieldQuery        *debug=1*
-    BotShieldPenalty      20
+    BotShieldScore  botsignals +20
 </BotShieldRule>
 
 # no User-Agent at all. Absence is not a substring, so this is the one
@@ -1375,7 +1377,7 @@ match.
 
 | Directive | Syntax | Scope |
 |---|---|---|
-| `BotShieldTrigger` | `[reset] [respond=N\|pass] [redirect=URL] [logas=tag] [accesslog=on\|off] [flag=NAME] [ttl=N] [penalty=N] [credit=N] [mode=enforce\|observe]` | server / vhost / Directory / Location / LocationMatch / Files / If |
+| `BotShieldTrigger` | `[reset] [respond=N\|pass] [redirect=URL] [logas=tag] [accesslog=on\|off] [flag=NAME] [ttl=N] [score="NAME +N"] [mode=enforce\|observe]` | server / vhost / Directory / Location / LocationMatch / Files / If |
 
 The Apache scope the directive lives in IS the predicate; no path
 glob argument. Multiple `BotShieldTrigger` lines in one scope
@@ -1434,21 +1436,25 @@ re-add the score:
 <BotShieldFlagTrigger honeypot_hit>
     BotShieldReset
     BotShieldAction       score
+BotShieldAccumulator  botsignals
     BotShieldAdd          60
 </BotShieldFlagTrigger>
 <BotShieldFlagTrigger fake_bot>
     BotShieldReset
     BotShieldAction       score
+BotShieldAccumulator  botsignals
     BotShieldAdd          80
 </BotShieldFlagTrigger>
 <BotShieldFlagTrigger scanner_probe>
     BotShieldReset
     BotShieldAction       score
+BotShieldAccumulator  botsignals
     BotShieldAdd          50
 </BotShieldFlagTrigger>
 <BotShieldFlagTrigger pow_fail_streak>
     BotShieldReset
     BotShieldAction       score
+BotShieldAccumulator  botsignals
     BotShieldAdd          30
 </BotShieldFlagTrigger>
 ```

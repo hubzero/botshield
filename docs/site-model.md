@@ -76,7 +76,7 @@ or cohort. Signs are absolute; the score either rises or stays put.
 | Missing `Accept-Language` | +15 | `missingacceptlanguage` |
 | Scraper-pattern UA | +50 | `scraperua:<pattern>` |
 | First-sight IP (not in Bloom filter) | +5 | `firstsightip` |
-| Path-trigger fire (respond=4xx) | per-rule `penalty=` | `path-trigger:<name>` |
+| Path-trigger fire (respond=4xx) | per-rule `BotShieldScore` | `path-trigger:<name>` |
 | Rate-limit exceeded | +50 | `ratelimitexceeded:<name>` |
 | Robots.txt Disallow | +100 | `robotsblock:<group>` |
 | Honeypot hit (default flag trigger) | +60 | `flagtrigger:honeypot_hit` |

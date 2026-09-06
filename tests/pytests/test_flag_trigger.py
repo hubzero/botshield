@@ -121,7 +121,7 @@ def test_operator_extra_score_sums_with_default(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldFlagTrigger honeypot_hit action=score add=20',
+        '    BotShieldFlagTrigger honeypot_hit action=score accumulator=botsignals add=20',
         count=1,
     ):
         _trip_honeypot(fresh_ip)
@@ -229,7 +229,7 @@ def test_reset_with_no_replacement_clears_default(
     # defaults now, and the only honeypot_hit entry is the one below.
     with config_override(
         _blocks.block_pattern("BotShieldFlagTrigger", "honeypot_hit"),
-        'BotShieldFlagTrigger honeypot_hit action=score add=60\n'
+        'BotShieldFlagTrigger honeypot_hit action=score accumulator=botsignals add=60\n'
         '    BotShieldFlagTrigger honeypot_hit reset',
         count=1,
     ):
@@ -254,15 +254,15 @@ def test_reset_with_no_replacement_clears_default(
 def test_reset_inline_replacement(
     config_override, fresh_ip, log_slice,
 ):
-    """`BotShieldFlagTrigger honeypot_hit reset action=score add=10`
+    """`BotShieldFlagTrigger honeypot_hit reset action=score accumulator=botsignals add=10`
     is the syntactic-sugar form: reset + one inline replacement on a
     single line. The declared score+60 is gone; only +10 contributes."""
     # Anchored on the declaration for the same reason as the test
     # above: a reset only clears what precedes it.
     with config_override(
         _blocks.block_pattern("BotShieldFlagTrigger", "honeypot_hit"),
-        'BotShieldFlagTrigger honeypot_hit action=score add=60\n'
-        '    BotShieldFlagTrigger honeypot_hit reset action=score add=10',
+        'BotShieldFlagTrigger honeypot_hit action=score accumulator=botsignals add=60\n'
+        '    BotShieldFlagTrigger honeypot_hit reset action=score accumulator=botsignals add=10',
         count=1,
     ):
         _trip_honeypot(fresh_ip)
@@ -290,7 +290,7 @@ def test_botshield_flag_directive_unknown(config_override):
         with config_override(
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
-            '    BotShieldFlag honeypot_hit penalty=10',
+            '    BotShieldFlag honeypot_hit score=\"probe +10\"',
             count=1,
         ):
             pass
@@ -317,7 +317,7 @@ def test_unknown_flag_rejected(config_override):
         with config_override(
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
-            '    BotShieldFlagTrigger never_existed action=score add=10',
+            '    BotShieldFlagTrigger never_existed action=score accumulator=botsignals add=10',
             count=1,
         ):
             pass

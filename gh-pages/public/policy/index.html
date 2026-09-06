@@ -238,7 +238,7 @@ former <code>BotShieldBlockPath</code> directive, retired):</p>
 comma-separated inline CIDRs, or omit/<code>*</code> for &quot;any IP&quot;)</li>
 </ul>
 <p>Action keys (any of): <code>respond=</code>, <code>redirect=</code>, <code>flag=</code>, <code>ttl=</code>,
-<code>penalty=</code>, <code>logas=</code>, <code>mode=enforce|observe</code>. Convention is match
+<code>score=</code>, <code>logas=</code>, <code>mode=enforce|observe</code>. Convention is match
 keys first, action keys after — the parser doesn't enforce ordering
 but readability rewards consistency.</p>
 <h3 id="repeated-429-escalation">Repeated-429 escalation</h3>
@@ -395,12 +395,8 @@ action keys are:</p>
 <td>TTL on the flag-IP entry. Required when <code>flag=</code> is set</td>
 </tr>
 <tr>
-<td><code>penalty=N</code></td>
-<td>Add N to the request score</td>
-</tr>
-<tr>
-<td><code>credit=N</code></td>
-<td>Subtract N from the request score (rejected on the path family — paths can't credit)</td>
+<td><code>score=&quot;&lt;name&gt; +N&quot;</code></td>
+<td>Move a named per-request accumulator. <code>-N</code> subtracts, <code>=N</code> assigns. Read by whichever <code>BotShieldChallengeAtLeast</code> rows name it</td>
 </tr>
 <tr>
 <td><code>mode=observe</code></td>
@@ -418,7 +414,7 @@ action keys are:</p>
 &lt;/BotShieldRule&gt;
 &lt;BotShieldRule api-burst-trap&gt;
     BotShieldPath         /api/*/burst
-    BotShieldPenalty      30
+    BotShieldScore  botsignals +30
     BotShieldLogAs          api-burst
 &lt;/BotShieldRule&gt;
 </code></pre>
@@ -429,16 +425,16 @@ other status is the response code.</p>
 <pre><code class="language-apache">&lt;BotShieldCookieTrigger session-active&gt;
     BotShieldCookie       sessionid
     BotShieldRespond       nochallenge
-    BotShieldCredit       10
+    BotShieldScore    botsignals -10
 &lt;/BotShieldCookieTrigger&gt;
 &lt;BotShieldCookieTrigger weak-session&gt;
     BotShieldCookie       sessionid=guest
-    BotShieldPenalty      15
+    BotShieldScore  botsignals +15
     BotShieldLogAs          guest-session
 &lt;/BotShieldCookieTrigger&gt;
 &lt;BotShieldCookieTrigger no-cookies&gt;
     BotShieldCookies      none
-    BotShieldPenalty      5
+    BotShieldScore  botsignals +5
     BotShieldLogAs          cookieless
 &lt;/BotShieldCookieTrigger&gt;
 </code></pre>
@@ -466,13 +462,13 @@ non-pass status short-circuits.</p>
 &lt;BotShieldEnvTrigger ipv6-hint&gt;
     BotShieldEnv          BS_IPV6
     BotShieldRespond       nochallenge
-    BotShieldCredit       2
+    BotShieldScore    botsignals -2
 &lt;/BotShieldEnvTrigger&gt;
 
 SetEnvIf User-Agent &quot;(?i)\bcurl\b&quot; BS_CLI=1
 &lt;BotShieldEnvTrigger curl-hint&gt;
     BotShieldEnv          BS_CLI
-    BotShieldPenalty      10
+    BotShieldScore  botsignals +10
     BotShieldLogAs          cli
 &lt;/BotShieldEnvTrigger&gt;
 </code></pre>
@@ -524,7 +520,7 @@ BotShieldLoadHotThreshold       85
 
 &lt;BotShieldLoadTrigger be-strict&gt;
     BotShieldState        &gt;=warm
-    BotShieldPenalty      20
+    BotShieldScore  botsignals +20
     BotShieldLogAs          brownout
 &lt;/BotShieldLoadTrigger&gt;
 &lt;BotShieldLoadTrigger drop-noise&gt;
@@ -554,10 +550,12 @@ above:</p>
 &lt;/BotShieldFlagTrigger&gt;
 &lt;BotShieldFlagTrigger honeypot_hit&gt;
     BotShieldAction       score
+BotShieldAccumulator  botsignals
     BotShieldAdd          60
 &lt;/BotShieldFlagTrigger&gt;
 &lt;BotShieldFlagTrigger app_verified_human&gt;
     BotShieldAction       score
+BotShieldAccumulator  botsignals
     BotShieldAdd          -80
 &lt;/BotShieldFlagTrigger&gt;
 </code></pre>
@@ -666,7 +664,7 @@ log-only mode — there's a single per-scope directive:</p>
     &lt;BotShieldTrigger&gt;
         BotShieldFlag         scanner_probe
         BotShieldTTL          3600
-        BotShieldPenalty      20
+        BotShieldScore  botsignals +20
         BotShieldLogAs          wp-trap
     &lt;/BotShieldTrigger&gt;
 &lt;/LocationMatch&gt;
@@ -683,7 +681,7 @@ log-only mode — there's a single per-scope directive:</p>
 <p>The Apache scope match IS the predicate — no separate path glob,
 because Apache already evaluated the scope. Action keys mirror the
 cookie family: <code>status</code> / <code>redirect</code> / <code>log</code> / <code>flag</code> / <code>ttl</code> /
-<code>penalty</code> / <code>credit</code> / <code>mode</code>. Multiple <code>BotShieldTrigger</code> lines
+<code>score</code> / <code>mode</code>. Multiple <code>BotShieldTrigger</code> lines
 in one scope each append a separate action; they all fire on a
 pass, the first non-pass status short-circuits.</p>
 <p><code>BotShieldTrigger</code> works in any Apache container the parser
@@ -697,7 +695,7 @@ list and concatenates its own. To drop the inherited list,
 declare <code>BotShieldTrigger reset</code> in the child:</p>
 <pre><code class="language-apache">&lt;Location &quot;/api&quot;&gt;
     &lt;BotShieldTrigger&gt;
-        BotShieldPenalty      10
+        BotShieldScore  botsignals +10
         BotShieldLogAs          api-tax
     &lt;/BotShieldTrigger&gt;
 &lt;/Location&gt;

@@ -125,12 +125,15 @@ def test_trigger_status_pass_penalty_scores_the_current_request(
     RULE = ('    BotShieldRule passpen path="/honey-pass" '
             'respond=nochallenge %s ttl=3600')
 
-    def score_for(extra, ip):
+    def decision_for(extra, ip):
         with config_override(
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
             '    BotShieldChallengeAtLeast none\n'
-            + (RULE % extra),
+            + (RULE % extra) + '\n'
+            '    <Location /honey-pass>\n'
+            '        BotShieldChallengeAtLeast probe 50 noninteractive\n'
+            '    </Location>',
             count=1,
         ):
             with log_slice as slc:
@@ -139,19 +142,23 @@ def test_trigger_status_pass_penalty_scores_the_current_request(
         assert lines, f"no decision line for the passpen match; extra={extra!r}"
         return lines[-1]
 
-    low  = score_for("penalty=10", fresh_ip)
-    high = score_for("penalty=90", ips.fresh_ip())
+    # One row at 50, two arms either side of it. A number that never
+    # reached this request would leave both arms identical.
+    low  = decision_for("score=\"probe +10\"", fresh_ip)
+    high = decision_for("score=\"probe +90\"", ips.fresh_ip())
 
     assert "requesttrigger:passpen" in high["reason"], (
         f"the match must be traceable in the reason chain; d={high}"
     )
-    delta = int(high["score"]) - int(low["score"])
-    assert delta == 80, (
-        f"raising penalty 10 -> 90 must move the current request's "
-        f"score by exactly 80; got {delta} "
-        f"({low['score']} -> {high['score']})\n"
-        f"  low:  {low['reason']!r}\n"
-        f"  high: {high['reason']!r}"
+    assert low["tier"] == "nochallenge", (
+        f"+10 is under the row at 50 and must not challenge; "
+        f"tier={low['tier']} reason={low['reason']!r}"
+    )
+    assert high["tier"] != "nochallenge", (
+        f"+90 is over the row at 50 and must challenge -- a "
+        f"respond=nochallenge rule's score still reaches this "
+        f"request's decision; tier={high['tier']} "
+        f"reason={high['reason']!r}"
     )
 
 

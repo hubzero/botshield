@@ -161,10 +161,10 @@ def test_cookie_and_env_pass_then_path_runs(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldCookieTrigger c-pass cookies=none '
-        'respond=nochallenge penalty=3\n'
+        'respond=nochallenge score=\"probe +3\"\n'
         '    SetEnvIfExpr "true" BS_CROSS=1\n'
         '    BotShieldEnvTrigger e-pass env=BS_CROSS '
-        'respond=nochallenge penalty=7\n'
+        'respond=nochallenge score=\"probe +7\"\n'
         '    BotShieldRule p-block path="/*" respond=403',
         count=1,
     ):
@@ -236,7 +236,7 @@ def test_env_pass_then_load_blocks_path(
             'BotShieldEnabled On\n'
             '    SetEnvIfExpr "true" BS_CROSS=1\n'
             '    BotShieldEnvTrigger e-pass env=BS_CROSS '
-            'respond=nochallenge penalty=4\n'
+            'respond=nochallenge score=\"probe +4\"\n'
             '    BotShieldLoadTrigger l-block state=hot respond=503\n'
             '    BotShieldRule p-block path="/*" respond=451',
             count=1,
@@ -284,7 +284,7 @@ def test_env_trigger_no_double_apply_on_internal_redirect(
         'BotShieldEnabled On\n'
         '    SetEnvIfExpr "true" BS_CROSS=1\n'
         '    BotShieldEnvTrigger e-pass env=BS_CROSS '
-        'respond=nochallenge penalty=5\n'
+        'respond=nochallenge score=\"probe +5\"\n'
         '    BotShieldRule p-block path="/start" respond=403\n'
         '    ErrorDocument 403 /error',
         count=1,

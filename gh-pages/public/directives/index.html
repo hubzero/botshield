@@ -316,16 +316,19 @@ interactive-tier decisions in that window carried solve proof.</p>
 <pre><code class="language-apache">&lt;BotShieldFlagTrigger honeypot_hit&gt;
     BotShieldReset
     BotShieldAction       score
+BotShieldAccumulator  botsignals
     BotShieldAdd          60
 &lt;/BotShieldFlagTrigger&gt;
 &lt;BotShieldFlagTrigger fake_bot&gt;
     BotShieldReset
     BotShieldAction       score
+BotShieldAccumulator  botsignals
     BotShieldAdd          80
 &lt;/BotShieldFlagTrigger&gt;
 &lt;BotShieldFlagTrigger scanner_probe&gt;
     BotShieldReset
     BotShieldAction       score
+BotShieldAccumulator  botsignals
     BotShieldAdd          50
 &lt;/BotShieldFlagTrigger&gt;
 </code></pre>
@@ -1108,17 +1111,17 @@ semantics and refresh model.</p>
 <tr>
 <td><code>BotShieldRule</code></td>
 <td><code>&lt;name&gt;</code> + any of <code>path=&lt;glob&gt;</code> <code>query=&lt;glob&gt;</code> <code>cookies=none|any|session</code> <code>ua=&lt;substring&gt;|@&lt;botgroup&gt;|&quot;&quot;</code> <code>ipspec=&lt;spec&gt;</code> — ANDed, at least one required</td>
-<td><code>respond=</code>, <code>redirect=</code>, <code>logas=</code>, <code>accesslog=</code>, <code>flagip=</code>, <code>flagsession=</code>, <code>penalty=</code>, <code>mode=</code> (no <code>credit=</code>)</td>
+<td><code>respond=</code>, <code>redirect=</code>, <code>logas=</code>, <code>accesslog=</code>, <code>flagip=</code>, <code>flagsession=</code>, <code>score=</code>, <code>mode=</code></td>
 </tr>
 <tr>
 <td><code>BotShieldCookieTrigger</code></td>
 <td><code>&lt;name&gt; &lt;pred&gt;</code> (see policy page)</td>
-<td><code>respond=</code>, <code>redirect=</code>, <code>logas=</code>, <code>accesslog=</code>, <code>flagip=</code>, <code>flagsession=</code>, <code>penalty=</code>, <code>credit=</code>, <code>mode=</code></td>
+<td><code>respond=</code>, <code>redirect=</code>, <code>logas=</code>, <code>accesslog=</code>, <code>flagip=</code>, <code>flagsession=</code>, <code>score=</code>, <code>mode=</code></td>
 </tr>
 <tr>
 <td><code>BotShieldEnvTrigger</code></td>
 <td><code>&lt;name&gt; &lt;env-pred&gt;</code> (see policy page)</td>
-<td><code>respond=</code>, <code>logas=</code>, <code>accesslog=</code>, <code>flagip=</code>, <code>flagsession=</code>, <code>penalty=</code>, <code>credit=</code>, <code>mode=</code> (no <code>redirect=</code>)</td>
+<td><code>respond=</code>, <code>logas=</code>, <code>accesslog=</code>, <code>flagip=</code>, <code>flagsession=</code>, <code>score=</code>, <code>mode=</code> (no <code>redirect=</code>)</td>
 </tr>
 <tr>
 <td><code>BotShieldFeedbackTrigger</code></td>
@@ -1128,7 +1131,7 @@ semantics and refresh model.</p>
 <tr>
 <td><code>BotShieldLoadTrigger</code></td>
 <td><code>&lt;name&gt; state=&lt;n&gt;|state&gt;=&lt;n&gt;</code></td>
-<td><code>respond=</code>, <code>logas=</code>, <code>accesslog=</code>, <code>penalty=</code>, <code>mode=</code> (no <code>redirect=</code>, <code>flagip=</code>, <code>flagsession=</code>)</td>
+<td><code>respond=</code>, <code>logas=</code>, <code>accesslog=</code>, <code>score=</code>, <code>mode=</code> (no <code>redirect=</code>, <code>flagip=</code>, <code>flagsession=</code>)</td>
 </tr>
 <tr>
 <td><code>BotShieldSessionCookieName</code></td>
@@ -1359,11 +1362,6 @@ compress into one key.</p>
 <td>Captcha</td>
 <td><code>BotShieldChallenge captcha</code></td>
 <td>The configured provider's widget.</td>
-</tr>
-<tr>
-<td>Score only</td>
-<td><code>BotShieldPenalty &lt;n&gt;</code></td>
-<td>Adds to the ambient score and lets the thresholds decide.</td>
 </tr>
 <tr>
 <td>Move a named score</td>
@@ -1658,8 +1656,8 @@ was how you spelled &quot;decide nothing&quot;, by <em>omission</em>. That is no
 <td><code>BotShieldChallenge noninteractive</code></td>
 </tr>
 <tr>
-<td><code>BotShieldRespond nochallenge</code> + <code>BotShieldPenalty 20</code></td>
-<td><code>BotShieldPenalty 20</code></td>
+<td><code>BotShieldRespond nochallenge</code> + <code>BotShieldScore botsignals +20</code></td>
+<td><code>BotShieldScore botsignals +20</code></td>
 </tr>
 <tr>
 <td><code>BotShieldRespond nochallenge</code> (bare)</td>
@@ -1682,7 +1680,7 @@ was how you spelled &quot;decide nothing&quot;, by <em>omission</em>. That is no
 # no path condition at all — any URL carrying ?debug=1
 &lt;BotShieldRule debugparam&gt;
     BotShieldQuery        *debug=1*
-    BotShieldPenalty      20
+    BotShieldScore  botsignals +20
 &lt;/BotShieldRule&gt;
 
 # no User-Agent at all. Absence is not a substring, so this is the one
@@ -1894,7 +1892,7 @@ match.</p>
 <tbody>
 <tr>
 <td><code>BotShieldTrigger</code></td>
-<td><code>[reset] [respond=N|pass] [redirect=URL] [logas=tag] [accesslog=on|off] [flag=NAME] [ttl=N] [penalty=N] [credit=N] [mode=enforce|observe]</code></td>
+<td><code>[reset] [respond=N|pass] [redirect=URL] [logas=tag] [accesslog=on|off] [flag=NAME] [ttl=N] [score=&quot;NAME +N&quot;] [mode=enforce|observe]</code></td>
 <td>server / vhost / Directory / Location / LocationMatch / Files / If</td>
 </tr>
 </tbody>
@@ -1955,21 +1953,25 @@ re-add the score:</p>
 <pre><code class="language-apache">&lt;BotShieldFlagTrigger honeypot_hit&gt;
     BotShieldReset
     BotShieldAction       score
+BotShieldAccumulator  botsignals
     BotShieldAdd          60
 &lt;/BotShieldFlagTrigger&gt;
 &lt;BotShieldFlagTrigger fake_bot&gt;
     BotShieldReset
     BotShieldAction       score
+BotShieldAccumulator  botsignals
     BotShieldAdd          80
 &lt;/BotShieldFlagTrigger&gt;
 &lt;BotShieldFlagTrigger scanner_probe&gt;
     BotShieldReset
     BotShieldAction       score
+BotShieldAccumulator  botsignals
     BotShieldAdd          50
 &lt;/BotShieldFlagTrigger&gt;
 &lt;BotShieldFlagTrigger pow_fail_streak&gt;
     BotShieldReset
     BotShieldAction       score
+BotShieldAccumulator  botsignals
     BotShieldAdd          30
 &lt;/BotShieldFlagTrigger&gt;
 </code></pre>

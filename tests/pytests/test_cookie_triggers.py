@@ -46,7 +46,14 @@ def test_cookie_trigger_named_present_applies_credit(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldCookieTrigger app-session cookie=PHPSESSID credit=15',
+        '    <BotShieldRule probe-base>\n'
+        '        BotShieldPath   /*\n'
+        '        BotShieldScore  probe +20\n'
+        '    </BotShieldRule>\n'
+        '    BotShieldCookieTrigger app-session cookie=PHPSESSID score=\"probe -15\"\n'
+        '    <Location />\n'
+        '        BotShieldChallengeAtLeast probe 20 noninteractive\n'
+        '    </Location>',
         count=1,
     ):
         with log_slice as slc:
@@ -58,11 +65,16 @@ def test_cookie_trigger_named_present_applies_credit(
 
     assert baseline, "no baseline decision line"
     assert withcookie, "no with-cookie decision line"
-    base_score = int(baseline[-1]["score"])
-    cookie_score = int(withcookie[-1]["score"])
-    assert cookie_score == base_score - 15, (
-        f"credit=15 should reduce score by 15 under respond=nochallenge; "
-        f"baseline={base_score} cookie={cookie_score}"
+    # 20 reaches the row; 20 - 15 does not. The credit is visible as
+    # the difference between being challenged and not.
+    assert baseline[-1]["tier"] != "nochallenge", (
+        f"the control must cross the row or this proves nothing; "
+        f"tier={baseline[-1]['tier']} reason={baseline[-1]['reason']!r}"
+    )
+    assert withcookie[-1]["tier"] == "nochallenge", (
+        f"the cookie's -15 should have kept this under the row; "
+        f"tier={withcookie[-1]['tier']} "
+        f"reason={withcookie[-1]['reason']!r}"
     )
     # Reason string should tag the cookie trigger.
     assert any("cookietrigger:app-session" in d["reason"]
@@ -263,8 +275,15 @@ def test_cookie_trigger_status_pass_still_applies_credit(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
+        '    <BotShieldRule probe-base>\n'
+        '        BotShieldPath   /*\n'
+        '        BotShieldScore  probe +20\n'
+        '    </BotShieldRule>\n'
         '    BotShieldCookieTrigger ghost cookie=PHPSESSID '
-        'respond=nochallenge credit=20',
+        'respond=nochallenge score=\"probe -20\"\n'
+        '    <Location />\n'
+        '        BotShieldChallengeAtLeast probe 20 noninteractive\n'
+        '    </Location>',
         count=1,
     ):
         with log_slice as slc:
@@ -276,11 +295,17 @@ def test_cookie_trigger_status_pass_still_applies_credit(
     assert base_lines and with_lines
     hits = [d for d in with_lines if "cookietrigger:ghost" in d["reason"]]
     assert hits, f"no cookietrigger:ghost decision line; lines={with_lines}"
-    base_score = int(base_lines[-1]["score"])
-    with_score = int(with_lines[-1]["score"])
-    assert with_score == base_score - 20, (
-        f"credit=20 must shift the score by exactly -20 under "
-        f"respond=nochallenge; baseline={base_score} with-cookie={with_score}"
+    # respond=nochallenge decides the trigger's own outcome; it does
+    # not stop the score it carries from reaching the decision.
+    assert base_lines[-1]["tier"] != "nochallenge", (
+        f"the control must cross the row; "
+        f"tier={base_lines[-1]['tier']} "
+        f"reason={base_lines[-1]['reason']!r}"
+    )
+    assert with_lines[-1]["tier"] == "nochallenge", (
+        f"a respond=nochallenge trigger's -20 should still have kept "
+        f"this under the row; tier={with_lines[-1]['tier']} "
+        f"reason={with_lines[-1]['reason']!r}"
     )
 
 
@@ -297,28 +322,48 @@ def test_cookie_trigger_pass_triggers_stack_credits(
     the second credit."""
     from botshield_test import ips as _ips
     ip_base = _ips.fresh_ip()
+    ip_one  = _ips.fresh_ip()
     ip_both = _ips.fresh_ip()
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldCookieTrigger app-session cookie=PHPSESSID credit=15\n'
-        '    BotShieldCookieTrigger app-auth    cookie=auth_token credit=40',
+        '    <BotShieldRule probe-base>\n'
+        '        BotShieldPath   /*\n'
+        '        BotShieldScore  probe +60\n'
+        '    </BotShieldRule>\n'
+        '    BotShieldCookieTrigger app-session cookie=PHPSESSID score=\"probe -15\"\n'
+        '    BotShieldCookieTrigger app-auth    cookie=auth_token score=\"probe -40\"\n'
+        '    <Location />\n'
+        '        BotShieldChallengeAtLeast probe 20 noninteractive\n'
+        '    </Location>',
         count=1,
     ):
         with log_slice as slc:
             client.get("/", xff=ip_base)
+            client.get("/", xff=ip_one, cookies={"PHPSESSID": "x"})
             client.get("/", xff=ip_both,
                        cookies={"PHPSESSID": "x", "auth_token": "y"})
             baseline  = slc.decision_lines(ip=ip_base)
+            one       = slc.decision_lines(ip=ip_one)
             both      = slc.decision_lines(ip=ip_both)
 
-    assert baseline and both
-    base_score = int(baseline[-1]["score"])
-    both_score = int(both[-1]["score"])
-    assert both_score == base_score - 55, (
-        f"two pass-triggers with credit=15 + credit=40 must stack "
-        f"to -55; baseline={base_score} both={both_score}"
+    assert baseline and one and both
+    # 60 crosses the row at 20. One credit leaves 45, still over. Both
+    # leave 5, under -- which only happens if they combined rather than
+    # the first match winning.
+    assert baseline[-1]["tier"] != "nochallenge", (
+        f"the control must cross the row; "
+        f"reason={baseline[-1]['reason']!r}"
+    )
+    assert one[-1]["tier"] != "nochallenge", (
+        f"one credit leaves 45, still over the row -- if this passes, "
+        f"the credits are not what moved it; "
+        f"reason={one[-1]['reason']!r}"
+    )
+    assert both[-1]["tier"] == "nochallenge", (
+        f"-15 and -40 must both land: 60 - 55 is under the row. "
+        f"tier={both[-1]['tier']} reason={both[-1]['reason']!r}"
     )
     # Both reasons should appear in the decision line.
     reason = both[-1]["reason"]
@@ -337,7 +382,7 @@ def test_cookie_trigger_non_pass_shortcircuits_after_pass(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldCookieTrigger app-session cookie=PHPSESSID credit=15\n'
+        '    BotShieldCookieTrigger app-session cookie=PHPSESSID score=\"probe -15\"\n'
         '    BotShieldCookieTrigger kill       cookie=api_token=BAD respond=403',
         count=1,
     ):

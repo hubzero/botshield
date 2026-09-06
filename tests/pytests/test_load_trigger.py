@@ -71,7 +71,7 @@ def test_directive_rejects_unrecognized_load_match(config_override):
         with config_override(
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
-            '    BotShieldLoadTrigger bad cpu>=80 penalty=10',
+            '    BotShieldLoadTrigger bad cpu>=80 score=\"probe +10\"',
             count=1,
         ):
             pass
@@ -82,7 +82,7 @@ def test_directive_rejects_bad_state_name(config_override):
         with config_override(
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
-            '    BotShieldLoadTrigger bad state=meltdown penalty=10',
+            '    BotShieldLoadTrigger bad state=meltdown score=\"probe +10\"',
             count=1,
         ):
             pass
@@ -115,7 +115,7 @@ def test_load_trigger_inert_under_normal(config_override, fresh_ip,
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
             '    BotShieldLoadTrigger be-strict state>=warm '
-            'penalty=20',
+            'score=\"probe +20\"',
             count=1,
         ):
             with log_slice as slc:
@@ -145,7 +145,7 @@ def test_load_trigger_fires_under_hot(config_override, fresh_ip,
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
             '    BotShieldLoadTrigger be-strict state>=warm '
-            'penalty=20 logas=brownout',
+            'score=\"probe +20\" logas=brownout',
             count=1,
         ):
             # Wait for state machine to settle on hot (~5s).
@@ -211,8 +211,8 @@ def test_load_trigger_first_match_wins_specific_first(
         with config_override(
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
-            '    BotShieldLoadTrigger only-hot state=hot penalty=80\n'
-            '    BotShieldLoadTrigger any-warm state>=warm penalty=20',
+            '    BotShieldLoadTrigger only-hot state=hot score=\"probe +80\"\n'
+            '    BotShieldLoadTrigger any-warm state>=warm score=\"probe +20\"',
             count=1,
         ):
             _wait_for_metric_load_state(target=2, timeout=12.0)

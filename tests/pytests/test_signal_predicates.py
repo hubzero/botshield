@@ -143,7 +143,7 @@ def test_a_new_predicate_counts_as_a_condition_on_its_own(config_override,
         "    <BotShieldRule al-only>\n"
         "        BotShieldAcceptLanguage  \"\"\n"
         "        BotShieldNoChallenge\n"
-        "        BotShieldPenalty         3\n"
+        "        BotShieldScore         probe +3\n"
         "    </BotShieldRule>\n"
     )
     with config_override(r"BotShieldEnabled\s+On", only_al,
@@ -158,7 +158,7 @@ def test_firstsight_alone_is_also_a_condition(config_override, fresh_ip):
         "    <BotShieldRule fs-only>\n"
         "        BotShieldFirstSight  yes\n"
         "        BotShieldNoChallenge\n"
-        "        BotShieldPenalty     3\n"
+        "        BotShieldScore     probe +3\n"
         "    </BotShieldRule>\n"
     )
     with config_override(r"BotShieldEnabled\s+On", only_fs,

@@ -917,11 +917,9 @@ void bs_policy_dump(server_rec *s, apr_pool_t *p, bs_dir_cfg *cfg)
                                 : e->action == BS_FLAG_ACT_TIER_FLOOR
                                   ? "tier_floor" : "reset";
                 char val[32];
-                if (e->action == BS_FLAG_ACT_SCORE && e->score_name) {
+                if (e->action == BS_FLAG_ACT_SCORE) {
                     apr_snprintf(val, sizeof(val), "%s%+d",
                                  e->score_name, e->score_add);
-                } else if (e->action == BS_FLAG_ACT_SCORE) {
-                    apr_snprintf(val, sizeof(val), "%+d", e->score_add);
                 } else if (e->action == BS_FLAG_ACT_TIER_FLOOR) {
                     apr_snprintf(val, sizeof(val), "%s",
                                  bs_tier_name(e->tier_min));
@@ -932,35 +930,19 @@ void bs_policy_dump(server_rec *s, apr_pool_t *p, bs_dir_cfg *cfg)
                            e->flag_name, act, val,
                            e->mode == BS_TMODE_OBSERVE ? "observe" : "enforce",
                            e->from_default ? "compiled default" : "configured");
-                /* The two conditions that have actually locked users
-                 * out of this deployment. Reported here rather than
-                 * only in the docs, because both were invisible in the
-                 * config that produced them. */
-                /* Note what this does NOT say any more. Before
-                 * flags_excused it said "forever", which was accurate
-                 * then: flags re-apply every request and solving did
-                 * not clear them. It is no longer true -- a client that
-                 * solves once has the flags it carried at that moment
-                 * excused for the life of the cookie -- and leaving the
-                 * stronger wording in would push operators into
-                 * lowering scores that no longer need lowering. */
-                /* Both advisories here compared a flag's number
-                 * against a score threshold, and there are no score
-                 * thresholds. An ambient action=score reaches nothing
-                 * at all now, which is worth saying plainly -- it is
-                 * the one config that looks like it does something and
-                 * does not. */
-                if (e->action == BS_FLAG_ACT_SCORE
-                    && !e->score_name
-                    && e->mode != BS_TMODE_OBSERVE) {
-                    printf("  !! %s scores %+d on the cumulative "
-                                  "total, which no longer decides a tier. "
-                                  "Add accumulator=<name> and a matching "
-                                  "BotShieldChallengeAtLeast row, or this "
-                                  "flag reaches nothing but the log.\n",
-                               e->flag_name, e->score_add);
-                    warned++;
-                }
+                /* Two advisories used to print here, about the
+                 * conditions that had actually locked users out of
+                 * this deployment: a flag scoring past the
+                 * noninteractive threshold on its own, and a
+                 * tier_floor above a parked one. Both compared a
+                 * flag's number against a score threshold, and there
+                 * are no score thresholds -- a flag reaches a tier
+                 * through a BotShieldChallengeAtLeast row now, and the
+                 * rows are dir config, which this walk does not have.
+                 *
+                 * Worth restoring in that shape rather than leaving as
+                 * a gap: "this flag crosses row <name> alone" is the
+                 * same warning and still worth making. */
             }
             printf("# %d note(s). '!!' is a fault; '~' is a design\n"
                           "# consequence worth knowing.\n\n", warned);

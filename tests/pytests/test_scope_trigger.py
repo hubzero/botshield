@@ -115,7 +115,7 @@ def test_scope_trigger_reset_drops_inherited(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    <Location "/api">\n'
-        '        BotShieldTrigger penalty=15 logas=api-tax\n'
+        '        BotShieldTrigger score=\"probe +15\" logas=api-tax\n'
         '    </Location>\n'
         '    <Location "/api/health">\n'
         '        BotShieldTrigger reset\n'

@@ -221,8 +221,6 @@ static void bs_trigger_action_init(bs_trigger_family fam,
         a->ttl_sec     = 0;
         break;
     }
-    a->penalty         = 0;
-    a->credit          = 0;
     a->tier_floor      = -1;
     a->redirect_url    = NULL;
     a->log_tag         = NULL;
@@ -234,25 +232,23 @@ static const char *bs_trigger_known_keys(bs_trigger_family fam)
     switch (fam) {
     case BS_TFAMILY_REQUEST:
         return "respond, nochallenge, challenge, redirect, logas, "
-               "accesslog, flagip, flagsession, penalty, mode";
+               "accesslog, flagip, flagsession, score, mode";
     case BS_TFAMILY_COOKIE:
         return "respond, nochallenge, challenge, redirect, logas, "
-               "accesslog, flagip, flagsession, penalty, credit, "
-               "mode";
+               "accesslog, flagip, flagsession, score, mode";
     case BS_TFAMILY_ENV:
         return "respond, nochallenge, challenge, logas, accesslog, flagip, "
-               "flagsession, penalty, credit, mode";
+               "flagsession, score, mode";
     case BS_TFAMILY_FEEDBACK:
         /* mode=observe means "log :observe but skip the flagged-IP
          * write" — meaningful for staging a feedback rule before
          * mutating server state. */
         return "flagip, flagsession, logas, accesslog, mode";
     case BS_TFAMILY_LOAD:
-        return "respond, logas, accesslog, penalty, credit, mode";
+        return "respond, logas, accesslog, score, mode";
     case BS_TFAMILY_SCOPE:
         return "respond, nochallenge, challenge, redirect, logas, "
-               "accesslog, flagip, flagsession, penalty, credit, "
-               "mode";
+               "accesslog, flagip, flagsession, score, mode";
     case BS_TFAMILY_FLAG:
         /* Flag triggers use a separate parser. This entry exists
          * for switch-exhaustiveness; the flag setter prints its
@@ -262,8 +258,8 @@ static const char *bs_trigger_known_keys(bs_trigger_family fam)
     return "";
 }
 
-/* Feedback-specific: status/redirect/penalty/credit make no sense
- * on the response path — all four are rejected at parse time with
+/* Feedback-specific: status and redirect make no sense
+ * on the response path — both are rejected at parse time with
  * a pointed error. Centralized so the messages stay consistent and
  * future keys are easier to vet per family. */
 static int bs_trigger_key_is_response_only(const char *arg,
@@ -274,8 +270,6 @@ static int bs_trigger_key_is_response_only(const char *arg,
     if (BS_KMATCH("respond"))  return 1;
     if (BS_KMATCH("status"))   return 1;   /* deprecated spelling */
     if (BS_KMATCH("redirect")) return 1;
-    if (BS_KMATCH("penalty"))  return 1;
-    if (BS_KMATCH("credit"))   return 1;
     #undef BS_KMATCH
     return 0;
 }
@@ -703,14 +697,15 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
             "server scope. A per-rule duration was never honoured -- "
             "one address slot holds one expiry for all its flags.",
             dname);
-    } else if (BS_AK("penalty")) {
-        char *end = NULL;
-        long pn = strtol(val, &end, 10);
-        if (!end || *end || pn < 0 || pn > 1000) {
-            return apr_psprintf(pool,
-                "%s: penalty='%s' must be 0..1000", dname, val);
-        }
-        a->penalty = (int)pn;
+    } else if (BS_AK("penalty") || BS_AK("credit")) {
+        return apr_psprintf(pool,
+            "%s: %.*s= is gone. It moved the cumulative score, which "
+            "no longer decides anything and persisted into the cookie "
+            "-- so a request refused for one reason could bill the "
+            "client for another. Use BotShieldScore <name> %s<n> and a "
+            "BotShieldChallengeAtLeast row that reads <name>.",
+            dname, (int)klen, arg,
+            (klen == 6 ? "-" : "+"));
     } else if (BS_AK("mode")) {
         /* observe vs enforce. Default enforce; observe makes the
          * rule log a :observe match without applying side effects.
@@ -728,21 +723,6 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
                 "%s: mode='%s' must be 'enforce' or 'observe'",
                 dname, val);
         }
-    } else if (BS_AK("credit")) {
-        if (fam == BS_TFAMILY_REQUEST) {
-            return apr_psprintf(pool,
-                "%s: credit= is not supported on path triggers "
-                "(path matches are discrete events; running "
-                "reputation belongs on cookie or env triggers)",
-                dname);
-        }
-        char *end = NULL;
-        long cn = strtol(val, &end, 10);
-        if (!end || *end || cn < 0 || cn > 1000) {
-            return apr_psprintf(pool,
-                "%s: credit='%s' must be 0..1000", dname, val);
-        }
-        a->credit = (int)cn;
     } else {
         return apr_psprintf(pool,
             "%s: unknown key '%.*s' (known: %s)",
@@ -957,8 +937,7 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
 
     if (is_pass) {
         if (fam == BS_TFAMILY_REQUEST) {
-            if (a->tier_floor >= 0 || a->penalty || a->credit
-             || a->score_ops) {
+            if (a->tier_floor >= 0 || a->score_ops) {
                 /* tier= turns the match into "challenge this", not
                  * "ignore this". Score contribution and the floor
                  * both apply, and we return CONTINUE so the caller
@@ -967,16 +946,15 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
                 /* status=pass with score-shaping and/or a tier
                  * demand. Either way the request must reach the
                  * scoring pipeline, so CONTINUE rather than the bare
-                 * pass's DECLINE. A bare status=pass with neither key
+                 * pass's DECLINE. A bare status=pass with neither
                  * keeps its original log-only meaning below. */
-                int d = a->penalty - a->credit;
                 const char *why = (a->tier_floor >= 0)
                     ? apr_pstrcat(r->pool, family_tag, ":", trigger_name,
                                   ":tier-", bs_tier_name(a->tier_floor),
                                   NULL)
                     : apr_pstrcat(r->pool, family_tag, ":", trigger_name,
                                   NULL);
-                bs_score_add(r, d, 0, why);
+                bs_score_add(r, 0, 0, why);
                 if (a->tier_floor >= 0) {
                     bs_set_request_tier_floor(r, a->tier_floor);
                 }
@@ -992,13 +970,12 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
                             ":pass", NULL));
             return BS_TEXEC_PASS_DECLINE;
         }
-        /* Cookie/env/load/scope pass: apply penalty - credit on
-         * THIS request's score. The signal is part of this
-         * request's decision state (cookie carried, env set, host
-         * hot, scope matched), so the score contribution belongs
-         * here. */
-        int delta = a->penalty - a->credit;
-        bs_score_add(r, delta, 0,
+        /* Cookie/env/load/scope pass: record the match. The number
+         * that used to ride along came from penalty - credit and went
+         * onto the cumulative score; a rule that wants to move
+         * something says BotShieldScore <name>, which has already been
+         * applied above. */
+        bs_score_add(r, 0, 0,
             apr_pstrcat(r->pool, family_tag, ":", trigger_name, NULL));
         if (fam == BS_TFAMILY_COOKIE) return BS_TEXEC_PASS_CONTINUE;
         /* Scope: multiple BotShieldTrigger directives in the same
@@ -1012,11 +989,11 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
     }
 
     /* Concrete status. Record reason; caller emits Location + the
-     * status_code. Path family historically ignored `credit` — the
-     * parser rejects credit= for path so a->credit is always 0 and
-     * `penalty - credit` collapses to `penalty` for path too. */
-    int delta = a->penalty - a->credit;
-    bs_score_add(r, delta, 0,
+     * status_code. The number that used to ride along was
+     * penalty - credit, onto the cumulative score. Both keys are gone;
+     * a rule that wants to move something says BotShieldScore <name>,
+     * applied above. */
+    bs_score_add(r, 0, 0,
         apr_pstrcat(r->pool, family_tag, ":", trigger_name, NULL));
 
     if (a->redirect_url) {
@@ -2144,6 +2121,15 @@ const char *bs_set_flag_trigger(cmd_parms *cmd, void *dconf,
             return apr_psprintf(cmd->pool,
                 "BotShieldFlagTrigger '%s' action=score: missing "
                 "required 'add=N'", flag_name);
+        }
+        if (!e->score_name) {
+            return apr_psprintf(cmd->pool,
+                "BotShieldFlagTrigger '%s' action=score: missing "
+                "required 'accumulator=<name>'. Without it the number "
+                "went onto the cumulative score, which no longer "
+                "decides a tier -- the flag would reach nothing but "
+                "the log. Name an accumulator and give it a "
+                "BotShieldChallengeAtLeast row to read.", flag_name);
         }
     } else if (strcasecmp(verb, "tier_floor") == 0) {
         e->action = BS_FLAG_ACT_TIER_FLOOR;

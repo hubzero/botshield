@@ -161,22 +161,16 @@ int bs_apply_flag_triggers(request_rec *r,
             continue;
         }
         if (e->action == BS_FLAG_ACT_SCORE) {
-            if (e->score_name) {
-                /* Into the named accumulator, and 0 into the ambient
-                 * total -- the reason token still lands so the
-                 * decision log reads the same either way. */
-                bs_request_named_score_apply(
-                    r, e->score_name,
-                    e->score_add < 0 ? '-' : '+',
-                    e->score_add < 0 ? -e->score_add : e->score_add);
-                bs_score_add(r, 0, 0,
-                    apr_psprintf(r->pool, "flagtrigger:%s:%s",
-                                 e->flag_name, e->score_name));
-            } else {
-                bs_score_add(r, e->score_add, 0,
-                    apr_psprintf(r->pool,
-                        "flagtrigger:%s", e->flag_name));
-            }
+            /* Always named -- the parser requires accumulator=. The
+             * reason still carries 0 into the cumulative score so the
+             * decision log records the match. */
+            bs_request_named_score_apply(
+                r, e->score_name,
+                e->score_add < 0 ? '-' : '+',
+                e->score_add < 0 ? -e->score_add : e->score_add);
+            bs_score_add(r, 0, 0,
+                apr_psprintf(r->pool, "flagtrigger:%s:%s",
+                             e->flag_name, e->score_name));
         } else if (e->action == BS_FLAG_ACT_TIER_FLOOR) {
             if (out_tier_floor && e->tier_min > *out_tier_floor) {
                 *out_tier_floor = e->tier_min;

@@ -127,7 +127,7 @@ Match keys (any of):
   comma-separated inline CIDRs, or omit/`*` for "any IP")
 
 Action keys (any of): `respond=`, `redirect=`, `flag=`, `ttl=`,
-`penalty=`, `logas=`, `mode=enforce|observe`. Convention is match
+`score=`, `logas=`, `mode=enforce|observe`. Convention is match
 keys first, action keys after — the parser doesn't enforce ordering
 but readability rewards consistency.
 
@@ -257,8 +257,7 @@ action keys are:
 | `logas=<tag>` | Stash a tag in `r->notes` for the access log (`%{BS-…}n`) and the decision-log line |
 | `flag=<name>` | Add a flag bit on the IP's flagged-IP entry (e.g. `flag=honeypot_hit`) |
 | `ttl=<sec>` | TTL on the flag-IP entry. Required when `flag=` is set |
-| `penalty=N` | Add N to the request score |
-| `credit=N` | Subtract N from the request score (rejected on the path family — paths can't credit) |
+| `score="<name> +N"` | Move a named per-request accumulator. `-N` subtracts, `=N` assigns. Read by whichever `BotShieldChallengeAtLeast` rows name it |
 | `mode=observe` | Per-rule observe mode: predicate evaluates, side-effects suppressed. See [staging](staging.md) |
 
 ### Path triggers
@@ -273,7 +272,7 @@ action keys are:
 </BotShieldRule>
 <BotShieldRule api-burst-trap>
     BotShieldPath         /api/*/burst
-    BotShieldPenalty      30
+    BotShieldScore  botsignals +30
     BotShieldLogAs          api-burst
 </BotShieldRule>
 ```
@@ -288,16 +287,16 @@ other status is the response code.
 <BotShieldCookieTrigger session-active>
     BotShieldCookie       sessionid
     BotShieldRespond       nochallenge
-    BotShieldCredit       10
+    BotShieldScore    botsignals -10
 </BotShieldCookieTrigger>
 <BotShieldCookieTrigger weak-session>
     BotShieldCookie       sessionid=guest
-    BotShieldPenalty      15
+    BotShieldScore  botsignals +15
     BotShieldLogAs          guest-session
 </BotShieldCookieTrigger>
 <BotShieldCookieTrigger no-cookies>
     BotShieldCookies      none
-    BotShieldPenalty      5
+    BotShieldScore  botsignals +5
     BotShieldLogAs          cookieless
 </BotShieldCookieTrigger>
 ```
@@ -329,13 +328,13 @@ SetEnvIfExpr "%{HTTP:CF-Connecting-IP} =~ /:/" BS_IPV6=1
 <BotShieldEnvTrigger ipv6-hint>
     BotShieldEnv          BS_IPV6
     BotShieldRespond       nochallenge
-    BotShieldCredit       2
+    BotShieldScore    botsignals -2
 </BotShieldEnvTrigger>
 
 SetEnvIf User-Agent "(?i)\bcurl\b" BS_CLI=1
 <BotShieldEnvTrigger curl-hint>
     BotShieldEnv          BS_CLI
-    BotShieldPenalty      10
+    BotShieldScore  botsignals +10
     BotShieldLogAs          cli
 </BotShieldEnvTrigger>
 ```
@@ -399,7 +398,7 @@ BotShieldLoadHotThreshold       85
 
 <BotShieldLoadTrigger be-strict>
     BotShieldState        >=warm
-    BotShieldPenalty      20
+    BotShieldScore  botsignals +20
     BotShieldLogAs          brownout
 </BotShieldLoadTrigger>
 <BotShieldLoadTrigger drop-noise>
@@ -435,10 +434,12 @@ above:
 </BotShieldFlagTrigger>
 <BotShieldFlagTrigger honeypot_hit>
     BotShieldAction       score
+BotShieldAccumulator  botsignals
     BotShieldAdd          60
 </BotShieldFlagTrigger>
 <BotShieldFlagTrigger app_verified_human>
     BotShieldAction       score
+BotShieldAccumulator  botsignals
     BotShieldAdd          -80
 </BotShieldFlagTrigger>
 ```
@@ -532,7 +533,7 @@ log-only mode — there's a single per-scope directive:
     <BotShieldTrigger>
         BotShieldFlag         scanner_probe
         BotShieldTTL          3600
-        BotShieldPenalty      20
+        BotShieldScore  botsignals +20
         BotShieldLogAs          wp-trap
     </BotShieldTrigger>
 </LocationMatch>
@@ -550,7 +551,7 @@ log-only mode — there's a single per-scope directive:
 The Apache scope match IS the predicate — no separate path glob,
 because Apache already evaluated the scope. Action keys mirror the
 cookie family: `status` / `redirect` / `log` / `flag` / `ttl` /
-`penalty` / `credit` / `mode`. Multiple `BotShieldTrigger` lines
+`score` / `mode`. Multiple `BotShieldTrigger` lines
 in one scope each append a separate action; they all fire on a
 pass, the first non-pass status short-circuits.
 
@@ -569,7 +570,7 @@ declare `BotShieldTrigger reset` in the child:
 ```apache
 <Location "/api">
     <BotShieldTrigger>
-        BotShieldPenalty      10
+        BotShieldScore  botsignals +10
         BotShieldLogAs          api-tax
     </BotShieldTrigger>
 </Location>

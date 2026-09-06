@@ -50,7 +50,7 @@ def test_env_trigger_penalty_on_presence(config_override, log_slice):
         'BotShieldEnabled On\n'
         '    SetEnvIfNoCase User-Agent "curl" BS_SUSPECT_UA=1\n'
         '    BotShieldEnvTrigger suspect-ua env=BS_SUSPECT_UA '
-        'penalty=25 logas=env-suspect',
+        'score=\"probe +25\" logas=env-suspect',
         count=1,
     ):
         with log_slice as slc:
@@ -83,7 +83,7 @@ def test_env_trigger_absent(config_override, log_slice, fresh_ip):
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldEnvTrigger no-marker !env=BS_MARKER '
-        'penalty=30',
+        'score=\"probe +30\"',
         count=1,
     ):
         with log_slice as slc:
@@ -110,8 +110,8 @@ def test_env_trigger_value_exact_match(config_override, log_slice):
         'BotShieldEnabled On\n'
         '    SetEnvIf Request_URI "/hi$" BS_LEVEL=high\n'
         '    SetEnvIf Request_URI "/med$" BS_LEVEL=medium\n'
-        '    BotShieldEnvTrigger hi-match env=BS_LEVEL=high penalty=80\n'
-        '    BotShieldEnvTrigger med-match env=BS_LEVEL=medium penalty=20',
+        '    BotShieldEnvTrigger hi-match env=BS_LEVEL=high score=\"probe +80\"\n'
+        '    BotShieldEnvTrigger med-match env=BS_LEVEL=medium score=\"probe +20\"',
         count=1,
     ):
         with log_slice as slc:
@@ -156,7 +156,7 @@ def test_env_trigger_from_rewrite_producer(config_override, log_slice,
         'BotShieldEnabled On\n'
         '    RewriteEngine On\n'
         '    RewriteRule ^/rw-flag /index.html [E=BS_FROM_RW:1,L]\n'
-        '    BotShieldEnvTrigger rw-origin env=BS_FROM_RW penalty=15',
+        '    BotShieldEnvTrigger rw-origin env=BS_FROM_RW score=\"probe +15\"',
         count=1,
     ):
         with log_slice as slc:
@@ -206,8 +206,8 @@ def test_env_trigger_first_match_wins(config_override, log_slice,
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    SetEnvIf Request_URI ".*" BS_PING=1\n'
-        '    BotShieldEnvTrigger first  env=BS_PING penalty=5\n'
-        '    BotShieldEnvTrigger second env=BS_PING penalty=50',
+        '    BotShieldEnvTrigger first  env=BS_PING score=\"probe +5\"\n'
+        '    BotShieldEnvTrigger second env=BS_PING score=\"probe +50\"',
         count=1,
     ):
         with log_slice as slc:

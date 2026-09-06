@@ -100,7 +100,7 @@ def test_session_mark_comes_back_on_the_next_request(config_override,
         _cfg("    BotShieldFeedbackTrigger login-success "
              "flagsession=app_verified_human\n"
              "    BotShieldFlagTrigger app_verified_human "
-             "action=score add=-40\n"),
+             "action=score accumulator=botsignals add=-40\n"),
         count=1,
     ):
         first = _g(FEEDBACK_PATH, fresh_ip)

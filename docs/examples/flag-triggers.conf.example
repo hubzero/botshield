@@ -38,6 +38,18 @@
 # applying the side effect — useful for safe rollout of a new rule):
 #   BotShieldFlagTrigger <flag> action=score add=N mode=observe
 
+# Every action=score names the accumulator it moves, and something has
+# to read that name for the number to mean anything:
+#
+#     BotShieldChallengeAtLeast botsignals 20 noninteractive
+#     BotShieldChallengeAtLeast botsignals 50 interactive
+#     BotShieldChallengeAtLeast botsignals 80 captcha
+#
+# Without a row, a flag that scores reaches nothing but the log. The
+# accumulator lives for one request, so a flag's number cannot follow a
+# client into a later one -- that is what a tier_floor is for, and why
+# a floor is the heavier instrument.
+
 # --- Detection signals — definitive ---------------------------------
 # Honeypot hits and fake-bot signatures (UA claims a search-engine
 # crawler from a non-search-engine network, etc.) are essentially
@@ -45,6 +57,7 @@
 # response stops short of any user content.
 <BotShieldFlagTrigger honeypot_hit>
     BotShieldAction       score
+BotShieldAccumulator  botsignals
     BotShieldAdd          60
 </BotShieldFlagTrigger>
 <BotShieldFlagTrigger honeypot_hit>
@@ -53,6 +66,7 @@
 </BotShieldFlagTrigger>
 <BotShieldFlagTrigger fake_bot>
     BotShieldAction       score
+BotShieldAccumulator  botsignals
     BotShieldAdd          80
 </BotShieldFlagTrigger>
 <BotShieldFlagTrigger fake_bot>
@@ -67,6 +81,7 @@
 # accessibility cost.
 <BotShieldFlagTrigger scanner_probe>
     BotShieldAction       score
+BotShieldAccumulator  botsignals
     BotShieldAdd          50
 </BotShieldFlagTrigger>
 <BotShieldFlagTrigger scanner_probe>
@@ -82,6 +97,7 @@
 # the request near the tier-bump threshold.
 <BotShieldFlagTrigger pow_fail_streak>
     BotShieldAction       score
+BotShieldAccumulator  botsignals
     BotShieldAdd          30
 </BotShieldFlagTrigger>
 <BotShieldFlagTrigger pow_fail_streak>
@@ -97,14 +113,17 @@
 # Multiple credits compose additively (SUM).
 <BotShieldFlagTrigger app_verified_human>
     BotShieldAction       score
+BotShieldAccumulator  botsignals
     BotShieldAdd          -80
 </BotShieldFlagTrigger>
 <BotShieldFlagTrigger app_verified_session>
     BotShieldAction       score
+BotShieldAccumulator  botsignals
     BotShieldAdd          -40
 </BotShieldFlagTrigger>
 <BotShieldFlagTrigger app_trust_signal>
     BotShieldAction       score
+BotShieldAccumulator  botsignals
     BotShieldAdd          -20
 </BotShieldFlagTrigger>
 

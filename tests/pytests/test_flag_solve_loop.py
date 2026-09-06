@@ -78,7 +78,7 @@ def test_flagged_client_escapes_loop_after_solving(
         r"BotShieldEnabled\s+On",
         "BotShieldEnabled On\n"
         f"    BotShieldFlagTrigger honeypot_hit reset "
-        f"action=score add={LOOPING_SCORE}",
+        f"action=score accumulator=botsignals add={LOOPING_SCORE}",
         count=1,
     ):
         _trip_honeypot(fresh_ip)
@@ -115,9 +115,9 @@ def test_flag_acquired_after_solving_still_fires(
         "    BotShieldEnvTrigger flagger env=BS_FLAG_ME "
         "flag=scanner_probe ttl=3600\n"
         f"    BotShieldFlagTrigger honeypot_hit reset "
-        f"action=score add={LOOPING_SCORE}\n"
+        f"action=score accumulator=botsignals add={LOOPING_SCORE}\n"
         f"    BotShieldFlagTrigger scanner_probe reset "
-        f"action=score add={LOOPING_SCORE}",
+        f"action=score accumulator=botsignals add={LOOPING_SCORE}",
         count=1,
     ):
         # Solve carrying honeypot_hit, which excuses exactly that bit.
@@ -154,7 +154,7 @@ def test_excusal_requires_real_solve_proof(
         r"BotShieldEnabled\s+On",
         "BotShieldEnabled On\n"
         f"    BotShieldFlagTrigger honeypot_hit reset "
-        f"action=score add={LOOPING_SCORE}",
+        f"action=score accumulator=botsignals add={LOOPING_SCORE}",
         count=1,
     ):
         _trip_honeypot(fresh_ip)
