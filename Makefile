@@ -68,6 +68,15 @@ LA       := $(MAIN_SRC:.c=.la)
 # Operators refresh the JSON via services/refresh/botshield-refresh.py directory
 # (network fetch + validation + atomic replace); we never auto-run
 # refresh from the build, only codegen.
+# The first rule in a makefile is its default goal, and the first rule
+# below is the generated bot directory -- so bare `make` regenerated one
+# data file, printed "up to date", and exited 0 without compiling
+# anything. It reads exactly like a successful no-op build, which is
+# what makes it expensive: the module you go on to install is whatever
+# was in src/.libs from last time, and every conclusion you draw from
+# running it is about code you did not build. Twice in one sitting.
+.DEFAULT_GOAL := all
+
 GEN_BOT_DIR_C    := src/generated_bot_directory.c
 GEN_BOT_DIR_JSON := data/bot-directory.json
 GEN_BOT_DIR_TOOL := tools/gen-bot-directory.py
