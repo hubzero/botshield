@@ -372,6 +372,14 @@ static const command_rec bs_cmds[] = {
                  "Who may read /metrics. Closed until this names "
                  "someone; refused requests get 404. Same argument form "
                  "as BotShieldDashboardAccess."),
+    AP_INIT_TAKE_ARGV("BotShieldChallengeAtLeast", bs_set_challenge_at_least,
+                 NULL, RSRC_CONF | ACCESS_CONF,
+                 "<name> <n> <tier> -- floor the tier at <tier> when the "
+                 "named per-request accumulator (BotShieldScore) has "
+                 "reached <n>. Evaluated with the score-to-tier decision, "
+                 "after robots and rate limiting, so a request refused "
+                 "there is never challenged instead. Rows MAX against "
+                 "each other and against flag and rule tier floors."),
     AP_INIT_TAKE_ARGV("BotShieldAdminAccess", bs_set_admin_access,
                  NULL, RSRC_CONF,
                  "Who may clear flagged addresses via POST to "
@@ -2380,6 +2388,25 @@ static int bs_handler(request_rec *r)
      * floor — we never silently downgrade. */
     /* A trigger tier= floor composes with the flag floor and the
      * score-derived tier by MAX, same as everything else here. */
+    /* Named accumulators -> tier floor. Evaluated here, beside
+     * bs_decide_tier, because this is after robots and the rate
+     * limiter: a request those refused never reaches this line, and so
+     * is never challenged in place of being refused. */
+    if (cfg->challenge_at_least) {
+        for (int i = 0; i < cfg->challenge_at_least->nelts; i++) {
+            const bs_challenge_min *row = APR_ARRAY_IDX(
+                cfg->challenge_at_least, i, const bs_challenge_min *);
+            if (bs_request_named_score(r, row->name) < row->min) continue;
+            if ((bs_tier)row->tier > tier_floor_from_flags) {
+                tier_floor_from_flags = (bs_tier)row->tier;
+            }
+            bs_score_add(r, 0, 0,
+                apr_psprintf(r->pool, "score:%s>=%d:%s",
+                             row->name, row->min,
+                             bs_tier_name((bs_tier)row->tier)));
+        }
+    }
+
     bs_tier trig_floor = (bs_tier)bs_get_request_tier_floor(r);
     if (trig_floor > tier_floor_from_flags) {
         tier_floor_from_flags = trig_floor;

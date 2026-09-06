@@ -193,6 +193,17 @@ enum bs_enabled_state {
  * Per-directory configuration
  * ====================================================================== */
 
+/* One BotShieldChallengeAtLeast row: a named per-request accumulator
+ * mapped to a tier floor. Evaluated beside bs_decide_tier, not in the
+ * rule ladder -- deciding in the ladder fires before robots and the
+ * rate limiter, so a client both suspicious and rate-limited would be
+ * challenged instead of refused. */
+typedef struct {
+    const char *name;
+    int         min;
+    int         tier;   /* bs_tier */
+} bs_challenge_min;
+
 struct bs_dir_cfg {
     int enabled;
     /* BotShieldChallenge — On (default) or Off. Off means no tier
@@ -266,6 +277,20 @@ struct bs_dir_cfg {
      * triggers" — the merge skips base->scope_triggers when set. */
     apr_array_header_t *scope_triggers;
     int                 scope_triggers_reset;
+    /* BotShieldChallengeAtLeast <name> <n> <tier>: named per-request
+     * accumulators mapped to a tier floor, evaluated beside
+     * bs_decide_tier rather than in the rule ladder.
+     *
+     * Position is the point. A tier decision taken in the ladder fires
+     * at stage 1 and short-circuits before robots and the rate limiter,
+     * so a client that is both suspicious and rate-limited is
+     * challenged instead of refused. Deciding here keeps the order the
+     * score thresholds always had. */
+    apr_array_header_t *challenge_at_least;   /* of bs_challenge_min * */
+    /* 'BotShieldChallengeAtLeast none' in this scope: drop what was
+     * inherited rather than adding to it. Propagates outward on merge
+     * so a deeper scope still sees the silence. */
+    int                 challenge_at_least_reset;
     /* --- Captcha tier (M8) --- */
     const char *endpoint_prefix;            /* default "/botshield" */
     const bs_captcha_provider *captcha_provider;  /* NULL = tier unused */

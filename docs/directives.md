@@ -899,6 +899,57 @@ reader can bound the value without adding up the file.
 discards everything earlier rules contributed, which is occasionally
 what you want and easy to write by accident.
 
+#### `BotShieldChallengeAtLeast` — act on an accumulator, after policy
+
+| Directive | Syntax | Scope |
+|---|---|---|
+| `BotShieldChallengeAtLeast` | `<name> <n> <tier>` | server / vhost / directory |
+
+Floors the tier at `<tier>` when the named accumulator has reached
+`<n>`. Rows MAX against each other and against flag and rule tier
+floors, so several may match and the highest wins; order is irrelevant.
+
+Rows accumulate through nested scopes: a scope adds to what it
+inherited rather than replacing it. `BotShieldChallengeAtLeast none`,
+alone on a line, drops everything inherited. That is the off switch a
+list needs and a single-valued threshold did not — overriding
+`BotShieldScoreNonInteractive` was enough to silence it, and there is
+no equivalent for a row you cannot see.
+
+```apache
+<BotShieldRule sig-scraper>
+    BotShieldUserAgent  @scraper
+    BotShieldScore      botsignals +10
+</BotShieldRule>
+<BotShieldRule sig-newcomer>
+    BotShieldFirstSight yes
+    BotShieldSolved     no
+    BotShieldScore      botsignals +5
+</BotShieldRule>
+
+BotShieldChallengeAtLeast  botsignals  20  noninteractive
+BotShieldChallengeAtLeast  botsignals  50  interactive
+```
+
+**Why this is a directive and not a rule condition.** `BotShieldScore`
+and `BotShieldScoreAtLeast` both live in the rule ladder, which runs
+*before* robots.txt and rate limiting. Accumulating there is harmless —
+nothing between those stages reads an accumulator. Deciding there is
+not: a request that is both over the threshold and over a rate ceiling
+would be challenged instead of refused, because the ladder
+short-circuits before the limiter ever runs.
+
+That is the wrong way round — refusing a bot outright is cheaper than
+serving it a proof-of-work challenge you were going to reject anyway —
+and it is not hypothetical: writing the ladder that way broke seven
+rate-limit tests and a robots test.
+
+So this directive is evaluated with the score-to-tier decision, after
+all of policy, which is where the tier has always been chosen. Use
+`BotShieldScoreAtLeast` inside a rule when you want the accumulator to
+gate *that rule's* match; use `BotShieldChallengeAtLeast` when you want
+it to choose a challenge tier.
+
 #### `@selectors` on `ua=`
 
 Three of them name a classification this module makes rather than a bot

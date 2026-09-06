@@ -36,6 +36,7 @@
 
 #include <apr_pools.h>
 #include <apr_strings.h>
+#include <apr_lib.h>      /* apr_isalnum */
 #include <apr_tables.h>
 #include <apr_atomic.h>
 #include <apr_global_mutex.h>
@@ -92,6 +93,8 @@ void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->cookie_domain   = NULL;
     cfg->scope_triggers       = NULL;
     cfg->scope_triggers_reset = 0;
+    cfg->challenge_at_least   = NULL;
+    cfg->challenge_at_least_reset = 0;
     cfg->endpoint_prefix     = NULL;
     cfg->captcha_provider    = NULL;
     cfg->captcha_site_key    = NULL;
@@ -615,6 +618,26 @@ void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     } else {
         out->scope_triggers = apr_array_append(p, base->scope_triggers,
                                                add->scope_triggers);
+    }
+    /* Concatenate parent and child, like scope_triggers: a <Location>
+     * adding a row should not silently drop the vhost's ladder. Rows
+     * MAX against each other at decision time, so order is irrelevant
+     * and a duplicate is harmless. */
+    out->challenge_at_least_reset = base->challenge_at_least_reset
+                                  | add->challenge_at_least_reset;
+    if (add->challenge_at_least_reset) {
+        /* This scope said 'none'. Whatever it added after that stands
+         * alone; the inherited rows are gone. */
+        out->challenge_at_least = add->challenge_at_least;
+    } else if (!base->challenge_at_least
+            || base->challenge_at_least->nelts == 0) {
+        out->challenge_at_least = add->challenge_at_least;
+    } else if (!add->challenge_at_least
+            || add->challenge_at_least->nelts == 0) {
+        out->challenge_at_least = base->challenge_at_least;
+    } else {
+        out->challenge_at_least = apr_array_append(p,
+            base->challenge_at_least, add->challenge_at_least);
     }
     out->endpoint_prefix  = add->endpoint_prefix  ? add->endpoint_prefix  : base->endpoint_prefix;
     out->captcha_provider = add->captcha_provider ? add->captcha_provider : base->captcha_provider;
@@ -3169,6 +3192,88 @@ const char *bs_set_metrics_access(cmd_parms *cmd, void *dummy,
     if (!scfg) return "BotShieldMetricsAccess: no server config";
     return bs_set_observe_acl(cmd, &scfg->observe_metrics,
                               "BotShieldMetricsAccess", argc, argv);
+}
+
+/* BotShieldChallengeAtLeast <name> <n> <tier>
+ *
+ * The replacement for BotShieldScoreNonInteractive / Interactive /
+ * Captcha: same decision point, same MAX composition against flag
+ * floors and rule floors, but reading a named accumulator that lives
+ * for one request instead of a total that persisted into the cookie.
+ *
+ * Deliberately not a rule key. In the ladder it would decide at stage
+ * 1, before robots and the rate limiter -- so a client both suspicious
+ * and rate-limited would be challenged rather than refused, which is
+ * the wrong way round and broke eight tests when it was tried. */
+const char *bs_set_challenge_at_least(cmd_parms *cmd, void *cfg_v,
+                                      int argc, char *const argv[])
+{
+    bs_dir_cfg *cfg = (bs_dir_cfg *)cfg_v;
+    if (!cfg) return "BotShieldChallengeAtLeast: no directory config";
+    if (argc != 1 && argc != 3) {
+        return "BotShieldChallengeAtLeast: <name> <n> <tier>, or "
+               "'none' alone to drop what this scope inherited";
+    }
+    const char *name = argv[0];
+    const char *nstr = argc == 3 ? argv[1] : NULL;
+    const char *tier = argc == 3 ? argv[2] : NULL;
+    if (!name || !*name) return "BotShieldChallengeAtLeast: needs an accumulator name";
+
+    /* 'none' drops every row this scope inherited.
+     *
+     * Rows accumulate on merge, so without this a nested scope could
+     * add a row but never silence one -- and a scope that wants no
+     * score-driven challenge at all would have no way to say so. The
+     * score thresholds this replaces were single-valued, so overriding
+     * one was enough; a list needs its own off switch. */
+    if (!strcasecmp(name, "none")) {
+        if (argc != 1) {
+            return "BotShieldChallengeAtLeast none takes no other "
+                   "arguments";
+        }
+        cfg->challenge_at_least =
+            apr_array_make(cmd->pool, 1, sizeof(bs_challenge_min *));
+        cfg->challenge_at_least_reset = 1;
+        return NULL;
+    }
+    if (argc != 3) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldChallengeAtLeast %s: needs <n> and <tier> after "
+            "the name", name);
+    }
+
+    for (const char *p = name; *p; p++) {
+        if (!apr_isalnum(*p) && *p != '_' && *p != '-') {
+            return apr_psprintf(cmd->pool,
+                "BotShieldChallengeAtLeast: name '%s' -- letters, "
+                "digits, _ and - only", name);
+        }
+    }
+    char *end = NULL;
+    long v = strtol(nstr ? nstr : "", &end, 10);
+    if (!end || *end || v < 0 || v > BS_NAMED_SCORE_MAX) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldChallengeAtLeast %s: '%s' is not an integer in "
+            "0..%d", name, nstr ? nstr : "", BS_NAMED_SCORE_MAX);
+    }
+    int t;
+    if      (!strcasecmp(tier, "noninteractive")) t = BS_TIER_NONINTERACTIVE;
+    else if (!strcasecmp(tier, "interactive"))    t = BS_TIER_INTERACTIVE;
+    else if (!strcasecmp(tier, "captcha"))        t = BS_TIER_CAPTCHA;
+    else return apr_psprintf(cmd->pool,
+        "BotShieldChallengeAtLeast %s %s: tier '%s' must be "
+        "noninteractive, interactive or captcha", name, nstr, tier);
+
+    if (!cfg->challenge_at_least) {
+        cfg->challenge_at_least =
+            apr_array_make(cmd->pool, 3, sizeof(bs_challenge_min *));
+    }
+    bs_challenge_min *row = apr_pcalloc(cmd->pool, sizeof(*row));
+    row->name = apr_pstrdup(cmd->pool, name);
+    row->min  = (int)v;
+    row->tier = t;
+    *(bs_challenge_min **)apr_array_push(cfg->challenge_at_least) = row;
+    return NULL;
 }
 
 /* BotShieldAdminAccess

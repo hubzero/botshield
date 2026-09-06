@@ -1452,6 +1452,61 @@ reader can bound the value without adding up the file.</p>
 <p><code>=</code> assigns rather than accumulates. It is the sharp one: a later <code>=</code>
 discards everything earlier rules contributed, which is occasionally
 what you want and easy to write by accident.</p>
+<h4 id="botshieldchallengeatleast-act-on-an-accumulator-after-policy"><code>BotShieldChallengeAtLeast</code> — act on an accumulator, after policy</h4>
+<table>
+<thead>
+<tr>
+<th>Directive</th>
+<th>Syntax</th>
+<th>Scope</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BotShieldChallengeAtLeast</code></td>
+<td><code>&lt;name&gt; &lt;n&gt; &lt;tier&gt;</code></td>
+<td>server / vhost / directory</td>
+</tr>
+</tbody>
+</table>
+<p>Floors the tier at <code>&lt;tier&gt;</code> when the named accumulator has reached
+<code>&lt;n&gt;</code>. Rows MAX against each other and against flag and rule tier
+floors, so several may match and the highest wins; order is irrelevant.</p>
+<p>Rows accumulate through nested scopes: a scope adds to what it
+inherited rather than replacing it. <code>BotShieldChallengeAtLeast none</code>,
+alone on a line, drops everything inherited. That is the off switch a
+list needs and a single-valued threshold did not — overriding
+<code>BotShieldScoreNonInteractive</code> was enough to silence it, and there is
+no equivalent for a row you cannot see.</p>
+<pre><code class="language-apache">&lt;BotShieldRule sig-scraper&gt;
+    BotShieldUserAgent  @scraper
+    BotShieldScore      botsignals +10
+&lt;/BotShieldRule&gt;
+&lt;BotShieldRule sig-newcomer&gt;
+    BotShieldFirstSight yes
+    BotShieldSolved     no
+    BotShieldScore      botsignals +5
+&lt;/BotShieldRule&gt;
+
+BotShieldChallengeAtLeast  botsignals  20  noninteractive
+BotShieldChallengeAtLeast  botsignals  50  interactive
+</code></pre>
+<p><strong>Why this is a directive and not a rule condition.</strong> <code>BotShieldScore</code>
+and <code>BotShieldScoreAtLeast</code> both live in the rule ladder, which runs
+<em>before</em> robots.txt and rate limiting. Accumulating there is harmless —
+nothing between those stages reads an accumulator. Deciding there is
+not: a request that is both over the threshold and over a rate ceiling
+would be challenged instead of refused, because the ladder
+short-circuits before the limiter ever runs.</p>
+<p>That is the wrong way round — refusing a bot outright is cheaper than
+serving it a proof-of-work challenge you were going to reject anyway —
+and it is not hypothetical: writing the ladder that way broke seven
+rate-limit tests and a robots test.</p>
+<p>So this directive is evaluated with the score-to-tier decision, after
+all of policy, which is where the tier has always been chosen. Use
+<code>BotShieldScoreAtLeast</code> inside a rule when you want the accumulator to
+gate <em>that rule's</em> match; use <code>BotShieldChallengeAtLeast</code> when you want
+it to choose a challenge tier.</p>
 <h4 id="selectors-on-ua"><code>@selectors</code> on <code>ua=</code></h4>
 <p>Three of them name a classification this module makes rather than a bot
 the directory knows:</p>

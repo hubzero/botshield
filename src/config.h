@@ -107,6 +107,10 @@ const char *bs_set_metrics_access  (cmd_parms *cmd, void *dummy, int argc,
  * read grant. */
 const char *bs_set_admin_access    (cmd_parms *cmd, void *dummy, int argc,
                                     char *const argv[]);
+/* Named accumulator -> tier floor, evaluated at the tier decision
+ * rather than in the rule ladder. */
+const char *bs_set_challenge_at_least(cmd_parms *cmd, void *cfg_v,
+                                      int argc, char *const argv[]);
 const char *bs_set_score_non_interactive  (cmd_parms *cmd, void *cfg_v, const char *arg);
 const char *bs_set_score_interactive    (cmd_parms *cmd, void *cfg_v, const char *arg);
 const char *bs_set_score_captcha (cmd_parms *cmd, void *cfg_v, const char *arg);
