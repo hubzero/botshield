@@ -1034,12 +1034,12 @@ typedef struct bs_rate_escalate_entry {
 ```
 
 Directive: `BotShieldRateLimitEscalate <rate-name> <strikes> <per>
-[respond=<code>] [ttl=<sec>] [log=<tag>]`. Per-(client_ip, rate_rule_slot)
+[respond=<code>] [ttl=<sec>] [logas=<tag>]`. Per-(client_ip, rate_rule_slot)
 strike accounting in the SHM strike table (see SHM segment); each 429
 on the named rule increments. Over the strike threshold within the
 window, subsequent requests against the same rule return the
 escalated status (default 403) for `ttl_sec` (default 1800). The TTL
-slides on each fresh strike. `log=<tag>` rides the decision line on
+slides on each fresh strike. `logas=<tag>` rides the decision line on
 threshold crossing for fail2ban handoff, with reason
 `ratelimitabuse:<name>`.
 
@@ -1198,14 +1198,14 @@ typedef struct {
 ```
 
 Action key parsers: `respond=<code|pass>`, `redirect=<url>` (only for
-families that support it), `log=<tag>`, `accesslog=on|off`, `flag=<bit>`,
+families that support it), `logas=<tag>`, `accesslog=on|off`, `flag=<bit>`,
 `ttl=<sec>`, `penalty=<n>`, `credit=<n>`, `mode=enforce|observe`.
 
-`log=<tag>` and `accesslog=on|off` are separate keys on purpose. An
-earlier development build overloaded `log=off` for suppression, which
+`logas=<tag>` and `accesslog=on|off` are separate keys on purpose. An
+earlier development build overloaded `logas=off` for suppression, which
 made the two mutually exclusive — and that cost the fail2ban tag on
 exactly the traffic most worth tagging, since a scanner probe typically
-wants both a tag and no access-log line. `log=off` is now rejected at
+wants both a tag and no access-log line. `logas=off` is now rejected at
 config time with a pointer to `accesslog=off`, rather than silently
 degrading to a tag named "off" and dropping suppression a config relied
 on.
@@ -1326,14 +1326,14 @@ kinds: `state=normal|warm|hot` or `state>=normal|warm|hot`. The
 match consumes the cached load state via `bs_load_current()` (lockless
 atomic read on `bs_shm.header->load_state`).
 
-Action keys: `credit=`, `penalty=`, `respond=<code|pass>`, `log=<tag>`.
+Action keys: `credit=`, `penalty=`, `respond=<code|pass>`, `logas=<tag>`.
 **`flag=` / `ttl=` / `redirect=` are rejected** at config-time: load
 is global state, not per-IP behavior.
 
 #### Feedback triggers (E7.3)
 
 `BotShieldFeedbackTrigger <event> [key=value ...]`. Required:
-`flag=<bit>`, `ttl=<sec>`. Optional: `log=<tag>`. Maps an app-signed
+`flag=<bit>`, `ttl=<sec>`. Optional: `logas=<tag>`. Maps an app-signed
 event name (E5 wire format) to module memory. **No** status,
 redirect, penalty, or credit — the response has already been served.
 
@@ -1926,7 +1926,7 @@ mod_botshield: decision tier=<t> outcome=<o> ip=<i> score=<n>
     [tag="<x>"]
 ```
 
-Tag suffix is emitted only when a trigger set a `log=<tag>` action;
+Tag suffix is emitted only when a trigger set a `logas=<tag>` action;
 absent tag means a normal decision line shape, byte-identical to
 pre-tag emissions.
 
