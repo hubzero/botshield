@@ -26,11 +26,15 @@ from botshield_test import client
 BROWSER_UA = "Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/125.0"
 ACCEPT_LANG = "en-US,en;q=0.9"
 
-PARKED = (
+LADDER_OFF = (
     "BotShieldEnabled On\n"
-    "    BotShieldScoreNonInteractive 9000\n"
-    "    BotShieldScoreInteractive    9500\n"
-    "    BotShieldScoreCaptcha        9900\n"
+    # Off, not parked at 9000. The second request in each test is
+    # cookieless at an address the first one minted for, which is
+    # droppedcookie: 25, past the vhost's 20, and the control would
+    # fail on a challenge that has nothing to do with tier floors.
+    # This file declares no rows of its own, so the scope switch is
+    # exactly the right shape.
+    "    BotShieldChallengeAtLeast none\n"
     "    <BotShieldRule tf-probe>\n"
     "        BotShieldPath      /tier-floor-probe\n"
     "        BotShieldRespond   404\n"
@@ -39,7 +43,7 @@ PARKED = (
     "    </BotShieldRule>\n"
 )
 
-WITH_FLOOR = PARKED + (
+WITH_FLOOR = LADDER_OFF + (
     "    <BotShieldFlagTrigger scanner_probe>\n"
     "        BotShieldAction    tier_floor\n"
     "        BotShieldMin       noninteractive\n"
@@ -57,8 +61,8 @@ def _challenged(slc, ip):
                for d in slc.decision_lines(ip=ip))
 
 
-def test_tier_floor_fires_with_thresholds_parked(config_override, fresh_ip,
-                                                 log_slice):
+def test_tier_floor_fires_with_the_ladder_off(config_override, fresh_ip,
+                                              log_slice):
     """Flag the address, then watch an ordinary path get challenged."""
     with config_override(r"BotShieldEnabled\s+On", WITH_FLOOR,
                          render=False, count=1):
@@ -79,7 +83,7 @@ def test_without_the_floor_the_same_flag_does_nothing(config_override,
     Same rule, same flag, no BotShieldFlagTrigger. Nothing is seeded in,
     so the flag is recorded and acts on nothing.
     """
-    with config_override(r"BotShieldEnabled\s+On", PARKED,
+    with config_override(r"BotShieldEnabled\s+On", LADDER_OFF,
                          render=False, count=1):
         assert _get("/tier-floor-probe", fresh_ip).status_code == 404
 

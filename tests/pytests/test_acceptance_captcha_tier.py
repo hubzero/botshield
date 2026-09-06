@@ -1,6 +1,8 @@
 """Acceptance: high-confidence-friction journey.
 
-/captcha-demo is pinned to captcha tier via BotShieldScoreCaptcha 3.
+/captcha-demo is pinned to captcha tier by the demo-captcha rule
+(BotShieldChallenge captcha), so this never depends on a UA
+happening to score past a cut-point.
 The user:
   1. hits /captcha-demo → interstitial with a Turnstile widget,
   2. solves → 303 + __Host-bs_session cookie,

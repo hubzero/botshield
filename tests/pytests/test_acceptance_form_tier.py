@@ -23,10 +23,11 @@ pytestmark = pytest.mark.acceptance
 
 SUSPICIOUS_UA = "Mozilla/5.0 (X11) Chrome/145"
 
-# Forced form tier. SUSPICIOUS_UA scores 10, which never reaches
-# BotShieldScoreInteractive (50) at any sane firstsightip value, so relying
-# on the ambient score to produce a form interstitial was never going
-# to hold. Same rationale as SILENT_PATH in test_cookie_gcm.
+# Forced form tier, by the demo-form rule. SUSPICIOUS_UA is worth
+# 10 on botsignals and the interactive row sits at 50, so relying
+# on the score to produce a form interstitial was never going to
+# hold -- which is why the path asks for the tier instead. Same
+# rationale as SILENT_PATH in test_cookie_gcm.
 FORM_PATH = "/form-demo"
 BROWSER_UA = "Mozilla/5.0 (X11) Chrome/145"
 

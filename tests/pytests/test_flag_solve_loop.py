@@ -2,7 +2,7 @@
 
 Solving a challenge does not clear a flag, and flag scores re-apply on
 every request. Before `flags_excused`, any flag scoring at or above
-BotShieldScoreNonInteractive was therefore an unbreakable loop: challenge,
+the noninteractive row was therefore an unbreakable loop: challenge,
 solve, get re-scored by the same flag, challenge again, forever. It
 reached production twice -- once via a compiled-in tier_floor, once via
 the score that the documented fix for the first one recommends.
@@ -34,7 +34,7 @@ from botshield_test import client, cookies
 BROWSER_UA = "Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/125.0"
 ACCEPT_LANG = "en-US,en;q=0.9"
 
-# Comfortably above the default BotShieldScoreNonInteractive of 20, which is
+# Comfortably above the dev vhost's botsignals row at 20, which is
 # what makes the flag alone sufficient to challenge on every request.
 LOOPING_SCORE = 60
 

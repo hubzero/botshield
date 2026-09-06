@@ -364,10 +364,17 @@ def test_log_only_emits_tilde_rate_limited_for_ratelimit(
 def test_log_only_emits_tilde_challenge_for_tier_dispatch(
     config_override, fresh_ip, log_slice,
 ):
-    """Scope-level BotShieldEnabled LogOnly + a request whose score
-    crosses BotShieldScoreNonInteractive. Without LogOnly the response would
-    be a tier=noninteractive interstitial; under LogOnly the module logs
-    `outcome=~challenge` and declines so the real handler runs."""
+    """Scope-level BotShieldEnabled LogOnly + a request whose
+    botsignals crosses the vhost's noninteractive row. Without
+    LogOnly the response would be a tier=noninteractive
+    interstitial; under LogOnly the module logs `outcome=~challenge`
+    and declines so the real handler runs.
+
+    The scores have to keep moving for that to be true. They are
+    rules now, and rules hit the observe short-circuit -- so this
+    also guards the rule that a named accumulator is evidence and
+    survives LogOnly, without which the module reports allow for
+    every challenge it is about to start raising."""
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'

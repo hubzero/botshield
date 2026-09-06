@@ -1,7 +1,9 @@
 """M11.6 browser acceptance: captcha tier in a real Chromium.
 
-/captcha-demo is pinned to the captcha tier (BotShieldScoreCaptcha 3),
-so a fresh-IP + missing-AL request is guaranteed to land there. A real
+/captcha-demo is pinned to the captcha tier by the demo-captcha
+rule (BotShieldChallenge captcha), so any request lands there --
+it no longer has to be a fresh IP with a missing Accept-Language
+to score its way in. A real
 Chromium loads the interstitial, the module's form markup is well-
 formed enough that a submit with an injected Turnstile-always-pass
 token does a round-trip → 303 → __Host-bs_session cookie → redirect to

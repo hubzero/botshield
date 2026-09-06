@@ -623,21 +623,37 @@ void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
      * adding a row should not silently drop the vhost's ladder. Rows
      * MAX against each other at decision time, so order is irrelevant
      * and a duplicate is harmless. */
-    out->challenge_at_least_reset = base->challenge_at_least_reset
-                                  | add->challenge_at_least_reset;
     if (add->challenge_at_least_reset) {
-        /* This scope said 'none'. Whatever it added after that stands
-         * alone; the inherited rows are gone. */
+        /* This scope said 'none'. Rows it declares are kept for a
+         * deeper scope to inherit-and-lift, but nothing acts here --
+         * the decision site drops them on the reset flag, which is
+         * what makes 'none' independent of where it sits among them. */
+        out->challenge_at_least_reset = 1;
         out->challenge_at_least = add->challenge_at_least;
-    } else if (!base->challenge_at_least
-            || base->challenge_at_least->nelts == 0) {
-        out->challenge_at_least = add->challenge_at_least;
-    } else if (!add->challenge_at_least
-            || add->challenge_at_least->nelts == 0) {
-        out->challenge_at_least = base->challenge_at_least;
+    } else if (add->challenge_at_least
+            && add->challenge_at_least->nelts > 0) {
+        /* Declaring a row is an explicit statement that this scope
+         * raises score-driven challenges, and that is what lifts an
+         * inherited 'none'. Without this the flag ORs all the way
+         * down and a <Location> under a silenced vhost can never say
+         * "not those rows, these" -- an off switch with no way back
+         * on, which is a wall.
+         *
+         * The inherited rows do not return with it: an operator
+         * reaching for this has already said they do not want them. */
+        out->challenge_at_least_reset = 0;
+        out->challenge_at_least = base->challenge_at_least_reset
+            ? add->challenge_at_least
+            : (base->challenge_at_least
+               && base->challenge_at_least->nelts > 0)
+              ? apr_array_append(p, base->challenge_at_least,
+                                 add->challenge_at_least)
+              : add->challenge_at_least;
     } else {
-        out->challenge_at_least = apr_array_append(p,
-            base->challenge_at_least, add->challenge_at_least);
+        /* Silence inherits, so a vhost can turn the ladder off for
+         * everything under it in one line. */
+        out->challenge_at_least_reset = base->challenge_at_least_reset;
+        out->challenge_at_least = base->challenge_at_least;
     }
     out->endpoint_prefix  = add->endpoint_prefix  ? add->endpoint_prefix  : base->endpoint_prefix;
     out->captcha_provider = add->captcha_provider ? add->captcha_provider : base->captcha_provider;

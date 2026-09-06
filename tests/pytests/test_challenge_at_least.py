@@ -23,17 +23,18 @@ from botshield_test import client
 BROWSER_UA = "Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/125.0"
 ACCEPT_LANG = "en-US,en;q=0.9"
 
-# Parks the vhost's own ladder so only this accumulator can act.
-PARK = (
-    "    BotShieldScoreNonInteractive 9000\n"
-    "    BotShieldScoreInteractive    9500\n"
-    "    BotShieldScoreCaptcha        9900\n"
-)
-
+# No parking. This used to raise the ambient cut-points to 9000 so
+# the vhost's ladder could not reach anything; the vhost has no ambient
+# ladder now, and unset has always meant never, so 9000 said nothing
+# that silence does not say.
+#
+# The vhost's botsignals rows are what could still interfere, and this
+# probe stays clear of them by being uninteresting: one request from a
+# fresh address, a browser UA, an Accept-Language. firstsight is the
+# only signal that fires and 5 does not reach 20.
 REACHES = (
     "BotShieldEnabled On\n"
-    + PARK
-    + "    <BotShieldRule cal-a>\n"
+    "    <BotShieldRule cal-a>\n"
       "        BotShieldPath   /cal-probe\n"
       "        BotShieldScore  calsig +12\n"
       "    </BotShieldRule>\n"
@@ -109,13 +110,12 @@ def test_rows_max_rather_than_first_match(config_override, fresh_ip,
     """
     conf = (
         "BotShieldEnabled On\n"
-        + PARK
-        + "    <BotShieldRule cal-a>\n"
-          "        BotShieldPath   /cal-probe\n"
-          "        BotShieldScore  calsig +60\n"
-          "    </BotShieldRule>\n"
-          "    BotShieldChallengeAtLeast calsig 20 noninteractive\n"
-          "    BotShieldChallengeAtLeast calsig 50 interactive\n"
+        "    <BotShieldRule cal-a>\n"
+        "        BotShieldPath   /cal-probe\n"
+        "        BotShieldScore  calsig +60\n"
+        "    </BotShieldRule>\n"
+        "    BotShieldChallengeAtLeast calsig 20 noninteractive\n"
+        "    BotShieldChallengeAtLeast calsig 50 interactive\n"
     )
     with config_override(r"BotShieldEnabled\s+On", conf,
                          render=False, count=1):
@@ -124,4 +124,62 @@ def test_rows_max_rather_than_first_match(config_override, fresh_ip,
         tiers = [d.get("tier") for d in slc.decision_lines(ip=fresh_ip)]
         assert "interactive" in tiers, (
             f"60 crosses both rows; the higher tier should win, got {tiers}"
+        )
+
+
+def test_a_nested_row_lifts_an_inherited_none(config_override, fresh_ip,
+                                              log_slice):
+    """'none' is inherited, and declaring a row is what lifts it.
+
+    Off has to inherit or a vhost cannot silence everything under it in
+    one line. It also has to be liftable, or a <Location> can never say
+    "not the vhost's rows, mine" -- an off switch with no way back on.
+    """
+    conf = (
+        "BotShieldEnabled On\n"
+        "    BotShieldChallengeAtLeast none\n"
+        "    <BotShieldRule cal-nest>\n"
+        "        BotShieldPath   /cal-nested\n"
+        "        BotShieldScore  calsig +25\n"
+        "    </BotShieldRule>\n"
+        "    <Location /cal-nested>\n"
+        "        BotShieldChallengeAtLeast calsig 20 noninteractive\n"
+        "    </Location>\n"
+    )
+    with config_override(r"BotShieldEnabled\s+On", conf,
+                         render=False, count=1):
+        with log_slice as slc:
+            _get(fresh_ip, path="/cal-nested")
+        assert _challenged(slc, fresh_ip), (
+            "a row declared in a nested scope should lift the "
+            "inherited none; "
+            f"lines={slc.decision_lines(ip=fresh_ip)}"
+        )
+
+
+def test_none_still_inherits_where_nothing_is_declared(
+    config_override, fresh_ip, log_slice,
+):
+    """The control for the test above, and the property it must not
+    cost: a scope that declares no row of its own stays silenced."""
+    conf = (
+        "BotShieldEnabled On\n"
+        "    BotShieldChallengeAtLeast none\n"
+        "    <BotShieldRule cal-nest>\n"
+        "        BotShieldPath   /cal-nested\n"
+        "        BotShieldScore  calsig +25\n"
+        "    </BotShieldRule>\n"
+        "    BotShieldChallengeAtLeast calsig 20 noninteractive\n"
+        "    <Location /cal-nested>\n"
+        "        BotShieldNonInteractiveMode interstitial\n"
+        "    </Location>\n"
+    )
+    with config_override(r"BotShieldEnabled\s+On", conf,
+                         render=False, count=1):
+        with log_slice as slc:
+            _get(fresh_ip, path="/cal-nested")
+        assert not _challenged(slc, fresh_ip), (
+            "the Location declares no row, so the vhost's none should "
+            "still reach it; "
+            f"lines={slc.decision_lines(ip=fresh_ip)}"
         )

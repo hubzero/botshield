@@ -214,19 +214,23 @@ def test_embedded_falls_back_to_m7_when_wrapper_blocked(
     request 3 falls back (count was just bumped to 3 inside
     bs_apply_safeguard, and the embedded read sees 3 ≥ 3).
 
-    Test pins silent tier explicitly via tight ScoreSilent + relaxed
-    ScoreHard so successive requests don't drop to pass tier after
-    the Bloom first-sight bonus stops applying. Without that, only
-    the first request would be silent-tier and the count couldn't
-    accumulate."""
+    The tier is pinned by a rule rather than left to the score:
+    successive requests must all be noninteractive for the count to
+    accumulate, and the first-sight bonus only applies to the first
+    one. This used to be spelled as thresholds of 1/1000/2000 --
+    noninteractive at any score at all, nothing higher reachable --
+    which is a tier assignment written as arithmetic. solved=no so a
+    client that solves is not pinned forever."""
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
+        '    <BotShieldRule embedded-pin>\n'
+        '        BotShieldPath      /embedded-test.html\n'
+        '        BotShieldSolved    no\n'
+        '        BotShieldChallenge noninteractive\n'
+        '    </BotShieldRule>\n'
         '    <Location /embedded-test.html>\n'
         '        BotShieldNonInteractiveMode embedded\n'
-        '        BotShieldScoreNonInteractive 1\n'
-        '        BotShieldScoreInteractive 1000\n'
-        '        BotShieldScoreCaptcha 2000\n'
         '    </Location>',
         count=1,
     ):
