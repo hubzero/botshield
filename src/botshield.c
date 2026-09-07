@@ -1861,6 +1861,15 @@ static int bs_handler(request_rec *r)
          * so it gets its own note rather than a fourth state. */
         apr_table_setn(r->notes, BS_CK_SOLVED_NOTE,
                        have_solve_proof ? "1" : "0");
+        /* Session flags, for flagged= in the rule walk below. Same
+         * gate the tier decision uses when it folds cookie_flags into
+         * all_flags -- without have_prior_rep the block is not
+         * authenticated and asserts nothing. */
+        if (have_prior_rep && prior_ch.rep.flags_active) {
+            apr_table_setn(r->notes, BS_CK_FLAGS_NOTE,
+                apr_psprintf(r->pool, "%x",
+                             (unsigned)prior_ch.rep.flags_active));
+        }
     }
 
     /* Always-mint: install a presence-only session cookie when the

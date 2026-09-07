@@ -246,3 +246,95 @@ def test_negated_flagged_is_refused(config_override):
                              render=False, count=1):
             pass
     assert "returned non-zero exit status" in str(exc_info.value)
+
+
+# --- the session subject ---------------------------------------------
+
+COOKIE_NAME = "__Host-bs_session"
+
+
+def _carry(resp):
+    c = resp.cookies.get(COOKIE_NAME)
+    return {COOKIE_NAME: c} if c else {}
+
+
+def test_flagged_matches_a_session_flag(config_override, fresh_ip):
+    """A flag on the cookie, read by a rule on the next request.
+
+    This could not work at all until flagged= learned to read the
+    session: it probed the address table and nothing else, so a mark
+    written to a cookie was invisible to every rule. The tier decision
+    had always read the union of both subjects; only the rule language
+    was half-blind.
+    """
+    trap = "/session-flag-trap"
+    probe = "/session-flag-probe"
+    conf = _conf(
+        "    <BotShieldRule mark>\n"
+        f"        BotShieldPath          {trap}\n"
+        "        BotShieldFlagSession   honeypot_hit\n"
+        "        BotShieldRespond       404\n"
+        "    </BotShieldRule>\n"
+        "    <BotShieldRule act>\n"
+        f"        BotShieldPath      {probe}\n"
+        "        BotShieldFlagged   honeypot_hit\n"
+        "        BotShieldRespond   451\n"
+        "    </BotShieldRule>"
+    )
+    with config_override(r"BotShieldEnabled\s+On", conf,
+                         render=False, count=1):
+        marked = client.get(trap, xff=fresh_ip)
+        ck = _carry(marked)
+        assert ck, "the trap response should carry the resealed cookie"
+        after = client.get(probe, xff=fresh_ip, cookies=ck).status_code
+        # Same address, no cookie: the mark is on the session, so this
+        # must not see it. Without this the test would pass on an
+        # address write just as well.
+        bare = client.get(probe, xff=fresh_ip).status_code
+    assert after == 451, "the rule must see the flag the cookie carries"
+    assert bare != 451, (
+        "a session flag must not leak to a cookieless request from the "
+        "same address -- that is the whole reason the subject exists"
+    )
+
+
+def test_an_unverified_cookie_asserts_nothing(config_override, fresh_ip):
+    """The gate. Session flags are read only from an authenticated rep
+    block, because the GCM tag is what makes it trustworthy -- a client
+    that could hand itself a flag could also hand itself a credit."""
+    probe = "/session-flag-probe"
+    conf = _conf(
+        "    <BotShieldRule act>\n"
+        f"        BotShieldPath      {probe}\n"
+        "        BotShieldFlagged   app_verified_human\n"
+        "        BotShieldRespond   451\n"
+        "    </BotShieldRule>"
+    )
+    with config_override(r"BotShieldEnabled\s+On", conf,
+                         render=False, count=1):
+        got = client.get(probe, xff=fresh_ip,
+                         cookies={COOKIE_NAME: "not-a-real-cookie"}
+                         ).status_code
+    assert got != 451, "a forged cookie must assert no flags"
+
+
+def test_matching_and_rewriting_a_session_flag_is_refused(
+    config_override,
+):
+    """Same loop the address side already refused, one subject over: a
+    rule that matches a session flag and rewrites it reseals the flag
+    on every matching request, so it lasts as long as the client keeps
+    the cookie."""
+    conf = _conf(
+        "    <BotShieldRule loop>\n"
+        "        BotShieldPath          /loop-probe\n"
+        "        BotShieldFlagged       honeypot_hit\n"
+        "        BotShieldFlagSession   honeypot_hit\n"
+        "        BotShieldRespond       451\n"
+        "    </BotShieldRule>"
+    )
+    with pytest.raises(Exception) as exc_info:
+        with config_override(r"BotShieldEnabled\s+On", conf,
+                             render=False, count=1):
+            pass
+    assert "returned non-zero exit status" in str(exc_info.value)

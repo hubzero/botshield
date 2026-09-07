@@ -106,6 +106,13 @@ extern "C" {
  * so the policy walk can match on it -- the walk runs after cookie
  * verification, so the answer is known by then. "1" or "0". */
 #define BS_CK_SOLVED_NOTE     "botshield-cookie-solved"
+/* Flags carried in the cookie's authenticated rep block, as hex, for
+ * rules to read via flagged=. Published only when have_prior_rep --
+ * the GCM tag is what makes the block trustworthy, and an
+ * unauthenticated cookie must not assert a flag about its own bearer
+ * in either direction. Absent means "no trustworthy session flags",
+ * which is what an unverified cookie and no cookie both mean. */
+#define BS_CK_FLAGS_NOTE      "botshield-cookie-flags"
 #define BS_CK_STATE_VERIFIED  "verified"
 #define BS_CK_STATE_MISSING   "missing"
 #define BS_CK_STATE_INVALID   "invalid"

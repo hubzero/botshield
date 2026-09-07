@@ -971,7 +971,7 @@ all of policy, which is where the tier has always been chosen. Use
 gate *that rule's* match; use `BotShieldChallengeAtLeast` when you want
 it to choose a challenge tier.
 
-#### `flagged=` — does this address already carry a flag
+#### `flagged=` — does this client already carry a flag
 
 ```apache
 <BotShieldRule escalate>
@@ -980,6 +980,23 @@ it to choose a challenge tier.
     BotShieldChallenge captcha
 </BotShieldRule>
 ```
+
+**Both subjects.** A flag matches whether it was written to the
+address with `BotShieldFlagIP` or to the session with
+`BotShieldFlagSession`. That matters most for the three `app_*`
+credits, which are refused on an address and so exist nowhere but a
+cookie — a rule could not see them at all until this read both.
+
+A session flag counts only from a cookie whose authentication tag
+verifies. That is the same gate the tier decision uses, and the reason
+for it is symmetrical: a client that could hand itself a flag could
+also hand itself a credit.
+
+The address half is re-probed per rule, so a rule sees flags written
+by rules above it in the same walk. The session half is what the
+client presented: a `BotShieldFlagSession` written earlier in this
+same walk is staged for the response and is not visible until the next
+request, because the cookie carrying it has not been resealed yet.
 
 Flag names are the registered set: `honeypot_hit`, `scanner_probe`,
 `fake_bot`, `pow_fail_streak`, `app_verified_human`,

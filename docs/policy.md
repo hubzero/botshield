@@ -468,7 +468,7 @@ purpose. They are the only flags the module writes on its own, and a
 starter action for them would be a policy nobody asked for applied to
 every client who ever overspent a budget. What they should mean is a
 rule you write; see
-[directives](directives.md#flagged--does-this-address-already-carry-a-flag).
+[directives](directives.md#flagged--does-this-client-already-carry-a-flag).
 
 Trust signals (credits) are score-only by design; no credit ever
 forces tier *down*. A verified-human flag can't unlock a request

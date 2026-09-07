@@ -1493,14 +1493,21 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
      * Same-rule only. The same hazard across two rules needs the
      * config read as a graph, and claiming a complete check would be
      * worse than this one being honestly partial. */
-    if (e->flagged_bit && (e->action.flag_ip & e->flagged_bit)) {
+    if (e->flagged_bit
+        && ((e->action.flag_ip | e->action.flag_session)
+            & e->flagged_bit)) {
+        const int ip_side = (e->action.flag_ip & e->flagged_bit) != 0;
         return apr_psprintf(cmd->pool,
-            "%s '%s': matches flagged= and writes the same flag, which "
-            "refreshes its expiry on every matching request -- the "
-            "address never ages out of it, and expiry is the only "
-            "recovery for a client that cannot solve. Write the flag "
-            "from the rule that detects the behaviour; this one does "
-            "not need to see it already set.", D, name);
+            "%s '%s': matches flagged= and writes the same flag to the "
+            "%s, which renews it on every matching request -- %s, and "
+            "expiry is the only recovery for a client that cannot "
+            "solve. Write the flag from the rule that detects the "
+            "behaviour; this one does not need to see it already "
+            "set.", D, name,
+            ip_side ? "address" : "session",
+            ip_side ? "so the address never ages out of it"
+                    : "so the session carries it as long as the client "
+                      "keeps the cookie");
     }
 
     /* A rule with no condition matches every request, which at

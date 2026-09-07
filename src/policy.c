@@ -387,16 +387,41 @@ int bs_check_policy(request_rec *r)
                     continue;
             }
             if (t->flagged_bit) {
-                /* A fresh probe rather than a value captured before
-                 * the walk. Rules above this one may have written to
-                 * the table, and this reads what they did -- the same
-                 * contract BotShieldScoreAtLeast has for accumulators.
-                 * The cost is one hash probe per rule that asks. */
-                unsigned char fip[16];
-                apr_uint32_t  fbits = 0;
-                if (!bs_parse_client_ip(r->useragent_ip, fip)) continue;
-                bs_mask_ipv6_prefix(fip, scfg->ipv6_prefix_bits);
-                bs_flagged_ip_lookup(fip, &fbits, scfg->ns_id);
+                /* The union of both subjects, which is what the tier
+                 * decision has always read. Rules saw only the address
+                 * until now, so a flag written to a cookie was
+                 * invisible to them -- including the three app_*
+                 * credits, which are refused on an address and so can
+                 * exist nowhere else.
+                 *
+                 * The address is a fresh probe rather than a value
+                 * captured before the walk: rules above this one may
+                 * have written to the table, and this reads what they
+                 * did, the same contract BotShieldScoreAtLeast has for
+                 * accumulators. The cost is one hash probe per rule
+                 * that asks.
+                 *
+                 * The session half is the note published at cookie
+                 * verification, so it reflects what the client
+                 * presented. A session flag written by a rule earlier
+                 * in this same walk is staged for the response and is
+                 * not visible here -- the cookie it will ride on has
+                 * not been resealed yet. */
+                apr_uint32_t fbits = 0;
+                const char *sflags = apr_table_get(r->notes,
+                                                   BS_CK_FLAGS_NOTE);
+                if (sflags) {
+                    fbits = (apr_uint32_t)strtoul(sflags, NULL, 16);
+                }
+                if (!(fbits & t->flagged_bit)) {
+                    unsigned char fip[16];
+                    apr_uint32_t ipbits = 0;
+                    if (!bs_parse_client_ip(r->useragent_ip, fip))
+                        continue;
+                    bs_mask_ipv6_prefix(fip, scfg->ipv6_prefix_bits);
+                    bs_flagged_ip_lookup(fip, &ipbits, scfg->ns_id);
+                    fbits |= ipbits;
+                }
                 if (!(fbits & t->flagged_bit)) continue;
             }
             if (t->ck_pred >= 0) {
