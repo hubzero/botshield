@@ -548,11 +548,12 @@ def test_app_feedback_can_mark_the_address(config_override, log_slice):
 def test_the_retired_tag_is_refused(config_override):
     """<BotShieldFeedbackTrigger> is gone.
 
-    Registered rather than simply dropped, so the error names the
-    replacement. Apache's own answer to an unregistered section is
+    It held a migration stub naming the replacement until 2026-09-07,
+    when the slot was dropped; the failure is now Apache's generic
     "Invalid command, perhaps misspelled or defined by a module not
-    included", which sends an operator looking for a build problem
-    instead of a rename.
+    included". What this asserts either way is that the old spelling
+    does not quietly work -- the message is a courtesy, the refusal is
+    the contract.
     """
     with pytest.raises(Exception) as exc_info:
         with config_override(

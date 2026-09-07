@@ -2226,14 +2226,24 @@ the linker on Apache symbols.
 
 ### Directive table
 
-`bs_cmds[]` registers 96 directives. Retired spellings fall into two
-groups, and which group a name is in decides what an old config sees.
-`BotShieldTrigger`, `BotShieldFlagTrigger` and
-`BotShieldFeedbackTrigger` still occupy table slots pointing at
-`bs_*_retired` handlers, so naming one fails with a message saying
-what to write instead. `BotShieldPathTrigger` has no such stub, so it
-fails with Apache's generic "Invalid command" and the operator gets no
-migration note.
+`bs_cmds[]` registers 91 directives. No retired *family* keeps a
+table slot any more: `BotShieldPathTrigger`, `BotShieldTrigger`,
+`BotShieldFlagTrigger` and `BotShieldFeedbackTrigger` all fail with
+Apache's generic "Invalid command, perhaps misspelled or defined by a
+module not included".
+
+The three trigger families held migration stubs until 2026-09-07, and
+dropping them was a deliberate trade rather than a tidy-up: the stub
+message named the replacement, and the generic error instead sends a
+reader looking for a build or LoadModule problem. What paid for it is
+that no config on this deployment -- the only one -- has named those
+spellings since 2026-09-06, so the audience for the message was empty
+while the slots were not.
+
+One retired spelling does keep a handler. `bs_flat_trigger_retired` is
+generic over `cmd->cmd->name` and still backs the one-line key=value
+form of `BotShieldRule`, which is a live directive whose flat form is
+retired -- a different case from a family that is gone entirely.
 The family groupings below summarize the surface — the canonical
 per-directive spec (handler, arg count, scope flags, help text) is
 the `bs_cmds[]` table at `src/botshield.c:213`.

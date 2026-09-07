@@ -541,6 +541,11 @@ def test_removed_flagtrigger_family_is_refused(config_override):
     the family added over that was its own vocabulary for the same
     actions and a `reset` keyword for a merge order rules settle by
     declaration.
+
+    The migration stub that named the replacement was dropped
+    2026-09-07, so this now fails with Apache's generic "Invalid
+    command" rather than a rename note. The assertion is unchanged:
+    what matters is that the spelling is refused, not how politely.
     """
     with pytest.raises(Exception) as exc_info:
         with config_override(

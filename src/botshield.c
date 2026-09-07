@@ -143,58 +143,10 @@ int bs_bot_name_valid(const char *s)
  * carries the work; what differs between families is only which setter
  * receives the tokens it builds. */
 
-/* Registered rather than dropped so the error names the shape that
- * replaced it, instead of Apache's "Invalid command, perhaps
- * misspelled or defined by a module not included". */
-static const char *bs_open_trigger_retired(cmd_parms *cmd, void *dconf,
-                                          const char *arg)
-{
-    (void)dconf; (void)arg;
-    return apr_psprintf(cmd->pool,
-        "<BotShieldTrigger> is gone; write <BotShieldRule name> in the "
-        "same container. A rule declared inside <Location>, "
-        "<Directory> or <Files> needs no match key -- Apache has "
-        "already matched, and the container is the condition, which "
-        "is all this directive ever was.");
-}
-
-/* Registered rather than dropped so the error names the shape that
- * replaced it. */
-static const char *bs_open_flagtrigger_retired(cmd_parms *cmd,
-                                          void *dconf, const char *arg)
-{
-    (void)dconf; (void)arg;
-    return apr_psprintf(cmd->pool,
-        "<BotShieldFlagTrigger> is gone; write <BotShieldRule name> "
-        "with BotShieldFlagged <flag>. Its three actions are rule "
-        "actions: action=score is BotShieldScore, action=tier_floor "
-        "is BotShieldChallenge, action=block is BotShieldRespond. "
-        "`reset` has no equivalent -- rules settle by declaration "
-        "order.");
-}
-
 static const char *bs_open_feedback(cmd_parms *cmd, void *dconf,
                                           const char *arg)
 {
     return bs_section_trigger(cmd, dconf, arg, "BotShieldFeedback", bs_set_feedback);
-}
-
-/* The old tag. Registered rather than simply dropped so the error
- * names the replacement -- an operator who hits this has a working
- * config in front of them, and Apache's own "Invalid command,
- * perhaps misspelled or defined by a module not included" sends them
- * looking for a build problem instead. */
-static const char *bs_open_feedbacktrigger_retired(cmd_parms *cmd,
-                                          void *dconf, const char *arg)
-{
-    (void)dconf; (void)arg;
-    return apr_psprintf(cmd->pool,
-        "<BotShieldFeedbackTrigger> is gone; write <BotShieldFeedback> "
-        "and move the event into the block: the tag name is a label "
-        "now, like a rule's, and BotShieldEvent <name> is the "
-        "condition. It was never a trigger -- it runs after the "
-        "response is built and matches a signed header, not a "
-        "request.");
 }
 
 
@@ -561,14 +513,6 @@ static const command_rec bs_cmds[] = {
                  "graceful-shutdown save runs). Range when non-zero: "
                  "30..86400. Requires mod_watchdog to be loaded; otherwise "
                  "degrades to shutdown-only with a NOTICE."),
-    AP_INIT_RAW_ARGS("<BotShieldTrigger", bs_open_trigger_retired,
-                 NULL, RSRC_CONF | ACCESS_CONF,
-                 "Removed. Write <BotShieldRule> in the same "
-                 "container."),
-    AP_INIT_RAW_ARGS("<BotShieldFlagTrigger",
-                 bs_open_flagtrigger_retired, NULL, RSRC_CONF,
-                 "Removed. Write <BotShieldRule> with "
-                 "BotShieldFlagged."),
     AP_INIT_RAW_ARGS("<BotShieldFeedback", bs_open_feedback, NULL, RSRC_CONF,
                  "Open a BotShieldFeedback block: what a signed "
                  "application event means. Takes a label; "
@@ -577,10 +521,6 @@ static const command_rec bs_cmds[] = {
                  "remember about the client. Runs on the response "
                  "path, so it cannot direct the response -- flags are "
                  "what the next request reads."),
-    AP_INIT_RAW_ARGS("<BotShieldFeedbackTrigger",
-                 bs_open_feedbacktrigger_retired, NULL, RSRC_CONF,
-                 "Removed. Write <BotShieldFeedback> with "
-                 "BotShieldEvent inside it."),
     AP_INIT_RAW_ARGS("<BotShieldRule", bs_open_rule, NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "Open a BotShieldRule block. Takes the rule name; every "
@@ -594,13 +534,6 @@ static const command_rec bs_cmds[] = {
                  "</BotShieldMatch>. Conditions only -- actions belong "
                  "on the rules that name the set. Define a set above "
                  "the rules that use it."),
-    AP_INIT_TAKE_ARGV("BotShieldTrigger", bs_flat_trigger_retired, NULL,
-                 RSRC_CONF | ACCESS_CONF,
-                 "Removed. Write <BotShieldRule name> in the same "
-                 "Apache container: a rule declared inside "
-                 "<Location>, <Directory>, <Files> or <If> needs no "
-                 "match key, because Apache has already matched and "
-                 "the container is the condition."),
     /* E1 — Allow family */
     AP_INIT_TAKE_ARGV("BotShieldClassify", bs_set_classify, NULL,
                  RSRC_CONF,
@@ -847,12 +780,6 @@ static const command_rec bs_cmds[] = {
                  "(e.g., dev+prod for one logical app, or api+www "
                  "subdomains). Strings up to 128 chars; hashed to a "
                  "32-bit ns_id and stored in each SHM slot."),
-    AP_INIT_TAKE_ARGV("BotShieldFlagTrigger",
-                 bs_flat_trigger_retired, NULL, RSRC_CONF,
-                 "Removed. A rule matching BotShieldFlagged does what "
-                 "this did: BotShieldScore for action=score, "
-                 "BotShieldChallenge for action=tier_floor, "
-                 "BotShieldRespond for action=block."),
     /* E4 — cookie triggers */
     AP_INIT_TAKE1("BotShieldSessionCookieName",
                  bs_set_session_cookie_name, NULL, RSRC_CONF,
