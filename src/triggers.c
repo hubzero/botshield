@@ -132,7 +132,6 @@ static const char *bs_trigger_family_dname(bs_trigger_family fam)
     switch (fam) {
     case BS_TFAMILY_REQUEST:  return "BotShieldRule";
     case BS_TFAMILY_FEEDBACK: return "BotShieldFeedbackTrigger";
-    case BS_TFAMILY_LOAD:     return "BotShieldLoadTrigger";
     case BS_TFAMILY_FLAG:     return "BotShieldFlagTrigger";
     case BS_TFAMILY_SCOPE:    return "BotShieldTrigger";
     }
@@ -178,16 +177,6 @@ static void bs_trigger_action_init(bs_trigger_family fam,
         a->flag_bit    = 0;
         a->ttl_sec     = 0;
         break;
-    case BS_TFAMILY_LOAD:
-        /* Load triggers default to pass-with-score-shaping. The
-         * common case is "add some penalty/credit when warm/hot";
-         * less common is "outright 403 expensive paths under hot."
-         * Both are explicit operator decisions via status=. No
-         * flag — load is a global state, not per-IP behavior. */
-        a->status_code = BS_TRIGGER_STATUS_PASS;
-        a->flag_bit    = 0;
-        a->ttl_sec     = 0;
-        break;
     case BS_TFAMILY_FLAG:
         /* Flag triggers do not use bs_trigger_action — they have
          * their own bs_flag_trigger_entry shape with different
@@ -228,8 +217,6 @@ static const char *bs_trigger_known_keys(bs_trigger_family fam)
          * write" — meaningful for staging a feedback rule before
          * mutating server state. */
         return "flagip, flagsession, logas, accesslog, mode";
-    case BS_TFAMILY_LOAD:
-        return "respond, logas, accesslog, score, mode";
     case BS_TFAMILY_SCOPE:
         return "respond, nochallenge, challenge, redirect, logas, "
                "accesslog, flagip, flagsession, score, mode";
@@ -528,13 +515,6 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
             "removed; write BotShieldChallenge <tier>, which needs no "
             "BotShieldRespond nochallenge alongside it.", dname);
     } else if (BS_AK("redirect")) {
-        if (fam == BS_TFAMILY_LOAD) {
-            return apr_psprintf(pool,
-                "%s: redirect= is not supported on this family "
-                "(load is global state; redirect a request from a "
-                "BotShieldRule, which knows which request it is)",
-                dname);
-        }
         if (!*val) {
             return apr_psprintf(pool,
                 "%s: redirect= requires a URL", dname);
@@ -587,14 +567,6 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
                 dname, val);
         }
     } else if (BS_AK("flag")) {
-        if (fam == BS_TFAMILY_LOAD) {
-            return apr_psprintf(pool,
-                "%s: flag= is not supported on load triggers "
-                "(load is global state; flagging individual IPs "
-                "because the host is hot doesn't fit the model — "
-                "use a cookie or env trigger if you want per-IP "
-                "memory tied to a load condition)", dname);
-        }
         const char *perr = NULL;
         apr_uint32_t bits = bs_parse_flag_names(pool, val, &perr);
         if (perr) return apr_psprintf(pool,
@@ -658,12 +630,6 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
         }
         (void)bits;
     } else if (BS_AK("ttl")) {
-        if (fam == BS_TFAMILY_LOAD) {
-            return apr_psprintf(pool,
-                "%s: ttl= has no effect on load triggers (no flag "
-                "is written, so there's nothing for ttl to govern)",
-                dname);
-        }
         char *end = NULL;
         long t = strtol(val, &end, 10);
         if (!end || *end || t < 0 || t > 86400 * 30) {
@@ -1701,93 +1667,6 @@ const char *bs_set_feedback_trigger(cmd_parms *cmd, void *dconf,
     return NULL;
 }
 
-/* E11.2 — BotShieldLoadTrigger <name> <load-match> [key=value ...].
- *
- * load-match shapes:
- *   state=normal   (exact match — typically only for tests/docs)
- *   state=warm
- *   state=hot
- *   state>=warm    (matches warm OR hot)
- *   state>=hot     (matches hot only — equivalent to state=hot but
- *                   reads more naturally in operator config when
- *                   paired with state>=warm rules)
- *
- * First-match-wins within the family (load triggers are alternative-
- * specificity cases, not layered reputation). Action keys: status,
- * log, penalty, credit. flag/ttl/redirect rejected at parse time —
- * load is a global signal, not per-IP behavior to memorize. */
-const char *bs_set_load_trigger(cmd_parms *cmd, void *dconf,
-                                       int argc, char *const argv[])
-{
-    (void)dconf;
-    if (argc < 2) {
-        return "BotShieldLoadTrigger: expects <name> <load-match> "
-               "[key=value ...]";
-    }
-    const char *name  = argv[0];
-    const char *match = argv[1];
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    if (!bs_bot_name_valid(name)) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldLoadTrigger: name '%s' must be [a-z0-9-]{1,32}",
-            name);
-    }
-
-    int pred_kind;
-    const char *state_str;
-    if (!strncmp(match, "state>=", 7)) {
-        pred_kind = BS_LP_GE;
-        state_str = match + 7;
-    } else if (!strncmp(match, "state=", 6)) {
-        pred_kind = BS_LP_EQ;
-        state_str = match + 6;
-    } else {
-        return apr_psprintf(cmd->pool,
-            "BotShieldLoadTrigger: unrecognized load-match '%s' "
-            "(expected state=<level> or state>=<level> where "
-            "<level> is normal|warm|hot)", match);
-    }
-    bs_load_state target;
-    if      (!strcasecmp(state_str, "normal")) target = BS_LOAD_NORMAL;
-    else if (!strcasecmp(state_str, "warm"))   target = BS_LOAD_WARM;
-    else if (!strcasecmp(state_str, "hot"))    target = BS_LOAD_HOT;
-    else {
-        return apr_psprintf(cmd->pool,
-            "BotShieldLoadTrigger: state '%s' must be one of "
-            "normal|warm|hot", state_str);
-    }
-
-    bs_load_trigger_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
-    e->name         = apr_pstrdup(cmd->pool, name);
-    e->pred_kind    = pred_kind;
-    e->target_state = target;
-    bs_trigger_action_init(BS_TFAMILY_LOAD, &e->action);
-
-    for (int i = 2; i < argc; i++) {
-        const char *err = bs_parse_trigger_action_key(cmd->pool,
-            BS_TFAMILY_LOAD, argv[i], &e->action);
-        if (err) return err;
-    }
-    {
-        const char *err = bs_finalize_trigger_action(cmd->pool,
-            BS_TFAMILY_LOAD, &e->action);
-        if (err) return err;
-    }
-
-    /* Upsert-by-name. */
-    for (int i = 0; i < scfg->load_triggers->nelts; i++) {
-        bs_load_trigger_entry *ex = APR_ARRAY_IDX(
-            scfg->load_triggers, i, bs_load_trigger_entry *);
-        if (strcmp(ex->name, e->name) == 0) {
-            APR_ARRAY_IDX(scfg->load_triggers, i,
-                          bs_load_trigger_entry *) = e;
-            return NULL;
-        }
-    }
-    *(bs_load_trigger_entry **)apr_array_push(scfg->load_triggers) = e;
-    return NULL;
-}
 
 /* --- BotShieldTrigger setter --- *
  *

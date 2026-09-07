@@ -259,8 +259,6 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
                                              add->request_triggers);
     out->feedback_triggers = bs_merge_rule_array(p, base->feedback_triggers,
                                                  add->feedback_triggers);
-    out->load_triggers     = bs_merge_rule_array(p, base->load_triggers,
-                                                 add->load_triggers);
     out->flag_triggers     = bs_merge_rule_array(p, base->flag_triggers,
                                                  add->flag_triggers);
     /* session_names: concatenate base + add, drop dups. Small lists,
@@ -421,7 +419,6 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     /* E15 — 0 means "inherit / use default". */
     scfg->request_triggers         = apr_array_make(p, 4, sizeof(void *));
     scfg->feedback_triggers = apr_array_make(p, 4, sizeof(void *));
-    scfg->load_triggers     = apr_array_make(p, 4, sizeof(void *));
     scfg->flag_triggers     = apr_array_make(p, 8, sizeof(void *));
     /* Curated session-cookie-name defaults. Kept deliberately
      * short; long auto-lists turn `cookies=session` into a loose

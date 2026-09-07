@@ -161,11 +161,6 @@ static const char *bs_open_feedbacktrigger(cmd_parms *cmd, void *dconf,
     return bs_section_trigger(cmd, dconf, arg, "BotShieldFeedbackTrigger", bs_set_feedback_trigger);
 }
 
-static const char *bs_open_loadtrigger(cmd_parms *cmd, void *dconf,
-                                          const char *arg)
-{
-    return bs_section_trigger(cmd, dconf, arg, "BotShieldLoadTrigger", bs_set_load_trigger);
-}
 
 static const char *bs_open_match(cmd_parms *cmd, void *dconf,
                                           const char *arg)
@@ -542,10 +537,6 @@ static const command_rec bs_cmds[] = {
                  "Open a BotShieldFeedbackTrigger block. Takes the rule name; every "
                  "setting is a BotShield directive on its own line "
                  "until </BotShieldFeedbackTrigger>."),
-    AP_INIT_RAW_ARGS("<BotShieldLoadTrigger", bs_open_loadtrigger, NULL, RSRC_CONF,
-                 "Open a BotShieldLoadTrigger block. Takes the rule name; every "
-                 "setting is a BotShield directive on its own line "
-                 "until </BotShieldLoadTrigger>."),
     AP_INIT_RAW_ARGS("<BotShieldRule", bs_open_rule, NULL, RSRC_CONF,
                  "Open a BotShieldRule block. Takes the rule name; every "
                  "setting is a BotShield directive on its own line "
@@ -850,35 +841,6 @@ static const command_rec bs_cmds[] = {
                  "PHPSESSID, JSESSIONID, ASP.NET_SessionId, "
                  "session_id, connect.sid, laravel_session. Each "
                  "invocation appends one name; case-insensitive."),
-    AP_INIT_TAKE_ARGV("BotShieldLoadTrigger",
-                 bs_flat_trigger_retired, NULL, RSRC_CONF,
-                 "Trigger that fires based on the cached load state "
-                 "(see BotShieldLoadStateFile / E11). Args: <name> "
-                 "<load-match> [key=value ...]. load-match is one of "
-                 "state=<level> or state>=<level> where <level> is "
-                 "normal|warm|hot. Keys: respond=<code|nochallenge>, "
-                 "log=<tag>, accesslog=on|off, score=\"<name> +n\". "
-                 "flag/ttl/redirect rejected — load is global state, not "
-                 "per-IP behavior. First-match-wins."),
-    /* E3 — path-based triggers */
-    /* BotShieldRule — the name this family should have had, and now
-     * the only one it answers to.
-     *
-     * It was BotShieldRequestTrigger until 2026-09-05, deprecated then
-     * and removed the next day once it turned out no config anywhere
-     * used the old spelling. The family stopped being about
-     * requests-versus-something-else once it grew ua=, ipspec=,
-     * query=, cookies=, exists=, solved= and minload=: it is simply
-     * "match a request on any combination of its properties and act",
-     * which is what a rule is.
-     *
-     * The two match keys that make a load-shed ladder expressible
-     * without arithmetic:
-     *   solved=yes|no        did this client pass a challenge
-     *   minload=normal|warm|hot   fires at that load state or above
-     * Combined with ua=@bot / @search / @ai-train / @fake-bot, a shed
-     * ladder reads as one line per rung with no score to reason about.
-     */
     AP_INIT_TAKE_ARGV("BotShieldRule",
                  bs_flat_trigger_retired, NULL, RSRC_CONF,
                  "Match a request on any combination of its properties "

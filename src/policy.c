@@ -249,39 +249,10 @@ int bs_check_policy(request_rec *r)
                                                &botshield_module);
     if (!scfg) return OK;
 
-    /* The cookie and env family walks stood here, between the rate
-     * limiter and the load triggers. Their predicates are conditions on
-     * a rule now -- BotShieldCookie, BotShieldEnv -- matched through
-     * the same code these walks used.
-     *
-     * Two properties went with them rather than moving. A cookie
-     * trigger accumulated on a pass and only short-circuited on a
-     * non-pass, and an env trigger needed an ap_is_initial_req gate so
-     * an internal redirect did not apply its action twice. Both are
-     * properties of a walk that applies actions; a condition only
-     * reads, so neither has anything left to describe. */
-    /* E11.2 — load triggers. Match on the global cached load state
-     * (BS_LOAD_NORMAL/WARM/HOT). First-match-wins; alternative-
-     * specificity rules (state>=warm vs state=hot) are stacked by
-     * declaration order with the more specific one declared first. */
-    if (scfg->load_triggers && scfg->load_triggers->nelts > 0) {
-        bs_load_state cur = bs_load_current();
-        for (int i = 0; i < scfg->load_triggers->nelts; i++) {
-            bs_load_trigger_entry *t = APR_ARRAY_IDX(
-                scfg->load_triggers, i, bs_load_trigger_entry *);
-            int matched = 0;
-            switch (t->pred_kind) {
-            case BS_LP_EQ: matched = (cur == t->target_state); break;
-            case BS_LP_GE: matched = (cur >= t->target_state); break;
-            }
-            if (!matched) continue;
-            bs_trigger_exec_outcome o = bs_apply_trigger_action(
-                r, scfg, BS_TFAMILY_LOAD, &t->action,
-                "loadtrigger", t->name);
-            if (o == BS_TEXEC_STATUS) return t->action.status_code;
-            if (o == BS_TEXEC_PASS_BREAK) break;
-        }
-    }
+    /* The load family walked here, ahead of the rules. Its
+     * predicate is BotShieldMinLoad on a rule now, so a shed
+     * ladder is rules in declaration order rather than one walk
+     * short-circuiting another. */
 
     /* BotShieldTrigger — per-Apache-scope triggers. Apache's
      * scope-match has already evaluated; walk the merged dcfg

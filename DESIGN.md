@@ -1347,7 +1347,11 @@ header processing.
 
 #### Load triggers (E11.2)
 
-`BotShieldLoadTrigger <name> <load-match> [key=value ...]`. Predicate
+`BotShieldMinLoad <level>` inside a `<BotShieldRule>`. It was the
+`BotShieldLoadTrigger` family until 2026-09-06, when the predicate
+moved into the rule -- shedding is almost always "this kind of
+client at this load", which needs the other conditions beside it.
+Predicate
 kinds: `state=normal|warm|hot` or `state>=normal|warm|hot`. The
 match consumes the cached load state via `bs_load_current()` (lockless
 atomic read on `bs_shm.header->load_state`).
@@ -1784,7 +1788,7 @@ seconds (default 1, range 1..60) under mod_watchdog. Each tick:
 ### Lockless reader
 
 `bs_load_current()` is `__atomic_load_n(&header->load_state,
-__ATOMIC_RELAXED)`, called from E11.2's `BotShieldLoadTrigger`
+__ATOMIC_RELAXED)`, called from the `minload=` rule condition
 predicate matcher in `bs_check_policy`. No scoreboard scans on the
 hot path.
 
@@ -2215,7 +2219,7 @@ the `bs_cmds[]` table at `src/botshield.c:142`.
 | UA classification (E1) | `BotShieldClassify`, `BotShieldAllowBot`, `BotShieldAllowRangesRefreshInterval`, `BotShieldBotDirectory`, `BotShieldBotDirectoryRefreshInterval`, `BotShieldBrowserTemplates`, `BotShieldBrowserTemplatesRefreshInterval` |
 | Policy (E2.1 / E9) | `BotShieldRateLimit`, `BotShieldBotRateLimit`, `BotShieldRateLimitEscalate` |
 | Robots (E2.2) | `BotShieldRobotsTxt`, `BotShieldRobotsRefreshInterval`, `BotShieldRobotsWildcardScope` |
-| Triggers | `BotShieldTrigger` (per-scope), `BotShieldRule` (E3, formerly BotShieldPathTrigger, and since 2026-09-06 also carrying the E4 cookie and E6 env predicates), `BotShieldFeedbackTrigger` (E7.3), `BotShieldLoadTrigger` (E11.2), `BotShieldFlagTrigger` (E14), `BotShieldSessionCookieName` (E4) |
+| Triggers | `BotShieldTrigger` (per-scope), `BotShieldRule` (E3, formerly BotShieldPathTrigger; since 2026-09-06 also carrying the E4 cookie, E6 env, E11.2 load and E14 flag predicates), `BotShieldFeedbackTrigger` (E7.3), `BotShieldFlagTrigger` (E14, action half), `BotShieldSessionCookieName` (E4) |
 | Safeguard (E10) | `BotShieldSafeguard`, `BotShieldSafeguardThreshold`, `BotShieldSafeguardWindow`, `BotShieldSafeguardTTL`, `BotShieldSafeguardRedirectURL` |
 | Load (E11) | `BotShieldLoadStateFile`, `BotShieldLoadRefreshInterval`, `BotShieldLoadWarmThreshold`, `BotShieldLoadHotThreshold` |
 | Multi-vhost (E13) | `BotShieldShareScope` |

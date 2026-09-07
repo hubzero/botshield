@@ -58,7 +58,6 @@ struct bs_server_cfg;
 typedef enum {
     BS_TFAMILY_REQUEST = 0,
     BS_TFAMILY_FEEDBACK,
-    BS_TFAMILY_LOAD,
     BS_TFAMILY_FLAG,
     BS_TFAMILY_SCOPE,
 } bs_trigger_family;
@@ -363,18 +362,6 @@ typedef struct {
     bs_trigger_action  action;
 } bs_env_trigger_entry;
 
-/* Load predicate: state==target (EQ) or state>=target (GE). */
-enum bs_load_pred_kind {
-    BS_LP_EQ = 0,
-    BS_LP_GE,
-};
-
-typedef struct {
-    const char        *name;
-    int                pred_kind;     /* enum bs_load_pred_kind */
-    bs_load_state      target_state;
-    bs_trigger_action  action;
-} bs_load_trigger_entry;
 
 /* E7.3 — feedback trigger entry. One per BotShieldFeedbackTrigger
  * directive; lookup-by-event-name. */
@@ -519,8 +506,6 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
 const char *bs_set_request_trigger    (cmd_parms *cmd, void *dconf,
                                     int argc, char *const argv[]);
 const char *bs_set_feedback_trigger(cmd_parms *cmd, void *dconf,
-                                    int argc, char *const argv[]);
-const char *bs_set_load_trigger    (cmd_parms *cmd, void *dconf,
                                     int argc, char *const argv[]);
 
 /* E4 — BotShieldSessionCookieName <name>. Each invocation appends a

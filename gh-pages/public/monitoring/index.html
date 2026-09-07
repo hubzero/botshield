@@ -231,7 +231,8 @@ BotShieldFpmStatsFile  /run/botshield/fpm-load.stats
 <p>All three are server scope. Inside a <code>&lt;VirtualHost&gt;</code> they are a
 config-parse error rather than a silent discard, but the rule is easier
 to follow than to debug. The load state drives
-<code>BotShieldLoadTrigger</code>, covered in <a href="../policy/index.html#load-triggers">Policy</a>.</p>
+<code>BotShieldMinLoad</code> on a rule, covered in
+<a href="../policy/index.html#load-conditions">Policy</a>.</p>
 <h2 id="data-refresh">Data refresh</h2>
 <p>One timer, one entry point, three datasets, each of which the module
 re-reads when the file's mtime changes. That is the point of running

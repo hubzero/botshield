@@ -115,8 +115,7 @@
 <li class="toc__item toc__item--level-3"><a href="#cookie-conditions">Cookie conditions</a></li>
 <li class="toc__item toc__item--level-3"><a href="#environment-conditions">Environment conditions</a></li>
 <li class="toc__item toc__item--level-3"><a href="#feedback-triggers">Feedback triggers</a></li>
-<li class="toc__item toc__item--level-3"><a href="#load-triggers">Load triggers</a></li>
-<li class="toc__item toc__item--level-2"><a href="#flag-trigger-family">Flag-trigger family</a></li>
+<li class="toc__item toc__item--level-3"><a href="#load-conditions">Load conditions</a></li>
 <li class="toc__item toc__item--level-3"><a href="#no-compiled-in-defaults">No compiled-in defaults</a></li>
 <li class="toc__item toc__item--level-3"><a href="#per-apache-scope-triggers-botshieldtrigger">Per-Apache-scope triggers — `BotShieldTrigger`</a></li>
 <li class="toc__item toc__item--level-3"><a href="#nochallenge-waives-the-challenge-not-the-policy">`nochallenge` waives the challenge, not the policy</a></li>
@@ -358,7 +357,7 @@ the same shared action keys.</p>
 </tr>
 <tr>
 <td>Load</td>
-<td><code>BotShieldLoadTrigger</code></td>
+<td><code>BotShieldMinLoad</code> inside a rule</td>
 <td>Global load_state</td>
 </tr>
 </tbody>
@@ -495,84 +494,38 @@ future-request state (the flagged-IP write). Both
 <code>BotShieldEnabled LogOnly</code> and per-trigger <code>mode=observe</code> apply —
 either gates the filter into logging <code>feedbacktrigger:&lt;event&gt;: observe</code> and skipping the SHM mutation. See
 <a href="../staging/index.html">staging</a>.</p>
-<h3 id="load-triggers">Load triggers</h3>
-<pre><code class="language-apache">BotShieldLoadStateFile          /run/botshield/load-state
-BotShieldLoadRefreshInterval    1
-BotShieldLoadWarmThreshold      65
-BotShieldLoadHotThreshold       85
+<h3 id="load-conditions">Load conditions</h3>
+<p><code>BotShieldMinLoad</code> fires at that load state <strong>or above</strong>, so a shed
+ladder is rules in declaration order with the strictest rung first:</p>
+<pre><code class="language-apache">&lt;BotShieldRule shed-hard&gt;
+    BotShieldMinLoad   hot
+    BotShieldUserAgent @bot
+    BotShieldRespond   503
+&lt;/BotShieldRule&gt;
 
-&lt;BotShieldLoadTrigger be-strict&gt;
-    BotShieldState        &gt;=warm
-    BotShieldScore  botsignals +20
-    BotShieldLogAs          brownout
-&lt;/BotShieldLoadTrigger&gt;
-&lt;BotShieldLoadTrigger drop-noise&gt;
-    BotShieldState        hot
-    BotShieldRespond       503
-    BotShieldLogAs          hot-shed
-&lt;/BotShieldLoadTrigger&gt;
+&lt;BotShieldRule shed-soft&gt;
+    BotShieldMinLoad   warm
+    BotShieldUserAgent @ai-train
+    BotShieldChallenge noninteractive
+&lt;/BotShieldRule&gt;
 </code></pre>
-<p>Predicates: <code>state=&lt;name&gt;</code> (exact match) or <code>state&gt;=&lt;name&gt;</code> (at
-least). State names: <code>normal</code>, <code>warm</code>, <code>hot</code>. Hysteresis settles
-the state machine over a few sample ticks before rules fire — a
-single load spike doesn't flip the global state.</p>
-<p>Load state is sampled from the Apache scoreboard plus an optional
-external state file (set by an out-of-band collector — e.g.
-collectd writing a single-word state every second). The external
-file lets you key load decisions on whatever metric makes sense
-for your deployment, not just Apache's busy-worker count.</p>
-<h2 id="flag-trigger-family">Flag-trigger family</h2>
-<p>Flag triggers map flag bits → actions, applied after the policy
-walk against the IP's accumulated flag bitmap (IP-side via
-flagged-IP table + cookie-side via prior <code>_bs_session</code>). They
-have a different action surface than the five trigger families
-above:</p>
-<pre><code class="language-apache">&lt;BotShieldFlagTrigger honeypot_hit&gt;
-    BotShieldAction       tier_floor
-    BotShieldMin          captcha
-&lt;/BotShieldFlagTrigger&gt;
-&lt;BotShieldFlagTrigger honeypot_hit&gt;
-    BotShieldAction       score
-BotShieldAccumulator  botsignals
-    BotShieldAdd          60
-&lt;/BotShieldFlagTrigger&gt;
-&lt;BotShieldFlagTrigger app_verified_human&gt;
-    BotShieldAction       score
-BotShieldAccumulator  botsignals
-    BotShieldAdd          -80
-&lt;/BotShieldFlagTrigger&gt;
-</code></pre>
-<p>Args: <code>&lt;flag&gt; [reset] [action=&lt;verb&gt; args...]</code>. The first arg names
-a flag bit (<code>honeypot_hit</code>, <code>scanner_probe</code>, <code>fake_bot</code>,
-<code>pow_fail_streak</code>, <code>app_verified_human</code>, <code>app_verified_session</code>,
-<code>app_trust_signal</code>); each invocation appends one trigger entry for
-that bit.</p>
-<p>Two action verbs:</p>
-<ul>
-<li><strong><code>action=score add=N</code></strong> — accumulate signed N into the
-request's score (positive penalty / negative credit). SUM
-accumulates across triggers.</li>
-<li><strong><code>action=tier_floor min=&lt;tier&gt;</code></strong> — set a minimum tier; <code>&lt;tier&gt;</code>
-is <code>pass</code> / <code>noninteractive</code> / <code>interactive</code> / <code>captcha</code>. MAX accumulates
-(strictest wins).</li>
-</ul>
-<p>The <code>reset</code> keyword is directive-level (not an action verb): a
-line of the form <code>BotShieldFlagTrigger &lt;flag&gt; reset</code> clears every
-prior declaration for that flag from this scope at post-config
-time. <code>reset</code> may appear with or without a trailing <code>action=...</code>:</p>
-<pre><code class="language-apache"># Clear whatever this scope already declared for honeypot_hit,
-# install only one tier-floor rule:
-&lt;BotShieldFlagTrigger honeypot_hit&gt;
-    BotShieldReset
-    BotShieldAction       tier_floor
-    BotShieldMin          interactive
-&lt;/BotShieldFlagTrigger&gt;
-
-# Disarm a flag entirely:
-&lt;BotShieldFlagTrigger pow_fail_streak&gt;
-    BotShieldReset
-&lt;/BotShieldFlagTrigger&gt;
-</code></pre>
+<p>This was <code>BotShieldLoadTrigger</code>, a family of its own, until the
+predicate moved into the rule. The family could match load and nothing
+else; shedding is nearly always &quot;this <em>kind</em> of client at this load&quot;,
+which needs the other conditions alongside it.</p>
+<p>The family also had exact <code>state=&lt;level&gt;</code> beside <code>state&gt;=</code>. Nothing
+carried it over and nothing wanted it: the only exact form ever written
+was <code>state=hot</code>, which means the same as <code>state&gt;=hot</code> because hot is
+the top of the scale. &quot;Warm but not hot&quot; has never been asked for.</p>
+<p><strong>On the three levels.</strong> <code>normal|warm|hot</code> come from the busy-worker
+ratio with hysteresis, and <code>shm.h</code> is blunt that this signal is weak on
+a large worker pool — 1024 slots on 6 cores means a fully unusable site
+still reads 2-3% busy. The module already samples load average,
+database saturation, FPM saturation and mean request latency into SHM
+for the dashboard; none of them is reachable from a rule yet. Until
+they are, <code>BotShieldLoadStateFile</code> is the escape hatch: an external
+process that can see the real signal writes <code>warm</code> or <code>hot</code> into it,
+and the watchdog merges it most-severe-wins with what it measured.</p>
 <h3 id="no-compiled-in-defaults">No compiled-in defaults</h3>
 <p>The module seeds nothing at config-parse time. A fresh install
 scores nothing and challenges nothing until you declare both a

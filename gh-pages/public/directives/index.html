@@ -1094,11 +1094,6 @@ semantics and refresh model.</p>
 <td><code>flagip=</code>, <code>flagsession=</code> (both accept <code>+</code>/<code>-</code>/<code>=</code>), <code>logas=</code>, <code>accesslog=</code>, <code>mode=</code></td>
 </tr>
 <tr>
-<td><code>BotShieldLoadTrigger</code></td>
-<td><code>&lt;name&gt; state=&lt;n&gt;|state&gt;=&lt;n&gt;</code></td>
-<td><code>respond=</code>, <code>logas=</code>, <code>accesslog=</code>, <code>score=</code>, <code>mode=</code> (no <code>redirect=</code>, <code>flagip=</code>, <code>flagsession=</code>)</td>
-</tr>
-<tr>
 <td><code>BotShieldSessionCookieName</code></td>
 <td><code>&lt;name&gt;</code> (single arg, repeatable)</td>
 <td>n/a (feeds cookies=session predicate)</td>
@@ -2395,7 +2390,7 @@ never links a database client, because blocking I/O has no place in
 the watchdog and a database too sick to answer must not be able to
 stall the code whose job is to shed load because the database is sick.</p>
 <p>The trigger family that consumes the state lives under
-<code>BotShieldLoadTrigger</code> (above). See
+<code>BotShieldMinLoad</code> on a rule (above). See
 <a href="../policy/index.html#load-triggers">policy</a>.</p>
 <h2 id="multi-vhost-reputation">Multi-vhost reputation</h2>
 <table>

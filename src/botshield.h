@@ -460,7 +460,6 @@ typedef struct bs_server_cfg {
     /* E7.3 — feedback triggers. */
     apr_array_header_t *feedback_triggers;
     /* E11.2 — load triggers. */
-    apr_array_header_t *load_triggers;
     /* Flag triggers. */
     apr_array_header_t *flag_triggers;
     /* Idempotence guard for the post_config resolver.

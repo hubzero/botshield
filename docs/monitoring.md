@@ -136,7 +136,8 @@ BotShieldFpmStatsFile  /run/botshield/fpm-load.stats
 All three are server scope. Inside a `<VirtualHost>` they are a
 config-parse error rather than a silent discard, but the rule is easier
 to follow than to debug. The load state drives
-`BotShieldLoadTrigger`, covered in [Policy](policy.md#load-triggers).
+`BotShieldMinLoad` on a rule, covered in
+[Policy](policy.md#load-conditions).
 
 ## Data refresh
 

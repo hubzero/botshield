@@ -658,7 +658,6 @@ semantics and refresh model.
 |---|---|---|
 | `BotShieldRule` | `<name>` + any of `path=<glob>` `query=<glob>` `cookies=none\|any\|session` `ua=<substring>\|@<botgroup>\|""` `ipspec=<spec>` — ANDed, at least one required | `respond=`, `redirect=`, `logas=`, `accesslog=`, `flagip=`, `flagsession=`, `score=`, `mode=` |
 | `BotShieldFeedbackTrigger` | `<event>` | `flagip=`, `flagsession=` (both accept `+`/`-`/`=`), `logas=`, `accesslog=`, `mode=` |
-| `BotShieldLoadTrigger` | `<name> state=<n>\|state>=<n>` | `respond=`, `logas=`, `accesslog=`, `score=`, `mode=` (no `redirect=`, `flagip=`, `flagsession=`) |
 | `BotShieldSessionCookieName` | `<name>` (single arg, repeatable) | n/a (feeds cookies=session predicate) |
 
 See [policy](policy.md#triggers-predicate-action-engine)
@@ -1821,7 +1820,7 @@ the watchdog and a database too sick to answer must not be able to
 stall the code whose job is to shed load because the database is sick.
 
 The trigger family that consumes the state lives under
-`BotShieldLoadTrigger` (above). See
+`BotShieldMinLoad` on a rule (above). See
 [policy](policy.md#load-triggers).
 
 ## Multi-vhost reputation
