@@ -27,4 +27,4 @@ pytest-html==4.2.0
 # prometheus_client — the official Prometheus Python lib; its parser
 # is the ground-truth for Prometheus exposition-format validation.
 hypothesis==6.155.2
-prometheus_client==0.25.0
+prometheus_client==0.26.0
