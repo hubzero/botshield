@@ -87,6 +87,7 @@ void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->cookie_domain   = NULL;
     cfg->scope_triggers       = NULL;
     cfg->scope_triggers_reset = 0;
+    cfg->rules                = NULL;
     cfg->challenge_at_least   = NULL;
     cfg->challenge_at_least_reset = 0;
     cfg->endpoint_prefix     = NULL;
@@ -418,6 +419,7 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->share_scope_token     = NULL;
     /* E15 — 0 means "inherit / use default". */
     scfg->request_triggers         = apr_array_make(p, 4, sizeof(void *));
+    scfg->scoped_rules             = apr_array_make(p, 4, sizeof(void *));
     scfg->feedback_triggers = apr_array_make(p, 4, sizeof(void *));
     scfg->flag_triggers     = apr_array_make(p, 8, sizeof(void *));
     /* Curated session-cookie-name defaults. Kept deliberately
@@ -579,6 +581,17 @@ void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
      * propagates to the merged output so deeper scopes see the
      * effect (a reset at vhost level holds through every nested
      * <Location>). */
+    if (!base->rules || base->rules->nelts == 0) {
+        out->rules = add->rules;
+    } else if (!add->rules || add->rules->nelts == 0) {
+        out->rules = base->rules;
+    } else {
+        /* Outer scope first: Apache walks the container chain
+         * outermost-in, so this preserves the order the operator
+         * wrote across nested scopes. Both come before the server
+         * ladder either way. */
+        out->rules = apr_array_append(p, base->rules, add->rules);
+    }
     out->scope_triggers_reset = base->scope_triggers_reset
                               | add->scope_triggers_reset;
     if (add->scope_triggers_reset) {
@@ -1755,20 +1768,33 @@ static void bs_wire_rate_and_block_cohorts(apr_pool_t *pconf,
          * cohort; resolve its ipspec the same way rate-limit cohorts
          * are resolved. Path triggers without those keys leave
          * has_cohort=0 and are skipped here. */
-        if (vcfg->request_triggers && vcfg->request_triggers->nelts > 0) {
+        {
+            /* Both ladders. The scoped list holds the same pointers
+             * the dir config walks -- it exists only because
+             * post_config iterates server_recs and Apache offers no
+             * equivalent walk over dir configs, so a rule written in a
+             * <Location> would otherwise never load its ipspec
+             * ranges. */
+            apr_array_header_t *ladders[2];
+            int nladders = 0;
+            if (vcfg->request_triggers && vcfg->request_triggers->nelts > 0)
+                ladders[nladders++] = vcfg->request_triggers;
+            if (vcfg->scoped_rules && vcfg->scoped_rules->nelts > 0)
+                ladders[nladders++] = vcfg->scoped_rules;
             int wired = 0;
-            for (int i = 0; i < vcfg->request_triggers->nelts; i++) {
-                bs_request_trigger_entry *e = APR_ARRAY_IDX(
-                    vcfg->request_triggers, i, bs_request_trigger_entry *);
-                if (!e->has_cohort) continue;
-                BS_E21_RESOLVE_COHORT(&e->cohort,
-                    "BotShieldRule", e->name);
-                wired++;
+            for (int li = 0; li < nladders; li++) {
+                for (int i = 0; i < ladders[li]->nelts; i++) {
+                    bs_request_trigger_entry *e = APR_ARRAY_IDX(
+                        ladders[li], i, bs_request_trigger_entry *);
+                    if (!e->has_cohort) continue;
+                    BS_E21_RESOLVE_COHORT(&e->cohort,
+                        "BotShieldRule", e->name);
+                    wired++;
+                }
             }
             if (wired > 0) {
                 ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
-                    "mod_botshield: %d path-trigger cohorts wired",
-                    wired);
+                    "mod_botshield: %d rule cohorts wired", wired);
             }
         }
         #undef BS_E21_RESOLVE_COHORT

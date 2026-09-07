@@ -1111,10 +1111,40 @@ static void bs_warn_tier_without_solved(cmd_parms *cmd,
         "to challenge every time.", e->name);
 }
 
+/* Where a rule lands.
+ *
+ * Server scope keeps the single ladder it always had. A rule written
+ * in a container goes to the dir config, so Apache's own merge carries
+ * it down the scope chain and its container match applies -- and onto
+ * the server's resolution list as well, because post_config walks
+ * server_recs and cannot reach a dir config. Both hold the same
+ * pointer, so resolving one resolves the other. */
+static void bs_rule_push(cmd_parms *cmd, bs_dir_cfg *dcfg, int scoped,
+                         bs_server_cfg *scfg,
+                         bs_request_trigger_entry *e)
+{
+    if (scoped) {
+        if (!dcfg->rules) {
+            dcfg->rules = apr_array_make(cmd->pool, 4, sizeof(void *));
+        }
+        *(bs_request_trigger_entry **)apr_array_push(dcfg->rules) = e;
+        *(bs_request_trigger_entry **)
+            apr_array_push(scfg->scoped_rules) = e;
+        return;
+    }
+    *(bs_request_trigger_entry **)
+        apr_array_push(scfg->request_triggers) = e;
+}
+
 const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                                        int argc, char *const argv[])
 {
-    (void)dconf;
+    /* cmd->path is set for <Location>, <Directory>, <Files> and their
+     * regex forms, and NULL at server or vhost scope. It is how this
+     * setter knows whether Apache's own container match is already
+     * standing in as a condition. */
+    bs_dir_cfg *dcfg = (bs_dir_cfg *)dconf;
+    const int scoped = (cmd->path != NULL && dcfg != NULL);
     /* Names the family in every message this setter emits. There is
      * one spelling now -- BotShieldRequestTrigger was removed
      * 2026-09-06 -- but the constant stays because the messages below
@@ -1488,7 +1518,13 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
             "not need to see it already set.", D, name);
     }
 
-    if (!e->path_patterns && !e->query_pattern
+    /* A rule with no condition matches every request, which at
+     * server scope is always a mistake -- nobody writes a ladder rung
+     * that swallows the site. Inside a container it is the ordinary
+     * case: Apache has already matched, and the <Location> is the
+     * condition. That is the whole of what BotShieldTrigger was. */
+    if (!scoped
+        && !e->path_patterns && !e->query_pattern
         && e->bscookie_pred < 0 && e->crawler_pred < 0
         && e->cookie_pred < 0 && e->exists_pred < 0
         && e->solved_pred < 0 && e->minload < 0
@@ -1503,8 +1539,9 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
             "exists=, solved=, firstsight=, acceptlanguage=, minload=, "
             "loadavgatleast=, ua=, ipspec=). A rule "
             "with no condition "
-            "matches every request - use BotShieldTrigger in the scope "
-            "you mean instead", D, name);
+            "matches every request. Declare it inside the "
+            "<Location>, <Directory> or <Files> you mean and the "
+            "container match is the condition.", D, name);
     }
 
     const char *err = bs_finalize_trigger_action(cmd->pool,
@@ -1542,23 +1579,26 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
             if (n > 1) {
                 c->name = apr_psprintf(cmd->pool, "%s#%d", e->name, n);
             }
-            *(bs_request_trigger_entry **)
-                apr_array_push(scfg->request_triggers) = c;
+            bs_rule_push(cmd, dcfg, scoped, scfg, c);
             tok = apr_strtok(NULL, ",", &save);
         }
         return NULL;
     }
 
-    /* Upsert-by-name; preserves declaration order. */
-    for (int i = 0; i < scfg->request_triggers->nelts; i++) {
-        bs_request_trigger_entry *ex =
-            APR_ARRAY_IDX(scfg->request_triggers, i, bs_request_trigger_entry *);
-        if (strcmp(ex->name, e->name) == 0) {
-            APR_ARRAY_IDX(scfg->request_triggers, i, bs_request_trigger_entry *) = e;
-            return NULL;
+    /* Upsert-by-name; preserves declaration order. Server scope
+     * only: two containers may reasonably give a rule the same name,
+     * and neither should silently replace the other's. */
+    if (!scoped) {
+        for (int i = 0; i < scfg->request_triggers->nelts; i++) {
+            bs_request_trigger_entry *ex =
+                APR_ARRAY_IDX(scfg->request_triggers, i, bs_request_trigger_entry *);
+            if (strcmp(ex->name, e->name) == 0) {
+                APR_ARRAY_IDX(scfg->request_triggers, i, bs_request_trigger_entry *) = e;
+                return NULL;
+            }
         }
     }
-    *(bs_request_trigger_entry **)apr_array_push(scfg->request_triggers) = e;
+    bs_rule_push(cmd, dcfg, scoped, scfg, e);
     bs_warn_tier_without_solved(cmd, e);
     return NULL;
 }

@@ -299,6 +299,11 @@ struct bs_dir_cfg {
      * triggers" — the merge skips base->scope_triggers when set. */
     apr_array_header_t *scope_triggers;
     int                 scope_triggers_reset;
+    /* BotShieldRule declared inside an Apache container. Same entry
+     * type as the server-scope ladder; separate array because Apache
+     * merges dir configs down a scope chain and server configs not at
+     * all. Walked ahead of the server ladder -- see bs_check_policy. */
+    apr_array_header_t *rules;
     /* BotShieldChallengeAtLeast <name> <n> <tier>: named per-request
      * accumulators mapped to a tier floor, evaluated at the tier
      * decision rather than in the rule ladder.
@@ -491,6 +496,12 @@ typedef struct bs_server_cfg {
     const char         *share_scope_token; /* explicit override; NULL = default */
     /* E3 — path-based triggers. */
     apr_array_header_t *request_triggers;
+    /* Rules declared in a <Location> and friends. They live in the
+     * dir config for the walk; this list exists only so post_config
+     * can reach them, because it iterates server_recs and there is no
+     * equivalent walk over dir configs. Same pointers, so resolving
+     * here resolves what the dir walk reads. */
+    apr_array_header_t *scoped_rules;
     /* E7.3 — feedback triggers. */
     apr_array_header_t *feedback_triggers;
     /* E11.2 — load triggers. */

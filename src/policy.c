@@ -312,14 +312,32 @@ int bs_check_policy(request_rec *r)
      * with `ua=` or `ipspec=` keys carries a populated cohort that
      * ANDs with the path-glob match (path-only triggers leave
      * has_cohort==0 and skip the cohort check). */
-    if (scfg->request_triggers && scfg->request_triggers->nelts > 0) {
+    {
+        /* Two ladders walked as one: rules declared inside an Apache
+         * container first, then the server-scope ones.
+         *
+         * Scoped first because Apache's own match is the more specific
+         * statement. Under first-match-wins a single concatenation the
+         * other way would let a broad vhost rule pre-empt the rule
+         * someone wrote inside the <Location> for exactly that path,
+         * which is the opposite of what writing it there means. It is
+         * also the order bs_merge_rule_array already uses when server
+         * configs merge: the child's entries come first. */
+        apr_array_header_t *ladders[2];
+        int nladders = 0;
+        if (dcfg && dcfg->rules && dcfg->rules->nelts > 0)
+            ladders[nladders++] = dcfg->rules;
+        if (scfg->request_triggers && scfg->request_triggers->nelts > 0)
+            ladders[nladders++] = scfg->request_triggers;
         /* Cookie map is parsed lazily and only once, and only if some
          * rule actually carries a cookies= condition — the common case
          * (path-only rules) must not pay for it. */
         apr_table_t *rt_cmap = NULL;
-        for (int i = 0; i < scfg->request_triggers->nelts; i++) {
+        for (int li = 0; li < nladders && !pass_declined; li++) {
+        apr_array_header_t *ladder = ladders[li];
+        for (int i = 0; i < ladder->nelts; i++) {
             bs_request_trigger_entry *t = APR_ARRAY_IDX(
-                scfg->request_triggers, i, bs_request_trigger_entry *);
+                ladder, i, bs_request_trigger_entry *);
             /* Every dimension is optional; absent means "no restriction".
              * Ordered cheapest-first: path and query are byte globs, the
              * cohort may hit the UA classifier / CIDR ranges. */
@@ -502,6 +520,7 @@ int bs_check_policy(request_rec *r)
             /* tier=: the rule asked for a challenge, so the request
              * must reach the scoring pipeline. Keep walking. */
             if (o == BS_TEXEC_PASS_CONTINUE) continue;
+        }
         }
     }
 

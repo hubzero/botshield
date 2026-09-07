@@ -563,7 +563,8 @@ static const command_rec bs_cmds[] = {
                  bs_open_feedbacktrigger_retired, NULL, RSRC_CONF,
                  "Removed. Write <BotShieldFeedback> with "
                  "BotShieldEvent inside it."),
-    AP_INIT_RAW_ARGS("<BotShieldRule", bs_open_rule, NULL, RSRC_CONF,
+    AP_INIT_RAW_ARGS("<BotShieldRule", bs_open_rule, NULL,
+                 RSRC_CONF | ACCESS_CONF,
                  "Open a BotShieldRule block. Takes the rule name; every "
                  "setting is a BotShield directive on its own line "
                  "until </BotShieldRule>."),
