@@ -211,9 +211,6 @@ apr_array_header_t *bs_known_bots_resolve_by_botgroup(apr_pool_t *pool,
 /* Setters wired into bs_cmds[]. */
 const char *bs_set_bot_directory(cmd_parms *cmd, void *dconf,
                                  const char *path);
-const char *bs_set_bot_directory_refresh_interval(cmd_parms *cmd,
-                                                  void *dconf,
-                                                  const char *arg);
 
 #ifdef __cplusplus
 }

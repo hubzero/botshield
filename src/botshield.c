@@ -871,12 +871,15 @@ static const command_rec bs_cmds[] = {
                  "compiled-in baseline (~600 entries from the "
                  "bundled Cloudflare directory at build time) "
                  "stays active."),
-    AP_INIT_TAKE1("BotShieldBotDirectoryRefreshInterval",
-                 bs_set_bot_directory_refresh_interval, NULL, RSRC_CONF,
+    AP_INIT_TAKE1("BotShieldDataRefreshInterval",
+                 bs_set_data_refresh_interval, NULL, RSRC_CONF,
                  "Seconds between mod_watchdog re-checks of the "
-                 "BotShieldBotDirectory file. Default 300. Set 0 to "
-                 "disable live-refresh; the post_config-time load "
-                 "still happens once."),
+                 "BotShieldBotDirectory and BotShieldBrowserTemplates "
+                 "files. Default 300; 0 selects that default and a "
+                 "negative value disables live-refresh. The "
+                 "post_config-time load still happens once either "
+                 "way. Not BotShieldAllowRangesRefreshInterval, where "
+                 "0 means the refresh is off."),
     AP_INIT_TAKE1("BotShieldBrowserTemplates",
                  bs_set_browser_templates, NULL, RSRC_CONF,
                  "Path to a text file overriding the compiled-in "
@@ -887,12 +890,6 @@ static const command_rec bs_cmds[] = {
                  "re-loads on mtime change. Optional; if unset the "
                  "compiled-in baseline (~23 templates from the "
                  "build-time bundled top-100 list) stays active."),
-    AP_INIT_TAKE1("BotShieldBrowserTemplatesRefreshInterval",
-                 bs_set_browser_templates_refresh_interval, NULL,
-                 RSRC_CONF,
-                 "Seconds between mod_watchdog re-checks of the "
-                 "BotShieldBrowserTemplates file. Default 300. Set "
-                 "0 to disable live-refresh."),
     AP_INIT_TAKE1("BotShieldRobotsWildcardScope",
                  bs_set_robots_wildcard_scope, NULL, RSRC_CONF,
                  "How to apply User-agent: * rules: 'heuristic' "

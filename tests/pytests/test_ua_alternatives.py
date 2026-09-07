@@ -138,7 +138,7 @@ def test_a_user_agent_containing_a_comma_is_one_value(
     )
 
 
-def test_two_ipspec_lines_are_ored(config_override):
+def test_two_ipspec_lines_are_ored(config_override, log_slice):
     """ipspec repeats the same way, for consistency rather than repair.
 
     A comma cannot appear in a CIDR, so the old comma-joining was never
@@ -165,9 +165,20 @@ def test_two_ipspec_lines_are_ored(config_override):
     )
     with config_override(r'BotShieldEnabled\s+On', conf,
                          render=False, count=1):
-        a = client.get('/ip-alt-probe', xff='192.0.2.3', ua='probe/1.0')
-        b = client.get('/ip-alt-probe', xff='192.0.2.130', ua='probe/1.0')
-        c = client.get('/ip-alt-probe', xff='192.0.2.200', ua='probe/1.0')
+        with log_slice as slc:
+            a = client.get('/ip-alt-probe', xff='192.0.2.3', ua='probe/1.0')
+            b = client.get('/ip-alt-probe', xff='192.0.2.130', ua='probe/1.0')
+            client.get('/ip-alt-probe', xff='192.0.2.200', ua='probe/1.0')
+            miss = slc.decision_lines(ip='192.0.2.200')
+
     assert a.status_code == 403, f'first CIDR missed; got {a.status_code}'
     assert b.status_code == 403, f'second CIDR missed; got {b.status_code}'
-    assert c.status_code != 403, f'an unlisted IP was refused; got {c.status_code}'
+    # Assert on the rule, not the status. The unlisted address is
+    # refused either way -- the harness client sends no Accept-Language
+    # and drops cookies, so anything reaching the signature scorer is
+    # challenged. A status check here reads that as proof the rule
+    # fired; only the decision reason distinguishes the two.
+    assert miss, 'no decision line for the unlisted address'
+    assert not any('ip-alts' in d['reason'] for d in miss), (
+        f'the rule matched an address outside both CIDRs: {miss}'
+    )

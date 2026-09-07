@@ -296,16 +296,12 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
     if (!add->bot_directory_path && base->bot_directory_path) {
         out->bot_directory_path = base->bot_directory_path;
     }
-    if (add->bot_directory_refresh_interval == 0) {
-        out->bot_directory_refresh_interval = base->bot_directory_refresh_interval;
+    if (add->data_refresh_interval == 0) {
+        out->data_refresh_interval = base->data_refresh_interval;
     }
     /* Browser-templates runtime override — same inheritance shape. */
     if (!add->browser_templates_path && base->browser_templates_path) {
         out->browser_templates_path = base->browser_templates_path;
-    }
-    if (add->browser_templates_refresh_interval == 0) {
-        out->browser_templates_refresh_interval =
-            base->browser_templates_refresh_interval;
     }
 
     /* App integration server-scope inheritance. */
@@ -450,12 +446,11 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
      * (compiled-in baseline stays active). Refresh interval 0 =
      * use compile-time default at post_config. */
     scfg->bot_directory_path             = NULL;
-    scfg->bot_directory_refresh_interval = 0;
+    scfg->data_refresh_interval = 0;
     /* Browser-templates runtime override defaults. NULL path =
      * compiled-in baseline stays active. Refresh interval 0 = use
      * compile-time default at post_config. */
     scfg->browser_templates_path             = NULL;
-    scfg->browser_templates_refresh_interval = 0;
     /* App integration defaults — UNSET sentinel so the server-scope
      * merge can tell "unset at this scope" from explicit off. */
     scfg->app_feedback_enabled        = BS_APP_FEEDBACK_UNSET;
@@ -1850,7 +1845,7 @@ static void bs_init_bot_directory(apr_pool_t *pconf, server_rec *s)
 
     /* Default refresh interval if operator didn't override and
      * watchdog is desired. 0 = leave watchdog unregistered. */
-    int refresh = src_scfg->bot_directory_refresh_interval;
+    int refresh = src_scfg->data_refresh_interval;
     if (refresh == 0) refresh = 300;   /* default 5 min */
     if (refresh < 0) return;
 
@@ -1932,7 +1927,7 @@ static void bs_init_browser_templates(apr_pool_t *pconf, server_rec *s)
             bs_browser_templates_count);
     }
 
-    int refresh = src_scfg->browser_templates_refresh_interval;
+    int refresh = src_scfg->data_refresh_interval;
     if (refresh == 0) refresh = 300;
     if (refresh < 0) return;
 
@@ -4079,6 +4074,35 @@ const char *bs_set_share_scope(cmd_parms *cmd, void *dconf,
  * behavior). Range 1..1000 — beyond that the cap is effectively
  * absent anyway. */
 
+
+/* BotShieldDataRefreshInterval <seconds>.
+ *
+ * Replaced BotShieldBotDirectoryRefreshInterval and
+ * BotShieldBrowserTemplatesRefreshInterval on 2026-09-07. They were the
+ * same directive written twice -- same 0..86400 range, same 0-means-300
+ * default, same watchdog registration -- over two files that are the
+ * same kind of thing, and neither had ever been set.
+ *
+ * BotShieldAllowRangesRefreshInterval stays separate despite looking
+ * like a third of these: 0 there leaves the watchdog unregistered
+ * rather than selecting a default, so folding it in would switch on a
+ * refresh that is deliberately opt-in. */
+const char *bs_set_data_refresh_interval(cmd_parms *cmd, void *dconf,
+                                         const char *arg)
+{
+    (void)dconf;
+    char *end = NULL;
+    long v = strtol(arg, &end, 10);
+    if (!end || *end || v < 0 || v > 86400) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldDataRefreshInterval: '%s' must be an integer "
+            "0..86400 seconds (0 selects the 300s default)", arg);
+    }
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+    scfg->data_refresh_interval = (int)v;
+    return NULL;
+}
 
 const char *bs_set_endpoint_prefix(cmd_parms *cmd, void *cfg_v,
                                           const char *arg)

@@ -461,9 +461,8 @@ nothing else.
 | `BotShieldAllowBot` | `<name> <ua-pattern> [<target>]` | builtin only | server / vhost |
 | `BotShieldAllowRangesRefreshInterval` | `N` (sec, 0..86400) | `0` (disabled) | server / vhost |
 | `BotShieldBotDirectory` | `/path` (TSV) | unset (compiled-in baseline) | server / vhost |
-| `BotShieldBotDirectoryRefreshInterval` | `N` (sec) | `300` (0=disabled) | server / vhost |
 | `BotShieldBrowserTemplates` | `/path` (text) | unset (compiled-in baseline) | server / vhost |
-| `BotShieldBrowserTemplatesRefreshInterval` | `N` (sec) | `300` (0=disabled) | server / vhost |
+| `BotShieldDataRefreshInterval` | `N` (sec, 0..86400) | `300`; `0` selects that default, negative disables | server / vhost |
 
 `BotShieldClassify` toggles individual passes — `browsers`,
 `known-bots`, `verified-bots`, `unknown-bots`. Mixing the two

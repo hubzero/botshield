@@ -555,7 +555,16 @@ typedef struct bs_server_cfg {
      * pointer is module-global (bot_directory.c owns it). NULL path
      * leaves the compiled-in baseline in effect. */
     const char         *bot_directory_path;
-    int                 bot_directory_refresh_interval;
+    /* Seconds between watchdog re-checks of the two shipped data
+     * files -- the bot directory and the browser templates. One knob
+     * because they are one kind of thing: operator-replaceable data
+     * that changes rarely, read the same way, on the same tick.
+     *
+     * 0 means "use the default" (300), not "disable"; a negative
+     * value disables. That differs from allow_ranges_refresh_interval,
+     * where 0 leaves the watchdog unregistered -- which is why that
+     * one is still its own directive. */
+    int                 data_refresh_interval;
     /* Top-user-agents browser-templates runtime override.
      * Same shape as bot_directory: NULL path = compiled-in baseline
      * stays active; non-NULL path = parse + atomic-swap, refreshed
@@ -564,7 +573,6 @@ typedef struct bs_server_cfg {
      * distinguish real-browser UAs from everything else when
      * applying robots.txt User-agent: * rules. */
     const char         *browser_templates_path;
-    int                 browser_templates_refresh_interval;
     /* E5 — app-to-module reputation feedback. */
     int                 app_feedback_enabled;
     const char         *app_feedback_header;
@@ -778,6 +786,8 @@ const char *bs_require_server_scope(cmd_parms *cmd, const char *name);
 
 /* BotShieldDataDir: the directory holding this instance's own files. */
 const char *bs_set_data_dir(cmd_parms *cmd, void *dconf, const char *arg);
+const char *bs_set_data_refresh_interval(cmd_parms *cmd, void *dconf,
+                                         const char *arg);
 
 /* <data dir>/<name>, using the configured dir or the default. */
 const char *bs_data_path(apr_pool_t *p, struct bs_server_cfg *scfg,

@@ -2226,7 +2226,7 @@ the linker on Apache symbols.
 
 ### Directive table
 
-`bs_cmds[]` registers 91 directives. No retired *family* keeps a
+`bs_cmds[]` registers 90 directives. No retired *family* keeps a
 table slot any more: `BotShieldPathTrigger`, `BotShieldTrigger`,
 `BotShieldFlagTrigger` and `BotShieldFeedbackTrigger` all fail with
 Apache's generic "Invalid command, perhaps misspelled or defined by a
@@ -2257,7 +2257,7 @@ the `bs_cmds[]` table at `src/botshield.c:213`.
 | Captcha (M8 + E18) | `BotShieldCaptchaProvider`, `BotShieldCaptchaSiteKey`, `BotShieldCaptchaSecretFile`, `BotShieldCaptchaTimeout`, `BotShieldCaptchaConnectTimeout`, `BotShieldRecaptchaV3MinScore`, `BotShieldCaptchaExpectedHostname`, `BotShieldCaptchaExpectedAction`, `BotShieldCaptchaCABundle`, `BotShieldCaptchaRateLimit`, `BotShieldCaptchaMaxInFlight`, `BotShieldFormCaptcha` |
 | Non-interactive (E17) | `BotShieldNonInteractiveMode` |
 | SHM sizing | `BotShieldShmSize`, `BotShieldFlaggedIPCapacity`, `BotShieldIPv6PrefixLen`, `BotShieldBloomIPs`, `BotShieldBloomWindow`, `BotShieldStateFile`, `BotShieldStateSaveInterval`, `BotShieldRateLimitEscalateCapacity`, `BotShieldSafeguardCapacity`, `BotShieldEmbeddedNonceCapacity` |
-| UA classification (E1) | `BotShieldClassify`, `BotShieldAllowBot`, `BotShieldAllowRangesRefreshInterval`, `BotShieldBotDirectory`, `BotShieldBotDirectoryRefreshInterval`, `BotShieldBrowserTemplates`, `BotShieldBrowserTemplatesRefreshInterval` |
+| UA classification (E1) | `BotShieldClassify`, `BotShieldAllowBot`, `BotShieldAllowRangesRefreshInterval`, `BotShieldBotDirectory`, `BotShieldBrowserTemplates`, `BotShieldDataRefreshInterval` |
 | Policy (E2.1 / E9) | `BotShieldRateLimit`, `BotShieldBotRateLimit`, `BotShieldRateLimitEscalate` |
 | Robots (E2.2) | `BotShieldRobotsTxt`, `BotShieldRobotsRefreshInterval`, `BotShieldRobotsWildcardScope` |
 | Triggers | `BotShieldRule` (E3, formerly BotShieldPathTrigger; since 2026-09-06 also carrying the E4 cookie, E6 env, E11.2 load and E14 flag predicates, and since 2026-09-07 the E14 action half), `BotShieldMatch` (named condition sets, shared by rules), `BotShieldFeedback` (E7.3), `BotShieldSessionCookieName` (E4) |

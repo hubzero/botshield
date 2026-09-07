@@ -406,21 +406,3 @@ const char *bs_set_browser_templates(cmd_parms *cmd, void *dconf,
     return NULL;
 }
 
-const char *bs_set_browser_templates_refresh_interval(cmd_parms *cmd,
-                                                      void *dconf,
-                                                      const char *arg)
-{
-    (void)dconf;
-    char *end = NULL;
-    long v = strtol(arg, &end, 10);
-    if (!end || *end || v < 0 || v > 86400) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldBrowserTemplatesRefreshInterval: '%s' must be "
-            "an integer 0..86400 seconds (0 = disable live refresh)",
-            arg);
-    }
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    scfg->browser_templates_refresh_interval = (int)v;
-    return NULL;
-}

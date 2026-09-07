@@ -132,9 +132,6 @@ apr_status_t bs_browser_templates_watchdog_cb(int state, void *data,
 /* Setters wired into bs_cmds[]. */
 const char *bs_set_browser_templates(cmd_parms *cmd, void *dconf,
                                      const char *path);
-const char *bs_set_browser_templates_refresh_interval(cmd_parms *cmd,
-                                                      void *dconf,
-                                                      const char *arg);
 
 #ifdef __cplusplus
 }
