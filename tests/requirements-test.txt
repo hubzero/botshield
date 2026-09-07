@@ -13,7 +13,7 @@ pytest-timeout==2.4.0
 # M11.6: real-browser acceptance layer. The chromium binary itself
 # lives under ~/.cache/ms-playwright/ and is installed separately via
 # `playwright install chromium` in tests/setup/provision.sh.
-pytest-playwright==0.8.0
+pytest-playwright==0.9.0
 playwright==1.60.0
 
 # M11.7: rerun-on-flake for @live_network (third-party siteverify
