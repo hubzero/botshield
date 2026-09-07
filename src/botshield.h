@@ -157,6 +157,40 @@ enum bs_enabled_state {
  * detection signal like scanner_probe with a punishment. */
 #define BS_FLAG_BLOCKED               (1U << 7)
 
+/* Written by the enforcement paths that end a request where they
+ * stand -- the rate-limit cohorts, the slug-keyed bot limits, and
+ * robots.txt Disallow. Those return 429/403 from inside
+ * bs_check_policy, so no later stage records that they fired, and the
+ * rule walk runs ahead of all of them: without these bits a client
+ * refused a hundred times in a row is still a stranger to every rule
+ * on request 101.
+ *
+ * Like blocked, they carry no meaning of their own. Nothing seeds a
+ * default flag trigger for them, so writing one costs an SHM slot and
+ * changes no decision until an operator asks for it with
+ * flagged=rate_abuse on a rule or a <BotShieldFlagTrigger>. That is
+ * deliberate: the module keeps the memory, the operator keeps the
+ * policy.
+ *
+ * Separate bits because the two events are not the same accusation.
+ * rate_abuse means the client spent more than its budget; robots
+ * means it fetched a path the site published as off-limits, which
+ * plenty of operators want to watch for a while before acting on. */
+#define BS_FLAG_RATE_ABUSE            (1U << 8)
+#define BS_FLAG_ROBOTS_IGNORED        (1U << 9)
+
+/* Bounds on the window-derived TTL for BS_FLAG_RATE_ABUSE. A
+ * one-second budget would otherwise flag for less time than it takes
+ * the next request to arrive; an unbounded one would pin an address in
+ * the flagged table for as long as the operator's largest window. */
+#define BS_RATE_FLAG_TTL_MIN   60
+#define BS_RATE_FLAG_TTL_MAX   86400
+
+/* Robots.txt has no window to derive from -- ignoring a Disallow is an
+ * instant, not a rate. An hour is what the pre-B5 code charged here
+ * when its score still carried a TTL. */
+#define BS_ROBOTS_FLAG_TTL     3600
+
 /* Captcha tier (M8) defaults — small and boring: a 1 s HTTP verify
  * budget is enough for Cloudflare / hCaptcha / Google normally, and
  * short enough that a provider outage doesn't stall real users. */

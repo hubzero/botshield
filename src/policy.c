@@ -186,6 +186,38 @@ static int bs_ua_is_crawler_candidate(request_rec *r)
     return !c->is_browser;
 }
 
+/* Enforcement paths that end a request where they stand -- robots.txt
+ * Disallow, the rate-limit cohorts, the slug-keyed bot limits -- have
+ * nothing downstream to record that they fired, and the rule walk runs
+ * ahead of all three. A bit written here is the only way the next
+ * request can know this one was refused.
+ *
+ * Safe to call on every refusal: bs_flagged_ip_add trylocks and drops
+ * under contention rather than queueing workers behind the mutex, and
+ * the table is keyed by address, so a flood of the same attackers
+ * rewrites the same slots instead of growing.
+ *
+ * Silent when the address will not parse. A refusal we cannot attribute
+ * to an address is a refusal we cannot remember, and there is nothing
+ * useful to say about it once per request. */
+void bs_flag_client(request_rec *r, apr_uint32_t bits, int ttl_sec)
+{
+    bs_server_cfg *scfg =
+        ap_get_module_config(r->server->module_config, &botshield_module);
+    unsigned char ip[16];
+    if (!scfg) return;
+    if (!bs_parse_client_ip(r->useragent_ip, ip)) return;
+    bs_mask_ipv6_prefix(ip, scfg->ipv6_prefix_bits);
+    bs_flagged_ip_add(r, ip, bits, ttl_sec, scfg->ns_id);
+}
+
+int bs_rate_flag_ttl(apr_uint32_t window_sec)
+{
+    if (window_sec < BS_RATE_FLAG_TTL_MIN) return BS_RATE_FLAG_TTL_MIN;
+    if (window_sec > BS_RATE_FLAG_TTL_MAX) return BS_RATE_FLAG_TTL_MAX;
+    return (int)window_sec;
+}
+
 /* BS_CK_STATE_NOTE / _VERIFIED / _MISSING / _INVALID are now
  * declared cross-file in botshield.h — set by bs_handler after the
  * `_bs_session` verification pass; consumed by triggers.c's
@@ -538,11 +570,15 @@ int bs_check_policy(request_rec *r)
                                    1, __ATOMIC_RELAXED);
             }
         } else {
-            /* Robots.txt Disallow → 403 with a +100 score hit and a
-             * 1-hour flag, mirroring the deny weight an explicit
-             * BotShieldRule ... status=403 would carry. */
+            /* Robots.txt Disallow → 403, and remember the address
+             * for an hour. The score bump beside it reaches the
+             * decision log and stops there -- it has since the total
+             * stopped choosing a tier -- so the flag is what a later
+             * request can act on, via flagged=robots_ignored. */
             bs_score_add(r, 100,
                 apr_pstrcat(r->pool, "robotsblock:", rgroup, NULL));
+            bs_flag_client(r, BS_FLAG_ROBOTS_IGNORED,
+                           BS_ROBOTS_FLAG_TTL);
             return HTTP_FORBIDDEN;
         }
     }
@@ -585,6 +621,14 @@ int bs_check_policy(request_rec *r)
                 bs_score_add(r, BS_PENALTY_RATE_LIMIT,
                     apr_pstrcat(r->pool, "ratelimitabuse:",
                                 e->name, NULL));
+                /* The escalation's own TTL, not the budget window: the
+                 * operator has already said how long an escalated
+                 * client stays escalated, and a flag outliving that
+                 * would accuse someone the module has stopped
+                 * refusing. */
+                bs_flag_client(r, BS_FLAG_RATE_ABUSE,
+                               bs_rate_flag_ttl(
+                                   (apr_uint32_t)e->escalate->ttl_sec));
                 if (bs_shm.metrics) {
                     __atomic_fetch_add(
                         &bs_shm.metrics->rate_limit_exceeded_total,
@@ -621,6 +665,8 @@ int bs_check_policy(request_rec *r)
             bs_score_add(r, BS_PENALTY_RATE_LIMIT,
                 apr_pstrcat(r->pool, "ratelimitexceeded:",
                             e->name, NULL));
+            bs_flag_client(r, BS_FLAG_RATE_ABUSE,
+                           bs_rate_flag_ttl(e->window_sec));
             if (bs_shm.metrics) {
                 __atomic_fetch_add(&bs_shm.metrics->rate_limit_exceeded_total,
                                    1, __ATOMIC_RELAXED);

@@ -978,32 +978,31 @@ static int bs_ua_is_selector_list(const char *ua)
     return 1;
 }
 
-typedef struct {
-    const char     *name;
-    apr_uint32_t    bit;
-} bs_flag_meta;
-
-static const bs_flag_meta bs_flag_metadata[] = {
-    { "honeypot_hit",         BS_FLAG_HONEYPOT_HIT         },
-    { "scanner_probe",        BS_FLAG_SCANNER_PROBE        },
-    { "fake_bot",             BS_FLAG_FAKE_BOT             },
-    { "pow_fail_streak",      BS_FLAG_POW_FAIL_STREAK      },
-    { "app_verified_human",   BS_FLAG_APP_VERIFIED_HUMAN   },
-    { "app_verified_session", BS_FLAG_APP_VERIFIED_SESSION },
-    { "app_trust_signal",     BS_FLAG_APP_TRUST_SIGNAL     },
-    { "blocked",              BS_FLAG_BLOCKED              },
-};
-#define BS_FLAG_META_COUNT \
-    (sizeof(bs_flag_metadata) / sizeof(bs_flag_metadata[0]))
+/* The flag registry is bs_flag_names[] in score.c, which botshield.h
+ * extern-declares. This file used to keep a second copy of the same
+ * names and bits; the two agreed by hand, and the two error messages
+ * built from them had already stopped agreeing with either -- both
+ * omitted `blocked`, which has been a flag for some time. */
+typedef struct bs_flag_name bs_flag_meta;
 
 static const bs_flag_meta *bs_flag_meta_for_name(const char *name)
 {
-    for (size_t i = 0; i < BS_FLAG_META_COUNT; i++) {
-        if (strcmp(bs_flag_metadata[i].name, name) == 0) {
-            return &bs_flag_metadata[i];
-        }
+    for (const bs_flag_meta *m = bs_flag_names; m->name; m++) {
+        if (strcmp(m->name, name) == 0) return m;
     }
     return NULL;
+}
+
+/* "honeypot_hit, scanner_probe, ..." for an error message. Built from
+ * the registry so a new bit cannot be added without the message
+ * learning about it, which is how the hand-written lists drifted. */
+static const char *bs_flag_names_joined(apr_pool_t *p)
+{
+    const char *out = NULL;
+    for (const bs_flag_meta *m = bs_flag_names; m->name; m++) {
+        out = out ? apr_pstrcat(p, out, ", ", m->name, NULL) : m->name;
+    }
+    return out ? out : "(none)";
 }
 
 /* Parse a rule's cookie= value: [!]NAME[=|!|~ VALUE].
@@ -1374,7 +1373,9 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                 const bs_flag_meta *fm = bs_flag_meta_for_name(val);
                 if (!fm) {
                     return apr_psprintf(cmd->pool,
-                        "%s: flagged='%s' is not a known flag", D, val);
+                        "%s: flagged='%s' is not a known flag. "
+                        "Known flags: %s", D, val,
+                        bs_flag_names_joined(cmd->pool));
                 }
                 if (neg) {
                     return apr_psprintf(cmd->pool,
@@ -1805,10 +1806,8 @@ const char *bs_set_flag_trigger(cmd_parms *cmd, void *dconf,
     const bs_flag_meta *fm = bs_flag_meta_for_name(flag_name);
     if (!fm) {
         return apr_psprintf(cmd->pool,
-            "BotShieldFlagTrigger: unknown flag '%s'. Known flags: "
-            "honeypot_hit, scanner_probe, fake_bot, pow_fail_streak, "
-            "app_verified_human, app_verified_session, "
-            "app_trust_signal", flag_name);
+            "BotShieldFlagTrigger: unknown flag '%s'. Known flags: %s",
+            flag_name, bs_flag_names_joined(cmd->pool));
     }
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);

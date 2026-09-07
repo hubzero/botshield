@@ -77,6 +77,20 @@ int bs_rate_counter_admit(bs_rate_counter *slot,
                           apr_uint32_t budget,
                           apr_uint32_t window_sec);
 
+/* Flag the request's client address. Shared with bot_rate.c so the
+ * slug-keyed limit records a trip the same way the cohort limit does;
+ * a refusal that only one of the two remembers is worse than one
+ * neither remembers, because the difference is invisible in the log. */
+void bs_flag_client(request_rec *r, apr_uint32_t bits, int ttl_sec);
+
+/* TTL for a rate-abuse flag, derived from the budget window the
+ * client overspent and clamped to [BS_RATE_FLAG_TTL_MIN,
+ * BS_RATE_FLAG_TTL_MAX]. A minute's budget is remembered for a
+ * minute, an hour's for an hour -- so the flag's lifetime tracks the
+ * limit that produced it without an operator setting a second number
+ * that has to agree with the first. */
+int bs_rate_flag_ttl(apr_uint32_t window_sec);
+
 #ifdef __cplusplus
 }
 #endif

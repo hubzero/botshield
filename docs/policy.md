@@ -464,6 +464,13 @@ paired score + tier_floor rows used to carry:
 | `app_verified_session` | `score add=-40` |
 | `app_trust_signal` | `score add=-20` |
 
+`rate_abuse` and `robots_ignored` are absent from that table on
+purpose. They are the only flags the module writes on its own, and a
+starter action for them would be a policy nobody asked for applied to
+every client who ever overspent a budget. What they should mean is a
+rule you write; see
+[directives](directives.md#flagged--does-this-address-already-carry-a-flag).
+
 Trust signals (credits) are score-only by design; no credit ever
 forces tier *down*. A verified-human flag can't unlock a request
 that already tripped a different tier_floor.

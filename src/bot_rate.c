@@ -843,6 +843,15 @@ int bs_bot_rate_check(request_rec *r)
      * spike. */
     bs_score_add(r, tripped_is_slug ? BS_PENALTY_RATE_LIMIT : 0,
                  apr_pstrcat(r->pool, "botrate:", trip_label, NULL));
+    /* The flag follows the same rule as the score above, and for the
+     * same reason: a bot refused because the site hit its own ceiling
+     * has done nothing to earn a mark, and flagging it would hand
+     * every well-behaved crawler present during someone else's spike
+     * a record of abuse that outlives the spike. */
+    if (tripped_is_slug) {
+        bs_flag_client(r, BS_FLAG_RATE_ABUSE,
+                       bs_rate_flag_ttl(tripped->window_sec));
+    }
     if (bs_shm.metrics) {
         __atomic_fetch_add(&bs_shm.metrics->rate_limit_exceeded_total,
                            1, __ATOMIC_RELAXED);

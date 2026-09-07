@@ -204,6 +204,8 @@ const struct bs_flag_name bs_flag_names[] = {
     { "app_verified_session", BS_FLAG_APP_VERIFIED_SESSION },
     { "app_trust_signal",     BS_FLAG_APP_TRUST_SIGNAL     },
     { "blocked",              BS_FLAG_BLOCKED              },
+    { "rate_abuse",           BS_FLAG_RATE_ABUSE           },
+    { "robots_ignored",       BS_FLAG_ROBOTS_IGNORED       },
     { NULL, 0 }
 };
 

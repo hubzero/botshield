@@ -982,7 +982,43 @@ it to choose a challenge tier.
 
 Flag names are the registered set: `honeypot_hit`, `scanner_probe`,
 `fake_bot`, `pow_fail_streak`, `app_verified_human`,
-`app_verified_session`, `app_trust_signal`, `blocked`.
+`app_verified_session`, `app_trust_signal`, `blocked`, `rate_abuse`,
+`robots_ignored`. Naming one that is not on the list prints the list,
+so the authority is the module rather than this paragraph.
+
+**`rate_abuse` and `robots_ignored` are written by the module, not by
+your rules.** Every other flag needs a `BotShieldFlagIP` somewhere;
+these two are set wherever a request is refused for exceeding a rate
+budget or for fetching a path `robots.txt` disallows. They exist
+because those refusals return from inside the policy walk and end the
+request there -- nothing downstream records them, and the rule walk
+runs *before* all of them, so without a flag a client refused a
+hundred times running is still a stranger to every rule on request
+101.
+
+They carry no effect of their own. Nothing is seeded for them, so a
+write changes no decision until you ask for one:
+
+```apache
+<BotShieldRule tighten-on-repeat-offenders>
+    BotShieldFlagged   rate_abuse
+    BotShieldChallenge noninteractive
+</BotShieldRule>
+```
+
+The lifetime of a `rate_abuse` flag is the budget window the client
+overspent, clamped to between a minute and a day -- a per-minute limit
+remembers for a minute, an hourly one for an hour, so the flag tracks
+the limit that produced it without a second number to keep in sync.
+Where a `BotShieldRateLimitEscalate` fired, its `ttl=` is used
+instead, because the operator has already said how long an escalated
+client stays escalated. `robots_ignored` has no window to derive from
+and lasts an hour.
+
+Neither is written under `mode=observe` or `BotShieldRobotsMode
+observe`. A flag written there would follow the client into later
+requests and change what matches, which is enforcement by another
+route and exactly what observe defers.
 
 **The read is live.** A rule sees flags written by rules *above* it in
 the same walk, the same contract `BotShieldScoreAtLeast` has for
@@ -1339,11 +1375,12 @@ A rule that sets a flag no trigger defines is inert.
 
 #### Which flags may go where
 
-Three of the seven describe a session and are **refused on an address**:
+Three describe a session and are **refused on an address**:
 
 | Flag | Subjects |
 |---|---|
 | `honeypot_hit`, `scanner_probe`, `fake_bot`, `pow_fail_streak` | address or session |
+| `rate_abuse`, `robots_ignored` | address (written by the module) |
 | `app_verified_human`, `app_verified_session`, `app_trust_signal` | **session only** |
 
 Those three are credits. Suspicion shared across an address costs
