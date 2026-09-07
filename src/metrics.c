@@ -4461,8 +4461,9 @@ int bs_dashboard_handler(request_rec *r)
         apr_uint32_t la = bs_loadavg_current();
         /* The merged state is no longer rendered here -- it is the
          * worst of the four pills below, and printing it again cost a
-         * row. It is still what policy matches on; see bs_load_current
-         * and the minload= predicate. */
+         * row. Since 2026-09-07 no rule matches on it either: the
+         * minload= condition was retired and the state survives as
+         * this gauge and the load_state series, not as policy. */
         apr_uint32_t dbst  = bs_shm.header
             ? apr_atomic_read32(&bs_shm.header->db_state) : 0;
         apr_uint32_t dbthr = bs_shm.header

@@ -284,10 +284,11 @@ typedef struct {
      * 0 = no condition. */
     /* loadavgatleast= : per-CPU load average, hundredths.
      *
-     * The quantitative half of minload=. That reads a three-state
-     * machine driven mostly by the busy-worker ratio; this reads the
-     * number the same watchdog tick already wrote to the SHM header,
-     * in the unit BotShieldLoadAvgWarm/Hot use.
+     * Reads the number the watchdog tick already wrote to the SHM
+     * header, in the unit BotShieldLoadAvgWarm/Hot use. It replaced a
+     * minload= condition that matched on the three-state machine
+     * instead; that state is still sampled and still reported as the
+     * load_state gauge, but no rule reads it.
      *
      * -1 = no condition. 0 is a legal threshold and means "always",
      * so absence cannot be spelled as zero. */
@@ -322,12 +323,6 @@ typedef struct {
      * rules put there; NULL name = no condition. */
     const char        *score_pred_name;
     int                score_pred_min;
-    /* minload=normal|warm|hot -- fires when the current load state is
-     * AT OR ABOVE this level. Spelled as a minimum rather than an
-     * operator so it parses as an ordinary key=value; "fires from warm
-     * upwards" is the only comparison a shed ladder ever wants.
-     * -1 = no condition. */
-    int                minload;
     /* ua= / ipspec= cohort. has_cohort==0 means no UA/IP restriction. */
     bs_cohort          cohort;
     int                has_cohort;

@@ -796,8 +796,6 @@ static const command_rec bs_cmds[] = {
                  "path=<glob>, query=<glob>, cookies=none|any|session, "
                  "exists=yes|no, solved=yes|no (client holds a cookie "
                  "proving it passed a challenge), "
-                 "minload=normal|warm|hot (fires at that load state or "
-                 "above), ua=<substring>|@<botgroup>|@bot|@fake-bot, "
                  "ipspec=*|<file>|<cidr[,cidr]>. Action keys: "
                  "respond=<code|nochallenge>, redirect=<url>, "
                  "challenge=<tier>, score=\"<name> +n\", log=<tag>, "

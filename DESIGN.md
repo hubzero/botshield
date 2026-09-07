@@ -1813,9 +1813,9 @@ seconds (default 1, range 1..60) under mod_watchdog. Each tick:
 ### Lockless reader
 
 `bs_load_current()` is `__atomic_load_n(&header->load_state,
-__ATOMIC_RELAXED)`, called from the `minload=` rule condition
-predicate matcher in `bs_check_policy`. No scoreboard scans on the
-hot path. `bs_loadavg_current()` and `bs_latency_current_us()` are the
+__ATOMIC_RELAXED)`. It had one policy consumer, the `minload=`
+condition, until that was removed on 2026-09-07; the read now serves
+the `load_state` gauge only. No scoreboard scans on the hot path. `bs_loadavg_current()` and `bs_latency_current_us()` are the
 same shape for `loadavgatleast=` and `latencyatleast=`: one relaxed
 atomic read of a number the watchdog tick already wrote.
 

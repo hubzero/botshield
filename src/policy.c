@@ -482,8 +482,6 @@ int bs_check_policy(request_rec *r)
             /* Load axis before the cohort: an atomic read is cheaper
              * than the UA classifier, and under a shed ladder most
              * rules will not be at their level. */
-            if (t->minload >= 0 && (int)bs_load_current() < t->minload)
-                continue;
             if (t->solved_pred >= 0) {
                 const char *sv = apr_table_get(r->notes, BS_CK_SOLVED_NOTE);
                 int solved = (sv && *sv == '1');
@@ -852,7 +850,6 @@ static const char *bs_psh_rule_conditions(apr_pool_t *p,
         BS_PSH_ADD("acceptlanguage=%s", t->acceptlang_pred ? "*" : "\"\"");
     if (t->flagged_bit)        BS_PSH_ADD("flagged=%s",
                                           bs_psh_flag_name(t->flagged_bit));
-    if (t->minload >= 0)       BS_PSH_ADD("minload=%d", t->minload);
     /* Hundredths per core on the wire; printed as the ratio the
      * operator typed, which is also what BotShieldLoadAvgWarm takes. */
     if (t->loadavg_min_pct >= 0)

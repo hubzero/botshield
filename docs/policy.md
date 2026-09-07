@@ -244,7 +244,7 @@ the same shared action keys.
 | Cookie | `BotShieldCookie` / `BotShieldCookies` / `BotShieldBSCookie` inside a rule | Cookie name + value, or the bulk shape |
 | Env | `BotShieldEnv` inside a rule | Apache env var |
 | Feedback | `BotShieldEvent` inside a `<BotShieldFeedback>` | App-signed event name (**response** path) |
-| Load | `BotShieldMinLoad` inside a rule | Global load_state |
+| Load | `BotShieldLoadAvgAtLeast` / `BotShieldLatencyAtLeast` inside a rule | Per-CPU load average / Apache mean latency |
 
 ### Shared action keys
 
@@ -376,26 +376,9 @@ observe` and skipping the SHM mutation. See
 
 ### Load conditions
 
-`BotShieldMinLoad` fires at that load state **or above**, so a shed
-ladder is rules in declaration order with the strictest rung first:
-
-```apache
-<BotShieldRule shed-hard>
-    BotShieldMinLoad   hot
-    BotShieldUserAgent @bot
-    BotShieldRespond   503
-</BotShieldRule>
-
-<BotShieldRule shed-soft>
-    BotShieldMinLoad   warm
-    BotShieldUserAgent @ai-train
-    BotShieldChallenge noninteractive
-</BotShieldRule>
-```
-
-`BotShieldLoadAvgAtLeast <N>` is the same shape against a number
-instead of a state — the per-CPU 1-minute load average, `1.0` being one
-runnable process per core:
+A shed ladder is rules in declaration order with the strictest rung
+first. `BotShieldLoadAvgAtLeast <N>` matches the per-CPU 1-minute load
+average, `1.0` being one runnable process per core:
 
 ```apache
 <BotShieldRule shed-hard>
@@ -405,11 +388,10 @@ runnable process per core:
 </BotShieldRule>
 ```
 
-Which to reach for is a question about what should be deciding. A
-`minload=` rule asks the load *policy* whether it is unhappy, and
-inherits every threshold, the latency escape and the external state
-file with it. A `BotShieldLoadAvgAtLeast` rule asks the machine a
-question with one answer. On a host where `MaxRequestWorkers` bears no
+A `BotShieldMinLoad` condition matching the three-state machine
+existed until 2026-09-07 and was removed; the state is still sampled
+and reported as the `load_state` gauge, but no rule reads it. On a
+host where `MaxRequestWorkers` bears no
 relation to what the hardware can serve — see
 [directives](directives.md#why-the-busy-worker-ratio-is-often-the-wrong-signal) —
 the ratio is the one to distrust.

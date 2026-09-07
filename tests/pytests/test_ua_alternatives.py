@@ -136,3 +136,38 @@ def test_a_user_agent_containing_a_comma_is_one_value(
         f"a UA matching only part of the comma-containing value was refused "
         f"({half.status_code}) -- the value was split on its comma"
     )
+
+
+def test_two_ipspec_lines_are_ored(config_override):
+    """ipspec repeats the same way, for consistency rather than repair.
+
+    A comma cannot appear in a CIDR, so the old comma-joining was never
+    ambiguous here the way it was for a User-Agent -- this spelling
+    already worked. What it was not was consistent: three repeatable
+    keys, two taking a token per line and one joined behind the
+    reader's back.
+
+    Every address here is inside 192.0.2.0/24, which no other
+    test or config touches. The first draft used 203.0.113.x and
+    198.51.100.x -- four and five other files use those -- and the
+    control address arrived carrying flag state from an earlier
+    test, refused for a reason unrelated to this rule. It passed
+    alone and failed in the full lane.
+    """
+    conf = (
+        'BotShieldEnabled On\n'
+        '    <BotShieldRule ip-alts>\n'
+        '        BotShieldPath      /ip-alt-probe\n'
+        '        BotShieldIPSpec    192.0.2.0/28\n'
+        '        BotShieldIPSpec    192.0.2.128/28\n'
+        '        BotShieldRespond   403\n'
+        '    </BotShieldRule>'
+    )
+    with config_override(r'BotShieldEnabled\s+On', conf,
+                         render=False, count=1):
+        a = client.get('/ip-alt-probe', xff='192.0.2.3', ua='probe/1.0')
+        b = client.get('/ip-alt-probe', xff='192.0.2.130', ua='probe/1.0')
+        c = client.get('/ip-alt-probe', xff='192.0.2.200', ua='probe/1.0')
+    assert a.status_code == 403, f'first CIDR missed; got {a.status_code}'
+    assert b.status_code == 403, f'second CIDR missed; got {b.status_code}'
+    assert c.status_code != 403, f'an unlisted IP was refused; got {c.status_code}'

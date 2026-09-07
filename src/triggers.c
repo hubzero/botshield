@@ -1172,7 +1172,6 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
     e->score_pred_min  = 0;
     e->bscookie_pred = -1;            /* no bs-cookie condition */
     e->crawler_pred  = -1;            /* no crawler condition */
-    e->minload     = -1;              /* no load condition */
     bs_trigger_action_init(BS_TFAMILY_REQUEST, &e->action);
 
     const char *ua_arg = NULL, *ipspec_arg = NULL;
@@ -1418,16 +1417,6 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                     "%.*s=no, or the complementary value.",
                     D, (int)klen, arg);
             }
-            if (klen == 7 && strncasecmp(arg, "minload", 7) == 0) {
-                if      (!strcasecmp(val, "normal")) e->minload = BS_LOAD_NORMAL;
-                else if (!strcasecmp(val, "warm"))   e->minload = BS_LOAD_WARM;
-                else if (!strcasecmp(val, "hot"))    e->minload = BS_LOAD_HOT;
-                else {
-                    return apr_psprintf(cmd->pool,
-                        "%s: minload='%s' not one of normal|warm|hot", D, val);
-                }
-                continue;
-            }
             if (klen == 6 && strncasecmp(arg, "exists", 6) == 0) {
                 if      (!strcasecmp(val, "yes")) e->exists_pred = 1;
                 else if (!strcasecmp(val, "no"))  e->exists_pred = 0;
@@ -1486,7 +1475,15 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                 continue;
             }
             if (klen == 6 && strncasecmp(arg, "ipspec", 6) == 0) {
-                ipspec_arg = val;
+                /* Re-join here rather than in the walker. The cohort
+                 * resolver takes a comma-separated list already, so
+                 * one line per network and one line holding a list are
+                 * the same input to it -- and unlike a User-Agent, a
+                 * CIDR cannot contain the separator, so rebuilding the
+                 * list cannot merge two values into one. */
+                ipspec_arg = (ipspec_arg && ipspec_arg[0])
+                           ? apr_psprintf(cmd->pool, "%s,%s", ipspec_arg, val)
+                           : val;
                 continue;
             }
         }
@@ -1552,7 +1549,7 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
         && !e->path_patterns && !e->query_pattern
         && e->bscookie_pred < 0 && e->crawler_pred < 0
         && e->cookie_pred < 0 && e->exists_pred < 0
-        && e->solved_pred < 0 && e->minload < 0
+        && e->solved_pred < 0
         && e->firstsight_pred < 0 && e->acceptlang_pred < 0
         && e->ck_pred < 0 && e->env_pred < 0 && !e->flagged_bit
         && e->loadavg_min_pct < 0 && e->latency_min_ms < 0
@@ -1561,7 +1558,7 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
         return apr_psprintf(cmd->pool,
             "%s '%s': needs at least one match key (path=, query=, "
             "cookies=, bscookie=, cookie=, env=, flagged=, crawler=, "
-            "exists=, solved=, firstsight=, acceptlanguage=, minload=, "
+            "exists=, solved=, firstsight=, acceptlanguage=, "
             "loadavgatleast=, latencyatleast=, ua=, ipspec=). A rule "
             "with no condition "
             "matches every request. Declare it inside the "
@@ -2020,7 +2017,8 @@ const char *bs_section_trigger(cmd_parms *cmd, void *dconf, const char *arg,
                     "IPSpec accumulate; everything else would silently "
                     "keep one value.", dname, name, directive);
             }
-            if (strcmp(key, "path") == 0 || strcmp(key, "ua") == 0) {
+            if (strcmp(key, "path") == 0 || strcmp(key, "ua") == 0
+             || strcmp(key, "ipspec") == 0) {
                 /* Paths get a token each rather than a comma-joined
                  * list, because a comma is a legal character in a path
                  * (RFC 3986 sub-delims) and cannot also be the
@@ -2038,8 +2036,11 @@ const char *bs_section_trigger(cmd_parms *cmd, void *dconf, const char *arg,
                  * where one value ended, and could only do it safely
                  * when every element began with '@'.
                  *
-                 * IPSpec keeps the joined form: a comma cannot appear
-                 * in a CIDR, so there is no ambiguity to avoid. */
+                 * IPSpec comes too. A comma cannot appear in a CIDR,
+                 * so joining was never ambiguous the way it was for a
+                 * User-Agent -- but three repeatable keys behaving two
+                 * ways is a rule an operator has to hold in their head,
+                 * and the cohort resolver already accepts a list. */
                 *(const char **)apr_array_push(kvs) =
                     apr_psprintf(p, "%s=%s", key, value);
                 continue;

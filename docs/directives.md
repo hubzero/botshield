@@ -808,7 +808,6 @@ already matched, and the container is the condition. See
 | `exists=yes\|no` | whether the request maps to a real file | a stat, so the rest of a ladder can see only paths that do not exist |
 | `crawler=yes\|no` | verified-bot classification | identity-checked, not UA text |
 | `firstsight=yes\|no` | Bloom-filter membership of the address | `yes` = never seen before |
-| `minload=normal\|warm\|hot` | current server load state | fires **at or above** the named level |
 | `loadavgatleast=<N>` | 1-minute load average **per CPU** | fires at or above `N`. `1.0` = one runnable process per core. The quantitative form of `minload=`; see [why the busy-worker ratio is often the wrong signal](#why-the-busy-worker-ratio-is-often-the-wrong-signal) |
 
 Five of those consult module state rather than request text — a stat,
@@ -1907,15 +1906,21 @@ ability to measure itself.
 matches every request and a rule saying "shed when latency is at least
 nothing" is always a mistake.
 
-### Choosing between the three
+### Choosing between the two
 
-Prefer `BotShieldLoadAvgAtLeast` to `minload=` when the deployment is
-one the ratio cannot see, which on the host described above is all of
-them.
-`minload=` remains the right condition when the load *policy* — the
-thresholds, the latency escape, the external state file — is what
-should decide, and a rule should just ask whether that policy is
-currently unhappy.
+`BotShieldLatencyAtLeast` is the one that sees a worker blocked on
+I/O; `BotShieldLoadAvgAtLeast` is the one that sees CPU saturation.
+On this deployment the failure mode has been the former, so the shed
+ladder reads latency and keeps load average in reserve.
+
+There was a third, `minload=`, matching the three-state
+normal/warm/hot machine. It was **removed on 2026-09-07**: the shed
+ladder was its only consumer, and the state it read disagreed sharply
+with the load average about what "busy" meant — the machine reached
+warm 172 times on 2026-09-01 while 98.3% of the shedding it drove
+happened between 0.07 and 0.24 per CPU. Nobody could account for what
+moved it, and a condition whose firing cannot be explained is worse
+than no condition. The measurement stayed: see below.
 
 There is no "below this" spelling and `!` is refused. A rule for the
 quiet case is the one the loaded rule falls through to, which keeps the
@@ -1933,13 +1938,14 @@ because the alternative — persisting the value across a reload — means
 a rule acting on a measurement taken by a configuration that is no
 longer running.
 
-The three-state machine that `minload=` reads is not affected: it is
-recomputed from the scoreboard on the same tick and starts at `normal`,
-which is also fail-open.
+The three-state machine is not affected: it is recomputed from the
+scoreboard on the same tick and starts at `normal`, which is also
+fail-open.
 
-The trigger family that consumes the state lives under
-`BotShieldMinLoad` on a rule (above). See
-[policy](policy.md#load-conditions).
+No rule reads that machine any more. It survives as the `load_state`
+gauge and the `load_state_changes_total` series, which is the right
+home for a signal that is worth watching and not yet worth acting on.
+See [policy](policy.md#load-conditions).
 
 ## Multi-vhost reputation
 
