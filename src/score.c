@@ -132,8 +132,7 @@ const char *bs_score_reasons_joined(apr_pool_t *p,
  * *out_tier_floor). */
 int bs_apply_flag_triggers(request_rec *r,
                            const struct bs_server_cfg *scfg,
-                           apr_uint32_t firing_flags,
-                           apr_uint32_t block_flags,
+                           apr_uint32_t flags,
                            bs_tier *out_tier_floor,
                            int *out_block_status,
                            const char **out_block_flag)
@@ -142,16 +141,12 @@ int bs_apply_flag_triggers(request_rec *r,
     if (out_block_status) *out_block_status = 0;
     if (out_block_flag) *out_block_flag = NULL;
     if (!scfg || !scfg->flag_triggers) return 0;
-    if (firing_flags == 0 && block_flags == 0) return 0;
+    if (flags == 0) return 0;
     int fired = 0;
     for (int i = 0; i < scfg->flag_triggers->nelts; i++) {
         bs_flag_trigger_entry *e =
             APR_ARRAY_IDX(scfg->flag_triggers, i, bs_flag_trigger_entry *);
-        /* Block reads the un-excused set; everything else reads the
-         * excused-subtracted one. */
-        apr_uint32_t visible = (e->action == BS_FLAG_ACT_BLOCK)
-                             ? block_flags : firing_flags;
-        if (!(visible & e->flag_bit)) continue;
+        if (!(flags & e->flag_bit)) continue;
         fired++;
         if (e->mode == BS_TMODE_OBSERVE) {
             bs_score_add(r, 0,

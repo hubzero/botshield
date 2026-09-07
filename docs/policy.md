@@ -222,9 +222,10 @@ Two interactions are called out inline rather than left to
 documentation nobody consults at the moment it matters:
 
 `~` — a flag scoring at or above the noninteractive threshold. Such a
-flag is a challenge switch rather than a contributing signal. Bounded by
-`flags_excused` (one solve clears it for that cookie), so the residual
-risk is a client that *cannot* solve.
+flag is a challenge switch rather than a contributing signal. Bounded
+by the tier decision, which does not challenge a client at a level it
+has already passed, so the residual risk is a client that *cannot*
+solve.
 
 `!!` — a `tier_floor` at or above `interactive` while that threshold is
 parked. The floor is MAX'd in after the score-to-tier decision and

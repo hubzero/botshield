@@ -66,10 +66,9 @@ const char *bs_challenge_canonical(apr_pool_t *p,
      * circulation; removing one silently validates a forgery. */
     return apr_psprintf(p,
         "%d|%s|%s|%s|%d|%" APR_TIME_T_FMT
-        "|%u|%d|%d|%d|%" APR_TIME_T_FMT "|%d|%u",
+        "|%d|%d|%d|%" APR_TIME_T_FMT "|%d|%u",
         ch->version, ch->alg_name, salt_hex, nonce_hex,
         ch->difficulty, ch->expires_at,
-        (unsigned)ch->rep.flags_excused,
         ch->rep.passes_non_interactive, ch->rep.passes_interactive,
         ch->rep.passes_captcha,
         ch->rep.challenged_at,

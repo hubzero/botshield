@@ -467,21 +467,19 @@ static const char *bs_parse_canonical_fields(char *const fields[], int nf,
     if (!bs_parse_int64_bounded(fields[5], 0, APR_INT64_MAX, &v64)) return "bad expires_at";
     ch->expires_at = (apr_time_t)v64;
 
-    if (!bs_parse_uint32_bounded(fields[6], 10, &ch->rep.flags_excused))
-        return "bad flags";
-    if (!bs_parse_int_bounded(fields[7],  0, 1, 1, &v)) return "bad passes_non_interactive";
+    if (!bs_parse_int_bounded(fields[6],  0, 1, 1, &v)) return "bad passes_non_interactive";
     ch->rep.passes_non_interactive  = (int)v;
-    if (!bs_parse_int_bounded(fields[8],  0, 1, 1, &v)) return "bad passes_interactive";
+    if (!bs_parse_int_bounded(fields[7],  0, 1, 1, &v)) return "bad passes_interactive";
     ch->rep.passes_interactive    = (int)v;
-    if (!bs_parse_int_bounded(fields[9], 0, 1, 1, &v)) return "bad passes_captcha";
+    if (!bs_parse_int_bounded(fields[8], 0, 1, 1, &v)) return "bad passes_captcha";
     ch->rep.passes_captcha = (int)v;
-    if (!bs_parse_int64_bounded(fields[10], 0, APR_INT64_MAX, &v64)) return "bad challenged_at";
+    if (!bs_parse_int64_bounded(fields[9], 0, APR_INT64_MAX, &v64)) return "bad challenged_at";
     ch->rep.challenged_at  = (apr_time_t)v64;
-    if (!bs_parse_int_bounded(fields[11], 0, 1, 1, &v)) return "bad auto";
+    if (!bs_parse_int_bounded(fields[10], 0, 1, 1, &v)) return "bad auto";
     ch->auto_tier = (int)v;
-    if (!bs_strict_int_form(fields[12], 0))
+    if (!bs_strict_int_form(fields[11], 0))
         return "non-canonical integer surface form";
-    if (!bs_parse_uint32_bounded(fields[12], 10, &ch->rep.flags_active))
+    if (!bs_parse_uint32_bounded(fields[11], 10, &ch->rep.flags_active))
         return "bad flags_active";
     return NULL;
 }
@@ -657,35 +655,12 @@ int bs_carry_forward_eligible(request_rec *r,
  * The caller bumps the appropriate passes_X afterward (the
  * "ever passed" clamp). Tier knowledge for that decision also stays
  * at the call site. */
-/* Record the client's currently-flagged bits as answered-for.
- *
- * Called at every point a challenge is successfully solved, because
- * solving does not clear a flag and flag scores re-apply on every
- * request: without this, any flag scoring at or above
- * BotShieldScoreNonInteractive is an unbreakable challenge loop. Seen in
- * production as pow_ok succeeding roughly once a second, each success
- * followed immediately by another challenge carrying cookie=solved.
- *
- * Only flags live at THIS moment are excused. Anything flagged later is
- * new evidence and still fires, so a solve settles the debt it was
- * challenged for without buying immunity. OR'd rather than assigned so
- * a client solving twice keeps what it already earned.
- *
- * Reads the IP table directly: the verify endpoints are routed before
- * the decision path runs, so there is no ip_flags in scope to pass in. */
-void bs_rep_excuse_current_flags(request_rec *r, bs_rep_state *rep)
-{
-    if (!rep) return;
-    bs_server_cfg *scfg = ap_get_module_config(r->server->module_config,
-                                               &botshield_module);
-    if (!scfg) return;
-    unsigned char ip[16];
-    apr_uint32_t  flags = 0;
-    if (!bs_parse_client_ip(r->useragent_ip, ip)) return;
-    bs_mask_ipv6_prefix(ip, scfg->ipv6_prefix_bits);
-    bs_flagged_ip_lookup(ip, &flags, scfg->ns_id);
-    rep->flags_excused |= flags;
-}
+/* bs_rep_excuse_current_flags lived here. It stamped the flags a
+ * client held at solve time into the cookie so they would stop firing
+ * for it. The tier decision compares the tier being asked for against
+ * the passes the cookie carries instead, which answers the same
+ * question wherever the tier came from rather than only when a flag
+ * raised it. */
 
 /* bs_apply_rep_carry lived here. Both callers already did the carry
  * themselves -- next_rep = prior_ch.rep -- and called this only to run

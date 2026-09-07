@@ -127,8 +127,7 @@ The cookie carried a `score` field until protocol 6, and a request's
 total was that plus what the request itself scored. Nothing read it for
 a decision after the tier cut-points went, so it was signed and carried
 and consulted by nobody. What the cookie carries about the past now is
-discrete and named: which challenges this client has passed, and which
-flags were excused when it passed them.
+discrete and named: which challenges this client has passed.
 
 The decision log's `cookie=` field reports one of `solved` (verified
 **and** carrying challenge-solve proof), `ok` (verified, no such proof
@@ -160,12 +159,14 @@ A successful challenge used to apply a negative score credit
 cap so a bot could not stockpile credit by solving cheap challenges.
 Both went with the total in protocol 6.
 
-What a solve buys now is discrete: the matching `passes_*` marker, and
-`flags_excused` — the flags this client was carrying at the moment it
-solved are answered for, for the life of the cookie. That is what stops
-a flagged client being re-challenged forever, and it is what was doing
-that work all along. Forgiveness never could: flag effects re-apply
-every request, so a forgiven-to-zero score came back before the next
+What a solve buys now is discrete: the matching `passes_*` marker.
+The tier decision reads it and does not challenge a client at a level
+it has already cleared, which is what stops a flagged client being
+re-challenged forever. `flags_excused` did that job from protocol 6
+until protocol 7, on the flags rather than on the decision, and could
+only cover the tiers a flag had raised. Forgiveness never could at
+all: flag effects re-apply every request, so a forgiven-to-zero score
+came back before the next
 decision.
 
 Anything flagged *after* the solve is new evidence and still fires, so

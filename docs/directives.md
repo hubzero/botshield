@@ -250,12 +250,12 @@ the cookie. A tier is chosen by a rule that asks for one, or by a
 which name the signal that paid for the challenge, which a single
 running total never could.
 
-What forgiveness was protecting is still protected, by the thing that
-was always doing the work: a client that solves has the flags it was
-carrying at that moment excused for the life of its cookie. Forgiveness
-could never break a challenge loop on its own, because flag effects
-re-apply every request — a forgiven-to-zero score was re-raised on the
-next one. See [site model](site-model.md#carry-forward-gate).
+What forgiveness was protecting is still protected, at the tier
+decision rather than in the score: a client is not challenged at a
+tier it has already passed. Forgiveness could never break a challenge
+loop on its own, because flag effects re-apply every request — a
+forgiven-to-zero score was re-raised on the next one. See
+[site model](site-model.md#carry-forward-gate).
 
 ## Silent-tier dispatch
 
@@ -1083,8 +1083,9 @@ error:
 
 Such a rule refreshes the flag's expiry on every request it matches, so
 the address never ages out of it — and expiry is the only recovery for
-a client that *cannot* solve a challenge. (`flags_excused` covers the
-client that can.) The match earns nothing there either: if the rule's
+a client that *cannot* solve a challenge. (A client that can is covered
+by the tier decision, which does not re-ask a question the cookie
+already answers.) The match earns nothing there either: if the rule's
 other conditions justify the write, they justify it whether or not the
 flag is already set. Write the flag from the rule that detects the
 behaviour.
@@ -1706,7 +1707,11 @@ request. Forgiveness used to reduce a score carried in the cookie and
 could not help: `bs_apply_flag_triggers` re-added the flag's
 contribution immediately, so a forgiven-to-zero score was raised again
 before it could matter. Both the carried score and forgiveness are gone
-now; what breaks the loop is `flags_excused`.
+now, and so is `flags_excused`, which replaced them and worked a step
+removed from the decision in the same way — on the flags rather than
+on the score. What breaks the loop is the tier decision: a demand at
+or below what the cookie already proves is not made, and a captcha the
+scope cannot serve is clamped to what it can.
 
 So a flagged client is re-challenged forever however many times it
 solves. In production this looked like `pow_ok` succeeding roughly once

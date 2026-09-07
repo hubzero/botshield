@@ -1,11 +1,28 @@
 """Regression: a flagged client must be able to solve its way out.
 
 Solving a challenge does not clear a flag, and flag scores re-apply on
-every request. Before `flags_excused`, any flag scoring at or above
-the noninteractive row was therefore an unbreakable loop: challenge,
-solve, get re-scored by the same flag, challenge again, forever. It
-reached production twice -- once via a compiled-in tier_floor, once via
-the score that the documented fix for the first one recommends.
+every request. Any flag scoring at or above the noninteractive row is
+therefore a loop unless something breaks it: challenge, solve, get
+re-scored by the same flag, challenge again, forever. It reached
+production twice -- once via a compiled-in tier_floor, once via the
+score that the documented fix for the first one recommends.
+
+Two things break it now, and both live at the tier decision rather
+than at the flag.
+
+A client is not challenged at a tier it already passed. Re-asking a
+question the cookie already answers gets the same answer and costs a
+page; only a demand HIGHER than what was passed is a new question. So
+a flag keeps scoring, keeps appearing in the reason trace, and stops
+producing challenges once the client has cleared its level.
+
+And a captcha this scope cannot serve is clamped to what it can. The
+render path falls back to the interactive PoW page when no provider is
+configured, but the demand used to survive the fallback -- and the
+envelope that page mints carries passes_interactive, never
+passes_captcha. The client was asked for a proof it was never offered.
+That is the loop these tests actually caught when `flags_excused` was
+removed and the clamp was not yet there.
 
 The shape of the bug is why it survived a test suite that already
 covered flags and already covered solving. A test that solves once and
@@ -98,16 +115,19 @@ def test_flagged_client_escapes_loop_after_solving(
 def test_flag_acquired_after_solving_still_fires(
     config_override, fresh_ip, log_slice,
 ):
-    """The excusal must not become blanket immunity.
+    """Solving must not switch the flag system off.
 
-    Only the flags live at solve time are settled. A client that solves
-    and then earns a DIFFERENT flag has produced new evidence, and that
-    must still challenge -- otherwise one solve buys permanent immunity
-    and the flag system stops meaning anything.
+    A client that solves and then earns a DIFFERENT flag has produced
+    new evidence. The flag still fires: it scores, and it appears in
+    the reason trace, which is what this asserts. Whether it also
+    produces a challenge is the separate question the tier decision
+    answers -- new evidence that pushes the demand above what the
+    client passed does challenge, and evidence that lands at or below
+    it does not, because that question is already answered.
 
-    Two distinct flags rather than one, because that is precisely the
-    distinction being tested: excusal is per-flag-bit, not a blanket
-    "this client has solved" exemption."""
+    Two distinct flags rather than one, because a mechanism keyed on
+    "this client has solved something" rather than on what it proved
+    would let the second flag through unnoticed."""
     with config_override(
         r"BotShieldEnabled\s+On",
         "BotShieldEnabled On\n"
@@ -143,14 +163,14 @@ def test_flag_acquired_after_solving_still_fires(
         )
 
 
-def test_excusal_requires_real_solve_proof(
+def test_a_presence_cookie_settles_nothing(
     config_override, fresh_ip, log_slice,
 ):
     """A presence cookie is not solve proof.
 
-    Under always-mint every returning client holds a valid cookie, which
-    is exactly what a cookie-harvesting bot has. Only `solved` -- a
-    cookie carrying a passes_* bit -- may excuse anything."""
+    Under always-mint every returning client holds a valid cookie,
+    which is exactly what a cookie-harvesting bot has. It carries no
+    passes_* bit, so it proves nothing and answers no demand."""
     with config_override(
         r"BotShieldEnabled\s+On",
         "BotShieldEnabled On\n"
@@ -174,4 +194,66 @@ def test_excusal_requires_real_solve_proof(
         assert any("flagtrigger:honeypot_hit" in d["reason"] for d in lines), (
             f"an unsolved presence cookie must not excuse a flag; "
             f"lines={lines}"
+        )
+
+
+def test_an_unservable_captcha_demand_is_clamped(
+    config_override, fresh_ip, log_slice,
+):
+    """A captcha nobody can serve must not be demanded.
+
+    The dev vhost configures no captcha provider, so the render path
+    falls back to the interactive PoW page. The demand used to survive
+    that fallback: the envelope minted for a PoW page carries
+    passes_interactive and never passes_captcha, so the next request
+    met the same captcha demand, the same missing provider, and the
+    same PoW page. The client was asked for a proof it was never
+    offered, and no amount of solving could end it.
+
+    Scored straight past the captcha row rather than through a flag,
+    because the flag route is the one that was already covered -- this
+    pins the clamp itself, which any route to a captcha demand needs.
+
+    The reason trace naming captcha_unavailable is the assertion that
+    the clamp is what did it. A challenge served at interactive proves
+    nothing on its own: that is exactly what the broken version did
+    too, one loop iteration at a time.
+    """
+    with config_override(
+        r"BotShieldEnabled\s+On",
+        "BotShieldEnabled On\n"
+        "    <BotShieldRule demand-captcha>\n"
+        "        BotShieldPath      /captcha-clamp-probe\n"
+        "        BotShieldChallenge captcha\n"
+        "    </BotShieldRule>",
+        render=False,
+        count=1,
+    ):
+        with log_slice as slc:
+            first = client.get("/captcha-clamp-probe", xff=fresh_ip,
+                               ua=BROWSER_UA, accept_language=ACCEPT_LANG)
+            lines = slc.decision_lines(ip=fresh_ip)
+
+        assert first.headers.get("X-Botshield") == "challenge", (
+            "the rule asked for a challenge; something else refused the "
+            "request and this test is not exercising the clamp"
+        )
+        assert any("captcha_unavailable" in (d.get("reason") or "")
+                   for d in lines), (
+            f"the demand should have been clamped to what this scope "
+            f"can serve; lines={lines}"
+        )
+        assert all(d["tier"] != "captcha" for d in lines), (
+            f"a captcha tier survived into the decision log with no "
+            f"provider to serve it; lines={lines}"
+        )
+
+        # And it ends: solve the page actually served, then two more
+        # requests. The second is where the loop showed up.
+        cookie = _solve("/captcha-clamp-probe", fresh_ip)
+        _get("/captcha-clamp-probe", fresh_ip, cookie)
+        again = _get("/captcha-clamp-probe", fresh_ip, cookie)
+        assert again.headers.get("X-Botshield") != "challenge", (
+            "a client that solved what it was offered is still being "
+            "challenged -- the demand outlived the fallback again"
         )

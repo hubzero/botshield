@@ -2139,27 +2139,21 @@ static int bs_handler(request_rec *r)
         bs_score_add(r, 0, "flaggedsession");
     }
     apr_uint32_t all_flags = ip_flags | cookie_flags;
-    /* Skip flags this client already answered for. Solving does not
-     * clear a flag and flag scores re-apply every request, so without
-     * this a flag worth more than BotShieldScoreNonInteractive is an unbreakable
-     * loop: solve, get re-flagged, get re-challenged, forever. Observed
-     * in production as pow_ok succeeding once a second, each success
-     * followed immediately by another challenge carrying cookie=solved.
+    /* Every flag fires, every request. Solving does not clear one and
+     * their effects re-apply, so a flag worth more than
+     * BotShieldScoreNonInteractive would be an unbreakable challenge
+     * loop if nothing else intervened -- solve, get re-flagged, get
+     * re-challenged, forever. Seen in production as pow_ok succeeding
+     * once a second, each success followed immediately by another
+     * challenge carrying cookie=solved.
      *
-     * Only genuine solve proof excuses anything -- a presence cookie
-     * ("ok", which is what a cookie-harvesting bot holds) does not.
-     * Flags acquired after the solve are not in the excused set and
-     * still fire, so this forgives the debt that existed at solve time
-     * rather than granting blanket immunity. The cookie's own lifetime
-     * bounds it; no separate TTL. */
-    apr_uint32_t excused = (have_solve_proof && have_prior_rep)
-                         ? prior_ch.rep.flags_excused : 0;
-    apr_uint32_t firing_flags = all_flags & ~excused;
-    if (all_flags & excused) {
-        bs_score_add(r, 0,
-            apr_psprintf(r->pool, "flags-excused:0x%x",
-                         (unsigned)(all_flags & excused)));
-    }
+     * What intervenes is at the tier decision below, not here: a
+     * client is not challenged at a level its cookie already proves.
+     * So a flag keeps scoring and keeps appearing in the reason trace,
+     * and stops producing challenges once the client has cleared the
+     * level that flag reaches. Evidence that raises the demand HIGHER
+     * still challenges, which is the difference between a client
+     * having answered and a client being exempt. */
     bs_tier tier_floor_from_flags = BS_TIER_PASS;
     int flag_block_status = 0;
     const char *flag_block_name = NULL;
@@ -2167,22 +2161,21 @@ static int bs_handler(request_rec *r)
      * gated. Leaving tier_floor on with scoring off would keep the
      * exact hazard this directive exists to remove: a floor that
      * ignores the verified-bot credit. */
-    bs_apply_flag_triggers(r, scfg_h, firing_flags, all_flags,
+    bs_apply_flag_triggers(r, scfg_h, all_flags,
                            &tier_floor_from_flags,
                            &flag_block_status, &flag_block_name);
 
     /* A block ends the request here, before any tier is chosen.
      *
-     * Read from the un-excused set on purpose: solving a challenge
-     * pays off the flags that were live at solve time, and a refusal
-     * is not a debt a client can work off. The inverse -- letting a
-     * solve clear a block -- would make "blocked" mean "solve a
-     * challenge to continue", which is what a challenge tier already
-     * says and not what an operator writing block asked for.
+     * Solving never clears it, and nothing below can: the
+     * already-passed check applies to challenges, and a block is not
+     * one. Letting a solve clear a block would make "blocked" mean
+     * "solve a challenge to continue", which is what a challenge tier
+     * already says and not what an operator writing block asked for.
      *
-     * Safe to leave un-excusable only because it terminates. A flag
-     * that forces a challenge and cannot be excused is the loop that
-     * reached production twice. */
+     * Safe only because it terminates. A flag that forces a challenge
+     * and cannot be answered is the loop that reached production
+     * twice. */
     if (flag_block_status) {
         bs_score_add(r, 0,
             apr_psprintf(r->pool, "flagblock:%s", flag_block_name));
@@ -2258,6 +2251,23 @@ static int bs_handler(request_rec *r)
                          bs_tier_name(tier_floor_from_flags)));
     }
 
+    /* A captcha this scope cannot serve is not a demand, it is a
+     * loop. bs_render_challenge_page falls back to the interactive PoW
+     * page when the provider triple is incomplete; the envelope it
+     * mints carries passes_interactive, so a captcha demand that
+     * survives the fallback is one the client can never satisfy. Clamp
+     * the demand to what can actually be asked, and the already-passed
+     * check below closes it out on the next request.
+     *
+     * Same triple bs_render_challenge_page tests, because the two have
+     * to agree about what "captcha is available here" means. */
+    if (tier == BS_TIER_CAPTCHA
+        && !(cfg->captcha_provider && cfg->captcha_site_key
+             && cfg->captcha_secret)) {
+        bs_score_add(r, 0, "captcha_unavailable");
+        tier = BS_TIER_INTERACTIVE;
+    }
+
     /* Already answered. A challenge asks the client to prove
      * something; if the cookie already proves it at this level or
      * above, asking again gets the same answer and costs the client a
@@ -2310,10 +2320,10 @@ static int bs_handler(request_rec *r)
     if (tier == BS_TIER_PASS) {
         ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
                       "mod_botshield: pass %s score=%d "
-                      "(ip_flags=0x%x excused=0x%x) cookie_ok=%d",
+                      "(ip_flags=0x%x session_flags=0x%x) cookie_ok=%d",
                       r->uri, effective,
                       (unsigned)ip_flags,
-                      have_prior_rep ? (unsigned)prior_ch.rep.flags_excused : 0,
+                      have_prior_rep ? (unsigned)prior_ch.rep.flags_active : 0,
                       cookie_fully_ok);
         /* E8.2 — module-to-app reputation export. Strip incoming
          * X-Botshield-* and set a single signed claim envelope so
@@ -2446,13 +2456,13 @@ static int bs_handler(request_rec *r)
          * could not farm passes for credit. It had nothing left to
          * subtract from once the score left the cookie.
          *
-         * What it was really protecting against is still handled, by
-         * the thing that always did the work: flags_excused below. A
-         * client that solves has the flags it carried at that moment
-         * excused for the life of the cookie, which is what breaks the
-         * challenge loop. Forgiveness never could -- flag effects
-         * re-apply every request, so a forgiven-to-zero score was
-         * re-raised on the next one. */
+         * Excusal replaced it and has now gone the same way. Both were
+         * trying to stop a solved client being challenged again by the
+         * evidence it had already answered for, and both worked a step
+         * removed from the decision -- forgiveness on the score,
+         * excusal on the flags. The tier decision compares what is
+         * being asked for against the passes this cookie carries,
+         * which is the same question asked where it is decided. */
         next_rep = prior_ch.rep;
         if (prior_ch.auto_tier) {
             next_rep.passes_non_interactive = 1;  /* clamp */
@@ -2460,30 +2470,11 @@ static int bs_handler(request_rec *r)
             next_rep.passes_interactive = 1;  /* clamp */
         }
     } else {
-        next_rep.flags_excused  = 0;
         next_rep.passes_non_interactive  = issue_auto ? 1 : 0;
         next_rep.passes_interactive    = issue_auto ? 0 : 1;
         next_rep.passes_captcha = 0;
         next_rep.challenged_at  = 0;   /* overwritten by issue() */
     }
-
-    /* Stamp the flags this client is being challenged over into the
-     * cookie we are about to issue.
-     *
-     * Needed because the M7 form path never re-mints: the client
-     * assembles its cookie as <envelope>.<counter> from the envelope
-     * issued right here, and no server-side mint follows the solve. The
-     * verify endpoints DO re-mint and stamp this themselves, so this is
-     * the same excusal arriving by the only route the interactive tier has.
-     *
-     * Safe to record before the work is done, because the envelope is
-     * inert without a valid PoW counter -- a client that never solves
-     * can never present this cookie, so "excused at issue" and "excused
-     * on solve" are the same event from the server's side.
-     *
-     * OR'd so re-challenges accumulate rather than resetting what an
-     * earlier solve already settled. */
-    next_rep.flags_excused |= all_flags;
 
     /* Same pending set as the session mint. A challenge response is
      * still a response, and a rule that flagged this request must not
@@ -2510,7 +2501,7 @@ static int bs_handler(request_rec *r)
                   r->unparsed_uri, cfg->algorithm->name, difficulty, ttl,
                   effective, bs_tier_name(tier),
                   bs_score_reasons_joined(r->pool, score),
-                  have_prior_rep ? (unsigned)prior_ch.rep.flags_excused : 0,
+                  have_prior_rep ? (unsigned)prior_ch.rep.flags_active : 0,
                   cookie_fully_ok,
                   next_rep.passes_non_interactive, next_rep.passes_interactive,
                   next_rep.passes_captcha);

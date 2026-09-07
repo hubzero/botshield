@@ -438,13 +438,13 @@ typedef enum {
     /* Refuse the request outright. Sits above every tier rather than
      * beside them: score SUMs, tier_floor MAXes, and any block wins.
      *
-     * Unlike the other two this is NOT subject to excusal. A flag that
-     * forces a challenge and cannot be excused is the unbreakable loop
-     * that reached production twice -- solve, get re-flagged, get
-     * re-challenged. A block has no loop to get stuck in: it ends the
-     * request rather than asking the client for something. That is
-     * what makes it safe to leave un-excusable, and why tier_floor
-     * must not be. */
+     * Nothing lets a client out of it, and nothing needs to: the
+     * already-passed check at the tier decision applies to challenges,
+     * and a block is not one. A block has no loop to get stuck in --
+     * it ends the request rather than asking the client for
+     * something -- which is what makes that safe. A flag that forces a
+     * challenge the client cannot answer is the unbreakable loop that
+     * reached production twice. */
     BS_FLAG_ACT_BLOCK,
 } bs_flag_action_kind;
 

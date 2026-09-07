@@ -84,9 +84,9 @@ typedef struct bs_dir_cfg bs_dir_cfg;
 /* Canonical field count for BS_PROTOCOL_VERSION. The splitter
  * and the parser both read this; they used to carry separate
  * literals, and disagreed. */
-#define BS_CANONICAL_FIELDS   13
-#define BS_PROTOCOL_VERSION   6
-#define BS_PROTOCOL_VERSION_MIN 6
+#define BS_CANONICAL_FIELDS   12
+#define BS_PROTOCOL_VERSION   7
+#define BS_PROTOCOL_VERSION_MIN 7
 #define BS_SALT_BYTES         16
 #define BS_NONCE_BYTES        8
 
@@ -105,26 +105,16 @@ typedef struct bs_dir_cfg bs_dir_cfg;
  * stays at or below BotShieldForgivenessCapPerHour. */
 typedef struct {
 
-    /* Flags the holder has already answered for.
+    /* Which challenges this client has passed. The tier decision
+     * reads these: a demand at or below what they prove is not made,
+     * because re-asking gets the same answer.
      *
-     * Wire field 7. It was originally "cookie-side flags", OR'd into the
-     * IP-side set so a flag followed the cookie -- but nothing ever
-     * wrote it, so it has always been zero on the wire. It now records
-     * the flag set that was live at the moment this cookie's challenge
-     * was solved, and those flags are skipped on later requests.
-     *
-     * This is what stops a flagged client looping forever. Solving does
-     * not clear a flag, and flag scores are re-applied on every request,
-     * so before this a flag worth more than BotShieldScoreNonInteractive meant
-     * an unbreakable challenge loop no matter how many times the client
-     * solved. Flags acquired AFTER the solve are absent from this set
-     * and still fire, so the excusal pays off the debt that existed at
-     * solve time without granting immunity to new evidence.
-     *
-     * No protocol bump: same slot, same width, and the old always-zero
-     * value reads as "nothing excused", which is exactly the previous
-     * behaviour until the client next solves. */
-    apr_uint32_t flags_excused;
+     * A flags_excused field sat above these from protocol 6 to 7,
+     * recording the flags live at solve time so they would stop
+     * firing. It did the same job one step removed -- on the flags
+     * rather than on the decision -- so it could only cover a demand a
+     * flag had raised, and a score threshold or a rule's
+     * BotShieldChallenge still looped. */
     int          passes_non_interactive;
     int          passes_interactive;
     int          passes_captcha;

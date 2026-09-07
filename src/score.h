@@ -159,16 +159,16 @@ const char *bs_score_reasons_joined(apr_pool_t *p,
  * mode=observe entries log a `would-flagtrigger:<flag>:observe`
  * reason and skip the side effect. Returns the count of triggers
  * that fired (informational). */
-/* `firing_flags` drives score and tier_floor and has excusal already
- * subtracted. `block_flags` drives block actions and does not: a
- * blocked session stays blocked whether or not it later solves
- * something. A block ends the request rather than asking the client
- * for anything, so it cannot make the loop that excusal exists to
- * break. */
+/* One flag set. There were two -- score and tier_floor read an
+ * excusal-subtracted set while block read the raw one -- because
+ * excusal stopped a solved client being re-challenged by the same
+ * evidence. That is done at the tier decision now, by comparing the
+ * tier asked for against the passes the cookie carries, which covers
+ * every route to a tier rather than only the flag one. A block was
+ * never a challenge and so never needed excluding from it. */
 int bs_apply_flag_triggers(request_rec *r,
                            const struct bs_server_cfg *scfg,
-                           apr_uint32_t firing_flags,
-                           apr_uint32_t block_flags,
+                           apr_uint32_t flags,
                            bs_tier *out_tier_floor,
                            int *out_block_status,
                            const char **out_block_flag);
