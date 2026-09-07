@@ -1,9 +1,10 @@
 """T3 - BotShieldFlagged as a rule condition.
 
-The FlagTrigger predicate, moved into the rule so it can be ANDed with
-the path, the UA and the rest. FlagTrigger's action half stays: a
-flag->tier mapping applied at the tier decision is a different thing
-from a request match.
+BotShieldFlagTrigger's predicate, moved into the rule so it can be
+ANDed with the path, the UA and the rest. Its action half followed
+later: a rule scores with BotShieldScore, sets a challenge floor with
+BotShieldChallenge and refuses with BotShieldRespond, which was the
+whole of what the family did.
 
 Two decisions this file pins.
 

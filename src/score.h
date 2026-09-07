@@ -1,7 +1,7 @@
-/* score.h — per-request scoring + flagtrigger walker.
+/* score.h — per-request scoring.
  *
  * The score system aggregates penalty/credit signals across all the
- * heuristics, triggers, rate-limit decisions, and flagtrigger
+ * heuristics, triggers, rate-limit decisions and flag
  * runtime. Each entry records (penalty, ttl_seconds, reason) so the
  * decision log can replay why a tier was chosen.
  *
@@ -12,12 +12,9 @@
  * struct is request-scoped and lives on r->request_config under the
  * module's slot.
  *
- * The flagtrigger walker is on the request side too — it consumes
- * scfg->flag_triggers entries (configured at config time via
- * BotShieldFlagTrigger directives, with compiled-in defaults
- * seeded by bs_post_config). For each flag bit set on the request,
- * the walker accumulates SCORE actions via bs_score_add and
- * resolves a TIER_FLOOR via MAX. */
+ * A flagtrigger walker sat here too, turning flag bits into score
+ * and tier floors. A rule matching flagged= does that from the
+ * policy walk, so the walker and its family are gone. */
 #ifndef BOTSHIELD_SCORE_H
 #define BOTSHIELD_SCORE_H
 
@@ -151,27 +148,6 @@ const char *bs_decision_reason_names(apr_pool_t *p,
  * when no entries fired. */
 const char *bs_score_reasons_joined(apr_pool_t *p,
                                     const bs_request_score *s);
-
-/* E14 flagtrigger walker. For each entry in scfg->flag_triggers
- * whose flag_bit is set in all_flags:
- *   - SCORE actions accumulate via bs_score_add
- *   - TIER_FLOOR actions MAX into *out_tier_floor
- * mode=observe entries log a `would-flagtrigger:<flag>:observe`
- * reason and skip the side effect. Returns the count of triggers
- * that fired (informational). */
-/* One flag set. There were two -- score and tier_floor read an
- * excusal-subtracted set while block read the raw one -- because
- * excusal stopped a solved client being re-challenged by the same
- * evidence. That is done at the tier decision now, by comparing the
- * tier asked for against the passes the cookie carries, which covers
- * every route to a tier rather than only the flag one. A block was
- * never a challenge and so never needed excluding from it. */
-int bs_apply_flag_triggers(request_rec *r,
-                           const struct bs_server_cfg *scfg,
-                           apr_uint32_t flags,
-                           bs_tier *out_tier_floor,
-                           int *out_block_status,
-                           const char **out_block_flag);
 
 /* Score-to-tier picker. Three configurable cut-points
  * (BotShieldScoreNonInteractive / Hard / Captcha) gate four tiers

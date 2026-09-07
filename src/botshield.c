@@ -158,10 +158,19 @@ static const char *bs_open_trigger_retired(cmd_parms *cmd, void *dconf,
         "is all this directive ever was.");
 }
 
-static const char *bs_open_flagtrigger(cmd_parms *cmd, void *dconf,
-                                          const char *arg)
+/* Registered rather than dropped so the error names the shape that
+ * replaced it. */
+static const char *bs_open_flagtrigger_retired(cmd_parms *cmd,
+                                          void *dconf, const char *arg)
 {
-    return bs_section_trigger(cmd, dconf, arg, "BotShieldFlagTrigger", bs_set_flag_trigger);
+    (void)dconf; (void)arg;
+    return apr_psprintf(cmd->pool,
+        "<BotShieldFlagTrigger> is gone; write <BotShieldRule name> "
+        "with BotShieldFlagged <flag>. Its three actions are rule "
+        "actions: action=score is BotShieldScore, action=tier_floor "
+        "is BotShieldChallenge, action=block is BotShieldRespond. "
+        "`reset` has no equivalent -- rules settle by declaration "
+        "order.");
 }
 
 static const char *bs_open_feedback(cmd_parms *cmd, void *dconf,
@@ -556,10 +565,10 @@ static const command_rec bs_cmds[] = {
                  NULL, RSRC_CONF | ACCESS_CONF,
                  "Removed. Write <BotShieldRule> in the same "
                  "container."),
-    AP_INIT_RAW_ARGS("<BotShieldFlagTrigger", bs_open_flagtrigger, NULL, RSRC_CONF,
-                 "Open a BotShieldFlagTrigger block. Takes the rule name; every "
-                 "setting is a BotShield directive on its own line "
-                 "until </BotShieldFlagTrigger>."),
+    AP_INIT_RAW_ARGS("<BotShieldFlagTrigger",
+                 bs_open_flagtrigger_retired, NULL, RSRC_CONF,
+                 "Removed. Write <BotShieldRule> with "
+                 "BotShieldFlagged."),
     AP_INIT_RAW_ARGS("<BotShieldFeedback", bs_open_feedback, NULL, RSRC_CONF,
                  "Open a BotShieldFeedback block: what a signed "
                  "application event means. Takes a label; "
@@ -838,27 +847,12 @@ static const command_rec bs_cmds[] = {
                  "(e.g., dev+prod for one logical app, or api+www "
                  "subdomains). Strings up to 128 chars; hashed to a "
                  "32-bit ns_id and stored in each SHM slot."),
-    /* Flag-driven trigger family. */
     AP_INIT_TAKE_ARGV("BotShieldFlagTrigger",
                  bs_flat_trigger_retired, NULL, RSRC_CONF,
-                 "Apply an action when a flag bit fires on the IP- "
-                 "or cookie-side bitmap of a request. Args: <flag> "
-                 "[reset] [action=<verb> args...]. Naming an "
-                 "unknown flag lists the known ones; this text cannot "
-                 "build that list at compile time, and enumerating it "
-                 "by hand is how it fell behind. Action "
-                 "verbs: 'score add=N' (signed, -1000..1000; SUMs "
-                 "across triggers) or 'tier_floor min=<tier>' "
-                 "(pass|noninteractive|interactive|captcha; MAXes across triggers). "
-                 "'reset' clears prior operator declarations for "
-                 "the named flag before this directive's effect is "
-                 "added. mode=observe logs "
-                 "would-flagtrigger:<flag>:observe instead of "
-                 "applying. NOTHING IS SEEDED: a flag with no "
-                 "BotShieldFlagTrigger is recorded and acts on "
-                 "nothing, so every consequence is a line in this "
-                 "config. See docs/examples/flag-triggers.conf.example "
-                 "for a slate to start from."),
+                 "Removed. A rule matching BotShieldFlagged does what "
+                 "this did: BotShieldScore for action=score, "
+                 "BotShieldChallenge for action=tier_floor, "
+                 "BotShieldRespond for action=block."),
     /* E4 — cookie triggers */
     AP_INIT_TAKE1("BotShieldSessionCookieName",
                  bs_set_session_cookie_name, NULL, RSRC_CONF,
@@ -2119,12 +2113,7 @@ static int bs_handler(request_rec *r)
      * disagree about the same address. */
     if (have_client_ip) bs_bloom_add(client_ip, scfg_h->ns_id);
 
-    /* Flag-trigger walker. Walks scfg->flag_triggers over the union
-     * of IP-side and cookie-side flag bits, applying `score add=N`
-     * actions via bs_score_add or a named accumulator, and
-     * accumulating MAX into a tier_floor. Nothing is seeded; operators
-     * declare what they want via BotShieldFlagTrigger. */
-    /* The union this walker has always advertised. cookie_flags is
+    /* The union a flagged= rule reads. cookie_flags is
      * gated on have_prior_rep for the same reason the solve proof
      * below is: the GCM tag is what makes the rep block trustworthy,
      * and an unauthenticated cookie must not be able to assert a flag
@@ -2138,7 +2127,6 @@ static int bs_handler(request_rec *r)
     if (cookie_flags != 0) {
         bs_score_add(r, 0, "flaggedsession");
     }
-    apr_uint32_t all_flags = ip_flags | cookie_flags;
     /* Every flag fires, every request. Solving does not clear one and
      * their effects re-apply, so a flag worth more than
      * BotShieldScoreNonInteractive would be an unbreakable challenge
@@ -2154,37 +2142,12 @@ static int bs_handler(request_rec *r)
      * level that flag reaches. Evidence that raises the demand HIGHER
      * still challenges, which is the difference between a client
      * having answered and a client being exempt. */
-    bs_tier tier_floor_from_flags = BS_TIER_PASS;
-    int flag_block_status = 0;
-    const char *flag_block_name = NULL;
-    /* Flag score AND tier_floor actions are both implicit, so both are
-     * gated. Leaving tier_floor on with scoring off would keep the
-     * exact hazard this directive exists to remove: a floor that
-     * ignores the verified-bot credit. */
-    bs_apply_flag_triggers(r, scfg_h, all_flags,
-                           &tier_floor_from_flags,
-                           &flag_block_status, &flag_block_name);
-
-    /* A block ends the request here, before any tier is chosen.
-     *
-     * Solving never clears it, and nothing below can: the
-     * already-passed check applies to challenges, and a block is not
-     * one. Letting a solve clear a block would make "blocked" mean
-     * "solve a challenge to continue", which is what a challenge tier
-     * already says and not what an operator writing block asked for.
-     *
-     * Safe only because it terminates. A flag that forces a challenge
-     * and cannot be answered is the loop that reached production
-     * twice. */
-    if (flag_block_status) {
-        bs_score_add(r, 0,
-            apr_psprintf(r->pool, "flagblock:%s", flag_block_name));
-        bs_decision_log(r, "nochallenge", "block", cookie_status,
-                        "-", "-",
-                        apr_psprintf(r->pool, "flagblock:%s",
-                                     flag_block_name), 0);
-        return flag_block_status;
-    }
+    /* A flag walker ran here, mapping bits to a score, a tier floor
+     * or a block. All three are rule actions -- BotShieldScore,
+     * BotShieldChallenge, BotShieldRespond -- on a rule that matches
+     * flagged=, so the family said nothing a rule could not and has
+     * been retired. A flag refusal now short-circuits in the policy
+     * walk, earlier than this and for less work. */
 
     /* Fetch the score struct *after* all per-request adds. Using create=1
      * so a request with zero hits still gets a valid (empty) pointer and
@@ -2239,16 +2202,15 @@ static int bs_handler(request_rec *r)
         }
     }
 
-    bs_tier trig_floor = (bs_tier)bs_get_request_tier_floor(r);
-    if (trig_floor > tier_floor_from_flags) {
-        tier_floor_from_flags = trig_floor;
-    }
-    bs_tier tier = (tier_floor_from_flags > score_tier)
-                 ? tier_floor_from_flags : score_tier;
-    if (tier_floor_from_flags > score_tier) {
+    /* One floor now, from BotShieldChallenge on whichever rules
+     * matched. It used to be MAXed with a second one the flag walker
+     * accumulated; a rule reading flagged= sets this one instead. */
+    bs_tier rule_floor = (bs_tier)bs_get_request_tier_floor(r);
+    bs_tier tier = (rule_floor > score_tier) ? rule_floor : score_tier;
+    if (rule_floor > score_tier) {
         bs_score_add(r, 0,
-            apr_psprintf(r->pool, "flagtierfloor:%s",
-                         bs_tier_name(tier_floor_from_flags)));
+            apr_psprintf(r->pool, "ruletierfloor:%s",
+                         bs_tier_name(rule_floor)));
     }
 
     /* A captcha this scope cannot serve is not a demand, it is a

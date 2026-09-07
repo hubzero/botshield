@@ -633,7 +633,7 @@ takes the shape `<family>:<name>` so the source family is visible:
 | `ratelimitexceeded:<name>`, `ratelimitabuse:<name>` | rate limit |
 | `robotsblock:<group>` | robots.txt |
 | `flagtrigger:<flag>` | flag-trigger score action |
-| `flagtierfloor:<tier>` | flag-trigger tier-floor action |
+| `ruletierfloor:<tier>` | a rule's BotShieldChallenge set the floor |
 | `requesttrigger:<name>`, `cookietrigger:<name>`, `envtrigger:<name>`, `loadtrigger:<name>`, `scopetrigger:<name>`, `feedbacktrigger:<event>` | trigger families |
 | `challengesafeguard`, `safeguardredirect` | safeguard |
 | `observabilityendpoint` | a request to the dashboard or metrics endpoint |

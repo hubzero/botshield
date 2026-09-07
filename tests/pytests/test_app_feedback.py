@@ -275,7 +275,7 @@ def test_app_feedback_credit_flag_lowers_score(
         f"the control needs to be challenged for this test to mean "
         f"anything; tier={base_tier} reason={base_lines[-1]['reason']!r}"
     )
-    assert "flagtrigger:app_verified_human" in cred["reason"], (
+    assert "rule:flag-app-verified-human" in cred["reason"], (
         f"the credit flag never fired; reason={cred['reason']!r}"
     )
     assert cred["tier"] == "nochallenge", (

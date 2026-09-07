@@ -928,55 +928,6 @@ void bs_policy_dump(server_rec *s, apr_pool_t *p, bs_dir_cfg *cfg)
         fputs("\n", stdout);
     }
 
-    /* --- robots.txt --- */
-    {
-        /* --- effective flag triggers, after reset processing --- */
-        fputs("## Flag triggers (effective, after reset)\n", stdout);
-        if (!scfg->flag_triggers || scfg->flag_triggers->nelts == 0) {
-            fputs("# (none)\n\n", stdout);
-        } else {
-            fputs("# flag              action      value    mode      "
-                     "source\n", stdout);
-            int warned = 0;
-            for (int i = 0; i < scfg->flag_triggers->nelts; i++) {
-                bs_flag_trigger_entry *e = APR_ARRAY_IDX(
-                    scfg->flag_triggers, i, bs_flag_trigger_entry *);
-                const char *act = e->action == BS_FLAG_ACT_SCORE ? "score"
-                                : e->action == BS_FLAG_ACT_TIER_FLOOR
-                                  ? "tier_floor" : "reset";
-                char val[32];
-                if (e->action == BS_FLAG_ACT_SCORE) {
-                    apr_snprintf(val, sizeof(val), "%s%+d",
-                                 e->score_name, e->score_add);
-                } else if (e->action == BS_FLAG_ACT_TIER_FLOOR) {
-                    apr_snprintf(val, sizeof(val), "%s",
-                                 bs_tier_name(e->tier_min));
-                } else {
-                    apr_snprintf(val, sizeof(val), "-");
-                }
-                printf("%-18s %-11s %-8s %-9s %s\n",
-                           e->flag_name, act, val,
-                           e->mode == BS_TMODE_OBSERVE ? "observe" : "enforce",
-                           e->from_default ? "compiled default" : "configured");
-                /* Two advisories used to print here, about the
-                 * conditions that had actually locked users out of
-                 * this deployment: a flag scoring past the
-                 * noninteractive threshold on its own, and a
-                 * tier_floor above a parked one. Both compared a
-                 * flag's number against a score threshold, and there
-                 * are no score thresholds -- a flag reaches a tier
-                 * through a BotShieldChallengeAtLeast row now, and the
-                 * rows are dir config, which this walk does not have.
-                 *
-                 * Worth restoring in that shape rather than leaving as
-                 * a gap: "this flag crosses row <name> alone" is the
-                 * same warning and still worth making. */
-            }
-            printf("# %d note(s). '!!' is a fault; '~' is a design\n"
-                          "# consequence worth knowing.\n\n", warned);
-        }
-    }
-
     fputs("## robots.txt (BotShieldRobotsTxt)\n", stdout);
     if (!scfg->robots_txt_path) {
         fputs("# (not configured)\n", stdout);

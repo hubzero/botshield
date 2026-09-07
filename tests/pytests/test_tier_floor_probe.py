@@ -1,21 +1,21 @@
-"""A flag tier_floor challenges even where scoring can never fire.
+"""A flag-driven challenge fires even where scoring can never reach.
 
-This is the question an operator actually has when their thresholds are
-unset -- as qubeshub's are, which means cumulative score challenges
-nobody there. If a tier_floor needed a threshold, flagging an address
-would be inert on exactly the deployment most likely to reach for it,
-and the docs' claim that a floor "bypasses your score thresholds" would
-be false where it matters most.
+This is the question an operator actually has when their thresholds
+are unset -- as qubeshub's are, which means cumulative score
+challenges nobody there. If BotShieldChallenge on a flagged= rule
+needed a score threshold to be crossed, flagging an address would be
+inert on exactly the deployment most likely to reach for it, and the
+docs' claim that it bypasses the score thresholds would be false where
+it matters most.
 
 Thresholds are parked absurdly high rather than left unset, because
 config_override appends and cannot unset. Same effect: no score this
 suite generates approaches 9000.
 
-Written in block form with render=False on purpose. The one-line
-key=value spelling of BotShieldFlagTrigger is retired at parse time,
-and the harness's to_blocks does not render the tier_floor keys -- so
-the compact spelling used elsewhere in this suite fails here with a
-reload error rather than a readable assertion.
+This was a BotShieldFlagTrigger with action=tier_floor until that
+family was retired. Same mechanism underneath -- the rule sets a
+request tier floor, which MAXes into the decision without consulting a
+threshold.
 """
 
 from __future__ import annotations
@@ -44,10 +44,10 @@ LADDER_OFF = (
 )
 
 WITH_FLOOR = LADDER_OFF + (
-    "    <BotShieldFlagTrigger scanner_probe>\n"
-    "        BotShieldAction    tier_floor\n"
-    "        BotShieldMin       noninteractive\n"
-    "    </BotShieldFlagTrigger>\n"
+    "    <BotShieldRule flag-floor>\n"
+    "        BotShieldFlagged   scanner_probe\n"
+    "        BotShieldChallenge noninteractive\n"
+    "    </BotShieldRule>\n"
 )
 
 

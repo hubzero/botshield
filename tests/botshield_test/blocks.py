@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 
 FAMILIES = (
-    "BotShieldRule", "BotShieldFlagTrigger", "BotShieldFeedback",
+    "BotShieldRule", "BotShieldFeedback",
 )
 
 # key -> inner directive. Mirrors bs_section_key() in src/triggers.c;

@@ -53,7 +53,6 @@ ACCEPT_LANG = "en-US,en;q=0.9"
 
 # Comfortably above the dev vhost's botsignals row at 20, which is
 # what makes the flag alone sufficient to challenge on every request.
-LOOPING_SCORE = 60
 
 
 def _trip_honeypot(ip: str) -> None:
@@ -93,9 +92,7 @@ def test_flagged_client_escapes_loop_after_solving(
     re-challenged."""
     with config_override(
         r"BotShieldEnabled\s+On",
-        "BotShieldEnabled On\n"
-        f"    BotShieldFlagTrigger honeypot_hit reset "
-        f"action=score accumulator=botsignals add={LOOPING_SCORE}",
+        "BotShieldEnabled On",
         count=1,
     ):
         _trip_honeypot(fresh_ip)
@@ -134,11 +131,7 @@ def test_flag_acquired_after_solving_still_fires(
         "    <BotShieldRule flagger>\n"
         "        BotShieldPath    /flag-me\n"
         "        BotShieldFlagIP  scanner_probe\n"
-        "    </BotShieldRule>\n"
-        f"    BotShieldFlagTrigger honeypot_hit reset "
-        f"action=score accumulator=botsignals add={LOOPING_SCORE}\n"
-        f"    BotShieldFlagTrigger scanner_probe reset "
-        f"action=score accumulator=botsignals add={LOOPING_SCORE}",
+        "    </BotShieldRule>",
         count=1,
     ):
         # Solve carrying honeypot_hit, which excuses exactly that bit.
@@ -158,7 +151,7 @@ def test_flag_acquired_after_solving_still_fires(
         with log_slice as slc:
             _get("/", fresh_ip, cookie)
         lines = slc.decision_lines(ip=fresh_ip)
-        assert any("flagtrigger:scanner_probe" in d["reason"] for d in lines), (
+        assert any("rule:flag-scanner-probe" in d["reason"] for d in lines), (
             f"a flag earned after the solve must still fire; lines={lines}"
         )
 
@@ -173,9 +166,7 @@ def test_a_presence_cookie_settles_nothing(
     passes_* bit, so it proves nothing and answers no demand."""
     with config_override(
         r"BotShieldEnabled\s+On",
-        "BotShieldEnabled On\n"
-        f"    BotShieldFlagTrigger honeypot_hit reset "
-        f"action=score accumulator=botsignals add={LOOPING_SCORE}",
+        "BotShieldEnabled On",
         count=1,
     ):
         _trip_honeypot(fresh_ip)
@@ -191,7 +182,7 @@ def test_a_presence_cookie_settles_nothing(
         with log_slice as slc:
             _get("/", fresh_ip, presence)
         lines = slc.decision_lines()
-        assert any("flagtrigger:honeypot_hit" in d["reason"] for d in lines), (
+        assert any("rule:flag-honeypot-hit" in d["reason"] for d in lines), (
             f"an unsolved presence cookie must not excuse a flag; "
             f"lines={lines}"
         )

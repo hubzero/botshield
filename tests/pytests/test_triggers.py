@@ -529,3 +529,59 @@ def test_respond_is_the_canonical_spelling(config_override, fresh_ip):
             f"BotShieldRespond should return the rule status; got "
             f"{resp.status_code}"
         )
+
+
+def test_removed_flagtrigger_family_is_refused(config_override):
+    """<BotShieldFlagTrigger> is gone.
+
+    It mapped a flag bit to a score, a tier floor or a block, applied
+    at the tier decision. A rule does all three: flagged= reads the
+    address and the session, BotShieldScore moves an accumulator,
+    BotShieldChallenge sets the floor, BotShieldRespond refuses. What
+    the family added over that was its own vocabulary for the same
+    actions and a `reset` keyword for a merge order rules settle by
+    declaration.
+    """
+    with pytest.raises(Exception) as exc_info:
+        with config_override(
+            r"BotShieldEnabled\s+On",
+            "BotShieldEnabled On\n"
+            "    <BotShieldFlagTrigger honeypot_hit>\n"
+            "        BotShieldAction       score\n"
+            "        BotShieldAccumulator  botsignals\n"
+            "        BotShieldAdd          60\n"
+            "    </BotShieldFlagTrigger>",
+            render=False,
+            count=1,
+        ):
+            pass
+    assert "returned non-zero exit status" in str(exc_info.value)
+
+
+def test_removed_botshield_flag_directive_is_refused(config_override):
+    """BotShieldFlag, the pre-FlagTrigger spelling, is not registered.
+
+    Carried over from test_flag_trigger.py, which went with the family
+    it tested.
+    """
+    with pytest.raises(Exception):
+        with config_override(
+            r"BotShieldEnabled\s+On",
+            "BotShieldEnabled On\n"
+            '    BotShieldFlag honeypot_hit score="probe +10"',
+            count=1,
+        ):
+            pass
+
+
+def test_removed_max_difficulty_directive_is_refused(config_override):
+    """BotShieldMaxDifficulty went with the adaptive difficulty knob it
+    capped. Also carried over from test_flag_trigger.py."""
+    with pytest.raises(Exception):
+        with config_override(
+            r"BotShieldEnabled\s+On",
+            "BotShieldEnabled On\n"
+            "    BotShieldMaxDifficulty 12",
+            count=1,
+        ):
+            pass

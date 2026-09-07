@@ -84,55 +84,36 @@ what the others only appear to.
 **This has bitten a production deployment, so it is worth spelling out
 what the ceiling does and does not buy.** A hub running only the silent
 tier parked `Hard` and `Captcha` at `10000`, believing form and captcha
-were unreachable. They were not: a flag trigger's `tier_floor` forces a
-tier directly, bypassing the thresholds entirely.
+were unreachable. They were not: a flag was forcing a tier directly,
+bypassing the thresholds entirely.
 
 At the time those floors were seeded in and the config said nothing
-about them, which is what made the surprise possible. Nothing is seeded
-now — a floor exists only where this config declares one — so the
-hazard survives only for floors you wrote. It is still worth knowing
-that writing one opts that flag out of your ceiling.
-
-| flag | forced tier | score |
-|---|---|---|
-| `honeypot_hit` | captcha | 60 |
-| `fake_bot` | captcha | 80 |
-| `scanner_probe` | **form** | 50 |
-| `pow_fail_streak` | silent | 30 |
-
-A residential visitor who had already solved a silent challenge —
-`cookie=solved` — was pushed into the untested form widget six seconds
-later because their IP carried `scanner_probe`. 124 of the 132
-interactive-tier decisions in that window carried solve proof.
-
-To genuinely cap the tier, reset each floor and re-add only the score:
+about them, which is what made the surprise possible. Nothing is
+seeded now, and a flag reaches a tier only through a rule you wrote:
 
 ```apache
-<BotShieldFlagTrigger honeypot_hit>
-    BotShieldReset
-    BotShieldAction       score
-BotShieldAccumulator  botsignals
-    BotShieldAdd          60
-</BotShieldFlagTrigger>
-<BotShieldFlagTrigger fake_bot>
-    BotShieldReset
-    BotShieldAction       score
-BotShieldAccumulator  botsignals
-    BotShieldAdd          80
-</BotShieldFlagTrigger>
-<BotShieldFlagTrigger scanner_probe>
-    BotShieldReset
-    BotShieldAction       score
-BotShieldAccumulator  botsignals
-    BotShieldAdd          50
-</BotShieldFlagTrigger>
+<BotShieldRule escalate-honeypot>
+    BotShieldFlagged   honeypot_hit
+    BotShieldChallenge captcha
+</BotShieldRule>
 ```
 
-`reset` matters because **tier floors MAX across triggers**: a lower
-floor written beside a higher one already declared for the same flag is
-silently useless — it MAXes straight back up. With nothing seeded, that
-only happens between declarations in this config, so `reset` is for
-overriding a slate you included rather than one the module supplied.
+`BotShieldChallenge` on a rule sets a floor, and a floor is "at least
+this intense regardless of cumulative score" — so it opts that flag
+out of your ceiling, by design. Writing one is the deliberate act; the
+hazard is only that it used to happen without you.
+
+Score instead of a floor if you want the ceiling to keep applying:
+
+```apache
+<BotShieldRule score-honeypot>
+    BotShieldFlagged   honeypot_hit
+    BotShieldScore     botsignals +60
+</BotShieldRule>
+```
+
+That contributes to an accumulator a `BotShieldChallengeAtLeast` row
+reads, so it is subject to whatever thresholds you set.
 
 `BotShieldDebug` returns `403 "Hello World"` for every request in
 scope — useful as a smoke test that the hook is firing.
@@ -830,7 +811,7 @@ compress into one key.
 tier floor — it raises the floor, it never downgrades.
 
 It sets that floor on **this request only**. That is the difference from
-`BotShieldFlagIP` plus a `BotShieldFlagTrigger` tier floor, which writes
+`BotShieldFlagIP` plus a rule reading `flagged=`, which writes
 per-address state with a window: a client that solves the challenge
 would keep being re-challenged for the life of a flag it cannot clear.
 Flag when you want the reputation to persist; challenge when you want to
@@ -1390,7 +1371,7 @@ either, so it costs nothing that was not already being paid.
 ```
 
 A flag does nothing on its own. What it *means* is declared once, by
-`BotShieldFlagTrigger`, and nothing is built in — see that directive.
+a rule matching `flagged=`, and nothing is built in.
 A rule that sets a flag no trigger defines is inert.
 
 #### Which flags may go where
@@ -1483,8 +1464,8 @@ parse and then did nothing. Both subjects work there now.
 > of scanners probing `/.env`. It was the wrong default for
 > high-cardinality traffic: at roughly one request per address the flag
 > is never read again and it churns the 50,000-slot table. And a
-> `scanner_probe` flag is not inert: wherever a `BotShieldFlagTrigger`
-> gives it a `tier_floor` — as the seeded slate did before default rules
+> `scanner_probe` flag is not inert: wherever a rule gives it a
+> `BotShieldChallenge` — as the seeded slate did before default rules
 > were switched off — that floor **overrides parked score thresholds**,
 > so a rule written to block quietly began rendering interstitials to
 > whoever shared that address next, with nothing in the config saying
@@ -1627,127 +1608,51 @@ scopes, is gone — a nested scope opts out by writing a rule that
 matches and passes, which works because the inner scope is walked
 first. See [policy](policy.md#ordering-and-opting-out).
 
-## Flag triggers
+#### Removed: `BotShieldFlagTrigger`
 
-| Directive | Syntax |
+The family that said what a flag was worth, removed 2026-09-07. It
+mapped a flag bit to one of three actions at the tier decision, and a
+rule matching `flagged=` does all three from the policy walk:
+
+| Was | Now |
 |---|---|
-| `BotShieldFlagTrigger` | `<flag> [reset] [action=<verb> args...] [mode=observe]` |
-
-Action verbs: `action=score add=N [accumulator=<name>]` (signed N
--1000..1000), `action=tier_floor min=<tier>` (raise effective tier;
-tier is one of `pass`/`noninteractive`/`interactive`/`captcha`). The
-`reset` keyword clears all earlier declarations for the named flag at
-post-config time.
-
-**Prefer `accumulator=`.** Without it the number goes onto the ambient
-score, which persists into the cookie — so a flag's penalty can still
-be charged to a client on a later request that was refused for
-something else entirely. A named accumulator dies with the request that
-raised it, and is read by whichever `BotShieldChallengeAtLeast` rows
-name it:
+| `action=score accumulator=A add=N` | `BotShieldScore A +N` |
+| `action=tier_floor min=<tier>` | `BotShieldChallenge <tier>` |
+| `action=block status=N` | `BotShieldRespond N` |
 
 ```apache
+# configtest: skip -- the "before" half names a removed directive.
+# before
 <BotShieldFlagTrigger honeypot_hit>
     BotShieldAction       score
     BotShieldAccumulator  botsignals
     BotShieldAdd          60
 </BotShieldFlagTrigger>
+
+# after
+<BotShieldRule flag-honeypot-hit>
+    BotShieldFlagged      honeypot_hit
+    BotShieldScore        botsignals +60
+</BotShieldRule>
 ```
 
-This is the same accumulator a `BotShieldScore` line in a rule moves,
-so a flag and a rule can contribute to one judgement without either
-knowing about the other.
+Three things to know when migrating.
 
-**A `tier_floor` answers to nothing but itself.** It is MAX'd in at
-the tier decision alongside every other claim on the tier, so an
-address carrying a floored flag is challenged whatever else the request
-did or did not trip. That is the property to reach for when a signal
-really is definitive, and the reason to reach for it rarely: a floor
-ignores the credits too, and a floor ignoring a credit is how
-`honeypot_hit` challenged Googlebot 248 times over ten hours.
+**Declare them first.** A rule carrying only `BotShieldScore`
+continues the walk, so several in a row all contribute — but a rule
+above them that answers with a status ends the walk, and the flag
+rules below it never run. The family applied at the tier decision and
+so had no such ordering; rules do.
 
-Nothing carries a floor unless this config gives it one. To keep a
-flag's score while dropping a floor you declared earlier, reset it and
-re-add the score:
+**`reset` is gone.** It cleared earlier declarations for a flag,
+including compiled-in defaults. Nothing is seeded any more, and rules
+settle by declaration order, so what `reset` expressed is now "declare
+the one you want".
 
-```apache
-<BotShieldFlagTrigger honeypot_hit>
-    BotShieldReset
-    BotShieldAction       score
-BotShieldAccumulator  botsignals
-    BotShieldAdd          60
-</BotShieldFlagTrigger>
-<BotShieldFlagTrigger fake_bot>
-    BotShieldReset
-    BotShieldAction       score
-BotShieldAccumulator  botsignals
-    BotShieldAdd          80
-</BotShieldFlagTrigger>
-<BotShieldFlagTrigger scanner_probe>
-    BotShieldReset
-    BotShieldAction       score
-BotShieldAccumulator  botsignals
-    BotShieldAdd          50
-</BotShieldFlagTrigger>
-<BotShieldFlagTrigger pow_fail_streak>
-    BotShieldReset
-    BotShieldAction       score
-BotShieldAccumulator  botsignals
-    BotShieldAdd          30
-</BotShieldFlagTrigger>
-```
-
-**A flag score large enough to challenge on its own is an unbreakable
-loop, not a challenge.** The replacement scores above fix the
-`tier_floor` bypass but leave a second trap: any flag whose `add=`
-clears a `BotShieldChallengeAtLeast` row by itself walks into
-it. Solving does
-not clear a flag, and a flag's score re-applies on the very next
-request. Forgiveness used to reduce a score carried in the cookie and
-could not help: `bs_apply_flag_triggers` re-added the flag's
-contribution immediately, so a forgiven-to-zero score was raised again
-before it could matter. Both the carried score and forgiveness are gone
-now, and so is `flags_excused`, which replaced them and worked a step
-removed from the decision in the same way — on the flags rather than
-on the score. What breaks the loop is the tier decision: a demand at
-or below what the cookie already proves is not made, and a captcha the
-scope cannot serve is clamped to what it can.
-
-So a flagged client is re-challenged forever however many times it
-solves. In production this looked like `pow_ok` succeeding roughly once
-a second, each success followed immediately by another
-`outcome=challenged` carrying `cookie=solved` and
-`forgive-capped:0/10` — the hourly forgiveness cap exhausted by the
-loop it could not escape. The affected user had tripped
-`scanner_probe` while filing a support ticket about being blocked: the
-attachment upload posts a negative ticket id, which reads as probing.
-
-Keep a flag's `add=` **below** the lowest row that reads its
-accumulator, unless you intend the flag alone to challenge
-indefinitely. A flag worth less than the row still contributes toward a
-challenge in combination with other signals, which is usually what was
-meant:
-
-```apache
-# against a BotShieldChallengeAtLeast botsignals 20 row
-<BotShieldFlagTrigger scanner_probe>
-    BotShieldReset
-    BotShieldAction       score
-    BotShieldAccumulator  botsignals
-    BotShieldAdd          10
-</BotShieldFlagTrigger>
-```
-
-Setting `add=0` is worse than a low value: it discards the evidence
-rather than de-weighting it. And note this trap is invisible in
-testing that solves once — it only appears on the *second* request
-after a solve.
-
-Flag bits: `honeypot_hit`, `scanner_probe`, `fake_bot`,
-`pow_fail_streak`, `app_verified_human`, `app_verified_session`,
-`app_trust_signal`. See
-[policy](policy.md#flag-trigger-family) for the starter
-slate and override semantics.
+**A block is a rule that answers.** `action=block` refused a
+non-refusal status, since a block that answers 200 is a contradiction.
+`BotShieldRespond` makes no such claim and takes any code 100..599, so
+that check went with the verb.
 
 ## Request signals
 

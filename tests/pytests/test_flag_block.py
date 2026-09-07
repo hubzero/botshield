@@ -27,7 +27,7 @@ RULE = (
     "BotShieldEnabled On\n"
     '    BotShieldRule wp-probe path="/wp-admin/*" respond=404 '
     "flagsession=blocked logas=wp-probe\n"
-    "    BotShieldFlagTrigger blocked action=block status=404\n"
+    "    BotShieldRule blocked-404 flagged=blocked respond=404\n"
 )
 
 
@@ -63,9 +63,10 @@ def test_blocked_session_is_refused_on_its_next_request(
             f"a blocked session must be refused; got {back.status_code}"
         )
         lines = slc.decision_lines(ip=fresh_ip)
-        assert any("flagblock:blocked" in (d.get("reason") or "")
+        assert any("rule:blocked-404" in (d.get("reason") or "")
                    for d in lines), (
-            f"decision log should name the blocking flag; lines={lines}"
+            f"decision log should name the rule that refused; "
+            f"lines={lines}"
         )
 
 
@@ -92,17 +93,3 @@ def test_block_is_not_excused_by_solving(config_override, fresh_ip):
             )
 
 
-def test_block_rejects_a_non_refusal_status(config_override):
-    """status=200 on a block has no meaning; refused at config time."""
-    with pytest.raises(Exception) as exc_info:
-        with config_override(
-            r"BotShieldEnabled\s+On",
-            "BotShieldEnabled On\n"
-            "    BotShieldFlagTrigger blocked action=block status=200\n",
-            count=1,
-        ):
-            pass
-    msg = str(exc_info.value)
-    assert "returned non-zero exit status" in msg or "400..599" in msg, (
-        f"expected a non-refusal status to be refused; got {msg!r}"
-    )

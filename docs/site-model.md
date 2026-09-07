@@ -50,20 +50,23 @@ effective = heuristic_total + cookie_score
 
 - **`heuristic_total`** — sum of `bs_score_add` calls that fired
   during this request. Includes built-in heuristics, allow-list /
-  rate-limit / robots / trigger families, and
-  `BotShieldFlagTrigger action=score` effects fired by flags set on
-  the IP or carried in the prior cookie.
+  rate-limit / robots / trigger families, and the
+  `BotShieldScore` effects of rules matching `flagged=` against flags
+  set on the address or carried in the prior cookie.
 - **`cookie_score`** — accumulated reputation in the prior
   `_bs_session` cookie, if one was presented and verified. Carries
   forward across requests; expires with the cookie TTL.
 
 A separate **tier floor** can lift the final tier independent of the
-score: any `BotShieldFlagTrigger action=tier_floor min=<tier>` that
-fires on a set flag bit raises the chosen tier to AT LEAST that
-level. Score-derived tier wins when it's already above the floor —
-floors never silently downgrade. Floor lifts produce a
-`flagtierfloor:<tier>` reason so the reasoning is visible in the
-log.
+score: `BotShieldChallenge <tier>` on any rule that matches raises the
+chosen tier to AT LEAST that level. Score-derived tier wins when it is
+already above the floor — floors never silently downgrade. Floor lifts
+produce a `ruletierfloor:<tier>` reason so the reasoning is visible in
+the log.
+
+A floor is not a demand the client cannot meet: the tier decision
+drops it when the cookie already proves a pass at that level or
+above.
 
 ## Built-in heuristic signals
 

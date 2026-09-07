@@ -422,51 +422,6 @@ typedef struct {
     apr_uint32_t window_start_sec;
 } bs_rate_counter;
 
-/* ======================================================================
- * E14 flagtrigger family
- *
- * Predicate is "flag_bit is set on this request's IP-side or cookie-
- * side flag bitmap". Two runtime action verbs (SCORE / TIER_FLOOR);
- * RESET is a config-time sentinel consumed before the request path
- * runs.
- * ====================================================================== */
-
-typedef enum {
-    BS_FLAG_ACT_SCORE = 0,
-    BS_FLAG_ACT_TIER_FLOOR,
-    BS_FLAG_ACT_RESET,
-    /* Refuse the request outright. Sits above every tier rather than
-     * beside them: score SUMs, tier_floor MAXes, and any block wins.
-     *
-     * Nothing lets a client out of it, and nothing needs to: the
-     * already-passed check at the tier decision applies to challenges,
-     * and a block is not one. A block has no loop to get stuck in --
-     * it ends the request rather than asking the client for
-     * something -- which is what makes that safe. A flag that forces a
-     * challenge the client cannot answer is the unbreakable loop that
-     * reached production twice. */
-    BS_FLAG_ACT_BLOCK,
-} bs_flag_action_kind;
-
-typedef struct {
-    const char         *flag_name;
-    apr_uint32_t        flag_bit;
-    bs_flag_action_kind action;
-    int                 score_add;
-    /* action=score accumulator=<name>. NULL means the ambient total,
-     * which is what every flag trigger did before named accumulators
-     * existed and what the compiled-in default slate still describes.
-     *
-     * A named movement dies with the request. That is the whole reason
-     * to prefer it: the ambient total persists into the cookie, so a
-     * flag's penalty could be billed to a client on a request that was
-     * refused for something else entirely. */
-    const char         *score_name;
-    bs_tier             tier_min;
-    int                 mode;
-    int                 from_default;
-    int                 block_status;   /* action=block status=N */
-} bs_flag_trigger_entry;
 
 /* ======================================================================
  * Cookie-trigger predicate matcher
@@ -554,9 +509,6 @@ const char *bs_section_trigger(cmd_parms *cmd, void *dconf, const char *arg,
  * spelling instead of Apache's bare "Invalid command". */
 const char *bs_flat_trigger_retired(cmd_parms *cmd, void *dconf,
                                     int argc, char *const argv[]);
-
-const char *bs_set_flag_trigger(cmd_parms *cmd, void *dconf,
-                                int argc, char *const argv[]);
 
 
 #ifdef __cplusplus

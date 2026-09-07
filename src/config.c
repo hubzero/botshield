@@ -258,8 +258,6 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
                                              add->request_triggers);
     out->feedback_triggers = bs_merge_rule_array(p, base->feedback_triggers,
                                                  add->feedback_triggers);
-    out->flag_triggers     = bs_merge_rule_array(p, base->flag_triggers,
-                                                 add->flag_triggers);
     /* session_names: concatenate base + add, drop dups. Small lists,
      * O(n*m) is fine; happens once at config load. */
     if (base->session_names && add->session_names) {
@@ -419,7 +417,6 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->request_triggers         = apr_array_make(p, 4, sizeof(void *));
     scfg->scoped_rules             = apr_array_make(p, 4, sizeof(void *));
     scfg->feedback_triggers = apr_array_make(p, 4, sizeof(void *));
-    scfg->flag_triggers     = apr_array_make(p, 8, sizeof(void *));
     /* Curated session-cookie-name defaults. Kept deliberately
      * short; long auto-lists turn `cookies=session` into a loose
      * matcher and undermine the bonus. Operators add their own
@@ -665,94 +662,6 @@ void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     return out;
 }
 
-/* Compiled-in default flagtrigger rule set.
- *
- * Seeded into every server scope's scfg->flag_triggers at post_config
- * time so the module Just Works with zero config — operators don't
- * have to discover the abstraction to get sensible flag-driven
- * tier-bumping behavior. Operators tune by adding their own
- * BotShieldFlagTrigger directives (which append after these defaults
- * and accumulate per the SUM-score / MAX-tier_floor rules) or by
- * declaring `BotShieldFlagTrigger <flag> reset` to clear defaults
- * for that flag before declaring their own.
- *
- * Detection signals get both a score adjustment (for cumulative
- * effective-score math) and a tier_floor (for "this signal is
- * definitive enough that the response should be at least this
- * intense, regardless of cumulative score"). Trust signals get
- * score-only — a credit shouldn't force a tier UP.
- *
- * The score values match the prior bs_flag_meta.penalty fields the
- * E14 rework retired; behavior on a flagged IP is unchanged at the
- * effective-score level. The tier_floor entries are new: previously
- * E14 stayed dormant (every flag had next_tier_floor=PASS), so
- * flag-driven tier escalation only fired if an operator wrote a
- * BotShieldFlag directive — which Hubzero's 10 deployments never
- * did. Now the definitive signals (honeypot, fake-bot) escalate
- * to captcha automatically. */
-/* Default rule sets ship EMPTY.
- *
- * The tables below are kept as documentation of a sensible starter
- * slate, not as behaviour. Nothing is seeded, so BotShieldEnabled On
- * with no rules does nothing at all: the module acts only where an
- * operator wrote a rule saying so.
- *
- * This reverses the E14 decision recorded above ("flag-driven tier
- * escalation only fired if an operator wrote a BotShieldFlag directive
- * -- which Hubzero's 10 deployments never did. Now the definitive
- * signals escalate to captcha automatically"). That automatic
- * escalation is what caused the harm it was meant to prevent: the
- * scanner_probe tier_floor behind incident #1, and honeypot_hit's
- * captcha floor overriding the -985 verified-bot credit, which
- * challenged Googlebot 248 times over ten hours on 2026-09-01. A
- * tier_floor is defined as "at least this intense regardless of
- * cumulative score", and regardless of score includes regardless of
- * every credit that says this client is fine.
- *
- * The evidence that these were never wanted is in the deployments
- * themselves: qubeshub's config carried four lines whose only purpose
- * was to switch them back off. A default every real deployment has to
- * disable is not a default.
- *
- * Set to 1 to restore the historical slate. */
-#define BS_SEED_DEFAULT_RULES 0
-
-static const struct {
-    const char         *flag_name;
-    apr_uint32_t        flag_bit;
-    bs_flag_action_kind action;
-    int                 score_add;
-    bs_tier             tier_min;
-} bs_default_flag_triggers[] = {
-    /* Detection signals — definitive */
-    { "honeypot_hit",         BS_FLAG_HONEYPOT_HIT,
-                              BS_FLAG_ACT_SCORE,        60, BS_TIER_PASS },
-    { "honeypot_hit",         BS_FLAG_HONEYPOT_HIT,
-                              BS_FLAG_ACT_TIER_FLOOR,    0, BS_TIER_CAPTCHA },
-    { "fake_bot",             BS_FLAG_FAKE_BOT,
-                              BS_FLAG_ACT_SCORE,        80, BS_TIER_PASS },
-    { "fake_bot",             BS_FLAG_FAKE_BOT,
-                              BS_FLAG_ACT_TIER_FLOOR,    0, BS_TIER_CAPTCHA },
-    /* Detection signals — probable */
-    { "scanner_probe",        BS_FLAG_SCANNER_PROBE,
-                              BS_FLAG_ACT_SCORE,        50, BS_TIER_PASS },
-    { "scanner_probe",        BS_FLAG_SCANNER_PROBE,
-                              BS_FLAG_ACT_TIER_FLOOR,    0, BS_TIER_INTERACTIVE },
-    /* Detection signals — accumulating */
-    { "pow_fail_streak",      BS_FLAG_POW_FAIL_STREAK,
-                              BS_FLAG_ACT_SCORE,        30, BS_TIER_PASS },
-    { "pow_fail_streak",      BS_FLAG_POW_FAIL_STREAK,
-                              BS_FLAG_ACT_TIER_FLOOR,    0, BS_TIER_NONINTERACTIVE },
-    /* Trust signals (credits) — score-only; never force tier up. */
-    { "app_verified_human",   BS_FLAG_APP_VERIFIED_HUMAN,
-                              BS_FLAG_ACT_SCORE,       -80, BS_TIER_PASS },
-    { "app_verified_session", BS_FLAG_APP_VERIFIED_SESSION,
-                              BS_FLAG_ACT_SCORE,       -40, BS_TIER_PASS },
-    { "app_trust_signal",     BS_FLAG_APP_TRUST_SIGNAL,
-                              BS_FLAG_ACT_SCORE,       -20, BS_TIER_PASS },
-};
-#define BS_DEFAULT_FLAG_TRIGGER_COUNT \
-    (sizeof(bs_default_flag_triggers) / sizeof(bs_default_flag_triggers[0]))
 
 
 /* --- post_config phase helpers ---
@@ -853,87 +762,6 @@ static void bs_warn_app_integration_secrets(server_rec *s)
     }
 }
 
-/* Flag-trigger registration.
- *
- * For each server scope: prepend the compiled-in defaults to
- * the operator-declared trigger list (so defaults are earliest
- * and reset entries clear them), then walk the combined array
- * and process reset sentinels. A `reset` for a flag removes
- * every prior entry targeting that flag (defaults + operator)
- * along with the reset sentinel itself; entries declared after
- * the reset for the same flag are kept.
- *
- * Result is a final, request-time-ready scfg->flag_triggers
- * containing only BS_FLAG_ACT_SCORE / BS_FLAG_ACT_TIER_FLOOR
- * entries — no resets to dispatch on the hot path. */
-static void bs_resolve_flag_triggers(apr_pool_t *pconf, server_rec *s)
-{
-    for (server_rec *sv = s; sv; sv = sv->next) {
-        bs_server_cfg *vcfg = ap_get_module_config(sv->module_config,
-                                                   &botshield_module);
-        if (!vcfg) continue;
-        /* Aliased server configs are reachable more than once in
-         * this walk; resolving twice would re-seed the defaults on
-         * top of the previous result. See bs_server_cfg. */
-        if (vcfg->flag_triggers_resolved) continue;
-        apr_array_header_t *operator_decls = vcfg->flag_triggers;
-        apr_array_header_t *combined = apr_array_make(pconf,
-            BS_DEFAULT_FLAG_TRIGGER_COUNT
-              + (operator_decls ? operator_decls->nelts : 0),
-            sizeof(void *));
-        /* Defaults first -- none, unless BS_SEED_DEFAULT_RULES. */
-        for (size_t i = 0;
-             BS_SEED_DEFAULT_RULES && i < BS_DEFAULT_FLAG_TRIGGER_COUNT;
-             i++) {
-            const typeof(bs_default_flag_triggers[0]) *d =
-                &bs_default_flag_triggers[i];
-            bs_flag_trigger_entry *e = apr_pcalloc(pconf, sizeof(*e));
-            e->flag_name    = d->flag_name;
-            e->flag_bit     = d->flag_bit;
-            e->action       = d->action;
-            e->score_add    = d->score_add;
-            e->tier_min     = d->tier_min;
-            e->mode         = BS_TMODE_ENFORCE;
-            e->from_default = 1;
-            *(bs_flag_trigger_entry **)apr_array_push(combined) = e;
-        }
-        /* Operator declarations next, in declaration order. */
-        if (operator_decls) {
-            for (int i = 0; i < operator_decls->nelts; i++) {
-                bs_flag_trigger_entry *e =
-                    APR_ARRAY_IDX(operator_decls, i, bs_flag_trigger_entry *);
-                *(bs_flag_trigger_entry **)apr_array_push(combined) = e;
-            }
-        }
-        /* Resolve reset sentinels: walk combined; when a reset is
-         * found, drop every earlier entry for the same flag and the
-         * reset itself. Build the final array in one pass. */
-        apr_array_header_t *resolved = apr_array_make(pconf,
-            combined->nelts, sizeof(void *));
-        for (int i = 0; i < combined->nelts; i++) {
-            bs_flag_trigger_entry *e =
-                APR_ARRAY_IDX(combined, i, bs_flag_trigger_entry *);
-            if (e->action == BS_FLAG_ACT_RESET) {
-                /* Remove prior entries for this flag. */
-                int w = 0;
-                for (int j = 0; j < resolved->nelts; j++) {
-                    bs_flag_trigger_entry *k =
-                        APR_ARRAY_IDX(resolved, j, bs_flag_trigger_entry *);
-                    if (k->flag_bit != e->flag_bit) {
-                        APR_ARRAY_IDX(resolved, w, bs_flag_trigger_entry *) = k;
-                        w++;
-                    }
-                }
-                resolved->nelts = w;
-                /* Sentinel itself is consumed — don't append. */
-                continue;
-            }
-            *(bs_flag_trigger_entry **)apr_array_push(resolved) = e;
-        }
-        vcfg->flag_triggers = resolved;
-        vcfg->flag_triggers_resolved = 1;
-    }
-}
 
 
 /* Normalise a server_rec into a vhost directory key.
@@ -2660,7 +2488,6 @@ void bs_test_config(apr_pool_t *pconf, server_rec *s)
 {
     if (!ap_exists_config_define("DUMP_BOTSHIELD_POLICY")) return;
 
-    bs_resolve_flag_triggers(pconf, s);
 
     for (server_rec *sv = s; sv; sv = sv->next) {
         if (!bs_vhost_runs_botshield(sv, s)) continue;
@@ -2710,7 +2537,6 @@ int bs_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     if (rv != OK) return rv;
 
     bs_warn_app_integration_secrets(s);
-    bs_resolve_flag_triggers(pconf, s);
 
     bs_server_cfg *scfg = ap_get_module_config(s->module_config,
                                                &botshield_module);

@@ -99,8 +99,9 @@ def test_session_mark_comes_back_on_the_next_request(config_override,
         r"BotShieldEnabled\s+On",
         _cfg("    BotShieldFeedback login-success event=login-success "
              "flagsession=app_verified_human\n"
-             "    BotShieldFlagTrigger app_verified_human "
-             "action=score accumulator=botsignals add=-40\n"),
+             "    BotShieldRule credit-verified-human "
+             "flagged=app_verified_human "
+             'score="botsignals -40"\n'),
         count=1,
     ):
         first = _g(FEEDBACK_PATH, fresh_ip)
@@ -113,7 +114,7 @@ def test_session_mark_comes_back_on_the_next_request(config_override,
         with log_slice as slc:
             _g("/", fresh_ip, cookies={COOKIE_NAME: cookie})
         lines = slc.decision_lines(ip=fresh_ip)
-        assert any("app_verified_human" in (d.get("reason") or "")
+        assert any("rule:credit-verified-human" in (d.get("reason") or "")
                    for d in lines), (
             "the session flag should fire its trigger on the next "
             f"request; lines={lines}"

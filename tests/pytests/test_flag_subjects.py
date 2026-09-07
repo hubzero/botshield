@@ -87,8 +87,8 @@ def test_flag_session_reaches_the_cookie(config_override, fresh_ip,
         "BotShieldEnabled On\n"
         '    BotShieldRule mark-session path="/mark-session-probe" '
         "respond=404 flagsession=scanner_probe logas=mark-session\n"
-        "    BotShieldFlagTrigger scanner_probe action=tier_floor "
-        "min=noninteractive\n",
+        "    BotShieldRule scanner-challenge flagged=scanner_probe "
+        "challenge=noninteractive\n",
         count=1,
     ):
         probe = client.get("/mark-session-probe", xff=fresh_ip,
@@ -104,7 +104,7 @@ def test_flag_session_reaches_the_cookie(config_override, fresh_ip,
             client.get("/", xff=fresh_ip, ua=BROWSER_UA,
                        cookies={COOKIE_NAME: cookie})
         lines = slc.decision_lines(ip=fresh_ip)
-        assert any("flagtrigger:scanner_probe" in (d.get("reason") or "")
+        assert any("rule:scanner-challenge" in (d.get("reason") or "")
                    for d in lines), (
             "the session flag should fire its trigger on the next "
             f"request; lines={lines}"

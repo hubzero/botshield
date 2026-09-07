@@ -1,0 +1,83 @@
+# What a flag is worth, as rules.
+#
+# Nothing is seeded. A flag records that something happened; what it
+# costs is a rule you write, so every consequence is a line in this
+# file. Paste what you want and delete the rest.
+#
+# Declare these ahead of rules that answer with a status. A rule
+# carrying only BotShieldScore continues the walk, so all of these
+# contribute and the ladder below them still runs -- but a rule above
+# them that responds ends the walk, and these never fire.
+#
+# This was BotShieldFlagTrigger until 2026-09-07. The family mapped a
+# flag to a score, a tier floor or a block; those are BotShieldScore,
+# BotShieldChallenge and BotShieldRespond on a rule matching flagged=,
+# so it had nothing of its own left to say.
+
+# --- Detection signals ------------------------------------------------
+# Scores into an accumulator a BotShieldChallengeAtLeast row reads, so
+# your thresholds still apply. Use BotShieldChallenge instead of
+# BotShieldScore if a signal is definitive enough to force a tier
+# regardless of score -- and know that doing so opts the flag out of
+# any ceiling you have parked.
+
+<BotShieldRule flag-honeypot-hit>
+    BotShieldFlagged      honeypot_hit
+    BotShieldScore        botsignals +60
+</BotShieldRule>
+
+<BotShieldRule flag-fake-bot>
+    BotShieldFlagged      fake_bot
+    BotShieldScore        botsignals +80
+</BotShieldRule>
+
+<BotShieldRule flag-scanner-probe>
+    BotShieldFlagged      scanner_probe
+    BotShieldScore        botsignals +50
+</BotShieldRule>
+
+<BotShieldRule flag-pow-fail-streak>
+    BotShieldFlagged      pow_fail_streak
+    BotShieldScore        botsignals +30
+</BotShieldRule>
+
+# --- Refusals written by the module -----------------------------------
+# rate_abuse and robots_ignored are set where a request is refused for
+# exceeding a rate budget or for fetching a path robots.txt disallows.
+# They carry no effect until a rule asks for one.
+
+# <BotShieldRule flag-rate-abuse>
+#     BotShieldFlagged      rate_abuse
+#     BotShieldChallenge    noninteractive
+# </BotShieldRule>
+
+# --- Trust credits from the application -------------------------------
+# Set through the X-BotShield-Feedback bridge with BotShieldFlagSession.
+# Credits are score-only: a credit should never force a tier UP, and
+# these are session flags because a credit spread across an address
+# hands strangers an exemption someone else earned.
+
+<BotShieldRule flag-app-verified-human>
+    BotShieldFlagged      app_verified_human
+    BotShieldScore        botsignals -80
+</BotShieldRule>
+
+<BotShieldRule flag-app-verified-session>
+    BotShieldFlagged      app_verified_session
+    BotShieldScore        botsignals -40
+</BotShieldRule>
+
+<BotShieldRule flag-app-trust-signal>
+    BotShieldFlagged      app_trust_signal
+    BotShieldScore        botsignals -20
+</BotShieldRule>
+
+# --- A neutral bit to hang a refusal on -------------------------------
+# `blocked` means whatever you say here and nothing otherwise. It
+# exists so a refusal has a name of its own rather than overloading a
+# detection signal.
+
+# <BotShieldRule flag-blocked>
+#     BotShieldFlagged      blocked
+#     BotShieldRespond      403
+# </BotShieldRule>

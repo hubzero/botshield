@@ -244,11 +244,10 @@ def test_the_new_flags_are_nameable(config_override, flag):
         f"        BotShieldFlagged   {flag}\n"
         "        BotShieldRespond   451\n"
         "    </BotShieldRule>\n"
-        f"    <BotShieldFlagTrigger {flag}>\n"
-        "        BotShieldAction       score\n"
-        "        BotShieldAccumulator  botsignals\n"
-        "        BotShieldAdd          10\n"
-        "    </BotShieldFlagTrigger>"
+        f"    <BotShieldRule score-{flag.replace(chr(95), chr(45))}>\n"
+        f"        BotShieldFlagged   {flag}\n"
+        "        BotShieldScore     botsignals +10\n"
+        "    </BotShieldRule>"
     )
     with config_override(r"BotShieldEnabled\s+On", conf,
                          render=False, count=1):

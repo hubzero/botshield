@@ -145,8 +145,8 @@ enum bs_enabled_state {
  * Each bit represents a *serious* event we want to remember about
  * an IP even if its cookie is rolled back. Bits are additive — an
  * IP that tripped both a honeypot and a scanner probe carries both.
- * Score effects per bit live in scfg->flag_triggers (see
- * bs_default_flag_triggers + bs_apply_flag_triggers in botshield.c).
+ * What a bit is worth is a rule matching flagged=; nothing is
+ * implicit, so every consequence is a line in the config.
  *
  * BS_FLAG_APP_* are credit-carrying bits set by the app via the E5
  * X-BotShield-Feedback bridge — the app can push score down as well
@@ -504,30 +504,26 @@ typedef struct bs_server_cfg {
     apr_array_header_t *scoped_rules;
     /* E7.3 — feedback triggers. */
     apr_array_header_t *feedback_triggers;
-    /* E11.2 — load triggers. */
-    /* Flag triggers. */
-    apr_array_header_t *flag_triggers;
-    /* Idempotence guard for the post_config resolver.
+    /* A flag-trigger list and its post_config resolver lived here.
+     * Both are gone -- a rule matching flagged= carries the effect
+     * now -- but the hazard the guard existed for is worth keeping in
+     * view, because it belongs to the shape rather than to what was
+     * being resolved.
      *
-     * bs_resolve_flag_triggers reads and writes the SAME field: it
-     * carries operator declarations on
-     * input and the fully resolved list on output. That is only safe if
-     * every bs_server_cfg is visited exactly once. It is not guaranteed
-     * -- these configs are shared between server_recs, because
-     * bs_merge_rule_array returns the caller's array object unchanged
-     * when one side is empty (`if (nadd == 0) return base;`). A second
-     * visit then treats the first visit's output, compiled-in defaults
-     * included, as operator input and seeds the defaults again.
+     * A resolver that reads and writes the same field is only safe if
+     * every bs_server_cfg is visited exactly once, and that is not
+     * guaranteed: these configs are shared between server_recs,
+     * because bs_merge_rule_array returns the caller's array unchanged
+     * when one side is empty. A second visit treats the first visit's
+     * output as operator input and seeds it again.
      *
      * Observed on a HubZero hub with 102 namevhosts and the config at
      * main scope, on the heuristic resolver that used to sit beside
-     * this one: every heuristic fired 107 times. firstsightip (20)
-     * scored 2140, droppedcookie (25) scored 2675,
-     * missingacceptlanguage (5) scored 535 -- all exactly x107, which
-     * pushed ordinary browsers into the captcha tier. That family is
-     * gone; the hazard is a property of the resolve-in-place shape,
-     * not of what was being resolved, so it applies here unchanged. */
-    int                 flag_triggers_resolved;
+     * it: every heuristic fired 107 times. firstsightip (20) scored
+     * 2140, droppedcookie (25) scored 2675, missingacceptlanguage (5)
+     * scored 535 -- all exactly x107, which pushed ordinary browsers
+     * into the captcha tier. Anything resolving in place here needs
+     * its own visited guard. */
     apr_array_header_t *session_names;
     /* E2.2 — robots.txt enforcement. */
     const char         *robots_txt_path;
@@ -835,7 +831,7 @@ void bs_path_pattern_warn_middle_star(cmd_parms *cmd,
                                       const char *pattern);
 
 /* Score system (bs_get_score, bs_score_add, bs_decision_reason_names,
- * bs_score_reasons_joined, bs_apply_flag_triggers) lives in score.h. */
+ * bs_score_reasons_joined) lives in score.h. */
 
 
 /* Parse a comma-separated list of flag-bit names ("honeypot_hit,

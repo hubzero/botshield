@@ -13,8 +13,8 @@ config; the module never reads any of these files.
 
 ## What's here
 
-- **[`flag-triggers.conf.example`](https://github.com/hubzero/botshield/blob/main/docs/examples/flag-triggers.conf.example)**
-  — the `BotShieldFlagTrigger` slate: honeypot and fake-bot detection
+- **[`flag-rules.conf.example`](https://github.com/hubzero/botshield/blob/main/docs/examples/flag-rules.conf.example)**
+  — a slate of rules reading `flagged=`: honeypot and fake-bot detection
   forced to captcha, scanner-probe and repeat-PoW-failure signals
   escalating tier, and the three application-issued trust credits
   (`app_verified_human`, `app_verified_session`, `app_trust_signal`)

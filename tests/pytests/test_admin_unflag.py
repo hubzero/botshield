@@ -45,7 +45,8 @@ FLAGGING = (
     + ADMIN_OPEN
     + '    BotShieldRule probe path="/unflag-probe" respond=404 '
     "flagip=scanner_probe logas=unflag-probe\n"
-    "    BotShieldFlagTrigger scanner_probe action=block status=403\n"
+    "    BotShieldRule scanner-blocked flagged=scanner_probe "
+    "respond=403\n"
 )
 
 
@@ -62,8 +63,14 @@ def _unflag(**fields):
 
 
 def _blocked_by_flag(slc, ip):
-    """Did a flag refuse this address, per the decision log?"""
-    return any("flagblock" in (d.get("reason") or "")
+    """Did a flag refuse this address, per the decision log?
+
+    Reads the outcome rather than a reason substring. The reason names
+    whatever refused -- a flag walker once, a rule now -- and this test
+    is about whether the address is still being refused, not about
+    which mechanism does the refusing.
+    """
+    return any(d.get("outcome") == "block"
                for d in slc.decision_lines(ip=ip))
 
 
@@ -204,7 +211,8 @@ def test_unflag_can_clear_one_flag_and_leave_another(config_override,
         + ADMIN_OPEN
         + '    BotShieldRule p1 path="/unflag-two" respond=404 '
         "flagip=scanner_probe,honeypot_hit logas=unflag-two\n"
-        "    BotShieldFlagTrigger honeypot_hit action=block status=403\n"
+        "    BotShieldRule honeypot-blocked flagged=honeypot_hit "
+        "respond=403\n"
     )
     with config_override(r"BotShieldEnabled\s+On", two, count=1):
         assert _get("/unflag-two", fresh_ip).status_code == 404

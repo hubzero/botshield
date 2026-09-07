@@ -476,10 +476,11 @@ forces tier *down*. A verified-human flag can't unlock a request
 that already tripped a different tier_floor.
 
 None of this is active unless you paste it into your own config.
-Once you have, a later `BotShieldFlagTrigger` line for the same
-flag bit and action verb adds to it (SUM for score, MAX for
-tier_floor) — use `reset` first if you want to replace rather than
-accumulate.
+Written as rules, a second rule for the same flag adds to the first —
+scores sum, challenge floors MAX — because a rule carrying only a
+score or a challenge continues the walk. To replace rather than
+accumulate, declare the one rule you want: there is no `reset`,
+because declaration order says it.
 
 ### Rules in an Apache container
 
