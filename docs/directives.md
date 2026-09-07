@@ -656,7 +656,7 @@ semantics and refresh model.
 | Directive | Predicate args | Action keys |
 |---|---|---|
 | `BotShieldRule` | `<name>` + any of `path=<glob>` `query=<glob>` `cookies=none\|any\|session` `ua=<substring>\|@<botgroup>\|""` `ipspec=<spec>` — ANDed, at least one required | `respond=`, `redirect=`, `logas=`, `accesslog=`, `flagip=`, `flagsession=`, `score=`, `mode=` |
-| `BotShieldFeedbackTrigger` | `<event>` | `flagip=`, `flagsession=` (both accept `+`/`-`/`=`), `logas=`, `accesslog=`, `mode=` |
+| `BotShieldFeedback` | `<label>` + `BotShieldEvent` | `flagip=`, `flagsession=` (both accept `+`/`-`/`=`), `logas=`, `accesslog=`, `mode=` |
 | `BotShieldSessionCookieName` | `<name>` (single arg, repeatable) | n/a (feeds cookies=session predicate) |
 
 See [policy](policy.md#triggers-predicate-action-engine)
@@ -1421,16 +1421,17 @@ what it always did. Mixing `=` with `+` or `-` is a config error —
 `=a,+b` has no reading that is not a guess. The same grammar and the
 same rule as `BotShieldClassify`.
 
-**`-` and `=` are only allowed on `BotShieldFeedbackTrigger`.** A rule
+**`-` and `=` are only allowed on `BotShieldFeedback`.** A rule
 matches on request properties the client controls, so clearing there
 would let anyone shed their own record by fetching the URL that
 matches. Feedback fires on a header your application signs: the
 application asserts it, the visitor cannot.
 
 ```apache
-<BotShieldFeedbackTrigger login-success>
+<BotShieldFeedback login-success>
+    BotShieldEvent        login-success
     BotShieldFlagSession  +app_verified_human,-scanner_probe
-</BotShieldFeedbackTrigger>
+</BotShieldFeedback>
 ```
 
 Feedback marks the cookie the response is already carrying rather than
@@ -1454,7 +1455,7 @@ scope, said once where it is true.
 
 Retiring `BotShieldFlag` exposed a bug it had been hiding: the app
 feedback filter read only the field that spelling set, so
-`BotShieldFlagIP` on a `<BotShieldFeedbackTrigger>` passed config
+`BotShieldFlagIP` on a `<BotShieldFeedback>` block passed config
 parse and then did nothing. Both subjects work there now.
 
 > **This family used to flag by default**, `scanner_probe` for 3600 s,

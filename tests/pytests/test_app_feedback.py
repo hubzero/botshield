@@ -3,7 +3,7 @@
 App sets `X-BotShield-Feedback: event=<name>;sig=<hmac>` on its
 response. The signer only has to know the HMAC secret and an event
 name; the mapping from event → action (flag bit + TTL + optional
-log tag) is declared server-side via `BotShieldFeedbackTrigger`, so
+log tag) is declared server-side via `BotShieldFeedback`, so
 a compromised app can't reach into arbitrary module memory by
 emitting raw `flag=` / `ttl=` tokens on the wire.
 
@@ -88,7 +88,7 @@ def _sign(event: str, extra: str = "") -> str:
 def _cfg(feedback_triggers: str, body_inserts: str) -> str:
     """Assemble the override block.
 
-    `feedback_triggers` is zero or more `BotShieldFeedbackTrigger`
+    `feedback_triggers` is zero or more `BotShieldFeedback`
     lines (pre-indented to match the vhost-body style), and
     `body_inserts` is the <Location>…</Location> chunk that plants
     the header on the test path.
@@ -116,7 +116,7 @@ def test_app_feedback_penalty_flag_applies_to_next_request(
     with config_override(
         r"BotShieldEnabled\s+On",
         _cfg(
-            '    BotShieldFeedbackTrigger scanner-hit '
+            '    BotShieldFeedback scanner-hit event=scanner-hit '
             'flagsession=honeypot_hit\n',
             f'    {FEEDBACK_LOC_1}\n'
             f'        Header always set X-BotShield-Feedback "{val}"\n'
@@ -165,7 +165,7 @@ def test_app_feedback_observed_under_log_only(
         '    BotShieldEnabled LogOnly\n'
         '    BotShieldAppFeedback on\n'
         f'    BotShieldAppIntegrationSecretFile {SECRET_PATH}\n'
-        '    BotShieldFeedbackTrigger scanner-hit '
+        '    BotShieldFeedback scanner-hit event=scanner-hit '
         'flagsession=honeypot_hit\n'
         f'    {FEEDBACK_LOC_1}\n'
         f'        Header always set X-BotShield-Feedback "{val}"\n'
@@ -195,7 +195,7 @@ def test_app_feedback_observed_under_log_only(
 def test_app_feedback_per_trigger_observe_mode(
     config_override, log_slice,
 ):
-    """Per-trigger `mode=observe` on a BotShieldFeedbackTrigger
+    """Per-trigger `mode=observe` on a BotShieldFeedback
     suppresses the flagged-IP write the same way scope-level
     BotShieldEnabled LogOnly does. Even though feedback runs on
     the response path, the side effect is future-request state —
@@ -209,7 +209,7 @@ def test_app_feedback_per_trigger_observe_mode(
         'BotShieldEnabled On\n'
         '    BotShieldAppFeedback on\n'
         f'    BotShieldAppIntegrationSecretFile {SECRET_PATH}\n'
-        '    BotShieldFeedbackTrigger scanner-hit '
+        '    BotShieldFeedback scanner-hit event=scanner-hit '
         'flagsession=honeypot_hit mode=observe\n'
         f'    {FEEDBACK_LOC_1}\n'
         f'        Header always set X-BotShield-Feedback "{val}"\n'
@@ -252,7 +252,7 @@ def test_app_feedback_credit_flag_lowers_score(
     with config_override(
         r"BotShieldEnabled\s+On",
         _cfg(
-            '    BotShieldFeedbackTrigger human-verified '
+            '    BotShieldFeedback human-verified event=human-verified '
             'flagsession=app_verified_human\n',
             f'    {FEEDBACK_LOC_1}\n'
             f'        Header always set X-BotShield-Feedback "{val}"\n'
@@ -301,7 +301,7 @@ def test_app_feedback_strips_from_404_error_response(
     with config_override(
         r"BotShieldEnabled\s+On",
         _cfg(
-            '    BotShieldFeedbackTrigger scanner-hit '
+            '    BotShieldFeedback scanner-hit event=scanner-hit '
             'flagsession=honeypot_hit\n',
             f'    <Location "{missing_path}">\n'
             f'        Header always set X-BotShield-Feedback "{val}"\n'
@@ -326,7 +326,7 @@ def test_app_feedback_strips_when_feature_off(config_override):
         'BotShieldEnabled On\n'
         '    BotShieldAppFeedback off\n'
         f'    BotShieldAppIntegrationSecretFile {SECRET_PATH}\n'
-        '    BotShieldFeedbackTrigger scanner-hit '
+        '    BotShieldFeedback scanner-hit event=scanner-hit '
         'flagsession=honeypot_hit\n'
         f'    {FEEDBACK_LOC_1}\n'
         f'        Header always set X-BotShield-Feedback "{val}"\n'
@@ -349,7 +349,7 @@ def test_app_feedback_tampered_sig_rejected_and_stripped(
     with config_override(
         r"BotShieldEnabled\s+On",
         _cfg(
-            '    BotShieldFeedbackTrigger scanner-hit '
+            '    BotShieldFeedback scanner-hit event=scanner-hit '
             'flagsession=honeypot_hit\n',
             f'    {FEEDBACK_LOC_1}\n'
             f'        Header always set X-BotShield-Feedback "{tampered}"\n'
@@ -377,7 +377,7 @@ def test_app_feedback_tampered_sig_rejected_and_stripped(
 def test_app_feedback_unmapped_event_is_ignored(
     config_override, log_slice,
 ):
-    """App signs an event name nobody has BotShieldFeedbackTrigger'd.
+    """App signs an event name nobody has BotShieldFeedback'd.
     The HMAC is valid but the event has no module-memory mapping, so
     the flag doesn't land. Gives operators safe rollout: apps can
     start emitting new event names before the config catches up."""
@@ -386,7 +386,7 @@ def test_app_feedback_unmapped_event_is_ignored(
     with config_override(
         r"BotShieldEnabled\s+On",
         _cfg(
-            # deliberately no BotShieldFeedbackTrigger for the event
+            # deliberately no BotShieldFeedback for event=for the event
             '',
             f'    {FEEDBACK_LOC_1}\n'
             f'        Header always set X-BotShield-Feedback "{val}"\n'
@@ -422,7 +422,7 @@ def test_app_feedback_legacy_wire_format_rejected(
     with config_override(
         r"BotShieldEnabled\s+On",
         _cfg(
-            '    BotShieldFeedbackTrigger legacy-guard '
+            '    BotShieldFeedback legacy-guard event=legacy-guard '
             'flagsession=honeypot_hit\n',
             f'    {FEEDBACK_LOC_1}\n'
             f'        Header always set X-BotShield-Feedback "{val}"\n'
@@ -460,9 +460,9 @@ def test_app_feedback_credit_and_penalty_compose(
     with config_override(
         r"BotShieldEnabled\s+On",
         _cfg(
-            '    BotShieldFeedbackTrigger scanner-hit '
+            '    BotShieldFeedback scanner-hit event=scanner-hit '
             'flagsession=honeypot_hit\n'
-            '    BotShieldFeedbackTrigger human-verified '
+            '    BotShieldFeedback human-verified event=human-verified '
             'flagsession=app_verified_human\n',
             f'    {FEEDBACK_LOC_1}\n'
             f'        Header always set X-BotShield-Feedback "{penalty_val}"\n'
@@ -523,7 +523,7 @@ def test_app_feedback_can_mark_the_address(config_override, log_slice):
     with config_override(
         r"BotShieldEnabled\s+On",
         _cfg(
-            '    BotShieldFeedbackTrigger scanner-hit '
+            '    BotShieldFeedback scanner-hit event=scanner-hit '
             'flagip=honeypot_hit\n',
             f'    {FEEDBACK_LOC_1}\n'
             f'        Header always set X-BotShield-Feedback "{val}"\n'
@@ -539,4 +539,79 @@ def test_app_feedback_can_mark_the_address(config_override, log_slice):
     assert "flaggedip" in lines[-1]["reason"], (
         f"the address should carry the mark; "
         f"reason={lines[-1]['reason']}"
+    )
+
+
+# --- the container shape --------------------------------------------
+
+
+def test_the_retired_tag_is_refused(config_override):
+    """<BotShieldFeedbackTrigger> is gone.
+
+    Registered rather than simply dropped, so the error names the
+    replacement. Apache's own answer to an unregistered section is
+    "Invalid command, perhaps misspelled or defined by a module not
+    included", which sends an operator looking for a build problem
+    instead of a rename.
+    """
+    with pytest.raises(Exception) as exc_info:
+        with config_override(
+            r"BotShieldEnabled\s+On",
+            "BotShieldEnabled On\n"
+            "    <BotShieldFeedbackTrigger scanner-hit>\n"
+            "        BotShieldFlagIP   honeypot_hit\n"
+            "    </BotShieldFeedbackTrigger>",
+            render=False,
+            count=1,
+        ):
+            pass
+    assert "returned non-zero exit status" in str(exc_info.value)
+
+
+def test_a_block_without_an_event_is_refused(config_override):
+    """The name is a label now, so it no longer says what the block
+    is about. While event= is the only condition, a block without one
+    would match every signed event -- which is never what someone
+    writing one of these means."""
+    with pytest.raises(Exception) as exc_info:
+        with config_override(
+            r"BotShieldEnabled\s+On",
+            "BotShieldEnabled On\n"
+            "    <BotShieldFeedback nameless>\n"
+            "        BotShieldFlagSession  honeypot_hit\n"
+            "    </BotShieldFeedback>",
+            render=False,
+            count=1,
+        ):
+            pass
+    assert "returned non-zero exit status" in str(exc_info.value)
+
+
+def test_label_and_event_are_separate(config_override, log_slice):
+    """The point of the reshape: the block is named one thing and
+    matches another, which is what leaves room for a second
+    condition."""
+    val = _sign("scanner-hit")
+    ip = _ips.fresh_ip()
+    with config_override(
+        r"BotShieldEnabled\s+On",
+        _cfg(
+            '    <BotShieldFeedback watch-for-probes>\n'
+            '        BotShieldEvent    scanner-hit\n'
+            '        BotShieldFlagIP   honeypot_hit\n'
+            '    </BotShieldFeedback>\n',
+            f'    {FEEDBACK_LOC_1}\n'
+            f'        Header always set X-BotShield-Feedback "{val}"\n'
+            f'    </Location>'
+        ),
+        render=False,
+        count=1,
+    ):
+        _g(FEEDBACK_PATH_1, xff=ip)
+        with log_slice as slc:
+            _g("/index.html", xff=ip)
+            lines = slc.decision_lines(ip=ip)
+    assert lines and "flaggedip" in lines[-1]["reason"], (
+        f"the event should have matched despite the differing label; "
+        f"reason={lines[-1]['reason'] if lines else None}"
     )

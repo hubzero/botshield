@@ -179,16 +179,26 @@ X-BotShield-Feedback: event=scanner-hit;sig=<hmac-sha256-hex>
 mod_botshield strips the header before the response leaves the
 server (so it never reaches the client), verifies the HMAC against
 the integration secret, looks up `event=scanner-hit` in the
-configured `BotShieldFeedbackTrigger` table, and applies the
+configured `BotShieldFeedback` blocks, and applies the
 corresponding action.
 
 ```apache
 BotShieldAppFeedback              on
 BotShieldAppIntegrationSecretFile /etc/botshield/app-integration-secret
 
-BotShieldFeedbackTrigger scanner-hit  flag=honeypot_hit ttl=3600 logas=app-trap
-BotShieldFeedbackTrigger human-pass   flag=app_verified_human ttl=3600
-BotShieldFeedbackTrigger session-ok   flag=app_verified_session ttl=3600
+<BotShieldFeedback scanner-hit>
+    BotShieldEvent        scanner-hit
+    BotShieldFlagIP       honeypot_hit
+    BotShieldLogAs        app-trap
+</BotShieldFeedback>
+<BotShieldFeedback human-pass>
+    BotShieldEvent        human-pass
+    BotShieldFlagSession  app_verified_human
+</BotShieldFeedback>
+<BotShieldFeedback session-ok>
+    BotShieldEvent        session-ok
+    BotShieldFlagSession  app_verified_session
+</BotShieldFeedback>
 ```
 
 Wire format details:

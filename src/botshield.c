@@ -155,10 +155,28 @@ static const char *bs_open_flagtrigger(cmd_parms *cmd, void *dconf,
     return bs_section_trigger(cmd, dconf, arg, "BotShieldFlagTrigger", bs_set_flag_trigger);
 }
 
-static const char *bs_open_feedbacktrigger(cmd_parms *cmd, void *dconf,
+static const char *bs_open_feedback(cmd_parms *cmd, void *dconf,
                                           const char *arg)
 {
-    return bs_section_trigger(cmd, dconf, arg, "BotShieldFeedbackTrigger", bs_set_feedback_trigger);
+    return bs_section_trigger(cmd, dconf, arg, "BotShieldFeedback", bs_set_feedback);
+}
+
+/* The old tag. Registered rather than simply dropped so the error
+ * names the replacement -- an operator who hits this has a working
+ * config in front of them, and Apache's own "Invalid command,
+ * perhaps misspelled or defined by a module not included" sends them
+ * looking for a build problem instead. */
+static const char *bs_open_feedbacktrigger_retired(cmd_parms *cmd,
+                                          void *dconf, const char *arg)
+{
+    (void)dconf; (void)arg;
+    return apr_psprintf(cmd->pool,
+        "<BotShieldFeedbackTrigger> is gone; write <BotShieldFeedback> "
+        "and move the event into the block: the tag name is a label "
+        "now, like a rule's, and BotShieldEvent <name> is the "
+        "condition. It was never a trigger -- it runs after the "
+        "response is built and matches a signed header, not a "
+        "request.");
 }
 
 
@@ -533,10 +551,18 @@ static const command_rec bs_cmds[] = {
                  "Open a BotShieldFlagTrigger block. Takes the rule name; every "
                  "setting is a BotShield directive on its own line "
                  "until </BotShieldFlagTrigger>."),
-    AP_INIT_RAW_ARGS("<BotShieldFeedbackTrigger", bs_open_feedbacktrigger, NULL, RSRC_CONF,
-                 "Open a BotShieldFeedbackTrigger block. Takes the rule name; every "
-                 "setting is a BotShield directive on its own line "
-                 "until </BotShieldFeedbackTrigger>."),
+    AP_INIT_RAW_ARGS("<BotShieldFeedback", bs_open_feedback, NULL, RSRC_CONF,
+                 "Open a BotShieldFeedback block: what a signed "
+                 "application event means. Takes a label; "
+                 "BotShieldEvent names the event, and "
+                 "BotShieldFlagIP / BotShieldFlagSession say what to "
+                 "remember about the client. Runs on the response "
+                 "path, so it cannot direct the response -- flags are "
+                 "what the next request reads."),
+    AP_INIT_RAW_ARGS("<BotShieldFeedbackTrigger",
+                 bs_open_feedbacktrigger_retired, NULL, RSRC_CONF,
+                 "Removed. Write <BotShieldFeedback> with "
+                 "BotShieldEvent inside it."),
     AP_INIT_RAW_ARGS("<BotShieldRule", bs_open_rule, NULL, RSRC_CONF,
                  "Open a BotShieldRule block. Takes the rule name; every "
                  "setting is a BotShield directive on its own line "

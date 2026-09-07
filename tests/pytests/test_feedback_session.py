@@ -76,7 +76,7 @@ def test_session_mark_does_not_add_a_second_cookie(config_override,
     """
     with config_override(
         r"BotShieldEnabled\s+On",
-        _cfg("    BotShieldFeedbackTrigger login-success "
+        _cfg("    BotShieldFeedback login-success event=login-success "
              "flagsession=app_verified_human\n"),
         count=1,
     ):
@@ -97,7 +97,7 @@ def test_session_mark_comes_back_on_the_next_request(config_override,
     """
     with config_override(
         r"BotShieldEnabled\s+On",
-        _cfg("    BotShieldFeedbackTrigger login-success "
+        _cfg("    BotShieldFeedback login-success event=login-success "
              "flagsession=app_verified_human\n"
              "    BotShieldFlagTrigger app_verified_human "
              "action=score accumulator=botsignals add=-40\n"),

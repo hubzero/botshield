@@ -286,7 +286,7 @@ def test_directive_accepts_mode_on_feedback(config_override):
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldFeedbackTrigger event-x '
+        '    BotShieldFeedback event-x event=event-x '
         'flagsession=honeypot_hit mode=observe',
         count=1,
     ):

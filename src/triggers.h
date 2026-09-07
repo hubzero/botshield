@@ -371,9 +371,14 @@ typedef struct {
 } bs_env_trigger_entry;
 
 
-/* E7.3 — feedback trigger entry. One per BotShieldFeedbackTrigger
- * directive; lookup-by-event-name. */
+/* E7.3 — feedback entry. One per <BotShieldFeedback> block.
+ *
+ * `name` is the operator's label, like a rule's; `event` is the
+ * condition. They were one field while the block name *was* the
+ * event, which left nowhere to put a second condition -- the reason
+ * this family never grew the vocabulary the request-path ones did. */
 typedef struct {
+    const char        *name;
     const char        *event;
     bs_trigger_action  action;
 } bs_feedback_trigger_entry;
@@ -513,8 +518,8 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
 
 const char *bs_set_request_trigger    (cmd_parms *cmd, void *dconf,
                                     int argc, char *const argv[]);
-const char *bs_set_feedback_trigger(cmd_parms *cmd, void *dconf,
-                                    int argc, char *const argv[]);
+const char *bs_set_feedback(cmd_parms *cmd, void *dconf,
+                            int argc, char *const argv[]);
 
 /* E4 — BotShieldSessionCookieName <name>. Each invocation appends a
  * new name to the session-cookie list. Lives next to the cookie-

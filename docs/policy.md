@@ -242,7 +242,7 @@ the same shared action keys.
 | Path | `BotShieldRule` | URI glob |
 | Cookie | `BotShieldCookie` / `BotShieldCookies` / `BotShieldBSCookie` inside a rule | Cookie name + value, or the bulk shape |
 | Env | `BotShieldEnv` inside a rule | Apache env var |
-| Feedback | `BotShieldFeedbackTrigger` | App-emitted event name (response path) |
+| Feedback | `BotShieldEvent` inside a `<BotShieldFeedback>` | App-signed event name (**response** path) |
 | Load | `BotShieldMinLoad` inside a rule | Global load_state |
 
 ### Shared action keys
@@ -350,13 +350,15 @@ configured feedback-trigger table:
 ```apache
 BotShieldAppFeedback                  on
 BotShieldAppIntegrationSecretFile     /etc/botshield/app-integration-secret
-<BotShieldFeedbackTrigger scanner-hit>
+<BotShieldFeedback scanner-hit>
+    BotShieldEvent        scanner-hit
     BotShieldFlagSession  honeypot_hit
     BotShieldLogAs        app-trap
-</BotShieldFeedbackTrigger>
-<BotShieldFeedbackTrigger human-pass>
+</BotShieldFeedback>
+<BotShieldFeedback human-pass>
+    BotShieldEvent        human-pass
     BotShieldFlagSession  app_verified_human
-</BotShieldFeedbackTrigger>
+</BotShieldFeedback>
 ```
 
 The event-name → action indirection is the security property: a

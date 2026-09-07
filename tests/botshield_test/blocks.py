@@ -18,7 +18,7 @@ import re
 
 FAMILIES = (
     "BotShieldRule", "BotShieldFlagTrigger",
-    "BotShieldFeedbackTrigger", "BotShieldTrigger",
+    "BotShieldFeedback", "BotShieldTrigger",
 )
 
 # Families whose rules carry no name.

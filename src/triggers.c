@@ -131,7 +131,7 @@ static const char *bs_trigger_family_dname(bs_trigger_family fam)
 {
     switch (fam) {
     case BS_TFAMILY_REQUEST:  return "BotShieldRule";
-    case BS_TFAMILY_FEEDBACK: return "BotShieldFeedbackTrigger";
+    case BS_TFAMILY_FEEDBACK: return "BotShieldFeedback";
     case BS_TFAMILY_FLAG:     return "BotShieldFlagTrigger";
     case BS_TFAMILY_SCOPE:    return "BotShieldTrigger";
     }
@@ -1614,31 +1614,54 @@ const char *bs_set_session_cookie_name(cmd_parms *cmd, void *dconf,
  * (the event has to land somewhere); optional log=<tag>. Response-
  * path only, so status/redirect/penalty/credit are rejected by the
  * shared parser. Upsert-by-event-name. */
-const char *bs_set_feedback_trigger(cmd_parms *cmd, void *dconf,
-                                           int argc, char *const argv[])
+const char *bs_set_feedback(cmd_parms *cmd, void *dconf,
+                            int argc, char *const argv[])
 {
     (void)dconf;
     if (argc < 1) {
-        return "BotShieldFeedbackTrigger: expects <event> "
-               "[key=value ...]";
+        return "<BotShieldFeedback> needs a name: "
+               "<BotShieldFeedback verified-human>";
     }
-    const char *event = argv[0];
+    const char *name = argv[0];
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
-    if (!bs_bot_name_valid(event)) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldFeedbackTrigger: event '%s' must be "
-            "[a-z0-9-]{1,32}", event);
-    }
 
     bs_feedback_trigger_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
-    e->event = apr_pstrdup(cmd->pool, event);
+    e->name = apr_pstrdup(cmd->pool, name);
     bs_trigger_action_init(BS_TFAMILY_FEEDBACK, &e->action);
 
     for (int i = 1; i < argc; i++) {
+        const char *arg = argv[i];
+        const char *eq  = strchr(arg, '=');
+        /* event= is the family's one condition, so it is read here
+         * rather than in the shared action parser -- that parser
+         * knows about actions, and this is the half of the block a
+         * response-status or header condition will join. */
+        if (eq && (apr_size_t)(eq - arg) == 5
+            && strncasecmp(arg, "event", 5) == 0) {
+            const char *val = eq + 1;
+            if (!bs_bot_name_valid(val)) {
+                return apr_psprintf(cmd->pool,
+                    "BotShieldFeedback '%s': event '%s' must be "
+                    "[a-z0-9-]{1,32}", name, val);
+            }
+            e->event = apr_pstrdup(cmd->pool, val);
+            continue;
+        }
         const char *err = bs_parse_trigger_action_key(cmd->pool,
-            BS_TFAMILY_FEEDBACK, argv[i], &e->action);
+            BS_TFAMILY_FEEDBACK, arg, &e->action);
         if (err) return err;
+    }
+
+    /* Required while it is the only condition: a block without it
+     * would match every event the app ever signs, which is never what
+     * an operator writing one of these means. When response-status
+     * and header conditions land, this stops being the only way to
+     * say what a row is about and the requirement can relax. */
+    if (!e->event) {
+        return apr_psprintf(cmd->pool,
+            "BotShieldFeedback '%s': needs BotShieldEvent <name>. "
+            "Without it the block matches every signed event.", name);
     }
     {
         const char *err = bs_finalize_trigger_action(cmd->pool,
@@ -1646,17 +1669,13 @@ const char *bs_set_feedback_trigger(cmd_parms *cmd, void *dconf,
         if (err) return err;
     }
 
-    /* Upsert-by-event. Last declaration for a given event wins its
-     * slot, same model as the other trigger families. */
-    for (int i = 0; i < scfg->feedback_triggers->nelts; i++) {
-        bs_feedback_trigger_entry *ex = APR_ARRAY_IDX(
-            scfg->feedback_triggers, i, bs_feedback_trigger_entry *);
-        if (strcmp(ex->event, e->event) == 0) {
-            APR_ARRAY_IDX(scfg->feedback_triggers, i,
-                          bs_feedback_trigger_entry *) = e;
-            return NULL;
-        }
-    }
+    /* Appended, not upserted. Two blocks may now name one event --
+     * they are separate rows with separate labels, so the first in
+     * declaration order wins, which is what BotShieldRule does and
+     * what bs_feedback_trigger_find already did. The old
+     * upsert-by-event made the *last* declaration win, silently, and
+     * could not have done anything else while the event was the
+     * identity of the row. */
     *(bs_feedback_trigger_entry **)
         apr_array_push(scfg->feedback_triggers) = e;
     return NULL;

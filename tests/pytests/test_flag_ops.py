@@ -6,7 +6,7 @@ borrowed rather than invented: BotShieldClassify already takes
 `[All|None] [+/-flag]...`.
 
 The part worth testing is the gate. Clearing is available only on
-BotShieldFeedbackTrigger, which fires on an app-signed header. Every
+BotShieldFeedback, which fires on an app-signed header. Every
 other family matches on request properties the client controls, so `-`
 there would be a laundering primitive: fetch the URL that matches, shed
 your own record. That refusal has to happen at config time, because at
@@ -70,9 +70,10 @@ def test_mixing_replace_with_a_delta_is_refused(config_override):
     otherwise allowed -- this is a grammar error, not a permission one.
     """
     msg = _refused(config_override,
-        "    <BotShieldFeedbackTrigger login-success>\n"
+        "    <BotShieldFeedback login-success>\n"
+             "        BotShieldEvent        login-success\n"
         "        BotShieldFlagSession  =app_verified_human,+scanner_probe\n"
-        "    </BotShieldFeedbackTrigger>")
+        "    </BotShieldFeedback>")
     assert "returned non-zero exit status" in msg or "mix" in msg, (
         f"mixing = with a delta must be refused; got {msg!r}"
     )
@@ -85,9 +86,10 @@ def test_feedback_may_clear(config_override, fresh_ip):
     suspicion" needs no flag of its own to set.
     """
     with _override(config_override,
-        "    <BotShieldFeedbackTrigger login-success>\n"
+        "    <BotShieldFeedback login-success>\n"
+             "        BotShieldEvent        login-success\n"
         "        BotShieldFlagSession  -scanner_probe\n"
-        "    </BotShieldFeedbackTrigger>"):
+        "    </BotShieldFeedback>"):
         resp = client.get("/", xff=fresh_ip, ua=BROWSER_UA)
         assert resp.status_code < 500, (
             "a clear-only feedback trigger must parse and serve"
