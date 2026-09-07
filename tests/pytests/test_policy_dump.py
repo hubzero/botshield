@@ -110,3 +110,97 @@ def test_policy_dump_surfaces_robots(robots_path, config_override):
     assert "wildcard=yes" in body
     assert "user-agent: *" in body
     assert "Disallow: /private" in body
+
+
+def test_policy_dump_surfaces_rules(config_override):
+    """Rules are in the dump.
+
+    They were absent entirely until 2026-09-07, which is how a shed
+    ladder sat in a production config for months unable to fire with
+    nothing saying so: the one tool that answers "what is in effect"
+    covered every subsystem except the one operators write.
+    """
+    conf = (
+        "BotShieldEnabled On\n"
+        "    <BotShieldRule dumped>\n"
+        "        BotShieldPath          /dump-probe\n"
+        "        BotShieldUserAgent     @bot\n"
+        "        BotShieldRespond       403\n"
+        "        BotShieldLogAs         dump-probe\n"
+        "    </BotShieldRule>"
+    )
+    with config_override(r"BotShieldEnabled\s+On", conf,
+                         render=False, count=1):
+        body = apache.policy_dump()
+    assert "## BotShieldRule" in body, body[:400]
+    line = [ln for ln in body.splitlines() if ln.startswith("dumped")]
+    assert line, f"the rule is missing from the dump; body={body[:600]}"
+    assert "path=/dump-probe" in line[0], line[0]
+    assert "ua=@bot" in line[0], line[0]
+    assert "respond=403" in line[0], line[0]
+    assert "logas=dump-probe" in line[0], line[0]
+
+
+def test_policy_dump_names_flags_rather_than_bits(config_override):
+    """A bitmask is true and useless.
+
+    The dump exists so a rule reads back the way it was written, so
+    flagged= and flagip= print the names the operator typed rather
+    than the bits they resolve to.
+    """
+    conf = (
+        "BotShieldEnabled On\n"
+        "    <BotShieldRule flagnames>\n"
+        "        BotShieldPath      /flagname-probe\n"
+        "        BotShieldFlagged   scanner_probe\n"
+        "        BotShieldFlagIP    honeypot_hit\n"
+        "        BotShieldRespond   403\n"
+        "    </BotShieldRule>"
+    )
+    with config_override(r"BotShieldEnabled\s+On", conf,
+                         render=False, count=1):
+        body = apache.policy_dump()
+    line = [ln for ln in body.splitlines() if ln.startswith("flagnames")]
+    assert line, f"rule missing; body={body[:600]}"
+    assert "flagged=scanner_probe" in line[0], line[0]
+    assert "flagip=honeypot_hit" in line[0], line[0]
+    assert "0x" not in line[0], f"raw bits leaked into the dump: {line[0]}"
+
+
+def test_policy_dump_marks_observe_rules(config_override):
+    """An observe rule that reads like an enforcing one is the whole
+    reason to check a dump before arming a ladder."""
+    conf = (
+        "BotShieldEnabled On\n"
+        "    <BotShieldRule staged>\n"
+        "        BotShieldPath      /observe-probe\n"
+        "        BotShieldRespond   503\n"
+        "        BotShieldMode      observe\n"
+        "    </BotShieldRule>"
+    )
+    with config_override(r"BotShieldEnabled\s+On", conf,
+                         render=False, count=1):
+        body = apache.policy_dump()
+    line = [ln for ln in body.splitlines() if ln.startswith("staged")]
+    assert line and "[observe]" in line[0], (
+        f"an observe rule must say so; line={line}"
+    )
+
+
+def test_policy_dump_counts_container_rules(config_override):
+    """Rules in a <Location> cannot be attributed back to it here --
+    this walk reads server config. Saying how many are missing beats
+    an empty section that reads as none."""
+    conf = (
+        "BotShieldEnabled On\n"
+        '    <Location "/dump-scoped">\n'
+        "        <BotShieldRule scoped>\n"
+        "            BotShieldRespond   403\n"
+        "        </BotShieldRule>\n"
+        "    </Location>"
+    )
+    with config_override(r"BotShieldEnabled\s+On", conf,
+                         render=False, count=1):
+        body = apache.policy_dump()
+    assert "in containers" in body, body[:600]
+    assert "not listed" in body, body[:600]

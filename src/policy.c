@@ -773,6 +773,142 @@ int bs_check_policy(request_rec *r)
  * by humans over curl; structured consumers use /botshield/metrics.
  * ====================================================================== */
 
+/* A flag bit's registered name, for the dump. Falls back to hex for
+ * a bit with no name, which should not happen and is worth seeing if
+ * it does. */
+static const char *bs_psh_flag_name(apr_uint32_t bit)
+{
+    for (const struct bs_flag_name *m = bs_flag_names; m->name; m++) {
+        if (m->bit == bit) return m->name;
+    }
+    return "?";
+}
+
+/* Comma-joined names for a bitmap, which flagip= and flagsession= can
+ * carry more than one of. */
+static const char *bs_psh_flag_names(apr_pool_t *p, apr_uint32_t bits)
+{
+    const char *s = "";
+    for (const struct bs_flag_name *m = bs_flag_names; m->name; m++) {
+        if (!(bits & m->bit)) continue;
+        s = apr_pstrcat(p, s, *s ? "," : "", m->name, NULL);
+    }
+    return *s ? s : "?";
+}
+
+/* Render one rule's conditions as the keys an operator wrote.
+ *
+ * Ordered as bs_check_policy evaluates them, so a rule reads back the
+ * way it was written rather than in struct order. Appends to a pool
+ * string because the count is unbounded and a fixed buffer here would
+ * silently truncate the one thing this dump exists to show. */
+static const char *bs_psh_rule_conditions(apr_pool_t *p,
+                                          const bs_request_trigger_entry *t)
+{
+    const char *s = "";
+    #define BS_PSH_ADD(...) \
+        s = apr_pstrcat(p, s, *s ? " " : "", apr_psprintf(p, __VA_ARGS__), NULL)
+
+    if (t->path_patterns && t->path_patterns->nelts > 0) {
+        const char *paths = "";
+        for (int i = 0; i < t->path_patterns->nelts; i++) {
+            const char *g = APR_ARRAY_IDX(t->path_patterns, i, const char *);
+            paths = apr_pstrcat(p, paths, i ? "|" : "", g, NULL);
+        }
+        BS_PSH_ADD("path=%s", paths);
+    }
+    if (t->query_pattern)      BS_PSH_ADD("query=%s", t->query_pattern);
+    if (t->cookie_pred >= 0)   BS_PSH_ADD("cookies=%d", t->cookie_pred);
+    if (t->bscookie_pred >= 0) BS_PSH_ADD("bscookie=%d", t->bscookie_pred);
+    if (t->ck_pred >= 0) {
+        BS_PSH_ADD("cookie=%s%s%s", t->ck_name ? t->ck_name : "?",
+                   t->ck_value ? "=" : "", t->ck_value ? t->ck_value : "");
+    }
+    if (t->env_pred >= 0) {
+        BS_PSH_ADD("env=%s%s%s", t->env_name ? t->env_name : "?",
+                   t->env_value ? "=" : "", t->env_value ? t->env_value : "");
+    }
+    if (t->exists_pred >= 0)
+        BS_PSH_ADD("exists=%s", t->exists_pred ? "yes" : "no");
+    if (t->solved_pred >= 0)
+        BS_PSH_ADD("solved=%s", t->solved_pred ? "yes" : "no");
+    if (t->crawler_pred >= 0)
+        BS_PSH_ADD("crawler=%s", t->crawler_pred ? "yes" : "no");
+    if (t->firstsight_pred >= 0)
+        BS_PSH_ADD("firstsight=%s", t->firstsight_pred ? "yes" : "no");
+    if (t->acceptlang_pred >= 0)
+        BS_PSH_ADD("acceptlanguage=%s", t->acceptlang_pred ? "*" : "\"\"");
+    if (t->flagged_bit)        BS_PSH_ADD("flagged=%s",
+                                          bs_psh_flag_name(t->flagged_bit));
+    if (t->minload >= 0)       BS_PSH_ADD("minload=%d", t->minload);
+    /* Hundredths per core on the wire; printed as the ratio the
+     * operator typed, which is also what BotShieldLoadAvgWarm takes. */
+    if (t->loadavg_min_pct >= 0)
+        BS_PSH_ADD("loadavgatleast=%d.%02d",
+                   t->loadavg_min_pct / 100, t->loadavg_min_pct % 100);
+    if (t->score_pred_name)
+        BS_PSH_ADD("scoreatleast=%s %d", t->score_pred_name,
+                   t->score_pred_min);
+    if (t->has_cohort) {
+        if (!t->cohort.ua_any) {
+            /* The setter decomposes the selector into flags, so
+             * reassemble rather than print "@selector" and make the
+             * reader go and look it up. */
+            const char *ua = t->cohort.ua_pattern;
+            if (!ua) {
+                if (t->cohort.ua_none)               ua = "\"\"";
+                else if (t->cohort.ua_class_bot)     ua = "@bot";
+                else if (t->cohort.ua_class_fake)    ua = "@fake-bot";
+                else if (t->cohort.ua_class_verified) ua = "@verified-bot";
+                else if (t->cohort.ua_class_scraper) ua = "@scraper";
+                else if (t->cohort.ua_botgroup)
+                    ua = apr_pstrcat(p, "@", t->cohort.ua_botgroup, NULL);
+                else                                 ua = "?";
+            }
+            BS_PSH_ADD("ua=%s", ua);
+        }
+        if (!t->cohort.ip_any) {
+            BS_PSH_ADD("ipspec=%s", t->cohort.inline_cidrs
+                                    ? t->cohort.inline_cidrs
+                                    : (t->cohort.path ? t->cohort.path : "?"));
+        }
+    }
+    #undef BS_PSH_ADD
+    return *s ? s : "(none)";
+}
+
+/* The action half, in the same spirit. */
+static const char *bs_psh_rule_action(apr_pool_t *p,
+                                      const bs_trigger_action *a)
+{
+    const char *s = "";
+    #define BS_PSH_ACT(...) \
+        s = apr_pstrcat(p, s, *s ? " " : "", apr_psprintf(p, __VA_ARGS__), NULL)
+
+    if (a->status_code == BS_TRIGGER_STATUS_PASS) {
+        if (a->tier_floor >= 0) BS_PSH_ACT("challenge=%s",
+                                           bs_tier_name(a->tier_floor));
+        else if (!a->score_ops) BS_PSH_ACT("nochallenge");
+    } else {
+        BS_PSH_ACT("respond=%d", a->status_code);
+    }
+    if (a->redirect_url)   BS_PSH_ACT("redirect=%s", a->redirect_url);
+    if (a->flag_ip)        BS_PSH_ACT("flagip=%s",
+                                      bs_psh_flag_names(p, a->flag_ip));
+    if (a->flag_session)   BS_PSH_ACT("flagsession=%s",
+                                      bs_psh_flag_names(p, a->flag_session));
+    if (a->score_ops) {
+        for (int i = 0; i < a->score_ops->nelts; i++) {
+            bs_score_op *o = APR_ARRAY_IDX(a->score_ops, i, bs_score_op *);
+            BS_PSH_ACT("score=%s%c%d", o->name, o->op, o->value);
+        }
+    }
+    if (a->log_tag)        BS_PSH_ACT("logas=%s", a->log_tag);
+    if (a->suppress_access_log) BS_PSH_ACT("accesslog=off");
+    #undef BS_PSH_ACT
+    return *s ? s : "(none)";
+}
+
 static void bs_psh_cohort_ipspec(const bs_cohort *c)
 {
     if (c->ip_any) { fputs("*", stdout); return; }
@@ -852,6 +988,47 @@ void bs_policy_dump(server_rec *s, apr_pool_t *p, bs_dir_cfg *cfg)
         }
     }
     fputs("\n", stdout);
+
+    /* --- rules ---
+     *
+     * First, because they are most of the language and the first thing
+     * anyone reading this is looking for. They were absent entirely
+     * until 2026-09-07: the dump answered "what is in effect" for
+     * every subsystem except the one an operator actually writes.
+     *
+     * Declaration order, which is evaluation order -- first match
+     * wins, so a rule listed above another can shadow it, and reading
+     * them in order is how you see that. */
+    fputs("## BotShieldRule (server scope, in evaluation order)\n", stdout);
+    if (!scfg->request_triggers || scfg->request_triggers->nelts == 0) {
+        fputs("# (none)\n\n", stdout);
+    } else {
+        fputs("# name               conditions -> action\n", stdout);
+        for (int i = 0; i < scfg->request_triggers->nelts; i++) {
+            bs_request_trigger_entry *t = APR_ARRAY_IDX(
+                scfg->request_triggers, i, bs_request_trigger_entry *);
+            printf("%-18s  %s -> %s%s\n",
+                   t->name,
+                   bs_psh_rule_conditions(p, t),
+                   bs_psh_rule_action(p, &t->action),
+                   t->action.mode == BS_TMODE_OBSERVE ? "  [observe]" : "");
+        }
+        fputs("\n", stdout);
+    }
+
+    /* Rules written inside <Location> and friends live on the dir
+     * config, which this walk cannot reach -- it iterates server
+     * configs. Counting them is possible because each is also pushed
+     * onto a server-side resolution list; listing them is not, because
+     * that list does not record which container each came from. Say
+     * so rather than let an empty section read as "none". */
+    if (scfg->scoped_rules && scfg->scoped_rules->nelts > 0) {
+        printf("## BotShieldRule (in containers): %d not listed\n"
+                  "# Declared inside <Location>/<Directory>/<Files>, which\n"
+                  "# this dump cannot attribute back to their container.\n"
+                  "# They are walked BEFORE the server-scope rules above.\n\n",
+               scfg->scoped_rules->nelts);
+    }
 
     /* --- directive rate limits --- */
     fputs("## BotShieldRateLimit (directive)\n", stdout);
