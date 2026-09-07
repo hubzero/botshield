@@ -48,7 +48,7 @@ def test_trigger_status_code_blocks_and_tags_log(
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
         '    BotShieldRule env-probe path="/.env" '
-        'respond=403 "logas=BAN 2h" ttl=3600',
+        'respond=403 "logas=BAN 2h"',
         count=1,
     ):
         with log_slice as slc:
@@ -123,7 +123,7 @@ def test_trigger_status_pass_penalty_scores_the_current_request(
     difference there is the whole pipeline, not the penalty.
     """
     RULE = ('    BotShieldRule passpen path="/honey-pass" '
-            'respond=nochallenge %s ttl=3600')
+            'respond=nochallenge %s')
 
     def decision_for(extra, ip):
         with config_override(
@@ -272,7 +272,7 @@ def test_trigger_flag_ip_carries_to_next_request(
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
         '    BotShieldRule bait path="/honey-bait" '
-        'respond=nochallenge flag=honeypot_hit ttl=3600',
+        'respond=nochallenge flagip=honeypot_hit',
         count=1,
     ):
         # First request primes the flagged-IP table.
@@ -473,33 +473,38 @@ def test_removed_requesttrigger_spelling_is_refused(
     )
 
 
-def test_deprecated_status_spelling_still_parses(config_override, fresh_ip):
-    """BotShieldStatus is the old spelling of BotShieldRespond.
+def test_removed_status_spelling_is_refused(config_override):
+    """BotShieldStatus was the old spelling of BotShieldRespond.
 
-    Warns at config time and keeps working, on the same
-    deprecate-then-remove schedule as the directive rename: the name is
-    in live configs -- twenty-four times in the one on qubeshub.org --
-    and a config error is fatal to httpd.
+    This test used to assert the deprecated spelling kept working, and
+    its docstring said what to do when the name went: invert it. The
+    name was removed 2026-09-06 along with BotShieldFlag, BotShieldTTL,
+    BotShieldTier and BotShieldLog -- this is the only site running the
+    module, so there was nobody to carry a deprecation window for.
+
+    The error names the replacement rather than saying "unknown key",
+    because an operator who reaches this has a working config in front
+    of them and needs the one word that fixes it.
 
     render=False so the block reaches Apache exactly as written, which
     is the only way the module rather than the harness is under test.
-    When the spelling is removed this inverts into its rejection test.
     """
-    with config_override(
-        r"BotShieldEnabled\s+On",
-        "BotShieldEnabled On\n"
-        "    <BotShieldRule legacy-status>\n"
-        "        BotShieldPath      /legacy-status-probe\n"
-        "        BotShieldStatus    404\n"
-        "    </BotShieldRule>",
-        render=False,
-        count=1,
-    ):
-        resp = client.get("/legacy-status-probe", xff=fresh_ip)
-        assert resp.status_code == 404, (
-            "the deprecated spelling must keep working until it is "
-            f"removed; got {resp.status_code}"
-        )
+    with pytest.raises(Exception) as exc_info:
+        with config_override(
+            r"BotShieldEnabled\s+On",
+            "BotShieldEnabled On\n"
+            "    <BotShieldRule legacy-status>\n"
+            "        BotShieldPath      /legacy-status-probe\n"
+            "        BotShieldStatus    404\n"
+            "    </BotShieldRule>",
+            render=False,
+            count=1,
+        ):
+            pass
+    assert "returned non-zero exit status" in str(exc_info.value), (
+        f"the removed spelling must be refused by httpd; "
+        f"got: {str(exc_info.value)!r}"
+    )
 
 
 def test_respond_is_the_canonical_spelling(config_override, fresh_ip):

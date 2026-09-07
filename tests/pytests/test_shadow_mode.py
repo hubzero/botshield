@@ -88,13 +88,13 @@ def test_path_trigger_observe_does_not_flag_ip(
     config_override, fresh_ip, log_slice,
 ):
     """The point of observe is no persistent memory. Match a path
-    trigger with flag=fake_bot ttl=3600 in observe mode; the IP
+    trigger with flagip=fake_bot in observe mode; the IP
     must not pick up the flag bit on the next request."""
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldRule trap path="/.envprobe" '
-        'respond=nochallenge flag=fake_bot ttl=3600 mode=observe',
+        'respond=nochallenge flagip=fake_bot mode=observe',
         count=1,
     ):
         # Match in observe mode.
@@ -277,8 +277,8 @@ def test_directive_rejects_bad_mode_value(config_override):
 
 def test_directive_accepts_mode_on_feedback(config_override):
     """Feedback runs response-path but its side effect is the
-    flagged-IP write — observe-mode means "log :observe but skip
-    the SHM mutation", which is the same staging gate operators
+    session-flag write — observe-mode means "log :observe but skip
+    resealing the cookie", which is the same staging gate operators
     get for the other trigger families. The parser must accept
     `mode=observe` on a feedback trigger; bridge.c honors it.
     Per-trigger functional verification lives in
@@ -287,7 +287,7 @@ def test_directive_accepts_mode_on_feedback(config_override):
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldFeedbackTrigger event-x '
-        'flag=honeypot_hit ttl=3600 mode=observe',
+        'flagsession=honeypot_hit mode=observe',
         count=1,
     ):
         pass

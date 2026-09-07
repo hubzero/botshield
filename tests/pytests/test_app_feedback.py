@@ -51,9 +51,25 @@ FEEDBACK_LOC_1  = '<Location "/about.html">'
 FEEDBACK_LOC_2  = '<Location "/login.html">'
 
 
+COOKIE_NAME = "__Host-bs_session"
+
+
 def _g(path, xff, **kw):
     return client.get(path, xff=xff, ua=PASS_UA,
                       accept_language=PASS_AL, **kw)
+
+
+def _carry(resp):
+    """Hand the session cookie from `resp` to the next request.
+
+    Feedback marks the session rather than the address, so a follow-up
+    that does not carry the cookie cannot see the mark. That matters
+    most for the negative assertions below: "flaggedsession not in
+    reason" passes trivially on a request that was never able to see
+    it, which would make them pass no matter what bridge.c did.
+    """
+    c = resp.cookies.get(COOKIE_NAME)
+    return {COOKIE_NAME: c} if c else {}
 
 
 def _sign(event: str, extra: str = "") -> str:
@@ -92,16 +108,16 @@ def _cfg(feedback_triggers: str, body_inserts: str) -> str:
 def test_app_feedback_penalty_flag_applies_to_next_request(
     config_override, log_slice,
 ):
-    """Event `scanner-hit` maps to flag=honeypot_hit ttl=3600. App
-    signs the event name; module looks it up in the config and
-    applies the configured bit to the flagged-IP table."""
+    """Event `scanner-hit` maps to flagsession=honeypot_hit. App
+    signs the event name; the module looks it up in the config and
+    applies the configured bit to the cookie session."""
     val = _sign("scanner-hit")
     ip = _ips.fresh_ip()
     with config_override(
         r"BotShieldEnabled\s+On",
         _cfg(
             '    BotShieldFeedbackTrigger scanner-hit '
-            'flag=honeypot_hit ttl=3600\n',
+            'flagsession=honeypot_hit\n',
             f'    {FEEDBACK_LOC_1}\n'
             f'        Header always set X-BotShield-Feedback "{val}"\n'
             f'    </Location>'
@@ -113,11 +129,15 @@ def test_app_feedback_penalty_flag_applies_to_next_request(
             "feedback header leaked to client; strip-before-send "
             "rule broken"
         )
+        assert r1.cookies.get(COOKIE_NAME), (
+            f"the feedback response should carry the resealed cookie "
+            f"holding the mark; got {dict(r1.cookies)}"
+        )
         with log_slice as slc:
-            _g("/index.html", xff=ip)
+            _g("/index.html", xff=ip, cookies=_carry(r1))
             lines = slc.decision_lines(ip=ip)
     assert lines, "no follow-up decision line"
-    assert "flaggedip" in lines[-1]["reason"], (
+    assert "flaggedsession" in lines[-1]["reason"], (
         f"follow-up request didn't pick up the flagged bit; "
         f"reason={lines[-1]['reason']}"
     )
@@ -136,7 +156,7 @@ def test_app_feedback_observed_under_log_only(
 
     Verify by minting feedback under LogOnly, then checking that
     a follow-up request from the same IP does NOT see the
-    flaggedip reason."""
+    flaggedsession reason."""
     val = _sign("scanner-hit")
     ip = _ips.fresh_ip()
     with config_override(
@@ -146,20 +166,20 @@ def test_app_feedback_observed_under_log_only(
         '    BotShieldAppFeedback on\n'
         f'    BotShieldAppIntegrationSecretFile {SECRET_PATH}\n'
         '    BotShieldFeedbackTrigger scanner-hit '
-        'flag=honeypot_hit ttl=3600\n'
+        'flagsession=honeypot_hit\n'
         f'    {FEEDBACK_LOC_1}\n'
         f'        Header always set X-BotShield-Feedback "{val}"\n'
         f'    </Location>',
         count=1,
     ):
         with log_slice as slc:
-            _g(FEEDBACK_PATH_1, xff=ip)
-            _g("/index.html", xff=ip)
+            first = _g(FEEDBACK_PATH_1, xff=ip)
+            _g("/index.html", xff=ip, cookies=_carry(first))
             lines = slc.decision_lines(ip=ip)
 
     assert lines, "no decision lines emitted"
     follow_up = lines[-1]["reason"]
-    assert "flaggedip" not in follow_up, (
+    assert "flaggedsession" not in follow_up, (
         f"follow-up request picked up the flagged bit even though "
         f"BotShieldEnabled LogOnly was set; bridge.c bypassed the "
         f"observe gate. reason={follow_up}"
@@ -190,20 +210,20 @@ def test_app_feedback_per_trigger_observe_mode(
         '    BotShieldAppFeedback on\n'
         f'    BotShieldAppIntegrationSecretFile {SECRET_PATH}\n'
         '    BotShieldFeedbackTrigger scanner-hit '
-        'flag=honeypot_hit ttl=3600 mode=observe\n'
+        'flagsession=honeypot_hit mode=observe\n'
         f'    {FEEDBACK_LOC_1}\n'
         f'        Header always set X-BotShield-Feedback "{val}"\n'
         f'    </Location>',
         count=1,
     ):
         with log_slice as slc:
-            _g(FEEDBACK_PATH_1, xff=ip)
-            _g("/index.html", xff=ip)
+            first = _g(FEEDBACK_PATH_1, xff=ip)
+            _g("/index.html", xff=ip, cookies=_carry(first))
             lines = slc.decision_lines(ip=ip)
 
     assert lines, "no decision lines emitted"
     follow_up = lines[-1]["reason"]
-    assert "flaggedip" not in follow_up, (
+    assert "flaggedsession" not in follow_up, (
         f"follow-up request picked up the flagged bit even though "
         f"the feedback trigger was mode=observe. reason={follow_up}"
     )
@@ -233,17 +253,18 @@ def test_app_feedback_credit_flag_lowers_score(
         r"BotShieldEnabled\s+On",
         _cfg(
             '    BotShieldFeedbackTrigger human-verified '
-            'flag=app_verified_human ttl=3600\n',
+            'flagsession=app_verified_human\n',
             f'    {FEEDBACK_LOC_1}\n'
             f'        Header always set X-BotShield-Feedback "{val}"\n'
             f'    </Location>'
         ),
         count=1,
     ):
-        _g(FEEDBACK_PATH_1, xff=ip_cred)
+        credited = _g(FEEDBACK_PATH_1, xff=ip_cred)
         with log_slice as slc:
             client.get("/index.html", xff=ip_base, ua=scraper)
-            client.get("/index.html", xff=ip_cred, ua=scraper)
+            client.get("/index.html", xff=ip_cred, ua=scraper,
+                       cookies=_carry(credited))
             base_lines = slc.decision_lines(ip=ip_base)
             cred_lines = slc.decision_lines(ip=ip_cred)
 
@@ -281,7 +302,7 @@ def test_app_feedback_strips_from_404_error_response(
         r"BotShieldEnabled\s+On",
         _cfg(
             '    BotShieldFeedbackTrigger scanner-hit '
-            'flag=honeypot_hit ttl=3600\n',
+            'flagsession=honeypot_hit\n',
             f'    <Location "{missing_path}">\n'
             f'        Header always set X-BotShield-Feedback "{val}"\n'
             f'    </Location>'
@@ -306,7 +327,7 @@ def test_app_feedback_strips_when_feature_off(config_override):
         '    BotShieldAppFeedback off\n'
         f'    BotShieldAppIntegrationSecretFile {SECRET_PATH}\n'
         '    BotShieldFeedbackTrigger scanner-hit '
-        'flag=honeypot_hit ttl=3600\n'
+        'flagsession=honeypot_hit\n'
         f'    {FEEDBACK_LOC_1}\n'
         f'        Header always set X-BotShield-Feedback "{val}"\n'
         f'    </Location>',
@@ -329,7 +350,7 @@ def test_app_feedback_tampered_sig_rejected_and_stripped(
         r"BotShieldEnabled\s+On",
         _cfg(
             '    BotShieldFeedbackTrigger scanner-hit '
-            'flag=honeypot_hit ttl=3600\n',
+            'flagsession=honeypot_hit\n',
             f'    {FEEDBACK_LOC_1}\n'
             f'        Header always set X-BotShield-Feedback "{tampered}"\n'
             f'    </Location>'
@@ -338,14 +359,14 @@ def test_app_feedback_tampered_sig_rejected_and_stripped(
     ):
         r1 = _g(FEEDBACK_PATH_1, xff=ip)
         with log_slice as slc:
-            _g("/index.html", xff=ip)
+            _g("/index.html", xff=ip, cookies=_carry(r1))
             lines = slc.decision_lines(ip=ip)
 
     assert "X-BotShield-Feedback" not in r1.headers, (
         "tampered header must still be stripped"
     )
-    assert lines and "flaggedip" not in lines[-1]["reason"], (
-        f"tampered feedback shouldn't have flagged the IP; "
+    assert lines and "flaggedsession" not in lines[-1]["reason"], (
+        f"tampered feedback shouldn't have marked the session; "
         f"reason={lines[-1]['reason']}"
     )
 
@@ -375,12 +396,12 @@ def test_app_feedback_unmapped_event_is_ignored(
     ):
         r1 = _g(FEEDBACK_PATH_1, xff=ip)
         with log_slice as slc:
-            _g("/index.html", xff=ip)
+            _g("/index.html", xff=ip, cookies=_carry(r1))
             lines = slc.decision_lines(ip=ip)
 
     assert "X-BotShield-Feedback" not in r1.headers
-    assert lines and "flaggedip" not in lines[-1]["reason"], (
-        f"unmapped event should not have flagged the IP; "
+    assert lines and "flaggedsession" not in lines[-1]["reason"], (
+        f"unmapped event should not have marked the session; "
         f"reason={lines[-1]['reason']}"
     )
 
@@ -402,7 +423,7 @@ def test_app_feedback_legacy_wire_format_rejected(
         r"BotShieldEnabled\s+On",
         _cfg(
             '    BotShieldFeedbackTrigger legacy-guard '
-            'flag=honeypot_hit ttl=3600\n',
+            'flagsession=honeypot_hit\n',
             f'    {FEEDBACK_LOC_1}\n'
             f'        Header always set X-BotShield-Feedback "{val}"\n'
             f'    </Location>'
@@ -411,11 +432,11 @@ def test_app_feedback_legacy_wire_format_rejected(
     ):
         r1 = _g(FEEDBACK_PATH_1, xff=ip)
         with log_slice as slc:
-            _g("/index.html", xff=ip)
+            _g("/index.html", xff=ip, cookies=_carry(r1))
             lines = slc.decision_lines(ip=ip)
 
     assert "X-BotShield-Feedback" not in r1.headers
-    assert lines and "flaggedip" not in lines[-1]["reason"], (
+    assert lines and "flaggedsession" not in lines[-1]["reason"], (
         f"legacy wire format must not flag; "
         f"reason={lines[-1]['reason']}"
     )
@@ -440,9 +461,9 @@ def test_app_feedback_credit_and_penalty_compose(
         r"BotShieldEnabled\s+On",
         _cfg(
             '    BotShieldFeedbackTrigger scanner-hit '
-            'flag=honeypot_hit ttl=3600\n'
+            'flagsession=honeypot_hit\n'
             '    BotShieldFeedbackTrigger human-verified '
-            'flag=app_verified_human ttl=3600\n',
+            'flagsession=app_verified_human\n',
             f'    {FEEDBACK_LOC_1}\n'
             f'        Header always set X-BotShield-Feedback "{penalty_val}"\n'
             f'    </Location>\n'
@@ -452,30 +473,70 @@ def test_app_feedback_credit_and_penalty_compose(
         ),
         count=1,
     ):
-        _g(FEEDBACK_PATH_1, xff=ip_both)   # earn honeypot_hit  (+60)
-        _g(FEEDBACK_PATH_2, xff=ip_both)   # earn app_verified_human (-80)
-        # A few subsequent requests so Bloom eats firstsightip and
-        # the follow-up's reason trace doesn't include it, leaving
-        # just flaggedip as the visible flag contribution.
-        _g("/index.html", xff=ip_both)
-        _g("/index.html", xff=ip_both)
-        _g("/index.html", xff=ip_both)
+        # Both marks land on one session, so the cookie has to be
+        # chained through: the second event reseals the cookie the
+        # first one produced.
+        r1 = _g(FEEDBACK_PATH_1, xff=ip_both)   # honeypot_hit  (+60)
+        r2 = _g(FEEDBACK_PATH_2, xff=ip_both,   # app_verified_human (-80)
+                cookies=_carry(r1))
+        ck = _carry(r2)
+        # A few subsequent requests so Bloom eats firstsightip and the
+        # follow-up's reason trace doesn't include it, leaving just
+        # flaggedsession as the visible flag contribution.
+        for _ in range(3):
+            _g("/index.html", xff=ip_both, cookies=ck)
         with log_slice as slc:
-            _g("/index.html", xff=ip_both)
+            _g("/index.html", xff=ip_both, cookies=ck)
             lines = slc.decision_lines(ip=ip_both)
 
     assert lines
-    # Score is dominated by flag-penalty composition: honeypot +60
-    # plus app_verified_human -80 = -20. The droppedcookie
-    # heuristic adds +25 on cookieless follow-ups whose IP is in the
-    # Bloom filter, so the observed score on a typical run is +5.
-    # We assert the composite landed roughly where it should (well
-    # below zero plus a small buffer for the droppedcookie penalty)
-    # rather than an exact value the heuristic stack can shift.
+    # Score is dominated by flag composition: honeypot +60 plus
+    # app_verified_human -80 = -20. The follow-ups carry the cookie
+    # now, so droppedcookie no longer adds its +25 -- the bound stays
+    # loose anyway, because asserting an exact value would make this
+    # test a tripwire for every heuristic weight.
     score = int(lines[-1]["score"])
     assert score < 30, (
         f"penalty+credit composition didn't pull score down — "
         f"app_verified_human credit may not have applied. "
         f"reason={lines[-1]['reason']} score={score}"
     )
-    assert "flaggedip" in lines[-1]["reason"]
+    assert "flaggedsession" in lines[-1]["reason"]
+
+
+def test_app_feedback_can_mark_the_address(config_override, log_slice):
+    """BotShieldFlagIP on a feedback trigger flags the address.
+
+    The subject is the operator's choice and the two say different
+    things. A session mark is right for what the app knows about a
+    person it authenticated. An abuse report usually has no session to
+    point at -- a scripted client never takes a cookie, and a session
+    write no-ops without one -- so the address is the only place that
+    report can land.
+
+    Sent deliberately without a cookie, which is both the case that
+    needs the address and the case that proves the session path is not
+    quietly doing the work.
+    """
+    val = _sign("scanner-hit")
+    ip = _ips.fresh_ip()
+    with config_override(
+        r"BotShieldEnabled\s+On",
+        _cfg(
+            '    BotShieldFeedbackTrigger scanner-hit '
+            'flagip=honeypot_hit\n',
+            f'    {FEEDBACK_LOC_1}\n'
+            f'        Header always set X-BotShield-Feedback "{val}"\n'
+            f'    </Location>'
+        ),
+        count=1,
+    ):
+        _g(FEEDBACK_PATH_1, xff=ip)
+        with log_slice as slc:
+            _g("/index.html", xff=ip)
+            lines = slc.decision_lines(ip=ip)
+    assert lines, "no follow-up decision line"
+    assert "flaggedip" in lines[-1]["reason"], (
+        f"the address should carry the mark; "
+        f"reason={lines[-1]['reason']}"
+    )

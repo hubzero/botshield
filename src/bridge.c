@@ -21,10 +21,10 @@
 #include <http_request.h>
 
 #include "botshield.h"
-#include "allowlist.h" /* bs_parse_client_ip, bs_mask_ipv6_prefix */
 #include "crypto.h"
 #include "shm.h"
 #include "metrics.h"
+#include "allowlist.h" /* bs_parse_client_ip, bs_mask_ipv6_prefix */
 #include "cookie.h"  /* bs_amend_session_flags */
 
 /* ======================================================================
@@ -300,33 +300,49 @@ apr_status_t bs_app_feedback_filter(ap_filter_t *f,
         }
         ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
             "mod_botshield: app feedback event=%s observed "
-            "(would-flag=0x%x ttl=%d) - log-only/observe", event,
-            ft->action.flag_bit, ft->action.ttl_sec);
+            "(would-flag ip=0x%x session=0x%x) - log-only/observe",
+            event, ft->action.flag_ip, ft->action.flag_session);
         return ap_pass_brigade(f->next, bb);
     }
 
-    unsigned char client_ip[16];
-    if (bs_parse_client_ip(r->useragent_ip, client_ip)) {
-        bs_mask_ipv6_prefix(client_ip, scfg->ipv6_prefix_bits);
-        bs_flagged_ip_add(r, client_ip,
-                          ft->action.flag_bit, ft->action.ttl_sec,
-                          scfg->ns_id);
-        if (ft->action.log_tag) {
-            /* Feedback has no decision-log emission of its own, but
-             * the tag belongs in r->notes so any subsequent access
-             * log or custom format can pick it up via %{BS-...}n. */
-            bs_set_trigger_tag(r, ft->action.log_tag);
-        }
-        ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
-            "mod_botshield: app feedback event=%s applied "
-            "flag=0x%x ttl=%d", event,
-            ft->action.flag_bit, ft->action.ttl_sec);
+    if (ft->action.log_tag) {
+        /* Feedback has no decision-log emission of its own, but the
+         * tag belongs in r->notes so any subsequent access log or
+         * custom format can pick it up via %{BS-...}n. */
+        bs_set_trigger_tag(r, ft->action.log_tag);
     }
 
-    /* Session flags. Applied after the address write and outside the
-     * bs_parse_client_ip guard above, because a cookie session is
-     * identified by the cookie -- an unparseable client address says
-     * nothing about whether this browser can be marked.
+    /* Address flags. This read ft->action.flag_bit until the flag=/ttl=
+     * pair was retired, which meant BotShieldFlagIP on a feedback
+     * trigger cleared the parse-time guard and then did nothing --
+     * the family had one working address path and it was the
+     * deprecated spelling. On the server-scope window like every
+     * other address write, because one address slot holds a single
+     * expires_at shared by all its flags. */
+    {
+        unsigned char client_ip[16];
+        if ((ft->action.flag_ip || ft->action.flag_ip_clear
+             || ft->action.flag_ip_replace)
+            && bs_parse_client_ip(r->useragent_ip, client_ip)) {
+            bs_mask_ipv6_prefix(client_ip, scfg->ipv6_prefix_bits);
+            int ip_ttl = scfg->forget_ip_after > 0
+                       ? scfg->forget_ip_after : BS_DEFAULT_FORGET_IP_AFTER;
+            if (ft->action.flag_ip_clear || ft->action.flag_ip_replace) {
+                bs_flagged_ip_clear(r, client_ip, ft->action.flag_ip_clear,
+                                    ft->action.flag_ip,
+                                    ft->action.flag_ip_replace,
+                                    scfg->ns_id);
+            } else {
+                bs_flagged_ip_add(r, client_ip, ft->action.flag_ip,
+                                  ip_ttl, scfg->ns_id);
+            }
+        }
+    }
+
+    /* Session flags. Outside any bs_parse_client_ip guard, because a
+     * cookie session is identified by the cookie: an unparseable
+     * client address says nothing about whether this browser can be
+     * marked.
      *
      * Feedback wins over any session flag a rule set earlier in the
      * same request: the application asserting something about a

@@ -74,7 +74,7 @@ def test_scope_trigger_status_blocks_inside_location_only(
 def test_scope_trigger_flag_persists_to_next_request(
     config_override, log_slice, fresh_ip,
 ):
-    """A BotShieldTrigger flag=honeypot_hit in <Location> writes
+    """A BotShieldTrigger flagip=honeypot_hit in <Location> writes
     the flag into the SHM flagged-IP table; the next request from
     the same IP hits the default flagtrigger reaction
     (tier_floor=captcha + +60 score) — same behavior the legacy
@@ -83,7 +83,7 @@ def test_scope_trigger_flag_persists_to_next_request(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    <Location "/admin/.env">\n'
-        '        BotShieldTrigger flag=honeypot_hit ttl=3600\n'
+        '        BotShieldTrigger flagip=honeypot_hit\n'
         '    </Location>',
         count=1,
     ):

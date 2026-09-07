@@ -12,6 +12,8 @@ migrated keeps working.
 
 from __future__ import annotations
 
+import pytest
+
 from botshield_test import client
 
 
@@ -45,18 +47,26 @@ def test_log_as_tags_the_decision_line(config_override, fresh_ip, log_slice):
         )
 
 
-def test_deprecated_log_still_tags(config_override, fresh_ip, log_slice):
-    """The old spelling keeps working while it is being migrated."""
-    with config_override(
-        r"BotShieldEnabled\s+On",
-        _rule("BotShieldLog", "oldspelling", "/log-probe"),
-        render=False,
-        count=1,
-    ):
-        with log_slice as slc:
-            resp = client.get("/log-probe", xff=fresh_ip, ua=BROWSER_UA)
-        assert resp.status_code == 403
-        lines = slc.decision_lines(ip=fresh_ip)
-        assert any(d.get("tag") == "oldspelling" for d in lines), (
-            f"the deprecated spelling must still tag; lines={lines}"
-        )
+def test_removed_log_spelling_is_refused(config_override):
+    """BotShieldLog is gone; BotShieldLogAs is the name.
+
+    The old one read as the thing that produces the log entry, and
+    removing it as a way to stop one. It does neither -- the line was
+    going to be emitted anyway, and this only labels it.
+
+    Removed 2026-09-06 with the other four deprecated spellings rather
+    than carried: this is the only site running the module, so there
+    was nobody to hold a window open for.
+    """
+    with pytest.raises(Exception) as exc_info:
+        with config_override(
+            r"BotShieldEnabled\s+On",
+            _rule("BotShieldLog", "oldspelling", "/log-probe"),
+            render=False,
+            count=1,
+        ):
+            pass
+    assert "returned non-zero exit status" in str(exc_info.value), (
+        f"the removed spelling must be refused by httpd; "
+        f"got: {str(exc_info.value)!r}"
+    )

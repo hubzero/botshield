@@ -2095,6 +2095,14 @@ static int bs_handler(request_rec *r)
      * and an unauthenticated cookie must not be able to assert a flag
      * about its own bearer -- in either direction. */
     apr_uint32_t cookie_flags = have_prior_rep ? prior_ch.rep.flags_active : 0;
+    /* The cookie-side counterpart to "flaggedip" above. Same purpose:
+     * one word telling an operator reading decision logs that this
+     * client carries flags, without parsing every trigger name. It
+     * matters more since app feedback stopped writing addresses --
+     * without it the family's entire effect is invisible to a grep. */
+    if (cookie_flags != 0) {
+        bs_score_add(r, 0, "flaggedsession");
+    }
     apr_uint32_t all_flags = ip_flags | cookie_flags;
     /* Skip flags this client already answered for. Solving does not
      * clear a flag and flag scores re-apply every request, so without

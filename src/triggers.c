@@ -161,12 +161,10 @@ static void bs_trigger_action_init(bs_trigger_family fam,
          * radius, and a default is the wrong place for it: the operator
          * who wanted a plain 404 on /wp-admin got an hour of forced
          * challenges for every NAT behind it, and nothing in the config
-         * said so. Both kinds of memory are opt-in now -- flag= plus
-         * BotShieldFlagIP for the address, BotShieldFlagSession
-         * for the cookie session. */
+         * said so. Both kinds of memory are opt-in now --
+         * BotShieldFlagIP for the address, BotShieldFlagSession for
+         * the cookie session. */
         a->status_code = 403;
-        a->flag_bit    = 0;
-        a->ttl_sec     = 0;
         break;
     case BS_TFAMILY_FEEDBACK:
         /* Feedback runs on the response path; status/redirect/
@@ -174,8 +172,6 @@ static void bs_trigger_action_init(bs_trigger_family fam,
          * a harmless sentinel — the executor path for this family
          * doesn't consult it. */
         a->status_code = BS_TRIGGER_STATUS_PASS;
-        a->flag_bit    = 0;
-        a->ttl_sec     = 0;
         break;
     case BS_TFAMILY_FLAG:
         /* Flag triggers do not use bs_trigger_action — they have
@@ -185,8 +181,6 @@ static void bs_trigger_action_init(bs_trigger_family fam,
          * caller mis-routed a flag trigger through the shared
          * engine. */
         a->status_code = BS_TRIGGER_STATUS_PASS;
-        a->flag_bit    = 0;
-        a->ttl_sec     = 0;
         break;
     case BS_TFAMILY_SCOPE:
         /* Per-scope triggers default to pass-with-score-shaping —
@@ -196,8 +190,6 @@ static void bs_trigger_action_init(bs_trigger_family fam,
          * status= explicitly when they want the scope to short-
          * circuit with a status code or redirect. */
         a->status_code = BS_TRIGGER_STATUS_PASS;
-        a->flag_bit    = 0;
-        a->ttl_sec     = 0;
         break;
     }
     a->tier_floor      = -1;
@@ -239,7 +231,6 @@ static int bs_trigger_key_is_response_only(const char *arg,
     #define BS_KMATCH(n) (klen == sizeof(n)-1 && \
                           strncasecmp(arg, n, sizeof(n)-1) == 0)
     if (BS_KMATCH("respond"))  return 1;
-    if (BS_KMATCH("status"))   return 1;   /* deprecated spelling */
     if (BS_KMATCH("redirect")) return 1;
     #undef BS_KMATCH
     return 0;
@@ -342,11 +333,32 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
     if (fam == BS_TFAMILY_FEEDBACK
         && bs_trigger_key_is_response_only(arg, klen)) {
         return apr_psprintf(pool,
-            "%s: %.*s= is not supported on feedback triggers "
-            "(the response has already been served; feedback maps "
-            "a signed event to flag/ttl only — use a cookie or path "
-            "trigger for status/redirect/penalty/credit)",
+            "%s: %.*s= is not supported on feedback triggers. The "
+            "response has already been served, so there is nothing "
+            "left to direct: feedback maps a signed event to "
+            "BotShieldFlagIP or BotShieldFlagSession, which is what "
+            "the next request can read. Put the response decision in "
+            "a BotShieldRule.",
             dname, (int)klen, arg);
+    }
+    /* score= parses in every family, so without this it lands on a
+     * feedback trigger, writes a request-scoped accumulator, and is
+     * never read -- the tier decision was made before this filter
+     * ran. Dead config accepted at parse time is exactly what the
+     * flag guard in bs_finalize_trigger_action exists to prevent;
+     * this was the same hole one key over.
+     *
+     * Spelled out rather than via BS_AK because that macro is defined
+     * a few lines below, after the family-specific rejections. */
+    if (fam == BS_TFAMILY_FEEDBACK && klen == 5
+        && strncasecmp(arg, "score", 5) == 0) {
+        return apr_psprintf(pool,
+            "%s: score= is not supported on feedback triggers. The "
+            "accumulator lives for one request and the tier decision "
+            "is already made when this runs, so the value would never "
+            "be read. Reputation that outlives a request is a flag: "
+            "write BotShieldFlagIP or BotShieldFlagSession, and let a "
+            "BotShieldRule read it with flagged=.", dname);
     }
 
     #define BS_AK(n) (klen == sizeof(n)-1 && \
@@ -421,28 +433,20 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
         }
         return NULL;
     }
-    if (BS_AK("respond") || BS_AK("status")) {
-        /* BotShieldRespond is the name; BotShieldStatus is the old
-         * spelling and warns.
-         *
-         * "Status" is the word Apache already spends on mod_status and
+    if (BS_AK("status")) {
+        /* "Status" is the word Apache already spends on mod_status and
          * server-status, and this module ships a dashboard and a
-         * metrics endpoint of its own -- so in this config the old name
-         * read as a monitoring surface rather than as the response a
-         * rule produces. Nothing in Apache names a response code
-         * "Status": Redirect and ErrorDocument take one as an argument,
-         * and mod_rewrite spells it [R=404].
-         *
-         * Warns rather than fails, for the same reason the
-         * BotShieldRequestTrigger rename does: a config error is fatal
-         * to httpd and this spelling is in live configs. */
-        const char *kspell = BS_AK("status") ? "status" : "respond";
-        if (BS_AK("status")) {
-            ap_log_error(APLOG_MARK, APLOG_WARNING, 0, NULL,
-                "mod_botshield: %s: BotShieldStatus is deprecated and "
-                "will be removed; rename it to BotShieldRespond. Same "
-                "values, same behaviour.", dname);
-        }
+         * metrics endpoint of its own -- so the old name read as a
+         * monitoring surface rather than as the response a rule
+         * produces. Nothing in Apache names a response code "Status":
+         * Redirect and ErrorDocument take one as an argument, and
+         * mod_rewrite spells it [R=404]. */
+        return apr_psprintf(pool,
+            "%s: BotShieldStatus is gone; write BotShieldRespond. "
+            "Same values, same behaviour.", dname);
+    }
+    if (BS_AK("respond")) {
+        const char *kspell = "respond";
         /* 'nochallenge' is the name; 'pass' is the same thing spelled
          * the way it was before the name said what it meant. It waives
          * the challenge only -- rate limits and robots.txt still apply
@@ -497,42 +501,30 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
             a->status_explicit = 1;
         }
     } else if (BS_AK("tier")) {
-        if      (!strcasecmp(val, "nochallenge")) a->tier_floor = BS_TIER_PASS;
-        else if (!strcasecmp(val, "noninteractive"))
-            a->tier_floor = BS_TIER_NONINTERACTIVE;
-        /* The form/hard alias this used to carry is gone. It existed
-         * because the wire string said "form" while the threshold
-         * directive said Hard, so an operator could not guess which
-         * surface they were on. One name on every surface now. */
-        else if (!strcasecmp(val, "interactive"))
-            a->tier_floor = BS_TIER_INTERACTIVE;
-        else if (!strcasecmp(val, "captcha")) a->tier_floor = BS_TIER_CAPTCHA;
-        else return apr_psprintf(pool,
-            "%s: tier='%s' must be nochallenge/noninteractive/interactive/"
-            "captcha", dname, val);
-        ap_log_error(APLOG_MARK, APLOG_WARNING, 0, NULL,
-            "mod_botshield: %s: BotShieldTier is deprecated and will be "
-            "removed; write BotShieldChallenge <tier>, which needs no "
-            "BotShieldRespond nochallenge alongside it.", dname);
+        /* BotShieldChallenge sets the same floor and implies the pass,
+         * so the pair BotShieldTier needed alongside it is one line
+         * now. tier=nochallenge is BotShieldNoChallenge. */
+        return apr_psprintf(pool,
+            "%s: BotShieldTier is gone; write BotShieldChallenge %s, "
+            "which needs no BotShieldRespond nochallenge beside it "
+            "(tier=nochallenge is BotShieldNoChallenge).",
+            dname,
+            strcasecmp(val, "nochallenge") == 0 ? "<tier>" : val);
     } else if (BS_AK("redirect")) {
         if (!*val) {
             return apr_psprintf(pool,
                 "%s: redirect= requires a URL", dname);
         }
         a->redirect_url = apr_pstrdup(pool, val);
-    } else if (BS_AK("logas") || BS_AK("log")) {
-        /* BotShieldLogAs sets the tag embedded on the decision-log
-         * line this request was going to emit anyway. It does not
-         * cause logging, which is what the old name implied -- an
-         * operator could reasonably read BotShieldLog as the thing
-         * that produces the log entry, and removing it as a way to
-         * stop one. "As" says the value is a name. */
-        if (BS_AK("log")) {
-            ap_log_error(APLOG_MARK, APLOG_WARNING, 0, NULL,
-                "mod_botshield: %s: BotShieldLog is deprecated and will "
-                "be removed; write BotShieldLogAs. It labels the "
-                "decision line, it does not cause it.", dname);
-        }
+    } else if (BS_AK("log")) {
+        /* BotShieldLog read as the thing that produces the log entry,
+         * and removing it as a way to stop one. It does neither: the
+         * line was going to be emitted anyway and this only labels
+         * it. "As" says the value is a name. */
+        return apr_psprintf(pool,
+            "%s: BotShieldLog is gone; write BotShieldLogAs. It labels "
+            "the decision line, it does not cause it.", dname);
+    } else if (BS_AK("logas")) {
         if (!*val) {
             return apr_psprintf(pool,
                 "%s: a log tag cannot be empty", dname);
@@ -567,25 +559,15 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
                 dname, val);
         }
     } else if (BS_AK("flag")) {
-        const char *perr = NULL;
-        apr_uint32_t bits = bs_parse_flag_names(pool, val, &perr);
-        if (perr) return apr_psprintf(pool,
-            "%s: flag=%s: %s", dname, val, perr);
-        if (bits == 0 || (bits & (bits - 1)) != 0) {
-            return apr_psprintf(pool,
-                "%s: flag=%s must name exactly one bit",
-                dname, val);
-        }
-        a->flag_bit = bits;
-        /* BotShieldFlag names no subject, and the subject is the whole
+        /* BotShieldFlag named no subject, and the subject is the whole
          * question: an address is shared and a cookie is not. It also
-         * cannot express the credit flags safely, since those describe
-         * a session. BotShieldFlagIP and BotShieldFlagSession say
-         * which, and refuse the combinations that do not make sense. */
-        ap_log_error(APLOG_MARK, APLOG_WARNING, 0, NULL,
-            "mod_botshield: %s: BotShieldFlag is deprecated and will be "
-            "removed; write BotShieldFlagIP or BotShieldFlagSession, "
-            "which name the subject the mark is written to.", dname);
+         * could not express the credit flags safely, since those
+         * describe a session and an address cannot hold one. */
+        return apr_psprintf(pool,
+            "%s: BotShieldFlag is gone; write BotShieldFlagIP or "
+            "BotShieldFlagSession, which name the subject the mark is "
+            "written to. An address is shared and a cookie is not.",
+            dname);
     } else if (BS_AK("flagip") || BS_AK("flagsession")) {
         int to_session = BS_AK("flagsession");
         const char *dirname = to_session ? "BotShieldFlagSession"
@@ -630,24 +612,12 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
         }
         (void)bits;
     } else if (BS_AK("ttl")) {
-        char *end = NULL;
-        long t = strtol(val, &end, 10);
-        if (!end || *end || t < 0 || t > 86400 * 30) {
-            return apr_psprintf(pool,
-                "%s: ttl='%s' must be 0..2592000 (0 = don't flag)",
-                dname, val);
-        }
-        a->ttl_sec = (int)t;
-        /* A per-rule duration cannot be honoured: the address slot
-         * holds one expiry shared by every flag on it, extended to
-         * whichever rule wrote last. BotShieldForgetIPAfter is that
-         * one window, said once, at the scope where it is true. */
-        ap_log_error(APLOG_MARK, APLOG_WARNING, 0, NULL,
-            "mod_botshield: %s: BotShieldTTL is deprecated and will be "
-            "removed; the address window is BotShieldForgetIPAfter at "
-            "server scope. A per-rule duration was never honoured -- "
-            "one address slot holds one expiry for all its flags.",
-            dname);
+        return apr_psprintf(pool,
+            "%s: BotShieldTTL is gone. A per-rule duration was never "
+            "honoured -- one address slot holds one expiry shared by "
+            "every flag on it, extended to whichever rule wrote last. "
+            "The window is BotShieldForgetIPAfter at server scope, "
+            "said once where it is true.", dname);
     } else if (BS_AK("penalty") || BS_AK("credit")) {
         return apr_psprintf(pool,
             "%s: %.*s= is gone. It moved the cumulative score, which "
@@ -688,21 +658,23 @@ static const char *bs_finalize_trigger_action(apr_pool_t *pool,
                                               bs_trigger_action *a)
 {
     const char *dname = bs_trigger_family_dname(fam);
-    /* No flag without a TTL — clear the bit so the request-time
-     * walk skips the flag_ip call and the decision log stays
-     * honest about what persisted. */
-    if (a->ttl_sec == 0) a->flag_bit = 0;
 
     /* Feedback triggers without an actionable flag are dead config —
      * the mapping has nowhere to land. Reject at parse time so
      * operators see it via configtest rather than as silent no-ops
      * at runtime. */
     if (fam == BS_TFAMILY_FEEDBACK) {
-        /* The deprecated pair still needs its own ttl; the new
-         * directives use the server-scope window, so naming a flag is
-         * enough. Either way an event with nowhere to land is dead
-         * config and is refused at parse time. */
-        if (!a->flag_bit && !a->flag_ip && !a->flag_session
+        /* Either subject. BotShieldFlagSession for what the app
+         * knows about a person it authenticated -- BotShieldFlagIP
+         * already refuses the app_* credits, because a credit spread
+         * across a NAT hands strangers an exemption someone else
+         * earned. BotShieldFlagIP for an abuse report, which often
+         * has no session to point at: a scripted client never takes a
+         * cookie, and a session write no-ops without one.
+         *
+         * An event with nowhere to land is dead config, refused at
+         * parse time rather than left as a silent no-op at runtime. */
+        if (!a->flag_ip && !a->flag_session
             && !a->flag_ip_clear && !a->flag_session_clear
             && !a->flag_ip_replace && !a->flag_session_replace) {
             return apr_psprintf(pool,
@@ -802,20 +774,13 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
     }
 
     /* Flag-IP (future-request memory). Applies to all families
-     * uniformly — flag_bit is already 0 when ttl_sec==0, so the
-     * guard below is belt-and-suspenders. */
+     * uniformly. One duration, from server scope, because one address
+     * slot holds a single expires_at shared by all its flags — which
+     * is why the per-rule ttl= this used to honour is gone. */
     {
-        /* Two spellings converge here. The deprecated flag=/ttl= pair
-         * carries its own duration; BotShieldFlagIP uses the
-         * server-scope window, because one address slot holds a single
-         * expires_at shared by all its flags. */
         apr_uint32_t ip_bits = a->flag_ip;
         int ip_ttl = scfg->forget_ip_after > 0
                    ? scfg->forget_ip_after : BS_DEFAULT_FORGET_IP_AFTER;
-        if (a->flag_bit && a->ttl_sec > 0) {
-            ip_bits |= a->flag_bit;
-            ip_ttl   = a->ttl_sec;
-        }
         if (ip_bits || a->flag_ip_clear || a->flag_ip_replace) {
             unsigned char client_ip[16];
             if (bs_parse_client_ip(r->useragent_ip, client_ip)) {

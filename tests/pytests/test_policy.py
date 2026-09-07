@@ -143,7 +143,7 @@ def test_path_trigger_block_prefix_match(config_override, log_slice, fresh_ip):
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldRule lockdown path="/admin" ua="Scraper/" respond=403 ttl=0',
+        '    BotShieldRule lockdown path="/admin" ua="Scraper/" respond=403',
         count=1,
     ):
         with log_slice as slc:
@@ -166,7 +166,7 @@ def test_path_trigger_block_end_anchor(config_override, log_slice, fresh_ip):
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldRule exact path="/exact$" ua="Scraper/" respond=403 ttl=0',
+        '    BotShieldRule exact path="/exact$" ua="Scraper/" respond=403',
         count=1,
     ):
         r_exact = client.get("/exact",     xff=fresh_ip, ua="Scraper/1.0")
@@ -183,7 +183,7 @@ def test_path_trigger_cohort_narrowing(config_override, log_slice, fresh_ip):
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldRule scrapersonly path="/wp-admin" ua="Scraper/" respond=403 ttl=0',
+        '    BotShieldRule scrapersonly path="/wp-admin" ua="Scraper/" respond=403',
         count=1,
     ):
         r_scrap = client.get("/wp-admin", xff=fresh_ip, ua="Scraper/1.0")
@@ -239,8 +239,8 @@ def test_path_trigger_precedence_is_declaration_order(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldRule specific path="/admin/secret" ua="Scraper/" respond=403 ttl=0\n'
-        '    BotShieldRule generic  path="/admin*"       ua="Scraper/" respond=403 ttl=0',
+        '    BotShieldRule specific path="/admin/secret" ua="Scraper/" respond=403\n'
+        '    BotShieldRule generic  path="/admin*"       ua="Scraper/" respond=403',
         count=1,
     ):
         with log_slice as slc:

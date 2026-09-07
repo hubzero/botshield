@@ -548,8 +548,7 @@ one does:
     BotShieldPath         /api/*
     BotShieldUserAgent    @search,@ai-input,@ai-train,@monitor
     BotShieldRespond      403
-    BotShieldTTL          0
-    BotShieldLogAs          api-bot
+    BotShieldLogAs        api-bot
 </BotShieldRule>
 ```
 
@@ -1278,9 +1277,11 @@ always going to exist.
 Distinct from `BotShieldAccessLog`, which is a genuine on/off switch for
 the Apache access-log line and is unaffected by this rename.
 
-#### Deprecated: `BotShieldTier`, and `BotShieldRespond nochallenge`
+#### Removed: `BotShieldTier`, and `BotShieldRespond nochallenge`
 
-Both still parse and warn at config time.
+Both were removed 2026-09-06 and now fail config parse, naming their
+replacement. This is the only deployment running the module, so there
+was nobody to hold a deprecation window open for.
 
 `BotShieldTier` required `BotShieldRespond nochallenge` beside it,
 because a concrete status short-circuits before any tier is chosen. That
@@ -1308,7 +1309,7 @@ was how you spelled "decide nothing", by *omission*. That is now
     BotShieldQuery        *return=*
     BotShieldCookies      none
     BotShieldRespond      403
-    BotShieldLogAs          login-trap
+    BotShieldLogAs        login-trap
     BotShieldAccessLog    off
 </BotShieldRule>
 
@@ -1324,9 +1325,8 @@ was how you spelled "decide nothing", by *omission*. That is now
 # rule carrying only ua=* is rejected as having no condition.
 <BotShieldRule no-ua>
     BotShieldUserAgent    ""
-    BotShieldRespond       nochallenge
-    BotShieldTier         noninteractive
-    BotShieldLogAs          no-ua
+    BotShieldChallenge    noninteractive
+    BotShieldLogAs        no-ua
 </BotShieldRule>
 ```
 
@@ -1438,15 +1438,24 @@ adding a second one. If the response carries no cookie at all, there is
 no session to mark and the module logs that the flag was not applied
 rather than creating one.
 
-#### Deprecated: `BotShieldFlag` and `BotShieldTTL`
+#### Removed: `BotShieldFlag` and `BotShieldTTL`
 
-Both still parse and both warn at config time.
+Both were removed 2026-09-06 and now fail config parse.
 
-`BotShieldFlag` names no subject, and the subject is the whole
-question. Write `BotShieldFlagIP` or `BotShieldFlagSession`.
+`BotShieldFlag` named no subject, and the subject is the whole
+question: an address is shared and a cookie is not. Write
+`BotShieldFlagIP` or `BotShieldFlagSession`.
 
-`BotShieldTTL` set a per-rule duration that was never honoured, for the
-reason above. The window is `BotShieldForgetIPAfter`, at server scope.
+`BotShieldTTL` set a per-rule duration that was never honoured — one
+address slot holds a single expiry shared by every flag on it,
+extended to whichever rule wrote last, so the number was read, stored
+and partly ignored. The window is `BotShieldForgetIPAfter`, at server
+scope, said once where it is true.
+
+Retiring `BotShieldFlag` exposed a bug it had been hiding: the app
+feedback filter read only the field that spelling set, so
+`BotShieldFlagIP` on a `<BotShieldFeedbackTrigger>` passed config
+parse and then did nothing. Both subjects work there now.
 
 > **This family used to flag by default**, `scanner_probe` for 3600 s,
 > inherited from `BotShieldPathTrigger` where the target was a handful
@@ -1503,7 +1512,7 @@ logs `rule:<name>` where it used to log `requesttrigger:<name>` — the
 old prefix was a separate literal and would otherwise have been the
 only surviving trace of a directive nobody can write.
 
-#### Renamed from `BotShieldStatus`
+#### Removed: `BotShieldStatus`
 
 `BotShieldStatus` is the old spelling of `BotShieldRespond`. Apache
 already spends the word "status" on `mod_status` and `server-status`,
@@ -1513,9 +1522,16 @@ than as the response a rule produces. Nothing in Apache names a
 response code `Status` either: `Redirect` and `ErrorDocument` take one
 as an argument, and `mod_rewrite` spells it `[R=404]`.
 
-The old name still parses and warns at config time. `respond=` is also
-accepted by `BotShieldRateLimitEscalate`, which had its own `status=`
-key -- one concept should not wear two names in the same file.
+The old name was removed 2026-09-06 and now fails config parse.
+`BotShieldRateLimitEscalate` had its own `status=` key, removed with
+it -- one concept should not wear two names in the same file, and it
+was wearing two in two.
+
+`BotShieldLog` went the same day, for a reason of its own: it read as
+the thing that produces the log entry, and removing it as a way to
+stop one. It does neither. The line was going to be emitted anyway;
+`BotShieldLogAs` only labels it, and the "As" says the value is a
+name.
 
 ```apache
 <BotShieldRule blocked>

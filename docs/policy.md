@@ -265,10 +265,9 @@ action keys are:
 ```apache
 <BotShieldRule admin-honeypot>
     BotShieldPath         /admin/.env
-    BotShieldRespond       403
-    BotShieldFlag         honeypot_hit
-    BotShieldTTL          3600
-    BotShieldLogAs          admin-trap
+    BotShieldRespond      403
+    BotShieldFlagIP       honeypot_hit
+    BotShieldLogAs        admin-trap
 </BotShieldRule>
 <BotShieldRule api-burst-trap>
     BotShieldPath         /api/*/burst
@@ -352,13 +351,11 @@ configured feedback-trigger table:
 BotShieldAppFeedback                  on
 BotShieldAppIntegrationSecretFile     /etc/botshield/app-integration-secret
 <BotShieldFeedbackTrigger scanner-hit>
-    BotShieldFlag         honeypot_hit
-    BotShieldTTL          3600
-    BotShieldLogAs          app-trap
+    BotShieldFlagSession  honeypot_hit
+    BotShieldLogAs        app-trap
 </BotShieldFeedbackTrigger>
 <BotShieldFeedbackTrigger human-pass>
-    BotShieldFlag         app_verified_human
-    BotShieldTTL          3600
+    BotShieldFlagSession  app_verified_human
 </BotShieldFeedbackTrigger>
 ```
 
@@ -490,16 +487,14 @@ log-only mode — there's a single per-scope directive:
 ```apache
 <Location "/admin/.env">
     <BotShieldTrigger>
-        BotShieldFlag         honeypot_hit
-        BotShieldTTL          3600
-        BotShieldLogAs          admin-trap
+        BotShieldFlagIP       honeypot_hit
+        BotShieldLogAs        admin-trap
     </BotShieldTrigger>
 </Location>
 
 <LocationMatch "(?i)/wp-(login|admin)">
     <BotShieldTrigger>
-        BotShieldFlag         scanner_probe
-        BotShieldTTL          3600
+        BotShieldFlagIP       scanner_probe
         BotShieldScore  botsignals +20
         BotShieldLogAs          wp-trap
     </BotShieldTrigger>
