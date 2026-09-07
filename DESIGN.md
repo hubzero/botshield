@@ -310,10 +310,10 @@ default static-file handler. Its walk:
     and bumps M9.2 counters.
 
 Flag-IP writes are not a separate lifecycle step: a scope that wants
-to flag the client writes `BotShieldTrigger` with
-`BotShieldFlagIP <name>`,
+to flag the client puts a `<BotShieldRule>` carrying
+`BotShieldFlagIP <name>` inside that container,
 and the flag lands inside the policy walk at step 7 via
-`bs_apply_trigger_action` like any other trigger action.
+`bs_apply_trigger_action` like any other rule action.
 
 ## Cookie envelope
 
@@ -1213,7 +1213,7 @@ it), `logas=<tag>`, `accesslog=on|off`, `flagip=<bit>`,
 `flagip=` and `flagsession=` name the subject the mark is written to,
 which is the whole question: an address is shared and a cookie is not.
 They take `+`/`-`/`=` prefixes, and `-`/`=` are refused outside
-`BotShieldFeedbackTrigger` -- a rule matches on request properties the
+`<BotShieldFeedback>` -- a rule matches on request properties the
 client controls, so clearing there would let a client shed its own
 record by fetching the matching URL.
 
@@ -1362,9 +1362,13 @@ is global state, not per-IP behavior.
 
 #### Feedback triggers (E7.3)
 
-`BotShieldFeedbackTrigger <event> [key=value ...]`. Required:
-`flagip=<bit>` or `flagsession=<bit>` -- an event with nowhere to land
-is dead config and is refused at parse time. Optional: `logas=<tag>`.
+`<BotShieldFeedback <name>>` holding `BotShieldEvent <event>`.
+Required: `BotShieldEvent`, plus `BotShieldFlagIP <bit>` or
+`BotShieldFlagSession <bit>` -- an event with nowhere to land is dead
+config and is refused at parse time. Optional: `BotShieldLogAs`,
+`BotShieldAccessLog`, `BotShieldMode`. The flat
+`BotShieldFeedbackTrigger` spelling this replaced on 2026-09-07 keeps
+a retired stub, so an old config gets a migration note.
 This is the only family where `-` and `=` are accepted, because it
 fires on a header the application signs rather than on anything the
 requester controls. Maps an app-signed
@@ -1445,11 +1449,12 @@ A flag scoring at or above the noninteractive threshold is a challenge
 switch rather than a contributing signal, and the policy dump flags
 that inline with `~`.
 
-`BotShieldTrigger` with `BotShieldFlagIP <name>` is the operator
-handle for honeypot / scanner-bait `<Location>` blocks: the enclosing
-Apache scope is the predicate, so any request reaching it adds the
-named bit to the address's flagged-IP entry (`bs_flagged_ip_add`), for
-`BotShieldForgetIPAfter` seconds counted from the last flagging.
+A `<BotShieldRule>` carrying `BotShieldFlagIP <name>` is the
+operator handle for honeypot / scanner-bait `<Location>` blocks: the
+enclosing Apache scope is the predicate, so any request reaching it
+adds the named bit to the address's flagged-IP entry
+(`bs_flagged_ip_add`), for `BotShieldForgetIPAfter` seconds counted
+from the last flagging.
 
 The name has been round the houses. A standalone `BotShieldFlagIP`
 directive existed first; it was folded into the shared action grammar
@@ -1720,12 +1725,12 @@ filter `bs_app_feedback_filter` strips and applies in one pass.
 #### Event-to-flag mapping
 
 E5 went through a wire-format rework in E7.3: the body now carries
-`event=<name>` only, and the flag/ttl/log come from
-`BotShieldFeedbackTrigger <event>` configuration. The signer covers
-`event=<name>` only; the responder validates the HMAC, looks up the
-event in `scfg->feedback_triggers`, and applies the configured
-flag-bit + TTL via `bs_flagged_ip_add` (with the configured log-tag
-on the decision log).
+`event=<name>` only, and the flag/ttl/log come from the
+`<BotShieldFeedback>` block whose `BotShieldEvent` matches it. The
+signer covers `event=<name>` only; the responder validates the HMAC,
+looks up the event in `scfg->feedback_triggers`, and applies the
+configured flag-bit + TTL via `bs_flagged_ip_add` (with the configured
+log-tag on the decision log).
 
 Apps cannot invent new flags without a matching directive
 configuration — keeps the scoring surface auditable.
@@ -2199,13 +2204,17 @@ the linker on Apache symbols.
 
 ### Directive table
 
-`bs_cmds[]` registers 100 directives. The retired `BotShieldPathTrigger`
-stub that used to sit alongside them is gone, so an old config naming
-it now fails with Apache's generic "Invalid command" rather than a
+`bs_cmds[]` registers 96 directives. Retired spellings fall into two
+groups, and which group a name is in decides what an old config sees.
+`BotShieldTrigger`, `BotShieldFlagTrigger` and
+`BotShieldFeedbackTrigger` still occupy table slots pointing at
+`bs_*_retired` handlers, so naming one fails with a message saying
+what to write instead. `BotShieldPathTrigger` has no such stub, so it
+fails with Apache's generic "Invalid command" and the operator gets no
 migration note.
 The family groupings below summarize the surface — the canonical
 per-directive spec (handler, arg count, scope flags, help text) is
-the `bs_cmds[]` table at `src/botshield.c:142`.
+the `bs_cmds[]` table at `src/botshield.c:213`.
 
 | Family | Directives |
 |--------|-----------|
@@ -2219,7 +2228,7 @@ the `bs_cmds[]` table at `src/botshield.c:142`.
 | UA classification (E1) | `BotShieldClassify`, `BotShieldAllowBot`, `BotShieldAllowRangesRefreshInterval`, `BotShieldBotDirectory`, `BotShieldBotDirectoryRefreshInterval`, `BotShieldBrowserTemplates`, `BotShieldBrowserTemplatesRefreshInterval` |
 | Policy (E2.1 / E9) | `BotShieldRateLimit`, `BotShieldBotRateLimit`, `BotShieldRateLimitEscalate` |
 | Robots (E2.2) | `BotShieldRobotsTxt`, `BotShieldRobotsRefreshInterval`, `BotShieldRobotsWildcardScope` |
-| Triggers | `BotShieldTrigger` (per-scope), `BotShieldRule` (E3, formerly BotShieldPathTrigger; since 2026-09-06 also carrying the E4 cookie, E6 env, E11.2 load and E14 flag predicates), `BotShieldFeedbackTrigger` (E7.3), `BotShieldFlagTrigger` (E14, action half), `BotShieldSessionCookieName` (E4) |
+| Triggers | `BotShieldRule` (E3, formerly BotShieldPathTrigger; since 2026-09-06 also carrying the E4 cookie, E6 env, E11.2 load and E14 flag predicates, and since 2026-09-07 the E14 action half), `BotShieldMatch` (named condition sets, shared by rules), `BotShieldFeedback` (E7.3), `BotShieldSessionCookieName` (E4) |
 | Safeguard (E10) | `BotShieldSafeguard`, `BotShieldSafeguardThreshold`, `BotShieldSafeguardWindow`, `BotShieldSafeguardTTL`, `BotShieldSafeguardRedirectURL` |
 | Load (E11) | `BotShieldLoadStateFile`, `BotShieldLoadRefreshInterval`, `BotShieldLoadWarmThreshold`, `BotShieldLoadHotThreshold` |
 | Multi-vhost (E13) | `BotShieldShareScope` |
@@ -2233,8 +2242,8 @@ directives use `RSRC_CONF` only and emit a NOTICE if placed inside
 
 The module is not valid in `.htaccess` — `OR_ALL` is never used.
 
-`AP_INIT_TAKE_ARGV` is used for the trigger families (including
-`BotShieldFlagTrigger`), the two
+`AP_INIT_TAKE_ARGV` is used for the flat `BotShieldRule` form, the
+retired flat spellings that shadow it, the two
 rate-limit setters, and `BotShieldClassify` because Apache has no
 TAKE4/5 macros and because those directives take a variable-length
 key=value tail; setters enforce argc themselves.
