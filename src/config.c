@@ -236,10 +236,6 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
     out->load_refresh_sec  = (add->load_refresh_sec > 0)
                            ? add->load_refresh_sec
                            : base->load_refresh_sec;
-    out->load_warm_pct     = (add->load_warm_pct > 0)
-                           ? add->load_warm_pct : base->load_warm_pct;
-    out->load_hot_pct      = (add->load_hot_pct > 0)
-                           ? add->load_hot_pct : base->load_hot_pct;
     out->load_warm_rise    = (add->load_warm_rise > 0)
                            ? add->load_warm_rise : base->load_warm_rise;
     out->load_hot_rise     = (add->load_hot_rise > 0)
@@ -395,10 +391,6 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
      * time + post_config substitute the compile-time defaults). */
     scfg->load_state_file       = NULL;
     scfg->load_refresh_sec      = 0;
-    scfg->load_warm_pct         = 0;
-    scfg->loadavg_warm          = 0;
-    scfg->loadavg_hot           = 0;
-    scfg->load_hot_pct          = 0;
     scfg->load_warm_rise        = 0;
     scfg->load_hot_rise         = 0;
     scfg->load_normal_fall      = 0;
@@ -2153,10 +2145,6 @@ static void bs_register_load_watchdog(apr_pool_t *pconf, server_rec *s)
                 if (main_scfg->load_refresh_sec <= 0
                     && vc->load_refresh_sec > 0)
                     main_scfg->load_refresh_sec = vc->load_refresh_sec;
-                if (main_scfg->load_warm_pct <= 0 && vc->load_warm_pct > 0)
-                    main_scfg->load_warm_pct = vc->load_warm_pct;
-                if (main_scfg->load_hot_pct <= 0 && vc->load_hot_pct > 0)
-                    main_scfg->load_hot_pct = vc->load_hot_pct;
                 /* Hysteresis fields too — bs_load_apply_tick reads
                  * these off main_scfg via the watchdog callback. If
                  * an operator sets BotShieldLoadWarmRise inside a

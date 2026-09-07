@@ -1365,9 +1365,9 @@ request latency via `bs_latency_current_us()`, and is the one of the
 three that can see a worker blocked on I/O: interruptible sleep is not
 counted by the load average, and the busy ratio sees the held slot
 only while it is held, but request duration accumulates for the whole
-wait. It reads the same watchdog sample the `BotShieldLatencyWarm` /
-`BotShieldLatencyHot` thresholds use, so a rule and the load policy
-cannot disagree about what the number is.
+wait. It reads the same watchdog sample the latency warm/hot bands
+use, so a rule and the load state cannot disagree about what the
+number is.
 
 That sample needs `ExtendedStatus On`; without it Apache never
 maintains the counters and `bs_latency_current_us()` returns
@@ -1797,10 +1797,10 @@ seconds (default 1, range 1..60) under mod_watchdog. Each tick:
 3. **Most-severe-wins merge** — internal sample vs external
    override, take the more severe.
 4. **Hysteresis state machine** — asymmetric:
-   - Ratio ≥ `BotShieldLoadWarmThreshold` (default 65 %) →
+   - Ratio ≥ `BS_DEFAULT_LOAD_WARM_RATIO_PCT` (65 %) →
      escalating sample. Promotion to `warm` after
      `BS_DEFAULT_LOAD_WARM_RISE = 3` consecutive escalating samples.
-   - Ratio ≥ `BotShieldLoadHotThreshold` (default 85 %) → hotter
+   - Ratio ≥ `BS_DEFAULT_LOAD_HOT_RATIO_PCT` (85 %) → hotter
      sample. From `warm`, promotion to `hot` after
      `BS_DEFAULT_LOAD_HOT_RISE = 2` more.
    - Below warm threshold for `BS_DEFAULT_LOAD_NORMAL_FALL = 5`
@@ -2226,7 +2226,7 @@ the linker on Apache symbols.
 
 ### Directive table
 
-`bs_cmds[]` registers 90 directives. No retired *family* keeps a
+`bs_cmds[]` registers 84 directives. No retired *family* keeps a
 table slot any more: `BotShieldPathTrigger`, `BotShieldTrigger`,
 `BotShieldFlagTrigger` and `BotShieldFeedbackTrigger` all fail with
 Apache's generic "Invalid command, perhaps misspelled or defined by a
@@ -2262,7 +2262,7 @@ the `bs_cmds[]` table at `src/botshield.c:213`.
 | Robots (E2.2) | `BotShieldRobotsTxt`, `BotShieldRobotsRefreshInterval`, `BotShieldRobotsWildcardScope` |
 | Triggers | `BotShieldRule` (E3, formerly BotShieldPathTrigger; since 2026-09-06 also carrying the E4 cookie, E6 env, E11.2 load and E14 flag predicates, and since 2026-09-07 the E14 action half), `BotShieldMatch` (named condition sets, shared by rules), `BotShieldFeedback` (E7.3), `BotShieldSessionCookieName` (E4) |
 | Safeguard (E10) | `BotShieldSafeguard`, `BotShieldSafeguardThreshold`, `BotShieldSafeguardWindow`, `BotShieldSafeguardTTL`, `BotShieldSafeguardRedirectURL` |
-| Load (E11) | `BotShieldLoadStateFile`, `BotShieldLoadRefreshInterval`, `BotShieldLoadWarmThreshold`, `BotShieldLoadHotThreshold` |
+| Load (E11) | `BotShieldLoadStateFile`, `BotShieldLoadRefreshInterval` |
 | Multi-vhost (E13) | `BotShieldShareScope` |
 | Observability | `BotShieldDecisionLog` |
 | App bridge (E5 / E8.2) | `BotShieldAppFeedback`, `BotShieldAppFeedbackHeader`, `BotShieldAppClaims`, `BotShieldAppIntegrationSecretFile` |

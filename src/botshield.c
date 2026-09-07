@@ -727,15 +727,6 @@ static const command_rec bs_cmds[] = {
      * below cannot see this deployment's failure mode: with 1024
      * MaxRequestWorkers on 6 cores the box is CPU-saturated at a busy
      * ratio of 2-3%, which is where four outages actually ran. */
-    AP_INIT_TAKE1("BotShieldLatencyWarm", bs_set_latency_warm, NULL,
-                 RSRC_CONF,
-                 "Apache mean request latency in ms at which load is "
-                 "'warm' (default 250). Measured as a delta between "
-                 "watchdog ticks, not since restart."),
-    AP_INIT_TAKE1("BotShieldLatencyHot", bs_set_latency_hot, NULL,
-                 RSRC_CONF,
-                 "Apache mean request latency in ms at which load is "
-                 "'hot' (default 1000). Must exceed BotShieldLatencyWarm."),
     AP_INIT_TAKE1("BotShieldFpmStatsFile",
                  bs_set_fpm_stats_file, NULL, RSRC_CONF,
                  "Path to the external PHP-FPM monitor's key=value "
@@ -746,28 +737,6 @@ static const command_rec bs_cmds[] = {
                  "Path to the external database monitor's key=value "
                  "telemetry file. Dashboard display only; database load "
                  "reaches policy via BotShieldLoadStateFile."),
-    AP_INIT_TAKE1("BotShieldLoadAvgWarm", bs_set_loadavg_warm, NULL,
-                 RSRC_CONF,
-                 "1-minute load average PER CPU at which the load state "
-                 "samples as 'warm', as a ratio (default 1.0). Same unit "
-                 "as a host shedding script whose HIGH is 2x cores; keep "
-                 "this under that so policy can shed selectively before "
-                 "a blunt site-wide 503 engages."),
-    AP_INIT_TAKE1("BotShieldLoadAvgHot", bs_set_loadavg_hot, NULL,
-                 RSRC_CONF,
-                 "Per-CPU load average at which the state samples as "
-                 "'hot' (default 1.5). Must exceed BotShieldLoadAvgWarm."),
-    AP_INIT_TAKE1("BotShieldLoadWarmThreshold",
-                 bs_set_load_warm_pct, NULL, RSRC_CONF,
-                 "Busy-worker percentage at which a tick samples "
-                 "as 'warm' (default 65; range 1..99). Hysteresis "
-                 "still applies — promotion takes 3 consecutive "
-                 "warm-or-hot samples."),
-    AP_INIT_TAKE1("BotShieldLoadHotThreshold",
-                 bs_set_load_hot_pct, NULL, RSRC_CONF,
-                 "Busy-worker percentage at which a tick samples "
-                 "as 'hot' (default 85; range 1..99). Must be "
-                 "greater than the warm threshold."),
     /* E13 — per-vhost reputation namespacing. */
     AP_INIT_TAKE1("BotShieldShareScope",
                  bs_set_share_scope, NULL, RSRC_CONF,

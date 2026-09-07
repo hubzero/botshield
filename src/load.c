@@ -544,10 +544,8 @@ apr_status_t bs_load_watchdog_cb(int state, void *data,
         ap_get_module_config(sv->module_config, &botshield_module);
     if (!scfg) return APR_SUCCESS;
 
-    int warm_pct = bs_load_effective_int(scfg->load_warm_pct,
-                       BS_DEFAULT_LOAD_WARM_RATIO_PCT);
-    int hot_pct  = bs_load_effective_int(scfg->load_hot_pct,
-                       BS_DEFAULT_LOAD_HOT_RATIO_PCT);
+    int warm_pct = BS_DEFAULT_LOAD_WARM_RATIO_PCT;
+    int hot_pct  = BS_DEFAULT_LOAD_HOT_RATIO_PCT;
     apr_uint64_t sb_access = 0, sb_duration = 0;
     int busy_pct = bs_load_sample_scoreboard(&sb_access, &sb_duration);
     bs_load_state internal = bs_load_state_from_pct(busy_pct,
@@ -600,10 +598,8 @@ apr_status_t bs_load_watchdog_cb(int state, void *data,
         apr_uint32_t cur_us = apr_atomic_read32(&m->ap_latency_us);
         if (cur_us != BS_M_AP_NO_STATUS) {
             int cur = (int)(cur_us / 1000);
-            int lw = bs_load_effective_int(scfg->latency_warm_ms,
-                                           BS_DEFAULT_LATENCY_WARM_MS);
-            int lh = bs_load_effective_int(scfg->latency_hot_ms,
-                                           BS_DEFAULT_LATENCY_HOT_MS);
+            int lw = BS_DEFAULT_LATENCY_WARM_MS;
+            int lh = BS_DEFAULT_LATENCY_HOT_MS;
             lat_state = bs_load_state_from_pct(cur, lw, lh);
         }
     }
@@ -628,10 +624,8 @@ apr_status_t bs_load_watchdog_cb(int state, void *data,
                                         (apr_uint32_t)la5);
         if (la15 >= 0) apr_atomic_set32(&bs_shm.header->loadavg15_pct,
                                         (apr_uint32_t)la15);
-        int aw = bs_load_effective_int(scfg->loadavg_warm,
-                                       BS_DEFAULT_LOADAVG_WARM);
-        int ah = bs_load_effective_int(scfg->loadavg_hot,
-                                       BS_DEFAULT_LOADAVG_HOT);
+        int aw = BS_DEFAULT_LOADAVG_WARM;
+        int ah = BS_DEFAULT_LOADAVG_HOT;
         avg = bs_load_state_from_pct(la, aw, ah);
         apr_atomic_set32(&bs_shm.header->loadavg_pct, (apr_uint32_t)la);
         /* History ring, one sample per BS_M_LA_PERIOD seconds. Gated on
@@ -727,50 +721,16 @@ const char *bs_set_fpm_stats_file(cmd_parms *cmd, void *dconf,
 
 /* BotShieldLatencyWarm / BotShieldLatencyHot <milliseconds>. Mean
  * request latency at which a sample is classified warm / hot. */
-static const char *bs_set_latency_ms(cmd_parms *cmd, const char *arg,
-                                     int *slot, const char *name)
-{
-    if (!arg || !*arg) return apr_psprintf(cmd->pool,
-                                           "%s: milliseconds required", name);
-    char *end = NULL;
-    long v = strtol(arg, &end, 10);
-    if (end == arg || (end && *end) || v < 1 || v > BS_M_AP_MAX_MS) {
-        return apr_psprintf(cmd->pool,
-            "%s: expected 1..%d milliseconds, got '%s'",
-            name, BS_M_AP_MAX_MS, arg);
-    }
-    *slot = (int)v;
-    return NULL;
-}
 
-const char *bs_set_latency_warm(cmd_parms *cmd, void *dconf, const char *arg)
-{
-    (void)dconf;
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    return bs_set_latency_ms(cmd, arg, &scfg->latency_warm_ms,
-                             "BotShieldLatencyWarm");
-}
 
-const char *bs_set_latency_hot(cmd_parms *cmd, void *dconf, const char *arg)
-{
-    (void)dconf;
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    return bs_set_latency_ms(cmd, arg, &scfg->latency_hot_ms,
-                             "BotShieldLatencyHot");
-}
 
 /* Effective latency thresholds, defaults applied. Exported for the
  * dashboard, which needs the same numbers to draw its bands. */
 void bs_latency_thresholds(server_rec *sv, int *warm, int *hot)
 {
-    bs_server_cfg *scfg =
-        ap_get_module_config(sv->module_config, &botshield_module);
-    int w = scfg ? scfg->latency_warm_ms : 0;
-    int h = scfg ? scfg->latency_hot_ms  : 0;
-    if (warm) *warm = bs_load_effective_int(w, BS_DEFAULT_LATENCY_WARM_MS);
-    if (hot)  *hot  = bs_load_effective_int(h, BS_DEFAULT_LATENCY_HOT_MS);
+    (void)sv;
+    if (warm) *warm = BS_DEFAULT_LATENCY_WARM_MS;
+    if (hot)  *hot  = BS_DEFAULT_LATENCY_HOT_MS;
 }
 
 /* Most recent Apache mean-latency sample, milliseconds. */
@@ -822,41 +782,9 @@ const char *bs_set_load_refresh(cmd_parms *cmd, void *dconf,
 /* BotShieldLoadWarmThreshold <percent>. Busy-worker ratio (percent
  * of total worker slots) at which a sample is classified warm.
  * Default 65. */
-const char *bs_set_load_warm_pct(cmd_parms *cmd, void *dconf,
-                                 const char *arg)
-{
-    (void)dconf;
-    char *end = NULL;
-    long n = strtol(arg, &end, 10);
-    if (!end || *end || n < 1 || n > 99) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldLoadWarmThreshold: '%s' must be 1..99 (percent)",
-            arg);
-    }
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    scfg->load_warm_pct = (int)n;
-    return NULL;
-}
 
 /* BotShieldLoadHotThreshold <percent>. Default 85; must be strictly
  * greater than the warm threshold. */
-const char *bs_set_load_hot_pct(cmd_parms *cmd, void *dconf,
-                                const char *arg)
-{
-    (void)dconf;
-    char *end = NULL;
-    long n = strtol(arg, &end, 10);
-    if (!end || *end || n < 1 || n > 99) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldLoadHotThreshold: '%s' must be 1..99 (percent)",
-            arg);
-    }
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    scfg->load_hot_pct = (int)n;
-    return NULL;
-}
 
 /* BotShieldLoadAvgWarm / …Hot <ratio>
  *
@@ -867,43 +795,8 @@ const char *bs_set_load_hot_pct(cmd_parms *cmd, void *dconf,
  * machines -- and so it reads in the same unit the host's own shedding
  * script uses, whose defaults are HIGH = 2x cores and LOW = 1x cores.
  * Keep these under that HIGH; see BS_DEFAULT_LOADAVG_WARM. */
-static const char *bs_set_loadavg_thr(cmd_parms *cmd, const char *arg,
-                                      const char *dname, int *slot)
-{
-    char *end = NULL;
-    double v = strtod(arg, &end);
-    if (!end || *end || !(v > 0.0) || v > 100.0) {
-        return apr_psprintf(cmd->pool,
-            "%s: '%s' must be a ratio greater than 0 and at most 100 "
-            "(1.0 = one runnable process per core)", dname, arg);
-    }
-    *slot = (int)(v * 100.0);
-    return NULL;
-}
 
-const char *bs_set_loadavg_warm(cmd_parms *cmd, void *dconf, const char *arg)
-{
-    (void)dconf;
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    return bs_set_loadavg_thr(cmd, arg, "BotShieldLoadAvgWarm",
-                              &scfg->loadavg_warm);
-}
 
-const char *bs_set_loadavg_hot(cmd_parms *cmd, void *dconf, const char *arg)
-{
-    (void)dconf;
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    const char *err = bs_set_loadavg_thr(cmd, arg, "BotShieldLoadAvgHot",
-                                         &scfg->loadavg_hot);
-    if (err) return err;
-    if (scfg->loadavg_warm > 0 && scfg->loadavg_hot <= scfg->loadavg_warm) {
-        return "BotShieldLoadAvgHot must be greater than "
-               "BotShieldLoadAvgWarm";
-    }
-    return NULL;
-}
 
 /* Last sampled per-CPU load average, hundredths. Dashboard only. */
 /* The 5- and 15-minute averages, per-CPU hundredths. */
@@ -930,17 +823,7 @@ apr_uint32_t bs_loadavg_current(void)
  * find out. */
 void bs_loadavg_thresholds(server_rec *s, int *warm, int *hot)
 {
-    int w = BS_DEFAULT_LOADAVG_WARM, h = BS_DEFAULT_LOADAVG_HOT;
-    if (s) {
-        bs_server_cfg *scfg =
-            ap_get_module_config(s->module_config, &botshield_module);
-        if (scfg) {
-            w = bs_load_effective_int(scfg->loadavg_warm,
-                                      BS_DEFAULT_LOADAVG_WARM);
-            h = bs_load_effective_int(scfg->loadavg_hot,
-                                      BS_DEFAULT_LOADAVG_HOT);
-        }
-    }
-    if (warm) *warm = w;
-    if (hot)  *hot  = h;
+    (void)s;
+    if (warm) *warm = BS_DEFAULT_LOADAVG_WARM;
+    if (hot)  *hot  = BS_DEFAULT_LOADAVG_HOT;
 }

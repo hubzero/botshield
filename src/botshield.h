@@ -480,12 +480,10 @@ typedef struct bs_server_cfg {
     const char         *fpm_stats_file;
     apr_time_t          fpm_stats_mtime;
     int                 load_refresh_sec;
-    int                 load_warm_pct;
-    int                 loadavg_warm;   /* per-CPU hundredths; 0 = default */
-    int                 loadavg_hot;
-    int                 latency_warm_ms;  /* 0 = default */
-    int                 latency_hot_ms;
-    int                 load_hot_pct;
+    /* The warm/hot thresholds were configurable until 2026-09-07 and
+     * are now the compiled-in constants in shm.h. Nothing had ever set
+     * them, and the state they drive is observability rather than
+     * policy since the shed ladder moved to latencyatleast=. */
     int                 load_warm_rise;
     int                 load_hot_rise;
     int                 load_normal_fall;

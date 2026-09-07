@@ -7,7 +7,7 @@ fully unusable site still reads 2-3% busy. Load average moves.
 
 Nothing new is measured. The watchdog tick that decides warm/hot
 already writes the per-CPU load average to the SHM header, in the same
-unit BotShieldLoadAvgWarm and ...Hot take -- hundredths of a runnable
+unit the warm/hot load-average bands use -- hundredths of a runnable
 process per core, so 1.0 means one per core and the same threshold
 means the same thing on a 6-core host and a 64-core one.
 

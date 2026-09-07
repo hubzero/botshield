@@ -1795,12 +1795,14 @@ Sampling and hysteresis:
 |---|---|---|---|
 | `BotShieldLoadStateFile` | `/path` | unset | server only |
 | `BotShieldLoadRefreshInterval` | `N` (sec) | `1` | server only |
-| `BotShieldLoadWarmThreshold` | `N` (% workers busy) | `65` | server only |
-| `BotShieldLoadHotThreshold` | `N` (% workers busy) | `85` | server only |
-| `BotShieldLatencyWarm` | `N` (ms) | `250` | server only |
-| `BotShieldLatencyHot` | `N` (ms) | `1000` | server only |
-| `BotShieldLoadAvgWarm` | `N` (per-CPU ratio) | `1.0` | server only |
-| `BotShieldLoadAvgHot` | `N` (per-CPU ratio) | `1.5` | server only |
+
+The six warm/hot thresholds were directives until 2026-09-07 and are
+now fixed constants in `src/shm.h`: busy-worker ratio 65/85 percent,
+mean latency 250/1000 ms, load average 1.00/1.50 per CPU. Nothing had
+ever configured them, and the state they drive stopped being policy
+when the shed ladder moved to `BotShieldLatencyAtLeast` — a rule reads
+the raw number, not the state. What is left is a gauge, and a gauge
+with tunable bands nobody tuned is a knob with no reader.
 | `BotShieldDbStatsFile` | `/path` | `/run/botshield/db-load.stats` | server only |
 | `BotShieldFpmStatsFile` | `/path` | `/run/botshield/fpm-load.stats` | server only |
 
@@ -1812,18 +1814,19 @@ saturation, etc.).
 
 ### Why the busy-worker ratio is often the wrong signal
 
-`BotShieldLoadWarmThreshold` and `BotShieldLoadHotThreshold` are a
-percentage of `MaxRequestWorkers`, which is only meaningful if that
-setting reflects what the machine can actually serve. It frequently
+The busy-worker warm/hot thresholds are a percentage of
+`MaxRequestWorkers`, which is only meaningful if that setting reflects
+what the machine can actually serve. It frequently
 does not. On a host running `MaxRequestWorkers 1024` against 6 cores,
 four separate outages ran at 25-30 busy workers — the site returning
 500s and taking half a minute per request — which is **2-3%**
 utilisation. No threshold on that ratio can distinguish those outages
 from an idle server.
 
-`BotShieldLatencyWarm` / `BotShieldLatencyHot` exist for that case.
-They compare the **mean request latency**, measured as a delta between
-watchdog ticks, against a duration you choose. On the host above the
+The latency thresholds exist for that case. They compare the **mean
+request latency**, measured as a delta between watchdog ticks, against
+a fixed duration — and `BotShieldLatencyAtLeast` lets a rule compare
+against one you choose. On the host above the
 same outages moved this number from ~31ms to 29,000-36,000ms — roughly
 a thousandfold, on the same data the worker ratio read as flat.
 
@@ -1850,8 +1853,8 @@ stall the code whose job is to shed load because the database is sick.
 ### Reaching a number from a rule
 
 `BotShieldLoadAvgAtLeast <N>` inside a `<BotShieldRule>` matches on the
-per-CPU load average directly, in the same unit `BotShieldLoadAvgWarm`
-and `BotShieldLoadAvgHot` take:
+per-CPU load average directly, in the same hundredths-per-core unit
+the warm/hot bands use:
 
 ```apache
 <BotShieldRule shed-scrapers-under-load>
@@ -1870,8 +1873,7 @@ compares against. Per **CPU**, so a threshold means the same thing on a
 ### Reaching request latency from a rule
 
 `BotShieldLatencyAtLeast <ms>` matches on Apache's mean request
-latency, in the same milliseconds `BotShieldLatencyWarm` and
-`BotShieldLatencyHot` take:
+latency, in the same milliseconds the warm/hot bands use:
 
 ```apache
 <BotShieldRule shed-bots-when-slow>

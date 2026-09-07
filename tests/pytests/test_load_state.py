@@ -94,12 +94,23 @@ def test_directive_rejects_bad_refresh_interval(config_override):
             pass
 
 
-def test_directive_rejects_bad_warm_threshold(config_override):
+def test_the_threshold_directives_are_gone(config_override):
+    """Warm/hot were configurable until 2026-09-07 and are
+    constants now. Naming one fails parse rather than being
+    ignored -- an operator who wrote a threshold and saw it
+    accepted would believe they had moved a band that no longer
+    moves.
+
+    The state machine itself is untouched and still driven here
+    through BotShieldLoadStateFile, which is why that directive
+    stayed: it is how the machine is exercised and how the
+    load_state gauge is verified.
+    """
     with pytest.raises(Exception):
         with config_override(
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
-            '    BotShieldLoadWarmThreshold 0',
+            '    BotShieldLoadWarmThreshold 70',
             count=1,
         ):
             pass

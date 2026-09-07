@@ -63,10 +63,6 @@ const char *bs_set_load_refresh(cmd_parms *cmd, void *dconf,
 /* BotShieldLoadWarmThreshold <percent> — busy-worker ratio at which
  * a sample is classified warm. 1..99, default
  * BS_DEFAULT_LOAD_WARM_RATIO_PCT. */
-const char *bs_set_loadavg_warm(cmd_parms *cmd, void *dconf,
-                                const char *arg);
-const char *bs_set_loadavg_hot(cmd_parms *cmd, void *dconf,
-                               const char *arg);
 /* BotShieldDbStatsFile <path> -- key=value telemetry from the external
  * database monitor, surfaced on the dashboard. */
 const char *bs_set_db_stats_file(cmd_parms *cmd, void *dconf,
@@ -79,8 +75,6 @@ const char *bs_set_fpm_stats_file(cmd_parms *cmd, void *dconf,
 
 /* BotShieldLatencyWarm / BotShieldLatencyHot <ms> -- Apache mean
  * request latency thresholds. */
-const char *bs_set_latency_warm(cmd_parms *cmd, void *dconf, const char *arg);
-const char *bs_set_latency_hot (cmd_parms *cmd, void *dconf, const char *arg);
 void bs_latency_thresholds(server_rec *sv, int *warm, int *hot);
 apr_uint32_t bs_latency_current_us(void);
 
@@ -91,15 +85,11 @@ void bs_loadavg_thresholds(server_rec *s, int *warm, int *hot);
 apr_uint32_t bs_loadavg_current(void);
 void bs_loadavg_current_all(apr_uint32_t *m5, apr_uint32_t *m15);
 
-const char *bs_set_load_warm_pct(cmd_parms *cmd, void *dconf,
-                                 const char *arg);
 
 /* BotShieldLoadHotThreshold <percent> — same shape as warm, default
  * BS_DEFAULT_LOAD_HOT_RATIO_PCT. (Operators are responsible for
  * setting hot strictly greater than warm; the watchdog won't crash
  * if they don't but the warm tier becomes unreachable.) */
-const char *bs_set_load_hot_pct(cmd_parms *cmd, void *dconf,
-                                const char *arg);
 
 #ifdef __cplusplus
 }
