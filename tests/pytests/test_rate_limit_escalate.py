@@ -29,7 +29,7 @@ import time
 
 import pytest
 
-from botshield_test import client
+from botshield_test import client, ratelimit
 
 
 # No longer serial. The marker meant "mutates Apache config or SHM",
@@ -43,6 +43,15 @@ CORP_UA = "CorpBot/1.0"
 
 
 def _hammer(ip: str, ua: str, n: int) -> list[int]:
+    """Fire n requests and return their codes.
+
+    Aligned because every caller here runs against a one-second budget
+    window and then asserts on which requests admitted -- codes[:2] ==
+    [200, 200], or a strike count that has to accumulate inside one
+    window. A tick crossing mid-burst resets the counter and the
+    assertion reads a different burst than the one it describes.
+    """
+    ratelimit.align_to_window()
     return [client.get("/", xff=ip, ua=ua).status_code for _ in range(n)]
 
 
@@ -108,7 +117,7 @@ def test_repeated_429_escalates_to_403(config_override, fresh_ip,
 def test_below_strike_threshold_stays_at_429(
     config_override, fresh_ip, log_slice,
 ):
-    """Budget=2/60s, escalate after 5 strikes. Only 4 overage
+    """Budget=2/sec, escalate after 5 strikes. Only 4 overage
     requests: never crosses the threshold, all 429, no 403s."""
     with config_override(
         r"BotShieldEnabled\s+On",
