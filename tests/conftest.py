@@ -39,11 +39,19 @@ def pytest_sessionstart(session):
     stay in the shared dev vhost and apply to every later run, so the
     next session fails in ways that look like product bugs rather than
     like leftover config. Checked here, before any test runs.
+
+    Two passes, because the first one cannot catch everything it is
+    meant to. restore_pristine_config only fires while the .dirty
+    marker is present and only trusts a snapshot written by the same
+    code that does the overriding; verify_baseline_config compares
+    against the copy make-instance.sh wrote at generation time, which
+    needs neither. See its docstring for what got through.
     """
-    msg = _apache.restore_pristine_config()
-    if msg:
-        session.config.pluginmanager.get_plugin("terminalreporter").write_line(
-            f"botshield: {msg}", yellow=True)
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    for msg in (_apache.restore_pristine_config(),
+                _apache.verify_baseline_config()):
+        if msg:
+            reporter.write_line(f"botshield: {msg}", yellow=True)
 
 
 def pytest_collection_modifyitems(config, items):

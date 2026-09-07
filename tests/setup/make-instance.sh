@@ -63,5 +63,14 @@ done
 sudo chown "$(id -u):$(id -g)" "$DST/dev-vhost.conf"
 sudo chmod 644 "$DST/dev-vhost.conf"
 
+# A copy of the generated vhost, taken before any test can touch it,
+# for pytest_sessionstart to compare against. Root-owned and read-only
+# on purpose: the .pristine snapshot it backstops is written by the
+# test user, which is exactly how a mutated file once got recorded as
+# the clean one. Nothing in the suite can write this.
+sudo cp "$DST/dev-vhost.conf" "$DST/dev-vhost.conf.baseline"
+sudo chown root:root "$DST/dev-vhost.conf.baseline"
+sudo chmod 444 "$DST/dev-vhost.conf.baseline"
+
 sudo httpd -f "$DST/httpd.conf" -t 2>&1 | tail -1
 echo "instance w$N: https=$HTTPS http=$HTTP state=$STATE conf=$DST"

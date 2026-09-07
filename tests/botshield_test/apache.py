@@ -270,11 +270,82 @@ def _pristine_paths(conf_path: Path):
             Path(str(conf_path) + ".dirty"))
 
 
-def _stash_pristine(conf_path: Path, original: str) -> None:
-    """Record the pre-override content and mark the file as mutated."""
+def verify_baseline_config(conf: str = DEV_VHOST_CONF) -> str | None:
+    """Put the vhost back to its generated baseline if it has drifted.
+
+    Called at session start, after restore_pristine_config. Returns a
+    message if it restored anything, None if the file already matched.
+
+    This exists because the .pristine mechanism has two load-bearing
+    assumptions and both have failed in practice:
+
+      - It trusts a snapshot taken by the same code that does the
+        overriding. Two concurrent pytest processes made that snapshot
+        a copy of an already-mutated file.
+      - It is gated on the .dirty marker. Once any override exits
+        cleanly the marker is gone, so restore_pristine_config returns
+        None and the session proceeds against whatever is on disk --
+        however wrong. A dev vhost accumulated ~130 lines of leftover
+        rules from a dozen tests that way and still reported a green
+        lane, because the drift included a live
+
+            BotShieldBotRateLimit @ai-train 1 sec scope=group
+
+        in the baseline. Every ai-train test in the suite was being
+        graded against config nobody committed, and a one-second
+        window on a per-slot counter is a flake generator besides.
+
+    The baseline is written by make-instance.sh at generation time,
+    before any test can touch it, and is root-owned 0444 so the
+    unprivileged test user cannot corrupt it the way .pristine was
+    corrupted. Comparing against it needs no marker file and no
+    cooperation from whatever made the mess.
+    """
+    conf_path = Path(conf)
+    baseline = Path(str(conf_path) + ".baseline")
+    if not baseline.exists():
+        # Say so rather than no-op quietly. An unnoticed missing guard
+        # is the same failure this function exists to catch.
+        return (f"no {baseline.name} to check {conf} against -- drift "
+                f"will go undetected; run tests/setup/make-instances.sh")
+    want = baseline.read_text()
+    if conf_path.read_text() == want:
+        return None
+    _atomic_write(conf_path, want)
+    reload()
+    return (f"{conf} had drifted from its generated baseline and was "
+            f"restored; re-run tests/setup/make-instances.sh if this "
+            f"repeats")
+
+
+def _stash_pristine(conf_path: Path, original: str) -> bool:
+    """Record the pre-override content and mark the file as mutated.
+
+    Returns True if this call took the snapshot, False if one was
+    already outstanding.
+
+    Refusing to overwrite an outstanding snapshot is the whole point.
+    Two pytest processes against one instance interleave: the second
+    one's stash captured the first one's *mutated* file and recorded it
+    as pristine, so the next session "restored" the mess and every run
+    after that inherited it. The first writer holds the only content
+    that was ever actually clean, so it keeps the snapshot.
+
+    A nested override lands here too and is handled the same way: the
+    outer original is the one worth keeping, and each override reverts
+    to its own captured text on the way out regardless.
+
+    This is check-then-act, not a lock: two processes can still both
+    find no marker and both stash. It narrows the window rather than
+    closing it, which is why verify_baseline_config exists and does
+    not depend on this working.
+    """
     pristine, dirty = _pristine_paths(conf_path)
+    if dirty.exists():
+        return False
     _atomic_write(pristine, original)
     _atomic_write(dirty, "")
+    return True
 
 
 def _clear_pristine(conf_path: Path) -> None:
@@ -408,14 +479,18 @@ def config_override(
     # unrelated tests red and read as a product bug for two full suite
     # runs. So stash the original and drop a marker first, and let
     # session start put it back.
-    _stash_pristine(conf_path, original)
+    stashed = _stash_pristine(conf_path, original)
     _atomic_write(conf_path, mutated)
     try:
         reload()
         yield
     finally:
         _atomic_write(conf_path, original)
-        _clear_pristine(conf_path)
+        # Only the override that took the snapshot may drop the
+        # marker. An inner or concurrent one clearing it would leave
+        # the outstanding outer override with no recovery path.
+        if stashed:
+            _clear_pristine(conf_path)
         reload()
 
 

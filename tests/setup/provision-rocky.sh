@@ -261,6 +261,12 @@ EOF
 cp "$REPO/tests/setup/botshield-dev.conf" "$PREFIX/dev-vhost.conf"
 chmod 644 "$PREFIX/httpd.conf" "$PREFIX/dev-vhost.conf"
 
+# See make-instance.sh: the session-start drift check compares against
+# this, and it must not be writable by the user running the tests.
+cp "$PREFIX/dev-vhost.conf" "$PREFIX/dev-vhost.conf.baseline"
+chown root:root "$PREFIX/dev-vhost.conf.baseline"
+chmod 444 "$PREFIX/dev-vhost.conf.baseline"
+
 # --- the pytest virtualenv ---------------------------------------------
 # tests/run treats a missing venv as a hard failure rather than a silent
 # skip, on the reasoning that a test run which quietly tests nothing is
