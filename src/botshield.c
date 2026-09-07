@@ -2258,6 +2258,30 @@ static int bs_handler(request_rec *r)
                          bs_tier_name(tier_floor_from_flags)));
     }
 
+    /* Already answered. A challenge asks the client to prove
+     * something; if the cookie already proves it at this level or
+     * above, asking again gets the same answer and costs the client a
+     * page. Only a demand HIGHER than what they passed is a new
+     * question, so escalation still works: passed noninteractive plus
+     * a captcha floor is still a captcha.
+     *
+     * At the decision rather than in the rules, because every route to
+     * a tier converges here -- a score threshold, a flag floor, a
+     * rule's BotShieldChallenge -- and a check that lives in the rules
+     * is one every rule has to remember. */
+    if (tier != BS_TIER_PASS && have_prior_rep) {
+        bs_tier passed = BS_TIER_PASS;
+        if (prior_ch.rep.passes_non_interactive) passed = BS_TIER_NONINTERACTIVE;
+        if (prior_ch.rep.passes_interactive)     passed = BS_TIER_INTERACTIVE;
+        if (prior_ch.rep.passes_captcha)         passed = BS_TIER_CAPTCHA;
+        if (passed >= tier) {
+            bs_score_add(r, 0,
+                apr_psprintf(r->pool, "alreadypassed:%s",
+                             bs_tier_name(passed)));
+            tier = BS_TIER_PASS;
+        }
+    }
+
     /* BotShieldChallenge Off — collapse any challenge tier back to pass
      * for this scope. Deliberately applied AFTER the floor MAX above: a
      * flag tier_floor ignores the score thresholds entirely, so parking
