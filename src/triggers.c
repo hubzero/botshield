@@ -1164,6 +1164,7 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
     e->firstsight_pred = -1;          /* no Bloom-membership condition */
     e->acceptlang_pred = -1;          /* no Accept-Language condition */
     e->loadavg_min_pct = -1;          /* no loadavg condition */
+    e->latency_min_ms  = -1;          /* no latency condition */
     e->flagged_bit = 0;               /* no flagged= condition */
     e->ck_pred     = -1;              /* no cookie= condition */
     e->env_pred    = -1;              /* no env= condition */
@@ -1349,6 +1350,30 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                 e->loadavg_min_pct = (int)(lv * 100.0);
                 continue;
             }
+            if (klen == 14
+             && strncasecmp(arg, "latencyatleast", 14) == 0) {
+                /* Same millisecond surface as BotShieldLatencyWarm,
+                 * and the same upper bound, so a threshold that is
+                 * legal at server scope is legal here. */
+                char *lend = NULL;
+                long ms = strtol(val, &lend, 10);
+                if (!lend || *lend || ms < 1 || ms > BS_M_AP_MAX_MS) {
+                    return apr_psprintf(cmd->pool,
+                        "%s: latencyatleast='%s' must be 1..%d "
+                        "milliseconds (the same unit "
+                        "BotShieldLatencyWarm takes)",
+                        D, val, BS_M_AP_MAX_MS);
+                }
+                if (neg) {
+                    return apr_psprintf(cmd->pool,
+                        "%s: '!' is not accepted on latencyatleast=. "
+                        "For \"below this\" there is no rule "
+                        "condition; put the slow case in a rule above "
+                        "and let the fast case fall through.", D);
+                }
+                e->latency_min_ms = (int)ms;
+                continue;
+            }
             if (klen == 7 && strncasecmp(arg, "flagged", 7) == 0) {
                 const bs_flag_meta *fm = bs_flag_meta_for_name(val);
                 if (!fm) {
@@ -1522,14 +1547,14 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
         && e->solved_pred < 0 && e->minload < 0
         && e->firstsight_pred < 0 && e->acceptlang_pred < 0
         && e->ck_pred < 0 && e->env_pred < 0 && !e->flagged_bit
-        && e->loadavg_min_pct < 0
+        && e->loadavg_min_pct < 0 && e->latency_min_ms < 0
         && !e->score_pred_name
         && !e->has_cohort) {
         return apr_psprintf(cmd->pool,
             "%s '%s': needs at least one match key (path=, query=, "
             "cookies=, bscookie=, cookie=, env=, flagged=, crawler=, "
             "exists=, solved=, firstsight=, acceptlanguage=, minload=, "
-            "loadavgatleast=, ua=, ipspec=). A rule "
+            "loadavgatleast=, latencyatleast=, ua=, ipspec=). A rule "
             "with no condition "
             "matches every request. Declare it inside the "
             "<Location>, <Directory> or <Files> you mean and the "

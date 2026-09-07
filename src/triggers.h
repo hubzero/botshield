@@ -292,6 +292,24 @@ typedef struct {
      * -1 = no condition. 0 is a legal threshold and means "always",
      * so absence cannot be spelled as zero. */
     int                loadavg_min_pct;
+    /* latencyatleast= : Apache mean request latency, milliseconds.
+     *
+     * The signal loadavgatleast= cannot see. A worker blocked on a
+     * database socket sits in interruptible sleep, which Linux does
+     * not count toward the load average, so a server with every
+     * worker waiting on the database reads as idle. Its mean request
+     * duration does not: the blocked worker keeps accumulating
+     * duration the whole time it waits.
+     *
+     * Milliseconds, the unit BotShieldLatencyWarm/Hot already take,
+     * because an operator setting both should not have to convert
+     * between them.
+     *
+     * -1 = no condition. 0 is excluded by the parser rather than
+     * treated as absence -- a 0ms floor matches everything, and a
+     * rule that says "shed when latency is at least nothing" is
+     * always a mistake. */
+    int                latency_min_ms;
     apr_uint32_t       flagged_bit;
     int                ck_pred;         /* enum bs_cookie_pred_kind, -1 unset */
     const char        *ck_name;

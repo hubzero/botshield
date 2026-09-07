@@ -1842,8 +1842,49 @@ of truth, and the gauge on the dashboard is the number the rule
 compares against. Per **CPU**, so a threshold means the same thing on a
 6-core host and a 64-core one.
 
-Prefer it to `minload=` when the deployment is one the ratio cannot
-see, which on the host described above is all of them.
+### Reaching request latency from a rule
+
+`BotShieldLatencyAtLeast <ms>` matches on Apache's mean request
+latency, in the same milliseconds `BotShieldLatencyWarm` and
+`BotShieldLatencyHot` take:
+
+```apache
+<BotShieldRule shed-bots-when-slow>
+    BotShieldLatencyAtLeast  1000
+    BotShieldUserAgent       @bot
+    BotShieldRespond         503
+</BotShieldRule>
+```
+
+This is the condition the other two cannot express, and the reason is
+what "busy" means to each of them. A worker blocked on a database
+socket is in interruptible sleep, which Linux does not count toward
+the load average, so a server with every worker waiting on a sick
+database reads as **idle** to `BotShieldLoadAvgAtLeast`. Its mean
+request duration does not read as idle: the blocked worker accumulates
+duration for the entire time it waits, which is exactly the quantity
+that makes a page take thirty seconds.
+
+Measured as a delta between watchdog ticks, so it is what the server
+is doing now rather than an average since restart.
+
+**It requires `ExtendedStatus On`.** Apache only maintains the
+per-worker access and duration counters when that is set; with it off
+they sit at zero forever. The module reports the metric as unavailable
+rather than as 0ms, and a `BotShieldLatencyAtLeast` rule **declines**
+while it is unavailable. That direction is deliberate: the alternative
+is a server that starts shedding traffic at the moment it loses the
+ability to measure itself.
+
+`0` is refused rather than read as "no condition", because a 0ms floor
+matches every request and a rule saying "shed when latency is at least
+nothing" is always a mistake.
+
+### Choosing between the three
+
+Prefer `BotShieldLoadAvgAtLeast` to `minload=` when the deployment is
+one the ratio cannot see, which on the host described above is all of
+them.
 `minload=` remains the right condition when the load *policy* — the
 thresholds, the latency escape, the external state file — is what
 should decide, and a rule should just ask whether that policy is

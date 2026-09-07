@@ -386,6 +386,18 @@ int bs_check_policy(request_rec *r)
                 if ((int)bs_loadavg_current() < t->loadavg_min_pct)
                     continue;
             }
+            if (t->latency_min_ms >= 0) {
+                /* NO_STATUS is 0xFFFFFFFF, so comparing it as a
+                 * number would clear every threshold and shed traffic
+                 * precisely when the server cannot measure itself.
+                 * Absence is not a high reading; check it first and
+                 * let the rule decline. */
+                apr_uint32_t us = bs_latency_current_us();
+                if (us == BS_M_AP_NO_STATUS)
+                    continue;
+                if ((int)(us / 1000u) < t->latency_min_ms)
+                    continue;
+            }
             if (t->flagged_bit) {
                 /* The union of both subjects, which is what the tier
                  * decision has always read. Rules saw only the address
@@ -846,6 +858,8 @@ static const char *bs_psh_rule_conditions(apr_pool_t *p,
     if (t->loadavg_min_pct >= 0)
         BS_PSH_ADD("loadavgatleast=%d.%02d",
                    t->loadavg_min_pct / 100, t->loadavg_min_pct % 100);
+    if (t->latency_min_ms >= 0)
+        BS_PSH_ADD("latencyatleast=%dms", t->latency_min_ms);
     if (t->score_pred_name)
         BS_PSH_ADD("scoreatleast=%s %d", t->score_pred_name,
                    t->score_pred_min);

@@ -412,10 +412,41 @@ file with it. A `BotShieldLoadAvgAtLeast` rule asks the machine a
 question with one answer. On a host where `MaxRequestWorkers` bears no
 relation to what the hardware can serve — see
 [directives](directives.md#why-the-busy-worker-ratio-is-often-the-wrong-signal) —
-the second is the one that moves during an outage.
+the ratio is the one to distrust.
 
-Both fire **at or above**, so a ladder is rules in declaration order
-with the strictest rung first, and both read the sample the watchdog
+Do not read that as "the load average is the one that moves during an
+outage". Measured on 2026-09-01, the two disagreed sharply: the load
+state reached `warm` 172 times that day and the shed rules recorded
+3709 observe hits, while 98.3% of those hits fell in ten-minute
+windows whose per-CPU load average was between 0.07 and 0.24. The
+busiest shedding window of the day, 53% of the hits on its own, had
+the *lowest* load reading in the set. Whichever of the two was right,
+they are not measuring the same thing, and neither has been validated
+against a confirmed outage on this host. That is the gap
+`BotShieldLatencyAtLeast` exists to close.
+
+`BotShieldLatencyAtLeast <ms>` is the third, and asks the question
+the other two are structurally unable to answer:
+
+```apache
+<BotShieldRule shed-when-slow>
+    BotShieldLatencyAtLeast 1000
+    BotShieldUserAgent      @bot
+    BotShieldRespond        503
+</BotShieldRule>
+```
+
+A worker waiting on a database socket sits in interruptible sleep and
+does not count toward the load average, so a server whose every worker
+is stuck on the database reads as idle to a loadavg rule while taking
+thirty seconds to answer. Mean request duration is the one number of
+the three that rises in that situation. It needs `ExtendedStatus On`,
+and declines while the metric is unavailable rather than treating
+"cannot measure" as "very slow".
+
+All three fire **at or above**, so a ladder is rules in declaration
+order with the strictest rung first, and all read the sample the
+watchdog
 last published: for one refresh interval after a config reload that
 sample is 0 and neither fires.
 
