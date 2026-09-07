@@ -133,3 +133,88 @@ def test_a_scoped_rule_can_use_ipspec(config_override, fresh_ip):
     assert got == 451, (
         f"the cohort never resolved its ranges; got {got}"
     )
+
+
+def test_a_nested_container_gets_the_first_word(config_override,
+                                                fresh_ip):
+    """Specificity again, one level down.
+
+    Same argument as scoped-before-server: under first-match-wins the
+    inner container has to be reached first, or a rule written about
+    <Location /a> answers for the request that <Location /a/b> exists
+    to handle. Order *within* a scope stays declaration order; this is
+    only about the order between them.
+    """
+    outer = "/nest"
+    inner = "/nest/deep"
+    conf = _conf(
+        f'    <Location "{outer}">\n'
+        "        <BotShieldRule broad>\n"
+        "            BotShieldRespond   403\n"
+        "        </BotShieldRule>\n"
+        "    </Location>\n"
+        f'    <Location "{inner}">\n'
+        "        <BotShieldRule narrow>\n"
+        "            BotShieldRespond   451\n"
+        "        </BotShieldRule>\n"
+        "    </Location>"
+    )
+    with config_override(r"BotShieldEnabled\s+On", conf,
+                         render=False, count=1):
+        deep = client.get(inner, xff=fresh_ip).status_code
+        shallow = client.get(outer, xff=fresh_ip).status_code
+    assert deep == 451, (
+        f"the inner container should answer for its own path; got {deep}"
+    )
+    assert shallow == 403, "the outer one still answers for the rest"
+
+
+def test_a_scoped_flag_reaches_the_next_request(config_override,
+                                                fresh_ip):
+    """Carried over from the scope-trigger suite: the honeypot shape.
+
+    A container the client should never touch, a flag written when it
+    does, and a later request that a separate rule matches on the
+    flag. This was the family's headline use and it has to survive the
+    move.
+    """
+    trap = "/scoped-trap"
+    probe = "/scoped-flag-probe"
+    conf = _conf(
+        f'    <Location "{trap}">\n'
+        "        <BotShieldRule trap>\n"
+        "            BotShieldFlagIP    honeypot_hit\n"
+        "            BotShieldRespond   404\n"
+        "        </BotShieldRule>\n"
+        "    </Location>\n"
+        "    <BotShieldRule act>\n"
+        f"        BotShieldPath      {probe}\n"
+        "        BotShieldFlagged   honeypot_hit\n"
+        "        BotShieldRespond   451\n"
+        "    </BotShieldRule>"
+    )
+    with config_override(r"BotShieldEnabled\s+On", conf,
+                         render=False, count=1):
+        before = client.get(probe, xff=fresh_ip).status_code
+        client.get(trap, xff=fresh_ip)
+        after = client.get(probe, xff=fresh_ip).status_code
+    assert before != 451, "not flagged yet"
+    assert after == 451, "the scoped rule's flag must outlive its request"
+
+
+def test_observe_mode_works_on_a_scoped_rule(config_override, fresh_ip):
+    """Also carried over. mode=observe has to keep meaning "log it,
+    do not enforce it" when the container is the condition -- staging
+    a container rule is exactly as necessary as staging any other."""
+    conf = _conf(
+        f'    <Location "{SCOPED}">\n'
+        "        <BotShieldRule watched>\n"
+        "            BotShieldRespond   451\n"
+        "            BotShieldMode      observe\n"
+        "        </BotShieldRule>\n"
+        "    </Location>"
+    )
+    with config_override(r"BotShieldEnabled\s+On", conf,
+                         render=False, count=1):
+        got = client.get(SCOPED, xff=fresh_ip).status_code
+    assert got != 451, "observe must not enforce"

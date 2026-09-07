@@ -480,85 +480,89 @@ flag bit and action verb adds to it (SUM for score, MAX for
 tier_floor) — use `reset` first if you want to replace rather than
 accumulate.
 
-### Per-Apache-scope triggers — `BotShieldTrigger`
+### Rules in an Apache container
 
-For everything else you want to do at a specific Apache
-scope — flag the IP, add a penalty, return a status, observe in
-log-only mode — there's a single per-scope directive:
+A `<BotShieldRule>` can be declared inside `<Location>`,
+`<Directory>`, `<Files>`, their regex forms, and `<If>` — the same
+places `Require` and `Header` work. Declared there it **needs no match
+key**: Apache has already matched, and the container is the condition.
 
 ```apache
 <Location "/admin/.env">
-    <BotShieldTrigger>
+    <BotShieldRule admin-trap>
         BotShieldFlagIP       honeypot_hit
         BotShieldLogAs        admin-trap
-    </BotShieldTrigger>
+    </BotShieldRule>
 </Location>
 
 <LocationMatch "(?i)/wp-(login|admin)">
-    <BotShieldTrigger>
+    <BotShieldRule wp-trap>
         BotShieldFlagIP       scanner_probe
-        BotShieldScore  botsignals +20
-        BotShieldLogAs          wp-trap
-    </BotShieldTrigger>
+        BotShieldScore        botsignals +20
+        BotShieldLogAs        wp-trap
+    </BotShieldRule>
 </LocationMatch>
 
 <Files "*.php">
     <If "%{REQUEST_URI} =~ m#/uploads/#">
-        <BotShieldTrigger>
-            BotShieldRespond       403
-            BotShieldLogAs          php-in-uploads
-        </BotShieldTrigger>
+        <BotShieldRule php-in-uploads>
+            BotShieldRespond      403
+            BotShieldLogAs        php-in-uploads
+        </BotShieldRule>
     </If>
 </Files>
 ```
 
-The Apache scope match IS the predicate — no separate path glob,
-because Apache already evaluated the scope. Action keys mirror the
-cookie family: `status` / `redirect` / `log` / `flag` / `ttl` /
-`score` / `mode`. Multiple `BotShieldTrigger` lines
-in one scope each append a separate action; they all fire on a
-pass, the first non-pass status short-circuits.
+This is the recommended way to express anything `<Location>`-shaped,
+and it is worth reaching for over `BotShieldPath` when the shape you
+want is one Apache can already match — `<LocationMatch>` takes a
+regex, `<Directory>` matches the filesystem, `<If>` takes an
+expression, and `BotShieldPath` is a glob with a trailing `$` anchor.
 
-`BotShieldTrigger` works in any Apache container the parser
-accepts (server config, `<VirtualHost>`, `<Directory>`,
-`<Location>`, `<LocationMatch>`, `<Files>`, `<If>`, etc.) — the
-same set that `Require` and `Header` work in. This is the
-recommended way to express anything `<Location>`-shaped.
+Everything else about the rule is unchanged: conditions still apply
+and AND with the container, `mode=observe` still stages it, and the
+actions are the same.
 
-#### Reset semantics — opting out of inherited triggers
+This was a family of its own, `BotShieldTrigger`, until 2026-09-06.
+Its predicate was the container match and it had no conditions, which
+is a rule whose condition Apache has already evaluated — so it could
+say nothing a rule could not, and cost an operator a second directive
+to learn.
 
-By default a child scope inherits its parent's `BotShieldTrigger`
-list and concatenates its own. To drop the inherited list,
-declare `BotShieldTrigger reset` in the child:
+#### Ordering, and opting out
+
+Two ladders are walked: rules declared in a container first, then the
+server-scope ones. Within the container ladder the innermost scope
+comes first.
+
+Both are the same rule, applied twice: under first-match-wins the more
+specific statement has to get the first word. Otherwise a broad vhost
+rule would answer for a path someone wrote a `<Location>` about, and a
+rule in `<Location /a>` would answer for a request that
+`<Location /a/b>` exists to handle.
+
+That ordering is also how a nested scope opts out of what an outer one
+does — write a rule that matches and passes:
 
 ```apache
 <Location "/api">
-    <BotShieldTrigger>
-        BotShieldScore  botsignals +10
-        BotShieldLogAs          api-tax
-    </BotShieldTrigger>
+    <BotShieldRule api-tax>
+        BotShieldScore        botsignals +10
+        BotShieldLogAs        api-tax
+    </BotShieldRule>
 </Location>
 
 <Location "/api/health">
-    <BotShieldTrigger>
-        BotShieldReset
-    </BotShieldTrigger>
-</Location>
-
-<Location "/api/internal">
-    <BotShieldTrigger>
-        BotShieldReset
-    </BotShieldTrigger>
-    <BotShieldTrigger>
-        BotShieldRespond       nochallenge
-        BotShieldLogAs          internal-allow
-    </BotShieldTrigger>
+    <BotShieldRule health-exempt>
+        BotShieldNoChallenge
+        BotShieldLogAs        health-exempt
+    </BotShieldRule>
 </Location>
 ```
 
-`reset` as the first arg drops triggers inherited from outer
-scopes (and clears any earlier `BotShieldTrigger` entries
-appended in the same scope before the reset).
+`BotShieldTrigger` had a `reset` keyword for this. A rule that says
+what it wants is one mechanism rather than two, and it is visible in
+the config instead of in a merge rule.
 
 ### `nochallenge` waives the challenge, not the policy
 

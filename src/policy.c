@@ -286,25 +286,12 @@ int bs_check_policy(request_rec *r)
      * ladder is rules in declaration order rather than one walk
      * short-circuiting another. */
 
-    /* BotShieldTrigger — per-Apache-scope triggers. Apache's
-     * scope-match has already evaluated; walk the merged dcfg
-     * list in declaration order. Each entry's pass continues
-     * (multiple BotShieldTriggers in one scope all fire); a
-     * status short-circuits the walk. */
+    /* The BotShieldTrigger walk was here. Its predicate was the
+     * Apache container match, which a rule declared in that container
+     * now carries -- see the scoped ladder below. dcfg stays: it holds
+     * that ladder, and the log-only gate reads it further down. */
     bs_dir_cfg *dcfg = ap_get_module_config(r->per_dir_config,
                                             &botshield_module);
-    if (dcfg && dcfg->scope_triggers && dcfg->scope_triggers->nelts > 0) {
-        for (int i = 0; i < dcfg->scope_triggers->nelts; i++) {
-            bs_trigger_action *a = APR_ARRAY_IDX(
-                dcfg->scope_triggers, i, bs_trigger_action *);
-            const char *tag = a->log_tag ? a->log_tag : "scope";
-            bs_trigger_exec_outcome o = bs_apply_trigger_action(
-                r, scfg, BS_TFAMILY_SCOPE, a,
-                "scopetrigger", tag);
-            if (o == BS_TEXEC_STATUS) return a->status_code;
-            /* PASS_CONTINUE / OBSERVE → keep walking */
-        }
-    }
 
     const char *ua = apr_table_get(r->headers_in, "User-Agent");
 

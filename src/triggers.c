@@ -133,9 +133,8 @@ static const char *bs_trigger_family_dname(bs_trigger_family fam)
     case BS_TFAMILY_REQUEST:  return "BotShieldRule";
     case BS_TFAMILY_FEEDBACK: return "BotShieldFeedback";
     case BS_TFAMILY_FLAG:     return "BotShieldFlagTrigger";
-    case BS_TFAMILY_SCOPE:    return "BotShieldTrigger";
     }
-    return "BotShieldTrigger";      /* unreachable */
+    return "BotShieldRule";         /* unreachable */
 }
 
 static void bs_trigger_action_init(bs_trigger_family fam,
@@ -182,15 +181,6 @@ static void bs_trigger_action_init(bs_trigger_family fam,
          * engine. */
         a->status_code = BS_TRIGGER_STATUS_PASS;
         break;
-    case BS_TFAMILY_SCOPE:
-        /* Per-scope triggers default to pass-with-score-shaping —
-         * the scope match itself is the predicate, so the typical
-         * use is "everything reaching this <Location> gets +N
-         * penalty / -N credit / a flag bit set." Operators flip
-         * status= explicitly when they want the scope to short-
-         * circuit with a status code or redirect. */
-        a->status_code = BS_TRIGGER_STATUS_PASS;
-        break;
     }
     a->tier_floor      = -1;
     a->redirect_url    = NULL;
@@ -209,9 +199,6 @@ static const char *bs_trigger_known_keys(bs_trigger_family fam)
          * write" — meaningful for staging a feedback rule before
          * mutating server state. */
         return "flagip, flagsession, logas, accesslog, mode";
-    case BS_TFAMILY_SCOPE:
-        return "respond, nochallenge, challenge, redirect, logas, "
-               "accesslog, flagip, flagsession, score, mode";
     case BS_TFAMILY_FLAG:
         /* Flag triggers use a separate parser. This entry exists
          * for switch-exhaustiveness; the flag setter prints its
@@ -893,13 +880,11 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
          * applied above. */
         bs_score_add(r, 0,
             apr_pstrcat(r->pool, family_tag, ":", trigger_name, NULL));
-        /* Scope: multiple BotShieldTrigger directives in the same
-         * scope are independent declarations, all should fire on
-         * a pass — caller's loop continues to the next entry. */
-        if (fam == BS_TFAMILY_SCOPE)  return BS_TEXEC_PASS_CONTINUE;
-        /* env + load: first-match-wins. Distinct load triggers
-         * (state>=warm vs state=hot) are alternative-specificity
-         * cases, not layered reputation — one match is enough. */
+        /* First-match-wins. The scope family returned CONTINUE
+         * here, because several BotShieldTriggers in one <Location>
+         * were independent declarations that should all fire. Written
+         * as rules they are a ladder like any other, and a ladder
+         * stops at the rung that matches. */
         return BS_TEXEC_PASS_BREAK;
     }
 
@@ -1722,58 +1707,6 @@ const char *bs_set_feedback(cmd_parms *cmd, void *dconf,
 }
 
 
-/* --- BotShieldTrigger setter --- *
- *
- * BotShieldTrigger [reset] [key=value ...]
- *
- * Per-scope trigger declaration; the Apache scope match is the
- * predicate. `reset` as the first arg drops inherited triggers
- * (and earlier same-scope entries) before any further triggers
- * in this scope are appended. Action keys mirror the cookie
- * family. Multiple BotShieldTrigger directives in one scope each
- * append a separate entry. */
-const char *bs_set_trigger(cmd_parms *cmd, void *cfg_v,
-                                  int argc, char *const argv[])
-{
-    bs_dir_cfg *cfg = cfg_v;
-    int start_idx = 0;
-    if (argc >= 1 && strcasecmp(argv[0], "reset") == 0) {
-        /* Reset clears any same-scope entries pushed before this
-         * directive and signals the merge to drop the inherited
-         * base list. Subsequent args (if any) are action keys
-         * for the remaining directive. */
-        cfg->scope_triggers_reset = 1;
-        if (cfg->scope_triggers) {
-            cfg->scope_triggers->nelts = 0;
-        }
-        start_idx = 1;
-        if (argc == 1) return NULL;
-    }
-    if (start_idx == argc) {
-        return "BotShieldTrigger: expects [reset] [key=value ...]; "
-               "got nothing actionable";
-    }
-
-    if (!cfg->scope_triggers) {
-        cfg->scope_triggers = apr_array_make(cmd->pool, 2,
-                                             sizeof(bs_trigger_action *));
-    }
-
-    bs_trigger_action *a = apr_pcalloc(cmd->pool, sizeof(*a));
-    bs_trigger_action_init(BS_TFAMILY_SCOPE, a);
-
-    for (int i = start_idx; i < argc; i++) {
-        const char *err = bs_parse_trigger_action_key(cmd->pool,
-            BS_TFAMILY_SCOPE, argv[i], a);
-        if (err) return err;
-    }
-    const char *err = bs_finalize_trigger_action(cmd->pool,
-        BS_TFAMILY_SCOPE, a);
-    if (err) return err;
-
-    *(bs_trigger_action **)apr_array_push(cfg->scope_triggers) = a;
-    return NULL;
-}
 
 /* Flag-bit registry. Maps the BS_FLAG_* defines to the canonical
  * names that appear in directives (BotShieldFlagTrigger, BotShieldTrigger),

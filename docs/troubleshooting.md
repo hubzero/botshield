@@ -108,8 +108,8 @@ access logs aren't being gated. Decision log shows `tier=nochallenge`.
 **Fixes**:
 
 - **Honeypot scopes**: drop `<Location>` blocks for paths only
-  bots scan (`/wp-admin/`, `/.env`, `/.git/`) with
-  `BotShieldTrigger flag=honeypot_hit ttl=3600`. The bot trips
+  bots scan (`/wp-admin/`, `/.env`, `/.git/`) holding a
+  `<BotShieldRule>` with `BotShieldFlagIP honeypot_hit`. The bot trips
   the honeypot, the IP is flagged, future requests get the
   flagtrigger penalty + tier_floor=captcha. See
   [policy](policy.md).

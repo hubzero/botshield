@@ -782,10 +782,12 @@ same rule `BotShieldAllowBot` follows.
 
 ### `BotShieldRule` — match on any request property
 
-Every match key is optional and they **AND** together; at least one is
-required. A rule with no condition would match every request, which is
-what `BotShieldTrigger` in an Apache scope is for, so the parser rejects
-it.
+Every match key is optional and they **AND** together. At server
+scope at least one is required: a rule with no condition matches every
+request, which nobody writes on purpose. Inside `<Location>`,
+`<Directory>`, `<Files>` or `<If>` none is required — Apache has
+already matched, and the container is the condition. See
+[policy](policy.md#rules-in-an-apache-container).
 
 | Key | Matches against | Notes |
 |---|---|---|
@@ -1573,21 +1575,39 @@ A note on quoting: values are unquoted by the module, so
 this a quoted `key="value"` would retain its quotes and silently never
 match.
 
-## Per-scope triggers
+#### Removed: `BotShieldTrigger`
 
-| Directive | Syntax | Scope |
-|---|---|---|
-| `BotShieldTrigger` | `[reset] [respond=N\|pass] [redirect=URL] [logas=tag] [accesslog=on\|off] [flag=NAME] [ttl=N] [score="NAME +N"] [mode=enforce\|observe]` | server / vhost / Directory / Location / LocationMatch / Files / If |
+The per-Apache-scope family, removed 2026-09-06. Its predicate was the
+container match and it carried no conditions of its own, which is a
+rule whose condition Apache has already evaluated — so it could say
+nothing a rule could not, once a rule could be written in a container.
 
-The Apache scope the directive lives in IS the predicate; no path
-glob argument. Multiple `BotShieldTrigger` lines in one scope
-each append a separate action; they all fire on a pass, the first
-non-pass status short-circuits. `reset` (no other args) drops
-inherited triggers from outer scopes and clears earlier same-scope
-entries.
+Write `<BotShieldRule name>` in the same container. The block name is
+the only addition; the action keys are unchanged.
 
-This is the directive that replaces the legacy `BotShieldFlagIP`
-— the equivalent today is `BotShieldTrigger flag=<name> ttl=<sec>`.
+```apache
+# configtest: skip -- the "before" half names a removed directive.
+# before
+<Location "/admin/.env">
+    <BotShieldTrigger>
+        BotShieldFlagIP   honeypot_hit
+    </BotShieldTrigger>
+</Location>
+
+# after
+<Location "/admin/.env">
+    <BotShieldRule admin-trap>
+        BotShieldFlagIP   honeypot_hit
+    </BotShieldRule>
+</Location>
+```
+
+Two behaviours changed with it. Several `BotShieldTrigger` blocks in
+one scope all fired; rules are a ladder and stop at the rung that
+matches. And `reset`, which dropped triggers inherited from outer
+scopes, is gone — a nested scope opts out by writing a rule that
+matches and passes, which works because the inner scope is walked
+first. See [policy](policy.md#ordering-and-opting-out).
 
 ## Flag triggers
 

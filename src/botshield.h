@@ -292,13 +292,6 @@ struct bs_dir_cfg {
     /* E18 — inline form captcha. -1 inherit, 0 off, 1 on. */
     int form_captcha;
     const char *cookie_domain;  /* if set, Set-Cookie Domain= attribute */
-    /* BotShieldTrigger — per-Apache-scope trigger list. Each entry
-     * is a bs_trigger_action *; the request-time walker iterates
-     * the merged list and applies each via bs_apply_trigger_action.
-     * `scope_triggers_reset` means "this scope drops inherited
-     * triggers" — the merge skips base->scope_triggers when set. */
-    apr_array_header_t *scope_triggers;
-    int                 scope_triggers_reset;
     /* BotShieldRule declared inside an Apache container. Same entry
      * type as the server-scope ladder; separate array because Apache
      * merges dir configs down a scope chain and server configs not at

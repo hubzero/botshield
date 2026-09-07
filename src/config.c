@@ -85,8 +85,6 @@ void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->non_interactive_mode   = BS_NON_INTERACTIVE_MODE_UNSET;
     cfg->form_captcha  = BS_UNSET;
     cfg->cookie_domain   = NULL;
-    cfg->scope_triggers       = NULL;
-    cfg->scope_triggers_reset = 0;
     cfg->rules                = NULL;
     cfg->challenge_at_least   = NULL;
     cfg->challenge_at_least_reset = 0;
@@ -575,34 +573,27 @@ void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     /* Flag-on-match is additive: a more-specific scope that adds a flag
      * is merged with any broader-scope flag, so an inner <Location> adds
      * its flag without losing the outer. */
-    /* Per-scope BotShieldTrigger merge. Default: concatenate
-     * parent + child. Reset flag on the child drops the inherited
-     * list and uses only the child's entries. The reset flag also
-     * propagates to the merged output so deeper scopes see the
-     * effect (a reset at vhost level holds through every nested
-     * <Location>). */
+    /* Rules declared in a container. Concatenated parent + child,
+     * so a <Location> adding a rule does not drop the vhost's.
+     *
+     * BotShieldTrigger had a `reset` keyword here that dropped the
+     * inherited list. Rules have no equivalent: a nested scope that
+     * wants to opt out writes a rule that matches and passes, which
+     * works because the inner scope is walked first. That is one
+     * mechanism instead of two, and it is visible in the config
+     * rather than in a merge rule. */
     if (!base->rules || base->rules->nelts == 0) {
         out->rules = add->rules;
     } else if (!add->rules || add->rules->nelts == 0) {
         out->rules = base->rules;
     } else {
-        /* Outer scope first: Apache walks the container chain
-         * outermost-in, so this preserves the order the operator
-         * wrote across nested scopes. Both come before the server
-         * ladder either way. */
-        out->rules = apr_array_append(p, base->rules, add->rules);
-    }
-    out->scope_triggers_reset = base->scope_triggers_reset
-                              | add->scope_triggers_reset;
-    if (add->scope_triggers_reset) {
-        out->scope_triggers = add->scope_triggers;
-    } else if (!base->scope_triggers || base->scope_triggers->nelts == 0) {
-        out->scope_triggers = add->scope_triggers;
-    } else if (!add->scope_triggers || add->scope_triggers->nelts == 0) {
-        out->scope_triggers = base->scope_triggers;
-    } else {
-        out->scope_triggers = apr_array_append(p, base->scope_triggers,
-                                               add->scope_triggers);
+        /* Inner scope first, by the same specificity argument that
+         * puts the whole dir ladder ahead of the server one: under
+         * first-match-wins the more specific container has to get the
+         * first word, or a rule in <Location /a> would answer for a
+         * request that <Location /a/b> was written about. Order
+         * *within* each scope stays declaration order. */
+        out->rules = apr_array_append(p, add->rules, base->rules);
     }
     /* Concatenate parent and child, like scope_triggers: a <Location>
      * adding a row should not silently drop the vhost's ladder. Rows

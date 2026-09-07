@@ -143,10 +143,19 @@ int bs_bot_name_valid(const char *s)
  * carries the work; what differs between families is only which setter
  * receives the tokens it builds. */
 
-static const char *bs_open_trigger(cmd_parms *cmd, void *dconf,
+/* Registered rather than dropped so the error names the shape that
+ * replaced it, instead of Apache's "Invalid command, perhaps
+ * misspelled or defined by a module not included". */
+static const char *bs_open_trigger_retired(cmd_parms *cmd, void *dconf,
                                           const char *arg)
 {
-    return bs_section_trigger(cmd, dconf, arg, "BotShieldTrigger", bs_set_trigger);
+    (void)dconf; (void)arg;
+    return apr_psprintf(cmd->pool,
+        "<BotShieldTrigger> is gone; write <BotShieldRule name> in the "
+        "same container. A rule declared inside <Location>, "
+        "<Directory> or <Files> needs no match key -- Apache has "
+        "already matched, and the container is the condition, which "
+        "is all this directive ever was.");
 }
 
 static const char *bs_open_flagtrigger(cmd_parms *cmd, void *dconf,
@@ -543,10 +552,10 @@ static const command_rec bs_cmds[] = {
                  "graceful-shutdown save runs). Range when non-zero: "
                  "30..86400. Requires mod_watchdog to be loaded; otherwise "
                  "degrades to shutdown-only with a NOTICE."),
-    AP_INIT_RAW_ARGS("<BotShieldTrigger", bs_open_trigger, NULL, RSRC_CONF | ACCESS_CONF,
-                 "Open a BotShieldTrigger block. Takes the rule name; every "
-                 "setting is a BotShield directive on its own line "
-                 "until </BotShieldTrigger>."),
+    AP_INIT_RAW_ARGS("<BotShieldTrigger", bs_open_trigger_retired,
+                 NULL, RSRC_CONF | ACCESS_CONF,
+                 "Removed. Write <BotShieldRule> in the same "
+                 "container."),
     AP_INIT_RAW_ARGS("<BotShieldFlagTrigger", bs_open_flagtrigger, NULL, RSRC_CONF,
                  "Open a BotShieldFlagTrigger block. Takes the rule name; every "
                  "setting is a BotShield directive on its own line "
@@ -578,21 +587,11 @@ static const command_rec bs_cmds[] = {
                  "the rules that use it."),
     AP_INIT_TAKE_ARGV("BotShieldTrigger", bs_flat_trigger_retired, NULL,
                  RSRC_CONF | ACCESS_CONF,
-                 "Per-scope trigger: the Apache scope (server / "
-                 "<VirtualHost> / <Directory> / <Location> / "
-                 "<LocationMatch> / <Files> / <If>) the directive "
-                 "lives in IS the predicate. Action keys: "
-                 "respond=<code|nochallenge>, redirect=<url>, log=<tag>, "
-                 "accesslog=on|off, "
-                 "flag=<name>, ttl=<sec>, penalty=<N>, credit=<N>, "
-                 "mode=enforce|observe. The literal 'reset' as the "
-                 "first arg drops triggers inherited from outer "
-                 "scopes (and earlier same-scope BotShieldTrigger "
-                 "directives). Multiple BotShieldTrigger directives "
-                 "in one scope each append a separate action. "
-                 "Replaces the legacy BotShieldFlagIP — the "
-                 "equivalent today is `BotShieldTrigger flag=<name> "
-                 "ttl=<sec>`."),
+                 "Removed. Write <BotShieldRule name> in the same "
+                 "Apache container: a rule declared inside "
+                 "<Location>, <Directory>, <Files> or <If> needs no "
+                 "match key, because Apache has already matched and "
+                 "the container is the condition."),
     /* E1 — Allow family */
     AP_INIT_TAKE_ARGV("BotShieldClassify", bs_set_classify, NULL,
                  RSRC_CONF,
@@ -2267,10 +2266,10 @@ static int bs_handler(request_rec *r)
         tier = BS_TIER_PASS;
     }
 
-    /* Per-scope flag/TTL writes happen inside bs_check_policy via
-     * the BotShieldTrigger walker (BS_TFAMILY_SCOPE). The legacy
-     * BotShieldFlagIP directive that used to live here was
-     * superseded by `BotShieldTrigger flag=<name> ttl=<sec>`. */
+    /* Flag writes happen inside bs_check_policy, from whichever
+     * rule matched -- including one declared in an Apache container,
+     * which is where the retired BotShieldTrigger family's writes
+     * used to come from. */
 
     /* Happy path: nothing asked for a tier, so pass through. If
      * there's no cookie this means no cookie is ever issued --

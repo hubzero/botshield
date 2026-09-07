@@ -17,12 +17,8 @@ from __future__ import annotations
 import re
 
 FAMILIES = (
-    "BotShieldRule", "BotShieldFlagTrigger",
-    "BotShieldFeedback", "BotShieldTrigger",
+    "BotShieldRule", "BotShieldFlagTrigger", "BotShieldFeedback",
 )
-
-# Families whose rules carry no name.
-_NAMELESS = frozenset({"BotShieldTrigger"})
 
 # key -> inner directive. Mirrors bs_section_key() in src/triggers.c;
 # only the names that are not just the capitalised key appear here.
@@ -86,13 +82,7 @@ def to_blocks(text: str) -> str:
             out.append(line)
             i += 1
             continue
-        # BotShieldTrigger takes no name: it is identified by the
-        # <Location> it sits in, not by a word. Everything after the
-        # directive is a setting.
-        if fam in _NAMELESS:
-            name, attrs = "", rest
-        else:
-            name, attrs = parts[0], (parts[1] if len(parts) > 1 else "")
+        name, attrs = parts[0], (parts[1] if len(parts) > 1 else "")
 
         # `reset` is a bare positional on the flag/heuristic families.
         bare = []
