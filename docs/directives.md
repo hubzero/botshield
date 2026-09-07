@@ -541,10 +541,35 @@ an OR. Copies take a `#N` name internally; the decision log is
 unaffected, since it reports the action's `logas=` tag, which every copy
 shares.
 
-**Only `@selectors` split.** A bare substring pattern is passed through
-untouched, because a User-Agent legitimately contains commas —
-`Mozilla/5.0 (X11; Linux x86_64)` is full of them — and splitting those
-would silently change what an existing rule matches.
+**Only `@selectors` split** *on one line*. A bare substring pattern
+written as a single value is passed through untouched, because a
+User-Agent legitimately contains commas — `Mozilla/5.0 (X11; Linux
+x86_64)` is full of them — and splitting those would silently change
+what an existing rule matches.
+
+**Repeating the directive ORs, whatever the values are.** Inside a
+block, `BotShieldUserAgent` accumulates the way `BotShieldPath` does —
+one alternative per line, no separator to be ambiguous about:
+
+```apache
+<BotShieldRule mixed>
+    BotShieldUserAgent  @ai-train
+    BotShieldUserAgent  CorpBot/1.0
+    BotShieldUserAgent  Mozilla/5.0 (X11; Linux x86_64) Grabber/2
+    BotShieldRespond    403
+</BotShieldRule>
+```
+
+All three are alternatives, and the third stays one value despite its
+commas. This is the spelling to reach for when the alternatives are not
+all `@selectors`; the one-line comma form remains available and is
+still the shorter way to write a list of selectors.
+
+Until 2026-09-07 repeated lines were comma-joined before parsing, so
+two plain values became the single literal substring
+`CorpBot/1.0,OtherBot/2.0` — a rule that matched nothing, with no
+warning, because repetition was accepted and only the `@selector`
+split could undo the join.
 
 Match keys: `ua=<substring>`, `ua=@<botgroup>`, or `ua=""` (no/empty
 User-Agent) for the UA gate

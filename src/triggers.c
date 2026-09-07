@@ -1176,6 +1176,11 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
     bs_trigger_action_init(BS_TFAMILY_REQUEST, &e->action);
 
     const char *ua_arg = NULL, *ipspec_arg = NULL;
+    /* One entry per BotShieldUserAgent line. A single line may still
+     * be a comma list of @selectors, which is expanded below, so this
+     * holds tokens rather than final alternatives. */
+    apr_array_header_t *ua_tokens =
+        apr_array_make(cmd->pool, 4, sizeof(const char *));
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
         /* The walker moves a leading '!' from the value to the key, so
@@ -1474,7 +1479,10 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                 continue;
             }
             if (klen == 2 && strncasecmp(arg, "ua", 2) == 0) {
-                ua_arg = val;
+                *(const char **)apr_array_push(ua_tokens) = val;
+                ua_arg = val;   /* last one wins for the single-value
+                                 * checks below; the list drives the
+                                 * expansion. */
                 continue;
             }
             if (klen == 6 && strncasecmp(arg, "ipspec", 6) == 0) {
@@ -1579,12 +1587,33 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
      * Each copy takes a #N name so upsert-by-name stays exact. The
      * decision log is unaffected: it reports the action's log= tag,
      * which every copy shares. */
-    if (bs_ua_is_selector_list(ua_arg)) {
-        char *list = apr_pstrdup(cmd->pool, ua_arg);
-        char *save = NULL, *tok = apr_strtok(list, ",", &save);
+    /* Flatten the tokens into alternatives: a line that is a comma
+     * list of @selectors contributes one alternative per selector,
+     * any other line contributes itself. Two lines reading
+     * `BotShieldUserAgent @bot` and `BotShieldUserAgent CorpBot` are
+     * two alternatives, which is what repeating the directive has
+     * always looked like it meant. */
+    apr_array_header_t *ua_alts =
+        apr_array_make(cmd->pool, 4, sizeof(const char *));
+    for (int i = 0; i < ua_tokens->nelts; i++) {
+        const char *tokv = APR_ARRAY_IDX(ua_tokens, i, const char *);
+        if (bs_ua_is_selector_list(tokv)) {
+            char *list = apr_pstrdup(cmd->pool, tokv);
+            char *save = NULL, *s = apr_strtok(list, ",", &save);
+            while (s) {
+                while (*s == ' ' || *s == '\t') s++;
+                *(const char **)apr_array_push(ua_alts) = s;
+                s = apr_strtok(NULL, ",", &save);
+            }
+        } else {
+            *(const char **)apr_array_push(ua_alts) = tokv;
+        }
+    }
+
+    if (ua_alts->nelts > 1) {
         int n = 0;
-        while (tok) {
-            while (*tok == ' ' || *tok == '\t') tok++;
+        for (int i = 0; i < ua_alts->nelts; i++) {
+            const char *tok = APR_ARRAY_IDX(ua_alts, i, const char *);
             n++;
             bs_request_trigger_entry *c =
                 apr_pmemdup(cmd->pool, e, sizeof(*e));
@@ -1597,7 +1626,6 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                 c->name = apr_psprintf(cmd->pool, "%s#%d", e->name, n);
             }
             bs_rule_push(cmd, dcfg, scoped, scfg, c);
-            tok = apr_strtok(NULL, ",", &save);
         }
         return NULL;
     }
@@ -1992,7 +2020,7 @@ const char *bs_section_trigger(cmd_parms *cmd, void *dconf, const char *arg,
                     "IPSpec accumulate; everything else would silently "
                     "keep one value.", dname, name, directive);
             }
-            if (strcmp(key, "path") == 0) {
+            if (strcmp(key, "path") == 0 || strcmp(key, "ua") == 0) {
                 /* Paths get a token each rather than a comma-joined
                  * list, because a comma is a legal character in a path
                  * (RFC 3986 sub-delims) and cannot also be the
@@ -2001,9 +2029,17 @@ const char *bs_section_trigger(cmd_parms *cmd, void *dconf, const char *arg,
                  * patterns -- silently matching two prefixes instead of
                  * the one literal path asked for.
                  *
-                 * UserAgent and IPSpec keep the joined form: a comma
-                 * cannot appear in a CIDR, and @botgroup lists are
-                 * written comma-separated on purpose. */
+                 * UserAgent goes the same way and for the same
+                 * reason: a User-Agent legitimately contains commas
+                 * ("Mozilla/5.0 (X11; Linux x86_64)"), so a comma
+                 * cannot also be the separator between two of them.
+                 * Joining them here was why repeating the directive
+                 * only OR-ed @selectors -- the setter had to guess
+                 * where one value ended, and could only do it safely
+                 * when every element began with '@'.
+                 *
+                 * IPSpec keeps the joined form: a comma cannot appear
+                 * in a CIDR, so there is no ambiguity to avoid. */
                 *(const char **)apr_array_push(kvs) =
                     apr_psprintf(p, "%s=%s", key, value);
                 continue;
