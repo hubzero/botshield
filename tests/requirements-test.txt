@@ -18,7 +18,7 @@ playwright==1.60.0
 
 # M11.7: rerun-on-flake for @live_network (third-party siteverify
 # blips) + HTML reports for CI triage.
-pytest-rerunfailures==16.3
+pytest-rerunfailures==16.6.1
 pytest-html==4.2.0
 
 # M11.8: property + format testing.
