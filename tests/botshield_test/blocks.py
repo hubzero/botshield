@@ -17,10 +17,8 @@ from __future__ import annotations
 import re
 
 FAMILIES = (
-    "BotShieldRequestTrigger", "BotShieldRule", "BotShieldFlagTrigger",
-    "BotShieldCookieTrigger",
-    "BotShieldEnvTrigger", "BotShieldFeedbackTrigger",
-    "BotShieldLoadTrigger", "BotShieldTrigger",
+    "BotShieldRule", "BotShieldFlagTrigger",
+    "BotShieldFeedbackTrigger", "BotShieldTrigger",
 )
 
 # Families whose rules carry no name.
@@ -31,6 +29,7 @@ _NAMELESS = frozenset({"BotShieldTrigger"})
 _SPELL = {
     "ua": "BotShieldUserAgent", "ipspec": "BotShieldIPSpec",
     "ttl": "BotShieldTTL", "minload": "BotShieldMinLoad",
+    "loadavgatleast": "BotShieldLoadAvgAtLeast",
     "logas": "BotShieldLogAs", "accesslog": "BotShieldAccessLog", "bscookie": "BotShieldBSCookie",
     "bs-cookie": "BotShieldBSCookie",
 }

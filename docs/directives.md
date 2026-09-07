@@ -802,9 +802,11 @@ it.
 | `crawler=yes\|no` | verified-bot classification | identity-checked, not UA text |
 | `firstsight=yes\|no` | Bloom-filter membership of the address | `yes` = never seen before |
 | `minload=normal\|warm\|hot` | current server load state | fires **at or above** the named level |
+| `loadavgatleast=<N>` | 1-minute load average **per CPU** | fires at or above `N`. `1.0` = one runnable process per core. The quantitative form of `minload=`; see [why the busy-worker ratio is often the wrong signal](#why-the-busy-worker-ratio-is-often-the-wrong-signal) |
 
-Four of those consult module state rather than request text — a stat, a
-classifier, a cookie's authenticated contents, a load sampler. That is
+Five of those consult module state rather than request text — a stat,
+a classifier, a cookie's authenticated contents, a load sampler read
+two ways. That is
 the family's actual shape: match a request on anything known about it.
 
 Globs take `*` wildcards and a trailing `$` anchor. Named-cookie
@@ -1819,9 +1821,56 @@ never links a database client, because blocking I/O has no place in
 the watchdog and a database too sick to answer must not be able to
 stall the code whose job is to shed load because the database is sick.
 
+### Reaching a number from a rule
+
+`BotShieldLoadAvgAtLeast <N>` inside a `<BotShieldRule>` matches on the
+per-CPU load average directly, in the same unit `BotShieldLoadAvgWarm`
+and `BotShieldLoadAvgHot` take:
+
+```apache
+<BotShieldRule shed-scrapers-under-load>
+    BotShieldLoadAvgAtLeast  2.0
+    BotShieldUserAgent       @ai-train
+    BotShieldRespond         503
+</BotShieldRule>
+```
+
+That is the same sample the watchdog reads to decide `warm` and `hot`
+and the same one `botshield_loadavg_1m_pct` reports — no second source
+of truth, and the gauge on the dashboard is the number the rule
+compares against. Per **CPU**, so a threshold means the same thing on a
+6-core host and a 64-core one.
+
+Prefer it to `minload=` when the deployment is one the ratio cannot
+see, which on the host described above is all of them.
+`minload=` remains the right condition when the load *policy* — the
+thresholds, the latency escape, the external state file — is what
+should decide, and a rule should just ask whether that policy is
+currently unhappy.
+
+There is no "below this" spelling and `!` is refused. A rule for the
+quiet case is the one the loaded rule falls through to, which keeps the
+two thresholds from drifting apart.
+
+**After a config reload it reads 0 until the next watchdog tick.** A
+graceful reload builds a fresh SHM header and nothing repopulates the
+sample until the watchdog runs again, so for up to
+`BotShieldLoadRefreshInterval` seconds — one, by default — a
+load-conditioned rule does not fire. It fails **open**: requests that
+would have been shed are served. For a shed rule that is the right
+direction to fail, and one second of a reload you performed is not a
+window an attacker can choose. It is documented rather than fixed
+because the alternative — persisting the value across a reload — means
+a rule acting on a measurement taken by a configuration that is no
+longer running.
+
+The three-state machine that `minload=` reads is not affected: it is
+recomputed from the scoreboard on the same tick and starts at `normal`,
+which is also fail-open.
+
 The trigger family that consumes the state lives under
 `BotShieldMinLoad` on a rule (above). See
-[policy](policy.md#load-triggers).
+[policy](policy.md#load-conditions).
 
 ## Multi-vhost reputation
 

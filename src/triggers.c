@@ -1184,6 +1184,7 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
     e->solved_pred = -1;              /* no solve-proof condition */
     e->firstsight_pred = -1;          /* no Bloom-membership condition */
     e->acceptlang_pred = -1;          /* no Accept-Language condition */
+    e->loadavg_min_pct = -1;          /* no loadavg condition */
     e->flagged_bit = 0;               /* no flagged= condition */
     e->ck_pred     = -1;              /* no cookie= condition */
     e->env_pred    = -1;              /* no env= condition */
@@ -1340,6 +1341,33 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                     return apr_psprintf(cmd->pool,
                         "%s: firstsight='%s' not one of yes|no", D, val);
                 }
+                continue;
+            }
+            if (klen == 14
+             && strncasecmp(arg, "loadavgatleast", 14) == 0) {
+                /* Same decimal-ratio surface as BotShieldLoadAvgWarm:
+                 * 1.0 is one runnable process per core. Parsed here
+                 * rather than shared with that setter because this one
+                 * lands in a rule entry and that one in the server
+                 * config -- the surface is what has to agree, and the
+                 * error text says the same thing. */
+                char *lend = NULL;
+                double lv = strtod(val, &lend);
+                if (!lend || *lend || !(lv >= 0.0) || lv > 100.0) {
+                    return apr_psprintf(cmd->pool,
+                        "%s: loadavgatleast='%s' must be a ratio from 0 "
+                        "to 100 (1.0 = one runnable process per core, "
+                        "the same unit BotShieldLoadAvgWarm takes)",
+                        D, val);
+                }
+                if (neg) {
+                    return apr_psprintf(cmd->pool,
+                        "%s: '!' is not accepted on loadavgatleast=. "
+                        "For \"below this\" there is no rule condition; "
+                        "put the loaded case in a rule above and let "
+                        "the quiet case fall through.", D);
+                }
+                e->loadavg_min_pct = (int)(lv * 100.0);
                 continue;
             }
             if (klen == 7 && strncasecmp(arg, "flagged", 7) == 0) {
@@ -1500,13 +1528,14 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
         && e->solved_pred < 0 && e->minload < 0
         && e->firstsight_pred < 0 && e->acceptlang_pred < 0
         && e->ck_pred < 0 && e->env_pred < 0 && !e->flagged_bit
+        && e->loadavg_min_pct < 0
         && !e->score_pred_name
         && !e->has_cohort) {
         return apr_psprintf(cmd->pool,
             "%s '%s': needs at least one match key (path=, query=, "
             "cookies=, bscookie=, cookie=, env=, flagged=, crawler=, "
             "exists=, solved=, firstsight=, acceptlanguage=, minload=, "
-            "ua=, ipspec=). A rule "
+            "loadavgatleast=, ua=, ipspec=). A rule "
             "with no condition "
             "matches every request - use BotShieldTrigger in the scope "
             "you mean instead", D, name);

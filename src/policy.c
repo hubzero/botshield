@@ -341,6 +341,14 @@ int bs_check_policy(request_rec *r)
                                           scfg->session_names, NULL))
                     continue;
             }
+            if (t->loadavg_min_pct >= 0) {
+                /* The number the watchdog wrote this tick, lockless
+                 * like bs_load_current(). Already smoothed -- a
+                 * one-minute load average is a decaying average over a
+                 * minute -- so there is no window to configure. */
+                if ((int)bs_loadavg_current() < t->loadavg_min_pct)
+                    continue;
+            }
             if (t->flagged_bit) {
                 /* A fresh probe rather than a value captured before
                  * the walk. Rules above this one may have written to

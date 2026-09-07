@@ -285,6 +285,16 @@ typedef struct {
      * makes trap-then-act work in one request rather than two.
      *
      * 0 = no condition. */
+    /* loadavgatleast= : per-CPU load average, hundredths.
+     *
+     * The quantitative half of minload=. That reads a three-state
+     * machine driven mostly by the busy-worker ratio; this reads the
+     * number the same watchdog tick already wrote to the SHM header,
+     * in the unit BotShieldLoadAvgWarm/Hot use.
+     *
+     * -1 = no condition. 0 is a legal threshold and means "always",
+     * so absence cannot be spelled as zero. */
+    int                loadavg_min_pct;
     apr_uint32_t       flagged_bit;
     int                ck_pred;         /* enum bs_cookie_pred_kind, -1 unset */
     const char        *ck_name;

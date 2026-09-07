@@ -393,6 +393,32 @@ ladder is rules in declaration order with the strictest rung first:
 </BotShieldRule>
 ```
 
+`BotShieldLoadAvgAtLeast <N>` is the same shape against a number
+instead of a state — the per-CPU 1-minute load average, `1.0` being one
+runnable process per core:
+
+```apache
+<BotShieldRule shed-hard>
+    BotShieldLoadAvgAtLeast 4.0
+    BotShieldUserAgent      @bot
+    BotShieldRespond        503
+</BotShieldRule>
+```
+
+Which to reach for is a question about what should be deciding. A
+`minload=` rule asks the load *policy* whether it is unhappy, and
+inherits every threshold, the latency escape and the external state
+file with it. A `BotShieldLoadAvgAtLeast` rule asks the machine a
+question with one answer. On a host where `MaxRequestWorkers` bears no
+relation to what the hardware can serve — see
+[directives](directives.md#why-the-busy-worker-ratio-is-often-the-wrong-signal) —
+the second is the one that moves during an outage.
+
+Both fire **at or above**, so a ladder is rules in declaration order
+with the strictest rung first, and both read the sample the watchdog
+last published: for one refresh interval after a config reload that
+sample is 0 and neither fires.
+
 This was `BotShieldLoadTrigger`, a family of its own, until the
 predicate moved into the rule. The family could match load and nothing
 else; shedding is nearly always "this *kind* of client at this load",
