@@ -1263,10 +1263,12 @@ switched off.
 </BotShieldRule>
 ```
 
-#### Deprecated: `BotShieldLog`
+#### Removed: `BotShieldLog`
 
-`BotShieldLogAs <tag>` is the name now. The old one still parses and
-warns at config time.
+`BotShieldLogAs <tag>` is the name now. The old one was removed
+2026-09-06 with the other four retired spellings and fails config
+parse naming its replacement -- it does not parse with a warning, and
+this section said it did for a day longer than that was true.
 
 It never caused logging. The decision line is emitted whether or not a
 rule sets a tag, and the tag is embedded on that same line rather than

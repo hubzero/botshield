@@ -121,9 +121,26 @@ static bs_load_state bs_load_read_external(server_rec *sv,
  * The scoreboard ratio below cannot see this deployment's failure mode.
  * With MaxRequestWorkers 1024 on 6 cores, the box is CPU-saturated at a
  * busy ratio in the single digits: four separate outages ran at 25-30
- * busy workers -- 2-3% -- while the 1-minute load average was well past
- * the point where requests took thirty seconds. A worker-ratio trigger
- * calibrated to fire there would be indistinguishable from noise.
+ * busy workers -- 2-3% -- while requests took thirty seconds. A
+ * worker-ratio trigger calibrated to fire there would be
+ * indistinguishable from noise.
+ *
+ * This comment used to add that the load average was "well past" its
+ * threshold during those outages. That was never measured, and the one
+ * shedding event on record says the two signals do not track each
+ * other: on 2026-09-01 the ratio-driven state reached warm 172 times
+ * and hot 29, and the shed rules logged 3709 observe hits, while 98.3%
+ * of those hits fell in ten-minute windows whose per-CPU load average
+ * was 0.07-0.24 against a warm rung of 1.0, with the CPU 79% idle. The
+ * busiest window of the day, 53% of the hits on its own, had the
+ * lowest load reading in the set. Whatever moved the ratio that day,
+ * the load average did not follow it.
+ *
+ * Neither signal is what the production ladder reads now. Since
+ * 2026-09-07 its rungs are BotShieldLatencyAtLeast, on the reasoning
+ * that a worker blocked on a database socket sits in interruptible
+ * sleep -- which the load average does not count at all -- while
+ * accumulating request duration for the whole time it waits.
  *
  * Per-CPU normalisation so one threshold means the same thing on a
  * 6-core hub and a 64-core one. Read every tick: /proc/loadavg is a

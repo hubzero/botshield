@@ -1356,6 +1356,26 @@ kinds: `state=normal|warm|hot` or `state>=normal|warm|hot`. The
 match consumes the cached load state via `bs_load_current()` (lockless
 atomic read on `bs_shm.header->load_state`).
 
+`BotShieldLoadAvgAtLeast <N>` is the quantitative half of the same
+idea, matching the per-CPU load average in hundredths via
+`bs_loadavg_current()`.
+
+`BotShieldLatencyAtLeast <ms>` (2026-09-07) matches Apache's mean
+request latency via `bs_latency_current_us()`, and is the one of the
+three that can see a worker blocked on I/O: interruptible sleep is not
+counted by the load average, and the busy ratio sees the held slot
+only while it is held, but request duration accumulates for the whole
+wait. It reads the same watchdog sample the `BotShieldLatencyWarm` /
+`BotShieldLatencyHot` thresholds use, so a rule and the load policy
+cannot disagree about what the number is.
+
+That sample needs `ExtendedStatus On`; without it Apache never
+maintains the counters and `bs_latency_current_us()` returns
+`BS_M_AP_NO_STATUS`. The predicate tests for that sentinel before
+comparing and declines when it is set. The sentinel is `0xFFFFFFFF`,
+so a numeric comparison would instead clear every threshold and shed
+traffic at the moment the server stopped being able to measure itself.
+
 Action keys: `credit=`, `penalty=`, `respond=<code|pass>`, `logas=<tag>`.
 **`flag=` / `ttl=` / `redirect=` are rejected** at config-time: load
 is global state, not per-IP behavior.
@@ -1795,7 +1815,9 @@ seconds (default 1, range 1..60) under mod_watchdog. Each tick:
 `bs_load_current()` is `__atomic_load_n(&header->load_state,
 __ATOMIC_RELAXED)`, called from the `minload=` rule condition
 predicate matcher in `bs_check_policy`. No scoreboard scans on the
-hot path.
+hot path. `bs_loadavg_current()` and `bs_latency_current_us()` are the
+same shape for `loadavgatleast=` and `latencyatleast=`: one relaxed
+atomic read of a number the watchdog tick already wrote.
 
 `bs_load_state` enum: `BS_LOAD_NORMAL = 0`, `BS_LOAD_WARM = 1`,
 `BS_LOAD_HOT = 2`. The numeric ordering is exposed as the

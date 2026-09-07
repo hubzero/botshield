@@ -4069,7 +4069,9 @@ const char *bs_set_share_scope(cmd_parms *cmd, void *dconf,
     return NULL;
 }
 
-/* The BotShieldFlagTrigger directive setter lives in triggers.c. */
+/* BotShieldFlagTrigger was retired 2026-09-07; what remains in
+ * triggers.c is the stub that tells an old config what to write
+ * instead. */
 
 /* E15 — BotShieldForgivenessCapPerHour <N>. Server-
  * scope cap on the points of forgiveness any one cookie can earn
