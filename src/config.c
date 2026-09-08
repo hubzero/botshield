@@ -1539,6 +1539,33 @@ static void bs_wire_rate_and_block_cohorts(apr_pool_t *pconf,
                 vcfg->rate_limits->nelts);
         }
 
+        /* Rules carrying budget= draw from the same slot pool. Done
+         * here rather than in a pass of their own so the pool is
+         * consumed in one place and exhaustion reports the same way
+         * for both spellings. */
+        if (vcfg->request_triggers && vcfg->request_triggers->nelts > 0) {
+            int rule_rate = 0;
+            for (int i = 0; i < vcfg->request_triggers->nelts; i++) {
+                bs_request_trigger_entry *t = APR_ARRAY_IDX(
+                    vcfg->request_triggers, i, bs_request_trigger_entry *);
+                if (t->budget == 0 || t->shm_slot >= 0) continue;
+                if (*next_slot < (int)bs_shm.rate_counter_count) {
+                    t->shm_slot = (*next_slot)++;
+                    rule_rate++;
+                } else {
+                    ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
+                        "mod_botshield: rate-limit slot pool exhausted "
+                        "(%d); rule '%s' will not rate-limit",
+                        (int)bs_shm.rate_counter_count, t->name);
+                }
+            }
+            if (rule_rate) {
+                ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+                    "mod_botshield: %d rate-limiting rules wired",
+                    rule_rate);
+            }
+        }
+
         /* E9 — link each BotShieldRateLimitEscalate to its target
          * BotShieldRateLimit by name. Declarations may appear in
          * any order at config time; we resolve here once both arrays

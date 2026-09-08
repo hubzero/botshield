@@ -514,6 +514,37 @@ int bs_check_policy(request_rec *r)
             }
             if (t->has_cohort && !bs_cohort_matches(&t->cohort, ua, r))
                 continue;
+            if (t->budget > 0 && t->shm_slot >= 0 && bs_shm.rate_counters) {
+                /* Every condition has matched, so this request is one
+                 * the operator meant to count. Spend from the window
+                 * first: under budget the rule carries on to whatever
+                 * else it says, over budget it refuses here and the
+                 * rest of the rule is moot.
+                 *
+                 * countper=total for now, so the bucket is the rule --
+                 * everyone matching shares one budget rather than
+                 * getting one each, which is what BotShieldRateLimit
+                 * has always done without saying so.
+                 *
+                 * No escalation here. BotShieldRateLimitEscalate binds
+                 * to a BotShieldRateLimit by name and stays with it;
+                 * bringing strikes across is the next piece, not this
+                 * one. */
+                bs_rate_counter *rc =
+                    &((bs_rate_counter *)bs_shm.rate_counters)[t->shm_slot];
+                if (!bs_rate_counter_admit(rc, t->budget, t->window_sec)) {
+                    int observe = (t->action.mode == BS_TMODE_OBSERVE);
+                    bs_score_add(r, BS_PENALTY_RATE_LIMIT,
+                        apr_pstrcat(r->pool, "ratelimitexceeded:",
+                                    t->name, observe ? ":observe" : "",
+                                    NULL));
+                    if (!observe) {
+                        bs_set_trigger_tag(r, t->action.log_tag
+                                              ? t->action.log_tag : t->name);
+                        return HTTP_TOO_MANY_REQUESTS;
+                    }
+                }
+            }
             bs_trigger_exec_outcome o = bs_apply_trigger_action(
                 r, scfg, BS_TFAMILY_REQUEST, &t->action,
                 "rule", t->name);
@@ -857,6 +888,12 @@ static const char *bs_psh_rule_conditions(apr_pool_t *p,
                    t->loadavg_min_pct / 100, t->loadavg_min_pct % 100);
     if (t->latency_min_ms >= 0)
         BS_PSH_ADD("latencyatleast=%dms", t->latency_min_ms);
+    if (t->budget > 0) {
+        const char *per = t->window_sec == 1    ? "sec"
+                        : t->window_sec == 60   ? "min"
+                        : t->window_sec == 3600 ? "hour" : "?";
+        BS_PSH_ADD("budget=%u/%s countper=total", t->budget, per);
+    }
     if (t->score_pred_name)
         BS_PSH_ADD("scoreatleast=%s %d", t->score_pred_name,
                    t->score_pred_min);

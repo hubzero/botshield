@@ -1165,6 +1165,10 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
     e->acceptlang_pred = -1;          /* no Accept-Language condition */
     e->loadavg_min_pct = -1;          /* no loadavg condition */
     e->latency_min_ms  = -1;          /* no latency condition */
+    e->budget          = 0;           /* no rate limit */
+    e->window_sec      = 0;
+    e->count_key       = BS_COUNT_TOTAL;
+    e->shm_slot        = -1;          /* assigned at post_config */
     e->flagged_bit = 0;               /* no flagged= condition */
     e->ck_pred     = -1;              /* no cookie= condition */
     e->env_pred    = -1;              /* no env= condition */
@@ -1352,6 +1356,50 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                         "the quiet case fall through.", D);
                 }
                 e->loadavg_min_pct = (int)(lv * 100.0);
+                continue;
+            }
+            if (klen == 6 && strncasecmp(arg, "budget", 6) == 0) {
+                char *bend = NULL;
+                long b = strtol(val, &bend, 10);
+                if (!bend || *bend || b < 1 || b > 1000000) {
+                    return apr_psprintf(cmd->pool,
+                        "%s: budget='%s' must be 1..1000000 requests",
+                        D, val);
+                }
+                e->budget = (apr_uint32_t)b;
+                continue;
+            }
+            if (klen == 3 && strncasecmp(arg, "per", 3) == 0) {
+                /* Same words BotShieldRateLimit takes, so an operator
+                 * moving a limit into a rule does not also have to
+                 * learn a new spelling for the window. */
+                if      (!strcasecmp(val, "sec")  || !strcasecmp(val, "s"))
+                    e->window_sec = 1;
+                else if (!strcasecmp(val, "min")  || !strcasecmp(val, "m"))
+                    e->window_sec = 60;
+                else if (!strcasecmp(val, "hour") || !strcasecmp(val, "h"))
+                    e->window_sec = 3600;
+                else {
+                    return apr_psprintf(cmd->pool,
+                        "%s: per='%s' must be sec, min or hour "
+                        "(s/m/h accepted)", D, val);
+                }
+                continue;
+            }
+            if (klen == 8 && strncasecmp(arg, "countper", 8) == 0) {
+                if (!strcasecmp(val, "total")) {
+                    e->count_key = BS_COUNT_TOTAL;
+                } else if (!strcasecmp(val, "client")
+                        || !strcasecmp(val, "session")) {
+                    return apr_psprintf(cmd->pool,
+                        "%s: countper='%s' is not implemented yet -- it "
+                        "needs a counter table keyed on (subject, rule) "
+                        "rather than the fixed per-rule slot. Only "
+                        "'total' works, and it is the default.", D, val);
+                } else {
+                    return apr_psprintf(cmd->pool,
+                        "%s: countper='%s' must be 'total'", D, val);
+                }
                 continue;
             }
             if (klen == 14
@@ -1560,10 +1608,21 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
             "cookies=, bscookie=, cookie=, env=, flagged=, crawler=, "
             "exists=, solved=, firstsight=, acceptlanguage=, "
             "loadavgatleast=, latencyatleast=, ua=, ipspec=). A rule "
+            "carrying only budget=/per= still needs one of these: a "
+            "counter is not a condition. A rule "
             "with no condition "
             "matches every request. Declare it inside the "
             "<Location>, <Directory> or <Files> you mean and the "
             "container match is the condition.", D, name);
+    }
+
+    /* Half a rate limit is not a smaller rate limit, it is a rule
+     * that silently does not have one. */
+    if ((e->budget > 0) != (e->window_sec > 0)) {
+        return apr_psprintf(cmd->pool,
+            "%s '%s': budget= and per= must be given together (%s)",
+            D, name,
+            e->budget ? "per= is missing" : "budget= is missing");
     }
 
     const char *err = bs_finalize_trigger_action(cmd->pool,

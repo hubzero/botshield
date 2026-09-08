@@ -326,8 +326,37 @@ typedef struct {
     /* ua= / ipspec= cohort. has_cohort==0 means no UA/IP restriction. */
     bs_cohort          cohort;
     int                has_cohort;
+    /* budget= / per= -- a fixed-window counter on this rule, refusing
+     * with 429 once the window's budget is spent.
+     *
+     * A rate limit is a rule with a counter. bs_rate_limit_entry holds
+     * name, cohort, budget, window and slot; a rule already has the
+     * first two and the mode, so the counter is the only new thing.
+     * Carrying it here is what lets a rate limit have a path -- the
+     * separate family's only predicate is the cohort, so
+     * "five requests a minute to /search/" has never been sayable.
+     *
+     * budget == 0 means no rate limit on this rule. */
+    apr_uint32_t       budget;
+    apr_uint32_t       window_sec;
+    /* countper= -- the key the counter buckets by. Not a predicate:
+     * it decides which bucket, not whether the rule matched. Only
+     * BS_COUNT_TOTAL exists so far, one bucket per rule, which is what
+     * BotShieldRateLimit does today without saying so -- everyone
+     * matching shares one budget rather than getting one each. */
+    int                count_key;
+    /* Assigned in post_config alongside the rate-limit families, out
+     * of the same BS_E21_RATE_SLOTS pool. -1 = none needed/available. */
+    int                shm_slot;
     bs_trigger_action  action;
 } bs_request_trigger_entry;
+
+/* countper= values. Only TOTAL is wired; the rest are the vocabulary
+ * this is meant to grow into, and are rejected at parse time rather
+ * than accepted and ignored. */
+enum bs_count_key {
+    BS_COUNT_TOTAL = 0
+};
 
 /* Cookie predicate kinds. Per-named lookups (NAMED_*) target a
  * specific cookie name; bulk variants (BULK_*) examine the cookie

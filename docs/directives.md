@@ -1870,6 +1870,60 @@ of truth, and the gauge on the dashboard is the number the rule
 compares against. Per **CPU**, so a threshold means the same thing on a
 6-core host and a 64-core one.
 
+### Rate-limiting from a rule
+
+`BotShieldBudget <n>` and `BotShieldPer <sec|min|hour>` put a
+fixed-window counter on a rule. Once the window's budget is spent the
+rule answers `429`; under budget it carries on to whatever else it
+says.
+
+```apache
+<BotShieldRule search-flood>
+    BotShieldPath      /search/
+    BotShieldBudget    5
+    BotShieldPer       min
+</BotShieldRule>
+```
+
+A rate limit is a rule with a counter. `BotShieldRateLimit` holds a
+name, a cohort, a budget, a window and a slot; a rule already had the
+name, the cohort and the mode, so the counter was the only new thing.
+
+What it buys is the predicate set. `BotShieldRateLimit` matches on
+`ua=` and `ipspec=` and **nothing else** — there is no path in it —
+so the example above cannot be written with that directive at all. On a
+rule, every condition is available: path, query, cookies, `solved=`,
+`flagged=`, `latencyatleast=`, and the rest.
+
+`BotShieldBudget` and `BotShieldPer` must be given together. Half a
+rate limit is not a smaller one, it is a rule that silently has none.
+
+#### `BotShieldCountPer` — which bucket the count lands in
+
+Not a predicate. Predicates decide whether the rule matched; this
+decides which counter the match is spent from.
+
+| value | one bucket per | status |
+|---|---|---|
+| `total` | rule | the default, and the only one implemented |
+| `client` | client address | refused at parse time |
+| `session` | session cookie | refused at parse time |
+
+`total` means **everyone matching shares one budget** rather than
+getting one each. That is what `BotShieldRateLimit` has always done
+without naming it: `BotShieldRateLimit corpbot 3 sec` gives every
+matching client three requests a second *between them*.
+
+`client` is what most people mean by "rate limit", and it is refused
+rather than approximated because the difference is invisible until
+someone counts the 429s. It needs a counter table keyed on
+(subject, rule) — one address can sit inside several rate-limiting
+rules at once, each with its own window — where `total` needs only the
+fixed per-rule slot that exists today. That table is separate work.
+
+Rule budgets carry no escalation. `BotShieldRateLimitEscalate` binds
+to a `BotShieldRateLimit` by name and stays with it.
+
 ### Reaching request latency from a rule
 
 `BotShieldLatencyAtLeast <ms>` matches on Apache's mean request

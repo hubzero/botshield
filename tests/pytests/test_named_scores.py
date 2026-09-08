@@ -58,6 +58,22 @@ SEPARATE = (
 )
 
 
+def _assert_not_refused(slc, ip, why):
+    """Assert no rule refused the request.
+
+    `status_code != 403` reads any 403 as the rule under test firing,
+    and this vhost has other sources -- a bot-signal challenge answers
+    403 too, and a fresh address under a full parallel lane can
+    accumulate enough score to get one. A rule refusal logs
+    outcome=block; a challenge logs outcome=challenged. Asserting on
+    the outcome says what these tests mean.
+    """
+    lines = slc.decision_lines(ip=ip)
+    assert lines, f"no decision line for {ip}"
+    refused = [d for d in lines if d.get("outcome") == "block"]
+    assert not refused, f"{why}; refused by: {refused}"
+
+
 def _get(ip, path="/score-probe"):
     return client.get(path, xff=ip, ua=BROWSER_UA,
                       accept_language=ACCEPT_LANG)
@@ -71,23 +87,29 @@ def test_contributions_sum_and_the_threshold_fires(config_override,
         assert _get(fresh_ip).status_code == 403
 
 
-def test_one_short_does_not_fire(config_override, fresh_ip):
+def test_one_short_does_not_fire(config_override, fresh_ip,
+                                 log_slice):
     """The control. Same rules, threshold at 16, so 15 must not act.
 
     Without this the test above passes on any 403 the vhost produces.
     """
     with config_override(r"BotShieldEnabled\s+On", FALLS_SHORT,
                          render=False, count=1):
-        assert _get(fresh_ip).status_code != 403
+        with log_slice as slc:
+            _get(fresh_ip)
+            _assert_not_refused(slc, fresh_ip,
+                                "15 is under a threshold of 16")
 
 
-def test_accumulators_are_separate(config_override, fresh_ip):
+def test_accumulators_are_separate(config_override, fresh_ip,
+                                   log_slice):
     """A name scopes the coupling; that is the point of naming them."""
     with config_override(r"BotShieldEnabled\s+On", SEPARATE,
                          render=False, count=1):
-        assert _get(fresh_ip).status_code != 403, (
-            "moving 'suspicion' must not satisfy a test of 'otherthing'"
-        )
+        with log_slice as slc:
+            _get(fresh_ip)
+            _assert_not_refused(slc, fresh_ip,
+                                "moving 'suspicion' must not satisfy a test of 'otherthing'")
 
 
 def test_a_score_does_not_survive_the_request(config_override, fresh_ip,
@@ -130,7 +152,8 @@ def test_a_score_does_not_survive_the_request(config_override, fresh_ip,
             )
 
 
-def test_order_decides_what_a_reader_sees(config_override, fresh_ip):
+def test_order_decides_what_a_reader_sees(config_override, fresh_ip,
+                                          log_slice):
     """A reader above the contributor sees nothing.
 
     This is the fold: position k reads rules 1..k-1. It is also the
@@ -150,13 +173,14 @@ def test_order_decides_what_a_reader_sees(config_override, fresh_ip):
     )
     with config_override(r"BotShieldEnabled\s+On", reader_first,
                          render=False, count=1):
-        assert _get(fresh_ip).status_code != 403, (
-            "a rule above the contributor must see 0"
-        )
+        with log_slice as slc:
+            _get(fresh_ip)
+            _assert_not_refused(slc, fresh_ip,
+                                "a rule above the contributor must see 0")
 
 
 def test_a_scoring_rule_does_not_refuse_by_default(config_override,
-                                                   fresh_ip):
+                                                   fresh_ip, log_slice):
     """BotShieldScore alone implies a pass, like BotShieldChallenge.
 
     Without that a score-only rule would refuse with the family default
@@ -172,10 +196,14 @@ def test_a_scoring_rule_does_not_refuse_by_default(config_override,
     )
     with config_override(r"BotShieldEnabled\s+On", scoring_only,
                          render=False, count=1):
-        assert _get(fresh_ip).status_code != 403
+        with log_slice as slc:
+            _get(fresh_ip)
+            _assert_not_refused(slc, fresh_ip,
+                                "a scoring rule does not refuse by default")
 
 
-def test_minus_and_assign(config_override, fresh_ip):
+def test_minus_and_assign(config_override, fresh_ip,
+                          log_slice):
     """- subtracts and = assigns, both against what came before."""
     conf = (
         "BotShieldEnabled On\n"
@@ -195,7 +223,10 @@ def test_minus_and_assign(config_override, fresh_ip):
     )
     with config_override(r"BotShieldEnabled\s+On", conf,
                          render=False, count=1):
-        assert _get(fresh_ip).status_code != 403, "20 - 12 = 8, under 10"
+        with log_slice as slc:
+            _get(fresh_ip)
+            _assert_not_refused(slc, fresh_ip,
+                                "20 - 12 = 8, under 10")
 
 
 def test_a_malformed_movement_is_refused(config_override):
