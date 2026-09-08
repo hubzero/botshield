@@ -334,8 +334,15 @@ static int register_robots_entries(apr_pool_t *pconf, server_rec *sv,
         bs_bot_rate_entry *e = apr_pcalloc(pconf, sizeof(*e));
         e->origin     = "robots.txt";
         e->budget     = 1;
-        e->window_ms = (apr_uint32_t)crawl_delay_ms;
+        e->window_ms  = (apr_uint32_t)crawl_delay_ms;
         e->shm_slot   = -1;
+        /* The file's mode covers the whole file. This used to be left
+         * at zero, so BotShieldRobotsMode observe staged the Disallow
+         * rules and quietly enforced the Crawl-delay ones -- an observe
+         * that says the opposite of what it does. robots_mode is
+         * resolved before this runs (bs_resolve_robots_defaults comes
+         * first in post_config), so UNSET cannot be seen here. */
+        e->observe    = (scfg->robots_mode == BS_ROBOTS_MODE_OBSERVE);
 
         if (robots_group_is_wildcard_at(rstate->doc, g)) {
             e->is_wildcard = 1;

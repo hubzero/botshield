@@ -197,6 +197,40 @@ def test_robots_fractional_crawl_delay(
     assert ra and ra.isdigit() and int(ra) >= 1, f"Retry-After={ra!r}"
 
 
+def test_robots_mode_observe_covers_crawl_delay(
+    robots_path, config_override, log_slice, fresh_ip,
+):
+    """Observe is the whole file. Until 2026-09-08 it staged the
+    Disallow rules and silently enforced Crawl-delay -- an observe
+    that half-enforces says the opposite of what it does, and it is
+    exactly the mode an operator turns on first on a live site."""
+    robots_path = _write_robots(robots_path, """
+        User-agent: GPTBot
+        Crawl-delay: 60
+    """)
+    with config_override(
+        r"BotShieldEnabled\s+On",
+        f'BotShieldEnabled On\n    BotShieldChallengeAtLeast none\n'
+        f'    BotShieldRobotsTxt {robots_path}\n'
+        f'    BotShieldRobotsMode observe',
+        count=1,
+    ):
+        with log_slice as slc:
+            client.get("/", xff=fresh_ip, ua=GPTBOT_UA)
+            r2 = client.get("/", xff=fresh_ip, ua=GPTBOT_UA)
+            lines = slc.decision_lines(ip=fresh_ip)
+
+    assert r2.status_code != 429, (
+        f"observe mode refused a Crawl-delay repeat with 429; the mode "
+        f"does not reach the Crawl-delay entries"
+    )
+    observed = [d for d in lines if "botrate:gptbot:observe" in d["reason"]]
+    assert observed, (
+        f"no botrate:gptbot:observe decision line -- the trip was neither "
+        f"enforced nor observed; lines={lines}"
+    )
+
+
 # --- Wildcard scope ---------------------------------------------------
 
 
