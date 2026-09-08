@@ -91,7 +91,7 @@ typedef struct robots_match {
     int          group_idx;       /* -1 if no group matched */
     int          is_wildcard;     /* 1 if matching group was User-agent: * */
     int          allowed;         /* 1 if path allowed, 0 if Disallowed */
-    int          crawl_delay_sec; /* 0 if no Crawl-delay on matching group */
+    int          crawl_delay_ms;  /* 0 if no Crawl-delay on matching group */
     const char  *group_name;      /* normalized id (lowercase, [a-z0-9-]);
                                    * pool-alloc'd; NULL if no match */
 } robots_match;
@@ -137,7 +137,9 @@ int         robots_group_count(const robots_doc *doc);
 int         robots_doc_truncated_lines(const robots_doc *doc);
 const char *robots_group_name_at(const robots_doc *doc, int idx);
 int         robots_group_is_wildcard_at(const robots_doc *doc, int idx);
-int         robots_group_crawl_delay_at(const robots_doc *doc, int idx);
+int         robots_group_crawl_delay_ms_at(const robots_doc *doc, int idx);
+/* Format a millisecond delay as robots.txt seconds; see robots.c. */
+const char *robots_fmt_seconds(char *buf, apr_size_t n, int ms);
 
 /* Per-group content accessors. `ua_at` returns the lowercased UA
  * token the parser stored; `rule_at` fills out the pattern pointer

@@ -292,7 +292,7 @@ static int robots_has_crawl_delay(bs_server_cfg *scfg)
     if (!rstate || !rstate->doc) return 0;
     int n = robots_group_count(rstate->doc);
     for (int g = 0; g < n; g++) {
-        if (robots_group_crawl_delay_at(rstate->doc, g) > 0) return 1;
+        if (robots_group_crawl_delay_ms_at(rstate->doc, g) > 0) return 1;
     }
     return 0;
 }
@@ -325,14 +325,16 @@ static int register_robots_entries(apr_pool_t *pconf, server_rec *sv,
     int registered = 0;
     int n = robots_group_count(rstate->doc);
     for (int g = 0; g < n; g++) {
-        int crawl_delay = robots_group_crawl_delay_at(rstate->doc, g);
-        if (crawl_delay <= 0) continue;
+        int crawl_delay_ms = robots_group_crawl_delay_ms_at(rstate->doc, g);
+        if (crawl_delay_ms <= 0) continue;
+        char cdbuf[32];
+        robots_fmt_seconds(cdbuf, sizeof cdbuf, crawl_delay_ms);
 
         const char *gname = robots_group_name_at(rstate->doc, g);
         bs_bot_rate_entry *e = apr_pcalloc(pconf, sizeof(*e));
         e->origin     = "robots.txt";
         e->budget     = 1;
-        e->window_ms = (apr_uint32_t)crawl_delay * 1000;
+        e->window_ms = (apr_uint32_t)crawl_delay_ms;
         e->shm_slot   = -1;
 
         if (robots_group_is_wildcard_at(rstate->doc, g)) {
@@ -342,9 +344,9 @@ static int register_robots_entries(apr_pool_t *pconf, server_rec *sv,
                  * directive wins. */
                 ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
                     "mod_botshield: robots.txt User-agent: * "
-                    "Crawl-delay: %d ignored — BotShieldBotRateLimit "
+                    "Crawl-delay: %ss ignored — BotShieldBotRateLimit "
                     "* directive already configured (directive wins)",
-                    crawl_delay);
+                    cdbuf);
                 continue;
             }
             st->wildcard_entry = e;
@@ -375,11 +377,11 @@ static int register_robots_entries(apr_pool_t *pconf, server_rec *sv,
         if (e->slugs->nelts == 0) {
             ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
                 "mod_botshield: robots.txt group '%s' has Crawl-delay: "
-                "%d but its User-agent stanza(s) don't resolve to any "
+                "%ss but its User-agent stanza(s) don't resolve to any "
                 "directory slug; group has no rate-limit enforcement. "
                 "Add matching entries to data/bot-directory.local.json "
                 "if you want this group enforced.",
-                gname ? gname : "?", crawl_delay);
+                gname ? gname : "?", cdbuf);
             continue;
         }
 

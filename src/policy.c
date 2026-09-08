@@ -1357,12 +1357,14 @@ void bs_policy_dump(server_rec *s, apr_pool_t *p, bs_dir_cfg *cfg)
                     allow ? "Allow:" : "Disallow:", pat ? pat : "");
             }
         }
-        int cd = robots_group_crawl_delay_at(rs->doc, i);
+        int cd = robots_group_crawl_delay_ms_at(rs->doc, i);
         if (cd > 0) {
             /* No slot number: which SHM counter slot a group landed
              * in is bookkeeping, not policy, and it differs between
              * this configtest and the server being tested. */
-            printf("  Crawl-delay: %ds", cd);
+            char cdbuf[32];
+            printf("  Crawl-delay: %ss",
+                   robots_fmt_seconds(cdbuf, sizeof cdbuf, cd));
             fputs("\n", stdout);
         }
     }

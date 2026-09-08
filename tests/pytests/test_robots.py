@@ -20,6 +20,8 @@ import re
 import textwrap
 import uuid
 
+import time
+
 import pytest
 
 from botshield_test import client
@@ -159,6 +161,40 @@ def test_robots_crawl_delay_rate_limits(
     assert [d for d in lines if "botrate:gptbot" in d["reason"]], (
         f"no botrate:gptbot decision line; lines={lines}"
     )
+
+
+def test_robots_fractional_crawl_delay(
+    robots_path, config_override, fresh_ip,
+):
+    """`Crawl-delay: 0.5` used to mean no delay at all: strtol stopped
+    at the '.' and the group kept 0. It is half a second now -- refused
+    inside the window, admitted once it has passed. The window is
+    anchored to the first request, so no alignment is needed."""
+    robots_path = _write_robots(robots_path, """
+        User-agent: GPTBot
+        Crawl-delay: 0.5
+    """)
+    with config_override(
+        r"BotShieldEnabled\s+On",
+        f'BotShieldEnabled On\n    BotShieldChallengeAtLeast none\n    BotShieldRobotsTxt {robots_path}',
+        count=1,
+    ):
+        r1 = client.get("/", xff=fresh_ip, ua=GPTBOT_UA)
+        r2 = client.get("/", xff=fresh_ip, ua=GPTBOT_UA)
+        time.sleep(0.7)
+        r3 = client.get("/", xff=fresh_ip, ua=GPTBOT_UA)
+
+    assert r1.status_code != 429, r1.status_code
+    assert r2.status_code == 429, (
+        f"a repeat inside a 500ms window was admitted ({r2.status_code}); "
+        f"the fraction was dropped and the group has no delay"
+    )
+    assert r3.status_code != 429, (
+        f"700ms later the window should have rolled; got {r3.status_code}. "
+        f"If this reads as a whole second, 0.5 was rounded up."
+    )
+    ra = r2.headers.get("Retry-After")
+    assert ra and ra.isdigit() and int(ra) >= 1, f"Retry-After={ra!r}"
 
 
 # --- Wildcard scope ---------------------------------------------------

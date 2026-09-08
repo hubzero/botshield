@@ -54,7 +54,7 @@ typedef struct robots_rule {
 typedef struct robots_group {
     apr_array_header_t *user_agents;  /* const char *, lowercased */
     apr_array_header_t *rules;        /* robots_rule * */
-    int                 crawl_delay;  /* seconds, 0 if unset */
+    int                 crawl_delay_ms; /* milliseconds, 0 if unset */
     const char         *name;         /* normalized id, derived from first UA */
     int                 is_wildcard;  /* 1 when first UA is "*" */
 } robots_group;
@@ -307,7 +307,7 @@ static robots_group *bs_rb_new_group(bs_rb_parser *st)
     robots_group *g = apr_pcalloc(st->pool, sizeof(*g));
     g->user_agents = apr_array_make(st->pool, 4, sizeof(const char *));
     g->rules       = apr_array_make(st->pool, 8, sizeof(robots_rule *));
-    g->crawl_delay = 0;
+    g->crawl_delay_ms = 0;
     g->is_wildcard = 0;
     g->name        = "unnamed";
     return g;
@@ -382,11 +382,20 @@ static void bs_rb_add_rule(bs_rb_parser *st, const char *pattern, int allow)
 static void bs_rb_set_crawl_delay(bs_rb_parser *st, const char *value)
 {
     if (!st->cur) return;
+    /* strtod, not strtol. `Crawl-delay: 0.5` is a real line, and the
+     * whole-second reader this replaced stopped at the '.', failed the
+     * trailing-character check and returned -- so the group kept 0
+     * and the crawler got no delay at all, the opposite of what the
+     * file asked. Stored in milliseconds so the fraction reaches the
+     * counter. A value that rounds to nothing is treated as absent. */
     char *end = NULL;
-    long v = strtol(value, &end, 10);
-    if (!end || (*end != '\0' && *end != ' ' && *end != '\t')) return;
-    if (v <= 0 || v > BOTSHIELD_ROBOTS_MAX_CRAWL_DELAY_SEC) return;
-    st->cur->crawl_delay = (int)v;
+    double v = strtod(value, &end);
+    if (!end || end == value) return;
+    if (*end != '\0' && *end != ' ' && *end != '\t') return;
+    if (!(v > 0.0) || v > BOTSHIELD_ROBOTS_MAX_CRAWL_DELAY_SEC) return;
+    int ms = (int)(v * 1000.0 + 0.5);
+    if (ms <= 0) return;
+    st->cur->crawl_delay_ms = ms;
     st->cur_expect_ua = 0;
 }
 
@@ -578,7 +587,7 @@ void robots_query(const robots_doc *doc, const char *ua, const char *botgroup,
     out->group_idx       = -1;
     out->is_wildcard     = 0;
     out->allowed         = 1;
-    out->crawl_delay_sec = 0;
+    out->crawl_delay_ms  = 0;
     out->group_name      = NULL;
     if (!doc || !ua || !doc->groups || doc->groups->nelts == 0) return;
 
@@ -596,8 +605,8 @@ void robots_query(const robots_doc *doc, const char *ua, const char *botgroup,
         if (!bs_rb_group_qualifies(g, ua, botgroup, best_len)) continue;
         if (first_relevant_idx < 0) first_relevant_idx = i;
 
-        if (g->crawl_delay > max_crawl_delay) {
-            max_crawl_delay = g->crawl_delay;
+        if (g->crawl_delay_ms > max_crawl_delay) {
+            max_crawl_delay = g->crawl_delay_ms;
         }
         if (!path) continue;
 
@@ -620,7 +629,7 @@ void robots_query(const robots_doc *doc, const char *ua, const char *botgroup,
                                      robots_group *);
     out->group_idx       = first_relevant_idx;
     out->is_wildcard     = (best_len == 0);
-    out->crawl_delay_sec = max_crawl_delay;
+    out->crawl_delay_ms  = max_crawl_delay;
     out->group_name      = fg->name;
     out->allowed         = (path && best_rule_len >= 0) ? best_allow : 1;
 }
@@ -654,10 +663,26 @@ int robots_group_is_wildcard_at(const robots_doc *doc, int idx)
     return g ? g->is_wildcard : 0;
 }
 
-int robots_group_crawl_delay_at(const robots_doc *doc, int idx)
+/* Milliseconds as the seconds robots.txt would write: 30000 -> "30",
+ * 500 -> "0.5", 1500 -> "1.5". Three decimals is exact for any
+ * millisecond count; trailing zeros are dropped so a whole number
+ * prints as one. `buf` should hold 32 bytes. */
+const char *robots_fmt_seconds(char *buf, apr_size_t n, int ms)
+{
+    if (ms % 1000 == 0) {
+        apr_snprintf(buf, n, "%d", ms / 1000);
+        return buf;
+    }
+    apr_snprintf(buf, n, "%d.%03d", ms / 1000, ms % 1000);
+    apr_size_t l = strlen(buf);
+    while (l && buf[l - 1] == '0') buf[--l] = '\0';
+    return buf;
+}
+
+int robots_group_crawl_delay_ms_at(const robots_doc *doc, int idx)
 {
     robots_group *g = bs_rb_group_at(doc, idx);
-    return g ? g->crawl_delay : 0;
+    return g ? g->crawl_delay_ms : 0;
 }
 
 int robots_group_ua_count_at(const robots_doc *doc, int idx)
@@ -902,7 +927,7 @@ apr_status_t bs_robots_load(server_rec *sv, bs_server_cfg *scfg,
     int delay_count = 0, slot_reused = 0, slot_new = 0, slot_exhausted = 0;
     for (int i = 0; i < n_groups; i++) {
         ns->slot_by_group_idx[i] = -1;
-        int cd = robots_group_crawl_delay_at(doc, i);
+        int cd = robots_group_crawl_delay_ms_at(doc, i);
         if (cd <= 0) continue;
         delay_count++;
         const char *name = robots_group_name_at(doc, i);
