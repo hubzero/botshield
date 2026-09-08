@@ -1188,7 +1188,7 @@ families.
 **Why robots keeps its own evaluator.** It was proposed that robots
 should expand into ordinary `<BotShieldRule>` entries and the parallel
 engine be deleted. Most of it does expand: named groups at
-`Disallow: /`, wildcard `Disallow` paths, and -- since `countper=slug`
+`Disallow: /`, wildcard `Disallow` paths, and -- since `BotShieldDelay`
 exists -- `Crawl-delay`. What does not is `Allow` together with
 `Crawl-delay`.
 

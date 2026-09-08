@@ -23,7 +23,7 @@ import subprocess
 
 import pytest
 
-from botshield_test import apache, client, config, ratelimit
+from botshield_test import apache, client, config
 
 
 # Three ai-train slugs with distinct UA patterns. Distinct slugs is the
@@ -69,7 +69,6 @@ def test_group_scope_aggregates_across_distinct_bots(
         count=1,
     ):
         with log_slice as slc:
-            ratelimit.align_to_window()
             got = [
                 client.get("/", xff=fresh_ip, ua=ua)
                 for ua in AI_TRAIN_UAS + AI_TRAIN_UAS[:1]
@@ -113,7 +112,6 @@ def test_group_trip_does_not_penalise_the_client(
         count=1,
     ):
         with log_slice as slc:
-            ratelimit.align_to_window()
             client.get("/", xff=fresh_ip, ua=AI_TRAIN_UAS[0])
             r2 = client.get("/", xff=fresh_ip, ua=AI_TRAIN_UAS[1])
             lines = slc.decision_lines(ip=fresh_ip)
@@ -139,7 +137,6 @@ def test_total_scope_is_a_ceiling_over_every_bot(
         count=1,
     ):
         with log_slice as slc:
-            ratelimit.align_to_window()
             got = [
                 client.get("/", xff=fresh_ip, ua=ua)
                 for ua in MIXED_BOT_UAS
@@ -187,7 +184,6 @@ def test_slug_tier_still_returns_429_alongside_the_new_tiers(
         count=1,
     ):
         with log_slice as slc:
-            ratelimit.align_to_window()
             client.get("/", xff=fresh_ip, ua=AI_TRAIN_UAS[0])
             r2 = client.get("/", xff=fresh_ip, ua=AI_TRAIN_UAS[0])
             lines = slc.decision_lines(ip=fresh_ip)

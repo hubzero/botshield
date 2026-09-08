@@ -1,30 +1,28 @@
-"""A rule can carry a budget.
+"""A rule can carry a window.
 
 A rate limit is a rule with a counter. `bs_rate_limit_entry` holds
 name, cohort, budget, window and slot; a rule already had the first two
 and the mode, so the counter was the only thing missing. Putting it on
 the rule is what makes the predicate set available to it -- and the
 predicate a rate limit has never had is the path. `bs_cohort` is
-ua + ipspec and nothing else, so "five requests a minute to /search/"
+ua + ipspec and nothing else, so "thirty requests a minute to /search/"
 has not been sayable in either family.
 
-countper= is the counter key rather than a predicate: it says which
-bucket the count lands in, not whether the rule matched. Only `total`
-is wired -- one bucket per rule, everyone matching sharing one budget.
-That is what BotShieldRateLimit has always done without naming it, and
-naming it is half the point: `client` and `session` are the ones an
-operator probably means, and they are refused with a message rather
-than silently approximated.
+`BotShieldRate <n> <seconds>` is the shared form: everyone the rule
+matches spends from one window, which is what BotShieldRateLimit has
+always done without naming it. `BotShieldDelay <seconds>` is the
+per-crawler form; test_rate_vocabulary.py owns the difference. This
+file is about what a windowed rule does once it has one.
 
 Nothing migrates here. BotShieldRateLimit and BotShieldBotRateLimit are
-untouched and still the only spelling with escalation behind it.
+untouched.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from botshield_test import apache, client, ratelimit
+from botshield_test import apache, client
 
 UA = "budget-probe/1.0"
 
@@ -43,27 +41,25 @@ def test_a_path_scoped_rate_limit(config_override, fresh_ip):
 
     A BotShieldRateLimit matches on ua= and ipspec= only, so it cannot
     be told to apply to one path. This asserts the exact-index shape --
-    third request refused -- which needs the burst inside one window,
-    hence the alignment.
+    third request refused. The window is anchored to the first request
+    rather than to a wall-clock tick, so the burst needs no alignment.
     """
     conf = _rule(
         "        BotShieldPath      /budget-probe\n"
-        "        BotShieldBudget    2\n"
-        "        BotShieldPer       sec"
+        "        BotShieldRate      2 1"
     )
     with config_override(r"BotShieldEnabled\s+On", conf,
                          render=False, count=1):
-        ratelimit.align_to_window()
         codes = [client.get("/budget-probe", xff=fresh_ip, ua=UA).status_code
                  for _ in range(3)]
-        # Same rule, different path: must be untouched by the budget.
+        # Same rule, different path: must be untouched by the window.
         other = client.get("/elsewhere-probe", xff=fresh_ip, ua=UA)
 
     # Assert on 429 specifically, not on 200. The harness client sends
     # no Accept-Language, so an admitted request is still challenged to
     # 403 by the baseline signature rules -- comparing to 200 tests the
-    # whole vhost rather than this budget.
-    assert 429 not in codes[:2], f"budget of 2 refused early; got {codes}"
+    # whole vhost rather than this window.
+    assert 429 not in codes[:2], f"a budget of 2 refused early; got {codes}"
     assert codes[2] == 429, f"third request should exceed; got {codes}"
     assert other.status_code != 429, (
         f"a path outside the rule was rate-limited ({other.status_code}) -- "
@@ -72,14 +68,14 @@ def test_a_path_scoped_rate_limit(config_override, fresh_ip):
 
 
 def test_under_budget_does_not_run_the_action(config_override, fresh_ip):
-    """On a rule with a budget, the action is what exceeding it means.
+    """On a rule with a window, the action is what exceeding it means.
 
     This test used to assert the opposite -- that the action ran
     while under budget, on the reasoning that the counter was "a
-    gate on the way to the action". That makes the budget
-    decorative: BotShieldBudget 5 with BotShieldRespond 403 would
-    answer 403 to the first request and to every request, and the
-    budget would change nothing at all.
+    gate on the way to the action". That makes the window
+    decorative: a budget of 5 with BotShieldRespond 403 would answer
+    403 to the first request and to every request, and the window
+    would change nothing at all.
 
     It was caught by writing test_over_budget_runs_the_rule_action,
     where the first request came back 451 before any budget had
@@ -90,24 +86,22 @@ def test_under_budget_does_not_run_the_action(config_override, fresh_ip):
     """
     conf = _rule(
         "        BotShieldPath      /budget-and-act\n"
-        "        BotShieldBudget    5\n"
-        "        BotShieldPer       min\n"
+        "        BotShieldRate      5 60\n"
         "        BotShieldRespond   403"
     )
     with config_override(r"BotShieldEnabled\s+On", conf,
                          render=False, count=1):
         r = client.get("/budget-and-act", xff=fresh_ip, ua=UA)
     assert r.status_code != 403, (
-        f"the action ran on an admitted request, so the budget is "
+        f"the action ran on an admitted request, so the window is "
         f"decorative; got {r.status_code}"
     )
 
 
-def test_the_budget_appears_in_the_policy_dump(config_override):
+def test_the_window_appears_in_the_policy_dump(config_override):
     conf = _rule(
         "        BotShieldPath      /budget-dump\n"
-        "        BotShieldBudget    30\n"
-        "        BotShieldPer       hour",
+        "        BotShieldRate      30 3600",
         name="dumped-budget",
     )
     with config_override(r"BotShieldEnabled\s+On", conf,
@@ -115,91 +109,30 @@ def test_the_budget_appears_in_the_policy_dump(config_override):
         body = apache.policy_dump()
     line = [ln for ln in body.splitlines() if ln.startswith("dumped-budget")]
     assert line, f"rule missing from dump; body={body[:600]}"
-    assert "budget=30/hour" in line[0], line[0]
-    assert "countper=total" in line[0], line[0]
+    assert "rate=30/3600" in line[0], line[0]
 
 
-@pytest.mark.parametrize("body, why", [
-    ("        BotShieldBudget    5", "per= missing"),
-    ("        BotShieldPer       sec", "budget= missing"),
-])
-def test_half_a_rate_limit_is_refused(config_override, body, why):
-    """Half of one is not a smaller one -- it is a rule that silently
-    has none."""
-    with pytest.raises(Exception):
-        with config_override(r"BotShieldEnabled\s+On",
-                             _rule("        BotShieldPath /x\n" + body),
-                             render=False, count=1):
-            pass
-
-
-@pytest.mark.parametrize("bad", ["0", "-1", "1000001", "lots"])
-def test_bad_budgets_are_refused(config_override, bad):
+def test_two_windows_on_one_rule_are_refused(config_override):
+    """A rule has one counter. delay= and rate= both claim it, and the
+    last one written silently winning is how a config says one thing
+    and does another."""
     with pytest.raises(Exception):
         with config_override(
             r"BotShieldEnabled\s+On",
-            _rule("        BotShieldPath /x\n"
-                  f"        BotShieldBudget {bad}\n"
-                  "        BotShieldPer sec"),
+            _rule("        BotShieldPath  /x\n"
+                  "        BotShieldDelay 1\n"
+                  "        BotShieldRate  5 60"),
             render=False, count=1,
         ):
             pass
 
 
-# "5" was here until 2026-09-07, when per= learned to take a
-# count and a bare number came to mean seconds.
-@pytest.mark.parametrize("bad", ["week", "secs", "5weeks"])
-def test_bad_windows_are_refused(config_override, bad):
-    with pytest.raises(Exception):
-        with config_override(
-            r"BotShieldEnabled\s+On",
-            _rule("        BotShieldPath /x\n"
-                  "        BotShieldBudget 5\n"
-                  f"        BotShieldPer {bad}"),
-            render=False, count=1,
-        ):
-            pass
-
-
-@pytest.mark.parametrize("key", ["client", "session"])
-def test_unimplemented_count_keys_say_so(config_override, key):
-    """Refused with a reason, not accepted and quietly treated as
-    total. An operator writing countper=client means "one budget each"
-    and would get "one budget between them" -- the opposite of the
-    request, and invisible until someone counts 429s.
-    """
-    with pytest.raises(Exception):
-        with config_override(
-            r"BotShieldEnabled\s+On",
-            _rule("        BotShieldPath /x\n"
-                  "        BotShieldBudget 5\n"
-                  "        BotShieldPer sec\n"
-                  f"        BotShieldCountPer {key}"),
-            render=False, count=1,
-        ):
-            pass
-
-
-def test_countper_total_is_accepted(config_override, fresh_ip):
-    """The one that works, spelled out rather than defaulted."""
-    conf = _rule(
-        "        BotShieldPath      /budget-total\n"
-        "        BotShieldBudget    2\n"
-        "        BotShieldPer       min\n"
-        "        BotShieldCountPer  total"
-    )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
-        r = client.get("/budget-total", xff=fresh_ip, ua=UA)
-    assert r.status_code != 429, f"first request refused; got {r.status_code}"
-
-
-# --- escalation on a rule budget -------------------------------------
+# --- escalation on a rule window -------------------------------------
 
 
 def test_escalation_can_name_a_rule(config_override, fresh_ip):
     """BotShieldRateLimitEscalate binds by name, and a rule carrying a
-    budget is a rate limit by another spelling.
+    window is a rate limit by another spelling.
 
     The strike table is keyed on (address, slot) rather than on which
     directive family owns the slot, so nothing beneath the linkage had
@@ -209,8 +142,7 @@ def test_escalation_can_name_a_rule(config_override, fresh_ip):
         "BotShieldEnabled On\n"
         "    <BotShieldRule esc-rule>\n"
         "        BotShieldPath      /esc-probe\n"
-        "        BotShieldBudget    1\n"
-        "        BotShieldPer       sec\n"
+        "        BotShieldRate      1 1\n"
         "    </BotShieldRule>\n"
         "    BotShieldRateLimitEscalate esc-rule 2 min respond=403 ttl=60"
     )
@@ -218,7 +150,7 @@ def test_escalation_can_name_a_rule(config_override, fresh_ip):
                          render=False, count=1):
         codes = [client.get("/esc-probe", xff=fresh_ip, ua=UA).status_code
                  for _ in range(6)]
-    assert 429 in codes, f"the budget never refused; got {codes}"
+    assert 429 in codes, f"the window never refused; got {codes}"
     assert 403 in codes, (
         f"strikes never escalated to the operator status; got {codes}"
     )
@@ -240,20 +172,18 @@ def test_an_escalate_naming_nothing_warns(config_override, log_slice):
 
 
 def test_over_budget_runs_the_rule_action(config_override, fresh_ip):
-    """A spent budget applies whatever the rule says. 429 is only the
-    default, for a rule that declares a budget and nothing else."""
+    """A spent window applies whatever the rule says. 429 is only the
+    default, for a rule that declares a window and nothing else."""
     conf = (
         "BotShieldEnabled On\n"
         "    <BotShieldRule budget-451>\n"
         "        BotShieldPath      /budget-action\n"
-        "        BotShieldBudget    1\n"
-        "        BotShieldPer       sec\n"
+        "        BotShieldRate      1 1\n"
         "        BotShieldRespond   451\n"
         "    </BotShieldRule>"
     )
     with config_override(r"BotShieldEnabled\s+On", conf,
                          render=False, count=1):
-        ratelimit.align_to_window()
         codes = [client.get("/budget-action", xff=fresh_ip, ua=UA).status_code
                  for _ in range(2)]
     assert codes[1] == 451, (
@@ -262,12 +192,12 @@ def test_over_budget_runs_the_rule_action(config_override, fresh_ip):
     )
 
 
-def test_a_budget_can_mark_without_refusing(config_override, fresh_ip):
+def test_a_window_can_mark_without_refusing(config_override, fresh_ip):
     """The shape the separate family could not offer.
 
     Rate limits ran at step 7 of the walk, after every rule, so a mark
     one of them wrote could not be a condition in the same request --
-    only in the next one. In the ladder a budget can score the client
+    only in the next one. In the ladder a window can score the client
     and a rule below can read it, which is the same property that makes
     trap-then-act work in one request rather than two.
     """
@@ -275,8 +205,7 @@ def test_a_budget_can_mark_without_refusing(config_override, fresh_ip):
         "BotShieldEnabled On\n"
         "    <BotShieldRule mark-flood>\n"
         "        BotShieldPath   /mark-probe\n"
-        "        BotShieldBudget 1\n"
-        "        BotShieldPer    sec\n"
+        "        BotShieldRate   1 1\n"
         "        BotShieldScore  flood +50\n"
         "    </BotShieldRule>\n"
         "    <BotShieldRule act-on-mark>\n"
@@ -287,7 +216,6 @@ def test_a_budget_can_mark_without_refusing(config_override, fresh_ip):
     )
     with config_override(r"BotShieldEnabled\s+On", conf,
                          render=False, count=1):
-        ratelimit.align_to_window()
         first = client.get("/mark-probe", xff=fresh_ip, ua=UA)
         second = client.get("/mark-probe", xff=fresh_ip, ua=UA)
     assert first.status_code != 451, (

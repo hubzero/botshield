@@ -1,21 +1,26 @@
-"""per=<n>unit and countper=slug -- the two things robots.txt could say
-and the rule vocabulary could not.
+"""delay= and rate= -- a rule's two ways of carrying a window.
 
-`Crawl-delay: 10` is one request per ten seconds. per= took sec, min
-and hour and nothing between them, so that window had no spelling even
-though window_sec has always been an int.
+    BotShieldDelay <seconds>        one request per window, EACH crawler
+    BotShieldRate  <n> <seconds>    n requests per window, SHARED
 
-`Crawl-delay` also gives *each* crawler the budget. countper=total
-gives all of them one between them, which looks the same in the config
-and is drastically different in effect -- with @bot and 1/sec, total
-means the whole crawler population shares one request a second.
+The unit is always seconds and seconds take a fraction. The counter
+keeps milliseconds, so `BotShieldDelay 0.5` is 500ms exactly -- the
+thing robots.txt could say with `Crawl-delay: 0.5` and the module used
+to read as "no delay at all".
+
+The two words are the difference in who shares the window. That used
+to be a separate countper= knob whose default, `total`, was the trap:
+@bot with one request a second under `total` gave the entire crawler
+population one request a second between them.
 """
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
-from botshield_test import apache, client, ratelimit
+from botshield_test import apache, client
 
 # Two UAs the classifier gives distinct known slugs, and neither needs
 # IP verification to land in @bot -- a spoofed Googlebot from a test
@@ -33,91 +38,143 @@ def _rule(body: str, name: str = "vocab") -> str:
     )
 
 
-# --- per=<n>unit ------------------------------------------------------
+def _dump_line(name: str) -> str:
+    body = apache.policy_dump()
+    line = [ln for ln in body.splitlines() if ln.startswith(name)]
+    assert line, f"rule {name} missing from dump; body={body[:400]}"
+    return line[0]
+
+
+# --- spellings -------------------------------------------------------
 
 
 @pytest.mark.parametrize("spelling, shown", [
-    ("10sec", "10sec"),
-    ("30", "30sec"),        # bare number means seconds
-    ("2min", "120sec"),
-    ("sec", "sec"),         # the old spellings still work
-    ("min", "min"),
-    ("hour", "hour"),
+    ("1", "delay=1"),
+    ("10", "delay=10"),
+    ("0.5", "delay=0.5"),        # the one whole seconds could not say
+    ("1.5", "delay=1.5"),
+    ("0.001", "delay=0.001"),    # the smallest window
+    ("2.500", "delay=2.5"),      # trailing zeros do not survive
+    ("0", "delay=0"),            # no limit, kept for robots.txt fidelity
 ])
-def test_per_accepts_a_count(config_override, spelling, shown):
+def test_delay_prints_as_written(config_override, spelling, shown):
     conf = _rule(
-        "        BotShieldPath   /per-probe\n"
-        "        BotShieldBudget 5\n"
-        f"        BotShieldPer    {spelling}",
-        name="per-dump",
+        "        BotShieldPath   /delay-dump\n"
+        f"        BotShieldDelay  {spelling}",
+        name="delay-dump",
     )
     with config_override(r"BotShieldEnabled\s+On", conf,
                          render=False, count=1):
-        body = apache.policy_dump()
-    line = [ln for ln in body.splitlines() if ln.startswith("per-dump")]
-    assert line, f"rule missing from dump; body={body[:400]}"
-    assert f"budget=5/{shown}" in line[0], line[0]
+        line = _dump_line("delay-dump")
+    assert shown in line, line
+    assert "countper" not in line and "budget=" not in line, line
 
 
-@pytest.mark.parametrize("bad", ["0sec", "weeks", "10weeks", "0", "-5"])
-def test_bad_windows_are_refused(config_override, bad):
+@pytest.mark.parametrize("spelling, shown", [
+    ("30 60", "rate=30/60"),      # container form: two words
+    ("30/60", "rate=30/60"),      # flat form: one token
+    ("30 / 60", "rate=30/60"),
+    ("5 0.5", "rate=5/0.5"),
+    ("1 1", "rate=1/1"),
+])
+def test_rate_prints_as_written(config_override, spelling, shown):
+    conf = _rule(
+        "        BotShieldPath   /rate-dump\n"
+        f"        BotShieldRate   {spelling}",
+        name="rate-dump",
+    )
+    with config_override(r"BotShieldEnabled\s+On", conf,
+                         render=False, count=1):
+        line = _dump_line("rate-dump")
+    assert shown in line, line
+
+
+@pytest.mark.parametrize("bad", [
+    "10sec",      # no unit words -- the unit is always seconds
+    "10min",      # ... and this one read as 10 would be off by sixty
+    "-1",
+    "lots",
+    "0.0001",     # rounds to zero ms without being zero: no limit at all
+    "90000",      # over a day
+])
+def test_bad_delays_are_refused(config_override, bad):
     with pytest.raises(Exception):
         with config_override(
             r"BotShieldEnabled\s+On",
             _rule("        BotShieldPath /x\n"
-                  "        BotShieldBudget 5\n"
-                  f"        BotShieldPer {bad}"),
+                  f"        BotShieldDelay {bad}"),
             render=False, count=1,
         ):
             pass
 
 
-def test_a_window_over_a_day_is_refused(config_override):
-    """86400 is the ceiling. A window longer than the counter's own
-    reset cadence is a budget nobody can reason about."""
+@pytest.mark.parametrize("bad", [
+    "30",         # a count and no window
+    "0/60",
+    "-5/60",
+    "1000001/60",
+    "30/0",       # a zero window is not a rate; delay=0 is that spelling
+    "30/min",
+    "30/60sec",
+    "lots/60",
+])
+def test_bad_rates_are_refused(config_override, bad):
     with pytest.raises(Exception):
         with config_override(
             r"BotShieldEnabled\s+On",
             _rule("        BotShieldPath /x\n"
-                  "        BotShieldBudget 5\n"
-                  "        BotShieldPer 25hour"),
+                  f"        BotShieldRate {bad}"),
             render=False, count=1,
         ):
             pass
 
 
-# --- countper=slug ----------------------------------------------------
+@pytest.mark.parametrize("line", [
+    "BotShieldBudget   5",
+    "BotShieldPer      sec",
+    "BotShieldCountPer slug",
+])
+def test_the_old_words_are_gone(config_override, line):
+    """Retired, not aliased. A config still carrying them must fail to
+    load rather than quietly having no limit."""
+    with pytest.raises(Exception):
+        with config_override(
+            r"BotShieldEnabled\s+On",
+            _rule("        BotShieldPath /x\n"
+                  f"        {line}"),
+            render=False, count=1,
+        ):
+            pass
 
 
-def test_each_crawler_gets_its_own_budget(config_override, fresh_ip):
-    """The whole point of slug.
+# --- who shares the window -------------------------------------------
 
-    Under countper=total these three requests share one bucket and the
-    second UA is refused. Under slug each crawler has its own, so only
-    a repeat from the *same* crawler is.
+
+def test_delay_gives_each_crawler_its_own_window(config_override, fresh_ip):
+    """The whole point of the word.
+
+    Under a shared window these three requests spend from one bucket
+    and crawler B is refused. Under delay each crawler has its own, so
+    only a repeat from the *same* crawler is.
     """
     conf = _rule(
-        "        BotShieldPath      /slug-probe\n"
+        "        BotShieldPath      /delay-probe\n"
         "        BotShieldUserAgent @bot\n"
-        "        BotShieldBudget    1\n"
-        "        BotShieldPer       sec\n"
-        "        BotShieldCountPer  slug",
-        name="per-slug",
+        "        BotShieldDelay     1",
+        name="per-crawler",
     )
     with config_override(r"BotShieldEnabled\s+On", conf,
                          render=False, count=1):
-        ratelimit.align_to_window()
-        first_a = client.get("/slug-probe", xff=fresh_ip, ua=UA_A)
-        first_b = client.get("/slug-probe", xff=fresh_ip, ua=UA_B)
-        again_a = client.get("/slug-probe", xff=fresh_ip, ua=UA_A)
+        first_a = client.get("/delay-probe", xff=fresh_ip, ua=UA_A)
+        first_b = client.get("/delay-probe", xff=fresh_ip, ua=UA_B)
+        again_a = client.get("/delay-probe", xff=fresh_ip, ua=UA_A)
 
     assert first_a.status_code != 429, (
         f"first request from crawler A was refused; got {first_a.status_code}"
     )
     assert first_b.status_code != 429, (
         f"crawler B was refused on its first request, so it is sharing "
-        f"A's bucket -- that is countper=total behaviour; got "
-        f"{first_b.status_code}"
+        f"A's window -- that is rate= behaviour; got {first_b.status_code}"
     )
     assert again_a.status_code == 429, (
         f"crawler A repeated inside its own window and was admitted; got "
@@ -125,41 +182,68 @@ def test_each_crawler_gets_its_own_budget(config_override, fresh_ip):
     )
 
 
-def test_total_makes_them_share(config_override, fresh_ip):
+def test_rate_makes_them_share(config_override, fresh_ip):
     """The contrast, so the test above is not passing by accident."""
     conf = _rule(
-        "        BotShieldPath      /total-probe\n"
+        "        BotShieldPath      /rate-probe\n"
         "        BotShieldUserAgent @bot\n"
-        "        BotShieldBudget    1\n"
-        "        BotShieldPer       sec\n"
-        "        BotShieldCountPer  total",
-        name="per-total",
+        "        BotShieldRate      1 1",
+        name="shared",
     )
     with config_override(r"BotShieldEnabled\s+On", conf,
                          render=False, count=1):
-        ratelimit.align_to_window()
-        client.get("/total-probe", xff=fresh_ip, ua=UA_A)
-        second = client.get("/total-probe", xff=fresh_ip, ua=UA_B)
+        client.get("/rate-probe", xff=fresh_ip, ua=UA_A)
+        second = client.get("/rate-probe", xff=fresh_ip, ua=UA_B)
 
     assert second.status_code == 429, (
-        f"a different crawler was admitted under countper=total, so the "
-        f"bucket is not shared; got {second.status_code}"
+        f"a different crawler was admitted under rate=, so the window is "
+        f"not shared; got {second.status_code}"
     )
 
 
-def test_countper_slug_shows_in_the_dump(config_override):
+# --- the fraction is real --------------------------------------------
+
+
+def test_a_half_second_window_is_half_a_second(config_override, fresh_ip):
+    """Not a display nicety. Refused inside the window, admitted once
+    it has elapsed -- and the window is anchored to the first request,
+    not to a wall-clock tick, so no alignment is needed."""
     conf = _rule(
-        "        BotShieldPath      /slug-dump\n"
+        "        BotShieldPath      /half-probe\n"
         "        BotShieldUserAgent @bot\n"
-        "        BotShieldBudget    1\n"
-        "        BotShieldPer       10sec\n"
-        "        BotShieldCountPer  slug",
-        name="slug-dumped",
+        "        BotShieldDelay     0.5",
+        name="half",
     )
     with config_override(r"BotShieldEnabled\s+On", conf,
                          render=False, count=1):
-        body = apache.policy_dump()
-    line = [ln for ln in body.splitlines() if ln.startswith("slug-dumped")]
-    assert line, f"rule missing from dump; body={body[:400]}"
-    assert "budget=1/10sec" in line[0], line[0]
-    assert "countper=slug" in line[0], line[0]
+        first = client.get("/half-probe", xff=fresh_ip, ua=UA_A)
+        inside = client.get("/half-probe", xff=fresh_ip, ua=UA_A)
+        time.sleep(0.7)
+        after = client.get("/half-probe", xff=fresh_ip, ua=UA_A)
+
+    assert first.status_code != 429, first.status_code
+    assert inside.status_code == 429, (
+        f"a repeat inside a 500ms window was admitted; got {inside.status_code}"
+    )
+    assert after.status_code != 429, (
+        f"700ms later the window should have rolled; got {after.status_code}. "
+        f"If this reads as a whole second, the fraction was truncated."
+    )
+
+
+def test_retry_after_rounds_up_never_zero(config_override, fresh_ip):
+    """A sub-second remainder must not become Retry-After: 0, which
+    invites an immediate retry that cannot succeed."""
+    conf = _rule(
+        "        BotShieldPath      /retry-probe\n"
+        "        BotShieldUserAgent @bot\n"
+        "        BotShieldDelay     0.5",
+        name="retry",
+    )
+    with config_override(r"BotShieldEnabled\s+On", conf,
+                         render=False, count=1):
+        client.get("/retry-probe", xff=fresh_ip, ua=UA_A)
+        refused = client.get("/retry-probe", xff=fresh_ip, ua=UA_A)
+    assert refused.status_code == 429, refused.status_code
+    ra = refused.headers.get("Retry-After")
+    assert ra is not None and int(ra) >= 1, f"Retry-After={ra!r}"

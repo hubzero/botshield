@@ -1122,6 +1122,51 @@ static void bs_rule_push(cmd_parms *cmd, bs_dir_cfg *dcfg, int scoped,
         apr_array_push(scfg->request_triggers) = e;
 }
 
+/* A window written in seconds, stored in milliseconds.
+ *
+ * Fractions are why this is strtod and not strtol: robots.txt writes
+ * `Crawl-delay: 0.5`, and a whole-second reader turns that into either
+ * 0 (no limit) or 1 (twice what was asked).
+ *
+ * Zero is accepted and means no limit -- bs_rate_counter_admit treats
+ * a zero window as constantly rolling -- because a robots.txt
+ * transcription may carry a literal `Crawl-delay: 0`. A value that
+ * ROUNDS to zero without being zero is refused: delay=0.0001 is
+ * someone who meant a limit and would silently get none. */
+static const char *bs_parse_window_ms(apr_pool_t *p, const char *D,
+                                      const char *key, const char *val,
+                                      apr_uint32_t *out_ms)
+{
+    char *end = NULL;
+    double v = strtod(val, &end);
+    if (!end || end == val) {
+        return apr_psprintf(p, "%s: %s='%s' is not a number of seconds",
+                            D, key, val);
+    }
+    while (*end == ' ' || *end == '\t') end++;
+    /* No unit words. The unit is always seconds, and a `10min` read as
+     * ten seconds would be off by sixty in the direction of admitting
+     * more. */
+    if (*end) {
+        return apr_psprintf(p,
+            "%s: %s='%s' has trailing '%s'. The window is always "
+            "seconds -- write %s=600 rather than a unit word.",
+            D, key, val, end, key);
+    }
+    if (!(v >= 0.0) || v > 86400.0) {
+        return apr_psprintf(p,
+            "%s: %s='%s' must be 0..86400 seconds", D, key, val);
+    }
+    apr_uint32_t ms = (apr_uint32_t)(v * 1000.0 + 0.5);
+    if (ms == 0 && v > 0.0) {
+        return apr_psprintf(p,
+            "%s: %s='%s' rounds to zero milliseconds, which is no limit "
+            "at all. The smallest window is 0.001.", D, key, val);
+    }
+    *out_ms = ms;
+    return NULL;
+}
+
 const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                                        int argc, char *const argv[])
 {
@@ -1170,7 +1215,7 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
     e->window_ms      = 0;
     e->count_key       = BS_COUNT_TOTAL;
     e->shm_slot        = -1;          /* assigned at post_config */
-    e->slug_slots      = NULL;        /* countper=slug only */
+    e->slug_slots      = NULL;        /* delay= only */
     e->escalate        = NULL;        /* linked at post_config */
     e->flagged_bit = 0;               /* no flagged= condition */
     e->ck_pred     = -1;              /* no cookie= condition */
@@ -1361,82 +1406,80 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                 e->loadavg_min_pct = (int)(lv * 100.0);
                 continue;
             }
-            if (klen == 6 && strncasecmp(arg, "budget", 6) == 0) {
-                char *bend = NULL;
-                long b = strtol(val, &bend, 10);
-                if (!bend || *bend || b < 1 || b > 1000000) {
+            /* delay=<seconds> -- one request per <seconds>, for EACH
+             * crawler. This is robots.txt Crawl-delay in the unit
+             * robots.txt writes it in, which is the point: a
+             * Crawl-delay an operator wants enforced should transcribe
+             * into a rule, not translate.
+             *
+             * Each, not shared: delay=1 on ua=@bot gives every crawler
+             * its own request a second. It costs one counter slot per
+             * known-bot slug (see the post_config allocation), and a
+             * matching request whose UA is not a known bot lands in
+             * the rule's own slot, so unknown bots share one window. */
+            if (klen == 5 && strncasecmp(arg, "delay", 5) == 0) {
+                if (e->budget) {
                     return apr_psprintf(cmd->pool,
-                        "%s: budget='%s' must be 1..1000000 requests",
-                        D, val);
+                        "%s: delay= and rate= both given. A rule has one "
+                        "window -- say which.", D);
                 }
-                e->budget = (apr_uint32_t)b;
+                apr_uint32_t ms = 0;
+                const char *werr =
+                    bs_parse_window_ms(cmd->pool, D, "delay", val, &ms);
+                if (werr) return werr;
+                e->budget    = 1;
+                e->window_ms = ms;
+                e->count_key = BS_COUNT_SLUG;
                 continue;
             }
-            if (klen == 3 && strncasecmp(arg, "per", 3) == 0) {
-                /* Same words BotShieldRateLimit takes, so an operator
-                 * moving a limit into a rule does not also have to
-                 * learn a new spelling for the window -- plus an
-                 * optional count in front of the unit.
-                 *
-                 * `Crawl-delay: 10` is one request per ten seconds and
-                 * had no spelling here: sec, min and hour with nothing
-                 * between them. window_ms has always been an int, so
-                 * the gap was in this parser rather than in the
-                 * storage, and robots.txt could say something the
-                 * config could not. */
-                const char *u = val;
-                long mult = 1;
-                if (apr_isdigit((unsigned char)*u)) {
-                    char *uend = NULL;
-                    mult = strtol(u, &uend, 10);
-                    u = uend ? uend : u;
-                    while (*u == ' ' || *u == '\t') u++;
-                    if (mult < 1) {
-                        return apr_psprintf(cmd->pool,
-                            "%s: per='%s' needs a count of at least 1",
-                            D, val);
-                    }
-                }
-                long unit;
-                if      (!strcasecmp(u, "sec")  || !strcasecmp(u, "s")
-                      || !*u)
-                    unit = 1;   /* bare number means seconds */
-                else if (!strcasecmp(u, "min")  || !strcasecmp(u, "m"))
-                    unit = 60;
-                else if (!strcasecmp(u, "hour") || !strcasecmp(u, "h"))
-                    unit = 3600;
-                else {
+
+            /* rate=<n>/<seconds> -- n requests per window, SHARED by
+             * everyone the rule matches. The separator is a slash or
+             * whitespace, so `BotShieldRate 30 60` inside a container
+             * and `rate=30/60` on a flat rule are one spelling; the
+             * flat form has to fit in a token.
+             *
+             * Shared is what BotShieldRateLimit has always done, and
+             * it is the trap: ua=@bot with rate=1/1 gives the whole
+             * crawler population one request a second BETWEEN them,
+             * which reads almost like delay=1 and is a different
+             * policy. The two words are the difference. */
+            if (klen == 4 && strncasecmp(arg, "rate", 4) == 0) {
+                if (e->budget) {
                     return apr_psprintf(cmd->pool,
-                        "%s: per='%s' must be sec, min or hour "
-                        "(s/m/h accepted), optionally with a count in "
-                        "front: per=10sec", D, val);
+                        "%s: delay= and rate= both given. A rule has one "
+                        "window -- say which.", D);
                 }
-                long secs = mult * unit;
-                if (secs < 1 || secs > 86400) {
+                char *nend = NULL;
+                long n = strtol(val, &nend, 10);
+                if (!nend || nend == val || n < 1 || n > 1000000) {
                     return apr_psprintf(cmd->pool,
-                        "%s: per='%s' is %ld seconds; the window must be "
-                        "1..86400", D, val, secs);
+                        "%s: rate='%s' must begin with a count of "
+                        "1..1000000, as rate=<n>/<seconds>", D, val);
                 }
-                e->window_ms = (apr_uint32_t)secs * 1000;
-                continue;
-            }
-            if (klen == 8 && strncasecmp(arg, "countper", 8) == 0) {
-                if (!strcasecmp(val, "total")) {
-                    e->count_key = BS_COUNT_TOTAL;
-                } else if (!strcasecmp(val, "slug")) {
-                    e->count_key = BS_COUNT_SLUG;
-                } else if (!strcasecmp(val, "client")
-                        || !strcasecmp(val, "session")) {
+                const char *w = nend;
+                while (*w == ' ' || *w == '\t') w++;
+                if (*w == '/') w++;
+                while (*w == ' ' || *w == '\t') w++;
+                if (!*w) {
                     return apr_psprintf(cmd->pool,
-                        "%s: countper='%s' is not implemented yet -- it "
-                        "needs a counter table keyed on (subject, rule) "
-                        "rather than the fixed per-rule slot. Only "
-                        "'total' works, and it is the default.", D, val);
-                } else {
-                    return apr_psprintf(cmd->pool,
-                        "%s: countper='%s' must be 'total' or 'slug'",
-                        D, val);
+                        "%s: rate='%s' has a count and no window. "
+                        "Write rate=<n>/<seconds>: rate=30/60 is thirty "
+                        "requests a minute.", D, val);
                 }
+                apr_uint32_t ms = 0;
+                const char *werr =
+                    bs_parse_window_ms(cmd->pool, D, "rate", w, &ms);
+                if (werr) return werr;
+                if (ms == 0) {
+                    return apr_psprintf(cmd->pool,
+                        "%s: rate='%s' has a zero-length window. A rate "
+                        "needs a window; delay=0 is the spelling for "
+                        "\"no limit\".", D, val);
+                }
+                e->budget    = (apr_uint32_t)n;
+                e->window_ms = ms;
+                e->count_key = BS_COUNT_TOTAL;
                 continue;
             }
             if (klen == 14
@@ -1645,21 +1688,12 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
             "cookies=, bscookie=, cookie=, env=, flagged=, crawler=, "
             "exists=, solved=, firstsight=, acceptlanguage=, "
             "loadavgatleast=, latencyatleast=, ua=, ipspec=). A rule "
-            "carrying only budget=/per= still needs one of these: a "
+            "carrying only delay= or rate= still needs one of these: a "
             "counter is not a condition. A rule "
             "with no condition "
             "matches every request. Declare it inside the "
             "<Location>, <Directory> or <Files> you mean and the "
             "container match is the condition.", D, name);
-    }
-
-    /* Half a rate limit is not a smaller rate limit, it is a rule
-     * that silently does not have one. */
-    if ((e->budget > 0) != (e->window_ms > 0)) {
-        return apr_psprintf(cmd->pool,
-            "%s '%s': budget= and per= must be given together (%s)",
-            D, name,
-            e->budget ? "per= is missing" : "budget= is missing");
     }
 
     const char *err = bs_finalize_trigger_action(cmd->pool,

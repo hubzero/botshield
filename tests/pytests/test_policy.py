@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-from botshield_test import client, ratelimit
+from botshield_test import client
 
 
 # No longer serial. The marker meant "mutates Apache config or SHM",
@@ -45,7 +45,6 @@ def test_rate_limit_ua_narrowing(config_override, log_slice, fresh_ip):
         count=1,
     ):
         with log_slice as slc:
-            ratelimit.align_to_window()
             responses = [
                 client.get("/", xff=fresh_ip, ua=CORP_UA)
                 for _ in range(5)
@@ -86,7 +85,6 @@ def test_rate_limit_inline_cidr_narrowing(config_override, log_slice, fresh_ip):
             )
 
         with log_slice as slc:
-            ratelimit.align_to_window()
             responses = [
                 client.get("/", xff=in_range_ip, ua=ua)
                 for _ in range(4)
@@ -126,7 +124,6 @@ def test_rate_limit_ua_and_ip_and_ed(config_override, log_slice, fresh_ip):
             assert r.status_code == 200
 
         with log_slice as slc:
-            ratelimit.align_to_window()
             r1 = client.get("/", xff=matched_ip, ua=ua_match)
             r2 = client.get("/", xff=matched_ip, ua=ua_match)
             lines = slc.decision_lines(ip=matched_ip)
@@ -216,7 +213,6 @@ def test_rate_limit_ua_match_is_case_insensitive(
         count=1,
     ):
         with log_slice as slc:
-            ratelimit.align_to_window()
             r1 = client.get("/", xff=fresh_ip, ua="GPTBot/1.0")
             r2 = client.get("/", xff=fresh_ip, ua="GPTBot/1.0")
             lines = slc.decision_lines(ip=fresh_ip)

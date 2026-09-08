@@ -1539,7 +1539,7 @@ static void bs_wire_rate_and_block_cohorts(apr_pool_t *pconf,
                 vcfg->rate_limits->nelts);
         }
 
-        /* Rules carrying budget= draw from the same slot pool. Done
+        /* Rules carrying a window draw from the same slot pool. Done
          * here rather than in a pass of their own so the pool is
          * consumed in one place and exhaustion reports the same way
          * for both spellings. */
@@ -1575,7 +1575,7 @@ static void bs_wire_rate_and_block_cohorts(apr_pool_t *pconf,
                         }
                         if (missed) {
                             ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
-                                "mod_botshield: rule '%s' countper=slug "
+                                "mod_botshield: rule '%s' delay= "
                                 "got %d of %d slugs; the remaining %d "
                                 "share the rule's fallback counter. "
                                 "Raise BS_E21_RATE_SLOTS in src/config.c "
@@ -1618,7 +1618,7 @@ static void bs_wire_rate_and_block_cohorts(apr_pool_t *pconf,
                         }
                     }
                 }
-                /* A rule carrying budget= is a rate limit by
+                /* A rule carrying rate= or delay= is a rate limit by
                  * another spelling, so an escalate may name one. Rate
                  * limits are searched first only because they are the
                  * older spelling; a name should not be shared between
@@ -1641,7 +1641,8 @@ static void bs_wire_rate_and_block_cohorts(apr_pool_t *pconf,
                     ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
                         "mod_botshield: BotShieldRateLimitEscalate '%s' "
                         "names no matching BotShieldRateLimit and no rule "
-                        "with budget= at this scope; directive is inert",
+                        "carrying rate= or delay= at this scope; directive "
+                        "is inert",
                         esc->rule_name);
                 }
             }

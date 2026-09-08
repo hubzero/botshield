@@ -1872,80 +1872,74 @@ compares against. Per **CPU**, so a threshold means the same thing on a
 
 ### Rate-limiting from a rule
 
-`BotShieldBudget <n>` and `BotShieldPer <[count]sec|min|hour>` put a
-fixed-window counter on a rule. Once the window's budget is spent the
-rule answers `429`; under budget it carries on to whatever else it
-says.
+`BotShieldDelay <seconds>` or `BotShieldRate <n> <seconds>` puts a
+fixed-window counter on a rule. Once the window is spent the rule
+applies its action -- `429` unless it says otherwise. Under budget the
+request spends from the window and the walk carries on to whatever
+else the rule says and to the rules below.
 
 ```apache
+<BotShieldRule crawl-delay>
+    BotShieldUserAgent  @bot
+    BotShieldDelay      1.5
+</BotShieldRule>
+
 <BotShieldRule search-flood>
-    BotShieldPath      /search/
-    BotShieldBudget    5
-    BotShieldPer       min
+    BotShieldPath       /search/
+    BotShieldRate       30 60
 </BotShieldRule>
 ```
 
-A rate limit is a rule with a counter. `BotShieldRateLimit` holds a
-name, a cohort, a budget, a window and a slot; a rule already had the
-name, the cohort and the mode, so the counter was the only new thing.
+The unit is always seconds, and seconds take a fraction: `0.5` is half
+a second, exactly -- the counter keeps milliseconds. There are no unit
+words; `10min` is refused rather than read as ten seconds. The ceiling
+is 86400.
 
-What it buys is the predicate set. `BotShieldRateLimit` matches on
-`ua=` and `ipspec=` and **nothing else** — there is no path in it —
-so the example above cannot be written with that directive at all. On a
-rule, every condition is available: path, query, cookies, `solved=`,
-`flagged=`, `latencyatleast=`, and the rest.
+The two spellings differ in **who shares the window**, and that is the
+whole reason there are two:
 
-`BotShieldPer` takes an optional count in front of the unit, so
-windows other than one second, minute or hour are sayable:
-`per 10sec`, `per 2min`, or a bare `per 30` meaning thirty seconds.
-The ceiling is 86400. Before 2026-09-07 the three bare units were the
-only spellings, which meant `Crawl-delay: 10` -- one request per ten
-seconds -- could be written in robots.txt and not in a rule, even
-though the window has always been stored as a plain integer.
+| | one window per | budget | is |
+|---|---|---|---|
+| `BotShieldDelay <s>` | crawler (known-bot slug) | 1 request | robots.txt `Crawl-delay` |
+| `BotShieldRate <n> <s>` | rule | n requests | what `BotShieldRateLimit` does |
 
-`BotShieldBudget` and `BotShieldPer` must be given together. Half a
-rate limit is not a smaller one, it is a rule that silently has none.
+`Delay` is `Crawl-delay` in the unit robots.txt writes it in, and it
+means what robots.txt means: **each** crawler gets a window of its own.
+`Rate` is one window for everyone the rule matches, between them.
+`BotShieldUserAgent @bot` with `BotShieldRate 1 1` gives the entire
+crawler population one request a second *shared*, which reads almost
+like `BotShieldDelay 1` and is a very different policy. Until
+2026-09-08 this was a separate `countper=` knob whose default was the
+shared bucket, and the default was the trap.
 
-#### `BotShieldCountPer` — which bucket the count lands in
+A rule has one counter, so `Delay` and `Rate` on the same rule is
+refused rather than last-one-wins.
 
-Not a predicate. Predicates decide whether the rule matched; this
-decides which counter the match is spent from.
+`Delay` costs a counter slot per entry in the bot directory, which is
+large against the pool, so post_config allocates what it can and logs
+a warning naming the rule when it cannot; slugs that missed out share
+the rule's own slot. A matching request whose UA is not a known bot
+has no slug to key on and uses that same slot, so unknown bots are one
+shared window.
 
-| value | one bucket per | status |
-|---|---|---|
-| `total` | rule | the default |
-| `slug` | known-bot slug | implemented |
-| `client` | client address | refused at parse time |
-| `session` | session cookie | refused at parse time |
+`BotShieldDelay 0` is accepted and means no limit, so a robots.txt
+transcription can keep a literal `Crawl-delay: 0`. A value that rounds
+to zero milliseconds without being zero is refused: `0.0001` is
+someone who meant a limit and would silently get none.
 
-`slug` is what a robots.txt `Crawl-delay` means: **each** crawler gets
-the budget rather than all of them sharing one. The difference is
-invisible in the config and drastic in effect --
-`BotShieldUserAgent @bot` with `BotShieldBudget 1 / BotShieldPer sec`
-under `total` gives the entire crawler population one request a second
-between them.
+What a rule buys over `BotShieldRateLimit` is the predicate set. That
+directive matches on `ua=` and `ipspec=` and **nothing else** -- there
+is no path in it -- so `search-flood` above cannot be written with it
+at all. On a rule every condition is available: path, query, cookies,
+`solved=`, `flagged=`, `latencyatleast=`, and the rest.
 
-It costs a counter slot per entry in the bot directory, which is large
-against the pool, so post_config allocates what it can and logs a
-warning naming the rule when it cannot; the slugs that missed out
-share the rule's own slot. A request whose UA is not a known bot has
-no slug to key on and uses that same fallback, which makes unknown
-bots one shared bucket.
-
-`total` means **everyone matching shares one budget** rather than
-getting one each. That is what `BotShieldRateLimit` has always done
-without naming it: `BotShieldRateLimit corpbot 3 sec` gives every
-matching client three requests a second *between them*.
-
-`client` is what most people mean by "rate limit", and it is refused
-rather than approximated because the difference is invisible until
-someone counts the 429s. It needs a counter table keyed on
-(subject, rule) — one address can sit inside several rate-limiting
-rules at once, each with its own window — where `total` needs only the
-fixed per-rule slot that exists today. That table is separate work.
-
-Rule budgets carry no escalation. `BotShieldRateLimitEscalate` binds
-to a `BotShieldRateLimit` by name and stays with it.
+Not expressible: a per-crawler budget larger than one ("thirty a
+minute, each"). `Rate` shares and `Delay` is one-at-a-time; a
+per-crawler rate would be a third spelling, and it has not been
+needed. Nor is a per-client-address window, which is what most people
+mean by "rate limit"; it needs a counter table keyed on (address,
+rule) rather than the fixed per-rule slot, and that table is separate
+work.
 
 ### Reaching request latency from a rule
 

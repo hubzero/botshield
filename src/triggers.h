@@ -326,8 +326,10 @@ typedef struct {
     /* ua= / ipspec= cohort. has_cohort==0 means no UA/IP restriction. */
     bs_cohort          cohort;
     int                has_cohort;
-    /* budget= / per= -- a fixed-window counter on this rule, refusing
-     * with 429 once the window's budget is spent.
+    /* delay= / rate= -- a fixed-window counter on this rule, refusing
+     * with 429 once the window's budget is spent. delay=<s> is budget 1
+     * with one window per crawler; rate=<n>/<s> is budget n with one
+     * window shared by everyone the rule matches.
      *
      * A rate limit is a rule with a counter. bs_rate_limit_entry holds
      * name, cohort, budget, window and slot; a rule already has the
@@ -339,18 +341,19 @@ typedef struct {
      * budget == 0 means no rate limit on this rule. */
     apr_uint32_t       budget;
     apr_uint32_t       window_ms;
-    /* countper= -- the key the counter buckets by. Not a predicate:
-     * it decides which bucket, not whether the rule matched. Only
-     * BS_COUNT_TOTAL exists so far, one bucket per rule, which is what
-     * BotShieldRateLimit does today without saying so -- everyone
-     * matching shares one budget rather than getting one each. */
+    /* Which bucket the counter keys by. Not a predicate: it decides
+     * where the count lands, not whether the rule matched. Set by the
+     * spelling rather than by a knob of its own: rate= is BS_COUNT_TOTAL
+     * (one bucket per rule, shared -- what BotShieldRateLimit does
+     * without saying so) and delay= is BS_COUNT_SLUG (one per crawler,
+     * what Crawl-delay means). */
     int                count_key;
     /* Assigned in post_config alongside the rate-limit families, out
      * of the same BS_E21_RATE_SLOTS pool. -1 = none needed/available.
-     * Under countper=slug this is the fallback bucket for requests
-     * that are not a known bot. */
+     * Under delay= this is the fallback bucket for requests that are
+     * not a known bot. */
     int                shm_slot;
-    /* countper=slug only: slug -> int* slot, filled at post_config. */
+    /* delay= only: slug -> int* slot, filled at post_config. */
     apr_hash_t        *slug_slots;
     /* Resolved at post_config from a BotShieldRateLimitEscalate naming
      * this rule. The strike table is keyed on (address, slot), not on
@@ -360,9 +363,11 @@ typedef struct {
     bs_trigger_action  action;
 } bs_request_trigger_entry;
 
-/* countper= values. Only TOTAL is wired; the rest are the vocabulary
- * this is meant to grow into, and are rejected at parse time rather
- * than accepted and ignored. */
+/* What a rule's counter is keyed by. Implied by the spelling --
+ * rate= is TOTAL, delay= is SLUG -- rather than chosen separately;
+ * the knob that once chose it had a default, and the default was the
+ * trap. Per-address and per-session are not here because they need a
+ * counter table keyed on (subject, rule) rather than the fixed slot. */
 enum bs_count_key {
     BS_COUNT_TOTAL = 0,
     /* One counter per known-bot slug. What Crawl-delay means: each

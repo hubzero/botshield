@@ -29,7 +29,7 @@ import time
 
 import pytest
 
-from botshield_test import client, ratelimit
+from botshield_test import client
 
 
 # No longer serial. The marker meant "mutates Apache config or SHM",
@@ -51,7 +51,6 @@ def _hammer(ip: str, ua: str, n: int) -> list[int]:
     window. A tick crossing mid-burst resets the counter and the
     assertion reads a different burst than the one it describes.
     """
-    ratelimit.align_to_window()
     return [client.get("/", xff=ip, ua=ua).status_code for _ in range(n)]
 
 

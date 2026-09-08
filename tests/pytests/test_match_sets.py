@@ -76,13 +76,27 @@ def test_a_named_set_supplies_every_condition_in_it(config_override,
             )
 
 
-def test_paths_outside_the_set_are_untouched(config_override, fresh_ip):
-    """The control: expansion must not widen the rule."""
+def test_paths_outside_the_set_are_untouched(config_override, fresh_ip,
+                                             log_slice):
+    """The control: expansion must not widen the rule.
+
+    Asserted on the decision reason, not the status. The vhost has
+    other 403 sources -- the baseline signature scoring challenges an
+    unrecognised browser UA to noninteractive, which the harness client
+    cannot solve -- so `!= 403` tested the whole vhost and flaked on
+    cross-test state (2026-09-08, reason=unknownua,rule:sig-droppedcookie).
+    What this rule uniquely leaves behind is its own tag.
+    """
     with config_override(r"BotShieldEnabled\s+On", SHARED,
                          render=False, count=1):
-        assert _get("/set-gamma", fresh_ip).status_code != 403, (
-            "a path the set does not list must not match"
-        )
+        with log_slice as slc:
+            _get("/set-gamma", fresh_ip)
+            fired = [ln for ln in slc.grep(r'path="/set-gamma"')
+                     if "set-rule" in ln]
+    assert not fired, (
+        "a path the set does not list must not match, but the rule fired:\n"
+        + "\n".join(fired)
+    )
 
 
 def test_two_rules_can_share_one_set(config_override, fresh_ip):

@@ -529,10 +529,11 @@ int bs_check_policy(request_rec *r)
                  * else it says, over budget it refuses here and the
                  * rest of the rule is moot.
                  *
-                 * countper=total for now, so the bucket is the rule --
-                 * everyone matching shares one budget rather than
-                 * getting one each, which is what BotShieldRateLimit
-                 * has always done without saying so.
+                 * Under rate= the bucket is the rule -- everyone
+                 * matching shares one budget rather than getting one
+                 * each, which is what BotShieldRateLimit has always
+                 * done without saying so. Under delay= it is the
+                 * crawler; see below.
                  *
                  * No escalation here. BotShieldRateLimitEscalate binds
                  * to a BotShieldRateLimit by name and stays with it;
@@ -562,7 +563,7 @@ int bs_check_policy(request_rec *r)
                     return t->escalate->status_code;
                 }
 
-                /* countper=slug: the bucket is the crawler, not
+                /* delay=: the bucket is the crawler, not
                  * the rule. A UA that is not a known bot has no slug
                  * to key on and falls back to the rule's own slot,
                  * which makes unknown bots one shared bucket. */
@@ -584,7 +585,7 @@ int bs_check_policy(request_rec *r)
                      * action does NOT run -- on a rule carrying a
                      * budget the action is what exceeding it means, so
                      * applying it to an admitted request would make
-                     * `BotShieldBudget 1 / BotShieldRespond 451` answer
+                     * `BotShieldRate 1 1 / BotShieldRespond 451` answer
                      * 451 to the first request and the budget would
                      * change nothing. */
                     continue;
@@ -637,6 +638,31 @@ int bs_check_policy(request_rec *r)
                             || t->action.tier_floor >= 0
                             || (t->action.score_ops
                                 && t->action.score_ops->nelts > 0);
+                        /* Retry-After when the outcome is a refusal:
+                         * the default 429 or an explicit status. Not
+                         * for a rule that only marks -- that request
+                         * goes on to a 200, which has no business
+                         * carrying one. Seconds left in the window,
+                         * rounded UP so a sub-second remainder never
+                         * says 0 and invites an immediate retry. Read
+                         * from rc, the counter this request actually
+                         * spent from, which under delay= is the slug's
+                         * slot and not the rule's. err_headers_out,
+                         * because an error response keeps only those. */
+                        if (!has_action || t->action.status_explicit) {
+                            apr_uint32_t win_ms = __atomic_load_n(
+                                &rc->window_start_ms, __ATOMIC_RELAXED);
+                            apr_uint32_t now_ms =
+                                (apr_uint32_t)(apr_time_now() / 1000);
+                            apr_uint32_t gone = now_ms - win_ms;
+                            apr_uint32_t left = (gone < t->window_ms)
+                                                  ? t->window_ms - gone : 0;
+                            apr_uint32_t retry = (left + 999) / 1000;
+                            if (retry < 1) retry = 1;
+                            apr_table_setn(r->err_headers_out,
+                                "Retry-After",
+                                apr_psprintf(r->pool, "%u", retry));
+                        }
                         if (!has_action) {
                         if (!t->escalate || !rl_have_ip) {
                             bs_set_trigger_tag(r, t->action.log_tag
@@ -952,6 +978,19 @@ static const char *bs_psh_flag_names(apr_pool_t *p, apr_uint32_t bits)
  * way it was written rather than in struct order. Appends to a pool
  * string because the count is unbounded and a fixed buffer here would
  * silently truncate the one thing this dump exists to show. */
+/* Milliseconds as the seconds an operator would write: 1000 -> "1",
+ * 1500 -> "1.5", 500 -> "0.5". Three decimals is exact for any
+ * millisecond count, and trailing zeros are dropped so the dump reads
+ * as config rather than as a float. */
+static const char *bs_fmt_seconds(apr_pool_t *p, apr_uint32_t ms)
+{
+    if (ms % 1000 == 0) return apr_psprintf(p, "%u", ms / 1000);
+    char *s = apr_psprintf(p, "%u.%03u", ms / 1000, ms % 1000);
+    apr_size_t n = strlen(s);
+    while (n && s[n - 1] == '0') s[--n] = '\0';
+    return s;
+}
+
 static const char *bs_psh_rule_conditions(apr_pool_t *p,
                                           const bs_request_trigger_entry *t)
 {
@@ -998,19 +1037,13 @@ static const char *bs_psh_rule_conditions(apr_pool_t *p,
     if (t->latency_min_ms >= 0)
         BS_PSH_ADD("latencyatleast=%dms", t->latency_min_ms);
     if (t->budget > 0) {
-        /* Print the window as the operator could write it again --
-         * "?" for anything that was not one of three words told an
-         * operator nothing, and per= now takes a count. */
-        const char *per = t->window_ms == 1000       ? "sec"
-                        : t->window_ms == 60 * 1000   ? "min"
-                        : t->window_ms == 3600 * 1000 ? "hour" : NULL;
-        if (per) {
-            BS_PSH_ADD("budget=%u/%s countper=%s", t->budget, per,
-                       t->count_key == BS_COUNT_SLUG ? "slug" : "total");
+        /* Printed as the operator could write it again. A per-crawler
+         * window is delay=, everything else is rate=. */
+        if (t->count_key == BS_COUNT_SLUG && t->budget == 1) {
+            BS_PSH_ADD("delay=%s", bs_fmt_seconds(p, t->window_ms));
         } else {
-            BS_PSH_ADD("budget=%u/%usec countper=%s", t->budget,
-                       t->window_ms / 1000,
-                       t->count_key == BS_COUNT_SLUG ? "slug" : "total");
+            BS_PSH_ADD("rate=%u/%s", t->budget,
+                       bs_fmt_seconds(p, t->window_ms));
         }
     }
     if (t->score_pred_name)
