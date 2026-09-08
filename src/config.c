@@ -1552,6 +1552,37 @@ static void bs_wire_rate_and_block_cohorts(apr_pool_t *pconf,
                 if (*next_slot < (int)bs_shm.rate_counter_count) {
                     t->shm_slot = (*next_slot)++;
                     rule_rate++;
+                    if (t->count_key == BS_COUNT_SLUG) {
+                        /* One slot per known slug. The directory is
+                         * large against the pool, so take what is
+                         * available and say plainly when it runs out:
+                         * a rule counting some crawlers and silently
+                         * not others is worse than one that says it
+                         * gave up. */
+                        int got = 0, missed = 0;
+                        t->slug_slots = apr_hash_make(pconf);
+                        for (int k = 0; bs_known_bots[k].slug; k++) {
+                            if (*next_slot >= (int)bs_shm.rate_counter_count) {
+                                missed++;
+                                continue;
+                            }
+                            int *sp = apr_palloc(pconf, sizeof(*sp));
+                            *sp = (*next_slot)++;
+                            apr_hash_set(t->slug_slots,
+                                         bs_known_bots[k].slug,
+                                         APR_HASH_KEY_STRING, sp);
+                            got++;
+                        }
+                        if (missed) {
+                            ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
+                                "mod_botshield: rule '%s' countper=slug "
+                                "got %d of %d slugs; the remaining %d "
+                                "share the rule's fallback counter. "
+                                "Raise BS_E21_RATE_SLOTS in src/config.c "
+                                "and rebuild.",
+                                t->name, got, got + missed, missed);
+                        }
+                    }
                 } else {
                     ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
                         "mod_botshield: rate-limit slot pool exhausted "
@@ -1587,11 +1618,30 @@ static void bs_wire_rate_and_block_cohorts(apr_pool_t *pconf,
                         }
                     }
                 }
+                /* A rule carrying budget= is a rate limit by
+                 * another spelling, so an escalate may name one. Rate
+                 * limits are searched first only because they are the
+                 * older spelling; a name should not be shared between
+                 * the two, and if it is, the first wins in the order
+                 * an operator would read them. */
+                if (!linked && vcfg->request_triggers) {
+                    for (int j = 0; j < vcfg->request_triggers->nelts; j++) {
+                        bs_request_trigger_entry *rt = APR_ARRAY_IDX(
+                            vcfg->request_triggers, j,
+                            bs_request_trigger_entry *);
+                        if (rt->budget == 0) continue;
+                        if (strcmp(rt->name, esc->rule_name) == 0) {
+                            rt->escalate = esc;
+                            linked = 1;
+                            break;
+                        }
+                    }
+                }
                 if (!linked) {
                     ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
                         "mod_botshield: BotShieldRateLimitEscalate '%s' "
-                        "names no matching BotShieldRateLimit at this "
-                        "scope; directive is inert",
+                        "names no matching BotShieldRateLimit and no rule "
+                        "with budget= at this scope; directive is inert",
                         esc->rule_name);
                 }
             }

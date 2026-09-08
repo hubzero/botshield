@@ -42,6 +42,7 @@
 #include "score.h"     /* bs_score_add */
 #include "shm.h"       /* bs_flagged_ip_add */
 #include "triggers.h"
+#include "robots.h"      /* robots_doc accessors */
 
 /* Is this cookie-name on the operator-curated session-name list?
  * Linear scan — list is short (typically <10 entries) so an O(n)
@@ -1169,6 +1170,8 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
     e->window_sec      = 0;
     e->count_key       = BS_COUNT_TOTAL;
     e->shm_slot        = -1;          /* assigned at post_config */
+    e->slug_slots      = NULL;        /* countper=slug only */
+    e->escalate        = NULL;        /* linked at post_config */
     e->flagged_bit = 0;               /* no flagged= condition */
     e->ck_pred     = -1;              /* no cookie= condition */
     e->env_pred    = -1;              /* no env= condition */
@@ -1372,23 +1375,56 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
             if (klen == 3 && strncasecmp(arg, "per", 3) == 0) {
                 /* Same words BotShieldRateLimit takes, so an operator
                  * moving a limit into a rule does not also have to
-                 * learn a new spelling for the window. */
-                if      (!strcasecmp(val, "sec")  || !strcasecmp(val, "s"))
-                    e->window_sec = 1;
-                else if (!strcasecmp(val, "min")  || !strcasecmp(val, "m"))
-                    e->window_sec = 60;
-                else if (!strcasecmp(val, "hour") || !strcasecmp(val, "h"))
-                    e->window_sec = 3600;
+                 * learn a new spelling for the window -- plus an
+                 * optional count in front of the unit.
+                 *
+                 * `Crawl-delay: 10` is one request per ten seconds and
+                 * had no spelling here: sec, min and hour with nothing
+                 * between them. window_sec has always been an int, so
+                 * the gap was in this parser rather than in the
+                 * storage, and robots.txt could say something the
+                 * config could not. */
+                const char *u = val;
+                long mult = 1;
+                if (apr_isdigit((unsigned char)*u)) {
+                    char *uend = NULL;
+                    mult = strtol(u, &uend, 10);
+                    u = uend ? uend : u;
+                    while (*u == ' ' || *u == '\t') u++;
+                    if (mult < 1) {
+                        return apr_psprintf(cmd->pool,
+                            "%s: per='%s' needs a count of at least 1",
+                            D, val);
+                    }
+                }
+                long unit;
+                if      (!strcasecmp(u, "sec")  || !strcasecmp(u, "s")
+                      || !*u)
+                    unit = 1;   /* bare number means seconds */
+                else if (!strcasecmp(u, "min")  || !strcasecmp(u, "m"))
+                    unit = 60;
+                else if (!strcasecmp(u, "hour") || !strcasecmp(u, "h"))
+                    unit = 3600;
                 else {
                     return apr_psprintf(cmd->pool,
                         "%s: per='%s' must be sec, min or hour "
-                        "(s/m/h accepted)", D, val);
+                        "(s/m/h accepted), optionally with a count in "
+                        "front: per=10sec", D, val);
                 }
+                long secs = mult * unit;
+                if (secs < 1 || secs > 86400) {
+                    return apr_psprintf(cmd->pool,
+                        "%s: per='%s' is %ld seconds; the window must be "
+                        "1..86400", D, val, secs);
+                }
+                e->window_sec = (apr_uint32_t)secs;
                 continue;
             }
             if (klen == 8 && strncasecmp(arg, "countper", 8) == 0) {
                 if (!strcasecmp(val, "total")) {
                     e->count_key = BS_COUNT_TOTAL;
+                } else if (!strcasecmp(val, "slug")) {
+                    e->count_key = BS_COUNT_SLUG;
                 } else if (!strcasecmp(val, "client")
                         || !strcasecmp(val, "session")) {
                     return apr_psprintf(cmd->pool,
@@ -1398,7 +1434,8 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                         "'total' works, and it is the default.", D, val);
                 } else {
                     return apr_psprintf(cmd->pool,
-                        "%s: countper='%s' must be 'total'", D, val);
+                        "%s: countper='%s' must be 'total' or 'slug'",
+                        D, val);
                 }
                 continue;
             }

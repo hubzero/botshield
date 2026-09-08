@@ -1872,7 +1872,7 @@ compares against. Per **CPU**, so a threshold means the same thing on a
 
 ### Rate-limiting from a rule
 
-`BotShieldBudget <n>` and `BotShieldPer <sec|min|hour>` put a
+`BotShieldBudget <n>` and `BotShieldPer <[count]sec|min|hour>` put a
 fixed-window counter on a rule. Once the window's budget is spent the
 rule answers `429`; under budget it carries on to whatever else it
 says.
@@ -1895,6 +1895,14 @@ so the example above cannot be written with that directive at all. On a
 rule, every condition is available: path, query, cookies, `solved=`,
 `flagged=`, `latencyatleast=`, and the rest.
 
+`BotShieldPer` takes an optional count in front of the unit, so
+windows other than one second, minute or hour are sayable:
+`per 10sec`, `per 2min`, or a bare `per 30` meaning thirty seconds.
+The ceiling is 86400. Before 2026-09-07 the three bare units were the
+only spellings, which meant `Crawl-delay: 10` -- one request per ten
+seconds -- could be written in robots.txt and not in a rule, even
+though the window has always been stored as a plain integer.
+
 `BotShieldBudget` and `BotShieldPer` must be given together. Half a
 rate limit is not a smaller one, it is a rule that silently has none.
 
@@ -1905,9 +1913,24 @@ decides which counter the match is spent from.
 
 | value | one bucket per | status |
 |---|---|---|
-| `total` | rule | the default, and the only one implemented |
+| `total` | rule | the default |
+| `slug` | known-bot slug | implemented |
 | `client` | client address | refused at parse time |
 | `session` | session cookie | refused at parse time |
+
+`slug` is what a robots.txt `Crawl-delay` means: **each** crawler gets
+the budget rather than all of them sharing one. The difference is
+invisible in the config and drastic in effect --
+`BotShieldUserAgent @bot` with `BotShieldBudget 1 / BotShieldPer sec`
+under `total` gives the entire crawler population one request a second
+between them.
+
+It costs a counter slot per entry in the bot directory, which is large
+against the pool, so post_config allocates what it can and logs a
+warning naming the rule when it cannot; the slugs that missed out
+share the rule's own slot. A request whose UA is not a known bot has
+no slug to key on and uses that same fallback, which makes unknown
+bots one shared bucket.
 
 `total` means **everyone matching shares one budget** rather than
 getting one each. That is what `BotShieldRateLimit` has always done

@@ -530,18 +530,113 @@ int bs_check_policy(request_rec *r)
                  * to a BotShieldRateLimit by name and stays with it;
                  * bringing strikes across is the next piece, not this
                  * one. */
+                int rl_observe = (t->action.mode == BS_TMODE_OBSERVE);
+                unsigned char rl_ip[16];
+                int rl_have_ip = bs_parse_client_ip(r->useragent_ip, rl_ip);
+                if (rl_have_ip)
+                    bs_mask_ipv6_prefix(rl_ip, scfg->ipv6_prefix_bits);
+                apr_int64_t rl_now = (apr_int64_t)apr_time_sec(apr_time_now());
+
+                /* Already escalated: refuse with the operator's status
+                 * without spending from the window. Suppressed under
+                 * observe, which must not enforce. */
+                if (!rl_observe && t->escalate && rl_have_ip
+                    && bs_strike_check_escalated(rl_ip,
+                                                 (apr_uint32_t)t->shm_slot,
+                                                 rl_now, scfg->ns_id)) {
+                    bs_score_add(r, BS_PENALTY_RATE_LIMIT,
+                        apr_pstrcat(r->pool, "ratelimitabuse:",
+                                    t->name, NULL));
+                    bs_flag_client(r, BS_FLAG_RATE_ABUSE,
+                        bs_rate_flag_ttl((apr_uint32_t)t->escalate->ttl_sec));
+                    bs_set_trigger_tag(r, t->escalate->log_tag
+                                          ? t->escalate->log_tag : t->name);
+                    return t->escalate->status_code;
+                }
+
+                /* countper=slug: the bucket is the crawler, not
+                 * the rule. A UA that is not a known bot has no slug
+                 * to key on and falls back to the rule's own slot,
+                 * which makes unknown bots one shared bucket. */
+                int rl_slot = t->shm_slot;
+                if (t->count_key == BS_COUNT_SLUG && t->slug_slots) {
+                    const bs_ua_class *rl_cls = bs_classify_request_ua(r);
+                    if (rl_cls && rl_cls->known_slug) {
+                        int *sp = apr_hash_get(t->slug_slots,
+                                               rl_cls->known_slug,
+                                               APR_HASH_KEY_STRING);
+                        if (sp) rl_slot = *sp;
+                    }
+                }
                 bs_rate_counter *rc =
-                    &((bs_rate_counter *)bs_shm.rate_counters)[t->shm_slot];
-                if (!bs_rate_counter_admit(rc, t->budget, t->window_sec)) {
-                    int observe = (t->action.mode == BS_TMODE_OBSERVE);
+                    &((bs_rate_counter *)bs_shm.rate_counters)[rl_slot];
+                if (bs_rate_counter_admit(rc, t->budget, t->window_sec)) {
+                    /* Under budget: the request has spent from the
+                     * window and this rule is finished with it. The
+                     * action does NOT run -- on a rule carrying a
+                     * budget the action is what exceeding it means, so
+                     * applying it to an admitted request would make
+                     * `BotShieldBudget 1 / BotShieldRespond 451` answer
+                     * 451 to the first request and the budget would
+                     * change nothing. */
+                    continue;
+                }
+                {
                     bs_score_add(r, BS_PENALTY_RATE_LIMIT,
                         apr_pstrcat(r->pool, "ratelimitexceeded:",
-                                    t->name, observe ? ":observe" : "",
+                                    t->name, rl_observe ? ":observe" : "",
                                     NULL));
-                    if (!observe) {
-                        bs_set_trigger_tag(r, t->action.log_tag
-                                              ? t->action.log_tag : t->name);
+                    if (!rl_observe) {
+                        bs_flag_client(r, BS_FLAG_RATE_ABUSE,
+                                       bs_rate_flag_ttl(t->window_sec));
+                        if (t->escalate && rl_have_ip) {
+                            int crossed = bs_strike_record_429(r, rl_ip,
+                                (apr_uint32_t)t->shm_slot,
+                                t->escalate->per_sec, t->escalate->strikes,
+                                t->escalate->ttl_sec, rl_now, scfg->ns_id);
+                            if (crossed) {
+                                ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r,
+                                    "mod_botshield: ratelimitabuse threshold "
+                                    "crossed for rule '%s' from ip=%s; "
+                                    "escalating to status=%d for %ds",
+                                    t->name, r->useragent_ip,
+                                    t->escalate->status_code,
+                                    t->escalate->ttl_sec);
+                                bs_set_trigger_tag(r, t->escalate->log_tag);
+                            }
+                        }
+                        /* Over budget runs whatever the rule says,
+                         * so a spent budget composes like any other
+                         * match: BotShieldRespond 403 refuses
+                         * differently, BotShieldChallenge asks instead
+                         * of refusing, BotShieldScore or
+                         * BotShieldFlagIP mark the client and let a
+                         * rule further down decide.
+                         *
+                         * That last shape is what the separate family
+                         * could not offer. Rate limits ran at step 7,
+                         * after every rule, so a flag one of them
+                         * wrote could not be a condition in the same
+                         * request. Here flagged= reads what rules
+                         * above it wrote, which is the same property
+                         * that makes trap-then-act work in one
+                         * request.
+                         *
+                         * 429 stays the default, for a rule that
+                         * declares a budget and nothing else. */
+                        int has_action =
+                            t->action.status_explicit
+                            || t->action.tier_floor >= 0
+                            || (t->action.score_ops
+                                && t->action.score_ops->nelts > 0);
+                        if (!has_action) {
+                        if (!t->escalate || !rl_have_ip) {
+                            bs_set_trigger_tag(r, t->action.log_tag
+                                                  ? t->action.log_tag
+                                                  : t->name);
+                        }
                         return HTTP_TOO_MANY_REQUESTS;
+                        }
                     }
                 }
             }
@@ -889,10 +984,20 @@ static const char *bs_psh_rule_conditions(apr_pool_t *p,
     if (t->latency_min_ms >= 0)
         BS_PSH_ADD("latencyatleast=%dms", t->latency_min_ms);
     if (t->budget > 0) {
+        /* Print the window as the operator could write it again --
+         * "?" for anything that was not one of three words told an
+         * operator nothing, and per= now takes a count. */
         const char *per = t->window_sec == 1    ? "sec"
                         : t->window_sec == 60   ? "min"
-                        : t->window_sec == 3600 ? "hour" : "?";
-        BS_PSH_ADD("budget=%u/%s countper=total", t->budget, per);
+                        : t->window_sec == 3600 ? "hour" : NULL;
+        if (per) {
+            BS_PSH_ADD("budget=%u/%s countper=%s", t->budget, per,
+                       t->count_key == BS_COUNT_SLUG ? "slug" : "total");
+        } else {
+            BS_PSH_ADD("budget=%u/%usec countper=%s", t->budget,
+                       t->window_sec,
+                       t->count_key == BS_COUNT_SLUG ? "slug" : "total");
+        }
     }
     if (t->score_pred_name)
         BS_PSH_ADD("scoreatleast=%s %d", t->score_pred_name,

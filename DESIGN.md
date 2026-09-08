@@ -1111,6 +1111,120 @@ Reason strings:
   dangerous).
 - `off` — ignore `*` groups entirely.
 
+### Designed, not built: `<BotShieldRobots>` (2026-09-08)
+
+A decision record. None of this exists in the code; it is written down
+because the reasoning took a long conversation to arrive at and would
+otherwise have to be rediscovered.
+
+**The problem.** robots.txt enforcement has no configuration surface.
+`BotShieldRobotsTxt` points at a file and that is the whole of it, so
+the policy can be read from disk and not written by an operator. On the
+deployment this was built for, the directive is not even set -- which
+is why robots.txt there is advisory, and why 27 named AI crawlers at
+`Disallow: /` are currently being asked rather than refused.
+
+**The shape.** One container per server scope, holding both the file
+and any hand-written groups:
+
+```apache
+<BotShieldRobots>
+    BotShieldRobotsTxt       /var/www/site/robots.txt
+    BotShieldMode            observe
+    BotShieldWildcardScope   knownbots
+    BotShieldRefreshInterval 60
+
+    <BotShieldRobotRule ai-crawlers>
+        BotShieldUserAgent  GPTBot
+        BotShieldUserAgent  ClaudeBot
+        BotShieldDisallow   /
+        BotShieldRespond    404
+        BotShieldMode       enforce
+    </BotShieldRobotRule>
+</BotShieldRobots>
+```
+
+The four `BotShieldRobots*` directives become block keys, the same move
+that took `BotShieldPath` and `BotShieldRespond` inside
+`<BotShieldRule>`. That is 84 registered directives down to 80.
+
+The knobs are the payoff over the file alone: a status code (robots.txt
+cannot say 404 rather than 403), a dry run, a log tag, and a place to
+put conditions the file has no vocabulary for.
+
+**The container is the precedence scope, not decoration.** This is the
+justification. robots.txt resolves by longest match across the whole
+set, so a rule's meaning depends on its siblings -- add a longer
+`Allow` and an existing `Disallow` silently stops applying to some
+paths. That coupling is the opposite of `<BotShieldRule>`, where each
+rule stands alone and order is written down. The container names the
+set within which precedence is computed, which also settles what
+happens when the file and inline groups coexist: they merge into one
+scope and resolve together.
+
+One container per server scope. A redefinition is refused rather than
+merged or last-one-wins, the way `<BotShieldMatch>` already refuses
+one: two of these would be two independent precedence scopes, and
+nothing good comes of an operator discovering that by accident.
+
+**Mode inherits and a rule overrides it.** The container sets the
+default; a rule may set its own. Both directions are useful -- an
+observing container with one group armed is how this gets staged, and
+an enforcing container with one group observing is how a new group
+joins an armed set.
+
+Mixed modes inside one set raise a question that cannot arise today,
+because `BotShieldRobotsMode` is scope-wide and every rule shares it:
+when an observe rule is the longest match and a shorter rule would have
+enforced, does the observe rule govern? It does not. Observe rules log
+and step aside; the longest *enforcing* rule still applies. Not because
+the alternative is dangerous -- "the longest match governs, observe
+means do not act on it" is coherent -- but because request rules
+already work that way. A `BotShieldMode observe` request rule logs
+`:observe`, does not act, and lets the walk continue, so observed rules
+never shadow enforced ones. The word should mean the same thing in both
+families.
+
+**Why robots keeps its own evaluator.** It was proposed that robots
+should expand into ordinary `<BotShieldRule>` entries and the parallel
+engine be deleted. Most of it does expand: named groups at
+`Disallow: /`, wildcard `Disallow` paths, and -- since `countper=slug`
+exists -- `Crawl-delay`. What does not is `Allow` together with
+`Crawl-delay`.
+
+An `Allow` becomes a pass. A pass does `break` on the rule walk, by
+design: the comment at that line records that a pass which did not
+shadow later rules once made declared crawlers unratelimitable across
+most of the site. So the `Allow` rule, which longest-match ordering
+requires be declared first, stops the walk before the Crawl-delay rule
+below is reached, and allowed paths escape the rate limit. Declaring
+Crawl-delay first fixes that and makes a disallowed path spend from the
+window before being refused. One or the other, not both: a single
+first-match ladder with one short-circuit cannot carry two independent
+axes -- the path verdict and the rate budget -- that robots.txt
+evaluates separately.
+
+There is a second, softer reason. Expressing robots.txt as rules
+requires a global sort by UA token length descending, then pattern
+length descending, with `Allow` ahead of `Disallow` on ties. The
+failure mode is silent: a mis-ordered `Allow` does not error, it just
+never takes effect. robots.txt is order-independent by construction and
+a rule ladder is order-dependent by construction, so the translation
+moves precedence resolution from the engine onto the person writing the
+config. The exercise that produced this record got that ordering wrong
+in a first draft -- Disallow before Crawl-delay was presented as
+generally faithful when it is only faithful for a file with no `Allow`
+lines.
+
+**Rejected.** Deleting the robots evaluator in favour of rules, for the
+reasons above. Also rejected: building a synthesizer that populates
+rule entries from the parsed document. It was written and discarded
+once the question turned out to be whether the policy is *expressible*
+rather than how it is stored. One finding from it is worth keeping: a
+zeroed `bs_cohort` has `ip_any == 0` and `ranges == NULL`, and
+`bs_cohort_matches` reads that as refuse-everything, so any hand-built
+rule entry that forgets `ip_any` silently never matches.
+
 ### Live refresh (E2.2.2)
 
 ```c

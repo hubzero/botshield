@@ -346,8 +346,17 @@ typedef struct {
      * matching shares one budget rather than getting one each. */
     int                count_key;
     /* Assigned in post_config alongside the rate-limit families, out
-     * of the same BS_E21_RATE_SLOTS pool. -1 = none needed/available. */
+     * of the same BS_E21_RATE_SLOTS pool. -1 = none needed/available.
+     * Under countper=slug this is the fallback bucket for requests
+     * that are not a known bot. */
     int                shm_slot;
+    /* countper=slug only: slug -> int* slot, filled at post_config. */
+    apr_hash_t        *slug_slots;
+    /* Resolved at post_config from a BotShieldRateLimitEscalate naming
+     * this rule. The strike table is keyed on (address, slot), not on
+     * which family owns the slot, so nothing below this pointer needed
+     * to change to make escalation work on a rule. */
+    const struct bs_rate_escalate_entry *escalate;
     bs_trigger_action  action;
 } bs_request_trigger_entry;
 
@@ -355,7 +364,15 @@ typedef struct {
  * this is meant to grow into, and are rejected at parse time rather
  * than accepted and ignored. */
 enum bs_count_key {
-    BS_COUNT_TOTAL = 0
+    BS_COUNT_TOTAL = 0,
+    /* One counter per known-bot slug. What Crawl-delay means: each
+     * crawler gets the budget, rather than all of them sharing one.
+     * Costs a slot per slug in the directory, so post_config allocates
+     * what the pool allows and says so when it cannot. A request whose
+     * UA is not a known bot falls back to the rule's own slot, which
+     * makes unknown bots one shared bucket -- the same shape
+     * bs_bot_rate uses for its unknownbot aggregate. */
+    BS_COUNT_SLUG
 };
 
 /* Cookie predicate kinds. Per-named lookups (NAMED_*) target a
@@ -443,7 +460,7 @@ typedef struct {
     apr_uint32_t  budget;
     apr_uint32_t  window_sec;
     int           shm_slot;
-    const bs_rate_escalate_entry *escalate;
+    const struct bs_rate_escalate_entry *escalate;
     int           mode;
 } bs_rate_limit_entry;
 
