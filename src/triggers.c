@@ -1167,7 +1167,7 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
     e->loadavg_min_pct = -1;          /* no loadavg condition */
     e->latency_min_ms  = -1;          /* no latency condition */
     e->budget          = 0;           /* no rate limit */
-    e->window_sec      = 0;
+    e->window_ms      = 0;
     e->count_key       = BS_COUNT_TOTAL;
     e->shm_slot        = -1;          /* assigned at post_config */
     e->slug_slots      = NULL;        /* countper=slug only */
@@ -1380,7 +1380,7 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                  *
                  * `Crawl-delay: 10` is one request per ten seconds and
                  * had no spelling here: sec, min and hour with nothing
-                 * between them. window_sec has always been an int, so
+                 * between them. window_ms has always been an int, so
                  * the gap was in this parser rather than in the
                  * storage, and robots.txt could say something the
                  * config could not. */
@@ -1417,7 +1417,7 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                         "%s: per='%s' is %ld seconds; the window must be "
                         "1..86400", D, val, secs);
                 }
-                e->window_sec = (apr_uint32_t)secs;
+                e->window_ms = (apr_uint32_t)secs * 1000;
                 continue;
             }
             if (klen == 8 && strncasecmp(arg, "countper", 8) == 0) {
@@ -1655,7 +1655,7 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
 
     /* Half a rate limit is not a smaller rate limit, it is a rule
      * that silently does not have one. */
-    if ((e->budget > 0) != (e->window_sec > 0)) {
+    if ((e->budget > 0) != (e->window_ms > 0)) {
         return apr_psprintf(cmd->pool,
             "%s '%s': budget= and per= must be given together (%s)",
             D, name,

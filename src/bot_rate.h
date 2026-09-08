@@ -45,7 +45,7 @@ extern "C" {
 typedef struct bs_bot_rate_slot {
     int          shm_slot;       /* index into bs_shm.rate_counters; -1 = unallocated */
     apr_uint32_t budget;
-    apr_uint32_t window_sec;
+    apr_uint32_t window_ms;
     const char  *origin;         /* "directive" or "wildcard" or "robots.txt" */
     int          observe;        /* copied from the entry that created it */
     /* Botgroup aggregate this slug also counts against, or NULL.
@@ -98,7 +98,7 @@ typedef struct bs_bot_rate_entry {
     int                 is_botgroup;     /* @botgroup selector */
     const char         *botgroup_name;   /* "search"/"ai-input"/etc.; non-NULL when is_botgroup */
     apr_uint32_t        budget;
-    apr_uint32_t        window_sec;
+    apr_uint32_t        window_ms;
     apr_array_header_t *slugs;       /* const char *; NULL for wildcard */
     bs_bot_rate_scope   scope;       /* each (default) | group | total */
     int                 shm_slot;    /* shared across this entry's slugs (specific only) */

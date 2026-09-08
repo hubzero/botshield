@@ -75,7 +75,7 @@ void bs_policy_dump(server_rec *s, apr_pool_t *p, bs_dir_cfg *cfg);
  * for the slug-keyed bot rate limit. */
 int bs_rate_counter_admit(bs_rate_counter *slot,
                           apr_uint32_t budget,
-                          apr_uint32_t window_sec);
+                          apr_uint32_t window_ms);
 
 /* Flag the request's client address. Shared with bot_rate.c so the
  * slug-keyed limit records a trip the same way the cohort limit does;
@@ -89,7 +89,7 @@ void bs_flag_client(request_rec *r, apr_uint32_t bits, int ttl_sec);
  * minute, an hour's for an hour -- so the flag's lifetime tracks the
  * limit that produced it without an operator setting a second number
  * that has to agree with the first. */
-int bs_rate_flag_ttl(apr_uint32_t window_sec);
+int bs_rate_flag_ttl(apr_uint32_t window_ms);
 
 #ifdef __cplusplus
 }

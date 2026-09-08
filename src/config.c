@@ -3779,7 +3779,7 @@ const char *bs_set_rate_limit(cmd_parms *cmd, void *dconf,
     bs_rate_limit_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
     e->name       = apr_pstrdup(cmd->pool, name);
     e->budget     = (apr_uint32_t)budget;
-    e->window_sec = (apr_uint32_t)unit;
+    e->window_ms = (apr_uint32_t)unit * 1000;
     e->shm_slot   = -1;
     e->mode       = mode;
     /* In the new form an omitted ua=/ipspec= defaults to "*" (any).

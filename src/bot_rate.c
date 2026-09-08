@@ -22,7 +22,7 @@
 #include <http_log.h>
 
 
-/* Parse "<budget> <per>" into (budget, window_sec). Returns NULL
+/* Parse "<budget> <per>" into (budget, window_ms). Returns NULL
  * on success, an error string on failure. */
 static const char *
 parse_budget_window(apr_pool_t *p, const char *budget_s, const char *per_s,
@@ -34,21 +34,24 @@ parse_budget_window(apr_pool_t *p, const char *budget_s, const char *per_s,
         return apr_psprintf(p,
             "budget '%s' must be 1..1000000", budget_s);
     }
-    apr_uint32_t window;
-    if      (!strcasecmp(per_s, "sec")  || !strcasecmp(per_s, "s")) window = 1;
-    else if (!strcasecmp(per_s, "min")  || !strcasecmp(per_s, "m")) window = 60;
-    else if (!strcasecmp(per_s, "hour") || !strcasecmp(per_s, "h")) window = 3600;
+    apr_uint32_t window_ms;
+    if      (!strcasecmp(per_s, "sec")  || !strcasecmp(per_s, "s"))
+        window_ms = 1000;
+    else if (!strcasecmp(per_s, "min")  || !strcasecmp(per_s, "m"))
+        window_ms = 60 * 1000;
+    else if (!strcasecmp(per_s, "hour") || !strcasecmp(per_s, "h"))
+        window_ms = 3600 * 1000;
     else return apr_psprintf(p,
             "per '%s' must be sec|min|hour (or s|m|h)", per_s);
     *out_budget = (apr_uint32_t)bn;
-    *out_window = window;
+    *out_window = window_ms;
     return NULL;
 }
 
 
 /* Parse a single integer "<delay-sec>" into (budget=1, window). 0 is
  * accepted and means "admit all" — bs_rate_counter_admit treats
- * window_sec=0 as a constantly-rolling window where every CAS lands
+ * window_ms=0 as a constantly-rolling window where every CAS lands
  * a fresh count=1. */
 static const char *
 parse_delay(apr_pool_t *p, const char *delay_s,
@@ -62,7 +65,9 @@ parse_delay(apr_pool_t *p, const char *delay_s,
             delay_s);
     }
     *out_budget = 1;
-    *out_window = (apr_uint32_t)ns;
+    /* The directive is seconds; the counter is milliseconds. 86400s
+     * is 86.4M ms, well inside apr_uint32_t. */
+    *out_window = (apr_uint32_t)ns * 1000;
     return NULL;
 }
 
@@ -153,7 +158,7 @@ const char *bs_set_bot_rate_limit(cmd_parms *cmd, void *dconf,
     e->shm_slot   = -1;
     e->observe    = want_observe;
     e->budget     = budget;
-    e->window_sec = window;
+    e->window_ms = window;
     e->scope      = want_scope;
 
     /* The selector and the scope have to agree. A shared budget over a
@@ -254,7 +259,7 @@ const char *bs_set_bot_rate_limit(cmd_parms *cmd, void *dconf,
 static bs_bot_rate_slot *
 allocate_holder(apr_pool_t *pconf, server_rec *sv,
                 const char *what, int *next_slot,
-                apr_uint32_t budget, apr_uint32_t window_sec,
+                apr_uint32_t budget, apr_uint32_t window_ms,
                 const char *origin, int observe)
 {
     if (*next_slot >= (int)bs_shm.rate_counter_count) {
@@ -268,7 +273,7 @@ allocate_holder(apr_pool_t *pconf, server_rec *sv,
     bs_bot_rate_slot *h = apr_pcalloc(pconf, sizeof(*h));
     h->shm_slot   = (*next_slot)++;
     h->budget     = budget;
-    h->window_sec = window_sec;
+    h->window_ms = window_ms;
     h->origin     = origin;
     h->observe    = observe;
     return h;
@@ -327,7 +332,7 @@ static int register_robots_entries(apr_pool_t *pconf, server_rec *sv,
         bs_bot_rate_entry *e = apr_pcalloc(pconf, sizeof(*e));
         e->origin     = "robots.txt";
         e->budget     = 1;
-        e->window_sec = (apr_uint32_t)crawl_delay;
+        e->window_ms = (apr_uint32_t)crawl_delay * 1000;
         e->shm_slot   = -1;
 
         if (robots_group_is_wildcard_at(rstate->doc, g)) {
@@ -385,7 +390,7 @@ static int register_robots_entries(apr_pool_t *pconf, server_rec *sv,
         bs_bot_rate_slot *h = allocate_holder(pconf, sv,
             apr_pstrcat(pconf, "robots.txt ",
                 APR_ARRAY_IDX(e->slugs, 0, const char *), NULL),
-            next_slot, e->budget, e->window_sec, e->origin, e->observe);
+            next_slot, e->budget, e->window_ms, e->origin, e->observe);
         if (!h) continue;
         e->shm_slot = h->shm_slot;
         for (int j = 0; j < e->slugs->nelts; j++) {
@@ -475,7 +480,7 @@ void bs_bot_rate_init(apr_pool_t *pconf, server_rec *s, int *next_slot)
                 ? APR_ARRAY_IDX(e->slugs, 0, const char *) : "?";
             bs_bot_rate_slot *h = allocate_holder(pconf, sv,
                 apr_pstrcat(pconf, "directive ", first_slug, NULL),
-                next_slot, e->budget, e->window_sec, e->origin, e->observe);
+                next_slot, e->budget, e->window_ms, e->origin, e->observe);
             if (!h) continue;
             e->shm_slot = h->shm_slot;
             specific_count++;
@@ -513,7 +518,7 @@ void bs_bot_rate_init(apr_pool_t *pconf, server_rec *s, int *next_slot)
                 bs_bot_rate_slot *h = allocate_holder(pconf, sv,
                     apr_pstrcat(pconf, "botgroup:", e->botgroup_name,
                                 " ", slug, NULL),
-                    next_slot, e->budget, e->window_sec,
+                    next_slot, e->budget, e->window_ms,
                     apr_pstrcat(pconf, "botgroup:", e->botgroup_name,
                                 NULL), e->observe);
                 if (!h) break;
@@ -528,7 +533,7 @@ void bs_bot_rate_init(apr_pool_t *pconf, server_rec *s, int *next_slot)
          * wildcard-fallback). */
         if (st->wildcard_entry) {
             apr_uint32_t budget = st->wildcard_entry->budget;
-            apr_uint32_t window = st->wildcard_entry->window_sec;
+            apr_uint32_t window_ms = st->wildcard_entry->window_ms;
             for (int i = 0; bs_known_bots[i].slug != NULL; i++) {
                 const char *slug = bs_known_bots[i].slug;
                 if (apr_hash_get(st->by_slug, slug, APR_HASH_KEY_STRING)) {
@@ -536,20 +541,21 @@ void bs_bot_rate_init(apr_pool_t *pconf, server_rec *s, int *next_slot)
                 }
                 bs_bot_rate_slot *h = allocate_holder(pconf, sv,
                     apr_pstrcat(pconf, "wildcard ", slug, NULL),
-                    next_slot, budget, window, "wildcard", st->wildcard_entry->observe);
+                    next_slot, budget, window_ms, "wildcard",
+                    st->wildcard_entry->observe);
                 if (!h) break;  /* pool exhausted; remaining slugs unprotected */
                 apr_hash_set(st->by_slug, slug, APR_HASH_KEY_STRING, h);
                 wildcard_count++;
             }
             st->unknown_bot_holder = allocate_holder(pconf, sv,
                 "unknownbot aggregate", next_slot,
-                budget, window, "wildcard:unknownbot", st->wildcard_entry->observe);
+                budget, window_ms, "wildcard:unknownbot", st->wildcard_entry->observe);
             st->no_ua_holder       = allocate_holder(pconf, sv,
                 "no-ua aggregate", next_slot,
-                budget, window, "wildcard:no-ua", st->wildcard_entry->observe);
+                budget, window_ms, "wildcard:no-ua", st->wildcard_entry->observe);
             st->fake_bot_holder    = allocate_holder(pconf, sv,
                 "fake-bot aggregate", next_slot,
-                budget, window, "wildcard:fake-bot", st->wildcard_entry->observe);
+                budget, window_ms, "wildcard:fake-bot", st->wildcard_entry->observe);
             /* v2a — fallback for slugs added mid-run that missed
              * the post_config snapshot (e.g., bot-directory watchdog
              * refresh adds entries; their slugs aren't in by_slug
@@ -557,7 +563,7 @@ void bs_bot_rate_init(apr_pool_t *pconf, server_rec *s, int *next_slot)
              * v2b's SHM-resident slot table lands. */
             st->wildcard_fallback_holder = allocate_holder(pconf, sv,
                 "wildcard-fallback aggregate", next_slot,
-                budget, window, "wildcard:fallback", st->wildcard_entry->observe);
+                budget, window_ms, "wildcard:fallback", st->wildcard_entry->observe);
 
             /* fallthrough to the tier-2/3 allocation below */
             ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
@@ -599,7 +605,7 @@ void bs_bot_rate_init(apr_pool_t *pconf, server_rec *s, int *next_slot)
             bs_bot_rate_slot *h = allocate_holder(pconf, sv,
                 apr_pstrcat(pconf, "group aggregate ",
                             e->botgroup_name, NULL),
-                next_slot, e->budget, e->window_sec,
+                next_slot, e->budget, e->window_ms,
                 "directive:group", e->observe);
             if (!h) continue;
             h->label = apr_pstrcat(pconf, "@", e->botgroup_name, NULL);
@@ -638,7 +644,7 @@ void bs_bot_rate_init(apr_pool_t *pconf, server_rec *s, int *next_slot)
         if (st->global_entry) {
             st->global_holder = allocate_holder(pconf, sv,
                 "total ceiling", next_slot,
-                st->global_entry->budget, st->global_entry->window_sec,
+                st->global_entry->budget, st->global_entry->window_ms,
                 "directive:total", st->global_entry->observe);
             if (st->global_holder) {
                 st->global_holder->label = "*";
@@ -648,7 +654,7 @@ void bs_bot_rate_init(apr_pool_t *pconf, server_rec *s, int *next_slot)
                     "is a circuit breaker: if it trips in normal "
                     "operation it is set too low.",
                     st->global_entry->budget,
-                    st->global_entry->window_sec,
+                    st->global_entry->window_ms / 1000,
                     st->global_entry->observe ? "observe" : "enforce");
             }
         }
@@ -782,24 +788,27 @@ int bs_bot_rate_check(request_rec *r)
 
     bs_bot_rate_slot *tripped = NULL;   /* first (most specific) */
     apr_uint32_t retry_max = 0;
-    apr_uint32_t now = (apr_uint32_t)apr_time_sec(apr_time_now());
+    apr_uint32_t now_ms = (apr_uint32_t)(apr_time_now() / 1000);
     int tripped_is_slug = 0;
 
     for (int i = 0; i < ntiers; i++) {
         bs_bot_rate_slot *t = tiers[i];
         if (t->shm_slot < 0) continue;
         if (bs_rate_counter_admit(&counters[t->shm_slot],
-                                  t->budget, t->window_sec)) {
+                                  t->budget, t->window_ms)) {
             continue;
         }
         if (!tripped) {
             tripped = t;
             tripped_is_slug = (i == 0);
         }
-        apr_uint32_t win = __atomic_load_n(
-            &counters[t->shm_slot].window_start_sec, __ATOMIC_RELAXED);
-        apr_uint32_t rt = (now >= win && now - win < t->window_sec)
-                            ? t->window_sec - (now - win) : 1;
+        apr_uint32_t win_ms = __atomic_load_n(
+            &counters[t->shm_slot].window_start_ms, __ATOMIC_RELAXED);
+        apr_uint32_t gone   = now_ms - win_ms;   /* wraparound-safe */
+        apr_uint32_t left   = (gone < t->window_ms)
+                                ? t->window_ms - gone : 0;
+        apr_uint32_t rt     = (left + 999) / 1000;   /* header is seconds */
+        if (rt < 1) rt = 1;
         if (rt > retry_max) retry_max = rt;
     }
 
@@ -850,7 +859,7 @@ int bs_bot_rate_check(request_rec *r)
      * a record of abuse that outlives the spike. */
     if (tripped_is_slug) {
         bs_flag_client(r, BS_FLAG_RATE_ABUSE,
-                       bs_rate_flag_ttl(tripped->window_sec));
+                       bs_rate_flag_ttl(tripped->window_ms));
     }
     if (bs_shm.metrics) {
         __atomic_fetch_add(&bs_shm.metrics->rate_limit_exceeded_total,

@@ -107,12 +107,12 @@ static int bs_cohort_matches(const bs_cohort *c,
  * count and err on admitting rather than emitting spurious 429s.
  *
  *  the prior shape did the window-roll
- * via two separate stores (CAS window_start_sec, then plain
+ * via two separate stores (CAS window_start_ms, then plain
  * __atomic_store_n on count = 1). Between those two operations,
  * another thread could land an increment via the bottom-of-loop
  * count-CAS path; the count=1 store then wiped that increment,
  * yielding a slightly-larger-than-budget window straddling the
- * rollover. Pack window_start_sec and count into a single u64 and
+ * rollover. Pack window_start_ms and count into a single u64 and
  * CAS them together — same shape as bs_cv_counter_bump. The
  * struct is already laid out 8-byte-packed for this. Each CAS
  * either rolls the window AND sets count atomically, or
@@ -120,26 +120,31 @@ static int bs_cohort_matches(const bs_cohort *c,
  * other threads. */
 int bs_rate_counter_admit(bs_rate_counter *slot,
                           apr_uint32_t budget,
-                          apr_uint32_t window_sec)
+                          apr_uint32_t window_ms)
 {
     _Static_assert(sizeof(bs_rate_counter) == sizeof(apr_uint64_t),
                    "bs_rate_counter must be 8 bytes for u64 CAS");
     apr_uint64_t *p64 = (apr_uint64_t *)slot;
-    apr_uint32_t now = (apr_uint32_t)apr_time_sec(apr_time_now());
+    /* Truncated to 32 bits on purpose; see bs_rate_counter. */
+    apr_uint32_t now = (apr_uint32_t)(apr_time_now() / 1000);
     for (int i = 0; i < 32; i++) {
         apr_uint64_t observed = __atomic_load_n(p64, __ATOMIC_RELAXED);
         bs_rate_counter snap;
         memcpy(&snap, &observed, sizeof(snap));
         apr_uint64_t next;
         bs_rate_counter cand;
-        if (now < snap.window_start_sec ||
-            now - snap.window_start_sec >= window_sec) {
-            cand.count            = 1;
-            cand.window_start_sec = now;
+        /* Unsigned difference, so a wrap is handled without a
+         * separate branch. The old `now < window_start` test for a
+         * clock stepping backwards is gone with it: under wrap the two
+         * are indistinguishable, and a backwards jump resetting the
+         * window early is the safe direction for a limit. */
+        if ((apr_uint32_t)(now - snap.window_start_ms) >= window_ms) {
+            cand.count           = 1;
+            cand.window_start_ms = now;
         } else {
             if (snap.count >= budget) return 0;
-            cand.count            = snap.count + 1;
-            cand.window_start_sec = snap.window_start_sec;
+            cand.count           = snap.count + 1;
+            cand.window_start_ms = snap.window_start_ms;
         }
         memcpy(&next, &cand, sizeof(next));
         if (__atomic_compare_exchange_n(p64, &observed, next,
@@ -211,11 +216,14 @@ void bs_flag_client(request_rec *r, apr_uint32_t bits, int ttl_sec)
     bs_flagged_ip_add(r, ip, bits, ttl_sec, scfg->ns_id);
 }
 
-int bs_rate_flag_ttl(apr_uint32_t window_sec)
+int bs_rate_flag_ttl(apr_uint32_t window_ms)
 {
-    if (window_sec < BS_RATE_FLAG_TTL_MIN) return BS_RATE_FLAG_TTL_MIN;
-    if (window_sec > BS_RATE_FLAG_TTL_MAX) return BS_RATE_FLAG_TTL_MAX;
-    return (int)window_sec;
+    /* The window is milliseconds; a flag TTL is seconds. Round up, so
+     * a sub-second window still buys the minimum rather than zero. */
+    apr_uint32_t sec = (window_ms + 999) / 1000;
+    if (sec < BS_RATE_FLAG_TTL_MIN) return BS_RATE_FLAG_TTL_MIN;
+    if (sec > BS_RATE_FLAG_TTL_MAX) return BS_RATE_FLAG_TTL_MAX;
+    return (int)sec;
 }
 
 /* BS_CK_STATE_NOTE / _VERIFIED / _MISSING / _INVALID are now
@@ -570,7 +578,7 @@ int bs_check_policy(request_rec *r)
                 }
                 bs_rate_counter *rc =
                     &((bs_rate_counter *)bs_shm.rate_counters)[rl_slot];
-                if (bs_rate_counter_admit(rc, t->budget, t->window_sec)) {
+                if (bs_rate_counter_admit(rc, t->budget, t->window_ms)) {
                     /* Under budget: the request has spent from the
                      * window and this rule is finished with it. The
                      * action does NOT run -- on a rule carrying a
@@ -588,7 +596,7 @@ int bs_check_policy(request_rec *r)
                                     NULL));
                     if (!rl_observe) {
                         bs_flag_client(r, BS_FLAG_RATE_ABUSE,
-                                       bs_rate_flag_ttl(t->window_sec));
+                                       bs_rate_flag_ttl(t->window_ms));
                         if (t->escalate && rl_have_ip) {
                             int crossed = bs_strike_record_429(r, rl_ip,
                                 (apr_uint32_t)t->shm_slot,
@@ -805,7 +813,7 @@ int bs_check_policy(request_rec *r)
             }
 
             if (bs_rate_counter_admit(&counters[e->shm_slot],
-                                      e->budget, e->window_sec)) {
+                                      e->budget, e->window_ms)) {
                 continue;
             }
             /* Over budget. */
@@ -821,19 +829,25 @@ int bs_check_policy(request_rec *r)
                 }
                 continue;
             }
-            /* Enforce: Retry-After = seconds remaining in window. */
-            apr_uint32_t win = __atomic_load_n(
-                &counters[e->shm_slot].window_start_sec, __ATOMIC_RELAXED);
-            apr_uint32_t now = (apr_uint32_t)apr_time_sec(apr_time_now());
-            apr_uint32_t retry = (now >= win && now - win < e->window_sec)
-                                  ? e->window_sec - (now - win) : 1;
+            /* Enforce: Retry-After = seconds remaining in window.
+             * The window is milliseconds now and the header is
+             * seconds, so round the remainder up -- a Retry-After of 0
+             * invites an immediate retry that cannot succeed. */
+            apr_uint32_t win_ms = __atomic_load_n(
+                &counters[e->shm_slot].window_start_ms, __ATOMIC_RELAXED);
+            apr_uint32_t now_ms = (apr_uint32_t)(apr_time_now() / 1000);
+            apr_uint32_t gone   = now_ms - win_ms;   /* wraparound-safe */
+            apr_uint32_t left   = (gone < e->window_ms)
+                                    ? e->window_ms - gone : 0;
+            apr_uint32_t retry  = (left + 999) / 1000;
+            if (retry < 1) retry = 1;
             apr_table_setn(r->err_headers_out, "Retry-After",
                 apr_psprintf(r->pool, "%u", retry));
             bs_score_add(r, BS_PENALTY_RATE_LIMIT,
                 apr_pstrcat(r->pool, "ratelimitexceeded:",
                             e->name, NULL));
             bs_flag_client(r, BS_FLAG_RATE_ABUSE,
-                           bs_rate_flag_ttl(e->window_sec));
+                           bs_rate_flag_ttl(e->window_ms));
             if (bs_shm.metrics) {
                 __atomic_fetch_add(&bs_shm.metrics->rate_limit_exceeded_total,
                                    1, __ATOMIC_RELAXED);
@@ -987,15 +1001,15 @@ static const char *bs_psh_rule_conditions(apr_pool_t *p,
         /* Print the window as the operator could write it again --
          * "?" for anything that was not one of three words told an
          * operator nothing, and per= now takes a count. */
-        const char *per = t->window_sec == 1    ? "sec"
-                        : t->window_sec == 60   ? "min"
-                        : t->window_sec == 3600 ? "hour" : NULL;
+        const char *per = t->window_ms == 1000       ? "sec"
+                        : t->window_ms == 60 * 1000   ? "min"
+                        : t->window_ms == 3600 * 1000 ? "hour" : NULL;
         if (per) {
             BS_PSH_ADD("budget=%u/%s countper=%s", t->budget, per,
                        t->count_key == BS_COUNT_SLUG ? "slug" : "total");
         } else {
             BS_PSH_ADD("budget=%u/%usec countper=%s", t->budget,
-                       t->window_sec,
+                       t->window_ms / 1000,
                        t->count_key == BS_COUNT_SLUG ? "slug" : "total");
         }
     }
@@ -1198,7 +1212,7 @@ void bs_policy_dump(server_rec *s, apr_pool_t *p, bs_dir_cfg *cfg)
             bs_rate_limit_entry *e = APR_ARRAY_IDX(
                 scfg->rate_limits, i, bs_rate_limit_entry *);
             printf("%-18s  %6u  %4us   %-26s  ",
-                e->name, e->budget, e->window_sec,
+                e->name, e->budget, e->window_ms / 1000,
                 e->cohort.ua_any ? "*"
                     : apr_psprintf(p, "\"%s\"", e->cohort.ua_pattern));
             bs_psh_cohort_ipspec(&e->cohort);
@@ -1251,7 +1265,7 @@ void bs_policy_dump(server_rec *s, apr_pool_t *p, bs_dir_cfg *cfg)
                 : "each";
 
             printf("%-18s  %6u  %4us   %-6s  %-7s  %s\n",
-                   target, e->budget, e->window_sec, scope_name,
+                   target, e->budget, e->window_ms / 1000, scope_name,
                    e->observe ? "observe" : "enforce",
                    e->origin ? e->origin : "directive");
         }

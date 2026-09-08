@@ -338,7 +338,7 @@ typedef struct {
      *
      * budget == 0 means no rate limit on this rule. */
     apr_uint32_t       budget;
-    apr_uint32_t       window_sec;
+    apr_uint32_t       window_ms;
     /* countper= -- the key the counter buckets by. Not a predicate:
      * it decides which bucket, not whether the rule matched. Only
      * BS_COUNT_TOTAL exists so far, one bucket per rule, which is what
@@ -458,7 +458,7 @@ typedef struct {
     const char   *name;
     bs_cohort     cohort;
     apr_uint32_t  budget;
-    apr_uint32_t  window_sec;
+    apr_uint32_t  window_ms;
     int           shm_slot;
     const struct bs_rate_escalate_entry *escalate;
     int           mode;
@@ -478,7 +478,12 @@ struct bs_rate_escalate_entry {
  * atomics on each field separately. */
 typedef struct {
     apr_uint32_t count;
-    apr_uint32_t window_start_sec;
+    /* Milliseconds, not seconds, and deliberately 32-bit: the pair is
+     * CAS'd as one u64 and a 64-bit field would forfeit that. Wraps
+     * every ~49.7 days; the admit test is an unsigned difference,
+     * which is correct across a wrap while the window stays far
+     * smaller than the wrap period. Largest accepted window is 86400s. */
+    apr_uint32_t window_start_ms;
 } bs_rate_counter;
 
 

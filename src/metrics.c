@@ -3050,7 +3050,7 @@ typedef struct {
     apr_uint32_t used;
     apr_uint64_t seen;
     apr_uint32_t budget;
-    apr_uint32_t window_sec;
+    apr_uint32_t window_ms;
     const char *origin;
     const char *ua;          /* last agent seen on this slot, or NULL */
     int observe;
@@ -3146,7 +3146,6 @@ int bs_dashboard_bots_handler(request_rec *r)
     apr_array_header_t *rows =
         apr_array_make(r->pool, 64, sizeof(bs_d_botrow));
     bs_rate_counter *counters = (bs_rate_counter *)bs_shm.rate_counters;
-    apr_uint64_t now_sec = (apr_uint64_t)apr_time_sec(apr_time_now());
 
     if (scfg && scfg->bot_rate_state && scfg->bot_rate_state->by_slug) {
         apr_hash_index_t *hi;
@@ -3160,7 +3159,7 @@ int bs_dashboard_bots_handler(request_rec *r)
             memset(&row, 0, sizeof(row));
             row.slug       = (const char *)k;
             row.budget     = h->budget;
-            row.window_sec = h->window_sec;
+            row.window_ms = h->window_ms;
             row.origin     = h->origin ? h->origin : "-";
             row.observe    = h->observe;
             /* Live window count. A slot whose window has already rolled
@@ -3168,11 +3167,15 @@ int bs_dashboard_bots_handler(request_rec *r)
              * count would imply current pressure that is gone. */
             if (counters && h->shm_slot >= 0) {
                 bs_rate_counter *c = &counters[h->shm_slot];
-                apr_uint32_t ws = __atomic_load_n(&c->window_start_sec,
+                apr_uint32_t ws = __atomic_load_n(&c->window_start_ms,
                                                   __ATOMIC_RELAXED);
                 apr_uint32_t n  = __atomic_load_n(&c->count,
                                                   __ATOMIC_RELAXED);
-                if (h->window_sec && now_sec < (apr_uint64_t)ws + h->window_sec) {
+                /* Both sides in milliseconds; the subtraction is
+                 * wraparound-safe the way the admit test is. */
+                apr_uint32_t now_ms = (apr_uint32_t)(apr_time_now() / 1000);
+                if (h->window_ms
+                    && (apr_uint32_t)(now_ms - ws) < h->window_ms) {
                     row.used = n;
                 }
             }
@@ -3225,17 +3228,21 @@ int bs_dashboard_bots_handler(request_rec *r)
             row.slug       = agg[a].name;
             row.category   = agg[a].what;
             row.budget     = h->budget;
-            row.window_sec = h->window_sec;
+            row.window_ms = h->window_ms;
             row.origin     = h->origin ? h->origin : "-";
             row.observe    = h->observe;
             row.aggregate  = 1;
             if (counters && h->shm_slot >= 0) {
                 bs_rate_counter *c = &counters[h->shm_slot];
-                apr_uint32_t ws = __atomic_load_n(&c->window_start_sec,
+                apr_uint32_t ws = __atomic_load_n(&c->window_start_ms,
                                                   __ATOMIC_RELAXED);
                 apr_uint32_t n  = __atomic_load_n(&c->count,
                                                   __ATOMIC_RELAXED);
-                if (h->window_sec && now_sec < (apr_uint64_t)ws + h->window_sec) {
+                /* Both sides in milliseconds; the subtraction is
+                 * wraparound-safe the way the admit test is. */
+                apr_uint32_t now_ms = (apr_uint32_t)(apr_time_now() / 1000);
+                if (h->window_ms
+                    && (apr_uint32_t)(now_ms - ws) < h->window_ms) {
                     row.used = n;
                 }
             }
@@ -3413,7 +3420,7 @@ int bs_dashboard_bots_handler(request_rec *r)
                 apr_snprintf(budget, sizeof(budget), "unlimited");
             } else {
                 apr_snprintf(budget, sizeof(budget),
-                             "%u / %us", b->budget, b->window_sec);
+                             "%u / %us", b->budget, b->window_ms / 1000);
             }
             /* The agent hangs off the bot name, which is the cell a
              * reader is already pointing at to ask "who is this". A
