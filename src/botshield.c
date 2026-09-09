@@ -521,6 +521,16 @@ static const command_rec bs_cmds[] = {
                  "remember about the client. Runs on the response "
                  "path, so it cannot direct the response -- flags are "
                  "what the next request reads."),
+    AP_INIT_RAW_ARGS("<BotShieldRobots", bs_open_robots, NULL, RSRC_CONF,
+                 "Open the robots.txt enforcement block, one per server "
+                 "scope. Inside: BotShieldRobotsTxt <path>, BotShieldMode "
+                 "enforce|observe, BotShieldWildcardScope "
+                 "heuristic|strict|off, BotShieldRefreshInterval <sec>, "
+                 "and <BotShieldRobotRule name> groups carrying "
+                 "BotShieldUserAgent, BotShieldDisallow, BotShieldAllow, "
+                 "BotShieldCrawlDelay, BotShieldRespond, BotShieldMode "
+                 "and BotShieldLogAs. The file and the groups form one "
+                 "set: precedence is computed across both."),
     AP_INIT_RAW_ARGS("<BotShieldRule", bs_open_rule, NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "Open a BotShieldRule block. Takes the rule name; every "
@@ -783,36 +793,6 @@ static const command_rec bs_cmds[] = {
                  "startup: a decision log you asked for and did not get "
                  "is a silent blind spot."),
     /* E2.2 — robots.txt enforcement */
-    AP_INIT_TAKE1("BotShieldRobotsTxt", bs_set_robots_txt,
-                 NULL, RSRC_CONF,
-                 "Path to a robots.txt file whose Disallow and "
-                 "Crawl-delay rules mod_botshield will enforce "
-                 "server-side. Parsed at post_config; RFC 9309 "
-                 "semantics (prefix + '*' + '$' wildcards, longest-"
-                 "match-wins, case-insensitive UA prefix). Blocked "
-                 "paths return 403 (reason robotsblock:<group>); "
-                 "Crawl-delay trips return 429 + Retry-After "
-                 "(reason robots-rate:<group>)."),
-    AP_INIT_TAKE1("BotShieldRobotsMode", bs_set_robots_mode,
-                 NULL, RSRC_CONF,
-                 "Whether robots.txt Disallow rules enforce or only "
-                 "record. 'enforce' (default) returns 403 with reason "
-                 "robotsblock:<group>; 'observe' logs "
-                 "robotsblock:<group>:observe with outcome=~block and "
-                 "lets the request through, suppressing the score bump "
-                 "and the flag as well so nothing leaks into later "
-                 "requests. Use observe to find out who actually "
-                 "ignores a robots.txt before starting to refuse them "
-                 "- independent of BotShieldEnabled, so a scope can "
-                 "enforce its scoring while robots stays advisory."),
-    AP_INIT_TAKE1("BotShieldRobotsRefreshInterval",
-                 bs_set_robots_refresh_interval, NULL, RSRC_CONF,
-                 "Seconds between mod_watchdog-driven re-checks of "
-                 "the BotShieldRobotsTxt file. On mtime change the "
-                 "file is re-parsed and the active rule set is "
-                 "atomically swapped — no Apache reload needed. "
-                 "Default 60. Set 0 to disable live-refresh and "
-                 "require an explicit reload after editing."),
     AP_INIT_TAKE1("BotShieldBotDirectory",
                  bs_set_bot_directory, NULL, RSRC_CONF,
                  "Path to a TSV file overriding the compiled-in "
@@ -844,16 +824,6 @@ static const command_rec bs_cmds[] = {
                  "re-loads on mtime change. Optional; if unset the "
                  "compiled-in baseline (~23 templates from the "
                  "build-time bundled top-100 list) stays active."),
-    AP_INIT_TAKE1("BotShieldRobotsWildcardScope",
-                 bs_set_robots_wildcard_scope, NULL, RSRC_CONF,
-                 "How to apply User-agent: * rules: 'heuristic' "
-                 "(default — apply only to UAs that look like "
-                 "crawlers), 'strict' (apply to every UA), or "
-                 "'off' (ignore * groups entirely). Heuristic mode "
-                 "uses a real-browser-prefix denylist (Mozilla/, "
-                 "Opera/, Firefox/, Edge/, Safari/) combined with a "
-                 "bot-token allowlist (bot/crawl/spider/fetch/"
-                 "slurp)."),
     /* E5 — app-to-module reputation feedback */
     AP_INIT_FLAG("BotShieldAppFeedback",
                  bs_set_app_feedback, NULL, RSRC_CONF,

@@ -143,6 +143,59 @@ def to_blocks(text: str) -> str:
                 out.append(f"{indent}    {_spell(key):<22}{value}")
         out.append(f"{indent}</{fam}>")
         i = j + 1
+    return _wrap_robots("\n".join(out))
+
+
+# The four robots directives became keys inside <BotShieldRobots> on
+# 2026-09-09. Tests still write them flat -- one f-string line each --
+# and consecutive ones are wrapped into one container here, the same
+# way rules are rendered into blocks above. Lines already inside a
+# <BotShieldRobots> block are left alone.
+_ROBOTS_KEYS = {
+    "BotShieldRobotsTxt":             "BotShieldRobotsTxt",
+    "BotShieldRobotsMode":            "BotShieldMode",
+    "BotShieldRobotsWildcardScope":   "BotShieldWildcardScope",
+    "BotShieldRobotsRefreshInterval": "BotShieldRefreshInterval",
+}
+
+
+def _robots_key(body: str):
+    for k in _ROBOTS_KEYS:
+        if body.startswith(k + " ") or body.startswith(k + "\t"):
+            return k
+    return None
+
+
+def _wrap_robots(text: str) -> str:
+    out: list[str] = []
+    lines = text.split("\n")
+    i = 0
+    inside = 0
+    while i < len(lines):
+        line = lines[i]
+        body = line.strip()
+        if body.lower().startswith("<botshieldrobots>"):
+            inside += 1
+        elif body.lower().startswith("</botshieldrobots>"):
+            inside = max(0, inside - 1)
+        key = None if inside else _robots_key(line.lstrip())
+        if not key:
+            out.append(line)
+            i += 1
+            continue
+        indent = line[: len(line) - len(line.lstrip())]
+        block = []
+        while i < len(lines):
+            b = lines[i].lstrip()
+            k2 = _robots_key(b)
+            if not k2:
+                break
+            block.append((k2, b[len(k2):].strip()))
+            i += 1
+        out.append(f"{indent}<BotShieldRobots>")
+        for k2, value in block:
+            out.append(f"{indent}    {_ROBOTS_KEYS[k2]:<26}{value}")
+        out.append(f"{indent}</BotShieldRobots>")
     return "\n".join(out)
 
 

@@ -286,6 +286,14 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
     if (add->robots_mode == BS_ROBOTS_MODE_UNSET) {
         out->robots_mode = base->robots_mode;
     }
+    /* A vhost with no container of its own takes the main server's
+     * whole. One with its own keeps its groups, and the unset knobs
+     * above still inherit, so a vhost may add groups without restating
+     * the file. */
+    if (!add->robots_container_seen && base->robots_container_seen) {
+        out->robots_container_seen = 1;
+        out->robots_groups         = base->robots_groups;
+    }
     /* Bot-directory runtime override inherits unless explicitly set. */
     if (!add->bot_directory_path && base->bot_directory_path) {
         out->bot_directory_path = base->bot_directory_path;
@@ -431,6 +439,8 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->robots_slot_pool_used   = 0;
     scfg->robots_refresh_interval = BS_ROBOTS_REFRESH_UNSET;
     scfg->robots_mode             = BS_ROBOTS_MODE_UNSET;
+    scfg->robots_container_seen   = 0;
+    scfg->robots_groups           = NULL;
     /* Bot-directory runtime override. NULL path = no override
      * (compiled-in baseline stays active). Refresh interval 0 =
      * use compile-time default at post_config. */
@@ -1733,7 +1743,7 @@ static void bs_init_robots(apr_pool_t *pconf, server_rec *s,
     for (server_rec *sv = s; sv; sv = sv->next) {
         bs_server_cfg *vcfg = ap_get_module_config(sv->module_config,
                                                    &botshield_module);
-        if (!vcfg || !vcfg->robots_txt_path) continue;
+        if (!vcfg || !bs_robots_configured(vcfg)) continue;
 
         /* Reserve the pool from the global rate-counter table. */
         int pool_base = *next_slot;
@@ -1759,7 +1769,7 @@ static void bs_init_robots(apr_pool_t *pconf, server_rec *s,
          * what post_config built and that's that. Per-vhost
          * singletons so the watchdog doesn't multiplex ticks across
          * vhosts with different refresh intervals. */
-        if (vcfg->robots_refresh_interval > 0) {
+        if (vcfg->robots_txt_path && vcfg->robots_refresh_interval > 0) {
             APR_OPTIONAL_FN_TYPE(ap_watchdog_get_instance) *fn_get =
                 APR_RETRIEVE_OPTIONAL_FN(ap_watchdog_get_instance);
             APR_OPTIONAL_FN_TYPE(ap_watchdog_register_callback) *fn_reg =
@@ -2520,7 +2530,7 @@ void bs_test_config(apr_pool_t *pconf, server_rec *s)
          * them. */
         bs_server_cfg *vcfg = ap_get_module_config(sv->module_config,
                                                    &botshield_module);
-        if (vcfg && vcfg->robots_txt_path && !vcfg->robots) {
+        if (vcfg && bs_robots_configured(vcfg) && !vcfg->robots) {
             vcfg->robots_slot_pool_base = 0;
             vcfg->robots_slot_pool_size = BS_E22_ROBOTS_SLOT_POOL;
             vcfg->robots_slot_pool_used = 0;
@@ -3037,19 +3047,6 @@ const char *bs_set_admin_access(cmd_parms *cmd, void *dummy,
  * only purpose was logging -- and any request the rule's predicate
  * missed silently kept logging. Outcome-keyed and scope-level, so it
  * follows the decision rather than the rule that produced it. */
-const char *bs_set_robots_mode(cmd_parms *cmd, void *cfg_v,
-                               const char *arg)
-{
-    (void)cfg_v;
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    if (!strcasecmp(arg, "enforce"))      scfg->robots_mode = BS_ROBOTS_MODE_ENFORCE;
-    else if (!strcasecmp(arg, "observe")) scfg->robots_mode = BS_ROBOTS_MODE_OBSERVE;
-    else return apr_psprintf(cmd->pool,
-        "BotShieldRobotsMode: '%s' must be enforce or observe", arg);
-    return NULL;
-}
-
 const char *bs_set_access_log(cmd_parms *cmd, void *cfg_v, int argc,
                               char *const argv[])
 {

@@ -165,7 +165,9 @@ def test_a_robots_block_flags_the_address(
         Disallow: /admin
     """)
     conf = _conf(
-        f"    BotShieldRobotsTxt {robots_path}\n"
+        "    <BotShieldRobots>\n"
+        f"        BotShieldRobotsTxt {robots_path}\n"
+        "    </BotShieldRobots>\n"
         + _reader("robots_ignored")
     )
     with config_override(r"BotShieldEnabled\s+On", conf,
@@ -181,7 +183,7 @@ def test_a_robots_block_flags_the_address(
 def test_robots_observe_does_not_flag(
     robots_path, config_override, fresh_ip,
 ):
-    """BotShieldRobotsMode observe exists so an operator can find out
+    """BotShieldMode observe on <BotShieldRobots> exists so an operator can find out
     who ignores a robots.txt they have published but never enforced.
     A flag written under it would be the enforcement they deferred."""
     robots_path = _write_robots(robots_path, """
@@ -189,8 +191,10 @@ def test_robots_observe_does_not_flag(
         Disallow: /admin
     """)
     conf = _conf(
-        f"    BotShieldRobotsTxt {robots_path}\n"
-        "    BotShieldRobotsMode observe\n"
+        "    <BotShieldRobots>\n"
+        f"        BotShieldRobotsTxt {robots_path}\n"
+        "        BotShieldMode      observe\n"
+        "    </BotShieldRobots>\n"
         + _reader("robots_ignored")
     )
     with config_override(r"BotShieldEnabled\s+On", conf,
@@ -209,7 +213,9 @@ def test_an_allowed_path_flags_nothing(
         Disallow: /admin
     """)
     conf = _conf(
-        f"    BotShieldRobotsTxt {robots_path}\n"
+        "    <BotShieldRobots>\n"
+        f"        BotShieldRobotsTxt {robots_path}\n"
+        "    </BotShieldRobots>\n"
         + _reader("robots_ignored")
     )
     with config_override(r"BotShieldEnabled\s+On", conf,

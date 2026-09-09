@@ -537,6 +537,10 @@ typedef struct bs_server_cfg {
     int                 robots_slot_pool_used;
     int                 robots_refresh_interval;
     int                 robots_mode;   /* bs_robots_mode */
+    /* <BotShieldRobots>: seen in this scope, and its inline groups
+     * (bs_robots_inline_group *; NULL when none). */
+    int                 robots_container_seen;
+    apr_array_header_t *robots_groups;
     /* Cloudflare bot directory runtime override.
      *
      * The compiled-in bs_known_bots[] table is the baseline. If
@@ -639,6 +643,14 @@ typedef struct bs_server_cfg {
      * discover they also handed it the ability to unflag. */
     bs_observe_acl      observe_admin;
 } bs_server_cfg;
+
+/* Is there anything for robots enforcement to do at this scope: a
+ * file, inline groups, or both. */
+static inline int bs_robots_configured(const bs_server_cfg *c)
+{
+    return c && (c->robots_txt_path
+                 || (c->robots_groups && c->robots_groups->nelts > 0));
+}
 
 /* Trigger and policy family types (bs_trigger_*, bs_*_trigger_entry,
  * bs_cohort, bs_rate_counter,

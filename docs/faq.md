@@ -223,8 +223,9 @@ to be search engines. See [policy](policy.md#allow-list-verified-crawlers).
 
 For LLM crawlers (GPTBot, ClaudeBot, anthropic-ai, Google-
 Extended) — sites that want to block them by default can pair
-`BotShieldRobotsTxt` with a robots.txt carrying `Disallow: /` for
-those groups. mod_botshield enforces robots.txt at the policy
+a `<BotShieldRobots>` block -- pointing at a robots.txt carrying
+`Disallow: /` for those groups, or saying so in a
+`<BotShieldRobotRule>` of its own. mod_botshield enforces robots.txt at the policy
 layer, not as advisory text the bot can ignore.
 
 ### What about API endpoints — clients that legitimately can't run JavaScript?
@@ -501,7 +502,7 @@ a new bot range, reload Apache.
 
 Robots.txt is parsed at startup and re-parsed by the watchdog on
 mtime change. Default refresh interval 60 s; tunable via
-`BotShieldRobotsRefreshInterval`.
+`BotShieldRefreshInterval` inside `<BotShieldRobots>`.
 
 The captcha provider's site key, secret, and CA bundle are read
 once at config-parse time. To pick up a key rotation, reload

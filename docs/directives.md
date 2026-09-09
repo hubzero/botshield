@@ -652,16 +652,83 @@ its robots.txt section rather than this one.
 
 ## Robots.txt enforcement
 
-| Directive | Syntax | Default |
-|---|---|---|
-| `BotShieldRobotsTxt` | `/path` | unset |
-| `BotShieldRobotsRefreshInterval` | `N` (sec) | `60` (0=disabled) |
-| `BotShieldRobotsWildcardScope` | `heuristic\|strict\|off` | `heuristic` |
-| `BotShieldRobotsMode` | `enforce\|observe` | `enforce` |
+One container, `<BotShieldRobots>`, once per server scope. Everything
+robots.txt enforcement can be told lives inside it: the file, the mode,
+how `User-agent: *` is applied, the refresh cadence, and any groups
+written directly in the config.
 
-`BotShieldRobotsMode observe` records what a `Disallow` would have done
-without returning 403 — the way to see what enforcing a robots.txt you
-did not write would cost before you enforce it.
+```apache
+<BotShieldRobots>
+    BotShieldRobotsTxt        /etc/botshield/robots.txt
+    BotShieldMode             observe
+    BotShieldWildcardScope    heuristic
+    BotShieldRefreshInterval  60
+
+    <BotShieldRobotRule ai-crawlers>
+        BotShieldUserAgent   GPTBot
+        BotShieldUserAgent   ClaudeBot
+        BotShieldDisallow    /
+        BotShieldRespond     404
+        BotShieldLogAs       ai-deny
+        BotShieldMode        enforce
+    </BotShieldRobotRule>
+</BotShieldRobots>
+```
+
+| Inside the container | Syntax | Default |
+|---|---|---|
+| `BotShieldRobotsTxt` | `/path` | none -- the container may be groups only |
+| `BotShieldMode` | `enforce\|observe` | `enforce` |
+| `BotShieldWildcardScope` | `heuristic\|strict\|off` | `heuristic` |
+| `BotShieldRefreshInterval` | `N` (sec) | `60` (0 disables; needs a file) |
+| `<BotShieldRobotRule name>` | a group; see below | |
+
+| Inside a group | Syntax | Notes |
+|---|---|---|
+| `BotShieldUserAgent` | product token, `*`, or `@botgroup` | repeatable; at least one |
+| `BotShieldDisallow` / `BotShieldAllow` | `/pattern` (`*` and `$` as RFC 9309) | repeatable |
+| `BotShieldCrawlDelay` | seconds, fractions allowed | one request per window, per crawler |
+| `BotShieldRespond` | 4xx or 5xx, not 429 | what a Disallow answers; default 403 |
+| `BotShieldMode` | `enforce\|observe` | overrides the container's for this group |
+| `BotShieldLogAs` | tag | rides the decision line as `tag="..."` |
+
+**The container is the precedence scope.** The file's groups and the
+inline groups are one document, and robots.txt precedence -- the most
+specific `User-agent` group wins, the longest path rule within it, an
+`Allow` on a length tie -- is computed across all of them together. A
+named inline group therefore suppresses the file's `User-agent: *` for
+its crawler exactly as a named group in the file would. That is why
+there is one container per scope and a second is refused: two would be
+two independent sets, and a rule's meaning depends on its siblings.
+
+**Mode is inherited and a group may override it.** Both directions are
+useful: an observing container with one group armed is how enforcement
+gets staged one crawler at a time; an enforcing container with one
+group observing is how a new group joins. When an observe group's
+`Disallow` is the longest match, it records what it would have done
+(`robotsblock:<group>:observe`, `outcome=~block`) and **steps aside** --
+the longest *enforcing* rule still applies. An observed rule never
+shadows an enforced one, which is what `BotShieldMode observe` already
+means on a request rule.
+
+Observe never enforces anything: no status, no `+100`, no
+`robots_ignored` flag. A scope-level `BotShieldEnabled LogOnly` observes
+every group, enforce overrides included.
+
+`BotShieldRespond` is what a `Disallow` answers. `Crawl-delay` trips
+always answer 429 with `Retry-After`, because that is a request to come
+back later rather than a refusal, so `BotShieldRespond 429` is rejected
+rather than accepted as a Disallow that invites a retry.
+
+`httpd -t -D DUMP_BOTSHIELD_POLICY` lists every group with its source
+(`file` or `config`) and any knobs it set.
+
+Until 2026-09-09 this was four standalone directives --
+`BotShieldRobotsTxt`, `BotShieldRobotsMode`,
+`BotShieldRobotsWildcardScope`, `BotShieldRobotsRefreshInterval` -- and
+the file was the only place a policy could be written. The container
+folds them and adds what the file cannot say: a status code, a per-group
+mode, a log tag, and a group that exists in the config alone.
 
 See [policy](policy.md#robots-txt-enforcement) for the matcher
 semantics and refresh model.
@@ -1047,8 +1114,8 @@ instead, because the operator has already said how long an escalated
 client stays escalated. `robots_ignored` has no window to derive from
 and lasts an hour.
 
-Neither is written under `mode=observe` or `BotShieldRobotsMode
-observe`. A flag written there would follow the client into later
+Neither is written under `mode=observe` or `BotShieldMode
+observe` (in `<BotShieldRobots>`). A flag written there would follow the client into later
 requests and change what matches, which is enforcement by another
 route and exactly what observe defers.
 

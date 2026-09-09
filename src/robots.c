@@ -57,6 +57,13 @@ typedef struct robots_group {
     int                 crawl_delay_ms; /* milliseconds, 0 if unset */
     const char         *name;         /* normalized id, derived from first UA */
     int                 is_wildcard;  /* 1 when first UA is "*" */
+    /* Knobs only an inline group can carry. A file group has the
+     * defaults: mode UNSET (inherit the container's), status 0 (403),
+     * no tag. */
+    int                 mode;         /* bs_robots_mode */
+    int                 status;
+    const char         *log_tag;
+    int                 is_inline;    /* 1 for a <BotShieldRobotRule> */
 } robots_group;
 
 struct robots_doc {
@@ -310,6 +317,10 @@ static robots_group *bs_rb_new_group(bs_rb_parser *st)
     g->crawl_delay_ms = 0;
     g->is_wildcard = 0;
     g->name        = "unnamed";
+    g->mode        = BS_ROBOTS_MODE_UNSET;
+    g->status      = 0;
+    g->log_tag     = NULL;
+    g->is_inline   = 0;
     return g;
 }
 
@@ -573,15 +584,23 @@ apr_status_t robots_parse_file(apr_pool_t *p, const char *path,
  *      longest-match-wins Allow/Disallow (Allow wins length ties
  *      per RFC 9309).
  *   4. Crawl-delay: take the max across relevant groups' non-zero
- *      values — most restrictive wins. The RFC is silent on
- *      duplicates; max is the safe interpretation for rate-limit
- *      enforcement (if any stanza says "wait 60s," honor it).
- *   5. group_idx / group_name report the first relevant group —
- *      stable identifier for the decision log and for the slot
- *      lookup downstream (duplicate-name groups share an SHM slot
- *      by construction of scfg->robots_slot_by_name). */
+ *      values — most restrictive wins.
+ *   5. group_idx reports the first relevant group; group_name the
+ *      governing one.
+ *
+ * Two verdicts are kept through step 3: one over every relevant
+ * group, one over the enforcing groups alone. The enforcing verdict
+ * is the answer. The other exists so an observe group whose Disallow
+ * was the longest match of all can be named in `observed_group`: it
+ * logs what it would have done and steps aside, and the longest
+ * enforcing rule still applies. That is how BotShieldMode observe on
+ * a request rule already behaves -- an observed rule never shadows an
+ * enforced one -- and the word means the same thing here.
+ *
+ * `default_mode` is the container's; a group with mode UNSET takes
+ * it. Pass BS_ROBOTS_MODE_OBSERVE to observe the whole set. */
 void robots_query(const robots_doc *doc, const char *ua, const char *botgroup,
-                  const char *path, robots_match *out)
+                  const char *path, int default_mode, robots_match *out)
 {
     if (!out) return;
     out->group_idx       = -1;
@@ -589,16 +608,19 @@ void robots_query(const robots_doc *doc, const char *ua, const char *botgroup,
     out->allowed         = 1;
     out->crawl_delay_ms  = 0;
     out->group_name      = NULL;
+    out->status          = 0;
+    out->log_tag         = NULL;
+    out->observed_group  = NULL;
     if (!doc || !ua || !doc->groups || doc->groups->nelts == 0) return;
 
     int has_wildcard = 0;
     int best_len = bs_rb_best_token_len(doc, ua, botgroup, &has_wildcard);
     if (best_len == 0 && !has_wildcard) return;  /* nothing to enforce */
 
-    int best_rule_len = -1;
-    int best_allow    = 1;
     int first_relevant_idx = -1;
     int max_crawl_delay    = 0;
+    int all_len = -1, all_allow = 1, all_gidx = -1;   /* every group */
+    int enf_len = -1, enf_allow = 1, enf_gidx = -1;   /* enforcing only */
 
     for (int i = 0; i < doc->groups->nelts; i++) {
         robots_group *g = APR_ARRAY_IDX(doc->groups, i, robots_group *);
@@ -610,15 +632,23 @@ void robots_query(const robots_doc *doc, const char *ua, const char *botgroup,
         }
         if (!path) continue;
 
+        int gmode = (g->mode == BS_ROBOTS_MODE_UNSET) ? default_mode : g->mode;
+        int observe = (gmode == BS_ROBOTS_MODE_OBSERVE);
+
         for (int k = 0; k < g->rules->nelts; k++) {
             robots_rule *r = APR_ARRAY_IDX(g->rules, k, robots_rule *);
             if (!bs_path_match(r->pattern, path)) continue;
             int len = (int)strlen(r->pattern);
-            if (len > best_rule_len) {
-                best_rule_len = len;
-                best_allow = r->allow;
-            } else if (len == best_rule_len && r->allow) {
-                best_allow = 1;
+            if (len > all_len) {
+                all_len = len; all_allow = r->allow; all_gidx = i;
+            } else if (len == all_len && r->allow && !all_allow) {
+                all_allow = 1; all_gidx = i;
+            }
+            if (observe) continue;
+            if (len > enf_len) {
+                enf_len = len; enf_allow = r->allow; enf_gidx = i;
+            } else if (len == enf_len && r->allow && !enf_allow) {
+                enf_allow = 1; enf_gidx = i;
             }
         }
     }
@@ -631,7 +661,23 @@ void robots_query(const robots_doc *doc, const char *ua, const char *botgroup,
     out->is_wildcard     = (best_len == 0);
     out->crawl_delay_ms  = max_crawl_delay;
     out->group_name      = fg->name;
-    out->allowed         = (path && best_rule_len >= 0) ? best_allow : 1;
+    if (!path) return;
+
+    out->allowed = (enf_len >= 0) ? enf_allow : 1;
+    if (enf_len >= 0) {
+        robots_group *eg = APR_ARRAY_IDX(doc->groups, enf_gidx,
+                                         robots_group *);
+        out->group_name = eg->name;
+        out->status     = eg->status;
+        out->log_tag    = eg->log_tag;
+    }
+    if (all_len >= 0 && !all_allow) {
+        robots_group *og = APR_ARRAY_IDX(doc->groups, all_gidx,
+                                         robots_group *);
+        int ogmode = (og->mode == BS_ROBOTS_MODE_UNSET)
+                   ? default_mode : og->mode;
+        if (ogmode == BS_ROBOTS_MODE_OBSERVE) out->observed_group = og->name;
+    }
 }
 
 int robots_group_count(const robots_doc *doc)
@@ -685,6 +731,82 @@ int robots_group_crawl_delay_ms_at(const robots_doc *doc, int idx)
     return g ? g->crawl_delay_ms : 0;
 }
 
+int robots_group_mode_at(const robots_doc *doc, int idx)
+{
+    robots_group *g = bs_rb_group_at(doc, idx);
+    return g ? g->mode : BS_ROBOTS_MODE_UNSET;
+}
+
+int robots_group_status_at(const robots_doc *doc, int idx)
+{
+    robots_group *g = bs_rb_group_at(doc, idx);
+    return g ? g->status : 0;
+}
+
+const char *robots_group_log_tag_at(const robots_doc *doc, int idx)
+{
+    robots_group *g = bs_rb_group_at(doc, idx);
+    return g ? g->log_tag : NULL;
+}
+
+int robots_group_is_inline_at(const robots_doc *doc, int idx)
+{
+    robots_group *g = bs_rb_group_at(doc, idx);
+    return g ? g->is_inline : 0;
+}
+
+/* ---------- inline groups ---------- */
+
+robots_doc *robots_doc_empty(apr_pool_t *p)
+{
+    robots_doc *doc = apr_pcalloc(p, sizeof(*doc));
+    doc->pool   = p;
+    doc->groups = apr_array_make(p, 8, sizeof(robots_group *));
+    return doc;
+}
+
+apr_status_t robots_doc_add_inline(robots_doc *doc,
+                                   const bs_robots_inline_group *ig,
+                                   const char **err)
+{
+    if (err) *err = NULL;
+    if (!doc || !ig) return APR_EINVAL;
+    if (doc->groups->nelts >= BOTSHIELD_ROBOTS_MAX_GROUPS) {
+        if (err) *err = apr_psprintf(doc->pool,
+            "group cap of %d reached", BOTSHIELD_ROBOTS_MAX_GROUPS);
+        return APR_ENOSPC;
+    }
+    robots_group *g = apr_pcalloc(doc->pool, sizeof(*g));
+    g->user_agents = apr_array_make(doc->pool, 4, sizeof(const char *));
+    g->rules       = apr_array_make(doc->pool, 8, sizeof(robots_rule *));
+    for (int i = 0; i < ig->user_agents->nelts; i++) {
+        const char *ua = APR_ARRAY_IDX(ig->user_agents, i, const char *);
+        if (g->user_agents->nelts >= BOTSHIELD_ROBOTS_MAX_UAS_PER_GROUP) break;
+        *(const char **)apr_array_push(g->user_agents) =
+            bs_rb_lower_dup(doc->pool, ua);
+    }
+    for (int i = 0; i < ig->rules->nelts; i++) {
+        const bs_robots_inline_rule *ir =
+            &APR_ARRAY_IDX(ig->rules, i, bs_robots_inline_rule);
+        if (g->rules->nelts >= BOTSHIELD_ROBOTS_MAX_RULES_PER_GROUP) break;
+        robots_rule *r = apr_pcalloc(doc->pool, sizeof(*r));
+        r->pattern = apr_pstrdup(doc->pool, ir->pattern);
+        r->allow   = ir->allow;
+        *(robots_rule **)apr_array_push(g->rules) = r;
+    }
+    const char *first_ua = APR_ARRAY_IDX(g->user_agents, 0, const char *);
+    g->crawl_delay_ms = ig->crawl_delay_ms;
+    g->name           = apr_pstrdup(doc->pool, ig->name);
+    g->is_wildcard    = (strcmp(first_ua, "*") == 0);
+    g->mode           = ig->mode;
+    g->status         = ig->status;
+    g->log_tag        = ig->log_tag ? apr_pstrdup(doc->pool, ig->log_tag)
+                                    : NULL;
+    g->is_inline      = 1;
+    *(robots_group **)apr_array_push(doc->groups) = g;
+    return APR_SUCCESS;
+}
+
 int robots_group_ua_count_at(const robots_doc *doc, int idx)
 {
     robots_group *g = bs_rb_group_at(doc, idx);
@@ -725,72 +847,281 @@ int robots_group_rule_at(const robots_doc *doc, int idx, int rule_idx,
  * for the doc's lifetime. Empty/absent path is the default "don't
  * enforce robots.txt" state; operators turn it on by pointing at a
  * file. */
-const char *bs_set_robots_txt(cmd_parms *cmd, void *dconf,
-                                     const char *path)
+/* ======================================================================
+ * <BotShieldRobots> -- the container
+ *
+ * Apache has already built the block's children by the time this runs
+ * and hung them off cmd->directive; a nested <BotShieldRobotRule>
+ * arrives as a child whose own children are the group's lines. None of
+ * the inner names are registered directives: they mean something only
+ * in here, and Apache reports an outer one as unknown on its own.
+ *
+ * One container per server scope. It is the set within which robots
+ * precedence is computed -- a rule's meaning depends on its siblings,
+ * because a longer Allow elsewhere in the set changes what a Disallow
+ * covers -- so two containers would be two independent sets, and a
+ * redefinition is refused the way <BotShieldMatch> refuses one.
+ * ====================================================================== */
+
+/* The rest of a directive line, one layer of quotes removed. */
+static const char *bs_rb_dir_value(apr_pool_t *p, const ap_directive_t *d)
 {
-    (void)dconf;
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    if (!path || !*path) {
-        return "BotShieldRobotsTxt: path required";
+    char *v = apr_pstrdup(p, d->args ? d->args : "");
+    apr_size_t n = strlen(v);
+    while (n && apr_isspace(v[n - 1])) v[--n] = '\0';
+    if (n >= 2 && (v[0] == '"' || v[0] == '\'') && v[n - 1] == v[0]) {
+        v[n - 1] = '\0';
+        v++;
     }
-    if (path[0] != '/') {
-        return "BotShieldRobotsTxt: path must be absolute";
-    }
-    scfg->robots_txt_path = apr_pstrdup(cmd->pool, path);
+    return v;
+}
+
+static const char *bs_rb_where(apr_pool_t *p, const ap_directive_t *d)
+{
+    return apr_psprintf(p, "%s:%d", d->filename ? d->filename : "?",
+                        d->line_num);
+}
+
+static const char *bs_rb_parse_mode(const char *v, int *out)
+{
+    if (!strcasecmp(v, "enforce"))      *out = BS_ROBOTS_MODE_ENFORCE;
+    else if (!strcasecmp(v, "observe")) *out = BS_ROBOTS_MODE_OBSERVE;
+    else return "must be enforce or observe";
     return NULL;
 }
 
-/* E2.2 — BotShieldRobotsRefreshInterval <seconds>. Governs the
- * mod_watchdog-driven live refresh (E2.2.2). 0 disables the
- * watchdog callback, reverting to post_config-only load
- * (edit robots.txt + reload Apache). Default 60s. Hard cap at
- * 86400 to catch typos that'd push refreshes into next week. */
-const char *bs_set_robots_refresh_interval(cmd_parms *cmd,
-                                                  void *dconf,
-                                                  const char *arg)
+/* <BotShieldRobotRule name> ... </BotShieldRobotRule> */
+static const char *bs_rb_parse_inline_group(cmd_parms *cmd,
+                                            const ap_directive_t *d,
+                                            bs_robots_inline_group **out)
 {
-    (void)dconf;
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    char *end = NULL;
-    long v = strtol(arg, &end, 10);
-    if (!end || *end || v < 0 || v > 86400) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldRobotsRefreshInterval: '%s' must be an integer "
-            "0..86400 seconds (0 = disable live refresh)", arg);
+    apr_pool_t *p = cmd->pool;
+    /* d->args is "name>" -- the closing bracket travels with it. */
+    char *spec = apr_pstrdup(p, d->args ? d->args : "");
+    apr_size_t n = strlen(spec);
+    while (n && apr_isspace(spec[n - 1])) spec[--n] = '\0';
+    if (!n || spec[n - 1] != '>') {
+        return apr_psprintf(p, "<BotShieldRobotRule> at %s is missing its "
+                            "closing '>'", bs_rb_where(p, d));
     }
-    scfg->robots_refresh_interval = (int)v;
+    spec[--n] = '\0';
+    while (n && apr_isspace(spec[n - 1])) spec[--n] = '\0';
+    const char *name = ap_getword_conf(p, (const char **)&spec);
+    if (!name || !*name) {
+        return apr_psprintf(p, "<BotShieldRobotRule> at %s needs a name: "
+                            "<BotShieldRobotRule ai-crawlers>",
+                            bs_rb_where(p, d));
+    }
+    if (strlen(name) > 32) {
+        return apr_psprintf(p, "<BotShieldRobotRule %s>: name must be at "
+                            "most 32 characters", name);
+    }
+    for (const char *c = name; *c; c++) {
+        if (!((*c >= 'a' && *c <= 'z') || (*c >= '0' && *c <= '9')
+              || *c == '-')) {
+            return apr_psprintf(p, "<BotShieldRobotRule %s>: name must be "
+                                "[a-z0-9-]; it is the group's id in the "
+                                "decision log and the dump", name);
+        }
+    }
+
+    bs_robots_inline_group *g = apr_pcalloc(p, sizeof(*g));
+    g->name        = name;
+    g->user_agents = apr_array_make(p, 4, sizeof(const char *));
+    g->rules       = apr_array_make(p, 8, sizeof(bs_robots_inline_rule));
+    g->mode        = BS_ROBOTS_MODE_UNSET;
+    int seen_delay = 0, seen_status = 0, seen_mode = 0, seen_tag = 0;
+
+    for (const ap_directive_t *c = d->first_child; c; c = c->next) {
+        const char *dir = c->directive;
+        const char *val = bs_rb_dir_value(p, c);
+        if (!strcasecmp(dir, "BotShieldUserAgent")) {
+            if (!*val) return apr_psprintf(p,
+                "<BotShieldRobotRule %s>: BotShieldUserAgent needs a "
+                "token (a product token, '*', or @botgroup)", name);
+            if (g->user_agents->nelts >= BOTSHIELD_ROBOTS_MAX_UAS_PER_GROUP)
+                return apr_psprintf(p, "<BotShieldRobotRule %s>: more than "
+                    "%d user agents", name, BOTSHIELD_ROBOTS_MAX_UAS_PER_GROUP);
+            *(const char **)apr_array_push(g->user_agents) = val;
+        } else if (!strcasecmp(dir, "BotShieldDisallow")
+                || !strcasecmp(dir, "BotShieldAllow")) {
+            /* An empty Disallow is a real line in robots.txt ("allow
+             * everything") and means nothing here, where absence
+             * already means that. Refuse it rather than store a
+             * pattern that can never match. */
+            if (!*val) return apr_psprintf(p,
+                "<BotShieldRobotRule %s>: %s needs a path pattern "
+                "(/ for everything)", name, dir);
+            if (*val != '/' && *val != '*') return apr_psprintf(p,
+                "<BotShieldRobotRule %s>: %s '%s' must start with '/' "
+                "(or '*')", name, dir, val);
+            if (g->rules->nelts >= BOTSHIELD_ROBOTS_MAX_RULES_PER_GROUP)
+                return apr_psprintf(p, "<BotShieldRobotRule %s>: more than "
+                    "%d rules", name, BOTSHIELD_ROBOTS_MAX_RULES_PER_GROUP);
+            bs_robots_inline_rule *r = apr_array_push(g->rules);
+            r->pattern = val;
+            r->allow   = !strcasecmp(dir, "BotShieldAllow");
+            bs_path_pattern_warn_middle_star(cmd, "BotShieldRobotRule",
+                                             name, val);
+        } else if (!strcasecmp(dir, "BotShieldCrawlDelay")) {
+            if (seen_delay++) return apr_psprintf(p,
+                "<BotShieldRobotRule %s>: BotShieldCrawlDelay given twice",
+                name);
+            char *end = NULL;
+            double v = strtod(val, &end);
+            if (!end || end == val || *end || !(v > 0.0)
+                || v > BOTSHIELD_ROBOTS_MAX_CRAWL_DELAY_SEC) {
+                return apr_psprintf(p, "<BotShieldRobotRule %s>: "
+                    "BotShieldCrawlDelay '%s' must be seconds, above 0 and "
+                    "at most %d; fractions are fine (0.5)", name, val,
+                    BOTSHIELD_ROBOTS_MAX_CRAWL_DELAY_SEC);
+            }
+            int ms = (int)(v * 1000.0 + 0.5);
+            if (ms <= 0) return apr_psprintf(p, "<BotShieldRobotRule %s>: "
+                "BotShieldCrawlDelay '%s' rounds to no time at all", name, val);
+            g->crawl_delay_ms = ms;
+        } else if (!strcasecmp(dir, "BotShieldRespond")) {
+            if (seen_status++) return apr_psprintf(p,
+                "<BotShieldRobotRule %s>: BotShieldRespond given twice", name);
+            char *end = NULL;
+            long s = strtol(val, &end, 10);
+            if (!end || *end || s < 400 || s > 599) return apr_psprintf(p,
+                "<BotShieldRobotRule %s>: BotShieldRespond '%s' must be a "
+                "4xx or 5xx status", name, val);
+            if (s == 429) return apr_psprintf(p,
+                "<BotShieldRobotRule %s>: BotShieldRespond 429 is the "
+                "Crawl-delay answer, not a refusal; a Disallow that "
+                "answers 429 tells the crawler to come back", name);
+            g->status = (int)s;
+        } else if (!strcasecmp(dir, "BotShieldMode")) {
+            if (seen_mode++) return apr_psprintf(p,
+                "<BotShieldRobotRule %s>: BotShieldMode given twice", name);
+            const char *e = bs_rb_parse_mode(val, &g->mode);
+            if (e) return apr_psprintf(p,
+                "<BotShieldRobotRule %s>: BotShieldMode '%s' %s", name, val, e);
+        } else if (!strcasecmp(dir, "BotShieldLogAs")) {
+            if (seen_tag++) return apr_psprintf(p,
+                "<BotShieldRobotRule %s>: BotShieldLogAs given twice", name);
+            if (!*val) return apr_psprintf(p,
+                "<BotShieldRobotRule %s>: BotShieldLogAs needs a tag", name);
+            g->log_tag = val;
+        } else {
+            return apr_psprintf(p, "<BotShieldRobotRule %s>: '%s' at %s is "
+                "not a robots setting. Inside a group: BotShieldUserAgent, "
+                "BotShieldDisallow, BotShieldAllow, BotShieldCrawlDelay, "
+                "BotShieldRespond, BotShieldMode, BotShieldLogAs.",
+                name, dir, bs_rb_where(p, c));
+        }
+    }
+    if (g->user_agents->nelts == 0) {
+        return apr_psprintf(p, "<BotShieldRobotRule %s> names no "
+            "BotShieldUserAgent, so it is addressed to nobody", name);
+    }
+    if (g->rules->nelts == 0 && g->crawl_delay_ms == 0) {
+        return apr_psprintf(p, "<BotShieldRobotRule %s> has no "
+            "BotShieldDisallow, BotShieldAllow or BotShieldCrawlDelay, so "
+            "it says nothing", name);
+    }
+    *out = g;
     return NULL;
 }
 
-
-/* E2.2 — BotShieldRobotsWildcardScope heuristic|strict|off.
- * Governs how the User-agent: * group in robots.txt is enforced:
- *   heuristic (default): apply only to UAs that look like crawlers
- *                        — real-browser prefix denylist + bot-token
- *                        allowlist (see CHANGELOG.md).
- *   strict             : apply to every UA (operator's call; risks
- *                        rate-limiting or blocking real users).
- *   off                : ignore * groups entirely. */
-const char *bs_set_robots_wildcard_scope(cmd_parms *cmd, void *dconf,
-                                                const char *arg)
+const char *bs_open_robots(cmd_parms *cmd, void *dconf, const char *arg)
 {
     (void)dconf;
+    apr_pool_t *p = cmd->pool;
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
-    if (!arg || !*arg) return "BotShieldRobotsWildcardScope: mode required";
-    if (!strcasecmp(arg, "heuristic")) {
-        scfg->robots_wildcard_scope = BS_ROBOTS_WILDCARD_HEURISTIC;
-    } else if (!strcasecmp(arg, "strict")) {
-        scfg->robots_wildcard_scope = BS_ROBOTS_WILDCARD_STRICT;
-    } else if (!strcasecmp(arg, "off")) {
-        scfg->robots_wildcard_scope = BS_ROBOTS_WILDCARD_OFF;
-    } else {
-        return apr_psprintf(cmd->pool,
-            "BotShieldRobotsWildcardScope: '%s' not one of "
-            "heuristic|strict|off", arg);
+
+    char *spec = apr_pstrdup(p, arg ? arg : "");
+    apr_size_t n = strlen(spec);
+    while (n && apr_isspace(spec[n - 1])) spec[--n] = '\0';
+    if (!n || spec[n - 1] != '>') {
+        return "<BotShieldRobots> is missing its closing '>'";
     }
+    spec[--n] = '\0';
+    while (n && apr_isspace(spec[n - 1])) spec[--n] = '\0';
+    if (n) {
+        return apr_psprintf(p, "<BotShieldRobots> takes no argument; "
+                            "'%s' was given", spec);
+    }
+    if (scfg->robots_container_seen) {
+        return "<BotShieldRobots> is already defined in this scope. One "
+               "container per scope: it is the set within which robots.txt "
+               "precedence is computed, and two would be two independent "
+               "sets. Put every group in the one block.";
+    }
+    scfg->robots_container_seen = 1;
+
+    apr_array_header_t *groups =
+        apr_array_make(p, 4, sizeof(bs_robots_inline_group *));
+    int seen_txt = 0, seen_mode = 0, seen_scope = 0, seen_ival = 0;
+
+    for (const ap_directive_t *d = cmd->directive->first_child; d;
+         d = d->next) {
+        const char *dir = d->directive;
+        const char *val = bs_rb_dir_value(p, d);
+        if (!strcasecmp(dir, "BotShieldRobotsTxt")) {
+            if (seen_txt++) return "<BotShieldRobots>: BotShieldRobotsTxt "
+                                   "given twice";
+            if (!*val) return "<BotShieldRobots>: BotShieldRobotsTxt needs a path";
+            if (*val != '/') return apr_psprintf(p, "<BotShieldRobots>: "
+                "BotShieldRobotsTxt '%s' must be an absolute path", val);
+            scfg->robots_txt_path = apr_pstrdup(p, val);
+        } else if (!strcasecmp(dir, "BotShieldMode")) {
+            if (seen_mode++) return "<BotShieldRobots>: BotShieldMode given twice";
+            const char *e = bs_rb_parse_mode(val, &scfg->robots_mode);
+            if (e) return apr_psprintf(p, "<BotShieldRobots>: BotShieldMode "
+                                       "'%s' %s", val, e);
+        } else if (!strcasecmp(dir, "BotShieldWildcardScope")) {
+            if (seen_scope++) return "<BotShieldRobots>: BotShieldWildcardScope "
+                                     "given twice";
+            if (!strcasecmp(val, "heuristic"))
+                scfg->robots_wildcard_scope = BS_ROBOTS_WILDCARD_HEURISTIC;
+            else if (!strcasecmp(val, "strict"))
+                scfg->robots_wildcard_scope = BS_ROBOTS_WILDCARD_STRICT;
+            else if (!strcasecmp(val, "off"))
+                scfg->robots_wildcard_scope = BS_ROBOTS_WILDCARD_OFF;
+            else return apr_psprintf(p, "<BotShieldRobots>: "
+                "BotShieldWildcardScope '%s' not one of heuristic|strict|off",
+                val);
+        } else if (!strcasecmp(dir, "BotShieldRefreshInterval")) {
+            if (seen_ival++) return "<BotShieldRobots>: BotShieldRefreshInterval "
+                                    "given twice";
+            char *end = NULL;
+            long v = strtol(val, &end, 10);
+            if (!end || end == val || *end || v < 0 || v > 86400) {
+                return apr_psprintf(p, "<BotShieldRobots>: "
+                    "BotShieldRefreshInterval '%s' must be an integer "
+                    "0..86400 seconds (0 = no live refresh)", val);
+            }
+            scfg->robots_refresh_interval = (int)v;
+        } else if (!strcasecmp(dir, "<BotShieldRobotRule")) {
+            bs_robots_inline_group *g = NULL;
+            const char *e = bs_rb_parse_inline_group(cmd, d, &g);
+            if (e) return e;
+            for (int i = 0; i < groups->nelts; i++) {
+                bs_robots_inline_group *o =
+                    APR_ARRAY_IDX(groups, i, bs_robots_inline_group *);
+                if (strcmp(o->name, g->name) == 0) {
+                    return apr_psprintf(p, "<BotShieldRobotRule %s> is "
+                        "defined twice in this <BotShieldRobots>", g->name);
+                }
+            }
+            *(bs_robots_inline_group **)apr_array_push(groups) = g;
+        } else {
+            return apr_psprintf(p, "<BotShieldRobots>: '%s' at %s is not a "
+                "robots setting. Inside the container: BotShieldRobotsTxt, "
+                "BotShieldMode, BotShieldWildcardScope, "
+                "BotShieldRefreshInterval, or a <BotShieldRobotRule name> "
+                "block.", dir, bs_rb_where(p, d));
+        }
+    }
+    if (!scfg->robots_txt_path && groups->nelts == 0) {
+        return "<BotShieldRobots> is empty: give it a BotShieldRobotsTxt "
+               "file, a <BotShieldRobotRule> block, or both";
+    }
+    scfg->robots_groups = groups;
     return NULL;
 }
 
@@ -861,27 +1192,33 @@ void bs_path_pattern_warn_middle_star(cmd_parms *cmd,
 apr_status_t bs_robots_load(server_rec *sv, bs_server_cfg *scfg,
                             apr_pool_t *pconf)
 {
-    if (!scfg || !scfg->robots_txt_path) return APR_EINVAL;
-
-    /* Stat first — if mtime is unchanged since the active doc was
-     * parsed, there's nothing to do. This is the common case on
-     * every refresh tick. */
-    apr_finfo_t fi;
-    apr_status_t rv = apr_stat(&fi, scfg->robots_txt_path,
-                               APR_FINFO_MTIME | APR_FINFO_SIZE, pconf);
-    if (rv != APR_SUCCESS) {
-        char errbuf[128];
-        apr_strerror(rv, errbuf, sizeof(errbuf));
-        ap_log_error(APLOG_MARK, APLOG_WARNING, rv, sv,
-            "mod_botshield: robots.txt %s stat failed (%s); "
-            "keeping previous state",
-            scfg->robots_txt_path, errbuf);
-        return rv;
-    }
+    if (!scfg || !bs_robots_configured(scfg)) return APR_EINVAL;
 
     bs_robots_state *cur =
         __atomic_load_n(&scfg->robots, __ATOMIC_ACQUIRE);
-    if (cur && cur->mtime == fi.mtime) {
+    apr_finfo_t fi;
+    apr_status_t rv;
+    fi.mtime = 0;
+    if (scfg->robots_txt_path) {
+        /* Stat first — if mtime is unchanged since the active doc was
+         * parsed, there's nothing to do. This is the common case on
+         * every refresh tick. */
+        rv = apr_stat(&fi, scfg->robots_txt_path,
+                      APR_FINFO_MTIME | APR_FINFO_SIZE, pconf);
+        if (rv != APR_SUCCESS) {
+            char errbuf[128];
+            apr_strerror(rv, errbuf, sizeof(errbuf));
+            ap_log_error(APLOG_MARK, APLOG_WARNING, rv, sv,
+                "mod_botshield: robots.txt %s stat failed (%s); "
+                "keeping previous state",
+                scfg->robots_txt_path, errbuf);
+            return rv;
+        }
+        if (cur && cur->mtime == fi.mtime) {
+            return APR_SUCCESS;
+        }
+    } else if (cur) {
+        /* Inline groups only: config-time constants, built once. */
         return APR_SUCCESS;
     }
 
@@ -893,16 +1230,37 @@ apr_status_t bs_robots_load(server_rec *sv, bs_server_cfg *scfg,
 
     robots_doc *doc = NULL;
     const char *parse_err = NULL;
-    rv = robots_parse_file(npool, scfg->robots_txt_path,
-                           &doc, &parse_err);
-    if (rv != APR_SUCCESS || !doc) {
-        ap_log_error(APLOG_MARK, APLOG_WARNING, rv, sv,
-            "mod_botshield: robots.txt %s parse failed (%s); "
-            "keeping previous state",
-            scfg->robots_txt_path,
-            parse_err ? parse_err : "unknown error");
-        apr_pool_destroy(npool);
-        return rv;
+    if (scfg->robots_txt_path) {
+        rv = robots_parse_file(npool, scfg->robots_txt_path,
+                               &doc, &parse_err);
+        if (rv != APR_SUCCESS || !doc) {
+            ap_log_error(APLOG_MARK, APLOG_WARNING, rv, sv,
+                "mod_botshield: robots.txt %s parse failed (%s); "
+                "keeping previous state",
+                scfg->robots_txt_path,
+                parse_err ? parse_err : "unknown error");
+            apr_pool_destroy(npool);
+            return rv;
+        }
+    } else {
+        doc = robots_doc_empty(npool);
+    }
+
+    /* The inline groups join the same document, so precedence is
+     * computed across the file and the config together: that is what
+     * makes the container the scope rather than a wrapper. Re-added
+     * on every refresh of the file, since the doc is rebuilt whole. */
+    if (scfg->robots_groups) {
+        for (int i = 0; i < scfg->robots_groups->nelts; i++) {
+            bs_robots_inline_group *ig = APR_ARRAY_IDX(
+                scfg->robots_groups, i, bs_robots_inline_group *);
+            const char *aerr = NULL;
+            if (robots_doc_add_inline(doc, ig, &aerr) != APR_SUCCESS) {
+                ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
+                    "mod_botshield: <BotShieldRobotRule %s> not added: %s",
+                    ig->name, aerr ? aerr : "unknown error");
+            }
+        }
     }
 
     /* Surface truncated lines (the parser
@@ -979,10 +1337,13 @@ apr_status_t bs_robots_load(server_rec *sv, bs_server_cfg *scfg,
             slot_exhausted);
     }
     ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
-        "mod_botshield: robots.txt %s %sloaded - %d groups, "
+        "mod_botshield: robots %s %sloaded - %d groups (%d inline), "
         "%d with Crawl-delay (%d slots reused, %d new)",
-        scfg->robots_txt_path, cur ? "re" : "",
-        n_groups, delay_count, slot_reused, slot_new);
+        scfg->robots_txt_path ? scfg->robots_txt_path
+                              : "<BotShieldRobots> (no file)",
+        cur ? "re" : "", n_groups,
+        scfg->robots_groups ? scfg->robots_groups->nelts : 0,
+        delay_count, slot_reused, slot_new);
     return APR_SUCCESS;
 }
 

@@ -92,9 +92,37 @@ typedef struct robots_match {
     int          is_wildcard;     /* 1 if matching group was User-agent: * */
     int          allowed;         /* 1 if path allowed, 0 if Disallowed */
     int          crawl_delay_ms;  /* 0 if no Crawl-delay on matching group */
-    const char  *group_name;      /* normalized id (lowercase, [a-z0-9-]);
-                                   * pool-alloc'd; NULL if no match */
+    const char  *group_name;      /* the governing group: the one whose
+                                   * rule decided `allowed`, else the first
+                                   * relevant one; NULL if no match */
+    /* The governing group's knobs, when it refused. status 0 means
+     * the default (403); log_tag NULL means none. */
+    int          status;
+    const char  *log_tag;
+    /* An observe group whose Disallow was the longest match of all
+     * and stepped aside. NULL when none did. The caller logs it as
+     * `robotsblock:<name>:observe` and then acts on `allowed`, which
+     * only the enforcing groups decided. */
+    const char  *observed_group;
 } robots_match;
+
+/* An inline group: <BotShieldRobotRule name> inside <BotShieldRobots>.
+ * Config-time constant, in pconf; merged into every document
+ * bs_robots_load builds, so it survives a live refresh of the file. */
+typedef struct bs_robots_inline_rule {
+    const char *pattern;
+    int         allow;
+} bs_robots_inline_rule;
+
+typedef struct bs_robots_inline_group {
+    const char         *name;          /* the block's name, [a-z0-9-]{1,32} */
+    apr_array_header_t *user_agents;   /* const char *, as written */
+    apr_array_header_t *rules;         /* bs_robots_inline_rule, in order */
+    int                 crawl_delay_ms;
+    int                 status;        /* 0 = default */
+    int                 mode;          /* bs_robots_mode; UNSET inherits */
+    const char         *log_tag;
+} bs_robots_inline_group;
 
 /* Parse a robots.txt file. On APR_SUCCESS, *out is set to a new doc
  * allocated in `p`. On error, *err is an operator-readable diagnostic
@@ -124,8 +152,18 @@ apr_status_t robots_parse_buf(apr_pool_t *p, const char *buf,
  * won't match in that case (UA-substring stanzas still apply). */
 void robots_query(const robots_doc *doc,
                   const char *ua, const char *botgroup,
-                  const char *path,
+                  const char *path, int default_mode,
                   robots_match *out);
+
+/* Build a document with no file behind it, and add an inline group to
+ * a document (parsed or empty). The group's UA tokens are lowercased
+ * and its name taken as given, so a file group and an inline group
+ * with the same name share a Crawl-delay slot, as duplicate names in
+ * one file already do. */
+robots_doc  *robots_doc_empty(apr_pool_t *p);
+apr_status_t robots_doc_add_inline(robots_doc *doc,
+                                   const bs_robots_inline_group *g,
+                                   const char **err);
 
 /* Group iteration — used at post_config time to allocate one SHM
  * rate-counter slot per group that carries a Crawl-delay, and by
@@ -138,6 +176,13 @@ int         robots_doc_truncated_lines(const robots_doc *doc);
 const char *robots_group_name_at(const robots_doc *doc, int idx);
 int         robots_group_is_wildcard_at(const robots_doc *doc, int idx);
 int         robots_group_crawl_delay_ms_at(const robots_doc *doc, int idx);
+/* The per-group knobs an inline group may carry. mode is the raw
+ * value -- BS_ROBOTS_MODE_UNSET when the group inherits the
+ * container's; the caller resolves it. status 0 is the default. */
+int         robots_group_mode_at(const robots_doc *doc, int idx);
+int         robots_group_status_at(const robots_doc *doc, int idx);
+const char *robots_group_log_tag_at(const robots_doc *doc, int idx);
+int         robots_group_is_inline_at(const robots_doc *doc, int idx);
 /* Format a millisecond delay as robots.txt seconds; see robots.c. */
 const char *robots_fmt_seconds(char *buf, apr_size_t n, int ms);
 
@@ -165,18 +210,20 @@ int         robots_group_rule_at(const robots_doc *doc, int idx, int rule_idx,
  * maintaining a parallel placeholder. */
 int bs_path_match(const char *pattern, const char *path);
 
-/* --- E2.2 directive setters --- *
+/* --- <BotShieldRobots> --- *
  *
- * BotShieldRobotsTxt <path>           — point at a robots.txt file.
- * BotShieldRobotsRefreshInterval <s>  — live-refresh cadence (0 disables).
- * BotShieldRobotsWildcardScope mode   — User-agent: * group enforcement
- *                                       (heuristic / strict / off). */
-const char *bs_set_robots_txt(cmd_parms *cmd, void *dconf,
-                              const char *path);
-const char *bs_set_robots_refresh_interval(cmd_parms *cmd, void *dconf,
-                                           const char *arg);
-const char *bs_set_robots_wildcard_scope(cmd_parms *cmd, void *dconf,
-                                         const char *arg);
+ * The one configuration surface for robots.txt enforcement. Inside:
+ *   BotShieldRobotsTxt <path>          the file (optional)
+ *   BotShieldMode enforce|observe      the file's and the default mode
+ *   BotShieldWildcardScope <scope>     heuristic|strict|off
+ *   BotShieldRefreshInterval <s>       live-refresh cadence, 0 disables
+ *   <BotShieldRobotRule name> ... </>  an inline group: BotShieldUserAgent
+ *                                      (repeatable), BotShieldDisallow /
+ *                                      BotShieldAllow (repeatable),
+ *                                      BotShieldCrawlDelay, BotShieldRespond,
+ *                                      BotShieldMode, BotShieldLogAs
+ * One container per server scope; a second is refused. */
+const char *bs_open_robots(cmd_parms *cmd, void *dconf, const char *arg);
 
 /* --- E2.2.2 module-side loader --- *
  *

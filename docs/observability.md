@@ -356,12 +356,15 @@ Two directives let robots.txt-derived rules record without acting, so a
 file most sites publish and never enforce can be measured first:
 
 ```apache
-BotShieldRobotsMode   observe                  # Disallow -> ~block, no 403
+<BotShieldRobots>
+    BotShieldRobotsTxt  /etc/botshield/robots.txt
+    BotShieldMode       observe                # Disallow -> ~block, no 403
+</BotShieldRobots>
 BotShieldBotRateLimit * 1 sec mode=observe     # Crawl-delay -> ~rate_limited, no 429
 ```
 
 Both are independent of `BotShieldEnabled`, so a scope can enforce its
-scoring while robots.txt stays advisory. `BotShieldRobotsMode observe`
+scoring while robots.txt stays advisory. `BotShieldMode observe`
 also suppresses the +100 score and the 1-hour flag, not just the status
 — otherwise the penalty follows the client into later requests and
 changes its tier, which is enforcement by another route.
@@ -877,7 +880,7 @@ $ sudo httpd -t -D DUMP_BOTSHIELD_POLICY
 honeypot_hit       score       botsignals+60  enforce   configured
 app_verified_human score       botsignals-80  enforce   configured
 
-## robots.txt (BotShieldRobotsTxt)
+## robots.txt (<BotShieldRobots>)
 # path:                /var/www/html/robots.txt
 # mtime:               Thu, 03 Sep 2026 16:16:19 GMT
 # groups:              2

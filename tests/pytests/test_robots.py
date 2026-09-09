@@ -1,6 +1,7 @@
 """E2.2 — server-side robots.txt enforcement.
 
-Exercises BotShieldRobotsTxt + BotShieldRobotsWildcardScope:
+Exercises <BotShieldRobots>: the file, the wildcard scope, the mode,
+the refresh, and -- since 2026-09-09 -- the inline groups:
 
   Disallow      → 403, reason robotsblock:<group-name>
   Crawl-delay   → 429 + Retry-After, reason robots-rate:<group>
@@ -9,7 +10,8 @@ Exercises BotShieldRobotsTxt + BotShieldRobotsWildcardScope:
   Directive rules layer over robots.txt (operator wins in each family)
 
 Each test writes a tiny robots.txt under /tmp and injects a
-BotShieldRobotsTxt directive via config_override to point at it. The
+<BotShieldRobots> block via config_override to point at it (the tests
+write the compact BotShieldRobotsTxt line; the renderer wraps it). The
 file is cleaned up by pytest tmp_path_factory.
 """
 
@@ -24,7 +26,7 @@ import time
 
 import pytest
 
-from botshield_test import client
+from botshield_test import apache, client
 
 
 # No longer serial. The marker meant "mutates Apache config or SHM",
@@ -560,3 +562,242 @@ def test_directive_rate_limit_overrides_robots_crawl_delay(
     # Directive budget is 10/sec; all three should admit. If robots.txt's
     # 1/60s were being consulted (i.e., directive didn't win), r2 = 429.
     assert [r1.status_code, r2.status_code, r3.status_code] == [200, 200, 200]
+
+
+# --- <BotShieldRobots> ------------------------------------------------
+#
+# Written in the real block form, not the compact one: this is the
+# container's own behaviour, and the renderer passes these through.
+
+CLAUDEBOT_UA = "Mozilla/5.0 (compatible; ClaudeBot/1.0; +claudebot@anthropic.com)"
+
+
+def _container(body: str) -> str:
+    return (
+        "BotShieldEnabled On\n"
+        "    BotShieldChallengeAtLeast none\n"
+        "    <BotShieldRobots>\n"
+        + body +
+        "    </BotShieldRobots>"
+    )
+
+
+def test_robots_inline_group_without_a_file(
+    config_override, log_slice, fresh_ip,
+):
+    """A container with no file at all. The group is the whole policy,
+    and it is written in the config where the operator can see it."""
+    conf = _container(
+        "        <BotShieldRobotRule ai-crawlers>\n"
+        "            BotShieldUserAgent  GPTBot\n"
+        "            BotShieldDisallow   /\n"
+        "        </BotShieldRobotRule>\n"
+    )
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
+        with log_slice as slc:
+            r = client.get("/anything", xff=fresh_ip, ua=GPTBOT_UA)
+            lines = slc.decision_lines(ip=fresh_ip)
+    assert r.status_code == 403, r.status_code
+    assert [d for d in lines if "robotsblock:ai-crawlers" in d["reason"]], (
+        f"no robotsblock:ai-crawlers line; lines={lines}"
+    )
+
+
+def test_robots_inline_group_status_and_tag(
+    config_override, log_slice, fresh_ip,
+):
+    """The knobs a file cannot express: a status other than 403 and a
+    log tag for the fail2ban handoff."""
+    conf = _container(
+        "        <BotShieldRobotRule ai-crawlers>\n"
+        "            BotShieldUserAgent  GPTBot\n"
+        "            BotShieldDisallow   /\n"
+        "            BotShieldRespond    404\n"
+        "            BotShieldLogAs      ai-deny\n"
+        "        </BotShieldRobotRule>\n"
+    )
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
+        with log_slice as slc:
+            r = client.get("/", xff=fresh_ip, ua=GPTBOT_UA)
+            tagged = slc.grep(r'tag="ai-deny"')
+    assert r.status_code == 404, r.status_code
+    assert tagged, "the decision line did not carry tag=\"ai-deny\""
+
+
+def test_robots_file_and_inline_groups_form_one_set(
+    robots_path, config_override, fresh_ip,
+):
+    """The file and the groups are one document. A named inline group
+    suppresses the file's wildcard for its crawler, exactly as a named
+    group in the file would; the wildcard still applies to the rest."""
+    robots_path = _write_robots(robots_path, """
+        User-agent: *
+        Disallow: /private
+    """)
+    conf = _container(
+        f"        BotShieldRobotsTxt  {robots_path}\n"
+        "        <BotShieldRobotRule ai-crawlers>\n"
+        "            BotShieldUserAgent  GPTBot\n"
+        "            BotShieldDisallow   /\n"
+        "        </BotShieldRobotRule>\n"
+    )
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
+        gpt_public  = client.get("/public",  xff=fresh_ip, ua=GPTBOT_UA)
+        curl_priv   = client.get("/private", xff=fresh_ip, ua=CURL_UA)
+        curl_public = client.get("/public",  xff=fresh_ip, ua=CURL_UA)
+    assert gpt_public.status_code == 403, (
+        f"the inline group should refuse GPTBot everywhere; got "
+        f"{gpt_public.status_code}"
+    )
+    assert curl_priv.status_code == 403, (
+        f"the file's wildcard should still refuse /private; got "
+        f"{curl_priv.status_code}"
+    )
+    assert curl_public.status_code != 403, (
+        f"the wildcard says nothing about /public; got "
+        f"{curl_public.status_code}"
+    )
+
+
+def test_robots_group_mode_overrides_container_observe(
+    robots_path, config_override, log_slice, fresh_ip,
+):
+    """An observing container with one group armed: the file's groups
+    record, the inline enforce group refuses. This is how enforcement
+    gets staged one crawler at a time."""
+    robots_path = _write_robots(robots_path, """
+        User-agent: GPTBot
+        Disallow: /admin
+    """)
+    conf = _container(
+        f"        BotShieldRobotsTxt  {robots_path}\n"
+        "        BotShieldMode       observe\n"
+        "        <BotShieldRobotRule armed>\n"
+        "            BotShieldUserAgent  ClaudeBot\n"
+        "            BotShieldDisallow   /\n"
+        "            BotShieldMode       enforce\n"
+        "        </BotShieldRobotRule>\n"
+    )
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
+        with log_slice as slc:
+            gpt = client.get("/admin", xff=fresh_ip, ua=GPTBOT_UA)
+            claude = client.get("/", xff=fresh_ip, ua=CLAUDEBOT_UA)
+            lines = slc.decision_lines(ip=fresh_ip)
+    assert gpt.status_code != 403, (
+        f"the file's group is observed and must not refuse; got {gpt.status_code}"
+    )
+    assert [d for d in lines if "robotsblock:gptbot:observe" in d["reason"]], (
+        f"the observed Disallow was not recorded; lines={lines}"
+    )
+    assert claude.status_code == 403, (
+        f"the armed group must refuse; got {claude.status_code}"
+    )
+
+
+def test_robots_observe_group_steps_aside(
+    config_override, log_slice, fresh_ip,
+):
+    """Two groups for one crawler: the longer Disallow is observed, the
+    shorter enforced. The observed one records itself and steps aside,
+    and the enforcing one still governs -- an observed rule never
+    shadows an enforced one, the same as in the request-rule family."""
+    conf = _container(
+        "        <BotShieldRobotRule wide>\n"
+        "            BotShieldUserAgent  GPTBot\n"
+        "            BotShieldDisallow   /admin\n"
+        "        </BotShieldRobotRule>\n"
+        "        <BotShieldRobotRule deep>\n"
+        "            BotShieldUserAgent  GPTBot\n"
+        "            BotShieldDisallow   /admin/secret\n"
+        "            BotShieldMode       observe\n"
+        "        </BotShieldRobotRule>\n"
+    )
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
+        with log_slice as slc:
+            r = client.get("/admin/secret", xff=fresh_ip, ua=GPTBOT_UA)
+            lines = slc.decision_lines(ip=fresh_ip)
+    assert r.status_code == 403, (
+        f"the enforcing group should still govern; got {r.status_code}"
+    )
+    reasons = " ".join(d["reason"] for d in lines)
+    assert "robotsblock:deep:observe" in reasons, reasons
+    assert "robotsblock:wide" in reasons, reasons
+
+
+def test_robots_second_container_is_refused(config_override):
+    """One container per scope. Two would be two precedence sets."""
+    conf = (
+        _container(
+            "        <BotShieldRobotRule a>\n"
+            "            BotShieldUserAgent  GPTBot\n"
+            "            BotShieldDisallow   /\n"
+            "        </BotShieldRobotRule>\n"
+        )
+        + "\n    <BotShieldRobots>\n"
+        "        <BotShieldRobotRule b>\n"
+        "            BotShieldUserAgent  ClaudeBot\n"
+        "            BotShieldDisallow   /\n"
+        "        </BotShieldRobotRule>\n"
+        "    </BotShieldRobots>"
+    )
+    with pytest.raises(Exception):
+        with config_override(r"BotShieldEnabled\s+On", conf, count=1):
+            pass
+
+
+@pytest.mark.parametrize("body, why", [
+    ("        <BotShieldRobotRule a>\n"
+     "            BotShieldDisallow   /\n"
+     "        </BotShieldRobotRule>\n", "no user agent"),
+    ("        <BotShieldRobotRule a>\n"
+     "            BotShieldUserAgent  GPTBot\n"
+     "        </BotShieldRobotRule>\n", "says nothing"),
+    ("        <BotShieldRobotRule a>\n"
+     "            BotShieldUserAgent  GPTBot\n"
+     "            BotShieldDisallow   /\n"
+     "            BotShieldRespond    429\n"
+     "        </BotShieldRobotRule>\n", "429 is the Crawl-delay answer"),
+    ("", "empty container"),
+])
+def test_robots_container_refuses_nonsense(config_override, body, why):
+    with pytest.raises(Exception):
+        with config_override(r"BotShieldEnabled\s+On", _container(body),
+                             count=1):
+            pass
+
+
+def test_robots_inline_crawl_delay(config_override, fresh_ip):
+    """A Crawl-delay written in the config feeds the same per-slug
+    machinery a file's does."""
+    conf = _container(
+        "        <BotShieldRobotRule slow>\n"
+        "            BotShieldUserAgent  GPTBot\n"
+        "            BotShieldCrawlDelay 60\n"
+        "        </BotShieldRobotRule>\n"
+    )
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
+        r1 = client.get("/", xff=fresh_ip, ua=GPTBOT_UA)
+        r2 = client.get("/", xff=fresh_ip, ua=GPTBOT_UA)
+    assert r1.status_code != 429, r1.status_code
+    assert r2.status_code == 429, (
+        f"the inline Crawl-delay did not refuse the repeat; got {r2.status_code}"
+    )
+
+
+def test_robots_dump_shows_inline_groups(config_override):
+    """The dump says where each group came from and what knobs it set."""
+    conf = _container(
+        "        <BotShieldRobotRule ai-crawlers>\n"
+        "            BotShieldUserAgent  GPTBot\n"
+        "            BotShieldDisallow   /\n"
+        "            BotShieldRespond    404\n"
+        "            BotShieldLogAs      ai-deny\n"
+        "        </BotShieldRobotRule>\n"
+    )
+    with config_override(r"BotShieldEnabled\s+On", conf, render=False,
+                         count=1):
+        body = apache.policy_dump()
+    assert 'group[0] "ai-crawlers"' in body, body[:800]
+    assert "source=config" in body, body[:800]
+    assert "respond:   404" in body, body[:800]
+    assert "logas:     ai-deny" in body, body[:800]

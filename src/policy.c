@@ -750,14 +750,18 @@ int bs_check_policy(request_rec *r)
      * pool is reclaimed — see bs_robots_refresh. */
     bs_robots_state *rstate =
         __atomic_load_n(&scfg->robots, __ATOMIC_ACQUIRE);
-    robots_match rmatch = { -1, 0, 1, 0, NULL };
+    robots_match rmatch;
+    memset(&rmatch, 0, sizeof(rmatch));
+    rmatch.group_idx = -1;
+    rmatch.allowed   = 1;
     int robots_apply = 0;
     if (rstate && rstate->doc && ua) {
         const bs_ua_class *cls_for_robots = bs_classify_request_ua(r);
         const char *robots_botgroup = (cls_for_robots
                                        && cls_for_robots->known_botgroup)
                                     ? cls_for_robots->known_botgroup : NULL;
-        robots_query(rstate->doc, ua, robots_botgroup, r->uri, &rmatch);
+        robots_query(rstate->doc, ua, robots_botgroup, r->uri,
+                     scfg->robots_mode, &rmatch);
         if (rmatch.group_idx >= 0) {
             robots_apply = 1;
             if (rmatch.is_wildcard) {
@@ -776,43 +780,49 @@ int bs_check_policy(request_rec *r)
             }
         }
     }
-    if (robots_apply && !rmatch.allowed) {
-        const char *rgroup = rmatch.group_name ? rmatch.group_name : "?";
-        /* Observe mode must not enforce -- the same contract the
-         * rate-limit path below has always honoured. Without this,
-         * switching BotShieldRobotsTxt on turned every Disallow into a
-         * hard 403 even under BotShieldEnabled LogOnly, so there was no
-         * way to find out who ignores your robots.txt before starting
-         * to refuse them. That is the wrong order for a rule set an
-         * operator has often published but never enforced.
-         *
-         * The score bump and the flag are suppressed too, not just the
-         * status: a +100 with a 1-hour TTL would follow the client into
-         * later requests and change their tier, which is enforcement by
-         * another route. */
-        int robots_observe = global_log_only
-                          || (scfg && scfg->robots_mode
-                                        == BS_ROBOTS_MODE_OBSERVE);
-        if (robots_observe) {
+    if (robots_apply) {
+        /* An observe group whose Disallow was the longest match of all
+         * records what it would have done and steps aside; the verdict
+         * in rmatch.allowed is the enforcing groups' alone. Observe must
+         * not enforce: no status, no score, no flag -- a +100 with an
+         * hour's TTL would follow the client into later requests and
+         * change their tier, which is enforcement by another route. */
+        if (rmatch.observed_group) {
             bs_score_add(r, 0,
-                apr_pstrcat(r->pool, "robotsblock:", rgroup,
+                apr_pstrcat(r->pool, "robotsblock:", rmatch.observed_group,
                             ":observe", NULL));
             bs_set_would_outcome(r, "~block");
             if (bs_shm.metrics) {
                 __atomic_fetch_add(&bs_shm.metrics->trigger_observed_total,
                                    1, __ATOMIC_RELAXED);
             }
-        } else {
-            /* Robots.txt Disallow → 403, and remember the address
-             * for an hour. The score bump beside it reaches the
-             * decision log and stops there -- it has since the total
-             * stopped choosing a tier -- so the flag is what a later
-             * request can act on, via flagged=robots_ignored. */
-            bs_score_add(r, 100,
-                apr_pstrcat(r->pool, "robotsblock:", rgroup, NULL));
-            bs_flag_client(r, BS_FLAG_ROBOTS_IGNORED,
-                           BS_ROBOTS_FLAG_TTL);
-            return HTTP_FORBIDDEN;
+        }
+        if (!rmatch.allowed) {
+            const char *rgroup = rmatch.group_name ? rmatch.group_name : "?";
+            if (global_log_only) {
+                /* Scope-level LogOnly observes the enforcing groups too. */
+                bs_score_add(r, 0,
+                    apr_pstrcat(r->pool, "robotsblock:", rgroup,
+                                ":observe", NULL));
+                bs_set_would_outcome(r, "~block");
+                if (bs_shm.metrics) {
+                    __atomic_fetch_add(
+                        &bs_shm.metrics->trigger_observed_total,
+                        1, __ATOMIC_RELAXED);
+                }
+            } else {
+                /* Disallow → the group's status (403 unless it says
+                 * otherwise), and remember the address for an hour. The
+                 * score bump reaches the decision log and stops there;
+                 * the flag is what a later request can act on, via
+                 * flagged=robots_ignored. */
+                bs_score_add(r, 100,
+                    apr_pstrcat(r->pool, "robotsblock:", rgroup, NULL));
+                bs_flag_client(r, BS_FLAG_ROBOTS_IGNORED,
+                               BS_ROBOTS_FLAG_TTL);
+                if (rmatch.log_tag) bs_set_trigger_tag(r, rmatch.log_tag);
+                return rmatch.status ? rmatch.status : HTTP_FORBIDDEN;
+            }
         }
     }
 
@@ -1176,14 +1186,19 @@ void bs_policy_dump(server_rec *s, apr_pool_t *p, bs_dir_cfg *cfg)
         fputs("\n", stdout);
     }
 
-    fputs("## robots.txt (BotShieldRobotsTxt)\n", stdout);
-    if (!scfg->robots_txt_path) {
+    fputs("## robots.txt (<BotShieldRobots>)\n", stdout);
+    if (!bs_robots_configured(scfg)) {
         fputs("# (not configured)\n", stdout);
         return;
     }
     bs_robots_state *rs =
         __atomic_load_n(&scfg->robots, __ATOMIC_ACQUIRE);
-    printf("# path:                %s\n", scfg->robots_txt_path);
+    printf("# path:                %s\n",
+           scfg->robots_txt_path ? scfg->robots_txt_path
+                                 : "(none - inline groups only)");
+    printf("# mode:                %s\n",
+           scfg->robots_mode == BS_ROBOTS_MODE_OBSERVE ? "observe"
+                                                       : "enforce");
     if (!rs) {
         fputs("# status:              NOT LOADED - parse failed or file "
                  "missing (see the error log above)\n", stdout);
@@ -1211,9 +1226,20 @@ void bs_policy_dump(server_rec *s, apr_pool_t *p, bs_dir_cfg *cfg)
 
     int n = robots_group_count(rs->doc);
     for (int i = 0; i < n; i++) {
-        printf("\n### group[%d] \"%s\"  wildcard=%s\n", i,
+        printf("\n### group[%d] \"%s\"  wildcard=%s  source=%s\n", i,
             robots_group_name_at(rs->doc, i),
-            robots_group_is_wildcard_at(rs->doc, i) ? "yes" : "no");
+            robots_group_is_wildcard_at(rs->doc, i) ? "yes" : "no",
+            robots_group_is_inline_at(rs->doc, i) ? "config" : "file");
+        {
+            int gm = robots_group_mode_at(rs->doc, i);
+            int gs = robots_group_status_at(rs->doc, i);
+            const char *gt = robots_group_log_tag_at(rs->doc, i);
+            if (gm != BS_ROBOTS_MODE_UNSET)
+                printf("  mode:      %s\n",
+                       gm == BS_ROBOTS_MODE_OBSERVE ? "observe" : "enforce");
+            if (gs) printf("  respond:   %d\n", gs);
+            if (gt) printf("  logas:     %s\n", gt);
+        }
         int n_ua = robots_group_ua_count_at(rs->doc, i);
         for (int u = 0; u < n_ua; u++) {
             printf("  user-agent: %s\n",

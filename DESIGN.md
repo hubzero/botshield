@@ -1096,7 +1096,7 @@ Reason strings:
 
 ### Wildcard `User-agent: *` semantics
 
-`BotShieldRobotsWildcardScope` controls how `*` rules are applied:
+`BotShieldWildcardScope` (inside `<BotShieldRobots>`) controls how `*` rules are applied:
 
 - `heuristic` (default): apply only to UAs that look like crawlers.
   The crawler-candidate test:
@@ -1115,11 +1115,10 @@ Reason strings:
   dangerous).
 - `off` — ignore `*` groups entirely.
 
-### Designed, not built: `<BotShieldRobots>` (2026-09-08)
+### `<BotShieldRobots>` (designed 2026-09-08, built 2026-09-09)
 
-A decision record. None of this exists in the code; it is written down
-because the reasoning took a long conversation to arrive at and would
-otherwise have to be rediscovered.
+A decision record, written the day before the build. The code matches
+it; what differs is noted under *As built* at the end.
 
 **The problem.** robots.txt enforcement has no configuration surface.
 `BotShieldRobotsTxt` points at a file and that is the whole of it, so
@@ -1229,6 +1228,24 @@ zeroed `bs_cohort` has `ip_any == 0` and `ranges == NULL`, and
 `bs_cohort_matches` reads that as refuse-everything, so any hand-built
 rule entry that forgets `ip_any` silently never matches.
 
+**As built (2026-09-09).** The four directives became the container's
+`BotShieldRobotsTxt`, `BotShieldMode`, `BotShieldWildcardScope` and
+`BotShieldRefreshInterval`; registered directives 83 -> 80. Groups are
+`<BotShieldRobotRule name>` with `BotShieldUserAgent`,
+`BotShieldDisallow`/`BotShieldAllow`, `BotShieldCrawlDelay` (fractions
+allowed), `BotShieldRespond` (4xx/5xx, 429 refused since it is the
+Crawl-delay answer), `BotShieldMode` and `BotShieldLogAs`. The file and
+the groups merge into one `robots_doc` in `bs_robots_load`, so the
+inline groups are re-added on every live refresh of the file; a
+container with no file builds its document once. The step-aside rule is
+two verdicts kept through one walk of `robots_query`: the longest match
+over every relevant group names the observed group if it was an observe
+Disallow, and the longest match over the enforcing groups alone is the
+answer. Not in the design: none of the inner names are registered
+directives, so Apache reports one used outside the container as
+unknown on its own; and a container's inline groups inherit main ->
+vhost as a whole when the vhost has no container of its own.
+
 ### Live refresh (E2.2.2)
 
 ```c
@@ -1254,7 +1271,7 @@ unchanged ⇒ O(1) no-op; only re-parses on change.
 OPTIONAL_FN; per-vhost instance name prevents cross-vhost
 interference. Soft dependency: if mod_watchdog isn't loaded, refresh
 degrades to post_config-only with a NOTICE.
-`BotShieldRobotsRefreshInterval` (default 60, 0 disables, max 86400)
+`BotShieldRefreshInterval` inside `<BotShieldRobots>` (default 60, 0 disables, max 86400)
 controls cadence.
 
 The SHM rate-counter slot pool reserved for robots groups
@@ -2377,7 +2394,7 @@ the `bs_cmds[]` table at `src/botshield.c:213`.
 | SHM sizing | `BotShieldShmSize`, `BotShieldFlaggedIPCapacity`, `BotShieldIPv6PrefixLen`, `BotShieldBloomIPs`, `BotShieldBloomWindow`, `BotShieldStateFile`, `BotShieldStateSaveInterval`, `BotShieldRateLimitEscalateCapacity`, `BotShieldSafeguardCapacity`, `BotShieldEmbeddedNonceCapacity` |
 | UA classification (E1) | `BotShieldClassify`, `BotShieldAllowBot`, `BotShieldAllowRangesRefreshInterval`, `BotShieldBotDirectory`, `BotShieldBrowserTemplates`, `BotShieldDataRefreshInterval` |
 | Policy (E2.1 / E9) | `BotShieldBotRateLimit`, `BotShieldRateLimitEscalate` (`BotShieldRateLimit` retired 2026-09-09) |
-| Robots (E2.2) | `BotShieldRobotsTxt`, `BotShieldRobotsRefreshInterval`, `BotShieldRobotsWildcardScope` |
+| Robots (E2.2) | `<BotShieldRobots>` carrying `BotShieldRobotsTxt`, `BotShieldMode`, `BotShieldWildcardScope`, `BotShieldRefreshInterval` and `<BotShieldRobotRule>` groups (four standalone directives until 2026-09-09) |
 | Triggers | `BotShieldRule` (E3, formerly BotShieldPathTrigger; since 2026-09-06 also carrying the E4 cookie, E6 env, E11.2 load and E14 flag predicates, and since 2026-09-07 the E14 action half), `BotShieldMatch` (named condition sets, shared by rules), `BotShieldFeedback` (E7.3), `BotShieldSessionCookieName` (E4) |
 | Safeguard (E10) | `BotShieldSafeguard`, `BotShieldSafeguardThreshold`, `BotShieldSafeguardWindow`, `BotShieldSafeguardTTL`, `BotShieldSafeguardRedirectURL` |
 | Load (E11) | `BotShieldLoadStateFile`, `BotShieldLoadRefreshInterval` |

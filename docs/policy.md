@@ -172,33 +172,43 @@ shifted; existing configs aren't broken, just verified.
 
 ## Robots.txt enforcement
 
-`BotShieldRobotsTxt` plugs in a parsed RFC 9309 robots.txt file as
-a policy source. Disallow rules become `robotsblock:<group>`
-matches; Crawl-delay rules become per-group rate limits.
+`<BotShieldRobots>` plugs in an RFC 9309 robots.txt policy: a parsed
+file, groups written in the config, or both. Disallow rules become
+`robotsblock:<group>` matches; Crawl-delay rules become per-crawler
+rate limits.
 
 ```apache
-BotShieldRobotsTxt              /etc/botshield/robots.txt
-BotShieldRobotsRefreshInterval  60
-BotShieldRobotsWildcardScope    heuristic
+<BotShieldRobots>
+    BotShieldRobotsTxt        /etc/botshield/robots.txt
+    BotShieldRefreshInterval  60
+    BotShieldWildcardScope    heuristic
+</BotShieldRobots>
 ```
 
-Args:
+Inside the container:
 
-- **`BotShieldRobotsTxt <path>`** — path to the robots.txt file. A
-  background watchdog re-parses on mtime change.
-- **`BotShieldRobotsRefreshInterval <sec>`** — how often the
-  watchdog checks mtime. Default 60. Set to 0 to disable
-  hot-reload (mtime change won't be picked up until next restart).
-- **`BotShieldRobotsWildcardScope <mode>`** — how strict the
-  matcher is on `User-agent: *` rules:
-  - `heuristic` (default): wildcard rules apply only when no more
-    specific group matches. Closest to your intent — a `*`
-    block doesn't override a tighter Googlebot allow.
-  - `strict`: RFC-9309 strict semantics. Wildcard rules participate
-    in matching like any other group. May produce surprising
-    overrides when wildcard and named groups conflict.
+- **`BotShieldRobotsTxt <path>`** -- the file. A background watchdog
+  re-parses it on mtime change; the inline groups are re-added to every
+  build, so they survive a refresh.
+- **`BotShieldRefreshInterval <sec>`** -- how often the watchdog checks
+  mtime. Default 60. Set to 0 to disable hot-reload.
+- **`BotShieldMode enforce|observe`** -- the default for every group;
+  a group may override it.
+- **`BotShieldWildcardScope <mode>`** -- how strict the matcher is on
+  `User-agent: *` rules:
+  - `heuristic` (default): wildcard rules apply only to UAs that look
+    like crawlers.
+  - `strict`: wildcard rules apply to every UA.
   - `off`: ignore wildcard groups entirely. Only named-group rules
     apply.
+- **`<BotShieldRobotRule name>`** -- a group: `BotShieldUserAgent`
+  (repeatable), `BotShieldDisallow` / `BotShieldAllow`,
+  `BotShieldCrawlDelay`, and the knobs a file has no words for:
+  `BotShieldRespond`, `BotShieldMode`, `BotShieldLogAs`.
+
+The file and the groups are one document, so precedence is computed
+across both. See [directives](directives.md#robotstxt-enforcement) for
+the full vocabulary and the observe step-aside rule.
 
 Group iteration is exposed by `httpd -t -D DUMP_BOTSHIELD_POLICY`
 for inspection (see [observability](observability.md)).
