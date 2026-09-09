@@ -9,13 +9,12 @@ ua + ipspec and nothing else, so "thirty requests a minute to /search/"
 has not been sayable in either family.
 
 `BotShieldRate <n> <seconds>` is the shared form: everyone the rule
-matches spends from one window, which is what BotShieldRateLimit has
-always done without naming it. `BotShieldDelay <seconds>` is the
+matches spends from one window. `BotShieldDelay <seconds>` is the
 per-crawler form; test_rate_vocabulary.py owns the difference. This
 file is about what a windowed rule does once it has one.
 
-Nothing migrates here. BotShieldRateLimit and BotShieldBotRateLimit are
-untouched.
+BotShieldRateLimit, the directive this family replaced, was retired on
+2026-09-09; BotShieldBotRateLimit is untouched.
 """
 
 from __future__ import annotations
@@ -39,8 +38,8 @@ def _rule(body: str, name: str = "budgeted") -> str:
 def test_a_path_scoped_rate_limit(config_override, fresh_ip):
     """The thing neither directive family can express.
 
-    A BotShieldRateLimit matches on ua= and ipspec= only, so it cannot
-    be told to apply to one path. This asserts the exact-index shape --
+    The retired BotShieldRateLimit matched on ua= and ipspec= only, so
+    it could not be told to apply to one path. This asserts the exact-index shape --
     third request refused. The window is anchored to the first request
     rather than to a wall-clock tick, so the burst needs no alignment.
     """
@@ -167,7 +166,7 @@ def test_an_escalate_naming_nothing_warns(config_override, log_slice):
         with config_override(r"BotShieldEnabled\s+On", conf,
                              render=False, count=1):
             pass
-        warned = slc.grep(r"names no matching BotShieldRateLimit and no rule")
+        warned = slc.grep(r"names no rule carrying rate= or delay=")
     assert warned, "an unlinked escalate warned about nothing"
 
 

@@ -120,7 +120,7 @@ def test_rate_limit_observe_does_not_429(config_override, fresh_ip):
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldRateLimit corpbot 1 sec "CorpBot" * '
+        '    BotShieldRule corpbot ua="CorpBot" rate=1/1 '
         'mode=observe',
         count=1,
     ):
@@ -142,7 +142,7 @@ def test_rate_limit_observe_increments_metric(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldRateLimit corpbot 1 sec "CorpBot" * '
+        '    BotShieldRule corpbot ua="CorpBot" rate=1/1 '
         'mode=observe',
         count=1,
     ):
@@ -341,7 +341,7 @@ def test_log_only_emits_tilde_rate_limited_for_ratelimit(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldEnabled LogOnly\n'
-        '    BotShieldRateLimit corpbot 1 sec "CorpBot" *',
+        '    BotShieldRule corpbot ua="CorpBot" rate=1/1',
         count=1,
     ):
         with log_slice as slc:

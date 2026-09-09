@@ -514,9 +514,8 @@ template per line (runs of `[0-9._]+` replaced by `X`).
 
 | Directive | Syntax | Default |
 |---|---|---|
-| `BotShieldRateLimit` | `<name> [budget=N] [per=U] [ua=...] [ipspec=...] [mode=...]` (or legacy `<name> <budget> <per> <ua-pattern> <ipspec> [mode=observe]`) | none |
 | `BotShieldBotRateLimit` | `off`, or `<target> <delay-sec>`, or `<target> <budget> <per>` | none |
-| `BotShieldRateLimitEscalate` | `<rate-rule> <strikes> <per> [respond=N] [ttl=N]` | none |
+| `BotShieldRateLimitEscalate` | `<rule> <strikes> <per> [respond=N] [ttl=N]` | none |
 
 ### Alternation on `ua=`
 
@@ -570,17 +569,28 @@ two plain values became the single literal substring
 warning, because repetition was accepted and only the `@selector`
 split could undo the join.
 
-Match keys: `ua=<substring>`, `ua=@<botgroup>`, or `ua=""` (no/empty
-User-Agent) for the UA gate
-(`*` or omit for any UA); `ipspec=<spec>` for the IP gate (CIDR file
-path, comma-separated inline CIDRs, `*` or omit for any IP). Both
-axes can't be wildcard — that's rejected at config time.
+### `BotShieldRateLimit` is retired (2026-09-09)
 
-Rate keys: `budget=N` (required) and `per=<sec|min|hour>` (required;
-also accepts `s`/`m`/`h`). Plain integer for `per` is rejected.
+It was a name, a cohort (`ua=` and `ipspec=`), a budget and a window.
+A rule has all of that and everything else -- a path, a query, a
+cookie, a flag -- so the directive was a rule that could say less:
 
-The legacy 5-arg positional form is still accepted (form is detected
-by sniffing for `=` in the args); no deprecation warning yet.
+```apache
+# then:  BotShieldRateLimit scrapers 10 min ua="wget"
+# now:
+<BotShieldRule scrapers>
+    BotShieldUserAgent  wget
+    BotShieldRate       10 60
+</BotShieldRule>
+```
+
+Same reason (`ratelimitexceeded:scrapers`), same 429 with
+`Retry-After`, same `+50` score, same flag on the address, and
+`BotShieldRateLimitEscalate scrapers ...` binds to the rule by name
+exactly as it bound to the directive. `mode=observe` on the directive
+is `BotShieldMode observe` on the rule, and a scope-level
+`BotShieldEnabled LogOnly` observes a rule's window as it observed the
+directive's. Nothing was lost in the move except the second spelling.
 
 `BotShieldBotRateLimit` caps volume per knownbot slug rather than
 per cohort. `<target>` is a bot slug or UA substring resolved against
@@ -1901,7 +1911,7 @@ whole reason there are two:
 | | one window per | budget | is |
 |---|---|---|---|
 | `BotShieldDelay <s>` | crawler (known-bot slug) | 1 request | robots.txt `Crawl-delay` |
-| `BotShieldRate <n> <s>` | rule | n requests | what `BotShieldRateLimit` does |
+| `BotShieldRate <n> <s>` | rule | n requests | a shared budget |
 
 `Delay` is `Crawl-delay` in the unit robots.txt writes it in, and it
 means what robots.txt means: **each** crawler gets a window of its own.
@@ -1927,10 +1937,11 @@ transcription can keep a literal `Crawl-delay: 0`. A value that rounds
 to zero milliseconds without being zero is refused: `0.0001` is
 someone who meant a limit and would silently get none.
 
-What a rule buys over `BotShieldRateLimit` is the predicate set. That
-directive matches on `ua=` and `ipspec=` and **nothing else** -- there
-is no path in it -- so `search-flood` above cannot be written with it
-at all. On a rule every condition is available: path, query, cookies,
+What a rule bought over the retired `BotShieldRateLimit` is the
+predicate set. That directive matched on `ua=` and `ipspec=` and
+**nothing else** -- there was no path in it -- so `search-flood` above
+could not be written with it at all. On a rule every condition is
+available: path, query, cookies,
 `solved=`, `flagged=`, `latencyatleast=`, and the rest.
 
 Not expressible: a per-crawler budget larger than one ("thirty a

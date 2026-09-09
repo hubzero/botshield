@@ -5244,7 +5244,7 @@ int bs_metrics_handler(request_rec *r)
         "mode across all families.",
         bs_mload(&m->trigger_observed_total));
     bs_m_emit_counter(r, "rate_limit_exceeded_total",
-        "Requests that tripped a BotShieldRateLimit cohort budget "
+        "Requests that exceeded a rule's rate= or delay= window "
         "(response was 429 + Retry-After).",
         bs_mload(&m->rate_limit_exceeded_total));
     bs_m_emit_counter(r, "attestation_fail_total",

@@ -1439,7 +1439,7 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
              * and `rate=30/60` on a flat rule are one spelling; the
              * flat form has to fit in a token.
              *
-             * Shared is what BotShieldRateLimit has always done, and
+             * Shared is what the retired BotShieldRateLimit did, and
              * it is the trap: ua=@bot with rate=1/1 gives the whole
              * crawler population one request a second BETWEEN them,
              * which reads almost like delay=1 and is a different

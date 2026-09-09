@@ -195,12 +195,10 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
      * If a name exists in both, the vhost version wins and the
      * main version is skipped entirely (no shadowed duplicates).
      *
-     * Every entry type stored here (bs_rate_limit_entry,
-     * bs_request_trigger_entry, etc.) shares a const char *name as its
+     * Every entry type stored here (bs_request_trigger_entry,
+     * bs_rate_escalate_entry, etc.) shares a const char *name as its
      * first field, so we can key the dedup by the leading pointer
      * word without branching per-type. */
-    out->rate_limits = bs_merge_rule_array(p, base->rate_limits,
-                                           add->rate_limits);
     out->rate_escalates = bs_merge_rule_array(p, base->rate_escalates,
                                               add->rate_escalates);
     out->strike_capacity = (add->strike_capacity > 0)
@@ -372,7 +370,6 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     /* E2.1 — rate-limit ordered arrays; populated by directives in
      * declaration order, post_config resolves cohort ipspecs and
      * assigns SHM slots. */
-    scfg->rate_limits      = apr_array_make(p, 4, sizeof(void *));
     scfg->rate_escalates   = apr_array_make(p, 2, sizeof(void *));
     scfg->strike_capacity  = 0;   /* 0 = inherit / use default */
     /* E10 — safeguard defaults. enabled=-1 is the unset sentinel so
@@ -1496,7 +1493,7 @@ static void bs_wire_rate_and_block_cohorts(apr_pool_t *pconf,
         if (!vcfg) continue;
 
         /* Resolve a cohort's ipspec (path or inline CIDRs) into the
-         * ranges array. Shared between rate_limits and request_triggers. */
+         * ranges array. */
         #define BS_E21_RESOLVE_COHORT(c_, feature_, name_) do {              \
             if ((c_)->ip_any || (c_)->ranges) break;                         \
             const char *rerr = NULL;                                         \
@@ -1517,32 +1514,7 @@ static void bs_wire_rate_and_block_cohorts(apr_pool_t *pconf,
             }                                                                \
         } while (0)
 
-        if (vcfg->rate_limits && vcfg->rate_limits->nelts > 0) {
-            for (int i = 0; i < vcfg->rate_limits->nelts; i++) {
-                bs_rate_limit_entry *e = APR_ARRAY_IDX(
-                    vcfg->rate_limits, i, bs_rate_limit_entry *);
-                BS_E21_RESOLVE_COHORT(&e->cohort,
-                    "BotShieldRateLimit", e->name);
-                if (e->shm_slot < 0) {
-                    if (*next_slot < (int)bs_shm.rate_counter_count) {
-                        e->shm_slot = (*next_slot)++;
-                    } else {
-                        ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
-                            "mod_botshield: rate-limit slot pool "
-                            "exhausted (%d); '%s' will not enforce",
-                            (int)bs_shm.rate_counter_count, e->name);
-                    }
-                }
-            }
-            ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
-                "mod_botshield: %d rate-limit cohorts wired",
-                vcfg->rate_limits->nelts);
-        }
-
-        /* Rules carrying a window draw from the same slot pool. Done
-         * here rather than in a pass of their own so the pool is
-         * consumed in one place and exhaustion reports the same way
-         * for both spellings. */
+        /* Rules carrying a window draw from the counter slot pool. */
         if (vcfg->request_triggers && vcfg->request_triggers->nelts > 0) {
             int rule_rate = 0;
             for (int i = 0; i < vcfg->request_triggers->nelts; i++) {
@@ -1597,34 +1569,16 @@ static void bs_wire_rate_and_block_cohorts(apr_pool_t *pconf,
             }
         }
 
-        /* E9 — link each BotShieldRateLimitEscalate to its target
-         * BotShieldRateLimit by name. Declarations may appear in
-         * any order at config time; we resolve here once both arrays
-         * are populated. Unlinked escalates (no matching rate rule)
-         * log a warning and stay inert. */
+        /* E9 — link each BotShieldRateLimitEscalate to the rule it
+         * names. Declarations may appear in any order at config time;
+         * resolved here once both arrays are populated. An escalate
+         * naming nothing logs a warning and stays inert. */
         if (vcfg->rate_escalates && vcfg->rate_escalates->nelts > 0) {
             for (int i = 0; i < vcfg->rate_escalates->nelts; i++) {
                 bs_rate_escalate_entry *esc = APR_ARRAY_IDX(
                     vcfg->rate_escalates, i, bs_rate_escalate_entry *);
                 int linked = 0;
-                if (vcfg->rate_limits) {
-                    for (int j = 0; j < vcfg->rate_limits->nelts; j++) {
-                        bs_rate_limit_entry *rl = APR_ARRAY_IDX(
-                            vcfg->rate_limits, j, bs_rate_limit_entry *);
-                        if (strcmp(rl->name, esc->rule_name) == 0) {
-                            rl->escalate = esc;
-                            linked = 1;
-                            break;
-                        }
-                    }
-                }
-                /* A rule carrying rate= or delay= is a rate limit by
-                 * another spelling, so an escalate may name one. Rate
-                 * limits are searched first only because they are the
-                 * older spelling; a name should not be shared between
-                 * the two, and if it is, the first wins in the order
-                 * an operator would read them. */
-                if (!linked && vcfg->request_triggers) {
+                if (vcfg->request_triggers) {
                     for (int j = 0; j < vcfg->request_triggers->nelts; j++) {
                         bs_request_trigger_entry *rt = APR_ARRAY_IDX(
                             vcfg->request_triggers, j,
@@ -1640,9 +1594,8 @@ static void bs_wire_rate_and_block_cohorts(apr_pool_t *pconf,
                 if (!linked) {
                     ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
                         "mod_botshield: BotShieldRateLimitEscalate '%s' "
-                        "names no matching BotShieldRateLimit and no rule "
-                        "carrying rate= or delay= at this scope; directive "
-                        "is inert",
+                        "names no rule carrying rate= or delay= at this "
+                        "scope; directive is inert",
                         esc->rule_name);
                 }
             }
@@ -1772,9 +1725,8 @@ static void bs_assign_namespace_ids(server_rec *s)
  * BS_E22_ROBOTS_SLOT_POOL is a deliberate overshoot — most hand-
  * maintained robots.txt files have <10 Crawl-delay groups.
  *
- * next_slot is consumed (mutated) for slot allocation; the rate-
- * limit phase already advanced it past the BotShieldRateLimit
- * cohorts. */
+ * next_slot is consumed (mutated) for slot allocation; the rule
+ * phase already advanced it past the rules carrying a window. */
 static void bs_init_robots(apr_pool_t *pconf, server_rec *s,
                            int *next_slot)
 {
@@ -3635,183 +3587,12 @@ static int bs_rate_unit_seconds(const char *u)
     return 0;
 }
 
-/* BotShieldRateLimit <name> [budget=N] [per=U] [ua=...] [ipspec=...]
- * [mode=...] — cohort rate-limit. Legacy positional form
- * `<name> <budget> <per> <ua> <ipspec> [mode=...]` is also accepted
- * and parses the same way internally; the form is detected by
- * sniffing the args (every arg after <name> contains '=' → new
- * shape; any positional arg without '=' → legacy).
- *
- * Cohort semantics mirror BotShieldRule ua=/ipspec= (UA
- * substring, @botgroup, polymorphic ipspec, '*' for "any" on either
- * axis). Both-'*' (or both keys omitted in the new form) is rejected
- * because that would rate-limit every request on the server. Budget
- * + window are stored as-is; SHM slot assignment happens in
- * post_config.
- *
- * Apache doesn't ship AP_INIT_TAKE4/5, so this uses TAKE_ARGV and
- * enforces argc itself. */
-/* E12 — parse the optional trailing `mode=enforce|observe` argv
- * token used by BotShieldRateLimit. The directive grammar is
- * positional (5 args for rate-limit), so this is strict: the
- * token must be the LAST argument and it must be `mode=...`.
- * Returns the parsed mode in *out_mode and shrinks *argc by 1 if
- * the token was consumed. */
-static const char *bs_parse_optional_mode(apr_pool_t *p,
-                                          const char *dname,
-                                          int *argc,
-                                          char *const argv[],
-                                          int *out_mode)
-{
-    *out_mode = BS_TMODE_ENFORCE;
-    if (*argc <= 0) return NULL;
-    const char *last = argv[*argc - 1];
-    if (strncmp(last, "mode=", 5) != 0) return NULL;
-    const char *val = last + 5;
-    if (!strcasecmp(val, "enforce")) {
-        *out_mode = BS_TMODE_ENFORCE;
-    } else if (!strcasecmp(val, "observe")) {
-        *out_mode = BS_TMODE_OBSERVE;
-    } else {
-        return apr_psprintf(p,
-            "%s: mode='%s' must be 'enforce' or 'observe'", dname, val);
-    }
-    (*argc)--;
-    return NULL;
-}
-
-const char *bs_set_rate_limit(cmd_parms *cmd, void *dconf,
-                                     int argc, char *const argv[])
-{
-    (void)dconf;
-    if (argc < 1) {
-        return "BotShieldRateLimit: expects at least <name>";
-    }
-    const char *name = argv[0];
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    if (!bs_bot_name_valid(name)) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldRateLimit: name '%s' must be [a-z0-9-]{1,32}", name);
-    }
-
-    /* Form detection — every arg after <name> is key=value (contains
-     * '=') in the new shape; the legacy positional shape has at most
-     * a single trailing `mode=...` token. If any non-trailing arg
-     * lacks '=', fall through to the legacy parser. */
-    int new_form = (argc > 1);
-    for (int i = 1; i < argc; i++) {
-        if (!strchr(argv[i], '=')) { new_form = 0; break; }
-    }
-
-    const char *budget_s = NULL, *per_s = NULL;
-    const char *ua_arg = NULL, *ipspec_arg = NULL;
-    int mode = BS_TMODE_ENFORCE;
-
-    if (new_form) {
-        for (int i = 1; i < argc; i++) {
-            const char *arg = argv[i];
-            const char *eq  = strchr(arg, '=');
-            apr_size_t klen = (apr_size_t)(eq - arg);
-            const char *val = eq + 1;
-            if (klen == 6 && strncasecmp(arg, "budget", 6) == 0) {
-                budget_s = val;
-            } else if (klen == 3 && strncasecmp(arg, "per", 3) == 0) {
-                per_s = val;
-            } else if (klen == 2 && strncasecmp(arg, "ua", 2) == 0) {
-                ua_arg = val;
-            } else if (klen == 6 && strncasecmp(arg, "ipspec", 6) == 0) {
-                ipspec_arg = val;
-            } else if (klen == 4 && strncasecmp(arg, "mode", 4) == 0) {
-                if (!strcasecmp(val, "enforce")) {
-                    mode = BS_TMODE_ENFORCE;
-                } else if (!strcasecmp(val, "observe")) {
-                    mode = BS_TMODE_OBSERVE;
-                } else {
-                    return apr_psprintf(cmd->pool,
-                        "BotShieldRateLimit: mode='%s' must be 'enforce' "
-                        "or 'observe'", val);
-                }
-            } else {
-                return apr_psprintf(cmd->pool,
-                    "BotShieldRateLimit: unknown key '%.*s' (known: "
-                    "budget, per, ua, ipspec, mode)", (int)klen, arg);
-            }
-        }
-        if (!budget_s) {
-            return "BotShieldRateLimit: budget=<N> is required";
-        }
-        if (!per_s) {
-            return "BotShieldRateLimit: per=<sec|min|hour> is required";
-        }
-    } else {
-        /* Legacy positional: <name> <budget> <per> <ua> <ipspec>
-         * [mode=enforce|observe]. Strip optional trailing mode=
-         * before counting. */
-        const char *merr = bs_parse_optional_mode(cmd->pool,
-            "BotShieldRateLimit", &argc, argv, &mode);
-        if (merr) return merr;
-        if (argc != 5) {
-            return "BotShieldRateLimit: expects either "
-                   "<name> [budget=N] [per=U] [ua=...] [ipspec=...] "
-                   "[mode=...]  or legacy "
-                   "<name> <budget> <per> <ua> <ipspec> [mode=...]";
-        }
-        budget_s   = argv[1];
-        per_s      = argv[2];
-        ua_arg     = argv[3];
-        ipspec_arg = argv[4];
-    }
-
-    char *end = NULL;
-    long budget = strtol(budget_s, &end, 10);
-    if (!end || *end || budget <= 0 || budget > 1000000) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldRateLimit: budget '%s' must be a positive integer "
-            "≤ 1000000", budget_s);
-    }
-    int unit = bs_rate_unit_seconds(per_s);
-    if (unit == 0) {
-        return apr_psprintf(cmd->pool,
-            "BotShieldRateLimit: per '%s' must be one of "
-            "sec/min/hour (or s/m/h)", per_s);
-    }
-
-    bs_rate_limit_entry *e = apr_pcalloc(cmd->pool, sizeof(*e));
-    e->name       = apr_pstrdup(cmd->pool, name);
-    e->budget     = (apr_uint32_t)budget;
-    e->window_ms = (apr_uint32_t)unit * 1000;
-    e->shm_slot   = -1;
-    e->mode       = mode;
-    /* In the new form an omitted ua=/ipspec= defaults to "*" (any).
-     * bs_cohort_resolve enforces the both-* rejection so a
-     * key=value form with neither set still errors at config time. */
-    const char *ua_eff     = ua_arg     ? ua_arg     : "*";
-    const char *ipspec_eff = ipspec_arg ? ipspec_arg : "*";
-    const char *err = bs_cohort_resolve(cmd, &e->cohort, ua_eff, ipspec_eff);
-    if (err) return apr_pstrcat(cmd->pool,
-        "BotShieldRateLimit: ", err, NULL);
-
-    /* Upsert by name — a re-declaration replaces the entry in its
-     * existing slot, preserving declaration order for the surrounding
-     * rules. New names append. */
-    for (int i = 0; i < scfg->rate_limits->nelts; i++) {
-        bs_rate_limit_entry *ex =
-            APR_ARRAY_IDX(scfg->rate_limits, i, bs_rate_limit_entry *);
-        if (strcmp(ex->name, e->name) == 0) {
-            APR_ARRAY_IDX(scfg->rate_limits, i, bs_rate_limit_entry *) = e;
-            return NULL;
-        }
-    }
-    *(bs_rate_limit_entry **)apr_array_push(scfg->rate_limits) = e;
-    return NULL;
-}
 const char *bs_set_rate_limit_escalate(cmd_parms *cmd, void *dconf,
                                               int argc, char *const argv[])
 {
     (void)dconf;
     if (argc < 3) {
-        return "BotShieldRateLimitEscalate: expects <rate-name> "
+        return "BotShieldRateLimitEscalate: expects <rule> "
                "<strikes> <per> [key=value ...]";
     }
     const char *rule_name = argv[0];
@@ -3821,7 +3602,7 @@ const char *bs_set_rate_limit_escalate(cmd_parms *cmd, void *dconf,
                                                &botshield_module);
     if (!bs_bot_name_valid(rule_name)) {
         return apr_psprintf(cmd->pool,
-            "BotShieldRateLimitEscalate: rate-name '%s' must be "
+            "BotShieldRateLimitEscalate: rule name '%s' must be "
             "[a-z0-9-]{1,32}", rule_name);
     }
     char *end = NULL;

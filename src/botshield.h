@@ -448,9 +448,6 @@ typedef struct bs_server_cfg {
      * restart). Default 0 (off). */
     int         allow_ranges_refresh_interval;
     apr_hash_t *allow_bots;           /* name → bs_allow_bot_entry * (directive-defined) */
-    /* E2.1 — policy enforcement (rate limit + path block). Ordered
-     * arrays of entry pointers. */
-    apr_array_header_t *rate_limits;
     /* E9 — repeated-429 escalation. */
     apr_array_header_t *rate_escalates;
     int                 strike_capacity;
@@ -644,7 +641,7 @@ typedef struct bs_server_cfg {
 } bs_server_cfg;
 
 /* Trigger and policy family types (bs_trigger_*, bs_*_trigger_entry,
- * bs_cohort, bs_rate_limit_entry, bs_rate_counter,
+ * bs_cohort, bs_rate_counter,
  * bs_flag_trigger_entry, BS_TFAMILY_*, BS_TMODE_*, BS_TEXEC_*,
  * BS_FLAG_ACT_*, BS_PENALTY_RATE_LIMIT) live in triggers.h. */
 

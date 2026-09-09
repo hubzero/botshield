@@ -959,7 +959,8 @@ family's matcher / action lives in its own feature file
    that absorbed the retired BotShieldBlockPath).
 5. **E2.2 robots.txt Disallow** — wildcard-gated, longest-match-
    wins between Allow/Disallow within the matching group.
-6. **E2.1 BotShieldRateLimit** — fixed-window counter; over-budget
+6. **E2.1 rules carrying `rate=` or `delay=`** (`BotShieldRateLimit`
+   until 2026-09-09) — fixed-window counter; over-budget
    → 429 + Retry-After. With E9 strike escalation: repeat 429s on
    the same rule promote into a configurable status (default 403).
 7. **E2.2 robots.txt Crawl-delay** — wildcard-gated; per-group rate
@@ -1011,8 +1012,11 @@ typedef struct {
 } bs_rate_limit_entry;
 ```
 
-Directive: `BotShieldRateLimit <name> <budget> <per> <ua> <ipspec>`,
-`<per>` is `sec`/`min`/`hour` (or `s`/`m`/`h`).
+Spelling: a `<BotShieldRule>` carrying `BotShieldRate <n> <seconds>`
+or `BotShieldDelay <seconds>`. The original directive,
+`BotShieldRateLimit <name> <budget> <per> <ua> <ipspec>`, was retired
+on 2026-09-09: a rule had its cohort and everything a cohort could not
+say, and escalation already bound by rule name.
 
 Storage: each entry's `shm_slot` indexes into `bs_shm.rate_counters[]`,
 allocated in post_config. Atomic CAS on each `count` /
@@ -1051,7 +1055,7 @@ threshold crossing for fail2ban handoff, with reason
 `ratelimitabuse:<name>`.
 
 E9 escalation only applies to BotShield-generated 429s on a named
-`BotShieldRateLimit` rule. robots.txt Crawl-delay 429s are not
+rule carrying `rate=` or `delay=`. robots.txt Crawl-delay 429s are not
 strike-eligible in v1 (no operator handle for them).
 
 ### Robots.txt enforcement (E2.2)
@@ -2372,7 +2376,7 @@ the `bs_cmds[]` table at `src/botshield.c:213`.
 | Non-interactive (E17) | `BotShieldNonInteractiveMode` |
 | SHM sizing | `BotShieldShmSize`, `BotShieldFlaggedIPCapacity`, `BotShieldIPv6PrefixLen`, `BotShieldBloomIPs`, `BotShieldBloomWindow`, `BotShieldStateFile`, `BotShieldStateSaveInterval`, `BotShieldRateLimitEscalateCapacity`, `BotShieldSafeguardCapacity`, `BotShieldEmbeddedNonceCapacity` |
 | UA classification (E1) | `BotShieldClassify`, `BotShieldAllowBot`, `BotShieldAllowRangesRefreshInterval`, `BotShieldBotDirectory`, `BotShieldBrowserTemplates`, `BotShieldDataRefreshInterval` |
-| Policy (E2.1 / E9) | `BotShieldRateLimit`, `BotShieldBotRateLimit`, `BotShieldRateLimitEscalate` |
+| Policy (E2.1 / E9) | `BotShieldBotRateLimit`, `BotShieldRateLimitEscalate` (`BotShieldRateLimit` retired 2026-09-09) |
 | Robots (E2.2) | `BotShieldRobotsTxt`, `BotShieldRobotsRefreshInterval`, `BotShieldRobotsWildcardScope` |
 | Triggers | `BotShieldRule` (E3, formerly BotShieldPathTrigger; since 2026-09-06 also carrying the E4 cookie, E6 env, E11.2 load and E14 flag predicates, and since 2026-09-07 the E14 action half), `BotShieldMatch` (named condition sets, shared by rules), `BotShieldFeedback` (E7.3), `BotShieldSessionCookieName` (E4) |
 | Safeguard (E10) | `BotShieldSafeguard`, `BotShieldSafeguardThreshold`, `BotShieldSafeguardWindow`, `BotShieldSafeguardTTL`, `BotShieldSafeguardRedirectURL` |

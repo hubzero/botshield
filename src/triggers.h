@@ -149,8 +149,7 @@ typedef struct {
     /* @botgroup selector — when non-NULL, the UA axis matches by
      * the request's classified botgroup instead of UA-substring.
      * Mutually exclusive with ua_pattern; setter rejects both. Set
-     * by `BotShieldRateLimit @ai-train ...` or
-     * `BotShieldRule ... ua=@search ...`. */
+     * by `BotShieldRule ... ua=@search ...`. */
     const char         *ua_botgroup;
     /* @bot / @fake-bot — match on the classifier's verdict rather than
      * on a declared botgroup. @botgroup can only name a bot the UA
@@ -331,9 +330,10 @@ typedef struct {
      * with one window per crawler; rate=<n>/<s> is budget n with one
      * window shared by everyone the rule matches.
      *
-     * A rate limit is a rule with a counter. bs_rate_limit_entry holds
-     * name, cohort, budget, window and slot; a rule already has the
-     * first two and the mode, so the counter is the only new thing.
+     * A rate limit is a rule with a counter. The retired
+     * BotShieldRateLimit entry held name, cohort, budget, window and
+     * slot; a rule already had the first two and the mode, so the
+     * counter was the only new thing.
      * Carrying it here is what lets a rate limit have a path -- the
      * separate family's only predicate is the cohort, so
      * "five requests a minute to /search/" has never been sayable.
@@ -344,8 +344,9 @@ typedef struct {
     /* Which bucket the counter keys by. Not a predicate: it decides
      * where the count lands, not whether the rule matched. Set by the
      * spelling rather than by a knob of its own: rate= is BS_COUNT_TOTAL
-     * (one bucket per rule, shared -- what BotShieldRateLimit does
-     * without saying so) and delay= is BS_COUNT_SLUG (one per crawler,
+     * (one bucket per rule, shared -- what the retired
+     * BotShieldRateLimit did without saying so) and delay= is
+     * BS_COUNT_SLUG (one per crawler,
      * what Crawl-delay means). */
     int                count_key;
     /* Assigned in post_config alongside the rate-limit families, out
@@ -447,27 +448,17 @@ typedef struct {
 } bs_feedback_trigger_entry;
 
 /* ======================================================================
- * E2.1 rate-limit family
+ * E9 escalation
  *
- * bs_rate_limit_entry and bs_rate_escalate_entry are the per-directive
- * configs that consume the bs_cohort predicate declared above. Defined
- * here because config.c's post_config hook walks them at SHM-slot
- * assignment time.
+ * bs_rate_escalate_entry is the per-directive config for
+ * BotShieldRateLimitEscalate. It binds by name to a rule carrying
+ * rate= or delay=; config.c's post_config hook links the two once
+ * both arrays are populated.
  * ====================================================================== */
 
 #define BS_PENALTY_RATE_LIMIT  50
 
 typedef struct bs_rate_escalate_entry bs_rate_escalate_entry;
-
-typedef struct {
-    const char   *name;
-    bs_cohort     cohort;
-    apr_uint32_t  budget;
-    apr_uint32_t  window_ms;
-    int           shm_slot;
-    const struct bs_rate_escalate_entry *escalate;
-    int           mode;
-} bs_rate_limit_entry;
 
 struct bs_rate_escalate_entry {
     const char   *rule_name;

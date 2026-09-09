@@ -126,8 +126,6 @@ const char *bs_set_state_file         (cmd_parms *cmd, void *dconf, const char *
 const char *bs_set_state_save_interval(cmd_parms *cmd, void *dconf, const char *arg);
 
 /* Rate-limit / safeguard family */
-const char *bs_set_rate_limit            (cmd_parms *cmd, void *dconf,
-                                          int argc, char *const argv[]);
 const char *bs_set_rate_limit_escalate   (cmd_parms *cmd, void *dconf,
                                           int argc, char *const argv[]);
 const char *bs_set_rate_escalate_capacity(cmd_parms *cmd, void *dconf,

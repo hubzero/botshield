@@ -93,7 +93,10 @@ def test_a_cohort_429_flags_the_address(config_override, fresh_ip):
     not spoken yet.
     """
     conf = _conf(
-        '    BotShieldRateLimit rl 1 min "RateBot" *\n'
+        '    <BotShieldRule rl>\n'
+        '        BotShieldUserAgent RateBot\n'
+        '        BotShieldRate      1 60\n'
+        '    </BotShieldRule>\n'
         + _reader("rate_abuse")
     )
     with config_override(r"BotShieldEnabled\s+On", conf,
@@ -112,7 +115,10 @@ def test_staying_under_budget_flags_nothing(config_override, fresh_ip):
     """The control. Being in a rate-limited cohort is not the event;
     exceeding the budget is."""
     conf = _conf(
-        '    BotShieldRateLimit rl 5 min "RateBot" *\n'
+        '    <BotShieldRule rl>\n'
+        '        BotShieldUserAgent RateBot\n'
+        '        BotShieldRate      5 60\n'
+        '    </BotShieldRule>\n'
         + _reader("rate_abuse")
     )
     with config_override(r"BotShieldEnabled\s+On", conf,
@@ -132,7 +138,11 @@ def test_observe_mode_does_not_flag(config_override, fresh_ip):
     fire has said they do not want yet.
     """
     conf = _conf(
-        '    BotShieldRateLimit rl 1 min "RateBot" * mode=observe\n'
+        '    <BotShieldRule rl>\n'
+        '        BotShieldUserAgent RateBot\n'
+        '        BotShieldRate      1 60\n'
+        '        BotShieldMode      observe\n'
+        '    </BotShieldRule>\n'
         + _reader("rate_abuse")
     )
     with config_override(r"BotShieldEnabled\s+On", conf,
@@ -220,7 +230,10 @@ def test_a_rate_trip_does_not_set_the_robots_bit(
     an operator watching for robots violations that every client who
     ever exceeded a budget had ignored their robots.txt."""
     conf = _conf(
-        '    BotShieldRateLimit rl 1 min "RateBot" *\n'
+        '    <BotShieldRule rl>\n'
+        '        BotShieldUserAgent RateBot\n'
+        '        BotShieldRate      1 60\n'
+        '    </BotShieldRule>\n'
         + _reader("robots_ignored")
     )
     with config_override(r"BotShieldEnabled\s+On", conf,

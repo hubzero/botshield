@@ -11,7 +11,8 @@
  *                              optional ua=/ipspec= cohort gate ANDs
  *                              with the path glob)
  *   5. E2.2 robots.txt Disallow (configured robots.txt)
- *   6. E2.1 BotShieldRateLimit (with E9 strike escalation)
+ *   6. (was E2.1 BotShieldRateLimit; a rule's rate=/delay= window
+ *      is spent inside step 4 since 2026-09-09, E9 strikes included)
  *   7. E2.2 robots.txt Crawl-delay (per-group rate limit)
  *
  * Each family's matcher / action is owned by its own feature file
@@ -19,8 +20,8 @@
  * orchestrator that walks them in the right order and converts the
  * outcomes into Apache-friendly status codes.
  *
- * E2.1 specifics — BotShieldRateLimit and BotShieldRule share
- * one cohort definition: a (ua-substring?, ipspec?) predicate pair.
+ * E2.1 specifics — a rule's cohort is a (ua-substring?, ipspec?)
+ * predicate pair.
  * The ipspec reuses E1's polymorphic shape — omitted / explicit path
  * / '*' / inline CIDRs — via bs_allow_load_ranges{,_from_string}.
  * Cohort matching at request time is UA-match AND IP-match, with '*'
@@ -28,10 +29,10 @@
  * every request, which the setter rejects at config time).
  *
  * Storage:
- *  - Config: scfg->rate_limits and scfg->request_triggers arrays, keyed
- *    by name; merged across main/vhost scope via bs_merge_server_cfg.
+ *  - Config: the scfg->request_triggers array, keyed by name; merged
+ *    across main/vhost scope via bs_merge_server_cfg.
  *  - Runtime: rate counters live in SHM as a flat slot array
- *    (bs_shm.rate_counters[]). Each bs_rate_limit_entry's shm_slot
+ *    (bs_shm.rate_counters[]). Each windowed rule's shm_slot
  *    is an index assigned in post_config. Fixed-window counter model
  *    with atomic CAS updates — approximate rather than exact sliding
  *    window, but the right trade for a rate limiter (smaller code,

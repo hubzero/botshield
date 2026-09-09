@@ -117,8 +117,8 @@ access logs aren't being gated. Decision log shows `tier=nochallenge`.
   users don't, add `BotShieldRule` rules with a penalty,
   respond=403, or both. UA / IP cohort gating goes inline as
   `ua=...` / `ipspec=...` keys.
-- **Rate-limit**: if you see scraper UA patterns, add a
-  `BotShieldRateLimit` cohort.
+- **Rate-limit**: if you see scraper UA patterns, add a rule
+  carrying `rate=` for that UA.
 - **Allow-list verification**: if a "bot" is claiming to be
   Googlebot but doesn't have Googlebot's IP range, the fake-bot
   detection fires automatically — assuming `BotShieldAllowBot

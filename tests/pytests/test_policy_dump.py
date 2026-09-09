@@ -45,31 +45,30 @@ def test_policy_dump_without_config_shows_none(config_override):
     — the handler doesn't crash on a scfg with nothing in it."""
     body = apache.policy_dump()
     assert "# mod_botshield policy dump" in body
-    assert "## BotShieldRateLimit" in body
+    assert "## BotShieldBotRateLimit" in body
     assert "## robots.txt" in body
     # Dev vhost doesn't declare any of these by default.
-    assert "# (none)" in body
+    assert "# (no directives)" in body
     assert "# (not configured)" in body
 
 
 def test_policy_dump_surfaces_rate_limit(config_override):
-    """A BotShieldRateLimit directive appears in the directive
-    section with its cohort + live counter state."""
+    """A rule carrying rate= appears in the rules section with its
+    conditions and its window, and no live counter column."""
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldRateLimit gptbot 60 min "GPTBot" *',
+        '    BotShieldRule gptbot ua="GPTBot" rate=60/60',
         count=1,
     ):
         body = apache.policy_dump()
 
-    assert "BotShieldRateLimit" in body
-    assert "gptbot" in body
-    assert '"GPTBot"' in body
+    line = [ln for ln in body.splitlines() if ln.startswith("gptbot")]
+    assert line, f"rule missing from dump; body={body[:600]}"
+    assert "GPTBot" in line[0], line[0]
     # Budget and window as configured. There is deliberately no live
     # counter column: a configtest process has no SHM to read.
-    assert "60" in body
-    assert "60s" in body
+    assert "rate=60/60" in line[0], line[0]
     assert "count/budget" not in body
 
 

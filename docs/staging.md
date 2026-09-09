@@ -42,7 +42,7 @@ Add `mode=observe` to any directive that supports it:
 ```apache
 BotShieldRule    admin-trap   path="/admin/.env"  flagip=scanner_probe logas=admin-trap mode=observe
 BotShieldRule    legacy-admin path="/wp-admin/*"  respond=403 mode=observe
-BotShieldRateLimit      api-burst    60 min "" * mode=observe
+BotShieldRule    api-burst    ua=""  rate=60/60  mode=observe
 BotShieldRule    honeypot-esc flagged=honeypot_hit challenge=captcha mode=observe
 ```
 

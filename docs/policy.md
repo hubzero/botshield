@@ -78,15 +78,28 @@ states:
 
 ## Rate limits and block paths
 
-`BotShieldRateLimit` caps requests-per-window for a cohort. Hits
-return 429 with `Retry-After` and add 50 to the score. Cohorts pair
-a UA-substring matcher with an IP spec:
+A rule carrying `rate=` caps requests-per-window for everyone it
+matches. Hits return 429 with `Retry-After` and add 50 to the score.
+The conditions are the rule's own -- a UA substring, an IP spec, a
+path, anything a rule can say:
 
 ```apache
-BotShieldRateLimit api-burst budget=60 per=min ipspec=10.0.0.0/8,2001:db8::/48
-BotShieldRateLimit scrapers  budget=10 per=min ua="wget"
-BotShieldRateLimit ai-bots   budget=1  per=sec ua=@ai-train
+<BotShieldRule api-burst>
+    BotShieldIPSpec     10.0.0.0/8,2001:db8::/48
+    BotShieldRate       60 60
+</BotShieldRule>
+<BotShieldRule scrapers>
+    BotShieldUserAgent  wget
+    BotShieldRate       10 60
+</BotShieldRule>
+<BotShieldRule ai-bots>
+    BotShieldUserAgent  @ai-train
+    BotShieldRate       1 1
+</BotShieldRule>
 ```
+
+(`BotShieldRateLimit`, which said the same thing with fewer available
+conditions, was retired on 2026-09-09.)
 
 Match keys (any of):
 - `ua=<substring>` or `ua=@<botgroup>` — UA gate; omit or set to
@@ -141,9 +154,9 @@ configurable status):
 BotShieldRateLimitEscalate api-burst 5 min respond=403 ttl=3600
 ```
 
-Args: `<rate-rule> <strikes> <per> [respond=N] [ttl=N]`. `<per>`
-accepts `sec`/`min`/`hour` (same as `BotShieldRateLimit`). If a
-rate-limited cohort triggers `<strikes>` 429s within the window,
+Args: `<rule> <strikes> <per> [respond=N] [ttl=N]`. `<per>`
+accepts `sec`/`min`/`hour`. If a rate-limiting rule refuses
+`<strikes>` requests within the window,
 the IP is upgraded to the configured status for `ttl` seconds
 (lives in the strike SHM table). The original rate-limit rule
 still runs; the escalation is a separate decision applied on top.

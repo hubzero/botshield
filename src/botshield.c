@@ -591,21 +591,6 @@ static const command_rec bs_cmds[] = {
                  "0..86400; recommended 60-300."),
     /* E2.1 — policy enforcement. TAKE_ARGV because Apache has no
      * TAKE4/TAKE5 macros; the setters enforce argc themselves. */
-    AP_INIT_TAKE_ARGV("BotShieldRateLimit",
-                 bs_set_rate_limit, NULL, RSRC_CONF,
-                 "Rate-limit a named cohort. Two forms:\n"
-                 "  <name> [budget=N] [per=U] [ua=...] [ipspec=...] "
-                 "[mode=enforce|observe]   (key=value form)\n"
-                 "  <name> <budget> <per> <ua> <ipspec> "
-                 "[mode=enforce|observe]   (legacy positional)\n"
-                 "Per is sec/min/hour (or s/m/h). UA is a substring "
-                 "(case-insensitive), `@<botgroup>`, or '*' for any "
-                 "UA. Ipspec is '*', an absolute file path, or a "
-                 "single / comma-separated CIDR list. Both-'*' (or "
-                 "both keys omitted in the key=value form) is "
-                 "rejected. Over-budget requests return 429 + "
-                 "Retry-After and get a +50 score penalty under "
-                 "reason ratelimitexceeded:<name>."),
     AP_INIT_TAKE_ARGV("BotShieldBotRateLimit",
                  bs_set_bot_rate_limit, NULL, RSRC_CONF,
                  "Per-bot-slug rate limit. Three forms:\n"
@@ -635,13 +620,13 @@ static const command_rec bs_cmds[] = {
                  "No default: with no directive and no robots.txt "
                  "Crawl-delay, nothing is rate limited. Over-budget "
                  "returns 429 + Retry-After + reason bot-rate:<slug>."),
-    /* E9 — repeated-429 escalation. Sits on top of BotShieldRateLimit;
-     * does not apply to robots.txt Crawl-delay 429s in v1 (no operator
-     * handle for them). */
+    /* E9 — repeated-429 escalation. Binds by name to a rule carrying
+     * rate= or delay=; does not apply to robots.txt Crawl-delay 429s
+     * (no operator handle for them). */
     AP_INIT_TAKE_ARGV("BotShieldRateLimitEscalate",
                  bs_set_rate_limit_escalate, NULL, RSRC_CONF,
-                 "Promote repeated 429s on a named BotShieldRateLimit "
-                 "into a stricter status. Args: <rate-name> <strikes> "
+                 "Promote repeated 429s on a named rule carrying rate= "
+                 "or delay= into a stricter status. Args: <rule> <strikes> "
                  "<per> [respond=<code>] [ttl=<sec>] [log=<tag>]. "
                  "Per accepts sec/min/hour. Once <strikes> rejected "
                  "requests accumulate within <per>, subsequent "
@@ -1525,7 +1510,7 @@ static int bs_route_module_endpoint(request_rec *r, bs_dir_cfg *cfg)
  *   4. Cookie verify — bs_verify_cookie + safeguard-clear-on-solve
  *      + bs-cookie-state note for cookietrigger predicates.
  *   5. Policy check — bs_check_policy (cookie/env/load/scope/path
- *      triggers + robots + rate_limits). DECLINED or
+ *      triggers + robots + bot rate limits). DECLINED or
  *      HTTP_* short-circuits return here.
  *   6. Heuristics + flagged-IP + first-sight + flagtrigger walker
  *      → effective score, score_tier, tier_floor.

@@ -872,10 +872,6 @@ $ sudo httpd -t -D DUMP_BOTSHIELD_POLICY
 # mod_botshield policy dump
 # vhost: www.example.org:443 (/etc/httpd/sites.d/example-ssl.conf:12)
 
-## BotShieldRateLimit (directive)
-# name               budget  window  ua                          ipspec
-scrapers                10    60s   "wget|curl|python"          *
-
 ## Flag triggers (effective, after reset)
 # flag              action      value          mode      source
 honeypot_hit       score       botsignals+60  enforce   configured

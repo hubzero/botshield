@@ -2,7 +2,7 @@
 
 Exercises the two cohort-conditional surfaces:
 
-  BotShieldRateLimit <name> <budget> <per> <ua> <ipspec>
+  BotShieldRule <name> [ua=...] [ipspec=...] rate=<n>/<seconds>
   BotShieldRule <name> path=<glob> [ua=...] [ipspec=...] respond=403
 
 The legacy `BotShieldBlockPath` directive was retired in favor of a
@@ -41,7 +41,7 @@ def test_rate_limit_ua_narrowing(config_override, log_slice, fresh_ip):
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldRateLimit corpbot 3 sec "CorpBot" *',
+        '    BotShieldRule corpbot ua="CorpBot" rate=3/1',
         count=1,
     ):
         with log_slice as slc:
@@ -74,7 +74,7 @@ def test_rate_limit_inline_cidr_narrowing(config_override, log_slice, fresh_ip):
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldRateLimit dcblock 2 sec * "198.51.100.0/24"',
+        '    BotShieldRule dcblock ipspec="198.51.100.0/24" rate=2/1',
         count=1,
     ):
         # Hit from an out-of-range IP — should not trip no matter how many.
@@ -111,7 +111,7 @@ def test_rate_limit_ua_and_ip_and_ed(config_override, log_slice, fresh_ip):
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldRateLimit pair 1 sec "Scraper/" "203.0.113.0/24"',
+        '    BotShieldRule pair ua="Scraper/" ipspec="203.0.113.0/24" rate=1/1',
         count=1,
     ):
         # UA miss from matching IP → must not trip.
@@ -209,7 +209,7 @@ def test_rate_limit_ua_match_is_case_insensitive(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldRateLimit gptbot 1 sec "gptbot" *',
+        '    BotShieldRule gptbot ua="gptbot" rate=1/1',
         count=1,
     ):
         with log_slice as slc:

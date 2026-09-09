@@ -56,8 +56,8 @@ typedef struct bs_ua_class {
      * the IETF aipref content-signal vocabulary plus mod_botshield's
      * "monitor" extension (search/ai-input/ai-train/monitor). NULL
      * if the bot's category doesn't map to a botgroup. Used by
-     * @botgroup selectors in BotShieldBotRateLimit /
-     * BotShieldRateLimit / BotShieldRule / robots.txt. */
+     * @botgroup selectors in BotShieldBotRateLimit / BotShieldRule /
+     * robots.txt. */
     const char  *known_botgroup;
 
     /* Strict semantics: is_verified_bot means "IP cross-checked AND

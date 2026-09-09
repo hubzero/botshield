@@ -233,7 +233,7 @@ int bs_rate_flag_ttl(apr_uint32_t window_ms)
 
 
 /* Request-time policy check (cookie / env / load / scope / path
- * triggers + robots.txt + rate_limits).
+ * triggers + robots.txt + bot rate limits).
  * Return values:
  *   OK                     — no rule fired; continue to heuristics.
  *   DECLINED               — a trigger with status=pass fired; the
@@ -257,8 +257,8 @@ int bs_rate_flag_ttl(apr_uint32_t window_ms)
  *      A path trigger with `ua=` / `ipspec=` keys ANDs the cohort
  *      match with the path glob; trigger fires only when both match.
  *   6. robots.txt Disallow (if configured).
- *   7. Directive rate_limits.
- *   8. robots.txt Crawl-delay (if configured).
+ *   7. Slug-keyed bot rate limits: BotShieldBotRateLimit and
+ *      robots.txt Crawl-delay.
  *
  * Cookie triggers run first so reputation signals always land on
  * the decision log, even when a later rule short-circuits. Env
@@ -300,6 +300,10 @@ int bs_check_policy(request_rec *r)
      * that ladder, and the log-only gate reads it further down. */
     bs_dir_cfg *dcfg = ap_get_module_config(r->per_dir_config,
                                             &botshield_module);
+    /* Scope-level LogOnly observes every family below, the rule walk
+     * included -- a rule's window used to be the one thing it did
+     * not reach, because this was declared after the walk. */
+    int global_log_only = (dcfg && dcfg->enabled == BS_ENABLED_LOGONLY);
 
     const char *ua = apr_table_get(r->headers_in, "User-Agent");
 
@@ -531,15 +535,14 @@ int bs_check_policy(request_rec *r)
                  *
                  * Under rate= the bucket is the rule -- everyone
                  * matching shares one budget rather than getting one
-                 * each, which is what BotShieldRateLimit has always
-                 * done without saying so. Under delay= it is the
-                 * crawler; see below.
+                 * each. Under delay= it is the crawler; see below.
                  *
-                 * No escalation here. BotShieldRateLimitEscalate binds
-                 * to a BotShieldRateLimit by name and stays with it;
-                 * bringing strikes across is the next piece, not this
-                 * one. */
-                int rl_observe = (t->action.mode == BS_TMODE_OBSERVE);
+                 * BotShieldRateLimitEscalate binds to this rule by
+                 * name; the strike table is keyed on (address, slot),
+                 * so nothing beneath it knows which spelling owns the
+                 * slot. */
+                int rl_observe = global_log_only
+                              || (t->action.mode == BS_TMODE_OBSERVE);
                 unsigned char rl_ip[16];
                 int rl_have_ip = bs_parse_client_ip(r->useragent_ip, rl_ip);
                 if (rl_have_ip)
@@ -560,6 +563,11 @@ int bs_check_policy(request_rec *r)
                         bs_rate_flag_ttl((apr_uint32_t)t->escalate->ttl_sec));
                     bs_set_trigger_tag(r, t->escalate->log_tag
                                           ? t->escalate->log_tag : t->name);
+                    if (bs_shm.metrics) {
+                        __atomic_fetch_add(
+                            &bs_shm.metrics->rate_limit_exceeded_total,
+                            1, __ATOMIC_RELAXED);
+                    }
                     return t->escalate->status_code;
                 }
 
@@ -595,7 +603,29 @@ int bs_check_policy(request_rec *r)
                         apr_pstrcat(r->pool, "ratelimitexceeded:",
                                     t->name, rl_observe ? ":observe" : "",
                                     NULL));
-                    if (!rl_observe) {
+                    if (rl_observe) {
+                        /* Would have refused. Say so where the operator
+                         * looks -- the decision line's outcome and the
+                         * observed counter -- the same two places every
+                         * other observed family writes. */
+                        bs_set_would_outcome(r, "~rate_limited");
+                        if (bs_shm.metrics) {
+                            __atomic_fetch_add(
+                                &bs_shm.metrics->rate_limit_observed_total,
+                                1, __ATOMIC_RELAXED);
+                        }
+                        /* Recorded; the walk goes on to the next rule.
+                         * Falling into this rule's action would let an
+                         * empty one write `~block` over the outcome
+                         * just set, and an observed rule acts on
+                         * nothing anyway. */
+                        continue;
+                    } else {
+                        if (bs_shm.metrics) {
+                            __atomic_fetch_add(
+                                &bs_shm.metrics->rate_limit_exceeded_total,
+                                1, __ATOMIC_RELAXED);
+                        }
                         bs_flag_client(r, BS_FLAG_RATE_ABUSE,
                                        bs_rate_flag_ttl(t->window_ms));
                         if (t->escalate && rl_have_ip) {
@@ -607,10 +637,14 @@ int bs_check_policy(request_rec *r)
                                 ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r,
                                     "mod_botshield: ratelimitabuse threshold "
                                     "crossed for rule '%s' from ip=%s; "
-                                    "escalating to status=%d for %ds",
+                                    "escalating to status=%d for %ds%s%s%s",
                                     t->name, r->useragent_ip,
                                     t->escalate->status_code,
-                                    t->escalate->ttl_sec);
+                                    t->escalate->ttl_sec,
+                                    t->escalate->log_tag ? " tag=\"" : "",
+                                    t->escalate->log_tag
+                                        ? t->escalate->log_tag : "",
+                                    t->escalate->log_tag ? "\"" : "");
                                 bs_set_trigger_tag(r, t->escalate->log_tag);
                             }
                         }
@@ -706,8 +740,6 @@ int bs_check_policy(request_rec *r)
         }
     }
 
-    int global_log_only = (dcfg && dcfg->enabled == BS_ENABLED_LOGONLY);
-
     /* E2.2 — robots.txt Disallow enforcement. Queried once for
      * (ua, path); the result also carries the Crawl-delay we'll use
      * below, so stash it.
@@ -784,129 +816,6 @@ int bs_check_policy(request_rec *r)
         }
     }
 
-    /* A directive rate-limit cohort that MATCHES this request is
-     * authoritative for it. (Pre-rekey, this also suppressed the
-     * robots.txt Crawl-delay check below; that legacy enforcement
-     * has been replaced by bs_bot_rate_check, which absorbs
-     * robots.txt and is independent of cohort-based rate limits —
-     * the two compose naturally, whichever trips first wins.) */
-    if (scfg->rate_limits && scfg->rate_limits->nelts > 0) {
-        bs_rate_counter *counters = (bs_rate_counter *)bs_shm.rate_counters;
-        unsigned char client_ip[16];
-        int have_ip = bs_parse_client_ip(r->useragent_ip, client_ip);
-        if (have_ip) bs_mask_ipv6_prefix(client_ip, scfg->ipv6_prefix_bits);
-        apr_int64_t now_t = (apr_int64_t)apr_time_sec(apr_time_now());
-        for (int i = 0; i < scfg->rate_limits->nelts; i++) {
-            bs_rate_limit_entry *e = APR_ARRAY_IDX(
-                scfg->rate_limits, i, bs_rate_limit_entry *);
-            if (!bs_cohort_matches(&e->cohort, ua, r)) continue;
-            if (e->shm_slot < 0 || !counters) continue;
-
-            /* E12 — observe mode (per-rule or global log-only).
-             * The counter still ticks (so `would-rate-limit` volume
-             * answers the operator's "what would this fire?"
-             * question accurately), but over-budget hits log
-             * `ratelimitexceeded:<name>:observe` instead of
-             * returning 429. E9 escalation is also fully suppressed
-             * — we don't bump strikes, and any pre-existing
-             * escalation state is ignored for this rule under
-             * observe. */
-            int observe = global_log_only || (e->mode == BS_TMODE_OBSERVE);
-
-            if (!observe && e->escalate && have_ip
-                && bs_strike_check_escalated(client_ip,
-                                             (apr_uint32_t)e->shm_slot,
-                                             now_t, scfg->ns_id)) {
-                /* E9 — escalation gate. Active only outside observe
-                 * mode; observe must not enforce. */
-                bs_score_add(r, BS_PENALTY_RATE_LIMIT,
-                    apr_pstrcat(r->pool, "ratelimitabuse:",
-                                e->name, NULL));
-                /* The escalation's own TTL, not the budget window: the
-                 * operator has already said how long an escalated
-                 * client stays escalated, and a flag outliving that
-                 * would accuse someone the module has stopped
-                 * refusing. */
-                bs_flag_client(r, BS_FLAG_RATE_ABUSE,
-                               bs_rate_flag_ttl(
-                                   (apr_uint32_t)e->escalate->ttl_sec));
-                if (bs_shm.metrics) {
-                    __atomic_fetch_add(
-                        &bs_shm.metrics->rate_limit_exceeded_total,
-                        1, __ATOMIC_RELAXED);
-                }
-                return e->escalate->status_code;
-            }
-
-            if (bs_rate_counter_admit(&counters[e->shm_slot],
-                                      e->budget, e->window_ms)) {
-                continue;
-            }
-            /* Over budget. */
-            if (observe) {
-                bs_score_add(r, 0,
-                    apr_pstrcat(r->pool, "ratelimitexceeded:",
-                                e->name, ":observe", NULL));
-                bs_set_would_outcome(r, "~rate_limited");
-                if (bs_shm.metrics) {
-                    __atomic_fetch_add(
-                        &bs_shm.metrics->rate_limit_observed_total,
-                        1, __ATOMIC_RELAXED);
-                }
-                continue;
-            }
-            /* Enforce: Retry-After = seconds remaining in window.
-             * The window is milliseconds now and the header is
-             * seconds, so round the remainder up -- a Retry-After of 0
-             * invites an immediate retry that cannot succeed. */
-            apr_uint32_t win_ms = __atomic_load_n(
-                &counters[e->shm_slot].window_start_ms, __ATOMIC_RELAXED);
-            apr_uint32_t now_ms = (apr_uint32_t)(apr_time_now() / 1000);
-            apr_uint32_t gone   = now_ms - win_ms;   /* wraparound-safe */
-            apr_uint32_t left   = (gone < e->window_ms)
-                                    ? e->window_ms - gone : 0;
-            apr_uint32_t retry  = (left + 999) / 1000;
-            if (retry < 1) retry = 1;
-            apr_table_setn(r->err_headers_out, "Retry-After",
-                apr_psprintf(r->pool, "%u", retry));
-            bs_score_add(r, BS_PENALTY_RATE_LIMIT,
-                apr_pstrcat(r->pool, "ratelimitexceeded:",
-                            e->name, NULL));
-            bs_flag_client(r, BS_FLAG_RATE_ABUSE,
-                           bs_rate_flag_ttl(e->window_ms));
-            if (bs_shm.metrics) {
-                __atomic_fetch_add(&bs_shm.metrics->rate_limit_exceeded_total,
-                                   1, __ATOMIC_RELAXED);
-            }
-            /* E9 — strike accounting. Record this 429 under the
-             * (ip, rule) entry; if the strike count crosses the
-             * threshold inside the per-window, log the operator's
-             * tag once for fail2ban handoff. The threshold-crossing
-             * request itself returns 429; subsequent ones promote
-             * to status_code via bs_strike_check_escalated above. */
-            if (e->escalate && have_ip) {
-                int crossed = bs_strike_record_429(r, client_ip,
-                    (apr_uint32_t)e->shm_slot,
-                    e->escalate->per_sec, e->escalate->strikes,
-                    e->escalate->ttl_sec,
-                    now_t, scfg->ns_id);
-                if (crossed) {
-                    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r,
-                        "mod_botshield: ratelimitabuse threshold "
-                        "crossed for '%s' from ip=%s; escalating to "
-                        "status=%d for %ds%s%s%s",
-                        e->name, r->useragent_ip,
-                        e->escalate->status_code, e->escalate->ttl_sec,
-                        e->escalate->log_tag ? " tag=\"" : "",
-                        e->escalate->log_tag ? e->escalate->log_tag : "",
-                        e->escalate->log_tag ? "\"" : "");
-                    bs_set_trigger_tag(r, e->escalate->log_tag);
-                }
-            }
-            return HTTP_TOO_MANY_REQUESTS;
-        }
-    }
-
     /* Slug-keyed bot rate limit. Absorbs both BotShieldBotRateLimit
      * directives and robots.txt Crawl-delay groups (the latter
      * resolved to slugs at post_config via the bot directory). The
@@ -914,9 +823,9 @@ int bs_check_policy(request_rec *r)
      * here when the rekey landed; bot_rate_check now covers both
      * sources via one slug→counter map. Lookup keys on
      * cls->known_slug or cls->verified_name (then unknownbot /
-     * fake-bot / wildcard-fallback aggregates). Composes with
-     * BotShieldRateLimit directive cohorts above: whichever trips
-     * first short-circuits the policy walk. */
+     * fake-bot / wildcard-fallback aggregates). Composes with rules
+     * carrying rate= or delay= above: whichever trips first
+     * short-circuits the policy walk. */
     {
         int botrate_rv = bs_bot_rate_check(r);
         if (botrate_rv != OK) return botrate_rv;
@@ -929,7 +838,7 @@ int bs_check_policy(request_rec *r)
  * E2.2.3 — the policy dump (-D DUMP_BOTSHIELD_POLICY)
  *
  * Plain-text dump of the rules currently being enforced:
- *   - BotShieldRateLimit directives (directive rate_limits array).
+ *   - rules, windowed or not, with their conditions and actions.
  *   - robots.txt-derived groups (if BotShieldRobotsTxt is set) —
  *     source file path, mtime, every group's UA tokens + rules +
  *     Crawl-delay.
@@ -1109,20 +1018,6 @@ static const char *bs_psh_rule_action(apr_pool_t *p,
     return *s ? s : "(none)";
 }
 
-static void bs_psh_cohort_ipspec(const bs_cohort *c)
-{
-    if (c->ip_any) { fputs("*", stdout); return; }
-    if (c->inline_cidrs) {
-        printf("inline(%s)", c->inline_cidrs);
-        return;
-    }
-    if (c->path) {
-        printf("file(%s)", c->path);
-        return;
-    }
-    printf("<%d ranges>", c->ranges ? c->ranges->nelts : 0);
-}
-
 /* Dump the effective policy for one vhost to stdout, for
  * `httpd -t -D DUMP_BOTSHIELD_POLICY`.
  *
@@ -1230,35 +1125,11 @@ void bs_policy_dump(server_rec *s, apr_pool_t *p, bs_dir_cfg *cfg)
                scfg->scoped_rules->nelts);
     }
 
-    /* --- directive rate limits --- */
-    fputs("## BotShieldRateLimit (directive)\n", stdout);
-    if (!scfg->rate_limits || scfg->rate_limits->nelts == 0) {
-        fputs("# (none)\n\n", stdout);
-    } else {
-        /* No live counter column. A configtest process never attaches
-         * the scoreboard SHM, so the count could only ever print as
-         * "-/-"; live consumption belongs to the dashboard and the
-         * metrics endpoint, which run inside a serving child. */
-        fputs("# name               budget  window  ua                          "
-                 "ipspec\n", stdout);
-        for (int i = 0; i < scfg->rate_limits->nelts; i++) {
-            bs_rate_limit_entry *e = APR_ARRAY_IDX(
-                scfg->rate_limits, i, bs_rate_limit_entry *);
-            printf("%-18s  %6u  %4us   %-26s  ",
-                e->name, e->budget, e->window_ms / 1000,
-                e->cohort.ua_any ? "*"
-                    : apr_psprintf(p, "\"%s\"", e->cohort.ua_pattern));
-            bs_psh_cohort_ipspec(&e->cohort);
-            fputs("\n", stdout);
-        }
-        fputs("\n", stdout);
-    }
-
     /* --- BotShieldBotRateLimit ---
      *
-     * Printed even when empty, and printed separately from the cohort
-     * rate limits above, because these are different subsystems with
-     * different sources. This one used to synthesise an enforcing
+     * Printed even when empty, and printed separately from the rules
+     * above, because these are different subsystems with different
+     * sources. This one used to synthesise an enforcing
      * wildcard nobody had written, and the dump not knowing about it
      * meant the one tool that answers "what is actually in effect"
      * stayed silent while it issued 429s. It no longer synthesises
