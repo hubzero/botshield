@@ -596,7 +596,7 @@ apr_status_t bs_load_watchdog_cb(int state, void *data,
          * int made the comparison signed-vs-unsigned, which is exactly
          * the kind of thing that works until the value changes. */
         apr_uint32_t cur_us = apr_atomic_read32(&m->ap_latency_us);
-        if (cur_us != BS_M_AP_NO_STATUS) {
+        if (cur_us != BS_M_AP_NO_STATUS && !bs_latency_in_grace()) {
             int cur = (int)(cur_us / 1000);
             int lw = BS_DEFAULT_LATENCY_WARM_MS;
             int lh = BS_DEFAULT_LATENCY_HOT_MS;
@@ -741,6 +741,13 @@ apr_uint32_t bs_latency_current_us(void)
     return bs_shm.metrics
          ? apr_atomic_read32(&bs_shm.metrics->ap_latency_us)
          : BS_M_AP_NO_STATUS;
+}
+
+int bs_latency_in_grace(void)
+{
+    if (!bs_shm.metrics) return 0;
+    apr_uint32_t until = apr_atomic_read32(&bs_shm.metrics->ap_grace_until);
+    return until && (apr_uint32_t)apr_time_sec(apr_time_now()) < until;
 }
 
 /* BotShieldDbStatsFile <path>. Written by the external monitor; read

@@ -2219,6 +2219,13 @@ static void bs_register_load_watchdog(apr_pool_t *pconf, server_rec *s)
                 } else if (wrv == APR_SUCCESS) {
                     wrv = APR_EGENERAL;
                 }
+                if (wrv == APR_SUCCESS && bs_shm.metrics) {
+                    /* Hold the latency signal while the fresh children
+                     * warm up; see BS_M_AP_GRACE_SEC. */
+                    apr_atomic_set32(&bs_shm.metrics->ap_grace_until,
+                        (apr_uint32_t)apr_time_sec(apr_time_now())
+                            + BS_M_AP_GRACE_SEC);
+                }
                 if (wrv == APR_SUCCESS) {
                     ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
                         "mod_botshield: load-state sampler enabled "

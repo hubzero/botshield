@@ -661,6 +661,13 @@ typedef enum {
  * per-worker counters this metric is derived from. Distinct from zero,
  * which would claim the server is instantaneous. */
 #define BS_M_AP_NO_STATUS 0xFFFFFFFFu
+/* Seconds after post_config during which the latency signal is held
+ * at normal. A graceful reload's fresh children answer their first
+ * requests slowly, and without this the mean read that as hot and the
+ * bot rungs shed a deploy. Long enough to cover the ring's first
+ * three samples; short enough that a real outage starting during a
+ * deploy is seen on the fourth. */
+#define BS_M_AP_GRACE_SEC 30
 
 #define BS_M_MIN_SLOTS   60   /* 1-minute slots: serves 15min and 1h */
 #define BS_M_HOUR_SLOTS  24   /* 1-hour slots: serves 24h */
@@ -763,6 +770,12 @@ typedef struct {
     apr_uint32_t ap_latency_us;      /* most recent sample, microseconds */
     apr_uint64_t ap_prev_access;
     apr_uint64_t ap_prev_duration;
+    /* Wall-clock second until which the latency signal is held at
+     * normal; set at post_config. Adding this field changed
+     * sizeof(bs_metrics), so the persisted metrics block is skipped
+     * once on the first restart after the change -- by design of the
+     * restore, which only trusts a block of the size it expects. */
+    apr_uint32_t ap_grace_until;
     /* PHP-FPM, published by the external monitor. Percent of
      * pm.max_children busy -- a real ceiling, unlike MaxRequestWorkers,
      * which is why this is worth its own signal.

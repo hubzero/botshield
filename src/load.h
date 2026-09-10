@@ -77,6 +77,10 @@ const char *bs_set_fpm_stats_file(cmd_parms *cmd, void *dconf,
  * request latency thresholds. */
 void bs_latency_thresholds(server_rec *sv, int *warm, int *hot);
 apr_uint32_t bs_latency_current_us(void);
+/* 1 while the post-(re)start grace on the latency signal is running:
+ * the sample is still published for the dashboard, but neither the
+ * warm/hot state nor latencyatleast= acts on it. */
+int bs_latency_in_grace(void);
 
 /* Effective per-CPU load-average thresholds, defaults applied. */
 void bs_loadavg_thresholds(server_rec *s, int *warm, int *hot);

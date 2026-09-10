@@ -405,7 +405,7 @@ int bs_check_policy(request_rec *r)
                  * Absence is not a high reading; check it first and
                  * let the rule decline. */
                 apr_uint32_t us = bs_latency_current_us();
-                if (us == BS_M_AP_NO_STATUS)
+                if (us == BS_M_AP_NO_STATUS || bs_latency_in_grace())
                     continue;
                 if ((int)(us / 1000u) < t->latency_min_ms)
                     continue;
