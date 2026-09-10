@@ -60,16 +60,14 @@ def _get(path, ip):
 
 
 def _refused(config_override, conf, ip, path):
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         return _get(path, ip).status_code
 
 
 def test_a_named_set_supplies_every_condition_in_it(config_override,
                                                     fresh_ip):
     """Both paths in the set reach the rule that names it."""
-    with config_override(r"BotShieldEnabled\s+On", SHARED,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", SHARED, count=1):
         for path in ("/set-alpha", "/set-beta"):
             assert _get(path, fresh_ip).status_code == 403, (
                 f"{path} is in the set, so the rule should refuse it"
@@ -87,8 +85,7 @@ def test_paths_outside_the_set_are_untouched(config_override, fresh_ip,
     cross-test state (2026-09-08, reason=unknownua,rule:sig-droppedcookie).
     What this rule uniquely leaves behind is its own tag.
     """
-    with config_override(r"BotShieldEnabled\s+On", SHARED,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", SHARED, count=1):
         with log_slice as slc:
             _get("/set-gamma", fresh_ip)
             fired = [ln for ln in slc.grep(r'path="/set-gamma"')
@@ -122,8 +119,7 @@ def test_two_rules_can_share_one_set(config_override, fresh_ip):
         "        BotShieldLogAs    gate-everyone\n"
         "    </BotShieldRule>\n"
     )
-    with config_override(r"BotShieldEnabled\s+On", pair,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", pair, count=1):
         # Not a declared crawler, so the second rule refuses -- proving
         # the set reached both rules rather than only the first.
         assert _get("/set-beta", fresh_ip).status_code == 403
@@ -135,8 +131,7 @@ def test_a_set_can_name_a_set_defined_above_it(config_override, fresh_ip):
     A cycle cannot be built for the same reason: a name that is not yet
     defined does not resolve.
     """
-    with config_override(r"BotShieldEnabled\s+On", NESTED,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", NESTED, count=1):
         for path in ("/set-alpha", "/set-beta"):
             assert _get(path, fresh_ip).status_code == 403, (
                 f"{path} should arrive through the nested set"
@@ -152,8 +147,7 @@ def test_an_undefined_set_is_refused_at_config_time(config_override):
             "    <BotShieldRule r>\n"
             "        BotShieldMatches  nosuchset\n"
             "        BotShieldRespond  403\n"
-            "    </BotShieldRule>\n",
-            render=False, count=1,
+            "    </BotShieldRule>\n", count=1,
         ):
             pass
     assert "non-zero exit status" in str(exc.value)
@@ -168,8 +162,7 @@ def test_a_set_refuses_an_action(config_override):
             "    <BotShieldMatch s>\n"
             "        BotShieldPath     /set-alpha\n"
             "        BotShieldRespond  403\n"
-            "    </BotShieldMatch>\n",
-            render=False, count=1,
+            "    </BotShieldMatch>\n", count=1,
         ):
             pass
     assert "non-zero exit status" in str(exc.value)
@@ -186,8 +179,7 @@ def test_a_set_defined_twice_is_refused(config_override):
             "    </BotShieldMatch>\n"
             "    <BotShieldMatch s>\n"
             "        BotShieldPath /set-beta\n"
-            "    </BotShieldMatch>\n",
-            render=False, count=1,
+            "    </BotShieldMatch>\n", count=1,
         ):
             pass
     assert "non-zero exit status" in str(exc.value)

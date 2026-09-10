@@ -91,7 +91,11 @@ def test_robots_disallow_blocks_bot(
     """)
     with config_override(
         r"BotShieldEnabled\s+On",
-        f'BotShieldEnabled On\n    BotShieldChallengeAtLeast none\n    BotShieldRobotsTxt {robots_path}',
+        f'BotShieldEnabled On\n'
+        f'    BotShieldChallengeAtLeast none\n'
+        f'    <BotShieldRobots>\n'
+        f'        BotShieldRobotsTxt        {robots_path}\n'
+        f'    </BotShieldRobots>',
         count=1,
     ):
         with log_slice as slc:
@@ -117,7 +121,11 @@ def test_robots_allow_longest_match_wins(
     """)
     with config_override(
         r"BotShieldEnabled\s+On",
-        f'BotShieldEnabled On\n    BotShieldChallengeAtLeast none\n    BotShieldRobotsTxt {robots_path}',
+        f'BotShieldEnabled On\n'
+        f'    BotShieldChallengeAtLeast none\n'
+        f'    <BotShieldRobots>\n'
+        f'        BotShieldRobotsTxt        {robots_path}\n'
+        f'    </BotShieldRobots>',
         count=1,
     ):
         r_admin  = client.get("/admin",        xff=fresh_ip, ua=GPTBOT_UA)
@@ -144,7 +152,11 @@ def test_robots_crawl_delay_rate_limits(
     """)
     with config_override(
         r"BotShieldEnabled\s+On",
-        f'BotShieldEnabled On\n    BotShieldChallengeAtLeast none\n    BotShieldRobotsTxt {robots_path}',
+        f'BotShieldEnabled On\n'
+        f'    BotShieldChallengeAtLeast none\n'
+        f'    <BotShieldRobots>\n'
+        f'        BotShieldRobotsTxt        {robots_path}\n'
+        f'    </BotShieldRobots>',
         count=1,
     ):
         with log_slice as slc:
@@ -178,7 +190,11 @@ def test_robots_fractional_crawl_delay(
     """)
     with config_override(
         r"BotShieldEnabled\s+On",
-        f'BotShieldEnabled On\n    BotShieldChallengeAtLeast none\n    BotShieldRobotsTxt {robots_path}',
+        f'BotShieldEnabled On\n'
+        f'    BotShieldChallengeAtLeast none\n'
+        f'    <BotShieldRobots>\n'
+        f'        BotShieldRobotsTxt        {robots_path}\n'
+        f'    </BotShieldRobots>',
         count=1,
     ):
         r1 = client.get("/", xff=fresh_ip, ua=GPTBOT_UA)
@@ -213,8 +229,10 @@ def test_robots_mode_observe_covers_crawl_delay(
     with config_override(
         r"BotShieldEnabled\s+On",
         f'BotShieldEnabled On\n    BotShieldChallengeAtLeast none\n'
-        f'    BotShieldRobotsTxt {robots_path}\n'
-        f'    BotShieldRobotsMode observe',
+        f'    <BotShieldRobots>\n'
+        f'        BotShieldRobotsTxt        {robots_path}\n'
+        f'        BotShieldMode             observe\n'
+        f'    </BotShieldRobots>',
         count=1,
     ):
         with log_slice as slc:
@@ -252,7 +270,11 @@ def test_robots_wildcard_heuristic_skips_real_browser(
     blocked (scripting tool, crawler-candidate)."""
     with config_override(
         r"BotShieldEnabled\s+On",
-        f'BotShieldEnabled On\n    BotShieldChallengeAtLeast none\n    BotShieldRobotsTxt {wildcard_robots}',
+        f'BotShieldEnabled On\n'
+        f'    BotShieldChallengeAtLeast none\n'
+        f'    <BotShieldRobots>\n'
+        f'        BotShieldRobotsTxt        {wildcard_robots}\n'
+        f'    </BotShieldRobots>',
         count=1,
     ):
         r_firefox = client.get("/admin", xff=fresh_ip, ua=REAL_UA)
@@ -275,8 +297,10 @@ def test_robots_wildcard_strict_applies_to_everyone(
         r"BotShieldEnabled\s+On",
         f'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        f'    BotShieldRobotsTxt {wildcard_robots}\n'
-        f'    BotShieldRobotsWildcardScope strict',
+        f'    <BotShieldRobots>\n'
+        f'        BotShieldRobotsTxt        {wildcard_robots}\n'
+        f'        BotShieldWildcardScope    strict\n'
+        f'    </BotShieldRobots>',
         count=1,
     ):
         r_firefox = client.get("/admin", xff=fresh_ip, ua=REAL_UA)
@@ -294,8 +318,10 @@ def test_robots_wildcard_off_skips_wildcard_entirely(
         r"BotShieldEnabled\s+On",
         f'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        f'    BotShieldRobotsTxt {wildcard_robots}\n'
-        f'    BotShieldRobotsWildcardScope off',
+        f'    <BotShieldRobots>\n'
+        f'        BotShieldRobotsTxt        {wildcard_robots}\n'
+        f'        BotShieldWildcardScope    off\n'
+        f'    </BotShieldRobots>',
         count=1,
     ):
         r_firefox = client.get("/admin", xff=fresh_ip, ua=REAL_UA)
@@ -332,7 +358,11 @@ def test_robots_ua_match_is_segment_based(
     """)
     with config_override(
         r"BotShieldEnabled\s+On",
-        f'BotShieldEnabled On\n    BotShieldChallengeAtLeast none\n    BotShieldRobotsTxt {robots_path}',
+        f'BotShieldEnabled On\n'
+        f'    BotShieldChallengeAtLeast none\n'
+        f'    <BotShieldRobots>\n'
+        f'        BotShieldRobotsTxt        {robots_path}\n'
+        f'    </BotShieldRobots>',
         count=1,
     ):
         # A UA that mentions 'bot' only inside a URL in a slug —
@@ -375,7 +405,11 @@ def test_robots_duplicate_ua_groups_are_unioned(
     """)
     with config_override(
         r"BotShieldEnabled\s+On",
-        f'BotShieldEnabled On\n    BotShieldChallengeAtLeast none\n    BotShieldRobotsTxt {robots_path}',
+        f'BotShieldEnabled On\n'
+        f'    BotShieldChallengeAtLeast none\n'
+        f'    <BotShieldRobots>\n'
+        f'        BotShieldRobotsTxt        {robots_path}\n'
+        f'    </BotShieldRobots>',
         count=1,
     ):
         r_a = client.get("/a", xff=fresh_ip, ua=GPTBOT_UA)
@@ -405,7 +439,11 @@ def test_robots_duplicate_crawl_delay_takes_max(
     """)
     with config_override(
         r"BotShieldEnabled\s+On",
-        f'BotShieldEnabled On\n    BotShieldChallengeAtLeast none\n    BotShieldRobotsTxt {robots_path}',
+        f'BotShieldEnabled On\n'
+        f'    BotShieldChallengeAtLeast none\n'
+        f'    <BotShieldRobots>\n'
+        f'        BotShieldRobotsTxt        {robots_path}\n'
+        f'    </BotShieldRobots>',
         count=1,
     ):
         r1 = client.get("/", xff=fresh_ip, ua=GPTBOT_UA)
@@ -436,7 +474,9 @@ def test_robots_main_scope_path_inherits_into_vhost(
     """)
     with config_override(
         r"BotShieldStateSaveInterval\s+\d+",
-        f'BotShieldRobotsTxt {robots_path}\n'
+        f'<BotShieldRobots>\n'
+        f'    BotShieldRobotsTxt        {robots_path}\n'
+        f'</BotShieldRobots>\n'
         r'BotShieldStateSaveInterval 30',
         count=1,
     ):
@@ -479,8 +519,10 @@ def test_robots_live_refresh_picks_up_changes(
         r"BotShieldEnabled\s+On",
         f'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        f'    BotShieldRobotsTxt {robots_path}\n'
-        f'    BotShieldRobotsRefreshInterval 1',
+        f'    <BotShieldRobots>\n'
+        f'        BotShieldRobotsTxt        {robots_path}\n'
+        f'        BotShieldRefreshInterval  1\n'
+        f'    </BotShieldRobots>',
         count=1,
     ):
         r_before = client.get("/admin", xff=fresh_ip, ua=GPTBOT_UA)
@@ -551,7 +593,9 @@ def test_directive_rate_limit_overrides_robots_crawl_delay(
         r"BotShieldEnabled\s+On",
         f'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        f'    BotShieldRobotsTxt {robots_path}\n'
+        f'    <BotShieldRobots>\n'
+        f'        BotShieldRobotsTxt        {robots_path}\n'
+        f'    </BotShieldRobots>\n'
         f'    BotShieldBotRateLimit gptbot 10 sec',
         count=1,
     ):
@@ -794,7 +838,7 @@ def test_robots_dump_shows_inline_groups(config_override):
         "            BotShieldLogAs      ai-deny\n"
         "        </BotShieldRobotRule>\n"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf, render=False,
+    with config_override(r"BotShieldEnabled\s+On", conf,
                          count=1):
         body = apache.policy_dump()
     assert 'group[0] "ai-crawlers"' in body, body[:800]

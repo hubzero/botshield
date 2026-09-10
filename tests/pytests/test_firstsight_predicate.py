@@ -75,8 +75,7 @@ def test_firstsight_yes_matches_only_the_first_request(config_override,
     once -- if the predicate read the filter after the write, or read it
     fresh each time, it would answer differently.
     """
-    with config_override(r"BotShieldEnabled\s+On", NEWCOMER,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", NEWCOMER, count=1):
         with log_slice as first:
             _get("/firstsight-probe", fresh_ip)
         assert _fired(first, fresh_ip, "newcomer"), (
@@ -95,8 +94,7 @@ def test_firstsight_yes_matches_only_the_first_request(config_override,
 def test_firstsight_no_is_the_other_half(config_override, fresh_ip,
                                          log_slice):
     """firstsight=no is droppedcookie's half: matches from the second."""
-    with config_override(r"BotShieldEnabled\s+On", RETURNING,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", RETURNING, count=1):
         with log_slice as first:
             _get("/firstsight-probe", fresh_ip)
         assert not _fired(first, fresh_ip, "returning"), (
@@ -119,8 +117,7 @@ def test_firstsight_is_scoped_to_the_rule_path(config_override, fresh_ip,
     The global heuristic cannot express this at any weight -- it applies
     to every path in the scope or to none.
     """
-    with config_override(r"BotShieldEnabled\s+On", NEWCOMER,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", NEWCOMER, count=1):
         with log_slice as slc:
             _get("/", fresh_ip)
         assert not _fired(slc, fresh_ip, "newcomer"), (
@@ -153,8 +150,7 @@ def test_a_refusing_rule_does_not_register_the_address(config_override,
         "        BotShieldLogAs       newcomer\n"
         "    </BotShieldRule>\n"
     )
-    with config_override(r"BotShieldEnabled\s+On", refusing,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", refusing, count=1):
         assert _get("/firstsight-refuse", fresh_ip).status_code == 404
 
         with log_slice as slc:

@@ -45,8 +45,7 @@ def test_two_plain_user_agents_are_ored(config_override, fresh_ip):
         f'        BotShieldUserAgent    "{UA_A}"\n'
         f'        BotShieldUserAgent    "{UA_B}"'
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         a = client.get("/ua-alt-probe", xff=fresh_ip, ua=UA_A)
         b = client.get("/ua-alt-probe", xff=fresh_ip, ua=UA_B)
         c = client.get("/ua-alt-probe", xff=fresh_ip, ua=UA_C)
@@ -75,8 +74,7 @@ def test_a_selector_and_a_plain_ua_are_ored(config_override, fresh_ip):
         "        BotShieldUserAgent    @bot\n"
         f'        BotShieldUserAgent    "{UA_C}"'
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         bot = client.get("/ua-alt-probe", xff=fresh_ip, ua="curl/8.0.1")
         plain = client.get("/ua-alt-probe", xff=fresh_ip, ua=UA_C)
 
@@ -96,8 +94,7 @@ def test_one_line_of_comma_separated_selectors_still_ors(
     """The spelling that already worked. It is the reason the join
     existed, so it is the one most at risk from removing it."""
     conf = _rule("        BotShieldUserAgent    @bot,@ai-train")
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         r = client.get("/ua-alt-probe", xff=fresh_ip, ua="curl/8.0.1")
     assert r.status_code == 403, f"@bot,@ai-train on one line broke; got {r.status_code}"
 
@@ -106,8 +103,7 @@ def test_a_single_user_agent_is_unchanged(config_override, fresh_ip):
     """One line, no commas, no '@' -- the ordinary case, which must
     not have acquired list semantics."""
     conf = _rule(f'        BotShieldUserAgent    "{UA_A}"')
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         hit = client.get("/ua-alt-probe", xff=fresh_ip, ua=UA_A)
         miss = client.get("/ua-alt-probe", xff=fresh_ip, ua=UA_B)
     assert hit.status_code == 403, f"single UA missed; got {hit.status_code}"
@@ -126,8 +122,7 @@ def test_a_user_agent_containing_a_comma_is_one_value(
     """
     ua = "Mozilla/5.0 (X11; Linux x86_64, like Gecko) Probe/1.0"
     conf = _rule(f'        BotShieldUserAgent    "{ua}"')
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         exact = client.get("/ua-alt-probe", xff=fresh_ip, ua=ua)
         half = client.get("/ua-alt-probe", xff=fresh_ip,
                           ua="Mozilla/5.0 (Windows NT 10.0) Gecko/20100101")
@@ -163,8 +158,7 @@ def test_two_ipspec_lines_are_ored(config_override, log_slice):
         '        BotShieldRespond   403\n'
         '    </BotShieldRule>'
     )
-    with config_override(r'BotShieldEnabled\s+On', conf,
-                         render=False, count=1):
+    with config_override(r'BotShieldEnabled\s+On', conf, count=1):
         with log_slice as slc:
             a = client.get('/ip-alt-probe', xff='192.0.2.3', ua='probe/1.0')
             b = client.get('/ip-alt-probe', xff='192.0.2.130', ua='probe/1.0')

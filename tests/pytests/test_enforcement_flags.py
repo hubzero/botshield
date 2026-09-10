@@ -99,8 +99,7 @@ def test_a_cohort_429_flags_the_address(config_override, fresh_ip):
         '    </BotShieldRule>\n'
         + _reader("rate_abuse")
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         before = _flagged(fresh_ip, "rate_abuse")
         first = client.get(LIMITED, xff=fresh_ip, ua="RateBot/1.0")
         second = client.get(LIMITED, xff=fresh_ip, ua="RateBot/1.0")
@@ -121,8 +120,7 @@ def test_staying_under_budget_flags_nothing(config_override, fresh_ip):
         '    </BotShieldRule>\n'
         + _reader("rate_abuse")
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         r = client.get(LIMITED, xff=fresh_ip, ua="RateBot/1.0")
         after = _flagged(fresh_ip, "rate_abuse")
     assert r.status_code != 429
@@ -145,8 +143,7 @@ def test_observe_mode_does_not_flag(config_override, fresh_ip):
         '    </BotShieldRule>\n'
         + _reader("rate_abuse")
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         client.get(LIMITED, xff=fresh_ip, ua="RateBot/1.0")
         second = client.get(LIMITED, xff=fresh_ip, ua="RateBot/1.0")
         after = _flagged(fresh_ip, "rate_abuse")
@@ -170,8 +167,7 @@ def test_a_robots_block_flags_the_address(
         "    </BotShieldRobots>\n"
         + _reader("robots_ignored")
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         before = _flagged(fresh_ip, "robots_ignored")
         blocked = client.get("/admin", xff=fresh_ip, ua=GPTBOT_UA)
         after = _flagged(fresh_ip, "robots_ignored")
@@ -197,8 +193,7 @@ def test_robots_observe_does_not_flag(
         "    </BotShieldRobots>\n"
         + _reader("robots_ignored")
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         blocked = client.get("/admin", xff=fresh_ip, ua=GPTBOT_UA)
         after = _flagged(fresh_ip, "robots_ignored")
     assert blocked.status_code != 403, "observe must not refuse"
@@ -218,8 +213,7 @@ def test_an_allowed_path_flags_nothing(
         "    </BotShieldRobots>\n"
         + _reader("robots_ignored")
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         ok = client.get("/public", xff=fresh_ip, ua=GPTBOT_UA)
         after = _flagged(fresh_ip, "robots_ignored")
     assert ok.status_code != 403
@@ -242,8 +236,7 @@ def test_a_rate_trip_does_not_set_the_robots_bit(
         '    </BotShieldRule>\n'
         + _reader("robots_ignored")
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         client.get(LIMITED, xff=fresh_ip, ua="RateBot/1.0")
         second = client.get(LIMITED, xff=fresh_ip, ua="RateBot/1.0")
         after = _flagged(fresh_ip, "robots_ignored")
@@ -268,8 +261,7 @@ def test_the_new_flags_are_nameable(config_override, flag):
         "        BotShieldScore     botsignals +10\n"
         "    </BotShieldRule>"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         pass
 
 
@@ -285,7 +277,6 @@ def test_an_unknown_flag_lists_the_known_ones(config_override):
         "    </BotShieldRule>"
     )
     with pytest.raises(Exception) as exc_info:
-        with config_override(r"BotShieldEnabled\s+On", conf,
-                             render=False, count=1):
+        with config_override(r"BotShieldEnabled\s+On", conf, count=1):
             pass
     assert "returned non-zero exit status" in str(exc_info.value)

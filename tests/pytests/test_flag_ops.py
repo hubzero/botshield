@@ -27,7 +27,6 @@ def _override(config_override, body):
     return config_override(
         r"BotShieldEnabled\s+On",
         "BotShieldEnabled On\n" + body,
-        render=False,
         count=1,
     )
 

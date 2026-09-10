@@ -41,7 +41,10 @@ def test_rate_limit_ua_narrowing(config_override, log_slice, fresh_ip):
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldRule corpbot ua="CorpBot" rate=3/1',
+        '    <BotShieldRule corpbot>\n'
+        '        BotShieldUserAgent    CorpBot\n'
+        '        BotShieldRate         3/1\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         with log_slice as slc:
@@ -74,7 +77,10 @@ def test_rate_limit_inline_cidr_narrowing(config_override, log_slice, fresh_ip):
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldRule dcblock ipspec="198.51.100.0/24" rate=2/1',
+        '    <BotShieldRule dcblock>\n'
+        '        BotShieldIPSpec       198.51.100.0/24\n'
+        '        BotShieldRate         2/1\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         # Hit from an out-of-range IP — should not trip no matter how many.
@@ -111,7 +117,11 @@ def test_rate_limit_ua_and_ip_and_ed(config_override, log_slice, fresh_ip):
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldRule pair ua="Scraper/" ipspec="203.0.113.0/24" rate=1/1',
+        '    <BotShieldRule pair>\n'
+        '        BotShieldUserAgent    Scraper/\n'
+        '        BotShieldIPSpec       203.0.113.0/24\n'
+        '        BotShieldRate         1/1\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         # UA miss from matching IP → must not trip.
@@ -143,7 +153,11 @@ def test_path_trigger_block_prefix_match(config_override, log_slice, fresh_ip):
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldRule lockdown path="/admin" ua="Scraper/" respond=403',
+        '    <BotShieldRule lockdown>\n'
+        '        BotShieldPath         /admin\n'
+        '        BotShieldUserAgent    Scraper/\n'
+        '        BotShieldRespond      403\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         with log_slice as slc:
@@ -166,7 +180,11 @@ def test_path_trigger_block_end_anchor(config_override, log_slice, fresh_ip):
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldRule exact path="/exact$" ua="Scraper/" respond=403',
+        '    <BotShieldRule exact>\n'
+        '        BotShieldPath         /exact$\n'
+        '        BotShieldUserAgent    Scraper/\n'
+        '        BotShieldRespond      403\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         r_exact = client.get("/exact",     xff=fresh_ip, ua="Scraper/1.0")
@@ -183,7 +201,11 @@ def test_path_trigger_cohort_narrowing(config_override, log_slice, fresh_ip):
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldRule scrapersonly path="/wp-admin" ua="Scraper/" respond=403',
+        '    <BotShieldRule scrapersonly>\n'
+        '        BotShieldPath         /wp-admin\n'
+        '        BotShieldUserAgent    Scraper/\n'
+        '        BotShieldRespond      403\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         r_scrap = client.get("/wp-admin", xff=fresh_ip, ua="Scraper/1.0")
@@ -209,7 +231,10 @@ def test_rate_limit_ua_match_is_case_insensitive(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldRule gptbot ua="gptbot" rate=1/1',
+        '    <BotShieldRule gptbot>\n'
+        '        BotShieldUserAgent    gptbot\n'
+        '        BotShieldRate         1/1\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         with log_slice as slc:
@@ -239,8 +264,16 @@ def test_path_trigger_precedence_is_declaration_order(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldRule specific path="/admin/secret" ua="Scraper/" respond=403\n'
-        '    BotShieldRule generic  path="/admin*"       ua="Scraper/" respond=403',
+        '    <BotShieldRule specific>\n'
+        '        BotShieldPath         /admin/secret\n'
+        '        BotShieldUserAgent    Scraper/\n'
+        '        BotShieldRespond      403\n'
+        '    </BotShieldRule>\n'
+        '    <BotShieldRule generic>\n'
+        '        BotShieldPath         /admin*\n'
+        '        BotShieldUserAgent    Scraper/\n'
+        '        BotShieldRespond      403\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         with log_slice as slc:

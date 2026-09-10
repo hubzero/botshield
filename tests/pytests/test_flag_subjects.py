@@ -38,7 +38,6 @@ def test_flag_ip_refuses_session_only_flags(config_override):
             "        BotShieldPath      /trust-probe\n"
             "        BotShieldFlagIP    app_verified_human\n"
             "    </BotShieldRule>",
-            render=False,
             count=1,
         ):
             pass
@@ -58,7 +57,6 @@ def test_flag_session_accepts_them(config_override, fresh_ip):
         "        BotShieldRespond      nochallenge\n"
         "        BotShieldFlagSession  app_verified_human\n"
         "    </BotShieldRule>",
-        render=False,
         count=1,
     ):
         resp = client.get("/trust-session-probe", xff=fresh_ip,
@@ -85,10 +83,16 @@ def test_flag_session_reaches_the_cookie(config_override, fresh_ip,
     with config_override(
         r"BotShieldEnabled\s+On",
         "BotShieldEnabled On\n"
-        '    BotShieldRule mark-session path="/mark-session-probe" '
-        "respond=404 flagsession=scanner_probe logas=mark-session\n"
-        "    BotShieldRule scanner-challenge flagged=scanner_probe "
-        "challenge=noninteractive\n",
+        '    <BotShieldRule mark-session>\n'
+        '        BotShieldPath         /mark-session-probe\n'
+        '        BotShieldRespond      404\n'
+        '        BotShieldFlagSession  scanner_probe\n'
+        '        BotShieldLogAs        mark-session\n'
+        '    </BotShieldRule>\n'
+        "    <BotShieldRule scanner-challenge>\n"
+        "        BotShieldFlagged      scanner_probe\n"
+        "        BotShieldChallenge    noninteractive\n"
+        "    </BotShieldRule>\n",
         count=1,
     ):
         probe = client.get("/mark-session-probe", xff=fresh_ip,
@@ -121,7 +125,6 @@ def test_flag_ip_accepts_suspicion_flags(config_override, fresh_ip):
         "        BotShieldRespond  404\n"
         "        BotShieldFlagIP   scanner_probe\n"
         "    </BotShieldRule>",
-        render=False,
         count=1,
     ):
         resp = client.get("/suspect-address-probe", xff=fresh_ip,

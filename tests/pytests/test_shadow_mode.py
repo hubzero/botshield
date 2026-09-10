@@ -66,8 +66,11 @@ def test_path_trigger_observe_does_not_enforce(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldRule trap path="/.envprobe" '
-        'respond=403 mode=observe',
+        '    <BotShieldRule trap>\n'
+        '        BotShieldPath         /.envprobe\n'
+        '        BotShieldRespond      403\n'
+        '        BotShieldMode         observe\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         with log_slice as slc:
@@ -93,8 +96,12 @@ def test_path_trigger_observe_does_not_flag_ip(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldRule trap path="/.envprobe" '
-        'respond=nochallenge flagip=fake_bot mode=observe',
+        '    <BotShieldRule trap>\n'
+        '        BotShieldPath         /.envprobe\n'
+        '        BotShieldRespond      nochallenge\n'
+        '        BotShieldFlagip       fake_bot\n'
+        '        BotShieldMode         observe\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         # Match in observe mode.
@@ -120,8 +127,11 @@ def test_rate_limit_observe_does_not_429(config_override, fresh_ip):
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldRule corpbot ua="CorpBot" rate=1/1 '
-        'mode=observe',
+        '    <BotShieldRule corpbot>\n'
+        '        BotShieldUserAgent    CorpBot\n'
+        '        BotShieldRate         1/1\n'
+        '        BotShieldMode         observe\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         codes = [
@@ -142,8 +152,11 @@ def test_rate_limit_observe_increments_metric(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldRule corpbot ua="CorpBot" rate=1/1 '
-        'mode=observe',
+        '    <BotShieldRule corpbot>\n'
+        '        BotShieldUserAgent    CorpBot\n'
+        '        BotShieldRate         1/1\n'
+        '        BotShieldMode         observe\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         before_obs = _read_metric("botshield_rate_limit_observed_total")
@@ -177,8 +190,12 @@ def test_path_trigger_observe_does_not_403(config_override, fresh_ip):
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldRule admin-block path="/admin/*" '
-        'ua="httpx" respond=403 mode=observe',
+        '    <BotShieldRule admin-block>\n'
+        '        BotShieldPath         /admin/*\n'
+        '        BotShieldUserAgent    httpx\n'
+        '        BotShieldRespond      403\n'
+        '        BotShieldMode         observe\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         r = client.get("/admin/login.php", xff=fresh_ip,
@@ -203,7 +220,10 @@ def test_scope_log_only_overrides_per_rule_enforce(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldEnabled LogOnly\n'
-        '    BotShieldRule trap path="/.envprobe" respond=403',
+        '    <BotShieldRule trap>\n'
+        '        BotShieldPath         /.envprobe\n'
+        '        BotShieldRespond      403\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         r = _g("/.envprobe", xff=fresh_ip)
@@ -222,7 +242,10 @@ def test_scope_log_only_default_lets_per_rule_enforce(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldRule trap path="/.envprobe2" respond=403',
+        '    <BotShieldRule trap>\n'
+        '        BotShieldPath         /.envprobe2\n'
+        '        BotShieldRespond      403\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         r = _g("/.envprobe2", xff=fresh_ip)
@@ -246,10 +269,17 @@ def test_observe_does_not_shadow_subsequent_enforce_rule(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldRule staged path="/admin/*" ua="httpx" '
-        'respond=403 mode=observe\n'
-        '    BotShieldRule active path="/admin/*" ua="httpx" '
-        'respond=403',
+        '    <BotShieldRule staged>\n'
+        '        BotShieldPath         /admin/*\n'
+        '        BotShieldUserAgent    httpx\n'
+        '        BotShieldRespond      403\n'
+        '        BotShieldMode         observe\n'
+        '    </BotShieldRule>\n'
+        '    <BotShieldRule active>\n'
+        '        BotShieldPath         /admin/*\n'
+        '        BotShieldUserAgent    httpx\n'
+        '        BotShieldRespond      403\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         r = client.get("/admin/login.php", xff=fresh_ip,
@@ -268,8 +298,11 @@ def test_directive_rejects_bad_mode_value(config_override):
         with config_override(
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
-            '    BotShieldRule trap path="/foo" '
-            'respond=403 mode=monitor',
+            '    <BotShieldRule trap>\n'
+            '        BotShieldPath         /foo\n'
+            '        BotShieldRespond      403\n'
+            '        BotShieldMode         monitor\n'
+            '    </BotShieldRule>',
             count=1,
         ):
             pass
@@ -286,8 +319,11 @@ def test_directive_accepts_mode_on_feedback(config_override):
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldFeedback event-x event=event-x '
-        'flagsession=honeypot_hit mode=observe',
+        '    <BotShieldFeedback event-x>\n'
+        '        BotShieldEvent        event-x\n'
+        '        BotShieldFlagsession  honeypot_hit\n'
+        '        BotShieldMode         observe\n'
+        '    </BotShieldFeedback>',
         count=1,
     ):
         pass
@@ -313,7 +349,11 @@ def test_log_only_emits_tilde_block_for_path_trigger(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldEnabled LogOnly\n'
-        '    BotShieldRule admin-block path="/admin/*" ua="httpx" respond=403',
+        '    <BotShieldRule admin-block>\n'
+        '        BotShieldPath         /admin/*\n'
+        '        BotShieldUserAgent    httpx\n'
+        '        BotShieldRespond      403\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         with log_slice as slc:
@@ -341,7 +381,10 @@ def test_log_only_emits_tilde_rate_limited_for_ratelimit(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldEnabled LogOnly\n'
-        '    BotShieldRule corpbot ua="CorpBot" rate=1/1',
+        '    <BotShieldRule corpbot>\n'
+        '        BotShieldUserAgent    CorpBot\n'
+        '        BotShieldRate         1/1\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         with log_slice as slc:
@@ -404,8 +447,12 @@ def test_path_trigger_observe_increments_observed_total(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldRule admin-block path="/admin/*" ua="httpx" '
-        'respond=403 mode=observe',
+        '    <BotShieldRule admin-block>\n'
+        '        BotShieldPath         /admin/*\n'
+        '        BotShieldUserAgent    httpx\n'
+        '        BotShieldRespond      403\n'
+        '        BotShieldMode         observe\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         before_obs = _read_metric("botshield_trigger_observed_total")
@@ -432,7 +479,11 @@ def test_per_location_log_only_with_inner_enforce(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldEnabled LogOnly\n'
-        '    BotShieldRule everywhere path="/*" ua="httpx" respond=403\n'
+        '    <BotShieldRule everywhere>\n'
+        '        BotShieldPath         /*\n'
+        '        BotShieldUserAgent    httpx\n'
+        '        BotShieldRespond      403\n'
+        '    </BotShieldRule>\n'
         '    <Location "/enforce-here">\n'
         '        BotShieldEnabled On\n'
         '    </Location>',

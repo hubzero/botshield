@@ -82,7 +82,10 @@ def test_strike_used_grows_when_429_burst_recorded(
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldRule corpbot ua="CorpBot" rate=2/60\n'
+        '    <BotShieldRule corpbot>\n'
+        '        BotShieldUserAgent    CorpBot\n'
+        '        BotShieldRate         2/60\n'
+        '    </BotShieldRule>\n'
         '    BotShieldEscalate corpbot 3 min respond=403 ttl=60',
         count=1,
     ):

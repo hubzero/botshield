@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import re
 
-from . import blocks as _blocks
 import os
 import socket
 import subprocess
@@ -413,7 +412,6 @@ def config_override(
     pattern: str, replacement: str, *,
     conf: str = DEV_VHOST_CONF,
     count: int | None = None,
-    render: bool = True,
 ):
     """Swap one or more lines in the dev vhost, reload, run the block,
     revert.
@@ -446,17 +444,10 @@ def config_override(
     original = conf_path.read_text()
 
     found, mutated = _sub_uncommented(pattern, replacement, original)
-    # Tests write the compact one-line spelling; the module only
-    # accepts blocks. Render here so the file Apache reads is the
-    # block form, and the container path is what the suite exercises.
-    #
-    # render=False writes the text through untouched, for the one test
-    # that needs to prove the flat form is actually refused. Without
-    # the escape hatch that test cannot exist: the renderer would
-    # convert its input and it would pass whether or not the module
-    # still accepted the retired spelling.
-    if render:
-        mutated = _blocks.to_blocks(mutated)
+    # The text goes through untouched. Until 2026-09-10 a renderer here
+    # translated the retired one-line rule spelling into blocks, which
+    # let tests keep writing config the module refuses; every test now
+    # writes the block form, so what a test says is what Apache reads.
     if found == 0:
         raise ValueError(
             f"config_override: pattern {pattern!r} matched zero "

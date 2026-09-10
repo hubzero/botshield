@@ -76,8 +76,10 @@ def test_session_mark_does_not_add_a_second_cookie(config_override,
     """
     with config_override(
         r"BotShieldEnabled\s+On",
-        _cfg("    BotShieldFeedback login-success event=login-success "
-             "flagsession=app_verified_human\n"),
+        _cfg("    <BotShieldFeedback login-success>\n"
+             "        BotShieldEvent        login-success\n"
+             "        BotShieldFlagSession  app_verified_human\n"
+             "    </BotShieldFeedback>\n"),
         count=1,
     ):
         resp = _g(FEEDBACK_PATH, fresh_ip)
@@ -97,11 +99,14 @@ def test_session_mark_comes_back_on_the_next_request(config_override,
     """
     with config_override(
         r"BotShieldEnabled\s+On",
-        _cfg("    BotShieldFeedback login-success event=login-success "
-             "flagsession=app_verified_human\n"
-             "    BotShieldRule credit-verified-human "
-             "flagged=app_verified_human "
-             'score="botsignals -40"\n'),
+        _cfg("    <BotShieldFeedback login-success>\n"
+             "        BotShieldEvent        login-success\n"
+             "        BotShieldFlagSession  app_verified_human\n"
+             "    </BotShieldFeedback>\n"
+             "    <BotShieldRule credit-verified-human>\n"
+             "        BotShieldFlagged      app_verified_human\n"
+             "        BotShieldScore        botsignals -40\n"
+             "    </BotShieldRule>\n"),
         count=1,
     ):
         first = _g(FEEDBACK_PATH, fresh_ip)

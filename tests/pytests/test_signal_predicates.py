@@ -51,8 +51,7 @@ HAS_AL = (
 
 
 def test_scraper_selector_matches_a_library_ua(config_override, fresh_ip):
-    with config_override(r"BotShieldEnabled\s+On", SCRAPER,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", SCRAPER, count=1):
         hit = client.get("/signal-probe", xff=fresh_ip, ua=CURL_UA)
         assert hit.status_code == 403, (
             f"curl's UA carries a known library token; got {hit.status_code}"
@@ -61,8 +60,7 @@ def test_scraper_selector_matches_a_library_ua(config_override, fresh_ip):
 
 def test_scraper_selector_leaves_a_browser_alone(config_override, fresh_ip):
     """The control. Without it the test above passes on any 403 at all."""
-    with config_override(r"BotShieldEnabled\s+On", SCRAPER,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", SCRAPER, count=1):
         miss = client.get("/signal-probe", xff=fresh_ip, ua=BROWSER_UA,
                           accept_language=ACCEPT_LANG)
         assert miss.status_code != 403, (
@@ -72,8 +70,7 @@ def test_scraper_selector_leaves_a_browser_alone(config_override, fresh_ip):
 
 def test_acceptlanguage_empty_matches_a_missing_header(config_override,
                                                        fresh_ip):
-    with config_override(r"BotShieldEnabled\s+On", NO_AL,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", NO_AL, count=1):
         hit = client.get("/signal-probe", xff=fresh_ip, ua=BROWSER_UA)
         assert hit.status_code == 403, (
             f"no Accept-Language should match; got {hit.status_code}"
@@ -82,8 +79,7 @@ def test_acceptlanguage_empty_matches_a_missing_header(config_override,
 
 def test_acceptlanguage_empty_ignores_a_present_header(config_override,
                                                        fresh_ip):
-    with config_override(r"BotShieldEnabled\s+On", NO_AL,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", NO_AL, count=1):
         miss = client.get("/signal-probe", xff=fresh_ip, ua=BROWSER_UA,
                           accept_language=ACCEPT_LANG)
         assert miss.status_code != 403, (
@@ -93,8 +89,7 @@ def test_acceptlanguage_empty_ignores_a_present_header(config_override,
 
 
 def test_acceptlanguage_star_is_the_inverse(config_override, fresh_ip):
-    with config_override(r"BotShieldEnabled\s+On", HAS_AL,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", HAS_AL, count=1):
         hit = client.get("/signal-probe", xff=fresh_ip, ua=BROWSER_UA,
                          accept_language=ACCEPT_LANG)
         assert hit.status_code == 403, (
@@ -119,8 +114,7 @@ def test_acceptlanguage_rejects_a_substring(config_override):
             "        BotShieldPath            /signal-probe\n"
             "        BotShieldAcceptLanguage  en-US\n"
             "        BotShieldRespond         403\n"
-            "    </BotShieldRule>\n",
-            render=False, count=1,
+            "    </BotShieldRule>\n", count=1,
         ):
             pass
     msg = str(exc.value)
@@ -146,8 +140,7 @@ def test_a_new_predicate_counts_as_a_condition_on_its_own(config_override,
         "        BotShieldScore         probe +3\n"
         "    </BotShieldRule>\n"
     )
-    with config_override(r"BotShieldEnabled\s+On", only_al,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", only_al, count=1):
         # Parsing is the assertion; a refused config raises on entry.
         assert client.get("/", xff=fresh_ip, ua=BROWSER_UA).status_code
 
@@ -161,6 +154,5 @@ def test_firstsight_alone_is_also_a_condition(config_override, fresh_ip):
         "        BotShieldScore     probe +3\n"
         "    </BotShieldRule>\n"
     )
-    with config_override(r"BotShieldEnabled\s+On", only_fs,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", only_fs, count=1):
         assert client.get("/", xff=fresh_ip, ua=BROWSER_UA).status_code

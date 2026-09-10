@@ -63,8 +63,7 @@ def test_latency_is_a_condition_on_its_own(config_override):
     # sheds -- on a path the baseline vhost does not gate, because
     # a 403 from gated-content would say nothing about this
     # condition.
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         r = client.get("/latency-cond-probe", ua="probe/1.0")
     assert r.status_code != 503, (
         f"a 500ms floor shed a request on an idle server; "
@@ -80,8 +79,7 @@ def test_the_policy_dump_shows_the_threshold(config_override):
         "        BotShieldLatencyAtLeast  1200\n"
         "        BotShieldRespond         503"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         body = apache.policy_dump()
     line = [ln for ln in body.splitlines() if ln.startswith("latency-probe")]
     assert line, f"rule missing from dump; body={body[:600]}"
@@ -102,8 +100,7 @@ def test_a_threshold_no_traffic_reaches_declines(config_override):
         "        BotShieldRespond         503\n"
         "        BotShieldLogAs           latency-gate"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         r = client.get("/latency-gate-probe", ua="probe/1.0")
     assert r.status_code != 503, (
         "a 65-second latency floor fired on a healthy server -- the "
@@ -131,8 +128,7 @@ def test_bad_thresholds_are_refused(config_override, value, why):
         "        BotShieldRespond         503"
     )
     with pytest.raises(Exception):
-        with config_override(r"BotShieldEnabled\s+On", conf,
-                             render=False, count=1):
+        with config_override(r"BotShieldEnabled\s+On", conf, count=1):
             pass
 
 
@@ -145,6 +141,5 @@ def test_negation_is_refused(config_override):
         "        BotShieldRespond         503"
     )
     with pytest.raises(Exception):
-        with config_override(r"BotShieldEnabled\s+On", conf,
-                             render=False, count=1):
+        with config_override(r"BotShieldEnabled\s+On", conf, count=1):
             pass

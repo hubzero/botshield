@@ -67,7 +67,10 @@ def test_repeated_429_escalates_to_403(config_override, fresh_ip,
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldRule corpbot ua="CorpBot" rate=2/1\n'
+        '    <BotShieldRule corpbot>\n'
+        '        BotShieldUserAgent    CorpBot\n'
+        '        BotShieldRate         2/1\n'
+        '    </BotShieldRule>\n'
         '    BotShieldEscalate corpbot 3 min '
         'respond=403 ttl=60 "logas=BAN rate-abuse"',
         count=1,
@@ -122,7 +125,10 @@ def test_below_strike_threshold_stays_at_429(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldRule corpbot ua="CorpBot" rate=2/1\n'
+        '    <BotShieldRule corpbot>\n'
+        '        BotShieldUserAgent    CorpBot\n'
+        '        BotShieldRate         2/1\n'
+        '    </BotShieldRule>\n'
         '    BotShieldEscalate corpbot 5 min '
         'respond=403 ttl=60',
         count=1,
@@ -162,12 +168,18 @@ def test_escalation_isolates_per_rule(
         '    BotShieldChallengeAtLeast none\n'
         # Rule-A matches "CorpBot" with escalation. Tight budget +
         # tight strike count to escalate quickly.
-        '    BotShieldRule corpbot ua="CorpBot" rate=1/1\n'
+        '    <BotShieldRule corpbot>\n'
+        '        BotShieldUserAgent    CorpBot\n'
+        '        BotShieldRate         1/1\n'
+        '    </BotShieldRule>\n'
         '    BotShieldEscalate corpbot 2 min '
         'respond=403 ttl=60\n'
         # Rule-B matches "OtherUA" — no escalation. Different cohort
         # entirely, so even strict bursts stay at 429.
-        '    BotShieldRule otherbot ua="OtherUA" rate=1/1',
+        '    <BotShieldRule otherbot>\n'
+        '        BotShieldUserAgent    OtherUA\n'
+        '        BotShieldRate         1/1\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         # Drive rule-A into escalation: first request admits, then
@@ -220,7 +232,10 @@ def test_escalation_isolates_per_ip(config_override):
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldRule corpbot ua="CorpBot" rate=1/1\n'
+        '    <BotShieldRule corpbot>\n'
+        '        BotShieldUserAgent    CorpBot\n'
+        '        BotShieldRate         1/1\n'
+        '    </BotShieldRule>\n'
         '    BotShieldEscalate corpbot 3 min '
         'respond=403 ttl=60',
         count=1,
@@ -258,7 +273,10 @@ def test_directive_rejects_bogus_status(config_override):
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-            '    BotShieldRule corpbot ua="CorpBot" rate=1/1\n'
+            '    <BotShieldRule corpbot>\n'
+            '        BotShieldUserAgent    CorpBot\n'
+            '        BotShieldRate         1/1\n'
+            '    </BotShieldRule>\n'
             '    BotShieldEscalate corpbot 2 sec status=29',
             count=1,
         ):
@@ -274,7 +292,10 @@ def test_directive_rejects_status_429(config_override):
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-            '    BotShieldRule corpbot ua="CorpBot" rate=1/1\n'
+            '    <BotShieldRule corpbot>\n'
+            '        BotShieldUserAgent    CorpBot\n'
+            '        BotShieldRate         1/1\n'
+            '    </BotShieldRule>\n'
             '    BotShieldEscalate corpbot 2 sec respond=429',
             count=1,
         ):
@@ -288,7 +309,10 @@ def test_directive_rejects_unknown_key(config_override):
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-            '    BotShieldRule corpbot ua="CorpBot" rate=1/1\n'
+            '    <BotShieldRule corpbot>\n'
+            '        BotShieldUserAgent    CorpBot\n'
+            '        BotShieldRate         1/1\n'
+            '    </BotShieldRule>\n'
             '    BotShieldEscalate corpbot 2 sec '
             'mystery_key=42',
             count=1,

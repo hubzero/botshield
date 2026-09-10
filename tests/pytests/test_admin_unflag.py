@@ -43,10 +43,16 @@ ADMIN_OPEN = "    BotShieldAdminAccess 127.0.0.1 ::1\n"
 FLAGGING = (
     "BotShieldEnabled On\n"
     + ADMIN_OPEN
-    + '    BotShieldRule probe path="/unflag-probe" respond=404 '
-    "flagip=scanner_probe logas=unflag-probe\n"
-    "    BotShieldRule scanner-blocked flagged=scanner_probe "
-    "respond=403\n"
+    + "    <BotShieldRule probe>\n"
+    "        BotShieldPath         /unflag-probe\n"
+    "        BotShieldRespond      404\n"
+    "        BotShieldFlagIP       scanner_probe\n"
+    "        BotShieldLogAs        unflag-probe\n"
+    "    </BotShieldRule>\n"
+    "    <BotShieldRule scanner-blocked>\n"
+    "        BotShieldFlagged      scanner_probe\n"
+    "        BotShieldRespond      403\n"
+    "    </BotShieldRule>\n"
 )
 
 
@@ -209,10 +215,16 @@ def test_unflag_can_clear_one_flag_and_leave_another(config_override,
     two = (
         "BotShieldEnabled On\n"
         + ADMIN_OPEN
-        + '    BotShieldRule p1 path="/unflag-two" respond=404 '
-        "flagip=scanner_probe,honeypot_hit logas=unflag-two\n"
-        "    BotShieldRule honeypot-blocked flagged=honeypot_hit "
-        "respond=403\n"
+        + "    <BotShieldRule p1>\n"
+        "        BotShieldPath         /unflag-two\n"
+        "        BotShieldRespond      404\n"
+        "        BotShieldFlagIP       scanner_probe,honeypot_hit\n"
+        "        BotShieldLogAs        unflag-two\n"
+        "    </BotShieldRule>\n"
+        "    <BotShieldRule honeypot-blocked>\n"
+        "        BotShieldFlagged      honeypot_hit\n"
+        "        BotShieldRespond      403\n"
+        "    </BotShieldRule>\n"
     )
     with config_override(r"BotShieldEnabled\s+On", two, count=1):
         assert _get("/unflag-two", fresh_ip).status_code == 404

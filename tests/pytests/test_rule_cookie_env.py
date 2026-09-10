@@ -53,8 +53,7 @@ def _conf(condition: str) -> str:
 
 def _hit(config_override, fresh_ip, condition, cookies=None):
     """451 means the rule matched; anything else means it did not."""
-    with config_override(r"BotShieldEnabled\s+On", _conf(condition),
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", _conf(condition), count=1):
         return client.get(PROBE, xff=fresh_ip, cookies=cookies).status_code
 
 
@@ -144,8 +143,7 @@ def _env_hit(config_override, fresh_ip, condition, set_var=True):
     if not set_var:
         conf = conf.replace(
             '    SetEnvIfExpr "true" BS_RULE_ENV=high\n', "")
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         return client.get(PROBE, xff=fresh_ip).status_code
 
 
@@ -181,8 +179,7 @@ def test_negated_name_with_operator_is_refused(config_override, fresh_ip):
     with pytest.raises(Exception) as exc_info:
         with config_override(
             r"BotShieldEnabled\s+On",
-            _conf("BotShieldCookie !tier=guest"),
-            render=False, count=1,
+            _conf("BotShieldCookie !tier=guest"), count=1,
         ):
             pass
     assert "returned non-zero exit status" in str(exc_info.value)
@@ -198,8 +195,7 @@ def test_module_own_cookie_is_refused(config_override, fresh_ip):
     with pytest.raises(Exception) as exc_info:
         with config_override(
             r"BotShieldEnabled\s+On",
-            _conf("BotShieldCookie __Host-bs_session"),
-            render=False, count=1,
+            _conf("BotShieldCookie __Host-bs_session"), count=1,
         ):
             pass
     assert "returned non-zero exit status" in str(exc_info.value)
@@ -225,8 +221,7 @@ def test_cookie_ands_with_the_rest_of_the_rule(config_override, fresh_ip):
         "        BotShieldRespond   451\n"
         "    </BotShieldRule>"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         both = client.get(PROBE, xff=fresh_ip,
                           cookies={"tier": "guest"}).status_code
         wrong_cookie = client.get(PROBE, xff=fresh_ip,
@@ -268,8 +263,7 @@ def test_cookies_none_and_any(config_override, fresh_ip):
         "        BotShieldRespond   451\n"
         "    </BotShieldRule>"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         assert client.get(PROBE, xff=fresh_ip).status_code == 451
         assert client.get(PROBE, xff=fresh_ip,
                           cookies={"foo": "bar"}).status_code != 451
@@ -290,8 +284,7 @@ def test_cookies_session_and_the_name_directive(config_override, fresh_ip):
         "        BotShieldRespond   451\n"
         "    </BotShieldRule>"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         curated = client.get(PROBE, xff=fresh_ip,
                              cookies={"PHPSESSID": "x"}).status_code
         added = client.get(PROBE, xff=fresh_ip,
@@ -318,8 +311,7 @@ def test_bscookie_states(config_override, fresh_ip):
             "        BotShieldRespond   451\n"
             "    </BotShieldRule>"
         )
-        with config_override(r"BotShieldEnabled\s+On", conf,
-                             render=False, count=1):
+        with config_override(r"BotShieldEnabled\s+On", conf, count=1):
             return client.get(PROBE, xff=fresh_ip,
                               cookies=cookies).status_code
 
@@ -347,8 +339,7 @@ def test_env_from_a_rewrite_producer(config_override, fresh_ip):
         "        BotShieldRespond   451\n"
         "    </BotShieldRule>"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         hit = client.get("/rw-probe", xff=fresh_ip).status_code
         miss = client.get("/index.html", xff=fresh_ip).status_code
     assert hit == 451, "RewriteRule [E=...] must light up the condition"

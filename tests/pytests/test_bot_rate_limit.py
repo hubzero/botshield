@@ -383,7 +383,11 @@ def test_challenge_pass_waives_the_challenge_not_the_rate_limit(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldBotRateLimit * 1 sec\n'
-        '    BotShieldRule cp path="/*" respond=nochallenge logas=cp',
+        '    <BotShieldRule cp>\n'
+        '        BotShieldPath         /*\n'
+        '        BotShieldRespond      nochallenge\n'
+        '        BotShieldLogAs        cp\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         results = [

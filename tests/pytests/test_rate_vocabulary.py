@@ -63,8 +63,7 @@ def test_delay_prints_as_written(config_override, spelling, shown):
         f"        BotShieldDelay  {spelling}",
         name="delay-dump",
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         line = _dump_line("delay-dump")
     assert shown in line, line
     assert "countper" not in line and "budget=" not in line, line
@@ -83,8 +82,7 @@ def test_rate_prints_as_written(config_override, spelling, shown):
         f"        BotShieldRate   {spelling}",
         name="rate-dump",
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         line = _dump_line("rate-dump")
     assert shown in line, line
 
@@ -102,8 +100,7 @@ def test_bad_delays_are_refused(config_override, bad):
         with config_override(
             r"BotShieldEnabled\s+On",
             _rule("        BotShieldPath /x\n"
-                  f"        BotShieldDelay {bad}"),
-            render=False, count=1,
+                  f"        BotShieldDelay {bad}"), count=1,
         ):
             pass
 
@@ -123,8 +120,7 @@ def test_bad_rates_are_refused(config_override, bad):
         with config_override(
             r"BotShieldEnabled\s+On",
             _rule("        BotShieldPath /x\n"
-                  f"        BotShieldRate {bad}"),
-            render=False, count=1,
+                  f"        BotShieldRate {bad}"), count=1,
         ):
             pass
 
@@ -141,8 +137,7 @@ def test_the_old_words_are_gone(config_override, line):
         with config_override(
             r"BotShieldEnabled\s+On",
             _rule("        BotShieldPath /x\n"
-                  f"        {line}"),
-            render=False, count=1,
+                  f"        {line}"), count=1,
         ):
             pass
 
@@ -163,8 +158,7 @@ def test_delay_gives_each_crawler_its_own_window(config_override, fresh_ip):
         "        BotShieldDelay     1",
         name="per-crawler",
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         first_a = client.get("/delay-probe", xff=fresh_ip, ua=UA_A)
         first_b = client.get("/delay-probe", xff=fresh_ip, ua=UA_B)
         again_a = client.get("/delay-probe", xff=fresh_ip, ua=UA_A)
@@ -190,8 +184,7 @@ def test_rate_makes_them_share(config_override, fresh_ip):
         "        BotShieldRate      1 1",
         name="shared",
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         client.get("/rate-probe", xff=fresh_ip, ua=UA_A)
         second = client.get("/rate-probe", xff=fresh_ip, ua=UA_B)
 
@@ -214,8 +207,7 @@ def test_a_half_second_window_is_half_a_second(config_override, fresh_ip):
         "        BotShieldDelay     0.5",
         name="half",
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         first = client.get("/half-probe", xff=fresh_ip, ua=UA_A)
         inside = client.get("/half-probe", xff=fresh_ip, ua=UA_A)
         time.sleep(0.7)
@@ -240,8 +232,7 @@ def test_retry_after_rounds_up_never_zero(config_override, fresh_ip):
         "        BotShieldDelay     0.5",
         name="retry",
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         client.get("/retry-probe", xff=fresh_ip, ua=UA_A)
         refused = client.get("/retry-probe", xff=fresh_ip, ua=UA_A)
     assert refused.status_code == 429, refused.status_code
@@ -260,8 +251,7 @@ def test_rate_each_gives_each_crawler_the_budget(config_override, fresh_ip):
         "        BotShieldRate      2 60 each",
         name="per-each",
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         a1 = client.get("/each-probe", xff=fresh_ip, ua=UA_A)
         a2 = client.get("/each-probe", xff=fresh_ip, ua=UA_A)
         b1 = client.get("/each-probe", xff=fresh_ip, ua=UA_B)
@@ -286,7 +276,6 @@ def test_rate_refuses_other_sharing_words(config_override, bad):
         with config_override(
             r"BotShieldEnabled\s+On",
             _rule("        BotShieldPath /x\n"
-                  f"        BotShieldRate {bad}"),
-            render=False, count=1,
+                  f"        BotShieldRate {bad}"), count=1,
         ):
             pass

@@ -44,8 +44,7 @@ def test_minload_is_refused_in_a_rule(config_override):
         "    </BotShieldRule>"
     )
     with pytest.raises(Exception):
-        with config_override(r"BotShieldEnabled\s+On", conf,
-                             render=False, count=1):
+        with config_override(r"BotShieldEnabled\s+On", conf, count=1):
             pass
 
 
@@ -64,6 +63,5 @@ def test_a_rule_with_only_minload_is_refused(config_override):
         "    </BotShieldRule>"
     )
     with pytest.raises(Exception):
-        with config_override(r"BotShieldEnabled\s+On", conf,
-                             render=False, count=1):
+        with config_override(r"BotShieldEnabled\s+On", conf, count=1):
             pass

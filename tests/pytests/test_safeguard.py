@@ -218,8 +218,11 @@ def test_safeguard_does_not_override_block_path(
         r"BotShieldEnabled\s+On",
         _safeguard_cfg(threshold=2)
         # UA-narrowed cohort: 'httpx' substring matches SCRAPER_UA.
-        + '    BotShieldRule badpath path="/blocked" '
-          'ua="httpx" respond=403',
+        + '    <BotShieldRule badpath>\n'
+          '        BotShieldPath         /blocked\n'
+          '        BotShieldUserAgent    httpx\n'
+          '        BotShieldRespond      403\n'
+          '    </BotShieldRule>',
         count=1,
     ):
         # Trip safeguard on /.

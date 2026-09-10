@@ -58,7 +58,10 @@ def test_policy_dump_surfaces_rate_limit(config_override):
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
-        '    BotShieldRule gptbot ua="GPTBot" rate=60/60',
+        '    <BotShieldRule gptbot>\n'
+        '        BotShieldUserAgent    GPTBot\n'
+        '        BotShieldRate         60/60\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         body = apache.policy_dump()
@@ -88,7 +91,9 @@ def test_policy_dump_surfaces_robots(robots_path, config_override):
     with config_override(
         r"BotShieldEnabled\s+On",
         f'BotShieldEnabled On\n'
-        f'    BotShieldRobotsTxt {robots_path}',
+        f'    <BotShieldRobots>\n'
+        f'        BotShieldRobotsTxt        {robots_path}\n'
+        f'    </BotShieldRobots>',
         count=1,
     ):
         body = apache.policy_dump()
@@ -128,8 +133,7 @@ def test_policy_dump_surfaces_rules(config_override):
         "        BotShieldLogAs         dump-probe\n"
         "    </BotShieldRule>"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         body = apache.policy_dump()
     assert "## BotShieldRule" in body, body[:400]
     line = [ln for ln in body.splitlines() if ln.startswith("dumped")]
@@ -156,8 +160,7 @@ def test_policy_dump_names_flags_rather_than_bits(config_override):
         "        BotShieldRespond   403\n"
         "    </BotShieldRule>"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         body = apache.policy_dump()
     line = [ln for ln in body.splitlines() if ln.startswith("flagnames")]
     assert line, f"rule missing; body={body[:600]}"
@@ -177,8 +180,7 @@ def test_policy_dump_marks_observe_rules(config_override):
         "        BotShieldMode      observe\n"
         "    </BotShieldRule>"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         body = apache.policy_dump()
     line = [ln for ln in body.splitlines() if ln.startswith("staged")]
     assert line and "[observe]" in line[0], (
@@ -198,8 +200,7 @@ def test_policy_dump_counts_container_rules(config_override):
         "        </BotShieldRule>\n"
         "    </Location>"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         body = apache.policy_dump()
     assert "in containers" in body, body[:600]
     assert "not listed" in body, body[:600]

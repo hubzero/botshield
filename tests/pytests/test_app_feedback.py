@@ -116,8 +116,10 @@ def test_app_feedback_penalty_flag_applies_to_next_request(
     with config_override(
         r"BotShieldEnabled\s+On",
         _cfg(
-            '    BotShieldFeedback scanner-hit event=scanner-hit '
-            'flagsession=honeypot_hit\n',
+            '    <BotShieldFeedback scanner-hit>\n'
+            '        BotShieldEvent        scanner-hit\n'
+            '        BotShieldFlagsession  honeypot_hit\n'
+            '    </BotShieldFeedback>\n',
             f'    {FEEDBACK_LOC_1}\n'
             f'        Header always set X-BotShield-Feedback "{val}"\n'
             f'    </Location>'
@@ -165,8 +167,10 @@ def test_app_feedback_observed_under_log_only(
         '    BotShieldEnabled LogOnly\n'
         '    BotShieldAppFeedback on\n'
         f'    BotShieldAppIntegrationSecretFile {SECRET_PATH}\n'
-        '    BotShieldFeedback scanner-hit event=scanner-hit '
-        'flagsession=honeypot_hit\n'
+        '    <BotShieldFeedback scanner-hit>\n'
+        '        BotShieldEvent        scanner-hit\n'
+        '        BotShieldFlagsession  honeypot_hit\n'
+        '    </BotShieldFeedback>\n'
         f'    {FEEDBACK_LOC_1}\n'
         f'        Header always set X-BotShield-Feedback "{val}"\n'
         f'    </Location>',
@@ -209,8 +213,11 @@ def test_app_feedback_per_trigger_observe_mode(
         'BotShieldEnabled On\n'
         '    BotShieldAppFeedback on\n'
         f'    BotShieldAppIntegrationSecretFile {SECRET_PATH}\n'
-        '    BotShieldFeedback scanner-hit event=scanner-hit '
-        'flagsession=honeypot_hit mode=observe\n'
+        '    <BotShieldFeedback scanner-hit>\n'
+        '        BotShieldEvent        scanner-hit\n'
+        '        BotShieldFlagsession  honeypot_hit\n'
+        '        BotShieldMode         observe\n'
+        '    </BotShieldFeedback>\n'
         f'    {FEEDBACK_LOC_1}\n'
         f'        Header always set X-BotShield-Feedback "{val}"\n'
         f'    </Location>',
@@ -252,8 +259,10 @@ def test_app_feedback_credit_flag_lowers_score(
     with config_override(
         r"BotShieldEnabled\s+On",
         _cfg(
-            '    BotShieldFeedback human-verified event=human-verified '
-            'flagsession=app_verified_human\n',
+            '    <BotShieldFeedback human-verified>\n'
+            '        BotShieldEvent        human-verified\n'
+            '        BotShieldFlagsession  app_verified_human\n'
+            '    </BotShieldFeedback>\n',
             f'    {FEEDBACK_LOC_1}\n'
             f'        Header always set X-BotShield-Feedback "{val}"\n'
             f'    </Location>'
@@ -301,8 +310,10 @@ def test_app_feedback_strips_from_404_error_response(
     with config_override(
         r"BotShieldEnabled\s+On",
         _cfg(
-            '    BotShieldFeedback scanner-hit event=scanner-hit '
-            'flagsession=honeypot_hit\n',
+            '    <BotShieldFeedback scanner-hit>\n'
+            '        BotShieldEvent        scanner-hit\n'
+            '        BotShieldFlagsession  honeypot_hit\n'
+            '    </BotShieldFeedback>\n',
             f'    <Location "{missing_path}">\n'
             f'        Header always set X-BotShield-Feedback "{val}"\n'
             f'    </Location>'
@@ -326,8 +337,10 @@ def test_app_feedback_strips_when_feature_off(config_override):
         'BotShieldEnabled On\n'
         '    BotShieldAppFeedback off\n'
         f'    BotShieldAppIntegrationSecretFile {SECRET_PATH}\n'
-        '    BotShieldFeedback scanner-hit event=scanner-hit '
-        'flagsession=honeypot_hit\n'
+        '    <BotShieldFeedback scanner-hit>\n'
+        '        BotShieldEvent        scanner-hit\n'
+        '        BotShieldFlagsession  honeypot_hit\n'
+        '    </BotShieldFeedback>\n'
         f'    {FEEDBACK_LOC_1}\n'
         f'        Header always set X-BotShield-Feedback "{val}"\n'
         f'    </Location>',
@@ -349,8 +362,10 @@ def test_app_feedback_tampered_sig_rejected_and_stripped(
     with config_override(
         r"BotShieldEnabled\s+On",
         _cfg(
-            '    BotShieldFeedback scanner-hit event=scanner-hit '
-            'flagsession=honeypot_hit\n',
+            '    <BotShieldFeedback scanner-hit>\n'
+            '        BotShieldEvent        scanner-hit\n'
+            '        BotShieldFlagsession  honeypot_hit\n'
+            '    </BotShieldFeedback>\n',
             f'    {FEEDBACK_LOC_1}\n'
             f'        Header always set X-BotShield-Feedback "{tampered}"\n'
             f'    </Location>'
@@ -422,8 +437,10 @@ def test_app_feedback_legacy_wire_format_rejected(
     with config_override(
         r"BotShieldEnabled\s+On",
         _cfg(
-            '    BotShieldFeedback legacy-guard event=legacy-guard '
-            'flagsession=honeypot_hit\n',
+            '    <BotShieldFeedback legacy-guard>\n'
+            '        BotShieldEvent        legacy-guard\n'
+            '        BotShieldFlagsession  honeypot_hit\n'
+            '    </BotShieldFeedback>\n',
             f'    {FEEDBACK_LOC_1}\n'
             f'        Header always set X-BotShield-Feedback "{val}"\n'
             f'    </Location>'
@@ -460,10 +477,14 @@ def test_app_feedback_credit_and_penalty_compose(
     with config_override(
         r"BotShieldEnabled\s+On",
         _cfg(
-            '    BotShieldFeedback scanner-hit event=scanner-hit '
-            'flagsession=honeypot_hit\n'
-            '    BotShieldFeedback human-verified event=human-verified '
-            'flagsession=app_verified_human\n',
+            '    <BotShieldFeedback scanner-hit>\n'
+            '        BotShieldEvent        scanner-hit\n'
+            '        BotShieldFlagsession  honeypot_hit\n'
+            '    </BotShieldFeedback>\n'
+            '    <BotShieldFeedback human-verified>\n'
+            '        BotShieldEvent        human-verified\n'
+            '        BotShieldFlagsession  app_verified_human\n'
+            '    </BotShieldFeedback>\n',
             f'    {FEEDBACK_LOC_1}\n'
             f'        Header always set X-BotShield-Feedback "{penalty_val}"\n'
             f'    </Location>\n'
@@ -523,8 +544,10 @@ def test_app_feedback_can_mark_the_address(config_override, log_slice):
     with config_override(
         r"BotShieldEnabled\s+On",
         _cfg(
-            '    BotShieldFeedback scanner-hit event=scanner-hit '
-            'flagip=honeypot_hit\n',
+            '    <BotShieldFeedback scanner-hit>\n'
+            '        BotShieldEvent        scanner-hit\n'
+            '        BotShieldFlagip       honeypot_hit\n'
+            '    </BotShieldFeedback>\n',
             f'    {FEEDBACK_LOC_1}\n'
             f'        Header always set X-BotShield-Feedback "{val}"\n'
             f'    </Location>'
@@ -562,7 +585,6 @@ def test_the_retired_tag_is_refused(config_override):
             "    <BotShieldFeedbackTrigger scanner-hit>\n"
             "        BotShieldFlagIP   honeypot_hit\n"
             "    </BotShieldFeedbackTrigger>",
-            render=False,
             count=1,
         ):
             pass
@@ -581,7 +603,6 @@ def test_a_block_without_an_event_is_refused(config_override):
             "    <BotShieldFeedback nameless>\n"
             "        BotShieldFlagSession  honeypot_hit\n"
             "    </BotShieldFeedback>",
-            render=False,
             count=1,
         ):
             pass
@@ -605,7 +626,6 @@ def test_label_and_event_are_separate(config_override, log_slice):
             f'        Header always set X-BotShield-Feedback "{val}"\n'
             f'    </Location>'
         ),
-        render=False,
         count=1,
     ):
         _g(FEEDBACK_PATH_1, xff=ip)

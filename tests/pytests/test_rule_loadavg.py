@@ -73,8 +73,7 @@ def _conf(ratio: str) -> str:
 
 
 def _fires(config_override, fresh_ip, ratio: str) -> bool:
-    with config_override(r"BotShieldEnabled\s+On", _conf(ratio),
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", _conf(ratio), count=1):
         _wait_for_sample()
         return client.get(PROBE, xff=fresh_ip).status_code == 451
 
@@ -137,8 +136,7 @@ def test_composes_with_the_rest_of_the_rule(config_override, fresh_ip):
         "        BotShieldRespond         451\n"
         "    </BotShieldRule>"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         bot = client.get(PROBE, xff=fresh_ip,
                          ua="python-requests/2.31").status_code
         human = client.get(
@@ -176,8 +174,7 @@ def test_reads_the_same_number_the_metric_reports(config_override, fresh_ip):
 @pytest.mark.parametrize("bad", ["warm", "-1", "1.0.0", "101", "abc"])
 def test_rejects_a_non_ratio(config_override, bad):
     with pytest.raises(Exception) as exc_info:
-        with config_override(r"BotShieldEnabled\s+On", _conf(bad),
-                             render=False, count=1):
+        with config_override(r"BotShieldEnabled\s+On", _conf(bad), count=1):
             pass
     assert "returned non-zero exit status" in str(exc_info.value)
 
@@ -186,7 +183,6 @@ def test_negation_is_refused(config_override):
     """There is no "below this" spelling. A quiet-host rule is the one
     the loaded rule falls through to, not a negated condition."""
     with pytest.raises(Exception) as exc_info:
-        with config_override(r"BotShieldEnabled\s+On", _conf("!1.0"),
-                             render=False, count=1):
+        with config_override(r"BotShieldEnabled\s+On", _conf("!1.0"), count=1):
             pass
     assert "returned non-zero exit status" in str(exc_info.value)

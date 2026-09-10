@@ -39,8 +39,7 @@ def test_a_rule_in_a_location_needs_no_condition(config_override, fresh_ip):
         "        </BotShieldRule>\n"
         "    </Location>"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         inside = client.get(SCOPED, xff=fresh_ip).status_code
         outside = client.get(OTHER, xff=fresh_ip).status_code
     assert inside == 451, "the container match is the condition"
@@ -56,8 +55,7 @@ def test_the_same_rule_at_server_scope_is_refused(config_override):
         "    </BotShieldRule>"
     )
     with pytest.raises(Exception) as exc_info:
-        with config_override(r"BotShieldEnabled\s+On", conf,
-                             render=False, count=1):
+        with config_override(r"BotShieldEnabled\s+On", conf, count=1):
             pass
     assert "returned non-zero exit status" in str(exc_info.value)
 
@@ -74,8 +72,7 @@ def test_conditions_still_apply_inside_a_container(config_override,
         "        </BotShieldRule>\n"
         "    </Location>"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         bot = client.get(SCOPED, xff=fresh_ip,
                          ua="python-requests/2.31").status_code
         human = client.get(
@@ -106,8 +103,7 @@ def test_scoped_rules_are_walked_before_server_rules(config_override,
         "        </BotShieldRule>\n"
         "    </Location>"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         got = client.get(SCOPED, xff=fresh_ip).status_code
     assert got == 451, (
         f"the scoped rule should answer for its own path; got {got}"
@@ -127,8 +123,7 @@ def test_a_scoped_rule_can_use_ipspec(config_override, fresh_ip):
         "        </BotShieldRule>\n"
         "    </Location>"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         got = client.get(SCOPED, xff=fresh_ip).status_code
     assert got == 451, (
         f"the cohort never resolved its ranges; got {got}"
@@ -159,8 +154,7 @@ def test_a_nested_container_gets_the_first_word(config_override,
         "        </BotShieldRule>\n"
         "    </Location>"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         deep = client.get(inner, xff=fresh_ip).status_code
         shallow = client.get(outer, xff=fresh_ip).status_code
     assert deep == 451, (
@@ -193,8 +187,7 @@ def test_a_scoped_flag_reaches_the_next_request(config_override,
         "        BotShieldRespond   451\n"
         "    </BotShieldRule>"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         before = client.get(probe, xff=fresh_ip).status_code
         client.get(trap, xff=fresh_ip)
         after = client.get(probe, xff=fresh_ip).status_code
@@ -214,7 +207,6 @@ def test_observe_mode_works_on_a_scoped_rule(config_override, fresh_ip):
         "        </BotShieldRule>\n"
         "    </Location>"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         got = client.get(SCOPED, xff=fresh_ip).status_code
     assert got != 451, "observe must not enforce"

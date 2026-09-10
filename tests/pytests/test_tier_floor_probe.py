@@ -64,8 +64,7 @@ def _challenged(slc, ip):
 def test_tier_floor_fires_with_the_ladder_off(config_override, fresh_ip,
                                               log_slice):
     """Flag the address, then watch an ordinary path get challenged."""
-    with config_override(r"BotShieldEnabled\s+On", WITH_FLOOR,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", WITH_FLOOR, count=1):
         assert _get("/tier-floor-probe", fresh_ip).status_code == 404
 
         with log_slice as slc:
@@ -83,8 +82,7 @@ def test_without_the_floor_the_same_flag_does_nothing(config_override,
     Same rule, same flag, no BotShieldFlagTrigger. Nothing is seeded in,
     so the flag is recorded and acts on nothing.
     """
-    with config_override(r"BotShieldEnabled\s+On", LADDER_OFF,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", LADDER_OFF, count=1):
         assert _get("/tier-floor-probe", fresh_ip).status_code == 404
 
         with log_slice as slc:

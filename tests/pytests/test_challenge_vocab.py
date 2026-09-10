@@ -64,7 +64,6 @@ def test_nochallenge_declines_the_decision(config_override, fresh_ip):
         "        BotShieldNoChallenge\n"
         "        BotShieldLogAs          quiet\n"
         "    </BotShieldRule>",
-        render=False,
         count=1,
     ):
         resp = _scraper("/?nochal=1", fresh_ip)
@@ -89,7 +88,6 @@ def test_challenge_needs_no_companion(config_override, fresh_ip):
         "        BotShieldChallenge  noninteractive\n"
         "        BotShieldLogAs        gate\n"
         "    </BotShieldRule>",
-        render=False,
         count=1,
     ):
         resp = _get("/?chal=1", fresh_ip, BROWSER_UA)
@@ -109,7 +107,6 @@ def test_challenge_rejects_nochallenge_as_a_tier(config_override):
             '        BotShieldQuery      *x=1*\n'
             "        BotShieldChallenge  nochallenge\n"
             "    </BotShieldRule>",
-            render=False,
             count=1,
         ):
             pass

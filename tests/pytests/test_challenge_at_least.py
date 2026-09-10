@@ -62,8 +62,7 @@ def _challenged(slc, ip):
 def test_reaching_the_threshold_challenges(config_override, fresh_ip,
                                            log_slice):
     """12 + 8 reaches 20, and the tier decision acts on it."""
-    with config_override(r"BotShieldEnabled\s+On", REACHES,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", REACHES, count=1):
         with log_slice as slc:
             _get(fresh_ip)
         assert _challenged(slc, fresh_ip), (
@@ -74,8 +73,7 @@ def test_reaching_the_threshold_challenges(config_override, fresh_ip,
 def test_one_short_does_not_challenge(config_override, fresh_ip,
                                       log_slice):
     """The control: same rules, threshold 21, so 20 must not act."""
-    with config_override(r"BotShieldEnabled\s+On", SHORT,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", SHORT, count=1):
         with log_slice as slc:
             _get(fresh_ip)
         assert not _challenged(slc, fresh_ip), (
@@ -91,8 +89,7 @@ def test_none_drops_inherited_rows(config_override, fresh_ip, log_slice):
     single-valued, so overriding one was enough; a list is not.
     """
     with_reset = REACHES + "    BotShieldChallengeAtLeast none\n"
-    with config_override(r"BotShieldEnabled\s+On", with_reset,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", with_reset, count=1):
         with log_slice as slc:
             _get(fresh_ip)
         assert not _challenged(slc, fresh_ip), (
@@ -117,8 +114,7 @@ def test_rows_max_rather_than_first_match(config_override, fresh_ip,
         "    BotShieldChallengeAtLeast calsig 20 noninteractive\n"
         "    BotShieldChallengeAtLeast calsig 50 interactive\n"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         with log_slice as slc:
             _get(fresh_ip)
         tiers = [d.get("tier") for d in slc.decision_lines(ip=fresh_ip)]
@@ -146,8 +142,7 @@ def test_a_nested_row_lifts_an_inherited_none(config_override, fresh_ip,
         "        BotShieldChallengeAtLeast calsig 20 noninteractive\n"
         "    </Location>\n"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         with log_slice as slc:
             _get(fresh_ip, path="/cal-nested")
         assert _challenged(slc, fresh_ip), (
@@ -174,8 +169,7 @@ def test_none_still_inherits_where_nothing_is_declared(
         "        BotShieldNonInteractiveMode interstitial\n"
         "    </Location>\n"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         with log_slice as slc:
             _get(fresh_ip, path="/cal-nested")
         assert not _challenged(slc, fresh_ip), (

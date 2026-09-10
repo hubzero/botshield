@@ -46,7 +46,6 @@ def test_session_mark_replaces_rather_than_duplicates(config_override,
         "        BotShieldRespond      404\n"
         "        BotShieldFlagSession  blocked\n"
         "    </BotShieldRule>",
-        render=False,
         count=1,
     ):
         resp = client.get("/mark-once-probe", xff=fresh_ip, ua=BROWSER_UA)

@@ -47,8 +47,11 @@ def test_trigger_status_code_blocks_and_tags_log(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldRule env-probe path="/.env" '
-        'respond=403 "logas=BAN 2h"',
+        '    <BotShieldRule env-probe>\n'
+        '        BotShieldPath         /.env\n'
+        '        BotShieldRespond      403\n'
+        '        BotShieldLogAs        BAN 2h\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         with log_slice as slc:
@@ -78,8 +81,10 @@ def test_trigger_status_pass_lets_request_through(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldRule pass-probe path="/definitely-nonexistent" '
-        'respond=nochallenge',
+        '    <BotShieldRule pass-probe>\n'
+        '        BotShieldPath         /definitely-nonexistent\n'
+        '        BotShieldRespond      nochallenge\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         resp = client.get("/definitely-nonexistent", xff=fresh_ip)
@@ -122,8 +127,11 @@ def test_trigger_status_pass_penalty_scores_the_current_request(
     scraperua-python, firstsightip and any flag triggers. The
     difference there is the whole pipeline, not the penalty.
     """
-    RULE = ('    BotShieldRule passpen path="/honey-pass" '
-            'respond=nochallenge %s')
+    RULE = ('    <BotShieldRule passpen>\n'
+            '        BotShieldPath      /honey-pass\n'
+            '        BotShieldRespond   nochallenge\n'
+            '        %s\n'
+            '    </BotShieldRule>')
 
     def decision_for(extra, ip):
         with config_override(
@@ -144,8 +152,8 @@ def test_trigger_status_pass_penalty_scores_the_current_request(
 
     # One row at 50, two arms either side of it. A number that never
     # reached this request would leave both arms identical.
-    low  = decision_for("score=\"probe +10\"", fresh_ip)
-    high = decision_for("score=\"probe +90\"", ips.fresh_ip())
+    low  = decision_for("BotShieldScore probe +10", fresh_ip)
+    high = decision_for("BotShieldScore probe +90", ips.fresh_ip())
 
     assert "rule:passpen" in high["reason"], (
         f"the match must be traceable in the reason chain; d={high}"
@@ -175,8 +183,10 @@ def test_trigger_redirect_sets_location(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldRule env-redirect path="/.env.redir" '
-        'redirect=https://example.org/gone',
+        '    <BotShieldRule env-redirect>\n'
+        '        BotShieldPath         /.env.redir\n'
+        '        BotShieldRedirect     https://example.org/gone\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         resp = client.get("/.env.redir", xff=fresh_ip,
@@ -194,8 +204,11 @@ def test_trigger_redirect_honors_explicit_status(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldRule env-redirect path="/.env.perm" '
-        'redirect=https://example.org/gone respond=301',
+        '    <BotShieldRule env-redirect>\n'
+        '        BotShieldPath         /.env.perm\n'
+        '        BotShieldRedirect     https://example.org/gone\n'
+        '        BotShieldRespond      301\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         resp = client.get("/.env.perm", xff=fresh_ip,
@@ -216,8 +229,14 @@ def test_trigger_declaration_order_wins_on_overlap(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldRule wp-ajax path="/wp-admin/admin-ajax.php" respond=nochallenge\n'
-        '    BotShieldRule wp-all  path="/wp-admin*"               respond=403',
+        '    <BotShieldRule wp-ajax>\n'
+        '        BotShieldPath         /wp-admin/admin-ajax.php\n'
+        '        BotShieldRespond      nochallenge\n'
+        '    </BotShieldRule>\n'
+        '    <BotShieldRule wp-all>\n'
+        '        BotShieldPath         /wp-admin*\n'
+        '        BotShieldRespond      403\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         r_ajax  = client.get("/wp-admin/admin-ajax.php", xff=fresh_ip)
@@ -242,8 +261,11 @@ def test_trigger_main_scope_inherits_into_vhost(
     other E2.x directives got."""
     with config_override(
         r"BotShieldStateSaveInterval\s+\d+",
-        'BotShieldRule main-scope-trap path="/main-scope-env" '
-        'respond=403 logas="MAIN"\n'
+        '<BotShieldRule main-scope-trap>\n'
+        '    BotShieldPath         /main-scope-env\n'
+        '    BotShieldRespond      403\n'
+        '    BotShieldLogAs        MAIN\n'
+        '</BotShieldRule>\n'
         'BotShieldStateSaveInterval 30',
         count=1,
     ):
@@ -271,8 +293,11 @@ def test_trigger_flag_ip_carries_to_next_request(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldRule bait path="/honey-bait" '
-        'respond=nochallenge flagip=honeypot_hit',
+        '    <BotShieldRule bait>\n'
+        '        BotShieldPath         /honey-bait\n'
+        '        BotShieldRespond      nochallenge\n'
+        '        BotShieldFlagip       honeypot_hit\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         # First request primes the flagged-IP table.
@@ -308,7 +333,10 @@ def test_path_trigger_middle_star_matches_segment(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldRule api-admin path="/api/*/admin" respond=403',
+        '    <BotShieldRule api-admin>\n'
+        '        BotShieldPath         /api/*/admin\n'
+        '        BotShieldRespond      403\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         with log_slice as slc:
@@ -343,7 +371,10 @@ def test_path_trigger_middle_star_anchored_excludes_suffix(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldRule api-admin-end path="/api/*/admin$" respond=403',
+        '    <BotShieldRule api-admin-end>\n'
+        '        BotShieldPath         /api/*/admin$\n'
+        '        BotShieldRespond      403\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         with log_slice as slc:
@@ -394,7 +425,10 @@ def test_path_trigger_middle_star_emits_notice_on_config_load(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-        '    BotShieldRule middle-warn path="/foo*bar" respond=403',
+        '    <BotShieldRule middle-warn>\n'
+        '        BotShieldPath         /foo*bar\n'
+        '        BotShieldRespond      403\n'
+        '    </BotShieldRule>',
         count=1,
     ):
         pass
@@ -416,21 +450,15 @@ def test_path_trigger_middle_star_emits_notice_on_config_load(
 def test_flat_trigger_form_is_rejected(config_override):
     """The `key=value` one-liner is retired; only blocks parse.
 
-    Worth its own test because the rest of the suite cannot notice.
-    Tests still *write* the compact spelling and the harness renders
-    it to a block before Apache sees it, so every other case here
-    would keep passing if the flat form quietly came back.
-
-    render=False is load-bearing: without it the harness would
-    convert this test's input to a block and the test would pass
-    whether or not the module still accepted the retired spelling.
+    Worth its own test because nothing else in the suite writes the
+    flat form any more -- every other test writes blocks, so every
+    other case would keep passing if the flat form quietly came back.
     """
     with pytest.raises(Exception) as exc_info:
         with config_override(
             r"BotShieldEnabled\s+On",
             "BotShieldEnabled On\n"
             '    BotShieldRule oldform path="/retired" respond=403',
-            render=False,
         ):
             pass
     msg = str(exc_info.value)
@@ -463,7 +491,6 @@ def test_removed_requesttrigger_spelling_is_refused(
             "        BotShieldPath      /legacy-spelling-probe\n"
             "        BotShieldRespond    404\n"
             "    </BotShieldRequestTrigger>",
-            render=False,
             count=1,
         ):
             pass
@@ -486,7 +513,7 @@ def test_removed_status_spelling_is_refused(config_override):
     because an operator who reaches this has a working config in front
     of them and needs the one word that fixes it.
 
-    render=False so the block reaches Apache exactly as written, which
+     so the block reaches Apache exactly as written, which
     is the only way the module rather than the harness is under test.
     """
     with pytest.raises(Exception) as exc_info:
@@ -497,7 +524,6 @@ def test_removed_status_spelling_is_refused(config_override):
             "        BotShieldPath      /legacy-status-probe\n"
             "        BotShieldStatus    404\n"
             "    </BotShieldRule>",
-            render=False,
             count=1,
         ):
             pass
@@ -521,7 +547,6 @@ def test_respond_is_the_canonical_spelling(config_override, fresh_ip):
         "        BotShieldPath      /respond-spelling-probe\n"
         "        BotShieldRespond   404\n"
         "    </BotShieldRule>",
-        render=False,
         count=1,
     ):
         resp = client.get("/respond-spelling-probe", xff=fresh_ip)
@@ -556,7 +581,6 @@ def test_removed_flagtrigger_family_is_refused(config_override):
             "        BotShieldAccumulator  botsignals\n"
             "        BotShieldAdd          60\n"
             "    </BotShieldFlagTrigger>",
-            render=False,
             count=1,
         ):
             pass

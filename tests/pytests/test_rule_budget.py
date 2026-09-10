@@ -47,8 +47,7 @@ def test_a_path_scoped_rate_limit(config_override, fresh_ip):
         "        BotShieldPath      /budget-probe\n"
         "        BotShieldRate      2 1"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         codes = [client.get("/budget-probe", xff=fresh_ip, ua=UA).status_code
                  for _ in range(3)]
         # Same rule, different path: must be untouched by the window.
@@ -88,8 +87,7 @@ def test_under_budget_does_not_run_the_action(config_override, fresh_ip):
         "        BotShieldRate      5 60\n"
         "        BotShieldRespond   403"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         r = client.get("/budget-and-act", xff=fresh_ip, ua=UA)
     assert r.status_code != 403, (
         f"the action ran on an admitted request, so the window is "
@@ -103,8 +101,7 @@ def test_the_window_appears_in_the_policy_dump(config_override):
         "        BotShieldRate      30 3600",
         name="dumped-budget",
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         body = apache.policy_dump()
     line = [ln for ln in body.splitlines() if ln.startswith("dumped-budget")]
     assert line, f"rule missing from dump; body={body[:600]}"
@@ -120,8 +117,7 @@ def test_two_windows_on_one_rule_are_refused(config_override):
             r"BotShieldEnabled\s+On",
             _rule("        BotShieldPath  /x\n"
                   "        BotShieldDelay 1\n"
-                  "        BotShieldRate  5 60"),
-            render=False, count=1,
+                  "        BotShieldRate  5 60"), count=1,
         ):
             pass
 
@@ -145,8 +141,7 @@ def test_escalation_can_name_a_rule(config_override, fresh_ip):
         "    </BotShieldRule>\n"
         "    BotShieldEscalate esc-rule 2 min respond=403 ttl=60"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         codes = [client.get("/esc-probe", xff=fresh_ip, ua=UA).status_code
                  for _ in range(6)]
     assert 429 in codes, f"the window never refused; got {codes}"
@@ -163,8 +158,7 @@ def test_an_escalate_naming_nothing_warns(config_override, log_slice):
         "    BotShieldEscalate no-such-thing 2 min respond=403"
     )
     with log_slice as slc:
-        with config_override(r"BotShieldEnabled\s+On", conf,
-                             render=False, count=1):
+        with config_override(r"BotShieldEnabled\s+On", conf, count=1):
             pass
         warned = slc.grep(r"names no rule carrying rate= or delay=")
     assert warned, "an unlinked escalate warned about nothing"
@@ -181,8 +175,7 @@ def test_over_budget_runs_the_rule_action(config_override, fresh_ip):
         "        BotShieldRespond   451\n"
         "    </BotShieldRule>"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         codes = [client.get("/budget-action", xff=fresh_ip, ua=UA).status_code
                  for _ in range(2)]
     assert codes[1] == 451, (
@@ -213,8 +206,7 @@ def test_a_window_can_mark_without_refusing(config_override, fresh_ip):
         "        BotShieldRespond       451\n"
         "    </BotShieldRule>"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         first = client.get("/mark-probe", xff=fresh_ip, ua=UA)
         second = client.get("/mark-probe", xff=fresh_ip, ua=UA)
     assert first.status_code != 451, (

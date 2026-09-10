@@ -35,7 +35,6 @@ def test_log_as_tags_the_decision_line(config_override, fresh_ip, log_slice):
     with config_override(
         r"BotShieldEnabled\s+On",
         _rule("BotShieldLogAs", "newspelling", "/logas-probe"),
-        render=False,
         count=1,
     ):
         with log_slice as slc:
@@ -62,7 +61,6 @@ def test_removed_log_spelling_is_refused(config_override):
         with config_override(
             r"BotShieldEnabled\s+On",
             _rule("BotShieldLog", "oldspelling", "/log-probe"),
-            render=False,
             count=1,
         ):
             pass

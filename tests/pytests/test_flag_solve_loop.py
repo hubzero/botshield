@@ -217,7 +217,6 @@ def test_an_unservable_captcha_demand_is_clamped(
         "        BotShieldPath      /captcha-clamp-probe\n"
         "        BotShieldChallenge captcha\n"
         "    </BotShieldRule>",
-        render=False,
         count=1,
     ):
         with log_slice as slc:

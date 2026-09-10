@@ -38,7 +38,6 @@ def test_comma_in_a_path_is_not_a_separator(config_override, fresh_ip):
         "        BotShieldPath     /comma-a,/comma-b\n"
         "        BotShieldRespond  403\n"
         "    </BotShieldRule>",
-        render=False,
         count=1,
     ):
         literal = _get("/comma-a,/comma-b", fresh_ip)
@@ -69,7 +68,6 @@ def test_repeated_path_lines_still_or_together(config_override, fresh_ip):
         "        BotShieldPath     /multi-two\n"
         "        BotShieldRespond  403\n"
         "    </BotShieldRule>",
-        render=False,
         count=1,
     ):
         for p in ("/multi-one", "/multi-two"):

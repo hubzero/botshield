@@ -36,8 +36,11 @@ def test_request_trigger_does_not_flag_the_address_by_default(
     with config_override(
         r"BotShieldEnabled\s+On",
         "BotShieldEnabled On\n"
-        '    BotShieldRule wp-probe path="/wp-admin/*" respond=404 '
-        "logas=wp-probe\n",
+        '    <BotShieldRule wp-probe>\n'
+        '        BotShieldPath         /wp-admin/*\n'
+        '        BotShieldRespond      404\n'
+        '        BotShieldLogAs        wp-probe\n'
+        '    </BotShieldRule>\n',
         count=1,
     ):
         client.get("/wp-admin/setup-config.php", xff=fresh_ip,

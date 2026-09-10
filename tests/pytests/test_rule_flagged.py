@@ -58,8 +58,7 @@ def test_flagged_matches_an_address_carrying_the_flag(
         "        BotShieldRespond   451\n"
         "    </BotShieldRule>"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         before = client.get(PROBE, xff=fresh_ip).status_code
         client.get(TRAP, xff=fresh_ip)
         after = client.get(PROBE, xff=fresh_ip).status_code
@@ -78,8 +77,7 @@ def test_flagged_does_not_match_an_unflagged_address(
         "        BotShieldRespond   451\n"
         "    </BotShieldRule>"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         assert client.get(PROBE, xff=fresh_ip).status_code != 451
 
 
@@ -110,8 +108,7 @@ def test_read_is_live_within_one_walk(config_override, fresh_ip):
         "        BotShieldRespond   451\n"
         "    </BotShieldRule>"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         first = client.get(TRAP, xff=fresh_ip).status_code
     assert first == 451, (
         "the flag was written by the rule above and must be visible "
@@ -135,8 +132,7 @@ def test_order_matters_for_a_live_read(config_override, fresh_ip):
         "        BotShieldFlagIP    scanner_probe\n"
         "    </BotShieldRule>"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         first = client.get(TRAP, xff=fresh_ip).status_code
         second = client.get(TRAP, xff=fresh_ip).status_code
     assert first != 451, "the reader ran before the writer"
@@ -157,8 +153,7 @@ def test_flagged_ands_with_the_rest_of_the_rule(config_override):
         "        BotShieldRespond   451\n"
         "    </BotShieldRule>"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         client.get(TRAP, xff=ip)
         on_probe = client.get(PROBE, xff=ip).status_code
         on_other = client.get("/", xff=ip).status_code
@@ -185,8 +180,7 @@ def test_matching_and_writing_the_same_flag_is_refused(config_override):
         "    </BotShieldRule>"
     )
     with pytest.raises(Exception) as exc_info:
-        with config_override(r"BotShieldEnabled\s+On", conf,
-                             render=False, count=1):
+        with config_override(r"BotShieldEnabled\s+On", conf, count=1):
             pass
     assert "returned non-zero exit status" in str(exc_info.value)
 
@@ -208,8 +202,7 @@ def test_matching_one_flag_and_writing_another_is_allowed(
         "        BotShieldRespond   451\n"
         "    </BotShieldRule>"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         assert client.get(TRAP, xff=fresh_ip).status_code != 451
 
 
@@ -222,8 +215,7 @@ def test_unknown_flag_name_is_refused(config_override):
         "    </BotShieldRule>"
     )
     with pytest.raises(Exception) as exc_info:
-        with config_override(r"BotShieldEnabled\s+On", conf,
-                             render=False, count=1):
+        with config_override(r"BotShieldEnabled\s+On", conf, count=1):
             pass
     assert "returned non-zero exit status" in str(exc_info.value)
 
@@ -243,8 +235,7 @@ def test_negated_flagged_is_refused(config_override):
         "    </BotShieldRule>"
     )
     with pytest.raises(Exception) as exc_info:
-        with config_override(r"BotShieldEnabled\s+On", conf,
-                             render=False, count=1):
+        with config_override(r"BotShieldEnabled\s+On", conf, count=1):
             pass
     assert "returned non-zero exit status" in str(exc_info.value)
 
@@ -282,8 +273,7 @@ def test_flagged_matches_a_session_flag(config_override, fresh_ip):
         "        BotShieldRespond   451\n"
         "    </BotShieldRule>"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         marked = client.get(trap, xff=fresh_ip)
         ck = _carry(marked)
         assert ck, "the trap response should carry the resealed cookie"
@@ -311,8 +301,7 @@ def test_an_unverified_cookie_asserts_nothing(config_override, fresh_ip):
         "        BotShieldRespond   451\n"
         "    </BotShieldRule>"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         got = client.get(probe, xff=fresh_ip,
                          cookies={COOKIE_NAME: "not-a-real-cookie"}
                          ).status_code
@@ -335,7 +324,6 @@ def test_matching_and_rewriting_a_session_flag_is_refused(
         "    </BotShieldRule>"
     )
     with pytest.raises(Exception) as exc_info:
-        with config_override(r"BotShieldEnabled\s+On", conf,
-                             render=False, count=1):
+        with config_override(r"BotShieldEnabled\s+On", conf, count=1):
             pass
     assert "returned non-zero exit status" in str(exc_info.value)

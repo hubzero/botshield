@@ -82,8 +82,7 @@ def _get(ip, path="/score-probe"):
 def test_contributions_sum_and_the_threshold_fires(config_override,
                                                    fresh_ip):
     """10 + 5 reaches 15."""
-    with config_override(r"BotShieldEnabled\s+On", REACHES,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", REACHES, count=1):
         assert _get(fresh_ip).status_code == 403
 
 
@@ -93,8 +92,7 @@ def test_one_short_does_not_fire(config_override, fresh_ip,
 
     Without this the test above passes on any 403 the vhost produces.
     """
-    with config_override(r"BotShieldEnabled\s+On", FALLS_SHORT,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", FALLS_SHORT, count=1):
         with log_slice as slc:
             _get(fresh_ip)
             _assert_not_refused(slc, fresh_ip,
@@ -104,8 +102,7 @@ def test_one_short_does_not_fire(config_override, fresh_ip,
 def test_accumulators_are_separate(config_override, fresh_ip,
                                    log_slice):
     """A name scopes the coupling; that is the point of naming them."""
-    with config_override(r"BotShieldEnabled\s+On", SEPARATE,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", SEPARATE, count=1):
         with log_slice as slc:
             _get(fresh_ip)
             _assert_not_refused(slc, fresh_ip,
@@ -139,8 +136,7 @@ def test_a_score_does_not_survive_the_request(config_override, fresh_ip,
         "        BotShieldLogAs         carried\n"
         "    </BotShieldRule>\n"
     )
-    with config_override(r"BotShieldEnabled\s+On", once,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", once, count=1):
         for attempt in (1, 2):
             with log_slice as slc:
                 _get(fresh_ip)
@@ -171,8 +167,7 @@ def test_order_decides_what_a_reader_sees(config_override, fresh_ip,
         "        BotShieldScore  suspicion +10\n"
         "    </BotShieldRule>\n"
     )
-    with config_override(r"BotShieldEnabled\s+On", reader_first,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", reader_first, count=1):
         with log_slice as slc:
             _get(fresh_ip)
             _assert_not_refused(slc, fresh_ip,
@@ -194,8 +189,7 @@ def test_a_scoring_rule_does_not_refuse_by_default(config_override,
         "        BotShieldScore  suspicion +1\n"
         "    </BotShieldRule>\n"
     )
-    with config_override(r"BotShieldEnabled\s+On", scoring_only,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", scoring_only, count=1):
         with log_slice as slc:
             _get(fresh_ip)
             _assert_not_refused(slc, fresh_ip,
@@ -221,8 +215,7 @@ def test_minus_and_assign(config_override, fresh_ip,
         "        BotShieldRespond       403\n"
         "    </BotShieldRule>\n"
     )
-    with config_override(r"BotShieldEnabled\s+On", conf,
-                         render=False, count=1):
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
         with log_slice as slc:
             _get(fresh_ip)
             _assert_not_refused(slc, fresh_ip,
@@ -238,8 +231,7 @@ def test_a_malformed_movement_is_refused(config_override):
             "    <BotShieldRule bad>\n"
             "        BotShieldPath   /score-probe\n"
             "        BotShieldScore  suspicion 10\n"
-            "    </BotShieldRule>\n",
-            render=False, count=1,
+            "    </BotShieldRule>\n", count=1,
         ):
             pass
     assert "non-zero exit status" in str(exc.value)
