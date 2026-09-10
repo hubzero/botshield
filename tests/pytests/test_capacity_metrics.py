@@ -83,7 +83,7 @@ def test_strike_used_grows_when_429_burst_recorded(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    BotShieldRule corpbot ua="CorpBot" rate=2/60\n'
-        '    BotShieldRateLimitEscalate corpbot 3 min respond=403 ttl=60',
+        '    BotShieldEscalate corpbot 3 min respond=403 ttl=60',
         count=1,
     ):
         for _ in range(8):

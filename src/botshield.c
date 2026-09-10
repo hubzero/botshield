@@ -633,7 +633,7 @@ static const command_rec bs_cmds[] = {
     /* E9 — repeated-429 escalation. Binds by name to a rule carrying
      * rate= or delay=; does not apply to robots.txt Crawl-delay 429s
      * (no operator handle for them). */
-    AP_INIT_TAKE_ARGV("BotShieldRateLimitEscalate",
+    AP_INIT_TAKE_ARGV("BotShieldEscalate",
                  bs_set_rate_limit_escalate, NULL, RSRC_CONF,
                  "Promote repeated 429s on a named rule carrying rate= "
                  "or delay= into a stricter status. Args: <rule> <strikes> "
@@ -645,7 +645,7 @@ static const command_rec bs_cmds[] = {
                  "ttl slides on each additional strike; log=<tag> "
                  "rides the decision line on threshold crossing for "
                  "fail2ban handoff. Reason ratelimitabuse:<name>."),
-    AP_INIT_TAKE1("BotShieldRateLimitEscalateCapacity",
+    AP_INIT_TAKE1("BotShieldEscalateCapacity",
                  bs_set_rate_escalate_capacity, NULL, RSRC_CONF,
                  "SHM strike-table slot count (default 50000). Sized "
                  "for (concurrent-misbehaving-IPs * named-rate-rules) "

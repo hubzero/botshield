@@ -345,8 +345,8 @@ typedef struct {
      * where the count lands, not whether the rule matched. Set by the
      * spelling rather than by a knob of its own: rate= is BS_COUNT_TOTAL
      * (one bucket per rule, shared -- what the retired
-     * BotShieldRateLimit did without saying so) and delay= is
-     * BS_COUNT_SLUG (one per crawler,
+     * BotShieldRateLimit did without saying so), `rate= ... each` and
+     * delay= are BS_COUNT_SLUG (one per crawler,
      * what Crawl-delay means). */
     int                count_key;
     /* Assigned in post_config alongside the rate-limit families, out
@@ -356,7 +356,7 @@ typedef struct {
     int                shm_slot;
     /* delay= only: slug -> int* slot, filled at post_config. */
     apr_hash_t        *slug_slots;
-    /* Resolved at post_config from a BotShieldRateLimitEscalate naming
+    /* Resolved at post_config from a BotShieldEscalate naming
      * this rule. The strike table is keyed on (address, slot), not on
      * which family owns the slot, so nothing below this pointer needed
      * to change to make escalation work on a rule. */
@@ -451,7 +451,7 @@ typedef struct {
  * E9 escalation
  *
  * bs_rate_escalate_entry is the per-directive config for
- * BotShieldRateLimitEscalate. It binds by name to a rule carrying
+ * BotShieldEscalate. It binds by name to a rule carrying
  * rate= or delay=; config.c's post_config hook links the two once
  * both arrays are populated.
  * ====================================================================== */

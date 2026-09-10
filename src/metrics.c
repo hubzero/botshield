@@ -5274,7 +5274,7 @@ int bs_metrics_handler(request_rec *r)
         "Strike-table slots physically occupied (used != 0).",
         bs_metrics_strike_used());
     bs_m_emit_gauge(r, "shm_strike_capacity",
-        "Configured BotShieldRateLimitEscalateCapacity.",
+        "Configured BotShieldEscalateCapacity.",
         (apr_uint64_t)bs_shm.strike_capacity);
     bs_m_emit_gauge(r, "shm_safeguard_used",
         "Safeguard-table slots physically occupied (used != 0).",

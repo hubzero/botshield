@@ -112,7 +112,7 @@ SERVER_ONLY = [
     ("BotShieldBloomWindow", "3600"),
     ("BotShieldStateFile", "/tmp/bs-scope-test.bin"),
     ("BotShieldStateSaveInterval", "60"),
-    ("BotShieldRateLimitEscalateCapacity", "2048"),
+    ("BotShieldEscalateCapacity", "2048"),
     ("BotShieldSafeguardCapacity", "2048"),
     ("BotShieldEmbeddedNonceCapacity", "2048"),
     ("BotShieldDbStatsFile", "/tmp/bs-db.stats"),

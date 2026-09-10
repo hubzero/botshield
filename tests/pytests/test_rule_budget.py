@@ -130,7 +130,7 @@ def test_two_windows_on_one_rule_are_refused(config_override):
 
 
 def test_escalation_can_name_a_rule(config_override, fresh_ip):
-    """BotShieldRateLimitEscalate binds by name, and a rule carrying a
+    """BotShieldEscalate binds by name, and a rule carrying a
     window is a rate limit by another spelling.
 
     The strike table is keyed on (address, slot) rather than on which
@@ -143,7 +143,7 @@ def test_escalation_can_name_a_rule(config_override, fresh_ip):
         "        BotShieldPath      /esc-probe\n"
         "        BotShieldRate      1 1\n"
         "    </BotShieldRule>\n"
-        "    BotShieldRateLimitEscalate esc-rule 2 min respond=403 ttl=60"
+        "    BotShieldEscalate esc-rule 2 min respond=403 ttl=60"
     )
     with config_override(r"BotShieldEnabled\s+On", conf,
                          render=False, count=1):
@@ -160,7 +160,7 @@ def test_an_escalate_naming_nothing_warns(config_override, log_slice):
     binds to nothing looks armed and is not."""
     conf = (
         "BotShieldEnabled On\n"
-        "    BotShieldRateLimitEscalate no-such-thing 2 min respond=403"
+        "    BotShieldEscalate no-such-thing 2 min respond=403"
     )
     with log_slice as slc:
         with config_override(r"BotShieldEnabled\s+On", conf,

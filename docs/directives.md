@@ -351,7 +351,7 @@ All directives in this section are **server scope only**. Inside
 | `BotShieldFpmStatsFile` | `/path` | `/run/botshield/fpm-load.stats` |
 | `BotShieldStateFile` | `/path` | `<datadir>/state.bin` |
 | `BotShieldStateSaveInterval` | `N` (sec) | `300` (0=shutdown-only) |
-| `BotShieldRateLimitEscalateCapacity` | `N` | `50000` |
+| `BotShieldEscalateCapacity` | `N` | `50000` |
 | `BotShieldSafeguardCapacity` | `N` | `50000` |
 | `BotShieldEmbeddedNonceCapacity` | `N` | `32768` (1024..1048576) |
 
@@ -515,7 +515,7 @@ template per line (runs of `[0-9._]+` replaced by `X`).
 | Directive | Syntax | Default |
 |---|---|---|
 | `BotShieldBotRateLimit` | `off`, or `<target> <delay-sec>`, or `<target> <budget> <per>` | none |
-| `BotShieldRateLimitEscalate` | `<rule> <strikes> <per> [respond=N] [ttl=N]` | none |
+| `BotShieldEscalate` | `<rule> <strikes> <per> [respond=N] [ttl=N]` | none (`BotShieldRateLimitEscalate` until 2026-09-09) |
 
 ### Alternation on `ua=`
 
@@ -586,7 +586,7 @@ cookie, a flag -- so the directive was a rule that could say less:
 
 Same reason (`ratelimitexceeded:scrapers`), same 429 with
 `Retry-After`, same `+50` score, same flag on the address, and
-`BotShieldRateLimitEscalate scrapers ...` binds to the rule by name
+`BotShieldEscalate scrapers ...` binds to the rule by name
 exactly as it bound to the directive. `mode=observe` on the directive
 is `BotShieldMode observe` on the rule, and a scope-level
 `BotShieldEnabled LogOnly` observes a rule's window as it observed the
@@ -649,6 +649,26 @@ own.
 with its budget, window, scope, and whether it enforces or observes.
 Crawl-delay entries register after that dump runs, so they appear in
 its robots.txt section rather than this one.
+
+### Why `BotShieldBotRateLimit` stays (2026-09-09)
+
+Everything it can say a rule can now say: `scope=each` is
+`BotShieldDelay` or `BotShieldRate <n> <s> each`, `scope=group` is a
+rule with `BotShieldUserAgent @group` and `BotShieldRate`, and
+`scope=total` is the same with `@bot`. Rules also spend in sequence,
+so a per-crawler rule above a shared-group rule above a ceiling rule
+is the tier stack the directive built by hand.
+
+It stays because the bots page is fed from its request-time check:
+the per-bot request totals and the User-Agent sample the dashboard
+shows come from the slot the wildcard gives every directory slug. A
+rule's per-crawler slots are the same counters but do no such
+accounting, and the dashboard reads only the directive's table.
+Retiring the directive means moving that accounting into the rule
+path and the dashboard onto rule slots -- worth doing, and its own
+piece of work rather than a footnote to this one. Until then a
+`BotShieldBotRateLimit * 1 sec` is the line that keeps the bots page
+populated, whatever else rate-limits.
 
 ## Robots.txt enforcement
 
@@ -1109,7 +1129,7 @@ The lifetime of a `rate_abuse` flag is the budget window the client
 overspent, clamped to between a minute and a day -- a per-minute limit
 remembers for a minute, an hourly one for an hour, so the flag tracks
 the limit that produced it without a second number to keep in sync.
-Where a `BotShieldRateLimitEscalate` fired, its `ttl=` is used
+Where a `BotShieldEscalate` fired, its `ttl=` is used
 instead, because the operator has already said how long an escalated
 client stays escalated. `robots_ignored` has no window to derive from
 and lasts an hour.
@@ -1627,7 +1647,7 @@ response code `Status` either: `Redirect` and `ErrorDocument` take one
 as an argument, and `mod_rewrite` spells it `[R=404]`.
 
 The old name was removed 2026-09-06 and now fails config parse.
-`BotShieldRateLimitEscalate` had its own `status=` key, removed with
+`BotShieldEscalate` had its own `status=` key, removed with
 it -- one concept should not wear two names in the same file, and it
 was wearing two in two.
 
@@ -1979,6 +1999,7 @@ whole reason there are two:
 |---|---|---|---|
 | `BotShieldDelay <s>` | crawler (known-bot slug) | 1 request | robots.txt `Crawl-delay` |
 | `BotShieldRate <n> <s>` | rule | n requests | a shared budget |
+| `BotShieldRate <n> <s> each` | crawler (known-bot slug) | n requests | a per-crawler budget above one |
 
 `Delay` is `Crawl-delay` in the unit robots.txt writes it in, and it
 means what robots.txt means: **each** crawler gets a window of its own.

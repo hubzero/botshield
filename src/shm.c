@@ -666,7 +666,7 @@ int bs_strike_record_429(request_rec *r, const unsigned char ip[16],
                 "mod_botshield: strike-table probe saturated at "
                 "bucket %u (capacity %" APR_SIZE_T_FMT "); "
                 "overwriting - consider raising "
-                "BotShieldRateLimitEscalateCapacity",
+                "BotShieldEscalateCapacity",
                 base, bs_shm.strike_capacity);
         }
         target_idx = (int)base;
@@ -1884,7 +1884,7 @@ typedef struct {
 static bs_headroom_table bs_headroom_tables[] = {
     { "flagged-IP", "BotShieldFlaggedIPCapacity",
       bs_headroom_count_flagged, &bs_shm.flagged_capacity, 0 },
-    { "strike", "BotShieldRateLimitEscalateCapacity",
+    { "strike", "BotShieldEscalateCapacity",
       bs_headroom_count_strike, &bs_shm.strike_capacity, 0 },
     { "safeguard",
       "BotShieldSafeguardCapacity / BotShieldEmbeddedNonceCapacity",

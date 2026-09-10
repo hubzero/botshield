@@ -247,3 +247,46 @@ def test_retry_after_rounds_up_never_zero(config_override, fresh_ip):
     assert refused.status_code == 429, refused.status_code
     ra = refused.headers.get("Retry-After")
     assert ra is not None and int(ra) >= 1, f"Retry-After={ra!r}"
+
+
+def test_rate_each_gives_each_crawler_the_budget(config_override, fresh_ip):
+    """`rate=2/1 each` is two a second PER crawler. Under the default
+    (shared) the two crawlers would spend from one window and B's first
+    request would be refused; under each, B has its own two, and only
+    A's third is refused. The dump prints the word back."""
+    conf = _rule(
+        "        BotShieldPath      /each-probe\n"
+        "        BotShieldUserAgent @bot\n"
+        "        BotShieldRate      2 60 each",
+        name="per-each",
+    )
+    with config_override(r"BotShieldEnabled\s+On", conf,
+                         render=False, count=1):
+        a1 = client.get("/each-probe", xff=fresh_ip, ua=UA_A)
+        a2 = client.get("/each-probe", xff=fresh_ip, ua=UA_A)
+        b1 = client.get("/each-probe", xff=fresh_ip, ua=UA_B)
+        a3 = client.get("/each-probe", xff=fresh_ip, ua=UA_A)
+        body = apache.policy_dump()
+    assert a1.status_code != 429 and a2.status_code != 429, (a1.status_code, a2.status_code)
+    assert b1.status_code != 429, (
+        f"crawler B was refused on its first request, so it is sharing "
+        f"A's window -- 'each' was not honoured; got {b1.status_code}"
+    )
+    assert a3.status_code == 429, (
+        f"crawler A's third request inside its own window was admitted; "
+        f"got {a3.status_code}"
+    )
+    line = [ln for ln in body.splitlines() if ln.startswith("per-each")]
+    assert line and "rate=2/60 each" in line[0], line
+
+
+@pytest.mark.parametrize("bad", ["2/60 every", "2/60 each shared"])
+def test_rate_refuses_other_sharing_words(config_override, bad):
+    with pytest.raises(Exception):
+        with config_override(
+            r"BotShieldEnabled\s+On",
+            _rule("        BotShieldPath /x\n"
+                  f"        BotShieldRate {bad}"),
+            render=False, count=1,
+        ):
+            pass

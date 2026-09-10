@@ -537,7 +537,7 @@ int bs_check_policy(request_rec *r)
                  * matching shares one budget rather than getting one
                  * each. Under delay= it is the crawler; see below.
                  *
-                 * BotShieldRateLimitEscalate binds to this rule by
+                 * BotShieldEscalate binds to this rule by
                  * name; the strike table is keyed on (address, slot),
                  * so nothing beneath it knows which spelling owns the
                  * slot. */
@@ -961,8 +961,9 @@ static const char *bs_psh_rule_conditions(apr_pool_t *p,
         if (t->count_key == BS_COUNT_SLUG && t->budget == 1) {
             BS_PSH_ADD("delay=%s", bs_fmt_seconds(p, t->window_ms));
         } else {
-            BS_PSH_ADD("rate=%u/%s", t->budget,
-                       bs_fmt_seconds(p, t->window_ms));
+            BS_PSH_ADD("rate=%u/%s%s", t->budget,
+                       bs_fmt_seconds(p, t->window_ms),
+                       t->count_key == BS_COUNT_SLUG ? " each" : "");
         }
     }
     if (t->score_pred_name)

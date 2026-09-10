@@ -146,12 +146,12 @@ but readability rewards consistency.
 
 ### Repeated-429 escalation
 
-`BotShieldRateLimitEscalate` upgrades a rule that's already been
+`BotShieldEscalate` upgrades a rule that's already been
 firing — repeated 429s on the same IP escalate to 403 (or any
 configurable status):
 
 ```apache
-BotShieldRateLimitEscalate api-burst 5 min respond=403 ttl=3600
+BotShieldEscalate api-burst 5 min respond=403 ttl=3600
 ```
 
 Args: `<rule> <strikes> <per> [respond=N] [ttl=N]`. `<per>`

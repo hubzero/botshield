@@ -1433,17 +1433,19 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                 continue;
             }
 
-            /* rate=<n>/<seconds> -- n requests per window, SHARED by
-             * everyone the rule matches. The separator is a slash or
-             * whitespace, so `BotShieldRate 30 60` inside a container
-             * and `rate=30/60` on a flat rule are one spelling; the
-             * flat form has to fit in a token.
+            /* rate=<n>/<seconds> [each] -- n requests per window. Shared
+             * by everyone the rule matches unless it says `each`, in
+             * which case every crawler gets the n on its own, the way
+             * delay= gives each crawler its one. The separator is a
+             * slash or whitespace, so `BotShieldRate 30 60 each` inside
+             * a container and `rate=30/60 each` are one spelling.
              *
              * Shared is what the retired BotShieldRateLimit did, and
              * it is the trap: ua=@bot with rate=1/1 gives the whole
              * crawler population one request a second BETWEEN them,
              * which reads almost like delay=1 and is a different
-             * policy. The two words are the difference. */
+             * policy. `each` is the word that says which; the bucket
+             * it buys is the same per-slug one delay= uses. */
             if (klen == 4 && strncasecmp(arg, "rate", 4) == 0) {
                 if (e->budget) {
                     return apr_psprintf(cmd->pool,
@@ -1467,9 +1469,30 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                         "Write rate=<n>/<seconds>: rate=30/60 is thirty "
                         "requests a minute.", D, val);
                 }
+                /* The window token ends at whitespace; what follows is
+                 * the sharing word, or nothing. */
+                char *wtok = apr_pstrdup(cmd->pool, w);
+                char *rest = wtok;
+                while (*rest && *rest != ' ' && *rest != '\t') rest++;
+                if (*rest) {
+                    *rest++ = '\0';
+                    while (*rest == ' ' || *rest == '\t') rest++;
+                }
+                int rate_each = 0;
+                if (*rest) {
+                    if (!strcasecmp(rest, "each"))        rate_each = 1;
+                    else if (!strcasecmp(rest, "shared")) rate_each = 0;
+                    else {
+                        return apr_psprintf(cmd->pool,
+                            "%s: rate='%s': after the window, only "
+                            "'each' or 'shared' may follow. 'each' gives "
+                            "every crawler the budget on its own; shared "
+                            "is the default.", D, val);
+                    }
+                }
                 apr_uint32_t ms = 0;
                 const char *werr =
-                    bs_parse_window_ms(cmd->pool, D, "rate", w, &ms);
+                    bs_parse_window_ms(cmd->pool, D, "rate", wtok, &ms);
                 if (werr) return werr;
                 if (ms == 0) {
                     return apr_psprintf(cmd->pool,
@@ -1479,7 +1502,7 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                 }
                 e->budget    = (apr_uint32_t)n;
                 e->window_ms = ms;
-                e->count_key = BS_COUNT_TOTAL;
+                e->count_key = rate_each ? BS_COUNT_SLUG : BS_COUNT_TOTAL;
                 continue;
             }
             if (klen == 14

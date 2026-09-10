@@ -1,7 +1,7 @@
 """E9 — repeated-429 escalation.
 
 Builds on rules carrying rate=. The
-BotShieldRateLimitEscalate directive remembers per-(IP, rate-rule)
+BotShieldEscalate directive remembers per-(IP, rate-rule)
 strike counts: enough rejected requests inside a window promote the
 client into a stricter status (default 403) for a short TTL,
 sliding on each additional strike.
@@ -68,7 +68,7 @@ def test_repeated_429_escalates_to_403(config_override, fresh_ip,
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
         '    BotShieldRule corpbot ua="CorpBot" rate=2/1\n'
-        '    BotShieldRateLimitEscalate corpbot 3 min '
+        '    BotShieldEscalate corpbot 3 min '
         'respond=403 ttl=60 "logas=BAN rate-abuse"',
         count=1,
     ):
@@ -123,7 +123,7 @@ def test_below_strike_threshold_stays_at_429(
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
         '    BotShieldRule corpbot ua="CorpBot" rate=2/1\n'
-        '    BotShieldRateLimitEscalate corpbot 5 min '
+        '    BotShieldEscalate corpbot 5 min '
         'respond=403 ttl=60',
         count=1,
     ):
@@ -163,7 +163,7 @@ def test_escalation_isolates_per_rule(
         # Rule-A matches "CorpBot" with escalation. Tight budget +
         # tight strike count to escalate quickly.
         '    BotShieldRule corpbot ua="CorpBot" rate=1/1\n'
-        '    BotShieldRateLimitEscalate corpbot 2 min '
+        '    BotShieldEscalate corpbot 2 min '
         'respond=403 ttl=60\n'
         # Rule-B matches "OtherUA" — no escalation. Different cohort
         # entirely, so even strict bursts stay at 429.
@@ -221,7 +221,7 @@ def test_escalation_isolates_per_ip(config_override):
         'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
         '    BotShieldRule corpbot ua="CorpBot" rate=1/1\n'
-        '    BotShieldRateLimitEscalate corpbot 3 min '
+        '    BotShieldEscalate corpbot 3 min '
         'respond=403 ttl=60',
         count=1,
     ):
@@ -259,7 +259,7 @@ def test_directive_rejects_bogus_status(config_override):
             'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
             '    BotShieldRule corpbot ua="CorpBot" rate=1/1\n'
-            '    BotShieldRateLimitEscalate corpbot 2 sec status=29',
+            '    BotShieldEscalate corpbot 2 sec status=29',
             count=1,
         ):
             pass
@@ -275,7 +275,7 @@ def test_directive_rejects_status_429(config_override):
             'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
             '    BotShieldRule corpbot ua="CorpBot" rate=1/1\n'
-            '    BotShieldRateLimitEscalate corpbot 2 sec respond=429',
+            '    BotShieldEscalate corpbot 2 sec respond=429',
             count=1,
         ):
             pass
@@ -289,7 +289,7 @@ def test_directive_rejects_unknown_key(config_override):
             'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
             '    BotShieldRule corpbot ua="CorpBot" rate=1/1\n'
-            '    BotShieldRateLimitEscalate corpbot 2 sec '
+            '    BotShieldEscalate corpbot 2 sec '
             'mystery_key=42',
             count=1,
         ):
@@ -307,12 +307,12 @@ def test_directive_warns_on_unmatched_rate_name(
             r"BotShieldEnabled\s+On",
             'BotShieldEnabled On\n'
         '    BotShieldChallengeAtLeast none\n'
-            '    BotShieldRateLimitEscalate ghostrule 2 sec',
+            '    BotShieldEscalate ghostrule 2 sec',
             count=1,
         ):
             pass
         warnings = slc.grep(
-            r"BotShieldRateLimitEscalate 'ghostrule' names no rule"
+            r"BotShieldEscalate 'ghostrule' names no rule"
         )
     assert warnings, (
         f"expected post_config warning for unlinked escalate; "

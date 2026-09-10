@@ -689,7 +689,7 @@ typedef struct {
 } bs_strike_slot;
 ```
 
-Default 50 000 slots, `BotShieldRateLimitEscalateCapacity` adjustable.
+Default 50 000 slots, `BotShieldEscalateCapacity` adjustable.
 Per-(client_ip, rate_rule_slot) strike accounting. Strike counter
 windowed on `strike_window_start`; idle entries roll over.
 `escalation_until == 0` → not yet crossed threshold; non-zero → in
@@ -1016,7 +1016,11 @@ Spelling: a `<BotShieldRule>` carrying `BotShieldRate <n> <seconds>`
 or `BotShieldDelay <seconds>`. The original directive,
 `BotShieldRateLimit <name> <budget> <per> <ua> <ipspec>`, was retired
 on 2026-09-09: a rule had its cohort and everything a cohort could not
-say, and escalation already bound by rule name.
+say, and escalation already bound by rule name. `BotShieldRate <n> <s>
+each` (same day) closed the last gap against `BotShieldBotRateLimit`,
+a per-crawler budget above one; that directive stays only because the
+bots page is fed from its check -- see "Why BotShieldBotRateLimit
+stays" in docs/directives.md.
 
 Storage: each entry's `shm_slot` indexes into `bs_shm.rate_counters[]`,
 allocated in post_config. Atomic CAS on each `count` /
@@ -1044,7 +1048,7 @@ typedef struct bs_rate_escalate_entry {
 } bs_rate_escalate_entry;
 ```
 
-Directive: `BotShieldRateLimitEscalate <rate-name> <strikes> <per>
+Directive: `BotShieldEscalate <rate-name> <strikes> <per>
 [respond=<code>] [ttl=<sec>] [logas=<tag>]`. Per-(client_ip, rate_rule_slot)
 strike accounting in the SHM strike table (see SHM segment); each 429
 on the named rule increments. Over the strike threshold within the
@@ -2037,7 +2041,7 @@ dangerous than letting it rebuild from live traffic).
 `bs_warn_if_virtual_scope` emits a NOTICE on every SHM-sizing
 directive placed inside `<VirtualHost>` (`BotShieldShmSize`,
 `BotShieldFlaggedIPCapacity`, `BotShieldBloomIPs`,
-`BotShieldBloomWindow`, `BotShieldRateLimitEscalateCapacity`,
+`BotShieldBloomWindow`, `BotShieldEscalateCapacity`,
 `BotShieldSafeguardCapacity`) — those are read off the main server's
 scfg only, since the SHM segment is module-global.
 
@@ -2391,9 +2395,9 @@ the `bs_cmds[]` table at `src/botshield.c:213`.
 | Cookie | `BotShieldCookieDomain` |
 | Captcha (M8 + E18) | `BotShieldCaptchaProvider`, `BotShieldCaptchaSiteKey`, `BotShieldCaptchaSecretFile`, `BotShieldCaptchaTimeout`, `BotShieldCaptchaConnectTimeout`, `BotShieldRecaptchaV3MinScore`, `BotShieldCaptchaExpectedHostname`, `BotShieldCaptchaExpectedAction`, `BotShieldCaptchaCABundle`, `BotShieldCaptchaRateLimit`, `BotShieldCaptchaMaxInFlight`, `BotShieldFormCaptcha` |
 | Non-interactive (E17) | `BotShieldNonInteractiveMode` |
-| SHM sizing | `BotShieldShmSize`, `BotShieldFlaggedIPCapacity`, `BotShieldIPv6PrefixLen`, `BotShieldBloomIPs`, `BotShieldBloomWindow`, `BotShieldStateFile`, `BotShieldStateSaveInterval`, `BotShieldRateLimitEscalateCapacity`, `BotShieldSafeguardCapacity`, `BotShieldEmbeddedNonceCapacity` |
+| SHM sizing | `BotShieldShmSize`, `BotShieldFlaggedIPCapacity`, `BotShieldIPv6PrefixLen`, `BotShieldBloomIPs`, `BotShieldBloomWindow`, `BotShieldStateFile`, `BotShieldStateSaveInterval`, `BotShieldEscalateCapacity`, `BotShieldSafeguardCapacity`, `BotShieldEmbeddedNonceCapacity` |
 | UA classification (E1) | `BotShieldClassify`, `BotShieldAllowBot`, `BotShieldAllowRangesRefreshInterval`, `BotShieldBotDirectory`, `BotShieldBrowserTemplates`, `BotShieldDataRefreshInterval` |
-| Policy (E2.1 / E9) | `BotShieldBotRateLimit`, `BotShieldRateLimitEscalate` (`BotShieldRateLimit` retired 2026-09-09) |
+| Policy (E2.1 / E9) | `BotShieldBotRateLimit`, `BotShieldEscalate` (`BotShieldRateLimit` retired 2026-09-09) |
 | Robots (E2.2) | `<BotShieldRobots>` carrying `BotShieldRobotsTxt`, `BotShieldMode`, `BotShieldWildcardScope`, `BotShieldRefreshInterval` and `<BotShieldRobotRule>` groups (four standalone directives until 2026-09-09) |
 | Triggers | `BotShieldRule` (E3, formerly BotShieldPathTrigger; since 2026-09-06 also carrying the E4 cookie, E6 env, E11.2 load and E14 flag predicates, and since 2026-09-07 the E14 action half), `BotShieldMatch` (named condition sets, shared by rules), `BotShieldFeedback` (E7.3), `BotShieldSessionCookieName` (E4) |
 | Safeguard (E10) | `BotShieldSafeguard`, `BotShieldSafeguardThreshold`, `BotShieldSafeguardWindow`, `BotShieldSafeguardTTL`, `BotShieldSafeguardRedirectURL` |

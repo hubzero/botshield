@@ -233,7 +233,7 @@ should size capacity directives to match.
 | `BotShieldForgetIPAfter` | `3600` | Seconds an address stays flagged, counted from its last flagging. Range 1..2592000 |
 | `BotShieldBloomIPs` | `1000000` | Expected unique-IPs working set. Drives Bloom filter dimensions |
 | `BotShieldBloomWindow` | `604800` | Bloom rotation window (seconds). Rotation at window/2 |
-| `BotShieldRateLimitEscalateCapacity` | `50000` | strike-table slots |
+| `BotShieldEscalateCapacity` | `50000` | strike-table slots |
 | `BotShieldSafeguardCapacity` | `50000` | challenge-loop suppression slots |
 | `BotShieldEmbeddedNonceCapacity` | `32768` | embedded-bootstrap nonce table |
 

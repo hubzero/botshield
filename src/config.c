@@ -961,7 +961,7 @@ static int bs_init_shm_layout(apr_pool_t *pconf, apr_pool_t *ptemp,
     apr_size_t e21_ua_bytes    = BS_E21_RATE_SLOTS * BS_RATE_UA_MAX;
     apr_size_t gen_bytes       = sizeof(bs_gen_counters);
     /* E9 — strike table for repeated-429 escalation. Sized by the
-     * main server's BotShieldRateLimitEscalateCapacity (default
+     * main server's BotShieldEscalateCapacity (default
      * BS_DEFAULT_STRIKE_SLOTS). */
     apr_size_t strike_slots = (scfg->strike_capacity > 0)
                             ? (apr_size_t)scfg->strike_capacity
@@ -1579,7 +1579,7 @@ static void bs_wire_rate_and_block_cohorts(apr_pool_t *pconf,
             }
         }
 
-        /* E9 — link each BotShieldRateLimitEscalate to the rule it
+        /* E9 — link each BotShieldEscalate to the rule it
          * names. Declarations may appear in any order at config time;
          * resolved here once both arrays are populated. An escalate
          * naming nothing logs a warning and stays inert. */
@@ -1603,7 +1603,7 @@ static void bs_wire_rate_and_block_cohorts(apr_pool_t *pconf,
                 }
                 if (!linked) {
                     ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
-                        "mod_botshield: BotShieldRateLimitEscalate '%s' "
+                        "mod_botshield: BotShieldEscalate '%s' "
                         "names no rule carrying rate= or delay= at this "
                         "scope; directive is inert",
                         esc->rule_name);
@@ -3596,7 +3596,7 @@ const char *bs_set_rate_limit_escalate(cmd_parms *cmd, void *dconf,
 {
     (void)dconf;
     if (argc < 3) {
-        return "BotShieldRateLimitEscalate: expects <rule> "
+        return "BotShieldEscalate: expects <rule> "
                "<strikes> <per> [key=value ...]";
     }
     const char *rule_name = argv[0];
@@ -3606,20 +3606,20 @@ const char *bs_set_rate_limit_escalate(cmd_parms *cmd, void *dconf,
                                                &botshield_module);
     if (!bs_bot_name_valid(rule_name)) {
         return apr_psprintf(cmd->pool,
-            "BotShieldRateLimitEscalate: rule name '%s' must be "
+            "BotShieldEscalate: rule name '%s' must be "
             "[a-z0-9-]{1,32}", rule_name);
     }
     char *end = NULL;
     long strikes = strtol(strikes_s, &end, 10);
     if (!end || *end || strikes <= 0 || strikes > 1000000) {
         return apr_psprintf(cmd->pool,
-            "BotShieldRateLimitEscalate: strikes '%s' must be a "
+            "BotShieldEscalate: strikes '%s' must be a "
             "positive integer <= 1000000", strikes_s);
     }
     int per = bs_rate_unit_seconds(per_s);
     if (per == 0) {
         return apr_psprintf(cmd->pool,
-            "BotShieldRateLimitEscalate: per '%s' must be one of "
+            "BotShieldEscalate: per '%s' must be one of "
             "sec/min/hour (or s/m/h)", per_s);
     }
 
@@ -3636,7 +3636,7 @@ const char *bs_set_rate_limit_escalate(cmd_parms *cmd, void *dconf,
         const char *eq  = strchr(arg, '=');
         if (!eq) {
             return apr_psprintf(cmd->pool,
-                "BotShieldRateLimitEscalate: extra arg '%s' must be "
+                "BotShieldEscalate: extra arg '%s' must be "
                 "key=value", arg);
         }
         apr_size_t klen = (apr_size_t)(eq - arg);
@@ -3644,7 +3644,7 @@ const char *bs_set_rate_limit_escalate(cmd_parms *cmd, void *dconf,
         #define BS_REK(n) (klen == sizeof(n)-1 && \
                            strncasecmp(arg, n, sizeof(n)-1) == 0)
         if (BS_REK("status")) {
-            return "BotShieldRateLimitEscalate: status= is gone; "
+            return "BotShieldEscalate: status= is gone; "
                    "write respond=. Same values, same behaviour.";
         }
         if (BS_REK("respond")) {
@@ -3652,14 +3652,14 @@ const char *bs_set_rate_limit_escalate(cmd_parms *cmd, void *dconf,
             long code = strtol(val, &e2, 10);
             if (!e2 || *e2 || code < 100 || code > 599) {
                 return apr_psprintf(cmd->pool,
-                    "BotShieldRateLimitEscalate: status='%s' must be "
+                    "BotShieldEscalate: status='%s' must be "
                     "an HTTP code 100..599", val);
             }
             if (code == 429) {
                 /* Same code as the normal rate-limit response — no
                  * escalation effect. Reject so operators don't
                  * accidentally write a no-op directive. */
-                return "BotShieldRateLimitEscalate: status=429 is a "
+                return "BotShieldEscalate: status=429 is a "
                        "no-op (same as the normal rate-limit "
                        "response); pick a stricter code (default 403)";
             }
@@ -3669,19 +3669,19 @@ const char *bs_set_rate_limit_escalate(cmd_parms *cmd, void *dconf,
             long t = strtol(val, &e2, 10);
             if (!e2 || *e2 || t < 1 || t > 86400 * 30) {
                 return apr_psprintf(cmd->pool,
-                    "BotShieldRateLimitEscalate: ttl='%s' must be "
+                    "BotShieldEscalate: ttl='%s' must be "
                     "1..2592000 seconds", val);
             }
             e->ttl_sec = (int)t;
         } else if (BS_REK("log")) {
-            return "BotShieldRateLimitEscalate: log= is gone; write "
+            return "BotShieldEscalate: log= is gone; write "
                    "logas=. It labels the decision line, it does not "
                    "cause it.";
         } else if (BS_REK("logas")) {
             e->log_tag = apr_pstrdup(cmd->pool, val);
         } else {
             return apr_psprintf(cmd->pool,
-                "BotShieldRateLimitEscalate: unknown key '%.*s' "
+                "BotShieldEscalate: unknown key '%.*s' "
                 "(known: respond, ttl, logas)", (int)klen, arg);
         }
         #undef BS_REK
@@ -3701,7 +3701,7 @@ const char *bs_set_rate_limit_escalate(cmd_parms *cmd, void *dconf,
     return NULL;
 }
 
-/* E9 — BotShieldRateLimitEscalateCapacity <n>. SHM slot count for
+/* E9 — BotShieldEscalateCapacity <n>. SHM slot count for
  * the strike table. Per-server-scope; only the main server's value
  * is used at post_config (the strike table is module-global). */
 const char *bs_set_rate_escalate_capacity(cmd_parms *cmd,
@@ -3709,14 +3709,14 @@ const char *bs_set_rate_escalate_capacity(cmd_parms *cmd,
                                                  const char *arg)
 {
     (void)dconf;
-    { const char *scope_err = bs_require_server_scope(cmd, "BotShieldRateLimitEscalateCapacity");
+    { const char *scope_err = bs_require_server_scope(cmd, "BotShieldEscalateCapacity");
       if (scope_err) return scope_err; }
     char *end = NULL;
     long n = strtol(arg, &end, 10);
     if (!end || *end
         || n < BS_STRIKE_MIN_SLOTS || n > BS_STRIKE_MAX_SLOTS) {
         return apr_psprintf(cmd->pool,
-            "BotShieldRateLimitEscalateCapacity: '%s' must be %d..%d",
+            "BotShieldEscalateCapacity: '%s' must be %d..%d",
             arg, BS_STRIKE_MIN_SLOTS, BS_STRIKE_MAX_SLOTS);
     }
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
