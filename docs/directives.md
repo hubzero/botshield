@@ -268,6 +268,7 @@ argument and describes how the interstitial looks.
 ```apache
 <BotShieldChallengePage>
     BotShieldPrompt     "Please verify"
+    BotShieldNotice     "Checking your browser…"
     BotShieldLogoFile   /etc/botshield/logo.svg
     BotShieldLogoLabel  "Crestline"
     BotShieldShowLogo   On
@@ -279,6 +280,7 @@ argument and describes how the interstitial looks.
 | Inside the container | Syntax | Default |
 |---|---|---|
 | `BotShieldPrompt` | `"text"` | `I'm not a robot` |
+| `BotShieldNotice` | `"text"` | `Verifying you are human…` |
 | `BotShieldLogoFile` | `/path.svg` | embedded Guardian |
 | `BotShieldLogoLabel` | `"text"` | `botshield` |
 | `BotShieldShowLogo` | `On\|Off` | `On` |
@@ -287,6 +289,18 @@ argument and describes how the interstitial looks.
 | `BotShieldHelp` | `off\|on\|button` | `button` |
 | `BotShieldHelpFile` | `/path.html` | built-in text |
 | `BotShieldTemplate` | `/path.html` | built-in shell |
+
+**`BotShieldPrompt` and `BotShieldNotice` are not the same string.**
+The interactive and captcha tiers put a control in front of the client,
+so their line is an invitation. The non-interactive tier gives them
+nothing to do, so its line is a status — and writing an invitation
+there asks a question the page offers no way to answer. Set whichever
+you customise; the other keeps its built-in.
+
+Before 2026-09-11 a single `BotShieldPrompt` won on every tier, so
+setting it silently replaced the status too. If you set a prompt and
+want that old text on the self-solving tier as well, write it into
+`BotShieldNotice` explicitly.
 
 **This is the page every challenged request sees**, not the captcha
 tier's alone — `bs_render_challenge_page` draws all three tiers and the

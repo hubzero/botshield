@@ -494,6 +494,7 @@ void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     out->show_label = (add->show_label == BS_UNSET) ? base->show_label : add->show_label;
     out->show_box   = (add->show_box   == BS_UNSET) ? base->show_box   : add->show_box;
     out->prompt         = add->prompt         ? add->prompt         : base->prompt;
+    out->notice         = add->notice         ? add->notice         : base->notice;
     out->logo_svg       = add->logo_svg       ? add->logo_svg       : base->logo_svg;
     out->logo_label     = add->logo_label     ? add->logo_label     : base->logo_label;
     out->help_html      = add->help_html      ? add->help_html      : base->help_html;
@@ -3263,6 +3264,18 @@ const char *bs_set_cookie_domain(cmd_parms *cmd, void *cfg_v, const char *arg)
     return NULL;
 }
 
+/* BotShieldNotice inside <BotShieldChallengePage>. What the
+ * non-interactive tier says while it works. Separate from
+ * BotShieldPrompt because that tier has no control to label: one is an
+ * invitation, the other a status, and an operator who sets the
+ * invitation should not silently lose the status. */
+const char *bs_set_notice(cmd_parms *cmd, void *cfg_v, const char *arg)
+{
+    if (!arg || !*arg) return "BotShieldNotice: text required";
+    ((bs_dir_cfg *)cfg_v)->notice = arg;
+    return NULL;
+}
+
 const char *bs_set_prompt(cmd_parms *cmd, void *cfg_v, const char *arg)
 {
     (void)cmd;
@@ -3994,6 +4007,7 @@ static const struct {
     const char *(*set_flag)(cmd_parms *, void *, int);
 } bs_page_keys[] = {
     { "BotShieldPrompt",    0, bs_set_prompt,         NULL             },
+    { "BotShieldNotice",    0, bs_set_notice,         NULL             },
     { "BotShieldLogoFile",  0, bs_set_logo_file,      NULL             },
     { "BotShieldLogoLabel", 0, bs_set_logo_label,     NULL             },
     { "BotShieldHelp",      0, bs_set_help,           NULL             },
@@ -4041,6 +4055,7 @@ const char *bs_open_page(cmd_parms *cmd, void *dconf, const char *arg)
             return apr_psprintf(p,
                 "<BotShieldChallengePage>: '%s' at %s:%d is not a page "
                 "setting. Inside the block: BotShieldPrompt, "
+                "BotShieldNotice, "
                 "BotShieldLogoFile, BotShieldLogoLabel, "
                 "BotShieldShowLogo, BotShieldShowLabel, "
                 "BotShieldShowBox, BotShieldHelp, BotShieldHelpFile, "

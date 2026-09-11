@@ -847,14 +847,19 @@ int bs_render_challenge_page(request_rec *r,
      * what a scope with one provider has always done. */
     const bs_captcha_cfg *cap = bs_captcha_pick(cfg,
                                                 bs_get_request_captcha(r));
-    /* The noninteractive tier's label is a status, not an invitation: there is
-     * no checkbox to tick. Turnstile makes the same split -- "Verify
-     * you are human" when it wants a click, "Verifying..." when it is
-     * working on its own. An operator's BotShieldPrompt still wins,
-     * since it is the string they chose to put in front of clients. */
-    const char *prompt     = cfg->prompt ? cfg->prompt
-                           : (issue_auto ? BS_SILENT_PROMPT
-                                         : BS_DEFAULT_PROMPT);
+    /* The noninteractive tier's label is a status, not an invitation:
+     * there is no checkbox to tick. Turnstile makes the same split --
+     * "Verify you are human" when it wants a click, "Verifying..."
+     * when it is working on its own.
+     *
+     * Each tier takes its own directive, so an operator who writes one
+     * keeps the other. Until 2026-09-11 a single BotShieldPrompt won
+     * on both, which meant customising the invitation silently
+     * replaced the status too, and the self-solving page ended up
+     * asking a question it gave the client no way to answer. */
+    const char *prompt     = issue_auto
+                           ? (cfg->notice ? cfg->notice : BS_SILENT_PROMPT)
+                           : (cfg->prompt ? cfg->prompt : BS_DEFAULT_PROMPT);
     const char *logo_svg   = cfg->logo_svg   ? cfg->logo_svg   : BS_DEFAULT_LOGO_SVG;
     const char *logo_label = cfg->logo_label ? cfg->logo_label : BS_DEFAULT_LOGO_LABEL;
     int help_mode  = bs_effective_int(cfg->help_mode,  BS_DEFAULT_HELP_MODE);

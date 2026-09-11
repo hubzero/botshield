@@ -1834,7 +1834,9 @@ naming their new home.
   KiB`.
 - `BotShieldHelpFile <path>` — HTML fragment for the help panel;
   `BS_MAX_HELP_BYTES = 64 KiB`. Contents are trusted (no escaping).
-- `BotShieldPrompt`, `BotShieldLogoLabel` — short strings;
+- `BotShieldPrompt` (interactive and captcha tiers), `BotShieldNotice`
+  (the non-interactive tier's status line; `issue_auto` picks between
+  them), `BotShieldLogoLabel` — short strings;
   HTML-escaped at render.
 - `BotShieldShowLogo` / `BotShieldShowLabel` / `BotShieldShowBox` —
   visibility flags.
@@ -2416,7 +2418,7 @@ the `bs_cmds[]` table at `src/botshield.c:213`.
 | Family | Directives |
 |--------|-----------|
 | Top-level | `BotShieldEnabled`, `BotShieldChallenge`, `BotShieldDebug`, `BotShieldCookieTTL`, `BotShieldDifficulty`, `BotShieldEndpointPrefix` |
-| Interstitial page | `<BotShieldChallengePage>` holding `BotShieldPrompt`, `BotShieldLogoFile`, `BotShieldLogoLabel`, `BotShieldShowLogo`, `BotShieldShowLabel`, `BotShieldShowBox`, `BotShieldHelp`, `BotShieldHelpFile`, `BotShieldTemplate` |
+| Interstitial page | `<BotShieldChallengePage>` holding `BotShieldPrompt`, `BotShieldNotice`, `BotShieldLogoFile`, `BotShieldLogoLabel`, `BotShieldShowLogo`, `BotShieldShowLabel`, `BotShieldShowBox`, `BotShieldHelp`, `BotShieldHelpFile`, `BotShieldTemplate` |
 | Crypto | `BotShieldSecretFile`, `BotShieldSecondarySecretFile`, `BotShieldAlgorithm` |
 | Scoring | `BotShieldScore` (in a rule), `BotShieldScoreAtLeast`, `BotShieldChallengeAtLeast`. The `BotShieldScore*` cut-points and the `BotShieldForgiveness*` family were removed with the cumulative score |
 | Cookie | `BotShieldCookieDomain` |

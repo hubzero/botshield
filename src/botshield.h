@@ -266,6 +266,11 @@ struct bs_dir_cfg {
     int show_label;             /* 0 = hide prompt, 1 = show, -1 = inherit */
     int show_box;               /* 0 = no box, 1 = boxed, -1 = inherit */
     const char *prompt;         /* e.g. "I'm not a robot" */
+    /* The non-interactive tier's line. That tier gives the client
+     * nothing to do, so its text is a status rather than an
+     * invitation, and `prompt` would be the wrong words on it.
+     * NULL = use the built-in. */
+    const char *notice;         /* e.g. "Checking your browser..." */
     const char *logo_svg;       /* full SVG content, loaded at config time */
     const char *logo_label;     /* small caption under the logo */
     const char *help_html;      /* panel content, loaded at config time */

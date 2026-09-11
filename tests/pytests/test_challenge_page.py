@@ -13,6 +13,8 @@ interstitial — and what they assert holds for all three.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from botshield_test import apache, client
@@ -203,3 +205,129 @@ def test_a_flat_spelling_names_its_new_home(line, expect):
     assert rc != 0, f"{line!r} was accepted after the move"
     assert "BotShieldChallengePage" in err, err[-500:]
     assert expect in err, err[-500:]
+
+
+
+def _label(body: str) -> str:
+    """The widget's rendered label text.
+
+    Whole-body matching is wrong here: the challenge JS carries its own
+    hardcoded 'Verifying you are human\\u2026' for the interactive
+    tier's post-click moment, which is a different string doing a
+    different job. Only the span (or the aria-label that replaces it
+    when BotShieldShowLabel is off) is the directive's output.
+    """
+    m = re.search(r'<span class="bs-label">(.*?)</span>', body, re.S)
+    if m:
+        return m.group(1)
+    m = re.search(r'aria-label="([^"]*)"', body)
+    return m.group(1) if m else ""
+
+
+# --- BotShieldPrompt vs BotShieldNotice ------------------------------
+
+# Substrings of the two built-ins, chosen to avoid the curly ellipsis
+# and apostrophe the defaults actually carry.
+DEFAULT_NOTICE = "Verifying you are human"
+DEFAULT_PROMPT = "not a robot"
+MARK_NOTICE = "Checking your browser now"
+
+
+def _tier_conf(page_body: str, tier: str) -> str:
+    """Force one tier on the probe path so the assertion is about the
+    string that tier picks, not about scoring."""
+    return (
+        "BotShieldEnabled On\n"
+        "    BotShieldChallengeAtLeast none\n"
+        "    <BotShieldChallengePage>\n"
+        f"{page_body}"
+        "    </BotShieldChallengePage>\n"
+        "    <BotShieldRule page-probe>\n"
+        f"        BotShieldPath      {PROBE}\n"
+        f"        BotShieldChallenge {tier}\n"
+        "    </BotShieldRule>\n"
+    )
+
+
+def test_the_two_tiers_differ_by_default(config_override, fresh_ip):
+    """The module already split these before either directive existed:
+    a status where there is nothing to click, an invitation where there
+    is. This is the behaviour the two names protect."""
+    with config_override(r"BotShieldEnabled\s+On",
+                         _tier_conf("", "noninteractive"), count=1):
+        silent = client.get(PROBE, xff=fresh_ip).text
+    with config_override(r"BotShieldEnabled\s+On",
+                         _tier_conf("", "interactive"), count=1):
+        clickable = client.get(PROBE, xff=fresh_ip).text
+    assert DEFAULT_NOTICE in _label(silent), f"label={_label(silent)!r}"
+    assert DEFAULT_PROMPT in _label(clickable), f"label={_label(clickable)!r}"
+
+
+def test_notice_reaches_the_silent_tier(config_override, fresh_ip):
+    body_cfg = f'        BotShieldNotice "{MARK_NOTICE}"\n'
+    with config_override(r"BotShieldEnabled\s+On",
+                         _tier_conf(body_cfg, "noninteractive"), count=1):
+        body = client.get(PROBE, xff=fresh_ip).text
+    assert MARK_NOTICE in _label(body), f"label={_label(body)!r}"
+    assert DEFAULT_NOTICE not in _label(body), (
+        "the built-in notice is still the label"
+    )
+
+
+def test_prompt_no_longer_overrides_the_silent_tier(config_override,
+                                                    fresh_ip):
+    """The regression this pair exists to fix.
+
+    Before 2026-09-11 a single BotShieldPrompt won on every tier, so
+    setting the invitation replaced the status too and the self-solving
+    page asked a question it gave the client no way to answer.
+    """
+    body_cfg = f'        BotShieldPrompt "{MARK_PROMPT}"\n'
+    with config_override(r"BotShieldEnabled\s+On",
+                         _tier_conf(body_cfg, "noninteractive"), count=1):
+        body = client.get(PROBE, xff=fresh_ip).text
+    assert MARK_PROMPT not in _label(body), (
+        "BotShieldPrompt leaked onto the tier with nothing to click; "
+        f"label={_label(body)!r}"
+    )
+    assert DEFAULT_NOTICE in _label(body), (
+        "the silent tier should have fallen back to its own built-in; "
+        f"label={_label(body)!r}"
+    )
+
+
+def test_notice_does_not_reach_the_clickable_tier(config_override,
+                                                  fresh_ip):
+    """The other direction, so neither name quietly covers both."""
+    body_cfg = f'        BotShieldNotice "{MARK_NOTICE}"\n'
+    with config_override(r"BotShieldEnabled\s+On",
+                         _tier_conf(body_cfg, "interactive"), count=1):
+        body = client.get(PROBE, xff=fresh_ip).text
+    assert MARK_NOTICE not in _label(body), f"label={_label(body)!r}"
+    assert DEFAULT_PROMPT in _label(body), f"label={_label(body)!r}"
+
+
+def test_both_set_at_once(config_override, fresh_ip):
+    body_cfg = (f'        BotShieldPrompt "{MARK_PROMPT}"\n'
+                f'        BotShieldNotice "{MARK_NOTICE}"\n')
+    with config_override(r"BotShieldEnabled\s+On",
+                         _tier_conf(body_cfg, "noninteractive"), count=1):
+        silent = client.get(PROBE, xff=fresh_ip).text
+    with config_override(r"BotShieldEnabled\s+On",
+                         _tier_conf(body_cfg, "interactive"), count=1):
+        clickable = client.get(PROBE, xff=fresh_ip).text
+    assert MARK_NOTICE in _label(silent) and \
+           MARK_PROMPT not in _label(silent), (
+        f"label={_label(silent)!r}"
+    )
+    assert MARK_PROMPT in _label(clickable) and \
+           MARK_NOTICE not in _label(clickable), (
+        f"label={_label(clickable)!r}"
+    )
+
+
+def test_notice_needs_text(config_override):
+    with pytest.raises(Exception):
+        with config_override(r"BotShieldEnabled\s+On",
+                             _conf('        BotShieldNotice\n'), count=1):
+            pass
