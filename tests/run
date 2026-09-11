@@ -29,6 +29,10 @@
 #   --slow             Include tests marked @slow (e.g. the 40s
 #                      periodic-save watchdog wait). Excluded by
 #                      default so the suite finishes fast.
+#   --stale-ok         Run even if the installed module is older than
+#                      the sources. Only for deliberately testing an
+#                      old binary; a failed build looks exactly like a
+#                      successful one from the install onwards.
 #   --verbose          Show each test's stdout inline instead of
 #                      only on failure.
 #   --list             List tests that would run, don't execute.
@@ -46,6 +50,55 @@ set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PYTEST_VENV="$HERE/.venv"
+
+# ---------------------------------------------------------------------
+# Is the module under test the one the sources describe?
+#
+# A build that fails leaves the previous .so in place, and installing
+# it looks exactly like installing a fresh one. On 2026-09-10 that
+# happened twice in an afternoon -- the periodic gcc permission reset
+# fails the compile, apxs reports "apxs:Error: Command failed", and a
+# run afterwards tested the old code while reporting on the new. Four
+# probes and a whole test file were read as findings before the
+# timestamps gave it away.
+#
+# So compare what is loaded against what is on disk. Sources newer than
+# the module means the module is not this source tree, whatever the
+# install said. --stale-ok is there for bisecting an old binary on
+# purpose; there is no other reason to pass it.
+# ---------------------------------------------------------------------
+check_module_freshness() {
+  local conf so newest
+  conf=$(grep -rl 'LoadModule[[:space:]]\+botshield_module' \
+           /etc/httpd/bstest/httpd.conf 2>/dev/null | head -1)
+  [[ -z "$conf" ]] && return 0
+  so=$(sed -nE 's#.*LoadModule[[:space:]]+botshield_module[[:space:]]+(\S+).*#\1#p' \
+         "$conf" | head -1)
+  [[ -z "$so" ]] && return 0
+  [[ "$so" != /* ]] && so="/usr/lib64/httpd/$so"
+  [[ -f "$so" ]] || return 0
+
+  newest=$(find "$HERE/../src" -name '*.c' -o -name '*.h' 2>/dev/null \
+           | xargs -r ls -t 2>/dev/null | head -1)
+  [[ -z "$newest" ]] && return 0
+  [[ "$newest" -nt "$so" ]] || return 0
+
+  echo "" >&2
+  echo "tests/run: the installed module is older than the sources." >&2
+  echo "  module:  $so" >&2
+  echo "  newer:   $newest" >&2
+  echo "" >&2
+  echo "  The build did not produce what is loaded -- most often a" >&2
+  echo "  failed compile leaving the previous .so in place. Check the" >&2
+  echo "  build output for 'apxs:Error' (a grep for 'error:' misses" >&2
+  echo "  it), and if gcc lost its execute bit:" >&2
+  echo "" >&2
+  echo "    sudo make toolchain-fix && make" >&2
+  echo "    sudo install -m 755 src/.libs/botshield.so $so" >&2
+  echo "" >&2
+  echo "  Pass --stale-ok to run anyway." >&2
+  exit 2
+}
 
 DEFAULT_CATEGORIES=(pytests)
 ALL_CATEGORIES=(pytests)
@@ -72,6 +125,7 @@ VERBOSE=0
 LIST_ONLY=0
 PARALLEL=0
 SLOW=0
+STALE_OK=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -86,6 +140,7 @@ while [[ $# -gt 0 ]]; do
     --mark)     MARK_EXTRA="$2"; shift 2 ;;
     --parallel) PARALLEL=1;      shift   ;;
     --slow)     SLOW=1;          shift   ;;
+    --stale-ok) STALE_OK=1;      shift   ;;
     --fast)     FAST=1;          shift   ;;
     --verbose)  VERBOSE=1;       shift   ;;
     --list)     LIST_ONLY=1;     shift   ;;
@@ -98,6 +153,8 @@ done
 if [[ ${#ONLY[@]} -gt 0 ]]; then
   CATEGORIES=("${ONLY[@]}")
 fi
+
+[[ $STALE_OK -eq 1 ]] || check_module_freshness
 
 pass=0
 fail=0
