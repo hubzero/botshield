@@ -115,6 +115,21 @@ struct bs_captcha_provider {
     bs_captcha_siteverify_fn siteverify_fn; /* NULL → shared path */
 };
 
+/* One <BotShieldCaptcha> block: everything that is per-provider.
+ * The timeouts and the verify-endpoint guards are not in here --
+ * they are scope defaults that apply to whichever provider ends up
+ * being used. */
+typedef struct {
+    const bs_captcha_provider *provider;
+    const char          *site_key;
+    const unsigned char *secret;
+    apr_size_t           secret_len;
+    double               min_score;
+    const char          *expected_hostname;
+    const char          *expected_action;
+    const char          *ca_bundle;
+} bs_captcha_alt;
+
 const bs_captcha_provider *bs_find_provider(const char *name);
 
 bs_captcha_result bs_captcha_siteverify(request_rec *r,
@@ -236,6 +251,16 @@ const char *bs_set_captcha_max_inflight (cmd_parms *cmd, void *cfg_v, const char
  * seven directives that describe one provider; the timeouts and the
  * verify-endpoint guards stay scope-level. See captcha.c. */
 const char *bs_open_captcha(cmd_parms *cmd, void *dconf, const char *arg);
+
+/* The block in a scope configured for `name`, or NULL for "not
+ * here" -- callers fall back to the scope's own provider. */
+const bs_captcha_alt *bs_captcha_pick(const bs_dir_cfg *cfg,
+                                      const char *name);
+/* A copy of `cfg` with its captcha fields swapped for `alt`'s, so
+ * the many cfg->captcha_* reads downstream need no argument. */
+const bs_dir_cfg *bs_captcha_with(const bs_dir_cfg *cfg,
+                                  const bs_captcha_alt *alt,
+                                  bs_dir_cfg *out);
 
 #ifdef __cplusplus
 }

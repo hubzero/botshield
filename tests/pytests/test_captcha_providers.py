@@ -223,9 +223,9 @@ def _block(body: str) -> str:
     ("        <BotShieldCaptcha turnstile>\n"
      "            BotShieldSiteKey 1x00000000000000000000AA\n"
      "        </BotShieldCaptcha>\n"
-     "        <BotShieldCaptcha hcaptcha>\n"
-     "            BotShieldSiteKey 10000000-ffff-ffff-ffff-000000000001\n"
-     "        </BotShieldCaptcha>\n", "two providers in one scope"),
+     "        <BotShieldCaptcha turnstile>\n"
+     "            BotShieldSiteKey 2x00000000000000000000AB\n"
+     "        </BotShieldCaptcha>\n", "the same provider twice"),
 ])
 def test_provider_block_refusals(config_override, body, why):
     """Each of these is a configuration that would otherwise be wrong
@@ -249,3 +249,83 @@ def test_min_score_is_accepted_under_recaptcha_v3(config_override):
             "        </BotShieldCaptcha>\n")
     with config_override(r"BotShieldEnabled\s+On", _block(body), count=1):
         pass
+
+
+def test_two_providers_share_a_scope(config_override):
+    """A scope holds several blocks since 2026-09-11.
+
+    It held one provider's worth of scalars before, so the second had
+    nowhere to go and was refused; cohabitation meant one <Location>
+    per provider. Entering the override is the assertion -- a config
+    the module rejects fails the reload.
+    """
+    conf = ("BotShieldEnabled On\n"
+            "    <Location /two-providers-probe>\n"
+            "        <BotShieldCaptcha turnstile>\n"
+            "            BotShieldSiteKey    1x00000000000000000000AA\n"
+            "            BotShieldSecretFile /etc/botshield/turnstile-secret\n"
+            "        </BotShieldCaptcha>\n"
+            "        <BotShieldCaptcha hcaptcha>\n"
+            "            BotShieldSiteKey    "
+            "10000000-ffff-ffff-ffff-000000000001\n"
+            "            BotShieldSecretFile /etc/botshield/hcaptcha-secret\n"
+            "        </BotShieldCaptcha>\n"
+            "    </Location>")
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
+        pass
+
+
+def test_the_first_block_is_the_scope_default(config_override):
+    """The first block still fills the flat fields, which is what
+    everything asking for \"this scope's provider\" reads -- the
+    interstitial included. The dump is the cheapest place to see it."""
+    conf = ("BotShieldEnabled On\n"
+            "    <Location /default-provider-probe>\n"
+            "        <BotShieldCaptcha hcaptcha>\n"
+            "            BotShieldSiteKey    "
+            "10000000-ffff-ffff-ffff-000000000001\n"
+            "            BotShieldSecretFile /etc/botshield/hcaptcha-secret\n"
+            "        </BotShieldCaptcha>\n"
+            "        <BotShieldCaptcha turnstile>\n"
+            "            BotShieldSiteKey    1x00000000000000000000AA\n"
+            "            BotShieldSecretFile /etc/botshield/turnstile-secret\n"
+            "        </BotShieldCaptcha>\n"
+            "    </Location>")
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
+        r = client.post("/botshield/captcha-verify",
+                        data={"cf-turnstile-response": "dummy"})
+    # hcaptcha was declared first, so the bare endpoint verifies as
+    # hcaptcha -- it must not answer as though turnstile were the
+    # scope's provider.
+    assert r.status_code in (400, 403, 429, 503), r.status_code
+
+
+def test_verify_url_names_the_provider(config_override, log_slice):
+    """<prefix>/captcha-verify/<name> picks the block to verify with.
+
+    The router has accepted that form since cohabitation shipped and
+    nothing read it: `cfg` differed because each provider had its own
+    <Location>. With both in one scope the name is what distinguishes
+    them, and the decision line names the provider that ran.
+    """
+    conf = ("BotShieldEnabled On\n"
+            "    <Location /botshield/captcha-verify>\n"
+            "        <BotShieldCaptcha turnstile>\n"
+            "            BotShieldSiteKey    1x00000000000000000000AA\n"
+            "            BotShieldSecretFile /etc/botshield/turnstile-secret\n"
+            "        </BotShieldCaptcha>\n"
+            "        <BotShieldCaptcha hcaptcha>\n"
+            "            BotShieldSiteKey    "
+            "10000000-ffff-ffff-ffff-000000000001\n"
+            "            BotShieldSecretFile /etc/botshield/hcaptcha-secret\n"
+            "        </BotShieldCaptcha>\n"
+            "    </Location>")
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
+        with log_slice as slc:
+            client.post("/botshield/captcha-verify/hcaptcha",
+                        data={"h-captcha-response": "dummy"})
+            text = slc.text()
+    assert "hcaptcha" in text, (
+        "the named provider should be the one that ran; the log names "
+        "none of it:\n" + text[-600:]
+    )

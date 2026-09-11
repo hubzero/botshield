@@ -325,6 +325,13 @@ struct bs_dir_cfg {
      * <Location> declaring its own provider is an override, not a
      * duplicate. */
     int         captcha_container_seen;
+    /* Every <BotShieldCaptcha> block in this scope, declaration
+     * order, as bs_captcha_alt *. The first is also mirrored into
+     * the flat fields below, which is what everything that wants
+     * "this scope's provider" reads. The array is for the two
+     * places that want a NAMED one: the verify endpoint resolving
+     * <prefix>/captcha-verify/<name>, and a rule that picks. */
+    apr_array_header_t *captchas;
     const char *captcha_site_key;           /* provider-public */
     const unsigned char *captcha_secret;    /* file bytes, mode-600 */
     apr_size_t  captcha_secret_len;

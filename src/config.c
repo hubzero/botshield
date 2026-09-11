@@ -91,6 +91,7 @@ void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->endpoint_prefix     = NULL;
     cfg->captcha_provider    = NULL;
     cfg->captcha_container_seen = 0;
+    cfg->captchas            = NULL;
     cfg->captcha_site_key    = NULL;
     cfg->captcha_secret      = NULL;
     cfg->captcha_secret_len  = 0;
@@ -627,6 +628,12 @@ void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     out->captcha_provider = add->captcha_provider ? add->captcha_provider : base->captcha_provider;
     /* Deliberately not inherited -- see the field's comment. */
     out->captcha_container_seen = add->captcha_container_seen;
+    /* Block-level, like the flat fields it mirrors: a scope that
+     * declares any provider replaces the set it inherited rather
+     * than adding to it, so what a <Location> shows is what it
+     * says. */
+    out->captchas = (add->captchas && add->captchas->nelts)
+                  ? add->captchas : base->captchas;
     out->captcha_site_key = add->captcha_site_key ? add->captcha_site_key : base->captcha_site_key;
     if (add->captcha_secret) {
         out->captcha_secret     = add->captcha_secret;

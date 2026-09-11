@@ -1461,6 +1461,28 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
      * return path inherits it. */
     apr_table_setn(r->headers_out, "Cache-Control", "no-store");
 
+    /* <prefix>/captcha-verify/<name> names the provider that minted the
+     * token. The router has always accepted the form and nothing read
+     * it: cohabitation meant one <Location> per provider, so `cfg`
+     * differed by URL. A scope can hold several now, so resolve the
+     * name against them and verify with that block's secret. Unknown
+     * or absent falls back to the scope's own provider, which is what
+     * the bare /captcha-verify has always done.
+     *
+     * `picked` is declared here, not inside the block, because `cfg`
+     * points at it for the rest of the function. */
+    bs_dir_cfg picked;
+    {
+        const char *cv = strstr(r->uri ? r->uri : "", "/captcha-verify/");
+        const char *want = cv ? cv + sizeof("/captcha-verify/") - 1 : NULL;
+        const bs_captcha_alt *alt = (want && *want)
+                                  ? bs_captcha_pick(cfg, want) : NULL;
+        if (alt && alt->provider != cfg->captcha_provider) {
+            bs_captcha_with(cfg, alt, &picked);
+            cfg = &picked;
+        }
+    }
+
     /* For consistency in the decision log, resolve a provider name up
      * front even if config is partial — misconfigured paths still want
      * a defensible value to emit. */
@@ -2175,18 +2197,24 @@ const char *bs_open_captcha(cmd_parms *cmd, void *dconf, const char *arg)
                             "provider; '%s' was also given", provider, spec);
     }
 
-    /* One block per scope. A second would be two providers with one
-     * tier to render them, and the later one silently winning is how
-     * an operator ends up serving a widget whose secret verifies
-     * nothing. Naming a provider from a rule -- which is what would
-     * make two of these meaningful -- is a separate piece of work. */
-    if (cfg && cfg->captcha_container_seen) {
-        return apr_psprintf(p,
-            "<BotShieldCaptcha %s>: a captcha provider is already "
-            "defined in this scope. One per scope: the captcha tier "
-            "renders one widget, and a second block would be a provider "
-            "nothing can select. Use a <Location> for a second one.",
-            provider);
+    /* The setters write to the scope's flat fields, which is exactly
+     * where the first block belongs -- that is what everything reading
+     * "this scope's provider" sees. For a second block, borrow them:
+     * snapshot, let the setters run, copy the result into an alternate,
+     * then put the originals back. Reusing the setters is what keeps
+     * the validation, the secret file's mode check and the error
+     * wording identical for every block, first or not. */
+    bs_captcha_alt saved;
+    int borrowing = (cfg && cfg->captcha_container_seen);
+    if (borrowing) {
+        saved.provider          = cfg->captcha_provider;
+        saved.site_key          = cfg->captcha_site_key;
+        saved.secret            = cfg->captcha_secret;
+        saved.secret_len        = cfg->captcha_secret_len;
+        saved.min_score         = cfg->recaptcha_v3_min_score;
+        saved.expected_hostname = cfg->captcha_expected_hostname;
+        saved.expected_action   = cfg->captcha_expected_action;
+        saved.ca_bundle         = cfg->captcha_ca_bundle;
     }
 
     const char *err = bs_set_captcha_provider(cmd, dconf, provider);
@@ -2235,5 +2263,92 @@ const char *bs_open_captcha(cmd_parms *cmd, void *dconf, const char *arg)
                                 provider, err);
         }
     }
+
+    if (!cfg) return NULL;
+
+    /* Record what this block configured, then -- if the flat fields
+     * were borrowed -- hand them back to the first block. */
+    bs_captcha_alt *alt = apr_pcalloc(cmd->pool, sizeof(*alt));
+    alt->provider          = cfg->captcha_provider;
+    alt->site_key          = cfg->captcha_site_key;
+    alt->secret            = cfg->captcha_secret;
+    alt->secret_len        = cfg->captcha_secret_len;
+    alt->min_score         = cfg->recaptcha_v3_min_score;
+    alt->expected_hostname = cfg->captcha_expected_hostname;
+    alt->expected_action   = cfg->captcha_expected_action;
+    alt->ca_bundle         = cfg->captcha_ca_bundle;
+
+    if (borrowing) {
+        cfg->captcha_provider          = saved.provider;
+        cfg->captcha_site_key          = saved.site_key;
+        cfg->captcha_secret            = saved.secret;
+        cfg->captcha_secret_len        = saved.secret_len;
+        cfg->recaptcha_v3_min_score    = saved.min_score;
+        cfg->captcha_expected_hostname = saved.expected_hostname;
+        cfg->captcha_expected_action   = saved.expected_action;
+        cfg->captcha_ca_bundle         = saved.ca_bundle;
+    }
+
+    if (!cfg->captchas) {
+        cfg->captchas = apr_array_make(cmd->pool, 4,
+                                       sizeof(bs_captcha_alt *));
+    }
+    for (int k = 0; k < cfg->captchas->nelts; k++) {
+        bs_captcha_alt *o = APR_ARRAY_IDX(cfg->captchas, k,
+                                          bs_captcha_alt *);
+        if (o->provider && alt->provider
+            && strcmp(o->provider->name, alt->provider->name) == 0) {
+            return apr_psprintf(p,
+                "<BotShieldCaptcha %s> is declared twice in this scope",
+                provider);
+        }
+    }
+    *(bs_captcha_alt **)apr_array_push(cfg->captchas) = alt;
     return NULL;
+}
+
+/* The block in this scope configured for `name`, or NULL.
+ *
+ * NULL means "nothing named that here", and every caller treats it as
+ * "use the scope's own provider" -- the flat fields. A name that
+ * resolves to nothing is therefore not an error at the point of use:
+ * the scope a request lands in may legitimately have only one
+ * provider, and falling back to it is what the single-provider case
+ * has always done. */
+const bs_captcha_alt *bs_captcha_pick(const bs_dir_cfg *cfg,
+                                      const char *name)
+{
+    if (!cfg || !cfg->captchas || !name || !*name) return NULL;
+    for (int i = 0; i < cfg->captchas->nelts; i++) {
+        const bs_captcha_alt *a = APR_ARRAY_IDX(cfg->captchas, i,
+                                                bs_captcha_alt *);
+        if (a->provider && a->provider->name
+            && strcasecmp(a->provider->name, name) == 0) {
+            return a;
+        }
+    }
+    return NULL;
+}
+
+/* Patch a scope's captcha fields with one of its alternates.
+ *
+ * The verify handler and the render path each read a dozen
+ * cfg->captcha_* fields. Rather than thread a provider through both,
+ * copy the scope and swap the fields: every read below sees the chosen
+ * provider and nothing else changes. `out` must outlive the use. */
+const bs_dir_cfg *bs_captcha_with(const bs_dir_cfg *cfg,
+                                  const bs_captcha_alt *alt,
+                                  bs_dir_cfg *out)
+{
+    if (!alt || !cfg) return cfg;
+    *out = *cfg;
+    out->captcha_provider          = alt->provider;
+    out->captcha_site_key          = alt->site_key;
+    out->captcha_secret            = alt->secret;
+    out->captcha_secret_len        = alt->secret_len;
+    out->recaptcha_v3_min_score    = alt->min_score;
+    out->captcha_expected_hostname = alt->expected_hostname;
+    out->captcha_expected_action   = alt->expected_action;
+    out->captcha_ca_bundle         = alt->ca_bundle;
+    return out;
 }
