@@ -390,6 +390,20 @@ void bs_app_feedback_insert_filter(request_rec *r)
  * "X-Botshield-" (case-insensitive). apr_table_unset takes a key, so
  * we collect names first (snapshotting because table mutation during
  * iteration is undefined) then drop them all in a second pass. */
+/* Headers under the X-Botshield- prefix that the MODULE reads on the
+ * request, at its own endpoints, and that the strip must therefore
+ * leave alone. They are not claims: no application reads them, so one
+ * surviving to a backend asserts nothing about the client.
+ *
+ * Anything added here has to be a header the module consumes itself.
+ * Getting it wrong in the other direction is loud -- the endpoint
+ * stops seeing its own input -- which is how the unflag endpoint
+ * caught a blanket strip during review. */
+static int bs_app_claims_keep_header(const char *key)
+{
+    return strcasecmp(key, BS_UNFLAG_HEADER) == 0;
+}
+
 static void bs_app_claims_strip_incoming(request_rec *r)
 {
     const apr_array_header_t *arr = apr_table_elts(r->headers_in);
@@ -397,7 +411,8 @@ static void bs_app_claims_strip_incoming(request_rec *r)
         apr_array_make(r->pool, 4, sizeof(const char *));
     for (int i = 0; i < arr->nelts; i++) {
         apr_table_entry_t *e = &((apr_table_entry_t *)arr->elts)[i];
-        if (e->key && strncasecmp(e->key, "X-Botshield-", 12) == 0) {
+        if (e->key && strncasecmp(e->key, "X-Botshield-", 12) == 0
+            && !bs_app_claims_keep_header(e->key)) {
             *(const char **)apr_array_push(to_unset) = e->key;
         }
     }
@@ -405,6 +420,27 @@ static void bs_app_claims_strip_incoming(request_rec *r)
         apr_table_unset(r->headers_in,
                         APR_ARRAY_IDX(to_unset, i, const char *));
     }
+}
+
+/* post_read_request: sanitise every request, always.
+ *
+ * This ran inside bs_app_claims_set until 2026-09-11, after the
+ * enabled check, which meant it did not run at all on a scope with
+ * claims off -- and "claims off" includes a staged rollback, a vhost
+ * that never turned it on, and claims-on-with-no-secret, which only
+ * warns at startup rather than refusing to serve. In any of those a
+ * client could send its own X-Botshield-Claims and the backend got it
+ * verbatim.
+ *
+ * Stripping is not a per-scope decision: a request that matches no
+ * <Location> is precisely the one a forged header would be aimed at.
+ * So it is unconditional and it is early -- before the URI is mapped,
+ * before any other module reads the headers. Requests the module
+ * never looks at are still sanitised, which is the point. */
+int bs_app_claims_strip_hook(request_rec *r)
+{
+    bs_app_claims_strip_incoming(r);
+    return DECLINED;
 }
 
 /* Render the flag bitmap as a space-separated list of registry names
@@ -430,10 +466,12 @@ static const char *bs_app_claims_flag_names(apr_pool_t *p,
     return buf;
 }
 
-/* Emit X-Botshield-Claims on the request to the backend. Called from
- * bs_handler's PASS leg — every value is finalized at that point.
- * Returns NULL on success or an error string the caller can log. */
+/* Emit X-Botshield-Claims on the request to the backend, for a scope
+ * that asked for one. Called from bs_handler's PASS leg — every value
+ * is finalized at that point. Returns NULL on success or an error
+ * string the caller can log. */
 const char *bs_app_claims_set(request_rec *r,
+                                     const bs_dir_cfg *cfg,
                                      bs_server_cfg *scfg,
                                      int score,
                                      bs_tier tier,
@@ -443,13 +481,16 @@ const char *bs_app_claims_set(request_rec *r,
                                      int passes_interactive,
                                      int passes_captcha)
 {
-    if (!scfg || scfg->app_claims_enabled != 1) return NULL;
-    if (!scfg->app_integration_secret ||
+    /* Unset is off: a scope that never mentions the directive does
+     * not hand its backend reputation state. */
+    if (!cfg || cfg->app_claims != 1) return NULL;
+    if (!scfg || !scfg->app_integration_secret ||
         scfg->app_integration_secret_len == 0) {
         return "BotShieldAppIntegrationSecretFile not configured";
     }
 
-    bs_app_claims_strip_incoming(r);
+    /* The incoming strip already happened in bs_app_claims_strip_hook,
+     * for every request rather than only the ones that reach here. */
 
     apr_time_t now = apr_time_sec(apr_time_now());
     const char *flag_names = bs_app_claims_flag_names(r->pool, flags);
@@ -513,10 +554,19 @@ const char *bs_set_app_feedback_header(cmd_parms *cmd, void *dconf,
  * forged claim values can't survive the strip + set sequence). */
 const char *bs_set_app_claims(cmd_parms *cmd, void *dconf, int flag)
 {
-    (void)dconf;
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    scfg->app_claims_enabled = flag ? 1 : 0;
+    bs_dir_cfg *cfg = dconf;
+    if (cfg) cfg->app_claims = flag ? 1 : 0;
+
+    /* Also witness it on the server so the startup secret check can
+     * see an On that lives inside a <Location> it cannot walk. Only
+     * ever set, never cleared: a later Off somewhere else does not
+     * mean no scope needs the key. */
+    if (flag) {
+        bs_server_cfg *scfg =
+            ap_get_module_config(cmd->server->module_config,
+                                 &botshield_module);
+        if (scfg) scfg->app_claims_anywhere = 1;
+    }
     return NULL;
 }
 

@@ -320,6 +320,18 @@ struct bs_dir_cfg {
     int                 challenge_at_least_reset;
     /* --- Captcha tier (M8) --- */
     const char *endpoint_prefix;            /* default "/botshield" */
+    /* Emit the signed X-Botshield-Claims header to the backend
+     * for requests in this scope. BS_UNSET = not mentioned here, so
+     * inherit; 0 = explicitly off, which is how a <Location> opts out
+     * of a vhost that turned it on. Off unless asked for: handing a
+     * backend reputation state is the operator's call, not a default.
+     *
+     * Per-scope because it is a route question -- does the handler
+     * under this path read the header. Stripping client-supplied
+     * X-Botshield-* is NOT per-scope and does not live here; see
+     * bs_app_claims_strip_hook. */
+    int         app_claims;
+
     /* This scope's captcha: the first <BotShieldCaptcha> block in
      * it. NULL when the scope configures none. Read through
      * bs_cap() below, which turns NULL into an all-zero record so
@@ -354,6 +366,12 @@ struct bs_dir_cfg {
  * while the app still emitted the old one sent that header to the
  * client with the flag vocabulary and a signature in it. */
 #define BS_APP_FEEDBACK_HEADER  "X-BotShield-Feedback"
+
+/* Inbound control header for the admin unflag endpoint. Shares
+ * the X-Botshield- prefix with the claims namespace, so the
+ * claims strip has to exempt it by name -- see
+ * bs_app_claims_keep_header. */
+#define BS_UNFLAG_HEADER  "X-BotShield-Unflag"
 
 /* Per-pass enable/disable for the unified UA classifier. Wired
  * through BotShieldClassify. Defaults to all four passes on; the
@@ -582,8 +600,12 @@ typedef struct bs_server_cfg {
     const char         *browser_templates_path;
     /* E5 — app-to-module reputation feedback. */
     int                 app_feedback_enabled;
+    /* Any scope under this server turned claims on. Set by the
+     * setter as it writes the per-scope flag, purely so the
+     * startup secret check can see into <Location> blocks it
+     * cannot otherwise walk. */
+    int                 app_claims_anywhere;
     /* E8.2 — module-to-app reputation export. */
-    int                 app_claims_enabled;
     /* Single shared HMAC key for both directions of app integration. */
     const char         *app_integration_secret_file;
     const unsigned char *app_integration_secret;

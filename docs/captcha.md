@@ -255,14 +255,24 @@ The application reads this to know what mod_botshield decided about
 the current request — without re-implementing tier inspection.
 
 ```apache
-BotShieldAppClaims                on
 BotShieldAppIntegrationSecretFile /etc/botshield/app-integration-secret
+
+<Location /api>
+    BotShieldAppClaims on
+</Location>
 ```
 
-mod_botshield strips any client-supplied `X-Botshield-Claims`
-header on the way in, then emits a fresh signed value before
-handing the request to the next phase. Any application-side
-spoofing attempt is dropped before the app sees it.
+Emission is per-scope — vhost-wide, or only the paths that read it.
+The key stays at server scope; it is a deployment fact, not a route
+one.
+
+mod_botshield drops client-supplied `X-Botshield-*` request headers
+from **every** request, before the URI is even mapped to a location,
+and independently of whether the scope emits claims. So a path with
+claims off cannot hand a forged one to the backend either. Scopes that
+do emit then get a fresh signed value. The one header exempt from the
+strip is `X-BotShield-Unflag`, which the module's own admin endpoint
+consumes and which makes no claim about the client.
 
 Claims fields (semicolon-separated, in this order):
 

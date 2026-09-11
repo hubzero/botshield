@@ -228,3 +228,140 @@ def test_claims_not_emitted_without_secret(config_override, fresh_ip):
     assert "sig=" not in claim, (
         f"claim emitted without a secret configured: {claim!r}"
     )
+
+
+# --- The strip does not depend on the scope emitting ----------------
+
+# `Header always echo` rather than `Header echo`: these configs put
+# the probe on a path the test site does not serve, so the response is
+# a 404 and the onsuccess-only form would copy nothing.
+ECHO = '    Header always echo "X-Botshield-.*"\n'
+FORGED = {
+    "X-Botshield-Score":  "0",
+    "X-Botshield-Tier":   "nochallenge",
+    "X-Botshield-Claims": "v=1;score=0;tier=nochallenge;sig=" + "0" * 64,
+}
+
+
+def _assert_forgeries_gone(r, why):
+    for h in FORGED:
+        got = r.headers.get(h)
+        if h == "X-Botshield-Claims":
+            # Absent, or the module's own -- never the forged body,
+            # which carries a signature of sixty-four zeros.
+            assert "0" * 64 not in (got or ""), f"{why}: {h}={got!r}"
+        else:
+            assert got is None, f"{why}: {h}={got!r}"
+
+
+def test_forged_headers_are_stripped_when_claims_is_off(
+    config_override, fresh_ip,
+):
+    """The strip is not part of the emission path.
+
+    It used to be: bs_app_claims_set returned early when the scope had
+    claims off, and the strip sat after that return. So a staged
+    rollback, or any vhost that never turned claims on, passed a
+    client's own X-Botshield-* straight to the backend -- against the
+    module's documented contract that it strips them. Now it runs in
+    post_read_request for every request.
+    """
+    with config_override(
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n' + ECHO,   # no BotShieldAppClaims at all
+        count=1,
+    ):
+        r = _g("/", xff=fresh_ip, headers=FORGED)
+    _assert_forgeries_gone(r, "claims off")
+
+
+def test_forged_headers_are_stripped_without_a_secret(
+    config_override, fresh_ip,
+):
+    """Same hole by a second route: claims on but no key. The module
+    only warns at startup and keeps serving, so this is a state a
+    deployment can actually sit in."""
+    with config_override(
+        r"BotShieldEnabled\s+On",
+        'BotShieldEnabled On\n'
+        '    BotShieldAppClaims on\n'      # deliberately no SecretFile
+        + ECHO,
+        count=1,
+    ):
+        r = _g("/", xff=fresh_ip, headers=FORGED)
+    _assert_forgeries_gone(r, "claims on, no secret")
+
+
+# --- Scope: vhost-wide, or narrowed to a <Location> -----------------
+
+ON_PATH  = "/claims-on-probe"
+OFF_PATH = "/claims-off-probe"
+
+
+def test_claims_can_be_limited_to_a_location(config_override, fresh_ip):
+    """Emission is a route question -- does the handler under this
+    path read the header -- so it is settable per <Location>."""
+    conf = (
+        'BotShieldEnabled On\n'
+        + ECHO
+        + f'    BotShieldAppIntegrationSecretFile {SECRET_PATH}\n'
+        + f'    <Location {ON_PATH}>\n'
+        '        BotShieldAppClaims on\n'
+        '    </Location>\n'
+    )
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
+        inside  = _g(ON_PATH,  xff=fresh_ip)
+        outside = _g(OFF_PATH, xff=fresh_ip)
+    assert "sig=" in inside.headers.get("X-Botshield-Claims", ""), (
+        "no claim inside the Location that asked for one; "
+        f"got {inside.headers.get('X-Botshield-Claims')!r}"
+    )
+    assert "sig=" not in outside.headers.get("X-Botshield-Claims", ""), (
+        "a scope that never asked for claims emitted one; "
+        f"got {outside.headers.get('X-Botshield-Claims')!r}"
+    )
+
+
+def test_a_location_can_opt_out_of_a_vhost_wide_on(
+    config_override, fresh_ip,
+):
+    """Unset inherits, so an explicit Off has to be distinguishable
+    from silence -- that is what the tri-state buys."""
+    conf = (
+        'BotShieldEnabled On\n'
+        + ECHO
+        + f'    BotShieldAppIntegrationSecretFile {SECRET_PATH}\n'
+        '    BotShieldAppClaims on\n'
+        + f'    <Location {OFF_PATH}>\n'
+        '        BotShieldAppClaims off\n'
+        '    </Location>\n'
+    )
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
+        inherited = _g(ON_PATH,  xff=fresh_ip)
+        opted_out = _g(OFF_PATH, xff=fresh_ip)
+    assert "sig=" in inherited.headers.get("X-Botshield-Claims", ""), (
+        "a path with no Location of its own should inherit the vhost's On"
+    )
+    assert "sig=" not in opted_out.headers.get("X-Botshield-Claims", ""), (
+        "BotShieldAppClaims off in a Location did not override the "
+        f"vhost; got {opted_out.headers.get('X-Botshield-Claims')!r}"
+    )
+
+
+def test_forged_headers_are_stripped_in_an_opted_out_location(
+    config_override, fresh_ip,
+):
+    """The interesting corner: a Location that switched emission off
+    is still sanitised, because the strip never consulted the scope."""
+    conf = (
+        'BotShieldEnabled On\n'
+        + ECHO
+        + f'    BotShieldAppIntegrationSecretFile {SECRET_PATH}\n'
+        '    BotShieldAppClaims on\n'
+        + f'    <Location {OFF_PATH}>\n'
+        '        BotShieldAppClaims off\n'
+        '    </Location>\n'
+    )
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
+        r = _g(OFF_PATH, xff=fresh_ip, headers=FORGED)
+    _assert_forgeries_gone(r, "opted-out Location")

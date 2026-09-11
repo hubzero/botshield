@@ -89,6 +89,7 @@ void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->challenge_at_least   = NULL;
     cfg->challenge_at_least_reset = 0;
     cfg->endpoint_prefix     = NULL;
+    cfg->app_claims          = BS_UNSET;
     cfg->captcha             = NULL;
     cfg->captchas            = NULL;
     cfg->captcha_timeout_ms  = BS_UNSET;
@@ -332,9 +333,6 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
         out->observe_metrics = base->observe_metrics;
     if (!add->observe_admin.ranges)
         out->observe_admin = base->observe_admin;
-    if (add->app_claims_enabled == BS_APP_FEEDBACK_UNSET) {
-        out->app_claims_enabled = base->app_claims_enabled;
-    }
     if (!add->app_integration_secret_file && base->app_integration_secret_file) {
         out->app_integration_secret_file = base->app_integration_secret_file;
         out->app_integration_secret      = base->app_integration_secret;
@@ -448,7 +446,6 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     /* App integration defaults — UNSET sentinel so the server-scope
      * merge can tell "unset at this scope" from explicit off. */
     scfg->app_feedback_enabled        = BS_APP_FEEDBACK_UNSET;
-    scfg->app_claims_enabled          = BS_APP_FEEDBACK_UNSET;
     scfg->app_integration_secret_file = NULL;
     scfg->app_integration_secret      = NULL;
     scfg->app_integration_secret_len  = 0;
@@ -620,6 +617,11 @@ void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
     /* A scope that declares any provider replaces the set it
      * inherited rather than adding to it, so what a <Location>
      * shows is what it uses. */
+    /* Unset inherits; an explicit Off in a <Location> overrides a
+     * vhost that turned it on, which is the whole reason this is a
+     * tri-state rather than a bare flag. */
+    out->app_claims = (add->app_claims == BS_UNSET) ? base->app_claims
+                                                    : add->app_claims;
     out->captcha  = add->captcha ? add->captcha : base->captcha;
     /* A scope declaring any provider replaces the set it inherited
      * rather than adding to it, so what a <Location> shows is what it
@@ -727,8 +729,10 @@ static void bs_warn_app_integration_secrets(server_rec *s)
         bs_server_cfg *vcfg = ap_get_module_config(sv->module_config,
                                                    &botshield_module);
         if (!vcfg) continue;
+        /* app_claims_anywhere rather than a per-scope read: claims
+         * is per-<Location> now and this walk only sees servers. */
         int needs_secret = (vcfg->app_feedback_enabled == 1) ||
-                           (vcfg->app_claims_enabled   == 1);
+                           (vcfg->app_claims_anywhere  == 1);
         if (needs_secret && !vcfg->app_integration_secret) {
             ap_log_error(APLOG_MARK, APLOG_WARNING, 0, sv,
                 "mod_botshield: BotShieldAppFeedback or "

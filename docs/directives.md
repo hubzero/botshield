@@ -2527,12 +2527,35 @@ Folded into `BotShieldEnabled` (tri-state `on` / `off` /
 | Directive | Syntax | Default |
 |---|---|---|
 | `BotShieldAppFeedback` | `on\|off` | `off` |
-| `BotShieldAppClaims` | `on\|off` | `off` |
+| `BotShieldAppClaims` | `on\|off` | `off` (server / vhost / `<Location>`) |
 | `BotShieldAppIntegrationSecretFile` | `/path` | unset (required for either above) |
 
 The feedback header is fixed at `X-BotShield-Feedback`. It is part of
 the protocol your application writes against, like the verify
 endpoint's path — not a setting.
+
+`BotShieldAppClaims` is per-scope: set it for a whole vhost, or narrow
+it to the paths whose handler actually reads the header. A `<Location>`
+that says `off` overrides a vhost that turned it on, because unset and
+explicit-off are distinct states.
+
+```apache
+<VirtualHost *:443>
+    BotShieldAppIntegrationSecretFile /etc/botshield/app-integration-secret
+    BotShieldAppClaims On
+
+    <Location /static>
+        BotShieldAppClaims Off
+    </Location>
+</VirtualHost>
+```
+
+**The strip is not per-scope.** Client-supplied `X-Botshield-*` request
+headers are dropped from *every* request in `post_read_request`,
+whether or not the scope emits claims — a request matching no
+`<Location>` is exactly the one a forged header would be aimed at. The
+one exception is `X-BotShield-Unflag`, which the admin endpoint reads
+and which asserts nothing about a client.
 
 See [captcha](captcha.md#app-bridge) for the wire format
 and security model.

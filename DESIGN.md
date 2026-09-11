@@ -120,7 +120,7 @@ deliver an incremental-rebuild win — punted as a follow-up.
 | `non_interactive.{c,h}` | E17 embedded handlers: `bs_embedded_js_handler`, `bs_embedded_worker_handler`, `bs_embedded_bootstrap_handler`, `bs_embedded_verify_handler`, `bs_form_widget_handler`. `BotShieldNonInteractiveMode` setter |
 | `templates.{c,h}` | Static HTML/CSS/JS strings for the PoW widget, captcha-tier widgets, and the page shell. Two-step substitution renderer (`bs_render_challenge_page`) |
 | `formcaptcha.{c,h}` | E18 fixup hook (`bs_form_captcha_fixup`) and the `BS_FORM_REPLAY` input filter (`bs_form_replay_filter`) for body replay |
-| `bridge.{c,h}` | E5 inbound: `BOTSHIELD_APP_FEEDBACK` output filter (`bs_app_feedback_filter` + `bs_app_feedback_insert_filter`) that strips the response header and applies the signed event. E8.2 outbound: `bs_app_claims_set` strips client X-Botshield-* and emits a fresh signed `X-Botshield-Claims`. Setters for `BotShieldAppFeedback`, `BotShieldAppClaims`, `BotShieldAppIntegrationSecretFile`, plus the refusal stub for the retired `BotShieldAppFeedbackHeader`. The header name is fixed at `BS_APP_FEEDBACK_HEADER` |
+| `bridge.{c,h}` | E5 inbound: `BOTSHIELD_APP_FEEDBACK` output filter (`bs_app_feedback_filter` + `bs_app_feedback_insert_filter`) that strips the response header and applies the signed event. E8.2 outbound: `bs_app_claims_strip_hook` (post_read_request) drops client X-Botshield-* from every request; `bs_app_claims_set` emits a fresh signed `X-Botshield-Claims` for scopes that enabled it. Setters for `BotShieldAppFeedback`, `BotShieldAppClaims`, `BotShieldAppIntegrationSecretFile`, plus the refusal stub for the retired `BotShieldAppFeedbackHeader`. The header name is fixed at `BS_APP_FEEDBACK_HEADER` |
 | `load.{c,h}` | E11 load-aware throttling: `bs_load_watchdog_cb` (scoreboard sampler + external-state-file poller + hysteresis), `bs_load_current` lockless reader. Four `BotShieldLoad*` setters |
 | `allowlist.{c,h}` | E1 verified-crawler classifier: `bs_ua_classifier`, `bs_ua_classify`, CIDR loaders (`bs_allow_load_ranges`, `bs_allow_load_ranges_from_string`), `bs_allow_ip_in_ranges`, request-time `bs_check_allow`, builtin bot table (`bs_builtin_bots`). Setters `bs_set_allow_enabled`, `bs_set_allow_bot`. Also hosts shared IP helpers (`bs_parse_client_ip`, `bs_mask_ipv6_prefix`) |
 | `ua_class.{c,h}` | Unified per-request UA classification: `bs_classify_request_ua` walks browser-templates → bot directory → verified-bot IP cross-check in that order (browser-first, so real users pay one pass) and caches the single answer on `r->pool` via `apr_pool_userdata` for every downstream consumer. `bs_classify_request_hook`, label stringifier `bs_ua_class_label_str`. Hosts the `bs_ua_class` struct + `bs_ua_class_label` enum. Setter `bs_set_classify` (`BotShieldClassify` — per-pass enable/disable, each disabled pass with a documented fail-safe) |
@@ -1897,10 +1897,24 @@ configuration — keeps the scoring surface auditable.
 
 ### Outbound: X-Botshield-Claims (E8.2)
 
-On the request path's pass leg, the module strips any client-
-supplied `X-Botshield-*` (case-insensitive) and emits a single
-signed claim envelope on `r->headers_in` so the backend reads
+Two separate jobs, deliberately split since 2026-09-11.
+
+`bs_app_claims_strip_hook` runs at `post_read_request` and drops every
+client-supplied `X-Botshield-*` (case-insensitive) from
+`r->headers_in`, unconditionally — before the URI is mapped, for every
+request, regardless of any scope's settings. `X-BotShield-Unflag` is
+exempt (`bs_app_claims_keep_header`): the module reads it at its own
+admin endpoint and it asserts nothing about a client.
+
+Then, on the request path's pass leg, scopes with claims enabled get a
+single signed claim envelope on `r->headers_in`, so the backend reads
 sanctioned BotShield state without poking at the encrypted cookie.
+
+The strip used to live inside `bs_app_claims_set`, *after* its enabled
+check, which meant it did not run at all wherever claims were off — a
+staged rollback, a vhost that never enabled it, or claims-on-with-no-key
+(which only warns at startup). In those states a client's own
+`X-Botshield-Claims` reached the backend verbatim.
 
 Wire format:
 
@@ -1913,9 +1927,16 @@ the trust anchor for apps that don't bother to verify the HMAC; the
 signed envelope is for apps that want value-integrity even across an
 untrusted Apache→backend hop.
 
-`BotShieldAppClaims on` enables it; without
+`BotShieldAppClaims on` enables emission. It is `RSRC_CONF |
+ACCESS_CONF` on the per-directory config, so it is settable per vhost
+or per `<Location>` and merges tri-state — unset inherits, an explicit
+`off` overrides an inherited `on`. Default off. Without
 `BotShieldAppIntegrationSecretFile` set, `bs_app_claims_set` returns
 an error string the caller logs at WARNING level.
+
+The startup secret check walks `server_rec`s and so cannot see a
+`<Location>`; `scfg->app_claims_anywhere`, set by the setter whenever
+it writes an `on`, is what keeps that warning working.
 
 ## Load-aware throttling (E11)
 

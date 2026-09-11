@@ -804,12 +804,18 @@ static const command_rec bs_cmds[] = {
                  "enabled, so a misconfigured app cannot leak it."),
     /* E8.2 — module-to-app reputation export. */
     AP_INIT_FLAG("BotShieldAppClaims",
-                 bs_set_app_claims, NULL, RSRC_CONF,
-                 "Enable module-to-app reputation export. When on, "
-                 "the module strips any client-supplied X-Botshield-* "
-                 "from the request and sets a single signed "
-                 "X-Botshield-Claims header before the backend handler "
-                 "runs. Default off."),
+                 bs_set_app_claims, NULL, RSRC_CONF | ACCESS_CONF,
+                 "Emit a single signed X-Botshield-Claims header to the "
+                 "backend handler for requests in this scope, carrying "
+                 "score, tier, cookie status, flags and passes. Default "
+                 "off. Settable per vhost or per <Location>, so it can "
+                 "be turned on only where the application reads it; a "
+                 "<Location> may also say Off to opt out of a vhost "
+                 "that turned it on. Requires "
+                 "BotShieldAppIntegrationSecretFile. Client-supplied "
+                 "X-Botshield-* request headers are stripped from EVERY "
+                 "request regardless of this setting, so a scope with "
+                 "claims off cannot pass a forged one to the backend."),
     AP_INIT_TAKE1("BotShieldAppIntegrationSecretFile",
                  bs_set_app_integration_secret_file, NULL, RSRC_CONF,
                  "Absolute path to the HMAC key used for both inbound "
@@ -1142,7 +1148,7 @@ static int bs_admin_unflag_handler(request_rec *r)
         return bs_admin_reply(r, HTTP_METHOD_NOT_ALLOWED,
                               "POST only: this clears state");
     }
-    if (!apr_table_get(r->headers_in, "X-BotShield-Unflag")) {
+    if (!apr_table_get(r->headers_in, BS_UNFLAG_HEADER)) {
         ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r,
                       "botshield: admin/unflag refused: no "
                       "X-BotShield-Unflag header");
@@ -2095,10 +2101,12 @@ static int bs_handler(request_rec *r)
                       (unsigned)ip_flags,
                       have_prior_rep ? (unsigned)prior_ch.rep.flags_active : 0,
                       cookie_fully_ok);
-        /* E8.2 — module-to-app reputation export. Strip incoming
-         * X-Botshield-* and set a single signed claim envelope so
-         * the backend handler reads sanctioned BotShield state
-         * without poking at the (encrypted post-E8.1) cookie. */
+        /* E8.2 — module-to-app reputation export. Set a single
+         * signed claim envelope so the backend handler reads
+         * sanctioned BotShield state without poking at the (encrypted
+         * post-E8.1) cookie. Incoming X-Botshield-* were already
+         * stripped in post_read_request, for every request rather than
+         * only the scopes that emit. */
         {
             bs_server_cfg *scfg2 = ap_get_module_config(
                 r->server->module_config, &botshield_module);
@@ -2108,7 +2116,7 @@ static int bs_handler(request_rec *r)
              * scoring is still a fact about it. Excusal governs whether
              * we re-challenge, not what we report. */
             apr_uint32_t composite_flags = ip_flags;
-            const char *cerr = bs_app_claims_set(r, scfg2,
+            const char *cerr = bs_app_claims_set(r, cfg, scfg2,
                 effective, tier, cookie_status, composite_flags,
                 have_prior_rep ? prior_ch.rep.passes_non_interactive  : 0,
                 have_prior_rep ? prior_ch.rep.passes_interactive    : 0,
@@ -2383,6 +2391,10 @@ static void bs_register_hooks(apr_pool_t *p)
      * rewritten r->useragent_ip into the real client address before
      * we do the verified-bot IP cross-check. The result is cached on
      * r->pool so every downstream consumer reads the same answer. */
+    /* Ahead of everything: no other module should see a
+     * client-supplied X-Botshield-* header. */
+    ap_hook_post_read_request(bs_app_claims_strip_hook,
+                              NULL, NULL, APR_HOOK_REALLY_FIRST);
     ap_hook_post_read_request(bs_classify_request_hook,
                               NULL, NULL, APR_HOOK_LAST);
     {

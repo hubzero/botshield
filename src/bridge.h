@@ -43,12 +43,20 @@ apr_status_t bs_app_feedback_filter(ap_filter_t *f,
                                     apr_bucket_brigade *bb);
 void bs_app_feedback_insert_filter(request_rec *r);
 
-/* E8.2 — strip any client-supplied X-Botshield-* and emit a fresh
- * signed X-Botshield-Claims request header. Called from the
- * request-handler "nochallenge" decision after the score+tier are
- * resolved. Returns NULL on success or a pool-allocated diagnostic
- * string on failure (e.g. no key configured). */
+/* E8.2 — post_read_request: drop every client-supplied
+ * X-Botshield-* header. Unconditional and scope-free by design; see
+ * the definition for why it is not part of the emission path. */
+int bs_app_claims_strip_hook(request_rec *r);
+
+/* E8.2 — emit a fresh signed X-Botshield-Claims request header for
+ * scopes that asked for one. Called from the request-handler
+ * "nochallenge" decision after the score+tier are resolved. `cfg` is
+ * the per-directory config the request landed in; emission is off
+ * unless it says otherwise. Returns NULL on success or a
+ * pool-allocated diagnostic string on failure (e.g. no key
+ * configured). */
 const char *bs_app_claims_set(request_rec *r,
+                              const struct bs_dir_cfg *cfg,
                               struct bs_server_cfg *scfg,
                               int score, bs_tier tier,
                               const char *cookie_status,
@@ -59,10 +67,11 @@ const char *bs_app_claims_set(request_rec *r,
 
 /* --- E5 + E8.2 directive setters --- *
  *
- * BotShieldAppFeedback / BotShieldAppFeedbackHeader configure the
- * inbound (E5) channel; BotShieldAppClaims gates the outbound (E8.2)
- * channel; BotShieldAppIntegrationSecretFile loads the HMAC key
- * shared by both. */
+ * BotShieldAppFeedback configures the inbound (E5) channel;
+ * BotShieldAppClaims gates the outbound (E8.2) channel per scope;
+ * BotShieldAppIntegrationSecretFile loads the HMAC key shared by
+ * both. BotShieldAppFeedbackHeader is retired and its setter only
+ * returns the refusal. */
 const char *bs_set_app_feedback(cmd_parms *cmd, void *dconf, int flag);
 const char *bs_set_app_feedback_header(cmd_parms *cmd, void *dconf,
                                        const char *name);
