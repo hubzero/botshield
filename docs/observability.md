@@ -605,7 +605,7 @@ while challenges were in fact being solved.
 
 `tier=safeguard` is emitted for challenge-loop suppression: the
 client gets a 302 redirect to a configured
-`BotShieldSafeguardRedirectURL` (or to the built-in explainer at
+`BotShieldRedirectURL` (or to the built-in explainer at
 `<BotShieldEndpointPrefix>/safeguard-info`) with the original URI
 appended as `?return=<urlencoded path>`. The flagged-IP entry is
 preserved. The pre-2026 silent pass-through is gone — silent

@@ -621,51 +621,43 @@ static const command_rec bs_cmds[] = {
                  "IP table when the probe window saturates. Read at "
                  "post_config from the main server's value."),
     /* E10 — challenge safeguard / anti-loop hysteresis. */
-    AP_INIT_FLAG("BotShieldSafeguard",
-                 bs_set_safeguard, NULL, RSRC_CONF,
-                 "Anti-loop hysteresis. Default ON - only an explicit Off "
-                 "disables it. When on, a client challenged N times "
-                 "within W seconds without solving any of them is "
-                 "redirected ONCE to the explainer page and its "
+    AP_INIT_RAW_ARGS("<BotShieldSafeguard", bs_open_safeguard, NULL,
+                 RSRC_CONF,
+                 "Anti-loop hysteresis, on by default. A client "
+                 "challenged BotShieldThreshold times within "
+                 "BotShieldWindow seconds without solving any of them "
+                 "is redirected ONCE to an explainer page and its "
                  "counter is cleared; the next request is challenged "
                  "again normally. It does NOT grant a pass window -- "
-                 "an earlier version of this text said it did, which "
-                 "would describe a bot buying access by failing on "
-                 "purpose. Decision log shows reason "
-                 "challengesafeguard. Doesn't mint _bs_session; "
-                 "doesn't override 403/429 blocks. Default-on because a client that cannot solve the challenge - JS disabled, a "
-                 "privacy extension, an old browser - would otherwise be re-challenged forever with no way out, and nothing in the "
-                 "logs shouts about it. The tripped client is redirected to an explainer, NOT admitted: it never reaches protected "
-                 "content, and its flagged-IP entry survives."),
-    AP_INIT_TAKE1("BotShieldSafeguardThreshold",
-                 bs_set_safeguard_threshold, NULL, RSRC_CONF,
-                 "Presentations-without-solve inside the window "
-                 "before safeguard trips (default 5; range 1..1000)."),
-    AP_INIT_TAKE1("BotShieldSafeguardWindow",
-                 bs_set_safeguard_window, NULL, RSRC_CONF,
-                 "Counting window in seconds for the threshold "
-                 "(default 600; range 1..86400)."),
-    AP_INIT_TAKE1("BotShieldSafeguardTTL",
-                 bs_set_safeguard_ttl, NULL, RSRC_CONF,
-                 "How long safeguard stays active after the last "
-                 "presentation (default 900 seconds; range "
-                 "1..604800). Slides on each fresh presentation "
-                 "during active safeguard."),
-    AP_INIT_TAKE1("BotShieldSafeguardRedirectURL",
-                 bs_set_safeguard_redirect_url, NULL, RSRC_CONF,
-                 "Where to redirect (302) a client that trips the "
-                 "safeguard threshold. Original URI is appended as "
-                 "?return=<urlencoded path>. Unset (default) uses the "
-                 "built-in explainer at "
-                 "<BotShieldEndpointPrefix>/safeguard-info, which is "
-                 "auto-routed by the module so no Location carve-out "
-                 "is needed. Must be a same-origin absolute path."),
+                 "the client is redirected, not admitted: it never "
+                 "reaches protected content, its flagged-IP entry "
+                 "survives, and 403/429 blocks still win. So it cannot "
+                 "be farmed by failing on purpose. Default-on because "
+                 "a client that cannot solve the challenge - JS "
+                 "disabled, a privacy extension, an old browser - "
+                 "would otherwise be re-challenged forever with no way "
+                 "out and nothing in the logs shouting about it. "
+                 "Decision log shows reason challengesafeguard. "
+                 "Inside the block: BotShieldEnabled (On|Off, default "
+                 "On), BotShieldThreshold (default 5, range 1..1000), "
+                 "BotShieldWindow (seconds, default 600, range "
+                 "1..86400), BotShieldTTL (seconds the state lasts "
+                 "after the last presentation, default 900, range "
+                 "1..604800, slides on each fresh presentation), "
+                 "BotShieldRedirectURL (same-origin absolute path; "
+                 "unset uses the built-in explainer at "
+                 "<BotShieldEndpointPrefix>/safeguard-info, which the "
+                 "module auto-routes, and the original URI is appended "
+                 "as ?return=<urlencoded path>). The SHM table's size "
+                 "is BotShieldSafeguardCapacity, which stays outside "
+                 "the block -- see its own entry."),
     AP_INIT_TAKE1("BotShieldSafeguardCapacity",
                  bs_set_safeguard_capacity, NULL, RSRC_CONF,
                  "SHM safeguard-table slot count (default 50000). "
-                 "Per-server-scope but only the main server's value "
-                 "is consulted at post_config since the table is "
-                 "module-global."),
+                 "Outside <BotShieldSafeguard> because the table is "
+                 "module-global: only the main server's value is "
+                 "consulted at post_config, so unlike the block's "
+                 "settings this one cannot be set per-vhost."),
     AP_INIT_TAKE1("BotShieldEmbeddedNonceCapacity",
                  bs_set_nonce_capacity, NULL, RSRC_CONF,
                  "SHM slot count for the embedded-bootstrap nonce "
@@ -995,7 +987,7 @@ static int bs_apply_safeguard(request_rec *r, int have_client_ip,
     if (scfg_sg->safeguard_enabled != 0 &&
         bs_safeguard_check(client_ip, now_t, scfg_sg->ns_id)) {
         /* Resolve the redirect target. Operator override via
-         * BotShieldSafeguardRedirectURL, otherwise the built-in
+         * the block's BotShieldRedirectURL, otherwise the built-in
          * explainer at <endpoint_prefix>/safeguard-info. */
         bs_dir_cfg *dcfg_sg = ap_get_module_config(
             r->per_dir_config, &botshield_module);

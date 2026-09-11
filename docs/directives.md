@@ -1916,16 +1916,46 @@ want site-wide.
 
 ## Safeguard
 
-| Directive | Syntax | Default | Scope |
-|---|---|---|---|
-| `BotShieldSafeguard` | `on\|off` | **`on`** | server / vhost |
-| `BotShieldSafeguardThreshold` | `N` | `5` | server / vhost |
-| `BotShieldSafeguardWindow` | `N` (sec) | `600` | server / vhost |
-| `BotShieldSafeguardTTL` | `N` (sec) | `900` | server / vhost |
-| `BotShieldSafeguardRedirectURL` | `<url>` | unset (uses built-in explainer) | server / vhost |
+One container, `<BotShieldSafeguard>`, once per server scope. It
+takes no argument, and the settings inside it drop the feature name
+they used to repeat.
+
+```apache
+<BotShieldSafeguard>
+    BotShieldThreshold    5
+    BotShieldWindow       600
+    BotShieldTTL          900
+    # Optional. When unset, the redirect points at
+    # /botshield/safeguard-info (the module's built-in explainer).
+    BotShieldRedirectURL  /help/auto-check-failed
+</BotShieldSafeguard>
+```
+
+| Inside the container | Syntax | Default |
+|---|---|---|
+| `BotShieldEnabled` | `On\|Off` | **`On`** |
+| `BotShieldThreshold` | `N` (1..1000) | `5` |
+| `BotShieldWindow` | `N` sec (1..86400) | `600` |
+| `BotShieldTTL` | `N` sec (1..604800) | `900` |
+| `BotShieldRedirectURL` | `/path`, same-origin | unset (uses built-in explainer) |
+
+The block is optional: safeguard runs on the defaults above without
+one. Write it to tune those numbers, or to turn the feature off:
+
+```apache
+<BotShieldSafeguard>
+    BotShieldEnabled Off
+</BotShieldSafeguard>
+```
+
+`BotShieldSafeguardCapacity` sizes the SHM table and stays **outside**
+the block. It is module-global — only the main server's value is read
+at `post_config` — so unlike the settings above it cannot be set
+per-vhost, and a block written inside a `<VirtualHost>` could not have
+carried it. See [SHM sizing](#shm-sizing).
 
 Challenge-loop suppression, **on by default** — only an explicit
-`Off` disables it. A client that cannot solve the challenge (JS
+`BotShieldEnabled Off` inside the block disables it. A client that cannot solve the challenge (JS
 disabled, a privacy extension, an old browser) would otherwise be
 re-challenged forever with nothing in the logs shouting about it, and
 that client is indistinguishable from a non-JS crawler. The redirect
@@ -1939,7 +1969,7 @@ threshold number of challenges within the window without ever
 returning a verified cookie, the next request gets a 302 redirect
 to break the loop.
 
-`BotShieldSafeguardRedirectURL` lets the operator point the
+`BotShieldRedirectURL` lets the operator point the
 redirect at their own page (a status page, a help article, a
 login flow). When unset, the module redirects to its built-in
 explainer at `<BotShieldEndpointPrefix>/safeguard-info`. The

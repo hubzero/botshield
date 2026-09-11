@@ -282,12 +282,13 @@ default static-file handler. Its walk:
     to the active Bloom buffer (writes stay off the ~99% happy path).
 14. **Safeguard / anti-loop.** E10's `bs_safeguard_check` returns
     true if N presentations have piled up without a solve. The client
-    is then 302-redirected to `BotShieldSafeguardRedirectURL`, or to
+    is then 302-redirected to the block's `BotShieldRedirectURL`, or to
     the built-in explainer at `<prefix>/safeguard-info`, with the
     original URI appended as `?return=`. It is **not** passed through
     — it never reaches protected content, and its flagged-IP entry
     survives. Logged `tier=safeguard outcome=redirect`. Enabled by
-    default; only an explicit `BotShieldSafeguard Off` disables it.
+    default; only an explicit `BotShieldEnabled Off` inside
+    `<BotShieldSafeguard>` disables it.
     Otherwise the presentation is recorded.
 15. **E17 embedded short-circuit.** `tier == BS_TIER_NONINTERACTIVE &&
     cfg->non_interactive_mode == BS_NON_INTERACTIVE_MODE_EMBEDDED` and the safeguard
@@ -1975,11 +1976,11 @@ The safeguard SHM table (see SHM segment) carries
 `(present_window_start, present_count, safeguard_until)` per masked
 IP. Every challenge presentation calls
 `bs_safeguard_record_presentation` (regardless of
-`BotShieldSafeguard` master switch — E17 embedded mode reads the
-count). When `present_count >= BotShieldSafeguardThreshold` (default
-5) inside `BotShieldSafeguardWindow` (default 600 sec):
+`<BotShieldSafeguard>` master switch — E17 embedded mode reads the
+count). When `present_count >= BotShieldThreshold` (default
+5) inside `BotShieldWindow` (default 600 sec):
 
-- `safeguard_until = now + BotShieldSafeguardTTL` (default 900 sec).
+- `safeguard_until = now + BotShieldTTL` (default 900 sec).
 - The TTL slides on each fresh presentation during active safeguard
   so a chronically broken client stays in safeguard rather than
   dropping in and out at every window boundary.
@@ -1990,7 +1991,7 @@ fully-valid cookie verifies — a successful solve proves the client
 
 ### Behavior under safeguard
 
-When `BotShieldSafeguard On` and `bs_safeguard_check()` returns
+When safeguard is on and `bs_safeguard_check()` returns
 true, the request is short-circuited with reason
 `challengesafeguard`, `tier=safeguard outcome=redirect`, and
 returns `DECLINED`. The real handler runs.
@@ -2400,7 +2401,7 @@ the `bs_cmds[]` table at `src/botshield.c:213`.
 | Policy (E2.1 / E9) | `BotShieldBotRateLimit`, `BotShieldEscalate` (`BotShieldRateLimit` retired 2026-09-09) |
 | Robots (E2.2) | `<BotShieldRobots>` carrying `BotShieldRobotsTxt`, `BotShieldMode`, `BotShieldWildcardScope`, `BotShieldRefreshInterval` and `<BotShieldRobotRule>` groups (four standalone directives until 2026-09-09) |
 | Triggers | `BotShieldRule` (E3, formerly BotShieldPathTrigger; since 2026-09-06 also carrying the E4 cookie, E6 env, E11.2 load and E14 flag predicates, and since 2026-09-07 the E14 action half), `BotShieldMatch` (named condition sets, shared by rules), `BotShieldFeedback` (E7.3), `BotShieldSessionCookieName` (E4) |
-| Safeguard (E10) | `BotShieldSafeguard`, `BotShieldSafeguardThreshold`, `BotShieldSafeguardWindow`, `BotShieldSafeguardTTL`, `BotShieldSafeguardRedirectURL` |
+| Safeguard (E10) | `<BotShieldSafeguard>` holding `BotShieldEnabled`, `BotShieldThreshold`, `BotShieldWindow`, `BotShieldTTL`, `BotShieldRedirectURL` |
 | Load (E11) | `BotShieldLoadStateFile`, `BotShieldLoadRefreshInterval` |
 | Multi-vhost (E13) | `BotShieldShareScope` |
 | Observability | `BotShieldDecisionLog` |

@@ -537,6 +537,7 @@ typedef struct bs_server_cfg {
     /* <BotShieldRobots>: seen in this scope, and its inline groups
      * (bs_robots_inline_group *; NULL when none). */
     int                 robots_container_seen;
+    int                 safeguard_container_seen;
     apr_array_header_t *robots_groups;
     /* Cloudflare bot directory runtime override.
      *

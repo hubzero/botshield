@@ -27,7 +27,7 @@ A fifth value, `safeguard`, can appear in decision logs. It marks
 challenge-loop suppression: a client that has been issued
 challenges repeatedly within the safeguard window without ever
 returning a verified cookie gets `tier=safeguard outcome=redirect`
-— a 302 to a configured `BotShieldSafeguardRedirectURL` (or to the
+— a 302 to a configured `BotShieldRedirectURL` (or to the
 built-in explainer at `<BotShieldEndpointPrefix>/safeguard-info`)
 with the original URI appended as `?return=<urlencoded path>`. The
 explainer covers common reasons the auto-check failed (JS disabled,

@@ -4,6 +4,7 @@
 
 #include "captcha.h"
 #include "allowlist.h" /* bs_parse_client_ip */
+#include "config.h"   /* bs_block_value, shared by the containers */
 
 #include <ctype.h>
 #include <errno.h>
@@ -2147,20 +2148,6 @@ static const struct {
     { NULL, NULL }
 };
 
-/* The rest of a directive line, one layer of quoting removed, so a
- * value with spaces survives either spelling. */
-static const char *bs_cap_value(apr_pool_t *p, const ap_directive_t *d)
-{
-    char *v = apr_pstrdup(p, d->args ? d->args : "");
-    apr_size_t n = strlen(v);
-    while (n && apr_isspace(v[n - 1])) v[--n] = '\0';
-    if (n >= 2 && (v[0] == '"' || v[0] == '\'') && v[n - 1] == v[0]) {
-        v[n - 1] = '\0';
-        v++;
-    }
-    return v;
-}
-
 const char *bs_open_captcha(cmd_parms *cmd, void *dconf, const char *arg)
 {
     apr_pool_t *p = cmd->pool;
@@ -2233,7 +2220,7 @@ const char *bs_open_captcha(cmd_parms *cmd, void *dconf, const char *arg)
                 "or set the provider to recaptcha-v3.", provider, provider);
         }
 
-        err = bs_captcha_block_keys[i].set(cmd, blk, bs_cap_value(p, d));
+        err = bs_captcha_block_keys[i].set(cmd, blk, bs_block_value(p, d));
         if (err) {
             return apr_psprintf(p, "<BotShieldCaptcha %s>: %s",
                                 provider, err);

@@ -284,6 +284,9 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
      * whole. One with its own keeps its groups, and the unset knobs
      * above still inherit, so a vhost may add groups without restating
      * the file. */
+    if (!add->safeguard_container_seen && base->safeguard_container_seen) {
+        out->safeguard_container_seen = 1;
+    }
     if (!add->robots_container_seen && base->robots_container_seen) {
         out->robots_container_seen = 1;
         out->robots_groups         = base->robots_groups;
@@ -434,6 +437,7 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     scfg->robots_refresh_interval = BS_ROBOTS_REFRESH_UNSET;
     scfg->robots_mode             = BS_ROBOTS_MODE_UNSET;
     scfg->robots_container_seen   = 0;
+    scfg->safeguard_container_seen = 0;
     scfg->robots_groups           = NULL;
     /* Bot-directory runtime override. NULL path = no override
      * (compiled-in baseline stays active). Refresh interval 0 =
@@ -3709,89 +3713,99 @@ const char *bs_set_rate_escalate_capacity(cmd_parms *cmd,
     return NULL;
 }
 
-/* E10 — BotShieldSafeguard on|off. Master switch for the
- * anti-loop hysteresis. Off = pre-E10 behavior (challenge every
- * request that tier dispatch sends to challenge). On = track
- * presentations per IP and flip to a short-lived pass-through
- * after BotShieldSafeguardThreshold presentations within
- * BotShieldSafeguardWindow seconds without a solve.
- *
- * Default off: opt-in because safeguard does grant temporary
- * pass-through, which some operators will consider too soft
- * regardless of the narrow conditions. Operators who've seen
- * the stuck-loop failure mode in practice enable it. */
-const char *bs_set_safeguard(cmd_parms *cmd, void *dconf, int flag)
+/* The value of one directive inside a <BotShield...> block:
+ * everything after the name, trimmed, with a single layer of matching
+ * quotes removed. Shared by every container -- the section handlers
+ * read raw args, so each would otherwise re-derive this. */
+const char *bs_block_value(apr_pool_t *p, const ap_directive_t *d)
 {
-    (void)dconf;
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    scfg->safeguard_enabled = flag ? 1 : 0;
+    char *v = apr_pstrdup(p, d->args ? d->args : "");
+    apr_size_t n = strlen(v);
+    while (n && apr_isspace(v[n - 1])) v[--n] = '\0';
+    if (n >= 2 && (v[0] == '"' || v[0] == '\'') && v[n - 1] == v[0]) {
+        v[n - 1] = '\0';
+        v++;
+    }
+    return v;
+}
+
+/* BotShieldEnabled On|Off inside <BotShieldSafeguard>.
+ *
+ * Default on, so this exists to turn safeguard OFF. A client that
+ * cannot solve the challenge -- JS disabled, a privacy extension, an
+ * old browser -- is otherwise re-challenged forever with nothing in
+ * the logs drawing attention to it, so the safe default is the one
+ * that leaves them a way to an explanation.
+ *
+ * It grants no pass window: a client that trips the threshold is
+ * redirected to the explainer, not admitted. An earlier version of
+ * this comment said it flipped to "a short-lived pass-through", which
+ * would have described a bot buying access by failing on purpose. */
+const char *bs_set_safeguard_enabled(cmd_parms *cmd, bs_server_cfg *scfg,
+                                     const char *arg)
+{
+    if (!arg || !*arg) return "BotShieldEnabled requires On or Off";
+    if (!strcasecmp(arg, "on"))       scfg->safeguard_enabled = 1;
+    else if (!strcasecmp(arg, "off")) scfg->safeguard_enabled = 0;
+    else return apr_psprintf(cmd->pool,
+        "BotShieldEnabled: '%s' must be On or Off", arg);
     return NULL;
 }
 
-/* E10 — BotShieldSafeguardThreshold <N>. Number of presentations
+/* BotShieldThreshold <N> inside <BotShieldSafeguard>. Presentations
  * within the window before safeguard trips. */
 const char *bs_set_safeguard_threshold(cmd_parms *cmd,
-                                              void *dconf,
-                                              const char *arg)
+                                       bs_server_cfg *scfg,
+                                       const char *arg)
 {
-    (void)dconf;
     char *end = NULL;
     long n = strtol(arg, &end, 10);
     if (!end || *end || n < 1 || n > 1000) {
         return apr_psprintf(cmd->pool,
-            "BotShieldSafeguardThreshold: '%s' must be 1..1000", arg);
+            "BotShieldThreshold: '%s' must be 1..1000", arg);
     }
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
     scfg->safeguard_threshold = (int)n;
     return NULL;
 }
 
-/* E10 — BotShieldSafeguardWindow <seconds>. Counting window for
+/* BotShieldWindow <seconds> inside <BotShieldSafeguard>. Counting window for
  * the threshold. Beyond this, old presentations roll off and the
  * counter resets on the next presentation. */
 const char *bs_set_safeguard_window(cmd_parms *cmd,
-                                           void *dconf,
-                                           const char *arg)
+                                    bs_server_cfg *scfg,
+                                    const char *arg)
 {
-    (void)dconf;
     char *end = NULL;
     long n = strtol(arg, &end, 10);
     if (!end || *end || n < 1 || n > 86400) {
         return apr_psprintf(cmd->pool,
-            "BotShieldSafeguardWindow: '%s' must be 1..86400 seconds",
+            "BotShieldWindow: '%s' must be 1..86400 seconds",
             arg);
     }
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
     scfg->safeguard_window = (int)n;
     return NULL;
 }
 
-/* E10 — BotShieldSafeguardTTL <seconds>. How long the safeguard
+/* BotShieldTTL <seconds> inside <BotShieldSafeguard>. How long the safeguard
  * state lasts after the last presentation. Slides on each fresh
  * presentation during active safeguard (TTL resets) so a client
  * that stays broken doesn't oscillate at window boundaries. */
 const char *bs_set_safeguard_ttl(cmd_parms *cmd,
-                                        void *dconf,
-                                        const char *arg)
+                                 bs_server_cfg *scfg,
+                                 const char *arg)
 {
-    (void)dconf;
     char *end = NULL;
     long n = strtol(arg, &end, 10);
     if (!end || *end || n < 1 || n > 86400 * 7) {
         return apr_psprintf(cmd->pool,
-            "BotShieldSafeguardTTL: '%s' must be 1..%d seconds",
+            "BotShieldTTL: '%s' must be 1..%d seconds",
             arg, 86400 * 7);
     }
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
     scfg->safeguard_ttl = (int)n;
     return NULL;
 }
 
-/* E10 — BotShieldSafeguardRedirectURL <url>. Where to send a client
+/* BotShieldRedirectURL <path> inside <BotShieldSafeguard>. Where to send a client
  * that trips the safeguard threshold. NULL (unset) → use the built-
  * in explainer at <BotShieldEndpointPrefix>/safeguard-info. The
  * built-in endpoint is auto-routed by the module so operators don't
@@ -3800,20 +3814,17 @@ const char *bs_set_safeguard_ttl(cmd_parms *cmd,
  * page) can offer a continue link. URL must start with '/' (same-
  * origin path) to avoid open-redirect risk. */
 const char *bs_set_safeguard_redirect_url(cmd_parms *cmd,
-                                          void *dconf,
+                                          bs_server_cfg *scfg,
                                           const char *arg)
 {
-    (void)dconf;
     if (!arg || !*arg) {
-        return "BotShieldSafeguardRedirectURL requires a path";
+        return "BotShieldRedirectURL requires a path";
     }
     if (arg[0] != '/' || (arg[0] == '/' && arg[1] == '/')) {
         return apr_psprintf(cmd->pool,
-            "BotShieldSafeguardRedirectURL: '%s' must be a same-origin "
+            "BotShieldRedirectURL: '%s' must be a same-origin "
             "absolute path starting with a single '/'", arg);
     }
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
     scfg->safeguard_redirect_url = apr_pstrdup(cmd->pool, arg);
     return NULL;
 }
@@ -3823,8 +3834,8 @@ const char *bs_set_safeguard_redirect_url(cmd_parms *cmd,
  * per-server-scope convention as the other SHM-sizing directives:
  * only the main server's value is consulted at post_config. */
 const char *bs_set_safeguard_capacity(cmd_parms *cmd,
-                                             void *dconf,
-                                             const char *arg)
+                                      void *dconf,
+                                      const char *arg)
 {
     (void)dconf;
     { const char *scope_err = bs_require_server_scope(cmd, "BotShieldSafeguardCapacity");
@@ -3840,6 +3851,81 @@ const char *bs_set_safeguard_capacity(cmd_parms *cmd,
     bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
                                                &botshield_module);
     scfg->safeguard_capacity = (int)n;
+    return NULL;
+}
+
+/* <BotShieldSafeguard> -- every anti-loop setting in one place.
+ *
+ * These were six flat directives, five of them meaningless unless the
+ * first was on, and each spelling the feature name twice over
+ * (BotShieldSafeguardRedirectURL). Inside the block the prefix is
+ * implied, the way <BotShieldRobots> carries BotShieldMode; the
+ * settings above are not registered directives, so the short names
+ * exist only here and cannot be written loose by mistake. */
+const char *bs_open_safeguard(cmd_parms *cmd, void *dconf, const char *arg)
+{
+    (void)dconf;
+    apr_pool_t *p = cmd->pool;
+    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
+                                               &botshield_module);
+
+    static const struct {
+        const char *name;
+        const char *(*set)(cmd_parms *, bs_server_cfg *, const char *);
+    } keys[] = {
+        { "BotShieldEnabled",     bs_set_safeguard_enabled     },
+        { "BotShieldThreshold",   bs_set_safeguard_threshold   },
+        { "BotShieldWindow",      bs_set_safeguard_window      },
+        { "BotShieldTTL",         bs_set_safeguard_ttl         },
+        { "BotShieldRedirectURL", bs_set_safeguard_redirect_url },
+        { NULL, NULL }
+    };
+
+    char *spec = apr_pstrdup(p, arg ? arg : "");
+    apr_size_t n = strlen(spec);
+    while (n && apr_isspace(spec[n - 1])) spec[--n] = '\0';
+    if (!n || spec[n - 1] != '>') {
+        return "<BotShieldSafeguard> is missing its closing '>'";
+    }
+    spec[--n] = '\0';
+    while (n && apr_isspace(spec[n - 1])) spec[--n] = '\0';
+    if (n) {
+        return apr_psprintf(p, "<BotShieldSafeguard> takes no argument; "
+                            "'%s' was given", spec);
+    }
+    if (scfg->safeguard_container_seen) {
+        return "<BotShieldSafeguard> is already defined in this scope. "
+               "One container per scope: the settings are a single "
+               "policy, and a second block would silently win.";
+    }
+    scfg->safeguard_container_seen = 1;
+
+    apr_table_t *seen = apr_table_make(p, 8);
+    for (const ap_directive_t *d = cmd->directive->first_child; d;
+         d = d->next) {
+        const char *dir = d->directive;
+        int i;
+        for (i = 0; keys[i].name; i++) {
+            if (!strcasecmp(dir, keys[i].name)) break;
+        }
+        if (!keys[i].name) {
+            return apr_psprintf(p,
+                "<BotShieldSafeguard>: '%s' at %s:%d is not a safeguard "
+                "setting. Inside the block: BotShieldEnabled, "
+                "BotShieldThreshold, BotShieldWindow, BotShieldTTL, "
+                "BotShieldRedirectURL. BotShieldSafeguardCapacity "
+                "sizes a module-global table and stays outside.",
+                dir, d->filename ? d->filename : "?", d->line_num);
+        }
+        if (apr_table_get(seen, keys[i].name)) {
+            return apr_psprintf(p, "<BotShieldSafeguard>: %s given twice",
+                                dir);
+        }
+        apr_table_set(seen, keys[i].name, "1");
+
+        const char *err = keys[i].set(cmd, scfg, bs_block_value(p, d));
+        if (err) return apr_psprintf(p, "<BotShieldSafeguard>: %s", err);
+    }
     return NULL;
 }
 

@@ -1933,7 +1933,7 @@ apr_status_t bs_headroom_watchdog_cb(int state, void *data, apr_pool_t *pool)
      * across ticks — see bs_safeguard_reclaim.
      *
      * The window passed here is the compiled-in default rather than the
-     * operator's BotShieldSafeguardWindow: the watchdog callback has a
+     * operator's BotShieldWindow: the watchdog callback has a
      * server_rec but the safeguard policy ints are per-directory, and
      * there is no single value to read at this level. Using the default
      * makes the sweep CONSERVATIVE when an operator has widened the

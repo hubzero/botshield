@@ -638,26 +638,32 @@ The safeguard suppresses a challenge loop: a client that has been
 issued challenges repeatedly within the safeguard window without
 ever returning a verified cookie gets a 302 redirect
 (`tier=safeguard outcome=redirect`) to a configured
-`BotShieldSafeguardRedirectURL` or to the built-in explainer at
+`BotShieldRedirectURL` or to the built-in explainer at
 `<BotShieldEndpointPrefix>/safeguard-info`. The original URI is
 appended as `?return=<urlencoded path>`. The per-IP counter clears
 on redirect so a fresh failure cycle starts after the client
 engages with the redirect target.
 
 ```apache
-BotShieldSafeguard             on
-BotShieldSafeguardThreshold    5
-BotShieldSafeguardWindow       600
-BotShieldSafeguardTTL          900
-# Optional. When unset, the redirect points at
-# /botshield/safeguard-info (the module's built-in explainer).
-BotShieldSafeguardRedirectURL  /help/auto-check-failed
+<BotShieldSafeguard>
+    BotShieldThreshold    5
+    BotShieldWindow       600
+    BotShieldTTL          900
+    # Optional. When unset, the redirect points at
+    # /botshield/safeguard-info (the module's built-in explainer).
+    BotShieldRedirectURL  /help/auto-check-failed
+</BotShieldSafeguard>
 ```
 
-Defaults: 5 missed verifications in 600 seconds → 900-second pass-
-through window. The IP's flagged-IP entry is preserved so the
-suspicious behavior is still recorded for downstream signals; only
-the in-line challenge is suppressed.
+Those are the defaults, so the block is only needed to change them —
+or to turn safeguard off with `BotShieldEnabled Off` inside it.
+
+Defaults: 5 missed verifications in 600 seconds, and the safeguard
+state lasts 900 seconds after the last presentation. It grants **no
+pass window**: the tripped client is redirected to the explainer, not
+admitted, so failing on purpose buys a bot nothing. The IP's
+flagged-IP entry is preserved so the suspicious behavior still feeds
+downstream signals.
 
 Sites staging a fresh deployment with aggressive thresholds
 are the most likely to trip this. Watch the

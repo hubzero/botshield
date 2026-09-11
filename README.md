@@ -145,7 +145,7 @@ Under `BotShieldEndpointPrefix` (default `/botshield`):
 | `<prefix>/embedded-bootstrap` | GET | Issues a challenge to an embedded client |
 | `<prefix>/embedded-verify` | POST | Accepts an embedded client's solution |
 | `<prefix>/form-widget.js` | GET | Inline form-captcha widget shell |
-| `<prefix>/safeguard-info` | GET | Built-in explainer page rendered when challengesafeguard trips (and no `BotShieldSafeguardRedirectURL` is set). Accepts `?return=<urlencoded path>` |
+| `<prefix>/safeguard-info` | GET | Built-in explainer page rendered when challengesafeguard trips (and no `BotShieldRedirectURL` is set in `<BotShieldSafeguard>`). Accepts `?return=<urlencoded path>` |
 
 The dashboard and metrics are closed until `BotShieldDashboardAccess` /
 `BotShieldMetricsAccess` name who may read them; a refusal is a 404, not

@@ -129,12 +129,24 @@ const char *bs_set_rate_limit_escalate   (cmd_parms *cmd, void *dconf,
                                           int argc, char *const argv[]);
 const char *bs_set_rate_escalate_capacity(cmd_parms *cmd, void *dconf,
                                           const char *arg);
-const char *bs_set_safeguard          (cmd_parms *cmd, void *dconf, int flag);
-const char *bs_set_safeguard_threshold(cmd_parms *cmd, void *dconf, const char *arg);
-const char *bs_set_safeguard_window   (cmd_parms *cmd, void *dconf, const char *arg);
-const char *bs_set_safeguard_ttl      (cmd_parms *cmd, void *dconf, const char *arg);
-const char *bs_set_safeguard_redirect_url(cmd_parms *cmd, void *dconf, const char *arg);
+/* The settings inside <BotShieldSafeguard>. Not registered
+ * directives: the section handler is the only caller, so each takes
+ * the server config to fill rather than pretending to be an Apache
+ * directive handler. */
+const char *bs_set_safeguard_enabled  (cmd_parms *cmd, bs_server_cfg *scfg, const char *arg);
+const char *bs_set_safeguard_threshold(cmd_parms *cmd, bs_server_cfg *scfg, const char *arg);
+const char *bs_set_safeguard_window   (cmd_parms *cmd, bs_server_cfg *scfg, const char *arg);
+const char *bs_set_safeguard_ttl      (cmd_parms *cmd, bs_server_cfg *scfg, const char *arg);
+const char *bs_set_safeguard_redirect_url(cmd_parms *cmd, bs_server_cfg *scfg, const char *arg);
+const char *bs_open_safeguard(cmd_parms *cmd, void *dconf, const char *arg);
+
+/* Sizes the module-global safeguard table, so only the main
+ * server's value is read -- a registered directive, not a block
+ * setting. */
 const char *bs_set_safeguard_capacity (cmd_parms *cmd, void *dconf, const char *arg);
+
+/* One directive's value inside any <BotShield...> block. */
+const char *bs_block_value(apr_pool_t *p, const ap_directive_t *d);
 const char *bs_set_nonce_capacity     (cmd_parms *cmd, void *dconf, const char *arg);
 
 #ifdef __cplusplus

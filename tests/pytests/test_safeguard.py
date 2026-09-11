@@ -2,7 +2,7 @@
 
 Track presentations without a solve per IP. After N presentations
 inside window W, the next presentation gets a 302 redirect to a
-configured URL (BotShieldSafeguardRedirectURL) or to the built-in
+configured URL (BotShieldRedirectURL in the block) or to the built-in
 explainer at <BotShieldEndpointPrefix>/safeguard-info. The original
 URI is appended as ?return=<urlencoded path>. The per-IP counter
 clears on redirect so a fresh failure cycle starts after the
@@ -16,8 +16,9 @@ legitimate clients and gives bots nothing useful (the explainer has
 no scrapable content; redirect followers land on it but never
 reach the protected URL).
 
-Safeguard is opt-in (BotShieldSafeguard off by default). These
-tests enable it explicitly and check:
+Safeguard is on by default; a <BotShieldSafeguard> block tunes it
+and `BotShieldEnabled Off` inside that block turns it off. These
+tests set a small threshold explicitly and check:
   - threshold crossing promotes the request to a 302 redirect
   - decision log carries tier=safeguard outcome=redirect
   - the Location header points at the explainer (or operator URL)
@@ -72,13 +73,21 @@ def _hammer(ip: str, n: int) -> list:
             for _ in range(n)]
 
 
-def _safeguard_cfg(threshold: int, ttl: int = 900, window: int = 600) -> str:
+def _safeguard_cfg(threshold: int, ttl: int = 900, window: int = 600,
+                   redirect_url: str = None) -> str:
+    """The settings live in a <BotShieldSafeguard> block, so a test that
+    wants to set one of them has to build the whole block -- there is
+    no loose BotShieldSafeguardRedirectURL to append any more."""
+    redirect = (f'        BotShieldRedirectURL {redirect_url}\n'
+                if redirect_url else '')
     return (
         'BotShieldEnabled On\n'
-        '    BotShieldSafeguard on\n'
-        f'    BotShieldSafeguardThreshold {threshold}\n'
-        f'    BotShieldSafeguardWindow {window}\n'
-        f'    BotShieldSafeguardTTL {ttl}\n'
+        '    <BotShieldSafeguard>\n'
+        f'        BotShieldThreshold {threshold}\n'
+        f'        BotShieldWindow {window}\n'
+        f'        BotShieldTTL {ttl}\n'
+        f'{redirect}'
+        '    </BotShieldSafeguard>\n'
     )
 
 
@@ -122,7 +131,7 @@ def test_safeguard_trips_after_threshold(config_override, fresh_ip,
     location = sg.headers.get("Location", "")
     assert "/safeguard-info" in location, (
         f"Location should point at the built-in explainer when no "
-        f"BotShieldSafeguardRedirectURL is set; got {location!r}"
+        f"BotShieldRedirectURL is set; got {location!r}"
     )
     assert "return=" in location, (
         f"Location must carry the original URI as ?return=; "
@@ -315,7 +324,7 @@ def test_safeguard_on_by_default(config_override, fresh_ip):
     still not be able to trap a client in a challenge loop."""
     with config_override(
         r"BotShieldEnabled\s+On",
-        # Deliberately no BotShieldSafeguard directive.
+        # Deliberately no <BotShieldSafeguard> block.
         'BotShieldEnabled On\n',
         count=1,
     ):
@@ -333,19 +342,16 @@ def test_safeguard_on_by_default(config_override, fresh_ip):
     )
 
 
-# --- BotShieldSafeguardRedirectURL override ------------------------
+# --- BotShieldRedirectURL override ---------------------------------
 
 
 def test_safeguard_redirect_url_override(config_override, fresh_ip):
-    """`BotShieldSafeguardRedirectURL` lets the operator point the
+    """`BotShieldRedirectURL` lets the operator point the
     redirect at their own page (a status page, a help article, a
     login flow). When set, the Location should target that URL with
     the original URI appended as ?return=<urlencoded path>."""
     custom_url = "/help/please-enable-javascript"
-    cfg = (
-        _safeguard_cfg(threshold=2)
-        + f'    BotShieldSafeguardRedirectURL {custom_url}\n'
-    )
+    cfg = _safeguard_cfg(threshold=2, redirect_url=custom_url)
     with config_override(
         r"BotShieldEnabled\s+On", cfg, count=1,
     ):
@@ -527,3 +533,75 @@ def _read_metric(name: str) -> int:
         if line.startswith(needle):
             return int(line.split()[1])
     return 0
+
+
+# --- the container ---------------------------------------------------
+
+
+def test_enabled_off_inside_the_block_disables_safeguard(config_override,
+                                                         fresh_ip):
+    """The block is also how safeguard is turned off. Without it the
+    hammer above redirects; with it every request stays a challenge."""
+    cfg = (
+        'BotShieldEnabled On\n'
+        '    <BotShieldSafeguard>\n'
+        '        BotShieldEnabled Off\n'
+        '        BotShieldThreshold 2\n'
+        '    </BotShieldSafeguard>\n'
+    )
+    with config_override(r"BotShieldEnabled\s+On", cfg, count=1):
+        responses = _hammer(fresh_ip, 8)
+    assert not any(r.status_code == 302 for r in responses), (
+        "BotShieldEnabled Off inside the block should stop safeguard "
+        f"entirely; got {[r.status_code for r in responses]}"
+    )
+
+
+
+@pytest.mark.parametrize("body, why", [
+    ("        BotShieldSafeguardThreshold 5\n",
+     "the old flat spelling, which the block does not accept"),
+    ("        BotShieldCapacity 4096\n",
+     "a module-global setting that stays outside the block"),
+    ("        BotShieldNonsense 5\n", "a name that is not a setting"),
+    ("        BotShieldThreshold 0\n", "below the documented range"),
+    ("        BotShieldThreshold 5\n        BotShieldThreshold 6\n",
+     "the same setting twice"),
+    ("        BotShieldEnabled Maybe\n", "a flag that is neither On nor Off"),
+    ("        BotShieldRedirectURL https://elsewhere.example/\n",
+     "an off-origin redirect"),
+])
+def test_the_block_refuses_bad_settings(config_override, body, why):
+    cfg = ('BotShieldEnabled On\n'
+           '    <BotShieldSafeguard>\n'
+           f'{body}'
+           '    </BotShieldSafeguard>\n')
+    with pytest.raises(Exception):
+        with config_override(r"BotShieldEnabled\s+On", cfg, count=1):
+            pass
+
+
+def test_the_block_takes_no_argument(config_override):
+    cfg = ('BotShieldEnabled On\n'
+           '    <BotShieldSafeguard strict>\n'
+           '        BotShieldThreshold 5\n'
+           '    </BotShieldSafeguard>\n')
+    with pytest.raises(Exception):
+        with config_override(r"BotShieldEnabled\s+On", cfg, count=1):
+            pass
+
+
+def test_one_block_per_scope(config_override):
+    """Two blocks would be two policies with the second silently
+    winning, which is the failure the robots container refuses for the
+    same reason."""
+    cfg = ('BotShieldEnabled On\n'
+           '    <BotShieldSafeguard>\n'
+           '        BotShieldThreshold 5\n'
+           '    </BotShieldSafeguard>\n'
+           '    <BotShieldSafeguard>\n'
+           '        BotShieldThreshold 9\n'
+           '    </BotShieldSafeguard>\n')
+    with pytest.raises(Exception):
+        with config_override(r"BotShieldEnabled\s+On", cfg, count=1):
+            pass
