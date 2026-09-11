@@ -298,21 +298,73 @@ static int robots_has_crawl_delay(bs_server_cfg *scfg)
 }
 
 
-/* Walk this vhost's parsed robots.txt and register one bot_rate
- * entry per group with a Crawl-delay. The group's User-agent
- * stanzas resolve to a slug-set via the bot directory; all matching
- * slugs share one counter at the group's Crawl-delay budget.
+/* Which group governs each directory slug.
  *
- * Robots.txt User-agent: * resolves to bot_rate_state.wildcard_entry,
- * but only if a directive wildcard isn't already set (directive wins
- * on conflict; same rule as specific entries). Stanzas that don't
- * resolve to any directory slug are logged + skipped (the group has
- * no enforcement until the operator adds matching directory entries
- * to data/bot-directory.local.json).
+ * robots.txt precedence is longest-matching-product-token, and a named
+ * group suppresses `*` entirely -- exactly what robots_query computes
+ * for Disallow. This walk used to compute neither. It claimed slugs
+ * group by group in document order and overwrote, so the LAST declared
+ * group won rather than the most specific one; and it skipped groups
+ * carrying no Crawl-delay, so a named group without one never claimed
+ * its slugs and the wildcard swept up a crawler the file had named.
  *
- * Called from bs_bot_rate_init BEFORE the directive-entry pass — so
- * directives processed second naturally overwrite robots.txt entries
- * on slug conflict (per "later wins" semantics). */
+ * Both were invisible from the Disallow side, which read the same two
+ * groups and resolved them correctly -- one container, two precedence
+ * rules, and only the quieter one wrong. A plain robots.txt could hit
+ * it too: `User-agent: Google` before `User-agent: Googlebot`, both
+ * with a Crawl-delay, gave Googlebot whichever came last.
+ *
+ * Resolved per slug now. Every token of every named group records the
+ * longest token that has claimed each slug it resolves to, and the
+ * group owning that token governs. Slugs one group wins still share
+ * its single counter, as before. */
+
+typedef struct {
+    int group_idx;
+    int tok_len;
+} bs_rb_slug_claim;
+
+/* A robots User-agent token to directory slugs. `@name` selects a
+ * botgroup, the same extension bs_rb_token_matches honours on the
+ * request path; anything else is UA-substring resolution. Passing an
+ * `@name` to the substring resolver -- which is what this walk did --
+ * matched nothing, so a botgroup stanza carried a Disallow and no
+ * Crawl-delay. */
+static apr_array_header_t *robots_token_slugs(apr_pool_t *p,
+                                              const char *tok)
+{
+    if (tok[0] == '@') return bs_known_bots_resolve_by_botgroup(p, tok + 1);
+    return bs_known_bots_resolve_slugs(p, tok);
+}
+
+/* The group's mode, or the container's when the group does not say.
+ * Resolved before this runs (bs_resolve_robots_defaults comes first in
+ * post_config), so UNSET cannot survive here. */
+static int robots_group_observes(bs_server_cfg *scfg,
+                                 const robots_doc *doc, int g)
+{
+    int m = robots_group_mode_at(doc, g);
+    if (m == BS_ROBOTS_MODE_UNSET) m = scfg->robots_mode;
+    return m == BS_ROBOTS_MODE_OBSERVE;
+}
+
+static bs_bot_rate_entry *robots_make_entry(apr_pool_t *pconf,
+                                            bs_server_cfg *scfg,
+                                            const robots_doc *doc,
+                                            int g, int delay_ms)
+{
+    bs_bot_rate_entry *e = apr_pcalloc(pconf, sizeof(*e));
+    e->origin    = "robots.txt";
+    e->budget    = 1;
+    e->window_ms = (apr_uint32_t)(delay_ms > 0 ? delay_ms : 0);
+    e->shm_slot  = -1;
+    e->observe   = robots_group_observes(scfg, doc, g);
+    return e;
+}
+
+/* Called from bs_bot_rate_init BEFORE the directive-entry pass, so a
+ * directive naming the same slug overwrites what is registered here
+ * (directive wins, as it always has). */
 static int register_robots_entries(apr_pool_t *pconf, server_rec *sv,
                                    bs_server_cfg *scfg,
                                    bs_bot_rate_state *st,
@@ -321,92 +373,130 @@ static int register_robots_entries(apr_pool_t *pconf, server_rec *sv,
     bs_robots_state *rstate =
         __atomic_load_n(&scfg->robots, __ATOMIC_ACQUIRE);
     if (!rstate || !rstate->doc) return 0;
+    const robots_doc *doc = rstate->doc;
 
     int registered = 0;
-    int n = robots_group_count(rstate->doc);
+    int n = robots_group_count(doc);
+    if (n <= 0) return 0;
+
+    /* ---- the wildcard ----------------------------------------------
+     * Kept out of the per-slug walk: `*` governs a crawler only when no
+     * named group matched it, which is what expanding over the slugs
+     * nobody claimed already means. Several `*` groups take the max,
+     * the way robots_query does across groups that tie. */
+    int wild_ms = 0, wild_g = -1;
     for (int g = 0; g < n; g++) {
-        int crawl_delay_ms = robots_group_crawl_delay_ms_at(rstate->doc, g);
-        if (crawl_delay_ms <= 0) continue;
+        if (!robots_group_is_wildcard_at(doc, g)) continue;
+        int cd = robots_group_crawl_delay_ms_at(doc, g);
+        if (cd > wild_ms) { wild_ms = cd; wild_g = g; }
+    }
+    if (wild_ms > 0) {
         char cdbuf[32];
-        robots_fmt_seconds(cdbuf, sizeof cdbuf, crawl_delay_ms);
-
-        const char *gname = robots_group_name_at(rstate->doc, g);
-        bs_bot_rate_entry *e = apr_pcalloc(pconf, sizeof(*e));
-        e->origin     = "robots.txt";
-        e->budget     = 1;
-        e->window_ms  = (apr_uint32_t)crawl_delay_ms;
-        e->shm_slot   = -1;
-        /* The group's mode, or the container's when the group does
-         * not say. This used to be left at zero, so observe staged the
-         * Disallow rules and quietly enforced the Crawl-delay ones --
-         * an observe that says the opposite of what it does. The
-         * container mode is resolved before this runs
-         * (bs_resolve_robots_defaults comes first in post_config), so
-         * UNSET cannot survive here. */
-        int gmode = robots_group_mode_at(rstate->doc, g);
-        if (gmode == BS_ROBOTS_MODE_UNSET) gmode = scfg->robots_mode;
-        e->observe    = (gmode == BS_ROBOTS_MODE_OBSERVE);
-
-        if (robots_group_is_wildcard_at(rstate->doc, g)) {
-            e->is_wildcard = 1;
-            if (st->wildcard_entry) {
-                /* Directive wildcard already set in bs_set_bot_rate_limit;
-                 * directive wins. */
-                ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
-                    "mod_botshield: robots.txt User-agent: * "
-                    "Crawl-delay: %ss ignored — BotShieldBotRateLimit "
-                    "* directive already configured (directive wins)",
-                    cdbuf);
-                continue;
-            }
-            st->wildcard_entry = e;
-            registered++;
-            continue;   /* wildcard expansion happens later in init */
-        }
-
-        /* Specific group: resolve UA stanzas to a deduped slug set. */
-        e->slugs = apr_array_make(pconf, 4, sizeof(const char *));
-        apr_hash_t *seen = apr_hash_make(pconf);
-        int ua_count = robots_group_ua_count_at(rstate->doc, g);
-        for (int u = 0; u < ua_count; u++) {
-            const char *ua = robots_group_ua_at(rstate->doc, g, u);
-            if (!ua || !*ua) continue;
-            apr_array_header_t *resolved =
-                bs_known_bots_resolve_slugs(pconf, ua);
-            for (int s2 = 0; s2 < resolved->nelts; s2++) {
-                const char *slug = APR_ARRAY_IDX(resolved, s2,
-                                                 const char *);
-                if (!apr_hash_get(seen, slug, APR_HASH_KEY_STRING)) {
-                    apr_hash_set(seen, slug, APR_HASH_KEY_STRING,
-                                 (void *)1);
-                    *(const char **)apr_array_push(e->slugs) = slug;
-                }
-            }
-        }
-
-        if (e->slugs->nelts == 0) {
+        robots_fmt_seconds(cdbuf, sizeof cdbuf, wild_ms);
+        if (st->wildcard_entry) {
             ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
-                "mod_botshield: robots.txt group '%s' has Crawl-delay: "
-                "%ss but its User-agent stanza(s) don't resolve to any "
-                "directory slug; group has no rate-limit enforcement. "
-                "Add matching entries to data/bot-directory.local.json "
-                "if you want this group enforced.",
-                gname ? gname : "?", cdbuf);
+                "mod_botshield: robots.txt User-agent: * "
+                "Crawl-delay: %ss ignored — BotShieldBotRateLimit "
+                "* directive already configured (directive wins)",
+                cdbuf);
+        } else {
+            st->wildcard_entry =
+                robots_make_entry(pconf, scfg, doc, wild_g, wild_ms);
+            st->wildcard_entry->is_wildcard = 1;
+            registered++;
+        }
+    }
+
+    /* ---- longest token wins, per slug ---- */
+    apr_hash_t *claim = apr_hash_make(pconf);
+    char *resolved_any = apr_pcalloc(pconf, (apr_size_t)n);
+    for (int g = 0; g < n; g++) {
+        if (robots_group_is_wildcard_at(doc, g)) continue;
+        int nua = robots_group_ua_count_at(doc, g);
+        for (int u = 0; u < nua; u++) {
+            const char *tok = robots_group_ua_at(doc, g, u);
+            if (!tok || !*tok) continue;
+            int tlen = (int)strlen(tok);
+            apr_array_header_t *slugs = robots_token_slugs(pconf, tok);
+            if (!slugs || slugs->nelts == 0) continue;
+            resolved_any[g] = 1;
+            for (int s = 0; s < slugs->nelts; s++) {
+                const char *slug = APR_ARRAY_IDX(slugs, s, const char *);
+                bs_rb_slug_claim *c =
+                    apr_hash_get(claim, slug, APR_HASH_KEY_STRING);
+                if (c) {
+                    if (c->tok_len > tlen) continue;
+                    /* Tie on specificity: robots_query takes the max
+                     * Crawl-delay across the groups that tie, so the
+                     * more restrictive one governs. */
+                    if (c->tok_len == tlen
+                        && robots_group_crawl_delay_ms_at(doc, g)
+                           <= robots_group_crawl_delay_ms_at(
+                                  doc, c->group_idx)) {
+                        continue;
+                    }
+                } else {
+                    c = apr_palloc(pconf, sizeof(*c));
+                    apr_hash_set(claim, slug, APR_HASH_KEY_STRING, c);
+                }
+                c->group_idx = g;
+                c->tok_len   = tlen;
+            }
+        }
+    }
+
+    /* ---- one counter per winning group ---- */
+    apr_array_header_t **won =
+        apr_pcalloc(pconf, (apr_size_t)n * sizeof(*won));
+    for (apr_hash_index_t *hi = apr_hash_first(pconf, claim); hi;
+         hi = apr_hash_next(hi)) {
+        const void *k; void *v;
+        apr_hash_this(hi, &k, NULL, &v);
+        bs_rb_slug_claim *c = v;
+        if (!won[c->group_idx]) {
+            won[c->group_idx] =
+                apr_array_make(pconf, 4, sizeof(const char *));
+        }
+        *(const char **)apr_array_push(won[c->group_idx]) = (const char *)k;
+    }
+
+    for (int g = 0; g < n; g++) {
+        if (robots_group_is_wildcard_at(doc, g)) continue;
+        int cd = robots_group_crawl_delay_ms_at(doc, g);
+        const char *gname = robots_group_name_at(doc, g);
+        if (!resolved_any[g]) {
+            if (cd > 0) {
+                char cdbuf[32];
+                robots_fmt_seconds(cdbuf, sizeof cdbuf, cd);
+                ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, sv,
+                    "mod_botshield: robots.txt group '%s' has Crawl-delay: "
+                    "%ss but its User-agent stanza(s) don't resolve to any "
+                    "directory slug; group has no rate-limit enforcement. "
+                    "Add matching entries to data/bot-directory.local.json "
+                    "if you want this group enforced.",
+                    gname ? gname : "?", cdbuf);
+            }
             continue;
         }
+        /* Every slug this group resolved went to a longer token. */
+        if (!won[g]) continue;
+        /* A named group carrying no Crawl-delay is not silence: being
+         * named is what suppresses `*`, so its crawlers are exempt from
+         * the wildcard's delay rather than subject to it. window_ms 0
+         * admits everything -- the sentinel `BotShieldBotRateLimit
+         * <slug> 0` already uses. Only worth a counter when there is a
+         * wildcard delay for it to suppress. */
+        if (cd <= 0 && !st->wildcard_entry) continue;
 
-        /* Allocate slot + register slugs immediately (before directive
-         * pass runs). Conflict logging is suppressed here — robots.txt
-         * is the FIRST source of entries, so by_slug is empty. The
-         * directive pass below may overwrite these with NOTICE. */
+        bs_bot_rate_entry *e = robots_make_entry(pconf, scfg, doc, g, cd);
+        e->slugs = won[g];
         bs_bot_rate_slot *h = allocate_holder(pconf, sv,
-            apr_pstrcat(pconf, "robots.txt ",
-                APR_ARRAY_IDX(e->slugs, 0, const char *), NULL),
+            apr_pstrcat(pconf, "robots.txt ", gname ? gname : "?", NULL),
             next_slot, e->budget, e->window_ms, e->origin, e->observe);
         if (!h) continue;
         e->shm_slot = h->shm_slot;
-        for (int j = 0; j < e->slugs->nelts; j++) {
-            const char *slug = APR_ARRAY_IDX(e->slugs, j, const char *);
+        for (int j = 0; j < won[g]->nelts; j++) {
+            const char *slug = APR_ARRAY_IDX(won[g], j, const char *);
             apr_hash_set(st->by_slug, slug, APR_HASH_KEY_STRING, h);
         }
         registered++;

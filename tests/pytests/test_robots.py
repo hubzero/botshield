@@ -48,6 +48,13 @@ REAL_UA    = ("Mozilla/5.0 (X11; Linux x86_64; rv:130.0) "
               "Gecko/20100101 Firefox/130.0")
 CURL_UA    = "curl/8.6.0"
 
+# Real crawler ranges so these classify verified-bot rather than
+# fake-bot, which is challenged instead of rate-limited.
+REAL_GOOGLEBOT_IP = "66.249.66.1"
+REAL_BINGBOT_IP = "157.55.39.1"
+BINGBOT_UA = ("Mozilla/5.0 (compatible; bingbot/2.0; "
+              "+http://www.bing.com/bingbot.htm)")
+
 
 TEST_ROBOTS_DIR = "/etc/botshield/test-robots"
 
@@ -845,3 +852,95 @@ def test_robots_dump_shows_inline_groups(config_override):
     assert "source=config" in body, body[:800]
     assert "respond:   404" in body, body[:800]
     assert "logas:     ai-deny" in body, body[:800]
+
+
+# --- Crawl-delay precedence -------------------------------------------
+
+
+@pytest.mark.parametrize("order", ["specific-first", "broad-first"])
+def test_crawl_delay_longest_token_wins(config_override, order):
+    """robots.txt is order-independent: the longest matching product
+    token governs, whichever group declared it.
+
+    Until 2026-09-10 the Crawl-delay side resolved by declaration order
+    and the last group won, so swapping these two blocks changed which
+    delay Googlebot got -- while the Disallow side, reading the same two
+    groups, resolved them correctly.
+
+    0.001s is below any real request spacing, so the specific group is
+    effectively "no limit" and a 429 means the broad group won.
+    """
+    specific = ("        <BotShieldRobotRule specific>\n"
+                "            BotShieldUserAgent   bingbot\n"
+                "            BotShieldCrawlDelay  0.001\n"
+                "        </BotShieldRobotRule>\n")
+    broad = ("        <BotShieldRobotRule broad>\n"
+             "            BotShieldUserAgent   bing\n"
+             "            BotShieldCrawlDelay  60\n"
+             "        </BotShieldRobotRule>\n")
+    body = (specific + broad) if order == "specific-first" else (broad + specific)
+    conf = ("BotShieldEnabled On\n"
+            "    BotShieldChallengeAtLeast none\n"
+            "    <BotShieldRobots>\n" + body + "    </BotShieldRobots>")
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
+        codes = [client.get("/", xff=REAL_BINGBOT_IP,
+                            ua=BINGBOT_UA).status_code for _ in range(3)]
+    assert 429 not in codes, (
+        f"'bingbot' is the longer token and must govern in either "
+        f"order; with {order} it lost to 'bing'. codes={codes}"
+    )
+
+
+def test_a_named_group_without_a_delay_is_exempt(config_override, fresh_ip):
+    """Being named is what suppresses `*`.
+
+    A named group carrying no Crawl-delay therefore means its crawlers
+    have none -- not "fall through to the wildcard's", which is what it
+    used to mean because a delay-free group never claimed its slugs.
+    """
+    conf = ("BotShieldEnabled On\n"
+            "    BotShieldChallengeAtLeast none\n"
+            "    <BotShieldRobots>\n"
+            "        <BotShieldRobotRule bing>\n"
+            "            BotShieldUserAgent   bingbot\n"
+            "            BotShieldAllow       /\n"
+            "        </BotShieldRobotRule>\n"
+            "        <BotShieldRobotRule everyone>\n"
+            "            BotShieldUserAgent   *\n"
+            "            BotShieldCrawlDelay  60\n"
+            "        </BotShieldRobotRule>\n"
+            "    </BotShieldRobots>")
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
+        b = [client.get("/", xff=REAL_BINGBOT_IP,
+                        ua=BINGBOT_UA).status_code for _ in range(3)]
+        g = [client.get("/", xff=fresh_ip, ua=GPTBOT_UA).status_code
+             for _ in range(2)]
+    assert 429 not in b, (
+        f"the named group should exempt bingbot from the wildcard's "
+        f"60s; got {b}"
+    )
+    assert g[1] == 429, (
+        f"an unnamed crawler must still take the wildcard's 60s; got {g}"
+    )
+
+
+def test_crawl_delay_honours_a_botgroup_token(config_override):
+    """`User-agent: @search` is the module's botgroup extension, and
+    robots_query has always matched it. The Crawl-delay walk passed the
+    whole `@search` string to the UA-substring resolver, which matched
+    nothing, so a botgroup stanza carried a Disallow and no delay."""
+    conf = ("BotShieldEnabled On\n"
+            "    BotShieldChallengeAtLeast none\n"
+            "    <BotShieldRobots>\n"
+            "        <BotShieldRobotRule searchers>\n"
+            "            BotShieldUserAgent   @search\n"
+            "            BotShieldCrawlDelay  60\n"
+            "        </BotShieldRobotRule>\n"
+            "    </BotShieldRobots>")
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
+        b = [client.get("/", xff=REAL_BINGBOT_IP,
+                        ua=BINGBOT_UA).status_code for _ in range(2)]
+    assert b[1] == 429, (
+        f"bingbot is in the search botgroup and should take the "
+        f"group's 60s delay; got {b}"
+    )
