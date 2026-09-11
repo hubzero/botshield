@@ -1798,7 +1798,7 @@ two-step substitution renderer.
    + verify URL). Result: a self-contained widget block with scoped
    CSS.
 2. The page shell — built-in `BS_DEFAULT_PAGE_TEMPLATE` or
-   operator-provided `BotShieldChallengeFile` — gets the widget
+   operator-provided `BotShieldTemplate` — gets the widget
    block spliced in at the `<!-- BOTSHIELD -->` marker.
 
 `bs_render_challenge_page` sets `r->status`, `Content-Type`,
@@ -1823,14 +1823,18 @@ the surrounding decision-log entry.
 
 ### Operator overrides
 
-- `BotShieldChallengeFile <path>` — full HTML page template with the
+All nine live inside `<BotShieldChallengePage>` (per-directory, one
+per scope) since 2026-09-11; the flat spellings fail config parse
+naming their new home.
+
+- `BotShieldTemplate <path>` — full HTML page template with the
   `<!-- BOTSHIELD -->` marker. Loaded once at startup, capped at
   `BS_MAX_PAGE_BYTES = 256 KiB`.
 - `BotShieldLogoFile <path>` — SVG inline; `BS_MAX_LOGO_BYTES = 64
   KiB`.
 - `BotShieldHelpFile <path>` — HTML fragment for the help panel;
   `BS_MAX_HELP_BYTES = 64 KiB`. Contents are trusted (no escaping).
-- `BotShieldPromptText`, `BotShieldLogoLabel` — short strings;
+- `BotShieldPrompt`, `BotShieldLogoLabel` — short strings;
   HTML-escaped at render.
 - `BotShieldShowLogo` / `BotShieldShowLabel` / `BotShieldShowBox` —
   visibility flags.
@@ -2411,7 +2415,8 @@ the `bs_cmds[]` table at `src/botshield.c:213`.
 
 | Family | Directives |
 |--------|-----------|
-| Top-level / UI | `BotShieldEnabled`, `BotShieldChallenge`, `BotShieldDebug`, `BotShieldCookieTTL`, `BotShieldDifficulty`, `BotShieldPromptText`, `BotShieldLogoFile`, `BotShieldLogoLabel`, `BotShieldShowLogo`, `BotShieldShowLabel`, `BotShieldShowBox`, `BotShieldHelp`, `BotShieldHelpFile`, `BotShieldChallengeFile`, `BotShieldEndpointPrefix` |
+| Top-level | `BotShieldEnabled`, `BotShieldChallenge`, `BotShieldDebug`, `BotShieldCookieTTL`, `BotShieldDifficulty`, `BotShieldEndpointPrefix` |
+| Interstitial page | `<BotShieldChallengePage>` holding `BotShieldPrompt`, `BotShieldLogoFile`, `BotShieldLogoLabel`, `BotShieldShowLogo`, `BotShieldShowLabel`, `BotShieldShowBox`, `BotShieldHelp`, `BotShieldHelpFile`, `BotShieldTemplate` |
 | Crypto | `BotShieldSecretFile`, `BotShieldSecondarySecretFile`, `BotShieldAlgorithm` |
 | Scoring | `BotShieldScore` (in a rule), `BotShieldScoreAtLeast`, `BotShieldChallengeAtLeast`. The `BotShieldScore*` cut-points and the `BotShieldForgiveness*` family were removed with the cumulative score |
 | Cookie | `BotShieldCookieDomain` |

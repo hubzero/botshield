@@ -262,17 +262,54 @@ serves the real content but no cookie ever lands.
 
 | Directive | Syntax | Default |
 |---|---|---|
-| `BotShieldPromptText` | `"text"` | `I'm not a robot` |
+One container, `<BotShieldChallengePage>`, once per scope. It takes no
+argument and describes how the interstitial looks.
+
+```apache
+<BotShieldChallengePage>
+    BotShieldPrompt     "Please verify"
+    BotShieldLogoFile   /etc/botshield/logo.svg
+    BotShieldLogoLabel  "Crestline"
+    BotShieldShowLogo   On
+    BotShieldHelp       button
+    BotShieldHelpFile   /etc/botshield/help.html
+</BotShieldChallengePage>
+```
+
+| Inside the container | Syntax | Default |
+|---|---|---|
+| `BotShieldPrompt` | `"text"` | `I'm not a robot` |
 | `BotShieldLogoFile` | `/path.svg` | embedded Guardian |
 | `BotShieldLogoLabel` | `"text"` | `botshield` |
-| `BotShieldShowLogo` | `on\|off` | `on` |
-| `BotShieldShowLabel` | `on\|off` | `on` |
-| `BotShieldShowBox` | `on\|off` | `on` |
+| `BotShieldShowLogo` | `On\|Off` | `On` |
+| `BotShieldShowLabel` | `On\|Off` | `On` |
+| `BotShieldShowBox` | `On\|Off` | `On` |
 | `BotShieldHelp` | `off\|on\|button` | `button` |
 | `BotShieldHelpFile` | `/path.html` | built-in text |
-| `BotShieldChallengeFile` | `/path.html` | built-in shell |
+| `BotShieldTemplate` | `/path.html` | built-in shell |
 
-`BotShieldChallengeFile` replaces the full HTML page that wraps the
+**This is the page every challenged request sees**, not the captcha
+tier's alone — `bs_render_challenge_page` draws all three tiers and the
+captcha widget is one branch inside it. That is why these settings are
+not part of `<BotShieldCaptcha>`: a scope that configures no captcha
+still renders this page, and making them per-provider would mean
+declaring a captcha block just to set a logo.
+
+Per-directory like `<BotShieldCaptcha>`, so a `<Location>` can dress
+its own interstitial.
+
+#### Moved: the nine flat spellings
+
+`BotShieldPromptText`, `BotShieldLogoFile`, `BotShieldLogoLabel`,
+`BotShieldShowLogo`, `BotShieldShowLabel`, `BotShieldShowBox`,
+`BotShieldHelp`, `BotShieldHelpFile` and `BotShieldChallengeFile` moved
+inside the block on 2026-09-11 and now fail config parse with a line
+naming where the setting went. Two changed name in the move:
+`BotShieldPromptText` → `BotShieldPrompt`, and `BotShieldChallengeFile`
+→ `BotShieldTemplate`, which is what a full HTML page carrying the
+widget marker always was.
+
+`BotShieldTemplate` replaces the full HTML page that wraps the
 widget; the file must contain `<!-- BOTSHIELD -->` where the widget
 is spliced in. Other widget directives still apply to the widget
 block itself. Max 256 KiB.
@@ -281,7 +318,7 @@ Logo and help files are 64 KiB max each. Logo content is served
 inline as `<img>`-equivalent SVG; help content is rendered as
 trusted HTML (no escaping — you own sanitization).
 
-`BotShieldShowLogo/Label/Box` strip widget chrome down to a lone
+`BotShieldShowLogo` / `ShowLabel` / `ShowBox` strip widget chrome down to a lone
 checkbox if the surrounding page styles its own chrome. When label
 is hidden it moves to the button's `aria-label` — accessibility is
 preserved.

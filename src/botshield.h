@@ -332,6 +332,11 @@ struct bs_dir_cfg {
      * bs_app_claims_strip_hook. */
     int         app_claims;
 
+    /* <BotShieldChallengePage> seen in this scope. Not
+     * inherited: a <Location> describing its own page is an
+     * override, not a duplicate. */
+    int         page_container_seen;
+
     /* This scope's captcha: the first <BotShieldCaptcha> block in
      * it. NULL when the scope configures none. Read through
      * bs_cap() below, which turns NULL into an all-zero record so

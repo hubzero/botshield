@@ -225,50 +225,53 @@ static const command_rec bs_cmds[] = {
                  "request. Raise it if your pages are heavy, lower or "
                  "disable it if legitimate clients are being refused "
                  "(look for reason=solve_too_fast)."),
-    AP_INIT_TAKE1("BotShieldPromptText", bs_set_prompt,    NULL,
+    /* Retired 2026-09-11 into <BotShieldChallengePage>; each fails
+     * config parse naming its new home and spelling. */
+    AP_INIT_RAW_ARGS("BotShieldPromptText",    bs_page_directive_moved,
+                 NULL, OR_ALL, "Moved into <BotShieldChallengePage> as BotShieldPrompt."),
+    AP_INIT_RAW_ARGS("BotShieldLogoFile",      bs_page_directive_moved,
+                 NULL, OR_ALL, "Moved into <BotShieldChallengePage>."),
+    AP_INIT_RAW_ARGS("BotShieldLogoLabel",     bs_page_directive_moved,
+                 NULL, OR_ALL, "Moved into <BotShieldChallengePage>."),
+    AP_INIT_RAW_ARGS("BotShieldShowLogo",      bs_page_directive_moved,
+                 NULL, OR_ALL, "Moved into <BotShieldChallengePage>."),
+    AP_INIT_RAW_ARGS("BotShieldShowLabel",     bs_page_directive_moved,
+                 NULL, OR_ALL, "Moved into <BotShieldChallengePage>."),
+    AP_INIT_RAW_ARGS("BotShieldShowBox",       bs_page_directive_moved,
+                 NULL, OR_ALL, "Moved into <BotShieldChallengePage>."),
+    AP_INIT_RAW_ARGS("BotShieldHelp",          bs_page_directive_moved,
+                 NULL, OR_ALL, "Moved into <BotShieldChallengePage>."),
+    AP_INIT_RAW_ARGS("BotShieldHelpFile",      bs_page_directive_moved,
+                 NULL, OR_ALL, "Moved into <BotShieldChallengePage>."),
+    AP_INIT_RAW_ARGS("BotShieldChallengeFile", bs_page_directive_moved,
+                 NULL, OR_ALL, "Moved into <BotShieldChallengePage> as BotShieldTemplate."),
+    AP_INIT_RAW_ARGS("<BotShieldChallengePage", bs_open_page, NULL,
                  RSRC_CONF | ACCESS_CONF,
-                 "Label shown next to the checkbox (default: \"I'm not a robot\"). "
-                 "HTML-escaped at render time."),
-    AP_INIT_TAKE1("BotShieldLogoFile",   bs_set_logo_file, NULL,
-                 RSRC_CONF | ACCESS_CONF,
-                 "Path to an SVG file served inline as the widget logo. "
-                 "Read once at startup; must be <= 64 KB. "
-                 "Default: embedded Guardian shield."),
-    AP_INIT_TAKE1("BotShieldLogoLabel",  bs_set_logo_label,NULL,
-                 RSRC_CONF | ACCESS_CONF,
-                 "Small caption under the logo (default: \"botshield\"). "
-                 "Empty string hides it."),
-    AP_INIT_FLAG("BotShieldShowLogo",   bs_set_show_logo,  NULL,
-                 RSRC_CONF | ACCESS_CONF,
-                 "Show the brand column — logo + caption (default: on). "
-                 "Off removes the whole column from the widget."),
-    AP_INIT_FLAG("BotShieldShowLabel",  bs_set_show_label, NULL,
-                 RSRC_CONF | ACCESS_CONF,
-                 "Show the prompt text next to the checkbox (default: on). "
-                 "Off hides the text and moves it to the button's aria-label "
-                 "so screen readers still hear it."),
-    AP_INIT_FLAG("BotShieldShowBox",    bs_set_show_box,   NULL,
-                 RSRC_CONF | ACCESS_CONF,
-                 "Show the widget's outer box — border, background, shadow "
-                 "(default: on). Off leaves just the controls for the admin's "
-                 "page to style around."),
-    AP_INIT_TAKE1("BotShieldHelp",       bs_set_help,      NULL,
-                 RSRC_CONF | ACCESS_CONF,
-                 "Help visibility: off | on | button (default: button). "
-                 "'button' shows a '?' link under the widget that toggles "
-                 "an explainer panel."),
-    AP_INIT_TAKE1("BotShieldHelpFile",   bs_set_help_file, NULL,
-                 RSRC_CONF | ACCESS_CONF,
-                 "Path to an HTML fragment used as the help panel content. "
-                 "Read once at startup; must be <= 64 KB. Contents are "
-                 "trusted (no escaping). Default: a built-in explanation."),
-    AP_INIT_TAKE1("BotShieldChallengeFile", bs_set_challenge_file, NULL,
-                 RSRC_CONF | ACCESS_CONF,
-                 "Path to a full HTML page that wraps the verification "
-                 "widget. Must contain the marker '" BS_WIDGET_MARKER "' "
-                 "where the widget should be inserted. Read once at startup; "
-                 "must be <= 256 KB. Other BotShield* directives still apply "
-                 "to the widget block."),
+                 "Open the block describing how the interstitial looks. "
+                 "Takes no argument; one per scope; settable per "
+                 "<Location> so a path can dress its own page. This is "
+                 "the page every challenged request sees, not the "
+                 "captcha tier's alone -- the captcha widget is one "
+                 "branch inside it. Inside the block: BotShieldPrompt "
+                 "(label next to the checkbox, default \"I'm not a "
+                 "robot\", HTML-escaped at render), BotShieldLogoFile "
+                 "(inline SVG, <= 64 KB, read at startup; default the "
+                 "embedded shield), BotShieldLogoLabel (caption under "
+                 "the logo, default \"botshield\"; empty hides it), "
+                 "BotShieldShowLogo (brand column, default On), "
+                 "BotShieldShowLabel (prompt text; Off moves it to the "
+                 "button's aria-label so screen readers still hear it), "
+                 "BotShieldShowBox (border, background and shadow, "
+                 "default On; Off leaves bare controls to style "
+                 "around), BotShieldHelp (off|on|button, default "
+                 "button), BotShieldHelpFile (HTML fragment for the "
+                 "help panel, <= 64 KB, trusted and unescaped), and "
+                 "BotShieldTemplate (a full HTML page containing the "
+                 "marker '" BS_WIDGET_MARKER "' where the widget is "
+                 "inserted, <= 256 KB; the other settings still apply "
+                 "to the widget block). Formerly nine flat directives; "
+                 "BotShieldPromptText is now BotShieldPrompt and "
+                 "BotShieldChallengeFile is now BotShieldTemplate."),
     AP_INIT_TAKE1("BotShieldSecretFile", bs_set_secret_file, NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "Path to the HMAC key used to sign challenge cookies. "

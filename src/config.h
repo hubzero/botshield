@@ -140,6 +140,15 @@ const char *bs_set_safeguard_ttl      (cmd_parms *cmd, bs_server_cfg *scfg, cons
 const char *bs_set_safeguard_redirect_url(cmd_parms *cmd, bs_server_cfg *scfg, const char *arg);
 const char *bs_open_safeguard(cmd_parms *cmd, void *dconf, const char *arg);
 
+/* <BotShieldChallengePage>: how the interstitial looks. The nine
+ * settings inside are not registered directives. */
+const char *bs_open_page(cmd_parms *cmd, void *dconf, const char *arg);
+
+/* Every flat spelling the block replaced; returns the migration
+ * sentence. Registered, so the failure is not "Invalid command". */
+const char *bs_page_directive_moved(cmd_parms *cmd, void *dconf,
+                                    const char *arg);
+
 /* Sizes the module-global safeguard table, so only the main
  * server's value is read -- a registered directive, not a block
  * setting. */

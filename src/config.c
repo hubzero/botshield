@@ -90,6 +90,7 @@ void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->challenge_at_least_reset = 0;
     cfg->endpoint_prefix     = NULL;
     cfg->app_claims          = BS_UNSET;
+    cfg->page_container_seen = 0;
     cfg->captcha             = NULL;
     cfg->captchas            = NULL;
     cfg->captcha_timeout_ms  = BS_UNSET;
@@ -622,6 +623,8 @@ void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
      * tri-state rather than a bare flag. */
     out->app_claims = (add->app_claims == BS_UNSET) ? base->app_claims
                                                     : add->app_claims;
+    /* Deliberately not inherited -- see the field's comment. */
+    out->page_container_seen = add->page_container_seen;
     out->captcha  = add->captcha ? add->captcha : base->captcha;
     /* A scope declaring any provider replaces the set it inherited
      * rather than adding to it, so what a <Location> shows is what it
@@ -3928,6 +3931,148 @@ const char *bs_open_safeguard(cmd_parms *cmd, void *dconf, const char *arg)
     }
     return NULL;
 }
+
+/* The flat spellings, kept registered so each fails with a sentence
+ * naming where the setting went. Apache's own answer to an
+ * unregistered directive is "Invalid command", which sends the reader
+ * looking for a typo or a missing LoadModule rather than at a
+ * migration. Two of the nine also changed name inside the block. */
+const char *bs_page_directive_moved(cmd_parms *cmd, void *dconf,
+                                    const char *arg)
+{
+    (void)dconf; (void)arg;
+    static const struct { const char *was, *now; } renamed[] = {
+        { "BotShieldPromptText",    "BotShieldPrompt"   },
+        { "BotShieldChallengeFile", "BotShieldTemplate" },
+        { NULL, NULL }
+    };
+    const char *name = cmd->cmd->name;
+    const char *inside = name;
+    for (int i = 0; renamed[i].was; i++) {
+        if (!strcasecmp(name, renamed[i].was)) {
+            inside = renamed[i].now;
+            break;
+        }
+    }
+    if (inside != name) {
+        return apr_psprintf(cmd->pool,
+            "%s now lives inside <BotShieldChallengePage> and is "
+            "spelled %s there. Write: <BotShieldChallengePage> ... "
+            "%s <value> ... </BotShieldChallengePage>. See "
+            "docs/directives.md.", name, inside, inside);
+    }
+    return apr_psprintf(cmd->pool,
+        "%s now lives inside <BotShieldChallengePage>. Write: "
+        "<BotShieldChallengePage> ... %s <value> ... "
+        "</BotShieldChallengePage>. See docs/directives.md.",
+        name, name);
+}
+
+/* <BotShieldChallengePage> -- everything about how the interstitial
+ * looks, in one block.
+ *
+ * These nine were flat, scattered between a PoW difficulty knob and a
+ * secret-file path, and nothing in the config said they described one
+ * page. They share no redundant prefix, so unlike <BotShieldSafeguard>
+ * the block is not buying shorter names; it is buying one place to
+ * read and one section to document. Two names do improve: PromptText
+ * drops a noise word, and ChallengeFile becomes Template, which is
+ * what a full HTML page carrying the widget marker always was.
+ *
+ * Per-directory like <BotShieldCaptcha>, so a <Location> can dress its
+ * own interstitial. The settings are not registered directives; the
+ * short names exist only here.
+ *
+ * It is NOT part of <BotShieldCaptcha>: this page is what
+ * bs_render_challenge_page draws for every tier, with the captcha
+ * widget as one branch inside it. A scope that configures no captcha
+ * still renders it. */
+static const struct {
+    const char *name;
+    int         is_flag;
+    const char *(*set_str)(cmd_parms *, void *, const char *);
+    const char *(*set_flag)(cmd_parms *, void *, int);
+} bs_page_keys[] = {
+    { "BotShieldPrompt",    0, bs_set_prompt,         NULL             },
+    { "BotShieldLogoFile",  0, bs_set_logo_file,      NULL             },
+    { "BotShieldLogoLabel", 0, bs_set_logo_label,     NULL             },
+    { "BotShieldHelp",      0, bs_set_help,           NULL             },
+    { "BotShieldHelpFile",  0, bs_set_help_file,      NULL             },
+    { "BotShieldTemplate",  0, bs_set_challenge_file, NULL             },
+    { "BotShieldShowLogo",  1, NULL,                  bs_set_show_logo  },
+    { "BotShieldShowLabel", 1, NULL,                  bs_set_show_label },
+    { "BotShieldShowBox",   1, NULL,                  bs_set_show_box   },
+    { NULL, 0, NULL, NULL }
+};
+
+const char *bs_open_page(cmd_parms *cmd, void *dconf, const char *arg)
+{
+    apr_pool_t *p = cmd->pool;
+    bs_dir_cfg *cfg = dconf;
+
+    char *spec = apr_pstrdup(p, arg ? arg : "");
+    apr_size_t n = strlen(spec);
+    while (n && apr_isspace(spec[n - 1])) spec[--n] = '\0';
+    if (!n || spec[n - 1] != '>') {
+        return "<BotShieldChallengePage> is missing its closing '>'";
+    }
+    spec[--n] = '\0';
+    while (n && apr_isspace(spec[n - 1])) spec[--n] = '\0';
+    if (n) {
+        return apr_psprintf(p, "<BotShieldChallengePage> takes no "
+                            "argument; '%s' was given", spec);
+    }
+    if (cfg && cfg->page_container_seen) {
+        return "<BotShieldChallengePage> is already defined in this "
+               "scope. One per scope: it describes a single page, and "
+               "a second block would silently win.";
+    }
+    if (cfg) cfg->page_container_seen = 1;
+
+    apr_table_t *seen = apr_table_make(p, 12);
+    for (const ap_directive_t *d = cmd->directive->first_child; d;
+         d = d->next) {
+        const char *dir = d->directive;
+        int i;
+        for (i = 0; bs_page_keys[i].name; i++) {
+            if (!strcasecmp(dir, bs_page_keys[i].name)) break;
+        }
+        if (!bs_page_keys[i].name) {
+            return apr_psprintf(p,
+                "<BotShieldChallengePage>: '%s' at %s:%d is not a page "
+                "setting. Inside the block: BotShieldPrompt, "
+                "BotShieldLogoFile, BotShieldLogoLabel, "
+                "BotShieldShowLogo, BotShieldShowLabel, "
+                "BotShieldShowBox, BotShieldHelp, BotShieldHelpFile, "
+                "BotShieldTemplate.",
+                dir, d->filename ? d->filename : "?", d->line_num);
+        }
+        if (apr_table_get(seen, bs_page_keys[i].name)) {
+            return apr_psprintf(p,
+                "<BotShieldChallengePage>: %s given twice", dir);
+        }
+        apr_table_set(seen, bs_page_keys[i].name, "1");
+
+        const char *val = bs_block_value(p, d);
+        const char *err;
+        if (bs_page_keys[i].is_flag) {
+            int on;
+            if      (!strcasecmp(val, "on"))  on = 1;
+            else if (!strcasecmp(val, "off")) on = 0;
+            else return apr_psprintf(p,
+                "<BotShieldChallengePage>: %s '%s' must be On or Off",
+                dir, val);
+            err = bs_page_keys[i].set_flag(cmd, dconf, on);
+        } else {
+            err = bs_page_keys[i].set_str(cmd, dconf, val);
+        }
+        if (err) {
+            return apr_psprintf(p, "<BotShieldChallengePage>: %s", err);
+        }
+    }
+    return NULL;
+}
+
 
 /* BotShieldEmbeddedNonceCapacity <n>. SHM slot count for the
  * embedded-bootstrap nonce table. Sized to comfortably hold all
