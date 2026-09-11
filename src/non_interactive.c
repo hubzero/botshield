@@ -549,21 +549,21 @@ int bs_embedded_bootstrap_handler(request_rec *r,
      * Otherwise fall back to native PoW. The wrapper's runtime check
      * on the `provider` field is what dispatches to the right
      * client-side path. */
-    if (cfg->captcha_provider && cfg->captcha_provider->implemented &&
-        cfg->captcha_site_key && cfg->captcha_secret) {
+    if (bs_cap(cfg)->provider && bs_cap(cfg)->provider->implemented &&
+        bs_cap(cfg)->site_key && bs_cap(cfg)->secret) {
         /* `action` is the string the client widget tags its token
          * with. Both Turnstile and reCAPTCHA v3 understand actions;
          * server-side we validate the response carries it back so
          * tokens minted for a different form/scope can't be replayed
          * here. Operator can override via BotShieldCaptchaExpectedAction;
          * default "botshield" matches the M8 interstitial path. */
-        const char *action = cfg->captcha_expected_action
-            ? cfg->captcha_expected_action : "botshield";
+        const char *action = bs_cap(cfg)->expected_action
+            ? bs_cap(cfg)->expected_action : "botshield";
         ap_rprintf(r,
             "{\"mode\":\"noninteractive\",\"provider\":\"%s\","
             "\"sitekey\":\"%s\",\"action\":\"%s\"}\n",
-            cfg->captcha_provider->name,
-            cfg->captcha_site_key, action);
+            bs_cap(cfg)->provider->name,
+            bs_cap(cfg)->site_key, action);
         return OK;
     }
 
@@ -1060,8 +1060,8 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
                                        json_object *root,
                                        const char *provider_name)
 {
-    if (!cfg->captcha_provider || !cfg->captcha_provider->implemented ||
-        !cfg->captcha_secret) {
+    if (!bs_cap(cfg)->provider || !bs_cap(cfg)->provider->implemented ||
+        !bs_cap(cfg)->secret) {
         r->status = HTTP_SERVICE_UNAVAILABLE;
         ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
             "mod_botshield: embedded-verify(%s): scope has no "
@@ -1069,12 +1069,12 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
             provider_name);
         return OK;
     }
-    if (strcmp(cfg->captcha_provider->name, provider_name) != 0) {
+    if (strcmp(bs_cap(cfg)->provider->name, provider_name) != 0) {
         r->status = HTTP_BAD_REQUEST;
         ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
             "mod_botshield: embedded-verify(%s): wrapper claimed "
             "provider but scope is configured for '%s'",
-            provider_name, cfg->captcha_provider->name);
+            provider_name, bs_cap(cfg)->provider->name);
         return OK;
     }
 
@@ -1100,7 +1100,7 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
      * same per-IP rate cap and global in-flight semaphore as the
      * /captcha-verify handler. Without the wrapper, this path was
      * a provider-quota / worker-occupancy DoS surface. */
-    bs_captcha_result res = bs_captcha_siteverify_guarded(r, cfg, token,
+    bs_captcha_result res = bs_captcha_siteverify_guarded(r, cfg, bs_cap(cfg), token,
         timeout_ms, "embedded-verify",
         &details, &http_code, &score, &resp_hostname, &resp_action);
 
@@ -1134,13 +1134,13 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
      * "valid token but signal is weak". Operator can opt out of
      * either binding by setting the directive to empty. */
     const char *expected_host =
-        cfg->captcha_expected_hostname
-            ? cfg->captcha_expected_hostname
+        bs_cap(cfg)->expected_hostname
+            ? bs_cap(cfg)->expected_hostname
             : (r->server && r->server->server_hostname
                    ? r->server->server_hostname : "");
     const char *expected_action =
-        cfg->captcha_expected_action
-            ? cfg->captcha_expected_action : "botshield";
+        bs_cap(cfg)->expected_action
+            ? bs_cap(cfg)->expected_action : "botshield";
 
     if (resp_hostname && *expected_host &&
         strcmp(resp_hostname, expected_host) != 0) {
@@ -1161,8 +1161,8 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
         return OK;
     }
     if (strcmp(provider_name, "recaptcha-v3") == 0) {
-        double min_score = (cfg->recaptcha_v3_min_score >= 0.0)
-            ? cfg->recaptcha_v3_min_score
+        double min_score = (bs_cap(cfg)->min_score >= 0.0)
+            ? bs_cap(cfg)->min_score
             : BS_DEFAULT_RECAPTCHA_V3_MIN_SCORE;
         if (score < 0.0) {
             /* Missing score on a v3 response is a protocol surprise
@@ -1195,7 +1195,7 @@ static int bs_embedded_verify_provider(request_rec *r, bs_dir_cfg *cfg,
      * exact code; one helper, one place to update. */
     bs_challenge ch;
     const char *cookie_alg_name = NULL;
-    const char *merr = bs_captcha_carry_and_mint(r, cfg,
+    const char *merr = bs_captcha_carry_and_mint(r, cfg, bs_cap(cfg),
         BS_CAPTCHA_PASSES_SILENT,
         /* auto_tier */ 1,
         &ch, &cookie_alg_name);

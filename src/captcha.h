@@ -116,6 +116,8 @@ struct bs_captcha_provider {
 };
 
 /* One <BotShieldCaptcha> block: everything that is per-provider.
+ * A scope points at one of these as its own; the rest are
+ * reachable by name.
  * The timeouts and the verify-endpoint guards are not in here --
  * they are scope defaults that apply to whichever provider ends up
  * being used. */
@@ -128,7 +130,7 @@ typedef struct {
     const char          *expected_hostname;
     const char          *expected_action;
     const char          *ca_bundle;
-} bs_captcha_alt;
+} bs_captcha_cfg;
 
 const bs_captcha_provider *bs_find_provider(const char *name);
 
@@ -165,9 +167,12 @@ bs_captcha_result bs_captcha_siteverify(request_rec *r,
  * site has its own body shape). Resolves the provider verify_fn
  * (provider-specific override or shared bs_captcha_siteverify) and
  * dispatches once the guards pass. */
+/* `cap` is the block to verify against: bs_cap(cfg) for the scope's
+ * own, or bs_captcha_pick() when the request named one. */
 bs_captcha_result bs_captcha_siteverify_guarded(
     request_rec *r,
     const bs_dir_cfg *cfg,
+    const bs_captcha_cfg *cap,
     const char *token,
     int timeout_ms,
     const char *log_tag,
@@ -216,6 +221,7 @@ typedef enum {
 const char *bs_captcha_carry_and_mint(
     request_rec *r,
     const bs_dir_cfg *cfg,
+    const bs_captcha_cfg *cap,
     bs_captcha_passes_kind passes_kind,
     int auto_tier,
     bs_challenge *out_ch,
@@ -235,15 +241,15 @@ char *bs_form_get(apr_pool_t *p, const char *body, const char *key);
  * choice, site/secret keys, network timeouts, expected hostname /
  * action, CA bundle, and the rate-limit / max-inflight DoS guards.
  * Wired into the cmds[] table in botshield.c. */
-const char *bs_set_captcha_provider     (cmd_parms *cmd, void *cfg_v, const char *arg);
-const char *bs_set_captcha_site_key     (cmd_parms *cmd, void *cfg_v, const char *arg);
-const char *bs_set_captcha_secret_file  (cmd_parms *cmd, void *cfg_v, const char *arg);
+const char *bs_set_captcha_provider     (cmd_parms *cmd, bs_captcha_cfg *cap, const char *arg);
+const char *bs_set_captcha_site_key     (cmd_parms *cmd, bs_captcha_cfg *cap, const char *arg);
+const char *bs_set_captcha_secret_file  (cmd_parms *cmd, bs_captcha_cfg *cap, const char *arg);
 const char *bs_set_captcha_timeout      (cmd_parms *cmd, void *cfg_v, const char *arg);
 const char *bs_set_captcha_connect_timeout(cmd_parms *cmd, void *cfg_v, const char *arg);
-const char *bs_set_recaptcha_v3_min_score(cmd_parms *cmd, void *cfg_v, const char *arg);
-const char *bs_set_captcha_expected_hostname(cmd_parms *cmd, void *cfg_v, const char *arg);
-const char *bs_set_captcha_expected_action  (cmd_parms *cmd, void *cfg_v, const char *arg);
-const char *bs_set_captcha_ca_bundle    (cmd_parms *cmd, void *cfg_v, const char *arg);
+const char *bs_set_recaptcha_v3_min_score(cmd_parms *cmd, bs_captcha_cfg *cap, const char *arg);
+const char *bs_set_captcha_expected_hostname(cmd_parms *cmd, bs_captcha_cfg *cap, const char *arg);
+const char *bs_set_captcha_expected_action  (cmd_parms *cmd, bs_captcha_cfg *cap, const char *arg);
+const char *bs_set_captcha_ca_bundle    (cmd_parms *cmd, bs_captcha_cfg *cap, const char *arg);
 const char *bs_set_captcha_rate_limit   (cmd_parms *cmd, void *cfg_v, const char *arg);
 const char *bs_set_captcha_max_inflight (cmd_parms *cmd, void *cfg_v, const char *arg);
 
@@ -252,15 +258,11 @@ const char *bs_set_captcha_max_inflight (cmd_parms *cmd, void *cfg_v, const char
  * verify-endpoint guards stay scope-level. See captcha.c. */
 const char *bs_open_captcha(cmd_parms *cmd, void *dconf, const char *arg);
 
-/* The block in a scope configured for `name`, or NULL for "not
- * here" -- callers fall back to the scope's own provider. */
-const bs_captcha_alt *bs_captcha_pick(const bs_dir_cfg *cfg,
+/* The block in a scope configured for `name`, or the scope's own
+ * provider when there is no such block -- which is what a scope
+ * with a single provider has always done. Never NULL. */
+const bs_captcha_cfg *bs_captcha_pick(const bs_dir_cfg *cfg,
                                       const char *name);
-/* A copy of `cfg` with its captcha fields swapped for `alt`'s, so
- * the many cfg->captcha_* reads downstream need no argument. */
-const bs_dir_cfg *bs_captcha_with(const bs_dir_cfg *cfg,
-                                  const bs_captcha_alt *alt,
-                                  bs_dir_cfg *out);
 
 #ifdef __cplusplus
 }

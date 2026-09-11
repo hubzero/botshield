@@ -2038,8 +2038,8 @@ static int bs_handler(request_rec *r)
      * Same triple bs_render_challenge_page tests, because the two have
      * to agree about what "captcha is available here" means. */
     if (tier == BS_TIER_CAPTCHA
-        && !(cfg->captcha_provider && cfg->captcha_site_key
-             && cfg->captcha_secret)) {
+        && !(bs_cap(cfg)->provider && bs_cap(cfg)->site_key
+             && bs_cap(cfg)->secret)) {
         bs_score_add(r, 0, "captcha_unavailable");
         tier = BS_TIER_INTERACTIVE;
     }
@@ -2202,7 +2202,7 @@ static int bs_handler(request_rec *r)
      * noninteractive tier auto-submit splash (issue_auto=1) for low-friction
      * challenges, the visible form interstitial (issue_auto=0) for
      * the harder tier. Captcha tier is rendered separately by
-     * bs_render_challenge_page when cfg->captcha_provider is set;
+     * bs_render_challenge_page when bs_cap(cfg)->provider is set;
      * if the operator selected captcha tier without configuring a
      * provider, render falls through to the interactive PoW interstitial
      * with reason "captcha_fallback" on the decision log. */
@@ -2332,9 +2332,9 @@ static int bs_handler(request_rec *r)
                                    ? cfg->algorithm->name : "-";
     const char *served_reason    = bs_decision_reason_names(r->pool, score);
     if (use_captcha_widget) {
-        served_provider = cfg->captcha_provider->name;
+        served_provider = bs_cap(cfg)->provider->name;
         served_alg      = apr_psprintf(r->pool, "captcha-%s",
-                                       cfg->captcha_provider->name);
+                                       bs_cap(cfg)->provider->name);
     } else if (tier == BS_TIER_CAPTCHA) {
         /* Captcha tier asked for but no provider configured on this
          * scope — interstitial we actually served is interactive PoW. Label

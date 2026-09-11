@@ -722,10 +722,16 @@ static bs_captcha_result bs_geetest_siteverify(request_rec *r,
     if (out_hostname) *out_hostname = NULL;
     if (out_action)   *out_action   = NULL;
 
-    /* Need the sitekey (captcha_id) from per-dir cfg. Walk up from r. */
+    /* GeeTest signs over its captcha_id, which the shared shim does
+     * not pass down, so look it up from the scope -- and look up the
+     * block for the provider we were handed, not the scope's default,
+     * so a request that named a provider verifies against that
+     * block's id rather than another block's. */
     bs_dir_cfg *cfg = ap_get_module_config(r->per_dir_config,
                                            &botshield_module);
-    if (!cfg || !cfg->captcha_site_key) {
+    const bs_captcha_cfg *cap = bs_captcha_pick(cfg, prov ? prov->name
+                                                          : NULL);
+    if (!cap->site_key) {
         *out_details = "captcha_id missing from scope";
         return BS_CAPTCHA_ERROR;
     }
@@ -754,8 +760,8 @@ static bs_captcha_result bs_geetest_siteverify(request_rec *r,
     const char *e_output = bs_curl_escape_pool(r->pool, curl, captcha_output, strlen(captcha_output));
     const char *e_pass   = bs_curl_escape_pool(r->pool, curl, pass_token,     strlen(pass_token));
     const char *e_time   = bs_curl_escape_pool(r->pool, curl, gen_time,       strlen(gen_time));
-    const char *e_id     = bs_curl_escape_pool(r->pool, curl, cfg->captcha_site_key,
-                                               strlen(cfg->captcha_site_key));
+    const char *e_id     = bs_curl_escape_pool(r->pool, curl, cap->site_key,
+                                               strlen(cap->site_key));
     if (!e_lot || !e_output || !e_pass || !e_time || !e_id) {
         curl_easy_cleanup(curl);
         return BS_CAPTCHA_ERROR;
@@ -982,6 +988,7 @@ static const char *bs_log_suppress_suffix(apr_pool_t *p, apr_uint32_t n)
 bs_captcha_result bs_captcha_siteverify_guarded(
     request_rec *r,
     const bs_dir_cfg *cfg,
+    const bs_captcha_cfg *cap,
     const char *token,
     int timeout_ms,
     const char *log_tag,
@@ -1037,13 +1044,13 @@ bs_captcha_result bs_captcha_siteverify_guarded(
      * set. GeeTest is the current user; the other five providers
      * leave siteverify_fn NULL. */
     bs_captcha_siteverify_fn verify_fn =
-        cfg->captcha_provider->siteverify_fn
-        ? cfg->captcha_provider->siteverify_fn
+        cap->provider->siteverify_fn
+        ? cap->provider->siteverify_fn
         : bs_captcha_siteverify;
     bs_captcha_result result = verify_fn(
-        r, cfg->captcha_provider,
-        cfg->captcha_secret, cfg->captcha_secret_len,
-        token, timeout_ms, cfg->captcha_ca_bundle,
+        r, cap->provider,
+        cap->secret, cap->secret_len,
+        token, timeout_ms, cap->ca_bundle,
         out_details, out_http_code, out_score,
         out_hostname, out_action);
 
@@ -1394,12 +1401,13 @@ const char *bs_clear_pending_cookie(request_rec *r,
 const char *bs_captcha_carry_and_mint(
     request_rec *r,
     const bs_dir_cfg *cfg,
+    const bs_captcha_cfg *cap,
     bs_captcha_passes_kind passes_kind,
     int auto_tier,
     bs_challenge *out_ch,
     const char **out_alg_name)
 {
-    if (!cfg || !cfg->captcha_provider) {
+    if (!cfg || !cap->provider) {
         return "no captcha provider configured on scope";
     }
 
@@ -1425,13 +1433,13 @@ const char *bs_captcha_carry_and_mint(
      * adding a provider doesn't require touching this helper — just the
      * two registries. */
     const char *cookie_alg_name = apr_psprintf(r->pool, "captcha-%s",
-                                               cfg->captcha_provider->name);
+                                               cap->provider->name);
     const bs_pow_algorithm *alg = bs_find_algorithm(cookie_alg_name);
     if (!alg || !alg->implemented) {
         return apr_psprintf(r->pool,
             "cookie alg '%s' missing from registry — provider '%s' "
             "is wired up but its cookie-alg row isn't",
-            cookie_alg_name, cfg->captcha_provider->name);
+            cookie_alg_name, cap->provider->name);
     }
     if (out_alg_name) *out_alg_name = cookie_alg_name;
 
@@ -1467,28 +1475,17 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
      * differed by URL. A scope can hold several now, so resolve the
      * name against them and verify with that block's secret. Unknown
      * or absent falls back to the scope's own provider, which is what
-     * the bare /captcha-verify has always done.
-     *
-     * `picked` is declared here, not inside the block, because `cfg`
-     * points at it for the rest of the function. */
-    bs_dir_cfg picked;
-    {
-        const char *cv = strstr(r->uri ? r->uri : "", "/captcha-verify/");
-        const char *want = cv ? cv + sizeof("/captcha-verify/") - 1 : NULL;
-        const bs_captcha_alt *alt = (want && *want)
-                                  ? bs_captcha_pick(cfg, want) : NULL;
-        if (alt && alt->provider != cfg->captcha_provider) {
-            bs_captcha_with(cfg, alt, &picked);
-            cfg = &picked;
-        }
-    }
+     * the bare /captcha-verify has always done. */
+    const char *cv = strstr(r->uri ? r->uri : "", "/captcha-verify/");
+    const bs_captcha_cfg *cap = bs_captcha_pick(
+        cfg, cv ? cv + sizeof("/captcha-verify/") - 1 : NULL);
 
     /* For consistency in the decision log, resolve a provider name up
      * front even if config is partial — misconfigured paths still want
      * a defensible value to emit. */
-    const char *prov_name = (cfg->captcha_provider
-                             && cfg->captcha_provider->name)
-                            ? cfg->captcha_provider->name : "-";
+    const char *prov_name = (cap->provider
+                             && cap->provider->name)
+                            ? cap->provider->name : "-";
 
     if (r->method_number != M_POST) {
         r->status = HTTP_METHOD_NOT_ALLOWED;
@@ -1517,14 +1514,14 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         return OK;
     }
 
-    if (!cfg->captcha_provider || !cfg->captcha_site_key ||
-        !cfg->captcha_secret || !cfg->secret) {
+    if (!cap->provider || !cap->site_key ||
+        !cap->secret || !cfg->secret) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
             "mod_botshield: captcha-verify called on a scope without full "
             "captcha config (provider=%s, sitekey=%s, secret=%s)",
-            cfg->captcha_provider ? "set" : "unset",
-            cfg->captcha_site_key ? "set" : "unset",
-            cfg->captcha_secret   ? "set" : "unset");
+            cap->provider ? "set" : "unset",
+            cap->site_key ? "set" : "unset",
+            cap->secret   ? "set" : "unset");
         r->status = HTTP_SERVICE_UNAVAILABLE;
         ap_set_content_type(r, "text/plain; charset=utf-8");
         ap_rputs("Captcha verification is not configured on this scope.\n", r);
@@ -1583,7 +1580,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         return HTTP_BAD_REQUEST;
     }
     char *token     = bs_form_get(r->pool, body,
-                                  cfg->captcha_provider->token_field);
+                                  cap->provider->token_field);
     char *return_to = bs_form_get(r->pool, body, "return_to");
 
     const char *safe_return = bs_sanitize_return_to(return_to);
@@ -1592,7 +1589,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
     if (!token || !*token) {
         ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
             "mod_botshield: captcha-verify: missing token field '%s'",
-            cfg->captcha_provider->token_field);
+            cap->provider->token_field);
         r->status = HTTP_BAD_REQUEST;
         ap_set_content_type(r, "text/plain; charset=utf-8");
         ap_rputs("Missing captcha token.\n", r);
@@ -1631,7 +1628,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
      * result variants (RATE_LIMITED, INFLIGHT_CAPPED) signal a guard
      * short-circuit; map to 429 / 503. */
     bs_captcha_result result = bs_captcha_siteverify_guarded(
-        r, cfg, token, timeout, "captcha-verify",
+        r, cfg, cap, token, timeout, "captcha-verify",
         &details, &http_code, &score,
         &resp_hostname, &resp_action);
 
@@ -1678,13 +1675,13 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
      * the empty string. */
     if (result == BS_CAPTCHA_OK) {
         const char *expected_host =
-            cfg->captcha_expected_hostname
-                ? cfg->captcha_expected_hostname
+            cap->expected_hostname
+                ? cap->expected_hostname
                 : (r->server && r->server->server_hostname
                        ? r->server->server_hostname : "");
         const char *expected_action =
-            cfg->captcha_expected_action
-                ? cfg->captcha_expected_action
+            cap->expected_action
+                ? cap->expected_action
                 : "botshield";
 
         if (resp_hostname && *expected_host &&
@@ -1712,10 +1709,10 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
      * happy-path OKs doesn't bump the slot counter and starve later
      * REJECTED/WARNING emissions. OK paths log unconditionally — the
      * throttle exists to protect against hostile/broken traffic. */
-    int is_v3 = (strcmp(cfg->captcha_provider->name, "recaptcha-v3") == 0);
+    int is_v3 = (strcmp(cap->provider->name, "recaptcha-v3") == 0);
     if (result == BS_CAPTCHA_OK && is_v3) {
-        double min_score = (cfg->recaptcha_v3_min_score >= 0.0)
-            ? cfg->recaptcha_v3_min_score
+        double min_score = (cap->min_score >= 0.0)
+            ? cap->min_score
             : BS_DEFAULT_RECAPTCHA_V3_MIN_SCORE;
         if (score < 0.0) {
             apr_uint32_t prev = 0;
@@ -1725,7 +1722,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
                 "mod_botshield: reCAPTCHA v3 response missing score%s - "
                 "failing open (provider=%s http=%ld)",
                 bs_log_suppress_suffix(r->pool, prev),
-                cfg->captcha_provider->name, http_code);
+                cap->provider->name, http_code);
             /* fall through to success path (fail-open) */
         } else if (score < min_score) {
             apr_uint32_t prev = 0;
@@ -1735,14 +1732,14 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
                 "mod_botshield: captcha REJECTED%s "
                 "(provider=%s http=%ld score=%.2f min=%.2f)",
                 bs_log_suppress_suffix(r->pool, prev),
-                cfg->captcha_provider->name, http_code,
+                cap->provider->name, http_code,
                 score, min_score);
             r->status = HTTP_FORBIDDEN;
             ap_set_content_type(r, "text/plain; charset=utf-8");
             apr_table_setn(r->err_headers_out, "X-Botshield", "captcharejected");
             ap_rputs("Verification score too low. Go back and try again.\n", r);
             bs_decision_log(r, "captcha", "block", "-",
-                            cfg->captcha_provider->name, "-",
+                            cap->provider->name, "-",
                             apr_psprintf(r->pool, "low_score:%.2f", score),
                             0);
             return OK;
@@ -1750,7 +1747,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
             ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
                 "mod_botshield: captcha OK (provider=%s http=%ld "
                 "score=%.2f min=%.2f return_to=%s)",
-                cfg->captcha_provider->name, http_code,
+                cap->provider->name, http_code,
                 score, min_score, safe_return);
         }
     } else if (result == BS_CAPTCHA_REJECTED) {
@@ -1761,14 +1758,14 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
             "mod_botshield: captcha REJECTED%s "
             "(provider=%s http=%ld error-codes=[%s])",
             bs_log_suppress_suffix(r->pool, prev),
-            cfg->captcha_provider->name, http_code,
+            cap->provider->name, http_code,
             details ? details : "");
         r->status = HTTP_FORBIDDEN;
         ap_set_content_type(r, "text/plain; charset=utf-8");
         apr_table_setn(r->err_headers_out, "X-Botshield", "captcharejected");
         ap_rputs("Captcha verification failed. Go back and try again.\n", r);
         bs_decision_log(r, "captcha", "block", "-",
-                        cfg->captcha_provider->name, "-",
+                        cap->provider->name, "-",
                         (details && *details) ? details : "-", 0);
         return OK;
     } else if (result == BS_CAPTCHA_TIMEOUT || result == BS_CAPTCHA_ERROR) {
@@ -1784,14 +1781,14 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
             "(provider=%s http=%ld detail=\"%s\")",
             result == BS_CAPTCHA_TIMEOUT ? "TIMEOUT" : "ERROR",
             bs_log_suppress_suffix(r->pool, prev),
-            cfg->captcha_provider->name, http_code,
+            cap->provider->name, http_code,
             details ? details : "");
         /* fall through to success path */
     } else {
         /* Plain OK, non-v3 provider. */
         ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
             "mod_botshield: captcha OK (provider=%s http=%ld return_to=%s)",
-            cfg->captcha_provider->name, http_code, safe_return);
+            cap->provider->name, http_code, safe_return);
     }
 
     /* Carry-forward + mint + install — see bs_captcha_carry_and_mint
@@ -1800,7 +1797,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
      * handler, embedded-verify-provider, and form-captcha fixup. */
     bs_challenge ch;
     const char *cookie_alg_name = NULL;
-    const char *merr = bs_captcha_carry_and_mint(r, cfg,
+    const char *merr = bs_captcha_carry_and_mint(r, cfg, cap,
         BS_CAPTCHA_PASSES_CAPTCHA,
         /* auto_tier */ 0,
         &ch, &cookie_alg_name);
@@ -1811,7 +1808,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
         ap_set_content_type(r, "text/plain; charset=utf-8");
         ap_rputs("Service error: could not issue cookie.\n", r);
         bs_decision_log(r, "captcha", "misconfigured", "-",
-                        cfg->captcha_provider->name,
+                        cap->provider->name,
                         cookie_alg_name ? cookie_alg_name : "-",
                         "mint_failed", 0);
         return OK;
@@ -1834,7 +1831,7 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
     if (result == BS_CAPTCHA_TIMEOUT) d_reason = "provider_timeout";
     else if (result == BS_CAPTCHA_ERROR) d_reason = "provider_error";
     bs_decision_log(r, "captcha", d_outcome, "-",
-                    cfg->captcha_provider->name, "-",
+                    cap->provider->name, "-",
                     d_reason, 0);
     return OK;
 }
@@ -1842,10 +1839,9 @@ int bs_captcha_verify_handler(request_rec *r, bs_dir_cfg *cfg)
 
 /* --- M8 captcha directive setters --- */
 
-const char *bs_set_captcha_provider(cmd_parms *cmd, void *cfg_v,
+const char *bs_set_captcha_provider(cmd_parms *cmd, bs_captcha_cfg *cap,
                                            const char *arg)
 {
-    bs_dir_cfg *cfg = cfg_v;
     const bs_captcha_provider *p = bs_find_provider(arg);
     if (!p) {
         return apr_psprintf(cmd->pool,
@@ -1858,14 +1854,13 @@ const char *bs_set_captcha_provider(cmd_parms *cmd, void *cfg_v,
             "<BotShieldCaptcha>: '%s' is reserved in the registry "
             "but not built into this module", arg);
     }
-    cfg->captcha_provider = p;
+    cap->provider = p;
     return NULL;
 }
 
-const char *bs_set_captcha_site_key(cmd_parms *cmd, void *cfg_v,
+const char *bs_set_captcha_site_key(cmd_parms *cmd, bs_captcha_cfg *cap,
                                            const char *arg)
 {
-    bs_dir_cfg *cfg = cfg_v;
     if (!arg || !*arg) {
         return "BotShieldSiteKey: empty value";
     }
@@ -1894,23 +1889,22 @@ const char *bs_set_captcha_site_key(cmd_parms *cmd, void *cfg_v,
                 c, p - arg);
         }
     }
-    cfg->captcha_site_key = arg;
+    cap->site_key = arg;
     return NULL;
 }
 
 /* Reuse the same mode-600 discipline as BotShieldSecretFile. */
-const char *bs_set_captcha_secret_file(cmd_parms *cmd, void *cfg_v,
+const char *bs_set_captcha_secret_file(cmd_parms *cmd, bs_captcha_cfg *cap,
                                               const char *arg)
 {
-    bs_dir_cfg *cfg = cfg_v;
 
     const char *buf = NULL;
     apr_size_t len = 0;
     const char *err = bs_load_secret_file(cmd, "BotShieldSecretFile",
                                           arg, &buf, &len);
     if (err) return err;
-    cfg->captcha_secret     = (const unsigned char *)buf;
-    cfg->captcha_secret_len = len;
+    cap->secret     = (const unsigned char *)buf;
+    cap->secret_len = len;
     return NULL;
 }
 
@@ -1957,10 +1951,9 @@ const char *bs_set_captcha_connect_timeout(cmd_parms *cmd,
  * (more permissive, fewer false rejections) or up (more strict) based
  * on observed traffic. */
 const char *bs_set_recaptcha_v3_min_score(cmd_parms *cmd,
-                                                 void *cfg_v,
-                                                 const char *arg)
+                                          bs_captcha_cfg *cap,
+                                          const char *arg)
 {
-    bs_dir_cfg *cfg = cfg_v;
     char *end = NULL;
     double v = strtod(arg, &end);
     if (!end || *end != '\0' || v < 0.0 || v > 1.0) {
@@ -1968,7 +1961,7 @@ const char *bs_set_recaptcha_v3_min_score(cmd_parms *cmd,
             "BotShieldMinScore: '%s' must be a number in 0.0..1.0",
             arg);
     }
-    cfg->recaptcha_v3_min_score = v;
+    cap->min_score = v;
     return NULL;
 }
 
@@ -1985,13 +1978,12 @@ const char *bs_set_recaptcha_v3_min_score(cmd_parms *cmd,
  * policy. Rejects quotes / backslashes / whitespace / anything that
  * could confuse later string comparison or logging. */
 const char *bs_set_captcha_expected_hostname(cmd_parms *cmd,
-                                                    void *cfg_v,
-                                                    const char *arg)
+                                             bs_captcha_cfg *cap,
+                                             const char *arg)
 {
-    bs_dir_cfg *cfg = cfg_v;
     if (!arg) return "BotShieldCaptchaExpectedHostname requires an argument";
     if (strcasecmp(arg, "off") == 0) {
-        cfg->captcha_expected_hostname = "";
+        cap->expected_hostname = "";
         return NULL;
     }
     if (strlen(arg) > 253) {
@@ -2004,7 +1996,7 @@ const char *bs_set_captcha_expected_hostname(cmd_parms *cmd,
                 "a character outside [a-zA-Z0-9.-]", arg);
         }
     }
-    cfg->captcha_expected_hostname = apr_pstrdup(cmd->pool, arg);
+    cap->expected_hostname = apr_pstrdup(cmd->pool, arg);
     return NULL;
 }
 
@@ -2015,13 +2007,12 @@ const char *bs_set_captcha_expected_hostname(cmd_parms *cmd,
  * literal value `off` disables the check. Restricted to printable
  * ASCII without whitespace or shell/quote metacharacters. */
 const char *bs_set_captcha_expected_action(cmd_parms *cmd,
-                                                  void *cfg_v,
-                                                  const char *arg)
+                                           bs_captcha_cfg *cap,
+                                           const char *arg)
 {
-    bs_dir_cfg *cfg = cfg_v;
     if (!arg) return "BotShieldCaptchaExpectedAction requires an argument";
     if (strcasecmp(arg, "off") == 0) {
-        cfg->captcha_expected_action = "";
+        cap->expected_action = "";
         return NULL;
     }
     if (strlen(arg) > 64) {
@@ -2036,7 +2027,7 @@ const char *bs_set_captcha_expected_action(cmd_parms *cmd,
                 "an unsafe character", arg);
         }
     }
-    cfg->captcha_expected_action = apr_pstrdup(cmd->pool, arg);
+    cap->expected_action = apr_pstrdup(cmd->pool, arg);
     return NULL;
 }
 
@@ -2054,10 +2045,9 @@ const char *bs_set_captcha_expected_action(cmd_parms *cmd,
  * is bad). Pointing this at the bundle the operator's image ships
  * fixes that without a config-time policy change. */
 const char *bs_set_captcha_ca_bundle(cmd_parms *cmd,
-                                            void *cfg_v,
-                                            const char *arg)
+                                     bs_captcha_cfg *cap,
+                                     const char *arg)
 {
-    bs_dir_cfg *cfg = cfg_v;
     if (!arg || !*arg) {
         return "BotShieldCABundle: path required";
     }
@@ -2073,7 +2063,7 @@ const char *bs_set_captcha_ca_bundle(cmd_parms *cmd,
         return apr_psprintf(cmd->pool,
             "BotShieldCABundle: '%s' is not a regular file", arg);
     }
-    cfg->captcha_ca_bundle = apr_pstrdup(cmd->pool, arg);
+    cap->ca_bundle = apr_pstrdup(cmd->pool, arg);
     return NULL;
 }
 
@@ -2146,7 +2136,7 @@ const char *bs_set_captcha_max_inflight(cmd_parms *cmd, void *cfg_v,
 
 static const struct {
     const char *name;
-    const char *(*set)(cmd_parms *, void *, const char *);
+    const char *(*set)(cmd_parms *, bs_captcha_cfg *, const char *);
 } bs_captcha_block_keys[] = {
     { "BotShieldSiteKey",          bs_set_captcha_site_key },
     { "BotShieldSecretFile",       bs_set_captcha_secret_file },
@@ -2197,29 +2187,15 @@ const char *bs_open_captcha(cmd_parms *cmd, void *dconf, const char *arg)
                             "provider; '%s' was also given", provider, spec);
     }
 
-    /* The setters write to the scope's flat fields, which is exactly
-     * where the first block belongs -- that is what everything reading
-     * "this scope's provider" sees. For a second block, borrow them:
-     * snapshot, let the setters run, copy the result into an alternate,
-     * then put the originals back. Reusing the setters is what keeps
-     * the validation, the secret file's mode check and the error
-     * wording identical for every block, first or not. */
-    bs_captcha_alt saved;
-    int borrowing = (cfg && cfg->captcha_container_seen);
-    if (borrowing) {
-        saved.provider          = cfg->captcha_provider;
-        saved.site_key          = cfg->captcha_site_key;
-        saved.secret            = cfg->captcha_secret;
-        saved.secret_len        = cfg->captcha_secret_len;
-        saved.min_score         = cfg->recaptcha_v3_min_score;
-        saved.expected_hostname = cfg->captcha_expected_hostname;
-        saved.expected_action   = cfg->captcha_expected_action;
-        saved.ca_bundle         = cfg->captcha_ca_bundle;
-    }
+    /* Each block fills a record of its own. The routines below are
+     * not registered directives -- nothing but this loop calls them --
+     * so they take the record to fill rather than a scope, and the
+     * first block in a scope stops being a special case. */
+    bs_captcha_cfg *blk = apr_pcalloc(p, sizeof(*blk));
+    blk->min_score = -1.0;          /* unset; the parser's sentinel */
 
-    const char *err = bs_set_captcha_provider(cmd, dconf, provider);
+    const char *err = bs_set_captcha_provider(cmd, blk, provider);
     if (err) return err;
-    if (cfg) cfg->captcha_container_seen = 1;
 
     apr_table_t *seen = apr_table_make(p, 8);
     for (const ap_directive_t *d = cmd->directive->first_child; d;
@@ -2257,7 +2233,7 @@ const char *bs_open_captcha(cmd_parms *cmd, void *dconf, const char *arg)
                 "or set the provider to recaptcha-v3.", provider, provider);
         }
 
-        err = bs_captcha_block_keys[i].set(cmd, dconf, bs_cap_value(p, d));
+        err = bs_captcha_block_keys[i].set(cmd, blk, bs_cap_value(p, d));
         if (err) {
             return apr_psprintf(p, "<BotShieldCaptcha %s>: %s",
                                 provider, err);
@@ -2266,89 +2242,48 @@ const char *bs_open_captcha(cmd_parms *cmd, void *dconf, const char *arg)
 
     if (!cfg) return NULL;
 
-    /* Record what this block configured, then -- if the flat fields
-     * were borrowed -- hand them back to the first block. */
-    bs_captcha_alt *alt = apr_pcalloc(cmd->pool, sizeof(*alt));
-    alt->provider          = cfg->captcha_provider;
-    alt->site_key          = cfg->captcha_site_key;
-    alt->secret            = cfg->captcha_secret;
-    alt->secret_len        = cfg->captcha_secret_len;
-    alt->min_score         = cfg->recaptcha_v3_min_score;
-    alt->expected_hostname = cfg->captcha_expected_hostname;
-    alt->expected_action   = cfg->captcha_expected_action;
-    alt->ca_bundle         = cfg->captcha_ca_bundle;
-
-    if (borrowing) {
-        cfg->captcha_provider          = saved.provider;
-        cfg->captcha_site_key          = saved.site_key;
-        cfg->captcha_secret            = saved.secret;
-        cfg->captcha_secret_len        = saved.secret_len;
-        cfg->recaptcha_v3_min_score    = saved.min_score;
-        cfg->captcha_expected_hostname = saved.expected_hostname;
-        cfg->captcha_expected_action   = saved.expected_action;
-        cfg->captcha_ca_bundle         = saved.ca_bundle;
-    }
-
     if (!cfg->captchas) {
-        cfg->captchas = apr_array_make(cmd->pool, 4,
-                                       sizeof(bs_captcha_alt *));
+        cfg->captchas = apr_array_make(p, 4, sizeof(bs_captcha_cfg *));
     }
     for (int k = 0; k < cfg->captchas->nelts; k++) {
-        bs_captcha_alt *o = APR_ARRAY_IDX(cfg->captchas, k,
-                                          bs_captcha_alt *);
-        if (o->provider && alt->provider
-            && strcmp(o->provider->name, alt->provider->name) == 0) {
+        const bs_captcha_cfg *o = APR_ARRAY_IDX(cfg->captchas, k,
+                                                bs_captcha_cfg *);
+        if (o->provider && blk->provider
+            && strcmp(o->provider->name, blk->provider->name) == 0) {
             return apr_psprintf(p,
                 "<BotShieldCaptcha %s> is declared twice in this scope",
                 provider);
         }
     }
-    *(bs_captcha_alt **)apr_array_push(cfg->captchas) = alt;
+    *(bs_captcha_cfg **)apr_array_push(cfg->captchas) = blk;
+
+    /* The first block a scope declares is that scope's captcha: what
+     * the interstitial renders when no rule names another, and what
+     * the bare /captcha-verify checks against. */
+    if (!cfg->captcha) cfg->captcha = blk;
     return NULL;
 }
 
-/* The block in this scope configured for `name`, or NULL.
+/* The block this scope configured for `name`, or the scope's own
+ * captcha when it has no such block.
  *
- * NULL means "nothing named that here", and every caller treats it as
- * "use the scope's own provider" -- the flat fields. A name that
- * resolves to nothing is therefore not an error at the point of use:
- * the scope a request lands in may legitimately have only one
- * provider, and falling back to it is what the single-provider case
- * has always done. */
-const bs_captcha_alt *bs_captcha_pick(const bs_dir_cfg *cfg,
+ * Never NULL, and a name that matches nothing is not an error at the
+ * point of use: the scope a request lands in may legitimately have
+ * only one provider, and falling back to it is what the
+ * single-provider case has always done. */
+const bs_captcha_cfg *bs_captcha_pick(const bs_dir_cfg *cfg,
                                       const char *name)
 {
-    if (!cfg || !cfg->captchas || !name || !*name) return NULL;
-    for (int i = 0; i < cfg->captchas->nelts; i++) {
-        const bs_captcha_alt *a = APR_ARRAY_IDX(cfg->captchas, i,
-                                                bs_captcha_alt *);
-        if (a->provider && a->provider->name
-            && strcasecmp(a->provider->name, name) == 0) {
-            return a;
+    if (cfg && cfg->captchas && name && *name) {
+        for (int i = 0; i < cfg->captchas->nelts; i++) {
+            const bs_captcha_cfg *c = APR_ARRAY_IDX(cfg->captchas, i,
+                                                    bs_captcha_cfg *);
+            if (c->provider && c->provider->name
+                && strcasecmp(c->provider->name, name) == 0) {
+                return c;
+            }
         }
     }
-    return NULL;
+    return bs_cap(cfg);
 }
 
-/* Patch a scope's captcha fields with one of its alternates.
- *
- * The verify handler and the render path each read a dozen
- * cfg->captcha_* fields. Rather than thread a provider through both,
- * copy the scope and swap the fields: every read below sees the chosen
- * provider and nothing else changes. `out` must outlive the use. */
-const bs_dir_cfg *bs_captcha_with(const bs_dir_cfg *cfg,
-                                  const bs_captcha_alt *alt,
-                                  bs_dir_cfg *out)
-{
-    if (!alt || !cfg) return cfg;
-    *out = *cfg;
-    out->captcha_provider          = alt->provider;
-    out->captcha_site_key          = alt->site_key;
-    out->captcha_secret            = alt->secret;
-    out->captcha_secret_len        = alt->secret_len;
-    out->recaptcha_v3_min_score    = alt->min_score;
-    out->captcha_expected_hostname = alt->expected_hostname;
-    out->captcha_expected_action   = alt->expected_action;
-    out->captcha_ca_bundle         = alt->ca_bundle;
-    return out;
-}

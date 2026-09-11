@@ -89,19 +89,11 @@ void *bs_create_dir_cfg(apr_pool_t *p, char *path)
     cfg->challenge_at_least   = NULL;
     cfg->challenge_at_least_reset = 0;
     cfg->endpoint_prefix     = NULL;
-    cfg->captcha_provider    = NULL;
-    cfg->captcha_container_seen = 0;
+    cfg->captcha             = NULL;
     cfg->captchas            = NULL;
-    cfg->captcha_site_key    = NULL;
-    cfg->captcha_secret      = NULL;
-    cfg->captcha_secret_len  = 0;
     cfg->captcha_timeout_ms  = BS_UNSET;
     cfg->captcha_connect_timeout_ms = BS_UNSET;
-    cfg->recaptcha_v3_min_score = -1.0;
     cfg->captcha_rate_limit  = BS_UNSET;
-    cfg->captcha_expected_hostname = NULL;
-    cfg->captcha_expected_action   = NULL;
-    cfg->captcha_ca_bundle         = NULL;
     return cfg;
 }
 
@@ -625,44 +617,26 @@ void *bs_merge_dir_cfg(apr_pool_t *p, void *base_v, void *add_v)
         out->challenge_at_least = base->challenge_at_least;
     }
     out->endpoint_prefix  = add->endpoint_prefix  ? add->endpoint_prefix  : base->endpoint_prefix;
-    out->captcha_provider = add->captcha_provider ? add->captcha_provider : base->captcha_provider;
-    /* Deliberately not inherited -- see the field's comment. */
-    out->captcha_container_seen = add->captcha_container_seen;
-    /* Block-level, like the flat fields it mirrors: a scope that
-     * declares any provider replaces the set it inherited rather
-     * than adding to it, so what a <Location> shows is what it
-     * says. */
+    /* A scope that declares any provider replaces the set it
+     * inherited rather than adding to it, so what a <Location>
+     * shows is what it uses. */
+    out->captcha  = add->captcha ? add->captcha : base->captcha;
+    /* A scope declaring any provider replaces the set it inherited
+     * rather than adding to it, so what a <Location> shows is what it
+     * uses. The per-field inheritance these lines used to do went with
+     * the loose fields: a block always names a provider, so half a
+     * provider was never inheritable anyway. */
     out->captchas = (add->captchas && add->captchas->nelts)
                   ? add->captchas : base->captchas;
-    out->captcha_site_key = add->captcha_site_key ? add->captcha_site_key : base->captcha_site_key;
-    if (add->captcha_secret) {
-        out->captcha_secret     = add->captcha_secret;
-        out->captcha_secret_len = add->captcha_secret_len;
-    } else {
-        out->captcha_secret     = base->captcha_secret;
-        out->captcha_secret_len = base->captcha_secret_len;
-    }
     out->captcha_timeout_ms = (add->captcha_timeout_ms == BS_UNSET)
                               ? base->captcha_timeout_ms : add->captcha_timeout_ms;
     out->captcha_connect_timeout_ms =
         (add->captcha_connect_timeout_ms == BS_UNSET)
             ? base->captcha_connect_timeout_ms
             : add->captcha_connect_timeout_ms;
-    out->recaptcha_v3_min_score = (add->recaptcha_v3_min_score < 0.0)
-                                  ? base->recaptcha_v3_min_score
-                                  : add->recaptcha_v3_min_score;
     out->captcha_rate_limit = (add->captcha_rate_limit == BS_UNSET)
                               ? base->captcha_rate_limit
                               : add->captcha_rate_limit;
-    out->captcha_expected_hostname = add->captcha_expected_hostname
-                                     ? add->captcha_expected_hostname
-                                     : base->captcha_expected_hostname;
-    out->captcha_expected_action   = add->captcha_expected_action
-                                     ? add->captcha_expected_action
-                                     : base->captcha_expected_action;
-    out->captcha_ca_bundle         = add->captcha_ca_bundle
-                                     ? add->captcha_ca_bundle
-                                     : base->captcha_ca_bundle;
     return out;
 }
 

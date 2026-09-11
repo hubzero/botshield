@@ -184,8 +184,8 @@ int bs_form_captcha_fixup(request_rec *r)
                                            &botshield_module);
     if (!cfg || cfg->form_captcha != 1) return DECLINED;
 
-    if (!cfg->captcha_provider || !cfg->captcha_provider->implemented ||
-        !cfg->captcha_secret || !cfg->captcha_site_key) {
+    if (!bs_cap(cfg)->provider || !bs_cap(cfg)->provider->implemented ||
+        !bs_cap(cfg)->secret || !bs_cap(cfg)->site_key) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
             "mod_botshield: BotShieldFormCaptcha on but scope is "
             "missing BotShieldCaptchaProvider/SiteKey/SecretFile; "
@@ -299,7 +299,7 @@ int bs_form_captcha_fixup(request_rec *r)
     const char *token = NULL;
     if (ct_form) {
         token = bs_form_get(r->pool, body,
-                            cfg->captcha_provider->token_field);
+                            bs_cap(cfg)->provider->token_field);
     } else { /* ct_json */
         enum json_tokener_error jerr = json_tokener_success;
         json_object *root = json_tokener_parse_verbose(body, &jerr);
@@ -311,7 +311,7 @@ int bs_form_captcha_fixup(request_rec *r)
         }
         json_object *tok_v = NULL;
         if (json_object_object_get_ex(root,
-                cfg->captcha_provider->token_field, &tok_v) &&
+                bs_cap(cfg)->provider->token_field, &tok_v) &&
             tok_v && json_object_is_type(tok_v, json_type_string)) {
             const char *s = json_object_get_string(tok_v);
             if (s) token = apr_pstrdup(r->pool, s);
@@ -321,7 +321,7 @@ int bs_form_captcha_fixup(request_rec *r)
     if (!token || !*token) {
         ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
             "mod_botshield: form-captcha: missing token field '%s'",
-            cfg->captcha_provider->token_field);
+            bs_cap(cfg)->provider->token_field);
         return HTTP_FORBIDDEN;
     }
 
@@ -337,7 +337,7 @@ int bs_form_captcha_fixup(request_rec *r)
      * /captcha-verify handler. Without the wrapper, every E18 POST
      * burned a provider quota slot and an Apache worker with no
      * back-pressure. */
-    bs_captcha_result res = bs_captcha_siteverify_guarded(r, cfg, token,
+    bs_captcha_result res = bs_captcha_siteverify_guarded(r, cfg, bs_cap(cfg), token,
         timeout_ms, "form-captcha",
         &details, &http_code, &score, &resp_hostname, &resp_action);
 
@@ -368,8 +368,8 @@ int bs_form_captcha_fixup(request_rec *r)
      * who want strict action checks can configure
      * BotShieldCaptchaExpectedAction explicitly. */
     const char *expected_host =
-        cfg->captcha_expected_hostname
-            ? cfg->captcha_expected_hostname
+        bs_cap(cfg)->expected_hostname
+            ? bs_cap(cfg)->expected_hostname
             : (r->server && r->server->server_hostname
                    ? r->server->server_hostname : "");
     if (resp_hostname && *expected_host &&
@@ -379,18 +379,18 @@ int bs_form_captcha_fixup(request_rec *r)
             "(got=%s expected=%s)", resp_hostname, expected_host);
         return HTTP_FORBIDDEN;
     }
-    if (cfg->captcha_expected_action && *cfg->captcha_expected_action &&
+    if (bs_cap(cfg)->expected_action && *bs_cap(cfg)->expected_action &&
         resp_action &&
-        strcmp(resp_action, cfg->captcha_expected_action) != 0) {
+        strcmp(resp_action, bs_cap(cfg)->expected_action) != 0) {
         ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
             "mod_botshield: form-captcha action-mismatch "
             "(got=%s expected=%s)",
-            resp_action, cfg->captcha_expected_action);
+            resp_action, bs_cap(cfg)->expected_action);
         return HTTP_FORBIDDEN;
     }
-    if (strcmp(cfg->captcha_provider->name, "recaptcha-v3") == 0) {
-        double min_score = (cfg->recaptcha_v3_min_score >= 0.0)
-            ? cfg->recaptcha_v3_min_score
+    if (strcmp(bs_cap(cfg)->provider->name, "recaptcha-v3") == 0) {
+        double min_score = (bs_cap(cfg)->min_score >= 0.0)
+            ? bs_cap(cfg)->min_score
             : BS_DEFAULT_RECAPTCHA_V3_MIN_SCORE;
         if (score >= 0.0 && score < min_score) {
             ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
@@ -408,7 +408,7 @@ int bs_form_captcha_fixup(request_rec *r)
      * captcha-verify handler. */
     bs_challenge ch;
     const char *cookie_alg_name = NULL;
-    const char *merr = bs_captcha_carry_and_mint(r, cfg,
+    const char *merr = bs_captcha_carry_and_mint(r, cfg, bs_cap(cfg),
         BS_CAPTCHA_PASSES_CAPTCHA,
         /* auto_tier */ 0,
         &ch, &cookie_alg_name);
@@ -448,7 +448,7 @@ int bs_form_captcha_fixup(request_rec *r)
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
         "mod_botshield: form-captcha verified (provider=%s, "
         "body_len=%" APR_SIZE_T_FMT ")",
-        cfg->captcha_provider->name, body_len);
+        bs_cap(cfg)->provider->name, body_len);
     /* DECLINED so the app's regular handler runs. */
     return DECLINED;
 }

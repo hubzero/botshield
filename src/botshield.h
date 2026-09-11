@@ -320,36 +320,22 @@ struct bs_dir_cfg {
     int                 challenge_at_least_reset;
     /* --- Captcha tier (M8) --- */
     const char *endpoint_prefix;            /* default "/botshield" */
-    const bs_captcha_provider *captcha_provider;  /* NULL = tier unused */
-    /* <BotShieldCaptcha> seen in this scope. Not inherited: a
-     * <Location> declaring its own provider is an override, not a
-     * duplicate. */
-    int         captcha_container_seen;
+    /* This scope's captcha: the first <BotShieldCaptcha> block in
+     * it. NULL when the scope configures none. Read through
+     * bs_cap() below, which turns NULL into an all-zero record so
+     * callers need no guard of their own. */
+    const bs_captcha_cfg *captcha;
     /* Every <BotShieldCaptcha> block in this scope, declaration
-     * order, as bs_captcha_alt *. The first is also mirrored into
-     * the flat fields below, which is what everything that wants
-     * "this scope's provider" reads. The array is for the two
-     * places that want a NAMED one: the verify endpoint resolving
+     * order, as bs_captcha_cfg *. `captcha` above points at the
+     * first of them. The array is for the two places that want a
+     * NAMED block: the verify endpoint resolving
      * <prefix>/captcha-verify/<name>, and a rule that picks. */
     apr_array_header_t *captchas;
-    const char *captcha_site_key;           /* provider-public */
-    const unsigned char *captcha_secret;    /* file bytes, mode-600 */
-    apr_size_t  captcha_secret_len;
     int         captcha_timeout_ms;         /* siteverify HTTP timeout */
     /* Connect-phase timeout. */
     int         captcha_connect_timeout_ms;
-    /* reCAPTCHA v3: minimum score in [0.0, 1.0]. -1.0 = unset. */
-    double      recaptcha_v3_min_score;
     /* M8.1 per-scope verify-endpoint rate limit. -1 unset, 0 disables. */
     int         captcha_rate_limit;
-    /* Binding-metadata validation on the siteverify response. NULL =
-     * runtime default (server_hostname, "botshield"); empty string =
-     * skip the check. */
-    const char *captcha_expected_hostname;
-    const char *captcha_expected_action;
-    /* Optional CA bundle for siteverify TLS. NULL = libcurl's
-     * compiled-in default. */
-    const char *captcha_ca_bundle;
 };
 
 /* ======================================================================
@@ -654,6 +640,20 @@ typedef struct bs_server_cfg {
      * discover they also handed it the ability to unflag. */
     bs_observe_acl      observe_admin;
 } bs_server_cfg;
+
+/* This scope's captcha settings, never NULL.
+ *
+ * A scope that configures none yields the empty record below, whose
+ * provider is NULL exactly where the old cfg->captcha_provider was,
+ * so every guard that tested it reads the same without a null check
+ * of its own. It carries the unset sentinels a block starts with
+ * rather than raw zero, so a field whose "unset" is not zero cannot
+ * read here as a deliberate setting. */
+static inline const bs_captcha_cfg *bs_cap(const bs_dir_cfg *cfg)
+{
+    static const bs_captcha_cfg none = { .min_score = -1.0 };
+    return (cfg && cfg->captcha) ? cfg->captcha : &none;
+}
 
 /* Is there anything for robots enforcement to do at this scope: a
  * file, inline groups, or both. */

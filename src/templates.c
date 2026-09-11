@@ -840,22 +840,13 @@ int bs_render_challenge_page(request_rec *r,
                              const char *challenge_js,
                              int issue_auto)
 {
-    /* A rule may have named which captcha to render. Swap the scope's
-     * captcha fields for that block's once, here, and everything below
-     * -- site key, widget script, token field, verify URL -- follows
-     * without an extra argument. A name this scope does not configure
-     * resolves to nothing and leaves the scope's own provider in
-     * place, which is what a scope with one provider has always done.
-     *
-     * `picked` is declared at function scope because `cfg` points at
-     * it for the rest of the render. */
-    bs_dir_cfg picked;
-    {
-        const char *want = bs_get_request_captcha(r);
-        const bs_captcha_alt *alt = want ? bs_captcha_pick(cfg, want)
-                                         : NULL;
-        if (alt) cfg = bs_captcha_with(cfg, alt, &picked);
-    }
+    /* A rule may have named which captcha to render. Resolve it once
+     * here and everything below -- site key, widget script, token
+     * field, verify URL -- reads that block. A name this scope does
+     * not configure resolves to the scope's own provider, which is
+     * what a scope with one provider has always done. */
+    const bs_captcha_cfg *cap = bs_captcha_pick(cfg,
+                                                bs_get_request_captcha(r));
     /* The noninteractive tier's label is a status, not an invitation: there is
      * no checkbox to tick. Turnstile makes the same split -- "Verify
      * you are human" when it wants a click, "Verifying..." when it is
@@ -981,9 +972,9 @@ int bs_render_challenge_page(request_rec *r,
      * opt in to captcha only on scopes they've configured. */
     char *widget;
     int use_captcha_widget = (tier == BS_TIER_CAPTCHA)
-        && cfg->captcha_provider
-        && cfg->captcha_site_key
-        && cfg->captcha_secret;
+        && cap->provider
+        && cap->site_key
+        && cap->secret;
     if (use_captcha_widget) {
         /* M8.1: mint a short-lived HMAC-signed "pending" cookie so the
          * verify endpoint can short-circuit random POST spray before
@@ -1002,43 +993,43 @@ int bs_render_challenge_page(request_rec *r,
          * providers on one vhost by giving each its own <Location> block
          * with the matching secret/sitekey. */
         const char *verify_url = apr_pstrcat(r->pool, prefix,
-            "/captcha-verify/", cfg->captcha_provider->name, NULL);
+            "/captcha-verify/", cap->provider->name, NULL);
         const char *return_esc  = ap_escape_html(r->pool,
             r->unparsed_uri ? r->unparsed_uri : "/");
         const char *provider_esc = ap_escape_html(r->pool,
-            cfg->captcha_provider->name);
-        const char *pname = cfg->captcha_provider->name;
+            cap->provider->name);
+        const char *pname = cap->provider->name;
         if (strcmp(pname, "recaptcha-v3") == 0) {
             /* v3 script URL embeds the sitekey in its query string, so
              * the render-pattern widget_script_url from the registry
              * isn't used directly — build it here instead. */
             const char *v3_script_url = apr_psprintf(r->pool,
                 "%s?render=%s",
-                cfg->captcha_provider->widget_script_url,
-                cfg->captcha_site_key);
+                cap->provider->widget_script_url,
+                cap->site_key);
             widget = apr_psprintf(r->pool, BS_RECAPTCHA_V3_WIDGET_TEMPLATE,
                 provider_esc,
                 verify_url,
                 return_esc,
-                cfg->captcha_provider->token_field,
+                cap->provider->token_field,
                 v3_script_url,
-                cfg->captcha_site_key);
+                cap->site_key);
         } else if (strcmp(pname, "geetest") == 0) {
             widget = apr_psprintf(r->pool, BS_GEETEST_WIDGET_TEMPLATE,
                 provider_esc,
                 verify_url,
                 return_esc,
-                cfg->captcha_provider->token_field,
-                cfg->captcha_provider->widget_script_url,
-                cfg->captcha_site_key);
+                cap->provider->token_field,
+                cap->provider->widget_script_url,
+                cap->site_key);
         } else {
             widget = apr_psprintf(r->pool, BS_CAPTCHA_WIDGET_TEMPLATE,
                 provider_esc,
                 verify_url,
                 return_esc,
-                cfg->captcha_provider->widget_class,
-                cfg->captcha_site_key,
-                cfg->captcha_provider->widget_script_url);
+                cap->provider->widget_class,
+                cap->site_key,
+                cap->provider->widget_script_url);
         }
     } else {
         widget = apr_psprintf(r->pool, BS_WIDGET_TEMPLATE,
