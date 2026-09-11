@@ -354,8 +354,8 @@ static const command_rec bs_cmds[] = {
                  RSRC_CONF | ACCESS_CONF,
                  "When on, this scope validates a configured captcha "
                  "provider's response token in the POST body of form "
-                 "submissions. Requires BotShieldCaptchaProvider + "
-                 "SiteKey + SecretFile in the same scope (or "
+                 "submissions. Requires a <BotShieldCaptcha> block with "
+                 "BotShieldSiteKey and BotShieldSecretFile in the same scope (or "
                  "inherited). On valid token: mints _bs_session, "
                  "DECLINED so the app handler runs with the original "
                  "body intact. On bad/missing token: 403, app handler "
@@ -385,21 +385,18 @@ static const command_rec bs_cmds[] = {
                  "URL prefix for module-owned handlers (default: /botshield). "
                  "Must start with '/' and not end with '/'. Change it if this "
                  "collides with real app routes."),
-    AP_INIT_TAKE1("BotShieldCaptchaProvider", bs_set_captcha_provider, NULL,
+    AP_INIT_RAW_ARGS("<BotShieldCaptcha", bs_open_captcha, NULL,
                  RSRC_CONF | ACCESS_CONF,
-                 "Third-party captcha provider for the captcha tier. Built "
-                 "in: 'turnstile' (Cloudflare), 'hcaptcha', 'recaptcha-v2', "
-                 "'recaptcha-v3' (with BotShieldRecaptchaV3MinScore), "
-                 "'friendly' (Friendly Captcha), 'geetest' (GeeTest v4). "
-                 "Unrecognized names fail at configtest time."),
-    AP_INIT_TAKE1("BotShieldCaptchaSiteKey", bs_set_captcha_site_key, NULL,
-                 RSRC_CONF | ACCESS_CONF,
-                 "Provider-public site key embedded in the captcha widget."),
-    AP_INIT_TAKE1("BotShieldCaptchaSecretFile", bs_set_captcha_secret_file,
-                 NULL, RSRC_CONF | ACCESS_CONF,
-                 "Path to the captcha provider's secret key, used in "
-                 "server-side siteverify calls. Must be mode 0600 (not "
-                 "group- or world-accessible). Read once at startup."),
+                 "Open the captcha provider block. Takes the provider "
+                 "as its argument: turnstile, hcaptcha, recaptcha-v2, "
+                 "recaptcha-v3, friendly or geetest. Inside: "
+                 "BotShieldSiteKey, BotShieldSecretFile, "
+                 "BotShieldExpectedHostname, BotShieldExpectedAction, "
+                 "BotShieldCABundle, and BotShieldMinScore for "
+                 "recaptcha-v3. One per scope; a <Location> may "
+                 "declare its own. The timeouts and the "
+                 "verify-endpoint guards are scope defaults and stay "
+                 "outside the block."),
     AP_INIT_TAKE1("BotShieldCaptchaTimeout", bs_set_captcha_timeout, NULL,
                  RSRC_CONF | ACCESS_CONF,
                  "Siteverify HTTP call timeout in milliseconds "
@@ -412,35 +409,6 @@ static const command_rec bs_cmds[] = {
                  "(default: 250, range 50..5000). Tighter than the full "
                  "siteverify timeout; bump on links with transient packet "
                  "loss to avoid fail-open on momentary connect blips."),
-    AP_INIT_TAKE1("BotShieldRecaptchaV3MinScore",
-                 bs_set_recaptcha_v3_min_score, NULL,
-                 RSRC_CONF | ACCESS_CONF,
-                 "Minimum score (0.0..1.0) to accept a reCAPTCHA v3 "
-                 "verification (default: 0.5). Scores below this are "
-                 "logged as REJECTED with the numeric score."),
-    AP_INIT_TAKE1("BotShieldCaptchaExpectedHostname",
-                 bs_set_captcha_expected_hostname, NULL,
-                 RSRC_CONF | ACCESS_CONF,
-                 "Hostname the captcha provider must echo back in the "
-                 "siteverify response for the token to be accepted. "
-                 "Default: the vhost's server_hostname. Empty string "
-                 "disables the check (for multi-origin deployments)."),
-    AP_INIT_TAKE1("BotShieldCaptchaExpectedAction",
-                 bs_set_captcha_expected_action, NULL,
-                 RSRC_CONF | ACCESS_CONF,
-                 "Action string the client widget must tag the captcha "
-                 "token with (reCAPTCHA v3 + Turnstile). Default: "
-                 "'botshield'. Empty string disables the check. "
-                 "Mismatch rejects the token."),
-    AP_INIT_TAKE1("BotShieldCaptchaCABundle", bs_set_captcha_ca_bundle,
-                 NULL, RSRC_CONF | ACCESS_CONF,
-                 "Absolute path to a PEM CA bundle libcurl will use to "
-                 "validate the captcha-provider TLS certificate. "
-                 "Optional; defaults to libcurl's compiled-in system "
-                 "bundle. Set this on stripped container images that "
-                 "lack /etc/ssl/certs to avoid silent fail-open from "
-                 "every siteverify hitting "
-                 "CURLE_PEER_FAILED_VERIFICATION."),
     AP_INIT_TAKE1("BotShieldCaptchaRateLimit", bs_set_captcha_rate_limit,
                  NULL, RSRC_CONF | ACCESS_CONF,
                  "Max captcha-verify POSTs per IP per minute (default: 30, "

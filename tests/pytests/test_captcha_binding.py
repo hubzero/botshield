@@ -6,9 +6,9 @@ sitekey but a different action (or any Google-family token minted
 for a different hostname) would be accepted as long as success:true
 came back. The fix adds:
   - Hostname check against r->server->server_hostname (default) or
-    BotShieldCaptchaExpectedHostname.
+    BotShieldExpectedHostname.
   - Action check (reCAPTCHA v3 + Turnstile) against "botshield" or
-    BotShieldCaptchaExpectedAction.
+    BotShieldExpectedAction.
 
 Mismatch flips OK → REJECTED with outcome=block and a reason
 string like "hostname-mismatch:got=example.com,expected=attacker.tld".
@@ -31,8 +31,8 @@ def test_hostname_mismatch_rejects_valid_token(config_override, log_slice):
     # Swap the expected hostname to something the response will never
     # match. config_override reverts on exit.
     with config_override(
-        r"BotShieldCaptchaExpectedHostname\s+example\.com",
-        "BotShieldCaptchaExpectedHostname wrong.attacker.tld",
+        r"BotShieldExpectedHostname\s+example\.com",
+        "BotShieldExpectedHostname wrong.attacker.tld",
         count=1,
     ):
         pending = cookies.fetch_pending_cookie("captcha-demo")
@@ -79,15 +79,15 @@ def test_hostname_match_accepts_valid_token(pending_cookie):
 
 
 def test_off_expected_hostname_disables_check(config_override, pending_cookie):
-    """Setting BotShieldCaptchaExpectedHostname to the literal value
+    """Setting BotShieldExpectedHostname to the literal value
     `off` is the documented escape hatch for multi-origin
     deployments. It must bypass the hostname check so a valid token
     is accepted even if the echoed hostname differs from anything
     we'd compare to. (`off` rather than "" because Apache's
     directive parser rejects bare "" as zero args.)"""
     with config_override(
-        r"BotShieldCaptchaExpectedHostname\s+example\.com",
-        "BotShieldCaptchaExpectedHostname off",
+        r"BotShieldExpectedHostname\s+example\.com",
+        "BotShieldExpectedHostname off",
         count=1,
     ):
         pending = pending_cookie("captcha-demo")

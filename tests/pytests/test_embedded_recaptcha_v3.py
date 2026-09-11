@@ -44,14 +44,15 @@ def test_bootstrap_returns_recaptcha_v3_provider(config_override):
     """With the scope configured for recaptcha-v3, /embedded-bootstrap
     surfaces provider=recaptcha-v3 + sitekey + action so the wrapper
     can dispatch to grecaptcha.execute(). Action defaults to
-    'botshield' if BotShieldCaptchaExpectedAction isn't set."""
+    'botshield' if BotShieldExpectedAction isn't set."""
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    <Location /botshield/embedded-bootstrap>\n'
-        '        BotShieldCaptchaProvider recaptcha-v3\n'
-        '        BotShieldCaptchaSiteKey 6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI\n'
-        '        BotShieldCaptchaSecretFile /etc/botshield/recaptcha-v3-secret\n'
+        '        <BotShieldCaptcha recaptcha-v3>\n'
+        '            BotShieldSiteKey 6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI\n'
+        '            BotShieldSecretFile /etc/botshield/recaptcha-v3-secret\n'
+        '        </BotShieldCaptcha>\n'
         '    </Location>',
         count=1,
     ):
@@ -71,17 +72,18 @@ def test_bootstrap_returns_recaptcha_v3_provider(config_override):
 
 
 def test_bootstrap_action_overrideable(config_override):
-    """BotShieldCaptchaExpectedAction overrides the default action so
+    """BotShieldExpectedAction overrides the default action so
     operators can have different action strings on different scopes
     without cross-contamination of v3 score semantics."""
     with config_override(
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    <Location /botshield/embedded-bootstrap>\n'
-        '        BotShieldCaptchaProvider recaptcha-v3\n'
-        '        BotShieldCaptchaSiteKey 6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI\n'
-        '        BotShieldCaptchaSecretFile /etc/botshield/recaptcha-v3-secret\n'
-        '        BotShieldCaptchaExpectedAction my_login_form\n'
+        '        <BotShieldCaptcha recaptcha-v3>\n'
+        '            BotShieldSiteKey 6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI\n'
+        '            BotShieldSecretFile /etc/botshield/recaptcha-v3-secret\n'
+        '            BotShieldExpectedAction my_login_form\n'
+        '        </BotShieldCaptcha>\n'
         '    </Location>',
         count=1,
     ):
@@ -123,9 +125,10 @@ def test_verify_rejects_recaptcha_v3_missing_token(config_override):
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    <Location /botshield/embedded-verify>\n'
-        '        BotShieldCaptchaProvider recaptcha-v3\n'
-        '        BotShieldCaptchaSiteKey 6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI\n'
-        '        BotShieldCaptchaSecretFile /etc/botshield/recaptcha-v3-secret\n'
+        '        <BotShieldCaptcha recaptcha-v3>\n'
+        '            BotShieldSiteKey 6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI\n'
+        '            BotShieldSecretFile /etc/botshield/recaptcha-v3-secret\n'
+        '        </BotShieldCaptcha>\n'
         '    </Location>',
         count=1,
     ):
@@ -184,9 +187,10 @@ def test_bootstrap_returns_recaptcha_v2_provider(config_override):
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    <Location /botshield/embedded-bootstrap>\n'
-        '        BotShieldCaptchaProvider recaptcha-v2\n'
-        '        BotShieldCaptchaSiteKey 6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI\n'
-        '        BotShieldCaptchaSecretFile /etc/botshield/recaptcha-v2-secret\n'
+        '        <BotShieldCaptcha recaptcha-v2>\n'
+        '            BotShieldSiteKey 6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI\n'
+        '            BotShieldSecretFile /etc/botshield/recaptcha-v2-secret\n'
+        '        </BotShieldCaptcha>\n'
         '    </Location>',
         count=1,
     ):
@@ -202,9 +206,10 @@ def test_bootstrap_returns_friendly_provider(config_override):
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    <Location /botshield/embedded-bootstrap>\n'
-        '        BotShieldCaptchaProvider friendly\n'
-        '        BotShieldCaptchaSiteKey FRIENDLY_CAPTCHA_SITEKEY_PLACEHOLDER\n'
-        '        BotShieldCaptchaSecretFile /etc/botshield/friendly-secret\n'
+        '        <BotShieldCaptcha friendly>\n'
+        '            BotShieldSiteKey FRIENDLY_CAPTCHA_SITEKEY_PLACEHOLDER\n'
+        '            BotShieldSecretFile /etc/botshield/friendly-secret\n'
+        '        </BotShieldCaptcha>\n'
         '    </Location>',
         count=1,
     ):
@@ -221,9 +226,10 @@ def test_verify_rejects_provider_mismatch(config_override):
         r"BotShieldEnabled\s+On",
         'BotShieldEnabled On\n'
         '    <Location /botshield/embedded-verify>\n'
-        '        BotShieldCaptchaProvider turnstile\n'
-        '        BotShieldCaptchaSiteKey 1x00000000000000000000AA\n'
-        '        BotShieldCaptchaSecretFile /etc/botshield/turnstile-secret\n'
+        '        <BotShieldCaptcha turnstile>\n'
+        '            BotShieldSiteKey 1x00000000000000000000AA\n'
+        '            BotShieldSecretFile /etc/botshield/turnstile-secret\n'
+        '        </BotShieldCaptcha>\n'
         '    </Location>',
         count=1,
     ):

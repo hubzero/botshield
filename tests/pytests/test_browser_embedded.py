@@ -119,9 +119,10 @@ def test_embedded_turnstile_mints_verified_cookie(
         'BotShieldEnabled On\n'
         '    <Location /embedded-test.html>\n'
         '        BotShieldNonInteractiveMode embedded\n'
-        '        BotShieldCaptchaProvider turnstile\n'
-        '        BotShieldCaptchaSiteKey 2x00000000000000000000AB\n'
-        '        BotShieldCaptchaSecretFile /etc/botshield/turnstile-secret\n'
+        '        <BotShieldCaptcha turnstile>\n'
+        '            BotShieldSiteKey 2x00000000000000000000AB\n'
+        '            BotShieldSecretFile /etc/botshield/turnstile-secret\n'
+        '        </BotShieldCaptcha>\n'
         '    </Location>',
         count=1,
     ):
@@ -167,11 +168,12 @@ def test_embedded_hcaptcha_mints_verified_cookie(
         'BotShieldEnabled On\n'
         '    <Location /embedded-test.html>\n'
         '        BotShieldNonInteractiveMode embedded\n'
-        '        BotShieldCaptchaProvider hcaptcha\n'
-        '        BotShieldCaptchaSiteKey '
+        '        <BotShieldCaptcha hcaptcha>\n'
+        '            BotShieldSiteKey '
             '10000000-ffff-ffff-ffff-000000000001\n'
-        '        BotShieldCaptchaSecretFile /etc/botshield/hcaptcha-secret\n'
-        '        BotShieldCaptchaExpectedHostname dummy-key-pass\n'
+        '            BotShieldSecretFile /etc/botshield/hcaptcha-secret\n'
+        '            BotShieldExpectedHostname dummy-key-pass\n'
+        '        </BotShieldCaptcha>\n'
         '    </Location>',
         count=1,
     ):

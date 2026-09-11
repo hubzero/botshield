@@ -56,10 +56,11 @@ def _override_form_captcha(provider: str = "turnstile",
     return (
         'BotShieldEnabled On\n'
         '    <Location /embedded-test.html>\n'
-        f'        BotShieldCaptchaProvider {provider}\n'
-        f'        BotShieldCaptchaSiteKey {sitekey}\n'
-        f'        BotShieldCaptchaSecretFile {secret_path}\n'
-        f'        BotShieldCaptchaExpectedHostname {expected_hostname}\n'
+        f'        <BotShieldCaptcha {provider}>\n'
+        f'            BotShieldSiteKey {sitekey}\n'
+        f'            BotShieldSecretFile {secret_path}\n'
+        f'            BotShieldExpectedHostname {expected_hostname}\n'
+        f'        </BotShieldCaptcha>\n'
         '        BotShieldFormCaptcha on\n'
         '    </Location>'
     )
@@ -265,9 +266,10 @@ def test_form_captcha_honors_log_only(config_override):
         'BotShieldEnabled On\n'
         '    BotShieldEnabled LogOnly\n'
         '    <Location /embedded-test.html>\n'
-        '        BotShieldCaptchaProvider turnstile\n'
-        '        BotShieldCaptchaSiteKey 1x00000000000000000000AA\n'
-        '        BotShieldCaptchaSecretFile /etc/botshield/turnstile-secret\n'
+        '        <BotShieldCaptcha turnstile>\n'
+        '            BotShieldSiteKey 1x00000000000000000000AA\n'
+        '            BotShieldSecretFile /etc/botshield/turnstile-secret\n'
+        '        </BotShieldCaptcha>\n'
         '        BotShieldFormCaptcha on\n'
         '    </Location>',
         count=1,

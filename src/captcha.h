@@ -232,6 +232,11 @@ const char *bs_set_captcha_ca_bundle    (cmd_parms *cmd, void *cfg_v, const char
 const char *bs_set_captcha_rate_limit   (cmd_parms *cmd, void *cfg_v, const char *arg);
 const char *bs_set_captcha_max_inflight (cmd_parms *cmd, void *cfg_v, const char *arg);
 
+/* <BotShieldCaptcha <provider>> -- the provider block. Folds the
+ * seven directives that describe one provider; the timeouts and the
+ * verify-endpoint guards stay scope-level. See captcha.c. */
+const char *bs_open_captcha(cmd_parms *cmd, void *dconf, const char *arg);
+
 #ifdef __cplusplus
 }
 #endif

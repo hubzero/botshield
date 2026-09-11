@@ -26,25 +26,33 @@ Six providers ship in the registry:
 | `turnstile` | `cf-turnstile-response` | Cloudflare Turnstile. Always-pass test keys at https://developers.cloudflare.com/turnstile/troubleshooting/testing/ |
 | `hcaptcha` | `h-captcha-response` | hCaptcha. Test keys at https://docs.hcaptcha.com/#integration-testing-test-keys |
 | `recaptcha-v2` | `g-recaptcha-response` | Google reCAPTCHA v2. Test pair at https://developers.google.com/recaptcha/docs/faq |
-| `recaptcha-v3` | `g-recaptcha-response` | Google reCAPTCHA v3. Score-thresholded; configure via `BotShieldRecaptchaV3MinScore` |
+| `recaptcha-v3` | `g-recaptcha-response` | Google reCAPTCHA v3. Score-thresholded; configure via `BotShieldMinScore` inside the block |
 | `friendly` | `frc-captcha-solution` | Friendly Captcha. The `solution` form field is mandated by the provider |
 | `geetest` | `geetest-token` | GeeTest v4. HMAC-signed; uses `captcha_id` + `captcha_key` rather than a generic site key + secret |
 
 Cohabitation: a single vhost can register multiple providers and
 route requests to different ones via `<LocationMatch>` scopes — the
-registry is per-scope, not per-server.
+registry is per-scope, not per-server, and one `<BotShieldCaptcha>`
+block per scope. Naming a provider from a `<BotShieldRule>` is not
+built; the scope a request lands in is what picks the provider.
 
 ### Configuration
 
 ```apache
-BotShieldCaptchaProvider        turnstile
-BotShieldCaptchaSiteKey         "1x00000000000000000000AA"
-BotShieldCaptchaSecretFile      /etc/botshield/captcha-turnstile-secret
+<BotShieldCaptcha turnstile>
+    BotShieldSiteKey    "1x00000000000000000000AA"
+    BotShieldSecretFile /etc/botshield/captcha-turnstile-secret
+    BotShieldCABundle   /etc/ssl/certs/ca-certificates.crt
+</BotShieldCaptcha>
+
+# Scope defaults, outside the block: they apply to every provider
+# under this scope and none of them describes a provider.
 BotShieldCaptchaTimeout         1000   # ms; 100..5000
 BotShieldCaptchaConnectTimeout  250    # ms
-BotShieldRecaptchaV3MinScore    0.5    # only meaningful for recaptcha-v3
-BotShieldCaptchaCABundle        /etc/ssl/certs/ca-certificates.crt
 ```
+
+`BotShieldMinScore 0.5` goes inside the block and is accepted only
+under `recaptcha-v3`.
 
 The secret file holds the provider's verify-side secret (or for
 GeeTest, the `captcha_key` used to HMAC the lot_number). Mode 0600,
@@ -55,7 +63,7 @@ timeout the verify path **fails open** — the request gets the same
 treatment it would on a clean pass. Provider-outage scenarios
 shouldn't black-hole legitimate traffic.
 
-`BotShieldCaptchaCABundle` is optional. If unset, libcurl uses its
+`BotShieldCABundle` is optional. If unset, libcurl uses its
 compiled-in default (usually `/etc/ssl/certs/ca-certificates.crt`
 on Debian-family). Sites with custom trust stores or air-gapped
 deployments can pin a specific bundle.
@@ -94,8 +102,12 @@ Several providers (hCaptcha, reCAPTCHA, Turnstile) return a
 botshield validates these against the configured expectations:
 
 ```apache
-BotShieldCaptchaExpectedHostname  example.com
-BotShieldCaptchaExpectedAction    botshield
+<BotShieldCaptcha turnstile>
+    BotShieldSiteKey           "1x00000000000000000000AA"
+    BotShieldSecretFile        /etc/botshield/turnstile-secret
+    BotShieldExpectedHostname  example.com
+    BotShieldExpectedAction    botshield
+</BotShieldCaptcha>
 ```
 
 NULL (unset) uses runtime defaults: server hostname from
@@ -114,15 +126,17 @@ no-ops for that provider.
     BotShieldEnabled on
 
     <LocationMatch "^/login">
-        BotShieldCaptchaProvider   turnstile
-        BotShieldCaptchaSiteKey    "..."
-        BotShieldCaptchaSecretFile /etc/botshield/turnstile-secret
+        <BotShieldCaptcha turnstile>
+            BotShieldSiteKey    "..."
+            BotShieldSecretFile /etc/botshield/turnstile-secret
+        </BotShieldCaptcha>
     </LocationMatch>
 
     <LocationMatch "^/api/v1/auth">
-        BotShieldCaptchaProvider   hcaptcha
-        BotShieldCaptchaSiteKey    "..."
-        BotShieldCaptchaSecretFile /etc/botshield/hcaptcha-secret
+        <BotShieldCaptcha hcaptcha>
+            BotShieldSiteKey    "..."
+            BotShieldSecretFile /etc/botshield/hcaptcha-secret
+        </BotShieldCaptcha>
     </LocationMatch>
 </VirtualHost>
 ```

@@ -131,8 +131,8 @@ def test_captcha_rejected_via_bad_secret(
     bad = spec.bad_secret_file
     # Match 1+ whitespace characters between directive + path so the
     # test survives aligned-column formatting in the vhost file.
-    pattern = rf"BotShieldCaptchaSecretFile\s+{good}"
-    replacement = f"BotShieldCaptchaSecretFile {bad}"
+    pattern = rf"BotShieldSecretFile\s+{good}"
+    replacement = f"BotShieldSecretFile {bad}"
 
     pending = pending_cookie(spec.demo_path)
     with config_override(pattern, replacement):
@@ -189,3 +189,63 @@ def test_captcha_body_field_name_stable(spec, pending_cookie, log_slice):
         f"{spec.name}: expected 'missing token field {spec.body_field!r}' "
         f"log line; none found"
     )
+
+
+# --- the provider block -----------------------------------------------
+#
+# Refusals go through config_override, not apache.configtest: that
+# helper injects one directive per -c argument and cannot carry a
+# block.
+
+
+def _block(body: str) -> str:
+    return ("BotShieldEnabled On\n"
+            "    <Location /captcha-block-probe>\n"
+            + body +
+            "    </Location>")
+
+
+@pytest.mark.parametrize("body, why", [
+    ("        <BotShieldCaptcha>\n"
+     "        </BotShieldCaptcha>\n", "no provider argument"),
+    ("        <BotShieldCaptcha turnstile>\n"
+     "            BotShieldSiteKey 1x00000000000000000000AA\n"
+     "            BotShieldCaptchaTimeout 1500\n"
+     "        </BotShieldCaptcha>\n", "a scope directive inside the block"),
+    ("        <BotShieldCaptcha turnstile>\n"
+     "            BotShieldSiteKey 1x00000000000000000000AA\n"
+     "            BotShieldMinScore 0.5\n"
+     "        </BotShieldCaptcha>\n", "MinScore under a non-v3 provider"),
+    ("        <BotShieldCaptcha turnstile>\n"
+     "            BotShieldSiteKey 1x00000000000000000000AA\n"
+     "            BotShieldSiteKey 2x00000000000000000000AB\n"
+     "        </BotShieldCaptcha>\n", "a setting given twice"),
+    ("        <BotShieldCaptcha turnstile>\n"
+     "            BotShieldSiteKey 1x00000000000000000000AA\n"
+     "        </BotShieldCaptcha>\n"
+     "        <BotShieldCaptcha hcaptcha>\n"
+     "            BotShieldSiteKey 10000000-ffff-ffff-ffff-000000000001\n"
+     "        </BotShieldCaptcha>\n", "two providers in one scope"),
+])
+def test_provider_block_refusals(config_override, body, why):
+    """Each of these is a configuration that would otherwise be wrong
+    quietly: a block that configures nothing, a scope default written
+    where it cannot apply, a knob that means nothing to the provider
+    it sits under, and two providers with one tier to render them."""
+    with pytest.raises(Exception):
+        with config_override(r"BotShieldEnabled\s+On", _block(body),
+                             count=1):
+            pass
+
+
+def test_min_score_is_accepted_under_recaptcha_v3(config_override):
+    """The guard above must not false-reject the one valid case."""
+    body = ("        <BotShieldCaptcha recaptcha-v3>\n"
+            "            BotShieldSiteKey "
+            "6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI\n"
+            "            BotShieldSecretFile "
+            "/etc/botshield/recaptcha-v3-secret\n"
+            "            BotShieldMinScore 0.5\n"
+            "        </BotShieldCaptcha>\n")
+    with config_override(r"BotShieldEnabled\s+On", _block(body), count=1):
+        pass

@@ -321,6 +321,10 @@ struct bs_dir_cfg {
     /* --- Captcha tier (M8) --- */
     const char *endpoint_prefix;            /* default "/botshield" */
     const bs_captcha_provider *captcha_provider;  /* NULL = tier unused */
+    /* <BotShieldCaptcha> seen in this scope. Not inherited: a
+     * <Location> declaring its own provider is an override, not a
+     * duplicate. */
+    int         captcha_container_seen;
     const char *captcha_site_key;           /* provider-public */
     const unsigned char *captcha_secret;    /* file bytes, mode-600 */
     apr_size_t  captcha_secret_len;

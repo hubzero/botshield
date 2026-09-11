@@ -288,17 +288,62 @@ preserved.
 
 ## Captcha tier
 
+One block per provider, the provider as its argument:
+
+```apache
+<BotShieldCaptcha turnstile>
+    BotShieldSiteKey           0x4AAAAAAA
+    BotShieldSecretFile        /etc/botshield/turnstile.secret
+    BotShieldExpectedHostname  example.org
+    BotShieldExpectedAction    botshield
+    BotShieldCABundle          /etc/ssl/certs/ca-bundle.crt
+</BotShieldCaptcha>
+
+BotShieldCaptchaTimeout        1000
+BotShieldCaptchaConnectTimeout 250
+BotShieldCaptchaRateLimit      30
+BotShieldCaptchaMaxInFlight    64
+```
+
+| Inside the block | Meaning |
+|---|---|
+| `BotShieldSiteKey` | provider-public key embedded in the widget |
+| `BotShieldSecretFile` | siteverify secret; must be mode 0600 |
+| `BotShieldExpectedHostname` | hostname the provider must echo back; empty disables |
+| `BotShieldExpectedAction` | action the widget must tag the token with; empty disables |
+| `BotShieldCABundle` | PEM bundle for the provider's TLS certificate |
+| `BotShieldMinScore` | reCAPTCHA v3 only: minimum accepted score |
+
+The provider is the block argument because it is the value that decides
+whether the rest mean anything -- a site key without a provider
+configures nothing -- and it names the block in every error the
+settings inside can raise. `RSRC_CONF | ACCESS_CONF`, so a `<Location>`
+may declare its own; one per scope, and a second is refused rather than
+letting the later one win silently.
+
+**Four captcha directives stay outside it.**
+`BotShieldCaptchaTimeout`, `BotShieldCaptchaConnectTimeout`,
+`BotShieldCaptchaRateLimit` and `BotShieldCaptchaMaxInFlight` are scope
+defaults: a vhost sets them once and every provider block under it
+inherits. The first two are network timeouts, the last two protect the
+verify endpoint; none describes a provider, and moving them in would
+make a per-`<Location>` provider block the only place to say something
+that is not per-provider.
+
+`BotShieldMinScore` replaces `BotShieldRecaptchaV3MinScore` and is
+**refused under any other provider**. As a top-level directive it
+parsed anywhere and silently did nothing for five of the six.
+
+Until 2026-09-10 these were seven standalone directives
+(`BotShieldCaptchaProvider`, `...SiteKey`, `...SecretFile`,
+`...ExpectedHostname`, `...ExpectedAction`, `...CABundle`,
+`BotShieldRecaptchaV3MinScore`).
+
+
 | Directive | Syntax | Default |
 |---|---|---|
-| `BotShieldCaptchaProvider` | `<name>` | unset |
-| `BotShieldCaptchaSiteKey` | `"key"` | unset |
-| `BotShieldCaptchaSecretFile` | `/path` | unset |
 | `BotShieldCaptchaTimeout` | `N` (ms) | `1000` (100..5000) |
 | `BotShieldCaptchaConnectTimeout` | `N` (ms) | `250` (50..5000) |
-| `BotShieldRecaptchaV3MinScore` | `0..1` | `0.5` |
-| `BotShieldCaptchaExpectedHostname` | `"name"` or `""` | server hostname |
-| `BotShieldCaptchaExpectedAction` | `"action"` or `""` | `botshield` |
-| `BotShieldCaptchaCABundle` | `/path` | libcurl default |
 | `BotShieldFormCaptcha` | `on\|off` | `off` |
 
 Provider names: `turnstile`, `hcaptcha`, `recaptcha-v2`,
@@ -310,10 +355,11 @@ timeout the verify path fails open. `BotShieldCaptchaConnectTimeout`
 is the connect phase only — tighter, raised on links with
 transient packet loss.
 
-`BotShieldRecaptchaV3MinScore` only matters for `recaptcha-v3`.
-Reject verifications below this score even on `success: true`.
+`BotShieldMinScore` only matters for `recaptcha-v3`, which is why the
+block refuses it anywhere else. Reject verifications below this score
+even on `success: true`.
 
-`BotShieldCaptchaExpectedHostname` / `Action`: empty string
+`BotShieldExpectedHostname` / `BotShieldExpectedAction`: empty string
 disables the check; unset uses defaults (`server_hostname` /
 `"botshield"`). GeeTest binds host/action via HMAC and doesn't
 return them in the response, so these are no-ops for that

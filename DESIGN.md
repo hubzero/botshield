@@ -1748,20 +1748,20 @@ Two response-contract families:
    connect timeout + operator-tunable total
    (`BotShieldCaptchaTimeout` 100..5000, default 1000).
    `SSL_VERIFYPEER` + `SSL_VERIFYHOST` on. Optional
-   `BotShieldCaptchaCABundle` for stripped container images that
+   `BotShieldCABundle` for stripped container images that
    lack `/etc/ssl/certs`.
 4. Fail-open on timeout / network error / 4xx-5xx / unrecognized
    response shape — logs at `APLOG_WARNING` with literal string
    "failing open" so it greps cleanly.
 5. **Binding-metadata validation**:
-   - `BotShieldCaptchaExpectedHostname` (default vhost
+   - `BotShieldExpectedHostname` (default vhost
      `server_hostname`; empty disables) — provider response's
      `hostname` field must echo it.
-   - `BotShieldCaptchaExpectedAction` (default `botshield`; empty
+   - `BotShieldExpectedAction` (default `botshield`; empty
      disables) — provider response's `action` field must echo it
      (Turnstile + reCAPTCHA v3).
-   - `BotShieldRecaptchaV3MinScore` (default 0.5) — reCAPTCHA v3
-     score must be ≥.
+   - `BotShieldMinScore` (default 0.5) — reCAPTCHA v3 score must
+     be ≥. Refused under any other provider since 2026-09-10.
 6. On success: `bs_install_verified_cookie` mints `_bs_session`
    with `alg=captcha-<provider>`, `passes_captcha` bumped
    ( clamp), forgiveness applied. Redirect to `return_to` or
@@ -2393,7 +2393,7 @@ the `bs_cmds[]` table at `src/botshield.c:213`.
 | Crypto | `BotShieldSecretFile`, `BotShieldSecondarySecretFile`, `BotShieldAlgorithm` |
 | Scoring | `BotShieldScore` (in a rule), `BotShieldScoreAtLeast`, `BotShieldChallengeAtLeast`. The `BotShieldScore*` cut-points and the `BotShieldForgiveness*` family were removed with the cumulative score |
 | Cookie | `BotShieldCookieDomain` |
-| Captcha (M8 + E18) | `BotShieldCaptchaProvider`, `BotShieldCaptchaSiteKey`, `BotShieldCaptchaSecretFile`, `BotShieldCaptchaTimeout`, `BotShieldCaptchaConnectTimeout`, `BotShieldRecaptchaV3MinScore`, `BotShieldCaptchaExpectedHostname`, `BotShieldCaptchaExpectedAction`, `BotShieldCaptchaCABundle`, `BotShieldCaptchaRateLimit`, `BotShieldCaptchaMaxInFlight`, `BotShieldFormCaptcha` |
+| Captcha (M8 + E18) | `<BotShieldCaptcha <provider>>` carrying `BotShieldSiteKey`, `BotShieldSecretFile`, `BotShieldExpectedHostname`, `BotShieldExpectedAction`, `BotShieldCABundle`, `BotShieldMinScore` (seven standalone directives until 2026-09-10); scope-level `BotShieldCaptchaTimeout`, `BotShieldCaptchaConnectTimeout`, `BotShieldCaptchaRateLimit`, `BotShieldCaptchaMaxInFlight`, `BotShieldFormCaptcha` |
 | Non-interactive (E17) | `BotShieldNonInteractiveMode` |
 | SHM sizing | `BotShieldShmSize`, `BotShieldFlaggedIPCapacity`, `BotShieldIPv6PrefixLen`, `BotShieldBloomIPs`, `BotShieldBloomWindow`, `BotShieldStateFile`, `BotShieldStateSaveInterval`, `BotShieldEscalateCapacity`, `BotShieldSafeguardCapacity`, `BotShieldEmbeddedNonceCapacity` |
 | UA classification (E1) | `BotShieldClassify`, `BotShieldAllowBot`, `BotShieldAllowRangesRefreshInterval`, `BotShieldBotDirectory`, `BotShieldBrowserTemplates`, `BotShieldDataRefreshInterval` |

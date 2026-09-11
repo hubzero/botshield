@@ -14,6 +14,7 @@
 
 #include <apr_pools.h>
 #include <apr_strings.h>
+#include <apr_lib.h>   /* apr_isspace in the provider block */
 #include <apr_tables.h>
 #include <apr_time.h>
 #include <apr_atomic.h>
@@ -1826,13 +1827,13 @@ const char *bs_set_captcha_provider(cmd_parms *cmd, void *cfg_v,
     const bs_captcha_provider *p = bs_find_provider(arg);
     if (!p) {
         return apr_psprintf(cmd->pool,
-            "BotShieldCaptchaProvider: '%s' is not a recognized provider "
+            "<BotShieldCaptcha>: '%s' is not a recognized provider "
             "(known: turnstile, hcaptcha, recaptcha-v2, recaptcha-v3, "
             "friendly, geetest)", arg);
     }
     if (!p->implemented) {
         return apr_psprintf(cmd->pool,
-            "BotShieldCaptchaProvider: '%s' is reserved in the registry "
+            "<BotShieldCaptcha>: '%s' is reserved in the registry "
             "but not built into this module", arg);
     }
     cfg->captcha_provider = p;
@@ -1844,12 +1845,12 @@ const char *bs_set_captcha_site_key(cmd_parms *cmd, void *cfg_v,
 {
     bs_dir_cfg *cfg = cfg_v;
     if (!arg || !*arg) {
-        return "BotShieldCaptchaSiteKey: empty value";
+        return "BotShieldSiteKey: empty value";
     }
     /* Site keys are public; cap length so a misconfigured directive
      * can't wedge the interstitial. */
     if (strlen(arg) > 256) {
-        return "BotShieldCaptchaSiteKey: value longer than 256 bytes";
+        return "BotShieldSiteKey: value longer than 256 bytes";
     }
     /* Defense-in-depth: real provider site keys are alphanumerics
      * plus `_`, `-`, `.` (Turnstile, hCaptcha, reCAPTCHA, Friendly,
@@ -1866,7 +1867,7 @@ const char *bs_set_captcha_site_key(cmd_parms *cmd, void *cfg_v,
               || c == '_' || c == '-' || c == '.';
         if (!ok) {
             return apr_psprintf(cmd->pool,
-                "BotShieldCaptchaSiteKey: illegal character 0x%02x at "
+                "BotShieldSiteKey: illegal character 0x%02x at "
                 "offset %td. Allowed: alphanumerics, '_', '-', '.'.",
                 c, p - arg);
         }
@@ -1883,7 +1884,7 @@ const char *bs_set_captcha_secret_file(cmd_parms *cmd, void *cfg_v,
 
     const char *buf = NULL;
     apr_size_t len = 0;
-    const char *err = bs_load_secret_file(cmd, "BotShieldCaptchaSecretFile",
+    const char *err = bs_load_secret_file(cmd, "BotShieldSecretFile",
                                           arg, &buf, &len);
     if (err) return err;
     cfg->captcha_secret     = (const unsigned char *)buf;
@@ -1942,7 +1943,7 @@ const char *bs_set_recaptcha_v3_min_score(cmd_parms *cmd,
     double v = strtod(arg, &end);
     if (!end || *end != '\0' || v < 0.0 || v > 1.0) {
         return apr_psprintf(cmd->pool,
-            "BotShieldRecaptchaV3MinScore: '%s' must be a number in 0.0..1.0",
+            "BotShieldMinScore: '%s' must be a number in 0.0..1.0",
             arg);
     }
     cfg->recaptcha_v3_min_score = v;
@@ -1972,12 +1973,12 @@ const char *bs_set_captcha_expected_hostname(cmd_parms *cmd,
         return NULL;
     }
     if (strlen(arg) > 253) {
-        return "BotShieldCaptchaExpectedHostname: longer than RFC 1035 limit";
+        return "BotShieldExpectedHostname: longer than RFC 1035 limit";
     }
     for (const char *p = arg; *p; p++) {
         if (!(isalnum((unsigned char)*p) || *p == '.' || *p == '-')) {
             return apr_psprintf(cmd->pool,
-                "BotShieldCaptchaExpectedHostname: '%s' contains "
+                "BotShieldExpectedHostname: '%s' contains "
                 "a character outside [a-zA-Z0-9.-]", arg);
         }
     }
@@ -2002,14 +2003,14 @@ const char *bs_set_captcha_expected_action(cmd_parms *cmd,
         return NULL;
     }
     if (strlen(arg) > 64) {
-        return "BotShieldCaptchaExpectedAction: max 64 characters";
+        return "BotShieldExpectedAction: max 64 characters";
     }
     for (const char *p = arg; *p; p++) {
         unsigned char c = (unsigned char)*p;
         if (c <= 0x20 || c >= 0x7f || c == '"' || c == '\'' ||
             c == '\\' || c == ';' || c == '&') {
             return apr_psprintf(cmd->pool,
-                "BotShieldCaptchaExpectedAction: '%s' contains "
+                "BotShieldExpectedAction: '%s' contains "
                 "an unsafe character", arg);
         }
     }
@@ -2036,19 +2037,19 @@ const char *bs_set_captcha_ca_bundle(cmd_parms *cmd,
 {
     bs_dir_cfg *cfg = cfg_v;
     if (!arg || !*arg) {
-        return "BotShieldCaptchaCABundle: path required";
+        return "BotShieldCABundle: path required";
     }
     if (arg[0] != '/') {
-        return "BotShieldCaptchaCABundle: path must be absolute";
+        return "BotShieldCABundle: path must be absolute";
     }
     struct stat st;
     if (stat(arg, &st) != 0) {
         return apr_psprintf(cmd->pool,
-            "BotShieldCaptchaCABundle: cannot stat '%s'", arg);
+            "BotShieldCABundle: cannot stat '%s'", arg);
     }
     if (!S_ISREG(st.st_mode)) {
         return apr_psprintf(cmd->pool,
-            "BotShieldCaptchaCABundle: '%s' is not a regular file", arg);
+            "BotShieldCABundle: '%s' is not a regular file", arg);
     }
     cfg->captcha_ca_bundle = apr_pstrdup(cmd->pool, arg);
     return NULL;
@@ -2091,5 +2092,148 @@ const char *bs_set_captcha_max_inflight(cmd_parms *cmd, void *cfg_v,
             arg);
     }
     scfg->captcha_max_inflight = (int)v;
+    return NULL;
+}
+
+/* ======================================================================
+ * <BotShieldCaptcha <provider>> -- the provider block
+ *
+ * The provider is the block argument because it is the one value that
+ * decides whether the rest mean anything: a site key without a provider
+ * configures nothing, and the provider names the block in every error
+ * the settings inside can raise.
+ *
+ * Four captcha directives are deliberately NOT in here.
+ * BotShieldCaptchaTimeout, BotShieldCaptchaConnectTimeout,
+ * BotShieldCaptchaRateLimit and BotShieldCaptchaMaxInFlight are scope
+ * defaults -- a vhost sets them once and every provider block under it
+ * inherits -- and the dev vhost has always used them that way. Moving
+ * them inside would make a per-Location provider block the only place
+ * to say something that is not about a provider.
+ *
+ * The inner names are not registered directives, the same as
+ * <BotShieldRule> and <BotShieldRobots>: BotShieldSiteKey at top level
+ * is an unknown directive, which Apache reports clearly, and the global
+ * table stays free of words like SiteKey and CABundle.
+ *
+ * Each inner name dispatches to the setter that has always parsed it,
+ * so validation, secret-file mode checks and error wording are
+ * unchanged, and the ~50 request-path reads of cfg->captcha_* need to
+ * know nothing about blocks.
+ * ====================================================================== */
+
+static const struct {
+    const char *name;
+    const char *(*set)(cmd_parms *, void *, const char *);
+} bs_captcha_block_keys[] = {
+    { "BotShieldSiteKey",          bs_set_captcha_site_key },
+    { "BotShieldSecretFile",       bs_set_captcha_secret_file },
+    { "BotShieldExpectedHostname", bs_set_captcha_expected_hostname },
+    { "BotShieldExpectedAction",   bs_set_captcha_expected_action },
+    { "BotShieldCABundle",         bs_set_captcha_ca_bundle },
+    { "BotShieldMinScore",         bs_set_recaptcha_v3_min_score },
+    { NULL, NULL }
+};
+
+/* The rest of a directive line, one layer of quoting removed, so a
+ * value with spaces survives either spelling. */
+static const char *bs_cap_value(apr_pool_t *p, const ap_directive_t *d)
+{
+    char *v = apr_pstrdup(p, d->args ? d->args : "");
+    apr_size_t n = strlen(v);
+    while (n && apr_isspace(v[n - 1])) v[--n] = '\0';
+    if (n >= 2 && (v[0] == '"' || v[0] == '\'') && v[n - 1] == v[0]) {
+        v[n - 1] = '\0';
+        v++;
+    }
+    return v;
+}
+
+const char *bs_open_captcha(cmd_parms *cmd, void *dconf, const char *arg)
+{
+    apr_pool_t *p = cmd->pool;
+    bs_dir_cfg *cfg = dconf;
+
+    char *spec = apr_pstrdup(p, arg ? arg : "");
+    apr_size_t n = strlen(spec);
+    while (n && apr_isspace(spec[n - 1])) spec[--n] = '\0';
+    if (!n || spec[n - 1] != '>') {
+        return "<BotShieldCaptcha> is missing its closing '>'";
+    }
+    spec[--n] = '\0';
+    while (n && apr_isspace(spec[n - 1])) spec[--n] = '\0';
+
+    const char *provider = ap_getword_conf(p, (const char **)&spec);
+    if (!provider || !*provider) {
+        return "<BotShieldCaptcha> needs a provider: "
+               "<BotShieldCaptcha turnstile>. Built in: turnstile, "
+               "hcaptcha, recaptcha-v2, recaptcha-v3, friendly, geetest.";
+    }
+    while (*spec == ' ' || *spec == '\t') spec++;
+    if (*spec) {
+        return apr_psprintf(p, "<BotShieldCaptcha %s> takes only the "
+                            "provider; '%s' was also given", provider, spec);
+    }
+
+    /* One block per scope. A second would be two providers with one
+     * tier to render them, and the later one silently winning is how
+     * an operator ends up serving a widget whose secret verifies
+     * nothing. Naming a provider from a rule -- which is what would
+     * make two of these meaningful -- is a separate piece of work. */
+    if (cfg && cfg->captcha_container_seen) {
+        return apr_psprintf(p,
+            "<BotShieldCaptcha %s>: a captcha provider is already "
+            "defined in this scope. One per scope: the captcha tier "
+            "renders one widget, and a second block would be a provider "
+            "nothing can select. Use a <Location> for a second one.",
+            provider);
+    }
+
+    const char *err = bs_set_captcha_provider(cmd, dconf, provider);
+    if (err) return err;
+    if (cfg) cfg->captcha_container_seen = 1;
+
+    apr_table_t *seen = apr_table_make(p, 8);
+    for (const ap_directive_t *d = cmd->directive->first_child; d;
+         d = d->next) {
+        const char *dir = d->directive;
+        int i;
+        for (i = 0; bs_captcha_block_keys[i].name; i++) {
+            if (!strcasecmp(dir, bs_captcha_block_keys[i].name)) break;
+        }
+        if (!bs_captcha_block_keys[i].name) {
+            return apr_psprintf(p,
+                "<BotShieldCaptcha %s>: '%s' at %s:%d is not a provider "
+                "setting. Inside the block: BotShieldSiteKey, "
+                "BotShieldSecretFile, BotShieldExpectedHostname, "
+                "BotShieldExpectedAction, BotShieldCABundle, "
+                "BotShieldMinScore. The timeouts and the verify-endpoint "
+                "guards are scope-level and stay outside it.",
+                provider, dir, d->filename ? d->filename : "?",
+                d->line_num);
+        }
+        if (apr_table_get(seen, bs_captcha_block_keys[i].name)) {
+            return apr_psprintf(p, "<BotShieldCaptcha %s>: %s given twice",
+                                provider, dir);
+        }
+        apr_table_set(seen, bs_captcha_block_keys[i].name, "1");
+
+        /* MinScore is reCAPTCHA v3's alone. Accepted anywhere before
+         * this block existed, where it read as a knob every provider
+         * had and silently did nothing for five of the six. */
+        if (!strcasecmp(dir, "BotShieldMinScore")
+            && strcasecmp(provider, "recaptcha-v3") != 0) {
+            return apr_psprintf(p,
+                "<BotShieldCaptcha %s>: BotShieldMinScore is reCAPTCHA "
+                "v3's score threshold and means nothing to %s. Remove it, "
+                "or set the provider to recaptcha-v3.", provider, provider);
+        }
+
+        err = bs_captcha_block_keys[i].set(cmd, dconf, bs_cap_value(p, d));
+        if (err) {
+            return apr_psprintf(p, "<BotShieldCaptcha %s>: %s",
+                                provider, err);
+        }
+    }
     return NULL;
 }

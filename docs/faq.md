@@ -358,7 +358,7 @@ sizing is documented in [deployment](deployment.md#capacity-sizing).
 No. The module makes outbound network calls in two
 configured categories:
 
-1. **Captcha siteverify.** When `BotShieldCaptchaProvider` is
+1. **Captcha siteverify.** When a `<BotShieldCaptcha>` block is
    configured, mod_botshield makes one HTTPS POST per verify
    attempt to the configured provider's siteverify URL with the
    client's captcha token (and the client IP as the `remoteip`
