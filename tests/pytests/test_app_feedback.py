@@ -29,7 +29,7 @@ import hmac
 
 import pytest
 
-from botshield_test import client, ips as _ips
+from botshield_test import apache, client, ips as _ips
 
 
 # No longer serial. The marker meant "mutates Apache config or SHM",
@@ -635,4 +635,20 @@ def test_label_and_event_are_separate(config_override, log_slice):
     assert lines and "flaggedip" in lines[-1]["reason"], (
         f"the event should have matched despite the differing label; "
         f"reason={lines[-1]['reason'] if lines else None}"
+    )
+
+
+def test_the_header_name_directive_is_retired():
+    """BotShieldAppFeedbackHeader failed config parse from 2026-09-11.
+
+    It stays registered so the failure is a sentence that says what
+    happened -- an unregistered directive gets "Invalid command", which
+    sends the reader looking for a typo or a missing LoadModule.
+    """
+    rc, err = apache.configtest(
+        "BotShieldAppFeedbackHeader X-My-Feedback")
+    assert rc != 0, "the retired directive was accepted"
+    assert "X-BotShield-Feedback" in err, (
+        "the refusal should name the header the app must set instead; "
+        f"stderr:\n{err[-400:]}"
     )

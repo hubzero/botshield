@@ -2527,12 +2527,30 @@ Folded into `BotShieldEnabled` (tri-state `on` / `off` /
 | Directive | Syntax | Default |
 |---|---|---|
 | `BotShieldAppFeedback` | `on\|off` | `off` |
-| `BotShieldAppFeedbackHeader` | `<header-name>` | `X-BotShield-Feedback` |
 | `BotShieldAppClaims` | `on\|off` | `off` |
 | `BotShieldAppIntegrationSecretFile` | `/path` | unset (required for either above) |
 
+The feedback header is fixed at `X-BotShield-Feedback`. It is part of
+the protocol your application writes against, like the verify
+endpoint's path — not a setting.
+
 See [captcha](captcha.md#app-bridge) for the wire format
 and security model.
+
+#### Removed: `BotShieldAppFeedbackHeader`
+
+Removed 2026-09-11; it now fails config parse.
+
+It bought nothing. The name is namespaced enough not to collide, and
+it never leaves Apache — the module strips it on the way out — so
+nothing upstream can rewrite it. Forgery is hard because of the HMAC,
+not because the name is obscure.
+
+What it did buy was a leak. The strip removes only the **configured**
+name, so renaming the header while the application still emitted the
+old one produced a header the module neither read nor stripped: it
+went to the client carrying the flag vocabulary and a signature. A
+fixed name cannot fail that way.
 
 ## Where to next
 

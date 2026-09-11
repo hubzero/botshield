@@ -214,9 +214,7 @@ apr_status_t bs_app_feedback_filter(ap_filter_t *f,
         ap_get_module_config(r->server->module_config, &botshield_module);
     if (!scfg) return ap_pass_brigade(f->next, bb);
 
-    const char *hname = scfg->app_feedback_header
-                      ? scfg->app_feedback_header
-                      : BS_APP_FEEDBACK_DEFAULT_HEADER;
+    const char *hname = BS_APP_FEEDBACK_HEADER;
 
     int n = bs_count_header(r, hname);
     if (n == 0) return ap_pass_brigade(f->next, bb);
@@ -491,34 +489,19 @@ const char *bs_set_app_feedback(cmd_parms *cmd, void *dconf,
     return NULL;
 }
 
-/* E5 — BotShieldAppFeedbackHeader <name>. Header name the module
- * reads feedback from (and strips on its way out). Default
- * X-BotShield-Feedback. */
+/* Retired 2026-09-11. Kept registered so it fails with a sentence
+ * that says what happened, rather than "Invalid command", which sends
+ * the reader looking for a typo or a missing LoadModule. */
 const char *bs_set_app_feedback_header(cmd_parms *cmd, void *dconf,
-                                               const char *name)
+                                       const char *name)
 {
-    (void)dconf;
-    if (!name || !*name) {
-        return "BotShieldAppFeedbackHeader: header name required";
-    }
-    apr_size_t nlen = strlen(name);
-    if (nlen > 64) {
-        return "BotShieldAppFeedbackHeader: name over 64 chars";
-    }
-    for (apr_size_t i = 0; i < nlen; i++) {
-        unsigned char c = (unsigned char)name[i];
-        int ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
-              || (c >= '0' && c <= '9') || c == '-' || c == '_';
-        if (!ok) {
-            return apr_psprintf(cmd->pool,
-                "BotShieldAppFeedbackHeader: '%s' contains invalid "
-                "char '%c'", name, (char)c);
-        }
-    }
-    bs_server_cfg *scfg = ap_get_module_config(cmd->server->module_config,
-                                               &botshield_module);
-    scfg->app_feedback_header = apr_pstrdup(cmd->pool, name);
-    return NULL;
+    (void)dconf; (void)name;
+    return apr_psprintf(cmd->pool,
+        "%s is retired: the feedback header is fixed at %s, which is "
+        "part of the protocol your application writes against rather "
+        "than a setting. Delete the directive and have the app set %s. "
+        "See docs/directives.md.",
+        cmd->cmd->name, BS_APP_FEEDBACK_HEADER, BS_APP_FEEDBACK_HEADER);
 }
 
 /* E8.2 — BotShieldAppClaims on|off. Master gate for the module-to-

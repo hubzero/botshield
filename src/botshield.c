@@ -794,12 +794,14 @@ static const command_rec bs_cmds[] = {
                  "leak it to clients."),
     AP_INIT_TAKE1("BotShieldAppFeedbackHeader",
                  bs_set_app_feedback_header, NULL, RSRC_CONF,
-                 "Header name the module reads feedback from. "
-                 "Default X-BotShield-Feedback. App sets "
-                 "`<header>: flag=<name>;ttl=<sec>[;kid=<id>];sig=<hex>`; "
+                 "RETIRED 2026-09-11; fails config parse. The feedback "
+                 "header is fixed at X-BotShield-Feedback. The app sets "
+                 "`X-BotShield-Feedback: "
+                 "flag=<name>;ttl=<sec>[;kid=<id>];sig=<hex>`; the "
                  "module validates the HMAC, applies the flag to the "
                  "flagged-IP table, and strips the header before the "
-                 "response leaves Apache."),
+                 "response leaves Apache -- whether or not feedback is "
+                 "enabled, so a misconfigured app cannot leak it."),
     /* E8.2 — module-to-app reputation export. */
     AP_INIT_FLAG("BotShieldAppClaims",
                  bs_set_app_claims, NULL, RSRC_CONF,

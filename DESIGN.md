@@ -120,7 +120,7 @@ deliver an incremental-rebuild win — punted as a follow-up.
 | `non_interactive.{c,h}` | E17 embedded handlers: `bs_embedded_js_handler`, `bs_embedded_worker_handler`, `bs_embedded_bootstrap_handler`, `bs_embedded_verify_handler`, `bs_form_widget_handler`. `BotShieldNonInteractiveMode` setter |
 | `templates.{c,h}` | Static HTML/CSS/JS strings for the PoW widget, captcha-tier widgets, and the page shell. Two-step substitution renderer (`bs_render_challenge_page`) |
 | `formcaptcha.{c,h}` | E18 fixup hook (`bs_form_captcha_fixup`) and the `BS_FORM_REPLAY` input filter (`bs_form_replay_filter`) for body replay |
-| `bridge.{c,h}` | E5 inbound: `BOTSHIELD_APP_FEEDBACK` output filter (`bs_app_feedback_filter` + `bs_app_feedback_insert_filter`) that strips the response header and applies the signed event. E8.2 outbound: `bs_app_claims_set` strips client X-Botshield-* and emits a fresh signed `X-Botshield-Claims`. Setters for `BotShieldAppFeedback`, `BotShieldAppFeedbackHeader`, `BotShieldAppClaims`, `BotShieldAppIntegrationSecretFile` |
+| `bridge.{c,h}` | E5 inbound: `BOTSHIELD_APP_FEEDBACK` output filter (`bs_app_feedback_filter` + `bs_app_feedback_insert_filter`) that strips the response header and applies the signed event. E8.2 outbound: `bs_app_claims_set` strips client X-Botshield-* and emits a fresh signed `X-Botshield-Claims`. Setters for `BotShieldAppFeedback`, `BotShieldAppClaims`, `BotShieldAppIntegrationSecretFile`, plus the refusal stub for the retired `BotShieldAppFeedbackHeader`. The header name is fixed at `BS_APP_FEEDBACK_HEADER` |
 | `load.{c,h}` | E11 load-aware throttling: `bs_load_watchdog_cb` (scoreboard sampler + external-state-file poller + hysteresis), `bs_load_current` lockless reader. Four `BotShieldLoad*` setters |
 | `allowlist.{c,h}` | E1 verified-crawler classifier: `bs_ua_classifier`, `bs_ua_classify`, CIDR loaders (`bs_allow_load_ranges`, `bs_allow_load_ranges_from_string`), `bs_allow_ip_in_ranges`, request-time `bs_check_allow`, builtin bot table (`bs_builtin_bots`). Setters `bs_set_allow_enabled`, `bs_set_allow_bot`. Also hosts shared IP helpers (`bs_parse_client_ip`, `bs_mask_ipv6_prefix`) |
 | `ua_class.{c,h}` | Unified per-request UA classification: `bs_classify_request_ua` walks browser-templates → bot directory → verified-bot IP cross-check in that order (browser-first, so real users pay one pass) and caches the single answer on `r->pool` via `apr_pool_userdata` for every downstream consumer. `bs_classify_request_hook`, label stringifier `bs_ua_class_label_str`. Hosts the `bs_ua_class` struct + `bs_ua_class_label` enum. Setter `bs_set_classify` (`BotShieldClassify` — per-pass enable/disable, each disabled pass with a documented fail-safe) |
@@ -2405,7 +2405,7 @@ the `bs_cmds[]` table at `src/botshield.c:213`.
 | Load (E11) | `BotShieldLoadStateFile`, `BotShieldLoadRefreshInterval` |
 | Multi-vhost (E13) | `BotShieldShareScope` |
 | Observability | `BotShieldDecisionLog` |
-| App bridge (E5 / E8.2) | `BotShieldAppFeedback`, `BotShieldAppFeedbackHeader`, `BotShieldAppClaims`, `BotShieldAppIntegrationSecretFile` |
+| App bridge (E5 / E8.2) | `BotShieldAppFeedback`, `BotShieldAppClaims`, `BotShieldAppIntegrationSecretFile` |
 
 Most directives use `RSRC_CONF | ACCESS_CONF` (server / vhost /
 `<Directory>` / `<Location>`); SHM-sizing and certain server-global

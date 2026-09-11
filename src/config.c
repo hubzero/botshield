@@ -307,9 +307,6 @@ void *bs_merge_server_cfg(apr_pool_t *p, void *base_v, void *add_v)
     if (add->app_feedback_enabled == BS_APP_FEEDBACK_UNSET) {
         out->app_feedback_enabled = base->app_feedback_enabled;
     }
-    if (!add->app_feedback_header && base->app_feedback_header) {
-        out->app_feedback_header = base->app_feedback_header;
-    }
     /* Inherit the decision-log path, but never the open fd: the fd is
      * resolved at post_config, where bs_open_decision_logs shares one
      * writer per distinct log spec. Copying a stale fd here would
@@ -451,7 +448,6 @@ void *bs_create_server_cfg(apr_pool_t *p, server_rec *s)
     /* App integration defaults — UNSET sentinel so the server-scope
      * merge can tell "unset at this scope" from explicit off. */
     scfg->app_feedback_enabled        = BS_APP_FEEDBACK_UNSET;
-    scfg->app_feedback_header         = NULL;
     scfg->app_claims_enabled          = BS_APP_FEEDBACK_UNSET;
     scfg->app_integration_secret_file = NULL;
     scfg->app_integration_secret      = NULL;

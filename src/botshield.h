@@ -343,7 +343,17 @@ struct bs_dir_cfg {
  * ====================================================================== */
 
 #define BS_APP_FEEDBACK_UNSET           (-1)
-#define BS_APP_FEEDBACK_DEFAULT_HEADER  "X-BotShield-Feedback"
+/* The app-to-module feedback channel. Fixed, not configurable:
+ * it is part of the protocol an application writes against, the
+ * way the verify endpoint's path is. BotShieldAppFeedbackHeader
+ * made it a setting until 2026-09-11, which bought nothing --
+ * the name is namespaced enough not to collide, it never leaves
+ * Apache so nothing upstream can rewrite it, and the HMAC is what
+ * makes forgery hard, not obscurity. What it did buy was a leak:
+ * the strip removes only the CONFIGURED name, so renaming it
+ * while the app still emitted the old one sent that header to the
+ * client with the flag vocabulary and a signature in it. */
+#define BS_APP_FEEDBACK_HEADER  "X-BotShield-Feedback"
 
 /* Per-pass enable/disable for the unified UA classifier. Wired
  * through BotShieldClassify. Defaults to all four passes on; the
@@ -572,7 +582,6 @@ typedef struct bs_server_cfg {
     const char         *browser_templates_path;
     /* E5 — app-to-module reputation feedback. */
     int                 app_feedback_enabled;
-    const char         *app_feedback_header;
     /* E8.2 — module-to-app reputation export. */
     int                 app_claims_enabled;
     /* Single shared HMAC key for both directions of app integration. */

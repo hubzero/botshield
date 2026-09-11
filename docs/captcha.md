@@ -223,8 +223,10 @@ Wire format details:
 - Multiple `X-BotShield-Feedback` headers on one response are
   rejected (the strip filter catches all copies; the verify path
   rejects multi-value).
-- Header name is configurable via `BotShieldAppFeedbackHeader` if
-  the default name conflicts with another module's vocabulary.
+- The header name is fixed at `X-BotShield-Feedback`. It is part
+  of the protocol, not a setting: it never leaves Apache, so nothing
+  upstream can rewrite it, and a configurable name only created a way
+  to misconfigure the strip and leak the header to clients.
 
 The event-name → action indirection is the security property: a
 compromised app can emit any event name, but only configured
