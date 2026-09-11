@@ -1006,8 +1006,16 @@ static const char *bs_psh_rule_action(apr_pool_t *p,
         s = apr_pstrcat(p, s, *s ? " " : "", apr_psprintf(p, __VA_ARGS__), NULL)
 
     if (a->status_code == BS_TRIGGER_STATUS_PASS) {
-        if (a->tier_floor >= 0) BS_PSH_ACT("challenge=%s",
-                                           bs_tier_name(a->tier_floor));
+        if (a->tier_floor >= 0) {
+            if (a->challenge_captcha) {
+                BS_PSH_ACT("challenge=%s %s",
+                           bs_tier_name(a->tier_floor),
+                           a->challenge_captcha);
+            } else {
+                BS_PSH_ACT("challenge=%s",
+                           bs_tier_name(a->tier_floor));
+            }
+        }
         else if (!a->score_ops) BS_PSH_ACT("nochallenge");
     } else {
         BS_PSH_ACT("respond=%d", a->status_code);

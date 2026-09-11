@@ -244,6 +244,7 @@ const char *bs_tier_name(bs_tier t)
  * -------------------------------------------------------------------- */
 
 #define BS_TIER_FLOOR_NOTE "bstierfloor"
+#define BS_CAPTCHA_PICK_NOTE "bscaptchapick"
 
 void bs_set_request_tier_floor(request_rec *r, int tier)
 {
@@ -254,6 +255,25 @@ void bs_set_request_tier_floor(request_rec *r, int tier)
     if (bs_get_request_tier_floor(r) >= tier) return;
     apr_table_setn(r->notes, BS_TIER_FLOOR_NOTE,
                    apr_psprintf(r->pool, "%d", tier));
+}
+
+/* Which captcha a rule named for this request.
+ *
+ * First writer wins, where the tier floor above takes the max:
+ * provider names have no ordering to take a max of, and the rule
+ * that first demanded the captcha tier is the one whose intent the
+ * interstitial should carry out. */
+void bs_set_request_captcha(request_rec *r, const char *provider)
+{
+    if (!r || !provider || !*provider) return;
+    if (apr_table_get(r->notes, BS_CAPTCHA_PICK_NOTE)) return;
+    apr_table_setn(r->notes, BS_CAPTCHA_PICK_NOTE,
+                   apr_pstrdup(r->pool, provider));
+}
+
+const char *bs_get_request_captcha(request_rec *r)
+{
+    return r ? apr_table_get(r->notes, BS_CAPTCHA_PICK_NOTE) : NULL;
 }
 
 int bs_get_request_tier_floor(request_rec *r)

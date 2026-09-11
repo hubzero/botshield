@@ -314,6 +314,35 @@ BotShieldCaptchaMaxInFlight    64
 | `BotShieldCABundle` | PEM bundle for the provider's TLS certificate |
 | `BotShieldMinScore` | reCAPTCHA v3 only: minimum accepted score |
 
+A scope may hold several blocks. The first declared is the scope's
+provider -- what the interstitial renders and what the bare
+`<prefix>/captcha-verify` checks against. The rest are reachable two
+ways: `<prefix>/captcha-verify/<name>` verifies with the named block's
+secret, and a rule can name one to render:
+
+```apache
+<BotShieldRule suspected-scraper>
+    BotShieldUserAgent  @bot
+    BotShieldChallenge  captcha hcaptcha
+</BotShieldRule>
+```
+
+That is friction by evidence -- an invisible widget for a borderline
+human, a harder one for a client the module already doubts. Only the
+captcha tier takes a provider; `BotShieldChallenge interactive hcaptcha`
+is refused, because neither of the other tiers renders one.
+
+An unknown provider name is refused at config time against the
+compiled-in registry. Whether the *scope* configures it cannot be
+checked there -- rules are server scope and a block may be
+per-`<Location>` -- so a name the scope has no block for falls back at
+render time to the scope's own provider, exactly as a single-provider
+scope has always behaved.
+
+Form captcha and the embedded path keep the scope's provider whatever a
+rule says: their token round-trip carries no provider name, so there
+would be nothing to verify the answer against.
+
 The provider is the block argument because it is the value that decides
 whether the rest mean anything -- a site key without a provider
 configures nothing -- and it names the block in every error the

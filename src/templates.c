@@ -840,6 +840,22 @@ int bs_render_challenge_page(request_rec *r,
                              const char *challenge_js,
                              int issue_auto)
 {
+    /* A rule may have named which captcha to render. Swap the scope's
+     * captcha fields for that block's once, here, and everything below
+     * -- site key, widget script, token field, verify URL -- follows
+     * without an extra argument. A name this scope does not configure
+     * resolves to nothing and leaves the scope's own provider in
+     * place, which is what a scope with one provider has always done.
+     *
+     * `picked` is declared at function scope because `cfg` points at
+     * it for the rest of the render. */
+    bs_dir_cfg picked;
+    {
+        const char *want = bs_get_request_captcha(r);
+        const bs_captcha_alt *alt = want ? bs_captcha_pick(cfg, want)
+                                         : NULL;
+        if (alt) cfg = bs_captcha_with(cfg, alt, &picked);
+    }
     /* The noninteractive tier's label is a status, not an invitation: there is
      * no checkbox to tick. Turnstile makes the same split -- "Verify
      * you are human" when it wants a click, "Verifying..." when it is

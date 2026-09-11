@@ -184,6 +184,7 @@ static void bs_trigger_action_init(bs_trigger_family fam,
         break;
     }
     a->tier_floor      = -1;
+    a->challenge_captcha = NULL;
     a->redirect_url    = NULL;
     a->log_tag         = NULL;
     a->status_explicit = 0;
@@ -474,16 +475,56 @@ static const char *bs_parse_trigger_action_key(apr_pool_t *pool,
          * Also names an act rather than a taxonomy. "Tier" is what the
          * levels are called internally; "challenge" is what the rule
          * does. */
-        if      (!strcasecmp(val, "noninteractive"))
+        /* A second word names the captcha to render, for a scope
+         * that configures more than one:
+         *     BotShieldChallenge captcha hcaptcha
+         * Only the captcha tier takes one -- the other two render no
+         * provider's widget. */
+        const char *tier_word = val;
+        const char *pick = NULL;
+        {
+            const char *sp = val;
+            while (*sp && !apr_isspace((unsigned char)*sp)) sp++;
+            if (*sp) {
+                tier_word = apr_pstrndup(pool, val,
+                                         (apr_size_t)(sp - val));
+                while (apr_isspace((unsigned char)*sp)) sp++;
+                if (*sp) pick = sp;
+            }
+        }
+        if      (!strcasecmp(tier_word, "noninteractive"))
             a->tier_floor = BS_TIER_NONINTERACTIVE;
-        else if (!strcasecmp(val, "interactive"))
+        else if (!strcasecmp(tier_word, "interactive"))
             a->tier_floor = BS_TIER_INTERACTIVE;
-        else if (!strcasecmp(val, "captcha"))
+        else if (!strcasecmp(tier_word, "captcha"))
             a->tier_floor = BS_TIER_CAPTCHA;
         else return apr_psprintf(pool,
             "%s: BotShieldChallenge '%s' must be noninteractive, "
             "interactive or captcha. To make a rule decide nothing, "
-            "write BotShieldNoChallenge instead.", dname, val);
+            "write BotShieldNoChallenge instead.", dname, tier_word);
+        if (pick) {
+            if (a->tier_floor != BS_TIER_CAPTCHA) {
+                return apr_psprintf(pool,
+                    "%s: BotShieldChallenge %s takes no provider -- only "
+                    "the captcha tier renders one. Write "
+                    "'BotShieldChallenge captcha %s' if that is what you "
+                    "meant.", dname, tier_word, pick);
+            }
+            /* The registry is compiled in, so a typo is catchable here.
+             * Whether the SCOPE configures it is not: rules are server
+             * scope and a <BotShieldCaptcha> block may be per-Location,
+             * so an unconfigured name falls back at render time to the
+             * scope's own provider. */
+            const bs_captcha_provider *pv = bs_find_provider(pick);
+            if (!pv || !pv->implemented) {
+                return apr_psprintf(pool,
+                    "%s: BotShieldChallenge captcha '%s' is not a known "
+                    "provider. Built in: turnstile, hcaptcha, "
+                    "recaptcha-v2, recaptcha-v3, friendly, geetest.",
+                    dname, pick);
+            }
+            a->challenge_captcha = apr_pstrdup(pool, pick);
+        }
         if (!a->status_explicit) {
             a->status_code = BS_TRIGGER_STATUS_PASS;
             a->status_explicit = 1;
@@ -861,6 +902,7 @@ bs_trigger_exec_outcome bs_apply_trigger_action(
                 bs_score_add(r, 0, why);
                 if (a->tier_floor >= 0) {
                     bs_set_request_tier_floor(r, a->tier_floor);
+                    bs_set_request_captcha(r, a->challenge_captcha);
                 }
                 return BS_TEXEC_PASS_CONTINUE;
             }

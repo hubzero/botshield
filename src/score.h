@@ -49,6 +49,11 @@ typedef struct bs_dir_cfg bs_dir_cfg;
  * in some translation units. Values are BS_TIER_*. */
 void bs_set_request_tier_floor(request_rec *r, int tier);
 int  bs_get_request_tier_floor(request_rec *r);
+/* Which captcha a rule named for this request, or NULL. Read by
+ * the interstitial; a name the scope does not configure falls
+ * back to the scope's own provider. */
+void        bs_set_request_captcha(request_rec *r, const char *provider);
+const char *bs_get_request_captcha(request_rec *r);
 
 #define BS_DEFAULT_SCORE_NON_INTERACTIVE   20
 #define BS_DEFAULT_SCORE_INTERACTIVE     50

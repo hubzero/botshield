@@ -119,6 +119,9 @@ typedef struct {
      * clear. Only meaningful alongside status=pass -- a concrete
      * status short-circuits before any tier is chosen. */
     int          tier_floor;
+    /* challenge=captcha <provider>: which captcha to render, for a
+     * scope configuring more than one. NULL = the scope's own. */
+    const char  *challenge_captcha;
 } bs_trigger_action;
 
 /* ======================================================================

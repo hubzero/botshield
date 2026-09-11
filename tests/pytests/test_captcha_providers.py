@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import pytest
 
-from botshield_test import client
+from botshield_test import apache, client
 from botshield_test.providers import (
     ALL, FRIENDLY, GEETEST,
     WITH_OK_TOKEN, WITH_SECRET_SWAP,
@@ -329,3 +329,111 @@ def test_verify_url_names_the_provider(config_override, log_slice):
         "the named provider should be the one that ran; the log names "
         "none of it:\n" + text[-600:]
     )
+
+
+# --- a rule names the captcha -----------------------------------------
+
+
+def _two_provider_scope(rule: str) -> str:
+    """A scope with turnstile first (so it is the default) and hcaptcha
+    second, plus a rule that forces the captcha tier on a probe path."""
+    return (
+        "BotShieldEnabled On\n"
+        "    BotShieldChallengeAtLeast none\n"
+        "    <BotShieldCaptcha turnstile>\n"
+        "        BotShieldSiteKey    1x00000000000000000000AA\n"
+        "        BotShieldSecretFile /etc/botshield/turnstile-secret\n"
+        "    </BotShieldCaptcha>\n"
+        "    <BotShieldCaptcha hcaptcha>\n"
+        "        BotShieldSiteKey    10000000-ffff-ffff-ffff-000000000001\n"
+        "        BotShieldSecretFile /etc/botshield/hcaptcha-secret\n"
+        "    </BotShieldCaptcha>\n"
+        + rule
+    )
+
+
+PICK_PATH = "/captcha-pick-probe"
+
+
+def test_a_rule_picks_the_second_provider(config_override, fresh_ip):
+    """The scope's default is turnstile; the rule asks for hcaptcha, so
+    the interstitial must carry hcaptcha's widget and post back to
+    hcaptcha's verify URL."""
+    conf = _two_provider_scope(
+        "    <BotShieldRule pick-hcaptcha>\n"
+        f"        BotShieldPath      {PICK_PATH}\n"
+        "        BotShieldChallenge captcha hcaptcha\n"
+        "    </BotShieldRule>")
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
+        body = client.get(PICK_PATH, xff=fresh_ip).text
+    assert "captcha-verify/hcaptcha" in body, (
+        "the rule named hcaptcha but the interstitial posts elsewhere; "
+        f"body={body[:600]}"
+    )
+    assert "10000000-ffff-ffff-ffff-000000000001" in body, (
+        "hcaptcha's site key is not in the page, so the widget is still "
+        "the scope's default"
+    )
+
+
+def test_without_a_name_the_scope_default_renders(config_override,
+                                                  fresh_ip):
+    """The control: same two blocks, no provider on the rule. Turnstile
+    was declared first, so that is what the page carries."""
+    conf = _two_provider_scope(
+        "    <BotShieldRule pick-default>\n"
+        f"        BotShieldPath      {PICK_PATH}\n"
+        "        BotShieldChallenge captcha\n"
+        "    </BotShieldRule>")
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
+        body = client.get(PICK_PATH, xff=fresh_ip).text
+    assert "captcha-verify/turnstile" in body, (
+        f"expected the scope default; body={body[:600]}"
+    )
+
+
+def test_an_unconfigured_name_falls_back(config_override, fresh_ip):
+    """Rules are server scope and a block may be per-Location, so
+    whether a scope configures the named provider cannot be checked at
+    config time. At render it resolves to nothing and the scope's own
+    provider stands -- which is what a one-provider scope has always
+    done."""
+    conf = _two_provider_scope(
+        "    <BotShieldRule pick-absent>\n"
+        f"        BotShieldPath      {PICK_PATH}\n"
+        "        BotShieldChallenge captcha geetest\n"
+        "    </BotShieldRule>")
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
+        body = client.get(PICK_PATH, xff=fresh_ip).text
+    assert "captcha-verify/turnstile" in body, (
+        f"expected a fall back to the scope default; body={body[:600]}"
+    )
+
+
+def test_the_dump_shows_the_named_provider(config_override):
+    conf = _two_provider_scope(
+        "    <BotShieldRule pick-hcaptcha>\n"
+        f"        BotShieldPath      {PICK_PATH}\n"
+        "        BotShieldChallenge captcha hcaptcha\n"
+        "    </BotShieldRule>")
+    with config_override(r"BotShieldEnabled\s+On", conf, count=1):
+        body = apache.policy_dump()
+    line = [ln for ln in body.splitlines() if ln.startswith("pick-hcaptcha")]
+    assert line, f"rule missing from dump; body={body[:600]}"
+    assert "challenge=captcha hcaptcha" in line[0], line[0]
+
+
+@pytest.mark.parametrize("line, why", [
+    ("BotShieldChallenge captcha nosuchprovider", "unknown provider"),
+    ("BotShieldChallenge interactive turnstile", "a tier that renders none"),
+    ("BotShieldChallenge noninteractive hcaptcha", "same, noninteractive"),
+])
+def test_bad_challenge_providers_are_refused(config_override, line, why):
+    conf = ("BotShieldEnabled On\n"
+            "    <BotShieldRule bad-pick>\n"
+            f"        BotShieldPath      {PICK_PATH}\n"
+            f"        {line}\n"
+            "    </BotShieldRule>")
+    with pytest.raises(Exception):
+        with config_override(r"BotShieldEnabled\s+On", conf, count=1):
+            pass
