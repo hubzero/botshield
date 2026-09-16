@@ -29,8 +29,27 @@ from botshield_test import apache, client
 
 PROBE = "/work-signal-probe"
 STATEDIR = "/var/lib/botshield-test"
-FPM_FILE = f"{STATEDIR}/fpm-signal-test.stats"
-DB_FILE = f"{STATEDIR}/db-signal-test.stats"
+
+# A fresh file name per write, and the config points at whichever one
+# this test wrote.
+#
+# The reader skips a stats file whose mtime has not changed since the
+# last tick, which is right in production and a trap in a test: where
+# mtime has one-second granularity -- an overlay filesystem in CI, for
+# instance -- two writes in the same second look identical, the second
+# one is never read, and the test asserts against the numbers the
+# previous test left behind. That is what broke
+# test_fpm_busy_declines_below_it in CI while it passed here: 79 of 100
+# busy read as the earlier test's 40 of 50, which is 80%.
+_files = {"fpm": None, "db": None}
+_seq = [0]
+
+
+def _new_path(kind: str) -> str:
+    _seq[0] += 1
+    path = f"{STATEDIR}/{kind}-signal-{_seq[0]}.stats"
+    _files[kind] = path
+    return path
 
 
 def _write(path: str, body: str) -> None:
@@ -39,35 +58,35 @@ def _write(path: str, body: str) -> None:
     subprocess.run(["sudo", "chmod", "0644", path], check=True)
 
 
-_seq = [0]
 
 
 def _stamp(age: int) -> int:
-    """A sample timestamp no earlier test has used. Tests wait for the
-    module to publish this exact value, which is the only proof the
-    watchdog has read *this* file -- waiting on active=100 matched a
-    previous test's fresh sample and let a stale-file test race it."""
-    _seq[0] += 1
+    """A sample timestamp no earlier test has used, so waiting on it
+    proves the watchdog read *this* file."""
     return int(time.time()) - age - _seq[0]
 
 
 def _fpm(active: int, max_children: int = 100, queue: int = 0,
-         age: int = 0) -> tuple:
+         age: int = 0) -> list:
     pct = active * 100 // max_children
+    path = _new_path("fpm")
     ts = _stamp(age)
-    _write(FPM_FILE,
+    _write(path,
            f"ts={ts} active={active} "
            f"max_children={max_children} listen_queue={queue} pct={pct} "
            f"state=normal warm_pct=50 hot_pct=80\n")
-    return ("fpm_sample_unix", ts)
+    return [("fpm_sample_unix", ts), ("fpm_active_processes", active),
+            ("fpm_max_children", max_children),
+            ("fpm_listen_queue", queue)]
 
 
-def _db(threads: int, age: int = 0) -> tuple:
+def _db(threads: int, age: int = 0) -> list:
+    path = _new_path("db")
     ts = _stamp(age)
-    _write(DB_FILE,
+    _write(path,
            f"ts={ts} threads_run={threads} qps=1 "
            f"lock_pct=0.0 state=normal warm_threads=12 hot_threads=25\n")
-    return ("db_sample_unix", ts)
+    return [("db_sample_unix", ts), ("db_threads_running", threads)]
 
 
 def _gauge(name: str) -> float | None:
@@ -77,16 +96,23 @@ def _gauge(name: str) -> float | None:
     return None
 
 
-def _wait_for(name: str, want: float, timeout: float = 10.0) -> None:
-    """The watchdog reads the stats files once per tick. Wait for the
-    number the rule will read, rather than sleeping and hoping."""
+def _wait_for(*pairs, timeout: float = 20.0) -> None:
+    """Wait until every gauge the rule will read holds the value this
+    test wrote.
+
+    Waiting on the sample timestamp alone was not enough. It is the
+    last field the reader stores, so it proves the file was read -- but
+    under load the tick can land between the request and the read, and
+    a test that only checked the timestamp went on to assert against
+    whatever the previous test had left. Checking each value the rule
+    depends on removes the gap."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if _gauge(name) == want:
+        if all(_gauge(n) == v for n, v in pairs):
             return
         time.sleep(0.25)
-    raise AssertionError(f"botshield_{name} never reached {want}; "
-                         f"last {_gauge(name)}")
+    have = ", ".join(f"{n}={_gauge(n)} want {v}" for n, v in pairs)
+    raise AssertionError(f"stats never reached the written sample: {have}")
 
 
 def _rule(condition: str) -> str:
@@ -104,9 +130,11 @@ def _main_scope(condition: str) -> str:
     settings, and a main-scope rule inherits into the vhost. Nesting a
     second override on the same file would put two reverts on one
     pristine copy."""
+    fpm = _files["fpm"] or f"{STATEDIR}/fpm-signal-none.stats"
+    db = _files["db"] or f"{STATEDIR}/db-signal-none.stats"
     return (f"BotShieldStateSaveInterval 30\n"
-            f"BotShieldFpmStatsFile {FPM_FILE}\n"
-            f"BotShieldDbStatsFile {DB_FILE}\n" + _rule(condition))
+            f"BotShieldFpmStatsFile {fpm}\n"
+            f"BotShieldDbStatsFile {db}\n" + _rule(condition))
 
 
 def _fires(config_override, fresh_ip, condition: str, wait=None) -> bool:
@@ -115,6 +143,16 @@ def _fires(config_override, fresh_ip, condition: str, wait=None) -> bool:
         if wait:
             _wait_for(*wait)
         return client.get(PROBE, xff=fresh_ip).status_code == 451
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _tidy_stats_files():
+    """One file per write means one file per test; sweep them at the
+    end rather than leaving a few dozen in the instance's state
+    directory for whoever looks next."""
+    yield
+    subprocess.run("sudo rm -f " + STATEDIR + "/*-signal-*.stats",
+                   shell=True, check=False)
 
 
 # --- Parsing ---------------------------------------------------------
@@ -253,9 +291,11 @@ def _counter(name: str) -> int:
 def _shed_delta(config_override, fresh_ip, body: str, sample) -> tuple:
     """Run one request against a rule and report how the two shed
     totals moved. Returns (status, shed_delta, observed_delta)."""
+    fpm = _files["fpm"] or f"{STATEDIR}/fpm-signal-none.stats"
+    db = _files["db"] or f"{STATEDIR}/db-signal-none.stats"
     conf = (f"BotShieldStateSaveInterval 30\n"
-            f"BotShieldFpmStatsFile {FPM_FILE}\n"
-            f"BotShieldDbStatsFile {DB_FILE}\n" + body)
+            f"BotShieldFpmStatsFile {fpm}\n"
+            f"BotShieldDbStatsFile {db}\n" + body)
     with config_override(r"BotShieldStateSaveInterval\s+\d+", conf,
                          count=1):
         _wait_for(*sample)
