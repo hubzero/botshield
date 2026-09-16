@@ -2003,7 +2003,7 @@ one. Write it to tune those numbers, or to turn the feature off:
 the block. It is module-global — only the main server's value is read
 at `post_config` — so unlike the settings above it cannot be set
 per-vhost, and a block written inside a `<VirtualHost>` could not have
-carried it. See [SHM sizing](#shm-sizing).
+carried it. See [SHM sizing](#shm-sizing-and-persistence).
 
 Challenge-loop suppression, **on by default** — only an explicit
 `BotShieldEnabled Off` inside the block disables it. A client that cannot solve the challenge (JS
@@ -2075,6 +2075,14 @@ four separate outages ran at 25-30 busy workers — the site returning
 500s and taking half a minute per request — which is **2-3%**
 utilisation. No threshold on that ratio can distinguish those outages
 from an idle server.
+
+That is not true of every outage, and the ratio is not the only way to
+read the scoreboard. Replayed from the access log, the outages of
+2026-08-20 and 2026-08-27 ran near 950 requests in flight and the
+floods of 2026-08-08 and 2026-08-16 near 980, against an ordinary-day
+peak of 119-181 that week. What misleads is dividing by a ceiling that
+does not describe the machine; the count itself separated those days
+cleanly. `BotShieldBusyWorkersAtLeast` reads the count.
 
 The latency thresholds exist for that case. They compare the **mean
 request latency**, measured as a delta between watchdog ticks, against
@@ -2232,6 +2240,67 @@ ability to measure itself.
 `0` is refused rather than read as "no condition", because a 0ms floor
 matches every request and a rule saying "shed when latency is at least
 nothing" is always a mistake.
+
+### Why latency is a poor shedding signal
+
+Request duration runs until the last byte is sent, so it includes the
+time a client spends receiving the response. A slow client downloading
+a large file holds a request open for minutes while the server does
+almost nothing, and reads as a slow server. The mean over a sample is
+also dominated by whichever single request is slowest: on this
+deployment 91% of the samples that crossed 500ms were one request doing
+80% or more of that sample's time, most often one expensive search page.
+
+Latency remains useful on the dashboard. For deciding to turn traffic
+away, prefer a signal that counts work being done.
+
+### Reaching work signals from a rule
+
+Four conditions count something occupied only while work is happening,
+so none of them moves for a slow download:
+
+| Directive | Reads | Unit |
+|---|---|---|
+| `BotShieldBusyWorkersAtLeast <n>` | Apache worker slots busy at the last watchdog tick | count |
+| `BotShieldFpmBusyAtLeast <pct>` | PHP-FPM active processes | percent of `pm.max_children`, 1-100 |
+| `BotShieldFpmQueueAtLeast <n>` | requests waiting for a PHP-FPM worker | count |
+| `BotShieldDbRunningAtLeast <n>` | database threads running | count |
+
+```apache
+<BotShieldRule shed-bots-when-php-is-full>
+    BotShieldFpmBusyAtLeast  80
+    BotShieldUserAgent       @bot
+    BotShieldRespond         503
+</BotShieldRule>
+```
+
+The PHP-FPM and database figures come from the stats files the bundled
+monitors write (`BotShieldFpmStatsFile`, `BotShieldDbStatsFile`), read
+once per watchdog tick. A sample more than 60 seconds old is treated as
+**no reading**, and a rule **declines** without one, as it does when
+latency is unavailable: a monitor that stopped writing is neither a
+calm server nor a loaded one, and shedding on its last word would
+punish traffic for a stopped service.
+
+The busy-worker count comes from the scoreboard the watchdog already
+walks and needs no monitor. Set its threshold well below
+`MaxRequestWorkers`: once every worker is busy, new connections wait in
+the kernel's accept queue and never reach the module, so a rung that
+fires at the ceiling cannot shed anything.
+
+Conditions in one rule are ANDed. To shed on either of two signals,
+write two rules with the same response; the family is first-match-wins
+so a request is counted once.
+
+`0` is refused on all four, for the reason given for latency, and `!`
+is refused because there is no "below" condition.
+
+A rule carrying any of these, or `BotShieldLoadAvgAtLeast` or
+`BotShieldLatencyAtLeast`, that answers with anything but
+`BotShieldNoChallenge` is counted as **shedding**: see
+`botshield_shed_total` and `botshield_shed_observed_total` in the
+observability guide, and the *Requests shed* and *Would shed* figures on
+the dashboard.
 
 ### Choosing between the two
 

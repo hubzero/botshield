@@ -73,10 +73,6 @@
   <span class="docs-nav__title">Troubleshooting</span>
   <span class="docs-nav__summary">Common issues, diagnostics, and fixes.</span>
 </a>
-<a class="docs-nav__item" href="../location-authz-hazard/index.html">
-  <span class="docs-nav__title">Location authz hazard</span>
-  <span class="docs-nav__summary">Why a broad &lt;Location&gt; block silently voids &lt;Files&gt; access control, and the rule that prevents it.</span>
-</a>
 <a class="docs-nav__item is-active" href="index.html">
   <span class="docs-nav__title">FAQ</span>
   <span class="docs-nav__summary">Honest answers to questions teams ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
@@ -338,8 +334,9 @@ strong penalty (<code>fake-googlebot</code>) — bot operators love claiming
 to be search engines. See <a href="../policy/index.html#allow-list-verified-crawlers">policy</a>.</p>
 <p>For LLM crawlers (GPTBot, ClaudeBot, anthropic-ai, Google-
 Extended) — sites that want to block them by default can pair
-<code>BotShieldRobotsTxt</code> with a robots.txt carrying <code>Disallow: /</code> for
-those groups. mod_botshield enforces robots.txt at the policy
+a <code>&lt;BotShieldRobots&gt;</code> block -- pointing at a robots.txt carrying
+<code>Disallow: /</code> for those groups, or saying so in a
+<code>&lt;BotShieldRobotRule&gt;</code> of its own. mod_botshield enforces robots.txt at the policy
 layer, not as advisory text the bot can ignore.</p>
 <h3 id="what-about-api-endpoints-clients-that-legitimately-can-t-run-javascript">What about API endpoints — clients that legitimately can't run JavaScript?</h3>
 <p>Three tools for this case:</p>
@@ -451,7 +448,7 @@ sizing is documented in <a href="../deployment/index.html#capacity-sizing">deplo
 configured categories:</p>
 <ol>
 <li>
-<p><strong>Captcha siteverify.</strong> When <code>BotShieldCaptchaProvider</code> is
+<p><strong>Captcha siteverify.</strong> When a <code>&lt;BotShieldCaptcha&gt;</code> block is
 configured, mod_botshield makes one HTTPS POST per verify
 attempt to the configured provider's siteverify URL with the
 client's captcha token (and the client IP as the <code>remoteip</code>
@@ -579,7 +576,7 @@ config-parse time and cached on the per-server config. To pick up
 a new bot range, reload Apache.</p>
 <p>Robots.txt is parsed at startup and re-parsed by the watchdog on
 mtime change. Default refresh interval 60 s; tunable via
-<code>BotShieldRobotsRefreshInterval</code>.</p>
+<code>BotShieldRefreshInterval</code> inside <code>&lt;BotShieldRobots&gt;</code>.</p>
 <p>The captcha provider's site key, secret, and CA bundle are read
 once at config-parse time. To pick up a key rotation, reload
 Apache.</p>

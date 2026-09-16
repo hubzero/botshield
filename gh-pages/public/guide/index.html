@@ -73,10 +73,6 @@
   <span class="docs-nav__title">Troubleshooting</span>
   <span class="docs-nav__summary">Common issues, diagnostics, and fixes.</span>
 </a>
-<a class="docs-nav__item" href="../location-authz-hazard/index.html">
-  <span class="docs-nav__title">Location authz hazard</span>
-  <span class="docs-nav__summary">Why a broad &lt;Location&gt; block silently voids &lt;Files&gt; access control, and the rule that prevents it.</span>
-</a>
 <a class="docs-nav__item" href="../faq/index.html">
   <span class="docs-nav__title">FAQ</span>
   <span class="docs-nav__summary">Honest answers to questions teams ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
@@ -330,7 +326,7 @@ framework.</li>
 <tr>
 <td><code>&lt;prefix&gt;/safeguard-info</code></td>
 <td>GET</td>
-<td>Built-in explainer page rendered when challengesafeguard trips (and no <code>BotShieldSafeguardRedirectURL</code> is set). Accepts <code>?return=&lt;urlencoded path&gt;</code></td>
+<td>Built-in explainer page rendered when challengesafeguard trips (and no <code>BotShieldRedirectURL</code> is set in <code>&lt;BotShieldSafeguard&gt;</code>). Accepts <code>?return=&lt;urlencoded path&gt;</code></td>
 </tr>
 </tbody>
 </table>

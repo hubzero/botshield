@@ -23,6 +23,7 @@
  * setter — except bs_cookie_pred_match, which the request-path
  * walker in botshield.c calls directly to consume an already-parsed
  * cookie map. */
+#include <stddef.h>   /* offsetof */
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
@@ -1253,6 +1254,10 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
     e->acceptlang_pred = -1;          /* no Accept-Language condition */
     e->loadavg_min_pct = -1;          /* no loadavg condition */
     e->latency_min_ms  = -1;          /* no latency condition */
+    e->busy_workers_min = -1;         /* no work-signal conditions */
+    e->fpm_busy_min_pct = -1;
+    e->fpm_queue_min    = -1;
+    e->db_running_min   = -1;
     e->budget          = 0;           /* no rate limit */
     e->window_ms      = 0;
     e->count_key       = BS_COUNT_TOTAL;
@@ -1571,6 +1576,54 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
                 e->latency_min_ms = (int)ms;
                 continue;
             }
+            {
+                /* Work signals. One table, because the four share
+                 * everything except their name, range and unit: an
+                 * integer floor, no '!', and 0 refused because a
+                 * floor of nothing matches everything, which in a
+                 * shedding rule is always a mistake. */
+                static const struct {
+                    const char *key; int max; const char *unit;
+                    size_t off;
+                } ws[] = {
+                    { "busyworkersatleast", 1000000,
+                      "busy Apache workers",
+                      offsetof(bs_request_trigger_entry, busy_workers_min) },
+                    { "fpmbusyatleast", 100,
+                      "percent of pm.max_children busy",
+                      offsetof(bs_request_trigger_entry, fpm_busy_min_pct) },
+                    { "fpmqueueatleast", 1000000,
+                      "requests waiting for a PHP-FPM worker",
+                      offsetof(bs_request_trigger_entry, fpm_queue_min) },
+                    { "dbrunningatleast", 1000000,
+                      "database threads running",
+                      offsetof(bs_request_trigger_entry, db_running_min) },
+                };
+                int hit = 0;
+                for (size_t w = 0; w < sizeof(ws) / sizeof(ws[0]); w++) {
+                    if (klen != strlen(ws[w].key)
+                     || strncasecmp(arg, ws[w].key, klen) != 0) continue;
+                    char *wend = NULL;
+                    long wv = strtol(val, &wend, 10);
+                    if (!wend || *wend || wv < 1 || wv > ws[w].max) {
+                        return apr_psprintf(cmd->pool,
+                            "%s: %s='%s' must be a whole number from 1 "
+                            "to %d (%s)", D, ws[w].key, val, ws[w].max,
+                            ws[w].unit);
+                    }
+                    if (neg) {
+                        return apr_psprintf(cmd->pool,
+                            "%s: '!' is not accepted on %s=. For "
+                            "\"below this\" there is no rule condition; "
+                            "put the loaded case in a rule above and let "
+                            "the quiet case fall through.", D, ws[w].key);
+                    }
+                    *(int *)((char *)e + ws[w].off) = (int)wv;
+                    hit = 1;
+                    break;
+                }
+                if (hit) continue;
+            }
             if (klen == 7 && strncasecmp(arg, "flagged", 7) == 0) {
                 const bs_flag_meta *fm = bs_flag_meta_for_name(val);
                 if (!fm) {
@@ -1746,13 +1799,17 @@ const char *bs_set_request_trigger(cmd_parms *cmd, void *dconf,
         && e->firstsight_pred < 0 && e->acceptlang_pred < 0
         && e->ck_pred < 0 && e->env_pred < 0 && !e->flagged_bit
         && e->loadavg_min_pct < 0 && e->latency_min_ms < 0
+        && e->busy_workers_min < 0 && e->fpm_busy_min_pct < 0
+        && e->fpm_queue_min < 0 && e->db_running_min < 0
         && !e->score_pred_name
         && !e->has_cohort) {
         return apr_psprintf(cmd->pool,
             "%s '%s': needs at least one match key (path=, query=, "
             "cookies=, bscookie=, cookie=, env=, flagged=, crawler=, "
             "exists=, solved=, firstsight=, acceptlanguage=, "
-            "loadavgatleast=, latencyatleast=, ua=, ipspec=). A rule "
+            "loadavgatleast=, latencyatleast=, busyworkersatleast=, "
+            "fpmbusyatleast=, fpmqueueatleast=, dbrunningatleast=, "
+            "ua=, ipspec=). A rule "
             "carrying only delay= or rate= still needs one of these: a "
             "counter is not a condition. A rule "
             "with no condition "

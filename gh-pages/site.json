@@ -78,12 +78,6 @@
       "summary": "Common issues, diagnostics, and fixes."
     },
     {
-      "slug": "location-authz-hazard",
-      "title": "Location authz hazard",
-      "source": "docs/apache-location-authz-hazard.md",
-      "summary": "Why a broad <Location> block silently voids <Files> access control, and the rule that prevents it."
-    },
-    {
       "slug": "faq",
       "title": "FAQ",
       "source": "docs/faq.md",

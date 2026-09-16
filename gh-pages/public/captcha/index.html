@@ -73,10 +73,6 @@
   <span class="docs-nav__title">Troubleshooting</span>
   <span class="docs-nav__summary">Common issues, diagnostics, and fixes.</span>
 </a>
-<a class="docs-nav__item" href="../location-authz-hazard/index.html">
-  <span class="docs-nav__title">Location authz hazard</span>
-  <span class="docs-nav__summary">Why a broad &lt;Location&gt; block silently voids &lt;Files&gt; access control, and the rule that prevents it.</span>
-</a>
 <a class="docs-nav__item" href="../faq/index.html">
   <span class="docs-nav__title">FAQ</span>
   <span class="docs-nav__summary">Honest answers to questions teams ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
@@ -160,7 +156,7 @@ keeps the directions distinct without separate keys.</p>
 <tr>
 <td><code>recaptcha-v3</code></td>
 <td><code>g-recaptcha-response</code></td>
-<td>Google reCAPTCHA v3. Score-thresholded; configure via <code>BotShieldRecaptchaV3MinScore</code></td>
+<td>Google reCAPTCHA v3. Score-thresholded; configure via <code>BotShieldMinScore</code> inside the block</td>
 </tr>
 <tr>
 <td><code>friendly</code></td>
@@ -176,16 +172,23 @@ keeps the directions distinct without separate keys.</p>
 </table>
 <p>Cohabitation: a single vhost can register multiple providers and
 route requests to different ones via <code>&lt;LocationMatch&gt;</code> scopes — the
-registry is per-scope, not per-server.</p>
+registry is per-scope, not per-server, and one <code>&lt;BotShieldCaptcha&gt;</code>
+block per scope. Naming a provider from a <code>&lt;BotShieldRule&gt;</code> is not
+built; the scope a request lands in is what picks the provider.</p>
 <h3 id="configuration">Configuration</h3>
-<pre><code class="language-apache">BotShieldCaptchaProvider        turnstile
-BotShieldCaptchaSiteKey         &quot;1x00000000000000000000AA&quot;
-BotShieldCaptchaSecretFile      /etc/botshield/captcha-turnstile-secret
+<pre><code class="language-apache">&lt;BotShieldCaptcha turnstile&gt;
+    BotShieldSiteKey    &quot;1x00000000000000000000AA&quot;
+    BotShieldSecretFile /etc/botshield/captcha-turnstile-secret
+    BotShieldCABundle   /etc/ssl/certs/ca-certificates.crt
+&lt;/BotShieldCaptcha&gt;
+
+# Scope defaults, outside the block: they apply to every provider
+# under this scope and none of them describes a provider.
 BotShieldCaptchaTimeout         1000   # ms; 100..5000
 BotShieldCaptchaConnectTimeout  250    # ms
-BotShieldRecaptchaV3MinScore    0.5    # only meaningful for recaptcha-v3
-BotShieldCaptchaCABundle        /etc/ssl/certs/ca-certificates.crt
 </code></pre>
+<p><code>BotShieldMinScore 0.5</code> goes inside the block and is accepted only
+under <code>recaptcha-v3</code>.</p>
 <p>The secret file holds the provider's verify-side secret (or for
 GeeTest, the <code>captcha_key</code> used to HMAC the lot_number). Mode 0600,
 read once at config-parse time.</p>
@@ -193,7 +196,7 @@ read once at config-parse time.</p>
 timeout the verify path <strong>fails open</strong> — the request gets the same
 treatment it would on a clean pass. Provider-outage scenarios
 shouldn't black-hole legitimate traffic.</p>
-<p><code>BotShieldCaptchaCABundle</code> is optional. If unset, libcurl uses its
+<p><code>BotShieldCABundle</code> is optional. If unset, libcurl uses its
 compiled-in default (usually <code>/etc/ssl/certs/ca-certificates.crt</code>
 on Debian-family). Sites with custom trust stores or air-gapped
 deployments can pin a specific bundle.</p>
@@ -248,8 +251,12 @@ BotShieldCaptchaMaxInFlight  64   # global, 1..1024
 <p>Several providers (hCaptcha, reCAPTCHA, Turnstile) return a
 <code>hostname</code> and <code>action</code> field in the siteverify response. mod_
 botshield validates these against the configured expectations:</p>
-<pre><code class="language-apache">BotShieldCaptchaExpectedHostname  example.com
-BotShieldCaptchaExpectedAction    botshield
+<pre><code class="language-apache">&lt;BotShieldCaptcha turnstile&gt;
+    BotShieldSiteKey           &quot;1x00000000000000000000AA&quot;
+    BotShieldSecretFile        /etc/botshield/turnstile-secret
+    BotShieldExpectedHostname  example.com
+    BotShieldExpectedAction    botshield
+&lt;/BotShieldCaptcha&gt;
 </code></pre>
 <p>NULL (unset) uses runtime defaults: server hostname from
 <code>r-&gt;server-&gt;server_hostname</code> and the literal action <code>botshield</code>.
@@ -263,15 +270,17 @@ no-ops for that provider.</p>
     BotShieldEnabled on
 
     &lt;LocationMatch &quot;^/login&quot;&gt;
-        BotShieldCaptchaProvider   turnstile
-        BotShieldCaptchaSiteKey    &quot;...&quot;
-        BotShieldCaptchaSecretFile /etc/botshield/turnstile-secret
+        &lt;BotShieldCaptcha turnstile&gt;
+            BotShieldSiteKey    &quot;...&quot;
+            BotShieldSecretFile /etc/botshield/turnstile-secret
+        &lt;/BotShieldCaptcha&gt;
     &lt;/LocationMatch&gt;
 
     &lt;LocationMatch &quot;^/api/v1/auth&quot;&gt;
-        BotShieldCaptchaProvider   hcaptcha
-        BotShieldCaptchaSiteKey    &quot;...&quot;
-        BotShieldCaptchaSecretFile /etc/botshield/hcaptcha-secret
+        &lt;BotShieldCaptcha hcaptcha&gt;
+            BotShieldSiteKey    &quot;...&quot;
+            BotShieldSecretFile /etc/botshield/hcaptcha-secret
+        &lt;/BotShieldCaptcha&gt;
     &lt;/LocationMatch&gt;
 &lt;/VirtualHost&gt;
 </code></pre>
@@ -314,14 +323,24 @@ the request after-the-fact:</p>
 <p>mod_botshield strips the header before the response leaves the
 server (so it never reaches the client), verifies the HMAC against
 the integration secret, looks up <code>event=scanner-hit</code> in the
-configured <code>BotShieldFeedbackTrigger</code> table, and applies the
+configured <code>BotShieldFeedback</code> blocks, and applies the
 corresponding action.</p>
 <pre><code class="language-apache">BotShieldAppFeedback              on
 BotShieldAppIntegrationSecretFile /etc/botshield/app-integration-secret
 
-BotShieldFeedbackTrigger scanner-hit  flag=honeypot_hit ttl=3600 logas=app-trap
-BotShieldFeedbackTrigger human-pass   flag=app_verified_human ttl=3600
-BotShieldFeedbackTrigger session-ok   flag=app_verified_session ttl=3600
+&lt;BotShieldFeedback scanner-hit&gt;
+    BotShieldEvent        scanner-hit
+    BotShieldFlagIP       honeypot_hit
+    BotShieldLogAs        app-trap
+&lt;/BotShieldFeedback&gt;
+&lt;BotShieldFeedback human-pass&gt;
+    BotShieldEvent        human-pass
+    BotShieldFlagSession  app_verified_human
+&lt;/BotShieldFeedback&gt;
+&lt;BotShieldFeedback session-ok&gt;
+    BotShieldEvent        session-ok
+    BotShieldFlagSession  app_verified_session
+&lt;/BotShieldFeedback&gt;
 </code></pre>
 <p>Wire format details:</p>
 <ul>
@@ -331,8 +350,10 @@ unmapped events log at DEBUG and are ignored.</li>
 <li>Multiple <code>X-BotShield-Feedback</code> headers on one response are
 rejected (the strip filter catches all copies; the verify path
 rejects multi-value).</li>
-<li>Header name is configurable via <code>BotShieldAppFeedbackHeader</code> if
-the default name conflicts with another module's vocabulary.</li>
+<li>The header name is fixed at <code>X-BotShield-Feedback</code>. It is part
+of the protocol, not a setting: it never leaves Apache, so nothing
+upstream can rewrite it, and a configurable name only created a way
+to misconfigure the strip and leak the header to clients.</li>
 </ul>
 <p>The event-name → action indirection is the security property: a
 compromised app can emit any event name, but only configured
@@ -353,13 +374,22 @@ by the upstream application:</p>
 </code></pre>
 <p>The application reads this to know what mod_botshield decided about
 the current request — without re-implementing tier inspection.</p>
-<pre><code class="language-apache">BotShieldAppClaims                on
-BotShieldAppIntegrationSecretFile /etc/botshield/app-integration-secret
+<pre><code class="language-apache">BotShieldAppIntegrationSecretFile /etc/botshield/app-integration-secret
+
+&lt;Location /api&gt;
+    BotShieldAppClaims on
+&lt;/Location&gt;
 </code></pre>
-<p>mod_botshield strips any client-supplied <code>X-Botshield-Claims</code>
-header on the way in, then emits a fresh signed value before
-handing the request to the next phase. Any application-side
-spoofing attempt is dropped before the app sees it.</p>
+<p>Emission is per-scope — vhost-wide, or only the paths that read it.
+The key stays at server scope; it is a deployment fact, not a route
+one.</p>
+<p>mod_botshield drops client-supplied <code>X-Botshield-*</code> request headers
+from <strong>every</strong> request, before the URI is even mapped to a location,
+and independently of whether the scope emits claims. So a path with
+claims off cannot hand a forged one to the backend either. Scopes that
+do emit then get a fresh signed value. The one header exempt from the
+strip is <code>X-BotShield-Unflag</code>, which the module's own admin endpoint
+consumes and which makes no claim about the client.</p>
 <p>Claims fields (semicolon-separated, in this order):</p>
 <ul>
 <li><code>v=1</code> — wire-format version. Locked to <code>1</code> today.</li>

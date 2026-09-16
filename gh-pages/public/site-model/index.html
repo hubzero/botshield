@@ -73,10 +73,6 @@
   <span class="docs-nav__title">Troubleshooting</span>
   <span class="docs-nav__summary">Common issues, diagnostics, and fixes.</span>
 </a>
-<a class="docs-nav__item" href="../location-authz-hazard/index.html">
-  <span class="docs-nav__title">Location authz hazard</span>
-  <span class="docs-nav__summary">Why a broad &lt;Location&gt; block silently voids &lt;Files&gt; access control, and the rule that prevents it.</span>
-</a>
 <a class="docs-nav__item" href="../faq/index.html">
   <span class="docs-nav__title">FAQ</span>
   <span class="docs-nav__summary">Honest answers to questions teams ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
@@ -162,7 +158,7 @@ or flag that asked for it.</p>
 challenge-loop suppression: a client that has been issued
 challenges repeatedly within the safeguard window without ever
 returning a verified cookie gets <code>tier=safeguard outcome=redirect</code>
-— a 302 to a configured <code>BotShieldSafeguardRedirectURL</code> (or to the
+— a 302 to a configured <code>BotShieldRedirectURL</code> (or to the
 built-in explainer at <code>&lt;BotShieldEndpointPrefix&gt;/safeguard-info</code>)
 with the original URI appended as <code>?return=&lt;urlencoded path&gt;</code>. The
 explainer covers common reasons the auto-check failed (JS disabled,
@@ -180,20 +176,22 @@ computed at request time:</p>
 <ul>
 <li><strong><code>heuristic_total</code></strong> — sum of <code>bs_score_add</code> calls that fired
 during this request. Includes built-in heuristics, allow-list /
-rate-limit / robots / trigger families, and
-<code>BotShieldFlagTrigger action=score</code> effects fired by flags set on
-the IP or carried in the prior cookie.</li>
+rate-limit / robots / trigger families, and the
+<code>BotShieldScore</code> effects of rules matching <code>flagged=</code> against flags
+set on the address or carried in the prior cookie.</li>
 <li><strong><code>cookie_score</code></strong> — accumulated reputation in the prior
 <code>_bs_session</code> cookie, if one was presented and verified. Carries
 forward across requests; expires with the cookie TTL.</li>
 </ul>
 <p>A separate <strong>tier floor</strong> can lift the final tier independent of the
-score: any <code>BotShieldFlagTrigger action=tier_floor min=&lt;tier&gt;</code> that
-fires on a set flag bit raises the chosen tier to AT LEAST that
-level. Score-derived tier wins when it's already above the floor —
-floors never silently downgrade. Floor lifts produce a
-<code>flagtierfloor:&lt;tier&gt;</code> reason so the reasoning is visible in the
-log.</p>
+score: <code>BotShieldChallenge &lt;tier&gt;</code> on any rule that matches raises the
+chosen tier to AT LEAST that level. Score-derived tier wins when it is
+already above the floor — floors never silently downgrade. Floor lifts
+produce a <code>ruletierfloor:&lt;tier&gt;</code> reason so the reasoning is visible in
+the log.</p>
+<p>A floor is not a demand the client cannot meet: the tier decision
+drops it when the cookie already proves a pass at that level or
+above.</p>
 <h2 id="built-in-heuristic-signals">Built-in heuristic signals</h2>
 <p>These run on every request before any configured trigger
 or cohort. Signs are absolute; the score either rises or stays put.</p>
@@ -305,8 +303,7 @@ rejected on verify.</p>
 total was that plus what the request itself scored. Nothing read it for
 a decision after the tier cut-points went, so it was signed and carried
 and consulted by nobody. What the cookie carries about the past now is
-discrete and named: which challenges this client has passed, and which
-flags were excused when it passed them.</p>
+discrete and named: which challenges this client has passed.</p>
 <p>The decision log's <code>cookie=</code> field reports one of <code>solved</code> (verified
 <strong>and</strong> carrying challenge-solve proof), <code>ok</code> (verified, no such proof
 — a presence cookie), <code>expired</code>, <code>bad_sig</code>, <code>bad_format</code>, <code>absent</code>, or
@@ -331,12 +328,14 @@ start fresh.</p>
 (&quot;forgiveness&quot;) against the running total in the cookie, with an hourly
 cap so a bot could not stockpile credit by solving cheap challenges.
 Both went with the total in protocol 6.</p>
-<p>What a solve buys now is discrete: the matching <code>passes_*</code> marker, and
-<code>flags_excused</code> — the flags this client was carrying at the moment it
-solved are answered for, for the life of the cookie. That is what stops
-a flagged client being re-challenged forever, and it is what was doing
-that work all along. Forgiveness never could: flag effects re-apply
-every request, so a forgiven-to-zero score came back before the next
+<p>What a solve buys now is discrete: the matching <code>passes_*</code> marker.
+The tier decision reads it and does not challenge a client at a level
+it has already cleared, which is what stops a flagged client being
+re-challenged forever. <code>flags_excused</code> did that job from protocol 6
+until protocol 7, on the flags rather than on the decision, and could
+only cover the tiers a flag had raised. Forgiveness never could at
+all: flag effects re-apply every request, so a forgiven-to-zero score
+came back before the next
 decision.</p>
 <p>Anything flagged <em>after</em> the solve is new evidence and still fires, so
 a solve settles the debt it was challenged for without buying immunity.</p>

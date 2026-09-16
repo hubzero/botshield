@@ -237,7 +237,14 @@ typedef struct {
     apr_uint64_t g_outcome[BS_M_GROUP_COUNT][BS_M_OUTCOME_COUNT];
     apr_uint64_t g_cookie [BS_M_GROUP_COUNT][BS_M_COOKIE_COUNT];
     apr_uint64_t decisions;      /* sum of outcome[] — every decision logs one */
+    apr_uint64_t shed;           /* refused by a load-conditioned rule */
+    apr_uint64_t shed_observed;  /* would have been, under observe */
 } bs_metrics_window;
+
+/* Count one request refused by a rule carrying a load or work condition,
+ * or -- observed != 0 -- one that such a rule would have refused under
+ * observe. Feeds the dashboard's windows and the Prometheus totals. */
+void bs_metrics_note_shed(request_rec *r, int observed);
 
 /* Sum the buckets covering the last `span_minutes`.
  *   15 / 60  -> the minute ring

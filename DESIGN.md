@@ -1500,6 +1500,13 @@ atomic read on `bs_shm.header->load_state`).
 idea, matching the per-CPU load average in hundredths via
 `bs_loadavg_current()`.
 
+`BotShieldBusyWorkersAtLeast`, `BotShieldFpmBusyAtLeast`,
+`BotShieldFpmQueueAtLeast` and `BotShieldDbRunningAtLeast` (2026-09-16)
+match work in progress rather than elapsed time, which is what a
+shedding rule wants: request duration includes the time spent sending
+the response, so a slow download reads as a slow server. They are what
+the production shed ladder runs on.
+
 `BotShieldLatencyAtLeast <ms>` (2026-09-07) matches Apache's mean
 request latency via `bs_latency_current_us()`, and is the one of the
 three that can see a worker blocked on I/O: interruptible sleep is not

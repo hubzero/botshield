@@ -207,7 +207,7 @@ Inside the container:
   `BotShieldRespond`, `BotShieldMode`, `BotShieldLogAs`.
 
 The file and the groups are one document, so precedence is computed
-across both. See [directives](directives.md#robotstxt-enforcement) for
+across both. See [directives](directives.md#robots-txt-enforcement) for
 the full vocabulary and the observe step-aside rule.
 
 Group iteration is exposed by `httpd -t -D DUMP_BOTSHIELD_POLICY`
@@ -267,7 +267,7 @@ the same shared action keys.
 | Cookie | `BotShieldCookie` / `BotShieldCookies` / `BotShieldBSCookie` inside a rule | Cookie name + value, or the bulk shape |
 | Env | `BotShieldEnv` inside a rule | Apache env var |
 | Feedback | `BotShieldEvent` inside a `<BotShieldFeedback>` | App-signed event name (**response** path) |
-| Load | `BotShieldLoadAvgAtLeast` / `BotShieldLatencyAtLeast` inside a rule | Per-CPU load average / Apache mean latency |
+| Load | `BotShieldLoadAvgAtLeast` / `BotShieldLatencyAtLeast` / `BotShieldBusyWorkersAtLeast` / `BotShieldFpmBusyAtLeast` / `BotShieldFpmQueueAtLeast` / `BotShieldDbRunningAtLeast` inside a rule | Per-CPU load average, Apache mean latency, or the work signals |
 
 ### Shared action keys
 
@@ -449,6 +449,51 @@ the three that rises in that situation. It needs `ExtendedStatus On`,
 and declines while the metric is unavailable rather than treating
 "cannot measure" as "very slow".
 
+That reasoning held, and the measurement did not. Request duration runs
+until the last byte is sent, so a slow client downloading a large file
+reads as a slow server while costing almost nothing, and the mean over
+a sample is dominated by its slowest single request. Measured on
+2026-09-15: 91% of the samples that crossed 500ms were one request
+supplying 80% or more of that sample's time, and 61% contained only one
+request. On ordinary days the signal read hot for 26-41 minutes, which
+is not what an ordinary day looks like.
+
+Four conditions measure the work instead, and none of them moves for a
+download:
+
+```apache
+<BotShieldRule shed-bots-when-php-is-full>
+    BotShieldFpmBusyAtLeast  80
+    BotShieldUserAgent       @bot
+    BotShieldRespond         503
+</BotShieldRule>
+```
+
+| Directive | Reads |
+|---|---|
+| `BotShieldBusyWorkersAtLeast <n>` | Apache worker slots busy |
+| `BotShieldFpmBusyAtLeast <pct>` | PHP-FPM active processes, percent of `pm.max_children` |
+| `BotShieldFpmQueueAtLeast <n>` | requests waiting for a PHP-FPM worker |
+| `BotShieldDbRunningAtLeast <n>` | database threads running |
+
+PHP-FPM answers the database-stall case the load average cannot: a
+worker blocked on the database is a PHP-FPM process that is busy and
+not finishing, and the queue behind it grows. A sample older than 60
+seconds is treated as no reading and the rule declines, for the same
+reason the latency condition declines when unavailable.
+
+Replayed against this deployment's outages, busy workers separated
+broken from ordinary cleanly: Aug 20 and Aug 27 ran near 950 requests
+in flight against an ordinary-day peak of 119-181. Set that threshold
+well below `MaxRequestWorkers` — at the ceiling, connections wait in
+the accept queue and never reach the module to be shed.
+
+Whatever the condition, a load-conditioned rule that answers with
+anything but `BotShieldNoChallenge` is counted as shedding, and shows
+on the dashboard as *Requests shed* — or *Would shed* while the rule is
+in observe, which is how a threshold gets chosen before anyone is
+turned away.
+
 All three fire **at or above**, so a ladder is rules in declaration
 order with the strictest rung first, and all read the sample the
 watchdog
@@ -505,7 +550,7 @@ purpose. They are the only flags the module writes on its own, and a
 starter action for them would be a policy nobody asked for applied to
 every client who ever overspent a budget. What they should mean is a
 rule you write; see
-[directives](directives.md#flagged--does-this-client-already-carry-a-flag).
+[directives](directives.md#flagged-does-this-client-already-carry-a-flag).
 
 Trust signals (credits) are score-only by design; no credit ever
 forces tier *down*. A verified-human flag can't unlock a request

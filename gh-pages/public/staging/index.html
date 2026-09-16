@@ -73,10 +73,6 @@
   <span class="docs-nav__title">Troubleshooting</span>
   <span class="docs-nav__summary">Common issues, diagnostics, and fixes.</span>
 </a>
-<a class="docs-nav__item" href="../location-authz-hazard/index.html">
-  <span class="docs-nav__title">Location authz hazard</span>
-  <span class="docs-nav__summary">Why a broad &lt;Location&gt; block silently voids &lt;Files&gt; access control, and the rule that prevents it.</span>
-</a>
 <a class="docs-nav__item" href="../faq/index.html">
   <span class="docs-nav__title">FAQ</span>
   <span class="docs-nav__summary">Honest answers to questions teams ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
@@ -146,10 +142,10 @@ client response is unaffected. Observe matches never short-circuit
 the policy walk — the next rule still gets its chance.</p>
 <h2 id="per-rule-observe-mode">Per-rule observe mode</h2>
 <p>Add <code>mode=observe</code> to any directive that supports it:</p>
-<pre><code class="language-apache">BotShieldRule    admin-trap   path=&quot;/admin/.env&quot;  flag=scanner_probe ttl=3600 logas=admin-trap mode=observe
+<pre><code class="language-apache">BotShieldRule    admin-trap   path=&quot;/admin/.env&quot;  flagip=scanner_probe logas=admin-trap mode=observe
 BotShieldRule    legacy-admin path=&quot;/wp-admin/*&quot;  respond=403 mode=observe
-BotShieldRateLimit      api-burst    60 min &quot;&quot; * mode=observe
-BotShieldFlagTrigger    honeypot_hit action=tier_floor min=captcha mode=observe
+BotShieldRule    api-burst    ua=&quot;&quot;  rate=60/60  mode=observe
+BotShieldRule    honeypot-esc flagged=honeypot_hit challenge=captcha mode=observe
 </code></pre>
 <p>The rule still evaluates against every matching request, but takes
 no action. Matches appear in the decision log:</p>

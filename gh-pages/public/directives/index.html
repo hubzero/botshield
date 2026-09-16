@@ -73,10 +73,6 @@
   <span class="docs-nav__title">Troubleshooting</span>
   <span class="docs-nav__summary">Common issues, diagnostics, and fixes.</span>
 </a>
-<a class="docs-nav__item" href="../location-authz-hazard/index.html">
-  <span class="docs-nav__title">Location authz hazard</span>
-  <span class="docs-nav__summary">Why a broad &lt;Location&gt; block silently voids &lt;Files&gt; access control, and the rule that prevents it.</span>
-</a>
 <a class="docs-nav__item" href="../faq/index.html">
   <span class="docs-nav__title">FAQ</span>
   <span class="docs-nav__summary">Honest answers to questions teams ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
@@ -115,18 +111,24 @@
 <li class="toc__item toc__item--level-2"><a href="#ua-classification-and-allow-list">UA classification and allow list</a></li>
 <li class="toc__item toc__item--level-2"><a href="#rate-limit">Rate limit</a></li>
 <li class="toc__item toc__item--level-3"><a href="#alternation-on-ua">Alternation on `ua=`</a></li>
+<li class="toc__item toc__item--level-3"><a href="#botshieldratelimit-is-retired-2026-09-09">`BotShieldRateLimit` is retired (2026-09-09)</a></li>
 <li class="toc__item toc__item--level-3"><a href="#nothing-is-rate-limited-until-you-say-so">Nothing is rate limited until you say so</a></li>
+<li class="toc__item toc__item--level-3"><a href="#why-botshieldbotratelimit-stays-2026-09-09">Why `BotShieldBotRateLimit` stays (2026-09-09)</a></li>
 <li class="toc__item toc__item--level-2"><a href="#robots-txt-enforcement">Robots.txt enforcement</a></li>
 <li class="toc__item toc__item--level-2"><a href="#triggers">Triggers</a></li>
 <li class="toc__item toc__item--level-3"><a href="#accesslog-off-keep-a-request-out-of-the-access-log">`accesslog=off` — keep a request out of the access log</a></li>
 <li class="toc__item toc__item--level-3"><a href="#botshieldmatch-name-a-set-of-conditions-and-reuse-it">`BotShieldMatch` — name a set of conditions and reuse it</a></li>
 <li class="toc__item toc__item--level-3"><a href="#botshieldrule-match-on-any-request-property">`BotShieldRule` — match on any request property</a></li>
-<li class="toc__item toc__item--level-2"><a href="#per-scope-triggers">Per-scope triggers</a></li>
-<li class="toc__item toc__item--level-2"><a href="#flag-triggers">Flag triggers</a></li>
 <li class="toc__item toc__item--level-2"><a href="#request-signals">Request signals</a></li>
 <li class="toc__item toc__item--level-2"><a href="#safeguard">Safeguard</a></li>
 <li class="toc__item toc__item--level-2"><a href="#load-aware-throttling">Load-aware throttling</a></li>
 <li class="toc__item toc__item--level-3"><a href="#why-the-busy-worker-ratio-is-often-the-wrong-signal">Why the busy-worker ratio is often the wrong signal</a></li>
+<li class="toc__item toc__item--level-3"><a href="#reaching-a-number-from-a-rule">Reaching a number from a rule</a></li>
+<li class="toc__item toc__item--level-3"><a href="#rate-limiting-from-a-rule">Rate-limiting from a rule</a></li>
+<li class="toc__item toc__item--level-3"><a href="#reaching-request-latency-from-a-rule">Reaching request latency from a rule</a></li>
+<li class="toc__item toc__item--level-3"><a href="#why-latency-is-a-poor-shedding-signal">Why latency is a poor shedding signal</a></li>
+<li class="toc__item toc__item--level-3"><a href="#reaching-work-signals-from-a-rule">Reaching work signals from a rule</a></li>
+<li class="toc__item toc__item--level-3"><a href="#choosing-between-the-two">Choosing between the two</a></li>
 <li class="toc__item toc__item--level-2"><a href="#multi-vhost-reputation">Multi-vhost reputation</a></li>
 <li class="toc__item toc__item--level-2"><a href="#observability-endpoint-access">Observability endpoint access</a></li>
 <li class="toc__item toc__item--level-2"><a href="#clearing-a-flagged-address">Clearing a flagged address</a></li>
@@ -270,73 +272,28 @@ what the others only appear to.</p>
 <p><strong>This has bitten a production deployment, so it is worth spelling out
 what the ceiling does and does not buy.</strong> A hub running only the silent
 tier parked <code>Hard</code> and <code>Captcha</code> at <code>10000</code>, believing form and captcha
-were unreachable. They were not: a flag trigger's <code>tier_floor</code> forces a
-tier directly, bypassing the thresholds entirely.</p>
+were unreachable. They were not: a flag was forcing a tier directly,
+bypassing the thresholds entirely.</p>
 <p>At the time those floors were seeded in and the config said nothing
-about them, which is what made the surprise possible. Nothing is seeded
-now — a floor exists only where this config declares one — so the
-hazard survives only for floors you wrote. It is still worth knowing
-that writing one opts that flag out of your ceiling.</p>
-<table>
-<thead>
-<tr>
-<th>flag</th>
-<th>forced tier</th>
-<th>score</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>honeypot_hit</code></td>
-<td>captcha</td>
-<td>60</td>
-</tr>
-<tr>
-<td><code>fake_bot</code></td>
-<td>captcha</td>
-<td>80</td>
-</tr>
-<tr>
-<td><code>scanner_probe</code></td>
-<td><strong>form</strong></td>
-<td>50</td>
-</tr>
-<tr>
-<td><code>pow_fail_streak</code></td>
-<td>silent</td>
-<td>30</td>
-</tr>
-</tbody>
-</table>
-<p>A residential visitor who had already solved a silent challenge —
-<code>cookie=solved</code> — was pushed into the untested form widget six seconds
-later because their IP carried <code>scanner_probe</code>. 124 of the 132
-interactive-tier decisions in that window carried solve proof.</p>
-<p>To genuinely cap the tier, reset each floor and re-add only the score:</p>
-<pre><code class="language-apache">&lt;BotShieldFlagTrigger honeypot_hit&gt;
-    BotShieldReset
-    BotShieldAction       score
-BotShieldAccumulator  botsignals
-    BotShieldAdd          60
-&lt;/BotShieldFlagTrigger&gt;
-&lt;BotShieldFlagTrigger fake_bot&gt;
-    BotShieldReset
-    BotShieldAction       score
-BotShieldAccumulator  botsignals
-    BotShieldAdd          80
-&lt;/BotShieldFlagTrigger&gt;
-&lt;BotShieldFlagTrigger scanner_probe&gt;
-    BotShieldReset
-    BotShieldAction       score
-BotShieldAccumulator  botsignals
-    BotShieldAdd          50
-&lt;/BotShieldFlagTrigger&gt;
+about them, which is what made the surprise possible. Nothing is
+seeded now, and a flag reaches a tier only through a rule you wrote:</p>
+<pre><code class="language-apache">&lt;BotShieldRule escalate-honeypot&gt;
+    BotShieldFlagged   honeypot_hit
+    BotShieldChallenge captcha
+&lt;/BotShieldRule&gt;
 </code></pre>
-<p><code>reset</code> matters because <strong>tier floors MAX across triggers</strong>: a lower
-floor written beside a higher one already declared for the same flag is
-silently useless — it MAXes straight back up. With nothing seeded, that
-only happens between declarations in this config, so <code>reset</code> is for
-overriding a slate you included rather than one the module supplied.</p>
+<p><code>BotShieldChallenge</code> on a rule sets a floor, and a floor is &quot;at least
+this intense regardless of cumulative score&quot; — so it opts that flag
+out of your ceiling, by design. Writing one is the deliberate act; the
+hazard is only that it used to happen without you.</p>
+<p>Score instead of a floor if you want the ceiling to keep applying:</p>
+<pre><code class="language-apache">&lt;BotShieldRule score-honeypot&gt;
+    BotShieldFlagged   honeypot_hit
+    BotShieldScore     botsignals +60
+&lt;/BotShieldRule&gt;
+</code></pre>
+<p>That contributes to an accumulator a <code>BotShieldChallengeAtLeast</code> row
+reads, so it is subject to whatever thresholds you set.</p>
 <p><code>BotShieldDebug</code> returns <code>403 &quot;Hello World&quot;</code> for every request in
 scope — useful as a smoke test that the hook is firing.</p>
 <p><code>BotShieldSecretFile</code> and <code>BotShieldAlgorithm</code> are required. The
@@ -450,12 +407,12 @@ the cookie. A tier is chosen by a rule that asks for one, or by a
 <code>BotShieldChallengeAtLeast</code> row reading a named accumulator — both of
 which name the signal that paid for the challenge, which a single
 running total never could.</p>
-<p>What forgiveness was protecting is still protected, by the thing that
-was always doing the work: a client that solves has the flags it was
-carrying at that moment excused for the life of its cookie. Forgiveness
-could never break a challenge loop on its own, because flag effects
-re-apply every request — a forgiven-to-zero score was re-raised on the
-next one. See <a href="../site-model/index.html#carry-forward-gate">site model</a>.</p>
+<p>What forgiveness was protecting is still protected, at the tier
+decision rather than in the score: a client is not challenged at a
+tier it has already passed. Forgiveness could never break a challenge
+loop on its own, because flag effects re-apply every request — a
+forgiven-to-zero score was re-raised on the next one. See
+<a href="../site-model/index.html#carry-forward-gate">site model</a>.</p>
 <h2 id="silent-tier-dispatch">Silent-tier dispatch</h2>
 <table>
 <thead>
@@ -496,9 +453,45 @@ serves the real content but no cookie ever lands.</p>
 </thead>
 <tbody>
 <tr>
-<td><code>BotShieldPromptText</code></td>
+<td>One container, <code>&lt;BotShieldChallengePage&gt;</code>, once per scope. It takes no</td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>argument and describes how the interstitial looks.</td>
+<td></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-apache">&lt;BotShieldChallengePage&gt;
+    BotShieldPrompt     &quot;Please verify&quot;
+    BotShieldNotice     &quot;Checking your browser…&quot;
+    BotShieldLogoFile   /etc/botshield/logo.svg
+    BotShieldLogoLabel  &quot;Crestline&quot;
+    BotShieldShowLogo   On
+    BotShieldHelp       button
+    BotShieldHelpFile   /etc/botshield/help.html
+&lt;/BotShieldChallengePage&gt;
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Inside the container</th>
+<th>Syntax</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BotShieldPrompt</code></td>
 <td><code>&quot;text&quot;</code></td>
 <td><code>I'm not a robot</code></td>
+</tr>
+<tr>
+<td><code>BotShieldNotice</code></td>
+<td><code>&quot;text&quot;</code></td>
+<td><code>Verifying you are human…</code></td>
 </tr>
 <tr>
 <td><code>BotShieldLogoFile</code></td>
@@ -512,18 +505,18 @@ serves the real content but no cookie ever lands.</p>
 </tr>
 <tr>
 <td><code>BotShieldShowLogo</code></td>
-<td><code>on|off</code></td>
-<td><code>on</code></td>
+<td><code>On|Off</code></td>
+<td><code>On</code></td>
 </tr>
 <tr>
 <td><code>BotShieldShowLabel</code></td>
-<td><code>on|off</code></td>
-<td><code>on</code></td>
+<td><code>On|Off</code></td>
+<td><code>On</code></td>
 </tr>
 <tr>
 <td><code>BotShieldShowBox</code></td>
-<td><code>on|off</code></td>
-<td><code>on</code></td>
+<td><code>On|Off</code></td>
+<td><code>On</code></td>
 </tr>
 <tr>
 <td><code>BotShieldHelp</code></td>
@@ -536,24 +529,143 @@ serves the real content but no cookie ever lands.</p>
 <td>built-in text</td>
 </tr>
 <tr>
-<td><code>BotShieldChallengeFile</code></td>
+<td><code>BotShieldTemplate</code></td>
 <td><code>/path.html</code></td>
 <td>built-in shell</td>
 </tr>
 </tbody>
 </table>
-<p><code>BotShieldChallengeFile</code> replaces the full HTML page that wraps the
+<p><strong><code>BotShieldPrompt</code> and <code>BotShieldNotice</code> are not the same string.</strong>
+The interactive and captcha tiers put a control in front of the client,
+so their line is an invitation. The non-interactive tier gives them
+nothing to do, so its line is a status — and writing an invitation
+there asks a question the page offers no way to answer. Set whichever
+you customise; the other keeps its built-in.</p>
+<p>Before 2026-09-11 a single <code>BotShieldPrompt</code> won on every tier, so
+setting it silently replaced the status too. If you set a prompt and
+want that old text on the self-solving tier as well, write it into
+<code>BotShieldNotice</code> explicitly.</p>
+<p><strong>This is the page every challenged request sees</strong>, not the captcha
+tier's alone — <code>bs_render_challenge_page</code> draws all three tiers and the
+captcha widget is one branch inside it. That is why these settings are
+not part of <code>&lt;BotShieldCaptcha&gt;</code>: a scope that configures no captcha
+still renders this page, and making them per-provider would mean
+declaring a captcha block just to set a logo.</p>
+<p>Per-directory like <code>&lt;BotShieldCaptcha&gt;</code>, so a <code>&lt;Location&gt;</code> can dress
+its own interstitial.</p>
+<h4 id="moved-the-nine-flat-spellings">Moved: the nine flat spellings</h4>
+<p><code>BotShieldPromptText</code>, <code>BotShieldLogoFile</code>, <code>BotShieldLogoLabel</code>,
+<code>BotShieldShowLogo</code>, <code>BotShieldShowLabel</code>, <code>BotShieldShowBox</code>,
+<code>BotShieldHelp</code>, <code>BotShieldHelpFile</code> and <code>BotShieldChallengeFile</code> moved
+inside the block on 2026-09-11 and now fail config parse with a line
+naming where the setting went. Two changed name in the move:
+<code>BotShieldPromptText</code> → <code>BotShieldPrompt</code>, and <code>BotShieldChallengeFile</code>
+→ <code>BotShieldTemplate</code>, which is what a full HTML page carrying the
+widget marker always was.</p>
+<p><code>BotShieldTemplate</code> replaces the full HTML page that wraps the
 widget; the file must contain <code>&lt;!-- BOTSHIELD --&gt;</code> where the widget
 is spliced in. Other widget directives still apply to the widget
 block itself. Max 256 KiB.</p>
 <p>Logo and help files are 64 KiB max each. Logo content is served
 inline as <code>&lt;img&gt;</code>-equivalent SVG; help content is rendered as
 trusted HTML (no escaping — you own sanitization).</p>
-<p><code>BotShieldShowLogo/Label/Box</code> strip widget chrome down to a lone
+<p><code>BotShieldShowLogo</code> / <code>ShowLabel</code> / <code>ShowBox</code> strip widget chrome down to a lone
 checkbox if the surrounding page styles its own chrome. When label
 is hidden it moves to the button's <code>aria-label</code> — accessibility is
 preserved.</p>
 <h2 id="captcha-tier">Captcha tier</h2>
+<p>One block per provider, the provider as its argument:</p>
+<pre><code class="language-apache">&lt;BotShieldCaptcha turnstile&gt;
+    BotShieldSiteKey           0x4AAAAAAA
+    BotShieldSecretFile        /etc/botshield/turnstile.secret
+    BotShieldExpectedHostname  example.org
+    BotShieldExpectedAction    botshield
+    BotShieldCABundle          /etc/ssl/certs/ca-bundle.crt
+&lt;/BotShieldCaptcha&gt;
+
+BotShieldCaptchaTimeout        1000
+BotShieldCaptchaConnectTimeout 250
+BotShieldCaptchaRateLimit      30
+BotShieldCaptchaMaxInFlight    64
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Inside the block</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BotShieldSiteKey</code></td>
+<td>provider-public key embedded in the widget</td>
+</tr>
+<tr>
+<td><code>BotShieldSecretFile</code></td>
+<td>siteverify secret; must be mode 0600</td>
+</tr>
+<tr>
+<td><code>BotShieldExpectedHostname</code></td>
+<td>hostname the provider must echo back; empty disables</td>
+</tr>
+<tr>
+<td><code>BotShieldExpectedAction</code></td>
+<td>action the widget must tag the token with; empty disables</td>
+</tr>
+<tr>
+<td><code>BotShieldCABundle</code></td>
+<td>PEM bundle for the provider's TLS certificate</td>
+</tr>
+<tr>
+<td><code>BotShieldMinScore</code></td>
+<td>reCAPTCHA v3 only: minimum accepted score</td>
+</tr>
+</tbody>
+</table>
+<p>A scope may hold several blocks. The first declared is the scope's
+provider -- what the interstitial renders and what the bare
+<code>&lt;prefix&gt;/captcha-verify</code> checks against. The rest are reachable two
+ways: <code>&lt;prefix&gt;/captcha-verify/&lt;name&gt;</code> verifies with the named block's
+secret, and a rule can name one to render:</p>
+<pre><code class="language-apache">&lt;BotShieldRule suspected-scraper&gt;
+    BotShieldUserAgent  @bot
+    BotShieldChallenge  captcha hcaptcha
+&lt;/BotShieldRule&gt;
+</code></pre>
+<p>That is friction by evidence -- an invisible widget for a borderline
+human, a harder one for a client the module already doubts. Only the
+captcha tier takes a provider; <code>BotShieldChallenge interactive hcaptcha</code>
+is refused, because neither of the other tiers renders one.</p>
+<p>An unknown provider name is refused at config time against the
+compiled-in registry. Whether the <em>scope</em> configures it cannot be
+checked there -- rules are server scope and a block may be
+per-<code>&lt;Location&gt;</code> -- so a name the scope has no block for falls back at
+render time to the scope's own provider, exactly as a single-provider
+scope has always behaved.</p>
+<p>Form captcha and the embedded path keep the scope's provider whatever a
+rule says: their token round-trip carries no provider name, so there
+would be nothing to verify the answer against.</p>
+<p>The provider is the block argument because it is the value that decides
+whether the rest mean anything -- a site key without a provider
+configures nothing -- and it names the block in every error the
+settings inside can raise. <code>RSRC_CONF | ACCESS_CONF</code>, so a <code>&lt;Location&gt;</code>
+may declare its own; one per scope, and a second is refused rather than
+letting the later one win silently.</p>
+<p><strong>Four captcha directives stay outside it.</strong>
+<code>BotShieldCaptchaTimeout</code>, <code>BotShieldCaptchaConnectTimeout</code>,
+<code>BotShieldCaptchaRateLimit</code> and <code>BotShieldCaptchaMaxInFlight</code> are scope
+defaults: a vhost sets them once and every provider block under it
+inherits. The first two are network timeouts, the last two protect the
+verify endpoint; none describes a provider, and moving them in would
+make a per-<code>&lt;Location&gt;</code> provider block the only place to say something
+that is not per-provider.</p>
+<p><code>BotShieldMinScore</code> replaces <code>BotShieldRecaptchaV3MinScore</code> and is
+<strong>refused under any other provider</strong>. As a top-level directive it
+parsed anywhere and silently did nothing for five of the six.</p>
+<p>Until 2026-09-10 these were seven standalone directives
+(<code>BotShieldCaptchaProvider</code>, <code>...SiteKey</code>, <code>...SecretFile</code>,
+<code>...ExpectedHostname</code>, <code>...ExpectedAction</code>, <code>...CABundle</code>,
+<code>BotShieldRecaptchaV3MinScore</code>).</p>
 <table>
 <thead>
 <tr>
@@ -564,21 +676,6 @@ preserved.</p>
 </thead>
 <tbody>
 <tr>
-<td><code>BotShieldCaptchaProvider</code></td>
-<td><code>&lt;name&gt;</code></td>
-<td>unset</td>
-</tr>
-<tr>
-<td><code>BotShieldCaptchaSiteKey</code></td>
-<td><code>&quot;key&quot;</code></td>
-<td>unset</td>
-</tr>
-<tr>
-<td><code>BotShieldCaptchaSecretFile</code></td>
-<td><code>/path</code></td>
-<td>unset</td>
-</tr>
-<tr>
 <td><code>BotShieldCaptchaTimeout</code></td>
 <td><code>N</code> (ms)</td>
 <td><code>1000</code> (100..5000)</td>
@@ -587,26 +684,6 @@ preserved.</p>
 <td><code>BotShieldCaptchaConnectTimeout</code></td>
 <td><code>N</code> (ms)</td>
 <td><code>250</code> (50..5000)</td>
-</tr>
-<tr>
-<td><code>BotShieldRecaptchaV3MinScore</code></td>
-<td><code>0..1</code></td>
-<td><code>0.5</code></td>
-</tr>
-<tr>
-<td><code>BotShieldCaptchaExpectedHostname</code></td>
-<td><code>&quot;name&quot;</code> or <code>&quot;&quot;</code></td>
-<td>server hostname</td>
-</tr>
-<tr>
-<td><code>BotShieldCaptchaExpectedAction</code></td>
-<td><code>&quot;action&quot;</code> or <code>&quot;&quot;</code></td>
-<td><code>botshield</code></td>
-</tr>
-<tr>
-<td><code>BotShieldCaptchaCABundle</code></td>
-<td><code>/path</code></td>
-<td>libcurl default</td>
 </tr>
 <tr>
 <td><code>BotShieldFormCaptcha</code></td>
@@ -622,9 +699,10 @@ preserved.</p>
 timeout the verify path fails open. <code>BotShieldCaptchaConnectTimeout</code>
 is the connect phase only — tighter, raised on links with
 transient packet loss.</p>
-<p><code>BotShieldRecaptchaV3MinScore</code> only matters for <code>recaptcha-v3</code>.
-Reject verifications below this score even on <code>success: true</code>.</p>
-<p><code>BotShieldCaptchaExpectedHostname</code> / <code>Action</code>: empty string
+<p><code>BotShieldMinScore</code> only matters for <code>recaptcha-v3</code>, which is why the
+block refuses it anywhere else. Reject verifications below this score
+even on <code>success: true</code>.</p>
+<p><code>BotShieldExpectedHostname</code> / <code>BotShieldExpectedAction</code>: empty string
 disables the check; unset uses defaults (<code>server_hostname</code> /
 <code>&quot;botshield&quot;</code>). GeeTest binds host/action via HMAC and doesn't
 return them in the response, so these are no-ops for that
@@ -727,7 +805,7 @@ Retry-After; <code>MaxInFlight</code> returns 503. 0 on <code>RateLimit</code> d
 <td><code>300</code> (0=shutdown-only)</td>
 </tr>
 <tr>
-<td><code>BotShieldRateLimitEscalateCapacity</code></td>
+<td><code>BotShieldEscalateCapacity</code></td>
 <td><code>N</code></td>
 <td><code>50000</code></td>
 </tr>
@@ -873,21 +951,15 @@ nothing else.</p>
 <td>server / vhost</td>
 </tr>
 <tr>
-<td><code>BotShieldBotDirectoryRefreshInterval</code></td>
-<td><code>N</code> (sec)</td>
-<td><code>300</code> (0=disabled)</td>
-<td>server / vhost</td>
-</tr>
-<tr>
 <td><code>BotShieldBrowserTemplates</code></td>
 <td><code>/path</code> (text)</td>
 <td>unset (compiled-in baseline)</td>
 <td>server / vhost</td>
 </tr>
 <tr>
-<td><code>BotShieldBrowserTemplatesRefreshInterval</code></td>
-<td><code>N</code> (sec)</td>
-<td><code>300</code> (0=disabled)</td>
+<td><code>BotShieldDataRefreshInterval</code></td>
+<td><code>N</code> (sec, 0..86400)</td>
+<td><code>300</code>; <code>0</code> selects that default, negative disables</td>
 <td>server / vhost</td>
 </tr>
 </tbody>
@@ -942,19 +1014,14 @@ template per line (runs of <code>[0-9._]+</code> replaced by <code>X</code>).</p
 </thead>
 <tbody>
 <tr>
-<td><code>BotShieldRateLimit</code></td>
-<td><code>&lt;name&gt; [budget=N] [per=U] [ua=...] [ipspec=...] [mode=...]</code> (or legacy <code>&lt;name&gt; &lt;budget&gt; &lt;per&gt; &lt;ua-pattern&gt; &lt;ipspec&gt; [mode=observe]</code>)</td>
-<td>none</td>
-</tr>
-<tr>
 <td><code>BotShieldBotRateLimit</code></td>
 <td><code>off</code>, or <code>&lt;target&gt; &lt;delay-sec&gt;</code>, or <code>&lt;target&gt; &lt;budget&gt; &lt;per&gt;</code></td>
 <td>none</td>
 </tr>
 <tr>
-<td><code>BotShieldRateLimitEscalate</code></td>
-<td><code>&lt;rate-rule&gt; &lt;strikes&gt; &lt;per&gt; [respond=N] [ttl=N]</code></td>
-<td>none</td>
+<td><code>BotShieldEscalate</code></td>
+<td><code>&lt;rule&gt; &lt;strikes&gt; &lt;per&gt; [respond=N] [ttl=N]</code></td>
+<td>none (<code>BotShieldRateLimitEscalate</code> until 2026-09-09)</td>
 </tr>
 </tbody>
 </table>
@@ -965,8 +1032,7 @@ one does:</p>
     BotShieldPath         /api/*
     BotShieldUserAgent    @search,@ai-input,@ai-train,@monitor
     BotShieldRespond      403
-    BotShieldTTL          0
-    BotShieldLogAs          api-bot
+    BotShieldLogAs        api-bot
 &lt;/BotShieldRule&gt;
 </code></pre>
 <p>That replaces four rules identical but for a single token. Expanded at
@@ -976,19 +1042,47 @@ and carrying identical actions are exactly equivalent to one entry with
 an OR. Copies take a <code>#N</code> name internally; the decision log is
 unaffected, since it reports the action's <code>logas=</code> tag, which every copy
 shares.</p>
-<p><strong>Only <code>@selectors</code> split.</strong> A bare substring pattern is passed through
-untouched, because a User-Agent legitimately contains commas —
-<code>Mozilla/5.0 (X11; Linux x86_64)</code> is full of them — and splitting those
-would silently change what an existing rule matches.</p>
-<p>Match keys: <code>ua=&lt;substring&gt;</code>, <code>ua=@&lt;botgroup&gt;</code>, or <code>ua=&quot;&quot;</code> (no/empty
-User-Agent) for the UA gate
-(<code>*</code> or omit for any UA); <code>ipspec=&lt;spec&gt;</code> for the IP gate (CIDR file
-path, comma-separated inline CIDRs, <code>*</code> or omit for any IP). Both
-axes can't be wildcard — that's rejected at config time.</p>
-<p>Rate keys: <code>budget=N</code> (required) and <code>per=&lt;sec|min|hour&gt;</code> (required;
-also accepts <code>s</code>/<code>m</code>/<code>h</code>). Plain integer for <code>per</code> is rejected.</p>
-<p>The legacy 5-arg positional form is still accepted (form is detected
-by sniffing for <code>=</code> in the args); no deprecation warning yet.</p>
+<p><strong>Only <code>@selectors</code> split</strong> <em>on one line</em>. A bare substring pattern
+written as a single value is passed through untouched, because a
+User-Agent legitimately contains commas — <code>Mozilla/5.0 (X11; Linux x86_64)</code> is full of them — and splitting those would silently change
+what an existing rule matches.</p>
+<p><strong>Repeating the directive ORs, whatever the values are.</strong> Inside a
+block, <code>BotShieldUserAgent</code> accumulates the way <code>BotShieldPath</code> does —
+one alternative per line, no separator to be ambiguous about:</p>
+<pre><code class="language-apache">&lt;BotShieldRule mixed&gt;
+    BotShieldUserAgent  @ai-train
+    BotShieldUserAgent  CorpBot/1.0
+    BotShieldUserAgent  Mozilla/5.0 (X11; Linux x86_64) Grabber/2
+    BotShieldRespond    403
+&lt;/BotShieldRule&gt;
+</code></pre>
+<p>All three are alternatives, and the third stays one value despite its
+commas. This is the spelling to reach for when the alternatives are not
+all <code>@selectors</code>; the one-line comma form remains available and is
+still the shorter way to write a list of selectors.</p>
+<p>Until 2026-09-07 repeated lines were comma-joined before parsing, so
+two plain values became the single literal substring
+<code>CorpBot/1.0,OtherBot/2.0</code> — a rule that matched nothing, with no
+warning, because repetition was accepted and only the <code>@selector</code>
+split could undo the join.</p>
+<h3 id="botshieldratelimit-is-retired-2026-09-09"><code>BotShieldRateLimit</code> is retired (2026-09-09)</h3>
+<p>It was a name, a cohort (<code>ua=</code> and <code>ipspec=</code>), a budget and a window.
+A rule has all of that and everything else -- a path, a query, a
+cookie, a flag -- so the directive was a rule that could say less:</p>
+<pre><code class="language-apache"># then:  BotShieldRateLimit scrapers 10 min ua=&quot;wget&quot;
+# now:
+&lt;BotShieldRule scrapers&gt;
+    BotShieldUserAgent  wget
+    BotShieldRate       10 60
+&lt;/BotShieldRule&gt;
+</code></pre>
+<p>Same reason (<code>ratelimitexceeded:scrapers</code>), same 429 with
+<code>Retry-After</code>, same <code>+50</code> score, same flag on the address, and
+<code>BotShieldEscalate scrapers ...</code> binds to the rule by name
+exactly as it bound to the directive. <code>mode=observe</code> on the directive
+is <code>BotShieldMode observe</code> on the rule, and a scope-level
+<code>BotShieldEnabled LogOnly</code> observes a rule's window as it observed the
+directive's. Nothing was lost in the move except the second spelling.</p>
 <p><code>BotShieldBotRateLimit</code> caps volume per knownbot slug rather than
 per cohort. <code>&lt;target&gt;</code> is a bot slug or UA substring resolved against
 the bot directory, <code>@&lt;botgroup&gt;</code> (<code>search</code>, <code>ai-input</code>, <code>ai-train</code>,
@@ -1036,11 +1130,48 @@ own.</p>
 with its budget, window, scope, and whether it enforces or observes.
 Crawl-delay entries register after that dump runs, so they appear in
 its robots.txt section rather than this one.</p>
+<h3 id="why-botshieldbotratelimit-stays-2026-09-09">Why <code>BotShieldBotRateLimit</code> stays (2026-09-09)</h3>
+<p>Everything it can say a rule can now say: <code>scope=each</code> is
+<code>BotShieldDelay</code> or <code>BotShieldRate &lt;n&gt; &lt;s&gt; each</code>, <code>scope=group</code> is a
+rule with <code>BotShieldUserAgent @group</code> and <code>BotShieldRate</code>, and
+<code>scope=total</code> is the same with <code>@bot</code>. Rules also spend in sequence,
+so a per-crawler rule above a shared-group rule above a ceiling rule
+is the tier stack the directive built by hand.</p>
+<p>It stays because the bots page is fed from its request-time check:
+the per-bot request totals and the User-Agent sample the dashboard
+shows come from the slot the wildcard gives every directory slug. A
+rule's per-crawler slots are the same counters but do no such
+accounting, and the dashboard reads only the directive's table.
+Retiring the directive means moving that accounting into the rule
+path and the dashboard onto rule slots -- worth doing, and its own
+piece of work rather than a footnote to this one. Until then a
+<code>BotShieldBotRateLimit * 1 sec</code> is the line that keeps the bots page
+populated, whatever else rate-limits.</p>
 <h2 id="robots-txt-enforcement">Robots.txt enforcement</h2>
+<p>One container, <code>&lt;BotShieldRobots&gt;</code>, once per server scope. Everything
+robots.txt enforcement can be told lives inside it: the file, the mode,
+how <code>User-agent: *</code> is applied, the refresh cadence, and any groups
+written directly in the config.</p>
+<pre><code class="language-apache">&lt;BotShieldRobots&gt;
+    BotShieldRobotsTxt        /etc/botshield/robots.txt
+    BotShieldMode             observe
+    BotShieldWildcardScope    heuristic
+    BotShieldRefreshInterval  60
+
+    &lt;BotShieldRobotRule ai-crawlers&gt;
+        BotShieldUserAgent   GPTBot
+        BotShieldUserAgent   ClaudeBot
+        BotShieldDisallow    /
+        BotShieldRespond     404
+        BotShieldLogAs       ai-deny
+        BotShieldMode        enforce
+    &lt;/BotShieldRobotRule&gt;
+&lt;/BotShieldRobots&gt;
+</code></pre>
 <table>
 <thead>
 <tr>
-<th>Directive</th>
+<th>Inside the container</th>
 <th>Syntax</th>
 <th>Default</th>
 </tr>
@@ -1049,28 +1180,103 @@ its robots.txt section rather than this one.</p>
 <tr>
 <td><code>BotShieldRobotsTxt</code></td>
 <td><code>/path</code></td>
-<td>unset</td>
+<td>none -- the container may be groups only</td>
 </tr>
 <tr>
-<td><code>BotShieldRobotsRefreshInterval</code></td>
-<td><code>N</code> (sec)</td>
-<td><code>60</code> (0=disabled)</td>
+<td><code>BotShieldMode</code></td>
+<td><code>enforce|observe</code></td>
+<td><code>enforce</code></td>
 </tr>
 <tr>
-<td><code>BotShieldRobotsWildcardScope</code></td>
+<td><code>BotShieldWildcardScope</code></td>
 <td><code>heuristic|strict|off</code></td>
 <td><code>heuristic</code></td>
 </tr>
 <tr>
-<td><code>BotShieldRobotsMode</code></td>
-<td><code>enforce|observe</code></td>
-<td><code>enforce</code></td>
+<td><code>BotShieldRefreshInterval</code></td>
+<td><code>N</code> (sec)</td>
+<td><code>60</code> (0 disables; needs a file)</td>
+</tr>
+<tr>
+<td><code>&lt;BotShieldRobotRule name&gt;</code></td>
+<td>a group; see below</td>
+<td></td>
 </tr>
 </tbody>
 </table>
-<p><code>BotShieldRobotsMode observe</code> records what a <code>Disallow</code> would have done
-without returning 403 — the way to see what enforcing a robots.txt you
-did not write would cost before you enforce it.</p>
+<table>
+<thead>
+<tr>
+<th>Inside a group</th>
+<th>Syntax</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BotShieldUserAgent</code></td>
+<td>product token, <code>*</code>, or <code>@botgroup</code></td>
+<td>repeatable; at least one</td>
+</tr>
+<tr>
+<td><code>BotShieldDisallow</code> / <code>BotShieldAllow</code></td>
+<td><code>/pattern</code> (<code>*</code> and <code>$</code> as RFC 9309)</td>
+<td>repeatable</td>
+</tr>
+<tr>
+<td><code>BotShieldCrawlDelay</code></td>
+<td>seconds, fractions allowed</td>
+<td>one request per window, per crawler</td>
+</tr>
+<tr>
+<td><code>BotShieldRespond</code></td>
+<td>4xx or 5xx, not 429</td>
+<td>what a Disallow answers; default 403</td>
+</tr>
+<tr>
+<td><code>BotShieldMode</code></td>
+<td><code>enforce|observe</code></td>
+<td>overrides the container's for this group</td>
+</tr>
+<tr>
+<td><code>BotShieldLogAs</code></td>
+<td>tag</td>
+<td>rides the decision line as <code>tag=&quot;...&quot;</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>The container is the precedence scope.</strong> The file's groups and the
+inline groups are one document, and robots.txt precedence -- the most
+specific <code>User-agent</code> group wins, the longest path rule within it, an
+<code>Allow</code> on a length tie -- is computed across all of them together. A
+named inline group therefore suppresses the file's <code>User-agent: *</code> for
+its crawler exactly as a named group in the file would. That is why
+there is one container per scope and a second is refused: two would be
+two independent sets, and a rule's meaning depends on its siblings.</p>
+<p><strong>Mode is inherited and a group may override it.</strong> Both directions are
+useful: an observing container with one group armed is how enforcement
+gets staged one crawler at a time; an enforcing container with one
+group observing is how a new group joins. When an observe group's
+<code>Disallow</code> is the longest match, it records what it would have done
+(<code>robotsblock:&lt;group&gt;:observe</code>, <code>outcome=~block</code>) and <strong>steps aside</strong> --
+the longest <em>enforcing</em> rule still applies. An observed rule never
+shadows an enforced one, which is what <code>BotShieldMode observe</code> already
+means on a request rule.</p>
+<p>Observe never enforces anything: no status, no <code>+100</code>, no
+<code>robots_ignored</code> flag. A scope-level <code>BotShieldEnabled LogOnly</code> observes
+every group, enforce overrides included.</p>
+<p><code>BotShieldRespond</code> is what a <code>Disallow</code> answers. <code>Crawl-delay</code> trips
+always answer 429 with <code>Retry-After</code>, because that is a request to come
+back later rather than a refusal, so <code>BotShieldRespond 429</code> is rejected
+rather than accepted as a Disallow that invites a retry.</p>
+<p><code>httpd -t -D DUMP_BOTSHIELD_POLICY</code> lists every group with its source
+(<code>file</code> or <code>config</code>) and any knobs it set.</p>
+<p>Until 2026-09-09 this was four standalone directives --
+<code>BotShieldRobotsTxt</code>, <code>BotShieldRobotsMode</code>,
+<code>BotShieldRobotsWildcardScope</code>, <code>BotShieldRobotsRefreshInterval</code> -- and
+the file was the only place a policy could be written. The container
+folds them and adds what the file cannot say: a status code, a per-group
+mode, a log tag, and a group that exists in the config alone.</p>
 <p>See <a href="../policy/index.html#robots-txt-enforcement">policy</a> for the matcher
 semantics and refresh model.</p>
 <h2 id="triggers">Triggers</h2>
@@ -1089,8 +1295,8 @@ semantics and refresh model.</p>
 <td><code>respond=</code>, <code>redirect=</code>, <code>logas=</code>, <code>accesslog=</code>, <code>flagip=</code>, <code>flagsession=</code>, <code>score=</code>, <code>mode=</code></td>
 </tr>
 <tr>
-<td><code>BotShieldFeedbackTrigger</code></td>
-<td><code>&lt;event&gt;</code></td>
+<td><code>BotShieldFeedback</code></td>
+<td><code>&lt;label&gt;</code> + <code>BotShieldEvent</code></td>
 <td><code>flagip=</code>, <code>flagsession=</code> (both accept <code>+</code>/<code>-</code>/<code>=</code>), <code>logas=</code>, <code>accesslog=</code>, <code>mode=</code></td>
 </tr>
 <tr>
@@ -1216,10 +1422,12 @@ is not yet defined does not resolve.</p>
 <p>A vhost inherits sets from server scope and may shadow one by name, the
 same rule <code>BotShieldAllowBot</code> follows.</p>
 <h3 id="botshieldrule-match-on-any-request-property"><code>BotShieldRule</code> — match on any request property</h3>
-<p>Every match key is optional and they <strong>AND</strong> together; at least one is
-required. A rule with no condition would match every request, which is
-what <code>BotShieldTrigger</code> in an Apache scope is for, so the parser rejects
-it.</p>
+<p>Every match key is optional and they <strong>AND</strong> together. At server
+scope at least one is required: a rule with no condition matches every
+request, which nobody writes on purpose. Inside <code>&lt;Location&gt;</code>,
+<code>&lt;Directory&gt;</code>, <code>&lt;Files&gt;</code> or <code>&lt;If&gt;</code> none is required — Apache has
+already matched, and the container is the condition. See
+<a href="../policy/index.html#rules-in-an-apache-container">policy</a>.</p>
 <table>
 <thead>
 <tr>
@@ -1285,14 +1493,15 @@ it.</p>
 <td><code>yes</code> = never seen before</td>
 </tr>
 <tr>
-<td><code>minload=normal|warm|hot</code></td>
-<td>current server load state</td>
-<td>fires <strong>at or above</strong> the named level</td>
+<td><code>loadavgatleast=&lt;N&gt;</code></td>
+<td>1-minute load average <strong>per CPU</strong></td>
+<td>fires at or above <code>N</code>. <code>1.0</code> = one runnable process per core. The quantitative form of <code>minload=</code>; see <a href="#why-the-busy-worker-ratio-is-often-the-wrong-signal">why the busy-worker ratio is often the wrong signal</a></td>
 </tr>
 </tbody>
 </table>
-<p>Four of those consult module state rather than request text — a stat, a
-classifier, a cookie's authenticated contents, a load sampler. That is
+<p>Five of those consult module state rather than request text — a stat,
+a classifier, a cookie's authenticated contents, a load sampler read
+two ways. That is
 the family's actual shape: match a request on anything known about it.</p>
 <p>Globs take <code>*</code> wildcards and a trailing <code>$</code> anchor. Named-cookie
 predicates (<code>cookie=&lt;n&gt;</code>, <code>cookie=&lt;n&gt;~&lt;substr&gt;</code>, <code>bs-cookie=&lt;state&gt;</code>)
@@ -1339,7 +1548,7 @@ compress into one key.</p>
 <code>captcha</code>. It composes by MAX with the score-derived tier and any flag
 tier floor — it raises the floor, it never downgrades.</p>
 <p>It sets that floor on <strong>this request only</strong>. That is the difference from
-<code>BotShieldFlagIP</code> plus a <code>BotShieldFlagTrigger</code> tier floor, which writes
+<code>BotShieldFlagIP</code> plus a rule reading <code>flagged=</code>, which writes
 per-address state with a window: a client that solves the challenge
 would keep being re-challenged for the life of a flag it cannot clear.
 Flag when you want the reputation to persist; challenge when you want to
@@ -1468,16 +1677,59 @@ all of policy, which is where the tier has always been chosen. Use
 <code>BotShieldScoreAtLeast</code> inside a rule when you want the accumulator to
 gate <em>that rule's</em> match; use <code>BotShieldChallengeAtLeast</code> when you want
 it to choose a challenge tier.</p>
-<h4 id="flagged-does-this-address-already-carry-a-flag"><code>flagged=</code> — does this address already carry a flag</h4>
+<h4 id="flagged-does-this-client-already-carry-a-flag"><code>flagged=</code> — does this client already carry a flag</h4>
 <pre><code class="language-apache">&lt;BotShieldRule escalate&gt;
     BotShieldFlagged   scanner_probe
     BotShieldPath      /admin/*
     BotShieldChallenge captcha
 &lt;/BotShieldRule&gt;
 </code></pre>
+<p><strong>Both subjects.</strong> A flag matches whether it was written to the
+address with <code>BotShieldFlagIP</code> or to the session with
+<code>BotShieldFlagSession</code>. That matters most for the three <code>app_*</code>
+credits, which are refused on an address and so exist nowhere but a
+cookie — a rule could not see them at all until this read both.</p>
+<p>A session flag counts only from a cookie whose authentication tag
+verifies. That is the same gate the tier decision uses, and the reason
+for it is symmetrical: a client that could hand itself a flag could
+also hand itself a credit.</p>
+<p>The address half is re-probed per rule, so a rule sees flags written
+by rules above it in the same walk. The session half is what the
+client presented: a <code>BotShieldFlagSession</code> written earlier in this
+same walk is staged for the response and is not visible until the next
+request, because the cookie carrying it has not been resealed yet.</p>
 <p>Flag names are the registered set: <code>honeypot_hit</code>, <code>scanner_probe</code>,
 <code>fake_bot</code>, <code>pow_fail_streak</code>, <code>app_verified_human</code>,
-<code>app_verified_session</code>, <code>app_trust_signal</code>, <code>blocked</code>.</p>
+<code>app_verified_session</code>, <code>app_trust_signal</code>, <code>blocked</code>, <code>rate_abuse</code>,
+<code>robots_ignored</code>. Naming one that is not on the list prints the list,
+so the authority is the module rather than this paragraph.</p>
+<p><strong><code>rate_abuse</code> and <code>robots_ignored</code> are written by the module, not by
+your rules.</strong> Every other flag needs a <code>BotShieldFlagIP</code> somewhere;
+these two are set wherever a request is refused for exceeding a rate
+budget or for fetching a path <code>robots.txt</code> disallows. They exist
+because those refusals return from inside the policy walk and end the
+request there -- nothing downstream records them, and the rule walk
+runs <em>before</em> all of them, so without a flag a client refused a
+hundred times running is still a stranger to every rule on request
+101.</p>
+<p>They carry no effect of their own. Nothing is seeded for them, so a
+write changes no decision until you ask for one:</p>
+<pre><code class="language-apache">&lt;BotShieldRule tighten-on-repeat-offenders&gt;
+    BotShieldFlagged   rate_abuse
+    BotShieldChallenge noninteractive
+&lt;/BotShieldRule&gt;
+</code></pre>
+<p>The lifetime of a <code>rate_abuse</code> flag is the budget window the client
+overspent, clamped to between a minute and a day -- a per-minute limit
+remembers for a minute, an hourly one for an hour, so the flag tracks
+the limit that produced it without a second number to keep in sync.
+Where a <code>BotShieldEscalate</code> fired, its <code>ttl=</code> is used
+instead, because the operator has already said how long an escalated
+client stays escalated. <code>robots_ignored</code> has no window to derive from
+and lasts an hour.</p>
+<p>Neither is written under <code>mode=observe</code> or <code>BotShieldMode observe</code> (in <code>&lt;BotShieldRobots&gt;</code>). A flag written there would follow the client into later
+requests and change what matches, which is enforcement by another
+route and exactly what observe defers.</p>
 <p><strong>The read is live.</strong> A rule sees flags written by rules <em>above</em> it in
 the same walk, the same contract <code>BotShieldScoreAtLeast</code> has for
 accumulators — a rule reads what rules above it have done. So a trap
@@ -1515,8 +1767,9 @@ error:</p>
 </code></pre>
 <p>Such a rule refreshes the flag's expiry on every request it matches, so
 the address never ages out of it — and expiry is the only recovery for
-a client that <em>cannot</em> solve a challenge. (<code>flags_excused</code> covers the
-client that can.) The match earns nothing there either: if the rule's
+a client that <em>cannot</em> solve a challenge. (A client that can is covered
+by the tier decision, which does not re-ask a question the cookie
+already answers.) The match earns nothing there either: if the rule's
 other conditions justify the write, they justify it whether or not the
 flag is already set. Write the flag from the rule that detects the
 behaviour.</p>
@@ -1713,9 +1966,11 @@ switched off.</p>
     BotShieldNoChallenge
 &lt;/BotShieldRule&gt;
 </code></pre>
-<h4 id="deprecated-botshieldlog">Deprecated: <code>BotShieldLog</code></h4>
-<p><code>BotShieldLogAs &lt;tag&gt;</code> is the name now. The old one still parses and
-warns at config time.</p>
+<h4 id="removed-botshieldlog">Removed: <code>BotShieldLog</code></h4>
+<p><code>BotShieldLogAs &lt;tag&gt;</code> is the name now. The old one was removed
+2026-09-06 with the other four retired spellings and fails config
+parse naming its replacement -- it does not parse with a warning, and
+this section said it did for a day longer than that was true.</p>
 <p>It never caused logging. The decision line is emitted whether or not a
 rule sets a tag, and the tag is embedded on that same line rather than
 producing a second entry — so <code>BotShieldLog</code> read as the thing that made
@@ -1724,8 +1979,10 @@ Neither is true. <code>As</code> says the value is a name for a line that was
 always going to exist.</p>
 <p>Distinct from <code>BotShieldAccessLog</code>, which is a genuine on/off switch for
 the Apache access-log line and is unaffected by this rename.</p>
-<h4 id="deprecated-botshieldtier-and-botshieldrespond-nochallenge">Deprecated: <code>BotShieldTier</code>, and <code>BotShieldRespond nochallenge</code></h4>
-<p>Both still parse and warn at config time.</p>
+<h4 id="removed-botshieldtier-and-botshieldrespond-nochallenge">Removed: <code>BotShieldTier</code>, and <code>BotShieldRespond nochallenge</code></h4>
+<p>Both were removed 2026-09-06 and now fail config parse, naming their
+replacement. This is the only deployment running the module, so there
+was nobody to hold a deprecation window open for.</p>
 <p><code>BotShieldTier</code> required <code>BotShieldRespond nochallenge</code> beside it,
 because a concrete status short-circuits before any tier is chosen. That
 companion carried no meaning of its own — you wrote it to be allowed to
@@ -1765,7 +2022,7 @@ was how you spelled &quot;decide nothing&quot;, by <em>omission</em>. That is no
     BotShieldQuery        *return=*
     BotShieldCookies      none
     BotShieldRespond      403
-    BotShieldLogAs          login-trap
+    BotShieldLogAs        login-trap
     BotShieldAccessLog    off
 &lt;/BotShieldRule&gt;
 
@@ -1781,9 +2038,8 @@ was how you spelled &quot;decide nothing&quot;, by <em>omission</em>. That is no
 # rule carrying only ua=* is rejected as having no condition.
 &lt;BotShieldRule no-ua&gt;
     BotShieldUserAgent    &quot;&quot;
-    BotShieldRespond       nochallenge
-    BotShieldTier         noninteractive
-    BotShieldLogAs          no-ua
+    BotShieldChallenge    noninteractive
+    BotShieldLogAs        no-ua
 &lt;/BotShieldRule&gt;
 </code></pre>
 <p>Because it fires from the policy walk it short-circuits <strong>before</strong>
@@ -1820,10 +2076,10 @@ either, so it costs nothing that was not already being paid.</p>
 &lt;/BotShieldRule&gt;
 </code></pre>
 <p>A flag does nothing on its own. What it <em>means</em> is declared once, by
-<code>BotShieldFlagTrigger</code>, and nothing is built in — see that directive.
+a rule matching <code>flagged=</code>, and nothing is built in.
 A rule that sets a flag no trigger defines is inert.</p>
 <h4 id="which-flags-may-go-where">Which flags may go where</h4>
-<p>Three of the seven describe a session and are <strong>refused on an address</strong>:</p>
+<p>Three describe a session and are <strong>refused on an address</strong>:</p>
 <table>
 <thead>
 <tr>
@@ -1835,6 +2091,10 @@ A rule that sets a flag no trigger defines is inert.</p>
 <tr>
 <td><code>honeypot_hit</code>, <code>scanner_probe</code>, <code>fake_bot</code>, <code>pow_fail_streak</code></td>
 <td>address or session</td>
+</tr>
+<tr>
+<td><code>rate_abuse</code>, <code>robots_ignored</code></td>
+<td>address (written by the module)</td>
 </tr>
 <tr>
 <td><code>app_verified_human</code>, <code>app_verified_session</code>, <code>app_trust_signal</code></td>
@@ -1873,33 +2133,42 @@ set. <code>+</code> is the default and may be omitted, so an unprefixed list mea
 what it always did. Mixing <code>=</code> with <code>+</code> or <code>-</code> is a config error —
 <code>=a,+b</code> has no reading that is not a guess. The same grammar and the
 same rule as <code>BotShieldClassify</code>.</p>
-<p><strong><code>-</code> and <code>=</code> are only allowed on <code>BotShieldFeedbackTrigger</code>.</strong> A rule
+<p><strong><code>-</code> and <code>=</code> are only allowed on <code>BotShieldFeedback</code>.</strong> A rule
 matches on request properties the client controls, so clearing there
 would let anyone shed their own record by fetching the URL that
 matches. Feedback fires on a header your application signs: the
 application asserts it, the visitor cannot.</p>
-<pre><code class="language-apache">&lt;BotShieldFeedbackTrigger login-success&gt;
+<pre><code class="language-apache">&lt;BotShieldFeedback login-success&gt;
+    BotShieldEvent        login-success
     BotShieldFlagSession  +app_verified_human,-scanner_probe
-&lt;/BotShieldFeedbackTrigger&gt;
+&lt;/BotShieldFeedback&gt;
 </code></pre>
 <p>Feedback marks the cookie the response is already carrying rather than
 adding a second one. If the response carries no cookie at all, there is
 no session to mark and the module logs that the flag was not applied
 rather than creating one.</p>
-<h4 id="deprecated-botshieldflag-and-botshieldttl">Deprecated: <code>BotShieldFlag</code> and <code>BotShieldTTL</code></h4>
-<p>Both still parse and both warn at config time.</p>
-<p><code>BotShieldFlag</code> names no subject, and the subject is the whole
-question. Write <code>BotShieldFlagIP</code> or <code>BotShieldFlagSession</code>.</p>
-<p><code>BotShieldTTL</code> set a per-rule duration that was never honoured, for the
-reason above. The window is <code>BotShieldForgetIPAfter</code>, at server scope.</p>
+<h4 id="removed-botshieldflag-and-botshieldttl">Removed: <code>BotShieldFlag</code> and <code>BotShieldTTL</code></h4>
+<p>Both were removed 2026-09-06 and now fail config parse.</p>
+<p><code>BotShieldFlag</code> named no subject, and the subject is the whole
+question: an address is shared and a cookie is not. Write
+<code>BotShieldFlagIP</code> or <code>BotShieldFlagSession</code>.</p>
+<p><code>BotShieldTTL</code> set a per-rule duration that was never honoured — one
+address slot holds a single expiry shared by every flag on it,
+extended to whichever rule wrote last, so the number was read, stored
+and partly ignored. The window is <code>BotShieldForgetIPAfter</code>, at server
+scope, said once where it is true.</p>
+<p>Retiring <code>BotShieldFlag</code> exposed a bug it had been hiding: the app
+feedback filter read only the field that spelling set, so
+<code>BotShieldFlagIP</code> on a <code>&lt;BotShieldFeedback&gt;</code> block passed config
+parse and then did nothing. Both subjects work there now.</p>
 <blockquote>
 <p><strong>This family used to flag by default</strong>, <code>scanner_probe</code> for 3600 s,
 inherited from <code>BotShieldPathTrigger</code> where the target was a handful
 of scanners probing <code>/.env</code>. It was the wrong default for
 high-cardinality traffic: at roughly one request per address the flag
 is never read again and it churns the 50,000-slot table. And a
-<code>scanner_probe</code> flag is not inert: wherever a <code>BotShieldFlagTrigger</code>
-gives it a <code>tier_floor</code> — as the seeded slate did before default rules
+<code>scanner_probe</code> flag is not inert: wherever a rule gives it a
+<code>BotShieldChallenge</code> — as the seeded slate did before default rules
 were switched off — that floor <strong>overrides parked score thresholds</strong>,
 so a rule written to block quietly began rendering interstitials to
 whoever shared that address next, with nothing in the config saying
@@ -1940,7 +2209,7 @@ resulting rule.</p>
 logs <code>rule:&lt;name&gt;</code> where it used to log <code>requesttrigger:&lt;name&gt;</code> — the
 old prefix was a separate literal and would otherwise have been the
 only surviving trace of a directive nobody can write.</p>
-<h4 id="renamed-from-botshieldstatus">Renamed from <code>BotShieldStatus</code></h4>
+<h4 id="removed-botshieldstatus">Removed: <code>BotShieldStatus</code></h4>
 <p><code>BotShieldStatus</code> is the old spelling of <code>BotShieldRespond</code>. Apache
 already spends the word &quot;status&quot; on <code>mod_status</code> and <code>server-status</code>,
 and this module ships a dashboard and a metrics endpoint of its own, so
@@ -1948,9 +2217,15 @@ in a BotShield config the old name read as a monitoring surface rather
 than as the response a rule produces. Nothing in Apache names a
 response code <code>Status</code> either: <code>Redirect</code> and <code>ErrorDocument</code> take one
 as an argument, and <code>mod_rewrite</code> spells it <code>[R=404]</code>.</p>
-<p>The old name still parses and warns at config time. <code>respond=</code> is also
-accepted by <code>BotShieldRateLimitEscalate</code>, which had its own <code>status=</code>
-key -- one concept should not wear two names in the same file.</p>
+<p>The old name was removed 2026-09-06 and now fails config parse.
+<code>BotShieldEscalate</code> had its own <code>status=</code> key, removed with
+it -- one concept should not wear two names in the same file, and it
+was wearing two in two.</p>
+<p><code>BotShieldLog</code> went the same day, for a reason of its own: it read as
+the thing that produces the log entry, and removing it as a way to
+stop one. It does neither. The line was going to be emitted anyway;
+<code>BotShieldLogAs</code> only labels it, and the &quot;As&quot; says the value is a
+name.</p>
 <pre><code class="language-apache">&lt;BotShieldRule blocked&gt;
     BotShieldPath         /wp-admin/*
     BotShieldRespond      404
@@ -1981,142 +2256,88 @@ BotShieldPathTrigger blocked &quot;/wp-admin/*&quot; status=403
 <code>TAKE_ARGV</code> tokenizer only strips quotes that begin a token, so without
 this a quoted <code>key=&quot;value&quot;</code> would retain its quotes and silently never
 match.</p>
-<h2 id="per-scope-triggers">Per-scope triggers</h2>
+<h4 id="removed-botshieldtrigger">Removed: <code>BotShieldTrigger</code></h4>
+<p>The per-Apache-scope family, removed 2026-09-06. Its predicate was the
+container match and it carried no conditions of its own, which is a
+rule whose condition Apache has already evaluated — so it could say
+nothing a rule could not, once a rule could be written in a container.</p>
+<p>Write <code>&lt;BotShieldRule name&gt;</code> in the same container. The block name is
+the only addition; the action keys are unchanged.</p>
+<pre><code class="language-apache"># configtest: skip -- the &quot;before&quot; half names a removed directive.
+# before
+&lt;Location &quot;/admin/.env&quot;&gt;
+    &lt;BotShieldTrigger&gt;
+        BotShieldFlagIP   honeypot_hit
+    &lt;/BotShieldTrigger&gt;
+&lt;/Location&gt;
+
+# after
+&lt;Location &quot;/admin/.env&quot;&gt;
+    &lt;BotShieldRule admin-trap&gt;
+        BotShieldFlagIP   honeypot_hit
+    &lt;/BotShieldRule&gt;
+&lt;/Location&gt;
+</code></pre>
+<p>Two behaviours changed with it. Several <code>BotShieldTrigger</code> blocks in
+one scope all fired; rules are a ladder and stop at the rung that
+matches. And <code>reset</code>, which dropped triggers inherited from outer
+scopes, is gone — a nested scope opts out by writing a rule that
+matches and passes, which works because the inner scope is walked
+first. See <a href="../policy/index.html#ordering-and-opting-out">policy</a>.</p>
+<h4 id="removed-botshieldflagtrigger">Removed: <code>BotShieldFlagTrigger</code></h4>
+<p>The family that said what a flag was worth, removed 2026-09-07. It
+mapped a flag bit to one of three actions at the tier decision, and a
+rule matching <code>flagged=</code> does all three from the policy walk:</p>
 <table>
 <thead>
 <tr>
-<th>Directive</th>
-<th>Syntax</th>
-<th>Scope</th>
+<th>Was</th>
+<th>Now</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td><code>BotShieldTrigger</code></td>
-<td><code>[reset] [respond=N|pass] [redirect=URL] [logas=tag] [accesslog=on|off] [flag=NAME] [ttl=N] [score=&quot;NAME +N&quot;] [mode=enforce|observe]</code></td>
-<td>server / vhost / Directory / Location / LocationMatch / Files / If</td>
+<td><code>action=score accumulator=A add=N</code></td>
+<td><code>BotShieldScore A +N</code></td>
+</tr>
+<tr>
+<td><code>action=tier_floor min=&lt;tier&gt;</code></td>
+<td><code>BotShieldChallenge &lt;tier&gt;</code></td>
+</tr>
+<tr>
+<td><code>action=block status=N</code></td>
+<td><code>BotShieldRespond N</code></td>
 </tr>
 </tbody>
 </table>
-<p>The Apache scope the directive lives in IS the predicate; no path
-glob argument. Multiple <code>BotShieldTrigger</code> lines in one scope
-each append a separate action; they all fire on a pass, the first
-non-pass status short-circuits. <code>reset</code> (no other args) drops
-inherited triggers from outer scopes and clears earlier same-scope
-entries.</p>
-<p>This is the directive that replaces the legacy <code>BotShieldFlagIP</code>
-— the equivalent today is <code>BotShieldTrigger flag=&lt;name&gt; ttl=&lt;sec&gt;</code>.</p>
-<h2 id="flag-triggers">Flag triggers</h2>
-<table>
-<thead>
-<tr>
-<th>Directive</th>
-<th>Syntax</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>BotShieldFlagTrigger</code></td>
-<td><code>&lt;flag&gt; [reset] [action=&lt;verb&gt; args...] [mode=observe]</code></td>
-</tr>
-</tbody>
-</table>
-<p>Action verbs: <code>action=score add=N [accumulator=&lt;name&gt;]</code> (signed N
--1000..1000), <code>action=tier_floor min=&lt;tier&gt;</code> (raise effective tier;
-tier is one of <code>pass</code>/<code>noninteractive</code>/<code>interactive</code>/<code>captcha</code>). The
-<code>reset</code> keyword clears all earlier declarations for the named flag at
-post-config time.</p>
-<p><strong>Prefer <code>accumulator=</code>.</strong> Without it the number goes onto the ambient
-score, which persists into the cookie — so a flag's penalty can still
-be charged to a client on a later request that was refused for
-something else entirely. A named accumulator dies with the request that
-raised it, and is read by whichever <code>BotShieldChallengeAtLeast</code> rows
-name it:</p>
-<pre><code class="language-apache">&lt;BotShieldFlagTrigger honeypot_hit&gt;
+<pre><code class="language-apache"># configtest: skip -- the &quot;before&quot; half names a removed directive.
+# before
+&lt;BotShieldFlagTrigger honeypot_hit&gt;
     BotShieldAction       score
     BotShieldAccumulator  botsignals
     BotShieldAdd          60
 &lt;/BotShieldFlagTrigger&gt;
+
+# after
+&lt;BotShieldRule flag-honeypot-hit&gt;
+    BotShieldFlagged      honeypot_hit
+    BotShieldScore        botsignals +60
+&lt;/BotShieldRule&gt;
 </code></pre>
-<p>This is the same accumulator a <code>BotShieldScore</code> line in a rule moves,
-so a flag and a rule can contribute to one judgement without either
-knowing about the other.</p>
-<p><strong>A <code>tier_floor</code> answers to nothing but itself.</strong> It is MAX'd in at
-the tier decision alongside every other claim on the tier, so an
-address carrying a floored flag is challenged whatever else the request
-did or did not trip. That is the property to reach for when a signal
-really is definitive, and the reason to reach for it rarely: a floor
-ignores the credits too, and a floor ignoring a credit is how
-<code>honeypot_hit</code> challenged Googlebot 248 times over ten hours.</p>
-<p>Nothing carries a floor unless this config gives it one. To keep a
-flag's score while dropping a floor you declared earlier, reset it and
-re-add the score:</p>
-<pre><code class="language-apache">&lt;BotShieldFlagTrigger honeypot_hit&gt;
-    BotShieldReset
-    BotShieldAction       score
-BotShieldAccumulator  botsignals
-    BotShieldAdd          60
-&lt;/BotShieldFlagTrigger&gt;
-&lt;BotShieldFlagTrigger fake_bot&gt;
-    BotShieldReset
-    BotShieldAction       score
-BotShieldAccumulator  botsignals
-    BotShieldAdd          80
-&lt;/BotShieldFlagTrigger&gt;
-&lt;BotShieldFlagTrigger scanner_probe&gt;
-    BotShieldReset
-    BotShieldAction       score
-BotShieldAccumulator  botsignals
-    BotShieldAdd          50
-&lt;/BotShieldFlagTrigger&gt;
-&lt;BotShieldFlagTrigger pow_fail_streak&gt;
-    BotShieldReset
-    BotShieldAction       score
-BotShieldAccumulator  botsignals
-    BotShieldAdd          30
-&lt;/BotShieldFlagTrigger&gt;
-</code></pre>
-<p><strong>A flag score large enough to challenge on its own is an unbreakable
-loop, not a challenge.</strong> The replacement scores above fix the
-<code>tier_floor</code> bypass but leave a second trap: any flag whose <code>add=</code>
-clears a <code>BotShieldChallengeAtLeast</code> row by itself walks into
-it. Solving does
-not clear a flag, and a flag's score re-applies on the very next
-request. Forgiveness used to reduce a score carried in the cookie and
-could not help: <code>bs_apply_flag_triggers</code> re-added the flag's
-contribution immediately, so a forgiven-to-zero score was raised again
-before it could matter. Both the carried score and forgiveness are gone
-now; what breaks the loop is <code>flags_excused</code>.</p>
-<p>So a flagged client is re-challenged forever however many times it
-solves. In production this looked like <code>pow_ok</code> succeeding roughly once
-a second, each success followed immediately by another
-<code>outcome=challenged</code> carrying <code>cookie=solved</code> and
-<code>forgive-capped:0/10</code> — the hourly forgiveness cap exhausted by the
-loop it could not escape. The affected user had tripped
-<code>scanner_probe</code> while filing a support ticket about being blocked: the
-attachment upload posts a negative ticket id, which reads as probing.</p>
-<p>Keep a flag's <code>add=</code> <strong>below</strong> the lowest row that reads its
-accumulator, unless you intend the flag alone to challenge
-indefinitely. A flag worth less than the row still contributes toward a
-challenge in combination with other signals, which is usually what was
-meant:</p>
-<pre><code class="language-apache"># against a BotShieldChallengeAtLeast botsignals 20 row
-&lt;BotShieldFlagTrigger scanner_probe&gt;
-    BotShieldReset
-    BotShieldAction       score
-    BotShieldAccumulator  botsignals
-    BotShieldAdd          10
-&lt;/BotShieldFlagTrigger&gt;
-</code></pre>
-<p>Setting <code>add=0</code> is worse than a low value: it discards the evidence
-rather than de-weighting it. And note this trap is invisible in
-testing that solves once — it only appears on the <em>second</em> request
-after a solve.</p>
-<p>Flag bits: <code>honeypot_hit</code>, <code>scanner_probe</code>, <code>fake_bot</code>,
-<code>pow_fail_streak</code>, <code>app_verified_human</code>, <code>app_verified_session</code>,
-<code>app_trust_signal</code>. See
-<a href="../policy/index.html#flag-trigger-family">policy</a> for the starter
-slate and override semantics.</p>
+<p>Three things to know when migrating.</p>
+<p><strong>Declare them first.</strong> A rule carrying only <code>BotShieldScore</code>
+continues the walk, so several in a row all contribute — but a rule
+above them that answers with a status ends the walk, and the flag
+rules below it never run. The family applied at the tier decision and
+so had no such ordering; rules do.</p>
+<p><strong><code>reset</code> is gone.</strong> It cleared earlier declarations for a flag,
+including compiled-in defaults. Nothing is seeded any more, and rules
+settle by declaration order, so what <code>reset</code> expressed is now &quot;declare
+the one you want&quot;.</p>
+<p><strong>A block is a rule that answers.</strong> <code>action=block</code> refused a
+non-refusal status, since a block that answers 200 is a contradiction.
+<code>BotShieldRespond</code> makes no such claim and takes any code 100..599, so
+that check went with the verb.</p>
 <h2 id="request-signals">Request signals</h2>
 <p>There is no directive family for these. Each was a named heuristic an
 operator bound a score action to; each is a rule condition now, and the
@@ -2205,50 +2426,67 @@ want on a login or registration path, where the check is invisible and
 a real browser clears it in one round trip; it is usually not what you
 want site-wide.</p>
 <h2 id="safeguard">Safeguard</h2>
+<p>One container, <code>&lt;BotShieldSafeguard&gt;</code>, once per server scope. It
+takes no argument, and the settings inside it drop the feature name
+they used to repeat.</p>
+<pre><code class="language-apache">&lt;BotShieldSafeguard&gt;
+    BotShieldThreshold    5
+    BotShieldWindow       600
+    BotShieldTTL          900
+    # Optional. When unset, the redirect points at
+    # /botshield/safeguard-info (the module's built-in explainer).
+    BotShieldRedirectURL  /help/auto-check-failed
+&lt;/BotShieldSafeguard&gt;
+</code></pre>
 <table>
 <thead>
 <tr>
-<th>Directive</th>
+<th>Inside the container</th>
 <th>Syntax</th>
 <th>Default</th>
-<th>Scope</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td><code>BotShieldSafeguard</code></td>
-<td><code>on|off</code></td>
-<td><strong><code>on</code></strong></td>
-<td>server / vhost</td>
+<td><code>BotShieldEnabled</code></td>
+<td><code>On|Off</code></td>
+<td><strong><code>On</code></strong></td>
 </tr>
 <tr>
-<td><code>BotShieldSafeguardThreshold</code></td>
-<td><code>N</code></td>
+<td><code>BotShieldThreshold</code></td>
+<td><code>N</code> (1..1000)</td>
 <td><code>5</code></td>
-<td>server / vhost</td>
 </tr>
 <tr>
-<td><code>BotShieldSafeguardWindow</code></td>
-<td><code>N</code> (sec)</td>
+<td><code>BotShieldWindow</code></td>
+<td><code>N</code> sec (1..86400)</td>
 <td><code>600</code></td>
-<td>server / vhost</td>
 </tr>
 <tr>
-<td><code>BotShieldSafeguardTTL</code></td>
-<td><code>N</code> (sec)</td>
+<td><code>BotShieldTTL</code></td>
+<td><code>N</code> sec (1..604800)</td>
 <td><code>900</code></td>
-<td>server / vhost</td>
 </tr>
 <tr>
-<td><code>BotShieldSafeguardRedirectURL</code></td>
-<td><code>&lt;url&gt;</code></td>
+<td><code>BotShieldRedirectURL</code></td>
+<td><code>/path</code>, same-origin</td>
 <td>unset (uses built-in explainer)</td>
-<td>server / vhost</td>
 </tr>
 </tbody>
 </table>
+<p>The block is optional: safeguard runs on the defaults above without
+one. Write it to tune those numbers, or to turn the feature off:</p>
+<pre><code class="language-apache">&lt;BotShieldSafeguard&gt;
+    BotShieldEnabled Off
+&lt;/BotShieldSafeguard&gt;
+</code></pre>
+<p><code>BotShieldSafeguardCapacity</code> sizes the SHM table and stays <strong>outside</strong>
+the block. It is module-global — only the main server's value is read
+at <code>post_config</code> — so unlike the settings above it cannot be set
+per-vhost, and a block written inside a <code>&lt;VirtualHost&gt;</code> could not have
+carried it. See <a href="#shm-sizing-and-persistence">SHM sizing</a>.</p>
 <p>Challenge-loop suppression, <strong>on by default</strong> — only an explicit
-<code>Off</code> disables it. A client that cannot solve the challenge (JS
+<code>BotShieldEnabled Off</code> inside the block disables it. A client that cannot solve the challenge (JS
 disabled, a privacy extension, an old browser) would otherwise be
 re-challenged forever with nothing in the logs shouting about it, and
 that client is indistinguishable from a non-JS crawler. The redirect
@@ -2260,7 +2498,7 @@ flagged-IP entry survives.</p>
 threshold number of challenges within the window without ever
 returning a verified cookie, the next request gets a 302 redirect
 to break the loop.</p>
-<p><code>BotShieldSafeguardRedirectURL</code> lets the operator point the
+<p><code>BotShieldRedirectURL</code> lets the operator point the
 redirect at their own page (a status page, a help article, a
 login flow). When unset, the module redirects to its built-in
 explainer at <code>&lt;BotShieldEndpointPrefix&gt;/safeguard-info</code>. The
@@ -2301,73 +2539,42 @@ behavior arc.</p>
 <td><code>1</code></td>
 <td>server only</td>
 </tr>
-<tr>
-<td><code>BotShieldLoadWarmThreshold</code></td>
-<td><code>N</code> (% workers busy)</td>
-<td><code>65</code></td>
-<td>server only</td>
-</tr>
-<tr>
-<td><code>BotShieldLoadHotThreshold</code></td>
-<td><code>N</code> (% workers busy)</td>
-<td><code>85</code></td>
-<td>server only</td>
-</tr>
-<tr>
-<td><code>BotShieldLatencyWarm</code></td>
-<td><code>N</code> (ms)</td>
-<td><code>250</code></td>
-<td>server only</td>
-</tr>
-<tr>
-<td><code>BotShieldLatencyHot</code></td>
-<td><code>N</code> (ms)</td>
-<td><code>1000</code></td>
-<td>server only</td>
-</tr>
-<tr>
-<td><code>BotShieldLoadAvgWarm</code></td>
-<td><code>N</code> (per-CPU ratio)</td>
-<td><code>1.0</code></td>
-<td>server only</td>
-</tr>
-<tr>
-<td><code>BotShieldLoadAvgHot</code></td>
-<td><code>N</code> (per-CPU ratio)</td>
-<td><code>1.5</code></td>
-<td>server only</td>
-</tr>
-<tr>
-<td><code>BotShieldDbStatsFile</code></td>
-<td><code>/path</code></td>
-<td><code>/run/botshield/db-load.stats</code></td>
-<td>server only</td>
-</tr>
-<tr>
-<td><code>BotShieldFpmStatsFile</code></td>
-<td><code>/path</code></td>
-<td><code>/run/botshield/fpm-load.stats</code></td>
-<td>server only</td>
-</tr>
 </tbody>
 </table>
+<p>The six warm/hot thresholds were directives until 2026-09-07 and are
+now fixed constants in <code>src/shm.h</code>: busy-worker ratio 65/85 percent,
+mean latency 250/1000 ms, load average 1.00/1.50 per CPU. Nothing had
+ever configured them, and the state they drive stopped being policy
+when the shed ladder moved to <code>BotShieldLatencyAtLeast</code> — a rule reads
+the raw number, not the state. What is left is a gauge, and a gauge
+with tunable bands nobody tuned is a knob with no reader.
+| <code>BotShieldDbStatsFile</code> | <code>/path</code> | <code>/run/botshield/db-load.stats</code> | server only |
+| <code>BotShieldFpmStatsFile</code> | <code>/path</code> | <code>/run/botshield/fpm-load.stats</code> | server only |</p>
 <p><code>BotShieldLoadStateFile</code> points at an external single-word state
 file (managed by an out-of-band collector) that overrides the
 scoreboard sample. Useful when load decisions should key on a
 metric Apache itself doesn't see (queue depth, downstream
 saturation, etc.).</p>
 <h3 id="why-the-busy-worker-ratio-is-often-the-wrong-signal">Why the busy-worker ratio is often the wrong signal</h3>
-<p><code>BotShieldLoadWarmThreshold</code> and <code>BotShieldLoadHotThreshold</code> are a
-percentage of <code>MaxRequestWorkers</code>, which is only meaningful if that
-setting reflects what the machine can actually serve. It frequently
+<p>The busy-worker warm/hot thresholds are a percentage of
+<code>MaxRequestWorkers</code>, which is only meaningful if that setting reflects
+what the machine can actually serve. It frequently
 does not. On a host running <code>MaxRequestWorkers 1024</code> against 6 cores,
 four separate outages ran at 25-30 busy workers — the site returning
 500s and taking half a minute per request — which is <strong>2-3%</strong>
 utilisation. No threshold on that ratio can distinguish those outages
 from an idle server.</p>
-<p><code>BotShieldLatencyWarm</code> / <code>BotShieldLatencyHot</code> exist for that case.
-They compare the <strong>mean request latency</strong>, measured as a delta between
-watchdog ticks, against a duration you choose. On the host above the
+<p>That is not true of every outage, and the ratio is not the only way to
+read the scoreboard. Replayed from the access log, the outages of
+2026-08-20 and 2026-08-27 ran near 950 requests in flight and the
+floods of 2026-08-08 and 2026-08-16 near 980, against an ordinary-day
+peak of 119-181 that week. What misleads is dividing by a ceiling that
+does not describe the machine; the count itself separated those days
+cleanly. <code>BotShieldBusyWorkersAtLeast</code> reads the count.</p>
+<p>The latency thresholds exist for that case. They compare the <strong>mean
+request latency</strong>, measured as a delta between watchdog ticks, against
+a fixed duration — and <code>BotShieldLatencyAtLeast</code> lets a rule compare
+against one you choose. On the host above the
 same outages moved this number from ~31ms to 29,000-36,000ms — roughly
 a thousandfold, on the same data the worker ratio read as flat.</p>
 <p>It is derived from Apache's own per-worker counters, the same ones
@@ -2389,9 +2596,242 @@ policy through <code>BotShieldLoadStateFile</code>, not through this — the mod
 never links a database client, because blocking I/O has no place in
 the watchdog and a database too sick to answer must not be able to
 stall the code whose job is to shed load because the database is sick.</p>
-<p>The trigger family that consumes the state lives under
-<code>BotShieldMinLoad</code> on a rule (above). See
-<a href="../policy/index.html#load-triggers">policy</a>.</p>
+<h3 id="reaching-a-number-from-a-rule">Reaching a number from a rule</h3>
+<p><code>BotShieldLoadAvgAtLeast &lt;N&gt;</code> inside a <code>&lt;BotShieldRule&gt;</code> matches on the
+per-CPU load average directly, in the same hundredths-per-core unit
+the warm/hot bands use:</p>
+<pre><code class="language-apache">&lt;BotShieldRule shed-scrapers-under-load&gt;
+    BotShieldLoadAvgAtLeast  2.0
+    BotShieldUserAgent       @ai-train
+    BotShieldRespond         503
+&lt;/BotShieldRule&gt;
+</code></pre>
+<p>That is the same sample the watchdog reads to decide <code>warm</code> and <code>hot</code>
+and the same one <code>botshield_loadavg_1m_pct</code> reports — no second source
+of truth, and the gauge on the dashboard is the number the rule
+compares against. Per <strong>CPU</strong>, so a threshold means the same thing on a
+6-core host and a 64-core one.</p>
+<h3 id="rate-limiting-from-a-rule">Rate-limiting from a rule</h3>
+<p><code>BotShieldDelay &lt;seconds&gt;</code> or <code>BotShieldRate &lt;n&gt; &lt;seconds&gt;</code> puts a
+fixed-window counter on a rule. Once the window is spent the rule
+applies its action -- <code>429</code> unless it says otherwise. Under budget the
+request spends from the window and the walk carries on to whatever
+else the rule says and to the rules below.</p>
+<pre><code class="language-apache">&lt;BotShieldRule crawl-delay&gt;
+    BotShieldUserAgent  @bot
+    BotShieldDelay      1.5
+&lt;/BotShieldRule&gt;
+
+&lt;BotShieldRule search-flood&gt;
+    BotShieldPath       /search/
+    BotShieldRate       30 60
+&lt;/BotShieldRule&gt;
+</code></pre>
+<p>The unit is always seconds, and seconds take a fraction: <code>0.5</code> is half
+a second, exactly -- the counter keeps milliseconds. There are no unit
+words; <code>10min</code> is refused rather than read as ten seconds. The ceiling
+is 86400.</p>
+<p>The two spellings differ in <strong>who shares the window</strong>, and that is the
+whole reason there are two:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>one window per</th>
+<th>budget</th>
+<th>is</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BotShieldDelay &lt;s&gt;</code></td>
+<td>crawler (known-bot slug)</td>
+<td>1 request</td>
+<td>robots.txt <code>Crawl-delay</code></td>
+</tr>
+<tr>
+<td><code>BotShieldRate &lt;n&gt; &lt;s&gt;</code></td>
+<td>rule</td>
+<td>n requests</td>
+<td>a shared budget</td>
+</tr>
+<tr>
+<td><code>BotShieldRate &lt;n&gt; &lt;s&gt; each</code></td>
+<td>crawler (known-bot slug)</td>
+<td>n requests</td>
+<td>a per-crawler budget above one</td>
+</tr>
+</tbody>
+</table>
+<p><code>Delay</code> is <code>Crawl-delay</code> in the unit robots.txt writes it in, and it
+means what robots.txt means: <strong>each</strong> crawler gets a window of its own.
+<code>Rate</code> is one window for everyone the rule matches, between them.
+<code>BotShieldUserAgent @bot</code> with <code>BotShieldRate 1 1</code> gives the entire
+crawler population one request a second <em>shared</em>, which reads almost
+like <code>BotShieldDelay 1</code> and is a very different policy. Until
+2026-09-08 this was a separate <code>countper=</code> knob whose default was the
+shared bucket, and the default was the trap.</p>
+<p>A rule has one counter, so <code>Delay</code> and <code>Rate</code> on the same rule is
+refused rather than last-one-wins.</p>
+<p><code>Delay</code> costs a counter slot per entry in the bot directory, which is
+large against the pool, so post_config allocates what it can and logs
+a warning naming the rule when it cannot; slugs that missed out share
+the rule's own slot. A matching request whose UA is not a known bot
+has no slug to key on and uses that same slot, so unknown bots are one
+shared window.</p>
+<p><code>BotShieldDelay 0</code> is accepted and means no limit, so a robots.txt
+transcription can keep a literal <code>Crawl-delay: 0</code>. A value that rounds
+to zero milliseconds without being zero is refused: <code>0.0001</code> is
+someone who meant a limit and would silently get none.</p>
+<p>What a rule bought over the retired <code>BotShieldRateLimit</code> is the
+predicate set. That directive matched on <code>ua=</code> and <code>ipspec=</code> and
+<strong>nothing else</strong> -- there was no path in it -- so <code>search-flood</code> above
+could not be written with it at all. On a rule every condition is
+available: path, query, cookies,
+<code>solved=</code>, <code>flagged=</code>, <code>latencyatleast=</code>, and the rest.</p>
+<p>Not expressible: a per-crawler budget larger than one (&quot;thirty a
+minute, each&quot;). <code>Rate</code> shares and <code>Delay</code> is one-at-a-time; a
+per-crawler rate would be a third spelling, and it has not been
+needed. Nor is a per-client-address window, which is what most people
+mean by &quot;rate limit&quot;; it needs a counter table keyed on (address,
+rule) rather than the fixed per-rule slot, and that table is separate
+work.</p>
+<h3 id="reaching-request-latency-from-a-rule">Reaching request latency from a rule</h3>
+<p><code>BotShieldLatencyAtLeast &lt;ms&gt;</code> matches on Apache's mean request
+latency, in the same milliseconds the warm/hot bands use:</p>
+<pre><code class="language-apache">&lt;BotShieldRule shed-bots-when-slow&gt;
+    BotShieldLatencyAtLeast  1000
+    BotShieldUserAgent       @bot
+    BotShieldRespond         503
+&lt;/BotShieldRule&gt;
+</code></pre>
+<p>This is the condition the other two cannot express, and the reason is
+what &quot;busy&quot; means to each of them. A worker blocked on a database
+socket is in interruptible sleep, which Linux does not count toward
+the load average, so a server with every worker waiting on a sick
+database reads as <strong>idle</strong> to <code>BotShieldLoadAvgAtLeast</code>. Its mean
+request duration does not read as idle: the blocked worker accumulates
+duration for the entire time it waits, which is exactly the quantity
+that makes a page take thirty seconds.</p>
+<p>Measured as a delta between watchdog ticks, so it is what the server
+is doing now rather than an average since restart.</p>
+<p><strong>It requires <code>ExtendedStatus On</code>.</strong> Apache only maintains the
+per-worker access and duration counters when that is set; with it off
+they sit at zero forever. The module reports the metric as unavailable
+rather than as 0ms, and a <code>BotShieldLatencyAtLeast</code> rule <strong>declines</strong>
+while it is unavailable. That direction is deliberate: the alternative
+is a server that starts shedding traffic at the moment it loses the
+ability to measure itself.</p>
+<p><code>0</code> is refused rather than read as &quot;no condition&quot;, because a 0ms floor
+matches every request and a rule saying &quot;shed when latency is at least
+nothing&quot; is always a mistake.</p>
+<h3 id="why-latency-is-a-poor-shedding-signal">Why latency is a poor shedding signal</h3>
+<p>Request duration runs until the last byte is sent, so it includes the
+time a client spends receiving the response. A slow client downloading
+a large file holds a request open for minutes while the server does
+almost nothing, and reads as a slow server. The mean over a sample is
+also dominated by whichever single request is slowest: on this
+deployment 91% of the samples that crossed 500ms were one request doing
+80% or more of that sample's time, most often one expensive search page.</p>
+<p>Latency remains useful on the dashboard. For deciding to turn traffic
+away, prefer a signal that counts work being done.</p>
+<h3 id="reaching-work-signals-from-a-rule">Reaching work signals from a rule</h3>
+<p>Four conditions count something occupied only while work is happening,
+so none of them moves for a slow download:</p>
+<table>
+<thead>
+<tr>
+<th>Directive</th>
+<th>Reads</th>
+<th>Unit</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BotShieldBusyWorkersAtLeast &lt;n&gt;</code></td>
+<td>Apache worker slots busy at the last watchdog tick</td>
+<td>count</td>
+</tr>
+<tr>
+<td><code>BotShieldFpmBusyAtLeast &lt;pct&gt;</code></td>
+<td>PHP-FPM active processes</td>
+<td>percent of <code>pm.max_children</code>, 1-100</td>
+</tr>
+<tr>
+<td><code>BotShieldFpmQueueAtLeast &lt;n&gt;</code></td>
+<td>requests waiting for a PHP-FPM worker</td>
+<td>count</td>
+</tr>
+<tr>
+<td><code>BotShieldDbRunningAtLeast &lt;n&gt;</code></td>
+<td>database threads running</td>
+<td>count</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-apache">&lt;BotShieldRule shed-bots-when-php-is-full&gt;
+    BotShieldFpmBusyAtLeast  80
+    BotShieldUserAgent       @bot
+    BotShieldRespond         503
+&lt;/BotShieldRule&gt;
+</code></pre>
+<p>The PHP-FPM and database figures come from the stats files the bundled
+monitors write (<code>BotShieldFpmStatsFile</code>, <code>BotShieldDbStatsFile</code>), read
+once per watchdog tick. A sample more than 60 seconds old is treated as
+<strong>no reading</strong>, and a rule <strong>declines</strong> without one, as it does when
+latency is unavailable: a monitor that stopped writing is neither a
+calm server nor a loaded one, and shedding on its last word would
+punish traffic for a stopped service.</p>
+<p>The busy-worker count comes from the scoreboard the watchdog already
+walks and needs no monitor. Set its threshold well below
+<code>MaxRequestWorkers</code>: once every worker is busy, new connections wait in
+the kernel's accept queue and never reach the module, so a rung that
+fires at the ceiling cannot shed anything.</p>
+<p>Conditions in one rule are ANDed. To shed on either of two signals,
+write two rules with the same response; the family is first-match-wins
+so a request is counted once.</p>
+<p><code>0</code> is refused on all four, for the reason given for latency, and <code>!</code>
+is refused because there is no &quot;below&quot; condition.</p>
+<p>A rule carrying any of these, or <code>BotShieldLoadAvgAtLeast</code> or
+<code>BotShieldLatencyAtLeast</code>, that answers with anything but
+<code>BotShieldNoChallenge</code> is counted as <strong>shedding</strong>: see
+<code>botshield_shed_total</code> and <code>botshield_shed_observed_total</code> in the
+observability guide, and the <em>Requests shed</em> and <em>Would shed</em> figures on
+the dashboard.</p>
+<h3 id="choosing-between-the-two">Choosing between the two</h3>
+<p><code>BotShieldLatencyAtLeast</code> is the one that sees a worker blocked on
+I/O; <code>BotShieldLoadAvgAtLeast</code> is the one that sees CPU saturation.
+On this deployment the failure mode has been the former, so the shed
+ladder reads latency and keeps load average in reserve.</p>
+<p>There was a third, <code>minload=</code>, matching the three-state
+normal/warm/hot machine. It was <strong>removed on 2026-09-07</strong>: the shed
+ladder was its only consumer, and the state it read disagreed sharply
+with the load average about what &quot;busy&quot; meant — the machine reached
+warm 172 times on 2026-09-01 while 98.3% of the shedding it drove
+happened between 0.07 and 0.24 per CPU. Nobody could account for what
+moved it, and a condition whose firing cannot be explained is worse
+than no condition. The measurement stayed: see below.</p>
+<p>There is no &quot;below this&quot; spelling and <code>!</code> is refused. A rule for the
+quiet case is the one the loaded rule falls through to, which keeps the
+two thresholds from drifting apart.</p>
+<p><strong>After a config reload it reads 0 until the next watchdog tick.</strong> A
+graceful reload builds a fresh SHM header and nothing repopulates the
+sample until the watchdog runs again, so for up to
+<code>BotShieldLoadRefreshInterval</code> seconds — one, by default — a
+load-conditioned rule does not fire. It fails <strong>open</strong>: requests that
+would have been shed are served. For a shed rule that is the right
+direction to fail, and one second of a reload you performed is not a
+window an attacker can choose. It is documented rather than fixed
+because the alternative — persisting the value across a reload — means
+a rule acting on a measurement taken by a configuration that is no
+longer running.</p>
+<p>The three-state machine is not affected: it is recomputed from the
+scoreboard on the same tick and starts at <code>normal</code>, which is also
+fail-open.</p>
+<p>No rule reads that machine any more. It survives as the <code>load_state</code>
+gauge and the <code>load_state_changes_total</code> series, which is the right
+home for a signal that is worth watching and not yet worth acting on.
+See <a href="../policy/index.html#load-conditions">policy</a>.</p>
 <h2 id="multi-vhost-reputation">Multi-vhost reputation</h2>
 <table>
 <thead>
@@ -2708,14 +3148,9 @@ for the line format and the trade-offs between all three routes.</p>
 <td><code>off</code></td>
 </tr>
 <tr>
-<td><code>BotShieldAppFeedbackHeader</code></td>
-<td><code>&lt;header-name&gt;</code></td>
-<td><code>X-BotShield-Feedback</code></td>
-</tr>
-<tr>
 <td><code>BotShieldAppClaims</code></td>
 <td><code>on|off</code></td>
-<td><code>off</code></td>
+<td><code>off</code> (server / vhost / <code>&lt;Location&gt;</code>)</td>
 </tr>
 <tr>
 <td><code>BotShieldAppIntegrationSecretFile</code></td>
@@ -2724,8 +3159,41 @@ for the line format and the trade-offs between all three routes.</p>
 </tr>
 </tbody>
 </table>
+<p>The feedback header is fixed at <code>X-BotShield-Feedback</code>. It is part of
+the protocol your application writes against, like the verify
+endpoint's path — not a setting.</p>
+<p><code>BotShieldAppClaims</code> is per-scope: set it for a whole vhost, or narrow
+it to the paths whose handler actually reads the header. A <code>&lt;Location&gt;</code>
+that says <code>off</code> overrides a vhost that turned it on, because unset and
+explicit-off are distinct states.</p>
+<pre><code class="language-apache">&lt;VirtualHost *:443&gt;
+    BotShieldAppIntegrationSecretFile /etc/botshield/app-integration-secret
+    BotShieldAppClaims On
+
+    &lt;Location /static&gt;
+        BotShieldAppClaims Off
+    &lt;/Location&gt;
+&lt;/VirtualHost&gt;
+</code></pre>
+<p><strong>The strip is not per-scope.</strong> Client-supplied <code>X-Botshield-*</code> request
+headers are dropped from <em>every</em> request in <code>post_read_request</code>,
+whether or not the scope emits claims — a request matching no
+<code>&lt;Location&gt;</code> is exactly the one a forged header would be aimed at. The
+one exception is <code>X-BotShield-Unflag</code>, which the admin endpoint reads
+and which asserts nothing about a client.</p>
 <p>See <a href="../captcha/index.html#app-bridge">captcha</a> for the wire format
 and security model.</p>
+<h4 id="removed-botshieldappfeedbackheader">Removed: <code>BotShieldAppFeedbackHeader</code></h4>
+<p>Removed 2026-09-11; it now fails config parse.</p>
+<p>It bought nothing. The name is namespaced enough not to collide, and
+it never leaves Apache — the module strips it on the way out — so
+nothing upstream can rewrite it. Forgery is hard because of the HMAC,
+not because the name is obscure.</p>
+<p>What it did buy was a leak. The strip removes only the <strong>configured</strong>
+name, so renaming the header while the application still emitted the
+old one produced a header the module neither read nor stripped: it
+went to the client carrying the flag vocabulary and a signature. A
+fixed name cannot fail that way.</p>
 <h2 id="where-to-next">Where to next</h2>
 <ul>
 <li>Conceptual model and scoring: <a href="../site-model/index.html">site model</a>.</li>

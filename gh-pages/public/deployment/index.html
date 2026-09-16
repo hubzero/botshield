@@ -73,10 +73,6 @@
   <span class="docs-nav__title">Troubleshooting</span>
   <span class="docs-nav__summary">Common issues, diagnostics, and fixes.</span>
 </a>
-<a class="docs-nav__item" href="../location-authz-hazard/index.html">
-  <span class="docs-nav__title">Location authz hazard</span>
-  <span class="docs-nav__summary">Why a broad &lt;Location&gt; block silently voids &lt;Files&gt; access control, and the rule that prevents it.</span>
-</a>
 <a class="docs-nav__item" href="../faq/index.html">
   <span class="docs-nav__title">FAQ</span>
   <span class="docs-nav__summary">Honest answers to questions teams ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
@@ -324,7 +320,7 @@ should size capacity directives to match.</p>
 <td>Bloom rotation window (seconds). Rotation at window/2</td>
 </tr>
 <tr>
-<td><code>BotShieldRateLimitEscalateCapacity</code></td>
+<td><code>BotShieldEscalateCapacity</code></td>
 <td><code>50000</code></td>
 <td>strike-table slots</td>
 </tr>

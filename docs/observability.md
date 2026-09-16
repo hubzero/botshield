@@ -723,6 +723,9 @@ Allow-list and policy counters:
 | `botshield_bot_unverified_total` | counter | UA matches a registered bot but no ranges loaded |
 | `botshield_rate_limit_exceeded_total` | counter | Total rate-limit 429s |
 | `botshield_rate_limit_observed_total` | counter | Observe-mode rate-limit matches |
+| `botshield_shed_total` | counter | Requests refused by a rule carrying a load or work condition |
+| `botshield_shed_observed_total` | counter | Requests such a rule in observe mode would have refused |
+| `botshield_apache_busy_workers` | gauge | Apache worker slots busy at the last watchdog tick; what `BotShieldBusyWorkersAtLeast` reads |
 | `botshield_trigger_observed_total` | counter | Observe-mode trigger matches across families (path/cookie/env/load/scope) |
 | `botshield_resp_status_mismatch_total` | counter | **Should always be 0 — alert on any non-zero value.** Requests recorded as answered by BotShield (challenge / block / rate-limit / safeguard redirect) where the client nevertheless received a 2xx, meaning the application answered. See [Invariant check](#invariant-check) below. |
 

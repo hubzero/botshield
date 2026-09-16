@@ -566,8 +566,21 @@ static void bs_m_slot_claim(bs_metrics_slot *slot, apr_uint64_t epoch)
         }
         __atomic_store_n(&slot->req_total,  0, __ATOMIC_RELAXED);
         __atomic_store_n(&slot->req_cookie, 0, __ATOMIC_RELAXED);
+        /* Zeroed field by field like everything above, so a new counter
+         * that is missed here carries the previous wrap's count into
+         * the new window and no test that starts from an empty ring
+         * would notice. */
+        __atomic_store_n(&slot->shed,          0, __ATOMIC_RELAXED);
+        __atomic_store_n(&slot->shed_observed, 0, __ATOMIC_RELAXED);
         for (int i = 0; i < BS_M_STATUS_COUNT; i++) {
             __atomic_store_n(&slot->req_status[i], 0, __ATOMIC_RELAXED);
+        }
+        /* req_code[] was missing from this reset since it was added, so
+         * a reused slot kept its previous wrap's per-status counts and
+         * the status breakdown over-reported in every window after the
+         * first day. */
+        for (int i = 0; i < BS_M_CODE_COUNT; i++) {
+            __atomic_store_n(&slot->req_code[i], 0, __ATOMIC_RELAXED);
         }
         for (int i = 0; i < BS_M_RESP_COUNT; i++) {
             __atomic_store_n(&slot->req_resp[i], 0, __ATOMIC_RELAXED);
@@ -738,6 +751,10 @@ static void bs_m_sum_ring(const bs_metrics_slot *ring, int nslots,
             out->cookie[c] += __atomic_load_n(&ring[i].cookie[c],
                                               __ATOMIC_RELAXED);
         }
+        out->shed          += __atomic_load_n(&ring[i].shed,
+                                              __ATOMIC_RELAXED);
+        out->shed_observed += __atomic_load_n(&ring[i].shed_observed,
+                                              __ATOMIC_RELAXED);
         out->req_total  += __atomic_load_n(&ring[i].req_total,
                                            __ATOMIC_RELAXED);
         out->req_cookie += __atomic_load_n(&ring[i].req_cookie,
@@ -843,6 +860,10 @@ void bs_metrics_read_window(int span_minutes, int vhost_idx,
             out->cookie[c] = __atomic_load_n(&m->cookie[c],
                                              __ATOMIC_RELAXED);
         }
+        out->shed          = __atomic_load_n(&m->shed_total,
+                                             __ATOMIC_RELAXED);
+        out->shed_observed = __atomic_load_n(&m->shed_observed_total,
+                                             __ATOMIC_RELAXED);
         out->req_total  = __atomic_load_n(&m->req_total,
                                           __ATOMIC_RELAXED);
         out->req_cookie = __atomic_load_n(&m->req_cookie,
@@ -897,6 +918,34 @@ void bs_metrics_read_window(int span_minutes, int vhost_idx,
         }
     }
     for (int o = 0; o < BS_M_OUTCOME_COUNT; o++) out->decisions += out->outcome[o];
+}
+
+void bs_metrics_note_shed(request_rec *r, int observed)
+{
+    if (!bs_shm.metrics) return;
+    bs_server_cfg *scfg = ap_get_module_config(r->server->module_config,
+                                               &botshield_module);
+    bs_metrics *vm = bs_vhost_block(scfg ? scfg->vhost_idx : -1);
+    bs_metrics *blocks[2] = { bs_shm.metrics, vm };
+    apr_uint64_t minute = (apr_uint64_t)(apr_time_sec(apr_time_now()) / 60);
+    apr_uint64_t hour   = minute / 60;
+    for (int b = 0; b < 2; b++) {
+        bs_metrics *m = blocks[b];
+        if (!m) continue;
+        bs_metrics_slot *ms = &m->min_slots[minute % BS_M_MIN_SLOTS];
+        bs_metrics_slot *hs = &m->hour_slots[hour % BS_M_HOUR_SLOTS];
+        bs_m_slot_claim(ms, minute);
+        bs_m_slot_claim(hs, hour);
+        if (observed) {
+            __atomic_fetch_add(&ms->shed_observed, 1, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&hs->shed_observed, 1, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&m->shed_observed_total, 1, __ATOMIC_RELAXED);
+        } else {
+            __atomic_fetch_add(&ms->shed, 1, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&hs->shed, 1, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&m->shed_total, 1, __ATOMIC_RELAXED);
+        }
+    }
 }
 
 void bs_suppress_access_log(request_rec *r)
@@ -4672,6 +4721,36 @@ int bs_dashboard_handler(request_rec *r)
             }
         }
         ap_rputs("</div>", r);   /* closes the KPI row */
+
+        /* What the load signals above actually cost visitors, over the
+         * window the page is set to. Shed and would-shed sit side by
+         * side because the second is how a threshold gets chosen: a
+         * rung in observe shows what it would have turned away before
+         * anyone is turned away. Both honour the selector -- the ring
+         * counters exist for exactly that, and a KPI that ignores the
+         * selected window while the page claims one is worse than no
+         * KPI. */
+        ap_rputs("<div class='kpis'>", r);
+        ap_rprintf(r, "<div class='kpi'><div class='k'>Requests shed</div>"
+                      "<div class='v'>%" APR_UINT64_T_FMT "</div>"
+                      "<div class='n'>refused by a load-conditioned rule, "
+                      "%s</div></div>",
+                   w.shed, bs_d_window_label(span));
+        ap_rprintf(r, "<div class='kpi'><div class='k'>Would shed</div>"
+                      "<div class='v'>%" APR_UINT64_T_FMT "</div>"
+                      "<div class='n'>same rules in observe mode, "
+                      "%s</div></div>",
+                   w.shed_observed, bs_d_window_label(span));
+        {
+            int busy = bs_busy_workers_current();
+            ap_rprintf(r, "<div class='kpi'><div class='k'>Apache busy "
+                          "workers</div><div class='v'>%s</div>"
+                          "<div class='n'>in flight at the last sample, "
+                          "what busyworkersatleast= reads</div></div>",
+                       busy < 0 ? "&mdash;"
+                                : apr_psprintf(r->pool, "%d", busy));
+        }
+        ap_rputs("</div>", r);
         ap_rputs("</section>", r);
     }
 
@@ -5225,6 +5304,13 @@ int bs_metrics_handler(request_rec *r)
 
     /* --- E2.1 policy-enforcement counters --- */
 
+    bs_m_emit_counter(r, "shed_total",
+        "Requests refused by a rule carrying a load or work condition.",
+        bs_mload(&m->shed_total));
+    bs_m_emit_counter(r, "shed_observed_total",
+        "Requests a load-conditioned rule in observe mode would have "
+        "refused.",
+        bs_mload(&m->shed_observed_total));
     bs_m_emit_counter(r, "rate_limit_observed_total",
         "Rate-limit over-budget events that ran in observe mode "
         "(per-rule mode=observe or BotShieldEnabled LogOnly); rule "
@@ -5378,6 +5464,14 @@ int bs_metrics_handler(request_rec *r)
             "average since restart. -1 when unavailable (requires "
             "ExtendedStatus On).",
             lat_us == BS_M_AP_NO_STATUS ? -1.0 : (double)lat_us);
+    }
+    {
+        int busy = bs_busy_workers_current();
+        bs_m_emit_gauge(r, "apache_busy_workers",
+            "Apache worker slots busy at the last watchdog tick, as a "
+            "count. What busyworkersatleast= compares against. -1 before "
+            "the first tick.",
+            busy < 0 ? -1.0 : (double)busy);
     }
     bs_m_emit_gauge(r, "load_state",
         "Current cached load state (0=normal, 1=warm, 2=hot).",

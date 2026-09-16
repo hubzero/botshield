@@ -73,10 +73,6 @@
   <span class="docs-nav__title">Troubleshooting</span>
   <span class="docs-nav__summary">Common issues, diagnostics, and fixes.</span>
 </a>
-<a class="docs-nav__item" href="../location-authz-hazard/index.html">
-  <span class="docs-nav__title">Location authz hazard</span>
-  <span class="docs-nav__summary">Why a broad &lt;Location&gt; block silently voids &lt;Files&gt; access control, and the rule that prevents it.</span>
-</a>
 <a class="docs-nav__item" href="../faq/index.html">
   <span class="docs-nav__title">FAQ</span>
   <span class="docs-nav__summary">Honest answers to questions teams ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
@@ -119,8 +115,8 @@ shape. The third shows how a whole deployment fits together.</p>
 config; the module never reads any of these files.</p>
 <h2 id="what-s-here">What's here</h2>
 <ul>
-<li><strong><a href="https://github.com/hubzero/botshield/blob/main/docs/examples/flag-triggers.conf.example"><code>flag-triggers.conf.example</code></a></strong>
-— the <code>BotShieldFlagTrigger</code> slate: honeypot and fake-bot detection
+<li><strong><a href="https://github.com/hubzero/botshield/blob/main/docs/examples/flag-rules.conf.example"><code>flag-rules.conf.example</code></a></strong>
+— a slate of rules reading <code>flagged=</code>: honeypot and fake-bot detection
 forced to captcha, scanner-probe and repeat-PoW-failure signals
 escalating tier, and the three application-issued trust credits
 (<code>app_verified_human</code>, <code>app_verified_session</code>, <code>app_trust_signal</code>)

@@ -389,8 +389,10 @@ static void bs_load_read_fpm_stats(server_rec *sv, bs_server_cfg *scfg)
  * + GRACEFUL (still serving its current request). READY and DEAD
  * slots don't count as busy. */
 static int bs_load_sample_scoreboard(apr_uint64_t *out_access,
-                                    apr_uint64_t *out_duration)
+                                    apr_uint64_t *out_duration,
+                                    int *out_busy)
 {
+    if (out_busy) *out_busy = -1;
     if (!ap_exists_scoreboard_image()) return 0;
     global_score *gs = ap_get_scoreboard_global();
     if (!gs) return 0;
@@ -425,6 +427,7 @@ static int bs_load_sample_scoreboard(apr_uint64_t *out_access,
     }
     if (out_access)   *out_access   = acc;
     if (out_duration) *out_duration = dur;
+    if (out_busy)     *out_busy     = busy;
     return (busy * 100) / total;
 }
 
@@ -547,7 +550,14 @@ apr_status_t bs_load_watchdog_cb(int state, void *data,
     int warm_pct = BS_DEFAULT_LOAD_WARM_RATIO_PCT;
     int hot_pct  = BS_DEFAULT_LOAD_HOT_RATIO_PCT;
     apr_uint64_t sb_access = 0, sb_duration = 0;
-    int busy_pct = bs_load_sample_scoreboard(&sb_access, &sb_duration);
+    int sb_busy = -1;
+    int busy_pct = bs_load_sample_scoreboard(&sb_access, &sb_duration,
+                                             &sb_busy);
+    if (bs_shm.metrics) {
+        apr_atomic_set32(&bs_shm.metrics->ap_busy_workers,
+                         sb_busy >= 0 ? (apr_uint32_t)sb_busy
+                                      : BS_M_AP_NO_STATUS);
+    }
     bs_load_state internal = bs_load_state_from_pct(busy_pct,
                                                     warm_pct, hot_pct);
     bs_load_state external = bs_load_read_external(sv, scfg);
@@ -833,4 +843,69 @@ void bs_loadavg_thresholds(server_rec *s, int *warm, int *hot)
     (void)s;
     if (warm) *warm = BS_DEFAULT_LOADAVG_WARM;
     if (hot)  *hot  = BS_DEFAULT_LOADAVG_HOT;
+}
+
+
+/* --- Work signals for rule conditions ---------------------------------
+ *
+ * The figures below measure work being done, which is what a shedding
+ * rule should key on. Apache request duration does not: it includes
+ * the time spent sending the response, so one slow client downloading a
+ * large file reads as a slow server while costing almost nothing. A
+ * PHP-FPM worker, a database thread, or an Apache worker slot is
+ * occupied only while something is actually happening.
+ *
+ * Each accessor returns -1 when there is no trustworthy reading, and
+ * every caller treats that as "decline", never as zero. A monitor that
+ * died an hour ago must not read as a calm server, and must not read as
+ * a loaded one either. */
+
+/* A monitor sample older than this is no reading at all. The monitors
+ * write every 10 seconds; six missed writes is a stopped monitor, not
+ * a slow one. */
+#define BS_WORK_SIGNAL_STALE_SEC 60
+
+static int bs_work_sample_fresh(apr_uint32_t sample_sec)
+{
+    if (sample_sec == 0) return 0;
+    apr_uint32_t now = (apr_uint32_t)apr_time_sec(apr_time_now());
+    if (sample_sec > now + 5) return 0;     /* clock skew: distrust */
+    return now - sample_sec <= BS_WORK_SIGNAL_STALE_SEC;
+}
+
+int bs_busy_workers_current(void)
+{
+    if (!bs_shm.metrics) return -1;
+    apr_uint32_t v = apr_atomic_read32(&bs_shm.metrics->ap_busy_workers);
+    return v == BS_M_AP_NO_STATUS ? -1 : (int)v;
+}
+
+int bs_fpm_busy_pct_current(void)
+{
+    if (!bs_shm.metrics) return -1;
+    bs_metrics *m = bs_shm.metrics;
+    if (!bs_work_sample_fresh(apr_atomic_read32(&m->fpm_sample_sec)))
+        return -1;
+    apr_uint32_t maxc = apr_atomic_read32(&m->fpm_max_children);
+    if (maxc == 0) return -1;
+    return (int)((apr_uint64_t)apr_atomic_read32(&m->fpm_active) * 100u
+                 / maxc);
+}
+
+int bs_fpm_queue_current(void)
+{
+    if (!bs_shm.metrics) return -1;
+    bs_metrics *m = bs_shm.metrics;
+    if (!bs_work_sample_fresh(apr_atomic_read32(&m->fpm_sample_sec)))
+        return -1;
+    return (int)apr_atomic_read32(&m->fpm_queue);
+}
+
+int bs_db_threads_current(void)
+{
+    if (!bs_shm.header) return -1;
+    if (!bs_work_sample_fresh(
+            apr_atomic_read32(&bs_shm.header->db_sample_sec)))
+        return -1;
+    return (int)apr_atomic_read32(&bs_shm.header->db_threads_run);
 }

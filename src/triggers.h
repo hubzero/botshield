@@ -313,6 +313,22 @@ typedef struct {
      * rule that says "shed when latency is at least nothing" is
      * always a mistake. */
     int                latency_min_ms;
+    /* Work-signal conditions. Unlike latencyatleast=, none of these
+     * moves for a slow client: each counts something occupied only
+     * while work is being done.
+     *
+     *   busyworkersatleast= Apache worker slots busy (count)
+     *   fpmbusyatleast=     PHP-FPM active processes, percent of
+     *                       pm.max_children
+     *   fpmqueueatleast=    requests waiting for a PHP-FPM worker
+     *   dbrunningatleast=   database threads running
+     *
+     * -1 = no condition. A missing or stale reading makes the rule
+     * decline: an absent measurement is neither calm nor loaded. */
+    int                busy_workers_min;
+    int                fpm_busy_min_pct;
+    int                fpm_queue_min;
+    int                db_running_min;
     apr_uint32_t       flagged_bit;
     int                ck_pred;         /* enum bs_cookie_pred_kind, -1 unset */
     const char        *ck_name;

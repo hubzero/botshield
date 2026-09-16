@@ -410,6 +410,26 @@ int bs_check_policy(request_rec *r)
                 if ((int)(us / 1000u) < t->latency_min_ms)
                     continue;
             }
+            /* Work signals. -1 is "no trustworthy reading" and declines,
+             * for the reason the latency check above gives: shedding
+             * because a monitor stopped writing would punish traffic
+             * for a broken cron job. */
+            if (t->busy_workers_min >= 0) {
+                int v = bs_busy_workers_current();
+                if (v < 0 || v < t->busy_workers_min) continue;
+            }
+            if (t->fpm_busy_min_pct >= 0) {
+                int v = bs_fpm_busy_pct_current();
+                if (v < 0 || v < t->fpm_busy_min_pct) continue;
+            }
+            if (t->fpm_queue_min >= 0) {
+                int v = bs_fpm_queue_current();
+                if (v < 0 || v < t->fpm_queue_min) continue;
+            }
+            if (t->db_running_min >= 0) {
+                int v = bs_db_threads_current();
+                if (v < 0 || v < t->db_running_min) continue;
+            }
             if (t->flagged_bit) {
                 /* The union of both subjects, which is what the tier
                  * decision has always read. Rules saw only the address
@@ -711,6 +731,18 @@ int bs_check_policy(request_rec *r)
             bs_trigger_exec_outcome o = bs_apply_trigger_action(
                 r, scfg, BS_TFAMILY_REQUEST, &t->action,
                 "rule", t->name);
+            /* Shedding is a refusal decided by how loaded the server is,
+             * so it is recognised by the rule's conditions rather than
+             * by its name or its status code: a load-conditioned rule
+             * that answers anything but nochallenge turned a request
+             * away because of load. */
+            if (t->action.status_code != BS_TRIGGER_STATUS_PASS
+                && (t->loadavg_min_pct >= 0 || t->latency_min_ms >= 0
+                    || t->busy_workers_min >= 0 || t->fpm_busy_min_pct >= 0
+                    || t->fpm_queue_min >= 0 || t->db_running_min >= 0)) {
+                if (o == BS_TEXEC_STATUS)  bs_metrics_note_shed(r, 0);
+                if (o == BS_TEXEC_OBSERVE) bs_metrics_note_shed(r, 1);
+            }
             /* Path family: PASS means "do not challenge this", not
              * "do not enforce anything on this". Those were the same
              * thing while a pass returned here, which quietly exempted
@@ -955,6 +987,14 @@ static const char *bs_psh_rule_conditions(apr_pool_t *p,
                    t->loadavg_min_pct / 100, t->loadavg_min_pct % 100);
     if (t->latency_min_ms >= 0)
         BS_PSH_ADD("latencyatleast=%dms", t->latency_min_ms);
+    if (t->busy_workers_min >= 0)
+        BS_PSH_ADD("busyworkersatleast=%d", t->busy_workers_min);
+    if (t->fpm_busy_min_pct >= 0)
+        BS_PSH_ADD("fpmbusyatleast=%d%%", t->fpm_busy_min_pct);
+    if (t->fpm_queue_min >= 0)
+        BS_PSH_ADD("fpmqueueatleast=%d", t->fpm_queue_min);
+    if (t->db_running_min >= 0)
+        BS_PSH_ADD("dbrunningatleast=%d", t->db_running_min);
     if (t->budget > 0) {
         /* Printed as the operator could write it again. A per-crawler
          * window is delay=, everything else is rate=. */

@@ -702,6 +702,15 @@ typedef struct {
      * crawler" from "the app answered a person" -- the same row in
      * req_resp[], but crawl budget versus real use. */
     apr_uint64_t g_resp[BS_M_GROUP_COUNT][BS_M_RESP_COUNT];
+    /* Requests refused by a rule that carries a load or work condition
+     * (loadavgatleast=, latencyatleast=, busyworkersatleast=, the FPM
+     * and database floors), and the same matches under observe. Kept as
+     * their own dimension rather than read off outcome[]: a shed 503 and
+     * a facet-trap 403 are both "block" there, and "how much did we turn
+     * away because the server was loaded" is the question an operator
+     * tuning thresholds actually asks. */
+    apr_uint64_t shed;
+    apr_uint64_t shed_observed;
 } bs_metrics_slot;
 
 /* M9.2 metrics block. Lives in SHM next to the rate-counter pool. */
@@ -776,6 +785,15 @@ typedef struct {
      * once on the first restart after the change -- by design of the
      * restore, which only trusts a block of the size it expects. */
     apr_uint32_t ap_grace_until;
+    /* Busy Apache worker slots at the last watchdog tick, as a count.
+     *
+     * The busy ratio beside it divides by the scoreboard size, which is
+     * only meaningful when MaxRequestWorkers reflects what the machine
+     * can serve. A rule wants the number itself: "400 requests in
+     * flight" means the same thing whatever the ceiling is set to.
+     * Adding it changed sizeof(bs_metrics), so the persisted metrics
+     * block is skipped once on the first restart after the change. */
+    apr_uint32_t ap_busy_workers;
     /* PHP-FPM, published by the external monitor. Percent of
      * pm.max_children busy -- a real ceiling, unlike MaxRequestWorkers,
      * which is why this is worth its own signal.
@@ -825,6 +843,9 @@ typedef struct {
     apr_uint64_t attestation_fail_total;
     /* E12 — log-only / observe-mode counters. */
     apr_uint64_t rate_limit_observed_total;
+    /* Since-restart totals behind the shed/shed_observed ring counters. */
+    apr_uint64_t shed_total;
+    apr_uint64_t shed_observed_total;
     apr_uint64_t trigger_observed_total;
     /* Requests where BotShield recorded that IT produced the response
      * -- challenge, block, rate-limit, safeguard redirect -- and the

@@ -77,6 +77,18 @@ const char *bs_set_fpm_stats_file(cmd_parms *cmd, void *dconf,
  * request latency thresholds. */
 void bs_latency_thresholds(server_rec *sv, int *warm, int *hot);
 apr_uint32_t bs_latency_current_us(void);
+
+/* Work signals for rule conditions. Each returns -1 when there is no
+ * trustworthy reading -- no sample yet, or a monitor sample older than
+ * a minute -- and callers must treat -1 as "decline", never as zero.
+ *   busy workers : Apache worker slots busy at the last watchdog tick
+ *   fpm busy pct : PHP-FPM active processes, percent of pm.max_children
+ *   fpm queue    : requests waiting for a PHP-FPM worker
+ *   db threads   : database threads running */
+int bs_busy_workers_current(void);
+int bs_fpm_busy_pct_current(void);
+int bs_fpm_queue_current(void);
+int bs_db_threads_current(void);
 /* 1 while the post-(re)start grace on the latency signal is running:
  * the sample is still published for the dashboard, but neither the
  * warm/hot state nor latencyatleast= acts on it. */

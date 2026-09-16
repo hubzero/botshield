@@ -73,10 +73,6 @@
   <span class="docs-nav__title">Troubleshooting</span>
   <span class="docs-nav__summary">Common issues, diagnostics, and fixes.</span>
 </a>
-<a class="docs-nav__item" href="../location-authz-hazard/index.html">
-  <span class="docs-nav__title">Location authz hazard</span>
-  <span class="docs-nav__summary">Why a broad &lt;Location&gt; block silently voids &lt;Files&gt; access control, and the rule that prevents it.</span>
-</a>
 <a class="docs-nav__item" href="../faq/index.html">
   <span class="docs-nav__title">FAQ</span>
   <span class="docs-nav__summary">Honest answers to questions teams ask before adopting — including how mod_botshield compares to Cloudflare, mod_security, and fail2ban.</span>
@@ -231,7 +227,8 @@ BotShieldFpmStatsFile  /run/botshield/fpm-load.stats
 <p>All three are server scope. Inside a <code>&lt;VirtualHost&gt;</code> they are a
 config-parse error rather than a silent discard, but the rule is easier
 to follow than to debug. The load state drives
-<code>BotShieldMinLoad</code> on a rule, covered in
+<code>BotShieldLoadAvgAtLeast</code>, the PHP-FPM and database conditions, or
+<code>BotShieldLatencyAtLeast</code> on a rule, covered in
 <a href="../policy/index.html#load-conditions">Policy</a>.</p>
 <h2 id="data-refresh">Data refresh</h2>
 <p>One timer, one entry point, three datasets, each of which the module
